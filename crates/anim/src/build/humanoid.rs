@@ -1,6 +1,7 @@
 //! A procedural human: skeleton, two outfits, muscles, foot IK, a ponytail on springs, and
 //! clips for idle, walk, run, leaning into turns, a heavy overhead swing, a block, a two-arm
-//! reach and a double-biceps flex, wired into one locomotion graph.
+//! reach, a double-biceps flex and getting up off the floor (from the back and from the front),
+//! wired into one locomotion graph.
 //!
 //! Conventions: Y up, the character faces −Z, its right side is +X. Arm bones are rotated in
 //! their rest pose so that, for every arm bone, rotating about local X bends it forward
@@ -28,6 +29,9 @@ pub const GRAPH: &str = "humanoid";
 /// Walk and run speeds the clips are authored for, m/s.
 pub const WALK_SPEED: f32 = 1.4;
 pub const RUN_SPEED: f32 = 3.8;
+/// Height of the hips at rest, m (the clips' positions are for this size of body and scale
+/// with the hips of a fitted skeleton).
+pub const HIPS_HEIGHT: f32 = 0.98;
 
 pub const CLAVICLE: [&str; 2] = ["clavicle_l", "clavicle_r"];
 pub const UPPER_ARM: [&str; 2] = ["upper_arm_l", "upper_arm_r"];
@@ -45,7 +49,7 @@ pub fn skeleton() -> Skeleton {
     let i = Quat::IDENTITY;
     let mut bones = vec![
         bone("root", None, Vec3::ZERO, i),
-        bone("hips", Some("root"), Vec3::new(0.0, 0.98, 0.0), i),
+        bone("hips", Some("root"), Vec3::new(0.0, HIPS_HEIGHT, 0.0), i),
         bone("spine", Some("hips"), Vec3::new(0.0, 0.12, 0.0), i),
         bone("chest", Some("spine"), Vec3::new(0.0, 0.18, 0.0), i),
         bone("neck", Some("chest"), Vec3::new(0.0, 0.22, 0.0), i),
@@ -1300,6 +1304,596 @@ fn flex(s: &Skeleton) -> AnimationClip {
     .with_curve("flex", 31, |ph| keyed(ph, &flex))
 }
 
+// ------------------------------------------------------------------------------- get-ups
+
+/// The get-up clips (and graph states and triggers of the same names): from the back and
+/// from the front.
+pub const GET_UP_CLIPS: [&str; 2] = ["get_up_back", "get_up_front"];
+
+/// Where the hips lie when [`get_up_back`] starts, behind the spot where it ends standing
+/// (the body lies with its feet toward −Z, the way it will face), meters.
+pub const GET_UP_BACK_HIPS: Vec3 = Vec3::new(0.0, 0.12, 0.75);
+/// Where the hips lie when [`get_up_front`] starts (the head toward −Z, the way it will face).
+pub const GET_UP_FRONT_HIPS: Vec3 = Vec3::new(0.0, 0.12, 0.45);
+
+impl Arm {
+    fn lerp(&self, o: &Arm, w: f32) -> Arm {
+        let l = |a: f32, b: f32| a + (b - a) * w;
+        Arm {
+            flex: l(self.flex, o.flex),
+            twist: l(self.twist, o.twist),
+            abduct: l(self.abduct, o.abduct),
+            elbow: l(self.elbow, o.elbow),
+            wrist: l(self.wrist, o.wrist),
+            protract: l(self.protract, o.protract),
+            elevate: l(self.elevate, o.elevate),
+        }
+    }
+}
+
+/// One key pose of a get-up: joint angles, plus where hands and feet are planted (solved
+/// with two-bone IK, so they stay put on the floor between keys that plant them).
+#[derive(Clone, Copy)]
+struct Key {
+    /// Phase of the clip (0..1).
+    at: f32,
+    /// Hips position in the character's frame (meters) and pitch, yaw, roll (degrees;
+    /// +pitch tips the trunk back).
+    hips: Vec3,
+    pitch: f32,
+    yaw: f32,
+    roll: f32,
+    /// Bend of spine, chest, neck and head (degrees, negative forward).
+    spine: [f32; 4],
+    arm: [Arm; 2],
+    /// Hip flexion, abduction, knee bend and ankle (degrees) per leg.
+    leg: [[f32; 4]; 2],
+    /// Planted wrists (left, right) and ankles (left, right), character frame, meters.
+    plant: [Option<Vec3>; 4],
+    /// Which way each planted leg's knee points, character frame (it bends in the plane of
+    /// this and the line from hip to ankle).
+    knee: [Vec3; 2],
+    /// How hard the body works (the `effort` curve).
+    effort: f32,
+}
+
+/// Wrist and ankle bones in `Key::plant` order, with the joints above them.
+const LIMBS: [[&str; 3]; 4] = [
+    ["upper_arm_l", "lower_arm_l", "hand_l"],
+    ["upper_arm_r", "lower_arm_r", "hand_r"],
+    ["upper_leg_l", "lower_leg_l", "foot_l"],
+    ["upper_leg_r", "lower_leg_r", "foot_r"],
+];
+/// Every bone a get-up key poses.
+const GET_UP_BONES: [&str; 21] = [
+    "hips",
+    "spine",
+    "chest",
+    "neck",
+    "head",
+    "clavicle_l",
+    "clavicle_r",
+    "upper_arm_l",
+    "upper_arm_r",
+    "lower_arm_l",
+    "lower_arm_r",
+    "hand_l",
+    "hand_r",
+    "upper_leg_l",
+    "upper_leg_r",
+    "lower_leg_l",
+    "lower_leg_r",
+    "foot_l",
+    "foot_r",
+    "toe_l",
+    "toe_r",
+];
+
+impl Key {
+    /// The first frame of `idle`, where every get-up ends.
+    const STAND: Key = Key {
+        at: 1.0,
+        hips: Vec3::new(0.0, HIPS_HEIGHT - 0.008, 0.0),
+        pitch: 0.0,
+        yaw: 0.0,
+        roll: 0.0,
+        spine: [-1.0, 0.0, 1.0, -1.0],
+        arm: [
+            Arm {
+                flex: 4.0,
+                ..Arm::HANG
+            },
+            Arm {
+                flex: 4.0,
+                ..Arm::HANG
+            },
+        ],
+        leg: [[4.0, 1.5, 4.0, 0.0], [4.0, 1.5, 4.0, 0.0]],
+        plant: [None; 4],
+        knee: [Vec3::NEG_Z; 2],
+        effort: 0.0,
+    };
+
+    /// Joint angles between `self` and `o` (plants are handled by [`Key::sample`]).
+    fn lerp(&self, o: &Key, w: f32) -> Key {
+        let l = |a: f32, b: f32| a + (b - a) * w;
+        let mut k = *self;
+        k.hips = self.hips.lerp(o.hips, w);
+        k.pitch = l(self.pitch, o.pitch);
+        k.yaw = l(self.yaw, o.yaw);
+        k.roll = l(self.roll, o.roll);
+        for i in 0..4 {
+            k.spine[i] = l(self.spine[i], o.spine[i]);
+        }
+        for side in 0..2 {
+            k.arm[side] = self.arm[side].lerp(&o.arm[side], w);
+            for j in 0..4 {
+                k.leg[side][j] = l(self.leg[side][j], o.leg[side][j]);
+            }
+            k.knee[side] = self.knee[side].lerp(o.knee[side], w);
+        }
+        k.effort = l(self.effort, o.effort);
+        k
+    }
+
+    /// The pose from the joint angles alone, local and model space.
+    fn forward(&self, s: &Skeleton) -> (Vec<Xf>, Vec<Xf>) {
+        let mut p = PoseBuilder::new(s);
+        let rest = s.rest[s.bone("hips")].t;
+        let hips = self.hips * body_scale(s);
+        p.rot_move("hips", hips - rest, self.pitch, self.yaw, self.roll);
+        spine(&mut p, self.spine, [0.0; 4], [0.0; 4]);
+        for side in 0..2 {
+            arm(&mut p, side, self.arm[side]);
+            let [hip, abduct, knee, ankle] = self.leg[side];
+            leg(&mut p, side, hip, abduct, knee, ankle, 0.0);
+        }
+        let mut local = s.rest.clone();
+        for (bone, x) in p.take() {
+            let b = s.bone(bone);
+            local[b].r = x.r;
+            if x.t != Vec3::ZERO {
+                local[b].t = x.t;
+            }
+        }
+        let mut model = s.rest_model.clone();
+        s.to_model(&local, &mut model);
+        (local, model)
+    }
+
+    /// Where each wrist and ankle is: planted, or where the joint angles put it.
+    fn ends(&self, s: &Skeleton) -> [Vec3; 4] {
+        let (_, model) = self.forward(s);
+        let k = body_scale(s);
+        std::array::from_fn(|i| {
+            self.plant[i].map_or_else(|| model[s.bone(LIMBS[i][2])].t, |p| p * k)
+        })
+    }
+
+    /// The pose at `phase` through `keys` (sorted by phase), eased in and out of each key,
+    /// with planted hands and feet held by IK.
+    fn sample(s: &Skeleton, keys: &[Key], phase: f32) -> (Key, Vec<(&'static str, Xf)>) {
+        let i = keys
+            .windows(2)
+            .position(|w| phase <= w[1].at)
+            .unwrap_or(keys.len().saturating_sub(2));
+        let (a, b) = (&keys[i], &keys[(i + 1).min(keys.len() - 1)]);
+        let t = ((phase - a.at) / (b.at - a.at).max(1e-6)).clamp(0.0, 1.0);
+        let w = t * t * (3.0 - 2.0 * t);
+        let key = a.lerp(b, w);
+        let (mut local, mut model) = key.forward(s);
+        let (ends_a, ends_b) = (a.ends(s), b.ends(s));
+        let mut edit = crate::animator::PoseEdit {
+            skeleton: s,
+            local: &mut local,
+            model: &mut model,
+        };
+        for (limb, [upper, lower, end]) in LIMBS.iter().enumerate() {
+            let planted = |k: &Key| if k.plant[limb].is_some() { 1.0 } else { 0.0 };
+            let weight = planted(a) + (planted(b) - planted(a)) * w;
+            if weight <= 0.0 {
+                continue;
+            }
+            let (upper, lower, end) = (s.bone(upper), s.bone(lower), s.bone(end));
+            let target = ends_a[limb].lerp(ends_b[limb], w);
+            let pole = if limb < 2 {
+                // Elbows back and out.
+                let side = if limb == 0 { -1.0 } else { 1.0 };
+                edit.model[s.bone("chest")].r * Vec3::new(0.6 * side, 0.0, 1.0)
+            } else {
+                key.knee[limb - 2]
+            };
+            let held = edit.model[end].r;
+            crate::ik::two_bone(&mut edit, upper, lower, end, target, pole, weight);
+            edit.set_model_rotation(end, held);
+        }
+        let out = GET_UP_BONES
+            .iter()
+            .map(|&name| {
+                let b = s.bone(name);
+                let mut x = local[b];
+                if name != "hips" {
+                    x.t = Vec3::ZERO;
+                }
+                (name, x)
+            })
+            .collect();
+        (key, out)
+    }
+}
+
+/// How much larger a (fitted) skeleton is than the humanoid, by its hips.
+fn body_scale(s: &Skeleton) -> f32 {
+    s.rest_model[s.bone("hips")].t.y / HIPS_HEIGHT
+}
+
+/// A get-up clip through `keys`, with `effort` and `floor` curves (`floor` is 1 while the
+/// body is on the ground and the feet don't carry it, so foot IK lets go). `standing` is the
+/// phase the feet take the weight.
+fn get_up(s: &Skeleton, name: &str, duration: f32, keys: &[Key], standing: f32) -> AnimationClip {
+    let samples = (duration * 30.0) as usize + 1;
+    let floor = [(0.0, 1.0), (standing - 0.08, 1.0), (standing + 0.08, 0.0)];
+    AnimationClip::from_fn(name, duration, samples, false, |ph| {
+        Key::sample(s, keys, ph).1
+    })
+    .with_curve("effort", samples, |ph| Key::sample(s, keys, ph).0.effort)
+    .with_curve("floor", 25, |ph| keyed(ph, &floor))
+}
+
+/// Getting up from lying on the back (feet toward −Z): sit up on the hands, tuck the legs,
+/// roll forward onto the right knee with the left foot planted, push up on the left leg.
+fn get_up_back(s: &Skeleton) -> AnimationClip {
+    let hz = GET_UP_BACK_HIPS.z;
+    let lying = Key {
+        at: 0.0,
+        hips: GET_UP_BACK_HIPS,
+        pitch: 90.0,
+        yaw: 0.0,
+        roll: 0.0,
+        spine: [0.0, 0.0, -4.0, -6.0],
+        arm: [Arm {
+            flex: 6.0,
+            abduct: 0.0,
+            elbow: 10.0,
+            ..Arm::HANG
+        }; 2],
+        leg: [[4.0, 6.0, 6.0, -10.0]; 2],
+        plant: [
+            Some(Vec3::new(-0.4, 0.05, hz + 0.05)),
+            Some(Vec3::new(0.4, 0.05, hz + 0.05)),
+            Some(Vec3::new(-0.18, 0.1, hz - 0.88)),
+            Some(Vec3::new(0.18, 0.1, hz - 0.88)),
+        ],
+        knee: [Vec3::Y; 2],
+        effort: 0.0,
+    };
+    let sitting = Key {
+        at: 0.3,
+        hips: Vec3::new(0.0, 0.13, hz),
+        pitch: 30.0,
+        spine: [-12.0, -10.0, -6.0, -8.0],
+        // Hands planted behind the hips, pushing.
+        arm: [Arm {
+            flex: -40.0,
+            twist: 0.0,
+            abduct: 12.0,
+            elbow: 8.0,
+            wrist: -50.0,
+            protract: -6.0,
+            elevate: 6.0,
+        }; 2],
+        leg: [[50.0, 6.0, 60.0, -6.0]; 2],
+        knee: [Vec3::Y; 2],
+        plant: [
+            Some(Vec3::new(-0.26, 0.04, hz + 0.28)),
+            Some(Vec3::new(0.26, 0.04, hz + 0.28)),
+            Some(Vec3::new(-0.15, 0.08, hz - 0.62)),
+            Some(Vec3::new(0.15, 0.08, hz - 0.62)),
+        ],
+        effort: 0.7,
+        ..lying
+    };
+    let tucked = Key {
+        at: 0.5,
+        hips: Vec3::new(0.0, 0.16, hz - 0.12),
+        pitch: -12.0,
+        spine: [-14.0, -12.0, 0.0, -4.0],
+        // Reaching forward, the right hand on the floor beside the knee.
+        arm: [
+            Arm {
+                flex: 40.0,
+                abduct: -4.0,
+                elbow: 40.0,
+                ..Arm::HANG
+            },
+            Arm {
+                flex: 58.0,
+                abduct: 14.0,
+                elbow: 10.0,
+                wrist: -30.0,
+                ..Arm::HANG
+            },
+        ],
+        leg: [[110.0, 10.0, 130.0, 34.0], [100.0, 22.0, 130.0, 44.0]],
+        plant: [
+            None,
+            Some(Vec3::new(0.36, 0.04, hz - 0.4)),
+            Some(Vec3::new(-0.14, 0.08, hz - 0.3)),
+            Some(Vec3::new(0.16, 0.08, hz - 0.24)),
+        ],
+        knee: [Vec3::new(0.0, 1.0, -1.0); 2],
+        effort: 0.8,
+        ..sitting
+    };
+    // Weight on the right knee and hand; the left foot swings through to the front.
+    let stepping = Key {
+        at: 0.6,
+        hips: Vec3::new(0.0, 0.5, 0.5),
+        pitch: -14.0,
+        leg: [[120.0, 8.0, 120.0, 10.0], [10.0, 10.0, 110.0, 0.0]],
+        plant: [
+            None,
+            Some(Vec3::new(0.36, 0.04, hz - 0.4)),
+            None,
+            Some(Vec3::new(0.14, 0.17, 0.8)),
+        ],
+        knee: [Vec3::new(0.0, 0.2, -1.0), Vec3::new(0.0, -0.4, -1.0)],
+        effort: 0.8,
+        ..tucked
+    };
+    let kneeling = Key {
+        at: 0.68,
+        hips: Vec3::new(0.0, 0.58, 0.4),
+        pitch: -8.0,
+        spine: [-12.0, -8.0, 2.0, -2.0],
+        arm: [
+            Arm {
+                flex: 30.0,
+                abduct: -10.0,
+                elbow: 70.0,
+                wrist: 10.0,
+                ..Arm::HANG
+            },
+            Arm {
+                flex: 12.0,
+                abduct: -8.0,
+                elbow: 30.0,
+                ..Arm::HANG
+            },
+        ],
+        // Left foot planted ahead, under the spot it stands on; right knee on the floor.
+        leg: [[96.0, 6.0, 92.0, 2.0], [-6.0, 4.0, 98.0, -40.0]],
+        plant: [
+            None,
+            None,
+            Some(Vec3::new(-0.12, 0.08, -0.03)),
+            Some(Vec3::new(0.12, 0.13, 0.84)),
+        ],
+        knee: [Vec3::NEG_Z, Vec3::new(0.0, -1.0, -0.4)],
+        effort: 0.7,
+        ..stepping
+    };
+    let rising = Key {
+        at: 0.84,
+        hips: Vec3::new(0.0, 0.82, 0.12),
+        pitch: -10.0,
+        spine: [-10.0, -6.0, 2.0, -2.0],
+        arm: [
+            Arm {
+                flex: 18.0,
+                elbow: 40.0,
+                ..Arm::HANG
+            },
+            Arm {
+                flex: 10.0,
+                elbow: 24.0,
+                ..Arm::HANG
+            },
+        ],
+        leg: [[52.0, 4.0, 62.0, 8.0], [46.0, 4.0, 86.0, 16.0]],
+        plant: [None, None, Some(Vec3::new(-0.12, 0.08, -0.03)), None],
+        knee: [Vec3::NEG_Z; 2],
+        effort: 0.9,
+        ..kneeling
+    };
+    let keys = [
+        lying,
+        Key { at: 0.08, ..lying },
+        sitting,
+        tucked,
+        stepping,
+        kneeling,
+        rising,
+        Key::STAND,
+    ];
+    get_up(s, "get_up_back", 2.4, &keys, 0.7)
+}
+
+/// Getting up from lying face down (head toward −Z): hands under the shoulders, push up onto
+/// hands and knees, bring the left foot forward, push up on the left leg.
+fn get_up_front(s: &Skeleton) -> AnimationClip {
+    let hz = GET_UP_FRONT_HIPS.z;
+    let hands = [
+        Some(Vec3::new(-0.24, 0.04, hz - 0.46)),
+        Some(Vec3::new(0.24, 0.04, hz - 0.46)),
+    ];
+    let lying = Key {
+        at: 0.0,
+        hips: GET_UP_FRONT_HIPS,
+        pitch: -90.0,
+        yaw: 0.0,
+        roll: 0.0,
+        // Chin up, the face clear of the floor.
+        spine: [2.0, 2.0, 22.0, 18.0],
+        // Hands on the floor beside the chest.
+        arm: [Arm {
+            flex: 20.0,
+            abduct: 50.0,
+            elbow: 90.0,
+            ..Arm::HANG
+        }; 2],
+        leg: [[0.0, 6.0, 4.0, -40.0]; 2],
+        plant: [
+            Some(Vec3::new(-0.34, 0.05, hz - 0.22)),
+            Some(Vec3::new(0.34, 0.05, hz - 0.22)),
+            None,
+            None,
+        ],
+        knee: [Vec3::NEG_Y; 2],
+        effort: 0.0,
+    };
+    // Hands under the shoulders, elbows bent.
+    let palms = Key {
+        at: 0.16,
+        arm: [Arm {
+            flex: 80.0,
+            twist: 10.0,
+            abduct: 16.0,
+            elbow: 95.0,
+            wrist: -70.0,
+            protract: 0.0,
+            elevate: 0.0,
+        }; 2],
+        plant: [hands[0], hands[1], None, None],
+        effort: 0.3,
+        ..lying
+    };
+    let pushed = Key {
+        at: 0.34,
+        hips: Vec3::new(0.0, 0.26, hz),
+        pitch: -68.0,
+        spine: [10.0, 8.0, 6.0, 0.0],
+        arm: [Arm {
+            flex: 66.0,
+            twist: 10.0,
+            abduct: 10.0,
+            elbow: 12.0,
+            wrist: -66.0,
+            protract: 6.0,
+            elevate: 4.0,
+        }; 2],
+        leg: [[10.0, 6.0, 10.0, -40.0]; 2],
+        plant: [
+            hands[0],
+            hands[1],
+            Some(Vec3::new(-0.17, 0.13, hz + 0.86)),
+            Some(Vec3::new(0.17, 0.13, hz + 0.86)),
+        ],
+        effort: 0.9,
+        ..palms
+    };
+    let all_fours = Key {
+        at: 0.52,
+        hips: Vec3::new(0.0, 0.5, hz + 0.05),
+        pitch: -78.0,
+        spine: [-6.0, -4.0, 14.0, 6.0],
+        arm: [Arm {
+            flex: 80.0,
+            twist: 8.0,
+            abduct: 6.0,
+            elbow: 6.0,
+            wrist: -76.0,
+            protract: 8.0,
+            elevate: 4.0,
+        }; 2],
+        leg: [[86.0, 6.0, 92.0, -75.0]; 2],
+        plant: [
+            hands[0],
+            hands[1],
+            Some(Vec3::new(-0.14, 0.1, hz + 0.5)),
+            Some(Vec3::new(0.14, 0.1, hz + 0.5)),
+        ],
+        effort: 0.6,
+        ..pushed
+    };
+    // Weight on the hands and right knee; the left foot swings through to the front.
+    let stepping = Key {
+        at: 0.61,
+        hips: Vec3::new(0.0, 0.5, hz),
+        pitch: -50.0,
+        spine: [-10.0, -8.0, 10.0, 4.0],
+        leg: [[130.0, 8.0, 125.0, 25.0], [80.0, 6.0, 95.0, -40.0]],
+        // The left foot is held mid-swing, clear of the floor.
+        plant: [
+            hands[0],
+            Some(Vec3::new(0.28, 0.04, hz - 0.3)),
+            Some(Vec3::new(-0.12, 0.24, 0.42)),
+            Some(Vec3::new(0.14, 0.12, 0.84)),
+        ],
+        knee: [Vec3::new(0.0, 0.2, -1.0), Vec3::new(0.0, -1.0, -0.4)],
+        effort: 0.8,
+        ..all_fours
+    };
+    // The left foot comes through under the body; the right knee stays down.
+    let kneeling = Key {
+        at: 0.7,
+        hips: Vec3::new(0.0, 0.58, 0.4),
+        pitch: -12.0,
+        spine: [-14.0, -10.0, 4.0, 0.0],
+        arm: [
+            Arm {
+                flex: 34.0,
+                abduct: -10.0,
+                elbow: 70.0,
+                wrist: 10.0,
+                ..Arm::HANG
+            },
+            Arm {
+                flex: 30.0,
+                abduct: 4.0,
+                elbow: 20.0,
+                wrist: -20.0,
+                ..Arm::HANG
+            },
+        ],
+        leg: [[96.0, 6.0, 92.0, 2.0], [-6.0, 4.0, 98.0, -40.0]],
+        plant: [
+            None,
+            None,
+            Some(Vec3::new(-0.12, 0.08, -0.03)),
+            Some(Vec3::new(0.12, 0.13, 0.84)),
+        ],
+        knee: [Vec3::NEG_Z, Vec3::new(0.0, -1.0, -0.4)],
+        effort: 0.7,
+        ..stepping
+    };
+    let rising = Key {
+        at: 0.86,
+        hips: Vec3::new(0.0, 0.82, 0.12),
+        pitch: -10.0,
+        spine: [-10.0, -6.0, 2.0, -2.0],
+        arm: [
+            Arm {
+                flex: 18.0,
+                elbow: 40.0,
+                ..Arm::HANG
+            },
+            Arm {
+                flex: 10.0,
+                elbow: 24.0,
+                ..Arm::HANG
+            },
+        ],
+        leg: [[52.0, 4.0, 62.0, 8.0], [46.0, 4.0, 86.0, 16.0]],
+        plant: [None, None, Some(Vec3::new(-0.12, 0.08, -0.03)), None],
+        knee: [Vec3::NEG_Z; 2],
+        effort: 0.9,
+        ..kneeling
+    };
+    let keys = [
+        lying,
+        Key { at: 0.06, ..lying },
+        palms,
+        pushed,
+        all_fours,
+        stepping,
+        kneeling,
+        rising,
+        Key::STAND,
+    ];
+    get_up(s, "get_up_front", 2.0, &keys, 0.72)
+}
+
 /// Every clip the humanoid graph uses.
 pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
     vec![
@@ -1312,11 +1906,14 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         block(s),
         reach(s),
         flex(s),
+        get_up_back(s),
+        get_up_front(s),
     ]
 }
 
 /// Locomotion (idle/walk/run by `speed`, leaning by `turn`), plus `heavy_swing`, `block`
-/// (held while `blocking` > 0.5), `reach` and `flex` actions.
+/// (held while `blocking` > 0.5), `reach` and `flex` actions, and getting up off the floor
+/// (`get_up_back`, `get_up_front`: triggered by the ragdoll when a limp body comes round).
 pub fn graph() -> AnimGraph {
     graph_with(GRAPH, &Locomotion::default())
 }
@@ -1403,6 +2000,8 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 state("block", NodeDef::clip("block")),
                 state("reach", NodeDef::one_shot("reach")),
                 state("flex", NodeDef::one_shot("flex")),
+                state("get_up_back", NodeDef::one_shot("get_up_back")),
+                state("get_up_front", NodeDef::one_shot("get_up_front")),
             ],
             transitions: vec![
                 TransitionDef::new(
@@ -1424,6 +2023,12 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 TransitionDef::new("reach", "move", Condition::Finished, 0.35).inertialize(),
                 TransitionDef::new("move", "flex", Condition::trigger("flex"), 0.3),
                 TransitionDef::new("flex", "move", Condition::Finished, 0.4).inertialize(),
+                // From wherever the body was when it went limp; the ragdoll's own blend
+                // covers the change, so the switch is instant.
+                TransitionDef::new("*", "get_up_back", Condition::trigger("get_up_back"), 0.0),
+                TransitionDef::new("*", "get_up_front", Condition::trigger("get_up_front"), 0.0),
+                TransitionDef::new("get_up_back", "move", Condition::Finished, 0.3).inertialize(),
+                TransitionDef::new("get_up_front", "move", Condition::Finished, 0.3).inertialize(),
             ],
             initial: Some("move".into()),
         },
@@ -1488,9 +2093,73 @@ mod tests {
         let lookup = |n: &str| clips.iter().find(|c| c.name == n).cloned();
         let g = GraphInstance::compile(&graph(), &s, &lookup).unwrap();
         assert!(g.in_state("move"));
+        for clip in GET_UP_CLIPS {
+            assert!(lookup(clip).is_some(), "{clip}");
+        }
         let swing = lookup("heavy_swing").unwrap();
         assert!(swing.curve("effort", 1.0).unwrap() > 0.9);
         assert!(swing.curve("effort", 0.0).unwrap() < 0.05);
+    }
+
+    /// Model-space pose of `clip` at `phase` (0..1).
+    fn model_at(s: &Skeleton, clip: &AnimationClip, phase: f32) -> Vec<Xf> {
+        let binding = crate::clip::ClipBinding::new(clip, s);
+        let mut local = s.rest.clone();
+        clip.sample(phase * clip.duration, &binding, &mut local);
+        let mut model = s.rest_model.clone();
+        s.to_model(&local, &mut model);
+        model
+    }
+
+    #[test]
+    fn get_ups_start_lying_and_end_on_the_first_idle_frame() {
+        let s = skeleton();
+        let idle = model_at(&s, &idle(&s), 0.0);
+        for (clip, up) in [(get_up_back(&s), 1.0), (get_up_front(&s), -1.0)] {
+            let start = model_at(&s, &clip, 0.0);
+            let hips = start[s.bone("hips")].t;
+            assert!(hips.y < 0.25, "{}: hips at {hips}", clip.name);
+            // The chest faces up for the back, down for the front.
+            let front = start[s.bone("chest")].r * Vec3::NEG_Z;
+            assert!(front.y * up > 0.9, "{}: chest faces {front}", clip.name);
+            let end = model_at(&s, &clip, 1.0);
+            for b in 1..s.len() {
+                let angle = end[b].r.angle_between(idle[b].r).to_degrees();
+                assert!(angle < 1.0, "{}: {} off by {angle}°", clip.name, s.names[b]);
+            }
+            let off = (end[s.bone("hips")].t - idle[s.bone("hips")].t).length();
+            assert!(off < 0.01, "{}: hips {off} m from idle", clip.name);
+        }
+    }
+
+    #[test]
+    fn get_ups_stay_on_the_floor_and_the_standing_foot_stays_put() {
+        let s = skeleton();
+        for clip in [get_up_back(&s), get_up_front(&s)] {
+            let mut planted = Vec::new();
+            for i in 0..=60 {
+                let ph = i as f32 / 60.0;
+                let m = model_at(&s, &clip, ph);
+                // Joint centers sit at least 4 cm inside the skin: nothing sinks deeper.
+                for b in 1..s.len() {
+                    assert!(
+                        m[b].t.y > -0.04,
+                        "{} at {ph:.2}: {} at {}",
+                        clip.name,
+                        s.names[b],
+                        m[b].t
+                    );
+                }
+                if ph >= 0.7 {
+                    planted.push(m[s.bone("foot_l")].t);
+                }
+            }
+            let slip = planted
+                .iter()
+                .map(|p| (*p - planted[0]).with_y(0.0).length())
+                .fold(0.0, f32::max);
+            assert!(slip < 0.08, "{}: the left foot slides {slip} m", clip.name);
+        }
     }
 
     #[test]

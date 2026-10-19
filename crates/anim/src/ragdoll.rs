@@ -15,8 +15,14 @@
 //!   rest (hands, head on the neck, toes, hair) keep animating on top.
 //! * Below weight 1 every joint is pulled toward the animated pose, holding the limbs up
 //!   against gravity, and the hips toward the animated hips; the closer to 1, the weaker.
-//! * Back at 0 the bodies go and the pose blends back to the animation over
-//!   [`BLEND_OUT_SECS`].
+//! * Back at 0 the bodies go. A person lying on the floor gets up: the ragdoll triggers the
+//!   graph's `get_up_back` or `get_up_front` (whichever way up it lies, see [`lying`]), blends
+//!   from the pose it lay in into the clip's first frame over [`GET_UP_BLEND_SECS`], and lines
+//!   the clip up with the body (turned and moved in model space, an offset that fades as the
+//!   body stands, so the requester should stand its entity where [`get_up_placement`] says to
+//!   keep the body from sliding). It reports `getting_up` and `got_up` animation events. A body
+//!   still on its feet, or without those clips, blends back to the animation over
+//!   [`BLEND_OUT_SECS`]. Blends run on each bone's local rotation, so limbs keep their length.
 //! * Parts are on [`RAGDOLL_LAYER`] and don't collide with each other; while a body is
 //!   physical its own character controller ignores them.
 //! * A part hitting something hard reports a `GroundContact` of kind `Body` (body falls for
@@ -34,6 +40,8 @@ use engine_world::physics::{
 use engine_world::{ContactKind, Gravity, Ground, GroundContact, NoiseEvent, SurfaceMaterials};
 
 use crate::animator::Animator;
+use crate::build::humanoid::{GET_UP_BACK_HIPS, GET_UP_FRONT_HIPS, HIPS_HEIGHT};
+use crate::graph::FiredEvent;
 use crate::skeleton::Skeleton;
 use crate::xform::{Xf, rotation_between};
 
@@ -42,6 +50,8 @@ use crate::xform::{Xf, rotation_between};
 pub const RAGDOLL_LAYER: u32 = 1 << 29;
 /// How long the pose takes to blend back to the animation when the weight returns to 0, s.
 pub const BLEND_OUT_SECS: f32 = 0.45;
+/// How long a body lying on the floor takes to blend into its get-up clip, s.
+pub const GET_UP_BLEND_SECS: f32 = 0.35;
 /// Faster than this between two frames is a teleport, not motion, m/s.
 const TELEPORT_SPEED: f32 = 60.0;
 /// How long the animated motion a body keeps when it turns physical is averaged over, s (so
@@ -729,8 +739,8 @@ pub struct RagdollRig {
     momentum: Vec<Velocity>,
     /// The frame the parts were spawned (they exist from the next one).
     spawned: u64,
-    /// Pose to blend back from after the body stopped being physical, and seconds since.
-    blend: Option<(Vec<Xf>, f32)>,
+    /// Blending back to the animation after the body stopped being physical.
+    blend: Option<BlendBack>,
     /// Whether this took the ragdoll layer out of the owner's character controller.
     took_controller_bit: bool,
 }
@@ -757,9 +767,17 @@ impl RagdollRig {
         !self.parts.is_empty()
     }
 
-    /// Whether the pose is still blending back to the animation.
+    /// Whether the pose is still blending back to the animation (or getting up).
     pub fn is_blending_back(&self) -> bool {
         self.blend.is_some()
+    }
+
+    /// The get-up clip the body is playing, while it gets up off the floor.
+    pub fn getting_up(&self) -> Option<&'static str> {
+        self.blend
+            .as_ref()
+            .and_then(|b| b.get_up.as_ref())
+            .map(|g| g.clip)
     }
 
     pub(crate) fn follow_shift(&mut self, s: &engine_world::WorldShift) {
@@ -768,6 +786,93 @@ impl RagdollRig {
             *r = s.orientation(*r);
         }
     }
+}
+
+/// The blend back to the animation after a body stopped being physical.
+#[derive(Debug, Clone)]
+struct BlendBack {
+    /// The pose shown when the body stopped being physical, local to each parent.
+    from: Vec<Xf>,
+    /// Seconds since, and how long the blend takes.
+    t: f32,
+    secs: f32,
+    get_up: Option<GetUp>,
+}
+
+/// A body getting up off the floor.
+#[derive(Debug, Clone)]
+struct GetUp {
+    clip: &'static str,
+    /// Animation seconds into the clip, and its length.
+    time: f32,
+    secs: f32,
+    /// Model-space offset (a turn about Y and a move) that lines the clip's start up with the
+    /// body as it lay; it fades out while the body stands.
+    offset: Xf,
+    /// Whether the graph has been seen playing the clip.
+    started: bool,
+}
+
+/// How a body lies on the floor (see [`lying`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Lying {
+    /// Face down (else face up, or on its side and nearer face up).
+    pub face_down: bool,
+    /// The get-up clip for it (`get_up_front` or `get_up_back`).
+    pub clip: &'static str,
+    /// Model-space offset that puts the clip's first frame onto the body: turned about Y and
+    /// moved along the floor.
+    pub offset: Xf,
+}
+
+/// Whether a pose (model space, of a skeleton with `hips` and `chest` bones) lies on the
+/// floor: the trunk within 35° of level. `None` for a body on its feet (or one without those
+/// bones).
+pub fn lying(skeleton: &Skeleton, model: &[Xf]) -> Option<Lying> {
+    let hips = model.get(skeleton.index_of("hips")?)?;
+    let chest = model.get(skeleton.index_of("chest")?)?;
+    let axis = chest.t - hips.t;
+    let along = axis.with_y(0.0);
+    if axis.y > axis.length() * 0.58 || along.length() < 1e-4 {
+        return None;
+    }
+    // Scale of this body against the humanoid the clips were made for.
+    let k = skeleton.rest_model[skeleton.index_of("hips")?].t.y / HIPS_HEIGHT;
+    let face_down = (chest.r * Vec3::NEG_Z).y < 0.0;
+    // Face down, the clip's head points the way it will face (−Z); face up, its feet do.
+    let (clip, start, ahead) = if face_down {
+        ("get_up_front", GET_UP_FRONT_HIPS, along)
+    } else {
+        ("get_up_back", GET_UP_BACK_HIPS, -along)
+    };
+    let ahead = ahead.normalize();
+    let turn = Quat::from_rotation_y((-ahead.x).atan2(-ahead.z));
+    let start = turn * (start * k).with_y(0.0);
+    Some(Lying {
+        face_down,
+        clip,
+        offset: Xf::from_tr((hips.t - start).with_y(0.0), turn),
+    })
+}
+
+/// Where to stand the entity of a body lying as `pose` shows (entity at `gt`) so that its
+/// get-up starts right where the body lies, without sliding: the entity's new position (its
+/// height unchanged) and rotation. `None` if the body isn't lying down.
+pub fn get_up_placement(
+    skeleton: &Skeleton,
+    pose: &SkeletonPose,
+    gt: &GlobalTransform,
+) -> Option<(DVec3, Quat)> {
+    if pose.bones.len() != skeleton.len() {
+        return None;
+    }
+    let model: Vec<Xf> = pose.bones.iter().map(Xf::from_bone_pose).collect();
+    let l = lying(skeleton, &model)?;
+    let rot = gt.rotation();
+    let scale = gt.scale().max_element();
+    let mut at = gt.translation() + (rot * (l.offset.t * scale)).as_dvec3();
+    at.y = gt.translation().y;
+    Some((at, (rot * l.offset.r).normalize()))
 }
 
 /// Give animated bodies whose skeleton has a ragdoll a [`RagdollRig`] (again when their
@@ -862,10 +967,41 @@ pub(crate) fn ragdoll_system(
                 c.layers.collides_with &= !RAGDOLL_LAYER;
             }
         } else if weight <= 0.0 && rig.is_physical() {
-            // Blend back from the pose shown last frame.
+            // Blend back from the pose shown last frame; get up if it lay on the floor.
             if published.bones.len() == animator.skeleton.len() && frame > rig.spawned + 1 {
-                let snapshot = published.bones.iter().map(Xf::from_bone_pose).collect();
-                rig.blend = Some((snapshot, 0.0));
+                let skeleton = animator.skeleton.clone();
+                let model: Vec<Xf> = published.bones.iter().map(Xf::from_bone_pose).collect();
+                let get_up = lying(&skeleton, &model).and_then(|l| {
+                    let secs = get_up_secs(&animator, l.clip)?;
+                    animator.trigger(l.clip);
+                    animator.events.push(FiredEvent {
+                        name: "getting_up".into(),
+                        bone: None,
+                    });
+                    Some(GetUp {
+                        clip: l.clip,
+                        time: 0.0,
+                        secs,
+                        offset: l.offset,
+                        started: false,
+                    })
+                });
+                let from = (0..skeleton.len())
+                    .map(|b| match skeleton.parents[b] {
+                        Some(p) => model[p as usize].inverse().mul(&model[b]),
+                        None => model[b],
+                    })
+                    .collect();
+                rig.blend = Some(BlendBack {
+                    from,
+                    t: 0.0,
+                    secs: if get_up.is_some() {
+                        GET_UP_BLEND_SECS
+                    } else {
+                        BLEND_OUT_SECS
+                    },
+                    get_up,
+                });
             }
             for e in rig.parts.drain(..).chain(rig.joints.drain(..)) {
                 commands.entity(e).try_despawn();
@@ -889,20 +1025,8 @@ pub(crate) fn ragdoll_system(
                 &gravity,
                 &mut parts,
             );
-        } else if let Some((snapshot, t)) = &mut rig.blend {
-            *t += dt;
-            let w = (*t / BLEND_OUT_SECS).clamp(0.0, 1.0);
-            let w = w * w * (3.0 - 2.0 * w);
-            let skeleton = animator.skeleton.clone();
-            let Animator { local, model, .. } = &mut *animator;
-            for b in 0..skeleton.len() {
-                model[b] = snapshot[b].lerp(&model[b], w);
-                local[b] = match skeleton.parents[b] {
-                    Some(p) => model[p as usize].inverse().mul(&model[b]),
-                    None => model[b],
-                };
-            }
-            if *t >= BLEND_OUT_SECS {
+        } else if let Some(blend) = &mut rig.blend {
+            if blend_back(blend, &mut animator, dt) {
                 rig.blend = None;
             }
         }
@@ -923,6 +1047,57 @@ pub(crate) fn ragdoll_system(
         rig.last = animated;
         rig.last_frame = Some(frame);
     }
+}
+
+/// One frame of blending back to the animation (and of getting up); true once done.
+fn blend_back(blend: &mut BlendBack, animator: &mut Animator, dt: f32) -> bool {
+    blend.t += dt;
+    let mut standing = true;
+    if let Some(g) = &mut blend.get_up {
+        let playing = animator.graph().is_some_and(|graph| graph.in_state(g.clip));
+        g.started |= playing;
+        g.time += animator.dt;
+        if playing || (!g.started && g.time < 0.25) {
+            standing = false;
+            // Line the clip up with where the body lay, fading out as it stands.
+            let fade = ((g.time / g.secs - 0.5) / 0.45).clamp(0.0, 1.0);
+            let keep = 1.0 - fade * fade * (3.0 - 2.0 * fade);
+            let offset = Xf::IDENTITY.lerp(&g.offset, keep);
+            let skeleton = animator.skeleton.clone();
+            for b in 0..skeleton.len() {
+                if skeleton.parents[b].is_none() {
+                    animator.local[b] = offset.mul(&animator.local[b]);
+                }
+            }
+            animator.refresh_model();
+        } else {
+            animator.events.push(FiredEvent {
+                name: "got_up".into(),
+                bone: None,
+            });
+            blend.get_up = None;
+        }
+    }
+    if blend.t < blend.secs {
+        let w = (blend.t / blend.secs).clamp(0.0, 1.0);
+        let w = w * w * (3.0 - 2.0 * w);
+        let skeleton = animator.skeleton.clone();
+        let Animator { local, model, .. } = &mut *animator;
+        for b in 0..skeleton.len() {
+            local[b] = blend.from[b].lerp(&local[b], w);
+            model[b] = match skeleton.parents[b] {
+                Some(p) => model[p as usize].mul(&local[b]),
+                None => local[b],
+            };
+        }
+    }
+    standing && blend.t >= blend.secs
+}
+
+/// Length of the get-up clip `clip` in the animator's graph, if it has one.
+fn get_up_secs(animator: &Animator, clip: &str) -> Option<f32> {
+    let graph = animator.graph()?;
+    graph.clip_duration(clip)
 }
 
 /// Spawn the part bodies and joints on the animated pose, moving as it moved.

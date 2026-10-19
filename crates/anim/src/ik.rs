@@ -565,6 +565,8 @@ pub fn solve_feet(
     let Some(pelvis) = skeleton.index_of(&ik.pelvis) else {
         return;
     };
+    // A body on the floor (the `floor` curve of a get-up) isn't standing on its feet.
+    let weight = ik.weight * (1.0 - animator.curve("floor")).clamp(0.0, 1.0);
     let legs: Vec<(usize, usize, usize, Option<usize>, Vec3)> = ik
         .legs
         .iter()
@@ -610,16 +612,24 @@ pub fn solve_feet(
         min_offset = 0.0;
     }
     // The pelvis goes down to let the lower foot reach (never up: legs can't stretch).
-    let target = min_offset.clamp(-ik.max_step_down, 0.0) * ik.weight;
+    let target = min_offset.clamp(-ik.max_step_down, 0.0) * weight;
     ik.pelvis_offset += (target - ik.pelvis_offset) * smoothing(dt, ik.pelvis_smoothing);
     let mut edit = animator.edit();
     edit.translate_model(pelvis, up_model * ik.pelvis_offset);
     for (n, &(upper, lower, foot, toe, knee)) in legs.iter().enumerate() {
         let ankle = edit.position(foot);
-        let goal = ankle + up_model * (ik.foot_offsets[n] * ik.weight - ik.pelvis_offset);
+        let goal = ankle + up_model * (ik.foot_offsets[n] * weight - ik.pelvis_offset);
         // Keep the animated foot rotation while the leg bends.
         let foot_rot = edit.model[foot].r;
+        let animated = (edit.model[upper].r, edit.model[lower].r);
         two_bone(&mut edit, upper, lower, foot, goal, knee, 1.0);
+        if weight < 1.0 {
+            // Fade the knee's re-aim toward `knee` too, not only the goal: at weight 0 the
+            // leg keeps its animated bend (knees up while sitting on the floor).
+            let solved = (edit.model[upper].r, edit.model[lower].r);
+            edit.set_model_rotation(upper, animated.0.slerp(solved.0, weight));
+            edit.set_model_rotation(lower, animated.1.slerp(solved.1, weight));
+        }
         edit.set_model_rotation(foot, foot_rot);
         // Tilt the foot to the ground, more when planted than when swinging.
         if let Some(h) = hits[n]
@@ -630,7 +640,7 @@ pub fn solve_feet(
             let planted = (1.0 - lift / 0.15).clamp(0.0, 1.0);
             let tilt = rotation_between(up_model, n_model);
             let (axis, angle) = tilt.to_axis_angle();
-            let angle = angle.min(ik.max_tilt_deg.to_radians()) * ik.align * planted * ik.weight;
+            let angle = angle.min(ik.max_tilt_deg.to_radians()) * ik.align * planted * weight;
             if angle > 1e-4 {
                 edit.rotate_model(foot, Quat::from_axis_angle(axis, angle));
             }
@@ -641,7 +651,7 @@ pub fn solve_feet(
                 if flat != Vec3::ZERO && fwd.dot(n_model) < 0.0 {
                     let bend = rotation_between(fwd, flat);
                     let (axis, angle) = bend.to_axis_angle();
-                    let angle = angle.min(50f32.to_radians()) * planted * ik.weight;
+                    let angle = angle.min(50f32.to_radians()) * planted * weight;
                     edit.rotate_model(t, Quat::from_axis_angle(axis, angle));
                 }
             }
