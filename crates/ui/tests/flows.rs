@@ -452,6 +452,167 @@ fn shop_and_inventory_open_with_the_item_asked_for() {
     assert_eq!(st.selected, Some(SlotRef::Bag(3)));
 }
 
+fn quests(app: &mut App) -> engine_ui::quests::QuestLog {
+    app.world.resource::<engine_ui::quests::QuestLog>().clone()
+}
+
+fn waypoint_label(app: &mut App) -> String {
+    app.world
+        .resource::<engine_ui::map::MapData>()
+        .waypoint
+        .as_ref()
+        .map(|w| w.label.clone())
+        .unwrap_or_default()
+}
+
+#[test]
+fn tracking_a_quest_moves_the_hud_tracker_and_the_waypoint() {
+    let mut app = app();
+    let data = |app: &mut App, path: &str| api(app, "ui.get_data", json!({"path": path}));
+    assert_eq!(data(&mut app, "quest.title"), "The Silent Relay");
+    assert_eq!(data(&mut app, "quest.progress_max"), 4);
+    assert_eq!(waypoint_label(&mut app), "Relay Tower");
+    api(&mut app, "quest.track", json!({"id": "storm_salvage"}));
+    app.update_n(2);
+    assert_eq!(data(&mut app, "quest.title"), "Storm Salvage");
+    assert_eq!(
+        data(&mut app, "quest.step"),
+        "Recover flight recorders from the Scar"
+    );
+    // A counted step shows its own count.
+    assert_eq!(data(&mut app, "quest.progress"), 1);
+    assert_eq!(data(&mut app, "quest.progress_max"), 4);
+    assert_eq!(waypoint_label(&mut app), "The Scar");
+    // Tracking nothing empties the tracker and leaves the waypoint where it was.
+    api(&mut app, "quest.track", json!({"id": null}));
+    app.update_n(2);
+    assert_eq!(data(&mut app, "quest.title"), "");
+    assert_eq!(waypoint_label(&mut app), "The Scar");
+}
+
+#[test]
+fn the_journal_opens_on_the_tracked_quest_and_tracks_with_a_click() {
+    use engine_ui::quests::JournalScreen;
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "journal", "instant": true}),
+    );
+    app.update_n(3);
+    let selected = |app: &mut App| {
+        let mut q = app.world.query::<&JournalScreen>();
+        let st = q.single(&app.world).unwrap();
+        (st.tab, st.selected.clone().unwrap_or_default())
+    };
+    assert_eq!(selected(&mut app), (0, "silent_relay".into()));
+    // The tracked quest's place is on the banner map.
+    let e = engine_ui::input::find_id(&mut app.world, "journal_map").expect("banner map");
+    let view = app.world.get::<engine_ui::map::MapView>(e).unwrap();
+    assert_eq!(
+        view.selected,
+        Some(engine_ui::map::MapItem::Poi("relay_tower".into()))
+    );
+    // The new quest loses its mark once looked at.
+    assert!(quests(&mut app).get("lookout_log").unwrap().new);
+    api(&mut app, "ui.click", json!({"id": "quest:lookout_log"}));
+    app.update_n(2);
+    assert_eq!(selected(&mut app), (0, "lookout_log".into()));
+    assert!(!quests(&mut app).get("lookout_log").unwrap().new);
+    api(&mut app, "ui.click", json!({"id": "journal_track"}));
+    app.update_n(2);
+    assert_eq!(quests(&mut app).tracked.as_deref(), Some("lookout_log"));
+    assert_eq!(waypoint_label(&mut app), "Ridge Lookout");
+    // Right click on a row tracks that one.
+    api(
+        &mut app,
+        "ui.click",
+        json!({"id": "quest:salt_run", "alt": true}),
+    );
+    app.update_n(2);
+    assert_eq!(quests(&mut app).tracked.as_deref(), Some("salt_run"));
+    // The finished tab opens on its first quest; Show on map opens the map over the journal.
+    api(&mut app, "ui.click", json!({"id": "journal.tab:1"}));
+    app.update_n(2);
+    assert_eq!(selected(&mut app), (1, "landfall".into()));
+    api(&mut app, "ui.click", json!({"id": "journal_show_map"}));
+    app.update_n(3);
+    let screens = open(&mut app);
+    assert!(
+        screens.contains(&"map".to_string()) && screens.contains(&"journal".to_string()),
+        "{screens:?}"
+    );
+}
+
+#[test]
+fn finishing_the_last_step_completes_the_quest_and_pays_out() {
+    use engine_ui::quests::QuestState;
+    let mut app = app();
+    let gold = player(&mut app).gold;
+    let xp = api(&mut app, "ui.get_data", json!({"path": "player.xp"}))
+        .as_f64()
+        .unwrap();
+    // One crystal more finishes the first step and shows the next one.
+    let r = api(
+        &mut app,
+        "quest.progress",
+        json!({"id": "glass_and_glow", "add": 1}),
+    );
+    assert_eq!(r["done"], true);
+    let q = quests(&mut app).get("glass_and_glow").unwrap().clone();
+    assert_eq!(
+        (q.state, q.current(), q.visible()),
+        (QuestState::Active, Some(1), 2)
+    );
+    // The salt run has one step: three medkits.
+    api(
+        &mut app,
+        "quest.progress",
+        json!({"id": "salt_run", "add": 3}),
+    );
+    app.update_n(2);
+    assert_eq!(
+        quests(&mut app).get("salt_run").unwrap().state,
+        QuestState::Completed
+    );
+    assert_eq!(player(&mut app).gold, gold + 240);
+    let xp2 = api(&mut app, "ui.get_data", json!({"path": "player.xp"}))
+        .as_f64()
+        .unwrap();
+    assert_eq!(xp2, xp + 180.0);
+    // Completing the tracked quest hands tracking to the next main quest... there is none
+    // left, so it goes to the first active one.
+    api(&mut app, "quest.complete", json!({"id": "silent_relay"}));
+    app.update_n(2);
+    let log = quests(&mut app);
+    assert_eq!(
+        log.get("silent_relay").unwrap().state,
+        QuestState::Completed
+    );
+    assert_eq!(log.tracked.as_deref(), Some("glass_and_glow"));
+}
+
+#[test]
+fn a_dialogue_choice_tracks_a_quest() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "dialogue", "tree": "quill_intro", "node": "c", "speed": 0}),
+    );
+    app.update_n(5);
+    api(&mut app, "dialogue.next", json!({}));
+    app.update_n(10);
+    api(&mut app, "dialogue.choose", json!({"index": 1}));
+    app.update_n(5);
+    assert_eq!(quests(&mut app).tracked.as_deref(), Some("glass_and_glow"));
+    assert_eq!(waypoint_label(&mut app), "Glass Caves");
+    assert_eq!(
+        api(&mut app, "dialogue.state", json!({}))["node"],
+        "crystals"
+    );
+}
+
 #[test]
 fn short_labels_stay_on_one_line() {
     let mut app = app();
@@ -480,4 +641,282 @@ fn short_labels_stay_on_one_line() {
         let lines = layouts.entries[&e].buffer.layout_runs().count();
         assert_eq!(lines, 1, "a short label wrapped");
     }
+}
+
+fn dilation(app: &mut App) -> f32 {
+    app.world
+        .resource::<engine_core::time::TimeDilation>()
+        .factor()
+}
+
+fn data_str(app: &mut App, path: &str) -> String {
+    let d = app.world.resource::<engine_ui::data::UiData>();
+    d.get(path)
+        .map(|v| {
+            v.as_str()
+                .map(String::from)
+                .unwrap_or_else(|| v.to_string())
+        })
+        .unwrap_or_default()
+}
+
+fn wheel_hovered(app: &mut App) -> Option<usize> {
+    let mut q = app.world.query::<&engine_ui::wheel::WheelView>();
+    q.iter(&app.world).next().and_then(|v| v.hovered)
+}
+
+fn press(app: &mut App, key: KeyCode) {
+    input(app, InputEvent::Key { key, pressed: true });
+    input(
+        app,
+        InputEvent::Key {
+            key,
+            pressed: false,
+        },
+    );
+}
+
+#[test]
+fn the_wheel_slows_time_points_with_the_cursor_and_equips_on_click() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "hud", "instant": true}),
+    );
+    api(&mut app, "ui.show", json!({"screen": "wheel"}));
+    app.update_n(40);
+    // The world slows while it is open; the HUD stays up underneath.
+    assert!(dilation(&mut app) < 0.3, "{}", dilation(&mut app));
+    let hud = open(&mut app).contains(&"hud".to_string());
+    assert!(hud);
+    // The pistol is in hand, so it starts hovered.
+    assert_eq!(wheel_hovered(&mut app), Some(0));
+    // Point to the right of the middle: slot 2 (the greatsword, clockwise from the top).
+    let c = center(&mut app, "wheel_canvas");
+    input(
+        &mut app,
+        InputEvent::CursorMoved {
+            position: c + Vec2::new(220.0, 0.0),
+        },
+    );
+    assert_eq!(wheel_hovered(&mut app), Some(2));
+    let since = next_event(&mut app);
+    input(
+        &mut app,
+        InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+        },
+    );
+    input(
+        &mut app,
+        InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: false,
+        },
+    );
+    assert!(
+        actions_since(&mut app, since).contains(&"weapon.equip:greatsword".to_string()),
+        "{:?}",
+        actions_since(&mut app, since)
+    );
+    assert_eq!(data_str(&mut app, "weapon.icon"), "greatsword");
+    assert_eq!(data_str(&mut app, "wheel.current"), "greatsword");
+    app.update_n(60);
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    // Time runs again once it has closed.
+    assert!((dilation(&mut app) - 1.0).abs() < 1e-3);
+    // The HUD shows the new weapon.
+    let e = engine_ui::input::find_id(&mut app.world, "hud_weapon_icon").unwrap();
+    assert_eq!(app.world.get::<Icon>(e).unwrap().name, "greatsword");
+}
+
+#[test]
+fn number_keys_pick_a_slot_and_unavailable_slots_stay_shut() {
+    let mut app = app();
+    api(&mut app, "ui.show", json!({"screen": "wheel"}));
+    app.update_n(20);
+    // Slot 7 is Time Slow, cooling down: nothing happens and the wheel stays open.
+    press(&mut app, KeyCode::Digit7);
+    app.update_n(5);
+    assert!(open(&mut app).contains(&"wheel".to_string()));
+    assert_eq!(data_str(&mut app, "wheel.current"), "pistol");
+    // Slot 2 is the rail rifle.
+    press(&mut app, KeyCode::Digit2);
+    app.update_n(60);
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    assert_eq!(data_str(&mut app, "weapon.icon"), "rifle");
+    assert_eq!(data_str(&mut app, "weapon.ammo"), "4");
+}
+
+#[test]
+fn a_held_wheel_picks_on_release_and_cancels_if_the_pointer_never_moved() {
+    let mut app = app();
+    // Held with Tab, let go without pointing: closes, nothing changes.
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: true,
+        },
+    );
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "wheel", "hold": "Tab"}),
+    );
+    app.update_n(20);
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: false,
+        },
+    );
+    app.update_n(60);
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    assert_eq!(data_str(&mut app, "wheel.selected"), "");
+    // Held again with the cursor locked: raw motion straight down aims at the grenades
+    // (slot 5 of 8, clockwise from the top).
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: true,
+        },
+    );
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "wheel", "hold": "Tab"}),
+    );
+    app.update_n(20);
+    input(
+        &mut app,
+        InputEvent::MouseMotion {
+            delta: Vec2::new(0.0, 160.0),
+        },
+    );
+    assert_eq!(wheel_hovered(&mut app), Some(4));
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: false,
+        },
+    );
+    app.update_n(60);
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    assert_eq!(data_str(&mut app, "wheel.selected"), "grenade");
+    // Grenades are thrown, not held: the pistol stays in hand.
+    assert_eq!(data_str(&mut app, "wheel.current"), "pistol");
+}
+
+#[test]
+fn the_click_that_picks_from_the_wheel_does_not_also_attack() {
+    let mut app = app();
+    app.world
+        .resource_mut::<InputMap>()
+        .bind("attack", Binding::Mouse(MouseButton::Left));
+    api(&mut app, "ui.show", json!({"screen": "wheel"}));
+    app.update_n(20);
+    let c = center(&mut app, "wheel_canvas");
+    input(
+        &mut app,
+        InputEvent::CursorMoved {
+            position: c + Vec2::new(0.0, -220.0),
+        },
+    );
+    // Press, hold while the wheel closes, then let go: the game never sees an attack.
+    app.world.write_message(InputEvent::MouseButton {
+        button: MouseButton::Left,
+        pressed: true,
+    });
+    let mut attacked = false;
+    for _ in 0..30 {
+        app.update();
+        let a = app
+            .world
+            .resource::<engine_input::ActionState>()
+            .get("attack");
+        attacked |= a.just_pressed || a.pressed_since_tick;
+    }
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    input(
+        &mut app,
+        InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: false,
+        },
+    );
+    let a = app
+        .world
+        .resource::<engine_input::ActionState>()
+        .get("attack");
+    attacked |= a.just_pressed || a.pressed_since_tick;
+    assert!(!attacked);
+    // The next click attacks as usual.
+    input(
+        &mut app,
+        InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+        },
+    );
+    assert!(
+        app.world
+            .resource::<engine_input::ActionState>()
+            .get("attack")
+            .pressed
+    );
+}
+
+#[test]
+fn letting_go_over_an_unavailable_slot_closes_the_wheel_and_restores_time() {
+    let mut app = app();
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: true,
+        },
+    );
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "wheel", "hold": "Tab"}),
+    );
+    app.update_n(20);
+    // Left points at Time Slow, which is cooling down.
+    input(
+        &mut app,
+        InputEvent::MouseMotion {
+            delta: Vec2::new(-160.0, 0.0),
+        },
+    );
+    assert_eq!(wheel_hovered(&mut app), Some(6));
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: false,
+        },
+    );
+    app.update_n(60);
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    assert_eq!(data_str(&mut app, "wheel.selected"), "");
+    assert!((dilation(&mut app) - 1.0).abs() < 1e-3);
+}
+
+#[test]
+fn showing_the_wheel_again_without_slow_motion_lets_time_run() {
+    let mut app = app();
+    api(&mut app, "ui.show", json!({"screen": "wheel"}));
+    app.update_n(30);
+    assert!(dilation(&mut app) < 0.3);
+    api(&mut app, "ui.show", json!({"screen": "wheel", "slow": 1.0}));
+    app.update_n(60);
+    assert!(open(&mut app).contains(&"wheel".to_string()));
+    assert!((dilation(&mut app) - 1.0).abs() < 1e-3);
 }

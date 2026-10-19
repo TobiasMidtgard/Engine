@@ -18,6 +18,7 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_fire::demo::{self, DemoView};
 use engine_fire::{FirePlugin, GrassMeadow, GroundKind, GroundPaint, PaintedGround, PatchShape};
+use engine_render::effects::CUT_STEP_M;
 use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
 use engine_world::{WeatherState, WorldPlugin};
@@ -272,6 +273,7 @@ fn main() {
             .map(|v| (v, v.at_secs, v.key.to_string()))
             .collect(),
     };
+    let mut last_eye = None;
     for (view, at, file) in views {
         let t0 = std::time::Instant::now();
         engine_core::registry::call_api(
@@ -326,14 +328,17 @@ fn main() {
             Transform::default().looking_at(-moon_dir.as_dvec3(), Vec3::Y);
         let eye = ORIGIN + DVec3::from_array(view.eye);
         let target = ORIGIN + DVec3::from_array(view.target);
-        // A cut the renderer sees as one: it keeps the last picture's history (anti-aliasing,
-        // fog) across a jump of less than 25 m, and the stops are closer together than that,
-        // so the camera looks from far off for a frame first. Without it, a stop smears
-        // ghosts of the one before over its sky.
-        *app.world.get_mut::<Transform>(camera).expect("camera") =
-            Transform::from_translation(eye + DVec3::Y * 1000.0).looking_at(target, Vec3::Y);
+        // A cut the renderer sees as one: it drops the last picture's history (anti-aliasing,
+        // fog, bounce light) when the camera jumps more than `CUT_STEP_M`. Close-ups can stand
+        // nearer each other than that, so for those the camera looks from far off for a frame
+        // first; without it a stop smears ghosts of the one before over its picture.
         let empty = swap_render(&mut app, render.take().expect("render schedule"));
-        app.update();
+        if last_eye.is_some_and(|p: DVec3| p.distance(eye) <= 2.0 * CUT_STEP_M) {
+            *app.world.get_mut::<Transform>(camera).expect("camera") =
+                Transform::from_translation(eye + DVec3::Y * 1000.0).looking_at(target, Vec3::Y);
+            app.update();
+        }
+        last_eye = Some(eye);
         *app.world.get_mut::<Transform>(camera).expect("camera") =
             Transform::from_translation(eye).looking_at(target, Vec3::Y);
 

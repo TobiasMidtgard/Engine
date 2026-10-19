@@ -367,6 +367,9 @@ pub struct DemoView {
     pub hour: f32,
     /// Simulated seconds to wait on arriving before the shot.
     pub warmup_secs: f32,
+    /// Everything in the shot comes from CPU simulation (no particles), so a tour may run the
+    /// warm-up without drawing and draw only the frames that settle the picture.
+    pub quick_warmup: bool,
 }
 
 /// The test area's close-ups, one per thing it tests that the overview can't show.
@@ -378,6 +381,7 @@ pub const VIEWS: &[DemoView] = &[
         target: [-2.0, 5.0, 0.0],
         hour: 16.5,
         warmup_secs: 3.0,
+        quick_warmup: false,
     },
     DemoView {
         key: "water_falls",
@@ -386,6 +390,7 @@ pub const VIEWS: &[DemoView] = &[
         target: [27.0, 4.2, 27.4],
         hour: 16.5,
         warmup_secs: 3.0,
+        quick_warmup: false,
     },
     DemoView {
         key: "water_wake",
@@ -394,6 +399,7 @@ pub const VIEWS: &[DemoView] = &[
         target: [-5.0, 5.5, -3.0],
         hour: 16.5,
         warmup_secs: 3.0,
+        quick_warmup: false,
     },
     DemoView {
         key: "water_under",
@@ -402,6 +408,7 @@ pub const VIEWS: &[DemoView] = &[
         target: [5.0, 4.6, 17.5],
         hour: 16.5,
         warmup_secs: 3.0,
+        quick_warmup: true,
     },
     DemoView {
         key: "water_pond",
@@ -410,6 +417,7 @@ pub const VIEWS: &[DemoView] = &[
         target: [46.7, 0.3, 46.7],
         hour: 16.5,
         warmup_secs: 3.0,
+        quick_warmup: false,
     },
 ];
 

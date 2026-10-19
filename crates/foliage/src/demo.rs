@@ -26,6 +26,7 @@
 use engine_core::prelude::*;
 use engine_render::{BoxFace, MeshRenderer, Shape, SkyLightVolume, StandardMaterial};
 
+use crate::cave::CaveChamber;
 use crate::felling::fell_tree;
 use crate::plant::{Disturbance, EcologyRegion, Plant, PlantStage, RegionHistory, ResourceSource};
 use crate::scenery::{PlacedRock, Pool, random_rock, rock_cluster, spawn_rocks};
@@ -631,6 +632,23 @@ pub fn spawn_cave_demo(commands: &mut Commands, center: DVec3) {
             ..Default::default()
         },
     ));
+}
+
+/// The rock around the mushroom cave ([`spawn_cave_demo`]) when nothing else provides it: a
+/// [`CaveChamber`] at `center` (30 × 34 m inside, a 9 m roof, the mouth facing −Z), and a
+/// [`SkyLightVolume`] keeping the sky's light out of it except through the mouth.
+pub fn spawn_cave_chamber(commands: &mut Commands, center: DVec3) {
+    let chamber = CaveChamber::default();
+    let [hx, hz] = chamber.half_extents;
+    let h = chamber.height_m;
+    // Reaching past the rock's deepest alcoves, or the sky lights them.
+    commands.spawn((
+        Transform::from_translation(center + DVec3::Y * (h * 0.5 + 0.4) as f64),
+        SkyLightVolume::new([hx + 2.8, h * 0.5 + 2.2, hz + 2.8])
+            .open(BoxFace::NegZ)
+            .with_fade(12.0),
+    ));
+    commands.spawn((Transform::from_translation(center), chamber));
 }
 
 /// The cave's rocks, local to the zone center: rubble fallen along the walls (where the fungi

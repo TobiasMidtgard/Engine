@@ -15,11 +15,12 @@
 //! | east | Fountain (water jets landing in a basin) and an anvil throwing sparks |
 //! | south | Pond with stones splashing in, footsteps on mud, snow, sand and water, impacts on six materials |
 //! | rim | Torches and fireflies |
+//! | north-east, outside the rim | A rocket motor test-firing on its stand, shock diamonds and all |
 
 pub mod art;
 
 use engine_assets::Assets;
-use engine_core::math::{DVec3, Quat, Rng, Vec3};
+use engine_core::math::{DVec3, Quat, Rng, Vec3, smoothstep};
 use engine_core::prelude::*;
 use engine_render::{
     Image, MaterialRef, Mesh, MeshRef, MeshRenderer, PointLight, StandardMaterial,
@@ -95,6 +96,14 @@ pub const VIEWS: &[DemoView] = &[
         warmup: 7.4,
     },
     DemoView {
+        key: "magic_engine",
+        name: "A rocket motor test-firing on its stand at dusk",
+        eye: [27.0, 2.1, -13.2],
+        target: [19.8, 1.3, -18.7],
+        hour: 18.7,
+        warmup: 4.0,
+    },
+    DemoView {
         key: "magic_impacts",
         name: "Impacts on rock, wood, metal, dirt, snow and sand",
         eye: [9.35, 1.5, 9.8],
@@ -140,6 +149,16 @@ pub struct DemoRepeater {
     /// Each shot lands somewhere within this many meters of here, across `up`.
     pub spread: f32,
     pub shots: u32,
+}
+
+/// Test-fires the engine effect on this entity in a loop: `rest` seconds off, then a quick
+/// spool up, `burn` seconds at full thrust and a quick shutdown. An igniter's burst of sparks
+/// starts each run.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct DemoEngine {
+    pub rest: f32,
+    pub burn: f32,
+    pub timer: f32,
 }
 
 /// Circles around `center`, bobbing up and down.
@@ -273,6 +292,8 @@ mod layout {
     pub const PLATES: (f64, f64) = (5.6, 14.6);
     pub const TORCH_RADIUS: f64 = 19.6;
     pub const SHRUBS: [(f64, f64); 4] = [(-22.5, -7.5), (22.0, -10.0), (-20.5, 15.5), (22.5, 13.0)];
+    /// The engine test stand, just outside the paved disc; it fires away from the court.
+    pub const STAND: (f64, f64) = (17.85, -16.95);
 }
 
 /// The parts of the court floor left unpaved because a prop stands there.
@@ -626,6 +647,33 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         ));
     }
 
+    // North-east, outside the rim: a rocket motor on its test stand, firing away from the
+    // court.
+    let stand = ground(STAND);
+    let turn = yaw((-STAND.1).atan2(STAND.0) as f32);
+    art::spawn_prop(
+        commands,
+        "court.engine_stand",
+        at(stand).with_rotation(turn),
+        props::stand::engine_stand,
+    );
+    let out = turn * Vec3::X;
+    let nozzle =
+        stand + (turn * Vec3::new(props::stand::EXIT_X, props::stand::AXIS_Y, 0.0)).as_dvec3();
+    let mut engine = ParticleEffect::new("exhaust.rocket")
+        .with_scale(props::stand::EXIT_RADIUS * 2.0)
+        .with_intensity(0.0);
+    engine.playing = false;
+    commands.spawn((
+        at(nozzle).with_rotation(Quat::from_rotation_arc(Vec3::Y, out)),
+        engine,
+        DemoEngine {
+            rest: 1.0,
+            burn: 10.0,
+            timer: 0.0,
+        },
+    ));
+
     // The rim: braziers, and fireflies in the shrubs beyond.
     for i in 0..8 {
         let angle = (i as f64 + 0.5) * std::f64::consts::TAU / 8.0;
@@ -790,6 +838,38 @@ pub fn run_repeaters(
         let (sin, cos) = (k * 2.399_963).sin_cos();
         let at = gt.translation() + ((a * cos + b * sin) * radius).as_dvec3();
         spawn_effect_at(&mut commands, &r.effect, at, r.up, r.scale);
+    }
+}
+
+/// Runs the test-fired engines: spools them up and down and fires the igniter.
+pub fn run_engines(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut engines: Query<(&mut DemoEngine, &mut ParticleEffect, &GlobalTransform)>,
+) {
+    let dt = time.delta_secs();
+    for (mut e, mut effect, gt) in &mut engines {
+        let cycle = (e.rest + e.burn).max(0.1);
+        let was = e.timer % cycle >= e.rest;
+        e.timer = (e.timer + dt) % cycle;
+        let s = e.timer - e.rest;
+        let level = if s < 0.0 {
+            0.0
+        } else {
+            smoothstep(0.0, 0.6, s) * (1.0 - smoothstep(e.burn - 0.5, e.burn, s))
+        };
+        effect.playing = level > 0.02;
+        effect.intensity = level;
+        if s >= 0.0 && !was {
+            let out = gt.rotation() * Vec3::Y;
+            spawn_effect_at(
+                &mut commands,
+                "exhaust.backfire",
+                gt.translation(),
+                out,
+                5.0,
+            );
+        }
     }
 }
 

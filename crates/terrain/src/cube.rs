@@ -76,7 +76,7 @@ impl NodeKey {
 
 /// Face frames: outward normal, `a` axis, `b` axis (a × b = normal, so triangles wound
 /// counter-clockwise in (a, b) face outward).
-const FACES: [(DVec3, DVec3, DVec3); 6] = [
+pub(crate) const FACES: [(DVec3, DVec3, DVec3); 6] = [
     (DVec3::X, DVec3::NEG_Z, DVec3::Y),
     (DVec3::NEG_X, DVec3::Z, DVec3::Y),
     (DVec3::Y, DVec3::X, DVec3::NEG_Z),

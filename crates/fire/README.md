@@ -97,9 +97,11 @@ shed and hay bales, while the bales across the road survive. A campfire burns fo
 path. Once the meadow has regrown, the next fire starts. The first fire is already 50 s along
 when the demo starts so there's something to see right away. `demo::VIEWS` lists camera spots
 for it (fire front, burning trees, campfire at dusk, the smoke plume, the fire at night), each
-with the moment it shows: `fire.demo {"at_secs": 35}` starts a fresh fire that far along, which
-the showcase tour calls on arriving at each stop (the jump fast-forwards only the fire, so the
-plume stop then waits a few seconds for the smoke to rise).
+with the moment it shows: `fire.demo {"at_secs": 25}` starts a fresh fire that far along, which
+the showcase tour calls on arriving at each stop (with `smoke.clear`). The jump fast-forwards
+only the fire, so most stops then watch it for 20 s (`demo::WATCH_SECS`, undrawn in the tour)
+while the smoke rises and drifts. A jump puts back everything the last fire left (grass, props,
+embers, its random sequence), so each stop looks the same whichever stop came before it.
 
 The grass is a `GrassMeadow` (`grass.rs`): a few hundred thousand curved, tapered blades
 drawn on the GPU, thinned with distance, swaying in the wind and casting shadows, standing on

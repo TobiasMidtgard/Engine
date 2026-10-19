@@ -610,6 +610,7 @@ pub fn spawn(commands: &mut Commands, body: Entity, aircraft: &Aircraft, wheels:
                 WheelVisual {
                     index: i,
                     retracts: false,
+                    max_travel: f32::MAX,
                 },
                 ChildOf(body),
             ))

@@ -71,6 +71,19 @@ pub struct FireClock {
     damage_acc: f32,
     gust_acc: f32,
     rng: Rng,
+    /// While fast-forwarding, only objects within this distance of this point are stepped (a
+    /// demo's jump leaves fires elsewhere where they are).
+    pub(crate) scope: Option<(DVec3, f64)>,
+}
+
+impl FireClock {
+    /// Start a demo's fresh fire from the same random sequence every time, so it burns the same
+    /// way whatever ran before it.
+    pub(crate) fn reset_for_demo(&mut self) {
+        let fast_forward = self.fast_forward;
+        *self = Self::default();
+        self.fast_forward = fast_forward;
+    }
 }
 
 impl Default for FireClock {
@@ -82,6 +95,7 @@ impl Default for FireClock {
             damage_acc: 0.0,
             gust_acc: 0.0,
             rng: Rng::new(0xF1BE),
+            scope: None,
         }
     }
 }
@@ -491,7 +505,13 @@ pub fn step_objects(
         0.0
     };
     let mut deposits: Vec<(DVec3, f32, f32)> = Vec::new();
+    let scope = clock.scope.filter(|_| clock.fast_forward);
     for (entity, gt, mut c, b, shape, contained) in &mut q {
+        if let Some((origin, radius)) = scope
+            && gt.translation().distance(origin) > radius
+        {
+            continue;
+        }
         let Some(mut b) = b else {
             commands.entity(entity).insert(Burning {
                 fuel0_kg: c.fuel_kg,

@@ -91,7 +91,9 @@ fn skin(body: &Body, win: &Windows, atlas: &Atlas) -> Kit {
         let (w, l, t, k) = (window(p), liner(p), trim(p), pocket(p));
         if w.abs() < 0.015 || l.abs() < 0.015 || t.abs() < 0.012 || k.abs() < 0.012 {
             0.0
-        } else if l < 0.0 || (k < 0.0 && body.features.at(p) != Some(sports::Feature::Headlight)) {
+        } else if l < 0.0
+            || (k < 0.0 && body.features.near(p, sports::LIP) != Some(sports::Feature::Headlight))
+        {
             // Wheel-well liners and pocket floors: mostly hidden (not the headlight housings,
             // seen through their lenses).
             8.0
@@ -109,7 +111,7 @@ fn skin(body: &Body, win: &Windows, atlas: &Atlas) -> Kit {
             }
             let mode = View::of(n) as u8;
             if cm.side(1, t) < 0.0 {
-                let mesh = match body.features.at(c) {
+                let mesh = match body.features.near(c, sports::LIP) {
                     Some(sports::Feature::Headlight) => 2,
                     _ => 3,
                 };
@@ -950,17 +952,18 @@ pub(super) fn badges_at(
         };
         let at = trs(p, Quat::from_rotation_arc(Vec3::X, n), Vec3::ONE);
         let r = 0.032;
+        // Profiles run so their normals face out (lathe normals point right of travel).
         let ring = lathe_x(
             &[
-                Vec2::new(-0.001, r + 0.004),
-                Vec2::new(0.004, r + 0.003),
-                Vec2::new(0.006, r),
                 Vec2::new(0.004, r - 0.004),
+                Vec2::new(0.006, r),
+                Vec2::new(0.004, r + 0.003),
+                Vec2::new(-0.001, r + 0.004),
             ],
             40,
             &[],
         );
-        let disc = flipped(lathe_x(
+        let disc = lathe_x(
             &[
                 Vec2::new(0.0045, 0.0),
                 Vec2::new(0.004, r * 0.7),
@@ -968,7 +971,7 @@ pub(super) fn badges_at(
             ],
             40,
             &[],
-        ));
+        );
         // Emblem: the maker's winged V (a V crossed by a wing bar), raised chrome. Outline
         // points are (up, across) in the badge plane.
         let bar = |a: Vec2, b: Vec2, w: f32| -> Mesh {
