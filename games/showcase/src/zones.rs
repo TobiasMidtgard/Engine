@@ -221,6 +221,7 @@ pub const GRASSY_ZONES: &[&str] = &[
     "parkour",
     "fortress",
     "weather",
+    "footsteps",
 ];
 
 /// Rectangles inside grassy zones where a module's demo lays its own ground, so no grass grows
@@ -234,6 +235,9 @@ pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     ("fortress", [11.2, 18.8], [17.7, 25.4]),
     // The market's cobbled square (grass still grows where its edge frays out).
     ("market", [-11.0, 11.0], [-11.0, 11.0]),
+    // The footstep trail and its own meadow, which thins out about 7 m from the path, where
+    // the valley's grass patches (reaching 2 m past this) take over.
+    ("footsteps", [-30.0, 30.0], [-12.0, 12.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south
