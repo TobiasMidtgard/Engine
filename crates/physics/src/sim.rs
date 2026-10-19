@@ -35,7 +35,8 @@ use rapier3d::prelude::{
     CollisionEvent, CollisionEventFlags, ContactModificationContext, ContactPair, EventHandler,
     ImpulseJointHandle, LockedAxes, MassProperties as RapierMassProperties, MultibodyJointHandle,
     PairFilterContext, PhysicsHooks, PhysicsWorld, Pose, RigidBodyBuilder, RigidBodyHandle,
-    RigidBodySet, RigidBodyType, SharedShape, SoftBodySet, SoftBodyTearEvent, SolverFlags,
+    RigidBodySet, RigidBodyType, RopeJointBuilder, SharedShape, SoftBodySet, SoftBodyTearEvent,
+    SolverFlags,
 };
 
 use crate::convert;
@@ -71,6 +72,8 @@ pub struct Region {
     pub stale_all: bool,
     /// Articulation links as the last step left them (see [`crate::articulation`]).
     pub links: crate::articulation::Links,
+    /// Hidden ropes carrying heavy bodies hung on light chains ([`Simulation::hang_loads`]).
+    pub load_lines: Vec<LoadLine>,
 }
 
 impl Region {
@@ -93,6 +96,7 @@ impl Region {
             fresh: Vec::new(),
             stale_all: false,
             links: Default::default(),
+            load_lines: Vec::new(),
         }
     }
 
@@ -407,6 +411,9 @@ pub struct Simulation {
     /// Bodies of jointed groups the articulation budget holds to constraint joints
     /// ([`Self::budget_articulations`]).
     pub held: EntityHashSet,
+    /// Bodies whose jointed group gained or lost a joint or a body, to hang its loads again
+    /// ([`Self::hang_loads`]).
+    pub rehang: Vec<Entity>,
     /// Steps since the articulation budget last looked.
     pub budget_clock: u32,
     /// Steps since the water under sleeping bodies was last looked at.
@@ -1185,6 +1192,10 @@ impl Simulation {
                 }
                 JointHandle::Impulse(world.impulse_joints.insert(h1, h2, joint, true))
             });
+        if matches!(handle, JointHandle::Impulse(_)) {
+            self.rehang.push(desc.body_a);
+            self.rehang.extend(desc.body_b);
+        }
         // A body jointed to a fixed body: keep it off that body's colliders too.
         let mut apart = Vec::new();
         if !desc.collide_connected
@@ -1491,10 +1502,177 @@ impl Simulation {
         }
     }
 
+    /// Hang the heavy bodies of [`Self::rehang`]'s jointed groups on hidden ropes. A light
+    /// chain holding a far heavier body (a 17 t wrecking ball on 11 kg links) can't carry it on
+    /// constraint joints: the iterative solver's few passes leave its links tens of centimeters
+    /// apart, and extra passes cost the whole island (tens of milliseconds while the ball plows
+    /// through a crate wall); such groups can't be articulations either (Rapier's blow up). So a
+    /// body over [`LOAD_RATIO`] times as heavy as a link above it also hangs from the chain's
+    /// pin on a rope as long as the chain pulled straight: the rope carries the load in one
+    /// exact constraint, and the links only their own weight. Slack, the rope does nothing.
+    /// Only for groups pinned at one place without loops, through joints that keep their
+    /// anchors together (fixed, ball and hinge joints).
+    pub fn hang_loads(&mut self, graph: &JointGraph) {
+        let mut bodies = std::mem::take(&mut self.rehang);
+        bodies.sort();
+        bodies.dedup();
+        let mut done = EntityHashSet::default();
+        for start in bodies {
+            if done.contains(&start)
+                || !self
+                    .bodies
+                    .get(&start)
+                    .is_some_and(|b| b.kind == BodyKind::Dynamic)
+            {
+                continue;
+            }
+            let (group, joints) = self.jointed_group(start, graph);
+            done.extend(group.iter().copied());
+            let rid = self.bodies[&start].region;
+            let handles: Vec<RigidBodyHandle> =
+                group.iter().map(|e| self.bodies[e].handle).collect();
+            let lines = self.loads(&group, &joints, graph, rid);
+            let region = self.region_mut(rid);
+            let mut gone = Vec::new();
+            region.load_lines.retain(|l| {
+                let keep = !handles.contains(&l.body);
+                if !keep {
+                    gone.push(l.joint);
+                }
+                keep
+            });
+            for h in gone {
+                region.world.impulse_joints.remove(h, true);
+            }
+            for (pin, pin_anchor, body, anchor, length) in lines {
+                let mut joint = RopeJointBuilder::new(length).build();
+                joint.set_local_anchor1(pin_anchor);
+                joint.set_local_anchor2(anchor);
+                joint.set_contacts_enabled(true);
+                let h = region.world.impulse_joints.insert(pin, body, joint, true);
+                region.load_lines.push(LoadLine { joint: h, body });
+            }
+        }
+    }
+
+    /// The loads of a jointed group to hang ([`Self::hang_loads`]): pin body and its anchor,
+    /// heavy body and its anchor (local), rope length.
+    fn loads(
+        &self,
+        group: &[Entity],
+        joints: &[Entity],
+        graph: &JointGraph,
+        rid: RegionId,
+    ) -> Vec<(RigidBodyHandle, Vec3, RigidBodyHandle, Vec3, f32)> {
+        let world = &self.region(rid).world;
+        let in_group = |e: &Entity| group.contains(e);
+        // A joint's Rapier side on `body` (its handle and local anchor) and the other side.
+        let sides = |j: &Entity, body: Option<Entity>| {
+            let entry = &self.joints[j];
+            let Some((r, JointHandle::Impulse(h))) = entry.created else {
+                return None;
+            };
+            let joint = world.impulse_joints.get(h).filter(|_| r == rid)?;
+            let one = (joint.body1(), joint.data.local_frame1.translation);
+            let two = (joint.body2(), joint.data.local_frame2.translation);
+            let on_a = match body {
+                Some(b) => entry.desc.body_a == b,
+                None => in_group(&entry.desc.body_a),
+            };
+            Some(if on_a { (one, two) } else { (two, one) })
+        };
+        let rigid = |j: &Entity| {
+            matches!(
+                self.joints[j].desc.kind,
+                JointKind::Fixed | JointKind::Spherical { .. } | JointKind::Revolute { .. }
+            )
+        };
+        let mass = |h: RigidBodyHandle| world.bodies.get(h).map_or(0.0, |rb| rb.mass());
+        // The pin: the one joint holding the group to something outside it.
+        let mut pins = joints.iter().filter(|j| {
+            let d = &self.joints[*j].desc;
+            in_group(&d.body_a) != d.body_b.is_some_and(|b| in_group(&b))
+        });
+        let (Some(pin), None) = (pins.next(), pins.next()) else {
+            return Vec::new();
+        };
+        let d = &self.joints[pin].desc;
+        let first = if in_group(&d.body_a) {
+            d.body_a
+        } else {
+            d.body_b.unwrap()
+        };
+        let Some(((_, first_anchor), (holder, holder_anchor))) =
+            rigid(pin).then(|| sides(pin, Some(first))).flatten()
+        else {
+            return Vec::new();
+        };
+        // Walk down from the pin: where each body hangs from, how far from the pin along the
+        // chain pulled straight, and the lightest body above it.
+        struct Hung {
+            body: Entity,
+            anchor: Vec3,
+            length: f32,
+            lightest: f32,
+        }
+        let mut hung = vec![Hung {
+            body: first,
+            anchor: first_anchor,
+            length: 0.0,
+            lightest: f32::MAX,
+        }];
+        let mut walked = EntityHashSet::default();
+        walked.insert(*pin);
+        let mut lines = Vec::new();
+        let mut next = 0;
+        while let Some(at) = hung.get(next) {
+            let (body, anchor, length, lightest) = (at.body, at.anchor, at.length, at.lightest);
+            next += 1;
+            let handle = self.bodies[&body].handle;
+            let lightest = lightest.min(mass(handle));
+            for j in graph.get(&body).into_iter().flatten() {
+                if !walked.insert(*j) || !self.joints.contains_key(j) {
+                    continue;
+                }
+                let d = &self.joints[j].desc;
+                let other = if d.body_a == body {
+                    d.body_b
+                } else {
+                    Some(d.body_a)
+                };
+                let Some(other) = other.filter(in_group) else {
+                    continue;
+                };
+                if !rigid(j) {
+                    continue;
+                }
+                let Some(((_, out), (child, child_anchor))) = sides(j, Some(body)) else {
+                    return Vec::new();
+                };
+                if hung.iter().any(|h| h.body == other) {
+                    // A loop.
+                    return Vec::new();
+                }
+                let length = length + (out - anchor).length();
+                if mass(child) > lightest * LOAD_RATIO {
+                    lines.push((holder, holder_anchor, child, child_anchor, length));
+                }
+                hung.push(Hung {
+                    body: other,
+                    anchor: child_anchor,
+                    length,
+                    lightest,
+                });
+            }
+        }
+        lines
+    }
+
     /// After joints or bodies went away: groups that can be articulated now have their
     /// constraint joints made again (by the next [`Self::create_joint`]s) as articulations.
     pub fn rearticulate(&mut self, graph: &JointGraph) {
         let mut bodies = std::mem::take(&mut self.regroup);
+        self.rehang.extend(bodies.iter().copied());
         bodies.sort();
         bodies.dedup();
         let mut done = EntityHashSet::default();
@@ -2410,4 +2588,17 @@ fn body_params(builder: RigidBodyBuilder, desc: &RigidBody) -> RigidBodyBuilder 
         .ccd_enabled(desc.ccd)
         .can_sleep(desc.can_sleep)
         .locked_axes(locked_axes(desc.lock_rotation))
+}
+
+/// A heavy body this many times as heavy as a link of the chain it hangs on also hangs on a
+/// hidden rope ([`Simulation::hang_loads`]): the mass ratio past which a group can't be
+/// articulated either.
+pub const LOAD_RATIO: f32 = 100.0;
+
+/// A hidden rope carrying a heavy body from its chain's pin ([`Simulation::hang_loads`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LoadLine {
+    pub joint: ImpulseJointHandle,
+    /// The heavy body.
+    pub body: RigidBodyHandle,
 }

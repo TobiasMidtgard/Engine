@@ -350,6 +350,10 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         let lookup = |x: Entity| world_pose(world, x).map(|t| (t.translation, t.rotation));
         sim.create_joint(e, &lookup, &graph);
     }
+    if !sim.rehang.is_empty() {
+        let graph = sim.joint_graph();
+        sim.hang_loads(&graph);
+    }
 
     // ---------------------------------------------------------------- characters
     for e in q.changed_characters.iter(world).collect::<Vec<_>>() {
