@@ -37,14 +37,13 @@ use crate::mesh_feature::MeshInstance;
 use crate::renderer::layout_entry;
 use crate::settings::RenderSettings;
 use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
+use crate::virtual_texture::system::{feedback_writes, mesh_shadow_source, mesh_source};
 
 const CLUSTER_TYPES: &str = include_str!("../shaders/cluster_types.wgsl");
 const CLUSTER_CULL: &str = include_str!("../shaders/cluster_cull.wgsl");
 const CLUSTER_FETCH: &str = include_str!("../shaders/cluster_fetch.wgsl");
 const CLUSTER_SCENE: &str = include_str!("../shaders/cluster.wgsl");
 const CLUSTER_SHADOW: &str = include_str!("../shaders/cluster_shadow.wgsl");
-const MESH: &str = include_str!("../shaders/mesh.wgsl");
-const MESH_SHADOW: &str = include_str!("../shaders/mesh_shadow.wgsl");
 
 /// Views culled every frame: the camera (0), the shadow cascades (1..=MAX_CASCADES), the sky
 /// occlusion map (`1 + SKY_OCCLUSION_VIEW`) and the far shadow map
@@ -333,6 +332,13 @@ struct Readback {
 /// Composed sources of the cluster shaders, before `compose_shader`: (label, source, whether
 /// they need the frame library). For shader validation.
 pub fn shader_sources() -> [(&'static str, String, bool); 3] {
+    shader_sources_for(true)
+}
+
+/// [`shader_sources`] with virtual texture feedback writes on or compiled out.
+pub fn shader_sources_for(feedback_writes: bool) -> [(&'static str, String, bool); 3] {
+    let mesh = mesh_source(feedback_writes);
+    let mesh_shadow = mesh_shadow_source(feedback_writes);
     [
         (
             "cluster_cull",
@@ -341,12 +347,18 @@ pub fn shader_sources() -> [(&'static str, String, bool); 3] {
         ),
         (
             "cluster",
-            [MESH, CLUSTER_TYPES, CLUSTER_FETCH, CLUSTER_SCENE].join("\n"),
+            [mesh.as_str(), CLUSTER_TYPES, CLUSTER_FETCH, CLUSTER_SCENE].join("\n"),
             true,
         ),
         (
             "cluster_shadow",
-            [MESH_SHADOW, CLUSTER_TYPES, CLUSTER_FETCH, CLUSTER_SHADOW].join("\n"),
+            [
+                mesh_shadow.as_str(),
+                CLUSTER_TYPES,
+                CLUSTER_FETCH,
+                CLUSTER_SHADOW,
+            ]
+            .join("\n"),
             false,
         ),
     ]
@@ -453,7 +465,7 @@ impl ClusterRenderer {
                 .collect::<Vec<_>>(),
         });
 
-        let [cull_source, scene_source, shadow_source] = shader_sources();
+        let [cull_source, scene_source, shadow_source] = shader_sources_for(feedback_writes(gpu));
         let cull_shader = gpu.shader("cluster cull", &cull_source.1, false);
         let with_dispatch = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("cluster cull"),

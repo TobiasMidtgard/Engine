@@ -29,6 +29,12 @@
 //! Dense opaque meshes (at least `RenderSettings::virtual_geometry_min_triangles`) are drawn
 //! as clusters by [`ClusterRenderer`] once their cluster hierarchy is built, with the same
 //! materials, texture sets and shading (see [`crate::virtual_geometry`]).
+//!
+//! Virtual textures: a slot whose image is over `RenderSettings::virtual_texture_threshold`, or
+//! was registered with [`crate::VirtualTextures`], is streamed tile by tile through the cache
+//! of [`VirtualTextureSystem`] instead of being uploaded whole. Its texture set binds the
+//! default texture in that slot and the material names the virtual texture in its flags; the
+//! cache, page tables and feedback buffer are bindings 7-11 of every texture set.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -52,6 +58,10 @@ use crate::settings::RenderSettings;
 use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use crate::texture::Image;
 use crate::virtual_geometry::{ClusterInstance, ClusterRenderer, FAR_SHADOW_CLUSTERS};
+use crate::virtual_texture::system::{
+    VirtualTextureSystem, feedback_writes, mesh_shadow_source, mesh_source,
+};
+use crate::virtual_texture::{VirtualTextureStats, VirtualTextures};
 
 /// Per-instance vertex data (locations 4–10 in `mesh.wgsl`, plus 11–13 for the previous
 /// matrix in the mesh feature's own pipelines).
@@ -168,6 +178,9 @@ enum Bound {
     Image(u64),
     /// A map of a generated preset: the generated set's id.
     Generated(u64),
+    /// A virtual texture: its id in the virtual texture cache (the slot binds the default
+    /// texture).
+    Virtual(u8),
 }
 
 /// Which images (by index) and which preset (at which size) a texture set binds.
@@ -179,6 +192,8 @@ struct TextureSet {
     key: TextureSetKey,
     /// What is actually bound per slot; `None` = default texture (no image, or not loaded yet).
     bound: [Option<Bound>; TEXTURE_SLOTS],
+    /// `VirtualTextureSystem::bind_generation` it was built with.
+    vt_generation: u64,
     last_used: u64,
 }
 
@@ -201,6 +216,23 @@ impl TextureSet {
             .enumerate()
             .filter(|(_, b)| b.is_some())
             .fold(0, |f, (i, _)| f | (TEXTURE_FLAG_BASE << i))
+    }
+
+    /// Virtual texture ids per slot, packed as `GpuMaterial::flags[1]` (slots 0-3) and
+    /// `flags[2]` (slots 4-5), 8 bits each.
+    fn virtual_ids(&self) -> (u32, u32) {
+        let mut words = (0u32, 0u32);
+        for (slot, b) in self.bound.iter().enumerate() {
+            if let Some(Bound::Virtual(id)) = b {
+                let shift = (slot as u32 % 4) * 8;
+                if slot < 4 {
+                    words.0 |= (*id as u32) << shift;
+                } else {
+                    words.1 |= (*id as u32) << shift;
+                }
+            }
+        }
+        words
     }
 }
 
@@ -293,6 +325,8 @@ pub struct MeshFeature {
     clusters: Option<ClusterRenderer>,
     /// Meshes drawn as clusters this frame.
     clustered: HashSet<u32>,
+    /// Streamed virtual textures.
+    vt: Option<VirtualTextureSystem>,
     stats: FeatureStats,
 }
 
@@ -345,21 +379,23 @@ impl MeshFeature {
         gpu: &GpuShared,
         handle: u32,
         material: &StandardMaterial,
-        images: Option<&Assets<Image>>,
-        preset_size: u32,
+        sources: &TextureSources,
     ) -> (u32, u32) {
         if let Some(v) = self.material_index.get(&handle) {
             return *v;
         }
-        let textures = self.texture_set_for(gpu, material, images, preset_size);
+        let textures = self.texture_set_for(gpu, material, sources);
         let mut gpu_material = material.to_gpu();
         // Only claim the slots that have a real image bound (others may still load).
-        let bound = self
+        let set = self
             .texture_sets
             .get(textures as usize)
-            .and_then(Option::as_ref)
-            .map_or(0, TextureSet::flags);
+            .and_then(Option::as_ref);
+        let bound = set.map_or(0, TextureSet::flags);
+        let (vt_low, vt_high) = set.map_or((0, 0), TextureSet::virtual_ids);
         gpu_material.flags[0] = (gpu_material.flags[0] & !TEXTURE_FLAGS) | bound;
+        gpu_material.flags[1] = vt_low;
+        gpu_material.flags[2] = vt_high;
         let slot = self.material_data.len() as u32;
         self.material_data.push(gpu_material);
         self.material_index.insert(handle, (slot, textures));
@@ -389,9 +425,14 @@ impl MeshFeature {
         &mut self,
         gpu: &GpuShared,
         material: &StandardMaterial,
-        images: Option<&Assets<Image>>,
-        preset_size: u32,
+        sources: &TextureSources,
     ) -> u32 {
+        let TextureSources {
+            images,
+            registry,
+            settings,
+        } = *sources;
+        let preset_size = settings.material_texture_size;
         let mut handles = material.textures();
         if handles.iter().all(Option::is_none) && material.preset.is_none() {
             return 0;
@@ -424,6 +465,18 @@ impl MeshFeature {
             let Some(images) = images else {
                 continue;
             };
+            // Streamed: drawn through the virtual texture cache once its root tile is in.
+            if let Some(vt) = &mut self.vt {
+                if let Some(id) =
+                    vt.texture_for(images, registry, *handle, COLOR_SLOT[slot], settings)
+                {
+                    bound[slot] = Some(Bound::Virtual(id));
+                    continue;
+                }
+                if vt.is_pending_image(images, registry, *handle, settings) {
+                    continue;
+                }
+            }
             if let Some(texture) = gpu.image_texture(images, *handle, COLOR_SLOT[slot]) {
                 bound[slot] = Some(Bound::Image(texture.id));
                 textures[slot] = Some(texture);
@@ -440,11 +493,12 @@ impl MeshFeature {
                 id
             }
         };
+        let vt_generation = self.vt.as_ref().map_or(0, |v| v.bind_generation());
         let needs_build = self
             .texture_sets
             .get(id as usize)
             .and_then(Option::as_ref)
-            .is_none_or(|s| s.bound != bound);
+            .is_none_or(|s| s.bound != bound || s.vt_generation != vt_generation);
         if needs_build {
             let views: [&wgpu::TextureView; TEXTURE_SLOTS] = std::array::from_fn(|slot| {
                 match bound[slot] {
@@ -452,14 +506,16 @@ impl MeshFeature {
                     Some(Bound::Generated(_)) => {
                         generated.as_deref().and_then(|g| preset_map(g, slot))
                     }
-                    None => None,
+                    Some(Bound::Virtual(_)) | None => None,
                 }
                 .unwrap_or(&self.default_textures[slot].1)
             });
-            let (Some(layout), Some(sampler)) = (&self.texture_layout, &self.sampler) else {
+            let (Some(layout), Some(sampler), Some(vt)) =
+                (&self.texture_layout, &self.sampler, &self.vt)
+            else {
                 return 0;
             };
-            let group = create_texture_group(&gpu.device, layout, sampler, views);
+            let group = create_texture_group(&gpu.device, layout, sampler, views, vt);
             if self.texture_sets.len() <= id as usize {
                 self.texture_sets.resize_with(id as usize + 1, || None);
             }
@@ -467,6 +523,7 @@ impl MeshFeature {
                 group,
                 key,
                 bound,
+                vt_generation,
                 last_used: self.frame,
             });
         } else if let Some(Some(set)) = self.texture_sets.get_mut(id as usize) {
@@ -487,6 +544,29 @@ impl MeshFeature {
                 self.texture_set_ids.remove(&set.key);
                 self.free_set_ids.push(id as u32);
             }
+        }
+    }
+
+    /// (Re)build texture set 0, the default set of untextured materials.
+    fn build_default_set(&mut self, device: &wgpu::Device) {
+        let (Some(layout), Some(sampler), Some(vt)) =
+            (&self.texture_layout, &self.sampler, &self.vt)
+        else {
+            return;
+        };
+        let views: [&wgpu::TextureView; TEXTURE_SLOTS] =
+            std::array::from_fn(|slot| &self.default_textures[slot].1);
+        let group = create_texture_group(device, layout, sampler, views, vt);
+        let set = TextureSet {
+            group,
+            key: ([None; TEXTURE_SLOTS], None),
+            bound: [None; TEXTURE_SLOTS],
+            vt_generation: vt.bind_generation(),
+            last_used: 0,
+        };
+        match self.texture_sets.first_mut() {
+            Some(first) => *first = Some(set),
+            None => self.texture_sets.push(Some(set)),
         }
     }
 
@@ -567,11 +647,23 @@ fn texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+/// Where a frame's materials get their textures.
+#[derive(Clone, Copy)]
+struct TextureSources<'a> {
+    images: Option<&'a Assets<Image>>,
+    registry: Option<&'a VirtualTextures>,
+    settings: &'a RenderSettings,
+}
+
+/// First binding of the virtual texture bindings in group 2.
+const VT_FIRST_BINDING: u32 = TEXTURE_SLOTS as u32 + 1;
+
 fn create_texture_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
     views: [&wgpu::TextureView; TEXTURE_SLOTS],
+    vt: &VirtualTextureSystem,
 ) -> wgpu::BindGroup {
     let mut entries: Vec<wgpu::BindGroupEntry> = views
         .iter()
@@ -585,6 +677,7 @@ fn create_texture_group(
         binding: TEXTURE_SLOTS as u32,
         resource: wgpu::BindingResource::Sampler(sampler),
     });
+    entries.extend(vt.bind_entries(VT_FIRST_BINDING));
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("mesh textures"),
         layout,
@@ -621,6 +714,11 @@ impl RenderFeature for MeshFeature {
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
             count: None,
         });
+        let feedback_writes = feedback_writes(gpu);
+        texture_entries.extend(VirtualTextureSystem::layout_entries(
+            VT_FIRST_BINDING,
+            feedback_writes,
+        ));
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mesh textures"),
             entries: &texture_entries,
@@ -646,7 +744,7 @@ impl RenderFeature for MeshFeature {
             })
             .collect();
 
-        let shader = gpu.shader("mesh", include_str!("shaders/mesh.wgsl"), true);
+        let shader = gpu.shader("mesh", &mesh_source(feedback_writes), true);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh"),
             bind_group_layouts: &[
@@ -738,11 +836,7 @@ impl RenderFeature for MeshFeature {
             })
             .collect();
 
-        let shadow_shader = gpu.shader(
-            "mesh shadow",
-            include_str!("shaders/mesh_shadow.wgsl"),
-            false,
-        );
+        let shadow_shader = gpu.shader("mesh shadow", &mesh_shadow_source(feedback_writes), false);
         let shadow_primitive = wgpu::PrimitiveState {
             cull_mode: None,
             unclipped_depth: gpu.features.contains(wgpu::Features::DEPTH_CLIP_CONTROL),
@@ -816,23 +910,17 @@ impl RenderFeature for MeshFeature {
             1024 * std::mem::size_of::<MeshInstance>() as u64,
         ));
 
-        // Texture set 0: the shared default set for untextured materials.
-        let default_views: [&wgpu::TextureView; TEXTURE_SLOTS] =
-            std::array::from_fn(|slot| &self.default_textures[slot].1);
-        let default_group = create_texture_group(device, &texture_layout, &sampler, default_views);
-        self.texture_sets = vec![Some(TextureSet {
-            group: default_group,
-            key: ([None; TEXTURE_SLOTS], None),
-            bound: [None; TEXTURE_SLOTS],
-            last_used: 0,
-        })];
-        self.texture_set_ids.clear();
-        self.free_set_ids.clear();
         self.clusters = Some(ClusterRenderer::new(gpu, &material_layout, &texture_layout));
         self.material_layout = Some(material_layout);
         self.texture_layout = Some(texture_layout);
         self.sampler = Some(sampler);
         self.material_group = None;
+        self.vt = Some(VirtualTextureSystem::new(gpu));
+        // Texture set 0: the shared default set for untextured materials.
+        self.texture_sets.clear();
+        self.texture_set_ids.clear();
+        self.free_set_ids.clear();
+        self.build_default_set(device);
     }
 
     fn prepare(
@@ -845,10 +933,26 @@ impl RenderFeature for MeshFeature {
         if self.pipelines.is_empty() {
             return;
         }
-        let preset_size = settings.material_texture_size;
         self.frame += 1;
         if let Some(clusters) = &mut self.clusters {
             clusters.begin_frame(gpu);
+        }
+        // Virtual textures: feedback in, tiles loaded and uploaded, tables written. Texture
+        // sets are rebuilt when the cache's bindings changed.
+        if let Some(vt) = &mut self.vt {
+            vt.begin_frame(gpu, settings);
+            let generation = vt.bind_generation();
+            if let Some(stats) = world.get_resource_mut::<VirtualTextureStats>() {
+                stats.into_inner().clone_from(vt.stats());
+            }
+            if self
+                .texture_sets
+                .first()
+                .and_then(Option::as_ref)
+                .is_some_and(|s| s.vt_generation != generation)
+            {
+                self.build_default_set(&gpu.device);
+            }
         }
         self.clustered.clear();
         let mut query = self
@@ -861,7 +965,11 @@ impl RenderFeature for MeshFeature {
             return;
         };
         let material_assets = world_ref.get_resource::<Assets<StandardMaterial>>();
-        let image_assets = world_ref.get_resource::<Assets<Image>>();
+        let sources = TextureSources {
+            images: world_ref.get_resource::<Assets<Image>>(),
+            registry: world_ref.get_resource::<VirtualTextures>(),
+            settings,
+        };
         let default_material = StandardMaterial::default();
 
         self.items.clear();
@@ -914,13 +1022,8 @@ impl RenderFeature for MeshFeature {
                         continue;
                     }
                 }
-                let (material_slot, textures) = self.material_slot(
-                    gpu,
-                    material_handle.index(),
-                    material,
-                    image_assets,
-                    preset_size,
-                );
+                let (material_slot, textures) =
+                    self.material_slot(gpu, material_handle.index(), material, &sources);
                 let prev_gt = match self.previous.insert(entity, (*gt, frame)) {
                     Some((prev, seen)) if seen + 1 == frame => prev,
                     _ => *gt,
@@ -969,13 +1072,8 @@ impl RenderFeature for MeshFeature {
                 culled += 1;
                 continue;
             }
-            let (material_slot, textures) = self.material_slot(
-                gpu,
-                material_handle.index(),
-                material,
-                image_assets,
-                preset_size,
-            );
+            let (material_slot, textures) =
+                self.material_slot(gpu, material_handle.index(), material, &sources);
             let model = gt.matrix_relative_to(view.origin);
             let prev_gt = match self.previous.insert(entity, (*gt, frame)) {
                 Some((prev, seen)) if seen + 1 == frame => prev,
@@ -1189,6 +1287,9 @@ impl RenderFeature for MeshFeature {
         if let Some(clusters) = &mut self.clusters {
             clusters.encode_culling(encoder);
         }
+        if let Some(vt) = &mut self.vt {
+            vt.encode(encoder);
+        }
     }
 
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
@@ -1262,6 +1363,7 @@ impl RenderFeature for MeshFeature {
             "shadow_batches": self.shadow.iter().map(|s| s.len()).collect::<Vec<_>>(),
             "far_shadow_batches": self.far_shadow.len(),
             "virtual_geometry": self.clusters.as_ref().map(ClusterRenderer::describe),
+            "virtual_textures": self.vt.as_ref().map(VirtualTextureSystem::describe),
         })
     }
 }

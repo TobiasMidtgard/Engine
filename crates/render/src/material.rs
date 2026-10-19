@@ -77,6 +77,41 @@ pub enum TextureMapping {
     /// Triplanar in world space: seamless across meshes split into pieces (terrain, cliffs
     /// built from several rocks, walls of many blocks), but stays put when the object moves.
     TriplanarWorld,
+    /// `projection` with anti-tiling: the texture is laid on a grid of hexagons, each showing it
+    /// at a random offset (and with `rotate`, a random rotation: for textures without a
+    /// direction, such as ground, moss or rock, not bark or planks), blended where they meet
+    /// with weights that follow the texture's brightness and a variance-preserving blend that
+    /// keeps its contrast. Only the detail is hex-tiled: the texture's slow variation (a darker
+    /// corner, an overall slope in the normal map) is evened out to its mean, so hexagons don't
+    /// show as light and dark patches. A texture repeated over a large surface then shows no
+    /// repeating pattern. Costs three samples per map instead of one (nine with triplanar), plus
+    /// three low-pass samples for the base color and the normal map.
+    AntiTiled {
+        projection: TextureProjection,
+        rotate: bool,
+    },
+}
+
+/// How [`TextureMapping::AntiTiled`] projects the texture before hex-tiling it (the plain
+/// mappings of the same names).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TextureProjection {
+    #[default]
+    Uv,
+    Triplanar,
+    TriplanarWorld,
+}
+
+impl TextureMapping {
+    /// The projection (anti-tiled or not).
+    pub fn projection(self) -> TextureProjection {
+        match self {
+            TextureMapping::Uv => TextureProjection::Uv,
+            TextureMapping::Triplanar => TextureProjection::Triplanar,
+            TextureMapping::TriplanarWorld => TextureProjection::TriplanarWorld,
+            TextureMapping::AntiTiled { projection, .. } => projection,
+        }
+    }
 }
 
 /// Physically based material (metallic/roughness workflow).
@@ -358,6 +393,13 @@ impl StandardMaterial {
         self.with_mapping(TextureMapping::TriplanarWorld)
     }
 
+    /// Anti-tiling on top of the current mapping (see [`TextureMapping::AntiTiled`]); `rotate`
+    /// also turns each hexagon, for textures without a direction.
+    pub fn with_anti_tiling(self, rotate: bool) -> Self {
+        let projection = self.mapping.projection();
+        self.with_mapping(TextureMapping::AntiTiled { projection, rotate })
+    }
+
     /// Add a height map (R channel) for parallax occlusion mapping, `depth` meters deep.
     pub fn with_height_texture(mut self, image: Handle<Image>, depth: f32) -> Self {
         self.height_texture = Some(image);
@@ -438,11 +480,17 @@ impl StandardMaterial {
         if self.detail_in_world {
             flags |= DETAIL_IN_WORLD_FLAG;
         }
-        flags |= match self.mapping {
-            TextureMapping::Uv => 0,
-            TextureMapping::Triplanar => 1,
-            TextureMapping::TriplanarWorld => 2,
+        flags |= match self.mapping.projection() {
+            TextureProjection::Uv => 0,
+            TextureProjection::Triplanar => 1,
+            TextureProjection::TriplanarWorld => 2,
         } << MAPPING_SHIFT;
+        if let TextureMapping::AntiTiled { rotate, .. } = self.mapping {
+            flags |= ANTI_TILING_FLAG;
+            if rotate {
+                flags |= ANTI_TILING_ROTATE_FLAG;
+            }
+        }
         if self.parallax_shadows {
             flags |= PARALLAX_SHADOWS_FLAG;
         }
@@ -512,6 +560,10 @@ pub const DETAIL_IN_WORLD_FLAG: u32 = 1 << 13;
 pub const MAPPING_SHIFT: u32 = 14;
 /// `GpuMaterial::flags[0]` bit: parallax self-shadowing toward the sun.
 pub const PARALLAX_SHADOWS_FLAG: u32 = 1 << 16;
+/// `GpuMaterial::flags[0]` bit: hex-tiled ([`TextureMapping::AntiTiled`]).
+pub const ANTI_TILING_FLAG: u32 = 1 << 17;
+/// `GpuMaterial::flags[0]` bit: each hexagon also turned.
+pub const ANTI_TILING_ROTATE_FLAG: u32 = 1 << 18;
 /// Exponent sharpening the triplanar blend weights (higher = narrower transitions).
 const TRIPLANAR_SHARPNESS: f32 = 6.0;
 
