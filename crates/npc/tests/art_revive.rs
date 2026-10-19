@@ -1,0 +1,468 @@
+//! A captioned render strip of a downed fighter, before and after squad revives: whole NPCs
+//! with their AI. Before (the old showcase timer, nobody coming): it lies there six seconds
+//! and is sent home whole. After: a squad mate runs in, kneels beside it, sets its carbine
+//! down, puts its hands on the chest and looks up at the enemy now and then, and the ally gets
+//! up where it lay. Needs a GPU or a software Vulkan driver (lavapipe) for the pictures (the
+//! behaviour is checked either way).
+//!
+//! The strip lands in the test's temp dir as `fighters-revive-before-after.png`; set
+//! `NPC_SCREENSHOT_DIR` to also copy it there.
+
+use engine_core::prelude::*;
+use engine_core::time::TimeSource;
+use engine_npc::visuals::{Part, StandInPart};
+use engine_npc::*;
+use engine_render::prelude::*;
+use engine_render::{RenderDisabled, capture_now};
+use engine_world::locomotion::LocomotionState;
+use engine_world::{DamageEvent, DamageKind, WorldPlugin};
+
+/// One picture of the strip, and the band over it for its caption.
+const TILE_W: u32 = 400;
+const TILE_H: u32 = 340;
+const BAND: u32 = 30;
+/// The simulation step between pictures (s).
+const STEP: f64 = 1.0 / 30.0;
+
+fn app() -> App {
+    let mut app = App::new();
+    app.world.resource_mut::<EngineConfig>().headless = true;
+    {
+        let mut win = app.world.resource_mut::<Window>();
+        win.width = TILE_W;
+        win.height = TILE_H;
+    }
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual { step_secs: STEP });
+    app.add_plugins((WorldPlugin, RenderPlugin, NpcPlugin));
+    // The showcase timer the demos use.
+    app.world.resource_mut::<NpcSettings>().revive_secs = 6.0;
+    app.world.spawn((
+        DirectionalLight {
+            illuminance: 90_000.0,
+            ..Default::default()
+        },
+        Transform::default().looking_at(DVec3::new(-0.6, -0.6, 0.55), Vec3::Y),
+    ));
+    app.world.spawn((
+        Transform::default(),
+        MeshRenderer::new(
+            Shape::Plane {
+                size: [400.0, 400.0],
+                subdivisions: 1,
+            },
+            StandardMaterial::hex(0x8c7a5b).with_roughness(0.95),
+        ),
+    ));
+    app
+}
+
+/// A fighter with a carbine at `at`, facing −Z (in squad 4 when `squad`).
+fn fighter(app: &mut App, at: DVec3, squad: bool, skills: NpcSkills, home: DVec3) -> Entity {
+    let mut t = Transform::from_translation(at);
+    t.look_to(Vec3::NEG_Z, Vec3::Y);
+    let mut e = app.world.spawn((
+        t,
+        Npc {
+            home: Some(home),
+            ..Default::default()
+        },
+        Faction::ENEMY,
+        skills,
+        NpcWeapon::rifle(),
+        StandIn {
+            color: None,
+            plain: false,
+        },
+    ));
+    if squad {
+        e.insert(Squad(4));
+    }
+    e.id()
+}
+
+fn camera(app: &mut App, eye: DVec3, target: DVec3, fov: f32) -> Entity {
+    app.world
+        .spawn((
+            Camera {
+                active: false,
+                ..Camera::perspective(fov)
+            },
+            Transform::from_translation(eye).looking_at(target, Vec3::Y),
+        ))
+        .id()
+}
+
+fn use_camera(app: &mut App, cam: Entity) {
+    let mut q = app.world.query::<(Entity, &mut Camera)>();
+    for (e, mut c) in q.iter_mut(&mut app.world) {
+        c.active = e == cam;
+    }
+}
+
+/// A picture through `cam` with the clocks stopped (then back to looking at nothing).
+fn shoot(app: &mut App, cam: Entity, away: Entity, name: &str) -> Option<image::RgbaImage> {
+    if app.world.get_resource::<RenderDisabled>().is_some() {
+        return None;
+    }
+    use_camera(app, cam);
+    let time = |app: &mut App, step_secs: f64| {
+        app.world
+            .resource_mut::<Time>()
+            .set_source(TimeSource::Manual { step_secs })
+    };
+    time(app, 0.0);
+    app.update_n(3);
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    capture_now(&mut app.world, &path).expect("screenshot");
+    time(app, STEP);
+    use_camera(app, away);
+    Some(image::open(&path).expect("png").to_rgba8())
+}
+
+fn hit(app: &mut App, e: Entity, amount: f32) {
+    let at = app.world.get::<Transform>(e).unwrap().translation;
+    app.world.write_message(DamageEvent {
+        target: e,
+        amount,
+        kind: DamageKind::Ballistic,
+        point: at + DVec3::Y * 1.2,
+        impulse: Vec3::Z * 10.0,
+        source: None,
+    });
+}
+
+fn at(app: &App, e: Entity) -> DVec3 {
+    app.world.get::<Transform>(e).unwrap().translation
+}
+
+fn downed(app: &App, e: Entity) -> bool {
+    app.world.get::<NpcVitals>(e).unwrap().downed
+}
+
+/// The pictures by row, each with its caption.
+type Pictures = [[Option<(String, Option<image::RgbaImage>)>; 7]; 2];
+
+/// Where a part of `e`'s stand-in is (world), and which way it faces.
+fn part(app: &App, e: Entity, which: Part) -> Option<(DVec3, Vec3)> {
+    let owner = *app.world.get::<Transform>(e)?;
+    let children: Vec<Entity> = app.world.get::<Children>(e)?.iter().collect();
+    children.into_iter().find_map(|c| {
+        let p = app.world.get::<StandInPart>(c)?;
+        if p.part != which {
+            return None;
+        }
+        let t = app.world.get::<Transform>(c)?;
+        let pos = owner.translation + (owner.rotation * t.translation.as_vec3()).as_dvec3();
+        Some((pos, owner.rotation * t.rotation * Vec3::NEG_Z))
+    })
+}
+
+#[test]
+fn fighters_revive_before_and_after() {
+    let mut app = app();
+    // Before: no squad, nobody comes (the old showcase timer: six seconds, then home whole).
+    let a0 = DVec3::new(-150.0, 0.0, 0.0);
+    let home = a0 + DVec3::new(40.0, 0.0, 30.0);
+    let lone = fighter(&mut app, a0, false, NpcSkills::soldier(), home);
+    let by = a0 + DVec3::new(-3.0, 0.0, 2.5);
+    fighter(&mut app, by, false, NpcSkills::rookie(), by);
+    // After: a rookie squad mate (it runs straight in, though the enemy sees the spot).
+    let b0 = DVec3::new(150.0, 0.0, 0.0);
+    let ally = fighter(&mut app, b0, true, NpcSkills::soldier(), b0);
+    let mate_at = b0 + DVec3::new(-4.0, 0.0, 2.5);
+    let mate = fighter(&mut app, mate_at, true, NpcSkills::rookie(), mate_at);
+    let mut enemy = Transform::from_translation(b0 + DVec3::new(4.0, 0.0, -16.0));
+    enemy.look_to(Vec3::Z, Vec3::Y);
+    app.world
+        .spawn((enemy, Faction::PLAYER, LocomotionState::default()));
+    let cam_home = camera(
+        &mut app,
+        home + DVec3::new(2.4, 1.6, -2.6),
+        home + DVec3::new(0.0, 0.9, 0.0),
+        40.0,
+    );
+    let away = camera(
+        &mut app,
+        DVec3::new(0.0, 2.0, 300.0),
+        DVec3::new(0.0, 2.0, 600.0),
+        30.0,
+    );
+    use_camera(&mut app, away);
+    // They see the enemy first, then both go down (and land).
+    app.update_n((1.5 / STEP) as usize);
+    hit(&mut app, lone, 1000.0);
+    hit(&mut app, ally, 1000.0);
+    let mut t = 0.0f64;
+    while t < 0.5 {
+        app.update();
+        t += STEP;
+    }
+    assert!(downed(&app, lone) && downed(&app, ally));
+    let (lies_a, lies_b) = (at(&app, lone), at(&app, ally));
+    // The cameras: on each fallen fighter's chest (it falls back along +Z) from the front and
+    // its right, and on the home the lone one is sent to.
+    let chest_of = |app: &App, e: Entity| {
+        part(app, e, Part::Torso).map_or(at(app, e) + DVec3::new(0.0, 0.3, 0.7), |(p, _)| p)
+    };
+    let (chest_a, chest_b) = (chest_of(&app, lone), chest_of(&app, ally));
+    let view = |app: &mut App, chest: DVec3| {
+        camera(
+            app,
+            chest + DVec3::new(2.3, 1.3, -1.9),
+            chest + DVec3::new(-0.35, 0.15, 0.05),
+            40.0,
+        )
+    };
+    let cam_a = view(&mut app, chest_a);
+    let cam_b = view(&mut app, chest_b);
+
+    let mut pictures: Pictures = Default::default();
+    let shot = |app: &mut App, pictures: &mut Pictures, (row, n): (usize, usize), cam, caption| {
+        let name = format!("revive_{row}_{n}.png");
+        let img = shoot(app, cam, away, &name);
+        pictures[row][n] = Some((caption, img));
+    };
+    let (mut up_at, mut glanced, mut set_down, mut sent_home) = (None, false, false, false);
+    let (mut up_from, mut up_health, mut home_at) = (DVec3::ZERO, 0.0, None);
+    let before = [0.6, 1.5, 3.0, 4.5, 5.9];
+    while t < 14.0 {
+        app.update();
+        t += STEP;
+        // Before: lying there until the timer sends it home.
+        for (n, &when) in before.iter().enumerate() {
+            if pictures[0][n].is_none() && t >= when {
+                assert!(downed(&app, lone), "the lone fighter got up at {t:.1} s");
+                let what = match n {
+                    0 => "BEFORE: SHOT DOWN".to_string(),
+                    1 => format!("{when:.1} S: A MATE STANDS BY"),
+                    _ => format!("{when:.1} S: STILL DOWN"),
+                };
+                shot(&mut app, &mut pictures, (0, n), cam_a, what);
+            }
+        }
+        if home_at.is_none() && !downed(&app, lone) {
+            home_at = Some(t);
+            sent_home = at(&app, lone).distance(home) < 0.5;
+            assert!(t >= 5.95, "the lone fighter was up after {t:.1} s");
+        }
+        if let Some(gone) = home_at {
+            if pictures[0][5].is_none() && t >= gone + 0.3 {
+                let what = format!("{t:.1} S: GONE FROM THE SPOT");
+                shot(&mut app, &mut pictures, (0, 5), cam_a, what);
+            }
+            if pictures[0][6].is_none() && t >= gone + 1.8 {
+                let what = "SENT HOME, WHOLE".to_string();
+                shot(&mut app, &mut pictures, (0, 6), cam_home, what);
+            }
+        }
+        // After: the mate runs in, kneels, sets the carbine down, hands on, looks up; the ally
+        // gets up where it lay.
+        let (action, progress) = {
+            let b = app.world.get::<NpcBrain>(mate).unwrap();
+            (b.action, b.revive_progress)
+        };
+        let near = at(&app, mate).distance(chest_b);
+        let kneeling = action == NpcAction::Revive && progress > 0.0;
+        if pictures[1][0].is_none() && t >= 0.6 {
+            shot(
+                &mut app,
+                &mut pictures,
+                (1, 0),
+                cam_b,
+                "AFTER: SHOT DOWN".into(),
+            );
+        }
+        if pictures[1][1].is_none() && action == NpcAction::Revive && !kneeling && near < 2.4 {
+            shot(
+                &mut app,
+                &mut pictures,
+                (1, 1),
+                cam_b,
+                format!("{t:.1} S: A MATE RUNS IN"),
+            );
+        }
+        if pictures[1][2].is_none() && kneeling && progress >= 0.75 {
+            shot(
+                &mut app,
+                &mut pictures,
+                (1, 2),
+                cam_b,
+                format!("{t:.1} S: KNEELS, SETS IT DOWN"),
+            );
+        }
+        let head = part(&app, mate, Part::Head);
+        let looks_up = head.is_some_and(|(_, f)| f.y > -0.2);
+        if kneeling && progress >= 1.3 {
+            // The carbine on the ground beside it.
+            if let Some((w, _)) = part(&app, mate, Part::Weapon) {
+                set_down |= w.y < 0.12;
+            }
+            if pictures[1][3].is_none() && !looks_up {
+                shot(
+                    &mut app,
+                    &mut pictures,
+                    (1, 3),
+                    cam_b,
+                    format!("{t:.1} S: HANDS ON THE CHEST"),
+                );
+            }
+            if pictures[1][4].is_none() && looks_up {
+                glanced = true;
+                shot(
+                    &mut app,
+                    &mut pictures,
+                    (1, 4),
+                    cam_b,
+                    format!("{t:.1} S: LOOKS UP AT THE ENEMY"),
+                );
+            }
+        }
+        if up_at.is_none() && !downed(&app, ally) {
+            up_at = Some(t);
+            up_from = at(&app, ally);
+            up_health = app.world.get::<NpcVitals>(ally).unwrap().fraction();
+        }
+        if let Some(up) = up_at {
+            if pictures[1][5].is_none() && t >= up + 0.6 {
+                shot(
+                    &mut app,
+                    &mut pictures,
+                    (1, 5),
+                    cam_b,
+                    format!("{t:.1} S: UP WHERE IT LAY"),
+                );
+            }
+            if pictures[1][6].is_none() && t >= up + 1.7 {
+                shot(
+                    &mut app,
+                    &mut pictures,
+                    (1, 6),
+                    cam_b,
+                    format!("{t:.1} S: BOTH UP, ARMED"),
+                );
+            }
+        }
+        if pictures.iter().flatten().all(Option::is_some) {
+            break;
+        }
+    }
+    // The behaviour, before and after.
+    assert!(sent_home, "the lone fighter was not sent home");
+    assert!(lies_a.distance(home) > 10.0);
+    let up = up_at.expect("the squad mate never revived its ally");
+    assert!(up < 6.0, "revived after {up:.1} s (the timer's 6 s)");
+    assert_eq!(app.world.get::<NpcCombat>(mate).unwrap().stats.revives, 1);
+    let moved = up_from.distance(lies_b);
+    assert!(
+        moved < 0.05,
+        "the ally got up {moved:.2} m from where it lay"
+    );
+    let ally_health = app.world.resource::<NpcSettings>().ally_revive_health;
+    assert!(
+        (up_health - ally_health).abs() < 0.01,
+        "up with {up_health:.2} of its health"
+    );
+    if part(&app, mate, Part::Head).is_some() {
+        assert!(glanced, "the reviver never looked up from the chest");
+        assert!(set_down, "the reviver kept its carbine in hand");
+    }
+    if app.world.get_resource::<RenderDisabled>().is_some() {
+        eprintln!("skipping the pictures: no GPU");
+        return;
+    }
+    // The strip: before over after, each picture captioned.
+    let mut strip = image::RgbaImage::from_pixel(
+        TILE_W * 7,
+        (TILE_H + BAND) * 2,
+        image::Rgba([24, 24, 28, 255]),
+    );
+    for (row, frames) in pictures.iter().enumerate() {
+        for (n, frame) in frames.iter().enumerate() {
+            let (caption, img) = frame.as_ref().expect("a picture was never taken");
+            let (x, y) = (TILE_W * n as u32, (TILE_H + BAND) * row as u32);
+            if let Some(img) = img {
+                image::imageops::replace(&mut strip, img, i64::from(x), i64::from(y + BAND));
+            }
+            write(&mut strip, x + 10, y + 8, caption);
+        }
+    }
+    let name = "fighters-revive-before-after.png";
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    strip.save(&path).expect("save the strip");
+    if let Ok(dir) = std::env::var("NPC_SCREENSHOT_DIR") {
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::copy(&path, std::path::Path::new(&dir).join(name)).expect("copy the strip");
+    }
+    eprintln!("wrote {}", path.display());
+}
+
+/// Write `text` (capitals, digits and a little punctuation) in a 5×7 pixel font at twice its
+/// size, from its top left at (`x`, `y`).
+fn write(img: &mut image::RgbaImage, x: u32, y: u32, text: &str) {
+    let ink = image::Rgba([240, 236, 220, 255]);
+    for (i, c) in text.chars().enumerate() {
+        for (row, bits) in glyph(c).into_iter().enumerate() {
+            for col in 0..5 {
+                if bits & (0b10000 >> col) == 0 {
+                    continue;
+                }
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let px = x + i as u32 * 12 + col * 2 + dx;
+                    let py = y + row as u32 * 2 + dy;
+                    if px < img.width() && py < img.height() {
+                        img.put_pixel(px, py, ink);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A character's rows, top first, its five columns as the low five bits (leftmost highest).
+fn glyph(c: char) -> [u8; 7] {
+    match c {
+        'A' => [0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11],
+        'B' => [0x1e, 0x11, 0x11, 0x1e, 0x11, 0x11, 0x1e],
+        'C' => [0x0e, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0e],
+        'D' => [0x1e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1e],
+        'E' => [0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x1f],
+        'F' => [0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x10],
+        'G' => [0x0e, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0f],
+        'H' => [0x11, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11],
+        'I' => [0x0e, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0e],
+        'J' => [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0c],
+        'K' => [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
+        'L' => [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1f],
+        'M' => [0x11, 0x1b, 0x15, 0x15, 0x11, 0x11, 0x11],
+        'N' => [0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11],
+        'O' => [0x0e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e],
+        'P' => [0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10],
+        'Q' => [0x0e, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0d],
+        'R' => [0x1e, 0x11, 0x11, 0x1e, 0x14, 0x12, 0x11],
+        'S' => [0x0f, 0x10, 0x10, 0x0e, 0x01, 0x01, 0x1e],
+        'T' => [0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+        'U' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e],
+        'V' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x0a, 0x04],
+        'W' => [0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0a],
+        'X' => [0x11, 0x11, 0x0a, 0x04, 0x0a, 0x11, 0x11],
+        'Y' => [0x11, 0x11, 0x0a, 0x04, 0x04, 0x04, 0x04],
+        'Z' => [0x1f, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1f],
+        '0' => [0x0e, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0e],
+        '1' => [0x04, 0x0c, 0x04, 0x04, 0x04, 0x04, 0x0e],
+        '2' => [0x0e, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1f],
+        '3' => [0x1f, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0e],
+        '4' => [0x02, 0x06, 0x0a, 0x12, 0x1f, 0x02, 0x02],
+        '5' => [0x1f, 0x10, 0x1e, 0x01, 0x01, 0x11, 0x0e],
+        '6' => [0x06, 0x08, 0x10, 0x1e, 0x11, 0x11, 0x0e],
+        '7' => [0x1f, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
+        '8' => [0x0e, 0x11, 0x11, 0x0e, 0x11, 0x11, 0x0e],
+        '9' => [0x0e, 0x11, 0x11, 0x0f, 0x01, 0x02, 0x0c],
+        '.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x0c],
+        ',' => [0x00, 0x00, 0x00, 0x00, 0x0c, 0x04, 0x08],
+        ':' => [0x00, 0x0c, 0x0c, 0x00, 0x0c, 0x0c, 0x00],
+        '-' => [0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00],
+        _ => [0; 7],
+    }
+}

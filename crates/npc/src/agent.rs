@@ -321,10 +321,13 @@ pub enum NpcAction {
     Obey,
     /// Downed.
     Down,
+    /// Go to a downed squad mate, kneel beside it and get it back on its feet where it lies
+    /// (see `NpcSettings::ally_revive_secs`).
+    Revive,
 }
 
 impl NpcAction {
-    pub const ALL: [NpcAction; 12] = [
+    pub const ALL: [NpcAction; 13] = [
         NpcAction::Idle,
         NpcAction::Patrol,
         NpcAction::Investigate,
@@ -337,6 +340,7 @@ impl NpcAction {
         NpcAction::Retreat,
         NpcAction::Obey,
         NpcAction::Down,
+        NpcAction::Revive,
     ];
 
     pub fn name(self) -> &'static str {
@@ -353,6 +357,7 @@ impl NpcAction {
             NpcAction::Retreat => "retreat",
             NpcAction::Obey => "obey",
             NpcAction::Down => "down",
+            NpcAction::Revive => "revive",
         }
     }
 }
@@ -417,6 +422,18 @@ pub struct NpcBrain {
     pub in_cover: bool,
     /// The cover there is waist-high (crouch behind it).
     pub low_cover: bool,
+    /// The downed squad mate it is going to revive (with [`NpcAction::Revive`]).
+    pub revive: Option<Entity>,
+    /// Seconds it has knelt over that squad mate so far (its own clock); the squad mate gets
+    /// up when this reaches its revive time. Lost if the revive is broken off.
+    pub revive_progress: f32,
+    /// After breaking off a revive, it doesn't try one again before this time (NPC clock).
+    pub revive_retry: f64,
+    /// On the way to revive: the closest it has come to its kneeling spot (m), and how long it
+    /// has been on its way since it last got closer (s; not counting time spent defending).
+    /// One that stops getting closer gives up.
+    pub revive_closest: f32,
+    pub revive_stalled: f32,
 }
 
 impl NpcBrain {
@@ -495,6 +512,10 @@ pub struct CombatStats {
     pub reacted_too_late: u32,
     pub shots: u32,
     pub explosives_used: u32,
+    /// Downed squad mates it got back on their feet.
+    pub revives: u32,
+    /// Revives it broke off (hit, staggered, or the spot got too hot).
+    pub revives_aborted: u32,
 }
 
 /// Weapon and defense state.
@@ -547,8 +568,19 @@ pub struct NpcSettings {
     pub far_distance: f32,
     /// Show where each NPC is going and why (rings and lines in the world).
     pub show_intent: bool,
-    /// Downed NPCs get back up after this many seconds (0 = stay down). Demos use it.
+    /// Showcase fallback: downed NPCs get back up after this many seconds (0 = stay down).
+    /// The timer waits while a squad mate is reviving them. One with a standing squad mate
+    /// within `ally_revive_range` gets up where it lies with `ally_revive_health`; one with
+    /// nobody to revive it is sent back to its home at full health. Demos use it.
     pub revive_secs: f32,
+    /// Seconds a squad mate kneels over a downed NPC to get it back up where it lies (0 =
+    /// squad mates never revive). A reviver with teamwork 1 is a fifth quicker, one with 0 a
+    /// fifth slower.
+    pub ally_revive_secs: f32,
+    /// Share of its maximum health (0..1) an NPC gets up with after a squad mate revives it.
+    pub ally_revive_health: f32,
+    /// Squad mates farther than this from a downed NPC leave it be, meters.
+    pub ally_revive_range: f32,
 }
 
 impl Default for NpcSettings {
@@ -560,6 +592,9 @@ impl Default for NpcSettings {
             far_distance: 150.0,
             show_intent: false,
             revive_secs: 0.0,
+            ally_revive_secs: 2.0,
+            ally_revive_health: 0.4,
+            ally_revive_range: 20.0,
         }
     }
 }
