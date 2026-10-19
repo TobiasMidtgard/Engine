@@ -41,11 +41,18 @@ Deer and rabbits graze, wander with their herd, drink at the nearest water's edg
 night and bolt from anything inside their flight distance. That distance grows when the
 threat runs or attacks and shrinks a lot when it sneaks, so a crouching player gets close.
 Deer smell what's upwind. Panic spreads through a herd a moment after the first one bolts, and
-alert deer make the rest look up. Wolf packs roam, get hungry, track prey by scent, stalk low
-while spreading out around it, then charge, cut it off and bite; they feed on the kill and
-back away from people. Bird flocks peck on the ground and lift off together. Gunfire,
-explosions, howls and fire scare everything. `WildlifeSettings` tunes respawn, thirst, hunger,
-skittishness and howling.
+alert deer make the rest look up. Wild boar live in sounders (sows with their striped
+piglets, `Animal::young`) or alone (tuskers, `Animal::male`), root for food with the snout,
+shuffling on as they go, and are about at night. They run from threats like the rest, but a
+boar turns and charges when it is cornered (its flight finds no way out, or the threat is on
+top of it) or wounded, and a sow charges anyone who comes close to her piglets while they
+scatter; the charge ends in a slash of the tusks (damage), then the boar breaks off and runs
+for a moment before it may turn again. Wolf packs roam, get hungry, track prey by scent, stalk
+low while spreading out around it, then charge, cut it off and bite; they feed on the kill and
+back away from people. Wolves prefer deer, take a boar only when nothing easier is about (a
+piglet sooner, a tusker last of all) and give a charging boar room. Bird flocks peck on the
+ground and lift off together. Gunfire, explosions, howls and fire scare everything.
+`WildlifeSettings` tunes respawn, thirst, hunger, skittishness and howling.
 
 ## Bodies and art
 
@@ -71,20 +78,36 @@ first, then the head), glance at flankers and noises, blink, set the jaw for a h
 shout as it lands, grimace when hit and breathe hard when tired; badly hurt, they limp on the
 struck leg or hunch over a body wound and press a hand to it at ease. At ease the weapon rests
 on the shoulder or hangs low and comes to guard when a foe is spotted, and a revived fighter
-rolls over, kneels, takes up its weapon and stands into its guard. Animals plant their feet too (a
+rolls over, kneels, takes up its weapon and stands into its guard where it lay. A fighter
+reviving a mate goes down on both knees beside it. It sets its sword or carbine down on the
+ground; an archer or a shield bearer holds the bow or shield aside. It puts its hands on the
+chest and presses, and looks up at the enemy now and then. Then it takes its weapon up and
+stands. Animals plant their feet too (a
 test fails if a hoof or paw on the ground slides) in each species' footfalls: deer walk in
 lateral sequence, trot and gallop (rotary) and bound away when they bolt from a stand, wolves
-walk, trot, lope and gallop, rabbits hop and half-bound with the hind feet landing ahead of the
-fore feet. Strides lengthen and quicken with speed; the spine flexes and extends through the
-gallop, the body flies an arc when no foot is down, sits back setting off and pitches forward
-stopping, leans into turns and breathes harder after a run, and heads steady against the bob.
-Ears swivel toward noises and threats and flick, tails swish (a deer's flags up when alarmed),
-grazing deer tear the grass and look up to chew and watch, an alert animal throws its head up
-toward what it heard and freezes, and states blend into each other. Starlings beat their
-wings (extended downstroke, folded upstroke), bound on folded wings between bursts, glide,
-bank into turns, push off with their legs to take off and flare to land. With
+walk, trot, lope and gallop, boars walk, trot and gallop (transverse) on quick, short strides,
+rabbits hop and half-bound with the hind feet landing ahead of the fore feet. Strides lengthen
+and quicken with speed; deer, wolf and boar backs bend at the loin,
+arching as the hind feet swing up past the fore feet and hollowing as the legs stretch out
+through the gallop, the body flies an arc when no foot is down, sits back setting off and
+pitches forward stopping, leans into turns and breathes harder after a run, and heads steady
+against the bob. Ears swivel toward noises and threats and flick, tails swish (a deer's flags
+up when alarmed), grazing deer tear the grass and look up to chew and watch, an alert animal
+turns its head toward what it heard before its neck follows and freezes, and states blend
+into each other. A hunting wolf stalks low with its head on its prey, rushes from the stalk
+crouched, reaches with jaws open as it closes and snaps, grips and shakes on the bite. A
+rooting boar shoves its snout into the soil and levers it up, sweeping from side to side with
+the jaw working, and lifts its head now and then to scent the air; alarmed, it champs its
+jaws; it runs with its tail up, and charges head down to hook its tusks up and sideways
+through what it strikes. Hurt but not killed, an animal flinches: it jolts and rolls away
+from the blow, hunched and ducking, head jerking away, ears pinned flat and tail clamped, and
+staggers a step or two before it runs. A killed animal goes down forequarters first (onto its
+chest and knees on the run), then over onto its side away from the blow, and settles. Starlings beat their wings (extended
+downstroke, folded upstroke), bound on folded wings between bursts, glide, bank into turns,
+push off with their legs to take off and flare to land, and tumble out of the air when
+killed. With
 `NpcSettings::show_intent`, rings and lines on the ground show where each NPC is going and why
-(blue cover, orange flank, purple high ground, grey fall back, yellow search).
+(blue cover, orange flank, purple high ground, grey fall back, yellow search, teal revive).
 
 All art is generated in code (`src/art`), since no third-party art may go in the repository:
 
@@ -98,9 +121,12 @@ All art is generated in code (`src/art`), since no third-party art may go in the
   skeleton with two-bone IK for arms and legs poses them for every combat state. Each team
   shares one mesh per piece.
 - **Wildlife** (`art/animals.rs`): sculpted red deer (stags with antlers and a neck mane),
-  grey wolves and European rabbits, with fur textures that follow the coat, baked ambient
-  occlusion, IK legs and planted feet, and starlings with iridescent spotted plumage and
-  feathered wings that fold, spread and beat.
+  grey wolves, wild boar (a bristly dark coat with a mane along the spine, a wedge head with
+  the flat snout disc, small eyes and pricked ears, cloven trotters with dewclaws, curved
+  tusks on the tuskers, and a size down, pale-striped piglets) and European rabbits, with fur
+  textures that follow the coat, baked ambient occlusion, IK legs and planted feet, deer, wolf
+  and boar torsos in two halves that bend at the loin over a closed seam, and starlings with
+  iridescent spotted plumage and feathered wings that fold, spread and beat.
 - **Arena** (`art/arena.rs`): a sandstone amphitheater with arched stands, gates with
   portcullises, fluted columns, banners, braziers with flickering fire and light, rubble,
   timber barricades, crates and drums, all with baked PBR textures. The floor (`art/arena/
@@ -121,7 +147,7 @@ AI agents and tools reach NPCs through the engine's API registry (and so through
 | --- | --- |
 | `npc.list` | NPCs and animals with position, action or state, target, health; filter by `near`/`radius`/`kind` |
 | `npc.spawn` | a fighter: `position`, `skills` (preset, level 0..1 or fields), `weapon`, `faction`, `squad`, `name` |
-| `npc.spawn_animal` | `species` deer, rabbit, wolf or bird, `herd`, `range`, `male` |
+| `npc.spawn_animal` | `species` deer, rabbit, wolf, boar or bird, `herd`, `range`, `male`, `young` |
 | `npc.set_skill` | merge skill fields (clamped) or set a preset or level |
 | `npc.inspect` | why an NPC does what it does: utility scores, chosen spot and best candidates, what it knows, combat state and stats; for animals state, danger and needs |
 | `npc.order` | `hold`, `move`, `attack` or `clear` for one NPC or a list |
@@ -138,9 +164,11 @@ and a wall-run wall. Two five-fighter squads of mixed skill fight across low wal
 explosive barrels and a raised platform; a master and a veteran duel in a ring; and a sparring
 lane on the east side puts five sword-and-shield fighters, rookie to master, in front of posts
 that swing at them, so you can watch skill decide who gets hit, who blocks and who parries.
-Downed fighters get up after six seconds and barrels come back, so the fight keeps going. A
+A squad mate often runs to a downed fighter, kneels and gets it up where it lies. One that
+nobody reaches gets up after six seconds, and barrels come back, so the fight keeps going. A
 camera at (0, 16, −31) from the origin looking at (0, 0, 4) frames the fight. `demo::spawn_wildlife(commands, center, radius)` fills a meadow with a
-deer herd, rabbits, two bird flocks and a wolf pack.
+deer herd, rabbits, two bird flocks, a sounder of wild boar with piglets and a lone tusker
+along the woods edge, and a wolf pack.
 
 ## Training
 
@@ -193,6 +221,32 @@ punish window), cooldown, spread and shield.
    game code) and it wall-runs and slides like the player; NPCs without them keep the
    built-in mover.
 
+## Squad revives
+
+A squad mate can revive a downed fighter where it lies. Each mate weighs the run: how far it
+is, how much the spot is in the enemy's view, how much fire the mate is under, its own health,
+and whether the squad is winning. Sight lines go through smoke, so smoke over the spot helps.
+An enemy that looks elsewhere, or that a mate is shooting at, counts for less. Only the best
+placed mate of the squad goes. Ranged mates with some teamwork cover it with suppressive fire.
+
+Skill changes the choice. A rookie notices late, then runs straight in. A skilled fighter waits
+while the spot is watched or it is under fire, and goes once things calm down. The reviver runs
+over, kneels beside the chest and works on it. After `ally_revive_secs` the ally gets up where
+it lies with `ally_revive_health` of its health. Teamwork 1 makes it a fifth quicker, teamwork
+0 a fifth slower. A reviver that is hit, staggered or stuck, or that finds it too hot, lets go.
+It waits a moment before it tries again.
+
+| Setting | Default | Does |
+| --- | --- | --- |
+| `ally_revive_secs` | 2 s | How long a revive takes. 0 turns squad revives off. |
+| `ally_revive_health` | 0.4 | The share of health a revived fighter gets up with. |
+| `ally_revive_range` | 20 m | How far a mate goes to revive. |
+| `revive_secs` | 0 (6 s in the demo) | The showcase timer. 0 turns it off. |
+
+The showcase timer is the fallback. It waits while a mate is on the way or kneeling. When it
+runs out, a fighter with a squad mate standing within `ally_revive_range` gets up where it lies
+with `ally_revive_health`. Only a fighter with nobody near is sent back to its home, whole.
+
 When the world is re-anchored (a floating-origin move or a new reference frame, `WorldShift`),
 everything NPCs and animals keep in world space moves with it in `WorldShiftSet::Apply`: homes,
 orders, destinations and candidate spots, paths, remembered positions, velocities and
@@ -225,10 +279,22 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   enemies, and that a ranged squad sends a flanker.
 - `tests/wildlife.rs`: deer bolt from a runner but let a sneaker much closer, panic spreads
   through a herd, a wolf pack stalks, charges, kills and feeds, birds take off together and
-  land again.
+  land again, a sounder roots about and wanders, boars run from a sprinter in the open, a
+  boar cornered in a pen charges before it is trodden on and slashes, a wounded boar turns on
+  whoever hurt it, a sow charges to defend her piglets (a lone sow runs), and wolves pick a
+  piglet over its elders.
 - `tests/demo.rs`: the arena fight keeps going for a minute (shots, attacks, blocks, cover,
-  downed and revived) inside the arena; the meadow lives for two minutes (grazing, wandering,
+  downed and revived, squad mates reviving at least twice) inside the arena; the meadow lives for two minutes (grazing, wandering,
   hunting, fleeing) without animals leaving.
+- `tests/revive.rs`: a squad mate kneels beside a downed ally and gets it up where it lies.
+  Skilled fighters don't go in the enemy's view or under fire; a rookie does. A reviver that is
+  hit lets go and tries again later. Nobody revives when it is off. The showcase timer waits
+  for a revive, gets a fighter with a mate near up in place, and sends home only one that is
+  alone.
+- `tests/art_revive.rs`: a captioned strip, before and after. Before, a lone fighter lies six
+  seconds and is sent home. After, a squad mate runs in, kneels, sets its carbine down, puts
+  its hands on the chest and looks up at the enemy, and the ally gets up where it lay. It
+  writes `fighters-revive-before-after.png`.
 - `tests/training.rs`: the same post swings at a rookie, soldier, veteran, elite and master;
   the share of swings defended climbs with skill (0 % to about 100 %) and the master parries.
 - `tests/smoke.rs`: thick smoke hides a player until it clears, thin smoke slows spotting,
@@ -242,9 +308,13 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   paths go around a wall where it moved to, not where it was.
 - `tests/art_fighters.rs`, `tests/art_animals.rs`, `tests/art_arena.rs`: close-up renders of
   the fighters, wildlife and arena in chosen poses and lights, flipbook strips of the wildlife
-  on the move (gaits, starts and stops, an alarm, a bend, a stalk, a starling's flight;
-  `NPC_STRIPS=deer-walk,...` shoots only some), plus triangle and build-time budgets and a
-  check that the arena art sits on every collider.
+  on the move (gaits, starts and stops, an alarm, a bend, a stalk, a wolf's hunt from stalk
+  to bite, a boar rooting and its charge and slash, deer, wolves and boars flinching from a
+  blow, a deer killed at a gallop, a starling's flight; `NPC_STRIPS=deer-walk,...` shoots
+  only some), plus triangle and build-time budgets and a check that the arena art sits on
+  every collider. The animal unit tests check that no planted foot slides in any gait (boars,
+  tuskers and piglets included), that a rooting boar's snout reaches the soil, and that a
+  hurt animal jolts away from the blow, pins its ears, steps and settles.
 - `tests/screenshots.rs`: renders the arena, its stands, a cover fight, the sparring lane, the
   duel and the meadow on a GPU or lavapipe and checks the fighters and deer show up.
   `NPC_SCREENSHOT_DIR=dir` keeps the PNGs.

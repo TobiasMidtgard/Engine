@@ -279,6 +279,12 @@ pub enum Sprite {
     /// it in a doorway with `facing: horizontal` and an effect turned so its up axis faces out;
     /// give it a long life and `additive` 0. `emissive` lights the arms and rim.
     Vortex,
+    /// An engine's exhaust flame from the nozzle out: a white-hot core, a train of shock
+    /// diamonds and a flickering tail that tears away (rockets, jets on afterburner). Use with
+    /// `facing: axis`, `local_space` and a few short, overlapping particles at the nozzle, so it
+    /// shimmers; its color is the flame's, whitened toward the core. The jet widens sooner and
+    /// the diamonds fade as the air thins, as they do high up and in space.
+    Plume,
 }
 
 impl Sprite {
@@ -292,7 +298,7 @@ impl Sprite {
         match self {
             Sprite::Smoke | Sprite::Dust => 1.0,
             Sprite::Droplet => 0.4,
-            Sprite::Shard | Sprite::Haze | Sprite::Vortex => 0.0,
+            Sprite::Shard | Sprite::Haze | Sprite::Vortex | Sprite::Plume => 0.0,
             _ => 0.6,
         }
     }
@@ -309,6 +315,10 @@ pub enum Facing {
     Velocity,
     /// Lies flat, perpendicular to the emitter's up axis (ripples, ground rings, magic circles).
     Horizontal,
+    /// Stands on the particle along the emitter's `direction`, turned about it to face the
+    /// camera: `size` is its length and `stretch` its width as a fraction of that (engine
+    /// plumes, beams of light).
+    Axis,
 }
 
 impl Facing {
@@ -570,6 +580,10 @@ pub struct EmitterDesc {
     pub collide: Collide,
     /// Particles move with the emitter instead of being left behind (auras, orbiting runes).
     pub local_space: bool,
+    /// Spawns at its full rate whatever the effect's `rate` and the density setting, stopping
+    /// only at rate 0: for a shape drawn by a few overlapping particles (an engine's plume),
+    /// which would flicker or break up if thinned.
+    pub steady: bool,
 
     // ---- sub-emitters
     /// New particles in another layer wherever this layer's particles hit the ground, water or
@@ -590,7 +604,8 @@ pub struct EmitterDesc {
     pub debris: Option<Debris>,
     /// Which way the quad faces.
     pub facing: Facing,
-    /// Streak length per m/s of speed, seconds (velocity facing; 0.02 = a 20 m/s spark is 0.4 m).
+    /// Streak length per m/s of speed, seconds (velocity facing; 0.02 = a 20 m/s spark is 0.4 m),
+    /// or width as a fraction of length (axis facing).
     pub stretch: f32,
     /// Color over life (see [`Gradient`]).
     pub color: Gradient,
@@ -639,6 +654,7 @@ impl Default for EmitterDesc {
             attract: 0.0,
             collide: Collide::None,
             local_space: false,
+            steady: false,
             on_hit: None,
             on_death: None,
             trailing: None,
@@ -670,6 +686,7 @@ impl EmitterDesc {
         if self.max_particles > 0 {
             return self.max_particles;
         }
+        let rate_scale = if self.steady { 1.0 } else { rate_scale };
         let life = self.max_lifetime();
         let steady = (self.rate + self.rate_per_meter * ASSUMED_EMITTER_SPEED) * life * rate_scale;
         let bursts: u32 = self.bursts.iter().map(Burst::total).sum();

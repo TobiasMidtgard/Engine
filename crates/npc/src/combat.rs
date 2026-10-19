@@ -18,11 +18,13 @@ use crate::agent::{
     AttackPhase, Defense, IncomingAttack, Npc, NpcAction, NpcBrain, NpcClock, NpcCombat,
     NpcSettings, NpcVitals, NpcWeapon, WeaponStyle,
 };
+use crate::brain::revive_secs;
+use crate::faction::{Faction, Squad};
 use crate::features::ExplosiveProp;
 use crate::learning::OpponentModels;
 use crate::perception::{NpcMemory, Perceivable, Perceivables};
 use crate::skills::NpcSkills;
-use crate::squad::AttackTokens;
+use crate::squad::{AttackTokens, ReviveClaims};
 use crate::world_model::{TacticalWorld, physics_backend};
 
 /// Deterministic 0..1 noise from an entity, a time and a salt (combat rolls).
@@ -745,6 +747,7 @@ pub(crate) fn apply_damage(
     mut hurts: MessageReader<DamageEvent>,
     mut q: Query<VictimItem>,
     mut tokens: ResMut<AttackTokens>,
+    mut revives: ResMut<ReviveClaims>,
     mut triggers: MessageWriter<AnimationTrigger>,
 ) {
     for h in hurts.read() {
@@ -781,8 +784,11 @@ pub(crate) fn apply_damage(
             vitals.downed = true;
             brain.switch(NpcAction::Down, now);
             brain.destination = None;
+            brain.revive = None;
+            brain.revive_progress = 0.0;
             *intent = MoveIntent::default();
             tokens.release(e);
+            revives.release(e);
             commands
                 .entity(e)
                 .insert((Downed { since: now }, Ragdoll { weight: 1.0 }));
@@ -790,44 +796,157 @@ pub(crate) fn apply_damage(
     }
 }
 
-/// Bring downed NPCs back after `NpcSettings::revive_secs` (showcases keep fighting forever).
-#[allow(clippy::type_complexity)]
+type ReviveItem<'a> = (
+    Entity,
+    &'a Npc,
+    &'a NpcClock,
+    &'a NpcSkills,
+    (&'a Faction, Option<&'a Squad>, Option<&'a Downed>),
+    &'a mut NpcVitals,
+    &'a mut NpcBrain,
+    &'a mut NpcCombat,
+    &'a mut NpcMemory,
+    &'a mut Transform,
+);
+
+/// What the revive pass saw of the NPCs this step (kept between steps to reuse the space).
+#[derive(Default)]
+pub(crate) struct ReviveScratch {
+    /// Revives done: (the downed, its reviver).
+    done: Vec<(Entity, Entity)>,
+    /// Downed NPCs a squad mate is reviving (on its way or kneeling).
+    tended: Vec<Entity>,
+    /// Standing squad members: squad, faction, where.
+    standing: Vec<(Squad, Faction, DVec3)>,
+}
+
+/// Get a downed NPC up where it lies with `health` (a share of its maximum): it keeps what it
+/// knows and thinks again at once.
+fn get_up(
+    now: f64,
+    health: f32,
+    vitals: &mut NpcVitals,
+    brain: &mut NpcBrain,
+    combat: &mut NpcCombat,
+) {
+    vitals.health = (vitals.max_health * health.clamp(0.0, 1.0)).max(1.0);
+    vitals.downed = false;
+    vitals.poise = 1.0;
+    *combat = NpcCombat {
+        stats: combat.stats,
+        ..Default::default()
+    };
+    brain.switch(NpcAction::Idle, now);
+    brain.next_think = now;
+    brain.destination = None;
+}
+
+/// Revives. A squad mate kneeling over a downed NPC for its revive time (see
+/// `NpcSettings::ally_revive_secs`) gets it up where it lies with `ally_revive_health`. The
+/// showcase timer `NpcSettings::revive_secs` is the fallback: it waits while a squad mate is
+/// on the way or kneeling; when it runs out, an NPC with a standing squad mate within
+/// `ally_revive_range` comes to and gets up where it lies (with `ally_revive_health`), and one
+/// with nobody to revive it is sent back to its home at full health, as fresh (what it knew is
+/// forgotten).
 pub(crate) fn revive(
     mut commands: Commands,
     settings: Res<NpcSettings>,
-    mut q: Query<(
-        Entity,
-        &Npc,
-        &NpcClock,
-        &Downed,
-        &mut NpcVitals,
-        &mut NpcBrain,
-        &mut NpcCombat,
-        &mut NpcMemory,
-        &mut Transform,
-    )>,
+    mut revives: ResMut<ReviveClaims>,
+    mut q: Query<ReviveItem>,
+    mut scratch: Local<ReviveScratch>,
 ) {
+    let s = &mut *scratch;
+    s.done.clear();
+    s.tended.clear();
+    s.standing.clear();
+    for (e, _, _, skills, (faction, squad, _), vitals, brain, _, _, t) in q.iter() {
+        if vitals.downed {
+            continue;
+        }
+        if let Some(&squad) = squad {
+            s.standing.push((squad, *faction, t.translation));
+        }
+        let Some(ally) = brain.revive.filter(|_| brain.action == NpcAction::Revive) else {
+            continue;
+        };
+        if brain.revive_progress >= revive_secs(&settings, skills) {
+            s.done.push((ally, e));
+        } else {
+            s.tended.push(ally);
+        }
+    }
+    let health = settings.ally_revive_health;
+    for &(ally, reviver) in &s.done {
+        let mut up = false;
+        if let Ok((_, _, clock, _, _, mut vitals, mut brain, mut combat, ..)) = q.get_mut(ally)
+            && vitals.downed
+        {
+            get_up(clock.now, health, &mut vitals, &mut brain, &mut combat);
+            commands
+                .entity(ally)
+                .remove::<Downed>()
+                .insert(Ragdoll { weight: 0.0 });
+            up = true;
+        }
+        if let Ok((_, _, clock, _, _, _, mut brain, mut combat, ..)) = q.get_mut(reviver) {
+            let now = clock.now;
+            brain.revive = None;
+            brain.revive_progress = 0.0;
+            brain.destination = None;
+            brain.switch(NpcAction::Idle, now);
+            // A moment to take its weapon up again before it thinks on.
+            brain.next_think = now + 0.4;
+            if up {
+                combat.stats.revives += 1;
+            }
+        }
+        revives.release(reviver);
+    }
     if settings.revive_secs <= 0.0 {
         return;
     }
-    for (e, npc, clock, downed, mut vitals, mut brain, mut combat, mut memory, mut t) in &mut q {
-        if clock.now - downed.since < settings.revive_secs as f64 {
+    for (
+        e,
+        npc,
+        clock,
+        _,
+        (faction, squad, downed),
+        mut vitals,
+        mut brain,
+        mut combat,
+        mut memory,
+        mut t,
+    ) in &mut q
+    {
+        let Some(downed) = downed else {
+            continue;
+        };
+        // A revive under way holds the timer off (a mate that stops getting closer gives up,
+        // so this doesn't last).
+        if !vitals.downed
+            || clock.now - downed.since < settings.revive_secs as f64
+            || s.tended.contains(&e)
+        {
             continue;
         }
-        vitals.health = vitals.max_health;
-        vitals.downed = false;
-        vitals.poise = 1.0;
-        *combat = NpcCombat {
-            stats: combat.stats,
-            ..Default::default()
-        };
-        memory.known.clear();
-        memory.stimulus = None;
-        brain.switch(NpcAction::Idle, clock.now);
-        brain.alert = Default::default();
-        brain.target = None;
-        if let Some(home) = npc.home {
-            t.translation = home;
+        let reach = settings.ally_revive_range as f64;
+        let mate_near = settings.ally_revive_secs > 0.0
+            && squad.is_some_and(|sq| {
+                s.standing
+                    .iter()
+                    .any(|(q, f, p)| q == sq && f == faction && p.distance(t.translation) < reach)
+            });
+        if mate_near {
+            get_up(clock.now, health, &mut vitals, &mut brain, &mut combat);
+        } else {
+            get_up(clock.now, 1.0, &mut vitals, &mut brain, &mut combat);
+            memory.known.clear();
+            memory.stimulus = None;
+            brain.alert = Default::default();
+            brain.target = None;
+            if let Some(home) = npc.home {
+                t.translation = home;
+            }
         }
         commands
             .entity(e)

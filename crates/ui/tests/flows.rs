@@ -452,6 +452,167 @@ fn shop_and_inventory_open_with_the_item_asked_for() {
     assert_eq!(st.selected, Some(SlotRef::Bag(3)));
 }
 
+fn quests(app: &mut App) -> engine_ui::quests::QuestLog {
+    app.world.resource::<engine_ui::quests::QuestLog>().clone()
+}
+
+fn waypoint_label(app: &mut App) -> String {
+    app.world
+        .resource::<engine_ui::map::MapData>()
+        .waypoint
+        .as_ref()
+        .map(|w| w.label.clone())
+        .unwrap_or_default()
+}
+
+#[test]
+fn tracking_a_quest_moves_the_hud_tracker_and_the_waypoint() {
+    let mut app = app();
+    let data = |app: &mut App, path: &str| api(app, "ui.get_data", json!({"path": path}));
+    assert_eq!(data(&mut app, "quest.title"), "The Silent Relay");
+    assert_eq!(data(&mut app, "quest.progress_max"), 4);
+    assert_eq!(waypoint_label(&mut app), "Relay Tower");
+    api(&mut app, "quest.track", json!({"id": "storm_salvage"}));
+    app.update_n(2);
+    assert_eq!(data(&mut app, "quest.title"), "Storm Salvage");
+    assert_eq!(
+        data(&mut app, "quest.step"),
+        "Recover flight recorders from the Scar"
+    );
+    // A counted step shows its own count.
+    assert_eq!(data(&mut app, "quest.progress"), 1);
+    assert_eq!(data(&mut app, "quest.progress_max"), 4);
+    assert_eq!(waypoint_label(&mut app), "The Scar");
+    // Tracking nothing empties the tracker and leaves the waypoint where it was.
+    api(&mut app, "quest.track", json!({"id": null}));
+    app.update_n(2);
+    assert_eq!(data(&mut app, "quest.title"), "");
+    assert_eq!(waypoint_label(&mut app), "The Scar");
+}
+
+#[test]
+fn the_journal_opens_on_the_tracked_quest_and_tracks_with_a_click() {
+    use engine_ui::quests::JournalScreen;
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "journal", "instant": true}),
+    );
+    app.update_n(3);
+    let selected = |app: &mut App| {
+        let mut q = app.world.query::<&JournalScreen>();
+        let st = q.single(&app.world).unwrap();
+        (st.tab, st.selected.clone().unwrap_or_default())
+    };
+    assert_eq!(selected(&mut app), (0, "silent_relay".into()));
+    // The tracked quest's place is on the banner map.
+    let e = engine_ui::input::find_id(&mut app.world, "journal_map").expect("banner map");
+    let view = app.world.get::<engine_ui::map::MapView>(e).unwrap();
+    assert_eq!(
+        view.selected,
+        Some(engine_ui::map::MapItem::Poi("relay_tower".into()))
+    );
+    // The new quest loses its mark once looked at.
+    assert!(quests(&mut app).get("lookout_log").unwrap().new);
+    api(&mut app, "ui.click", json!({"id": "quest:lookout_log"}));
+    app.update_n(2);
+    assert_eq!(selected(&mut app), (0, "lookout_log".into()));
+    assert!(!quests(&mut app).get("lookout_log").unwrap().new);
+    api(&mut app, "ui.click", json!({"id": "journal_track"}));
+    app.update_n(2);
+    assert_eq!(quests(&mut app).tracked.as_deref(), Some("lookout_log"));
+    assert_eq!(waypoint_label(&mut app), "Ridge Lookout");
+    // Right click on a row tracks that one.
+    api(
+        &mut app,
+        "ui.click",
+        json!({"id": "quest:salt_run", "alt": true}),
+    );
+    app.update_n(2);
+    assert_eq!(quests(&mut app).tracked.as_deref(), Some("salt_run"));
+    // The finished tab opens on its first quest; Show on map opens the map over the journal.
+    api(&mut app, "ui.click", json!({"id": "journal.tab:1"}));
+    app.update_n(2);
+    assert_eq!(selected(&mut app), (1, "landfall".into()));
+    api(&mut app, "ui.click", json!({"id": "journal_show_map"}));
+    app.update_n(3);
+    let screens = open(&mut app);
+    assert!(
+        screens.contains(&"map".to_string()) && screens.contains(&"journal".to_string()),
+        "{screens:?}"
+    );
+}
+
+#[test]
+fn finishing_the_last_step_completes_the_quest_and_pays_out() {
+    use engine_ui::quests::QuestState;
+    let mut app = app();
+    let gold = player(&mut app).gold;
+    let xp = api(&mut app, "ui.get_data", json!({"path": "player.xp"}))
+        .as_f64()
+        .unwrap();
+    // One crystal more finishes the first step and shows the next one.
+    let r = api(
+        &mut app,
+        "quest.progress",
+        json!({"id": "glass_and_glow", "add": 1}),
+    );
+    assert_eq!(r["done"], true);
+    let q = quests(&mut app).get("glass_and_glow").unwrap().clone();
+    assert_eq!(
+        (q.state, q.current(), q.visible()),
+        (QuestState::Active, Some(1), 2)
+    );
+    // The salt run has one step: three medkits.
+    api(
+        &mut app,
+        "quest.progress",
+        json!({"id": "salt_run", "add": 3}),
+    );
+    app.update_n(2);
+    assert_eq!(
+        quests(&mut app).get("salt_run").unwrap().state,
+        QuestState::Completed
+    );
+    assert_eq!(player(&mut app).gold, gold + 240);
+    let xp2 = api(&mut app, "ui.get_data", json!({"path": "player.xp"}))
+        .as_f64()
+        .unwrap();
+    assert_eq!(xp2, xp + 180.0);
+    // Completing the tracked quest hands tracking to the next main quest... there is none
+    // left, so it goes to the first active one.
+    api(&mut app, "quest.complete", json!({"id": "silent_relay"}));
+    app.update_n(2);
+    let log = quests(&mut app);
+    assert_eq!(
+        log.get("silent_relay").unwrap().state,
+        QuestState::Completed
+    );
+    assert_eq!(log.tracked.as_deref(), Some("glass_and_glow"));
+}
+
+#[test]
+fn a_dialogue_choice_tracks_a_quest() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "dialogue", "tree": "quill_intro", "node": "c", "speed": 0}),
+    );
+    app.update_n(5);
+    api(&mut app, "dialogue.next", json!({}));
+    app.update_n(10);
+    api(&mut app, "dialogue.choose", json!({"index": 1}));
+    app.update_n(5);
+    assert_eq!(quests(&mut app).tracked.as_deref(), Some("glass_and_glow"));
+    assert_eq!(waypoint_label(&mut app), "Glass Caves");
+    assert_eq!(
+        api(&mut app, "dialogue.state", json!({}))["node"],
+        "crystals"
+    );
+}
+
 #[test]
 fn short_labels_stay_on_one_line() {
     let mut app = app();

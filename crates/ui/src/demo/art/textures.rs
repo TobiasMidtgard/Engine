@@ -312,6 +312,108 @@ pub fn linen_texel(u: f32, v: f32) -> Texel {
     }
 }
 
+/// A tavern chalkboard (0.6 × 0.95 m, v down from the top): smudged slate with a chalk
+/// border, a yellow heading, three lines of a menu with prices and a little drawn tankard.
+/// Read from a few metres off, the hand-written strokes pass for words.
+pub fn chalkboard_texel(u: f32, v: f32) -> Texel {
+    use noise::*;
+    // Wobbly hand-drawn line `d` px from its path, `w` half-width (all in UV units of v).
+    let ink = |d: f32, w: f32| 1.0 - sstep(w * 0.6, w, d.abs());
+    // Writing along a line centred at `vc` from `u0` to `u1`: loops of letters, gaps between
+    // words.
+    let words = |vc: f32, u0: f32, u1: f32, a: f32, w: f32, seed: u32| -> f32 {
+        if u < u0 || u > u1 || (v - vc).abs() > a * 3.0 {
+            return 0.0;
+        }
+        let gap = n2(u * 11.0, seed as f32, seed) < -0.3;
+        if gap {
+            return 0.0;
+        }
+        let f = 260.0;
+        let ph = n2(u * 6.0, 0.5, seed + 1) * 2.0;
+        let loops = (u * f + ph).sin() * 0.55 + (u * f * 0.43 + ph * 1.7).sin() * 0.45;
+        // Taller strokes now and then: capitals and ascenders.
+        let tall = sstep(0.55, 0.9, n2(u * 40.0, 1.5, seed + 2)) * 1.4;
+        let y = vc + a * loops * (1.0 + tall * (loops < 0.0) as u8 as f32);
+        let ends = sstep(u0, u0 + 0.01, u) * (1.0 - sstep(u1 - 0.01, u1, u));
+        ink(v - y, w) * ends
+    };
+    let mut white = 0.0f32;
+    let mut yellow = 0.0f32;
+    // A border inset from the frame.
+    let wob = |x: f32, s: u32| n2(x * 7.0, 0.3, s) * 0.004;
+    let (mu, mv) = (0.07, 0.045);
+    if (mu..1.0 - mu).contains(&u) {
+        white = white.max(ink(v - mv - wob(u, 11), 0.0035));
+        white = white.max(ink(v - (1.0 - mv) - wob(u, 12), 0.0035));
+    }
+    if (mv..1.0 - mv).contains(&v) {
+        white = white.max(ink((u - mu - wob(v, 13)) * 0.632, 0.0035));
+        white = white.max(ink((u - (1.0 - mu) - wob(v, 14)) * 0.632, 0.0035));
+    }
+    // Heading and its underline.
+    yellow = yellow.max(words(0.13, 0.2, 0.8, 0.017, 0.0065, 21));
+    if (0.24..0.76).contains(&u) {
+        yellow = yellow.max(ink(v - 0.185 - wob(u, 22) * 0.6, 0.0028));
+    }
+    // Three dishes and their prices.
+    for (k, vc) in [0.29f32, 0.38, 0.47].into_iter().enumerate() {
+        let k = k as u32;
+        white = white.max(words(
+            vc,
+            0.13,
+            0.5 + 0.08 * (k % 2) as f32,
+            0.011,
+            0.0042,
+            31 + k,
+        ));
+        white = white.max(words(vc, 0.73, 0.86, 0.011, 0.0042, 41 + k));
+    }
+    // A foaming tankard: body, handle and a froth cloud.
+    let (cx, cy) = (0.5, 0.71);
+    let (x, y) = ((u - cx) * 0.632, v - cy);
+    let body = (x.abs() - 0.075).max(y.abs() - 0.09);
+    white = white.max(ink(body, 0.0045));
+    let handle = ((x - 0.075).hypot(y + 0.005) - 0.045).abs();
+    if x > 0.075 {
+        white = white.max(ink(handle, 0.0045));
+    }
+    let froth = (0..3)
+        .map(|i| {
+            let fx = -0.05 + 0.05 * i as f32;
+            (x - fx).hypot(y + 0.095) - 0.035
+        })
+        .fold(f32::MAX, f32::min);
+    if y < -0.085 {
+        white = white.max(ink(froth, 0.0045));
+    }
+    for i in 0..3 {
+        let sx = -0.04 + 0.04 * i as f32;
+        if (-0.06..0.07).contains(&y) {
+            white = white.max(ink((x - sx) * 1.0, 0.003) * 0.7);
+        }
+    }
+    // Chalk is grainy and patchy; slate keeps the ghosts of older menus.
+    let grain = sat(0.55 + 0.5 * fbm(u * 380.0, v * 240.0, 2, 51));
+    let (white, yellow) = (white * grain, yellow * grain);
+    let smudge = sat(fbm(u * 2.4, v * 1.5, 4, 52) * 0.9 + 0.15);
+    let ghosts = sat(fbm(u * 30.0, v * 20.0, 3, 53) * 0.8) * smudge;
+    let slate = Vec3::new(0.021, 0.026, 0.024) * (0.85 + 0.3 * fbm(u * 60.0, v * 40.0, 3, 54));
+    let slate = slate + Vec3::splat(0.03 * smudge + 0.02 * ghosts);
+    let albedo = mix3(
+        mix3(slate, Vec3::new(0.78, 0.78, 0.74), white),
+        Vec3::new(0.85, 0.66, 0.24),
+        yellow,
+    );
+    let chalk = white.max(yellow);
+    Texel {
+        albedo,
+        height: chalk * 0.00004 + fbm(u * 60.0, v * 40.0, 3, 55) * 0.00002,
+        rough: 0.78 + 0.18 * chalk,
+        ..Default::default()
+    }
+}
+
 /// A heightfield sampled on a grid, for map textures: `h[y][x]`, with bilinear lookups.
 pub struct HeightGrid {
     pub w: usize,
