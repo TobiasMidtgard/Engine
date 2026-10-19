@@ -1,7 +1,8 @@
 //! Renders skinned meshes offscreen and checks the pictures: the GPU skinning pass draws a
 //! character with its paint and the drawn pose follows the animation (a flex raises the
 //! arms); textured submeshes draw with their own surfaces (a checker, an alpha cutout on a
-//! double-sided card); fur shells grow strands over a furred skin. Needs a GPU or a software Vulkan driver (lavapipe); passes with a note
+//! double-sided card), from the renderer's shared images even after their CPU pixels are freed;
+//! fur shells grow strands over a furred skin. Needs a GPU or a software Vulkan driver (lavapipe); passes with a note
 //! when neither is available (CI sets ENGINE_REQUIRE_GPU=1, which turns that into a failure).
 
 use std::sync::Arc;
@@ -14,8 +15,9 @@ use engine_anim::{AnimationPlugin, Animator, Skeleton, SkinnedMesh, SkinnedMeshR
 use engine_assets::Assets;
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
+use engine_render::image_cache::RELEASE_AFTER_FRAMES;
 use engine_render::prelude::*;
-use engine_render::{AlphaMode, Image, RenderDisabled, capture_now};
+use engine_render::{AlphaMode, Image, RenderDisabled, Renderer, capture_now};
 use engine_world::WorldPlugin;
 use engine_world::animation::AnimationTrigger;
 
@@ -324,6 +326,103 @@ fn textured_submeshes_draw_their_own_surfaces() {
         shadow < total / 20,
         "the cut-out half casts a shadow: {shadow} dark of {total} pixels"
     );
+}
+
+/// With `release_image_pixels` on, the renderer frees an image's CPU pixels once it is on the
+/// GPU. A skin keeps drawing that image from the renderer's copy, the same upload a standard
+/// mesh with the image uses, and nothing is uploaded again.
+#[test]
+fn textured_skins_draw_from_the_shared_images_after_their_pixels_are_freed() {
+    let mut app = headless_app();
+    {
+        let mut s = app.world.resource_mut::<RenderSettings>();
+        s.release_image_pixels = true;
+        // Nothing here needs the expensive effects; frames are many.
+        s.anti_aliasing = AntiAliasing::None;
+        s.volumetric_fog = false;
+        s.sky_cloud_layer = false;
+        s.screen_space_reflections = false;
+        s.screen_space_gi = false;
+        s.ambient_occlusion = false;
+    }
+    let w = &mut app.world;
+    w.spawn((
+        DirectionalLight {
+            illuminance: 80_000.0,
+            ..Default::default()
+        },
+        Transform::default().looking_at(DVec3::new(0.0, -1.0, -1.0), Vec3::Y),
+    ));
+    w.spawn((
+        Camera::perspective(40.0),
+        Transform::from_xyz(0.0, 0.5, 3.0).looking_at(DVec3::new(0.0, 0.5, 0.0), Vec3::Y),
+    ));
+    let checker = w
+        .get_resource_or_init::<Assets<Image>>()
+        .add(Image::checker(64, 4, [255, 0, 0, 255], [0, 0, 255, 255]));
+    let surface = StandardMaterial {
+        base_color: [1.0; 4],
+        perceptual_roughness: 0.8,
+        double_sided: true,
+        ..Default::default()
+    }
+    .with_base_color_texture(checker);
+    // A standard quad under the panels with the same image.
+    w.spawn((
+        Transform::from_xyz(0.0, -0.3, 0.0),
+        MeshRenderer::new(Shape::Quad { size: [0.4, 0.4] }, surface),
+    ));
+    let (skeleton, mesh) = panels();
+    let mesh = w.get_resource_or_init::<Assets<SkinnedMesh>>().add(mesh);
+    w.spawn((
+        Transform::default(),
+        GlobalTransform::default(),
+        Animator::procedural(Arc::new(skeleton)),
+        SkinnedMeshRenderer {
+            mesh: Some(mesh),
+            surfaces: vec![surface, surface],
+            ..Default::default()
+        },
+    ));
+    app.update_n(5);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return;
+    }
+    let uploads = app
+        .world
+        .resource::<Renderer>()
+        .shared
+        .images
+        .stats()
+        .uploads;
+    assert!(uploads >= 1, "the checker went through the shared images");
+    app.update_n(RELEASE_AFTER_FRAMES as usize + 10);
+    assert!(
+        app.world
+            .resource::<Assets<Image>>()
+            .get(checker)
+            .is_some_and(|i| i.is_released()),
+        "the checker's pixels were freed"
+    );
+    let stats = app.world.resource::<Renderer>().shared.images.stats();
+    assert_eq!(stats.uploads, uploads, "nothing uploaded again ({stats:?})");
+
+    let img = capture(&mut app, "anim_released_pixels.png");
+    // Both panels still show red and blue squares (a skin whose image had no pixels would
+    // draw it white).
+    for (panel, area) in [
+        ("left", (0.15, 0.44, 0.3, 0.7)),
+        ("right", (0.56, 0.85, 0.3, 0.7)),
+    ] {
+        let (red, total) = count(&img, area, |r, g, b| r > 40.0 && r > 2.0 * g && r > 2.0 * b);
+        let (blue, _) = count(&img, area, |r, g, b| b > 40.0 && b > 2.0 * r && b > 1.5 * g);
+        assert!(
+            red > total / 5 && blue > total / 5,
+            "{panel} panel lost its checker after release: {red} red and {blue} blue of {total} \
+             pixels"
+        );
+    }
 }
 
 /// A 1 m square lying flat at `y`, facing up, red, with fur everywhere.

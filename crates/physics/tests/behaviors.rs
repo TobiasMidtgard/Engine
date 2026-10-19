@@ -9,9 +9,9 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_physics::{PhysicsPlugin, PhysicsSettings, PhysicsStats};
 use engine_world::physics::{
-    CharacterController, CharacterMove, CharacterState, Collider, ColliderShape, CollisionLayers,
-    ContactEvent, ContactPhase, ExternalForce, Joint, JointKind, PhysicsQueries, QueryFilter,
-    RigidBody, Velocity,
+    BodyKind, CharacterController, CharacterMove, CharacterState, Collider, ColliderShape,
+    CollisionLayers, ContactEvent, ContactPhase, ExternalForce, Joint, JointKind, PhysicsQueries,
+    QueryFilter, RigidBody, Velocity,
 };
 use engine_world::{Gravity, Water, WaterQuery, WaterSample, WorldImpulse, WorldPlugin};
 
@@ -68,6 +68,55 @@ fn vel(app: &App, e: Entity) -> Vec3 {
 
 fn stats(app: &App) -> PhysicsStats {
     *app.world.resource::<PhysicsStats>()
+}
+
+/// A region following a fast body across a field of posts keeps copies of the posts near it
+/// only: it drops the ones it leaves behind instead of collecting every static it passes.
+#[test]
+fn a_travelling_region_drops_the_statics_it_leaves_behind() {
+    let mut app = app();
+    // A post every 250 m along 30 km, 20 m to the side of the shot's path.
+    let posts = 121;
+    for i in 0..posts {
+        app.world.spawn((
+            Transform::from_xyz(i as f64 * 250.0, 0.0, 20.0),
+            Collider::cuboid(Vec3::new(0.2, 2.0, 0.2)),
+        ));
+    }
+    app.world.spawn((
+        Transform::from_xyz(0.0, 1.0, 0.0),
+        RigidBody {
+            gravity_scale: 0.0,
+            ..RigidBody::dynamic()
+        },
+        Collider::sphere(0.5),
+        Velocity {
+            linear: Vec3::new(3000.0, 0.0, 0.0),
+            angular: Vec3::ZERO,
+        },
+    ));
+    app.update_n(1);
+    let start = stats(&app).static_copies;
+    let mut most = start;
+    for _ in 0..600 {
+        app.update();
+        most = most.max(stats(&app).static_copies);
+    }
+    println!("static copies: {start} at the start, at most {most} on the way");
+    // The posts' own regions hold their copies from the start; the shot's region adds the
+    // ones within its reach (about 1.3 km each way: a dozen posts), not all of them.
+    assert!(
+        most < start + 30,
+        "{most} static copies, {start} at the start: the travelling region kept the posts it passed"
+    );
+    let diagnostics = app
+        .world
+        .resource::<engine_core::diagnostics::Diagnostics>();
+    assert_eq!(
+        diagnostics.get("physics.static_copies"),
+        Some(stats(&app).static_copies as f64)
+    );
+    assert_eq!(diagnostics.get("physics.substeps"), Some(2.0));
 }
 
 fn zero_g(app: &mut App) {
@@ -892,6 +941,99 @@ fn external_force_can_hover_a_body() {
     let y0 = pos(&app, c).y;
     app.update_n(120);
     assert!((pos(&app, c).y - y0).abs() < 0.01, "hovering body drifted");
+}
+
+/// A body on a slow clock lives in its own seconds for every push, not just gravity: a force
+/// that holds it up in normal time holds it up at half speed too, its damping slows it per its
+/// own second, and a lift driven by `Velocity` rises at half speed.
+#[test]
+fn forces_damping_and_kinematic_motion_follow_local_time() {
+    let slow = LocalTimeScale {
+        factor: 0.5,
+        ignore_world_dilation: false,
+    };
+    // Hover: weight held up by an ExternalForce.
+    let mut app = app();
+    let c = cube(&mut app, DVec3::new(0.0, 10.0, 0.0), 0.5);
+    app.world.entity_mut(c).insert(slow);
+    app.update_n(1);
+    let m = app
+        .world
+        .get::<engine_world::physics::MassProperties>(c)
+        .unwrap()
+        .mass_kg;
+    app.world.entity_mut(c).insert(ExternalForce {
+        force: Vec3::new(0.0, m * 9.81, 0.0),
+        ..Default::default()
+    });
+    *app.world.get_mut::<Velocity>(c).unwrap() = Velocity::default();
+    let y0 = pos(&app, c).y;
+    app.update_n(120);
+    let drift = pos(&app, c).y - y0;
+    assert!(drift.abs() < 0.01, "slowed hovering body drifted {drift} m");
+
+    // Damping: after 2 world seconds at half speed the slowed body has lived 1 s, so it has
+    // the speed the normal one has after 1 s.
+    let mut app = crate::app();
+    let drag = RigidBody {
+        linear_damping: 0.5,
+        angular_damping: 0.5,
+        gravity_scale: 0.0,
+        ..RigidBody::dynamic()
+    };
+    let normal = cube(&mut app, DVec3::new(0.0, 10.0, 0.0), 0.5);
+    let slowed = cube(&mut app, DVec3::new(0.0, 10.0, 10.0), 0.5);
+    for e in [normal, slowed] {
+        app.world.entity_mut(e).insert((
+            drag.clone(),
+            Velocity {
+                linear: Vec3::new(10.0, 0.0, 0.0),
+                angular: Vec3::new(0.0, 6.0, 0.0),
+            },
+        ));
+    }
+    app.world.entity_mut(slowed).insert(slow);
+    app.update_n(60);
+    let after_1s = *app.world.get::<Velocity>(normal).unwrap();
+    app.update_n(60);
+    let v = *app.world.get::<Velocity>(slowed).unwrap();
+    assert!(
+        (v.linear.x / after_1s.linear.x - 1.0).abs() < 0.02,
+        "slowed body's speed {} after 2 world s, normal body's {} after 1 s",
+        v.linear.x,
+        after_1s.linear.x
+    );
+    assert!(
+        (v.angular.y / after_1s.angular.y - 1.0).abs() < 0.02,
+        "slowed body's spin {} after 2 world s, normal body's {} after 1 s",
+        v.angular.y,
+        after_1s.angular.y
+    );
+
+    // A lift moved by its Velocity: 1 m/s of its own time is 0.5 m per world second.
+    let mut app = crate::app();
+    let lift = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            RigidBody {
+                kind: BodyKind::Kinematic,
+                ..Default::default()
+            },
+            Collider::cuboid(Vec3::new(1.0, 0.1, 1.0)),
+            Velocity {
+                linear: Vec3::Y,
+                angular: Vec3::ZERO,
+            },
+            slow,
+        ))
+        .id();
+    app.update_n(60);
+    let rise = pos(&app, lift).y;
+    assert!(
+        (rise - 0.5).abs() < 0.02,
+        "slowed lift rose {rise} m in 1 world s, wanted 0.5"
+    );
 }
 
 struct Lake;

@@ -1,7 +1,8 @@
 //! World shifts (floating origin, a new planet's frame): engine_world moves the shared
 //! contracts (root transforms, velocities, contact messages); this moves what animation keeps
 //! in world space the same way, in `WorldShiftSet::Apply`: planted feet, spring and jiggle
-//! history, wheel contacts, look and reach targets, and demo paths.
+//! history, wheel contacts, look and reach targets, ragdoll motion history, and demo paths and
+//! the stunt yard's routine.
 
 use engine_core::prelude::*;
 use engine_world::WorldShift;
@@ -12,6 +13,8 @@ use crate::muscle::MuscleRig;
 use crate::procedural::gait::LeggedGait;
 use crate::procedural::spring::SpringChains;
 use crate::procedural::vehicle::VehicleRig;
+use crate::ragdoll::RagdollRig;
+use crate::stunt::Stunt;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn follow_world_shifts(
@@ -23,6 +26,8 @@ pub(crate) fn follow_world_shifts(
     mut looks: Query<&mut LookAt>,
     mut reaches: Query<&mut ReachIk>,
     mut paths: Query<&mut DemoPath>,
+    mut ragdolls: Query<&mut RagdollRig>,
+    mut stunts: Query<&mut Stunt>,
 ) {
     let Some(s) = shifts.read().copied().reduce(|acc, next| acc.then(&next)) else {
         return;
@@ -39,6 +44,9 @@ pub(crate) fn follow_world_shifts(
     for mut v in &mut vehicles {
         v.rt.follow_shift(&s);
     }
+    for mut r in &mut ragdolls {
+        r.follow_shift(&s);
+    }
     for mut l in &mut looks {
         l.target = s.point(l.target);
     }
@@ -50,5 +58,8 @@ pub(crate) fn follow_world_shifts(
     // A demo loop moves with the ground under it (keeping its compass heading).
     for mut p in &mut paths {
         p.origin = s.point(p.origin);
+    }
+    for mut st in &mut stunts {
+        st.origin = s.point(st.origin);
     }
 }

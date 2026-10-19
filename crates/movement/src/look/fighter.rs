@@ -365,9 +365,10 @@ pub fn generate(lib: &mut Library) {
 /// The entities of a spawned fighter body.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Body {
-    /// One entity per bone, indexed by [`Bone::index`]. The first [`Bone::ANIMATED`] are
-    /// children of the owner and are posed with [`bone_transform`]; the sword rides on the
-    /// right hand and the blade (marked with [`Blade`]) on the sword.
+    /// One entity per bone, indexed by [`Bone::index`]. The first [`Bone::ANIMATED`] (the
+    /// sword among them: in the right hand, or in the scabbard while the hand holds a ladder)
+    /// are children of the owner and are posed with [`bone_transform`]; the blade (marked with
+    /// [`Blade`]) rides on the sword.
     pub bones: [Entity; BONES],
     /// At the blade's point.
     pub tip: Entity,
@@ -387,10 +388,6 @@ pub fn spawn_body(commands: &mut Commands, owner: Entity, style: Style, lift: f3
     let mut bones = [Entity::PLACEHOLDER; BONES];
     for bone in Bone::ALL {
         let (parent, t) = match bone {
-            Bone::Sword => (
-                bones[Bone::HandR.index()],
-                bone_transform(rig::grip_r(), 0.0),
-            ),
             Bone::Blade => (
                 bones[Bone::Sword.index()],
                 bone_transform(Xf::at(Vec3::Z * rig::BLADE_BASE_Z), 0.0),

@@ -41,6 +41,7 @@ use crate::muscle::{MorphWeights, MuscleRig};
 use crate::procedural::spring::SpringChains;
 use crate::retarget::HandGrip;
 use crate::skin::{SkinMaterial, SkinnedMesh, SkinnedMeshRenderer};
+use crate::stunt;
 use crate::xform::smoothing;
 
 /// Radius of the paddock, meters.
@@ -81,6 +82,7 @@ pub struct DemoEntities {
     pub spider: Entity,
     pub dog: Entity,
     pub car: Entity,
+    pub stuntman: Entity,
 }
 
 /// Follows a closed, smooth path through `waypoints` (`[x, z, speed]`, meters and m/s,
@@ -260,9 +262,12 @@ pub(crate) fn register(app: &mut App) {
     .register_component::<DemoScript>(
         "Demo timeline: triggers and parameter values at times (s), repeating every period.",
     )
+    .register_component::<stunt::Stunt>(
+        "Stunt yard routine: run off the deck, fall limp onto the mat, get up, walk back.",
+    )
     .add_systems(
         Update,
-        (demo_path_system, demo_script_system).in_set(UpdateSet::Logic),
+        (demo_path_system, demo_script_system, stunt::stunt_system).in_set(UpdateSet::Logic),
     )
     .register_api(
         "anim.spawn",
@@ -323,6 +328,7 @@ pub(crate) fn register(app: &mut App) {
                 "spider": d.spider.to_bits(),
                 "dog": d.dog.to_bits(),
                 "car": d.car.to_bits(),
+                "stuntman": d.stuntman.to_bits(),
             }))
         },
     );
@@ -924,6 +930,22 @@ pub const VIEWS: &[DemoView] = &[
         hour: 15.0,
         at: 3.6,
     },
+    DemoView {
+        key: "paddock_stunt",
+        name: "Stunt fall: limp off the deck with the run's momentum",
+        eye: [0.0, 1.7, 34.6],
+        target: [0.4, 1.2, 28.0],
+        hour: 15.0,
+        at: 6.62,
+    },
+    DemoView {
+        key: "paddock_stunt_down",
+        name: "Ragdoll come to rest on the crash mat",
+        eye: [5.0, 0.95, 29.6],
+        target: [3.6, 0.5, 28.1],
+        hour: 15.0,
+        at: 8.3,
+    },
 ];
 
 fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
@@ -1331,6 +1353,9 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         ..DemoPath::new(origin, DOG_PATH.to_vec())
     });
 
+    // --- Stunt yard: off a deck onto a crash mat, limp, and up again.
+    let stuntman = stunt::spawn_yard(world, origin);
+
     DemoEntities {
         athlete,
         lifter,
@@ -1340,6 +1365,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         spider: spider_e,
         dog: dog_e,
         car: car_e,
+        stuntman,
     }
 }
 

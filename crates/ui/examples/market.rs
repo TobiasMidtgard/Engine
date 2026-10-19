@@ -3,7 +3,8 @@
 //!
 //! `cargo run -p engine_ui --example market -- <out_dir> [width] [height] [view ...]`
 //!
-//! Views: overview, brannoc, produce, cloth, potter, smith, table, square (all by default).
+//! Views: overview, brannoc, produce, cloth, potter, smith, table, corner, square (all by
+//! default).
 //! Needs a GPU or a software Vulkan driver (lavapipe).
 
 use engine_assets::Assets;
@@ -140,6 +141,11 @@ fn main() {
             "table",
             DVec3::new(2.4, 2.1, 7.4),
             DVec3::new(0.0, 0.9, 5.0),
+        ),
+        (
+            "corner",
+            DVec3::new(7.8, 1.75, -6.2),
+            DVec3::new(4.8, 0.9, -10.8),
         ),
         (
             "square",

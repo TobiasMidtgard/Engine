@@ -12,7 +12,9 @@
 
 use engine_core::math::Vec3;
 use engine_world::{Deformation, SurfaceMaterial};
-use rapier3d::prelude::{Collider, ColliderHandle, RigidBody, RigidBodyHandle, ShapeType};
+use rapier3d::prelude::{
+    Collider, ColliderHandle, ContactPair, RigidBody, RigidBodyHandle, ShapeType,
+};
 
 use crate::convert;
 use crate::sim::{RegionId, Simulation};
@@ -112,7 +114,25 @@ pub(crate) fn resist_rolling(sim: &mut Simulation, rid: RegionId) {
     };
     let world = &mut region.world;
     let mut pushes = Vec::new();
-    for pair in world.narrow_phase.contact_pairs() {
+    // Only a pair with an awake body can need a push: walk the awake bodies' contacts rather
+    // than every resting pair in the region (each pair once).
+    let key = |pair: &ContactPair| {
+        (
+            pair.collider1.into_raw_parts(),
+            pair.collider2.into_raw_parts(),
+        )
+    };
+    let mut awake: Vec<&ContactPair> = world
+        .islands
+        .active_bodies()
+        .filter_map(|h| world.bodies.get(h))
+        .filter(|rb| rb.is_dynamic())
+        .flat_map(|rb| rb.colliders())
+        .flat_map(|&c| world.narrow_phase.contact_pairs_with(c))
+        .collect();
+    awake.sort_unstable_by_key(|pair| key(pair));
+    awake.dedup_by_key(|pair| key(pair));
+    for pair in awake {
         if !pair.has_any_active_contact() {
             continue;
         }

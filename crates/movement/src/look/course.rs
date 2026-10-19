@@ -2566,7 +2566,7 @@ fn build_tower() -> Kit {
     // gap stays open) and the north-west corner (the mantle edge stays open).
     let rail_y = [top + 0.55, top + 1.07];
     let rail_off = 0.05;
-    let ladder_x = t1.x - 1.8;
+    let ladder_x = layout::LADDER_BOTTOM[0] as f32;
     for side in [-1.0f32, 1.0] {
         let z = if side < 0.0 {
             t0.z - rail_off
@@ -2712,7 +2712,7 @@ fn build_tower() -> Kit {
         let hoop: Vec<Vec3> = (0..=12)
             .map(|k| {
                 let a = k as f32 / 12.0 * PI;
-                cage_c(y) + v3(-a.cos() * 0.36, 0.0, a.sin() * 0.38)
+                cage_c(y) + v3(-a.cos() * 0.36, 0.0, a.sin() * 0.68)
             })
             .collect();
         steel.append(&pipe(&hoop, 0.012, 6), Mat4::IDENTITY);
@@ -2720,7 +2720,7 @@ fn build_tower() -> Kit {
     }
     for k in 1..6 {
         let a = k as f32 / 6.0 * PI;
-        let o = v3(-a.cos() * 0.36, 0.0, a.sin() * 0.38);
+        let o = v3(-a.cos() * 0.36, 0.0, a.sin() * 0.68);
         steel.append(
             &rod(cage_c(2.5) + o, cage_c(top + 1.0) + o, 0.01, 5),
             Mat4::IDENTITY,

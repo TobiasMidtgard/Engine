@@ -7,10 +7,11 @@
 //!   events make a loud one.
 //! * Procedural gaits report every footfall the same way (a `footstep` event on the foot's
 //!   bone and a contact with the creature's weight).
+//! * A body that has mostly gone limp (`Ragdoll` weight 0.5 and up) takes no steps.
 //! * Vehicle rigs report each wheel's contact every frame (tire tracks).
 
 use engine_core::prelude::*;
-use engine_world::animation::{AnimationEvent, AnimationParams};
+use engine_world::animation::{AnimationEvent, AnimationParams, Ragdoll};
 use engine_world::{ContactKind, Ground, GroundContact, NoiseEvent};
 
 use crate::animator::Animator;
@@ -36,11 +37,17 @@ pub(crate) fn emit_events(
         Option<&AnimationParams>,
         Option<&mut LeggedGait>,
         Option<&mut VehicleRig>,
+        Option<&Ragdoll>,
     )>,
 ) {
-    for (entity, animator, gt, foot_ik, params, gait, vehicle) in &mut q {
+    for (entity, animator, gt, foot_ik, params, gait, vehicle, ragdoll) in &mut q {
         let yaw = GroundContact::yaw_of(gt.rotation() * Vec3::NEG_Z);
+        // A body that has mostly gone limp doesn't step (its parts report their own falls).
+        let down = ragdoll.is_some_and(|r| r.weight >= 0.5);
         for e in &animator.events {
+            if down && e.name.starts_with("footstep") {
+                continue;
+            }
             anim_events.write(AnimationEvent {
                 entity,
                 name: e.name.clone(),
@@ -94,6 +101,9 @@ pub(crate) fn emit_events(
             let feet: Vec<Option<String>> =
                 gait.legs.iter().map(|l| l.bones.last().cloned()).collect();
             for f in gait.take_footfalls() {
+                if down {
+                    continue;
+                }
                 let (kind, size) = kinds.get(f.leg).copied().unwrap_or_default();
                 anim_events.write(AnimationEvent {
                     entity,
