@@ -8,6 +8,7 @@ pub mod character;
 pub mod clip;
 pub mod demo;
 pub mod events;
+pub mod face;
 pub mod graph;
 pub mod horse_model;
 pub mod ik;
@@ -28,6 +29,7 @@ pub use attach::{BoneAttachment, Hang};
 pub use body::{Body, BodyKind, BodyMotion};
 pub use character::{HumanModel, HumanModels};
 pub use clip::AnimationClip;
+pub use face::{Face, FaceControls, FaceRig};
 pub use graph::{AnimGraph, NodeDef};
 pub use horse_model::{HorseModel, HorseModels};
 pub use ik::{FootIk, IkShape, IkSurface, LegIk, LookAt, Reach, ReachIk};
@@ -154,6 +156,7 @@ impl Plugin for AnimationPlugin {
                 (
                     animator::publish_pose,
                     retarget::retarget_poses,
+                    face::face_system,
                     (
                         skin::update_skin_poses,
                         attach::attachment_system,
@@ -212,6 +215,10 @@ fn register_types(app: &mut App) {
     .register_component::<HandGrip>(
         "Keeps a character's hands closed at least this much (left, right: 0..1), as when it \
          carries something.",
+    )
+    .register_component::<Face>(
+        "Living face on an imported person with face joints: blinks (per minute), gaze at \
+         look_at or its LookAt target, effort and limp expressions (expressiveness, 1 = normal).",
     );
 }
 
