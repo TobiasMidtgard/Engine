@@ -444,16 +444,28 @@ fn quest_tracker(p: &crate::theme::Palette) -> El {
             El::new()
                 .class("row")
                 .with_style(|s| s.gap(10.0).margin([2.0, 0.0, 0.0, 20.0]))
-                .child(El::new().with_style(|s| s.grow(1.0)).child(bar(
-                    "quest.progress",
-                    "quest.progress_max",
-                    p.accent_dark,
-                    p.accent,
-                    4.0,
-                    3,
-                    0.0,
-                    false,
-                )))
+                .child(
+                    El::new().with_style(|s| s.grow(1.0)).child(
+                        El::new()
+                            .class("bar_track")
+                            .paint("bar")
+                            .attach(
+                                "Bar",
+                                &Bar {
+                                    unit_ticks: true,
+                                    ..Bar::bound(
+                                        "quest.progress",
+                                        "quest.progress_max",
+                                        p.accent_dark,
+                                        p.accent,
+                                    )
+                                },
+                            )
+                            .with_style(|s| {
+                                s.width(pct(100.0)).height(4.0).radius(Corners::all(2.0))
+                            }),
+                    ),
+                )
                 .child(
                     El::text("{quest.progress} / {quest.progress_max}")
                         .text_style(|t| t.tabular().nowrap())
@@ -662,6 +674,7 @@ fn weapon(p: &crate::theme::Palette) -> El {
                 })
                 .child(
                     El::icon("pistol")
+                        .id("hud_weapon_icon")
                         .with_style(|s| s.size(54.0, 54.0))
                         .pick_ignore(),
                 ),
@@ -865,10 +878,13 @@ pub fn hud_system(world: &mut World) {
     }
 
     if let Some(root) = screens::find_screen(world, "hud") {
-        let prompt_on = world
-            .get_resource::<UiData>()
-            .and_then(|d| d.get_str("prompt.verb"))
-            .is_some_and(|v| !v.is_empty());
+        // The interaction prompt sits where the wheel's middle is.
+        let wheel_open = screens::find_screen(world, "wheel").is_some();
+        let prompt_on = !wheel_open
+            && world
+                .get_resource::<UiData>()
+                .and_then(|d| d.get_str("prompt.verb"))
+                .is_some_and(|v| !v.is_empty());
         let health = match (
             data_f64(world, "player.health"),
             data_f64(world, "player.health_max"),
@@ -883,7 +899,12 @@ pub fn hud_system(world: &mut World) {
         let pad = world
             .get_resource::<UiData>()
             .and_then(|d| d.get_str("prompt.pad").map(String::from));
+        let quest_on = world
+            .get_resource::<UiData>()
+            .and_then(|d| d.get_str("quest.title"))
+            .is_some_and(|t| !t.is_empty());
         set_opacity(world, root, "hud_prompt", if prompt_on { 1.0 } else { 0.0 });
+        set_opacity(world, root, "hud_quest", if quest_on { 1.0 } else { 0.0 });
         set_opacity(world, root, "hud_time", if dilated { 1.0 } else { 0.0 });
         set_opacity(
             world,
@@ -891,6 +912,18 @@ pub fn hud_system(world: &mut World) {
             "hud_vignette",
             ((0.35 - health) / 0.35).clamp(0.0, 1.0),
         );
+        let weapon_icon = world
+            .get_resource::<UiData>()
+            .and_then(|d| d.get_str("weapon.icon"))
+            .filter(|i| !i.is_empty())
+            .map(String::from);
+        if let Some(name) = weapon_icon
+            && let Some(e) = screens::find_in(world, root, "hud_weapon_icon")
+            && let Some(mut icon) = world.get_mut::<Icon>(e)
+            && icon.name != name
+        {
+            icon.name = name;
+        }
         if let Some(e) = screens::find_in(world, root, "hud_prompt_key")
             && let Some(mut k) = world.get_mut::<KeyHint>(e)
         {
@@ -921,14 +954,16 @@ fn set_opacity(world: &mut World, root: Entity, id: &str, opacity: f32) {
 }
 
 /// The HUD fades out while a menu (any other modal screen: dialogue, shop, inventory, map,
-/// settings) is open, and back in when it closes.
+/// settings) is open, and back in when it closes. It stays up under the quick-select wheel,
+/// so the ammo and the slow-motion gauge read while choosing; only the interaction prompt,
+/// which would sit in the wheel's middle, hides (in `hud_system`).
 fn step_aside_for_menus(world: &mut World) {
     let Some(root) = screens::find_screen(world, "hud") else {
         return;
     };
     let menu_open = screens::open_screens(world)
         .iter()
-        .any(|(key, _, _, modal)| *modal && key != "hud");
+        .any(|(key, _, _, modal)| *modal && !matches!(key.as_str(), "hud" | "wheel"));
     let dt = world.resource::<Time>().real_delta_secs().min(0.1);
     let Some(mut n) = world.get_mut::<Node>(root) else {
         return;
@@ -954,6 +989,11 @@ fn markers_update(world: &mut World) {
             .unwrap_or(1.0);
         presence * shown
     });
+    // Markers step aside while the quick-select wheel covers the middle of the screen.
+    let wheel = screens::find_screen(world, "wheel").map_or(1.0, |e| {
+        1.0 - world.get::<Screen>(e).map_or(1.0, |s| s.presence)
+    });
+    let hud = hud * wheel;
     let nav = world
         .get_resource::<MapData>()
         .and_then(|m| m.waypoint_nav())

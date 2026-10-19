@@ -373,6 +373,9 @@ pub struct WaterSettings {
     pub puddles: bool,
     /// Puddles are simulated within this distance of the focus, meters.
     pub puddle_radius_m: f32,
+    /// Water wets the ground it reaches (`SurfaceLayers::wetness`): a band of wet sand above a
+    /// lake's waterline, stream banks, the rock round a waterfall's foot.
+    pub wet_shores: bool,
     /// Interactors and splashes write `NoiseEvent`s AI can hear.
     pub noise_events: bool,
 }
@@ -388,6 +391,7 @@ impl Default for WaterSettings {
             rain_drops: 0.02,
             puddles: true,
             puddle_radius_m: 64.0,
+            wet_shores: true,
             noise_events: true,
         }
     }

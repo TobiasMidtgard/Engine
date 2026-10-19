@@ -1,6 +1,7 @@
 //! A landscape lake filled by `spawn_valley`: the lake holds water over its basin, the stream
-//! runs from its spring over a cliff into the lake and throws spray where it falls, and the
-//! boats moored at the jetty float and stay tied up.
+//! runs from its spring over a cliff into the lake and throws spray where it falls, the water
+//! wets the shore, the banks and the rock round the fall, and the boats moored at the jetty
+//! float and stay tied up.
 
 use std::sync::Arc;
 
@@ -8,7 +9,9 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_water::WaterPlugin;
 use engine_water::demo::{Valley, ValleyStream, spawn_valley};
-use engine_world::{Ground, GroundQuery, GroundSample, SurfaceId, Water, WaterSplash, WorldPlugin};
+use engine_world::{
+    Ground, GroundQuery, GroundSample, SurfaceId, SurfaceLayers, Water, WaterSplash, WorldPlugin,
+};
 
 /// The stream's course: from a spring on a plateau to the south, over a 5 m cliff at z = -80,
 /// into the lake.
@@ -139,6 +142,29 @@ fn the_valley_fills_flows_and_moors() {
     // The fall throws spray (as `WaterSplash` puffs for particles and audio).
     let spray = app.world.resource::<Spray>().0;
     assert!(spray > 1.0, "only {spray} kg of spray");
+
+    // The water wets the ground it reaches: a band of sand at the lake's waterline (r = 38.1 m),
+    // the stream's banks and the foot of the fall, soaked by its spray (nothing else soaks the
+    // ground that much). Higher ground stays dry, and the lake bed is left alone.
+    let surface = app.world.resource::<SurfaceLayers>();
+    let wet = |x: f64, z: f64| surface.sample(DVec3::new(x, 0.0, z)).wetness;
+    for x in [37.5, 38.5] {
+        assert!(wet(x, 0.5) > 0.9, "shore at x = {x}: {}", wet(x, 0.5));
+    }
+    assert_eq!(wet(50.5, 0.5), 0.0, "dry land");
+    assert_eq!(wet(30.5, 0.5), 0.0, "lake bed");
+    for x in [-3.5, 3.5] {
+        assert!(wet(x, -60.5) > 0.4, "bank at x = {x}: {}", wet(x, -60.5));
+    }
+    assert_eq!(wet(12.5, -60.5), 0.0, "away from the stream");
+    // The jetty runs out from the north shore along x = 0: its deck stays dry over the band.
+    assert_eq!(wet(0.5, 38.5), 0.0, "under the jetty");
+    assert!(wet(3.5, 38.5) > 0.5, "beside the jetty {}", wet(3.5, 38.5));
+    let soaked = (-3..=3)
+        .flat_map(|i| (-81..=-74).map(move |j| (i as f64 + 0.5, j as f64 + 0.5)))
+        .map(|(x, z)| wet(x, z))
+        .fold(0.0f32, f32::max);
+    assert!(soaked > 0.97, "the fall's foot: {soaked}");
 
     // The jetty stands on the north bank; the boats float beside it and stay tied up.
     let jetty = find(&mut app, "Jetty");

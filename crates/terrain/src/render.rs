@@ -21,7 +21,7 @@ use crate::cube::NodeKey;
 use crate::deform::DeformationMap;
 use crate::lod::{Lod, SelectInput};
 use crate::materials::{self, BakedMaterials, MATERIAL_COUNT};
-use crate::{TerrainSettings, Terrains};
+use crate::{TerrainRuntime, TerrainSettings, Terrains};
 
 const SHADER: &str = include_str!("terrain.wgsl");
 const SHADOW_SHADER: &str = include_str!("terrain_shadow.wgsl");
@@ -30,6 +30,10 @@ const SHADOW_SHADER: &str = include_str!("terrain_shadow.wgsl");
 const SLOTS_PER_PAGE: u32 = 256;
 /// Frames a patch may go unused before its slot is reused.
 const STALE_FRAMES: u64 = 300;
+/// Detail of the patches drawn into the far shadow map, relative to the view's.
+const FAR_SHADOW_DETAIL: f64 = 0.5;
+/// Most [`TerrainSettings::patch_budget`] may raise the detail.
+const MAX_BOOST: f64 = 4.0;
 
 /// Per-draw data (instance vertex buffer).
 #[repr(C)]
@@ -110,7 +114,20 @@ struct PlanetGpu {
     params2: [f32; 4],
     /// How far the terrain moved in the world since last frame (xyz, for motion vectors).
     motion: [f32; 4],
+    /// Regolith scattering (0..1), rayed craters in `rays`, young areas in `young`, unused.
+    params3: [f32; 4],
+    /// Rayed craters: planet-local unit direction of the center (xyz), radius on the ground
+    /// (w, meters).
+    rays: [[f32; 4]; MAX_RAYED],
+    /// Young ground with few craters: planet-local direction of the middle times its youth
+    /// (xyz), angular radius (w, radians).
+    young: [[f32; 4]; MAX_YOUNG],
 }
+
+/// Rayed craters per planet the shader draws.
+const MAX_RAYED: usize = 8;
+/// Young areas per planet the shader thins craters in.
+const MAX_YOUNG: usize = 12;
 
 /// Ground maps around the focus (uniform). Matches `Maps` in terrain.wgsl.
 #[repr(C)]
@@ -245,6 +262,50 @@ struct PlanetState {
     rebuild: Vec<NodeKey>,
     /// World position last frame (motion vectors for moving planets).
     last_position: Option<DVec3>,
+    /// The shape's rayed craters, packed for the shader.
+    rays: [[f32; 4]; MAX_RAYED],
+    rayed: usize,
+    /// The shape's young areas, packed for the shader.
+    young: [[f32; 4]; MAX_YOUNG],
+    young_count: usize,
+    /// Detail multiplier from [`TerrainSettings::patch_budget`] (1 = none).
+    boost: f64,
+}
+
+impl PlanetState {
+    fn new(t: &TerrainRuntime, src: &ChunkSource) -> Self {
+        let mut rays = [[0.0; 4]; MAX_RAYED];
+        let mut rayed = 0;
+        if src.map.is_sphere() {
+            for ((dir, r), slot) in t.config.shape.rayed_craters().into_iter().zip(&mut rays) {
+                *slot = [dir.x as f32, dir.y as f32, dir.z as f32, r as f32];
+                rayed += 1;
+            }
+        }
+        let mut young = [[0.0; 4]; MAX_YOUNG];
+        let mut young_count = 0;
+        if src.map.is_sphere() {
+            let shape = &t.config.shape;
+            for (a, slot) in shape.landforms.young_areas(shape.radius_m).zip(&mut young) {
+                let c = a.center * a.youth;
+                *slot = [c.x as f32, c.y as f32, c.z as f32, a.angle as f32];
+                young_count += 1;
+            }
+        }
+        Self {
+            lod: Lod::new(src.map, t.config.height_range(), t.config.finest_spacing_m),
+            version: t.version,
+            edits_seen: 0,
+            chunks: HashMap::new(),
+            rebuild: Vec::new(),
+            last_position: None,
+            rays,
+            rayed,
+            young,
+            young_count,
+            boost: 1.0,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -315,6 +376,8 @@ pub struct TerrainFeature {
     pool: SlotPool,
     draws: Vec<Draw>,
     shadow_draws: [Vec<Draw>; 4],
+    /// Patches drawn into the far shadow map (big shadows beyond the cascades).
+    far_shadow_draws: Vec<Draw>,
     deform_generation: u64,
     surface_frame: u64,
     /// Wetness and snow depth beyond the surface layers' grid (see [`beyond_grid`]).
@@ -921,6 +984,7 @@ impl RenderFeature for TerrainFeature {
         for s in &mut self.shadow_draws {
             s.clear();
         }
+        self.far_shadow_draws.clear();
         if self.gpu.is_none() {
             return;
         }
@@ -968,31 +1032,21 @@ impl RenderFeature for TerrainFeature {
         let mut planet_gpu = Vec::with_capacity(entities.len());
         let mut instances: Vec<ChunkInstance> = Vec::new();
         let mut built_total = 0usize;
+        let mut max_boost = 1.0f64;
         let max_slots = settings.max_patches as u32;
 
         for (pi, e) in entities.iter().enumerate() {
             let t = &terrains.entries[e];
             let src = t.source.clone();
-            let state = self.planets.entry(*e).or_insert_with(|| PlanetState {
-                lod: Lod::new(src.map, t.config.height_range(), t.config.finest_spacing_m),
-                version: t.version,
-                edits_seen: 0,
-                chunks: HashMap::new(),
-                rebuild: Vec::new(),
-                last_position: None,
-            });
+            let state = self
+                .planets
+                .entry(*e)
+                .or_insert_with(|| PlanetState::new(t, &src));
             if state.version != t.version {
                 for c in state.chunks.values() {
                     self.pool.release(c.slot);
                 }
-                *state = PlanetState {
-                    lod: Lod::new(src.map, t.config.height_range(), t.config.finest_spacing_m),
-                    version: t.version,
-                    edits_seen: 0,
-                    chunks: HashMap::new(),
-                    rebuild: Vec::new(),
-                    last_position: None,
-                };
+                *state = PlanetState::new(t, &src);
             }
             // Edited areas: rebuild the patches that cover them, keeping the old ones drawn.
             if state.edits_seen < t.edit_log.len() {
@@ -1019,7 +1073,7 @@ impl RenderFeature for TerrainFeature {
                 let rel = (pos + rot * c - origin).as_vec3();
                 frustum.intersects_sphere(rel, r as f32)
             };
-            let split = settings.split_factor * t.config.detail.max(0.05) as f64;
+            let split = settings.split_factor * t.config.detail.max(0.05) as f64 * state.boost;
 
             // Select; after a jump (many patches missing) build until the view is complete.
             let mut sel;
@@ -1029,6 +1083,7 @@ impl RenderFeature for TerrainFeature {
                     camera: cam_local,
                     split_factor: split,
                     visible: &visible,
+                    min_size: 0.0,
                 });
                 let catch_up =
                     sel.missing.len() > settings.catch_up_threshold || state.chunks.is_empty();
@@ -1050,40 +1105,8 @@ impl RenderFeature for TerrainFeature {
                 if batch.is_empty() {
                     break;
                 }
-                // Free stale patches if the pool is getting full.
-                if self.pool.used() + batch.len() as u32 + SLOTS_PER_PAGE > max_slots {
-                    for k in state.lod.stale(30) {
-                        if let Some(c) = state.chunks.remove(&k) {
-                            self.pool.release(c.slot);
-                        }
-                        state.lod.unbuild(k);
-                    }
-                }
-                let meshes = build_parallel(&src, &batch);
-                built_total += meshes.len();
-                for m in meshes {
-                    let slot = match state.chunks.get(&m.key) {
-                        Some(c) => Some(c.slot),
-                        None => self.pool.alloc(&gpu_shared.device, max_slots),
-                    };
-                    let Some(slot) = slot else {
-                        break;
-                    };
-                    self.pool.write(&gpu_shared.queue, slot, &m.vertices);
-                    state
-                        .lod
-                        .set_built(m.key, m.min_height, m.max_height, m.center, m.radius);
-                    state.chunks.insert(
-                        m.key,
-                        ChunkGpu {
-                            slot,
-                            origin: m.origin,
-                            center: m.center,
-                            radius: m.radius,
-                            spacing: m.spacing,
-                        },
-                    );
-                }
+                built_total +=
+                    build_into(&mut self.pool, state, &src, &batch, gpu_shared, max_slots);
                 rounds += 1;
                 if !catch_up || rounds > 40 {
                     // One more pass picks up what was just built.
@@ -1091,10 +1114,70 @@ impl RenderFeature for TerrainFeature {
                         camera: cam_local,
                         split_factor: split,
                         visible: &visible,
+                        min_size: 0.0,
                     });
                     break;
                 }
             }
+
+            // Few patches for the planet's share of the view (seen from orbit): split finer,
+            // easing toward the detail that fills the budget. The patch count grows with the
+            // square of the split factor.
+            if settings.patch_budget > 0 {
+                let dist = cam_local.length().max(1.0);
+                let angle = (src.map.radius / dist).min(1.0).asin();
+                let share = if view.fov_y > 0.0 {
+                    (angle / (0.5 * view.fov_y as f64)).min(1.0).powi(2)
+                } else {
+                    1.0
+                };
+                let budget = settings.patch_budget as f64 * share;
+                let needed = (sel.draw.len() + sel.missing.len()).max(1) as f64;
+                let base = needed / (state.boost * state.boost);
+                let want = (budget / base).sqrt().clamp(1.0, MAX_BOOST);
+                // While much of the view is still streaming in (after a jump), its count falls
+                // short of what it needs: then the detail only eases down.
+                if want < state.boost || sel.missing.len() * 10 <= sel.draw.len() {
+                    state.boost += (want - state.boost) * 0.2;
+                }
+                max_boost = max_boost.max(state.boost);
+            }
+
+            // The far shadow map: the same walk from the camera over the ground the map covers,
+            // so ridges outside the view shade the valley kilometers away. Shadows fall away from
+            // the sun, so on that side only what lies within the map's reach counts. One level
+            // coarser than the view (the map's texels are meters across, and its bias covers the
+            // difference), stopping at patches with vertices about half a texel apart; it builds
+            // what it lacks a few patches a frame after the view's own, drawing parents meanwhile.
+            let far = view.far_shadow;
+            let sun = view.sun_dir;
+            let far_sel = (t.config.cast_shadows && view.sun_shadows && far.enabled).then(|| {
+                let far_visible = move |c: DVec3, r: f64| {
+                    let rel = (pos + rot * c - origin).as_vec3();
+                    let r = r as f32;
+                    far.casts(rel, r)
+                        && (rel.dot(sun) + r >= 0.0 || rel.length() <= far.half_extent + r)
+                };
+                let input = SelectInput {
+                    camera: cam_local,
+                    split_factor: split * FAR_SHADOW_DETAIL,
+                    visible: &far_visible,
+                    min_size: far.texel() as f64 * 0.5 * crate::chunk::QUADS as f64,
+                };
+                let mut far_sel = state.lod.walk(&input);
+                let batch: Vec<NodeKey> = far_sel
+                    .missing
+                    .iter()
+                    .take((settings.builds_per_frame / 2).max(1))
+                    .map(|m| m.1)
+                    .collect();
+                if !batch.is_empty() {
+                    built_total +=
+                        build_into(&mut self.pool, state, &src, &batch, gpu_shared, max_slots);
+                    far_sel = state.lod.walk(&input);
+                }
+                far_sel
+            });
 
             // Recycle patches nobody has looked at for a while.
             if self.frame.is_multiple_of(60) {
@@ -1109,17 +1192,20 @@ impl RenderFeature for TerrainFeature {
             // Draw lists.
             let rot_f = Mat3::from_quat(rot.as_quat());
             let casts = t.config.cast_shadows && view.sun_shadows;
+            // The parent takes over at `split` parent sizes; be fully morphed by then.
+            let morph = |level: u8| {
+                if settings.geomorph && level > 0 {
+                    let merge = (split * state.lod.map.node_size(level - 1)) as f32;
+                    (merge * 0.75, merge * 0.98)
+                } else {
+                    (0.0, 0.0)
+                }
+            };
             for key in &sel.draw {
                 let Some(c) = state.chunks.get(key) else {
                     continue;
                 };
-                // The parent takes over at `split` parent sizes; be fully morphed by then.
-                let morph = if settings.geomorph && key.level > 0 {
-                    let merge = (split * state.lod.map.node_size(key.level - 1)) as f32;
-                    (merge * 0.75, merge * 0.98)
-                } else {
-                    (0.0, 0.0)
-                };
+                let morph = morph(key.level);
                 let rel = (pos + rot * c.origin - view.origin).as_vec3();
                 let instance = instances.len() as u32;
                 instances.push(ChunkInstance {
@@ -1142,6 +1228,23 @@ impl RenderFeature for TerrainFeature {
                         }
                     }
                 }
+            }
+            for key in far_sel.iter().flat_map(|s| &s.draw) {
+                let Some(c) = state.chunks.get(key) else {
+                    continue;
+                };
+                let morph = morph(key.level);
+                let rel = (pos + rot * c.origin - view.origin).as_vec3();
+                let instance = instances.len() as u32;
+                instances.push(ChunkInstance {
+                    origin: rel.to_array(),
+                    planet: pi as u32,
+                    lod: [c.spacing as f32, key.level as f32, morph.0, morph.1],
+                });
+                self.far_shadow_draws.push(Draw {
+                    slot: c.slot,
+                    instance,
+                });
             }
 
             let p = &t.config.palette;
@@ -1188,6 +1291,14 @@ impl RenderFeature for TerrainFeature {
                     t.config.shape.crater_seed() as f32,
                 ],
                 motion: motion.extend(0.0).to_array(),
+                params3: [
+                    p.regolith,
+                    state.rayed as f32,
+                    state.young_count as f32,
+                    0.0,
+                ],
+                rays: state.rays,
+                young: state.young,
             });
         }
         self.built_last_frame = built_total;
@@ -1197,6 +1308,8 @@ impl RenderFeature for TerrainFeature {
         for s in &mut self.shadow_draws {
             s.sort_by_key(|d| d.slot / SLOTS_PER_PAGE);
         }
+        self.far_shadow_draws
+            .sort_by_key(|d| d.slot / SLOTS_PER_PAGE);
 
         let mut maps = maps;
         maps.flags[2] = if settings.wireframe_lod { 1.0 } else { 0.0 };
@@ -1225,16 +1338,22 @@ impl RenderFeature for TerrainFeature {
 
         let tris_per_patch = (self.gpu.as_ref().map(|g| g.index_count).unwrap_or(0) / 3) as u64;
         self.stats = FeatureStats {
-            draw_calls: (self.draws.len() + self.shadow_draws.iter().map(Vec::len).sum::<usize>())
-                as u32,
+            draw_calls: (self.draws.len()
+                + self.shadow_draws.iter().map(Vec::len).sum::<usize>()
+                + self.far_shadow_draws.len()) as u32,
             instances: self.draws.len() as u32,
             triangles: self.draws.len() as u64 * tris_per_patch,
             culled: 0,
         };
         if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
             d.set("terrain.patches_drawn", self.draws.len() as f64);
+            d.set(
+                "terrain.far_shadow_patches",
+                self.far_shadow_draws.len() as f64,
+            );
             d.set("terrain.patches_resident", self.pool.used() as f64);
             d.set("terrain.patches_built", built_total as f64);
+            d.set("terrain.detail_boost", max_boost);
         }
     }
 
@@ -1283,6 +1402,21 @@ impl RenderFeature for TerrainFeature {
         self.draw_list(pass, gpu, &self.shadow_draws[cascade]);
     }
 
+    fn draw_far_shadow(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
+        if self.far_shadow_draws.is_empty() {
+            return;
+        }
+        let Some(gpu) = &self.gpu else {
+            return;
+        };
+        let Some(group) = &gpu.group else {
+            return;
+        };
+        pass.set_pipeline(&gpu.shadow_pipeline);
+        pass.set_bind_group(1, group, &[]);
+        self.draw_list(pass, gpu, &self.far_shadow_draws);
+    }
+
     fn stats(&self) -> FeatureStats {
         self.stats
     }
@@ -1291,6 +1425,7 @@ impl RenderFeature for TerrainFeature {
         serde_json::json!({
             "terrains": self.planets.len(),
             "patches_drawn": self.draws.len(),
+            "far_shadow_patches": self.far_shadow_draws.len(),
             "patches_resident": self.pool.used(),
             "patches_built_last_frame": self.built_last_frame,
             "gpu_pages": self.pool.pages.len(),
@@ -1313,6 +1448,52 @@ impl TerrainFeature {
             pass.draw_indexed(0..gpu.index_count, base, d.instance..d.instance + 1);
         }
     }
+}
+
+/// Build `batch` into vertex slots, first freeing patches unused for a while if the pool is
+/// filling up. Returns how many were built.
+fn build_into(
+    pool: &mut SlotPool,
+    state: &mut PlanetState,
+    src: &ChunkSource,
+    batch: &[NodeKey],
+    gpu_shared: &GpuShared,
+    max_slots: u32,
+) -> usize {
+    if pool.used() + batch.len() as u32 + SLOTS_PER_PAGE > max_slots {
+        for k in state.lod.stale(30) {
+            if let Some(c) = state.chunks.remove(&k) {
+                pool.release(c.slot);
+            }
+            state.lod.unbuild(k);
+        }
+    }
+    let meshes = build_parallel(src, batch);
+    let built = meshes.len();
+    for m in meshes {
+        let slot = match state.chunks.get(&m.key) {
+            Some(c) => Some(c.slot),
+            None => pool.alloc(&gpu_shared.device, max_slots),
+        };
+        let Some(slot) = slot else {
+            break;
+        };
+        pool.write(&gpu_shared.queue, slot, &m.vertices);
+        state
+            .lod
+            .set_built(m.key, m.min_height, m.max_height, m.center, m.radius);
+        state.chunks.insert(
+            m.key,
+            ChunkGpu {
+                slot,
+                origin: m.origin,
+                center: m.center,
+                radius: m.radius,
+                spacing: m.spacing,
+            },
+        );
+    }
+    built
 }
 
 /// Build patches on the compute pool.
@@ -1376,9 +1557,43 @@ mod tests {
     }
 
     #[test]
+    fn shader_structs_match_the_buffers() {
+        use wgpu::naga;
+        for (label, code, maps) in [
+            ("terrain", compose_shader(SHADER, true), true),
+            (
+                "terrain shadow",
+                compose_shader(SHADOW_SHADER, false),
+                false,
+            ),
+        ] {
+            let module = naga::front::wgsl::parse_str(&code).unwrap();
+            let size = |name: &str| {
+                module
+                    .types
+                    .iter()
+                    .find(|(_, t)| t.name.as_deref() == Some(name))
+                    .map(|(_, t)| t.inner.size(module.to_ctx()) as usize)
+            };
+            let planet = size("PlanetGpu");
+            assert_eq!(planet, Some(std::mem::size_of::<PlanetGpu>()), "{label}");
+            if maps {
+                assert_eq!(
+                    size("Maps"),
+                    Some(std::mem::size_of::<MapsGpu>()),
+                    "{label}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn gpu_structs_match_shader_sizes() {
-        assert_eq!(std::mem::size_of::<PlanetGpu>(), 16 * (3 + 1 + 10 + 3));
+        assert_eq!(
+            std::mem::size_of::<PlanetGpu>(),
+            16 * (3 + 1 + 10 + 4 + MAX_RAYED + MAX_YOUNG)
+        );
         assert_eq!(std::mem::size_of::<MapsGpu>(), 64);
-        assert_eq!(std::mem::size_of::<TerrainVertex>(), 44);
+        assert_eq!(std::mem::size_of::<TerrainVertex>(), 48);
     }
 }

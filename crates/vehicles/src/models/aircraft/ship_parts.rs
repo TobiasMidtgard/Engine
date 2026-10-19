@@ -1,5 +1,6 @@
 //! The spaceplane's parts outside the textured skins: main engine bells, hover engine wells,
-//! RCS ports, landing gear, gear doors, window frames, the docking port and the crew hatch.
+//! RCS ports, landing-gear tires, window frames, the docking port and the crew hatch (the
+//! folding legs and doors are in [`super::ship_gear`]).
 //! All in the body frame unless noted.
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -308,65 +309,6 @@ pub fn twin_tires(radius: f32, width: f32, gap: f32) -> (Mesh, Mesh) {
         Mat4::from_rotation_z(FRAC_PI_2),
     ));
     (tires, hubs)
-}
-
-/// A gear leg from the belly at `top` down to the axle at `axle`: the outer cylinder, the
-/// chrome piston, a torque link and a drag brace forward. Returns (painted, chrome).
-pub fn gear_leg(top: Vec3, axle: Vec3, r: f32, brace_to: Vec3) -> (Mesh, Mesh) {
-    let mut paint = Mesh::default();
-    let mut chrome = Mesh::default();
-    let mid = top.lerp(axle, 0.55);
-    paint.merge(&tube(&[top + Vec3::Y * 0.05, mid], |_| r, 18, true));
-    chrome.merge(&tube(&[mid, axle + Vec3::Y * 0.02], |_| r * 0.72, 16, true));
-    // Collar at the gland.
-    paint.merge(&tube(
-        &[mid + Vec3::Y * 0.03, mid - Vec3::Y * 0.03],
-        |_| r * 1.12,
-        18,
-        true,
-    ));
-    // Torque link (two arms on the front).
-    let f = Vec3::new(0.0, 0.0, -r * 1.6);
-    let k = mid.lerp(axle, 0.5) + f;
-    paint.merge(&tube(&[mid + f * 0.6, k], |_| 0.022, 8, true));
-    paint.merge(&tube(
-        &[k, axle + Vec3::Y * 0.10 + f * 0.6],
-        |_| 0.022,
-        8,
-        true,
-    ));
-    // Drag brace.
-    paint.merge(&tube(
-        &[top.lerp(mid, 0.6), brace_to],
-        |_| r * 0.45,
-        12,
-        true,
-    ));
-    (paint, chrome)
-}
-
-/// A gear door hanging from its hinge line `a`–`b`, `depth` meters down, `outward` the side
-/// its tiled face looks to. Returns (tiled outer skin, structure inside).
-pub fn gear_door(a: Vec3, b: Vec3, depth: f32, outward: Vec3) -> (Mesh, Mesh) {
-    let along = b - a;
-    let len = along.length();
-    let c = (a + b) * 0.5 - Vec3::Y * depth * 0.5;
-    let q = Quat::from_rotation_arc(Vec3::Z, along / len);
-    let half = Vec3::new(0.012, depth * 0.5, len * 0.5);
-    let outer = transformed(
-        rounded_box(half, 0.008, 2),
-        Mat4::from_translation(c + outward * 0.004) * Mat4::from_quat(q),
-    );
-    // Stiffeners on the inside.
-    let mut inner = Mesh::default();
-    for k in 0..4 {
-        let t = (k as f32 + 0.5) / 4.0 - 0.5;
-        inner.merge(&transformed(
-            rounded_box(Vec3::new(0.02, depth * 0.45, 0.012), 0.004, 2),
-            Mat4::from_translation(c - outward * 0.025 + along * t) * Mat4::from_quat(q),
-        ));
-    }
-    (outer, inner)
 }
 
 // ---------------------------------------------------------------- windows, hatch, dock

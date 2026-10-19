@@ -1,7 +1,7 @@
 //! Close-up stills of every stretch of the footstep trail, for judging the ground and props:
 //! one view from eye height (1.7 m) along the path and one low three-quarter view from the
-//! side, plus a wide view of the whole loop. Same scene as `trail_recording` (sun, grass
-//! plane, trees). Views of where one ground meets the next are named after both
+//! side, plus a wide view of the whole loop. Same scene as `trail_recording` (sun, lawn
+//! and trees). Views of where one ground meets the next are named after both
 //! (`mud-snow`, `snow-ice`, ...) and rendered only when asked for with `--only`.
 //!
 //! ```text
@@ -21,13 +21,14 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use engine_audio::demo::{STRETCHES, TrailWalker, spawn_demo, stretch_start, trail_point};
+use engine_audio::demo::{
+    STRETCHES, SoundRings, TrailWalker, spawn_backdrop, spawn_demo, stretch_start, trail_point,
+};
 use engine_audio::{AudioOutput, AudioPlugin, AudioSettings};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_render::{
-    Atmosphere, Camera, DirectionalLight, Exposure, Mesh, MeshRenderer, RenderPlugin, ResolvedMesh,
-    Screenshots, Shape, StandardMaterial,
+    Atmosphere, Camera, DirectionalLight, Exposure, Mesh, RenderPlugin, ResolvedMesh, Screenshots,
 };
 use engine_world::WorldPlugin;
 
@@ -132,9 +133,24 @@ fn main() {
         for e in walkers {
             app.world.despawn(e);
         }
+        // No walkers, no sounds: the rings of the first frame's steps would otherwise stay
+        // lit in every view (the clock barely moves between stills).
+        app.world.resource_mut::<SoundRings>().enabled = false;
     }
     // Let shaders compile and the first uploads happen.
     app.update();
+    if !o.walkers {
+        let rings: Vec<Entity> = app
+            .world
+            .query::<(Entity, &Name)>()
+            .iter(&app.world)
+            .filter(|(_, n)| n.as_str() == "Sound ring")
+            .map(|(e, _)| e)
+            .collect();
+        for e in rings {
+            app.world.despawn(e);
+        }
+    }
 
     // Name, views, and whether it is only rendered when asked for by name.
     let mut shots: Vec<(String, Vec<View>, bool)> = Vec::new();
@@ -299,76 +315,9 @@ fn setup(mut commands: Commands, demo: Res<WithDemo>) {
         DirectionalLight::default(),
         Transform::default().looking_at(DVec3::new(-0.55, -0.42, -0.62), Vec3::Y),
     ));
-    let grass = StandardMaterial::hex(0x55743a).with_roughness(0.95);
-    commands.spawn((
-        Transform::from_translation(origin),
-        MeshRenderer::new(
-            Shape::Plane {
-                size: [800.0, 800.0],
-                subdivisions: 1,
-            },
-            grass,
-        ),
-    ));
-    // The trees of `trail_recording`.
-    let bark = StandardMaterial::hex(0x5a4030).with_roughness(0.9);
-    let leaves = [0x3f6b2a, 0x557f2c, 0x2f5a2f].map(|c| {
-        StandardMaterial::hex(c)
-            .with_roughness(0.7)
-            .with_subsurface(0.45)
-            .with_wind_sway(0.3)
-    });
-    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
-    let mut rnd = move || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        (seed >> 11) as f64 / (1u64 << 53) as f64
-    };
-    for i in 0..60 {
-        let a = rnd() * std::f64::consts::TAU;
-        let p = if i < 6 {
-            DVec3::new((rnd() - 0.5) * 26.0, 0.0, (rnd() - 0.5) * 3.0)
-        } else {
-            let r = 16.0 + rnd() * 34.0;
-            DVec3::new(a.cos() * (r + 22.0), 0.0, a.sin() * r)
-        };
-        let p = origin + p;
-        let h = 3.5 + rnd() as f32 * 4.5;
-        commands.spawn((
-            Transform::from_translation(p + DVec3::new(0.0, h as f64 * 0.5, 0.0)),
-            MeshRenderer::new(
-                Shape::Cylinder {
-                    radius: 0.1 + h * 0.015,
-                    height: h,
-                    segments: 10,
-                },
-                bark,
-            ),
-        ));
-        let crown = 1.1 + h * 0.2;
-        for (k, (dx, dy, dz, r)) in [
-            (0.0, 0.2, 0.0, 1.0),
-            (0.45, 0.75, -0.25, 0.7),
-            (-0.4, 0.55, 0.35, 0.75),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let c = DVec3::new(dx, dy, dz) * crown as f64;
-            commands.spawn((
-                Transform::from_translation(p + DVec3::new(0.0, h as f64, 0.0) + c)
-                    .with_scale(Vec3::new(1.0, 0.85, 1.0)),
-                MeshRenderer::new(
-                    Shape::Sphere {
-                        radius: crown * r as f32,
-                        segments: 18,
-                    },
-                    leaves[(i + k) % 3],
-                ),
-            ));
-        }
-    }
+    // Ground, a lawn where the trail's meadow ends, and trees placed so their shadows
+    // miss the trail.
+    spawn_backdrop(&mut commands, origin);
     if demo.0 {
         spawn_demo(&mut commands, origin);
     }

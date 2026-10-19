@@ -67,8 +67,8 @@ pub(super) fn ground() -> Out {
             s1: snow.s1 + 0.04,
             fade_in: 0.0,
             fade_out: 0.0,
-            ds: 0.02,
-            columns: columns(3.4, 0.02, 1.4, 0.03, 3.4, 0.03),
+            ds: 0.016,
+            columns: columns(3.4, 0.016, 0.8, 0.02, 1.45, 0.03),
             surface: &surface,
             shadows: true,
         }),
@@ -120,7 +120,7 @@ impl Snow {
     pub fn new() -> Self {
         let (s0, s1) = range("snow");
         let (i0, i1) = range("ice");
-        let mut p = Prints::walkers(s0 + 0.5, s1 - 0.6, 0x9002, 0.017).0;
+        let mut p = Prints::walkers(s0 + 0.5, s1 - 0.6, 0x9002, 0.017).list;
         let mut rng = Rand::new(0x5e0);
         // Old prints trodden over and over, softened by melt and fresh falls: most in the
         // trench, some in the passing track, both ways along the trail.
@@ -167,9 +167,9 @@ impl Snow {
                         x: x + foot + rng.normal(0.03),
                         yaw: side * rng.range(0.1, 0.45) + rng.normal(0.08),
                         kind: PrintKind::Boot,
-                        depth: rng.range(0.03, 0.05),
+                        depth: rng.range(0.025, 0.04),
                         // Soft walls: deep snow caves in round a posthole.
-                        soft: rng.range(1.3, 1.7),
+                        soft: rng.range(1.6, 2.0),
                     });
                     left = !left;
                 }
@@ -182,7 +182,11 @@ impl Snow {
             s1,
             i0,
             i1,
-            prints: Prints(p),
+            // The trench's mesh spacing (see `ground`).
+            prints: Prints {
+                list: p,
+                soften: 0.016,
+            },
         }
     }
 
@@ -216,7 +220,8 @@ impl Snow {
         let k = side * 9.7;
         let big = fbm_world(s as f32, k, 2.2, 3, 0x5c1);
         let small = fbm_world(s as f32, k, 0.35, 2, 0x5c2);
-        2.3 + 0.3 * big + 0.07 * small - 0.4 * self.along_ice(s)
+        let fine = fbm_world(s as f32, k, 0.12, 2, 0x5c3);
+        2.3 + 0.3 * big + 0.1 * small + 0.05 * fine - 0.4 * self.along_ice(s)
     }
 
     /// Where the blanket starts on one side (the ice lies inside it), meters from the centre
@@ -228,7 +233,8 @@ impl Snow {
         let open = smooth(open_at, self.s1 as f32 + 0.5, s as f32);
         let edge = 1.02
             + 0.12 * fbm_world(s as f32, k, 1.4, 3, 0x5d1)
-            + 0.04 * fbm_world(s as f32, k, 0.3, 2, 0x5d2);
+            + 0.06 * fbm_world(s as f32, k, 0.3, 2, 0x5d2)
+            + 0.03 * fbm_world(s as f32, k, 0.1, 2, 0x5d4);
         -0.7 + (edge + 0.7) * open
     }
 
@@ -263,8 +269,11 @@ impl Snow {
         let reach = smooth(self.s0 as f32 - 0.85, self.s0 as f32 - 0.6, s as f32)
             * (1.0 - smooth(self.i1 as f32 + 0.1, self.i1 as f32 + 0.35, s as f32));
         let near = (1.0 - smooth(0.0, 0.9, -main)) * reach;
-        let patch = (fbm_world(w.x, w.y, 0.45, 3, 0x5f1) - 0.18 - 0.7 * (1.0 - near)) * 0.3;
-        let patch_depth = 0.012 + 0.012 * fbm_world(w.x, w.y, 0.2, 2, 0x5f2).max(0.0);
+        // Each patch a cluster of clumps rather than one smooth blob.
+        let clumps = fbm_world(w.x, w.y, 0.1, 2, 0x5f3);
+        let patch =
+            (fbm_world(w.x, w.y, 0.45, 3, 0x5f1) + 0.22 * clumps - 0.2 - 0.7 * (1.0 - near)) * 0.3;
+        let patch_depth = 0.007 + 0.011 * fbm_world(w.x, w.y, 0.2, 2, 0x5f2).max(0.0);
         let main_depth = edge(blanket, main);
         let patch_d = patch_depth.min(PATCH_LIP_H * lip(patch, PATCH_LIP) + 0.2 * patch.max(0.0));
         let (depth, inside) = if main_depth >= patch_d {
@@ -298,9 +307,20 @@ impl Snow {
     }
 
     /// Whether thick snow hides the ground at (s, x) (ground under it can be left out).
+    /// Only well inside the snow and where it is thick: the snow's crumbling edge and its
+    /// thin patches let the ground show through their holes (see [`Self::fray`]).
     pub fn covers(&self, s: f64, x: f32, w: Vec2) -> bool {
         let a = self.at(s, x, w);
-        a.inside > 0.04 && a.depth + a.relief.min(0.0) > 0.015
+        a.inside > 0.22 && a.depth + a.relief.min(0.0) > 0.022
+    }
+
+    /// Coverage of the snow at `a`: thin snow and the last decimeter before an edge crumble
+    /// into holes (with the texture's grainy coverage). Solid (1) wherever the ground under
+    /// it may be left out ([`Self::covers`]), with room for a triangle of either mesh.
+    fn fray(a: &SnowAt) -> f32 {
+        let edge = smooth(-0.02, 0.14, a.inside);
+        let thick = smooth(0.003, 0.017, a.depth);
+        0.5 + 0.5 * edge.min(thick)
     }
 
     /// The ribbon surface at (s, x): height, coverage (the thin snow near an edge frays into
@@ -310,7 +330,7 @@ impl Snow {
         let cover = if a.inside < -0.03 {
             -1.0
         } else {
-            1.0 - 0.42 * (1.0 - smooth(0.0, 0.1, a.inside))
+            Self::fray(&a)
         };
         Surf::new(a.y, cover, self.tint(s, &a, w))
     }
@@ -331,13 +351,17 @@ impl Snow {
         let carried = (1.0 - smooth(self.s0 as f32 - 0.3, self.s0 as f32 + 4.0, s as f32))
             * (0.8 * a.trodden + 0.5 * dent).min(1.0);
         c = c.lerp(
-            Vec3::new(0.4, 0.31, 0.23),
+            Vec3::new(0.36, 0.32, 0.27),
             (carried * (0.25 + 0.75 * clots)).min(0.9),
         );
-        // Dents in the shade of their walls, lit by the blue sky.
-        c *= Vec3::ONE.lerp(Vec3::new(0.87, 0.91, 0.99), dent);
-        // Thin, wet snow at the edges: the ground shows through.
-        let thin = 1.0 - smooth(0.004, 0.035, a.depth);
-        c * Vec3::ONE.lerp(Vec3::new(0.78, 0.8, 0.78), thin * 0.6)
+        // Dents in the shade of their walls; light scattered through the snow keeps their
+        // walls from going grey.
+        c *= Vec3::ONE.lerp(Vec3::new(0.93, 0.96, 1.02), dent);
+        // Thin, wet snow at the edges goes grey and grainy (the ground shows through), and
+        // the crumbling edge is shaded by its own undercut.
+        let thin = 1.0 - smooth(0.004, 0.05, a.depth);
+        let grit = 0.85 + 0.3 * fbm_world(w.x, w.y, 0.05, 2, 0x4d);
+        c = c.lerp(Vec3::new(0.6, 0.6, 0.57) * grit, thin * 0.7);
+        c * (1.0 - 0.28 * (1.0 - smooth(0.0, 0.12, a.inside)))
     }
 }

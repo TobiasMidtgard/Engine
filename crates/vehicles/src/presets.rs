@@ -417,6 +417,7 @@ pub fn sport_plane_aircraft() -> Aircraft {
         flaps: 0.0,
         pitch_trim: 0.0,
         gear_down: true,
+        gear: 1.0,
     }
 }
 
@@ -711,6 +712,7 @@ pub fn spaceplane_aircraft() -> Aircraft {
         flaps: 0.0,
         pitch_trim: 0.0,
         gear_down: true,
+        gear: 1.0,
     }
 }
 
