@@ -296,6 +296,11 @@ fn textured(
     if sp.blend {
         m.alpha_mode = AlphaMode::Blend;
     }
+    // The ground runs up cliffs (the crag): projected along all three axes, it never
+    // stretches down a face. (Its meshes share one transform, so it stays seamless.)
+    if surface == Surface::Ground {
+        m = m.with_triplanar();
+    }
     m
 }
 

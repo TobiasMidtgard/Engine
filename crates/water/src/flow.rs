@@ -10,8 +10,9 @@
 //! It is cheap (a few float operations per cell per step, no pressure solve), stable for any
 //! bed shape, and conserves water exactly apart from sources, drains and losses.
 
-use engine_core::math::{DVec2, DVec3, Vec2};
+use engine_core::math::{DVec2, DVec3, Vec2, Vec3};
 use engine_core::prelude::*;
+use engine_core::tasks::ComputeTaskPool;
 use engine_world::WorldShift;
 
 use crate::body::WaterOptics;
@@ -241,6 +242,27 @@ pub struct Lip {
     pub width: f32,
 }
 
+/// A point down a falling curtain (see [`FlowSim::fall_path`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FallPoint {
+    /// World position.
+    pub pos: DVec3,
+    /// Velocity (world), m/s.
+    pub vel: Vec3,
+    /// Seconds since the water left the lip.
+    pub t: f32,
+    /// Outward normal (world) of the rock the water slides down here, zero where it falls
+    /// free.
+    pub rock: Vec3,
+}
+
+/// Water sliding down rock rides this far off it, meters (a sheet's thickness, and clear of
+/// the terrain's triangles).
+const SHEET: f32 = 0.06;
+/// Rock flatter than this (rise over run) catches falling water: it lands and runs on in
+/// the grid. Steeper faces it slides down.
+const LANDING_SLOPE: f32 = 0.7;
+
 /// Simulation state of one [`FlowRegion`].
 #[derive(Debug, Clone)]
 pub struct FlowSim {
@@ -278,6 +300,8 @@ pub struct FlowSim {
 impl FlowSim {
     /// A region with `bed` heights (relative to `origin.y`).
     pub fn new(entity: Entity, origin: DVec3, region: &FlowRegion, bed: Vec<f32>) -> Self {
+        // The step runs on the compute pool; make sure it exists (no-op in a running app).
+        engine_core::tasks::init_task_pools();
         let nx = region.cells[0].max(2) as usize;
         let nz = region.cells[1].max(2) as usize;
         let mut bed = bed;
@@ -357,12 +381,12 @@ impl FlowSim {
         let size = 8.0 * self.cell as f64;
         let mut buckets: Vec<((i64, i64), DVec3, Vec2, f32)> = Vec::new();
         for lip in self.lips(min_drop) {
-            // Where its free-fall arc meets the water or ground below.
-            let t = (2.0 * lip.drop / 9.81).sqrt();
-            let reach = (lip.dir * lip.speed * t).as_dvec2();
-            let foot = lip.top + DVec3::new(reach.x, -lip.drop as f64, reach.y);
+            // Where it lands in the water or on ground below, down its arc and any rock it
+            // slides over.
+            let end = *self.fall_path(&lip, 1).last().unwrap();
+            let foot = end.pos;
             let power = 1000.0 * 9.81 * lip.q * lip.width * lip.drop;
-            let v = lip.dir * lip.speed;
+            let v = Vec2::new(end.vel.x, end.vel.z);
             let key = (
                 (foot.x / size).floor() as i64,
                 (foot.z / size).floor() as i64,
@@ -462,6 +486,126 @@ impl FlowSim {
         out
     }
 
+    /// Bed height (above the corner) at `local` meters along the grid's axes, bilinear, and
+    /// its slope (d/dx, d/dz); `None` off the grid.
+    fn bed_at(&self, local: Vec2) -> Option<(f32, Vec2, f32)> {
+        let size = Vec2::new(self.nx as f32, self.nz as f32);
+        let g = local / self.cell;
+        if g.x < 0.0 || g.y < 0.0 || g.x > size.x || g.y > size.y {
+            return None;
+        }
+        // The outer half cells take the edge cells' heights.
+        let g = (g - 0.5).clamp(Vec2::ZERO, size - 1.001);
+        let (i, j) = (g.x as usize, g.y as usize);
+        let (fx, fz) = (g.x - i as f32, g.y - j as f32);
+        let idx = j * self.nx + i;
+        let corner = |o: usize| (self.bed[o], self.depth[o]);
+        let ((b00, d00), (b10, d10)) = (corner(idx), corner(idx + 1));
+        let ((b01, d01), (b11, d11)) = (corner(idx + self.nx), corner(idx + self.nx + 1));
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let bed = lerp(lerp(b00, b10, fx), lerp(b01, b11, fx), fz);
+        let depth = lerp(lerp(d00, d10, fx), lerp(d01, d11, fx), fz);
+        let slope = Vec2::new(
+            lerp(b10 - b00, b11 - b01, fz),
+            lerp(b01 - b00, b11 - b10, fx),
+        ) / self.cell;
+        Some((bed, slope, depth))
+    }
+
+    /// The path the water over `lip` takes down: `count + 1` points evenly spaced along it,
+    /// from the lip to where it lands in the water or on ground flat enough to catch it.
+    /// It falls free on its arc; where the arc meets a rock face too steep to land on, it
+    /// clings and slides down it (sped up by the slope, slowed by the rock), and leaves it
+    /// again where the face drops away under it: a cascade down a crevice, not a curtain cut
+    /// through the rock.
+    pub fn fall_path(&self, lip: &Lip, count: usize) -> Vec<FallPoint> {
+        const G: f32 = 9.81;
+        const H: f32 = 1.0 / 120.0;
+        let to_local = |v: Vec2| {
+            let (s, c) = self.yaw.sin_cos();
+            Vec2::new(c * v.x - s * v.y, s * v.x + c * v.y)
+        };
+        let start = self.local(lip.top).as_vec2();
+        let top_y = (lip.top.y - self.origin.y) as f32;
+        let flat = to_local(lip.dir) * lip.speed;
+        let (mut p, mut v) = (
+            Vec3::new(start.x, top_y, start.y),
+            Vec3::new(flat.x, 0.0, flat.y),
+        );
+        let mut rock = Vec3::ZERO;
+        let mut t = 0.0;
+        let mut path = vec![(p, v, t, rock)];
+        // Somewhat past the drop the lip saw (it may slide further than it fell).
+        let floor = top_y - lip.drop - 1.0;
+        while t < 4.0 && p.y > floor {
+            t += H;
+            if rock == Vec3::ZERO {
+                v.y -= G * H;
+            } else {
+                // Gravity along the face, and the rock's drag on a thin sheet.
+                let down = Vec3::new(0.0, -G, 0.0);
+                v += (down - rock * down.dot(rock)) * H;
+                v *= 1.0 - 1.2 * H;
+            }
+            p += v * H;
+            let Some((bed, slope, depth)) = self.bed_at(Vec2::new(p.x, p.z)) else {
+                break;
+            };
+            let level = bed + depth;
+            let normal = Vec3::new(-slope.x, 1.0, -slope.y).normalize();
+            if rock != Vec3::ZERO && p.y > bed + SHEET + 0.15 {
+                // The face drops away under it: it leaves the rock.
+                rock = Vec3::ZERO;
+            } else if p.y <= level.max(bed + SHEET) {
+                if depth > 0.08 || slope.length() < LANDING_SLOPE {
+                    // Into a pool, or onto a ledge: the grid carries it on from here.
+                    p.y = level;
+                    path.push((p, v, t, rock));
+                    break;
+                }
+                if rock == Vec3::ZERO {
+                    // Hitting the face throws off some of its speed.
+                    v *= 0.7;
+                }
+                rock = normal;
+                p.y = bed + SHEET;
+                let into = v.dot(rock);
+                if into < 0.0 {
+                    v -= rock * into;
+                }
+            }
+            path.push((p, v, t, rock));
+        }
+        // Even spacing along the path.
+        let mut along = vec![0.0f32; path.len()];
+        for k in 1..path.len() {
+            along[k] = along[k - 1] + path[k].0.distance(path[k - 1].0);
+        }
+        let total = along.last().copied().unwrap_or(0.0).max(1e-4);
+        let mut out = Vec::with_capacity(count + 1);
+        let mut k = 0;
+        for s in 0..=count {
+            let want = total * s as f32 / count.max(1) as f32;
+            while k + 2 < path.len() && along[k + 1] < want {
+                k += 1;
+            }
+            let (a, b) = (path[k], path[(k + 1).min(path.len() - 1)]);
+            let span = (along[(k + 1).min(path.len() - 1)] - along[k]).max(1e-6);
+            let f = ((want - along[k]) / span).clamp(0.0, 1.0);
+            let pos = a.0.lerp(b.0, f);
+            let world_v = self.world_dir(Vec2::new(a.1.x, a.1.z).lerp(Vec2::new(b.1.x, b.1.z), f));
+            let r = if f < 0.5 { a.3 } else { b.3 };
+            let world_r = self.world_dir(Vec2::new(r.x, r.z));
+            out.push(FallPoint {
+                pos: self.world(DVec2::new(pos.x as f64, pos.z as f64), pos.y as f64),
+                vel: Vec3::new(world_v.x, a.1.y + (b.1.y - a.1.y) * f, world_v.y),
+                t: a.2 + (b.2 - a.2) * f,
+                rock: Vec3::new(world_r.x, r.y, world_r.y),
+            });
+        }
+        out
+    }
+
     /// Total water in the region, m³.
     pub fn volume(&self) -> f64 {
         let a = (self.cell * self.cell) as f64;
@@ -536,36 +680,43 @@ impl FlowSim {
         let keep = (1.0 - STILL_DAMPING * dt).clamp(0.0, 1.0);
         let follow = (dt / STEADY_TIME).min(1.0);
         let n2 = manning(self.friction).powi(2);
-        let surface = |idx: usize, s: &Self| s.bed[idx] + s.depth[idx];
-        for j in 0..nz {
-            for i in 0..nx {
-                let idx = j * nx + i;
-                let h = surface(idx, self);
-                let d = self.depth[idx];
-                let neighbor = |ii: Option<usize>, jj: Option<usize>| match (ii, jj) {
-                    (Some(ii), Some(jj)) if ii < nx && jj < nz => Some(surface(jj * nx + ii, self)),
-                    _ => None,
-                };
+        let open = self.open_edges;
+        let (bed, depth) = (&self.bed, &self.depth);
+        let rows = nz.div_ceil(bands(nx, nz));
+        let flux_rows = self
+            .flux
+            .chunks_mut(rows * nx)
+            .zip(self.steady.chunks_mut(rows * nx));
+        par_bands(flux_rows, |band, (flux, steady)| {
+            for (o, (f_out, steady)) in flux.iter_mut().zip(steady.iter_mut()).enumerate() {
+                let idx = band * rows * nx + o;
+                let (i, j) = (idx % nx, idx / nx);
+                let d = depth[idx];
+                if d <= 0.0 {
+                    // Nothing to send: a dry cell's pipes are empty.
+                    *f_out = [0.0; 4];
+                    for m in steady.iter_mut() {
+                        *m -= *m * follow;
+                    }
+                    continue;
+                }
+                let h = bed[idx] + d;
+                let level = |o: usize| bed[o] + depth[o];
+                // Open edge: the outside is the same bed, dry. Shut: a wall.
+                let edge = if open { bed[idx] } else { f32::INFINITY };
                 let ns = [
-                    neighbor(i.checked_sub(1), Some(j)),
-                    neighbor(Some(i + 1), Some(j)),
-                    neighbor(Some(i), j.checked_sub(1)),
-                    neighbor(Some(i), Some(j + 1)),
+                    if i > 0 { level(idx - 1) } else { edge },
+                    if i + 1 < nx { level(idx + 1) } else { edge },
+                    if j > 0 { level(idx - nx) } else { edge },
+                    if j + 1 < nz { level(idx + nx) } else { edge },
                 ];
-                let mut f = self.flux[idx];
+                let mut f = *f_out;
                 // Bed drag on what flows out of here, semi-implicit so thin films stay stable.
                 let wet = d.max(1e-4);
                 let speed = (f[0] + f[1] + f[2] + f[3]) / (l * wet);
-                let drag = 1.0 + dt * g * n2 * speed / wet.powf(4.0 / 3.0);
-                let steady = self.steady[idx];
+                let drag = 1.0 + dt * g * n2 * speed / (wet * wet.cbrt());
                 let k = dt * g * d;
-                for (dir, other) in ns.iter().enumerate() {
-                    let target = match other {
-                        Some(o) => *o,
-                        // Open edge: the outside is the same bed, dry.
-                        None if self.open_edges => self.bed[idx],
-                        None => f32::INFINITY,
-                    };
+                for (dir, target) in ns.into_iter().enumerate() {
                     f[dir] = if target.is_finite() {
                         let kept = steady[dir] + (f[dir] - steady[dir]) * keep;
                         ((kept + k * (h - target)) / drag).max(0.0)
@@ -581,48 +732,53 @@ impl FlowSim {
                         *v *= s;
                     }
                 }
-                self.flux[idx] = f;
-                for (m, v) in self.steady[idx].iter_mut().zip(f) {
+                *f_out = f;
+                for (m, v) in steady.iter_mut().zip(f) {
                     *m += (v - *m) * follow;
                 }
             }
-        }
+        });
         // Move water and derive velocities.
-        for j in 0..nz {
-            for i in 0..nx {
-                let idx = j * nx + i;
-                let f = self.flux[idx];
-                let from_l = if i > 0 { self.flux[idx - 1][1] } else { 0.0 };
-                let from_r = if i + 1 < nx {
-                    self.flux[idx + 1][0]
-                } else {
-                    0.0
-                };
-                let from_b = if j > 0 { self.flux[idx - nx][3] } else { 0.0 };
-                let from_t = if j + 1 < nz {
-                    self.flux[idx + nx][2]
-                } else {
-                    0.0
-                };
+        let (flux, loss) = (&self.flux, self.loss);
+        let mut drained = vec![0.0f64; nz.div_ceil(rows)];
+        let move_rows = self
+            .depth
+            .chunks_mut(rows * nx)
+            .zip(self.vel.chunks_mut(rows * nx))
+            .zip(drained.iter_mut());
+        par_bands(move_rows, |band, ((depth, vel), drained)| {
+            for (o, (depth, vel)) in depth.iter_mut().zip(vel.iter_mut()).enumerate() {
+                let idx = band * rows * nx + o;
+                let (i, j) = (idx % nx, idx / nx);
+                let f = flux[idx];
+                let from_l = if i > 0 { flux[idx - 1][1] } else { 0.0 };
+                let from_r = if i + 1 < nx { flux[idx + 1][0] } else { 0.0 };
+                let from_b = if j > 0 { flux[idx - nx][3] } else { 0.0 };
+                let from_t = if j + 1 < nz { flux[idx + nx][2] } else { 0.0 };
                 let inflow = from_l + from_r + from_b + from_t;
                 let outflow = f[0] + f[1] + f[2] + f[3];
-                let before = self.depth[idx];
+                let before = *depth;
+                if before <= 0.0 && inflow <= 0.0 {
+                    *vel = Vec2::ZERO;
+                    continue;
+                }
                 let after = (before + dt * (inflow - outflow) / area).max(0.0);
                 // Water leaving the grid through open edges.
                 let lost = (if i == 0 { f[0] } else { 0.0 })
                     + (if i + 1 == nx { f[1] } else { 0.0 })
                     + (if j == 0 { f[2] } else { 0.0 })
                     + (if j + 1 == nz { f[3] } else { 0.0 });
-                self.drained_m3 += (lost * dt) as f64;
+                *drained += (lost * dt) as f64;
                 let avg = ((before + after) * 0.5).max(1e-3);
                 let qx = (from_l - f[0] + f[1] - from_r) * 0.5;
                 let qz = (from_b - f[2] + f[3] - from_t) * 0.5;
                 let v = Vec2::new(qx, qz) / (l * avg);
                 // Thin films can't carry absurd speeds.
-                self.vel[idx] = v.clamp_length_max(12.0);
-                self.depth[idx] = (after - self.loss * dt).max(0.0);
+                *vel = v.clamp_length_max(12.0);
+                *depth = (after - loss * dt).max(0.0);
             }
-        }
+        });
+        self.drained_m3 += drained.iter().sum::<f64>();
     }
 
     /// Water at world `p` (x/z): (surface height world y, depth, world x/z velocity), if wet.
@@ -664,6 +820,33 @@ impl FlowSim {
             self.world_dir(vel / wet_w),
         ))
     }
+}
+
+/// Bands of rows a region's step is split into: one per thread, or one for a small region
+/// (waking the pool costs more than its work).
+fn bands(nx: usize, nz: usize) -> usize {
+    if nx * nz < 4096 {
+        1
+    } else {
+        ComputeTaskPool::get().thread_num().clamp(1, nz)
+    }
+}
+
+/// Run `f(band, item)` for each band of rows, one task each.
+fn par_bands<C: Send>(items: impl Iterator<Item = C>, f: impl Fn(usize, C) + Send + Sync) {
+    let items: Vec<C> = items.collect();
+    if items.len() <= 1 {
+        for (band, item) in items.into_iter().enumerate() {
+            f(band, item);
+        }
+        return;
+    }
+    let f = &f;
+    ComputeTaskPool::get().scope(|scope| {
+        for (band, item) in items.into_iter().enumerate() {
+            scope.spawn(async move { f(band, item) });
+        }
+    });
 }
 
 /// Damping of flow away from its steady average, 1/s: sloshing settles, while bed friction
@@ -874,6 +1057,94 @@ mod tests {
         };
         let d = flood(&bed, 5, 1, 1.0, &[fill]);
         assert_eq!(d, vec![1.0, 1.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// A spring on a shelf 6 m up (x < 5 m), a 1.4 m sheer drop at its edge, then (with
+    /// `face`) a rock face at 60° down to the floor, or (without) a sheer cliff; cells are
+    /// 0.5 m. The water's been running for 20 s.
+    fn cascade(face: bool) -> FlowSim {
+        let (nx, nz) = (40, 6);
+        let mut bed = vec![0.0f32; nx * nz];
+        for j in 0..nz {
+            for i in 0..nx {
+                let x = (i as f32 + 0.5) * 0.5;
+                bed[j * nx + i] = if x < 5.0 {
+                    6.0
+                } else if face {
+                    (4.6 - (x - 5.0) * 3f32.sqrt()).max(0.0)
+                } else {
+                    0.0
+                };
+            }
+        }
+        let r = FlowRegion {
+            cells: [nx as u32, nz as u32],
+            cell_m: 0.5,
+            sources: vec![FlowSource {
+                at: [1.0, 1.5],
+                radius_m: 0.6,
+                rate_m3_s: 0.05,
+            }],
+            open_edges: false,
+            ..Default::default()
+        };
+        let mut sim = FlowSim::new(Entity::PLACEHOLDER, DVec3::new(10.0, 2.0, -3.0), &r, bed);
+        sim.yaw = 0.4;
+        for _ in 0..30 * 20 {
+            sim.step(1.0 / 30.0);
+        }
+        sim
+    }
+
+    #[test]
+    fn a_fall_slides_down_the_rock_face_it_meets() {
+        let sim = cascade(true);
+        let lips = sim.lips(1.0);
+        assert!(!lips.is_empty(), "no lip");
+        for lip in &lips {
+            let path = sim.fall_path(lip, 16);
+            assert_eq!(path.len(), 17);
+            assert!(
+                path[0].pos.distance(lip.top) < 1e-3,
+                "{:?} vs {lip:?}",
+                path[0]
+            );
+            let sliding = path.iter().filter(|p| p.rock != Vec3::ZERO).count();
+            assert!(sliding >= 4, "only {sliding} of 17 points on the rock");
+            for p in &path {
+                let (bed, _, _) = sim.bed_at(sim.local(p.pos).as_vec2()).unwrap();
+                let above = (p.pos.y - sim.origin.y) as f32 - bed;
+                assert!(above > -0.02, "{above} m inside the rock at {p:?}");
+                if p.rock != Vec3::ZERO {
+                    assert!(above < 0.3, "{above} m off the rock it slides on");
+                    assert!(p.rock.y > 0.4 && p.rock.y < 0.6, "a 60° face: {:?}", p.rock);
+                }
+            }
+            // It runs out at the foot of the face, on the floor.
+            let end = path.last().unwrap();
+            let x = sim.local(end.pos).x;
+            assert!((7.0..10.0).contains(&x), "ends {x} m along");
+            assert!(end.pos.y - sim.origin.y < 0.3, "ends {} m up", end.pos.y);
+            // Times run on down the path.
+            assert!(path.windows(2).all(|w| w[1].t >= w[0].t));
+        }
+    }
+
+    #[test]
+    fn a_fall_over_a_sheer_cliff_falls_free() {
+        let sim = cascade(false);
+        let lips = sim.lips(1.0);
+        assert!(!lips.is_empty(), "no lip");
+        for lip in &lips {
+            let path = sim.fall_path(lip, 12);
+            assert!(path.iter().all(|p| p.rock == Vec3::ZERO), "{path:?}");
+            // Down its arc to the floor.
+            let end = path.last().unwrap();
+            assert!(end.pos.y - sim.origin.y < 0.2, "ends {} m up", end.pos.y);
+            let reach = sim.local(end.pos).x - sim.local(lip.top).x;
+            let t = (2.0 * lip.drop / 9.81).sqrt();
+            assert!((reach as f32 - lip.speed * t).abs() < 0.3, "{reach} m out");
+        }
     }
 
     #[test]

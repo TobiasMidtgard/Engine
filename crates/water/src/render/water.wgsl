@@ -53,6 +53,7 @@ struct WaterUniform {
 @group(1) @binding(2) var scene_color: texture_2d<f32>;     // pre-exposed HDR, before transparents
 @group(1) @binding(3) var scene_depth: texture_depth_2d;    // reverse-Z
 @group(1) @binding(4) var puddle_tex: texture_2d<f32>;      // r depth (m), g ground y rel puddle2.x
+@group(1) @binding(5) var current_tex: texture_2d<f32>;     // ripple grid currents: x, z (m/s), turn (1/s)
 
 struct FlowGpu {
     origin: vec4<f32>,  // corner rel camera x, base y, z, cell (m)
@@ -207,6 +208,17 @@ fn ripple_at(rel_xz: vec2<f32>) -> vec4<f32> {
     let edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
     let fade = smoothstep(0.0, 0.08, edge);
     return textureSampleLevel(ripple_tex, linear_clamp, uv, 0.0) * fade;
+}
+
+// Currents stirred into the ripple grid at a camera-relative x/z: (x, z m/s, turn 1/s, 0),
+// faded at the edge.
+fn current_at(rel_xz: vec2<f32>) -> vec4<f32> {
+    if (water.g.ripple.w < 0.5) { return vec4<f32>(0.0); }
+    let uv = (rel_xz - water.g.ripple.xy) / water.g.ripple.z;
+    if (any(uv <= vec2<f32>(0.0)) || any(uv >= vec2<f32>(1.0))) { return vec4<f32>(0.0); }
+    let edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
+    let fade = smoothstep(0.0, 0.08, edge);
+    return textureSampleLevel(current_tex, linear_clamp, uv, 0.0) * fade;
 }
 
 // Rain falling at a camera-relative x/z, mm/h.
@@ -498,8 +510,11 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
     if (foam > 0.001) {
         let wp = tiling_pos(rel).xz;
         var pattern = fbm2(wp * 2.3 + vec2<f32>(time_s() * 0.07, 0.0), 4);
-        if (dot(vel, vel) > 1e-4) {
-            pattern = streak_foam(wp, vel);
+        // Moving water draws its foam out into streaks along the current (blended in, so
+        // a slowing current doesn't leave a seam where one pattern gives way to the other).
+        let moving = smoothstep(0.02, 0.15, length(vel));
+        if (moving > 0.0) {
+            pattern = mix(pattern, streak_foam(wp, vel), moving);
         }
         let cover = smoothstep(1.0 - foam, 1.0 - foam + 0.3, pattern + foam * 0.35);
         let up = sky_ambient(n) * sky_vis * PI;
@@ -588,10 +603,13 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     let w = eval_waves(bi, in.p0, depth, pixel * 3.0);
     var n = w.normal;
     var foam = 0.0;
+    var vel = water.bodies[bi].wind.zw;
     if (water.bodies[bi].look.w > 0.5) {
         let rp = ripple_at(in.rest);
         n = normalize(n + vec3<f32>(-rp.z, 0.0, -rp.w));
-        foam += rp.y * 1.4;
+        foam += rp.y * 2.2;
+        // Foam rides the stirred currents: its streaks follow their swirls.
+        vel += current_at(in.rest).xy;
     }
     // Whitecaps where the waves pinch.
     let wind = water.bodies[bi].bed.z;
@@ -605,7 +623,7 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     if (water.g.rain.z >= 0.0) {
         color = shade_underside(in.rel, n, look, in.clip);
     } else {
-        color = shade_water(in.rel, n, look, foam, in.crest, in.clip, wind, 0.05, 0.3, vec2<f32>(0.0));
+        color = shade_water(in.rel, n, look, foam, in.crest, in.clip, wind, 0.05, 0.3, vel);
     }
     return vec4<f32>(color, 1.0);
 }
@@ -705,7 +723,7 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
 
 // ---------------------------------------------------------------- falling water
 // A curtain arcs out over each lip (`FlowSim::lips`) on its free-fall path down to the water or
-// ground below. It leaves the lip as a glassy sheet and breaks up into aerated white streaks as
+// ground below, sliding down any rock face it meets on the way (`FlowSim::fall_path`). It leaves the lip as a glassy sheet and breaks up into aerated white streaks as
 // it speeds up; the streak pattern rides down with the water, so it stretches as it falls.
 struct FallIn {
     @location(0) rel_q: vec4<f32>,       // camera-relative position, m²/s over the lip
@@ -721,7 +739,7 @@ struct FallOut {
     @location(2) across: vec3<f32>,
     @location(3) uv: vec2<f32>,
     @location(4) look: vec4<f32>,        // q, frac, side, lip speed
-    @location(5) @interpolate(flat) kind: f32, // 0 curtain, 1 spray cloud
+    @location(5) kind: f32,              // 1 spray cloud; under a half a curtain, 0.45 where it slides down rock
 };
 
 @vertex
@@ -798,11 +816,14 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     // Glassy as it rolls over the lip, white with air a few tenths of a second later. From
     // behind or below, the churned water under the tongue shows.
     let front = dot(in.normal, v) >= 0.0;
-    let aerated = max(smoothstep(0.03, 0.22, tau + (s - 0.5) * 0.1), select(0.6, 0.0, front));
+    var aerated = max(smoothstep(0.03, 0.22, tau + (s - 0.5) * 0.1), select(0.6, 0.0, front));
+    // Sliding down rock (`ROCK_KIND`), the sheet tumbles over every bump: white all over.
+    let rock = saturate(in.kind / 0.45);
+    aerated = max(aerated, rock * 0.85);
 
     // Coverage: a thick flow stays a closed sheet; lower down and at its edges it frays into
     // fingers with the rock showing between them, and thin threads are see-through.
-    let body = saturate(q * 12.0 + 0.3);
+    let body = saturate(q * 8.0 + 0.15);
     let gaps = smoothstep(0.1, 1.0, frac) * 0.45 * (1.2 - body * 0.4);
     var alpha = smoothstep(gaps, gaps + 0.2, s) * body * (0.7 + 0.3 * smoothstep(0.2, 0.7, s));
     alpha *= 1.0 - smoothstep(0.6, 1.0, abs(side) + (s - 0.5) * 0.4);
@@ -811,7 +832,8 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     let pix = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), size - 1.0));
     let z_scene = linear_depth(textureLoad(scene_depth, pix, 0));
     let z_frag = max(view_depth(in.rel), 1e-3);
-    alpha *= saturate((z_scene - z_frag) / 0.5);
+    // (A sheet on the rock lies a few centimeters off it: soft over far less.)
+    alpha *= saturate((z_scene - z_frag) / mix(0.5, 0.03, rock));
     if (alpha < 0.004) { discard; }
 
     // Streak relief: each finger is rounded across, and the surges in it ripple the tongue.

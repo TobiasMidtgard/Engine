@@ -159,15 +159,19 @@ impl WaterState {
         let mut height = b.center.y + w.offset.y as f64;
         let mut normal = w.normal;
         let mut foam = 0.0;
+        let mut velocity = Vec3::new(b.body.current[0], 0.0, b.body.current[1]) + w.velocity;
         if b.body.interactive
-            && let Some((h, grad, f)) = self.ripples.sample(DVec2::new(p.x, p.z))
+            && let Some(r) = self.ripples.sample(DVec2::new(p.x, p.z))
         {
+            // A moving interactor's own push (its trough, the water it drags along) doesn't
+            // act back on it.
             let own = self.hull_weight(DVec2::new(p.x, p.z));
-            height += (h * own) as f64;
-            normal = (normal + Vec3::new(-grad.x, 0.0, -grad.y) * own).normalize_or(Vec3::Y);
-            foam = f;
+            height += (r.height * own) as f64;
+            let g = r.gradient * own;
+            normal = (normal + Vec3::new(-g.x, 0.0, -g.y)).normalize_or(Vec3::Y);
+            velocity += Vec3::new(r.current.x, 0.0, r.current.y) * own;
+            foam = r.foam;
         }
-        let velocity = Vec3::new(b.body.current[0], 0.0, b.body.current[1]) + w.velocity;
         Some((height, depth + w.offset.y, velocity, normal, foam))
     }
 
