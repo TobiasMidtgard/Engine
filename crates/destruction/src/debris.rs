@@ -21,7 +21,7 @@ use engine_world::{ContactKind, Env, GroundContact, NoiseEvent, SurfaceMaterials
 
 use crate::assets::DestructionAssets;
 use crate::material::{DestructibleMaterial, DestructionMaterials};
-use crate::voxel::{VoxelState, rock_contact, rock_depth};
+use crate::voxel::{VoxelState, in_rock, rock_contact, rock_depth, rock_side};
 use crate::{DebrisMode, DestructionSettings, DestructionStats};
 
 /// A piece of debris. Registered so tools and AI agents can see and tune it.
@@ -93,7 +93,7 @@ pub struct DebrisBody {
 }
 
 /// Whether debris lands on voxel rock as on the ground.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum RockContact {
     /// Not looked at yet: decided on its first step.
     #[default]
@@ -103,17 +103,24 @@ pub enum RockContact {
     /// Started out buried in rock deeper than [`BURIED_M`]: lands on it once it has fallen
     /// clear.
     Buried,
-    /// Cut from the rock (a cave-in's boulders, a blast's rubble): passes through rock onto
-    /// the ground, so it doesn't catch on the rims of the hole it falls out of.
-    Ignores,
+    /// Cut from the rock at this point (a cave-in's boulders, a blast's rubble): passes through
+    /// rock until it has moved [`LEAVE_M`] from there and is clear of it, so it falls out of
+    /// the hole it came from instead of hanging on the hole's rims; then lands on rock (a
+    /// ledge, a cave's floor) like anything else.
+    Leaving(DVec3),
 }
 
 /// How deep debris may start out inside voxel rock and still land on it (a building piece
 /// resting on rock sits up to the ground tolerance in it), m.
 pub const BURIED_M: f32 = 0.15;
-/// How far rock pushes a point inside it up to its top; deeper, the point is inside a rock
-/// wall's side or under a ceiling, not on a floor, m.
+/// How far rock pushes a point inside it out: up to a floor's top, out of a wall's face, down
+/// out of a ceiling; deeper, it passes through, m.
 const ROCK_REACH_M: f32 = 0.6;
+/// How far debris cut from rock moves before it may land on rock, m (see
+/// [`RockContact::Leaving`]).
+pub const LEAVE_M: f32 = 0.5;
+/// Spacing of the points checked for rock before debris cut from rock may land, m.
+const LEAVE_LATTICE_M: f32 = 0.2;
 
 impl DebrisBody {
     /// Box-shaped body of `mass_kg` with half extents `half`, touching the ground at `points`.
@@ -208,8 +215,8 @@ pub struct DebrisSpawn {
     pub scale: Option<Vec3>,
     /// Spawn already lying still on the ground (see [`settle`]).
     pub resting: bool,
-    /// Cut from voxel rock (a cave-in's boulders, a blast's rubble): it passes through rock
-    /// (see [`RockContact::Ignores`]).
+    /// Cut from voxel rock (a cave-in's boulders, a blast's rubble): it falls out of its hole
+    /// through the rock around it (see [`RockContact::Leaving`]).
     pub from_rock: bool,
 }
 
@@ -519,7 +526,7 @@ pub fn spawn_debris_system(
             body.angular = item.angular;
             body.asleep = item.resting;
             if item.from_rock {
-                body.rock = RockContact::Ignores;
+                body.rock = RockContact::Leaving(item.position);
             }
             // A piece that stood with a collider loses it: this solver moves it now.
             e.insert(body).remove::<Collider>();
@@ -818,6 +825,27 @@ pub fn simulate_debris_system(
         let scale = t.scale;
         let rot = t.rotation;
         let center = t.translation;
+        // Out of its hole: past the rims and all of it clear of the rock (its hull's extremes,
+        // its center and a lattice over its box no coarser than a thin shelf), it lands on rock
+        // from now on.
+        if let RockContact::Leaving(from) = body.rock
+            && center.distance(from) >= LEAVE_M as f64
+        {
+            let inside = |local: Vec3| in_rock(&rock, center + (rot * local).as_dvec3());
+            let (lo, hi) = body.points.iter().fold(
+                (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                |(lo, hi), p| (lo.min(*p * scale), hi.max(*p * scale)),
+            );
+            let steps = (((hi - lo).max_element() / LEAVE_LATTICE_M).ceil() as usize).clamp(1, 8);
+            let clear = !body.points.is_empty()
+                && !body.points.iter().any(|p| inside(*p * scale))
+                && !inside(Vec3::ZERO)
+                && !box_lattice(steps)
+                    .any(|(i, j, k)| inside(lo + (hi - lo) * Vec3::new(i, j, k) / steps as f32));
+            if clear {
+                body.rock = RockContact::Lands;
+            }
+        }
         if !rock.is_empty() && matches!(body.rock, RockContact::Unknown | RockContact::Buried) {
             let buried = body
                 .points
@@ -837,25 +865,32 @@ pub fn simulate_debris_system(
         }
         let on_rock = body.rock == RockContact::Lands && !rock.is_empty();
         // Collect penetrating points.
-        let mut touching: [(Vec3, f32); MAX_CONTACTS] = [(Vec3::ZERO, 0.0); MAX_CONTACTS];
+        let mut touching = [(Vec3::ZERO, 0.0f32, Vec3::ZERO); MAX_CONTACTS];
         let mut count = 0;
-        let mut deepest = 0.0f32;
-        let mut touch = |r: Vec3, depth: f32| {
+        let mut touch = |r: Vec3, depth: f32, normal: Vec3| {
             if depth > 0.0 && count < MAX_CONTACTS {
-                touching[count] = (r, depth);
+                touching[count] = (r, depth, normal);
                 count += 1;
-                deepest = deepest.max(depth);
             }
         };
-        // The ground and rock, at its hull's extreme points.
+        // The ground and rock, at its hull's extreme points: rock floors hold it up like the
+        // ground, rock walls and ceilings push it out of their face, so it slides down a cliff
+        // onto the ledge below instead of catching on the cliff's edge.
         for p in &body.points {
             let r = rot * (*p * scale);
             let wp = center + r.as_dvec3();
             let mut h = env.ground_query.height(wp).unwrap_or(ground.height);
-            if on_rock && let Some(r) = rock_contact(&rock, wp, ROCK_REACH_M) {
-                h = h.max(r);
+            if on_rock {
+                match rock_side(&rock, wp, ROCK_REACH_M) {
+                    Some((normal, depth)) => touch(r, depth, normal),
+                    None => {
+                        if let Some(r) = rock_contact(&rock, wp, ROCK_REACH_M) {
+                            h = h.max(r);
+                        }
+                    }
+                }
             }
-            touch(r, ((h - wp.y) as f32) * n.y.max(0.2));
+            touch(r, ((h - wp.y) as f32) * n.y.max(0.2), n);
         }
         // Resting chunks, box on box: a lattice over the lower half of its box, so it lies
         // across an edge below it instead of tipping through it.
@@ -885,7 +920,7 @@ pub fn simulate_debris_system(
                         best = depth;
                         on = Some(s);
                     }
-                    touch(r, depth);
+                    touch(r, depth, n);
                 }
             }
         }
@@ -917,27 +952,35 @@ pub fn simulate_debris_system(
                 source: Some(entity),
             });
         }
-        let restitution = if impact > 1.5 { body.restitution } else { 0.0 };
+        // Each contact pushes along its own normal: the ground's, or a rock face's.
+        let bounce = body.restitution;
+        let targets: [f32; MAX_CONTACTS] = std::array::from_fn(|k| {
+            let speed = -(body.velocity.dot(touching[k].2)).min(0.0);
+            if speed > 1.5 {
+                -bounce * speed.min(8.0)
+            } else {
+                0.0
+            }
+        });
         let mut normal_impulse = [0.0f32; MAX_CONTACTS];
         for _ in 0..4 {
             for k in 0..count {
-                let (r, _) = touching[k];
+                let (r, _, nk) = touching[k];
                 let v = body.velocity + body.angular.cross(r);
-                let vn = v.dot(n);
-                let rn = r.cross(n);
-                let kn = body.inv_mass + inv_i_world(rn, body).cross(r).dot(n);
-                let target = -restitution * impact.min(8.0);
-                let mut j = (target - vn) / kn.max(1e-6);
+                let vn = v.dot(nk);
+                let rn = r.cross(nk);
+                let kn = body.inv_mass + inv_i_world(rn, body).cross(r).dot(nk);
+                let mut j = (targets[k] - vn) / kn.max(1e-6);
                 let old = normal_impulse[k];
                 normal_impulse[k] = (old + j).max(0.0);
                 j = normal_impulse[k] - old;
-                let imp = n * j;
+                let imp = nk * j;
                 body.velocity += imp * body.inv_mass;
                 let dw = inv_i_world(r.cross(imp), body);
                 body.angular += dw;
                 // Friction.
                 let v = body.velocity + body.angular.cross(r);
-                let vt = v - n * v.dot(n);
+                let vt = v - nk * v.dot(nk);
                 let speed_t = vt.length();
                 if speed_t > 1e-5 {
                     let tdir = vt / speed_t;
@@ -953,9 +996,15 @@ pub fn simulate_debris_system(
         }
         // Rolling resistance so pieces settle instead of rocking forever.
         body.angular *= 1.0 / (1.0 + 2.5 * dt);
-        if deepest > 0.002 {
-            t.translation += (n * (deepest - 0.002) * 0.8).as_dvec3();
+        // Out of whatever it sank into: enough along each normal for its deepest point there.
+        let mut push = Vec3::ZERO;
+        for &(_, depth, normal) in &touching[..count] {
+            let need = depth - 0.002 - push.dot(normal);
+            if need > 0.0 {
+                push += normal * need;
+            }
         }
+        t.translation += (push * 0.8).as_dvec3();
         if body.velocity.length_squared() < 0.12 * 0.12 && body.angular.length_squared() < 0.3 * 0.3
         {
             body.still += dt;
