@@ -7,7 +7,9 @@
 //! `--follow NAME` films an entity instead: the camera rides behind and above whatever carries
 //! that `Name` (a walker on the footstep trail, a car on the track), turning with its direction
 //! of travel, from the first place's settings (weather, time, demo restarts). Until the entity
-//! exists the camera holds on the place.
+//! exists the camera holds on the place. The camera keeps its distance in proportion to the
+//! subject's size (a [`BodyRequest`]'s height), and the film listens from the subject's head, so
+//! its footsteps are heard as it hears them, not from the camera several meters back.
 //!
 //! `--secs N` is the length of each shot or glide (default 8) and `--fps F` the frame rate
 //! (default 30). Turn the frames into a video with:
@@ -21,6 +23,8 @@ use crate::camera::{self, ShowcaseCamera};
 use crate::landscape;
 use crate::places::{self, Place};
 use engine::prelude::*;
+use engine::world::animation::BodyRequest;
+use engine_audio::AudioListener;
 
 /// Frames rendered before recording starts, so auto-exposure and the demos have settled.
 const SETTLE_FRAMES: u32 = 8;
@@ -36,6 +40,8 @@ pub struct Film {
     /// `Name` of the entity to follow (`--follow`), instead of moving between the places.
     pub follow: Option<String>,
     rig: Option<Rig>,
+    /// The listener riding on the followed subject's head.
+    ears: Option<Entity>,
 }
 
 /// The follow camera's state, smoothed from frame to frame.
@@ -52,6 +58,10 @@ struct Rig {
 const BEHIND: f64 = 6.5;
 const ABOVE: f64 = 2.3;
 const AIM: f64 = 1.1;
+/// The size those distances are for: a person's standing height (m).
+const PERSON: f64 = 1.75;
+/// Ear height on a person (m), scaled like the camera for other subjects.
+const EARS: f64 = 1.65;
 
 impl Film {
     /// Frames to record in all.
@@ -85,6 +95,7 @@ pub fn install(app: &mut App, keys: &str, secs: f32, fps: f32, follow: Option<St
         frame: 0,
         follow,
         rig: None,
+        ears: None,
     });
     app.add_systems(Update, run.after(camera::fly));
 }
@@ -165,19 +176,58 @@ fn pose(places: &[Place], secs: f32, t: f32) -> (DVec3, DVec3, f32) {
     (eye, target, hour)
 }
 
-/// Position and facing of the first entity called `name`.
-fn subject(world: &mut World, name: &str) -> Option<(DVec3, Quat)> {
-    let mut q = world.query::<(&Name, &Transform)>();
+/// The first entity called `name`, its position and facing, and its size relative to a person:
+/// a body's requested height over a person's, 1 without one (people leave it to the module).
+fn subject(world: &mut World, name: &str) -> Option<(Entity, DVec3, Quat, f64)> {
+    let mut q = world.query::<(Entity, &Name, &Transform, Option<&BodyRequest>)>();
     q.iter(world)
-        .find(|(n, _)| n.as_str() == name)
-        .map(|(_, tf)| (tf.translation, tf.rotation))
+        .find(|(_, n, _, _)| n.as_str() == name)
+        .map(|(e, _, tf, body)| (e, tf.translation, tf.rotation, size_of(body)))
 }
 
-/// Move the follow camera one frame (`dt` seconds) behind a subject at `at` facing `facing`:
-/// it swings round to the direction of travel over about a second and trails the subject
-/// softly, so steps and turns don't shake the picture. Returns eye and target.
-fn follow(rig: &mut Option<Rig>, at: DVec3, facing: Quat, dt: f64) -> (DVec3, DVec3) {
-    let want = |heading: DVec3| at - heading * BEHIND + DVec3::Y * ABOVE;
+/// A subject's size relative to a person, kept within reason so a bad height can't put the
+/// camera in the ground or far away.
+fn size_of(body: Option<&BodyRequest>) -> f64 {
+    body.and_then(|b| b.height)
+        .map_or(1.0, |h| (h as f64 / PERSON).clamp(0.3, 2.0))
+}
+
+/// Put the film's ears on the subject's head (once), or move them to a new subject.
+fn listen_from(world: &mut World, subject: Entity, size: f64) {
+    let ears = world.resource::<Film>().ears;
+    let on_subject = ears
+        .and_then(|e| world.get::<ChildOf>(e))
+        .is_some_and(|c| c.parent() == subject);
+    if on_subject {
+        return;
+    }
+    if let Some(e) = ears {
+        world.despawn(e);
+    }
+    let e = world
+        .spawn((
+            Name::new("Film ears"),
+            AudioListener { priority: 10 },
+            Transform::from_translation(DVec3::Y * EARS * size),
+            ChildOf(subject),
+        ))
+        .id();
+    world.resource_mut::<Film>().ears = Some(e);
+}
+
+/// Take the film's ears off the subject.
+fn stop_listening(world: &mut World) {
+    if let Some(e) = world.resource_mut::<Film>().ears.take() {
+        world.despawn(e);
+    }
+}
+
+/// Move the follow camera one frame (`dt` seconds) behind a subject at `at` facing `facing`,
+/// `size` times a person's size: it swings round to the direction of travel over about a second
+/// and trails the subject softly, so steps and turns don't shake the picture. Returns eye and
+/// target.
+fn follow(rig: &mut Option<Rig>, at: DVec3, facing: Quat, size: f64, dt: f64) -> (DVec3, DVec3) {
+    let want = |heading: DVec3| at - heading * (BEHIND * size) + DVec3::Y * (ABOVE * size);
     let step = DVec3::new(
         at.x - rig.map_or(at.x, |r| r.last.x),
         0.0,
@@ -203,8 +253,8 @@ fn follow(rig: &mut Option<Rig>, at: DVec3, facing: Quat, dt: f64) -> (DVec3, DV
     r.last = at;
     r.eye = r.eye.lerp(want(r.heading), 1.0 - (-dt * 3.0).exp());
     let ground = landscape::shared().height(r.eye.x, r.eye.z);
-    r.eye.y = r.eye.y.max(ground + 1.5);
-    (r.eye, at + DVec3::Y * AIM)
+    r.eye.y = r.eye.y.max(ground + 1.5 * size);
+    (r.eye, at + DVec3::Y * (AIM * size))
 }
 
 fn smootherstep(x: f32) -> f32 {
@@ -254,6 +304,7 @@ fn run(world: &mut World) {
     if frame >= SETTLE_FRAMES && recorded >= total {
         // The recording was started for exactly this long, so it has written its file.
         places::leave(world);
+        stop_listening(world);
         engine::core::log::info!("film: {total} frames in {OUT_DIR}");
         world.write_message(AppExit::Success);
         return;
@@ -270,10 +321,11 @@ fn run(world: &mut World) {
     let (mut eye, mut target, hour) = pose(&places, secs, t);
     if let Some(name) = &follow_name {
         match subject(world, name) {
-            Some((at, facing)) => {
+            Some((entity, at, facing, size)) => {
                 let mut rig = world.resource::<Film>().rig;
-                (eye, target) = follow(&mut rig, at, facing, 1.0 / fps as f64);
+                (eye, target) = follow(&mut rig, at, facing, size, 1.0 / fps as f64);
                 world.resource_mut::<Film>().rig = rig;
+                listen_from(world, entity, size);
             }
             None if frame == SETTLE_FRAMES => {
                 engine::core::log::warn!("film: nothing called \"{name}\" to follow yet");
