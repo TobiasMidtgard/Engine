@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
-use engine_assets::Assets;
+use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
 use wgpu::util::DeviceExt;
 
@@ -51,7 +51,11 @@ use crate::mesh::{Mesh, Vertex};
 use crate::settings::RenderSettings;
 use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use crate::texture::Image;
-use crate::virtual_geometry::{ClusterInstance, ClusterRenderer, FAR_SHADOW_CLUSTERS};
+use crate::virtual_geometry::{
+    BuildCache, BuildJob, ClusterInstance, ClusterRenderer, DisplacedJob, Displacement,
+    DisplacementSource, FAR_SHADOW_CLUSTERS, HeightField, HeightImage, MaterialHeightField,
+    SMALL_BUILD_TRIANGLES, StableHasher,
+};
 
 /// Per-instance vertex data (locations 4–10 in `mesh.wgsl`, plus 11–13 for the previous
 /// matrix in the mesh feature's own pipelines).
@@ -239,12 +243,126 @@ type MeshQuery = (
     &'static ResolvedMesh,
     Has<NoVirtualGeometry>,
     Option<&'static MaxDrawDistance>,
+    Option<&'static Displacement>,
 );
 
 /// Whether a bounding sphere at camera-relative `center` lies wholly beyond the entity's
 /// [`MaxDrawDistance`].
 fn beyond_draw_distance(max: Option<&MaxDrawDistance>, center: Vec3, radius: f32) -> bool {
     max.is_some_and(|m| center.length() - radius > m.0)
+}
+
+/// Where a [`Displacement`]'s height comes from, before it is read (cheap to find every
+/// frame; reading it happens once, when a build starts).
+enum HeightSource {
+    /// A procedural or code height, with its cache key.
+    Field(Arc<dyn HeightField>, u64),
+    /// The material's height texture at an asset version.
+    Image(Handle<Image>, u64),
+    /// The generated height map of the material's preset, at a size.
+    Preset(MaterialPreset, u32),
+}
+
+fn height_source(
+    d: &Displacement,
+    material: &StandardMaterial,
+    images: Option<&Assets<Image>>,
+    preset_size: u32,
+) -> Option<HeightSource> {
+    match &d.source {
+        DisplacementSource::Stone(f) => Some(HeightSource::Field(Arc::new(*f), f.key())),
+        DisplacementSource::Custom(f) => Some(HeightSource::Field(f.field.clone(), f.key)),
+        DisplacementSource::MaterialHeight => {
+            if let Some(h) = material.height_texture {
+                let images = images?;
+                let h = images.canonical(h);
+                let image = images.get(h)?;
+                (!image.is_released()).then(|| HeightSource::Image(h, images.version(h)))
+            } else {
+                material
+                    .preset
+                    .map(|p| HeightSource::Preset(p, preset_size))
+            }
+        }
+    }
+}
+
+/// Key of a displaced mesh's clusters: the mesh, the displacement and its height.
+fn displaced_key(
+    mesh: u32,
+    d: &Displacement,
+    material: &StandardMaterial,
+    source: &HeightSource,
+) -> u64 {
+    let mut h = StableHasher::new(0xd15b_0001);
+    h.write_u32(mesh);
+    h.write_u64(d.settings_key());
+    h.write_u32(d.amplitude_for(material).to_bits());
+    match source {
+        HeightSource::Field(_, key) => h.write_u64(*key),
+        HeightSource::Image(handle, version) => {
+            h.write_u32(handle.index());
+            h.write_u64(*version);
+        }
+        HeightSource::Preset(p, size) => {
+            h.write_u32(*p as u32 + 1000);
+            h.write_u32(*size);
+        }
+    }
+    if matches!(source, HeightSource::Image(..) | HeightSource::Preset(..)) {
+        h.write_u32(material.mapping as u32);
+        h.write_u32(material.texture_scale.to_bits());
+        h.write_u32(material.uv_scale[0].to_bits());
+        h.write_u32(material.uv_scale[1].to_bits());
+    }
+    // Plain meshes use their asset index as the key; displaced keys have the top bit set.
+    h.finish() | 1 << 63
+}
+
+/// The height field of a displacement, read when its build starts: the procedural one, or the
+/// material's height map at the resolution its finest edges can use.
+fn resolve_displacement(
+    d: &Displacement,
+    material: &StandardMaterial,
+    source: &HeightSource,
+    images: Option<&Assets<Image>>,
+    preset_heights: &mut HashMap<(MaterialPreset, u32), Option<Image>>,
+    gpu: &GpuShared,
+) -> Option<DisplacedJob> {
+    // Texels per tile so a texel is about half the finest edge.
+    let repeat = material.uv_scale[0]
+        .abs()
+        .max(material.uv_scale[1].abs())
+        .max(1e-4);
+    let tile_m = material.texture_scale / repeat;
+    let max_size = ((2.0 * tile_m / d.edge_m.max(1e-4)) as u32).clamp(64, 8192);
+    let (field, field_key): (Arc<dyn HeightField>, u64) = match source {
+        HeightSource::Field(f, key) => (f.clone(), *key),
+        HeightSource::Image(handle, _) => {
+            let image = HeightImage::from_image(images?.get(*handle)?, max_size)?;
+            let field = MaterialHeightField::new(Arc::new(image), material);
+            let key = field.key();
+            (Arc::new(field), key)
+        }
+        HeightSource::Preset(preset, size) => {
+            let maps = preset_heights.entry((*preset, *size)).or_insert_with(|| {
+                gpu.read_material_maps(*preset, *size)
+                    .map_err(|e| tracing::warn!("reading the {preset:?} height map failed: {e}"))
+                    .ok()
+                    .map(|m| m.height)
+            });
+            let image = HeightImage::from_image(maps.as_ref()?, max_size)?;
+            let field = MaterialHeightField::new(Arc::new(image), material);
+            let key = field.key();
+            (Arc::new(field), key)
+        }
+    };
+    Some(DisplacedJob {
+        displacement: d.clone(),
+        amplitude: d.amplitude_for(material),
+        field,
+        field_key,
+    })
 }
 
 /// Draws [`MeshRenderer`] entities. Added by `RenderPlugin`.
@@ -288,11 +406,19 @@ pub struct MeshFeature {
     instance_data: Vec<MeshInstance>,
     material_data: Vec<GpuMaterial>,
     /// Material handle index → (material buffer slot, texture set id), rebuilt every frame.
-    material_index: HashMap<u32, (u32, u32)>,
+    /// Material slot key (the handle index, or a displaced variant: see `displaced_material`)
+    /// → (material buffer slot, texture set id), rebuilt every frame.
+    material_index: HashMap<u64, (u32, u32)>,
     /// Dense meshes drawn as clusters (virtual geometry).
     clusters: Option<ClusterRenderer>,
     /// Meshes drawn as clusters this frame.
     clustered: HashSet<u32>,
+    /// Generated preset height maps read back for displacement, by preset and size.
+    preset_heights: HashMap<(MaterialPreset, u32), Option<Image>>,
+    /// The cluster build cache settings last applied (enabled, folder, megabytes).
+    cache_settings: Option<(bool, String, u32)>,
+    /// Displaced entities whose material has no height to displace by (warned once).
+    warned_no_height: HashSet<u32>,
     stats: FeatureStats,
 }
 
@@ -343,7 +469,7 @@ impl MeshFeature {
     fn material_slot(
         &mut self,
         gpu: &GpuShared,
-        handle: u32,
+        handle: u64,
         material: &StandardMaterial,
         images: Option<&Assets<Image>>,
         preset_size: u32,
@@ -872,7 +998,34 @@ impl RenderFeature for MeshFeature {
 
         let frame = self.frame;
         let prev_origin = self.prev_origin.unwrap_or(view.origin);
-        for (entity, gt, renderer, resolved, instanced_only, max_distance) in query.iter(world_ref)
+        // The disk cache of cluster builds.
+        let cache_settings = (
+            settings.virtual_geometry_cache,
+            settings.virtual_geometry_cache_dir.clone(),
+            settings.virtual_geometry_cache_mb,
+        );
+        if self.cache_settings.as_ref() != Some(&cache_settings) {
+            let cache = cache_settings
+                .0
+                .then(|| {
+                    if cache_settings.1.is_empty() {
+                        crate::virtual_geometry::default_cache_dir()
+                    } else {
+                        Some(cache_settings.1.clone().into())
+                    }
+                })
+                .flatten()
+                .map(|dir: std::path::PathBuf| {
+                    BuildCache::new(dir, cache_settings.2 as u64 * 1024 * 1024)
+                });
+            if let Some(clusters) = &mut self.clusters {
+                clusters.set_cache(cache);
+            }
+            self.cache_settings = Some(cache_settings);
+        }
+
+        for (entity, gt, renderer, resolved, instanced_only, max_distance, displacement) in
+            query.iter(world_ref)
         {
             if !renderer.visible {
                 continue;
@@ -890,20 +1043,66 @@ impl RenderFeature for MeshFeature {
                 .and_then(|m| m.get(material_handle))
                 .unwrap_or(&default_material);
 
-            // Dense opaque meshes: clusters, culled and picked on the GPU, once built (until
-            // then they are drawn below as usual).
+            // Dense opaque meshes and displaced ones: clusters, culled and picked on the GPU,
+            // once built (until then they are drawn below as usual).
             let min_triangles = settings.virtual_geometry_min_triangles as usize;
-            if settings.virtual_geometry
+            let cluster_path = if settings.virtual_geometry
                 && !instanced_only
                 && material.alpha_mode == AlphaMode::Opaque
                 && material.wind_sway <= 0.0
                 && let Some(mesh) = mesh_assets.get(mesh_handle)
-                && mesh.indices.len() / 3 >= min_triangles.max(1)
-                && let Some(clusters) = &mut self.clusters
-                && clusters.ready(mesh_index, version, mesh)
             {
+                match displacement {
+                    None => (mesh.indices.len() / 3 >= min_triangles.max(1))
+                        .then(|| (mesh_index as u64, None)),
+                    Some(d) => match height_source(d, material, image_assets, preset_size) {
+                        Some(source) => {
+                            let key = displaced_key(mesh_index, d, material, &source);
+                            Some((key, Some((d, source))))
+                        }
+                        None => {
+                            if self.warned_no_height.insert(mesh_index) {
+                                tracing::warn!(
+                                    "a Displacement takes its height from the material, which \
+                                     has no height_texture or preset (or its pixels were \
+                                     released): drawing mesh {mesh_index} without displacement"
+                                );
+                            }
+                            None
+                        }
+                    },
+                }
+            } else {
+                None
+            };
+            let small = match &cluster_path {
+                Some((_, Some((d, _)))) => (d.max_triangles as usize) < SMALL_BUILD_TRIANGLES,
+                _ => mesh_assets
+                    .get(mesh_handle)
+                    .is_some_and(|m| m.indices.len() / 3 < SMALL_BUILD_TRIANGLES),
+            };
+            let preset_heights = &mut self.preset_heights;
+            if let Some((cluster_key, displaced)) = &cluster_path
+                && let Some(clusters) = &mut self.clusters
+                && clusters.ready(*cluster_key, version, small, || {
+                    let mesh = mesh_assets.get(mesh_handle)?.clone();
+                    let displacement = match displaced {
+                        None => None,
+                        Some((d, source)) => Some(resolve_displacement(
+                            d,
+                            material,
+                            source,
+                            image_assets,
+                            preset_heights,
+                            gpu,
+                        )?),
+                    };
+                    Some(BuildJob { mesh, displacement })
+                })
+            {
+                let cluster_key = *cluster_key;
                 self.clustered.insert(mesh_index);
-                if let Some(bounds) = clusters.bounds(mesh_index)
+                if let Some(bounds) = clusters.bounds(cluster_key)
                     && max_distance.is_some()
                 {
                     let center =
@@ -914,20 +1113,36 @@ impl RenderFeature for MeshFeature {
                         continue;
                     }
                 }
-                let (material_slot, textures) = self.material_slot(
-                    gpu,
-                    material_handle.index(),
-                    material,
-                    image_assets,
-                    preset_size,
-                );
+                // Displaced: the relief is geometry now, so parallax is off and the normal map
+                // only adds what is finer than the triangles.
+                let (material_slot, textures) = match displacement {
+                    Some(d) => {
+                        let strength = d.normal_map_strength.clamp(0.0, 1.0);
+                        self.material_slot(
+                            gpu,
+                            material_handle.index() as u64
+                                | (strength.to_bits() as u64) << 32
+                                | 1 << 63,
+                            &d.adjust_material(material),
+                            image_assets,
+                            preset_size,
+                        )
+                    }
+                    None => self.material_slot(
+                        gpu,
+                        material_handle.index() as u64,
+                        material,
+                        image_assets,
+                        preset_size,
+                    ),
+                };
                 let prev_gt = match self.previous.insert(entity, (*gt, frame)) {
                     Some((prev, seen)) if seen + 1 == frame => prev,
                     _ => *gt,
                 };
                 if let Some(clusters) = &mut self.clusters {
                     clusters.push_instance(ClusterInstance {
-                        mesh: mesh_index,
+                        mesh: cluster_key,
                         model: gt.matrix_relative_to(view.origin),
                         prev_model: prev_gt.matrix_relative_to(prev_origin),
                         material: material_slot,
@@ -971,7 +1186,7 @@ impl RenderFeature for MeshFeature {
             }
             let (material_slot, textures) = self.material_slot(
                 gpu,
-                material_handle.index(),
+                material_handle.index() as u64,
                 material,
                 image_assets,
                 preset_size,

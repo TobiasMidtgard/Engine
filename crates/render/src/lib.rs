@@ -109,22 +109,24 @@ pub use mesh::{Mesh, Shape, Vertex};
 pub use renderer::{
     RenderDisabled, RenderStats, Renderer, ScreenshotInfo, Screenshots, capture_now,
 };
+pub use rock::{StoneFinish, StoneKind, WallStone, wall_stone};
 pub use settings::{
     AntiAliasing, Atmosphere, DebugView, FogSettings, RenderSettings, Tonemapper, VolumetricQuality,
 };
 pub use surface_weather::{SURFACE_PUDDLE_SCALE_M, SURFACE_SNOW_SCALE_M};
 pub use texture::{Image, ImageLoader, PixelFormat};
+pub use virtual_geometry::{Displacement, DisplacementSource};
 pub use wgpu;
 
 pub mod prelude {
     pub use crate::{
         AlphaMode, AmbientLight, AntiAliasing, Atmosphere, BoxFace, Camera, DirectionalLight,
-        Exposure, FogSettings, FogShape, FogVolume, GltfScene, GltfSceneSpawner, GrassBender,
-        GrassField, GrassStyle, Image, MaterialPreset, MaterialRef, MaxDrawDistance, Mesh, MeshRef,
-        MeshRenderer, NoVirtualGeometry, PointLight, Projection, RenderAppExt, RenderFeature,
-        RenderPhase, RenderPlugin, RenderSettings, Screenshots, Shape, SkyLightVolume,
-        StandardMaterial, TextureMapping, Tonemapper, VolumetricQuality, spawn_gltf_scene,
-        spawn_gltf_scene_deferred,
+        Displacement, DisplacementSource, Exposure, FogSettings, FogShape, FogVolume, GltfScene,
+        GltfSceneSpawner, GrassBender, GrassField, GrassStyle, Image, MaterialPreset, MaterialRef,
+        MaxDrawDistance, Mesh, MeshRef, MeshRenderer, NoVirtualGeometry, PointLight, Projection,
+        RenderAppExt, RenderFeature, RenderPhase, RenderPlugin, RenderSettings, Screenshots, Shape,
+        SkyLightVolume, StandardMaterial, StoneKind, TextureMapping, Tonemapper, VolumetricQuality,
+        WallStone, spawn_gltf_scene, spawn_gltf_scene_deferred,
     };
 }
 
@@ -166,6 +168,9 @@ impl Plugin for RenderPlugin {
             )
             .register_component::<NoVirtualGeometry>(
                 "Marker: keeps this entity's dense MeshRenderer off the virtual geometry cluster path (debris, fragments, meshes that change often).",
+            )
+            .register_component::<Displacement>(
+                "Real displaced geometry for this entity's MeshRenderer, made when its virtual geometry clusters are built (background, cached on disk): amplitude_m (m; 0 = the material's parallax_depth), midlevel (height left on the surface), edge_m / max_edge_m (finest / coarsest triangle edges, m), tolerance_m, max_triangles, cavity_darkening, normal_map_strength, source: \"MaterialHeight\" (the material's height map or preset) | {\"Stone\": {kind: SplitFace|RoughHewn|Slab, seed, scale, lichen, grime}}.",
             )
             .register_component::<MaxDrawDistance>(
                 "Meters from the camera beyond which this entity's MeshRenderer (and its shadow) is not drawn: small props and clutter. Measured to the mesh's bounding sphere.",

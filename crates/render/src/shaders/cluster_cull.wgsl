@@ -185,8 +185,13 @@ fn cs_clusters(
     let radius = cluster.bounds.w * inst.lod.x;
     if (!in_view(view, center, radius)) { return; }
     if (view.forward.w > 0.5 && (inst.extra.y & INSTANCE_CONE_CULL) != 0u && cluster.cone.w > 0.0) {
-        let axis = normalize(mat3x3<f32>(inst.n0.xyz, inst.n1.xyz, inst.n2.xyz) * cluster.cone.xyz);
-        if (backfacing(view, center, radius, axis, cluster.cone.w)) { return; }
+        // A stretched instance turns its normals further from the axis: sin grows by at most
+        // the stretch (and the cone stays under 90 degrees while that is below 1).
+        let sin_a = sqrt(max(1.0 - cluster.cone.w * cluster.cone.w, 0.0)) * inst.lod.y;
+        if (sin_a < 0.999) {
+            let axis = normalize(mat3x3<f32>(inst.n0.xyz, inst.n1.xyz, inst.n2.xyz) * cluster.cone.xyz);
+            if (backfacing(view, center, radius, axis, sqrt(1.0 - sin_a * sin_a))) { return; }
+        }
     }
 
     let bucket = select(inst.mesh.z, 0u, view.slots.y != 0u);
@@ -204,6 +209,8 @@ fn cs_finish(@builtin(global_invocation_id) id: vec3<u32>) {
     var v = 0u;
     for (var k = 0u; k < VIEWS; k++) {
         let s = cull.views[k].slots;
+        // A view that is off owns no slot (its slot fields are all zero).
+        if (s.w == 0u) { continue; }
         let n = select(cull.counts.w, 1u, s.y != 0u);
         if (slot >= s.x && slot < s.x + n) { v = k; }
     }

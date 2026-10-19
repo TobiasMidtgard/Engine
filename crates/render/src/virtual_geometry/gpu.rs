@@ -25,11 +25,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use engine_core::prelude::*;
 
-use super::{CLUSTER_TRIANGLES, ClusterDag, Sphere, build};
+use super::cache::{BuildCache, build_key};
+use super::{
+    CLUSTER_TRIANGLES, ClusterDag, Displacement, HeightField, Sphere, StableHasher, build,
+    tessellate,
+};
 use crate::features::{GpuShared, GrowBuffer};
 use crate::frame::ViewData;
 use crate::mesh::Mesh;
@@ -77,7 +82,7 @@ const MAX_INSTANCES: usize = 600_000;
 /// kept for meshes under `SMALL_BUILD_TRIANGLES`.
 const MAX_LARGE_BUILDS: usize = 2;
 /// Meshes under this many triangles build in well under a second (in release builds).
-const SMALL_BUILD_TRIANGLES: usize = 200_000;
+pub const SMALL_BUILD_TRIANGLES: usize = 200_000;
 /// A mesh is built once its version has stayed the same for this many frames, so meshes
 /// that change every frame don't keep restarting builds (they stay on the instanced path).
 const SETTLE_FRAMES: u64 = 4;
@@ -86,7 +91,7 @@ const EVICT_AFTER_FRAMES: u64 = 600;
 
 /// The transform mirrors the mesh (`INSTANCE_MIRRORED` in `cluster_types.wgsl`).
 const INSTANCE_MIRRORED: u32 = 1;
-/// Normal cones are valid: single-sided, rigid, uniformly scaled.
+/// Normal cones are valid: single-sided, rotated and scaled without shear.
 const INSTANCE_CONE_CULL: u32 = 2;
 const INSTANCE_CASTS_SHADOWS: u32 = 4;
 
@@ -137,8 +142,8 @@ struct CullParams {
 /// One entity drawn as clusters this frame.
 #[derive(Debug, Clone, Copy)]
 pub struct ClusterInstance {
-    /// Mesh asset index (see [`ClusterRenderer::ready`]).
-    pub mesh: u32,
+    /// Key of the built mesh (see [`ClusterRenderer::ready`]).
+    pub mesh: u64,
     /// Camera-relative model matrix.
     pub model: Mat4,
     /// Last frame's model matrix, relative to last frame's camera (motion vectors).
@@ -167,6 +172,101 @@ pub struct ClusterStats {
     pub overflow: u32,
     /// Indirect draws issued this frame.
     pub draw_calls: u32,
+}
+
+/// What a build turns into clusters: a mesh, or a base mesh to tessellate and displace first.
+pub struct BuildJob {
+    pub mesh: Mesh,
+    pub displacement: Option<DisplacedJob>,
+}
+
+/// The displacement part of a [`BuildJob`].
+pub struct DisplacedJob {
+    pub displacement: Displacement,
+    /// Resolved amplitude, meters ([`Displacement::amplitude_for`]).
+    pub amplitude: f32,
+    pub field: Arc<dyn HeightField>,
+    /// Identifies the field's data for the build cache (its texels, or its parameters).
+    pub field_key: u64,
+}
+
+impl BuildJob {
+    /// What besides the mesh's own data decides the build (0 for a plain mesh).
+    fn extra_key(&self) -> u64 {
+        match &self.displacement {
+            None => 0,
+            Some(d) => {
+                let mut h = StableHasher::new(0xd15b_1ace);
+                h.write_u64(d.displacement.settings_key());
+                h.write_u64(d.field_key);
+                h.write_u32(d.amplitude.to_bits());
+                h.finish()
+            }
+        }
+    }
+
+    /// Build (or load from `cache`) the cluster hierarchy. Runs on a build thread.
+    fn run(self, cache: Option<BuildCache>) -> BuildOutput {
+        let started = Instant::now();
+        let key = cache
+            .as_ref()
+            .map(|_| build_key(&self.mesh, self.extra_key()));
+        if let (Some(cache), Some(key)) = (&cache, key)
+            && let Some(dag) = cache.load(key)
+        {
+            return BuildOutput {
+                dag,
+                cached: true,
+                seconds: started.elapsed().as_secs_f32(),
+                cache_bytes: 0,
+            };
+        }
+        let mesh = match self.displacement {
+            Some(d) => tessellate(&self.mesh, &d.displacement, d.amplitude, d.field.as_ref()),
+            None => self.mesh,
+        };
+        let dag = build(&mesh);
+        drop(mesh);
+        let mut cache_bytes = 0;
+        if let (Some(cache), Some(key)) = (&cache, key) {
+            match cache.store(key, &dag) {
+                Ok(bytes) => cache_bytes = bytes,
+                Err(e) => tracing::warn!(
+                    "could not write the cluster cache in {}: {e}",
+                    cache.dir.display()
+                ),
+            }
+        }
+        BuildOutput {
+            dag,
+            cached: false,
+            seconds: started.elapsed().as_secs_f32(),
+            cache_bytes,
+        }
+    }
+}
+
+struct BuildOutput {
+    dag: ClusterDag,
+    /// Loaded from the disk cache instead of built.
+    cached: bool,
+    seconds: f32,
+    /// Bytes written to the cache (0 when loaded or not cached).
+    cache_bytes: u64,
+}
+
+/// Cluster builds since startup: how many were built and loaded from the disk cache, and the
+/// time they took (on their background threads).
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+pub struct BuildStats {
+    pub built: u32,
+    pub loaded: u32,
+    pub build_seconds: f32,
+    pub load_seconds: f32,
+    /// Triangles of the meshes clustered (after displacement).
+    pub source_triangles: u64,
+    /// Bytes written to the disk cache.
+    pub cache_bytes_written: u64,
 }
 
 /// Free ranges of a pool (start, length), sorted by start and merged; first fit.
@@ -312,11 +412,11 @@ struct Entry {
 }
 
 struct Build {
-    mesh: u32,
+    mesh: u64,
     version: u64,
     /// Under `SMALL_BUILD_TRIANGLES`.
     small: bool,
-    handle: JoinHandle<ClusterDag>,
+    handle: JoinHandle<BuildOutput>,
 }
 
 const FREE: u8 = 0;
@@ -387,8 +487,11 @@ pub struct ClusterRenderer {
     cull_group: Option<wgpu::BindGroup>,
     draw_group: Option<wgpu::BindGroup>,
 
-    meshes: HashMap<u32, Entry>,
+    meshes: HashMap<u64, Entry>,
     running: Vec<Build>,
+    /// Where finished builds are kept on disk (None: no cache).
+    cache: Option<BuildCache>,
+    builds: BuildStats,
     frame: u64,
 
     pending: Vec<ClusterInstance>,
@@ -645,6 +748,8 @@ impl ClusterRenderer {
             draw_group: None,
             meshes: HashMap::new(),
             running: Vec::new(),
+            cache: None,
+            builds: BuildStats::default(),
             frame: 0,
             pending: Vec::new(),
             gpu_instances: Vec::new(),
@@ -681,33 +786,50 @@ impl ClusterRenderer {
                 continue; // the mesh changed while it was being built
             }
             entry.state = match result {
-                Ok(dag) => match upload(
-                    gpu,
-                    [
-                        &mut self.vertices,
-                        &mut self.indices,
-                        &mut self.clusters,
-                        &mut self.levels,
-                    ],
-                    self.max_bytes,
-                    &dag,
-                ) {
-                    Some(gpu_dag) => {
-                        // Pools may have been recreated.
-                        self.cull_group = None;
-                        self.draw_group = None;
-                        State::Ready(gpu_dag)
+                Ok(BuildOutput {
+                    dag,
+                    cached,
+                    seconds,
+                    cache_bytes,
+                }) => {
+                    if cached {
+                        self.builds.loaded += 1;
+                        self.builds.load_seconds += seconds;
+                    } else {
+                        self.builds.built += 1;
+                        self.builds.build_seconds += seconds;
                     }
-                    None => {
-                        tracing::warn!(
-                            "mesh {} ({} clusters) does not fit in GPU memory; drawing it \
+                    self.builds.source_triangles += dag.source_triangles as u64;
+                    self.builds.cache_bytes_written += cache_bytes;
+                    let uploaded = upload(
+                        gpu,
+                        [
+                            &mut self.vertices,
+                            &mut self.indices,
+                            &mut self.clusters,
+                            &mut self.levels,
+                        ],
+                        self.max_bytes,
+                        &dag,
+                    );
+                    match uploaded {
+                        Some(gpu_dag) => {
+                            // Pools may have been recreated.
+                            self.cull_group = None;
+                            self.draw_group = None;
+                            State::Ready(gpu_dag)
+                        }
+                        None => {
+                            tracing::warn!(
+                                "mesh {} ({} clusters) does not fit in GPU memory; drawing it \
                              without virtual geometry",
-                            b.mesh,
-                            dag.clusters.len()
-                        );
-                        State::Failed
+                                b.mesh,
+                                dag.clusters.len()
+                            );
+                            State::Failed
+                        }
                     }
-                },
+                }
                 Err(_) => {
                     tracing::error!(
                         "building clusters of mesh {} failed; drawing it without virtual geometry",
@@ -721,7 +843,7 @@ impl ClusterRenderer {
         // Meshes nobody drew for a while.
         if self.frame.is_multiple_of(120) {
             let frame = self.frame;
-            let stale: Vec<u32> = self
+            let stale: Vec<u64> = self
                 .meshes
                 .iter()
                 .filter(|(_, e)| e.last_used + EVICT_AFTER_FRAMES < frame)
@@ -773,10 +895,24 @@ impl ClusterRenderer {
         }
     }
 
-    /// Whether mesh `mesh` (asset index) at `version` can be drawn as clusters. The first call
-    /// for a mesh (or a new version of it) starts building its clusters in the background;
-    /// until they are on the GPU this returns false and the mesh should be drawn as usual.
-    pub fn ready(&mut self, mesh: u32, version: u64, data: &Mesh) -> bool {
+    /// Keep finished builds on disk in `cache` (None: build every time).
+    pub fn set_cache(&mut self, cache: Option<BuildCache>) {
+        self.cache = cache;
+    }
+
+    /// Whether the mesh `mesh` (a key naming the mesh and anything it is built with, such as
+    /// its displacement) at `version` can be drawn as clusters. The first call for a key (or a
+    /// new version of it) starts building its clusters in the background from what `job`
+    /// returns (called only then); until they are on the GPU this returns false and the mesh
+    /// should be drawn as usual. `small` builds (under 200 000 triangles) get a slot of their
+    /// own.
+    pub fn ready(
+        &mut self,
+        mesh: u64,
+        version: u64,
+        small: bool,
+        job: impl FnOnce() -> Option<BuildJob>,
+    ) -> bool {
         let frame = self.frame;
         let entry = self.meshes.entry(mesh).or_insert(Entry {
             version,
@@ -802,7 +938,6 @@ impl ClusterRenderer {
         }
         // Small meshes (a damaged wall being rebuilt) have a build slot of their own, so they
         // never wait behind large builds.
-        let small = data.indices.len() / 3 < SMALL_BUILD_TRIANGLES;
         let large_running = self.running.iter().filter(|b| !b.small).count();
         let slot_free = self.running.len() < MAX_LARGE_BUILDS + 1
             && (small || large_running < MAX_LARGE_BUILDS);
@@ -811,10 +946,13 @@ impl ClusterRenderer {
         match entry.state {
             State::Ready(_) => true,
             State::Waiting if slot_free && settled => {
-                let copy = data.clone();
+                let Some(job) = job() else {
+                    return false;
+                };
+                let cache = self.cache.clone();
                 match std::thread::Builder::new()
                     .name("cluster build".into())
-                    .spawn(move || build(&copy))
+                    .spawn(move || job.run(cache))
                 {
                     Ok(handle) => {
                         entry.state = State::Building;
@@ -837,7 +975,7 @@ impl ClusterRenderer {
     }
 
     /// Mesh-space bounding sphere of a mesh [`ready`](Self::ready) to be drawn as clusters.
-    pub fn bounds(&self, mesh: u32) -> Option<Sphere> {
+    pub fn bounds(&self, mesh: u64) -> Option<Sphere> {
         match self.meshes.get(&mesh) {
             Some(Entry {
                 state: State::Ready(dag),
@@ -914,16 +1052,25 @@ impl ClusterRenderer {
             let axes = [model.x_axis, model.y_axis, model.z_axis].map(|a| a.truncate());
             let lengths = axes.map(Vec3::length);
             let scale = lengths[0].max(lengths[1]).max(lengths[2]);
-            // Normal cones survive rotation and uniform scale (not shear or stretch).
-            let conformal = lengths[0].min(lengths[1]).min(lengths[2]) >= scale * 0.99
+            // Normal cones survive rotation and scale, uniform or not (not shear): a scale
+            // along the axes turns a normal's angle to the cone axis from a to at most
+            // asin(stretch * sin a), stretch = largest^2 / (middle * smallest) scale.
+            let smallest = lengths[0].min(lengths[1]).min(lengths[2]);
+            let middle = lengths[0] + lengths[1] + lengths[2] - scale - smallest;
+            let orthogonal = smallest > 1e-6
                 && [(0, 1), (1, 2), (0, 2)]
                     .iter()
                     .all(|&(a, b)| axes[a].dot(axes[b]).abs() <= 0.01 * scale * scale);
+            let stretch = if orthogonal {
+                scale * scale / (middle * smallest)
+            } else {
+                f32::INFINITY
+            };
             let mut flags = 0;
             if Mat3::from_mat4(model).determinant() < 0.0 {
                 flags |= INSTANCE_MIRRORED;
             }
-            if !inst.double_sided && conformal {
+            if !inst.double_sided && stretch < 4.0 {
                 flags |= INSTANCE_CONE_CULL;
             }
             let views = 1 + if inst.casts_shadows {
@@ -942,7 +1089,7 @@ impl ClusterRenderer {
                 extra: [inst.material, flags, base.extra[2], base.extra[3]],
                 sphere: [center.x, center.y, center.z, dag.bounds.radius * scale],
                 mesh: [dag.levels.0 as u32, dag.levels.1 as u32, bucket, 0],
-                lod: [scale, 0.0, 0.0, 0.0],
+                lod: [scale, stretch.min(4.0), 0.0, 0.0],
             });
             entries += dag.clusters.1;
             chunks += dag.chunks as u64 * views;
@@ -1238,6 +1385,11 @@ impl ClusterRenderer {
         self.stats
     }
 
+    /// Builds since startup.
+    pub fn build_stats(&self) -> BuildStats {
+        self.builds
+    }
+
     /// State for `render.stats`.
     pub fn describe(&self) -> serde_json::Value {
         let count = |f: fn(&State) -> bool| self.meshes.values().filter(|e| f(&e.state)).count();
@@ -1252,6 +1404,8 @@ impl ClusterRenderer {
             "stats": self.stats,
             "pool_bytes": pool_bytes,
             "buckets": self.buckets.len(),
+            "builds": self.builds,
+            "cache_dir": self.cache.as_ref().map(|c| c.dir.display().to_string()),
         })
     }
 }
