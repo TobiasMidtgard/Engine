@@ -715,6 +715,8 @@ impl Renderer {
             )
         {
             view.history_valid = false;
+            self.meter.restart();
+            self.exposure.snap = true;
         }
         let mut uniform = frame_uniform(world, &view);
         uniform.shadow_params[3] = self.shadow.size as f32;
