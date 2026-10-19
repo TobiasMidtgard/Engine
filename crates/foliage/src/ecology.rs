@@ -18,7 +18,7 @@ use crate::sim::{
     EnvSample, FlatEnv, RegionSim, SimLog, SimPlant, SimSource, Soil, StepContext, StepOutput,
     grow_plant,
 };
-use crate::species::{Layer, PlantLibrary, SpeciesId};
+use crate::species::{Layer, PlantLibrary, PlantSpecies, SpeciesId};
 
 /// Which region a plant belongs to (`None` = it grows on its own, without spreading).
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
@@ -294,12 +294,25 @@ pub fn play_history(
         h.years_since,
         region.step_years.max(0.5),
     );
-    // Paths, shores and plots stay passable, and no log runs through a standing trunk or
-    // another log: one that came down across any of them was dragged around to lie beside it,
-    // or hauled away (or long since rotted) when it fits nowhere.
+    fit_logs(region, center, library, &plants, &[], &mut logs);
+    (plants, logs)
+}
+
+/// Paths, shores and plots stay passable, and no log runs through a standing trunk or another
+/// log: one that came down across any of them was dragged around to lie beside it, or hauled
+/// away (or long since rotted) when it fits nowhere. Keeps the `logs` that fit, turned to
+/// where they fit, clear of `lying` logs already on the ground.
+pub fn fit_logs(
+    region: &EcologyRegion,
+    center: DVec3,
+    library: &PlantLibrary,
+    plants: &[SimPlant],
+    lying: &[SimLog],
+    logs: &mut Vec<SimLog>,
+) {
     let stems: Vec<(Vec2, f32)> = plants
         .iter()
-        .filter(|p| !matches!(p.plant.stage, PlantStage::Stump { .. }))
+        .filter(|p| !p.removed && !matches!(p.plant.stage, PlantStage::Stump { .. }))
         .filter_map(|p| {
             let sp = library.get(p.plant.species);
             let local = Vec2::new((p.pos.x - center.x) as f32, (p.pos.z - center.z) as f32);
@@ -307,7 +320,10 @@ pub fn play_history(
                 .then(|| (local, (sp.trunk_radius_m * p.plant.size).max(0.05)))
         })
         .collect();
-    let mut lying: Vec<LogSpan> = Vec::new();
+    let mut lying: Vec<LogSpan> = lying
+        .iter()
+        .map(|l| LogSpan::of(center, l, library))
+        .collect();
     logs.retain_mut(|l| {
         let yaw = l.yaw;
         let fits = [
@@ -338,7 +354,28 @@ pub fn play_history(
         }
         fits
     });
-    (plants, logs)
+}
+
+/// Whether a plant the simulation is done with comes down whole in live play (a big snag),
+/// rather than crumbling away.
+pub fn topples(plant: &Plant, sp: &PlantSpecies) -> bool {
+    matches!(plant.stage, PlantStage::Dead { .. }) && sp.is_tree() && plant.size > 0.5
+}
+
+/// Which way a snag comes down: any way, but away from anyone standing within its reach.
+fn topple_direction(focus: &FocusPoints, pos: DVec3, height: f32, e: Entity) -> Vec3 {
+    let r = engine_core::math::hash01(e.to_bits() as i64, 7, 0, 0x5a6);
+    let near = focus
+        .points
+        .iter()
+        .map(|f| (pos - *f).with_y(0.0))
+        .filter(|away| away.length() > 0.1 && away.length() < height as f64 * 1.5)
+        .min_by(|a, b| a.length().total_cmp(&b.length()));
+    let yaw = match near {
+        Some(away) => away.z.atan2(away.x) as f32 + (r - 0.5) * 1.2,
+        None => r * TAU,
+    };
+    Vec3::new(yaw.cos(), 0.0, yaw.sin())
 }
 
 /// Whether a log lies across one of the region's keep-clear circles.
@@ -728,6 +765,10 @@ pub fn ecology_step(world: &mut World) {
         let log_ids: Vec<Entity> = logs.iter().filter_map(|l| l.entity).collect();
         let start = std::time::Instant::now();
         let mut out = StepOutput::default();
+        // Long catch-ups run in coarse steps; a step's worth (and the frame that tipped it over)
+        // is one step.
+        let steps = (years / region.step_years - 0.25).ceil().clamp(1.0, 8.0);
+        let catch_up = steps > 1.0;
         {
             let env = EnvView::from_world(world);
             let ctx = StepContext {
@@ -737,13 +778,11 @@ pub fn ecology_step(world: &mut World) {
                 rain_species: &state.rain_species,
                 env: &env,
             };
-            // Long catch-ups run in coarse steps.
-            let steps = (years / region.step_years).ceil().clamp(1.0, 8.0);
             let dt = years / steps;
             for _ in 0..steps as u32 {
                 state
                     .sim
-                    .step(&ctx, &mut plants, &mut logs, dt, steps > 1.0, &mut out);
+                    .step(&ctx, &mut plants, &mut logs, dt, catch_up, &mut out);
             }
         }
         let mut stats = RegionStats {
@@ -753,10 +792,16 @@ pub fn ecology_step(world: &mut World) {
             step_ms: start.elapsed().as_secs_f32() * 1000.0,
             ..Default::default()
         };
+        let mut toppling = Vec::new();
         for p in &plants {
             let Some(e) = p.entity else { continue };
             if p.removed {
-                if let Ok(ent) = world.get_entity_mut(e) {
+                // In live play a big snag comes down whole and its stump stays a while; in a
+                // catch-up it came down while nobody was near (see the new logs below).
+                let sp = library.get(p.plant.species);
+                if !catch_up && topples(&p.plant, sp) {
+                    toppling.push((e, p.pos, p.plant.height(sp)));
+                } else if let Ok(ent) = world.get_entity_mut(e) {
                     ent.despawn();
                 }
                 stats.deaths += 1;
@@ -801,6 +846,22 @@ pub fn ecology_step(world: &mut World) {
                 && let Some(mut log) = world.get_mut::<FelledLog>(e)
             {
                 log.years = l.years;
+            }
+        }
+        for (e, pos, height) in toppling {
+            let dir = topple_direction(&focus, pos, height, e);
+            if crate::felling::fell_tree(world, e, dir).is_none()
+                && let Ok(ent) = world.get_entity_mut(e)
+            {
+                ent.despawn();
+            }
+        }
+        if catch_up {
+            let (lying, mut fresh): (Vec<SimLog>, Vec<SimLog>) =
+                logs.into_iter().partition(|l| l.entity.is_some());
+            fit_logs(&region, state.center, &library, &plants, &lying, &mut fresh);
+            for l in &fresh {
+                spawn_log(world, l);
             }
         }
         for b in out.births {
@@ -948,6 +1009,74 @@ mod tests {
             &log(6.0, FRAC_PI_2),
             &lib
         ));
+    }
+
+    #[test]
+    fn a_log_from_a_catch_up_lies_clear_of_the_logs_already_there() {
+        let lib = PlantLibrary::default();
+        let region = forest();
+        let log = |x: f64, z: f64, yaw: f32| SimLog {
+            entity: None,
+            pos: DVec3::new(x, 0.0, z),
+            yaw,
+            species: lib.id("oak").unwrap(),
+            size: 0.8,
+            years: 0.0,
+            rot_years: 10.0,
+            genes: Genes::default(),
+        };
+        // One lies along +X from the origin; the new one came down across it.
+        let lying = [log(0.0, 0.0, 0.0)];
+        let mut fresh = vec![log(3.0, -4.0, FRAC_PI_2)];
+        fit_logs(&region, DVec3::ZERO, &lib, &[], &lying, &mut fresh);
+        assert_eq!(fresh.len(), 1, "it fits, turned away from the other");
+        let (a, b) = (
+            LogSpan::of(DVec3::ZERO, &fresh[0], &lib),
+            LogSpan::of(DVec3::ZERO, &lying[0], &lib),
+        );
+        assert!(a.distance_to_span(&b) >= a.radius + b.radius);
+    }
+
+    #[test]
+    fn a_big_snag_comes_down_whole_in_live_play() {
+        let mut app = App::new();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual {
+                step_secs: 1.0 / 60.0,
+            });
+        app.add_plugins(engine_world::WorldPlugin);
+        app.add_plugins(crate::FoliagePlugin);
+        app.world.resource_mut::<EcologySettings>().years_per_second = 1.0;
+        app.world.spawn((
+            Transform::default(),
+            EcologyRegion {
+                half_extents: [20.0, 20.0],
+                species: vec!["oak".into()],
+                seed_rain: 0.0,
+                ..Default::default()
+            },
+        ));
+        let lib = PlantLibrary::default();
+        let mut snag = Plant::new(lib.id("oak").unwrap(), 0.8, Genes::default());
+        // A woody snag stands 2 + 5 * size years.
+        snag.stage = PlantStage::Dead { years: 5.9 };
+        let snag = app
+            .world
+            .spawn((Transform::from_xyz(3.0, 0.0, 4.0), snag))
+            .id();
+        for _ in 0..40 {
+            app.update();
+        }
+        let stage = app.world.get::<Plant>(snag).map(|p| p.stage);
+        assert!(
+            matches!(stage, Some(PlantStage::Stump { .. })),
+            "the snag left {stage:?}"
+        );
+        let mut down = app
+            .world
+            .query_filtered::<(), Or<(With<crate::felling::FallingTree>, With<FelledLog>)>>();
+        assert_eq!(down.iter(&app.world).count(), 1, "it came down whole");
     }
 
     #[test]

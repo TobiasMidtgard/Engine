@@ -26,6 +26,13 @@ fracture and debris.
 - **Breach charges** (`BreachCharge`): an explosive charge blows a hole through soft walls; a
   thermite charge burns around its edge (sparks, smoke, glowing strip), cutting rebar too, and
   the panel inside drops out at the end.
+- **Reinforcement** (`reinforce`, Siege style): a `ReinforceRequest` sets steel panels against
+  a wall's back, one per 2.8 m of width. Each is a 4 cm steel `DestructibleWall` on a bolted
+  frame (worn paint, a yellow kick member, lugs and handles), carried in, pressed home and
+  braced by two yellow hydraulic struts that swing down off its back onto the floor. Bullets
+  that get through the wall ring off the steel, a breach charge strips the wall and only
+  scars the panel, and thermite on the wall burns through the panel behind too. Panels go
+  when their wall goes.
 - **Building pieces** (`StructuralPiece`, Valheim style) carry support from the ground up:
   every piece gets the best support any path to a grounded piece gives it, losing some per
   meter up and more per meter sideways, by material (wood carries far less sideways than
@@ -65,8 +72,9 @@ fracture and debris.
   ring pull on each face) hangs in every doorway built in build mode. `interact` (E, gamepad
   West) opens or shuts the door nearest a character within 2.2 m; it swings 95° away from
   whoever opens it, either way, and with a physics module it is a kinematic body that swings
-  with it (shut, it closes the doorway; swinging, it shoves crates out of its way). When its doorway falls the door swings shut and falls with it; take
-  the doorway down and the door goes too.
+  with it (shut, it closes the doorway; swinging, it shoves crates out of its way). When its
+  doorway falls the door swings shut and falls with it; take the doorway down and the door
+  goes too.
 - **Burning wood** (`burn`): wooden building pieces get an `engine_world::Combustible`
   holding their wood as fuel, so the fire module (when installed) can light and burn them.
   As they burn they char (scorched, then black alligator char with embers glowing in its
@@ -104,14 +112,16 @@ Reads: `DamageEvent` (bullets, melee, explosions; `target` picks the wall or pie
 `WorldImpulse` (explosions: energy falls off with distance), `ProjectileTrace` (bullets pass
 through soft material and lose energy), `ContactEvent` (hard impacts, debris landing),
 `TerrainEdit` (dig and build rock), `Combustible` state, the `build_*` and `interact` input
-actions, `BuildRequest` (script a builder), `DoorRequest` (open or shut a door).
+actions, `BuildRequest` (script a builder), `DoorRequest` (open or shut a door),
+`ReinforceRequest` (reinforce a wall).
 
 Writes: `WorldImpulse` (falling structures, strength only), `NoiseEvent` (breaks, collapses,
-doors),
+doors, reinforcement going up),
 `SmokeEmission` (dust and thermite smoke for the smoke module), `GroundContact` (debris
 landing on a surface, for footstep-style impact sounds), physics-contract bodies for debris
 and static colliders for standing building pieces, breakable props and set dressing, and
-kinematic bodies for doors (moved by their `Transform`).
+kinematic bodies for doors (moved by their `Transform`), and `Climbable` on the breach house's
+ladders (climbed by the movement module, linked by NPC navigation).
 
 ## Using it
 
@@ -155,6 +165,7 @@ grenade writes `WorldImpulse`, a pickaxe writes `TerrainEdit`.
 | `destruction.build` | Place a piece like a player in build mode: `{kind, from, to}` or `{kind, at}`, `yaw_deg`, `preview` |
 | `destruction.unbuild` | Take down a built piece `{entity}` or the one aimed at `{from, to}` |
 | `destruction.build_pieces` | The pieces build mode can place, with sizes |
+| `destruction.reinforce` | Set steel panels behind the wall nearest `{near}` (within 3 m) or `{entity}`; returns the wall and how many panels |
 | `destruction.door` | Open or shut the door nearest `{near}` (it swings away from there) or `{entity}`; `open` true, false or left out to toggle |
 | `destruction.inspect` | Integrity, cells, rebar, volume of one entity `{entity}` |
 | `destruction.stats`, `destruction.clear_debris` | Counters; remove all debris |
@@ -175,14 +186,17 @@ bridge and the editor can change them live.
 `demo::spawn_demo(commands, origin)` builds the destruction range (`games/showcase` puts it in
 the Siege fortress zone). It is about 80 × 40 m and runs a 20 s loop, then rebuilds:
 
-- **Seven breach bays.** Five show the aftermath from the start: drywall shot to pieces with
+- **Eight breach bays.** Five show the aftermath from the start: drywall shot to pieces with
   a vault hole; a drywall with a kicked-in door barricade and a window barricade; a reinforced
   wall with a thermite doorway; a reinforced wall after an explosive (concrete gone, rebar
-  standing); a brick wall with a blast hole. Two run live: thermite burning through reinforced
-  concrete, and a drywall shot up and then blown open by a charge.
+  standing); a brick wall with a blast hole. Three run live: thermite burning through
+  reinforced concrete; a drywall shot up and then blown open by a charge; and a drywall
+  reinforced while it is being shot (bay 8, west end): the panels go up behind it, the next
+  bursts stop on the steel, a charge strips the drywall and leaves the panels standing, and
+  thermite burns a doorway through wall and panel together.
 - **Breach house** (vertical play, north of the tower): a brick room with an open front and a
   window in each side wall under a timber roof deck on joists, with a stair up its back wall
-  to the roof and a steel ladder under each of its two rimmed hatches. Galvanized
+  to the roof and a climbable steel ladder under each of its two rimmed hatches. Galvanized
   tube-and-clamp guard railings (`PropKind::PipeRailing`: cast clamp fittings, base flanges,
   a timber toe board) run round the roof, open at the stair's head, and up the stair's open
   side on palms bolted to its stringer. Its west roof bay was
@@ -202,7 +216,7 @@ the Siege fortress zone). It is about 80 × 40 m and runs a 20 s loop, then rebu
   no flames).
 
 `cargo run -p engine_destruction --release --example fortress -- <out_dir>` renders all of it
-headless to 28 screenshots (`house` for the breach house's).
+headless to 36 screenshots (`house` for the breach house's, `reinforce` for bay 8's).
 
 `hill::spawn_voxel_hill(commands, origin)` builds the dig-and-build hill (the showcase's voxel
 hill zone) on a 28 s loop: a tunnel dug into the hill until its hall caves in, a terrace raised
@@ -235,7 +249,10 @@ still holds it, red), then under both, and the shelter drops into the pit.
   them, doors opening away from whoever presses interact and falling with their doorway,
   stairs built up to the cabin's deck and their ramp-shaped colliders, a floor shot through
   from below and blown open from above, hatches smashed in or cut out while steel stops
-  bullets and charges, built openings surviving a rebuild, and the breach house's loop).
+  bullets and charges, built openings surviving a rebuild, the breach house's loop,
+  reinforcement panels set and braced behind a drywall that stop bullets and a charge until
+  thermite burns through wall and panel, and the AI call reinforcing the wall nearest a
+  point).
 - `hill::tests::the_yard_cabin_snaps_together_as_planned` and
   `the_terrace_shelter_snaps_together_as_planned` aim every step of the cabin and the shelter
   and check each piece lands where it should with the support the solver gives it.
@@ -247,5 +264,4 @@ still holds it, red), then under both, and the shelter drops into the pit.
   voxel cliff. **Done** (tests above and the showcase).
 
 Next: debris resting on other debris without a physics module, cave-in boulders resting on
-rock ledges (they need side contacts, not just floors), and ladders you can climb (they need
-a climbing contract from movement).
+rock ledges (they need side contacts, not just floors).

@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use crate::ecology::{InRegion, RegionState};
 use crate::felling::{ChopResult, chop, fell_tree};
 use crate::plant::{EcologyRegion, EcologySettings, Genes, Plant, PlantStage, ResourceSource};
+use crate::season::FoliageSeason;
 use crate::sim::SimSource;
 use crate::species::{PlantLibrary, PlantSpecies};
 
@@ -378,6 +379,30 @@ pub fn register(app: &mut App) {
                 s.paused = p;
             }
             Ok(serde_json::to_value(s.clone()).unwrap_or_default())
+        },
+    )
+    .register_api(
+        "foliage.season",
+        "Set the time of year the plants show: \"day_of_year\" (0..365; 115 ≈ late April \
+         leaf-out, 190 midsummer, 285 autumn color, 350 bare winter), or \"follow_weather\": \
+         true to take the weather's calendar. Returns the day and what the deciduous plants \
+         are doing.",
+        r#"{"day_of_year": 285}"#,
+        |world, args| {
+            let mut season = world.resource_mut::<FoliageSeason>();
+            if let Some(f) = args.get("follow_weather").and_then(|f| f.as_bool()) {
+                season.follow_weather = f;
+            }
+            if let Some(d) = args.get("day_of_year").and_then(|d| d.as_f64()) {
+                season.day_of_year = (d as f32).rem_euclid(crate::season::YEAR_DAYS);
+                season.follow_weather = false;
+            }
+            let season = *season;
+            Ok(json!({
+                "day_of_year": season.day_of_year,
+                "follow_weather": season.follow_weather,
+                "phase": crate::season::phase_name(season.day_of_year),
+            }))
         },
     )
     .register_api(

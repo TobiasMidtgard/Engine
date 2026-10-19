@@ -37,6 +37,12 @@ pub struct VariantMeshes {
     pub foliage_lod: Option<Handle<Mesh>>,
     pub sapling_wood: Option<Handle<Mesh>>,
     pub sapling_foliage: Option<Handle<Mesh>>,
+    /// Thinned crowns for leaf fall and leaf-out, one per [`crate::meshgen::tree::LEAF_STEPS`]
+    /// step (deciduous species; empty otherwise): of `foliage`, `foliage_lod` and
+    /// `sapling_foliage`.
+    pub foliage_thin: Vec<Handle<Mesh>>,
+    pub foliage_lod_thin: Vec<Handle<Mesh>>,
+    pub sapling_foliage_thin: Vec<Handle<Mesh>>,
     /// Limbed trunk for old logs.
     pub log: Option<Handle<Mesh>>,
     /// The same trunk standing dead (snags and burnt trees).
@@ -57,6 +63,8 @@ pub struct SpeciesVisual {
     /// The stump and roots (rigid).
     pub bark_rigid: Handle<StandardMaterial>,
     pub leaves: [Handle<StandardMaterial>; TINTS],
+    /// The summer color of each tint of `leaves` (linear RGB); the season recolors from it.
+    pub leaf_colors: [[f32; 3]; TINTS],
     pub dead_leaves: Handle<StandardMaterial>,
     /// Leaves that don't sway (falling trees and logs: their mesh lies on its side).
     pub leaves_still: [Handle<StandardMaterial>; TINTS],
@@ -247,10 +255,16 @@ fn build_species(
     for v in 0..VARIANTS as u64 {
         let (full, sapling) = build_meshes(sp, seed ^ (v * 0x9e37_79b9));
         let mut add = |m: Option<Mesh>| m.map(|m| meshes.add(m));
-        let (sapling_wood, sapling_foliage) = match sapling {
-            Some(s) => (add(s.wood), add(s.foliage)),
-            None => (None, None),
+        let (sapling_wood, sapling_foliage, sapling_thin) = match sapling {
+            Some(s) => (add(s.wood), add(s.foliage), s.foliage_thin),
+            None => (None, None, Vec::new()),
         };
+        let mut add_all =
+            |v: Vec<Mesh>| -> Vec<Handle<Mesh>> { v.into_iter().map(|m| meshes.add(m)).collect() };
+        let foliage_thin = add_all(full.foliage_thin);
+        let foliage_lod_thin = add_all(full.foliage_lod_thin);
+        let sapling_foliage_thin = add_all(sapling_thin);
+        let mut add = |m: Option<Mesh>| m.map(|m| meshes.add(m));
         variants.push(VariantMeshes {
             base: add(full.base),
             wood: add(full.wood),
@@ -259,6 +273,9 @@ fn build_species(
             foliage_lod: add(full.foliage_lod),
             sapling_wood,
             sapling_foliage,
+            foliage_thin,
+            foliage_lod_thin,
+            sapling_foliage_thin,
             log: add(full.log),
             snag: add(full.snag),
             height: full.height,
@@ -335,6 +352,11 @@ fn build_species(
     let mix = |a: [f32; 3], b: [f32; 3], t: f32| [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t);
     let tint_colors = [0.0, 0.35, 0.7].map(|t| mix(sp.leaf_color, sp.accent_color, t));
     let leaves = tint_colors.map(|c| materials.add(leaf_material(c)));
+    // What the season recolors from (flowers keep white: their petals are in the texture).
+    let leaf_colors = tint_colors.map(|c| {
+        let [r, g, b, _] = leaf_material(c).base_color;
+        [r, g, b]
+    });
     let dead_leaves = materials.add(leaf_material(srgb(0x8a6a3c)));
     let still = |mut m: StandardMaterial| {
         m.wind_sway = 0.0;
@@ -390,6 +412,7 @@ fn build_species(
         bark: materials.add(bark),
         bark_rigid: materials.add(bark_rigid),
         leaves,
+        leaf_colors,
         dead_leaves,
         leaves_still,
         dead_leaves_still,
