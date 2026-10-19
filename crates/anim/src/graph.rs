@@ -1035,6 +1035,14 @@ impl GraphInstance {
         }
     }
 
+    /// Length of the clip named `name` if the graph plays it, seconds.
+    pub fn clip_duration(&self, name: &str) -> Option<f32> {
+        self.nodes.iter().find_map(|n| match n {
+            Node::Clip(c) if c.clip.name == name => Some(c.clip.duration),
+            _ => None,
+        })
+    }
+
     /// Clips that contributed to the last pose, with their weights and playback times.
     pub fn describe(&self) -> serde_json::Value {
         let clips: Vec<_> = self

@@ -284,6 +284,29 @@ pushes blades aside (16 nearest the camera). `RenderSettings::grass_density` sca
 draw distance. `engine_foliage` drives grass by spawning fields from its soil grid; game code
 can spawn them directly.
 
+**Sprites and tile maps** (built; `sprites/`): 2D and 2.5D. A `Sprite` draws an image (or a solid
+color) as a quad at its entity's `Transform`: size in meters, an atlas frame (`SpriteAtlas::grid`,
+`grid_cells` or explicit rectangles), tint, flips, anchor, a `layer` that orders 2D scenes, and
+`Billboard::Fixed`, `FaceCamera` or `Upright` (turns about its own up axis only). `SpriteAnimation`
+steps `Sprite::frame` through a frame list (loop, once, ping-pong) on world time, so slow motion
+and `LocalTimeScale` slow it. A `TileMap` holds a grid of atlas frames (0 empty, Tiled's flip bits)
+and draws with one instanced draw per run of visible 32 × 32 chunks (one for a map wholly in view)
+from a GPU buffer rebuilt only when the map changes; a `Parallax` component moves a sprite or map
+with part of the camera's motion and can repeat it along x. Filtering is `Linear`, `Nearest` or
+`PixelArt` (sharp bilinear: texel centers, blending only across the one pixel a texel edge
+crosses), always kept inside the frame's rectangle so atlas neighbours never bleed.
+`SpriteAlpha::Cutout` sprites draw with the meshes (depth prepass, depth writes, sun shadows with
+the cut-out); `Blend` and `Additive` ones draw after them, sorted by layer and then back to front.
+Unlit sprites show their colors as authored (like unlit meshes); `lit` ones are shaded as thin
+sheets by the sun, sky light and point lights with shadows, optionally through a normal map,
+`roundness` (a bent normal, like a rounded volume) and `translucency`. A `PixelPerfect` component
+(art texels per meter, scale, snap) on an orthographic camera renders at full resolution with a
+whole number of screen pixels per art texel, moves the view and every sprite and tile corner to
+whole texels (or pixels), and turns temporal anti-aliasing off while it renders (jitter would blur
+the texel edges and there is nothing between them to smooth); full resolution keeps lighting,
+shadows and UI sharp without an extra target or upscale. Images come from the shared image cache.
+Nothing is built for scenes without sprites or tile maps.
+
 **Volumetric fog** (built): with `RenderSettings::volumetric_fog` (the default), fog within
 `volumetric_fog_range` (default 256 m) of the camera lives in a froxel grid fitted to the view,
 after Wronski 2014 and Hillaire 2015 (`volumetric_fog_quality`: `High` 8 px tiles and 128

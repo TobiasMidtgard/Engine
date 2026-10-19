@@ -57,7 +57,8 @@ compresses and stretches.
   ponytail spring chain, and optional motion-capture idle, walk and run replace the
   generated ones. Files load on background threads; until then the person keeps its
   generated body.
-- **Contracts.** Reads `AnimationParams` and `AnimationTrigger`; writes `SkeletonPose` every
+- **Contracts.** Reads `AnimationParams` and `AnimationTrigger` (`attack_heavy` swings,
+  `block` raises the guard, and a mover's `LocomotionState.blocking` holds it); writes `SkeletonPose` every
   frame and `AnimationEvent` at marked frames, so movement, AI, cloth and hair never depend
   on this crate. Footsteps and hoof falls become `GroundContact` (foot, paw or hoof, with
   load and speed) and `NoiseEvent`; hammer impacts are loud `NoiseEvent`s.
@@ -84,6 +85,24 @@ compresses and stretches.
   each other or their owner's controller (`RAGDOLL_LAYER`), foot IK ignores them, and hard
   hits become `GroundContact`s of kind `Body` and `NoiseEvent`s. Without a physics module the
   body stays animated. It runs in `AnimSet::Ragdoll`, after IK and before muscles.
+- **Getting up.** A person whose weight returns to 0 while lying flat gets up rather than
+  blending straight to standing: `get_up_back` (sits up, tucks a leg, plants a hand and a
+  knee, steps up) or `get_up_front` (palms down, pushes up to all fours, kneels, steps up),
+  with hands, knees and feet planted by IK on the floor. The clip starts from where and how
+  the body lies, its first frame lined up with the body and blended in from the limp pose;
+  foot IK stays off while on the floor. It reports `getting_up` and `got_up`
+  `AnimationEvent`s so a mover knows when to take over again. A body moved far from its
+  entity while limp (more than `GET_UP_REACH`) blends straight back to standing.
+- **Bracing.** `RagdollTone` gives a limp body muscle tone: each joint turns toward its
+  animated angle, with no pull toward a place and no help against gravity, so a falling
+  person holds the shape of the `fall_brace` clip (arms reaching to take the fall, knees
+  bent, chin tucked) until the first hard landing relaxes it.
+- **Faces.** Imported people with Biped face joints (eyes, lids, jaw, mouth corners, lips,
+  brows, cheeks) get a `Face`: seeded blinks, eyes that lead the head toward `LookAt` or
+  `Face::look_at` (clamped to their sockets) and glance about otherwise, an effort
+  expression from the `effort`, `brace` and `flex` curves (narrowed eyes, brows down and
+  knit, mouth pulled into a grimace over gritted teeth), and a limp body's drooping lids and
+  hanging jaw. It runs after retargeting, on the imported skeleton.
 - **Time.** Every animator uses `Time::delta_for(LocalTimeScale)`, so `TimeDilation` slows
   animation and a hero who ignores world dilation keeps moving at full speed. Animators
   beyond `lod_distance` from the simulation focus update at a quarter rate.
@@ -151,10 +170,12 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 | Spider garden | A furred red-knee tarantula climbs over boulders in alternating sets of legs, a wave running from the back legs forward; its palps tap, its jaws work and its abdomen sways (`paddock_spider`) |
 | Car loop | A concept car: suspension over speed bumps, roll in corners, steering and spinning wheels with the brake calipers held still |
 | Parked car | A second concept car inside the loop swings its doors open on their front hinges, holds, and shuts them with a bounce on the latch |
-| Stunt yard | A stuntman climbs the stairs to a deck, sprints across and goes limp at the edge: he tumbles onto the crash mat with the run's momentum, lies still, gets up where he landed and walks back round (`paddock_stunt`, `paddock_stunt_down`; needs the physics module) |
+| Stunt yard | A stuntman climbs the stairs to a deck, sprints across and goes off the edge braced, arms out and knees bent; he goes limp on the crash mat with the run's momentum, lies still with a slack face, gets up off his back or front with a hand and a knee planted, and walks back round (`paddock_stunt`, `paddock_stunt_down`, `paddock_stunt_up`; needs the physics module) |
+| Faces | The imported people blink at their own times and glance about; under effort (the lifter's flex, the hammer strike, the block) the eyes narrow, the brows knit and the teeth grit (`paddock_face`; needs the fetched characters) |
 
 `cargo run -p engine_anim --example anim_gallery --release -- out_dir` renders close-ups of
-each test case (`GALLERY_SEQUENCE=horse:11:12:0.05` renders a strip of one subject).
+each test case (`GALLERY_SEQUENCE=horse:11:12:0.05` renders a strip of one subject;
+`GALLERY_TRIGGER=get_up_back:1.0` with subject `stuntman` plays a graph state on him).
 In the showcase valley the paddock is the `paddock` zone; `demo::VIEWS` are its close-up
 tour stops, each restarting the paddock and waiting for its moment
 (`cargo run -p showcase --release -- --headless --tour paddock_hammer,paddock_gallop`).
@@ -178,7 +199,12 @@ requester's own parameters, rebuild on a changed request and go with a removed o
 jointed parts that start together, keep the walk's momentum and ignore each other and the
 owner's controller; the pose follows them, footsteps stop, half-limp parts are pulled
 toward the animation and held up, hard hits sound like a body falling, and the pose blends
-back to standing. A dog and a horse go limp at their weight and get up again too.
+back to standing. A body laid face down gets up off its front with `getting_up` and
+`got_up` events and stands on its entity; one moved far away blends straight up; muscle
+tone turns joints without pulling or holding the body up, and relaxes on landing. A dog
+and a horse go limp at their weight and get up again too. `face.rs` tests blinks, gaze
+within the sockets, the effort and limp expressions, and that a skeleton without face
+joints is left alone.
 
 ## Not yet
 

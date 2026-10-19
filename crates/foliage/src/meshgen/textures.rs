@@ -974,13 +974,39 @@ fn along(path: &[Vec2], t: f32) -> (Vec2, Vec2) {
 
 const TWIG: [f32; 3] = [0.36, 0.3, 0.24];
 
+/// Twigs of a spray: each a path (canvas units) and its width at the base.
+type Twigs = Vec<(Vec<Vec2>, f32)>;
+
 /// A twig spray of broad leaves (oak, hazel, birch), growing up from the bottom center.
 fn broad_spray(cv: &mut Canvas, kind: LeafKind, rng: &mut Rng) {
+    let (leaves, twigs) = broad_spray_layout(kind, rng);
+    for (path, w) in &twigs {
+        cv.stem_path(path, *w, *w * 0.45, TWIG);
+    }
+    // Petioles, then the leaves (in growth order: later ones overlap earlier ones).
+    for l in &leaves {
+        let at = l.base - l.dir * l.length * broad_style(kind).petiole;
+        cv.stem(
+            at,
+            l.base + l.dir * l.length * 0.04,
+            0.0045,
+            0.0035,
+            TWIG,
+            mix3(TWIG, l.color, 0.5),
+        );
+    }
+    for l in &leaves {
+        cv.blade(l);
+    }
+}
+
+/// Where the leaves and twigs of a broadleaf spray go (see [`broad_spray`]).
+fn broad_spray_layout(kind: LeafKind, rng: &mut Rng) -> (Vec<Blade>, Twigs) {
     let st = broad_style(kind);
     let base = Vec2::new(0.5, 0.995);
     let up = Vec2::NEG_Y;
     let mut leaves = Vec::new();
-    let mut twigs: Vec<(Vec<Vec2>, f32)> = Vec::new();
+    let mut twigs: Twigs = Vec::new();
     match kind {
         LeafKind::Lobed => {
             // Oak: a twig that forks into shoots; leaves crowd at every shoot tip.
@@ -1116,28 +1142,18 @@ fn broad_spray(cv: &mut Canvas, kind: LeafKind, rng: &mut Rng) {
             }
         }
     }
-    for (path, w) in &twigs {
-        cv.stem_path(path, *w, *w * 0.45, TWIG);
-    }
-    // Petioles, then the leaves (in growth order: later ones overlap earlier ones).
-    for l in &leaves {
-        let at = l.base - l.dir * l.length * broad_style(kind).petiole;
-        cv.stem(
-            at,
-            l.base + l.dir * l.length * 0.04,
-            0.0045,
-            0.0035,
-            TWIG,
-            mix3(TWIG, l.color, 0.5),
-        );
-    }
-    for l in &leaves {
-        cv.blade(l);
-    }
+    (leaves, twigs)
 }
 
 /// A cluster of shoot tips seen from outside the crown: rosettes of leaves filling a disc.
 fn broad_cluster(cv: &mut Canvas, kind: LeafKind, rng: &mut Rng) {
+    for l in &broad_cluster_layout(kind, rng) {
+        cv.blade(l);
+    }
+}
+
+/// Where the leaves of a cluster go (see [`broad_cluster`]).
+fn broad_cluster_layout(kind: LeafKind, rng: &mut Rng) -> Vec<Blade> {
     let st = broad_style(kind);
     let center = Vec2::splat(0.5);
     let mut leaves = Vec::new();
@@ -1160,9 +1176,7 @@ fn broad_cluster(cv: &mut Canvas, kind: LeafKind, rng: &mut Rng) {
             push_leaf(&mut leaves, rng, &st, *c, Vec2::new(a.cos(), a.sin()), size);
         }
     }
-    for l in &leaves {
-        cv.blade(l);
-    }
+    leaves
 }
 
 /// Needle color: older needles darker, new growth lighter and yellower.
@@ -1474,7 +1488,7 @@ fn needle_tuft(cv: &mut Canvas, rng: &mut Rng, long: bool) {
 fn paint_cell(kind: LeafKind, cell: usize, size: u32, seed: u64, min_needle_px: f32) -> Canvas {
     let mut cv = Canvas::new(size);
     cv.min_needle_px = min_needle_px;
-    let mut rng = Rng::new(seed ^ (cell as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    let mut rng = cell_rng(seed, cell);
     match kind {
         LeafKind::Broad | LeafKind::Small | LeafKind::Lobed => {
             if cell == CLUSTER_CELL {
@@ -1530,6 +1544,182 @@ fn paint_cell(kind: LeafKind, cell: usize, size: u32, seed: u64, min_needle_px: 
         }
     }
     cv
+}
+
+fn cell_rng(seed: u64, cell: usize) -> Rng {
+    Rng::new(seed ^ (cell as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+}
+
+/// One leaf of a painted spray (canvas units of its atlas cell, y down).
+#[derive(Debug, Clone, Copy)]
+pub struct SprayLeaf {
+    /// Where its petiole leaves the twig.
+    pub at: Vec2,
+    /// Base of the blade.
+    pub base: Vec2,
+    /// Unit direction from base to tip.
+    pub dir: Vec2,
+    /// Blade length.
+    pub length: f32,
+    /// Shows its paler underside.
+    pub under: bool,
+    /// For picking a variant.
+    pub seed: u64,
+}
+
+/// The layout of a broadleaf atlas cell: the leaves (bottom first, as painted) and twigs.
+#[derive(Debug, Clone, Default)]
+pub struct SprayLayout {
+    pub leaves: Vec<SprayLeaf>,
+    /// Twig paths (canvas units) and their widths at the base.
+    pub twigs: Vec<(Vec<Vec2>, f32)>,
+}
+
+/// The layout of atlas cell `cell` of a broadleaf atlas painted with `seed`
+/// ([`leaf_textures`]), for building the same spray from single leaves
+/// ([`hero_leaf_textures`]). `None` for needles and fronds.
+pub fn spray_layout(kind: LeafKind, cell: usize, seed: u64) -> Option<SprayLayout> {
+    if !matches!(kind, LeafKind::Broad | LeafKind::Small | LeafKind::Lobed) {
+        return None;
+    }
+    let mut rng = cell_rng(seed, cell % (ATLAS_CELLS * ATLAS_CELLS) as usize);
+    let (blades, twigs) = if cell % (ATLAS_CELLS * ATLAS_CELLS) as usize == CLUSTER_CELL {
+        (broad_cluster_layout(kind, &mut rng), Vec::new())
+    } else {
+        broad_spray_layout(kind, &mut rng)
+    };
+    let petiole = broad_style(kind).petiole;
+    let leaves = blades
+        .iter()
+        .map(|l| SprayLeaf {
+            at: l.base - l.dir * l.length * petiole,
+            base: l.base,
+            dir: l.dir,
+            length: l.length,
+            under: l.under,
+            seed: l.seed,
+        })
+        .collect();
+    Some(SprayLayout { leaves, twigs })
+}
+
+/// Cells per side of a single-leaf atlas ([`hero_leaf_textures`]).
+pub const HERO_CELLS: u32 = 4;
+
+/// The single-leaf atlas cell painted solid twig color, for twigs drawn as narrow strips.
+pub const HERO_TWIG_CELL: usize = (HERO_CELLS * HERO_CELLS) as usize - 1;
+
+/// Texels per side of a single-leaf atlas (256 per leaf: a few texels a millimeter).
+pub const HERO_ATLAS_SIZE: u32 = 1024;
+
+/// UV rectangle (min, max) of cell `cell` of a single-leaf atlas, inset by half a texel.
+pub fn hero_cell(cell: usize) -> (Vec2, Vec2) {
+    let n = HERO_CELLS as usize;
+    let c = cell % (n * n);
+    let size = 1.0 / n as f32;
+    let min = Vec2::new((c % n) as f32 * size, (c / n) as f32 * size);
+    let inset = Vec2::splat(0.5 / HERO_ATLAS_SIZE as f32);
+    (min + inset, min + Vec2::splat(size) - inset)
+}
+
+/// Where a single-leaf atlas cell holds its leaf (cell units, y down): the petiole starts at
+/// the bottom center (0.5, [`HERO_PETIOLE_Y`]) and the blade runs straight up, starting at
+/// `base_y` and `length` long.
+pub fn hero_leaf_frame(kind: LeafKind) -> (f32, f32) {
+    let st = broad_style(kind);
+    // Long enough to fill the cell, narrow enough that lobes and teeth stay inside it.
+    let length = (0.94 / (1.0 + st.petiole)).min(0.62 / (st.aspect * 1.1));
+    (HERO_PETIOLE_Y - length * st.petiole, length)
+}
+
+/// Height (cell units, y down) where a single leaf's petiole starts.
+pub const HERO_PETIOLE_Y: f32 = 0.98;
+
+/// The part of a single-leaf cell its leaf covers (min, max; cell units, y down).
+pub fn hero_leaf_rect(kind: LeafKind) -> (Vec2, Vec2) {
+    let st = broad_style(kind);
+    let (base_y, length) = hero_leaf_frame(kind);
+    let half = (0.75 * length * st.aspect * 1.08 + 0.01).min(0.5);
+    (
+        Vec2::new(0.5 - half, (base_y - length * 1.03).max(0.0)),
+        Vec2::new(0.5 + half, (HERO_PETIOLE_Y + 0.015).min(1.0)),
+    )
+}
+
+/// The seed a leaf style's atlas is painted with (so meshes can follow its layout).
+pub fn atlas_seed(style: crate::species::LeafStyle) -> u64 {
+    0x1eaf ^ style as u64
+}
+
+/// An atlas of single leaves, [`HERO_CELLS`]² cells, each one leaf of the kind's spray
+/// painting (shape, color, spots) upright on its petiole ([`hero_leaf_frame`]); the last
+/// cell is solid twig. For crowns built leaf by leaf up close.
+pub fn hero_leaf_textures(kind: LeafKind, size: u32, seed: u64) -> LeafTextures {
+    let n = HERO_CELLS;
+    let cs = (size / n).max(1);
+    let st = broad_style(kind);
+    let (base_y, length) = hero_leaf_frame(kind);
+    let cells: Vec<Canvas> = std::thread::scope(|scope| {
+        let st = &st;
+        let handles: Vec<_> = (0..(n * n) as usize)
+            .map(|c| {
+                scope.spawn(move || {
+                    let mut cv = Canvas::new(cs);
+                    let mut rng = cell_rng(seed ^ 0x4e70, c);
+                    if c == HERO_TWIG_CELL {
+                        cv.line(Vec2::new(0.5, 1.0), Vec2::new(0.5, 0.0), 0.9, 0.9, TWIG);
+                        return cv;
+                    }
+                    let under = c % 6 == 5;
+                    let blade = Blade {
+                        shape: st.shape,
+                        base: Vec2::new(0.5, base_y),
+                        dir: Vec2::NEG_Y,
+                        length,
+                        width: length * st.aspect * rng.range(0.92, 1.08),
+                        color: leaf_color(&mut rng, st.green, under),
+                        under,
+                        tilt: Vec2::ZERO,
+                        phase: rng.range(0.0, 1.0),
+                        spots: if c % 7 == 3 {
+                            [
+                                (rng.range(0.3, 0.8), rng.range(-0.6, 0.6), 0.05),
+                                (rng.range(0.3, 0.8), rng.range(-0.6, 0.6), 0.03),
+                            ]
+                        } else {
+                            [(0.0, 0.0, 0.0); 2]
+                        },
+                        seed: rng.next_u64(),
+                    };
+                    cv.stem(
+                        Vec2::new(0.5, HERO_PETIOLE_Y),
+                        blade.base + blade.dir * length * 0.04,
+                        0.02,
+                        0.015,
+                        TWIG,
+                        mix3(TWIG, blade.color, 0.5),
+                    );
+                    cv.blade(&blade);
+                    cv
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("leaf painter"))
+            .collect()
+    });
+    let mut atlas = Canvas::new(cs * n);
+    for (c, cell) in cells.iter().enumerate() {
+        let (ox, oy) = ((c as u32 % n) * cs, (c as u32 / n) * cs);
+        for y in 0..cs {
+            let src = (y * cs) as usize..((y + 1) * cs) as usize;
+            let dst = ((oy + y) * cs * n + ox) as usize..((oy + y) * cs * n + ox + cs) as usize;
+            atlas.px[dst.clone()].copy_from_slice(&cell.px[src.clone()]);
+            atlas.nrm[dst].copy_from_slice(&cell.nrm[src]);
+        }
+    }
+    atlas.into_textures()
 }
 
 /// Paint a leaf texture and its normal map. Trees and shrubs get an atlas of

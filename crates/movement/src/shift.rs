@@ -84,6 +84,10 @@ pub(crate) fn follow_world_shifts(
         if let Some(l) = &mut m.ladder {
             l.facing = s.direction(l.facing);
         }
+        if let Some(v) = &mut m.vault {
+            v.plant = s.point(v.plant);
+            v.forward = s.direction(v.forward);
+        }
         if let Some(platform) = &mut m.platform {
             platform.shift(&s);
         }
@@ -92,6 +96,7 @@ pub(crate) fn follow_world_shifts(
         if let Brain::Runner { origin, .. }
         | Brain::Climber { origin, .. }
         | Brain::LadderClimber { origin, .. }
+        | Brain::Vaulter { origin, .. }
         | Brain::Grappler { origin, .. }
         | Brain::Rider { origin, .. } = &mut *b
         {
@@ -241,9 +246,9 @@ mod tests {
     }
 
     #[test]
-    fn a_shift_turns_ladder_climbers_and_zip_line_riders() {
-        use crate::demo::Rungs;
-        use crate::mover::{Ladder, Zip};
+    fn a_shift_turns_ladder_climbers_zip_line_riders_and_vaulters() {
+        use crate::demo::{Rungs, Vaults};
+        use crate::mover::{Ladder, Vault, Zip};
         let mut app = App::new();
         app.add_message::<WorldShift>()
             .add_systems(Update, follow_world_shifts);
@@ -288,6 +293,33 @@ mod tests {
                 },
             ))
             .id();
+        let plant = DVec3::new(-16.1, 0.9, 2.0);
+        let vaulter = app
+            .world
+            .spawn((
+                GlobalTransform::default(),
+                Mover {
+                    vault: Some(Vault {
+                        plant,
+                        forward: Vec3::X,
+                        depth: 0.25,
+                        from: -1.4,
+                        speed: 7.6,
+                        lift: 6.8,
+                        rising: false,
+                        secs: 0.2,
+                        surface: None,
+                        on: None,
+                    }),
+                    ..Default::default()
+                },
+                Brain::Vaulter {
+                    step: Vaults::Run,
+                    secs: 0.0,
+                    origin: DVec3::new(2.0, 0.0, 0.0),
+                },
+            ))
+            .id();
         let shift = WorldShift {
             rotation: DQuat::from_rotation_y(std::f64::consts::FRAC_PI_2),
             translation: DVec3::new(0.0, 0.0, 100.0),
@@ -296,6 +328,13 @@ mod tests {
         };
         app.world.write_message(shift);
         app.update();
+        let v = app.world.get::<Mover>(vaulter).unwrap().vault.unwrap();
+        assert!(v.plant.distance(shift.point(plant)) < 1e-6);
+        assert!(v.forward.distance(shift.direction(Vec3::X)) < 1e-5);
+        let Brain::Vaulter { origin, .. } = app.world.get::<Brain>(vaulter).unwrap() else {
+            unreachable!()
+        };
+        assert!(origin.distance(shift.point(DVec3::new(2.0, 0.0, 0.0))) < 1e-6);
         let m = app.world.get::<Mover>(climber).unwrap();
         assert!(m.ladder.unwrap().facing.distance(shift.direction(Vec3::X)) < 1e-5);
         let Brain::LadderClimber { origin, .. } = app.world.get::<Brain>(climber).unwrap() else {

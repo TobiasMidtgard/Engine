@@ -320,6 +320,9 @@ pub struct EcologySettings {
     /// Trees beyond this distance use their simplified mesh, meters, scaled by
     /// `0.5 + size`: a grown tree switches at 1.5× this (105 m by default), a sapling sooner.
     pub tree_lod_distance_m: f32,
+    /// Broadleaf trees and shrubs within this distance draw their crown leaf by leaf (in full
+    /// leaf), meters, scaled like `tree_lod_distance_m` (18 m for a grown tree by default).
+    pub tree_hero_distance_m: f32,
     /// Trees beyond this distance use their cheapest mesh (a trunk and a few big crown
     /// cards, a few hundred triangles), meters, scaled like `tree_lod_distance_m` (360 m for a
     /// grown tree by default): for valleys of scenery trees seen from afar.
@@ -345,6 +348,7 @@ impl Default for EcologySettings {
             small_plant_distance_m: 110.0,
             small_plant_lod_distance_m: 22.0,
             tree_lod_distance_m: 70.0,
+            tree_hero_distance_m: 12.0,
             tree_distant_distance_m: 240.0,
             scenery_tree_draw_distance_m: 6000.0,
             collider_distance_m: 150.0,

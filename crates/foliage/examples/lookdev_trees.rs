@@ -49,8 +49,9 @@ fn aim(world: &mut World, eye: DVec3, target: DVec3) {
 fn shot(app: &mut App, out: &str, name: &str, eye: DVec3, target: DVec3, to_sun: Vec3) {
     aim(&mut app.world, eye, target);
     set_sun(&mut app.world, to_sun);
-    // Let auto exposure settle.
-    app.update_n(5);
+    // Let auto exposure settle, and every plant pick its level of detail for the new view
+    // (they all do every eighth frame).
+    app.update_n(9);
     let path = format!("{out}/{name}.png");
     app.world
         .resource_mut::<Screenshots>()
@@ -103,18 +104,20 @@ fn print_stats() {
     for name in ["oak", "birch", "hazel", "pine", "spruce"] {
         let sp = library.get(library.id(name).unwrap());
         let tris = |m: &Option<engine_render::Mesh>| m.as_ref().map_or(0, |m| m.triangle_count());
-        let (mut near, mut far, mut distant, mut leaves) = (0, 0, 0, 0);
+        let (mut near, mut far, mut distant, mut leaves, mut hero) = (0, 0, 0, 0, 0);
         for seed in 0..4u64 {
             let m = woody(sp, seed * 0x9e37_79b9, false);
             near += tris(&m.wood) + tris(&m.foliage) + tris(&m.base);
             far += tris(&m.wood_lod) + tris(&m.foliage_lod) + tris(&m.base);
             distant += tris(&m.wood_distant) + tris(&m.foliage_distant);
             leaves += tris(&m.foliage);
+            hero += tris(&m.foliage_hero);
         }
         println!(
-            "{name:7} near {:6} (leaves {:6})  far {:5}  distant {:4}",
+            "{name:7} near {:6} (leaves {:6})  leaf by leaf {:6}  far {:5}  distant {:4}",
             near / 4,
             leaves / 4,
+            hero / 4,
             far / 4,
             distant / 4
         );
