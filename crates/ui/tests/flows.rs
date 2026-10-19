@@ -612,3 +612,33 @@ fn a_dialogue_choice_tracks_a_quest() {
         "crystals"
     );
 }
+
+#[test]
+fn short_labels_stay_on_one_line() {
+    let mut app = app();
+    // A scaled UI (900 px tall) lays out at fractional sizes.
+    {
+        let mut w = app.world.resource_mut::<Window>();
+        w.width = 1600;
+        w.height = 900;
+    }
+    app.update_n(2);
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "inventory", "select": "greatsword", "instant": true}),
+    );
+    app.update_n(4);
+    let mut q = app.world.query::<(Entity, &Text)>();
+    let chips: Vec<Entity> = q
+        .iter(&app.world)
+        .filter(|(_, t)| t.text == "Main hand" || t.text == "Weapon")
+        .map(|(e, _)| e)
+        .collect();
+    assert!(!chips.is_empty());
+    let layouts = app.world.resource::<engine_ui::text::TextLayouts>();
+    for e in chips {
+        let lines = layouts.entries[&e].buffer.layout_runs().count();
+        assert_eq!(lines, 1, "a short label wrapped");
+    }
+}

@@ -829,6 +829,15 @@ pub fn key_hint2(keys: [&str; 2], pads: [&str; 2], label: &str) -> El {
 
 /// A coin icon and an amount (a binding like `"{player.gold}"`, or a literal).
 pub fn currency(amount: &str, size: f32) -> El {
+    currency_el(amount, size, None)
+}
+
+/// [`currency`] with the amount in `color` (a price the player can't pay, in red).
+pub fn currency_tinted(amount: &str, size: f32, color: Color) -> El {
+    currency_el(amount, size, Some(color))
+}
+
+fn currency_el(amount: &str, size: f32, color: Option<Color>) -> El {
     El::new()
         .class("row")
         .with_style(|s| s.gap(6.0))
@@ -836,7 +845,13 @@ pub fn currency(amount: &str, size: f32) -> El {
         .child(
             El::text(amount)
                 .class("currency")
-                .text_style(|t| t.tabular().nowrap())
+                .text_style(|t| {
+                    let t = t.tabular().nowrap();
+                    match color {
+                        Some(c) => t.color(c),
+                        None => t,
+                    }
+                })
                 .with_style(|s| s.font_size(size * 0.9)),
         )
 }
