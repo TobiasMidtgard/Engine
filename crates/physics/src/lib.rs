@@ -5,6 +5,7 @@ mod articulation;
 mod buoyancy;
 mod capsule_box;
 mod character;
+mod cones;
 mod convert;
 mod debug;
 pub mod demo;

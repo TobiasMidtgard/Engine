@@ -531,6 +531,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 settings.buoyancy,
             );
             drive_kinematics(&mut sim, rid, sub_dt, substeps - sub);
+            crate::cones::orient(&mut sim, rid);
             let scaled = scale_time(&mut sim, rid, true);
             {
                 let s = &mut *sim;
@@ -551,6 +552,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 scale_time(&mut sim, rid, false);
             }
             crate::rolling::resist_rolling(&mut sim, rid);
+            crate::cones::rub(&mut sim, rid);
             if settings.contact_events {
                 sim.process_contacts(rid, sub_dt);
             } else {

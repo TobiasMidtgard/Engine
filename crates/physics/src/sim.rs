@@ -1113,14 +1113,15 @@ impl Simulation {
             (_, JointSide::Body(e)) if dynamic(self, &side_b) => Some(e),
             _ => None,
         };
-        let mut articulable = false;
-        if let Some(e) = group
-            && self.settings.articulated_joints
-        {
-            let (ok, joints) = self.articulable(e, graph);
-            articulable = ok;
-            if !ok {
-                self.unarticulate(&joints, static_pose, graph);
+        let (mut articulable, mut floating) = (false, false);
+        if let Some(e) = group {
+            let (ok, free, joints) = self.articulable(e, graph);
+            floating = free;
+            if self.settings.articulated_joints {
+                articulable = ok;
+                if !ok {
+                    self.unarticulate(&joints, static_pose, graph);
+                }
             }
         }
         let free = |side: &JointSide| match side {
@@ -1140,7 +1141,18 @@ impl Simulation {
             .then(|| crate::articulation::link(world, h1, h2, &desc, frames))
             .flatten()
             .unwrap_or_else(|| {
-                let joint = convert::joint(&desc.kind, frames, desc.collide_connected);
+                let mut joint = convert::joint(&desc.kind, frames, desc.collide_connected);
+                // The joints of a free-floating group (a ragdoll on constraint joints) rub
+                // like an articulation's.
+                if floating
+                    && let (Some(rb1), Some(rb2)) = (world.bodies.get(h1), world.bodies.get(h2))
+                {
+                    let (torque, force) = crate::articulation::friction_of(
+                        (rb1, frames.anchor1),
+                        (rb2, frames.anchor2),
+                    );
+                    convert::add_friction(&mut joint, &desc.kind, torque, force);
+                }
                 JointHandle::Impulse(world.impulse_joints.insert(h1, h2, joint, true))
             });
         // A body jointed to a fixed body: keep it off that body's colliders too.
@@ -1275,7 +1287,10 @@ impl Simulation {
     /// against its tower), where a free articulation can always move as a whole, so a contact
     /// never sees more than the group's mass. And only one whose masses are close (see
     /// `articulation::MAX_MASS_RATIO`).
-    fn articulable(&self, body: Entity, graph: &JointGraph) -> (bool, Vec<Entity>) {
+    ///
+    /// Also whether the group floats free at all (its joints then get a ragdoll's joint
+    /// friction, see `articulation::JOINT_FRICTION`).
+    fn articulable(&self, body: Entity, graph: &JointGraph) -> (bool, bool, Vec<Entity>) {
         let (bodies, joints) = self.jointed_group(body, graph);
         let dynamic = |e: Entity| {
             self.bodies
@@ -1294,7 +1309,7 @@ impl Simulation {
                 .get(b.handle)
                 .map_or(0.0, |rb| rb.mass())
         }));
-        (free && close, joints)
+        (free && close, free, joints)
     }
 
     /// Make the articulated ones of `joints` constraint joints.
@@ -1336,7 +1351,7 @@ impl Simulation {
             {
                 continue;
             }
-            let (ok, joints) = self.articulable(body, graph);
+            let (ok, _, joints) = self.articulable(body, graph);
             for e in joints {
                 let j = self.joints.get_mut(&e).unwrap();
                 done.insert(j.desc.body_a);
