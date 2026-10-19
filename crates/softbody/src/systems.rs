@@ -948,7 +948,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     } else {
         0.0
     };
-    let warmth = ((env.temperature(b.center) + 5.0) / 20.0).clamp(0.3, 2.0);
+    let warmth = drying_warmth(env.temperature(b.center));
     soak(b, dt, rain, warmth);
 
     // Step (plus prewarm on the first update).
@@ -1086,6 +1086,19 @@ fn water_surface(env: &Env, center: DVec3, radius: f32, origin: DVec3) -> Option
     })
 }
 
+/// How fast cloth dries at an air temperature (°C), as a factor on [`DRY`].
+pub(crate) fn drying_warmth(temperature_c: f32) -> f32 {
+    ((temperature_c + 5.0) / 20.0).clamp(0.3, 2.0)
+}
+
+/// Wetness after `dt` out of the water: rain wets it (`rain_mm_h`), wind (m/s) and warmth
+/// ([`drying_warmth`]) dry it.
+pub(crate) fn in_the_open(wet: f32, dt: f32, rain_mm_h: f32, wind: f32, warmth: f32) -> f32 {
+    let gain = rain_mm_h * 0.004;
+    let loss = DRY * (1.0 + wind / 4.0) * warmth;
+    (wet + dt * (gain - loss)).clamp(0.0, 1.0)
+}
+
 /// Wet what is under water or out in the rain, wick it along the body and dry the rest
 /// (faster in wind and warmth); soaked particles weigh more.
 fn soak(b: &mut SoftBodySim, dt: f32, rain_mm_h: f32, warmth: f32) {
@@ -1096,8 +1109,7 @@ fn soak(b: &mut SoftBodySim, dt: f32, rain_mm_h: f32, warmth: f32) {
         b.wet.iter_mut().for_each(|w| *w = 0.0);
         return;
     }
-    let gain = rain_mm_h * 0.004;
-    let loss = DRY * (1.0 + b.wind.length() / 4.0) * warmth;
+    let wind = b.wind.length();
     let r = b.sim.params.radius.max(0.005);
     for i in 0..n {
         // As far as it is in the water (across its thickness, as the solver's lift).
@@ -1106,11 +1118,10 @@ fn soak(b: &mut SoftBodySim, dt: f32, rain_mm_h: f32, warmth: f32) {
         });
         let w = &mut b.wet[i];
         *w = if under > 0.0 {
-            *w + dt * under / SOAK_SECS
+            (*w + dt * under / SOAK_SECS).clamp(0.0, 1.0)
         } else {
-            *w + dt * (gain - loss)
-        }
-        .clamp(0.0, 1.0);
+            in_the_open(*w, dt, rain_mm_h, wind, warmth)
+        };
     }
     if b.wet.iter().any(|&w| w > 0.0) {
         let up = -b.sim.params.gravity.normalize_or(Vec3::NEG_Y);
