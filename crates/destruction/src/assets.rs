@@ -241,14 +241,6 @@ impl DestructionAssets {
                 materials.add(t)
             });
             self.ghost_surface.push(ghosts);
-            // Rock and soil chips wear the ground's own texture, darkened like the ground's
-            // shaded relief, so a dig's spoil matches the ground it came from (flat fresh-break
-            // colors, or the bare texture in full sun, read as pale flakes on dark soil).
-            if matches!(*m, DestructibleMaterial::Rock | DestructibleMaterial::Dirt) {
-                let mut chip = mat;
-                chip.base_color = [CHIP_SHADE, CHIP_SHADE, CHIP_SHADE, 1.0];
-                materials.set(self.chip_material[i], chip);
-            }
             materials.set(self.surface[i], mat);
         }
         let mut grass = textured(SurfaceKind::Grass, 0xDE57_06A5, images);
@@ -259,8 +251,32 @@ impl DestructionAssets {
         materials.set(self.gravel, gravel);
         self.texture_char(materials, images);
         self.texture_broken(materials, images);
+        self.texture_chips(materials);
         self.dust_sprite = Some(images.add(textures::dust_puffs(64, 0xD057)));
         self.textured = true;
+    }
+
+    /// Chips of rock, soil and masonry wear their broken surface's texture, darkened like
+    /// shaded relief, so spoil and rubble match what they came from (flat fresh-break colors,
+    /// or a bare texture in full sun, read as pale flakes on soil and grass).
+    fn texture_chips(&mut self, materials: &mut Assets<StandardMaterial>) {
+        use DestructibleMaterial as M;
+        for m in [
+            M::Rock,
+            M::Dirt,
+            M::Stone,
+            M::Brick,
+            M::Concrete,
+            M::ReinforcedConcrete,
+        ] {
+            let Some(mut chip) = materials.get(self.broken[m.index()]).copied() else {
+                continue;
+            };
+            for c in &mut chip.base_color[..3] {
+                *c *= CHIP_SHADE;
+            }
+            materials.set(self.chip_material[m.index()], chip);
+        }
     }
 
     /// Joint-free fracture materials for masonry: the rock texture tinted so that, under the

@@ -30,6 +30,9 @@ use crate::{DestructionSettings, DestructionStats};
 
 /// Smallest wall chunk (m³) a blast throws that bursts on a hard landing.
 const THROWN_SHATTER_M3: f32 = 0.003;
+/// Fastest a blast throws wall pieces, m/s. A breaching charge is packed to cut, not to
+/// launch, so even a thin partition's slabs land within about a dozen metres of the wall.
+const BLAST_THROW_MAX: f32 = 20.0;
 
 /// One piece of damage to apply.
 #[derive(Debug, Clone)]
@@ -1098,7 +1101,7 @@ fn blast(
         let speed = ((energy / (4.0 * std::f32::consts::PI * d * d))
             / (props.density * state.grid.thickness))
             .sqrt()
-            .clamp(2.0, 35.0);
+            .clamp(2.0, BLAST_THROW_MAX);
         let wall = wall.clone();
         finish_wall_hit(ctx, &gt, &wall, &mut state, &hit, Some((local, speed)));
     }
