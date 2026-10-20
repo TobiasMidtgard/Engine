@@ -14,7 +14,8 @@ struct Clouds {
     params: vec4<f32>,      // visibility (fades out high above the planet), detail period (m), env steps, night (0 day .. 1 dark night)
     detail: vec4<f32>,      // detail noise origin xyz (wrapped), 1 = draw rain shafts
     veil: vec4<f32>,        // falling rain or snow veils from x (m), fully from y (m); z = snow share 0..1
-    shadow: vec4<f32>,      // cloud shadow map: the shading light's dimming at the player, samples toward the light
+    shadow: vec4<f32>,      // cloud shadow map: the shading light's dimming at the player, samples toward the light;
+                            // share of the ambient fill left (the rest comes with the moon), moonlight's glow (0..1)
     far: vec4<f32>,         // far cloud layer drawn by another module: hand over from x to y m of ground distance, z = its weight
 };
 
@@ -229,7 +230,7 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
     let ground_tint = mix(vec3(dot(albedo, vec3<f32>(0.2126, 0.7152, 0.0722))), albedo, 0.4);
     let ground_sun = ground_tint * key * saturate(ldir.y) * INV_PI;
     let ground_sky = ground_tint * sky * 0.4;
-    let fill = frame.ambient.rgb;
+    let fill = frame.ambient.rgb * clouds.shadow.z;
 
     // Big strides through empty air; on touching cloud, step back and walk it finely.
     let len = t1 - t0;
@@ -311,7 +312,15 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
             // diffuses down through it like through frosted glass, white and without direction:
             // two-stream transmittance 1 / (1 + 0.75 (1 - g) τ), g ≈ 0.85. Without it a storm
             // deck's base was lit only by the blue sky and turned navy.
-            light = max(light, saturate(ldir.y + 0.05) * INV_PI / (1.0 + 0.11 * od));
+            // Under the moon the light keeps some of its forward bias through the first few
+            // optical depths: seen from below, a deck of moderate depth glows broadly where the
+            // moon is behind it. Without it a moonlit deck was one flat grey and the moon behind
+            // it left no trace. Only a gain, as from the lit side the same light comes back
+            // diffusely reflected (dimming it made sunlit heaps grey); and not by day, when
+            // the octaves above and the bright sky around already give the sun its glow, and the
+            // extra light flattened the heaps' shading and filled in their shadows.
+            let aureole = 1.0 + clouds.shadow.w * max(4.0 * PI * hg(cos_t, 0.5 * exp(-0.15 * od)) - 1.0, 0.0);
+            light = max(light, saturate(ldir.y + 0.05) * INV_PI / (1.0 + 0.11 * od) * aureole);
             // Dark edges facing the light ("powder"): fewer photons scattered back out.
             let powder = 1.0 - 0.45 * exp(-sigma * 150.0);
             let h01 = saturate((h - base) / type_thickness(w.g));

@@ -44,6 +44,24 @@ fn precipitation_veil(temperature_c: f32) -> [f32; 4] {
     [at(0), at(1), snow, 0.0]
 }
 
+/// Share of the night fill that lights the clouds as moonlight instead (`moon_fill`).
+const MOON_FILL_SHARE: f32 = 0.7;
+
+/// On a moonlit night the ambient fill (the night floor that keeps the ground readable)
+/// outshines the moon several times over. Spread evenly through the clouds it made a flat
+/// blue-grey ceiling with no shape, and the clear breaks in it read as dark clouds. Most of it
+/// reaches the clouds from the moon's side instead: the same light (an isotropic radiance L
+/// scatters out as much as 4πL from one direction), so tops and edges toward the moon turn
+/// silver and thick middles shade. Returns the illuminance to add to the moon's key light
+/// (lux) and the share of the fill left (0..1).
+fn moon_fill(moon_key: bool, moon_lux: f32, ambient_luminance: f32) -> (f32, f32) {
+    if !moon_key {
+        return (0.0, 1.0);
+    }
+    let share = MOON_FILL_SHARE * smoothstep(0.02, 0.15, moon_lux);
+    (share * 4.0 * PI * ambient_luminance, 1.0 - share)
+}
+
 /// How much the weather already dimmed the light the renderer shades with (its brightest, the
 /// sun or the moon) for thick cloud at the player ([`SkyLights::cloud_dimming`], with the
 /// same floors). The cloud shadow map holds the sunlight the clouds let through relative to
@@ -637,7 +655,13 @@ impl RenderFeature for CloudFeature {
         } else {
             0.0
         };
-        let (key_dir, key_color) = if sun_lux >= moon_lux || !lights.in_charge {
+        let moon_key = lights.in_charge && moon_lux > sun_lux;
+        let ambient = world
+            .get_resource::<engine_render::AmbientLight>()
+            .map(|a| Vec3::from(a.color).dot(Vec3::new(0.2126, 0.7152, 0.0722)) * a.brightness)
+            .unwrap_or(0.0);
+        let (fill_lux, fill_left) = moon_fill(moon_key, moon_lux, ambient);
+        let (key_dir, key_color) = if !moon_key {
             let c = if lights.in_charge {
                 Vec3::splat(sun_lux)
             } else {
@@ -645,7 +669,7 @@ impl RenderFeature for CloudFeature {
             };
             (sun_dir, c)
         } else {
-            (moon_dir, Vec3::from(KEY_MOON_COLOR) * moon_lux)
+            (moon_dir, Vec3::from(KEY_MOON_COLOR) * (moon_lux + fill_lux))
         };
         let night = smoothstep(0.05, -0.25, sun_dir.y);
         let stars = smoothstep(-0.02, -0.25, sun_dir.y);
@@ -730,8 +754,8 @@ impl RenderFeature for CloudFeature {
             shadow: [
                 shadow_dimming,
                 settings.cloud_shadow_steps.clamp(4, 64) as f32,
-                0.0,
-                0.0,
+                fill_left,
+                (1.0 - fill_left) / MOON_FILL_SHARE,
             ],
             far: far_handover(world.get_resource::<FarCloudLayer>()),
         };
@@ -940,6 +964,19 @@ mod tests {
         assert_eq!(far_handover(Some(&layer)), [0.0; 4]);
         layer.weight = 1.5;
         assert_eq!(far_handover(Some(&layer)), [42_000.0, 60_000.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn moonlit_clouds_take_most_of_the_night_fill_from_the_moon() {
+        // By day, and on a moonless night, the clouds keep the whole fill.
+        assert_eq!(moon_fill(false, 0.3, 0.07), (0.0, 1.0));
+        assert_eq!(moon_fill(true, 0.0, 0.07), (0.0, 1.0));
+        // Under a full moon most of it moves into the moon's light, energy kept: what leaves
+        // the fill (radiance from all around) comes back as 4π times that from one side.
+        let (lux, left) = moon_fill(true, 0.3, 0.07);
+        assert!(left < 0.4, "{left}");
+        assert!((lux - (1.0 - left) * 4.0 * PI * 0.07).abs() < 1e-5);
+        assert!(lux > 0.3, "the moon becomes the clouds' main light: {lux}");
     }
 
     #[test]
