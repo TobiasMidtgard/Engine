@@ -1657,7 +1657,23 @@ fn standing_pieces_are_solid_with_a_physics_module() {
             ),
         ))
         .id();
+    let ladder = app
+        .world
+        .spawn((
+            Transform::from_xyz(8.0, 1.6, -6.0),
+            dress::PropModel::new(props::PropKind::SteelLadder { height: 3.18 }, 2),
+            engine_world::Climbable::ladder(Vec3::ZERO, Vec3::Y * 3.0, Vec3::NEG_Z),
+        ))
+        .id();
     app.update();
+    let rungs = app
+        .world
+        .get::<Collider>(ladder)
+        .expect("the ladder has a surface");
+    assert!(
+        rungs.sensor && !app.world.get::<Collider>(pillar).unwrap().sensor,
+        "a climber passes through the ladder's box, not the pillar's"
+    );
     assert_eq!(
         app.world.get::<Collider>(crate_e).map(|c| c.shape.clone()),
         Some(ColliderShape::Cuboid {
