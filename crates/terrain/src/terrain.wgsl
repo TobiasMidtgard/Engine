@@ -28,6 +28,9 @@ struct Maps {
     surface: vec4<f32>,  // origin x/z relative to the camera, cell size, cells per side
     flags: vec4<f32>,    // deformation on, surface layers on, LOD debug colors
     far: vec4<f32>,      // wetness, puddles, snow depth, scorch beyond the surface layers' grid
+    wear_origin: vec4<f32>, // worn paths window: corner relative to the camera, cell size
+    wear_u: vec4<f32>,      // the window's column axis, cells per side
+    wear_v: vec4<f32>,      // the window's row axis, 1 when paths are drawn
 };
 
 const C_LUSH: u32 = 0u;
@@ -56,6 +59,7 @@ struct Materials {
 @group(1) @binding(6) var mat_albedo: texture_2d_array<f32>;  // sRGB albedo, height in alpha
 @group(1) @binding(7) var mat_normal: texture_2d_array<f32>;  // normal xy, roughness, occlusion
 @group(1) @binding(8) var mat_sampler: sampler;
+@group(1) @binding(9) var wear_tex: texture_2d<f32>;  // r: path wear 0..1 (wear.rs)
 
 // Ground materials (`materials::GroundMaterial`).
 const M_GRASS: u32 = 0u;
@@ -128,6 +132,22 @@ fn surface_uv(rel: vec3<f32>) -> vec2<f32> {
     return (rel.xz - maps.surface.xy) / (maps.surface.z * dims);
 }
 
+// How worn the ground is at a camera-relative point, 0 untouched .. 1 a well-worn path (0
+// outside the window of paths around the camera, fading in over its outer cells).
+fn path_wear(rel: vec3<f32>) -> f32 {
+    if (maps.wear_v.w < 0.5) {
+        return 0.0;
+    }
+    let d = rel - maps.wear_origin.xyz;
+    // (Only near the ground the paths lie on: the plane runs on under other planets.)
+    if (abs(dot(d, cross(maps.wear_u.xyz, maps.wear_v.xyz))) > 300.0) {
+        return 0.0;
+    }
+    let uv = vec2<f32>(dot(d, maps.wear_u.xyz), dot(d, maps.wear_v.xyz)) / (maps.wear_origin.w * maps.wear_u.w);
+    let edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
+    return textureSampleLevel(wear_tex, map_sampler, uv, 0.0).r * smoothstep(0.0, 0.03, edge);
+}
+
 fn inside01(uv: vec2<f32>) -> f32 {
     return select(0.0, 1.0, all(uv > vec2(0.002)) && all(uv < vec2(0.998)));
 }
@@ -178,6 +198,16 @@ fn pnoise3v(p: vec3<f32>, period: vec3<f32>) -> f32 {
 
 // Wind-packed snow: low drifts and ridges stretched along the prevailing east-west wind,
 // 16 m long and 4 m across down to a quarter of that. Height in meters (about ±10 cm).
+// Slope of churned ground (sand and snow trampled by many feet): overlapping hollows and
+// lumps a hand or two across, as a horizontal tilt to subtract from a normal.
+fn churn_tilt(tp: vec3<f32>) -> vec3<f32> {
+    let e = 0.05;
+    let h = tile_fbm(tp, 5.0, 2);
+    let hx = tile_fbm(tp + vec3<f32>(e, 0.0, 0.0), 5.0, 2);
+    let hz = tile_fbm(tp + vec3<f32>(0.0, 0.0, e), 5.0, 2);
+    return vec3<f32>(hx - h, 0.0, hz - h) / e * 0.04;
+}
+
 fn snow_drift(tp: vec3<f32>) -> f32 {
     var sum = 0.0;
     var amp = 0.06;
@@ -701,6 +731,10 @@ fn place_vertex(in: VertexIn, planet: PlanetGpu) -> vec3<f32> {
         d += textureSampleLevel(deform_tex, map_sampler, uv - vec2(0.0, o), 0.0).r * 0.15;
         rel -= up * d * inside01(uv);
     }
+    // Worn paths sink a few centimeters into the ground.
+    if (in.lod.x < 1.5 && (flags & 2u) == 0u) {
+        rel -= up * smoothstep(0.2, 0.9, path_wear(rel)) * 0.035;
+    }
     return rel;
 }
 
@@ -1145,6 +1179,25 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let dzn = textureSampleLevel(deform_tex, map_sampler, duv - vec2(0.0, texel), 0.0).r;
     let layers = surface_layers(in.rel);
 
+    // Worn paths: the wear, and its slope across the path (for the sunken bed's normal).
+    let wear_raw = path_wear(in.rel) * (1.0 - ocean);
+    var wear_grad = vec3<f32>(0.0);
+    // How worn the ground a meter or so around is: people step off a path to pass each other,
+    // so its margins are trodden too.
+    var wear_near = 0.0;
+    if (maps.wear_v.w > 0.5 && pixel < 1.0) {
+        let r = 1.3;
+        wear_near = 0.25 * (path_wear(in.rel + maps.wear_u.xyz * r) + path_wear(in.rel - maps.wear_u.xyz * r)
+            + path_wear(in.rel + maps.wear_v.xyz * r) + path_wear(in.rel - maps.wear_v.xyz * r)) * (1.0 - ocean);
+    }
+    if (wear_raw > 0.003) {
+        let e = maps.wear_origin.w * 0.75;
+        let wu = maps.wear_u.xyz * e;
+        let wv = maps.wear_v.xyz * e;
+        wear_grad = (maps.wear_u.xyz * (path_wear(in.rel + wu) - path_wear(in.rel - wu))
+            + maps.wear_v.xyz * (path_wear(in.rel + wv) - path_wear(in.rel - wv))) / (2.0 * e);
+    }
+
     let print_fade = in_deform * (1.0 - smoothstep(maps.deform.z * 1.5, maps.deform.z * 8.0, pixel));
     let depth = d0.r * in_deform;
     let flattened = d0.g * in_deform;
@@ -1367,6 +1420,37 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             if (i != M_SNOW && i != M_MUD) { col[i] = mix(col[i], tint_ground, tint_a); }
         }
     }
+    // ---- Worn paths. The edge of a path is ragged (turf holds on in tufts, bare earth bites
+    // into it), and a well-used one has a bare middle and a trodden margin. Grass and leaf
+    // litter are trodden flat and pale, then thin to packed earth; gravel is pushed aside
+    // from the middle; sand is churned and darker.
+    var wear = 0.0;
+    var path_bare = 0.0;
+    if (wear_raw > 0.003 || wear_near > 0.003) {
+        // (Tufts a hand or two across, clumps of a meter.)
+        let tufts = (tile_fbm(tp, 4.0, 2) - 0.5) * (1.0 - smoothstep(0.01, 0.12, pixel));
+        let ragged = (detail_n - 0.5) * 0.5 * fine_fade + tufts * 0.55;
+        wear = saturate(wear_raw + ragged * smoothstep(0.02, 0.25, wear_raw));
+        let trod = max(smoothstep(0.04, 0.4, wear), smoothstep(0.05, 0.5, wear_near + tufts * 0.3) * 0.7);
+        path_bare = smoothstep(0.45, 0.85, wear);
+        // Turf gives way to earth; what is left of it is flattened, yellowed straw.
+        let turf_lost = (w[M_GRASS] + w[M_FOREST]) * path_bare;
+        w[M_GRASS] *= 1.0 - path_bare;
+        w[M_FOREST] *= 1.0 - path_bare;
+        w[M_SOIL] += turf_lost;
+        col[M_GRASS] = mix(col[M_GRASS], mix(planet.colors[C_DRY].rgb, planet.colors[C_SOIL].rgb, 0.35) * 1.05, trod * 0.55);
+        col[M_FOREST] = mix(col[M_FOREST], litter * 0.9, trod * 0.6 * (1.0 - canopy));
+        // Gravel shoved aside: the middle of the track is finer and earthier.
+        let shoved = w[M_GRAVEL] * path_bare * 0.55;
+        w[M_GRAVEL] -= shoved;
+        w[M_SOIL] += shoved;
+        // Beaten earth: dusty and paler than the soil of bare patches (drier, and ground fine),
+        // darker and firmer down the middle where the feet fall most.
+        let soil_gray = vec3<f32>(dot(col[M_SOIL], vec3<f32>(0.3, 0.5, 0.2)));
+        let dusty = mix(col[M_SOIL], soil_gray, 0.4) * 1.1;
+        col[M_SOIL] = mix(col[M_SOIL], dusty * mix(1.0, 0.82, smoothstep(0.85, 1.0, wear_raw)), trod);
+        col[M_SAND] *= mix(1.0, 0.88, trod);
+    }
     // Grass grows in clumps whatever its color (natural, painted or tinted): straw-colored
     // tufts next to dark, dense ones, a couple of meters and several meters across, and
     // sunburnt and lush blue-green stretches tens of meters across.
@@ -1435,6 +1519,14 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             // Barren worlds' bare ground is powdery regolith, not the cracked earth of the
             // soil texture: most of its relief and pattern is smoothed away (small craters
             // stand in for it).
+            // Beaten earth is smooth and fine: the cracks and clods of the soil texture are
+            // trodden out of it.
+            if (i == M_SOIL && path_bare > 0.0) {
+                let k = 0.7 * path_bare;
+                ms[i].normal = normalize(mix(ms[i].normal, n_geo, k));
+                ms[i].detail = mix(ms[i].detail, vec3<f32>(0.9 + 0.2 * detail_f), k);
+                ms[i].height = mix(ms[i].height, 0.35, k);
+            }
             if (i == M_SOIL && barren > 0.0) {
                 let k = 0.9 * barren;
                 ms[i].normal = normalize(mix(ms[i].normal, n_geo, k));
@@ -1473,6 +1565,28 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     occlusion *= inv_b;
     ground_h *= inv_b;
     var n = normalize(select(n_geo, nsum, bsum > 1e-4));
+    // Worn paths: beaten smooth, sunk a few centimeters below the ground beside them (deeper
+    // in soft sand), rock polished by the feet.
+    if (wear_raw > 0.003) {
+        let soft = saturate(w[M_SOIL] + w[M_GRASS] + w[M_FOREST] + w[M_MUD]);
+        // (The turf beside a path stands above it by its own thickness.)
+        let sink = 0.07 * soft + 0.07 * saturate(w[M_SAND]) + 0.025 * saturate(w[M_GRAVEL]);
+        n = normalize(mix(n, n_geo, path_bare * 0.55 * soft));
+        let g = wear_grad - up * dot(wear_grad, up);
+        n = normalize(n + g * sink);
+        // Sand trampled into lumps and hollows.
+        let churned = smoothstep(0.1, 0.5, wear) * saturate(w[M_SAND]) * (1.0 - smoothstep(0.05, 0.3, pixel));
+        if (churned > 0.0) {
+            n = normalize(n - churn_tilt(tp) * churned);
+        }
+        let polish = smoothstep(0.3, 0.9, wear) * saturate(w[M_ROCK] + w[M_CONCRETE]);
+        roughness = mix(roughness, roughness * 0.6, polish);
+        albedo *= 1.0 + 0.06 * polish;
+        ground_h = mix(ground_h, ground_h * 0.4, path_bare * soft);
+        // The turf's edge shades the margin of the path.
+        let lip = smoothstep(0.35, 0.6, wear) * (1.0 - smoothstep(0.65, 0.95, wear)) * soft;
+        occlusion *= 1.0 - 0.25 * lip;
+    }
     // Large-scale variation beyond the textures' reach.
     albedo *= mix(1.0, 0.88 + 0.24 * macro_v, macro_fade) * mix(1.0, 0.9 + 0.2 * far_n.x, far)
         * mix(1.0, 0.8 + 0.4 * far_n.y, airless_far);
@@ -1566,6 +1680,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var glint = 0.0;
     var glint_n = up;
     if (snow_amount > 0.003) {
+        // Prints and worn tracks pack the snow; a busy track is trodden to glossy ice.
+        let track = smoothstep(0.08, 0.45, wear);
+        // (Only the busiest tracks: most stay packed, gray snow.)
+        let icy = smoothstep(0.85, 1.0, wear) * 0.6;
         snow = mix(fill_low(snow_amount, ground_h), snow_amount, far);
         // Deep prints in thin snow show the ground below.
         let snow_depth = max(fallen, painted_snow * 0.25 + climate_snow * 0.5);
@@ -1581,10 +1699,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             drift = snow_drift(tp);
             let e = 0.25;
             let dh = vec2<f32>(snow_drift(tp + vec3<f32>(e, 0.0, 0.0)), snow_drift(tp + vec3<f32>(0.0, 0.0, e))) - drift;
-            soft = normalize(soft - vec3<f32>(dh.x, 0.0, dh.y) / e * drift_fade);
+            // Feet trample the drifts flat and churn the snow.
+            soft = normalize(soft - vec3<f32>(dh.x, 0.0, dh.y) / e * drift_fade * (1.0 - track));
+            if (track > 0.0) {
+                soft = normalize(soft - churn_tilt(tp) * track * (1.0 - icy) * drift_fade * 1.5);
+            }
         }
         let sm = sample_planar(M_SNOW, tp, soft, dp1, dp2, tex_pixel);
-        let packed = saturate(depth * 12.0) * print_fade;
+        // Prints and worn tracks pack the snow.
+        let packed = max(saturate(depth * 12.0) * print_fade, track);
         // Drift crests a touch whiter, the hollows between them a touch grayer.
         var snow_col = col[M_SNOW] * sm.detail * mix(1.0, 0.82, packed) * mix(vec3(1.0), vec3(0.93, 0.96, 1.0), packed)
             * mix(1.0, 0.86 + 0.18 * far_n.x, far) * (1.0 + drift * 0.6 * drift_fade);
@@ -1597,7 +1720,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         }
         albedo = mix(albedo, snow_col, snow);
         n = normalize(mix(n, sm.normal, snow));
-        roughness = mix(roughness, mix(sm.roughness, 0.45, packed), snow);
+        roughness = mix(roughness, mix(mix(sm.roughness, 0.45, packed), 0.2, icy), snow);
+        albedo = mix(albedo, albedo * vec3<f32>(0.82, 0.87, 0.94), icy * snow);
+        // The packed track sits below the soft snow beside it.
+        let g = wear_grad - up * dot(wear_grad, up);
+        n = normalize(n + g * 0.1 * snow);
         // Glints: here and there an ice crystal faces just right and flashes in the sun. In
         // cells at least a pixel across, one in sixteen holds a tilted mirror facet (lit below,
         // on top of the snow's own shading, which it leaves alone).
@@ -1621,7 +1748,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Bare soil turns to mud; grass stays grass (darker, with a sheen) unless it is trodden.
     let natural_bare = 1.0 - veg;
     let bare = natural_bare * (1.0 - paint_w) + pw[1] + pw[4] + pw[8] + pw[10];
-    let trodden = saturate(depth * 25.0) * print_fade + flattened * 0.6;
+    let trodden = saturate(depth * 25.0) * print_fade + flattened * 0.6 + path_bare;
     // Sand soaks water up and darkens far more than grass or stone, glossy where it is
     // saturated, but it drains too fast to turn to mud.
     let sand = saturate(w[M_SAND]);
