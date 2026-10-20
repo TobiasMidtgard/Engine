@@ -14,7 +14,8 @@
 //! only those (`lineup`, `lineup_lod`, `lineup_distant`, `roots`, `crown_front`,
 //! `leaves_close`, `crown_back`, `conifers`, `pine_crown`, `birch_hazel`, `grove`,
 //! `grove_far`, `valley`, `valley_far`), `textures`
-//! to save the leaf atlases, their normal maps and three of their mip levels instead, or `stats` to print triangle counts.
+//! to save the leaf atlases, their normal maps, three of their mip levels and the mass atlases far
+//! crowns draw with instead, or `stats` to print triangle counts.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -62,7 +63,9 @@ fn shot(app: &mut App, out: &str, name: &str, eye: DVec3, target: DVec3, to_sun:
 
 /// Save every tree leaf atlas (color with alpha, and normal map) as PNGs.
 fn save_textures(out: &str) {
-    use engine_foliage::meshgen::textures::{LeafKind, leaf_textures};
+    use engine_foliage::meshgen::textures::{
+        LeafKind, MASS_ATLAS_SIZE, leaf_textures, mass_textures,
+    };
     for (name, kind) in [
         ("oak", LeafKind::Lobed),
         ("hazel", LeafKind::Broad),
@@ -78,6 +81,16 @@ fn save_textures(out: &str) {
         );
         for (suffix, img) in [("color", &t.color), ("normal", &t.normal)] {
             let path = format!("{out}/leaves_{name}_{suffix}.png");
+            image::RgbaImage::from_raw(img.width, img.height, img.data.clone())
+                .expect("rgba")
+                .save(&path)
+                .expect("png");
+            println!("saved {path}");
+        }
+        // The mass atlas far and distant crowns draw with.
+        let m = mass_textures(kind, MASS_ATLAS_SIZE, 0x1eaf);
+        for (suffix, img) in [("color", &m.color), ("normal", &m.normal)] {
+            let path = format!("{out}/mass_{name}_{suffix}.png");
             image::RgbaImage::from_raw(img.width, img.height, img.data.clone())
                 .expect("rgba")
                 .save(&path)

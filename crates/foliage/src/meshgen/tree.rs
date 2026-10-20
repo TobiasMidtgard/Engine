@@ -2073,7 +2073,7 @@ fn broadleaf(sp: &PlantSpecies, seed: u64, sapling: bool) -> PlantMeshes {
     }
     if !sapling {
         let airy = if weeping { 1.25 } else { 1.0 };
-        let per_m2 = 1.5 * airy * density * sp.canopy_density.clamp(0.4, 1.5) / (leaf * leaf);
+        let per_m2 = 2.2 * airy * density * sp.canopy_density.clamp(0.4, 1.5) / (leaf * leaf);
         cr.fill_shell(&mut rng, per_m2, weeping);
     }
     // Crown top.
