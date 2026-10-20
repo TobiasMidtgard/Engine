@@ -2582,6 +2582,26 @@ fn exhausts() -> Vec<EffectDesc> {
                         soft: 1.0,
                         ..smoke("cloud", 0.68, 0.35)
                     },
+                    // The trail a climbing rocket leaves: laid down per meter it travels, so it
+                    // stands as one unbroken column however fast it goes, lingering and
+                    // spreading long after the rocket has gone.
+                    EmitterDesc {
+                        rate_per_meter: 0.8,
+                        shape: EmitShape::Cone {
+                            angle_deg: 60.0,
+                            radius: 0.6,
+                        },
+                        offset: [0.0, 6.0, 0.0],
+                        speed: [0.5, 1.5],
+                        drag: 1.5,
+                        turbulence: 1.2,
+                        turbulence_scale: 6.0,
+                        lifetime: [8.0, 12.0],
+                        size: [1.8, 2.6],
+                        size_over_life: c(&[(0.0, 0.7), (0.2, 1.6), (1.0, 4.5)]),
+                        soft: 1.0,
+                        ..smoke("trail", 0.8, 0.5)
+                    },
                     EmitterDesc {
                         rate: 30.0,
                         offset: [0.0, 2.0, 0.0],

@@ -17,7 +17,7 @@ struct Body {
     haze: vec4<f32>,    // relative extinction per channel, w: vertical optical depth
     haze2: vec4<f32>,   // single-scattering albedo per channel, w: scale height (R)
     haze3: vec4<f32>,   // x: forward scattering g; cloud shell: y radius (R), z fade, w hole (R)
-    rings: vec4<f32>,   // inner radius (R), outer radius (R), brightness, unused
+    rings: vec4<f32>,   // inner radius (R), outer radius (R), brightness; cloud shell: w local cover
     flags: vec4<u32>,   // x: F_* bits
 };
 
@@ -381,15 +381,29 @@ fn shell_noise(p: vec3<f32>) -> f32 {
     return mix(a, b, u.z);
 }
 
+// The cloud tops' cover at `apart` (R along the shell) from the camera's ground point. Around
+// the camera the weather's own clouds set it (`rings.w`, negative when the weather is on
+// another body): the shell takes their cover where they hand over to it, at the edge of its
+// hole, and returns to the map's by three hole radii, so the two decks meet at the same share
+// of sky.
+fn shell_coverage(b: Body, map_cover: f32, apart: f32) -> f32 {
+    if (b.rings.w < 0.0 || b.haze3.w <= 0.0) {
+        return map_cover;
+    }
+    return mix(b.rings.w, map_cover, smoothstep(b.haze3.w, b.haze3.w * 3.0, apart));
+}
+
 // How much of the sun the cloud tops over unit-shell point `p` block: the map's coverage
 // broken up by the coarse octaves of the shell's own detail (finer ones average out in a
-// shadow seen from this high), `foot` the size of a pixel on the shell (R).
-fn shell_shadow(b: Body, p: vec3<f32>, foot: f32) -> f32 {
+// shadow seen from this high), `foot` the size of a pixel on the shell (R), `apart` its
+// distance from the camera's ground point (R).
+fn shell_shadow(b: Body, p: vec3<f32>, foot: f32, apart: f32) -> f32 {
     let lon = atan2(p.x, p.z);
     let lat = asin(clamp(p.y, -1.0, 1.0));
     let uv = vec2<f32>(lon * (0.5 * INV_PI) + 0.5 + b.sun.w, 0.5 - lat * INV_PI);
     let texel = 2.0 * PI / f32(textureDimensions(aux_map).x);
-    let coverage = textureSampleLevel(aux_map, map_sampler, uv, max(log2(foot / texel), 0.0)).r;
+    let map_cover = textureSampleLevel(aux_map, map_sampler, uv, max(log2(foot / texel), 0.0)).r;
+    let coverage = shell_coverage(b, map_cover, apart);
     let turn = b.sun.w * 2.0 * PI;
     let ct = cos(turn);
     let st = sin(turn);
@@ -460,8 +474,11 @@ fn fs_shell(in: VsOut) -> FsOut {
     let du = select(du1, du2, abs(du2) < abs(du1));
     let dv = vec2<f32>(dpdx(vv), dpdy(vv));
     let cloud_uv = vec2<f32>(u1 + b.sun.w, vv);
-    let coverage = textureSampleGrad(aux_map, map_sampler, cloud_uv, vec2<f32>(du.x, dv.x),
-                                     vec2<f32>(du.y, dv.y)).r;
+    let map_cover = textureSampleGrad(aux_map, map_sampler, cloud_uv, vec2<f32>(du.x, dv.x),
+                                      vec2<f32>(du.y, dv.y)).r;
+    let hit = o + dl * t_hit;
+    let apart = acos(clamp(dot(normalize(hit), normalize(o)), -1.0, 1.0));
+    let coverage = shell_coverage(b, map_cover, apart);
 
     // Detail: octaves of noise turning with the clouds' drift, each faded out before it is
     // smaller than a couple of pixels (seen slanted, the footprint stretches).
@@ -511,8 +528,6 @@ fn fs_shell(in: VsOut) -> FsOut {
     // The weather draws the clouds around the camera itself.
     var outside_hole = 1.0;
     if (b.haze3.w > 0.0) {
-        let hit = o + dl * t_hit;
-        let apart = acos(clamp(dot(normalize(hit), normalize(o)), -1.0, 1.0));
         outside_hole = smoothstep(b.haze3.w * 0.7, b.haze3.w, apart);
         alpha *= outside_hole;
     }
@@ -538,7 +553,7 @@ fn fs_shell(in: VsOut) -> FsOut {
                 apart_g = smoothstep(b.haze3.w * 0.7, b.haze3.w, a_g);
             }
             // Skylight still reaches the shade; a low sun's light was weak anyway.
-            shadow = shell_shadow(b, cp, foot) * 0.75 * smoothstep(0.0, 0.15, mu_g)
+            shadow = shell_shadow(b, cp, foot, acos(clamp(dot(cp, normalize(os)), -1.0, 1.0))) * 0.75 * smoothstep(0.0, 0.15, mu_g)
                 * cover * b.haze3.z * apart_g;
         }
     }

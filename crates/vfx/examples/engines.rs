@@ -5,6 +5,7 @@
 //! cargo run -p engine_vfx --release --example engines                        # all of them
 //! cargo run -p engine_vfx --release --example engines -- night exhaust.rocket
 //! cargo run -p engine_vfx --release --example engines -- vacuum exhaust.thruster
+//! cargo run -p engine_vfx --release --example engines -- day launch          # a lift-off
 //! ```
 //!
 //! `vacuum` takes the air away, as in space. Needs a GPU or lavapipe.
@@ -151,7 +152,42 @@ fn main() {
             }
             app.world.despawn(engine);
         }
+        if only.is_empty() || only.iter().any(|o| o.as_str() == "launch") {
+            launch(&mut app, camera, out, &format!("{label}{tag}"));
+        }
     }
+}
+
+/// A rocket lifting off and climbing faster and faster, seen from 150 m away, to show the
+/// trail of exhaust it leaves behind.
+fn launch(app: &mut App, camera: Entity, out: &std::path::Path, label: &str) {
+    let base = DVec3::new(400.0, 4.0, 0.0);
+    *app.world.get_mut::<Transform>(camera).unwrap() =
+        Transform::from_translation(base + DVec3::new(-40.0, 30.0, 170.0))
+            .looking_at(base + DVec3::new(0.0, 50.0, 0.0), Vec3::Y);
+    app.update_n(40);
+    let rocket = app
+        .world
+        .spawn((
+            Transform::from_translation(base)
+                .with_rotation(Quat::from_rotation_arc(Vec3::Y, -Vec3::Y)),
+            ParticleEffect::new("exhaust.rocket").with_scale(2.0),
+        ))
+        .id();
+    // Held down for a second, then climbing at 12 m/s^2.
+    let frames = (5.0 / STEP).round() as usize;
+    for f in 0..frames {
+        let t = (f as f64 * STEP - 1.0).max(0.0);
+        app.world.get_mut::<Transform>(rocket).unwrap().translation =
+            base + DVec3::Y * (6.0 * t * t);
+        app.update();
+    }
+    let path = out.join(format!("{label}_launch.png"));
+    match capture_now(&mut app.world, &path) {
+        Ok(_) => println!("{}", path.display()),
+        Err(e) => eprintln!("{label}_launch: {e}"),
+    }
+    app.world.despawn(rocket);
 }
 
 /// Flat ground at y = 0 for the particles to land on.
