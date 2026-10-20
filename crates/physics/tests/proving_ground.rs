@@ -7,7 +7,7 @@ use engine_core::registry::call_api;
 use engine_core::time::TimeSource;
 use engine_physics::PhysicsPlugin;
 use engine_physics::demo::{self, Station};
-use engine_world::physics::{BodyKind, RigidBody, Velocity};
+use engine_world::physics::{BodyKind, Collider, ColliderShape, RigidBody, Velocity};
 use engine_world::{SimulationFocus, WorldPlugin};
 use serde_json::json;
 
@@ -230,4 +230,53 @@ fn ten_dummies_tumble_down_the_stairs_and_fall_asleep() {
         "a dummy stayed on the landing: {at:?}"
     );
     assert!(lowest > 0.02, "a dummy sank into the yard ({lowest} m)");
+}
+
+/// The rockfall's rocks all pour out of the hopper and off the chute, heap up at its foot (a
+/// heap, not a sheet spread over the slab) and come to rest before the station replays.
+#[test]
+fn rocks_pour_down_the_chute_into_a_heap_and_come_to_rest() {
+    let mut app = app();
+    app.update();
+    let base = Station::Rockfall.base() + DVec3::Y * demo::SLAB_RISE;
+    let rocks: Vec<Entity> = app
+        .world
+        .query::<(Entity, &Transform, &Collider)>()
+        .iter(&app.world)
+        .filter(|(_, t, c)| {
+            matches!(c.shape, ColliderShape::ConvexHull { .. })
+                && t.translation.distance(base) < 15.0
+        })
+        .map(|(e, _, _)| e)
+        .collect();
+    assert_eq!(rocks.len(), 300);
+    let secs = Station::Rockfall.cycle_secs().unwrap() - 1.0;
+    app.update_n((secs * 60.0) as usize);
+    let local: Vec<DVec3> = rocks
+        .iter()
+        .map(|&e| app.world.get::<Transform>(e).unwrap().translation - base)
+        .collect();
+    // The chute's lip is 1.6 m up at x = 0; it runs up toward -x.
+    let left = local.iter().filter(|p| p.x < -0.2 && p.y > 1.2).count();
+    assert!(
+        left <= 5,
+        "{left} rocks stayed in the hopper or on the chute"
+    );
+    let top = local.iter().map(|p| p.y).fold(0.0, f64::max);
+    assert!(top > 0.6, "the heap is only {top:.2} m high (rock centers)");
+    let near = local
+        .iter()
+        .filter(|p| p.x > -1.0 && p.x < 4.5 && p.z.abs() < 3.0)
+        .count();
+    assert!(
+        near >= 270,
+        "only {near} of 300 rocks heaped within 4.5 m of the chute"
+    );
+    for &e in &rocks {
+        let v = app.world.get::<Velocity>(e).unwrap();
+        assert!(
+            v.linear.length() < 0.01 && v.angular.length() < 0.05,
+            "a rock is still moving: {v:?}"
+        );
+    }
 }
