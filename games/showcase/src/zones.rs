@@ -860,6 +860,11 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     "Crafting bench",
                     r#"{"screen": "crafting", "select": "r_elixir"}"#,
                 ),
+                ui(
+                    "market_saves",
+                    "Save and load",
+                    r#"{"screen": "saves", "select": "save_3"}"#,
+                ),
                 // Over the HUD, so the slow-motion gauge shows the world slowing.
                 View::new(
                     "market_wheel",
