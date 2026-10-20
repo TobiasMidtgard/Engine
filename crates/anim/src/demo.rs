@@ -944,11 +944,11 @@ pub const VIEWS: &[DemoView] = &[
     },
     DemoView {
         key: "paddock_flex",
-        name: "Double-biceps flex",
+        name: "Front double-biceps: curl up, hit and squeeze",
         eye: [0.47, 1.8, 7.19],
         target: [0.7, 1.7, 5.6],
         hour: 15.0,
-        at: 2.52,
+        at: 2.92,
     },
     DemoView {
         key: "paddock_reach",
@@ -1286,7 +1286,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     );
     dress(world, lifter, "lifter", SkinMaterial::default());
     world.entity_mut(lifter).insert(DemoScript {
-        period: 5.0,
+        period: 6.0,
         steps: vec![DemoStep::trigger(0.8, "flex")],
         time: 0.0,
     });
