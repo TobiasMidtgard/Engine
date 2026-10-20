@@ -330,7 +330,10 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   to bite, a boar rooting and its charge and slash, deer, wolves and boars flinching from a
   blow, a deer killed at a gallop, a starling's flight; `NPC_STRIPS=deer-walk,...` shoots
   only some), plus triangle and build-time budgets and a check that the arena art sits on
-  every collider. Each walking animal's close-up is a still from a real run at the game's
+  every collider. In `tests/art_animals.rs` only the checks run by default (the budgets, and a
+  few close-ups and strips rendered small, each of which must show its animal, the animals
+  living on undrawn between shots); the full-size close-ups and strips are ignored tests
+  (`-- --ignored`). Each walking animal's close-up is a still from a real run at the game's
   rate (it walks on toward the camera's mark and is shot at its moment), so its legs are
   where its gait has them. The animal unit tests check that no planted foot slides in any
   gait (boars, tuskers and piglets included; a rabbit's paws by under a millimetre a frame,

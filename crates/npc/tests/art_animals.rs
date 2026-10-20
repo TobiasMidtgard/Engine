@@ -4,9 +4,14 @@
 //! on the move (gaits, an alarm, a wolf's hunt from stalk to bite, a boar's charge and slash,
 //! a deer killed at a gallop, animals flinching from a blow), plus budget checks on the
 //! generated meshes.
-//! Rendering needs a GPU or lavapipe and passes with a note without one. Set
-//! `NPC_SCREENSHOT_DIR` to keep the PNGs, and `NPC_STRIPS` (names, comma separated) to shoot
-//! only some strips.
+//! Rendering needs a GPU or lavapipe and passes with a note without one.
+//!
+//! By default (and in CI) only the checks run: the mesh budgets, and a few close-ups and
+//! motion strips rendered small, each of which must show its animal. The full-size pictures
+//! (every close-up and strip, as an animator looks at them) are ignored tests:
+//! `cargo test -p engine_npc --test art_animals -- --ignored`, with `NPC_SCREENSHOT_DIR` set to
+//! keep the PNGs and `NPC_STRIPS` (names, comma separated) to shoot only some strips. They
+//! hold the same checks.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -19,6 +24,8 @@ use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 
 const W: u32 = 960;
 const H: u32 = 540;
+/// The checks render this size (a quarter of the pixels).
+const SMALL: (u32, u32) = (W / 2, H / 2);
 
 /// One animal for a close-up: in `state` for `t` s at `speed` (m/s, straight ahead) when it
 /// is shot. Walkers run there at the real rate; birds are held in the pose.
@@ -69,13 +76,13 @@ impl Pose {
     }
 }
 
-fn app() -> App {
+fn app((width, height): (u32, u32)) -> App {
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
         let mut w = app.world.resource_mut::<Window>();
-        w.width = W;
-        w.height = H;
+        w.width = width;
+        w.height = height;
     }
     app.world
         .resource_mut::<Time>()
@@ -275,7 +282,10 @@ fn framing(shot: &Shot, at: DVec3) -> (DVec3, DVec3) {
     (eye, target)
 }
 
+/// The animal shows up: at least 400 busy pixels, however small the picture (a small one
+/// only makes it harder).
 fn check(name: &str, img: &image::RgbaImage) {
+    eprintln!("{name}: {} busy px", busy(img));
     assert!(
         busy(img) > 400,
         "{name}: the animal should show up ({} px)",
@@ -283,9 +293,19 @@ fn check(name: &str, img: &image::RgbaImage) {
     );
 }
 
+/// What the file names of pictures rendered at `size` begin with: small ones are told apart
+/// from the full-size pictures.
+fn tag(size: (u32, u32)) -> &'static str {
+    if size == (W, H) || size == (SW, SH) {
+        ""
+    } else {
+        "small_"
+    }
+}
+
 /// Close-ups of birds, held in their poses (flight is posed, not flown).
-fn render_held(shots: &[Shot]) {
-    let mut app = app();
+fn render_held(shots: &[Shot], size: (u32, u32)) {
+    let mut app = app(size);
     app.update_n(2);
     if app.world.get_resource::<RenderDisabled>().is_some() {
         eprintln!("skipping: no GPU");
@@ -301,7 +321,8 @@ fn render_held(shots: &[Shot]) {
         hold(&mut app, &animals, &list);
         app.update();
         hold(&mut app, &animals, &list);
-        let Some(img) = shoot(&mut app, cam, &dir, &format!("animal_{}.png", shot.0)) else {
+        let file = format!("{}animal_{}.png", tag(size), shot.0);
+        let Some(img) = shoot(&mut app, cam, &dir, &file) else {
             return;
         };
         check(shot.0, &img);
@@ -359,8 +380,8 @@ fn steady(mut q: Query<SteadyItem>) {
 
 /// Close-ups of walking animals: every one runs at the real rate (60 Hz) into its pose, all
 /// reaching their moments together, and is shot where it then is, time standing still.
-fn render(shots: &[Shot]) {
-    let mut app = app();
+fn render(shots: &[Shot], size: (u32, u32)) {
+    let mut app = app(size);
     app.world
         .resource_mut::<Time>()
         .set_source(TimeSource::Manual { step_secs: 0.0 });
@@ -406,28 +427,29 @@ fn render(shots: &[Shot]) {
             .entity_mut(*e)
             .insert(Steady { pose: *pose, shot });
     }
-    live_until(&mut app, animals[0], shot);
+    live_until(&mut app, animals[0], shot, size == (W, H));
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("npc_art_animals");
     std::fs::create_dir_all(&dir).expect("dir");
     for (e, s) in animals.iter().zip(shots) {
         let at = app.world.get::<Transform>(*e).expect("animal").translation;
         let (eye, target) = framing(s, DVec3::new(at.x, 0.0, at.z));
         let cam = camera(&mut app, eye, target, 28.0);
-        let Some(img) = shoot(&mut app, cam, &dir, &format!("animal_{}.png", s.0)) else {
+        let file = format!("{}animal_{}.png", tag(size), s.0);
+        let Some(img) = shoot(&mut app, cam, &dir, &file) else {
             return;
         };
         check(s.0, &img);
     }
 }
 
-#[test]
-fn deer_closeups() {
+/// The deer close-ups.
+fn deer_shots() -> Vec<Shot<'static>> {
     let p = |state| Pose::new(Species::Deer, state);
     let stag = |state| Pose {
         male: true,
         ..Pose::new(Species::Deer, state)
     };
-    render(&[
+    vec![
         ("deer_stag_alert", stag(AnimalState::Alert), 5.0, 35.0),
         ("deer_stag_profile", stag(AnimalState::Wander), 5.0, 0.0),
         ("deer_hind_profile", p(AnimalState::Wander), 4.5, 0.0),
@@ -481,13 +503,19 @@ fn deer_closeups() {
         ("deer_stag_rest", stag(AnimalState::Rest), 4.5, 40.0),
         ("deer_hind_dead", p(AnimalState::Dead), 4.5, 60.0),
         ("deer_hind_rear", p(AnimalState::Alert), 3.5, -140.0),
-    ]);
+    ]
 }
 
 #[test]
-fn wolf_closeups() {
+#[ignore = "full-size pictures: run with --ignored"]
+fn deer_closeups() {
+    render(&deer_shots(), (W, H));
+}
+
+/// The wolf close-ups.
+fn wolf_shots() -> Vec<Shot<'static>> {
     let w = |state| Pose::new(Species::Wolf, state);
-    render(&[
+    vec![
         ("wolf_profile", w(AnimalState::Wander), 3.4, 0.0),
         ("wolf_alert", w(AnimalState::Alert), 3.4, 35.0),
         ("wolf_head", w(AnimalState::Wander), 1.1, 45.0),
@@ -541,11 +569,17 @@ fn wolf_closeups() {
         ("wolf_dead", w(AnimalState::Dead), 3.2, 60.0),
         ("wolf_rear", w(AnimalState::Wander), 3.0, -140.0),
         ("wolf_feet", w(AnimalState::Wander), 0.8, 25.0),
-    ]);
+    ]
 }
 
 #[test]
-fn boar_closeups() {
+#[ignore = "full-size pictures: run with --ignored"]
+fn wolf_closeups() {
+    render(&wolf_shots(), (W, H));
+}
+
+/// The boar close-ups.
+fn boar_shots() -> Vec<Shot<'static>> {
     let sow = |state| Pose::new(Species::Boar, state);
     let tusker = |state| Pose {
         male: true,
@@ -555,7 +589,7 @@ fn boar_closeups() {
         young: true,
         ..Pose::new(Species::Boar, state)
     };
-    render(&[
+    vec![
         ("boar_tusker_profile", tusker(AnimalState::Wander), 3.4, 0.0),
         ("boar_sow_profile", sow(AnimalState::Wander), 3.2, 0.0),
         ("boar_tusker_head", tusker(AnimalState::Wander), 1.4, 40.0),
@@ -600,13 +634,19 @@ fn boar_closeups() {
         ("boar_sow_dead", sow(AnimalState::Dead), 3.2, 60.0),
         ("boar_tusker_rear", tusker(AnimalState::Wander), 3.0, -140.0),
         ("boar_sow_feet", sow(AnimalState::Wander), 0.8, 25.0),
-    ]);
+    ]
 }
 
 #[test]
-fn rabbit_closeups() {
+#[ignore = "full-size pictures: run with --ignored"]
+fn boar_closeups() {
+    render(&boar_shots(), (W, H));
+}
+
+/// The rabbit close-ups.
+fn rabbit_shots() -> Vec<Shot<'static>> {
     let r = |state| Pose::new(Species::Rabbit, state);
-    render(&[
+    vec![
         ("rabbit_profile", r(AnimalState::Wander), 1.1, 0.0),
         ("rabbit_graze", r(AnimalState::Graze), 1.0, 35.0),
         ("rabbit_head", r(AnimalState::Wander), 0.45, 40.0),
@@ -626,18 +666,24 @@ fn rabbit_closeups() {
         ("rabbit_rest", r(AnimalState::Rest), 1.0, 40.0),
         ("rabbit_rear", r(AnimalState::Wander), 0.9, -140.0),
         ("rabbit_dead", r(AnimalState::Dead), 1.0, 60.0),
-    ]);
+    ]
 }
 
 #[test]
-fn starling_closeups() {
+#[ignore = "full-size pictures: run with --ignored"]
+fn rabbit_closeups() {
+    render(&rabbit_shots(), (W, H));
+}
+
+/// The starling close-ups.
+fn starling_shots() -> Vec<Shot<'static>> {
     let b = |state| Pose::new(Species::Bird, state);
     let fly = |flap: f32| Pose {
         flap,
         t: 3.0,
         ..b(AnimalState::Flying).moving(7.0, 0.0, LocomotionMode::Air)
     };
-    render_held(&[
+    vec![
         ("bird_profile", b(AnimalState::Perched), 0.6, 0.0),
         ("bird_head", b(AnimalState::Perched), 0.3, 40.0),
         (
@@ -693,7 +739,32 @@ fn starling_closeups() {
             -20.0,
         ),
         ("bird_dead", b(AnimalState::Dead), 0.6, 60.0),
-    ]);
+    ]
+}
+
+#[test]
+#[ignore = "full-size pictures: run with --ignored"]
+fn starling_closeups() {
+    render_held(&starling_shots(), (W, H));
+}
+
+/// A few close-ups rendered small, of every walking species standing and on the run (the
+/// starling shows up in its flight strip): each shows its animal.
+#[test]
+fn a_few_closeups_show_their_animals() {
+    let pick = |shots: Vec<Shot<'static>>, names: &[&str]| -> Vec<Shot<'static>> {
+        let out: Vec<_> = shots.into_iter().filter(|s| names.contains(&s.0)).collect();
+        assert_eq!(out.len(), names.len(), "no close-up named in {names:?}");
+        out
+    };
+    let mut walkers = pick(deer_shots(), &["deer_stag_alert", "deer_hind_gallop"]);
+    walkers.extend(pick(wolf_shots(), &["wolf_bite"]));
+    walkers.extend(pick(
+        boar_shots(),
+        &["boar_tusker_charge", "boar_piglet_gallop"],
+    ));
+    walkers.extend(pick(rabbit_shots(), &["rabbit_run"]));
+    render(&walkers, SMALL);
 }
 
 #[test]
@@ -1093,7 +1164,12 @@ fn wolf_hunt(t: f32) -> Cue {
 /// Walking at `walk` (a share of its run), struck from its right at 1 s and not killed: it
 /// flinches away from the blow and staggers, ears pinned, and bolts off away from it.
 fn hurt(t: f32, walk: f32) -> Cue {
-    let at = Vec2::new(1.2, 6.0);
+    hurt_from(t, walk, 1.0)
+}
+
+/// Hurt from the side the strips are shot from (`side` 1) or from the far side (-1).
+fn hurt_from(t: f32, walk: f32, side: f32) -> Cue {
+    let at = Vec2::new(1.2, 6.0 * side);
     if t < 1.0 {
         Cue::new(AnimalState::Wander, walk, 0.0)
     } else if t < 1.22 {
@@ -1106,12 +1182,27 @@ fn hurt(t: f32, walk: f32) -> Cue {
             sprint: true,
             hit: Some(at),
             threat: Some((at, 1.2)),
-            ..Cue::new(AnimalState::Flee, 0.8, -0.6)
+            ..Cue::new(AnimalState::Flee, 0.8, -0.6 * side)
         }
     }
 }
 fn deer_hurt(t: f32) -> Cue {
     hurt(t, 0.2)
+}
+fn deer_hurt_far(t: f32) -> Cue {
+    hurt_from(t, 0.2, -1.0)
+}
+/// A boar hurt by something it can't find: it flinches, then stands and scents for it.
+fn boar_search(t: f32) -> Cue {
+    let at = Vec2::new(1.2, 6.0);
+    if t < 1.0 {
+        Cue::new(AnimalState::Wander, 0.2, 0.0)
+    } else {
+        Cue {
+            hit: (t < 1.22).then_some(at),
+            ..Cue::new(AnimalState::Alert, 0.0, 0.0)
+        }
+    }
 }
 fn wolf_hurt(t: f32) -> Cue {
     hurt(t, 0.2)
@@ -1234,8 +1325,22 @@ fn course_animal(app: &mut App, s: &Strip, origin: DVec3, delay: f64) -> Entity 
 }
 
 /// Step the fixed clock on to `until` (s of the animals' lives), several steps a frame,
-/// looking away (cheap frames).
-fn live_until(app: &mut App, clock_of: Entity, until: f64) {
+/// looking away (cheap frames), or, unless `draw`, without drawing at all: the animals live,
+/// move and are posed as in a drawn frame (the checks' small pictures; each shot's camera
+/// starts with a cut, so they miss nothing but the light's exposure settling, which the
+/// full-size pictures keep as before).
+fn live_until(app: &mut App, clock_of: Entity, until: f64, draw: bool) {
+    let render = (!draw).then(|| {
+        let render = app
+            .world
+            .resource_mut::<Schedules>()
+            .remove(Render)
+            .expect("render schedule");
+        app.world
+            .resource_mut::<Schedules>()
+            .insert(Schedule::new(Render));
+        render
+    });
     let step = 1.0 / 60.0;
     loop {
         let now = app.world.get::<NpcClock>(clock_of).map_or(0.0, |c| c.now);
@@ -1254,6 +1359,9 @@ fn live_until(app: &mut App, clock_of: Entity, until: f64) {
     app.world
         .resource_mut::<Time>()
         .set_source(TimeSource::Manual { step_secs: 0.0 });
+    if let Some(render) = render {
+        app.world.resource_mut::<Schedules>().insert(render);
+    }
 }
 
 /// Flipbook strips of the wildlife on the move: each animal runs a course with the fallback
@@ -1262,13 +1370,38 @@ fn live_until(app: &mut App, clock_of: Entity, until: f64) {
 /// stops, alarms, the hunt, the fall and flight read frame by frame as an animator reads
 /// them. The PNGs are `animal_motion_<strip>.png`.
 #[test]
+#[ignore = "full-size pictures: run with --ignored"]
 fn wildlife_motion_strips() {
+    // `NPC_STRIPS=deer-walk,rabbit-hop` shoots only those.
+    let only = std::env::var("NPC_STRIPS").ok();
+    let names: Option<Vec<&str>> = only.as_deref().map(|o| o.split(',').collect());
+    motion_strips(names.as_deref(), (SW, SH));
+}
+
+/// A few motion strips rendered small (gaits, the hunt, a charge, a flinch, a hop and
+/// flight): every frame shows its animal.
+#[test]
+fn a_few_motion_strips_show_their_animals() {
+    motion_strips(
+        Some(&[
+            "deer-gallop",
+            "wolf-hunt",
+            "boar-charge",
+            "deer-hurt",
+            "rabbit-run",
+            "starling-flight",
+        ]),
+        (SW / 2, SH / 2),
+    );
+}
+
+/// Shoot the strips named in `only` (all of them if `None`), `size` pixels each.
+fn motion_strips(only: Option<&[&str]>, size: (u32, u32)) {
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
         let mut w = app.world.resource_mut::<Window>();
-        w.width = SW;
-        w.height = SH;
+        (w.width, w.height) = size;
     }
     app.world
         .resource_mut::<Time>()
@@ -1411,6 +1544,18 @@ fn wildlife_motion_strips() {
             [0.9, 1.04, 1.08, 1.14, 1.22, 1.34, 1.5, 1.8],
         ),
         strip(
+            "deer-hurt-far",
+            Species::Deer,
+            deer_hurt_far,
+            [0.9, 1.04, 1.08, 1.14, 1.22, 1.34, 1.5, 1.8],
+        ),
+        stag(strip(
+            "boar-search",
+            Species::Boar,
+            boar_search,
+            [0.9, 1.1, 1.5, 1.9, 2.3, 2.7, 3.1, 3.5],
+        )),
+        strip(
             "wolf-hurt",
             Species::Wolf,
             wolf_hurt,
@@ -1427,16 +1572,15 @@ fn wildlife_motion_strips() {
         s.young = s.name.starts_with("piglet");
         s
     });
-    // `NPC_STRIPS=deer-walk,rabbit-hop` shoots only those.
-    let only = std::env::var("NPC_STRIPS").ok();
     let strips: Vec<Strip> = strips
         .into_iter()
-        .filter(|s| {
-            only.as_ref()
-                .is_none_or(|o| o.split(',').any(|n| n == s.name))
-        })
+        .filter(|s| only.is_none_or(|o| o.contains(&s.name)))
         .collect();
-    assert!(!strips.is_empty(), "NPC_STRIPS names no strip");
+    assert_eq!(
+        strips.len(),
+        only.map_or(strips.len(), <[&str]>::len),
+        "no strip named in {only:?}"
+    );
     // The ground, out past the last row of strips (each row 100 m on from the last).
     app.world.spawn((
         Transform::default(),
@@ -1469,7 +1613,7 @@ fn wildlife_motion_strips() {
         .iter()
         .map(|s| grid(s.times[FRAMES - 1]))
         .fold(0.0, f64::max);
-    live_until(&mut app, probes[0], end + 0.05);
+    live_until(&mut app, probes[0], end + 0.05, size == (SW, SH));
     let went: Vec<[DVec3; FRAMES]> = strips
         .iter()
         .zip(&probes)
@@ -1562,10 +1706,10 @@ fn wildlife_motion_strips() {
     let mut order: Vec<usize> = (0..strips.len()).collect();
     order.sort_by(|&a, &b| shoot_at[a].total_cmp(&shoot_at[b]));
     for k in order {
-        live_until(&mut app, clock, shoot_at[k]);
+        live_until(&mut app, clock, shoot_at[k], size == (SW, SH));
         let (eye, target, fov) = views[k];
         let cam = camera(&mut app, eye, target, fov);
-        let name = format!("animal_motion_{}.png", strips[k].name);
+        let name = format!("{}animal_motion_{}.png", tag(size), strips[k].name);
         let img = shoot(&mut app, cam, &dir, &name).expect("rendering");
         app.world.despawn(cam);
         let mut cams = app.world.query::<(Entity, &mut Camera)>();
@@ -1586,6 +1730,7 @@ fn wildlife_motion_strips() {
                     n += usize::from(d > 30);
                 }
             }
+            // As many in a small strip as in a full-size one (only harder to pass).
             assert!(
                 n > 60,
                 "{name} frame {i}: the animal should show up ({n} px)"
