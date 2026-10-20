@@ -68,6 +68,9 @@ const TOWER: [f64; 3] = [18.0, 0.0, 9.0];
 const GATE: [f64; 3] = [-22.0, 0.0, 7.0];
 const CLIFF: [f64; 3] = [-4.0, 0.0, 16.0];
 const ARCH: [f64; 3] = [-36.0, 0.0, 16.0];
+/// The gate and arch charges are cutting charges: a hot flash, short of lighting the grass
+/// round them (engine_fire's grass catches at 300 °C).
+const CUT_CHARGE_HEAT_C: f32 = 280.0;
 /// The breach house's floor middle (north of the tower, in the sun); its open front looks +Z.
 pub const HOUSE: [f64; 3] = [15.0, 0.0, 22.0];
 /// House-local: top of the walls and joists (the roof deck lies on them) and the deck boards.
@@ -757,7 +760,8 @@ fn piece(
     e.id()
 }
 
-/// A two-storey wooden watchtower with a cantilevered balcony (Valheim build-mode colors).
+/// A two-storey wooden watchtower with knee braces, a board deck, a railed cantilevered
+/// balcony and a shingled roof (Valheim build-mode colors).
 fn spawn_tower(commands: &mut Commands, o: DVec3) -> (Vec<Entity>, Vec<Entity>) {
     let base = o + DVec3::from_array(TOWER);
     let wood = mat(0x7a5634, 0.85);
@@ -813,25 +817,90 @@ fn spawn_tower(commands: &mut Commands, o: DVec3) -> (Vec<Entity>, Vec<Entity>) 
             ));
         }
     }
-    // Floor and a balcony sticking out over the range (−Z).
-    for (x, z) in [
+    // Knee braces from each post up to the beams it carries, on all four faces.
+    let quarter = std::f32::consts::FRAC_PI_4;
+    let brace = Vec3::new(0.12, 1.0, 0.12);
+    for s in [-1.6, 1.6] {
+        for (along, lean) in [(1.25, quarter), (-1.25, -quarter)] {
+            all.push(piece(
+                commands,
+                "Knee brace",
+                p(along, 2.65, s),
+                Quat::from_rotation_z(lean),
+                brace,
+                w,
+                wood,
+                true,
+            ));
+            all.push(piece(
+                commands,
+                "Knee brace",
+                p(s, 2.65, along),
+                Quat::from_rotation_x(-lean),
+                brace,
+                w,
+                wood,
+                true,
+            ));
+        }
+    }
+    // Board decking (battens underneath) and a balcony sticking out over the range (−Z).
+    let deck = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+    for (k, (x, z)) in [
         (-0.9, -0.9),
         (0.9, -0.9),
         (-0.9, 0.9),
         (0.9, 0.9),
         (-0.9, -2.7),
         (0.9, -2.7),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let size = Vec3::new(1.8, 1.8, 0.12);
+        let e = piece(commands, "Floor", p(x, 3.26, z), deck, size, w, wood, true);
+        commands.entity(e).insert(PropModel::new(
+            PropKind::BoardWall {
+                size: size.to_array(),
+            },
+            20 + k as u64,
+        ));
+        all.push(e);
+    }
+    // Hand and mid rails round the lookout and the balcony, on two balcony stanchions.
+    for x in [-1.75, 1.75] {
         all.push(piece(
             commands,
-            "Floor",
-            p(x, 3.26, z),
+            "Stanchion",
+            p(x, 3.85, -3.5),
             Quat::IDENTITY,
-            Vec3::new(1.8, 0.12, 1.8),
+            Vec3::new(0.1, 1.05, 0.1),
             w,
             wood,
             true,
         ));
+    }
+    for y in [3.85, 4.35] {
+        let rails = [
+            (p(0.0, y, 1.6), Vec3::new(3.2, 0.1, 0.07)),
+            (p(-1.6, y, 0.0), Vec3::new(0.07, 0.1, 3.2)),
+            (p(1.6, y, 0.0), Vec3::new(0.07, 0.1, 3.2)),
+            (p(0.0, y, -3.5), Vec3::new(3.4, 0.1, 0.07)),
+            (p(-1.75, y, -2.6), Vec3::new(0.07, 0.1, 1.75)),
+            (p(1.75, y, -2.6), Vec3::new(0.07, 0.1, 1.75)),
+        ];
+        for (at, size) in rails {
+            all.push(piece(
+                commands,
+                "Rail",
+                at,
+                Quat::IDENTITY,
+                size,
+                w,
+                wood,
+                true,
+            ));
+        }
     }
     // Roof: two shingled panels on the upper beams (each panel's X runs down its slope).
     for s in [-1.0f32, 1.0] {
@@ -1512,7 +1581,7 @@ fn run_step(world: &mut World, demo: &mut DestructionDemo, step: Step) {
                     radius: 6.0,
                     strength: 60.0,
                     energy_j: 2.5e6,
-                    heat_c: 400.0,
+                    heat_c: CUT_CHARGE_HEAT_C,
                     source: None,
                 },
             );
@@ -1529,7 +1598,7 @@ fn run_step(world: &mut World, demo: &mut DestructionDemo, step: Step) {
                         radius: 8.0,
                         strength: 80.0,
                         energy_j: 6.0e6,
-                        heat_c: 400.0,
+                        heat_c: CUT_CHARGE_HEAT_C,
                         source: None,
                     },
                 );
