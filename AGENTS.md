@@ -15,10 +15,19 @@ cargo run -p hello                    # windowed
 cargo run -p hello -- --headless --frames 4   # offscreen, writes screenshots/hello.png
 ```
 
-Before every push, run `cargo fmt --all`, the clippy line above, and the tests of each crate
-you changed and of every crate that uses what you changed (shared shaders, contracts and
-assets reach other modules; `cargo test --workspace` covers all). CI runs all of it on every
-pull request, and each failed run emails the repository owner.
+Before every push, run `scripts/quick-check`. It checks formatting across the workspace, lints
+the crates your change touches (the whole workspace when a core crate, `engine_world` or the
+Cargo files change) and runs their unit tests (`--lib`), in a few minutes. `scripts/quick-check
+--full` also runs their integration and render tests; use it when you change shared shaders,
+contracts or assets that reach other modules.
+
+While the engine is in active development (Tobias, 2026-10-20), work lands by pushing straight
+to `main` after the quick check: `git fetch origin main && git rebase origin/main`, then
+`scripts/quick-check`, then `git push origin HEAD:main` (fetch and rebase again if the push is
+refused because main moved). CI runs every test on each push to `main` and each failed run
+emails the repository owner, so whoever's push turned main red fixes it forward right away,
+before anything else. Core crates and `engine_world` contracts still change through the lead
+(ARCHITECTURE.md).
 
 Headless GPU tests and screenshots need a GPU or a software Vulkan driver. On Debian/Ubuntu
 containers: `apt-get install -y mesa-vulkan-drivers` (lavapipe). Tests that need a GPU must
