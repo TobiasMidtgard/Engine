@@ -14,6 +14,10 @@ use engine_world::ForestSample;
 use crate::chunk::{Sample, patches, variety};
 use crate::ground::GroundTerrain;
 
+/// Smallest relief (m) a forest lookup reads: woods stand on the lay of the land, so slopes
+/// are measured over this distance (not a boulder's flank).
+const DETAIL_M: f64 = 4.0;
+
 /// Dave Hoskins' hash without sine (`lib_types.wgsl`).
 fn hash13(p: [f32; 3]) -> f32 {
     let mut p3 = p.map(|v| fract(v * 0.1031));
@@ -83,12 +87,13 @@ fn tiling_pos(p: DVec3) -> [f32; 3] {
 }
 
 /// Woods from a terrain sample at full detail: canopy cover and needle share, both 0..1.
-/// `slope` is 1 − cos of the ground's slope angle, `tp` the tiling position.
+/// `slope` gives 1 − cos of the ground's slope angle (asked only where woods might grow: it
+/// costs two more terrain samples), `tp` is the tiling position.
 pub(crate) fn woods(
     s: &Sample,
     variety: f32,
     patches: f32,
-    slope: f32,
+    slope: impl FnOnce() -> f32,
     rock_slope: f32,
     tp: [f32; 3],
 ) -> ForestSample {
@@ -116,8 +121,29 @@ pub(crate) fn woods(
         * (1.0 - smoothstep(1800.0, 2600.0, altitude));
     let veg = smoothstep(-8.0, 6.0, temp_c);
     let mut density = woodland.max(gallery).min(veg);
+    let desert = (1.0 - smoothstep(0.08, 0.22, moisture + (variety - 0.5) * 0.1))
+        * smoothstep(12.0, 22.0, temp_c);
+    // Painted ground (paths, fields, yards) clears the woods; snow and mud lie on top.
+    if s.paint.0 >= 3 {
+        density *= 1.0 - saturate(s.paint.1);
+    }
+    // Rivers and lakes.
+    density *= 1.0 - smoothstep(0.3, 0.6, s.water);
+    // Needle trees in the cold: up mountains and toward the poles, mixed woods in between.
+    let conifer = smoothstep(
+        11.0,
+        3.0,
+        temp_c + (variety - 0.5) * 5.0 + (macro_v - 0.5) * 3.0 + (moisture - 0.5) * 2.0,
+    );
+    if density * (1.0 - desert) <= 0.0 {
+        return ForestSample {
+            density: 0.0,
+            conifer,
+        };
+    }
 
     // No woods on beaches, in deserts, on scree or on rock.
+    let slope = slope();
     let nu = (1.0 - slope).max(0.05);
     let shore_tan = (1.0 - nu * nu).max(0.0).sqrt() / nu;
     let beach_w = mix(40.0, 160.0, saturate((meadow_v - 0.35) * 2.5));
@@ -125,8 +151,6 @@ pub(crate) fn woods(
     let beach_h = altitude + (mid_v - 0.5) * 0.5 * beach_top;
     let beach = (1.0 - smoothstep(beach_top * 0.55, beach_top * 1.15, beach_h))
         * if altitude >= -1.0 { 1.0 } else { 0.0 };
-    let desert = (1.0 - smoothstep(0.08, 0.22, moisture + (variety - 0.5) * 0.1))
-        * smoothstep(12.0, 22.0, temp_c);
     density *= 1.0 - saturate(beach + desert);
     let veg_hold =
         0.03 + 0.06 * (1.0 - smoothstep(1400.0, 2600.0, altitude + (variety - 0.5) * 600.0));
@@ -137,19 +161,6 @@ pub(crate) fn woods(
     let scree = (1.0 - rock)
         * saturate(smoothstep(rock_slope - 0.14, rock_slope - 0.04, slope) * 0.7 + alpine * 0.6);
     density *= (1.0 - scree) * (1.0 - rock);
-    // Painted ground (paths, fields, yards) clears the woods; snow and mud lie on top.
-    if s.paint.0 >= 3 {
-        density *= 1.0 - saturate(s.paint.1);
-    }
-    // Rivers and lakes.
-    density *= 1.0 - smoothstep(0.3, 0.6, s.water);
-
-    // Needle trees in the cold: up mountains and toward the poles, mixed woods in between.
-    let conifer = smoothstep(
-        11.0,
-        3.0,
-        temp_c + (variety - 0.5) * 5.0 + (macro_v - 0.5) * 3.0 + (moisture - 0.5) * 2.0,
-    );
     ForestSample {
         density: saturate(density),
         conifer,
@@ -165,13 +176,16 @@ impl GroundTerrain {
         }
         let local = self.rotation.inverse() * (p - self.position);
         let (dir, up, base) = self.source.map.locate(local)?;
-        let s = self.source.sample(base, up, dir, 0.0);
+        let s = self.source.sample(base, up, dir, DETAIL_M);
         if self.source.shape.ocean && s.height < 0.0 {
             return None;
         }
         let point_local = base + up * s.height;
-        let n = self.local_normal(base, up, point_local);
-        let slope = (1.0 - n.dot(up)) as f32;
+        let slope = || {
+            (1.0 - self
+                .local_normal(base, up, point_local, DETAIL_M, DETAIL_M)
+                .dot(up)) as f32
+        };
         let spacing = 1.0;
         let w = woods(
             &s,
@@ -257,25 +271,25 @@ mod tests {
     #[test]
     fn woods_grow_where_it_is_moist_and_mild_and_give_way_to_cold_heights_and_cliffs() {
         let tp = [100.0, 0.0, 200.0];
-        let wet = woods(&sample(0.9, 10.0, 300.0), 0.6, 0.2, 0.0, 0.3, tp);
+        let wet = woods(&sample(0.9, 10.0, 300.0), 0.6, 0.2, || 0.0, 0.3, tp);
         assert!(wet.density > 0.9, "{wet:?}");
-        let dry = woods(&sample(0.1, 20.0, 300.0), 0.4, 0.8, 0.0, 0.3, tp);
+        let dry = woods(&sample(0.1, 20.0, 300.0), 0.4, 0.8, || 0.0, 0.3, tp);
         assert_eq!(dry.density, 0.0);
-        let high = woods(&sample(0.9, 2.0, 3200.0), 0.6, 0.2, 0.0, 0.3, tp);
+        let high = woods(&sample(0.9, 2.0, 3200.0), 0.6, 0.2, || 0.0, 0.3, tp);
         assert_eq!(high.density, 0.0);
-        let cliff = woods(&sample(0.9, 10.0, 300.0), 0.6, 0.2, 0.9, 0.3, tp);
+        let cliff = woods(&sample(0.9, 10.0, 300.0), 0.6, 0.2, || 0.9, 0.3, tp);
         assert_eq!(cliff.density, 0.0);
-        let beach = woods(&sample(0.9, 10.0, 0.2), 0.6, 0.2, 0.0, 0.3, tp);
+        let beach = woods(&sample(0.9, 10.0, 0.2), 0.6, 0.2, || 0.0, 0.3, tp);
         assert_eq!(beach.density, 0.0);
         let mut road = sample(0.9, 10.0, 300.0);
         road.paint = (9, 1.0);
-        assert_eq!(woods(&road, 0.6, 0.2, 0.0, 0.3, tp).density, 0.0);
+        assert_eq!(woods(&road, 0.6, 0.2, || 0.0, 0.3, tp).density, 0.0);
         let mut banks = sample(0.2, 14.0, 300.0);
         banks.banks = 0.9;
-        assert!(woods(&banks, 0.4, 0.8, 0.0, 0.3, tp).density > 0.8);
+        assert!(woods(&banks, 0.4, 0.8, || 0.0, 0.3, tp).density > 0.8);
         // Needles in the cold, leaves in the warm.
-        let cold = woods(&sample(0.9, 1.0, 1500.0), 0.5, 0.2, 0.0, 0.3, tp);
-        let warm = woods(&sample(0.9, 16.0, 100.0), 0.5, 0.2, 0.0, 0.3, tp);
+        let cold = woods(&sample(0.9, 1.0, 1500.0), 0.5, 0.2, || 0.0, 0.3, tp);
+        let warm = woods(&sample(0.9, 16.0, 100.0), 0.5, 0.2, || 0.0, 0.3, tp);
         assert!(
             cold.conifer > 0.9 && warm.conifer < 0.1,
             "{cold:?} {warm:?}"

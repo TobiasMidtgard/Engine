@@ -980,6 +980,29 @@ mod tests {
         assert!(wooded > 20 && open > 20, "wooded {wooded}, open {open}");
     }
 
+    /// Cost of a forest lookup (`cargo test --release -p engine_terrain forest_cover_cost --
+    /// --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn forest_cover_cost() {
+        let mut app = app_with_planet();
+        app.update_n(2);
+        let woods = app.world.resource::<engine_world::ForestCover>().clone();
+        let n = 20_000;
+        let t = std::time::Instant::now();
+        let mut wooded = 0;
+        for i in 0..n {
+            let p = DVec3::new(
+                (i % 200) as f64 * 25.0 - 2_500.0,
+                0.0,
+                (i / 200) as f64 * 25.0 - 2_500.0,
+            );
+            wooded += woods.sample(p).is_some() as u32;
+        }
+        let us = t.elapsed().as_secs_f64() * 1e6 / n as f64;
+        println!("forest lookup {us:.1} µs ({wooded} of {n} wooded)");
+    }
+
     #[test]
     fn overlay_ground_passes_through_its_points() {
         // Also with the planet turned under the level (north toward +Z).
