@@ -6,6 +6,7 @@ pub mod cube;
 pub mod deform;
 pub mod demo;
 pub mod edits;
+pub mod forest;
 pub mod ground;
 pub mod landforms;
 pub mod lod;
@@ -549,6 +550,7 @@ fn sync_terrains(
     q: Query<PlanetPlacement>,
     materials: Res<SurfaceMaterials>,
     mut ground: ResMut<engine_world::Ground>,
+    mut forest: ResMut<engine_world::ForestCover>,
     mut installed: Local<bool>,
 ) {
     let mut changed = false;
@@ -603,10 +605,13 @@ fn sync_terrains(
     if list.is_empty() {
         if *installed {
             *ground = engine_world::Ground::default();
+            *forest = engine_world::ForestCover::default();
             *installed = false;
         }
     } else {
-        *ground = engine_world::Ground(ground::provider(list, &materials));
+        let provider = ground::provider(list, &materials);
+        *forest = engine_world::ForestCover(provider.clone());
+        *ground = engine_world::Ground(provider);
         *installed = true;
     }
 }
@@ -620,12 +625,14 @@ struct PendingEdits(Vec<(TerrainEdit, u32)>);
 /// Frames an edit waits for a terrain before it is dropped.
 const EDIT_WAIT_FRAMES: u32 = 600;
 
+#[allow(clippy::too_many_arguments)]
 fn apply_edits(
     mut edits: MessageReader<TerrainEdit>,
     mut terrains: ResMut<Terrains>,
     materials: Res<SurfaceMaterials>,
     mut changed: MessageWriter<TerrainChanged>,
     mut ground: ResMut<engine_world::Ground>,
+    mut forest: ResMut<engine_world::ForestCover>,
     mut pending: Local<PendingEdits>,
     mut prints: ResMut<DeformationMap>,
 ) {
@@ -693,7 +700,9 @@ fn apply_edits(
             .map(TerrainRuntime::ground_terrain)
             .collect();
         if !list.is_empty() {
-            *ground = engine_world::Ground(ground::provider(list, &materials));
+            let provider = ground::provider(list, &materials);
+            *forest = engine_world::ForestCover(provider.clone());
+            *ground = engine_world::Ground(provider);
         }
     }
 }
@@ -941,6 +950,34 @@ mod tests {
         // Far from the pad the ground has relief.
         let far = g.sample(DVec3::new(9_000.0, 0.0, 12_000.0)).unwrap();
         assert!(far.height.is_finite());
+    }
+
+    #[test]
+    fn forest_cover_reports_woods_and_open_land() {
+        let mut app = app_with_planet();
+        app.update_n(2);
+        let woods = app.world.resource::<engine_world::ForestCover>().clone();
+        let (mut wooded, mut open) = (0, 0);
+        for i in 0..20 {
+            for j in 0..20 {
+                let p = DVec3::new(
+                    i as f64 * 2_000.0 - 20_000.0,
+                    0.0,
+                    j as f64 * 2_000.0 - 20_000.0,
+                );
+                match woods.sample(p) {
+                    Some(s) => {
+                        assert!(s.density > 0.0 && s.density <= 1.0, "{s:?}");
+                        assert!((0.0..=1.0).contains(&s.conifer), "{s:?}");
+                        if s.density > 0.5 {
+                            wooded += 1;
+                        }
+                    }
+                    None => open += 1,
+                }
+            }
+        }
+        assert!(wooded > 20 && open > 20, "wooded {wooded}, open {open}");
     }
 
     #[test]
