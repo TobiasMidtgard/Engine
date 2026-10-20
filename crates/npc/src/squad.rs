@@ -206,6 +206,7 @@ struct Member {
     skills: NpcSkills,
     ranged: bool,
     medic: bool,
+    pos: DVec3,
     target: Option<Entity>,
     /// Flanking: holding at a cover on the way, or at its flank spot.
     holding: bool,
@@ -233,6 +234,14 @@ pub(crate) struct Plans {
 const PLAN_LOGIC: f32 = 0.35;
 const PLAN_TEAMWORK: f32 = 0.3;
 
+/// An enemy this close to a downed squad mate (m, flat) keeps anyone from kneeling by it (see
+/// `brain::weigh_revive`): the squad's mates within `CLEAR_REACH` of the body drive it off.
+pub(crate) const CLEAR_RADIUS: f64 = 5.0;
+const CLEAR_REACH: f64 = 25.0;
+/// A melee squad mate screens any mate reviving someone with an enemy that fights hand to hand
+/// this close to it (m); the squad's medic always.
+const SCREEN_THREAT: f64 = 10.0;
+
 /// Share sightings and hand out roles (runs every `plan_secs`).
 pub(crate) fn plan_squads(
     mut q: Query<MemberItem>,
@@ -250,28 +259,29 @@ pub(crate) fn plan_squads(
     let mut members: Vec<Member> = Vec::new();
     // Sightings: (squad, spotter, enemy, faction, position, velocity).
     let mut sightings: Vec<(Squad, Entity, Entity, Faction, DVec3, Vec3, DVec3)> = Vec::new();
-    // Squads with a member kneeling over (or on its way to) a downed mate.
-    let mut reviving: Vec<Squad> = Vec::new();
-    // Squads whose medic goes to or kneels over a downed mate, and where it kneels.
-    let mut medics: Vec<(Squad, DVec3)> = Vec::new();
+    // Squad members going to or kneeling over a downed mate: squad, where it kneels, and
+    // whether it is the squad's medic.
+    let mut revivers: Vec<(Squad, DVec3, bool)> = Vec::new();
+    // Enemies a squad sees that can fight hand to hand (not only shoot): squad, where.
+    let mut strikers: Vec<(Squad, DVec3)> = Vec::new();
+    // Downed squad members: squad, where they lie.
+    let mut down: Vec<(Squad, DVec3)> = Vec::new();
     for (e, squad, _, t, skills, weapon, (clock, npc), vitals, brain, memory) in q.iter() {
         if vitals.downed {
+            down.push((*squad, t.translation));
             continue;
         }
         // (One handed to game code or stopped in time revives nobody.)
         let acting = npc.active && clock.dt > 0.0;
-        if brain.action == NpcAction::Revive && acting && !reviving.contains(squad) {
-            reviving.push(*squad);
-        }
         let medic = npc.role == NpcRole::Medic;
-        if medic && acting && brain.action == NpcAction::Revive {
+        if acting && brain.action == NpcAction::Revive {
             // (Its mates get there as it does.)
             let at = if brain.kneeling() {
                 t.translation
             } else {
                 brain.destination.unwrap_or(t.translation)
             };
-            medics.push((*squad, at));
+            revivers.push((*squad, at, medic));
         }
         members.push(Member {
             e,
@@ -279,6 +289,7 @@ pub(crate) fn plan_squads(
             skills: *skills,
             ranged: weapon.style == WeaponStyle::Ranged,
             medic,
+            pos: t.translation,
             target: brain.target,
             holding: brain.holding,
             in_position: brain.in_position,
@@ -294,6 +305,9 @@ pub(crate) fn plan_squads(
                     k.last_velocity,
                     t.translation,
                 ));
+                if !k.history.back().is_some_and(|o| o.shooter) {
+                    strikers.push((*squad, k.last_position));
+                }
             }
         }
     }
@@ -438,21 +452,56 @@ pub(crate) fn plan_squads(
     }
     plans.maneuvers = kept;
     // While a mate revives someone, the other shooters cover it: they hold where they are and
-    // keep the enemy's heads down (fire at where it was last seen), instead of flanking.
-    // A medic going to kneel or kneeling most of all: the shooters fire at whoever can see
-    // its spot, and the melee fighters go stand between it and the enemy.
+    // keep the enemy's heads down instead of flanking: the shooters fire at whoever can see
+    // the spot it kneels at (the medic's, if it is one of them). A medic's they guard most of
+    // all: the melee fighters go stand between it and the enemy too.
     let mut guards: HashMap<Entity, DVec3> = HashMap::new();
     for m in &members {
         if m.skills.teamwork < 0.3 {
             continue;
         }
-        if m.ranged && reviving.contains(&m.squad) {
-            roles.insert(m.e, "cover");
-        }
-        if let Some(&(_, at)) = medics.iter().find(|(sq, _)| *sq == m.squad) {
-            if !m.ranged {
-                roles.insert(m.e, "screen");
+        let spot = revivers
+            .iter()
+            .filter(|r| r.0 == m.squad)
+            .max_by_key(|r| r.2)
+            .copied();
+        match spot {
+            Some((_, at, _)) if m.ranged => {
+                roles.insert(m.e, "cover");
+                guards.insert(m.e, at);
             }
+            // (Any reviver's, with an enemy about that could close in on it hand to hand.)
+            Some((_, at, medic))
+                if medic
+                    || strikers
+                        .iter()
+                        .any(|s| s.0 == m.squad && s.1.distance(at) < SCREEN_THREAT) =>
+            {
+                roles.insert(m.e, "screen");
+                guards.insert(m.e, at);
+            }
+            _ => {}
+        }
+    }
+    // A downed mate with an enemy standing over it: nobody can kneel by it, so the squad
+    // drives that enemy off first, each taking on whoever is nearest the body (the medic
+    // waits to go in).
+    for m in &members {
+        if m.skills.teamwork < 0.3 || m.medic || guards.contains_key(&m.e) {
+            continue;
+        }
+        let flat = |a: DVec3, b: DVec3| DVec2::new(a.x - b.x, a.z - b.z).length();
+        let body = down
+            .iter()
+            .filter(|(sq, at)| *sq == m.squad && flat(*at, m.pos) < CLEAR_REACH)
+            .filter(|(sq, at)| {
+                sightings
+                    .iter()
+                    .any(|s| s.0 == *sq && flat(s.4, *at) < CLEAR_RADIUS)
+            })
+            .min_by(|a, b| flat(a.1, m.pos).total_cmp(&flat(b.1, m.pos)));
+        if let Some(&(_, at)) = body {
+            roles.insert(m.e, "clear");
             guards.insert(m.e, at);
         }
     }

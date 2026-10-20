@@ -13,7 +13,7 @@ use engine_world::{
     DamageEvent, FocusPoints, Ground, NoiseEvent, Obscurance, ProjectileTrace, WeatherState,
 };
 
-use crate::agent::{NpcClock, NpcCombat, NpcMotor, NpcSettings, NpcVitals};
+use crate::agent::{NpcClock, NpcCombat, NpcMotor, NpcSettings, NpcVitals, NpcWeapon, WeaponStyle};
 use crate::faction::{Faction, Factions};
 use crate::skills::{NpcSkills, Perception};
 use crate::world_model::{OPAQUE_SMOKE, Sight, TacticalWorld, physics_backend};
@@ -36,6 +36,8 @@ pub struct Snapshot {
     pub stamina: f32,
     /// Changing magazines or reloading (its `AnimationParams` `reloading` above 0.5).
     pub reloading: bool,
+    /// It fights only at range (an NPC with a gun or bow): nothing to fear within its reach.
+    pub shooter: bool,
 }
 
 /// A mistake an enemy is caught in, for as long as it lasts: a window to punish.
@@ -219,6 +221,8 @@ pub struct Perceivable {
     pub vulnerable: bool,
     pub stamina: f32,
     pub reloading: bool,
+    /// An NPC with a ranged weapon (see [`Snapshot::shooter`]).
+    pub shooter: bool,
 }
 
 /// Everything with a [`Faction`] this tick, with a spatial hash (rebuilt every tick).
@@ -283,6 +287,7 @@ type PerceivableItem<'a> = (
     Option<&'a NpcCombat>,
     Option<&'a NpcClock>,
     Option<&'a AnimationParams>,
+    Option<&'a NpcWeapon>,
 );
 
 pub(crate) fn tick_clocks(time: Res<Time>, mut q: Query<(&mut NpcClock, Option<&LocalTimeScale>)>) {
@@ -301,7 +306,7 @@ pub(crate) fn collect_perceivables(mut out: ResMut<Perceivables>, q: Query<Perce
     for v in out.hash.values_mut() {
         v.clear();
     }
-    for (e, faction, t, loco, cc, motor, body, vitals, combat, clock, params) in &q {
+    for (e, faction, t, loco, cc, motor, body, vitals, combat, clock, params, weapon) in &q {
         if vitals.is_some_and(|v| v.downed) {
             continue;
         }
@@ -328,6 +333,7 @@ pub(crate) fn collect_perceivables(mut out: ResMut<Perceivables>, q: Query<Perce
             vulnerable: loco.vulnerable || combat.is_some_and(|c| c.is_vulnerable(now)),
             stamina: loco.stamina,
             reloading: params.is_some_and(|p| p.get("reloading") > 0.5),
+            shooter: weapon.is_some_and(|w| w.style == WeaponStyle::Ranged),
         });
         out.index.insert(e, i);
         let key = (
@@ -572,6 +578,7 @@ pub(crate) fn perceive(
                 vulnerable: other.vulnerable,
                 stamina: other.stamina,
                 reloading: other.reloading,
+                shooter: other.shooter,
             });
             while k.history.len() > 24 || k.history.front().is_some_and(|s| now - s.time > 2.0) {
                 k.history.pop_front();
@@ -620,6 +627,7 @@ mod tests {
             vulnerable: false,
             stamina: 1.0,
             reloading: false,
+            shooter: false,
         };
         f(&mut s);
         s

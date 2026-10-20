@@ -31,10 +31,10 @@ use crate::features::ExplosiveProp;
 use crate::grenade;
 use crate::learning::OpponentModels;
 use crate::nav::{NavAgent, NavGrid, PathStatus};
-use crate::perception::{Known, NpcMemory, Opening, Perceivables, Snapshot};
+use crate::perception::{Known, NpcMemory, Opening, Perceivables, Snapshot, segment_distance};
 use crate::skills::NpcSkills;
 use crate::smoke::SmokeClouds;
-use crate::squad::{AttackTokens, ReviveClaims, SquadSettings};
+use crate::squad::{AttackTokens, CLEAR_RADIUS, ReviveClaims, SquadSettings};
 use crate::tactics::{PositionQuery, PositionWeights, TacticsCtx, choose_position};
 use crate::world_model::{Sight, TacticalWorld, physics_backend};
 
@@ -92,6 +92,8 @@ struct Claim {
     target: Option<Entity>,
     /// Going round with the squad: where to (its flank spot, else its next stop).
     flank: Option<DVec3>,
+    /// On its way to or kneeling over a downed mate.
+    reviving: bool,
 }
 
 /// A downed NPC of a squad, as its squad mates see it.
@@ -161,6 +163,7 @@ pub(crate) fn think_and_act(
                         .or(brain.destination)
                         .unwrap_or(t.translation)
                 }),
+                reviving: brain.action == NpcAction::Revive,
             });
         } else if let Some(&squad) = squad {
             let f = t.forward();
@@ -418,9 +421,13 @@ fn think(
         } else {
             0.6 + 0.3 * skills.aggression
         };
-        if matches!(brain.role, "cover" | "screen") {
-            // A mate is reviving someone: hold here and keep the enemy busy (or stand between
-            // the medic and the enemy).
+        // A mate is reviving someone: hold here and keep the enemy busy (or stand between the
+        // reviver and the enemy); or an enemy stands over a downed mate: drive it off. (Not
+        // the one whose turn it is to revive: it goes.)
+        let my_revive = fallen
+            .iter()
+            .any(|f| revives.reviver(f.e, world_now) == Some(me));
+        if matches!(brain.role, "cover" | "screen" | "clear") && !my_revive {
             engage += 0.1 + 0.15 * skills.teamwork;
         }
         add(NpcAction::Engage, engage);
@@ -820,7 +827,9 @@ fn weigh_revive(
             k.last_position.distance(pos),
             k.last_position.distance(chest),
         );
-        if ago < 1.5 && (to_me < strike_me || to_ally < strike_ally) {
+        // (A shooter that close is a matter of what it sees, below, not of its reach.)
+        let shooter = k.history.back().is_some_and(|o| o.shooter);
+        if ago < 1.5 && !shooter && (to_me < strike_me || to_ally < strike_ally) {
             melee_close = true;
         }
         if k.awareness < 0.8 {
@@ -911,9 +920,10 @@ fn revive_range(settings: &NpcSettings, medic: bool) -> f32 {
     settings.ally_revive_range * if medic { 1.5 } else { 1.0 }
 }
 
-/// The enemy that most threatens the squad's medic kneeling at `at`, for a mate covering it
-/// (`"cover"`: of those seen a moment ago, the one with the clearest view of it, nearer
-/// counting more) or screening it (`"screen"`: the nearest to it).
+/// The enemy that most threatens a squad mate kneeling (or about to) at `at`, for a mate
+/// covering it (`"cover"`: of those seen a moment ago, the one with the clearest view of it,
+/// nearer counting more) or screening it (`"screen"`: the nearest to it); or, for one driving
+/// an enemy off a downed mate lying at `at` (`"clear"`), the nearest within reach of it.
 fn guard_threat(
     me: Entity,
     role: &str,
@@ -925,6 +935,13 @@ fn guard_threat(
     let fresh = |k: &&Known| k.awareness >= 0.8 && now - k.last_seen < 2.0;
     let flat = |p: DVec3| DVec2::new(p.x - at.x, p.z - at.z).length();
     match role {
+        "clear" => memory
+            .known
+            .iter()
+            .filter(fresh)
+            .filter(|k| flat(k.last_position) < CLEAR_RADIUS + 1.0)
+            .min_by(|a, b| flat(a.last_position).total_cmp(&flat(b.last_position)))
+            .cloned(),
         "screen" => memory
             .known
             .iter()
@@ -1738,8 +1755,8 @@ fn drive(
             }
         }
         NpcAction::Engage if weapon.style == WeaponStyle::Melee => {
-            // Screening the squad's kneeling medic: it stands between the medic and the enemy,
-            // and takes on only one that comes close to the medic.
+            // Screening a kneeling mate (the squad's medic most of all): it stands between it
+            // and the enemy, and takes on only one that comes close to it.
             let screen = brain
                 .guard
                 .filter(|_| brain.role == "screen")
@@ -1883,6 +1900,7 @@ fn drive(
                         brain,
                         combat,
                         w,
+                        &s.claims,
                         &mut out,
                     );
                 }
@@ -1944,6 +1962,7 @@ fn drive(
                         brain,
                         combat,
                         w,
+                        &s.claims,
                         &mut out,
                     );
                 }
@@ -2197,6 +2216,9 @@ fn melee(
     let _ = fwd;
 }
 
+/// How close to its line of fire a fighter lets a mate reviving someone be (m).
+const REVIVER_CLEARANCE: f64 = 1.2;
+
 /// Shoot at the enemy when there's a shot (or suppress its last position for the squad).
 #[allow(clippy::too_many_arguments)]
 fn ranged_fire(
@@ -2211,6 +2233,7 @@ fn ranged_fire(
     brain: &mut NpcBrain,
     combat: &mut NpcCombat,
     w: &mut BrainWorld,
+    claims: &[Claim],
     out: &mut MoveIntent,
 ) {
     if !ready || weapon.style != WeaponStyle::Ranged {
@@ -2234,6 +2257,21 @@ fn ranged_fire(
     } else {
         return;
     };
+    // It doesn't fire past a mate reviving someone (if it has any teamwork): a stray shot
+    // would make it let go.
+    if skills.teamwork >= 0.3 {
+        let muzzle = pos + DVec3::Y * 1.4;
+        let mine = claims.iter().find(|c| c.e == me).map(|c| c.faction);
+        let in_line = claims.iter().any(|c| {
+            c.reviving
+                && c.e != me
+                && Some(c.faction) == mine
+                && segment_distance(c.pos + DVec3::Y * 0.8, muzzle, aim) < REVIVER_CLEARANCE
+        });
+        if in_line {
+            return;
+        }
+    }
     if k.visible && k.opening(now, skills.reaction_time).is_some() {
         combat.stats.punishes += 1;
     }

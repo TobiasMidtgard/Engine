@@ -398,7 +398,13 @@ A squad mate can revive a downed fighter where it lies. Each mate weighs the run
 is, how much the spot is in the enemy's view, how much fire the mate is under, its own health,
 and whether the squad is winning. Sight lines go through smoke, so smoke over the spot helps.
 An enemy that looks elsewhere, or that a mate is shooting at, counts for less. Only the best
-placed mate of the squad goes. Ranged mates with some teamwork cover it with suppressive fire.
+placed mate of the squad goes. Ranged mates with some teamwork cover it with suppressive fire
+at whoever has the best view of the spot it kneels at (`role` "cover"; `NpcBrain::guard`
+holds the spot), and hold their fire rather than shoot past it (a stray round would make it
+let go). An enemy that fights hand to hand within striking distance of the reviver or the
+downed mate keeps anyone from going; an enemy that only shoots counts by what it can see, like
+any other. With an enemy standing within 5 m of a downed mate, the squad's other mates within
+25 m of it (not the medic) first drive that enemy off (`role` "clear").
 
 Skill changes the choice. A rookie notices late, then runs straight in. A skilled fighter waits
 while the spot is watched or it is under fire, and goes once things calm down. The reviver runs
@@ -425,11 +431,11 @@ mate twice as soon, goes half as far again (`ally_revive_range` × 1.5) and want
 far more, so it is usually the one that goes. While it is in range and not more than 6 m
 farther from the downed mate than they are, its mates hold off for the first 3 s, unless the
 medic is the one down. An enemy within striking distance of the downed mate holds the medic
-off like anyone else, however far away it still is. Once the medic goes, its mates cover it: ranged
-mates with some teamwork engage whoever has the best view of its spot (`role` "cover"), and
-melee mates stand 2 m off the spot on the side of the nearest enemy and take on whoever
-comes within 5 m of it (`role` "screen"; `NpcBrain::guard` holds the spot). A squad without
-a medic revives as before. A medic wears a bleached armband with a red cross over its left
+off like anyone else, however far away it still is. Once the medic goes, its mates cover it
+(the medic's spot before any other mate's), and melee mates stand 2 m off the spot on the side
+of the nearest enemy and take on whoever comes within 5 m of it (`role` "screen"). They screen
+any other reviver too, but only with an enemy that fights hand to hand within 10 m of its
+spot, so a squad without a medic otherwise revives as before. A medic wears a bleached armband with a red cross over its left
 brassard.
 
 A medic also carries smoke (`smoke::SmokeClouds`). When an enemy has a clear view of a
