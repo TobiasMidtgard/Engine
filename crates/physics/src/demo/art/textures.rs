@@ -1541,6 +1541,55 @@ pub fn raked_sand(res: u32) -> TextureSet {
     cv.finish(&[(2, 0.001, 0.3), (8, 0.003, 0.3)])
 }
 
+/// Freshly broken grey granite for crushed rock: interlocking crystals a few millimeters
+/// across (white feldspar, some of it pinkish, grey glassy quartz, black biotite flecks), a
+/// faint mottling, and pale rock dust settled in the low spots. `tile_m = 0.5` of the unscaled
+/// 1 m rock mesh (about 15 cm on a typical rock). Roughness 0.45 (quartz) .. 0.85 (dust).
+pub fn granite(res: u32) -> TextureSet {
+    const T: f32 = 0.5;
+    let n = res.max(16);
+    let low = Field::<3>::new(n / 4, |u, v| {
+        [
+            fbm(u, v, 3, 3, 4, 0.5, 1501),
+            fbm(u, v, 7, 7, 3, 0.5, 1502),
+            fbm(u, v, 2, 2, 3, 0.5, 1503),
+        ]
+    });
+    let cv = Canvas::new(n, T, |u, v| {
+        let l = low.at(u, v);
+        let fine = grain(u, v, n, 1505);
+        // Crystals: 36 cells per tile, the boundaries between them a hair lower.
+        let (edge, id) = voronoi_edge(u, v, 36, 0.85, 1504);
+        let kind = unit(hash(id));
+        let shade = unit(hash(id ^ 7));
+        let pink = sstep(0.1, 0.6, l[2]);
+        let (mut c, mut r) = if kind < 0.14 {
+            ([0.025, 0.024, 0.023], 0.5)
+        } else if kind < 0.45 {
+            ([0.17, 0.175, 0.18], 0.45)
+        } else {
+            (
+                mix3([0.42, 0.405, 0.38], [0.47, 0.36, 0.3], pink * 0.6),
+                0.75,
+            )
+        };
+        c = scale3(c, (0.85 + 0.3 * shade) * (1.0 + 0.08 * fine + 0.1 * l[0]));
+        let h = 0.0012 * l[0] + 0.0005 * l[1] + 0.00015 * fine
+            - 0.0004 * (1.0 - sstep(0.0, 0.08, edge));
+        // Dust in the hollows.
+        let dust = sstep(0.15, 0.45, -l[1] - 0.4 * l[0]);
+        c = mix3(c, [0.45, 0.43, 0.4], dust * 0.5);
+        r = lerp(r, 0.85, dust);
+        Px {
+            h,
+            c,
+            r,
+            ..Px::default()
+        }
+    });
+    cv.finish(&[(2, 0.0005, 0.25), (8, 0.0015, 0.3)])
+}
+
 /// Hot-dip galvanized steel for guardrails: the zinc coat's spangle (crystals about 14 mm
 /// across, each its own grey and sheen, with fine grain boundaries), dulled to a matte grey
 /// patina where it weathered, white rust (zinc oxide) blooms, and grime streaks running down

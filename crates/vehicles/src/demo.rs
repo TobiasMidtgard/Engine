@@ -717,6 +717,9 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
             let t = orbit_capture_secs(ORBIT_WARMUP as f64);
             let fall = 0.5 * mu / (radius + height).powi(2) * t * t;
             let orbit_from = orbit + DVec3::new(0.0, fall, 0.0);
+            let entry_height = 70_000.0;
+            let entry_fall = 0.5 * mu / (radius + entry_height).powi(2) * t * t;
+            let entry_from = center + DVec3::new(0.0, entry_height + entry_fall, 0.0);
             vec![
                 // Restart the hop so the shot lands in the hover: from the pad it lifts off
                 // after 5 s and hovers from about 9 s to 23 s; caught in the air, it hovers at once.
@@ -815,14 +818,81 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                     "vehicles.control",
                     serde_json::json!({"vehicle": "Orbiter", "assist": "Off"}),
                 ),
+                // Re-entry, 70 km up: nose 40° up and banked, the hull at the 1 390 K the
+                // return from orbit peaks at (test `returns_from_orbit_and_lands_on_the_pad`).
+                // Held still beside the camera, as in orbit: at 7 km/s it would be gone.
+                DemoView::new(
+                    "spaceport_reentry",
+                    "Spaceplane re-entering, hull glowing at 1 390 K",
+                    [-27.0, entry_height - 4.0, -20.0],
+                    [0.0, entry_height - 0.5, 0.0],
+                )
+                .at(18.0, ORBIT_WARMUP)
+                .call("entity.despawn", serde_json::json!({"name": "Orbiter"}))
+                .call(
+                    "vehicles.spawn",
+                    serde_json::json!({
+                        "preset": "spaceplane",
+                        "name": "Orbiter",
+                        "at": [entry_from.x, entry_from.y, entry_from.z],
+                        "on_ground": false,
+                        "gear": "up",
+                    }),
+                )
+                .call(
+                    "vehicles.place",
+                    serde_json::json!({
+                        "vehicle": "Orbiter",
+                        "at": [entry_from.x, entry_from.y, entry_from.z],
+                        "on_ground": false,
+                        "yaw_deg": 0.0,
+                        "pitch_deg": 40.0,
+                        "roll_deg": 45.0,
+                        "velocity": [0.0, 0.0, 0.0],
+                        "hull_temperature_k": 1_390.0,
+                    }),
+                )
+                .call(
+                    "vehicles.control",
+                    serde_json::json!({"vehicle": "Orbiter", "assist": "Off"}),
+                ),
+                // Home again: coming in from the west, belly first on its hover engines, the
+                // Return autopilot's landing burn sets the hopper down on the pad.
+                DemoView::new(
+                    "spaceport_landing",
+                    "Spaceplane braking on its hover engines to land on the pad",
+                    [-15.0, 98.0, 52.0],
+                    [-62.0, 74.0, 0.0],
+                )
+                .at(17.0, LANDING_WARMUP)
+                .call(
+                    "vehicles.place",
+                    serde_json::json!({
+                        "vehicle": "Hopper",
+                        "at": abs(-160.0, 110.0, 0.0),
+                        "on_ground": false,
+                        "yaw_deg": 90.0,
+                        "pitch_deg": 20.0,
+                        "velocity": [30.0, -4.0, 0.0],
+                    }),
+                )
+                .call(
+                    "vehicles.autopilot",
+                    serde_json::json!({
+                        "vehicle": "Hopper",
+                        "mode": {"Return": {"pad": abs(0.0, 0.4, 0.0)}},
+                    }),
+                ),
             ]
         }
         _ => Vec::new(),
     }
 }
 
-/// Warmup of the in-orbit shot (s).
+/// Warmup of the in-orbit and re-entry shots (s).
 const ORBIT_WARMUP: f32 = 0.5;
+/// Warmup of the landing shot (s): the landing burn is under way, braking over the apron.
+const LANDING_WARMUP: f32 = 3.0;
 
 /// Seconds from a tour stop's arrival calls to its shot: the showcase tour steps 0.05 s, runs
 /// the warmup and then nine more steps.

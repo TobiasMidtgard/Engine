@@ -305,6 +305,11 @@ pub enum Sprite {
     /// standing on the fuel (`local_space`, `steady`) so it burns continuously; `stretch` is its
     /// width over its height.
     Blaze,
+    /// A ball of burning gas, traced through as a volume: a lumpy body rolled into lobes that
+    /// glows from inside, near white deep in and reddening outward, and chars to dark soot from
+    /// the outside in over its life. Use with `facing: camera`, `lit` 1 (the soot catches the
+    /// sun), a dozen or so big particles expanding as they rise.
+    Fireball,
 }
 
 impl Sprite {
