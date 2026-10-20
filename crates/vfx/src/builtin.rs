@@ -753,22 +753,36 @@ fn spells() -> Vec<EffectDesc> {
                     additive: 1.0,
                     ..em("glints")
                 },
-                // A thin cold mist rolling out low along the ground.
+                // A thin cold mist rolling out low along the ground: many flat wisps lying just
+                // above it, overlapping into one sheet instead of separate round puffs.
                 EmitterDesc {
-                    bursts: once(16),
+                    bursts: once(36),
+                    offset: [0.0, 0.12, 0.0],
                     shape: EmitShape::Ring {
-                        radius: 0.3,
-                        thickness: 0.2,
+                        radius: 0.4,
+                        thickness: 0.3,
                     },
-                    speed: [1.8, 3.5],
+                    speed: [1.2, 3.0],
                     drag: 2.0,
-                    gravity: 0.02,
-                    turbulence: 0.3,
-                    lifetime: [1.4, 2.4],
-                    size: [0.5, 0.8],
-                    size_over_life: c(&[(0.0, 0.6), (1.0, 2.6)]),
-                    emissive: 60.0,
-                    ..smoke("mist", 0.75, 0.22)
+                    gravity: 0.0,
+                    turbulence: 0.2,
+                    wind: 0.3,
+                    lifetime: [1.2, 2.2],
+                    size: [0.6, 0.9],
+                    size_over_life: c(&[(0.0, 0.5), (1.0, 3.0)]),
+                    rotation_deg: [0.0, 360.0],
+                    facing: Facing::Horizontal,
+                    // Cold and pale whatever the light: bluish, a little self-lit, thin enough
+                    // to see the ground through.
+                    color: g(&[
+                        (0.0, [0.72, 0.84, 1.0, 0.0]),
+                        (0.1, [0.72, 0.84, 1.0, 0.2]),
+                        (1.0, [0.85, 0.92, 1.0, 0.0]),
+                    ]),
+                    lit: 0.7,
+                    emissive: 150.0,
+                    soft: 0.15,
+                    ..smoke("mist", 0.8, 0.2)
                 },
                 EmitterDesc {
                     bursts: once(1),
