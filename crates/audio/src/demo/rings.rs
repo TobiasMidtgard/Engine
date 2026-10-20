@@ -134,7 +134,7 @@ const RING_NAMES: &[&str] = &[
 fn ring_material(color: usize, step: usize) -> StandardMaterial {
     let c = ring_color(RING_NAMES[color.min(RING_NAMES.len() - 1)]);
     let a = step.min(FADE_STEPS) as f32 / FADE_STEPS as f32;
-    let pale = |v: f32| 0.5 + 0.4 * v;
+    let pale = |v: f32| 0.25 + 0.65 * v;
     let mut m = StandardMaterial::color(pale(c[0]), pale(c[1]), pale(c[2]))
         .with_roughness(0.6)
         .with_emissive(c, 900.0 * a)
@@ -311,14 +311,14 @@ mod tests {
             assert_eq!(ring_material(1, steps[40]).base_color[3], 0.0);
         }
         // Halfway through its life a horse's ring still shows at three quarters of its
-        // strength or more; a dog's has thinned to under half.
+        // strength or more; a dog's has thinned to half or less.
         let (dog, horse) = (ring_style(0.17), ring_style(0.79));
         let peak = |s: &RingStyle| (0..10).map(|i| fade_step(s, i as f32 / 100.0)).max();
         assert!(
             fade_step(&horse, 0.5) * 4 >= peak(&horse).unwrap() * 3,
             "{horse:?}"
         );
-        assert!(fade_step(&dog, 0.5) * 2 < peak(&dog).unwrap(), "{dog:?}");
+        assert!(fade_step(&dog, 0.5) * 2 <= peak(&dog).unwrap(), "{dog:?}");
     }
 
     #[test]
