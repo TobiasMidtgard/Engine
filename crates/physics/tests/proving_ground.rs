@@ -337,10 +337,10 @@ fn the_break_scatters_the_rack_into_the_pockets_and_the_balls_stop() {
     assert!(moved >= 12, "only {moved} of the 15 balls spread out");
 }
 
-/// The Galton board (`demo::galton`): the balls pour through the pins without jamming, all but
-/// a few (wedged against the glass, as on a real board) end in the bins and come to rest, and
-/// the bins hold a bell curve about the middle, spread about as wide as the curve printed
-/// behind them.
+/// The Galton board (`demo::galton`): the balls pour through the pins without jamming, all (one
+/// at most may jam, as on a real board; with contacts reused for 5 cm, four to ten hung on old
+/// contact planes) end in the bins and come to rest, and the bins hold a bell curve about the
+/// middle, spread about as wide as the curve printed behind them.
 #[test]
 fn the_galton_board_fills_its_bins_in_a_bell_curve() {
     use demo::galton;
@@ -368,7 +368,7 @@ fn the_galton_board_fills_its_bins_in_a_bell_curve() {
         }
     }
     assert!(
-        caught.len() <= galton::BALLS / 50,
+        caught.len() <= 1,
         "{} balls are caught on the pins: {caught:?}",
         caught.len()
     );
