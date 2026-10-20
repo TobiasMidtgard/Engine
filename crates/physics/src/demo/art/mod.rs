@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub(crate) mod barrel_run;
+pub(crate) mod catapult;
 pub(crate) mod dummy;
 pub(crate) mod galton;
 pub(crate) mod kit;
