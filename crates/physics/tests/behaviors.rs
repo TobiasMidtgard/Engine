@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
+use engine_core::registry::call_api;
 use engine_core::time::TimeSource;
 use engine_physics::{PhysicsPlugin, PhysicsSettings, PhysicsStats};
 use engine_world::physics::{
@@ -16,6 +17,7 @@ use engine_world::physics::{
 use engine_world::{
     Gravity, GroundContact, NoiseEvent, Water, WaterQuery, WaterSample, WorldImpulse, WorldPlugin,
 };
+use serde_json::json;
 
 const DT: f64 = 1.0 / 60.0;
 
@@ -1579,6 +1581,32 @@ fn blasts_throw_nearby_bodies_away() {
     let v = vel(&app, near);
     assert!(v.x > 1.0 && v.y > 0.0, "near box wasn't thrown: {v:?}");
     assert!(vel(&app, far).length() < 0.01, "far box moved");
+}
+
+#[test]
+fn scripted_explosions_are_heard_and_plain_shockwaves_are_not() {
+    let mut app = app();
+    let heard = |app: &mut App, args: serde_json::Value| {
+        call_api(&mut app.world, "physics.blast", args).unwrap();
+        let noise = app.world.resource::<Messages<NoiseEvent>>();
+        noise
+            .iter_current_update_messages()
+            .copied()
+            .collect::<Vec<_>>()
+    };
+    let bang = heard(
+        &mut app,
+        json!({ "center": [5, 1, 0], "radius": 8, "strength": 120, "energy_j": 250000 }),
+    );
+    assert_eq!(bang.len(), 1, "an explosion makes one noise: {bang:?}");
+    assert_eq!(bang[0].position, DVec3::new(5.0, 1.0, 0.0));
+    assert!((bang[0].radius - 150.0).abs() < 0.5, "{bang:?}");
+    app.update();
+    let gust = heard(
+        &mut app,
+        json!({ "center": [0, 1, 0], "radius": 8, "strength": 120 }),
+    );
+    assert!(gust.is_empty(), "a plain shockwave made noise: {gust:?}");
 }
 
 // ---------------------------------------------------------------- regions
