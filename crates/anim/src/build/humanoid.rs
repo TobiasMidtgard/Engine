@@ -1470,6 +1470,73 @@ fn block(s: &Skeleton) -> AnimationClip {
     .with_curve("brace", 2, |_| 1.0)
 }
 
+/// A boxer's guard, held loose: left foot forward, knees soft, the trunk turned to show the
+/// left shoulder, chin tucked, the lead fist out at chin height and the rear fist by the
+/// cheek, bouncing lightly on the balls of the feet with the hands working a little.
+fn guard(s: &Skeleton) -> AnimationClip {
+    AnimationClip::from_fn("guard", 1.6, 49, true, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let tau = std::f32::consts::TAU;
+        // Two bounces a loop, and a slow weave from side to side once.
+        let bounce = (ph * 2.0 * tau).sin();
+        let weave = (ph * tau).sin();
+        p.rot_move(
+            "hips",
+            Vec3::new(0.012 * weave, -0.045 + 0.008 * bounce, 0.0),
+            2.0,
+            -24.0,
+            0.0,
+        );
+        spine(
+            &mut p,
+            [-2.0, -3.0 + 0.8 * bounce, 2.0, -8.0],
+            [2.0, 3.0, 6.0, 8.0 + 2.0 * weave],
+            [-1.5 * weave, -2.0 * weave, 0.0, 1.5 * weave],
+        );
+        // Lead (left) fist out in front of the chin, rear (right) fist by the cheek.
+        arm(
+            &mut p,
+            0,
+            Arm {
+                flex: 50.0 + 3.0 * weave,
+                twist: 0.0,
+                abduct: -16.0,
+                elbow: 110.0 - 4.0 * weave,
+                wrist: -6.0,
+                protract: 8.0,
+                elevate: 7.0,
+            },
+        );
+        arm(
+            &mut p,
+            1,
+            Arm {
+                flex: 55.0 - 2.0 * weave,
+                twist: 10.0,
+                abduct: -28.0,
+                elbow: 145.0 + 3.0 * weave,
+                wrist: -8.0,
+                protract: 5.0,
+                elevate: 9.0,
+            },
+        );
+        // Stance: the lead leg ahead, the rear heel up off the ground.
+        leg(
+            &mut p,
+            0,
+            20.0,
+            4.0,
+            26.0 + 3.0 * bounce,
+            8.0 + 1.5 * bounce,
+            0.0,
+        );
+        leg(&mut p, 1, -6.0, 6.0, 20.0 + 3.0 * bounce, -6.0, 8.0);
+        p.take()
+    })
+    .with_curve("effort", 49, |_| 0.15)
+    .with_curve("fist", 2, |_| 0.9)
+}
+
 /// The right hand of the hammer block: the handle held across in front of the face,
 /// pointing left, the forearm up.
 const BLOCK_ARM: Arm = Arm {
@@ -2596,6 +2663,7 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         heavy_swing(s),
         block(s),
         hammer_block(s),
+        guard(s),
         wince(s),
         reach(s),
         flex(s),
@@ -2607,8 +2675,8 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
 
 /// Locomotion (idle/walk/run by `speed`, leaning by `turn`), plus `heavy_swing` (also on
 /// the contract's `attack_heavy`), `block` (on its trigger or while `blocking` > 0.5, held
-/// while it stays there), `hammer_block` (while `hammer_guard` > 0.5), `reach`, `flex` and
-/// `wince` actions, and getting up off the floor
+/// while it stays there), `hammer_block` (while `hammer_guard` > 0.5), `guard` (a boxer's
+/// guard while `guarding` > 0.5), `reach`, `flex` and `wince` actions, and getting up off the floor
 /// (`get_up_back`, `get_up_front`: triggered by the ragdoll when a limp body comes round), and
 /// `fall_brace` (bracing for a fall, on its trigger from anywhere).
 pub fn graph() -> AnimGraph {
@@ -2768,6 +2836,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 state("heavy_swing", NodeDef::one_shot("heavy_swing")),
                 state("block", NodeDef::clip("block")),
                 state("hammer_block", NodeDef::clip("hammer_block")),
+                state("guard", NodeDef::clip("guard")),
                 state("reach", NodeDef::one_shot("reach")),
                 state("flex", NodeDef::one_shot("flex")),
                 state("wince", NodeDef::one_shot("wince")),
@@ -2818,6 +2887,20 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                     "move",
                     Condition::param("hammer_guard", Cmp::Lt, 0.5),
                     0.3,
+                ),
+                // A boxer's guard while `guarding` is up (a sparring partner).
+                TransitionDef::new(
+                    "move",
+                    "guard",
+                    Condition::param("guarding", Cmp::Gt, 0.5),
+                    0.3,
+                )
+                .inertialize(),
+                TransitionDef::new(
+                    "guard",
+                    "move",
+                    Condition::param("guarding", Cmp::Lt, 0.5),
+                    0.4,
                 ),
                 TransitionDef::new("move", "reach", Condition::trigger("reach"), 0.25),
                 TransitionDef::new("reach", "move", Condition::Finished, 0.35).inertialize(),

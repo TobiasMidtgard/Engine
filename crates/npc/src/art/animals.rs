@@ -1836,6 +1836,32 @@ fn tuft_table(n: i32, len: f32, seed: u32) -> Vec<Tuft> {
     out
 }
 
+/// A deer's hooves are part of its pasterns, drawn with the coat: they read a few texels of
+/// horn kept in the coat texture round its corner (UV 0, wherever the texture repeats), too
+/// few to show in the fur.
+const HOOF_SWATCH: f32 = 3.0;
+
+/// Whether `uv` is in the hoof swatch of a `size`-texel coat texture.
+fn in_hoof_swatch(uv: Vec2, size: u32) -> bool {
+    let near = |c: f32| {
+        let t = c * size as f32;
+        t < HOOF_SWATCH || t > size as f32 - HOOF_SWATCH
+    };
+    near(uv.x) && near(uv.y)
+}
+
+/// Horn: smooth (the hoof's vertex colors give its color), a little glossy, as high as the
+/// fur's middle so the swatch's edge doesn't show.
+fn hoof_texel(fur_height: f32) -> Texel {
+    Texel {
+        albedo: Vec3::splat(0.92),
+        height: fur_height * 0.5,
+        roughness: 0.44,
+        metallic: 0.0,
+        occlusion: 1.0,
+    }
+}
+
 fn fur_texel(f: &Fur, tufts: &[Tuft], uv: Vec2) -> Texel {
     let n = f.cells;
     let q = uv * n as f32;
@@ -1936,7 +1962,13 @@ fn coat_texture(species: Species) -> TextureSet {
                 seed: 11,
             };
             let tufts = fur_tufts(&f);
-            TextureSet::bake(512, 0.16, |uv| fur_texel(&f, &tufts, uv))
+            TextureSet::bake(512, 0.16, |uv| {
+                if in_hoof_swatch(uv, 512) {
+                    hoof_texel(f.height)
+                } else {
+                    fur_texel(&f, &tufts, uv)
+                }
+            })
         }
         Species::Wolf => {
             let f = Fur {
@@ -2916,7 +2948,11 @@ mod deer {
                 let color = |p: Vec3, n: Vec3| {
                     let sole = smooth(0.006, 0.0, p.y);
                     let dew = smooth(0.06, 0.08, p.y);
-                    mix(hex(0x2e2723), hex(0x5a4c40), sole * 0.6 + dew * 0.2) * (1.0 + 0.05 * n.y)
+                    // Faint growth rings round the wall.
+                    let rings = 1.0 + 0.05 * (p.y * TAU / 0.007).sin();
+                    mix(hex(0x2e2723), hex(0x5a4c40), sole * 0.6 + dew * 0.2)
+                        * (1.0 + 0.05 * n.y)
+                        * rings
                 };
                 let paint = Paint {
                     flow: Flow::new(j[3], j[4], back, 0.05),
@@ -2932,7 +2968,11 @@ mod deer {
                     c + v3(0.045, 0.07, 0.07),
                     Vec3::splat(0.0018),
                 );
-                let hoof = sculpt(&hoof_f, region, 520, &paint);
+                let mut hoof = sculpt(&hoof_f, region, 520, &paint);
+                // Horn from the coat texture's hoof swatch.
+                for v in &mut hoof.vertices {
+                    v.uv = [0.0, 0.0];
+                }
                 let Some(Made::Mesh(_, leg)) = pastern.run(KIND).pop() else {
                     unreachable!("a pastern mesh")
                 };
@@ -5992,6 +6032,30 @@ mod tests {
                 "{name}: the croup swells {swell:.4} m"
             );
         }
+    }
+
+    #[test]
+    fn the_hoof_swatch_is_a_few_texels_round_the_coat_texture_corner() {
+        // UV 0 (where the hooves read) is in it however the texture repeats; the fur all but
+        // never is.
+        let size = 512;
+        let texel = |x: u32, y: u32| {
+            Vec2::new(
+                (x as f32 + 0.5) / size as f32,
+                (y as f32 + 0.5) / size as f32,
+            )
+        };
+        let n = (0..size)
+            .flat_map(|y| (0..size).map(move |x| (x, y)))
+            .filter(|&(x, y)| in_hoof_swatch(texel(x, y), size))
+            .count();
+        assert_eq!(n, 36);
+        for (x, y) in [(0, 0), (511, 0), (0, 511), (511, 511), (2, 509)] {
+            assert!(in_hoof_swatch(texel(x, y), size), "{x} {y}");
+        }
+        assert!(!in_hoof_swatch(Vec2::splat(0.5), size));
+        let horn = hoof_texel(0.0009);
+        assert!(horn.roughness < 0.5);
     }
 
     #[test]

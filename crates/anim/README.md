@@ -67,7 +67,8 @@ compresses and stretches.
   along the facing) tips the trunk forward into a start and sits it back on bent knees into
   a stop. A `DamageEvent` makes the
   struck person flinch (`HitReaction`): joints below the hit give with the blow, joints above
-  lag, the hips are shoved, the face winces, and it all springs back.
+  lag, a low blow shoves the hips (the knees give and the trunk leans against it), the
+  face winces, and it all springs back. `guarding` > 0.5 holds a boxer's `guard`.
 - **Contracts.** Reads `AnimationParams` and `AnimationTrigger` (`attack_heavy` swings,
   `block` raises the guard, and a mover's `LocomotionState.blocking` holds it); writes `SkeletonPose` every
   frame and `AnimationEvent` at marked frames, so movement, AI, cloth and hair never depend
@@ -204,7 +205,7 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 | Step course | A walker climbs a ramp, crosses a deck, walks down stairs with feet planted by IK, then runs back leaning into the turns |
 | Footwork drill | An athlete walks a square facing one way: ahead, sidestepping left, backpedalling, sidestepping right, blending through the corners, every planted foot still on the sand (`paddock_footwork`) |
 | Shuttle lane | An athlete sprints the lane from a standing start (leaning into it), digs in to stop, runs back backwards, turns on the spot and runs sideways to the start; a coach beside the lane turns where they stand to keep watching, the head first and the feet stepping round once the runner is well off to one side (`paddock_sprint_start`, `paddock_sprint_stop`) |
-| Sparring partner | A lifter takes a jab to the chin (head snaps back), a hook to the side of the head, a blow to the stomach (folds over it) and a shove on the back of a shoulder, flinching away from each and recovering (`paddock_flinch`) |
+| Sparring partner | A lifter in a boxer's guard (lead foot and fist forward, elbows tucked, bouncing lightly) takes a jab to the chin (head snaps back), a hook to the side of the head, a blow to the stomach (folds over it) and a shove on the back of a shoulder, flinching away from each and recovering to the guard without being shoved off his feet (`paddock_flinch`) |
 | Horse oval | A textured horse walks, trots, canters and gallops by speed; in the swing the knees fold, the hocks bend and the hooves curl back behind the fetlocks; haunches and shoulders flex with each stride; the mane rides the neck and the tail streams |
 | Dog run | A furred Labrador walks off, trots, canters out of a turn and gallops down the far straight, the spine flexing with each stride, ears and tail swinging; it pants as it goes (`paddock_dog_trot`, `paddock_dog`) |
 | Spider garden | A furred red-knee tarantula climbs over boulders in alternating sets of legs, a wave running from the back legs forward; its palps tap, its jaws work and its abdomen sways (`paddock_spider`) |

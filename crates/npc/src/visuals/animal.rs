@@ -1221,6 +1221,8 @@ const STOT: [f32; 4] = [0.0; 4];
 /// high flights (nearly half a second, over a quarter of a metre up for a deer).
 const STOT_DUTY: f32 = 0.22;
 const STOT_FREQ: f32 = 1.65;
+/// How much of a stotting deer's arch tips its fore half forward (the rest lifts it).
+const STOT_TIP: f32 = 0.35;
 
 const DEER_BUILD: Build = Build {
     gaits: &[WALK, TROT, ROTARY_DEER],
@@ -1446,6 +1448,9 @@ struct Quad<'a> {
     /// Killed this long ago (s), falling onto this side (+1 its right side up).
     fall: Option<(f32, f32)>,
     upright: f32,
+    /// Stotting (0..1): the legs hang straight in the air, so a swinging foot doesn't pull
+    /// the body down after its spot.
+    stot: f32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1631,12 +1636,13 @@ fn quad(
     let lz = rig.hind.joints[0].z - rig.front.joints[0].z;
     let mut pitch = (dy_f - dy_h) / lz + m.lean.x - look.stoop;
     let mut pos = rig.body + Vec3::new(0.0, (dy_f + dy_h) * 0.5 + arc - low + breath, m.surge.x);
-    // ... the loin humped up over straight legs: the fore half tips forward about the
-    // shoulders just as far as the tucked croup would lower the hips, so neither pair of legs
-    // bends.
+    // ... the loin humped up over straight legs, the body near level: the tucked croup would
+    // lower the hips, so the body rises that far (the fore legs, a little bent at a stand,
+    // straightening under it) and tips forward about the shoulders only a little.
     let tip = -arch * (rig.hind.joints[0].z - rig.loin.z) / lz;
-    pitch += tip;
-    pos.y += (rig.front.joints[0].z - rig.body.z) * tip;
+    let lean = STOT_TIP * tip;
+    pitch += lean;
+    pos.y += (rig.front.joints[0].z - rig.body.z) * lean - (tip - lean) * lz;
     let sink = beast.by(0.12, 0.13, 0.1) * crouch;
     pos.y -= sink;
     pitch -= 0.04 * crouch;
@@ -1790,6 +1796,7 @@ fn quad(
         dead,
         fall: fall.map(|t| (t, k.side)),
         upright,
+        stot,
     };
     // The body comes down as far as a planted foot needs to reach the ground (a few goes, so
     // a foot landing far out in a long stride reaches its spot the frame it lands).
@@ -1805,8 +1812,8 @@ fn quad(
         }
     }
     // Head and neck steady against the bob and pitch of the body (crouching, it keeps them
-    // down with it).
-    let bob = body.pos.y - rig.body.y + low + sink;
+    // down with it; stotting, the head rides up with each bound, held high).
+    let bob = (body.pos.y - rig.body.y + low + sink) * (1.0 - stot);
     let tilt = (body.rot * Vec3::NEG_Z).y.asin() + look.stoop;
     q.look.neck -= (1.4 * bob + 0.6 * tilt) * upright;
     q.look.head -= 0.3 * tilt * upright;
@@ -2507,7 +2514,7 @@ impl Quad<'_> {
         let mut drop = [0.0f32; 2];
         for k in 0..4u8 {
             let pl = &self.plants[k as usize];
-            if !pl.down && pl.u > 0.35 && pl.u < 0.55 {
+            if !pl.down && (pl.u > 0.35 && pl.u < 0.55 || self.stot > 0.5) {
                 continue;
             }
             let j = self.rig.leg(k);
@@ -4038,7 +4045,8 @@ mod tests {
     fn a_stot_is_a_pronk() {
         // Stotting at 2.9 m/s, and loping at the same pace: each bound, all four feet leave
         // the ground and land again together on legs held stiff and straight under it, the
-        // back arched, the body flung high, and the pale rump patch flared out of the coat.
+        // back arched, the body flung high and near level, the head held up, and the pale
+        // rump patch flared out of the coat.
         let dt = 1.0 / 60.0;
         let go = |stot: f32| {
             let mut m = Motion::default();
@@ -4062,6 +4070,8 @@ mod tests {
             let rump_rest = rump(&standing);
             let body_rest = standing.place(Part::Body).pos.y;
             let (mut bent, mut arch, mut top, mut flared) = (1.0f32, f32::MAX, 0.0f32, 0.0f32);
+            let (mut level, mut level_air) = (0.0f32, 0.0f32);
+            let (mut head_low, mut head_dip) = (f32::MAX, f32::MAX);
             // How long from the first foot leaving the ground to the last, and from the
             // first landing to the last (s).
             let (mut first_off, mut first_on, mut spread) = (None, None, 0.0f32);
@@ -4104,6 +4114,16 @@ mod tests {
                     for (k, s) in straight.iter().enumerate() {
                         bent = bent.min(reach(&pose, k) / s);
                     }
+                    // The body's pitch (nose up +) and the head's height over it and pitch.
+                    let b = pose.place(Part::Body);
+                    let h = pose.place(Part::Head);
+                    let pitch = (b.rot * Vec3::NEG_Z).y.asin();
+                    level = level.max(pitch.abs());
+                    if on.iter().all(|&o| !o) {
+                        level_air = level_air.max(pitch.abs());
+                    }
+                    head_low = head_low.min(h.pos.y - b.pos.y);
+                    head_dip = head_dip.min((h.rot * Vec3::NEG_Z).y.asin());
                     let body = pose.place(Part::Body).rot;
                     let croup = pose.place(Part::Beast(CROUP)).rot;
                     let (axis, angle) = (body.inverse() * croup).to_axis_angle();
@@ -4112,15 +4132,38 @@ mod tests {
                     flared = flared.max((rump(&pose) - rump_rest).length());
                 }
             }
-            (bent, arch, top, flared, spread)
+            (
+                bent,
+                arch,
+                top,
+                flared,
+                spread,
+                (level, level_air, head_low, head_dip),
+            )
         };
-        let (bent, arch, top, flared, spread) = go(1.0);
+        let (bent, arch, top, flared, spread, (level, level_air, head_low, head_dip)) = go(1.0);
         let lope = go(0.0);
         eprintln!(
             "pronk: legs at least {bent:.3} of straight, back arched {arch:.2} rad, body up \
-             {top:.3} m, rump out {flared:.3} m, feet {spread:.3} s apart; loping at the pace: \
-             legs {:.3}, arch {:.2}, up {:.3} m, rump {:.3} m",
-            lope.0, lope.1, lope.2, lope.3
+             {top:.3} m, rump out {flared:.3} m, feet {spread:.3} s apart, body pitched at most \
+             {level:.3} rad ({level_air:.3} in the air), head at least {head_low:.3} m over the \
+             body pitched {head_dip:.3}; loping at the pace: legs {:.3}, arch {:.2}, up {:.3} m, \
+             rump {:.3} m, head at least {:.3} m over the body",
+            lope.0,
+            lope.1,
+            lope.2,
+            lope.3,
+            (lope.5).2
+        );
+        // Near level, the head up, not tipped nose down at the top of each bound.
+        assert!(level < 0.12, "the body pitched {level:.3} rad");
+        assert!(
+            level_air < 0.06,
+            "in the air the body pitched {level_air:.3} rad"
+        );
+        assert!(
+            head_low > 0.25 && head_dip > -0.1,
+            "the head dropped to {head_low:.3} m over the body, pitched {head_dip:.3}"
         );
         assert!(bent > 0.96, "the legs bent to {bent:.3} of straight");
         assert!(lope.0 < 0.9, "loping, the legs fold ({:.3})", lope.0);
