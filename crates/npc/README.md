@@ -309,7 +309,11 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   its hands on the chest and looks up at the enemy, and the ally gets up where it lay. It
   writes `fighters-revive-before-after.png`. A close-up from two sides
   (`fighters-revive-kneel-closeup.png`) shows the reviver getting down, its hands on the chest
-  with its carbine set down clear of the mate's, and looking up.
+  with its carbine set down clear of the mate's, and looking up. It checks that the mate kneels
+  before the six-second timer and that the revive then takes no longer than the setting
+  allows (from the hands on, and from the kneel with the 1.2 s getting down). It draws only
+  with `NPC_SCREENSHOT_DIR` set; without it the scenes play out the same and every check runs.
+  `tests/art_fighters.rs` likewise draws only the two pictures it counts pixels in.
 - `tests/training.rs`: the same post swings at a rookie, soldier, veteran, elite and master;
   the share of swings defended climbs with skill (0 % to about 100 %) and the master parries.
 - `tests/smoke.rs`: thick smoke hides a player until it clears, thin smoke slows spotting,

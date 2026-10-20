@@ -10,6 +10,8 @@
 //!
 //! The strips land in the test's temp dir as `fighters-revive-before-after.png` and
 //! `fighters-revive-kneel-closeup.png`; set `NPC_SCREENSHOT_DIR` to also copy them there.
+//! Without it nothing is drawn (drawing is costly without a GPU): the scenes play out the
+//! same and every check runs.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -39,6 +41,9 @@ fn app() -> App {
         .resource_mut::<Time>()
         .set_source(TimeSource::Manual { step_secs: STEP });
     app.add_plugins((WorldPlugin, RenderPlugin, NpcPlugin));
+    if std::env::var_os("NPC_SCREENSHOT_DIR").is_none() {
+        app.add_systems(Extract, hold_off_drawing);
+    }
     // The showcase timer the demos use.
     app.world.resource_mut::<NpcSettings>().revive_secs = 6.0;
     app.world.spawn((
@@ -59,6 +64,16 @@ fn app() -> App {
         ),
     ));
     app
+}
+
+/// No drawing (without `NPC_SCREENSHOT_DIR`). Held off in the first frame, where the renderer
+/// would be made, so the scene's entities are numbered as they are with pictures.
+fn hold_off_drawing(world: &mut World) {
+    if !world.contains_resource::<RenderDisabled>() {
+        world.insert_resource(RenderDisabled(
+            "pictures only with NPC_SCREENSHOT_DIR".into(),
+        ));
+    }
 }
 
 /// A fighter with a carbine at `at`, facing −Z (in squad 4 when `squad`).
@@ -104,11 +119,9 @@ fn use_camera(app: &mut App, cam: Entity) {
     }
 }
 
-/// A picture through `cam` with the clocks stopped (then back to looking at nothing).
+/// A picture through `cam` with the clocks stopped (then back to looking at nothing). Without
+/// a renderer the clocks stop all the same, so the scene plays out as it does with pictures.
 fn shoot(app: &mut App, cam: Entity, away: Entity, name: &str) -> Option<image::RgbaImage> {
-    if app.world.get_resource::<RenderDisabled>().is_some() {
-        return None;
-    }
     use_camera(app, cam);
     let time = |app: &mut App, step_secs: f64| {
         app.world
@@ -118,10 +131,13 @@ fn shoot(app: &mut App, cam: Entity, away: Entity, name: &str) -> Option<image::
     time(app, 0.0);
     app.update_n(3);
     let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
-    capture_now(&mut app.world, &path).expect("screenshot");
+    let drawn = app.world.get_resource::<RenderDisabled>().is_none();
+    if drawn {
+        capture_now(&mut app.world, &path).expect("screenshot");
+    }
     time(app, STEP);
     use_camera(app, away);
-    Some(image::open(&path).expect("png").to_rgba8())
+    drawn.then(|| image::open(&path).expect("png").to_rgba8())
 }
 
 fn hit(app: &mut App, e: Entity, amount: f32) {
@@ -232,6 +248,9 @@ fn fighters_revive_before_and_after() {
     };
     let (mut up_at, mut glanced, mut set_down, mut sent_home) = (None, false, false, false);
     let (mut up_from, mut up_health, mut home_at) = (DVec3::ZERO, 0.0, None);
+    // When the mate's current kneel began, and when its hands went on the chest in it (a
+    // revive it let go of starts over).
+    let (mut knelt_at, mut hands_at, mut first_knelt) = (None, None, None);
     let before = [0.6, 1.5, 3.0, 4.5, 5.9];
     while t < 14.0 {
         app.update();
@@ -271,6 +290,20 @@ fn fighters_revive_before_and_after() {
         };
         let near = at(&app, mate).distance(chest_b);
         let kneeling = action == NpcAction::Revive && knelt > 0.0;
+        // (Up to the frame the ally gets up, the mate standing from it the same frame.)
+        if downed(&app, ally) {
+            if !kneeling {
+                (knelt_at, hands_at) = (None, None);
+            } else {
+                if knelt_at.is_none() {
+                    knelt_at = Some(t);
+                    first_knelt.get_or_insert(t);
+                }
+                if progress > 0.0 && hands_at.is_none() {
+                    hands_at = Some(t);
+                }
+            }
+        }
         if pictures[1][0].is_none() && t >= 0.6 {
             shot(
                 &mut app,
@@ -358,7 +391,34 @@ fn fighters_revive_before_and_after() {
     assert!(sent_home, "the lone fighter was not sent home");
     assert!(lies_a.distance(home) > 10.0);
     let up = up_at.expect("the squad mate never revived its ally");
-    assert!(up < 6.0, "revived after {up:.1} s (the timer's 6 s)");
+    // The mate has to be at it before the 6 s timer would send its ally home (the timer then
+    // waits for it), and once it is, it gets down and puts its hands on, and the revive takes
+    // as long as the settings say, no longer.
+    let first = first_knelt.expect("the squad mate never knelt to revive");
+    let knelt = knelt_at.unwrap_or(first);
+    let hands = hands_at.expect("the squad mate never put its hands on the chest");
+    eprintln!(
+        "first knelt at {first:.2} s, last kneel from {knelt:.2} s, hands on from {hands:.2} s, \
+         ally up at {up:.2} s"
+    );
+    assert!(
+        first < 6.0,
+        "began the revive at {first:.1} s (the timer's 6 s)"
+    );
+    let settings = app.world.resource::<NpcSettings>();
+    let takes = settings.ally_revive_secs as f64 * 1.2;
+    assert!(
+        up - hands <= takes + 0.5,
+        "the revive took {:.1} s from the hands on (the setting's {takes:.1} s)",
+        up - hands
+    );
+    let down = NpcBrain::REVIVE_KNEEL_SECS as f64;
+    assert!(
+        up - knelt <= down + takes + 0.5,
+        "the revive took {:.1} s from the kneel ({down:.1} s getting down, the setting's \
+         {takes:.1} s)",
+        up - knelt
+    );
     assert_eq!(app.world.get::<NpcCombat>(mate).unwrap().stats.revives, 1);
     let moved = up_from.distance(lies_b);
     assert!(
