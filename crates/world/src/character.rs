@@ -22,21 +22,19 @@
 //!   simulation (the softbody module) to move; it writes them back posed as
 //!   [`HairGuidesPosed`]. Without a simulation the character module draws its hair from the
 //!   rest guides skinned to the pose.
-//!
 //! * [`HandControls`]: how closed each hand is. One writer per entity: NPC AI for the fighters
 //!   it poses itself, the animation module for `BodyRequest` people.
 //! * [`BodyFit`]: the person's own rest skeleton on the animation module's humanoid bones,
 //!   written by the character module, so a poser can fit its skeleton (and held items) to the
 //!   person's stature.
 //!
-//! Catalogs that will grow (hair and beard styles, headgear, garments) are string ids; unknown ids fall
-//! back to the default. Seeds are stored at spawn, never taken from entity ids.
+//! Catalogs that will grow (hair and beard styles, headgear, garments) are string ids; unknown
+//! ids fall back to the default. Seeds are stored at spawn, never taken from entity ids.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use engine_core::prelude::*;
-
-use std::sync::Arc;
 
 use crate::animation::{BonePose, SkeletonPose};
 
