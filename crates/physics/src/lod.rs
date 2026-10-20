@@ -86,7 +86,10 @@ impl Region {
             return None;
         }
         let span = dt + std::mem::take(&mut self.owed_secs);
-        let longest = settings.max_substep_secs.max(1e-4) * (1u32 << self.tier.min(2)) as f32;
+        // Fine steps only while two bodies here may meet this frame.
+        let fine = self.fine.filter(|_| self.meeting_soon(span));
+        let base = crate::fine::finest(Some(settings.max_substep_secs), fine).unwrap_or(0.0);
+        let longest = base.max(1e-4) * (1u32 << self.tier.min(2)) as f32;
         let n = ((span / longest).ceil() as u32).clamp(1, settings.max_substeps.max(1));
         Some((n, span / n as f32))
     }
@@ -108,12 +111,12 @@ impl Region {
 }
 
 /// A mover as the level of detail sees it.
-struct Member {
+pub(crate) struct Member {
     /// `None` for a character (they never split off).
-    body: Option<Entity>,
-    at: DVec3,
-    reach: f64,
-    awake: bool,
+    pub body: Option<Entity>,
+    pub at: DVec3,
+    pub reach: f64,
+    pub awake: bool,
 }
 
 type Cell = (i64, i64, i64);
@@ -127,7 +130,7 @@ fn cells(at: DVec3, half: f64, size: f64) -> impl Iterator<Item = Cell> {
         .flat_map(move |x| (lo.y..=hi.y).flat_map(move |y| (lo.z..=hi.z).map(move |z| (x, y, z))))
 }
 
-fn find(parent: &mut [usize], mut i: usize) -> usize {
+pub(crate) fn find(parent: &mut [usize], mut i: usize) -> usize {
     while parent[i] != i {
         parent[i] = parent[parent[i]];
         i = parent[i];
@@ -144,7 +147,7 @@ fn union(parent: &mut [usize], a: usize, b: usize) {
 
 impl Simulation {
     /// The movers of a region: its bodies and characters.
-    fn members(&self, id: RegionId) -> Vec<Member> {
+    pub(crate) fn members(&self, id: RegionId) -> Vec<Member> {
         let region = self.region(id);
         let mut out: Vec<Member> = self
             .bodies
@@ -227,6 +230,48 @@ impl Simulation {
             .any(|m| cells(m.at, m.reach + margin, size).any(|c| grid.contains(&c)))
     }
 
+    /// Cluster `members`: those whose boxes, grown by half of `gap`, share a grid cell, and
+    /// those joined by a joint. Returns union-find parents (roots through [`find`]).
+    pub(crate) fn cluster(&self, members: &[Member], gap: f64) -> Vec<usize> {
+        let n = members.len();
+        let mut parent: Vec<usize> = (0..n).collect();
+        let size = gap.max(1.0);
+        let big = |m: &Member| m.reach > size * BIG_CELLS;
+        let mut grid: HashMap<Cell, usize> = HashMap::new();
+        for (i, m) in members.iter().enumerate() {
+            if big(m) {
+                for (j, o) in members.iter().enumerate() {
+                    if j != i && m.at.distance(o.at) < m.reach + o.reach + gap {
+                        union(&mut parent, i, j);
+                    }
+                }
+                continue;
+            }
+            for c in cells(m.at, m.reach + gap * 0.5, size) {
+                match grid.get(&c) {
+                    Some(&j) => union(&mut parent, i, j),
+                    None => {
+                        grid.insert(c, i);
+                    }
+                }
+            }
+        }
+        let index: EntityHashMap<usize> = members
+            .iter()
+            .enumerate()
+            .filter_map(|(i, m)| m.body.map(|e| (e, i)))
+            .collect();
+        for j in self.joints.values() {
+            if let (Some(&a), Some(&b)) = (
+                index.get(&j.desc.body_a),
+                j.desc.body_b.and_then(|b| index.get(&b)),
+            ) {
+                union(&mut parent, a, b);
+            }
+        }
+        parent
+    }
+
     /// Move far clusters of movers into regions of a coarser tier ([module docs](self)). Two
     /// movers less than `gap` meters apart (between their colliders' bounds) stay together.
     pub(crate) fn split_far(&mut self, foci: &[DVec3], gap: f64) {
@@ -258,43 +303,7 @@ impl Simulation {
             if !members.iter().any(|m| m.awake && far(m)) {
                 continue;
             }
-            // Cluster: movers whose boxes, grown by half the gap, share a grid cell.
-            let n = members.len();
-            let mut parent: Vec<usize> = (0..n).collect();
-            let size = gap.max(1.0);
-            let big = |m: &Member| m.reach > size * BIG_CELLS;
-            let mut grid: HashMap<Cell, usize> = HashMap::new();
-            for (i, m) in members.iter().enumerate() {
-                if big(m) {
-                    for (j, o) in members.iter().enumerate() {
-                        if j != i && m.at.distance(o.at) < m.reach + o.reach + gap {
-                            union(&mut parent, i, j);
-                        }
-                    }
-                    continue;
-                }
-                for c in cells(m.at, m.reach + gap * 0.5, size) {
-                    match grid.get(&c) {
-                        Some(&j) => union(&mut parent, i, j),
-                        None => {
-                            grid.insert(c, i);
-                        }
-                    }
-                }
-            }
-            let index: EntityHashMap<usize> = members
-                .iter()
-                .enumerate()
-                .filter_map(|(i, m)| m.body.map(|e| (e, i)))
-                .collect();
-            for j in self.joints.values() {
-                if let (Some(&a), Some(&b)) = (
-                    index.get(&j.desc.body_a),
-                    j.desc.body_b.and_then(|b| index.get(&b)),
-                ) {
-                    union(&mut parent, a, b);
-                }
-            }
+            let mut parent = self.cluster(&members, gap);
             // Clusters wholly far, with an awake body in them, leave.
             let mut clusters: HashMap<usize, (bool, bool, Vec<usize>)> = HashMap::new();
             for (i, m) in members.iter().enumerate() {
@@ -315,7 +324,9 @@ impl Simulation {
                 let bodies: Vec<Entity> = list.iter().filter_map(|i| members[*i].body).collect();
                 let target = self
                     .live_regions()
-                    .filter(|(r, region)| *r != id && !region.frozen && region.tier > tier)
+                    .filter(|(r, region)| {
+                        *r != id && !region.frozen && region.tier > tier && region.fine.is_none()
+                    })
                     .map(|(r, region)| (r, region.anchor.distance(at)))
                     .filter(|(_, d)| *d <= join)
                     .min_by(|a, b| a.1.total_cmp(&b.1))
