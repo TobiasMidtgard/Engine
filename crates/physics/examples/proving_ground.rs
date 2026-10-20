@@ -16,7 +16,7 @@ use engine_core::time::TimeSource;
 use engine_physics::{PhysicsDebug, PhysicsPlugin, PhysicsStats, demo};
 use engine_render::prelude::*;
 use engine_render::{RenderDisabled, Renderer, capture_now};
-use engine_world::WorldPlugin;
+use engine_world::{SimulationFocus, WorldPlugin};
 
 /// (world seconds, file name, camera position, look-at target), yard-local.
 const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
@@ -145,6 +145,16 @@ fn main() {
     app.add_plugins(WorldPlugin);
     app.add_plugins(PhysicsPlugin);
     let debug = std::env::var("PHYSICS_DEBUG").is_ok_and(|v| v != "0");
+    // `PHYSICS_FOCUS=x,y,z` simulates as if the player stood there (far away, the yard
+    // simulates at a coarser level of detail).
+    let focus: Option<DVec3> = std::env::var("PHYSICS_FOCUS").ok().and_then(|v| {
+        let p: Vec<f64> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        (p.len() == 3).then(|| DVec3::new(p[0], p[1], p[2]))
+    });
+    if let Some(at) = focus {
+        app.world
+            .spawn((Transform::from_translation(at), SimulationFocus::default()));
+    }
     if debug {
         app.add_plugins(engine_debug::DebugPlugin);
         *app.world.resource_mut::<PhysicsDebug>() = PhysicsDebug {
@@ -152,7 +162,8 @@ fn main() {
             contacts: true,
             joints: true,
             centers_of_mass: true,
-            radius_m: 80.0,
+            // Drawn around the focus, so around it and the yard both when it is far.
+            radius_m: focus.map_or(80.0, |f| f.length() + 80.0),
             ..Default::default()
         };
     }
@@ -211,16 +222,23 @@ fn main() {
             eprintln!("no GPU: {}", d.0);
             return;
         }
-        let suffix = if debug { "_debug" } else { "" };
+        let suffix = match (debug, focus) {
+            (true, Some(_)) => "_debug_far",
+            (true, None) => "_debug",
+            (false, Some(_)) => "_far",
+            (false, None) => "",
+        };
         let path = out.join(format!("{name}{suffix}.png"));
         match capture_now(&mut app.world, &path) {
             Ok(_) => {
                 let s = *app.world.resource::<PhysicsStats>();
                 println!(
-                    "t = {t:5.2} s  {}  ({} bodies, {} awake, step {:.2} ms)",
+                    "t = {t:5.2} s  {}  ({} bodies, {} awake ({} coarse, {} half rate), step {:.2} ms)",
                     path.display(),
                     s.bodies,
                     s.awake,
+                    s.coarse_awake,
+                    s.half_rate_awake,
                     s.step_ms
                 );
             }

@@ -432,6 +432,65 @@ fn a_blaze_burns_hottest_low_in_its_heart_and_leaves_the_air_beside_it_clear() {
 }
 
 #[test]
+fn a_fireball_glows_while_young_and_chars_to_soot() {
+    // One ball of burning gas 2 m across standing over the ground in daylight: young, it glows
+    // brighter than the ground behind it; near the end of its life it is dark soot covering it.
+    let mut app = app(DVec3::ZERO, 30_000.0);
+    let Some(before) = shot(&mut app, "vfx_fireball_before.png") else {
+        return;
+    };
+    let ball = EffectDesc {
+        name: "test.fireball".into(),
+        emitters: vec![EmitterDesc {
+            bursts: vec![engine_vfx::Burst {
+                count: 1,
+                ..Default::default()
+            }],
+            offset: [0.0, 0.8, 0.0],
+            speed: [0.0, 0.0],
+            gravity: 0.0,
+            lifetime: [2.0, 2.0],
+            size: [2.0, 2.0],
+            sprite: Sprite::Fireball,
+            lit: 1.0,
+            color: Gradient::constant([1.0, 0.45, 0.12, 1.0]),
+            emissive: 18_000.0,
+            soft: 0.0,
+            wind: 0.0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    app.world
+        .resource_mut::<EffectLibrary>()
+        .insert(ball)
+        .unwrap();
+    app.world.spawn((
+        Transform::from_translation(DVec3::ZERO),
+        ParticleEffect::new("test.fireball"),
+    ));
+    let heart = project(DVec3::new(0.0, 0.8, 0.0));
+    app.update_n(4);
+    let young = shot(&mut app, "vfx_fireball_young.png").unwrap();
+    app.update_n(40);
+    let old = shot(&mut app, "vfx_fireball_old.png").unwrap();
+    let (b, y, o) = (
+        luma(&before, heart, 2),
+        luma(&young, heart, 2),
+        luma(&old, heart, 2),
+    );
+    eprintln!("fireball: ground {b}, young {y}, old {o}");
+    assert!(
+        y > b + 30.0,
+        "a young fireball should glow: ground {b}, young {y}"
+    );
+    assert!(
+        o < b - 10.0,
+        "an old fireball should be dark soot: ground {b}, old {o}"
+    );
+}
+
+#[test]
 fn a_splash_crown_stands_out_of_the_ground_and_nothing_else_changes() {
     let mut app = app(DVec3::ZERO, 30_000.0);
     let Some(before) = shot(&mut app, "vfx_crown_before.png") else {

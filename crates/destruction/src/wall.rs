@@ -174,6 +174,17 @@ impl DestructibleWall {
         }
     }
 
+    /// The bricks or blocks masonry breaks into, as its texture lays them (running bond from
+    /// local x = 0, y = 0); `None` for walls that aren't masonry.
+    pub fn brick_size(&self) -> Option<[f32; 2]> {
+        self.masonry?;
+        match self.material {
+            DestructibleMaterial::Brick => Some(crate::textures::BRICK_PITCH),
+            DestructibleMaterial::Stone => Some(crate::textures::STONE_PITCH),
+            _ => self.masonry,
+        }
+    }
+
     /// Plain concrete slab wall.
     pub fn concrete(width: f32, height: f32, thickness: f32) -> Self {
         Self {
@@ -432,6 +443,9 @@ pub struct WallState {
 /// Cells per mesh tile edge.
 pub const TILE: usize = 24;
 
+/// Share of a brick's cells a hit must take for the rest of the brick to come out.
+pub const BRICK_LOSS: f32 = 0.4;
+
 impl WallState {
     /// Fresh, intact state for `wall`.
     pub fn new(wall: &DestructibleWall, materials: &DestructionMaterials) -> Self {
@@ -642,6 +656,70 @@ impl WallState {
                         back: b0,
                     });
                 }
+            }
+        }
+    }
+
+    /// Masonry breaks along its mortar: a brick or block (`[w, h]` m, running bond) that a hit
+    /// took [`BRICK_LOSS`] or more of comes out whole, so holes get stepped, toothed edges
+    /// rather than round ones. Bricks that lost less stay, chipped.
+    pub fn knock_out_bricks(&mut self, brick: [f32; 2], out: &mut WallHit) {
+        let [bw, bh] = brick;
+        let id = |p: Vec2| {
+            let row = (p.y / bh).floor();
+            let offset = if (row as i64).rem_euclid(2) == 1 {
+                bw * 0.5
+            } else {
+                0.0
+            };
+            (((p.x + offset) / bw).floor() as i64, row as i64)
+        };
+        let mut bricks: Vec<(i64, i64)> = out
+            .lost
+            .iter()
+            .map(|c| id(self.grid.center(c.idx)))
+            .collect();
+        bricks.sort_unstable();
+        bricks.dedup();
+        let g = &mut self.grid;
+        let area = g.cell.x * g.cell.y;
+        for (col, row) in bricks {
+            let offset = if row.rem_euclid(2) == 1 {
+                bw * 0.5
+            } else {
+                0.0
+            };
+            let mid = Vec2::new((col as f32 + 0.5) * bw - offset, (row as f32 + 0.5) * bh);
+            let (i0, j0, i1, j1) = g.cells_near(mid, bw.max(bh) * 0.5);
+            let mut cells = Vec::new();
+            let mut gone = 0;
+            for j in j0..j1 {
+                for i in i0..i1 {
+                    let idx = g.idx(i, j);
+                    if g.kind[idx] == CellKind::Opening || id(g.center(idx)) != (col, row) {
+                        continue;
+                    }
+                    if g.solid[idx] {
+                        cells.push((i, j, idx));
+                    } else {
+                        gone += 1;
+                    }
+                }
+            }
+            let total = cells.len() + gone;
+            if cells.is_empty() || (gone as f32) < BRICK_LOSS * total as f32 {
+                continue;
+            }
+            for (i, j, idx) in cells {
+                let (f0, b0) = (g.front[idx], g.back[idx]);
+                out.volume += g.remaining(idx) * area;
+                g.erode(idx, g.thickness, true);
+                out.touch(i, j);
+                out.lost.push(LostCell {
+                    idx,
+                    front: f0,
+                    back: b0,
+                });
             }
         }
     }
@@ -977,6 +1055,9 @@ pub struct WallLook {
     pub seed: u64,
     /// Keep the grid's outer border straight (true for walls, false for broken chunks).
     pub straight_border: bool,
+    /// Masonry: broken edges run straight along the cell lines (whole bricks come out),
+    /// not jittered like broken plaster or concrete.
+    pub mortar: bool,
     /// The material's own exterior color (what its texture already shows).
     pub reference: [f32; 3],
     /// How readily cracks run out from damage ([`crate::cracks::brittleness`]).
@@ -996,6 +1077,7 @@ impl WallLook {
             plank_pitch: (wall.plank_height > 0.0).then_some(wall.plank_height + wall.plank_gap),
             seed: wall.seed,
             straight_border: true,
+            mortar: wall.masonry.is_some(),
             reference: props.exterior,
             cracks: crate::cracks::brittleness(wall.material),
         }
@@ -1123,7 +1205,7 @@ pub fn mesh_cells(
             let gy = grid.global.1 + vj as i64;
             let mut xy = grid.origin + Vec2::new(vi as f32 * grid.cell.x, vj as f32 * grid.cell.y);
             let on_border = vi == 0 || vj == 0 || vi == nx || vj == ny;
-            if damaged && !(look.straight_border && on_border) {
+            if damaged && !look.mortar && !(look.straight_border && on_border) {
                 let jx = hash3(gx, gy, 1, look.seed) - 0.5;
                 let jy = hash3(gx, gy, 2, look.seed) - 0.5;
                 xy += Vec2::new(jx * grid.cell.x, jy * grid.cell.y) * 0.75;
