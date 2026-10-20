@@ -522,13 +522,35 @@ impl CharacterFeature {
                         v,
                         pack(m.skin.bones.get(at).copied().unwrap_or_default()),
                         pack(m.skin.weights.get(at).copied().unwrap_or([255, 0, 0, 0])),
-                        if moves { set.follow[h] } else { u32::MAX },
+                        if moves {
+                            set.follow[h].guides[0]
+                        } else {
+                            u32::MAX
+                        },
                     ]
                 })
                 .collect();
             let roots = buffer(
                 "character strand roots",
                 bytemuck::cast_slice(&roots),
+                wgpu::BufferUsages::STORAGE,
+            );
+            // Per hair that moves: its three guides and their weights (bytes, 0..255).
+            let follow: Vec<[u32; 4]> = if moves {
+                set.follow
+                    .iter()
+                    .map(|f| {
+                        let w = f.weights.map(|w| (w.clamp(0.0, 1.0) * 255.0).round() as u8);
+                        let [a, b, c] = f.guides;
+                        [a, b, c, u32::from_le_bytes([w[0], w[1], w[2], 0])]
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let follow = buffer(
+                "character strand follow",
+                bytemuck::cast_slice(&follow),
                 wgpu::BufferUsages::STORAGE,
             );
             // Every guide point's displacement, this frame's then last frame's (none yet).
@@ -571,6 +593,10 @@ impl CharacterFeature {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: motion_binding,
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: follow.as_entire_binding(),
                     },
                 ],
             });
@@ -680,6 +706,7 @@ impl RenderFeature for CharacterFeature {
                 storage_entry(2),
                 storage_entry(3),
                 storage_entry(4),
+                storage_entry(5),
             ],
         });
         let [

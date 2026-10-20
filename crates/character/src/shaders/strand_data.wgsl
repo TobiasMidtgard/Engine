@@ -17,6 +17,8 @@ struct StrandParams {
 // Hair that moves (`info.w` guides): how far each guide point moved from where the pose alone
 // carries it (posed model space), this frame's for all guides, then last frame's.
 @group(2) @binding(4) var<storage, read> strand_motion: array<vec4<f32>>;
+// Per hair that moves: the three guides it moves with and their weights (bytes, 0..255).
+@group(2) @binding(5) var<storage, read> strand_follow: array<vec4<u32>>;
 
 struct StrandOut {
     @invariant @builtin(position) clip: vec4<f32>,
@@ -64,13 +66,31 @@ fn ribbon_point(hair: u32, vertex: u32) -> RibbonPoint {
     // Hair that moves goes where its guide went.
     let guides = strand_params.info.w;
     if (guides > 0u && root.w < guides) {
-        let g = root.w * n;
+        // A blend of its nearest guides, so neighboring hairs don't part where guides swing
+        // apart.
+        let f = strand_follow[hair];
+        let w = unpack4x8unorm(f.w);
         let half = guides * n;
-        out.model += strand_motion[g + k].xyz;
-        out.prev_model += strand_motion[half + g + k].xyz;
-        let ahead = strand_motion[g + min(k + 1u, n - 1u)].xyz;
-        let behind = strand_motion[g + select(k - 1u, 0u, k == 0u)].xyz;
-        along += ahead - behind;
+        var sum = 0.0;
+        var now_d = vec3<f32>(0.0);
+        var prev_d = vec3<f32>(0.0);
+        var slope = vec3<f32>(0.0);
+        for (var j = 0u; j < 3u; j++) {
+            if (f[j] >= guides || w[j] <= 0.0) {
+                continue;
+            }
+            let g = f[j] * n;
+            now_d += strand_motion[g + k].xyz * w[j];
+            prev_d += strand_motion[half + g + k].xyz * w[j];
+            let ahead = strand_motion[g + min(k + 1u, n - 1u)].xyz;
+            let behind = strand_motion[g + select(k - 1u, 0u, k == 0u)].xyz;
+            slope += (ahead - behind) * w[j];
+            sum += w[j];
+        }
+        let inv = 1.0 / max(sum, 1e-4);
+        out.model += now_d * inv;
+        out.prev_model += prev_d * inv;
+        along += slope * inv;
     }
     out.rel = model_point(out.model);
     out.tangent = model_dir(along);
