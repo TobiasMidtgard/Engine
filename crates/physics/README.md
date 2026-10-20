@@ -24,7 +24,8 @@ changing that one plugin line.
   keeps the shapes' inertia about it. Damping, gravity scale, CCD, sleeping, rotation locks.
   With `ccd` a 5 cm ball at 100 to 1000 m/s never passes through a 2 cm board, a mesh wall with
   no thickness, or a free-floating 5 cm plank; without it, a 1000 m/s ball flies through the
-  plank.
+  plank. Contacts closing faster than 50 m/s are made hard by a contact hook: Rapier's contacts
+  give a little once shapes touch, and a 1000 m/s ball sank 5 cm into the board, past its middle.
   `MassProperties` is written back.
   Settled bodies cost next to nothing: a step visits only awake bodies and those with forces of
   their own, and never takes a sleeping one mutably from Rapier (which would make Rapier redo its
@@ -49,6 +50,11 @@ changing that one plugin line.
   new triangle brought such a contact and a kick (a barrel at 8 m/s jumped 20 cm and veered
   meters off its line). A contact hook takes the spin's share out of each contact's closing
   speed, for colliders spinning that fast only, so piles keep Rapier's contact reuse.
+- **Contacts on small bodies**: Rapier reuses a touching pair's contacts until the two have moved
+  5 cm against each other, and a ball sliding along an old contact plane rides on it as if it
+  went on forever. Bodies under 5 cm in reach (a 14 mm Galton ball slid 6 cm off a 4 mm pin on
+  air, and balls stayed wedged between pins they had left behind) get fresh contacts every step
+  while awake, through the same hook; bigger ones keep the reuse.
 - **Spin friction**: a ball spinning on its spot, or a ragdoll's head, slows and stops (Rapier
   only resists spin for flat contacts with several points, and never for articulation links).
   Each such contact takes up to `μ · N · 1 cm` of torque out of the spin about its normal; spin
@@ -391,9 +397,11 @@ and a pendulum wave is in two alternate rows at half a minute and back in step a
 pool table's break (`tests/proving_ground.rs`: all sixteen balls step finely, at least 12 of the 15
 spread more than 30 cm, at least one goes down a pocket, none leaves the table, and all are still
 before the table resets); the Galton board (`tests/proving_ground.rs`: no ball leaves the board, all
-are still, at most 2% stay caught on the pins, and the heap is centered within 0.6 bins, spread
+are still, at most one stays caught on the pins, and the heap is centered within 0.6 bins, spread
 2.5 to 4 bins, over 28% of the balls in the middle three bins, under 8% in the outer four, and no
-more than 12% more on one side); a headless screenshot of the proving ground.
+more than 12% more on one side); contacts on small bodies (`tests/contacts.rs`: a 14 mm ball
+sliding off a 4 mm pin falls within 10 frames and 2 cm, and one dropped on one of two pins three
+ball widths apart drops through); a headless screenshot of the proving ground.
 
 ## Done when
 

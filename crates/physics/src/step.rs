@@ -1184,7 +1184,14 @@ const DECK_REACH_M: f32 = 1.2;
 /// rolling correction of `ContactFilter::modify_solver_contacts`; below [`SLOW_ROLL_SPEED`] it
 /// goes back to plain contacts. Slower spin makes too little of a false gap to matter.
 const FAST_ROLL_SPEED: f32 = 1.0;
-const SLOW_ROLL_SPEED: f32 = 0.5;
+pub(crate) const SLOW_ROLL_SPEED: f32 = 0.5;
+/// Dynamic bodies reaching less than this from their center of mass, m, get fresh contacts
+/// every step while awake: Rapier's 5 cm of reuse is more than their own size.
+const SMALL_REACH_M: f32 = 0.05;
+/// A body faster than this, m/s, gets the hard stop of `ContactFilter::modify_solver_contacts`
+/// for its impacts; below [`SLOW_IMPACT_SPEED`] it goes back to plain contacts.
+pub(crate) const HARD_IMPACT_SPEED: f32 = 50.0;
+const SLOW_IMPACT_SPEED: f32 = 25.0;
 
 /// Give the colliders that need it the contact hook (`ContactFilter::modify_solver_contacts`),
 /// and take it off again when they settle. Pairs with a hook are never recycled, and recycling
@@ -1198,6 +1205,11 @@ const SLOW_ROLL_SPEED: f32 = 0.5;
 ///   with the deck's size, so only bodies big enough to carry something count
 ///   ([`DECK_REACH_M`]): debris and crates tumbling in a settling pile keep the speed-up.
 /// - Fast-rolling balls, barrels and wheels, whose contacts the hook corrects.
+/// - Small bodies ([`SMALL_REACH_M`]). A reused contact keeps its old plane until the pair has
+///   moved 5 cm, and a ball sliding along that plane rides on it as if it went on forever: a
+///   14 mm Galton ball slid 6 cm off a 4 mm pin on air, and balls stayed wedged between pins
+///   by planes of pins they had left 3 cm behind. Sleeping ones keep reusing (nothing moves).
+/// - Bullet-fast bodies ([`HARD_IMPACT_SPEED`]), whose impacts the hook makes hard.
 fn refresh_contact_hooks(world: &mut PhysicsWorld) {
     let PhysicsWorld {
         bodies, colliders, ..
@@ -1208,29 +1220,33 @@ fn refresh_contact_hooks(world: &mut PhysicsWorld) {
         }
         let awake = !rb.is_sleeping();
         let spin = if awake { rb.angvel().length() } else { 0.0 };
-        let edge_speed = if rb.is_kinematic() {
-            // Gameplay turns these on purpose, and steadily: any turning counts.
-            if spin > 1.0e-4 { f32::INFINITY } else { 0.0 }
+        let speed = if awake { rb.linvel().length() } else { 0.0 };
+        // A ball's radius from its inertia: close enough for any shape (a disc reads 1.1× its
+        // radius, a rod 0.9× its half-length) and cheap for a thousand bodies a step.
+        let reach = if rb.is_kinematic() {
+            f32::INFINITY
         } else {
-            // A ball's radius from its inertia: close enough for any shape (a disc reads 1.1×
-            // its radius, a rod 0.9× its half-length) and cheap for a thousand bodies a step.
             let mass = rb.mass();
             let inertia = rb
                 .mass_properties()
                 .local_mprops
                 .principal_inertia()
                 .max_element();
-            let reach = if mass > 0.0 {
+            if mass > 0.0 {
                 (2.5 * inertia / mass).sqrt()
             } else {
                 0.0
-            };
-            if reach < DECK_REACH_M {
-                0.0
-            } else {
-                spin * reach
             }
         };
+        let edge_speed = if rb.is_kinematic() {
+            // Gameplay turns these on purpose, and steadily: any turning counts.
+            if spin > 1.0e-4 { f32::INFINITY } else { 0.0 }
+        } else if reach < DECK_REACH_M {
+            0.0
+        } else {
+            spin * reach
+        };
+        let small = reach < SMALL_REACH_M;
         for &h in rb.colliders() {
             // Look before touching: `get_mut` marks the collider modified, which costs the
             // broad phase work every step.
@@ -1244,8 +1260,14 @@ fn refresh_contact_hooks(world: &mut PhysicsWorld) {
             };
             let hooks = c.active_hooks();
             let hooked = hooks.contains(ActiveHooks::MODIFY_SOLVER_CONTACTS);
-            let wants = edge_speed > TURNING_EDGE_SPEED || roll_speed > FAST_ROLL_SPEED;
-            let settled = edge_speed < STILL_EDGE_SPEED && roll_speed < SLOW_ROLL_SPEED;
+            let wants = edge_speed > TURNING_EDGE_SPEED
+                || roll_speed > FAST_ROLL_SPEED
+                || speed > HARD_IMPACT_SPEED
+                || (small && awake);
+            let settled = edge_speed < STILL_EDGE_SPEED
+                && roll_speed < SLOW_ROLL_SPEED
+                && speed < SLOW_IMPACT_SPEED
+                && !(small && awake);
             let hooks = if !hooked && wants {
                 hooks | ActiveHooks::MODIFY_SOLVER_CONTACTS
             } else if hooked && settled {
