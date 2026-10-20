@@ -9,7 +9,7 @@ use std::f32::consts::{PI, TAU};
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
-use engine_npc::wildlife::{PACK_CHASE_SECS, PACK_REST_SECS, ZIGZAG_RANGE};
+use engine_npc::wildlife::{PACK_CHASE_SECS, PACK_REST_SECS, SCENT_REACH, ZIGZAG_RANGE};
 use engine_npc::*;
 use engine_world::locomotion::{LocomotionMode, LocomotionState};
 use engine_world::physics::Collider;
@@ -1179,6 +1179,58 @@ fn a_deer_zigzags_once_a_wolf_is_close() {
         cuts.len() >= 3,
         "it zigzags once the wolf is close: cut {cuts:?} in {} steps",
         close.len().min(90)
+    );
+}
+
+/// A pack that scents a herd from further off than it would run one down stalks it in and
+/// rushes it, rather than giving it up as lost the moment it picks it.
+#[test]
+fn a_pack_stalks_a_herd_it_scents_from_afar() {
+    let mut app = app();
+    app.world.resource_mut::<WildlifeSettings>().respawn_secs = 0.0;
+    let deer = herd(&mut app, Species::Deer, DVec3::ZERO, 4, 1);
+    let pack = herd(&mut app, Species::Wolf, DVec3::new(0.0, 0.0, -90.0), 3, 2);
+    app.update();
+    let far = flat(pos(&app, pack[0]) - pos(&app, deer[0])).length();
+    assert!(
+        far > 75.0 && (far as f64) < SCENT_REACH,
+        "the pack starts {far:.0} m off"
+    );
+    for &w in &pack {
+        app.world.get_mut::<AnimalMind>(w).unwrap().hunger = 1.0;
+    }
+    let (mut stalked, mut rushed, mut rested) = (false, None, false);
+    for f in 0..60 * 60 {
+        app.update();
+        for &w in &pack {
+            match state(&app, w) {
+                AnimalState::Stalk => stalked = true,
+                AnimalState::Chase => {
+                    rushed.get_or_insert(f);
+                }
+                AnimalState::Rest => rested = true,
+                _ => {}
+            }
+        }
+        if rushed.is_some() {
+            break;
+        }
+    }
+    let nearest = pack
+        .iter()
+        .flat_map(|&w| deer.iter().map(move |&d| (w, d)))
+        .map(|(w, d)| flat(pos(&app, w) - pos(&app, d)).length())
+        .fold(f32::MAX, f32::min);
+    eprintln!(
+        "stalked {stalked}, rushed at {:?} s, rested {rested}, nearest {nearest:.1} m",
+        rushed.map(|f| f as f32 / 60.0)
+    );
+    assert!(stalked, "the pack stalks the herd it scents");
+    assert!(!rested, "the pack never gives the herd up as lost");
+    assert!(rushed.is_some(), "the pack rushes the herd within a minute");
+    assert!(
+        nearest < 40.0,
+        "the pack rushes from close ({nearest:.1} m)"
     );
 }
 

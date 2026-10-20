@@ -383,6 +383,8 @@ pub const PACK_CHASE_SECS: f64 = 20.0;
 pub const PACK_REST_SECS: f64 = 25.0;
 /// The tester picks over the fleeing herd for the weakest this long into its rush (s).
 pub const TEST_SECS: f64 = 4.0;
+/// A wolf scents deer this far off (m), and stalks a herd it scents until it is past this.
+pub const SCENT_REACH: f64 = 110.0;
 /// A deer chased by a wolf this close (m) cuts from side to side.
 pub const ZIGZAG_RANGE: f32 = 6.0;
 /// A deer that raises the alarm stots this long (s) as it sets off.
@@ -1616,7 +1618,14 @@ fn decide(
                 p = qs;
             }
             let d = p.pos.distance(pos);
-            if d > 70.0 || pack_chase > PACK_CHASE_SECS || mate_gave_up {
+            // A running quarry is lost 70 m off; one it is still stalking only beyond its
+            // scent (it picks a herd up by scent from further than it could run one down).
+            let lost = if pack_chase > 0.0 || pack_charging || mind.state == AnimalState::Chase {
+                70.0
+            } else {
+                SCENT_REACH + 10.0
+            };
+            if d > lost || pack_chase > PACK_CHASE_SECS || mate_gave_up {
                 // Lost it, or run out of steam: the pack gives up and catches its breath.
                 mind.prey = None;
                 mind.role = PackRole::None;
@@ -1675,7 +1684,7 @@ fn decide(
                 let d = s.pos.distance(pos);
                 // Sight up close, scent trails further out.
                 let reach = match s.species {
-                    Species::Deer => 110.0,
+                    Species::Deer => SCENT_REACH,
                     Species::Boar => 60.0,
                     _ => 35.0,
                 };
