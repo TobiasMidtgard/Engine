@@ -142,7 +142,7 @@ fn cloth_lift(r: vec3<f32>, sleeves: f32) -> f32 {
 // Joints of the base mesh at rest (the character's left; the right mirrors in x).
 const SHOULDER: vec3<f32> = vec3<f32>(0.168, 0.525, 0.015);
 const ELBOW: vec3<f32> = vec3<f32>(0.313, 0.349, 0.013);
-const WRIST: vec3<f32> = vec3<f32>(0.493, 0.19, 0.013);
+const WRIST: vec3<f32> = vec3<f32>(0.431, 0.245, 0.176);
 const HIP: vec3<f32> = vec3<f32>(0.11, 0.049, 0.012);
 const KNEE: vec3<f32> = vec3<f32>(0.158, -0.369, 0.032);
 const ANKLE: vec3<f32> = vec3<f32>(0.22, -0.745, 0.0);

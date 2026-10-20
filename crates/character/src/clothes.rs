@@ -26,6 +26,7 @@ const WAIST: f32 = 0.105;
 /// How far the cloth stands off the body, m (the shaders lift it a little more).
 const EASE_SHIRT: f32 = 0.003;
 const EASE_TROUSERS: f32 = 0.004;
+const EASE_SLEEVES: f32 = 0.005;
 /// Cross-sections of each trouser leg below the knee, and directions around every section.
 const SLICES: usize = 20;
 const AROUND: usize = 32;
@@ -140,6 +141,8 @@ pub fn dress(pack: &HumanPack, regions: &Regions, morphed: &[Vec3], skin: &mut S
             }
             let ease = if rest[b].y < WAIST {
                 EASE_TROUSERS
+            } else if arm_weight(pack, skin.base[b]) >= 0.3 {
+                EASE_SLEEVES
             } else {
                 EASE_SHIRT
             };
@@ -354,6 +357,53 @@ fn hang(
         (!verts.is_empty())
             .then(|| verts.iter().map(|v| morphed[*v as usize]).sum::<Vec3>() / verts.len() as f32)
     };
+    // Sleeves: sections across each arm, from the shoulder to the wrist, the forearm's no
+    // narrower than most of the elbow's.
+    for (s, side) in [("l", 1.0f32), ("r", -1.0)] {
+        let (Some(shoulder), Some(elbow), Some(wrist)) = (
+            joint(&format!("upper_arm_{s}")),
+            joint(&format!("lower_arm_{s}")),
+            joint(&format!("hand_{s}")),
+        ) else {
+            continue;
+        };
+        let arm: Vec<usize> = (0..q.len())
+            .filter(|b| cov[*b] && q[*b].x * side > 0.0 && arm_weight(pack, base[*b]) >= 0.3)
+            .collect();
+        // Each part of the arm in a frame of its own whose "up" runs along it.
+        for (from, to, wide) in [(elbow, wrist, true), (shoulder, elbow, false)] {
+            let w = (from - to).normalize_or(Vec3::Y);
+            let u = w.cross(Vec3::Z).normalize_or(Vec3::X);
+            let v = u.cross(w);
+            let local = |p: Vec3| {
+                let d = p - to;
+                Vec3::new(d.dot(u), d.dot(w), d.dot(v))
+            };
+            let len = (from - to).length();
+            let part: Vec<usize> = arm
+                .iter()
+                .copied()
+                .filter(|b| (0.0..len).contains(&local(q[*b]).y))
+                .collect();
+            let mut lq: Vec<Vec3> = q.iter().map(|p| local(*p)).collect();
+            let Some(mut col) = Column::new(&lq, &part, 16) else {
+                continue;
+            };
+            if wide {
+                let top = col.radii[col.radii.len() - 1];
+                for row in &mut col.radii {
+                    for (j, r) in row.iter_mut().enumerate() {
+                        *r = r.max(top[j] * 0.85);
+                    }
+                }
+            }
+            col.wrap(&mut lq, &part, |_| 1.0);
+            for b in part {
+                let l = lq[b];
+                q[b] = to + u * l.x + w * l.y + v * l.z;
+            }
+        }
+    }
     for (knee, side) in [("lower_leg_l", 1.0f32), ("lower_leg_r", -1.0)] {
         let Some(knee) = joint(knee) else {
             continue;
