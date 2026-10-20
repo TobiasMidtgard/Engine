@@ -498,7 +498,9 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
 /// into random blotches the size of a vertex, a camouflage pattern seen from orbit.
 pub(crate) fn variety(src: &ChunkSource, dir: DVec3, spacing: f64) -> f32 {
     let p = dir * (src.shape.radius_m / 18_000.0);
-    let octaves = ((18_000.0 / (2.0 * spacing)).log2() + 1.0).clamp(0.0, 4.0);
+    // Octaves down to three vertex spacings: finer ones alias into the mesh's squares between
+    // far vertices (the shader's per-pixel noise carries the detail there).
+    let octaves = ((18_000.0 / (3.0 * spacing)).log2() + 1.0).clamp(0.0, 4.0);
     let n = crate::noise::fbm_smooth(p, src.shape.seed ^ 0xB10E, octaves, 0.55);
     (n * 0.6 + 0.5).clamp(0.0, 1.0) as f32
 }
