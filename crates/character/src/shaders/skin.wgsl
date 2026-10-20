@@ -24,6 +24,8 @@ struct SkinIn {
     @location(3) m0: vec4<f32>,  // lips, nose, eyelids, brows
     @location(4) m1: vec4<f32>,  // cheeks, beard, scalp, ears
     @location(5) m2: vec4<f32>,  // cloth, forehead, chin, lid rim
+    @location(6) bones: vec4<u32>,
+    @location(7) weights: vec4<f32>,
 };
 
 struct SkinOut {
@@ -37,25 +39,33 @@ struct SkinOut {
     @location(6) curvature: f32,
     @location(7) clip_now: vec4<f32>,
     @location(8) clip_prev: vec4<f32>,
+    // 0 skin, 1 teeth, 2 gums, 3 tongue.
+    @location(9) @interpolate(flat) part: u32,
 };
 
 @vertex
-fn vs_skin(in: SkinIn) -> SkinOut {
+fn vs_skin(in: SkinIn, @builtin(vertex_index) vertex: u32) -> SkinOut {
     var out: SkinOut;
-    var p = in.position_curvature.xyz;
-    // The shirt stands off the skin.
-    p += in.normal.xyz * (0.004 * in.m2.x);
+    let m = morph_at(vertex);
+    let n = normalize(in.normal.xyz + m.dn);
+    // Clothes stand off the skin.
+    let lift = n * cloth_lift(in.rest.xyz, in.m2.x);
+    let now = skin_matrix(in.bones, in.weights, false);
+    let p = (now * vec4<f32>(in.position_curvature.xyz + m.dp + lift, 1.0)).xyz;
+    let p_prev = (skin_matrix(in.bones, in.weights, true)
+        * vec4<f32>(in.position_curvature.xyz + m.dp_prev + lift, 1.0)).xyz;
     let rel = model_point(p);
     out.rel = rel;
-    out.normal = model_dir(in.normal.xyz);
+    out.normal = model_dir((now * vec4<f32>(n, 0.0)).xyz);
     out.rest = in.rest.xyz;
     out.m0 = in.m0;
     out.m1 = in.m1;
     out.m2 = in.m2;
     out.curvature = in.position_curvature.w;
+    out.part = u32(in.normal.w + 0.5);
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     out.clip_now = motion_clip(rel);
-    out.clip_prev = prev_motion_clip(prev_model_point(p));
+    out.clip_prev = prev_motion_clip(prev_model_point(p_prev));
     return out;
 }
 
@@ -99,17 +109,27 @@ fn skin_relief(r: vec3<f32>, m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, footpr
     if (pore_vis > 0.0) {
         let c = cells3(r / pore_size);
         let pit = 1.0 - smoothstep(0.08, 0.42, c.f1);
-        let amount = (0.45 + 0.55 * nose) * (1.0 - lips) * (1.0 - 0.6 * lids) * (0.6 + 0.6 * c.id);
+        let amount = (0.55 + 0.6 * nose) * (1.0 - lips) * (1.0 - 0.6 * lids) * (0.6 + 0.6 * c.id);
         d.pore = pit * amount * pore_vis;
-        h -= d.pore * 0.00005;
+        h -= d.pore * 0.0001;
         // Raised skin between pores: a soft cellular ridge pattern.
-        h += smoothstep(0.0, 0.25, c.f2 - c.f1) * 0.00001 * pore_vis * (1.0 - lips);
+        h += smoothstep(0.0, 0.25, c.f2 - c.f1) * 0.000018 * pore_vis * (1.0 - lips);
     }
     // Fine grain.
     let grain_vis = saturate((0.0004 / max(footprint, 1e-7) - 1.0) * 0.5);
     if (grain_vis > 0.0) {
         let g = value_noise3(r * vec3<f32>(2600.0, 1400.0, 2600.0)) + value_noise3(r * vec3<f32>(1300.0, 2900.0, 1300.0));
-        h += (g - 1.0) * 0.000012 * grain_vis * (1.0 - cloth);
+        h += (g - 1.0) * 0.000018 * grain_vis * (1.0 - cloth);
+    }
+    // Skin lines: two crossing families of fine furrows (the diamond texture of real skin),
+    // broken up so they never read as a grid.
+    let lines_vis = saturate((0.0013 / max(footprint, 1e-7) - 1.0) * 0.5) * (1.0 - lips) * (1.0 - cloth);
+    if (lines_vis > 0.0) {
+        let wn = (value_noise3(r * 700.0) - 0.5) * 2.0;
+        let a = (r.x * 0.82 + r.y * 0.57) * 6283.0 / 1.3 + wn;
+        let b = (-r.x * 0.82 + r.y * 0.57 + r.z * 0.3) * 6283.0 / 1.1 + wn * 1.3;
+        let l = pow(1.0 - abs(sin(a)), 6.0) + pow(1.0 - abs(sin(b)), 6.0) * 0.8;
+        h -= l * 0.000014 * lines_vis * (0.6 + 0.6 * value_noise3(r * 150.0));
     }
     // Lips: fine vertical lines.
     if (lips > 0.01) {
@@ -148,9 +168,10 @@ fn skin_relief(r: vec3<f32>, m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, footpr
             let u = r - e;
             let under = length(u.xy) - character.rest_eye_l.w * 1.32;
             if (u.y < -0.004 && abs(u.x) < 0.02 && under > 0.0 && under < 0.012) {
-                let wave = under * 6283.0 / 3.2 + value_noise3(r * 300.0) * 2.0;
-                let fade = (1.0 - smoothstep(0.004, 0.012, under)) * (1.0 - smoothstep(0.012, 0.02, abs(u.x)));
-                w = max(w, pow(saturate(1.0 - abs(sin(wave))), 6.0) * fade * 0.8);
+                let wave = under * 6283.0 / 3.2 + value_noise3(r * 300.0) * 3.5;
+                let fade = (1.0 - smoothstep(0.004, 0.012, under)) * (1.0 - smoothstep(0.012, 0.02, abs(u.x)))
+                    * smoothstep(0.3, 0.6, value_noise3(r * vec3<f32>(250.0, 80.0, 250.0)));
+                w = max(w, pow(saturate(1.0 - abs(sin(wave))), 6.0) * fade * 0.55);
             }
         }
         // Neck rings: a few broken creases across the front of the neck.
@@ -165,16 +186,30 @@ fn skin_relief(r: vec3<f32>, m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, footpr
         d.wrinkle = w * wr * saturate((0.0015 / max(footprint, 1e-7) - 0.8));
         h -= d.wrinkle * 0.00022;
     }
-    // Knit of the shirt: jersey loops, and a ribbed band along the collar.
+    // Knit of the shirt: jersey loops, and a ribbed band along the collar. Twill of the
+    // trousers, a belt, and grained leather shoes with a welt above the sole.
     if (cloth > 0.01) {
         let vis = saturate((0.0015 / max(footprint, 1e-7) - 1.0));
-        let wale = sin(r.x * 6283.0 / 0.9) * 0.5 + 0.5;
-        let course = sin(r.y * 6283.0 / 0.7 + wale * 2.0);
-        var knit = wale * 0.00002 + course * 0.000008;
-        let collar = smoothstep(0.004, 0.0, collar_depth(r) - 0.012);
-        let rib = sin(atan2(r.x, r.z - character.rest_head.z) * 420.0) * 0.5 + 0.5;
-        knit = mix(knit, rib * 0.00006, collar);
-        h += cloth * knit * vis;
+        let g = garment(r);
+        var relief = 0.0;
+        if (g == 0u) {
+            let wale = sin(r.x * 6283.0 / 0.9) * 0.5 + 0.5;
+            let course = sin(r.y * 6283.0 / 0.7 + wale * 2.0);
+            relief = wale * 0.00002 + course * 0.000008;
+            let collar = smoothstep(0.004, 0.0, collar_depth(r) - 0.012);
+            let rib = sin(atan2(r.x, r.z - character.rest_head.z) * 420.0) * 0.5 + 0.5;
+            relief = mix(relief, rib * 0.00006, collar);
+        } else if (g == 1u) {
+            let twill = sin((r.y * 0.94 + (r.x + r.z) * 0.34) * 6283.0 / 0.8) * 0.5 + 0.5;
+            relief = twill * 0.000016 + value_noise3(r * 2500.0) * 0.000006;
+            // The belt's edges.
+            let belt = belt_band(r);
+            relief += belt * 0.00025 - belt * value_noise3(r * 3000.0) * 0.00001;
+        } else {
+            relief = value_noise3(r * vec3<f32>(1800.0, 1800.0, 1800.0)) * 0.000018;
+            relief -= smoothstep(0.0012, 0.0, abs(r.y - (SOLE_TOP + 0.004))) * 0.00012;
+        }
+        h += cloth * relief * vis;
     }
     d.height = h;
     return d;
@@ -198,7 +233,15 @@ struct SkinLight {
     curvature: f32,      // 1/m
     thin: f32,           // ears, nostrils: light shines through from behind
     occlusion: f32,
+    inside: f32,         // 1 inside the mouth: the light there has bounced off lips and cheeks
 };
+
+// What reaches the inside of the mouth: as bright, but warmed by the lips and cheeks it bounced
+// off on the way in (sky blue straight on the teeth reads as blue teeth).
+fn mouth_light(c: vec3<f32>, inside: f32) -> vec3<f32> {
+    let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return mix(c, lum * vec3<f32>(1.18, 0.92, 0.78), inside);
+}
 
 fn skin_spec(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, rough: f32) -> f32 {
     let h = normalize(l + v);
@@ -270,7 +313,7 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> vec3<f32> {
     let fill = frame.ambient.rgb;
     let sky_r = (sky_ambient_covered(nr, sky_vis) - fill) * sky_vis + fill;
     let sky_b = (sky_ambient_covered(nb, sky_vis) - fill) * sky_vis + fill;
-    let irradiance = mix(sky_b, sky_r, vec3<f32>(1.0, 0.5, 0.0)) * PI;
+    let irradiance = mouth_light(mix(sky_b, sky_r, vec3<f32>(1.0, 0.5, 0.0)) * PI, s.inside);
     let visibility = min(s.occlusion, screen_ao(rel));
     // Light bounces inside the skin, so occlusion darkens red less.
     let ao = ao_multibounce(visibility, s.albedo);
@@ -280,7 +323,7 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> vec3<f32> {
     let rough = s.roughness;
     let r = reflect(-v, s.n);
     let ssr = screen_reflection(rel);
-    let env = mix(sample_env_rough(r, rough) * sky_vis + fill, ssr.rgb, ssr.a);
+    let env = mix(mouth_light(sample_env_rough(r, rough) * sky_vis + fill, s.inside), ssr.rgb, ssr.a);
     let brdf = env_brdf_approx(vec3<f32>(0.028), rough, n_dot_v);
     color += env * brdf * s.specular * specular_occlusion(n_dot_v, visibility, rough * rough);
     // Peach fuzz catches light at grazing angles.
@@ -294,13 +337,59 @@ struct SkinSurface {
     light: SkinLight,
 };
 
+// Teeth (ivory enamel, a little translucent and greyer toward the biting edge), gums and
+// tongue (wet, red, the tongue rough with papillae).
+fn mouth_surface(in: SkinOut, front: bool) -> SkinLight {
+    var n = normalize(in.normal);
+    if (!front) { n = -n; }
+    let r = in.rest;
+    var s: SkinLight;
+    s.n = n;
+    s.n_soft = n;
+    s.curvature = 0.0;
+    s.thin = 0.0;
+    let v = value_noise3(r * 1500.0);
+    // Inside the mouth little of the sky reaches.
+    s.occlusion = 0.55;
+    s.inside = 1.0;
+    if (in.part == 1u) {
+        // Enamel: warm ivory, a soft sheen (a strong one mirrors the blue sky into the mouth).
+        s.albedo = vec3<f32>(0.86, 0.79, 0.65) * (0.94 + 0.08 * v);
+        s.roughness = 0.38;
+        s.specular = 0.22;
+        s.scatter = 0.35;
+        s.occlusion = 0.9;
+    } else if (in.part == 2u) {
+        s.albedo = vec3<f32>(0.5, 0.14, 0.13) * (0.9 + 0.2 * v);
+        s.roughness = 0.3;
+        s.specular = 0.6;
+        s.scatter = 1.0;
+    } else {
+        let papillae = value_noise3(r * 4000.0);
+        s.albedo = vec3<f32>(0.44, 0.17, 0.17) * (0.85 + 0.25 * papillae);
+        // Deep in the mouth.
+        s.occlusion = 0.4;
+        s.roughness = 0.4 + 0.2 * papillae;
+        s.specular = 0.5;
+        s.scatter = 1.0;
+    }
+    return s;
+}
+
 fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
+    if (in.part != 0u) {
+        return mouth_surface(in, front);
+    }
     let r = in.rest;
     let footprint = max(length(dpdx(r)), length(dpdy(r)));
     let m0 = in.m0;
     let m1 = in.m1;
-    // The shirt's edge per pixel (the vertex mask is as soft as the base mesh is coarse).
-    let m2 = vec4<f32>(smoothstep(-0.0008, 0.0008, collar_depth(r)), in.m2.yzw);
+    // The shirt's edge per pixel (the vertex mask is as soft as the base mesh is coarse); the
+    // vertex mask leaves the hands bare.
+    let m2 = vec4<f32>(
+        smoothstep(-0.0008, 0.0008, collar_depth(r)) * smoothstep(0.25, 0.75, in.m2.x),
+        in.m2.yzw,
+    );
     let lips = m0.x;
     let nose = m0.y;
     let lids = m0.z;
@@ -330,7 +419,9 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     let seed = character.look.w * 917.0;
     let mel_base = character.skin.x;
     let mottle = value_noise3(r * 40.0 + seed) - 0.5;
-    var mel = saturate(mel_base * (1.0 + 0.12 * mottle) + 0.03 * lids * (0.5 + mel_base));
+    // Blotches a few centimeters across, and finer ones a few millimeters across.
+    let fine = value_noise3(r * 300.0 + seed * 1.3) - 0.5;
+    var mel = saturate(mel_base * (1.0 + 0.12 * mottle + 0.08 * fine) + 0.03 * lids * (0.5 + mel_base));
     // Freckles and age spots.
     let fr = character.skin2.x;
     let age = character.look.x;
@@ -354,7 +445,7 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     // Blood: flushed cheeks, nose, ears and chin, mottled; muted under dark skin.
     let redness = character.skin.y;
     let flush = redness * (0.3 + 0.55 * cheeks + 0.6 * nose + 0.5 * ears + 0.25 * chin + 0.25 * lids)
-        * (0.85 + 0.3 * value_noise3(r * 120.0 + seed));
+        * (0.8 + 0.25 * value_noise3(r * 120.0 + seed) + 0.15 * value_noise3(r * 450.0 + seed * 0.7));
     let blood = saturate(flush) * (1.0 - 0.75 * saturate(mel * 1.3));
     albedo *= mix(vec3<f32>(1.0), vec3<f32>(1.0, 0.70, 0.72), blood);
     // Undertone: warm is golden-olive, cool is pinker.
@@ -408,21 +499,41 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     // Shine: oily T-zone, wet lips and lid rims, matte pores.
     let oil = character.skin.w;
     var rough = 0.56 - 0.12 * oil * saturate(forehead + nose + chin) - 0.08 * oil;
-    rough += (value_noise3(r * 300.0 + seed) - 0.5) * 0.06;
+    rough += (value_noise3(r * 300.0 + seed) - 0.5) * 0.06 + (value_noise3(r * 900.0 + seed) - 0.5) * 0.05;
     rough = mix(rough, 0.42, lips);
     rough = mix(rough, 0.18, rim);
     rough += 0.12 * d0.pore + 0.1 * d0.wrinkle + 0.06 * scalp_tint;
     var specular = (1.0 - 0.6 * d0.pore) * (1.0 - 0.3 * scalp_tint);
 
     var scatter = 1.0;
-    // The shirt: a slate heather knit, its collar band a shade darker.
+    // The shirt: a slate heather knit, its collar band a shade darker. Charcoal twill
+    // trousers with a dark leather belt; brown leather shoes on dark soles.
     if (cloth > 0.0) {
-        let heather = 0.82 + 0.36 * value_noise3(r * vec3<f32>(900.0, 300.0, 900.0) + seed);
-        let collar = smoothstep(0.004, 0.0, collar_depth(r) - 0.012);
-        let shirt = vec3<f32>(0.075, 0.085, 0.1) * heather * (1.0 - 0.25 * collar);
-        albedo = mix(albedo, shirt, cloth);
-        rough = mix(rough, 0.9, cloth);
-        specular = mix(specular, 0.25, cloth);
+        let g = garment(r);
+        var fabric = vec3<f32>(0.0);
+        var fabric_rough = 0.9;
+        var fabric_spec = 0.25;
+        if (g == 0u) {
+            let heather = 0.82 + 0.36 * value_noise3(r * vec3<f32>(900.0, 300.0, 900.0) + seed);
+            let collar = smoothstep(0.004, 0.0, collar_depth(r) - 0.012);
+            fabric = vec3<f32>(0.075, 0.085, 0.1) * heather * (1.0 - 0.25 * collar);
+        } else if (g == 1u) {
+            let mottle = 0.85 + 0.3 * value_noise3(r * vec3<f32>(400.0, 120.0, 400.0) + seed);
+            fabric = vec3<f32>(0.038, 0.04, 0.046) * mottle;
+            let belt = belt_band(r);
+            fabric = mix(fabric, vec3<f32>(0.03, 0.019, 0.012), belt);
+            fabric_rough = mix(0.85, 0.45, belt);
+            fabric_spec = mix(0.25, 0.6, belt);
+        } else {
+            let grain = 0.9 + 0.2 * value_noise3(r * 900.0 + seed);
+            let sole = smoothstep(SOLE_TOP + 0.001, SOLE_TOP - 0.001, r.y);
+            fabric = mix(vec3<f32>(0.05, 0.03, 0.018) * grain, vec3<f32>(0.018, 0.017, 0.016), sole);
+            fabric_rough = mix(0.38, 0.7, sole);
+            fabric_spec = 0.6;
+        }
+        albedo = mix(albedo, fabric, cloth);
+        rough = mix(rough, fabric_rough, cloth);
+        specular = mix(specular, fabric_spec, cloth);
         scatter = 1.0 - cloth;
     }
     var s: SkinLight;
@@ -468,12 +579,7 @@ fn fs_skin_prepass(in: SkinOut, @builtin(front_facing) front: bool) -> PrepassOu
     return prepass_output(n, 0.5, in.clip_now, in.clip_prev);
 }
 
-// How far below the shirt's neckline a rest position is, m (the neckline as in `mesh.rs`).
-fn collar_depth(r: vec3<f32>) -> f32 {
-    let theta = atan2(r.x, r.z - character.rest_head.z);
-    let neckline = 0.565 - 0.03 * (cos(theta) * 0.5 + 0.5);
-    return neckline - r.y;
-}
+
 
 fn model_dir_raw(d: vec3<f32>) -> vec3<f32> {
     return (character.model * vec4<f32>(d, 0.0)).xyz;

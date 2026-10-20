@@ -56,7 +56,11 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
   wood from a hill as a closed canopy rather than sticks with sky between them. Up close (within `tree_hero_distance_m`, 18 m
   for a grown tree) broadleaf trees and shrubs in full leaf draw their crown leaf by leaf: every
   leaf of every spray its own small quad turned its own way, with a single-leaf atlas (about
-  20k to 160k triangles). Grass, ferns and flowers switch to a
+  20k to 160k triangles). Past the drawn trees, `FarWoods` (`far_woods.rs`) draws cheap 3D
+  woods from 500 m to 5 km wherever the terrain's `engine_world::ForestCover` says the land is
+  wooded: streamed 256 m cells of crossed crown cards on the mass atlases, spaced 6 m apart at
+  500 m and wider with distance, so ridgelines and wood edges stand up off the ground. Places
+  with trees of their own (a valley of scenery trees) go in `FarWoods::keep_clear`. Grass, ferns and flowers switch to a
   far mesh (about a tenth of the triangles) past `EcologySettings::small_plant_lod_distance_m`
   and vanish beyond `small_plant_distance_m`. Each species has four mesh variants shared by all
   its plants, so a forest draws in a few instanced batches.

@@ -3,7 +3,7 @@
 use engine_core::prelude::*;
 use serde_json::{Value, json};
 
-use crate::appearance::Appearance;
+use crate::appearance::{Appearance, AppearanceExt};
 use crate::sliders::SLIDERS;
 use crate::{BuiltCharacter, CharacterDebug, HumanAssets, PackStatus};
 

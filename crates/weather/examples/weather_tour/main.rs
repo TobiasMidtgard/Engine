@@ -256,12 +256,14 @@ fn shots() -> Vec<Shot> {
             frames: 12,
             face_moon: false,
         },
-        // Fair-weather cumulus from up on a hill: their shadows dapple the land below.
+        // Fair-weather cumulus seen from a balloon with the sun behind it: their shadows
+        // dapple the land below. The camera turns once cumulus drift over the valley in front
+        // (see `wait_for_cloud_shadows`).
         Shot {
             name: "14_cloud_shadows_on_the_valley",
             setup: vec![dry(), set("partly_cloudy"), hour(11.0), advance(900.0)],
-            eye: DVec3::new(0.0, 80.0, 40.0),
-            target: DVec3::new(0.0, 0.0, -500.0),
+            eye: DVec3::new(0.0, 250.0, 0.0),
+            target: DVec3::new(0.0, 0.0, -1500.0),
             frames: 10,
             face_moon: false,
         },
@@ -315,6 +317,33 @@ fn wait_for_rainbow(app: &mut App, camera: Entity, eye: DVec3) {
         call_api(&mut app.world, "weather.advance", json!({"seconds": 60})).unwrap();
     }
     eprintln!("no rainbow weather found; shooting anyway");
+}
+
+/// Let the cumulus drift until the land in front of a camera with its back to the sun lies
+/// under the field (not in one of its clear gaps), then face that way.
+fn wait_for_cloud_shadows(app: &mut App, camera: Entity, eye: DVec3) {
+    for _ in 0..120 {
+        let lights = engine_weather::sky::compute_lights(
+            app.world.resource::<engine_weather::Sky>(),
+            app.world.resource::<engine_weather::Climate>(),
+            app.world.resource::<engine_weather::WeatherSim>(),
+        );
+        let sim = app.world.resource::<engine_weather::WeatherSim>();
+        let sun = lights.sun_dir.as_dvec3();
+        let away = -DVec2::new(sun.x, sun.z).normalize_or(DVec2::X);
+        let cover = (1..6)
+            .map(|k| sim.cell_at(away * (k as f64 * 1500.0)).coverage)
+            .sum::<f32>()
+            / 5.0;
+        if cover > 0.45 {
+            let ahead = DVec3::new(away.x, 0.0, away.y) * eye.y * 6.0;
+            *app.world.get_mut::<Transform>(camera).unwrap() = Transform::from_translation(eye)
+                .looking_at(DVec3::new(eye.x, 0.0, eye.z) + ahead, Vec3::Y);
+            return;
+        }
+        call_api(&mut app.world, "weather.advance", json!({"seconds": 60})).unwrap();
+    }
+    eprintln!("no cumulus over the valley found; shooting anyway");
 }
 
 fn main() {
@@ -397,6 +426,9 @@ fn main() {
         }
         if shot.name.contains("rainbow") {
             wait_for_rainbow(&mut app, camera, shot.eye);
+        }
+        if shot.name.contains("cloud_shadows") {
+            wait_for_cloud_shadows(&mut app, camera, shot.eye);
         }
         if shot.face_moon {
             // Where the moon is at the time the setup chose (the lights catch up next frame).

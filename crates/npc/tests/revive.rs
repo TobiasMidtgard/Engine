@@ -10,6 +10,7 @@ use engine_core::time::TimeSource;
 use engine_npc::agent::CombatStats;
 use engine_npc::*;
 use engine_world::locomotion::{LocomotionState, MoveIntent};
+use engine_world::physics::Collider;
 use engine_world::{DamageEvent, DamageKind, ProjectileTrace, WorldPlugin};
 
 fn app() -> App {
@@ -88,6 +89,14 @@ fn stats(app: &App, e: Entity) -> CombatStats {
     app.world.get::<NpcCombat>(e).unwrap().stats
 }
 
+fn clock(app: &App, e: Entity) -> f64 {
+    app.world.get::<NpcClock>(e).unwrap().now
+}
+
+fn moving(app: &App, e: Entity) -> Vec3 {
+    app.world.get::<MoveIntent>(e).unwrap().direction
+}
+
 /// Where the downed `e`'s chest lies: about 0.7 m behind its feet (it falls on its back).
 fn chest(app: &App, e: Entity) -> DVec3 {
     let t = app.world.get::<Transform>(e).unwrap();
@@ -105,10 +114,18 @@ fn a_squad_mate_revives_a_downed_ally_where_it_lies() {
     run(&mut app, 0.5);
     down(&mut app, ally);
     let lies = at(&app, ally);
-    let (mut kneeled, mut up_after) = (0.0f32, None);
+    let (mut kneeled, mut up_after, mut got_down) = (0.0f32, None, 0.0f32);
     for frame in 0..60 * 12 {
         app.update();
         let b = brain(&app, reviver);
+        // Down on its knees first, the weapon set down and the hands on: the revive counts
+        // only from then.
+        if b.action == NpcAction::Revive && b.revive_progress <= 0.0 && b.revive_kneel > 0.0 {
+            got_down = got_down.max(b.revive_kneel);
+        }
+        if b.revive_kneel < NpcBrain::REVIVE_KNEEL_SECS - 1e-3 {
+            assert_eq!(b.revive_progress, 0.0, "counts {:.2} s in", b.revive_kneel);
+        }
         if b.action == NpcAction::Revive && b.revive_progress > 0.0 {
             kneeled += 1.0 / 60.0;
             assert_eq!(b.revive, Some(ally));
@@ -124,10 +141,21 @@ fn a_squad_mate_revives_a_downed_ally_where_it_lies() {
         }
     }
     let up_after = up_after.expect("the ally was never revived");
-    // It took the walk over and the revive itself (not the instant it fell).
+    // It took the walk over, getting down and the revive itself (not the instant it fell):
+    // its hands on the chest for as long as its revive takes.
     assert!(
         kneeled >= settings.ally_revive_secs * 0.8 - 0.05,
         "knelt only {kneeled:.2} s"
+    );
+    let skills = NpcSkills::veteran();
+    let takes = settings.ally_revive_secs * (1.2 - 0.4 * skills.teamwork);
+    assert!(
+        (kneeled - takes).abs() < 0.05,
+        "the hands on {kneeled:.2} s, the revive takes {takes:.2} s"
+    );
+    assert!(
+        got_down >= NpcBrain::REVIVE_KNEEL_SECS - 0.02,
+        "got down in {got_down:.2} s"
     );
     assert!(up_after > 2.5, "up after {up_after:.2} s");
     // Up where it lay, hurt, and nobody left kneeling.
@@ -294,13 +322,38 @@ fn a_reviver_that_is_hit_lets_go_and_tries_again_later() {
     assert!(kneeling, "it never knelt");
     hit(&mut app, reviver, 10.0);
     run(&mut app, 0.05);
+    let hit_at = clock(&app, reviver);
     let b = brain(&app, reviver);
     assert_ne!(b.action, NpcAction::Revive, "it kept going after the hit");
     assert_eq!(b.revive_progress, 0.0);
     assert!(b.revive.is_none());
     assert_eq!(stats(&app, reviver).revives_aborted, 1);
-    // The ally stays down for a while (the progress was lost, and the reviver waits)...
-    run(&mut app, 1.5);
+    // It waits a while before it tries again (a veteran lets things calm down first)...
+    assert!(
+        b.revive_retry > hit_at + 1.5,
+        "it tries again {:.2} s after",
+        b.revive_retry - hit_at
+    );
+    for _ in 0..90 {
+        app.update();
+        let now = clock(&app, reviver);
+        assert_ne!(
+            brain(&app, reviver).action,
+            NpcAction::Revive,
+            "back at it {:.2} s after the hit",
+            now - hit_at
+        );
+        // ...first getting up off its knees where it is.
+        if now < hit_at + NpcBrain::REVIVE_STAND_SECS - 0.1 {
+            let m = moving(&app, reviver);
+            assert!(
+                m.length() < 1e-4,
+                "off at {m:?} {:.2} s after",
+                now - hit_at
+            );
+        }
+    }
+    // The ally stays down meanwhile (the progress was lost).
     assert!(downed(&app, ally));
     // ...then it comes back and finishes.
     let mut revived = false;
@@ -313,6 +366,92 @@ fn a_reviver_that_is_hit_lets_go_and_tries_again_later() {
     }
     assert!(revived, "it never came back to finish");
     assert_eq!(stats(&app, reviver).revives, 1);
+}
+
+#[test]
+fn turning_revives_off_midway_gets_nobody_up() {
+    let mut app = app();
+    let ally = mate(&mut app, DVec3::ZERO, NpcSkills::veteran());
+    let reviver = mate(&mut app, DVec3::new(14.0, 0.0, 6.0), NpcSkills::master());
+    run(&mut app, 0.5);
+    down(&mut app, ally);
+    let mut going = false;
+    for _ in 0..60 * 4 {
+        app.update();
+        if brain(&app, reviver).action == NpcAction::Revive {
+            going = true;
+            break;
+        }
+    }
+    assert!(going, "it never went");
+    app.world.resource_mut::<NpcSettings>().ally_revive_secs = 0.0;
+    for _ in 0..60 * 3 {
+        app.update();
+        assert!(downed(&app, ally), "got up with revives off");
+    }
+    assert_eq!(stats(&app, reviver).revives, 0);
+    assert_ne!(brain(&app, reviver).action, NpcAction::Revive);
+}
+
+#[test]
+fn a_mate_handed_to_game_code_on_its_way_holds_up_neither_the_revive_nor_the_timer() {
+    let mut app = app();
+    app.world.resource_mut::<NpcSettings>().revive_secs = 1.5;
+    let ally = mate(&mut app, DVec3::ZERO, NpcSkills::veteran());
+    let reviver = mate(&mut app, DVec3::new(14.0, 0.0, 6.0), NpcSkills::master());
+    run(&mut app, 0.5);
+    down(&mut app, ally);
+    let mut going = false;
+    for _ in 0..60 * 3 {
+        app.update();
+        if brain(&app, reviver).action == NpcAction::Revive {
+            going = true;
+            break;
+        }
+    }
+    assert!(going, "it never went");
+    app.world.get_mut::<Npc>(reviver).unwrap().active = false;
+    run(&mut app, 0.1);
+    assert!(brain(&app, reviver).revive.is_none(), "it kept its revive");
+    // The timer runs out as it would with nobody coming (up where it lies, a mate near).
+    run(&mut app, 1.6);
+    assert!(!downed(&app, ally), "the timer was held up");
+    assert_eq!(stats(&app, reviver).revives, 0);
+}
+
+#[test]
+fn a_mate_revives_the_ally_it_safely_can_rather_than_the_nearest_in_the_open() {
+    let mut app = app();
+    // The enemy far up the field; one ally down in the open in its view, another behind a
+    // wall, a little farther from the elite that would revive them.
+    let near = mate(&mut app, DVec3::ZERO, NpcSkills::soldier());
+    let far = mate(&mut app, DVec3::new(8.0, 0.0, 6.0), NpcSkills::soldier());
+    let reviver = mate(&mut app, DVec3::new(4.0, 0.0, 2.0), NpcSkills::elite());
+    app.world.spawn((
+        Transform::from_translation(DVec3::new(8.0, 1.5, 3.0)),
+        Collider::cuboid(Vec3::new(3.0, 1.5, 0.3)),
+    ));
+    let enemy = player(&mut app, DVec3::new(0.0, 0.0, -18.0));
+    run(&mut app, 1.5);
+    hit(&mut app, near, 1000.0);
+    hit(&mut app, far, 1000.0);
+    run(&mut app, 0.1);
+    assert!(downed(&app, near) && downed(&app, far));
+    let mut up = false;
+    for _ in 0..60 * 14 {
+        app.update();
+        if brain(&app, reviver).action == NpcAction::Revive {
+            assert_eq!(brain(&app, reviver).revive, Some(far), "went into the open");
+        }
+        if !downed(&app, far) {
+            up = true;
+            break;
+        }
+    }
+    assert!(up, "nobody revived the ally behind the wall");
+    assert!(downed(&app, near));
+    assert_eq!(stats(&app, reviver).revives, 1);
+    let _ = enemy;
 }
 
 #[test]
@@ -376,4 +515,354 @@ fn the_showcase_timer_waits_for_a_mate_and_sends_home_only_the_alone() {
     assert!(!downed(&w, ally));
     assert!(at(&w, ally).distance(home) < 0.5, "not sent home");
     assert_eq!(w.world.get::<NpcVitals>(ally).unwrap().fraction(), 1.0);
+}
+
+/// A fighter of squad 4 at `at` with `weapon`, facing −Z, as `role`.
+fn member(app: &mut App, at: DVec3, skills: NpcSkills, weapon: NpcWeapon, role: NpcRole) -> Entity {
+    let e = mate(app, at, skills);
+    app.world.entity_mut(e).insert((
+        weapon,
+        Npc {
+            role,
+            ..Default::default()
+        },
+    ));
+    e
+}
+
+/// The squad's medic: all teamwork, a carbine.
+fn medic(app: &mut App, at: DVec3, skills: NpcSkills) -> Entity {
+    let skills = NpcSkills {
+        teamwork: 1.0,
+        ..skills
+    };
+    member(app, at, skills, NpcWeapon::carbine(), NpcRole::Medic)
+}
+
+#[test]
+fn the_squads_medic_is_the_one_that_usually_revives() {
+    // Two mates nearer the downed ally than the medic is, in a few layouts.
+    let layouts = [
+        (
+            DVec3::new(7.0, 0.0, 3.0),
+            DVec3::new(-6.0, 0.0, 5.0),
+            DVec3::new(11.0, 0.0, 8.0),
+        ),
+        (
+            DVec3::new(-7.0, 0.0, 2.0),
+            DVec3::new(5.0, 0.0, 6.0),
+            DVec3::new(-10.0, 0.0, 9.0),
+        ),
+        (
+            DVec3::new(4.0, 0.0, 7.0),
+            DVec3::new(-8.0, 0.0, 1.0),
+            DVec3::new(9.0, 0.0, -7.0),
+        ),
+        (
+            DVec3::new(6.0, 0.0, -4.0),
+            DVec3::new(-5.0, 0.0, -6.0),
+            DVec3::new(-12.0, 0.0, 4.0),
+        ),
+    ];
+    let mut by_medic = 0;
+    for (n, (a, b, m)) in layouts.into_iter().enumerate() {
+        let mut app = app();
+        let ally = mate(&mut app, DVec3::ZERO, NpcSkills::soldier());
+        let mates = [
+            mate(&mut app, a, NpcSkills::veteran()),
+            mate(&mut app, b, NpcSkills::soldier()),
+        ];
+        let medic = medic(&mut app, m, NpcSkills::soldier());
+        run(&mut app, 0.5);
+        down(&mut app, ally);
+        for _ in 0..60 * 12 {
+            app.update();
+            if !downed(&app, ally) {
+                break;
+            }
+        }
+        assert!(!downed(&app, ally), "layout {n}: nobody revived the ally");
+        let medic_revived = stats(&app, medic).revives == 1;
+        let mates_revived: u32 = mates.iter().map(|&e| stats(&app, e).revives).sum();
+        assert_eq!(
+            u32::from(medic_revived) + mates_revived,
+            1,
+            "layout {n}: one revive"
+        );
+        by_medic += usize::from(medic_revived);
+    }
+    assert!(
+        by_medic >= 3,
+        "the medic revived in {by_medic} of 4 layouts"
+    );
+}
+
+#[test]
+fn melee_mates_screen_a_kneeling_medic_from_the_enemy() {
+    let mut app = app();
+    // The enemy up the field, looking at the spot; a medic that goes in all the same, and a
+    // swordsman off to the side.
+    let ally = mate(&mut app, DVec3::ZERO, NpcSkills::soldier());
+    let medic = medic(&mut app, DVec3::new(7.0, 0.0, 5.0), NpcSkills::rookie());
+    let sword = member(
+        &mut app,
+        DVec3::new(-8.0, 0.0, 7.0),
+        NpcSkills::veteran(),
+        NpcWeapon::sword(),
+        NpcRole::Fighter,
+    );
+    let enemy = player(&mut app, DVec3::new(2.0, 0.0, -16.0));
+    run(&mut app, 1.5);
+    down(&mut app, ally);
+    let (mut knelt_at, mut closest, mut on_the_enemy_side) = (None, f64::MAX, false);
+    for _ in 0..60 * 10 {
+        app.update();
+        let b = brain(&app, medic);
+        if !b.kneeling() || !downed(&app, ally) {
+            if knelt_at.is_some() {
+                break;
+            }
+            continue;
+        }
+        let now = clock(&app, medic);
+        let since = now - *knelt_at.get_or_insert(now);
+        let s = brain(&app, sword);
+        // Once the medic kneels, the swordsman screens it.
+        if since > 1.0 {
+            assert_eq!(s.role, "screen", "{since:.1} s into the kneel");
+            assert!(s.guard.is_some());
+        }
+        let (m, me, foe) = (at(&app, medic), at(&app, sword), at(&app, enemy));
+        let flat = |v: DVec3| DVec3::new(v.x, 0.0, v.z);
+        let gap = flat(me - m).length();
+        if gap < closest {
+            closest = gap;
+            on_the_enemy_side = flat(me - m).normalize().dot(flat(foe - m).normalize()) > 0.5;
+        }
+    }
+    assert!(knelt_at.is_some(), "the medic never knelt");
+    assert!(
+        closest < 3.0,
+        "the swordsman came no nearer than {closest:.1} m"
+    );
+    assert!(
+        on_the_enemy_side,
+        "the swordsman stood off the enemy's side"
+    );
+    // It holds there rather than running at the enemy 16 m off.
+    assert!(at(&app, sword).distance(at(&app, enemy)) > 8.0);
+}
+
+#[test]
+fn a_squad_without_a_medic_revives_as_before() {
+    let mut app = app();
+    let ally = mate(&mut app, DVec3::ZERO, NpcSkills::soldier());
+    let reviver = mate(&mut app, DVec3::new(9.0, 0.0, 4.0), NpcSkills::rookie());
+    let sword = member(
+        &mut app,
+        DVec3::new(-8.0, 0.0, 7.0),
+        NpcSkills::veteran(),
+        NpcWeapon::sword(),
+        NpcRole::Fighter,
+    );
+    let _enemy = player(&mut app, DVec3::new(2.0, 0.0, -16.0));
+    run(&mut app, 1.5);
+    down(&mut app, ally);
+    for _ in 0..60 * 10 {
+        app.update();
+        // Nobody screens and nobody guards a spot: there is no medic to cover.
+        let s = brain(&app, sword);
+        assert_ne!(s.role, "screen");
+        assert!(s.guard.is_none());
+        if !downed(&app, ally) {
+            break;
+        }
+    }
+    assert!(!downed(&app, ally), "nobody revived the ally");
+    // One of them got it up (as before: whoever is best placed).
+    assert_eq!(stats(&app, reviver).revives + stats(&app, sword).revives, 1);
+}
+
+#[test]
+fn a_mate_going_the_long_way_round_a_wall_is_not_taken_for_stuck() {
+    let mut app = app();
+    // The downed ally in a round pen open on the far side: the reviver's way there runs half
+    // way round the pen's wall, all that while no nearer to it as the crow flies.
+    let ally = mate(&mut app, DVec3::ZERO, NpcSkills::soldier());
+    let reviver = mate(&mut app, DVec3::new(0.0, 0.0, 7.0), NpcSkills::veteran());
+    for i in (0..20).filter(|i| !(9..=11).contains(i)) {
+        let a = i as f32 * std::f32::consts::TAU / 20.0;
+        app.world.spawn((
+            Transform::from_translation(DVec3::new(
+                6.0 * a.sin() as f64,
+                1.5,
+                6.0 * a.cos() as f64,
+            ))
+            .with_rotation(Quat::from_rotation_y(a)),
+            Collider::cuboid(Vec3::new(1.0, 1.5, 0.25)),
+        ));
+    }
+    run(&mut app, 0.5);
+    down(&mut app, ally);
+    // How long at a stretch the straight-line gap to the chest failed to shrink by 0.3 m.
+    let (mut closest, mut since, mut longest) = (f64::MAX, None::<f64>, 0.0f64);
+    let mut up = false;
+    for _ in 0..60 * 20 {
+        app.update();
+        let now = clock(&app, reviver);
+        let b = brain(&app, reviver);
+        if b.action == NpcAction::Revive && b.revive_kneel <= 0.0 {
+            let (p, c) = (at(&app, reviver), chest(&app, ally));
+            let gap = DVec2::new(p.x - c.x, p.z - c.z).length();
+            if gap + 0.3 < closest {
+                (closest, since) = (gap, None);
+            } else {
+                longest = longest.max(now - *since.get_or_insert(now));
+            }
+        }
+        if !downed(&app, ally) {
+            up = true;
+            break;
+        }
+    }
+    eprintln!("no nearer as the crow flies for {longest:.1} s at a stretch");
+    assert!(
+        longest > 2.5,
+        "the way round took no detour ({longest:.1} s): the wall does not test it"
+    );
+    assert!(up, "the reviver never got round the wall to its ally");
+    assert_eq!(stats(&app, reviver).revives_aborted, 0);
+    assert_eq!(stats(&app, reviver).revives, 1);
+}
+
+#[test]
+fn nobody_revives_a_mate_up_on_a_ledge_from_below() {
+    let mut app = app();
+    // A block 3 m high with no way up: the ally downed at its edge on top, a mate on the
+    // ground at its foot. However close it gets as the crow flies, it doesn't kneel there.
+    app.world.spawn((
+        Transform::from_translation(DVec3::new(0.0, 1.5, 0.0)),
+        Collider::cuboid(Vec3::new(2.0, 1.5, 2.0)),
+    ));
+    let ally = mate(&mut app, DVec3::new(1.5, 3.0, 0.5), NpcSkills::soldier());
+    let reviver = mate(&mut app, DVec3::new(4.0, 0.0, 1.5), NpcSkills::rookie());
+    run(&mut app, 0.5);
+    let up_there = at(&app, ally).y;
+    assert!(
+        up_there > 2.5,
+        "the ally is not up on the block ({up_there:.2} m)"
+    );
+    down(&mut app, ally);
+    let (mut tried, mut nearest) = (false, f64::MAX);
+    for _ in 0..60 * 12 {
+        app.update();
+        let b = brain(&app, reviver);
+        let (p, c) = (at(&app, reviver), chest(&app, ally));
+        if b.action == NpcAction::Revive {
+            tried = true;
+            nearest = nearest.min(DVec2::new(p.x - c.x, p.z - c.z).length());
+        }
+        assert!(
+            b.revive_kneel <= 0.0,
+            "kneels {:.1} m below its ally",
+            c.y - p.y
+        );
+        assert!(downed(&app, ally), "revived from below");
+    }
+    // It went, and got as near as would count as there (0.9 m) on level ground.
+    assert!(tried, "it never went to revive");
+    assert!(
+        nearest < 0.9,
+        "came no nearer than {nearest:.2} m as the crow flies"
+    );
+    assert_eq!(stats(&app, reviver).revives, 0);
+}
+
+/// The `exposed` scene with a medic of `skills` (teamwork 1, a carbine) as the squad mate,
+/// every body's randomness from `seed`.
+fn exposed_medic(skills: NpcSkills, seed: u64) -> (App, Entity, Entity, Entity) {
+    let mut app = app();
+    let ally = mate(&mut app, DVec3::ZERO, NpcSkills::soldier());
+    let medic = medic(&mut app, DVec3::new(4.0, 0.0, 2.0), skills);
+    app.world
+        .entity_mut(ally)
+        .insert(Seed(hash_u64(2 * seed + 1)));
+    app.world
+        .entity_mut(medic)
+        .insert(Seed(hash_u64(2 * seed + 2)));
+    let enemy = player(&mut app, DVec3::new(0.0, 0.0, -18.0));
+    run(&mut app, 1.5);
+    down(&mut app, ally);
+    (app, ally, medic, enemy)
+}
+
+/// An elite medic in the `exposed` scene: when it threw smoke (s after the mate went down)
+/// and how many of its frames kneeling were hidden from the enemy, of how many.
+fn smoke_and_revive(seed: u64) -> (f32, usize, usize) {
+    let (mut app, ally, medic, _enemy) = exposed_medic(NpcSkills::elite(), seed);
+    let eye = DVec3::new(0.0, 1.5, -18.0);
+    let (mut thrown, mut hidden_kneeling, mut kneeling, mut up) = (None, 0, 0, false);
+    for frame in 0..60 * 14 {
+        app.update();
+        let clouds = app.world.resource::<engine_npc::smoke::SmokeClouds>();
+        if thrown.is_none() && !clouds.clouds.is_empty() {
+            thrown = Some(frame as f32 / 60.0);
+            // Between the spot and the enemy, about 2 m off the chest.
+            let c = clouds.clouds[0].at;
+            assert!(
+                c.z < -1.0 && c.distance(chest(&app, ally)) < 2.6,
+                "seed {seed}: landed at {c:.1}"
+            );
+        }
+        let b = brain(&app, medic);
+        if b.action == NpcAction::Revive && b.revive_kneel > 0.0 {
+            kneeling += 1;
+            let head = at(&app, medic) + DVec3::Y * 0.9;
+            let seen = app
+                .world
+                .resource::<engine_world::Obscurance>()
+                .transmittance(eye, head);
+            if seen < 0.25 {
+                hidden_kneeling += 1;
+            }
+        }
+        if !downed(&app, ally) {
+            up = true;
+            break;
+        }
+    }
+    let thrown = thrown.unwrap_or_else(|| panic!("seed {seed}: the medic threw no smoke"));
+    assert!(
+        up,
+        "seed {seed}: the medic never revived its mate under the smoke"
+    );
+    assert_eq!(stats(&app, medic).revives, 1, "seed {seed}");
+    (thrown, hidden_kneeling, kneeling)
+}
+
+#[test]
+fn a_medic_smokes_a_watched_mate_and_goes_in_under_the_smoke() {
+    // An elite holds off a spot in the enemy's view (above); an elite medic throws smoke
+    // between them and goes in once the smoke hides the spot, in every run.
+    for (seed, (thrown, hidden, kneeling)) in each_seed(smoke_and_revive).into_iter().enumerate() {
+        assert!(
+            thrown < 3.0,
+            "seed {seed}: threw it only {thrown:.1} s after the mate went down"
+        );
+        assert!(
+            hidden * 10 >= kneeling * 9,
+            "seed {seed}: hidden from the enemy {hidden} of {kneeling} frames kneeling"
+        );
+    }
+}
+
+#[test]
+fn only_a_medic_carries_smoke() {
+    let (went, app, ally, ..) = exposed(NpcSkills::elite(), false, 6.0, 0);
+    assert!(!went && downed(&app, ally));
+    let clouds = app.world.resource::<engine_npc::smoke::SmokeClouds>();
+    assert!(
+        clouds.clouds.is_empty(),
+        "a fighter that is no medic threw smoke"
+    );
 }

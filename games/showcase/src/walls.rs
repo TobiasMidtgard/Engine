@@ -113,7 +113,7 @@ pub struct Placed {
 }
 
 /// Hero stone shades (a material per shade multiplies the palette's own colors).
-pub const HERO_SHADES: usize = 4;
+pub const HERO_SHADES: usize = 6;
 
 /// The class for a stone of `size` in `role`.
 fn hero_class(role: Role, size: Vec3) -> u8 {

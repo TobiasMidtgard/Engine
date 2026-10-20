@@ -2,7 +2,8 @@
 //! light behind, and a camera that orbits the subject's face.
 
 use engine::prelude::*;
-use engine_character::{Appearance, BuiltCharacter, CharacterQuality};
+use engine::world::animation::SkeletonPose;
+use engine_character::{Appearance, AppearanceExt, BuiltCharacter, CharacterBuild};
 
 use crate::Subject;
 
@@ -125,7 +126,7 @@ pub fn setup(mut commands: Commands, mut settings: ResMut<RenderSettings>) {
         Subject,
         Transform::from_xyz(0.0, 1.0, 0.0),
         Appearance::preset("Kofi").unwrap_or_default(),
-        CharacterQuality::default(),
+        CharacterBuild::portrait(),
     ));
 }
 
@@ -136,9 +137,27 @@ type SubjectQuery<'w, 's> = Query<
         &'static Transform,
         &'static Appearance,
         Option<&'static BuiltCharacter>,
+        Option<&'static SkeletonPose>,
     ),
     With<Subject>,
 >;
+
+/// A posed subject lives in the animation module's model space (facing −Z, standing on its
+/// origin): turn it to face the camera and stand it on the floor. At rest it's a bust at
+/// chest height.
+pub fn face_camera(mut q: Query<(&mut Transform, Has<SkeletonPose>), With<Subject>>) {
+    for (mut t, posed) in &mut q {
+        let want = if posed {
+            Transform::from_xyz(0.0, 0.0, 0.0)
+                .with_rotation(Quat::from_rotation_y(std::f32::consts::PI))
+        } else {
+            Transform::from_xyz(0.0, 1.0, 0.0)
+        };
+        if *t != want {
+            *t = want;
+        }
+    }
+}
 type CameraQuery<'w, 's> = Query<
     'w,
     's,
@@ -164,7 +183,7 @@ pub fn orbit_camera(
     mut backdrops: BackdropQuery,
     mut dragging: Local<bool>,
 ) {
-    let eyes = crate::subject_eyes(&subject)
+    let eyes = crate::subject_eyes(subject.iter())
         .map(|(p, _)| p)
         .unwrap_or(DVec3::new(0.0, 1.73, 0.12));
     let over_ui = ui.is_some_and(|u| u.hit.is_some());
@@ -184,8 +203,12 @@ pub fn orbit_camera(
                 orbit.distance = (orbit.distance * 0.9f32.powf(motion.scroll.y)).clamp(0.35, 3.5);
             }
         }
-        // Farther out, look at the shoulders too.
-        let drop = orbit.drop + (orbit.distance - 0.78).max(0.0) * 0.12;
+        // Farther out, look at the shoulders too (whole-body views set their own drop).
+        let drop = if orbit.distance > 2.5 {
+            orbit.drop
+        } else {
+            orbit.drop + (orbit.distance - 0.78).max(0.0) * 0.12
+        };
         let aim = eyes - DVec3::Y * drop as f64;
         let dir = Vec3::new(
             orbit.yaw.sin() * orbit.pitch.cos(),

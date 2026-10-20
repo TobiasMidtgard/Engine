@@ -73,6 +73,11 @@ compresses and stretches.
   frame and `AnimationEvent` at marked frames, so movement, AI, cloth and hair never depend
   on this crate. Footsteps and hoof falls become `GroundContact` (foot, paw or hoof, with
   load and speed) and `NoiseEvent`; hammer impacts are loud `NoiseEvent`s.
+- **Character contract.** People with an `Appearance` get a `Face` seeded from it that
+  writes `FaceControls` every frame (ARKit blink, squint, brows, cheeks, mouth and jaw
+  weights from effort, wincing and limpness, plus gaze from the humanoid head). While a
+  character module draws appearances (`AppearanceBodies`), those people keep their humanoid
+  `SkeletonPose` but no fetched model and no mesh of this crate's (`tests/appearance.rs`).
 - **Bodies on request.** A module that moves an entity itself puts `BodyRequest` on it
   (`human`, `horse`, `dog` or `spider`, an optional model path, height and seed) and gets a body:
   the paddock's rigs and models, animated from the entity's motion (`LocomotionState` or
@@ -193,9 +198,9 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 
 | Test case | What to look for |
 |---|---|
-| Hammer athlete | Two-handed sledgehammer strike onto a tractor tire: arms, shoulders and back tense on the strike and relax after; veins on the forearms; the ponytail whips; then a braced block |
+| Hammer athlete | Two-handed sledgehammer strike onto a tractor tire: arms, shoulders and back tense on the strike and relax after; veins on the forearms; the ponytail whips; then a braced guard (`hammer_block`, held while `hammer_guard` is on): left foot forward, knees bent, the handle across the face with the left hand on it by `ReachIk` |
 | Lifter | Double-biceps flex: biceps, shoulders and chest bulge |
-| Shirt reach | Sleeves bunch at the elbows on the wind-up, the shirt stretches across the back on the reach |
+| Shirt reach | Up on tiptoe to a hanging lantern: a glance up and a dip, the elbow leads the arm up, `ReachIk` puts the hand on the glass while `grip` closes it, then down onto the heels with a give in the knees; the sleeve bunches at the elbow and rides up the raised arm |
 | Step course | A walker climbs a ramp, crosses a deck, walks down stairs with feet planted by IK, then runs back leaning into the turns |
 | Footwork drill | An athlete walks a square facing one way: ahead, sidestepping left, backpedalling, sidestepping right, blending through the corners, every planted foot still on the sand (`paddock_footwork`) |
 | Shuttle lane | An athlete sprints the lane from a standing start (leaning into it), digs in to stop, runs back backwards, turns on the spot and runs sideways to the start; a coach beside the lane turns where they stand to keep watching, the head first and the feet stepping round once the runner is well off to one side (`paddock_sprint_start`, `paddock_sprint_stop`) |
@@ -207,6 +212,7 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 | Parked car | A second concept car inside the loop swings its doors open on their front hinges, holds, and shuts them with a bounce on the latch |
 | Stunt yard | A stuntman climbs the stairs to a deck, sprints across and goes off the edge braced, arms out and knees bent; he goes limp on the crash mat with the run's momentum, lies still with a slack face, gets up off his back or front with a hand and a knee planted, and walks back round (`paddock_stunt`, `paddock_stunt_down`, `paddock_stunt_up`; needs the physics module) |
 | Faces | The imported people blink at their own times and glance about; under effort (the lifter's flex, the hammer strike, the block) the eyes narrow, the brows knit and the teeth grit (`paddock_face`; needs the fetched characters) |
+| Spectators | Three people in front of the stage who ask a character module for their look (`AppearanceRequest`): two follow the hammer down to the tire, one glances about, all blink and wince at each strike (the `wince` clip; its `effort` squeezes the eyes and knits the brows through `FaceControls`). Without a character module they keep anim's bodies (`paddock_crowd`, `paddock_crowd_wince`) |
 
 `cargo run -p engine_anim --example anim_gallery --release -- out_dir` renders close-ups of
 each test case (`GALLERY_SEQUENCE=horse:11:12:0.05` renders a strip of one subject;

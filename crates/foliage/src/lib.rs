@@ -5,6 +5,7 @@ pub mod assets;
 pub mod cave;
 pub mod demo;
 pub mod ecology;
+pub mod far_woods;
 pub mod felling;
 pub mod grass;
 pub mod meshgen;
@@ -23,6 +24,7 @@ use engine_render::Mesh;
 
 pub use api::spawn_plant;
 pub use ecology::{InRegion, RegionState, RegionStats};
+pub use far_woods::{FarWoods, KeepClear};
 pub use felling::{ChopResult, FallingTree, FoliageCollider, LogPose, chop, fell_tree};
 pub use plant::{
     Disturbance, EcologyRegion, EcologySettings, FelledLog, Genes, Plant, PlantStage,
@@ -45,6 +47,8 @@ impl Plugin for FoliagePlugin {
             .init_resource::<ecology::GrowthClock>()
             .init_resource::<assets::FoliageVisuals>()
             .init_resource::<visuals::GlowLights>()
+            .init_resource::<FarWoods>()
+            .init_resource::<far_woods::FarWoodsState>()
             .add_message::<engine_world::DamageEvent>()
             .add_message::<engine_world::WorldImpulse>()
             .add_message::<engine_world::NoiseEvent>()
@@ -58,6 +62,12 @@ impl Plugin for FoliagePlugin {
             .register_resource::<EcologySettings>(
                 "Ecology speed (simulated years per second), pause, and draw distances for small \
                  plants, simplified and distant trees, and scenery trees (meters).",
+            )
+            .register_resource::<FarWoods>(
+                "Cheap 3D woods from start_m to end_m (meters from the camera) wherever the \
+                 terrain's ForestCover says the land is wooded: crossed crown cards in streamed \
+                 cells, spaced wider with distance. keep_clear leaves circles (a valley with \
+                 trees of its own) alone.",
             )
             .register_resource::<FoliageSeason>(
                 "The time of year plants show (day_of_year, 100 ≈ 10 April, 290 ≈ 17 October; \
@@ -145,7 +155,8 @@ impl Plugin for FoliagePlugin {
         )
         .add_systems(
             PostUpdate,
-            shift::follow_world_shift.in_set(engine_world::WorldShiftSet::Apply),
+            (shift::follow_world_shift, far_woods::follow_world_shift)
+                .in_set(engine_world::WorldShiftSet::Apply),
         )
         .add_systems(
             Update,
@@ -163,6 +174,7 @@ impl Plugin for FoliagePlugin {
                     season::apply_litter_color,
                     visuals::sync_plant_visuals,
                     scenery_tree::sync_scenery_trees,
+                    far_woods::stream_far_woods,
                     visuals::sync_log_visuals,
                     visuals::update_glow_lights,
                     visuals::pulse_glow,

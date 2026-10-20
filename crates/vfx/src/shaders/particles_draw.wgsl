@@ -143,7 +143,7 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) instance
         let l = frame.sun_dir.xyz;
         out.sun = vec3<f32>(dot(l, right), dot(l, up), dot(l, to_eye)) * saturate(frame.sun_dir.y * 8.0 + 0.4);
     }
-    if (out.sprite == 4u) {
+    if (out.sprite == 4u || out.sprite == 19u) {
         // Clear water mirrors the sky beyond it, just above the horizon.
         let ahead = normalize(vec3<f32>(rel.x, 0.0, rel.z) + vec3<f32>(1e-4, 0.0, 0.0));
         let sky = sample_env(normalize(ahead + vec3<f32>(0.0, 0.4, 0.0)));
@@ -537,6 +537,53 @@ fn blaze(c: vec2<f32>, t: f32, seed: f32) -> vec2<f32> {
     return vec2<f32>(heat, a);
 }
 
+// ---------------------------------------------------------------- jet
+// A fountain's jet from the nozzle (t = 0) up to where it turns over (t = 1): a glassy rod of
+// water, clear in the middle and mirroring the sky at its edges, streaked as it flows,
+// swelling as it slows and breaking into beads and threads near the top. c.x is across it.
+fn jet(c: vec2<f32>, t: f32, seed: f32, rgb: vec3<f32>, sky: vec3<f32>) -> vec4<f32> {
+    let time = frame.time.x % 3600.0;
+    let w = mix(0.3, 0.85, t * t);
+    let x = c.x / w;
+    if (abs(x) >= 1.0) { return vec4<f32>(0.0); }
+    let thick = sqrt(1.0 - x * x);
+    let rise = t * 7.0 - time * 5.0 + seed * 13.0;
+    let breakup = smoothstep(0.5, 0.95, t);
+    let beads = smoothstep(0.3, 0.55, value_noise2(vec2<f32>(x * 1.5 + seed * 7.0, rise)));
+    let keep = mix(1.0, beads, breakup) * smoothstep(1.0, 0.82, t) * smoothstep(0.0, 0.03, t);
+    let fresnel = pow(1.0 - thick, 2.0);
+    let a = (0.45 + 0.5 * fresnel) * keep * smoothstep(1.0, 0.8, abs(x));
+    let streaks = value_noise2(vec2<f32>(x * 5.0 + seed * 3.0, t * 2.5 - time * 3.0));
+    let glint = exp(-sq((x + 0.4) / 0.13)) * (0.6 + 0.8 * streaks);
+    // Air churned into the water whitens its core.
+    let col = rgb * (0.6 + 0.5 * thick) * (0.8 + 0.4 * streaks) + sky * (fresnel * 0.9 + glint);
+    return vec4<f32>(col, a);
+}
+
+// A column of light rising from a spell circle (t = 0 at the circle, 1 at its top): a hollow
+// tube whose walls pile up toward its silhouette, combed into rays that drift up and turn
+// slowly round it, brightest at its foot and fading out as it rises. c.x is across it.
+fn veil(c: vec2<f32>, t: f32, seed: f32) -> f32 {
+    let x = c.x;
+    if (abs(x) >= 1.0) { return 0.0; }
+    let time = frame.time.x % 3600.0;
+    let thick = sqrt(1.0 - x * x);
+    // Seen through, a tube's wall is crossed at a slant toward its edges.
+    let wall = min(0.3 / max(thick, 0.08), 2.0);
+    let around = asin(x);
+    let rise = t * 1.6 - time * 0.5;
+    // The near wall's rays turn one way across the column and the far wall's the other.
+    let near = value_noise2(vec2<f32>(around * 5.0 + time * 0.2 + seed * 11.0, rise));
+    let far = value_noise2(vec2<f32>(-around * 5.0 + time * 0.2 + seed * 5.0 + 17.0, rise * 1.2 + 3.1));
+    let rays = smoothstep(0.35, 0.85, near) + 0.7 * smoothstep(0.35, 0.85, far);
+    // Faint rings of light climb it now and then.
+    let pulse = pow(0.5 + 0.5 * sin((t * 2.0 - time * 0.45 + seed) * TAU), 8.0);
+    let fade = smoothstep(0.0, 0.04, t) * pow(1.0 - t, 1.8);
+    let foot = exp(-t * 14.0);
+    return fade * (wall * (0.25 + 0.75 * rays) * (1.0 + 0.6 * pulse) + foot * 1.5)
+        * smoothstep(1.0, 0.85, abs(x));
+}
+
 // ---------------------------------------------------------------- fireball
 // A ball of burning gas traced through its sprite as a volume: a lumpy body rolled into lobes,
 // glowing from inside (near white deep in, reddening outward), turning to dark soot from the
@@ -714,6 +761,15 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
         }
         case 12u: { // portal: the scene behind it swirled into a vortex
             return vortex(in, c, r, jx, jy);
+        }
+        case 19u: { // jet: a fountain's rising rod of water, from the nozzle (uv.y 0) up
+            let j = jet(c, in.uv.y, in.seed, rgb, in.glint);
+            rgb = j.rgb;
+            a = j.a;
+        }
+        case 20u: { // veil: a column of light rising from a spell circle (uv.y 0) up
+            a = veil(c, in.uv.y, in.seed);
+            rgb *= 1.0 + saturate(a - 0.6);
         }
         case 18u: { // fireball: a burning, cooling volume of gas
             let f = fireball(in, c);

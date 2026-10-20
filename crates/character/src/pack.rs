@@ -1,13 +1,13 @@
 //! The human pack: MakeHuman's CC0 base mesh (hm08) and its shape targets, baked into one file
 //! by `tools/bake_makehuman.py` (format in that script's docs) and fetched to
-//! `assets/fetched/character/human_hm08.bin`.
+//! `assets/fetched/character/human_hm08_v2.bin`.
 
 use std::collections::HashMap;
 
 use engine_core::math::{Vec2, Vec3};
 
 /// Asset path of the pack under the asset root.
-pub const PACK_PATH: &str = "fetched/character/human_hm08.bin";
+pub const PACK_PATH: &str = "fetched/character/human_hm08_v2.bin";
 
 /// One quad of the base mesh (triangles repeat their last corner).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -30,6 +30,14 @@ pub struct Target {
     pub deltas: Vec<Vec3>,
 }
 
+/// Up to four bones bending a vertex, as indices into [`HumanPack::bones`] and weights summing
+/// to 255 (all zero for a vertex no bone moves).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SkinWeights {
+    pub bones: [u8; 4],
+    pub weights: [u8; 4],
+}
+
 /// The base mesh and its targets.
 #[derive(Debug, Clone, Default)]
 pub struct HumanPack {
@@ -40,6 +48,13 @@ pub struct HumanPack {
     pub groups: Vec<String>,
     pub quads: Vec<Quad>,
     pub targets: Vec<Target>,
+    /// The animation module's humanoid bones the skin is weighted to (empty in packs without a
+    /// rig).
+    pub bones: Vec<String>,
+    /// Per vertex of `positions` (empty in packs without a rig).
+    pub skin: Vec<SkinWeights>,
+    /// Per bone of `bones`: the vertices whose mean is the joint (so joints follow the morphs).
+    pub joints: Vec<Vec<u32>>,
     by_name: HashMap<String, usize>,
 }
 
@@ -103,9 +118,9 @@ impl HumanPack {
             return Err("this is not a human pack (no MHPK header).".into());
         }
         let version = r.u32()?;
-        if version != 1 {
+        if version != 1 && version != 2 {
             return Err(format!(
-                "human pack version {version} is not supported (expected 1); update the engine or \
+                "human pack version {version} is not supported (expected 2); update the engine or \
                  fetch the pack again."
             ));
         }
@@ -171,7 +186,53 @@ impl HumanPack {
                 deltas,
             });
         }
-        Ok(Self::new(positions, uvs, groups, quads, targets))
+        let mut pack = Self::new(positions, uvs, groups, quads, targets);
+        if version >= 2 {
+            let nb = r.count("bones", 255)?;
+            for _ in 0..nb {
+                pack.bones.push(r.string()?);
+            }
+            pack.skin.reserve(nv);
+            for _ in 0..nv {
+                let b = r.take(8)?;
+                let s = SkinWeights {
+                    bones: [b[0], b[1], b[2], b[3]],
+                    weights: [b[4], b[5], b[6], b[7]],
+                };
+                if s.bones.iter().any(|i| *i as usize >= nb) {
+                    return Err("the human pack weights a vertex to a bone it doesn't have.".into());
+                }
+                pack.skin.push(s);
+            }
+            let nj = r.count("joints", nb)?;
+            pack.joints = vec![Vec::new(); nb];
+            for _ in 0..nj {
+                let name = r.string()?;
+                let n = r.count("joint vertices", nv)?;
+                let mut verts = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let i = r.u32()?;
+                    if i as usize >= nv {
+                        return Err(format!("joint {name} uses a vertex the mesh doesn't have."));
+                    }
+                    verts.push(i);
+                }
+                if let Some(b) = pack.bones.iter().position(|b| *b == name) {
+                    pack.joints[b] = verts;
+                }
+            }
+        }
+        Ok(pack)
+    }
+
+    /// Whether the pack can be posed (it has skin weights and joints).
+    pub fn has_rig(&self) -> bool {
+        !self.bones.is_empty() && self.skin.len() == self.positions.len()
+    }
+
+    /// Index of a bone in [`Self::bones`].
+    pub fn bone(&self, name: &str) -> Option<usize> {
+        self.bones.iter().position(|b| b == name)
     }
 
     /// A pack from parts (tests build small ones).
@@ -193,6 +254,9 @@ impl HumanPack {
             groups,
             quads,
             targets,
+            bones: Vec::new(),
+            skin: Vec::new(),
+            joints: Vec::new(),
             by_name,
         }
     }
@@ -281,6 +345,31 @@ mod tests {
         assert_eq!(t.indices, [2]);
         assert!((t.deltas[0].z - 0.01).abs() < 1e-6);
         assert_eq!(pack.group_vertices("body"), [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn version_2_packs_carry_skin_weights_and_joints() {
+        let mut b = tiny_pack_bytes();
+        b[4..8].copy_from_slice(&2u32.to_le_bytes());
+        b.extend(2u32.to_le_bytes());
+        write_str(&mut b, "hips");
+        write_str(&mut b, "head");
+        for v in 0..4u8 {
+            let head = if v >= 2 { 128u8 } else { 0 };
+            b.extend([0, 1, 0, 0, 255 - head, head, 0, 0]);
+        }
+        b.extend(1u32.to_le_bytes());
+        write_str(&mut b, "head");
+        b.extend(2u32.to_le_bytes());
+        b.extend(2u32.to_le_bytes());
+        b.extend(3u32.to_le_bytes());
+        let pack = HumanPack::parse(&b).unwrap();
+        assert!(pack.has_rig());
+        assert_eq!(pack.bones, ["hips", "head"]);
+        assert_eq!(pack.skin[3].weights, [127, 128, 0, 0]);
+        assert_eq!(pack.joints[pack.bone("head").unwrap()], [2, 3]);
+        assert!(pack.joints[0].is_empty());
+        assert!(!HumanPack::parse(&tiny_pack_bytes()).unwrap().has_rig());
     }
 
     #[test]

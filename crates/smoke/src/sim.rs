@@ -161,12 +161,20 @@ pub struct SmokeDomains {
 }
 
 impl SmokeDomains {
-    /// The volume that holds a point, if any (explicit volumes first).
+    /// The volume that holds a point, if any: explicit volumes first, and of those the one
+    /// with the finest cells, so a small fine box inside a big coarse one (a campfire's wisp
+    /// in a meadow's air) gets the smoke released in it.
     pub fn find(&self, p: DVec3) -> Option<usize> {
-        self.list
-            .iter()
-            .position(|d| d.owner.is_some() && d.domain.contains(p))
-            .or_else(|| self.list.iter().position(|d| d.domain.contains(p)))
+        let mut best: Option<usize> = None;
+        for (i, d) in self.list.iter().enumerate() {
+            if d.owner.is_some()
+                && d.domain.contains(p)
+                && best.is_none_or(|b| d.domain.cell < self.list[b].domain.cell)
+            {
+                best = Some(i);
+            }
+        }
+        best.or_else(|| self.list.iter().position(|d| d.domain.contains(p)))
     }
 
     pub fn add(&mut self, owner: Option<Entity>, domain: Domain) -> usize {

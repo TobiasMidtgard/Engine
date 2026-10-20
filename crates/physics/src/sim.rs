@@ -66,6 +66,13 @@ pub struct Region {
     /// Half rate: world time the region has not stepped yet, seconds (it steps every other
     /// frame, and its bodies are drawn moving on in between).
     pub owed_secs: f32,
+    /// The shortest substep a body here asks for (`FineSteps`), seconds ([`crate::fine`]).
+    pub fine: Option<f32>,
+    /// Holds bodies that ask for fine steps and others too (as of the last step).
+    pub mixed: bool,
+    /// How far the farthest-reaching body here reaches from its origin, meters (as of the
+    /// last step).
+    pub reach: f64,
     /// Colliders changed while frozen: refresh the query structures before the next query.
     pub needs_refresh: bool,
     /// Collision events from Rapier, drained after every substep.
@@ -116,6 +123,9 @@ impl Region {
             frozen: false,
             tier: 0,
             owed_secs: 0.0,
+            fine: None,
+            mixed: false,
+            reach: 0.0,
             needs_refresh: true,
             collector: Collector::default(),
             bounds: None,
@@ -375,6 +385,8 @@ pub struct BodyEntry {
     pub water_mark: Option<(f64, Vec3)>,
     /// How far its colliders reach from its origin, meters (never shrinks).
     pub reach: f32,
+    /// The longest substep it asks for (`FineSteps`), seconds.
+    pub fine: Option<f32>,
 }
 
 /// A collider: attached to a body, or static (copied into every region it can touch).
@@ -721,13 +733,13 @@ impl Simulation {
     }
 
     /// The region a new mover at `p` belongs to (created if needed): the nearest at full
-    /// detail in reach, or else the nearest in reach (a far one splits off again,
+    /// detail (and without fine steps) in reach, or else the nearest in reach (a far one splits off again,
     /// [`crate::lod`]).
     pub fn region_for_mover(&mut self, p: DVec3) -> RegionId {
         let join = self.settings.region_radius_m * 0.5;
         let full = self
             .live_regions()
-            .filter(|(_, r)| r.tier == 0)
+            .filter(|(_, r)| r.tier == 0 && r.fine.is_none())
             .map(|(id, r)| (id, r.anchor.distance(p)))
             .filter(|(_, d)| *d <= join)
             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -832,6 +844,7 @@ impl Simulation {
                 mass_dirty: true,
                 water_mark: None,
                 reach: 0.0,
+                fine: None,
             },
         );
     }
@@ -2050,9 +2063,16 @@ impl Simulation {
         // Movers nearer than the margin may touch before regions are looked at again.
         let margin = 20.0 + max_speed_step * 4.0;
         self.lod_clock += 1;
+        // Bodies asking for fine steps keep to regions of their own (`crate::fine`).
+        let fine_margin = crate::fine::MARGIN + max_speed_step * 3.0;
+        let newly_mixed = self.update_fine();
         if self.lod_clock.is_multiple_of(crate::lod::LOD_EVERY) {
             self.split_far(foci, margin * 1.25);
         }
+        if newly_mixed || self.lod_clock.is_multiple_of(crate::lod::LOD_EVERY) {
+            self.split_fine(fine_margin * 1.25);
+        }
+        self.update_fine();
         self.update_tiers(foci);
 
         let mut bounds: Vec<(RegionId, DVec3, DVec3)> = Vec::new();
@@ -2114,7 +2134,18 @@ impl Simulation {
                 };
                 if overlap && span < radius * 2.0 && live(self, a) && live(self, b) {
                     let (ta, tb) = (self.region(a).tier, self.region(b).tier);
-                    if ta != tb && !(look_closer && self.movers_close(a, b, margin)) {
+                    let (fa, fb) = (self.region(a).fine, self.region(b).fine);
+                    // Regions with and without fine steps are compared every step: the fine
+                    // ones are small, and their margin covers only a step of travel.
+                    let apart = if ta != tb {
+                        !(look_closer && self.movers_close(a, b, margin))
+                    } else if fa.is_some() != fb.is_some() {
+                        let (fine, other) = if fa.is_some() { (a, b) } else { (b, a) };
+                        !self.movers_near(fine, other, fine_margin)
+                    } else {
+                        false
+                    };
+                    if apart {
                         continue;
                     }
                     let (big, small) = if self.region(a).movers >= self.region(b).movers {
@@ -2123,7 +2154,9 @@ impl Simulation {
                         (b, a)
                     };
                     self.merge_regions(big, small);
-                    self.region_mut(big).tier = ta.min(tb);
+                    let merged = self.region_mut(big);
+                    merged.tier = ta.min(tb);
+                    merged.fine = crate::fine::finest(fa, fb);
                 }
             }
         }

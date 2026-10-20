@@ -5,10 +5,13 @@ pub mod appearance;
 pub mod build;
 pub mod demo;
 pub mod eyes;
+pub mod face;
 pub mod feature;
 pub mod mesh;
 pub mod morph;
+pub mod mouth;
 pub mod pack;
+pub mod rig;
 pub mod sliders;
 pub mod strands;
 pub mod subdiv;
@@ -19,9 +22,11 @@ use std::sync::{Arc, Mutex};
 
 use engine_core::prelude::*;
 use engine_render::RenderAppExt;
+pub use engine_world::character::CharacterQuality;
 
 pub use appearance::{
-    Ancestry, Appearance, Beard, BeardStyle, Brows, Eyes, Hair, HairColor, HairStyle, Skin,
+    Ancestry, AncestryExt, Appearance, AppearanceExt, AppearanceRequest, Beard, BeardStyle, Brows,
+    Eyes, Hair, HairColor, HairStyle, Skin,
 };
 pub use build::{BuildOptions, CharacterMeshes};
 pub use feature::{CharacterFeature, GpuCharacter};
@@ -29,10 +34,11 @@ pub use mesh::Region;
 pub use pack::HumanPack;
 
 /// How a character is built: how much of the body, how smooth, and whether it has hair.
+/// Without it, the shared [`CharacterQuality`] override picks the level (close-up by default).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct CharacterQuality {
-    /// `bust` (head, neck, shoulders) or `head`.
+pub struct CharacterBuild {
+    /// `body` (the whole person, dressed), `bust` (head, neck, shoulders) or `head`.
     pub region: RegionName,
     /// Skin subdivision levels, 0..=2 (2 for close-ups).
     pub levels: u32,
@@ -45,29 +51,57 @@ pub struct CharacterQuality {
 #[serde(rename_all = "lowercase")]
 pub enum RegionName {
     Head,
-    #[default]
     Bust,
+    #[default]
+    Body,
 }
 
-impl Default for CharacterQuality {
+impl Default for CharacterBuild {
     fn default() -> Self {
         Self {
-            region: RegionName::Bust,
+            region: RegionName::Body,
             levels: 2,
             hair: true,
         }
     }
 }
 
-impl CharacterQuality {
-    fn options(&self) -> BuildOptions {
+impl CharacterBuild {
+    /// A close-up of head and shoulders (the creator's portraits).
+    pub fn portrait() -> Self {
+        Self {
+            region: RegionName::Bust,
+            ..Self::default()
+        }
+    }
+
+    /// The build for a shared detail level.
+    pub fn for_quality(q: CharacterQuality) -> Self {
+        match q {
+            CharacterQuality::CloseUp => Self::default(),
+            CharacterQuality::Mid => Self {
+                levels: 1,
+                ..Self::default()
+            },
+            CharacterQuality::Crowd => Self {
+                levels: 0,
+                hair: false,
+                ..Self::default()
+            },
+        }
+    }
+
+    /// The build options this asks for.
+    pub fn options(&self) -> BuildOptions {
         BuildOptions {
             region: match self.region {
                 RegionName::Head => Region::Head,
                 RegionName::Bust => Region::Bust,
+                RegionName::Body => Region::Body,
             },
             levels: self.levels.min(2),
             hair: self.hair,
+            face: self.levels > 0,
         }
     }
 }
@@ -82,12 +116,14 @@ pub struct BuiltCharacter {
     pub uniform: GpuCharacter,
     /// The appearance it was built from.
     pub appearance: Appearance,
+    /// How it was built (a different region or detail level rebuilds it).
+    pub options: BuildOptions,
 }
 
 /// A build running in the background for an entity.
 #[derive(Component)]
 struct PendingBuild {
-    rx: Mutex<Receiver<(Appearance, CharacterMeshes)>>,
+    rx: Mutex<Receiver<(Appearance, BuildOptions, CharacterMeshes)>>,
 }
 
 /// Debug views of the character shaders: 0 off, 1 region masks, 2 normals, 3 curvature.
@@ -168,11 +204,8 @@ pub struct CharacterPlugin;
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CharacterDebug>()
-            .register_component::<Appearance>(
-                "A person's look: sex (0 female..1 male), age (years), muscle, weight, height, proportions (0..1), ancestry (african/asian/european weights), shape (face sliders by key, -1..1; see character.sliders), skin (melanin, redness, undertone, freckles, moles, oiliness, wrinkles, pores), eyes (melanin, lipochrome, limbal_ring, pupil, redness), hair (style Bald/Buzz/Short/Medium/Long/Bun, color {melanin, red, grey}, length, curl, recession), brows, beard (style None/Stubble/Short/Full/Goatee, density), seed.",
-            )
-            .register_component::<CharacterQuality>(
-                "How a character is built: region (bust or head), levels (skin subdivision 0..2), hair (grow strands).",
+            .register_component::<CharacterBuild>(
+                "How a character is built: region (body, bust or head), levels (skin subdivision 0..2), hair (grow strands).",
             )
             .register_resource::<CharacterDebug>(
                 "Character shader debug view: 0 off, 1 region masks, 2 normals, 3 curvature.",
@@ -180,11 +213,13 @@ impl Plugin for CharacterPlugin {
             .add_systems(Startup, load_pack)
             .add_systems(
                 Update,
-                (poll_pack, start_builds, finish_builds)
+                (answer_requests, poll_pack, start_builds, finish_builds)
                     .chain()
                     .in_set(CharacterSet),
             )
             .add_render_feature(CharacterFeature::default());
+        // Every person is drawn here, skinned to the animation module's pose.
+        engine_world::character::draws_appearances(app, "character");
         api::register(app);
     }
 }
@@ -239,6 +274,18 @@ fn poll_pack(assets: Option<ResMut<HumanAssets>>) {
     }
 }
 
+/// Gives every [`AppearanceRequest`] without an [`Appearance`] the person it asks for.
+fn answer_requests(
+    mut commands: Commands,
+    q: Query<(Entity, &AppearanceRequest), Without<Appearance>>,
+) {
+    for (entity, req) in &q {
+        commands
+            .entity(entity)
+            .insert(Appearance::from_request(req));
+    }
+}
+
 #[allow(clippy::type_complexity)]
 fn start_builds(
     mut commands: Commands,
@@ -246,6 +293,7 @@ fn start_builds(
     q: Query<(
         Entity,
         &Appearance,
+        Option<&CharacterBuild>,
         Option<&CharacterQuality>,
         Option<&BuiltCharacter>,
         Has<PendingBuild>,
@@ -257,17 +305,20 @@ fn start_builds(
     let (Some(pack), Some(regions)) = (assets.pack.clone(), assets.regions.clone()) else {
         return;
     };
-    for (entity, appearance, quality, built, pending) in &q {
-        if pending || built.is_some_and(|b| b.appearance == *appearance) {
+    for (entity, appearance, build, quality, built, pending) in &q {
+        let opts = build
+            .copied()
+            .unwrap_or_else(|| CharacterBuild::for_quality(quality.copied().unwrap_or_default()))
+            .options();
+        if pending || built.is_some_and(|b| b.appearance == *appearance && b.options == opts) {
             continue;
         }
         let a = appearance.clone();
-        let opts = quality.copied().unwrap_or_default().options();
         let (pack, regions) = (pack.clone(), regions.clone());
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             let meshes = build::build(&pack, &regions, &a, opts);
-            let _ = tx.send((a, meshes));
+            let _ = tx.send((a, opts, meshes));
         });
         commands
             .entity(entity)
@@ -291,7 +342,7 @@ fn finish_builds(
             .unwrap_or_else(|e| e.into_inner())
             .try_recv();
         match msg {
-            Ok((appearance, meshes)) => {
+            Ok((appearance, options, meshes)) => {
                 let Some(rest) = rest else {
                     continue;
                 };
@@ -304,6 +355,7 @@ fn finish_builds(
                         version,
                         uniform: GpuCharacter::new(&appearance, &rest, 0),
                         appearance,
+                        options,
                     });
             }
             Err(TryRecvError::Disconnected) => {

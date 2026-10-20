@@ -48,58 +48,6 @@ impl Builder {
         self.mesh.indices.extend_from_slice(&[b, b + 1, b + 2]);
     }
 
-    /// Box with half extents `h`, rotated by `rot` around its center.
-    pub fn cuboid(&mut self, center: Vec3, h: Vec3, rot: Quat, c: Vec3) {
-        let corner = |sx: f32, sy: f32, sz: f32| center + rot * (h * Vec3::new(sx, sy, sz));
-        let faces = [
-            // +X
-            [
-                corner(1., -1., 1.),
-                corner(1., -1., -1.),
-                corner(1., 1., -1.),
-                corner(1., 1., 1.),
-            ],
-            // -X
-            [
-                corner(-1., -1., -1.),
-                corner(-1., -1., 1.),
-                corner(-1., 1., 1.),
-                corner(-1., 1., -1.),
-            ],
-            // +Y
-            [
-                corner(-1., 1., 1.),
-                corner(1., 1., 1.),
-                corner(1., 1., -1.),
-                corner(-1., 1., -1.),
-            ],
-            // -Y
-            [
-                corner(-1., -1., -1.),
-                corner(1., -1., -1.),
-                corner(1., -1., 1.),
-                corner(-1., -1., 1.),
-            ],
-            // +Z
-            [
-                corner(-1., -1., 1.),
-                corner(1., -1., 1.),
-                corner(1., 1., 1.),
-                corner(-1., 1., 1.),
-            ],
-            // -Z
-            [
-                corner(1., -1., -1.),
-                corner(-1., -1., -1.),
-                corner(-1., 1., -1.),
-                corner(1., 1., -1.),
-            ],
-        ];
-        for f in faces {
-            self.quad(f, c);
-        }
-    }
-
     /// Smooth tapered tube from `a` (radius `ra`) to `b` (radius `rb`), colors per end.
     #[allow(clippy::too_many_arguments)]
     pub fn tube(

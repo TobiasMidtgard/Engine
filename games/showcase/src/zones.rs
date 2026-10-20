@@ -507,6 +507,16 @@ pub fn spawn_demos(
                         cell_m: 1.25,
                     },
                 ));
+                // Finer air around the campfire (fire::demo puts it 22 m west, 20.5 m south of
+                // the center), so its thin wisp isn't smeared into the meadow's coarse cells.
+                commands.spawn((
+                    Name::new("Fire demo: campfire smoke"),
+                    Transform::from_translation(z.center + DVec3::new(-25.0, -1.0, -19.5)),
+                    engine_smoke::SmokeVolume {
+                        size: [16.0, 13.0, 10.0],
+                        cell_m: 0.3,
+                    },
+                ));
             }
             "range" => engine_smoke::demo::spawn_demo(commands, z.center),
             "weather" => engine_weather::demo::spawn_demo(commands, z.center),
@@ -845,6 +855,11 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     "Skill tree",
                     r#"{"screen": "skills", "select": "c_cleave"}"#,
                 ),
+                ui(
+                    "market_crafting",
+                    "Crafting bench",
+                    r#"{"screen": "crafting", "select": "r_elixir"}"#,
+                ),
                 // Over the HUD, so the slow-motion gauge shows the world slowing.
                 View::new(
                     "market_wheel",
@@ -892,6 +907,31 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     .iter()
                     .map(water_view)
                     .collect();
+            // The jetty in a gale: from above the bank, past the boats and out over the open
+            // lake, where whitecaps and spray streaks run downwind.
+            if let Some(jetty) = views.iter().find(|v| v.key == "lake_jetty") {
+                let eye = DVec3::from(jetty.eye) + DVec3::Y * 1.5;
+                let water_y = jetty.target[1] - 0.3;
+                let out = DVec3::from(jetty.target) - eye;
+                let far = eye + DVec3::new(out.x, 0.0, out.z) * 4.0;
+                let gale = View::new(
+                    "lake_gale",
+                    "The lake in a gale: whitecaps, spray streaks and boats riding it out",
+                    eye.to_array(),
+                    [far.x, water_y, far.z],
+                    15.0,
+                )
+                .warmup(6.0)
+                .quick_warmup()
+                .on_arrive("weather.set", r#"{"preset": "storm", "transition_s": 0}"#)
+                // The wind takes a few minutes to rise to the storm's (the rain doesn't).
+                .on_arrive("weather.advance", r#"{"seconds": 180}"#)
+                .on_leave(
+                    "weather.set",
+                    r#"{"preset": "partly_cloudy", "transition_s": 0}"#,
+                );
+                views.push(gale);
+            }
             // The float test from the south, 8 m off and 3 m up, a few seconds after a drop
             // (its cycle runs while the camera is near, so it drops as the camera arrives).
             let at = (float_test(z) - z.center).to_array();

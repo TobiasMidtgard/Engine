@@ -2,182 +2,13 @@
 //! agent patches. Everything is plain numbers with physical or 0..1 meanings, so any mix is
 //! valid and sliders, presets and random people all use the same fields.
 
-use std::collections::BTreeMap;
-
 use engine_core::prelude::*;
 
 use crate::sliders::SLIDERS;
 
-/// A whole person's look.
-#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Appearance {
-    /// 0 female .. 1 male (blends the body and face shapes).
-    pub sex: f32,
-    /// Age, years (1..90). Shapes the skull, face and body, and ages the skin.
-    pub age: f32,
-    /// 0 slight .. 0.5 average .. 1 muscular.
-    pub muscle: f32,
-    /// 0 thin .. 0.5 average .. 1 heavy.
-    pub weight: f32,
-    /// 0 short .. 0.5 average .. 1 tall (for the sex and age).
-    pub height: f32,
-    /// 0 uncommon .. 0.5 regular .. 1 idealized body proportions.
-    pub proportions: f32,
-    /// Shape of the face and body by ancestry (relative weights, normalized when used).
-    pub ancestry: Ancestry,
-    /// Face, neck and torso sliders by key (`nose-hump-decr|incr`, `head-oval`), -1..1 (0..1
-    /// for one-sided ones). Missing keys are 0. See [`crate::sliders::SLIDERS`].
-    pub shape: BTreeMap<String, f32>,
-    pub skin: Skin,
-    pub eyes: Eyes,
-    pub hair: Hair,
-    pub brows: Brows,
-    pub beard: Beard,
-    /// Varies what has no slider (pores, freckle and hair placement), the same way every run.
-    pub seed: u64,
-}
-
-impl Default for Appearance {
-    fn default() -> Self {
-        Self {
-            sex: 0.5,
-            age: 25.0,
-            muscle: 0.5,
-            weight: 0.5,
-            height: 0.5,
-            proportions: 0.5,
-            ancestry: Ancestry::default(),
-            shape: BTreeMap::new(),
-            skin: Skin::default(),
-            eyes: Eyes::default(),
-            hair: Hair::default(),
-            brows: Brows::default(),
-            beard: Beard::default(),
-            seed: 0,
-        }
-    }
-}
-
-/// Relative weights of MakeHuman's three ancestry shape sets.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Ancestry {
-    pub african: f32,
-    pub asian: f32,
-    pub european: f32,
-}
-
-impl Default for Ancestry {
-    fn default() -> Self {
-        Self {
-            african: 1.0 / 3.0,
-            asian: 1.0 / 3.0,
-            european: 1.0 / 3.0,
-        }
-    }
-}
-
-impl Ancestry {
-    /// The weights scaled to sum to 1 (equal thirds when all are 0 or negative).
-    pub fn normalized(&self) -> [f32; 3] {
-        let w = [self.african, self.asian, self.european].map(|v| v.max(0.0));
-        let sum: f32 = w.iter().sum();
-        if sum <= 1e-6 {
-            [1.0 / 3.0; 3]
-        } else {
-            w.map(|v| v / sum)
-        }
-    }
-}
-
-/// Skin, from the two pigments that color real skin.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Skin {
-    /// Melanin, 0 very fair .. 1 very dark.
-    pub melanin: f32,
-    /// Blood under the skin, 0 pale .. 1 ruddy (cheeks, nose, ears and lips flush more).
-    pub redness: f32,
-    /// -1 cool (pink) .. 1 warm (olive, golden).
-    pub undertone: f32,
-    /// Freckles, 0 none .. 1 many (more on the nose and cheeks).
-    pub freckles: f32,
-    /// Moles and small marks, 0 none .. 1 many.
-    pub moles: f32,
-    /// Shine of the skin, 0 matte .. 1 oily (most on the forehead, nose and chin).
-    pub oiliness: f32,
-    /// Wrinkles beyond what the age gives, -1 smooth .. 1 deeply lined.
-    pub wrinkles: f32,
-    /// Size of the pores, 0 fine .. 1 coarse.
-    pub pores: f32,
-}
-
-impl Default for Skin {
-    fn default() -> Self {
-        Self {
-            melanin: 0.25,
-            redness: 0.4,
-            undertone: 0.1,
-            freckles: 0.0,
-            moles: 0.2,
-            oiliness: 0.35,
-            wrinkles: 0.0,
-            pores: 0.45,
-        }
-    }
-}
-
-/// Eyes.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Eyes {
-    /// Iris melanin, 0 blue .. 0.35 green/hazel .. 1 dark brown.
-    pub melanin: f32,
-    /// Extra yellow-green in the iris (hazel, green), 0..1.
-    pub lipochrome: f32,
-    /// Darkness of the ring around the iris, 0..1.
-    pub limbal_ring: f32,
-    /// Pupil opening, 0 small .. 1 wide.
-    pub pupil: f32,
-    /// Redness of the whites, 0..1.
-    pub redness: f32,
-}
-
-impl Default for Eyes {
-    fn default() -> Self {
-        Self {
-            melanin: 0.6,
-            lipochrome: 0.2,
-            limbal_ring: 0.6,
-            pupil: 0.4,
-            redness: 0.15,
-        }
-    }
-}
-
-/// Hair color from its pigments (as in real hair: eumelanin browns and blacks, pheomelanin
-/// reds and blondes), plus grey.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HairColor {
-    /// Eumelanin, 0 platinum .. 0.3 blonde .. 0.6 brown .. 1 black.
-    pub melanin: f32,
-    /// Share of red pheomelanin, 0 ash .. 1 auburn/ginger.
-    pub red: f32,
-    /// Grey or white hairs mixed in, 0..1.
-    pub grey: f32,
-}
-
-impl Default for HairColor {
-    fn default() -> Self {
-        Self {
-            melanin: 0.65,
-            red: 0.2,
-            grey: 0.0,
-        }
-    }
-}
+pub use engine_world::character::{
+    Ancestry, Appearance, AppearanceRequest, Beard, Brows, Eyes, Hair, HairColor, Skin,
+};
 
 /// Scalp hair styles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -208,7 +39,15 @@ impl HairStyle {
         HairStyle::Bun,
     ];
 
-    /// Lowercase name, as the API takes it.
+    /// The style for an id (`Appearance.hair.style`, any case); unknown ids are the default.
+    pub fn from_id(id: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|s| s.name().eq_ignore_ascii_case(id))
+            .unwrap_or_default()
+    }
+
+    /// Lowercase id, as `Appearance.hair.style` and the API take it.
     pub fn name(self) -> &'static str {
         match self {
             HairStyle::Bald => "bald",
@@ -217,51 +56,6 @@ impl HairStyle {
             HairStyle::Medium => "medium",
             HairStyle::Long => "long",
             HairStyle::Bun => "bun",
-        }
-    }
-}
-
-/// Scalp hair.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Hair {
-    pub style: HairStyle,
-    pub color: HairColor,
-    /// Length multiplier for the style, 0.5..1.5.
-    pub length: f32,
-    /// 0 straight .. 1 curly.
-    pub curl: f32,
-    /// Hairline height, 0 full .. 1 receded (temples back, thinner crown).
-    pub recession: f32,
-}
-
-impl Default for Hair {
-    fn default() -> Self {
-        Self {
-            style: HairStyle::Short,
-            color: HairColor::default(),
-            length: 1.0,
-            curl: 0.15,
-            recession: 0.0,
-        }
-    }
-}
-
-/// Eyebrows.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Brows {
-    /// 0 sparse .. 1 thick.
-    pub thickness: f32,
-    /// Color; `None` takes the scalp hair's.
-    pub color: Option<HairColor>,
-}
-
-impl Default for Brows {
-    fn default() -> Self {
-        Self {
-            thickness: 0.5,
-            color: None,
         }
     }
 }
@@ -291,7 +85,15 @@ impl BeardStyle {
         BeardStyle::Goatee,
     ];
 
-    /// Lowercase name, as the API takes it.
+    /// The style for an id (`Appearance.beard.style`, any case); unknown ids are the default.
+    pub fn from_id(id: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|s| s.name().eq_ignore_ascii_case(id))
+            .unwrap_or_default()
+    }
+
+    /// Lowercase id, as `Appearance.beard.style` and the API take it.
     pub fn name(self) -> &'static str {
         match self {
             BeardStyle::None => "none",
@@ -299,27 +101,6 @@ impl BeardStyle {
             BeardStyle::Short => "short",
             BeardStyle::Full => "full",
             BeardStyle::Goatee => "goatee",
-        }
-    }
-}
-
-/// Facial hair.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Beard {
-    pub style: BeardStyle,
-    /// 0 patchy .. 1 dense.
-    pub density: f32,
-    /// Color; `None` takes the scalp hair's.
-    pub color: Option<HairColor>,
-}
-
-impl Default for Beard {
-    fn default() -> Self {
-        Self {
-            style: BeardStyle::None,
-            density: 0.8,
-            color: None,
         }
     }
 }
@@ -352,14 +133,72 @@ impl Rng {
     }
 }
 
-impl Appearance {
+/// Ancestry weights as this crate uses them.
+pub trait AncestryExt {
+    /// The weights scaled to sum to 1 (equal thirds when all are 0 or negative).
+    fn normalized(&self) -> [f32; 3];
+}
+
+impl AncestryExt for Ancestry {
+    fn normalized(&self) -> [f32; 3] {
+        let w = [self.african, self.asian, self.european].map(|v| v.max(0.0));
+        let sum: f32 = w.iter().sum();
+        if sum <= 1e-6 {
+            [1.0 / 3.0; 3]
+        } else {
+            w.map(|v| v / sum)
+        }
+    }
+}
+
+/// What this crate adds to the shared [`Appearance`]: sliders by key, derived colors and
+/// styles, random people and presets. `use engine_character::AppearanceExt` to call them.
+pub trait AppearanceExt: Sized {
     /// A slider's value (0 when unset).
-    pub fn slider(&self, key: &str) -> f32 {
+    fn slider(&self, key: &str) -> f32;
+    /// Set a slider, clamped to its range. Returns false for an unknown key.
+    fn set_slider(&mut self, key: &str, value: f32) -> bool;
+    /// Set a slider on both sides of the face (`eye-height1-decr|incr` sets the `l-` and `r-`
+    /// sliders; keys without sides are set as they are). Returns false if nothing matched.
+    fn set_symmetric(&mut self, key: &str, value: f32) -> bool;
+    /// The scalp hair color.
+    fn hair_color(&self) -> HairColor;
+    /// The brows' color (their own, or the hair's darkened slightly as brows usually are).
+    fn brow_color(&self) -> HairColor;
+    /// The beard's color.
+    fn beard_color(&self) -> HairColor;
+    /// The scalp hair style (unknown ids are the default).
+    fn hair_style(&self) -> HairStyle;
+    /// The beard style (unknown ids are none).
+    fn beard_style(&self) -> BeardStyle;
+    /// A plausible random person, the same for the same seed.
+    fn random(seed: u64) -> Self;
+    /// A person for a request: the request's own seed, its sex, age range and ancestry where
+    /// given, and, with a family seed, ancestry, coloring and face shape drawn toward the
+    /// family's so relatives look related but distinct.
+    fn from_request(req: &AppearanceRequest) -> Self;
+    /// Named starting points for the creator (and the showcase): `(name, appearance)`.
+    fn presets() -> Vec<(&'static str, Self)>;
+    /// A preset by name (any case).
+    fn preset(name: &str) -> Option<Self>;
+}
+
+impl AppearanceExt for Appearance {
+    fn hair_style(&self) -> HairStyle {
+        HairStyle::from_id(&self.hair.style)
+    }
+
+    fn beard_style(&self) -> BeardStyle {
+        BeardStyle::from_id(&self.beard.style)
+    }
+
+    /// A slider's value (0 when unset).
+    fn slider(&self, key: &str) -> f32 {
         self.shape.get(key).copied().unwrap_or(0.0)
     }
 
     /// Set a slider, clamped to its range. Returns false for an unknown key.
-    pub fn set_slider(&mut self, key: &str, value: f32) -> bool {
+    fn set_slider(&mut self, key: &str, value: f32) -> bool {
         let Some(s) = SLIDERS.iter().find(|s| s.key() == key) else {
             return false;
         };
@@ -370,19 +209,19 @@ impl Appearance {
 
     /// Set a slider on both sides of the face (`eye-height1-decr|incr` sets the `l-` and `r-`
     /// sliders; keys without sides are set as they are). Returns false if nothing matched.
-    pub fn set_symmetric(&mut self, key: &str, value: f32) -> bool {
+    fn set_symmetric(&mut self, key: &str, value: f32) -> bool {
         let both = self.set_slider(&format!("l-{key}"), value);
         let right = self.set_slider(&format!("r-{key}"), value);
         both | right || self.set_slider(key, value)
     }
 
     /// The scalp hair color.
-    pub fn hair_color(&self) -> HairColor {
+    fn hair_color(&self) -> HairColor {
         self.hair.color
     }
 
     /// The brows' color (their own, or the hair's darkened slightly as brows usually are).
-    pub fn brow_color(&self) -> HairColor {
+    fn brow_color(&self) -> HairColor {
         self.brows.color.unwrap_or(HairColor {
             melanin: (self.hair.color.melanin + 0.08).min(1.0),
             grey: self.hair.color.grey * 0.6,
@@ -391,7 +230,7 @@ impl Appearance {
     }
 
     /// The beard's color.
-    pub fn beard_color(&self) -> HairColor {
+    fn beard_color(&self) -> HairColor {
         self.beard.color.unwrap_or(HairColor {
             red: (self.hair.color.red + 0.1).min(1.0),
             grey: (self.hair.color.grey * 1.2).min(1.0),
@@ -402,123 +241,33 @@ impl Appearance {
     /// A plausible random person, the same for the same seed: ancestry, sex and age first,
     /// then coloring that goes with them (darker skin, hair and eyes where melanin is common),
     /// then small face differences on every slider so no two look alike.
-    pub fn random(seed: u64) -> Self {
-        let mut r = Rng::new(seed);
-        let mut a = Appearance {
-            seed,
-            ..Default::default()
+    fn random(seed: u64) -> Self {
+        generate(seed, &AppearanceRequest::default())
+    }
+
+    fn from_request(req: &AppearanceRequest) -> Self {
+        let mut a = generate(req.seed, req);
+        let Some(family) = req.family else {
+            return a;
         };
-        // One main ancestry, sometimes mixed.
-        let main = (r.f32() * 3.0) as usize % 3;
-        let mut w = [0.05f32; 3];
-        w[main] = 1.0;
-        if r.f32() < 0.35 {
-            w[(main + 1 + (r.f32() * 2.0) as usize) % 3] += r.range(0.2, 0.8);
-        }
-        a.ancestry = Ancestry {
-            african: w[0],
-            asian: w[1],
-            european: w[2],
-        };
-        let n = a.ancestry.normalized();
-        a.sex = if r.f32() < 0.5 {
-            r.range(0.0, 0.1)
-        } else {
-            r.range(0.9, 1.0)
-        };
-        a.age = (r.range(18.0, 75.0) + r.normal() * 4.0).clamp(16.0, 88.0);
-        a.muscle = (0.5 + r.normal() * 0.15).clamp(0.05, 0.95);
-        a.weight = (0.5 + r.normal() * 0.15).clamp(0.05, 0.95);
-        a.height = (0.5 + r.normal() * 0.2).clamp(0.0, 1.0);
-        // Pigments by ancestry, with spread.
-        let mel =
-            n[0] * r.range(0.62, 0.95) + n[1] * r.range(0.22, 0.45) + n[2] * r.range(0.04, 0.4);
-        a.skin = Skin {
-            melanin: mel.clamp(0.0, 1.0),
-            redness: r.range(0.25, 0.6),
-            undertone: n[1] * 0.6 + n[2] * r.range(-0.4, 0.4) + n[0] * 0.2,
-            freckles: if mel < 0.2 && r.f32() < 0.4 {
-                r.range(0.2, 0.8)
-            } else {
-                0.0
-            },
-            moles: r.range(0.0, 0.5),
-            oiliness: r.range(0.15, 0.6),
-            wrinkles: r.normal() * 0.25,
-            pores: r.range(0.3, 0.7),
-        };
-        let light = n[2] * (1.0 - mel * 1.5).clamp(0.0, 1.0);
-        a.eyes = Eyes {
-            melanin: if r.f32() < light {
-                r.range(0.0, 0.45)
-            } else {
-                r.range(0.6, 1.0)
-            },
-            lipochrome: r.range(0.0, 0.6),
-            limbal_ring: r.range(0.4, 0.9),
-            pupil: r.range(0.25, 0.55),
-            redness: r.range(0.05, 0.3),
-        };
-        let fair_hair = r.f32() < light * 0.8;
-        let grey = ((a.age - 38.0) / 35.0).clamp(0.0, 1.0) * r.range(0.4, 1.0);
-        a.hair = Hair {
-            style: if a.sex > 0.5 {
-                [
-                    HairStyle::Buzz,
-                    HairStyle::Short,
-                    HairStyle::Short,
-                    HairStyle::Medium,
-                ][(r.f32() * 4.0) as usize % 4]
-            } else {
-                [
-                    HairStyle::Medium,
-                    HairStyle::Long,
-                    HairStyle::Bun,
-                    HairStyle::Short,
-                ][(r.f32() * 4.0) as usize % 4]
-            },
-            color: HairColor {
-                melanin: if fair_hair {
-                    r.range(0.1, 0.5)
-                } else {
-                    r.range(0.6, 1.0)
-                },
-                red: if fair_hair && r.f32() < 0.25 {
-                    r.range(0.6, 1.0)
-                } else {
-                    r.range(0.0, 0.3)
-                },
-                grey,
-            },
-            length: r.range(0.8, 1.2),
-            curl: n[0] * r.range(0.6, 1.0) + (1.0 - n[0]) * r.range(0.0, 0.4),
-            recession: if a.sex > 0.5 {
-                (((a.age - 30.0) / 40.0).clamp(0.0, 1.0) * r.range(0.0, 1.0)).min(0.9)
-            } else {
-                0.0
-            },
-        };
-        a.brows.thickness = r.range(0.3, 0.8) + a.sex * 0.15;
-        if a.sex > 0.5 && a.age > 17.0 {
-            a.beard = Beard {
-                style: BeardStyle::ALL[(r.f32() * 5.0) as usize % 5],
-                density: r.range(0.5, 1.0),
-                color: None,
-            };
-        }
-        for s in SLIDERS {
-            if s.group == "torso" {
-                continue;
-            }
-            let v = r.normal() * 0.22;
-            let v = if s.low.is_empty() { v.abs() * 0.6 } else { v };
-            a.set_slider(&s.key(), v);
+        let f = generate(family, req);
+        let toward = |own: f32, fam: f32, k: f32| own + (fam - own) * k;
+        a.ancestry = f.ancestry;
+        a.skin.melanin = toward(a.skin.melanin, f.skin.melanin, 0.8);
+        a.skin.undertone = toward(a.skin.undertone, f.skin.undertone, 0.7);
+        a.skin.freckles = toward(a.skin.freckles, f.skin.freckles, 0.6);
+        a.eyes.melanin = toward(a.eyes.melanin, f.eyes.melanin, 0.6);
+        a.hair.color.melanin = toward(a.hair.color.melanin, f.hair.color.melanin, 0.7);
+        a.hair.color.red = toward(a.hair.color.red, f.hair.color.red, 0.7);
+        for (key, v) in &f.shape {
+            let own = a.slider(key);
+            a.shape.insert(key.clone(), toward(own, *v, 0.5));
         }
         a
     }
 
     /// Named starting points for the creator (and the showcase): `(name, appearance)`.
-    pub fn presets() -> Vec<(&'static str, Appearance)> {
+    fn presets() -> Vec<(&'static str, Appearance)> {
         let mut out = Vec::new();
         let mut astrid = Appearance {
             sex: 0.0,
@@ -542,7 +291,7 @@ impl Appearance {
                 ..Default::default()
             },
             hair: Hair {
-                style: HairStyle::Long,
+                style: HairStyle::Long.name().into(),
                 color: HairColor {
                     melanin: 0.25,
                     red: 0.08,
@@ -579,7 +328,7 @@ impl Appearance {
                 ..Default::default()
             },
             hair: Hair {
-                style: HairStyle::Buzz,
+                style: HairStyle::Buzz.name().into(),
                 color: HairColor {
                     melanin: 1.0,
                     red: 0.05,
@@ -589,7 +338,7 @@ impl Appearance {
                 ..Default::default()
             },
             beard: Beard {
-                style: BeardStyle::Short,
+                style: BeardStyle::Short.name().into(),
                 density: 0.85,
                 color: None,
             },
@@ -620,7 +369,7 @@ impl Appearance {
                 ..Default::default()
             },
             hair: Hair {
-                style: HairStyle::Bun,
+                style: HairStyle::Bun.name().into(),
                 color: HairColor {
                     melanin: 0.95,
                     red: 0.05,
@@ -658,7 +407,7 @@ impl Appearance {
                 ..Default::default()
             },
             hair: Hair {
-                style: HairStyle::Short,
+                style: HairStyle::Short.name().into(),
                 color: HairColor {
                     melanin: 0.85,
                     red: 0.1,
@@ -668,7 +417,7 @@ impl Appearance {
                 ..Default::default()
             },
             beard: Beard {
-                style: BeardStyle::Full,
+                style: BeardStyle::Full.name().into(),
                 density: 0.9,
                 color: None,
             },
@@ -702,7 +451,7 @@ impl Appearance {
                 ..Default::default()
             },
             hair: Hair {
-                style: HairStyle::Short,
+                style: HairStyle::Short.name().into(),
                 color: HairColor {
                     melanin: 0.4,
                     red: 0.1,
@@ -737,7 +486,7 @@ impl Appearance {
                 ..Default::default()
             },
             hair: Hair {
-                style: HairStyle::Medium,
+                style: HairStyle::Medium.name().into(),
                 color: HairColor {
                     melanin: 0.95,
                     red: 0.05,
@@ -747,7 +496,7 @@ impl Appearance {
                 ..Default::default()
             },
             beard: Beard {
-                style: BeardStyle::Stubble,
+                style: BeardStyle::Stubble.name().into(),
                 density: 0.9,
                 color: None,
             },
@@ -760,12 +509,138 @@ impl Appearance {
     }
 
     /// The preset with this name (any case).
-    pub fn preset(name: &str) -> Option<Appearance> {
+    fn preset(name: &str) -> Option<Appearance> {
         Self::presets()
             .into_iter()
             .find(|(n, _)| n.eq_ignore_ascii_case(name))
             .map(|(_, a)| a)
     }
+}
+
+/// A random person, with the request's sex, age range and ancestry where it gives them (drawn
+/// before what depends on them, so coloring matches the ancestry).
+fn generate(seed: u64, req: &AppearanceRequest) -> Appearance {
+    let mut r = Rng::new(seed);
+    let mut a = Appearance {
+        seed,
+        ..Default::default()
+    };
+    // One main ancestry, sometimes mixed.
+    let main = (r.f32() * 3.0) as usize % 3;
+    let mut w = [0.05f32; 3];
+    w[main] = 1.0;
+    if r.f32() < 0.35 {
+        w[(main + 1 + (r.f32() * 2.0) as usize) % 3] += r.range(0.2, 0.8);
+    }
+    a.ancestry = req.ancestry.unwrap_or(Ancestry {
+        african: w[0],
+        asian: w[1],
+        european: w[2],
+    });
+    let n = a.ancestry.normalized();
+    let sex = if r.f32() < 0.5 {
+        r.range(0.0, 0.1)
+    } else {
+        r.range(0.9, 1.0)
+    };
+    a.sex = req.sex.map_or(sex, |s| s.clamp(0.0, 1.0));
+    let age = (r.range(18.0, 75.0) + r.normal() * 4.0).clamp(16.0, 88.0);
+    a.age = match req.age {
+        Some([lo, hi]) => {
+            let (lo, hi) = (lo.min(hi).clamp(1.0, 90.0), lo.max(hi).clamp(1.0, 90.0));
+            lo + (hi - lo) * ((age - 16.0) / 72.0).clamp(0.0, 1.0)
+        }
+        None => age,
+    };
+    a.muscle = (0.5 + r.normal() * 0.15).clamp(0.05, 0.95);
+    a.weight = (0.5 + r.normal() * 0.15).clamp(0.05, 0.95);
+    a.height = (0.5 + r.normal() * 0.2).clamp(0.0, 1.0);
+    // Pigments by ancestry, with spread.
+    let mel = n[0] * r.range(0.62, 0.95) + n[1] * r.range(0.22, 0.45) + n[2] * r.range(0.04, 0.4);
+    a.skin = Skin {
+        melanin: mel.clamp(0.0, 1.0),
+        redness: r.range(0.25, 0.6),
+        undertone: n[1] * 0.6 + n[2] * r.range(-0.4, 0.4) + n[0] * 0.2,
+        freckles: if mel < 0.2 && r.f32() < 0.4 {
+            r.range(0.2, 0.8)
+        } else {
+            0.0
+        },
+        moles: r.range(0.0, 0.5),
+        oiliness: r.range(0.15, 0.6),
+        wrinkles: r.normal() * 0.25,
+        pores: r.range(0.3, 0.7),
+    };
+    let light = n[2] * (1.0 - mel * 1.5).clamp(0.0, 1.0);
+    a.eyes = Eyes {
+        melanin: if r.f32() < light {
+            r.range(0.0, 0.45)
+        } else {
+            r.range(0.6, 1.0)
+        },
+        lipochrome: r.range(0.0, 0.6),
+        limbal_ring: r.range(0.4, 0.9),
+        pupil: r.range(0.25, 0.55),
+        redness: r.range(0.05, 0.3),
+    };
+    let fair_hair = r.f32() < light * 0.8;
+    let grey = ((a.age - 38.0) / 35.0).clamp(0.0, 1.0) * r.range(0.4, 1.0);
+    a.hair = Hair {
+        style: if a.sex > 0.5 {
+            [
+                HairStyle::Buzz,
+                HairStyle::Short,
+                HairStyle::Short,
+                HairStyle::Medium,
+            ][(r.f32() * 4.0) as usize % 4]
+        } else {
+            [
+                HairStyle::Medium,
+                HairStyle::Long,
+                HairStyle::Bun,
+                HairStyle::Short,
+            ][(r.f32() * 4.0) as usize % 4]
+        }
+        .name()
+        .into(),
+        color: HairColor {
+            melanin: if fair_hair {
+                r.range(0.1, 0.5)
+            } else {
+                r.range(0.6, 1.0)
+            },
+            red: if fair_hair && r.f32() < 0.25 {
+                r.range(0.6, 1.0)
+            } else {
+                r.range(0.0, 0.3)
+            },
+            grey,
+        },
+        length: r.range(0.8, 1.2),
+        curl: n[0] * r.range(0.6, 1.0) + (1.0 - n[0]) * r.range(0.0, 0.4),
+        recession: if a.sex > 0.5 {
+            (((a.age - 30.0) / 40.0).clamp(0.0, 1.0) * r.range(0.0, 1.0)).min(0.9)
+        } else {
+            0.0
+        },
+    };
+    a.brows.thickness = r.range(0.3, 0.8) + a.sex * 0.15;
+    if a.sex > 0.5 && a.age > 17.0 {
+        a.beard = Beard {
+            style: BeardStyle::ALL[(r.f32() * 5.0) as usize % 5].name().into(),
+            density: r.range(0.5, 1.0),
+            color: None,
+        };
+    }
+    for s in SLIDERS {
+        if s.group == "torso" {
+            continue;
+        }
+        let v = r.normal() * 0.22;
+        let v = if s.low.is_empty() { v.abs() * 0.6 } else { v };
+        a.set_slider(&s.key(), v);
+    }
+    a
 }
 
 #[cfg(test)]
@@ -780,7 +655,7 @@ mod tests {
         let partial: Appearance =
             serde_json::from_str(r#"{"sex": 1.0, "hair": {"style": "Long"}}"#).unwrap();
         assert_eq!(partial.sex, 1.0);
-        assert_eq!(partial.hair.style, HairStyle::Long);
+        assert_eq!(partial.hair_style(), HairStyle::Long);
         assert_eq!(partial.age, 25.0);
     }
 
@@ -814,5 +689,44 @@ mod tests {
         assert!(Appearance::presets().len() >= 5);
         assert_eq!(Appearance::preset("kofi").unwrap().sex, 1.0);
         assert!(Appearance::preset("nobody").is_none());
+    }
+
+    #[test]
+    fn requests_keep_their_limits_and_families_look_related() {
+        let req = |seed, family| AppearanceRequest {
+            seed,
+            family,
+            sex: Some(1.0),
+            age: Some([20.0, 30.0]),
+            ancestry: None,
+        };
+        let a = Appearance::from_request(&req(5, None));
+        assert_eq!(a, Appearance::from_request(&req(5, None)));
+        assert_eq!(a.seed, 5);
+        assert_eq!(a.sex, 1.0);
+        assert!((20.0..=30.0).contains(&a.age), "{}", a.age);
+        // Two members of one family are closer than two strangers.
+        let (b, c) = (
+            Appearance::from_request(&req(1, Some(9))),
+            Appearance::from_request(&req(2, Some(9))),
+        );
+        let (x, y) = (
+            Appearance::from_request(&req(1, None)),
+            Appearance::from_request(&req(2, None)),
+        );
+        assert_eq!(b.ancestry, c.ancestry);
+        let face = |p: &Appearance, q: &Appearance| -> f32 {
+            p.shape
+                .keys()
+                .map(|k| (p.slider(k) - q.slider(k)).abs())
+                .sum()
+        };
+        assert!(
+            face(&b, &c) < face(&x, &y) * 0.8,
+            "{} {}",
+            face(&b, &c),
+            face(&x, &y)
+        );
+        assert_ne!(b, c);
     }
 }
