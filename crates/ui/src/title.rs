@@ -98,18 +98,10 @@ fn paint_backdrop(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
         at(0.90, 0.40),
         h * 0.045,
         PlanetKind::Barren.look(8.4),
-        1.2 + t * 0.03,
+        0.4 + t * 0.012,
         0.1,
         -2.3,
         0.55,
-        0.0,
-    );
-    // A faint lens streak from the sun.
-    ctx.line(
-        sun,
-        at(0.95, 0.62),
-        2.0 * ctx.px,
-        Color::hex(0xffe8c0).with_alpha(0.035),
         0.0,
     );
     // Darker on the left, where the menu sits.
