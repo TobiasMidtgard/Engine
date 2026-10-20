@@ -99,17 +99,27 @@ fn skin_relief(r: vec3<f32>, m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, footpr
     if (pore_vis > 0.0) {
         let c = cells3(r / pore_size);
         let pit = 1.0 - smoothstep(0.08, 0.42, c.f1);
-        let amount = (0.45 + 0.55 * nose) * (1.0 - lips) * (1.0 - 0.6 * lids) * (0.6 + 0.6 * c.id);
+        let amount = (0.55 + 0.6 * nose) * (1.0 - lips) * (1.0 - 0.6 * lids) * (0.6 + 0.6 * c.id);
         d.pore = pit * amount * pore_vis;
-        h -= d.pore * 0.00005;
+        h -= d.pore * 0.0001;
         // Raised skin between pores: a soft cellular ridge pattern.
-        h += smoothstep(0.0, 0.25, c.f2 - c.f1) * 0.00001 * pore_vis * (1.0 - lips);
+        h += smoothstep(0.0, 0.25, c.f2 - c.f1) * 0.000018 * pore_vis * (1.0 - lips);
     }
     // Fine grain.
     let grain_vis = saturate((0.0004 / max(footprint, 1e-7) - 1.0) * 0.5);
     if (grain_vis > 0.0) {
         let g = value_noise3(r * vec3<f32>(2600.0, 1400.0, 2600.0)) + value_noise3(r * vec3<f32>(1300.0, 2900.0, 1300.0));
-        h += (g - 1.0) * 0.000012 * grain_vis * (1.0 - cloth);
+        h += (g - 1.0) * 0.000018 * grain_vis * (1.0 - cloth);
+    }
+    // Skin lines: two crossing families of fine furrows (the diamond texture of real skin),
+    // broken up so they never read as a grid.
+    let lines_vis = saturate((0.0013 / max(footprint, 1e-7) - 1.0) * 0.5) * (1.0 - lips) * (1.0 - cloth);
+    if (lines_vis > 0.0) {
+        let wn = (value_noise3(r * 700.0) - 0.5) * 2.0;
+        let a = (r.x * 0.82 + r.y * 0.57) * 6283.0 / 1.3 + wn;
+        let b = (-r.x * 0.82 + r.y * 0.57 + r.z * 0.3) * 6283.0 / 1.1 + wn * 1.3;
+        let l = pow(1.0 - abs(sin(a)), 6.0) + pow(1.0 - abs(sin(b)), 6.0) * 0.8;
+        h -= l * 0.000014 * lines_vis * (0.6 + 0.6 * value_noise3(r * 150.0));
     }
     // Lips: fine vertical lines.
     if (lips > 0.01) {
@@ -148,9 +158,10 @@ fn skin_relief(r: vec3<f32>, m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, footpr
             let u = r - e;
             let under = length(u.xy) - character.rest_eye_l.w * 1.32;
             if (u.y < -0.004 && abs(u.x) < 0.02 && under > 0.0 && under < 0.012) {
-                let wave = under * 6283.0 / 3.2 + value_noise3(r * 300.0) * 2.0;
-                let fade = (1.0 - smoothstep(0.004, 0.012, under)) * (1.0 - smoothstep(0.012, 0.02, abs(u.x)));
-                w = max(w, pow(saturate(1.0 - abs(sin(wave))), 6.0) * fade * 0.8);
+                let wave = under * 6283.0 / 3.2 + value_noise3(r * 300.0) * 3.5;
+                let fade = (1.0 - smoothstep(0.004, 0.012, under)) * (1.0 - smoothstep(0.012, 0.02, abs(u.x)))
+                    * smoothstep(0.3, 0.6, value_noise3(r * vec3<f32>(250.0, 80.0, 250.0)));
+                w = max(w, pow(saturate(1.0 - abs(sin(wave))), 6.0) * fade * 0.55);
             }
         }
         // Neck rings: a few broken creases across the front of the neck.
@@ -330,7 +341,9 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     let seed = character.look.w * 917.0;
     let mel_base = character.skin.x;
     let mottle = value_noise3(r * 40.0 + seed) - 0.5;
-    var mel = saturate(mel_base * (1.0 + 0.12 * mottle) + 0.03 * lids * (0.5 + mel_base));
+    // Blotches a few centimeters across, and finer ones a few millimeters across.
+    let fine = value_noise3(r * 300.0 + seed * 1.3) - 0.5;
+    var mel = saturate(mel_base * (1.0 + 0.12 * mottle + 0.08 * fine) + 0.03 * lids * (0.5 + mel_base));
     // Freckles and age spots.
     let fr = character.skin2.x;
     let age = character.look.x;
@@ -354,7 +367,7 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     // Blood: flushed cheeks, nose, ears and chin, mottled; muted under dark skin.
     let redness = character.skin.y;
     let flush = redness * (0.3 + 0.55 * cheeks + 0.6 * nose + 0.5 * ears + 0.25 * chin + 0.25 * lids)
-        * (0.85 + 0.3 * value_noise3(r * 120.0 + seed));
+        * (0.8 + 0.25 * value_noise3(r * 120.0 + seed) + 0.15 * value_noise3(r * 450.0 + seed * 0.7));
     let blood = saturate(flush) * (1.0 - 0.75 * saturate(mel * 1.3));
     albedo *= mix(vec3<f32>(1.0), vec3<f32>(1.0, 0.70, 0.72), blood);
     // Undertone: warm is golden-olive, cool is pinker.
@@ -408,7 +421,7 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     // Shine: oily T-zone, wet lips and lid rims, matte pores.
     let oil = character.skin.w;
     var rough = 0.56 - 0.12 * oil * saturate(forehead + nose + chin) - 0.08 * oil;
-    rough += (value_noise3(r * 300.0 + seed) - 0.5) * 0.06;
+    rough += (value_noise3(r * 300.0 + seed) - 0.5) * 0.06 + (value_noise3(r * 900.0 + seed) - 0.5) * 0.05;
     rough = mix(rough, 0.42, lips);
     rough = mix(rough, 0.18, rim);
     rough += 0.12 * d0.pore + 0.1 * d0.wrinkle + 0.06 * scalp_tint;
