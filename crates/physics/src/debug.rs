@@ -21,15 +21,17 @@ use crate::sim::{JointHandle, Simulation};
 #[derive(Resource, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PhysicsDebug {
-    /// Collider wireframes: green awake, blue-gray asleep, yellow kinematic, gray static,
-    /// magenta sensors, cyan characters.
+    /// Collider wireframes: green awake (orange when far away and simulated coarsely, red at
+    /// half rate), blue-gray asleep, yellow kinematic, gray static, magenta sensors, cyan
+    /// characters.
     pub colliders: bool,
     /// Touching contact points, with an arrow along the normal that grows with the force.
     pub contacts: bool,
     /// Joint anchors joined by a line: orange, turning red as a breakable joint nears its
     /// break force (or when the anchors pull apart).
     pub joints: bool,
-    /// Region anchors and their radius (purple, gray when frozen).
+    /// Region anchors and their radius (purple, orange when coarse, red at half rate, gray
+    /// when frozen).
     pub regions: bool,
     /// Centers of mass of dynamic bodies, as small axes.
     pub centers_of_mass: bool,
@@ -78,6 +80,9 @@ impl PhysicsDebug {
 }
 
 const AWAKE: Color = color::LIME;
+/// Awake, far away: coarse and half rate ([`crate::lod`]).
+const COARSE: Color = color::ORANGE;
+const HALF_RATE: Color = color::RED;
 const ASLEEP: Color = [0.35, 0.45, 0.6, 1.0];
 const KINEMATIC: Color = color::YELLOW;
 const STATIC: Color = [0.55, 0.55, 0.55, 0.7];
@@ -143,10 +148,11 @@ impl Pen<'_> {
             let to_world = |v: Vec3| region.global(v);
             let world = &region.world;
             if s.regions {
-                let c = if region.frozen {
-                    color::GRAY
-                } else {
-                    color::PURPLE
+                let c = match region.tier {
+                    _ if region.frozen => color::GRAY,
+                    0 => color::PURPLE,
+                    1 => COARSE,
+                    _ => HALF_RATE,
                 };
                 let r = sim.settings.region_radius_m as f32;
                 if self.near(region.anchor, r as f64) {
@@ -172,7 +178,7 @@ impl Pen<'_> {
                     if !self.near(pos, extent) {
                         continue;
                     }
-                    let c = collider_color(col, body, characters.contains(&h));
+                    let c = collider_color(col, body, characters.contains(&h), region.tier);
                     self.shape(col.shape(), pos, col.rotation(), c);
                 }
             }
@@ -373,7 +379,12 @@ impl Pen<'_> {
     }
 }
 
-fn collider_color(col: &RapierCollider, body: Option<&RapierBody>, character: bool) -> Color {
+fn collider_color(
+    col: &RapierCollider,
+    body: Option<&RapierBody>,
+    character: bool,
+    tier: u8,
+) -> Color {
     if col.is_sensor() {
         return SENSOR;
     }
@@ -385,6 +396,6 @@ fn collider_color(col: &RapierCollider, body: Option<&RapierBody>, character: bo
         Some(b) if b.is_fixed() => STATIC,
         Some(b) if b.is_kinematic() => KINEMATIC,
         Some(b) if b.is_sleeping() => ASLEEP,
-        Some(_) => AWAKE,
+        Some(_) => [AWAKE, COARSE, HALF_RATE][tier.min(2) as usize],
     }
 }
