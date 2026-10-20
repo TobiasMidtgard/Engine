@@ -207,7 +207,11 @@ falls back to primitive shapes so tests stay fast.
 Fighters are ready for the faces and bodies a character module draws (`engine_world::
 character`; `visuals/character.rs`):
 
-- **Looks.** On its first step each fighter gets an `AppearanceRequest`: its own `Seed`, its
+- **Off by default.** `NpcSettings::character_looks` is false: fighters keep their own bodies
+  and ask for no looks. A character module draws people with their own limb lengths, open hands
+  and plain clothes, so held weapons miss short people's hands and squads lose their armour and
+  colours. Turn it on once the contract carries body size, a grip and armour or team colours.
+- **Looks.** With `character_looks` on, on its first step each fighter gets an `AppearanceRequest`: its own `Seed`, its
   squad (with its faction) as the family seed so squad mates look related, a sex picked from
   the seed and an age range by skill (a rookie 18 to 26, a master 34 to 52). An
   `Appearance` already there is kept. No full `Appearance` is put on fighters.
