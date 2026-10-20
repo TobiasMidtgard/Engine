@@ -47,7 +47,7 @@ pub use material::{DestructibleMaterial, DestructionMaterials, MaterialProps};
 pub use reinforce::{ReinforceRequest, ReinforcedBy, Reinforcement};
 pub use structure::{Fracturable, FractureShape, PieceState, ShowSupport, StructuralPiece};
 pub use voxel::{VoxelShape, VoxelState, VoxelVolume};
-pub use wall::{DestructibleWall, WallAnchors, WallState};
+pub use wall::{BRICK_LOSS, DestructibleWall, WallAnchors, WallState};
 
 /// A suggested viewpoint on a demo (camera bookmark or screenshot-tour stop), relative to the
 /// demo's origin. Call `destruction.demo_restart` on arrival, then wait `warmup_secs` (a

@@ -670,7 +670,10 @@ fn wall_impact(
     let lp = local_point(gt, point);
     let ld = local_dir(gt, dir).normalize_or(Vec3::NEG_Z);
     let aspect = if melee { 0.35 } else { 1.0 };
-    let hit = state.crater(&props, lp, ld, energy, min_radius, aspect);
+    let mut hit = state.crater(&props, lp, ld, energy, min_radius, aspect);
+    if let Some(brick) = wall.brick_size() {
+        state.knock_out_bricks(brick, &mut hit);
+    }
     let exit = hit.exit;
     // Chips spray back toward the shooter from the entry point.
     let t = state.grid.thickness;
@@ -1044,7 +1047,10 @@ fn blast(
         }
         let props = ctx.table.get(wall.material);
         let gt = *gt;
-        let hit = state.blast(&props, local, energy, rebar_cut);
+        let mut hit = state.blast(&props, local, energy, rebar_cut);
+        if let Some(brick) = wall.brick_size() {
+            state.knock_out_bricks(brick, &mut hit);
+        }
         if hit.volume > 0.0 {
             let side = if local.z >= 0.0 { 1.0 } else { -1.0 };
             let face = gt.transform_point(DVec3::new(
