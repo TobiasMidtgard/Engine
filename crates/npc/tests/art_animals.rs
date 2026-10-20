@@ -511,6 +511,17 @@ fn deer_shots() -> Vec<Shot<'static>> {
             0.0,
         ),
         ("deer_stag_rest", stag(AnimalState::Rest), 4.5, 40.0),
+        // Bedded a while: dozing, the chin laid on the ground.
+        (
+            "deer_stag_doze",
+            Pose {
+                t: 24.0,
+                ..stag(AnimalState::Rest)
+            },
+            4.5,
+            40.0,
+        ),
+        ("deer_hind_drink", p(AnimalState::Drink), 4.2, 40.0),
         ("deer_hind_dead", p(AnimalState::Dead), 4.5, 60.0),
         ("deer_hind_rear", p(AnimalState::Alert), 3.5, -140.0),
     ]
@@ -641,6 +652,7 @@ fn boar_shots() -> Vec<Shot<'static>> {
             30.0,
         ),
         ("boar_sow_rest", sow(AnimalState::Rest), 3.2, 40.0),
+        ("boar_sow_drink", sow(AnimalState::Drink), 3.2, 40.0),
         ("boar_sow_dead", sow(AnimalState::Dead), 3.2, 60.0),
         ("boar_tusker_rear", tusker(AnimalState::Wander), 3.0, -140.0),
         ("boar_sow_feet", sow(AnimalState::Wander), 0.8, 25.0),
@@ -2634,4 +2646,277 @@ fn the_herds_alarm_spreads() {
         }
     }
     side_by_side(&frames, "animal_live_herd_alarm.png");
+}
+
+/// A round pond for the live pictures: the ground drops 0.8 m inside `radius` under water
+/// standing level with the grass (as the AI sees it), drawn as a still, dark sheet of water
+/// with a muddy rim.
+struct Pond {
+    center: DVec3,
+    radius: f64,
+}
+
+impl Pond {
+    fn inside(&self, p: DVec3) -> bool {
+        DVec3::new(p.x - self.center.x, 0.0, p.z - self.center.z).length() < self.radius
+    }
+}
+
+impl engine_world::GroundQuery for Pond {
+    fn sample(&self, p: DVec3) -> Option<engine_world::GroundSample> {
+        Some(engine_world::GroundSample {
+            height: if self.inside(p) { -0.8 } else { 0.0 },
+            normal: Vec3::Y,
+            surface: engine_world::SurfaceId(3),
+        })
+    }
+}
+
+impl engine_world::WaterQuery for Pond {
+    fn sample(&self, p: DVec3) -> Option<engine_world::WaterSample> {
+        self.inside(p).then_some(engine_world::WaterSample {
+            surface_height: 0.0,
+            depth: 0.8,
+            velocity: Vec3::ZERO,
+            normal: Vec3::Y,
+        })
+    }
+}
+
+fn live_pond(app: &mut App, center: DVec3, radius: f64) {
+    let pond = std::sync::Arc::new(Pond { center, radius });
+    app.world
+        .insert_resource(engine_world::Ground(pond.clone()));
+    app.world.insert_resource(engine_world::Water(pond));
+    // Mud a little way up the bank, then the water.
+    for (r, top, rgb, rough) in [
+        (radius + 0.7, 0.008, 0x4f4330, 0.9),
+        (radius, 0.016, 0x22383c, 0.06),
+    ] {
+        app.world.spawn((
+            Transform::from_translation(center + DVec3::Y * (top - 0.05)),
+            MeshRenderer::new(
+                Shape::Cylinder {
+                    radius: r as f32,
+                    height: 0.1,
+                    segments: 96,
+                },
+                StandardMaterial::hex(rgb).with_roughness(rough),
+            ),
+        ));
+    }
+}
+
+/// The world's clock at `hour`, the sun where it would be then (up from 6 to 18 h, at most
+/// 0.85 high at noon), as the day/night cycle writes them. Only the animals go by it: the
+/// pictures keep their one light.
+fn live_clock(app: &mut App, hour: f32) {
+    let mut w = app.world.resource_mut::<engine_world::WeatherState>();
+    w.time_of_day_h = hour;
+    let up = ((hour - 6.0) / 12.0 * std::f32::consts::PI).sin() * 0.85;
+    w.sun_direction = Vec3::new(0.3, up, -(1.0 - up * up).max(0.0).sqrt()).normalize();
+}
+
+/// A herd of red deer (a stag and three hinds) moving out at dusk and down to a pond to drink,
+/// as you would see it from the grass on the far bank, 1 m up, with no markers: grazing in the
+/// afternoon, setting off when the sun goes down, coming down to the water, each to its own
+/// place along the bank, square on to the water, and drinking, heads down, now and then one
+/// looking up. The PNG is `animal_live_deer_drinking.png`.
+#[test]
+#[ignore = "full-size pictures: run with --ignored"]
+fn deer_drink_at_a_pond_at_eye_level() {
+    let Some(mut app) = live_app((640, 400)) else {
+        return;
+    };
+    let water = DVec3::new(13.0, 0.0, -2.0);
+    let radius = 4.0;
+    live_pond(&mut app, water, radius);
+    live_clock(&mut app, 16.0);
+    let deer = live_herd(&mut app, Species::Deer, DVec3::ZERO, 4, 1);
+    app.world.get_mut::<Animal>(deer[0]).unwrap().male = true;
+    let clock = deer[0];
+    tick(&mut app, clock);
+    let start = now_of(&app, clock);
+    // Across the pond from where they come down to it, looking back at the near bank.
+    let toward = DVec3::new(water.x, 0.0, water.z).normalize();
+    let eye = water + toward * (radius + 1.2) + DVec3::Y;
+    let drinking = |app: &App| {
+        deer.iter()
+            .filter(|&&d| mind_of(app, d).state == AnimalState::Drink)
+            .count()
+    };
+    let setting_off = |app: &App| {
+        deer.iter().any(|&d| {
+            let m = mind_of(app, d);
+            m.state == AnimalState::Wander && m.thirst > 0.75 && m.drink_at.is_some()
+        })
+    };
+    let mut frames = Vec::new();
+    let mut dusk = false;
+    let mut off = None;
+    let mut first_drink = None;
+    let mut all_drink = None;
+    let mut shots: Vec<f64> = vec![1.0];
+    while frames.len() < 8 {
+        tick(&mut app, clock);
+        let t = now_of(&app, clock) - start;
+        if !dusk && t >= 2.0 {
+            live_clock(&mut app, 18.0);
+            dusk = true;
+        }
+        if dusk && off.is_none() && setting_off(&app) {
+            // Moving out: on their way down to the water.
+            off = Some(t);
+            shots.push(t + 1.5);
+        }
+        let n = drinking(&app);
+        if off.is_some() && first_drink.is_none() && n > 0 {
+            // The first at the water.
+            first_drink = Some(t);
+            shots.push((t + 0.6).max(shots[shots.len() - 1] + 0.5));
+        }
+        if first_drink.is_some() && all_drink.is_none() && n == deer.len() {
+            all_drink = Some(t);
+            let last = shots[shots.len() - 1];
+            shots.extend([0.5, 1.5, 3.0, 4.5, 6.0].map(|d| (t + d).max(last + d)));
+        }
+        if t > 120.0 {
+            panic!("the herd never all drank ({n} of {})", deer.len());
+        }
+        let Some(&when) = shots.get(frames.len()) else {
+            continue;
+        };
+        if t < when {
+            continue;
+        }
+        let mid = deer.iter().map(|&d| at(&app, d)).sum::<DVec3>() / deer.len() as f64;
+        // Once they set off, from the far bank straight across from where they drink,
+        // looking at their places along the near bank; until then from across where they
+        // will come down to it, on the herd.
+        let spots: Vec<DVec3> = deer
+            .iter()
+            .filter_map(|&d| mind_of(&app, d).drink_at.map(|s| s.0))
+            .collect();
+        let view = if off.is_some() && !spots.is_empty() {
+            let at_bank = spots.iter().sum::<DVec3>() / spots.len() as f64;
+            let across = DVec3::new(water.x - at_bank.x, 0.0, water.z - at_bank.z).normalize();
+            // Back on the far bank, or further back still if that won't take in every
+            // place along the near one (each a metre and a half clear of the sides).
+            let side = DVec3::new(-across.z, 0.0, across.x);
+            let half = 15f64.to_radians().tan() * 1.6;
+            let back = spots
+                .iter()
+                .map(|&p| ((p - at_bank).dot(side).abs() + 1.5) / half)
+                .fold(2.0 * radius + 1.2, f64::max);
+            (
+                at_bank + across * back + DVec3::Y,
+                DVec3::new(at_bank.x, 0.45, at_bank.z),
+                Vec3::Y,
+            )
+        } else {
+            (eye, DVec3::new(mid.x, 0.5, mid.z), Vec3::Y)
+        };
+        let name = format!("animal_live_deer_drinking_{}.png", frames.len());
+        eprintln!(
+            "frame {} at {t:.2} s: {:?}",
+            frames.len(),
+            deer.iter()
+                .map(|&d| mind_of(&app, d).state.name())
+                .collect::<Vec<_>>()
+        );
+        frames.push(live_shot(&mut app, view, 30.0, &name));
+    }
+    side_by_side(&frames, "animal_live_deer_drinking.png");
+}
+
+/// A small herd of red deer (a stag and two hinds) bedding down at midday, as you would see it
+/// from the grass, 1 m up off its sunny side, with no markers: grazing late in the morning,
+/// gathering when midday comes, lying down one by one, legs folded under, then bedded: heads
+/// up chewing the cud, and later dozing with their chins on the ground. The PNG is
+/// `animal_live_deer_bedded.png`.
+#[test]
+#[ignore = "full-size pictures: run with --ignored"]
+fn deer_bed_down_at_midday_at_eye_level() {
+    let Some(mut app) = live_app((640, 400)) else {
+        return;
+    };
+    live_clock(&mut app, 10.5);
+    let deer = live_herd(&mut app, Species::Deer, DVec3::ZERO, 3, 1);
+    app.world.get_mut::<Animal>(deer[0]).unwrap().male = true;
+    let clock = deer[0];
+    tick(&mut app, clock);
+    let start = now_of(&app, clock);
+    let sunny = DVec3::new(-0.45, 0.0, 0.7).normalize();
+    let resting = |app: &App| {
+        deer.iter()
+            .filter(|&&d| mind_of(app, d).state == AnimalState::Rest)
+            .count()
+    };
+    let mut frames = Vec::new();
+    let mut noon = false;
+    let mut first_down = None;
+    let mut all_down = None;
+    let mut shots: Vec<f64> = vec![1.0];
+    let mut eye = None;
+    while frames.len() < 8 {
+        tick(&mut app, clock);
+        let t = now_of(&app, clock) - start;
+        if !noon && t >= 2.0 {
+            live_clock(&mut app, 12.5);
+            noon = true;
+        }
+        let n = resting(&app);
+        if first_down.is_none() && n > 0 {
+            // Going down: onto its knees, then lying.
+            first_down = Some(t);
+            shots.extend([t + 0.5, t + 1.2]);
+        }
+        if first_down.is_some() && all_down.is_none() && n == deer.len() {
+            // Bedded and chewing the cud; then dozing (each lays its head down 14 to 20 s
+            // after lying down, for 16 s).
+            all_down = Some(t);
+            let last = shots[shots.len() - 1];
+            shots.extend([3.0, 6.0, 10.0, 22.0, 27.0].map(|d| (t + d).max(last + 0.5)));
+        }
+        if t > 150.0 {
+            panic!("the herd never all bedded down ({n} of {})", deer.len());
+        }
+        let Some(&when) = shots.get(frames.len()) else {
+            continue;
+        };
+        if t < when {
+            continue;
+        }
+        let mid = deer.iter().map(|&d| at(&app, d)).sum::<DVec3>() / deer.len() as f64;
+        // Set up off the sunny side, far enough back to take the herd in; it stays put once
+        // they have lain down.
+        let place = |app: &App| {
+            let across = DVec3::new(-sunny.z, 0.0, sunny.x);
+            let half = (16f64.to_radians().tan() * 1.6) * 0.85;
+            let back = deer
+                .iter()
+                .map(|&d| {
+                    let off = at(app, d) - mid;
+                    (off.dot(across).abs() + 1.2) / half + off.dot(sunny)
+                })
+                .fold(5.0, f64::max);
+            DVec3::new(mid.x, 1.0, mid.z) + sunny * back
+        };
+        let e = if all_down.is_some() {
+            *eye.get_or_insert_with(|| place(&app))
+        } else {
+            place(&app)
+        };
+        let view = (e, DVec3::new(mid.x, 0.45, mid.z), Vec3::Y);
+        let name = format!("animal_live_deer_bedded_{}.png", frames.len());
+        eprintln!(
+            "frame {} at {t:.2} s: {:?}",
+            frames.len(),
+            deer.iter()
+                .map(|&d| mind_of(&app, d).state.name())
+                .collect::<Vec<_>>()
+        );
+        frames.push(live_shot(&mut app, view, 32.0, &name));
+    }
+    side_by_side(&frames, "animal_live_deer_bedded.png");
 }

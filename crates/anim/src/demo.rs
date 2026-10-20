@@ -1574,7 +1574,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
                 ShuttleLeg {
                     to: [x, z - LANE_LENGTH],
                     facing_deg: 0.0,
-                    top: 5.0,
+                    top: humanoid::SPRINT_SPEED,
                 },
                 ShuttleLeg {
                     to: [x, z - LANE_LENGTH * 0.45],

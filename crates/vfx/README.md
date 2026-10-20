@@ -82,6 +82,12 @@ deep in and orange at its surface, and chars to dark, sunlit soot from the creas
 its life. `explosion.large` throws a dozen or so of them up and out, and the fireball spell's
 impact a smaller handful, with the smoke rising only once the fire has burnt through.
 
+The same sprite flies with the fireball spell: `spell.fireball` is a ball of rolling fire round
+a white-hot heart, shedding burning gas in flight that swells, rises and chars, so its tail runs
+from fire at the ball to smoke further back. `spell.frost_bolt` is a ball of cold, crackling
+light (the `plasma` sprite) on a thin bright trail, with glinting frost, tumbling shards and a
+faint mist. `--example bolts` renders both flying past side on.
+
 The court's fountain is a jet of water, not a cloud of drops. The `jet` sprite draws a glassy
 rod rising from the nozzle, clear in the middle and mirroring the sky at its edges, streaked as
 it flows and breaking into beads where it turns over; fine drops rain back around it into the
@@ -220,8 +226,8 @@ keeps its color at night instead of turning white.
 `cargo run -p engine_vfx --release --example sub_emitters` renders the firework and the
 splitting sparks; `--example braziers` renders the brazier fires, `--example engines` every
 exhaust side on and a rocket lifting off (add `vacuum` to take the air away), `--example splashes` the splashes, `--example explosions` the explosions close up
-as they unfold, `--example fountain`, `--example aura` and `--example orbs` the fountain, the healing aura and
-the charge and orb, and `--example court` the whole court, each by day, at dusk and at night.
+as they unfold, `--example bolts` the spells in flight, `--example fountain`, `--example aura`
+and `--example orbs` the fountain, the healing aura and the charge and orb, and `--example court` the whole court, each by day, at dusk and at night.
 
 ## Next
 

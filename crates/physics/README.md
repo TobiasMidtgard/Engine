@@ -24,7 +24,8 @@ changing that one plugin line.
   keeps the shapes' inertia about it. Damping, gravity scale, CCD, sleeping, rotation locks.
   With `ccd` a 5 cm ball at 100 to 1000 m/s never passes through a 2 cm board, a mesh wall with
   no thickness, or a free-floating 5 cm plank; without it, a 1000 m/s ball flies through the
-  plank.
+  plank. Contacts closing faster than 50 m/s are made hard by a contact hook: Rapier's contacts
+  give a little once shapes touch, and a 1000 m/s ball sank 5 cm into the board, past its middle.
   `MassProperties` is written back.
   Settled bodies cost next to nothing: a step visits only awake bodies and those with forces of
   their own, and never takes a sleeping one mutably from Rapier (which would make Rapier redo its
@@ -49,6 +50,11 @@ changing that one plugin line.
   new triangle brought such a contact and a kick (a barrel at 8 m/s jumped 20 cm and veered
   meters off its line). A contact hook takes the spin's share out of each contact's closing
   speed, for colliders spinning that fast only, so piles keep Rapier's contact reuse.
+- **Contacts on small bodies**: Rapier reuses a touching pair's contacts until the two have moved
+  5 cm against each other, and a ball sliding along an old contact plane rides on it as if it
+  went on forever. Bodies under 5 cm in reach (a 14 mm Galton ball slid 6 cm off a 4 mm pin on
+  air, and balls stayed wedged between pins they had left behind) get fresh contacts every step
+  while awake, through the same hook; bigger ones keep the reuse.
 - **Spin friction**: a ball spinning on its spot, or a ragdoll's head, slows and stops (Rapier
   only resists spin for flat contacts with several points, and never for articulation links).
   Each such contact takes up to `μ · N · 1 cm` of torque out of the spin about its normal; spin
@@ -316,7 +322,12 @@ a little off true as by hand, into seventeen bins behind glass, and heap up in t
 printed on the back board: steel bounces over more than one pin, so the curve is the normal
 curve this board gives, σ ≈ 3.2 bins, wider than a coin tossed at every row would make), a **rockfall** (300 crushed granite
 rocks, faceted convex hulls 30 to 55 cm across, pour out of a hopper, slide down a 40° steel chute
-and drop off its lip into a heap with a 35° face) and, along the front, a **barrel run**:
+and drop off its lip into a heap with a 35° face), a **counterweight catapult** (a 1.2 t
+iron-bound box of stone on the short end of a 5 m oak arm swings it up into a padded crossbar,
+and the 38 kg granite ball flies on out of its cup, 7.4 m up and 11 m down range, into the top of
+a five-course crate wall; the arm is one body with the oak's and the stone's masses set on it,
+stopped by its hinge's limit where the crossbar stands, and nothing lets the ball go: the cup
+stops and it doesn't) and, along the front, a **barrel run**:
 three oil drums roll off a 2 m ramp and 47 m down an asphalt runway (one triangle mesh, an edge
 every 2 m) into a sand pit, staying flat and in their painted lanes, past galvanized guardrails to a
 tire wall. It sits on the ground at `origin`, its top `demo::SLAB_RISE` (10 cm) above it; the
@@ -324,7 +335,7 @@ showcase's physics zone places it. Render it alone with
 `cargo run -p engine_physics --release --example proving_ground -- out_dir`.
 
 The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,
-seesaw, balls and cradle every 20 s, the barrel run and pool table every 25 s, dominoes, wrecking ball and bridge every
+seesaw, balls, cradle and catapult every 20 s, the barrel run and pool table every 25 s, dominoes, wrecking ball and bridge every
 30 s, the rockfall every 30 s, the Galton board every 40 s, the pile every 45 s, the pendulum wave every minute, as it comes
 back into step; the tower, wheel and turntable run on), so the zone is always
 playing when someone walks in.
@@ -391,9 +402,15 @@ and a pendulum wave is in two alternate rows at half a minute and back in step a
 pool table's break (`tests/proving_ground.rs`: all sixteen balls step finely, at least 12 of the 15
 spread more than 30 cm, at least one goes down a pocket, none leaves the table, and all are still
 before the table resets); the Galton board (`tests/proving_ground.rs`: no ball leaves the board, all
-are still, at most 2% stay caught on the pins, and the heap is centered within 0.6 bins, spread
+are still, at most one stays caught on the pins, and the heap is centered within 0.6 bins, spread
 2.5 to 4 bins, over 28% of the balls in the middle three bins, under 8% in the outer four, and no
-more than 12% more on one side); a headless screenshot of the proving ground.
+more than 12% more on one side); contacts on small bodies (`tests/contacts.rs`: a 14 mm ball
+sliding off a 4 mm pin falls within 10 frames and 2 cm, and one dropped on one of two pins three
+ball widths apart drops through); the catapult (`tests/proving_ground.rs`: the arm stays on its
+axle and comes to rest against the crossbar, the ball leaves the cup at 95 to 101% of the speed
+the counterweight's fall gives it without losses (99%: 10.1 of 10.2 m/s), rises over 7 m and
+brings down at least four of the wall's crates, and no crate leaves the yard); a headless
+screenshot of the proving ground.
 
 ## Done when
 

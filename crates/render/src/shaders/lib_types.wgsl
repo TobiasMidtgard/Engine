@@ -55,10 +55,10 @@ struct Frame {
     cloud_shadow_params: vec4<f32>, // drawn this frame (1/0), cloud base height relative to the camera (m), cloud layer thickness (m), sun transmittance beyond the map
     cloud_shadow_area: vec4<f32>,  // camera-relative x and z of the map corner at uv (0, 0) (m), side (m), texels per side
     air_rayleigh: vec4<f32>,       // the air (`Atmosphere`, times its density scale): Rayleigh scattering at the surface (1/m) RGB, w unused
-    air_mie: vec4<f32>,            // Mie scattering at the surface (1/m) RGB, w unused
-    air_mie_extinction: vec4<f32>, // Mie extinction (scattering + absorption) at the surface (1/m) RGB, w unused
+    air_mie: vec4<f32>,            // Mie scattering at the surface (1/m) RGB, less the forward peak (`air_mie_peak`), w unused
+    air_mie_extinction: vec4<f32>, // Mie extinction (scattering + absorption) at the surface (1/m) RGB, less the forward peak, w unused
     air_ozone: vec4<f32>,          // ozone absorption at the layer's peak (1/m) RGB, w unused
-    air_mie_g: vec4<f32>,          // Mie anisotropy per channel RGB, w unused
+    air_mie_g: vec4<f32>,          // Mie anisotropy per channel RGB (the whole lobe), w the share of g² passing as unscattered (`Atmosphere::mie_forward_peak`)
 };
 
 // An indoor space (`SkyLightVolume`): sky light comes in only through its open faces.

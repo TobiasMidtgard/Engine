@@ -23,6 +23,8 @@
 //!   and drop into the pockets,
 //! * a Galton board: five hundred steel balls pour through twelve rows of pins and pile up in
 //!   seventeen bins in the bell curve printed behind them,
+//! * a counterweight catapult: a tonne of stone swings its arm up into the crossbar and the
+//!   granite ball flies on, 7 m up and 11 m down range into a crate wall,
 //! * along the front, three oil drums rolling down a ramp and 47 m along an asphalt runway
 //!   (one triangle mesh) into a sand pit: they stay flat and in their lanes.
 //!
@@ -30,6 +32,7 @@
 //! them play; `physics.proving_ground.replay` restarts one or all of them now.
 
 mod art;
+pub mod catapult;
 mod floaters;
 pub mod galton;
 pub mod pool;
@@ -190,6 +193,16 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 6.0,
     },
     DemoView {
+        key: "physics_catapult",
+        name: "A counterweight catapult throwing a granite ball through a crate wall",
+        eye: [0.0, 7.0, -11.0],
+        target: [2.0, 4.0, 3.0],
+        hour: 16.0,
+        station: Some(Station::Catapult),
+        // The ball leaves the cup at 1.0 s and tops its flight over the yard at 1.7 s.
+        warmup_secs: 1.3,
+    },
+    DemoView {
         key: "physics_turntable",
         name: "A turntable carrying crates and a rider",
         eye: [37.0, 6.5, 20.0],
@@ -219,10 +232,11 @@ pub enum Station {
     Cradle,
     Pool,
     Galton,
+    Catapult,
 }
 
 impl Station {
-    pub const ALL: [Station; 16] = [
+    pub const ALL: [Station; 17] = [
         Station::Tower,
         Station::Pile,
         Station::Dominoes,
@@ -239,6 +253,7 @@ impl Station {
         Station::Cradle,
         Station::Pool,
         Station::Galton,
+        Station::Catapult,
     ];
 
     /// The station's name in the `physics.proving_ground.replay` API.
@@ -260,6 +275,7 @@ impl Station {
             Station::Cradle => "cradle",
             Station::Pool => "pool",
             Station::Galton => "galton",
+            Station::Catapult => "catapult",
         }
     }
 
@@ -282,6 +298,7 @@ impl Station {
             Station::Cradle => (16.0, -4.5),
             Station::Pool => (9.0, -8.5),
             Station::Galton => (10.0, -18.0),
+            Station::Catapult => (-4.0, 3.0),
         };
         DVec3::new(x, 0.0, z)
     }
@@ -301,6 +318,7 @@ impl Station {
             Station::Cradle => Some(20.0),
             Station::Pool => Some(25.0),
             Station::Galton => Some(40.0),
+            Station::Catapult => Some(20.0),
         }
     }
 
@@ -327,6 +345,7 @@ impl Station {
             Station::Cradle => newtons_cradle(y, base),
             Station::Pool => pool::pool_table(y, base),
             Station::Galton => galton::galton_board(y, base),
+            Station::Catapult => catapult::catapult(y, base),
         }
     }
 }

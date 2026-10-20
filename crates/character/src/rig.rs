@@ -19,6 +19,7 @@
 
 use engine_core::math::{Mat3, Mat4, Quat, Vec3};
 use engine_world::animation::SkeletonPose;
+use engine_world::character::BodyFit;
 
 use crate::pack::HumanPack;
 
@@ -71,6 +72,8 @@ pub struct Rig {
     pub rest: Vec<Quat>,
     /// Turns each bone of the character from its own rest direction onto the humanoid's.
     pub correction: Vec<Quat>,
+    /// Standing height, soles to crown (m).
+    pub height: f32,
 }
 
 impl Rig {
@@ -101,10 +104,18 @@ impl Rig {
             .collect();
         joints.resize(bones.len(), Vec3::ZERO);
         // The root stands on the ground under the hips.
+        let mut ground = morphed.iter().fold(f32::MAX, |m, p| m.min(p.y));
         if let (Some(root), Some(hips)) = (index("root"), index("hips")) {
-            let ground = joints[root].y;
+            ground = joints[root].y;
             joints[root] = Vec3::new(joints[hips].x, ground, joints[hips].z);
         }
+        let body = pack.group_vertices("body");
+        let crown = if body.is_empty() {
+            morphed.iter().fold(f32::MIN, |m, p| m.max(p.y))
+        } else {
+            body.iter()
+                .fold(f32::MIN, |m, v| m.max(morphed[*v as usize].y))
+        };
         let side = |b: &str| {
             if b.ends_with("_l") { -1.0 } else { 1.0 }
         };
@@ -161,6 +172,7 @@ impl Rig {
             joints,
             rest,
             correction,
+            height: (crown - ground).max(0.0),
         })
     }
 
@@ -283,6 +295,17 @@ impl Rig {
                 * Mat4::from_translation(-self.joints[b])
                 * flip;
             out.push(m);
+        }
+    }
+
+    /// This body's rest skeleton and height, for posers fitting their skeletons to it.
+    pub fn body_fit(&self) -> BodyFit {
+        let pose = self.rest_pose();
+        BodyFit {
+            names: pose.names.to_vec(),
+            parents: pose.parents.to_vec(),
+            rest: pose.bones,
+            height: self.height,
         }
     }
 
@@ -414,6 +437,19 @@ mod tests {
         let foot = pose.bones[pose.index_of("foot_l").unwrap()].translation;
         assert!((at("foot_l") - foot).length() < 1e-4);
         assert!(at("toe_l").z < at("foot_l").z - 0.05);
+    }
+
+    #[test]
+    fn the_body_fit_is_the_rest_pose_and_the_standing_height() {
+        let pack = stick_pack();
+        let rig = Rig::new(&pack, &pack.positions).unwrap();
+        let fit = rig.body_fit();
+        let rest = rig.rest_pose();
+        assert_eq!(*fit.pose().names, *rest.names);
+        assert_eq!(*fit.pose().parents, *rest.parents);
+        assert_eq!(fit.rest, rest.bones);
+        // Soles (the root) to the highest vertex, the head joint here.
+        assert!((fit.height - (0.70 + 0.81)).abs() < 1e-4, "{}", fit.height);
     }
 
     #[test]
