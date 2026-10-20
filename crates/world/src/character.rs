@@ -18,6 +18,10 @@
 //!   body to that pose by the animation module's humanoid bone names (listed in engine_anim's
 //!   README) and owns the mapping from its own rig to them. Without a character module the
 //!   animation module's bodies stay as they are.
+//! * [`HairGuides`]: the guide strands the character module grew on a person, for a hair
+//!   simulation (the softbody module) to move; it writes them back posed as
+//!   [`HairGuidesPosed`]. Without a simulation the character module draws its hair from the
+//!   rest guides skinned to the pose.
 //!
 //! Catalogs that will grow (hair and beard styles, headgear) are string ids; unknown ids fall
 //! back to the default. Seeds are stored at spawn, never taken from entity ids.
@@ -25,6 +29,8 @@
 use std::collections::BTreeMap;
 
 use engine_core::prelude::*;
+
+use crate::animation::BonePose;
 
 /// A whole person's look. Every field has a default, so data only needs what differs.
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -452,6 +458,69 @@ pub fn draws_appearances(app: &mut App, name: &str) {
     }
 }
 
+/// Guide strands a look module grew on a person, for a hair simulation to move (each lock of
+/// drawn hairs follows its guide). Replace the component, or bump `version`, when the hair is
+/// regrown.
+#[derive(Component, Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HairGuides {
+    pub version: u32,
+    pub guides: Vec<HairGuide>,
+    /// The person's `SkeletonPose` bones (model space) when the hair was grown, one per bone of
+    /// that pose: each guide rides its bones relative to this.
+    pub grown_on: Vec<BonePose>,
+    /// 0..1: how firmly the hair holds its grown shape (long hair ~0.2, short ~0.6, fur ~0.9).
+    pub stiffness: f32,
+}
+
+/// One guide strand.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HairGuide {
+    /// Indices into the person's `SkeletonPose` bones; `blend` is the weight of `bones[1]`
+    /// (0 = only `bones[0]`).
+    pub bones: [u16; 2],
+    pub blend: f32,
+    /// Root first, in the person's model space at `HairGuides::grown_on`.
+    pub points: Vec<Vec3>,
+    /// The skin's outward normal at the root, model space.
+    pub normal: Vec3,
+    /// The lock's thickness at the root, meters (for collisions).
+    pub thickness: f32,
+}
+
+impl HairGuides {
+    /// Points over all guides: the length of a matching [`HairGuidesPosed::points`].
+    pub fn point_count(&self) -> usize {
+        self.guides.iter().map(|g| g.points.len()).sum()
+    }
+}
+
+/// Written by the hair simulation every fixed step: every guide's points in the person's model
+/// space (the space of [`HairGuides`] and `SkeletonPose`, through the body's transform at that
+/// step), all guides concatenated in [`HairGuides`] order. `version` echoes the
+/// [`HairGuides::version`] simulated; the character module draws from these only while it
+/// matches (otherwise from the rest guides skinned to the pose), under the body's interpolated
+/// transform.
+#[derive(Component, Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HairGuidesPosed {
+    pub version: u32,
+    pub points: Vec<Vec3>,
+}
+
+impl HairGuidesPosed {
+    /// Guide `i`'s points, when these match `guides`.
+    pub fn guide<'a>(&'a self, guides: &HairGuides, i: usize) -> Option<&'a [Vec3]> {
+        if self.version != guides.version || self.points.len() != guides.point_count() {
+            return None;
+        }
+        let start: usize = guides.guides.get(..i)?.iter().map(|g| g.points.len()).sum();
+        let len = guides.guides.get(i)?.points.len();
+        self.points.get(start..start + len)
+    }
+}
+
 pub(crate) fn register(app: &mut App) {
     app.register_component::<Appearance>(
         "A person's look: sex, age (years), body shape, face sliders, skin, eyes, hair, wear, \
@@ -466,6 +535,14 @@ pub(crate) fn register(app: &mut App) {
     )
     .register_component::<CharacterQuality>(
         "Override how detailed a person is drawn: CloseUp, Mid or Crowd (default: by distance).",
+    )
+    .register_component::<HairGuides>(
+        "Hair guide strands grown on a person (bone indices, model-space rest points, the pose \
+         they were grown on, stiffness 0..1), for a hair simulation.",
+    )
+    .register_component::<HairGuidesPosed>(
+        "Simulated hair guide points in the person's model space, in HairGuides order; version \
+         echoes the guides simulated.",
     );
 }
 
@@ -515,6 +592,45 @@ mod tests {
         let short: FaceControls = serde_json::from_str(r#"{"weights": [0.5]}"#).unwrap();
         assert_eq!(short.get("eyeBlinkLeft"), 0.5);
         assert_eq!(short.get("tongueOut"), 0.0);
+    }
+
+    #[test]
+    fn posed_hair_matches_its_guides_by_version_and_count() {
+        let lock = |n: usize, x: f32| HairGuide {
+            bones: [4, 3],
+            blend: 0.25,
+            points: (0..n)
+                .map(|k| Vec3::new(x, 1.7 - 0.05 * k as f32, 0.0))
+                .collect(),
+            normal: Vec3::Y,
+            thickness: 0.004,
+        };
+        let guides = HairGuides {
+            version: 3,
+            guides: vec![lock(4, 0.0), lock(6, 0.1)],
+            grown_on: vec![BonePose::default(); 5],
+            stiffness: 0.2,
+        };
+        assert_eq!(guides.point_count(), 10);
+        let mut posed = HairGuidesPosed {
+            version: 3,
+            points: guides
+                .guides
+                .iter()
+                .flat_map(|g| g.points.clone())
+                .collect(),
+        };
+        assert_eq!(posed.guide(&guides, 1), Some(&guides.guides[1].points[..]));
+        assert_eq!(posed.guide(&guides, 2), None);
+        // Stale (simulated from older guides) or short: draw from the rest guides instead.
+        posed.version = 2;
+        assert_eq!(posed.guide(&guides, 0), None);
+        posed.version = 3;
+        posed.points.pop();
+        assert_eq!(posed.guide(&guides, 0), None);
+        let back: HairGuides =
+            serde_json::from_str(&serde_json::to_string(&guides).unwrap()).unwrap();
+        assert_eq!(back, guides);
     }
 
     #[test]
