@@ -353,7 +353,7 @@ fn foam(count: u32, radius: f32, size: [f32; 2], life: f32) -> EmitterDesc {
         local_space: true,
         rotation_deg: [0.0, 360.0],
         lit: 1.0,
-        color: fade([0.95, 0.97, 1.0], 0.9, 0.05, 0.75),
+        color: fade([0.95, 0.97, 1.0], 0.75, 0.05, 0.75),
         soft: 0.0,
         wind: 0.0,
         ..em("foam")
@@ -1670,23 +1670,43 @@ fn water() -> Vec<EffectDesc> {
             // The crown's thin wall of water, rising, tearing and slumping back as the jet
             // shoots up from the middle.
             crown(1.3, 0.95),
+            // The jet shooting up from the middle as the crater closes: a glassy rod of water
+            // that rises, stalls and sinks back.
+            EmitterDesc {
+                bursts: vec![at(0.3, 1)],
+                speed: [0.0, 0.0],
+                gravity: 0.0,
+                lifetime: [0.5, 0.5],
+                size: [0.9, 0.9],
+                size_over_life: c(&[(0.0, 0.15), (0.35, 1.0), (1.0, 0.2)]),
+                rotation_deg: [0.0, 0.0],
+                local_space: true,
+                sprite: Sprite::Jet,
+                facing: Facing::Axis,
+                stretch: 0.09,
+                lit: 1.0,
+                color: fade([0.8, 0.88, 0.95], 0.85, 0.1, 0.6),
+                wind: 0.0,
+                soft: 0.0,
+                ..em("jet")
+            },
             // Drops breaking off the top of the jet.
             EmitterDesc {
-                bursts: vec![at(0.42, 40), at(0.5, 30)],
+                bursts: vec![at(0.42, 16), at(0.5, 12)],
                 shape: EmitShape::Cone {
-                    angle_deg: 9.0,
+                    angle_deg: 30.0,
                     radius: 0.03,
                 },
-                offset: [0.0, 0.5, 0.0],
-                speed: [1.0, 2.6],
+                offset: [0.0, 0.8, 0.0],
+                speed: [0.8, 2.0],
                 velocity: [0.0, 0.0, 0.0],
-                lifetime: [0.8, 1.3],
-                size: [0.03, 0.06],
-                stretch: 0.04,
-                ..droplets("column", 70, water_rgb, [1.0, 2.6], 0.0, Collide::Die)
+                lifetime: [0.6, 1.0],
+                size: [0.015, 0.03],
+                stretch: 0.03,
+                ..droplets("column", 28, water_rgb, [0.8, 2.0], 0.0, Collide::Die)
             },
             EmitterDesc {
-                bursts: once(10),
+                bursts: once(6),
                 shape: EmitShape::Hemisphere { radius: 0.3 },
                 speed: [0.8, 2.2],
                 drag: 2.2,
@@ -1695,10 +1715,10 @@ fn water() -> Vec<EffectDesc> {
                 size: [0.3, 0.55],
                 size_over_life: c(&[(0.0, 0.6), (1.0, 2.0)]),
                 color: g(&[
-                    (0.0, [0.92, 0.96, 1.0, 0.28]),
+                    (0.0, [0.92, 0.96, 1.0, 0.12]),
                     (1.0, [0.92, 0.96, 1.0, 0.0]),
                 ]),
-                ..smoke("spray", 0.92, 0.28)
+                ..smoke("spray", 0.92, 0.12)
             },
             ripples("ripples", &[0.0, 0.18, 0.4], 7.0, 2.2, 1.0),
             foam(10, 0.4, [0.35, 0.6], 3.5),

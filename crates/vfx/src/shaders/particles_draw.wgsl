@@ -387,9 +387,10 @@ fn foam(c: vec2<f32>, r: f32, seed: f32, age: f32, pixels: f32) -> f32 {
     let walls = (smoothstep(0.12, 0.0, big.y - big.x) + 0.35 * smoothstep(0.1, 0.0, small.y - small.x)) * (0.4 + 0.8 * vary);
     let clumps = fbm2(c * 2.2 + s, 3);
     let keep = smoothstep(0.15 + age * 0.3, 0.35 + age * 0.3, clumps + 0.3 * (1.0 - r));
-    let fill = 0.35 * smoothstep(0.45, 0.9, clumps) * (1.0 - age * 0.6);
-    // Too small on screen to show its bubbles, it shows as their average whiteness.
-    let lace = mix(0.5 * (0.6 + 0.8 * vary), walls, smoothstep(40.0, 160.0, pixels));
+    let fill = 0.2 * smoothstep(0.45, 0.9, clumps) * (1.0 - age * 0.6);
+    // Too small on screen to show its bubbles, it shows as their average whiteness: thin, so
+    // far foam reads as a pale film on the water rather than a white patch.
+    let lace = mix(0.28 * (0.6 + 0.8 * vary), walls, smoothstep(40.0, 160.0, pixels));
     return saturate((lace + fill) * keep) * smoothstep(1.0, 0.45, r);
 }
 

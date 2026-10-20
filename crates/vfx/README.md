@@ -120,10 +120,11 @@ night.
 
 Splashes are water, not white puffs. The `crown` sprite ray traces the splash's crown inside
 its square: a wall of water thrown up in a ring that flares out, its rim drawn into fingers
-with a bead on each tip, then tears open and slumps while the jet shoots up from the middle. It
+with a bead on each tip, then tears open and slumps while the jet (a short `jet` rod with a few
+fine drops breaking off its top) shoots up from the middle and sinks back. It
 mirrors the sky at a glance, glints in the sun and whitens only where it froths. `ripple`
 bends the water behind it in a train of wavelets and catches the sky on their crests, and
-`foam` floats a lace of bubbles that breaks up over a few seconds (an even whiteness when too
+`foam` floats a lace of bubbles that breaks up over a few seconds (a thin pale film when too
 far away to show its bubbles). Both ride the surface in the effect's own space, so the air
 neither holds them up nor lets them sink.
 
