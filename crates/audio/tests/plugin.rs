@@ -854,3 +854,74 @@ impl engine_world::GroundQuery for Meadow {
         })
     }
 }
+
+/// Level of the `hz` tone in the left channel of an interleaved stereo recording.
+fn tone_level(samples: &[f32], hz: f32, fs: f32) -> f32 {
+    let w = std::f32::consts::TAU * hz / fs;
+    let (mut re, mut im) = (0.0f32, 0.0f32);
+    for (n, frame) in samples.chunks(2).enumerate() {
+        re += frame[0] * (w * n as f32).cos();
+        im += frame[0] * (w * n as f32).sin();
+    }
+    (re * re + im * im).sqrt() / (samples.len() / 2).max(1) as f32
+}
+
+#[test]
+fn recorded_takes_play_where_there_are_some_and_the_synthesis_everywhere_else() {
+    use engine_audio::FootstepSamples;
+    use engine_audio::samples::{Gait, SampleBank, Take, TakeSet};
+    // A "recording" of concrete that is a 2 kHz tone burst, so it is easy to find.
+    let fs = 48_000.0;
+    let tone: Vec<f32> = (0..(0.25 * fs) as usize)
+        .map(|i| {
+            let t = i as f32 / fs;
+            (std::f32::consts::TAU * 2_000.0 * t).sin() * (-t * 10.0).exp()
+        })
+        .collect();
+    // Takes come levelled to unit loudness.
+    let l = engine_audio::samples::loudness(&tone, fs);
+    let tone: Vec<f32> = tone.iter().map(|v| v / l).collect();
+    let take = |k: f32| Take {
+        pcm: tone.iter().map(|v| v * k).collect::<Vec<_>>().into(),
+        sample_rate: fs,
+        gait: Gait::Walk,
+        source: "tone".into(),
+    };
+    let heard = |surface: &str, recorded: bool| {
+        let mut app = app();
+        app.world.resource_mut::<AudioSettings>().recorded_footsteps = recorded;
+        let mut bank = SampleBank::default();
+        bank.surfaces.insert(
+            "concrete".into(),
+            TakeSet::new(vec![take(1.0), take(0.9), take(1.1)]),
+        );
+        app.insert_resource(FootstepSamples::from_bank(bank));
+        app.world
+            .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)));
+        let s = surface.to_string();
+        let x = record(
+            &mut app,
+            &format!("takes_{surface}_{recorded}"),
+            40,
+            |app, i| {
+                if i % 10 == 0 {
+                    step_on(app, &s, DVec3::new(0.3, 0.0, -0.5));
+                }
+            },
+        );
+        let fs = app.world.resource::<Audio>().sample_rate();
+        (tone_level(&x, 2_000.0, fs), rms(&x))
+    };
+    let (with, level) = heard("concrete", true);
+    let (without, synth_level) = heard("concrete", false);
+    assert!(with > without * 2.5, "the take plays: {with} vs {without}");
+    // Levelled to the synthesized step, within a few dB.
+    let ratio = level / synth_level;
+    assert!((0.5..2.0).contains(&ratio), "level ratio {ratio}");
+    // Grass has no takes: synthesized, and no tone.
+    let (grass, grass_level) = heard("grass", true);
+    assert!(
+        grass < with * 0.1 && grass_level > 0.001,
+        "{grass} {grass_level}"
+    );
+}

@@ -1,0 +1,220 @@
+# Owner: Audio and footsteps. Recorded footstep takes for engine_audio (crates/audio).
+# Format and rules: AGENTS.md, "Art and large files". Fetch with `cargo run -p fetch-assets -- audio`.
+# Freesound previews (Ogg Vorbis). Without them every footstep is synthesized; with them
+# engine_audio::samples cuts each recording into single-step takes.
+
+# Mountain boots on grass: 19 walking and 22 running steps, then jumps, scrapes and scuffs (Rode NTG4+).
+[[file]]
+path = "audio/footsteps/grass/nox_sound_556042.ogg"
+url = "https://cdn.freesound.org/previews/556/556042_9250976-hq.ogg"
+sha256 = "5aa062bc0c8a09910afca154b295bd3482114c5a739535d0819255c1722ef352"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Nox_Sound/sounds/556042/"
+author = "Nox_Sound"
+
+# Hiking boots on grass, six steps.
+[[file]]
+path = "audio/footsteps/grass/fission9_521587.ogg"
+url = "https://cdn.freesound.org/previews/521/521587_9395330-hq.ogg"
+sha256 = "cad6078e8ca16a0d33f063f6a0437d0293476c9ddf6690c1b9740ef2c2550f39"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Fission9/sounds/521587/"
+author = "Fission9"
+
+# Leather shoes on short grass and moss: walk, jog and run.
+[[file]]
+path = "audio/footsteps/grass/vrymaa_moss_770095.ogg"
+url = "https://cdn.freesound.org/previews/770/770095_13973196-hq.ogg"
+sha256 = "245f95543af36d70413c67e9366f7953e0a5bd3bd39917391ef3372c64d7078c"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Vrymaa/sounds/770095/"
+author = "Vrymaa"
+
+# Mountain boots in mud: five walking and five running steps, three landings.
+[[file]]
+path = "audio/footsteps/mud/nox_sound_548384.ogg"
+url = "https://cdn.freesound.org/previews/548/548384_9250976-hq.ogg"
+sha256 = "2b177b3fe187a10fda617138cf7528ad3f4a4b969c894cf71786afa431ccafb1"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Nox_Sound/sounds/548384/"
+author = "Nox_Sound"
+
+# Wet shoes on muddy swamp ground: walk and run.
+[[file]]
+path = "audio/footsteps/mud/vrymaa_770097.ogg"
+url = "https://cdn.freesound.org/previews/770/770097_13973196-hq.ogg"
+sha256 = "574c5e63f0140d7ba883a9ed86acf67623b25b7971007a27aa7054ef58566428"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Vrymaa/sounds/770097/"
+author = "Vrymaa"
+
+# Mountain boots in snow: twelve walking steps.
+[[file]]
+path = "audio/footsteps/snow/nox_sound_613849.ogg"
+url = "https://cdn.freesound.org/previews/613/613849_9250976-hq.ogg"
+sha256 = "9b190a5b4cc09f3dafae38be9c3afac034b45987335fb9f1bd2f7f1d952c4dfb"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Nox_Sound/sounds/613849/"
+author = "Nox_Sound"
+
+# A walk through powder snow.
+[[file]]
+path = "audio/footsteps/snow/vrymaa_773736.ogg"
+url = "https://cdn.freesound.org/previews/773/773736_13973196-hq.ogg"
+sha256 = "579027e43857a1b0d7992e33032e0bebd9dd9bc2a688b2edafd3f2b98528458f"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Vrymaa/sounds/773736/"
+author = "Vrymaa"
+
+# Stepping on frozen puddles (the ice cracks). Credit: "Footsteps, Ice, A.wav" by InspectorJ (www.jshaw.co.uk) of Freesound.org.
+[[file]]
+path = "audio/footsteps/ice/inspectorj_338265.ogg"
+url = "https://cdn.freesound.org/previews/338/338265_5121236-hq.ogg"
+sha256 = "69bb0080add61734dd9e0e5aae75e5cca343507ad31557fee899feecd00c0e9e"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/InspectorJ/sounds/338265/"
+author = "InspectorJ (www.jshaw.co.uk)"
+
+# Mountain boots on gravel: 11 walking and 10 running steps, then jumps, scrapes and scuffs.
+[[file]]
+path = "audio/footsteps/gravel/nox_sound_556002.ogg"
+url = "https://cdn.freesound.org/previews/556/556002_9250976-hq.ogg"
+sha256 = "af2145d67b8427b4cc394a69ba54fe15cf8dd3bd638d6fcf9f310c2e0b6eb766"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Nox_Sound/sounds/556002/"
+author = "Nox_Sound"
+
+# Boots on gritty ground: five walking and five running steps.
+[[file]]
+path = "audio/footsteps/gravel/nox_sound_gritty_530589.ogg"
+url = "https://cdn.freesound.org/previews/530/530589_9250976-hq.ogg"
+sha256 = "92dcccbdbd15bb2c3548479fe554ebcc69755750f12247d96b54628d9e689c3d"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Nox_Sound/sounds/530589/"
+author = "Nox_Sound"
+
+# Hiking boots on crunchy gravel, four steps.
+[[file]]
+path = "audio/footsteps/gravel/fission9_521588.ogg"
+url = "https://cdn.freesound.org/previews/521/521588_9395330-hq.ogg"
+sha256 = "063b71bb10b71f7b5d794817c8e1962798c24b5214b6a02b270490f9e52839b6"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Fission9/sounds/521588/"
+author = "Fission9"
+
+# A walk on mountain pebbles.
+[[file]]
+path = "audio/footsteps/gravel/vrymaa_825854.ogg"
+url = "https://cdn.freesound.org/previews/825/825854_13973196-hq.ogg"
+sha256 = "b7ae606b9114525b8767641c1201c262005ea7e49366247a57cf4ff67f1aa1f3"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Vrymaa/sounds/825854/"
+author = "Vrymaa"
+
+# Hiking boots on hollow wooden planks, six steps.
+[[file]]
+path = "audio/footsteps/wood/fission9_521589.ogg"
+url = "https://cdn.freesound.org/previews/521/521589_9395330-hq.ogg"
+sha256 = "a6f8f8e65e6b82cfb2fb439475d78bb2f97db28e289abb51fdb72c4d8be76226"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Fission9/sounds/521589/"
+author = "Fission9"
+
+# Wood in seven kinds of shoes, three steps each (the shod ones are used).
+[[file]]
+path = "audio/footsteps/wood/nox_sound_543685.ogg"
+url = "https://cdn.freesound.org/previews/543/543685_9250976-hq.ogg"
+sha256 = "ccda2492b2d6d3cbe9ab8619ab66fe0e3b76d9b39dfa6238fd9f5b66e5f57bcd"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Nox_Sound/sounds/543685/"
+author = "Nox_Sound"
+
+# Hard-soled shoes on a metal grate, about 160 steps.
+[[file]]
+path = "audio/footsteps/metal/softdistortionfx_398937.ogg"
+url = "https://cdn.freesound.org/previews/398/398937_5993580-hq.ogg"
+sha256 = "1af36650b5db95c9ea836eb39c053f1f26392b66546159ec6b54691c25b06d64"
+license = "CC0-1.0"
+source = "https://freesound.org/people/SoftDistortionFX/sounds/398937/"
+author = "SoftDistortionFX"
+
+# A metal catwalk, 13 steps.
+[[file]]
+path = "audio/footsteps/metal/vestibule_door_669095.ogg"
+url = "https://cdn.freesound.org/previews/669/669095_14100561-hq.ogg"
+sha256 = "dac70ee6b7e7a0fbcc2d40fa7dd9c5922ac0db7b2b246d8afb71ffe8c6d30c35"
+license = "CC0-1.0"
+source = "https://freesound.org/people/vestibule-door/sounds/669095/"
+author = "vestibule-door"
+
+# Dry shoes on a rock floor: walk and run.
+[[file]]
+path = "audio/footsteps/concrete/vrymaa_rock_770084.ogg"
+url = "https://cdn.freesound.org/previews/770/770084_13973196-hq.ogg"
+sha256 = "9b782fba48f773b649e5729983ed980f0c8429c1c861d2ea8251285168c4eade"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Vrymaa/sounds/770084/"
+author = "Vrymaa"
+
+# Hiking boots on stone, six steps.
+[[file]]
+path = "audio/footsteps/concrete/fission9_stone_521590.ogg"
+url = "https://cdn.freesound.org/previews/521/521590_9395330-hq.ogg"
+sha256 = "b0185b24490d7d59f7241bcc4e1cc581257c4f0781366d53585c71ab4d8751ec"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Fission9/sounds/521590/"
+author = "Fission9"
+
+# Boots on a concrete basement floor, about 50 steps.
+[[file]]
+path = "audio/footsteps/concrete/sturmankin_272253.ogg"
+url = "https://cdn.freesound.org/previews/272/272253_4181170-hq.ogg"
+sha256 = "189a82bce0cf46dbaac4019b8ae1a1ebd2efc119b83b741885eae8f7aebea9ec"
+license = "CC0-1.0"
+source = "https://freesound.org/people/sturmankin/sounds/272253/"
+author = "sturmankin"
+
+# Mountain boots on wet sand: 24 walking steps and a run, then jumps, scuffs and scrapes.
+[[file]]
+path = "audio/footsteps/sand/nox_sound_564893.ogg"
+url = "https://cdn.freesound.org/previews/564/564893_9250976-hq.ogg"
+sha256 = "432d86feba23bb5653961af4c8b04034a9dcc7d2e16d767502cee616dfd08347"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Nox_Sound/sounds/564893/"
+author = "Nox_Sound"
+
+# Sneakers on dry leaves, a hundred seconds.
+[[file]]
+path = "audio/footsteps/leaves/splicesound_218305.ogg"
+url = "https://cdn.freesound.org/previews/218/218305_1480854-hq.ogg"
+sha256 = "6235f89e5145741e40b7de98d6f24cdb512bea3f824e9f633f2015c1e8e1146c"
+license = "CC0-1.0"
+source = "https://freesound.org/people/SpliceSound/sounds/218305/"
+author = "SpliceSound"
+
+# A splash into a puddle, then steps through it.
+[[file]]
+path = "audio/footsteps/water/launemax_249911.ogg"
+url = "https://cdn.freesound.org/previews/249/249911_389377-hq.ogg"
+sha256 = "03d14bcd7774f2126c0b46b999790e218ad9d23498f866ec83ac7b9d81bc1d83"
+license = "CC0-1.0"
+source = "https://freesound.org/people/launemax/sounds/249911/"
+author = "launemax"
+
+# Squishy wet gravel, then walking through a puddle.
+[[file]]
+path = "audio/footsteps/water/patchytherat_531571.ogg"
+url = "https://cdn.freesound.org/previews/531/531571_5911297-hq.ogg"
+sha256 = "b7ef468a28bb56a55e50606a047755b86c675d8e3c43c819569adc4afb4bb668"
+license = "CC0-1.0"
+source = "https://freesound.org/people/patchytherat/sounds/531571/"
+author = "patchytherat"
+
+# Footsteps in puddles (96 kHz).
+[[file]]
+path = "audio/footsteps/water/vlatkoblazek_260979.ogg"
+url = "https://cdn.freesound.org/previews/260/260979_3452716-hq.ogg"
+sha256 = "741893b1e44b462d591602cce9ccc7b8a5e3fe508ab543ffb57c18cbd671c92f"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/VlatkoBlazek/sounds/260979/"
+author = "VlatkoBlazek"
