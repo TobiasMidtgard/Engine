@@ -35,7 +35,8 @@ fn the_arena_fight_keeps_going() {
         .filter(|(_, f)| **f != demo::SPARRING)
         .map(|(e, _)| e)
         .collect();
-    assert_eq!(fighters.len(), 12);
+    // Two squads of six (a medic in each) and the duelling pair.
+    assert_eq!(fighters.len(), 14);
     let mut actions = HashSet::new();
     let mut reasons = HashSet::new();
     let mut downed_seen = 0;

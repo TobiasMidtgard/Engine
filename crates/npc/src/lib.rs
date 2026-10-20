@@ -23,7 +23,7 @@ pub mod world_model;
 
 pub use agent::{
     AlertLevel, AttackPhase, Defense, Npc, NpcAction, NpcBrain, NpcClock, NpcCombat, NpcMotor,
-    NpcOrder, NpcSettings, NpcVitals, NpcWeapon, WeaponStyle,
+    NpcOrder, NpcRole, NpcSettings, NpcVitals, NpcWeapon, WeaponStyle,
 };
 pub use combat::Downed;
 pub use faction::{Faction, Factions, Squad};

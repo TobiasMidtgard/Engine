@@ -453,3 +453,169 @@ fn the_showcase_timer_waits_for_a_mate_and_sends_home_only_the_alone() {
     assert!(at(&w, ally).distance(home) < 0.5, "not sent home");
     assert_eq!(w.world.get::<NpcVitals>(ally).unwrap().fraction(), 1.0);
 }
+
+/// A fighter of squad 4 at `at` with `weapon`, facing −Z, as `role`.
+fn member(app: &mut App, at: DVec3, skills: NpcSkills, weapon: NpcWeapon, role: NpcRole) -> Entity {
+    let e = mate(app, at, skills);
+    app.world.entity_mut(e).insert((
+        weapon,
+        Npc {
+            role,
+            ..Default::default()
+        },
+    ));
+    e
+}
+
+/// The squad's medic: all teamwork, a carbine.
+fn medic(app: &mut App, at: DVec3, skills: NpcSkills) -> Entity {
+    let skills = NpcSkills {
+        teamwork: 1.0,
+        ..skills
+    };
+    member(app, at, skills, NpcWeapon::carbine(), NpcRole::Medic)
+}
+
+#[test]
+fn the_squads_medic_is_the_one_that_usually_revives() {
+    // Two mates nearer the downed ally than the medic is, in a few layouts.
+    let layouts = [
+        (
+            DVec3::new(7.0, 0.0, 3.0),
+            DVec3::new(-6.0, 0.0, 5.0),
+            DVec3::new(11.0, 0.0, 8.0),
+        ),
+        (
+            DVec3::new(-7.0, 0.0, 2.0),
+            DVec3::new(5.0, 0.0, 6.0),
+            DVec3::new(-10.0, 0.0, 9.0),
+        ),
+        (
+            DVec3::new(4.0, 0.0, 7.0),
+            DVec3::new(-8.0, 0.0, 1.0),
+            DVec3::new(9.0, 0.0, -7.0),
+        ),
+        (
+            DVec3::new(6.0, 0.0, -4.0),
+            DVec3::new(-5.0, 0.0, -6.0),
+            DVec3::new(-12.0, 0.0, 4.0),
+        ),
+    ];
+    let mut by_medic = 0;
+    for (n, (a, b, m)) in layouts.into_iter().enumerate() {
+        let mut app = app();
+        let ally = mate(&mut app, DVec3::ZERO, NpcSkills::soldier());
+        let mates = [
+            mate(&mut app, a, NpcSkills::veteran()),
+            mate(&mut app, b, NpcSkills::soldier()),
+        ];
+        let medic = medic(&mut app, m, NpcSkills::soldier());
+        run(&mut app, 0.5);
+        down(&mut app, ally);
+        for _ in 0..60 * 12 {
+            app.update();
+            if !downed(&app, ally) {
+                break;
+            }
+        }
+        assert!(!downed(&app, ally), "layout {n}: nobody revived the ally");
+        let medic_revived = stats(&app, medic).revives == 1;
+        let mates_revived: u32 = mates.iter().map(|&e| stats(&app, e).revives).sum();
+        assert_eq!(
+            u32::from(medic_revived) + mates_revived,
+            1,
+            "layout {n}: one revive"
+        );
+        by_medic += usize::from(medic_revived);
+    }
+    assert!(
+        by_medic >= 3,
+        "the medic revived in {by_medic} of 4 layouts"
+    );
+}
+
+#[test]
+fn melee_mates_screen_a_kneeling_medic_from_the_enemy() {
+    let mut app = app();
+    // The enemy up the field, looking at the spot; a medic that goes in all the same, and a
+    // swordsman off to the side.
+    let ally = mate(&mut app, DVec3::ZERO, NpcSkills::soldier());
+    let medic = medic(&mut app, DVec3::new(7.0, 0.0, 5.0), NpcSkills::rookie());
+    let sword = member(
+        &mut app,
+        DVec3::new(-8.0, 0.0, 7.0),
+        NpcSkills::veteran(),
+        NpcWeapon::sword(),
+        NpcRole::Fighter,
+    );
+    let enemy = player(&mut app, DVec3::new(2.0, 0.0, -16.0));
+    run(&mut app, 1.5);
+    down(&mut app, ally);
+    let (mut knelt_at, mut closest, mut on_the_enemy_side) = (None, f64::MAX, false);
+    for _ in 0..60 * 10 {
+        app.update();
+        let b = brain(&app, medic);
+        if !b.kneeling() || !downed(&app, ally) {
+            if knelt_at.is_some() {
+                break;
+            }
+            continue;
+        }
+        let now = clock(&app, medic);
+        let since = now - *knelt_at.get_or_insert(now);
+        let s = brain(&app, sword);
+        // Once the medic kneels, the swordsman screens it.
+        if since > 1.0 {
+            assert_eq!(s.role, "screen", "{since:.1} s into the kneel");
+            assert!(s.guard.is_some());
+        }
+        let (m, me, foe) = (at(&app, medic), at(&app, sword), at(&app, enemy));
+        let flat = |v: DVec3| DVec3::new(v.x, 0.0, v.z);
+        let gap = flat(me - m).length();
+        if gap < closest {
+            closest = gap;
+            on_the_enemy_side = flat(me - m).normalize().dot(flat(foe - m).normalize()) > 0.5;
+        }
+    }
+    assert!(knelt_at.is_some(), "the medic never knelt");
+    assert!(
+        closest < 3.0,
+        "the swordsman came no nearer than {closest:.1} m"
+    );
+    assert!(
+        on_the_enemy_side,
+        "the swordsman stood off the enemy's side"
+    );
+    // It holds there rather than running at the enemy 16 m off.
+    assert!(at(&app, sword).distance(at(&app, enemy)) > 8.0);
+}
+
+#[test]
+fn a_squad_without_a_medic_revives_as_before() {
+    let mut app = app();
+    let ally = mate(&mut app, DVec3::ZERO, NpcSkills::soldier());
+    let reviver = mate(&mut app, DVec3::new(9.0, 0.0, 4.0), NpcSkills::rookie());
+    let sword = member(
+        &mut app,
+        DVec3::new(-8.0, 0.0, 7.0),
+        NpcSkills::veteran(),
+        NpcWeapon::sword(),
+        NpcRole::Fighter,
+    );
+    let _enemy = player(&mut app, DVec3::new(2.0, 0.0, -16.0));
+    run(&mut app, 1.5);
+    down(&mut app, ally);
+    for _ in 0..60 * 10 {
+        app.update();
+        // Nobody screens and nobody guards a spot: there is no medic to cover.
+        let s = brain(&app, sword);
+        assert_ne!(s.role, "screen");
+        assert!(s.guard.is_none());
+        if !downed(&app, ally) {
+            break;
+        }
+    }
+    assert!(!downed(&app, ally), "nobody revived the ally");
+    // One of them got it up (as before: whoever is best placed).
+    assert_eq!(stats(&app, reviver).revives + stats(&app, sword).revives, 1);
+}

@@ -43,6 +43,21 @@ pub struct Npc {
     pub active: bool,
     /// Override the weapon's preferred fighting distance, meters.
     pub preferred_range: Option<f32>,
+    /// What it is in its squad (see [`NpcRole`]).
+    pub role: NpcRole,
+}
+
+/// What an NPC is in its squad.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum NpcRole {
+    /// A fighter like any other.
+    #[default]
+    Fighter,
+    /// The squad's medic: it fights from the back line and goes for downed squad mates first
+    /// (it notices them sooner and wants it more, and its mates leave the revive to it while it
+    /// is near). While it kneels over one, its mates cover it: the shooters fire at whoever can
+    /// see it, the melee fighters stand between it and the enemy. It wears an armband.
+    Medic,
 }
 
 impl Default for Npc {
@@ -52,6 +67,7 @@ impl Default for Npc {
             patrol_radius: 8.0,
             active: true,
             preferred_range: None,
+            role: NpcRole::Fighter,
         }
     }
 }
@@ -65,7 +81,8 @@ pub enum WeaponStyle {
 }
 
 /// The NPC's weapon. Presets: [`NpcWeapon::sword`], [`sword_and_shield`](NpcWeapon::sword_and_shield),
-/// [`rifle`](NpcWeapon::rifle), [`bow`](NpcWeapon::bow), [`claws`](NpcWeapon::claws).
+/// [`rifle`](NpcWeapon::rifle), [`carbine`](NpcWeapon::carbine), [`bow`](NpcWeapon::bow),
+/// [`claws`](NpcWeapon::claws).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NpcWeapon {
@@ -140,6 +157,18 @@ impl NpcWeapon {
         }
     }
 
+    /// A light rifle (a medic's): it hits less hard and less far, and fires a little faster.
+    pub fn carbine() -> Self {
+        Self {
+            damage: 12.0,
+            range: 30.0,
+            windup: 0.3,
+            cooldown: 0.45,
+            spread_deg: 8.0,
+            ..Self::rifle()
+        }
+    }
+
     pub fn bow() -> Self {
         Self {
             damage: 30.0,
@@ -165,12 +194,13 @@ impl NpcWeapon {
         }
     }
 
-    /// Named preset: `sword`, `sword_and_shield`, `rifle`, `bow`, `claws`.
+    /// Named preset: `sword`, `sword_and_shield`, `rifle`, `carbine`, `bow`, `claws`.
     pub fn preset(name: &str) -> Option<Self> {
         Some(match name {
             "sword" => Self::sword(),
             "sword_and_shield" => Self::sword_and_shield(),
             "rifle" => Self::rifle(),
+            "carbine" => Self::carbine(),
             "bow" => Self::bow(),
             "claws" => Self::claws(),
             _ => return None,
@@ -397,8 +427,12 @@ pub struct NpcBrain {
     pub next_strafe_flip: f64,
     /// A direct order overrides utility scoring until done.
     pub order: Option<NpcOrder>,
-    /// Squad role this think (`"suppress"`, `"flank"`, `"wait"`, `"attack"`).
+    /// Squad role this think (`"suppress"`, `"flank"`, `"cover"` a mate reviving, `"screen"` a
+    /// kneeling medic).
     pub role: &'static str,
+    /// Where the squad's medic kneels over a downed mate, while this one covers or screens it
+    /// (`"cover"` / `"screen"`).
+    pub guard: Option<DVec3>,
     /// Random stream for this NPC's decisions.
     pub rng_state: u64,
     /// Where it came from (patrol center when `Npc::home` is not set).

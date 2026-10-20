@@ -1,14 +1,17 @@
 //! Squads: NPCs that share a [`Squad`](crate::faction::Squad) tell each other what they see
 //! (a shouted callout, which enemies can hear too), take turns attacking in melee so they don't
 //! crowd one opponent, and split into suppressors and a flanker against the same target. When
-//! one of them kneels to revive a downed squad mate, the other shooters cover it.
+//! one of them kneels to revive a downed squad mate, the other shooters cover it. While the
+//! squad's medic kneels, they fire at whoever can see it, and its melee mates screen it.
 
 use std::collections::HashMap;
 
 use engine_core::prelude::*;
 use engine_world::NoiseEvent;
 
-use crate::agent::{Npc, NpcAction, NpcBrain, NpcClock, NpcVitals, NpcWeapon, WeaponStyle};
+use crate::agent::{
+    Npc, NpcAction, NpcBrain, NpcClock, NpcRole, NpcVitals, NpcWeapon, WeaponStyle,
+};
 use crate::faction::{Faction, Squad};
 use crate::perception::NpcMemory;
 use crate::skills::NpcSkills;
@@ -198,6 +201,7 @@ struct Member {
     squad: Squad,
     skills: NpcSkills,
     ranged: bool,
+    medic: bool,
     target: Option<Entity>,
 }
 
@@ -219,6 +223,8 @@ pub(crate) fn plan_squads(
     let mut sightings: Vec<(Squad, Entity, Entity, Faction, DVec3, Vec3, DVec3)> = Vec::new();
     // Squads with a member kneeling over (or on its way to) a downed mate.
     let mut reviving: Vec<Squad> = Vec::new();
+    // Squads whose medic goes to or kneels over a downed mate, and where it kneels.
+    let mut medics: Vec<(Squad, DVec3)> = Vec::new();
     for (e, squad, _, t, skills, weapon, (clock, npc), vitals, brain, memory) in q.iter() {
         if vitals.downed {
             continue;
@@ -228,11 +234,22 @@ pub(crate) fn plan_squads(
         if brain.action == NpcAction::Revive && acting && !reviving.contains(squad) {
             reviving.push(*squad);
         }
+        let medic = npc.role == NpcRole::Medic;
+        if medic && acting && brain.action == NpcAction::Revive {
+            // (Its mates get there as it does.)
+            let at = if brain.kneeling() {
+                t.translation
+            } else {
+                brain.destination.unwrap_or(t.translation)
+            };
+            medics.push((*squad, at));
+        }
         members.push(Member {
             e,
             squad: *squad,
             skills: *skills,
             ranged: weapon.style == WeaponStyle::Ranged,
+            medic,
             target: brain.target,
         });
         for k in &memory.known {
@@ -293,14 +310,15 @@ pub(crate) fn plan_squads(
             .filter(|m| m.ranged)
             .collect();
         if ranged.len() >= 2 {
+            // (The medic stays back.)
             let flanker = ranged
                 .iter()
-                .filter(|m| m.skills.teamwork >= 0.3 && m.skills.logic >= 0.35)
+                .filter(|m| !m.medic && m.skills.teamwork >= 0.3 && m.skills.logic >= 0.35)
                 .max_by(|a, b| a.skills.logic.total_cmp(&b.skills.logic));
             for m in &ranged {
                 let role = if flanker.is_some_and(|f| f.e == m.e) {
                     "flank"
-                } else if m.skills.teamwork >= 0.3 {
+                } else if m.skills.teamwork >= 0.3 && !m.medic {
                     "suppress"
                 } else {
                     ""
@@ -311,18 +329,28 @@ pub(crate) fn plan_squads(
     }
     // While a mate revives someone, the other shooters cover it: they hold where they are and
     // keep the enemy's heads down (fire at where it was last seen), instead of flanking.
+    // A medic going to kneel or kneeling most of all: the shooters fire at whoever can see
+    // its spot, and the melee fighters go stand between it and the enemy.
+    let mut guards: HashMap<Entity, DVec3> = HashMap::new();
     for m in &members {
-        if m.ranged && m.skills.teamwork >= 0.3 && reviving.contains(&m.squad) {
+        if m.skills.teamwork < 0.3 {
+            continue;
+        }
+        if m.ranged && reviving.contains(&m.squad) {
             roles.insert(m.e, "cover");
+        }
+        if let Some(&(_, at)) = medics.iter().find(|(sq, _)| *sq == m.squad) {
+            if !m.ranged {
+                roles.insert(m.e, "screen");
+            }
+            guards.insert(m.e, at);
         }
     }
     for (e, _, _, _, _, _, _, _, mut brain, _) in q.iter_mut() {
         let role = roles.get(&e).copied().unwrap_or("");
-        brain.role = if brain.action == NpcAction::Revive {
-            ""
-        } else {
-            role
-        };
+        let reviving = brain.action == NpcAction::Revive;
+        brain.role = if reviving { "" } else { role };
+        brain.guard = guards.get(&e).copied().filter(|_| !reviving);
     }
 }
 
