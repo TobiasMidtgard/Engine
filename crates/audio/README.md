@@ -27,7 +27,7 @@ the same grass sounds different wet, frozen, snowed on or burnt.
   re-levelled, louder and brighter for heavier and faster steps, duller when wet; the
   synthesis adds only what the recording lacks (rain's squelch, a puddle's splash, a heavy
   walker's thump) and takes over when the ground has changed too much (frozen mud) or there
-  are no takes (other grounds, wheels, falling bodies, CI). Deep snow plays snow and puddles
+  are no takes (other grounds, paws, hooves, wheels, falling bodies, CI). Deep snow plays snow and puddles
   play water whatever is under them. Rock has its own takes too; tile and asphalt borrow
   concrete's, stone rock's and planks wood's.
 - **Impacts** from physics contacts (what hit what, how hard), **splashes** from
@@ -188,6 +188,6 @@ character's and shows as a ring in its ground's colour.
 - Footsteps change from grass to mud to snow; rain gets louder with intensity; slow motion
   lowers the pitch. ✓ (all three are in the trail recording and the tests)
 
-Next: music layers; recorded takes for paws and hooves (they borrow the boots' now, re-pitched),
-a solid-ice recording (the ice takes are frozen puddles cracking), and recordings for more
+Next: music layers; recorded takes for paws and hooves (still synthesized: boot takes re-pitched
+for a dog's and a horse's eight feet buried the trail's gaps in noise), a solid-ice recording (the ice takes are frozen puddles cracking), and recordings for more
 grounds (dirt, rock, fabric).

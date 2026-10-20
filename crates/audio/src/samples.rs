@@ -14,6 +14,8 @@
 //! but only what the recording lacks: the squelch of wet ground, a puddle's splash, a heavy
 //! walker's thump, a snow crust's squeak. A surface with no takes, or a missing folder, falls
 //! back to the synthesis alone, so nothing needs the fetched files (CI never fetches them).
+//! The takes are people's shoes and boots, so only feet play them; paws and hooves are
+//! synthesized.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -956,14 +958,13 @@ impl FootstepSamples {
         fs: f32,
         wait: bool,
     ) -> Option<(Step, StepSample)> {
-        let (kind_speed, kind_gain) = match step.kind {
-            ContactKind::Foot => (1.0, 1.0),
-            // A dog's paw: lighter and quicker than a boot.
-            ContactKind::Paw => (1.3, db(-7.0)),
-            // A hoof: heavier and lower, with the synthesized clop on top.
-            ContactKind::Hoof => (0.82, db(1.5)),
-            _ => return None,
-        };
+        // Only feet: the takes are boots. Played for a dog's four paws or a horse's four
+        // hooves (re-pitched), their half-second takes filled every gap between steps on the
+        // trail with a bed of noise and sounded like boots anyway, so paws, hooves, wheels,
+        // tracks and falling bodies stay synthesized until there are recordings of them.
+        if step.kind != ContactKind::Foot {
+            return None;
+        }
         // What the ground sounds like now decides which recordings fit: deep fresh snow
         // covers anything, and a puddle (or wading) is water whatever is under it.
         let snow = surfaces.snow();
@@ -999,9 +1000,9 @@ impl FootstepSamples {
         // The synthesized level law (gain ∝ i^0.8, strikes ∝ √i up to 2) and its loudness at
         // the reference step (75 kg walking, i = 1), plus ±1.5 dB per step.
         let level = i.powf(0.8) * i.min(2.0).sqrt();
-        let gain = reference * level * kept.sqrt() * kind_gain * db(rng.range(-1.5, 1.5));
+        let gain = reference * level * kept.sqrt() * db(rng.range(-1.5, 1.5));
         let pitch = (state.pitch / base.pitch.max(0.05)).clamp(0.7, 1.4);
-        let speed = kind_speed * pitch * 2f32.powf(rng.range(-0.6, 0.6) / 12.0);
+        let speed = pitch * 2f32.powf(rng.range(-0.6, 0.6) / 12.0);
         let tone = state.brightness / base.brightness.max(0.05);
         let shelf_db = (4.5 * i.log2()).clamp(-6.0, 4.0) + (8.0 * tone.log2()).clamp(-9.0, 3.0);
         let lowpass_hz = if tone < 1.0 {
@@ -1223,9 +1224,10 @@ mod tests {
         let mut s = FootstepSamples::from_bank(bank());
         let dry = SurfaceCell::default();
         assert!(step_on(&mut s, "grass", &dry, ContactKind::Foot, 75.0, 1.4, 15.0).is_some());
-        assert!(step_on(&mut s, "grass", &dry, ContactKind::Paw, 20.0, 1.4, 15.0).is_some());
-        assert!(step_on(&mut s, "grass", &dry, ContactKind::Hoof, 500.0, 1.4, 15.0).is_some());
-        // No takes for gravel; wheels and falling bodies are always synthesized.
+        // No takes for gravel; the takes are boots, so paws, hooves, wheels and falling
+        // bodies are always synthesized.
+        assert!(step_on(&mut s, "grass", &dry, ContactKind::Paw, 20.0, 1.4, 15.0).is_none());
+        assert!(step_on(&mut s, "grass", &dry, ContactKind::Hoof, 500.0, 1.4, 15.0).is_none());
         assert!(step_on(&mut s, "gravel", &dry, ContactKind::Foot, 75.0, 1.4, 15.0).is_none());
         assert!(step_on(&mut s, "grass", &dry, ContactKind::Wheel, 900.0, 5.0, 15.0).is_none());
         assert!(step_on(&mut s, "grass", &dry, ContactKind::Body, 75.0, 0.0, 15.0).is_none());
