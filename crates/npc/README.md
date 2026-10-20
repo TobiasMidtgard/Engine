@@ -54,9 +54,13 @@ flames. Wolf packs roam, get hungry, track prey by scent and hunt together, each
 part by its place in the pack (`AnimalMind::role`, a `PackRole`): the tester creeps straight
 at the herd, singles out the weakest (wounded, young or straggling; it picks over the herd
 again as its rush sets it running) and drives it; two flankers swing wide to its sides and
-run out level with it to cut its escape line, then cut in; a fourth wolf circles wide
-round the herd and lies in wait where it will run, springing when it comes near; any more
-drive with the tester. The tester rushes once the pack is in place. A pack gives up a chase
+run out level with it to cut its escape line, holding its side until it tires or a wolf is
+on it, then cut in; a fourth wolf circles wide round the herd and lies in wait where it
+will run, springing when it comes within 12 m (or the pack's charge misses, or it has
+waited a minute); any more drive with the tester. While they stalk, the wolves keep 10 m
+clear of the herd and crouch within 30 m of it, and the flankers loop round behind it to
+their posts off its flanks rather than cross in front. The tester rushes once the pack is
+in place. A pack gives up a chase
 `PACK_CHASE_SECS` after its first wolf set off (all of it together, on the wolves' own
 clocks) and rests `PACK_REST_SECS`, hungry or not. They feed on the kill and back away from
 people. Deer raise the alarm: the first to bolt snorts (a noise other animals hear, though
@@ -313,11 +317,12 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   whoever hurt it (the shooter, not what it was watching), stands and scents when it can't
   find who rather than charge at nothing, and runs from fire rather than
   charge into it, a sow charges to defend her piglets (a lone sow runs), wolves give room to
-  a boar charging at them but not to one charging past, wolves pick a piglet over its
+  a boar charging at them but not to one charging past (at six spots), wolves pick a piglet over its
   elders, a pack of three, four or five picks the wounded deer from the start, runs only it
-  and catches it (unhurt, the herd's nearest), its flankers run out on the quarry's sides
-  (never the wrong one) while the tester drives from behind and the ambusher lies in wait
-  beyond the herd, a herd's alarm spreads within a reaction time (each deer looks toward the
+  and catches it (unhurt, the herd's nearest), over eight seeded hunts for each pack size
+  its flankers run out on the quarry's sides (both on their own for most of the flanking,
+  abreast of it for a second in at least half the hunts, never level with it on the far
+  side) while the tester drives from behind and the ambusher lies in wait beyond the herd, a herd's alarm spreads within a reaction time (each deer looks toward the
   shot before it bolts, and the herd stays bunched), a deer runs straight from a wolf well
   back and zigzags once it is close, and a pack gives up a chase after its time, all
   together, rests its time out though hungry, and hunts again.

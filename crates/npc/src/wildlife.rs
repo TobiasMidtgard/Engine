@@ -508,6 +508,8 @@ pub struct AnimalMind {
     pub alarm: Option<(f64, bool)>,
     pub pursuer: Option<(DVec3, f32)>,
     chaser: Option<Entity>,
+    /// Flankers: when it came level with the quarry in this chase (animal clock).
+    abreast: Option<f64>,
     /// Away from everything it last saw or smelled that threatens it, weighted by danger.
     escape: Option<Vec3>,
     zig: f32,
@@ -1597,17 +1599,18 @@ fn decide(
                 return;
             }
             // The tester picks over the herd for the weakest as it stalks and as its rush
-            // sets the herd running (a straggler shows itself then).
-            let testing = match mind.state {
-                AnimalState::Stalk => true,
-                AnimalState::Chase => now - mind.since < TEST_SECS,
-                _ => false,
+            // sets the herd running (a straggler shows itself then). Once the pack is running
+            // one down it takes a clearly weaker one to turn it from it.
+            let switch = match mind.state {
+                AnimalState::Stalk => Some(0.75),
+                AnimalState::Chase if now - mind.since < TEST_SECS => Some(0.5),
+                _ => None,
             };
             if role == PackRole::Tester
-                && testing
+                && let Some(switch) = switch
                 && let Some((q, qs, score)) = weakest(p.herd, pos, snaps)
                 && q != prey
-                && score < 0.75 * quarry_score(p, p.pos.distance(pos))
+                && score < switch * quarry_score(p, p.pos.distance(pos))
             {
                 prey = q;
                 p = qs;
@@ -1634,11 +1637,12 @@ fn decide(
                 };
                 let rush = match role {
                     // Lies in wait until the quarry comes to it, or the chase goes another way;
-                    // not in place yet when the pack sets off, it runs to head the quarry off.
+                    // not in place yet when the pack sets off, it keeps heading for its place
+                    // ahead of the quarry (rushing it head-on would only turn it back).
                     PackRole::Ambusher => {
                         let away = flat(pos - p.pos).dot(p.vel) <= 0.0;
                         let missed = pack_chase > 3.0 && d > 20.0 && away;
-                        d < 12.0 || pack_charging && (!mind.placed || missed) || stalk_secs > 60.0
+                        d < 12.0 || pack_charging && missed || stalk_secs > 60.0
                     }
                     // Rushes the herd once the pack is in place.
                     PackRole::Tester => {
@@ -1992,7 +1996,26 @@ fn flee_direction(
         dir = Quat::from_rotation_y(mind.zig * 0.6) * dir;
     } else if deer && heels.is_some_and(|p| p.1 < ZIGZAG_RANGE) {
         if now >= mind.next_zig {
-            mind.zig = if mind.zig > 0.0 { -1.0 } else { 1.0 };
+            // Cuts the other way each time, unless that would take it at a wolf running out
+            // on that side (a flanker): then it cuts away from it again.
+            let toward = |side: f32| {
+                let cut = Quat::from_rotation_y(side * 0.9) * dir;
+                let mut sum = 0.0;
+                for s in snaps.values() {
+                    let off = flat(s.pos - pos);
+                    let d = off.length();
+                    if s.species == Species::Wolf && !s.dead && d > 0.1 && d < 15.0 {
+                        sum += cut.dot(off / d).max(0.0) * (1.0 - d / 15.0);
+                    }
+                }
+                sum
+            };
+            let next = if mind.zig > 0.0 { -1.0 } else { 1.0 };
+            mind.zig = if toward(next) > toward(-next) + 0.3 {
+                -next
+            } else {
+                next
+            };
             mind.next_zig = now + 0.45 + 0.25 * mind.random() as f64;
         }
         dir = Quat::from_rotation_y(mind.zig * 0.9) * dir;
@@ -2259,31 +2282,82 @@ fn hunt(
     let stalk = motor.walk_speed / run * 1.6;
     let at = |along: f32, side: f32| prey_pos + (drive * along + left * side).as_dvec3();
     if mind.state == AnimalState::Stalk {
+        // How far the rest of the herd spreads out from the quarry, to its left and right and
+        // ahead of it: the pack keeps its distance from all of them, not just from it.
+        let (mut wide_left, mut wide_right) = (0.0f32, 0.0f32);
+        let (mut ahead, mut behind) = (0.0f32, 0.0f32);
+        let (mut nearest, mut nearest_at) = (flat(prey_pos - pos).length(), prey_pos);
+        for s in snaps.values() {
+            if s.dead || s.herd.is_none() || s.herd != p.herd {
+                continue;
+            }
+            let d = flat(s.pos - pos).length();
+            if d < nearest {
+                (nearest, nearest_at) = (d, s.pos);
+            }
+            let off = flat(s.pos - prey_pos);
+            wide_left = wide_left.max(off.dot(left));
+            wide_right = wide_right.max(-off.dot(left));
+            ahead = ahead.max(off.dot(drive));
+            behind = behind.max(-off.dot(drive));
+        }
+        let wide = |side: f32| if side > 0.0 { wide_left } else { wide_right }.min(12.0);
+        let ahead = ahead.min(12.0);
+        let behind = behind.min(8.0);
+        let along_me = flat(pos - prey_pos).dot(drive);
         // Creep into place: the tester straight at the herd, the flankers out to its sides,
         // the ambusher round beyond it, keeping its distance until it is past, then lying in
         // wait where the quarry will run.
         let mut lying_in_wait = true;
         let (goal, speed) = match mind.role {
             PackRole::FlankLeft | PackRole::FlankRight => {
-                (at(2.0, 13.0 * mind.role.side()), stalk * 2.2)
-            }
-            PackRole::Ambusher => {
-                let off = flat(pos - prey_pos);
-                let side = if off.dot(left) >= 0.0 { 1.0 } else { -1.0 };
-                if off.dot(drive) < 4.0 {
+                // Out wide alongside the back of the herd first, then up to its post.
+                let side = mind.role.side();
+                let across = (10.0 + wide(side).min(6.0)) * side;
+                if along_me < -(behind + 2.0) {
                     lying_in_wait = false;
-                    (at(9.0, 30.0 * side), 1.0)
+                    (at(-behind, across), stalk * 2.2)
                 } else {
-                    (at(24.0, 0.0), stalk * 2.2)
+                    (at(6.0, across), stalk * 2.2)
                 }
             }
-            PackRole::Chaser => (at(-14.0, 5.0 * spread), stalk * 1.6),
-            _ => (at(-14.0, 0.0), stalk * 1.6),
+            PackRole::Ambusher => {
+                // Wide round its side, wide again ahead of it, and only then in to its post
+                // in front of it, so it never passes close enough to be seen.
+                let off = flat(pos - prey_pos);
+                let side = if off.dot(left) >= 0.0 { 1.0 } else { -1.0 };
+                let along = off.dot(drive);
+                if along < 4.0 {
+                    lying_in_wait = false;
+                    (at(9.0, (30.0 + wide(side)) * side), 1.0)
+                } else if along < 20.0 + ahead {
+                    lying_in_wait = false;
+                    (at(28.0 + ahead, (26.0 + wide(side)) * side), 1.0)
+                } else {
+                    (at(24.0 + ahead, 0.0), stalk * 2.2)
+                }
+            }
+            PackRole::Chaser => (at(-(10.0f32 + behind).max(14.0), 5.0 * spread), stalk * 1.6),
+            _ => (at(-(10.0f32 + behind).max(14.0), 0.0), stalk * 1.6),
         };
-        walk_to(pos, goal, speed, nav, w, now, replans, out);
-        out.crouch = true;
+        // Backs off from any of the herd that wanders too close, before it is seen.
+        let clear = 10.0;
+        let away = flat(pos - nearest_at).normalize_or_zero();
+        let step = if nearest < clear && away != Vec3::ZERO {
+            pos + (away * (clear + 1.0 - nearest)).as_dvec3()
+        } else {
+            goal
+        };
+        walk_to(pos, step, speed, nav, w, now, replans, out);
+        // Trots while the herd is well off, then creeps.
+        out.crouch = nearest < 30.0;
+        mind.abreast = None;
         let off = pos.distance(goal);
-        mind.placed = off < 2.5 && lying_in_wait;
+        let near_enough = match mind.role {
+            PackRole::FlankLeft | PackRole::FlankRight => 4.0,
+            _ => 2.5,
+        };
+        mind.placed = off < near_enough && lying_in_wait;
         let look = flat(prey_pos - pos);
         if look.length() > 0.1 && off < 3.0 {
             out.look = Some(look.normalize());
@@ -2305,12 +2379,26 @@ fn hunt(
         PackRole::FlankLeft | PackRole::FlankRight => {
             let side = left_of(heading) * mind.role.side();
             let off = flat(pos - prey_pos);
-            let level = off.dot(heading) > -1.5 && off.dot(side) > 0.0;
-            if level || d < 3.0 {
-                // Cut in at its flank.
-                prey_pos + (prey_vel * t.min(0.25)).as_dvec3()
-            } else {
-                lead + (side * 5.0 + heading * 2.0).as_dvec3()
+            if off.dot(heading) > -1.5 && off.dot(side) > 0.0 {
+                mind.abreast.get_or_insert(now);
+            }
+            let flank = prey_pos + (prey_vel * t.min(0.25)).as_dvec3();
+            let across = off.dot(side).max(0.0);
+            let level = off.dot(heading) > -1.0;
+            let tiring = prey_vel.length() < motor.sprint_speed * 0.9;
+            match mind.abreast {
+                // Close enough, or level with it as it tires or turns: cut in at its flank.
+                _ if d < 3.0 => flank,
+                Some(at) if level && tiring && now - at > 1.0 => flank,
+                // Up with it: run alongside it in a lane out on its side, closing it off from
+                // that side, easing in to the lane and aiming well ahead so as not to lose
+                // ground.
+                Some(_) => {
+                    let lane = (across - 2.0).max(4.5);
+                    prey_pos + (prey_vel * 0.6 + side * lane).as_dvec3()
+                }
+                // Still behind: run out wide and up level with it.
+                None => lead + (side * 5.0 + heading * 2.0).as_dvec3(),
             }
         }
         PackRole::Chaser if d > 6.0 => lead + (left * 3.0 * spread).as_dvec3(),

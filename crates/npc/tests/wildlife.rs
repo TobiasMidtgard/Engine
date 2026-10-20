@@ -613,45 +613,56 @@ fn a_wounded_boar_runs_from_fire_rather_than_charge_into_it() {
 
 #[test]
 fn wolves_give_room_to_a_boar_charging_at_them_only() {
-    let mut app = app();
-    let tusker = boar(&mut app, DVec3::ZERO, 40, true, false);
-    app.update_n(60);
-    // Shot from one side, it charges the hunter; a wolf turns up 5 m behind it as it sets
-    // off, and stays put: the boar is not charging at it.
-    let hunter = player(&mut app, DVec3::new(14.0, 0.0, 0.0), LocomotionMode::Crouch);
-    app.update_n(10);
-    shoot(&mut app, hunter, tusker);
-    let mut wolf = None;
-    for _ in 0..90 {
-        app.update();
-        if wolf.is_none() && state(&app, tusker) == AnimalState::Charge {
-            let at = pos(&app, tusker) - DVec3::new(5.0, 0.0, 0.0);
-            wolf = Some(animal(&mut app, Species::Wolf, at, 2));
+    // Across several spots (each its own draw of the animals' seeds).
+    for k in 0..6 {
+        let o = DVec3::new(k as f64 * 97.0, 0.0, k as f64 * 53.0);
+        let mut app = app();
+        let tusker = boar(&mut app, o, 40, true, false);
+        app.update_n(60);
+        // Shot from one side, it charges the hunter; a wolf turns up 5 m behind it as it
+        // sets off, and stays put: the boar is not charging at it.
+        let hunter = player(
+            &mut app,
+            o + DVec3::new(14.0, 0.0, 0.0),
+            LocomotionMode::Crouch,
+        );
+        app.update_n(10);
+        shoot(&mut app, hunter, tusker);
+        let mut wolf = None;
+        for _ in 0..90 {
+            app.update();
+            if wolf.is_none() && state(&app, tusker) == AnimalState::Charge {
+                let at = pos(&app, tusker) - DVec3::new(5.0, 0.0, 0.0);
+                wolf = Some(animal(&mut app, Species::Wolf, at, 2));
+            }
+            if let Some(w) = wolf {
+                assert_ne!(
+                    state(&app, w),
+                    AnimalState::Flee,
+                    "spot {k}: the wolf ran from a boar charging away from it"
+                );
+            }
         }
-        if let Some(w) = wolf {
-            assert_ne!(
-                state(&app, w),
-                AnimalState::Flee,
-                "the wolf ran from a boar charging away from it"
-            );
-        }
-    }
-    wolf.expect("the boar charges the hunter");
+        wolf.expect("the boar charges the hunter");
 
-    // Bitten by a wolf 15 m off, it charges the wolf, which gives it room.
-    let mut app = self::app();
-    let tusker = boar(&mut app, DVec3::ZERO, 40, true, false);
-    let wolf = animal(&mut app, Species::Wolf, DVec3::new(-15.0, 0.0, 0.0), 2);
-    app.update_n(60);
-    shoot(&mut app, wolf, tusker);
-    let (mut charged, mut gave_way) = (false, false);
-    for _ in 0..60 * 6 {
-        app.update();
-        charged |= state(&app, tusker) == AnimalState::Charge;
-        gave_way |= charged && state(&app, wolf) == AnimalState::Flee;
+        // Bitten by a wolf 15 m off, it charges the wolf, which gives it room. (Both wander
+        // for a second first; the wolf is 15 m off when it bites.)
+        let mut app = self::app();
+        let tusker = boar(&mut app, o, 40, true, false);
+        let wolf = animal(&mut app, Species::Wolf, o + DVec3::new(-15.0, 0.0, 0.0), 2);
+        app.update_n(60);
+        let at = pos(&app, tusker) - DVec3::new(15.0, 0.0, 0.0);
+        app.world.get_mut::<Transform>(wolf).unwrap().translation = at;
+        shoot(&mut app, wolf, tusker);
+        let (mut charged, mut gave_way) = (false, false);
+        for _ in 0..60 * 6 {
+            app.update();
+            charged |= state(&app, tusker) == AnimalState::Charge;
+            gave_way |= charged && state(&app, wolf) == AnimalState::Flee;
+        }
+        assert!(charged, "spot {k}: the boar charges the wolf");
+        assert!(gave_way, "spot {k}: and the wolf gives it room");
     }
-    assert!(charged, "the boar charges the wolf");
-    assert!(gave_way, "and the wolf gives it room");
 }
 
 /// A sow with `piglets` about her, and someone stepping out of cover 10 m away and walking
@@ -821,110 +832,166 @@ fn a_pack_singles_out_the_wounded_deer() {
     }
 }
 
+/// A pack of `wolves` 45 m from a herd of `deer`, hungry, every body seeded from draw `k`
+/// (so a test can run the same hunt over several draws instead of one).
+fn seeded_hunt(app: &mut App, deer: usize, wolves: usize, k: u64) -> (Vec<Entity>, Vec<Entity>) {
+    app.world.resource_mut::<WildlifeSettings>().respawn_secs = 0.0;
+    let herd_ = herd(app, Species::Deer, DVec3::ZERO, deer, 1);
+    let pack = herd(app, Species::Wolf, DVec3::new(0.0, 0.0, -45.0), wolves, 2);
+    for (i, &e) in herd_.iter().chain(&pack).enumerate() {
+        let s = (k + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ (i as u64 + 1).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        app.world.entity_mut(e).insert(Seed(s));
+    }
+    app.update();
+    for &w in &pack {
+        app.world.get_mut::<AnimalMind>(w).unwrap().hunger = 1.0;
+    }
+    (herd_, pack)
+}
+
+/// How a pack's flankers ran. `chase` counts the steps the quarry ran from the pack; the
+/// rest is over the flanking phase, from the rush until a wolf closes to 3 m or the quarry,
+/// once at full sprint, tires below three quarters of it: its steps, the steps both flankers
+/// were out on their own sides, the longest both ran abreast of it, the steps a flanker
+/// running level with it (no more than 6 m behind) was on its far side, and the steps the
+/// tester was behind it. Also, as the tester rushed, how far beyond the quarry the ambusher
+/// lay and whether it was still lying in wait.
+#[derive(Debug, Default)]
+struct Flanking {
+    chase: usize,
+    phase: usize,
+    sides: usize,
+    abreast: usize,
+    wrong_level: usize,
+    tester_behind: usize,
+    ambusher: Option<(f32, bool)>,
+}
+
+/// Runs `pack`'s hunt of `deer` until a kill (or 90 s), watching where each wolf is from the
+/// quarry, across (toward a flanker's own side) and along its line of flight.
+fn flanking(app: &mut App, deer: &[Entity], pack: &[Entity]) -> Flanking {
+    let mut f = Flanking::default();
+    let (mut rushed, mut open, mut fast, mut run) = (false, true, false, 0);
+    for _ in 0..60 * 90 {
+        app.update();
+        if deer.iter().any(|&d| state(app, d) == AnimalState::Dead) {
+            break;
+        }
+        let Some(tester) = pack
+            .iter()
+            .copied()
+            .find(|&w| mind(app, w).role == PackRole::Tester)
+        else {
+            continue;
+        };
+        let m = mind(app, tester);
+        let (true, Some(q)) = (m.state == AnimalState::Chase, m.prey) else {
+            continue;
+        };
+        if !rushed
+            && let Some(&a) = pack
+                .iter()
+                .find(|&&w| mind(app, w).role == PackRole::Ambusher)
+        {
+            let line = flat(pos(app, q) - pos(app, tester)).normalize();
+            let beyond = flat(pos(app, a) - pos(app, q)).dot(line);
+            f.ambusher = Some((beyond, state(app, a) == AnimalState::Stalk));
+        }
+        rushed = true;
+        let v = app.world.get::<LocomotionState>(q).unwrap().velocity;
+        let v = Vec3::new(v.x, 0.0, v.z);
+        if v.length() < 3.0 {
+            continue;
+        }
+        f.chase += 1;
+        if open {
+            let sprint = app.world.get::<NpcMotor>(q).unwrap().sprint_speed;
+            fast |= v.length() > 0.95 * sprint;
+            let close = pack
+                .iter()
+                .any(|&w| flat(pos(app, w) - pos(app, q)).length() < 3.0);
+            open = !(close || fast && v.length() < 0.75 * sprint);
+        }
+        if !open {
+            continue;
+        }
+        let ahead = v.normalize();
+        let left = Vec3::new(ahead.z, 0.0, -ahead.x);
+        f.phase += 1;
+        let (mut abeam, mut sides) = (0, 0);
+        for &w in pack {
+            let r = mind(app, w).role;
+            let off = flat(pos(app, w) - pos(app, q));
+            let (d, across, along) = (off.length(), off.dot(left) * r.side(), off.dot(ahead));
+            if r == PackRole::Tester && along < 0.0 {
+                f.tester_behind += 1;
+            }
+            if r.side() == 0.0 {
+                continue;
+            }
+            if d < 12.0 && across > 1.5 && along.abs() < across + 1.0 {
+                abeam += 1;
+            }
+            if d < 20.0 && (across > 1.5 || d < 1.6) {
+                sides += 1;
+            }
+            if d < 12.0 && d > 4.0 && across < -1.5 && along > -6.0 {
+                f.wrong_level += 1;
+            }
+        }
+        f.sides += (sides == 2) as usize;
+        run = if abeam == 2 { run + 1 } else { 0 };
+        f.abreast = f.abreast.max(run);
+    }
+    f
+}
+
+/// Over eight draws of each pack size: every hunt is a real chase, with the ambusher (in a
+/// pack of four or more) lying in wait well beyond the quarry as the tester rushes, the
+/// tester driving it from behind, and never a flanker level with it on its far side. Each
+/// pack size keeps both flankers out on their own sides for most of its flanking, and in at
+/// least half the hunts both run abreast of the quarry for a second (unless the flanking was
+/// over within two) and hold their sides for three quarters of it. (A deer at full sprint
+/// outruns a wolf, so on a long straight bolt the flankers fall back: hence not every hunt.)
 #[test]
 fn flankers_run_out_on_the_quarrys_sides() {
     for wolves in [3, 4, 5] {
-        let mut app = app();
-        let (deer, pack) = hunt(&mut app, 4, wolves);
-        // Where each wolf is from the quarry, across (toward a flanker's own side) and along
-        // its line of flight, at every step of the chase.
-        let (mut frames, mut both, mut run, mut longest) = (0, 0, 0, 0);
-        let (mut wrong_side, mut tester_behind) = (0, 0);
-        let (mut rushed, mut ambushed) = (false, false);
-        for _ in 0..60 * 90 {
-            app.update();
-            if deer.iter().any(|&d| state(&app, d) == AnimalState::Dead) {
-                break;
+        let (mut phase, mut sides, mut good) = (0, 0, 0);
+        for k in 0..8 {
+            let mut app = app();
+            let (deer, pack) = seeded_hunt(&mut app, 4, wolves, k);
+            let f = flanking(&mut app, &deer, &pack);
+            eprintln!("{wolves} wolves, draw {k}: {f:?}");
+            let at = format!("{wolves} wolves, draw {k}");
+            assert!(f.chase >= 60, "{at}: a real chase ({} steps)", f.chase);
+            assert_eq!(f.ambusher.is_some(), wolves >= 4, "{at}: an ambusher");
+            if let Some((beyond, lying_in_wait)) = f.ambusher {
+                assert!(beyond > 12.0, "{at}: the ambusher {beyond:.1} m beyond");
+                assert!(lying_in_wait, "{at}: the ambusher lying in wait");
             }
-            let Some(tester) = pack
-                .iter()
-                .copied()
-                .find(|&w| mind(&app, w).role == PackRole::Tester)
-            else {
-                continue;
-            };
-            let m = mind(&app, tester);
-            let (true, Some(q)) = (m.state == AnimalState::Chase, m.prey) else {
-                continue;
-            };
-            let first = !rushed;
-            rushed = true;
-            if first
-                && let Some(&a) = pack
-                    .iter()
-                    .find(|&&w| mind(&app, w).role == PackRole::Ambusher)
-            {
-                // As the tester rushes, the ambusher lies in wait well beyond the quarry.
-                let line = flat(pos(&app, q) - pos(&app, tester)).normalize();
-                let beyond = flat(pos(&app, a) - pos(&app, q)).dot(line);
-                eprintln!("{wolves} wolves: the ambusher lies {beyond:.1} m beyond the quarry");
-                assert!(
-                    beyond > 12.0,
-                    "{wolves} wolves: the ambusher {beyond:.1} m beyond"
-                );
-                assert_eq!(state(&app, a), AnimalState::Stalk, "lying in wait");
-                ambushed = true;
-            }
-            let v = app.world.get::<LocomotionState>(q).unwrap().velocity;
-            let v = Vec3::new(v.x, 0.0, v.z);
-            if v.length() < 3.0 {
-                continue;
-            }
-            let ahead = v.normalize();
-            let left = Vec3::new(ahead.z, 0.0, -ahead.x);
-            frames += 1;
-            // Out on its own side, abreast of the quarry (or already on it, biting).
-            let (mut abeam, mut on_it) = (0, 0);
-            for &w in &pack {
-                let r = mind(&app, w).role;
-                let off = flat(pos(&app, w) - pos(&app, q));
-                let (across, along) = (off.dot(left) * r.side(), off.dot(ahead));
-                if r.side() != 0.0 && off.length() < 12.0 {
-                    if across > 1.5 && along.abs() < across + 1.0 {
-                        abeam += 1;
-                    } else if off.length() < 1.6 {
-                        on_it += 1;
-                    }
-                    // (Not in the scrimmage at the end, where they close in from all sides.)
-                    if across < -1.5 && off.length() > 4.0 {
-                        wrong_side += 1;
-                    }
-                }
-                if r == PackRole::Tester && along < 0.0 {
-                    tester_behind += 1;
-                }
-            }
-            if abeam + on_it == 2 {
-                both += 1;
-            }
-            run = if abeam == 2 { run + 1 } else { 0 };
-            longest = longest.max(run);
+            assert!(
+                f.tester_behind * 10 >= f.phase * 9,
+                "{at}: the tester drives from behind ({} of {})",
+                f.tester_behind,
+                f.phase
+            );
+            assert_eq!(
+                f.wrong_level, 0,
+                "{at}: a flanker level with the quarry on its far side"
+            );
+            phase += f.phase;
+            sides += f.sides;
+            let abreast = f.abreast >= 60 || f.phase < 120;
+            good += (abreast && f.sides * 4 >= f.phase * 3) as usize;
         }
-        eprintln!(
-            "{wolves} wolves: chase steps {frames}, both flankers at its sides {both}, both \
-             abreast {longest} steps running, a flanker on the wrong side {wrong_side}, the \
-             tester behind {tester_behind}"
+        assert!(
+            sides * 10 >= phase * 8,
+            "{wolves} wolves: both flankers on their sides for {sides} of {phase} steps"
         );
         assert!(
-            frames >= 60,
-            "{wolves} wolves: a real chase ({frames} steps)"
-        );
-        assert_eq!(ambushed, wolves >= 4, "{wolves} wolves: an ambusher");
-        assert!(
-            both * 10 >= frames * 6,
-            "{wolves} wolves: both flankers at the quarry's sides for {both} of {frames} steps"
-        );
-        assert!(
-            longest >= 60,
-            "{wolves} wolves: both flankers running abreast of it for a second ({longest} steps)"
-        );
-        assert!(
-            wrong_side == 0,
-            "{wolves} wolves: a flanker on the wrong side for {wrong_side} of {frames} steps"
-        );
-        assert!(
-            tester_behind * 10 >= frames * 9,
-            "{wolves} wolves: the tester drives from behind ({tester_behind} of {frames})"
+            good >= 4,
+            "{wolves} wolves: both flankers abreast and on their sides in {good} of 8 hunts"
         );
     }
 }
