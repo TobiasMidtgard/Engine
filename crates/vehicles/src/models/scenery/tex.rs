@@ -249,13 +249,25 @@ fn scale3(a: [f32; 3], s: f32) -> [f32; 3] {
 /// With `grooves` (pitch in meters) it gets transverse runway grooves 6 mm wide running
 /// along the texture's x axis (constant y).
 pub fn asphalt(px: u32, tile_m: f32, grooves: Option<f32>, seed: u32) -> Maps {
+    bake(
+        Spec::square(px, tile_m),
+        asphalt_texel(tile_m, grooves, seed),
+    )
+}
+
+/// A texel recipe: meters inside the tile to the texel there.
+pub trait Recipe: Fn(f32, f32) -> Texel + Copy + Send + Sync + 'static {}
+impl<F: Fn(f32, f32) -> Texel + Copy + Send + Sync + 'static> Recipe for F {}
+
+/// [`asphalt`]'s texel recipe, for paint laid over it.
+pub fn asphalt_texel(tile_m: f32, grooves: Option<f32>, seed: u32) -> impl Recipe {
     let fine = cells(tile_m, 0.0065);
     let coarse = cells(tile_m, 0.016);
     let blot = cells(tile_m, 0.7);
     let big = cells(tile_m, 2.6);
     let crack_p = cells(tile_m, 1.6);
     let groove_n = grooves.map(|p| cells(tile_m, p));
-    bake(Spec::square(px, tile_m), move |x, y| {
+    move |x, y| {
         let (u, v) = (x / tile_m, y / tile_m);
         // Aggregate.
         let c = worley(u * fine as f32, v * fine as f32, (fine, fine), 0.95, seed);
@@ -324,16 +336,21 @@ pub fn asphalt(px: u32, tile_m: f32, grooves: Option<f32>, seed: u32) -> Maps {
             ao,
             ..Default::default()
         }
-    })
+    }
 }
 
 /// Cast concrete (walls, barriers, footings, buildings): light gray with mottling, sand grain
 /// and small air pores.
 pub fn concrete(px: u32, tile_m: f32, seed: u32) -> Maps {
+    bake(Spec::square(px, tile_m), concrete_texel(tile_m, seed))
+}
+
+/// [`concrete`]'s texel recipe.
+pub fn concrete_texel(tile_m: f32, seed: u32) -> impl Recipe {
     let m1 = cells(tile_m, 0.9);
     let m2 = cells(tile_m, 0.18);
     let pore = cells(tile_m, 0.009);
-    bake(Spec::square(px, tile_m), move |x, y| {
+    move |x, y| {
         let (u, v) = (x / tile_m, y / tile_m);
         let a = fbm(u * m1 as f32, v * m1 as f32, (m1, m1), 4, 0.5, seed);
         let b = fbm(u * m2 as f32, v * m2 as f32, (m2, m2), 3, 0.5, seed + 1);
@@ -358,19 +375,24 @@ pub fn concrete(px: u32, tile_m: f32, seed: u32) -> Maps {
             ao: 1.0 - is_pore * 0.5,
             ..Default::default()
         }
-    })
+    }
 }
 
 /// Concrete pavement: a 2 × 2 block of `panel_m` slabs with sealed expansion joints on the
 /// tile borders and through the middle, broomed surface texture (alternating direction per
 /// slab), corner cracks and stains. Covers `2 * panel_m`.
 pub fn slabs(px: u32, panel_m: f32, seed: u32) -> Maps {
+    bake(Spec::square(px, panel_m * 2.0), slabs_texel(panel_m, seed))
+}
+
+/// [`slabs`]'s texel recipe (the tile is `2 * panel_m`).
+pub fn slabs_texel(panel_m: f32, seed: u32) -> impl Recipe {
     let tile = panel_m * 2.0;
     let m1 = cells(tile, 1.2);
     let m2 = cells(tile, 0.25);
     let broom = cells(tile, 0.012);
     let agg = cells(tile, 0.007);
-    bake(Spec::square(px, tile), move |x, y| {
+    move |x, y| {
         let (u, v) = (x / tile, y / tile);
         let (pi, pj) = ((x / panel_m) as i32, (y / panel_m) as i32);
         let (lx, ly) = (x - pi as f32 * panel_m, y - pj as f32 * panel_m);
@@ -430,32 +452,77 @@ pub fn slabs(px: u32, panel_m: f32, seed: u32) -> Maps {
             ao: 1.0 - joint * 0.6 - crack * 0.4 - chip * 0.3,
             ..Default::default()
         }
-    })
+    }
 }
 
-/// Road paint on top of a surface: white with dirt, worn through in patches and specks
-/// (alpha = paint left). Shares the UVs and normal map of the surface below. Covers `tile_m`.
-pub fn paint(px: u32, tile_m: f32, wear: f32, seed: u32) -> Maps {
+/// Road paint laid over the surface `under` (its texel recipe, same UVs and tile): an
+/// off-white film (vertex colors tint it) with faint lengthwise streaks from the striping
+/// machine, dirt, and grime settled in the surface's dips. The film is thinnest over the
+/// tops of the aggregate, so wear bares those first: a worn line goes gray as the film
+/// thins and shows the surface's own stones through in fine specks (alpha = paint left),
+/// and in the most worn places small chips have flaked off. `wear` is the mean wear
+/// (0 = fresh, 1 = gone); it varies over a few meters. Shares the surface's normal map.
+pub fn paint(px: u32, tile_m: f32, wear: f32, under: impl Recipe, seed: u32) -> Maps {
     let p1 = cells(tile_m, 0.35);
-    let p2 = cells(tile_m, 0.05);
+    let p2 = cells(tile_m, 2.5);
     let p3 = cells(tile_m, 0.012);
+    let flake = cells(tile_m, 0.05);
+    let streak = cells(tile_m, 0.05);
+    let (lo, hi) = height_range(under, tile_m);
     let mut spec = Spec::square(px, tile_m);
     spec.normal = false;
     bake(spec, move |x, y| {
+        let g = under(x, y);
         let (u, v) = (x / tile_m, y / tile_m);
         let a = fbm(u * p1 as f32, v * p1 as f32, (p1, p1), 4, 0.55, seed);
-        let b = value(u * p2 as f32, v * p2 as f32, (p2, p2), seed + 1);
-        let c = value(u * p3 as f32, v * p3 as f32, (p3, p3), seed + 2);
-        let worn = a * 0.7 + (b - 0.5) * 0.35 + (c - 0.5) * 0.3;
-        let alpha = smoothstep(wear + 0.05, wear - 0.05, worn);
-        let dirt = 1.0 - 0.18 * smoothstep(-0.4, 0.5, a) - 0.08 * (c - 0.5);
+        let big = fbm(u * p2 as f32, v * p2 as f32, (p2, p2), 2, 0.5, seed + 3);
+        let c = value(u * p3 as f32, v * p3 as f32, (p3, p3), seed + 2) - 0.5;
+        let worn = (wear + 0.16 * a + 0.2 * big).max(0.0);
+        // Film thickness: the paint levels out, so it is thin over the surface's tops.
+        let h = ((g.height - lo) / (hi - lo).max(1e-6)).clamp(0.0, 1.0) + 0.3 * c;
+        let thick = ((1.0 - 1.3 * worn - h) / 0.35).clamp(0.0, 1.0);
+        // Chips flaked off, only where the paint is already worn.
+        let fl = value(u * flake as f32, v * flake as f32, (flake, flake), seed + 4);
+        let chip = smoothstep(0.8, 0.84, fl) * smoothstep(0.3, 0.42, worn);
+        let alpha = smoothstep(0.0, 0.08, thick) * (1.0 - chip);
+        // Machine streaks run along the texture's y (the length of a runway).
+        let st = value(u * streak as f32, v * 2.0, (streak, 2), seed + 5) - 0.5;
+        let dirt =
+            1.0 - 0.22 * smoothstep(-0.4, 0.5, a) - 0.08 * smoothstep(-0.3, 0.6, big) - 0.05 * c
+                + 0.05 * st;
+        // Dark surface shows through a thin film; grime collects where the surface is
+        // occluded (grooves, joints, between stones).
+        let through = mix(0.45, 1.0, smoothstep(0.0, 0.7, thick));
+        let grime = 1.0 - 0.6 * (1.0 - g.ao);
+        let k = 0.8 * dirt * through * grime;
         Texel {
-            rgb: [0.86 * dirt, 0.86 * dirt, 0.84 * dirt],
+            rgb: [k, k, k * 0.97],
             alpha,
-            rough: 0.55 + 0.15 * smoothstep(-0.2, 0.6, a),
+            height: g.height,
+            rough: mix(
+                g.rough,
+                0.55 + 0.15 * smoothstep(-0.2, 0.6, a),
+                smoothstep(0.0, 0.5, thick),
+            ),
+            ao: g.ao,
             ..Default::default()
         }
     })
+}
+
+/// The low (2nd percentile) and high (99.5th percentile) heights of a recipe over its tile.
+fn height_range(under: impl Recipe, tile_m: f32) -> (f32, f32) {
+    let n = 64;
+    let mut hs: Vec<f32> = (0..n * n)
+        .map(|i| {
+            let (x, y) = ((i % n) as f32 + 0.37, (i / n) as f32 + 0.61);
+            // Off the texel grid so the samples do not alias with the recipe's own cells.
+            under(x * tile_m / n as f32, y * tile_m / n as f32).height
+        })
+        .collect();
+    hs.sort_by(f32::total_cmp);
+    let at = |q: f32| hs[((hs.len() - 1) as f32 * q) as usize];
+    (at(0.02), at(0.995))
 }
 
 /// Curb paint: near-white with rubber streaks, grime in the dips and fine paint texture
