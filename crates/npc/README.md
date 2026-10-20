@@ -180,6 +180,47 @@ All art is generated in code (`src/art`), since no third-party art may go in the
 Everything is built once per world and shared. Without a renderer (headless tests) the art
 falls back to primitive shapes so tests stay fast.
 
+## Faces and bodies from a character module
+
+Fighters are ready for the faces and bodies a character module draws (`engine_world::
+character`; `visuals/character.rs`):
+
+- **Looks.** On its first step each fighter gets an `AppearanceRequest`: its own `Seed`, its
+  squad (with its faction) as the family seed so squad mates look related, a sex picked from
+  the seed and an age range by skill (a rookie 18 to 26, a master 34 to 52). An
+  `Appearance` already there is kept. No full `Appearance` is put on fighters.
+- **Pose and face.** One writer per entity. On fighters without a `BodyRequest` this crate
+  writes `SkeletonPose` every step from the stand-in's pose, on the animation module's
+  humanoid skeleton (its bone names and parents, shared by every fighter through one `Arc`;
+  model space, facing −Z). The joints the stand-in has are put on it exactly: waist
+  (`spine`), neck, shoulders, elbows, wrists, hips, knees and ankles. Each is turned like the
+  segment it starts, with limbs along −Y, the hinge on +X and the feet flat toes −Z, so
+  straight legs read as the rest pose. `hips`, `chest`, `head`, the clavicles, toes and
+  ponytail sit at the animation module's offsets. The limbs keep the stand-in's lengths
+  (thigh 0.45 m, shin 0.44 m, upper arm 0.30 m, forearm 0.26 m). This crate also writes
+  `FaceControls` with ARKit weights:
+  - blinks, shut when downed;
+  - pain from a blow's flinch and a wound's ache: squint, brows down, nose sneer, mouth
+    stretched and down;
+  - effort from a heavy blow set and shouted, a sprint, a braced guard, a held draw and a
+    revive: squint, brows down, lips pressed;
+  - fear when pinned down by fire or badly hurt in a fight: inner brows up, eyes wide;
+  - panting: the jaw opening with each breath;
+  - gaze yaw and pitch, the eyes' turn in the head.
+
+  Feet still send `GroundContact`s, now each with a `footstep_left` or `footstep_right`
+  `AnimationEvent` (bone `foot_l` / `foot_r`).
+- **Hiding the stand-in.** While the `AppearanceBodies` resource exists (checked every step),
+  a fighter with an `Appearance` or an `AppearanceRequest` has its stand-in body hidden. What
+  it holds stays shown: the weapon, the shield, a magazine or arrow in hand, the muzzle
+  flash. Without the resource nothing changes.
+- **Wear.** On fighters with an `Appearance`, `wear` follows the fight:
+  - blood from cuts, stabs and shots (less from blunt blows and burns);
+  - bruises from blunt blows and falls;
+  - dirt from going down, lying on the ground, kneeling by a mate and dashing.
+
+  A fighter sent home fresh is clean again. `wet` is left to the weather.
+
 ## API (`npc.*`, JSON)
 
 AI agents and tools reach NPCs through the engine's API registry (and so through the AI bridge):
@@ -336,12 +377,15 @@ a turned world also rebuilds the tactical world from the colliders.
 Reads: `Collider` / `RigidBody` (tactical world), `PhysicsQueries` when present, `Ground`,
 `Water`, `HeatField` (avoid fire), `Obscurance` (smoke, fog and dust), `NoiseEvent`, `DamageEvent`, `AttackEvent` (telegraphs to
 defend against), `ProjectileTrace` (near misses), `LocomotionState` of targets, `TerrainChanged`,
-`LocalTimeScale` / `TimeDilation`, `LocomotionBackend`, `WorldShift`.
+`LocalTimeScale` / `TimeDilation`, `LocomotionBackend`, `WorldShift`, `AppearanceBodies`,
+`BodyRequest` (whose pose the animation module writes).
 
 Writes: `MoveIntent` (the same input a player produces), `LocomotionState` and
 `AnimationParams` (fallback mover only), `AttackEvent` (its own telegraphs), `DamageEvent`,
-`ProjectileTrace` (its shots), `NoiseEvent` (shouts and gunfire), `GroundContact` (footsteps),
-`WorldImpulse`, `IgniteRequest` and `SmokeEmission` (explosions).
+`ProjectileTrace` (its shots), `NoiseEvent` (shouts and gunfire), `GroundContact` and
+`AnimationEvent` (footsteps), `WorldImpulse`, `IgniteRequest` and `SmokeEmission`
+(explosions), `AppearanceRequest`, `SkeletonPose` and `FaceControls` (fighters), and
+`Appearance::wear` (blood, bruises and dirt).
 
 The crate depends only on core crates (`engine_core`, `engine_world`, `engine_render`).
 
@@ -411,6 +455,16 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   the tactical world move exactly with the world, the rifleman keeps looking and shooting at
   the player, the deer keep running from what scared them and stay around their home, and
   paths go around a wall where it moved to, not where it was.
+- `tests/character.rs`:
+  - Through a fight of swords, shield and carbine, the written `SkeletonPose` puts every limb
+    segment, the head and the trunk where the stand-in has them, within 3 mm. Its chains hold
+    together, and its names and parents are the animation module's.
+  - Fighters ask for a look (their seed, one family per squad, a sex and an age range).
+  - Their body hides only while `AppearanceBodies` exists, and the weapon and shield stay.
+  - `FaceControls` follow pain (a blow, then the ache, worse badly hurt) and effort (a
+    sprint, then panting).
+  - Blows and a fall wear the look.
+  - Each footstep is an `AnimationEvent` on its foot.
 - `tests/schedule_order.rs`: no two systems in the fixed step or `PostUpdate` touch the same
   data without an order between them (the scheduler's ambiguity check), and the arena fight
   and the meadow end bit for bit the same with unrelated systems, resources or entities added.
