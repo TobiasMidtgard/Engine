@@ -18,6 +18,10 @@
 //! with an appearance (or asking for one) keep the generated humanoid skeleton, posed as
 //! always, but none of this module's meshes: the character module skins its own body to their
 //! `SkeletonPose`.
+//!
+//! People also get [`HandControls`]: how closed each hand is, from the clips' `grip`, `flex`
+//! and `fist` curves and what the hand holds ([`HandGrip`]), so a character module curls the
+//! fingers.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -25,7 +29,7 @@ use std::sync::Mutex;
 use engine_core::prelude::*;
 use engine_world::LocomotionState;
 use engine_world::animation::{AnimationParams, BodyRequest, SkeletonPose};
-use engine_world::character::{Appearance, AppearanceBodies, AppearanceRequest};
+use engine_world::character::{Appearance, AppearanceBodies, AppearanceRequest, HandControls};
 
 use crate::animator::{Animator, AnimatorSettings};
 use crate::build::dog;
@@ -41,7 +45,7 @@ use crate::muscle::{MorphWeights, MuscleRig};
 use crate::procedural::gait::LeggedGait;
 use crate::procedural::spring::SpringChains;
 use crate::ragdoll::RagdollRig;
-use crate::retarget::Retarget;
+use crate::retarget::{HandGrip, Retarget};
 use crate::skin::{SkinPose, SkinnedMeshRenderer};
 use crate::xform::smoothing;
 
@@ -268,6 +272,44 @@ pub(crate) fn drive_bodies(
 /// Acceleration (m/s²) at which a person leans fully into a start or back into a stop.
 pub const FULL_LEAN_ACCEL: f32 = 4.0;
 
+/// Curves that close a person's hands (0..1); the same ones close an imported person's
+/// fingers.
+const GRIP_CURVES: [&str; 3] = ["grip", "flex", "fist"];
+
+/// Give people their [`HandControls`].
+#[allow(clippy::type_complexity)]
+pub(crate) fn give_hand_controls(
+    mut commands: Commands,
+    q: Query<(Entity, &Body), (With<Animator>, Without<HandControls>)>,
+) {
+    for (e, body) in &q {
+        if body.kind == BodyKind::Human {
+            commands.entity(e).insert(HandControls::default());
+        }
+    }
+}
+
+/// Write how closed each person's hands are: the closing curves of what they're doing, at
+/// least what they hold.
+pub(crate) fn hand_controls_system(
+    mut q: Query<(&Body, &Animator, Option<&HandGrip>, &mut HandControls)>,
+) {
+    for (body, animator, held, mut out) in &mut q {
+        if body.kind != BodyKind::Human {
+            continue;
+        }
+        let closed = GRIP_CURVES
+            .iter()
+            .map(|c| animator.curve(c))
+            .fold(0.0, f32::max);
+        let held = held.map_or([0.0; 2], |h| [h.left, h.right]);
+        let grip = held.map(|h| closed.max(h).clamp(0.0, 1.0));
+        if out.grip != grip {
+            out.grip = grip;
+        }
+    }
+}
+
 /// The `accel` animation parameter (−1..1) for an acceleration along the facing, m/s².
 pub fn accel_param(accel: f32) -> f32 {
     (accel / FULL_LEAN_ACCEL).clamp(-1.0, 1.0)
@@ -440,6 +482,7 @@ fn strip(world: &mut World, entity: Entity) {
         SkinPose,
         MorphWeights,
         MuscleRig,
+        HandControls,
     )>();
     e.remove::<(FootIk, SpringChains, LeggedGait, RagdollRig)>();
 }

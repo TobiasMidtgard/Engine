@@ -81,6 +81,9 @@ compresses and stretches.
   weights from effort, wincing and limpness, plus gaze from the humanoid head). While a
   character module draws appearances (`AppearanceBodies`), those people keep their humanoid
   `SkeletonPose` but no fetched model and no mesh of this crate's (`tests/appearance.rs`).
+  Requested people also get `HandControls`: each hand's grip from the clips' `grip`, `flex`
+  and `fist` curves, at least what it holds (`HandGrip`), for the character module to curl
+  the fingers (`tests/hands.rs`).
 - **Bodies on request.** A module that moves an entity itself puts `BodyRequest` on it
   (`human`, `horse`, `dog` or `spider`, an optional model path, height and seed) and gets a body:
   the paddock's rigs and models, animated from the entity's motion (`LocomotionState` or
