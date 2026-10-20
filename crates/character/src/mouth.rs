@@ -20,6 +20,8 @@ pub enum MouthPart {
     Teeth = 1,
     Gums = 2,
     Tongue = 3,
+    /// Not in the mouth: shoes are built and drawn the same way (see `crate::shoes`).
+    Shoe = 4,
 }
 
 /// Mouth geometry in the character's model space.
@@ -367,7 +369,7 @@ fn tongue(m: &mut MouthMesh, pack: &HumanPack, morphed: &[Vec3], jaw: (&Arch, &[
 }
 
 /// Add a vertex tied to the nearest three vertices of a helper band.
-fn push(m: &mut MouthMesh, p: Vec3, part: MouthPart, band: &[Vec3], ids: &[u32]) {
+pub(crate) fn push(m: &mut MouthMesh, p: Vec3, part: MouthPart, band: &[Vec3], ids: &[u32]) {
     let mut best = [(f32::MAX, 0usize); 3];
     for (i, b) in band.iter().enumerate() {
         let d = (*b - p).length_squared();
@@ -389,7 +391,7 @@ fn push(m: &mut MouthMesh, p: Vec3, part: MouthPart, band: &[Vec3], ids: &[u32])
 }
 
 /// Normals of the vertices from `first` on, from the triangles that use them.
-fn smooth_normals(m: &mut MouthMesh, first: u32) {
+pub(crate) fn smooth_normals(m: &mut MouthMesh, first: u32) {
     let n = vertex_normals(&m.positions, &m.indices);
     let first = first as usize;
     m.normals[first..].copy_from_slice(&n[first..]);
