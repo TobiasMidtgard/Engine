@@ -376,7 +376,8 @@ impl Default for Face {
 }
 
 impl Face {
-    /// A face whose blinks and glances follow `seed` (an entity's bits, say).
+    /// A face whose blinks and glances follow `seed` (set at spawn: never an entity's bits,
+    /// which shift whenever any crate adds a resource or message).
     pub fn seeded(seed: u64) -> Self {
         let mut f = Self::default();
         f.seed(seed);
@@ -489,7 +490,6 @@ fn unit(rng: &mut u64) -> f32 {
 }
 
 type FaceQuery<'a> = (
-    Entity,
     &'a Animator,
     &'a mut Retarget,
     &'a mut Face,
@@ -500,16 +500,13 @@ type FaceQuery<'a> = (
 );
 
 pub(crate) fn face_system(targets: Query<&GlobalTransform>, mut q: Query<FaceQuery>) {
-    for (entity, animator, mut retarget, mut face, gt, ragdoll, look, params) in &mut q {
+    for (animator, mut retarget, mut face, gt, ragdoll, look, params) in &mut q {
         if !face.enabled {
             continue;
         }
         let retarget = &mut *retarget;
         let key = Arc::as_ptr(&retarget.retargeter) as usize;
         if face.state.rig.as_ref().is_none_or(|(k, _)| *k != key) {
-            if face.state.rng == 0 {
-                face.seed(entity.to_bits());
-            }
             let rig = FaceRig::new(&retarget.retargeter.target).map(Arc::new);
             face.state.rig = Some((key, rig));
         }

@@ -1040,6 +1040,48 @@ impl Renderer {
                 pass.set_bind_group(0, &self.prepass_group, &[]);
             }
         }
+        // Occlusion culling against that depth, then what it found visible after all.
+        let mut late = false;
+        for f in self.features.iter_mut() {
+            late |= f.after_prepass(&mut encoder, &self.targets.depth.view, &ctx);
+        }
+        if late {
+            let keep = wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            };
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("prepass (late)"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.targets.prepass_normal.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: keep,
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.targets.motion.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: keep,
+                    }),
+                ],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.targets.depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pass.set_bind_group(0, &self.prepass_group, &[]);
+            for f in &self.features {
+                f.draw_prepass_late(&mut pass, &ctx);
+                pass.set_bind_group(0, &self.prepass_group, &[]);
+            }
+        }
         encoder.copy_texture_to_texture(
             self.targets.depth.texture.as_image_copy(),
             self.targets.prepass_depth.texture.as_image_copy(),

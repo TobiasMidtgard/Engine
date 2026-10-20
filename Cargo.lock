@@ -1132,6 +1132,7 @@ dependencies = [
  "engine_world",
  "gltf",
  "image",
+ "miniz_oxide 0.8.9",
  "pollster",
  "raw-window-handle",
  "serde",

@@ -140,7 +140,9 @@ impl Default for Spacecraft {
 
 /// Find thruster throttles `u` (0..1 each) whose combined push comes closest to the wanted
 /// body-axis force and torque. Torque is weighted so attitude control wins when the
-/// thrusters can't do everything at once. `u` holds the warm start and the result.
+/// thrusters can't do everything at once. `u` holds the warm start and the result. Asked
+/// for nothing, every thruster is off: a warm start could otherwise keep firing thrusters
+/// that cancel each other out.
 pub fn allocate(
     thrusters: &[Thruster],
     com: Vec3,
@@ -151,6 +153,10 @@ pub fn allocate(
     let n = thrusters.len().min(MAX_THRUSTERS).min(u.len());
     if n == 0 {
         return 0.0;
+    }
+    if force == Vec3::ZERO && torque == Vec3::ZERO {
+        u[..n].fill(0.0);
+        return 1.0;
     }
     // Columns of the 6×n effect matrix, scaled so force and torque rows are comparable.
     let mut cols = [[0.0f32; 6]; MAX_THRUSTERS];
