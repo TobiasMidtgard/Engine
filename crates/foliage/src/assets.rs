@@ -17,7 +17,8 @@ use crate::meshgen::small_textures::{
     Fungus, SMALL_ALPHA_CUTOFF, TextureSet, fern_pinna, fungus, meadow_atlas,
 };
 use crate::meshgen::textures::{
-    ALPHA_CUTOFF, HERO_ATLAS_SIZE, LeafKind, atlas_seed, hero_leaf_textures, kind_of, leaf_textures,
+    ALPHA_CUTOFF, HERO_ATLAS_SIZE, LeafKind, MASS_ATLAS_SIZE, atlas_seed, hero_leaf_textures,
+    kind_of, leaf_textures, mass_textures,
 };
 use crate::meshgen::tree::{PlantMeshes, woody};
 use crate::species::{LeafStyle, PlantForm, PlantLibrary, PlantSpecies, srgb};
@@ -88,6 +89,9 @@ pub struct SpeciesVisual {
     pub leaves: [Handle<StandardMaterial>; TINTS],
     /// `leaves` with the single-leaf atlas, double-sided, for crowns drawn leaf by leaf.
     pub leaves_hero: Option<[Handle<StandardMaterial>; TINTS]>,
+    /// `leaves` with the mass atlas (clumps of foliage rather than single sprays), for the far
+    /// and distant crowns; the same as `leaves` without an atlas.
+    pub leaves_far: [Handle<StandardMaterial>; TINTS],
     /// The summer color of each tint of `leaves` (linear RGB); the season recolors from it.
     pub leaf_colors: [[f32; 3]; TINTS],
     pub dead_leaves: Handle<StandardMaterial>,
@@ -179,6 +183,8 @@ struct LeafImages {
     normal: Option<Handle<Image>>,
     /// The single-leaf atlas (color, normal) for crowns drawn leaf by leaf (broadleaves).
     hero: Option<(Handle<Image>, Handle<Image>)>,
+    /// The mass atlas (color, normal) for far and distant crowns.
+    mass: Option<(Handle<Image>, Handle<Image>)>,
 }
 
 /// Texels per side of a tree or shrub leaf atlas (up close, broadleaf crowns are drawn leaf by
@@ -196,6 +202,7 @@ fn paint_leaves(style: LeafStyle, images: &mut Assets<Image>) -> LeafImages {
             color: images.add(t.color),
             normal: None,
             hero: None,
+            mass: None,
         };
     }
     let t = leaf_textures(kind, LEAF_ATLAS_SIZE, seed);
@@ -203,10 +210,12 @@ fn paint_leaves(style: LeafStyle, images: &mut Assets<Image>) -> LeafImages {
         let h = hero_leaf_textures(kind, HERO_ATLAS_SIZE, seed);
         (images.add(h.color), images.add(h.normal))
     });
+    let m = mass_textures(kind, MASS_ATLAS_SIZE, seed);
     LeafImages {
         color: images.add(t.color),
         normal: Some(images.add(t.normal)),
         hero,
+        mass: Some((images.add(m.color), images.add(m.normal))),
     }
 }
 
@@ -441,6 +450,17 @@ fn build_species(
             materials.add(m)
         })
     });
+    let leaves_far = match texture.and_then(|t| t.mass) {
+        Some((color, normal)) => tint_colors.map(|c| {
+            let mut m = leaf_material(c);
+            m.base_color_texture = Some(color);
+            m.normal_texture = Some(normal);
+            // A clump is many leaves deep: less light makes it through.
+            m.subsurface *= 0.5;
+            materials.add(m)
+        }),
+        None => leaves,
+    };
     // What the season recolors from (flowers keep white: their petals are in the texture).
     let leaf_colors = tint_colors.map(|c| {
         let [r, g, b, _] = leaf_material(c).base_color;
@@ -502,6 +522,7 @@ fn build_species(
         bark_rigid: materials.add(bark_rigid),
         leaves,
         leaves_hero,
+        leaves_far,
         leaf_colors,
         dead_leaves,
         leaves_still,

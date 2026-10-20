@@ -15,6 +15,7 @@ use engine_render::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, Image, RenderFeature, RenderPhase,
     RenderSettings, ViewData,
 };
+use engine_world::FarCloudLayer;
 
 use super::bake::{SurfaceMaps, bake_rings, bake_surface};
 use super::{
@@ -45,6 +46,23 @@ const SHELL_RANGE: f64 = 0.4;
 /// The cloud layer fades in between these camera altitudes, meters (below, the weather's
 /// clouds are the sky).
 const SHELL_FADE_M: (f64, f64) = (9_000.0, 25_000.0);
+
+/// How much of the cloud layer is drawn at a camera altitude (meters): 0 below
+/// `SHELL_FADE_M.0`, 1 from `SHELL_FADE_M.1`.
+fn shell_fade(altitude_m: f64) -> f64 {
+    let t = ((altitude_m - SHELL_FADE_M.0) / (SHELL_FADE_M.1 - SHELL_FADE_M.0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// The handover the weather's clouds read while the cloud layer is drawn: the layer's hole
+/// around the camera opens from 70 % of `cloud_hole_m` to all of it (as in `fs_shell`).
+fn far_cloud_layer(altitude_m: f64, cloud_hole_m: f64) -> FarCloudLayer {
+    FarCloudLayer {
+        inner_m: (cloud_hole_m * 0.7) as f32,
+        outer_m: cloud_hole_m as f32,
+        weight: shell_fade(altitude_m) as f32,
+    }
+}
 
 /// GPU layout of `Body` in `bodies.wgsl`.
 #[repr(C)]
@@ -488,6 +506,8 @@ impl RenderFeature for BodiesFeature {
             .collect();
 
         self.scratch.clear();
+        // The cloud layer nearest the camera, told to the weather (FarCloudLayer).
+        let mut far_layer: Option<(f64, FarCloudLayer)> = None;
         for (entity, depth_radius, gt) in parts {
             let Some(body) = world.get::<CelestialBody>(entity).cloned() else {
                 continue;
@@ -619,9 +639,10 @@ impl RenderFeature for BodiesFeature {
             if shell {
                 // The cloud tops, a few kilometers up, just in front of the body.
                 let k = 1.0 + SHELL_HEIGHT_M * scale / r_eq;
-                let t = ((altitude - SHELL_FADE_M.0) / (SHELL_FADE_M.1 - SHELL_FADE_M.0))
-                    .clamp(0.0, 1.0);
-                let fade = t * t * (3.0 - 2.0 * t);
+                let fade = shell_fade(altitude);
+                if far_layer.is_none_or(|(near, _)| d < near) {
+                    far_layer = Some((d, far_cloud_layer(altitude, space.cloud_hole_m)));
+                }
                 let mut g = gpu_body;
                 g.center[3] = (r_eq * k) as f32;
                 g.flags[0] = (flags & F_AIR) | if d < r_eq * k * 1.15 { F_FULLSCREEN } else { 0 };
@@ -636,6 +657,16 @@ impl RenderFeature for BodiesFeature {
         }
         self.run_jobs(world, gpu, &mut bakes);
         world.insert_resource(bakes);
+        match far_layer {
+            Some((_, layer)) => {
+                if world.get_resource::<FarCloudLayer>() != Some(&layer) {
+                    world.insert_resource(layer);
+                }
+            }
+            None => {
+                world.remove_resource::<FarCloudLayer>();
+            }
+        }
 
         // Back to front.
         self.scratch.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -724,5 +755,22 @@ impl RenderFeature for BodiesFeature {
             "maps": self.maps.values().map(|m| (m.key.name.clone(), m.width)).collect::<Vec<_>>(),
             "baking": self.job.as_ref().map(|j| j.key.name.clone()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn far_cloud_layer_fades_in_with_the_shell_and_hands_over_at_its_hole() {
+        let low = far_cloud_layer(SHELL_FADE_M.0, 60_000.0);
+        assert_eq!(low.weight, 0.0);
+        assert_eq!((low.inner_m, low.outer_m), (42_000.0, 60_000.0));
+        assert!((far_cloud_layer(17_000.0, 60_000.0).weight - 0.5).abs() < 1e-6);
+        let high = far_cloud_layer(35_000.0, 60_000.0);
+        assert_eq!(high.weight, 1.0);
+        assert_eq!(high.near_share(30_000.0), 1.0);
+        assert_eq!(high.near_share(80_000.0), 0.0);
     }
 }

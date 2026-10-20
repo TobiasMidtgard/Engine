@@ -292,6 +292,10 @@ fn sequence(spec: &str) -> Vec<Shot> {
         "spider" => |d| d.spider,
         "dog" => |d| d.dog,
         "stuntman" => |d| d.stuntman,
+        "runner" => |d| d.runner,
+        "coach" => |d| d.coach,
+        // The camera fixed in the paddock's frame.
+        "world" => |_| Entity::PLACEHOLDER,
         _ => |d| d.car,
     };
     let num = |i: usize, default: f64| parts.get(i).and_then(|p| p.parse().ok()).unwrap_or(default);

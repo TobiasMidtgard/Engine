@@ -146,9 +146,10 @@ fn setup(
         ResMut<engine::world::SurfaceMaterials>,
     ),
     config: Res<EngineConfig>,
-    (use_planet, demo_zones): (
+    (use_planet, demo_zones, plants): (
         Option<Res<planet::UsePlanet>>,
         Option<Res<zones::DemoZones>>,
+        Res<engine_foliage::PlantLibrary>,
     ),
 ) {
     let t0 = std::time::Instant::now();
@@ -167,7 +168,7 @@ fn setup(
     let ground = std::sync::Arc::new(landscape::LandscapeGround::new(land.clone(), &mut surfaces));
     // On the planet the terrain answers `Ground` (edits included) and asks this for surfaces.
     commands.insert_resource(engine::world::Ground(ground.clone()));
-    let lib = scenery::build_library(&mut meshes, &mut materials, &mut images);
+    let lib = scenery::build_library(&mut meshes, &mut materials, &mut images, &plants);
     let mut rng = Rng::new(config.seed);
     if use_planet.is_some() {
         planet::spawn(&mut commands, land.clone(), ground);

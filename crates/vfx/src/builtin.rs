@@ -2582,6 +2582,26 @@ fn exhausts() -> Vec<EffectDesc> {
                         soft: 1.0,
                         ..smoke("cloud", 0.68, 0.35)
                     },
+                    // The trail a climbing rocket leaves: laid down per meter it travels, so it
+                    // stands as one unbroken column however fast it goes, lingering and
+                    // spreading long after the rocket has gone.
+                    EmitterDesc {
+                        rate_per_meter: 0.8,
+                        shape: EmitShape::Cone {
+                            angle_deg: 60.0,
+                            radius: 0.6,
+                        },
+                        offset: [0.0, 6.0, 0.0],
+                        speed: [0.5, 1.5],
+                        drag: 1.5,
+                        turbulence: 1.2,
+                        turbulence_scale: 6.0,
+                        lifetime: [8.0, 12.0],
+                        size: [1.8, 2.6],
+                        size_over_life: c(&[(0.0, 0.7), (0.2, 1.6), (1.0, 4.5)]),
+                        soft: 1.0,
+                        ..smoke("trail", 0.8, 0.5)
+                    },
                     EmitterDesc {
                         rate: 30.0,
                         offset: [0.0, 2.0, 0.0],
@@ -2946,37 +2966,33 @@ fn misc() -> Vec<EffectDesc> {
                  flickering light.",
                 None,
                 vec![
-                    // The bed: short, wide, hot flames hugging the fuel, nearly white at the root.
+                    // The body of the fire: a few overlapping blazes standing on the coals,
+                    // each churning and swaying on its own, crossfading as they come and go.
                     EmitterDesc {
-                        rate: 36.0,
-                        offset: [0.0, 0.02, 0.0],
-                        shape: EmitShape::Disc { radius: 0.13 },
-                        speed: [0.1, 0.3],
-                        acceleration: [0.0, 2.0, 0.0],
-                        drag: 2.0,
-                        turbulence: 1.5,
-                        turbulence_scale: 0.3,
-                        wind: 0.3,
-                        lifetime: [0.22, 0.36],
-                        size: [0.2, 0.3],
-                        size_over_life: c(&[(0.0, 0.7), (0.35, 1.0), (1.0, 0.55)]),
-                        rotation_deg: [-15.0, 15.0],
-                        sprite: Sprite::Flame,
-                        color: g(&[
-                            (0.0, [1.0, 0.82, 0.5, 0.0]),
-                            (0.12, [1.0, 0.78, 0.42, 1.0]),
-                            (0.6, [1.0, 0.55, 0.16, 0.8]),
-                            (1.0, [1.0, 0.36, 0.06, 0.0]),
-                        ]),
-                        emissive: 14_000.0,
-                        additive: 0.7,
-                        ..em("bed")
+                        rate: 6.0,
+                        offset: [0.0, -0.02, 0.0],
+                        shape: EmitShape::Disc { radius: 0.08 },
+                        speed: [0.0, 0.0],
+                        lifetime: [0.9, 1.3],
+                        size: [0.46, 0.56],
+                        rotation_deg: [0.0, 0.0],
+                        local_space: true,
+                        steady: true,
+                        sprite: Sprite::Blaze,
+                        facing: Facing::Axis,
+                        stretch: 1.3,
+                        color: fade([1.0, 0.62, 0.24], 1.0, 0.3, 0.7),
+                        emissive: 11_000.0,
+                        additive: 0.45,
+                        wind: 0.0,
+                        soft: 0.05,
+                        ..em("blaze")
                     },
                     // Tongues: rise fast on their own heat, stretch, narrow to a point and redden.
                     EmitterDesc {
-                        rate: 48.0,
-                        offset: [0.0, 0.05, 0.0],
-                        shape: EmitShape::Disc { radius: 0.11 },
+                        rate: 10.0,
+                        offset: [0.0, 0.12, 0.0],
+                        shape: EmitShape::Disc { radius: 0.09 },
                         speed: [0.3, 0.6],
                         acceleration: [0.0, 2.5, 0.0],
                         drag: 1.4,
@@ -2990,13 +3006,13 @@ fn misc() -> Vec<EffectDesc> {
                         sprite: Sprite::Flame,
                         color: g(&[
                             (0.0, [1.0, 0.72, 0.32, 0.0]),
-                            (0.08, [1.0, 0.66, 0.26, 1.0]),
-                            (0.45, [1.0, 0.42, 0.08, 0.9]),
-                            (0.75, [0.9, 0.2, 0.03, 0.35]),
-                            (1.0, [0.5, 0.07, 0.01, 0.0]),
+                            (0.08, [1.0, 0.68, 0.28, 0.9]),
+                            (0.35, [1.0, 0.56, 0.18, 0.5]),
+                            (0.6, [1.0, 0.46, 0.12, 0.0]),
+                            (1.0, [1.0, 0.4, 0.1, 0.0]),
                         ]),
-                        emissive: 13_000.0,
-                        additive: 0.75,
+                        emissive: 9_000.0,
+                        additive: 0.9,
                         ..em("flames")
                     },
                     // Tips: scraps torn off the tongues' tops, flickering out within a blink.
