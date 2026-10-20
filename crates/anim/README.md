@@ -199,7 +199,7 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 | Test case | What to look for |
 |---|---|
 | Hammer athlete | Two-handed sledgehammer strike onto a tractor tire: arms, shoulders and back tense on the strike and relax after; veins on the forearms; the ponytail whips; then a braced guard (`hammer_block`, held while `hammer_guard` is on): left foot forward, knees bent, the handle across the face with the left hand on it by `ReachIk` |
-| Lifter | Double-biceps flex: biceps, shoulders and chest bulge |
+| Lifter | Front double-biceps: a breath in, the fists curl up and the elbows swing out to shoulder height, a hit that overshoots and settles, two squeezes (fists curl, shoulders lift, chest up, face strained), then the elbows drop and the arms shake loose; biceps, shoulders and chest bulge |
 | Shirt reach | Up on tiptoe to a hanging lantern: a glance up and a dip, the elbow leads the arm up, `ReachIk` puts the hand on the glass while `grip` closes it, then down onto the heels with a give in the knees; the sleeve bunches at the elbow and rides up the raised arm |
 | Step course | A walker climbs a ramp, crosses a deck, walks down stairs with feet planted by IK, then runs back leaning into the turns |
 | Footwork drill | An athlete walks a square facing one way: ahead, sidestepping left, backpedalling, sidestepping right, blending through the corners, every planted foot still on the sand (`paddock_footwork`) |
