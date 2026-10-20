@@ -849,13 +849,13 @@ fn fighters_medic_revives_under_covering_fire() {
         if up_since.is_none() && !downed(&app, ally) {
             up_since = Some(t);
         }
-        if up_since.is_some_and(|u| t >= u + NpcBrain::GET_UP_SECS + 0.2) {
+        if up_since.is_some_and(|u| t >= u + NpcBrain::GET_UP_SECS) {
             if close_shots[1].is_none() {
-                let (m, a) = (at(&app, medic), at(&app, ally));
-                let mid = (m + a) * 0.5;
-                // From behind a shoulder, the smoke they got up in ahead of them.
-                let eye = clear_of_smoke(&app, mid, 3.4, |d| 0.5 * d.x.abs());
-                aim(&mut app, close, eye + DVec3::Y * 1.3, mid + DVec3::Y * 0.9);
+                // The mate on its feet (the medic may be a few meters off by now), side on,
+                // from away from the smoke (it hangs beyond).
+                let a = at(&app, ally);
+                let eye = clear_of_smoke(&app, a, 3.6, |d| 0.5 * d.x.abs());
+                aim(&mut app, close, eye + DVec3::Y * 1.3, a + DVec3::Y * 0.9);
             }
             take(
                 &mut app,

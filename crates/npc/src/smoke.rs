@@ -252,7 +252,7 @@ pub(crate) fn show_clouds(
                         shell,
                     },
                     Transform::from_translation(c.at).with_scale(Vec3::ZERO),
-                    MeshRenderer::new(ball.clone(), haze[tier].clone()).without_shadows(),
+                    MeshRenderer::new(ball, haze[tier]).without_shadows(),
                 ));
             }
         }
