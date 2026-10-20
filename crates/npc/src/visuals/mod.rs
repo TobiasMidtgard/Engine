@@ -74,7 +74,8 @@ use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::{AttackEvent, AttackKind, DamageEvent};
 
 use crate::agent::{
-    NpcAction, NpcBrain, NpcClock, NpcCombat, NpcMotor, NpcSettings, NpcVitals, NpcWeapon,
+    Npc, NpcAction, NpcBrain, NpcClock, NpcCombat, NpcMotor, NpcRole, NpcSettings, NpcVitals,
+    NpcWeapon,
 };
 use crate::art::ArtAssets;
 use crate::combat::Downed;
@@ -203,6 +204,7 @@ type BuildItem<'a> = (
     Option<&'a NpcWeapon>,
     Option<&'a Faction>,
     Option<&'a NpcSkills>,
+    Option<&'a Npc>,
 );
 
 /// Spawn the parts of new stand-ins.
@@ -211,9 +213,10 @@ pub(crate) fn build_stand_ins(
     q: Query<BuildItem, Added<StandIn>>,
     mut art: ArtAssets,
 ) {
-    for (e, stand_in, animal, weapon, faction, skills) in &q {
+    for (e, stand_in, animal, weapon, faction, skills, npc) in &q {
+        let medic = npc.is_some_and(|n| n.role == NpcRole::Medic);
         let parts = match animal.map(|a| a.species) {
-            None => humanoid::parts(stand_in, weapon, faction, skills, &mut art),
+            None => humanoid::parts(stand_in, weapon, faction, skills, medic, &mut art),
             Some(species) => animal::parts(stand_in, animal, species, &mut art),
         };
         for (part, renderer, scale) in parts {

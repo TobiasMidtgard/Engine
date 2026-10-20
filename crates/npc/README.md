@@ -162,7 +162,7 @@ Entities are addressed by `id` or `name`.
 
 `demo::spawn_demo(commands, origin)` builds the whole combat arena (`demo::ARENA_RADIUS`, 48 m):
 a sand floor ringed by stepped stone stands with red and blue banners, pillars, braziers, a ramp
-and a wall-run wall. Two five-fighter squads of mixed skill fight across low walls, crates,
+and a wall-run wall. Two six-fighter squads of mixed skill (a medic in each) fight across low walls, crates,
 explosive barrels and a raised platform; a master and a veteran duel in a ring; and a sparring
 lane on the east side puts five sword-and-shield fighters, rookie to master, in front of posts
 that swing at them, so you can watch skill decide who gets hit, who blocks and who parries.
@@ -247,6 +247,20 @@ to game code (`Npc::active = false`) gives its revive up, and one stopped in tim
 nobody, so neither holds up the showcase timer. `npc.inspect` shows `kneeling_secs` and
 `hands_on_secs`.
 
+### Squad medics
+
+`Npc::role = NpcRole::Medic` makes a fighter its squad's medic (the arena's squads have one
+each, with teamwork 1 and a carbine, `NpcWeapon::carbine()`: lighter and shorter-ranged than
+the rifle). A medic fights from 3 m behind where it would otherwise stand, notices a downed
+mate twice as soon, goes half as far again (`ally_revive_range` × 1.5) and wants the revive
+far more, so it is usually the one that goes. While it is near, its mates hold off for the
+first 3 s, unless the medic is the one down. Once the medic goes, its mates cover it: ranged
+mates with some teamwork engage whoever has the best view of its spot (`role` "cover"), and
+melee mates stand 2 m off the spot on the side of the nearest enemy and take on whoever
+comes within 5 m of it (`role` "screen"; `NpcBrain::guard` holds the spot). A squad without
+a medic revives as before. A medic wears a bleached armband with a red cross over its left
+brassard.
+
 | Setting | Default | Does |
 | --- | --- | --- |
 | `ally_revive_secs` | 2 s | How long a revive takes. 0 turns squad revives off. |
@@ -303,7 +317,10 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   the nearer one in the open. A reviver that is hit lets go, stays put while it gets up and
   tries again only later. Nobody revives when it is off, or once it is turned off midway. A
   mate handed to game code does not hold up the showcase timer. The timer waits for a revive,
-  gets a fighter with a mate near up in place, and sends home only one that is alone.
+  gets a fighter with a mate near up in place, and sends home only one that is alone. A
+  reviver going the long way round a wall is not taken for stuck, and nobody revives a mate
+  on a floor above it. The squad's medic is the usual reviver, melee mates screen it from the
+  enemy while it kneels, and a squad without one revives as before.
 - `tests/art_revive.rs`: a captioned strip, before and after. Before, a lone fighter lies six
   seconds and is sent home. After, a squad mate runs in, kneels, sets its carbine down, puts
   its hands on the chest and looks up at the enemy, and the ally gets up where it lay. It

@@ -619,3 +619,98 @@ fn a_squad_without_a_medic_revives_as_before() {
     // One of them got it up (as before: whoever is best placed).
     assert_eq!(stats(&app, reviver).revives + stats(&app, sword).revives, 1);
 }
+
+#[test]
+fn a_mate_going_the_long_way_round_a_wall_is_not_taken_for_stuck() {
+    let mut app = app();
+    // The downed ally in a round pen open on the far side: the reviver's way there runs half
+    // way round the pen's wall, all that while no nearer to it as the crow flies.
+    let ally = mate(&mut app, DVec3::ZERO, NpcSkills::soldier());
+    let reviver = mate(&mut app, DVec3::new(0.0, 0.0, 7.0), NpcSkills::veteran());
+    for i in (0..20).filter(|i| !(9..=11).contains(i)) {
+        let a = i as f32 * std::f32::consts::TAU / 20.0;
+        app.world.spawn((
+            Transform::from_translation(DVec3::new(
+                6.0 * a.sin() as f64,
+                1.5,
+                6.0 * a.cos() as f64,
+            ))
+            .with_rotation(Quat::from_rotation_y(a)),
+            Collider::cuboid(Vec3::new(1.0, 1.5, 0.25)),
+        ));
+    }
+    run(&mut app, 0.5);
+    down(&mut app, ally);
+    // How long at a stretch the straight-line gap to the chest failed to shrink by 0.3 m.
+    let (mut closest, mut since, mut longest) = (f64::MAX, None::<f64>, 0.0f64);
+    let mut up = false;
+    for _ in 0..60 * 20 {
+        app.update();
+        let now = clock(&app, reviver);
+        let b = brain(&app, reviver);
+        if b.action == NpcAction::Revive && b.revive_kneel <= 0.0 {
+            let (p, c) = (at(&app, reviver), chest(&app, ally));
+            let gap = DVec2::new(p.x - c.x, p.z - c.z).length();
+            if gap + 0.3 < closest {
+                (closest, since) = (gap, None);
+            } else {
+                longest = longest.max(now - *since.get_or_insert(now));
+            }
+        }
+        if !downed(&app, ally) {
+            up = true;
+            break;
+        }
+    }
+    eprintln!("no nearer as the crow flies for {longest:.1} s at a stretch");
+    assert!(
+        longest > 2.5,
+        "the way round took no detour ({longest:.1} s): the wall does not test it"
+    );
+    assert!(up, "the reviver never got round the wall to its ally");
+    assert_eq!(stats(&app, reviver).revives_aborted, 0);
+    assert_eq!(stats(&app, reviver).revives, 1);
+}
+
+#[test]
+fn nobody_revives_a_mate_up_on_a_ledge_from_below() {
+    let mut app = app();
+    // A block 3 m high with no way up: the ally downed at its edge on top, a mate on the
+    // ground at its foot. However close it gets as the crow flies, it doesn't kneel there.
+    app.world.spawn((
+        Transform::from_translation(DVec3::new(0.0, 1.5, 0.0)),
+        Collider::cuboid(Vec3::new(2.0, 1.5, 2.0)),
+    ));
+    let ally = mate(&mut app, DVec3::new(1.5, 3.0, 0.5), NpcSkills::soldier());
+    let reviver = mate(&mut app, DVec3::new(4.0, 0.0, 1.5), NpcSkills::rookie());
+    run(&mut app, 0.5);
+    let up_there = at(&app, ally).y;
+    assert!(
+        up_there > 2.5,
+        "the ally is not up on the block ({up_there:.2} m)"
+    );
+    down(&mut app, ally);
+    let (mut tried, mut nearest) = (false, f64::MAX);
+    for _ in 0..60 * 12 {
+        app.update();
+        let b = brain(&app, reviver);
+        let (p, c) = (at(&app, reviver), chest(&app, ally));
+        if b.action == NpcAction::Revive {
+            tried = true;
+            nearest = nearest.min(DVec2::new(p.x - c.x, p.z - c.z).length());
+        }
+        assert!(
+            b.revive_kneel <= 0.0,
+            "kneels {:.1} m below its ally",
+            c.y - p.y
+        );
+        assert!(downed(&app, ally), "revived from below");
+    }
+    // It went, and got as near as would count as there (0.9 m) on level ground.
+    assert!(tried, "it never went to revive");
+    assert!(
+        nearest < 0.9,
+        "came no nearer than {nearest:.2} m as the crow flies"
+    );
+    assert_eq!(stats(&app, reviver).revives, 0);
+}

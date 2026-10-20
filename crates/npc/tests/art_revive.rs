@@ -8,8 +8,12 @@
 //! A close-up strip follows one reviver from two sides: getting down, its hands on the chest
 //! (the carbine set down clear of what the mate let go of), and looking up.
 //!
+//! A squad's medic goes to a downed mate while the riflemen fire at the enemy and the
+//! swordsman stands between: an overview strip, and a close-up of the medic's armband.
+//!
 //! The strips land in the test's temp dir as `fighters-revive-before-after.png` and
-//! `fighters-revive-kneel-closeup.png`; set `NPC_SCREENSHOT_DIR` to also copy them there.
+//! `fighters-revive-kneel-closeup.png` (and `fighters-medic-revive-overview.png`,
+//! `fighters-medic-closeup.png`); set `NPC_SCREENSHOT_DIR` to also copy them there.
 //! Without it nothing is drawn (drawing is costly without a GPU): the scenes play out the
 //! same and every check runs.
 
@@ -110,6 +114,20 @@ fn camera(app: &mut App, eye: DVec3, target: DVec3, fov: f32) -> Entity {
             Transform::from_translation(eye).looking_at(target, Vec3::Y),
         ))
         .id()
+}
+
+fn aim(app: &mut App, cam: Entity, eye: DVec3, target: DVec3) {
+    *app.world.get_mut::<Transform>(cam).unwrap() =
+        Transform::from_translation(eye).looking_at(target, Vec3::Y);
+}
+
+/// Which way `e`'s chest faces, flat (its stand-in's, else its own).
+fn facing(app: &App, e: Entity) -> DVec3 {
+    let f = part(app, e, Part::Torso).map_or_else(
+        || app.world.get::<Transform>(e).unwrap().rotation * Vec3::NEG_Z,
+        |(_, f)| f,
+    );
+    DVec3::new(f.x as f64, 0.0, f.z as f64).normalize_or(DVec3::NEG_Z)
 }
 
 fn use_camera(app: &mut App, cam: Entity) {
@@ -239,6 +257,8 @@ fn fighters_revive_before_and_after() {
     };
     let cam_a = view(&mut app, chest_a);
     let cam_b = view(&mut app, chest_b);
+    // Framing both once they are up (moved to them when the picture is taken).
+    let cam_both = view(&mut app, chest_b);
 
     let mut pictures: Pictures = Default::default();
     let shot = |app: &mut App, pictures: &mut Pictures, (row, n): (usize, usize), cam, caption| {
@@ -374,11 +394,17 @@ fn fighters_revive_before_and_after() {
                 );
             }
             if pictures[1][6].is_none() && t >= up + 1.7 {
+                // From the same side as the rest of the row, far enough back for both whole.
+                let (m, a) = (at(&app, mate), at(&app, ally));
+                let mid = (m + a) * 0.5 + DVec3::Y * 0.85;
+                let back = 5.0 + 1.2 * m.distance(a);
+                let eye = mid + DVec3::new(2.3, 1.0, -1.9).normalize() * back;
+                aim(&mut app, cam_both, eye, mid);
                 shot(
                     &mut app,
                     &mut pictures,
                     (1, 6),
-                    cam_b,
+                    cam_both,
                     format!("{t:.1} S: BOTH UP, ARMED"),
                 );
             }
@@ -504,25 +530,28 @@ fn fighters_revive_kneel_closeup() {
             let b = app.world.get::<NpcBrain>(mate).unwrap();
             (b.action, b.revive_kneel, b.revive_progress)
         };
-        if action != NpcAction::Revive || knelt <= 0.0 {
+        // (Set once it is half way down and has turned to the chest.)
+        if action != NpcAction::Revive || knelt < 0.5 {
             continue;
         }
         let chest = part(&app, ally, Part::Torso).map_or(at(&app, ally), |(p, _)| p);
         let [side, across] = *cams.get_or_insert_with(|| {
             let me = at(&app, mate);
             let d = DVec3::new(chest.x - me.x, 0.0, chest.z - me.z).normalize();
-            let right = DVec3::new(-d.z, 0.0, d.x);
             let mid = (me + chest) * 0.5 + DVec3::Y * 0.3;
+            // Its right, a little ahead of it (its face and hands, not its back).
+            let f = facing(&app, mate);
+            let right = DVec3::new(-f.z, 0.0, f.x);
             [
                 camera(
                     &mut app,
-                    mid + right * 2.1 + DVec3::Y * 0.9 - d * 0.4,
-                    mid,
+                    me + right * 2.0 + f * 0.9 + DVec3::Y * 1.0,
+                    (me + mid) * 0.5 + DVec3::Y * 0.1,
                     36.0,
                 ),
                 camera(
                     &mut app,
-                    chest + d * 1.9 + right * 0.7 + DVec3::Y * 1.2,
+                    chest + d * 1.9 + DVec3::new(-d.z, 0.0, d.x) * 0.7 + DVec3::Y * 1.2,
                     mid + DVec3::Y * 0.1,
                     36.0,
                 ),
@@ -600,6 +629,243 @@ fn fighters_revive_kneel_closeup() {
         std::fs::copy(&path, std::path::Path::new(&dir).join(name)).expect("copy the strip");
     }
     eprintln!("wrote {}", path.display());
+}
+
+/// A fighter of squad 4 at `at` facing −Z, with `weapon` and `role`.
+fn member(app: &mut App, at: DVec3, skills: NpcSkills, weapon: NpcWeapon, role: NpcRole) -> Entity {
+    let mut t = Transform::from_translation(at);
+    t.look_to(Vec3::NEG_Z, Vec3::Y);
+    app.world
+        .spawn((
+            t,
+            Npc {
+                home: Some(at),
+                role,
+                ..Default::default()
+            },
+            Faction::ENEMY,
+            skills,
+            weapon,
+            Squad(4),
+            StandIn {
+                color: None,
+                plain: false,
+            },
+        ))
+        .id()
+}
+
+#[test]
+fn fighters_medic_revives_under_covering_fire() {
+    let mut app = app();
+    // A squad of five with its medic at the back; the enemy up the field.
+    let a0 = DVec3::new(0.0, 0.0, -60.0);
+    let o = |x: f64, z: f64| a0 + DVec3::new(x, 0.0, z);
+    let rifle = NpcWeapon::rifle();
+    let ally = member(
+        &mut app,
+        o(0.0, 0.0),
+        NpcSkills::soldier(),
+        rifle,
+        NpcRole::Fighter,
+    );
+    let covers = [
+        member(
+            &mut app,
+            o(4.5, 2.0),
+            NpcSkills::veteran(),
+            rifle,
+            NpcRole::Fighter,
+        ),
+        member(
+            &mut app,
+            o(-4.5, 1.5),
+            NpcSkills::veteran(),
+            rifle,
+            NpcRole::Fighter,
+        ),
+    ];
+    let sword = member(
+        &mut app,
+        o(2.0, 4.0),
+        NpcSkills::veteran(),
+        NpcWeapon::sword(),
+        NpcRole::Fighter,
+    );
+    let medic = member(
+        &mut app,
+        o(-2.5, 8.0),
+        NpcSkills {
+            teamwork: 1.0,
+            ..NpcSkills::soldier()
+        },
+        NpcWeapon::carbine(),
+        NpcRole::Medic,
+    );
+    let mut enemy = Transform::from_translation(o(3.0, -18.0));
+    enemy.look_to(Vec3::Z, Vec3::Y);
+    app.world
+        .spawn((enemy, Faction::PLAYER, LocomotionState::default()));
+    let away = camera(
+        &mut app,
+        DVec3::new(0.0, 2.0, 300.0),
+        DVec3::new(0.0, 2.0, 600.0),
+        30.0,
+    );
+    // Over the squad from behind its right, the enemy in the top of the frame.
+    let wide = camera(&mut app, o(9.0, 13.0) + DVec3::Y * 9.0, o(0.5, -3.0), 50.0);
+    // On the medic's left arm (its armband), moved to it when the picture is taken.
+    let close = camera(&mut app, o(0.0, 2.0) + DVec3::Y, o(0.0, 0.0), 30.0);
+    use_camera(&mut app, away);
+    app.update_n((1.5 / STEP) as usize);
+    hit(&mut app, ally, 1000.0);
+    let shots = |app: &App| -> u32 {
+        covers
+            .iter()
+            .map(|&e| app.world.get::<NpcCombat>(e).unwrap().stats.shots)
+            .sum()
+    };
+    let mut wide_shots: [Picture; 5] = Default::default();
+    let mut close_shots: [Picture; 2] = Default::default();
+    let (mut t, mut knelt_at, mut fired_from, mut screened) = (0.0f64, None, None, false);
+    let mut fired = 0;
+    while t < 16.0 {
+        app.update();
+        t += STEP;
+        let b = app.world.get::<NpcBrain>(medic).unwrap();
+        let (going, kneel, progress) = (
+            b.action == NpcAction::Revive,
+            b.revive_kneel,
+            b.revive_progress,
+        );
+        let take = |app: &mut App, row: &mut [Picture], n: usize, cam: Entity, caption: String| {
+            if row[n].is_none() {
+                let img = shoot(app, cam, away, &format!("medic_{n}_{}.png", row.len()));
+                row[n] = Some((caption, img));
+            }
+        };
+        if t >= 0.3 {
+            take(&mut app, &mut wide_shots, 0, wide, "SHOT DOWN".into());
+        }
+        if going && kneel <= 0.0 && at(&app, medic).distance(at(&app, ally)) < 4.0 {
+            take(
+                &mut app,
+                &mut wide_shots,
+                1,
+                wide,
+                format!("{t:.1} S: THE MEDIC GOES"),
+            );
+        }
+        if going && kneel > 0.0 {
+            knelt_at.get_or_insert(t);
+            // Once it kneels, its riflemen keep the enemy's head down and the swordsman
+            // stands between.
+            let n = shots(&app);
+            let since = *fired_from.get_or_insert(n);
+            fired = n - since;
+            screened |= app.world.get::<NpcBrain>(sword).unwrap().role == "screen";
+        }
+        if going && kneel > 0.9 && progress <= 0.0 {
+            take(
+                &mut app,
+                &mut wide_shots,
+                2,
+                wide,
+                format!("{t:.1} S: KNEELS, SCREENED"),
+            );
+        }
+        if going && progress > 0.5 {
+            // The close-up: from its left, a little ahead, at the height of its arm.
+            if close_shots[0].is_none() {
+                let m = at(&app, medic);
+                let f = facing(&app, medic);
+                let left = DVec3::new(f.z, 0.0, -f.x);
+                aim(
+                    &mut app,
+                    close,
+                    m + left * 1.5 + f * 0.6 + DVec3::Y * 0.9,
+                    m + DVec3::Y * 0.55,
+                );
+            }
+            take(
+                &mut app,
+                &mut close_shots,
+                0,
+                close,
+                "ITS ARMBAND, HANDS ON".into(),
+            );
+            take(
+                &mut app,
+                &mut wide_shots,
+                3,
+                wide,
+                format!("{t:.1} S: HANDS ON, COVERED"),
+            );
+        }
+        if !downed(&app, ally) {
+            if close_shots[1].is_none() {
+                let m = at(&app, medic);
+                aim(
+                    &mut app,
+                    close,
+                    m + DVec3::new(-2.6, 1.6, 2.4),
+                    m + DVec3::Y * 0.8,
+                );
+            }
+            take(
+                &mut app,
+                &mut close_shots,
+                1,
+                close,
+                format!("{t:.1} S: UP AGAIN"),
+            );
+            take(
+                &mut app,
+                &mut wide_shots,
+                4,
+                wide,
+                format!("{t:.1} S: BOTH UP"),
+            );
+        }
+        if wide_shots.iter().chain(&close_shots).all(Option::is_some) {
+            break;
+        }
+    }
+    // The medic was the one that went, its mates covering it.
+    assert!(knelt_at.is_some(), "the medic never knelt");
+    assert!(!downed(&app, ally), "the medic never got its mate up");
+    let revives = |e: Entity| app.world.get::<NpcCombat>(e).unwrap().stats.revives;
+    assert_eq!(revives(medic), 1);
+    assert!(fired > 0, "nobody fired to cover the kneeling medic");
+    assert!(screened, "the swordsman never screened the medic");
+    if app.world.get_resource::<RenderDisabled>().is_some() {
+        eprintln!("skipping the pictures: no GPU");
+        return;
+    }
+    let strip = |row: &[Picture], name: &str| {
+        let mut img = image::RgbaImage::from_pixel(
+            TILE_W * row.len() as u32,
+            TILE_H + BAND,
+            image::Rgba([24, 24, 28, 255]),
+        );
+        for (n, frame) in row.iter().enumerate() {
+            let (caption, pic) = frame.as_ref().expect("a picture was never taken");
+            let x = TILE_W * n as u32;
+            if let Some(pic) = pic {
+                image::imageops::replace(&mut img, pic, i64::from(x), i64::from(BAND));
+            }
+            write(&mut img, x + 10, 8, caption);
+        }
+        let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+        img.save(&path).expect("save the strip");
+        if let Ok(dir) = std::env::var("NPC_SCREENSHOT_DIR") {
+            let _ = std::fs::create_dir_all(&dir);
+            std::fs::copy(&path, std::path::Path::new(&dir).join(name)).expect("copy the strip");
+        }
+        eprintln!("wrote {}", path.display());
+    };
+    strip(&wide_shots, "fighters-medic-revive-overview.png");
+    strip(&close_shots, "fighters-medic-closeup.png");
 }
 
 /// Write `text` (capitals, digits and a little punctuation) in a 5×7 pixel font at twice its
