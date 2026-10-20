@@ -3,13 +3,14 @@
 #
 # Baked by crates/character/tools/bake_makehuman.py from MakeHuman's CC0 assets: the hm08 base
 # mesh (in meters) and its face, neck and torso shape targets plus the macro targets (sex, age,
-# muscle, weight, height, proportions, ancestry). Without this file characters aren't drawn and
-# the creator says how to fetch it.
+# muscle, weight, height, proportions, ancestry), the facial expression units, and the default
+# skeleton's weights folded onto anim's humanoid bones. Without this file characters aren't
+# drawn and the creator says how to fetch it. (Version 2; old checkouts fetch human_hm08.bin.)
 
 [[file]]
-path = "character/human_hm08.bin"
+path = "character/human_hm08_v2.bin"
 url = "mirror"
-sha256 = "7ad4b481fe3f42903e5f35ba6ae63f63ba1d039a6835a2e95ecf6ed8d2ca2c79"
+sha256 = "4cbce8947ae564ce1e66249bd3f1e694ca138d4691e4f570eb5012b4fb780b6c"
 license = "CC0-1.0"
 source = "https://github.com/makehumancommunity/makehuman/tree/a8bc2d54ff0ac92e78ff71431b1023eda42bf482/makehuman/data"
 author = "The MakeHuman team"

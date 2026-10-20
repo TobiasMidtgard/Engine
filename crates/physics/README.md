@@ -214,6 +214,21 @@ under a micrometer).
   the proving ground example simulates the yard as if the player were 400 m away: the
   rockfall pours a little slower there and heaps a little tighter, at half the cost (14 ms a
   step instead of 27.5 while pouring).
+- Fine steps (`FineSteps`, `src/fine.rs`): the solver settles all of a substep's contacts
+  together, so when a Newton's cradle ball swings in, the 3 mm gaps of the whole row close in
+  one 8 ms substep and the row swings off as one lump, where steel passes the blow down the
+  row and only the last ball flies. A body with `FineSteps` asks for substeps short enough
+  that each touch is its own (1/960 s by default: a ball at 2 m/s moves 2 mm, less than the
+  gap). Rows of hard bodies that pass a blow on (cradles, billiard racks, clockwork) need it.
+  Stepping a whole scene that finely would cost several times as much, so such bodies keep to
+  regions of their own: a group of them (by distance and joints) leaves a region that holds
+  others too, and they merge again only when bodies come within 0.5 m plus three steps of
+  travel, looked at every step, so a ball rolled at the cradle joins it before it hits. A fine
+  region steps finely only in frames where two of its bodies may meet, and then with as many
+  solver iterations per second as elsewhere (one per 1 ms substep): a five-ball cradle near
+  the player costs about 0.3 ms a step (1.4 ms without those two savings). Gaps between
+  resting bodies must exceed Rapier's 2 mm contact prediction, or resting balls touch before
+  the blow arrives. `PhysicsStats::fine_awake` counts the awake bodies stepping finely.
 - A `WorldShift` (the space module re-anchoring the world) moves the simulation in the same
   frame. A floating-origin move only moves region anchors: sleeping bodies stay asleep and
   contacts carry on. A turn into another planet's frame rotates each region's contents about
@@ -288,7 +303,11 @@ simulated coarsely and at half rate.
 yard (with a curb, so nothing rolls off) with a 30-crate tower, a bin filling with 250
 crates/barrels/balls, a domino snake, ten crash test dummy ragdolls tumbling down a steep staircase together,
 a wrecking ball smashing a crate wall, a seesaw catapult, a motor-driven paddle wheel, a sagging
-plank bridge, a kinematic turntable, bouncing rubber balls, a **rockfall** (300 crushed granite
+plank bridge, a kinematic turntable, bouncing rubber balls, a **pendulum wave** (15 lacquered steel bobs under an A-frame gantry,
+swinging 20 to 34 times a minute: they fall out of step into waves and snakes, swing in two
+alternate rows at half a minute and are back in step at a minute) in front of a **Newton's
+cradle** on a plinth (five 20 cm chrome balls on 80 cm wires, stepping finely, so the blow passes
+down the row and only the last ball flies), a **rockfall** (300 crushed granite
 rocks, faceted convex hulls 30 to 55 cm across, pour out of a hopper, slide down a 40° steel chute
 and drop off its lip into a heap with a 35° face) and, along the front, a **barrel run**:
 three oil drums roll off a 2 m ramp and 47 m down an asphalt runway (one triangle mesh, an edge
@@ -298,8 +317,9 @@ showcase's physics zone places it. Render it alone with
 `cargo run -p engine_physics --release --example proving_ground -- out_dir`.
 
 The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,
-seesaw and balls every 20 s, the barrel run every 25 s, dominoes, wrecking ball and bridge every
-30 s, the rockfall every 30 s, the pile every 45 s; the tower, wheel and turntable run on), so the zone is always
+seesaw, balls and cradle every 20 s, the barrel run every 25 s, dominoes, wrecking ball and bridge every
+30 s, the rockfall every 30 s, the pile every 45 s, the pendulum wave every minute, as it comes
+back into step; the tower, wheel and turntable run on), so the zone is always
 playing when someone walks in.
 They pause while no focus point is within 250 m.
 `physics.proving_ground.replay {"station": "dominoes"}` restarts one now (`{}` restarts all).
@@ -357,7 +377,10 @@ on its spot slows at `μ·g·1 cm/(⅖r²)` and stops where it is); the debug vi
 (`tests/debug_draw.rs`, contacts on terrain included); the level of detail (`tests/lod.rs`:
 far drums tumble coarsely and at half rate and keep their rocks, far heaps still fall asleep,
 a ball flying in from afar hits the crate by the player at full detail, a far walker steps every
-frame); a headless screenshot of the proving ground.
+frame); pendulums (`tests/pendulums.rs`: a Newton's cradle with fine steps passes one or two
+balls' blow down the row while the middle stays within 2 cm, without them the middle swings off,
+a cradle keeps to its own region beside tumbling crates and a ball rolled at it still hits it,
+and a pendulum wave is in two alternate rows at half a minute and back in step at a minute); a headless screenshot of the proving ground.
 
 ## Done when
 
