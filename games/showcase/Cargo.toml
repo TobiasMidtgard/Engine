@@ -28,3 +28,4 @@ engine_destruction.workspace = true
 engine_movement.workspace = true
 engine_audio.workspace = true
 engine_softbody.workspace = true
+engine_character.workspace = true
