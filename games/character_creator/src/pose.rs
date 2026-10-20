@@ -55,10 +55,14 @@ fn turns(name: &str, t: f32) -> Vec<(&'static str, Quat)> {
             v.extend([
                 ("upper_arm_l", z(24.0) * x(4.0)),
                 ("lower_arm_l", x(10.0)),
-                // The right arm up and out, the forearm swinging.
-                ("upper_arm_r", z(95.0) * x(10.0)),
-                ("lower_arm_r", x(70.0) * z(18.0 * (t * 6.0).sin())),
-                ("hand_r", x(-10.0)),
+                // The right upper arm out to the side, turned on itself so the elbow bends
+                // the forearm straight up, and the forearm swinging side to side.
+                (
+                    "upper_arm_r",
+                    z(48.0) * x(-8.0) * y(-80.0 + 18.0 * (t * 6.0).sin()),
+                ),
+                ("lower_arm_r", x(100.0)),
+                ("hand_r", x(-8.0)),
                 ("chest", y(-6.0) * x(-2.0)),
                 ("neck", z(4.0)),
                 ("head", z(5.0) * y(8.0)),
