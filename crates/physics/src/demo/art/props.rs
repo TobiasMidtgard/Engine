@@ -1480,12 +1480,88 @@ fn pip(
     b.color = body;
 }
 
+/// A crushed rock's corners, about 1 m across (each rock scales them): 11 points on a lumpy
+/// ellipsoid, whose convex hull is both the rock's collider and its mesh. `seed` picks one.
+pub fn rock_points(seed: u32) -> Vec<Vec3> {
+    let mut state = seed.wrapping_mul(0x9e37_79b9) ^ 0x51ed_270b;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        (state >> 8) as f32 / (1u32 << 24) as f32
+    };
+    // A golden-angle spiral spreads the corners evenly; jitter and a lumpy radius break it up.
+    const N: usize = 11;
+    let squash = Vec3::new(1.0, 0.6 + 0.25 * next(), 0.75 + 0.2 * next());
+    (0..N)
+        .map(|i| {
+            let y = 1.0 - 2.0 * (i as f32 + 0.5) / N as f32;
+            let r = (1.0 - y * y).sqrt();
+            let a = i as f32 * 2.399_963 + next() * 0.6;
+            let dir = Vec3::new(r * a.cos(), y + (next() - 0.5) * 0.4, r * a.sin()).normalize();
+            dir * squash * 0.5 * (0.8 + 0.35 * next())
+        })
+        .collect()
+}
+
+/// The convex hull of `points` as a faceted rock: flat facets (fresh fractures), each with
+/// its own planar UVs in meters of the unscaled rock, tinted `tint` (sRGB hex: rocks from
+/// one quarry differ a little in shade).
+pub fn rock(points: &[Vec3], tint: u32) -> Mesh {
+    let (verts, tris) = rapier3d::parry::transformation::convex_hull(points);
+    let center = verts.iter().copied().sum::<Vec3>() / verts.len().max(1) as f32;
+    let mut b = MeshBuilder::new();
+    b.color = srgb(tint);
+    for [i, j, k] in tris {
+        let (p0, p1, p2) = (verts[i as usize], verts[j as usize], verts[k as usize]);
+        let mut n = (p1 - p0).cross(p2 - p0).normalize_or_zero();
+        if n == Vec3::ZERO {
+            continue;
+        }
+        if n.dot(p0 - center) < 0.0 {
+            n = -n;
+        }
+        // Projected along the facet's normal, so neighboring facets' grain doesn't line up.
+        let u = n.any_orthonormal_vector();
+        let v = n.cross(u);
+        let uv = |p: Vec3| Vec2::new(p.dot(u), p.dot(v));
+        let a = b.vertex(p0, n, uv(p0));
+        let c = b.vertex(p1, n, uv(p1));
+        let d = b.vertex(p2, n, uv(p2));
+        b.tri(a, c, d);
+    }
+    b.build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn tris(m: &Mesh) -> usize {
         m.triangle_count()
+    }
+
+    /// Every rock is a closed, outward-facing hull of its collider's points, about 1 m across.
+    #[test]
+    fn rocks_are_their_collider_hulls_facing_out() {
+        for seed in 0..8 {
+            let points = rock_points(seed);
+            let m = rock(&points, 0xffffff);
+            assert!((12..=40).contains(&tris(&m)), "{} triangles", tris(&m));
+            let center = points.iter().copied().sum::<Vec3>() / points.len() as f32;
+            let p = |i: u32| Vec3::from(m.vertices[i as usize].position);
+            for t in m.indices.chunks(3) {
+                let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+                let n = (b - a).cross(c - a);
+                assert!(n.dot(a - center) > 0.0, "rock {seed} has an inward facet");
+                assert!(points.iter().any(|q| q.distance(a) < 1e-5));
+            }
+            let size = points.iter().fold(Vec3::ZERO, |acc, q| acc.max(q.abs())) * 2.0;
+            assert!(
+                size.max_element() < 1.2 && size.min_element() > 0.5,
+                "{size}"
+            );
+        }
     }
 
     #[test]

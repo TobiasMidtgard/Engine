@@ -3,7 +3,8 @@
 //!
 //! Every screen can then be opened from the console or by an AI agent:
 //! `ui.show {"screen": "dialogue", "tree": "merchant_intro"}`, `{"screen": "shop"}`,
-//! `{"screen": "inventory"}`, `{"screen": "map"}`, `{"screen": "journal"}`, `{"screen": "pause"}`.
+//! `{"screen": "inventory"}`, `{"screen": "map"}`, `{"screen": "journal"}`, `{"screen": "skills"}`,
+//! `{"screen": "pause"}`.
 
 use bevy_ecs::prelude::*;
 use engine_core::math::DVec3;
@@ -181,6 +182,7 @@ pub fn setup_data(world: &mut World) {
     crate::map::add_demo_map(world);
     crate::quests::add_demo_quests(world);
     crate::wheel::add_demo_items(world);
+    crate::skills::add_demo_tree(world);
 }
 
 /// Marks the UI test area's world objects.

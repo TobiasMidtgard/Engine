@@ -26,9 +26,9 @@ use engine_core::prelude::*;
 use engine_render::{
     GltfScene, MaterialPreset, Mesh, MeshRenderer, Shape as MeshShape, StandardMaterial,
 };
-use engine_world::Ground;
 use engine_world::animation::AnimationParams;
 use engine_world::physics::PhysicsQueries;
+use engine_world::{DamageEvent, DamageKind, Ground};
 use serde_json::{Value, json};
 
 use crate::animator::{AnimationLibrary, Animator, AnimatorSettings};
@@ -40,6 +40,7 @@ use crate::ik::{GroundProbe, IkShape, IkSurface, IkSurfaces, LookAt, Reach, Reac
 use crate::muscle::{MorphWeights, MuscleRig};
 use crate::procedural::spring::SpringChains;
 use crate::retarget::HandGrip;
+use crate::shuttle::{Shuttle, ShuttleLeg, Watch};
 use crate::skin::{SkinMaterial, SkinnedMesh, SkinnedMeshRenderer};
 use crate::stunt;
 use crate::xform::smoothing;
@@ -52,6 +53,10 @@ const ATHLETE: DVec3 = DVec3::new(-2.6, 0.0, 5.4);
 const TIRE_AHEAD: f64 = 1.3;
 /// The dog's run ([x, z, speed], m and m/s from the paddock's center): it walks off at the
 /// west end, trots, canters out of the east turn and gallops down the far straight.
+/// Start of the shuttle lane (x, z from the paddock's center; it runs towards −Z) and its
+/// length, m.
+const LANE: DVec3 = DVec3::new(-23.0, 0.0, 7.0);
+const LANE_LENGTH: f32 = 15.0;
 const DOG_PATH: [[f32; 3]; 10] = [
     [-12.0, 12.0, 1.1],
     [-6.0, 12.0, 2.6],
@@ -78,16 +83,22 @@ pub struct DemoEntities {
     pub lifter: Entity,
     pub reacher: Entity,
     pub walker: Entity,
+    /// Walks a square facing one way: sidesteps and backpedals.
+    pub drill: Entity,
+    /// Flinches from blows on a timeline.
+    pub sparring: Entity,
     pub horse: Entity,
     pub spider: Entity,
     pub dog: Entity,
     pub car: Entity,
     pub stuntman: Entity,
+    pub runner: Entity,
+    pub coach: Entity,
 }
 
 /// Follows a closed, smooth path through `waypoints` (`[x, z, speed]`, meters and m/s,
-/// relative to `origin`), standing on whatever ground is there. Sets the `speed`, `turn`
-/// and `move_effort` animation parameters.
+/// relative to `origin`), standing on whatever ground is there. Sets the `speed`, `turn`,
+/// `heading` and `move_effort` animation parameters.
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DemoPath {
@@ -99,10 +110,19 @@ pub struct DemoPath {
     pub speed: f32,
     /// Speed at which `move_effort` reaches 1, m/s.
     pub effort_speed: f32,
+    /// Keep facing this way (yaw, radians) instead of along the path: a person then
+    /// sidesteps and backpedals round it.
+    pub facing: Option<f32>,
     #[serde(skip)]
     samples: Vec<(Vec2, f32, f32)>,
     #[serde(skip)]
     yaw_rate: f32,
+    /// Velocity on the ground (x, z), m/s, and the acceleration along the facing, m/s²
+    /// (smoothed).
+    #[serde(skip)]
+    velocity: Vec2,
+    #[serde(skip)]
+    accel: f32,
     #[serde(skip)]
     started: bool,
 }
@@ -115,8 +135,11 @@ impl Default for DemoPath {
             distance: 0.0,
             speed: 1.0,
             effort_speed: humanoid::RUN_SPEED,
+            facing: None,
             samples: Vec::new(),
             yaw_rate: 0.0,
+            velocity: Vec2::ZERO,
+            accel: 0.0,
             started: false,
         }
     }
@@ -200,7 +223,7 @@ pub struct DemoScript {
     pub time: f32,
 }
 
-/// One step of a [`DemoScript`]: a trigger and/or a parameter value at `at` seconds.
+/// One step of a [`DemoScript`]: a trigger, a parameter value and/or a blow at `at` seconds.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DemoStep {
@@ -208,6 +231,9 @@ pub struct DemoStep {
     pub trigger: String,
     pub param: String,
     pub value: f32,
+    /// Strike the entity: a [`DamageEvent`] at this point with this push (N·s), both in its
+    /// own frame (it faces −Z).
+    pub hit: Option<(Vec3, Vec3)>,
 }
 
 impl DemoStep {
@@ -223,6 +249,13 @@ impl DemoStep {
             at,
             param: name.into(),
             value,
+            ..Default::default()
+        }
+    }
+    pub fn hit(at: f32, point: Vec3, push: Vec3) -> Self {
+        Self {
+            at,
+            hit: Some((point, push)),
             ..Default::default()
         }
     }
@@ -262,12 +295,24 @@ pub(crate) fn register(app: &mut App) {
     .register_component::<DemoScript>(
         "Demo timeline: triggers and parameter values at times (s), repeating every period.",
     )
+    .register_component::<Shuttle>(
+        "Shuttle runner: straight legs from a standing start to a standing stop, turning on \
+         the spot between them.",
+    )
+    .register_component::<Watch>("Watcher: turns where it stands to keep watching a target.")
     .register_component::<stunt::Stunt>(
         "Stunt yard routine: run off the deck, fall limp onto the mat, get up, walk back.",
     )
     .add_systems(
         Update,
-        (demo_path_system, demo_script_system, stunt::stunt_system).in_set(UpdateSet::Logic),
+        (
+            demo_path_system,
+            demo_script_system,
+            stunt::stunt_system,
+            crate::shuttle::shuttle_system,
+            crate::shuttle::watch_system,
+        )
+            .in_set(UpdateSet::Logic),
     )
     .register_api(
         "anim.spawn",
@@ -962,6 +1007,38 @@ pub const VIEWS: &[DemoView] = &[
         hour: 15.0,
         at: 9.9,
     },
+    DemoView {
+        key: "paddock_footwork",
+        name: "Sidestepping round a square, feet planted",
+        eye: [-3.2, 1.6, -9.2],
+        target: [-6.0, 0.8, -4.6],
+        hour: 15.0,
+        at: 5.5,
+    },
+    DemoView {
+        key: "paddock_flinch",
+        name: "A jab to the chin snaps the head back",
+        eye: [-3.6, 1.35, 1.2],
+        target: [-6.0, 1.15, 1.0],
+        hour: 15.0,
+        at: 0.92,
+    },
+    DemoView {
+        key: "paddock_sprint_start",
+        name: "Driving off into a sprint, leaning into it",
+        eye: [-18.6, 1.3, 7.8],
+        target: [-23.0, 1.0, 5.2],
+        hour: 15.0,
+        at: 1.35,
+    },
+    DemoView {
+        key: "paddock_sprint_stop",
+        name: "Digging in to stop from a sprint, sitting back; the coach turns to watch",
+        eye: [-17.8, 1.4, -10.4],
+        target: [-22.6, 0.9, -6.4],
+        hour: 15.0,
+        at: 4.3,
+    },
 ];
 
 fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
@@ -1224,6 +1301,117 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         ),
     ));
 
+    // Footwork drill: round a square facing one way, walking ahead, sidestepping left,
+    // backpedalling and sidestepping right.
+    let drill = spawn_humanoid(
+        world,
+        humanoid::Outfit::Shirt,
+        Transform::from_translation(at(-4.5, 0.0, -2.0)),
+    );
+    dress(world, drill, "athlete", SkinMaterial::default());
+    let (ahead, side, back) = (1.2, humanoid::SIDESTEP_SPEED, 0.9);
+    world.entity_mut(drill).insert((
+        Name::new("Footwork drill"),
+        DemoPath {
+            facing: Some(0.0),
+            ..DemoPath::new(
+                origin,
+                vec![
+                    [-4.5, -2.0, ahead],
+                    [-4.5, -4.0, ahead],
+                    [-4.5, -6.0, side],
+                    [-6.0, -6.0, side],
+                    [-7.5, -6.0, back],
+                    [-7.5, -4.0, back],
+                    [-7.5, -2.0, side],
+                    [-6.0, -2.0, side],
+                ],
+            )
+        },
+    ));
+
+    // Sparring partner: struck in turn on the chin, the side of the head, the stomach and
+    // the back of a shoulder, flinching away from each blow.
+    let sparring = spawn_humanoid(
+        world,
+        humanoid::Outfit::Shirt,
+        Transform::from_translation(at(-6.0, 0.0, 1.0)).with_rotation(facing(180.0)),
+    );
+    dress(world, sparring, "lifter", SkinMaterial::default());
+    world.entity_mut(sparring).insert((
+        Name::new("Sparring partner"),
+        DemoScript {
+            period: 6.0,
+            steps: vec![
+                DemoStep::hit(0.8, Vec3::new(0.0, 1.62, -0.12), Vec3::new(0.0, 0.0, 26.0)),
+                DemoStep::hit(2.3, Vec3::new(-0.1, 1.6, -0.03), Vec3::new(24.0, 0.0, 6.0)),
+                DemoStep::hit(3.8, Vec3::new(0.02, 1.1, -0.15), Vec3::new(0.0, 0.0, 32.0)),
+                DemoStep::hit(5.0, Vec3::new(0.18, 1.42, 0.08), Vec3::new(0.0, 0.0, -24.0)),
+            ],
+            time: 0.0,
+        },
+    ));
+
+    // --- Shuttle lane: sprint down it, dig in to stop, run back backwards, turn and run
+    // sideways back to the start; a coach beside it turns to keep watching.
+    let runner = spawn_humanoid(
+        world,
+        humanoid::Outfit::Athlete,
+        Transform::from_translation(at(LANE.x, 0.0, LANE.z)),
+    );
+    dress(world, runner, "athlete", SkinMaterial::default());
+    let (x, z) = (LANE.x as f32, LANE.z as f32);
+    world.entity_mut(runner).insert((
+        Name::new("Shuttle runner"),
+        Shuttle {
+            origin,
+            start: [x, z],
+            legs: vec![
+                ShuttleLeg {
+                    to: [x, z - LANE_LENGTH],
+                    facing_deg: 0.0,
+                    top: 5.0,
+                },
+                ShuttleLeg {
+                    to: [x, z - LANE_LENGTH * 0.45],
+                    facing_deg: 0.0,
+                    top: humanoid::BACK_RUN_SPEED,
+                },
+                ShuttleLeg {
+                    to: [x, z],
+                    facing_deg: -90.0,
+                    top: humanoid::SIDE_RUN_SPEED,
+                },
+            ],
+            ..Default::default()
+        },
+    ));
+    let coach = spawn_humanoid(
+        world,
+        humanoid::Outfit::Shirt,
+        Transform::from_translation(at(LANE.x - 2.6, 0.0, LANE.z - LANE_LENGTH as f64 * 0.55))
+            .with_rotation(facing(-90.0)),
+    );
+    dress(world, coach, "reacher", shirt_detail());
+    world.entity_mut(coach).insert((
+        Name::new("Coach"),
+        Watch {
+            target: Some(runner),
+            ..Default::default()
+        },
+        LookAt {
+            chain: vec![
+                ("chest".into(), 0.2),
+                ("neck".into(), 0.35),
+                ("head".into(), 0.45),
+            ],
+            max_angle_deg: 75.0,
+            weight: 0.9,
+            smoothing: 0.15,
+            ..Default::default()
+        },
+    ));
+
     // --- Horse track: an oval with a white rail.
     let horse_path = vec![
         [16.0, 7.0, 1.6],
@@ -1377,11 +1565,15 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         lifter,
         reacher,
         walker,
+        drill,
+        sparring,
         horse: horse_e,
         spider: spider_e,
         dog: dog_e,
         car: car_e,
         stuntman,
+        runner,
+        coach,
     }
 }
 
@@ -1425,7 +1617,8 @@ fn demo_path_system(
         } else {
             pos.y = target_y;
         }
-        let yaw = (-dir.x).atan2(-dir.y);
+        let along = (-dir.x).atan2(-dir.y);
+        let yaw = path.facing.unwrap_or(along);
         let old_yaw = {
             let f = t.rotation * Vec3::NEG_Z;
             (-f.x).atan2(-f.z)
@@ -1437,15 +1630,22 @@ fn demo_path_system(
         while dyaw < -PI {
             dyaw += 2.0 * PI;
         }
+        let velocity = dir * speed;
         if dt > 0.0 && path.started {
             path.yaw_rate += (dyaw / dt - path.yaw_rate) * smoothing(dt, 0.25);
+            let forward = Vec2::new(-yaw.sin(), -yaw.cos());
+            let accel = ((velocity - path.velocity) / dt).dot(forward);
+            path.accel += (accel - path.accel) * smoothing(dt, 0.2);
         }
+        path.velocity = velocity;
         path.started = true;
         t.translation = pos;
         t.rotation = Quat::from_rotation_y(yaw);
         if let Some(mut params) = params {
             params.set("speed", speed);
             params.set("turn", (path.yaw_rate / 1.2).clamp(-1.0, 1.0));
+            params.set("heading", (along - yaw + PI).rem_euclid(2.0 * PI) - PI);
+            params.set("accel", crate::body::accel_param(path.accel));
             params.set(
                 "move_effort",
                 (speed / path.effort_speed.max(0.1)).clamp(0.0, 1.0),
@@ -1457,14 +1657,17 @@ fn demo_path_system(
 #[allow(clippy::type_complexity)]
 fn demo_script_system(
     time: Res<Time>,
+    mut damage: MessageWriter<DamageEvent>,
     mut q: Query<(
+        Entity,
         &mut DemoScript,
         Option<&mut Animator>,
         Option<&mut AnimationParams>,
+        Option<&GlobalTransform>,
         Option<&LocalTimeScale>,
     )>,
 ) {
-    for (mut script, mut animator, mut params, local) in &mut q {
+    for (entity, mut script, mut animator, mut params, gt, local) in &mut q {
         let dt = time.delta_for(local);
         if script.period <= 0.0 || dt <= 0.0 {
             continue;
@@ -1488,6 +1691,16 @@ fn demo_script_system(
                 && let Some(p) = params.as_mut()
             {
                 p.set(&step.param, step.value);
+            }
+            if let (Some((point, push)), Some(gt)) = (step.hit, gt) {
+                damage.write(DamageEvent {
+                    target: entity,
+                    amount: push.length() * 0.2,
+                    kind: DamageKind::Blunt,
+                    point: gt.translation() + (gt.rotation() * point).as_dvec3(),
+                    impulse: gt.rotation() * push,
+                    source: None,
+                });
             }
         }
     }

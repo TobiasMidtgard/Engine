@@ -249,6 +249,7 @@ pub(crate) fn swing_posts(
     targets: Query<(&Transform, &NpcClock, &NpcCombat, &NpcVitals), Without<SparringPost>>,
     mut attacks: MessageWriter<AttackEvent>,
     mut damage: MessageWriter<DamageEvent>,
+    seeds: Query<&crate::seed::Seed>,
 ) {
     for (me, mut post, mut t, local) in &mut posts {
         let st = &mut post.state;
@@ -302,7 +303,8 @@ pub(crate) fn swing_posts(
         if now < post.state.next_at || vitals.downed || !in_reach {
             continue;
         }
-        let jitter = (roll(me, now, 31) * 2.0 - 1.0) * post.jitter_secs;
+        let jitter =
+            (roll(crate::seed::seed_of(&seeds, me), now, 31) * 2.0 - 1.0) * post.jitter_secs;
         post.state.next_at = now + (post.every_secs + jitter).max(post.windup_secs + 0.4) as f64;
         post.state.started = now;
         post.state.lands_at = Some(now + post.windup_secs as f64);

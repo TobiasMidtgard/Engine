@@ -1357,29 +1357,45 @@ pub fn mars_landforms() -> Landforms {
             volcano(32.1, 150.2, 90.0, 4_800.0, 6.0, 0.0),         // Hecates Tholus
         ],
         canyons: vec![
-            // Valles Marineris: Ius, Melas, Coprates, Eos and Capri Chasmata.
+            // Valles Marineris: Ius, Melas, Coprates, Eos and Capri Chasmata, widest in Melas
+            // (~200 km) and opening east into the chaos.
             Canyon {
                 path: path(&[
-                    [-6.5, 268.0, 12.0],
-                    [-7.0, 275.0, 25.0],
-                    [-7.8, 280.5, 35.0],
-                    [-9.5, 286.0, 75.0],
-                    [-11.0, 291.0, 50.0],
+                    [-6.6, 268.0, 15.0],
+                    [-7.1, 274.0, 30.0],
+                    [-7.8, 279.5, 40.0],
+                    [-9.2, 284.5, 75.0],
+                    [-10.2, 288.5, 100.0],
+                    [-11.3, 292.5, 75.0],
                     [-12.8, 297.0, 40.0],
                     [-13.5, 303.0, 45.0],
                     [-13.0, 308.0, 55.0],
-                    [-11.0, 313.0, 70.0],
-                    [-7.0, 318.0, 60.0],
+                    [-10.5, 312.5, 85.0],
+                    [-6.5, 317.5, 90.0],
+                    [-3.5, 322.0, 65.0],
                 ]),
                 depth_m: 7_000.0,
             },
-            // Candor and Ophir Chasmata, north of Melas.
+            // Ius Chasma's southern trough, parallel to the main one.
+            Canyon {
+                path: path(&[[-8.9, 271.0, 8.0], [-9.4, 277.0, 13.0], [-9.3, 281.5, 10.0]]),
+                depth_m: 4_500.0,
+            },
+            // Candor Chasma, north of Melas, and Ophir Chasma north of it.
             Canyon {
                 path: path(&[
-                    [-4.0, 280.0, 25.0],
-                    [-5.5, 284.0, 45.0],
-                    [-6.8, 289.0, 55.0],
-                    [-7.3, 293.5, 30.0],
+                    [-5.6, 281.5, 30.0],
+                    [-6.2, 285.0, 70.0],
+                    [-6.8, 289.0, 75.0],
+                    [-7.6, 293.0, 35.0],
+                ]),
+                depth_m: 6_500.0,
+            },
+            Canyon {
+                path: path(&[
+                    [-3.6, 283.5, 25.0],
+                    [-3.9, 287.0, 45.0],
+                    [-4.4, 290.5, 25.0],
                 ]),
                 depth_m: 6_000.0,
             },
@@ -1391,6 +1407,15 @@ pub fn mars_landforms() -> Landforms {
                     [-4.2, 281.0, 12.0],
                 ]),
                 depth_m: 5_000.0,
+            },
+            // Coprates Catena: a chain of pits and troughs south of Coprates.
+            Canyon {
+                path: path(&[
+                    [-14.6, 292.0, 6.0],
+                    [-15.1, 297.5, 9.0],
+                    [-15.0, 302.5, 6.0],
+                ]),
+                depth_m: 2_500.0,
             },
             // Hebes Chasma, closed all round.
             Canyon {

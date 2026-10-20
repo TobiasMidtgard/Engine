@@ -50,10 +50,13 @@ engine_foliage::spawn_plant(world, "oak", DVec3::new(3.0, 0.0, 4.0), 0.2, None)?
   the player returns. Trees use a cheaper mesh far away (past `tree_lod_distance_m`) and a
   cheapest one beyond `tree_distant_distance_m` (a trunk and a few big crown cards, 150 to 1,000
   triangles, for whole wooded hillsides); both distances scale with `0.5 + size`, so a grown
-  tree switches at 105 m and 360 m by default. Up close (within `tree_hero_distance_m`, 18 m
+  tree switches at 105 m and 360 m by default. Their crown cards sample a mass atlas
+  (`textures::mass_textures`): each spray in front of darker ones over a ragged clump of
+  shaded leaves, so a far crown with a third of the cards still reads as solid foliage and a
+  wood from a hill as a closed canopy rather than sticks with sky between them. Up close (within `tree_hero_distance_m`, 18 m
   for a grown tree) broadleaf trees and shrubs in full leaf draw their crown leaf by leaf: every
   leaf of every spray its own small quad turned its own way, with a single-leaf atlas (about
-  20k to 120k triangles). Grass, ferns and flowers switch to a
+  20k to 160k triangles). Grass, ferns and flowers switch to a
   far mesh (about a tenth of the triangles) past `EcologySettings::small_plant_lod_distance_m`
   and vanish beyond `small_plant_distance_m`. Each species has four mesh variants shared by all
   its plants, so a forest draws in a few instanced batches.

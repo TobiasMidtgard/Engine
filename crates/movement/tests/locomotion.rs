@@ -1368,6 +1368,102 @@ fn crouch_slides_down_and_jump_kicks_off() {
     assert!(pos(&app, c).z > 1.5, "{:?}", pos(&app, c));
 }
 
+/// A roof deck 3.24 to 3.29 m up with a 1 m square hatch in it (x −0.5..0.5, z −2.1..−1.1)
+/// and a header joist along its back edge, a steel ladder hung from the header up through the
+/// hatch (as in the breach house): its rungs 0.18 m in from the header, climbed facing −Z
+/// 0.2 m out from them, feet on the lowest rung 0.27 m up and on the top one 3.07 m up,
+/// stepped off over the header onto the deck 0.35 m behind it.
+fn roof_hatch(app: &mut App) -> Entity {
+    let (y, t) = (3.265, 0.05);
+    block(app, DVec3::new(0.0, y, 0.45), Vec3::new(4.0, t, 3.1));
+    block(app, DVec3::new(0.0, y, -3.05), Vec3::new(4.0, t, 1.9));
+    for x in [-1.25, 1.25] {
+        block(app, DVec3::new(x, y, -1.6), Vec3::new(1.5, t, 1.0));
+    }
+    block(app, DVec3::new(0.0, 3.12, -2.1), Vec3::new(1.6, 0.24, 0.1));
+    app.world
+        .spawn((
+            Transform::from_translation(DVec3::new(0.0, 1.61, -1.93)),
+            Climbable::ladder(
+                Vec3::new(0.0, 0.25 - 1.59, 0.26),
+                Vec3::new(0.0, 3.05 - 1.59, 0.26),
+                Vec3::NEG_Z,
+            )
+            .with_exit(Vec3::new(0.0, 1.68, -0.52)),
+        ))
+        .id()
+}
+
+#[test]
+fn climbs_up_through_a_roof_hatch_onto_the_deck() {
+    // Climbing back down through it, and waiting under a closed hatch, are checked against
+    // the real physics backend: the stand-in pushes a capsule out of a box the shortest way,
+    // up through a closed hatch or onto the header's edge.
+    let mut app = app();
+    roof_hatch(&mut app);
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 0.9, 1.5),
+        MovementProfile::pilot(),
+    );
+    intent(&mut app, c, |i| i.direction = Vec3::NEG_Z);
+    run_until(&mut app, 3.0, |w| {
+        w.get::<Mover>(c).unwrap().ladder.is_some()
+    });
+    assert_eq!(triggered(&app, c, "ladder_grab"), 1);
+    // Up through the hatch, over the header and onto the deck behind it.
+    let secs = run_until(&mut app, 5.0, |w| {
+        let m = w.get::<Mover>(c).unwrap();
+        m.grounded && m.mode != LocomotionMode::Mantle && m.ladder.is_none()
+    });
+    let p = pos(&app, c);
+    assert!(secs < 3.0, "took {secs:.2} s, at {p:?}");
+    assert!(
+        (p.y - 3.29 - 0.9).abs() < 0.05 && p.z < -2.2,
+        "on the deck: {p:?}"
+    );
+    assert_eq!(triggered(&app, c, "ladder_exit"), 1);
+}
+
+#[test]
+fn a_ladder_guest_climbs_any_ladder_up_and_back_down() {
+    let mut app = app();
+    let ladder = ladder_wall(&mut app);
+    let r = engine_core::registry::call_api(
+        &mut app.world,
+        "movement.ladder_guest",
+        serde_json::json!({"near": [0.0, 0.0, 3.0]}),
+    )
+    .unwrap();
+    assert_eq!(r["ladder"].as_u64(), Some(ladder.to_bits()));
+    let guest = Entity::from_bits(r["guest"].as_u64().unwrap());
+    // Up onto the roof…
+    let mut top = 0.0f64;
+    let secs = run_until(&mut app, 8.0, |w| {
+        top = top.max(w.get::<Transform>(guest).unwrap().translation.y);
+        triggered_in(w, guest, "ladder_exit") == 1
+    });
+    assert!(secs < 6.0, "{secs:.2} s");
+    // …and back down to the floor.
+    run_until(&mut app, 8.0, |w| {
+        top = top.max(w.get::<Transform>(guest).unwrap().translation.y);
+        triggered_in(w, guest, "ladder_exit") == 2
+    });
+    run(&mut app, 0.5);
+    assert!(top > 6.8, "reached the roof: {top}");
+    assert_eq!(triggered(&app, guest, "ladder_grab"), 2);
+    let p = pos(&app, guest);
+    assert!(p.y < 1.0, "back on the floor: {p:?}");
+    // Calling again restarts the same guest.
+    let again = engine_core::registry::call_api(
+        &mut app.world,
+        "movement.ladder_guest",
+        serde_json::json!({"near": [0.0, 0.0, 3.0]}),
+    )
+    .unwrap();
+    assert_eq!(again["guest"], r["guest"]);
+}
+
 #[test]
 fn a_jump_into_a_ladder_catches_it() {
     let mut app = app();

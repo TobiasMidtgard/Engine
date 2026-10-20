@@ -125,6 +125,7 @@ pub use motion_blur::MotionBlur;
 pub use renderer::{
     RenderDisabled, RenderStats, Renderer, ScreenshotInfo, Screenshots, capture_now,
 };
+pub use rock::{StoneFinish, StoneKind, WallStone, wall_stone};
 pub use settings::{
     AntiAliasing, Atmosphere, DebugView, FogSettings, RenderSettings, Tonemapper, VolumetricQuality,
 };
@@ -135,19 +136,20 @@ pub use sprites::{
 };
 pub use surface_weather::{SURFACE_PUDDLE_SCALE_M, SURFACE_SNOW_SCALE_M};
 pub use texture::{Image, ImageLoader, PixelFormat};
+pub use virtual_geometry::{Displacement, DisplacementSource};
 pub use wgpu;
 
 pub mod prelude {
     pub use crate::{
         AlphaMode, AmbientLight, AntiAliasing, Atmosphere, Billboard, BoxFace, Camera,
-        DepthOfField, DirectionalLight, Exposure, FogSettings, FogShape, FogVolume, GltfScene,
-        GltfSceneSpawner, GrassBender, GrassField, GrassStyle, Image, MaterialPreset, MaterialRef,
-        MaxDrawDistance, Mesh, MeshRef, MeshRenderer, MotionBlur, NoVirtualGeometry, Parallax,
-        PixelPerfect, PixelSnap, PointLight, Projection, RenderAppExt, RenderFeature, RenderPhase,
-        RenderPlugin, RenderSettings, Screenshots, Shape, SkyLightVolume, Sprite, SpriteAlpha,
-        SpriteAnimation, SpriteAnimationMode, SpriteAtlas, SpriteFilter, StandardMaterial,
-        TextureMapping, TileMap, Tonemapper, VolumetricQuality, spawn_gltf_scene,
-        spawn_gltf_scene_deferred,
+        DepthOfField, DirectionalLight, Displacement, DisplacementSource, Exposure, FogSettings,
+        FogShape, FogVolume, GltfScene, GltfSceneSpawner, GrassBender, GrassField, GrassStyle,
+        Image, MaterialPreset, MaterialRef, MaxDrawDistance, Mesh, MeshRef, MeshRenderer,
+        MotionBlur, NoVirtualGeometry, Parallax, PixelPerfect, PixelSnap, PointLight, Projection,
+        RenderAppExt, RenderFeature, RenderPhase, RenderPlugin, RenderSettings, Screenshots, Shape,
+        SkyLightVolume, Sprite, SpriteAlpha, SpriteAnimation, SpriteAnimationMode, SpriteAtlas,
+        SpriteFilter, StandardMaterial, StoneKind, TextureMapping, TileMap, Tonemapper,
+        VolumetricQuality, WallStone, spawn_gltf_scene, spawn_gltf_scene_deferred,
     };
 }
 
@@ -196,6 +198,9 @@ impl Plugin for RenderPlugin {
             .register_component::<NoVirtualGeometry>(
                 "Marker: keeps this entity's dense MeshRenderer off the virtual geometry cluster path (debris, fragments, meshes that change often).",
             )
+            .register_component::<Displacement>(
+                "Real displaced geometry for this entity's MeshRenderer, made when its virtual geometry clusters are built (background, cached on disk): amplitude_m (m; 0 = the material's parallax_depth), midlevel (height left on the surface), edge_m / max_edge_m (finest / coarsest triangle edges, m), tolerance_m, max_triangles, cavity_darkening, normal_map_strength, source: \"MaterialHeight\" (the material's height map or preset) | {\"Stone\": {kind: SplitFace|RoughHewn|Slab, seed, scale, lichen, grime}}.",
+            )
             .register_component::<MaxDrawDistance>(
                 "Meters from the camera beyond which this entity's MeshRenderer (and its shadow) is not drawn: small props and clutter. Measured to the mesh's bounding sphere.",
             )
@@ -233,7 +238,7 @@ impl Plugin for RenderPlugin {
                 "On an orthographic Camera: pixel-perfect pixel art. pixels_per_unit (art texels per meter), scale (screen pixels per texel, 0 = largest that shows the camera's height), snap Texel/ScreenPixel (camera and sprites move in whole steps). Turns temporal anti-aliasing off for this camera.",
             )
             .register_resource::<RenderSettings>(
-                "Renderer quality and look: shadows (shadow_distance m, far_shadow_distance m: big casters such as mountains beyond the cascades, 0 = off; sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), screen_space_reflections, volumetric_fog (bool), volumetric_fog_range (m), volumetric_fog_quality (Low/Medium/High), anti_aliasing (Taa/None) and sharpness, tonemapper (AgX/Aces/Reinhard/None), bloom (bloom_intensity, bloom_limit: the most a pixel brings into the bloom in multiples of white, 0 = no limit), grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion/Reflections/Clusters/ClusterLevels), virtual_geometry (dense opaque meshes as GPU-culled clusters: virtual_geometry_min_triangles, cluster_error_px, cluster_shadow_error_texels), release_image_pixels (free each image's CPU pixels once uploaded and unchanged for 120 frames; Image keep_pixels opts one out).",
+                "Renderer quality and look: shadows (shadow_distance m, far_shadow_distance m: big casters such as mountains beyond the cascades, 0 = off; sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), screen_space_reflections, volumetric_fog (bool), volumetric_fog_range (m), volumetric_fog_quality (Low/Medium/High), anti_aliasing (Taa/None) and sharpness, tonemapper (AgX/Aces/Reinhard/None), bloom (bloom_intensity, bloom_limit: the most a pixel brings into the bloom in multiples of white, 0 = no limit), grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion/Reflections/Clusters/ClusterLevels), virtual_geometry (dense opaque meshes as GPU-culled clusters: virtual_geometry_min_triangles, virtual_geometry_occlusion (two-pass occlusion culling), virtual_geometry_cache (+ _dir, _mb: builds kept on disk), cluster_error_px, cluster_shadow_error_texels), release_image_pixels (free each image's CPU pixels once uploaded and unchanged for 120 frames; Image keep_pixels opts one out).",
             )
             .register_resource::<FogSettings>("Height fog everywhere (volumetric within volumetric_fog_range, with light shafts): density (extinction 1/m at base_height, visibility about 3.9 / density: 0.00002 clear air, 0.0001 light haze, 0.0005 haze, 0.05 ground fog), height_falloff (1/m), base_height (m), max_opacity, color (albedo), sun_scattering (Henyey-Greenstein g, 0.6 = forward scattering, glow around the sun).")
             .register_resource::<Atmosphere>(

@@ -613,6 +613,20 @@ fn switching_articulated_joints_off_and_on_rebuilds_them() {
     assert!(parts.iter().all(|p| pos(&app, *p).y > 0.0));
 }
 
+/// Spin a chain in place about its middle, as one rigid body, fast enough (its ends at over
+/// 4 m/s) to be worth articulating.
+fn spin(app: &mut App, parts: &[Entity]) {
+    let w = Vec3::Y * 4.0;
+    let middle = parts.iter().map(|p| pos(app, *p)).sum::<DVec3>() / parts.len() as f64;
+    for p in parts {
+        let r = (pos(app, *p) - middle).as_vec3();
+        *app.world.get_mut::<Velocity>(*p).unwrap() = Velocity {
+            linear: w.cross(r),
+            angular: w,
+        };
+    }
+}
+
 fn articulated(app: &App) -> usize {
     app.world.resource::<PhysicsStats>().articulated
 }
@@ -708,9 +722,7 @@ fn the_budget_articulates_the_groups_nearest_the_focus() {
     let chains: Vec<Vec<Entity>> = (0..6)
         .map(|i| {
             let (parts, _) = chain(&mut app, DVec3::new(0.0, 5.0, 4.0 * i as f64), i + 2);
-            for p in &parts {
-                app.world.get_mut::<Velocity>(*p).unwrap().linear = Vec3::Y;
-            }
+            spin(&mut app, &parts);
             parts
         })
         .collect();
@@ -719,12 +731,85 @@ fn the_budget_articulates_the_groups_nearest_the_focus() {
     app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(0.0, 5.0, 22.0);
     app.update_n(10);
     assert_eq!(articulated(&app), 5 + 6, "the two nearest the moved focus");
-    // Those two stop and fall asleep: the next two nearest take their places.
+    // Those two stop: calm, they let go of their places, and the next two nearest take them.
     for p in chains[4].iter().chain(&chains[5]) {
         *app.world.get_mut::<Velocity>(*p).unwrap() = Velocity::default();
     }
+    app.update_n(10);
+    assert_eq!(articulated(&app), 3 + 4);
     app.update_n(240);
-    assert_eq!(articulated(&app), 5 + 6 + 3 + 4);
+    assert_eq!(
+        articulated(&app),
+        3 + 4,
+        "the still ones fall asleep on constraint joints"
+    );
+}
+
+/// A group too slow to land hard rests closed on constraint joints: it's only articulated once
+/// it moves fast (a ragdoll knocked over, thrown or falling), and lets go when it calms down.
+#[test]
+fn only_moving_groups_near_the_focus_are_articulated() {
+    let mut app = app(true);
+    zero_g(&mut app);
+    app.world.spawn((
+        Transform::from_xyz(0.0, 5.0, -2.0),
+        SimulationFocus::default(),
+    ));
+    let (parts, _) = chain(&mut app, DVec3::new(0.0, 5.0, 0.0), 4);
+    for p in &parts {
+        app.world.get_mut::<Velocity>(*p).unwrap().linear = Vec3::Y * 0.5;
+    }
+    app.update_n(10);
+    assert_eq!(articulated(&app), 0, "drifting slowly");
+    spin(&mut app, &parts);
+    app.update_n(10);
+    assert_eq!(articulated(&app), 3, "spinning");
+    for p in &parts {
+        app.world.get_mut::<Velocity>(*p).unwrap().linear = Vec3::Y * 0.5;
+        app.world.get_mut::<Velocity>(*p).unwrap().angular = Vec3::ZERO;
+    }
+    app.update_n(10);
+    assert_eq!(articulated(&app), 0, "slow again");
+}
+
+/// Only groups near the focus are articulated: farther away the few centimeters a constraint
+/// joint opens on a hard landing can't be seen, so the cost buys nothing.
+#[test]
+fn groups_far_from_the_focus_stay_on_constraint_joints() {
+    let mut app = app(true);
+    zero_g(&mut app);
+    let focus = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 5.0, 0.0),
+            SimulationFocus::default(),
+        ))
+        .id();
+    // Chain `i` has `i + 1` joints: 5, 15 and 35 m from the focus.
+    for (i, z) in [5.0, 15.0, 35.0].into_iter().enumerate() {
+        let (parts, _) = chain(&mut app, DVec3::new(0.0, 5.0, z), i + 2);
+        spin(&mut app, &parts);
+    }
+    app.update_n(10);
+    assert_eq!(articulated(&app), 1 + 2, "the two chains within 20 m");
+    // Walk up to the far one: it takes its place among the near ones.
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(0.0, 5.0, 32.0);
+    app.update_n(10);
+    assert_eq!(
+        articulated(&app),
+        2 + 3,
+        "the two within 20 m of the moved focus"
+    );
+    // A quarter farther before an articulated group lets go: 22 m from the middle one.
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(0.0, 5.0, 37.0);
+    app.update_n(10);
+    assert_eq!(articulated(&app), 2 + 3);
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(0.0, 5.0, 57.0);
+    app.update_n(10);
+    assert_eq!(articulated(&app), 3, "only the far one, 22 m away");
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(0.0, 5.0, 70.0);
+    app.update_n(10);
+    assert_eq!(articulated(&app), 0, "none within 25 m");
 }
 
 /// A light chain hung from the world holding a far heavier ball (a wrecking ball, which can't

@@ -60,6 +60,8 @@ pub(crate) enum Mat {
     Paint,
     /// Hot-dip galvanized steel: guardrails.
     Galvanized,
+    /// Freshly broken granite: the rockfall's rocks.
+    Granite,
 }
 
 /// Texture sets, generated once per app.
@@ -80,6 +82,7 @@ enum Tex {
     Asphalt,
     Sand,
     Galvanized,
+    Granite,
 }
 
 /// Generated texture sets' images.
@@ -129,6 +132,7 @@ impl Tex {
             Tex::Asphalt => textures::asphalt(res(1024)),
             Tex::Sand => textures::raked_sand(res(512)),
             Tex::Galvanized => textures::galvanized(res(512)),
+            Tex::Granite => textures::granite(res(512)),
         }
     }
 }
@@ -193,6 +197,7 @@ pub(crate) fn material(world: &mut World, m: Mat) -> Handle<StandardMaterial> {
         Mat::Sand => textured(world, Tex::Sand, white),
         Mat::Paint => StandardMaterial::hex(0xe9e6dc).with_roughness(0.55),
         Mat::Galvanized => textured(world, Tex::Galvanized, white),
+        Mat::Granite => textured(world, Tex::Granite, white),
     };
     let h = world.resource_mut::<Assets<StandardMaterial>>().add(made);
     world.resource_mut::<ArtCache>().materials.insert(m, h);

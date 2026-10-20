@@ -117,6 +117,9 @@ pub struct HeatGlow {
     pub base: StandardMaterial,
     /// Quantized glow level currently shown.
     pub level: u8,
+    /// How much of the shield's heating above 288 K this part gets: 1 on the windward belly,
+    /// nose and leading edges; far less in the lee, which the hot flow skips over.
+    pub share: f32,
 }
 
 /// Wheels: position along the suspension, steering, spin; retract with aircraft gear.
@@ -311,10 +314,11 @@ pub fn heat_visuals(
         let Ok(shield) = shields.get(parent.parent()) else {
             continue;
         };
-        let (color, strength) = blackbody(shield.temperature_k);
+        let t = 288.0 + (shield.temperature_k - 288.0) * glow.share;
+        let (color, strength) = blackbody(t);
         // 24 steps on a log scale keep the number of distinct materials small.
         const STEPS: f32 = 24.0;
-        const MAX_LOG: f32 = 4.8;
+        const MAX_LOG: f32 = 6.0;
         let level = ((strength + 1.0).log10() / MAX_LOG * STEPS).clamp(0.0, STEPS) as u8;
         if level == glow.level {
             continue;

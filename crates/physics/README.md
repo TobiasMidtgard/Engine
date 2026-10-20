@@ -26,6 +26,13 @@ changing that one plugin line.
   no thickness, or a free-floating 5 cm plank; without it, a 1000 m/s ball flies through the
   plank.
   `MassProperties` is written back.
+  Settled bodies cost next to nothing: a step visits only awake bodies and those with forces of
+  their own, and never takes a sleeping one mutably from Rapier (which would make Rapier redo its
+  bookkeeping for it). 3,000 rock-shaped debris pieces asleep in a pit cost 0.44 ms per step
+  (8.4 ms before): `cargo run -p engine_physics --release --example debris_field -- 3000`.
+  While they tumble, the touching pairs that need spin friction or report hard hits are found in
+  one pass that reads each pair once, in storage order when much of the region is awake: 52 ms
+  per step for the 3,000 (102 ms before), of which Rapier's own step is ~37 ms.
 - **Colliders**: sphere, cuboid, capsule, cylinder, convex hull, triangle mesh, heightfield,
   compound; on the body entity or on its children (one compound body). Shapes scale with the
   entity's `Transform::scale`. Changing a `Collider` rebuilds it. Friction and restitution come
@@ -93,7 +100,17 @@ changing that one plugin line.
   and switch over when they rank among the nearest (a group already articulated counts as a
   fifth nearer, so groups at about the same distance don't trade places back and forth;
   sleeping groups keep their joints and don't count). Ten ragdolls tumbling at once cost 4.8 ms
-  per frame instead of 8.3. `articulated_joints: false` turns it all off.
+  per frame instead of 8.3. And only groups within `articulate_within_m` (20 m) of a focus are
+  articulated (one already articulated keeps it until a quarter farther): past that, the few
+  centimeters a constraint joint opens on a hard landing are about a pixel at 1080p. Seen from
+  the overview camera, the yard's busy first five seconds cost 8.6 ms a step instead of 14.5, and
+  the dummies' replay 4.6 instead of 13.3. With a focus, a group also needs to be moving: it is
+  articulated once its fastest point goes over 2.5 m/s (falling, tumbling, thrown) and lets go
+  under 1 m/s, when a settling or still ragdoll's constraint joints rest closed, so its place
+  goes to one still tumbling. Up close at the stairs the busy first five seconds then cost 12.3
+  ms instead of 16.1 and the replay 8.8 instead of 11.0, with the ragdolls' joints opening as
+  rarely as before (over 1 cm in 18 frames of 1,800 against 16; at most 3.3 cm for a frame).
+  `articulated_joints: false` turns it all off.
 - **Heavy loads on light chains** (`Simulation::hang_loads`): a chain pinned at one place holding
   a body over 100× heavier than one of its links (a 17 t wrecking ball on 11 kg links, which
   can't be an articulation) hung with its links up to 22 cm apart on constraint joints: the
@@ -206,6 +223,7 @@ proving ground with the overlay.
 | `max_substep_secs` | 1/120 | Longest substep. With constraint joints, 1/60 lets ragdoll joints gap ~5 cm on impact; 1/120 ~1.5 cm. |
 | `articulated_joints` | on | Solve free-floating jointed groups as articulations (no joint gap; see Articulations). |
 | `max_articulated` | 4 | Most moving groups articulated at once, nearest the focus first; the rest use constraint joints. |
+| `articulate_within_m` | 20 | Only groups this close to a focus are articulated (farther, joint gaps are under a pixel or two). |
 | `max_substeps` | 24 | Cap per fixed step (10× speed needs 20). |
 | `allowed_penetration_m` | 0.001 | How far contacts may sink before being pushed apart. |
 | `contact_stiffness_hz` | 60 | Contact spring frequency (static contacts 2×). 30 Hz lets a 30-box tower sag 24 cm, 60 Hz ~6 cm. |
@@ -246,7 +264,9 @@ touching pairs, step time, substeps, articulated joints, static copies.
 yard (with a curb, so nothing rolls off) with a 30-crate tower, a bin filling with 250
 crates/barrels/balls, a domino snake, ten crash test dummy ragdolls tumbling down a steep staircase together,
 a wrecking ball smashing a crate wall, a seesaw catapult, a motor-driven paddle wheel, a sagging
-plank bridge, a kinematic turntable, bouncing rubber balls and, along the front, a **barrel run**:
+plank bridge, a kinematic turntable, bouncing rubber balls, a **rockfall** (300 crushed granite
+rocks, faceted convex hulls 30 to 55 cm across, pour out of a hopper, slide down a 40° steel chute
+and drop off its lip into a heap with a 35° face) and, along the front, a **barrel run**:
 three oil drums roll off a 2 m ramp and 47 m down an asphalt runway (one triangle mesh, an edge
 every 2 m) into a sand pit, staying flat and in their painted lanes, past galvanized guardrails to a
 tire wall. It sits on the ground at `origin`, its top `demo::SLAB_RISE` (10 cm) above it; the
@@ -255,14 +275,15 @@ showcase's physics zone places it. Render it alone with
 
 The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,
 seesaw and balls every 20 s, the barrel run every 25 s, dominoes, wrecking ball and bridge every
-30 s, the pile every 45 s; the tower, wheel and turntable run on), so the zone is always
+30 s, the rockfall every 30 s, the pile every 45 s; the tower, wheel and turntable run on), so the zone is always
 playing when someone walks in.
 They pause while no focus point is within 250 m.
 `physics.proving_ground.replay {"station": "dominoes"}` restarts one now (`{}` restarts all).
 `demo::VIEWS` are tour stops for the action stations: arriving restarts the station, and the
 warm-up lands on its best moment. `tests/proving_ground.rs` checks that stations replay without
 piling up bodies, that the barrel run's drums stay within 1 cm of the deck and 30 cm of their
-lanes and stop in the sand, and that the ten dummies all leave the landing and are asleep well
+lanes and stop in the sand, that the rockfall's rocks leave the chute and come to rest in a
+heap, and that the ten dummies all leave the landing and are asleep well
 before their replay (about 6.6 s; four tumble articulated, six on constraint joints).
 
 Everything in it is drawn with detailed procedural art (`src/demo/art/`): beveled meshes sized to
