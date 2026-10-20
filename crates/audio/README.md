@@ -18,22 +18,27 @@ the same grass sounds different wet, frozen, snowed on or burnt.
   speed). The ground's state (`SurfaceLayers`) changes them: wet ground
   squelches, puddles splash, snow cover crunches over whatever is under it, burnt ground
   crackles, mud freezes hard below 0 °C, and wading drags through water.
-- **Recorded footsteps** on most trail grounds (grass, snow, gravel, wood, metal, concrete,
-  sand, leaves) and rock: CC0 and CC-BY field recordings from Freesound
-  (`assets/manifests/audio.toml`, about 10 MB) are cut into about 270 single-step takes at
+- **Recorded footsteps** on most trail grounds (grass, snow, ice, gravel, wood, metal,
+  concrete, sand, leaves) and rock: CC0 and CC-BY field recordings from Freesound
+  (`assets/manifests/audio.toml`, about 19 MB) are cut into about 310 single-step takes at
   startup (on a background thread), walking and running ones apart, each levelled to the
   loudness of the synthesized step it replaces. A take ends where the step does (back at the
   recording's noise, at most 0.35 s on hard ground, where its scuff fades out, and 0.6 s on
-  soft); jumps, scrapes, odd steps and steps less than 35 dB over the recording's hiss are
-  left out, and a ground with fewer than 8 clean takes is synthesized: today mud (one
-  recording hissy, the other bright noise), ice and puddles (too much background).
+  soft); jumps, scrapes, odd steps, steps less than 35 dB over the recording's hiss and steps
+  without 0.3 s of recording before them to measure it in are left out, and a ground with
+  fewer than 8 clean takes is synthesized: today mud and puddles (every recording found has
+  too much background or hiss).
   A step plays a random take (never one of the last few), slightly re-pitched and
   re-levelled, louder and brighter for heavier and faster steps, duller when wet; the
   synthesis adds only what the recording lacks (rain's squelch, a puddle's splash, a heavy
   walker's thump) and takes over when the ground has changed too much (frozen mud) or there
-  are no takes (other grounds, paws, hooves, wheels, falling bodies, CI). Deep snow plays
-  snow whatever is under it. Rock has its own takes too; tile and asphalt borrow concrete's,
-  stone rock's and planks wood's.
+  are no takes (other grounds, wheels, falling bodies, CI). Deep snow plays snow whatever
+  is under it. Rock has its own takes too; tile and asphalt borrow concrete's, stone rock's
+  and planks wood's. Paws and hooves have folders of their own (`paws/`, `hooves/`, by
+  ground kind: hard, soft, water; hard, wood, gravel, dirt, water), cut shorter, and play
+  their takes the same way once one has 8 clean ones; none has yet, so they are
+  synthesized. A walker with `RecordedSteps { enabled: false }` always synthesizes its
+  steps.
 - **Impacts** from physics contacts (what hit what, how hard), **splashes** from
   `WaterSplash`, **explosions** from `WorldImpulse`, **bullet whizzes and supersonic cracks**
   from `ProjectileTrace` passing near the listener, **whooshes** from melee, dash and spell
@@ -175,15 +180,16 @@ character's and shows as a ring in its ground's colour.
   (`--layers` prints each footstep layer's level).
 - `cargo run -p engine_audio --release --example footstep_ab -- out/` renders the same six
   steps on every trail ground synthesized and recorded (`<ground>_ab.wav`), plus light,
-  heavy, running, rain-soaked and puddle steps with the recordings (`<ground>_response.wav`);
+  heavy, running, rain-soaked and puddle steps with the recordings (`<ground>_response.wav`),
+  and the dog's paws and the horse's hooves on each (`dog_<ground>_ab.wav`, ...);
   `--takes` writes and lists every take, with its noise floor, tail and length in `takes.csv`.
 - `tests/plugin.rs`: contacts are heard, out-of-earshot steps are skipped, space is silent,
   the trail walks every surface, walls muffle what's behind them, burning ground and burning
   things are heard, shores lap and brooks babble, sounds stay put when the world shifts,
   lightning rolls thunder late, a waterfall roars instead of dripping, engines rev and tyres
   skid, sound travels at the speed the air allows, and birds sing at dawn, hush in rain and
-  give way to owls at night, and recorded takes play where a surface has some (the
-  synthesis everywhere else). Unit tests in `samples.rs` cut fake recordings into takes and
+  give way to owls at night, and recorded takes play where a surface has some, for feet
+  and paws, unless the walker turns them off (the synthesis everywhere else). Unit tests in `samples.rs` cut fake recordings into takes and
   check the cutting and picking rules (takes end with the step, noisy steps and thin surfaces
   left out, no repeats, walk or run, snow and puddles, the fallbacks); none
   needs the fetched files. `tests/screenshot.rs` renders the trail headless.
@@ -193,7 +199,6 @@ character's and shows as a ring in its ground's colour.
 - Footsteps change from grass to mud to snow; rain gets louder with intensity; slow motion
   lowers the pitch. ✓ (all three are in the trail recording and the tests)
 
-Next: music layers; recorded takes for paws and hooves (still synthesized: boot takes
-re-pitched for a dog's and a horse's eight feet buried the trail's gaps in noise), cleaner
-recordings of mud, ice and puddles (what there is has too much hiss or background), and
-recordings for more grounds (dirt, fabric).
+Next: music layers; clean recordings of paws and hooves (every one found so far has
+farmyard, street or room noise only 20 to 30 dB under the steps), of mud and puddles, more
+variety on sand, and recordings for more grounds (dirt, fabric).

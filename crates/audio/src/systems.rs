@@ -18,6 +18,7 @@ use crate::dsp::{Noise, to_db};
 use crate::effects::{ExplosionSound, WhizSound, WhooshSound};
 use crate::footstep::{FootstepSound, Step, SurfaceSound};
 use crate::mixer::{Bus, Clock, Command, VoiceId};
+use crate::samples::RecordedSteps;
 use crate::thunder;
 use crate::{
     Audio, AudioCue, AudioListener, AudioMix, AudioSettings, FootstepSamples, FootstepSurfaces,
@@ -184,6 +185,7 @@ pub(crate) fn play_footsteps(
     settings: Res<AudioSettings>,
     scales: Query<&LocalTimeScale>,
     animated: Query<&AnimationParams>,
+    switches: Query<&RecordedSteps>,
     mut cues: MessageWriter<AudioCue>,
 ) {
     if !audio.is_running() {
@@ -225,7 +227,12 @@ pub(crate) fn play_footsteps(
             .clock(clock_for(c.entity, &scales))
             .source(c.entity)
             .reverb(0.35);
-        let recorded = if settings.recorded_footsteps {
+        // Takes unless they are off, or off for this walker.
+        let takes = settings.recorded_footsteps
+            && c.entity
+                .and_then(|e| switches.get(e).ok())
+                .is_none_or(|s| s.enabled);
+        let recorded = if takes {
             let wait = audio.is_offline();
             samples.recorded(
                 &material.name,

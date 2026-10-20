@@ -868,8 +868,8 @@ fn tone_level(samples: &[f32], hz: f32, fs: f32) -> f32 {
 
 #[test]
 fn recorded_takes_play_where_there_are_some_and_the_synthesis_everywhere_else() {
-    use engine_audio::FootstepSamples;
     use engine_audio::samples::{Gait, SampleBank, Take, TakeSet};
+    use engine_audio::{FootstepSamples, RecordedSteps};
     // A "recording" of concrete that is a 2 kHz tone burst, so it is easy to find.
     let fs = 48_000.0;
     let tone: Vec<f32> = (0..(0.25 * fs) as usize)
@@ -888,7 +888,27 @@ fn recorded_takes_play_where_there_are_some_and_the_synthesis_everywhere_else() 
         source: "tone".into(),
         stats: Default::default(),
     };
-    let heard = |surface: &str, recorded: bool| {
+    // `switch`: the walker's RecordedSteps (None: it has none); `kind`: what touches down.
+    let paw_tone: Vec<f32> = (0..(0.15 * fs) as usize)
+        .map(|i| {
+            let t = i as f32 / fs;
+            (std::f32::consts::TAU * 3_000.0 * t).sin()
+                * (t / 0.005).min((0.15 - t) / 0.005).min(1.0)
+        })
+        .collect();
+    let l = engine_audio::samples::loudness(&paw_tone, fs);
+    let paw_take = |k: f32| Take {
+        pcm: paw_tone
+            .iter()
+            .map(|v| v * k / l)
+            .collect::<Vec<_>>()
+            .into(),
+        sample_rate: fs,
+        gait: Gait::Walk,
+        source: "paw".into(),
+        stats: Default::default(),
+    };
+    let heard = |surface: &str, recorded: bool, switch: Option<bool>, kind: ContactKind| {
         let mut app = app();
         app.world.resource_mut::<AudioSettings>().recorded_footsteps = recorded;
         let mut bank = SampleBank::default();
@@ -896,33 +916,89 @@ fn recorded_takes_play_where_there_are_some_and_the_synthesis_everywhere_else() 
             "concrete".into(),
             TakeSet::new(vec![take(1.0), take(0.9), take(1.1)]),
         );
+        // The dog's paws on hard ground play a steady 3 kHz tap.
+        bank.paws.insert(
+            "hard".into(),
+            TakeSet::new(vec![paw_take(1.0), paw_take(0.9), paw_take(1.1)]),
+        );
         app.insert_resource(FootstepSamples::from_bank(bank));
         app.world
             .spawn((AudioListener::default(), Transform::from_xyz(0.0, 1.7, 0.0)));
+        let walker = match switch {
+            Some(enabled) => app.world.spawn(RecordedSteps { enabled }).id(),
+            None => app.world.spawn_empty().id(),
+        };
         let s = surface.to_string();
         let x = record(
             &mut app,
-            &format!("takes_{surface}_{recorded}"),
+            &format!("takes_{surface}_{recorded}_{switch:?}_{kind:?}"),
             40,
             |app, i| {
                 if i % 10 == 0 {
-                    step_on(app, &s, DVec3::new(0.3, 0.0, -0.5));
+                    let id = app.world.resource::<SurfaceMaterials>().id(&s);
+                    app.world.write_message(GroundContact {
+                        position: DVec3::new(0.3, 0.0, -0.5),
+                        normal: Vec3::Y,
+                        size: [0.1, 0.27],
+                        yaw: 0.0,
+                        load_kg: if kind == ContactKind::Paw { 11.0 } else { 75.0 },
+                        speed: 1.4,
+                        kind,
+                        surface: id,
+                        entity: Some(walker),
+                    });
                 }
             },
         );
         let fs = app.world.resource::<Audio>().sample_rate();
-        (tone_level(&x, 2_000.0, fs), rms(&x))
+        let hz = if kind == ContactKind::Paw {
+            3_000.0
+        } else {
+            2_000.0
+        };
+        // Levels as the takes are levelled: K-weighted loudness (a pure tone above 1.7 kHz
+        // measures 4 dB louder than its RMS), of the left channel.
+        let left: Vec<f32> = x.chunks(2).map(|f| f[0]).collect();
+        (
+            tone_level(&x, hz, fs),
+            engine_audio::samples::loudness(&left, fs),
+        )
     };
-    let (with, level) = heard("concrete", true);
-    let (without, synth_level) = heard("concrete", false);
+    let foot = ContactKind::Foot;
+    let (with, level) = heard("concrete", true, None, foot);
+    let (without, synth_level) = heard("concrete", false, None, foot);
     assert!(with > without * 2.5, "the take plays: {with} vs {without}");
     // Levelled to the synthesized step, within a few dB.
     let ratio = level / synth_level;
     assert!((0.5..2.0).contains(&ratio), "level ratio {ratio}");
     // Grass has no takes: synthesized, and no tone.
-    let (grass, grass_level) = heard("grass", true);
+    let (grass, grass_level) = heard("grass", true, None, foot);
     assert!(
         grass < with * 0.1 && grass_level > 0.001,
         "{grass} {grass_level}"
+    );
+    // A walker can be kept synthesized (as if takes were off); one that allows takes plays
+    // them.
+    let (off, off_level) = heard("concrete", true, Some(false), foot);
+    assert!(
+        (off - without).abs() <= without * 0.05 && off_level > 0.001,
+        "{off} vs {without}, {off_level}"
+    );
+    let (on, _) = heard("concrete", true, Some(true), foot);
+    assert!(on > without * 2.5, "{on} vs {without}");
+    // Paws play their own takes (a wooden floor is hard ground), levelled to the synthesized
+    // paw.
+    let paw = ContactKind::Paw;
+    let (paw_with, paw_level) = heard("wood", true, None, paw);
+    let (paw_without, paw_synth) = heard("wood", false, None, paw);
+    assert!(paw_with > paw_without * 2.5, "{paw_with} vs {paw_without}");
+    let ratio = paw_level / paw_synth;
+    assert!((0.5..2.0).contains(&ratio), "paw level ratio {ratio}");
+    // Hooves have no takes here: synthesized, as with takes off.
+    let (hoof, _) = heard("rock", true, None, ContactKind::Hoof);
+    let (hoof_synth, _) = heard("rock", false, None, ContactKind::Hoof);
+    assert!(
+        (hoof - hoof_synth).abs() <= hoof_synth * 0.05,
+        "{hoof} vs {hoof_synth}"
     );
 }

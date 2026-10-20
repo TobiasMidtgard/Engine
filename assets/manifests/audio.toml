@@ -1,7 +1,8 @@
 # Owner: Audio and footsteps. Recorded footstep takes for engine_audio (crates/audio).
 # Format and rules: AGENTS.md, "Art and large files". Fetch with `cargo run -p fetch-assets -- audio`.
 # Freesound previews (Ogg Vorbis). Without them every footstep is synthesized; with them
-# engine_audio::samples cuts each recording into single-step takes.
+# engine_audio::samples cuts each recording into single-step takes. Paws (audio/paws/<ground>/)
+# and hooves (audio/hooves/<ground>/) have none yet: no recording found was clean enough.
 
 # Mountain boots on grass: 19 walking and 22 running steps, then jumps, scrapes and scuffs (Rode NTG4+).
 [[file]]
@@ -74,6 +75,42 @@ sha256 = "69bb0080add61734dd9e0e5aae75e5cca343507ad31557fee899feecd00c0e9e"
 license = "CC-BY-4.0"
 source = "https://freesound.org/people/InspectorJ/sounds/338265/"
 author = "InspectorJ (www.jshaw.co.uk)"
+
+# Crossing a thinly snow-covered frozen lake.
+[[file]]
+path = "audio/footsteps/ice/soundslikeyukon_732880.ogg"
+url = "https://cdn.freesound.org/previews/732/732880_1544275-hq.ogg"
+sha256 = "156b182a0b03fecffbb3f9826666ecb1f2ddc45a96ecdbf49bb0734504a0b759"
+license = "CC0-1.0"
+source = "https://freesound.org/people/SoundsLikeYukon/sounds/732880/"
+author = "SoundsLikeYukon"
+
+# A foot breaking frozen puddles (96 kHz).
+[[file]]
+path = "audio/footsteps/ice/jackmenhorn_213578.ogg"
+url = "https://cdn.freesound.org/previews/213/213578_154322-hq.ogg"
+sha256 = "f46ea535c37e9289a76883ab56e4af01b2fea34fbd53a5b953d60e0da1f0d66f"
+license = "CC0-1.0"
+source = "https://freesound.org/people/KomradeJack/sounds/213578/"
+author = "JackMenhorn"
+
+# Walking on ice and snow. Credit: "waking ice and snow.mp3" by soundmary of Freesound.org.
+[[file]]
+path = "audio/footsteps/ice/soundmary_194992.ogg"
+url = "https://cdn.freesound.org/previews/194/194992_1160789-hq.ogg"
+sha256 = "a084ce1a766114635abd0bf154f86b2455509ff200c08c9168f63035fab6d7fe"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/soundmary/sounds/194992/"
+author = "soundmary"
+
+# Cold mud under a thin layer of ice (96 kHz).
+[[file]]
+path = "audio/footsteps/ice/wwstudioswastaken_624164.ogg"
+url = "https://cdn.freesound.org/previews/624/624164_13582756-hq.ogg"
+sha256 = "4d89c7080abc49e51b09d75ff175fdc25d966559e0612675a97fe1c217fb4a03"
+license = "CC0-1.0"
+source = "https://freesound.org/people/wwstudioswastaken/sounds/624164/"
+author = "wwstudioswastaken"
 
 # Mountain boots on gravel: 11 walking and 10 running steps, then jumps, scrapes and scuffs.
 [[file]]
@@ -191,6 +228,42 @@ sha256 = "6235f89e5145741e40b7de98d6f24cdb512bea3f824e9f633f2015c1e8e1146c"
 license = "CC0-1.0"
 source = "https://freesound.org/people/SpliceSound/sounds/218305/"
 author = "SpliceSound"
+
+# Walking on dry broadleaved woodland leaves. Credit: "Walking On Dry Leaves.wav" by Benboncan of Freesound.org.
+[[file]]
+path = "audio/footsteps/leaves/benboncan_66631.ogg"
+url = "https://cdn.freesound.org/previews/66/66631_634166-hq.ogg"
+sha256 = "718419e8dd606ba04f01e801999e91eb38319548425277487dacfb0ff226c69f"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/Benboncan/sounds/66631/"
+author = "Benboncan"
+
+# Footsteps on dry leaves outdoors.
+[[file]]
+path = "audio/footsteps/leaves/spenceomatic_119765.ogg"
+url = "https://cdn.freesound.org/previews/119/119765_2123118-hq.ogg"
+sha256 = "02c7859f2ab46b30fc18d92298772347ab00485ed3dd4b7465e53e601f116985"
+license = "CC0-1.0"
+source = "https://freesound.org/people/spenceomatic/sounds/119765/"
+author = "spenceomatic"
+
+# Walking through dry leaves in a forest. Credit: "DryLeavesWalk.wav" by HerbertBoland of Freesound.org.
+[[file]]
+path = "audio/footsteps/leaves/herbertboland_33207.ogg"
+url = "https://cdn.freesound.org/previews/33/33207_129090-hq.ogg"
+sha256 = "c6d648c42443d313ad6fe0fd6862e5b1f99e6622d9fecec77ee58bc5973ec0ed"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/HerbertBoland/sounds/33207/"
+author = "HerbertBoland"
+
+# Walking boots in dry leaves and fern (MKH416). Credit: "Footsteps_Walking Boot_Dry Leaves-Fern-Crunch.wav" by omnisounddesign of Freesound.org.
+[[file]]
+path = "audio/footsteps/leaves/omnisounddesign_336844.ogg"
+url = "https://cdn.freesound.org/previews/336/336844_5903232-hq.ogg"
+sha256 = "7b759414c9808b416ee8a5f9f776c7867839329bbe920cc943da69a63050591d"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/omnisounddesign/sounds/336844/"
+author = "omnisounddesign"
 
 # A splash into a puddle, then steps through it.
 [[file]]

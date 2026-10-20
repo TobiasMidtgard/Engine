@@ -17,8 +17,16 @@
 //! but only what the recording lacks: the squelch of wet ground, a puddle's splash, a heavy
 //! walker's thump, a snow crust's squeak. A surface with no takes, or a missing folder, falls
 //! back to the synthesis alone, so nothing needs the fetched files (CI never fetches them).
-//! The takes are people's shoes and boots, so only feet play them; paws and hooves are
-//! synthesized.
+//!
+//! Shoes and boots, a dog's paws and a horse's hooves each have their own recordings
+//! ([`Feet`]): `fetched/audio/footsteps/<surface>/`, `fetched/audio/paws/<ground>/` and
+//! `fetched/audio/hooves/<ground>/`. Animals are recorded on far fewer grounds, so their
+//! folders are kinds of ground (`hard`, `soft`, `wood`, `gravel`, ...) that several surfaces
+//! share, each recorded on one surface ([`Feet::recorded_on`]); the synthesis on top adds what
+//! the step's own surface has beyond that one (a dog's paw take from a wooden floor, played
+//! on rock, gets rock's grit synthesized over it). Their takes are cut shorter (a paw is a
+//! tap, a hoof a clop), so four feet don't fill the gaps between steps with noise. A walker
+//! with [`RecordedSteps`] `{ enabled: false }` is always synthesized.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -34,6 +42,142 @@ use crate::footstep::{FootstepSurfaces, Step, SurfaceSound, smooth};
 /// Folder under the asset root that holds one subfolder of recordings per surface material
 /// (`<root>/fetched/audio/footsteps/gravel/*.ogg`).
 pub const SAMPLE_DIR: &str = "fetched/audio/footsteps";
+
+/// Folder under the asset root that holds every kind of [`Feet`]'s folder
+/// (`<root>/fetched/audio/{footsteps,paws,hooves}/`).
+pub const AUDIO_DIR: &str = "fetched/audio";
+
+/// Which recordings a contact plays: people's shoes, a dog's paws or a horse's hooves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Feet {
+    Shoes,
+    Paws,
+    Hooves,
+}
+
+impl Feet {
+    /// Every kind, in folder order.
+    pub const ALL: [Feet; 3] = [Feet::Shoes, Feet::Paws, Feet::Hooves];
+
+    /// The recordings a contact plays (`None`: wheels, tracks and falling bodies, which are
+    /// always synthesized).
+    pub fn of(kind: ContactKind) -> Option<Self> {
+        match kind {
+            ContactKind::Foot => Some(Feet::Shoes),
+            ContactKind::Paw => Some(Feet::Paws),
+            ContactKind::Hoof => Some(Feet::Hooves),
+            _ => None,
+        }
+    }
+
+    /// Its folder under [`AUDIO_DIR`].
+    pub fn folder(self) -> &'static str {
+        match self {
+            Feet::Shoes => "footsteps",
+            Feet::Paws => "paws",
+            Feet::Hooves => "hooves",
+        }
+    }
+
+    /// The folder (of this kind's) whose takes a step on `surface` plays: the surface itself
+    /// for shoes (or the one it borrows from, like `tile` from `concrete`), the kind of ground
+    /// for paws and hooves. `None` for a surface no folder covers.
+    pub fn ground(self, surface: &str) -> Option<&str> {
+        match self {
+            Feet::Shoes => Some(surface),
+            Feet::Paws => Some(match surface {
+                "water" => "water",
+                "wood" | "planks" | "tile" | "concrete" | "asphalt" | "rock" | "stone"
+                | "metal" | "ice" | "glass" => "hard",
+                "grass" | "dirt" | "soil" | "moss" | "leaves" | "sand" | "mud" | "snow"
+                | "gravel" | "ash" | "fabric" | "carpet" => "soft",
+                _ => return None,
+            }),
+            Feet::Hooves => Some(match surface {
+                "wood" | "planks" => "wood",
+                "gravel" => "gravel",
+                "concrete" | "asphalt" | "tile" | "rock" | "stone" | "metal" | "ice" => "hard",
+                "grass" | "dirt" | "soil" | "moss" | "leaves" | "sand" | "mud" | "snow" | "ash" => {
+                    "dirt"
+                }
+                "water" => "water",
+                _ => return None,
+            }),
+        }
+    }
+
+    /// The surface the recordings in `folder` were made on, whose [`SurfaceSound`] the
+    /// synthesis on top is measured against: the folder itself for shoes; a wooden floor for
+    /// paws on hard ground, a lawn for soft, a road for hooves on hard ground, a dirt track
+    /// for soft.
+    pub fn recorded_on(self, folder: &str) -> &str {
+        match (self, folder) {
+            (Feet::Paws, "hard") => "wood",
+            (Feet::Paws, "soft") => "grass",
+            (Feet::Hooves, "hard") => "asphalt",
+            (Feet::Hooves, "dirt") => "dirt",
+            _ => folder,
+        }
+    }
+
+    /// How hard ([`Step::intensity`]) the steps in this kind's recordings are: a 75 kg
+    /// person walking, one paw of a 22 kg dog and one hoof of a 500 kg horse at a walk (half
+    /// the weight on each foot that lands).
+    pub fn recorded_intensity(self) -> f32 {
+        match self {
+            Feet::Shoes => 1.0,
+            Feet::Paws => 0.43,
+            Feet::Hooves => 2.0,
+        }
+    }
+
+    /// How this kind's recordings are cut into takes.
+    fn cutter(self, folder: &str) -> Cutter {
+        match self {
+            Feet::Shoes => Cutter::SHOES.with_max(max_take_s(folder)),
+            // A paw lands every 0.1-0.2 s at a trot: taps, cut short.
+            Feet::Paws => Cutter {
+                min_gap_ms: Some(70),
+                look_ms: 60,
+                peak_ms: 40,
+                min_len_ms: 30,
+                max_rise_ms: 25,
+                settle_ms: 15,
+                max_s: 0.15,
+                tail: Some((0.05, 0.04)),
+            },
+            Feet::Hooves => Cutter {
+                min_gap_ms: Some(110),
+                look_ms: 90,
+                peak_ms: 70,
+                min_len_ms: 50,
+                max_rise_ms: 40,
+                settle_ms: 25,
+                max_s: if matches!(folder, "dirt" | "gravel") {
+                    0.3
+                } else {
+                    0.25
+                },
+                tail: Some((0.09, 0.07)),
+            },
+        }
+    }
+}
+
+/// Per walker: whether its steps may play recorded takes (`enabled`, the default) or are
+/// always synthesized. Takes also need [`crate::AudioSettings::recorded_footsteps`] on and the
+/// recordings fetched.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecordedSteps {
+    pub enabled: bool,
+}
+
+impl Default for RecordedSteps {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
 
 /// How a take was walked, so running steps pick running takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,116 +276,163 @@ impl TakeSet {
     }
 }
 
-/// Every surface's takes, keyed by surface material name.
+/// Every surface's takes: shoes keyed by surface material name, paws and hooves by kind of
+/// ground ([`Feet::ground`]).
 #[derive(Debug, Clone, Default)]
 pub struct SampleBank {
+    /// Shoes and boots.
     pub surfaces: BTreeMap<String, TakeSet>,
+    pub paws: BTreeMap<String, TakeSet>,
+    pub hooves: BTreeMap<String, TakeSet>,
 }
 
 impl SampleBank {
-    /// Load every recording under `dir` (`<dir>/<surface>/*.ogg|*.wav`). A missing or empty
-    /// folder gives an empty bank; a file that doesn't decode is skipped with a warning.
+    /// Load every shoe recording under `dir` (`<dir>/<surface>/*.ogg|*.wav`). A missing or
+    /// empty folder gives an empty bank; a file that doesn't decode is skipped with a warning.
     pub fn load(dir: &Path) -> Self {
-        let mut files: Vec<(String, PathBuf)> = Vec::new();
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return Self::default();
+        Self {
+            surfaces: load_sets(dir, Feet::Shoes),
+            ..Default::default()
+        }
+    }
+
+    /// Load every kind's recordings under `dir` (usually `<asset root>/`[`AUDIO_DIR`]): its
+    /// `footsteps`, `paws` and `hooves` folders.
+    pub fn load_all(dir: &Path) -> Self {
+        Self {
+            surfaces: load_sets(&dir.join(Feet::Shoes.folder()), Feet::Shoes),
+            paws: load_sets(&dir.join(Feet::Paws.folder()), Feet::Paws),
+            hooves: load_sets(&dir.join(Feet::Hooves.folder()), Feet::Hooves),
+        }
+    }
+
+    /// One kind's takes, by folder name.
+    pub fn sets(&self, feet: Feet) -> &BTreeMap<String, TakeSet> {
+        match feet {
+            Feet::Shoes => &self.surfaces,
+            Feet::Paws => &self.paws,
+            Feet::Hooves => &self.hooves,
+        }
+    }
+
+    fn sets_mut(&mut self, feet: Feet) -> &mut BTreeMap<String, TakeSet> {
+        match feet {
+            Feet::Shoes => &mut self.surfaces,
+            Feet::Paws => &mut self.paws,
+            Feet::Hooves => &mut self.hooves,
+        }
+    }
+
+    /// The folder whose takes `feet` play on `surface`, if it has takes.
+    pub fn folder_for(&self, feet: Feet, surface: &str) -> Option<&str> {
+        let sets = self.sets(feet);
+        let g = feet.ground(surface)?;
+        if let Some((k, _)) = sets.get_key_value(g) {
+            return Some(k);
+        }
+        let a = if feet == Feet::Shoes {
+            alias(g)?
+        } else {
+            None?
         };
-        for surface in entries.flatten() {
-            let Ok(inner) = std::fs::read_dir(surface.path()) else {
-                continue;
-            };
-            let name = surface.file_name().to_string_lossy().into_owned();
-            for f in inner.flatten() {
-                let p = f.path();
-                if matches!(p.extension().and_then(|e| e.to_str()), Some("ogg" | "wav")) {
-                    files.push((name.clone(), p));
-                }
-            }
-        }
-        files.sort();
-        // Decode on a few threads (a minute of Vorbis takes a while in a debug build).
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(2)
-            .clamp(1, 4);
-        let chunks: Vec<&[(String, PathBuf)]> =
-            files.chunks(files.len().div_ceil(workers).max(1)).collect();
-        let cut: Vec<Vec<(String, Vec<Take>)>> = std::thread::scope(|s| {
-            let handles: Vec<_> = chunks
-                .iter()
-                .map(|chunk| {
-                    s.spawn(move || {
-                        chunk
-                            .iter()
-                            .filter_map(|(surface, path)| match decode(path) {
-                                Ok((x, sr)) => {
-                                    let stem = path
-                                        .file_stem()
-                                        .map(|s| s.to_string_lossy().into_owned())
-                                        .unwrap_or_default();
-                                    Some((
-                                        surface.clone(),
-                                        takes_from_recording(&stem, surface, &x, sr),
-                                    ))
-                                }
-                                Err(e) => {
-                                    engine_core::log::warn!(
-                                        "audio: skipping footstep recording {}: {e}",
-                                        path.display()
-                                    );
-                                    None
-                                }
-                            })
-                            .collect()
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().unwrap_or_default())
-                .collect()
-        });
-        let mut bank = Self::default();
-        for (surface, takes) in cut.into_iter().flatten() {
-            bank.surfaces
-                .entry(surface)
-                .or_default()
-                .takes
-                .extend(takes);
-        }
-        // A surface with too few clean takes is synthesized.
-        bank.surfaces.retain(|_, t| t.takes.len() >= MIN_TAKES);
-        for set in bank.surfaces.values_mut() {
-            match_sources(&mut set.takes);
-        }
-        bank
+        sets.get_key_value(a).map(|(k, _)| k.as_str())
+    }
+
+    /// Takes `feet` play on `surface` (see [`Feet::ground`]).
+    pub fn takes_for(&self, feet: Feet, surface: &str) -> Option<&TakeSet> {
+        let f = self.folder_for(feet, surface)?;
+        self.sets(feet).get(f)
     }
 
     /// Takes for a surface material name (or the surface it borrows them from, like `tile`
     /// from `concrete` and `stone` from `rock`).
     pub fn takes(&self, surface: &str) -> Option<&TakeSet> {
-        self.surfaces
-            .get(surface)
-            .or_else(|| self.surfaces.get(alias(surface)?))
+        self.takes_for(Feet::Shoes, surface)
     }
 
-    fn takes_mut(&mut self, surface: &str) -> Option<&mut TakeSet> {
-        let key = if self.surfaces.contains_key(surface) {
-            surface
-        } else {
-            alias(surface)?
-        };
-        self.surfaces.get_mut(key)
-    }
-
-    /// Total takes over all surfaces.
+    /// Total takes over all surfaces and kinds.
     pub fn len(&self) -> usize {
-        self.surfaces.values().map(|t| t.takes.len()).sum()
+        Feet::ALL
+            .iter()
+            .flat_map(|f| self.sets(*f).values())
+            .map(|t| t.takes.len())
+            .sum()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// Load one kind's recordings: `<dir>/<folder>/*.ogg|*.wav`, cut, the folders left with too
+/// few takes dropped and the rest's recordings brought to a common tone.
+fn load_sets(dir: &Path, feet: Feet) -> BTreeMap<String, TakeSet> {
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return BTreeMap::new();
+    };
+    for folder in entries.flatten() {
+        let Ok(inner) = std::fs::read_dir(folder.path()) else {
+            continue;
+        };
+        let name = folder.file_name().to_string_lossy().into_owned();
+        for f in inner.flatten() {
+            let p = f.path();
+            if matches!(p.extension().and_then(|e| e.to_str()), Some("ogg" | "wav")) {
+                files.push((name.clone(), p));
+            }
+        }
+    }
+    files.sort();
+    // Decode on a few threads (a minute of Vorbis takes a while in a debug build).
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(1, 4);
+    let chunks: Vec<&[(String, PathBuf)]> =
+        files.chunks(files.len().div_ceil(workers).max(1)).collect();
+    let cut: Vec<Vec<(String, Vec<Take>)>> = std::thread::scope(|s| {
+        let handles: Vec<_> = chunks
+            .iter()
+            .map(|chunk| {
+                s.spawn(move || {
+                    chunk
+                        .iter()
+                        .filter_map(|(folder, path)| match decode(path) {
+                            Ok((x, sr)) => {
+                                let stem = path
+                                    .file_stem()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                                Some((folder.clone(), cut_recording(feet, &stem, folder, &x, sr)))
+                            }
+                            Err(e) => {
+                                engine_core::log::warn!(
+                                    "audio: skipping footstep recording {}: {e}",
+                                    path.display()
+                                );
+                                None
+                            }
+                        })
+                        .collect()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_default())
+            .collect()
+    });
+    let mut sets: BTreeMap<String, TakeSet> = BTreeMap::new();
+    for (folder, takes) in cut.into_iter().flatten() {
+        sets.entry(folder).or_default().takes.extend(takes);
+    }
+    // A surface with too few clean takes is synthesized.
+    sets.retain(|_, t| t.takes.len() >= MIN_TAKES);
+    for set in sets.values_mut() {
+        match_sources(&mut set.takes);
+    }
+    sets
 }
 
 /// Bring the recordings of one surface halfway to a common tone, so that consecutive steps
@@ -434,6 +625,8 @@ const PARTS: &[(&str, Parts)] = &[
     // Walks whose steps have quiet halves (heel, then a louder toe or crunch), which would
     // otherwise look like a quick run.
     ("inspectorj_338265", &[(0.0, 61.0, Part::Walk)]),
+    // Stamping through frozen puddles: steps a stride apart, however close the cracks.
+    ("jackmenhorn_213578", &[(0.0, 100.6, Part::Walk)]),
     ("vlatkoblazek_260979", &[(0.0, 13.3, Part::Walk)]),
     ("nox_sound_613849", &[(0.0, 11.3, Part::Walk)]),
     ("vrymaa_773736", &[(0.0, 68.7, Part::Walk)]),
@@ -485,8 +678,56 @@ pub fn max_take_s(surface: &str) -> f32 {
 /// sustained scuff, the room) dies away instead of standing 20 dB under the click.
 const HARD_TAIL_S: (f32, f32) = (0.15, 0.15);
 
-/// Cut a recording of steps on `surface` into takes (see the [module docs](self)).
+/// How one kind of recording is cut into steps (all times in ms of the 1 ms envelope).
+#[derive(Debug, Clone, Copy)]
+struct Cutter {
+    /// Fixed least time between onsets; `None` takes 60 % of the step period found in the
+    /// recording (180-700 ms).
+    min_gap_ms: Option<usize>,
+    /// How far back the 9 dB jump of an onset is measured from (`None` gap: half of it).
+    look_ms: usize,
+    /// Where a step's peak is looked for after its onset.
+    peak_ms: usize,
+    /// Shortest step.
+    min_len_ms: usize,
+    /// Slowest rise to within 6 dB of the peak: slower is a scrape or shuffle.
+    max_rise_ms: usize,
+    /// How long the envelope stays down before the step counts as over.
+    settle_ms: usize,
+    /// Longest take, s.
+    max_s: f32,
+    /// After how long (s) every take fades, and its time constant (s); `None` only on hard
+    /// ground ([`HARD_TAIL_S`]).
+    tail: Option<(f32, f32)>,
+}
+
+impl Cutter {
+    const SHOES: Cutter = Cutter {
+        min_gap_ms: None,
+        look_ms: 80,
+        peak_ms: 150,
+        min_len_ms: 90,
+        max_rise_ms: 100,
+        settle_ms: 50,
+        max_s: 0.6,
+        tail: None,
+    };
+
+    fn with_max(self, max_s: f32) -> Self {
+        Self { max_s, ..self }
+    }
+}
+
+/// Cut a recording of shoes or boots on `surface` into takes (see the [module docs](self)).
 pub fn takes_from_recording(name: &str, surface: &str, x: &[f32], sr: f32) -> Vec<Take> {
+    cut_recording(Feet::Shoes, name, surface, x, sr)
+}
+
+/// Cut a recording of `feet` in `folder` (a surface, or a kind of ground for animals) into
+/// takes (see the [module docs](self)).
+pub fn cut_recording(feet: Feet, name: &str, folder: &str, x: &[f32], sr: f32) -> Vec<Take> {
+    let cutter = feet.cutter(folder);
+    let surface = folder;
     let parts: Vec<(f32, f32, Part)> = PARTS
         .iter()
         .find(|(n, _)| *n == name)
@@ -502,12 +743,14 @@ pub fn takes_from_recording(name: &str, surface: &str, x: &[f32], sr: f32) -> Ve
         let a = ((a * sr) as usize).min(x.len());
         let b = ((b * sr) as usize).min(x.len());
         if b > a {
-            let max_s = max_take_s(surface);
+            // With the 0.3 s before the part, so its first step's noise can be measured.
+            let from = a.saturating_sub((NOISE_WINDOW_S * sr) as usize);
+            let lead_ms = ((a - from) as f32 / sr * 1000.0) as usize;
             cuts.extend(
-                cut_steps(&x[a..b], sr, part, max_s)
+                cut_steps(&x[from..b], sr, part, &cutter, lead_ms)
                     .into_iter()
                     .map(|mut c| {
-                        c.range = a + c.range.start..a + c.range.end;
+                        c.range = from + c.range.start..from + c.range.end;
                         c
                     }),
             );
@@ -532,8 +775,10 @@ pub fn takes_from_recording(name: &str, surface: &str, x: &[f32], sr: f32) -> Ve
         for c in of {
             let mut pcm = x[c.range.clone()].to_vec();
             expand(&mut pcm, c.floor_db, sr);
-            if hard_ground(surface) {
-                let (start, tau) = HARD_TAIL_S;
+            let tail = cutter
+                .tail
+                .or_else(|| hard_ground(surface).then_some(HARD_TAIL_S));
+            if let Some((start, tau)) = tail {
                 let from = ((ONSET_PAD_S + start) * sr) as usize;
                 for (j, v) in pcm.iter_mut().enumerate().skip(from) {
                     *v *= (-((j - from) as f32) / (tau * sr)).exp();
@@ -691,10 +936,14 @@ fn step_period(d10: &[f32], top: f32) -> Option<f32> {
 /// Find the steps in a recording: each starts where the 10 ms envelope jumps by more than
 /// 9 dB over its level since the last step, at most once per 60 % of the step period, and
 /// ends once the envelope has fallen to within 6 dB of the noise before the step, or 40 dB
-/// under its peak, and stayed there (at most `max_s` long). Steps much quieter or louder
+/// under its peak, and stayed there (at most `c.max_s` long). Steps much quieter or louder
 /// than the median, too short, too noisy ([`MIN_SNR_DB`]) or swelling slowly (scrapes) are
-/// dropped.
-fn cut_steps(x: &[f32], sr: f32, part: Part, max_s: f32) -> Vec<Cut> {
+/// dropped, and so are steps without a full [`NOISE_WINDOW_S`] of recording before them to
+/// measure the noise in (the first step of a file, or the first after digital silence that
+/// only opens the file): their noise can't be told. Onsets in the first `lead_ms` (the
+/// recording before the part) are only context. Animals' paws and hooves use their own,
+/// shorter times ([`Cutter`]).
+fn cut_steps(x: &[f32], sr: f32, part: Part, c: &Cutter, lead_ms: usize) -> Vec<Cut> {
     let hop = (sr * 0.001).max(1.0) as usize;
     // High-passed envelope in dB at 1 ms hops.
     let mut hp = Biquad::highpass(sr, 60.0, 0.7);
@@ -731,10 +980,18 @@ fn cut_steps(x: &[f32], sr: f32, part: Part, max_s: f32) -> Vec<Cut> {
         Part::Run => found.unwrap_or(0.33).clamp(0.25, 0.5),
         Part::Steps => found.unwrap_or(0.55),
     };
-    let min_gap = ((period * 600.0) as usize).clamp(180, 700);
-    let look = (min_gap / 2).max(80);
+    let (min_gap, look) = match c.min_gap_ms {
+        Some(gap) => (gap, c.look_ms),
+        None => {
+            let gap = ((period * 600.0) as usize).clamp(180, 700);
+            (gap, (gap / 2).max(c.look_ms))
+        }
+    };
+    // Where the recording starts: after any digital silence it opens with.
+    let opens = d10.iter().position(|v| *v > -120.0).unwrap_or(d10.len());
+    let measurable = opens + (NOISE_WINDOW_S * 1000.0) as usize;
     let mut onsets: Vec<usize> = Vec::new();
-    let mut k = 5;
+    let mut k = lead_ms.max(5);
     while k < d10.len() {
         let from = k
             .saturating_sub(look)
@@ -763,14 +1020,16 @@ fn cut_steps(x: &[f32], sr: f32, part: Part, max_s: f32) -> Vec<Cut> {
         }
         k += 1;
     }
-    let max_len = ((period * 1100.0) as usize)
-        .clamp(250, 700)
-        .min((max_s * 1000.0) as usize);
+    let max_ms = (c.max_s * 1000.0) as usize;
+    let max_len = match c.min_gap_ms {
+        Some(_) => max_ms,
+        None => ((period * 1100.0) as usize).clamp(250, 700).min(max_ms),
+    };
     let pad = (ONSET_PAD_S * 1000.0) as usize;
     let gait = match part {
         Part::Walk => Gait::Walk,
         Part::Run => Gait::Run,
-        Part::Steps if period < 0.42 => Gait::Run,
+        Part::Steps if period < 0.42 && c.min_gap_ms.is_none() => Gait::Run,
         Part::Steps => Gait::Walk,
     };
     let mut steps = Vec::new();
@@ -780,11 +1039,12 @@ fn cut_steps(x: &[f32], sr: f32, part: Part, max_s: f32) -> Vec<Cut> {
         if limit <= o + 20 {
             continue;
         }
-        let peak = d10[o..(o + 150).min(limit)]
+        let peak = d10[o..(o + c.peak_ms).min(limit)]
             .iter()
             .fold(f32::MIN, |m, v| m.max(*v));
         // The step is over once the envelope has fallen to just over the noise before it (or
-        // 40 dB under the peak) and stayed down for 50 ms: what follows is the recording's
+        // 40 dB under the peak) and stayed down for 50 ms (less for a paw or a hoof): what
+        // follows is the recording's
         // hiss, wind or room, not the step.
         let noise = noise_before(&d10, o);
         let quiet = (noise + 6.0).max(peak - 40.0);
@@ -793,7 +1053,7 @@ fn cut_steps(x: &[f32], sr: f32, part: Part, max_s: f32) -> Vec<Cut> {
         for (j, &level) in d10.iter().enumerate().take(limit).skip(o + 10) {
             if level < quiet {
                 below += 1;
-                if below >= 50 {
+                if below >= c.settle_ms {
                     end = j + 1 - below;
                     break;
                 }
@@ -801,10 +1061,10 @@ fn cut_steps(x: &[f32], sr: f32, part: Part, max_s: f32) -> Vec<Cut> {
                 below = 0;
             }
         }
-        let end = (end.max(o + 80) + 15).min(limit);
+        let end = (end.max(o + c.min_len_ms.saturating_sub(10)) + 15).min(limit);
         // Slow swells (a scrape, a shuffle) are not steps: nothing near the peak comes early.
         // (A step's toe or compaction may well be louder than its heel.)
-        let rise = (o..(o + 150).min(limit))
+        let rise = (o..(o + c.peak_ms).min(limit))
             .position(|j| d10[j] >= peak - 6.0)
             .unwrap_or(0);
         steps.push((o, end, peak, rise, noise));
@@ -818,8 +1078,9 @@ fn cut_steps(x: &[f32], sr: f32, part: Part, max_s: f32) -> Vec<Cut> {
     steps
         .into_iter()
         .filter(|&(o, end, peak, rise, noise)| {
-            end - o >= 90
-                && rise <= 100
+            o >= measurable
+                && end - o >= c.min_len_ms
+                && rise <= c.max_rise_ms
                 && peak > median - 10.0
                 && peak < median + 8.0
                 && peak - noise >= MIN_SNR_DB
@@ -838,11 +1099,14 @@ fn cut_steps(x: &[f32], sr: f32, part: Part, max_s: f32) -> Vec<Cut> {
         .collect()
 }
 
+/// How much recording before a step its noise is measured over, s.
+pub const NOISE_WINDOW_S: f32 = 0.3;
+
 /// The recording's noise just before onset `o`: the quietest tenth of the 10 ms envelope
-/// `d10` (1 ms hops) over the 0.3 s before it, dB (-140 in digital silence, and a step at the
-/// very start of a recording counts as clean).
+/// `d10` (1 ms hops) over the [`NOISE_WINDOW_S`] before it, dB (-140 in digital silence).
 fn noise_before(d10: &[f32], o: usize) -> f32 {
-    let mut before = d10[o.saturating_sub(300)..o.saturating_sub(5)].to_vec();
+    let w = (NOISE_WINDOW_S * 1000.0) as usize;
+    let mut before = d10[o.saturating_sub(w)..o.saturating_sub(5)].to_vec();
     before.sort_by(f32::total_cmp);
     before.get(before.len() / 10).copied().unwrap_or(-140.0)
 }
@@ -990,14 +1254,15 @@ impl FootstepSamples {
         }
     }
 
-    /// Start loading `dir` (usually `<asset root>/`[`SAMPLE_DIR`]) on a background thread.
+    /// Start loading `dir` (usually `<asset root>/`[`AUDIO_DIR`], see
+    /// [`SampleBank::load_all`]) on a background thread.
     pub fn start_loading(&mut self, dir: PathBuf) {
         let (tx, rx) = bounded(1);
         let d = dir.clone();
         let spawned = std::thread::Builder::new()
             .name("footstep-samples".into())
             .spawn(move || {
-                let _ = tx.send(SampleBank::load(&d));
+                let _ = tx.send(SampleBank::load_all(&d));
             });
         self.dir = Some(dir);
         self.load = match spawned {
@@ -1037,9 +1302,12 @@ impl FootstepSamples {
                 );
             } else {
                 engine_core::log::info!(
-                    "audio: {} recorded footstep takes on {} surfaces from {dir}",
+                    "audio: {} recorded footstep takes from {dir}: shoes on {} surfaces, \
+                     paws on {} kinds of ground, hooves on {}",
                     bank.len(),
-                    bank.surfaces.len()
+                    bank.surfaces.len(),
+                    bank.paws.len(),
+                    bank.hooves.len()
                 );
             }
             self.load = Load::Ready(bank);
@@ -1050,13 +1318,21 @@ impl FootstepSamples {
         }
     }
 
-    /// Takes per surface, for status reports (empty while loading).
+    /// Takes per surface, for status reports (empty while loading): shoes by surface name,
+    /// paws and hooves as `paws/<ground>` and `hooves/<ground>`.
     pub fn summary(&self) -> BTreeMap<String, usize> {
         match &self.load {
-            Load::Ready(b) => b
-                .surfaces
+            Load::Ready(b) => Feet::ALL
                 .iter()
-                .map(|(k, v)| (k.clone(), v.takes.len()))
+                .flat_map(|f| {
+                    b.sets(*f).iter().map(move |(k, v)| {
+                        let name = match f {
+                            Feet::Shoes => k.clone(),
+                            _ => format!("{}/{k}", f.folder()),
+                        };
+                        (name, v.takes.len())
+                    })
+                })
                 .collect(),
             _ => BTreeMap::new(),
         }
@@ -1064,7 +1340,9 @@ impl FootstepSamples {
 
     /// How a footstep on `material` sounds with a recording: the take to play, and the step
     /// for the synthesized layers on top (only what the recording lacks). `None` when there
-    /// is no fitting take, so the step is synthesized whole.
+    /// is no fitting take, so the step is synthesized whole. Shoes, paws and hooves each play
+    /// their own recordings ([`Feet`]); wheels, tracks and falling bodies are always
+    /// synthesized.
     ///
     /// `step` is the step as it would be synthesized (its surface already changed by the
     /// ground's state), `dry` the material's own sound, `cell` and `wading_m` the ground's
@@ -1081,53 +1359,65 @@ impl FootstepSamples {
         fs: f32,
         wait: bool,
     ) -> Option<(Step, StepSample)> {
-        // Only feet: the takes are boots. Played for a dog's four paws or a horse's four
-        // hooves (re-pitched), their half-second takes filled every gap between steps on the
-        // trail with a bed of noise and sounded like boots anyway, so paws, hooves, wheels,
-        // tracks and falling bodies stay synthesized until there are recordings of them.
-        if step.kind != ContactKind::Foot {
-            return None;
-        }
+        let feet = Feet::of(step.kind)?;
         // What the ground sounds like now decides which recordings fit: deep fresh snow
         // covers anything, and a puddle (or wading) is water whatever is under it.
         let snow = surfaces.snow();
         let cover = smooth(0.005, 0.07, cell.snow_m);
         let puddle = smooth(0.002, 0.03, cell.puddle_m);
+        let sound_of = |name: &str| {
+            surfaces
+                .surfaces
+                .get(name)
+                .copied()
+                .or_else(|| SurfaceSound::preset(name))
+                .unwrap_or_default()
+        };
         let (name, base) = if cover >= 0.5 && dry.crunch < snow.crunch {
             ("snow".to_string(), snow)
         } else if (puddle >= 0.5 || wading_m > 0.05) && material != "water" {
-            let water = surfaces
-                .surfaces
-                .get("water")
-                .copied()
-                .or_else(|| SurfaceSound::preset("water"))
-                .unwrap_or_default();
-            ("water".to_string(), water)
+            ("water".to_string(), sound_of("water"))
         } else {
             (material.to_string(), *dry)
         };
+        let folder = self.bank(wait)?.folder_for(feet, &name)?.to_string();
+        // The surface the recording was made on: for shoes the one it plays on (or its
+        // look-alike); for animals the one their kind of ground was recorded on.
+        let recorded = if feet == Feet::Shoes {
+            base
+        } else {
+            sound_of(feet.recorded_on(&folder))
+        };
         let state = step.surface;
-        let kept = state.kept(&base);
+        let kept = state.kept(&recorded);
         if kept < 0.4 {
-            // The ground has changed too much (frozen mud is not mud): synthesize it.
+            // The ground has changed too much (frozen mud is not mud, gravel is not a lawn):
+            // synthesize it.
             return None;
         }
-        self.bank(wait)?.takes(&name)?;
-        let reference = self.reference_loudness(&name, &base, fs);
+        let reference = self.reference_loudness(feet, step.kind, &name, &base, fs);
         let bank = self.bank(false)?;
         let mut rng = Noise::new(step.seed ^ 0x5EED_FA11_0F57_E950);
         let run = ((0.11 - step.roll) / 0.06).clamp(0.0, 1.0);
-        let take = bank.takes_mut(&name)?.pick(run, &mut rng)?.clone();
+        let take = bank
+            .sets_mut(feet)
+            .get_mut(&folder)?
+            .pick(run, &mut rng)?
+            .clone();
 
         let i = step.intensity.max(0.05);
-        // The synthesized level law (gain ∝ i^0.8, strikes ∝ √i up to 2) and its loudness at
-        // the reference step (75 kg walking, i = 1), plus ±1.5 dB per step.
-        let level = i.powf(0.8) * i.min(2.0).sqrt();
-        let gain = reference * level * kept.sqrt() * db(rng.range(-1.5, 1.5));
+        // The synthesized level law (gain ∝ i^0.8, strikes ∝ √i up to 2) from its loudness at
+        // the reference step (the walker the recordings are of: a 75 kg person, one paw of a
+        // 22 kg dog, one hoof of a 500 kg horse), plus ±1.5 dB per step.
+        let law = |i: f32| i.powf(0.8) * i.min(2.0).sqrt();
+        let i0 = feet.recorded_intensity();
+        let gain = reference * law(i) / law(i0) * kept.sqrt() * db(rng.range(-1.5, 1.5));
+        // Tone follows how hard the step is against that walker's.
+        let i_rel = i / i0;
         let pitch = (state.pitch / base.pitch.max(0.05)).clamp(0.7, 1.4);
         let speed = pitch * 2f32.powf(rng.range(-0.6, 0.6) / 12.0);
         let tone = state.brightness / base.brightness.max(0.05);
-        let shelf_db = (4.5 * i.log2()).clamp(-6.0, 4.0) + (8.0 * tone.log2()).clamp(-9.0, 3.0);
+        let shelf_db = (4.5 * i_rel.log2()).clamp(-6.0, 4.0) + (8.0 * tone.log2()).clamp(-9.0, 3.0);
         let lowpass_hz = if tone < 1.0 {
             (20_000.0 * tone.powf(2.5)).max(1_200.0)
         } else {
@@ -1135,8 +1425,8 @@ impl FootstepSamples {
         };
         // Synthesize what the recording lacks, plus a little of what it has: weight (a
         // heavier walker thumps more) and per-step grain.
-        let mut over = step.surface.over_recording(&base, 0.12);
-        over.thump += base.thump.min(state.thump) * (0.25 * (i - 1.0)).clamp(0.0, 0.5);
+        let mut over = step.surface.over_recording(&recorded, 0.12);
+        over.thump += recorded.thump.min(state.thump) * (0.25 * (i_rel - 1.0)).clamp(0.0, 0.5);
         let synth = Step {
             surface: over,
             ..*step
@@ -1153,16 +1443,25 @@ impl FootstepSamples {
         ))
     }
 
-    /// Loudness of the synthesized reference step on `surface` (cached until its sound is
-    /// changed in [`FootstepSurfaces`]).
-    fn reference_loudness(&mut self, name: &str, sound: &SurfaceSound, fs: f32) -> f32 {
-        if let Some((s, l)) = self.reference.get(name)
+    /// Loudness of the synthesized reference step of `kind` on `surface`, as hard as the
+    /// steps in `feet`'s recordings (cached until its sound is changed in
+    /// [`FootstepSurfaces`]).
+    fn reference_loudness(
+        &mut self,
+        feet: Feet,
+        kind: ContactKind,
+        name: &str,
+        sound: &SurfaceSound,
+        fs: f32,
+    ) -> f32 {
+        let key = format!("{}/{name}", feet.folder());
+        if let Some((s, l)) = self.reference.get(&key)
             && s == sound
         {
             return *l;
         }
-        let l = crate::footstep::reference_loudness(sound, fs);
-        self.reference.insert(name.to_string(), (*sound, l));
+        let l = crate::footstep::reference_loudness_of(sound, kind, feet.recorded_intensity(), fs);
+        self.reference.insert(key, (*sound, l));
         l
     }
 }
@@ -1179,7 +1478,7 @@ pub(crate) fn start_loading(
     let root = assets
         .map(|a| a.root())
         .unwrap_or_else(|| PathBuf::from("assets"));
-    samples.start_loading(root.join(SAMPLE_DIR));
+    samples.start_loading(root.join(AUDIO_DIR));
 }
 
 #[cfg(test)]
@@ -1189,17 +1488,24 @@ mod tests {
 
     const SR: f32 = 48_000.0;
 
-    /// A fake recording: a click-and-decay "step" every `gap` seconds over a noise floor.
+    /// A fake recording: a click-and-decay "step" every `gap` seconds over a noise floor,
+    /// the first after 0.4 s of it.
     fn steps(n: usize, gap: f32, seed: u64) -> Vec<f32> {
+        taps(n, gap, 0.3, 25.0, seed)
+    }
+
+    /// `n` noise bursts `gap` s apart, each `len` s long decaying at `rate` /s, over a quiet
+    /// floor, the first after 0.4 s.
+    fn taps(n: usize, gap: f32, len: f32, rate: f32, seed: u64) -> Vec<f32> {
         let mut rng = Noise::new(seed);
-        let len = ((n as f32 * gap + 0.5) * SR) as usize;
-        let mut x: Vec<f32> = (0..len).map(|_| rng.white() * 0.0005).collect();
+        let len_n = ((n as f32 * gap + 0.7) * SR) as usize;
+        let mut x: Vec<f32> = (0..len_n).map(|_| rng.white() * 0.0005).collect();
         for k in 0..n {
-            let at = ((0.2 + k as f32 * gap) * SR) as usize;
-            for j in 0..(0.3 * SR) as usize {
+            let at = ((0.4 + k as f32 * gap) * SR) as usize;
+            for j in 0..(len * SR) as usize {
                 if let Some(v) = x.get_mut(at + j) {
                     let t = j as f32 / SR;
-                    *v += rng.white() * 0.3 * (-t * 25.0).exp();
+                    *v += rng.white() * 0.3 * (-t * rate).exp();
                 }
             }
         }
@@ -1254,7 +1560,7 @@ mod tests {
             .map(|_| rng.white() * 0.0005)
             .collect();
         for k in 0..8 {
-            let at = ((0.2 + k as f32 * 0.8) * SR) as usize;
+            let at = ((0.4 + k as f32 * 0.8) * SR) as usize;
             for j in 0..(0.75 * SR) as usize {
                 if let Some(v) = x.get_mut(at + j) {
                     *v += rng.white() * 0.3 * (-(j as f32 / SR) * 4.0).exp();
@@ -1276,7 +1582,7 @@ mod tests {
     fn odd_steps_are_left_out() {
         let mut x = steps(7, 0.6, 3);
         // A much quieter fourth step (a distant or partial one).
-        let at = ((0.2 + 3.0 * 0.6) * SR) as usize;
+        let at = ((0.4 + 3.0 * 0.6) * SR) as usize;
         for v in &mut x[at..at + (0.3 * SR) as usize] {
             *v *= 0.05;
         }
@@ -1387,7 +1693,7 @@ mod tests {
         let mut s = FootstepSamples::from_bank(bank());
         let dry = SurfaceCell::default();
         assert!(step_on(&mut s, "grass", &dry, ContactKind::Foot, 75.0, 1.4, 15.0).is_some());
-        // No takes for gravel; the takes are boots, so paws, hooves, wheels and falling
+        // No takes for gravel, none for paws or hooves in this bank, and wheels and falling
         // bodies are always synthesized.
         assert!(step_on(&mut s, "grass", &dry, ContactKind::Paw, 20.0, 1.4, 15.0).is_none());
         assert!(step_on(&mut s, "grass", &dry, ContactKind::Hoof, 500.0, 1.4, 15.0).is_none());
@@ -1472,6 +1778,84 @@ mod tests {
     }
 
     #[test]
+    fn a_step_without_its_noise_window_is_not_a_take() {
+        // The first step 0.1 s in: its noise can't be measured, so it is left out.
+        let full = steps(8, 0.6, 21);
+        let early = &full[(0.3 * SR) as usize..];
+        assert_eq!(
+            takes_from_recording("unlisted", "grass", &full, SR).len(),
+            8
+        );
+        assert_eq!(
+            takes_from_recording("unlisted", "grass", early, SR).len(),
+            7
+        );
+        // Nor right after digital silence that opens a file (the recording starts there).
+        let mut opened = vec![0.0; (2.0 * SR) as usize];
+        opened.extend_from_slice(early);
+        assert_eq!(
+            takes_from_recording("unlisted", "grass", &opened, SR).len(),
+            7
+        );
+        // A part's first step is measured on the recording before the part.
+        let parted = cut_steps(&full, SR, Part::Walk, &Cutter::SHOES, 350);
+        assert_eq!(parted.len(), 8);
+    }
+
+    #[test]
+    fn paws_and_hooves_are_cut_short() {
+        // A paw every 0.15 s, each a 0.1 s tap.
+        let x = taps(16, 0.15, 0.1, 60.0, 31);
+        let paws = cut_recording(Feet::Paws, "unlisted", "hard", &x, SR);
+        assert!(paws.len() >= 12, "{}", paws.len());
+        for t in &paws {
+            assert!(t.stats.len_s <= 0.16, "{:?}", t.stats);
+            assert_eq!(t.gait, Gait::Walk);
+        }
+        // A hoof every 0.27 s.
+        let x = taps(10, 0.27, 0.25, 40.0, 32);
+        let hooves = cut_recording(Feet::Hooves, "unlisted", "hard", &x, SR);
+        assert!(hooves.len() >= 8, "{}", hooves.len());
+        assert!(hooves.iter().all(|t| t.stats.len_s <= 0.26));
+        let soft = cut_recording(Feet::Hooves, "unlisted", "dirt", &x, SR);
+        assert!(soft.iter().all(|t| t.stats.len_s <= 0.31));
+    }
+
+    #[test]
+    fn paws_and_hooves_play_their_own_ground() {
+        let mut b = bank();
+        let grass = b.surfaces["grass"].clone();
+        let snow = b.surfaces["snow"].clone();
+        b.paws.insert("hard".into(), grass.clone());
+        b.paws.insert("soft".into(), snow.clone());
+        b.hooves.insert("gravel".into(), grass);
+        let mut s = FootstepSamples::from_bank(b);
+        let dry = SurfaceCell::default();
+        let tone = |r: &(Step, StepSample)| {
+            let p = &r.1.take.pcm;
+            p.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count() as f32 / 0.3
+        };
+        // A paw on rock plays the hard-ground takes, with rock's grit (which a wooden floor,
+        // where they were recorded, lacks) synthesized over them.
+        let r = step_on(&mut s, "rock", &dry, ContactKind::Paw, 11.0, 1.8, 15.0).unwrap();
+        assert!((450.0..560.0).contains(&tone(&r)), "{}", tone(&r));
+        assert!(r.0.surface.grit > 0.15, "{:?}", r.0.surface);
+        let r = step_on(&mut s, "leaves", &dry, ContactKind::Paw, 11.0, 1.8, 15.0).unwrap();
+        assert!((850.0..960.0).contains(&tone(&r)), "{}", tone(&r));
+        // Gravel is too unlike a lawn for the soft-ground takes; a hoof has its own.
+        assert!(step_on(&mut s, "gravel", &dry, ContactKind::Paw, 11.0, 1.8, 15.0).is_none());
+        let r = step_on(&mut s, "gravel", &dry, ContactKind::Hoof, 250.0, 1.7, 15.0).unwrap();
+        assert!((450.0..560.0).contains(&tone(&r)), "{}", tone(&r));
+        // No hooves on wood here, and shoes never play the animals' takes.
+        assert!(step_on(&mut s, "wood", &dry, ContactKind::Hoof, 250.0, 1.7, 15.0).is_none());
+        assert!(step_on(&mut s, "rock", &dry, ContactKind::Foot, 75.0, 1.4, 15.0).is_none());
+        // A dog's paw is as bright as the dog recorded, not dulled for being lighter than a
+        // person.
+        let r = step_on(&mut s, "rock", &dry, ContactKind::Paw, 11.0, 1.8, 15.0).unwrap();
+        assert!(r.1.shelf_db.abs() < 1.5, "{}", r.1.shelf_db);
+    }
+
+    #[test]
     fn a_missing_folder_gives_an_empty_bank() {
         let bank = SampleBank::load(Path::new("no/such/folder"));
         assert!(bank.is_empty());
@@ -1495,5 +1879,26 @@ mod tests {
         // Tile borrows concrete's; nothing for snow.
         assert!(bank.takes("tile").is_some());
         assert!(bank.takes("snow").is_none());
+    }
+
+    #[test]
+    fn every_kind_loads_from_its_folder() {
+        let dir = std::env::temp_dir().join(format!("engine_audio_kinds_{}", std::process::id()));
+        let shoes = steps(8, 0.6, 41);
+        let paws = taps(16, 0.15, 0.1, 60.0, 42);
+        crate::wav::write_wav(&dir.join("footsteps/wood/a.wav"), &shoes, 1, SR as u32).unwrap();
+        crate::wav::write_wav(&dir.join("paws/hard/b.wav"), &paws, 1, SR as u32).unwrap();
+        let bank = SampleBank::load_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(bank.takes("wood").map(|t| t.takes.len()), Some(8));
+        assert!(bank.takes_for(Feet::Paws, "concrete").is_some());
+        assert!(bank.takes_for(Feet::Paws, "wood").is_some());
+        assert!(bank.takes_for(Feet::Paws, "grass").is_none());
+        assert!(bank.takes_for(Feet::Hooves, "wood").is_none());
+        let mut samples = FootstepSamples::from_bank(bank);
+        let _ = samples.bank(false);
+        let summary = samples.summary();
+        assert_eq!(summary.get("wood"), Some(&8));
+        assert!(summary.get("paws/hard").is_some_and(|n| *n >= 12));
     }
 }
