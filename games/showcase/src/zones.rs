@@ -757,8 +757,8 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 View::new(
                     "parkour_ladder",
                     "Ladder: climb the tower's caged ladder hand over hand, slide back down",
-                    [26.6, 2.0, 19.4],
-                    [23.0, 3.6, 14.6],
+                    [29.0, 2.1, 17.6],
+                    [23.0, 3.4, 14.4],
                     16.0,
                 )
                 // Halfway up about 2.9 s into the loop.
