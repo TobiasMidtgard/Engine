@@ -223,6 +223,7 @@ mod tests {
             "let macro_v = tile_fbm(tp, 1.0 / 64.0, 3);",
             "let mid_v = tile_fbm(tp, 1.0 / 8.0, 3);",
             "let patch_v = tile_fbm(tp, 1.0 / 32.0, 3);",
+            "let conifer = smoothstep(11.0, 3.0, temp_c + (variety - 0.5) * 5.0 + (macro_v - 0.5) * 3.0 * macro_fade + (moisture - 0.5) * 2.0);",
             "let meadow_v = tile_fbm(tp, 1.0 / 512.0, 3);",
             "sum += amp * pnoise3(tp * f + f32(i) * 17.0, 4096.0 * f);",
             "let i1 = (i0 + 1.0) - period * floor((i0 + 1.0) / period);",
