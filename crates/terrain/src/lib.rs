@@ -590,7 +590,9 @@ fn sync_terrains(
         if t.position != pos || t.rotation != rot {
             t.position = pos;
             t.rotation = rot;
-            changed = true;
+            // Only a terrain that answers the ground moves the providers (other planets in a
+            // solar system move every frame).
+            changed |= t.config.ground;
         }
     }
     let before = terrains.entries.len();
@@ -963,6 +965,26 @@ mod tests {
     fn the_ground_is_installed_once_while_the_terrain_stays_put() {
         let mut app = app_with_planet();
         app.update_n(10);
+        let d = app
+            .world
+            .resource::<engine_core::diagnostics::Diagnostics>();
+        assert_eq!(d.get("terrain.ground_installs"), Some(1.0));
+    }
+
+    #[test]
+    fn moving_planets_without_ground_leave_the_providers_alone() {
+        let mut app = app_with_planet();
+        let mut moon = PlanetTerrain::moon(3).with_radius(1_737_400.0);
+        moon.ground = false;
+        let moon = app
+            .world
+            .spawn((Transform::from_xyz(0.0, 0.0, 384_400_000.0), moon))
+            .id();
+        app.update_n(3);
+        for i in 0..5 {
+            app.world.get_mut::<Transform>(moon).unwrap().translation.x += 1_000.0 * (i + 1) as f64;
+            app.update();
+        }
         let d = app
             .world
             .resource::<engine_core::diagnostics::Diagnostics>();
