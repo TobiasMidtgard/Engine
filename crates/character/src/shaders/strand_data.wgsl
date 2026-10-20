@@ -11,6 +11,9 @@ struct StrandParams {
 @group(2) @binding(0) var<uniform> strand_params: StrandParams;
 @group(2) @binding(1) var<storage, read> strand_points: array<vec4<f32>>;  // xyz model space, radius
 @group(2) @binding(2) var<storage, read> strand_attrs: array<vec4<f32>>;   // occlusion, random, t, unused
+// Per hair: the skin vertex it grows from (its expressions move the hair), that vertex's four
+// bones and their weights (bytes), unused.
+@group(2) @binding(3) var<storage, read> strand_roots: array<vec4<u32>>;
 
 struct StrandOut {
     @invariant @builtin(position) clip: vec4<f32>,
@@ -25,6 +28,8 @@ struct StrandOut {
 
 struct RibbonPoint {
     model: vec3<f32>,
+    // Where the point was last frame (posed model space).
+    prev_model: vec3<f32>,
     rel: vec3<f32>,
     tangent: vec3<f32>,
     radius: f32,
@@ -43,10 +48,17 @@ fn ribbon_point(hair: u32, vertex: u32) -> RibbonPoint {
     let p = strand_points[i];
     let prev = strand_points[base + select(k - 1u, 0u, k == 0u)].xyz;
     let next = strand_points[base + min(k + 1u, n - 1u)].xyz;
+    // The hair rides its root: the root's expressions, then its bones.
+    let root = strand_roots[hair];
+    let m = morph_at(root.x);
+    let bones = unpack_bytes(root.y);
+    let weights = vec4<f32>(unpack_bytes(root.z)) / 255.0;
+    let now = skin_matrix(bones, weights, false);
     var out: RibbonPoint;
-    out.model = p.xyz;
-    out.rel = model_point(p.xyz);
-    out.tangent = model_dir(next - prev + vec3<f32>(0.0, 1e-7, 0.0));
+    out.model = (now * vec4<f32>(p.xyz + m.dp, 1.0)).xyz;
+    out.prev_model = (skin_matrix(bones, weights, true) * vec4<f32>(p.xyz + m.dp_prev, 1.0)).xyz;
+    out.rel = model_point(out.model);
+    out.tangent = model_dir((now * vec4<f32>(next - prev + vec3<f32>(0.0, 1e-7, 0.0), 0.0)).xyz);
     out.radius = p.w;
     out.index = i;
     return out;

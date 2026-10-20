@@ -254,6 +254,58 @@ fn debris_piles_up_on_resting_chunks_and_falls_when_they_go() {
 }
 
 #[test]
+fn digging_throws_chips_of_the_ground_it_cuts() {
+    let mut app = app();
+    // A 6 m block of rock under a metre of soil.
+    let ground = VoxelVolume {
+        dims: [24, 24, 16],
+        voxel_size: 0.25,
+        shape: VoxelShape::Solid,
+        topsoil: Some(DestructibleMaterial::Dirt),
+        topsoil_depth: 1.0,
+        grass: None,
+        ..VoxelVolume::default()
+    };
+    app.world.spawn((Transform::default(), ground));
+    app.update();
+    let dig = |app: &mut App, at: DVec3| {
+        app.world.write_message(TerrainEdit {
+            center: at,
+            shape: EditShape::Sphere { radius: 0.5 },
+            op: EditOp::Remove,
+            surface: None,
+            source: None,
+        });
+        app.update();
+        let mut q = app.world.query::<&Debris>();
+        let chips: Vec<DestructibleMaterial> = q
+            .iter(&app.world)
+            .filter(|d| d.chip)
+            .map(|d| d.material)
+            .collect();
+        for e in app
+            .world
+            .query_filtered::<Entity, With<Debris>>()
+            .iter(&app.world)
+            .collect::<Vec<_>>()
+        {
+            app.world.despawn(e);
+        }
+        chips
+    };
+    let top = dig(&mut app, DVec3::new(0.0, 5.9, 0.0));
+    assert!(
+        !top.is_empty() && top.iter().all(|m| *m == DestructibleMaterial::Dirt),
+        "a hole in the topsoil throws soil: {top:?}"
+    );
+    let side = dig(&mut app, DVec3::new(0.0, 2.5, 2.0));
+    assert!(
+        !side.is_empty() && side.iter().all(|m| *m == DestructibleMaterial::Rock),
+        "a hole in the rock face below throws rock: {side:?}"
+    );
+}
+
+#[test]
 fn rock_debris_lands_on_ledges_and_slides_off_rock_walls() {
     let mut app = app();
     // A 6 m block of rock, 6 m tall: its front half is cut back to a ledge 3 m up, so a 3 m

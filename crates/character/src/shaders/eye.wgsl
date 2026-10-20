@@ -30,17 +30,36 @@ const IRIS_RADIUS: f32 = 0.47;    // sin of the cornea angle: where the iris mee
 const IRIS_DEPTH: f32 = 0.84;     // eye-local z of the iris plane
 const CORNEA_IOR: f32 = 1.376;
 
+// Turns the eye about its center to look `yaw` toward the person's left and `pitch` up.
+fn gaze_turn(p: vec3<f32>, center: vec3<f32>, yaw: f32, pitch: f32, dir: bool) -> vec3<f32> {
+    var d = select(p - center, p, dir);
+    // Up first (about the eye's left-right axis), then aside (about the head's up).
+    d = vec3<f32>(d.x, d.y * cos(pitch) + d.z * sin(pitch), -d.y * sin(pitch) + d.z * cos(pitch));
+    d = vec3<f32>(d.x * cos(yaw) + d.z * sin(yaw), d.y, -d.x * sin(yaw) + d.z * cos(yaw));
+    return select(center + d, d, dir);
+}
+
 @vertex
 fn vs_eye(in: EyeIn) -> EyeOut {
     var out: EyeOut;
-    let rel = model_point(in.position.xyz);
+    // The base mesh's left eye is on +X.
+    let center = select(pose.eye_r.xyz, pose.eye_l.xyz, in.position.x > 0.0);
+    let head = vec4<u32>(pose.info.z, 0u, 0u, 0u);
+    let one = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    let p = (skin_matrix(head, one, false)
+        * vec4<f32>(gaze_turn(in.position.xyz, center, pose.gaze.x, pose.gaze.y, false), 1.0)).xyz;
+    let n = (skin_matrix(head, one, false)
+        * vec4<f32>(gaze_turn(in.normal.xyz, center, pose.gaze.x, pose.gaze.y, true), 0.0)).xyz;
+    let p_prev = (skin_matrix(head, one, true)
+        * vec4<f32>(gaze_turn(in.position.xyz, center, pose.gaze.z, pose.gaze.w, false), 1.0)).xyz;
+    let rel = model_point(p);
     out.rel = rel;
-    out.normal = model_dir(in.normal.xyz);
+    out.normal = model_dir(n);
     out.local = in.local.xyz;
     out.side = sign(in.position.x);
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     out.clip_now = motion_clip(rel);
-    out.clip_prev = prev_motion_clip(prev_model_point(in.position.xyz));
+    out.clip_prev = prev_motion_clip(prev_model_point(p_prev));
     return out;
 }
 

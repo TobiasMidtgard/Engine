@@ -20,6 +20,8 @@ pub enum Region {
     /// Head, neck, shoulders and upper chest (portraits, the creator).
     #[default]
     Bust,
+    /// The whole body, dressed (people in the world).
+    Body,
 }
 
 impl Region {
@@ -28,6 +30,7 @@ impl Region {
         match self {
             Region::Head => 0.55,
             Region::Bust => 0.30,
+            Region::Body => f32::NEG_INFINITY,
         }
     }
 }
@@ -55,7 +58,8 @@ pub enum Mask {
     Scalp = 6,
     /// Ears.
     Ears = 7,
-    /// Clothing (the shirt of a bust).
+    /// Clothing: 1 where clothes may cover (all but the hands); the shaders cut the shirt's
+    /// neckline per pixel and pick shirt, trousers or shoes from the height.
     Cloth = 8,
     /// Forehead.
     Forehead = 9,
@@ -300,9 +304,9 @@ impl Regions {
                 * (1.0 - m[Mask::Lips as usize])
                 * (1.0 - smoothstep(0.0, 0.004, d.y - 0.0) * smoothstep(0.06, 0.07, ax));
             m[Mask::Beard as usize] = beard;
-            // A crew-neck shirt below the collar line.
-            let neckline = 0.565 - 0.03 * (theta.cos() * 0.5 + 0.5);
-            m[Mask::Cloth as usize] = smoothstep(neckline + 0.004, neckline - 0.004, p.y);
+            // Clothes everywhere but the hands; the shaders cut the neckline per pixel
+            // (`collar_depth` in common.wgsl).
+            m[Mask::Cloth as usize] = 1.0 - bare_hands(pack, p);
         }
 
         // The wet rim of the lids: skin within a couple of millimeters of the lid margins.
@@ -337,6 +341,28 @@ impl Regions {
             lid_margins,
         }
     }
+}
+
+/// 1 on the hands, past the shirt's cuffs (0 without a rig, which places the wrists).
+fn bare_hands(pack: &HumanPack, p: Vec3) -> f32 {
+    let joint = |name: &str| {
+        let b = pack.bone(name)?;
+        centroid(pack, pack.joints.get(b)?)
+    };
+    let mut bare = 0.0f32;
+    for side in ["l", "r"] {
+        let (Some(elbow), Some(wrist)) = (
+            joint(&format!("lower_arm_{side}")),
+            joint(&format!("hand_{side}")),
+        ) else {
+            continue;
+        };
+        // Past the cuff, within a hand's length of the wrist.
+        let along = (p - wrist).dot((wrist - elbow).normalize_or_zero());
+        let near = 1.0 - smoothstep(0.2, 0.24, (p - wrist).length());
+        bare = bare.max(smoothstep(-0.012, -0.006, along) * near);
+    }
+    bare
 }
 
 /// The lid margins of each eye, from the base mesh's eyelash cards (one strip on each lid):
@@ -383,7 +409,8 @@ fn lid_margins(pack: &HumanPack, eyes: [Vec3; 2]) -> [[Vec<u32>; 2]; 2] {
     out
 }
 
-/// Floats per vertex while subdividing: position, rest position, masks.
+/// Floats per vertex while subdividing: position, rest position, masks (then one weight per
+/// bone when the pack has a rig).
 const STRIDE: usize = 6 + MASKS;
 
 /// A built skin surface, ready to upload.
@@ -399,6 +426,71 @@ pub struct SkinMesh {
     /// tip, an ear rim).
     pub curvature: Vec<f32>,
     pub indices: Vec<u32>,
+    /// Per vertex: the four bones (indices into the pack's bones) that bend it most and their
+    /// weights out of 255 (empty when the pack has no rig).
+    pub bones: Vec<[u8; 4]>,
+    pub weights: Vec<[u8; 4]>,
+    /// The cut-out base mesh before subdivision: its quads over `base` (pack vertex per
+    /// vertex), and how many times it was subdivided. Anything defined on the pack's vertices
+    /// (expression shapes) is subdivided the same way from these.
+    pub base: Vec<u32>,
+    pub base_quads: Vec<[u32; 4]>,
+    pub levels: u32,
+    /// Vertices after the subdivided skin (the mouth: teeth, gums, tongue), each following
+    /// three pack vertices (and weights), in order at the end of the vertex lists.
+    pub extra: Vec<[(u32, f32); 3]>,
+    /// Per extra vertex: what it is (see [`crate::mouth::MouthPart`]); skin vertices are 0.
+    pub extra_parts: Vec<u8>,
+}
+
+impl SkinMesh {
+    /// Vertices of the subdivided skin (the rest are [`Self::extra`]).
+    pub fn skin_vertices(&self) -> usize {
+        self.positions.len() - self.extra.len()
+    }
+
+    /// Append the mouth (after the hair has grown, so no hair roots on the teeth).
+    pub fn add_mouth(&mut self, pack: &HumanPack, mouth: &crate::mouth::MouthMesh) {
+        let first = self.positions.len() as u32;
+        for (i, p) in mouth.positions.iter().enumerate() {
+            let a = mouth.anchors[i];
+            self.positions.push(*p);
+            self.normals.push(mouth.normals[i]);
+            self.rest.push(
+                a.iter()
+                    .map(|(v, w)| pack.positions[*v as usize] * *w)
+                    .sum(),
+            );
+            self.masks.extend([0.0; MASKS]);
+            self.curvature.push(0.0);
+            if !self.bones.is_empty() {
+                let s = pack.skin.get(a[0].0 as usize).copied().unwrap_or_default();
+                self.bones.push(s.bones);
+                self.weights.push(s.weights);
+            }
+            self.extra.push(a);
+            self.extra_parts.push(mouth.parts[i] as u8);
+        }
+        self.indices.extend(mouth.indices.iter().map(|i| i + first));
+    }
+
+    /// Subdivide per-pack-vertex values (`channels` floats each) the way the skin was, giving
+    /// `channels` floats per skin vertex.
+    pub fn subdivide_values(&self, channels: usize, value: impl Fn(usize, &mut [f32])) -> Vec<f32> {
+        let mut attrs = vec![0.0f32; self.base.len() * channels];
+        for (i, v) in self.base.iter().enumerate() {
+            value(*v as usize, &mut attrs[i * channels..(i + 1) * channels]);
+        }
+        let mut mesh = QuadMesh {
+            quads: self.base_quads.clone(),
+            attrs,
+            stride: channels,
+        };
+        for _ in 0..self.levels {
+            mesh = mesh.subdivide();
+        }
+        mesh.attrs
+    }
 }
 
 /// Morph the base mesh for `a`, cut out `region` of the `body` group, and subdivide it
@@ -426,8 +518,11 @@ pub fn build_from(
 ) -> SkinMesh {
     let body = pack.group("body").unwrap_or(0);
     let cut = region.cut();
+    let bones = if pack.has_rig() { pack.bones.len() } else { 0 };
+    let stride = STRIDE + bones;
     let mut remap: HashMap<u32, u32> = HashMap::new();
     let mut attrs = Vec::new();
+    let mut base = Vec::new();
     let mut quads = Vec::new();
     for q in pack.quads.iter().filter(|q| q.group == body) {
         if q.v.iter().any(|v| pack.positions[*v as usize].y < cut) {
@@ -440,15 +535,25 @@ pub fn build_from(
                 attrs.extend(morphed[i].to_array());
                 attrs.extend(pack.positions[i].to_array());
                 attrs.extend(&regions.masks[i * MASKS..(i + 1) * MASKS]);
-                (attrs.len() / STRIDE - 1) as u32
+                if bones > 0 {
+                    let mut w = vec![0.0f32; bones];
+                    let s = pack.skin[i];
+                    for k in 0..4 {
+                        w[s.bones[k] as usize] += s.weights[k] as f32 / 255.0;
+                    }
+                    attrs.extend(w);
+                }
+                base.push(*v);
+                (attrs.len() / stride - 1) as u32
             });
         }
         quads.push(out);
     }
+    let base_quads = quads.clone();
     let mut mesh = QuadMesh {
         quads,
         attrs,
-        stride: STRIDE,
+        stride,
     };
     for _ in 0..levels {
         mesh = mesh.subdivide();
@@ -458,13 +563,21 @@ pub fn build_from(
         positions: Vec::with_capacity(nv),
         rest: Vec::with_capacity(nv),
         masks: Vec::with_capacity(nv * MASKS),
+        base,
+        base_quads,
+        levels,
         ..Default::default()
     };
     for i in 0..nv {
         let v = mesh.vertex(i);
         out.positions.push(Vec3::new(v[0], v[1], v[2]));
         out.rest.push(Vec3::new(v[3], v[4], v[5]));
-        out.masks.extend(&v[6..]);
+        out.masks.extend(&v[6..STRIDE]);
+        if bones > 0 {
+            let (b, w) = top_four(&v[STRIDE..]);
+            out.bones.push(b);
+            out.weights.push(w);
+        }
     }
     out.indices = Vec::with_capacity(mesh.quads.len() * 6);
     for q in &mesh.quads {
@@ -475,6 +588,29 @@ pub fn build_from(
     out.normals = vertex_normals(&out.positions, &out.indices);
     out.curvature = curvature(&out.positions, &out.normals, &mesh.quads);
     out
+}
+
+/// The four largest of per-bone weights, renormalized to sum to 255.
+pub fn top_four(weights: &[f32]) -> ([u8; 4], [u8; 4]) {
+    let mut best = [(0usize, 0.0f32); 4];
+    for (b, w) in weights.iter().enumerate() {
+        if *w <= best[3].1 {
+            continue;
+        }
+        let mut k = 3;
+        while k > 0 && *w > best[k - 1].1 {
+            best[k] = best[k - 1];
+            k -= 1;
+        }
+        best[k] = (b, *w);
+    }
+    let total: f32 = best.iter().map(|b| b.1).sum();
+    if total <= 0.0 {
+        return ([0; 4], [0; 4]);
+    }
+    let mut w = best.map(|b| (b.1 / total * 255.0).round() as i32);
+    w[0] += 255 - w.iter().sum::<i32>();
+    (best.map(|b| b.0 as u8), w.map(|x| x.clamp(0, 255) as u8))
 }
 
 /// Area-weighted vertex normals of a triangle list.
@@ -526,6 +662,17 @@ mod tests {
         assert!(hairline(std::f32::consts::PI, 0.0) < -0.05);
         assert!(hairline(0.4, 1.0) > hairline(0.4, 0.0));
         assert_eq!(hairline(-0.7, 0.3), hairline(0.7, 0.3));
+    }
+
+    #[test]
+    fn the_four_largest_weights_are_kept_and_sum_to_255() {
+        let (b, w) = top_four(&[0.1, 0.0, 0.5, 0.05, 0.3, 0.05]);
+        assert_eq!(b[..3], [2, 4, 0]);
+        assert_eq!(w.iter().map(|x| *x as u32).sum::<u32>(), 255);
+        assert!(w[0] > w[1] && w[1] > w[2]);
+        assert_eq!(top_four(&[0.0; 3]), ([0; 4], [0; 4]));
+        let (b, w) = top_four(&[0.0, 1.0]);
+        assert_eq!((b[0], w[0]), (1, 255));
     }
 
     #[test]

@@ -19,6 +19,9 @@ pub const SMOLDER_GLOW: f32 = 8_000.0;
 /// Alpha levels of the dust materials.
 pub const DUST_LEVELS: usize = 6;
 
+/// Albedo scale of textured rock and soil chips.
+const CHIP_SHADE: f32 = 0.55;
+
 /// Handles shared by everything destruction draws.
 #[derive(Resource, Debug, Clone)]
 pub struct DestructionAssets {
@@ -248,8 +251,32 @@ impl DestructionAssets {
         materials.set(self.gravel, gravel);
         self.texture_char(materials, images);
         self.texture_broken(materials, images);
+        self.texture_chips(materials);
         self.dust_sprite = Some(images.add(textures::dust_puffs(64, 0xD057)));
         self.textured = true;
+    }
+
+    /// Chips of rock, soil and masonry wear their broken surface's texture, darkened like
+    /// shaded relief, so spoil and rubble match what they came from (flat fresh-break colors,
+    /// or a bare texture in full sun, read as pale flakes on soil and grass).
+    fn texture_chips(&mut self, materials: &mut Assets<StandardMaterial>) {
+        use DestructibleMaterial as M;
+        for m in [
+            M::Rock,
+            M::Dirt,
+            M::Stone,
+            M::Brick,
+            M::Concrete,
+            M::ReinforcedConcrete,
+        ] {
+            let Some(mut chip) = materials.get(self.broken[m.index()]).copied() else {
+                continue;
+            };
+            for c in &mut chip.base_color[..3] {
+                *c *= CHIP_SHADE;
+            }
+            materials.set(self.chip_material[m.index()], chip);
+        }
     }
 
     /// Joint-free fracture materials for masonry: the rock texture tinted so that, under the

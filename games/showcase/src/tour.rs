@@ -79,13 +79,19 @@ fn at(key: &str) -> Option<Place> {
     })
 }
 
-/// Install the tour: deterministic time steps and fast-adapting exposure.
+/// Install the tour: deterministic time steps, fast-adapting exposure and far woods built at once.
 pub fn install(app: &mut App, only: Option<&str>) {
     app.world
         .resource_mut::<Time>()
         .set_source(engine::core::time::TimeSource::Manual {
             step_secs: STEP_SECS as f64,
         });
+    // The far woods build every cell in view on the first frame instead of a couple a frame,
+    // which a tour's few frames per stop would never finish.
+    if let Some(mut far) = app.world.get_resource_mut::<engine_foliage::FarWoods>() {
+        far.background_builds = 0;
+        far.cells_per_frame = u32::MAX;
+    }
     app.insert_resource(Tour::new(only));
     app.add_systems(Update, run.after(camera::fly));
 }

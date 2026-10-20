@@ -57,6 +57,7 @@ pub(crate) fn shift_agents(
         b.home = b.home.map(moved);
         b.destination = b.destination.map(moved);
         b.high_ground = b.high_ground.map(moved);
+        b.guard = b.guard.map(moved);
         if let Some(NpcOrder::Hold { at } | NpcOrder::MoveTo { at }) = &mut b.order {
             *at = moved(*at);
         }
@@ -133,10 +134,14 @@ pub(crate) fn shift_world_model(
     mut shifts: MessageReader<WorldShift>,
     mut world: ResMut<TacticalWorld>,
     mut nav: ResMut<NavGrid>,
+    mut clouds: ResMut<crate::smoke::SmokeClouds>,
 ) {
     let Some(s) = combined(&mut shifts) else {
         return;
     };
     world.shift(&s);
     nav.clear();
+    for c in &mut clouds.clouds {
+        c.at = s.point(c.at);
+    }
 }

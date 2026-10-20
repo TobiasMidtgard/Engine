@@ -1,11 +1,14 @@
-//! Headless portrait sheets: each preset from the front, three-quarter and profile.
+//! Headless portrait sheets: each preset from the front, three-quarter and profile, the whole
+//! body in a pose, and the face's expressions.
 
 use std::path::PathBuf;
 
 use engine::prelude::*;
-use engine_character::{Appearance, AppearanceExt, BuiltCharacter, CharacterDebug};
+use engine::world::character::FaceControls;
+use engine_character::{Appearance, AppearanceExt, BuiltCharacter, CharacterBuild, CharacterDebug};
 
 use crate::Subject;
+use crate::pose::{self, PoseName};
 use crate::studio::Orbit;
 
 /// Frames rendered after a change before a shot (temporal anti-aliasing and screen-space
@@ -18,6 +21,9 @@ struct Shot {
     appearance: Appearance,
     orbit: Orbit,
     debug: u8,
+    /// The whole body in this pose (`None`: the bust at rest).
+    pose: Option<String>,
+    face: FaceControls,
 }
 
 /// The shots still to take.
@@ -96,8 +102,35 @@ fn view(name: &str) -> Option<(Orbit, u8)> {
     })
 }
 
+/// Whole-body views: the camera on the subject's chest.
+fn body_view(name: &str) -> Option<Orbit> {
+    let body = Orbit {
+        yaw: 0.0,
+        pitch: 0.06,
+        distance: 4.0,
+        drop: 0.74,
+        fov_deg: 30.0,
+    };
+    Some(match name {
+        "body" => body,
+        "body34" => Orbit { yaw: 0.62, ..body },
+        "bodyside" => Orbit {
+            yaw: std::f32::consts::FRAC_PI_2,
+            ..body
+        },
+        "bodyback" => Orbit {
+            yaw: std::f32::consts::PI,
+            ..body
+        },
+        _ => return None,
+    })
+}
+
 impl ShotPlan {
-    /// `--shots <dir> [--only name,name] [--views front,34,...]`, or None without `--shots`.
+    /// `--shots <dir> [--only name,name] [--views front,34,...] [--pose walk]`, or None without
+    /// `--shots`. Views are close-ups (`front`, `34`, `profile`, `eyes`, ...), whole-body views
+    /// (`body`, `body34`, `bodyside`, `bodyback`, in `--pose`), or expressions in close-up
+    /// (`smile`, `sad`, `surprise`, ...; `<expression>34` from three-quarters).
     pub fn from_args() -> Option<Self> {
         let args: Vec<String> = std::env::args().collect();
         let value = |flag: &str| {
@@ -110,6 +143,7 @@ impl ShotPlan {
         let only: Option<Vec<String>> =
             value("--only").map(|s| s.split(',').map(|n| n.trim().to_lowercase()).collect());
         let views = value("--views").unwrap_or_else(|| "front,34,profile".into());
+        let body_pose = value("--pose").unwrap_or_else(|| "stand".into());
         let mut people: Vec<(String, Appearance)> = Appearance::presets()
             .into_iter()
             .map(|(n, a)| (n.to_lowercase(), a))
@@ -126,14 +160,33 @@ impl ShotPlan {
             if !wanted {
                 continue;
             }
-            for v in views.split(',') {
-                if let Some((orbit, debug)) = view(v.trim()) {
-                    shots.push(Shot {
-                        file: format!("{name}_{}.png", v.trim()),
-                        appearance: a.clone(),
+            for v in views.split(',').map(str::trim) {
+                let file = format!("{name}_{v}.png");
+                let shot = |orbit, debug, pose: Option<String>, face| Shot {
+                    file: file.clone(),
+                    appearance: a.clone(),
+                    orbit,
+                    debug,
+                    pose,
+                    face,
+                };
+                if let Some((orbit, debug)) = view(v) {
+                    shots.push(shot(orbit, debug, None, FaceControls::default()));
+                } else if let Some(orbit) = body_view(v) {
+                    shots.push(shot(
                         orbit,
-                        debug,
-                    });
+                        0,
+                        Some(body_pose.clone()),
+                        FaceControls::default(),
+                    ));
+                } else {
+                    let (expr, orbit) = match v.strip_suffix("34") {
+                        Some(e) => (e, view("34").map(|o| o.0)),
+                        None => (v, view("front").map(|o| o.0)),
+                    };
+                    if let (true, Some(orbit)) = (pose::EXPRESSIONS.contains(&expr), orbit) {
+                        shots.push(shot(orbit, 0, None, pose::expression(expr)));
+                    }
                 }
             }
         }
@@ -148,12 +201,27 @@ impl ShotPlan {
     }
 }
 
+type ShotSubject<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static mut Appearance,
+        &'static CharacterBuild,
+        Option<&'static PoseName>,
+        Option<&'static FaceControls>,
+        Option<&'static BuiltCharacter>,
+    ),
+    With<Subject>,
+>;
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_shots(
+    mut commands: Commands,
     mut plan: ResMut<ShotPlan>,
     mut shots: ResMut<Screenshots>,
     mut debug: ResMut<CharacterDebug>,
-    mut subject: Query<(&mut Appearance, Option<&BuiltCharacter>), With<Subject>>,
+    mut subject: ShotSubject,
     mut cams: Query<&mut Orbit>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -173,15 +241,40 @@ pub fn run_shots(
         }
         return;
     }
-    let Ok((mut a, built)) = subject.single_mut() else {
+    let Ok((entity, mut a, build, pose_name, face, built)) = subject.single_mut() else {
         return;
     };
+    let want_build = if shot.pose.is_some() {
+        CharacterBuild::default()
+    } else {
+        CharacterBuild::portrait()
+    };
+    let mut changed = false;
+    if *build != want_build {
+        commands.entity(entity).insert(want_build);
+        changed = true;
+    }
+    if pose_name.map(|p| &p.0) != shot.pose.as_ref() {
+        match &shot.pose {
+            Some(p) => commands.entity(entity).insert(PoseName(p.clone())),
+            None => commands.entity(entity).remove::<PoseName>(),
+        };
+        changed = true;
+    }
+    if face != Some(&shot.face) {
+        commands.entity(entity).insert(shot.face.clone());
+        changed = true;
+    }
     if *a != shot.appearance {
         *a = shot.appearance.clone();
+        changed = true;
+    }
+    if changed {
         plan.settled = 0;
         return;
     }
-    if !built.is_some_and(|b| b.appearance == shot.appearance) {
+    if !built.is_some_and(|b| b.appearance == shot.appearance && b.options == want_build.options())
+    {
         plan.settled = 0;
         return;
     }
