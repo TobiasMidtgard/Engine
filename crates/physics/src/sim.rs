@@ -371,6 +371,14 @@ pub struct Contacts {
 /// and forth.
 const KEEP_PLACE: f64 = 0.8;
 
+/// A jointed group moving faster than this (its fastest point, m/s) may be articulated
+/// ([`Simulation::budget_articulations`]): a ragdoll falling, tumbling or thrown.
+pub const STIR_SPEED: f32 = 2.5;
+
+/// An articulated group slower than this lets go of its place, m/s
+/// ([`Simulation::budget_articulations`]).
+pub const CALM_SPEED: f32 = 1.0;
+
 /// Steps between two looks of the articulation budget (it also looks whenever joints are made).
 pub const BUDGET_EVERY: u32 = 6;
 
@@ -1363,7 +1371,11 @@ impl Simulation {
 
     /// Keep at most `PhysicsSettings::max_articulated` moving jointed groups articulated: the
     /// ones nearest a focus (or the origin, without one; an articulated group keeps its place
-    /// unless another comes a fifth closer). The others are held to constraint joints until they
+    /// unless another comes a fifth closer). With a focus, only those within
+    /// `PhysicsSettings::articulate_within_m` of it (an articulated one until a quarter
+    /// farther), and only while they move fast enough to land hard: a group starts over
+    /// [`STIR_SPEED`] and lets go under [`CALM_SPEED`], when a ragdoll is settling or lying still
+    /// and its constraint joints rest closed, so its place goes to one still tumbling. The others are held to constraint joints until they
     /// rank among the nearest again. Sleeping groups keep their joints and don't count.
     pub fn budget_articulations(
         &mut self,
@@ -1383,6 +1395,8 @@ impl Simulation {
             articulated: bool,
             held: bool,
             rank: f64,
+            /// Moving too slowly to land hard: constraint joints rest closed.
+            calm: bool,
         }
         let mut starts: Vec<Entity> = self.joints.values().map(|j| j.desc.body_a).collect();
         starts.sort();
@@ -1434,16 +1448,30 @@ impl Simulation {
                     Some((_, JointHandle::Articulated { .. }))
                 )
             });
+            // Fastest point of the group (spin measured half a meter out).
+            let speed = bodies
+                .iter()
+                .filter_map(rb)
+                .map(|(rb, _)| rb.linvel().length() + 0.5 * rb.angvel().length())
+                .fold(0.0f32, f32::max);
             groups.push(Group {
                 held: bodies.iter().any(|e| self.held.contains(e)),
                 rank: if articulated { near * KEEP_PLACE } else { near },
+                calm: !foci.is_empty() && speed < if articulated { CALM_SPEED } else { STIR_SPEED },
                 bodies,
                 joints,
                 articulated,
             });
         }
         let max = self.settings.max_articulated as usize;
-        if groups.len() <= max && groups.iter().all(|g| !g.held) {
+        // Past this, a constraint joint's few centimeters on a hard landing are too small to see.
+        // Without a focus every group is in reach.
+        let reach = if foci.is_empty() {
+            f64::INFINITY
+        } else {
+            self.settings.articulate_within_m as f64
+        };
+        if groups.len() <= max && groups.iter().all(|g| !g.held && g.rank <= reach && !g.calm) {
             return;
         }
         // Nearest first; on a tie, articulated ones.
@@ -1452,7 +1480,14 @@ impl Simulation {
                 .total_cmp(&b.rank)
                 .then(b.articulated.cmp(&a.articulated))
         });
-        for (place, g) in groups.into_iter().enumerate() {
+        let mut places = 0..max;
+        for g in groups {
+            // Calm groups and those out of reach don't take a place.
+            let place = if g.rank <= reach && !g.calm {
+                places.next().unwrap_or(max)
+            } else {
+                max
+            };
             if place < max && g.held {
                 for e in &g.bodies {
                     self.held.remove(e);

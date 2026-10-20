@@ -14,13 +14,14 @@ struct ClusterInstance {
     extra: vec4<u32>,   // material index, flags (INSTANCE_*), mesh min y (f32 bits), mesh height (f32 bits)
     sphere: vec4<f32>,  // camera-relative sphere around all its clusters and error spheres (m)
     mesh: vec4<u32>,    // first level, level count, bucket (texture set and sidedness) in the camera view, unused
-    lod: vec4<f32>,     // largest axis scale (errors and radii grow by it), unused, unused, unused
+    lod: vec4<f32>,     // largest axis scale (errors and radii grow by it), normal cone stretch (1: rotation and uniform scale), unused, unused
 };
 
 // The transform mirrors the mesh: two corners of every triangle are swapped so front faces stay
 // counter-clockwise.
 const INSTANCE_MIRRORED: u32 = 1u;
-// Single-sided, rigid and uniformly scaled: normal cones are valid for backface culling.
+// Single-sided, rotated and scaled without shear: normal cones are valid for backface culling
+// (widened by the instance's stretch).
 const INSTANCE_CONE_CULL: u32 = 2u;
 const INSTANCE_CASTS_SHADOWS: u32 = 4u;
 

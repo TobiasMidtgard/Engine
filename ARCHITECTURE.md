@@ -426,8 +426,17 @@ draws; the clusters then go through the depth prepass, the scene pass (the same
 atomics and indirect draws: every backend. Smaller meshes, alpha-masked or wind-animated
 materials and entities with the `NoVirtualGeometry` marker stay instanced; a changed mesh is drawn
 instanced until its own clusters are rebuilt. `DebugView::Clusters` and `ClusterLevels` show
-them; `render.stats` reports `clusters` (and their triangles). Next: occlusion culling (two-pass
-HZB), streaming, a compute rasterizer for tiny triangles, cached shadow pages.
+them; `render.stats` reports `clusters` (and their triangles). A `Displacement` component bakes
+height into the clusters (crack-free adaptive tessellation of the entity's mesh, normals from the
+displaced surface): a material's height map, a function, or a `rock::StoneFinish`;
+`rock::WallStone` (kind, size, seed: split-face, rough-hewn or slab with tool marks, fractures,
+lichen and grime) gives the base mesh plus its displacement, or a finished mesh via
+`wall_stone`. Builds are cached on disk (`virtual_geometry_cache`, the user cache dir or
+`ENGINE_VG_CACHE`, LRU-trimmed to `virtual_geometry_cache_mb`). Two-pass HZB occlusion
+(`virtual_geometry_occlusion`): camera clusters hidden behind last frame's depth pyramid are
+retested after the early prepass against this frame's and drawn in a late prepass if visible.
+Next: streaming, a compute rasterizer for tiny triangles, occlusion for shadow views, cached
+shadow pages.
 
 **Material presets** (built): `StandardMaterial::preset(MaterialPreset::Brick)` (and cobblestone,
 rock, concrete, plaster, wood planks, bark, rusty steel, painted metal, sand, forest soil,

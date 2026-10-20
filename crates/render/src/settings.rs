@@ -194,9 +194,20 @@ pub struct RenderSettings {
     /// takes the regular instanced path.
     pub virtual_geometry: bool,
     /// Meshes with at least this many triangles take the cluster path. Smaller ones (props,
-    /// debris, fragments) are cheaper instanced; `MeshRenderer::virtual_geometry = false` keeps
-    /// a dense mesh off it too.
+    /// debris, fragments) are cheaper instanced; the `NoVirtualGeometry` marker keeps a dense
+    /// mesh off it too. Meshes with a `Displacement` take it whatever their triangle count.
     pub virtual_geometry_min_triangles: u32,
+    /// Occlusion culling of virtual geometry: clusters hidden behind what the depth prepass
+    /// drew (tested against last frame's depth, then this frame's) are not drawn.
+    pub virtual_geometry_occlusion: bool,
+    /// Keep built cluster hierarchies (and displaced tessellations) on disk, keyed by a hash of
+    /// the mesh and its displacement, so the next start loads them instead of building again.
+    pub virtual_geometry_cache: bool,
+    /// Folder of that cache; empty: `ENGINE_VG_CACHE`, else the user cache folder's
+    /// `engine/virtual-geometry`.
+    pub virtual_geometry_cache_dir: String,
+    /// Size budget of the cache folder, megabytes (least recently used builds go first).
+    pub virtual_geometry_cache_mb: u32,
     /// Largest geometric error a cluster may show on screen, pixels (lower = more triangles).
     pub cluster_error_px: f32,
     /// The same for shadow maps, in shadow map texels (cascade texels are much larger than
@@ -261,6 +272,10 @@ impl Default for RenderSettings {
             night_desaturation: 0.7,
             virtual_geometry: true,
             virtual_geometry_min_triangles: 50_000,
+            virtual_geometry_occlusion: true,
+            virtual_geometry_cache: true,
+            virtual_geometry_cache_dir: String::new(),
+            virtual_geometry_cache_mb: 2048,
             cluster_error_px: 1.0,
             cluster_shadow_error_texels: 2.0,
             material_texture_size: 1024,
