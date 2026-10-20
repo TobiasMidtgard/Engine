@@ -13,7 +13,9 @@ use std::collections::{HashMap, HashSet};
 use engine_assets::{Assets, Handle};
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_render::{MaterialRef, Mesh, MeshRef, MeshRenderer};
+use engine_render::{
+    Billboard, MaterialRef, Mesh, MeshRef, MeshRenderer, Sprite, SpriteAlpha, SpriteAtlas,
+};
 use engine_world::physics::{
     BodyKind, Collider, ColliderShape, PhysicsBackend, RigidBody, Velocity,
 };
@@ -21,6 +23,7 @@ use engine_world::{ContactKind, Env, GroundContact, NoiseEvent, SurfaceMaterials
 
 use crate::assets::DestructionAssets;
 use crate::material::{DestructibleMaterial, DestructionMaterials};
+use crate::textures::DUST_FRAMES;
 use crate::voxel::{VoxelState, in_rock, rock_contact, rock_depth, rock_side};
 use crate::{DebrisMode, DestructionSettings, DestructionStats};
 
@@ -161,6 +164,13 @@ impl DebrisBody {
 /// Glowing hot fragments (sparks): fade instead of sinking.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Spark;
+
+/// A dust sprite's quad, as a multiple of its puff's size: the soft cloud fades out well
+/// inside its quad, so the quad is larger than the mesh puff it replaces.
+const DUST_SPRITE_SCALE: f32 = 2.2;
+
+/// A dust sprite's opacity at its thickest.
+const DUST_SPRITE_ALPHA: f32 = 0.8;
 
 /// A puff of dust that grows, rises a little, drifts with the wind and fades.
 #[derive(Component, Debug, Clone, Copy)]
@@ -552,24 +562,45 @@ pub fn spawn_debris_system(
             for _ in 0..count.clamp(1, 14) {
                 let offset = Vec3::new(next(), next() * 0.5 + 0.25, next()) * spread;
                 let size = d.size.min(0.8) * (0.6 + 0.4 * (next() + 0.5));
-                commands.spawn((
-                    Transform::from_translation(d.position + offset.as_dvec3())
-                        .with_scale(Vec3::splat(size * 0.4)),
-                    MeshRenderer::new(
-                        MeshRef::Handle(assets.dust_mesh),
-                        MaterialRef::Handle(assets.dust(d.darkness, 1.0)),
-                    )
-                    .without_shadows(),
-                    DustPuff {
-                        age: 0.0,
-                        life: 2.5 + 1.5 * (next() + 0.5),
-                        start_size: size * 0.4,
-                        end_size: size * 1.6,
-                        velocity: d.velocity + Vec3::new(next(), 0.3 + next() * 0.2, next()) * 0.8,
-                        darkness: d.darkness,
-                        opacity: 1.0,
-                    },
-                ));
+                let transform = Transform::from_translation(d.position + offset.as_dvec3())
+                    .with_scale(Vec3::splat(size * 0.4));
+                let mut puff = commands.spawn(transform);
+                match assets.dust_sprite {
+                    // A soft camera-facing cloud, lit by the sun and the sky.
+                    Some(image) => {
+                        let c = DestructionAssets::dust_color(d.darkness);
+                        let frame = ((next() + 0.5) * DUST_FRAMES as f32) as u32;
+                        puff.insert(
+                            Sprite::new(image, [DUST_SPRITE_SCALE; 2])
+                                .with_atlas(SpriteAtlas::grid(DUST_FRAMES, 1))
+                                .with_frame(frame.min(DUST_FRAMES - 1))
+                                .with_billboard(Billboard::FaceCamera)
+                                .with_alpha(SpriteAlpha::Blend)
+                                .with_color([c[0], c[1], c[2], 0.0])
+                                .lit()
+                                .with_roundness(0.8)
+                                .with_translucency(0.5),
+                        );
+                    }
+                    None => {
+                        puff.insert(
+                            MeshRenderer::new(
+                                MeshRef::Handle(assets.dust_mesh),
+                                MaterialRef::Handle(assets.dust(d.darkness, 1.0)),
+                            )
+                            .without_shadows(),
+                        );
+                    }
+                }
+                puff.insert(DustPuff {
+                    age: 0.0,
+                    life: 2.5 + 1.5 * (next() + 0.5),
+                    start_size: size * 0.4,
+                    end_size: size * 1.6,
+                    velocity: d.velocity + Vec3::new(next(), 0.3 + next() * 0.2, next()) * 0.8,
+                    darkness: d.darkness,
+                    opacity: 1.0,
+                });
             }
         }
     } else {
@@ -1037,7 +1068,16 @@ pub fn age_debris_system(
         Option<&Spark>,
         &Transform,
     )>,
-    mut dust: Query<(Entity, &mut DustPuff, &mut Transform, &mut MeshRenderer), Without<Debris>>,
+    mut dust: Query<
+        (
+            Entity,
+            &mut DustPuff,
+            &mut Transform,
+            Option<&mut MeshRenderer>,
+            Option<&mut Sprite>,
+        ),
+        Without<Debris>,
+    >,
     mut stats: ResMut<DestructionStats>,
     mut order: Local<Vec<(f32, Entity)>>,
 ) {
@@ -1121,7 +1161,7 @@ pub fn age_debris_system(
         return;
     };
     let mut puffs = 0;
-    for (e, mut p, mut t, mut r) in &mut dust {
+    for (e, mut p, mut t, mesh, sprite) in &mut dust {
         let (p, t) = (&mut *p, &mut *t);
         puffs += 1;
         p.age += dt;
@@ -1138,9 +1178,14 @@ pub fn age_debris_system(
         p.velocity.y *= 1.0 / (1.0 + 0.6 * dt);
         t.translation += (p.velocity * dt).as_dvec3();
         let opacity = p.opacity * (1.0 - k).powf(1.5) * (k * 8.0).min(1.0);
-        let handle = assets.dust(p.darkness, opacity);
-        if r.material != MaterialRef::Handle(handle) {
-            r.material = MaterialRef::Handle(handle);
+        if let Some(mut r) = mesh {
+            let handle = assets.dust(p.darkness, opacity);
+            if r.material != MaterialRef::Handle(handle) {
+                r.material = MaterialRef::Handle(handle);
+            }
+        }
+        if let Some(mut sprite) = sprite {
+            sprite.color[3] = opacity * DUST_SPRITE_ALPHA;
         }
     }
     stats.dust = puffs;
