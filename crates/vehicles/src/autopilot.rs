@@ -21,7 +21,7 @@ use engine_world::{Gravity, VehicleControls};
 
 use crate::aero::Aircraft;
 use crate::chassis::{VehicleForces, VehicleTelemetry};
-use crate::ship::{AssistMode, Spacecraft};
+use crate::ship::{AssistMode, Spacecraft, ThrusterRole};
 use crate::wheels::Wheels;
 
 /// What the autopilot does.
@@ -271,6 +271,7 @@ pub fn autopilot_system(
                             &mut controls,
                             forces,
                             tel,
+                            aircraft,
                             &mut ship,
                             &gravity,
                             *target_altitude_m,
@@ -791,12 +792,43 @@ fn stall_demo(
     }
 }
 
+/// Seconds to apoapsis the gravity turn keeps at least, so the climb never stalls.
+const CLIMB_HOLD_S: f32 = 45.0;
+
+/// Circular orbit speed `altitude` m above the nearest body's surface (None in flat worlds).
+fn circular_speed(gravity: &Gravity, at: DVec3, altitude: f64) -> Option<f32> {
+    let b = gravity.bodies.iter().min_by(|a, b| {
+        (at - a.center)
+            .length()
+            .total_cmp(&(at - b.center).length())
+    })?;
+    Some((b.mu / (b.radius + altitude)).sqrt() as f32)
+}
+
+/// How fast the vertical speed falls with the engines off (m/s²): gravity, less what the
+/// sideways speed's curve round the planet takes off it (0 in orbit).
+fn sink_rate(f: &crate::chassis::VehicleFrame, gravity: &Gravity, up: Vec3) -> f32 {
+    let v_side = (f.linear - up * f.linear.dot(up)).length();
+    let r = gravity
+        .bodies
+        .iter()
+        .map(|b| (f.com - b.center).length())
+        .fold(f64::MAX, f64::min);
+    let curve = if r < f64::MAX {
+        v_side * v_side / r as f32
+    } else {
+        0.0
+    };
+    (f.gravity.length() - curve).max(0.0)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ascend(
     ap: &mut Autopilot,
     c: &mut VehicleControls,
     forces: &VehicleForces,
     tel: &VehicleTelemetry,
+    aircraft: Option<Mut<Aircraft>>,
     ship: &mut Spacecraft,
     gravity: &Gravity,
     target_altitude: f64,
@@ -831,6 +863,13 @@ fn ascend(
         return;
     }
     let start = *ap.start_altitude.get_or_insert(alt);
+    // Gear up once clear of the pad.
+    if let Some(mut a) = aircraft {
+        let down = alt - start < 30.0;
+        if a.gear_down != down {
+            a.gear_down = down;
+        }
+    }
     if ap.phase.is_empty() {
         // A ship standing on its tail goes straight up; one lying on its belly (a VTOL
         // spaceplane) lifts off on its hover engines first and then stands up.
@@ -876,7 +915,33 @@ fn ascend(
             ship.assist.mode = AssistMode::Rotation;
             let x = ((alt - turn_start) / (turn_end - turn_start).max(1.0)).clamp(0.0, 1.0);
             let angle = (x.sqrt() * 85f64.to_radians()) as f32; // from vertical
-            let dir = up * angle.cos() + heading * angle.sin();
+            // Never let the climb stall: hold the time to apoapsis near `CLIMB_HOLD_S`. On a
+            // full-size planet the pitch program alone levels off at 50 km with orbital speed
+            // still far off, and the ship sinks back into thick air at Mach 16.
+            let v_up = f.linear.dot(up);
+            let sink = sink_rate(f, gravity, up);
+            let main: f32 = ship
+                .thrusters
+                .iter()
+                .filter(|t| t.role == ThrusterRole::Main)
+                .map(|t| t.max_thrust_n)
+                .sum();
+            let accel = (main / f.mass.max(1.0)).max(0.1);
+            // …and climb fast enough to coast up to the target height by the time the speed
+            // round the planet is nearly orbital, so apoapsis reaches it with the burn.
+            let v_side = (f.linear - up * v_up).length();
+            let to_go = (target_altitude - alt).max(0.0) as f32;
+            let orbital = circular_speed(gravity, f.com, target_altitude).unwrap_or(f32::MAX);
+            let coast_up = (2.0 * sink * to_go).sqrt() * (v_side / orbital).clamp(0.0, 1.0);
+            let climb = (sink * CLIMB_HOLD_S).max(coast_up);
+            let needed = ((sink + (climb - v_up) / 8.0) / accel)
+                .clamp(-0.3, 1.0)
+                .asin();
+            // The program sets the floor low down; past its end the hold steers alone (nose a
+            // little below the horizon if need be), so apoapsis comes soon after the burn.
+            let floor = (std::f32::consts::FRAC_PI_2 - angle) * (1.0 - x as f32) - 0.3 * x as f32;
+            let elevation = needed.max(floor);
+            let dir = up * elevation.sin() + heading * elevation.cos();
             // Never point far from where we're going once moving fast (less drag, no tumbling).
             let vel = f.linear.normalize_or_zero();
             let dir = if f.linear.length() > 200.0 && f.air.density > 0.01 {
@@ -904,7 +969,10 @@ fn ascend(
             if tel.apoapsis_m < target_altitude * 0.98 {
                 c.throttle = 0.3;
             }
-            if tel.vertical_speed < 40.0 && alt > target_altitude * 0.8 {
+            // Near apoapsis: climbing slowly, or about to stop climbing.
+            let v_up = f.linear.dot(up);
+            let soon = v_up < sink_rate(f, gravity, up) * 20.0;
+            if (tel.vertical_speed < 40.0 || soon) && alt > target_altitude * 0.8 {
                 ap.set_phase("circularize");
             }
         }
@@ -916,7 +984,10 @@ fn ascend(
                 .normalize_or_zero();
             aim(c, dir, up);
             let pe_short = (target_altitude * 0.9 - tel.periapsis_m).max(0.0);
-            c.throttle = (pe_short / 20_000.0).clamp(0.05, 1.0) as f32;
+            // Ease off as periapsis comes up: near orbital speed it rises ~100 km a second at
+            // full thrust, and the engines take a moment to shut down.
+            let ease = (target_altitude * 0.5).max(1_000.0);
+            c.throttle = (pe_short / ease).clamp(0.05, 1.0) as f32;
             if tel.periapsis_m >= target_altitude * 0.9 {
                 ap.set_phase("orbit");
             }
