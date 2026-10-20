@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use engine::prelude::*;
-use engine_character::{Appearance, BuiltCharacter, CharacterDebug};
+use engine_character::{Appearance, AppearanceExt, BuiltCharacter, CharacterDebug};
 
 use crate::Subject;
 use crate::studio::Orbit;
