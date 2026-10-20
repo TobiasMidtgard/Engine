@@ -357,7 +357,8 @@ pub fn places() -> Vec<Place> {
         place(
             "night",
             "The village at night",
-            (DVec3::new(-26.0, 6.0, 30.0), DVec3::new(10.0, 2.0, -10.0)),
+            // Across the plaza between its planter trees, to the lit fountain.
+            (DVec3::new(-30.0, 8.0, 6.0), DVec3::new(8.0, 0.5, -2.0)),
             22.5,
         ),
     ];
