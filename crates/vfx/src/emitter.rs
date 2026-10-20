@@ -501,7 +501,8 @@ impl Instance {
         let a1 = a0 + dt;
         let effect_end = self.desc.duration.unwrap_or(f32::INFINITY);
         let emitting = self.emitting_now();
-        let moved = from.distance(to) as f32;
+        // Meters in the effect's own scale, so a small copy lays its smaller particles closer.
+        let moved = from.distance(to) as f32 / self.scale.max(0.01);
         let rate_mul = self.rate.max(0.0) * rate_scale;
         for (i, run) in self.emitters.iter_mut().enumerate() {
             let desc = &self.desc.emitters[i];
@@ -916,7 +917,9 @@ fn tick_instance(
         // Sized for at least rate 1, so an effect started thin can still be turned up.
         let rate_mul = inst.rate.max(1.0) * rate_scale;
         for (i, run) in inst.emitters.iter_mut().enumerate() {
-            let cap = inst.desc.layer_capacity(i, rate_mul.max(0.01));
+            let cap = inst
+                .desc
+                .layer_capacity_at_scale(i, rate_mul.max(0.01), inst.scale);
             let fed = inst.desc.is_fed(i);
             let cursor = if fed { pool.alloc_cursor() } else { None };
             match pool.alloc(cap, limit) {
@@ -1262,6 +1265,37 @@ mod tests {
         let run = inst.emitters[0].runs[0];
         assert_eq!(run.from, DVec3::new(4.5, 0.0, 0.0));
         assert_eq!(run.to, DVec3::new(5.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn distance_spawning_counts_meters_at_the_effects_scale() {
+        // At half scale the particles are half the size, so twice as many lay a trail as dense.
+        let d = desc(
+            EmitterDesc {
+                rate_per_meter: 10.0,
+                ..Default::default()
+            },
+            None,
+        );
+        let (mut inst, mut pool) = instance(d);
+        inst.scale = 0.5;
+        let mut stats = VfxStats::default();
+        let mut total = 0;
+        for i in 1..=10 {
+            inst.prev_pos = inst.pos;
+            inst.pos = DVec3::new(i as f64 * 0.5, 0.0, 0.0);
+            tick_instance(
+                &mut inst,
+                0.1,
+                &mut pool,
+                1 << 20,
+                1.0,
+                &mut Vec::new(),
+                &mut stats,
+            );
+            total += spawned(&inst);
+        }
+        assert_eq!(total, 100);
     }
 
     #[test]
