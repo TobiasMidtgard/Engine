@@ -12,6 +12,11 @@
 //! close (the shadowed rubble between the stones), stone-colored from afar, where it is the
 //! whole wall.
 //!
+//! Up close the merged rocks give way to hero stones ([`Placed`]): every stone as its own
+//! entity, one of a small palette of dressed building stones ([`HERO_CLASSES`], Rendering's
+//! [`engine::render::rock::WallStone`]: split faces, chipped arrises, lichen and grime, real
+//! displaced relief), stretched to the stone's box.
+//!
 //! Build frame: the segment runs along X from `-SEGMENT / 2` to `SEGMENT / 2`, centered on
 //! Z = 0, with the ground at y = 0 (the foot goes [`SINK`] meters below it). A head is built
 //! with its outer face at X = 0, the wall it ends running off toward -X.
@@ -19,6 +24,7 @@
 use crate::village::Mb;
 use engine::core::math::{hash01, smoothstep};
 use engine::prelude::*;
+use engine::render::rock::StoneKind;
 
 /// Length of one segment, m. Walls stretch theirs a little to fit a run exactly.
 pub const SEGMENT: f32 = 5.0;
@@ -42,8 +48,11 @@ pub const HEAD_DEPTH: f32 = 0.55;
 pub struct WallSegment {
     /// The stones (virtual geometry: the renderer picks their detail).
     pub near: Mesh,
+    /// Where each of `near`'s stones is, for the hero stones up close.
+    pub placed: Vec<Placed>,
     /// The last segment of a run: its stones stop short of the +X end, where the head goes.
     pub near_end: Mesh,
+    pub placed_end: Vec<Placed>,
     /// The core between the faces: dark, for behind the stones. Open at its ends, which the
     /// neighbors close.
     pub core: Mesh,
@@ -56,6 +65,88 @@ pub struct WallSegment {
 /// A wall head's stones.
 pub struct WallHead {
     pub near: Mesh,
+    pub placed: Vec<Placed>,
+}
+
+/// Hero stone classes: the kind of stone and the size its palette meshes are built at
+/// (along the wall or the stone's own x, up, into the wall). A placed stone takes the class
+/// for its part of the wall nearest its size and is stretched to fit.
+pub const HERO_CLASSES: [(StoneKind, Vec3); 8] = [
+    // Face stones, long to small, and the pinning stones.
+    (StoneKind::SplitFace, Vec3::new(0.6, 0.26, 0.3)),
+    (StoneKind::SplitFace, Vec3::new(0.4, 0.2, 0.28)),
+    (StoneKind::SplitFace, Vec3::new(0.25, 0.15, 0.25)),
+    (StoneKind::SplitFace, Vec3::new(0.12, 0.06, 0.12)),
+    // Coping stones on edge.
+    (StoneKind::SplitFace, Vec3::new(0.11, 0.24, 0.5)),
+    // Through-stones: bedded slabs across the wall.
+    (StoneKind::Slab, Vec3::new(0.32, 0.15, 0.9)),
+    // A head's capstone.
+    (StoneKind::Slab, Vec3::new(0.52, 0.19, 0.54)),
+    // A head's courses, laid across the wall.
+    (StoneKind::SplitFace, Vec3::new(0.4, 0.22, 0.8)),
+];
+
+/// Palette meshes per hero class (different stones of the same size).
+pub const HERO_VARIANTS: usize = 4;
+
+/// What part of the wall a stone is.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Role {
+    Face,
+    Coping,
+    Through,
+    Cap,
+    HeadCourse,
+}
+
+/// A stone as laid: its center and axes (along, up, out of the face; a reflection on one face
+/// of the wall) in the build frame, its box, its palette class and variant, and a shade.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placed {
+    pub center: Vec3,
+    pub ax: [Vec3; 3],
+    pub size: Vec3,
+    pub class: u8,
+    pub variant: u8,
+    pub shade: u8,
+}
+
+/// Hero stone shades (a material per shade multiplies the palette's own colors).
+pub const HERO_SHADES: usize = 4;
+
+/// The class for a stone of `size` in `role`.
+fn hero_class(role: Role, size: Vec3) -> u8 {
+    match role {
+        Role::Face => (0..4)
+            .min_by(|&a, &b| {
+                let miss = |c: usize| {
+                    let r = size / HERO_CLASSES[c].1;
+                    r.x.ln().abs() + r.y.ln().abs() + r.z.ln().abs()
+                };
+                miss(a).total_cmp(&miss(b))
+            })
+            .unwrap_or(1) as u8,
+        Role::Coping => 4,
+        Role::Through => 5,
+        Role::Cap => 6,
+        Role::HeadCourse => 7,
+    }
+}
+
+/// Stones being laid: the merged rocks and where each stone went.
+struct Laying {
+    mb: Mb,
+    placed: Vec<Placed>,
+}
+
+impl Laying {
+    fn new() -> Self {
+        Self {
+            mb: Mb::new(false),
+            placed: Vec::new(),
+        }
+    }
 }
 
 /// Half the width of the body at height `y` (the faces batter in toward the top).
@@ -109,9 +200,13 @@ const FACE_UNDER_HEAD: f32 = 0.2;
 
 /// Segment variant `seed`: stones up close, their fronts, and the two cores.
 pub fn segment(seed: u64) -> WallSegment {
+    let (near, placed) = stones(seed, false);
+    let (near_end, placed_end) = stones(seed, true);
     WallSegment {
-        near: stones(seed, false),
-        near_end: stones(seed, true),
+        near,
+        placed,
+        near_end,
+        placed_end,
         core: core(DARK, DARK_TOP, CoreEnds::Open),
         core_end: core(DARK, DARK_TOP, CoreEnds::UnderHead),
         core_far: core(
@@ -124,23 +219,35 @@ pub fn segment(seed: u64) -> WallSegment {
 
 /// Head variant `seed`.
 pub fn head(seed: u64) -> WallHead {
-    WallHead {
-        near: head_stones(seed),
-    }
+    let (near, placed) = head_stones(seed);
+    WallHead { near, placed }
 }
 
 /// One weathered stone: `center` and axes `ax` (along, up, out of the face), half extents
-/// `half`, shaded for a stone at height `y` in the wall.
+/// `half`, shaded for a stone at height `y` in the wall, playing `role`.
+#[allow(clippy::too_many_arguments)]
 fn stone(
-    mb: &mut Mb,
+    l: &mut Laying,
     rng: &mut Rng,
     seed: &mut u64,
     center: Vec3,
     ax: [Vec3; 3],
     half: Vec3,
     y: f32,
+    role: Role,
 ) {
     *seed += 1;
+    // The hero stone: a dressed block filling the box (a hair bigger, so neighbors touch).
+    let size = half * 2.0 * Vec3::new(1.04, 1.04, 1.0);
+    l.placed.push(Placed {
+        center,
+        ax,
+        size,
+        class: hero_class(role, size),
+        variant: (*seed % HERO_VARIANTS as u64) as u8,
+        shade: (hash01(*seed as i64, 0, 3, 0x51) * HERO_SHADES as f32) as u8 % HERO_SHADES as u8,
+    });
+    let mb = &mut l.mb;
     // (The rock texture is pale limestone; the tints darken it toward weathered gritstone.)
     let tint = stone_tint(rng, y) * rng.range(0.58, 0.72);
     // Rocks are rounder than the boxes they fill: a little bigger along the face, so their
@@ -190,9 +297,9 @@ fn soft_clamp(v: f32, limit: f32, k: f32) -> f32 {
 
 /// Both faces' stones in uneven courses, pinning stones, through-stones and the coping (which
 /// leaves room for a head at the +X end when `end` is set).
-fn stones(seed: u64, end: bool) -> Mesh {
+fn stones(seed: u64, end: bool) -> (Mesh, Vec<Placed>) {
     let mut rng = Rng::new(seed);
-    let mut mb = Mb::new(false);
+    let mut l = Laying::new();
     let x0 = -SEGMENT * 0.5;
     let x1 = SEGMENT * 0.5;
     let mut stone_seed = seed * 10_000;
@@ -253,7 +360,16 @@ fn stones(seed: u64, end: bool) -> Mesh {
                     * Quat::from_axis_angle(Vec3::X, rng.range(-0.06, 0.06));
                 let ax = [tilt * Vec3::X, tilt * up, tilt * n];
                 let half = Vec3::new((b - a - gap) * 0.5, (sh - gap * 0.6) * 0.5, depth * 0.5);
-                stone(&mut mb, &mut rng, &mut stone_seed, center, ax, half, yc);
+                stone(
+                    &mut l,
+                    &mut rng,
+                    &mut stone_seed,
+                    center,
+                    ax,
+                    half,
+                    yc,
+                    Role::Face,
+                );
                 // A pinning stone wedged into the joint above a short stone.
                 if sh < h * 0.85 && rng.chance(0.5) {
                     let py = yc + sh * 0.5 + (h - sh) * 0.35;
@@ -262,13 +378,14 @@ fn stones(seed: u64, end: bool) -> Mesh {
                     let s = (h - sh).clamp(0.04, 0.08);
                     let half = Vec3::new(s * rng.range(0.9, 1.6), s * 0.5, 0.06);
                     stone(
-                        &mut mb,
+                        &mut l,
                         &mut rng,
                         &mut stone_seed,
                         p,
                         [Vec3::X, up, n],
                         half,
                         py,
+                        Role::Face,
                     );
                 }
             }
@@ -285,23 +402,24 @@ fn stones(seed: u64, end: bool) -> Mesh {
         let rot = Quat::from_rotation_y(rng.range(-0.12, 0.12));
         let half = Vec3::new(rng.range(0.12, 0.2), rng.range(0.06, 0.09), w);
         stone(
-            &mut mb,
+            &mut l,
             &mut rng,
             &mut stone_seed,
             Vec3::new(x, y, 0.0),
             [rot * Vec3::X, Vec3::Y, rot * Vec3::Z],
             half,
             y,
+            Role::Through,
         );
         x += rng.range(1.0, 1.7);
     }
-    coping(&mut mb, &mut rng, &mut stone_seed, x0, top_end);
-    mb.mesh
+    coping(&mut l, &mut rng, &mut stone_seed, x0, top_end);
+    (l.mb.mesh, l.placed)
 }
 
 /// Coping from `x0` to `x1`: flat stones set on edge across the top, tall and short in turn,
 /// leaning a little.
-fn coping(mb: &mut Mb, rng: &mut Rng, seed: &mut u64, x0: f32, x1: f32) {
+fn coping(l: &mut Laying, rng: &mut Rng, seed: &mut u64, x0: f32, x1: f32) {
     let mut x = x0 + 0.02;
     let mut tall = rng.chance(0.5);
     let lean = rng.range(-0.1, 0.1);
@@ -318,13 +436,14 @@ fn coping(mb: &mut Mb, rng: &mut Rng, seed: &mut u64, x0: f32, x1: f32) {
             * Quat::from_rotation_y(rng.range(-0.1, 0.1));
         let center = Vec3::new(x + t * 0.5, BODY + h * 0.5 - 0.04, rng.range(-0.02, 0.02));
         stone(
-            mb,
+            l,
             rng,
             seed,
             center,
             [rot * Vec3::X, rot * Vec3::Y, rot * Vec3::Z],
             Vec3::new(t * 0.5 - 0.008, h * 0.5, w),
             BODY + h,
+            Role::Coping,
         );
         x += t;
     }
@@ -332,9 +451,9 @@ fn coping(mb: &mut Mb, rng: &mut Rng, seed: &mut u64, x0: f32, x1: f32) {
 
 /// A head: courses of stones laid across the whole wall at its end, long and short in turn
 /// along it so they bond into the wall's faces, with a coping stone on top.
-fn head_stones(seed: u64) -> Mesh {
+fn head_stones(seed: u64) -> (Mesh, Vec<Placed>) {
     let mut rng = Rng::new(seed);
-    let mut mb = Mb::new(false);
+    let mut l = Laying::new();
     let mut stone_seed = seed * 10_000 + 5_000;
     let mut y = -SINK;
     let mut long = rng.chance(0.5);
@@ -358,28 +477,30 @@ fn head_stones(seed: u64) -> Mesh {
             * Quat::from_rotation_x(rng.range(-0.05, 0.05));
         let center = Vec3::new(-reach * 0.5 + rng.range(-0.01, 0.02), yc, 0.0);
         stone(
-            &mut mb,
+            &mut l,
             &mut rng,
             &mut stone_seed,
             center,
             [rot * Vec3::X, rot * Vec3::Y, rot * Vec3::Z],
             Vec3::new(reach * 0.5, h * 0.5 - 0.012, w),
             yc,
+            Role::HeadCourse,
         );
         y += h;
     }
     // A big flat stone capping the head.
     let h = rng.range(0.16, 0.22);
     stone(
-        &mut mb,
+        &mut l,
         &mut rng,
         &mut stone_seed,
         Vec3::new(-0.24, BODY + h * 0.5 - 0.03, 0.0),
         [Vec3::X, Vec3::Y, Vec3::Z],
         Vec3::new(0.26, h * 0.5, TOP * 0.5 + 0.04),
         BODY + h,
+        Role::Cap,
     );
-    mb.mesh
+    (l.mb.mesh, l.placed)
 }
 
 /// Which ends of a core are closed.
@@ -496,6 +617,28 @@ mod tests {
         );
         assert!(max.z > half_width(0.0) - 0.02 && min.z < -half_width(0.0) + 0.02);
         assert!(min.y < -SINK + 0.05 && max.y > BODY, "{min:?} {max:?}");
+    }
+
+    #[test]
+    fn every_stone_has_a_hero_that_fits_its_box() {
+        let s = segment(3);
+        let h = head(5);
+        for (placed, least) in [(&s.placed, 60), (&s.placed_end, 50), (&h.placed, 5)] {
+            assert!(placed.len() >= least, "{}", placed.len());
+            for p in placed {
+                assert!((p.class as usize) < HERO_CLASSES.len());
+                assert!((p.variant as usize) < HERO_VARIANTS);
+                assert!((p.shade as usize) < HERO_SHADES);
+                // Stretched, not distorted beyond recognition.
+                let r = p.size / HERO_CLASSES[p.class as usize].1;
+                assert!(r.min_element() > 0.25 && r.max_element() < 3.0, "{p:?} {r}");
+                // An orthonormal frame (a reflection on one face).
+                let m = Mat3::from_cols(p.ax[0], p.ax[1], p.ax[2]);
+                assert!((m.determinant().abs() - 1.0).abs() < 1e-3, "{p:?}");
+            }
+        }
+        // A stone per merged rock: about 2,500 triangles each.
+        assert!(tris(&s.near) / s.placed.len() > 1000);
     }
 
     #[test]
