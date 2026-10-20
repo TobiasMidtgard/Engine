@@ -122,6 +122,10 @@ fn cloud_density(p: vec3<f32>, h: f32, w: vec4<f32>, with_detail: bool) -> f32 {
         // Wispy at the bottom, billowy at the top.
         let m = mix(dfbm, 1.0 - dfbm, saturate(h01 * 5.0));
         d = saturate(remap(d, m * 0.45, 1.0, 0.0, 1.0));
+        // Real clouds end abruptly: droplets evaporate within meters of the edge. Lift the
+        // thin fringe the noise leaves so billows get crisp outlines instead of a cotton-wool
+        // blur; the cores keep their density.
+        d = max(d, 0.3 * smoothstep(0.0, 0.1, d));
     }
     // Towers are far denser than fair-weather heaps: solid, hard-edged, dark underneath.
     return d * w.a * (1.0 + 1.5 * tower);
@@ -159,6 +163,9 @@ fn near_share(p: vec3<f32>) -> f32 {
     let t = saturate((ground - clouds.far.x) / max(clouds.far.y - clouds.far.x, 1e-3));
     return 1.0 - clouds.far.z * t * t * (3.0 - 2.0 * t);
 }
+
+// How much more cloud than the light march samples shades a point (see march_clouds).
+const SELF_SHADOW: f32 = 2.0;
 
 // Interleaved gradient noise: a stable per-pixel start offset that hides banding.
 fn ign(px: vec2<f32>) -> f32 {
@@ -283,12 +290,16 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
             // et al.): sunlit sides bright, shaded sides several times darker but never black.
             // Clouds scatter ~all light they absorb (albedo ≈ 1), so the higher orders carry
             // most of the energy of a thick cloud.
-            var light = exp(-od) * cloud_phase(cos_t, 1.0);
+            // The march toward the light skips most detail noise and thins its far samples, so
+            // it sees about half the cloud really there: without the doubling, heaps lit from
+            // the side or seen from above looked evenly bright, with no shaded flanks.
+            let shade = od * SELF_SHADOW;
+            var light = exp(-shade) * cloud_phase(cos_t, 1.0);
             var oa = 0.25;
             var ob = 1.2;
             var oc = 0.5;
             for (var o = 1; o < 4; o++) {
-                light += ob * cloud_phase(cos_t, oc) * exp(-od * oa);
+                light += ob * cloud_phase(cos_t, oc) * exp(-shade * oa);
                 oa *= 0.25;
                 ob *= 0.6;
                 oc *= 0.5;
