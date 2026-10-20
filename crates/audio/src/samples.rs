@@ -192,7 +192,7 @@ impl SampleBank {
     }
 
     /// Takes for a surface material name (or the surface it borrows them from, like `tile`
-    /// from `concrete`).
+    /// from `concrete` and `stone` from `rock`).
     pub fn takes(&self, surface: &str) -> Option<&TakeSet> {
         self.surfaces
             .get(surface)
@@ -284,7 +284,8 @@ fn centroid(x: &[f32], sr: f32) -> f32 {
 /// Surfaces that sound close enough to borrow another's recordings.
 fn alias(surface: &str) -> Option<&'static str> {
     Some(match surface {
-        "asphalt" | "tile" | "rock" | "stone" => "concrete",
+        "asphalt" | "tile" => "concrete",
+        "stone" => "rock",
         "planks" => "wood",
         _ => return None,
     })
@@ -420,7 +421,7 @@ const MAX_TAKES: usize = 24;
 
 /// Highest peak a take may have over its loudness (dB) before its transient is limited:
 /// about the synthesized steps' crest, so recorded steps stay as peak-safe as they were.
-pub const MAX_CREST_DB: f32 = 22.0;
+pub const MAX_CREST_DB: f32 = 20.0;
 
 /// Cut a recording into takes (see the [module docs](self)).
 pub fn takes_from_recording(name: &str, x: &[f32], sr: f32) -> Vec<Take> {
@@ -489,22 +490,25 @@ pub fn takes_from_recording(name: &str, x: &[f32], sr: f32) -> Vec<Take> {
 }
 
 /// Scale a take to unit [`loudness`], limiting its transient to [`MAX_CREST_DB`] over it
-/// first. False for silence.
+/// first. A take so sharp that limiting keeps eating its loudness ends up a little quieter
+/// rather than over the crest. False for silence.
 fn normalize(pcm: &mut [f32], sr: f32) -> bool {
-    for _ in 0..2 {
+    let ceiling = db(MAX_CREST_DB);
+    for _ in 0..6 {
         let l = loudness(pcm, sr);
         if l <= 1e-7 {
             return false;
         }
         pcm.iter_mut().for_each(|v| *v /= l);
-        let ceiling = db(MAX_CREST_DB);
-        if pcm.iter().all(|v| v.abs() <= ceiling * 1.02) {
+        if pcm.iter().all(|v| v.abs() <= ceiling * 1.05) {
             return true;
         }
         limit(pcm, ceiling, sr);
     }
-    let l = loudness(pcm, sr);
-    pcm.iter_mut().for_each(|v| *v /= l);
+    let peak = pcm.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    if peak > ceiling {
+        pcm.iter_mut().for_each(|v| *v *= ceiling / peak);
+    }
     true
 }
 

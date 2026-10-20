@@ -19,7 +19,7 @@ the same grass sounds different wet, frozen, snowed on or burnt.
   squelches, puddles splash, snow cover crunches over whatever is under it, burnt ground
   crackles, mud freezes hard below 0 °C, and wading drags through water.
 - **Recorded footsteps** on the eleven trail grounds (grass, mud, snow, ice, gravel, wood,
-  metal, concrete, sand, leaves, puddles): CC0 and CC-BY field recordings from Freesound
+  metal, concrete, sand, leaves, puddles) and rock: CC0 and CC-BY field recordings from Freesound
   (`assets/manifests/audio.toml`, about 10 MB) are cut into about 490 single-step takes at
   startup (on a background thread; jumps, scrapes and odd steps left out), walking and
   running ones apart, each levelled to the loudness of the synthesized step it replaces.
@@ -28,8 +28,8 @@ the same grass sounds different wet, frozen, snowed on or burnt.
   synthesis adds only what the recording lacks (rain's squelch, a puddle's splash, a heavy
   walker's thump) and takes over when the ground has changed too much (frozen mud) or there
   are no takes (other grounds, wheels, falling bodies, CI). Deep snow plays snow and puddles
-  play water whatever is under them. Tile, asphalt, rock and stone borrow concrete's, planks
-  wood's.
+  play water whatever is under them. Rock has its own takes too; tile and asphalt borrow
+  concrete's, stone rock's and planks wood's.
 - **Impacts** from physics contacts (what hit what, how hard), **splashes** from
   `WaterSplash`, **explosions** from `WorldImpulse`, **bullet whizzes and supersonic cracks**
   from `ProjectileTrace` passing near the listener, **whooshes** from melee, dash and spell

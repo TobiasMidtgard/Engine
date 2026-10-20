@@ -149,7 +149,7 @@ author = "vestibule-door"
 
 # Dry shoes on a rock floor: walk and run.
 [[file]]
-path = "audio/footsteps/concrete/vrymaa_rock_770084.ogg"
+path = "audio/footsteps/rock/vrymaa_rock_770084.ogg"
 url = "https://cdn.freesound.org/previews/770/770084_13973196-hq.ogg"
 sha256 = "9b782fba48f773b649e5729983ed980f0c8429c1c861d2ea8251285168c4eade"
 license = "CC0-1.0"
