@@ -76,8 +76,6 @@ const LEG_MID: u8 = 0;
 const LEG_LOW: u8 = 4;
 /// Feet (pastern, paw) of legs 0..4.
 const LEG_FOOT: u8 = 8;
-/// Hooves of legs 0..4.
-const HOOF: u8 = 12;
 /// Eyes and nose (or beak).
 const GLOSS: u8 = 16;
 const NECK2: u8 = 17;
@@ -96,6 +94,12 @@ const MANE: u8 = 24;
 const UPPER_TUSKS: u8 = 26;
 /// How far a boar's crests slide up out of the coat when raised (rig m).
 const MANE_LIFT: f32 = 0.045;
+/// A deer's flared rump patch.
+const RUMP: u8 = 27;
+/// How far a deer's rump patch lies sunk in the coat (rig m), and how far further out it
+/// stands when flared.
+const RUMP_SINK: f32 = 0.022;
+const RUMP_FLARE: f32 = 0.008;
 
 fn part_of(piece: Piece) -> Part {
     match piece {
@@ -113,11 +117,11 @@ fn part_of(piece: Piece) -> Part {
         Piece::Tusks => Part::Beast(TUSKS),
         Piece::Mane(s) => Part::Beast(MANE + s),
         Piece::UpperTusks => Part::Beast(UPPER_TUSKS),
+        Piece::Rump => Part::Beast(RUMP),
         Piece::Leg(k, 0) => Part::Leg(k),
         Piece::Leg(k, 1) => Part::Beast(LEG_MID + k),
         Piece::Leg(k, 2) => Part::Beast(LEG_LOW + k),
         Piece::Leg(k, _) => Part::Beast(LEG_FOOT + k),
-        Piece::Hoof(k) => Part::Beast(HOOF + k),
         Piece::Wing(s, 0) => Part::Wing(s),
         Piece::Wing(s, 1) => Part::Wing(2 + s),
         Piece::Wing(s, _) => Part::Beast(WING_FOLDED + s),
@@ -265,7 +269,7 @@ impl Senses {
     }
 }
 
-const SLOTS: usize = 43;
+const SLOTS: usize = 44;
 
 fn slot(part: Part) -> Option<usize> {
     Some(match part {
@@ -278,7 +282,7 @@ fn slot(part: Part) -> Option<usize> {
         Part::Antler(_) => 7,
         Part::Leg(k) if k < 4 => 8 + k as usize,
         Part::Wing(w) if w < 4 => 12 + w as usize,
-        Part::Beast(b) if b <= UPPER_TUSKS => 16 + b as usize,
+        Part::Beast(b) if b <= RUMP => 16 + b as usize,
         _ => return None,
     })
 }
@@ -637,6 +641,8 @@ pub(super) struct Motion {
     /// How far it crouches (0..1); a rabbit sitting up, grazing and lying low (0..1).
     crouch: f32,
     blend: [f32; 3],
+    /// A deer's rump patch flared (0..1).
+    rump: f32,
 }
 
 /// This step's timing and motion in the animal's own frame.
@@ -1209,8 +1215,12 @@ const ROTARY_WOLF: [f32; 4] = [0.35, 1.45, 0.0, 0.9];
 const TRANSVERSE: [f32; 4] = [0.45, 0.55, 0.0, 0.1];
 /// A bounding leap: the hind feet push off together, the fore feet land together.
 const BOUND: [f32; 4] = [0.42, 0.45, 0.0, 0.02];
-/// A stot (pronk): all four together.
-const STOT: [f32; 4] = [0.0, 0.01, 0.02, 0.03];
+/// A stot (pronk): all four feet push off and land together.
+const STOT: [f32; 4] = [0.0; 4];
+/// A stot's ground contact (share of the cycle) and bounds a second: short contacts and long,
+/// high flights (nearly half a second, over a quarter of a metre up for a deer).
+const STOT_DUTY: f32 = 0.22;
+const STOT_FREQ: f32 = 1.65;
 
 const DEER_BUILD: Build = Build {
     gaits: &[WALK, TROT, ROTARY_DEER],
@@ -1364,6 +1374,8 @@ struct Look {
     stoop: f32,
     /// A boar's crests raised: 0 lying in the coat, 1 standing up.
     bristle: f32,
+    /// A deer's rump patch flared: 0 lying in the coat, 1 standing out.
+    flare: f32,
 }
 
 impl Look {
@@ -1383,6 +1395,7 @@ impl Look {
             jaw: l(self.jaw, o.jaw),
             stoop: l(self.stoop, o.stoop),
             bristle: l(self.bristle, o.bristle),
+            flare: l(self.flare, o.flare),
         }
     }
 
@@ -1510,9 +1523,12 @@ fn quad(
     let mut p = b.pattern(rig, m.gait, v_eff, bound);
     if stot > 0.0 && p.stepping {
         p.offsets = mix_phases(p.offsets, STOT, stot);
-        p.duty = p.duty.map(|d| lerp(d, 0.3, stot));
-        p.freq = lerp(p.freq, 2.0, stot);
-        p.lift = p.lift.map(|l| l * (1.0 + 1.5 * stot));
+        p.duty = p.duty.map(|d| lerp(d, STOT_DUTY, stot));
+        p.freq = lerp(p.freq, STOT_FREQ, stot);
+        // The feet go up with the body, the legs hanging straight under it.
+        let air = (1.0 - STOT_DUTY) / STOT_FREQ;
+        let high = 9.81 * air * air / 8.0 / scale;
+        p.lift = p.lift.map(|l| lerp(l, high.max(l), stot));
     }
     if fall.is_some() {
         // The dead don't step.
@@ -1522,11 +1538,17 @@ fn quad(
     // Hurt: shoved away from the blow, it staggers a step or two that way, and the stride
     // under way hitches (the rhythm checks for a beat before it picks up again).
     let size = rig.half_width / 0.2;
+    // Struck from the side, the forehand swings away about the hind hips and the front feet
+    // step out under it (rather than the body turning over planted legs).
+    let hips = Vec3::new(0.0, 0.0, rig.hind.joints[0].z);
+    let slew = k.flinch.map_or(0.0, |(t, from)| flinch_slew(t, from));
     if let Some((t, from)) = k.flinch {
         let shove = 0.14 * size * smooth(0.0, 0.08, t) * (1.0 - smooth(0.5, 0.9, t));
         let away = Vec2::new(-from.sin(), from.cos());
+        let swing = Quat::from_rotation_y(slew);
         for h in &mut p.home {
-            *h += away * shove;
+            let at = hips + swing * (Vec3::new(h.x, 0.0, h.y) - hips);
+            *h = Vec2::new(at.x, at.z) + away * shove;
         }
         let hitch = smooth(0.12, 0.25, t) * (1.0 - smooth(0.4, 0.65, t));
         p.freq *= 1.0 - 0.6 * hitch;
@@ -1536,16 +1558,31 @@ fn quad(
         m.reset_feet(k.now, k.v, &p);
     }
     // Killed on the move, the feet buckle under the body and skid on with it.
-    let plants = if fall.is_some() {
+    let mut plants = if fall.is_some() {
         m.step_feet(k.now, k.dt, 0.0, Vec2::ZERO, 0.0, &p)
     } else {
         m.step_feet(k.now, k.dt, k.turned, k.v, m.spin, &p)
     };
+    let arc = m.flight_arc(k.now, scale) * upright;
+    if stot > 0.0 {
+        // Stotting, the feet go up and come down with the body, the legs hanging straight.
+        for pl in plants.iter_mut().filter(|pl| !pl.down) {
+            pl.lift = lerp(pl.lift, arc, stot);
+        }
+    }
     let stepping = smooth(0.03, 0.3, v_eff) * upright;
     let run = smooth(0.4, 1.0, m.gait);
     let fast = smooth(b.gallop - 0.8, b.gallop, m.gait).max(bound);
 
-    let look = quad_look(beast, i, k, m, crouch, fast, run, plants, stepping);
+    let mut look = quad_look(beast, i, k, m, crouch, fast, run, plants, stepping);
+    // Stotting, a deer flares its rump patch (quickly up, slowly down again).
+    if k.fresh {
+        m.rump = stot;
+    } else {
+        let secs = if stot > m.rump { 0.04 } else { 0.35 };
+        ease_to(&mut m.rump, stot, secs, k.dt);
+    }
+    look.flare = m.rump;
 
     // The body rides on the feet: it sinks into each stance in the running gaits (front and
     // hind apart, so it pitches over the pair carrying it), vaults gently over the walk and
@@ -1556,12 +1593,13 @@ fn quad(
             comp[n / 2] = comp[n / 2].max((PI * pl.u).sin());
         }
     }
-    let bounce = lerp(b.bounce.0, b.bounce.1, fast) * run * stepping * (1.0 + bound);
+    // Stotting, the legs stay stiff: the body doesn't sink into the stance.
+    let bounce = lerp(b.bounce.0, b.bounce.1, fast) * run * stepping * (1.0 + bound) * (1.0 - stot);
     let vault = 0.012 * (1.0 - run) * stepping;
     let dy_f = -bounce * comp[0] + vault * (comp[0] - 0.6);
     let dy_h = -bounce * comp[1] + vault * (comp[1] - 0.6);
-    let arc = m.flight_arc(k.now, scale) * upright;
-    let low = (b.low * fast + 0.03 * run * (1.0 - fast)) * stepping;
+    // (Stotting, it doesn't crouch into its run.)
+    let low = (b.low * fast + 0.03 * run * (1.0 - fast)) * stepping * (1.0 - stot);
     // Weight thrown back setting off and forward stopping, settling after.
     let a_fwd = -m.accel.y;
     m.lean
@@ -1586,10 +1624,19 @@ fn quad(
     // one (hind feet pushed off behind, fore feet reaching out).
     let cycle = m.cycles.rem_euclid(1.0) as f32;
     let mut flex = b.flex * fast * stepping * (TAU * (cycle - b.gather)).cos();
+    // Stotting, the back is arched (the croup tucked, the loin humped).
+    let arch = 0.32 * stot;
+    flex += arch;
 
     let lz = rig.hind.joints[0].z - rig.front.joints[0].z;
     let mut pitch = (dy_f - dy_h) / lz + m.lean.x - look.stoop;
     let mut pos = rig.body + Vec3::new(0.0, (dy_f + dy_h) * 0.5 + arc - low + breath, m.surge.x);
+    // ... the loin humped up over straight legs: the fore half tips forward about the
+    // shoulders just as far as the tucked croup would lower the hips, so neither pair of legs
+    // bends.
+    let tip = -arch * (rig.hind.joints[0].z - rig.loin.z) / lz;
+    pitch += tip;
+    pos.y += (rig.front.joints[0].z - rig.body.z) * tip;
     let sink = beast.by(0.12, 0.13, 0.1) * crouch;
     pos.y -= sink;
     pitch -= 0.04 * crouch;
@@ -1627,10 +1674,11 @@ fn quad(
         pos.y -= 0.08 * size * duck + 0.08 * size * stumble;
         let sway = track(t, &[(0.0, 0.0, Both), (0.1, 1.0, Out), (0.6, 0.0, Both)]);
         roll += from.sin() * (0.24 * jolt + 0.08 * sway);
-        // And it slews: the forequarters swing away from a blow from the side, the planted
-        // legs left slanting under it (so a shove toward or away from the camera still reads
-        // from the side, in the legs).
-        twist = from.sin() * (0.2 * jolt + 0.14 * sway);
+        // And it slews: the forequarters swing away from a blow from the side, about the
+        // hind hips, the front feet stepping out after them.
+        twist = slew;
+        let at = hips + Quat::from_rotation_y(slew) * (Vec3::new(pos.x, 0.0, pos.z) - hips);
+        (pos.x, pos.z) = (at.x, at.z);
         // From behind, the rump jumps up.
         pitch -= 0.06 * jolt * (-from.cos()).max(0.0) + 0.22 * stumble;
         flex += 0.22 * duck;
@@ -1709,7 +1757,11 @@ fn quad(
         let front = n < 2;
         let pl = plants[n];
         if pl.down {
-            (-0.45 * smooth(0.65, 1.0, pl.u) * stepping, 0.0)
+            // (Stotting, it springs off the hoof on a stiff leg.)
+            (
+                -0.45 * smooth(0.65, 1.0, pl.u) * stepping * (1.0 - stot),
+                0.0,
+            )
         } else {
             // At speed a hind leg pushes off extended and peels off the ground before it
             // folds (folding at once would drag the hock along the ground behind).
@@ -1717,7 +1769,7 @@ fn quad(
             let u = ((pl.u - late) / (1.0 - late)).max(0.0);
             let fold = (PI * u.powf(0.75)).sin().max(0.0)
                 * if p.stepping { 1.0 } else { 0.5 }
-                * (1.0 - 0.75 * stot);
+                * (1.0 - stot);
             (
                 -(if front { 1.3 } else { 0.9 }) * fold,
                 g_flex * fold * if front { -1.0 } else { 0.75 },
@@ -2280,6 +2332,23 @@ fn quad_look(
     l
 }
 
+/// How far (rad, toward the left for a blow from the right) the forehand swings away from a
+/// blow `t` s ago from `from` (rad, the blow's bearing from the animal's heading).
+fn flinch_slew(t: f32, from: f32) -> f32 {
+    use Ease::{Both, Out};
+    let jolt = track(
+        t,
+        &[
+            (0.0, 0.0, Both),
+            (0.05, 1.0, Out),
+            (0.14, 0.75, Both),
+            (0.6, 0.0, Both),
+        ],
+    );
+    let sway = track(t, &[(0.0, 0.0, Both), (0.1, 1.0, Out), (0.6, 0.0, Both)]);
+    from.sin() * (0.07 * jolt + 0.05 * sway)
+}
+
 /// A rooting boar's neck, head and stoop (rad) with its snout in the soil.
 const ROOT: (f32, f32, f32) = (-0.9, 0.8, 0.2);
 
@@ -2292,7 +2361,6 @@ impl Quad<'_> {
             for (s, p) in segs.iter().enumerate() {
                 out.set(Piece::Leg(k, s as u8), *p);
             }
-            out.set(Piece::Hoof(k), segs[3]);
         }
         out.set(Piece::Neck, self.neck(0).placed());
         out.set(Piece::Neck2, self.neck(1).placed());
@@ -2311,6 +2379,16 @@ impl Quad<'_> {
         }
         out.set(Piece::Tail, self.tail(0).placed());
         out.set(Piece::Tail2, self.tail(1).placed());
+        // A deer's rump patch rides on its croup, standing out of the coat as it flares.
+        if self.beast == Beast::Deer {
+            let flare = self.look.flare.clamp(0.0, 1.0);
+            let lift = art::DEER_RUMP_OUT * lerp(-RUMP_SINK, RUMP_FLARE, flare);
+            let croup = self.croup();
+            out.set(
+                Piece::Rump,
+                at(croup.point(art::DEER_RUMP_AT + lift), croup.rot),
+            );
+        }
         // A boar's crests ride on its neck and withers, sliding up out of the coat as they
         // rise.
         if self.beast == Beast::Boar {
@@ -3956,6 +4034,112 @@ mod tests {
         assert!(stot.sink > -0.02, "a toe sank to {:.3} m", stot.sink);
     }
 
+    #[test]
+    fn a_stot_is_a_pronk() {
+        // Stotting at 2.9 m/s, and loping at the same pace: each bound, all four feet leave
+        // the ground and land again together on legs held stiff and straight under it, the
+        // back arched, the body flung high, and the pale rump patch flared out of the coat.
+        let dt = 1.0 / 60.0;
+        let go = |stot: f32| {
+            let mut m = Motion::default();
+            let standing = step(
+                Species::Deer,
+                (AnimalState::Graze, 0.0),
+                1.0,
+                (Vec3::ZERO, 0.0),
+                Senses::default(),
+                &mut Motion::default(),
+            );
+            let reach = |pose: &Pose, k: usize| {
+                let hip = pose.place(Part::Leg(k as u8)).pos;
+                (toes(Species::Deer, (false, false), pose)[k] - hip).length()
+            };
+            let straight: [f32; 4] = std::array::from_fn(|k| reach(&standing, k));
+            let rump = |pose: &Pose| {
+                let c = pose.place(Part::Beast(CROUP));
+                c.rot.inverse() * (pose.place(Part::Beast(RUMP)).pos - c.pos)
+            };
+            let rump_rest = rump(&standing);
+            let body_rest = standing.place(Part::Body).pos.y;
+            let (mut bent, mut arch, mut top, mut flared) = (1.0f32, f32::MAX, 0.0f32, 0.0f32);
+            // How long from the first foot leaving the ground to the last, and from the
+            // first landing to the last (s).
+            let (mut first_off, mut first_on, mut spread) = (None, None, 0.0f32);
+            let mut was = [true; 4];
+            for f in 0..120 {
+                let t = f as f32 * dt;
+                let pose = step(
+                    Species::Deer,
+                    (AnimalState::Flee, 0.0),
+                    1.0 + f64::from(t),
+                    (Vec3::new(0.0, 0.0, -2.9 * t), 2.9),
+                    Senses {
+                        stot,
+                        ..Senses::default()
+                    },
+                    &mut m,
+                );
+                let feet = toes(Species::Deer, (false, false), &pose);
+                let on: [bool; 4] = std::array::from_fn(|k| feet[k].y < 0.006);
+                if was.iter().all(|&w| w) && on.iter().any(|&o| !o) {
+                    first_off = Some(t);
+                }
+                if was.iter().all(|&w| !w) && on.iter().any(|&o| o) {
+                    first_on = Some(t);
+                }
+                if on.iter().all(|&o| !o)
+                    && let Some(t0) = first_off.take()
+                    && t > 0.3
+                {
+                    spread = spread.max(t - t0);
+                }
+                if on.iter().all(|&o| o)
+                    && let Some(t0) = first_on.take()
+                    && t > 0.3
+                {
+                    spread = spread.max(t - t0);
+                }
+                was = on;
+                if t > 0.3 {
+                    for (k, s) in straight.iter().enumerate() {
+                        bent = bent.min(reach(&pose, k) / s);
+                    }
+                    let body = pose.place(Part::Body).rot;
+                    let croup = pose.place(Part::Beast(CROUP)).rot;
+                    let (axis, angle) = (body.inverse() * croup).to_axis_angle();
+                    arch = arch.min(angle * axis.x.signum());
+                    top = top.max(pose.place(Part::Body).pos.y - body_rest);
+                    flared = flared.max((rump(&pose) - rump_rest).length());
+                }
+            }
+            (bent, arch, top, flared, spread)
+        };
+        let (bent, arch, top, flared, spread) = go(1.0);
+        let lope = go(0.0);
+        eprintln!(
+            "pronk: legs at least {bent:.3} of straight, back arched {arch:.2} rad, body up \
+             {top:.3} m, rump out {flared:.3} m, feet {spread:.3} s apart; loping at the pace: \
+             legs {:.3}, arch {:.2}, up {:.3} m, rump {:.3} m",
+            lope.0, lope.1, lope.2, lope.3
+        );
+        assert!(bent > 0.96, "the legs bent to {bent:.3} of straight");
+        assert!(lope.0 < 0.9, "loping, the legs fold ({:.3})", lope.0);
+        assert!(arch > 0.25, "the back arched only {arch:.2} rad");
+        assert!(top > 0.2, "the body went up only {top:.3} m");
+        assert!(
+            top > lope.2 + 0.12,
+            "higher than a lope ({top:.3} against {:.3})",
+            lope.2
+        );
+        assert!(flared > 0.02, "the rump patch stood out only {flared:.3} m");
+        assert!(
+            lope.3 < 1e-3,
+            "loping, the rump patch lies flat ({:.3})",
+            lope.3
+        );
+        assert!(spread < 0.05, "the feet {spread:.3} s apart");
+    }
+
     /// One step of an animal in `state` (since then) at `pos` facing −Z at `speed` m/s.
     fn step(
         species: Species,
@@ -4369,7 +4553,17 @@ mod tests {
                 let ahead = pose.place(Part::Head).rot * Vec3::NEG_Z;
                 let turn = (-ahead.x).atan2(-ahead.z);
                 let slew = (-fwd.x).atan2(-fwd.z);
-                let now = (body.pos, (-up.x).atan2(up.y), ear, lift, -fwd.y, turn, slew);
+                let feet = toes(species, (false, false), &pose);
+                let now = (
+                    body.pos,
+                    (-up.x).atan2(up.y),
+                    ear,
+                    lift,
+                    -fwd.y,
+                    turn,
+                    slew,
+                    feet,
+                );
                 if hit {
                     after.push((t - 1.0, now));
                 } else {
@@ -4379,10 +4573,24 @@ mod tests {
             let rest = rest.expect("stood");
             let (mut away, mut roll, mut pinned, mut stepped) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
             let (mut dip, mut sank, mut swung, mut slewed) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-            for (t, (pos, r, ear, lift, nose, turn, slew)) in &after {
+            let (mut out, mut slid) = (0.0f32, 0.0f32);
+            let mut was = rest.7;
+            for (t, (pos, r, ear, lift, nose, turn, slew, feet)) in &after {
                 if *t < 0.45 {
-                    slewed = slewed.max(slew - rest.6);
+                    slewed = slewed.max((slew - rest.6).abs());
                 }
+                for k in 0..4 {
+                    // A foot down (now and a step ago) stays put.
+                    if feet[k].y < 0.004 && was[k].y < 0.004 {
+                        let d = feet[k] - was[k];
+                        slid = slid.max(Vec2::new(d.x, d.z).length());
+                    }
+                    // A front foot set down away from the blow (it came from +x).
+                    if k < 2 && feet[k].y < 0.004 && *t < 0.9 {
+                        out = out.max(rest.7[k].x - feet[k].x);
+                    }
+                }
+                was = *feet;
                 if (0.1..0.4).contains(t) {
                     swung = swung.max(turn - rest.5);
                 }
@@ -4404,14 +4612,20 @@ mod tests {
                 }
             }
             eprintln!(
-                "{species:?}: jolted {away:.3} m away, rolled {roll:.2} rad, ears turned {pinned:.2} rad, a foot up {stepped:.3} m, stumbled {dip:.3} rad nose down, sank {sank:.3} m, head swung {swung:.2} rad away, body slewed {slewed:.2} rad away"
+                "{species:?}: jolted {away:.3} m away, rolled {roll:.2} rad, ears turned {pinned:.2} rad, a foot up {stepped:.3} m, stumbled {dip:.3} rad nose down, sank {sank:.3} m, head swung {swung:.2} rad away, body slewed {slewed:.2} rad, a front foot stepped out {out:.3} m, a planted foot slid {slid:.4} m"
             );
-            // The body slews off the blow too, so a blow from the far side reads from this
-            // one, in the slant of the legs.
+            // The forehand swings away about the hind hips and a front foot steps out after
+            // it, so a blow from the far side reads from this one; the body turns only a
+            // little, never over its planted legs.
             assert!(
-                slewed > 0.2,
-                "{species:?}: the body slewed only {slewed:.2} rad"
+                (0.05..0.15).contains(&slewed),
+                "{species:?}: the body turned {slewed:.2} rad"
             );
+            assert!(
+                out > 0.06,
+                "{species:?}: a front foot stepped out only {out:.3} m"
+            );
+            assert!(slid < 0.001, "{species:?}: a planted foot slid {slid:.4} m");
             assert!(away > 0.05, "{species:?}: jolted only {away:.3} m");
             assert!(roll > 0.1, "{species:?}: rolled only {roll:.2} rad");
             assert!(
@@ -4425,7 +4639,7 @@ mod tests {
                 swung > 0.8,
                 "{species:?}: the head swung only {swung:.2} rad away"
             );
-            for (t, (pos, r, _, _, _, _, slew)) in after.iter().filter(|a| a.0 > 1.3) {
+            for (t, (pos, r, _, _, _, _, slew, _)) in after.iter().filter(|a| a.0 > 1.3) {
                 assert!(
                     (pos.x - rest.0.x).abs() < 0.01
                         && (r - rest.1).abs() < 0.02
