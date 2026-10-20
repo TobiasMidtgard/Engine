@@ -136,6 +136,21 @@ impl ConvexPoly {
         Self { faces }
     }
 
+    /// Moved by `offset`.
+    pub fn translated(&self, offset: Vec3) -> ConvexPoly {
+        ConvexPoly {
+            faces: self
+                .faces
+                .iter()
+                .map(|f| Face {
+                    points: f.points.iter().map(|&p| p + offset).collect(),
+                    normal: f.normal,
+                    interior: f.interior,
+                })
+                .collect(),
+        }
+    }
+
     /// Every distinct corner.
     pub fn vertices(&self) -> Vec<Vec3> {
         let mut out: Vec<Vec3> = Vec::new();
