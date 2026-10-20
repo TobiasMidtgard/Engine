@@ -1162,6 +1162,52 @@ mod tests {
         assert_eq!(at(-12_000.0, 0.0).paint.1, 0.0);
     }
 
+    /// Far patches show hand-made ground as the mean over each vertex's cell: covers changing
+    /// within a vertex spacing average out instead of aliasing into blocks.
+    #[test]
+    fn far_patches_average_hand_made_paint() {
+        let pad = FlatPad::default();
+        let t = PlanetTerrain::earthlike(3)
+            .with_radius(6_371_000.0)
+            .with_pad(pad)
+            .with_overlay(8_000.0, 3_000.0, |_, _| 5.0)
+            .with_overlay_paint(|x, _| {
+                Some(if x.rem_euclid(24.0) < 12.0 {
+                    OverlayPaint::layer("sand", 1.0).tinted([0.0; 3], 1.0)
+                } else {
+                    OverlayPaint::layer("rock", 1.0).tinted([1.0; 3], 1.0)
+                })
+            });
+        let tf = t.home_transform(pad);
+        let src = ChunkSource {
+            map: SurfaceMap::new(TerrainDomain::Sphere, t.shape.radius_m),
+            shape: std::sync::Arc::new(t.shape.clone()),
+            edits: std::sync::Arc::new(EditLayer::default()),
+            ocean_surface: true,
+        };
+        let local =
+            tf.rotation.as_dquat().inverse() * (DVec3::new(1_500.0, 5.0, 1_500.0) - tf.translation);
+        let level = (0..24)
+            .find(|&l| src.map.node_size(l) / chunk::QUADS as f64 <= 40.0)
+            .unwrap();
+        let key = src.map.node_at(local, level).unwrap();
+        let c = chunk::build_chunk(&src, key);
+        assert!(c.spacing > 10.0, "{}", c.spacing);
+        let (sand, rock) = (
+            paint_index("sand") as usize - 1,
+            paint_index("rock") as usize - 1,
+        );
+        for v in &c.vertices[..chunk::GRID * chunk::GRID] {
+            let (s, r) = (v.paint[sand] as f32 / 255.0, v.paint[rock] as f32 / 255.0);
+            assert!((s + r - 1.0).abs() < 0.02, "{s} + {r}");
+            assert!((0.2..=0.8).contains(&s), "sand {s}");
+            // The tint is the cells' mean too: gray between the black and white stripes.
+            let gray = (v.tint[0] as f32 / 255.0).powi(2);
+            assert!((0.2..=0.8).contains(&gray), "tint {gray}");
+            assert_eq!(v.tint[3], 255);
+        }
+    }
+
     #[test]
     fn edits_dig_and_report() {
         let mut app = app_with_planet();
