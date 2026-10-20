@@ -138,7 +138,10 @@ pub struct PlasmaVisual {
 /// to the airflow.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlasmaWake {
-    /// Half extents of the ship's skin (body axes): the wake leaves from its far side.
+    /// Where it leaves the ship (body axes), such as a wingtip; `None` for the main wake,
+    /// which leaves from the far side of the ship's skin.
+    pub from: Option<Vec3>,
+    /// Half extents of the ship's skin (body axes), for the main wake.
     pub skin: Vec3,
     /// Wake radius where it leaves the ship, m.
     pub radius: f32,
@@ -388,11 +391,13 @@ pub fn plasma_visuals(
         if let Some(wake) = plasma.wake
             && level > 0
         {
-            // The wake leaves from the ship's far side along the flow (on an ellipsoid
-            // around its skin) and grows with the glow.
-            let reach = (wake.skin * flow).length();
+            // The main wake leaves from the ship's far side along the flow (on an ellipsoid
+            // around its skin), streamers from their edge; both grow with the glow.
+            let from = wake
+                .from
+                .unwrap_or_else(|| flow * (wake.skin * flow).length() * 0.45);
             let new = Transform {
-                translation: (flow * reach * 0.45).as_dvec3(),
+                translation: from.as_dvec3(),
                 rotation: Quat::from_rotation_arc(Vec3::Z, flow),
                 scale: Vec3::new(wake.radius, wake.radius, wake.length * glow.sqrt()),
             };
