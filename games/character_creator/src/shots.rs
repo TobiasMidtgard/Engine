@@ -102,7 +102,7 @@ fn view(name: &str) -> Option<(Orbit, u8)> {
     })
 }
 
-/// Whole-body views: the camera on the subject's chest.
+/// Whole-body views: the camera on the subject's chest (`feet`: on the shoes).
 fn body_view(name: &str) -> Option<Orbit> {
     let body = Orbit {
         yaw: 0.0,
@@ -122,6 +122,14 @@ fn body_view(name: &str) -> Option<Orbit> {
             yaw: std::f32::consts::PI,
             ..body
         },
+        // The shoes, from the front and a little above.
+        "feet" => Orbit {
+            yaw: 0.5,
+            pitch: 0.4,
+            distance: 1.3,
+            drop: 1.45,
+            fov_deg: 30.0,
+        },
         _ => return None,
     })
 }
@@ -129,7 +137,7 @@ fn body_view(name: &str) -> Option<Orbit> {
 impl ShotPlan {
     /// `--shots <dir> [--only name,name] [--views front,34,...] [--pose walk]`, or None without
     /// `--shots`. Views are close-ups (`front`, `34`, `profile`, `eyes`, ...), whole-body views
-    /// (`body`, `body34`, `bodyside`, `bodyback`, in `--pose`), or expressions in close-up
+    /// (`body`, `body34`, `bodyside`, `bodyback`, `feet`, in `--pose`), or expressions in close-up
     /// (`smile`, `sad`, `surprise`, ...; `<expression>34` from three-quarters).
     pub fn from_args() -> Option<Self> {
         let args: Vec<String> = std::env::args().collect();

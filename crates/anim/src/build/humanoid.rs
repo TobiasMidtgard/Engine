@@ -1470,6 +1470,127 @@ fn block(s: &Skeleton) -> AnimationClip {
     .with_curve("brace", 2, |_| 1.0)
 }
 
+/// The right hand of the hammer block: the handle held across in front of the face,
+/// pointing left, the forearm up.
+const BLOCK_ARM: Arm = Arm {
+    flex: 3.0,
+    twist: -20.0,
+    abduct: 38.0,
+    elbow: 138.0,
+    wrist: -34.5,
+    protract: 6.0,
+    elevate: 6.0,
+};
+
+/// Everything of the hammer block but the right arm: a fighting stance with the left foot
+/// forward and the knees bent, turned a little to the right, chin down behind the handle,
+/// the left arm up toward the handle (its `ReachIk` puts the hand on it while `guard` is on).
+/// `tremble` (−1..1) shakes the arms under the load.
+fn block_body(p: &mut PoseBuilder, tremble: f32) {
+    // Low enough that both feet reach the floor; foot IK bends the front knee the rest.
+    p.rot_move("hips", Vec3::new(0.0, -0.065, 0.0), 0.0, -14.0, 0.0);
+    leg(p, 0, 22.0, 3.0, 34.0, 12.0, 0.0);
+    leg(p, 1, -6.0, 5.0, 26.0, 20.0, 0.0);
+    spine(p, [-8.0, -6.0, 2.0, -12.0], [5.0, 5.0, 2.0, 2.0], [0.0; 4]);
+    arm(
+        p,
+        0,
+        Arm {
+            flex: 75.0 + 0.6 * tremble,
+            twist: 20.0,
+            abduct: 10.0,
+            elbow: 95.0 + 0.8 * tremble,
+            wrist: -10.0,
+            protract: 6.0,
+            elevate: 6.0,
+        },
+    );
+}
+
+/// A braced block with the hammer: the handle held across in front of the face in both
+/// hands, held while `hammer_guard` stays on.
+fn hammer_block(s: &Skeleton) -> AnimationClip {
+    AnimationClip::from_fn("hammer_block", 1.2, 25, true, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let tremble = (ph * 6.0 * std::f32::consts::TAU).sin();
+        block_body(&mut p, tremble);
+        arm(
+            &mut p,
+            1,
+            Arm {
+                flex: BLOCK_ARM.flex + 0.6 * tremble,
+                elbow: BLOCK_ARM.elbow + 0.8 * tremble,
+                ..BLOCK_ARM
+            },
+        );
+        p.take()
+    })
+    .with_curve("effort", 25, |ph| {
+        0.85 + 0.05 * (ph * 3.0 * std::f32::consts::TAU).sin()
+    })
+    .with_curve("brace", 2, |_| 1.0)
+    .with_curve("guard", 2, |_| 1.0)
+    // The left hand closes round the handle (the right holds the hammer anyway).
+    .with_curve("fist", 2, |_| 0.85)
+}
+
+/// A wince at something hard to watch (a hammer coming down): the shoulders jump up, the
+/// chin pulls in and the head turns a little away, the hands twitch up, the eyes squeeze
+/// (the `effort` curve, which the face reads), then it all lets go.
+fn wince(s: &Skeleton) -> AnimationClip {
+    let squeeze = [(0.0, 0.0), (0.1, 1.0), (0.4, 0.85), (1.0, 0.0)];
+    AnimationClip::from_fn("wince", 1.4, 29, false, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let k = |keys: &[(f32, f32)]| keyed(ph, keys);
+        let jump = k(&[(0.0, 0.0), (0.09, 1.0), (0.35, 0.8), (1.0, 0.0)]);
+        let away = k(&[(0.0, 0.0), (0.12, 1.0), (0.5, 0.7), (1.0, 0.0)]);
+        p.rot_move(
+            "hips",
+            Vec3::new(0.0, -0.01 - 0.012 * jump, 0.0),
+            0.0,
+            0.0,
+            0.0,
+        );
+        spine(
+            &mut p,
+            [
+                -1.0 - 3.0 * jump,
+                -5.0 * jump,
+                -6.0 * jump,
+                -8.0 * away - 1.0,
+            ],
+            [0.0, -3.0 * away, -6.0 * away, -8.0 * away],
+            [0.0, 0.0, 2.0 * away, 4.0 * away],
+        );
+        for side in 0..2 {
+            arm(
+                &mut p,
+                side,
+                Arm {
+                    flex: 4.0 + 16.0 * jump,
+                    twist: 0.0,
+                    abduct: -15.0 + 6.0 * jump,
+                    elbow: 12.0 + 38.0 * jump,
+                    wrist: 10.0 * jump,
+                    protract: 6.0 * jump,
+                    elevate: 14.0 * jump,
+                },
+            );
+            leg(
+                &mut p,
+                side,
+                2.0 + 3.0 * jump,
+                1.5,
+                3.0 + 6.0 * jump,
+                1.0 + 3.0 * jump,
+                0.0,
+            );
+        }
+        p.take()
+    })
+    .with_curve("effort", 29, |ph| keyed(ph, &squeeze))
+}
+
 /// Bracing for a fall: arms reaching forward and down to take it, knees bent, chin tucked,
 /// held for its length. A ragdoll with [`RagdollTone`](crate::ragdoll::RagdollTone) holds
 /// this shape in the air until it lands.
@@ -2321,6 +2442,8 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         lean_pitch(s, "lean_back", -1.0),
         heavy_swing(s),
         block(s),
+        hammer_block(s),
+        wince(s),
         reach(s),
         flex(s),
         get_up_back(s),
@@ -2331,7 +2454,8 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
 
 /// Locomotion (idle/walk/run by `speed`, leaning by `turn`), plus `heavy_swing` (also on
 /// the contract's `attack_heavy`), `block` (on its trigger or while `blocking` > 0.5, held
-/// while it stays there), `reach` and `flex` actions, and getting up off the floor
+/// while it stays there), `hammer_block` (while `hammer_guard` > 0.5), `reach`, `flex` and
+/// `wince` actions, and getting up off the floor
 /// (`get_up_back`, `get_up_front`: triggered by the ragdoll when a limp body comes round), and
 /// `fall_brace` (bracing for a fall, on its trigger from anywhere).
 pub fn graph() -> AnimGraph {
@@ -2490,8 +2614,10 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 state("move", leaning),
                 state("heavy_swing", NodeDef::one_shot("heavy_swing")),
                 state("block", NodeDef::clip("block")),
+                state("hammer_block", NodeDef::clip("hammer_block")),
                 state("reach", NodeDef::one_shot("reach")),
                 state("flex", NodeDef::one_shot("flex")),
+                state("wince", NodeDef::one_shot("wince")),
                 state("get_up_back", NodeDef::one_shot("get_up_back")),
                 state("get_up_front", NodeDef::one_shot("get_up_front")),
                 state("fall_brace", NodeDef::one_shot("fall_brace")),
@@ -2527,8 +2653,23 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                     Condition::param("blocking", Cmp::Lt, 0.5),
                     0.3,
                 ),
+                TransitionDef::new(
+                    "move",
+                    "hammer_block",
+                    Condition::param("hammer_guard", Cmp::Gt, 0.5),
+                    0.15,
+                )
+                .inertialize(),
+                TransitionDef::new(
+                    "hammer_block",
+                    "move",
+                    Condition::param("hammer_guard", Cmp::Lt, 0.5),
+                    0.3,
+                ),
                 TransitionDef::new("move", "reach", Condition::trigger("reach"), 0.25),
                 TransitionDef::new("reach", "move", Condition::Finished, 0.35).inertialize(),
+                TransitionDef::new("move", "wince", Condition::trigger("wince"), 0.08),
+                TransitionDef::new("wince", "move", Condition::Finished, 0.35).inertialize(),
                 TransitionDef::new("move", "flex", Condition::trigger("flex"), 0.3),
                 TransitionDef::new("flex", "move", Condition::Finished, 0.4).inertialize(),
                 // From wherever the body was when it went limp; the ragdoll's own blend

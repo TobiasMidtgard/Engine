@@ -864,6 +864,11 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     "Skill tree",
                     r#"{"screen": "skills", "select": "c_cleave"}"#,
                 ),
+                ui(
+                    "market_crafting",
+                    "Crafting bench",
+                    r#"{"screen": "crafting", "select": "r_elixir"}"#,
+                ),
                 // Over the HUD, so the slow-motion gauge shows the world slowing.
                 View::new(
                     "market_wheel",

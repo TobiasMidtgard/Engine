@@ -1,11 +1,13 @@
 //! The animation paddock: a showcase of every animation feature, spawned around one point.
 //!
 //! * **Muscle stage**: an athlete swings a sledgehammer (arms, shoulders and back tense on the
-//!   strike, then relax; veins show on the forearms; the ponytail whips), braces in a block,
-//!   and hits a double-biceps flex. Next to them, a man in a long-sleeved shirt goes up on
-//!   tiptoe to take hold of a lantern hanging from a beam: the sleeve bunches at the elbow as
-//!   the arm sweeps up, then rides up the straightened arm while the shirt pulls across his
-//!   back.
+//!   strike, then relax; veins show on the forearms; the ponytail whips), braces in a guard
+//!   with the handle across the face in both hands, and hits a double-biceps flex. Next to
+//!   them, a man in a long-sleeved shirt goes up on tiptoe to take hold of a lantern hanging
+//!   from a beam: the sleeve bunches at the elbow as the arm sweeps up, then rides up the
+//!   straightened arm while the shirt pulls across his back.
+//!   Three spectators stand on the sand in front of the stage: people a character module
+//!   draws, who follow the hammer, blink and wince at each strike.
 //! * **Step course**: a walker climbs a ramp, crosses a deck, walks down stairs (feet planted
 //!   by foot IK), then runs back on the flat, leaning into the turns.
 //! * **Horse track**: a horse walks, trots, canters and gallops around an oval; its haunches
@@ -28,7 +30,8 @@ use engine_core::prelude::*;
 use engine_render::{
     GltfScene, MaterialPreset, Mesh, MeshRenderer, Shape as MeshShape, StandardMaterial,
 };
-use engine_world::animation::AnimationParams;
+use engine_world::animation::{AnimationParams, BodyRequest};
+use engine_world::character::{Ancestry, AppearanceRequest};
 use engine_world::physics::PhysicsQueries;
 use engine_world::{DamageEvent, DamageKind, Ground};
 use serde_json::{Value, json};
@@ -81,6 +84,9 @@ const HANDLE_DIR: Vec3 = Vec3::new(0.0, -0.34, -0.94);
 /// The main entities of a spawned demo (for cameras, tests and tools).
 #[derive(Debug, Clone, Copy)]
 pub struct DemoEntities {
+    /// The three spectators in front of the muscle stage (drawn by a character module when
+    /// there is one).
+    pub spectators: [Entity; 3],
     pub athlete: Entity,
     pub lifter: Entity,
     pub reacher: Entity,
@@ -579,16 +585,40 @@ pub fn spawn_hammer(world: &mut World, person: Entity, near: DVec3) -> [Entity; 
         left: 0.0,
         right: 1.0,
     });
-    world.entity_mut(person).insert(ReachIk::new(vec![Reach {
-        target_bone: "hand_r".into(),
-        // The left wrist sits where the left fist closes around the handle's end.
-        target_offset: -dir * 0.11,
-        pole: Vec3::new(-0.5, -1.0, 0.3),
-        weight_curve: "grip".into(),
-        ..Reach::arm(0)
-    }]));
+    world.entity_mut(person).insert(ReachIk::new(vec![
+        Reach {
+            target_bone: "hand_r".into(),
+            // The left wrist sits where the left fist closes around the handle's end.
+            target_offset: -dir * 0.11,
+            pole: Vec3::new(-0.5, -1.0, 0.3),
+            weight_curve: "grip".into(),
+            ..Reach::arm(0)
+        },
+        Reach {
+            target_bone: "hand_r".into(),
+            // Blocking, the hands are spread along the handle, the left just below the head;
+            // its wrist sits below and behind the handle (in the block's right-hand frame)
+            // so the fist closes over it.
+            target_offset: GRIP + dir * 0.42 + Vec3::new(-0.07, 0.05, 0.015),
+            pole: Vec3::new(-0.6, -1.0, 0.2),
+            weight_curve: "guard".into(),
+            ..Reach::arm(0)
+        },
+    ]));
     ids
 }
+
+/// Where the spectators stand (z) in front of the muscle stage, facing it.
+const SPECTATOR_Z: f64 = 9.0;
+/// The spectators: x, seed, sex (0 female .. 1 male), age range, ancestry weights (african,
+/// asian, european), whether they watch the tire (or glance about), and when they wince (s
+/// into the athlete's round; the strike lands at 1.56 s).
+#[allow(clippy::type_complexity)]
+const SPECTATORS: [(f64, u64, f32, [f32; 2], [f32; 3], bool, f32); 3] = [
+    (-1.5, 401, 0.0, [28.0, 34.0], [0.7, 0.1, 0.2], true, 1.5),
+    (-2.6, 402, 1.0, [55.0, 65.0], [0.1, 0.1, 0.8], false, 1.6),
+    (-3.7, 403, 1.0, [19.0, 23.0], [0.1, 0.8, 0.1], true, 1.45),
+];
 
 /// Where the reacher stands on the muscle stage (x, z; it faces +Z).
 const REACHER: DVec3 = DVec3::new(3.1, 0.0, 5.8);
@@ -930,11 +960,27 @@ pub const VIEWS: &[DemoView] = &[
     },
     DemoView {
         key: "paddock_block",
-        name: "Braced block, hammer on the shoulder",
-        eye: [-4.0, 1.75, 6.75],
-        target: [-2.65, 1.55, 5.4],
+        name: "Braced guard: the hammer handle across the face in both hands",
+        eye: [-4.6, 1.55, 7.7],
+        target: [-2.65, 1.15, 5.4],
         hour: 15.0,
         at: 4.82,
+    },
+    DemoView {
+        key: "paddock_crowd",
+        name: "Spectators watching the hammer: blinking, following it, glancing about",
+        eye: [-2.6, 1.45, 6.5],
+        target: [-2.6, 1.5, 9.0],
+        hour: 15.0,
+        at: 1.0,
+    },
+    DemoView {
+        key: "paddock_crowd_wince",
+        name: "A spectator winces as the hammer lands",
+        eye: [-1.55, 1.58, 8.25],
+        target: [-1.5, 1.56, 9.0],
+        hour: 15.0,
+        at: 1.75,
     },
     DemoView {
         key: "paddock_stairs",
@@ -1157,9 +1203,8 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         period: 11.0,
         steps: vec![
             DemoStep::trigger(0.5, "heavy_swing"),
-            DemoStep::param(3.6, "blocking", 1.0),
-            DemoStep::trigger(3.6, "block"),
-            DemoStep::param(6.4, "blocking", 0.0),
+            DemoStep::param(3.6, "hammer_guard", 1.0),
+            DemoStep::param(6.4, "hammer_guard", 0.0),
             DemoStep::trigger(7.6, "heavy_swing"),
         ],
         time: 0.0,
@@ -1184,6 +1229,55 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         max_angle_deg: 60.0,
         weight: 0.7,
         ..Default::default()
+    });
+    // Spectators on the sand in front of the stage, facing the athlete: people a character
+    // module draws (they ask for a look by seed), so their faces blink, follow the hammer
+    // and wince at each strike through `FaceControls`. Without one they keep anim's bodies.
+    let spectators = SPECTATORS.map(|(x, seed, sex, age, ancestry, watch, wince_at)| {
+        let t = Transform::from_translation(at(x, 0.0, SPECTATOR_Z)).with_rotation(facing(0.0));
+        let person = world
+            .spawn((
+                Name::new("Spectator"),
+                t,
+                GlobalTransform::from(t),
+                BodyRequest::human(seed),
+                AppearanceRequest {
+                    seed,
+                    sex: Some(sex),
+                    age: Some(age),
+                    ancestry: Some(Ancestry {
+                        african: ancestry[0],
+                        asian: ancestry[1],
+                        european: ancestry[2],
+                    }),
+                    ..Default::default()
+                },
+                // Each strike lands 1.56 s into the swing (at 0.5 s and 7.6 s of the athlete's
+                // 11 s round).
+                DemoScript {
+                    period: 11.0,
+                    steps: vec![
+                        DemoStep::trigger(wince_at, "wince"),
+                        DemoStep::trigger(wince_at + 7.1, "wince"),
+                    ],
+                    time: 0.0,
+                },
+            ))
+            .id();
+        if watch {
+            world.entity_mut(person).insert(LookAt {
+                target: at(ATHLETE.x, 0.75, ATHLETE.z + TIRE_AHEAD - 0.3),
+                chain: vec![
+                    ("chest".into(), 0.15),
+                    ("neck".into(), 0.35),
+                    ("head".into(), 0.5),
+                ],
+                max_angle_deg: 70.0,
+                weight: 0.8,
+                ..Default::default()
+            });
+        }
+        person
     });
     let lifter = spawn_humanoid(
         world,
@@ -1658,6 +1752,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     let stuntman = stunt::spawn_yard(world, origin);
 
     DemoEntities {
+        spectators,
         athlete,
         lifter,
         reacher,

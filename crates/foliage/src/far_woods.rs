@@ -8,9 +8,12 @@
 //! sampling the species' mass atlas ([`crate::assets::SpeciesVisual::leaves_far`]). Cards are
 //! spaced wider with distance (each far one stands for a few crowns), so a closed wood costs
 //! about the same per pixel at any distance. Cells stream in nearest first, a few a frame, and
-//! rebuild when the camera has moved far enough that they want another spacing.
+//! rebuild when the camera has moved far enough that they want another spacing. Ground that
+//! already holds [`SceneryTree`]s is left to them, so a valley's own woods and the far woods
+//! around it meet without doubling up.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
@@ -20,6 +23,7 @@ use engine_world::{ForestCover, Ground, WorldShift};
 use crate::assets::FoliageVisuals;
 use crate::meshgen::MeshBuilder;
 use crate::meshgen::textures::{CLUSTER_CELL, LeafKind, atlas_cell};
+use crate::scenery_tree::SceneryTree;
 use crate::species::PlantLibrary;
 use crate::visuals::camera_position;
 
@@ -42,8 +46,8 @@ pub struct FarWoods {
     pub background_builds: u32,
     /// Most cells built per frame when `background_builds` is 0.
     pub cells_per_frame: u32,
-    /// Places with trees of their own (a valley of scenery trees): no far woods within
-    /// `radius` meters of `center` (world X/Z).
+    /// More places far woods leave alone: no far woods within `radius` meters of `center`
+    /// (world X/Z). Ground under [`SceneryTree`]s needs none: it is kept clear on its own.
     pub keep_clear: Vec<KeepClear>,
 }
 
@@ -224,9 +228,9 @@ pub(crate) fn cell_cards(
                 tree,
                 foot: Vec3::new(x, (y - origin.y) as f32, z),
                 height,
-                width: (height * wide).max(spacing * 1.15),
+                width: (height * wide).max(spacing * 1.4),
                 yaw: h(6) * std::f32::consts::PI,
-                shade: 0.85 + 0.25 * h(7),
+                shade: 0.62 + 0.22 * h(7),
             });
         }
     }
@@ -243,7 +247,7 @@ pub(crate) fn cell_meshes(cards: &[FarCard]) -> Vec<(FarTree, Mesh)> {
         let conifer = matches!(c.tree, FarTree::Spruce | FarTree::Pine);
         // Conifers stand as the tall spray cells, broad crowns as the round cluster.
         let cell = if conifer {
-            if c.shade > 0.97 { 1 } else { 0 }
+            if c.shade > 0.73 { 1 } else { 0 }
         } else {
             CLUSTER_CELL
         };
@@ -282,10 +286,16 @@ pub(crate) fn cell_meshes(cards: &[FarCard]) -> Vec<(FarTree, Mesh)> {
             b.tri(first, first + 2, first + 1);
             b.tri(first, first + 3, first + 2);
         }
-        if !matches!(c.tree, FarTree::Spruce) {
-            // The crown seen from above.
+        {
+            // The crown seen from above (a spruce's narrow spire is a small one).
             let (uv0, uv1) = atlas_cell(kind, CLUSTER_CELL);
-            let y = y0 + (y1 - y0) * 0.72;
+            let (y, half) = if matches!(c.tree, FarTree::Spruce) {
+                (y0 + (y1 - y0) * 0.45, half * 0.6)
+            } else {
+                // Wider than the upright cards, so neighbouring crowns close over the gaps
+                // their round outlines leave.
+                (y0 + (y1 - y0) * 0.72, half * 1.35)
+            };
             let (s, co) = c.yaw.sin_cos();
             let (u, w) = (Vec3::new(co, 0.0, s), Vec3::new(-s, 0.0, co));
             let corners = [
@@ -335,6 +345,47 @@ pub struct FarWoodsState {
     quiet_frames: u32,
     /// Still materials (no sway) per tree kind, made from the species' far leaves.
     materials: HashMap<FarTree, Handle<StandardMaterial>>,
+    /// The ground scenery trees stand on, and whether it must be looked at again.
+    occupied: Arc<Occupied>,
+    occupied_stale: bool,
+}
+
+/// Ground holding scenery trees: the [`OCCUPIED_M`] squares (keyed from the grid's origin, so
+/// world shifts carry it along) within [`OCCUPIED_REACH_M`] of one.
+#[derive(Debug, Default, PartialEq)]
+struct Occupied(HashSet<(i64, i64)>);
+
+/// Side of an occupied square, meters.
+const OCCUPIED_M: f64 = 16.0;
+/// How far around a scenery tree its ground counts as taken, meters (about a crown's reach,
+/// so a wood's edge trees keep far cards out of their crowns).
+const OCCUPIED_REACH_M: f64 = 10.0;
+
+impl Occupied {
+    fn key(origin: DVec3, p: DVec3) -> (i64, i64) {
+        (
+            ((p.x - origin.x) / OCCUPIED_M).floor() as i64,
+            ((p.z - origin.z) / OCCUPIED_M).floor() as i64,
+        )
+    }
+
+    fn from_trees(origin: DVec3, trees: impl Iterator<Item = DVec3>) -> Self {
+        let mut set = HashSet::new();
+        let r = DVec3::new(OCCUPIED_REACH_M, 0.0, OCCUPIED_REACH_M);
+        for p in trees {
+            let (a, b) = (Self::key(origin, p - r), Self::key(origin, p + r));
+            for j in a.1..=b.1 {
+                for i in a.0..=b.0 {
+                    set.insert((i, j));
+                }
+            }
+        }
+        Self(set)
+    }
+
+    fn holds(&self, origin: DVec3, p: DVec3) -> bool {
+        self.0.contains(&Self::key(origin, p))
+    }
 }
 
 /// A cell being built on a worker thread.
@@ -379,7 +430,10 @@ struct CellJob {
     cam: DVec3,
     start_m: f32,
     keep_clear: Vec<KeepClear>,
-    cover: std::sync::Arc<dyn engine_world::ForestQuery>,
+    /// The ground scenery trees hold, keyed from `grid_origin`.
+    occupied: Arc<Occupied>,
+    grid_origin: DVec3,
+    cover: Arc<dyn engine_world::ForestQuery>,
     ground: Option<Ground>,
 }
 
@@ -388,6 +442,7 @@ impl CellJob {
         let flat_distance = |p: DVec3| DVec2::new(p.x - self.cam.x, p.z - self.cam.z).length();
         let keep_out = |p: DVec3| {
             flat_distance(p) < self.start_m as f64
+                || self.occupied.holds(self.grid_origin, p)
                 || self.keep_clear.iter().any(|k| {
                     DVec2::new(p.x - k.center.x, p.z - k.center.z).length() < k.radius as f64
                 })
@@ -453,10 +508,28 @@ pub fn stream_far_woods(
     cams: Query<(&Camera, &GlobalTransform)>,
     mut state: ResMut<FarWoodsState>,
     cells: Query<&FarWoodCell>,
+    trees: Query<Ref<GlobalTransform>, With<SceneryTree>>,
+    mut removed: RemovedComponents<SceneryTree>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if cover.is_changed() {
+    // Scenery trees planted, felled or moved: look at their ground again (it changes the
+    // woods like a new cover does).
+    if removed.read().count() > 0 || trees.iter().any(|t| t.is_changed()) {
+        state.occupied_stale = true;
+    }
+    // A tree spawned this frame still stands at the origin; wait for its world transform.
+    let trees_placed = !trees.iter().any(|t| t.is_added());
+    let mut occupied_changed = false;
+    if state.occupied_stale && trees_placed {
+        state.occupied_stale = false;
+        let occupied = Occupied::from_trees(state.origin, trees.iter().map(|t| t.translation()));
+        if occupied != *state.occupied {
+            state.occupied = Arc::new(occupied);
+            occupied_changed = true;
+        }
+    }
+    if cover.is_changed() || occupied_changed {
         state.epoch += 1;
         state.quiet_frames = 0;
     } else {
@@ -476,6 +549,9 @@ pub fn stream_far_woods(
     let Some(cam) = camera_position(&cams) else {
         return;
     };
+    if !trees_placed {
+        return;
+    }
     // The trees' still far materials, once their visuals exist.
     if state.materials.len() < FarTree::ALL.len() {
         for t in FarTree::ALL {
@@ -572,6 +648,8 @@ pub fn stream_far_woods(
             cam,
             start_m: settings.start_m,
             keep_clear: settings.keep_clear.clone(),
+            occupied: state.occupied.clone(),
+            grid_origin: origin,
             cover: cover.0.clone(),
             ground: ground.as_deref().cloned(),
         };
@@ -649,6 +727,7 @@ pub fn follow_world_shift(
                 p.built_from = s.point(p.built_from);
             }
         } else {
+            state.occupied_stale = true;
             state.pending.clear();
             for (_, e) in std::mem::take(&mut state.cells) {
                 if let (Ok(c), Some(meshes)) = (cells.get(e), meshes.as_mut()) {
@@ -727,8 +806,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cells_stream_around_the_camera_and_free_their_meshes() {
+    /// An app with conifer far woods 100–600 m around a camera at the origin, built in the
+    /// frame.
+    fn woods_app() -> (App, Entity) {
         let mut app = App::new();
         app.world
             .resource_mut::<Time>()
@@ -758,6 +838,12 @@ mod tests {
             .world
             .spawn((Camera::default(), Transform::from_translation(DVec3::ZERO)))
             .id();
+        (app, cam)
+    }
+
+    #[test]
+    fn cells_stream_around_the_camera_and_free_their_meshes() {
+        let (mut app, cam) = woods_app();
         // No woods painted: nothing drawn.
         app.update_n(3);
         let mut cells = app.world.query::<(&FarWoodCell, &Transform)>();
@@ -820,6 +906,62 @@ mod tests {
             frames += 1;
             assert!(frames < 5000, "worker builds never arrived");
         }
+    }
+
+    /// Triangles drawn by every far woods cell.
+    fn woods_triangles(app: &mut App) -> usize {
+        let mut cells = app.world.query::<&FarWoodCell>();
+        let handles: Vec<_> = cells
+            .iter(&app.world)
+            .flat_map(|c| c.meshes.clone())
+            .collect();
+        let meshes = app.world.resource::<Assets<Mesh>>();
+        handles
+            .iter()
+            .filter_map(|&h| meshes.get(h))
+            .map(|m| m.triangle_count())
+            .sum()
+    }
+
+    #[test]
+    fn scenery_trees_keep_their_own_ground() {
+        let (mut app, _) = woods_app();
+        app.world
+            .insert_resource(ForestCover(std::sync::Arc::new(Everywhere)));
+        app.update_n(3);
+        let open = woods_triangles(&mut app);
+        assert!(open > 0);
+        // A 200 m square wood of scenery trees 300 m out: the far woods make room for it.
+        let library = app.world.resource::<PlantLibrary>().clone();
+        let mut wood = Vec::new();
+        for j in 0..25 {
+            for i in 0..25 {
+                let p = DVec3::new(200.0 + i as f64 * 8.0, 0.0, -100.0 + j as f64 * 8.0);
+                let tree = SceneryTree::new(&library, "pine", (i * 31 + j) as u64).unwrap();
+                wood.push(app.world.spawn((Transform::from_translation(p), tree)).id());
+            }
+        }
+        app.update_n(COVER_SETTLE_FRAMES as usize + 4);
+        let around = woods_triangles(&mut app);
+        // The ring holds about 1.1 km² of woods; the square takes 0.04 km² of it.
+        let share = 1.0 - around as f64 / open as f64;
+        assert!((0.015..0.08).contains(&share), "{share}");
+        // Felled: the far woods fill the gap again.
+        for e in wood {
+            app.world.despawn(e);
+        }
+        app.update_n(COVER_SETTLE_FRAMES as usize + 4);
+        assert_eq!(woods_triangles(&mut app), open);
+    }
+
+    #[test]
+    fn occupied_ground_reaches_a_crown_around_each_tree() {
+        let o = DVec3::new(5.0, 0.0, -3.0);
+        let occ = Occupied::from_trees(o, [DVec3::new(100.0, 7.0, 40.0)].into_iter());
+        assert!(occ.holds(o, DVec3::new(100.0, 0.0, 40.0)));
+        assert!(occ.holds(o, DVec3::new(100.0 + OCCUPIED_REACH_M - 0.5, 0.0, 40.0)));
+        assert!(!occ.holds(o, DVec3::new(100.0 + OCCUPIED_M * 2.0 + 1.0, 0.0, 40.0)));
+        assert!(occ.0.len() <= 4);
     }
 
     #[test]

@@ -316,6 +316,12 @@ pub enum Sprite {
     /// `stretch` its width over its height, and a couple of overlapping long-lived particles
     /// (`local_space`, `steady`) so it flows without a break.
     Jet,
+    /// A column of light rising from a spell circle: a hollow tube of light whose walls pile up
+    /// toward its edges, combed into rays that drift up and turn slowly round it, brightest at
+    /// its foot and fading out as it rises (healing auras, blessings, beacons). Use with
+    /// `facing: axis`, `additive` 1, `size` the column's height, `stretch` its width over its
+    /// height, and a couple of overlapping long-lived particles (`local_space`, `steady`).
+    Veil,
 }
 
 impl Sprite {
@@ -334,7 +340,8 @@ impl Sprite {
             | Sprite::Vortex
             | Sprite::Plume
             | Sprite::Ripple
-            | Sprite::Blaze => 0.0,
+            | Sprite::Blaze
+            | Sprite::Veil => 0.0,
             _ => 0.6,
         }
     }

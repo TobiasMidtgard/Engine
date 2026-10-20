@@ -707,6 +707,9 @@ fn bump(n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, dh1: f32, dh2: f32) -> vec
     return select(n, b / len, len > 1e-12);
 }
 
+// A hand-made ground's tint that means snow (linear).
+const SNOW_TINT = vec3<f32>(0.8, 0.83, 0.88);
+
 // Weight of each painted layer (index 0 = none) at a pixel.
 fn paint_weights(in: VertexOut) -> array<f32, 11> {
     return array<f32, 11>(
@@ -1226,10 +1229,17 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         }
     }
     // Hand-made ground's tint (fields, roads): its color with each material's texture detail.
-    // Snow and mud lie on top of the ground and keep their own colors.
-    if (in.tint.a > 0.001) {
+    // Snow and mud lie on top of the ground and keep their own colors. A tint as white as snow
+    // is the level's snow: it settles as snow below (per pixel), and the ground it leaves bare
+    // keeps its own color instead of turning white in the shape of the vertex grid.
+    // (Far vertices carry the mean over their cell, so a tint partly snow is part white: that
+    // share is snow, and the rest of the color is the ground's.)
+    let tint_white = smoothstep(0.22, 0.75, min(in.tint.r, min(in.tint.g, in.tint.b)));
+    let tint_ground = clamp((in.tint.rgb - SNOW_TINT * tint_white) / max(1.0 - tint_white, 0.05), vec3(0.0), vec3(1.0));
+    let tint_a = in.tint.a * (1.0 - tint_white);
+    if (tint_a > 0.001) {
         for (var i = 0u; i < MAT_COUNT; i++) {
-            if (i != M_SNOW && i != M_MUD) { col[i] = mix(col[i], in.tint.rgb, in.tint.a); }
+            if (i != M_SNOW && i != M_MUD) { col[i] = mix(col[i], tint_ground, tint_a); }
         }
     }
     // Grass grows in clumps whatever its color (natural, painted or tinted): straw-colored
@@ -1407,7 +1417,16 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let fallen = layers.z;
     let weather_snow = smoothstep(0.004, 0.04, fallen + (detail_f - 0.5) * 0.01 * fine_fade)
         * (1.0 - smoothstep(0.55, 0.8, snow_slope));
-    let painted_snow = pw[2];
+    // Hand-made snow (snow paint, or a snow-white tint) comes per vertex, tens of meters apart
+    // on far mountains: on its own it lies in straight-edged blocks across faces too steep to
+    // hold it. Per pixel it settles like the climate's snow: off the steep faces, deeper in the
+    // hollows, thinner on the crests, its edges ragged instead of following the triangles.
+    let hand_snow = max(pw[2], tint_white * smoothstep(0.0, 0.5, in.tint.a));
+    let hand_edge = ((patch_v - 0.5) * 0.6 * macro_fade + (macro_v - 0.5) * 0.5 * macro_fade
+        + (mid_v - 0.5) * 0.3 * clump_fade + gully * 0.3 - crest * 0.2 + (far_n.x - 0.5) * 0.8 * far)
+        * (0.25 + 3.0 * hand_snow * (1.0 - hand_snow));
+    let painted_snow = smoothstep(0.3, 0.7, hand_snow + hand_edge)
+        * (1.0 - smoothstep(rock_slope + 0.12, rock_slope + 0.32, snow_slope - gully * 0.12 + (detail_n - 0.5) * 0.1 * fine_fade));
     let snow_amount = saturate(max(max(climate_snow, weather_snow), painted_snow)) * (1.0 - ocean);
     var snow = 0.0;
     var glint = 0.0;

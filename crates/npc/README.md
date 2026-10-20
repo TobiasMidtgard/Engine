@@ -29,7 +29,13 @@ commands.entity(player).insert(Faction::PLAYER);
 
 Static `Collider`s (walls, crates, platforms) become the NPCs' tactical world: cover points,
 line of sight, walkable tops and the navigation grid are built from them and rebuilt when they
-change. When a physics backend is installed, sight and shot checks also use `PhysicsQueries`.
+change. A grid cell is walkable only with no obstacle side within the agent radius (0.4 m) that
+rises more than a step and starts below head height, so paths keep clear of wall ends and pinches
+instead of running into them (a tilted ramp counts from its lowest corner, so the way under its
+high end is not taken); a goal just inside that clearance (a cover spot by a wall) is still
+reached with a last straight step, and a body standing inside it starts from the nearest free
+cell at its own level (not the top of the barrel beside it). When a physics backend is installed, sight and shot checks
+also use `PhysicsQueries`.
 
 ## Wildlife
 
@@ -286,8 +292,10 @@ nobody, so neither holds up the showcase timer. `npc.inspect` shows `kneeling_se
 each, with teamwork 1 and a carbine, `NpcWeapon::carbine()`: lighter and shorter-ranged than
 the rifle). A medic fights from 3 m behind where it would otherwise stand, notices a downed
 mate twice as soon, goes half as far again (`ally_revive_range` × 1.5) and wants the revive
-far more, so it is usually the one that goes. While it is near, its mates hold off for the
-first 3 s, unless the medic is the one down. Once the medic goes, its mates cover it: ranged
+far more, so it is usually the one that goes. While it is in range and not more than 6 m
+farther from the downed mate than they are, its mates hold off for the first 3 s, unless the
+medic is the one down. An enemy within striking distance of the downed mate holds the medic
+off like anyone else, however far away it still is. Once the medic goes, its mates cover it: ranged
 mates with some teamwork engage whoever has the best view of its spot (`role` "cover"), and
 melee mates stand 2 m off the spot on the side of the nearest enemy and take on whoever
 comes within 5 m of it (`role` "screen"; `NpcBrain::guard` holds the spot). A squad without
@@ -295,13 +303,15 @@ a medic revives as before. A medic wears a bleached armband with a red cross ove
 brassard.
 
 A medic also carries smoke (`smoke::SmokeClouds`). When an enemy has a clear view of a
-downed mate's spot within 24 m, it throws a canister to land 2 m off the chest on that
+downed mate's spot within 35 m, it throws a canister to land 2 m off the chest on that
 enemy's side, one every 14 s at most. The cloud pops 0.9 s later, swells to 3.2 m over two
 seconds, hangs and thins out over the last five of its 22 s. It hides the spot, so the medic
 goes in as a skilled fighter does once a watched spot is out of view, and shots into it are
 mostly guesses. With a smoke module installed (one that registers the "smoke" obscurance
 source) the canister's gas goes to it as a `SmokeEmission`; without one the NPC module keeps a
-plain cloud of its own under the "npc_smoke" source.
+plain cloud of its own under the "npc_smoke" source, drawn as many faint grey puffs (each a
+few nested balls, so it fades out at its rim), bigger and fainter towards the cloud's edge and
+drifting as it hangs.
 
 | Setting | Default | Does |
 | --- | --- | --- |

@@ -560,6 +560,30 @@ fn jet(c: vec2<f32>, t: f32, seed: f32, rgb: vec3<f32>, sky: vec3<f32>) -> vec4<
     return vec4<f32>(col, a);
 }
 
+// A column of light rising from a spell circle (t = 0 at the circle, 1 at its top): a hollow
+// tube whose walls pile up toward its silhouette, combed into rays that drift up and turn
+// slowly round it, brightest at its foot and fading out as it rises. c.x is across it.
+fn veil(c: vec2<f32>, t: f32, seed: f32) -> f32 {
+    let x = c.x;
+    if (abs(x) >= 1.0) { return 0.0; }
+    let time = frame.time.x % 3600.0;
+    let thick = sqrt(1.0 - x * x);
+    // Seen through, a tube's wall is crossed at a slant toward its edges.
+    let wall = min(0.3 / max(thick, 0.08), 2.0);
+    let around = asin(x);
+    let rise = t * 1.6 - time * 0.5;
+    // The near wall's rays turn one way across the column and the far wall's the other.
+    let near = value_noise2(vec2<f32>(around * 5.0 + time * 0.2 + seed * 11.0, rise));
+    let far = value_noise2(vec2<f32>(-around * 5.0 + time * 0.2 + seed * 5.0 + 17.0, rise * 1.2 + 3.1));
+    let rays = smoothstep(0.35, 0.85, near) + 0.7 * smoothstep(0.35, 0.85, far);
+    // Faint rings of light climb it now and then.
+    let pulse = pow(0.5 + 0.5 * sin((t * 2.0 - time * 0.45 + seed) * TAU), 8.0);
+    let fade = smoothstep(0.0, 0.04, t) * pow(1.0 - t, 1.8);
+    let foot = exp(-t * 14.0);
+    return fade * (wall * (0.25 + 0.75 * rays) * (1.0 + 0.6 * pulse) + foot * 1.5)
+        * smoothstep(1.0, 0.85, abs(x));
+}
+
 // ---------------------------------------------------------------- fireball
 // A ball of burning gas traced through its sprite as a volume: a lumpy body rolled into lobes,
 // glowing from inside (near white deep in, reddening outward), turning to dark soot from the
@@ -742,6 +766,10 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
             let j = jet(c, in.uv.y, in.seed, rgb, in.glint);
             rgb = j.rgb;
             a = j.a;
+        }
+        case 20u: { // veil: a column of light rising from a spell circle (uv.y 0) up
+            a = veil(c, in.uv.y, in.seed);
+            rgb *= 1.0 + saturate(a - 0.6);
         }
         case 18u: { // fireball: a burning, cooling volume of gas
             let f = fireball(in, c);

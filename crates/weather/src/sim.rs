@@ -371,7 +371,10 @@ pub fn cloud_cell(r: &Regime, drifted: DVec2, seed: u64) -> CloudCell {
         2.1,
         0.5,
     );
-    let amp = 0.08 + 2.0 * c * (1.0 - c);
+    // Showers come in clusters with wide clear gaps between them; fair-weather heaps and
+    // layer cloud spread more evenly (a partly cloudy day isn't blue for 10 km at a time).
+    let gappy = 0.5 + 0.5 * smoothstep(0.6, 0.75, r.cloud_type);
+    let amp = 0.08 + 2.0 * c * (1.0 - c) * gappy;
     let coverage = (c + n * amp).clamp(0.0, 1.0);
     // Storm cells: towers where the second pattern peaks, lower cloud between them.
     let cells = fbm2(
@@ -941,6 +944,29 @@ mod tests {
             "overcast range {} vs clear {}",
             temps[1],
             temps[0]
+        );
+    }
+
+    #[test]
+    fn fair_weather_cloud_spreads_evenly_and_showers_keep_their_gaps() {
+        // Coverage at the 5th and 95th percentile over a 150 km square.
+        let spread = |preset: WeatherPreset| {
+            let r = preset.regime();
+            let mut v: Vec<f32> = (0..2500)
+                .map(|i| {
+                    let p = DVec2::new((i % 50) as f64, (i / 50) as f64) * 3000.0;
+                    cloud_cell(&r, p, 7).coverage
+                })
+                .collect();
+            v.sort_by(f32::total_cmp);
+            (v[125], v[2375])
+        };
+        let (lo, hi) = spread(WeatherPreset::PartlyCloudy);
+        assert!(lo > 0.3 && hi < 0.65, "partly cloudy spans {lo}..{hi}");
+        let (s_lo, s_hi) = spread(WeatherPreset::Showers);
+        assert!(
+            s_hi - s_lo > 1.5 * (hi - lo),
+            "showers span only {s_lo}..{s_hi}"
         );
     }
 }
