@@ -114,7 +114,8 @@ struct PlanetGpu {
     params2: [f32; 4],
     /// How far the terrain moved in the world since last frame (xyz, for motion vectors).
     motion: [f32; 4],
-    /// Regolith scattering (0..1), rayed craters in `rays`, young areas in `young`, unused.
+    /// Regolith scattering (0..1), rayed craters in `rays`, young areas in `young`, smallest
+    /// crater radius (m).
     params3: [f32; 4],
     /// Rayed craters: planet-local unit direction of the center (xyz), radius on the ground
     /// (w, meters).
@@ -1295,7 +1296,7 @@ impl RenderFeature for TerrainFeature {
                     p.regolith,
                     state.rayed as f32,
                     state.young_count as f32,
-                    0.0,
+                    t.config.shape.crater_min_radius_m as f32,
                 ],
                 rays: state.rays,
                 young: state.young,

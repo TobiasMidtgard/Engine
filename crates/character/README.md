@@ -79,6 +79,8 @@ A person's look is the shared `engine_world::character::Appearance` (this crate 
   their rest pose.
 - `FaceControls`: expressions and gaze.
 
+Headgear (`Appearance::headgear`) leaves out what a helmet covers, for whoever draws the helmet: `open_helm` the hair, ears and neck (the face from brow to chin stays), `closed_helm` the whole head and neck; `hood` hides nothing yet.
+
 It calls `draws_appearances`, so anim poses people with an `Appearance` without drawing its
 own mesh for them. It doesn't write `HairGuides` yet: hair follows the skin, not a simulation.
 It draws through its own `RenderFeature` (`character`).
