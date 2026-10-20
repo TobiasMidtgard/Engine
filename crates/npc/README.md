@@ -341,12 +341,13 @@ least 0.3, it runs a maneuver that lasts while the target does:
   down. It picks a spot to fire on the cover from and stays there rather than work its own way
   round. The others not going round give covering fire too.
 - **One or two flankers** (one in a pair, two in a group of three or more; never a medic, and
-  only those with `logic` of at least 0.35 and `teamwork` of at least 0.3) go to a spot off the
-  target's side: square to the way its cover faces (found by feeling round the target for
-  what blocks at chest height; in the open, square to the squad's fire), within about 20° of
-  that, on cover where they can, and with a line past the target's cover to it. Not round
-  behind it: a spot farther round counts against itself. The second flanker goes the same way
-  as the first unless the other side is clearly better. Their path is planned on the nav grid
+  only those with `logic` of at least 0.35 and `teamwork` of at least 0.3) go round it. A
+  target behind cover is taken from its side: a spot square to the way its cover faces (found
+  by feeling round the target for what blocks at chest height), within about 20° of that, on
+  cover where they can, and with a line past the target's cover to it. Not round behind it: a
+  spot farther round counts against itself. The second flanker goes the same way as the first
+  unless the other side is clearly better. A target in the open is simply gone round, the
+  flankers spreading out from the rest of the squad. Their path is planned on the nav grid
   with the cells the target can see a body in made four times dearer, so it goes behind cover
   where there is any.
 - **Bounding in turns**: only one flanker moves at a time. It runs to the last point of its
