@@ -105,7 +105,7 @@ impl Default for PrecipitationSettings {
         Self {
             enabled: true,
             max_drops: 40_000,
-            max_flakes: 30_000,
+            max_flakes: 120_000,
             max_splashes: 3_000,
             area_m: 30.0,
             drop_width_m: 0.0025,
