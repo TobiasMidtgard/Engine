@@ -1,0 +1,48 @@
+Engine showcase
+===============
+
+Start: double-click showcase.exe (Windows) or run ./showcase (Linux), with the `assets`
+folder kept next to it. The first start takes a while: the valley, planet and trees are
+generated on the way in. A console window shows the log; keep it open, it closes with the game.
+
+Needs a GPU with Vulkan or DirectX 12. All zones together use a lot of memory (16 GB of RAM
+recommended); with less, load only some zones with --zones (below).
+
+Flying camera (on at start)
+  Right mouse (hold)   look around
+  W A S D              move
+  Space / Ctrl         up / down
+  Shift                faster
+  Mouse wheel          change speed (speed also grows with height, so orbit is reachable)
+  1 - 9                jump to a zone
+  0                    overview of the valley
+  O                    orbit
+  [ and ]              hour of the day back / forward
+  T                    start or stop the clock
+
+Play mode
+  P                    toggle play mode: a character appears in front of the camera
+  W A S D, mouse       run and look
+  Space                jump (twice for a double jump; jump at walls to wall-run)
+  Shift                sprint
+  Ctrl                 crouch and slide
+  Q                    dash
+  F                    grapple
+  Left / right mouse   attack / block
+  Middle mouse         lock on to the nearest enemy
+  E                    interact
+  Tab                  inventory
+  M                    map
+  Esc                  pause menu
+
+A gamepad works too (A jump, B crouch, X interact, triggers attack and block).
+
+Command-line options
+  --size 2560x1440     window size
+  --zones arena,lake   load only these zones' demos (faster start, less memory); `all` is the
+                       default. Zones: plaza market paddock physics yard magic gallery2d forest
+                       meadow lake water footsteps tracks cave arena parkour fortress voxel
+                       field range weather track airfield spaceport
+  Windows: make a shortcut to showcase.exe and add the options after the path in its Target.
+
+THIRD_PARTY_NOTICES.md lists the licenses and authors of the art and sounds in `assets`.

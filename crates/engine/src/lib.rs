@@ -59,6 +59,7 @@ pub fn apply_cli_args(app: &mut App) {
         .world
         .resource::<engine_core::config::EngineConfig>()
         .clone();
+    run_beside_assets(&config.asset_root);
     let mut frames = None;
     let mut i = 1;
     while i < args.len() {
@@ -94,6 +95,29 @@ pub fn apply_cli_args(app: &mut App) {
     app.insert_resource(config);
     if frames.is_some() {
         app.insert_resource(engine_platform::HeadlessRun { max_frames: frames });
+    }
+}
+
+/// A packaged game (the executable with its `assets` folder next to it) started from somewhere
+/// else, such as a shortcut or another folder's terminal, finds no `assets` in the working
+/// directory. Then, unless `ENGINE_ASSET_ROOT` says where they are, work from the executable's
+/// folder when the assets are there, so every module's relative asset paths resolve.
+fn run_beside_assets(asset_root: &str) {
+    let root = std::path::Path::new(asset_root);
+    if root.is_absolute() || root.exists() || std::env::var_os("ENGINE_ASSET_ROOT").is_some() {
+        return;
+    }
+    let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.to_path_buf()))
+    else {
+        return;
+    };
+    if dir.join(root).is_dir() && std::env::set_current_dir(&dir).is_ok() {
+        engine_core::log::info!(
+            "assets found next to the executable; working from {}",
+            dir.display()
+        );
     }
 }
 
