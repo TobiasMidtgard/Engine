@@ -528,7 +528,7 @@ fn think(
 }
 
 /// How far a medic throws a smoke canister (m), and how often it has one ready (s).
-const SMOKE_RANGE: f64 = 24.0;
+const SMOKE_RANGE: f64 = 35.0;
 const SMOKE_EVERY_SECS: f64 = 14.0;
 
 /// Where a medic throws smoke, if anywhere: between a downed mate of its squad within throwing
@@ -679,14 +679,9 @@ fn weigh_revive(
     // lets go only for one closer still.
     let going = brain.action == NpcAction::Revive && brain.revive == Some(f.e);
     let (strike_me, strike_ally) = if going { (3.0, 3.0) } else { (4.5, 4.0) };
-    // The medic moves up while its melee mates go to screen it: an enemy at the ally holds it
-    // off only once it is near (it still kneels only with nobody close enough to strike).
+    // (An enemy at the ally holds the medic off too, however far it is: running in at a
+    // fight over the body only gets it hit on the way.)
     let medic = claims.iter().any(|c| c.e == me && c.medic);
-    let strike_ally = if medic && dist > MEDIC_HOLD {
-        0.0
-    } else {
-        strike_ally
-    };
     for k in &memory.known {
         let ago = now - k.last_seen;
         if k.awareness < 0.5 || ago > 6.0 {
@@ -740,14 +735,17 @@ fn weigh_revive(
     let ours = around as f32 + 1.0;
     let theirs = enemies as f32;
     let hurt_lately = combat.last_hurt > 0.0 && now - combat.last_hurt < 2.0;
-    // The squad's medic is up and in range of the ally: the others leave it to it.
+    // The squad's medic is up, in range of the ally and not much farther from it than this
+    // one is: the others leave it to it.
     let medic_near = !medic
         && claims.iter().any(|c| {
+            let d = c.pos.distance(chest) as f32;
             c.e != me
                 && c.medic
                 && c.faction == *faction
                 && c.squad == Some(f.squad)
-                && c.pos.distance(chest) as f32 <= revive_range(&w.settings, true)
+                && d <= revive_range(&w.settings, true)
+                && d <= dist + MEDIC_LEAD
         });
     let case = ReviveCase {
         dist,
@@ -770,9 +768,9 @@ fn weigh_revive(
     revive_score(&case, skills).0
 }
 
-/// How near a downed squad mate the medic comes before an enemy standing at it holds it off
-/// (m, to the chest).
-const MEDIC_HOLD: f32 = 6.0;
+/// How much farther from a downed mate than another squad mate the medic may be for the other
+/// to leave it to the medic (m).
+const MEDIC_LEAD: f32 = 6.0;
 
 /// For this long after a squad mate goes down (s), the others leave it to the squad's medic if
 /// it is near enough to go.

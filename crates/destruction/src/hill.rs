@@ -100,8 +100,9 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "voxel_cave_in",
         name: "The tunnel's hall caving in",
-        eye: [-1.0, 7.0, -17.0],
-        target: [-4.5, 2.5, -2.0],
+        // Above the hill: the hall's roof drops out of the hilltop as a sinkhole.
+        eye: [-3.0, 15.0, -11.0],
+        target: [-4.6, 4.5, -1.6],
         hour: 10.5,
         warmup_secs: 10.6,
     },

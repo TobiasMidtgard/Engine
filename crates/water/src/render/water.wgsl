@@ -831,7 +831,12 @@ fn fall_streaks(u: f32, t0: f32, fine: f32) -> f32 {
 @fragment
 fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     if (in.kind > 0.5) { return fall_mist(in); }
-    let q = in.look.x;
+    // No lip is level: the water gathers into tongues where the rock dips and runs thin
+    // between them (the pattern is fixed to the rock, `u` being meters across in the world).
+    let gather = value_noise2(vec2<f32>(in.uv.x * 0.45, 3.7)) * 0.65
+        + value_noise2(vec2<f32>(in.uv.x * 1.3, 9.1)) * 0.35;
+    let tongue = smoothstep(0.3, 0.7, gather);
+    let q = in.look.x * mix(0.4, 1.5, tongue);
     let frac = in.look.y;
     let side = in.look.z;
     let tau = in.uv.y;
@@ -871,6 +876,8 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     // From afar those drops blur into a veil across the gaps.
     alpha = max(alpha, (1.0 - fine) * body * 0.4 * smoothstep(0.15, 0.9, frac) * smoothstep(0.0, 0.35, s));
     alpha *= 1.0 - smoothstep(0.6, 1.0, abs(side) + (s - 0.5) * 0.4);
+    // Between the tongues only the strongest streaks pour, as threads.
+    alpha *= mix(smoothstep(0.55, 0.85, s) * 0.85, 1.0, tongue);
     // Soft where it meets the rock behind it and the pool it lands in.
     let size = vec2<f32>(textureDimensions(scene_color));
     let pix = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), size - 1.0));

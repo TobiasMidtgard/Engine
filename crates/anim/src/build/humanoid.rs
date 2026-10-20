@@ -1534,6 +1534,63 @@ fn hammer_block(s: &Skeleton) -> AnimationClip {
     .with_curve("fist", 2, |_| 0.85)
 }
 
+/// A wince at something hard to watch (a hammer coming down): the shoulders jump up, the
+/// chin pulls in and the head turns a little away, the hands twitch up, the eyes squeeze
+/// (the `effort` curve, which the face reads), then it all lets go.
+fn wince(s: &Skeleton) -> AnimationClip {
+    let squeeze = [(0.0, 0.0), (0.1, 1.0), (0.4, 0.85), (1.0, 0.0)];
+    AnimationClip::from_fn("wince", 1.4, 29, false, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let k = |keys: &[(f32, f32)]| keyed(ph, keys);
+        let jump = k(&[(0.0, 0.0), (0.09, 1.0), (0.35, 0.8), (1.0, 0.0)]);
+        let away = k(&[(0.0, 0.0), (0.12, 1.0), (0.5, 0.7), (1.0, 0.0)]);
+        p.rot_move(
+            "hips",
+            Vec3::new(0.0, -0.01 - 0.012 * jump, 0.0),
+            0.0,
+            0.0,
+            0.0,
+        );
+        spine(
+            &mut p,
+            [
+                -1.0 - 3.0 * jump,
+                -5.0 * jump,
+                -6.0 * jump,
+                -8.0 * away - 1.0,
+            ],
+            [0.0, -3.0 * away, -6.0 * away, -8.0 * away],
+            [0.0, 0.0, 2.0 * away, 4.0 * away],
+        );
+        for side in 0..2 {
+            arm(
+                &mut p,
+                side,
+                Arm {
+                    flex: 4.0 + 16.0 * jump,
+                    twist: 0.0,
+                    abduct: -15.0 + 6.0 * jump,
+                    elbow: 12.0 + 38.0 * jump,
+                    wrist: 10.0 * jump,
+                    protract: 6.0 * jump,
+                    elevate: 14.0 * jump,
+                },
+            );
+            leg(
+                &mut p,
+                side,
+                2.0 + 3.0 * jump,
+                1.5,
+                3.0 + 6.0 * jump,
+                1.0 + 3.0 * jump,
+                0.0,
+            );
+        }
+        p.take()
+    })
+    .with_curve("effort", 29, |ph| keyed(ph, &squeeze))
+}
+
 /// Bracing for a fall: arms reaching forward and down to take it, knees bent, chin tucked,
 /// held for its length. A ragdoll with [`RagdollTone`](crate::ragdoll::RagdollTone) holds
 /// this shape in the air until it lands.
@@ -2386,6 +2443,7 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         heavy_swing(s),
         block(s),
         hammer_block(s),
+        wince(s),
         reach(s),
         flex(s),
         get_up_back(s),
@@ -2396,8 +2454,8 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
 
 /// Locomotion (idle/walk/run by `speed`, leaning by `turn`), plus `heavy_swing` (also on
 /// the contract's `attack_heavy`), `block` (on its trigger or while `blocking` > 0.5, held
-/// while it stays there), `hammer_block` (while `hammer_guard` > 0.5), `reach` and `flex`
-/// actions, and getting up off the floor
+/// while it stays there), `hammer_block` (while `hammer_guard` > 0.5), `reach`, `flex` and
+/// `wince` actions, and getting up off the floor
 /// (`get_up_back`, `get_up_front`: triggered by the ragdoll when a limp body comes round), and
 /// `fall_brace` (bracing for a fall, on its trigger from anywhere).
 pub fn graph() -> AnimGraph {
@@ -2559,6 +2617,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 state("hammer_block", NodeDef::clip("hammer_block")),
                 state("reach", NodeDef::one_shot("reach")),
                 state("flex", NodeDef::one_shot("flex")),
+                state("wince", NodeDef::one_shot("wince")),
                 state("get_up_back", NodeDef::one_shot("get_up_back")),
                 state("get_up_front", NodeDef::one_shot("get_up_front")),
                 state("fall_brace", NodeDef::one_shot("fall_brace")),
@@ -2609,6 +2668,8 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 ),
                 TransitionDef::new("move", "reach", Condition::trigger("reach"), 0.25),
                 TransitionDef::new("reach", "move", Condition::Finished, 0.35).inertialize(),
+                TransitionDef::new("move", "wince", Condition::trigger("wince"), 0.08),
+                TransitionDef::new("wince", "move", Condition::Finished, 0.35).inertialize(),
                 TransitionDef::new("move", "flex", Condition::trigger("flex"), 0.3),
                 TransitionDef::new("flex", "move", Condition::Finished, 0.4).inertialize(),
                 // From wherever the body was when it went limp; the ragdoll's own blend
