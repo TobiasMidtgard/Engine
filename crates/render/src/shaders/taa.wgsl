@@ -10,10 +10,14 @@
 // blends. The color box is built in a compressed space (c / (1 + luma)) so very bright pixels
 // don't blow it open, while filtering and blending stay linear so small bright things (the
 // sun's disk, a lamp's core) keep their energy and still bloom.
+//
+// Thin transparent things (snowflakes, rain, sparks) write no depth or motion and are outliers
+// in their neighborhood, so the clipped history would erase them: where the reactive mask
+// (taa_reactive.wgsl) marks them, the resolve keeps most of this frame's own pixel.
 
 struct TaaParams {
     // x: history valid (0/1), y: frames accumulated since the last reset, z: minimum weight of
-    // the current frame, w: unused
+    // the current frame, w: strength of the reactive mask (0: ignored)
     params: vec4<f32>,
 };
 
@@ -22,6 +26,7 @@ struct TaaParams {
 @group(1) @binding(2) var motion_tex: texture_2d<f32>;
 @group(1) @binding(3) var depth_tex: texture_depth_2d;   // final scene depth (reverse-Z)
 @group(1) @binding(4) var<uniform> taa: TaaParams;
+@group(1) @binding(5) var reactive_tex: texture_2d<f32>;
 
 @vertex
 fn vs_taa(@builtin(vertex_index) i: u32) -> FullscreenOut {
@@ -149,6 +154,11 @@ fn fs_taa(in: FullscreenOut) -> @location(0) vec4<f32> {
         }
     }
     filtered /= filter_weight;
+    // A reactive pixel is its own sample: the filter would spread a one-pixel flake thin.
+    let reactive = saturate(taa.params.w * textureLoad(reactive_tex, px, 0).r);
+    if (reactive > 0.0) {
+        filtered = mix(filtered, load_current(px, size), reactive);
+    }
     if (taa.params.x < 0.5) {
         return vec4<f32>(filtered, 1.0);
     }
@@ -174,6 +184,7 @@ fn fs_taa(in: FullscreenOut) -> @location(0) vec4<f32> {
     let speed = length(motion * sizef);
     var alpha = max(1.0 / (frames + 1.0), taa.params.z);
     alpha = mix(alpha, max(alpha, 0.25), saturate(speed / 32.0));
+    alpha = max(alpha, 0.85 * reactive);
     let result = mix(clipped, filtered, alpha);
     return vec4<f32>(max(result, vec3<f32>(0.0)), 1.0);
 }

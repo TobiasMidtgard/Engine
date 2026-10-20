@@ -1142,18 +1142,27 @@ impl Renderer {
             }
         }
 
-        // Copies for refraction / soft particles.
-        if self.features.iter().any(|f| f.needs_scene_copy()) {
-            let size = wgpu::Extent3d {
-                width: self.targets.width,
-                height: self.targets.height,
-                depth_or_array_layers: 1,
-            };
+        // Copies for refraction / soft particles, and the color for TAA's reactive mask (what the
+        // transparent phase changed).
+        let scene_copy = self.features.iter().any(|f| f.needs_scene_copy());
+        let reactive = if taa {
+            settings.taa_reactive.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let size = wgpu::Extent3d {
+            width: self.targets.width,
+            height: self.targets.height,
+            depth_or_array_layers: 1,
+        };
+        if scene_copy || reactive > 0.0 {
             encoder.copy_texture_to_texture(
                 self.targets.hdr.texture.as_image_copy(),
                 self.targets.color_copy.texture.as_image_copy(),
                 size,
             );
+        }
+        if scene_copy {
             encoder.copy_texture_to_texture(
                 self.targets.depth.texture.as_image_copy(),
                 self.targets.depth_copy.texture.as_image_copy(),
@@ -1190,6 +1199,9 @@ impl Renderer {
                 pass.set_bind_group(0, frame_group, &[]);
             }
         }
+        if reactive > 0.0 {
+            self.effects.encode_reactive(&mut encoder, &self.targets);
+        }
 
         // Depth of field, on the scene before TAA (see depth_of_field.rs).
         self.lens.encode_depth_of_field(
@@ -1210,6 +1222,7 @@ impl Renderer {
                 &self.targets,
                 frame_group,
                 view.history_valid,
+                reactive,
             );
         } else if settings.screen_space_reflections || settings.screen_space_gi {
             self.effects.keep_frame(&mut encoder, &self.targets);

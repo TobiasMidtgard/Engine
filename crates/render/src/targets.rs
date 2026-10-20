@@ -72,6 +72,8 @@ pub struct Targets {
     pub gi: Tex,
     pub color_copy: Tex,
     pub depth_copy: Tex,
+    /// Where the transparent phase drew something thin, which TAA keeps (see effects.rs).
+    pub reactive: Tex,
     /// Tonemapped display image (sRGB). Screenshots read this.
     pub ldr: Tex,
     /// Bloom mip chain (half resolution and down).
@@ -152,6 +154,7 @@ impl Targets {
             formats.depth,
             U::TEXTURE_BINDING | U::COPY_DST,
         );
+        let reactive = screen("taa reactive mask", formats.ao);
         let ldr = Tex::new(
             device,
             "ldr",
@@ -192,6 +195,7 @@ impl Targets {
             gi,
             color_copy,
             depth_copy,
+            reactive,
             ldr,
             bloom,
         }
