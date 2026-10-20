@@ -8,8 +8,9 @@
 // the ring of pixels three away on both sides along some direction, and few of that ring changed
 // nearly as much: a flake, or a streak up to about five pixels wide crossing the ring twice. Wide
 // transparent things (water, glass, smoke, a large near flake) change their neighbors as much, so
-// TAA keeps anti-aliasing them; so do their edges (inside on one side), their corners, and the
-// corners of a pattern seen through them (a quarter of the ring or more).
+// TAA keeps anti-aliasing them; so do their edges (inside on one side), their corners, the
+// corners of a pattern seen through them (a quarter of the ring or more), and thin things seen
+// through them (a branch behind glass stood out as much before the glass was drawn).
 
 @group(0) @binding(0) var reactive_after: texture_2d<f32>;
 @group(0) @binding(1) var reactive_before: texture_2d<f32>;
@@ -25,12 +26,12 @@ fn reactive_compress(c: vec3<f32>) -> vec3<f32> {
     return s / (1.0 + luminance(s));
 }
 
-fn reactive_change(px: vec2<i32>, size: vec2<i32>) -> f32 {
-    let q = clamp(px, vec2<i32>(0), size - 1);
-    let d = abs(
-        reactive_compress(textureLoad(reactive_after, q, 0).rgb)
-            - reactive_compress(textureLoad(reactive_before, q, 0).rgb),
-    );
+fn reactive_load(tex: texture_2d<f32>, px: vec2<i32>, size: vec2<i32>) -> vec3<f32> {
+    return reactive_compress(textureLoad(tex, clamp(px, vec2<i32>(0), size - 1), 0).rgb);
+}
+
+fn reactive_distance(a: vec3<f32>, b: vec3<f32>) -> f32 {
+    let d = abs(a - b);
     return max(d.r, max(d.g, d.b));
 }
 
@@ -46,24 +47,44 @@ const REACTIVE_RING = array<vec2<i32>, 12>(
 fn fs_reactive(in: FullscreenOut) -> @location(0) vec4<f32> {
     let size = vec2<i32>(textureDimensions(reactive_after));
     let px = vec2<i32>(floor(in.position.xy));
-    let center = reactive_change(px, size);
+    let after = reactive_load(reactive_after, px, size);
+    let before = reactive_load(reactive_before, px, size);
+    let center = reactive_distance(after, before);
     if (center < 0.003) {
         return vec4<f32>(0.0);
     }
-    // The least, over the directions, of the larger change on either side (low only if the pixel
-    // is thin across some direction), and how many of the ring changed nearly as much.
+    // Over the directions: the least of the larger change on either side (low only if what was
+    // drawn is thin across some direction), and how thin the pixel stands out from either side in
+    // the image after and before (the most, over the directions, of the smaller difference).
     var around = 1.0;
     var alike = 0.0;
+    var ridge_after = 0.0;
+    var ridge_before = 0.0;
     for (var i = 0; i < 12; i++) {
         let o = REACTIVE_RING[i];
-        let a = reactive_change(px + o, size);
-        let b = reactive_change(px - o, size);
-        around = min(around, max(a, b));
-        alike += f32(a > 0.5 * center) + f32(b > 0.5 * center);
+        let a1 = reactive_load(reactive_after, px + o, size);
+        let b1 = reactive_load(reactive_before, px + o, size);
+        let a2 = reactive_load(reactive_after, px - o, size);
+        let b2 = reactive_load(reactive_before, px - o, size);
+        let c1 = reactive_distance(a1, b1);
+        let c2 = reactive_distance(a2, b2);
+        around = min(around, max(c1, c2));
+        alike += f32(c1 > 0.5 * center) + f32(c2 > 0.5 * center);
+        ridge_after = max(
+            ridge_after,
+            min(reactive_distance(after, a1), reactive_distance(after, a2)),
+        );
+        ridge_before = max(
+            ridge_before,
+            min(reactive_distance(before, b1), reactive_distance(before, b2)),
+        );
     }
     // Relative, so faint rain counts as much as bright snow; barely changed pixels fade out.
     let thin = saturate(1.5 * (1.0 - around / center) - 0.25);
     let few = saturate((8.0 - alike) / 2.0);
-    let r = thin * few * saturate((center - 0.003) * 200.0);
+    // Glass over a thin wire or branch also changes a thin line, but only tints what was there:
+    // the line stood out at least as much before. A flake or a streak stands out more after.
+    let new_detail = saturate(2.0 * (ridge_after - ridge_before) / max(ridge_after, 1e-4));
+    let r = thin * few * new_detail * saturate((center - 0.003) * 200.0);
     return vec4<f32>(r, 0.0, 0.0, 1.0);
 }

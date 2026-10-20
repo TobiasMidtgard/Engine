@@ -154,28 +154,36 @@ fn fs_taa(in: FullscreenOut) -> @location(0) vec4<f32> {
         }
     }
     filtered /= filter_weight;
-    // A reactive pixel is its own sample: the filter would spread a one-pixel flake thin.
-    let reactive = saturate(taa.params.w * textureLoad(reactive_tex, px, 0).r);
-    if (reactive > 0.0) {
-        filtered = mix(filtered, load_current(px, size), reactive);
-    }
+    let mask = saturate(taa.params.w * textureLoad(reactive_tex, px, 0).r);
+    let center = load_current(px, size);
     if (taa.params.x < 0.5) {
-        return vec4<f32>(filtered, 1.0);
+        return vec4<f32>(mix(filtered, center, mask), 1.0);
     }
     let motion = pixel_motion(nearest, size);
     let history_uv = uv - motion;
     if (any(history_uv < vec2<f32>(0.0)) || any(history_uv > vec2<f32>(1.0))) {
-        return vec4<f32>(filtered, 1.0);
+        return vec4<f32>(mix(filtered, center, mask), 1.0);
     }
     let mean = m1 / 9.0;
     let sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3<f32>(0.0)));
+    let history = rgb_to_ycocg(compress(sample_history(history_uv, sizef)));
+    // A thin transparent thing that stays put (a wire fence) is in the history already, and TAA
+    // smooths it as anything else; one that moved since (a falling flake) isn't: the history
+    // there holds what is behind it.
+    var reactive = 0.0;
+    if (mask > 0.0) {
+        let own = rgb_to_ycocg(compress(center));
+        let gap = abs(history.x - own.x) / (abs(own.x - mean.x) + 1e-3);
+        reactive = mask * saturate(2.5 * gap - 1.0);
+    }
+    // A reactive pixel is its own sample: the filter would spread a one-pixel flake thin.
+    filtered = mix(filtered, center, reactive);
     let gamma = 1.25;
     // The box can't hold the current sample if that is an outlier (a sub-pixel highlight):
     // widen it to include the filtered value.
     let current = rgb_to_ycocg(compress(filtered));
     let lo = min(mean - gamma * sigma, current);
     let hi = max(mean + gamma * sigma, current);
-    let history = rgb_to_ycocg(compress(sample_history(history_uv, sizef)));
     let clipped = decompress(ycocg_to_rgb(clip_to_box(history, lo, hi)));
 
     // Accumulate quickly after a reset, then keep a tenth of the current frame. Fast motion
