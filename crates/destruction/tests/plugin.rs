@@ -185,6 +185,31 @@ fn a_charge_knocks_whole_bricks_out_of_a_brick_wall() {
 }
 
 #[test]
+fn plaster_a_charge_throws_crumbles_where_it_lands() {
+    let mut app = app();
+    let wall = spawn_wall(&mut app, DestructibleWall::soft(3.0, 3.0), DVec3::ZERO);
+    app.update();
+    let mut c = BreachCharge::explosive(wall, Vec2::new(0.0, 1.2), 4.0e5);
+    c.fuse_secs = 0.1;
+    app.world.spawn(c);
+    run_secs(&mut app, 4.0);
+    let mut q = app.world.query::<(&Debris, &Transform)>();
+    let slabs: Vec<DVec3> = q
+        .iter(&app.world)
+        .filter(|(d, t)| {
+            !d.chip && DVec3::new(t.translation.x, 0.0, t.translation.z).length() > 3.0
+        })
+        .map(|(_, t)| t.translation)
+        .collect();
+    assert!(
+        slabs.is_empty(),
+        "plaster slabs lie whole far from the wall: {slabs:?}"
+    );
+    let stats = app.world.resource::<DestructionStats>();
+    assert!(stats.pieces_broken > 0, "thrown pieces crumbled");
+}
+
+#[test]
 fn debris_piles_up_on_resting_chunks_and_falls_when_they_go() {
     let mut app = app();
     let half = Vec3::new(0.5, 0.1, 0.4);
@@ -1668,7 +1693,23 @@ fn standing_pieces_are_solid_with_a_physics_module() {
             ),
         ))
         .id();
+    let ladder = app
+        .world
+        .spawn((
+            Transform::from_xyz(8.0, 1.6, -6.0),
+            dress::PropModel::new(props::PropKind::SteelLadder { height: 3.18 }, 2),
+            engine_world::Climbable::ladder(Vec3::ZERO, Vec3::Y * 3.0, Vec3::NEG_Z),
+        ))
+        .id();
     app.update();
+    let rungs = app
+        .world
+        .get::<Collider>(ladder)
+        .expect("the ladder has a surface");
+    assert!(
+        rungs.sensor && !app.world.get::<Collider>(pillar).unwrap().sensor,
+        "a climber passes through the ladder's box, not the pillar's"
+    );
     assert_eq!(
         app.world.get::<Collider>(crate_e).map(|c| c.shape.clone()),
         Some(ColliderShape::Cuboid {

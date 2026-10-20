@@ -26,6 +26,9 @@ use crate::voxel::{VoxelOp, VoxelState, VoxelVolume, box_sdf, capsule_sdf};
 use crate::wall::{DestructibleWall, LostCell, WallHit, WallLook, WallState, mesh_cells};
 use crate::{DestructionSettings, DestructionStats};
 
+/// Smallest wall chunk (m³) a blast throws that bursts on a hard landing.
+const THROWN_SHATTER_M3: f32 = 0.003;
+
 /// One piece of damage to apply.
 #[derive(Debug, Clone)]
 pub enum Hit {
@@ -867,11 +870,14 @@ fn wall_chunks(
             None => ctx.rng.unit_vector() * 0.3,
         };
         let spin = if push.is_some() { 6.0 } else { 0.6 } / size.max(0.2);
-        let shatter = if falling && volume > 0.03 {
-            props.shatter_speed
-        } else {
-            0.0
-        };
+        // Pieces a blast throws burst when they land hard, so a plaster or brick wall doesn't
+        // litter the yard with whole slabs of itself.
+        let shatter =
+            if (falling && volume > 0.03) || (push.is_some() && volume > THROWN_SHATTER_M3) {
+                props.shatter_speed
+            } else {
+                0.0
+            };
         ctx.pending.items.push(DebrisSpawn {
             position: gt.transform_point(com.as_dvec3()),
             rotation: rot,
