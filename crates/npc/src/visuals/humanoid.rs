@@ -892,6 +892,8 @@ impl Foe {
 /// What a fighter's pose sees beyond its owner this step.
 pub(super) struct Seen<'a> {
     pub me: Entity,
+    /// 0..1, the same every step for this fighter (from its seed): how it lands differs.
+    pub vary: f32,
     /// Where the owner stands.
     pub at: DVec3,
     /// The attacks telegraphed this step: attacker, target and kind.
@@ -5183,7 +5185,7 @@ pub(super) fn humanoid(
         };
         m.fell = Some((since.min(now), was));
     }
-    let vary = ((seen.me.to_bits() as u32) as f32 * 0.618_034).fract();
+    let vary = seen.vary;
     let fall = m.fell.map(|(since, _)| {
         let since = downed.map_or(since, |d| d.since);
         let push = m
@@ -6530,6 +6532,7 @@ mod tests {
                 };
                 let seen = Seen {
                     me: Entity::PLACEHOLDER,
+                    vary: ((Entity::PLACEHOLDER.to_bits() as u32) as f32 * 0.618_034).fract(),
                     at: DVec3::ZERO,
                     attacks: &attacks,
                     blows: &landed,
