@@ -38,9 +38,10 @@ struct Globals {
     showers: array<vec4<f32>, 4>, // center rel camera x, z, radius (m), rate (mm/h)
     puddle: vec4<f32>,   // origin rel camera x, z, cell (m), texels per side
     puddle2: vec4<f32>,  // height the puddle texture's ground is relative to (rel camera y), unused
-    counts: vec4<u32>,   // bodies, showers, puddles on, unused
+    counts: vec4<u32>,   // bodies, showers, puddles on, plunges
     under: vec4<f32>,    // underwater absorption rgb, scattering
     under2: vec4<f32>,   // underwater scatter color rgb, surface level rel camera y
+    plunges: array<vec4<f32>, 8>, // where falls land: foot rel camera xyz, boil radius (m)
 };
 
 struct WaterUniform {
@@ -95,6 +96,62 @@ fn linear_depth(d: f32) -> f32 {
 }
 
 fn time_s() -> f32 { return water.g.rain.y; }
+
+// Torn foam: patches with holes in them.
+fn froth_noise(p: vec2<f32>) -> f32 {
+    return value_noise2(p * 2.3) * 0.6 + value_noise2(p * 6.1 + vec2<f32>(4.1, 2.7)) * 0.4;
+}
+
+// Where a fall lands, the water boils: a churned white core where the falling water drives
+// air under, and the foam it brings up carried outward in torn patches, thinning as it
+// spreads. x: foam, yz: slope of the churned surface.
+fn plunge_boil(rel: vec3<f32>) -> vec3<f32> {
+    var out = vec3<f32>(0.0);
+    let wp = tiling_pos(rel).xz;
+    let t = time_s();
+    for (var i = 0u; i < min(water.g.counts.w, 8u); i++) {
+        let p = water.g.plunges[i];
+        let d = rel.xz - p.xz;
+        let r = length(d);
+        if (r > p.w * 2.5 || abs(rel.y - p.y) > 1.5) { continue; }
+        let x = r / p.w;
+        let dir = d / max(r, 1e-3);
+        // The foam rides the outflow (about 1 m/s): two copies carried outward, cross-faded.
+        let ph0 = fract(t * 0.25);
+        let ph1 = fract(t * 0.25 + 0.5);
+        let n0 = froth_noise(wp - dir * ph0 * 4.0);
+        let n1 = froth_noise(wp - dir * ph1 * 4.0 + vec2<f32>(5.3, 1.7));
+        let patches = mix(n0, n1, abs(ph0 - 0.5) * 2.0);
+        // Froth is bubbles, not paint: fine lace tears holes in it, more as it thins out.
+        let lace = value_noise2(wp * 11.0 - dir * ph0 * 44.0) * 0.5
+            + value_noise2(wp * 23.0 + vec2<f32>(t * 0.7, 1.3)) * 0.5;
+        let core = 1.0 - smoothstep(0.1, 0.7, x + (patches - 0.5) * 0.4);
+        let spread = smoothstep(0.45 + 0.1 * x, 0.75 + 0.1 * x, patches) * (1.0 - smoothstep(0.4, 2.4, x));
+        let holes = smoothstep(0.1 + 0.2 * x, 0.45 + 0.2 * x, lace);
+        out.x = max(out.x, (core * 1.4 + spread * 0.9) * mix(0.5, 1.0, holes));
+        // The core heaves and churns.
+        let e = 0.05;
+        let q = wp * 3.0 + vec2<f32>(t * 2.1, -t * 1.7);
+        let h = value_noise2(q);
+        let g = vec2<f32>(value_noise2(q + vec2<f32>(e, 0.0)) - h, value_noise2(q + vec2<f32>(0.0, e)) - h) / e;
+        let churn = 1.0 - smoothstep(0.0, 1.3, x);
+        out = vec3<f32>(out.x, out.yz + g * 0.06 * churn);
+    }
+    return out;
+}
+
+// The boil's outflow at `rel` (m/s, x and z): radially out from the nearest plunge.
+fn plunge_flow(rel: vec3<f32>) -> vec2<f32> {
+    var v = vec2<f32>(0.0);
+    for (var i = 0u; i < min(water.g.counts.w, 8u); i++) {
+        let p = water.g.plunges[i];
+        let d = rel.xz - p.xz;
+        let r = length(d);
+        if (r > p.w * 2.5 || abs(rel.y - p.y) > 1.5) { continue; }
+        v += d / max(r, 1e-3) * (1.0 - smoothstep(0.3, 2.4, r / p.w));
+    }
+    return v;
+}
 
 // A pixel's footprint on a level surface at camera-relative `rel`: `across` the view (meters)
 // and stretched `stretch` times along the horizontal view direction `view`, where at grazing
@@ -643,6 +700,10 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     }
     var g = capillary_gradient(wp, water.bodies[bi].wind.xy, wind, footprint(in.rel));
     g += rain_gradient(wp, rain_at(in.rest), saturate(1.0 - pixel / 0.02));
+    let boil = plunge_boil(in.rel);
+    foam += boil.x;
+    g += boil.yz;
+    vel += plunge_flow(in.rel);
     n = normalize(n + vec3<f32>(-g.x, 0.0, -g.y));
     var color: vec3<f32>;
     // Seen from below when the camera is under the water.
@@ -735,13 +796,15 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     // covers streams near the camera too).
     let rp = ripple_at(in.rel.xz);
     g += rp.zw;
+    let boil = plunge_boil(in.rel);
+    g += boil.yz;
     let n = normalize(in.normal + vec3<f32>(-g.x, 0.0, -g.y));
     // White water: fast, steep or tumbling. Fast water breaks into streaks and patches of
     // white over its riffles, never a white sheet; drops churn it white all over.
     let steep = 1.0 - in.normal.y;
     var foam = saturate((speed - 1.8) * 0.25) * 0.5 + saturate(steep * 2.5 - 0.3) * 1.3;
     foam *= saturate(in.depth * 30.0);
-    foam += rp.y * 1.2;
+    foam += rp.y * 1.2 + boil.x;
     var color: vec3<f32>;
     if (front) {
         // Streams run shallow over riffles: only the last centimeter fades.
