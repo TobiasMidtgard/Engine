@@ -20,6 +20,14 @@ use engine_world::{SimulationFocus, WorldPlugin};
 
 /// (world seconds, file name, camera position, look-at target), yard-local.
 const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
+    // The pool table: the cue ball rolling at the rack, the rack opening, and the balls at rest,
+    // seen from above, a few of them down the pockets.
+    (
+        0.1,
+        "26_pool_cue_ball_rolling",
+        [8.6, 1.9, -6.6],
+        [9.6, 0.8, -8.6],
+    ),
     (
         0.25,
         "01_overview_start",
@@ -34,6 +42,7 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [17.3, 2.3, -2.2],
         [16.0, 1.75, -4.5],
     ),
+    (0.35, "27_pool_break", [8.6, 1.9, -6.6], [9.6, 0.8, -8.6]),
     // The wrecking ball's chain close up under the swinging ball's load (and later, below).
     (
         0.7,
@@ -127,6 +136,12 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         "24_pendulum_wave_snakes",
         [16.0, 6.2, -3.4],
         [16.0, 1.5, -8.6],
+    ),
+    (
+        12.0,
+        "28_pool_after_the_break",
+        [9.0, 4.4, -6.6],
+        [9.0, 0.8, -8.5],
     ),
     (
         12.0,

@@ -117,6 +117,8 @@ const STD: u32 = 1024;
 /// Tile sizes (meters) the surfaces' UVs are divided by.
 pub const ASPHALT_TILE: f32 = 8.0;
 pub const RUNWAY_TILE: f32 = 8.0;
+/// Mean wear of road and runway paint (0 = fresh, 1 = gone).
+const PAINT_WEAR: f32 = 0.2;
 pub const CONCRETE_TILE: f32 = 4.0;
 pub const SLAB_PANEL: f32 = 5.0;
 pub const GRAVEL_TILE: f32 = 2.0;
@@ -420,9 +422,6 @@ impl<'w> Scene<'w> {
             })
         };
         let slabs = |w: &mut World| textures(w, "slabs", STD, |px| tex::slabs(px, SLAB_PANEL, 14));
-        let paint = |w: &mut World, tile: f32, name: &str| {
-            textures(w, name, STD, move |px| tex::paint(px, tile, 0.18, 15))
-        };
         let grime = |w: &mut World| textures(w, "grime", 512, |px| tex::grime(px, GRIME_TILE, 16));
         match s {
             Surface::Asphalt => {
@@ -455,13 +454,48 @@ impl<'w> Scene<'w> {
             | Surface::PaintRunway
             | Surface::PaintSlabs
             | Surface::PaintConcrete => {
-                let (tile, normal) = match s {
-                    Surface::PaintAsphalt => (ASPHALT_TILE, asphalt(w).1),
-                    Surface::PaintRunway => (RUNWAY_TILE, runway(w).1),
-                    Surface::PaintSlabs => (SLAB_PANEL * 2.0, slabs(w).1),
-                    _ => (CONCRETE_TILE, concrete(w).1),
-                };
-                let (b, _, o) = paint(w, tile, &format!("paint{}", tile as u32));
+                // Each paint bakes over the same recipe as the surface it lies on.
+                let (tile, normal, name, make): (_, _, _, Box<dyn Fn(u32) -> tex::Maps + Send>) =
+                    match s {
+                        Surface::PaintAsphalt => (
+                            ASPHALT_TILE,
+                            asphalt(w).1,
+                            "paint_asphalt",
+                            Box::new(|px| {
+                                let under = tex::asphalt_texel(ASPHALT_TILE, None, 11);
+                                tex::paint(px, ASPHALT_TILE, PAINT_WEAR, under, 15)
+                            }),
+                        ),
+                        Surface::PaintRunway => (
+                            RUNWAY_TILE,
+                            runway(w).1,
+                            "paint_runway",
+                            Box::new(|px| {
+                                let under =
+                                    tex::asphalt_texel(RUNWAY_TILE, Some(RUNWAY_TILE / 256.0), 12);
+                                tex::paint(px, RUNWAY_TILE, PAINT_WEAR, under, 15)
+                            }),
+                        ),
+                        Surface::PaintSlabs => (
+                            SLAB_PANEL * 2.0,
+                            slabs(w).1,
+                            "paint_slabs",
+                            Box::new(|px| {
+                                let under = tex::slabs_texel(SLAB_PANEL, 14);
+                                tex::paint(px, SLAB_PANEL * 2.0, PAINT_WEAR, under, 15)
+                            }),
+                        ),
+                        _ => (
+                            CONCRETE_TILE,
+                            concrete(w).1,
+                            "paint_concrete",
+                            Box::new(|px| {
+                                let under = tex::concrete_texel(CONCRETE_TILE, 13);
+                                tex::paint(px, CONCRETE_TILE, PAINT_WEAR, under, 15)
+                            }),
+                        ),
+                    };
+                let (b, _, o) = textures(w, name, STD, make);
                 let mut m = tiled(pbr(b, normal, o), tile);
                 m.occlusion_texture = None;
                 m.normal_scale = 0.8;
