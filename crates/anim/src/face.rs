@@ -14,11 +14,16 @@
 //! to the nose), and moves each joint by a rotation about a pivot (eyes, lids, jaw) or a small
 //! offset (mouth, lips, brows, cheeks), so the retargeter stays unchanged. A skeleton without
 //! face joints gets no rig and its pose is left as it was.
+//!
+//! People with an [`Appearance`] (drawn by a character module) get a [`Face`] too, seeded from
+//! the appearance: it writes the `FaceControls` contract (ARKit weights and gaze) every frame,
+//! with the gaze measured from the humanoid head, for the character module to show.
 
 use std::sync::Arc;
 
 use engine_core::prelude::*;
 use engine_world::animation::{AnimationParams, Ragdoll};
+use engine_world::character::{self as contract, Appearance, arkit};
 
 use crate::animator::Animator;
 use crate::ik::{LookAt, to_model};
@@ -497,10 +502,11 @@ type FaceQuery<'a> = (
     Option<&'a Ragdoll>,
     Option<&'a LookAt>,
     Option<&'a AnimationParams>,
+    Option<&'a mut contract::FaceControls>,
 );
 
 pub(crate) fn face_system(targets: Query<&GlobalTransform>, mut q: Query<FaceQuery>) {
-    for (animator, mut retarget, mut face, gt, ragdoll, look, params) in &mut q {
+    for (animator, mut retarget, mut face, gt, ragdoll, look, params, out) in &mut q {
         if !face.enabled {
             continue;
         }
@@ -513,25 +519,178 @@ pub(crate) fn face_system(targets: Query<&GlobalTransform>, mut q: Query<FaceQue
         let Some(rig) = face.state.rig.as_ref().and_then(|(_, r)| r.clone()) else {
             continue;
         };
-        let target = face.look_at.or_else(|| {
-            look.filter(|l| l.enabled && l.weight > 0.0).map(|l| {
-                l.entity
-                    .and_then(|e| targets.get(e).ok())
-                    .map_or(l.target, |t| t.translation())
-            })
-        });
-        let effort = animator
-            .curve("effort")
-            .max(0.8 * animator.curve("brace"))
-            .max(0.8 * animator.curve("flex"))
-            .max(0.5 * params.map_or(0.0, |p| p.get("move_effort")));
+        let target = look_target(&face, look, &targets);
         let input = FaceInputs {
-            effort,
-            slack: ragdoll.map_or(0.0, |r| ((r.weight - 0.3) / 0.5).clamp(0.0, 1.0)),
+            effort: effort(animator, params),
+            slack: slack(ragdoll),
             look: target.map(|t| rig.gaze_to(&retarget.model, to_model(gt, t))),
         };
         let controls = face.update(animator.dt, input);
         rig.apply(&controls, &mut retarget.model);
+        if let Some(mut out) = out {
+            controls.write_arkit(&mut out);
+        }
+    }
+}
+
+/// Where a face should look: its own point, else its `LookAt`'s target.
+fn look_target(
+    face: &Face,
+    look: Option<&LookAt>,
+    targets: &Query<&GlobalTransform>,
+) -> Option<DVec3> {
+    face.look_at.or_else(|| {
+        look.filter(|l| l.enabled && l.weight > 0.0).map(|l| {
+            l.entity
+                .and_then(|e| targets.get(e).ok())
+                .map_or(l.target, |t| t.translation())
+        })
+    })
+}
+
+/// How hard the body works (0..1), from the animation's curves and the move effort.
+fn effort(animator: &Animator, params: Option<&AnimationParams>) -> f32 {
+    animator
+        .curve("effort")
+        .max(0.8 * animator.curve("brace"))
+        .max(0.8 * animator.curve("flex"))
+        .max(0.5 * params.map_or(0.0, |p| p.get("move_effort")))
+}
+
+fn slack(ragdoll: Option<&Ragdoll>) -> f32 {
+    ragdoll.map_or(0.0, |r| ((r.weight - 0.3) / 0.5).clamp(0.0, 1.0))
+}
+
+/// Brow, cheek and mouth offsets (m) that make a full ARKit weight.
+const FULL_OFFSET: f32 = 0.006;
+
+impl FaceControls {
+    /// The same expression as ARKit blendshape weights and gaze, for a face another module
+    /// draws (`Left`/`Right` are the face's own; these faces are symmetric).
+    pub fn write_arkit(&self, out: &mut contract::FaceControls) {
+        let w = |v: f32| (v / FULL_OFFSET).clamp(0.0, 1.0);
+        out.weights.clear();
+        out.weights.resize(contract::ARKIT.len(), 0.0);
+        let mut both = |l: usize, r: usize, v: f32| {
+            out.set_index(l, v);
+            out.set_index(r, v);
+        };
+        both(
+            arkit::EYE_BLINK_LEFT,
+            arkit::EYE_BLINK_RIGHT,
+            self.lids.clamp(0.0, 1.0),
+        );
+        both(
+            arkit::EYE_SQUINT_LEFT,
+            arkit::EYE_SQUINT_RIGHT,
+            self.squint.clamp(0.0, 1.0),
+        );
+        both(
+            arkit::CHEEK_SQUINT_LEFT,
+            arkit::CHEEK_SQUINT_RIGHT,
+            w(self.cheeks * 1.5),
+        );
+        both(
+            arkit::BROW_DOWN_LEFT,
+            arkit::BROW_DOWN_RIGHT,
+            w(-self.brow_inner + self.brow_knit * 0.5),
+        );
+        both(
+            arkit::MOUTH_SMILE_LEFT,
+            arkit::MOUTH_SMILE_RIGHT,
+            w(self.corners_up * 2.0),
+        );
+        both(
+            arkit::MOUTH_FROWN_LEFT,
+            arkit::MOUTH_FROWN_RIGHT,
+            w(-self.corners_up * 2.0),
+        );
+        both(
+            arkit::MOUTH_STRETCH_LEFT,
+            arkit::MOUTH_STRETCH_RIGHT,
+            w(self.corners_out + self.corners_back),
+        );
+        both(
+            arkit::NOSE_SNEER_LEFT,
+            arkit::NOSE_SNEER_RIGHT,
+            w(self.upper_lip * 1.5),
+        );
+        out.set_index(arkit::BROW_INNER_UP, w(self.brow_inner));
+        out.set_index(arkit::JAW_OPEN, self.jaw.clamp(0.0, 1.0));
+        out.gaze_yaw = self.gaze.x.clamp(-GAZE_YAW_LIMIT, GAZE_YAW_LIMIT);
+        out.gaze_pitch = self.gaze.y.clamp(-GAZE_PITCH_LIMIT, GAZE_PITCH_LIMIT);
+    }
+}
+
+/// Where the eyes sit from the humanoid head bone (model axes at rest: ahead −Z), m.
+const EYES_FROM_HEAD: Vec3 = Vec3::new(0.0, 0.09, -0.08);
+
+/// Angles (left and up, radians) from the humanoid head in `model` to `target` (model space).
+fn humanoid_gaze(model: &[Xf], head: usize, target: Vec3) -> Vec2 {
+    let Some(h) = model.get(head) else {
+        return Vec2::ZERO;
+    };
+    let dir = h.r.inverse() * (target - h.transform_point(EYES_FROM_HEAD));
+    let flat = Vec2::new(-dir.x, -dir.z);
+    Vec2::new(flat.x.atan2(flat.y), dir.y.atan2(flat.length()))
+}
+
+/// Give people with an [`Appearance`] a face and the `FaceControls` it writes.
+#[allow(clippy::type_complexity)]
+pub(crate) fn give_appearance_faces(
+    mut commands: Commands,
+    q: Query<
+        (
+            Entity,
+            &Appearance,
+            Option<&Face>,
+            Option<&contract::FaceControls>,
+        ),
+        (With<Animator>, Changed<Appearance>),
+    >,
+) {
+    for (e, appearance, face, controls) in &q {
+        let mut entity = commands.entity(e);
+        if face.is_none() {
+            entity.insert(Face::seeded(appearance.seed.wrapping_add(1)));
+        }
+        if controls.is_none() {
+            entity.insert(contract::FaceControls::default());
+        }
+    }
+}
+
+type AppearanceFaceQuery<'a> = (
+    &'a Animator,
+    &'a mut Face,
+    &'a mut contract::FaceControls,
+    &'a GlobalTransform,
+    Option<&'a Ragdoll>,
+    Option<&'a LookAt>,
+    Option<&'a AnimationParams>,
+);
+
+/// Faces another module draws (people with an [`Appearance`] and no imported face rig): run
+/// the face and write the `FaceControls` contract.
+pub(crate) fn appearance_face_system(
+    targets: Query<&GlobalTransform>,
+    mut q: Query<AppearanceFaceQuery, (With<Appearance>, Without<Retarget>)>,
+) {
+    for (animator, mut face, mut out, gt, ragdoll, look, params) in &mut q {
+        if !face.enabled {
+            continue;
+        }
+        let Some(head) = animator.skeleton.index_of("head") else {
+            continue;
+        };
+        let target = look_target(&face, look, &targets);
+        let input = FaceInputs {
+            effort: effort(animator, params),
+            slack: slack(ragdoll),
+            look: target.map(|t| humanoid_gaze(&animator.model, head, to_model(gt, t))),
+        };
+        let controls = face.update(animator.dt, input);
+        controls.write_arkit(&mut out);
     }
 }
 
