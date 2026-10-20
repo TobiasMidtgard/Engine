@@ -1031,8 +1031,14 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let dr1 = dpdx(ripple_h);
     let dr2 = dpdy(ripple_h);
 
-    // Sea: below sea level, with a smooth coastline between vertices.
-    let ocean = planet.params.w * saturate(0.5 - altitude / alt_width);
+    // Sea: below sea level, with a smooth coastline between vertices. Seen from high up the
+    // vertices are kilometers apart and the sea-level line across each triangle is straight,
+    // so the coast drew the mesh's zigzag; there it wanders by up to a vertex spacing with the
+    // per-pixel noise, into capes, bays and inlets.
+    let coast_wander = (far_n.y - 0.5) * 1.6 * fwidth(altitude) / max(pixel, 1e-3) * in.lod.x * far;
+    // Beaches, shallows and the wash follow the same wandering coast.
+    let coast_alt = altitude + coast_wander;
+    let ocean = planet.params.w * saturate(0.5 - coast_alt / alt_width);
 
     // Ground maps around the focus.
     let duv = deform_uv(in.rel);
@@ -1074,7 +1080,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     // Grass: lush to dry by moisture, with sunlit meadows and hay fields between the woods.
     var grass = mix(planet.colors[C_DRY].rgb, planet.colors[C_LUSH].rgb, smoothstep(0.2, 0.7, moisture + wet_bias));
-    let field = vegetation * smoothstep(0.56, 0.64, patches + (variety - 0.5) * 0.2) * smoothstep(4.0, 12.0, temp_c);
+    // (Patches come per vertex, kilometers apart from high up: the per-pixel noise breaks the
+    // fields' edges there instead of drawing the mesh's squares.)
+    let field = vegetation * smoothstep(0.56 - 0.06 * far, 0.64 + 0.06 * far, patches + (variety - 0.5) * 0.2 + (far_n.x - 0.5) * 0.5 * far)
+        * smoothstep(4.0, 12.0, temp_c);
     grass = mix(grass, mix(planet.colors[C_DRY].rgb, planet.colors[C_LUSH].rgb, 0.45), field * 0.35);
     let clump_fade = 1.0 - smoothstep(1.0, 12.0, pixel);
     let worn = smoothstep(0.72, 0.84, patch_v + (patches - 0.5) * 0.3);
@@ -1140,10 +1149,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let shore_tan = sqrt(max(1.0 - nu * nu, 0.0)) / nu;
     let beach_w = mix(40.0, 160.0, saturate((meadow_v - 0.35) * 2.5));
     let beach_top = clamp(shore_tan * beach_w, 0.8, 5.0);
-    let beach_h = altitude + (mid_v - 0.5) * 0.5 * beach_top * clump_fade;
-    let beach = vegetation * (1.0 - smoothstep(beach_top * 0.55, beach_top * 1.15, beach_h)) * step(-1.0, altitude) * (1.0 - 0.85 * smoothstep(30.0, 300.0, pixel));
+    let beach_h = coast_alt + (mid_v - 0.5) * 0.5 * beach_top * clump_fade;
+    let beach = vegetation * (1.0 - smoothstep(beach_top * 0.55, beach_top * 1.15, beach_h)) * step(-1.0, coast_alt) * (1.0 - 0.85 * smoothstep(30.0, 300.0, pixel));
     // Behind it, grass that salt and wind keep pale and thin.
-    let dune = vegetation * planet.params.w * (1.0 - smoothstep(beach_top * 1.5, beach_top * 3.0, beach_h)) * step(0.0, altitude);
+    let dune = vegetation * planet.params.w * (1.0 - smoothstep(beach_top * 1.5, beach_top * 3.0, beach_h)) * step(0.0, coast_alt);
     let desert = vegetation * (1.0 - smoothstep(0.08, 0.22, moisture + (variety - 0.5) * 0.1 + (far_n.y - 0.5) * 0.15 * far)) * smoothstep(12.0, 22.0, temp_c);
     let sandy = saturate(beach + desert);
     col[M_SAND] = planet.colors[C_SAND].rgb;
@@ -1585,7 +1594,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     roughness = mix(roughness, 0.95, scorch);
 
     // ---- Open sea.
-    let sea_depth = max(-altitude, 0.0);
+    let sea_depth = max(-coast_alt, 0.0);
     // The wind roughens the sea: the mean square slope of its waves (Cox and Munk 1954) sets
     // how wide the sun's glitter spreads, and the waves it raises break higher on the shore.
     let wind = min(length(frame.wind.xz), 20.0);
@@ -1648,8 +1657,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // The beach the waves wash: dark wet sand up to where the biggest ones run, and the thin
     // sheet of each wave sliding up it and back, glossy, with froth along its edge.
     let runup = 0.2 + breaker * 0.6;
-    let shore_h = altitude + (detail_n - 0.5) * 0.06 * fine_fade;
-    let washed = (1.0 - smoothstep(runup * 0.8, runup * 1.2, shore_h)) * step(0.0, altitude) * coast_near * (1.0 - ocean);
+    let shore_h = coast_alt + (detail_n - 0.5) * 0.06 * fine_fade;
+    let washed = (1.0 - smoothstep(runup * 0.8, runup * 1.2, shore_h)) * step(0.0, coast_alt) * coast_near * (1.0 - ocean);
     let surge = runup * (0.45 + 0.4 * sin(6.2832 * (frame.time.x / wave_period + (meadow_v - 0.5) * 0.7)));
     let swash = (1.0 - smoothstep(surge - 0.02, surge, shore_h)) * washed;
     let swash_edge = smoothstep(surge - 0.06, surge - 0.015, shore_h) * swash * broken;
