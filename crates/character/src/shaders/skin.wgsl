@@ -406,7 +406,7 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     // The shirt's edge per pixel (the vertex mask is as soft as the base mesh is coarse); the
     // vertex mask leaves the hands bare.
     let m2 = vec4<f32>(
-        smoothstep(-0.0008, 0.0008, collar_depth(r)) * smoothstep(0.25, 0.75, in.m2.x),
+        smoothstep(-0.0008, 0.0008, cover_depth(r)) * smoothstep(0.25, 0.75, in.m2.x),
         in.m2.yzw,
     );
     let lips = m0.x;
@@ -525,8 +525,9 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     var specular = (1.0 - 0.6 * d0.pore) * (1.0 - 0.3 * scalp_tint);
 
     var scatter = 1.0;
-    // The shirt: a slate heather knit, its collar band a shade darker. Charcoal twill
-    // trousers with a dark leather belt; black leather shoes on pale rubber soles.
+    // The shirt: a heather knit in the outfit's color, its collar band a shade darker, and
+    // the accent's band. Twill trousers with a dark leather belt; black leather shoes on pale
+    // rubber soles.
     if (cloth > 0.0) {
         let g = garment(r);
         var fabric = vec3<f32>(0.0);
@@ -535,10 +536,11 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
         if (g == 0u) {
             let heather = 0.82 + 0.36 * value_noise3(r * vec3<f32>(900.0, 300.0, 900.0) + seed);
             let collar = smoothstep(0.004, 0.0, collar_depth(r) - 0.012);
-            fabric = vec3<f32>(0.075, 0.085, 0.1) * heather * (1.0 - 0.25 * collar);
+            fabric = character.top.xyz * heather * (1.0 - 0.25 * collar);
+            fabric = mix(fabric, character.accent.xyz * heather, accent_band(r, collar));
         } else if (g == 1u) {
             let mottle = 0.85 + 0.3 * value_noise3(r * vec3<f32>(400.0, 120.0, 400.0) + seed);
-            fabric = vec3<f32>(0.038, 0.04, 0.046) * mottle;
+            fabric = character.bottom.xyz * mottle;
             let belt = belt_band(r);
             fabric = mix(fabric, vec3<f32>(0.03, 0.019, 0.012), belt);
             fabric_rough = mix(0.85, 0.45, belt);

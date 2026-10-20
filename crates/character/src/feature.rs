@@ -30,6 +30,7 @@ use engine_world::character::FaceControls;
 
 use crate::appearance::{Appearance, AppearanceExt, BeardStyle, HairStyle};
 use crate::build::CharacterMeshes;
+use crate::clothes::Cut;
 use crate::face::{self, MAX_CHANNELS};
 use crate::mesh::Landmarks;
 use crate::rig::Rig;
@@ -89,6 +90,10 @@ pub struct GpuCharacter {
     pub rest_eye_r: [f32; 4],
     pub rest_head: [f32; 4],
     pub rest_mouth: [f32; 4],
+    /// The outfit: top color and style, bottom color and style, accent color and place.
+    pub top: [f32; 4],
+    pub bottom: [f32; 4],
+    pub accent: [f32; 4],
 }
 
 impl GpuCharacter {
@@ -116,6 +121,8 @@ impl GpuCharacter {
         let bc = a.brow_color();
         let dc = a.beard_color();
         let e = |p: Vec3, w: f32| [p.x, p.y, p.z, w];
+        let o = &a.outfit;
+        let cut = Cut::of(a).ids();
         Self {
             model: Mat4::IDENTITY.to_cols_array_2d(),
             prev_model: Mat4::IDENTITY.to_cols_array_2d(),
@@ -141,6 +148,14 @@ impl GpuCharacter {
             rest_eye_r: e(rest.eyes[1], rest.eye_radius),
             rest_head: e(rest.head, 0.0),
             rest_mouth: e(rest.mouth, 0.0),
+            top: [o.top_color[0], o.top_color[1], o.top_color[2], cut[0]],
+            bottom: [
+                o.bottom_color[0],
+                o.bottom_color[1],
+                o.bottom_color[2],
+                cut[1],
+            ],
+            accent: [o.accent[0], o.accent[1], o.accent[2], cut[2]],
         }
     }
 }
@@ -940,7 +955,7 @@ mod tests {
 
     #[test]
     fn gpu_structs_match_wgsl_sizes() {
-        assert_eq!(std::mem::size_of::<GpuCharacter>(), 2 * 64 + 12 * 16);
+        assert_eq!(std::mem::size_of::<GpuCharacter>(), 2 * 64 + 15 * 16);
         assert_eq!(std::mem::size_of::<SkinVertex>(), 104);
         assert_eq!(std::mem::size_of::<GpuPose>(), 4 * 16 + 2 * 16 * 16);
         assert_eq!(std::mem::size_of::<EyeVertex>(), 48);
