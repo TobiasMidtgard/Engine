@@ -1108,6 +1108,9 @@ fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
         hip.x.abs() * 0.8
     };
     let reach = 0.985 * (thigh + shin);
+    // Walking sideways is an athlete's shuffle: knees bent, trunk a little forward, hands up
+    // and out, and the hips carried over whichever foot holds the weight.
+    let athletic = if stance > 0.5 { dir.x.abs() } else { 0.0 };
     // Where each foot is (model space, relative to the hips' rest place) at `q` phase since
     // it planted, and how far it is through its swing (0 while it stands).
     let foot = |side: usize, q: f32| {
@@ -1131,8 +1134,14 @@ fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
         // The hips sink until both feet are in reach (knees soft), and dip a little as each
         // foot takes the weight.
         let mut drop: f32 = 0.015;
+        let over: f32 = feet
+            .iter()
+            .enumerate()
+            .map(|(side, (_, swing))| -S[side] * (std::f32::consts::PI * swing).sin())
+            .sum();
+        let shift = Vec3::X * 0.035 * athletic * over;
         let joint_at = |side: usize, drop: f32| {
-            turn * Vec3::new(S[side] * hip.x.abs(), 0.0, hip.z) + Vec3::Y * (hip.y - drop)
+            turn * Vec3::new(S[side] * hip.x.abs(), 0.0, hip.z) + shift + Vec3::Y * (hip.y - drop)
         };
         for (side, (at, _)) in feet.iter().enumerate() {
             let joint = joint_at(side, 0.0);
@@ -1140,13 +1149,13 @@ fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
             let below = (reach * reach - flat * flat).max(0.0).sqrt();
             drop = drop.max(joint.y - at.y - below);
         }
-        drop += 0.012 * (1.0 - cycle(ph * 2.0)) * 0.5;
+        drop += 0.012 * (1.0 - cycle(ph * 2.0)) * 0.5 + 0.06 * athletic;
         // A stoop (more running), leaning into a sidestep with the head kept level; the
         // spine turns the shoulders back to face ahead over hips turned into a run.
         let roll = 3.0 * dir.x;
-        let lean = gait.lean;
+        let lean = gait.lean + 6.0 * athletic;
         let yaw_deg = yaw.to_degrees();
-        p.rot_move("hips", Vec3::new(0.0, -drop, 0.0), 0.0, yaw_deg, 0.0);
+        p.rot_move("hips", shift - Vec3::Y * drop, 0.0, yaw_deg, 0.0);
         spine(
             &mut p,
             [-lean * 0.6, -lean * 0.4, 1.5 + lean * 0.4, 0.5 + lean * 0.3],
@@ -1194,9 +1203,11 @@ fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
                 &mut p,
                 side,
                 Arm {
-                    flex: 2.0 + 12.0 * walk_swing * (1.0 - running) - 30.0 * swing_arm * running,
-                    elbow: 18.0 + 6.0 * walk_swing.abs() + 62.0 * running,
-                    abduct: -15.0 - 6.0 * dir.x.abs() * (1.0 - running),
+                    flex: 2.0 + 12.0 * walk_swing * (1.0 - running) - 30.0 * swing_arm * running
+                        + 14.0 * athletic,
+                    elbow: 18.0 + 6.0 * walk_swing.abs() + 62.0 * running + 30.0 * athletic,
+                    abduct: -15.0 - 6.0 * dir.x.abs() * (1.0 - running) + 12.0 * athletic,
+                    wrist: 6.0 * athletic,
                     ..Arm::HANG
                 },
             );
@@ -3199,6 +3210,38 @@ mod tests {
         assert!(heel > run_heel + 0.08, "heel {heel} vs run {run_heel}");
         // The body faces −Z: a forward lean tips the neck toward −Z.
         assert!(lean < run_lean - 0.05, "lean {lean} vs run {run_lean}");
+    }
+
+    #[test]
+    fn sidesteps_shuffle_low_with_the_hands_up() {
+        let s = skeleton();
+        let clips = clips(&s);
+        let clip = |n: &str| clips.iter().find(|c| c.name == n).unwrap();
+        // Lowest hips, and highest hand above the hips, over a cycle.
+        let stance = |c: &AnimationClip| {
+            let (mut hips, mut hand) = (f32::MAX, f32::MIN);
+            for i in 0..20 {
+                let m = model_at(&s, c, i as f32 / 20.0);
+                let y = m[s.bone("hips")].t.y;
+                hips = hips.min(y);
+                for h in HAND {
+                    hand = hand.max(m[s.bone(h)].t.y - y);
+                }
+            }
+            (hips, hand)
+        };
+        let (back_hips, back_hand) = stance(clip("backpedal"));
+        for name in ["sidestep_left", "sidestep_right"] {
+            let (hips, hand) = stance(clip(name));
+            assert!(
+                hips < back_hips - 0.03,
+                "{name}: hips {hips} vs {back_hips}"
+            );
+            assert!(
+                hand > back_hand + 0.08,
+                "{name}: hand {hand} vs {back_hand}"
+            );
+        }
     }
 
     #[test]
