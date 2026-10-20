@@ -977,10 +977,18 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "paddock_crowd_wince",
         name: "A spectator winces as the hammer lands",
-        eye: [-1.55, 1.58, 8.25],
-        target: [-1.5, 1.56, 9.0],
+        eye: [-1.6, 1.4, 8.3],
+        target: [-1.5, 1.36, 9.0],
         hour: 15.0,
         at: 1.75,
+    },
+    DemoView {
+        key: "paddock_crowd_glance",
+        name: "A spectator glances about between strikes",
+        eye: [-2.62, 1.66, 8.35],
+        target: [-2.6, 1.62, 9.0],
+        hour: 15.0,
+        at: 4.5,
     },
     DemoView {
         key: "paddock_stairs",
