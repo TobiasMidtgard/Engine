@@ -41,6 +41,11 @@ use rapier3d::prelude::{
 
 use crate::convert;
 use crate::settings::PhysicsSettings;
+use crate::step::{HARD_IMPACT_SPEED, SLOW_ROLL_SPEED};
+
+/// The gap a bullet-fast impact's contacts are given, m: just short of touching, where the
+/// solver holds a contact rigidly (`ContactFilter::modify_solver_contacts`).
+const HARD_IMPACT_GAP: f32 = 1.0e-4;
 
 /// Index of a region in [`Simulation::regions`].
 pub type RegionId = u32;
@@ -625,18 +630,40 @@ impl PhysicsHooks for ContactFilter<'_> {
     /// takes its place. A rolling body meets such a contact at every new triangle of terrain or
     /// a mesh, and the solver stops its "fall" with a kick: a barrel rolling at 8 m/s jumped
     /// 20 cm. So each contact's gap is moved by the closing speed the symmetric spin alone
-    /// adds, which leaves the gap closing as fast as the shape itself moves. Only colliders
-    /// that spin fast get this hook (`step::refresh_contact_hooks`).
+    /// adds, which leaves the gap closing as fast as the shape itself moves.
+    ///
+    /// Bullet-fast impacts are made hard. Rapier's contacts give a little once shapes touch (the
+    /// contact stiffness), which at a bullet's speed is a lot: a ball at 1000 m/s sank 5 cm into
+    /// a board before stopping, past the middle of a 2 cm board, and the next fresh contact
+    /// pushed it out the far side. A contact closing faster than [`HARD_IMPACT_SPEED`] is
+    /// given as just short of touching, which the solver holds rigidly, so the ball stops where
+    /// it meets the board.
+    ///
+    /// Only colliders that spin fast, move bullet-fast or are small get this hook
+    /// (`step::refresh_contact_hooks`).
     fn modify_solver_contacts(&self, ctx: &mut ContactModificationContext) {
+        if self.dt <= 0.0 {
+            return;
+        }
         let spin = |c: ColliderHandle, b: Option<RigidBodyHandle>| {
             let (collider, body) = (ctx.colliders.get(c)?, ctx.bodies.get(b?)?);
             crate::rolling::symmetric_spin(collider, body)
+                .filter(|(w, _, r)| w.length() * r >= SLOW_ROLL_SPEED)
         };
         let (s1, s2) = (
             spin(ctx.collider1, ctx.rigid_body1),
             spin(ctx.collider2, ctx.rigid_body2),
         );
-        if self.dt <= 0.0 || (s1.is_none() && s2.is_none()) {
+        let bodies = ctx.bodies;
+        let (b1, b2) = (
+            ctx.rigid_body1.and_then(|b| bodies.get(b)),
+            ctx.rigid_body2.and_then(|b| bodies.get(b)),
+        );
+        let fast = |b: Option<&rapier3d::prelude::RigidBody>| {
+            b.is_some_and(|b| b.linvel().length() > HARD_IMPACT_SPEED)
+        };
+        let impact = fast(b1) || fast(b2);
+        if s1.is_none() && s2.is_none() && !impact {
             return;
         }
         let Some(m) = ctx.rigid_mut() else {
@@ -646,10 +673,18 @@ impl PhysicsHooks for ContactFilter<'_> {
         let surface = |s: Option<(Vec3, Vec3, f32)>, p: Vec3| {
             s.map_or(Vec3::ZERO, |(w, on_axis, _)| w.cross(p - on_axis))
         };
+        let velocity = |b: Option<&rapier3d::prelude::RigidBody>, p: Vec3| {
+            b.map_or(Vec3::ZERO, |b| b.velocity_at_point(p))
+        };
         for c in m.solver_contacts.iter_mut() {
             // The anchors are world points here; `n` points from collider 1 to collider 2.
             let closing = (surface(s1, c.anchor1) - surface(s2, c.anchor2)).dot(n);
             c.dist += closing * self.dt;
+            if impact
+                && (velocity(b1, c.anchor1) - velocity(b2, c.anchor2)).dot(n) > HARD_IMPACT_SPEED
+            {
+                c.dist = c.dist.max(HARD_IMPACT_GAP);
+            }
         }
     }
 

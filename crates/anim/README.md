@@ -65,7 +65,9 @@ compresses and stretches.
   backwards, clips solved by leg IK so planted feet move at the body's speed; generated
   people stroll on whole steps below walking speed. `accel` (from the motion: speeding up
   along the facing) tips the trunk forward into a start and sits it back on bent knees into
-  a stop. A `DamageEvent` makes the
+  a stop. `grade` (from the motion: rise per meter on the ground, full at a flight of
+  stairs) leans the body into a climb, and going down softens the knees, drops the chin to
+  watch the steps and holds the arms a little out. A `DamageEvent` makes the
   struck person flinch (`HitReaction`): joints below the hit give with the blow, joints above
   lag, a low blow shoves the hips (the knees give and the trunk leans against it), the
   face winces, and it all springs back. `guarding` > 0.5 holds a boxer's `guard`.
@@ -202,7 +204,7 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 | Hammer athlete | Two-handed sledgehammer strike onto a tractor tire: arms, shoulders and back tense on the strike and relax after; veins on the forearms; the ponytail whips; then a braced guard (`hammer_block`, held while `hammer_guard` is on): left foot forward, knees bent, the handle across the face with the left hand on it by `ReachIk` |
 | Lifter | Front double-biceps: a breath in, the fists curl up and the elbows swing out to shoulder height, a hit that overshoots and settles, two squeezes (fists curl, shoulders lift, chest up, face strained), then the elbows drop and the arms shake loose; biceps, shoulders and chest bulge |
 | Shirt reach | Up on tiptoe to a hanging lantern: a glance up and a dip, the elbow leads the arm up, `ReachIk` puts the hand on the glass while `grip` closes it, then down onto the heels with a give in the knees; the sleeve bunches at the elbow and rides up the raised arm |
-| Step course | A walker climbs a ramp, crosses a deck, walks down stairs with feet planted by IK, then runs back leaning into the turns |
+| Step course | A walker leans into a ramp, crosses a deck, walks down stairs watching the steps with feet planted by IK and arms a little out, then runs back leaning into the turns (`paddock_stairs`) |
 | Footwork drill | An athlete walks a square facing one way: ahead, sidestepping left, backpedalling, sidestepping right, blending through the corners, every planted foot still on the sand (`paddock_footwork`) |
 | Shuttle lane | An athlete sprints the lane from a standing start (leaning into it), digs in to stop, runs back backwards, turns on the spot and runs sideways to the start; a coach beside the lane turns where they stand to keep watching, the head first and the feet stepping round once the runner is well off to one side (`paddock_sprint_start`, `paddock_sprint_stop`) |
 | Sparring partner | A lifter in a boxer's guard (lead foot and fist forward, elbows tucked, bouncing lightly) takes a jab to the chin (head snaps back), a hook to the side of the head, a blow to the stomach (folds over it) and a shove on the back of a shoulder, flinching away from each and recovering to the guard without being shoved off his feet (`paddock_flinch`) |

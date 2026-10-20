@@ -10,6 +10,7 @@ pub mod footstep;
 pub mod mixer;
 pub mod nature;
 mod output;
+pub mod samples;
 mod systems;
 pub mod thunder;
 pub mod vehicle;
@@ -27,6 +28,7 @@ use engine_world::{FollowsWorldShift, WorldShift, WorldShiftAppExt};
 
 pub use footstep::{FootstepSound, FootstepSurfaces, Step, SurfaceSound};
 pub use mixer::{Bus, Clock, Meters, Sound, Spatial, VoiceId};
+pub use samples::FootstepSamples;
 
 use mixer::{Command, Mixer, MixerEvent, MixerSettings, Play};
 use output::Backend;
@@ -50,6 +52,7 @@ impl Plugin for AudioPlugin {
             .init_resource::<thunder::Strikes>()
             .init_resource::<AudioMix>()
             .init_resource::<FootstepSurfaces>()
+            .init_resource::<FootstepSamples>()
             .insert_resource(Audio::new())
             .add_message::<AudioCue>()
             .shift_messages::<AudioCue>()
@@ -57,8 +60,9 @@ impl Plugin for AudioPlugin {
                 "Audio settings: output (Auto/Device/Offline/Off), master_db, speed_of_sound (m/s), \
                  doppler (0..1), air_absorption (/m), slow_motion_pitch (0..1, how much time \
                  dilation lowers pitch), min_pitch, slow_motion_darken (0..1), space_is_silent, \
-                 footstep_distance_m, max_voices, weather_ambience, occlusion (walls muffle \
-                 sounds), fires, water, vehicles, nature (birds, owls, crickets, cicadas).",
+                 footstep_distance_m, recorded_footsteps (play fetched recordings of real \
+                 steps), max_voices, weather_ambience, occlusion (walls muffle sounds), fires, \
+                 water, vehicles, nature (birds, owls, crickets, cicadas).",
             )
             .register_resource::<AudioMix>(
                 "Bus volumes in dB: world (footsteps, impacts, explosions), ambience (rain, wind, \
@@ -76,7 +80,7 @@ impl Plugin for AudioPlugin {
                 "A room or cave: inside the box (half_extents, m, entity axes) sounds get reverb \
                  (room 0..1 size, damping 0..1, wet 0..1), fading in over fade_m meters.",
             )
-            .add_systems(Startup, systems::ensure_output)
+            .add_systems(Startup, (systems::ensure_output, samples::start_loading))
             .add_systems(
                 PostUpdate,
                 (
@@ -150,6 +154,11 @@ pub struct AudioSettings {
     pub space_is_silent: bool,
     /// Footsteps farther than this from the listener are not played, meters.
     pub footstep_distance_m: f32,
+    /// Footsteps play recorded takes where they are fetched (`cargo run -p fetch-assets --
+    /// audio`, into `<asset root>/fetched/audio/footsteps/`), with the synthesis adding only
+    /// what the recording lacks; off (or without the files) every step is synthesized. Read
+    /// at startup to load them; turning it off later goes back to the synthesis.
+    pub recorded_footsteps: bool,
     /// Most voices at once; new sounds beyond it are skipped.
     pub max_voices: u32,
     /// Play rain, wind and thunder from the weather.
@@ -183,6 +192,7 @@ impl Default for AudioSettings {
             slow_motion_darken: 0.7,
             space_is_silent: true,
             footstep_distance_m: 60.0,
+            recorded_footsteps: true,
             max_voices: 96,
             weather_ambience: true,
             occlusion: true,

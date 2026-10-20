@@ -627,16 +627,18 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                 )
                 .at(16.0, 1.2)
                 .call("vehicles.place", drift),
-                // Behind the barrier just past the kicker, the car flying by in the morning sun
-                // with the kicker behind it (placed at 40 m/s, it slows to about 33 for the
-                // straight over the kicker and is mid-air 2.2 s later).
+                // Low in the infield past the kicker, the car flying by at the top of its arc
+                // with the kicker behind it. Placed at 40 m/s, it slows to about 33 for the
+                // straight, leaves the lip 1.6 s later, peaks 2.4 m up 0.7 s after that and
+                // lands 42 m on. The tour's capture comes about 0.65 s later than the warmup
+                // says (measured), so this warmup catches it near the top.
                 DemoView::new(
                     "track_jump",
                     "The kicker jump",
-                    [-20.0, 1.8, 93.0],
-                    [-14.0, 2.0, 84.0],
+                    [-30.0, 1.7, 66.0],
+                    [-12.0, 2.2, 80.0],
                 )
-                .at(9.5, 1.75)
+                .at(9.5, 1.15)
                 .call(
                     "vehicles.place",
                     on_oval("Red car", JUMP_ANGLE - 0.42, 40.0),

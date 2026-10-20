@@ -774,22 +774,36 @@ fn spells() -> Vec<EffectDesc> {
                     additive: 1.0,
                     ..em("glints")
                 },
-                // A thin cold mist rolling out low along the ground.
+                // A thin cold mist rolling out low along the ground: many flat wisps lying just
+                // above it, overlapping into one sheet instead of separate round puffs.
                 EmitterDesc {
-                    bursts: once(16),
+                    bursts: once(36),
+                    offset: [0.0, 0.12, 0.0],
                     shape: EmitShape::Ring {
-                        radius: 0.3,
-                        thickness: 0.2,
+                        radius: 0.4,
+                        thickness: 0.3,
                     },
-                    speed: [1.8, 3.5],
+                    speed: [1.2, 3.0],
                     drag: 2.0,
-                    gravity: 0.02,
-                    turbulence: 0.3,
-                    lifetime: [1.4, 2.4],
-                    size: [0.5, 0.8],
-                    size_over_life: c(&[(0.0, 0.6), (1.0, 2.6)]),
-                    emissive: 60.0,
-                    ..smoke("mist", 0.75, 0.22)
+                    gravity: 0.0,
+                    turbulence: 0.2,
+                    wind: 0.3,
+                    lifetime: [1.2, 2.2],
+                    size: [0.6, 0.9],
+                    size_over_life: c(&[(0.0, 0.5), (1.0, 3.0)]),
+                    rotation_deg: [0.0, 360.0],
+                    facing: Facing::Horizontal,
+                    // Cold and pale whatever the light: bluish, a little self-lit, thin enough
+                    // to see the ground through.
+                    color: g(&[
+                        (0.0, [0.72, 0.84, 1.0, 0.0]),
+                        (0.1, [0.72, 0.84, 1.0, 0.2]),
+                        (1.0, [0.85, 0.92, 1.0, 0.0]),
+                    ]),
+                    lit: 0.7,
+                    emissive: 150.0,
+                    soft: 0.15,
+                    ..smoke("mist", 0.8, 0.2)
                 },
                 EmitterDesc {
                     bursts: once(1),
@@ -1203,32 +1217,34 @@ fn spells() -> Vec<EffectDesc> {
              brightening as they near a crackling white-blue ball of energy.",
             None,
             vec![
-                // Motes appear faint and blue on a sphere around the core and spiral in on
-                // comet tails, so the pull reads at a glance instead of as scattered dashes.
+                // Motes appear faint and blue on a sphere around the core and spiral in as fine
+                // sparks on comet tails, so the pull reads at a glance instead of as scattered
+                // dashes.
                 EmitterDesc {
-                    rate: 70.0,
+                    rate: 110.0,
                     shape: EmitShape::Sphere {
                         radius: 2.2,
                         surface: true,
                     },
                     speed: [0.0, 0.0],
                     attract: 16.0,
-                    vortex: 9.0,
+                    vortex: 5.0,
                     drag: 1.2,
                     wind: 0.0,
                     local_space: true,
                     lifetime: [0.7, 1.0],
-                    size: [0.06, 0.1],
+                    size: [0.016, 0.03],
                     size_over_life: c(&[(0.0, 0.6), (0.7, 1.0), (1.0, 0.5)]),
+                    sprite: Sprite::Spark,
                     facing: Facing::Velocity,
-                    stretch: 0.05,
+                    stretch: 0.022,
                     color: g(&[
                         (0.0, [0.35, 0.55, 1.0, 0.0]),
                         (0.45, [0.45, 0.65, 1.0, 0.7]),
                         (0.85, [0.75, 0.88, 1.0, 1.0]),
                         (1.0, [0.9, 0.95, 1.0, 0.0]),
                     ]),
-                    emissive: 10_000.0,
+                    emissive: 20_000.0,
                     additive: 1.0,
                     soft: 0.0,
                     ..em("converge")

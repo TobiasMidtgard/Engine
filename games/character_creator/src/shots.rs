@@ -135,7 +135,8 @@ fn body_view(name: &str) -> Option<Orbit> {
 }
 
 impl ShotPlan {
-    /// `--shots <dir> [--only name,name] [--views front,34,...] [--pose walk]`, or None without
+    /// `--shots <dir> [--only name,name] [--views front,34,...] [--pose walk] [--headgear id]`,
+    /// or None without
     /// `--shots`. Views are close-ups (`front`, `34`, `profile`, `eyes`, ...), whole-body views
     /// (`body`, `body34`, `bodyside`, `bodyback`, `feet`, in `--pose`), or expressions in close-up
     /// (`smile`, `sad`, `surprise`, ...; `<expression>34` from three-quarters).
@@ -152,6 +153,7 @@ impl ShotPlan {
             value("--only").map(|s| s.split(',').map(|n| n.trim().to_lowercase()).collect());
         let views = value("--views").unwrap_or_else(|| "front,34,profile".into());
         let body_pose = value("--pose").unwrap_or_else(|| "stand".into());
+        let headgear = value("--headgear");
         let mut people: Vec<(String, Appearance)> = Appearance::presets()
             .into_iter()
             .map(|(n, a)| (n.to_lowercase(), a))
@@ -160,7 +162,10 @@ impl ShotPlan {
             people.push((format!("random{seed}"), Appearance::random(seed)));
         }
         let mut shots = Vec::new();
-        for (name, a) in people {
+        for (name, mut a) in people {
+            if let Some(h) = &headgear {
+                a.headgear = h.clone();
+            }
             let wanted = match &only {
                 Some(list) => list.contains(&name),
                 None => !name.starts_with("random"),

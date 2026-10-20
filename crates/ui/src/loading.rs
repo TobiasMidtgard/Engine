@@ -170,12 +170,12 @@ fn paint_backdrop(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
     // Sunlight from the upper left, the night side to the lower right.
     let (az, el) = (-0.95, 0.42);
     if planet.rings {
-        crate::map::ring_half(ctx, pc, pr, true);
+        crate::map::ring_half(ctx, pc, pr, true, az);
     }
     let halo = if look.atmosphere[3] > 0.0 { 0.07 } else { 0.0 };
     ctx.planet(pc, pr, look, planet.seed + t * 0.035, 0.32, az, el, halo);
     if planet.rings {
-        crate::map::ring_half(ctx, pc, pr, false);
+        crate::map::ring_half(ctx, pc, pr, false, az);
     }
     // A thin scanning frame around the globe.
     ctx.ring(
