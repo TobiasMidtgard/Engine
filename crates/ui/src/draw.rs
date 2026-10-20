@@ -427,6 +427,32 @@ impl DrawCtx<'_> {
         self.list.push(i);
     }
 
+    /// [`DrawCtx::ring`] for a planet's ring: the part inside the shadow a globe of
+    /// `planet_radius` px at `center` casts toward arc angle `shadow_at` (0 = up/far,
+    /// clockwise) is darkened by `strength` (0..1). The ellipse is a tilted circle, so the
+    /// shadow is worked out in the ring's own plane (depth = up scaled by radii.x / radii.y).
+    #[allow(clippy::too_many_arguments)]
+    pub fn ring_shadowed(
+        &mut self,
+        center: Vec2,
+        radii: Vec2,
+        thickness: f32,
+        color: Color,
+        start: f32,
+        sweep: f32,
+        planet_radius: f32,
+        shadow_at: f32,
+        strength: f32,
+    ) {
+        let n = self.list.instances.len();
+        self.ring(center, radii, thickness, color, start, sweep, 0.0);
+        if self.list.instances.len() > n
+            && let Some(i) = self.list.instances.last_mut()
+        {
+            i.extra = [0.0, planet_radius, shadow_at, strength];
+        }
+    }
+
     /// A line from `a` to `b`; `dash` > 0 is the dash period in px.
     pub fn line(&mut self, a: Vec2, b: Vec2, width: f32, color: Color, dash: f32) {
         let d = b - a;

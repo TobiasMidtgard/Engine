@@ -1182,6 +1182,18 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
             a *= step(fract(ang * dashes), 0.55);
         }
         out = premul(in.color) * a;
+        // A planet's shadow across its rings (DrawCtx::ring_shadowed): a strip as wide as the
+        // globe, leading away from the sun, in the ring's own (untilted) plane.
+        let pr = in.extra.y;
+        if (pr > 0.0) {
+            let q = vec2(p.x, -p.y * radii.x / radii.y);
+            let d = vec2(sin(in.extra.z), cos(in.extra.z));
+            let along = dot(q, d);
+            let perp = abs(q.x * d.y - q.y * d.x);
+            let soft = pr * 0.04 + 1.0;
+            let shade = smoothstep(pr + soft, pr - soft, perp) * smoothstep(0.0, soft, along);
+            out = vec4(out.rgb * (1.0 - shade * in.extra.w), out.a);
+        }
     } else if (k == K_LINE) {
         let hl = in.params.z * 0.5;
         let w = in.params.x * 0.5;
