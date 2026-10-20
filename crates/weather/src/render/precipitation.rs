@@ -235,7 +235,7 @@ impl RenderFeature for PrecipitationFeature {
         let speeds = if snowing { SNOW_SPEEDS } else { RAIN_SPEEDS };
         let wind = state.wind;
         // Snow is drawn densely close to the eye (flakes far off are too small to see).
-        let area = settings.area_m.clamp(8.0, 120.0) * if snowing { 0.55 } else { 1.0 };
+        let area = settings.area_m.clamp(8.0, 120.0) * if snowing { 0.45 } else { 1.0 };
         let size = Vec3::new(area, area * 0.6, area);
         let mut wrap = [[0.0f32; 4]; 3];
         for (k, s) in speeds.iter().enumerate() {
@@ -269,7 +269,7 @@ impl RenderFeature for PrecipitationFeature {
             wrap,
             velocity: [wind.x, -fall, wind.z, settings.drop_width_m.max(0.0002)],
             look: [0.45, 1.0, 0.3, (t % 3600.0) as f32],
-            splash: [9.0, 0.06, 0.016, 0.0],
+            splash: [9.0, 0.06, 0.02, 0.0],
             bolt: [
                 BOLT_COLOR[0] * BOLT_LUMINANCE,
                 BOLT_COLOR[1] * BOLT_LUMINANCE,
