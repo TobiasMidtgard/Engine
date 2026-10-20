@@ -143,7 +143,7 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) instance
         let l = frame.sun_dir.xyz;
         out.sun = vec3<f32>(dot(l, right), dot(l, up), dot(l, to_eye)) * saturate(frame.sun_dir.y * 8.0 + 0.4);
     }
-    if (out.sprite == 4u || out.sprite == 19u) {
+    if (out.sprite == 4u || out.sprite == 19u || out.sprite == 21u) {
         // Clear water mirrors the sky beyond it, just above the horizon.
         let ahead = normalize(vec3<f32>(rel.x, 0.0, rel.z) + vec3<f32>(1e-4, 0.0, 0.0));
         let sky = sample_env(normalize(ahead + vec3<f32>(0.0, 0.4, 0.0)));
@@ -584,6 +584,56 @@ fn veil(c: vec2<f32>, t: f32, seed: f32) -> f32 {
         * smoothstep(1.0, 0.85, abs(x));
 }
 
+// A cluster of ice spikes thrust out from where something froze (uv.y 0 at the root): seven
+// faceted, glassy six-sided spikes fanned out from one root, the middle ones tallest, each
+// ending in a point. They grow out in the first moments of the particle's life, cloud with
+// cracks and thin away at its end. Units are the sprite's height; the quad is square.
+fn crystal(in: VsOut, c: vec2<f32>) -> vec4<f32> {
+    let p = vec2<f32>(c.x * 0.5, in.uv.y);
+    let grow = smoothstep(0.0, 0.06, in.age);
+    let gone = smoothstep(0.7, 1.0, in.age);
+    // Back spikes first, so the middle ones stand in front.
+    var fan = array<f32, 7>(-1.0, 1.0, -0.667, 0.667, -0.333, 0.333, 0.0);
+    var found = false;
+    var u = 0.0;
+    var up = 0.0;
+    var q = vec2<f32>(0.0);
+    for (var i = 0; i < 7; i++) {
+        let k = fan[i];
+        let h = hash12(vec2<f32>(k * 7.0 + 3.1, in.seed * 91.0));
+        let h2 = hash12(vec2<f32>(in.seed * 53.0, k * 11.0 + 1.7));
+        let ang = k * 0.8 + (h - 0.5) * 0.3;
+        let dir = vec2<f32>(sin(ang), cos(ang));
+        let len = (0.95 - 0.4 * abs(k) - 0.2 * h2) * grow;
+        let w = 0.04 + 0.035 * h2 + 0.035 * (1.0 - abs(k));
+        let d = p - vec2<f32>(k * 0.07, 0.0);
+        let along = dot(d, dir);
+        let across = d.x * dir.y - d.y * dir.x;
+        let half_w = w * saturate((len - along) / (w * 2.2));
+        if (along > 0.0 && along < len && abs(across) < half_w) {
+            found = true;
+            u = across / half_w;
+            up = along / max(len, 1e-3);
+            q = d * 9.0 + vec2<f32>(k * 5.0, in.seed * 17.0);
+        }
+    }
+    if (!found) { return vec4<f32>(0.0); }
+    // A six-sided prism side on shows three faces: a lit one, a front one and a shaded one.
+    let face = select(select(0.55, 1.0, u > -0.4), 0.75, u > 0.4);
+    let nx = select(select(-0.75, 0.0, u > -0.4), 0.75, u > 0.4);
+    let sun = saturate(dot(vec3<f32>(nx, 0.0, sqrt(1.0 - nx * nx)), in.sun));
+    let ridge = exp(-sq((abs(u) - 0.4) / 0.07));
+    let rim = smoothstep(0.75, 1.0, abs(u));
+    let cracks = smoothstep(0.06, 0.0, abs(value_noise2(q) - 0.5)) * (0.25 + gone);
+    // Deep blue down in the root, paling to near white at the tips.
+    let tint = mix(vec3<f32>(0.45, 0.7, 1.0), vec3<f32>(1.0), up * 0.8);
+    let col = in.radiance * tint * (0.35 * face + 0.5 * sun + 0.25)
+        + in.glint * (0.25 + 0.5 * ridge + 0.4 * rim) + in.radiance * cracks;
+    let a = (0.6 + 0.3 * rim + 0.2 * ridge + 0.3 * cracks) * (1.0 - gone)
+        * smoothstep(1.0, 0.9, abs(u));
+    return vec4<f32>(col, saturate(a));
+}
+
 // ---------------------------------------------------------------- fireball
 // A ball of burning gas traced through its sprite as a volume: a lumpy body rolled into lobes,
 // glowing from inside (near white deep in, reddening outward), turning to dark soot from the
@@ -770,6 +820,11 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
         case 20u: { // veil: a column of light rising from a spell circle (uv.y 0) up
             a = veil(c, in.uv.y, in.seed);
             rgb *= 1.0 + saturate(a - 0.6);
+        }
+        case 21u: { // crystal: a cluster of ice spikes from its root (uv.y 0) out
+            let k = crystal(in, c);
+            rgb = k.rgb;
+            a = k.a;
         }
         case 18u: { // fireball: a burning, cooling volume of gas
             let f = fireball(in, c);
