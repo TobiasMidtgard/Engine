@@ -97,8 +97,13 @@ changing that one plugin line.
   articulated (one already articulated keeps it until a quarter farther): past that, the few
   centimeters a constraint joint opens on a hard landing are about a pixel at 1080p. Seen from
   the overview camera, the yard's busy first five seconds cost 8.6 ms a step instead of 14.5, and
-  the dummies' replay 4.6 instead of 13.3; up close nothing changes. `articulated_joints: false`
-  turns it all off.
+  the dummies' replay 4.6 instead of 13.3. With a focus, a group also needs to be moving: it is
+  articulated once its fastest point goes over 2.5 m/s (falling, tumbling, thrown) and lets go
+  under 1 m/s, when a settling or still ragdoll's constraint joints rest closed, so its place
+  goes to one still tumbling. Up close at the stairs the busy first five seconds then cost 12.3
+  ms instead of 16.1 and the replay 8.8 instead of 11.0, with the ragdolls' joints opening as
+  rarely as before (over 1 cm in 18 frames of 1,800 against 16; at most 3.3 cm for a frame).
+  `articulated_joints: false` turns it all off.
 - **Heavy loads on light chains** (`Simulation::hang_loads`): a chain pinned at one place holding
   a body over 100× heavier than one of its links (a 17 t wrecking ball on 11 kg links, which
   can't be an articulation) hung with its links up to 22 cm apart on constraint joints: the
