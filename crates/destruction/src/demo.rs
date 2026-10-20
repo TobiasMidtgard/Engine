@@ -1505,28 +1505,34 @@ fn run_step(world: &mut World, demo: &mut DestructionDemo, step: Step) {
             }
         }
         Step::BlastGate => {
-            world.write_message(WorldImpulse {
-                center: o + DVec3::from_array(GATE) + DVec3::new(-1.6, 0.6, -0.9),
-                radius: 6.0,
-                strength: 60.0,
-                energy_j: 2.5e6,
-                heat_c: 400.0,
-                source: None,
-            });
+            crate::blast(
+                world,
+                WorldImpulse {
+                    center: o + DVec3::from_array(GATE) + DVec3::new(-1.6, 0.6, -0.9),
+                    radius: 6.0,
+                    strength: 60.0,
+                    energy_j: 2.5e6,
+                    heat_c: 400.0,
+                    source: None,
+                },
+            );
         }
         Step::BlastArch => {
             if let Some(arch) = t.arch {
                 let tr = world.get::<Transform>(arch).copied().unwrap_or_default();
                 let g = GlobalTransform::from(tr);
                 let foot = Vec3::new(-3.72, 1.0, 0.0);
-                world.write_message(WorldImpulse {
-                    center: g.transform_point((foot + Vec3::new(0.0, 0.0, -1.6)).as_dvec3()),
-                    radius: 8.0,
-                    strength: 80.0,
-                    energy_j: 6.0e6,
-                    heat_c: 400.0,
-                    source: None,
-                });
+                crate::blast(
+                    world,
+                    WorldImpulse {
+                        center: g.transform_point((foot + Vec3::new(0.0, 0.0, -1.6)).as_dvec3()),
+                        radius: 8.0,
+                        strength: 80.0,
+                        energy_j: 6.0e6,
+                        heat_c: 400.0,
+                        source: None,
+                    },
+                );
                 // The blast cuts through the pillar.
                 world.write_message(TerrainEdit {
                     center: g.transform_point((foot + Vec3::new(0.0, 0.0, -2.0)).as_dvec3()),
