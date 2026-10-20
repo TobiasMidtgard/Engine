@@ -13,7 +13,7 @@
 //! 150 m, and a wood of 12,000 scenery trees from a hill (with and without the distant level). Name shots after the directory to render
 //! only those (`lineup`, `lineup_lod`, `lineup_distant`, `roots`, `crown_front`,
 //! `leaves_close`, `crown_back`, `conifers`, `pine_crown`, `birch_hazel`, `grove`,
-//! `grove_far`, `valley`, `valley_far`), `textures`
+//! `grove_far`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
 //! to save the leaf atlases, their normal maps, three of their mip levels and the mass atlases far
 //! crowns draw with instead, or `stats` to print triangle counts.
 
@@ -418,6 +418,38 @@ fn main() {
             Vec3::new(-0.6, 0.5, 0.35),
         );
     }
+    if wanted("far_woods") || wanted("far_woods_off") {
+        // Patchy woods painted by a stand-in terrain out to 6 km, seen from 80 m up: only the
+        // far woods draw them (`far_woods_off`: none, the land the terrain paints today).
+        app.world.spawn((
+            Transform::from_xyz(0.0, -0.05, -3000.0),
+            MeshRenderer::new(
+                Shape::Plane {
+                    size: [14_000.0, 14_000.0],
+                    subdivisions: 1,
+                },
+                StandardMaterial::hex(0x4f5f33).with_roughness(0.95),
+            ),
+        ));
+        app.world
+            .insert_resource(engine_world::ForestCover(std::sync::Arc::new(PatchyWoods)));
+        let eye = DVec3::new(0.0, 80.0, 400.0);
+        let target = DVec3::new(0.0, 0.0, -2000.0);
+        let sun = Vec3::new(-0.6, 0.5, 0.35);
+        // Build every cell at once rather than a few a frame.
+        app.world
+            .resource_mut::<engine_foliage::FarWoods>()
+            .cells_per_frame = u32::MAX;
+        if wanted("far_woods") {
+            app.update_n(6);
+            shot(&mut app, &out, "far_woods", eye, target, sun);
+        }
+        if wanted("far_woods_off") {
+            app.world.resource_mut::<engine_foliage::FarWoods>().enabled = false;
+            app.update_n(4);
+            shot(&mut app, &out, "far_woods_off", eye, target, sun);
+        }
+    }
     if wanted("valley") || wanted("valley_far") {
         // A wood of scenery trees (no simulation) seen from a hill: the nearest draw in full,
         // then far, then distant out to a kilometer (`valley_far`: no distant level).
@@ -436,6 +468,23 @@ fn main() {
             app.update_n(10);
             shot(&mut app, &out, "valley_far", eye, target, sun);
         }
+    }
+}
+
+/// A stand-in terrain's woods: soft patches with glades, conifers to the east.
+struct PatchyWoods;
+
+impl engine_world::ForestQuery for PatchyWoods {
+    fn sample(&self, p: DVec3) -> Option<engine_world::ForestSample> {
+        let (x, z) = (p.x as f32, p.z as f32);
+        let patch = (x * 0.0021).sin() * (z * 0.0017 + 1.3).cos()
+            + 0.6 * (x * 0.0007 - z * 0.0011).sin()
+            + 0.25 * (x * 0.009 + z * 0.007).sin();
+        let density = ((patch + 0.2) * 1.6).clamp(0.0, 1.0);
+        (density > 0.02).then(|| engine_world::ForestSample {
+            density,
+            conifer: (0.5 + x * 0.0003).clamp(0.1, 0.9),
+        })
     }
 }
 
