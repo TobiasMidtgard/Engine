@@ -3,7 +3,7 @@
 //! skinned on the CPU ([`super::skin`]), wearing this module's cloth, hair and fur.
 
 use super::body::{self, BodyPart, Dog, Human, aim};
-use super::skin::SkinnedPart;
+use super::skin::{ScalpPaint, SkinnedPart};
 use super::*;
 use crate::hair::FurZone;
 
@@ -541,10 +541,34 @@ pub(super) fn mannequin(
         });
     }
     let man = root.id();
+    // Thick enough to hide the scalp: 560 guides, 48 drawn strands around each.
+    let style = HairStyle {
+        melanin: 0.8,
+        redness: 0.2,
+        strands_per_guide: 48,
+        spread: 0.015,
+        ..HairStyle::long()
+    };
+    // The cranium of the sculpt, in the head bone's frame, with a hair's breadth to spare.
+    let cranium = Vec3::new(0.0, 1.737, 0.012) - Human::HEAD;
+    let (radii, hairline) = (Vec3::new(0.079, 0.099, 0.103), 0.55);
+    // The scalp under the hair takes the hair's color, a shade darker as the roots in their
+    // own shadow, so the gaps between strands don't show white fiberglass.
+    let [r, g, b] = style.color();
+    let base = finish.base_color;
+    let tint = [r / base[0], g / base[1], b / base[2]].map(|t| (t * 0.8).clamp(0.0, 1.0));
     commands.spawn((
         Name::new(format!("{name} body")),
         Transform::default(),
-        SkinnedPart::new(BodyPart::Mannequin, man, &format!("{name} body"), finish),
+        SkinnedPart::new(BodyPart::Mannequin, man, &format!("{name} body"), finish).with_scalp(
+            ScalpPaint {
+                bone: Human::HEAD_I,
+                center: cranium,
+                radii,
+                hairline,
+                tint,
+            },
+        ),
         ChildOf(man),
     ));
     // Cape tied across the shoulders, hanging down the back.
@@ -564,13 +588,6 @@ pub(super) fn mannequin(
         },
         ChildOf(man),
     ));
-    let style = HairStyle {
-        melanin: 0.8,
-        redness: 0.2,
-        ..HairStyle::long()
-    };
-    // The cranium of the sculpt, in the head bone's frame, with a hair's breadth to spare.
-    let cranium = Vec3::new(0.0, 1.737, 0.012) - Human::HEAD;
     commands.spawn((
         Name::new(format!("{name} hair")),
         Transform::default(),
@@ -578,9 +595,9 @@ pub(super) fn mannequin(
             emitters: vec![HairEmitter::Scalp {
                 bone: "head".into(),
                 center: cranium.to_array(),
-                radii: [0.079, 0.099, 0.103],
-                guides: 380,
-                hairline: 0.55,
+                radii: radii.to_array(),
+                guides: 560,
+                hairline,
             }],
             ..HairGroom::long_hair("head", style)
         },
