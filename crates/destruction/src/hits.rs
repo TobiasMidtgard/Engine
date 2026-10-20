@@ -289,6 +289,20 @@ pub struct Ctx<'a> {
 
 impl Ctx<'_> {
     pub(crate) fn dust(&mut self, at: DVec3, size: f32, darkness: f32, count: u32, velocity: Vec3) {
+        self.puffs(at, size, darkness, count, velocity);
+        self.dust_events.push((at, size, darkness, 25.0));
+    }
+
+    /// Dust puffs only, with no cloud for the smoke module: a tool's stroke raises a little
+    /// dust that settles, not a cloud that hangs in a tunnel.
+    pub(crate) fn puffs(
+        &mut self,
+        at: DVec3,
+        size: f32,
+        darkness: f32,
+        count: u32,
+        velocity: Vec3,
+    ) {
         self.pending.dust.push(DustRequest {
             position: at,
             velocity,
@@ -296,7 +310,6 @@ impl Ctx<'_> {
             darkness,
             count,
         });
-        self.dust_events.push((at, size, darkness, 25.0));
     }
 
     pub(crate) fn chips(
@@ -1408,7 +1421,7 @@ fn dig(ctx: &mut Ctx, targets: &mut Targets, edit: &TerrainEdit, surfaces: &Surf
                 dug,
                 props.chip_size,
             );
-            ctx.dust(
+            ctx.puffs(
                 at,
                 (removed.cbrt() * 1.5).clamp(0.3, 2.5),
                 props.dust_darkness,
