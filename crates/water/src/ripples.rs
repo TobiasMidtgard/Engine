@@ -147,6 +147,15 @@ pub struct RippleField {
     stats: Vec<[f32; 3]>,
     /// Per tile, the most foam a step ago (what `foam2` holds).
     foam_was: Vec<f32>,
+    /// The flow the ripples ride on per cell (a stream's current, world x/z, m/s): rings and
+    /// foam drift downstream with it, so a push held in a stream trails a wake.
+    drift: Vec<Vec2>,
+    /// Tiles where the water flows (some cell drifts), and the ones drifted this step.
+    drifting: Vec<bool>,
+    drifted: Vec<bool>,
+    /// Scratch for the drift (heights, foam), only ever read where just written.
+    drift_h: Vec<f32>,
+    drift_foam: Vec<f32>,
 }
 
 /// Bilinear sample of one velocity component, `g` in that component's own grid coordinates
@@ -637,6 +646,11 @@ impl RippleField {
             wet: vec![0.0; n * n],
             stats: vec![[0.0; 3]; tiles],
             foam_was: vec![0.0; tiles],
+            drift: vec![Vec2::ZERO; n * n],
+            drifting: vec![false; tiles],
+            drifted: vec![false; tiles],
+            drift_h: vec![0.0; n * n],
+            drift_foam: vec![0.0; n * n],
         }
     }
 
@@ -763,6 +777,28 @@ impl RippleField {
         self.speeds_changed();
         if !any {
             self.clear();
+        }
+    }
+
+    /// Set the flow the ripples ride on at every cell (`None` = still water): a stream's
+    /// current carries rings and foam downstream.
+    pub fn rebuild_drift(&mut self, drift_at: impl Fn(DVec2) -> Option<Vec2>) {
+        let (n, t) = (self.n, self.tiles());
+        self.drifting.fill(false);
+        for j in 0..n {
+            for i in 0..n {
+                let idx = j * n + i;
+                let v = if self.speed2[idx] > 0.0 {
+                    drift_at(self.cell_center(i, j)).unwrap_or(Vec2::ZERO)
+                } else {
+                    Vec2::ZERO
+                };
+                // (Clamped: a torrent's ripples are lost in its own churn anyway.)
+                self.drift[idx] = v.clamp_length_max(6.0);
+                if v.length_squared() > 0.05 * 0.05 {
+                    self.drifting[(j / TILE) * t + i / TILE] = true;
+                }
+            }
         }
     }
 
@@ -910,6 +946,9 @@ impl RippleField {
         if !any_active && !self.foamy.iter().any(|f| *f) {
             return;
         }
+        if any_active {
+            self.drift_along(dt);
+        }
         let foam = Foam {
             decay: (-dt / foam_life.max(0.05)).exp(),
             gain: dt * 2.0,
@@ -940,6 +979,74 @@ impl RippleField {
         }
         self.settle();
         self.version += 1;
+    }
+
+    /// Carry the heights and foam of the active tiles where the water flows downstream with
+    /// it (tracing each cell back along the flow), so rings drift and a push held in the
+    /// flow trails a wake. Dry cells stay flat.
+    fn drift_along(&mut self, dt: f32) {
+        let n = self.n;
+        for (d, (a, f)) in self
+            .drifted
+            .iter_mut()
+            .zip(self.active.iter().zip(&self.drifting))
+        {
+            *d = *a && *f;
+        }
+        if !self.drifted.iter().any(|d| *d) {
+            return;
+        }
+        let k = dt / self.cell;
+        let (h, foam, drift, speed2, mask) = (
+            &self.h,
+            &self.foam,
+            &self.drift,
+            &self.speed2,
+            &self.drifted,
+        );
+        let bilinear = |buf: &[f32], x: f32, z: f32| {
+            let m = (n - 1) as f32;
+            let (x, z) = (x.clamp(0.0, m), z.clamp(0.0, m));
+            let (i0, j0) = (x as usize, z as usize);
+            let (i1, j1) = ((i0 + 1).min(n - 1), (j0 + 1).min(n - 1));
+            let (fx, fz) = (x - i0 as f32, z - j0 as f32);
+            let a = buf[j0 * n + i0] + (buf[j0 * n + i1] - buf[j0 * n + i0]) * fx;
+            let b = buf[j1 * n + i0] + (buf[j1 * n + i1] - buf[j1 * n + i0]) * fx;
+            a + (b - a) * fz
+        };
+        let rows = self
+            .drift_h
+            .chunks_mut(TILE * n)
+            .zip(self.drift_foam.chunks_mut(TILE * n));
+        par_tile_rows(n, mask, rows, |ty, (out_h, out_foam)| {
+            for (_, i0, i1) in spans(n, mask, ty) {
+                for j in ty * TILE..((ty + 1) * TILE).min(n) {
+                    let r = (j - ty * TILE) * n;
+                    for i in i0..i1 {
+                        let idx = j * n + i;
+                        let v = drift[idx];
+                        if speed2[idx] <= 0.0 || v == Vec2::ZERO {
+                            out_h[r + i] = h[idx];
+                            out_foam[r + i] = foam[idx];
+                            continue;
+                        }
+                        let (x, z) = (i as f32 - v.x * k, j as f32 - v.y * k);
+                        out_h[r + i] = bilinear(h, x, z);
+                        out_foam[r + i] = bilinear(foam, x, z);
+                    }
+                }
+            }
+        });
+        let t = self.tiles();
+        for ty in 0..t {
+            for (_, i0, i1) in spans(n, &self.drifted, ty) {
+                for j in ty * TILE..((ty + 1) * TILE).min(n) {
+                    let row = j * n + i0..j * n + i1;
+                    self.h[row.clone()].copy_from_slice(&self.drift_h[row.clone()]);
+                    self.foam[row.clone()].copy_from_slice(&self.drift_foam[row]);
+                }
+            }
+        }
     }
 
     /// Carry the current along in the stirred tiles (into `adv`, for the next march), and
@@ -1312,6 +1419,43 @@ mod tests {
         let a = f.sample(DVec2::new(0.0, best.0 as f64)).unwrap().height;
         let b = f.sample(DVec2::new(best.0 as f64, 0.0)).unwrap().height;
         assert!((a - b).abs() < 0.3 * b.abs().max(1e-4), "{a} vs {b}");
+    }
+
+    #[test]
+    fn rings_and_foam_drift_down_a_stream() {
+        // Where the foam's middle and the rings' strongest point lie along x after a second.
+        let run = |flow: f32| {
+            let mut f = pond();
+            f.rebuild_drift(|_| Some(Vec2::new(flow, 0.0)));
+            f.disturb(drop_at(0.0, 0.0, 0.3, 0.05, 0.8));
+            for _ in 0..60 {
+                f.step(1.0 / 60.0, 0.0, 6.0);
+            }
+            let (mut foam_x, mut foam_sum, mut up, mut down) = (0.0, 0.0, 0.0f32, 0.0f32);
+            for k in -60..=60 {
+                let x = k as f64 * 0.1;
+                let s = f.sample(DVec2::new(x, 0.0)).unwrap();
+                foam_x += x as f32 * s.foam;
+                foam_sum += s.foam;
+                if k < 0 {
+                    up = up.max(s.height.abs());
+                } else {
+                    down = down.max(s.height.abs());
+                }
+            }
+            (foam_x / foam_sum.max(1e-6), up, down)
+        };
+        let (still, ..) = run(0.0);
+        let (carried, up, down) = run(1.5);
+        assert!(still.abs() < 0.1, "still foam moved to {still} m");
+        assert!(
+            (carried - 1.5).abs() < 0.4,
+            "a 1.5 m/s stream carried the foam {carried} m in a second"
+        );
+        assert!(
+            up > 0.0 && down > up,
+            "rings upstream {up}, downstream {down}"
+        );
     }
 
     #[test]
