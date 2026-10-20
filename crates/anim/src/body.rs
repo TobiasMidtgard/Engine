@@ -96,7 +96,10 @@ pub struct BodyMotion {
     /// How fast it speeds up along where it faces, m/s² (smoothed; negative slowing down or
     /// setting off backwards).
     pub accel: f32,
-    owners: [Owner; 6],
+    /// How steeply it climbs (+) or descends (−) as it goes: rise per meter traveled
+    /// (smoothed).
+    pub grade: f32,
+    owners: [Owner; 7],
 }
 
 /// Who sets one of a person's animation parameters.
@@ -111,13 +114,14 @@ enum Owner {
     Others,
 }
 
-const PARAMS: [&str; 6] = [
+const PARAMS: [&str; 7] = [
     "speed",
     "turn",
     "move_effort",
     "blocking",
     "heading",
     "accel",
+    "grade",
 ];
 
 /// Build bodies for new or changed requests.
@@ -205,6 +209,16 @@ pub(crate) fn drive_bodies(
         motion.velocity = was + (velocity - was) * k;
         let forward = ((motion.velocity - was) / dt).dot(f.with_y(0.0).normalize_or_zero());
         motion.accel += (forward - motion.accel) * smoothing(dt, 0.2);
+        // Rise per meter along the way: none standing about or in the air (a jump's or a
+        // fall's height change is not a slope).
+        let horizontal = measured.length();
+        let grounded = locomotion.is_none_or(|l| l.grounded);
+        let rise = if horizontal > 0.3 && grounded {
+            ((p.y - last_p.y) as f32 / dt / horizontal).clamp(-1.5, 1.5)
+        } else {
+            0.0
+        };
+        motion.grade += (rise - motion.grade) * smoothing(dt, 0.25);
         let mut turn = yaw - last_yaw;
         turn =
             (turn + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
@@ -232,6 +246,7 @@ pub(crate) fn drive_bodies(
             locomotion.map(|l| if l.blocking { 1.0 } else { 0.0 }),
             Some(motion.heading),
             Some(accel_param(motion.accel)),
+            Some(grade_param(motion.grade)),
         ];
         for (i, (name, value)) in PARAMS.iter().zip(values).enumerate() {
             let Some(value) = value else {
@@ -256,6 +271,16 @@ pub const FULL_LEAN_ACCEL: f32 = 4.0;
 /// The `accel` animation parameter (−1..1) for an acceleration along the facing, m/s².
 pub fn accel_param(accel: f32) -> f32 {
     (accel / FULL_LEAN_ACCEL).clamp(-1.0, 1.0)
+}
+
+/// Rise per meter at which a person takes a climb (or a descent) fully: about a flight of
+/// stairs.
+pub const FULL_GRADE: f32 = 0.35;
+
+/// The `grade` animation parameter (−1 down a flight of stairs .. 1 up one) for a rise per
+/// meter traveled.
+pub fn grade_param(rise: f32) -> f32 {
+    (rise / FULL_GRADE).clamp(-1.0, 1.0)
 }
 
 impl BodyMotion {
