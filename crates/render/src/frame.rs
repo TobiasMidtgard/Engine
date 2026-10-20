@@ -764,6 +764,7 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
                 DebugView::IndirectLight => 6,
                 DebugView::Clusters => 7,
                 DebugView::ClusterLevels => 8,
+                DebugView::VirtualTextures => 9,
             },
             v.sky_volumes.len() as u32,
         ],

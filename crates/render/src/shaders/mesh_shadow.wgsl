@@ -20,7 +20,8 @@ struct Material {
     params2: vec4<f32>,  // subsurface, wind sway, normal scale, occlusion strength
     uv: vec4<f32>,       // uv scale xy, detail strength, detail scale
     mapping: vec4<f32>,  // tiles per meter, parallax depth (m), triplanar sharpness, unused
-    flags: vec4<u32>,    // x: bits 0-3 alpha mode, 7 base color texture present
+    flags: vec4<u32>,    // x: bits 0-3 alpha mode, 7 base color texture present; y: bits 0-7
+                         // the base color's virtual texture (0 = an ordinary texture)
 };
 
 @group(0) @binding(0) var<uniform> shadow_view: ShadowView;
@@ -97,10 +98,18 @@ fn vs_shadow_masked(in: VertexIn) -> MaskedOut {
 @fragment
 fn fs_shadow_masked(in: MaskedOut) {
     let mat = materials[in.material];
-    let tex = textureSample(base_color_texture, material_sampler, in.uv);
+    let d1 = dpdx(in.uv);
+    let d2 = dpdy(in.uv);
     var alpha = mat.base_color.a * in.alpha;
     if ((mat.flags.x & 128u) != 0u) {
-        alpha *= tex.a;
+        // The base color may be a streamed virtual texture (virtual_texture.wgsl): the shadow
+        // uses whatever tiles the camera has made resident.
+        let vt = mat.flags.y & 255u;
+        if (VT_ENABLED && vt != 0u) {
+            alpha *= vt_sample(vt, in.uv, d1, d2).a;
+        } else {
+            alpha *= textureSampleGrad(base_color_texture, material_sampler, in.uv, d1, d2).a;
+        }
     }
     if (alpha < mat.params.w) {
         discard;

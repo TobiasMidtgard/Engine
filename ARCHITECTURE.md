@@ -440,6 +440,23 @@ retested after the early prepass against this frame's and drawn in a late prepas
 Next: streaming, a compute rasterizer for tiny triangles, occlusion for shadow views, cached
 shadow pages.
 
+**Virtual textures** (built: `crates/render/src/virtual_texture`, whose module docs explain it):
+any `StandardMaterial` texture slot can hold a texture far larger than the GPU could take whole
+(16k scans). RGBA8 images over
+`RenderSettings::virtual_texture_threshold` (4096) are tiled at first use; `VirtualTextures::load`
+streams a PNG or JPEG from disk through a tiled copy baked once next to it (`<file>.vtex`);
+`VirtualTextures::add_procedural` takes a `TileSource` that paints tiles on demand. 128² tiles
+with 8-texel borders live in two fixed-size caches (sRGB and linear, BC7 where supported), one
+page table per texture maps every tile to the finest resident one, the depth prepass records
+which tiles each pixel wanted (1 in 16 pixels per frame), and loader threads read, decode and
+compress the missing ones under a per-frame upload budget, least recently used leaves evicted
+first; the root tile is always resident, so nothing ever shows missing. Works in every material
+path (triplanar, parallax, masked shadows, the cluster path in the early and late prepass,
+displaced clusters). `DebugView::VirtualTextures` shows
+levels and tile edges; `render.stats` reports the cache under `virtual_textures`.
+`TextureMapping::AntiTiled` (`with_anti_tiling`) hex-tiles any texture so a repeated one shows no
+pattern; displacement of an anti-tiled material follows the same hexagons (`material::hex_tiles`).
+
 **Material presets** (built): `StandardMaterial::preset(MaterialPreset::Brick)` (and cobblestone,
 rock, concrete, plaster, wood planks, bark, rusty steel, painted metal, sand, forest soil,
 gravel, snow, marble, grass) is a ready-made PBR surface whose maps (sRGB base color, normal,
