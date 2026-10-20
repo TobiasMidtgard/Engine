@@ -167,9 +167,12 @@ fn near_share(p: vec3<f32>) -> f32 {
 // How much more cloud than the light march samples shades a point (see march_clouds).
 const SELF_SHADOW: f32 = 2.0;
 
-// Interleaved gradient noise: a stable per-pixel start offset that hides banding.
+// Interleaved gradient noise: a per-pixel start offset that hides banding. It moves every
+// frame (Jimenez's 5.588238 px step) so the renderer's TAA averages the offsets away; a fixed
+// pattern left diagonal stripes and wood-grain contours across smooth storm decks.
 fn ign(px: vec2<f32>) -> f32 {
-    return fract(52.9829189 * fract(dot(px, vec2<f32>(0.06711056, 0.00583715))));
+    let p = px + 5.588238 * f32(u32(frame.time.w) % 64u);
+    return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
 }
 
 // Transmittance of the air above camera-relative `rel` toward the clouds' key light. Not
