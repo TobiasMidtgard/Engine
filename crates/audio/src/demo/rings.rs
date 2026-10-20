@@ -280,7 +280,7 @@ mod tests {
             );
         }
         // Round a 0.56 m dog: a ring under half a meter, gone in about a third of a second
-        // and faint; the horse's spreads past a meter and a half, nearly opaque.
+        // and lighter; the horse's spreads past a meter and a half, nearly opaque.
         assert!(
             dog.size < 0.5 && dog.life < 0.4 && dog.peak < 0.65,
             "{dog:?}"
