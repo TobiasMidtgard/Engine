@@ -485,8 +485,10 @@ pub fn blackbody(temperature_k: f32) -> ([f32; 3], f32) {
         (0.12 + 0.75 * x).min(0.95),
         (0.02 + 0.65 * x * x).min(0.85),
     ];
-    // Visible radiance climbs steeply: a dull glow at 1 000 K, daylight-bright by 2 000 K.
-    let strength = 10f32.powf(4.0 * ((t - 800.0) / 1_200.0).min(1.2)) - 1.0;
+    // Luminance of a blackbody (Wien's law at 555 nm, through platinum's 2 042 K at
+    // 600 000 cd/m²): about 1 cd/m² at 1 000 K, a dull glow only in the dark; 2 000 cd/m² at
+    // 1 400 K, plain to see in daylight; 300 000 at 1 900 K.
+    let strength = 6.0e5 * (-25_924.0 * (1.0 / t - 1.0 / 2_042.0)).exp();
     (color, strength)
 }
 
@@ -592,6 +594,10 @@ mod tests {
         let (c1, s1) = blackbody(1_200.0);
         let (c2, s2) = blackbody(2_000.0);
         assert!(s2 > s1 * 3.0 && s1 > 0.0);
+        // As bright as hot metal is: glowing in daylight (the renderer's 1 000+) at re-entry
+        // heat, near platinum's 600 000 cd/m² at its 2 042 K melting point.
+        assert!(blackbody(1_400.0).1 > 1_000.0, "{}", blackbody(1_400.0).1);
+        assert!((blackbody(2_042.0).1 / 6.0e5 - 1.0).abs() < 0.01);
         assert!(c2[1] > c1[1] && c2[2] >= c1[2], "whiter when hotter");
     }
 }

@@ -6,6 +6,7 @@ pub mod autopilot;
 pub mod chassis;
 pub mod demo;
 pub mod drivetrain;
+pub mod entry;
 pub mod events;
 pub mod exhaust;
 pub mod models;
