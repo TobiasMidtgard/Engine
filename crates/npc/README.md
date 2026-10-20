@@ -80,14 +80,22 @@ not its own herd) and flags its tail; each of the others turns its head to where
 came from, then bolts a reaction time later (0.3 to 0.55 s), and the herd runs off bunched
 (the ones out front ease off for the rest). The deer the pack is running down is cut off
 from its herd: it no longer runs with the others or is drawn back to them (it only keeps
-clear of them), so it runs its own line from the wolves. A deer runs from all the wolves it sees at
+clear of them), so it runs its own line from the wolves (a unit test in `wildlife.rs`
+checks there is no pull to the herd's middle and no running with it). A deer runs from all the wolves it sees at
 once, the nearest most, so one with a wolf on either side runs on between them; with a wolf
 close at its heels (`ZIGZAG_RANGE`) it cuts from side to side at sharp angles; the one that
 raised the alarm at a predator it saw stots (pronks) for its first bounds (`STOT_SECS`;
 not at a bang or fire, when wounded, or with a wolf close); a wounded animal runs lame. A blow is felt at once (the animal reacts the same tick). Wolves prefer deer, take a boar only when nothing easier is about (a
 piglet sooner, a tusker last of all) and give room to a boar charging at them (not to one
 charging past them at something else). Bird flocks peck on the
-ground and lift off together. Gunfire, explosions, howls and fire scare everything.
+ground and lift off together. Gunfire, explosions, howls and fire scare everything. A
+gunshot (a bullet's `ProjectileTrace` faster than sound; the bang it makes is not counted
+twice) carries `GUNSHOT_REACH` times an animal's hearing: birds in earshot burst up, and
+deer, boar, rabbits and wolves look up toward it, then move off from it at a brisk walk
+(`WARY_DIST`), carrying on if more shots follow; one closer than `GUNSHOT_BOLT` sends them
+running. An explosion (a `WorldImpulse` with energy or heat behind it, or a strong one, such
+as a barrel going up or a scripted blast) carries `BLAST_REACH` times their hearing, and
+everything that hears it bolts; an arrow, or a light thump, does nothing.
 `WildlifeSettings` tunes respawn, thirst, hunger, skittishness and howling.
 
 ## Bodies and art
@@ -317,6 +325,42 @@ punish window), cooldown, spread and shield.
    game code) and it wall-runs and slides like the player; NPCs without them keep the
    built-in mover.
 
+## Suppress and flank
+
+Against an enemy in cover, a squad with its wits about it pins it down and goes round. Every
+half second the squad planner looks at each group of two or more shooters on the same target.
+If the smartest of them has `logic` of at least 0.35 and the group's mean `teamwork` is at
+least 0.3, it runs a maneuver that lasts while the target does:
+
+- **One suppressor**, the best shot among those not going round, keeps up steady fire at the
+  cover the target was last seen behind (for up to 10 s without sight) so it keeps its head
+  down. It picks a spot to fire on the cover from and stays there rather than work its own way
+  round. The others not going round give covering fire too.
+- **One or two flankers** (one in a pair, two in a group of three or more; never a medic, and
+  only those with `logic` of at least 0.35 and `teamwork` of at least 0.3) go to a spot off the
+  target's side. Their path is planned on the nav grid with the cells the target can see a
+  body in made four times dearer, so it goes behind cover where there is any.
+- **Bounding in turns**: only one flanker moves at a time. It runs to the last point of its
+  path still hidden from the target (at least 3.5 m on), or to the next cover on it, crouches
+  there for 0.6 s firing as overwatch, and then hands the turn to its mate. Once in position it
+  takes its shot from the side.
+
+A rookie squad doesn't do this: a shooter with `logic` under 0.3 rushes straight in to 4 m of
+its target. A smart squad without teamwork doesn't either; its members still pick their own
+spots (which may be wide), but nobody pins the target for them.
+
+## Punishing mistakes
+
+A fighter watches its target for an opening: a recovery after a missed swing or a stumble
+(`LocomotionState::vulnerable`), a reload (the target's `AnimationParams` "reloading" above
+0.5: the convention for a weapon module to set while its holder reloads; none does yet), or running out of stamina
+(`LocomotionState::stamina` dropping under 0.05 from 0.3 or more). It sees the opening only
+through its reaction delay, from its remembered snapshots of the target, so a master (0.07 s)
+sees a 0.4 s window with most of it left and a rookie (0.65 s) sees it after it has shut. A
+melee fighter that sees one strikes into it, dashing in from further than it otherwise would,
+and closes in from up to 12 m for a long one (a reload or spent stamina). A shooter fires into
+it even on the move. Each such attack or shot counts in `CombatStats::punishes`.
+
 ## Squad revives
 
 A squad mate can revive a downed fighter where it lies. Each mate weighs the run: how far it
@@ -390,7 +434,8 @@ a turned world also rebuilds the tactical world from the colliders.
 
 Reads: `Collider` / `RigidBody` (tactical world), `PhysicsQueries` when present, `Ground`,
 `Water`, `HeatField` (avoid fire), `Obscurance` (smoke, fog and dust), `NoiseEvent`, `DamageEvent`, `AttackEvent` (telegraphs to
-defend against), `ProjectileTrace` (near misses), `LocomotionState` of targets, `TerrainChanged`,
+defend against), `ProjectileTrace` (near misses), `LocomotionState` of targets (and their
+`vulnerable` and `stamina` for openings), targets' `AnimationParams` "reloading", `TerrainChanged`,
 `LocalTimeScale` / `TimeDilation`, `LocomotionBackend`, `WorldShift`, `AppearanceBodies`,
 `BodyRequest` (whose pose the animation module writes).
 
@@ -427,7 +472,11 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   more, never level with it on the far side) while the tester drives from behind and the ambusher lies in wait beyond the
   herd, a herd's alarm spreads within a reaction time (each deer looks toward the shot
   before it bolts, and the herd stays bunched), a deer runs straight from a wolf well back
-  and zigzags once it is close, a deer stots at a wolf it sees but runs flat out from a bang, a pack stalks in on a herd it scents from further off than
+  and zigzags once it is close, a deer stots at a wolf it sees but runs flat out from a bang,
+  birds burst up at a gunshot 70 m off (not at an arrow), deer and boar look up at a gunshot
+  60 m off and then walk off from it (and bolt from one 20 m off), an explosion 120 m off
+  sends deer, boar and birds running (not a light thump, nor one out of earshot), a pack
+  stalks in on a herd it scents from further off than
   it would run one down (`SCENT_REACH`), a pack gives up a chase after its time, all
   together, rests its time out though hungry, and hunts again, and breaks off sooner from a
   fit deer that outruns it (past its test, the deer more than `ESCAPE_GAP` ahead).
@@ -461,6 +510,22 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   allows (from the hands on, and from the kneel with the 1.2 s getting down). It draws only
   with `NPC_SCREENSHOT_DIR` set; without it the scenes play out the same and every check runs.
   `tests/art_fighters.rs` likewise draws only the two pictures it counts pixels in.
+- `tests/tactics.rs`: whole squads against a player behind a wall, each case over eight seeds.
+  A veteran, an elite and a veteran: one suppresses (at least four shots at the cover, never
+  more than 3 s between shots until the flank, and staying within 40° of straight on) while
+  the other two bound round in turns, both
+  moving at once less than a fifth of the time, holding at two covers or more and seen by the
+  player less than 40 % of the way, until one has a clear shot from 65° or more round within
+  30 s. A rookie squad has nobody suppress or flank, stays within 40° of straight on while
+  farther than 6 m and ends up close; a smart squad without teamwork doesn't flank either.
+  Against 0.4 s openings (a recovery after a missed swing) the share punished climbs with
+  skill: a rookie under 5 %, a master over 75 %.
+- `tests/art_tactics.rs`: two captioned strips of that fight. At eye level from behind the
+  player's wall (`fighters-flank-eye-level.png`) the suppressor's tracers come in over it, then
+  a flanker comes round the end of the wall, gets into position off the player's side (how far
+  round is in the caption) and fires. Top down (`fighters-flank-top-down.png`) at the same
+  moments, the paths so far: red the suppressor, yellow the flankers (a big dot at each cover
+  held), blue the player. It draws only with `NPC_SCREENSHOT_DIR` set.
 - `tests/training.rs`: the same post swings at a rookie, soldier, veteran, elite and master;
   the share of swings defended climbs with skill (0 % to about 100 %) and the master parries.
 - `tests/smoke.rs`: thick smoke hides a player until it clears, thin smoke slows spotting,
@@ -497,14 +562,15 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   every collider. In `tests/art_animals.rs` only the checks run by default (the budgets, and a
   few close-ups and strips rendered small, each of which must show its animal, the animals
   living on undrawn between shots); the full-size close-ups and strips are ignored tests
-  (`-- --ignored`), and so are five pictures of the AI at work, each one live run shot at
+  (`-- --ignored`), and so are six pictures of the AI at work, each one live run shot at
   eight moments: a pack's hunt from above with its parts marked in colour
   (`animal_live_pack_hunt.png`), the same kind of hunt from the grass at eye height, no
   markers, the wolves creeping crouched (`animal_live_pack_eye_level.png`), a chased deer
   zigzagging seen from low behind
   (`animal_live_zigzag.png`), a herd's alarm spreading (`animal_live_herd_alarm.png`) and a
   sounder rooting, then its tusker charging a wolf that bit it, from the grass with no
-  markers (`animal_live_boar_eye_level.png`). Each walking animal's close-up is a still from a real run at the game's
+  markers (`animal_live_boar_eye_level.png`), and a flock of starlings bursting up at a
+  gunshot, from the grass (`animal_live_birds_gunshot.png`). Each walking animal's close-up is a still from a real run at the game's
   rate (it walks on toward the camera's mark and is shot at its moment), so its legs are
   where its gait has them. The animal unit tests check that no planted foot slides in any
   gait by more than a millimetre a frame (boars, tuskers and piglets included, deer as they

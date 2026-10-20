@@ -2228,8 +2228,9 @@ fn pack_at_eye_level(plan: Option<&[f64]>) -> Option<(f64, f64, f64)> {
 
 /// A sounder of wild boar rooting, then its tusker charging a wolf that bit it, as you would
 /// see it standing in the grass, with no markers: the camera low (1 m up) off to the sunny
-/// side of the sounder as it roots, then beside the tusker and a little behind it, looking
-/// along its run at the wolf. The wolf,
+/// side of the sounder as it roots (far enough back to take all of it in), then beside the
+/// tusker and a little behind it, looking along its run at the wolf (close beside it as it
+/// sets off). The wolf,
 /// well out of the way until then, is set down 12 m from the tusker and bites it from there
 /// (as in the behaviour tests). Run once to time the charge, then again for three moments of
 /// the rooting, four of the charge and one as the tusker breaks off. The PNG is
@@ -2334,9 +2335,28 @@ fn boar_at_eye_level(plan: Option<&[f64]>) -> Option<(f64, f64)> {
             continue;
         }
         let (eye, target) = if !bitten {
-            // Off the sounder's sunny side, taking it all in.
+            // Off the sounder's sunny side, far enough back to take all of it in: each boar
+            // a metre clear of the picture's sides (it is 50° high, 1.6 times as wide).
             let mid = sounder.iter().map(|&b| at(&app, b)).sum::<DVec3>() / sounder.len() as f64;
-            (mid + sunny * 8.0, mid)
+            let across = DVec3::new(-sunny.z, 0.0, sunny.x);
+            let half = (25f64.to_radians().tan() * 1.6) * 0.85;
+            let back = sounder
+                .iter()
+                .map(|&b| {
+                    let off = at(&app, b) - mid;
+                    (off.dot(across).abs() + 1.0) / half + off.dot(sunny)
+                })
+                .fold(7.0, f64::max);
+            (mid + sunny * back, mid)
+        } else if frames.len() == 3 {
+            // Setting off: close beside the tusker and a little behind it, the wolf ahead.
+            let (boar, w) = (at(&app, tusker), at(&app, wolf));
+            let line = DVec3::new(w.x - boar.x, 0.0, w.z - boar.z).normalize();
+            let mut side = DVec3::new(-line.z, 0.0, line.x);
+            if side.dot(sunny) < 0.0 {
+                side = -side;
+            }
+            (boar + side * 3.0 - line * 2.0, boar + line * 2.0)
         } else {
             // Off to the side of the tusker and a little behind it, looking along its run at
             // the wolf.
@@ -2375,6 +2395,85 @@ fn boar_at_eye_level(plan: Option<&[f64]>) -> Option<(f64, f64)> {
     }
     side_by_side(&frames, "animal_live_boar_eye_level.png");
     Some((charge.unwrap_or(0.0), done.unwrap_or(0.0)))
+}
+
+/// A flock of starlings pecking in the grass bursting up at a gunshot 60 m off (out of the
+/// picture), as you would see it standing in the grass, with no markers: the camera low (1 m
+/// up) off to the flock's sunny side, held still and turning to follow the flock up. Two
+/// moments before the shot and six after it. The PNG is `animal_live_birds_gunshot.png`.
+#[test]
+#[ignore = "full-size pictures: run with --ignored"]
+fn birds_lift_off_at_a_gunshot_at_eye_level() {
+    /// When the shot is fired (s).
+    const SHOT_AT: f64 = 3.0;
+    let Some(mut app) = live_app((640, 400)) else {
+        return;
+    };
+    let flock = live_herd(&mut app, Species::Bird, DVec3::ZERO, 9, 7);
+    let clock = flock[0];
+    tick(&mut app, clock);
+    let start = now_of(&app, clock);
+    let plan = [
+        1.0,
+        SHOT_AT - 0.05,
+        SHOT_AT + 0.08,
+        SHOT_AT + 0.18,
+        SHOT_AT + 0.3,
+        SHOT_AT + 0.45,
+        SHOT_AT + 0.65,
+        SHOT_AT + 0.9,
+    ];
+    let sunny = DVec3::new(-0.45, 0.0, 0.7).normalize();
+    let mut frames = Vec::new();
+    let mut fired = false;
+    let mut eye = None;
+    while frames.len() < plan.len() {
+        tick(&mut app, clock);
+        let t = now_of(&app, clock) - start;
+        if !fired && t >= SHOT_AT {
+            fired = true;
+            // A carbine shot from 60 m off to the side, as the arena's fighters fire: the
+            // bullet's trace and its bang.
+            let muzzle = DVec3::new(60.0, 1.5, -20.0);
+            app.world.write_message(engine_world::ProjectileTrace {
+                from: muzzle,
+                to: muzzle + DVec3::new(0.0, 0.0, -80.0),
+                radius: 0.08,
+                speed: 900.0,
+                shooter: None,
+            });
+            app.world.write_message(engine_world::NoiseEvent {
+                position: muzzle,
+                radius: 90.0,
+                source: None,
+            });
+        }
+        if t < plan[frames.len()] {
+            continue;
+        }
+        let mid = flock.iter().map(|&b| at(&app, b)).sum::<DVec3>() / flock.len() as f64;
+        // The camera stays where it was set up, off the flock's sunny side.
+        let eye = *eye.get_or_insert(DVec3::new(mid.x, 1.0, mid.z) + sunny * 5.0);
+        let view = (eye, DVec3::new(mid.x, mid.y.max(0.3), mid.z), Vec3::Y);
+        let name = format!("animal_live_birds_gunshot_{}.png", frames.len());
+        eprintln!(
+            "frame {} at {t:.2} s: {} of {} flying, the flock {:.1} m up",
+            frames.len(),
+            flock
+                .iter()
+                .filter(|&&b| mind_of(&app, b).state == AnimalState::Flying)
+                .count(),
+            flock.len(),
+            mid.y
+        );
+        frames.push(live_shot(&mut app, view, 50.0, &name));
+    }
+    let flying = flock
+        .iter()
+        .filter(|&&b| mind_of(&app, b).state == AnimalState::Flying)
+        .count();
+    assert_eq!(flying, flock.len(), "the whole flock went up at the shot");
+    side_by_side(&frames, "animal_live_birds_gunshot.png");
 }
 
 fn flat_len(v: DVec3) -> f64 {

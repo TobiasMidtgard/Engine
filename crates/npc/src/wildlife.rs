@@ -27,7 +27,8 @@ use engine_core::prelude::*;
 use engine_world::animation::{AnimationParams, AnimationTrigger};
 use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::{
-    DamageEvent, DamageKind, Ground, HeatField, NoiseEvent, Water, WeatherState, WindField,
+    DamageEvent, DamageKind, Ground, HeatField, NoiseEvent, ProjectileTrace, Water, WeatherState,
+    WindField, WorldImpulse,
 };
 
 use crate::agent::{NpcClock, NpcMotor, NpcVitals};
@@ -383,6 +384,22 @@ impl PackRole {
 /// side.
 const FLANK_POST: f32 = 2.0;
 
+/// A gunshot carries this far (m, times the animal's hearing): a bullet leaving the muzzle (a
+/// `ProjectileTrace` faster than sound). Within it, birds burst up, and the rest look up
+/// toward it and then move off from it; closer than [`GUNSHOT_BOLT`], they bolt.
+pub const GUNSHOT_REACH: f32 = 90.0;
+/// A gunshot this close (m) sends deer, boar, rabbits and wolves running at once.
+pub const GUNSHOT_BOLT: f32 = 30.0;
+/// Bullets faster than this (m/s) crack: slower projectiles (arrows, bolts) are not heard.
+const GUNSHOT_SPEED: f32 = 250.0;
+/// An explosion (a `WorldImpulse` with energy or heat, or a strong one) is heard this far
+/// (m, times the animal's hearing), and everything that hears it bolts.
+pub const BLAST_REACH: f32 = 160.0;
+/// How far an animal moves off from a gunshot it looked up at (m), and for how long after the
+/// shot it keeps moving off (s).
+const WARY_DIST: f64 = 35.0;
+const WARY_SECS: f64 = 20.0;
+
 /// An ambusher springs when the quarry comes this close (m); a deer fleeing the pack doesn't
 /// see it lying low in wait until then.
 pub const AMBUSH_RANGE: f32 = 12.0;
@@ -505,6 +522,10 @@ pub struct AnimalMind {
     pub last_danger: f64,
     /// Loudest noise heard since the last think: (where, how loud relative to distance).
     pub heard: Option<(DVec3, f32)>,
+    /// A gunshot heard since the last think, too far off to bolt from: where.
+    shot: Option<DVec3>,
+    /// The last gunshot it moves off from: where, and when (animal clock).
+    wary: Option<(DVec3, f64)>,
     /// Hurt since the last think, by something at this position.
     pub hurt_from: Option<DVec3>,
     /// When it was last hurt (animal clock), where the blow came from and who struck it, if
@@ -713,25 +734,87 @@ type SenseItem<'a> = (
     &'a mut NpcVitals,
 );
 
-/// Noises and damage that reach animals.
+/// What animals heard this tick, kept from tick to tick so hearing allocates nothing.
+#[derive(Default)]
+pub(crate) struct Heard {
+    noises: Vec<NoiseEvent>,
+    /// Gunshots: the muzzle, and who fired.
+    shots: Vec<(DVec3, Option<Entity>)>,
+    /// Explosions: where.
+    blasts: Vec<DVec3>,
+}
+
+/// Keeps the loudest noise an animal heard since it last thought.
+fn louder(mind: &mut AnimalMind, at: DVec3, level: f32) {
+    if mind.heard.is_none_or(|(_, l)| level > l) {
+        mind.heard = Some((at, level));
+    }
+}
+
+/// Noises, gunshots, explosions and damage that reach animals.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn animal_senses(
     mut noises: MessageReader<NoiseEvent>,
+    mut traces: MessageReader<ProjectileTrace>,
+    mut impulses: MessageReader<WorldImpulse>,
     mut hurts: MessageReader<DamageEvent>,
     positions: Query<&Transform>,
     packs: Query<&Herd>,
     mut q: Query<SenseItem>,
-    mut heard: Local<Vec<NoiseEvent>>,
+    mut heard: Local<Heard>,
 ) {
-    heard.clear();
-    heard.extend(noises.read().copied());
-    if !heard.is_empty() {
+    let heard = &mut *heard;
+    heard.noises.clear();
+    heard.noises.extend(noises.read().copied());
+    heard.shots.clear();
+    heard.shots.extend(
+        traces
+            .read()
+            .filter(|t| t.speed > GUNSHOT_SPEED)
+            .map(|t| (t.from, t.shooter)),
+    );
+    heard.blasts.clear();
+    heard.blasts.extend(
+        impulses
+            .read()
+            .filter(|i| i.energy_j > 0.0 || i.heat_c > 300.0 || i.strength >= 15.0)
+            .map(|i| i.center),
+    );
+    let any = !(heard.noises.is_empty() && heard.shots.is_empty() && heard.blasts.is_empty());
+    if any {
         for (e, animal, herd, t, _, mut mind, _) in &mut q {
-            let hearing = animal.species.traits().hearing;
-            for n in heard.iter() {
+            let species = animal.species;
+            let hearing = species.traits().hearing;
+            let pos = t.translation;
+            // Explosions: everything that hears one bolts.
+            for &at in &heard.blasts {
+                if (at.distance(pos) as f32) < BLAST_REACH * hearing {
+                    louder(&mut mind, at, 3.0);
+                }
+            }
+            // Gunshots: close, it bolts (a bird always bursts up); further off, it looks up
+            // and then moves off.
+            for &(at, _) in &heard.shots {
+                let d = at.distance(pos) as f32;
+                if d >= GUNSHOT_REACH * hearing {
+                    continue;
+                }
+                if d < GUNSHOT_BOLT || species == Species::Bird {
+                    louder(&mut mind, at, 2.0);
+                } else if mind.shot.is_none_or(|s| s.distance(pos) > at.distance(pos)) {
+                    mind.shot = Some(at);
+                }
+            }
+            for n in heard.noises.iter() {
                 // Not its own noise, nor its herd's (a mate's snort or its pack's howl: the
-                // herd has its own ways of passing an alarm on).
+                // herd has its own ways of passing an alarm on), nor the bang of a shot it
+                // heard as a gunshot.
                 if n.source == Some(e)
                     || herd.is_some_and(|h| n.source.and_then(|s| packs.get(s).ok()) == Some(h))
+                    || heard
+                        .shots
+                        .iter()
+                        .any(|&(at, by)| by == n.source && at.distance(n.position) < 3.0)
                 {
                     continue;
                 }
@@ -742,9 +825,7 @@ pub(crate) fn animal_senses(
                 }
                 // Loudness here: 1 at the source .. 0 at the edge, plus how big the noise is.
                 let level = (1.0 - d / reach) * (n.radius / 30.0).min(3.0);
-                if mind.heard.is_none_or(|(_, l)| level > l) {
-                    mind.heard = Some((n.position, level));
-                }
+                louder(&mut mind, n.position, level);
             }
         }
     }
@@ -1164,6 +1245,19 @@ pub(crate) fn animal_think(
                     mind.escape = None;
                 }
             }
+            // A gunshot further off: it looks up toward it, then moves off from it (already
+            // moving off from one, it carries on).
+            if let Some(at) = mind.shot.take() {
+                let moving_off = mind.state == AnimalState::Wander && mind.wary.is_some();
+                mind.wary = Some((at, now));
+                if !moving_off && danger < 0.6 {
+                    danger = 0.6;
+                    danger_at = Some(at);
+                    mind.threat = None;
+                    mind.threat_pos = Some(at);
+                    mind.escape = None;
+                }
+            }
             // Fire.
             let heat = w.heat.sample(pos + DVec3::Y * 0.5);
             if heat > 40.0 {
@@ -1364,7 +1458,8 @@ pub(crate) fn animal_think(
             }
             AnimalState::Wander => {
                 if let Some(dest) = mind.destination {
-                    let speed = if species == Species::Wolf {
+                    // Briskly, moving off from a gunshot.
+                    let speed = if species == Species::Wolf || mind.wary.is_some() {
                         walk * 2.0
                     } else {
                         walk
@@ -1380,6 +1475,7 @@ pub(crate) fn animal_think(
                         &mut intent,
                     ) {
                         mind.destination = None;
+                        mind.wary = None;
                         if species == Species::Wolf {
                             mind.set(AnimalState::Graze, now);
                             mind.wait_until = now + 3.0 + 6.0 * mind.random() as f64;
@@ -1839,6 +1935,17 @@ fn decide(
                 }
                 return;
             }
+            // Having looked up at a gunshot, it moves off from it.
+            if let Some((at, when)) = mind.wary {
+                if now - when < WARY_SECS {
+                    let away = flat(pos - at).normalize_or(Vec3::X);
+                    let dir = Quat::from_rotation_y((mind.random() - 0.5) * 0.6) * away;
+                    mind.set(AnimalState::Wander, now);
+                    mind.destination = Some(pos + (dir * WARY_DIST as f32).as_dvec3());
+                    return;
+                }
+                mind.wary = None;
+            }
             // Pick where to go next.
             let dest = if mind.thirst > 0.75
                 && let Some(Some(water)) = mind.water
@@ -1971,6 +2078,54 @@ fn walk_to(
     false
 }
 
+/// What running with its herd adds to a fleeing animal's course: it runs the way its fleeing
+/// mates run and is drawn back to the middle of the herd (deer from 3 m out, harder the
+/// further out; the rest from 6 m), and deer keep a little apart close up. A deer the pack is
+/// running down (`singled`) is cut off from its herd: no pull to the middle and no running
+/// with the others, only keeping clear of them, so it runs its own line from the wolves.
+fn with_herd(
+    deer: bool,
+    singled: bool,
+    me: Entity,
+    pos: DVec3,
+    mates: &[Entity],
+    snaps: &HashMap<Entity, Snap>,
+) -> Vec3 {
+    let mut align = Vec3::ZERO;
+    let mut center = DVec3::ZERO;
+    let mut apart = Vec3::ZERO;
+    let mut n = 0.0;
+    for m in mates {
+        let Some(s) = snaps.get(m) else { continue };
+        if s.dead || s.pos.distance(pos) > 25.0 {
+            continue;
+        }
+        if s.state == AnimalState::Flee && *m != me {
+            align += s.flee_dir;
+        }
+        let off = flat(pos - s.pos);
+        if deer && off.length() > 1e-3 && off.length() < 1.6 {
+            apart += off.normalize() * (1.6 - off.length());
+        }
+        center += s.pos;
+        n += 1.0;
+    }
+    if singled {
+        return apart;
+    }
+    let mut dir = apart + align.normalize_or_zero() * if deer { 1.1 } else { 0.8 };
+    if n > 1.0 {
+        let to_center = flat(center / n - pos);
+        let far = to_center.length();
+        if deer && far > 3.0 {
+            dir += to_center.normalize() * (0.5 + 0.2 * (far - 3.0)).min(1.6);
+        } else if far > 6.0 {
+            dir += to_center.normalize() * 0.5;
+        }
+    }
+    dir
+}
+
 #[allow(clippy::too_many_arguments)]
 fn flee_direction(
     mind: &mut AnimalMind,
@@ -2010,42 +2165,8 @@ fn flee_direction(
     if mind.flee_dir.length_squared() > 0.1 {
         dir += mind.flee_dir * 1.2;
     }
-    // Run with the herd: deer bunch up (pulled to the middle from 3 m out, harder the
-    // further out, kept a little apart close up). Not a deer the pack is running down: cut
-    // off from the herd, it runs its own line, and only keeps clear of the rest.
-    let singled = deer && mind.pursuer.is_some();
-    let mut align = Vec3::ZERO;
-    let mut center = DVec3::ZERO;
-    let mut apart = Vec3::ZERO;
-    let mut n = 0.0;
-    for m in mates {
-        let Some(s) = snaps.get(m) else { continue };
-        if s.dead || s.pos.distance(pos) > 25.0 {
-            continue;
-        }
-        if s.state == AnimalState::Flee && *m != me {
-            align += s.flee_dir;
-        }
-        let off = flat(pos - s.pos);
-        if deer && off.length() > 1e-3 && off.length() < 1.6 {
-            apart += off.normalize() * (1.6 - off.length());
-        }
-        center += s.pos;
-        n += 1.0;
-    }
-    if !singled {
-        dir += align.normalize_or_zero() * if deer { 1.1 } else { 0.8 };
-    }
-    if n > 1.0 && !singled {
-        let to_center = flat(center / n - pos);
-        let far = to_center.length();
-        if deer && far > 3.0 {
-            dir += to_center.normalize() * (0.5 + 0.2 * (far - 3.0)).min(1.6);
-        } else if far > 6.0 {
-            dir += to_center.normalize() * 0.5;
-        }
-    }
-    dir += apart;
+    // Run with the herd, unless the pack is running it down.
+    dir += with_herd(deer, deer && mind.pursuer.is_some(), me, pos, mates, snaps);
     // Don't run off the map: past twice the home range, curve back.
     let off = pos - home;
     let excess = off.length() as f32 - range * 2.0;
@@ -2721,6 +2842,62 @@ pub(crate) fn animal_bites(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn deer_at(pos: DVec3, state: AnimalState, flee_dir: Vec3) -> Snap {
+        Snap {
+            species: Species::Deer,
+            young: false,
+            male: false,
+            pos,
+            vel: Vec3::ZERO,
+            state,
+            age: 1.0,
+            flee_dir,
+            prey: None,
+            dead: false,
+            sensed: true,
+            threat_pos: None,
+            herd: Some(1),
+            hurt: 0.0,
+            straggle: 0.0,
+            placed: false,
+            chasing: None,
+            gave_up: None,
+        }
+    }
+
+    #[test]
+    fn a_chased_deer_is_cut_off_from_its_herd() {
+        // A deer running north (+Z), its herd 10 m off to the east (+X) running east, and
+        // one mate brushing past it 1 m to the west.
+        let id = |k| Entity::from_raw_u32(k).unwrap();
+        let me = id(1);
+        let mut snaps = HashMap::new();
+        snaps.insert(me, deer_at(DVec3::ZERO, AnimalState::Flee, Vec3::Z));
+        for k in 0..3 {
+            let at = DVec3::new(10.0, 0.0, f64::from(k) * 2.0 - 2.0);
+            snaps.insert(id(2 + k), deer_at(at, AnimalState::Flee, Vec3::X));
+        }
+        let mates: Vec<Entity> = (1..5).map(id).collect();
+        // Running with its herd, it is drawn east, toward the herd's middle and the way the
+        // herd runs.
+        let free = with_herd(true, false, me, DVec3::ZERO, &mates, &snaps);
+        assert!(free.x > 1.0, "a free deer runs with its herd: {free}");
+        // Run down by the pack, nothing of that: no pull and no alignment at all.
+        let cut = with_herd(true, true, me, DVec3::ZERO, &mates, &snaps);
+        assert_eq!(cut, Vec3::ZERO, "the chased deer is cut off from its herd");
+        // It still keeps clear of a mate it brushes past, and only that.
+        snaps.insert(
+            id(5),
+            deer_at(DVec3::new(-1.0, 0.0, 0.0), AnimalState::Flee, Vec3::X),
+        );
+        let mates: Vec<Entity> = (1..6).map(id).collect();
+        let cut = with_herd(true, true, me, DVec3::ZERO, &mates, &snaps);
+        assert!(
+            (cut - Vec3::new(0.6, 0.0, 0.0)).length() < 1e-5,
+            "it only keeps clear of the mate beside it: {cut}"
+        );
+    }
 
     #[test]
     fn species_round_trip_and_factions() {
