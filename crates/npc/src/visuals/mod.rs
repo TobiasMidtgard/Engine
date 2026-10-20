@@ -61,20 +61,28 @@
 //! grazing, alert freezes, rest, stalking, hopping, a starling's wing beat, bounds, glides,
 //! banks, takeoffs and landings, and falling over when killed.
 //!
+//! Fighters are ready for a character module's faces and bodies (see `character.rs`): they ask
+//! for a look, write their `SkeletonPose` and `FaceControls`, wear blood, bruises and dirt,
+//! and while a character module draws appearances, their own body is hidden (what they hold
+//! stays).
+//!
 //! With `NpcSettings::show_intent` on, a ring on the ground marks where each NPC decided to
 //! go and a line leads to it, colored by why: blue cover, orange flank, purple high ground,
 //! grey falling back, yellow investigating or searching.
 
 mod animal;
+pub(crate) mod character;
 mod humanoid;
 
 use engine_core::prelude::*;
 use engine_render::{MaterialRef, MeshRenderer, Shape, StandardMaterial};
+use engine_world::character::{Appearance, AppearanceBodies, AppearanceRequest};
 use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::{AttackEvent, AttackKind, DamageEvent};
 
 use crate::agent::{
-    NpcAction, NpcBrain, NpcClock, NpcCombat, NpcMotor, NpcSettings, NpcVitals, NpcWeapon,
+    Npc, NpcAction, NpcBrain, NpcClock, NpcCombat, NpcMotor, NpcRole, NpcSettings, NpcVitals,
+    NpcWeapon,
 };
 use crate::art::ArtAssets;
 use crate::combat::Downed;
@@ -203,6 +211,7 @@ type BuildItem<'a> = (
     Option<&'a NpcWeapon>,
     Option<&'a Faction>,
     Option<&'a NpcSkills>,
+    Option<&'a Npc>,
 );
 
 /// Spawn the parts of new stand-ins.
@@ -211,9 +220,10 @@ pub(crate) fn build_stand_ins(
     q: Query<BuildItem, Added<StandIn>>,
     mut art: ArtAssets,
 ) {
-    for (e, stand_in, animal, weapon, faction, skills) in &q {
+    for (e, stand_in, animal, weapon, faction, skills, npc) in &q {
+        let medic = npc.is_some_and(|n| n.role == NpcRole::Medic);
         let parts = match animal.map(|a| a.species) {
-            None => humanoid::parts(stand_in, weapon, faction, skills, &mut art),
+            None => humanoid::parts(stand_in, weapon, faction, skills, medic, &mut art),
             Some(species) => animal::parts(stand_in, animal, species, &mut art),
         };
         for (part, renderer, scale) in parts {
@@ -275,6 +285,9 @@ type PoseItem<'a> = (
         Option<&'a BirdFlight>,
         Option<&'a NpcMotor>,
         Option<&'a NpcMemory>,
+        // A look a character module may draw instead of the stand-in body.
+        Has<Appearance>,
+        Has<AppearanceRequest>,
     ),
 );
 
@@ -287,17 +300,20 @@ type FoeItem<'a> = (
 );
 
 /// The attacks telegraphed and the blows landed this step, and where the downed fighters'
-/// chests lie (kept between steps to reuse the space).
+/// chests lie and a mate's knees go beside them, from either side (kept between steps to
+/// reuse the space).
 #[derive(Default)]
 pub(crate) struct Sightings {
     attacks: Vec<(Entity, Option<Entity>, AttackKind)>,
     blows: Vec<DamageEvent>,
-    lying: Vec<(Entity, DVec3)>,
+    lying: Vec<(Entity, DVec3, [DVec3; 2])>,
 }
 
 /// Pose every stand-in from its owner's state (a fighter's also from the attacks telegraphed
 /// at it, the blows that land on it, the attacker whose blow its guard meets, and the downed
-/// mate it revives).
+/// mate it revives). While a character module draws appearances, a fighter with a look shows
+/// only what it holds.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn pose_stand_ins(
     mut owners: Query<PoseItem, Without<StandInPart>>,
     foes: Query<FoeItem, Without<StandInPart>>,
@@ -306,6 +322,7 @@ pub(crate) fn pose_stand_ins(
     mut blows: MessageReader<DamageEvent>,
     mut seen: Local<Sightings>,
     seeds: Query<&crate::seed::Seed>,
+    drawn: Option<Res<AppearanceBodies>>,
 ) {
     let seen = &mut *seen;
     seen.attacks.clear();
@@ -313,13 +330,14 @@ pub(crate) fn pose_stand_ins(
         .extend(attacks.read().map(|a| (a.attacker, a.target, a.kind)));
     seen.blows.clear();
     seen.blows.extend(blows.read().cloned());
-    // Where each downed fighter's chest lay as last posed (a mate reviving it puts its hands
-    // there).
+    // How each downed fighter lay as last posed (a mate reviving it kneels there and puts its
+    // hands on the chest).
     seen.lying.clear();
     seen.lying.extend(owners.iter().filter_map(|item| {
         let (me, _, st, _, owner, ..) = item;
-        let chest = st.motion.lying_chest()?;
-        Some((me, owner.translation + (owner.rotation * chest).as_dvec3()))
+        let l = st.motion.lying()?;
+        let world = |p: Vec3| owner.translation + (owner.rotation * p).as_dvec3();
+        Some((me, world(l.chest), l.knees.map(world)))
     }));
     let foe = |e: Entity| {
         foes.get(e)
@@ -346,15 +364,23 @@ pub(crate) fn pose_stand_ins(
     {
         let now = clock.map(|c| c.now).unwrap_or(0.0);
         let phase = mover.map(|m| m.phase).unwrap_or(0.0);
-        let (animal, mind, bird, motor, memory) = animal;
+        let (animal, mind, bird, motor, memory, looks, asks) = animal;
+        let drawn_elsewhere = drawn.is_some() && animal.is_none() && (looks || asks);
         let mut materials: Vec<(Part, StandardMaterial)> = Vec::new();
         let placed: Box<dyn Fn(Part) -> Placed> = match animal.map(|a| a.species) {
             None => {
+                // The mate it revives: its chest, and where the knees go on the side it kneels
+                // (the brain's spot is there).
                 let patient = brain
                     .filter(|b| b.action == NpcAction::Revive)
-                    .and_then(|b| b.revive)
-                    .and_then(|ally| seen.lying.iter().find(|(e, _)| *e == ally))
-                    .map(|&(_, at)| at);
+                    .and_then(|b| {
+                        let &(_, chest, knees) =
+                            seen.lying.iter().find(|l| Some(l.0) == b.revive)?;
+                        let spot = b.destination.unwrap_or(owner.translation);
+                        let near = |p: DVec3| DVec2::new(p.x - spot.x, p.z - spot.z).length();
+                        let side = usize::from(near(knees[1]) < near(knees[0]));
+                        Some((chest, knees[side]))
+                    });
                 let view = humanoid::Seen {
                     me,
                     vary: seeds.get(me).map_or(0.0, |s| s.unit()),
@@ -425,8 +451,9 @@ pub(crate) fn pose_stand_ins(
             if *t != new {
                 *t = new;
             }
-            if r.visible != p.visible {
-                r.visible = p.visible;
+            let visible = p.visible && !(drawn_elsewhere && !humanoid::held(part.part));
+            if r.visible != visible {
+                r.visible = visible;
             }
             // Overridden this step, or back to the part's own material.
             let m = materials

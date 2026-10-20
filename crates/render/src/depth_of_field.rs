@@ -205,6 +205,10 @@ pub(crate) struct DofPass {
     /// Camera and whether depth of field ran last frame (autofocus snaps when either changes).
     last_camera: Option<Entity>,
     was_active: bool,
+    /// Frames encoded, and the frame `focus_distance_m` was measured in: readings land a
+    /// varying number of frames late and can land out of order, so the newest one wins.
+    frame: u64,
+    read_frame: u64,
     /// Latest focus distance read back from the GPU (m).
     pub focus_distance_m: Option<f32>,
 }
@@ -212,6 +216,8 @@ pub(crate) struct DofPass {
 struct FocusReadback {
     buffer: wgpu::Buffer,
     state: Arc<AtomicU8>,
+    /// The frame whose focus this buffer holds.
+    frame: u64,
 }
 
 /// Size-dependent targets and the bind groups that read them.
@@ -322,6 +328,7 @@ impl DofPass {
                     mapped_at_creation: false,
                 }),
                 state: Arc::new(AtomicU8::new(FREE)),
+                frame: 0,
             })
             .collect();
         Self {
@@ -342,6 +349,8 @@ impl DofPass {
             targets: None,
             last_camera: None,
             was_active: false,
+            frame: 0,
+            read_frame: 0,
             focus_distance_m: None,
         }
     }
@@ -381,6 +390,7 @@ impl DofPass {
         let snap = !self.was_active || !view.history_valid || self.last_camera != view.camera;
         self.was_active = true;
         self.last_camera = view.camera;
+        self.frame += 1;
 
         let height = targets.height as f32;
         let lens = settings.lens(view.fov_y, height);
@@ -527,7 +537,8 @@ impl DofPass {
         else {
             return;
         };
-        let rb = &self.readbacks[slot];
+        let rb = &mut self.readbacks[slot];
+        rb.frame = self.frame;
         encoder.copy_texture_to_buffer(
             self.focus_next.texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
@@ -563,6 +574,11 @@ impl DofPass {
             });
     }
 
+    /// How many frames ago `focus_distance_m` was measured (1: the frame before the latest).
+    pub fn focus_lag_frames(&self) -> Option<u64> {
+        self.focus_distance_m.map(|_| self.frame - self.read_frame)
+    }
+
     /// Collect finished focus readbacks (non-blocking; the device was polled this frame).
     pub fn collect(&mut self) {
         for rb in &self.readbacks {
@@ -574,7 +590,10 @@ impl DofPass {
                     };
                     rb.buffer.unmap();
                     rb.state.store(FREE, Ordering::Release);
-                    if let Some(d) = diopters.filter(|d| d.is_finite()) {
+                    if let Some(d) = diopters.filter(|d| d.is_finite())
+                        && rb.frame > self.read_frame
+                    {
+                        self.read_frame = rb.frame;
                         self.focus_distance_m =
                             Some(if d > 1e-6 { 1.0 / d } else { f32::INFINITY });
                     }

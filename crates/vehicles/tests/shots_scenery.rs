@@ -294,6 +294,18 @@ fn scenery_airfield_shots() {
                 [0.0, 1.0, -500.0],
             ),
             shot(
+                "scenery_airfield_paint_closeup",
+                0.5,
+                [-8.5, 1.6, -599.0],
+                [-3.0, 0.0, -587.0],
+            ),
+            shot(
+                "scenery_airfield_threshold_top",
+                0.5,
+                [0.0, 40.0, -575.0],
+                [0.0, 0.0, -574.9],
+            ),
+            shot(
                 "scenery_airfield_markings",
                 0.5,
                 [36.0, 45.0, -660.0],

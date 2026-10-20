@@ -3,7 +3,8 @@
 //!
 //! Every screen can then be opened from the console or by an AI agent:
 //! `ui.show {"screen": "dialogue", "tree": "merchant_intro"}`, `{"screen": "shop"}`,
-//! `{"screen": "inventory"}`, `{"screen": "map"}`, `{"screen": "journal"}`, `{"screen": "skills"}`,
+//! `{"screen": "inventory"}`, `{"screen": "map"}`, `{"screen": "journal"}`, `{"screen": "skills"}`, `{"screen": "crafting"}`,
+//! `{"screen": "saves"}`,
 //! `{"screen": "pause"}`.
 
 use bevy_ecs::prelude::*;
@@ -125,6 +126,7 @@ pub fn player_data(data: &mut UiData) {
             "stamina": 81.0, "stamina_max": 100.0,
             "mana": 45.0, "mana_max": 80.0,
             "xp": 6_350.0, "xp_max": 9_000.0,
+            "playtime_s": 45_840,
             "gold": 1_250,
             "heading_deg": 32.0,
             "speed": 4.2
@@ -183,6 +185,8 @@ pub fn setup_data(world: &mut World) {
     crate::quests::add_demo_quests(world);
     crate::wheel::add_demo_items(world);
     crate::skills::add_demo_tree(world);
+    crate::crafting::add_demo_recipes(world);
+    crate::saves::add_demo_saves(world);
 }
 
 /// Marks the UI test area's world objects.

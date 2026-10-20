@@ -693,7 +693,7 @@ fn spells() -> Vec<EffectDesc> {
                     lifetime: [0.8, 1.4],
                     size: [0.25, 0.4],
                     emissive: 150.0,
-                    color: fade([0.4, 0.55, 0.7], 0.12, 0.15, 0.35),
+                    color: fade([0.85, 0.93, 1.0], 0.12, 0.15, 0.35),
                     ..smoke("mist", 0.85, 0.35)
                 },
             ],
@@ -705,8 +705,8 @@ fn spells() -> Vec<EffectDesc> {
         mark: mark(MarkKind::Frost, 1.3, 30.0, 0.0),
         ..effect(
             "spell.frost_impact",
-            "An ice bolt shattering: flash, a spray of bouncing ice shards, glints, a frost ring \
-             and a rolling cold mist.",
+            "An ice bolt shattering: flash, ice spikes thrust out where it struck, a spray of \
+             bouncing ice shards, glints, a frost ring and a rolling cold mist.",
             Some(0.1),
             vec![
                 EmitterDesc {
@@ -731,7 +731,7 @@ fn spells() -> Vec<EffectDesc> {
                         friction: 0.5,
                     },
                     debris: Some(Debris::Shard),
-                    emissive: 1200.0,
+                    emissive: 3000.0,
                     color: g(&[
                         (0.0, [0.62, 0.85, 1.0, 1.0]),
                         (0.8, [0.62, 0.85, 1.0, 1.0]),
@@ -768,7 +768,7 @@ fn spells() -> Vec<EffectDesc> {
                     size: [0.5, 0.8],
                     size_over_life: c(&[(0.0, 0.6), (1.0, 2.6)]),
                     emissive: 60.0,
-                    ..smoke("mist", 0.5, 0.3)
+                    ..smoke("mist", 0.75, 0.22)
                 },
                 EmitterDesc {
                     bursts: once(1),
@@ -785,6 +785,46 @@ fn spells() -> Vec<EffectDesc> {
                     additive: 1.0,
                     soft: 0.0,
                     ..em("frost_ring")
+                },
+                // Ice spikes thrust out where it struck: one big cluster and a few small ones
+                // around it, cracking and thinning away after a couple of seconds.
+                EmitterDesc {
+                    bursts: once(1),
+                    speed: [0.0, 0.0],
+                    lifetime: [2.4, 2.4],
+                    size: [1.1, 1.1],
+                    rotation_deg: [0.0, 0.0],
+                    local_space: true,
+                    sprite: Sprite::Crystal,
+                    facing: Facing::Axis,
+                    stretch: 1.0,
+                    lit: 1.0,
+                    color: Gradient::constant([0.75, 0.9, 1.0, 1.0]),
+                    emissive: 1500.0,
+                    soft: 0.1,
+                    wind: 0.0,
+                    ..em("spikes")
+                },
+                EmitterDesc {
+                    bursts: once(4),
+                    shape: EmitShape::Ring {
+                        radius: 0.45,
+                        thickness: 0.2,
+                    },
+                    speed: [0.0, 0.0],
+                    lifetime: [1.6, 2.2],
+                    size: [0.35, 0.6],
+                    rotation_deg: [0.0, 0.0],
+                    local_space: true,
+                    sprite: Sprite::Crystal,
+                    facing: Facing::Axis,
+                    stretch: 1.0,
+                    lit: 1.0,
+                    color: Gradient::constant([0.75, 0.9, 1.0, 1.0]),
+                    emissive: 1500.0,
+                    soft: 0.1,
+                    wind: 0.0,
+                    ..em("small_spikes")
                 },
             ],
         )
@@ -1000,33 +1040,76 @@ fn spells() -> Vec<EffectDesc> {
         )
     };
 
+    let heal_green = [0.5, 1.0, 0.6];
     let heal = EffectDesc {
-        prewarm: 2.0,
+        prewarm: 3.0,
         light: light([0.55, 1.0, 0.55], 2500.0, 8.0, 0.1, 0.5),
         ..effect(
             "spell.heal_aura",
-            "A healing aura: golden-green motes rising and swirling, pulsing rings on the ground \
-             and glints.",
+            "A healing aura: a column of light rising from a slowly turning circle, golden-green \
+             motes spiraling up it, pulsing rings on the ground and glints.",
             None,
             vec![
+                // The column: a tube of light as wide as the circle, a few overlapping copies
+                // crossfading so it never blinks.
                 EmitterDesc {
-                    rate: 70.0,
-                    shape: EmitShape::Disc { radius: 1.3 },
-                    speed: [0.0, 0.2],
-                    velocity: [0.0, 0.9, 0.0],
+                    rate: 1.0,
+                    speed: [0.0, 0.0],
+                    lifetime: [3.0, 3.0],
+                    size: [2.8, 2.8],
+                    rotation_deg: [0.0, 0.0],
+                    local_space: true,
+                    steady: true,
+                    sprite: Sprite::Veil,
+                    facing: Facing::Axis,
+                    stretch: 0.82,
+                    color: fade(heal_green, 0.5, 0.3, 0.7),
+                    emissive: 6000.0,
+                    additive: 1.0,
+                    soft: 0.2,
+                    wind: 0.0,
+                    ..em("column")
+                },
+                // The circle it rises from, turning slowly.
+                EmitterDesc {
+                    bursts: every(30.0, 1),
+                    offset: [0.0, 0.01, 0.0],
+                    speed: [0.0, 0.0],
+                    lifetime: [30.0, 30.0],
+                    size: [2.3, 2.3],
+                    rotation_deg: [0.0, 0.0],
+                    spin_deg: [8.0, 8.0],
+                    local_space: true,
+                    sprite: Sprite::Rune,
+                    facing: Facing::Horizontal,
+                    color: fade(heal_green, 0.7, 0.02, 0.97),
+                    emissive: 9000.0,
+                    additive: 1.0,
+                    soft: 0.0,
+                    wind: 0.0,
+                    ..em("circle")
+                },
+                // Motes spiraling up the column, drawn as short streaks.
+                EmitterDesc {
+                    rate: 110.0,
+                    shape: EmitShape::Disc { radius: 1.15 },
+                    speed: [0.0, 0.1],
+                    velocity: [0.0, 1.0, 0.0],
                     orbit_speed: 0.6,
-                    turbulence: 0.6,
+                    turbulence: 0.5,
                     turbulence_scale: 0.8,
                     drag: 0.8,
                     wind: 0.2,
                     lifetime: [1.8, 2.8],
-                    size: [0.05, 0.1],
+                    size: [0.012, 0.024],
+                    facing: Facing::Velocity,
+                    stretch: 0.15,
                     color: g(&[
                         (0.0, [0.5, 1.0, 0.5, 0.0]),
-                        (0.2, [0.6, 1.0, 0.55, 1.0]),
+                        (0.2, [0.65, 1.0, 0.55, 1.0]),
                         (1.0, [1.0, 0.95, 0.5, 0.0]),
                     ]),
-                    emissive: 14_000.0,
+                    emissive: 22_000.0,
                     additive: 1.0,
                     ..em("motes")
                 },
@@ -1053,43 +1136,17 @@ fn spells() -> Vec<EffectDesc> {
                     ..em("rings")
                 },
                 EmitterDesc {
-                    rate: 12.0,
+                    rate: 10.0,
                     shape: EmitShape::Disc { radius: 1.1 },
                     speed: [0.0, 0.0],
                     velocity: [0.0, 1.5, 0.0],
                     lifetime: [0.6, 1.0],
-                    size: [0.1, 0.18],
+                    size: [0.06, 0.12],
                     sprite: Sprite::Star,
                     color: g(&[(0.0, [1.0, 0.95, 0.6, 1.0]), (1.0, [0.8, 1.0, 0.5, 0.0])]),
                     emissive: 18_000.0,
                     additive: 1.0,
                     ..em("glints")
-                },
-                // Soft shafts of light rising from the circle.
-                EmitterDesc {
-                    rate: 9.0,
-                    shape: EmitShape::Ring {
-                        radius: 1.2,
-                        thickness: 0.4,
-                    },
-                    offset: [0.0, 0.9, 0.0],
-                    speed: [0.0, 0.0],
-                    velocity: [0.0, 0.6, 0.0],
-                    lifetime: [1.6, 2.4],
-                    size: [0.25, 0.4],
-                    sprite: Sprite::Glow,
-                    facing: Facing::Velocity,
-                    stretch: 1.3,
-                    color: g(&[
-                        (0.0, [0.55, 1.0, 0.6, 0.0]),
-                        (0.3, [0.6, 1.0, 0.55, 0.35]),
-                        (1.0, [0.9, 1.0, 0.6, 0.0]),
-                    ]),
-                    emissive: 6000.0,
-                    additive: 1.0,
-                    soft: 0.2,
-                    wind: 0.0,
-                    ..em("shafts")
                 },
                 EmitterDesc {
                     rate: 3.0,
@@ -1104,10 +1161,10 @@ fn spells() -> Vec<EffectDesc> {
                     facing: Facing::Horizontal,
                     color: g(&[
                         (0.0, [0.5, 1.0, 0.55, 0.0]),
-                        (0.5, [0.5, 1.0, 0.55, 0.25]),
+                        (0.5, [0.5, 1.0, 0.55, 0.3]),
                         (1.0, [0.5, 1.0, 0.55, 0.0]),
                     ]),
-                    emissive: 2500.0,
+                    emissive: 3000.0,
                     additive: 1.0,
                     soft: 0.0,
                     wind: 0.0,
@@ -1177,8 +1234,8 @@ fn spells() -> Vec<EffectDesc> {
         light: light([0.7, 0.8, 1.0], 30_000.0, 16.0, 0.6, 0.3),
         ..effect(
             "spell.lightning_hit",
-            "Where a lightning bolt strikes: white-blue flash, a starburst, bouncing sparks and a \
-             puff of scorched smoke.",
+            "Where a lightning bolt strikes: white-blue flash, a starburst, electric arcs \
+             crawling out over the ground, bouncing sparks and a wisp of scorched smoke.",
             Some(0.1),
             vec![
                 EmitterDesc {
@@ -1211,14 +1268,36 @@ fn spells() -> Vec<EffectDesc> {
                     ]),
                     ..sparks("sparks", 80, [3.0, 10.0])
                 },
+                // Arcs crawling out over the ground, crackling for a moment.
                 EmitterDesc {
-                    bursts: once(6),
+                    bursts: once(7),
+                    offset: [0.0, 0.03, 0.0],
+                    speed: [0.0, 0.0],
+                    lifetime: [0.25, 0.45],
+                    size: [1.6, 2.6],
+                    rotation_deg: [0.0, 360.0],
+                    local_space: true,
+                    sprite: Sprite::Arc,
+                    facing: Facing::Horizontal,
+                    color: g(&[
+                        (0.0, [0.85, 0.92, 1.0, 1.0]),
+                        (0.6, [0.6, 0.75, 1.0, 1.0]),
+                        (1.0, [0.45, 0.55, 1.0, 0.0]),
+                    ]),
+                    emissive: 60_000.0,
+                    additive: 1.0,
+                    soft: 0.0,
+                    wind: 0.0,
+                    ..em("arcs")
+                },
+                EmitterDesc {
+                    bursts: once(4),
                     shape: EmitShape::Hemisphere { radius: 0.2 },
                     speed: [0.3, 0.8],
                     acceleration: [0.0, 0.6, 0.0],
                     lifetime: [1.2, 2.0],
-                    size: [0.4, 0.6],
-                    ..smoke("smoke", 0.12, 0.5)
+                    size: [0.3, 0.45],
+                    ..smoke("smoke", 0.3, 0.3)
                 },
             ],
         )
@@ -1606,33 +1685,78 @@ fn water() -> Vec<EffectDesc> {
         prewarm: 3.0,
         ..effect(
             "water.fountain",
-            "A fountain jet: a column of water rising 2.5 m and falling back, with ripples and \
-             mist where it lands. The landing layers sit 0.6 m below the nozzle.",
+            "A fountain jet: a glassy rod of water rising 2.3 m, breaking into beads at the top \
+             and raining back around itself, with ripples and mist where it lands. The landing \
+             layers sit 0.6 m below the nozzle.",
             None,
             vec![
+                // The jet itself: a glassy rod of water rising 2.3 m, a few overlapping copies
+                // crossfading so it flows without a break.
                 EmitterDesc {
-                    rate: 420.0,
+                    rate: 4.0,
+                    speed: [0.0, 0.0],
+                    lifetime: [0.7, 0.9],
+                    size: [2.3, 2.3],
+                    rotation_deg: [0.0, 0.0],
+                    local_space: true,
+                    steady: true,
+                    sprite: Sprite::Jet,
+                    facing: Facing::Axis,
+                    stretch: 0.09,
+                    lit: 1.0,
+                    color: fade([0.8, 0.88, 0.95], 0.8, 0.3, 0.7),
+                    wind: 0.0,
+                    soft: 0.0,
+                    ..em("jet")
+                },
+                // Water turning over at the top and raining back down around the jet.
+                EmitterDesc {
+                    rate: 700.0,
                     shape: EmitShape::Cone {
-                        angle_deg: 5.0,
-                        radius: 0.04,
+                        angle_deg: 85.0,
+                        radius: 0.05,
                     },
-                    speed: [6.4, 7.2],
+                    offset: [0.0, 2.15, 0.0],
+                    speed: [0.2, 1.1],
                     gravity: 1.0,
                     drag: 0.08,
                     wind: 0.4,
                     collide: Collide::Die,
-                    lifetime: [1.6, 1.9],
-                    size: [0.04, 0.08],
+                    lifetime: [0.9, 1.1],
+                    size: [0.016, 0.032],
                     sprite: Sprite::Droplet,
                     facing: Facing::Velocity,
-                    stretch: 0.015,
+                    stretch: 0.03,
                     lit: 1.0,
                     color: g(&[
-                        (0.0, [0.8, 0.88, 0.95, 0.85]),
-                        (1.0, [0.8, 0.88, 0.95, 0.8]),
+                        (0.0, [0.8, 0.88, 0.95, 0.0]),
+                        (0.1, [0.8, 0.88, 0.95, 0.55]),
+                        (1.0, [0.8, 0.88, 0.95, 0.5]),
                     ]),
                     soft: 0.05,
-                    ..em("jet")
+                    ..em("fall")
+                },
+                // Spray shed along the jet as it rises.
+                EmitterDesc {
+                    rate: 60.0,
+                    shape: EmitShape::Cone {
+                        angle_deg: 3.0,
+                        radius: 0.03,
+                    },
+                    speed: [5.0, 6.9],
+                    gravity: 1.0,
+                    drag: 0.1,
+                    wind: 0.4,
+                    collide: Collide::Die,
+                    lifetime: [1.4, 1.8],
+                    size: [0.008, 0.016],
+                    sprite: Sprite::Droplet,
+                    facing: Facing::Velocity,
+                    stretch: 0.03,
+                    lit: 1.0,
+                    color: fade([0.8, 0.88, 0.95], 0.45, 0.05, 0.8),
+                    soft: 0.05,
+                    ..em("spray")
                 },
                 EmitterDesc {
                     rate: 25.0,
@@ -1641,10 +1765,10 @@ fn water() -> Vec<EffectDesc> {
                     speed: [0.1, 0.4],
                     velocity: [0.0, 0.3, 0.0],
                     lifetime: [1.5, 2.5],
-                    size: [0.5, 0.9],
+                    size: [0.3, 0.6],
                     size_over_life: c(&[(0.0, 0.7), (1.0, 2.0)]),
-                    color: fade([0.92, 0.96, 1.0], 0.22, 0.15, 0.5),
-                    ..smoke("mist", 0.9, 0.22)
+                    color: fade([0.92, 0.96, 1.0], 0.08, 0.15, 0.5),
+                    ..smoke("mist", 0.9, 0.08)
                 },
                 EmitterDesc {
                     rate: 7.0,
@@ -1663,7 +1787,7 @@ fn water() -> Vec<EffectDesc> {
                     velocity: [0.0, 1.3, 0.0],
                     bursts: Vec::new(),
                     lifetime: [0.3, 0.6],
-                    size: [0.025, 0.05],
+                    size: [0.012, 0.024],
                     ..droplets("splashes", 0, water_rgb, [0.3, 0.8], 1.3, Collide::None)
                 },
             ],
@@ -2576,11 +2700,11 @@ fn exhausts() -> Vec<EffectDesc> {
                         soft: 1.0,
                         ..smoke("cloud", 0.68, 0.35)
                     },
-                    // The trail a climbing rocket leaves: laid down per meter it travels, so it
-                    // stands as one unbroken column however fast it goes, lingering and
-                    // spreading long after the rocket has gone.
+                    // The trail a moving rocket leaves: laid down per meter it travels, close
+                    // enough for its puffs to overlap, so it stands as one unbroken column
+                    // however fast it goes, lingering and spreading long after it has gone.
                     EmitterDesc {
-                        rate_per_meter: 0.8,
+                        rate_per_meter: 2.0,
                         shape: EmitShape::Cone {
                             angle_deg: 60.0,
                             radius: 0.6,
@@ -2592,9 +2716,9 @@ fn exhausts() -> Vec<EffectDesc> {
                         turbulence_scale: 6.0,
                         lifetime: [8.0, 12.0],
                         size: [1.8, 2.6],
-                        size_over_life: c(&[(0.0, 0.7), (0.2, 1.6), (1.0, 4.5)]),
+                        size_over_life: c(&[(0.0, 1.0), (0.2, 1.8), (1.0, 4.5)]),
                         soft: 1.0,
-                        ..smoke("trail", 0.8, 0.5)
+                        ..smoke("trail", 0.8, 0.4)
                     },
                     EmitterDesc {
                         rate: 30.0,

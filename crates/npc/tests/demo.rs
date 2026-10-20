@@ -35,7 +35,8 @@ fn the_arena_fight_keeps_going() {
         .filter(|(_, f)| **f != demo::SPARRING)
         .map(|(e, _)| e)
         .collect();
-    assert_eq!(fighters.len(), 12);
+    // Two squads of six (a medic in each) and the duelling pair.
+    assert_eq!(fighters.len(), 14);
     let mut actions = HashSet::new();
     let mut reasons = HashSet::new();
     let mut downed_seen = 0;
@@ -122,12 +123,11 @@ fn arena_revives(seed: u64) -> u32 {
     q.iter(&app.world).map(|c| c.stats.revives).sum()
 }
 
-/// Across fights with different randomness, squad mates get the downed up at least once a
-/// minute on average.
+/// Across fights with different randomness, squad mates get the downed up at least twice a
+/// minute on average, and in every fight at least once.
 ///
-/// This is the rate the arena honestly has today (main measured 1.33 a minute over these seeds;
-/// skilled fighters now also hold off a watched spot). The target is 2 a minute with no fight at
-/// 0: the squad-medic round raises the bar back to that.
+/// The squads' medics do most of it: they go in further and first, their mates cover and screen
+/// them, and they smoke a spot the enemy watches (skilled fighters hold off one).
 #[test]
 fn squad_mates_revive_the_downed_every_minute() {
     let runs: Vec<u32> = std::thread::scope(|s| {
@@ -142,10 +142,13 @@ fn squad_mates_revive_the_downed_every_minute() {
     let mean = total as f32 / runs.len() as f32;
     eprintln!("revives in a minute, seed by seed: {runs:?} (mean {mean:.2})");
     assert!(
-        mean >= 1.0,
+        mean >= 2.0,
         "squad mates revived {mean:.2} a minute: {runs:?}"
     );
-    assert!(total >= 6, "only {total} revives in all: {runs:?}");
+    assert!(
+        runs.iter().all(|&r| r > 0),
+        "a fight with nobody revived: {runs:?}"
+    );
 }
 
 #[test]

@@ -11,7 +11,7 @@
 //! | middle lane | Fireballs and frost bolts flying into a target wall, with impacts and shockwaves |
 //! | west | Lightning arcing between two obelisks, striking with sparks |
 //! | north-west | A mortar firing starburst fireworks: stars that trail glitter and crackle |
-//! | center | Healing aura on a dais |
+//! | center | Healing aura on a dais: a column of light over a turning circle, motes spiraling up |
 //! | east | Fountain (water jets landing in a basin) and an anvil throwing sparks |
 //! | south | Pond with stones splashing in, footsteps on mud, snow, sand and water, impacts on six materials |
 //! | rim | Torches and fireflies |

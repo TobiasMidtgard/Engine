@@ -207,11 +207,38 @@ fn ground_color(x: f32, z: f32, h: f32, normal: Vec3) -> Vec3 {
     let n = noise::fbm2(x as f64 * 0.21, z as f64 * 0.21, 0xC0105, 3, 2.0, 0.5);
     let grass = srgb(0x55743a).lerp(srgb(0x6f7d3d), smooth(-0.2, 0.6, n));
     let rock = srgb(0x7d776f).lerp(srgb(0x5f5a53), smooth(-0.3, 0.5, -n));
-    // The crag is a cooler, darker stone, banded by its beds.
-    let bands = (h * 3.7 + n * 2.0).sin() * 0.5 + 0.5;
-    let stone = srgb(0x6a6b6c).lerp(srgb(0x4c4d50), smooth(0.2, 0.8, bands) * 0.7 + 0.3 * n);
-    let rock = rock.lerp(stone, crag::presence(x, z));
+    // The crag is a cooler, darker stone. Each of its beds has a tone of its own (a few
+    // buff and rusty ones among the grey), darkest at the partings, and water seeping out
+    // of the partings streaks the faces below them.
     let steep = 1.0 - normal.y;
+    let presence = crag::presence(x, z);
+    let rock = if presence > 0.0 {
+        let t = crag::bed_coord(x, z, h);
+        let bed = t.floor();
+        let tone = engine_core::math::hash01(bed as i64, 0, 0, 0xBED5);
+        let mut stone = srgb(0x878580).lerp(srgb(0x63635f), tone);
+        if engine_core::math::hash01(bed as i64, 1, 0, 0xBED5) > 0.7 {
+            stone = stone.lerp(srgb(0x7a6c5a), 0.3);
+        }
+        stone = stone.lerp(srgb(0x3e3f42), smooth(0.25, 0.0, t.fract()) * 0.6);
+        let (u, a) = crag::frame(x, z);
+        let along = a + u * 0.15;
+        let seep = noise::fbm2(along as f64 * 0.9, h as f64 * 0.05, 0x5EE9, 3, 2.0, 0.5);
+        let streak = smooth(0.15, 0.45, seep) * smooth(0.3, 0.7, steep);
+        stone *= 1.0 - 0.4 * streak;
+        // Joints: near-vertical cracks cutting the beds into blocks, offset from bed to bed.
+        let joint = 1.0
+            - noise::perlin2(
+                along as f64 * 0.32 + bed as f64 * 1.7,
+                h as f64 * 0.04,
+                0x1017,
+            )
+            .abs();
+        stone *= 1.0 - 0.55 * smooth(0.94, 0.99, joint) * smooth(0.2, 0.5, steep);
+        rock.lerp(stone * (0.92 + 0.16 * n), presence)
+    } else {
+        rock
+    };
     let mut c = grass.lerp(srgb(0x6b573b), smooth(0.15, 0.4, steep + n * 0.05) * 0.5);
     c = c.lerp(rock, smooth(0.3, 0.55, steep + n * 0.12));
     // Around the tarn.
@@ -275,9 +302,52 @@ pub fn tarn_mesh(spacing: f32) -> Mesh {
 /// The crag's crevice and the rock round it ([`crag::PATCH`]), at half the spacing of the
 /// hill's mesh around it (`hill_spacing`) so its ledges and drops come out sharp. Its border
 /// follows the hill's mesh exactly, so there are no cracks between them.
-pub fn crag_mesh(hill_spacing: f32) -> Mesh {
+///
+/// Two meshes: the turf and soil on its ledges and round it (for [`Surface::Ground`]) and its
+/// bare rock (for [`Surface::Cliff`]), sharing vertices along their ragged border.
+pub fn crag_mesh(hill_spacing: f32) -> (Mesh, Mesh) {
     let (lo, hi) = crag::PATCH;
-    height_mesh(lo, hi, hill_spacing * 0.5, None, true)
+    let mesh = height_mesh(lo, hi, hill_spacing * 0.5, None, true);
+    let (mut turf, mut bare) = (Vec::new(), Vec::new());
+    for t in mesh.indices.as_chunks::<3>().0 {
+        let v = |k: usize| &mesh.vertices[t[k] as usize];
+        let mid = (0..3).map(|k| Vec3::from(v(k).position)).sum::<Vec3>() / 3.0;
+        let up = (0..3).map(|k| v(k).normal[1]).sum::<f32>() / 3.0;
+        if crag::is_cliff(mid.x, mid.z, mid.y, up) {
+            bare.extend_from_slice(t);
+        } else {
+            turf.extend_from_slice(t);
+        }
+    }
+    // The rock texture carries the stone's own color; the vertex color keeps the crag's
+    // (beds, streaks, damp) relative to it, so the two meshes match where they meet.
+    // Hollows hold shade and grime, edges and noses are weathered pale: from the ground's
+    // curvature over a meter.
+    let ratio = materials::mean_color(Surface::Ground) / materials::mean_color(Surface::Cliff);
+    let mut rock = mesh.vertices.clone();
+    for v in &mut rock {
+        let [x, y, z] = v.position;
+        let d = 0.5;
+        let around = tarn_height(x + d, z)
+            + tarn_height(x - d, z)
+            + tarn_height(x, z + d)
+            + tarn_height(x, z - d);
+        let bend = (around - 4.0 * y) / (d * d);
+        let shade = 1.0 - 0.45 * smooth(0.0, 1.6, bend) + 0.25 * smooth(0.0, -1.6, bend);
+        // Bare rock takes the stone's color however gentle the triangle's corners are (not
+        // the turf's, which the turf mesh shows where the ground levels off).
+        let n = Vec3::from(v.normal);
+        let bare = Vec3::new(n.x, n.y.min(0.35), n.z).normalize_or(Vec3::X);
+        // Moss and grass hold on the ledges.
+        let ledge = smooth(0.62, 0.9, n.y);
+        let moss = srgb(0x4b5a30).lerp(
+            srgb(0x5d6b34),
+            smooth(-0.3, 0.3, (x * 0.37).sin() * (z * 0.29).cos()),
+        );
+        let c = ground_color(x, z, y, bare).lerp(moss, ledge * 0.75) * ratio * shade;
+        v.color = c.extend(v.color[3]).to_array();
+    }
+    (Mesh::new(mesh.vertices, turf), Mesh::new(rock, bare))
 }
 
 /// A vertex-colored mesh of the area's ground over `lo`..`hi` (local x, z) every `spacing`
@@ -656,7 +726,13 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
             commands,
             "Crag crevice",
             Transform::from_translation(origin),
-            vec![Part::new(crag_mesh(0.5), Surface::Ground)],
+            {
+                let (turf, bare) = crag_mesh(0.5);
+                vec![
+                    Part::new(turf, Surface::Ground),
+                    Part::new(bare, Surface::Cliff),
+                ]
+            },
         );
     }
 

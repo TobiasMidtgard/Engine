@@ -3,7 +3,7 @@
 //! `cargo run -p engine_ui --example gallery -- <out_dir> [width] [height] [shot ...]`
 //!
 //! Shots: hud, wheel, dialogue, dialogue_choices, shop, shop_sell, inventory, inventory_drag,
-//! journal, journal_finished, skills, map_galaxy, map_system, map_globe, map_surface, pause, confirm, settings, settings_video,
+//! journal, journal_finished, skills, crafting, crafting_busy, saves, saves_save, map_galaxy, map_system, map_globe, map_surface, pause, confirm, settings, settings_video,
 //! settings_controls, theme_cyan (all by default).
 //! Needs a GPU or a software Vulkan driver (lavapipe).
 
@@ -263,6 +263,33 @@ fn main() {
         show(&mut app, "skills", json!({"select": "c_cleave"}));
         app.update_n(30);
         shot(&mut app, &dir, "skills");
+    }
+    if want("crafting") {
+        show(&mut app, "crafting", json!({"select": "r_elixir"}));
+        app.update_n(30);
+        shot(&mut app, &dir, "crafting");
+    }
+    if want("crafting_busy") {
+        // Halfway through three Glowcap brews at the alchemy bench.
+        show(&mut app, "crafting", json!({"select": "r_potion_mana"}));
+        app.update_n(5);
+        for _ in 0..2 {
+            let _ = call_api(&mut app.world, "ui.click", json!({"id": "craft_more"}));
+            app.update_n(2);
+        }
+        let _ = call_api(&mut app.world, "ui.click", json!({"id": "craft_go"}));
+        app.update_n(80);
+        shot(&mut app, &dir, "crafting_busy");
+    }
+    if want("saves") {
+        show(&mut app, "saves", json!({"select": "save_3"}));
+        app.update_n(30);
+        shot(&mut app, &dir, "saves");
+    }
+    if want("saves_save") {
+        show(&mut app, "saves", json!({"mode": "save"}));
+        app.update_n(30);
+        shot(&mut app, &dir, "saves_save");
     }
     for (name, zoom, select) in [
         (

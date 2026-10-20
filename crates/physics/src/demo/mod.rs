@@ -17,6 +17,10 @@
 //! * a sagging plank bridge that crates drop onto, with a stand-in character on it,
 //! * a kinematic turntable carrying crates and a stand-in character around,
 //! * rubber balls bouncing in the middle,
+//! * a pendulum wave: 15 bobs that fall out of step into waves and snakes and come back into
+//!   step every minute, behind a Newton's cradle on a plinth passing its blow down the row,
+//! * a pool table: the cue ball breaks a rack of fifteen and they scatter, bank off the cushions
+//!   and drop into the pockets,
 //! * along the front, three oil drums rolling down a ramp and 47 m along an asphalt runway
 //!   (one triangle mesh) into a sand pit: they stay flat and in their lanes.
 //!
@@ -25,6 +29,7 @@
 
 mod art;
 mod floaters;
+pub mod pool;
 
 pub(crate) use floaters::replay_floaters;
 pub use floaters::{FLOAT_CYCLE_SECS, FloatTest, spawn_floaters};
@@ -146,6 +151,33 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 2.4,
     },
     DemoView {
+        key: "physics_pendulum_wave",
+        name: "A pendulum wave of 15 bobs falling into snakes, back in step every minute",
+        eye: [16.0, 6.2, -3.4],
+        target: [16.0, 1.5, -8.6],
+        hour: 16.0,
+        station: Some(Station::Pendulums),
+        warmup_secs: 7.5,
+    },
+    DemoView {
+        key: "physics_cradle",
+        name: "A Newton's cradle passing the blow down its row of steel balls",
+        eye: [17.4, 2.4, -2.2],
+        target: [16.0, 1.75, -4.5],
+        hour: 16.0,
+        station: Some(Station::Cradle),
+        warmup_secs: 0.9,
+    },
+    DemoView {
+        key: "physics_pool",
+        name: "A break on a pool table: fifteen balls scattering off the cushions into the pockets",
+        eye: [8.6, 1.9, -6.6],
+        target: [9.6, 0.8, -8.6],
+        hour: 16.0,
+        station: Some(Station::Pool),
+        warmup_secs: 0.5,
+    },
+    DemoView {
         key: "physics_turntable",
         name: "A turntable carrying crates and a rider",
         eye: [37.0, 6.5, 20.0],
@@ -171,10 +203,13 @@ pub enum Station {
     Balls,
     BarrelRun,
     Rockfall,
+    Pendulums,
+    Cradle,
+    Pool,
 }
 
 impl Station {
-    pub const ALL: [Station; 12] = [
+    pub const ALL: [Station; 15] = [
         Station::Tower,
         Station::Pile,
         Station::Dominoes,
@@ -187,6 +222,9 @@ impl Station {
         Station::Balls,
         Station::BarrelRun,
         Station::Rockfall,
+        Station::Pendulums,
+        Station::Cradle,
+        Station::Pool,
     ];
 
     /// The station's name in the `physics.proving_ground.replay` API.
@@ -204,6 +242,9 @@ impl Station {
             Station::Balls => "balls",
             Station::BarrelRun => "barrel_run",
             Station::Rockfall => "rockfall",
+            Station::Pendulums => "pendulums",
+            Station::Cradle => "cradle",
+            Station::Pool => "pool",
         }
     }
 
@@ -222,6 +263,9 @@ impl Station {
             Station::Balls => (6.0, -3.0),
             Station::BarrelRun => (0.0, 19.5),
             Station::Rockfall => (-24.0, -2.0),
+            Station::Pendulums => (16.0, -8.5),
+            Station::Cradle => (16.0, -4.5),
+            Station::Pool => (9.0, -8.5),
         };
         DVec3::new(x, 0.0, z)
     }
@@ -236,6 +280,10 @@ impl Station {
             Station::Ragdolls | Station::Seesaw | Station::Balls => Some(20.0),
             Station::BarrelRun => Some(25.0),
             Station::Rockfall => Some(30.0),
+            // The wave is back in step after exactly its cycle, so the replay is seamless.
+            Station::Pendulums => Some(WAVE_CYCLE_SECS as f64),
+            Station::Cradle => Some(20.0),
+            Station::Pool => Some(25.0),
         }
     }
 
@@ -258,6 +306,9 @@ impl Station {
             Station::Balls => bouncy_balls(y, base),
             Station::BarrelRun => barrel_run(y, base),
             Station::Rockfall => rockfall(y, base),
+            Station::Pendulums => pendulum_wave(y, base),
+            Station::Cradle => newtons_cradle(y, base),
+            Station::Pool => pool::pool_table(y, base),
         }
     }
 }
@@ -1349,6 +1400,181 @@ fn bouncy_balls(y: &mut Yard, center: DVec3) {
     for (i, color) in colors.into_iter().enumerate() {
         let at = center + DVec3::new(i as f64 * 1.6, 4.0 + i as f64 * 1.5, (i % 2) as f64 * 1.2);
         y.ball(at, 0.4, 300.0, color);
+    }
+}
+
+/// The pendulum wave's cycle: every bob swings a whole number of times in it, so they all
+/// come back into step, seconds.
+pub const WAVE_CYCLE_SECS: f32 = 60.0;
+
+/// The pendulum wave's bobs: bob `k` swings `WAVE_FIRST_SWINGS + k` times per cycle.
+const WAVE_BOBS: usize = 15;
+const WAVE_FIRST_SWINGS: usize = 20;
+const WAVE_BOB_RADIUS: f32 = 0.1;
+/// How far out the bobs start, radians.
+const WAVE_AMPLITUDE: f32 = 0.2;
+
+/// Pivot to center of a ball of `radius` that swings `swings` times per `cycle` seconds
+/// when let go `amplitude` radians out.
+pub fn wave_length(swings: usize, cycle: f32, radius: f32, amplitude: f32) -> f32 {
+    let period = cycle / swings as f32;
+    // A wider swing takes a little longer than a small one.
+    let small = period / (1.0 + amplitude * amplitude / 16.0);
+    let a = 9.81 * small * small / (4.0 * std::f32::consts::PI * std::f32::consts::PI);
+    // A ball, not a point: L² - aL + 0.4r² = 0.
+    (a + (a * a - 1.6 * radius * radius).sqrt()) / 2.0
+}
+
+/// An sRGB hex color of `hue` (0..1 around the wheel), as saturated as a lacquered toy.
+fn hue_hex(hue: f32) -> u32 {
+    let (s, v) = (0.78f32, 0.86f32);
+    let h = (hue.fract() * 6.0).max(0.0);
+    let i = h.floor() as u32 % 6;
+    let f = h - h.floor();
+    let (p, q, t) = (v * (1.0 - s), v * (1.0 - s * f), v * (1.0 - s * (1.0 - f)));
+    let (r, g, b) = match i {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (byte(r) << 16) | (byte(g) << 8) | byte(b)
+}
+
+/// Fifteen steel bobs under an A-frame gantry, swinging 20, 21 … 34 times a minute (lengths
+/// from 2.2 m down to 0.77 m). Let go together, they fall out of step into traveling waves
+/// and snakes, swing in two alternate rows at half a minute and are back in step at a
+/// minute (`tests/pendulums.rs`).
+fn pendulum_wave(y: &mut Yard, base: DVec3) {
+    use art::pendulums::{self as pend, WAVE_EYE_DROP, WAVE_WIRE_SPREAD};
+    let (height, pitch) = (3.25f32, 0.27f32);
+    let first_x = -pitch * (WAVE_BOBS - 1) as f32 * 0.5;
+    let (half_span, splay) = (2.3f32, 1.1f32);
+    let frame = y.parts(
+        "wave_frame",
+        [Mat::Yellow, Mat::Steel, Mat::Concrete],
+        || {
+            let f = pend::wave_frame(height, half_span, splay, WAVE_BOBS, first_x, pitch);
+            [f.painted, f.steel, f.concrete]
+        },
+    );
+    y.scenery(base, Quat::IDENTITY, frame);
+    for sx in [-1.0, 1.0] {
+        for sz in [-1.0, 1.0] {
+            y.block(
+                base + DVec3::new(sx * half_span as f64, 0.1, sz * splay as f64),
+                Vec3::new(0.24, 0.1, 0.24),
+            );
+        }
+    }
+    let pivot_y = (height - WAVE_EYE_DROP) as f64;
+    let turn = Quat::from_rotation_x(WAVE_AMPLITUDE);
+    for k in 0..WAVE_BOBS {
+        let length = wave_length(
+            WAVE_FIRST_SWINGS + k,
+            WAVE_CYCLE_SECS,
+            WAVE_BOB_RADIUS,
+            WAVE_AMPLITUDE,
+        );
+        let pivot = base + DVec3::new((first_x + pitch * k as f32) as f64, pivot_y, 0.0);
+        let center = pivot + (turn * Vec3::new(0.0, -length, 0.0)).as_dvec3();
+        let color = hue_hex(k as f32 / WAVE_BOBS as f32 * 0.82);
+        let parts = y.parts(
+            &format!("wave_bob/{k}"),
+            [Mat::Lacquer(color), Mat::Dark],
+            || {
+                let b = pend::bob(WAVE_BOB_RADIUS, length, Vec3::X, WAVE_WIRE_SPREAD);
+                [b.ball, b.wire]
+            },
+        );
+        let c = Collider::sphere(WAVE_BOB_RADIUS)
+            .with_surface(y.metal)
+            .with_density(7800.0);
+        let bob = y.body(center, turn, c, parts);
+        y.name(bob, &format!("Pendulum wave bob {}", k + 1));
+        let hinge = JointKind::Revolute {
+            axis: Vec3::X,
+            limits: None,
+            motor: None,
+        };
+        y.joint(hinge, bob, None, pivot);
+    }
+}
+
+/// The Newton's cradle's balls: radius, pivot to center, and the gap between two at rest
+/// (more than the solver's 2 mm contact prediction, so resting balls don't touch).
+const CRADLE_BALL: f32 = 0.1;
+const CRADLE_LENGTH: f32 = 0.8;
+const CRADLE_GAP: f32 = 0.003;
+
+/// A Newton's cradle on a concrete plinth: five 20 cm steel balls on 80 cm wires. The first
+/// is let go 34° out and the blow passes down the row: the middle three stay put and the
+/// last flies out, every swing. The balls step in fine substeps ([`crate::FineSteps`]),
+/// without which the row swings off as one lump (`tests/pendulums.rs`).
+fn newtons_cradle(y: &mut Yard, base: DVec3) {
+    use art::pendulums as pend;
+    let plinth = Vec3::new(1.0, 0.5, 0.6);
+    let block = y.block(base + DVec3::Y * plinth.y as f64, plinth);
+    let stone = y.parts("cradle_plinth", [Mat::Concrete], || {
+        let mut b = MeshBuilder::new();
+        b.rounded_box(plinth, 0.03, 2);
+        [b.build()]
+    });
+    y.dress(block, stone);
+    let top = base + DVec3::Y * (plinth.y * 2.0) as f64;
+    // Board 8.2 cm, the balls' bottoms 8 cm above it.
+    let pivot_y = 0.082 + 0.08 + CRADLE_BALL + CRADLE_LENGTH;
+    let (half_x, half_z, bar_z) = (0.85f32, 0.42f32, 0.34f32);
+    let frame = y.parts(
+        "cradle_frame",
+        [Mat::Lacquer(0x15161a), Mat::Chrome],
+        || {
+            let c = pend::cradle(half_x, half_z, bar_z, pivot_y);
+            [c.base, c.chrome]
+        },
+    );
+    y.scenery(top, Quat::IDENTITY, frame);
+    let steel = {
+        let mut table = y.world.get_resource_or_init::<SurfaceMaterials>();
+        match table.id("hardened_steel") {
+            Some(id) => id,
+            None => table.add(SurfaceMaterial {
+                name: "hardened_steel".into(),
+                friction: 0.05,
+                restitution: 0.97,
+                density: 7800.0,
+                footstep_sound: "footstep.metal".into(),
+                impact_effect: "impact.metal".into(),
+                ..Default::default()
+            }),
+        }
+    };
+    let pitch = 2.0 * CRADLE_BALL + CRADLE_GAP;
+    for i in 0..5 {
+        let pivot = top + DVec3::new(((i as f32 - 2.0) * pitch) as f64, pivot_y as f64, 0.0);
+        // The first ball pulled out toward -x.
+        let angle = if i == 0 { -0.6f32 } else { 0.0 };
+        let turn = Quat::from_rotation_z(angle);
+        let center = pivot + (turn * Vec3::new(0.0, -CRADLE_LENGTH, 0.0)).as_dvec3();
+        let parts = y.parts("cradle_ball", [Mat::Chrome, Mat::Dark], || {
+            let b = pend::bob(CRADLE_BALL, CRADLE_LENGTH, Vec3::Z, bar_z);
+            [b.ball, b.wire]
+        });
+        let c = Collider::sphere(CRADLE_BALL)
+            .with_surface(steel)
+            .with_density(7800.0);
+        let ball = y.body(center, turn, c, parts);
+        y.world.entity_mut(ball).insert(crate::FineSteps::default());
+        y.name(ball, &format!("Newton's cradle ball {}", i + 1));
+        let hinge = JointKind::Revolute {
+            axis: Vec3::Z,
+            limits: None,
+            motor: None,
+        };
+        y.joint(hinge, ball, None, pivot);
     }
 }
 

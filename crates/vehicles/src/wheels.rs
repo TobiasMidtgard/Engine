@@ -283,16 +283,16 @@ pub fn set_rolling(world: &mut World, e: Entity, forward_speed: f32) {
     }
 }
 
-/// What a ray down from a wheel mount found.
-struct GroundHit {
-    distance: f32,
-    point: DVec3,
+/// What a ray down from a wheel mount (or along an exhaust) found.
+pub(crate) struct GroundHit {
+    pub distance: f32,
+    pub point: DVec3,
     normal: Vec3,
     surface: SurfaceId,
     entity: Option<Entity>,
 }
 
-fn cast_down(
+pub(crate) fn cast_down(
     queries: &PhysicsQueries,
     ground: Option<&Ground>,
     origin: DVec3,

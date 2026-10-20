@@ -10,10 +10,14 @@
 // blends. The color box is built in a compressed space (c / (1 + luma)) so very bright pixels
 // don't blow it open, while filtering and blending stay linear so small bright things (the
 // sun's disk, a lamp's core) keep their energy and still bloom.
+//
+// Thin transparent things (snowflakes, rain, sparks) write no depth or motion and are outliers
+// in their neighborhood, so the clipped history would erase them: where the reactive mask
+// (taa_reactive.wgsl) marks them, the resolve keeps most of this frame's own pixel.
 
 struct TaaParams {
     // x: history valid (0/1), y: frames accumulated since the last reset, z: minimum weight of
-    // the current frame, w: unused
+    // the current frame, w: strength of the reactive mask (0: ignored)
     params: vec4<f32>,
 };
 
@@ -22,6 +26,7 @@ struct TaaParams {
 @group(1) @binding(2) var motion_tex: texture_2d<f32>;
 @group(1) @binding(3) var depth_tex: texture_depth_2d;   // final scene depth (reverse-Z)
 @group(1) @binding(4) var<uniform> taa: TaaParams;
+@group(1) @binding(5) var reactive_tex: texture_2d<f32>;
 
 @vertex
 fn vs_taa(@builtin(vertex_index) i: u32) -> FullscreenOut {
@@ -149,23 +154,36 @@ fn fs_taa(in: FullscreenOut) -> @location(0) vec4<f32> {
         }
     }
     filtered /= filter_weight;
+    let mask = saturate(taa.params.w * textureLoad(reactive_tex, px, 0).r);
+    let center = load_current(px, size);
     if (taa.params.x < 0.5) {
-        return vec4<f32>(filtered, 1.0);
+        return vec4<f32>(mix(filtered, center, mask), 1.0);
     }
     let motion = pixel_motion(nearest, size);
     let history_uv = uv - motion;
     if (any(history_uv < vec2<f32>(0.0)) || any(history_uv > vec2<f32>(1.0))) {
-        return vec4<f32>(filtered, 1.0);
+        return vec4<f32>(mix(filtered, center, mask), 1.0);
     }
     let mean = m1 / 9.0;
     let sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3<f32>(0.0)));
+    let history = rgb_to_ycocg(compress(sample_history(history_uv, sizef)));
+    // A thin transparent thing that stays put (a wire fence) is in the history already, and TAA
+    // smooths it as anything else; one that moved since (a falling flake) isn't: the history
+    // there holds what is behind it.
+    var reactive = 0.0;
+    if (mask > 0.0) {
+        let own = rgb_to_ycocg(compress(center));
+        let gap = abs(history.x - own.x) / (abs(own.x - mean.x) + 1e-3);
+        reactive = mask * saturate(2.5 * gap - 1.0);
+    }
+    // A reactive pixel is its own sample: the filter would spread a one-pixel flake thin.
+    filtered = mix(filtered, center, reactive);
     let gamma = 1.25;
     // The box can't hold the current sample if that is an outlier (a sub-pixel highlight):
     // widen it to include the filtered value.
     let current = rgb_to_ycocg(compress(filtered));
     let lo = min(mean - gamma * sigma, current);
     let hi = max(mean + gamma * sigma, current);
-    let history = rgb_to_ycocg(compress(sample_history(history_uv, sizef)));
     let clipped = decompress(ycocg_to_rgb(clip_to_box(history, lo, hi)));
 
     // Accumulate quickly after a reset, then keep a tenth of the current frame. Fast motion
@@ -174,6 +192,7 @@ fn fs_taa(in: FullscreenOut) -> @location(0) vec4<f32> {
     let speed = length(motion * sizef);
     var alpha = max(1.0 / (frames + 1.0), taa.params.z);
     alpha = mix(alpha, max(alpha, 0.25), saturate(speed / 32.0));
+    alpha = max(alpha, 0.85 * reactive);
     let result = mix(clipped, filtered, alpha);
     return vec4<f32>(max(result, vec3<f32>(0.0)), 1.0);
 }

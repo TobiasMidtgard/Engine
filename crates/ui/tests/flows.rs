@@ -1020,3 +1020,186 @@ fn the_skills_api_learns_and_grants_points() {
     let tree = api(&mut app, "skills.tree", json!({}));
     assert!(tree.to_string().contains("t_overclock"));
 }
+
+fn crafting(app: &mut App) -> engine_ui::crafting::CraftingScreen {
+    let mut q = app.world.query::<&engine_ui::crafting::CraftingScreen>();
+    q.single(&app.world).unwrap().clone()
+}
+
+#[test]
+fn crafting_three_brews_takes_time_then_moves_items() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "crafting", "instant": true}),
+    );
+    app.update_n(3);
+    // The alchemy bench opens on the first brew the bag can make.
+    assert_eq!(
+        crafting(&mut app).selected.as_deref(),
+        Some("r_potion_health")
+    );
+    let (herbs, brews) = (
+        player(&mut app).count_of("herb"),
+        player(&mut app).count_of("potion_health"),
+    );
+    api(&mut app, "ui.click", json!({"id": "craft_more"}));
+    app.update_n(2);
+    api(&mut app, "ui.click", json!({"id": "craft_more"}));
+    app.update_n(2);
+    assert_eq!(crafting(&mut app).quantity, 3);
+    let since = next_event(&mut app);
+    api(&mut app, "ui.click", json!({"id": "craft_go"}));
+    app.update_n(2);
+    // Nothing leaves the bag until the craft finishes.
+    assert!(crafting(&mut app).job.is_some());
+    assert_eq!(player(&mut app).count_of("herb"), herbs);
+    app.update_n(160);
+    assert!(crafting(&mut app).job.is_none());
+    assert_eq!(player(&mut app).count_of("herb"), herbs - 9);
+    assert_eq!(player(&mut app).count_of("potion_health"), brews + 6);
+    assert!(actions_since(&mut app, since).contains(&"craft.made:r_potion_health".to_string()));
+}
+
+#[test]
+fn a_short_or_unknown_recipe_cannot_be_crafted_until_learned() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "crafting", "station": "smithing", "instant": true}),
+    );
+    app.update_n(3);
+    assert_eq!(
+        crafting(&mut app).station,
+        engine_ui::crafting::Station::Smithing
+    );
+    // The sword needs an Oak Log the bag doesn't have.
+    api(&mut app, "ui.click", json!({"id": "recipe:r_sword"}));
+    app.update_n(2);
+    assert_eq!(crafting(&mut app).selected.as_deref(), Some("r_sword"));
+    assert!(call_api(&mut app.world, "ui.click", json!({"id": "craft_go"})).is_err());
+    press(&mut app, KeyCode::Space);
+    app.update_n(5);
+    assert!(crafting(&mut app).job.is_none());
+    // Tinkering, one station along: the rail rifle is unknown until its schematic is learned.
+    api(&mut app, "ui.click", json!({"id": "craft.station:2"}));
+    app.update_n(2);
+    assert_eq!(
+        crafting(&mut app).station,
+        engine_ui::crafting::Station::Tinkering
+    );
+    assert!(call_api(&mut app.world, "craft.make", json!({"id": "r_rifle"})).is_err());
+    let v = api(&mut app, "craft.learn", json!({"id": "r_rifle"}));
+    assert_eq!(v["learned"], true);
+    // Learned, the bag holds just enough for one.
+    api(&mut app, "craft.make", json!({"id": "r_rifle"}));
+    assert_eq!(player(&mut app).count_of("rifle"), 1);
+    let err = call_api(&mut app.world, "craft.make", json!({"id": "r_rifle"})).unwrap_err();
+    assert!(err.contains("Missing"), "{err}");
+    // The API crafts at once.
+    let picks = player(&mut app).count_of("lockpick");
+    api(
+        &mut app,
+        "craft.make",
+        json!({"id": "r_lockpick", "count": 2}),
+    );
+    assert_eq!(player(&mut app).count_of("lockpick"), picks + 4);
+}
+
+fn saves(app: &mut App) -> engine_ui::saves::SaveSlots {
+    app.world.resource::<engine_ui::saves::SaveSlots>().clone()
+}
+
+fn saves_selected(app: &mut App) -> String {
+    let mut q = app.world.query::<&engine_ui::saves::SavesScreen>();
+    q.single(&app.world)
+        .unwrap()
+        .selected
+        .clone()
+        .unwrap_or_default()
+}
+
+#[test]
+fn loading_a_save_from_pause_asks_first_then_sends_game_load() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "pause", "instant": true}),
+    );
+    app.update_n(2);
+    api(&mut app, "ui.click", json!({"id": "pause_load"}));
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"saves".to_string()));
+    // Newest first: the autosave.
+    assert_eq!(saves_selected(&mut app), "auto");
+    api(&mut app, "ui.click", json!({"id": "save:save_3"}));
+    app.update_n(2);
+    assert_eq!(saves_selected(&mut app), "save_3");
+    let since = next_event(&mut app);
+    api(&mut app, "ui.click", json!({"id": "saves_go"}));
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"confirm".to_string()));
+    assert!(!actions_since(&mut app, since).contains(&"game.load:save_3".to_string()));
+    api(&mut app, "ui.click", json!({"id": "confirm_ok"}));
+    app.update_n(30);
+    assert!(actions_since(&mut app, since).contains(&"game.load:save_3".to_string()));
+    let screens = open(&mut app);
+    assert!(
+        !screens.contains(&"saves".to_string()) && !screens.contains(&"pause".to_string()),
+        "{screens:?}"
+    );
+}
+
+#[test]
+fn saving_new_over_and_deleting_slots() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "saves", "mode": "save", "instant": true}),
+    );
+    app.update_n(3);
+    let n = saves(&mut app).slots.len();
+    // Save mode opens on a new save; Save here writes the game as it is now.
+    let since = next_event(&mut app);
+    api(&mut app, "ui.click", json!({"id": "saves_go"}));
+    app.update_n(3);
+    let s = saves(&mut app);
+    assert_eq!(s.slots.len(), n + 1);
+    let new = s.get("save_5").expect("a new slot");
+    assert_eq!(new.location, "Hollow Reach");
+    assert_eq!(new.chapter, "The Silent Relay");
+    assert_eq!(new.playtime_s, 45_840);
+    assert!(actions_since(&mut app, since).contains(&"game.save:save_5".to_string()));
+    // Saving over a named slot keeps its name and asks first.
+    api(&mut app, "ui.click", json!({"id": "save:save_4"}));
+    app.update_n(2);
+    api(&mut app, "ui.click", json!({"id": "saves_go"}));
+    app.update_n(3);
+    assert_eq!(
+        saves(&mut app).get("save_4").unwrap().location,
+        "Frostspine Pass"
+    );
+    api(&mut app, "ui.click", json!({"id": "confirm_ok"}));
+    app.update_n(3);
+    let s4 = saves(&mut app).get("save_4").cloned().unwrap();
+    assert_eq!(
+        (s4.location.as_str(), s4.name.as_str()),
+        ("Hollow Reach", "Summit")
+    );
+    // Delete, after a confirm.
+    api(&mut app, "ui.click", json!({"id": "save:save_2"}));
+    app.update_n(2);
+    api(&mut app, "ui.click", json!({"id": "saves_delete"}));
+    app.update_n(3);
+    api(&mut app, "ui.click", json!({"id": "confirm_ok"}));
+    app.update_n(3);
+    assert!(saves(&mut app).get("save_2").is_none());
+    assert!(actions_since(&mut app, since).contains(&"game.delete_save:save_2".to_string()));
+    // The deleted slot's selection moves on, and the screen stays open.
+    assert_ne!(saves_selected(&mut app), "save_2");
+    assert!(open(&mut app).contains(&"saves".to_string()));
+}

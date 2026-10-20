@@ -20,7 +20,10 @@ use crate::debris::{
 use crate::fracture::{BreakLook, ConvexPoly};
 use crate::material::{DestructibleMaterial, DestructionMaterials, MaterialProps};
 use crate::meshing::MeshBuilder;
-use crate::structure::{Fracturable, Obb, PieceState, StructuralPiece, piece_colors, shatter};
+use crate::structure::{
+    Fracturable, Obb, PieceState, StructuralPiece, crate_boards, piece_colors, shatter,
+    shatter_along_grain,
+};
 use crate::sync::{VoxelChunk, WallTile};
 use crate::voxel::{VoxelOp, VoxelState, VoxelVolume, box_sdf, capsule_sdf};
 use crate::wall::{DestructibleWall, LostCell, WallHit, WallLook, WallState, mesh_cells};
@@ -28,6 +31,9 @@ use crate::{DestructionSettings, DestructionStats};
 
 /// Smallest wall chunk (m³) a blast throws that bursts on a hard landing.
 const THROWN_SHATTER_M3: f32 = 0.003;
+/// Fastest a blast throws wall pieces, m/s. A breaching charge is packed to cut, not to
+/// launch, so even a thin partition's slabs land within about a dozen metres of the wall.
+const BLAST_THROW_MAX: f32 = 20.0;
 
 /// One piece of damage to apply.
 #[derive(Debug, Clone)]
@@ -1096,7 +1102,7 @@ fn blast(
         let speed = ((energy / (4.0 * std::f32::consts::PI * d * d))
             / (props.density * state.grid.thickness))
             .sqrt()
-            .clamp(2.0, 35.0);
+            .clamp(2.0, BLAST_THROW_MAX);
         let wall = wall.clone();
         finish_wall_hit(ctx, &gt, &wall, &mut state, &hit, Some((local, speed)));
     }
@@ -1383,17 +1389,23 @@ fn dig(ctx: &mut Ctx, targets: &mut Targets, edit: &TerrainEdit, surfaces: &Surf
             EditOp::Smooth { strength } => VoxelOp::Smooth(strength),
             EditOp::Paint => VoxelOp::Paint(material),
         };
+        // Chips of what was dug out: soil under the grass, rock deeper in.
+        let dug = match op {
+            VoxelOp::Remove => state.material_in(lo, hi, &sdf),
+            _ => None,
+        }
+        .unwrap_or(volume.material);
         let removed = state.edit(lo, hi, sdf, op);
         if removed > 0.0 {
             ctx.stats.voxels_removed_m3 += removed;
-            let props: MaterialProps = ctx.table.get(volume.material);
+            let props: MaterialProps = ctx.table.get(dug);
             let at = edit.center;
             ctx.chips(
                 at,
                 Vec3::Y * 2.0,
                 2.0,
                 ((removed * 20.0) as usize).clamp(1, 8),
-                volume.material,
+                dug,
                 props.chip_size,
             );
             ctx.dust(
@@ -1433,6 +1445,11 @@ pub(crate) fn break_piece(
     ctx.stats.pieces_broken += 1;
 }
 
+/// Wood this many times longer than it is thin breaks along its grain.
+const GRAIN_ASPECT: f32 = 2.5;
+/// How many times longer than wide its splinters run.
+const SPLINTER_STRETCH: f32 = 4.0;
+
 /// Shatter a fracturable into Voronoi pieces around `impact` (local) and remove it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn break_fracturable(
@@ -1448,9 +1465,27 @@ pub(crate) fn break_fracturable(
 ) {
     let props = ctx.table.get(f.material);
     let (ext, int) = piece_colors(f.color, f.material, ctx.table, ctx.textured);
-    let parts = shatter(&f.shape.poly(), impact, f.pieces, ctx.rng);
+    let half = f.shape.half_extents();
+    // Long timber (posts, beams, planks) splits along its grain into splinters.
+    let parts = if let crate::structure::FractureShape::Crate { half_extents, wall } = f.shape {
+        crate_boards(half_extents, wall, ctx.rng)
+    } else if f.material == DestructibleMaterial::Wood
+        && half.max_element() >= GRAIN_ASPECT * half.min_element()
+    {
+        let grain = Vec3::AXES[half.max_position()];
+        shatter_along_grain(
+            &f.shape.poly(),
+            impact,
+            f.pieces,
+            grain,
+            SPLINTER_STRETCH,
+            ctx.rng,
+        )
+    } else {
+        shatter(&f.shape.poly(), impact, f.pieces, ctx.rng)
+    };
     let rot = gt.rotation();
-    let size = f.shape.half_extents().max_element() * 2.0;
+    let size = half.max_element() * 2.0;
     let look = BreakLook::of(f.material, ext, int);
     for (poly, c, vol) in parts {
         let (outside, inside) = poly.broken_meshes(c, &look, ctx.rng.next_u64());
