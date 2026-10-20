@@ -30,7 +30,7 @@ pub(crate) struct AtmosphereLuts {
 
 /// The planet's size, scale heights, ground, sun size, the air's four coefficients and its
 /// anisotropy (RGB).
-const KEY_LEN: usize = 8 + 5 * 3;
+const KEY_LEN: usize = 8 + 5 * 3 + 1;
 
 struct LutPass {
     pipeline: wgpu::ComputePipeline,
@@ -232,6 +232,7 @@ fn table_key(uniform: &FrameUniform) -> [f32; KEY_LEN] {
     for (i, c) in air.iter().enumerate() {
         key[8 + 3 * i..11 + 3 * i].copy_from_slice(&c[..3]);
     }
+    key[KEY_LEN - 1] = uniform.air_mie_g[3];
     key
 }
 
@@ -257,5 +258,8 @@ mod tests {
                 assert_ne!(table_key(&changed), table_key(&base));
             }
         }
+        let mut peak = base;
+        peak.air_mie_g[3] = 1.0;
+        assert_ne!(table_key(&peak), table_key(&base));
     }
 }

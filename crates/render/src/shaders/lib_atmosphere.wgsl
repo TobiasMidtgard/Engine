@@ -136,6 +136,27 @@ fn phase_mie_rgb(cos_t: f32, g: vec3<f32>) -> vec3<f32> {
         / ((2.0 + g2) * pow(max(1.0 + g2 - 2.0 * g * cos_t, vec3<f32>(1e-4)), vec3<f32>(1.5)));
 }
 
+// The share of the air's Mie scattering in its forward peak, per channel
+// (`Atmosphere::mie_forward_peak` times g²): light in it passes straight on, so frame.air_mie and
+// frame.air_mie_extinction leave it out (delta-Eddington).
+fn air_mie_peak() -> vec3<f32> {
+    let g = frame.air_mie_g.rgb;
+    return frame.air_mie_g.w * g * g;
+}
+
+// The anisotropy of the Mie lobe left without the forward peak, (g - f) / (1 - f): the phase of
+// the light the air scatters on (frame.air_mie).
+fn air_mie_g_scattered() -> vec3<f32> {
+    let f = air_mie_peak();
+    return (frame.air_mie_g.rgb - f) / max(vec3<f32>(1.0) - f, vec3<f32>(1e-3));
+}
+
+// The Mie phase of sunlight scattered once toward the eye, per unit of frame.air_mie: the whole
+// lobe, so the glow around the sun keeps its forward peak.
+fn phase_mie_sun(cos_t: f32) -> vec3<f32> {
+    return phase_mie_rgb(cos_t, frame.air_mie_g.rgb) / max(vec3<f32>(1.0) - air_mie_peak(), vec3<f32>(1e-3));
+}
+
 fn ozone_density(h: f32) -> f32 {
     return max(0.0, 1.0 - abs(h - 25000.0) / 15000.0);
 }
@@ -377,7 +398,8 @@ fn integrate_atmosphere_spaced(h0: f32, mu: f32, mu_s: f32, nu: f32, t0: f32, t1
     let radius = frame.planet.w;
     let r0 = radius + h0;
     let pr = phase_rayleigh(nu);
-    let pm = phase_mie_rgb(nu, frame.air_mie_g.rgb);
+    let pm = phase_mie_sun(nu);
+    let g_ms = air_mie_g_scattered();
     let len = t1 - t0;
     var prev = 0.0;
     var throughput = vec3<f32>(1.0);
@@ -394,8 +416,8 @@ fn integrate_atmosphere_spaced(h0: f32, mu: f32, mu_s: f32, nu: f32, t0: f32, t1
         let sun = transmittance_to_top(h, mu_s_t) * sun_above_horizon(h, mu_s_t);
         let ms = multiscatter_parts(h, mu_s_t);
         let mu_t = clamp((r0 * mu + tm) / (radius + h), -1.0, 1.0);
-        let g1 = m.mie * frame.air_mie_g.rgb / max(m.mie + m.rayleigh, vec3<f32>(1e-20));
-        let mie_ms = multiscatter_inscatter(ms, mu_t, nu, frame.air_mie_g.rgb, g1);
+        let g1 = m.mie * g_ms / max(m.mie + m.rayleigh, vec3<f32>(1e-20));
+        let mie_ms = multiscatter_inscatter(ms, mu_t, nu, g_ms, g1);
         let s = sun * (m.rayleigh * pr + m.mie * pm) + ms.total * m.rayleigh + mie_ms * m.mie;
         let seg = exp(-m.extinction * dt);
         radiance += throughput * (s - s * seg) / max(m.extinction, vec3<f32>(1e-12));
