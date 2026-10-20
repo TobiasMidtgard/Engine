@@ -254,6 +254,58 @@ fn debris_piles_up_on_resting_chunks_and_falls_when_they_go() {
 }
 
 #[test]
+fn digging_throws_chips_of_the_ground_it_cuts() {
+    let mut app = app();
+    // A 6 m block of rock under a metre of soil.
+    let ground = VoxelVolume {
+        dims: [24, 24, 16],
+        voxel_size: 0.25,
+        shape: VoxelShape::Solid,
+        topsoil: Some(DestructibleMaterial::Dirt),
+        topsoil_depth: 1.0,
+        grass: None,
+        ..VoxelVolume::default()
+    };
+    app.world.spawn((Transform::default(), ground));
+    app.update();
+    let dig = |app: &mut App, at: DVec3| {
+        app.world.write_message(TerrainEdit {
+            center: at,
+            shape: EditShape::Sphere { radius: 0.5 },
+            op: EditOp::Remove,
+            surface: None,
+            source: None,
+        });
+        app.update();
+        let mut q = app.world.query::<&Debris>();
+        let chips: Vec<DestructibleMaterial> = q
+            .iter(&app.world)
+            .filter(|d| d.chip)
+            .map(|d| d.material)
+            .collect();
+        for e in app
+            .world
+            .query_filtered::<Entity, With<Debris>>()
+            .iter(&app.world)
+            .collect::<Vec<_>>()
+        {
+            app.world.despawn(e);
+        }
+        chips
+    };
+    let top = dig(&mut app, DVec3::new(0.0, 5.9, 0.0));
+    assert!(
+        !top.is_empty() && top.iter().all(|m| *m == DestructibleMaterial::Dirt),
+        "a hole in the topsoil throws soil: {top:?}"
+    );
+    let side = dig(&mut app, DVec3::new(0.0, 2.5, 2.0));
+    assert!(
+        !side.is_empty() && side.iter().all(|m| *m == DestructibleMaterial::Rock),
+        "a hole in the rock face below throws rock: {side:?}"
+    );
+}
+
+#[test]
 fn rock_debris_lands_on_ledges_and_slides_off_rock_walls() {
     let mut app = app();
     // A 6 m block of rock, 6 m tall: its front half is cut back to a ledge 3 m up, so a 3 m
@@ -666,30 +718,35 @@ fn a_floor_is_shot_up_through_from_below_and_blown_open_from_above() {
 }
 
 #[test]
-fn a_tipped_thermite_cut_drops_the_plate_clear_of_the_ladder_side() {
+fn a_heaved_thermite_cut_lands_the_plate_on_the_deck_beside_the_hatch() {
     let mut app = app();
-    // Flat at y = 3, local +y toward world -z: the ladder side is the back (z < 0).
+    // A steel hatch at y = 3 over x -0.5..0.5, and the roof deck beside it over x 0.5..2.5.
     let steel = spawn_flat(
         &mut app,
         DestructibleWall::steel_hatch(1.0, 1.0),
         DVec3::new(0.0, 3.0, 0.5),
     );
+    spawn_flat(
+        &mut app,
+        DestructibleWall::floor(2.0, 1.0),
+        DVec3::new(1.5, 3.0, 0.5),
+    );
     app.update();
     let mut c = BreachCharge::thermite(steel, Vec2::new(0.0, 0.5), [0.8, 0.8])
-        .with_tip(Vec2::new(0.0, -2.5));
+        .with_tip(Vec3::new(2.0, 0.0, 3.5));
     c.fuse_secs = 0.1;
     app.world.spawn(c);
-    run_secs(&mut app, 4.4);
+    run_secs(&mut app, 6.0);
     let mut q = app.world.query::<(&Debris, &Transform)>();
     let plate: Vec<DVec3> = q
         .iter(&app.world)
         .filter(|(d, _)| !d.chip && d.material == DestructibleMaterial::Metal)
         .map(|(_, t)| t.translation)
         .collect();
-    assert!(!plate.is_empty(), "the cut plate fell out");
+    assert!(!plate.is_empty(), "the cut plate came out");
     assert!(
-        plate.iter().all(|p| p.z > 0.4 || p.y > 3.2),
-        "the plate fell forward, out of the ladder side of the hatch: {plate:?}"
+        plate.iter().all(|p| p.x > 0.5 && p.y > 3.0 && p.y < 3.3),
+        "the plate lies on the deck beside the hatch, not in the room below: {plate:?}"
     );
 }
 

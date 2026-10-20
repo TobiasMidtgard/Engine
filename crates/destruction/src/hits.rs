@@ -63,8 +63,9 @@ pub enum Hit {
         max: Vec2,
         front: bool,
         melt: bool,
-        /// Sideways velocity (wall-local, m/s) for a panel the cut frees.
-        tip: Vec2,
+        /// Velocity (wall-local, m/s; +Z is out of the front) a panel the cut frees leaves
+        /// with, in place of the push away from the charge. Zero keeps the push.
+        tip: Vec3,
     },
     /// Dig, fill, smooth or paint voxel volumes (from `TerrainEdit`).
     Dig(TerrainEdit),
@@ -1246,7 +1247,7 @@ fn cut(
     max: Vec2,
     front: bool,
     melt: bool,
-    tip: Vec2,
+    tip: Vec3,
 ) {
     let Ok((_, gt, w, mut state)) = targets.walls.get_mut(wall) else {
         return;
@@ -1307,17 +1308,13 @@ fn cut(
             .sum::<Vec2>()
             / n;
         let push = Some((Vec3::new(c.x, c.y, side * t * 3.0), 2.0));
-        wall_chunks(
-            ctx,
-            &gt,
-            &w,
-            &state,
-            &island,
-            push,
-            3,
-            (island.len() / 2).max(1),
-            true,
-        );
+        // A cut steel plate comes out whole; other panels break in two.
+        let per = if w.material == DestructibleMaterial::Metal {
+            island.len()
+        } else {
+            (island.len() / 2).max(1)
+        };
+        wall_chunks(ctx, &gt, &w, &state, &island, push, 3, per, true);
         let at = gt.transform_point(DVec3::new(c.x as f64, c.y as f64, 0.0));
         ctx.dust(
             at,
@@ -1331,9 +1328,11 @@ fn cut(
         ctx.noise_events.push((at, 50.0));
         ctx.stats.collapses += 1;
     }
-    let drift = gt.rotation() * tip.extend(0.0);
-    for item in &mut ctx.pending.items[first_piece..] {
-        item.velocity += drift;
+    if tip != Vec3::ZERO {
+        let throw = gt.rotation() * tip;
+        for item in &mut ctx.pending.items[first_piece..] {
+            item.velocity = throw;
+        }
     }
 }
 
@@ -1384,17 +1383,23 @@ fn dig(ctx: &mut Ctx, targets: &mut Targets, edit: &TerrainEdit, surfaces: &Surf
             EditOp::Smooth { strength } => VoxelOp::Smooth(strength),
             EditOp::Paint => VoxelOp::Paint(material),
         };
+        // Chips of what was dug out: soil under the grass, rock deeper in.
+        let dug = match op {
+            VoxelOp::Remove => state.material_in(lo, hi, &sdf),
+            _ => None,
+        }
+        .unwrap_or(volume.material);
         let removed = state.edit(lo, hi, sdf, op);
         if removed > 0.0 {
             ctx.stats.voxels_removed_m3 += removed;
-            let props: MaterialProps = ctx.table.get(volume.material);
+            let props: MaterialProps = ctx.table.get(dug);
             let at = edit.center;
             ctx.chips(
                 at,
                 Vec3::Y * 2.0,
                 2.0,
                 ((removed * 20.0) as usize).clamp(1, 8),
-                volume.material,
+                dug,
                 props.chip_size,
             );
             ctx.dust(
