@@ -509,29 +509,6 @@ pub fn spawn_woods(commands: &mut Commands, lib: &Library, land: &Landscape, rng
                 solid(commands, at, 0.35 * scale, 5.0 * scale);
             }
             count += 1;
-            // Deep in the woods a second tree shares the cell, so the canopy closes. (Its own
-            // rng, so the rest of the valley's layout stays put.)
-            if wood > 0.6 {
-                let mut extra = Rng::new(0x3f0d ^ ((i as u64) << 20) ^ j as u64);
-                if extra.chance(((wood - 0.6) * 2.0).min(0.8) as f32) {
-                    let (ex, ez) = (
-                        x + extra.range(-0.5, 0.5) as f64 * spacing,
-                        z + extra.range(-0.5, 0.5) as f64 * spacing,
-                    );
-                    if land.road_weight(ex, ez) == 0.0 && (!in_zone(ex, ez, 12.0) || rim) {
-                        let t = pick_tree(lib, kind, &mut extra);
-                        let at = place(land, ex, ez, 0.1);
-                        spawn_tree(
-                            commands,
-                            t,
-                            at,
-                            extra.range(0.0, TAU),
-                            extra.range(0.7, 1.2),
-                        );
-                        count += 1;
-                    }
-                }
-            }
             // Bushes along the wood edges.
             if wood < 0.6 && rng.chance(0.35) {
                 let a = rng.range(0.0, TAU) as f64;
