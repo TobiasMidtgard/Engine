@@ -110,6 +110,20 @@ pub struct SkinPlane {
     pub margin: f32,
 }
 
+/// One-sided contact with a capsule riding a frame, for hair lying on the body it was grown
+/// over: particle `p` stays `radius` meters or more from the segment `a`–`b` (frame space), so
+/// it may lift off a shoulder but not sink into it. A particle more than `reach` inside is left
+/// alone (it came round from elsewhere, through the arm, say).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkinCapsule {
+    pub p: u32,
+    pub frame: u16,
+    pub a: Vec3,
+    pub b: Vec3,
+    pub radius: f32,
+    pub reach: f32,
+}
+
 /// Shape matching (Müller et al. 2005): particles are pulled toward their rest shape, rotated
 /// and translated to best fit where they are now. Gives jelly its wobble and its spring back.
 #[derive(Debug, Clone, PartialEq)]
@@ -271,6 +285,7 @@ pub struct Sim {
     pub pins: Vec<Pin>,
     pub goals: Vec<Goal>,
     pub skin_planes: Vec<SkinPlane>,
+    pub skin_capsules: Vec<SkinCapsule>,
     pub shapes: Vec<ShapeMatch>,
     pub frames: Vec<Frame>,
     /// Triangles that feel the air (cloth).
@@ -846,6 +861,21 @@ impl Sim {
             let d = (pos[i] - fp - fr * c.point).dot(n) - c.margin;
             if d < 0.0 {
                 pos[i] -= n * d;
+            }
+        }
+        for c in &self.skin_capsules {
+            let i = c.p as usize;
+            if w[i] == 0.0 {
+                continue;
+            }
+            let (fp, fr) = self.frames[c.frame as usize].pose(t1);
+            let (a, ab) = (fp + fr * c.a, fr * (c.b - c.a));
+            let t = ((pos[i] - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+            let off = pos[i] - a - ab * t;
+            let dist = off.length();
+            let d = dist - c.radius;
+            if d < 0.0 && d > -c.reach && dist > 1e-6 {
+                pos[i] -= off * (d / dist);
             }
         }
         for s in &mut self.shapes {
@@ -1425,6 +1455,38 @@ mod tests {
         }
         let height = (sim.pos[a as usize] - Vec3::Y).dot(tilt * Vec3::Y);
         assert!(height < 0.003, "rests on it: {height}");
+    }
+
+    #[test]
+    fn skin_capsules_keep_particles_off_the_body_but_let_them_lift() {
+        // A strand-end particle dropped onto a turned arm comes to rest on it, sliding round
+        // without being popped off; one already deep inside is left where it is.
+        let mut sim = Sim::new(DVec3::ZERO);
+        let turn = Quat::from_rotation_y(0.7);
+        let f = sim.add_frame(Vec3::new(0.0, 1.0, 0.0), turn);
+        let a = sim.add_particle(Vec3::new(0.01, 1.08, 0.0), 0.001);
+        let deep = sim.add_particle(Vec3::new(0.0, 1.0, 0.0), 0.001);
+        for p in [a, deep] {
+            sim.skin_capsules.push(SkinCapsule {
+                p,
+                frame: f,
+                a: Vec3::new(0.0, 0.0, -0.2),
+                b: Vec3::new(0.0, 0.0, 0.2),
+                radius: 0.05,
+                reach: 0.03,
+            });
+        }
+        for step in 1..=120 {
+            sim.step(1.0 / 60.0, &[]);
+            let off = sim.pos[a as usize] - Vec3::Y;
+            let r = off.reject_from(turn * Vec3::Z).length();
+            assert!(r > 0.05 - 1e-4, "{r} m from the axis");
+            // No faster than falling freely for as long.
+            let speed = sim.vel[a as usize].length();
+            let falling = 9.81 * step as f32 / 60.0;
+            assert!(speed < falling + 0.3, "thrown at {speed} m/s");
+        }
+        assert!(sim.pos[deep as usize].y < 1.0, "the deep one falls through");
     }
 
     #[test]

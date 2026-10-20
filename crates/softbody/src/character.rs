@@ -61,22 +61,29 @@ pub struct BoneColliders {
 }
 
 impl BoneColliders {
-    /// Capsules for a humanoid using the conventional bone names (`pelvis`, `spine`,
+    /// Capsules for a humanoid, under either naming: the conventional names (`pelvis`,
     /// `chest`, `neck`, `head`, `upper_arm_l`, `forearm_l`, `hand_l`, `thigh_l`, `shin_l`,
-    /// `foot_l`, and the `_r` side).
+    /// `foot_l`) or the animation module's (`hips`, `lower_arm_l`, `upper_leg_l`,
+    /// `lower_leg_l`), and the `_r` side. Capsules naming bones the skeleton lacks are skipped.
     pub fn humanoid() -> Self {
         let mut capsules = vec![
             BoneCapsule::capsule("pelvis", "chest", 0.15),
+            BoneCapsule::capsule("hips", "chest", 0.15),
             BoneCapsule::capsule("chest", "neck", 0.16),
             BoneCapsule::capsule("neck", "head", 0.06),
             BoneCapsule::sphere("head", 0.105, [0.0, 0.07, 0.0]),
         ];
         for side in ["l", "r"] {
             let b = |n: &str| format!("{n}_{side}");
-            capsules.push(BoneCapsule::capsule(&b("upper_arm"), &b("forearm"), 0.055));
-            capsules.push(BoneCapsule::capsule(&b("forearm"), &b("hand"), 0.045));
-            capsules.push(BoneCapsule::capsule(&b("thigh"), &b("shin"), 0.08));
-            capsules.push(BoneCapsule::capsule(&b("shin"), &b("foot"), 0.06));
+            for (forearm, thigh, shin) in [
+                ("forearm", "thigh", "shin"),
+                ("lower_arm", "upper_leg", "lower_leg"),
+            ] {
+                capsules.push(BoneCapsule::capsule(&b("upper_arm"), &b(forearm), 0.055));
+                capsules.push(BoneCapsule::capsule(&b(forearm), &b("hand"), 0.045));
+                capsules.push(BoneCapsule::capsule(&b(thigh), &b(shin), 0.08));
+                capsules.push(BoneCapsule::capsule(&b(shin), &b("foot"), 0.06));
+            }
             capsules.push(BoneCapsule::capsule("chest", &b("upper_arm"), 0.07));
         }
         Self {
