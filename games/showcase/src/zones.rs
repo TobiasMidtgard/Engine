@@ -344,8 +344,14 @@ pub const RUNWAY: ([f64; 2], [f64; 2]) = ([780.0, -750.0], [780.0, 450.0]);
 pub struct DemoZones(pub Vec<String>);
 
 /// Viewpoint names that belong to a zone of another name: the fire stops (`fire_front`) are the
-/// field's, the smoke stops (`smoke_range`) the range's.
-const ZONE_ALIASES: [(&str, &str); 2] = [("fire", "field"), ("smoke", "range")];
+/// field's, the smoke stops (`smoke_range`) the range's, and the sunset and night views look
+/// across the plaza, so a tour of them shows its fountain and spheres.
+const ZONE_ALIASES: [(&str, &str); 4] = [
+    ("fire", "field"),
+    ("smoke", "range"),
+    ("sunset", "plaza"),
+    ("night", "plaza"),
+];
 
 /// The zone a viewpoint belongs to: the zone with its key, or whose key and `_` start it
 /// (`paddock_car` is the paddock's), or the zone a [`ZONE_ALIASES`] prefix names.
@@ -1499,6 +1505,8 @@ mod tests {
         assert_eq!(zone_of("fire_front"), Some("field"));
         assert_eq!(zone_of("smoke_fans"), Some("range"));
         assert_eq!(zone_of("firefly"), None);
+        assert_eq!(zone_of("sunset"), Some("plaza"));
+        assert_eq!(zone_of("night"), Some("plaza"));
         let only = |keys: &[&str]| Some(DemoZones(keys.iter().map(|k| k.to_string()).collect()));
         assert_eq!(
             demo_zones(None, Some("paddock_car,yard,paddock")),

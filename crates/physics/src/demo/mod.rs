@@ -21,6 +21,8 @@
 //!   step every minute, behind a Newton's cradle on a plinth passing its blow down the row,
 //! * a pool table: the cue ball breaks a rack of fifteen and they scatter, bank off the cushions
 //!   and drop into the pockets,
+//! * a Galton board: five hundred steel balls pour through twelve rows of pins and pile up in
+//!   seventeen bins in the bell curve printed behind them,
 //! * along the front, three oil drums rolling down a ramp and 47 m along an asphalt runway
 //!   (one triangle mesh) into a sand pit: they stay flat and in their lanes.
 //!
@@ -29,6 +31,7 @@
 
 mod art;
 mod floaters;
+pub mod galton;
 pub mod pool;
 
 pub(crate) use floaters::replay_floaters;
@@ -178,6 +181,15 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 0.5,
     },
     DemoView {
+        key: "physics_galton",
+        name: "A Galton board: five hundred steel balls falling through pins into a bell curve",
+        eye: [10.35, 1.3, -15.85],
+        target: [10.0, 1.22, -18.0],
+        hour: 16.0,
+        station: Some(Station::Galton),
+        warmup_secs: 6.0,
+    },
+    DemoView {
         key: "physics_turntable",
         name: "A turntable carrying crates and a rider",
         eye: [37.0, 6.5, 20.0],
@@ -206,10 +218,11 @@ pub enum Station {
     Pendulums,
     Cradle,
     Pool,
+    Galton,
 }
 
 impl Station {
-    pub const ALL: [Station; 15] = [
+    pub const ALL: [Station; 16] = [
         Station::Tower,
         Station::Pile,
         Station::Dominoes,
@@ -225,6 +238,7 @@ impl Station {
         Station::Pendulums,
         Station::Cradle,
         Station::Pool,
+        Station::Galton,
     ];
 
     /// The station's name in the `physics.proving_ground.replay` API.
@@ -245,6 +259,7 @@ impl Station {
             Station::Pendulums => "pendulums",
             Station::Cradle => "cradle",
             Station::Pool => "pool",
+            Station::Galton => "galton",
         }
     }
 
@@ -266,6 +281,7 @@ impl Station {
             Station::Pendulums => (16.0, -8.5),
             Station::Cradle => (16.0, -4.5),
             Station::Pool => (9.0, -8.5),
+            Station::Galton => (10.0, -18.0),
         };
         DVec3::new(x, 0.0, z)
     }
@@ -284,6 +300,7 @@ impl Station {
             Station::Pendulums => Some(WAVE_CYCLE_SECS as f64),
             Station::Cradle => Some(20.0),
             Station::Pool => Some(25.0),
+            Station::Galton => Some(40.0),
         }
     }
 
@@ -309,6 +326,7 @@ impl Station {
             Station::Pendulums => pendulum_wave(y, base),
             Station::Cradle => newtons_cradle(y, base),
             Station::Pool => pool::pool_table(y, base),
+            Station::Galton => galton::galton_board(y, base),
         }
     }
 }

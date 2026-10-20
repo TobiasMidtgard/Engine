@@ -122,6 +122,35 @@ fn sample_layer(i: u32, wp: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>, variation: 
     return s;
 }
 
+// Ash left by burnt grass: each stalk burns down to a thin pale line of ash where it lay, in
+// every direction. Up to one stalk per 25 cm cell (3×3 cells searched); `px` is a pixel's size
+// on the ground (m): lines thinner than that fade to their average cover instead of flickering.
+fn ash_stalks(p: vec2<f32>, px: f32) -> f32 {
+    let cell = 0.25;
+    let g = p / cell;
+    let base = floor(g);
+    var cover = 0.0;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let c = base + vec2<f32>(f32(x), f32(y));
+            if (hash12(c + vec2<f32>(3.7, 1.9)) > 0.75) { continue; }
+            let o = (c + vec2<f32>(hash12(c), hash12(c + vec2<f32>(41.3, 7.1)))) * cell;
+            let a = hash12(c + vec2<f32>(17.9, 63.2)) * 6.2832;
+            let along = vec2<f32>(cos(a), sin(a));
+            let half = 0.06 + 0.12 * hash12(c + vec2<f32>(5.5, 29.3));
+            let w = 0.004 + 0.006 * hash12(c + vec2<f32>(88.1, 2.4));
+            let q = p - o;
+            let t = clamp(dot(q, along), -half, half);
+            let d = length(q - along * t);
+            let ww = max(w, px * 0.7);
+            // Brighter in places along it, where the ash fell whole.
+            let tone = 0.55 + 0.45 * value_noise2(vec2<f32>(t * 30.0, hash12(c) * 50.0));
+            cover = max(cover, (1.0 - smoothstep(ww * 0.5, ww, d)) * (w / ww) * tone);
+        }
+    }
+    return cover;
+}
+
 @fragment
 fn fs_ground(in: GroundOut) -> @location(0) vec4<f32> {
     let wp = tiling_pos(in.rel).xz;
@@ -195,22 +224,25 @@ fn fs_ground(in: GroundOut) -> @location(0) vec4<f32> {
     let suv = (p + jitter * 0.9 + half) / (2.0 * half);
     let scorch_raw = textureSampleLevel(scorch_map, scorch_sampler, suv, 0.0).r;
     let scorch = smoothstep(0.05, 0.6, scorch_raw * (0.8 + 0.4 * value_noise2(wp * 0.8)));
+    var sheen = 1.0;
     if (scorch > 0.0) {
-        // Ash: thin grey streaks where stalks lay (two crossing directions), in patches.
-        let qa = vec2<f32>(wp.x * 0.8 + wp.y * 0.6, wp.y * 0.8 - wp.x * 0.6);
-        let qb = vec2<f32>(wp.x * 0.26 - wp.y * 0.97, wp.y * 0.26 + wp.x * 0.97);
-        let streak = max(value_noise2(qa * vec2<f32>(7.0, 60.0)), value_noise2(qb * vec2<f32>(6.0, 52.0) + 7.0));
+        // Ash: thin pale lines where stalks lay (every which way), more of them in patches.
         let patch_ash = smoothstep(0.35, 0.8, fbm2(wp * 0.45 + vec2<f32>(4.0, 1.0), 3));
-        let ash = smoothstep(0.76, 0.9, streak) * (0.2 + 0.8 * patch_ash);
+        let px = max(length(dx), length(dy));
+        let ash = ash_stalks(wp, px) * (0.35 + 0.65 * patch_ash);
         var char_c = mix(vec3<f32>(0.016, 0.015, 0.013), vec3<f32>(0.045, 0.042, 0.038), fbm2(wp * 2.7, 3));
         char_c = mix(char_c, vec3<f32>(0.07, 0.067, 0.064), patch_ash * 0.55);
-        char_c = mix(char_c, vec3<f32>(0.15, 0.147, 0.142), ash * 0.7);
+        char_c = mix(char_c, vec3<f32>(0.24, 0.235, 0.228), ash * 0.85);
         let survives = smoothstep(0.8, 0.95, value_noise2(wp * 3.3 + 9.0)) * (1.0 - scorch_raw) * 0.6;
         let k = scorch * (1.0 - survives);
         albedo = mix(albedo, char_c, k);
-        rough = mix(rough, 0.95, k);
+        rough = mix(rough, 1.0, k);
         ao = mix(ao, 1.0, k * 0.5);
-        nrm *= 1.0 - 0.6 * k;
+        nrm *= 1.0 - 0.3 * k;
+        // Soot is about the mattest thing there is: its fluffy surface traps light, so burnt
+        // ground has almost no sheen even looking into a low sun (where a plain rough
+        // surface's grazing reflection would light it up like bare dirt).
+        sheen = 1.0 - 0.85 * k;
     }
 
     // Tangent space: +X along world X, image-up along world -Z, tilted with the ground.
@@ -224,7 +256,7 @@ fn fs_ground(in: GroundOut) -> @location(0) vec4<f32> {
     s.normal = n;
     s.roughness = clamp(rough, 0.03, 1.0);
     s.occlusion = ao;
-    s.reflectance = 0.5;
+    s.reflectance = 0.5 * sheen;
     if (frame.counts.z == 1u) {
         return vec4<f32>(n * 0.5 + 0.5, 1.0);
     }

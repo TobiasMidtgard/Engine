@@ -7,6 +7,7 @@
 
 pub(crate) mod barrel_run;
 pub(crate) mod dummy;
+pub(crate) mod galton;
 pub(crate) mod kit;
 pub(crate) mod pendulums;
 pub(crate) mod pool;
@@ -70,6 +71,10 @@ pub(crate) enum Mat {
     Lacquer(u32),
     /// Billiard cloth of this color (sRGB hex).
     Felt(u32),
+    /// Polished brass: the Galton board's pins.
+    Brass,
+    /// Clear glass: the Galton board's front pane.
+    Glass,
 }
 
 /// Texture sets, generated once per app.
@@ -211,6 +216,12 @@ pub(crate) fn material(world: &mut World, m: Mat) -> Handle<StandardMaterial> {
             .with_roughness(0.07),
         Mat::Lacquer(hex) => StandardMaterial::hex(hex).with_roughness(0.2),
         Mat::Felt(hex) => StandardMaterial::hex(hex).with_roughness(0.93),
+        Mat::Brass => StandardMaterial::hex(0xd6b25e)
+            .with_metallic(1.0)
+            .with_roughness(0.25),
+        Mat::Glass => StandardMaterial::hex(0xe8f1f4)
+            .with_roughness(0.04)
+            .with_alpha(0.12),
     };
     let h = world.resource_mut::<Assets<StandardMaterial>>().add(made);
     world.resource_mut::<ArtCache>().materials.insert(m, h);

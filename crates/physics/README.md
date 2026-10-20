@@ -310,7 +310,11 @@ cradle** on a plinth (five 20 cm chrome balls on 80 cm wires, stepping finely, s
 down the row and only the last ball flies), a **pool table** (a 9 ft table with mahogany rails,
 pockets cut into them and six turned legs: the cue ball breaks a rack of fifteen numbered balls at
 8 m/s, in 0.5 ms substeps so the blow passes from ball to ball, and they spread over the cloth,
-off the cushions and down a few pockets, still within about ten seconds), a **rockfall** (300 crushed granite
+off the cushions and down a few pockets, still within about ten seconds), a **Galton board** (500
+14 mm steel balls pour from a hopper through a walnut funnel and twelve rows of brass pins, set
+a little off true as by hand, into seventeen bins behind glass, and heap up in the bell curve
+printed on the back board: steel bounces over more than one pin, so the curve is the normal
+curve this board gives, σ ≈ 3.2 bins, wider than a coin tossed at every row would make), a **rockfall** (300 crushed granite
 rocks, faceted convex hulls 30 to 55 cm across, pour out of a hopper, slide down a 40° steel chute
 and drop off its lip into a heap with a 35° face) and, along the front, a **barrel run**:
 three oil drums roll off a 2 m ramp and 47 m down an asphalt runway (one triangle mesh, an edge
@@ -321,7 +325,7 @@ showcase's physics zone places it. Render it alone with
 
 The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,
 seesaw, balls and cradle every 20 s, the barrel run and pool table every 25 s, dominoes, wrecking ball and bridge every
-30 s, the rockfall every 30 s, the pile every 45 s, the pendulum wave every minute, as it comes
+30 s, the rockfall every 30 s, the Galton board every 40 s, the pile every 45 s, the pendulum wave every minute, as it comes
 back into step; the tower, wheel and turntable run on), so the zone is always
 playing when someone walks in.
 They pause while no focus point is within 250 m.
@@ -386,7 +390,10 @@ a cradle keeps to its own region beside tumbling crates and a ball rolled at it 
 and a pendulum wave is in two alternate rows at half a minute and back in step at a minute); the
 pool table's break (`tests/proving_ground.rs`: all sixteen balls step finely, at least 12 of the 15
 spread more than 30 cm, at least one goes down a pocket, none leaves the table, and all are still
-before the table resets); a headless screenshot of the proving ground.
+before the table resets); the Galton board (`tests/proving_ground.rs`: no ball leaves the board, all
+are still, at most 2% stay caught on the pins, and the heap is centered within 0.6 bins, spread
+2.5 to 4 bins, over 28% of the balls in the middle three bins, under 8% in the outer four, and no
+more than 12% more on one side); a headless screenshot of the proving ground.
 
 ## Done when
 

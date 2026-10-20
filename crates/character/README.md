@@ -22,7 +22,9 @@ eye and hair shading meant for close-ups.
 - **Hair.** Strands grown on the skin: brows in a herringbone, lashes along the lid rims,
   beards (stubble, short, full, goatee) and scalp hair (buzz, short, medium, long, bun) with
   clumped locks, curls (coily short hair stands up rather than combing flat), a soft hairline
-  of fine hairs, flyaways and occlusion inside the hair. Shaded with Marschner's fiber model
+  of fine hairs, flyaways and occlusion inside the hair. Long and medium hair is settled by a
+  short simulation when the person is built (gravity, bending, collisions with the skin, crown
+  hair layered over the hair below it), so it lies on the head and drapes over the shoulders. Shaded with Marschner's fiber model
   (Karis's fit) plus light scattered between fibers.
 - **Body and pose.** The whole body (`CharacterBuild::default()`; `portrait()` for a bust),
   dressed in a crew-neck shirt and belted trousers that are a layer of their own over the

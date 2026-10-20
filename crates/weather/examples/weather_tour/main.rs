@@ -275,6 +275,19 @@ fn shots() -> Vec<Shot> {
             frames: 10,
             face_moon: false,
         },
+        Shot {
+            name: "16_moonlit_clouds",
+            setup: vec![
+                dry(),
+                set("partly_cloudy"),
+                ("weather.time", json!({"hour": 22.0, "moon_phase": 0.5})),
+                advance(60.0),
+            ],
+            eye: DVec3::new(2.0, 1.7, 14.0),
+            target: DVec3::ZERO,
+            frames: 10,
+            face_moon: true,
+        },
     ]
 }
 

@@ -15,6 +15,7 @@ use engine_world::{Combustible, WindField};
 
 use crate::embers::Embers;
 use crate::field::{FireField, TILE};
+use crate::ground::PaintedGround;
 use crate::objects::{Burning, FlameShape};
 use crate::settings::FireSettings;
 
@@ -38,7 +39,13 @@ pub struct FlameInstance {
 struct ScorchParams {
     rect: [f32; 4],
     ground: [f32; 4],
+    /// Painted grounds, which char themselves (camera-relative min x, z and max x, z): the
+    /// decal leaves their ground and grass alone, or it would darken them a second time.
+    self_charred: [[f32; 4]; MAX_SELF_CHARRED],
 }
+
+/// Most painted grounds the scorch decal leaves alone.
+const MAX_SELF_CHARRED: usize = 4;
 
 /// The fire map uploaded for the scorch decal: a window over the field.
 struct FireMap {
@@ -727,7 +734,26 @@ impl RenderFeature for FireFeature {
                 self.map_origin.x - view.origin.x,
                 self.map_origin.y - view.origin.z,
             );
+            let mut self_charred = [[0.0; 4]; MAX_SELF_CHARRED];
+            let mut count = 0;
+            let mut q = world.query::<(&PaintedGround, &GlobalTransform)>();
+            for (g, t) in q.iter(world).take(MAX_SELF_CHARRED) {
+                // Inside its frayed edge, where the terrain under it no longer shows.
+                let at = t.translation() - view.origin;
+                let half = DVec2::new(
+                    (g.half_extents[0] - g.edge_m).max(0.0) as f64,
+                    (g.half_extents[1] - g.edge_m).max(0.0) as f64,
+                );
+                self_charred[count] = [
+                    (at.x - half.x) as f32,
+                    (at.z - half.y) as f32,
+                    (at.x + half.x) as f32,
+                    (at.z + half.y) as f32,
+                ];
+                count += 1;
+            }
             let p = ScorchParams {
+                self_charred,
                 rect: [
                     rel_min.x as f32,
                     rel_min.y as f32,
@@ -738,7 +764,7 @@ impl RenderFeature for FireFeature {
                     (self.map_base_y - view.origin.y) as f32,
                     cell,
                     view.time,
-                    0.0,
+                    count as f32,
                 ],
             };
             gpu.queue.write_buffer(params, 0, bytemuck::bytes_of(&p));
