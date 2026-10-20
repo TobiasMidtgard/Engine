@@ -163,6 +163,7 @@ impl Plugin for AnimationPlugin {
                     retarget::retarget_poses,
                     face::face_system,
                     (face::give_appearance_faces, face::appearance_face_system),
+                    (body::give_hand_controls, body::hand_controls_system),
                     (
                         skin::update_skin_poses,
                         attach::attachment_system,
