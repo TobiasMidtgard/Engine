@@ -269,7 +269,7 @@ impl RenderFeature for PrecipitationFeature {
             area: [size.x, size.y, size.z, settings.shutter_s.max(0.0)],
             wrap,
             velocity: [wind.x, -fall, wind.z, settings.drop_width_m.max(0.0002)],
-            look: [0.45, 1.0, 0.3, (t % 3600.0) as f32],
+            look: [0.32, 1.0, 0.3, (t % 3600.0) as f32],
             splash: [9.0, 0.06, 0.02, 0.0],
             bolt: [
                 BOLT_COLOR[0] * BOLT_LUMINANCE,
