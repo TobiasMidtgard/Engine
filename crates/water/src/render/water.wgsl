@@ -798,13 +798,40 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     g += rp.zw;
     let boil = plunge_boil(in.rel);
     g += boil.yz;
+    // Fast shallow water heaps up into standing waves over the stones of its bed, and breaks
+    // white on their crests: chop big enough to see from afar, so rapids never mirror the sky
+    // as a smooth sheet. The waves stand where the stones are, trembling.
+    let rapid = smoothstep(0.8, 2.6, speed) * saturate(in.depth * 20.0);
+    var crests = 0.0;
+    if (rapid > 0.0) {
+        let across = vec2<f32>(-in.vel.y, in.vel.x) / max(speed, 1e-3);
+        let along = in.vel / max(speed, 1e-3);
+        // Longer across the current than along it, like the ribs of a riffle.
+        let q = vec2<f32>(dot(wp, along) * 1.8, dot(wp, across) * 0.9) + vec2<f32>(sin(t * 3.1), cos(t * 2.3)) * 0.05;
+        let e = 0.05;
+        let h = fbm2(q, 3) / 0.875;
+        let dh = vec2<f32>(fbm2(q + vec2<f32>(e, 0.0), 3), fbm2(q + vec2<f32>(0.0, e), 3)) / 0.875 - h;
+        let slope = (along * dh.x * 1.8 + across * dh.y * 0.9) / e;
+        g += slope * 0.08 * rapid * (1.0 + speed * 0.15);
+        crests = smoothstep(0.55, 0.75, h) * rapid;
+    }
     let n = normalize(in.normal + vec3<f32>(-g.x, 0.0, -g.y));
     // White water: fast, steep or tumbling. Fast water breaks into streaks and patches of
-    // white over its riffles, never a white sheet; drops churn it white all over.
+    // white over its riffles, never a white sheet.
     let steep = 1.0 - in.normal.y;
-    var foam = saturate((speed - 1.8) * 0.25) * 0.5 + saturate(steep * 2.5 - 0.3) * 1.3;
+    let churn = saturate((speed - 1.8) * 0.25) * 0.5 + saturate(steep * 2.5 - 0.3) * 1.3;
+    // Even tumbling water is never one white sheet: it rolls down in lumps of froth with
+    // darker, glassier water between them, all carried along with the current.
+    let l0 = fbm2((wp - shift * phase0) * 1.3, 3);
+    let l1 = fbm2((wp - shift * phase1) * 1.3 + vec2<f32>(2.9, 6.1), 3);
+    let lumps = smoothstep(0.3, 0.65, mix(l0, l1, wgt) / 0.875);
+    // (`shade_water` covers nearly everything in foam from about 0.4: the white water stays
+    // under that, so the dark glassy water between its lumps shows.)
+    var foam = min(min(churn, 1.0) * mix(0.0, 0.38, lumps) + crests * 0.15 * (1.0 - lumps), 0.38);
     foam *= saturate(in.depth * 30.0);
-    foam += rp.y * 1.2 + boil.x;
+    // Only a pool boils where a fall lands: on running water the current sweeps the froth
+    // downstream in the lumps above.
+    foam += rp.y * 1.2 + boil.x * (1.0 - smoothstep(0.3, 0.8, speed));
     var color: vec3<f32>;
     if (front) {
         // Streams run shallow over riffles: only the last centimeter fades.
