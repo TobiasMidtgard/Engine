@@ -2,9 +2,14 @@
 //! several seeds (every body's randomness from its `Seed`), as in `revive.rs`.
 //!
 //! * Suppress and flank: against a player behind a wall, one shooter pins it with steady fire
-//!   while two mates go round to its flank, mostly out of its sight, bounding from cover to
-//!   cover in turns (one moves while the other holds); one of them gets a shot from the side.
+//!   while two mates go round to its side (70° to 110° round, both the same way), mostly out
+//!   of its sight, bounding from cover to cover in turns (one moves while the other holds);
+//!   one of them gets a shot from the side.
 //! * A rookie squad (and a smart squad that doesn't work together) rushes straight in instead.
+//! * Flushing: a player that stays put behind its wall gets a grenade from the squad's
+//!   suppressor, no sooner than 6 s after it went to ground; one that runs from it is seen in
+//!   the open at once and isn't hurt. The smarter the squad the sooner it throws; rookies never
+//!   do.
 //! * Punishing mistakes: a fighter strikes into a 0.4 s opening (a recovery after a missed
 //!   swing) as soon as its reactions let it see it; a master nearly always does, a rookie never.
 
@@ -14,7 +19,7 @@ use engine_core::time::TimeSource;
 use engine_npc::*;
 use engine_world::locomotion::LocomotionState;
 use engine_world::physics::Collider;
-use engine_world::{ProjectileTrace, SimulationFocus, WorldPlugin};
+use engine_world::{DamageEvent, DamageKind, ProjectileTrace, SimulationFocus, WorldPlugin};
 
 fn app() -> App {
     let mut app = App::new();
@@ -24,6 +29,12 @@ fn app() -> App {
             step_secs: 1.0 / 60.0,
         });
     app.add_plugins((WorldPlugin, NpcPlugin));
+    // A few fighters: running each system in turn on the test's own thread is far quicker
+    // than handing them about a thread pool (the order is fixed either way:
+    // `tests/schedule_order.rs`).
+    for (_, schedule) in app.world.resource_mut::<Schedules>().iter_mut() {
+        schedule.set_executor(engine_core::ecs::schedule::SingleThreadedExecutor::new());
+    }
     app
 }
 
@@ -111,7 +122,15 @@ fn squad(app: &mut App, skills: &[NpcSkills], seed: u64) -> Vec<Entity> {
 struct Player {
     e: Entity,
     next_shot: f32,
+    /// Up over the wall to shoot until then (s).
+    up_until: f32,
+    /// Whether it runs from a grenade coming in, and when it did.
+    flees: bool,
+    fled_at: Option<f32>,
 }
+
+/// Where a player flushed out of its cover runs to: out past the end of its wall.
+const ESCAPE: DVec3 = DVec3::new(-6.5, 0.0, -2.5);
 
 impl Player {
     fn spawn(app: &mut App) -> Self {
@@ -126,15 +145,42 @@ impl Player {
                 SimulationFocus::default(),
             ))
             .id();
-        Player { e, next_shot: 3.0 }
+        Player {
+            e,
+            next_shot: 3.0,
+            up_until: 0.0,
+            flees: false,
+            fled_at: None,
+        }
     }
 
     fn step(&mut self, app: &mut App, t: f32, squad: &[Entity]) {
-        if t >= 1.5 && at(app, self.e) != PLAYER {
-            app.world.get_mut::<Transform>(self.e).unwrap().translation = PLAYER;
+        if self.flees
+            && self.fled_at.is_none()
+            && app.world.resource::<Grenades>().incoming(PLAYER, 4.0)
+        {
+            self.fled_at = Some(t);
+        }
+        if self.fled_at.is_some() {
+            // Running out of cover, away from the grenade.
+            let p = at(app, self.e);
+            let to = ESCAPE - p;
+            let step = to.normalize_or_zero() * (5.0 / 60.0f64).min(to.length());
+            app.world.get_mut::<Transform>(self.e).unwrap().translation = p + step;
+            app.world
+                .get_mut::<LocomotionState>(self.e)
+                .unwrap()
+                .velocity = (step * 60.0).as_vec3();
+            return;
+        }
+        if t >= 1.5 {
+            // Down behind the wall, up over it a moment to fire.
+            let up = if t < self.up_until { 0.6 } else { 0.0 };
+            app.world.get_mut::<Transform>(self.e).unwrap().translation = PLAYER + DVec3::Y * up;
         }
         if t >= self.next_shot {
             self.next_shot += 2.5;
+            self.up_until = t + 0.4;
             let pinned_by = squad
                 .iter()
                 .copied()
@@ -166,6 +212,11 @@ fn bearing(p: DVec3) -> f64 {
     d.y.clamp(-1.0, 1.0).acos().to_degrees()
 }
 
+/// Degrees round from the way the player faces, + toward +X.
+fn signed_bearing(p: DVec3) -> f64 {
+    (p.x - PLAYER.x).atan2(p.z - PLAYER.z).to_degrees()
+}
+
 /// What one fight against the player in cover showed.
 #[derive(Debug, Default, Clone)]
 struct Fight {
@@ -180,21 +231,40 @@ struct Fight {
     /// Bounds: how many covers the flankers stopped at on the way.
     holds: u32,
     /// The suppressor: its longest wait between shots until then (s), and how many of its
-    /// shots went at the player's cover (within 3 m of the player).
+    /// shots went at the player's cover (passing within 3 m of the player).
     longest_gap: f32,
     pinning_shots: u32,
     /// How far round the suppressor went until then (degrees).
     suppressor_round: f64,
-    /// Where everyone ended, and the widest bearing anyone reached on the way in (farther
-    /// than 6 m from the player; degrees).
+    /// Where everyone ended, and the widest bearing anyone reached on the way in (until it
+    /// first came within 6 m of the player; degrees).
     ends: Vec<DVec3>,
     widest: f64,
+    /// Where each flanker got into position, as degrees round from the way the player's
+    /// cover faces (+ toward +X), in the order they got there.
+    in_position: Vec<(Entity, f64)>,
+    /// Grenades and smoke thrown at the player: when (s), a frag or not, and how far from
+    /// the player it landed (m).
+    thrown: Vec<(f32, bool, f64)>,
+    /// Blast damage the player took, when it ran out of cover (s), and when the squad first
+    /// saw it out there (s).
+    hurt: f32,
+    fled_at: Option<f32>,
+    seen_out_at: Option<f32>,
 }
 
 fn fight(skills: &[NpcSkills], seed: u64, secs: f32) -> Fight {
+    fight_with(skills, seed, secs, false)
+}
+
+/// A fight in which the player, if `flees`, runs from a grenade coming in.
+fn fight_with(skills: &[NpcSkills], seed: u64, secs: f32, flees: bool) -> Fight {
     let mut app = app();
     yard(&mut app);
     let mut player = Player::spawn(&mut app);
+    player.flees = flees;
+    let mut hurts = app.world.resource::<Messages<DamageEvent>>().get_cursor();
+    let mut throws = 0;
     let squad = squad(&mut app, skills, seed);
     let mut f = Fight::default();
     let mut cursor = app
@@ -204,12 +274,54 @@ fn fight(skills: &[NpcSkills], seed: u64, secs: f32) -> Fight {
     let mut suppressor: Option<(Entity, f32, u32)> = None;
     let (mut moving, mut moving_seen, mut both) = (0u32, 0u32, 0u32);
     let mut was_holding = vec![false; squad.len()];
+    let mut arrived = vec![false; squad.len()];
     let mut last = squad.iter().map(|&e| at(&app, e)).collect::<Vec<_>>();
     let frames = (secs * 60.0) as usize;
     for frame in 0..frames {
         let t = frame as f32 / 60.0;
         player.step(&mut app, t, &squad);
         app.update();
+        let now = app.world.resource::<Time>().elapsed_secs_f64();
+        let g = app.world.resource::<Grenades>();
+        if g.recent.len() > throws {
+            throws = g.recent.len();
+            let frag = g
+                .flights
+                .iter()
+                .rev()
+                .find(|fl| (fl.thrown - now).abs() < 1e-6);
+            let landed = frag.map(|fl| fl.at).or_else(|| {
+                let clouds = &app
+                    .world
+                    .resource::<engine_npc::smoke::SmokeClouds>()
+                    .clouds;
+                clouds.last().map(|c| c.at)
+            });
+            let off = landed.map_or(f64::MAX, |p| {
+                DVec2::new(p.x - PLAYER.x, p.z - PLAYER.z).length()
+            });
+            f.thrown.push((t, frag.is_some(), off));
+        }
+        let msgs = app.world.resource::<Messages<DamageEvent>>();
+        f.hurt += hurts
+            .read(msgs)
+            .filter(|h| h.target == player.e && h.kind == DamageKind::Explosive)
+            .map(|h| h.amount)
+            .sum::<f32>();
+        f.fled_at = player.fled_at;
+        if let Some(fled) = player.fled_at
+            && f.seen_out_at.is_none()
+            && squad.iter().any(|&e| {
+                app.world
+                    .get::<NpcMemory>(e)
+                    .unwrap()
+                    .get(player.e)
+                    .is_some_and(|k| k.visible)
+            })
+            && t > fled
+        {
+            f.seen_out_at = Some(t);
+        }
         let msgs = app.world.resource::<Messages<ProjectileTrace>>();
         let traces: Vec<ProjectileTrace> = cursor.read(msgs).copied().collect();
         let mut running = 0;
@@ -219,13 +331,18 @@ fn fight(skills: &[NpcSkills], seed: u64, secs: f32) -> Fight {
                 f.roles.push(b.role);
             }
             let p = at(&app, e);
-            if p.distance(PLAYER) > 6.0 {
+            if p.distance(PLAYER) <= 6.0 {
+                arrived[k] = true;
+            } else if !arrived[k] {
                 f.widest = f.widest.max(bearing(p));
             }
             let speed = DVec2::new(p.x - last[k].x, p.z - last[k].z).length() * 60.0;
             last[k] = p;
             if b.role == "suppress" && suppressor.is_none() {
                 suppressor = Some((e, t, shots(&app, e)));
+            }
+            if b.role == "flank" && b.in_position && !f.in_position.iter().any(|&(o, _)| o == e) {
+                f.in_position.push((e, signed_bearing(p)));
             }
             if b.role != "flank" || f.flanked_at.is_some() {
                 continue;
@@ -266,7 +383,14 @@ fn fight(skills: &[NpcSkills], seed: u64, secs: f32) -> Fight {
             f.suppressor_round = f.suppressor_round.max(bearing(at(&app, *s)));
             f.pinning_shots += traces
                 .iter()
-                .filter(|tr| tr.shooter == Some(*s) && tr.to.distance(PLAYER) < 3.0)
+                .filter(|tr| {
+                    tr.shooter == Some(*s)
+                        && engine_npc::perception::segment_distance(
+                            PLAYER + DVec3::Y,
+                            tr.from,
+                            tr.to,
+                        ) < 3.0
+                })
                 .count() as u32;
         }
     }
@@ -310,6 +434,12 @@ fn a_suppressor_pins_the_player_while_two_mates_bound_round_to_its_flank() {
             f.suppressor_round,
             f.roles
         );
+        let round: Vec<String> = f
+            .in_position
+            .iter()
+            .map(|x| format!("{:.0}", x.1))
+            .collect();
+        eprintln!("seed {seed}: in position at {round:?}°");
     }
     for (seed, f) in runs.iter().enumerate() {
         assert!(
@@ -320,7 +450,21 @@ fn a_suppressor_pins_the_player_while_two_mates_bound_round_to_its_flank() {
         let at = f
             .flanked_at
             .unwrap_or_else(|| panic!("seed {seed}: never got round"));
-        assert!(at < 30.0, "seed {seed}: round only after {at} s");
+        assert!(at < 12.0, "seed {seed}: round only after {at} s");
+        // Off the player's side, not round behind it, and both on the same side (the yard is
+        // the same on both).
+        for &(_, round) in &f.in_position {
+            assert!(
+                (70.0..110.0).contains(&round.abs()),
+                "seed {seed}: in position {round:.0}° round"
+            );
+        }
+        assert_eq!(f.in_position.len(), 2, "seed {seed}: {:?}", f.in_position);
+        assert!(
+            f.in_position[0].1.signum() == f.in_position[1].1.signum(),
+            "seed {seed}: split {:?}",
+            f.in_position
+        );
         assert!(
             f.longest_gap < 3.0,
             "seed {seed}: the suppressor let up for {} s",
@@ -332,7 +476,7 @@ fn a_suppressor_pins_the_player_while_two_mates_bound_round_to_its_flank() {
             f.pinning_shots
         );
         assert!(
-            f.holds >= 2,
+            f.holds >= 3,
             "seed {seed}: {} covers held on the way",
             f.holds
         );
@@ -346,11 +490,11 @@ fn a_suppressor_pins_the_player_while_two_mates_bound_round_to_its_flank() {
     let seen = runs.iter().map(|f| f.seen).sum::<f32>() / n;
     let together = runs.iter().map(|f| f.together).sum::<f32>() / n;
     assert!(
-        seen < 0.4,
+        seen < 0.15,
         "the player saw the flankers {seen:.2} of the way"
     );
     assert!(
-        together < 0.2,
+        together < 0.1,
         "both flankers ran at once {together:.2} of the time"
     );
 }
@@ -477,5 +621,84 @@ fn the_more_skilled_punish_more_openings_a_master_nearly_all_a_rookie_none() {
     assert!(
         rates.windows(2).all(|w| w[0] <= w[1]) && rates[2] > rates[1],
         "punishing should rise with skill: {rates:?}"
+    );
+}
+
+/// The first grenade or smoke thrown in a fight, if any.
+fn first_throw(f: &Fight) -> Option<(f32, bool, f64)> {
+    f.thrown.first().copied()
+}
+
+#[test]
+fn a_player_that_stays_put_behind_cover_gets_a_grenade_and_one_that_runs_is_seen_in_the_open() {
+    let skills = [
+        NpcSkills::veteran(),
+        NpcSkills::elite(),
+        NpcSkills::veteran(),
+    ];
+    for flees in [false, true] {
+        let runs = each_seed(|seed| fight_with(&skills, seed, 30.0, flees));
+        for (seed, f) in runs.iter().enumerate() {
+            eprintln!(
+                "flees {flees} seed {seed}: thrown {:?}, hurt {:.0}, fled at {:?}, seen out at {:?}",
+                f.thrown, f.hurt, f.fled_at, f.seen_out_at
+            );
+        }
+        for (seed, f) in runs.iter().enumerate() {
+            let (when, _, off) =
+                first_throw(f).unwrap_or_else(|| panic!("seed {seed}: nothing thrown"));
+            // It went down behind its wall at 1.5 s: at least 6 s still before anything comes.
+            assert!(when >= 7.5, "seed {seed}: thrown at {when:.1} s");
+            assert!(when < 14.0, "seed {seed}: thrown only at {when:.1} s");
+            assert!(off < 1.5, "seed {seed}: landed {off:.1} m off");
+            if flees {
+                let fled = f.fled_at.expect("it never ran");
+                let seen = f.seen_out_at.expect("nobody saw it out of cover");
+                assert!(
+                    seen - fled < 0.5,
+                    "seed {seed}: seen {:.2} s after it ran",
+                    seen - fled
+                );
+                assert!(
+                    f.hurt == 0.0,
+                    "seed {seed}: hurt {:.0} though it ran",
+                    f.hurt
+                );
+            } else {
+                assert!(
+                    f.hurt > 50.0,
+                    "seed {seed}: the blast did only {:.0}",
+                    f.hurt
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn logic_decides_when_a_squad_throws_and_a_rookie_squad_never_does() {
+    let mut means = Vec::new();
+    for name in ["rookie", "soldier", "elite"] {
+        let skills = [NpcSkills::preset(name).unwrap(); 3];
+        let runs = each_seed(|seed| fight(&skills, seed, 30.0));
+        let times: Vec<f32> = runs.iter().filter_map(first_throw).map(|t| t.0).collect();
+        eprintln!("{name}: first throws at {times:?}");
+        if name == "rookie" {
+            assert!(times.is_empty(), "rookies threw at {times:?}");
+            continue;
+        }
+        assert_eq!(
+            times.len(),
+            runs.len(),
+            "{name}: thrown in only {} fights",
+            times.len()
+        );
+        means.push(times.iter().sum::<f32>() / times.len() as f32);
+    }
+    assert!(
+        means[1] + 2.5 < means[0],
+        "elites threw at {:.1} s on average, soldiers at {:.1} s",
+        means[1],
+        means[0]
     );
 }

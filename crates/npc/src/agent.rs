@@ -435,6 +435,11 @@ pub struct NpcBrain {
     pub guard: Option<DVec3>,
     /// When a medic has its next smoke canister ready (world clock, s; see [`crate::smoke`]).
     pub smoke_ready: f64,
+    /// When it may next throw a grenade or smoke at an enemy pinned in cover (world clock, s;
+    /// see [`crate::grenade`]).
+    pub grenade_ready: f64,
+    /// Its enemy keeping still: who, where (as far as it knows), and since when (its clock, s).
+    pub still: Option<(Entity, DVec3, f64)>,
     /// Random stream for this NPC's decisions.
     pub rng_state: u64,
     /// Where it came from (patrol center when `Npc::home` is not set).

@@ -478,6 +478,8 @@ pub(crate) fn perceive(
                 c.last_hurt = now;
             }
             match h.source.and_then(|s| seen.get(s)) {
+                // A mate's stray shot or blast: nobody to look for.
+                Some(src) if src.entity != me && !relevant(&factions, *faction, src.faction) => {}
                 Some(src) if src.entity != me => {
                     let k = memory.entry(src.entity, src.faction, now, src.position);
                     k.last_position = src.position;

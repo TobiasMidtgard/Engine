@@ -8,6 +8,7 @@ pub mod combat;
 pub mod demo;
 pub mod faction;
 pub mod features;
+pub mod grenade;
 pub mod learning;
 pub mod locomotion;
 pub mod nav;
@@ -30,6 +31,7 @@ pub use agent::{
 pub use combat::Downed;
 pub use faction::{Faction, Factions, Squad};
 pub use features::ExplosiveProp;
+pub use grenade::Grenades;
 pub use learning::{OpponentModel, OpponentModels};
 pub use locomotion::{FootKind, Footfall, MoverState, SelfPropelled};
 pub use nav::{NavAgent, NavGrid, NavSettings, PathStatus};
@@ -78,6 +80,7 @@ impl Plugin for NpcPlugin {
             .init_resource::<AttackTokens>()
             .init_resource::<ReviveClaims>()
             .init_resource::<smoke::SmokeClouds>()
+            .init_resource::<grenade::Grenades>()
             .init_resource::<OpponentModels>()
             .init_resource::<WildlifeSettings>()
             .init_resource::<seed::SeedsGiven>()
@@ -181,6 +184,7 @@ impl Plugin for NpcPlugin {
                         combat::resolve_attacks,
                         combat::apply_damage,
                         features::explosives,
+                        grenade::fly_grenades,
                         combat::revive,
                         smoke::smoke_clouds,
                         training::swing_posts,
@@ -197,6 +201,7 @@ impl Plugin for NpcPlugin {
                         training::pose_posts,
                         art::arena::flicker_fires,
                         smoke::show_clouds,
+                        grenade::show_grenades,
                     )
                         .chain()
                         .in_set(NpcSet::Show),

@@ -135,6 +135,7 @@ pub(crate) fn shift_world_model(
     mut world: ResMut<TacticalWorld>,
     mut nav: ResMut<NavGrid>,
     mut clouds: ResMut<crate::smoke::SmokeClouds>,
+    mut grenades: ResMut<crate::grenade::Grenades>,
 ) {
     let Some(s) = combined(&mut shifts) else {
         return;
@@ -143,5 +144,9 @@ pub(crate) fn shift_world_model(
     nav.clear();
     for c in &mut clouds.clouds {
         c.at = s.point(c.at);
+    }
+    for g in &mut grenades.flights {
+        g.from = s.point(g.from);
+        g.at = s.point(g.at);
     }
 }

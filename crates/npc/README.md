@@ -342,8 +342,13 @@ least 0.3, it runs a maneuver that lasts while the target does:
   round. The others not going round give covering fire too.
 - **One or two flankers** (one in a pair, two in a group of three or more; never a medic, and
   only those with `logic` of at least 0.35 and `teamwork` of at least 0.3) go to a spot off the
-  target's side. Their path is planned on the nav grid with the cells the target can see a
-  body in made four times dearer, so it goes behind cover where there is any.
+  target's side: square to the way its cover faces (found by feeling round the target for
+  what blocks at chest height; in the open, square to the squad's fire), within about 20° of
+  that, on cover where they can, and with a line past the target's cover to it. Not round
+  behind it: a spot farther round counts against itself. The second flanker goes the same way
+  as the first unless the other side is clearly better. Their path is planned on the nav grid
+  with the cells the target can see a body in made four times dearer, so it goes behind cover
+  where there is any.
 - **Bounding in turns**: only one flanker moves at a time. It runs to the last point of its
   path still hidden from the target (at least 3.5 m on), or to the next cover on it, crouches
   there for 0.6 s firing as overwatch, and then hands the turn to its mate. Once in position it
@@ -352,6 +357,27 @@ least 0.3, it runs a maneuver that lasts while the target does:
 A rookie squad doesn't do this: a shooter with `logic` under 0.3 rushes straight in to 4 m of
 its target. A smart squad without teamwork doesn't either; its members still pick their own
 spots (which may be wide), but nobody pins the target for them.
+
+A fighter hit by a mate's stray shot or blast doesn't take the mate for an enemy.
+
+## Grenades
+
+A squad's suppressor with `logic` of at least 0.4 flushes out an enemy that stays put behind
+cover. Once the enemy has kept still (as far as the squad knows: within 1.5 m of where it was
+last placed) for 6 s, plus up to 8 s more the less logic the thrower has (a master after 6 s,
+a soldier after about 10), and it is 7 to 32 m off, the suppressor lobs a grenade to land just
+behind the enemy's cover, off by as much as its aim is poor. It throws a frag (the
+`grenade` module) unless a mate is within 8 m of the spot; then a smoke canister, which
+blinds the enemy while the flankers close in. One throw at an enemy every 8 s per squad, and
+each thrower every 20 s. Rookies never throw.
+
+A frag flies in an arc (`Grenades::flights`, with `Flight::position` along the way) for 0.6 s
+plus a second per 22 m, lies there 0.8 s more and goes off through the same blast as an
+explosive prop: a `WorldImpulse` (which wildlife, smoke, foliage and destruction react to), a
+dark `SmokeEmission`, a `NoiseEvent` and `DamageEvent`s to anything within 6 m that isn't
+behind solid cover from it (140 at the heart, nothing at the edge), but no fire.
+`Grenades::incoming` tells game code that one is due near a spot (a warning on the player's
+screen, or a scripted dive).
 
 ## Punishing mistakes
 
@@ -447,7 +473,7 @@ Writes: `MoveIntent` (the same input a player produces), `LocomotionState` and
 `AnimationParams` (fallback mover only), `AttackEvent` (its own telegraphs), `DamageEvent`,
 `ProjectileTrace` (its shots), `NoiseEvent` (shouts and gunfire), `GroundContact` and
 `AnimationEvent` (footsteps), `WorldImpulse`, `IgniteRequest` and `SmokeEmission`
-(explosions), `AppearanceRequest`, `SkeletonPose` and `FaceControls` (fighters), and
+(explosions and frag grenades), `AppearanceRequest`, `SkeletonPose` and `FaceControls` (fighters), and
 `Appearance::wear` (blood, bruises and dirt).
 
 The crate depends only on core crates (`engine_core`, `engine_world`, `engine_render`).
@@ -514,22 +540,33 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   allows (from the hands on, and from the kneel with the 1.2 s getting down). It draws only
   with `NPC_SCREENSHOT_DIR` set; without it the scenes play out the same and every check runs.
   `tests/art_fighters.rs` likewise draws only the two pictures it counts pixels in.
-- `tests/tactics.rs`: whole squads against a player behind a wall, each case over eight seeds.
-  A veteran, an elite and a veteran: one suppresses (at least four shots at the cover, never
-  more than 3 s between shots until the flank, and staying within 40° of straight on) while
-  the other two bound round in turns, both
-  moving at once less than a fifth of the time, holding at two covers or more and seen by the
-  player less than 40 % of the way, until one has a clear shot from 65° or more round within
-  30 s. A rookie squad has nobody suppress or flank, stays within 40° of straight on while
-  farther than 6 m and ends up close; a smart squad without teamwork doesn't flank either.
-  Against 0.4 s openings (a recovery after a missed swing) the share punished climbs with
-  skill: a rookie under 5 %, a master over 75 %.
-- `tests/art_tactics.rs`: two captioned strips of that fight. At eye level from behind the
-  player's wall (`fighters-flank-eye-level.png`) the suppressor's tracers come in over it, then
-  a flanker comes round the end of the wall, gets into position off the player's side (how far
-  round is in the caption) and fires. Top down (`fighters-flank-top-down.png`) at the same
-  moments, the paths so far: red the suppressor, yellow the flankers (a big dot at each cover
-  held), blue the player. It draws only with `NPC_SCREENSHOT_DIR` set.
+- `tests/tactics.rs`: whole squads against a player behind a wall (which pops up over it to
+  fire back now and then), each case over eight seeds. A veteran, an elite and a veteran: one
+  suppresses (at least four shots past the cover, never more than 3 s between shots until the
+  flank, and staying within 40° of straight on) while the other two bound round in turns, both
+  moving at once less than a tenth of the time, holding at three covers or more and seen by
+  the player less than 15 % of the way, until one has a clear shot from the side within 12 s.
+  Both get into position 70° to 110° round, on the same side. A rookie squad has nobody
+  suppress or flank, stays within 40° of straight on until it is within 6 m and ends up
+  close; a smart squad without teamwork doesn't flank either. A player that stays put gets a
+  frag from the suppressor between 7.5 and 14 s in (6 s after it went to ground at the
+  soonest), landing within 1.5 m of it, and takes over 50 of blast; one that runs from it
+  takes none and is seen in the open within half a second. Elite squads throw at least
+  2.5 s sooner than soldier squads on average; rookie squads never throw. Against 0.4 s
+  openings (a recovery after a missed swing) the share punished climbs with skill: a rookie
+  under 5 %, a master over 75 %.
+- `tests/art_tactics.rs`: captioned strips of those fights in the yard dressed with the
+  arena's sand and cut sandstone (each wall and block a chipped stone of its size). At eye
+  level from behind the player's wall (`fighters-flank-eye-level.png`) the suppressor's
+  tracers come in over it, then a flanker comes round the end of the wall, gets into position
+  off the player's side (how far round is in the caption) and fires. Top down
+  (`fighters-flank-top-down.png`) at the same moments, the paths so far: red the suppressor,
+  yellow the flankers (a big dot at each cover held), blue the player. Over the player's
+  shoulder (`fighters-flush-grenade.png`, the player a blue stand-in): pinned, a grenade
+  coming over the wall, the player running from where it lands, the blast (a flash and dust
+  the test draws, as no fire or smoke module is installed) and the player in the open under
+  fire. Tracers are drawn unlit and cast no shadow. It draws only with `NPC_SCREENSHOT_DIR`
+  set.
 - `tests/training.rs`: the same post swings at a rookie, soldier, veteran, elite and master;
   the share of swings defended climbs with skill (0 % to about 100 %) and the master parries.
 - `tests/smoke.rs`: thick smoke hides a player until it clears, thin smoke slows spotting,

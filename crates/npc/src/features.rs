@@ -15,6 +15,7 @@ use engine_world::{
 };
 
 use crate::perception::Perceivables;
+use crate::world_model::TacticalWorld;
 
 /// A barrel, gas tank or crate that explodes when damaged enough.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -123,62 +124,119 @@ pub(crate) fn explosives(
         }
         p.detonated = true;
         p.since = 0.0;
-        let (radius, blast) = (p.radius, p.damage);
+        let (radius, blast_damage) = (p.radius, p.damage);
         let origin = t.translation;
-        let center = origin + DVec3::Y * 0.5;
-        impulses.write(WorldImpulse {
-            center,
-            radius: radius * 2.5,
-            strength: 30.0,
-            energy_j: 250_000.0,
-            heat_c: 900.0,
+        let b = Blast {
+            center: origin + DVec3::Y * 0.5,
+            radius,
+            damage: blast_damage,
             source: source.or(Some(e)),
-        });
-        ignite.write(IgniteRequest {
-            position: center,
-            radius: radius * 0.6,
-            temperature_c: 900.0,
-            source: Some(e),
-        });
-        smoke.write(SmokeEmission {
-            position: center,
-            velocity: Vec3::Y * 8.0,
-            radius: 1.5,
-            mass_kg: 2.0,
-            temperature_c: 600.0,
-            darkness: 0.85,
-        });
-        noise.write(NoiseEvent {
-            position: center,
-            radius: 150.0,
-            source: Some(e),
-        });
-        seen.near(center, radius as f64, &mut near);
-        for &k in near.iter() {
-            let victim = seen.list[k as usize];
-            let d = (victim.position + DVec3::Y * 0.9).distance(center) as f32;
-            if d > radius {
-                continue;
-            }
-            let falloff = 1.0 - d / radius;
-            let dir = ((victim.position - center).as_vec3() + Vec3::Y * 0.5).normalize_or(Vec3::Y);
-            damage.write(DamageEvent {
-                target: victim.entity,
-                amount: blast * falloff,
-                kind: DamageKind::Explosive,
-                point: victim.position + DVec3::Y,
-                impulse: dir * 400.0 * falloff,
-                source: source.or(Some(e)),
-            });
-        }
+            heat_c: 900.0,
+            energy_j: 250_000.0,
+            strength: 30.0,
+        };
+        blast(
+            &b,
+            &seen,
+            None,
+            &mut near,
+            &mut impulses,
+            Some((&mut ignite, e)),
+            &mut smoke,
+            &mut noise,
+            &mut damage,
+        );
         // Chain reactions.
         for (other, ot, op, _, _) in props.iter() {
             if other != e && !op.detonated && ot.translation.distance(origin) < radius as f64 {
-                chain.push((other, blast, source));
+                chain.push((other, blast_damage, source));
             }
         }
         commands.entity(e).remove::<Collider>();
         commands.queue(move |world: &mut World| set_visible(world, e, false));
+    }
+}
+
+/// A blast: where, how far it reaches (m), the damage at its heart, and who set it off.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Blast {
+    pub center: DVec3,
+    pub radius: f32,
+    pub damage: f32,
+    pub source: Option<Entity>,
+    /// For the `WorldImpulse`: the heat (°C), energy (J) and peak air speed (m/s).
+    pub heat_c: f32,
+    pub energy_j: f32,
+    pub strength: f32,
+}
+
+/// Send a blast's world events: the impulse (out to 2.5 times its radius), a fire when
+/// `ignite` is given (with the prop that burns), a dark puff, the bang, and damage to whatever
+/// it reaches, falling off to nothing at its radius. With `cover`, nothing behind solid cover
+/// from the blast is hurt.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn blast(
+    b: &Blast,
+    seen: &Perceivables,
+    cover: Option<&TacticalWorld>,
+    near: &mut Vec<u32>,
+    impulses: &mut MessageWriter<WorldImpulse>,
+    ignite: Option<(&mut MessageWriter<IgniteRequest>, Entity)>,
+    smoke: &mut MessageWriter<SmokeEmission>,
+    noise: &mut MessageWriter<NoiseEvent>,
+    damage: &mut Messages<DamageEvent>,
+) {
+    let (center, radius) = (b.center, b.radius);
+    impulses.write(WorldImpulse {
+        center,
+        radius: radius * 2.5,
+        strength: b.strength,
+        energy_j: b.energy_j,
+        heat_c: b.heat_c,
+        source: b.source,
+    });
+    if let Some((ignite, by)) = ignite {
+        ignite.write(IgniteRequest {
+            position: center,
+            radius: radius * 0.6,
+            temperature_c: 900.0,
+            source: Some(by),
+        });
+    }
+    smoke.write(SmokeEmission {
+        position: center,
+        velocity: Vec3::Y * 8.0,
+        radius: 1.5,
+        mass_kg: 2.0 * (b.energy_j / 250_000.0),
+        temperature_c: 600.0,
+        darkness: 0.85,
+    });
+    noise.write(NoiseEvent {
+        position: center,
+        radius: 150.0,
+        source: b.source,
+    });
+    seen.near(center, radius as f64, near);
+    for &k in near.iter() {
+        let victim = seen.list[k as usize];
+        let chest = victim.position + DVec3::Y * 0.9;
+        let d = chest.distance(center) as f32;
+        if d > radius {
+            continue;
+        }
+        if cover.is_some_and(|w| w.raycast(center, chest).is_some()) {
+            continue;
+        }
+        let falloff = 1.0 - d / radius;
+        let dir = ((victim.position - center).as_vec3() + Vec3::Y * 0.5).normalize_or(Vec3::Y);
+        damage.write(DamageEvent {
+            target: victim.entity,
+            amount: b.damage * falloff,
+            kind: DamageKind::Explosive,
+            point: victim.position + DVec3::Y,
+            impulse: dir * 400.0 * falloff,
+            source: b.source,
+        });
     }
 }
 

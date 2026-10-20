@@ -25,7 +25,7 @@ pub struct PositionWeights {
     pub exposure: f32,
     /// Being to the side of or behind the enemy.
     pub flank: f32,
-    /// Coming from a different direction than allies (pincer).
+    /// Coming from a different direction than allies (pincer; negative: the same direction).
     pub pincer: f32,
     /// Height above the enemy.
     pub height: f32,
@@ -39,7 +39,15 @@ pub struct PositionWeights {
     pub hazard: f32,
     /// Bonus for keeping the current destination (avoids dithering).
     pub stay: f32,
+    /// Being off the enemy's side: square to the way its cover faces
+    /// ([`PositionQuery::front`]), within about 20° of it (a squad's flankers).
+    #[serde(default)]
+    pub side: f32,
 }
+
+/// How far from square to the enemy's front a side spot may be (the cosine of the angle off
+/// its front: 0.4 is 66° to 114°); farther round or less, it counts against the spot.
+pub const SIDE_BAND: f32 = 0.4;
 
 impl PositionWeights {
     /// Weights for an action, scaled by the NPC's tactical skill.
@@ -131,6 +139,8 @@ pub struct PositionQuery {
     pub allies: Vec<DVec3>,
     /// Directions (from the target, XZ) allies attack from.
     pub ally_angles: Vec<Vec3>,
+    /// The way the enemy's cover faces (from the target, XZ), for [`PositionWeights::side`].
+    pub front: Option<Vec3>,
     /// Preferred distance to the enemy, meters.
     pub ideal_range: f32,
     pub current_destination: Option<DVec3>,
@@ -308,7 +318,13 @@ pub fn choose_position(
             let behind = (1.0 - q.target_forward.dot(dir_from_target)) * 0.5;
             s += w.flank * behind;
         }
-        if w.pincer > 0.0 && !q.ally_angles.is_empty() {
+        if w.side > 0.0
+            && let Some(front) = q.front
+        {
+            let c = front.dot(dir_from_target) / SIDE_BAND;
+            s += w.side * (1.0 - c * c).max(-2.0);
+        }
+        if w.pincer != 0.0 && !q.ally_angles.is_empty() {
             let sep = q
                 .ally_angles
                 .iter()
@@ -400,6 +416,7 @@ mod tests {
             other_threats: vec![],
             allies: vec![],
             ally_angles: vec![],
+            front: None,
             ideal_range: 12.0,
             current_destination: None,
             logic,
