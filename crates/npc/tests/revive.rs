@@ -738,13 +738,13 @@ fn a_mate_going_the_long_way_round_a_wall_is_not_taken_for_stuck() {
 #[test]
 fn nobody_revives_a_mate_up_on_a_ledge_from_below() {
     let mut app = app();
-    // A block 3 m high with no way up: the ally downed at its edge on top, a mate on the
-    // ground at its foot. However close it gets as the crow flies, it doesn't kneel there.
+    // A block 3 m high with no way up: the ally downed right at its edge on top, a mate on
+    // the ground at its foot. However close it gets as the crow flies, it doesn't kneel there.
     app.world.spawn((
         Transform::from_translation(DVec3::new(0.0, 1.5, 0.0)),
         Collider::cuboid(Vec3::new(2.0, 1.5, 2.0)),
     ));
-    let ally = mate(&mut app, DVec3::new(1.5, 3.0, 0.5), NpcSkills::soldier());
+    let ally = mate(&mut app, DVec3::new(1.85, 3.0, 0.5), NpcSkills::soldier());
     let reviver = mate(&mut app, DVec3::new(4.0, 0.0, 1.5), NpcSkills::rookie());
     run(&mut app, 0.5);
     let up_there = at(&app, ally).y;

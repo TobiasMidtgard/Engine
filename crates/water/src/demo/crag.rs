@@ -104,6 +104,17 @@ fn bed(u: f32) -> f32 {
     mix(h0, h1, (u - u0) / (u1 - u0))
 }
 
+/// The crevice's floor at `u` along it and `a` across: [`bed`], but no brink is a level weir.
+/// Each lip runs ragged and aslant across the crevice, and is worn down in the middle, so
+/// the water gathers into a tongue there. (Not the brink over the 55° face: water any faster
+/// over it would clear the face instead of sliding down it.)
+fn floor(u: f32, a: f32) -> f32 {
+    let shaped = 1.0 - smooth(3.3, 3.8, u) * (1.0 - smooth(6.0, 6.6, u));
+    let ragged = 0.3 * noise::perlin2(a as f64 * 0.8, u as f64 * 0.21, 0xC4AC) + 0.08 * a;
+    let worn = 0.2 * (1.0 - (a / half_width(u)).powi(2)).max(0.0);
+    bed(u + ragged * shaped) - worn * shaped
+}
+
 /// Half the width of the crevice's floor: a bay at the cove, a wider basin round the spring.
 fn half_width(u: f32) -> f32 {
     let course = 1.0 + 0.25 * (u * 0.8 + 0.5).sin() + 0.25 * smooth(11.5, 13.0, u);
@@ -150,7 +161,7 @@ pub fn shape(x: f32, z: f32, h: f32) -> f32 {
                 0.25,
                 noise::perlin2(x as f64 * 0.09, z as f64 * 0.09, 0xC4AA),
             );
-    let top = mix(top, strata(x, z, top), 0.6 * relief * ledges);
+    let top = mix(top, strata(x, z, top), 0.85 * relief * ledges);
     let sides = 1.0 - smooth(8.0 + n * 3.0, 22.0 + n * 3.0 + ribs * 4.0, a.abs());
     let back = 1.0 - smooth(17.0, 36.0, u + ribs * 4.0);
     let front = smooth(-1.2, 0.3, u + n * 0.6);
@@ -158,8 +169,9 @@ pub fn shape(x: f32, z: f32, h: f32) -> f32 {
     // The crevice: a stepped bed between walls rising at ~73° (rounded into the floor),
     // layered like the rest of the crag above the floor.
     let w = a.abs() - half_width(u);
-    let walls =
-        bed(u) + 0.5 * (3.2 * w + (10.24 * w * w + 0.04).sqrt()) + fine * 0.3 * smooth(0.0, 1.0, w);
+    let walls = floor(u, a)
+        + 0.5 * (3.2 * w + (10.24 * w * w + 0.04).sqrt())
+        + fine * 0.3 * smooth(0.0, 1.0, w);
     let walls = mix(walls, strata(x, z, walls), 0.5 * smooth(0.4, 1.2, w));
     out = out.min(walls);
     out
@@ -187,7 +199,7 @@ pub fn bed_coord(x: f32, z: f32, h: f32) -> f32 {
 /// so faces read as layered rock rather than smooth slopes.
 fn strata(x: f32, z: f32, h: f32) -> f32 {
     let t = bed_coord(x, z, h);
-    let stepped = t.floor() + smooth(0.2, 0.8, t.fract());
+    let stepped = t.floor() + smooth(0.45, 0.8, t.fract());
     // Back from bed coordinates to meters over the bed's local thickness.
     let per_m = (bed_coord(x, z, h + 0.05) - t) / 0.05;
     h + (stepped - t) / per_m.max(0.1)
@@ -217,7 +229,7 @@ pub fn wetness(x: f32, z: f32, h: f32) -> f32 {
     if !(-3.0..15.0).contains(&u) {
         return 0.0;
     }
-    let over = h - bed(u);
+    let over = h - floor(u, a);
     (1.0 - smooth(0.2, 1.5, over)) * (1.0 - smooth(0.4, 1.5, a.abs() - half_width(u)))
 }
 
@@ -280,7 +292,8 @@ mod tests {
         for u in [2.0, 5.5, 8.0, 11.0, 13.0] {
             let floor = point(u, 0.0);
             let h = super::super::tarn_height(floor.x, floor.y);
-            assert!((h - bed(u)).abs() < 0.15, "floor at {u}: {h} vs {}", bed(u));
+            let want = super::floor(u, 0.0);
+            assert!((h - want).abs() < 0.15, "floor at {u}: {h} vs {want}");
             // Walls a meter or more high on both sides.
             for side in [-1.0, 1.0] {
                 let wall = point(u, side * (half_width(u) + 1.2));
