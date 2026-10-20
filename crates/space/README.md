@@ -119,7 +119,9 @@ are drawn as their own layer 5 km above the ground, over whatever terrain covers
 the baked cloud map broken up with procedural detail down to a few hundred meters, so far
 away it shows the weather systems and up close it breaks into crisp cumulus covering the
 same share of sky, with a thin veil under broken cloud. The tops are lit through the air and
-veiled by it. Within `SpaceSettings::cloud_hole_m` (60 km) of the camera the layer leaves
+veiled by it, and cast their shadows on the ground between them, offset away from the sun
+(long at a low sun), so the terrain under the layer is shaded like the far globe. Within
+`SpaceSettings::cloud_hole_m` (60 km) of the camera the layer leaves
 the sky to the weather's own volumetric clouds. Views `earth_leo` (400 km) and `earth_edge`
 (35 km) in `space_shots` show it, and `mars_low` and `mars_edge` the same heights over Mars.
 
@@ -131,8 +133,8 @@ the sky to the weather's own volumetric clouds. Views `earth_leo` (400 km) and `
   close. A shared continent field (or terrain baking the far map) needs a contract.
 - Full-size bakes cost 0.4-1.5 s of CPU per body; a few looks (Mars albedo regions, Moon
   maria outlines, Neptune's cloud streaks) still read as procedural up close.
-- The cloud layer from high up casts no shadows on the terrain yet, and its pattern is the
-  far look's own, not the weather's (they meet at the edge of `cloud_hole_m`).
+- The cloud layer's pattern from high up is the far look's own, not the weather's (they meet
+  at the edge of `cloud_hole_m`).
 - Coasting ships feel one body at a time (patched conics): no Lagrange points or slow
   three-body drifts, and a sphere of influence grazed by less than ~1 % of its radius in one
   sampled step can be missed at extreme warps. Engines can't fire on rails: drop the warp to

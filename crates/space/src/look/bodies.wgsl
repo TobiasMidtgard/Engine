@@ -381,6 +381,42 @@ fn shell_noise(p: vec3<f32>) -> f32 {
     return mix(a, b, u.z);
 }
 
+// How much of the sun the cloud tops over unit-shell point `p` block: the map's coverage
+// broken up by the coarse octaves of the shell's own detail (finer ones average out in a
+// shadow seen from this high), `foot` the size of a pixel on the shell (R).
+fn shell_shadow(b: Body, p: vec3<f32>, foot: f32) -> f32 {
+    let lon = atan2(p.x, p.z);
+    let lat = asin(clamp(p.y, -1.0, 1.0));
+    let uv = vec2<f32>(lon * (0.5 * INV_PI) + 0.5 + b.sun.w, 0.5 - lat * INV_PI);
+    let texel = 2.0 * PI / f32(textureDimensions(aux_map).x);
+    let coverage = textureSampleLevel(aux_map, map_sampler, uv, max(log2(foot / texel), 0.0)).r;
+    let turn = b.sun.w * 2.0 * PI;
+    let ct = cos(turn);
+    let st = sin(turn);
+    let pn = vec3<f32>(p.x * ct + p.z * st, p.y, p.z * ct - p.x * st);
+    var detail = 0.0;
+    var seen = 0.0;
+    var total = 0.0;
+    var freq = 150.0;
+    var amp = 1.0;
+    for (var i = 0; i < 4; i++) {
+        let w = clamp(1.0 / (freq * foot) * 0.5 - 0.5, 0.0, 1.0);
+        detail += (shell_noise(pn * freq + vec3<f32>(f32(i) * 17.1)) - 0.5) * amp * w;
+        seen += amp * w;
+        total += amp;
+        freq *= 2.6;
+        amp *= 0.7;
+    }
+    detail /= total;
+    let resolved = seen / total;
+    let c = clamp(coverage, 0.01, 0.99);
+    let density = 0.11 * resolved * log(c / (1.0 - c)) + (c - 0.5) * (1.0 - resolved)
+        + detail * 2.4;
+    let edge = 0.12 + 0.4 * (1.0 - resolved);
+    let thickness = 0.55 + 0.45 * smoothstep(0.2, 0.7, coverage);
+    return smoothstep(-edge, edge * 1.6, density) * thickness;
+}
+
 @fragment
 fn fs_shell(in: VsOut) -> FsOut {
     let b = bodies[in.body];
@@ -473,18 +509,45 @@ fn fs_shell(in: VsOut) -> FsOut {
     let veil = 0.45 * smoothstep(0.08, 0.7, coverage) * clamp(0.75 + 6.0 * detail, 0.3, 1.0);
     var alpha = (puffs + (1.0 - puffs) * veil) * cover * b.haze3.z;
     // The weather draws the clouds around the camera itself.
+    var outside_hole = 1.0;
     if (b.haze3.w > 0.0) {
         let hit = o + dl * t_hit;
         let apart = acos(clamp(dot(normalize(hit), normalize(o)), -1.0, 1.0));
-        alpha *= smoothstep(b.haze3.w * 0.7, b.haze3.w, apart);
+        outside_hole = smoothstep(b.haze3.w * 0.7, b.haze3.w, apart);
+        alpha *= outside_hole;
     }
-    if (alpha <= 1e-4) {
+
+    // Their shadows on the ground seen between them (the terrain under the shell has none
+    // of its own): from where the view ray meets the ground, toward the sun up to the
+    // shell, and how much cloud stands there.
+    let s = normalize(b.sun.xyz);
+    var shadow = 0.0;
+    let rg = 1.0 / k;
+    let hg = rg * rg - q_len * q_len;
+    if (cover > 0.0 && hg > 0.0) {
+        let gp = os + ds * (-bq - sqrt(hg));
+        let g = normalize(gp);
+        let mu_g = dot(g, s);
+        if (mu_g > 0.0) {
+            let gs = dot(gp, s);
+            let up = -gs + sqrt(max(gs * gs - (dot(gp, gp) - 1.0), 0.0));
+            let cp = normalize(gp + s * up);
+            var apart_g = 1.0;
+            if (b.haze3.w > 0.0) {
+                let a_g = acos(clamp(dot(g, normalize(os)), -1.0, 1.0));
+                apart_g = smoothstep(b.haze3.w * 0.7, b.haze3.w, a_g);
+            }
+            // Skylight still reaches the shade; a low sun's light was weak anyway.
+            shadow = shell_shadow(b, cp, foot) * 0.75 * smoothstep(0.0, 0.15, mu_g)
+                * cover * b.haze3.z * apart_g;
+        }
+    }
+    if (alpha + shadow <= 1e-4) {
         discard;
     }
 
     // Light: sunlit tops, a soft terminator, reddened through the air on the way in, thin
     // edges glowing forward toward the sun.
-    let s = normalize(b.sun.xyz);
     let mu0 = dot(n, s);
     let rel_hit = dir * (t_hit * r_eq);
     var sun_e = b.light.rgb;
@@ -500,9 +563,14 @@ fn fs_shell(in: VsOut) -> FsOut {
     if ((flags & F_AIR) != 0u) {
         let a = atmosphere(vec3<f32>(0.0), dir, t_hit * r_eq, 8);
         lit = lit * a.transmittance + a.radiance * frame.sun_color.rgb;
+        // The haze in front of the ground isn't shaded.
+        shadow *= dot(a.transmittance, vec3<f32>(0.2126, 0.7152, 0.0722));
     }
+    // Over the ground the shadow darkens what lies behind (premultiplied: black, by its
+    // share of what the clouds leave uncovered).
+    let total_alpha = alpha + (1.0 - alpha) * shadow;
     var out: FsOut;
     out.depth = depth_of(rel_hit);
-    out.color = vec4<f32>(pre_expose(lit) * alpha, alpha);
+    out.color = vec4<f32>(pre_expose(lit) * alpha, total_alpha);
     return out;
 }
