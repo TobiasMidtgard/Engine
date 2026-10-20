@@ -265,6 +265,14 @@ fn shots() -> Vec<Shot> {
             frames: 10,
             face_moon: false,
         },
+        Shot {
+            name: "15_flying_over_fair_weather_clouds",
+            setup: vec![set("partly_cloudy"), hour(10.0), advance(60.0)],
+            eye: DVec3::new(0.0, 4200.0, 0.0),
+            target: DVec3::new(0.0, 2600.0, -6000.0),
+            frames: 10,
+            face_moon: false,
+        },
     ]
 }
 
@@ -357,6 +365,9 @@ fn main() {
         }
         if let Some(v) = env("CLOUD_SHAPE") {
             c.shape_scale_m = v;
+        }
+        if let Some(v) = env("CLOUD_STEPS") {
+            c.steps = v as u32;
         }
     }
     // The weather clock spawns its sun and moon on the second frame.
