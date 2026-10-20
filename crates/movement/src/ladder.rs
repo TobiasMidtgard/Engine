@@ -65,6 +65,9 @@ const SNAP_SPEED: f32 = 5.0;
 const BOARDING: f32 = 0.15;
 /// Held this far off the line (something is in the way): let go, m.
 const TORN_OFF: f32 = 1.0;
+/// Climbing up gets no further ahead of the body than this, m: with something in the way (a
+/// closed hatch overhead, a beam) the climber waits on the ladder until it can move on.
+const HELD_BACK: f32 = 0.1;
 /// A hit pushing harder than this throws a climber off, m/s.
 pub(crate) const KNOCKED_OFF: f32 = 5.0;
 /// After letting go, no grabbing a ladder for this long, s.
@@ -99,6 +102,11 @@ impl Frame {
     /// Where the feet are `climbed` meters up.
     fn feet(&self, climbed: f32) -> DVec3 {
         self.line.at((climbed / self.len) as f64)
+    }
+
+    /// How far up the climb feet at `feet` are, m.
+    fn climbed_at(&self, feet: DVec3) -> f32 {
+        self.line.along(feet) as f32 * self.len
     }
 }
 
@@ -278,7 +286,12 @@ fn climb(
         (ask * p.ladder_speed * sprint, ACCEL)
     };
     l.speed += (target - l.speed).clamp(-accel * dt, accel * dt);
-    let next = l.climbed + l.speed * dt;
+    let mut next = l.climbed + l.speed * dt;
+    // Something overhead: wait for the body rather than climb on without it.
+    if l.speed > 0.0 && next > f.climbed_at(b.feet()) + HELD_BACK + l.speed * dt {
+        l.speed = 0.0;
+        next = l.climbed;
+    }
     l.secs += dt;
     m.air_secs = 0.0;
     m.fall_speed = 0.0;

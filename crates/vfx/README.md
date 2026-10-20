@@ -64,7 +64,8 @@ flame and nozzle glow are `steady` layers, which keep their full rate whatever t
 `rate` and the density setting (stopping only at rate 0), so they never thin into flicker. The `plume`
 sprite draws the flame procedurally: a white-hot core, a train of shock diamonds about a
 nozzle's width apart with the gas banded bright and dark around them, and a turbulent tail
-that flickers and tears away.
+that flickers and tears away. A climbing rocket lays its smoke trail down per meter it travels, so the trail stands
+as one unbroken column however fast it goes.
 
 Fires burn as one body, not a heap of paper cut-outs. The `blaze` sprite draws a whole fire
 standing on its fuel: a churning, domain-warped body that sways, breaks into a few tongues at
@@ -179,7 +180,7 @@ follows the camera's exposure as particle glow does ([`VfxSettings::glow_exposur
 keeps its color at night instead of turning white.
 `cargo run -p engine_vfx --release --example sub_emitters` renders the firework and the
 splitting sparks; `--example braziers` renders the brazier fires, `--example engines` every
-exhaust side on (add `vacuum` to take the air away), `--example splashes` the splashes close up
+exhaust side on and a rocket lifting off (add `vacuum` to take the air away), `--example splashes` the splashes close up
 as they unfold, and `--example court` the whole court, each by day, at dusk and at night.
 
 ## Next

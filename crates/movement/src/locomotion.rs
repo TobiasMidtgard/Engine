@@ -205,7 +205,12 @@ impl Probe<'_> {
 
 /// A ladder's climb line in world space. A ladder without a parent goes by its `Transform`
 /// (up to date within the fixed steps of a frame), a child by its `GlobalTransform`.
-fn climb_line(c: &Climbable, t: &Transform, g: &GlobalTransform, parented: bool) -> ClimbLine {
+pub(crate) fn climb_line(
+    c: &Climbable,
+    t: &Transform,
+    g: &GlobalTransform,
+    parented: bool,
+) -> ClimbLine {
     if parented {
         c.in_world(g)
     } else {

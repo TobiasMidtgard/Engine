@@ -79,6 +79,10 @@ fn rubber(hex: u32) -> StandardMaterial {
     StandardMaterial::hex(hex).with_roughness(0.55)
 }
 
+fn granite() -> StandardMaterial {
+    StandardMaterial::hex(0x8f8a84).with_roughness(0.75)
+}
+
 fn resin() -> StandardMaterial {
     StandardMaterial::hex(0xffffff).with_roughness(0.3)
 }
@@ -272,6 +276,15 @@ fn main() {
         Vec3::new(6.85, 0.25, 0.85),
         Quat::from_rotation_z(0.6),
     );
+    for seed in 0..3u32 {
+        s.put(
+            &format!("rock {seed}"),
+            props::rock(&props::rock_points(seed), 0xffffff),
+            granite(),
+            Vec3::new(6.4 + 0.5 * seed as f32, 0.2, -0.9),
+            y(seed as f32),
+        );
+    }
     let ball_at = Vec3::new(9.4, 0.8, 0.0);
     s.put(
         "wrecking ball r 0.8",

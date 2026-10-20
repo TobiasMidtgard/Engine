@@ -218,7 +218,7 @@ impl AeroSurface {
             separated(aoa)
         } else {
             // Blend through the stall so lift never jumps.
-            let (a, b, t) = if aoa > high {
+            let (a, b, t) = if aoa >= high {
                 (
                     attached(high),
                     separated(padded_high),
@@ -545,6 +545,28 @@ mod tests {
         let b = w.coefficients(-0.1, 0.0);
         assert!((a.lift + b.lift).abs() < 1e-4);
         assert!((a.drag - b.drag).abs() < 1e-4);
+    }
+
+    #[test]
+    fn exactly_at_the_stall_angle_the_wing_still_drags() {
+        // Exactly at the stall angle the blend once took the low (negative) stall's side
+        // and extrapolated: a spike of negative drag that gave a whole spaceplane thrust.
+        for (high, flap) in [(32.0f32, 0.0f32), (15.0, 0.0), (32.0, 0.2)] {
+            let w = AeroSurface {
+                stall_high_deg: high,
+                stall_low_deg: -high,
+                ..wing()
+            };
+            let below = w.coefficients((high - 0.5).to_radians(), flap);
+            let at = w.coefficients(high.to_radians(), flap);
+            assert!(at.drag > 0.0, "drag {} at {high}°", at.drag);
+            assert!(
+                (at.lift - below.lift).abs() < 0.2,
+                "lift {} at {high}° vs {} just below",
+                at.lift,
+                below.lift
+            );
+        }
     }
 
     #[test]
