@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 
 use engine_core::prelude::*;
 use engine_render::RenderAppExt;
+use engine_world::character::AppearanceBodies;
 pub use engine_world::character::CharacterQuality;
 
 pub use appearance::{
@@ -220,8 +221,9 @@ impl Plugin for CharacterPlugin {
                     .in_set(CharacterSet),
             )
             .add_render_feature(CharacterFeature::default());
-        // Every person is drawn here, skinned to the animation module's pose.
-        engine_world::character::draws_appearances(app, "character");
+        // Every person is drawn here, skinned to the animation module's pose, once the pack
+        // has loaded (`poll_pack` says so with `AppearanceBodies`): without it nothing would
+        // be drawn, so other modules keep drawing their own bodies.
         api::register(app);
     }
 }
@@ -237,7 +239,7 @@ fn load_pack(world: &mut World) {
     world.insert_resource(HumanAssets::loading(root.join(pack::PACK_PATH)));
 }
 
-fn poll_pack(assets: Option<ResMut<HumanAssets>>) {
+fn poll_pack(mut commands: Commands, assets: Option<ResMut<HumanAssets>>) {
     let Some(mut assets) = assets else {
         return;
     };
@@ -267,10 +269,14 @@ fn poll_pack(assets: Option<ResMut<HumanAssets>>) {
             assets.pack = Some(Arc::new(pack));
             assets.regions = Some(Arc::new(regions));
             assets.status = PackStatus::Ready;
+            commands.insert_resource(AppearanceBodies {
+                drawn_by: "character".into(),
+            });
         }
         Some(Err(e)) => {
             tracing::warn!("character: {e} Characters are not drawn until then.");
             assets.status = PackStatus::Missing(e);
+            commands.remove_resource::<AppearanceBodies>();
         }
         None => {}
     }

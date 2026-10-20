@@ -348,6 +348,16 @@ fn views() -> Vec<View> {
             sun: (230.0, 30.0),
             ..BASE
         },
+        // A lowland river winding through its flood plain, from a few hundred meters up.
+        View {
+            name: "earth_meanders",
+            eye: DVec3::new(-7_200.0, 0.0, 4_600.0),
+            target: DVec3::new(-8_300.0, 0.0, 2_900.0),
+            above_ground: Some(320.0),
+            target_above_ground: Some(0.0),
+            sun: (230.0, 35.0),
+            ..BASE
+        },
         View {
             name: "earth_high",
             eye: DVec3::new(-10_000.0, 45_000.0, 90_000.0),

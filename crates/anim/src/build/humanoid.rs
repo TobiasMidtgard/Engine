@@ -1288,6 +1288,53 @@ fn lean_pitch(s: &Skeleton, name: &str, dir: f32) -> AnimationClip {
     })
 }
 
+/// Additive posture for the ground's slope (`climb` up a flight of stairs, `descend` down
+/// one): leaning into a climb with the head up to see the top; going down, the knees softer,
+/// the chin down to watch the steps and the arms a little out for balance.
+fn grade_posture(s: &Skeleton, name: &str, dir: f32) -> AnimationClip {
+    AnimationClip::from_fn(name, 1.0, 2, true, |_| {
+        let mut p = PoseBuilder::new(s);
+        if dir > 0.0 {
+            p.rot_move("hips", Vec3::new(0.0, -0.02, 0.0), -5.0, 0.0, 0.0);
+            spine(&mut p, [-5.0, -4.0, 3.0, 4.0], [0.0; 4], [0.0; 4]);
+            for side in 0..2 {
+                arm(
+                    &mut p,
+                    side,
+                    Arm {
+                        flex: 4.0,
+                        twist: 0.0,
+                        abduct: 0.0,
+                        elbow: 10.0,
+                        wrist: 0.0,
+                        protract: 0.0,
+                        elevate: 0.0,
+                    },
+                );
+            }
+        } else {
+            p.rot_move("hips", Vec3::new(0.0, -0.035, 0.0), -1.0, 0.0, 0.0);
+            spine(&mut p, [-1.0, -4.0, -8.0, -16.0], [0.0; 4], [0.0; 4]);
+            for side in 0..2 {
+                arm(
+                    &mut p,
+                    side,
+                    Arm {
+                        flex: 6.0,
+                        twist: 0.0,
+                        abduct: 12.0,
+                        elbow: 16.0,
+                        wrist: 0.0,
+                        protract: 0.0,
+                        elevate: 2.0,
+                    },
+                );
+            }
+        }
+        p.take()
+    })
+}
+
 fn heavy_swing(s: &Skeleton) -> AnimationClip {
     let effort = [
         (0.0, 0.0),
@@ -2660,6 +2707,8 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         lean(s, "lean_right", -1.0),
         lean_pitch(s, "lean_forward", 1.0),
         lean_pitch(s, "lean_back", -1.0),
+        grade_posture(s, "climb", 1.0),
+        grade_posture(s, "descend", -1.0),
         heavy_swing(s),
         block(s),
         hammer_block(s),
@@ -2816,6 +2865,30 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 Blend1dChild {
                     at: 1.0,
                     node: NodeDef::clip("lean_forward"),
+                },
+            ],
+            sync: false,
+            match_speed: false,
+        }),
+        weight: Weight::default(),
+    };
+    // Leaning into a climb and watching the steps on the way down, by `grade` (−1..1).
+    let leaning = NodeDef::Additive {
+        base: Box::new(leaning),
+        additive: Box::new(NodeDef::Blend1d {
+            param: "grade".into(),
+            children: vec![
+                Blend1dChild {
+                    at: -1.0,
+                    node: NodeDef::clip("descend"),
+                },
+                Blend1dChild {
+                    at: 0.0,
+                    node: NodeDef::Rest,
+                },
+                Blend1dChild {
+                    at: 1.0,
+                    node: NodeDef::clip("climb"),
                 },
             ],
             sync: false,

@@ -215,7 +215,11 @@ falls back to primitive shapes so tests stay fast.
 Fighters are ready for the faces and bodies a character module draws (`engine_world::
 character`; `visuals/character.rs`):
 
-- **Looks.** On its first step each fighter gets an `AppearanceRequest`: its own `Seed`, its
+- **Off by default.** `NpcSettings::character_looks` is false: fighters keep their own bodies
+  and ask for no looks. A character module draws people with their own limb lengths, open hands
+  and plain clothes, so held weapons miss short people's hands and squads lose their armour and
+  colours. Turn it on once the contract carries body size, a grip and armour or team colours.
+- **Looks.** With `character_looks` on, on its first step each fighter gets an `AppearanceRequest`: its own `Seed`, its
   squad (with its faction) as the family seed so squad mates look related, a sex picked from
   the seed and an age range by skill (a rookie 18 to 26, a master 34 to 52). An
   `Appearance` already there is kept. No full `Appearance` is put on fighters.
@@ -333,6 +337,42 @@ punish window), cooldown, spread and shield.
    game code) and it wall-runs and slides like the player; NPCs without them keep the
    built-in mover.
 
+## Suppress and flank
+
+Against an enemy in cover, a squad with its wits about it pins it down and goes round. Every
+half second the squad planner looks at each group of two or more shooters on the same target.
+If the smartest of them has `logic` of at least 0.35 and the group's mean `teamwork` is at
+least 0.3, it runs a maneuver that lasts while the target does:
+
+- **One suppressor**, the best shot among those not going round, keeps up steady fire at the
+  cover the target was last seen behind (for up to 10 s without sight) so it keeps its head
+  down. It picks a spot to fire on the cover from and stays there rather than work its own way
+  round. The others not going round give covering fire too.
+- **One or two flankers** (one in a pair, two in a group of three or more; never a medic, and
+  only those with `logic` of at least 0.35 and `teamwork` of at least 0.3) go to a spot off the
+  target's side. Their path is planned on the nav grid with the cells the target can see a
+  body in made four times dearer, so it goes behind cover where there is any.
+- **Bounding in turns**: only one flanker moves at a time. It runs to the last point of its
+  path still hidden from the target (at least 3.5 m on), or to the next cover on it, crouches
+  there for 0.6 s firing as overwatch, and then hands the turn to its mate. Once in position it
+  takes its shot from the side.
+
+A rookie squad doesn't do this: a shooter with `logic` under 0.3 rushes straight in to 4 m of
+its target. A smart squad without teamwork doesn't either; its members still pick their own
+spots (which may be wide), but nobody pins the target for them.
+
+## Punishing mistakes
+
+A fighter watches its target for an opening: a recovery after a missed swing or a stumble
+(`LocomotionState::vulnerable`), a reload (the target's `AnimationParams` "reloading" above
+0.5: the convention for a weapon module to set while its holder reloads; none does yet), or running out of stamina
+(`LocomotionState::stamina` dropping under 0.05 from 0.3 or more). It sees the opening only
+through its reaction delay, from its remembered snapshots of the target, so a master (0.07 s)
+sees a 0.4 s window with most of it left and a rookie (0.65 s) sees it after it has shut. A
+melee fighter that sees one strikes into it, dashing in from further than it otherwise would,
+and closes in from up to 12 m for a long one (a reload or spent stamina). A shooter fires into
+it even on the move. Each such attack or shot counts in `CombatStats::punishes`.
+
 ## Squad revives
 
 A squad mate can revive a downed fighter where it lies. Each mate weighs the run: how far it
@@ -406,7 +446,8 @@ a turned world also rebuilds the tactical world from the colliders.
 
 Reads: `Collider` / `RigidBody` (tactical world), `PhysicsQueries` when present, `Ground`,
 `Water`, `HeatField` (avoid fire), `Obscurance` (smoke, fog and dust), `NoiseEvent`, `DamageEvent`, `AttackEvent` (telegraphs to
-defend against), `ProjectileTrace` (near misses), `LocomotionState` of targets, `TerrainChanged`,
+defend against), `ProjectileTrace` (near misses), `LocomotionState` of targets (and their
+`vulnerable` and `stamina` for openings), targets' `AnimationParams` "reloading", `TerrainChanged`,
 `LocalTimeScale` / `TimeDilation`, `LocomotionBackend`, `WorldShift`, `AppearanceBodies`,
 `BodyRequest` (whose pose the animation module writes).
 
@@ -487,6 +528,22 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   allows (from the hands on, and from the kneel with the 1.2 s getting down). It draws only
   with `NPC_SCREENSHOT_DIR` set; without it the scenes play out the same and every check runs.
   `tests/art_fighters.rs` likewise draws only the two pictures it counts pixels in.
+- `tests/tactics.rs`: whole squads against a player behind a wall, each case over eight seeds.
+  A veteran, an elite and a veteran: one suppresses (at least four shots at the cover, never
+  more than 3 s between shots until the flank, and staying within 40° of straight on) while
+  the other two bound round in turns, both
+  moving at once less than a fifth of the time, holding at two covers or more and seen by the
+  player less than 40 % of the way, until one has a clear shot from 65° or more round within
+  30 s. A rookie squad has nobody suppress or flank, stays within 40° of straight on while
+  farther than 6 m and ends up close; a smart squad without teamwork doesn't flank either.
+  Against 0.4 s openings (a recovery after a missed swing) the share punished climbs with
+  skill: a rookie under 5 %, a master over 75 %.
+- `tests/art_tactics.rs`: two captioned strips of that fight. At eye level from behind the
+  player's wall (`fighters-flank-eye-level.png`) the suppressor's tracers come in over it, then
+  a flanker comes round the end of the wall, gets into position off the player's side (how far
+  round is in the caption) and fires. Top down (`fighters-flank-top-down.png`) at the same
+  moments, the paths so far: red the suppressor, yellow the flankers (a big dot at each cover
+  held), blue the player. It draws only with `NPC_SCREENSHOT_DIR` set.
 - `tests/training.rs`: the same post swings at a rookie, soldier, veteran, elite and master;
   the share of swings defended climbs with skill (0 % to about 100 %) and the master parries.
 - `tests/smoke.rs`: thick smoke hides a player until it clears, thin smoke slows spotting,

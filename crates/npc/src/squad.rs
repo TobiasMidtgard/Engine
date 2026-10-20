@@ -1,8 +1,12 @@
 //! Squads: NPCs that share a [`Squad`](crate::faction::Squad) tell each other what they see
 //! (a shouted callout, which enemies can hear too), take turns attacking in melee so they don't
-//! crowd one opponent, and split into suppressors and a flanker against the same target. When
-//! one of them kneels to revive a downed squad mate, the other shooters cover it. While the
-//! squad's medic kneels, they fire at whoever can see it, and its melee mates screen it.
+//! crowd one opponent, and suppress and flank the same target: one shooter pins it with steady
+//! fire while one or two mates (two in a squad of three or more) go round to its flank out of
+//! its sight, bounding from cover to cover in turns, one moving while the other holds and
+//! covers it. Whether they do depends on the squad's smartest shooter's logic and the squad's
+//! teamwork; a squad without (rookies) rushes straight in. When one of them kneels to revive a
+//! downed squad mate, the other shooters cover it. While the squad's medic kneels, they fire
+//! at whoever can see it, and its melee mates screen it.
 
 use std::collections::HashMap;
 
@@ -203,7 +207,31 @@ struct Member {
     ranged: bool,
     medic: bool,
     target: Option<Entity>,
+    /// Flanking: holding at a cover on the way, or at its flank spot.
+    holding: bool,
+    in_position: bool,
 }
+
+/// A squad's suppress-and-flank against one enemy: who pins it, who goes round to its flank,
+/// and which of those has the turn to move.
+#[derive(Debug, Clone, Default)]
+struct Maneuver {
+    suppressor: Option<Entity>,
+    flankers: Vec<Entity>,
+    mover: usize,
+}
+
+/// The maneuvers under way, by squad and enemy (kept between planning passes).
+#[derive(Default)]
+pub(crate) struct Plans {
+    maneuvers: HashMap<(Squad, Entity), Maneuver>,
+}
+
+/// The least logic a squad's smartest shooter needs, and the least teamwork the squad needs
+/// on average, to suppress and flank (a squad of rookies rushes straight in); and what each
+/// flanker needs.
+const PLAN_LOGIC: f32 = 0.35;
+const PLAN_TEAMWORK: f32 = 0.3;
 
 /// Share sightings and hand out roles (runs every `plan_secs`).
 pub(crate) fn plan_squads(
@@ -212,6 +240,7 @@ pub(crate) fn plan_squads(
     time: Res<Time>,
     mut noise: MessageWriter<NoiseEvent>,
     mut since: Local<f32>,
+    mut plans: Local<Plans>,
 ) {
     *since += time.delta_secs();
     if *since < settings.plan_secs {
@@ -251,6 +280,8 @@ pub(crate) fn plan_squads(
             ranged: weapon.style == WeaponStyle::Ranged,
             medic,
             target: brain.target,
+            holding: brain.holding,
+            in_position: brain.in_position,
         });
         for k in &memory.known {
             if k.visible && k.awareness >= 0.9 {
@@ -295,7 +326,7 @@ pub(crate) fn plan_squads(
             }
         }
     }
-    // Roles: per squad and shared target, the smartest ranged member flanks, the rest suppress.
+    // Roles: per squad and shared target, suppress and flank (see the module docs).
     let mut by_target: HashMap<(Squad, Entity), Vec<usize>> = HashMap::new();
     for (i, m) in members.iter().enumerate() {
         if let Some(t) = m.target {
@@ -303,30 +334,109 @@ pub(crate) fn plan_squads(
         }
     }
     let mut roles: HashMap<Entity, &'static str> = HashMap::new();
-    for list in by_target.values() {
+    let mut bound: HashMap<Entity, bool> = HashMap::new();
+    let mut groups: Vec<_> = by_target.into_iter().collect();
+    // (In a fixed order: what each pass decides doesn't depend on how a map iterates.)
+    groups.sort_by_key(|(_, list)| list[0]);
+    let mut kept = HashMap::new();
+    for (key, list) in groups {
         let ranged: Vec<&Member> = list
             .iter()
             .map(|&i| &members[i])
             .filter(|m| m.ranged)
             .collect();
-        if ranged.len() >= 2 {
-            // (The medic stays back.)
-            let flanker = ranged
-                .iter()
-                .filter(|m| !m.medic && m.skills.teamwork >= 0.3 && m.skills.logic >= 0.35)
-                .max_by(|a, b| a.skills.logic.total_cmp(&b.skills.logic));
-            for m in &ranged {
-                let role = if flanker.is_some_and(|f| f.e == m.e) {
-                    "flank"
-                } else if m.skills.teamwork >= 0.3 && !m.medic {
-                    "suppress"
-                } else {
-                    ""
-                };
-                roles.insert(m.e, role);
-            }
+        if ranged.len() < 2 {
+            continue;
         }
+        let smartest = ranged.iter().map(|m| m.skills.logic).fold(0.0, f32::max);
+        let teamwork = ranged.iter().map(|m| m.skills.teamwork).sum::<f32>() / ranged.len() as f32;
+        if smartest < PLAN_LOGIC || teamwork < PLAN_TEAMWORK {
+            continue;
+        }
+        let can_flank =
+            |m: &Member| !m.medic && m.skills.teamwork >= 0.3 && m.skills.logic >= PLAN_LOGIC;
+        let had = plans.maneuvers.remove(&key).unwrap_or_default();
+        // The flankers: those already going round keep at it; the smartest others join them,
+        // up to two, one shooter always left to pin the enemy.
+        let want = if ranged.len() >= 3 { 2 } else { 1 };
+        let mut flankers: Vec<Entity> = had
+            .flankers
+            .iter()
+            .copied()
+            .filter(|&e| ranged.iter().any(|m| m.e == e && can_flank(m)))
+            .collect();
+        let mut others: Vec<&&Member> = ranged
+            .iter()
+            .filter(|m| can_flank(m) && !flankers.contains(&m.e) && had.suppressor != Some(m.e))
+            .collect();
+        others.sort_by(|a, b| b.skills.logic.total_cmp(&a.skills.logic));
+        for m in others {
+            if flankers.len() >= want {
+                break;
+            }
+            flankers.push(m.e);
+        }
+        flankers.truncate(want);
+        // The one that pins it: it keeps the job, else the best shot of the rest.
+        let rest = || ranged.iter().filter(|m| !flankers.contains(&m.e));
+        let suppressor = had
+            .suppressor
+            .filter(|&s| rest().any(|m| m.e == s))
+            .or_else(|| {
+                rest()
+                    .filter(|m| !m.medic)
+                    .max_by(|a, b| a.skills.accuracy.total_cmp(&b.skills.accuracy))
+                    .map(|m| m.e)
+            });
+        let Some(suppressor) = suppressor else {
+            continue;
+        };
+        // Whose turn it is to move: one at a time; the other holds a cover and covers it. The
+        // turn passes on once the mover reaches a cover on the way (or its flank spot).
+        let state = |e: Entity| {
+            ranged
+                .iter()
+                .find(|m| m.e == e)
+                .map_or((false, false), |m| (m.holding, m.in_position))
+        };
+        let moving: Vec<usize> = (0..flankers.len())
+            .filter(|&i| !state(flankers[i]).1)
+            .collect();
+        let mut mover = had.mover.min(flankers.len().saturating_sub(1));
+        if moving.len() >= 2 {
+            if !moving.contains(&mover) || state(flankers[mover]).0 {
+                mover = moving
+                    .iter()
+                    .copied()
+                    .find(|&i| i != mover)
+                    .unwrap_or(mover);
+            }
+        } else if let Some(&only) = moving.first() {
+            mover = only;
+        }
+        for m in &ranged {
+            let role = if flankers.contains(&m.e) {
+                "flank"
+            } else if m.e == suppressor || (m.skills.teamwork >= 0.3 && !m.medic) {
+                "suppress"
+            } else {
+                ""
+            };
+            roles.insert(m.e, role);
+        }
+        for (i, &f) in flankers.iter().enumerate() {
+            bound.insert(f, moving.len() < 2 || i == mover);
+        }
+        kept.insert(
+            key,
+            Maneuver {
+                suppressor: Some(suppressor),
+                flankers,
+                mover,
+            },
+        );
     }
+    plans.maneuvers = kept;
     // While a mate revives someone, the other shooters cover it: they hold where they are and
     // keep the enemy's heads down (fire at where it was last seen), instead of flanking.
     // A medic going to kneel or kneeling most of all: the shooters fire at whoever can see
@@ -351,6 +461,14 @@ pub(crate) fn plan_squads(
         let reviving = brain.action == NpcAction::Revive;
         brain.role = if reviving { "" } else { role };
         brain.guard = guards.get(&e).copied().filter(|_| !reviving);
+        brain.bound = bound.get(&e).copied().unwrap_or(true);
+        if brain.role != "flank" {
+            // Not going round any more: what it planned for that goes.
+            brain.holding = false;
+            brain.in_position = false;
+            brain.flank_goal = None;
+            brain.flank_route.clear();
+        }
     }
 }
 

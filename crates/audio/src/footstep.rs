@@ -1,7 +1,10 @@
 //! Procedural footsteps and impacts.
 //!
-//! No recordings: every step is synthesized from a few physically motivated layers, mixed by
-//! the surface's [`SurfaceSound`]. Grass rustles, gravel rattles (each pebble a tiny
+//! Every step can be synthesized from a few physically motivated layers, mixed by the
+//! surface's [`SurfaceSound`]. Where recorded takes of the surface are fetched
+//! ([`crate::samples`]), a footstep plays one of them and the layers only add what the
+//! recording lacks ([`FootstepSound::with_sample`]); without them the layers make the whole
+//! step. Grass rustles, gravel rattles (each pebble a tiny
 //! resonator), snow crunches as it compacts (and squeaks when it is colder than about −5 °C),
 //! mud squelches through a closing resonance and pops on lift-off with a suction bubble,
 //! puddles splash with bubbles that ring at their Minnaert pitch, planks knock with wood
@@ -20,6 +23,7 @@ use engine_world::{ContactKind, Deformation, SurfaceCell, SurfaceMaterial};
 
 use crate::dsp::{Biquad, Bubble, Noise, Resonator, db, decay_coef};
 use crate::mixer::Sound;
+use crate::samples::{SampleVoice, StepSample};
 
 /// How a surface sounds underfoot: how much of each layer it has (0 = none, 1 = typical) and
 /// its tone. Tune these per material in [`FootstepSurfaces`] (by JSON, from the console or an
@@ -185,6 +189,69 @@ impl SurfaceSound {
         base.unwrap_or_default()
     }
 
+    /// The 14 layer weights, in field order (thump … squeak).
+    fn layers(&self) -> [f32; 14] {
+        [
+            self.thump,
+            self.click,
+            self.scuff,
+            self.grit,
+            self.crunch,
+            self.rustle,
+            self.crackle,
+            self.squelch,
+            self.suction,
+            self.splash,
+            self.hollow,
+            self.ring,
+            self.hiss,
+            self.squeak,
+        ]
+    }
+
+    fn with_layers(mut self, l: [f32; 14]) -> Self {
+        [
+            self.thump,
+            self.click,
+            self.scuff,
+            self.grit,
+            self.crunch,
+            self.rustle,
+            self.crackle,
+            self.squelch,
+            self.suction,
+            self.splash,
+            self.hollow,
+            self.ring,
+            self.hiss,
+            self.squeak,
+        ] = l;
+        self
+    }
+
+    /// How much of `dry`'s character this sound still has (0..1): the share of `dry`'s layer
+    /// weights it keeps. A wet path keeps most of its gravel; frozen mud keeps little of mud.
+    pub fn kept(&self, dry: &SurfaceSound) -> f32 {
+        let (a, b) = (self.layers(), dry.layers());
+        let total: f32 = b.iter().sum();
+        if total <= 1e-6 {
+            return 1.0;
+        }
+        a.iter().zip(&b).map(|(x, y)| x.min(*y)).sum::<f32>() / total
+    }
+
+    /// The layers to synthesize over a recording of `dry`: everything this sound has beyond
+    /// `dry` (rain's squelch, a puddle's splash, snow's squeak), plus `bed` (0..1) of what
+    /// they share, for per-step variation. Tone, pitch and gain stay.
+    pub fn over_recording(&self, dry: &SurfaceSound, bed: f32) -> SurfaceSound {
+        let (a, b) = (self.layers(), dry.layers());
+        let mut l = [0.0; 14];
+        for k in 0..14 {
+            l[k] = (a[k] - b[k]).max(0.0) + a[k].min(b[k]) * bed;
+        }
+        self.with_layers(l)
+    }
+
     pub fn blend(&self, o: &Self, t: f32) -> Self {
         let t = t.clamp(0.0, 1.0);
         let l = |a: f32, b: f32| a + (b - a) * t;
@@ -272,7 +339,7 @@ impl SurfaceSound {
     }
 }
 
-fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
+pub(crate) fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
@@ -849,14 +916,24 @@ impl Splash {
         }
     }
 
-    fn strike(&mut self, fs: f32, s: f32, deep: f32, bubbles: &mut Bubbles, rng: &mut Noise) {
+    /// `bubble_gain` scales the bubbles (the spray and slosh are scaled by the layer weight
+    /// where they are mixed).
+    fn strike(
+        &mut self,
+        fs: f32,
+        s: f32,
+        deep: f32,
+        bubble_gain: f32,
+        bubbles: &mut Bubbles,
+        rng: &mut Noise,
+    ) {
         self.spray.trigger(fs, s, 0.002, 0.11);
         self.slosh
             .trigger(fs, s * (0.3 + deep), 0.015, 0.25 + 0.3 * deep);
         let n = (3.0 + 9.0 * s.min(1.5)) as usize;
         for _ in 0..n {
             let r = rng.range(0.0012, 0.006) * (1.0 + deep);
-            let amp = rng.uniform().powi(2) * s * 0.5;
+            let amp = rng.uniform().powi(2) * s * 0.5 * bubble_gain;
             bubbles.add(Bubble::new(fs, r, amp, 0.1, rng.range(0.0, 0.09)));
         }
     }
@@ -1005,9 +1082,25 @@ pub struct FootstepSound {
     ring: Modes,
     squeak: Squeak,
     hp: Biquad,
+    sample: Option<SampleVoice>,
+    /// How loud the splash's bubbles are: 1 when synthesized whole (the splash layer's weight
+    /// only scales its spray), the splash weight over a recording, which has its own.
+    splash_bubbles: f32,
 }
 
 impl FootstepSound {
+    /// A footstep that plays a recorded take, with `step`'s layers synthesized on top (pass
+    /// the step [`FootstepSamples::recorded`](crate::samples::FootstepSamples::recorded)
+    /// returns, whose layers are only what the recording lacks).
+    pub fn with_sample(fs: f32, step: &Step, sample: &StepSample) -> Self {
+        let mut me = Self::new(fs, step);
+        me.splash_bubbles = step.surface.splash.min(1.0);
+        let voice = SampleVoice::new(fs, sample);
+        me.max_len = me.max_len.max(voice.remaining() + 64);
+        me.sample = Some(voice);
+        me
+    }
+
     pub fn new(fs: f32, step: &Step) -> Self {
         let mut rng = Noise::new(step.seed);
         let mut s = step.surface;
@@ -1161,6 +1254,8 @@ impl FootstepSound {
             ),
             squeak: Squeak::new(fs, &mut rng),
             hp: Biquad::highpass(fs, 35.0, 0.7),
+            sample: None,
+            splash_bubbles: 1.0,
             fs,
             gain: db(s.gain_db) * 0.42 * i.powf(0.8) * rng.range(0.85, 1.15),
             rng,
@@ -1255,7 +1350,8 @@ impl FootstepSound {
         }
         if s.splash > 0.0 {
             let deep = (s.splash - 1.0).clamp(0.0, 1.0);
-            self.splash.strike(fs, k, deep, &mut self.bubbles, rng);
+            self.splash
+                .strike(fs, k, deep, self.splash_bubbles, &mut self.bubbles, rng);
         }
         if s.hollow > 0.0 {
             self.hollow.strike(fs, k);
@@ -1266,7 +1362,8 @@ impl FootstepSound {
     }
 
     fn active(&self) -> bool {
-        self.thump.active()
+        self.sample.as_ref().is_some_and(|s| s.active())
+            || self.thump.active()
             || self.click.active()
             || self.scuff.active()
             || self.grit.active()
@@ -1342,10 +1439,26 @@ impl Sound for FootstepSound {
                 y += self.squeak.next(fs, rng) * s.squeak * 0.15;
             }
             *o = self.hp.process(y) * self.gain;
+            if let Some(sample) = &mut self.sample {
+                *o += sample.next();
+            }
             self.t += 1;
         }
         out.len()
     }
+}
+
+/// Loudness ([`crate::samples::loudness`]) of a synthesized reference step on `surface`: a
+/// 75 kg walker at 1.4 m/s, averaged over four steps. Recorded takes are levelled to it, so a
+/// surface sounds as loud recorded as synthesized.
+pub fn reference_loudness(surface: &SurfaceSound, fs: f32) -> f32 {
+    let mut total = 0.0;
+    for seed in 1..=4u64 {
+        let step = Step::from_contact(*surface, ContactKind::Foot, 75.0, 1.4, seed * 7_919);
+        let x = render_mono(&mut FootstepSound::new(fs, &step), 1.0, fs);
+        total += crate::samples::loudness(&x, fs);
+    }
+    total / 4.0
 }
 
 /// Render a whole sound into a buffer (tests, tools and offline previews).
@@ -1499,6 +1612,91 @@ mod tests {
         let mut steel = mats.get(mats.id("metal").unwrap()).clone();
         steel.name = "steel_deck".into();
         assert!(SurfaceSound::from_material(&steel).ring > 0.5);
+    }
+
+    #[test]
+    fn recordings_get_only_the_layers_they_lack() {
+        let grass = SurfaceSound::preset("grass").unwrap();
+        let snow = SurfaceSound::preset("snow").unwrap();
+        // Dry grass over a grass recording: a faint bed of every layer, nothing more.
+        let over = grass.over_recording(&grass, 0.1);
+        assert!((over.rustle - 0.1).abs() < 1e-6 && over.squelch == 0.0);
+        assert_eq!(grass.kept(&grass), 1.0);
+        // Wet grass keeps most of its grass and adds squelch.
+        let wet = grass.with_state(
+            &SurfaceCell {
+                wetness: 1.0,
+                ..Default::default()
+            },
+            0.6,
+            15.0,
+            0.0,
+            &snow,
+        );
+        let over = wet.over_recording(&grass, 0.0);
+        assert!(over.squelch > 0.3 && over.rustle == 0.0);
+        assert!(
+            (0.6..1.0).contains(&wet.kept(&grass)),
+            "{}",
+            wet.kept(&grass)
+        );
+        // Frozen mud keeps little of mud.
+        let mud = SurfaceSound::preset("mud").unwrap();
+        let frozen = mud.with_state(&SurfaceCell::default(), 1.0, -12.0, 0.0, &snow);
+        assert!(frozen.kept(&mud) < 0.4, "{}", frozen.kept(&mud));
+    }
+
+    #[test]
+    fn a_step_with_a_recording_plays_it_and_is_reproducible() {
+        use crate::samples::{Gait, StepSample, Take};
+        let pcm: Vec<f32> = (0..24_000)
+            .map(|i| (i as f32 * 0.05).sin() * (-(i as f32) / 4_000.0).exp())
+            .collect();
+        let sample = StepSample {
+            take: Take {
+                pcm: pcm.into(),
+                sample_rate: 24_000.0,
+                gait: Gait::Walk,
+                source: "test".into(),
+                stats: Default::default(),
+            },
+            speed: 1.0,
+            gain: 0.5,
+            shelf_db: 0.0,
+            lowpass_hz: 20_000.0,
+        };
+        let silent = Step::from_contact(SurfaceSound::SILENT, ContactKind::Foot, 75.0, 1.4, 3);
+        let render = || {
+            render_mono(
+                &mut FootstepSound::with_sample(FS, &silent, &sample),
+                3.0,
+                FS,
+            )
+        };
+        let x = render();
+        // The take (one second at 24 kHz) plays at the mixer's rate, two seconds of samples.
+        assert!(
+            (x.len() as f32 / FS - 1.0).abs() < 0.05,
+            "{} s",
+            x.len() as f32 / FS
+        );
+        assert!(peak(&x) > 0.3);
+        assert_eq!(render(), x);
+        // With layers on top it is louder than the take alone.
+        let grass = Step::from_contact(
+            SurfaceSound::preset("grass").unwrap(),
+            ContactKind::Foot,
+            75.0,
+            1.4,
+            3,
+        );
+        let y = render_mono(
+            &mut FootstepSound::with_sample(FS, &grass, &sample),
+            3.0,
+            FS,
+        );
+        let e = |v: &[f32]| v.iter().map(|s| s * s).sum::<f32>();
+        assert!(e(&y) > e(&x));
     }
 
     #[test]
