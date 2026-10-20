@@ -823,7 +823,12 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
         "physics" => engine_physics::demo::VIEWS
             .iter()
             .map(|v| {
-                let view = View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs);
+                let mut view =
+                    View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs);
+                // Long warm-ups (Jenga plays 22 s before its fall) run without drawing.
+                if v.warmup_secs > 3.0 {
+                    view = view.quick_warmup();
+                }
                 match v.station {
                     Some(s) => view.on_arrive(
                         "physics.proving_ground.replay",
