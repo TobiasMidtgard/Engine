@@ -33,7 +33,7 @@ An effect has emitters (layers). Each emitter says when it spawns (`rate`, `rate
 box, line), how particles move (`speed`, `velocity`, `orbit_speed`, `gravity`, `drag`, `wind`,
 `turbulence`, `vortex`, `attract`, `collide` with the ground or water: bounce, die or stick) and
 how they look (`sprite`: glow, spark, smoke, flame, droplet, ring, star, rune, shard, dust,
-haze, billow, vortex, plume, crown, ripple, foam, blaze, fireball, jet; `facing`: camera, velocity, horizontal or axis (standing along the
+haze, billow, vortex, plume, crown, ripple, foam, blaze, fireball, jet, veil; `facing`: camera, velocity, horizontal or axis (standing along the
 emitter's direction); `color` and `size_over_life`; `emissive` in cd/m²;
 `lit` by sun, sky and point lights; `additive`; `soft`), or `debris` to draw solid 3D pieces
 instead of sprites ([`Debris`]: rock, splinter, shard or scrap). An effect can also carry a point
@@ -86,6 +86,12 @@ The court's fountain is a jet of water, not a cloud of drops. The `jet` sprite d
 rod rising from the nozzle, clear in the middle and mirroring the sky at its edges, streaked as
 it flows and breaking into beads where it turns over; fine drops rain back around it into the
 basin. `--example fountain` renders it close up.
+
+The healing aura is a column of light, not a cloud of dots. The `veil` sprite draws a hollow
+tube of light as wide as the dais's circle, its walls piling up toward its edges and combed into
+rays that drift up and turn slowly round it, brightest at its foot and fading out as it rises.
+It stands on a slowly turning rune circle, with golden-green motes streaking up it in a
+spiral. `--example aura` renders it close up by day, at dusk and at night.
 
 Splashes are water, not white puffs. The `crown` sprite ray traces the splash's crown inside
 its square: a wall of water thrown up in a ring that flares out, its rim drawn into fingers
@@ -194,8 +200,8 @@ follows the camera's exposure as particle glow does ([`VfxSettings::glow_exposur
 keeps its color at night instead of turning white.
 `cargo run -p engine_vfx --release --example sub_emitters` renders the firework and the
 splitting sparks; `--example braziers` renders the brazier fires, `--example engines` every
-exhaust side on and a rocket lifting off (add `vacuum` to take the air away), `--example splashes` the splashes and `--example explosions` the explosions close up
-as they unfold, and `--example court` the whole court, each by day, at dusk and at night.
+exhaust side on and a rocket lifting off (add `vacuum` to take the air away), `--example splashes` the splashes, `--example explosions` the explosions close up
+as they unfold, `--example fountain` and `--example aura` the fountain and the healing aura, and `--example court` the whole court, each by day, at dusk and at night.
 
 ## Next
 

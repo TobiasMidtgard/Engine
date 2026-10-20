@@ -1000,33 +1000,76 @@ fn spells() -> Vec<EffectDesc> {
         )
     };
 
+    let heal_green = [0.5, 1.0, 0.6];
     let heal = EffectDesc {
-        prewarm: 2.0,
+        prewarm: 3.0,
         light: light([0.55, 1.0, 0.55], 2500.0, 8.0, 0.1, 0.5),
         ..effect(
             "spell.heal_aura",
-            "A healing aura: golden-green motes rising and swirling, pulsing rings on the ground \
-             and glints.",
+            "A healing aura: a column of light rising from a slowly turning circle, golden-green \
+             motes spiraling up it, pulsing rings on the ground and glints.",
             None,
             vec![
+                // The column: a tube of light as wide as the circle, a few overlapping copies
+                // crossfading so it never blinks.
                 EmitterDesc {
-                    rate: 70.0,
-                    shape: EmitShape::Disc { radius: 1.3 },
-                    speed: [0.0, 0.2],
-                    velocity: [0.0, 0.9, 0.0],
+                    rate: 1.0,
+                    speed: [0.0, 0.0],
+                    lifetime: [3.0, 3.0],
+                    size: [2.8, 2.8],
+                    rotation_deg: [0.0, 0.0],
+                    local_space: true,
+                    steady: true,
+                    sprite: Sprite::Veil,
+                    facing: Facing::Axis,
+                    stretch: 0.82,
+                    color: fade(heal_green, 0.5, 0.3, 0.7),
+                    emissive: 6000.0,
+                    additive: 1.0,
+                    soft: 0.2,
+                    wind: 0.0,
+                    ..em("column")
+                },
+                // The circle it rises from, turning slowly.
+                EmitterDesc {
+                    bursts: every(30.0, 1),
+                    offset: [0.0, 0.01, 0.0],
+                    speed: [0.0, 0.0],
+                    lifetime: [30.0, 30.0],
+                    size: [2.3, 2.3],
+                    rotation_deg: [0.0, 0.0],
+                    spin_deg: [8.0, 8.0],
+                    local_space: true,
+                    sprite: Sprite::Rune,
+                    facing: Facing::Horizontal,
+                    color: fade(heal_green, 0.7, 0.02, 0.97),
+                    emissive: 9000.0,
+                    additive: 1.0,
+                    soft: 0.0,
+                    wind: 0.0,
+                    ..em("circle")
+                },
+                // Motes spiraling up the column, drawn as short streaks.
+                EmitterDesc {
+                    rate: 110.0,
+                    shape: EmitShape::Disc { radius: 1.15 },
+                    speed: [0.0, 0.1],
+                    velocity: [0.0, 1.0, 0.0],
                     orbit_speed: 0.6,
-                    turbulence: 0.6,
+                    turbulence: 0.5,
                     turbulence_scale: 0.8,
                     drag: 0.8,
                     wind: 0.2,
                     lifetime: [1.8, 2.8],
-                    size: [0.05, 0.1],
+                    size: [0.012, 0.024],
+                    facing: Facing::Velocity,
+                    stretch: 0.15,
                     color: g(&[
                         (0.0, [0.5, 1.0, 0.5, 0.0]),
-                        (0.2, [0.6, 1.0, 0.55, 1.0]),
+                        (0.2, [0.65, 1.0, 0.55, 1.0]),
                         (1.0, [1.0, 0.95, 0.5, 0.0]),
                     ]),
-                    emissive: 14_000.0,
+                    emissive: 22_000.0,
                     additive: 1.0,
                     ..em("motes")
                 },
@@ -1053,43 +1096,17 @@ fn spells() -> Vec<EffectDesc> {
                     ..em("rings")
                 },
                 EmitterDesc {
-                    rate: 12.0,
+                    rate: 10.0,
                     shape: EmitShape::Disc { radius: 1.1 },
                     speed: [0.0, 0.0],
                     velocity: [0.0, 1.5, 0.0],
                     lifetime: [0.6, 1.0],
-                    size: [0.1, 0.18],
+                    size: [0.06, 0.12],
                     sprite: Sprite::Star,
                     color: g(&[(0.0, [1.0, 0.95, 0.6, 1.0]), (1.0, [0.8, 1.0, 0.5, 0.0])]),
                     emissive: 18_000.0,
                     additive: 1.0,
                     ..em("glints")
-                },
-                // Soft shafts of light rising from the circle.
-                EmitterDesc {
-                    rate: 9.0,
-                    shape: EmitShape::Ring {
-                        radius: 1.2,
-                        thickness: 0.4,
-                    },
-                    offset: [0.0, 0.9, 0.0],
-                    speed: [0.0, 0.0],
-                    velocity: [0.0, 0.6, 0.0],
-                    lifetime: [1.6, 2.4],
-                    size: [0.25, 0.4],
-                    sprite: Sprite::Glow,
-                    facing: Facing::Velocity,
-                    stretch: 1.3,
-                    color: g(&[
-                        (0.0, [0.55, 1.0, 0.6, 0.0]),
-                        (0.3, [0.6, 1.0, 0.55, 0.35]),
-                        (1.0, [0.9, 1.0, 0.6, 0.0]),
-                    ]),
-                    emissive: 6000.0,
-                    additive: 1.0,
-                    soft: 0.2,
-                    wind: 0.0,
-                    ..em("shafts")
                 },
                 EmitterDesc {
                     rate: 3.0,
@@ -1104,10 +1121,10 @@ fn spells() -> Vec<EffectDesc> {
                     facing: Facing::Horizontal,
                     color: g(&[
                         (0.0, [0.5, 1.0, 0.55, 0.0]),
-                        (0.5, [0.5, 1.0, 0.55, 0.25]),
+                        (0.5, [0.5, 1.0, 0.55, 0.3]),
                         (1.0, [0.5, 1.0, 0.55, 0.0]),
                     ]),
-                    emissive: 2500.0,
+                    emissive: 3000.0,
                     additive: 1.0,
                     soft: 0.0,
                     wind: 0.0,
