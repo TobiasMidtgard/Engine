@@ -1,13 +1,17 @@
-//! What disturbs the water: swimmers, boats, footsteps, bullets, explosions and rain.
+//! What disturbs the water: swimmers, boats, footsteps, cloth and ropes, bullets, explosions
+//! and rain.
 //!
-//! Everything arrives through `engine_world` (positions, `GroundContact`, `ProjectileTrace`,
-//! `WorldImpulse`, `WeatherState`), so water reacts to any module's characters, weapons and
-//! weather without knowing them.
+//! Everything arrives through `engine_world` (positions, `GroundContact`, `WaterDisturbance`,
+//! `ProjectileTrace`, `WorldImpulse`, `WeatherState`), so water reacts to any module's
+//! characters, cloth, weapons and weather without knowing them.
+
+use std::collections::HashMap;
 
 use engine_core::math::{DVec2, DVec3, Rng, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_world::{
-    GroundContact, NoiseEvent, ProjectileTrace, WaterSplash, WeatherState, WorldImpulse,
+    GroundContact, NoiseEvent, ProjectileTrace, WaterDisturbance, WaterSplash, WeatherState,
+    WorldImpulse,
 };
 
 use crate::body::{RainShower, WaterSettings};
@@ -23,6 +27,11 @@ const TELEPORT_SPEED: f32 = 150.0;
 const STROUHAL: f32 = 0.2;
 /// How hard a shed eddy turns: its fastest water goes about 0.4 times the body's speed.
 const EDDY: f32 = 1.3;
+/// Going into the water faster than this, m/s, a `WaterDisturbance` throws spray.
+const SPLASH_SPEED: f32 = 2.0;
+/// Spray owed by one source is sent as a `WaterSplash` once it reaches this much water, kg
+/// (a few puffs a second for a flapping sheet, not one per patch per step).
+const SPRAY_PUFF_KG: f32 = 0.15;
 
 /// Something that pushes the water as it moves through it: a swimmer, a wading animal, a
 /// boat's hull, a dragging rope. Leaves wakes and rings, and splashes on entry.
@@ -113,11 +122,13 @@ pub fn disturbance_system(
     )>,
     showers: Query<(&GlobalTransform, &RainShower)>,
     mut contacts: MessageReader<GroundContact>,
+    mut pushes: MessageReader<WaterDisturbance>,
     mut traces: MessageReader<ProjectileTrace>,
     mut impulses: MessageReader<WorldImpulse>,
     mut noise: MessageWriter<NoiseEvent>,
     mut splash_out: MessageWriter<WaterSplash>,
     mut rng: Local<Option<Rng>>,
+    mut spray_owed: Local<HashMap<Option<Entity>, f32>>,
 ) {
     let dt = time.delta_secs();
     let rng = rng.get_or_insert_with(|| Rng::new(0x05EA_51DE));
@@ -284,6 +295,60 @@ pub fn disturbance_system(
                     spin: 0.0,
                 });
             }
+        }
+
+        // Cloth, ropes, hair, nets and paddles pushing the surface (`WaterDisturbance`): rings
+        // where they slap in or lift out, a wake and drag where they sweep along it, spray
+        // when they go in fast.
+        for d in pushes.read() {
+            let r = d.radius.max(0.05);
+            let Some(surface) = surface_near(&state, d.position, r + 0.5) else {
+                continue;
+            };
+            let v = d.velocity;
+            let flat = Vec2::new(v.x, v.z);
+            let sweep = flat.length().min(8.0);
+            // How solid the push is: a light sheet slapping in dents the surface a little, a
+            // paddle or a net full of fish moves it like a body would (its mass against a 1 cm
+            // layer of water under it).
+            let layer = 1000.0 * std::f32::consts::PI * r * r * 0.01;
+            let solid = (d.mass_kg.max(0.0) / layer).sqrt().clamp(0.4, 1.0);
+            let plunge = (-v.y).max(0.0).min(10.0);
+            let lift = v.y.max(0.0).min(10.0);
+            let depth = (0.5 * sweep + 0.8 * plunge - 0.3 * lift) * r * dt.max(1e-4) * solid;
+            out.push(Disturbance {
+                pos: DVec2::new(d.position.x, d.position.z),
+                radius: r,
+                depth: depth.clamp(-0.05, 0.08),
+                foam: ((plunge - 0.8).max(0.0) * 0.25 + sweep * 0.03).min(0.6) * solid,
+                stir: (sweep > 0.1).then_some(flat.clamp_length_max(4.0) * 0.5 * solid),
+                spin: 0.0,
+            });
+            if plunge > SPLASH_SPEED {
+                let owed = spray_owed.entry(d.source).or_insert(0.0);
+                *owed += d.mass_kg.max(0.0) * (plunge - SPLASH_SPEED) * 0.5;
+                if *owed > SPRAY_PUFF_KG {
+                    let at = DVec3::new(d.position.x, surface, d.position.z);
+                    splashes.push(WaterSplash {
+                        position: at,
+                        velocity: v,
+                        radius: r,
+                        mass_kg: std::mem::take(owed),
+                        source: d.source,
+                    });
+                    if settings.noise_events {
+                        noises.push(NoiseEvent {
+                            position: at,
+                            radius: 6.0 + 3.0 * plunge,
+                            source: d.source,
+                        });
+                    }
+                }
+            }
+        }
+        // (Sources come and go: forget them now and then rather than keep every one.)
+        if spray_owed.len() > 256 {
+            spray_owed.clear();
         }
 
         // Bullets and arrows crossing the surface.

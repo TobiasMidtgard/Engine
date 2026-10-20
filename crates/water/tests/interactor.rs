@@ -1,12 +1,12 @@
 //! A boat floats on the water around it, not in the trough its own wake digs under it: the
 //! `Water` query under a moving interactor stays at the lake's level while the wake spreads
 //! behind it. A boat moved without sailing (respawned, or shifted with the world) throws no
-//! spray.
+//! spray. A sheet of cloth dropped in (`WaterDisturbance`) sends rings out and throws spray.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_water::{WaterBody, WaterInteractor, WaterPlugin};
-use engine_world::{Water, WaterSplash, WorldPlugin};
+use engine_world::{Water, WaterDisturbance, WaterSplash, WorldPlugin};
 
 const SPEED: f64 = 1.8;
 
@@ -118,4 +118,55 @@ fn a_teleported_boat_throws_no_spray() {
         thrown.len(),
         thrown.first()
     );
+}
+
+/// A 1.2 m sheet dropped flat onto the lake from half a meter, as the softbody module reports
+/// it: four 0.6 m patches of 0.1 kg slapping in at 3 m/s for a few steps, then lying still.
+fn drop_sheet(mut step: Local<u32>, mut out: MessageWriter<WaterDisturbance>) {
+    *step += 1;
+    if !(30..36).contains(&*step) {
+        return;
+    }
+    for (x, z) in [(-0.3, -0.3), (0.3, -0.3), (-0.3, 0.3), (0.3, 0.3)] {
+        out.write(WaterDisturbance {
+            position: DVec3::new(x, 0.0, z),
+            velocity: Vec3::new(0.2, -3.0, 0.0),
+            radius: 0.3,
+            mass_kg: 0.1,
+            source: None,
+        });
+    }
+}
+
+#[test]
+fn a_sheet_dropped_in_sends_rings_and_spray() {
+    let mut app = App::new();
+    app.world.resource_mut::<EngineConfig>().headless = true;
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual {
+            step_secs: 1.0 / 30.0,
+        });
+    app.add_plugins((WorldPlugin, WaterPlugin));
+    let mut lake = WaterBody::lake(60.0);
+    lake.waves.wind_waves = false;
+    lake.bed = engine_water::WaterBed::Flat { depth_m: 4.0 };
+    app.world
+        .spawn((Transform::from_translation(DVec3::ZERO), lake));
+    app.world.insert_resource(Splashes::default());
+    app.add_systems(Update, (drop_sheet, collect));
+    let mut ring = 0.0f64;
+    for _ in 0..90 {
+        app.update();
+        // The rings spread out past the sheet's edge.
+        let water = app.world.resource::<Water>().0.clone();
+        for at in [DVec3::new(2.0, 0.0, 0.0), DVec3::new(0.0, 0.0, -2.0)] {
+            ring = ring.max(water.sample(at).unwrap().surface_height.abs());
+        }
+    }
+    assert!(ring > 0.002, "no rings from the sheet ({ring:.4} m)");
+    let splashes = &app.world.resource::<Splashes>().0;
+    assert!(!splashes.is_empty(), "the sheet threw no spray");
+    let thrown: f32 = splashes.iter().map(|s| s.mass_kg).sum();
+    assert!(thrown < 2.0, "a light sheet threw {thrown:.2} kg of spray");
 }
