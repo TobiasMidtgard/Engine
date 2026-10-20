@@ -1452,9 +1452,21 @@ impl Sound for FootstepSound {
 /// 75 kg walker at 1.4 m/s, averaged over four steps. Recorded takes are levelled to it, so a
 /// surface sounds as loud recorded as synthesized.
 pub fn reference_loudness(surface: &SurfaceSound, fs: f32) -> f32 {
+    reference_loudness_of(surface, ContactKind::Foot, 1.0, fs)
+}
+
+/// [`reference_loudness`] of a `kind` of contact (a paw, a hoof) at `intensity` (see
+/// [`Step::intensity`]), so recorded paws and hooves are levelled to their own synthesis.
+pub fn reference_loudness_of(
+    surface: &SurfaceSound,
+    kind: ContactKind,
+    intensity: f32,
+    fs: f32,
+) -> f32 {
     let mut total = 0.0;
     for seed in 1..=4u64 {
-        let step = Step::from_contact(*surface, ContactKind::Foot, 75.0, 1.4, seed * 7_919);
+        let mut step = Step::from_contact(*surface, kind, 75.0, 1.4, seed * 7_919);
+        step.intensity = intensity;
         let x = render_mono(&mut FootstepSound::new(fs, &step), 1.0, fs);
         total += crate::samples::loudness(&x, fs);
     }
