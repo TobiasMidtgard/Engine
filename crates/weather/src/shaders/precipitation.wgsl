@@ -18,6 +18,8 @@ struct Precip {
 @group(1) @binding(1) var<storage, read> segments: array<vec4<f32>>;
 
 const SPEED_CLASSES: u32 = 3u;
+// Half-width of a bolt's quad in core widths (the rest is glow).
+const BOLT_HALO: f32 = 6.0;
 
 fn pcg3(v0: vec3<u32>) -> vec3<f32> {
     var v = v0 * 1664525u + vec3<u32>(1013904223u);
@@ -252,8 +254,11 @@ fn fs_splash(in: PrecipOut) -> @location(0) vec4<f32> {
 // Lightning: blinding channel with a soft halo, fading inside the cloud.
 @vertex
 fn vs_bolt(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> PrecipOut {
-    let a = segments[i * 2u];
-    let b = segments[i * 2u + 1u];
+    // Per segment: start and core width (m), end and the flash's brightness, the segment's
+    // share of it (1 on the main channel, less on branches).
+    let a = segments[i * 3u];
+    let b = segments[i * 3u + 1u];
+    let share = segments[i * 3u + 2u].x;
     let c = corner(v);
     let p0 = a.xyz;
     let p1 = b.xyz;
@@ -262,7 +267,8 @@ fn vs_bolt(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> Pr
     let axis = normalize(p1 - p0 + vec3(1e-5));
     let side = normalize(cross(axis, -mid / max(dist, 1e-3)) + vec3(1e-5));
     let core = max(a.w, dist * pixel_angle() * 1.5);
-    let p = mid + side * core * c.x;
+    // The quad reaches well past the core for the glow of the air and rain around it.
+    let p = mid + side * core * c.x * BOLT_HALO;
     var out: PrecipOut;
     out.misc = vec4(0.0);
     out.position = frame.view_proj * vec4<f32>(p, 1.0);
@@ -271,13 +277,17 @@ fn vs_bolt(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> Pr
     let in_cloud = exp(-max(altitude - precip.bolt.w, 0.0) / 250.0);
     let haze = exp(-dist / 30000.0);
     // Display-referred cap: blinding white, but bloom stays a glow instead of a wall of light.
-    out.color = vec4<f32>(min(pre_expose(precip.bolt.rgb * b.w * in_cloud * haze), vec3(40.0)), 1.0);
+    // Branches take their share after the cap, so they stay dimmer than the channel.
+    out.color = vec4<f32>(min(pre_expose(precip.bolt.rgb * b.w * in_cloud * haze), vec3(40.0)) * share, 1.0);
     return out;
 }
 
 @fragment
 fn fs_bolt(in: PrecipOut) -> @location(0) vec4<f32> {
-    // A hot core with soft edges; the renderer's bloom adds the glow around it.
-    let core = smoothstep(1.0, 0.2, abs(in.uv.x));
-    return vec4<f32>(min(in.color.rgb, vec3(60000.0)) * core, 0.0);
+    // A hot core with soft edges, and a faint glow in the air and rain around it that
+    // the renderer's bloom (which only spreads what is bright) doesn't give a thin channel.
+    let x = abs(in.uv.x) * BOLT_HALO;
+    let core = smoothstep(1.0, 0.2, x);
+    let glow = 0.06 * exp(-1.2 * x) * (1.0 - smoothstep(0.6, 1.0, abs(in.uv.x)));
+    return vec4<f32>(min(in.color.rgb, vec3(60000.0)) * (core + glow), 0.0);
 }

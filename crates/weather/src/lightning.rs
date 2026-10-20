@@ -108,13 +108,31 @@ impl ActiveBolts {
 #[derive(Resource, Debug, Clone, Default)]
 pub struct StrikeRequests(pub Vec<DVec3>);
 
-/// Detail of the drawn main channel: `2^7` segments of [`LightningStrike::path`].
-const BOLT_DETAIL: u32 = 7;
+/// Points of [`LightningStrike::path`] the drawn channel passes through exactly (`2^4`
+/// stretches), so thunder rolls along the bolt you see.
+const BOLT_ANCHORS: u32 = 4;
+/// Halvings of each stretch between anchors: a few meters per drawn segment. Real channels
+/// run straight for meters and then turn sharply; finer halving made them curl like string.
+const BOLT_SUBDIVISIONS: u32 = 4;
+/// Sideways reach of each midpoint as a fraction of its segment's length. Real channels
+/// turn by tens of degrees every few meters and meander over hundreds; the shared path is
+/// smoother (it only needs to be right for sound).
+const BOLT_ROUGHNESS: f64 = 0.3;
 
-/// The bolt for a strike: its main channel is the strike's shared path (the same zigzag
-/// audio rolls thunder along), with branches forking off it.
+/// The bolt for a strike: a channel jagged at every scale through the strike's shared path,
+/// with dim branches forking off it, most of them high up where the leader spread out
+/// looking for the ground.
 pub fn build_bolt(strike: &LightningStrike, rng: &mut Rng) -> Vec<BoltSegment> {
-    let points = strike.path(BOLT_DETAIL);
+    let anchors = strike.path(BOLT_ANCHORS);
+    let mut points = vec![anchors[0]];
+    for w in anchors.windows(2) {
+        points.extend(
+            jagged(w[0], w[1], BOLT_SUBDIVISIONS, rng)
+                .into_iter()
+                .skip(1),
+        );
+    }
+    let n = (points.len() - 1) as f32;
     let mut out = Vec::new();
     for (i, w) in points.windows(2).enumerate() {
         out.push(BoltSegment {
@@ -123,91 +141,91 @@ pub fn build_bolt(strike: &LightningStrike, rng: &mut Rng) -> Vec<BoltSegment> {
             width: 0.6,
             brightness: 1.0,
         });
-        if i > 2 {
-            branch(w[1], strike.to.y, 0.6, 1.0, rng, &mut out, 0);
-        }
+        let high = 1.0 - i as f32 / n;
+        branch(
+            w[1],
+            strike.to.y,
+            0.6,
+            0.15,
+            0.1 * (0.3 + 0.7 * high),
+            rng,
+            &mut out,
+            0,
+        );
     }
     out
 }
 
-/// Maybe fork a branch off the channel at `start`, heading down and fading.
+/// A polyline of `2^depth` segments from `a` to `b` by midpoint displacement.
+fn jagged(a: DVec3, b: DVec3, depth: u32, rng: &mut Rng) -> Vec<DVec3> {
+    let mut points = vec![a, b];
+    for _ in 0..depth {
+        let mut next = Vec::with_capacity(points.len() * 2);
+        for w in points.windows(2) {
+            let d = w[1] - w[0];
+            let axis = d.normalize_or_zero();
+            let side = DVec3::new(
+                rng.range(-1.0, 1.0) as f64,
+                rng.range(-1.0, 1.0) as f64,
+                rng.range(-1.0, 1.0) as f64,
+            );
+            let side = side - axis * side.dot(axis);
+            next.push(w[0]);
+            next.push((w[0] + w[1]) * 0.5 + side * d.length() * BOLT_ROUGHNESS);
+        }
+        next.push(*points.last().unwrap());
+        points = next;
+    }
+    points
+}
+
+/// Maybe fork a branch off a channel at `start`: it heads down and out, thins and fades,
+/// and may fork again.
+#[allow(clippy::too_many_arguments)]
 fn branch(
     start: DVec3,
     bottom_y: f64,
     width: f32,
     brightness: f32,
+    chance: f32,
     rng: &mut Rng,
     out: &mut Vec<BoltSegment>,
     level: u32,
 ) {
-    if level >= 2 || !rng.chance(0.045) {
+    if level >= 3 || !rng.chance(chance) {
         return;
     }
     let remaining = (start.y - bottom_y).max(10.0);
     let dir = DVec3::new(
-        rng.range(-0.8, 0.8) as f64,
+        rng.range(-1.2, 1.2) as f64,
         -1.0,
-        rng.range(-0.8, 0.8) as f64,
+        rng.range(-1.2, 1.2) as f64,
     )
     .normalize();
-    let len = remaining * rng.range(0.15, 0.45) as f64;
-    channel(
-        start,
-        start + dir * len,
-        len as f32 * 0.15,
-        4,
-        brightness * 0.45,
-        width * 0.55,
-        rng,
-        out,
-        level + 1,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn channel(
-    a: DVec3,
-    b: DVec3,
-    jitter: f32,
-    depth: u32,
-    brightness: f32,
-    width: f32,
-    rng: &mut Rng,
-    out: &mut Vec<BoltSegment>,
-    level: u32,
-) {
-    // Midpoint displacement: a polyline of 2^depth segments.
-    let mut points = vec![a, b];
-    let mut j = jitter as f64;
-    for _ in 0..depth {
-        let mut next = Vec::with_capacity(points.len() * 2);
-        for w in points.windows(2) {
-            let mid = (w[0] + w[1]) * 0.5;
-            let d = w[1] - w[0];
-            let side = DVec3::new(
-                rng.range(-1.0, 1.0) as f64,
-                0.0,
-                rng.range(-1.0, 1.0) as f64,
-            );
-            let side = side - d.normalize_or_zero() * side.dot(d.normalize_or_zero());
-            next.push(w[0]);
-            next.push(mid + side * j);
-        }
-        next.push(*points.last().unwrap());
-        points = next;
-        j *= 0.5;
-    }
+    let len = remaining * rng.range(0.15, 0.5) as f64;
+    // About five meters per segment, like the main channel.
+    let depth = ((len / 5.0).log2().round() as u32).clamp(2, 6);
+    let points = jagged(start, start + dir * len, depth, rng);
+    let n = (points.len() - 1) as f32;
+    let width = width * 0.5;
     for (i, w) in points.windows(2).enumerate() {
+        let fade = 1.0 - 0.7 * i as f32 / n;
         out.push(BoltSegment {
             a: w[0],
             b: w[1],
             width,
-            brightness,
+            brightness: brightness * fade,
         });
-        // Branches fork off downward and fade.
-        if i > 2 {
-            branch(w[1], b.y, width, brightness, rng, out, level);
-        }
+        branch(
+            w[1],
+            bottom_y,
+            width,
+            brightness * fade * 0.5,
+            0.02,
+            rng,
+            out,
+            level + 1,
+        );
     }
 }
 
@@ -387,15 +405,34 @@ mod tests {
             seed: 11,
         };
         let segs = build_bolt(&strike, &mut rng);
-        assert!(segs.len() > 64);
-        assert!(segs.iter().any(|s| s.brightness < 1.0), "has branches");
         let main: Vec<_> = segs.iter().filter(|s| s.brightness == 1.0).collect();
+        assert_eq!(main.len(), 1 << (BOLT_ANCHORS + BOLT_SUBDIVISIONS));
         assert!((main[0].a - top).length() < 1e-6);
         assert!((main.last().unwrap().b - bottom).length() < 1e-6);
-        // The drawn channel is the shared path, so thunder rolls along the same bolt.
-        let path = strike.path(BOLT_DETAIL);
-        assert_eq!(main.len(), path.len() - 1);
-        assert!(main.iter().zip(&path).all(|(s, p)| s.a == *p));
+        // The channel runs through the shared path, so thunder rolls along the same bolt.
+        let step = 1 << BOLT_SUBDIVISIONS;
+        for (k, p) in strike
+            .path(BOLT_ANCHORS)
+            .iter()
+            .enumerate()
+            .take(1 << BOLT_ANCHORS)
+        {
+            assert_eq!(main[k * step].a, *p);
+        }
+        // Branches: several, dimmer than the channel, mostly from its upper half.
+        let branches: Vec<_> = segs.iter().filter(|s| s.brightness < 1.0).collect();
+        assert!(
+            (100..5000).contains(&branches.len()),
+            "{} branch segments",
+            branches.len()
+        );
+        assert!(branches.iter().all(|s| s.brightness <= 0.15));
+        let high = branches.iter().filter(|s| s.a.y > 600.0).count();
+        assert!(
+            high * 2 > branches.len(),
+            "{high} of {} high up",
+            branches.len()
+        );
     }
 
     #[test]
