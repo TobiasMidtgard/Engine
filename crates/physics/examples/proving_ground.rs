@@ -66,6 +66,13 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [-19.0, 2.4, 24.2],
         [-30.0, 1.3, 19.5],
     ),
+    // The rockfall: rocks pouring off the chute, then the heap.
+    (
+        2.4,
+        "18_rockfall_pouring",
+        [-15.0, 4.0, 7.0],
+        [-24.5, 2.0, -2.0],
+    ),
     (
         2.6,
         "05_pile_and_tower",
@@ -81,6 +88,12 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         "15_dummies_at_rest",
         [28.0, 2.4, -5.0],
         [24.0, 0.5, -9.8],
+    ),
+    (
+        10.0,
+        "19_rockfall_heap",
+        [-18.0, 2.4, 3.0],
+        [-23.0, 0.7, -2.0],
     ),
     (
         12.0,

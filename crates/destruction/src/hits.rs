@@ -26,6 +26,9 @@ use crate::voxel::{VoxelOp, VoxelState, VoxelVolume, box_sdf, capsule_sdf};
 use crate::wall::{DestructibleWall, LostCell, WallHit, WallLook, WallState, mesh_cells};
 use crate::{DestructionSettings, DestructionStats};
 
+/// Smallest wall chunk (m³) a blast throws that bursts on a hard landing.
+const THROWN_SHATTER_M3: f32 = 0.003;
+
 /// One piece of damage to apply.
 #[derive(Debug, Clone)]
 pub enum Hit {
@@ -670,7 +673,10 @@ fn wall_impact(
     let lp = local_point(gt, point);
     let ld = local_dir(gt, dir).normalize_or(Vec3::NEG_Z);
     let aspect = if melee { 0.35 } else { 1.0 };
-    let hit = state.crater(&props, lp, ld, energy, min_radius, aspect);
+    let mut hit = state.crater(&props, lp, ld, energy, min_radius, aspect);
+    if let Some(brick) = wall.brick_size() {
+        state.knock_out_bricks(brick, &mut hit);
+    }
     let exit = hit.exit;
     // Chips spray back toward the shooter from the entry point.
     let t = state.grid.thickness;
@@ -864,11 +870,14 @@ fn wall_chunks(
             None => ctx.rng.unit_vector() * 0.3,
         };
         let spin = if push.is_some() { 6.0 } else { 0.6 } / size.max(0.2);
-        let shatter = if falling && volume > 0.03 {
-            props.shatter_speed
-        } else {
-            0.0
-        };
+        // Pieces a blast throws burst when they land hard, so a plaster or brick wall doesn't
+        // litter the yard with whole slabs of itself.
+        let shatter =
+            if (falling && volume > 0.03) || (push.is_some() && volume > THROWN_SHATTER_M3) {
+                props.shatter_speed
+            } else {
+                0.0
+            };
         ctx.pending.items.push(DebrisSpawn {
             position: gt.transform_point(com.as_dvec3()),
             rotation: rot,
@@ -1044,7 +1053,10 @@ fn blast(
         }
         let props = ctx.table.get(wall.material);
         let gt = *gt;
-        let hit = state.blast(&props, local, energy, rebar_cut);
+        let mut hit = state.blast(&props, local, energy, rebar_cut);
+        if let Some(brick) = wall.brick_size() {
+            state.knock_out_bricks(brick, &mut hit);
+        }
         if hit.volume > 0.0 {
             let side = if local.z >= 0.0 { 1.0 } else { -1.0 };
             let face = gt.transform_point(DVec3::new(

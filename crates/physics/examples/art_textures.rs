@@ -210,6 +210,11 @@ fn previews() -> Vec<Preview> {
             make: Box::new(|| textures::galvanized(512)),
             tint: white,
         },
+        Preview {
+            name: "granite",
+            make: Box::new(|| textures::granite(512)),
+            tint: white,
+        },
     ]
 }
 

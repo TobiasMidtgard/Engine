@@ -73,7 +73,11 @@ pub fn with_commands(app: &mut App, f: impl FnOnce(&mut Commands)) {
 }
 
 pub fn triggered(app: &App, e: Entity, name: &str) -> usize {
-    app.world
+    triggered_in(&app.world, e, name)
+}
+
+pub fn triggered_in(world: &World, e: Entity, name: &str) -> usize {
+    world
         .resource::<Triggers>()
         .0
         .iter()

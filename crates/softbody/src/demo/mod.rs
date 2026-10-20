@@ -33,11 +33,11 @@
 //! [`boat_models`] builds a gaff-rigged clinker dinghy (hull, swinging rig, rudder; its
 //! dimensions in [`boat_dims`]) for the sailing cloth, with [`boat_stand`] to show it on.
 
-use std::f32::consts::{FRAC_PI_2, TAU};
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::sync::Arc;
 
 use engine_core::prelude::*;
-use engine_render::{MeshRenderer, Shape, StandardMaterial};
+use engine_render::{Shape, StandardMaterial};
 use engine_world::animation::{BonePose, SkeletonPose};
 use engine_world::physics::{Collider, ColliderShape, RigidBody};
 use engine_world::{IgniteRequest, ProjectileTrace};
@@ -128,15 +128,22 @@ pub enum DemoMotion {
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
 pub struct DemoClock(pub f32);
 
-/// Walks back and forth across a rope bridge, standing on its deck.
+/// Walks back and forth across a rope bridge at `speed`, standing on its deck, easing in and
+/// out of a stepping turn at each end.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct DemoBridgeWalker {
     pub bridge: Entity,
     /// Along the bridge's local X, meters.
     pub from: f32,
     pub to: f32,
-    pub period: f32,
+    /// Walking speed, m/s.
+    pub speed: f32,
 }
+
+/// Meters walked so far: drives a [`DemoSkeleton`]'s gait instead of its clock, so the feet
+/// stay planted however the walker speeds up and slows down.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
+pub struct DemoStride(pub f32);
 
 /// Fires a bullet through a random point of a rectangle every `period` seconds.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
@@ -195,8 +202,8 @@ pub fn register(app: &mut App) {
         FixedUpdate,
         (
             drive_motion,
-            animate_skeletons,
             walk_bridges,
+            animate_skeletons,
             fire_turrets,
             burn_and_restore,
             cut_and_restore,
@@ -504,42 +511,23 @@ fn bridges(commands: &mut Commands, c: DVec3) {
     let walker = commands
         .spawn((
             Name::new("Bridge walker"),
-            at(a + DVec3::new(2.5, 3.0, 0.0)),
+            // Setting out from the far tower, into the yard's westerly breeze, so the cloak
+            // streams out behind (a following wind wraps it around the legs).
+            at(a + DVec3::new(19.5, 3.0, 0.0))
+                .with_rotation(Quat::from_rotation_arc(Vec3::NEG_Z, Vec3::NEG_X)),
             TransformInterpolation::default(),
             SoftLoad { mass_kg: 90.0 },
             DemoBridgeWalker {
                 bridge,
-                from: 1.0,
-                to: 18.0,
-                period: 22.0,
+                from: 18.0,
+                to: 1.0,
+                speed: 1.25,
             },
             DemoClock::default(),
+            DemoStride::default(),
         ))
         .id();
-    let coat = mat(0xd35400, 0.7);
-    commands.spawn((
-        Transform::from_xyz(0.0, 0.85, 0.0),
-        MeshRenderer::new(
-            Shape::Capsule {
-                radius: 0.25,
-                height: 1.5,
-                segments: 16,
-            },
-            coat,
-        ),
-        ChildOf(walker),
-    ));
-    commands.spawn((
-        Transform::from_xyz(0.0, 1.78, 0.0),
-        MeshRenderer::new(
-            Shape::Sphere {
-                radius: 0.14,
-                segments: 16,
-            },
-            mat(0xe0b48a, 0.6),
-        ),
-        ChildOf(walker),
-    ));
+    characters::bridge_walker_body(commands, walker);
 
     // A short bridge between two sandstone piers that gets cut and drops.
     let (a, b) = (
@@ -932,32 +920,105 @@ pub fn drive_motion(
 pub fn walk_bridges(
     time: Res<Time>,
     bridges: Query<(&Transform, &SoftBodySim), Without<DemoBridgeWalker>>,
-    mut walkers: Query<(&mut Transform, &DemoBridgeWalker, &mut DemoClock)>,
+    mut walkers: Query<(
+        &mut Transform,
+        &DemoBridgeWalker,
+        &mut DemoClock,
+        Option<&mut DemoStride>,
+    )>,
 ) {
-    for (mut t, w, mut clock) in &mut walkers {
+    for (mut t, w, mut clock, stride) in &mut walkers {
         clock.0 += time.delta_for(None);
         let Ok((bt, body)) = bridges.get(w.bridge) else {
             continue;
         };
-        let f = smooth_shuttle(clock.0 / w.period);
-        let x = w.from + (w.to - w.from) * f;
+        let out = (w.to - w.from).signum();
+        let step = walk_shuttle(clock.0, (w.to - w.from).abs(), w.speed);
+        let x = w.from + out * step.along;
         let p = bt.translation + (bt.rotation * Vec3::new(x, 0.0, 0.0)).as_dvec3();
         let deck = body
             .bridge
             .as_ref()
             .and_then(|b| b.deck_height(p + DVec3::Y * 0.2));
-        let target = match deck {
-            Some(y) => DVec3::new(p.x, y, p.z),
+        let Some(y) = deck else {
             // Fell off (bridge cut): stay put.
-            None => t.translation,
+            continue;
         };
-        t.translation = target;
-        let going = if (clock.0 / w.period).fract() < 0.5 {
-            1.0
+        t.translation = DVec3::new(p.x, y, p.z);
+        let facing = Quat::from_rotation_arc(Vec3::NEG_Z, Vec3::X * out);
+        t.rotation = bt.rotation * facing * Quat::from_rotation_y(step.yaw);
+        if let Some(mut stride) = stride {
+            stride.0 = step.walked;
+        }
+    }
+}
+
+/// Where a shuttle walk is at a moment: meters `along` the crossing, the turn so far (`yaw`:
+/// 0 going out, π coming back) and the meters the feet have `walked`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ShuttleStep {
+    along: f32,
+    yaw: f32,
+    walked: f32,
+}
+
+/// Walk out across `length` at `speed`, ease into a stepping half turn at the far end, walk
+/// back, turn again. The feet keep stepping slowly through the turns and pick the pace back
+/// up over the first and last strides of each crossing.
+fn walk_shuttle(t: f32, length: f32, speed: f32) -> ShuttleStep {
+    /// Seconds from turning pace to full speed, and for each half turn.
+    const RAMP: f32 = 0.8;
+    const TURN: f32 = 1.6;
+    /// The pace of the feet while turning, as a fraction of `speed`.
+    const SLOW: f32 = 0.35;
+    let speed = speed.max(0.05);
+    let length = length.max(4.0 * speed * RAMP);
+    let ramp = speed * RAMP * (1.0 + SLOW) * 0.5;
+    let leg = (length - 2.0 * ramp) / speed + 2.0 * RAMP;
+    let turn_walk = SLOW * speed * TURN;
+    let cycle = 2.0 * (leg + TURN);
+    let laps = (t.max(0.0) / cycle).floor();
+    let mut s = t.max(0.0) - laps * cycle;
+    let mut walked = laps * 2.0 * (length + turn_walk);
+    let eased = |s: f32| speed * (SLOW * s + (1.0 - SLOW) * s * s / (2.0 * RAMP));
+    // Meters covered `s` seconds into a crossing.
+    let cross = |s: f32| {
+        if s < RAMP {
+            eased(s)
+        } else if s < leg - RAMP {
+            ramp + speed * (s - RAMP)
         } else {
-            -1.0
-        };
-        t.rotation = bt.rotation * Quat::from_rotation_arc(Vec3::NEG_Z, Vec3::X * going);
+            length - eased((leg - s).max(0.0))
+        }
+    };
+    let mut yaw = 0.0;
+    for (start, dir) in [(0.0, 1.0), (length, -1.0)] {
+        if s < leg {
+            return ShuttleStep {
+                along: start + dir * cross(s),
+                yaw,
+                walked: walked + cross(s),
+            };
+        }
+        s -= leg;
+        walked += length;
+        if s < TURN {
+            let f = s / TURN;
+            return ShuttleStep {
+                along: length - start,
+                yaw: yaw + PI * f * f * (3.0 - 2.0 * f),
+                walked: walked + SLOW * speed * s,
+            };
+        }
+        s -= TURN;
+        walked += turn_walk;
+        yaw += PI;
+    }
+    // Only reached through rounding at the very end of a cycle.
+    ShuttleStep {
+        along: 0.0,
+        yaw: TAU,
+        walked,
     }
 }
 
@@ -1071,5 +1132,40 @@ pub fn respawn_volumes(
             clock.0 = 0.0;
             spec.set_changed();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bridge_walk_stays_on_the_deck_never_hurries_and_never_jumps() {
+        let (length, speed, dt) = (17.0, 1.25, 1.0 / 120.0);
+        let mut last = walk_shuttle(0.0, length, speed);
+        assert_eq!((last.along, last.yaw, last.walked), (0.0, 0.0, 0.0));
+        let mut turned = 0.0f32;
+        for k in 1..(120 * 63) {
+            let now = walk_shuttle(k as f32 * dt, length, speed);
+            assert!((0.0..=length).contains(&now.along), "{now:?}");
+            let moved = (now.along - last.along).abs();
+            assert!(moved <= speed * dt * 1.001, "{k}: {last:?} → {now:?}");
+            // The feet walk exactly as far as the body moves, except while turning.
+            let stepped = now.walked - last.walked;
+            assert!(
+                stepped >= 0.0 && stepped <= speed * dt * 1.001,
+                "{k}: {stepped}"
+            );
+            let walking = |s: ShuttleStep| (s.yaw / PI).fract() == 0.0;
+            if walking(now) && walking(last) {
+                assert!((stepped - moved).abs() < 1e-3, "{k}: {stepped} {moved}");
+            }
+            let dyaw = (now.yaw - last.yaw).rem_euclid(TAU);
+            assert!(dyaw < 0.03, "{k}: {last:?} → {now:?}");
+            turned += dyaw;
+            last = now;
+        }
+        // 63 s is two round trips (34 m of walking and two half turns each).
+        assert!((turned / TAU - 2.0).abs() < 0.3, "{turned}");
     }
 }
