@@ -229,6 +229,9 @@ pub const GRASSY_ZONES: &[&str] = &[
 pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     // The weather station's asphalt yard, sand pit and stone patio.
     ("weather", [-13.5, 13.0], [-8.0, 9.0]),
+    // The animation paddock's sand floor (35 m round, fenced at 35.5 m), where people's feet
+    // must show; the meadow frames it outside the fence.
+    ("paddock", [-34.0, 34.0], [-34.0, 34.0]),
     // The siege fortress's gravel breach range.
     ("fortress", [-33.5, 26.5], [-14.0, -4.0]),
     // The siege fortress's breach house and the stair up its back wall.
@@ -1124,9 +1127,15 @@ fn destruction_views(views: &[engine_destruction::DemoView]) -> Vec<View> {
     views
         .iter()
         .map(|v| {
-            View::new(v.key, v.name, v.eye, v.target, v.hour)
+            let view = View::new(v.key, v.name, v.eye, v.target, v.hour)
                 .warmup(v.warmup_secs)
-                .on_arrive(engine_destruction::RESTART_API, "{}")
+                .on_arrive(engine_destruction::RESTART_API, "{}");
+            // Someone climbs the breach house ladders and up through the hatches once they open.
+            if v.key == "fortress_hatches" {
+                view.on_arrive("movement.ladder_guest", "{}")
+            } else {
+                view
+            }
         })
         .collect()
 }

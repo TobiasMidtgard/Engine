@@ -443,6 +443,14 @@ impl FollowsWorldShift for WaterSplash {
     }
 }
 
+impl FollowsWorldShift for WaterDisturbance {
+    fn follow(&mut self, s: &WorldShift) {
+        self.position = s.point(self.position);
+        // Relative to the water, which moves with the world.
+        self.velocity = s.direction(self.velocity);
+    }
+}
+
 impl FollowsWorldShift for LightningStrike {
     fn follow(&mut self, s: &WorldShift) {
         self.from = s.point(self.from);
@@ -492,6 +500,7 @@ pub(crate) fn register_messages(app: &mut App) {
         .shift_messages::<NoiseEvent>()
         .shift_messages::<SmokeEmission>()
         .shift_messages::<WaterSplash>()
+        .shift_messages::<WaterDisturbance>()
         .shift_messages::<LightningStrike>()
         .shift_messages::<ApplyImpulse>()
         .shift_messages::<ContactEvent>()
