@@ -1069,7 +1069,7 @@ impl RenderFeature for SoftBodyFeature {
         }
         let mut seen: Vec<Seen> = Vec::new();
         for body in query.iter(world) {
-            if body.sim.is_empty() {
+            if body.sim.is_empty() || body.drawn_elsewhere {
                 continue;
             }
             let center = view.relative(body.center);

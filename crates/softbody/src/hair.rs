@@ -868,6 +868,77 @@ fn sample_surface(mesh: &Mesh, n: usize) -> Vec<SurfacePoint> {
     out
 }
 
+/// Mass of one guide strand, kg (a lock of a few hundred hairs).
+pub(crate) const GUIDE_MASS: f32 = 0.0004;
+
+/// Goal spring frequencies at a strand's root and tip (rad/s) for a style's `stiffness`.
+pub(crate) fn strand_omegas(stiffness: f32) -> (f32, f32) {
+    let s = stiffness.clamp(0.01, 1.0);
+    (15.0 + 300.0 * s, 0.5 + 25.0 * s * s)
+}
+
+/// Add one guide strand to `sim`: particles at `rest` (root first, in the frame's space; the
+/// frame is placed at `placed`, body-local), rigid segments, the two root particles pinned,
+/// goals toward `rest` from stiff at the root to loose at the tip (at least `held(arc)` times
+/// 35% of the root's frequency), tethers to the root, and optionally a skin plane each
+/// particle stays above. Returns the first particle.
+pub(crate) fn push_strand(
+    sim: &mut Sim,
+    frame: u16,
+    placed: (Vec3, Quat),
+    rest: &[Vec3],
+    (omega_root, omega_tip): (f32, f32),
+    held: impl Fn(f32) -> f32,
+    skin_plane: Option<(Vec3, Vec3)>,
+) -> u32 {
+    let segments = rest.len().saturating_sub(1).max(1);
+    let mass = GUIDE_MASS / rest.len().max(1) as f32;
+    let first = sim.len() as u32;
+    for q in rest {
+        sim.add_particle(placed.0 + placed.1 * *q, mass);
+    }
+    for k in 1..rest.len() as u32 {
+        sim.add_distance(first + k - 1, first + k, 0.0, u32::MAX);
+    }
+    // Two root particles pinned: the root keeps its direction.
+    sim.pin(first, frame, rest[0]);
+    if rest.len() > 1 {
+        sim.pin(first + 1, frame, rest[1]);
+    }
+    let mut arc = rest.get(1).map_or(0.0, |r1| r1.distance(rest[0]));
+    for k in 2..rest.len() {
+        let local = rest[k];
+        arc += local.distance(rest[k - 1]);
+        let t = k as f32 / segments as f32;
+        let omega = (omega_root.ln() + (omega_tip.ln() - omega_root.ln()) * t.powf(0.6))
+            .exp()
+            .max(omega_root * 0.35 * held(arc));
+        // A spring of stiffness k = m·ω² on each particle; compliance is 1/k.
+        sim.goals.push(Goal {
+            p: first + k as u32,
+            frame,
+            local,
+            compliance: 1.0 / (mass * omega * omega),
+        });
+        sim.tethers.push(Tether {
+            p: first + k as u32,
+            anchor: first,
+            max: arc * 1.03,
+        });
+        // Fur on a body mesh doesn't sink into the skin it grows from.
+        if let Some((point, normal)) = skin_plane {
+            sim.skin_planes.push(SkinPlane {
+                p: first + k as u32,
+                frame,
+                point,
+                normal,
+                margin: FUR_ON_SKIN,
+            });
+        }
+    }
+    first
+}
+
 /// Build hair for `skeleton`; [`HairEmitter::Surface`] emitters read their mesh from `meshes`
 /// and its skin weights from `skins`.
 pub fn build(
@@ -890,9 +961,7 @@ pub fn build(
     let mut guides = Vec::new();
     let mut rng = Rng::new(0x4A12);
     let thickness = spec.sim.thickness.max(style.spread * 0.5 + 0.003);
-    let s = style.stiffness.clamp(0.01, 1.0);
-    let (omega_root, omega_tip) = (15.0 + 300.0 * s, 0.5 + 25.0 * s * s);
-    let total_mass = 0.0004; // kg per guide (a lock of a few hundred hairs)
+    let (omega_root, omega_tip) = strand_omegas(style.stiffness);
     for emitter in &spec.emitters {
         for root in emit_roots(emitter, pose, meshes, skins)? {
             let source = match root.blend {
@@ -964,50 +1033,22 @@ pub fn build(
                 p += dir * seg_len;
                 rest.push(p);
             }
-            let mass = total_mass / (segments + 1) as f32;
-            let first = sim.len() as u32;
-            for q in &rest {
-                sim.add_particle((bp - origin).as_vec3() + br * *q, mass);
-            }
-            for k in 1..=segments as u32 {
-                sim.add_distance(first + k - 1, first + k, 0.0, u32::MAX);
-            }
-            // Two root particles pinned: the root keeps its direction.
-            sim.pin(first, frame, rest[0]);
-            sim.pin(first + 1, frame, rest[1]);
-            let mut arc = seg_len;
-            for (k, &local) in rest.iter().enumerate().take(segments + 1).skip(2) {
-                arc += seg_len;
-                let t = k as f32 / segments as f32;
-                // Hair swept back over the head is held along the sweep (as roots and the
-                // hair around them hold it), else it slides off the crown over the face.
-                let held = sweep * (1.0 - smoothstep(0.14, 0.26, arc));
-                let omega = (omega_root.ln() + (omega_tip.ln() - omega_root.ln()) * t.powf(0.6))
-                    .exp()
-                    .max(omega_root * 0.35 * held);
-                // A spring of stiffness k = m·ω² on each particle; compliance is 1/k.
-                sim.goals.push(Goal {
-                    p: first + k as u32,
-                    frame,
-                    local,
-                    compliance: 1.0 / (mass * omega * omega),
-                });
-                sim.tethers.push(Tether {
-                    p: first + k as u32,
-                    anchor: first,
-                    max: arc * 1.03,
-                });
-                // Fur on a body mesh doesn't sink into the skin it grows from.
-                if let Skin::Plane { point, normal } = root.skin {
-                    sim.skin_planes.push(SkinPlane {
-                        p: first + k as u32,
-                        frame,
-                        point,
-                        normal,
-                        margin: FUR_ON_SKIN,
-                    });
-                }
-            }
+            // Hair swept back over the head is held along the sweep (as roots and the hair
+            // around them hold it), else it slides off the crown over the face.
+            let held = |arc: f32| sweep * (1.0 - smoothstep(0.14, 0.26, arc));
+            let skin_plane = match root.skin {
+                Skin::Plane { point, normal } => Some((point, normal)),
+                _ => None,
+            };
+            let first = push_strand(
+                &mut sim,
+                frame,
+                ((bp - origin).as_vec3(), br),
+                &rest,
+                (omega_root, omega_tip),
+                held,
+                skin_plane,
+            );
             guides.push(super::hair::Guide {
                 first,
                 count: (segments + 1) as u32,
