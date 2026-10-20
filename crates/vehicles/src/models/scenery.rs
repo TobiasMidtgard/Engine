@@ -818,6 +818,42 @@ pub fn grass_ground(world: &mut World, center: DVec3, half: f32) {
     scene.add("grass", b.finish(), Surface::Grass, false);
 }
 
+/// A concrete apron of pavement slabs (top at `center.y`), `half` meters each way from
+/// `center`, with a gentle tonal drift between slabs: a stand to show vehicles on. Draws
+/// nothing without a renderer.
+pub fn apron_ground(world: &mut World, center: DVec3, half: f32) {
+    let Some(mut scene) = Scene::new(world, center, "apron") else {
+        return;
+    };
+    let mut b = kit::Builder::new();
+    let n = ((half * 2.0) / 2.5).ceil().max(1.0) as u32;
+    let step = half * 2.0 / n as f32;
+    let o = center.as_vec3();
+    for j in 0..=n {
+        for i in 0..=n {
+            let (x, z) = (-half + i as f32 * step, -half + j as f32 * step);
+            let (wx, wz) = (x + o.x, z + o.z);
+            let k = 1.0
+                + 0.08 * noise::world_fbm(wx, wz, 12.0, 3, 61)
+                + 0.05 * noise::world_fbm(wx, wz, 60.0, 2, 62);
+            b.vertex_c(
+                engine_core::math::Vec3::new(x, 0.0, z),
+                engine_core::math::Vec3::Y,
+                engine_core::math::Vec2::new(wx, wz),
+                engine_core::math::Vec4::new(k, k, k * 0.99, 1.0),
+            );
+        }
+    }
+    let row = n + 1;
+    for j in 0..n {
+        for i in 0..n {
+            let k = j * row + i;
+            b.quad_idx(k, k + 1, k + row + 1, k + row);
+        }
+    }
+    scene.add("apron", b.finish(), Surface::Slabs, false);
+}
+
 /// One mesh builder per material; spawned as one entity per material.
 #[derive(Default)]
 pub struct Parts {
