@@ -340,9 +340,15 @@ fn height_mesh(
             let p = pos(i, j);
             let h = heights[(j * nx + i) as usize];
             // Along its border a finer mesh takes its neighbor's normals (over its spacing), so
-            // the two shade the same where they meet.
-            let border = i <= 1 || j <= 1 || i + 2 >= nx || j + 2 >= nz;
-            let normal = slope(i, j, if half_of_neighbor && border { 2 } else { 1 });
+            // the two shade the same where they meet, and blends to its own sharper normals
+            // over a few meters (a step there reads as a seam).
+            let normal = if half_of_neighbor {
+                let edge = i.min(j).min(nx - 1 - i).min(nz - 1 - j) as f32 * spacing;
+                let fine = smooth(0.5, 4.0, edge);
+                slope(i, j, 2).lerp(slope(i, j, 1), fine).normalize()
+            } else {
+                slope(i, j, 1)
+            };
             // Color by the slope over a wider area (about 3 m), so it doesn't flicker from
             // vertex to vertex.
             let broad = slope(i, j, (1.5 / spacing).round().max(1.0) as i64);

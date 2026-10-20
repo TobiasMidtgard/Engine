@@ -825,7 +825,20 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     // fingers with the rock showing between them, and thin threads are see-through.
     let body = saturate(q * 8.0 + 0.15);
     let gaps = smoothstep(0.1, 1.0, frac) * 0.45 * (1.2 - body * 0.4);
-    var alpha = smoothstep(gaps, gaps + 0.2, s) * body * (0.7 + 0.3 * smoothstep(0.2, 0.7, s));
+    // Falling free, the fingers tear into packets of water lower down (the pattern rides with
+    // the water, so they stretch as it speeds up), each fraying at its edges into spray, and a
+    // thin haze of drops hangs between them. A thick flow and a sheet sliding down rock stay
+    // whole.
+    // (From afar the torn packets blur together with the spray: the fall reads whole.)
+    let tear = smoothstep(0.15, 0.9, frac) * (1.0 - rock * 0.7) * mix(0.35, 1.0, fine);
+    let packets = fbm2(vec2<f32>(u * 3.1 + 7.7, t0 * 7.0), 3) / 0.875;
+    let edge = 0.2 + 0.3 * tear;
+    var alpha = smoothstep(gaps, gaps + edge, s - (1.0 - packets) * 0.35 * tear * (1.3 - body * 0.7)) * body
+        * (0.7 + 0.3 * smoothstep(0.2, 0.7, s));
+    let drops = value_noise2(vec2<f32>(u * 23.0 + 1.9, t0 * 31.0));
+    alpha = max(alpha, tear * body * 0.3 * smoothstep(0.35, 0.95, drops) * smoothstep(0.1, 0.5, s));
+    // From afar those drops blur into a veil across the gaps.
+    alpha = max(alpha, (1.0 - fine) * body * 0.4 * smoothstep(0.15, 0.9, frac) * smoothstep(0.0, 0.35, s));
     alpha *= 1.0 - smoothstep(0.6, 1.0, abs(side) + (s - 0.5) * 0.4);
     // Soft where it meets the rock behind it and the pool it lands in.
     let size = vec2<f32>(textureDimensions(scene_color));
