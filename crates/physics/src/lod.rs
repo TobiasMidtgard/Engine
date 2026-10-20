@@ -90,7 +90,10 @@ impl Region {
         let fine = self.fine.filter(|_| self.meeting_soon(span));
         let base = crate::fine::finest(Some(settings.max_substep_secs), fine).unwrap_or(0.0);
         let longest = base.max(1e-4) * (1u32 << self.tier.min(2)) as f32;
-        let n = ((span / longest).ceil() as u32).clamp(1, settings.max_substeps.max(1));
+        // (The cap guards the frame rate at extreme speed-ups; fine steps are few bodies, and
+        // shorter than the cap would allow at 60 Hz.)
+        let cap = settings.max_substeps.max(1) * if fine.is_some() { 8 } else { 1 };
+        let n = ((span / longest).ceil() as u32).clamp(1, cap);
         Some((n, span / n as f32))
     }
 
