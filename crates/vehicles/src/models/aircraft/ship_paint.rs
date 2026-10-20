@@ -42,12 +42,19 @@ fn black_tile(paint: &mut Paint, coord: Vec2, size: f32, texel: f32, seed: u32) 
     let r = rand(ix, iy, 1, seed);
     let r2 = rand(ix, iy, 2, seed);
     let edge = f.x.min(1.0 - f.x).min(f.y).min(1.0 - f.y) * size;
-    let mut tone = 0.020 + 0.020 * r;
+    // The black coating reflects about a tenth of the light (solar absorptance ~0.85), less
+    // where fresh, and flights bleach it in broad patches that cross tile lines, so the belly
+    // reads as charcoal with a tile pattern rather than a hole in the picture.
+    let bleach = smoothstep(0.45, 0.85, noise2(coord * 0.7, seed + 40))
+        * (0.6 + 0.4 * noise2(coord * 2.6, seed + 41));
+    let mut tone = 0.042 + 0.022 * r + 0.035 * bleach;
+    let mut fresh = false;
     if r2 > 0.975 {
         // A replaced tile, still fresh.
-        tone = 0.010;
+        tone = 0.022;
+        fresh = true;
     } else if r2 < 0.02 {
-        tone = 0.055;
+        tone = 0.095;
     }
     // Coating texture and a little scorching toward one corner.
     // Coating grain about a texel across (a hash per cell is plenty at that size).
@@ -58,8 +65,18 @@ fn black_tile(paint: &mut Paint, coord: Vec2, size: f32, texel: f32, seed: u32) 
         seed,
     );
     tone *= 0.85 + 0.3 * grain;
-    paint.color = Vec3::new(tone, tone * 0.98, tone * 0.97);
-    paint.rough = 0.78 + 0.1 * r;
+    // Bleached coating goes a little brown.
+    paint.color = Vec3::new(
+        tone,
+        tone * (0.98 - 0.05 * bleach),
+        tone * (0.97 - 0.1 * bleach),
+    );
+    // The glassy coating keeps a soft sheen that shows the belly's curve; worn spots are duller.
+    paint.rough = if fresh {
+        0.5
+    } else {
+        0.6 + 0.12 * r + 0.15 * bleach
+    };
     paint.metal = 0.0;
     // Bevel and gap.
     paint.height =
