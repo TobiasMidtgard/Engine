@@ -15,6 +15,10 @@ const VT_INFO_WORDS: u32 = 56u;
 const VT_LOW_WORD: u32 = 24u;
 const VT_MAX_ANISO: f32 = 8.0;
 
+// Whether the pipeline reads virtual textures at all (`ShaderFeatures`): off until a scene has
+// one, so the pipelines of scenes without any stay small.
+override VT_ENABLED: bool = true;
+
 @group(2) @binding(7) var<storage, read> vt_data: array<u32>;
 @group(2) @binding(8) var vt_cache_linear: texture_2d<f32>;
 @group(2) @binding(9) var vt_cache_srgb: texture_2d<f32>;

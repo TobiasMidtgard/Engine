@@ -51,7 +51,9 @@ use crate::features::{
 };
 use crate::frame::ViewData;
 use crate::image_cache::{ImageTexture, upload_image};
-use crate::material::{AlphaMode, GpuMaterial, StandardMaterial, TEXTURE_FLAG_BASE, TEXTURE_FLAGS};
+use crate::material::{
+    ANTI_TILING_FLAG, AlphaMode, GpuMaterial, StandardMaterial, TEXTURE_FLAG_BASE, TEXTURE_FLAGS,
+};
 use crate::material_library::{MaterialPreset, MaterialTextures};
 use crate::mesh::{Mesh, Vertex};
 use crate::settings::RenderSettings;
@@ -63,7 +65,7 @@ use crate::virtual_geometry::{
     SMALL_BUILD_TRIANGLES, StableHasher,
 };
 use crate::virtual_texture::system::{
-    VirtualTextureSystem, feedback_writes, mesh_shadow_source, mesh_source,
+    ShaderFeatures, VirtualTextureSystem, feedback_writes, mesh_shadow_source, mesh_source,
 };
 use crate::virtual_texture::{VirtualTextureStats, VirtualTextures};
 
@@ -401,9 +403,16 @@ fn resolve_displacement(
 #[derive(Default)]
 pub struct MeshFeature {
     /// Indexed by `PIPE_*` bits: double-sided, blend, mirrored (clockwise front faces).
-    pipelines: Vec<wgpu::RenderPipeline>,
+    /// Made on first use (`ensure_pipelines`).
+    pipelines: Vec<Option<wgpu::RenderPipeline>>,
     /// Depth prepass pipelines, indexed like `pipelines` (blend variants unused).
-    prepass_pipelines: Vec<wgpu::RenderPipeline>,
+    prepass_pipelines: Vec<Option<wgpu::RenderPipeline>>,
+    /// The optional shader parts the pipelines have (turned on as materials need them).
+    shader_features: ShaderFeatures,
+    shader: Option<wgpu::ShaderModule>,
+    pipeline_layout: Option<wgpu::PipelineLayout>,
+    shadow_shader: Option<wgpu::ShaderModule>,
+    shadow_masked_layout: Option<wgpu::PipelineLayout>,
     /// Each entity's world transform last frame, and the frame it was seen (motion vectors).
     previous: HashMap<Entity, (GlobalTransform, u64)>,
     /// Camera position last frame.
@@ -466,6 +475,157 @@ const SHADOW_DEPTH: u8 = 0;
 const SHADOW_MASKED: u8 = 1;
 
 impl MeshFeature {
+    /// Creates the scene, prepass and masked shadow pipelines this frame's batches use and
+    /// that don't exist yet. Each costs a compile of the large mesh shader, so only the ones
+    /// a scene draws with are made (a test app uses two or three of the 17).
+    fn ensure_pipelines(&mut self, gpu: &GpuShared) {
+        let mut main = [false; PIPELINE_VARIANTS as usize];
+        let mut prepass = [false; PIPELINE_VARIANTS as usize];
+        for b in self.opaque.iter() {
+            main[b.key.pipeline as usize] = true;
+            prepass[b.key.pipeline as usize] = true;
+        }
+        for b in self.transparent.iter() {
+            main[b.key.pipeline as usize] = true;
+        }
+        let masked = self
+            .shadow
+            .iter()
+            .chain(std::iter::once(&self.far_shadow))
+            .flatten()
+            .any(|b| b.key.pipeline == SHADOW_MASKED);
+        for variant in 0..PIPELINE_VARIANTS {
+            let i = variant as usize;
+            if main[i] && self.pipelines[i].is_none() {
+                self.pipelines[i] = self.mesh_pipeline(gpu, variant, false);
+            }
+            if prepass[i] && self.prepass_pipelines[i].is_none() {
+                self.prepass_pipelines[i] = self.mesh_pipeline(gpu, variant, true);
+            }
+        }
+        if masked && self.shadow_masked_pipeline.is_none() {
+            self.shadow_masked_pipeline = self.shadow_masked_pipeline(gpu);
+        }
+    }
+
+    /// Drops the pipelines built with other shader features; they are made again on use.
+    fn clear_pipelines(&mut self) {
+        self.pipelines = (0..PIPELINE_VARIANTS).map(|_| None).collect();
+        self.prepass_pipelines = (0..PIPELINE_VARIANTS).map(|_| None).collect();
+        self.shadow_masked_pipeline = None;
+    }
+
+    /// A scene (or, with `prepass`, depth prepass) pipeline for `variant`'s `PIPE_*` bits.
+    fn mesh_pipeline(
+        &self,
+        gpu: &GpuShared,
+        variant: u8,
+        prepass: bool,
+    ) -> Option<wgpu::RenderPipeline> {
+        let (Some(shader), Some(layout)) = (&self.shader, &self.pipeline_layout) else {
+            return None;
+        };
+        let constants = self.shader_features.mesh_constants();
+        let compilation = wgpu::PipelineCompilationOptions {
+            constants: &constants,
+            ..Default::default()
+        };
+        let buffers = [
+            Some(Vertex::layout()),
+            Some(MeshInstance::layout_with_motion()),
+        ];
+        let blend = !prepass && variant & PIPE_BLEND != 0;
+        let double = variant & PIPE_DOUBLE != 0;
+        let mirror = variant & PIPE_MIRROR != 0;
+        let main_targets = [Some(wgpu::ColorTargetState {
+            format: gpu.formats.hdr,
+            blend: blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let prepass_targets = gpu.prepass_targets();
+        let (label, vs, fs, targets): (_, _, _, &[Option<wgpu::ColorTargetState>]) = if prepass {
+            ("mesh prepass", "vs_prepass", "fs_prepass", &prepass_targets)
+        } else {
+            ("mesh", "vs_main", "fs_main", &main_targets)
+        };
+        Some(
+            gpu.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(layout),
+                    vertex: wgpu::VertexState {
+                        module: shader,
+                        entry_point: Some(vs),
+                        compilation_options: compilation.clone(),
+                        buffers: &buffers,
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        cull_mode: if double { None } else { Some(wgpu::Face::Back) },
+                        front_face: if mirror {
+                            wgpu::FrontFace::Cw
+                        } else {
+                            wgpu::FrontFace::Ccw
+                        },
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(gpu.depth_state(!blend)),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: shader,
+                        entry_point: Some(fs),
+                        compilation_options: compilation,
+                        targets,
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                }),
+        )
+    }
+
+    /// The alpha-tested shadow pipeline (masked casters).
+    fn shadow_masked_pipeline(&self, gpu: &GpuShared) -> Option<wgpu::RenderPipeline> {
+        let (Some(shader), Some(layout)) = (&self.shadow_shader, &self.shadow_masked_layout) else {
+            return None;
+        };
+        let constants = self.shader_features.shadow_constants();
+        let compilation = wgpu::PipelineCompilationOptions {
+            constants: &constants,
+            ..Default::default()
+        };
+        let buffers = [
+            Some(Vertex::layout()),
+            Some(MeshInstance::layout_with_motion()),
+        ];
+        Some(
+            gpu.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("mesh shadow masked"),
+                    layout: Some(layout),
+                    vertex: wgpu::VertexState {
+                        module: shader,
+                        entry_point: Some("vs_shadow_masked"),
+                        compilation_options: compilation.clone(),
+                        buffers: &buffers,
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        cull_mode: None,
+                        unclipped_depth: gpu.features.contains(wgpu::Features::DEPTH_CLIP_CONTROL),
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(gpu.shadow_depth_state()),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: shader,
+                        entry_point: Some("fs_shadow_masked"),
+                        compilation_options: compilation,
+                        targets: &[],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                }),
+        )
+    }
+
     fn upload_mesh(&mut self, device: &wgpu::Device, index: u32, mesh: &Mesh, version: u64) {
         if mesh.indices.is_empty() || mesh.vertices.is_empty() {
             self.meshes.remove(&index);
@@ -871,7 +1031,7 @@ impl RenderFeature for MeshFeature {
             .collect();
 
         let shader = gpu.shader("mesh", &mesh_source(feedback_writes), true);
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh"),
             bind_group_layouts: &[
                 Some(&gpu.frame_layout),
@@ -884,84 +1044,6 @@ impl RenderFeature for MeshFeature {
             Some(Vertex::layout()),
             Some(MeshInstance::layout_with_motion()),
         ];
-        self.pipelines = (0..PIPELINE_VARIANTS)
-            .map(|variant| {
-                let blend = variant & PIPE_BLEND != 0;
-                let double = variant & PIPE_DOUBLE != 0;
-                let mirror = variant & PIPE_MIRROR != 0;
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("mesh"),
-                    layout: Some(&layout),
-                    vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: Some("vs_main"),
-                        compilation_options: Default::default(),
-                        buffers: &buffers,
-                    },
-                    primitive: wgpu::PrimitiveState {
-                        cull_mode: if double { None } else { Some(wgpu::Face::Back) },
-                        front_face: if mirror {
-                            wgpu::FrontFace::Cw
-                        } else {
-                            wgpu::FrontFace::Ccw
-                        },
-                        ..Default::default()
-                    },
-                    depth_stencil: Some(gpu.depth_state(!blend)),
-                    multisample: Default::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: Some("fs_main"),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: gpu.formats.hdr,
-                            blend: blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                })
-            })
-            .collect();
-
-        let prepass_targets = gpu.prepass_targets();
-        self.prepass_pipelines = (0..PIPELINE_VARIANTS)
-            .map(|variant| {
-                let double = variant & PIPE_DOUBLE != 0;
-                let mirror = variant & PIPE_MIRROR != 0;
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("mesh prepass"),
-                    layout: Some(&layout),
-                    vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: Some("vs_prepass"),
-                        compilation_options: Default::default(),
-                        buffers: &buffers,
-                    },
-                    primitive: wgpu::PrimitiveState {
-                        cull_mode: if double { None } else { Some(wgpu::Face::Back) },
-                        front_face: if mirror {
-                            wgpu::FrontFace::Cw
-                        } else {
-                            wgpu::FrontFace::Ccw
-                        },
-                        ..Default::default()
-                    },
-                    depth_stencil: Some(gpu.depth_state(true)),
-                    multisample: Default::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: Some("fs_prepass"),
-                        compilation_options: Default::default(),
-                        targets: &prepass_targets,
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                })
-            })
-            .collect();
-
         let shadow_shader = gpu.shader("mesh shadow", &mesh_shadow_source(feedback_writes), false);
         let shadow_primitive = wgpu::PrimitiveState {
             cull_mode: None,
@@ -1000,29 +1082,6 @@ impl RenderFeature for MeshFeature {
             ],
             immediate_size: 0,
         });
-        self.shadow_masked_pipeline = Some(device.create_render_pipeline(
-            &wgpu::RenderPipelineDescriptor {
-                label: Some("mesh shadow masked"),
-                layout: Some(&shadow_masked_layout),
-                vertex: wgpu::VertexState {
-                    module: &shadow_shader,
-                    entry_point: Some("vs_shadow_masked"),
-                    compilation_options: Default::default(),
-                    buffers: &buffers,
-                },
-                primitive: shadow_primitive,
-                depth_stencil: Some(gpu.shadow_depth_state()),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &shadow_shader,
-                    entry_point: Some("fs_shadow_masked"),
-                    compilation_options: Default::default(),
-                    targets: &[],
-                }),
-                multiview_mask: None,
-                cache: None,
-            },
-        ));
         self.materials = Some(GrowBuffer::new(
             device,
             "mesh materials",
@@ -1036,7 +1095,18 @@ impl RenderFeature for MeshFeature {
             1024 * std::mem::size_of::<MeshInstance>() as u64,
         ));
 
-        self.clusters = Some(ClusterRenderer::new(gpu, &material_layout, &texture_layout));
+        self.shader_features = ShaderFeatures::default();
+        self.shader = Some(shader);
+        self.pipeline_layout = Some(pipeline_layout);
+        self.shadow_shader = Some(shadow_shader);
+        self.shadow_masked_layout = Some(shadow_masked_layout);
+        self.clear_pipelines();
+        self.clusters = Some(ClusterRenderer::new(
+            gpu,
+            &material_layout,
+            &texture_layout,
+            self.shader_features,
+        ));
         self.material_layout = Some(material_layout);
         self.texture_layout = Some(texture_layout);
         self.sampler = Some(sampler);
@@ -1056,7 +1126,7 @@ impl RenderFeature for MeshFeature {
         view: &ViewData,
         settings: &RenderSettings,
     ) {
-        if self.pipelines.is_empty() {
+        if self.shader.is_none() {
             return;
         }
         self.frame += 1;
@@ -1457,6 +1527,24 @@ impl RenderFeature for MeshFeature {
         if self.material_data.is_empty() {
             self.material_data.push(default_material.to_gpu());
         }
+        // Pipelines with the shader parts this frame's materials need, from now on.
+        let needed = self
+            .material_data
+            .iter()
+            .fold(self.shader_features, |f, m| {
+                f.union(ShaderFeatures {
+                    virtual_textures: m.flags[1] != 0 || m.flags[2] != 0,
+                    anti_tiling: m.flags[0] & ANTI_TILING_FLAG != 0,
+                })
+            });
+        if needed != self.shader_features {
+            self.shader_features = needed;
+            self.clear_pipelines();
+            if let Some(clusters) = &mut self.clusters {
+                clusters.set_shader_features(needed);
+            }
+        }
+        self.ensure_pipelines(gpu);
         let grown = self
             .materials
             .as_mut()
@@ -1527,7 +1615,12 @@ impl RenderFeature for MeshFeature {
         }
         pass.set_bind_group(1, group, &[]);
         pass.set_vertex_buffer(1, instances.buffer.slice(..));
-        self.draw_batches(pass, batches, |p| self.pipelines.get(p as usize), |_| true);
+        self.draw_batches(
+            pass,
+            batches,
+            |p| self.pipelines.get(p as usize).and_then(Option::as_ref),
+            |_| true,
+        );
         if let Some(clusters) = clusters {
             clusters.draw_scene(pass, |set| self.texture_group(set));
         }
@@ -1546,7 +1639,11 @@ impl RenderFeature for MeshFeature {
         self.draw_batches(
             pass,
             &self.opaque,
-            |p| self.prepass_pipelines.get(p as usize),
+            |p| {
+                self.prepass_pipelines
+                    .get(p as usize)
+                    .and_then(Option::as_ref)
+            },
             |_| true,
         );
         if let Some(clusters) = clusters {

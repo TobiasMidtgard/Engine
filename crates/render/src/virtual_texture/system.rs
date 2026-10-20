@@ -1289,6 +1289,46 @@ pub fn feedback_writes(gpu: &GpuShared) -> bool {
     gpu.adapter_info.backend != wgpu::Backend::Gl
 }
 
+/// The optional parts of the mesh shaders a pipeline is compiled with (WGSL overrides
+/// `VT_ENABLED` and `ANTI_TILING_ENABLED`). Both start off and turn on for good once a frame
+/// draws a material that needs them: software rasterizers (lavapipe) compile every pipeline's
+/// whole shader, and these parts make the mesh shaders several times larger, so scenes
+/// without virtual textures or anti-tiled materials would pay for them in every pipeline.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShaderFeatures {
+    pub virtual_textures: bool,
+    pub anti_tiling: bool,
+}
+
+impl ShaderFeatures {
+    /// Both on.
+    pub const ALL: Self = Self {
+        virtual_textures: true,
+        anti_tiling: true,
+    };
+
+    /// Everything either has.
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            virtual_textures: self.virtual_textures || other.virtual_textures,
+            anti_tiling: self.anti_tiling || other.anti_tiling,
+        }
+    }
+
+    /// The overrides for `mesh_source` (both).
+    pub fn mesh_constants(self) -> [(&'static str, f64); 2] {
+        [
+            ("VT_ENABLED", f64::from(u8::from(self.virtual_textures))),
+            ("ANTI_TILING_ENABLED", f64::from(u8::from(self.anti_tiling))),
+        ]
+    }
+
+    /// The overrides for `mesh_shadow_source` (virtual textures only).
+    pub fn shadow_constants(self) -> [(&'static str, f64); 1] {
+        [("VT_ENABLED", f64::from(u8::from(self.virtual_textures)))]
+    }
+}
+
 /// `mesh.wgsl` with the virtual texture library in front of it.
 pub fn mesh_source(feedback_writes: bool) -> String {
     format!(

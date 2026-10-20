@@ -28,6 +28,9 @@ const MAPPING_SHIFT: u32 = 14u;
 const PARALLAX_SHADOWS: u32 = 65536u;
 const ANTI_TILING: u32 = 131072u;
 const ANTI_TILING_ROTATE: u32 = 262144u;
+// Whether the pipeline hex-tiles anti-tiled materials (`ShaderFeatures`): off until a scene has
+// one.
+override ANTI_TILING_ENABLED: bool = true;
 const SLOT_BASE_COLOR: u32 = 0u;
 const SLOT_NORMAL: u32 = 1u;
 const SLOT_METALLIC_ROUGHNESS: u32 = 2u;
@@ -345,9 +348,11 @@ fn slot_virtual(mat: Material, slot: u32) -> u32 {
 }
 
 fn slot_sample(mat: Material, slot: u32, uv: vec2<f32>, d1: vec2<f32>, d2: vec2<f32>) -> vec4<f32> {
-    let vt = slot_virtual(mat, slot);
-    if (vt != 0u) {
-        return vt_sample(vt, uv, d1, d2);
+    if (VT_ENABLED) {
+        let vt = slot_virtual(mat, slot);
+        if (vt != 0u) {
+            return vt_sample(vt, uv, d1, d2);
+        }
     }
     switch slot {
         case 0u: { return textureSampleGrad(base_color_texture, material_sampler, uv, d1, d2); }
@@ -361,9 +366,11 @@ fn slot_sample(mat: Material, slot: u32, uv: vec2<f32>, d1: vec2<f32>, d2: vec2<
 
 // The slot's mean color (its coarsest level).
 fn slot_mean(mat: Material, slot: u32) -> vec4<f32> {
-    let vt = slot_virtual(mat, slot);
-    if (vt != 0u) {
-        return vt_mean(vt);
+    if (VT_ENABLED) {
+        let vt = slot_virtual(mat, slot);
+        if (vt != 0u) {
+            return vt_mean(vt);
+        }
     }
     if (slot == 0u) {
         return textureSampleLevel(base_color_texture, material_sampler, vec2<f32>(0.5), 16.0);
@@ -438,7 +445,7 @@ fn anti_tiles(mat: Material, uv: vec2<f32>, d1: vec2<f32>, d2: vec2<f32>) -> Ant
     t.count = 1u;
     t.sharp = HEX_SHARPNESS;
     t.contrast = HEX_CONTRAST;
-    if ((mat.flags.x & ANTI_TILING) == 0u) {
+    if (!ANTI_TILING_ENABLED || (mat.flags.x & ANTI_TILING) == 0u) {
         return t;
     }
     // Sharp, feature-following transitions while hexagons are big on screen; softer ones as

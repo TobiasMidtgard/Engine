@@ -105,7 +105,7 @@ fn fs_shadow_masked(in: MaskedOut) {
         // The base color may be a streamed virtual texture (virtual_texture.wgsl): the shadow
         // uses whatever tiles the camera has made resident.
         let vt = mat.flags.y & 255u;
-        if (vt != 0u) {
+        if (VT_ENABLED && vt != 0u) {
             alpha *= vt_sample(vt, in.uv, d1, d2).a;
         } else {
             alpha *= textureSampleGrad(base_color_texture, material_sampler, in.uv, d1, d2).a;
