@@ -72,6 +72,10 @@ impl Default for SoftVolume {
                 friction: 0.7,
                 thickness: 0.04,
                 wind_scale: 0.0,
+                // Mostly water itself: it hangs in water and never soaks.
+                buoyancy: 0.95,
+                water_drag: 1.5,
+                soak: 0.0,
                 ..SimSettings::default()
             },
             material: SoftMaterial::hex(0x5fd38d)

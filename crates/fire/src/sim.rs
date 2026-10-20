@@ -708,8 +708,10 @@ pub fn emit_outputs(
                 tile_hrr += hrr as f64;
                 tile_centroid += pos * hrr as f64;
                 // Smoke: flaming smoke rises hot; coals and wet fuel give whiter, cooler smoke.
+                // Grass coals only wisp: they glow for a minute after the flames, and more smoke
+                // than this lies over the burnt ground behind the front as a low brown bank.
                 let moisture = moisture / n;
-                let smolder = (glow / n) * 0.0004 * B as f32 * B as f32 * area * dt;
+                let smolder = (glow / n) * 0.00012 * B as f32 * B as f32 * area * dt;
                 let mass = consumed * settings.smoke_yield + smolder;
                 if mass > 0.0 {
                     let steam = (moisture / 0.6).clamp(0.0, 1.0);

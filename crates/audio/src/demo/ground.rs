@@ -40,6 +40,8 @@ pub(super) enum Mat {
     Mud,
     WetMud,
     Snow,
+    /// Lumps and crumbs of snow (solid, unlike the blanket's crumbling edge).
+    SnowLump,
     Ice,
     Gravel,
     PitFloor,
@@ -53,8 +55,12 @@ pub(super) enum Mat {
     Zinc,
     /// The worn tops of the grating's bars (see `textures::tread`).
     Tread,
-    /// Weathered galvanized steel, gone dull: the grating's bars and its frame.
+    /// Weathered galvanized steel, gone dull and rough: the sides of the grating's bars, its
+    /// cross rods and clips (rough, so the fine bars far off don't flash in coherent bands).
     Grating,
+    /// The grating's channel stringers, stiffeners and support beam: heavier galvanized
+    /// steel with more metal showing.
+    Stringer,
     Steel,
     Leaf,
     Stone,
@@ -384,8 +390,11 @@ fn material(mat: Mat, tex: &std::collections::HashMap<&str, TexHandles>) -> Stan
         }
         Mat::Dirt => ground(tex, "dirt", 1.5, 0xffffff, 1.0),
         Mat::Mud => ground(tex, "mud", 2.0, 0xffffff, 1.0),
-        Mat::WetMud => ground(tex, "mud", 2.0, 0xd0c8c0, 0.8),
+        Mat::WetMud => ground(tex, "mud", 2.0, 0xd0c8c0, 1.0),
         Mat::Snow => ground(tex, "snow", 2.0, 0xffffff, 1.0).with_subsurface(0.45),
+        Mat::SnowLump => {
+            textured(plain(0xffffff, 1.0), tex, "snow", (2.0, 2.0)).with_subsurface(0.45)
+        }
         Mat::Ice => {
             let mut m = ground(tex, "ice", 2.5, 0xffffff, 1.0).with_subsurface(0.15);
             m.reflectance = 0.45;
@@ -399,7 +408,7 @@ fn material(mat: Mat, tex: &std::collections::HashMap<&str, TexHandles>) -> Stan
         Mat::Forest => ground(tex, "forest", 2.0, 0xffffff, 1.0),
         Mat::Soil => ground(tex, "forest", 2.0, 0x8a8478, 0.8),
         Mat::Planks => textured(plain(0xffffff, 1.0), tex, "planks", (2.0, 0.5)),
-        Mat::Timber => textured(plain(0xb8aa98, 1.0), tex, "planks", (2.0, 0.5)),
+        Mat::Timber => textured(plain(0xaaa59e, 1.0), tex, "planks", (2.0, 0.5)),
         Mat::Zinc => textured(
             plain(0xffffff, 1.0).with_metallic(1.0),
             tex,
@@ -412,8 +421,15 @@ fn material(mat: Mat, tex: &std::collections::HashMap<&str, TexHandles>) -> Stan
             "tread",
             (2.56, 1.92),
         ),
+        // Roughness multiplies the zinc's (0.45..0.9): at 1.6 the bars stay above about 0.75.
         Mat::Grating => textured(
-            plain(0xffffff, 1.0).with_metallic(0.45),
+            plain(0xffffff, 1.6).with_metallic(0.3),
+            tex,
+            "zinc",
+            (0.4, 0.4),
+        ),
+        Mat::Stringer => textured(
+            plain(0xffffff, 1.1).with_metallic(0.7),
             tex,
             "zinc",
             (0.4, 0.4),
@@ -435,9 +451,16 @@ fn material(mat: Mat, tex: &std::collections::HashMap<&str, TexHandles>) -> Stan
             .with_wind_sway(0.04),
         Mat::Water => {
             // Murky and shallow: the ground under it shows through.
-            let mut m = plain(0x2b2419, 0.03).with_alpha(0.72);
+            // A faint ripple from the ice's normal map (puddle UVs are world meters), and the
+            // vertex alpha thins it toward the shore (see `dress::puddle`).
+            let mut m = plain(0x2b2419, 0.04).with_alpha(0.72);
             m.reflectance = 0.5;
             m.receives_wetness = false;
+            if let Some((_, n, _)) = tex.get("ice") {
+                m.normal_texture = *n;
+                m.normal_scale = 0.12;
+                m.uv_scale = [1.0 / 2.5, 1.0 / 2.5];
+            }
             m
         }
         Mat::Straw => plain(0xffffff, 0.75).with_subsurface(0.3),

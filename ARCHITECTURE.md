@@ -102,6 +102,7 @@ module's **contract** in `engine_world`:
 | `terrain`: `TerrainEdit`, `TerrainChanged`, plus the `Ground` query | `engine_terrain` | destruction, foliage, physics, water, npc |
 | `Obscurance`: smoke, fog and dust between two points (`transmittance`, `extinction`); sources stack by name and implementations pass `check_obscurance` | `engine_smoke` (weather fog and destruction dust can add their own) | npc, gameplay, ui |
 | `WorldShift` (+ `WorldShiftSet`, `FollowsWorldShift`): the world was re-anchored (floating origin, a new planet's frame). `engine_world` moves transforms, velocities, forces, intents, gravity, wind and sun, the fields, and pending contract messages; query providers answer in the new frame from `WorldShiftSet::Apply` on | written by `engine_space` | every module or crate that keeps world positions or directions of its own shifts them in `WorldShiftSet::Apply`: physics (bodies, statics, query caches), softbody, vehicles, movement, npc (memories, nav goals), anim (IK targets), vfx, fire, smoke, water, weather, terrain, foliage, destruction, audio, ui (map markers), render (sky and planet centers), debug |
+| `FarCloudLayer`: a far cloud layer (a planet's cloud tops seen from high up) and where the volumetric clouds hand over to it (`near_share`) | `engine_space` | weather |
 | `Water`, `Gravity`, fields and world events (see the crate docs) | water, space, weather, … | everyone |
 
 Anything a module needs that isn't there is a missing contract: ask the core owner to add it
@@ -282,6 +283,29 @@ pushes blades aside (16 nearest the camera). `RenderSettings::grass_density` sca
 (quality). Give the ground under a field `style.ground_color()` so it reads as grass past the
 draw distance. `engine_foliage` drives grass by spawning fields from its soil grid; game code
 can spawn them directly.
+
+**Sprites and tile maps** (built; `sprites/`): 2D and 2.5D. A `Sprite` draws an image (or a solid
+color) as a quad at its entity's `Transform`: size in meters, an atlas frame (`SpriteAtlas::grid`,
+`grid_cells` or explicit rectangles), tint, flips, anchor, a `layer` that orders 2D scenes, and
+`Billboard::Fixed`, `FaceCamera` or `Upright` (turns about its own up axis only). `SpriteAnimation`
+steps `Sprite::frame` through a frame list (loop, once, ping-pong) on world time, so slow motion
+and `LocalTimeScale` slow it. A `TileMap` holds a grid of atlas frames (0 empty, Tiled's flip bits)
+and draws with one instanced draw per run of visible 32 × 32 chunks (one for a map wholly in view)
+from a GPU buffer rebuilt only when the map changes; a `Parallax` component moves a sprite or map
+with part of the camera's motion and can repeat it along x. Filtering is `Linear`, `Nearest` or
+`PixelArt` (sharp bilinear: texel centers, blending only across the one pixel a texel edge
+crosses), always kept inside the frame's rectangle so atlas neighbours never bleed.
+`SpriteAlpha::Cutout` sprites draw with the meshes (depth prepass, depth writes, sun shadows with
+the cut-out); `Blend` and `Additive` ones draw after them, sorted by layer and then back to front.
+Unlit sprites show their colors as authored (like unlit meshes); `lit` ones are shaded as thin
+sheets by the sun, sky light and point lights with shadows, optionally through a normal map,
+`roundness` (a bent normal, like a rounded volume) and `translucency`. A `PixelPerfect` component
+(art texels per meter, scale, snap) on an orthographic camera renders at full resolution with a
+whole number of screen pixels per art texel, moves the view and every sprite and tile corner to
+whole texels (or pixels), and turns temporal anti-aliasing off while it renders (jitter would blur
+the texel edges and there is nothing between them to smooth); full resolution keeps lighting,
+shadows and UI sharp without an extra target or upscale. Images come from the shared image cache.
+Nothing is built for scenes without sprites or tile maps.
 
 **Volumetric fog** (built): with `RenderSettings::volumetric_fog` (the default), fog within
 `volumetric_fog_range` (default 256 m) of the camera lives in a froxel grid fitted to the view,

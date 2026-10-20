@@ -176,6 +176,7 @@ fn setup(
     }
     scenery::spawn_woods(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_meadows(&mut commands, &lib, &land, &mut rng);
+    scenery::spawn_meadow_grass(&mut commands, &land);
     let hedged = scenery::spawn_farms(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_walls(&mut commands, &lib, &land, &hedged);
     scenery::spawn_rocks(&mut commands, &lib, &land, &mut rng);

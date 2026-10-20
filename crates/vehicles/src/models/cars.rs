@@ -28,7 +28,9 @@ use engine_render::{
     AlphaMode, BoxFace, Image, MaterialRef, Mesh, MeshRef, MeshRenderer, SkyLightVolume,
     StandardMaterial,
 };
+use engine_world::ExhaustKind;
 
+use crate::exhaust::nozzles;
 use crate::visuals::{BrakeLight, WheelVisual};
 use crate::wheels::Wheels;
 
@@ -485,6 +487,11 @@ impl Finishes {
 
 /// Draw the sports car on `body` (a vehicle entity with these `wheels`) in `paint` (sRGB hex).
 pub fn sports_car_visuals(commands: &mut Commands, body: Entity, wheels: &Wheels, paint: u32) {
+    // The twin tailpipes, for the effects modules.
+    let tips = sports_kit::exhaust_exits(&sports::Body::new());
+    commands
+        .entity(body)
+        .insert(nozzles(ExhaustKind::Tailpipe, &tips));
     let wheels = wheels.clone();
     commands.queue(move |world: &mut World| {
         let p = sports_kit::PREFIX;
@@ -585,6 +592,11 @@ pub fn sports_car_visuals(commands: &mut Commands, body: Entity, wheels: &Wheels
 /// Draw the rally car (livery, dust, cage and all) on `body`, a vehicle entity with these
 /// `wheels`.
 pub fn rally_car_visuals(commands: &mut Commands, body: Entity, wheels: &Wheels) {
+    // The single big tailpipe, for the effects modules.
+    let tips = rally_kit::exhaust_exits(&rally::Body::new());
+    commands
+        .entity(body)
+        .insert(nozzles(ExhaustKind::Tailpipe, &tips));
     let wheels = wheels.clone();
     commands.queue(move |world: &mut World| {
         let p = rally_kit::PREFIX;

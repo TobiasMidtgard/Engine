@@ -283,7 +283,19 @@ pub fn spacecraft_system(
             // --- rotation
             let rate = Vec3::new(controls.pitch, -controls.yaw, -controls.steer)
                 .clamp(Vec3::splat(-1.0), Vec3::splat(1.0));
+            let input = Vec3::new(
+                controls.strafe.clamp(-1.0, 1.0),
+                controls.lift.clamp(-1.0, 1.0),
+                controls.brake.clamp(0.0, 1.0) - controls.throttle.clamp(0.0, 1.0),
+            );
+            // Standing on its gear with the stick and throttle released, the ship rests: the
+            // assist doesn't puff the RCS at every bounce of the gear.
+            let parked = tel.wheels_grounded > 0
+                && rate == Vec3::ZERO
+                && input == Vec3::ZERO
+                && !controls.boost;
             let torque = match assist.mode {
+                _ if parked => Vec3::ZERO,
                 AssistMode::Off => {
                     // Raw torque: a fraction of what the thrusters could make about each axis.
                     let mut max_t = Vec3::ZERO;
@@ -300,11 +312,6 @@ pub fn spacecraft_system(
                 }
             };
             // --- translation
-            let input = Vec3::new(
-                controls.strafe.clamp(-1.0, 1.0),
-                controls.lift.clamp(-1.0, 1.0),
-                controls.brake.clamp(0.0, 1.0) - controls.throttle.clamp(0.0, 1.0),
-            );
             let boost = if controls.boost { 1.0 } else { 0.0 };
             let mut force = Vec3::new(
                 axis_max(input.x, 0),
@@ -314,7 +321,7 @@ pub fn spacecraft_system(
             if controls.boost {
                 force.z = -cap[5] * boost;
             }
-            if matches!(assist.mode, AssistMode::Full | AssistMode::Hover) {
+            if !parked && matches!(assist.mode, AssistMode::Full | AssistMode::Hover) {
                 let damp = f.mass / assist.damping_response_secs.max(0.1);
                 if controls.strafe.abs() < 0.01 {
                     force.x = (-v_local.x * damp).clamp(-cap[1], cap[0]);
@@ -328,7 +335,7 @@ pub fn spacecraft_system(
                     force.z = (-v_local.z * damp * 2.0).clamp(-cap[5], cap[4]) * controls.brake;
                 }
             }
-            if assist.mode == AssistMode::Hover {
+            if !parked && assist.mode == AssistMode::Hover {
                 let g_local = inv * f.gravity;
                 force -= g_local * f.mass;
             }

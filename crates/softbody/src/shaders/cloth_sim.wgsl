@@ -50,6 +50,7 @@ struct OutVertex {
     tv: f32,
     burn_char: f32,
     burn_glow: f32,
+    wet: f32,
     material: u32,
 }
 
@@ -302,6 +303,7 @@ fn cs_simulate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_i
                 f32(i) / f32(nu - 1u), f32(j) / f32(nv - 1u),
                 tu, tv,
                 0.0, 0.0,
+                0.0,
                 f.grid.w,
             );
         }

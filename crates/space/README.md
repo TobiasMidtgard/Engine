@@ -82,7 +82,10 @@ Reads: `SimulationFocus` / `FocusPoints`, `Time` (fixed steps, dilated), and wit
 Writes: body `Transform`s, `Gravity` (bodies, uniform = 0), `engine_render::Atmosphere`,
 `StarLight` lights and, with one, `WeatherState`'s sun direction, time and day, the
 `Transform`/`Velocity` of free entities when the world re-anchors, and those of free
-`RigidBody`s out in space while they coast through time warp (`OnRails`).
+`RigidBody`s out in space while they coast through time warp (`OnRails`), and
+`engine_world::FarCloudLayer` while Earth's cloud tops are drawn from high up (handover from
+70 % of `cloud_hole_m` to all of it, weighted by the layer's fade; removed when none is drawn),
+so the weather's clouds give way to the layer instead of doubling it.
 
 API: `space.bodies`, `space.warp {warp, days}`, `space.rails`, `space.travel {body, lat, lon,
 altitude}`.

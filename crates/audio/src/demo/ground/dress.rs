@@ -6,7 +6,8 @@ use engine_core::math::{DVec3, Quat, Vec2, Vec3, Vec4};
 use engine_render::{GrassField, GrassStyle, Mesh};
 
 use super::procgen::{
-    Rand, append, blade, fbm_world, hex, leaf, rock, smooth, smooth_normals_from, tube, vert,
+    Rand, append, blade, fbm_world, hex, leaf, rock, smooth, smooth_normals_from, smoother, tube,
+    vert,
 };
 use super::ribbon::{
     self, PATH_Y, Ribbon, Surf, base, columns, ends, frame, fray, point, side_columns, verge_height,
@@ -57,9 +58,22 @@ pub(super) struct Print {
 }
 
 /// Foot, paw and hoof prints of the trail's walkers, sorted along the trail.
-pub(super) struct Prints(pub Vec<Print>);
+pub(super) struct Prints {
+    pub list: Vec<Print>,
+    /// Extra width every wall and rim gets, meters: about the spacing of the mesh that
+    /// samples the prints, so no wall is narrower than the grid (where it would break into
+    /// hard-edged triangles and shadow shards).
+    pub soften: f32,
+}
 
 impl Prints {
+    pub fn none() -> Self {
+        Self {
+            list: Vec::new(),
+            soften: 0.0,
+        }
+    }
+
     pub fn walkers(s0: f64, s1: f64, seed: u64, depth: f32) -> Self {
         let mut rng = Rand::new(seed);
         let mut p = Vec::new();
@@ -103,50 +117,68 @@ impl Prints {
             PrintKind::Hoof,
             0.45,
             0.18,
-            depth * 1.35,
+            depth * 1.05,
             0.1,
             0.0,
         );
         p.sort_by(|a, b| a.s.total_cmp(&b.s));
-        Self(p)
+        Self {
+            list: p,
+            soften: 0.02,
+        }
     }
 
-    /// Relief the prints add at (s, x): negative in them, a raised rim round them.
+    /// Relief the prints add at (s, x): negative in them, a raised rim round them. A wall is
+    /// at least 0.8 of the print's depth wide (deep holes cave in) plus [`Self::soften`],
+    /// and eases in and out, so the floor, the wall and the rim each span a few vertices.
     pub fn relief(&self, s: f64, x: f32) -> f32 {
-        let i = self.0.partition_point(|p| p.s < s - 0.2);
+        let i = self.list.partition_point(|p| p.s < s - 0.26);
         let mut h = 0.0f32;
         let mut deepest = 0.0f32;
-        for p in self.0[i..].iter().take_while(|p| p.s < s + 0.2) {
+        for p in self.list[i..].iter().take_while(|p| p.s < s + 0.26) {
             let (sn, cs) = p.yaw.sin_cos();
             let du = (s - p.s) as f32;
             let dv = x - p.x;
             let u = du * cs + dv * sn;
             let v = -du * sn + dv * cs;
+            let wall = (0.008 + 0.012 * p.soft).max(0.8 * p.depth);
+            let lo = -0.002 - 0.5 * self.soften;
+            let hi = wall + 0.5 * self.soften;
+            // The rim: a soft bulge just outside the wall, wider round wider walls.
+            let rim_w = 0.01 + 0.4 * wall + 0.5 * self.soften;
+            let reach = lo - 2.0 * rim_w;
+            // Cheap bounds before the shape: every print is within 0.15 m of its centre.
+            if du.abs() > 0.15 - reach || dv.abs() > 0.15 - reach {
+                continue;
+            }
             let inside = match p.kind {
                 PrintKind::Boot => boot(u, v),
                 PrintKind::Hoof => ellipse_in(u, v, 0.07, 0.064),
                 PrintKind::Paw => paw(u, v),
             };
-            if inside < -0.03 {
+            if inside < reach {
                 continue;
             }
-            let wall = 0.008 + 0.012 * p.soft;
-            let mut dip = smooth(-0.003, wall, inside);
+            let mut dip = smoother(lo, hi, inside);
             if p.kind == PrintKind::Boot {
                 // Heel and ball deeper than the arch.
                 dip *=
-                    1.0 + 0.25 * (1.0 - smooth(0.0, 0.05, (u + 0.08).abs().min((u - 0.06).abs())));
+                    1.0 + 0.2 * (1.0 - smooth(0.0, 0.06, (u + 0.08).abs().min((u - 0.06).abs())));
             }
             if p.kind == PrintKind::Hoof {
                 // The frog: a raised V in the middle of the hoof.
-                let frog = (1.0 - smooth(0.0, 0.015, (v.abs() * 1.6 + u * 0.6 + 0.02).abs()))
+                let frog = (1.0 - smooth(0.0, 0.02, (v.abs() * 1.6 + u * 0.6 + 0.02).abs()))
                     * smooth(0.04, -0.03, u);
-                dip *= 1.0 - 0.5 * frog;
+                dip *= 1.0 - 0.45 * frog;
             }
-            let rim =
-                (1.0 - ((inside + 0.014) / 0.014).powi(2)).max(0.0) * (inside < 0.0) as u8 as f32;
+            let t = (inside - (lo - rim_w)) / rim_w;
+            let rim = if inside < lo {
+                (1.0 - t * t).max(0.0).powi(2)
+            } else {
+                0.0
+            };
             deepest = deepest.min(-p.depth * dip);
-            h += p.depth * 0.3 * (1.0 - p.soft * 0.6).max(0.0) * rim;
+            h += p.depth * 0.25 * (1.0 - p.soft * 0.6).max(0.0) * rim;
         }
         deepest + h * (1.0 + deepest / 0.02).clamp(0.0, 1.0)
     }
@@ -214,6 +246,19 @@ impl Hollow {
         }
     }
 
+    /// 1 in and just round the hollow, fading out over the damp ring round its shore.
+    fn halo(&self, s: f64, x: f32, w: Vec2) -> f32 {
+        let du = (s - self.s) as f32 / self.rs;
+        let dv = (x - self.x) / self.rx;
+        let wobble = 1.0 + 0.28 * fbm_world(w.x, w.y, 0.35, 3, self.seed);
+        let q = (du * du + dv * dv).sqrt() * wobble;
+        1.0 - smooth(
+            0.9,
+            1.45 + 0.15 * fbm_world(w.x, w.y, 0.12, 2, self.seed ^ 0x51),
+            q,
+        )
+    }
+
     fn water_y(&self) -> f32 {
         PATH_Y - self.depth * 0.42
     }
@@ -259,7 +304,7 @@ impl Stretch {
         let prints = if depth > 0.0 {
             Prints::walkers(s0 + 0.5, s1 - 0.5, 0x9000 + i as u64, depth)
         } else {
-            Prints(Vec::new())
+            Prints::none()
         };
         let mut hollows = Vec::new();
         if name == "water" {
@@ -404,6 +449,7 @@ impl Stretch {
             "gravel" => 0.45,
             "ice" => 0.35,
             "sand" => 0.7,
+            "leaves" => 1.2,
             _ => 0.8,
         };
         // The ice starts under the end of the snow (which opens onto it) and the mud runs on
@@ -431,7 +477,7 @@ impl Stretch {
             ds: if fine { 0.02 } else { 0.04 },
             columns: cols,
             surface: &surface,
-            shadows: matches!(self.name, "mud" | "sand" | "water"),
+            shadows: matches!(self.name, "mud" | "sand" | "water" | "leaves"),
         }));
         match self.name {
             "grass" => {
@@ -499,7 +545,7 @@ impl Stretch {
             }
             "water" => {
                 for h in &self.hollows {
-                    out.parts.push(puddle(h));
+                    out.parts.push(self.puddle(h));
                 }
             }
             _ => {}
@@ -533,14 +579,25 @@ impl Stretch {
                     * (1.0 - 5.0 * windrow)
             }
             "sand" => {
+                // Damp and stained by the rotting litter where the leaves begin.
+                let stain = smooth(self.s1 as f32 - 1.5, self.s1 as f32 - 0.3, s as f32)
+                    * (0.6 + 0.4 * fbm_world(w.x, w.y, 0.25, 2, 0x93));
                 Vec3::new(1.0, 0.98, 0.95)
                     * (0.94 + 0.1 * n)
                     * (1.0 - 0.06 * (1.0 - smooth(0.2, 0.6, ax)))
+                    * Vec3::ONE.lerp(Vec3::new(0.62, 0.6, 0.6), stain.max(0.0))
+                    // Thin over the soil at the edge: darker and greyer.
+                    * Vec3::ONE.lerp(Vec3::new(0.7, 0.66, 0.6), 0.5 * smooth(1.1, 1.8, ax))
             }
             "leaves" => Vec3::splat(0.9 + 0.2 * n),
             "water" => {
                 let hollow: f32 = self.hollows.iter().map(|h| h.at(s, x, w)).sum();
-                Vec3::splat(0.92 + 0.12 * n) * (1.0 - 9.0 * hollow).max(0.55)
+                let halo = self
+                    .hollows
+                    .iter()
+                    .map(|h| h.halo(s, x, w))
+                    .fold(0.0, f32::max);
+                Vec3::splat(0.92 + 0.12 * n) * (1.0 - 9.0 * hollow).max(0.55) * (1.0 - 0.22 * halo)
             }
             _ => Vec3::ONE,
         }
@@ -715,6 +772,38 @@ impl Stretch {
                 },
             );
         }
+        // Crumbs and lumps broken off the snow's crumbling edge, lying along it on the snow
+        // and on the ground beside it.
+        let kit = capped_kit(false);
+        for _ in 0..(len * 6.6 * 60.0) as usize {
+            let s = rng.range(self.s0 as f32, s1 as f32) as f64;
+            let x = rng.range(-3.3, 3.3);
+            let p = point(s, x, 0.0);
+            let a = snow.at(s, x, Vec2::new(p.x, p.z));
+            if a.inside < -0.12 || a.inside > 0.05 {
+                continue;
+            }
+            let size = rng.range(0.008, 0.032) * if rng.chance(0.12) { 1.8 } else { 1.0 };
+            let y = self.ground_y(s, x);
+            // Dirtier off the snow, where they lie in the grass or on the ice.
+            let grey = if a.inside < 0.0 {
+                rng.range(0.72, 0.9)
+            } else {
+                rng.range(0.86, 1.0)
+            };
+            append(
+                b.at(s, Mat::SnowLump),
+                &kit[rng.below(KIT)],
+                Quat::from_rotation_y(rng.range(0.0, TAU)),
+                Vec3::new(
+                    size,
+                    size * rng.range(0.3, 0.55),
+                    size * rng.range(0.8, 1.5),
+                ),
+                point(s, x, y - size * 0.05),
+                (Vec3::new(0.97, 0.98, 1.0) * grey).extend(1.0),
+            );
+        }
         if self.name == "snow" {
             // A few stones out of the thin snow at the edges.
             for _ in 0..16 {
@@ -807,6 +896,42 @@ impl Stretch {
             let y = self.ground_y(s, x);
             let col = palette[rng.below(palette.len())];
             stone(b, rng, s, point(s, x, y), size, col, 0.35);
+        }
+        // The bed itself: a carpet of small pebbles packed shoulder to shoulder over the
+        // texture's fines, pressed in on the walking line and lying looser toward the
+        // edging, so the bed has real relief and self-shadowing at a grazing sun.
+        let kit = capped_kit(true);
+        let n = ((self.s1 - self.s0 + 0.35) * 2.6 * 255.0) as usize;
+        for _ in 0..n {
+            let s = rng.range(self.s0 as f32 - 0.35, self.s1 as f32) as f64;
+            let x = rng.range(-1.3, 1.3);
+            let ax = x.abs();
+            let walked = 1.0 - smooth(0.15, 0.6, ax);
+            if rng.chance(0.35 * walked) {
+                continue;
+            }
+            // Where the bed's tongue frays over the ice, fewer.
+            if s < self.s0 && !rng.chance(smooth(self.s0 as f32 - 0.35, self.s0 as f32, s as f32)) {
+                continue;
+            }
+            let size =
+                0.012 * (1.0 + 1.3 * rng.f().powf(1.5)) * (1.0 + 0.35 * smooth(0.6, 1.2, ax));
+            let y = self.ground_y(s, x);
+            let col = palette[rng.below(palette.len())] * rng.range(0.78, 1.18);
+            // Dusty where trodden.
+            let col = col.lerp(hex(0xa39a8c), 0.35 * walked * rng.f());
+            append(
+                b.at(s, Mat::Stone),
+                &kit[rng.below(KIT)],
+                Quat::from_rotation_y(rng.range(0.0, TAU)) * Quat::from_rotation_x(rng.normal(0.1)),
+                Vec3::new(
+                    size * rng.range(0.85, 1.25),
+                    size * rng.range(0.7, 0.95) * (1.0 - 0.2 * walked),
+                    size * rng.range(0.85, 1.25),
+                ),
+                point(s, x, y - size * (0.01 + 0.05 * walked)),
+                col.extend(1.0),
+            );
         }
         // Edging boards with stakes, in short straight pieces round the bend.
         let mut s = self.s0;
@@ -918,16 +1043,7 @@ impl Stretch {
     }
 
     fn leaf_props(&self, b: &mut Batch, rng: &mut Rand) {
-        let autumn = [
-            Vec3::new(0.62, 0.16, 0.03),
-            Vec3::new(0.75, 0.33, 0.05),
-            Vec3::new(0.8, 0.52, 0.1),
-            Vec3::new(0.55, 0.36, 0.12),
-            Vec3::new(0.42, 0.2, 0.07),
-            Vec3::new(0.7, 0.6, 0.18),
-            Vec3::new(0.35, 0.12, 0.05),
-            Vec3::new(0.3, 0.22, 0.1),
-        ];
+        let autumn = AUTUMN.map(muted);
         let n = ((self.s1 - self.s0 + 1.6) * 560.0) as usize;
         for _ in 0..n {
             let s = rng.range(self.s0 as f32 - 0.8, self.s1 as f32 + 0.8) as f64;
@@ -951,14 +1067,20 @@ impl Stretch {
             let tiltv = Vec3::new(rng.normal(0.35), 1.0, rng.normal(0.35))
                 * Vec3::new(1.0 - trodden * 0.8, 1.0, 1.0 - trodden * 0.8);
             let rot = super::procgen::tilt(tiltv, rng.range(0.0, TAU));
+            // Dry leaves curl: cupped, some with their tips drooping to the ground.
+            let droop = if rng.chance(0.3) {
+                rng.range(-0.016, -0.006)
+            } else {
+                rng.range(-0.006, 0.008)
+            };
             leaf(
                 b.at(s, Mat::Leaf),
                 point(s, x, y + pile),
                 rot,
                 len,
                 width,
-                rng.range(-0.012, 0.008) * (1.0 - trodden),
-                rng.range(0.0, 0.012) * (1.0 - trodden),
+                droop * (1.0 - trodden),
+                rng.range(0.0, 0.02) * (1.0 - 0.7 * trodden),
                 cell,
                 col.extend(1.0),
             );
@@ -1162,6 +1284,25 @@ impl Stretch {
     }
 }
 
+/// Fallen autumn leaves' colours (before [`muted`]).
+const AUTUMN: [Vec3; 8] = [
+    Vec3::new(0.62, 0.16, 0.03),
+    Vec3::new(0.75, 0.33, 0.05),
+    Vec3::new(0.8, 0.52, 0.1),
+    Vec3::new(0.55, 0.36, 0.12),
+    Vec3::new(0.42, 0.2, 0.07),
+    Vec3::new(0.7, 0.6, 0.18),
+    Vec3::new(0.35, 0.12, 0.05),
+    Vec3::new(0.3, 0.22, 0.1),
+];
+
+/// A fallen leaf's colour after days on the ground: a quarter of its chroma and a little of
+/// its brightness gone.
+fn muted(c: Vec3) -> Vec3 {
+    let grey = Vec3::splat(c.dot(Vec3::new(0.3, 0.55, 0.15)));
+    grey.lerp(c, 0.75) * 0.85
+}
+
 /// A grass stalk gone to seed: a thin stem `h` tall, leaning a little, with a seed spike.
 fn seed_head(m: &mut Mesh, rng: &mut Rand, at: Vec3, h: f32) {
     let lean = Vec3::new(rng.normal(0.15), 1.0, rng.normal(0.15)).normalize();
@@ -1216,10 +1357,10 @@ fn rosette(m: &mut Mesh, rng: &mut Rand, at: Vec3) {
     let leaves = 5 + rng.below(5);
     let size = rng.range(0.05, 0.11);
     let green = if dandelion {
-        Vec3::new(0.26, 0.4, 0.12)
+        Vec3::new(0.25, 0.31, 0.11)
     } else {
-        Vec3::new(0.2, 0.33, 0.1)
-    } * rng.range(0.8, 1.15);
+        Vec3::new(0.2, 0.26, 0.1)
+    } * rng.range(0.7, 1.0);
     let turn = rng.range(0.0, TAU);
     for k in 0..leaves {
         let yaw = turn + k as f32 / leaves as f32 * TAU + rng.normal(0.2);
@@ -1273,39 +1414,55 @@ impl Stretch {
     }
 }
 
-/// A puddle: a level, dark water surface sitting in a hollow (the ground hides its edges).
-fn puddle(h: &Hollow) -> Part {
-    let (c, d, r) = frame(h.s);
-    let center = c + r * h.x;
-    let y = h.water_y();
-    let mut m = Mesh::default();
-    let n = 40;
-    m.vertices.push(vert(
-        Vec3::new(0.0, y, 0.0),
-        Vec3::Y,
-        Vec2::new(center.x, center.z),
-        Vec4::ONE,
-    ));
-    for k in 0..=n {
-        let a = k as f32 / n as f32 * TAU;
-        let p = d * a.cos() * h.rs * 1.25 + r * a.sin() * h.rx * 1.25;
-        m.vertices.push(vert(
-            Vec3::new(p.x, y, p.z),
-            Vec3::Y,
-            Vec2::new(center.x + p.x, center.z + p.z),
-            Vec4::ONE,
-        ));
-    }
-    for k in 0..n as u32 {
-        let (a, bb) = (1 + k, 2 + k);
-        let [pa, pb] = [a, bb].map(|i| Vec3::from(m.vertices[i as usize].position));
-        if pa.cross(pb).y > 0.0 {
-            m.indices.extend_from_slice(&[0, a, bb]);
-        } else {
-            m.indices.extend_from_slice(&[0, bb, a]);
+impl Stretch {
+    /// A puddle: a level, dark water surface sitting in a hollow, clearing to nothing over
+    /// its shallow shore (the vertex alpha follows the depth of water over the ground), so
+    /// its edge is a soft wet line rather than a cut-out.
+    fn puddle(&self, h: &Hollow) -> Part {
+        let (c, d, r) = frame(h.s);
+        let center = c + r * h.x;
+        let y = h.water_y();
+        let mut m = Mesh::default();
+        let n = 48;
+        let rings = [0.0f32, 0.35, 0.6, 0.75, 0.85, 0.92, 1.0, 1.08, 1.16, 1.25];
+        for (i, &t) in rings.iter().enumerate() {
+            let count = if i == 0 { 1 } else { n };
+            for k in 0..count {
+                let a = k as f32 / n as f32 * TAU;
+                let p = (d * a.cos() * h.rs + r * a.sin() * h.rx) * t;
+                let s = h.s + p.dot(d) as f64;
+                let x = h.x + p.dot(r);
+                let ground = self.height(s, x, Vec2::new(center.x + p.x, center.z + p.z));
+                let alpha = smooth(0.0, 0.012, y - ground);
+                m.vertices.push(vert(
+                    Vec3::new(p.x, y, p.z),
+                    Vec3::Y,
+                    Vec2::new(center.x + p.x, center.z + p.z),
+                    Vec4::new(1.0, 1.0, 1.0, alpha),
+                ));
+            }
         }
+        let ring = |i: usize, k: usize| -> u32 {
+            if i == 0 {
+                0
+            } else {
+                (1 + (i - 1) * n + k % n) as u32
+            }
+        };
+        for i in 0..rings.len() - 1 {
+            for k in 0..n {
+                let (a, b) = (ring(i, k), ring(i, k + 1));
+                let (c2, d2) = (ring(i + 1, k), ring(i + 1, k + 1));
+                if i == 0 {
+                    m.indices.extend_from_slice(&[a, c2, d2]);
+                } else {
+                    m.indices.extend_from_slice(&[a, c2, d2, a, d2, b]);
+                }
+            }
+        }
+        fix_up(&mut m, 0);
+        Part::own(m, Mat::Water, Vec3::new(center.x, 0.0, center.z)).no_shadows()
     }
-    Part::own(m, Mat::Water, Vec3::new(center.x, 0.0, center.z)).no_shadows()
 }
 
 // ----------------------------------------------------------------------- the verges
@@ -1334,13 +1491,13 @@ fn verges() -> Out {
             let cover = if wintry && snow.covers(s, x, w) {
                 -1.0
             } else {
-                fray(x, 2.25, 2.68)
+                fray(x, 2.5, 3.2)
             };
             Surf::new(verge_height(x, w), cover, tint)
         };
         for side in [-1.0, 1.0] {
             // Global columns so overlapping verges of neighbours match exactly.
-            let cols: Vec<f32> = (0..=40)
+            let cols: Vec<f32> = (0..=51)
                 .map(|k| 0.9 + k as f32 * 0.045)
                 .filter(|x| *x >= from - 1e-4)
                 .map(|x| x * side)
@@ -1368,12 +1525,13 @@ fn verges() -> Out {
 /// Grass blades along the verges, drawn by the renderer's grass (a dense meadow for the
 /// cost of a small map): one field over the whole loop, thick along both sides of the path
 /// in drifts with thinner gaps, bare on the path itself, under the snow and inside the
-/// built stretches, short and trampled where it meets the path, fading raggedly into the
-/// lawn; dry and straw-coloured round the winter stretches, the dunes and the wood.
-/// Centred on the trail's origin.
+/// built stretches, short and trampled where it meets the path, thinning out gradually (and
+/// drying toward a lawn's colour) until it is gone at [`crate::demo::meadow_reach`], about
+/// 7 m out, where the landscape's own grass takes over; dry and straw-coloured round the
+/// winter stretches, the dunes and the wood. Centred on the trail's origin.
 pub(super) fn meadow() -> GrassField {
     let (h, r) = (HALF_STRAIGHT as f32, BEND_RADIUS as f32);
-    let reach = 4.6;
+    let reach = 7.8;
     let size = [2.0 * (h + r + reach), 2.0 * (r + reach)];
     let res = [(size[0] / 0.2) as u32, (size[1] / 0.2) as u32];
     let snow = snow::snow();
@@ -1410,9 +1568,14 @@ pub(super) fn meadow() -> GrassField {
                 _ => (1.45, 0.2),
             };
             let drift = fbm_world(x, z, 1.1, 3, 0x6a1);
+            // Thick by the path, thinning out (shorter and sparser) over the next few meters
+            // in drifts, gone at the hand-off.
+            let end = crate::demo::meadow_reach(x, z);
+            let thin = 1.0 - smooth(2.6, end, side + 0.35 * fbm_world(x, z, 0.9, 2, 0x6a2));
             let mut density = smooth(start, start + 0.35, side + 0.08 * drift)
-                * (1.0 - smooth(2.3, 4.4, side + 0.6 * fbm_world(x, z, 0.9, 2, 0x6a2)))
-                * (0.3 + 0.7 * smooth(-0.4, 0.35, drift));
+                * thin.powf(0.8)
+                * (0.3 + 0.7 * smooth(-0.4, 0.35, drift))
+                * (side < end) as u8 as f32;
             if name == "grass" {
                 // Short and thin where the walkers tread, either side of the worn line.
                 density *= 0.35 + 0.65 * smooth(1.0, 1.4, side);
@@ -1430,7 +1593,7 @@ pub(super) fn meadow() -> GrassField {
             let dryness = (dry
                 + 0.18 * fbm_world(x, z, 2.5, 2, 0x6a3)
                 + 0.25 * trampled
-                + 0.15 * smooth(3.0, 4.0, side))
+                + 0.15 * smooth(3.0, 6.5, side))
             .clamp(0.0, 1.0);
             (height, density, dryness)
         })
@@ -1463,7 +1626,7 @@ fn spill(b: &mut Batch, rng: &mut Rand, kind: &str, onto: &Stretch, at: f64, dir
     let forward = dir > 0.0;
     // How far and how many per meter of trail.
     let (reach, per_m) = match (kind, forward) {
-        ("leaves", false) => (1.4, 110.0),
+        ("leaves", false) => (1.4, 220.0),
         ("leaves", true) => (1.6, 40.0),
         ("gravel", true) => (1.3, 55.0),
         ("gravel", false) => (0.8, 30.0),
@@ -1479,8 +1642,14 @@ fn spill(b: &mut Batch, rng: &mut Rand, kind: &str, onto: &Stretch, at: f64, dir
         _ => return,
     };
     let built = matches!(onto.name, "wood" | "metal" | "concrete");
+    // Leaves blown back pile up near the litter's edge and thin out fast.
+    let falloff = if kind == "leaves" && !forward {
+        2.5
+    } else {
+        1.7
+    };
     for _ in 0..(reach * per_m) as usize {
-        let t = rng.f().powf(1.7) * reach;
+        let t = rng.f().powf(falloff) * reach;
         let s = at + dir * t as f64;
         let x = rng.normal(0.6).clamp(-1.25, 1.25) * if built { 0.8 } else { 1.0 };
         let y = onto.ground_y(s, x);
@@ -1494,7 +1663,7 @@ fn spill(b: &mut Batch, rng: &mut Rand, kind: &str, onto: &Stretch, at: f64, dir
             }
             "mud" | "water" => {
                 let size = rng.range(0.012, 0.04);
-                let col = hex(0x4a3524) * rng.range(0.6, 1.0);
+                let col = hex(0x433b33) * rng.range(0.6, 1.0);
                 let base = &rock_kit(0.5)[rng.below(KIT)];
                 append(
                     b.at(s, Mat::Stone),
@@ -1512,14 +1681,14 @@ fn spill(b: &mut Batch, rng: &mut Rand, kind: &str, onto: &Stretch, at: f64, dir
             "snow" => {
                 // Kicked crumbs and flat clumps, half sunk.
                 let size = rng.range(0.012, 0.06);
-                let base = &rock_kit(0.55)[rng.below(KIT)];
+                let base = &capped_kit(false)[rng.below(KIT)];
                 append(
-                    b.at(s, Mat::Straw),
+                    b.at(s, Mat::SnowLump),
                     base,
                     Quat::from_rotation_y(rng.range(0.0, TAU)),
                     Vec3::new(size, size * rng.range(0.2, 0.4), size * rng.range(0.8, 1.6)),
                     p - Vec3::Y * size * 0.08,
-                    Vec4::new(0.84, 0.87, 0.93, 1.0) * rng.range(0.9, 1.05),
+                    Vec4::new(0.95, 0.97, 1.0, 1.0) * rng.range(0.85, 1.0),
                 );
             }
             "sand" => {
@@ -1556,14 +1725,7 @@ fn spill(b: &mut Batch, rng: &mut Rand, kind: &str, onto: &Stretch, at: f64, dir
                     twig(b.at(s, Mat::Bark), rng, p + Vec3::Y * 0.004);
                     continue;
                 }
-                let autumn = [
-                    Vec3::new(0.62, 0.16, 0.03),
-                    Vec3::new(0.75, 0.33, 0.05),
-                    Vec3::new(0.8, 0.52, 0.1),
-                    Vec3::new(0.55, 0.36, 0.12),
-                    Vec3::new(0.42, 0.2, 0.07),
-                    Vec3::new(0.3, 0.22, 0.1),
-                ];
+                let autumn = AUTUMN.map(muted);
                 let l = rng.range(0.05, 0.1);
                 leaf(
                     b.at(s, Mat::Leaf),
@@ -1837,6 +1999,39 @@ pub(super) fn rock_kit(bury: f32) -> &'static [Mesh] {
             .map(|i| {
                 let detail = 1 + (i / KIT) as u32;
                 rock(i as u32 * 31 + 7, detail, Vec3::ONE, 0.32, bury, Vec3::ONE)
+            })
+            .collect()
+    })
+}
+
+/// Unit pebbles (`round`) or lumps, `KIT` shapes resting half buried on y = 0, with the
+/// faces wholly under the ground left out (they never show), so a carpet of thousands of
+/// them keeps the silhouettes of 80-triangle shapes for about half the triangles.
+pub(super) fn capped_kit(round: bool) -> &'static [Mesh] {
+    static ROUND: std::sync::OnceLock<Vec<Mesh>> = std::sync::OnceLock::new();
+    static LUMPY: std::sync::OnceLock<Vec<Mesh>> = std::sync::OnceLock::new();
+    let cell = if round { &ROUND } else { &LUMPY };
+    cell.get_or_init(|| {
+        (0..KIT)
+            .map(|i| {
+                let lump = if round { 0.16 } else { 0.34 };
+                let full = rock(i as u32 * 53 + 11, 1, Vec3::ONE, lump, 0.5, Vec3::ONE);
+                let mut m = Mesh::default();
+                for t in full.indices.as_chunks::<3>().0 {
+                    let top = t
+                        .iter()
+                        .map(|&k| full.vertices[k as usize].position[1])
+                        .fold(f32::MIN, f32::max);
+                    if top < -0.02 {
+                        continue;
+                    }
+                    let base = m.vertices.len() as u32;
+                    for &k in t {
+                        m.vertices.push(full.vertices[k as usize]);
+                    }
+                    m.indices.extend_from_slice(&[base, base + 1, base + 2]);
+                }
+                m
             })
             .collect()
     })
