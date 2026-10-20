@@ -45,6 +45,10 @@ struct Seen {
     biceps_at_strike: f32,
     biceps_relaxed: f32,
     lifter_flex: f32,
+    /// Through the held double-biceps: how far the elbows stray from shoulder height (m),
+    /// and the lowest the fists get relative to the top of the head (m, + above).
+    flex_elbow_off: f64,
+    flex_fist_low: f64,
     /// Through the guard: the left hand's largest distance from the handle, the hammer
     /// head's lowest height and the feet's smallest stagger (front to back), m.
     guard_hand_off: f64,
@@ -82,6 +86,7 @@ fn every_test_case_does_what_it_shows() {
     let mut seen = Seen {
         closest_strike: f64::MAX,
         guard_head_low: f64::MAX,
+        flex_fist_low: f64::MAX,
         guard_stagger: f64::MAX,
         dog_spine: (f32::MAX, f32::MIN),
         ..Default::default()
@@ -130,6 +135,17 @@ fn every_test_case_does_what_it_shows() {
         }
         if (2.2..2.8).contains(&t) {
             seen.lifter_flex = seen.lifter_flex.max(activation(w, d.lifter, "biceps_l"));
+        }
+        // The flex: triggered at 0.8 s, held from 34% to 72% of 3.6 s.
+        if (2.1..3.3).contains(&t) {
+            let head = bone_world(w, d.lifter, "head").y;
+            for side in ["l", "r"] {
+                let shoulder = bone_world(w, d.lifter, &format!("upper_arm_{side}"));
+                let elbow = bone_world(w, d.lifter, &format!("lower_arm_{side}"));
+                let fist = bone_world(w, d.lifter, &format!("hand_{side}"));
+                seen.flex_elbow_off = seen.flex_elbow_off.max((elbow.y - shoulder.y).abs());
+                seen.flex_fist_low = seen.flex_fist_low.min(fist.y - head);
+            }
         }
         // The reach: triggered at 0.5 s, holding the lantern from 40% to 70% of 3 s.
         if (1.8..2.5).contains(&t) {
@@ -245,6 +261,17 @@ fn every_test_case_does_what_it_shows() {
         seen.lifter_flex > 0.6,
         "flex activation {}",
         seen.lifter_flex
+    );
+    // Front double-biceps: upper arms level with the shoulders, fists up by the head.
+    assert!(
+        seen.flex_elbow_off < 0.1,
+        "elbows {} m off shoulder height in the flex",
+        seen.flex_elbow_off
+    );
+    assert!(
+        seen.flex_fist_low > 0.0,
+        "fists {} m from the head's height in the flex",
+        seen.flex_fist_low
     );
     assert!(
         seen.guard_hand_off < 0.1 && seen.guard_head_low > 1.5 && seen.guard_stagger > 0.2,

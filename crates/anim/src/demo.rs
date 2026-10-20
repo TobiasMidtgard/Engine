@@ -944,11 +944,11 @@ pub const VIEWS: &[DemoView] = &[
     },
     DemoView {
         key: "paddock_flex",
-        name: "Double-biceps flex",
+        name: "Front double-biceps: curl up, hit and squeeze",
         eye: [0.47, 1.8, 7.19],
         target: [0.7, 1.7, 5.6],
         hour: 15.0,
-        at: 2.52,
+        at: 2.92,
     },
     DemoView {
         key: "paddock_reach",
@@ -977,10 +977,18 @@ pub const VIEWS: &[DemoView] = &[
     DemoView {
         key: "paddock_crowd_wince",
         name: "A spectator winces as the hammer lands",
-        eye: [-1.55, 1.58, 8.25],
-        target: [-1.5, 1.56, 9.0],
+        eye: [-1.6, 1.4, 8.3],
+        target: [-1.5, 1.36, 9.0],
         hour: 15.0,
         at: 1.75,
+    },
+    DemoView {
+        key: "paddock_crowd_glance",
+        name: "A spectator glances about between strikes",
+        eye: [-2.62, 1.66, 8.35],
+        target: [-2.6, 1.62, 9.0],
+        hour: 15.0,
+        at: 4.5,
     },
     DemoView {
         key: "paddock_stairs",
@@ -1080,11 +1088,11 @@ pub const VIEWS: &[DemoView] = &[
     },
     DemoView {
         key: "paddock_flinch",
-        name: "A jab to the chin snaps the head back",
+        name: "In a boxer's guard, a jab to the chin snaps the head back",
         eye: [-3.6, 1.35, 1.2],
         target: [-6.0, 1.15, 1.0],
         hour: 15.0,
-        at: 0.92,
+        at: 0.9,
     },
     DemoView {
         key: "paddock_sprint_start",
@@ -1286,7 +1294,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     );
     dress(world, lifter, "lifter", SkinMaterial::default());
     world.entity_mut(lifter).insert(DemoScript {
-        period: 5.0,
+        period: 6.0,
         steps: vec![DemoStep::trigger(0.8, "flex")],
         time: 0.0,
     });
@@ -1521,8 +1529,8 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         },
     ));
 
-    // Sparring partner: struck in turn on the chin, the side of the head, the stomach and
-    // the back of a shoulder, flinching away from each blow.
+    // Sparring partner: in a boxer's guard, struck in turn on the chin, the side of the head,
+    // the stomach and the back of a shoulder, flinching away from each blow.
     let sparring = spawn_humanoid(
         world,
         humanoid::Outfit::Shirt,
@@ -1534,7 +1542,8 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         DemoScript {
             period: 6.0,
             steps: vec![
-                DemoStep::hit(0.8, Vec3::new(0.0, 1.62, -0.12), Vec3::new(0.0, 0.0, 26.0)),
+                DemoStep::param(0.05, "guarding", 1.0),
+                DemoStep::hit(0.8, Vec3::new(0.0, 1.58, -0.12), Vec3::new(0.0, 0.0, 26.0)),
                 DemoStep::hit(2.3, Vec3::new(-0.1, 1.6, -0.03), Vec3::new(24.0, 0.0, 6.0)),
                 DemoStep::hit(3.8, Vec3::new(0.02, 1.1, -0.15), Vec3::new(0.0, 0.0, 32.0)),
                 DemoStep::hit(5.0, Vec3::new(0.18, 1.42, 0.08), Vec3::new(0.0, 0.0, -24.0)),

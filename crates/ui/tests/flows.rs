@@ -1203,3 +1203,52 @@ fn saving_new_over_and_deleting_slots() {
     assert_ne!(saves_selected(&mut app), "save_2");
     assert!(open(&mut app).contains(&"saves".to_string()));
 }
+
+#[test]
+fn the_title_screen_continues_the_newest_save_and_opens_load_and_quit() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "title", "instant": true}),
+    );
+    app.update_n(3);
+    // Esc doesn't close the title screen.
+    press(&mut app, KeyCode::Escape);
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"title".to_string()));
+    // Load Game opens the saves screen over it; closing it comes back.
+    api(&mut app, "ui.click", json!({"id": "title_load"}));
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"saves".to_string()));
+    api(
+        &mut app,
+        "ui.hide",
+        json!({"screen": "saves", "instant": true}),
+    );
+    app.update_n(3);
+    // Quit asks first.
+    let since = next_event(&mut app);
+    api(&mut app, "ui.click", json!({"id": "title_quit"}));
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"confirm".to_string()));
+    assert!(!actions_since(&mut app, since).contains(&"game.exit".to_string()));
+    api(&mut app, "ui.click", json!({"id": "confirm_cancel"}));
+    app.update_n(30);
+    // Continue loads the newest save (the autosave) and leaves the title screen.
+    api(&mut app, "ui.click", json!({"id": "title_continue"}));
+    app.update_n(30);
+    assert!(actions_since(&mut app, since).contains(&"game.load:auto".to_string()));
+    assert!(!open(&mut app).contains(&"title".to_string()));
+    // New Game from a fresh title screen.
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "title", "instant": true}),
+    );
+    app.update_n(3);
+    api(&mut app, "ui.click", json!({"id": "title_new"}));
+    app.update_n(30);
+    assert!(actions_since(&mut app, since).contains(&"game.new".to_string()));
+    assert!(!open(&mut app).contains(&"title".to_string()));
+}

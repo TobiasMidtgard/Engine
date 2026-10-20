@@ -266,7 +266,10 @@ fn mud() -> TexSet {
         // The films lie flat over the bumps, so only they mirror the sky.
         let height = (h - wetness * 0.002).max(-0.0056);
         Texel {
-            color: col * (1.0 - 0.2 * film),
+            // A film shows the wet mud under it, the colour of soaked brown mud and no darker:
+            // from above it mirrors only a few percent of the sky, so a film over the darkest
+            // mud would read as a black hole.
+            color: col.lerp(brown * 0.8, film),
             height: lerp(height, -0.0056, smooth(0.3, 0.8, film)),
             rough: lerp(lerp(0.88, 0.62, wetness), 0.08, film),
             alpha: coverage(u, v, 5, 34),
