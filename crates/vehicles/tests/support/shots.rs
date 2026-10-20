@@ -8,6 +8,7 @@ use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
+use engine_vehicles::models::scenery;
 use engine_vehicles::presets;
 
 use super::*;
@@ -83,6 +84,8 @@ fn shoot_from(
         .id()
     });
     let ride = scene(&mut app);
+    // Scenery bakes its full-size textures in the background: wait for them.
+    scenery::finish_textures(&mut app.world);
     spawn_with(&mut app, |c| {
         let mut e = c.spawn((Camera::perspective(45.0), camera));
         if let Some(vehicle) = ride {
@@ -135,10 +138,12 @@ pub fn plane(app: &mut App, size: f32, y: f64, color: u32, roughness: f32) {
     });
 }
 
-/// A concrete floor with a collider (top at y = 0) and its drawing.
+/// A concrete apron with a collider (top at y = 0), slabs `size` meters across in a field
+/// of grass that runs on to the horizon.
 pub fn floor(app: &mut App, size: f32) {
     ground(app, DVec3::ZERO, size * 0.5, "concrete");
-    plane(app, size, 0.0, 0x8a8a86, 0.85);
+    scenery::apron_ground(&mut app.world, DVec3::ZERO, size * 0.5);
+    scenery::grass_ground(&mut app.world, DVec3::new(0.0, -0.02, 0.0), size * 2.0);
 }
 
 /// A preset parked on the ground at `at` (y = ground height), facing `heading_deg` from −Z.

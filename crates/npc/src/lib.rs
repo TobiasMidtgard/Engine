@@ -152,6 +152,7 @@ impl Plugin for NpcPlugin {
                 (
                     (
                         seed::seed_bodies,
+                        visuals::character::request_appearances,
                         world_model::rebuild_world_model,
                         wildlife::init_animals,
                         perception::tick_clocks,
@@ -189,6 +190,8 @@ impl Plugin for NpcPlugin {
                     (
                         visuals::build_stand_ins,
                         visuals::pose_stand_ins,
+                        visuals::character::write_bodies,
+                        visuals::character::wear,
                         visuals::intent_markers,
                         training::build_posts,
                         training::pose_posts,

@@ -462,31 +462,63 @@ fn ribbon(b: &mut Builder, path: &[(Vec3, f32)], w: f32) {
     }
 }
 
-/// Tire marks from touchdowns: pairs of short dark streaks in both touchdown zones.
+/// Tire marks: pairs of short dark streaks in both touchdown zones, and fainter long ones
+/// down the middle from the threshold, where take-offs line up and roll.
 fn touchdown_rubber(f: &Field, parts: &mut Parts) {
+    struct Set {
+        count: usize,
+        start: (f32, f32),
+        len: (f32, f32),
+        gear: (f32, f32),
+        spread: f32,
+        dark: (f32, f32),
+        width: (f32, f32),
+    }
+    let sets = [
+        Set {
+            count: 170,
+            start: (180.0, 620.0),
+            len: (14.0, 70.0),
+            gear: (1.6, 4.2),
+            spread: 5.0,
+            dark: (0.35, 0.9),
+            width: (0.22, 0.55),
+        },
+        Set {
+            count: 46,
+            start: (2.0, 60.0),
+            len: (50.0, 240.0),
+            gear: (1.3, 4.0),
+            spread: 1.6,
+            dark: (0.25, 0.6),
+            width: (0.25, 0.5),
+        },
+    ];
     let b = parts.get(Surface::Skid);
     for (ei, e) in f.ends.iter().enumerate() {
-        for k in 0..170 {
-            let seed = (ei * 1000 + k) as i32;
-            let t0 = mix(180.0, 620.0, rand1(seed, 3).powf(1.4));
-            let len = mix(14.0, 70.0, rand1(seed, 5));
-            let gear = mix(1.6, 4.2, rand1(seed, 7));
-            let off = (rand1(seed, 9) - 0.5) * 5.0;
-            let yaw = (rand1(seed, 11) - 0.5) * 0.03;
-            let dark = mix(0.35, 0.9, rand1(seed, 13));
-            let w = mix(0.22, 0.55, rand1(seed, 15));
-            b.color(Vec4::new(1.0, 1.0, 1.0, dark));
-            for s in [-1.0f32, 1.0] {
-                let pts: Vec<(Vec3, f32)> = (0..=8)
-                    .map(|i| {
-                        let u = i as f32 / 8.0;
-                        let t = t0 + u * len;
-                        let r = off + s * gear + yaw * (t - t0);
-                        let a = smoothstep(0.0, 0.08, u) * smoothstep(1.0, 0.5, u);
-                        (e.at(t, r, PAINT + 0.002), a)
-                    })
-                    .collect();
-                ribbon(b, &pts, w);
+        for (si, set) in sets.iter().enumerate() {
+            for k in 0..set.count {
+                let seed = (si * 100_000 + ei * 1000 + k) as i32;
+                let t0 = mix(set.start.0, set.start.1, rand1(seed, 3).powf(1.4));
+                let len = mix(set.len.0, set.len.1, rand1(seed, 5));
+                let gear = mix(set.gear.0, set.gear.1, rand1(seed, 7));
+                let off = (rand1(seed, 9) - 0.5) * set.spread;
+                let yaw = (rand1(seed, 11) - 0.5) * 0.03;
+                let dark = mix(set.dark.0, set.dark.1, rand1(seed, 13));
+                let w = mix(set.width.0, set.width.1, rand1(seed, 15));
+                b.color(Vec4::new(1.0, 1.0, 1.0, dark));
+                for s in [-1.0f32, 1.0] {
+                    let pts: Vec<(Vec3, f32)> = (0..=8)
+                        .map(|i| {
+                            let u = i as f32 / 8.0;
+                            let t = t0 + u * len;
+                            let r = off + s * gear + yaw * (t - t0);
+                            let a = smoothstep(0.0, 0.08, u) * smoothstep(1.0, 0.5, u);
+                            (e.at(t, r, PAINT + 0.002), a)
+                        })
+                        .collect();
+                    ribbon(b, &pts, w);
+                }
             }
         }
     }

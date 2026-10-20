@@ -23,6 +23,7 @@ use engine_world::{ForestCover, Ground, WorldShift};
 use crate::assets::FoliageVisuals;
 use crate::meshgen::MeshBuilder;
 use crate::meshgen::textures::{CLUSTER_CELL, LeafKind, atlas_cell};
+use crate::near_woods::NearWoodsTree;
 use crate::scenery_tree::SceneryTree;
 use crate::species::PlantLibrary;
 use crate::visuals::camera_position;
@@ -86,7 +87,7 @@ pub(crate) enum FarTree {
 impl FarTree {
     const ALL: [FarTree; 4] = [FarTree::Spruce, FarTree::Pine, FarTree::Oak, FarTree::Birch];
 
-    fn species(self) -> &'static str {
+    pub(crate) fn species(self) -> &'static str {
         match self {
             FarTree::Spruce => "spruce",
             FarTree::Pine => "pine",
@@ -334,26 +335,26 @@ pub struct FarWoodCell {
 /// cells being built.
 #[derive(Resource, Default)]
 pub struct FarWoodsState {
-    origin: DVec3,
+    pub(crate) origin: DVec3,
     cells: HashMap<(i64, i64), Entity>,
     pending: HashMap<(i64, i64), Pending>,
     /// Bumped whenever the terrain installs a new cover (a terrain edit, a terrain added or
     /// moved). Cells from older ones rebuild once the cover has held still for
     /// [`COVER_SETTLE_FRAMES`]: a terrain that reinstalls its cover every frame (one that
     /// moves) doesn't keep every wood rebuilding or blinking out.
-    epoch: u64,
-    quiet_frames: u32,
+    pub(crate) epoch: u64,
+    pub(crate) quiet_frames: u32,
     /// Still materials (no sway) per tree kind, made from the species' far leaves.
     materials: HashMap<FarTree, Handle<StandardMaterial>>,
     /// The ground scenery trees stand on, and whether it must be looked at again.
-    occupied: Arc<Occupied>,
+    pub(crate) occupied: Arc<Occupied>,
     occupied_stale: bool,
 }
 
-/// Ground holding scenery trees: the [`OCCUPIED_M`] squares (keyed from the grid's origin, so
-/// world shifts carry it along) within [`OCCUPIED_REACH_M`] of one.
+/// Ground holding placed scenery trees (not the near woods' own): the [`OCCUPIED_M`] squares (keyed
+/// from the grid's origin, so world shifts carry it along) within [`OCCUPIED_REACH_M`] of one.
 #[derive(Debug, Default, PartialEq)]
-struct Occupied(HashSet<(i64, i64)>);
+pub(crate) struct Occupied(HashSet<(i64, i64)>);
 
 /// Side of an occupied square, meters.
 const OCCUPIED_M: f64 = 16.0;
@@ -383,7 +384,7 @@ impl Occupied {
         Self(set)
     }
 
-    fn holds(&self, origin: DVec3, p: DVec3) -> bool {
+    pub(crate) fn holds(&self, origin: DVec3, p: DVec3) -> bool {
         self.0.contains(&Self::key(origin, p))
     }
 }
@@ -466,7 +467,7 @@ impl CellJob {
 }
 
 /// Frames the cover must hold still before cells built from an older one rebuild.
-const COVER_SETTLE_FRAMES: u32 = 60;
+pub(crate) const COVER_SETTLE_FRAMES: u32 = 60;
 
 /// Spacing band for a distance: spacing doubles every two bands.
 fn band(settings: &FarWoods, d: f32) -> i32 {
@@ -508,7 +509,7 @@ pub fn stream_far_woods(
     cams: Query<(&Camera, &GlobalTransform)>,
     mut state: ResMut<FarWoodsState>,
     cells: Query<&FarWoodCell>,
-    trees: Query<Ref<GlobalTransform>, With<SceneryTree>>,
+    trees: Query<Ref<GlobalTransform>, (With<SceneryTree>, Without<NearWoodsTree>)>,
     mut removed: RemovedComponents<SceneryTree>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,

@@ -87,6 +87,18 @@ fn sun_shadow(rel: vec3<f32>) -> f32 {
     return textureSampleCompareLevel(shadow_map, shadow_sampler, uv, cascade, z);
 }
 
+// The sun's shadow in smoke, softened: two taps either side of the point, across the sun's
+// rays and turned by `spin` (which changes from step to step, so the march averages a disc).
+// A tree's shadow falling through a plume reads as a soft darker shaft, not as a sharp copy of
+// its crown hanging in the smoke.
+fn soft_sun_shadow(rel: vec3<f32>, spin: f32, radius: f32) -> f32 {
+    let l = frame.sun_dir.xyz;
+    let a = normalize(cross(l, select(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), abs(l.y) > 0.9)));
+    let b = cross(l, a);
+    let o = (a * cos(spin * TAU) + b * sin(spin * TAU)) * radius;
+    return 0.5 * (sun_shadow(rel + o) + sun_shadow(rel - o));
+}
+
 // Interleaved gradient noise: a per-pixel offset that hides the step pattern.
 fn step_jitter(px: vec2<f32>, frame_index: f32) -> f32 {
     let p = px + 5.588238 * (frame_index % 64.0);
@@ -174,7 +186,10 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
     var transmittance = 1.0;
     var color = vec3(0.0);
     var t_weighted = 0.0;
-    var t = t0 + ds * step_jitter(in.clip.xy, frame.time.w);
+    let spin = step_jitter(in.clip.xy, frame.time.w);
+    var t = t0 + ds * spin;
+    // How far the sun's shadow is spread in the smoke (m): about a cell, at least 40 cm.
+    let shadow_blur = max(cell * 0.6, 0.4);
     for (var i = 0; i < steps; i++) {
         if (t > t1) { break; }
         let p = dir * t;
@@ -246,13 +261,17 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
                 var w = tint;
                 var reach = 1.0;
                 var g = 0.65;
+                let shade = soft_sun_shadow(p, spin + f32(i) * 0.618034, shadow_blur);
                 for (var o = 0; o < 4; o++) {
-                    sun += w * smoke_phase(cos_t, g) * exp(-light.x * reach);
+                    // Light that has bounced around in the smoke also came from its sunlit
+                    // parts beside a shadow, so the shadow takes less of it.
+                    let shaded = select(mix(1.0, shade, 0.45), shade, o == 0);
+                    sun += w * smoke_phase(cos_t, g) * exp(-light.x * reach) * shaded;
                     w *= albedo * 0.8;
                     reach *= 0.3;
                     g *= 0.45;
                 }
-                inscatter += sun * sun_light * sun_shadow(p);
+                inscatter += sun * sun_light;
             }
             // Sky and ground light, also partly scattered on through the smoke.
             let ms = 0.6 * albedo * albedo;

@@ -325,6 +325,14 @@ fn views() -> Vec<View> {
             ..BASE
         },
         View {
+            name: "earth_cliff_beds",
+            eye: DVec3::new(-12_300.0, 0.0, -22_050.0),
+            target: DVec3::new(-13_000.0, 1_500.0, -21_750.0),
+            above_ground: Some(120.0),
+            sun: (175.0, 28.0),
+            ..BASE
+        },
+        View {
             name: "earth_river",
             eye: DVec3::new(3_500.0, 0.0, -6_500.0),
             target: DVec3::new(9_800.0, -150.0, -6_200.0),

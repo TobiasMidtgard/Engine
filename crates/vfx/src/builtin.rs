@@ -693,7 +693,7 @@ fn spells() -> Vec<EffectDesc> {
                     lifetime: [0.8, 1.4],
                     size: [0.25, 0.4],
                     emissive: 150.0,
-                    color: fade([0.4, 0.55, 0.7], 0.12, 0.15, 0.35),
+                    color: fade([0.85, 0.93, 1.0], 0.12, 0.15, 0.35),
                     ..smoke("mist", 0.85, 0.35)
                 },
             ],
@@ -705,8 +705,8 @@ fn spells() -> Vec<EffectDesc> {
         mark: mark(MarkKind::Frost, 1.3, 30.0, 0.0),
         ..effect(
             "spell.frost_impact",
-            "An ice bolt shattering: flash, a spray of bouncing ice shards, glints, a frost ring \
-             and a rolling cold mist.",
+            "An ice bolt shattering: flash, ice spikes thrust out where it struck, a spray of \
+             bouncing ice shards, glints, a frost ring and a rolling cold mist.",
             Some(0.1),
             vec![
                 EmitterDesc {
@@ -731,7 +731,7 @@ fn spells() -> Vec<EffectDesc> {
                         friction: 0.5,
                     },
                     debris: Some(Debris::Shard),
-                    emissive: 1200.0,
+                    emissive: 3000.0,
                     color: g(&[
                         (0.0, [0.62, 0.85, 1.0, 1.0]),
                         (0.8, [0.62, 0.85, 1.0, 1.0]),
@@ -768,7 +768,7 @@ fn spells() -> Vec<EffectDesc> {
                     size: [0.5, 0.8],
                     size_over_life: c(&[(0.0, 0.6), (1.0, 2.6)]),
                     emissive: 60.0,
-                    ..smoke("mist", 0.5, 0.3)
+                    ..smoke("mist", 0.75, 0.22)
                 },
                 EmitterDesc {
                     bursts: once(1),
@@ -785,6 +785,46 @@ fn spells() -> Vec<EffectDesc> {
                     additive: 1.0,
                     soft: 0.0,
                     ..em("frost_ring")
+                },
+                // Ice spikes thrust out where it struck: one big cluster and a few small ones
+                // around it, cracking and thinning away after a couple of seconds.
+                EmitterDesc {
+                    bursts: once(1),
+                    speed: [0.0, 0.0],
+                    lifetime: [2.4, 2.4],
+                    size: [1.1, 1.1],
+                    rotation_deg: [0.0, 0.0],
+                    local_space: true,
+                    sprite: Sprite::Crystal,
+                    facing: Facing::Axis,
+                    stretch: 1.0,
+                    lit: 1.0,
+                    color: Gradient::constant([0.75, 0.9, 1.0, 1.0]),
+                    emissive: 1500.0,
+                    soft: 0.1,
+                    wind: 0.0,
+                    ..em("spikes")
+                },
+                EmitterDesc {
+                    bursts: once(4),
+                    shape: EmitShape::Ring {
+                        radius: 0.45,
+                        thickness: 0.2,
+                    },
+                    speed: [0.0, 0.0],
+                    lifetime: [1.6, 2.2],
+                    size: [0.35, 0.6],
+                    rotation_deg: [0.0, 0.0],
+                    local_space: true,
+                    sprite: Sprite::Crystal,
+                    facing: Facing::Axis,
+                    stretch: 1.0,
+                    lit: 1.0,
+                    color: Gradient::constant([0.75, 0.9, 1.0, 1.0]),
+                    emissive: 1500.0,
+                    soft: 0.1,
+                    wind: 0.0,
+                    ..em("small_spikes")
                 },
             ],
         )
@@ -1194,8 +1234,8 @@ fn spells() -> Vec<EffectDesc> {
         light: light([0.7, 0.8, 1.0], 30_000.0, 16.0, 0.6, 0.3),
         ..effect(
             "spell.lightning_hit",
-            "Where a lightning bolt strikes: white-blue flash, a starburst, bouncing sparks and a \
-             puff of scorched smoke.",
+            "Where a lightning bolt strikes: white-blue flash, a starburst, electric arcs \
+             crawling out over the ground, bouncing sparks and a wisp of scorched smoke.",
             Some(0.1),
             vec![
                 EmitterDesc {
@@ -1228,14 +1268,36 @@ fn spells() -> Vec<EffectDesc> {
                     ]),
                     ..sparks("sparks", 80, [3.0, 10.0])
                 },
+                // Arcs crawling out over the ground, crackling for a moment.
                 EmitterDesc {
-                    bursts: once(6),
+                    bursts: once(7),
+                    offset: [0.0, 0.03, 0.0],
+                    speed: [0.0, 0.0],
+                    lifetime: [0.25, 0.45],
+                    size: [1.6, 2.6],
+                    rotation_deg: [0.0, 360.0],
+                    local_space: true,
+                    sprite: Sprite::Arc,
+                    facing: Facing::Horizontal,
+                    color: g(&[
+                        (0.0, [0.85, 0.92, 1.0, 1.0]),
+                        (0.6, [0.6, 0.75, 1.0, 1.0]),
+                        (1.0, [0.45, 0.55, 1.0, 0.0]),
+                    ]),
+                    emissive: 60_000.0,
+                    additive: 1.0,
+                    soft: 0.0,
+                    wind: 0.0,
+                    ..em("arcs")
+                },
+                EmitterDesc {
+                    bursts: once(4),
                     shape: EmitShape::Hemisphere { radius: 0.2 },
                     speed: [0.3, 0.8],
                     acceleration: [0.0, 0.6, 0.0],
                     lifetime: [1.2, 2.0],
-                    size: [0.4, 0.6],
-                    ..smoke("smoke", 0.12, 0.5)
+                    size: [0.3, 0.45],
+                    ..smoke("smoke", 0.3, 0.3)
                 },
             ],
         )

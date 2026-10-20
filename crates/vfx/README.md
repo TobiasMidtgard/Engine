@@ -33,7 +33,7 @@ An effect has emitters (layers). Each emitter says when it spawns (`rate`, `rate
 box, line), how particles move (`speed`, `velocity`, `orbit_speed`, `gravity`, `drag`, `wind`,
 `turbulence`, `vortex`, `attract`, `collide` with the ground or water: bounce, die or stick) and
 how they look (`sprite`: glow, spark, smoke, flame, droplet, ring, star, rune, shard, dust,
-haze, billow, vortex, plume, crown, ripple, foam, blaze, fireball, jet, veil; `facing`: camera, velocity, horizontal or axis (standing along the
+haze, billow, vortex, plume, crown, ripple, foam, blaze, fireball, jet, veil, crystal, arc; `facing`: camera, velocity, horizontal or axis (standing along the
 emitter's direction); `color` and `size_over_life`; `emissive` in cd/m²;
 `lit` by sun, sky and point lights; `additive`; `soft`), or `debris` to draw solid 3D pieces
 instead of sprites ([`Debris`]: rock, splinter, shard or scrap). An effect can also carry a point
@@ -92,6 +92,19 @@ tube of light as wide as the dais's circle, its walls piling up toward its edges
 rays that drift up and turn slowly round it, brightest at its foot and fading out as it rises.
 It stands on a slowly turning rune circle, with golden-green motes streaking up it in a
 spiral. `--example aura` renders it close up by day, at dusk and at night.
+
+A frost bolt freezes what it strikes. The `crystal` sprite draws a cluster of ice spikes thrust
+out of the surface: faceted, glassy six-sided spikes fanned out from one root, deep blue at the
+root and pale at the tips, mirroring the sky along their ridges. `spell.frost_impact` raises one
+big cluster and a few small ones around it, which cloud with cracks and thin away after a couple
+of seconds; its cold mist and the frost bolt's trail are pale now, not grey smoke.
+`--example explosions -- spell.frost` renders the impact as it unfolds.
+
+Where lightning strikes, electricity crawls out over the ground. The `arc` sprite draws a
+jagged, white-hot channel in a halo running out from the strike, with a branch forking off it,
+and re-strikes along a new path several times a second so it crackles; `spell.lightning_hit`
+scatters seven of them around the flash, and its scorched smoke is a thin wisp now, not dark
+balls. `--example explosions -- spell.lightning` renders it.
 
 Splashes are water, not white puffs. The `crown` sprite ray traces the splash's crown inside
 its square: a wall of water thrown up in a ring that flares out, its rim drawn into fingers

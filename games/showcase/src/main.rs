@@ -68,6 +68,9 @@ fn main() {
             engine_audio::AudioPlugin,
         ))
         .add_plugins(engine_softbody::SoftBodyPlugin)
+        // People with an Appearance are drawn by the character creator's module (faces that
+        // blink, look around and wince); anim still poses them.
+        .add_plugins(engine_character::CharacterPlugin)
         .add_systems(Startup, setup)
         .add_systems(
             Update,
