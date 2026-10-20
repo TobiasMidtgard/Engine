@@ -24,6 +24,8 @@ pub struct CharacterMeshes {
     /// Per strand set, per hair: the skin vertex its root grows from (it follows that
     /// vertex's expressions and bones).
     pub strand_roots: Vec<Vec<u32>>,
+    /// Per strand set, per guide of hair that moves: the skin vertex its root grows from.
+    pub guide_roots: Vec<Vec<u32>>,
     /// Landmarks moved with the morphs (model space).
     pub landmarks: Option<Landmarks>,
     /// The skeleton the skin is weighted to (`None` when the pack has no rig).
@@ -115,7 +117,17 @@ pub fn build(
     headgear.cover_hair(&mut strands);
     let strand_roots = strands
         .iter()
-        .map(|set| roots(&skin.positions, set))
+        .map(|set| {
+            roots(
+                &skin.positions,
+                set.points.iter().map(|p| Vec3::new(p[0], p[1], p[2])),
+                set.points_per,
+            )
+        })
+        .collect();
+    let guide_roots = strands
+        .iter()
+        .map(|set| roots(&skin.positions, set.guides.iter().copied(), set.points_per))
         .collect();
     clothes::dress(pack, regions, &morphed, &mut skin, clothes::Cut::of(a));
     let face_shows = headgear.face_shows();
@@ -139,13 +151,14 @@ pub fn build(
         },
         strands,
         strand_roots,
+        guide_roots,
         landmarks: Some(landmarks),
         face,
     }
 }
 
-/// The skin vertex nearest each hair's root.
-fn roots(skin: &[Vec3], set: &StrandSet) -> Vec<u32> {
+/// The skin vertex nearest each hair's root (`points`: hairs of `points_per` points).
+fn roots(skin: &[Vec3], points: impl Iterator<Item = Vec3>, points_per: u32) -> Vec<u32> {
     const CELL: f32 = 0.004;
     let key = |p: Vec3| {
         let c = (p / CELL).floor();
@@ -156,11 +169,9 @@ fn roots(skin: &[Vec3], set: &StrandSet) -> Vec<u32> {
     for (i, p) in skin.iter().enumerate() {
         grid.entry(key(*p)).or_default().push(i as u32);
     }
-    let per = set.points_per.max(1) as usize;
-    (0..set.strand_count())
-        .map(|h| {
-            let r = set.points[h * per];
-            let root = Vec3::new(r[0], r[1], r[2]);
+    points
+        .step_by(points_per.max(1) as usize)
+        .map(|root| {
             let k = key(root);
             let mut best = (f32::MAX, 0u32);
             for reach in 1..=4 {

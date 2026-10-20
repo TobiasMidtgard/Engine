@@ -8,6 +8,7 @@ pub mod demo;
 pub mod eyes;
 pub mod face;
 pub mod feature;
+pub mod hair_motion;
 pub mod headgear;
 pub mod mesh;
 pub mod morph;
@@ -217,7 +218,13 @@ impl Plugin for CharacterPlugin {
             .add_systems(Startup, load_pack)
             .add_systems(
                 Update,
-                (answer_requests, poll_pack, start_builds, finish_builds)
+                (
+                    answer_requests,
+                    poll_pack,
+                    start_builds,
+                    finish_builds,
+                    hair_motion::publish_hair_guides,
+                )
                     .chain()
                     .in_set(CharacterSet),
             )

@@ -534,6 +534,7 @@ dependencies = [
  "bevy_ecs",
  "engine",
  "engine_character",
+ "engine_softbody",
  "engine_ui",
  "serde_json",
  "tracing",

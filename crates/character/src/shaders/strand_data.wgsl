@@ -5,15 +5,18 @@
 // triangles per segment.
 
 struct StrandParams {
-    info: vec4<u32>,   // points per hair, kind (0 scalp, 1 brows, 2 lashes, 3 beard), hairs, unused
+    info: vec4<u32>,   // points per hair, kind (0 scalp, 1 brows, 2 lashes, 3 beard), hairs, guides
 };
 
 @group(2) @binding(0) var<uniform> strand_params: StrandParams;
 @group(2) @binding(1) var<storage, read> strand_points: array<vec4<f32>>;  // xyz model space, radius
 @group(2) @binding(2) var<storage, read> strand_attrs: array<vec4<f32>>;   // occlusion, random, t, unused
 // Per hair: the skin vertex it grows from (its expressions move the hair), that vertex's four
-// bones and their weights (bytes), unused.
+// bones and their weights (bytes), the guide it moves with (0xffffffff: none).
 @group(2) @binding(3) var<storage, read> strand_roots: array<vec4<u32>>;
+// Hair that moves (`info.w` guides): how far each guide point moved from where the pose alone
+// carries it (posed model space), this frame's for all guides, then last frame's.
+@group(2) @binding(4) var<storage, read> strand_motion: array<vec4<f32>>;
 
 struct StrandOut {
     @invariant @builtin(position) clip: vec4<f32>,
@@ -57,8 +60,20 @@ fn ribbon_point(hair: u32, vertex: u32) -> RibbonPoint {
     var out: RibbonPoint;
     out.model = (now * vec4<f32>(p.xyz + m.dp, 1.0)).xyz;
     out.prev_model = (skin_matrix(bones, weights, true) * vec4<f32>(p.xyz + m.dp_prev, 1.0)).xyz;
+    var along = (now * vec4<f32>(next - prev + vec3<f32>(0.0, 1e-7, 0.0), 0.0)).xyz;
+    // Hair that moves goes where its guide went.
+    let guides = strand_params.info.w;
+    if (guides > 0u && root.w < guides) {
+        let g = root.w * n;
+        let half = guides * n;
+        out.model += strand_motion[g + k].xyz;
+        out.prev_model += strand_motion[half + g + k].xyz;
+        let ahead = strand_motion[g + min(k + 1u, n - 1u)].xyz;
+        let behind = strand_motion[g + select(k - 1u, 0u, k == 0u)].xyz;
+        along += ahead - behind;
+    }
     out.rel = model_point(out.model);
-    out.tangent = model_dir((now * vec4<f32>(next - prev + vec3<f32>(0.0, 1e-7, 0.0), 0.0)).xyz);
+    out.tangent = model_dir(along);
     out.radius = p.w;
     out.index = i;
     return out;

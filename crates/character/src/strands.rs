@@ -46,6 +46,12 @@ pub struct StrandSet {
     /// hairs and color variation), position along the hair (0 root .. 1 tip), and how fine
     /// the hair is (scalp hair: 0 full .. 1 the finest hairline hair).
     pub attrs: Vec<[f32; 4]>,
+    /// Hair that moves (long and medium scalp hair): the guides it grew from, `points_per`
+    /// model-space points each, root first. Handed to the hair simulation as
+    /// `engine_world::HairGuides`; empty for hair that holds its shape.
+    pub guides: Vec<Vec3>,
+    /// Per hair, the guide it moves with (`u32::MAX`: none). Empty without guides.
+    pub follow: Vec<u32>,
 }
 
 impl StrandSet {
@@ -55,11 +61,18 @@ impl StrandSet {
             points_per,
             points: Vec::new(),
             attrs: Vec::new(),
+            guides: Vec::new(),
+            follow: Vec::new(),
         }
     }
 
     pub fn strand_count(&self) -> usize {
         self.points.len() / self.points_per.max(1) as usize
+    }
+
+    /// Guides of hair that moves (see [`Self::guides`]).
+    pub fn guide_count(&self) -> usize {
+        self.guides.len() / self.points_per.max(1) as usize
     }
 
     fn push(&mut self, pts: &[Vec3], root_radius: f32, tip_radius: f32, random: f32) {
@@ -539,6 +552,8 @@ fn grow_scalp(
         guides.push((sp, pts));
     }
     let guide_grid = GuideGrid::new(&guides);
+    // Long and medium hair moves: every hair with the guide nearest its root.
+    let moves = g.gravity > 0.5 && !guides.is_empty();
     for _ in 0..total {
         let Some(sp) = sampler.sample(&mut r) else {
             break;
@@ -651,6 +666,15 @@ fn grow_scalp(
                 attr[0] = 1.0 - 0.4 * lock_edge * lock_edge * attr[2].sqrt();
             }
         }
+        if moves {
+            let gi = guide_grid
+                .nearest(sp.p, &guides)
+                .or_else(|| nearest_guide(sp.p, &guides));
+            set.follow.push(gi.map_or(u32::MAX, |i| i as u32));
+        }
+    }
+    if moves {
+        set.guides = guides.into_iter().flat_map(|(_, pts)| pts).collect();
     }
     Some(set)
 }
@@ -733,6 +757,19 @@ fn settle(
     if crumpled {
         pts.copy_from_slice(&grown);
     }
+}
+
+/// The guide whose root is nearest `p`, searching all of them.
+fn nearest_guide(p: Vec3, guides: &[(SkinPoint, Vec<Vec3>)]) -> Option<usize> {
+    guides
+        .iter()
+        .enumerate()
+        .min_by(|a, b| {
+            (a.1.0.p - p)
+                .length_squared()
+                .total_cmp(&(b.1.0.p - p).length_squared())
+        })
+        .map(|(i, _)| i)
 }
 
 /// The part of long hair: on the character's left, 2.5 cm off center.
