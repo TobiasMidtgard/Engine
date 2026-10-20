@@ -12,7 +12,7 @@ use crate::aero::Aircraft;
 use crate::autopilot::{Autopilot, AutopilotMode};
 use crate::chassis::{Vehicle, VehicleTelemetry};
 use crate::presets;
-use crate::ship::{AssistMode, Spacecraft};
+use crate::ship::{AssistMode, HeatShield, Spacecraft};
 
 fn vec3_arg(args: &Value, key: &str) -> Result<Option<DVec3>, String> {
     match args.get(key) {
@@ -121,7 +121,17 @@ fn place_api(world: &mut World, args: Value) -> Result<Value, String> {
     } else {
         0.0
     };
-    let rotation = DQuat::from_rotation_y(-yaw.to_radians()).as_quat();
+    let angle = |key: &str| {
+        args.get(key)
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0)
+            .to_radians()
+    };
+    // Yaw, then the nose up by pitch, then the right wing down by roll.
+    let rotation = (DQuat::from_rotation_y(-yaw.to_radians())
+        * DQuat::from_rotation_x(angle("pitch_deg"))
+        * DQuat::from_rotation_z(-angle("roll_deg")))
+    .as_quat();
     let forward = rotation * Vec3::NEG_Z;
     let speed = args.get("speed").and_then(Value::as_f64).unwrap_or(0.0) as f32;
     let linear = match vec3_arg(&args, "velocity")? {
@@ -144,6 +154,11 @@ fn place_api(world: &mut World, args: Value) -> Result<Value, String> {
         i.reset();
     }
     crate::wheels::set_rolling(world, e, linear.dot(forward));
+    if let Some(k) = args.get("hull_temperature_k").and_then(Value::as_f64)
+        && let Some(mut shield) = world.get_mut::<HeatShield>(e)
+    {
+        shield.temperature_k = k as f32;
+    }
     // A path follower looks for its place on the path again, and a pilot picks its phase
     // (and runway) afresh (a drift keeps its phase).
     if let Some(mut ap) = world.get_mut::<Autopilot>(e)
@@ -288,7 +303,8 @@ pub(crate) fn register(app: &mut App) {
          false), facing yaw_deg (0 = −Z, 90 = +X), moving at speed (m/s, along the nose) or \
          velocity ([x, y, z] m/s) and turning left at yaw_rate_deg (°/s), with its wheels \
          rolling and its gearbox in the matching gear. A driving autopilot finds its place on \
-         its path again.",
+         its path again. Optional pitch_deg (nose up) and roll_deg (right wing down) tilt \
+         it; hull_temperature_k heats a spacecraft's heat shield, as re-entry would.",
         r#"{"vehicle": "Red car", "at": [120, 0, -40], "yaw_deg": 150, "speed": 30}"#,
         place_api,
     )

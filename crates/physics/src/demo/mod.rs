@@ -29,9 +29,10 @@ mod floaters;
 pub(crate) use floaters::replay_floaters;
 pub use floaters::{FLOAT_CYCLE_SECS, FloatTest, spawn_floaters};
 
+use art::kit::MeshBuilder;
 use art::{Mat, Parts, dummy, props, structures};
 use engine_assets::Assets;
-use engine_core::math::{DVec3, Quat, Vec2, Vec3};
+use engine_core::math::{DVec3, Mat4, Quat, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_core::time::FixedTime;
 use engine_render::Mesh;
@@ -136,6 +137,15 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 7.5,
     },
     DemoView {
+        key: "physics_rockfall",
+        name: "300 granite rocks pouring from a hopper down a steel chute into a heap",
+        eye: [-15.0, 4.0, 7.0],
+        target: [-24.5, 2.0, -2.0],
+        hour: 16.0,
+        station: Some(Station::Rockfall),
+        warmup_secs: 2.4,
+    },
+    DemoView {
         key: "physics_turntable",
         name: "A turntable carrying crates and a rider",
         eye: [37.0, 6.5, 20.0],
@@ -160,10 +170,11 @@ pub enum Station {
     Turntable,
     Balls,
     BarrelRun,
+    Rockfall,
 }
 
 impl Station {
-    pub const ALL: [Station; 11] = [
+    pub const ALL: [Station; 12] = [
         Station::Tower,
         Station::Pile,
         Station::Dominoes,
@@ -175,6 +186,7 @@ impl Station {
         Station::Turntable,
         Station::Balls,
         Station::BarrelRun,
+        Station::Rockfall,
     ];
 
     /// The station's name in the `physics.proving_ground.replay` API.
@@ -191,6 +203,7 @@ impl Station {
             Station::Turntable => "turntable",
             Station::Balls => "balls",
             Station::BarrelRun => "barrel_run",
+            Station::Rockfall => "rockfall",
         }
     }
 
@@ -208,6 +221,7 @@ impl Station {
             Station::Turntable => (30.0, 10.0),
             Station::Balls => (6.0, -3.0),
             Station::BarrelRun => (0.0, 19.5),
+            Station::Rockfall => (-24.0, -2.0),
         };
         DVec3::new(x, 0.0, z)
     }
@@ -221,6 +235,7 @@ impl Station {
             Station::Dominoes | Station::WreckingBall | Station::Bridge => Some(30.0),
             Station::Ragdolls | Station::Seesaw | Station::Balls => Some(20.0),
             Station::BarrelRun => Some(25.0),
+            Station::Rockfall => Some(30.0),
         }
     }
 
@@ -242,6 +257,7 @@ impl Station {
             Station::Turntable => turntable(y, base),
             Station::Balls => bouncy_balls(y, base),
             Station::BarrelRun => barrel_run(y, base),
+            Station::Rockfall => rockfall(y, base),
         }
     }
 }
@@ -1460,4 +1476,233 @@ fn barrel_run(y: &mut Yard, base: DVec3) {
         let drum = y.body(at, lying, c, parts);
         y.name(drum, &format!("Run drum {}", lane + 2));
     }
+}
+
+/// Rocks in the rockfall.
+const ROCKFALL_ROCKS: usize = 300;
+
+/// Rock shapes in the rockfall (each rock scales one of them).
+const ROCK_SHAPES: u32 = 8;
+
+/// Each rock shape's shade (sRGB hex, multiplying the granite).
+const ROCK_TINTS: [u32; ROCK_SHAPES as usize] = [
+    0xffffff, 0xe4e0da, 0xcfcbc5, 0xf2e4da, 0xc4c4c4, 0xe8dacf, 0xdadada, 0xbdb8b2,
+];
+
+/// The rockfall chute's slope, degrees: steeper than crushed rock's angle of repose on steel,
+/// so it all slides off; the heap below takes the rock's own on concrete (about 35 degrees).
+const CHUTE_DEG: f32 = 40.0;
+
+/// A hopper on a steel chute, and [`ROCKFALL_ROCKS`] crushed granite rocks (30 to 55 cm, 2.6
+/// t/m³) dropped into it: they pour out of the hopper's mouth, slide down the chute and drop
+/// off its lip onto a heap. The chute runs down toward +X; `base` is under its lip.
+fn rockfall(y: &mut Yard, base: DVec3) {
+    // Crushed rock interlocks: its heaps stand at about 35 degrees on concrete.
+    let rock = {
+        let mut table = y.world.get_resource_or_init::<SurfaceMaterials>();
+        let base = table.get(table.id_or_default("rock")).clone();
+        table.add(SurfaceMaterial {
+            name: "crushed_rock".into(),
+            friction: 1.0,
+            ..base
+        })
+    };
+    let (plates, floor_at, top) = chute_plates();
+    for &(at, rotation, half, _) in &plates {
+        y.fixed(
+            base + at.as_dvec3(),
+            rotation,
+            ColliderShape::Cuboid { half_extents: half },
+            y.metal,
+        );
+    }
+    let art = y.parts(
+        "rockfall_chute",
+        [Mat::Steel, Mat::Yellow, Mat::Dark],
+        || {
+            let mut b: [MeshBuilder; 3] = Default::default();
+            for (at, rotation, half, mat) in chute_plates().0 {
+                let m = Mat4::from_rotation_translation(rotation, at);
+                b[mat as usize].placed(m, |b| b.rounded_box(half, 0.012, 2));
+            }
+            b.map(MeshBuilder::build)
+        },
+    );
+    y.scenery(base, Quat::IDENTITY, art);
+    // The rocks, in layers over the hopper, 5 by 5 each 58 cm apart.
+    let mut rng = Rng(0x0dd_5eed);
+    for i in 0..ROCKFALL_ROCKS {
+        let (gx, gz, layer) = ((i % 5) as f32, ((i / 5) % 5) as f32, (i / 25) as f32);
+        let x = top.x + 0.35 + gx * 0.58;
+        let at = Vec3::new(
+            x + rng.next() * 0.06,
+            floor_at(x) + 0.6 + layer * 0.58,
+            (gz - 2.0) * 0.58 + rng.next() * 0.06,
+        );
+        // 30 to 55 cm across, never flatter than 2:1.
+        let size = 0.3 + 0.25 * rng.next() * rng.next();
+        let scale = Vec3::new(
+            size * (0.8 + 0.4 * rng.next()),
+            size * (0.6 + 0.3 * rng.next()),
+            size * (0.8 + 0.4 * rng.next()),
+        );
+        let shape = (rng.next() * ROCK_SHAPES as f32) as u32 % ROCK_SHAPES;
+        let rotation = Quat::from_euler(
+            EulerRot::XYZ,
+            rng.next() * TAU,
+            rng.next() * TAU,
+            rng.next() * TAU,
+        );
+        let c = Collider {
+            shape: ColliderShape::ConvexHull {
+                points: props::rock_points(shape),
+            },
+            surface: rock,
+            density: 2600.0,
+            ..Default::default()
+        };
+        let parts = y.parts(&format!("rock/{shape}"), [Mat::Granite], || {
+            [props::rock(
+                &props::rock_points(shape),
+                ROCK_TINTS[shape as usize],
+            )]
+        });
+        let e = y.body(base + at.as_dvec3(), rotation, c, parts);
+        y.world.get_mut::<Transform>(e).unwrap().scale = scale;
+    }
+}
+
+/// The rockfall's steel as boxes relative to the chute's lip: (center, rotation, half
+/// extents, 0 steel / 1 yellow paint / 2 dark paint), each also a collider. Also the height of
+/// the chute's floor at a given x, and its upper end.
+#[allow(clippy::type_complexity)]
+fn chute_plates() -> (Vec<(Vec3, Quat, Vec3, u8)>, impl Fn(f32) -> f32, Vec3) {
+    let tilt = CHUTE_DEG.to_radians();
+    let (len, half_w, t) = (5.0f32, 1.5f32, 0.08f32);
+    // The floor runs from its lip, 1.6 m up, up and back along -X.
+    let lip = Vec3::new(0.0, 1.6, 0.0);
+    let down = Vec3::new(tilt.cos(), -tilt.sin(), 0.0);
+    let top = lip - down * len;
+    let along = Quat::from_rotation_z(-tilt);
+    let normal = along * Vec3::Y;
+    let floor_at = move |x: f32| top.y - (x - top.x) * tilt.tan();
+    let mid = (lip + top) * 0.5;
+    let mut out = vec![(
+        mid - normal * t * 0.5,
+        along,
+        Vec3::new(len * 0.5, t * 0.5, half_w),
+        0,
+    )];
+    // Side walls, 0.6 m tall, closing in from the hopper's width to 2.1 m at the lip, so the
+    // rocks land in one heap rather than a long ridge.
+    let narrow = 1.05f32;
+    let skew = ((half_w - narrow) / len).atan();
+    let wall_len = len / skew.cos();
+    for s in [-1.0f32, 1.0] {
+        let at = mid + normal * 0.3 + Vec3::Z * s * ((half_w + narrow) * 0.5 + t * 0.5);
+        let rotation = along * Quat::from_rotation_y(s * skew);
+        out.push((at, rotation, Vec3::new(wall_len * 0.5, 0.3, t * 0.5), 0));
+    }
+    // The hopper over the chute's upper end: 3 m square, its walls standing 2 m above the
+    // chute, the downhill one stopping 1.1 m above it (the mouth).
+    let (hop, hop_h, mouth) = (3.0f32, 2.0f32, 1.1f32);
+    let front_x = top.x + hop;
+    let rim = top.y + hop_h;
+    let low = floor_at(front_x);
+    out.push((
+        Vec3::new(top.x - t * 0.5, (top.y - 0.3 + rim) * 0.5, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(t * 0.5, (rim - top.y + 0.3) * 0.5, half_w + t),
+        1,
+    ));
+    out.push((
+        Vec3::new(front_x + t * 0.5, (low + mouth + rim) * 0.5, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(t * 0.5, (rim - low - mouth) * 0.5, half_w + t),
+        1,
+    ));
+    for s in [-1.0f32, 1.0] {
+        out.push((
+            Vec3::new(top.x + hop * 0.5, (low + rim) * 0.5, s * (half_w + t * 0.5)),
+            Quat::IDENTITY,
+            Vec3::new(hop * 0.5, (rim - low) * 0.5, t * 0.5),
+            1,
+        ));
+    }
+    // A dark steel angle around the hopper's rim, and a stiffening band around its walls.
+    let (cx, hw) = (top.x + hop * 0.5, hop * 0.5 + t);
+    for (y_at, size, mat) in [(rim, 0.07f32, 2u8), ((low + mouth + rim) * 0.5, 0.05, 1)] {
+        for s in [-1.0f32, 1.0] {
+            out.push((
+                Vec3::new(cx + s * (hw + size * 0.5), y_at, 0.0),
+                Quat::IDENTITY,
+                Vec3::new(size * 0.5, size, half_w + t + size),
+                mat,
+            ));
+            out.push((
+                Vec3::new(cx, y_at, s * (half_w + t + size * 0.5)),
+                Quat::IDENTITY,
+                Vec3::new(hw, size, size * 0.5),
+                mat,
+            ));
+        }
+    }
+    // Flat-bar stiffeners standing 10 cm proud of the hopper's walls every 75 cm, and dark
+    // angle posts on its corners.
+    let (rib, proud) = (0.03f32, 0.05f32);
+    for k in 1..4 {
+        let along = k as f32 * hop / 4.0 - hop * 0.5;
+        for s in [-1.0f32, 1.0] {
+            out.push((
+                Vec3::new(cx + along, (low + rim) * 0.5, s * (half_w + t + proud)),
+                Quat::IDENTITY,
+                Vec3::new(rib, (rim - low) * 0.5 - 0.08, proud),
+                1,
+            ));
+        }
+        let back = top.y - 0.3;
+        out.push((
+            Vec3::new(top.x - t - proud, (back + rim) * 0.5, along),
+            Quat::IDENTITY,
+            Vec3::new(proud, (rim - back) * 0.5 - 0.08, rib),
+            1,
+        ));
+        out.push((
+            Vec3::new(front_x + t + proud, (low + mouth + rim) * 0.5, along),
+            Quat::IDENTITY,
+            Vec3::new(proud, (rim - low - mouth) * 0.5 - 0.08, rib),
+            1,
+        ));
+    }
+    for (x, bottom) in [(top.x - t, top.y - 0.3), (front_x + t, low)] {
+        for s in [-1.0f32, 1.0] {
+            out.push((
+                Vec3::new(x, (bottom + rim) * 0.5, s * (half_w + t)),
+                Quat::IDENTITY,
+                Vec3::new(0.06, (rim - bottom) * 0.5, 0.06),
+                2,
+            ));
+        }
+    }
+    // Legs (16 cm box section) under the floor's edges at the lip, the middle and under the
+    // hopper, braced across at knee height.
+    let leg = 0.08f32;
+    for x in [lip.x - 0.35, mid.x, top.x + 0.25] {
+        let h = floor_at(x) - t;
+        for s in [-1.0f32, 1.0] {
+            out.push((
+                Vec3::new(x, h * 0.5, s * (half_w - leg)),
+                Quat::IDENTITY,
+                Vec3::new(leg, h * 0.5, leg),
+                1,
+            ));
+        }
+        out.push((
+            Vec3::new(x, 0.7, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(0.05, 0.06, half_w - 2.0 * leg),
+            2,
+        ));
+    }
+    (out, floor_at, top)
 }

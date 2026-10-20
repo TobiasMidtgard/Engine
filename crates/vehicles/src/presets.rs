@@ -657,7 +657,7 @@ pub fn spaceplane_aircraft() -> Aircraft {
             SurfaceControl {
                 axis: ControlAxis::Pitch,
                 gain: -1.0,
-                max_deg: 20.0,
+                max_deg: 30.0,
                 rate_deg_s: 40.0,
             },
             SurfaceControl {
@@ -679,7 +679,9 @@ pub fn spaceplane_aircraft() -> Aircraft {
             lift_slope: 4.5,
             stall_high_deg: 32.0,
             stall_low_deg: -32.0,
-            flap_fraction: 0.15,
+            // Big elevons (and the body flap behind them): they trim the nose from 5° to
+            // 45° up.
+            flap_fraction: 0.35,
             control: Some(pitch),
             control2: Some(roll),
             ..Default::default()
@@ -706,6 +708,20 @@ pub fn spaceplane_aircraft() -> Aircraft {
                     max_deg: 20.0,
                     rate_deg_s: 40.0,
                 }),
+                ..Default::default()
+            },
+            // The flat-bottomed forebody lifts too, ahead of the center of mass: with it the
+            // elevons can hold the nose high through re-entry, where the wings alone would
+            // pitch it down.
+            AeroSurface {
+                name: "forebody (hull lift)".into(),
+                position: Vec3::new(0.0, -1.2, -6.0),
+                chord: 7.9,
+                span: 6.3,
+                aspect_ratio: Some(0.8),
+                lift_slope: 4.0,
+                stall_high_deg: 55.0,
+                stall_low_deg: -55.0,
                 ..Default::default()
             },
         ],
@@ -793,10 +809,11 @@ pub fn spaceplane(commands: &mut Commands, transform: Transform) -> Entity {
                 can_sleep: false,
                 angular_damping: 0.0,
                 linear_damping: 0.0,
-                // Fuelled; the inertia scales with mass as propellant burns.
+                // Fuelled; the inertia scales with mass as propellant burns. The center of
+                // mass sits aft, near the heavy tail engines (62 % of the length).
                 ..RigidBody::dynamic().with_mass_properties(
                     mass,
-                    Vec3::new(0.0, -0.12, 0.9),
+                    Vec3::new(0.0, -0.12, 3.0),
                     Vec3::new(3.1e6, 3.4e6, 8.0e5),
                 )
             },
@@ -823,7 +840,8 @@ pub fn spaceplane(commands: &mut Commands, transform: Transform) -> Entity {
             Velocity::default(),
             VehicleControls::default(),
             AeroBody {
-                drag_area: Vec3::new(40.0, 110.0, 6.0),
+                // The belly's drag (its lift ahead of the wings is the forebody surface).
+                drag_area: Vec3::new(40.0, 60.0, 6.0),
                 downforce_area: 0.0,
                 downforce_center: Vec3::ZERO,
                 angular_drag: 3.0,

@@ -137,6 +137,27 @@ To animate your own character, register a `Skeleton`, clips and an `AnimGraph` i
 `build::sdf::Body` turns smooth-blended capsules, ellipsoids and boxes into a skinned mesh
 with automatic weights and muscle morph targets.
 
+People's `SkeletonPose` uses the humanoid skeleton (`build::humanoid::skeleton()`), whether
+they wear a generated body or a fetched model (fitted with `fit_skeleton`, which keeps these
+names and parents). Model space, meters, facing −Z, +X to the person's right; `_l` / `_r` are
+the person's own left and right. Each bone below is followed by its parent:
+
+| Bone | Parent | | Bone | Parent |
+|---|---|---|---|---|
+| `root` | — | | `clavicle_l`, `clavicle_r` | `chest` |
+| `hips` | `root` | | `upper_arm_l`, `upper_arm_r` | `clavicle_l`, `clavicle_r` |
+| `spine` | `hips` | | `lower_arm_l`, `lower_arm_r` | `upper_arm_l`, `upper_arm_r` |
+| `chest` | `spine` | | `hand_l`, `hand_r` | `lower_arm_l`, `lower_arm_r` |
+| `neck` | `chest` | | `upper_leg_l`, `upper_leg_r` | `hips` |
+| `head` | `neck` | | `lower_leg_l`, `lower_leg_r` | `upper_leg_l`, `upper_leg_r` |
+| `ponytail_1` | `head` | | `foot_l`, `foot_r` | `lower_leg_l`, `lower_leg_r` |
+| `ponytail_2` | `ponytail_1` | | `toe_l`, `toe_r` | `foot_l`, `foot_r` |
+| `ponytail_3` | `ponytail_2` | | | |
+
+There are no finger bones yet (hands pose as a whole); the ponytail bones swing on spring
+chains. The order in `SkeletonPose::names` is the one to index by; don't assume the order
+of this table.
+
 Tunable at runtime (JSON, console, scripts, AI agents): `AnimatorSettings`, `FootIk`,
 `LookAt`, `ReachIk`, `IkSurface`, `SpringChains`, `LeggedGait`, `VehicleRig`, `MuscleRig`,
 `SkinnedMeshRenderer` (with its `SkinMaterial`), `BoneAttachment`, `DemoPath`, `DemoScript`,

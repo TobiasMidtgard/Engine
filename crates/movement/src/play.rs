@@ -142,7 +142,7 @@ fn set_cursor(world: &mut World, mode: CursorMode) {
 
 /// The active camera with the highest order, and where it is. A camera without a parent is
 /// where its `Transform` says even before transforms propagate (moved this frame).
-fn active_camera(world: &mut World) -> Option<(Camera, GlobalTransform)> {
+pub(crate) fn active_camera(world: &mut World) -> Option<(Camera, GlobalTransform)> {
     let mut q = world.query::<(&Camera, &GlobalTransform, &Transform, Has<ChildOf>)>();
     q.iter(world)
         .filter(|(c, ..)| c.active)

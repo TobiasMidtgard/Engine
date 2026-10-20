@@ -47,7 +47,9 @@ world re-anchors on the next body.
   instead: `OnRails` holds the body it falls around and its `Conic` (ellipse, parabola or
   escape hyperbola, `conic.rs`). Paths are patched where they cross a sphere of influence, so a
   ship sent toward the Moon swings past it or falls into orbit around it, and one past escape
-  speed ends up around the Sun. Coasting ships hold their attitude. When the warp drops, physics
+  speed ends up around the Sun. Coasting ships hold their attitude until the game turns them, and
+  their engines still push: a railed ship's `ExternalForce` over its mass bends its path in
+  steps of up to 2 s of space time (64 a frame), so burns can be flown at any warp. When the warp drops, physics
   takes each ship back with its position and motion; a ship that coasts down into air or low
   space drops the warp to real time there, so physics flies the reentry or landing. Things on
   the ground, things left on other bodies (`Parked`) and anything marked `NoRails` stay with
@@ -82,7 +84,8 @@ Reads: `SimulationFocus` / `FocusPoints`, `Time` (fixed steps, dilated), and wit
 Writes: body `Transform`s, `Gravity` (bodies, uniform = 0), `engine_render::Atmosphere`,
 `StarLight` lights and, with one, `WeatherState`'s sun direction, time and day, the
 `Transform`/`Velocity` of free entities when the world re-anchors, and those of free
-`RigidBody`s out in space while they coast through time warp (`OnRails`), and
+`RigidBody`s out in space while they coast through time warp (`OnRails`, reading their
+`ExternalForce` and `MassProperties` to burn), and
 `engine_world::FarCloudLayer` while Earth's cloud tops are drawn from high up (handover from
 70 % of `cloud_hole_m` to all of it, weighted by the layer's fade; removed when none is drawn),
 so the weather's clouds give way to the layer instead of doubling it.
@@ -142,7 +145,8 @@ same share of sky. Views `earth_leo` (400 km) and `earth_edge`
   at the edge of `cloud_hole_m`).
 - Coasting ships feel one body at a time (patched conics): no Lagrange points or slow
   three-body drifts, and a sphere of influence grazed by less than ~1 % of its radius in one
-  sampled step can be missed at extreme warps. Engines can't fire on rails: drop the warp to
-  burn (maneuver nodes are a later round).
+  sampled step can be missed at extreme warps. Burns on rails are stepped, so at extreme warps
+  a long burn is less exact than physics flying it in real time (planned maneuver nodes are a
+  later round).
 - Physics below the rails' floor still runs in real time at any warp, so an aircraft flying
   while the clock races sees the sky and the other planets move fast.

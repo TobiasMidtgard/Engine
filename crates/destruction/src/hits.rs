@@ -63,6 +63,8 @@ pub enum Hit {
         max: Vec2,
         front: bool,
         melt: bool,
+        /// Sideways velocity (wall-local, m/s) for a panel the cut frees.
+        tip: Vec2,
     },
     /// Dig, fill, smooth or paint voxel volumes (from `TerrainEdit`).
     Dig(TerrainEdit),
@@ -462,7 +464,8 @@ pub fn apply_hits_system(
                     max,
                     front,
                     melt,
-                } => cut(&mut ctx, &mut targets, wall, min, max, front, melt),
+                    tip,
+                } => cut(&mut ctx, &mut targets, wall, min, max, front, melt, tip),
                 Hit::Dig(edit) => dig(&mut ctx, &mut targets, &edit, &surfaces),
                 Hit::Burn { target, energy_j } => {
                     if let Ok((e, gt, piece, mut state)) = targets.pieces.get_mut(target) {
@@ -673,7 +676,10 @@ fn wall_impact(
     let lp = local_point(gt, point);
     let ld = local_dir(gt, dir).normalize_or(Vec3::NEG_Z);
     let aspect = if melee { 0.35 } else { 1.0 };
-    let hit = state.crater(&props, lp, ld, energy, min_radius, aspect);
+    let mut hit = state.crater(&props, lp, ld, energy, min_radius, aspect);
+    if let Some(brick) = wall.brick_size() {
+        state.knock_out_bricks(brick, &mut hit);
+    }
     let exit = hit.exit;
     // Chips spray back toward the shooter from the entry point.
     let t = state.grid.thickness;
@@ -1050,7 +1056,10 @@ fn blast(
         }
         let props = ctx.table.get(wall.material);
         let gt = *gt;
-        let hit = state.blast(&props, local, energy, rebar_cut);
+        let mut hit = state.blast(&props, local, energy, rebar_cut);
+        if let Some(brick) = wall.brick_size() {
+            state.knock_out_bricks(brick, &mut hit);
+        }
         if hit.volume > 0.0 {
             let side = if local.z >= 0.0 { 1.0 } else { -1.0 };
             let face = gt.transform_point(DVec3::new(
@@ -1237,6 +1246,7 @@ fn cut(
     max: Vec2,
     front: bool,
     melt: bool,
+    tip: Vec2,
 ) {
     let Ok((_, gt, w, mut state)) = targets.walls.get_mut(wall) else {
         return;
@@ -1253,6 +1263,7 @@ fn cut(
         state.mark_dirty(rect);
     }
     ctx.stats.cells_destroyed += hit.lost.len() as u64;
+    let first_piece = ctx.pending.items.len();
     if !melt {
         // The cut panel falls out as a few big slabs, pushed away from the charge.
         let per = (hit.lost.len() / 3).max(1);
@@ -1319,6 +1330,10 @@ fn cut(
         );
         ctx.noise_events.push((at, 50.0));
         ctx.stats.collapses += 1;
+    }
+    let drift = gt.rotation() * tip.extend(0.0);
+    for item in &mut ctx.pending.items[first_piece..] {
+        item.velocity += drift;
     }
 }
 
