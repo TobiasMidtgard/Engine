@@ -131,6 +131,9 @@ pub struct DemoPath {
     velocity: Vec2,
     #[serde(skip)]
     accel: f32,
+    /// Rise per meter of the ground along the way (smoothed).
+    #[serde(skip)]
+    grade: f32,
     #[serde(skip)]
     started: bool,
 }
@@ -148,6 +151,7 @@ impl Default for DemoPath {
             yaw_rate: 0.0,
             velocity: Vec2::ZERO,
             accel: 0.0,
+            grade: 0.0,
             started: false,
         }
     }
@@ -992,7 +996,7 @@ pub const VIEWS: &[DemoView] = &[
     },
     DemoView {
         key: "paddock_stairs",
-        name: "Walking down stairs, feet planted by IK",
+        name: "Walking down stairs watching the steps, feet planted by IK",
         eye: [-13.15, 1.51, -10.38],
         target: [-12.6, 1.19, -8.01],
         hour: 15.0,
@@ -1813,6 +1817,18 @@ fn demo_path_system(
         let target_y = probe
             .probe(DVec3::new(pos.x, pos.y + 0.3, pos.z), 0.7, 3.0)
             .map_or(path.origin.y, |h| h.height);
+        // The slope of the ground over the next and last half meter, for the `grade` posture
+        // (stairs average out into their pitch).
+        let ground_at = |d: f32| {
+            let q = pos + DVec3::new((dir.x * d) as f64, 0.0, (dir.y * d) as f64);
+            probe
+                .probe(DVec3::new(q.x, pos.y + 0.3, q.z), 0.7, 3.0)
+                .map(|h| h.height)
+        };
+        let rise = match (ground_at(0.5), ground_at(-0.5)) {
+            (Some(ahead), Some(behind)) if speed > 0.1 => (ahead - behind) as f32,
+            _ => 0.0,
+        };
         if path.started {
             pos.y += (target_y - pos.y) * smoothing(dt, 0.12) as f64;
         } else {
@@ -1837,6 +1853,7 @@ fn demo_path_system(
             let forward = Vec2::new(-yaw.sin(), -yaw.cos());
             let accel = ((velocity - path.velocity) / dt).dot(forward);
             path.accel += (accel - path.accel) * smoothing(dt, 0.2);
+            path.grade += (rise - path.grade) * smoothing(dt, 0.2);
         }
         path.velocity = velocity;
         path.started = true;
@@ -1847,6 +1864,7 @@ fn demo_path_system(
             params.set("turn", (path.yaw_rate / 1.2).clamp(-1.0, 1.0));
             params.set("heading", (along - yaw + PI).rem_euclid(2.0 * PI) - PI);
             params.set("accel", crate::body::accel_param(path.accel));
+            params.set("grade", crate::body::grade_param(path.grade));
             params.set(
                 "move_effort",
                 (speed / path.effort_speed.max(0.1)).clamp(0.0, 1.0),

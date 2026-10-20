@@ -273,6 +273,8 @@ pub enum CellKind {
     /// Part of a built opening (doorway, window, hatch hole): no material, and its edges are
     /// straight like the wall's outer border, not broken.
     Opening,
+    /// Burned out by a thermite cut: its edges are straight cuts, dark with slag.
+    Cut,
 }
 
 /// Rebar bits per cell.
@@ -286,6 +288,13 @@ const REBAR_RADIUS: f32 = 0.01;
 const REBAR_BEND: f32 = 1.2;
 /// Cells from the concrete beyond which exposed rebar bends no further.
 const REBAR_BEND_CELLS: usize = 8;
+
+/// A thermite cut's edges against the material's broken face: blackened by the burn, with a
+/// warm tint of slag.
+const SLAG_SHADE: f32 = 0.22;
+const SLAG_TINT: [f32; 3] = [1.0, 0.92, 0.84];
+/// How far a thermite cut's line wanders, in cells (a blast break wanders 0.75).
+const SLAG_WANDER: f32 = 0.25;
 
 /// The damage grid of a wall (or of a chunk that broke off one).
 #[derive(Debug, Clone, Default)]
@@ -856,6 +865,7 @@ impl WallState {
                     continue;
                 }
                 g.rebar[idx] = 0;
+                g.kind[idx] = CellKind::Cut;
                 out.touch(i, j);
                 if g.solid[idx] {
                     out.volume += g.remaining(idx) * area;
@@ -1171,6 +1181,7 @@ pub fn mesh_cells(
             let mut any_solid = false;
             let mut damaged = false;
             let mut stud = false;
+            let mut burned = false;
             for (di, dj) in [(0usize, 0usize), (1, 0), (0, 1), (1, 1)] {
                 if vi < di || vj < dj {
                     continue;
@@ -1188,7 +1199,7 @@ pub fn mesh_cells(
                     if grid.front[c] > 1e-3 || grid.back[c] > 1e-3 {
                         damaged = true;
                     }
-                } else if grid.kind[c] != CellKind::Opening {
+                } else if !matches!(grid.kind[c], CellKind::Opening | CellKind::Cut) {
                     damaged = true;
                     f += grid.front[c].min(t);
                     b += grid.back[c].min(t);
@@ -1196,6 +1207,7 @@ pub fn mesh_cells(
                 sc[0] += grid.scorch[c][0];
                 sc[1] += grid.scorch[c][1];
                 stud |= grid.kind[c] == CellKind::Stud;
+                burned |= grid.kind[c] == CellKind::Cut;
             }
             if !any_solid {
                 continue;
@@ -1217,6 +1229,11 @@ pub fn mesh_cells(
                 let jx = hash3(gx, gy, 1, look.seed) - 0.5;
                 let jy = hash3(gx, gy, 2, look.seed) - 0.5;
                 xy += Vec2::new(jx * grid.cell.x, jy * grid.cell.y) * 0.75;
+            } else if burned && !(look.straight_border && on_border) {
+                // A burned cut wanders a little along its line.
+                let jx = hash3(gx, gy, 1, look.seed) - 0.5;
+                let jy = hash3(gx, gy, 2, look.seed) - 0.5;
+                xy += Vec2::new(jx * grid.cell.x, jy * grid.cell.y) * SLAG_WANDER;
             }
             verts[(vj - j0) * vw + (vi - i0)] = Some(GridVertex {
                 xy,
@@ -1327,9 +1344,14 @@ pub fn mesh_cells(
                 let (Some(va), Some(vb)) = (vert(a.0, a.1), vert(b.0, b.1)) else {
                     continue;
                 };
-                let built = neighbor.is_some_and(|k| grid.kind[k] == CellKind::Opening);
-                let broken = (neighbor.is_some() && !built) || !look.straight_border;
-                let color = if broken {
+                let kind = neighbor.map(|k| grid.kind[k]);
+                let built = kind == Some(CellKind::Opening);
+                let burned = kind == Some(CellKind::Cut);
+                let broken = (neighbor.is_some() && !built && !burned) || !look.straight_border;
+                let color = if burned {
+                    let c = scale(interior_of(stud), SLAG_SHADE);
+                    std::array::from_fn(|k| c[k] * SLAG_TINT[k])
+                } else if broken {
                     scale(interior_of(stud), 0.86)
                 } else {
                     scale(look.exterior, 0.8)
@@ -1635,6 +1657,44 @@ mod tests {
             .fold((f32::MAX, f32::MIN), |(lo, hi), &z| (lo.min(z), hi.max(z)));
         assert!(lo < -0.035, "bars bow out of the back of the hole ({lo})");
         assert!(hi < 0.05, "no bar bends toward the charge ({hi})");
+    }
+
+    #[test]
+    fn a_thermite_cut_leaves_straight_dark_edges() {
+        let wall = DestructibleWall::reinforced(3.0, 3.0);
+        let mut s = state(&wall);
+        s.cut_rect(Vec2::new(-0.6, 0.0), Vec2::new(0.6, 2.0));
+        let c = s.grid.cell_at(Vec2::new(0.0, 1.0)).unwrap();
+        assert_eq!(s.grid.kind[c], CellKind::Cut);
+        let look = WallLook::new(&wall, &DestructionMaterials::default());
+        let g = &s.grid;
+        let mesh = mesh_cells(g, &look, (0, 0, g.nx, g.ny), Vec3::ZERO);
+        // The cut's jambs (side faces next to the cut): straight, off their cell line by no
+        // more than a quarter cell, where a blast break wanders three quarters.
+        let jamb: Vec<_> = mesh
+            .vertices
+            .iter()
+            .filter(|v| {
+                let (x, y) = (v.position[0], v.position[1]);
+                v.normal[0].abs() > 0.9 && (0.3..1.7).contains(&y) && (x.abs() - 0.6).abs() < 0.3
+            })
+            .collect();
+        assert!(!jamb.is_empty());
+        for v in &jamb {
+            let k = (v.position[0] - g.origin.x) / g.cell.x;
+            assert!(
+                (k - k.round()).abs() <= 0.26,
+                "jamb vertex {:?} off its line",
+                v.position
+            );
+        }
+        // And it is darker than a blast break of the same concrete.
+        let dark = jamb.iter().map(|v| v.color[0]).fold(f32::MAX, f32::min);
+        assert!(
+            dark < look.interior[0] * 0.5,
+            "jamb {dark} vs interior {}",
+            look.interior[0]
+        );
     }
 
     #[test]
