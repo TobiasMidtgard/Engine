@@ -752,6 +752,57 @@ pub struct LabOptions {
     pub stand_in_bodies: bool,
 }
 
+/// A crowd walking one line, to and fro, so a path wears into the ground (see
+/// [`crate::wear`]): `walkers` people on a long, thin loop `half_length` meters to either side
+/// of `center` along X, each a little to one side of the others and at their own pace. Every
+/// walker first walks `prewalk_s` seconds at once, so the path has a head start. Set
+/// [`WearSettings::gain_scale`](crate::WearSettings) above 1 to watch it form quicker (at 20,
+/// a dozen walkers wear turf bare within a couple of minutes). Returns the walkers, for the
+/// bodies a game attaches (or stand-ins with `stand_in_bodies`).
+pub fn spawn_path_crowd(
+    commands: &mut Commands,
+    center: DVec3,
+    half_length: f64,
+    walkers: u32,
+    prewalk_s: f32,
+    stand_in_bodies: bool,
+) -> Vec<Entity> {
+    let look = Look::new();
+    (0..walkers)
+        .map(|i| {
+            // Repeatable spread of lanes and paces (no entity ids involved).
+            let r = |k: u32| {
+                let h = (i.wrapping_mul(2_654_435_761) ^ k.wrapping_mul(40_503))
+                    .wrapping_mul(2_246_822_519);
+                (h >> 8) as f64 / (1u32 << 24) as f64
+            };
+            let c = center + DVec3::new(0.0, 0.0, (r(1) - 0.5) * 0.5);
+            let walker = commands
+                .spawn((
+                    Transform::from_translation(c),
+                    DemoWalker {
+                        kind: WalkerKind::Person,
+                        center: c,
+                        radius_x: half_length,
+                        radius_z: 0.1 + 0.2 * r(2),
+                        speed: (1.15 + 0.45 * r(3)) as f32,
+                        step_m: (0.66 + 0.12 * r(4)) as f32,
+                        load_kg: (55.0 + 45.0 * r(5)) as f32,
+                        body_height: 0.88,
+                        prewalk_s,
+                        phase: i as f64 / walkers.max(1) as f64 * std::f64::consts::TAU,
+                        ..Default::default()
+                    },
+                ))
+                .id();
+            if stand_in_bodies {
+                stand_in_body(commands, walker, WalkerKind::Person, 0.88, &look);
+            }
+            walker
+        })
+        .collect()
+}
+
 /// Build the terrain lab around `origin` (on flat ground): 4 painted strips 9 m wide and 32 m
 /// long along Z (mud, snow, sand, grass from −X to +X), walkers on each, a rover crossing
 /// them, and a crater, a trench and a mound on the far side. The walkers have no bodies (see
