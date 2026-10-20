@@ -2171,12 +2171,15 @@ impl Simulation {
                     let (ta, tb) = (self.region(a).tier, self.region(b).tier);
                     let (fa, fb) = (self.region(a).fine, self.region(b).fine);
                     // Regions with and without fine steps are compared every step: the fine
-                    // ones are small, and their margin covers only a step of travel.
-                    let apart = if ta != tb {
-                        !(look_closer && self.movers_close(a, b, margin))
-                    } else if fa.is_some() != fb.is_some() {
+                    // ones are small, and their margin covers only a step of travel. This comes
+                    // before the tiers: far from every focus, a yard holding a character keeps
+                    // the coarse tier while its cradle drops to half rate, and merging them at
+                    // the tiers' wide margin stepped the whole yard finely.
+                    let apart = if fa.is_some() != fb.is_some() {
                         let (fine, other) = if fa.is_some() { (a, b) } else { (b, a) };
                         !self.movers_near(fine, other, fine_margin)
+                    } else if ta != tb {
+                        !(look_closer && self.movers_close(a, b, margin))
                     } else {
                         false
                     };

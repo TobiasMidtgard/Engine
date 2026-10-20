@@ -94,6 +94,16 @@ fn far_away_proving_grounds_pause() {
         first,
         "replayed with nobody near"
     );
+    // Only the cradle, pendulums and balls that ask for fine steps take them, far away too.
+    // (The yard's character kept it coarse while they dropped to half rate, and the two
+    // regions merged at the tiers' wide margin: all 1400 bodies stepped finely, 10× the cost.)
+    let stats = *app.world.resource::<PhysicsStats>();
+    assert!(
+        stats.fine_awake * 10 < stats.awake.max(1),
+        "{} of {} awake bodies step finely",
+        stats.fine_awake,
+        stats.awake
+    );
 }
 
 #[test]
