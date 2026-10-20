@@ -79,6 +79,10 @@ A person's look is the shared `engine_world::character::Appearance` (this crate 
   their rest pose.
 - `FaceControls`: expressions and gaze.
 
+The outfit (`Appearance::outfit`) sets the clothes' colours and cut: `shirt`, `tshirt` (sleeves to mid upper arm) or `none` (bare to the waist; women wear a band across the chest) on top, `trousers` or `shorts` (mid-thigh) below (`skirt` draws trousers for now), and an accent colour on the `collar` or an armband (`armband_l`, `armband_r`).
+
+Once a person is built it writes `BodyFit` (their rest skeleton on the humanoid bones and standing height), and rewrites it when the build changes it, so posers can fit their skeletons and props to that person.
+
 Headgear (`Appearance::headgear`) leaves out what a helmet covers, for whoever draws the helmet: `open_helm` the hair, ears and neck (the face from brow to chin stays), `closed_helm` the whole head and neck; `hood` hides nothing yet.
 
 It calls `draws_appearances`, so anim poses people with an `Appearance` without drawing its

@@ -134,9 +134,24 @@ fn body_view(name: &str) -> Option<Orbit> {
     })
 }
 
+/// Linear RGB from an sRGB hex color (`2a4d8f`).
+fn linear_from_hex(hex: &str) -> Option<[f32; 3]> {
+    let v = u32::from_str_radix(hex.trim_start_matches('#'), 16).ok()?;
+    let c = |shift: u32| {
+        let s = ((v >> shift) & 0xff) as f32 / 255.0;
+        if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    (hex.trim_start_matches('#').len() == 6).then(|| [c(16), c(8), c(0)])
+}
+
 impl ShotPlan {
-    /// `--shots <dir> [--only name,name] [--views front,34,...] [--pose walk] [--headgear id]`,
-    /// or None without
+    /// `--shots <dir> [--only name,name] [--views front,34,...] [--pose walk] [--headgear id]
+    /// [--outfit top,bottom,accent_on] [--colors top,bottom,accent]` (colors as sRGB hex,
+    /// `2a4d8f`), or None without
     /// `--shots`. Views are close-ups (`front`, `34`, `profile`, `eyes`, ...), whole-body views
     /// (`body`, `body34`, `bodyside`, `bodyback`, `feet`, in `--pose`), or expressions in close-up
     /// (`smile`, `sad`, `surprise`, ...; `<expression>34` from three-quarters).
@@ -154,6 +169,8 @@ impl ShotPlan {
         let views = value("--views").unwrap_or_else(|| "front,34,profile".into());
         let body_pose = value("--pose").unwrap_or_else(|| "stand".into());
         let headgear = value("--headgear");
+        let outfit = value("--outfit");
+        let colors = value("--colors");
         let mut people: Vec<(String, Appearance)> = Appearance::presets()
             .into_iter()
             .map(|(n, a)| (n.to_lowercase(), a))
@@ -165,6 +182,27 @@ impl ShotPlan {
         for (name, mut a) in people {
             if let Some(h) = &headgear {
                 a.headgear = h.clone();
+            }
+            if let Some(o) = &outfit {
+                let ids: Vec<&str> = o.split(',').map(str::trim).collect();
+                let o = &mut a.outfit;
+                for (field, id) in [&mut o.top, &mut o.bottom, &mut o.accent_on]
+                    .into_iter()
+                    .zip(ids)
+                {
+                    *field = id.to_string();
+                }
+            }
+            if let Some(c) = &colors {
+                let o = &mut a.outfit;
+                for (field, hex) in [&mut o.top_color, &mut o.bottom_color, &mut o.accent]
+                    .into_iter()
+                    .zip(c.split(','))
+                {
+                    if let Some(rgb) = linear_from_hex(hex.trim()) {
+                        *field = rgb;
+                    }
+                }
             }
             let wanted = match &only {
                 Some(list) => list.contains(&name),

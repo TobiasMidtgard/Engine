@@ -117,7 +117,7 @@ pub fn build(
         .iter()
         .map(|set| roots(&skin.positions, set))
         .collect();
-    clothes::dress(pack, regions, &morphed, &mut skin);
+    clothes::dress(pack, regions, &morphed, &mut skin, clothes::Cut::of(a));
     let face_shows = headgear.face_shows();
     if opts.face && face_shows {
         skin.add_mouth(pack, &mouth::build(pack, &morphed));
