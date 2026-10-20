@@ -504,6 +504,16 @@ pub fn spawn_demos(
                         cell_m: 1.25,
                     },
                 ));
+                // Finer air around the campfire (fire::demo puts it 22 m west, 20.5 m south of
+                // the center), so its thin wisp isn't smeared into the meadow's coarse cells.
+                commands.spawn((
+                    Name::new("Fire demo: campfire smoke"),
+                    Transform::from_translation(z.center + DVec3::new(-25.0, -1.0, -19.5)),
+                    engine_smoke::SmokeVolume {
+                        size: [16.0, 13.0, 10.0],
+                        cell_m: 0.3,
+                    },
+                ));
             }
             "range" => engine_smoke::demo::spawn_demo(commands, z.center),
             "weather" => engine_weather::demo::spawn_demo(commands, z.center),
