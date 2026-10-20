@@ -29,6 +29,9 @@ pub struct SmokeSettings {
     pub cool_secs: f32,
     /// Mixing too small for the voxels, m²/s: softer, wider clouds.
     pub diffusion_m2_s: f32,
+    /// Eddies in the wind as a share of its speed (0 = a perfectly steady wind): plumes
+    /// meander, puff and widen as they drift instead of streaming off in a straight tube.
+    pub turbulence: f32,
     /// Light blocked per kg of smoke, m²/kg (soot ≈ 8 700, grenade smoke ≈ 3 000).
     pub extinction_m2_kg: f32,
     /// Voxel size of volumes created around smoke released outside any `SmokeVolume`, m.
@@ -66,6 +69,7 @@ impl Default for SmokeSettings {
             dissipation_secs: p.dissipation_secs,
             cool_secs: p.cool_secs,
             diffusion_m2_s: p.diffusion_m2_s,
+            turbulence: 0.3,
             extinction_m2_kg: 3000.0,
             auto_cell_m: 1.0,
             auto_size_m: [48.0, 40.0, 48.0],
