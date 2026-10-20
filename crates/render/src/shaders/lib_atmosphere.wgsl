@@ -151,11 +151,6 @@ fn air_mie_g_scattered() -> vec3<f32> {
     return (frame.air_mie_g.rgb - f) / max(vec3<f32>(1.0) - f, vec3<f32>(1e-3));
 }
 
-// The Mie phase of sunlight scattered once toward the eye, per unit of frame.air_mie: the whole
-// lobe, so the glow around the sun keeps its forward peak.
-fn phase_mie_sun(cos_t: f32) -> vec3<f32> {
-    return phase_mie_rgb(cos_t, frame.air_mie_g.rgb) / max(vec3<f32>(1.0) - air_mie_peak(), vec3<f32>(1e-3));
-}
 
 fn ozone_density(h: f32) -> f32 {
     return max(0.0, 1.0 - abs(h - 25000.0) / 15000.0);
@@ -398,8 +393,8 @@ fn integrate_atmosphere_spaced(h0: f32, mu: f32, mu_s: f32, nu: f32, t0: f32, t1
     let radius = frame.planet.w;
     let r0 = radius + h0;
     let pr = phase_rayleigh(nu);
-    let pm = phase_mie_sun(nu);
     let g_ms = air_mie_g_scattered();
+    let pm = phase_mie_rgb(nu, g_ms);
     let len = t1 - t0;
     var prev = 0.0;
     var throughput = vec3<f32>(1.0);
@@ -459,6 +454,55 @@ fn atmosphere(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32, steps: i32) -> A
     result = integrate_atmosphere_spaced(h0, mu, dot(sun, up), dot(dir, sun), t0, t1, steps, dense_end);
     result.ground_t = ground_t;
     return result;
+}
+
+// The glow of the haze's forward peak around the sun, seen from the camera along `dir` (per lux
+// of sun color): what the whole Mie lobe scatters toward the eye beyond the lobe left without
+// the peak (`air_mie_peak`), so the sky around the sun looks as it does with the whole lobe.
+// The light in it is counted again in the sunlight (the peak passes as unscattered), so only
+// the visible sky draws it, as it draws the sun's disc, and not the environment map that
+// lights surfaces. 0 without a forward peak or away from the sun.
+fn atmosphere_aureole(dir: vec3<f32>) -> vec3<f32> {
+    let f = air_mie_peak();
+    if (frame.planet.w <= 0.0 || max(f.x, max(f.y, f.z)) <= 0.0) { return vec3(0.0); }
+    let nu = dot(dir, frame.sun_dir.xyz);
+    let left = max(vec3<f32>(1.0) - f, vec3<f32>(1e-3));
+    let lobe = max(phase_mie_rgb(nu, frame.air_mie_g.rgb) / left - phase_mie_rgb(nu, air_mie_g_scattered()), vec3<f32>(0.0));
+    if (max(lobe.x, max(lobe.y, lobe.z)) <= 0.0) { return vec3(0.0); }
+    let h0 = max(frame.camera_world.w, 1.0);
+    let up = normalize(-frame.planet.xyz);
+    let mu = dot(dir, up);
+    let mu_s = dot(frame.sun_dir.xyz, up);
+    let hit_atmo = ray_shell_mu(h0, mu, frame.atmosphere.x);
+    if (hit_atmo.y < 0.0) { return vec3(0.0); }
+    let t0 = max(hit_atmo.x, 0.0);
+    var t1 = hit_atmo.y;
+    let hit_ground = ray_shell_mu(h0, mu, 0.0);
+    if (hit_ground.x > 0.0) { t1 = min(t1, hit_ground.x); }
+    if (t1 <= t0) { return vec3(0.0); }
+    let radius = frame.planet.w;
+    let r0 = radius + h0;
+    let steps = 12;
+    let len = t1 - t0;
+    var prev = 0.0;
+    var throughput = vec3<f32>(1.0);
+    var radiance = vec3<f32>(0.0);
+    for (var i = 0; i < steps; i++) {
+        let x = f32(i + 1) / f32(steps);
+        let t = len * x * x;
+        let dt = t - prev;
+        let tm = t0 + (prev + t) * 0.5;
+        prev = t;
+        let h = height_along(h0, mu, tm);
+        let mu_s_t = clamp((r0 * mu_s + tm * nu) / (radius + h), -1.0, 1.0);
+        let m = atmo_medium(h);
+        let sun = transmittance_to_top(h, mu_s_t) * sun_above_horizon(h, mu_s_t);
+        let s = sun * m.mie * lobe;
+        let seg = exp(-m.extinction * dt);
+        radiance += throughput * (s - s * seg) / max(m.extinction, vec3<f32>(1e-12));
+        throughput *= seg;
+    }
+    return radiance;
 }
 
 // Sunlight transmittance to a camera-relative point through the atmosphere (0 in the planet's

@@ -634,12 +634,13 @@ mod tests {
         let (earth, mars) = (Atmosphere::earth(), Atmosphere::mars());
         let blue_over_red = |t: Vec3| t.z / t.x.max(1e-9);
 
-        // Overhead, Mars' dust (optical depth about 0.34) lets through less than Earth's air.
+        // Overhead, Mars' dust (optical depth about 0.34, of which its forward peak passes
+        // straight on: about 0.2 is left) lets through less than Earth's air.
         let earth_noon = sun_at_surface(&earth, 90.0);
         let mars_noon = sun_at_surface(&mars, 90.0);
         eprintln!("noon: Earth {earth_noon}, Mars {mars_noon}");
         assert!(
-            (0.65..0.8).contains(&mars_noon.y),
+            (0.75..0.87).contains(&mars_noon.y),
             "Mars' noon sun: {mars_noon}"
         );
         assert!(earth_noon.y > 0.85, "Earth's noon sun: {earth_noon}");
@@ -657,7 +658,7 @@ mod tests {
             "Mars' low sun is reddened: {mars_low}"
         );
         assert!(
-            mars_low.y < earth_low.y * 0.5,
+            mars_low.y < earth_low.y * 0.6,
             "Mars' dust doesn't dim the low sun: {mars_low} vs Earth's {earth_low}"
         );
 

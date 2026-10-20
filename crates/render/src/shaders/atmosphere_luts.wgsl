@@ -112,8 +112,8 @@ fn multiscatter_entry(h: f32, mu_s: f32) -> MultiScatter {
 // Sky light on an upward-facing surface at height h for sun zenith cosine mu_s, divided by pi
 // (the mean sky radiance over cosine-weighted directions of the upper hemisphere): sunlight
 // scattered once with the air's own phase functions (the bright aureole around the sun
-// included, less a forward peak that passes as sunlight: `air_mie_peak`), plus the higher
-// orders from `psi`, taken as constant along each ray.
+// included, less a forward peak that passes as sunlight: `air_mie_peak`, `atmosphere_aureole`),
+// plus the higher orders from `psi`, taken as constant along each ray.
 fn sky_irradiance_entry(h: f32, mu_s: f32, psi: vec3<f32>) -> vec3<f32> {
     let radius = frame.planet.w;
     let r0 = radius + h;

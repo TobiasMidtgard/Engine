@@ -320,8 +320,8 @@ impl Pcg {
 /// The dust's phase function is a forward peak holding a share f = `mie_forward_peak` · g² of
 /// its scattering, which passes straight on (delta-Eddington), plus the lobe left, of anisotropy
 /// (g − f) / (1 − f). So the dust's scattering and extinction here leave the peak out, and the
-/// light it scatters on follows the lobe left; only the sunlight it scatters once toward the
-/// camera keeps the whole lobe, as the renderer has it for the glow around the sun.
+/// light it scatters follows the lobe left. (The renderer draws the peak's glow around the sun
+/// in the visible sky only; none of these views look toward the sun.)
 struct Air {
     rayleigh: f64,
     /// Without the forward peak.
@@ -331,9 +331,6 @@ struct Air {
     mie_h: f64,
     /// The lobe left without the forward peak.
     g: f64,
-    /// The whole lobe, and the share of the scattering in its forward peak.
-    g_whole: f64,
-    peak: f64,
     top: f64,
     ground_albedo: f64,
 }
@@ -352,8 +349,6 @@ impl Air {
             rayleigh_h: a.rayleigh_scale_height as f64,
             mie_h: a.mie_scale_height as f64,
             g: (g - peak) / (1.0 - peak),
-            g_whole: g,
-            peak,
             top: a.thickness as f64,
             ground_albedo: a.ground_color[c] as f64,
         }
@@ -413,11 +408,6 @@ impl Air {
         Self::cornette_shanks(self.g, nu)
     }
 
-    /// Sunlight scattered once toward the camera, per unit of `mie_scattering`: the whole lobe.
-    fn phase_mie_sun(&self, nu: f64) -> f64 {
-        Self::cornette_shanks(self.g_whole, nu) / (1.0 - self.peak)
-    }
-
     /// Where along a direction the optical depth from z reaches `tau` (at most `max_len`).
     fn distance_to_depth(&self, z: f64, dz: f64, tau: f64, max_len: f64) -> f64 {
         let (mut lo, mut hi) = (0.0, max_len);
@@ -469,7 +459,7 @@ fn reference(
         let t = (i as f64 + 0.5) / n as f64 * len;
         let z = z0 + view.z * t;
         let source = (air.rayleigh * air.density(z, air.rayleigh_h) * Air::phase_rayleigh(nu)
-            + air.mie_scattering * air.density(z, air.mie_h) * air.phase_mie_sun(nu))
+            + air.mie_scattering * air.density(z, air.mie_h) * air.phase_mie(nu))
             * air.sun(z, sun.z);
         single += source * (-air.depth(z0, view.z, t)).exp() * len / n as f64;
     }
