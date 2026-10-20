@@ -1516,96 +1516,163 @@ fn fall_brace(s: &Skeleton) -> AnimationClip {
     .with_curve("effort", 16, |ph| (ph / 0.2).clamp(0.0, 1.0) * 0.9)
 }
 
+/// Up on tiptoe to take hold of something overhead with the right hand (the paddock's
+/// lantern): a glance up and a small dip, the arm sweeping up past the face with the elbow
+/// leading while the heels rise, the hand closing at the top and holding while the body
+/// balances, then down onto the heels with a little give in the knees. The `reach_hand`
+/// curve hands the wrist to a [`ReachIk`](crate::ik::ReachIk) for the hold, and `grip`
+/// closes the hand.
 fn reach(s: &Skeleton) -> AnimationClip {
+    // Phase keys: glance and dip, top of the rise, end of the hold, landing.
+    const DIP: f32 = 0.12;
+    const TOP: f32 = 0.38;
+    const HOLD: f32 = 0.7;
+    const LAND: f32 = 0.86;
     let effort = [
         (0.0, 0.0),
-        (0.22, 0.25),
+        (TOP, 0.35),
         (0.5, 0.45),
-        (0.78, 0.4),
+        (HOLD, 0.4),
         (1.0, 0.0),
     ];
-    AnimationClip::from_fn("reach", 2.6, 53, false, |ph| {
+    let grip = [
+        (0.0, 0.0),
+        (TOP, 0.05),
+        (0.45, 0.6),
+        (HOLD, 0.6),
+        (0.76, 0.0),
+    ];
+    let reach_hand = [
+        (0.0, 0.0),
+        (0.24, 0.0),
+        (0.4, 1.0),
+        (HOLD, 1.0),
+        (0.82, 0.0),
+    ];
+    AnimationClip::from_fn("reach", 3.0, 61, false, |ph| {
         let mut p = PoseBuilder::new(s);
         let k = |keys: &[(f32, f32)]| keyed(ph, keys);
+        // Balancing on the balls of the feet: a slow sway while up.
+        let up = k(&[(0.0, 0.0), (TOP, 1.0), (HOLD, 1.0), (0.8, 0.0)]);
+        let sway = (ph * 5.0 * std::f32::consts::TAU).sin() * up;
+        // Legs: a small dip that keeps the feet flat, then up onto the toes. The ankle points
+        // the foot and the toes bend back by as much, so the balls of the feet stay down
+        // while the heels and hips rise 6.6 cm (see the toe joint's offset).
+        let legs = [
+            (0.0, 0.0),
+            (DIP, -1.0),
+            (TOP, 1.0),
+            (HOLD, 1.0),
+            (LAND, -1.0),
+            (1.0, 0.0),
+        ];
+        let rise = k(&legs).max(0.0);
+        let dip = (-k(&legs)).max(0.0);
         p.rot_move(
             "hips",
-            Vec3::new(
-                0.0,
-                -0.01,
-                k(&[(0.0, 0.0), (0.5, 0.04), (0.78, 0.04), (1.0, 0.0)]),
-            ),
-            k(&[(0.0, 0.0), (0.5, 6.0), (0.78, 6.0), (1.0, 0.0)]),
+            Vec3::new(0.006 * sway, -0.01 + 0.066 * rise - 0.013 * dip, 0.0),
             0.0,
-            0.0,
+            -3.0 * rise,
+            1.0 * sway,
         );
+        // The trunk lengthens up the reaching side and turns that shoulder in; the head tips
+        // back to watch the hand.
+        let look = k(&[
+            (0.0, 0.0),
+            (DIP, 0.7),
+            (TOP, 1.0),
+            (HOLD, 1.0),
+            (LAND, 0.2),
+            (1.0, 0.0),
+        ]);
         spine(
             &mut p,
+            [2.0 * rise - 2.0 * dip, 5.0 * rise, 12.0 * look, 20.0 * look],
+            [2.0 * rise, 5.0 * rise, -2.0 * look, -3.0 * look],
             [
-                k(&[(0.0, 0.0), (0.5, -8.0), (0.78, -8.0), (1.0, 0.0)]),
-                k(&[
+                3.0 * rise - 0.8 * sway,
+                4.0 * rise,
+                -3.0 * rise,
+                -3.0 * rise,
+            ],
+        );
+        // Right arm: the elbow leads the hand up past the face, the arm straightens overhead
+        // with the shoulder blade lifting, then comes down with the elbow bending again.
+        arm(
+            &mut p,
+            1,
+            Arm {
+                flex: k(&[
+                    (0.0, 4.0),
+                    (DIP, 18.0),
+                    (TOP, 162.0),
+                    (HOLD, 162.0),
+                    (1.0, 4.0),
+                ]),
+                twist: k(&[
                     (0.0, 0.0),
-                    (0.22, 2.0),
-                    (0.5, -16.0),
-                    (0.78, -16.0),
+                    (DIP, 10.0),
+                    (TOP, -10.0),
+                    (HOLD, -10.0),
                     (1.0, 0.0),
                 ]),
-                k(&[(0.0, 0.0), (0.5, 9.0), (0.78, 9.0), (1.0, 0.0)]),
-                k(&[(0.0, 0.0), (0.5, 8.0), (0.78, 8.0), (1.0, 0.0)]),
-            ],
-            [0.0; 4],
-            [0.0; 4],
+                abduct: k(&[
+                    (0.0, -15.0),
+                    (DIP, -12.0),
+                    (TOP, -6.0),
+                    (HOLD, -6.0),
+                    (1.0, -15.0),
+                ]),
+                elbow: k(&[
+                    (0.0, 12.0),
+                    (DIP, 35.0),
+                    (0.24, 75.0),
+                    (TOP, 14.0),
+                    (HOLD, 14.0),
+                    (0.84, 55.0),
+                    (1.0, 12.0),
+                ]),
+                wrist: k(&[(0.0, 0.0), (DIP, 15.0), (TOP, 6.0), (HOLD, 6.0), (1.0, 0.0)]),
+                protract: k(&[(0.0, 0.0), (TOP, 10.0), (HOLD, 10.0), (1.0, 0.0)]),
+                elevate: k(&[
+                    (0.0, 0.0),
+                    (DIP, 2.0),
+                    (TOP, 22.0),
+                    (HOLD, 22.0),
+                    (1.0, 0.0),
+                ]),
+            },
+        );
+        // Left arm: drifts out a little for balance while up on the toes.
+        arm(
+            &mut p,
+            0,
+            Arm {
+                flex: 4.0 + 10.0 * up,
+                twist: 0.0,
+                abduct: -15.0 + 4.0 * up + 1.5 * sway,
+                elbow: 12.0 + 16.0 * up,
+                wrist: 4.0 * up,
+                protract: 0.0,
+                elevate: 0.0,
+            },
         );
         for side in 0..2 {
-            arm(
+            leg(
                 &mut p,
                 side,
-                Arm {
-                    flex: k(&[
-                        (0.0, 4.0),
-                        (0.22, 45.0),
-                        (0.32, 45.0),
-                        (0.5, 92.0),
-                        (0.78, 92.0),
-                        (1.0, 4.0),
-                    ]),
-                    twist: k(&[(0.0, 0.0), (0.22, 25.0), (0.5, 0.0)]),
-                    abduct: k(&[
-                        (0.0, -15.0),
-                        (0.22, -20.0),
-                        (0.5, -4.0),
-                        (0.78, -4.0),
-                        (1.0, -15.0),
-                    ]),
-                    elbow: k(&[
-                        (0.0, 12.0),
-                        (0.22, 135.0),
-                        (0.32, 135.0),
-                        (0.5, 4.0),
-                        (0.78, 4.0),
-                        (1.0, 12.0),
-                    ]),
-                    wrist: k(&[
-                        (0.0, 0.0),
-                        (0.22, -10.0),
-                        (0.5, 10.0),
-                        (0.78, 10.0),
-                        (1.0, 0.0),
-                    ]),
-                    protract: k(&[
-                        (0.0, 0.0),
-                        (0.22, -5.0),
-                        (0.5, 24.0),
-                        (0.78, 24.0),
-                        (1.0, 0.0),
-                    ]),
-                    elevate: k(&[(0.0, 0.0), (0.5, 4.0), (1.0, 0.0)]),
-                },
+                2.0 * (1.0 - rise) + 10.0 * dip,
+                1.5,
+                3.0 * (1.0 - rise) + 20.0 * dip,
+                1.0 - 31.0 * rise + 10.0 * dip,
+                31.0 * rise,
             );
-            leg(&mut p, side, 2.0, 1.5, 3.0, 1.0, 0.0);
         }
         p.take()
     })
-    .with_curve("effort", 53, |ph| keyed(ph, &effort))
+    .with_curve("effort", 61, |ph| keyed(ph, &effort))
+    .with_curve("grip", 61, |ph| keyed(ph, &grip))
+    .with_curve("reach_hand", 61, |ph| keyed(ph, &reach_hand))
 }
 
 fn flex(s: &Skeleton) -> AnimationClip {
