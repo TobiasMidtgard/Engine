@@ -113,6 +113,7 @@ pub(crate) fn think_and_act(
     mut w: BrainWorld,
     mut revives: ResMut<ReviveClaims>,
     mut scratch: Local<Scratch>,
+    seeds: Query<&crate::seed::Seed>,
 ) {
     let s = &mut *scratch;
     s.claims.clear();
@@ -169,7 +170,7 @@ pub(crate) fn think_and_act(
         let pos = t.translation;
         if brain.home.is_none() {
             brain.home = Some(npc.home.unwrap_or(pos));
-            brain.rng_state = me.to_bits() ^ 0x5eed;
+            brain.rng_state = crate::seed::seed_of(&seeds, me) ^ 0x5eed;
             brain.strafe = if brain.random() < 0.5 { -1.0 } else { 1.0 };
         }
         let far =
@@ -649,7 +650,11 @@ pub(crate) fn revive_score(c: &ReviveCase, s: &NpcSkills) -> (f32, f32) {
         + impulse
         + 0.6 * c.done.clamp(0.0, 1.0);
     let near = 1.0 - 0.35 * (c.dist / c.range).powi(2);
-    let danger = 0.55 * c.exposure.clamp(0.0, 2.0) + 0.7 * c.under_fire.clamp(0.0, 1.5);
+    // The more it thinks, the more a watched spot weighs: a skilled fighter waits until the
+    // watcher looks away, is pinned by its mates' fire or loses the spot in smoke (all of which
+    // lower `exposure`); a rookie runs straight in.
+    let watched = (0.55 + 0.6 * s.logic) * c.exposure.clamp(0.0, 2.0);
+    let danger = watched + 0.7 * c.under_fire.clamp(0.0, 1.5);
     let caution = 0.2 + 1.1 * s.logic;
     let risk = (danger * caution).clamp(0.0, 1.0);
     let hurt = (1.0 - c.health / 0.4).max(0.0) * (0.2 + 0.6 * s.logic);
