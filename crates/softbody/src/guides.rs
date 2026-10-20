@@ -85,7 +85,7 @@ pub fn build(
             ((bp - origin).as_vec3(), br),
             &g.points,
             omegas,
-            |_| 0.0,
+            |arc| hair::swept_hold(g.normal, arc),
             None,
         );
         let tangent = (g.points[1] - g.points[0])
