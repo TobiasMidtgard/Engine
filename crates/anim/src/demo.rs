@@ -1599,6 +1599,11 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     dress(world, coach, "reacher", shirt_detail());
     world.entity_mut(coach).insert((
         Name::new("Coach"),
+        DemoScript {
+            period: 1000.0,
+            steps: vec![DemoStep::param(0.05, "arms_folded", 1.0)],
+            time: 0.0,
+        },
         Watch {
             target: Some(runner),
             ..Default::default()

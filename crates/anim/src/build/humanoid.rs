@@ -14,7 +14,7 @@ use super::sdf::{Body, Paint, Shape};
 use super::{PoseBuilder, bone, bump, cycle, cycle_sin, keyed};
 use crate::clip::AnimationClip;
 use crate::graph::{
-    AnimGraph, Blend1dChild, Cmp, Condition, NodeDef, StateDef, TransitionDef, Weight,
+    AnimGraph, Blend1dChild, BoneMaskDef, Cmp, Condition, NodeDef, StateDef, TransitionDef, Weight,
 };
 use crate::ik::{FootIk, LegIk};
 use crate::muscle::{Muscle, MuscleDriver};
@@ -1332,6 +1332,31 @@ fn sprint(s: &Skeleton) -> AnimationClip {
     })
     .with_event(0.02, "footstep", Some("foot_r"))
     .with_event(0.52, "footstep", Some("foot_l"))
+}
+
+/// Arms folded across the chest, the left forearm over the right with each hand tucked by
+/// the other arm, rising a little with each breath. Laid over the arms by `arms_folded`.
+fn arms_folded(s: &Skeleton) -> AnimationClip {
+    AnimationClip::from_fn("arms_folded", 4.0, 17, true, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let breath = cycle_sin(ph);
+        for (side, flex, elbow) in [(1, 30.0, 84.0), (0, 35.0, 95.0)] {
+            arm(
+                &mut p,
+                side,
+                Arm {
+                    flex: flex + 1.5 * breath,
+                    twist: 80.0,
+                    abduct: -30.0,
+                    elbow,
+                    wrist: 4.0,
+                    protract: 2.0,
+                    elevate: 1.0 + breath,
+                },
+            );
+        }
+        p.take()
+    })
 }
 
 /// Upper-body lean into a turn (additive). `dir`: +1 left, −1 right.
@@ -2777,6 +2802,7 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         walk(s),
         run(s),
         sprint(s),
+        arms_folded(s),
         sidestep_left(s),
         sidestep_right(s),
         backpedal(s),
@@ -2984,6 +3010,17 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
             match_speed: false,
         }),
         weight: Weight::default(),
+    };
+    // Arms folded while standing about or stepping round, by `arms_folded` (0..1; ease it).
+    let leaning = NodeDef::Layer {
+        base: Box::new(leaning),
+        overlay: Box::new(NodeDef::clip("arms_folded")),
+        mask: BoneMaskDef {
+            bones: UPPER_ARM.iter().map(|b| b.to_string()).collect(),
+            include_children: true,
+        },
+        weight: Weight::param("arms_folded"),
+        additive: false,
     };
     let state = |name: &str, node: NodeDef| StateDef {
         name: name.into(),
@@ -3242,6 +3279,26 @@ mod tests {
                 "{name}: hand {hand} vs {back_hand}"
             );
         }
+    }
+
+    #[test]
+    fn folded_arms_cross_in_front_of_the_chest() {
+        let s = skeleton();
+        let m = model_at(&s, &arms_folded(&s), 0.0);
+        let chest = m[s.bone("chest")].t;
+        let (left, right) = (m[s.bone(HAND[0])].t, m[s.bone(HAND[1])].t);
+        // Each hand crosses to the other side, in front of the chest (the body faces −Z), the
+        // left forearm over the right.
+        assert!(right.x < 0.0 && left.x > 0.0, "hands {left} {right}");
+        assert!(
+            right.z < chest.z - 0.12 && left.z < chest.z - 0.12,
+            "hands {left} {right}"
+        );
+        assert!(left.y > right.y + 0.03, "hands {left} {right}");
+        assert!(
+            (right.y - chest.y).abs() < 0.12,
+            "hands {left} {right} chest {chest}"
+        );
     }
 
     #[test]
