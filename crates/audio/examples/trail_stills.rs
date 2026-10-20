@@ -8,6 +8,7 @@
 //! cargo run -p engine_audio --release --example trail_stills -- [out_dir]
 //!     [--only grass,mud,mud-snow,wide] [--size 1280x720] [--walkers] [--panels]
 //!     [--wide eye_x,eye_y,eye_z,at_x,at_y,at_z] [--sun x,y,z] [--ev ev100]
+//!     [--follow dog --on mud[+meters] --secs 2 --frames 6 --every 0.25]
 //! cargo run -p engine_audio --example trail_stills -- --measure
 //! ```
 //!
@@ -16,6 +17,10 @@
 //! warm spawn) and prints how long `spawn_demo` and the first frame take, and how many
 //! entities and triangles the trail adds; it renders nothing. `--sun` sets the direction the
 //! sunlight travels (default a low afternoon sun) and `--ev` a fixed exposure for every view.
+//! `--follow` (hiker, runner, dog or horse) instead puts that walker `meters` into the stretch
+//! named by `--on`, lets the clock run `--secs`, and films it from behind as the showcase's
+//! follow camera does (`follow_<walker>_<stretch>_<k>.png`, `--frames` of them `--every`
+//! seconds apart), sound rings and all.
 //! Headless rendering needs a GPU or lavapipe (`mesa-vulkan-drivers`).
 
 use std::path::{Path, PathBuf};
@@ -45,6 +50,13 @@ struct Options {
     sun: DVec3,
     /// Exposure for every view (otherwise one per stretch).
     ev100: Option<f32>,
+    /// `--follow`: the walker, the stretch and meters into it, seconds to run first, and
+    /// frames to film how many seconds apart.
+    follow: Option<String>,
+    on: (String, f64),
+    secs: f32,
+    frames: u32,
+    every: f32,
 }
 
 fn options() -> Options {
@@ -58,6 +70,11 @@ fn options() -> Options {
         wide: [-2.0, 22.0, -29.0, 0.0, 0.0, 1.5],
         sun: DVec3::new(-0.55, -0.42, -0.62),
         ev100: None,
+        follow: None,
+        on: ("mud".into(), 2.0),
+        secs: 2.0,
+        frames: 6,
+        every: 0.25,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -92,6 +109,30 @@ fn options() -> Options {
                 o.sun = DVec3::new(v[0], v[1], v[2]);
                 i += 1;
             }
+            "--follow" => {
+                o.follow = Some(next);
+                i += 1;
+            }
+            "--on" => {
+                let (name, m) = next.split_once('+').unwrap_or((&next, "2"));
+                o.on = (
+                    name.to_string(),
+                    m.parse().expect("--on takes stretch[+meters]"),
+                );
+                i += 1;
+            }
+            "--secs" => {
+                o.secs = next.parse().expect("--secs takes seconds");
+                i += 1;
+            }
+            "--frames" => {
+                o.frames = next.parse().expect("--frames takes a count");
+                i += 1;
+            }
+            "--every" => {
+                o.every = next.parse().expect("--every takes seconds");
+                i += 1;
+            }
             "--ev" => {
                 o.ev100 = Some(next.parse().expect("--ev takes an EV100"));
                 i += 1;
@@ -123,6 +164,10 @@ fn main() {
         .query_filtered::<&mut Transform, With<DirectionalLight>>();
     for mut t in suns.iter_mut(&mut app.world) {
         *t = Transform::default().looking_at(o.sun, Vec3::Y);
+    }
+    if let Some(who) = &o.follow {
+        film_walker(&mut app, &o, who, &o.on.0, o.on.1);
+        return;
     }
     if !o.walkers {
         let walkers: Vec<Entity> = app
@@ -259,6 +304,71 @@ fn main() {
             out.display(),
             started.elapsed().as_secs_f32()
         );
+    }
+}
+
+/// Put the walker whose name holds `who` `meters` into stretch `on`, run the clock, and film it
+/// from behind and above (the showcase's follow camera: 6.5 and 2.3 times its size, a
+/// person's being 1).
+fn film_walker(app: &mut App, o: &Options, who: &str, on: &str, meters: f64) {
+    let start = stretch_start(on).unwrap_or_else(|| panic!("no stretch {on}")) + meters;
+    let mut q = app.world.query::<(Entity, &Name, &mut TrailWalker)>();
+    let mut found = None;
+    for (e, name, mut w) in q.iter_mut(&mut app.world) {
+        if name.as_str().to_lowercase().contains(who) {
+            w.along = start;
+            found = Some(e);
+        }
+    }
+    let walker = found.unwrap_or_else(|| panic!("no walker called {who}"));
+    let size = match who {
+        "dog" => 0.56 / 1.75,
+        "horse" => 1.52 / 1.75,
+        _ => 1.0,
+    };
+    let step = 1.0 / 30.0;
+    let mut t = 0.0;
+    let mut shot = 0;
+    let mut next = o.secs;
+    while shot < o.frames {
+        let w = app
+            .world
+            .get::<TrailWalker>(walker)
+            .expect("walker")
+            .clone();
+        let (_, d) = trail_point(w.along);
+        let at = app
+            .world
+            .get::<Transform>(walker)
+            .expect("walker")
+            .translation;
+        let heading = d.as_dvec3();
+        let eye = at - heading * (6.5 * size) + DVec3::Y * (2.3 * size).max(1.5 * size);
+        let look = at + DVec3::Y * (1.1 * size);
+        let mut cams = app
+            .world
+            .query_filtered::<(&mut Transform, &mut Camera), Without<TrailWalker>>();
+        for (mut tf, mut cam) in cams.iter_mut(&mut app.world) {
+            *tf = Transform::from_translation(eye).looking_at(look, Vec3::Y);
+            cam.projection = engine_render::Projection::Perspective {
+                fov_y_deg: 55.0,
+                near: 0.05,
+            };
+            cam.exposure = Exposure::Manual {
+                ev100: o.ev100.unwrap_or(14.6),
+            };
+        }
+        if t + 1e-4 >= next {
+            let file = o.out.join(format!("follow_{who}_{on}_{shot}.png"));
+            app.world.resource_mut::<Screenshots>().request(&file);
+            app.update();
+            println!("{}", file.display());
+            shot += 1;
+            next += o.every;
+        } else {
+            app.update();
+        }
+        t += step;
     }
 }
 

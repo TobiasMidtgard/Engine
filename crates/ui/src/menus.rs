@@ -39,7 +39,8 @@ pub struct PauseState {
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct PauseMenu;
 
-fn menu_item(icon: &str, label: &str, action: &str, key: &str, id: &str) -> El {
+/// A row of the pause or title menu: icon, label and an optional key.
+pub(crate) fn menu_item(icon: &str, label: &str, action: &str, key: &str, id: &str) -> El {
     let mut row = El::new()
         .class("menu_item")
         .id(id)

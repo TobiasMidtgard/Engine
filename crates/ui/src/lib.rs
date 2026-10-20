@@ -28,6 +28,7 @@ pub mod skills;
 pub mod style;
 pub mod text;
 pub mod theme;
+pub mod title;
 pub mod toast;
 pub mod wheel;
 pub mod widgets;
@@ -108,6 +109,7 @@ impl Plugin for UiPlugin {
             skills::add_painters(&mut painters);
             crafting::add_painters(&mut painters);
             saves::add_painters(&mut painters);
+            title::add_painters(&mut painters);
         }
         app.init_resource::<items::ItemDatabase>()
             .init_resource::<dialogue::DialogueLibrary>()
@@ -180,6 +182,12 @@ impl Plugin for UiPlugin {
                 saves::build_screen,
             );
             screens.add(
+                "title",
+                "The title screen over a turning view of the home world and the galaxy: Continue (the newest save in SaveSlots), New Game (sends game.new), Load Game, Settings and Quit (asks, then sends game.exit).",
+                "{}",
+                title::build_screen,
+            );
+            screens.add(
                 "pause",
                 "The pause menu (stops game time while open): resume, inventory, journal, map, settings, save, quit.",
                 "{}",
@@ -216,6 +224,7 @@ impl Plugin for UiPlugin {
                 skills::skills_system,
                 crafting::crafting_system,
                 saves::saves_system,
+                title::title_system,
                 menus::menus_system,
             ),
         )
@@ -292,6 +301,9 @@ fn register_types(app: &mut App) {
     )
     .register_component::<saves::SaveThumb>(
         "A painted view for a save slot (paint: save_thumb): scene (valley, forest, village_night, snow, desert, orbit) and seed.",
+    )
+    .register_component::<title::TitleView>(
+        "The title screen backdrop's clock (paint: title_backdrop): time in seconds.",
     )
     .register_component::<widgets::Cooldown>(
         "Cooldown sweep over a slot: remaining/total seconds (or bind/bind_total), label.",

@@ -1234,8 +1234,8 @@ fn spells() -> Vec<EffectDesc> {
         light: light([0.7, 0.8, 1.0], 30_000.0, 16.0, 0.6, 0.3),
         ..effect(
             "spell.lightning_hit",
-            "Where a lightning bolt strikes: white-blue flash, a starburst, bouncing sparks and a \
-             puff of scorched smoke.",
+            "Where a lightning bolt strikes: white-blue flash, a starburst, electric arcs \
+             crawling out over the ground, bouncing sparks and a wisp of scorched smoke.",
             Some(0.1),
             vec![
                 EmitterDesc {
@@ -1268,14 +1268,36 @@ fn spells() -> Vec<EffectDesc> {
                     ]),
                     ..sparks("sparks", 80, [3.0, 10.0])
                 },
+                // Arcs crawling out over the ground, crackling for a moment.
                 EmitterDesc {
-                    bursts: once(6),
+                    bursts: once(7),
+                    offset: [0.0, 0.03, 0.0],
+                    speed: [0.0, 0.0],
+                    lifetime: [0.25, 0.45],
+                    size: [1.6, 2.6],
+                    rotation_deg: [0.0, 360.0],
+                    local_space: true,
+                    sprite: Sprite::Arc,
+                    facing: Facing::Horizontal,
+                    color: g(&[
+                        (0.0, [0.85, 0.92, 1.0, 1.0]),
+                        (0.6, [0.6, 0.75, 1.0, 1.0]),
+                        (1.0, [0.45, 0.55, 1.0, 0.0]),
+                    ]),
+                    emissive: 60_000.0,
+                    additive: 1.0,
+                    soft: 0.0,
+                    wind: 0.0,
+                    ..em("arcs")
+                },
+                EmitterDesc {
+                    bursts: once(4),
                     shape: EmitShape::Hemisphere { radius: 0.2 },
                     speed: [0.3, 0.8],
                     acceleration: [0.0, 0.6, 0.0],
                     lifetime: [1.2, 2.0],
-                    size: [0.4, 0.6],
-                    ..smoke("smoke", 0.12, 0.5)
+                    size: [0.3, 0.45],
+                    ..smoke("smoke", 0.3, 0.3)
                 },
             ],
         )

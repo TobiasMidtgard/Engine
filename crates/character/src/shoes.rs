@@ -47,7 +47,7 @@ pub fn build(pack: &HumanPack, morphed: &[Vec3]) -> MouthMesh {
 }
 
 /// Convex hull of 2D points (counter-clockwise).
-fn hull(mut p: Vec<Vec2>) -> Vec<Vec2> {
+pub(crate) fn hull(mut p: Vec<Vec2>) -> Vec<Vec2> {
     p.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
     p.dedup();
     if p.len() < 3 {
@@ -74,7 +74,7 @@ fn hull(mut p: Vec<Vec2>) -> Vec<Vec2> {
 }
 
 /// Distance from `c` (inside) to the hull's edge along `d`.
-fn reach(h: &[Vec2], c: Vec2, d: Vec2) -> f32 {
+pub(crate) fn reach(h: &[Vec2], c: Vec2, d: Vec2) -> f32 {
     let mut best = f32::MAX;
     for i in 0..h.len() {
         let (a, b) = (h[i] - c, h[(i + 1) % h.len()] - c);

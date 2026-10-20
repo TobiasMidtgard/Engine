@@ -210,6 +210,11 @@ fn skin_relief(r: vec3<f32>, m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, footpr
             relief -= smoothstep(0.0012, 0.0, abs(r.y - (SOLE_TOP + 0.004))) * 0.00012;
         }
         h += cloth * relief * vis;
+        // Folds (the vertices are moved by them too, see `cloth_lift`), and the shade in
+        // their creases.
+        let folds = cloth_folds(r, g) * saturate((0.02 / max(footprint, 1e-7) - 1.0));
+        h += cloth * folds.x;
+        d.wrinkle = max(d.wrinkle, cloth * folds.y * 2.0);
     }
     d.height = h;
     return d;

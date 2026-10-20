@@ -1,5 +1,5 @@
 //! Renders explosions and spell impacts (`explosion.large`, `spell.fireball_impact`,
-//! `spell.frost_impact`) on open ground, a few moments into each, by day or at dusk into
+//! `spell.frost_impact`, `spell.lightning_hit`) on open ground, a few moments into each, by day or at dusk into
 //! `screenshots/vfx/explosions/`.
 //!
 //! ```sh
@@ -37,6 +37,13 @@ const SHOTS: &[(&str, f32, f64, f64, &[f32])] = &[
         &[0.08, 0.25, 0.6, 1.4],
     ),
     ("spell.frost_impact", 1.0, 4.5, 1.3, &[0.1, 0.4, 1.2, 2.0]),
+    (
+        "spell.lightning_hit",
+        1.0,
+        4.5,
+        1.8,
+        &[0.05, 0.15, 0.3, 0.8],
+    ),
 ];
 
 fn main() {

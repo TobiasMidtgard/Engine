@@ -1796,38 +1796,191 @@ fn reach(s: &Skeleton) -> AnimationClip {
     .with_curve("reach_hand", 61, |ph| keyed(ph, &reach_hand))
 }
 
+/// A front double-biceps: a breath in, the fists curl up in front of the chest and the
+/// elbows swing out to shoulder height, a hit that overshoots and settles, two squeezes in
+/// the hold (fists curl in, shoulders lift, chest up, face strained), then the arms open
+/// out, drop and shake loose.
 fn flex(s: &Skeleton) -> AnimationClip {
-    let flex = [(0.0, 0.0), (0.2, 1.0), (0.8, 1.0), (1.0, 0.0)];
-    AnimationClip::from_fn("flex", 3.0, 31, false, |ph| {
+    const HIT: f32 = 0.26;
+    const HOLD: f32 = 0.72;
+    const POSE: Arm = Arm {
+        flex: 6.0,
+        twist: -86.0,
+        abduct: 54.0,
+        elbow: 102.0,
+        wrist: 8.0,
+        protract: -10.0,
+        elevate: 3.0,
+    };
+    let arms = [
+        (0.0, Arm::HANG),
+        // The fists come up in front of the belly, then the chest...
+        (
+            0.1,
+            Arm {
+                flex: 24.0,
+                twist: -12.0,
+                abduct: -8.0,
+                elbow: 72.0,
+                wrist: 12.0,
+                protract: 4.0,
+                elevate: 0.0,
+            },
+        ),
+        (
+            0.18,
+            Arm {
+                flex: 38.0,
+                twist: -45.0,
+                abduct: 26.0,
+                elbow: 118.0,
+                wrist: 22.0,
+                protract: 2.0,
+                elevate: 6.0,
+            },
+        ),
+        // ...and the elbows swing out and up past the pose and settle back into it.
+        (
+            HIT,
+            Arm {
+                flex: 2.0,
+                twist: -92.0,
+                abduct: 60.0,
+                elbow: 110.0,
+                wrist: 14.0,
+                protract: -12.0,
+                elevate: 6.0,
+            },
+        ),
+        (0.34, POSE),
+        (HOLD, POSE),
+        // Letting go: the elbows drop first with the forearms still bent, then the arms
+        // straighten down the sides.
+        (
+            0.8,
+            Arm {
+                flex: 22.0,
+                twist: -50.0,
+                abduct: 30.0,
+                elbow: 96.0,
+                wrist: 6.0,
+                protract: -2.0,
+                elevate: 3.0,
+            },
+        ),
+        (
+            0.9,
+            Arm {
+                flex: 10.0,
+                twist: -10.0,
+                abduct: -10.0,
+                elbow: 40.0,
+                wrist: 4.0,
+                protract: 0.0,
+                elevate: 0.0,
+            },
+        ),
+        (1.0, Arm::HANG),
+    ];
+    // How far into the pose the body is, and two squeezes during the hold.
+    let pose = [(0.0, 0.0), (0.1, 0.4), (HIT, 1.0), (HOLD, 1.0), (0.88, 0.0)];
+    let squeeze = [
+        (0.34, 0.0),
+        (0.43, 1.0),
+        (0.5, 0.25),
+        (0.59, 1.0),
+        (0.67, 0.3),
+        (HOLD, 0.0),
+    ];
+    // A breath in before the hit, a breath out and a shrug to shake loose after.
+    let breath = [
+        (0.0, 0.0),
+        (0.1, 1.0),
+        (HIT, 0.3),
+        (HOLD, 0.3),
+        (0.84, -0.6),
+        (1.0, 0.0),
+    ];
+    let shrug = [(0.84, 0.0), (0.9, 1.0), (0.96, 0.0)];
+    AnimationClip::from_fn("flex", 3.6, 73, false, |ph| {
         let mut p = PoseBuilder::new(s);
-        let w = keyed(ph, &flex);
-        let shake = (ph * 9.0 * std::f32::consts::TAU).sin() * w;
-        p.rot_move("hips", Vec3::new(0.0, -0.01, 0.0), 0.0, 0.0, 0.0);
+        let k = |keys: &[(f32, f32)]| keyed(ph, keys);
+        let (h, sq, br, sh) = (k(&pose), k(&squeeze), k(&breath), k(&shrug));
+        // Muscles shake as they lock out, harder on each squeeze.
+        let shake = (ph * 32.0 * std::f32::consts::TAU).sin() * h * (0.4 + sq);
+        p.rot_move(
+            "hips",
+            Vec3::new(0.0, -0.01 - 0.015 * h, 0.0),
+            -2.0 * h,
+            3.0 * h,
+            0.0,
+        );
+        // Chest high and the chin up a touch; the trunk turns a little toward the front leg.
         spine(
             &mut p,
-            [0.0, 4.0 * w, -2.0 * w, 2.0 * w],
-            [0.0; 4],
-            [0.0; 4],
+            [
+                1.0 * h + 1.5 * br,
+                5.0 * h + 2.5 * br + 2.0 * sq,
+                -5.0 * h - 1.0 * sq,
+                3.0 * h + 1.0 * sq,
+            ],
+            [0.0, -2.0 * h, -h, 0.0],
+            [0.0, 0.0, 0.0, 2.0 * h],
         );
+        let a = arm_keyed(ph, &arms);
         for side in 0..2 {
             arm(
                 &mut p,
                 side,
                 Arm {
-                    flex: 4.0 * (1.0 - w) + 5.0 * w,
-                    twist: -90.0 * w,
-                    abduct: -15.0 + 78.0 * w,
-                    elbow: 12.0 + 108.0 * w + 0.6 * shake,
-                    wrist: 20.0 * w,
-                    protract: -6.0 * w,
-                    elevate: 8.0 * w,
+                    abduct: a.abduct + 3.0 * sq,
+                    elbow: a.elbow + 6.0 * sq + 0.8 * shake,
+                    wrist: a.wrist + 8.0 * sq,
+                    protract: a.protract - 3.0 * sq,
+                    elevate: a.elevate + 3.0 * sq + 7.0 * sh,
+                    ..a
                 },
             );
-            leg(&mut p, side, 3.0, 4.0 * w + 1.5, 6.0, 3.0, 0.0);
         }
+        // Stance: feet set wider, the left foot a little ahead, knees soft and quads locked.
+        leg(
+            &mut p,
+            0,
+            3.0 + 7.0 * h,
+            1.5 + 5.0 * h,
+            6.0 + 9.0 * h,
+            3.0 + 2.0 * h,
+            0.0,
+        );
+        leg(
+            &mut p,
+            1,
+            3.0 - 3.0 * h,
+            1.5 + 5.0 * h,
+            6.0 + 5.0 * h,
+            3.0 + 2.0 * h,
+            0.0,
+        );
         p.take()
     })
-    .with_curve("flex", 31, |ph| keyed(ph, &flex))
+    .with_curve("flex", 73, |ph| {
+        keyed(ph, &pose) * (0.85 + 0.15 * keyed(ph, &squeeze))
+    })
+    .with_curve("effort", 73, |ph| {
+        0.3 * keyed(ph, &pose) + 0.55 * keyed(ph, &squeeze)
+    })
+}
+
+/// An arm pose between key poses, eased like [`keyed`].
+fn arm_keyed(phase: f32, keys: &[(f32, Arm)]) -> Arm {
+    for w in keys.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if phase <= b.0 {
+            let t = ((phase - a.0) / (b.0 - a.0).max(1e-6)).clamp(0.0, 1.0);
+            return a.1.lerp(&b.1, t * t * (3.0 - 2.0 * t));
+        }
+    }
+    keys.last().map_or(Arm::HANG, |k| k.1)
 }
 
 // ------------------------------------------------------------------------------- get-ups
