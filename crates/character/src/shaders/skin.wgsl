@@ -348,6 +348,20 @@ fn mouth_surface(in: SkinOut, front: bool) -> SkinLight {
     s.n_soft = n;
     s.curvature = 0.0;
     s.thin = 0.0;
+    if (in.part == 4u) {
+        // Shoes: black grained leather, a welt above pale rubber soles.
+        let seed = character.look.w * 917.0;
+        let grain = 0.88 + 0.24 * value_noise3(r * 1400.0 + seed);
+        let sole = smoothstep(SOLE_TOP + 0.001, SOLE_TOP - 0.001, r.y);
+        let welt = smoothstep(0.0012, 0.0, abs(r.y - SOLE_TOP - 0.003));
+        s.albedo = mix(vec3<f32>(0.022, 0.019, 0.017) * grain, vec3<f32>(0.42, 0.4, 0.37), sole);
+        s.albedo = mix(s.albedo, vec3<f32>(0.12, 0.1, 0.085), welt * 0.7);
+        s.roughness = mix(0.36 + 0.1 * grain, 0.75, sole);
+        s.specular = mix(0.7, 0.3, sole);
+        s.scatter = 0.0;
+        s.occlusion = 1.0;
+        return s;
+    }
     let v = value_noise3(r * 1500.0);
     // Inside the mouth little of the sky reaches.
     s.occlusion = 0.55;
@@ -507,7 +521,7 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
 
     var scatter = 1.0;
     // The shirt: a slate heather knit, its collar band a shade darker. Charcoal twill
-    // trousers with a dark leather belt; brown leather shoes on dark soles.
+    // trousers with a dark leather belt; black leather shoes on pale rubber soles.
     if (cloth > 0.0) {
         let g = garment(r);
         var fabric = vec3<f32>(0.0);
@@ -527,8 +541,8 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
         } else {
             let grain = 0.9 + 0.2 * value_noise3(r * 900.0 + seed);
             let sole = smoothstep(SOLE_TOP + 0.001, SOLE_TOP - 0.001, r.y);
-            fabric = mix(vec3<f32>(0.05, 0.03, 0.018) * grain, vec3<f32>(0.018, 0.017, 0.016), sole);
-            fabric_rough = mix(0.38, 0.7, sole);
+            fabric = mix(vec3<f32>(0.022, 0.019, 0.017) * grain, vec3<f32>(0.42, 0.4, 0.37), sole);
+            fabric_rough = mix(0.42, 0.75, sole);
             fabric_spec = 0.6;
         }
         albedo = mix(albedo, fabric, cloth);
