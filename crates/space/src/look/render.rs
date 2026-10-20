@@ -15,7 +15,7 @@ use engine_render::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, Image, RenderFeature, RenderPhase,
     RenderSettings, ViewData,
 };
-use engine_world::FarCloudLayer;
+use engine_world::{FarCloudLayer, WeatherState};
 
 use super::bake::{SurfaceMaps, bake_rings, bake_surface};
 use super::{
@@ -493,6 +493,8 @@ impl RenderFeature for BodiesFeature {
             .get_resource::<Atmosphere>()
             .filter(|a| a.enabled)
             .map(|a| a.planet_center);
+        // The weather's cloud cover around the camera, matched by the cloud tops near it.
+        let local_cover = world.get_resource::<WeatherState>().map(|w| w.cloud_cover);
         let clock = world
             .get_resource::<SpaceClock>()
             .map(|c| c.seconds)
@@ -651,6 +653,15 @@ impl RenderFeature for BodiesFeature {
                     k as f32,
                     fade as f32,
                     (space.cloud_hole_m * scale / r_eq) as f32,
+                ];
+                // Only the body whose air the camera is in has the weather's clouds.
+                g.rings = [
+                    0.0,
+                    0.0,
+                    0.0,
+                    local_cover
+                        .filter(|_| in_air)
+                        .map_or(-1.0, |c| c.clamp(0.0, 1.0)),
                 ];
                 self.scratch.push((d * (1.0 - 1e-6), entity, g, true));
             }

@@ -264,7 +264,9 @@ touching pairs, step time, substeps, articulated joints, static copies.
 yard (with a curb, so nothing rolls off) with a 30-crate tower, a bin filling with 250
 crates/barrels/balls, a domino snake, ten crash test dummy ragdolls tumbling down a steep staircase together,
 a wrecking ball smashing a crate wall, a seesaw catapult, a motor-driven paddle wheel, a sagging
-plank bridge, a kinematic turntable, bouncing rubber balls and, along the front, a **barrel run**:
+plank bridge, a kinematic turntable, bouncing rubber balls, a **rockfall** (300 crushed granite
+rocks, faceted convex hulls 30 to 55 cm across, pour out of a hopper, slide down a 40° steel chute
+and drop off its lip into a heap with a 35° face) and, along the front, a **barrel run**:
 three oil drums roll off a 2 m ramp and 47 m down an asphalt runway (one triangle mesh, an edge
 every 2 m) into a sand pit, staying flat and in their painted lanes, past galvanized guardrails to a
 tire wall. It sits on the ground at `origin`, its top `demo::SLAB_RISE` (10 cm) above it; the
@@ -273,14 +275,15 @@ showcase's physics zone places it. Render it alone with
 
 The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,
 seesaw and balls every 20 s, the barrel run every 25 s, dominoes, wrecking ball and bridge every
-30 s, the pile every 45 s; the tower, wheel and turntable run on), so the zone is always
+30 s, the rockfall every 30 s, the pile every 45 s; the tower, wheel and turntable run on), so the zone is always
 playing when someone walks in.
 They pause while no focus point is within 250 m.
 `physics.proving_ground.replay {"station": "dominoes"}` restarts one now (`{}` restarts all).
 `demo::VIEWS` are tour stops for the action stations: arriving restarts the station, and the
 warm-up lands on its best moment. `tests/proving_ground.rs` checks that stations replay without
 piling up bodies, that the barrel run's drums stay within 1 cm of the deck and 30 cm of their
-lanes and stop in the sand, and that the ten dummies all leave the landing and are asleep well
+lanes and stop in the sand, that the rockfall's rocks leave the chute and come to rest in a
+heap, and that the ten dummies all leave the landing and are asleep well
 before their replay (about 6.6 s; four tumble articulated, six on constraint joints).
 
 Everything in it is drawn with detailed procedural art (`src/demo/art/`): beveled meshes sized to
