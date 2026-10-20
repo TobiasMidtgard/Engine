@@ -20,7 +20,8 @@
 //! `--follow` (hiker, runner, dog or horse) instead puts that walker `meters` into the stretch
 //! named by `--on`, lets the clock run `--secs`, and films it from behind as the showcase's
 //! follow camera does (`follow_<walker>_<stretch>_<k>.png`, `--frames` of them `--every`
-//! seconds apart), sound rings and all.
+//! seconds apart), sound rings and all, and records what the camera hears from the start
+//! (`follow_<walker>_<stretch>.wav`): `--secs 0 --frames 360 --every 0.0333` is a 12 s clip.
 //! Headless rendering needs a GPU or lavapipe (`mesa-vulkan-drivers`).
 
 use std::path::{Path, PathBuf};
@@ -29,7 +30,7 @@ use std::time::Instant;
 use engine_audio::demo::{
     STRETCHES, SoundRings, TrailWalker, spawn_backdrop, spawn_demo, stretch_start, trail_point,
 };
-use engine_audio::{AudioOutput, AudioPlugin, AudioSettings};
+use engine_audio::{Audio, AudioOutput, AudioPlugin, AudioSettings};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_render::{
@@ -327,6 +328,11 @@ fn film_walker(app: &mut App, o: &Options, who: &str, on: &str, meters: f64) {
         _ => 1.0,
     };
     let step = 1.0 / 30.0;
+    let wav = o.out.join(format!("follow_{who}_{on}.wav"));
+    app.world
+        .resource_mut::<Audio>()
+        .start_recording(&wav, o.secs + o.frames as f32 * o.every + 1.0)
+        .expect("start recording");
     let mut t = 0.0;
     let mut shot = 0;
     let mut next = o.secs;
@@ -370,6 +376,12 @@ fn film_walker(app: &mut App, o: &Options, who: &str, on: &str, meters: f64) {
         }
         t += step;
     }
+    let (path, secs) = app
+        .world
+        .resource_mut::<Audio>()
+        .stop_recording()
+        .expect("write the recording");
+    println!("sound: {} ({secs:.1} s)", path.display());
 }
 
 /// Stack images vertically into one file.
