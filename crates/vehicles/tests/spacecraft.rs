@@ -458,8 +458,8 @@ fn the_control_api_turns_the_flight_assist_off_to_coast() {
     }
 }
 
-/// Re-entry plasma: at 7 km/s and 70 km the shock layer and the wake show, the wake
-/// trailing behind and above a ship flying nose 40° up; held still at the same height,
+/// Re-entry plasma: at 7 km/s and 70 km the shock layer, the wake and the wingtip
+/// streamers show, trailing behind and above a ship flying nose 40° up; held still at the same height,
 /// or in vacuum, neither does.
 #[test]
 fn reentry_air_glows_and_trails_the_ship() {
@@ -481,30 +481,41 @@ fn reentry_air_glows_and_trails_the_ship() {
         let mut q = app
             .world
             .query::<(&ChildOf, &PlasmaVisual, &MeshRenderer, &Transform)>();
-        let parts: Vec<(bool, bool, Transform)> = q
+        // (is a wake, is the main wake, shown, placed)
+        let parts: Vec<(bool, bool, bool, Transform)> = q
             .iter(&app.world)
             .filter(|(p, ..)| p.parent() == ship)
-            .map(|(_, v, r, t)| (v.wake.is_some(), r.visible, *t))
+            .map(|(_, v, r, t)| {
+                let main = v.wake.is_some_and(|w| w.from.is_none());
+                (v.wake.is_some(), main, r.visible, *t)
+            })
             .collect();
         eprintln!("{altitude} m at {speed} m/s: nose flux {flux:.0} W/m²");
-        assert_eq!(parts.len(), 2, "a shock layer and a wake");
+        assert_eq!(
+            parts.len(),
+            4,
+            "a shock layer, a wake and two wingtip streamers"
+        );
         parts
     };
-    for (wake, visible, t) in plasma(70_000.0, 7_000.0) {
+    for (wake, main, visible, t) in plasma(70_000.0, 7_000.0) {
         assert!(visible);
         if wake {
             let along = t.rotation * Vec3::Z;
             let a = 40f32.to_radians();
-            eprintln!("wake {:.0} m along {along:.2}", t.scale.z);
+            eprintln!(
+                "wake {:.0} m along {along:.2} from {:.1}",
+                t.scale.z, t.translation
+            );
             assert!(along.distance(Vec3::new(0.0, a.sin(), a.cos())) < 0.05);
-            assert!(t.scale.z > 100.0);
+            assert!(t.scale.z > if main { 100.0 } else { 40.0 });
         }
     }
     for (altitude, speed) in [(70_000.0, 0.0), (200_000.0, 7_800.0), (2_000.0, 250.0)] {
         assert!(
             plasma(altitude, speed)
                 .iter()
-                .all(|(_, visible, _)| !visible)
+                .all(|(.., visible, _)| !visible)
         );
     }
 }
