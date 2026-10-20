@@ -4,6 +4,7 @@
 use engine_core::math::Vec3;
 
 use crate::appearance::Appearance;
+use crate::clothes;
 use crate::eyes::{self, EyeMesh};
 use crate::face::{self, FaceShapes};
 use crate::mesh::{self, Landmarks, Region, Regions, SkinMesh};
@@ -113,6 +114,7 @@ pub fn build(
         .iter()
         .map(|set| roots(&skin.positions, set))
         .collect();
+    clothes::dress(pack, regions, &morphed, &mut skin);
     if opts.face {
         skin.add_mouth(pack, &mouth::build(pack, &morphed));
     }
