@@ -23,6 +23,7 @@ use engine_world::{ForestCover, Ground, WorldShift};
 use crate::assets::FoliageVisuals;
 use crate::meshgen::MeshBuilder;
 use crate::meshgen::textures::{CLUSTER_CELL, LeafKind, atlas_cell};
+use crate::near_woods::NearWoodsTree;
 use crate::scenery_tree::SceneryTree;
 use crate::species::PlantLibrary;
 use crate::visuals::camera_position;
@@ -86,7 +87,7 @@ pub(crate) enum FarTree {
 impl FarTree {
     const ALL: [FarTree; 4] = [FarTree::Spruce, FarTree::Pine, FarTree::Oak, FarTree::Birch];
 
-    fn species(self) -> &'static str {
+    pub(crate) fn species(self) -> &'static str {
         match self {
             FarTree::Spruce => "spruce",
             FarTree::Pine => "pine",
@@ -228,9 +229,9 @@ pub(crate) fn cell_cards(
                 tree,
                 foot: Vec3::new(x, (y - origin.y) as f32, z),
                 height,
-                width: (height * wide).max(spacing * 1.15),
+                width: (height * wide).max(spacing * 1.4),
                 yaw: h(6) * std::f32::consts::PI,
-                shade: 0.85 + 0.25 * h(7),
+                shade: 0.62 + 0.22 * h(7),
             });
         }
     }
@@ -247,7 +248,7 @@ pub(crate) fn cell_meshes(cards: &[FarCard]) -> Vec<(FarTree, Mesh)> {
         let conifer = matches!(c.tree, FarTree::Spruce | FarTree::Pine);
         // Conifers stand as the tall spray cells, broad crowns as the round cluster.
         let cell = if conifer {
-            if c.shade > 0.97 { 1 } else { 0 }
+            if c.shade > 0.73 { 1 } else { 0 }
         } else {
             CLUSTER_CELL
         };
@@ -286,10 +287,16 @@ pub(crate) fn cell_meshes(cards: &[FarCard]) -> Vec<(FarTree, Mesh)> {
             b.tri(first, first + 2, first + 1);
             b.tri(first, first + 3, first + 2);
         }
-        if !matches!(c.tree, FarTree::Spruce) {
-            // The crown seen from above.
+        {
+            // The crown seen from above (a spruce's narrow spire is a small one).
             let (uv0, uv1) = atlas_cell(kind, CLUSTER_CELL);
-            let y = y0 + (y1 - y0) * 0.72;
+            let (y, half) = if matches!(c.tree, FarTree::Spruce) {
+                (y0 + (y1 - y0) * 0.45, half * 0.6)
+            } else {
+                // Wider than the upright cards, so neighbouring crowns close over the gaps
+                // their round outlines leave.
+                (y0 + (y1 - y0) * 0.72, half * 1.35)
+            };
             let (s, co) = c.yaw.sin_cos();
             let (u, w) = (Vec3::new(co, 0.0, s), Vec3::new(-s, 0.0, co));
             let corners = [
@@ -328,26 +335,26 @@ pub struct FarWoodCell {
 /// cells being built.
 #[derive(Resource, Default)]
 pub struct FarWoodsState {
-    origin: DVec3,
+    pub(crate) origin: DVec3,
     cells: HashMap<(i64, i64), Entity>,
     pending: HashMap<(i64, i64), Pending>,
     /// Bumped whenever the terrain installs a new cover (a terrain edit, a terrain added or
     /// moved). Cells from older ones rebuild once the cover has held still for
     /// [`COVER_SETTLE_FRAMES`]: a terrain that reinstalls its cover every frame (one that
     /// moves) doesn't keep every wood rebuilding or blinking out.
-    epoch: u64,
-    quiet_frames: u32,
+    pub(crate) epoch: u64,
+    pub(crate) quiet_frames: u32,
     /// Still materials (no sway) per tree kind, made from the species' far leaves.
     materials: HashMap<FarTree, Handle<StandardMaterial>>,
     /// The ground scenery trees stand on, and whether it must be looked at again.
-    occupied: Arc<Occupied>,
+    pub(crate) occupied: Arc<Occupied>,
     occupied_stale: bool,
 }
 
-/// Ground holding scenery trees: the [`OCCUPIED_M`] squares (keyed from the grid's origin, so
-/// world shifts carry it along) within [`OCCUPIED_REACH_M`] of one.
+/// Ground holding placed scenery trees (not the near woods' own): the [`OCCUPIED_M`] squares (keyed
+/// from the grid's origin, so world shifts carry it along) within [`OCCUPIED_REACH_M`] of one.
 #[derive(Debug, Default, PartialEq)]
-struct Occupied(HashSet<(i64, i64)>);
+pub(crate) struct Occupied(HashSet<(i64, i64)>);
 
 /// Side of an occupied square, meters.
 const OCCUPIED_M: f64 = 16.0;
@@ -377,7 +384,7 @@ impl Occupied {
         Self(set)
     }
 
-    fn holds(&self, origin: DVec3, p: DVec3) -> bool {
+    pub(crate) fn holds(&self, origin: DVec3, p: DVec3) -> bool {
         self.0.contains(&Self::key(origin, p))
     }
 }
@@ -460,7 +467,7 @@ impl CellJob {
 }
 
 /// Frames the cover must hold still before cells built from an older one rebuild.
-const COVER_SETTLE_FRAMES: u32 = 60;
+pub(crate) const COVER_SETTLE_FRAMES: u32 = 60;
 
 /// Spacing band for a distance: spacing doubles every two bands.
 fn band(settings: &FarWoods, d: f32) -> i32 {
@@ -502,7 +509,7 @@ pub fn stream_far_woods(
     cams: Query<(&Camera, &GlobalTransform)>,
     mut state: ResMut<FarWoodsState>,
     cells: Query<&FarWoodCell>,
-    trees: Query<Ref<GlobalTransform>, With<SceneryTree>>,
+    trees: Query<Ref<GlobalTransform>, (With<SceneryTree>, Without<NearWoodsTree>)>,
     mut removed: RemovedComponents<SceneryTree>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,

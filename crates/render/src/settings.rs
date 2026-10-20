@@ -150,6 +150,11 @@ pub struct RenderSettings {
     pub anti_aliasing: AntiAliasing,
     /// 0..1 sharpening after temporal anti-aliasing (restores texture detail).
     pub sharpness: f32,
+    /// 0..1: how much temporal anti-aliasing keeps thin things the transparent phase draws
+    /// (falling snowflakes, rain streaks, sparks), which write no depth or motion and would
+    /// otherwise fade to a tenth of their strength. Found automatically; wide transparent
+    /// surfaces (water, glass, smoke) stay anti-aliased. 0 = off.
+    pub taa_reactive: f32,
     pub tonemapper: Tonemapper,
     /// 0..1 mix of the blurred image (0.04 is subtle and physical).
     pub bloom_intensity: f32,
@@ -252,6 +257,7 @@ impl Default for RenderSettings {
             volumetric_fog_quality: VolumetricQuality::High,
             anti_aliasing: AntiAliasing::Taa,
             sharpness: 0.3,
+            taa_reactive: 1.0,
             tonemapper: Tonemapper::AgXPunchy,
             bloom_intensity: 0.04,
             bloom_limit: 64.0,

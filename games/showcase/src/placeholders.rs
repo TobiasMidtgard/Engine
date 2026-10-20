@@ -125,36 +125,57 @@ pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
             ),
         );
     }
+    // A carved fountain in the middle of the marble (Particles' court fountain, a third bigger),
+    // its jets falling into the basin.
+    let fountain = 1.3;
+    engine_vfx::demo::art::spawn_prop(
+        commands,
+        "plaza.fountain",
+        at(c + DVec3::new(0.0, 0.2, 0.0)).with_scale(Vec3::splat(fountain)),
+        engine_vfx::demo::art::props::water::fountain,
+    );
+    commands.spawn((
+        at(c + DVec3::new(
+            0.0,
+            0.2 + (engine_vfx::demo::art::props::water::NOZZLE * fountain) as f64,
+            0.0,
+        )),
+        engine_vfx::ParticleEffect::new("water.fountain"),
+    ));
+    // Polished garden spheres on stone pedestals in a ring round it: a roughness sweep in red
+    // glaze on the near side and in gilt on the far side, smooth to matte left to right.
     for i in 0..7 {
         let r = i as f32 / 6.0;
-        let x = (i as f64 - 3.0) * 2.6;
         let ball = Shape::Sphere {
-            radius: 1.0,
+            radius: 0.45,
             segments: 48,
         };
-        spawn(
-            commands,
-            ball,
-            mat(0xc0392b, r.max(0.05)),
-            at(c + DVec3::new(x, 1.2, 4.0)),
-        );
-        spawn(
-            commands,
-            ball,
-            StandardMaterial::hex(0xe6b450)
-                .with_metallic(1.0)
-                .with_roughness(r.max(0.05)),
-            at(c + DVec3::new(x, 1.2, 0.0)),
-        );
-        for zz in [0.0, 4.0] {
-            spawn(
-                commands,
-                cyl(0.5, 0.2),
-                stone(),
-                at(c + DVec3::new(x, 0.3, zz)),
-            );
+        for (side, material) in [
+            (1.0, mat(0xc0392b, r.max(0.05))),
+            (
+                -1.0,
+                StandardMaterial::hex(0xe6b450)
+                    .with_metallic(1.0)
+                    .with_roughness(r.max(0.05)),
+            ),
+        ] {
+            // 25° to 155° round the near (+Z) or the far (−Z) half.
+            let a = (25.0 + i as f64 * 130.0 / 6.0).to_radians();
+            let p = DVec3::new(-a.cos() * 11.5, 0.0, side * a.sin() * 11.5);
+            // A marble pedestal: plinth, slim shaft and a cap the ball sits in.
+            for (radius, height, y) in [(0.36, 0.12, 0.26), (0.24, 0.72, 0.68), (0.32, 0.1, 1.09)] {
+                spawn(
+                    commands,
+                    cyl(radius, height),
+                    StandardMaterial::preset(MaterialPreset::Marble).with_triplanar(),
+                    at(c + p + DVec3::Y * y),
+                );
+            }
+            spawn(commands, ball, material, at(c + p + DVec3::Y * 1.56));
         }
     }
+    // Behind them, toward the north road: a glass globe in a glowing ring, between two steel
+    // sculptures on plinths.
     spawn(
         commands,
         Shape::Torus {
@@ -163,7 +184,7 @@ pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
             segments: 64,
         },
         StandardMaterial::hex(0x202830).with_emissive([0.3, 0.7, 1.0], 600.0),
-        Transform::from_translation(c + DVec3::new(0.0, 3.5, -6.0))
+        Transform::from_translation(c + DVec3::new(0.0, 3.5, -19.0))
             .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
     );
     let mut glass = StandardMaterial::hex(0xd8f0ff)
@@ -177,14 +198,14 @@ pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
             segments: 64,
         },
         glass,
-        at(c + DVec3::new(0.0, 3.5, -6.0)),
+        at(c + DVec3::new(0.0, 3.5, -19.0)),
     );
-    for (i, x) in [-9.0, 9.0].into_iter().enumerate() {
+    for (i, x) in [-6.0, 6.0].into_iter().enumerate() {
         spawn(
             commands,
             cuboid(2.0, 1.0, 2.0),
             stone(),
-            at(c + DVec3::new(x, 0.7, -6.0)),
+            at(c + DVec3::new(x, 0.7, -19.0)),
         );
         let shape = if i == 0 {
             Shape::Capsule {
@@ -199,7 +220,7 @@ pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
                 segments: 48,
             }
         };
-        spawn(commands, shape, metal(), at(c + DVec3::new(x, 2.4, -6.0)));
+        spawn(commands, shape, metal(), at(c + DVec3::new(x, 2.4, -19.0)));
     }
     // Trees in big planters at the four diagonals.
     for k in 0..4 {

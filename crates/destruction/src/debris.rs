@@ -189,6 +189,11 @@ const DUST_SPRITE_SCALE: f32 = 2.2;
 /// A dust sprite's opacity at its thickest.
 const DUST_SPRITE_ALPHA: f32 = 0.8;
 
+/// How much wider a dust puff ends than it starts.
+const DUST_SPREAD: f32 = 6.0;
+/// How fast a spreading puff thins: opacity goes as (start size / size)^this.
+const DUST_THINNING: f32 = 0.7;
+
 /// A puff of dust that grows, rises a little, drifts with the wind and fades.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct DustPuff {
@@ -613,7 +618,7 @@ pub fn spawn_debris_system(
                     age: 0.0,
                     life: 2.5 + 1.5 * (next() + 0.5),
                     start_size: size * 0.4,
-                    end_size: size * 1.6,
+                    end_size: size * 0.4 * DUST_SPREAD,
                     velocity: d.velocity + Vec3::new(next(), 0.3 + next() * 0.2, next()) * 0.8,
                     darkness: d.darkness,
                     opacity: 1.0,
@@ -1273,7 +1278,10 @@ pub fn age_debris_system(
         p.velocity += (wind - p.velocity) * (1.0 - (-1.2 * dt).exp());
         p.velocity.y *= 1.0 / (1.0 + 0.6 * dt);
         t.translation += (p.velocity * dt).as_dvec3();
-        let opacity = p.opacity * (1.0 - k).powf(1.5) * (k * 8.0).min(1.0);
+        // The same dust spread over a growing cloud: thinner as it grows, so a puff hazes
+        // out instead of hanging in the air as a solid ball.
+        let thin = (p.start_size / size).powf(DUST_THINNING);
+        let opacity = p.opacity * thin * (1.0 - k) * (k * 8.0).min(1.0);
         if let Some(mut r) = mesh {
             let handle = assets.dust(p.darkness, opacity);
             if r.material != MaterialRef::Handle(handle) {

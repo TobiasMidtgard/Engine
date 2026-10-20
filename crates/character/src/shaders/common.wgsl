@@ -132,7 +132,8 @@ fn belt_band(r: vec3<f32>) -> f32 {
 // 0 on bare hands).
 fn cloth_lift(r: vec3<f32>, sleeves: f32) -> f32 {
     let covered = smoothstep(-0.004, 0.004, collar_depth(r)) * sleeves;
-    let thickness = array<f32, 3>(0.004, 0.006, 0.009);
+    // (The shoes are their own shell; the feet stay inside it.)
+    let thickness = array<f32, 3>(0.004, 0.006, 0.0);
     return covered * thickness[garment(r)];
 }
 

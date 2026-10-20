@@ -10,6 +10,7 @@ use crate::mesh::{self, Landmarks, Region, Regions, SkinMesh};
 use crate::mouth;
 use crate::pack::HumanPack;
 use crate::rig::Rig;
+use crate::shoes;
 use crate::strands::{self, StrandSet};
 
 /// Everything drawn for one character.
@@ -115,6 +116,7 @@ pub fn build(
     if opts.face {
         skin.add_mouth(pack, &mouth::build(pack, &morphed));
     }
+    skin.add_mouth(pack, &shoes::build(pack, &morphed));
     let face = if opts.face {
         face::build(pack, &skin, a)
     } else {

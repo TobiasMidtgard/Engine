@@ -598,6 +598,118 @@ fn a_veil_of_light_is_brightest_at_its_foot_and_fades_as_it_rises() {
 }
 
 #[test]
+fn ice_spikes_stand_out_of_the_ground_and_nothing_beside_them_changes() {
+    // A cluster of ice spikes 1.5 m tall standing on the origin in daylight: it shows low in
+    // its middle and up its tallest spike, and leaves the air well beside it untouched.
+    let mut app = app(DVec3::ZERO, 30_000.0);
+    let Some(before) = shot(&mut app, "vfx_crystal_before.png") else {
+        return;
+    };
+    let ice = EffectDesc {
+        name: "test.crystal".into(),
+        emitters: vec![EmitterDesc {
+            bursts: vec![engine_vfx::Burst {
+                count: 1,
+                ..Default::default()
+            }],
+            speed: [0.0, 0.0],
+            lifetime: [5.0, 5.0],
+            size: [1.5, 1.5],
+            rotation_deg: [0.0, 0.0],
+            local_space: true,
+            sprite: Sprite::Crystal,
+            facing: engine_vfx::Facing::Axis,
+            stretch: 1.0,
+            lit: 1.0,
+            color: Gradient::constant([0.75, 0.9, 1.0, 1.0]),
+            soft: 0.0,
+            wind: 0.0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    app.world
+        .resource_mut::<EffectLibrary>()
+        .insert(ice)
+        .unwrap();
+    app.world.spawn((
+        Transform::from_translation(DVec3::ZERO),
+        ParticleEffect::new("test.crystal"),
+    ));
+    app.update_n(20);
+    let after = shot(&mut app, "vfx_crystal_after.png").unwrap();
+    let change = |x: f64, y: f64| {
+        let at = project(DVec3::new(x, y, 0.0));
+        (luma(&after, at, 1) - luma(&before, at, 1)).abs()
+    };
+    let (low, high, side) = (change(0.0, 0.3), change(0.0, 0.8), change(1.3, 0.8));
+    eprintln!("crystal: low {low}, high {high}, side {side}");
+    assert!(
+        low > 4.0 && high > 4.0,
+        "the spikes should show: low {low}, high {high}"
+    );
+    assert!(
+        side < 2.0,
+        "nothing beside the spikes should change: {side}"
+    );
+}
+
+#[test]
+fn an_arc_crawls_out_one_way_from_where_it_struck() {
+    // Arcs 2 m long lying on the ground at the origin, pointing along +x, at dusk: they light
+    // the ground just to the right of the strike and leave the left side dark.
+    let mut app = app(DVec3::ZERO, 300.0);
+    let Some(before) = shot(&mut app, "vfx_arc_before.png") else {
+        return;
+    };
+    let arcs = EffectDesc {
+        name: "test.arc".into(),
+        emitters: vec![EmitterDesc {
+            rate: 20.0,
+            offset: [0.0, 0.02, 0.0],
+            speed: [0.0, 0.0],
+            lifetime: [0.3, 0.3],
+            size: [2.0, 2.0],
+            rotation_deg: [0.0, 0.0],
+            local_space: true,
+            sprite: Sprite::Arc,
+            facing: engine_vfx::Facing::Horizontal,
+            color: Gradient::constant([0.8, 0.9, 1.0, 1.0]),
+            emissive: 2000.0,
+            additive: 1.0,
+            soft: 0.0,
+            wind: 0.0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    app.world
+        .resource_mut::<EffectLibrary>()
+        .insert(arcs)
+        .unwrap();
+    app.world.spawn((
+        Transform::from_translation(DVec3::ZERO),
+        ParticleEffect::new("test.arc"),
+    ));
+    app.update_n(12);
+    let after = shot(&mut app, "vfx_arc_after.png").unwrap();
+    let change = |x: f64| {
+        let at = project(DVec3::new(x, 0.02, 0.0));
+        luma(&after, at, 4) - luma(&before, at, 4)
+    };
+    let (right, left) = (change(0.3), change(-0.6));
+    eprintln!("arc: right {right}, left {left}");
+    assert!(
+        right > 3.0,
+        "the arc should light the ground it crawls over: {right}"
+    );
+    assert!(
+        left.abs() < 1.5,
+        "nothing should change behind the strike: {left}"
+    );
+}
+
+#[test]
 fn a_splash_crown_stands_out_of_the_ground_and_nothing_else_changes() {
     let mut app = app(DVec3::ZERO, 30_000.0);
     let Some(before) = shot(&mut app, "vfx_crown_before.png") else {

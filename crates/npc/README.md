@@ -29,7 +29,13 @@ commands.entity(player).insert(Faction::PLAYER);
 
 Static `Collider`s (walls, crates, platforms) become the NPCs' tactical world: cover points,
 line of sight, walkable tops and the navigation grid are built from them and rebuilt when they
-change. When a physics backend is installed, sight and shot checks also use `PhysicsQueries`.
+change. A grid cell is walkable only with no obstacle side within the agent radius (0.4 m) that
+rises more than a step and starts below head height, so paths keep clear of wall ends and pinches
+instead of running into them (a tilted ramp counts from its lowest corner, so the way under its
+high end is not taken); a goal just inside that clearance (a cover spot by a wall) is still
+reached with a last straight step, and a body standing inside it starts from the nearest free
+cell at its own level (not the top of the barrel beside it). When a physics backend is installed, sight and shot checks
+also use `PhysicsQueries`.
 
 ## Wildlife
 
@@ -56,21 +62,26 @@ at the herd, singles out the weakest (wounded, young or straggling; it picks ove
 again as its rush sets it running) and drives it; two flankers swing wide to its sides and
 run out level with it to cut its escape line, holding its side until it tires or a wolf is
 on it, then cut in; a fourth wolf circles wide round the herd and lies in wait where it
-will run, springing when it comes within 12 m (or the pack's charge misses, or it has
-waited a minute); any more drive with the tester. While they stalk, the wolves keep 10 m
+will run, still and low once the pack sets off (a deer fleeing the pack doesn't see it
+until it is almost on it), springing when it comes within `AMBUSH_RANGE` (or the pack's
+charge misses, or it has waited a minute); once the quarry is past, it drops back onto its
+trail and follows on at a run rather than cut in from the side; any more drive with the
+tester. While they stalk, the wolves keep 10 m
 clear of the herd and crouch within 30 m of it, and the flankers loop round behind it to
 their posts off its flanks rather than cross in front. The tester rushes once the pack is
 in place. A pack gives up a chase
-`PACK_CHASE_SECS` after its first wolf set off (all of it together, on the wolves' own
-clocks) and rests `PACK_REST_SECS`, hungry or not. They feed on the kill and back away from
+`PACK_CHASE_SECS` after its first wolf set off, or sooner, once its test is over, from a fit
+(unhurt, grown) quarry that is `ESCAPE_GAP` ahead of its nearest wolf and still pulling away
+(a deer at full sprint outruns a wolf), all of it together, on the wolves' own clocks, and
+rests `PACK_REST_SECS`, hungry or not. They feed on the kill and back away from
 people. Deer raise the alarm: the first to bolt snorts (a noise other animals hear, though
 not its own herd) and flags its tail; each of the others turns its head to where the alarm
 came from, then bolts a reaction time later (0.3 to 0.55 s), and the herd runs off bunched
 (the ones out front ease off for the rest). A deer runs from all the wolves it sees at
 once, the nearest most, so one with a wolf on either side runs on between them; with a wolf
 close at its heels (`ZIGZAG_RANGE`) it cuts from side to side at sharp angles; the one that
-raised the alarm at a predator it saw stots for its first bounds (`STOT_SECS`; not at a
-bang or fire, when wounded, or with a wolf close); a wounded animal runs lame. A blow is felt at once (the animal reacts the same tick). Wolves prefer deer, take a boar only when nothing easier is about (a
+raised the alarm at a predator it saw stots (pronks) for its first bounds (`STOT_SECS`;
+not at a bang or fire, when wounded, or with a wolf close); a wounded animal runs lame. A blow is felt at once (the animal reacts the same tick). Wolves prefer deer, take a boar only when nothing easier is about (a
 piglet sooner, a tusker last of all) and give room to a boar charging at them (not to one
 charging past them at something else). Bird flocks peck on the
 ground and lift off together. Gunfire, explosions, howls and fire scare everything.
@@ -117,7 +128,9 @@ and quicken with speed; deer, wolf and boar backs bend at the loin,
 arching as the hind feet swing up past the fore feet and hollowing as the legs stretch out
 through the gallop, the body flies an arc when no foot is down, sits back setting off and
 pitches forward stopping, leans into turns and breathes harder after a run, and heads steady
-against the bob. Ears swivel toward noises and threats and flick, tails swish (a deer's flags
+against the bob. A stotting deer pronks: all four feet push off and land together on legs
+held stiff and straight, the back arched, each bound high, the white rump patch flared out
+of the coat (quickly up, slowly down after). Ears swivel toward noises and threats and flick, tails swish (a deer's flags
 up when alarmed), grazing deer tear the grass and look up to chew and watch, an alert animal
 turns its head toward what it heard before its neck follows and freezes, and states blend
 into each other. A hunting wolf stalks low with its head on its prey, rushes from the stalk
@@ -127,8 +140,9 @@ the jaw working, and lifts its head now and then to scent the air; alarmed, it c
 jaws; it runs with its tail up, and charges head down to hook its tusks up and sideways
 through what it strikes; alarmed or charging, its crest of long, pale-tipped bristles stands
 up along its nape and withers. Hurt but not killed, an animal flinches, big enough to read
-at 25 m: it jolts and rolls away from the blow, hunched and ducking, head and neck swinging
-hard away (so a blow from the far side reads from this side too), ears
+at 25 m: it jolts and rolls away from the blow, hunched and ducking, its forequarters
+swinging away about the hind hips with the front feet stepping out after them, head and
+neck swinging hard away (so a blow from the far side reads from this side too), ears
 pinned flat and tail clamped, stumbles as a foreleg gives, hitches in its stride and
 staggers a step or two before it runs. A killed animal goes down forequarters first (onto its
 chest and knees on the run), then over onto its side away from the blow, and settles. Starlings beat their wings (extended
@@ -173,6 +187,47 @@ All art is generated in code (`src/art`), since no third-party art may go in the
 
 Everything is built once per world and shared. Without a renderer (headless tests) the art
 falls back to primitive shapes so tests stay fast.
+
+## Faces and bodies from a character module
+
+Fighters are ready for the faces and bodies a character module draws (`engine_world::
+character`; `visuals/character.rs`):
+
+- **Looks.** On its first step each fighter gets an `AppearanceRequest`: its own `Seed`, its
+  squad (with its faction) as the family seed so squad mates look related, a sex picked from
+  the seed and an age range by skill (a rookie 18 to 26, a master 34 to 52). An
+  `Appearance` already there is kept. No full `Appearance` is put on fighters.
+- **Pose and face.** One writer per entity. On fighters without a `BodyRequest` this crate
+  writes `SkeletonPose` every step from the stand-in's pose, on the animation module's
+  humanoid skeleton (its bone names and parents, shared by every fighter through one `Arc`;
+  model space, facing −Z). The joints the stand-in has are put on it exactly: waist
+  (`spine`), neck, shoulders, elbows, wrists, hips, knees and ankles. Each is turned like the
+  segment it starts, with limbs along −Y, the hinge on +X and the feet flat toes −Z, so
+  straight legs read as the rest pose. `hips`, `chest`, `head`, the clavicles, toes and
+  ponytail sit at the animation module's offsets. The limbs keep the stand-in's lengths
+  (thigh 0.45 m, shin 0.44 m, upper arm 0.30 m, forearm 0.26 m). This crate also writes
+  `FaceControls` with ARKit weights:
+  - blinks, shut when downed;
+  - pain from a blow's flinch and a wound's ache: squint, brows down, nose sneer, mouth
+    stretched and down;
+  - effort from a heavy blow set and shouted, a sprint, a braced guard, a held draw and a
+    revive: squint, brows down, lips pressed;
+  - fear when pinned down by fire or badly hurt in a fight: inner brows up, eyes wide;
+  - panting: the jaw opening with each breath;
+  - gaze yaw and pitch, the eyes' turn in the head.
+
+  Feet still send `GroundContact`s, now each with a `footstep_left` or `footstep_right`
+  `AnimationEvent` (bone `foot_l` / `foot_r`).
+- **Hiding the stand-in.** While the `AppearanceBodies` resource exists (checked every step),
+  a fighter with an `Appearance` or an `AppearanceRequest` has its stand-in body hidden. What
+  it holds stays shown: the weapon, the shield, a magazine or arrow in hand, the muzzle
+  flash. Without the resource nothing changes.
+- **Wear.** On fighters with an `Appearance`, `wear` follows the fight:
+  - blood from cuts, stabs and shots (less from blunt blows and burns);
+  - bruises from blunt blows and falls;
+  - dirt from going down, lying on the ground, kneeling by a mate and dashing.
+
+  A fighter sent home fresh is clean again. `wet` is left to the weather.
 
 ## API (`npc.*`, JSON)
 
@@ -286,8 +341,10 @@ nobody, so neither holds up the showcase timer. `npc.inspect` shows `kneeling_se
 each, with teamwork 1 and a carbine, `NpcWeapon::carbine()`: lighter and shorter-ranged than
 the rifle). A medic fights from 3 m behind where it would otherwise stand, notices a downed
 mate twice as soon, goes half as far again (`ally_revive_range` × 1.5) and wants the revive
-far more, so it is usually the one that goes. While it is near, its mates hold off for the
-first 3 s, unless the medic is the one down. Once the medic goes, its mates cover it: ranged
+far more, so it is usually the one that goes. While it is in range and not more than 6 m
+farther from the downed mate than they are, its mates hold off for the first 3 s, unless the
+medic is the one down. An enemy within striking distance of the downed mate holds the medic
+off like anyone else, however far away it still is. Once the medic goes, its mates cover it: ranged
 mates with some teamwork engage whoever has the best view of its spot (`role` "cover"), and
 melee mates stand 2 m off the spot on the side of the nearest enemy and take on whoever
 comes within 5 m of it (`role` "screen"; `NpcBrain::guard` holds the spot). A squad without
@@ -295,13 +352,15 @@ a medic revives as before. A medic wears a bleached armband with a red cross ove
 brassard.
 
 A medic also carries smoke (`smoke::SmokeClouds`). When an enemy has a clear view of a
-downed mate's spot within 24 m, it throws a canister to land 2 m off the chest on that
+downed mate's spot within 35 m, it throws a canister to land 2 m off the chest on that
 enemy's side, one every 14 s at most. The cloud pops 0.9 s later, swells to 3.2 m over two
 seconds, hangs and thins out over the last five of its 22 s. It hides the spot, so the medic
 goes in as a skilled fighter does once a watched spot is out of view, and shots into it are
 mostly guesses. With a smoke module installed (one that registers the "smoke" obscurance
 source) the canister's gas goes to it as a `SmokeEmission`; without one the NPC module keeps a
-plain cloud of its own under the "npc_smoke" source.
+plain cloud of its own under the "npc_smoke" source, drawn as many faint grey puffs (each a
+few nested balls, so it fades out at its rim), bigger and fainter towards the cloud's edge and
+drifting as it hangs.
 
 | Setting | Default | Does |
 | --- | --- | --- |
@@ -326,12 +385,15 @@ a turned world also rebuilds the tactical world from the colliders.
 Reads: `Collider` / `RigidBody` (tactical world), `PhysicsQueries` when present, `Ground`,
 `Water`, `HeatField` (avoid fire), `Obscurance` (smoke, fog and dust), `NoiseEvent`, `DamageEvent`, `AttackEvent` (telegraphs to
 defend against), `ProjectileTrace` (near misses), `LocomotionState` of targets, `TerrainChanged`,
-`LocalTimeScale` / `TimeDilation`, `LocomotionBackend`, `WorldShift`.
+`LocalTimeScale` / `TimeDilation`, `LocomotionBackend`, `WorldShift`, `AppearanceBodies`,
+`BodyRequest` (whose pose the animation module writes).
 
 Writes: `MoveIntent` (the same input a player produces), `LocomotionState` and
 `AnimationParams` (fallback mover only), `AttackEvent` (its own telegraphs), `DamageEvent`,
-`ProjectileTrace` (its shots), `NoiseEvent` (shouts and gunfire), `GroundContact` (footsteps),
-`WorldImpulse`, `IgniteRequest` and `SmokeEmission` (explosions).
+`ProjectileTrace` (its shots), `NoiseEvent` (shouts and gunfire), `GroundContact` and
+`AnimationEvent` (footsteps), `WorldImpulse`, `IgniteRequest` and `SmokeEmission`
+(explosions), `AppearanceRequest`, `SkeletonPose` and `FaceControls` (fighters), and
+`Appearance::wear` (blood, bruises and dirt).
 
 The crate depends only on core crates (`engine_core`, `engine_world`, `engine_render`).
 
@@ -354,14 +416,17 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   a boar charging at them but not to one charging past (at six spots), wolves pick a piglet
   over its elders, a pack of three, four or five picks the wounded deer from the start, runs
   only it and catches it (unhurt, the herd's nearest), over eight seeded hunts for each pack
-  size its flankers run out on the quarry's sides (both on their own for most of the
-  flanking, abreast of it for a second in at least half the hunts, never level with it on
-  the far side) while the tester drives from behind and the ambusher lies in wait beyond the
+  size its flankers run out on the quarry's sides (both on their own for 85 % of the
+  flanking, abreast of it for a second in five hunts or more, never level with it on the
+  far side) while the tester drives from behind and the ambusher lies in wait beyond the
   herd, a herd's alarm spreads within a reaction time (each deer looks toward the shot
   before it bolts, and the herd stays bunched), a deer runs straight from a wolf well back
   and zigzags once it is close, a deer stots at a wolf it sees but runs flat out from a bang, a pack stalks in on a herd it scents from further off than
-  it would run one down (`SCENT_REACH`), and a pack gives up a chase after its time, all
-  together, rests its time out though hungry, and hunts again.
+  it would run one down (`SCENT_REACH`), a pack gives up a chase after its time, all
+  together, rests its time out though hungry, and hunts again, and breaks off sooner from a
+  fit deer that outruns it (past its test, the deer more than `ESCAPE_GAP` ahead).
+- `tests/alloc_free.rs`: `TacticalWorld::blocked_at`, which a fleeing animal calls for every
+  way it might turn, finds walls, a pillar and a big slab and allocates nothing.
 - `tests/demo.rs`: the arena fight keeps going for a minute (shots, attacks, blocks, cover,
   downed and revived) inside the arena, and over six fights with different randomness squad
   mates revive at least twice a minute on average and in every fight at least once; the meadow
@@ -401,6 +466,16 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   the tactical world move exactly with the world, the rifleman keeps looking and shooting at
   the player, the deer keep running from what scared them and stay around their home, and
   paths go around a wall where it moved to, not where it was.
+- `tests/character.rs`:
+  - Through a fight of swords, shield and carbine, the written `SkeletonPose` puts every limb
+    segment, the head and the trunk where the stand-in has them, within 3 mm. Its chains hold
+    together, and its names and parents are the animation module's.
+  - Fighters ask for a look (their seed, one family per squad, a sex and an age range).
+  - Their body hides only while `AppearanceBodies` exists, and the weapon and shield stay.
+  - `FaceControls` follow pain (a blow, then the ache, worse badly hurt) and effort (a
+    sprint, then panting).
+  - Blows and a fall wear the look.
+  - Each footstep is an `AnimationEvent` on its foot.
 - `tests/schedule_order.rs`: no two systems in the fixed step or `PostUpdate` touch the same
   data without an order between them (the scheduler's ambiguity check), and the arena fight
   and the meadow end bit for bit the same with unrelated systems, resources or entities added.
@@ -412,22 +487,26 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   on the move (gaits, starts and stops, an alarm, a bend, a stalk, a wolf's hunt from stalk
   to bite, a boar rooting and its charge and slash, deer, wolves and boars flinching from a
   blow, a deer killed at a gallop, a starling's flight; `NPC_STRIPS=deer-walk,...` shoots
-  only some), plus triangle and build-time budgets and a check that the arena art sits on
+  only some, `NPC_STRIP_SCALE=2` twice the size), plus triangle and build-time budgets and a check that the arena art sits on
   every collider. In `tests/art_animals.rs` only the checks run by default (the budgets, and a
   few close-ups and strips rendered small, each of which must show its animal, the animals
   living on undrawn between shots); the full-size close-ups and strips are ignored tests
-  (`-- --ignored`), and so are three pictures of the AI at work, each one live run shot at
+  (`-- --ignored`), and so are four pictures of the AI at work, each one live run shot at
   eight moments: a pack's hunt from above with its parts marked in colour
-  (`animal_live_pack_hunt.png`), a chased deer zigzagging seen from low behind
+  (`animal_live_pack_hunt.png`), the same kind of hunt from the grass at eye height, no
+  markers, the wolves creeping crouched (`animal_live_pack_eye_level.png`), a chased deer
+  zigzagging seen from low behind
   (`animal_live_zigzag.png`) and a herd's alarm spreading (`animal_live_herd_alarm.png`). Each walking animal's close-up is a still from a real run at the game's
   rate (it walks on toward the camera's mark and is shot at its moment), so its legs are
   where its gait has them. The animal unit tests check that no planted foot slides in any
   gait by more than a millimetre a frame (boars, tuskers and piglets included, deer as they
   bolt and pull up, a rabbit's paws even as they peel off at a run), that a stotting deer
-  bounds high on all fours and that a rabbit's fore paws never land out of reach, that a rooting boar's snout reaches the soil, that a tusker's upper tusks stay in its
+  bounds high on all fours and pronks (legs straight, back arched, feet off and down
+  together, rump patch flared) and that a rabbit's fore paws never land out of reach, that a rooting boar's snout reaches the soil, that a tusker's upper tusks stay in its
   lip as its jaw opens, that a hurt animal jolts away from the blow, pins its ears, stumbles,
   steps, hitches in its stride and settles, its head swinging well away from a blow from
-  either side, and that the flinch does not jump when the state
+  either side, its body turning only a little (the front feet stepping out instead, no
+  planted foot sliding), and that the flinch does not jump when the state
   changes, that heads turn to a threat and to a noise before the neck, and that a shot
   starling lands as it was tumbling.
 - `tests/screenshots.rs`: renders the arena, its stands, a cover fight, the sparring lane, the
