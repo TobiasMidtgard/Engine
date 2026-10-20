@@ -708,7 +708,7 @@ fn spawn_cliff(commands: &mut Commands, o: DVec3) -> Entity {
 
 fn spawn_arch(commands: &mut Commands, o: DVec3) -> Entity {
     let (t, g) = placed(o + DVec3::from_array(ARCH), 0.35);
-    let v = VoxelVolume::arch(12.0, 8.0, 3.0, 0.2).with_seed(5);
+    let v = VoxelVolume::arch(12.0, 8.0, 4.0, 0.2).with_seed(5);
     commands.spawn((Name::new("Rock arch"), t, g, v)).id()
 }
 
@@ -1538,7 +1538,7 @@ fn run_step(world: &mut World, demo: &mut DestructionDemo, step: Step) {
                     center: g.transform_point((foot + Vec3::new(0.0, 0.0, -2.0)).as_dvec3()),
                     shape: EditShape::Capsule {
                         to: tr.rotation * Vec3::new(0.0, 0.6, 4.0),
-                        radius: 1.35,
+                        radius: 1.7,
                     },
                     op: EditOp::Remove,
                     surface: None,

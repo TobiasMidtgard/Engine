@@ -278,25 +278,49 @@ fn shape_sdf(v: &VoxelVolume, p: Vec3) -> f32 {
             (1.0 - q.length() + n) * r.min_element()
         }
         VoxelShape::Arch => {
-            // A thick half-ring in the XY plane, flattened, with rough faces.
+            // A weathered sandstone arch: a span of rounded section on two legs that thicken
+            // and flare into the ground, thinnest at the crown, banded by its beds, its line
+            // wandering a little instead of tracing a perfect ellipse.
             let span = hw * 0.62;
-            let c = Vec3::new(0.0, 0.0, 0.0);
-            let d = Vec3::new(p.x - c.x, (p.y - c.y) * (span / (h * 0.82)), 0.0).length();
-            let ring_thick = span * 0.3;
-            let ring = ring_thick - (d - span).abs();
-            let pillar_feet = (hw * 0.95 - p.x.abs()).min(p.y + 1.0);
-            let depth = hd * 0.75 - p.z.abs();
-            let n = 0.3
-                * fbm3(
-                    p.x as f64 * 0.6,
-                    p.y as f64 * 0.6,
-                    p.z as f64 * 0.6,
+            let rise = h * 0.82;
+            let wx = 0.35 * fbm2(p.y as f64 * 0.22, p.z as f64 * 0.22, seed + 3, 3, 2.0, 0.5);
+            let wy = 0.3 * fbm2(p.x as f64 * 0.22, p.z as f64 * 0.22, seed + 4, 3, 2.0, 0.5);
+            let squash = span / rise;
+            let d = Vec3::new(p.x + wx, (p.y + wy).max(0.0) * squash, 0.0).length();
+            // 0 at the feet, 1 at the crown.
+            let up = (p.y / rise).clamp(0.0, 1.0);
+            let flare = 0.7 * smoothstep(1.4, 0.0, p.y);
+            let thick = span * (0.32 - 0.1 * up) + flare;
+            let deep = hd * (0.82 - 0.3 * up) + flare;
+            // A rounded-square section: eroded edges, broad faces.
+            let r = ((d - span) / thick).abs();
+            let z = (p.z / deep).abs();
+            let section = (1.0 - (r.powi(3) + z.powi(3)).cbrt()) * thick.min(deep);
+            let beds = 0.1
+                * ((p.y * 1.5 + 0.6 * perlin2(p.x as f64 * 0.2, p.z as f64 * 0.2, seed + 1))
+                    .fract()
+                    - 0.5);
+            let n =
+                0.22 * fbm3(
+                    p.x as f64 * 0.7,
+                    p.y as f64 * 0.7,
+                    p.z as f64 * 0.7,
                     seed,
                     4,
                     2.0,
                     0.5,
-                );
-            ring.min(depth).min(pillar_feet).min(h - p.y) + n
+                ) + 0.06
+                    * fbm3(
+                        p.x as f64 * 2.6,
+                        p.y as f64 * 2.6,
+                        p.z as f64 * 2.6,
+                        seed + 2,
+                        2,
+                        2.0,
+                        0.5,
+                    );
+            let inside = (hw - 0.2 - p.x.abs()).min(hd - 0.2 - p.z.abs());
+            (section + beds + n).min(inside).min(h - p.y)
         }
     }
 }
