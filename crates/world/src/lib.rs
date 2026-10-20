@@ -223,6 +223,7 @@ impl Plugin for WorldPlugin {
             .add_message::<NoiseEvent>()
             .add_message::<SmokeEmission>()
             .add_message::<WaterSplash>()
+            .add_message::<WaterDisturbance>()
             .add_message::<AttackEvent>()
             .add_message::<LightningStrike>()
             .register_component::<SimulationFocus>(

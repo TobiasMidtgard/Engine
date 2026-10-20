@@ -1,11 +1,14 @@
 //! Assembles the spaceplane: builds every mesh, bakes the atlases, defines the materials
 //! (once per world) and spawns the drawn parts under a vehicle body.
 
+use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, TAU};
 
 use engine_core::math::{Mat4, Quat, Vec2, Vec3};
 use engine_core::prelude::*;
-use engine_render::{AlphaMode, Image, MaterialRef, Mesh, MeshRef, MeshRenderer, StandardMaterial};
+use engine_render::{
+    AlphaMode, Image, MaterialRef, Mesh, MeshRef, MeshRenderer, StandardMaterial, Vertex,
+};
 
 use engine_assets::Assets;
 use engine_world::{Exhaust, Exhausts};
@@ -13,7 +16,9 @@ use engine_world::{Exhaust, Exhausts};
 use crate::aero::Aircraft;
 use crate::exhaust::thruster_kind;
 use crate::ship::{Thruster, ThrusterRole};
-use crate::visuals::{GearFold, HeatGlow, PlumeVisual, SurfaceVisual, WheelVisual};
+use crate::visuals::{
+    GearFold, HeatGlow, PlasmaVisual, PlasmaWake, PlumeVisual, SurfaceVisual, WheelVisual,
+};
 use crate::wheels::Wheels;
 
 use super::ship_gear::{self, Underside};
@@ -447,6 +452,167 @@ fn plume_glow() -> Image {
     })
 }
 
+/// Shells of the re-entry wake, outside in: radius where it leaves the ship (1 = the
+/// wake's radius) and at its end, and opacity. Many faint shells read as a soft column of
+/// gas instead of a tube.
+const WAKE_SHELLS: [(f32, f32, f32); 8] = [
+    (1.0, 2.6, 0.03),
+    (0.86, 2.2, 0.035),
+    (0.72, 1.85, 0.04),
+    (0.6, 1.5, 0.045),
+    (0.48, 1.2, 0.05),
+    (0.36, 0.9, 0.06),
+    (0.25, 0.62, 0.07),
+    (0.15, 0.38, 0.09),
+];
+
+/// A unit re-entry wake along +Z (radius 1 where it leaves the ship, length 1): it fades
+/// in over its first few percent, then out, fastest in its core, and is streaked along its
+/// length like the turbulent gas it is (streaks drift around it downstream).
+fn wake_mesh() -> Mesh {
+    let seg = 24;
+    let n = 18;
+    let ts: Vec<f32> = (0..=n).map(|i| (i as f32 / n as f32).powf(1.6)).collect();
+    let mut out = Mesh::default();
+    for (k, &(r0, r1, a0)) in WAKE_SHELLS.iter().enumerate() {
+        let phase = k as f32 * 1.9;
+        let radius = |t: f32| r0 + (r1 - r0) * t.powf(0.7);
+        let rows: Vec<Vec<Vec3>> = ts
+            .iter()
+            .map(|&t| {
+                (0..seg)
+                    .map(|j| {
+                        let a = j as f32 / seg as f32 * TAU;
+                        Vec3::new(a.cos() * radius(t), a.sin() * radius(t), t)
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut m = grid(&rows, true, false, |i, j| {
+            Vec2::new(j as f32 / seg as f32, ts[i])
+        });
+        // Inner shells are the hottest gas, which cools first.
+        let fade = 1.6 + 1.4 * k as f32 / (WAKE_SHELLS.len() - 1) as f32;
+        for (i, v) in m.vertices.iter_mut().enumerate() {
+            let t = ts[i / (seg + 1)];
+            let a = (i % (seg + 1)) as f32 / seg as f32 * TAU;
+            let streaks = 0.55
+                + 0.25 * (5.0 * a + 7.0 * t + phase).sin()
+                + 0.2 * (11.0 * a - 13.0 * t + 2.0 * phase).sin();
+            v.color = [
+                1.0,
+                1.0,
+                1.0,
+                a0 * smoothstep(0.0, 0.04, t) * (1.0 - t).powf(fade) * streaks,
+            ];
+        }
+        out.merge(&m);
+    }
+    out
+}
+
+/// Where the nose cap is, on the body's long axis, m.
+const NOSE_Z: f32 = -10.8;
+/// The angle of attack the shock layer is drawn for: the one the entry flies.
+const SHEATH_AOA_DEG: f32 = 40.0;
+/// Shock-layer shells over the skin, inside out: standoff from the skin facing straight
+/// into the flow (m) and opacity there. Faces turned away from the flow get none.
+const SHEATH_SHELLS: [(f32, f32); 6] = [
+    (0.07, 0.085),
+    (0.2, 0.075),
+    (0.38, 0.065),
+    (0.62, 0.05),
+    (0.92, 0.036),
+    (1.3, 0.022),
+];
+
+/// Cell size the shock layer's skin is simplified to, m: a soft glow needs no detail.
+const SHEATH_CELL: f32 = 0.6;
+
+/// `mesh` simplified by merging its vertices in cubes of `cell` meters (apart where their
+/// normals point different ways, so a thin wing's two sides stay apart), dropping the
+/// triangles that collapse.
+fn coarse(mesh: &Mesh, cell: f32) -> Mesh {
+    let mut cells: HashMap<[i32; 6], u32> = HashMap::new();
+    let mut sums: Vec<(Vec3, Vec3, u32)> = Vec::new();
+    let remap: Vec<u32> = mesh
+        .vertices
+        .iter()
+        .map(|v| {
+            let p = Vec3::from(v.position);
+            let n = Vec3::from(v.normal);
+            let c = (p / cell).floor().as_ivec3();
+            let d = (n * 1.4).round().as_ivec3();
+            let k = *cells
+                .entry([c.x, c.y, c.z, d.x, d.y, d.z])
+                .or_insert_with(|| {
+                    sums.push((Vec3::ZERO, Vec3::ZERO, 0));
+                    sums.len() as u32 - 1
+                });
+            let s = &mut sums[k as usize];
+            s.0 += p;
+            s.1 += n;
+            s.2 += 1;
+            k
+        })
+        .collect();
+    let vertices = sums
+        .iter()
+        .map(|&(p, n, count)| Vertex::new(p / count as f32, n.normalize_or(Vec3::Y), Vec2::ZERO))
+        .collect();
+    let mut indices = Vec::new();
+    for tri in mesh.indices.as_chunks::<3>().0 {
+        let t = tri.map(|i| remap[i as usize]);
+        if t[0] != t[1] && t[1] != t[2] && t[0] != t[2] {
+            indices.extend_from_slice(&t);
+        }
+    }
+    Mesh::new(vertices, indices)
+}
+
+/// The shock layer of a re-entry: shells over `skins` pushed out along their normals,
+/// thickest where the skin faces into the airflow at [`SHEATH_AOA_DEG`]. It glows brightest
+/// where the heating is: at the nose cap and the leading edges, fading aft along the belly
+/// as the boundary layer thickens (heating falls off as 1/√distance from the nose, and the
+/// gas's glow faster still).
+fn sheath_mesh(skins: &[&Mesh]) -> Mesh {
+    let a = SHEATH_AOA_DEG.to_radians();
+    // The way the ship moves through the air, in its own axes.
+    let into = Vec3::new(0.0, -a.sin(), -a.cos());
+    let mut out = Mesh::default();
+    let skins: Vec<Mesh> = skins.iter().map(|m| coarse(m, SHEATH_CELL)).collect();
+    for &(standoff, opacity) in &SHEATH_SHELLS {
+        for skin in &skins {
+            let mut used = vec![u32::MAX; skin.vertices.len()];
+            let mut vertices: Vec<Vertex> = Vec::new();
+            let mut indices = Vec::new();
+            for tri in skin.indices.as_chunks::<3>().0 {
+                let facing = |i: u32| Vec3::from(skin.vertices[i as usize].normal).dot(into);
+                if tri.iter().all(|&i| facing(i) <= 0.02) {
+                    continue;
+                }
+                for &i in tri {
+                    if used[i as usize] == u32::MAX {
+                        used[i as usize] = vertices.len() as u32;
+                        let mut v = skin.vertices[i as usize];
+                        let n = Vec3::from(v.normal);
+                        let f = facing(i).max(0.0);
+                        let aft = (v.position[2] - NOSE_Z).max(0.0);
+                        let heat = (2.0 / (2.0 + aft)).max((-n.z).max(0.0).powi(2));
+                        v.position =
+                            (Vec3::from(v.position) + n * standoff * (0.3 + 0.7 * f)).to_array();
+                        v.color = [1.0, 1.0, 1.0, opacity * f * f * heat];
+                        vertices.push(v);
+                    }
+                    indices.push(used[i as usize]);
+                }
+            }
+            out.merge(&Mesh::new(vertices, indices));
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------- materials
 
 fn mat(hex_color: u32, rough: f32, metal: f32) -> StandardMaterial {
@@ -560,7 +726,7 @@ pub fn build() -> ModelAssets {
     out.mesh(&key("hull_nose"), nose);
     out.mesh(&key("hull_windward"), windward);
     out.mesh(&key("hull_leeward"), leeward);
-    out.mesh(&key("hull"), hull);
+    let mut sheath = sheath_mesh(&[&hull]);
     out.mesh(&key("base"), base_mesh(&h));
 
     // ---- wings, fin, pods, control surfaces (one atlas)
@@ -579,7 +745,8 @@ pub fn build() -> ModelAssets {
     out.mesh(&key("wing_nose"), nose);
     out.mesh(&key("wing_windward"), windward);
     out.mesh(&key("wing_leeward"), leeward);
-    out.mesh(&key("wing"), wing);
+    sheath.merge(&sheath_mesh(&[&wing]));
+    out.mesh(&key("plasma_sheath"), sheath);
     for pv in pivots() {
         out.mesh(&key(&pivot_name(&pv)), pivot_mesh(&pv));
     }
@@ -622,6 +789,7 @@ pub fn build() -> ModelAssets {
     out.mesh(&key("rcs_inside"), rcs_inside);
     out.mesh(&key("plume"), plume_mesh(&PLUME_SHELLS));
     out.mesh(&key("plume_soft"), plume_mesh(&HOVER_SHELLS));
+    out.mesh(&key("plasma_wake"), wake_mesh());
 
     // ---- details
     out.mesh(&key("frames"), window_frames(&h));
@@ -632,13 +800,8 @@ pub fn build() -> ModelAssets {
     out.mesh(&key("dock_metal"), dock_metal);
 
     // ---- landing gear: legs and doors (folding), tires and hubs (turning)
-    let skins: Vec<&Mesh> = out
-        .meshes
-        .iter()
-        .filter(|(k, _)| *k == key("hull") || *k == key("wing"))
-        .map(|(_, m)| m)
-        .collect();
-    let underside = Underside::new(&skins, Vec2::new(-2.6, -9.0), Vec2::new(2.6, 5.0));
+    // (The whole skins are drawn as their nose, windward and leeward parts.)
+    let underside = Underside::new(&[&hull, &wing], Vec2::new(-2.6, -9.0), Vec2::new(2.6, 5.0));
     for (name, mesh) in super::ship_gear::meshes(&|x, z| underside.at(x, z)) {
         out.mesh(&key(name), mesh);
     }
@@ -725,6 +888,12 @@ pub fn build() -> ModelAssets {
 
 // ---------------------------------------------------------------- spawn
 
+/// Glowing air of a re-entry: nitrogen and oxygen lines, pink-orange.
+const SHEATH_COLOR: [f32; 3] = [1.0, 0.42, 0.62];
+const WAKE_COLOR: [f32; 3] = [1.0, 0.5, 0.52];
+/// Half extents of the hull and wings (span, height, length), m.
+const SKIN_HALF: Vec3 = Vec3::new(7.2, 2.6, 10.8);
+
 fn renderer(mesh: &str, material: &str, shadows: bool) -> MeshRenderer {
     let mut r = MeshRenderer::new(
         MeshRef::Asset(key(mesh)),
@@ -760,7 +929,7 @@ pub fn spawn(
     wheels: &Wheels,
     thrusters: &[Thruster],
 ) {
-    commands.queue(|world: &mut World| ensure(world, &key("hull"), build));
+    commands.queue(|world: &mut World| ensure(world, &key("hull_nose"), build));
     // Parts that glow with re-entry heat, by material.
     let mut glowing: Vec<(Entity, &'static str, f32)> = Vec::new();
     for &(mesh, material, shadows, glows) in FIXED {
@@ -891,6 +1060,37 @@ pub fn spawn(
                 index: i,
                 length,
                 radius,
+            },
+            ChildOf(body),
+        ));
+    }
+    // Re-entry plasma: the shock layer over the windward skin and the wake streaming behind.
+    for (mesh, base, wake) in [
+        (
+            "plasma_sheath",
+            plume_material(SHEATH_COLOR, 30_000.0),
+            None,
+        ),
+        (
+            "plasma_wake",
+            plume_material(WAKE_COLOR, 40_000.0),
+            Some(PlasmaWake {
+                skin: SKIN_HALF,
+                radius: 4.5,
+                length: 160.0,
+            }),
+        ),
+    ] {
+        let mut r = MeshRenderer::new(MeshRef::Asset(key(mesh)), MaterialRef::from(base));
+        r.cast_shadows = false;
+        r.visible = false;
+        commands.spawn((
+            Transform::default(),
+            r,
+            PlasmaVisual {
+                base,
+                level: 0,
+                wake,
             },
             ChildOf(body),
         ));

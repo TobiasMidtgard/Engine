@@ -490,6 +490,18 @@ fn fibonacci_sphere(n: usize) -> impl Iterator<Item = Vec3> {
     })
 }
 
+/// How fully hair covers the scalp in direction `d` from the scalp ellipsoid's center (in its
+/// radii), 0..1: [`scalp_keep`] with a soft edge just behind the hairline, so paint under the
+/// hair fades out as a hairline rather than a hard line.
+pub(crate) fn scalp_cover(d: Vec3, hairline: f32) -> f32 {
+    let front = smoothstep(0.0, 0.9, -d.z);
+    let min_y = lerp(-0.4, 0.3 + 0.3 * hairline, front);
+    let ears = smoothstep(0.74, 0.86, d.x.abs())
+        * (1.0 - smoothstep(0.08, 0.22, d.y))
+        * (1.0 - smoothstep(0.22, 0.38, d.z));
+    smoothstep(min_y, min_y + 0.16, d.y) * (1.0 - ears)
+}
+
 fn scalp_keep(d: Vec3, hairline: f32) -> bool {
     // −Z is forward. The face (front, low) and the ears stay bare.
     let front = smoothstep(0.0, 0.9, -d.z);
@@ -967,8 +979,12 @@ pub fn build(
             for (k, &local) in rest.iter().enumerate().take(segments + 1).skip(2) {
                 arc += seg_len;
                 let t = k as f32 / segments as f32;
-                let omega =
-                    (omega_root.ln() + (omega_tip.ln() - omega_root.ln()) * t.powf(0.6)).exp();
+                // Hair swept back over the head is held along the sweep (as roots and the
+                // hair around them hold it), else it slides off the crown over the face.
+                let held = sweep * (1.0 - smoothstep(0.14, 0.26, arc));
+                let omega = (omega_root.ln() + (omega_tip.ln() - omega_root.ln()) * t.powf(0.6))
+                    .exp()
+                    .max(omega_root * 0.35 * held);
                 // A spring of stiffness k = m·ω² on each particle; compliance is 1/k.
                 sim.goals.push(Goal {
                     p: first + k as u32,
