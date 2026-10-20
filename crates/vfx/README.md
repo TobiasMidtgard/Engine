@@ -33,7 +33,7 @@ An effect has emitters (layers). Each emitter says when it spawns (`rate`, `rate
 box, line), how particles move (`speed`, `velocity`, `orbit_speed`, `gravity`, `drag`, `wind`,
 `turbulence`, `vortex`, `attract`, `collide` with the ground or water: bounce, die or stick) and
 how they look (`sprite`: glow, spark, smoke, flame, droplet, ring, star, rune, shard, dust,
-haze, billow, vortex, plume, crown, ripple, foam, blaze, fireball; `facing`: camera, velocity, horizontal or axis (standing along the
+haze, billow, vortex, plume, crown, ripple, foam, blaze, fireball, jet; `facing`: camera, velocity, horizontal or axis (standing along the
 emitter's direction); `color` and `size_over_life`; `emissive` in cd/m²;
 `lit` by sun, sky and point lights; `additive`; `soft`), or `debris` to draw solid 3D pieces
 instead of sprites ([`Debris`]: rock, splinter, shard or scrap). An effect can also carry a point
@@ -78,6 +78,11 @@ through its square as a volume: a body rolled into lobes that glows from inside,
 deep in and orange at its surface, and chars to dark, sunlit soot from the creases outward over
 its life. `explosion.large` throws a dozen or so of them up and out, and the fireball spell's
 impact a smaller handful, with the smoke rising only once the fire has burnt through.
+
+The court's fountain is a jet of water, not a cloud of drops. The `jet` sprite draws a glassy
+rod rising from the nozzle, clear in the middle and mirroring the sky at its edges, streaked as
+it flows and breaking into beads where it turns over; fine drops rain back around it into the
+basin. `--example fountain` renders it close up.
 
 Splashes are water, not white puffs. The `crown` sprite ray traces the splash's crown inside
 its square: a wall of water thrown up in a ring that flares out, its rim drawn into fingers
