@@ -345,12 +345,16 @@ pub struct DemoZones(pub Vec<String>);
 
 /// Viewpoint names that belong to a zone of another name: the fire stops (`fire_front`) are the
 /// field's, the smoke stops (`smoke_range`) the range's, and the sunset and night views look
-/// across the plaza, so a tour of them shows its fountain and spheres.
-const ZONE_ALIASES: [(&str, &str); 4] = [
+/// across the plaza, so a tour of them shows its fountain and spheres. The overview and the
+/// tower look down on the whole valley, where only the lake's water reads from that height
+/// (without it the lake is a bare basin), so they load just the lake.
+const ZONE_ALIASES: [(&str, &str); 6] = [
     ("fire", "field"),
     ("smoke", "range"),
     ("sunset", "plaza"),
     ("night", "plaza"),
+    ("overview", "lake"),
+    ("tower", "lake"),
 ];
 
 /// The zone a viewpoint belongs to: the zone with its key, or whose key and `_` start it
@@ -1501,7 +1505,8 @@ mod tests {
         assert_eq!(zone_of("paddock_car"), Some("paddock"));
         assert_eq!(zone_of("track_cars"), Some("track"));
         assert_eq!(zone_of("tracks"), Some("tracks"));
-        assert_eq!(zone_of("overview"), None);
+        assert_eq!(zone_of("overview"), Some("lake"));
+        assert_eq!(zone_of("orbit"), None);
         assert_eq!(zone_of("fire_front"), Some("field"));
         assert_eq!(zone_of("smoke_fans"), Some("range"));
         assert_eq!(zone_of("firefly"), None);
@@ -1513,7 +1518,7 @@ mod tests {
             only(&["paddock", "yard"])
         );
         // A stop that sees more than one zone, or the whole tour, loads every zone.
-        assert_eq!(demo_zones(None, Some("paddock,overview")), None);
+        assert_eq!(demo_zones(None, Some("paddock,orbit")), None);
         assert_eq!(demo_zones(None, None), None);
         // The flag wins.
         assert_eq!(demo_zones(Some("all"), Some("paddock")), None);

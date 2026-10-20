@@ -3,7 +3,9 @@
 //! land again, boars root about and run from a runner but turn and charge when cornered or
 //! wounded, a sow charges to defend her piglets, wolves pick a piglet over its elders, a pack
 //! singles out a wounded deer, flanks it and lies in wait for it and gives up a long chase,
-//! a herd's alarm spreads within a reaction time, and a deer zigzags from a wolf at its heels.
+//! a herd's alarm spreads within a reaction time, a deer zigzags from a wolf at its heels,
+//! birds burst up at a gunshot, deer and boar look up at one and move off (and bolt from one
+//! close by), and an explosion sends everything running.
 
 use std::f32::consts::{PI, TAU};
 
@@ -25,6 +27,12 @@ fn app() -> App {
             step_secs: 1.0 / 60.0,
         });
     app.add_plugins((WorldPlugin, NpcPlugin));
+    // A handful of animals: running each system in turn on the test's own thread is far
+    // quicker than handing them about a thread pool (the order is fixed either way:
+    // `tests/schedule_order.rs`).
+    for (_, schedule) in app.world.resource_mut::<Schedules>().iter_mut() {
+        schedule.set_executor(engine_core::ecs::schedule::SingleThreadedExecutor::new());
+    }
     app
 }
 
@@ -1469,4 +1477,179 @@ fn the_pack_breaks_off_from_a_fit_deer_that_outruns_it() {
             assert_eq!(state(&app, w), AnimalState::Rest, "{w:?} rests");
         }
     }
+}
+
+/// A gunshot from `at` (a carbine like the arena's: the bullet's trace and the bang), fired by
+/// `by` toward +X.
+fn gunshot(app: &mut App, at: DVec3, by: Option<Entity>) {
+    app.world.write_message(engine_world::ProjectileTrace {
+        from: at,
+        to: at + DVec3::new(60.0, 0.0, 0.0),
+        radius: 0.08,
+        speed: 900.0,
+        shooter: by,
+    });
+    app.world.write_message(engine_world::NoiseEvent {
+        position: at,
+        radius: 90.0,
+        source: by,
+    });
+}
+
+/// An explosion at `at`, like a barrel's: the blast (`WorldImpulse`) alone, no noise.
+fn blast(app: &mut App, at: DVec3, strength: f32, energy_j: f32) {
+    app.world.write_message(engine_world::WorldImpulse {
+        center: at,
+        radius: 8.0,
+        strength,
+        energy_j,
+        heat_c: 0.0,
+        source: None,
+    });
+}
+
+/// Birds burst up at a gunshot well off (and not at an arrow loosed from the same spot).
+#[test]
+fn birds_burst_up_at_a_gunshot() {
+    let mut app = app();
+    let flock = herd(&mut app, Species::Bird, DVec3::ZERO, 6, 5);
+    app.update_n(30);
+    // An arrow: no crack, nothing.
+    app.world.write_message(engine_world::ProjectileTrace {
+        from: DVec3::new(-70.0, 1.5, 0.0),
+        to: DVec3::new(-10.0, 1.5, 0.0),
+        radius: 0.02,
+        speed: 60.0,
+        shooter: None,
+    });
+    app.update_n(60);
+    assert!(
+        flock
+            .iter()
+            .all(|&b| state(&app, b) == AnimalState::Perched),
+        "an arrow doesn't flush them"
+    );
+    let shooter = app.world.spawn(Transform::default()).id();
+    gunshot(&mut app, DVec3::new(-70.0, 1.5, 0.0), Some(shooter));
+    app.update_n(30);
+    let up = flock
+        .iter()
+        .filter(|&&b| state(&app, b) == AnimalState::Flying)
+        .count();
+    assert_eq!(up, flock.len(), "a gunshot 70 m off flushes the flock");
+    app.update_n(60);
+    let high = flock.iter().filter(|&&b| pos(&app, b).y > 2.0).count();
+    assert!(high >= 5, "{high} are up in the air");
+}
+
+/// Deer and boar look up at a gunshot well off (at the shot), keep their heads, and then move
+/// off from it at a walk; a shot close by, they bolt.
+#[test]
+fn deer_and_boar_look_up_at_a_far_gunshot_then_move_off() {
+    let mut app = app();
+    let deer = herd(&mut app, Species::Deer, DVec3::ZERO, 4, 1);
+    let sounder: Vec<Entity> = (0..3)
+        .map(|k| {
+            let at = DVec3::new(f64::from(k) * 2.0, 0.0, 30.0);
+            boar(&mut app, at, 40, k == 0, false)
+        })
+        .collect();
+    let all: Vec<Entity> = deer.iter().chain(&sounder).copied().collect();
+    app.update_n(60);
+    // A shot 60 m to the west of them (in earshot, but well off).
+    let shot = DVec3::new(-60.0, 1.5, 15.0);
+    let start: Vec<f64> = all
+        .iter()
+        .map(|&a| flat(pos(&app, a) - shot).length() as f64)
+        .collect();
+    let shooter = app.world.spawn(Transform::from_translation(shot)).id();
+    gunshot(&mut app, shot, Some(shooter));
+    let mut looked = vec![false; all.len()];
+    for _ in 0..60 {
+        app.update();
+        for (k, &a) in all.iter().enumerate() {
+            let m = mind(&app, a);
+            assert_ne!(
+                m.state,
+                AnimalState::Flee,
+                "it doesn't bolt from a shot 60 m off"
+            );
+            looked[k] |= m.state == AnimalState::Alert
+                && m.threat_pos.is_some_and(|p| p.distance(shot) < 1.0);
+        }
+    }
+    assert!(
+        looked.iter().all(|&l| l),
+        "each looks up toward the shot within a second: {looked:?}"
+    );
+    // Then each moves off from it, at a walk, not a run.
+    let mut fastest = 0.0f32;
+    for _ in 0..60 * 15 {
+        app.update();
+        for &a in &all {
+            assert_ne!(state(&app, a), AnimalState::Flee, "it moves off, not bolts");
+            let v = app.world.get::<LocomotionState>(a).unwrap().velocity;
+            fastest = fastest.max(Vec3::new(v.x, 0.0, v.z).length());
+        }
+    }
+    for (k, &a) in all.iter().enumerate() {
+        let now = flat(pos(&app, a) - shot).length() as f64;
+        assert!(
+            now > start[k] + 15.0,
+            "{k}: it moved off from the shot ({:.1} m to {now:.1} m)",
+            start[k]
+        );
+    }
+    assert!(fastest < 4.0, "at a walk ({fastest:.1} m/s at most)");
+
+    // A shot 20 m off: they bolt.
+    let mut app = self::app();
+    let deer = herd(&mut app, Species::Deer, DVec3::ZERO, 3, 1);
+    let tusker = boar(&mut app, DVec3::new(0.0, 0.0, 8.0), 40, true, false);
+    app.update_n(60);
+    gunshot(&mut app, DVec3::new(-20.0, 1.5, 4.0), None);
+    app.update_n(30);
+    for &a in deer.iter().chain([&tusker]) {
+        assert_eq!(
+            state(&app, a),
+            AnimalState::Flee,
+            "a shot 20 m off: it bolts"
+        );
+    }
+}
+
+/// An explosion sends deer, boar and birds running, even 120 m off; a mere thump (a light
+/// impulse with no energy behind it) doesn't, and one beyond earshot doesn't either.
+#[test]
+fn an_explosion_sends_everything_running() {
+    let run = |strength: f32, energy_j: f32, off: f64| {
+        let mut app = app();
+        let deer = herd(&mut app, Species::Deer, DVec3::ZERO, 3, 1);
+        let tusker = boar(&mut app, DVec3::new(0.0, 0.0, 10.0), 40, true, false);
+        let flock = herd(&mut app, Species::Bird, DVec3::new(10.0, 0.0, 0.0), 4, 5);
+        app.update_n(60);
+        blast(&mut app, DVec3::new(-off, 0.5, 0.0), strength, energy_j);
+        app.update_n(30);
+        let ran = deer
+            .iter()
+            .chain([&tusker])
+            .filter(|&&a| state(&app, a) == AnimalState::Flee)
+            .count();
+        let flew = flock
+            .iter()
+            .filter(|&&b| state(&app, b) == AnimalState::Flying)
+            .count();
+        (ran, flew)
+    };
+    assert_eq!(
+        run(30.0, 250_000.0, 120.0),
+        (4, 4),
+        "a barrel going up 120 m off"
+    );
+    assert_eq!(run(6.0, 0.0, 30.0), (0, 0), "a thump 30 m off");
+    assert_eq!(
+        run(30.0, 250_000.0, 260.0),
+        (0, 0),
+        "a blast out of earshot"
+    );
 }

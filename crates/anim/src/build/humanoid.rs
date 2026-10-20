@@ -982,13 +982,20 @@ fn walk_with(s: &Skeleton, name: &str, secs: f32, stride: f32) -> AnimationClip 
                 4.0 * bump(q, 0.0, 0.06) - 14.0 * bump(q, 0.55, 0.08) + 6.0 * bump(q, 0.8, 0.1);
             let toe = 24.0 * bump(q, 0.53, 0.07);
             leg(&mut p, side, hip, 1.0, knee, ankle, toe);
+            // The arm swings against its leg, further forward than back; the forearm lags
+            // the upper arm a little and bends most as the arm comes forward, the hand
+            // trailing at the wrist.
+            let fore = -cq * swing;
+            let lag = -cycle(q - 0.07) * swing;
             arm(
                 &mut p,
                 side,
                 Arm {
-                    flex: -16.0 * swing * cq + 2.0,
-                    elbow: 20.0 - 6.0 * swing * cq,
-                    protract: -3.0 * swing * cq,
+                    flex: 2.0 + if fore > 0.0 { 24.0 } else { 22.0 } * fore,
+                    abduct: -13.0,
+                    elbow: 14.0 + 22.0 * lag.max(0.0) + 4.0 * fore.abs(),
+                    wrist: 8.0 * lag,
+                    protract: 4.0 * fore,
                     ..Arm::HANG
                 },
             );
@@ -3069,6 +3076,33 @@ mod tests {
         let mut model = s.rest_model.clone();
         s.to_model(&local, &mut model);
         model
+    }
+
+    #[test]
+    fn walk_arms_reach_forward_more_than_back_with_a_soft_elbow() {
+        let s = skeleton();
+        let clip = walk(&s);
+        for side in 0..2 {
+            let (mut front, mut back, mut bend_min) = (0.0f32, 0.0f32, f32::MAX);
+            for i in 0..60 {
+                let m = model_at(&s, &clip, i as f32 / 60.0);
+                let shoulder = m[s.bone(UPPER_ARM[side])].t;
+                let elbow = m[s.bone(LOWER_ARM[side])].t;
+                let hand = m[s.bone(HAND[side])].t;
+                // The body faces −Z.
+                let reach = shoulder.z - hand.z;
+                front = front.max(reach);
+                back = back.max(-reach);
+                let bend = (elbow - shoulder).angle_between(hand - elbow).to_degrees();
+                bend_min = bend_min.min(bend);
+            }
+            assert!(
+                front > 0.12 && front > back * 1.3,
+                "{side}: {front} vs {back}"
+            );
+            assert!(back > 0.05, "{side}: the arm never swings back ({back})");
+            assert!(bend_min > 8.0, "{side}: elbow locks straight ({bend_min}°)");
+        }
     }
 
     #[test]
