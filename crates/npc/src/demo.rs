@@ -395,7 +395,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         north,
         Faction::RIVAL,
         102,
-        NpcSkills::veteran(),
+        NpcSkills::soldier(),
     );
     for (x, z, skills, weapon) in [
         (0.0, -16.0, NpcSkills::elite(), NpcWeapon::rifle()),
