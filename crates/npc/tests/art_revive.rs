@@ -539,15 +539,17 @@ fn fighters_revive_kneel_closeup() {
             let me = at(&app, mate);
             let d = DVec3::new(chest.x - me.x, 0.0, chest.z - me.z).normalize();
             let mid = (me + chest) * 0.5 + DVec3::Y * 0.3;
-            // Its right, a little ahead of it (its face and hands, not its back).
+            // Its right, side on and a touch ahead of it (its profile and hands, not its
+            // back; the other camera looks at its front), back far enough that the arm
+            // setting the carbine down on that side stays in the picture.
             let f = facing(&app, mate);
             let right = DVec3::new(-f.z, 0.0, f.x);
             [
                 camera(
                     &mut app,
-                    me + right * 2.0 + f * 0.9 + DVec3::Y * 1.0,
-                    (me + mid) * 0.5 + DVec3::Y * 0.1,
-                    36.0,
+                    me + right * 2.8 + f * 0.4 + DVec3::Y * 1.15,
+                    (me + mid) * 0.5 + DVec3::Y * 0.05,
+                    38.0,
                 ),
                 camera(
                     &mut app,

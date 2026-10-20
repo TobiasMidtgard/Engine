@@ -156,21 +156,29 @@ pub(crate) fn smoke_clouds(
     }
 }
 
-/// One puff of a cloud the NPC module keeps itself, drawn as a soft grey ball.
+/// One shell of one puff of a cloud the NPC module keeps itself. A puff is a few faint grey
+/// balls one inside the other, so it is thick in the middle and thins out to its edge.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct CloudPuff {
     cloud: u32,
     n: usize,
+    shell: usize,
 }
 
-/// Where a cloud's puffs sit (offsets and sizes, in its radius).
-const PUFFS: [(Vec3, f32); 5] = [
-    (Vec3::new(0.0, 0.0, 0.0), 0.75),
-    (Vec3::new(0.45, -0.2, 0.2), 0.55),
-    (Vec3::new(-0.4, -0.15, -0.25), 0.6),
-    (Vec3::new(0.1, 0.35, -0.3), 0.5),
-    (Vec3::new(-0.2, -0.3, 0.4), 0.5),
+/// Where a cloud's puffs sit (offsets and sizes, in its radius): a low, lumpy heap.
+const PUFFS: [(Vec3, f32); 8] = [
+    (Vec3::new(0.0, -0.05, 0.0), 0.7),
+    (Vec3::new(0.5, -0.25, 0.2), 0.5),
+    (Vec3::new(-0.45, -0.2, -0.25), 0.55),
+    (Vec3::new(0.15, 0.3, -0.3), 0.45),
+    (Vec3::new(-0.25, -0.3, 0.45), 0.5),
+    (Vec3::new(0.3, -0.3, -0.5), 0.42),
+    (Vec3::new(-0.55, -0.35, 0.2), 0.4),
+    (Vec3::new(-0.1, 0.25, 0.3), 0.42),
 ];
+
+/// A puff's shells, outermost first (in its size).
+const SHELLS: [f32; 3] = [1.0, 0.8, 0.58];
 
 /// Draws the clouds the NPC module keeps itself (a smoke module draws its own).
 pub(crate) fn show_clouds(
@@ -189,7 +197,7 @@ pub(crate) fn show_clouds(
                 let (off, scale) = PUFFS[p.n];
                 let r = r as f32 * (0.5 + 0.5 * k / CLOUD_EXTINCTION);
                 t.translation = c.at + DVec3::Y * 0.8 + (off * r).as_dvec3();
-                t.scale = Vec3::splat(r * scale);
+                t.scale = Vec3::new(1.0, 0.85, 1.0) * (r * scale * SHELLS[p.shell]);
                 have.push(p.cloud);
             }
             None => commands.entity(e).despawn(),
@@ -200,21 +208,27 @@ pub(crate) fn show_clouds(
             continue;
         }
         let haze = StandardMaterial {
-            base_color: [0.66, 0.66, 0.64, 0.42],
+            base_color: [0.7, 0.7, 0.68, 0.17],
             alpha_mode: AlphaMode::Blend,
             perceptual_roughness: 1.0,
             ..Default::default()
         };
         for n in 0..PUFFS.len() {
-            let ball = Shape::Sphere {
-                radius: 1.0,
-                segments: 16,
-            };
-            commands.spawn((
-                CloudPuff { cloud: c.id, n },
-                Transform::from_translation(c.at).with_scale(Vec3::ZERO),
-                MeshRenderer::new(ball, haze).without_shadows(),
-            ));
+            for shell in 0..SHELLS.len() {
+                let ball = Shape::Sphere {
+                    radius: 1.0,
+                    segments: 16,
+                };
+                commands.spawn((
+                    CloudPuff {
+                        cloud: c.id,
+                        n,
+                        shell,
+                    },
+                    Transform::from_translation(c.at).with_scale(Vec3::ZERO),
+                    MeshRenderer::new(ball, haze).without_shadows(),
+                ));
+            }
         }
     }
 }
