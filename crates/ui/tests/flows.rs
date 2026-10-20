@@ -920,3 +920,103 @@ fn showing_the_wheel_again_without_slow_motion_lets_time_run() {
     assert!(open(&mut app).contains(&"wheel".to_string()));
     assert!((dilation(&mut app) - 1.0).abs() < 1e-3);
 }
+
+fn skills(app: &mut App) -> engine_ui::skills::SkillTree {
+    app.world.resource::<engine_ui::skills::SkillTree>().clone()
+}
+
+fn skill_selected(app: &mut App) -> String {
+    let mut q = app.world.query::<&engine_ui::skills::SkillsScreen>();
+    q.single(&app.world)
+        .unwrap()
+        .selected
+        .clone()
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_skill_tree_opens_from_pause_and_learns_with_a_point() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "pause", "instant": true}),
+    );
+    app.update_n(2);
+    api(&mut app, "ui.click", json!({"id": "pause_skills"}));
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"skills".to_string()));
+    // It opens on the first skill with a rank to learn; a click picks another.
+    assert_eq!(skill_selected(&mut app), "c_momentum");
+    api(&mut app, "ui.click", json!({"id": "skill:c_cleave"}));
+    app.update_n(2);
+    assert_eq!(skill_selected(&mut app), "c_cleave");
+    let before = skills(&mut app).points;
+    let since = next_event(&mut app);
+    api(&mut app, "ui.click", json!({"id": "skills_learn"}));
+    app.update_n(2);
+    let tree = skills(&mut app);
+    assert_eq!(tree.get("c_cleave").unwrap().rank, 1);
+    assert_eq!(tree.points, before - 1);
+    assert!(actions_since(&mut app, since).contains(&"skill.learned:c_cleave".to_string()));
+    let data = app.world.resource::<UiData>();
+    assert_eq!(data.get_f64("skills.c_cleave"), Some(1.0));
+    assert_eq!(
+        data.get_f64("player.skill_points"),
+        Some((before - 1) as f64)
+    );
+    // Space ranks it up again.
+    press(&mut app, KeyCode::Space);
+    assert_eq!(skills(&mut app).get("c_cleave").unwrap().rank, 2);
+}
+
+#[test]
+fn a_locked_skill_refuses_and_reset_refunds_after_a_confirm() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "skills", "instant": true}),
+    );
+    app.update_n(3);
+    // Whirlwind needs Cleave first; Thousand Cuts needs level 20.
+    api(&mut app, "ui.click", json!({"id": "skill:c_whirl"}));
+    app.update_n(2);
+    assert_eq!(skill_selected(&mut app), "c_whirl");
+    let points = skills(&mut app).points;
+    // Its Learn button is disabled.
+    assert!(call_api(&mut app.world, "ui.click", json!({"id": "skills_learn"})).is_err());
+    press(&mut app, KeyCode::Space);
+    assert_eq!(skills(&mut app).get("c_whirl").unwrap().rank, 0);
+    assert_eq!(skills(&mut app).points, points);
+    assert!(engine_ui::skills::learn(&mut app.world, "c_ult").is_err());
+    // Reset asks first, then gives every point back.
+    let spent = skills(&mut app).spent();
+    assert!(spent > 0);
+    api(&mut app, "ui.click", json!({"id": "skills_reset"}));
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"confirm".to_string()));
+    assert_eq!(skills(&mut app).spent(), spent);
+    api(&mut app, "ui.click", json!({"id": "confirm_ok"}));
+    app.update_n(3);
+    let tree = skills(&mut app);
+    assert_eq!(tree.spent(), 0);
+    assert_eq!(tree.points, points + spent);
+    let screens = open(&mut app);
+    assert!(
+        screens.contains(&"skills".to_string()) && !screens.contains(&"confirm".to_string()),
+        "{screens:?}"
+    );
+}
+
+#[test]
+fn the_skills_api_learns_and_grants_points() {
+    let mut app = app();
+    let v = api(&mut app, "skills.grant", json!({"points": 2}));
+    assert_eq!(v["points"], 5, "{v}");
+    api(&mut app, "skills.learn", json!({"id": "t_overclock"}));
+    assert_eq!(skills(&mut app).get("t_overclock").unwrap().rank, 1);
+    assert!(call_api(&mut app.world, "skills.learn", json!({"id": "t_ult"})).is_err());
+    let tree = api(&mut app, "skills.tree", json!({}));
+    assert!(tree.to_string().contains("t_overclock"));
+}

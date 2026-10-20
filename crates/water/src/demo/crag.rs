@@ -62,16 +62,18 @@ const PROFILE: [(f32, f32); 27] = [
 const POOLS: [f32; 4] = [2.4, 5.75, 11.05, 12.9];
 /// The spring, `u` along the crevice, and what it gives, m³/s.
 const SPRING_AT: f32 = 12.9;
-const SPRING_RATE: f32 = 0.12;
+const SPRING_RATE: f32 = 0.2;
 
 /// The cascade's flow grid: `u` from −3 to 17 m, 4 m to each side, 25 cm cells.
 const GRID_FROM: Vec2 = Vec2::new(-3.0, -4.0);
 const GRID_CELLS: [u32; 2] = [80, 32];
 const GRID_CELL: f32 = 0.25;
 
-/// The square (local x, z) round the crevice that has a finer ground mesh of its own
+/// The square (local x, z) round the whole crag that has a finer ground mesh of its own
 /// (`demo::crag_mesh`), on the hill mesh's half-meter grid.
-pub const PATCH: (Vec2, Vec2) = (Vec2::new(-38.5, -38.5), Vec2::new(-13.5, -13.5));
+/// Its edge lies where the hill is gentle again: on the crag's steep faces the two meshes would
+/// sample its color bands differently and show a seam.
+pub const PATCH: (Vec2, Vec2) = (Vec2::new(-58.5, -58.5), Vec2::new(-6.5, -6.5));
 
 /// Where the crag meets the tarn's shore, meters out from the tarn's center.
 pub fn foot() -> f32 {

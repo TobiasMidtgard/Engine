@@ -40,6 +40,7 @@ use crate::ik::{GroundProbe, IkShape, IkSurface, IkSurfaces, LookAt, Reach, Reac
 use crate::muscle::{MorphWeights, MuscleRig};
 use crate::procedural::spring::SpringChains;
 use crate::retarget::HandGrip;
+use crate::shuttle::{Shuttle, ShuttleLeg, Watch};
 use crate::skin::{SkinMaterial, SkinnedMesh, SkinnedMeshRenderer};
 use crate::stunt;
 use crate::xform::smoothing;
@@ -52,6 +53,10 @@ const ATHLETE: DVec3 = DVec3::new(-2.6, 0.0, 5.4);
 const TIRE_AHEAD: f64 = 1.3;
 /// The dog's run ([x, z, speed], m and m/s from the paddock's center): it walks off at the
 /// west end, trots, canters out of the east turn and gallops down the far straight.
+/// Start of the shuttle lane (x, z from the paddock's center; it runs towards −Z) and its
+/// length, m.
+const LANE: DVec3 = DVec3::new(-23.0, 0.0, 7.0);
+const LANE_LENGTH: f32 = 15.0;
 const DOG_PATH: [[f32; 3]; 10] = [
     [-12.0, 12.0, 1.1],
     [-6.0, 12.0, 2.6],
@@ -87,6 +92,8 @@ pub struct DemoEntities {
     pub dog: Entity,
     pub car: Entity,
     pub stuntman: Entity,
+    pub runner: Entity,
+    pub coach: Entity,
 }
 
 /// Follows a closed, smooth path through `waypoints` (`[x, z, speed]`, meters and m/s,
@@ -110,6 +117,12 @@ pub struct DemoPath {
     samples: Vec<(Vec2, f32, f32)>,
     #[serde(skip)]
     yaw_rate: f32,
+    /// Velocity on the ground (x, z), m/s, and the acceleration along the facing, m/s²
+    /// (smoothed).
+    #[serde(skip)]
+    velocity: Vec2,
+    #[serde(skip)]
+    accel: f32,
     #[serde(skip)]
     started: bool,
 }
@@ -125,6 +138,8 @@ impl Default for DemoPath {
             facing: None,
             samples: Vec::new(),
             yaw_rate: 0.0,
+            velocity: Vec2::ZERO,
+            accel: 0.0,
             started: false,
         }
     }
@@ -280,12 +295,24 @@ pub(crate) fn register(app: &mut App) {
     .register_component::<DemoScript>(
         "Demo timeline: triggers and parameter values at times (s), repeating every period.",
     )
+    .register_component::<Shuttle>(
+        "Shuttle runner: straight legs from a standing start to a standing stop, turning on \
+         the spot between them.",
+    )
+    .register_component::<Watch>("Watcher: turns where it stands to keep watching a target.")
     .register_component::<stunt::Stunt>(
         "Stunt yard routine: run off the deck, fall limp onto the mat, get up, walk back.",
     )
     .add_systems(
         Update,
-        (demo_path_system, demo_script_system, stunt::stunt_system).in_set(UpdateSet::Logic),
+        (
+            demo_path_system,
+            demo_script_system,
+            stunt::stunt_system,
+            crate::shuttle::shuttle_system,
+            crate::shuttle::watch_system,
+        )
+            .in_set(UpdateSet::Logic),
     )
     .register_api(
         "anim.spawn",
@@ -996,6 +1023,22 @@ pub const VIEWS: &[DemoView] = &[
         hour: 15.0,
         at: 0.92,
     },
+    DemoView {
+        key: "paddock_sprint_start",
+        name: "Driving off into a sprint, leaning into it",
+        eye: [-18.6, 1.3, 7.8],
+        target: [-23.0, 1.0, 5.2],
+        hour: 15.0,
+        at: 1.35,
+    },
+    DemoView {
+        key: "paddock_sprint_stop",
+        name: "Digging in to stop from a sprint, sitting back; the coach turns to watch",
+        eye: [-17.8, 1.4, -10.4],
+        target: [-22.6, 0.9, -6.4],
+        hour: 15.0,
+        at: 4.3,
+    },
 ];
 
 fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
@@ -1309,6 +1352,66 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         },
     ));
 
+    // --- Shuttle lane: sprint down it, dig in to stop, run back backwards, turn and run
+    // sideways back to the start; a coach beside it turns to keep watching.
+    let runner = spawn_humanoid(
+        world,
+        humanoid::Outfit::Athlete,
+        Transform::from_translation(at(LANE.x, 0.0, LANE.z)),
+    );
+    dress(world, runner, "athlete", SkinMaterial::default());
+    let (x, z) = (LANE.x as f32, LANE.z as f32);
+    world.entity_mut(runner).insert((
+        Name::new("Shuttle runner"),
+        Shuttle {
+            origin,
+            start: [x, z],
+            legs: vec![
+                ShuttleLeg {
+                    to: [x, z - LANE_LENGTH],
+                    facing_deg: 0.0,
+                    top: 5.0,
+                },
+                ShuttleLeg {
+                    to: [x, z - LANE_LENGTH * 0.45],
+                    facing_deg: 0.0,
+                    top: humanoid::BACK_RUN_SPEED,
+                },
+                ShuttleLeg {
+                    to: [x, z],
+                    facing_deg: -90.0,
+                    top: humanoid::SIDE_RUN_SPEED,
+                },
+            ],
+            ..Default::default()
+        },
+    ));
+    let coach = spawn_humanoid(
+        world,
+        humanoid::Outfit::Shirt,
+        Transform::from_translation(at(LANE.x - 2.6, 0.0, LANE.z - LANE_LENGTH as f64 * 0.55))
+            .with_rotation(facing(-90.0)),
+    );
+    dress(world, coach, "reacher", shirt_detail());
+    world.entity_mut(coach).insert((
+        Name::new("Coach"),
+        Watch {
+            target: Some(runner),
+            ..Default::default()
+        },
+        LookAt {
+            chain: vec![
+                ("chest".into(), 0.2),
+                ("neck".into(), 0.35),
+                ("head".into(), 0.45),
+            ],
+            max_angle_deg: 75.0,
+            weight: 0.9,
+            smoothing: 0.15,
+            ..Default::default()
+        },
+    ));
+
     // --- Horse track: an oval with a white rail.
     let horse_path = vec![
         [16.0, 7.0, 1.6],
@@ -1469,6 +1572,8 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         dog: dog_e,
         car: car_e,
         stuntman,
+        runner,
+        coach,
     }
 }
 
@@ -1525,9 +1630,14 @@ fn demo_path_system(
         while dyaw < -PI {
             dyaw += 2.0 * PI;
         }
+        let velocity = dir * speed;
         if dt > 0.0 && path.started {
             path.yaw_rate += (dyaw / dt - path.yaw_rate) * smoothing(dt, 0.25);
+            let forward = Vec2::new(-yaw.sin(), -yaw.cos());
+            let accel = ((velocity - path.velocity) / dt).dot(forward);
+            path.accel += (accel - path.accel) * smoothing(dt, 0.2);
         }
+        path.velocity = velocity;
         path.started = true;
         t.translation = pos;
         t.rotation = Quat::from_rotation_y(yaw);
@@ -1535,6 +1645,7 @@ fn demo_path_system(
             params.set("speed", speed);
             params.set("turn", (path.yaw_rate / 1.2).clamp(-1.0, 1.0));
             params.set("heading", (along - yaw + PI).rem_euclid(2.0 * PI) - PI);
+            params.set("accel", crate::body::accel_param(path.accel));
             params.set(
                 "move_effort",
                 (speed / path.effort_speed.max(0.1)).clamp(0.0, 1.0),

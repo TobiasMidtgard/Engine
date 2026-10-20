@@ -500,6 +500,32 @@ fn plume(c: vec2<f32>, t: f32, seed: f32, air: f32) -> vec3<f32> {
     return vec3<f32>(glow / max(a, 1e-3), saturate(core * 1.2 + diamonds), a);
 }
 
+// A whole fire, `t` from its base (0) up (1) and `c.x` across: turbulent heat rising through
+// a body that narrows upward and sways more the higher it gets, licks tearing off its top.
+// Returns the heat (0 clear .. 1 white hot) and the coverage.
+fn blaze(c: vec2<f32>, t: f32, seed: f32) -> vec2<f32> {
+    let time = (frame.time.x % 3600.0) + seed * 37.0;
+    let p = vec2<f32>(c.x, t);
+    // Rising eddies bend the flame; finer ones churn inside it.
+    let warp = vec2<f32>(
+        fbm2(p * vec2<f32>(2.2, 1.6) + vec2<f32>(seed * 11.0, -time * 1.3), 3),
+        fbm2(p * vec2<f32>(2.2, 1.6) + vec2<f32>(5.2 + seed * 7.0, -time * 1.7), 3)) - 0.45;
+    let n = fbm2(p * vec2<f32>(3.6, 2.4) + warp * 1.6 + vec2<f32>(seed * 3.0, -time * 2.6), 5);
+    let sway = warp.x * 0.7 * t * t;
+    let x = abs(c.x - sway);
+    // Wide and rounded over the fuel, drawn up into a flickering point.
+    let w = 0.78 * pow(saturate(1.0 - t), 0.55) * sqrt(smoothstep(0.0, 0.12, t));
+    let body = saturate(1.0 - x / max(w, 1e-3));
+    // Licks: the top breaks into a few tongues rising side by side.
+    let licks = value_noise2(vec2<f32>(c.x * 3.2 + seed * 5.0, t * 1.5 - time * 1.9));
+    // Noise only roughens the edge near the body, so no stray flames stand off on their own.
+    let near = smoothstep(0.0, 0.4, saturate(1.2 - x / max(w, 1e-3)));
+    let heat = saturate(body * 0.95 + ((n - 0.45) * 1.9 + (licks - 0.5) * 0.8 * t) * near - t * 1.05);
+    // The base, right on the fuel, is clear and blue-dim; licks fade as they cool.
+    let a = smoothstep(0.1, 0.28, heat) * smoothstep(0.0, 0.1, t);
+    return vec2<f32>(heat, a);
+}
+
 // A portal: the world behind it swirled into a vortex that sinks into the portal's color and
 // darkens toward its eye, glowing arms turning inward and a burning rim. `jx` and `jy` are how
 // the sprite coordinates change per pixel across and down the screen, to turn a shift within
@@ -631,6 +657,16 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
         }
         case 12u: { // portal: the scene behind it swirled into a vortex
             return vortex(in, c, r, jx, jy);
+        }
+        case 17u: { // blaze: a whole fire from its base (uv.y 0) up
+            let b = blaze(c, in.uv.y, in.seed);
+            a = b.y;
+            // Blackbody-like: deep red at the cool rim, the layer's color in the body, near
+            // white only in the hottest core, so overlapping blazes don't all wash to yellow.
+            let deep = rgb * vec3<f32>(1.0, 0.4, 0.15);
+            let hot = mix(rgb, vec3<f32>(1.0, 0.92, 0.75), 0.65);
+            let col = mix(mix(deep, rgb, smoothstep(0.1, 0.55, b.x)), hot, smoothstep(0.55, 1.0, b.x));
+            rgb = col * (0.3 + 1.4 * b.x * b.x * b.x);
         }
         case 14u: { // crown: a splash's wall of water, traced
             return crown(in);
