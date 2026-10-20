@@ -461,8 +461,8 @@ fn grow_scalp(
             points: 24,
             density: 80.0,
             gravity: 1.0,
-            loft: 0.016,
-            clump: 0.75,
+            loft: 0.012,
+            clump: 0.9,
             root_radius: 0.00012,
         },
         HairStyle::Bun => Groom {
@@ -499,7 +499,7 @@ fn grow_scalp(
     let mut set = StrandSet::new(StrandKind::Scalp, g.points);
     // Guides first: one per clump, grown in full; then the hairs that follow them.
     // Long hair gathers into fewer, bigger locks.
-    let per_guide = if g.gravity > 0.5 { 90 } else { 40 };
+    let per_guide = if g.gravity > 0.5 { 150 } else { 40 };
     let guides_n = if g.clump > 0.0 {
         (total / per_guide).clamp(60, 1500)
     } else {
@@ -511,7 +511,26 @@ fn grow_scalp(
         let Some(sp) = sampler.sample(&mut gr) else {
             break;
         };
-        let pts = grow_hair(a, &g, sp, collider, lm, rest, &mut gr, 1.0);
+        let mut pts = grow_hair(a, &g, sp, collider, lm, rest, &mut gr, 1.0);
+        if g.gravity > 0.5 {
+            // Each lock of hanging hair has a gentle wave of its own, so neighboring locks
+            // catch the light differently and read apart.
+            let phase = gr.f32() * std::f32::consts::TAU;
+            let waves = gr.range(1.5, 3.0);
+            let amp = gr.range(0.003, 0.008);
+            // Mostly toward and away from the head (which turns the lock's highlight), a
+            // little sideways.
+            let out = (sp.p - lm.head).normalize_or(Vec3::Z);
+            let side = out.cross(Vec3::Y).normalize_or(Vec3::X);
+            let tilt = gr.range(-0.5, 0.5);
+            let dir = (out + side * tilt).normalize();
+            let last = pts.len() - 1;
+            for (k, p) in pts.iter_mut().enumerate() {
+                let t = k as f32 / last as f32;
+                let wave = (phase + t * waves * std::f32::consts::TAU).sin() - phase.sin();
+                *p += dir * (amp * t.min(0.5) * 2.0 * wave);
+            }
+        }
         guides.push((sp, pts));
     }
     let guide_grid = GuideGrid::new(&guides);
@@ -531,14 +550,20 @@ fn grow_scalp(
         let at_front = fine < 1.0 || (d.z > 0.03 && d.y < 0.07);
         let flyaway = g.points > 5 && !at_front && r.f32() < 0.015;
         let mut pts = grow_hair(a, &g, sp, collider, lm, rest, &mut r, scale);
+        let mut lock_tone = None;
+        // How far out in its lock the hair is (0 on the guide .. 1 at the lock's edge).
+        let mut lock_edge = 0.0;
         // Follow the nearest guide if it is close (a lone hair far from any guide stays free).
         if !flyaway
             && let Some(gi) = guide_grid.nearest(sp.p, &guides)
-            && (guides[gi].0.p - sp.p).length() < if g.gravity > 0.5 { 0.018 } else { 0.012 }
+            && (guides[gi].0.p - sp.p).length() < if g.gravity > 0.5 { 0.025 } else { 0.012 }
         {
             let (gsp, gpts) = &guides[gi];
             let off = sp.p - gsp.p;
-            let c = g.clump * r.range(0.6, 1.0);
+            let c = g.clump * r.range(if g.gravity > 0.5 { 0.8 } else { 0.6 }, 1.0);
+            // The hairs of a lock share most of its tone.
+            lock_tone = Some(hash01(gsp.rest));
+            lock_edge = (off.length() / 0.025).min(1.0);
             let last = pts.len() - 1;
             for (k, p) in pts.iter_mut().enumerate() {
                 let t = k as f32 / last as f32;
@@ -590,12 +615,17 @@ fn grow_scalp(
             &pts,
             g.root_radius * HAIR_WIDTH * thin,
             g.root_radius * HAIR_WIDTH * thin * 0.35,
-            r.f32(),
+            lock_tone.map_or(r.f32(), |l| 0.6 * l + 0.4 * r.f32()),
         );
         // Fine hairline hairs are short, so they don't sit in their own root shadow.
         let n = set.attrs.len();
         for attr in &mut set.attrs[n - g.points as usize..] {
             attr[3] = 1.0 - fine;
+            // Hanging locks part toward their tips, and the hair seen between them is
+            // deeper in shadow: darken each lock's edge.
+            if g.gravity > 0.5 {
+                attr[0] = 1.0 - 0.4 * lock_edge * lock_edge * attr[2].sqrt();
+            }
         }
     }
     Some(set)
@@ -719,6 +749,9 @@ fn grow_hair(
     // Hair is moved off the face toward the side it is combed to.
     let mut face_side = Some(side);
     let jitter = hash01(sp.rest);
+    // Hanging hair wanders smoothly (a random walk of its direction) rather than kinking at
+    // every point, which made long hair look frizzy.
+    let mut drift = Vec3::ZERO;
     for k in 1..n {
         let t = k as f32 / (n - 1) as f32;
         let p_prev = pts[k - 1];
@@ -736,8 +769,13 @@ fn grow_hair(
         } else {
             // Gravity pulls down more as the hair leaves the scalp.
             let pull = Vec3::NEG_Y * (g.gravity * (0.15 + 0.6 * t));
-            let wander =
-                Vec3::new(r.normal(), r.normal(), r.normal()) * (0.015 + 0.025 * g.gravity);
+            let kick = Vec3::new(r.normal(), r.normal(), r.normal());
+            let wander = if g.gravity > 0.5 {
+                drift = drift * 0.85 + kick * 0.012;
+                drift
+            } else {
+                kick * (0.015 + 0.025 * g.gravity)
+            };
             next_dir = (dir + pull + flow.normalize_or(Vec3::NEG_Y) * 0.05 + wander).normalize();
         }
         let mut p = p_prev + next_dir * seg;
@@ -822,7 +860,8 @@ fn occlude(set: &mut StrandSet, head: Vec3) {
         // Near the root the scalp itself shadows too.
         let t = attr[2];
         let root = 0.55 + 0.45 * ((t / 0.25).min(1.0)).max(attr[3]);
-        attr[0] = (-sum * per_cell).exp().max(0.08) * root;
+        // (Times the shade the strand was grown with: the gaps between locks.)
+        attr[0] *= (-sum * per_cell).exp().max(0.08) * root;
     }
 }
 
