@@ -1199,7 +1199,7 @@ fn concrete(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
 }
 
 /// Brick pitch along u and v, meters (215 × 65 mm brick + 10 mm joint).
-const BRICK_PITCH: [f32; 2] = [0.225, 0.075];
+pub(crate) const BRICK_PITCH: [f32; 2] = [0.225, 0.075];
 /// Brick mortar joint width, meters.
 const BRICK_JOINT: f32 = 0.01;
 
@@ -1338,7 +1338,7 @@ fn brick(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
 }
 
 /// Ashlar block pitch along u and v, meters.
-const STONE_PITCH: [f32; 2] = [0.9, 0.45];
+pub(crate) const STONE_PITCH: [f32; 2] = [0.9, 0.45];
 /// Ashlar joint width, meters.
 const STONE_JOINT: f32 = 0.015;
 

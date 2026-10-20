@@ -149,6 +149,42 @@ fn a_breach_charge_opens_drywall_but_only_scars_reinforced_concrete() {
 }
 
 #[test]
+fn a_charge_knocks_whole_bricks_out_of_a_brick_wall() {
+    let mut app = app();
+    let brick_wall = DestructibleWall::masonry(DestructibleMaterial::Brick, 3.0, 3.0, 0.22);
+    let [bw, bh] = brick_wall.brick_size().expect("brick is masonry");
+    let wall = spawn_wall(&mut app, brick_wall, DVec3::ZERO);
+    app.update();
+    let mut c = BreachCharge::explosive(wall, Vec2::new(0.0, 1.2), 4.0e5);
+    c.fuse_secs = 0.1;
+    app.world.spawn(c);
+    run_secs(&mut app, 0.6);
+    let g = &app.world.get::<WallState>(wall).unwrap().grid;
+    // Cells per brick (running bond from x = 0, y = 0) and how many of them are gone.
+    let mut bricks: std::collections::HashMap<(i64, i64), (usize, usize)> = Default::default();
+    for idx in 0..g.len() {
+        let p = g.center(idx);
+        let row = (p.y / bh).floor() as i64;
+        let offset = if row.rem_euclid(2) == 1 {
+            bw * 0.5
+        } else {
+            0.0
+        };
+        let col = ((p.x + offset) / bw).floor() as i64;
+        let e = bricks.entry((col, row)).or_default();
+        e.0 += 1;
+        e.1 += usize::from(!g.solid[idx]);
+    }
+    let out = bricks.values().filter(|(n, gone)| *gone == *n).count();
+    let torn: Vec<_> = bricks
+        .iter()
+        .filter(|(_, (n, gone))| *gone < *n && *gone as f32 >= BRICK_LOSS * *n as f32)
+        .collect();
+    assert!(out >= 5, "the charge knocks out bricks ({out})");
+    assert!(torn.is_empty(), "bricks left torn in half: {torn:?}");
+}
+
+#[test]
 fn plaster_a_charge_throws_crumbles_where_it_lands() {
     let mut app = app();
     let wall = spawn_wall(&mut app, DestructibleWall::soft(3.0, 3.0), DVec3::ZERO);

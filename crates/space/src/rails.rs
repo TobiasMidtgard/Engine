@@ -7,12 +7,18 @@
 //!
 //! A ship that coasts down into a body's air (or into low space over an airless body) drops the
 //! warp back to real time there, so physics flies the reentry or the landing.
+//!
+//! Engines still work on the rails: a railed ship's `ExternalForce` (over its mass) bends its
+//! path through the sped-up time, in short steps, and turning the ship (its `Transform`)
+//! points the burn, so a game can fly maneuvers at any warp.
 
 use std::collections::HashSet;
 
-use engine_core::math::{DQuat, DVec3, Vec3};
+use engine_core::math::{DQuat, DVec3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_world::physics::{BodyKind as Motion, RigidBody, Velocity};
+use engine_world::physics::{
+    BodyKind as Motion, ExternalForce, MassProperties, RigidBody, Velocity,
+};
 
 use crate::conic::Conic;
 use crate::orbit::Orbit;
@@ -34,6 +40,9 @@ pub struct OnRails {
     pub attitude: DQuat,
     /// Space clock time it has been flown to.
     checked: f64,
+    /// The world-from-inertial turn it was placed with, and the rotation it was given, so a
+    /// turn the game makes between frames is kept.
+    placed: (DQuat, Quat),
 }
 
 /// Keeps a body off the rails (something the game moves itself while time is sped up).
@@ -230,6 +239,50 @@ fn next_event(conic: &Conic, p: usize, bodies: &[Body], t0: f64, t1: f64) -> Opt
     None
 }
 
+/// The longest step (space seconds) a burn is applied in; a frame at a high warp is split
+/// into up to [`MAX_BURN_STEPS`] of them.
+const BURN_STEP_S: f64 = 2.0;
+const MAX_BURN_STEPS: usize = 64;
+
+/// Flies `conic` around body `p` from `from` to `to`, handing it from one sphere of influence
+/// to the next. Returns the time it reached the floor (air or low space), if it did.
+fn coast(
+    conic: &mut Conic,
+    p: &mut usize,
+    table: &[Body],
+    from: f64,
+    to: f64,
+    log: &mut RailsLog,
+) -> Option<f64> {
+    let mut from = from;
+    for _ in 0..8 {
+        match next_event(conic, *p, table, from, to) {
+            None => break,
+            Some((at, Event::Floor)) => return Some(at),
+            Some((at, Event::Leave)) => {
+                let Some(parent) = table[*p].parent else {
+                    break;
+                };
+                let (r, v) = conic.state_at(at);
+                let (pr, pv) = table[*p].relative(table[parent].mu, at);
+                *conic = Conic::new(r + pr, v + pv, table[parent].mu, at);
+                *p = parent;
+                from = at;
+                log.handoffs += 1;
+            }
+            Some((at, Event::Enter(c))) => {
+                let (r, v) = conic.state_at(at);
+                let (cr, cv) = table[c].relative(table[*p].mu, at);
+                *conic = Conic::new(r - cr, v - cv, table[c].mu, at);
+                *p = c;
+                from = at;
+                log.handoffs += 1;
+            }
+        }
+    }
+    None
+}
+
 /// After the space module has placed the bodies (`PostUpdate`): fly coasting ships on rails
 /// while the clock runs fast, put free bodies out in space on rails, and hand them back to
 /// physics when it slows to real time.
@@ -333,6 +386,7 @@ pub fn fly(world: &mut World) {
                 conic: Conic::new(rel, vel - then[p].inertial_velocity, table[p].mu, last),
                 attitude: (then_map.0.inverse() * tf.rotation.as_dquat()).normalize(),
                 checked: last,
+                placed: (then_map.0, tf.rotation),
             };
             flights.push((e, rails));
         }
@@ -344,36 +398,44 @@ pub fn fly(world: &mut World) {
             continue;
         };
         let mut conic = rails.conic;
-        let mut from = rails.checked;
-        let mut landed = None;
-        for _ in 0..8 {
-            match next_event(&conic, p, &table, from, t) {
-                None => break,
-                Some((at, Event::Floor)) => {
-                    landed = Some(at);
-                    break;
-                }
-                Some((at, Event::Leave)) => {
-                    let Some(parent) = table[p].parent else {
-                        break;
-                    };
-                    let (r, v) = conic.state_at(at);
-                    let (pr, pv) = table[p].relative(table[parent].mu, at);
-                    conic = Conic::new(r + pr, v + pv, table[parent].mu, at);
-                    p = parent;
-                    from = at;
-                    log.handoffs += 1;
-                }
-                Some((at, Event::Enter(c))) => {
-                    let (r, v) = conic.state_at(at);
-                    let (cr, cv) = table[c].relative(table[p].mu, at);
-                    conic = Conic::new(r - cr, v - cv, table[c].mu, at);
-                    p = c;
-                    from = at;
-                    log.handoffs += 1;
-                }
-            }
+        let entity = world.entity(e);
+        // The game turned the ship since it was placed: hold the new attitude.
+        if let Some(tf) = entity.get::<Transform>()
+            && tf.rotation.angle_between(rails.placed.1) > 1e-5
+        {
+            rails.attitude = (rails.placed.0.inverse() * tf.rotation.as_dquat()).normalize();
         }
+        // Its engines: thrust over mass, turned from the world's axes into inertial ones.
+        let mass = entity
+            .get::<MassProperties>()
+            .map(|m| m.mass_kg)
+            .filter(|m| *m > 0.0)
+            .or_else(|| entity.get::<RigidBody>().and_then(|rb| rb.mass_kg));
+        let accel = entity
+            .get::<ExternalForce>()
+            .zip(mass)
+            .map(|(f, m)| map.0.inverse() * (f.force / m).as_dvec3())
+            .filter(|a| a.length_squared() > 0.0);
+        let landed = match accel {
+            None => coast(&mut conic, &mut p, &table, rails.checked, t, &mut log),
+            Some(a) => {
+                // Burn in short steps: coast each, then add its share of the push.
+                let span = t - rails.checked;
+                let steps = ((span / BURN_STEP_S).ceil() as usize).clamp(1, MAX_BURN_STEPS);
+                let mut landed = None;
+                for i in 0..steps {
+                    let a0 = rails.checked + span * i as f64 / steps as f64;
+                    let a1 = rails.checked + span * (i + 1) as f64 / steps as f64;
+                    landed = coast(&mut conic, &mut p, &table, a0, a1, &mut log);
+                    if landed.is_some() {
+                        break;
+                    }
+                    let (r, v) = conic.state_at(a1);
+                    conic = Conic::new(r, v + a * (a1 - a0), conic.mu, a1);
+                }
+                landed
+            }
+        };
         // Where it is now, around where its body is now.
         let (r, v) = conic.state_at(landed.unwrap_or(t));
         let inertial = states[p].inertial_position + r;
@@ -381,9 +443,10 @@ pub fn fly(world: &mut World) {
         let position = map.0 * inertial + map.1;
         let linear = map.0 * (velocity - here.velocity_at(inertial));
         let mut entity = world.entity_mut(e);
+        let rotation = (map.0 * rails.attitude).normalize().as_quat();
         if let Some(mut tf) = entity.get_mut::<Transform>() {
             tf.translation = position;
-            tf.rotation = (map.0 * rails.attitude).normalize().as_quat();
+            tf.rotation = rotation;
         }
         if let Some(mut vel) = entity.get_mut::<Velocity>() {
             vel.linear = linear.as_vec3();
@@ -402,6 +465,7 @@ pub fn fly(world: &mut World) {
             rails.around = table[p].name.clone();
             rails.conic = Conic::new(r, v, conic.mu, t);
             rails.checked = t;
+            rails.placed = (map.0, rotation);
             entity.insert(rails);
         }
     }
