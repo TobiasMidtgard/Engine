@@ -533,7 +533,12 @@ pub fn step(
         .wind_dir
         .lerp(dir, 1.0 - (-wind_rate * dt_w).exp())
         .normalize_or(dir);
-    air.wind_speed = damp(air.wind_speed, speed, 1.0 / 30.0, dt_w);
+    // Weather switched on at once blows at its own speed now, like its air is its own now.
+    air.wind_speed = if ease {
+        damp(air.wind_speed, speed, 1.0 / 30.0, dt_w)
+    } else {
+        speed
+    };
     air.gustiness = (regime.gustiness + sim.gust_front * 0.5).min(1.0);
 
     // Clouds drift with the wind aloft (stronger than at the ground).
@@ -834,6 +839,30 @@ mod tests {
         run(&mut sim, &mut weather, 2.0);
         write_state(&sim, &mut state);
         assert!(state.temperature_c < 2.0, "{state:?}");
+    }
+
+    #[test]
+    fn a_storm_switched_on_at_once_blows_now() {
+        let mut weather = Weather {
+            preset: WeatherPreset::Clear,
+            transition_s: 0.0,
+            ..Default::default()
+        };
+        let mut sim = WeatherSim::new(&weather);
+        let mut state = WeatherState::default();
+        run(&mut sim, &mut weather, 600.0);
+        weather.preset = WeatherPreset::Storm;
+        run(&mut sim, &mut weather, 2.0);
+        write_state(&sim, &mut state);
+        let storm = WeatherPreset::Storm.regime().wind_speed;
+        assert!(state.wind.length() > storm * 0.95, "{state:?}");
+
+        // A front carrying the weather in still lets the wind drop slowly.
+        weather.transition_s = 600.0;
+        weather.preset = WeatherPreset::Clear;
+        run(&mut sim, &mut weather, 2.0);
+        write_state(&sim, &mut state);
+        assert!(state.wind.length() > storm * 0.8, "{state:?}");
     }
 
     #[test]
