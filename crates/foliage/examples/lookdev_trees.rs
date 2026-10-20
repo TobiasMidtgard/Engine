@@ -436,10 +436,12 @@ fn main() {
         let eye = DVec3::new(0.0, 80.0, 400.0);
         let target = DVec3::new(0.0, 0.0, -2000.0);
         let sun = Vec3::new(-0.6, 0.5, 0.35);
-        // Build every cell at once rather than a few a frame.
-        app.world
-            .resource_mut::<engine_foliage::FarWoods>()
-            .cells_per_frame = u32::MAX;
+        // Build every cell at once, in the frame.
+        {
+            let mut far = app.world.resource_mut::<engine_foliage::FarWoods>();
+            far.background_builds = 0;
+            far.cells_per_frame = u32::MAX;
+        }
         if wanted("far_woods") {
             app.update_n(6);
             shot(&mut app, &out, "far_woods", eye, target, sun);

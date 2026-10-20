@@ -38,7 +38,9 @@ pub struct FarWoods {
     /// closer than `min_spacing_m`.
     pub spacing_per_m: f32,
     pub min_spacing_m: f32,
-    /// Most cells built per frame.
+    /// Worker threads building cells (0: build up to `cells_per_frame` cells in the frame).
+    pub background_builds: u32,
+    /// Most cells built per frame when `background_builds` is 0.
     pub cells_per_frame: u32,
     /// Places with trees of their own (a valley of scenery trees): no far woods within
     /// `radius` meters of `center` (world X/Z).
@@ -61,6 +63,7 @@ impl Default for FarWoods {
             cell_m: 256.0,
             spacing_per_m: 0.01,
             min_spacing_m: 6.0,
+            background_builds: 2,
             cells_per_frame: 6,
             keep_clear: Vec::new(),
         }
@@ -121,10 +124,14 @@ pub(crate) struct FarCard {
     pub shade: f32,
 }
 
+/// Cover lattice step, meters: closer card spacings read the cover from a lattice this fine
+/// (bilinear), so a cell asks the terrain a few hundred times rather than once per tree.
+const COVER_STEP_M: f32 = 16.0;
+
 /// The cards of one cell: candidates every `spacing` meters (jittered), each kept with the
-/// wood's density there and a conifer by its conifer share. `cover` answers for a world
-/// position on the ground; `ground` gives the ground height at a world X/Z. Cards within
-/// `keep_out` (a world X/Z and radius) are left out.
+/// wood's density there and a conifer by its conifer share. `cover` answers for a world X/Z
+/// (`(density, conifer)`); `ground` gives the ground height there (asked only for kept
+/// cards). Cards `keep_out` says are left out.
 pub(crate) fn cell_cards(
     origin: DVec3,
     cell_m: f32,
@@ -134,16 +141,50 @@ pub(crate) fn cell_cards(
     ground: &dyn Fn(DVec3) -> Option<f64>,
     keep_out: &dyn Fn(DVec3) -> bool,
 ) -> Vec<FarCard> {
+    let at = |x: f32, z: f32| origin + DVec3::new(x as f64, 0.0, z as f64);
     // Most of the land is open: a coarse look first, so an open cell costs a few samples.
     const PROBES: i64 = 5;
     let wooded = (0..PROBES * PROBES).any(|k| {
-        let f = |c: i64| (c as f64 + 0.5) / PROBES as f64 * cell_m as f64;
-        let flat = origin + DVec3::new(f(k % PROBES), 0.0, f(k / PROBES));
-        ground(flat).is_some_and(|y| cover(DVec3::new(flat.x, y, flat.z)).is_some())
+        let f = |c: i64| (c as f32 + 0.5) / PROBES as f32 * cell_m;
+        cover(at(f(k % PROBES), f(k / PROBES))).is_some()
     });
     if !wooded {
         return Vec::new();
     }
+    // Density and conifer share (weighted by density) at a cell-local X/Z.
+    let lattice: Option<(usize, Vec<(f32, f32)>)> = (spacing < COVER_STEP_M).then(|| {
+        let n = (cell_m / COVER_STEP_M).ceil() as usize + 1;
+        let values = (0..n * n)
+            .map(|k| {
+                let c = cover(at(
+                    (k % n) as f32 * COVER_STEP_M,
+                    (k / n) as f32 * COVER_STEP_M,
+                ));
+                c.map_or((0.0, 0.0), |(d, c)| (d, c * d))
+            })
+            .collect();
+        (n, values)
+    });
+    let woods_at = |x: f32, z: f32| -> (f32, f32) {
+        match &lattice {
+            Some((n, v)) => {
+                let (fx, fz) = (x / COVER_STEP_M, z / COVER_STEP_M);
+                let (ix, iz) = ((fx as usize).min(n - 2), (fz as usize).min(n - 2));
+                let (tx, tz) = (fx - ix as f32, fz - iz as f32);
+                let g = |i: usize, j: usize| v[j * n + i];
+                let lerp = |a: (f32, f32), b: (f32, f32), t: f32| {
+                    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+                };
+                let (d, c) = lerp(
+                    lerp(g(ix, iz), g(ix + 1, iz), tx),
+                    lerp(g(ix, iz + 1), g(ix + 1, iz + 1), tx),
+                    tz,
+                );
+                (d, if d > 0.0 { c / d } else { 0.0 })
+            }
+            None => cover(at(x, z)).unwrap_or((0.0, 0.0)),
+        }
+    };
     let n = (cell_m / spacing).ceil().max(1.0) as i64;
     let mut cards = Vec::new();
     for j in 0..n {
@@ -154,20 +195,17 @@ pub(crate) fn cell_cards(
             if x >= cell_m || z >= cell_m {
                 continue;
             }
-            let flat = origin + DVec3::new(x as f64, 0.0, z as f64);
+            let (density, conifer) = woods_at(x, z);
+            if h(2) >= density.clamp(0.0, 1.0) {
+                continue;
+            }
+            let flat = at(x, z);
             if keep_out(flat) {
                 continue;
             }
             let Some(y) = ground(flat) else {
                 continue;
             };
-            let at = DVec3::new(flat.x, y, flat.z);
-            let Some((density, conifer)) = cover(at) else {
-                continue;
-            };
-            if h(2) >= density.clamp(0.0, 1.0) {
-                continue;
-            }
             let pick = h(3);
             let tree = if h(4) < conifer.clamp(0.0, 1.0) {
                 if pick < 0.6 {
@@ -184,7 +222,7 @@ pub(crate) fn cell_cards(
             let height = lo + (hi - lo) * h(5);
             cards.push(FarCard {
                 tree,
-                foot: (at - origin).as_vec3(),
+                foot: Vec3::new(x, (y - origin.y) as f32, z),
                 height,
                 width: (height * wide).max(spacing * 1.15),
                 yaw: h(6) * std::f32::consts::PI,
@@ -280,13 +318,87 @@ pub struct FarWoodCell {
     meshes: Vec<Handle<Mesh>>,
 }
 
-/// Streaming state: the grid's origin (moved by world shifts) and the cells by key.
+/// Streaming state: the grid's origin (moved by world shifts), the cells by key and the
+/// cells being built.
 #[derive(Resource, Default)]
 pub struct FarWoodsState {
     origin: DVec3,
     cells: HashMap<(i64, i64), Entity>,
+    pending: HashMap<(i64, i64), Pending>,
     /// Still materials (no sway) per tree kind, made from the species' far leaves.
     materials: HashMap<FarTree, Handle<StandardMaterial>>,
+}
+
+/// A cell being built on a worker thread.
+struct Pending {
+    band: i32,
+    built_from: DVec3,
+    /// Where the cell's corner is (moved by world shifts while it builds).
+    origin: DVec3,
+    build: Build,
+}
+
+/// A cell's build: on a worker thread, or done in the frame.
+enum Build {
+    Running(std::thread::JoinHandle<Vec<(FarTree, Mesh)>>),
+    Ready(Vec<(FarTree, Mesh)>),
+}
+
+impl Build {
+    fn is_done(&self) -> bool {
+        match self {
+            Build::Running(h) => h.is_finished(),
+            Build::Ready(_) => true,
+        }
+    }
+
+    /// The finished meshes (`None` if the worker panicked).
+    fn take(self) -> Option<Vec<(FarTree, Mesh)>> {
+        match self {
+            Build::Running(h) => h.join().ok(),
+            Build::Ready(parts) => Some(parts),
+        }
+    }
+}
+
+/// Everything a cell's build needs, owned, so it can run on a worker thread.
+struct CellJob {
+    origin: DVec3,
+    cell_m: f32,
+    spacing: f32,
+    seed: u64,
+    cam: DVec3,
+    start_m: f32,
+    keep_clear: Vec<KeepClear>,
+    cover: std::sync::Arc<dyn engine_world::ForestQuery>,
+    ground: Option<Ground>,
+}
+
+impl CellJob {
+    fn run(self) -> Vec<(FarTree, Mesh)> {
+        let flat_distance = |p: DVec3| DVec2::new(p.x - self.cam.x, p.z - self.cam.z).length();
+        let keep_out = |p: DVec3| {
+            flat_distance(p) < self.start_m as f64
+                || self.keep_clear.iter().any(|k| {
+                    DVec2::new(p.x - k.center.x, p.z - k.center.z).length() < k.radius as f64
+                })
+        };
+        let ground_y = |p: DVec3| match &self.ground {
+            Some(g) => g.height(DVec3::new(p.x, self.cam.y + 10_000.0, p.z)),
+            None => Some(0.0),
+        };
+        let cover_at = |p: DVec3| self.cover.sample(p).map(|s| (s.density, s.conifer));
+        let cards = cell_cards(
+            self.origin,
+            self.cell_m,
+            self.spacing,
+            self.seed,
+            &cover_at,
+            &ground_y,
+            &keep_out,
+        );
+        cell_meshes(&cards)
+    }
 }
 
 /// Spacing band for a distance: spacing doubles every two bands.
@@ -299,8 +411,25 @@ fn band_spacing(settings: &FarWoods, band: i32) -> f32 {
     settings.min_spacing_m * 2f32.powf(band as f32 * 0.5)
 }
 
+/// Despawn a cell and free its meshes.
+fn drop_cell(
+    e: Entity,
+    cells: &Query<&FarWoodCell>,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+) {
+    if let Ok(c) = cells.get(e) {
+        for &h in &c.meshes {
+            meshes.remove(h);
+        }
+    }
+    commands.entity(e).despawn();
+}
+
 /// Stream the cells around the camera: drop those out of range, build missing ones and
-/// rebuild those that want another spacing, nearest first, a few a frame.
+/// rebuild those that want another spacing, nearest first: on `background_builds` worker
+/// threads (the terrain's answers cost tens of microseconds each), or a few a frame in the
+/// frame itself when that is 0.
 #[allow(clippy::too_many_arguments)]
 pub fn stream_far_woods(
     mut commands: Commands,
@@ -315,18 +444,12 @@ pub fn stream_far_woods(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let drop_cell = |e: Entity, commands: &mut Commands, meshes: &mut Assets<Mesh>| {
-        if let Ok(c) = cells.get(e) {
-            for &h in &c.meshes {
-                meshes.remove(h);
-            }
-        }
-        commands.entity(e).despawn();
-    };
     if !settings.enabled || settings.is_changed() || cover.is_changed() {
         for (_, e) in std::mem::take(&mut state.cells) {
-            drop_cell(e, &mut commands, &mut meshes);
+            drop_cell(e, &cells, &mut commands, &mut meshes);
         }
+        // Builds still running finish on their own; their results are dropped.
+        state.pending.clear();
         if !settings.enabled {
             return;
         }
@@ -337,6 +460,9 @@ pub fn stream_far_woods(
     // The trees' still far materials, once their visuals exist.
     if state.materials.len() < FarTree::ALL.len() {
         for t in FarTree::ALL {
+            if state.materials.contains_key(&t) {
+                continue;
+            }
             let Some(vis) = library.id(t.species()).and_then(|id| visuals.get(id)) else {
                 continue;
             };
@@ -354,14 +480,16 @@ pub fn stream_far_woods(
     let cell_m = settings.cell_m.max(16.0);
     let origin = state.origin;
     let reach = settings.end_m + cell_m;
-    let center = |key: (i64, i64)| {
+    let corner = |key: (i64, i64)| {
         origin
             + DVec3::new(
-                (key.0 as f64 + 0.5) * cell_m as f64,
+                key.0 as f64 * cell_m as f64,
                 0.0,
-                (key.1 as f64 + 0.5) * cell_m as f64,
+                key.1 as f64 * cell_m as f64,
             )
     };
+    let center =
+        |key: (i64, i64)| corner(key) + DVec3::new(cell_m as f64 * 0.5, 0.0, cell_m as f64 * 0.5);
     let flat_distance = |p: DVec3| DVec2::new(p.x - cam.x, p.z - cam.z).length() as f32;
     // Drop cells out of range.
     let gone: Vec<_> = state
@@ -372,7 +500,7 @@ pub fn stream_far_woods(
         .collect();
     for k in gone {
         if let Some(e) = state.cells.remove(&k) {
-            drop_cell(e, &mut commands, &mut meshes);
+            drop_cell(e, &cells, &mut commands, &mut meshes);
         }
     }
     // What each cell in range wants, nearest first.
@@ -385,6 +513,9 @@ pub fn stream_far_woods(
     let mut todo = Vec::new();
     for j in cj - r..=cj + r {
         for i in ci - r..=ci + r {
+            if state.pending.contains_key(&(i, j)) {
+                continue;
+            }
             let d = flat_distance(center((i, j)));
             if d > settings.end_m + half_diag || d + half_diag < settings.start_m {
                 continue;
@@ -401,44 +532,58 @@ pub fn stream_far_woods(
         }
     }
     todo.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let keep_out = |p: DVec3| {
-        flat_distance(p) < settings.start_m
-            || settings
-                .keep_clear
-                .iter()
-                .any(|k| DVec2::new(p.x - k.center.x, p.z - k.center.z).length() < k.radius as f64)
+    let threads = settings.background_builds as usize;
+    let room = if threads > 0 {
+        threads.saturating_sub(state.pending.len())
+    } else {
+        settings.cells_per_frame as usize
     };
-    let ground_y = |p: DVec3| match &ground {
-        Some(g) => g.height(DVec3::new(p.x, cam.y + 10_000.0, p.z)),
-        None => Some(0.0),
-    };
-    let cover_at = |p: DVec3| cover.sample(p).map(|s| (s.density, s.conifer));
-    for (_, key, b) in todo.into_iter().take(settings.cells_per_frame as usize) {
-        let cell_origin = origin
-            + DVec3::new(
-                key.0 as f64 * cell_m as f64,
-                0.0,
-                key.1 as f64 * cell_m as f64,
-            );
-        let seed =
-            (key.0 as u64).wrapping_mul(0x9e37_79b9) ^ (key.1 as u64).wrapping_mul(0x85eb_ca6b);
-        let cards = cell_cards(
-            cell_origin,
+    for (_, key, b) in todo.into_iter().take(room) {
+        let job = CellJob {
+            origin: corner(key),
             cell_m,
-            band_spacing(&settings, b),
-            seed,
-            &cover_at,
-            &ground_y,
-            &keep_out,
+            spacing: band_spacing(&settings, b),
+            seed: (key.0 as u64).wrapping_mul(0x9e37_79b9)
+                ^ (key.1 as u64).wrapping_mul(0x85eb_ca6b),
+            cam,
+            start_m: settings.start_m,
+            keep_clear: settings.keep_clear.clone(),
+            cover: cover.0.clone(),
+            ground: ground.as_deref().cloned(),
+        };
+        let build = if threads > 0 {
+            Build::Running(std::thread::spawn(move || job.run()))
+        } else {
+            Build::Ready(job.run())
+        };
+        state.pending.insert(
+            key,
+            Pending {
+                band: b,
+                built_from: cam,
+                origin: corner(key),
+                build,
+            },
         );
+    }
+    // Place the cells whose builds are done.
+    let done: Vec<_> = state
+        .pending
+        .iter()
+        .filter(|(_, p)| p.build.is_done())
+        .map(|(&k, _)| k)
+        .collect();
+    for key in done {
+        let p = state.pending.remove(&key).expect("pending cell");
+        let Some(parts) = p.build.take() else {
+            continue;
+        };
         if let Some(e) = state.cells.remove(&key) {
-            drop_cell(e, &mut commands, &mut meshes);
+            drop_cell(e, &cells, &mut commands, &mut meshes);
         }
-        let e = commands
-            .spawn(Transform::from_translation(cell_origin))
-            .id();
+        let e = commands.spawn(Transform::from_translation(p.origin)).id();
         let mut handles = Vec::new();
-        for (tree, mesh) in cell_meshes(&cards) {
+        for (tree, mesh) in parts {
             let Some(&material) = state.materials.get(&tree) else {
                 continue;
             };
@@ -454,8 +599,8 @@ pub fn stream_far_woods(
             commands.spawn((Transform::default(), ChildOf(e), r, NoVirtualGeometry));
         }
         commands.entity(e).insert(FarWoodCell {
-            band: b,
-            built_from: cam,
+            band: p.band,
+            built_from: p.built_from,
             meshes: handles,
         });
         state.cells.insert(key, e);
@@ -473,7 +618,12 @@ pub fn follow_world_shift(
     for s in shifts.read() {
         if s.is_translation_only() {
             state.origin = s.point(state.origin);
+            for p in state.pending.values_mut() {
+                p.origin = s.point(p.origin);
+                p.built_from = s.point(p.built_from);
+            }
         } else {
+            state.pending.clear();
             for (_, e) in std::mem::take(&mut state.cells) {
                 if let (Ok(c), Some(meshes)) = (cells.get(e), meshes.as_mut()) {
                     for &h in &c.meshes {
@@ -574,6 +724,7 @@ mod tests {
             start_m: 100.0,
             end_m: 600.0,
             cell_m: 128.0,
+            background_builds: 0,
             cells_per_frame: u32::MAX,
             ..Default::default()
         });
@@ -616,6 +767,20 @@ mod tests {
         );
         let after = app.world.resource::<Assets<Mesh>>().len();
         assert!(after <= meshes + meshes / 10, "{after} vs {meshes}");
+        // On worker threads (the default): the same cells arrive over a few frames.
+        app.world.resource_mut::<FarWoods>().background_builds = 2;
+        let mut frames = 0;
+        while cells
+            .iter(&app.world)
+            .filter(|(c, _)| !c.meshes.is_empty())
+            .count()
+            < drawn.len() / 2
+        {
+            app.update();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            frames += 1;
+            assert!(frames < 5000, "worker builds never arrived");
+        }
     }
 
     #[test]
