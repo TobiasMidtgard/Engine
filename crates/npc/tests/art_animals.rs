@@ -210,9 +210,14 @@ fn camera(app: &mut App, eye: DVec3, target: DVec3, fov: f32) -> Entity {
 /// there" count in the middle of the frame.
 fn busy(img: &image::RgbaImage) -> usize {
     let (w, h) = img.dimensions();
+    busy_in(img, (w / 4, h / 4), (w * 3 / 4, h * 3 / 4))
+}
+
+/// [`busy`] over the pixels from `from` up to (not including) `to`.
+fn busy_in(img: &image::RgbaImage, from: (u32, u32), to: (u32, u32)) -> usize {
     let mut n = 0;
-    for y in h / 4..h * 3 / 4 {
-        for x in w / 4..w * 3 / 4 {
+    for y in from.1..to.1 {
+        for x in from.0..to.0 {
             let p = img.get_pixel(x, y);
             let q = img.get_pixel(x.saturating_sub(3), y);
             let d: i32 = (0..3).map(|i| (p[i] as i32 - q[i] as i32).abs()).sum();
@@ -1870,7 +1875,10 @@ fn live_shot(
     std::fs::create_dir_all(&dir).expect("dir");
     let img = shoot(app, cam, &dir, name).expect("rendering");
     app.world.despawn(cam);
-    check(name, &img);
+    // The animals are small and anywhere in these, so look over all of the picture.
+    let busy = busy_in(&img, (0, 0), img.dimensions());
+    eprintln!("{name}: {busy} busy px");
+    assert!(busy > 400, "{name}: the animals should show up ({busy} px)");
     img
 }
 
@@ -1903,16 +1911,30 @@ fn role_colour(r: PackRole) -> u32 {
 /// A pack of four hunting a herd of four from above, the wounded deer furthest from it:
 /// balls over the wolves in the colours of their parts (orange the tester, blue and purple
 /// the left and right flankers, yellow the ambusher), red over the quarry, and crumbs where
-/// each has been. The PNG is `animal_live_pack_hunt.png`.
+/// each has been. The hunt is run once to time it, then again for three moments of the
+/// stalk, four of the chase and one just after the kill. The PNG is
+/// `animal_live_pack_hunt.png`.
 #[test]
 #[ignore = "full-size pictures: run with --ignored"]
 fn a_pack_hunt_from_above() {
-    let Some(mut app) = live_app((640, 640)) else {
+    let Some((rush, kill)) = pack_hunt(None) else {
         return;
     };
+    eprintln!("the pack rushes at {rush:.2} s and kills at {kill:.2} s");
+    let mut plan = vec![2.0, rush * 0.5, rush - 0.4];
+    plan.extend((0..4).map(|k| rush + (kill - rush) * k as f64 / 4.0));
+    plan.push(kill + 0.3);
+    pack_hunt(Some(&plan));
+}
+
+/// The hunt of [`a_pack_hunt_from_above`], shot at the moments of `plan` (seconds from the
+/// start) when there is one: when the first wolf set off running, and when the quarry fell.
+fn pack_hunt(plan: Option<&[f64]>) -> Option<(f64, f64)> {
+    let mut app = live_app((640, 640))?;
     let deer = live_herd(&mut app, Species::Deer, DVec3::ZERO, 4, 1);
     let pack = live_herd(&mut app, Species::Wolf, DVec3::new(0.0, 0.0, -45.0), 4, 2);
-    app.update();
+    // A first step of their lives (which sets up their minds), then the pack is hungry.
+    tick(&mut app, deer[0]);
     for &w in &pack {
         app.world.get_mut::<AnimalMind>(w).unwrap().hunger = 1.0;
     }
@@ -1926,8 +1948,7 @@ fn a_pack_hunt_from_above() {
     let mut rush: Option<f64> = None;
     let mut killed: Option<f64> = None;
     let mut last_crumb = f64::MIN;
-    let plan = [1.0, 9.0, 17.0];
-    while frames.len() < FRAMES {
+    loop {
         tick(&mut app, clock);
         let t = now_of(&app, clock) - start;
         assert!(t < 90.0, "the hunt took too long");
@@ -1959,37 +1980,56 @@ fn a_pack_hunt_from_above() {
                 ball(&mut app, p + DVec3::Y * 0.05, 0.14, QUARRY);
             }
         }
-        let due = match frames.len() {
-            n if n < plan.len() => t >= plan[n],
-            n => {
-                rush.is_some_and(|r| t >= r + 0.7 * (n - plan.len()) as f64)
-                    || killed.is_some_and(|k| t >= k + 0.3)
+        let Some(plan) = plan else {
+            match (rush, killed) {
+                (Some(r), Some(k)) => return Some((r, k)),
+                _ => continue,
             }
         };
-        if !due {
+        if frames.len() == plan.len() {
+            break;
+        }
+        if t < plan[frames.len()] {
             continue;
         }
         let mut marks = Vec::new();
-        let mut sum = DVec3::ZERO;
+        let mut seen = Vec::new();
         for &w in &pack {
             let m = mind_of(&app, w);
             let (rgb, p) = (role_colour(m.role), at(&app, w));
-            sum += p;
+            seen.push(p);
             marks.push(ball(&mut app, p + DVec3::Y * 1.6, 0.8, rgb));
         }
-        if let Some(q) = mind_of(&app, pack[0]).prey {
-            let p = at(&app, q);
-            sum += p * 4.0;
-            marks.push(ball(&mut app, p + DVec3::Y * 2.0, 0.9, QUARRY));
-        }
-        let mid = sum / 8.0;
-        let view = (mid + DVec3::new(0.0, 75.0, 0.01), mid, Vec3::NEG_Z);
+        let wolves = seen.iter().sum::<DVec3>() / seen.len() as f64;
+        // Midway between the pack and its quarry (the herd, before it has one), high enough
+        // to take in every wolf with some ground around.
+        let quarry = match mind_of(&app, pack[0]).prey {
+            Some(q) => {
+                let p = at(&app, q);
+                marks.push(ball(&mut app, p + DVec3::Y * 2.0, 0.9, QUARRY));
+                p
+            }
+            None => deer.iter().map(|&d| at(&app, d)).sum::<DVec3>() / deer.len() as f64,
+        };
+        seen.push(quarry);
+        let mid = (wolves + quarry) / 2.0;
+        let reach = seen
+            .iter()
+            .map(|p| (p.x - mid.x).abs().max((p.z - mid.z).abs()))
+            .fold(0.0, f64::max);
+        let high = ((reach + 6.0) / 22f64.to_radians().tan()).clamp(30.0, 75.0);
+        let view = (mid + DVec3::new(0.0, high, 0.01), mid, Vec3::NEG_Z);
         let name = format!("animal_live_pack_hunt_{}.png", frames.len());
         eprintln!(
-            "frame {} at {t:.2} s: rush {rush:?}, kill {killed:?}, roles {:?}",
+            "frame {} at {t:.2} s: {:.0} m up, rush {rush:?}, kill {killed:?}, roles {:?}, \
+             states {:?}",
             frames.len(),
+            high,
             pack.iter()
                 .map(|&w| mind_of(&app, w).role.name())
+                .collect::<Vec<_>>(),
+            pack.iter()
+                .map(|&w| mind_of(&app, w).state)
                 .collect::<Vec<_>>()
         );
         frames.push(live_shot(&mut app, view, 44.0, &name));
@@ -1998,9 +2038,10 @@ fn a_pack_hunt_from_above() {
         }
     }
     side_by_side(&frames, "animal_live_pack_hunt.png");
+    Some((rush.unwrap_or(0.0), killed.unwrap_or(0.0)))
 }
 
-/// A deer that can't outrun the wolf after it, from close behind and low: it runs straight
+/// A wary deer that can't outrun the wolf after it, from close behind and low: it runs straight
 /// while the wolf is well back and cuts from side to side once it is close (white crumbs
 /// where the deer ran, orange where the wolf did). The PNG is `animal_live_zigzag.png`.
 #[test]
@@ -2013,7 +2054,11 @@ fn a_chased_deer_zigzags() {
         .world
         .spawn((
             Transform::from_translation(DVec3::ZERO),
-            Animal::new(Species::Deer),
+            Animal {
+                skittishness: 6.0,
+                range: 200.0,
+                ..Animal::new(Species::Deer)
+            },
             Herd(1),
             StandIn::default(),
             NpcMotor {
@@ -2024,7 +2069,7 @@ fn a_chased_deer_zigzags() {
         ))
         .id();
     let wolf = live_animal(&mut app, Species::Wolf, DVec3::new(0.0, 0.0, -30.0), 2);
-    app.update();
+    tick(&mut app, deer);
     app.world.get_mut::<AnimalMind>(wolf).unwrap().hunger = 1.0;
     let clock = deer;
     let start = now_of(&app, clock);
@@ -2044,19 +2089,23 @@ fn a_chased_deer_zigzags() {
             ball(&mut app, w + DVec3::Y * 0.03, 0.07, TESTER);
         }
         let gap = Vec3::new((d.x - w.x) as f32, 0.0, (d.z - w.z) as f32);
-        // From when the wolf is 10 m back: two frames as it closes, then the cuts.
-        if chasing && close.is_none() && gap.length() < 10.0 {
+        // From when the wolf is 8 m back: a frame as it closes, then the cuts.
+        if chasing && close.is_none() && gap.length() < 8.0 {
             close = Some(t);
             line = Some(gap.normalize());
         }
         let Some(c) = close else { continue };
-        if t < c + 0.25 * frames.len() as f64 {
+        if t < c + 0.3 * frames.len() as f64 {
             continue;
         }
+        // From up behind and off to the deer's left, looking between the two, so the wolf
+        // doesn't hide the deer and the crumbs show the cuts on the ground.
         let ahead = line.unwrap().as_dvec3();
+        let left = DVec3::new(ahead.z, 0.0, -ahead.x);
+        let mid = (d + w) / 2.0 + DVec3::Y * 0.6;
         let view = (
-            d - ahead * 11.0 + DVec3::Y * 2.4,
-            d + ahead * 4.0 + DVec3::Y * 0.6,
+            mid - ahead * 7.0 + left * 8.0 + DVec3::Y * 6.0,
+            mid,
             Vec3::Y,
         );
         let name = format!("animal_live_zigzag_{}.png", frames.len());
