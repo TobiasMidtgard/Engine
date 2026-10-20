@@ -766,7 +766,8 @@ impl Landscape {
         if slope > 0.32 {
             return Cover::Rock;
         }
-        if h < LAKE_LEVEL - 0.15 {
+        // (The valley floor dips below the lake's level in places, away from the lake.)
+        if h < LAKE_LEVEL - 0.15 && self.lake_t(x, z) < 1.05 {
             return Cover::LakeBed;
         }
         if let Some(road) = self.road_at(DVec2::new(x, z))
@@ -884,6 +885,23 @@ impl Landscape {
     /// Color of the cave roof's top: the hillside, as if there were no cave below.
     pub fn roof_color(&self, x: f64, z: f64, h: f64, normal: Vec3) -> Vec3 {
         self.paint(x, z, h, normal, true)
+    }
+
+    /// 0 = fresh .. 1 = dry, of the meadow grass at (x, z): where the ground paint yellows
+    /// (dry stretches and hay drifts), damp and green by the streams and the lake.
+    pub fn grass_dryness(&self, x: f64, z: f64) -> f32 {
+        let s = self.seed;
+        let n1 = fbm2(x / 55.0, z / 55.0, s + 20, 4, 2.0, 0.5) * 0.5 + 0.5;
+        let n2 = fbm2(x / 9.0, z / 9.0, s + 21, 3, 2.0, 0.5) * 0.5 + 0.5;
+        let dry = (n1 * 0.8 + n2 * 0.25 - 0.25).clamp(0.0, 1.0);
+        let drift = fbm2(x / 70.0 + 3.1, z / 70.0, s + 23, 3, 2.0, 0.5);
+        let hay = smoothstep(0.15, 0.5, drift);
+        let by_stream = self
+            .stream_at(x, z)
+            .map_or(0.0, |(d, _)| 1.0 - smoothstep(4.0, 28.0, d as f32));
+        let by_lake = 1.0 - smoothstep(1.15, 1.6, self.lake_t(x, z) as f32);
+        let t = (dry * 0.55 + hay * 0.5).min(1.0);
+        t * (1.0 - by_stream.max(by_lake) * 0.8)
     }
 
     fn paint(&self, x: f64, z: f64, h: f64, normal: Vec3, roofed: bool) -> Vec3 {

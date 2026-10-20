@@ -22,9 +22,11 @@ use std::sync::{Arc, Mutex};
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
 use engine_render::{Image, StandardMaterial};
+use engine_world::animation::BodyRequest;
 use serde::{Deserialize, Serialize};
 
 use crate::animator::{AnimationLibrary, AnimatorSettings};
+use crate::face::Face;
 use crate::muscle::{MorphWeights, MuscleRig};
 use crate::procedural::spring::SpringChains;
 use crate::retarget::{Retarget, Retargeter};
@@ -241,6 +243,8 @@ pub fn add_locomotion(
                 }
             }
             if role == "walk" {
+                // The generated slow walk wouldn't match the captured one.
+                motion.slow_walk.clear();
                 motion.walk = name;
                 motion.walk_speed = info.speed.max(0.3);
             } else {
@@ -1055,6 +1059,16 @@ fn wear(world: &mut World, entity: Entity, model: &HumanModel, loaded: &LoadedHu
         Retarget::new(loaded.retargeter.clone()),
         AppliedHumanModel(model.key()),
     ));
+    if !e.contains::<Face>() {
+        // Seeded from what the requester set, else from where the person stands: entity ids
+        // shift whenever any crate adds a resource or message, so they make poor seeds.
+        let seed = e.get::<BodyRequest>().map(|r| r.seed).unwrap_or_else(|| {
+            let at = e.get::<Transform>().map_or(DVec3::ZERO, |t| t.translation);
+            let cm = |v: f64| (v * 100.0).round() as i64 as u64;
+            cm(at.x) ^ cm(at.y).rotate_left(21) ^ cm(at.z).rotate_left(42)
+        });
+        e.insert(Face::seeded(seed.wrapping_add(1)));
+    }
     match &loaded.ponytail {
         Some(p) => {
             e.insert(SpringChains::new(vec![p.clone()]));

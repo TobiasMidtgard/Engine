@@ -7,6 +7,7 @@ struct StrandOut {
     @location(2) t_shade: vec2<f32>,
     @location(3) @interpolate(flat) groom: u32,
     @location(4) @interpolate(flat) seed: f32,
+    @location(5) wet: f32,
 };
 
 @vertex
@@ -27,6 +28,7 @@ fn vs_strand(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instan
     out.t_shade = vec2<f32>(p.t, p.shade);
     out.groom = p.groom;
     out.seed = p.seed;
+    out.wet = p.wet;
     return out;
 }
 
@@ -34,12 +36,14 @@ fn vs_strand(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instan
 // reflection off the cuticle (R) shifted toward the root, a colored glint that went through
 // the fiber and back (TRT) shifted toward the tip and broken up into sparkles along it, and
 // light passing straight through (TT) that makes backlit hair glow. Every strand varies a
-// little in brightness and warmth, and strands deep at the root get less light.
+// little in brightness and warmth, and strands deep at the root get less light. Wet hair is
+// darker and deeper in color, with a sharper, brighter shine off the film of water.
 @fragment
 fn fs_strand(in: StrandOut) -> @location(0) vec4<f32> {
     let g = grooms[in.groom];
     let warm = vec3(1.0 + 0.06 * (in.seed - 0.5), 1.0, 1.0 - 0.08 * (in.seed - 0.5));
-    let albedo = g.color.rgb * in.t_shade.y * warm;
+    let dry = g.color.rgb * in.t_shade.y * warm;
+    let albedo = mix(dry, pow(dry, vec3(1.3)) * 0.7, in.wet);
     let t = safe_normalize(in.tangent, vec3(0.0, 1.0, 0.0));
     let v = normalize(-in.rel);
     let n = safe_normalize(v - t * dot(v, t), safe_normalize(cross(t, vec3(0.0, 0.0, 1.0)), vec3(1.0, 0.0, 0.0)));
@@ -55,7 +59,8 @@ fn fs_strand(in: StrandOut) -> @location(0) vec4<f32> {
         let t2 = normalize(t - n * 0.15);
         let th1 = dot(t1, h);
         let th2 = dot(t2, h);
-        let spec1 = pow(sqrt(max(1.0 - th1 * th1, 0.0)), 90.0) * 0.06;
+        let spec1 = pow(sqrt(max(1.0 - th1 * th1, 0.0)), mix(90.0, 220.0, in.wet))
+            * mix(0.06, 0.16, in.wet);
         let glint = 0.55 + 0.9 * value_noise2(vec2(in.t_shade.x * 18.0, in.seed * 97.0));
         let spec2 = pow(sqrt(max(1.0 - th2 * th2, 0.0)), 24.0) * 0.12 * glint;
         // Transmission: strongest looking toward the sun through the hair.

@@ -2,7 +2,7 @@
 //! No GPU needed (mesh assets exist, nothing renders).
 
 use engine_assets::AssetAppExt;
-use engine_core::math::{DVec3, Vec2, Vec3};
+use engine_core::math::{DVec3, Quat, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_core::registry::call_api;
 use engine_core::time::TimeSource;
@@ -149,6 +149,67 @@ fn a_breach_charge_opens_drywall_but_only_scars_reinforced_concrete() {
 }
 
 #[test]
+fn a_charge_knocks_whole_bricks_out_of_a_brick_wall() {
+    let mut app = app();
+    let brick_wall = DestructibleWall::masonry(DestructibleMaterial::Brick, 3.0, 3.0, 0.22);
+    let [bw, bh] = brick_wall.brick_size().expect("brick is masonry");
+    let wall = spawn_wall(&mut app, brick_wall, DVec3::ZERO);
+    app.update();
+    let mut c = BreachCharge::explosive(wall, Vec2::new(0.0, 1.2), 4.0e5);
+    c.fuse_secs = 0.1;
+    app.world.spawn(c);
+    run_secs(&mut app, 0.6);
+    let g = &app.world.get::<WallState>(wall).unwrap().grid;
+    // Cells per brick (running bond from x = 0, y = 0) and how many of them are gone.
+    let mut bricks: std::collections::HashMap<(i64, i64), (usize, usize)> = Default::default();
+    for idx in 0..g.len() {
+        let p = g.center(idx);
+        let row = (p.y / bh).floor() as i64;
+        let offset = if row.rem_euclid(2) == 1 {
+            bw * 0.5
+        } else {
+            0.0
+        };
+        let col = ((p.x + offset) / bw).floor() as i64;
+        let e = bricks.entry((col, row)).or_default();
+        e.0 += 1;
+        e.1 += usize::from(!g.solid[idx]);
+    }
+    let out = bricks.values().filter(|(n, gone)| *gone == *n).count();
+    let torn: Vec<_> = bricks
+        .iter()
+        .filter(|(_, (n, gone))| *gone < *n && *gone as f32 >= BRICK_LOSS * *n as f32)
+        .collect();
+    assert!(out >= 5, "the charge knocks out bricks ({out})");
+    assert!(torn.is_empty(), "bricks left torn in half: {torn:?}");
+}
+
+#[test]
+fn plaster_a_charge_throws_crumbles_where_it_lands() {
+    let mut app = app();
+    let wall = spawn_wall(&mut app, DestructibleWall::soft(3.0, 3.0), DVec3::ZERO);
+    app.update();
+    let mut c = BreachCharge::explosive(wall, Vec2::new(0.0, 1.2), 4.0e5);
+    c.fuse_secs = 0.1;
+    app.world.spawn(c);
+    run_secs(&mut app, 4.0);
+    let mut q = app.world.query::<(&Debris, &Transform)>();
+    let slabs: Vec<DVec3> = q
+        .iter(&app.world)
+        .filter(|(d, t)| {
+            !d.chip && DVec3::new(t.translation.x, 0.0, t.translation.z).length() > 3.0
+        })
+        .map(|(_, t)| t.translation)
+        .collect();
+    assert!(
+        slabs.is_empty(),
+        "plaster slabs lie whole far from the wall: {slabs:?}"
+    );
+    let stats = app.world.resource::<DestructionStats>();
+    assert!(stats.pieces_broken > 0, "thrown pieces crumbled");
+}
+
+#[test]
 fn debris_piles_up_on_resting_chunks_and_falls_when_they_go() {
     let mut app = app();
     let half = Vec3::new(0.5, 0.1, 0.4);
@@ -190,6 +251,212 @@ fn debris_piles_up_on_resting_chunks_and_falls_when_they_go() {
     app.world.despawn(below);
     run_secs(&mut app, 2.0);
     assert!((y(&app) - 0.1).abs() < 0.03, "on the ground: {}", y(&app));
+}
+
+#[test]
+fn rock_debris_lands_on_ledges_and_slides_off_rock_walls() {
+    let mut app = app();
+    // A 6 m block of rock, 6 m tall: its front half is cut back to a ledge 3 m up, so a 3 m
+    // wall rises behind the ledge with its face at z = 0, toward +Z.
+    let rock = VoxelVolume {
+        dims: [24, 24, 16],
+        voxel_size: 0.25,
+        shape: VoxelShape::Solid,
+        topsoil: None,
+        grass: None,
+        ..VoxelVolume::default()
+    };
+    app.world.spawn((Transform::default(), rock));
+    app.update();
+    app.world.write_message(TerrainEdit {
+        center: DVec3::new(0.0, 4.75, 1.5),
+        shape: EditShape::Box {
+            half_extents: Vec3::new(3.5, 1.75, 1.5),
+            rotation: Quat::IDENTITY,
+        },
+        op: EditOp::Remove,
+        surface: None,
+        source: None,
+    });
+    app.update();
+    let half = Vec3::splat(0.3);
+    let corners: Vec<Vec3> = (0..8)
+        .map(|k| {
+            let s = |b: usize| if k & b == 0 { -1.0 } else { 1.0 };
+            half * Vec3::new(s(1), s(2), s(4))
+        })
+        .collect();
+    let mut boulder = |at: DVec3| {
+        app.world
+            .spawn((
+                Transform::from_translation(at),
+                Debris {
+                    mass_kg: 600.0,
+                    material: DestructibleMaterial::Rock,
+                    lifetime: 600.0,
+                    ..Default::default()
+                },
+                debris::DebrisBody::new(600.0, half, corners.clone(), 0.6),
+            ))
+            .id()
+    };
+    // One drops onto the ledge from above.
+    let dropped = boulder(DVec3::new(-1.5, 5.0, 1.0));
+    // One broke off just under the wall's top and sits 10 cm into its face: the face pushes
+    // it out and it falls to the ledge, instead of being lifted onto the wall's top.
+    let rim = boulder(DVec3::new(1.5, 5.4, 0.2));
+    run_secs(&mut app, 3.0);
+    let at = |e: Entity| app.world.get::<Transform>(e).unwrap().translation;
+    let (a, b) = (at(dropped), at(rim));
+    assert!((a.y - 3.3).abs() < 0.08, "lands on the ledge: {a}");
+    assert!(
+        (b.y - 3.3).abs() < 0.08,
+        "slid off the wall onto the ledge: {b}"
+    );
+    assert!(b.z > 0.27, "out of the wall's face: {b}");
+    for e in [dropped, rim] {
+        assert!(app.world.get::<debris::DebrisBody>(e).unwrap().asleep);
+    }
+}
+
+#[test]
+fn rock_cut_loose_drops_through_its_narrowing_hole_onto_the_cave_floor() {
+    let mut app = app();
+    // A 6 m block of rock with a cave inside, its floor 1 m up, and a shaft from the block's
+    // top down into the cave's roof: 1.4 m wide for its top metre, 1 m wide below.
+    let rock = VoxelVolume {
+        dims: [24, 24, 16],
+        voxel_size: 0.25,
+        shape: VoxelShape::Solid,
+        topsoil: None,
+        grass: None,
+        ..VoxelVolume::default()
+    };
+    app.world.spawn((Transform::default(), rock));
+    app.update();
+    for (center, half) in [
+        (DVec3::new(1.5, 2.0, 0.0), Vec3::new(1.3, 1.0, 1.3)),
+        (DVec3::new(1.5, 5.55, 0.0), Vec3::new(0.7, 0.55, 0.7)),
+        (DVec3::new(1.5, 4.0, 0.0), Vec3::new(0.5, 1.0, 0.5)),
+    ] {
+        app.world.write_message(TerrainEdit {
+            center,
+            shape: EditShape::Box {
+                half_extents: half,
+                rotation: Quat::IDENTITY,
+            },
+            op: EditOp::Remove,
+            surface: None,
+            source: None,
+        });
+    }
+    app.update();
+    // A 1.2 m boulder broken loose in the shaft's wide top: rather than hang on the step where
+    // the shaft narrows, it drops out through the rock around it (as a cave-in's roof does),
+    // then lands on the cave's rock floor, not on the ground under the block.
+    let half = Vec3::splat(0.6);
+    let corners: Vec<Vec3> = (0..8)
+        .map(|k| {
+            let s = |b: usize| if k & b == 0 { -1.0 } else { 1.0 };
+            half * Vec3::new(s(1), s(2), s(4))
+        })
+        .collect();
+    let at = DVec3::new(1.5, 5.65, 0.0);
+    let mut body = debris::DebrisBody::new(4000.0, half, corners, 0.6);
+    body.rock = debris::RockContact::Leaving(at);
+    let boulder = app
+        .world
+        .spawn((
+            Transform::from_translation(at),
+            Debris {
+                mass_kg: 4000.0,
+                material: DestructibleMaterial::Rock,
+                lifetime: 600.0,
+                ..Default::default()
+            },
+            body,
+        ))
+        .id();
+    run_secs(&mut app, 3.0);
+    let p = app.world.get::<Transform>(boulder).unwrap().translation;
+    assert!((p.y - 1.6).abs() < 0.08, "on the cave floor: {p}");
+    let body = app.world.get::<debris::DebrisBody>(boulder).unwrap();
+    assert!(body.asleep && body.rock == debris::RockContact::Lands);
+}
+
+#[test]
+fn a_thin_rock_roof_holds_debris_up_and_cut_rock_drops_through_its_hole() {
+    let mut app = app();
+    // A 6 m block of rock hollowed into a cave up to a roof one voxel (25 cm) thick, with a
+    // 1 m hole through the roof.
+    let rock = VoxelVolume {
+        dims: [24, 24, 16],
+        voxel_size: 0.25,
+        shape: VoxelShape::Solid,
+        topsoil: None,
+        grass: None,
+        ..VoxelVolume::default()
+    };
+    app.world.spawn((Transform::default(), rock));
+    app.update();
+    for (center, half) in [
+        (DVec3::new(0.0, 3.375, 0.0), Vec3::new(2.7, 2.375, 1.7)),
+        (DVec3::new(1.5, 5.9, 0.0), Vec3::new(0.5, 0.3, 0.5)),
+    ] {
+        app.world.write_message(TerrainEdit {
+            center,
+            shape: EditShape::Box {
+                half_extents: half,
+                rotation: Quat::IDENTITY,
+            },
+            op: EditOp::Remove,
+            surface: None,
+            source: None,
+        });
+    }
+    app.update();
+    let boulder = |app: &mut App, at: DVec3, half: f32, rock: debris::RockContact| {
+        let half = Vec3::splat(half);
+        let corners: Vec<Vec3> = (0..8)
+            .map(|k| {
+                let s = |b: usize| if k & b == 0 { -1.0 } else { 1.0 };
+                half * Vec3::new(s(1), s(2), s(4))
+            })
+            .collect();
+        let mut body = debris::DebrisBody::new(1000.0, half, corners, 0.6);
+        body.rock = rock;
+        app.world
+            .spawn((
+                Transform::from_translation(at),
+                Debris {
+                    mass_kg: 1000.0,
+                    material: DestructibleMaterial::Rock,
+                    lifetime: 600.0,
+                    ..Default::default()
+                },
+                body,
+            ))
+            .id()
+    };
+    // One drops onto the roof: the cave under it doesn't pull it through.
+    let on_roof = boulder(
+        &mut app,
+        DVec3::new(-1.5, 7.0, 0.0),
+        0.3,
+        debris::RockContact::Unknown,
+    );
+    // One cut loose above the hole, wider than it: it drops through, and lands on the cave's
+    // floor rather than hanging by its top on the roof once its corners are clear.
+    let at = DVec3::new(1.5, 6.7, 0.0);
+    let cut = boulder(&mut app, at, 0.6, debris::RockContact::Leaving(at));
+    run_secs(&mut app, 3.0);
+    let y = |e: Entity| app.world.get::<Transform>(e).unwrap().translation.y;
+    assert!(
+        (y(on_roof) - 6.3).abs() < 0.08,
+        "on the roof: {}",
+        y(on_roof)
+    );
+    assert!((y(cut) - 1.6).abs() < 0.08, "on the cave floor: {}", y(cut));
 }
 
 #[test]
@@ -1426,7 +1693,23 @@ fn standing_pieces_are_solid_with_a_physics_module() {
             ),
         ))
         .id();
+    let ladder = app
+        .world
+        .spawn((
+            Transform::from_xyz(8.0, 1.6, -6.0),
+            dress::PropModel::new(props::PropKind::SteelLadder { height: 3.18 }, 2),
+            engine_world::Climbable::ladder(Vec3::ZERO, Vec3::Y * 3.0, Vec3::NEG_Z),
+        ))
+        .id();
     app.update();
+    let rungs = app
+        .world
+        .get::<Collider>(ladder)
+        .expect("the ladder has a surface");
+    assert!(
+        rungs.sensor && !app.world.get::<Collider>(pillar).unwrap().sensor,
+        "a climber passes through the ladder's box, not the pillar's"
+    );
     assert_eq!(
         app.world.get::<Collider>(crate_e).map(|c| c.shape.clone()),
         Some(ColliderShape::Cuboid {

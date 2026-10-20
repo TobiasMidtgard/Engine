@@ -8,9 +8,11 @@ use engine_world::VehicleControls;
 use engine_world::physics::Velocity;
 use serde_json::{Value, json};
 
+use crate::aero::Aircraft;
 use crate::autopilot::{Autopilot, AutopilotMode};
 use crate::chassis::{Vehicle, VehicleTelemetry};
 use crate::presets;
+use crate::ship::{AssistMode, HeatShield, Spacecraft};
 
 fn vec3_arg(args: &Value, key: &str) -> Result<Option<DVec3>, String> {
     match args.get(key) {
@@ -80,7 +82,25 @@ fn spawn_api(world: &mut World, args: Value) -> Result<Value, String> {
         e
     };
     world.flush();
+    // Spawned with its gear up: stowed from the start, as for a ship already in flight.
+    if let Some(down) = gear_arg(&args)? {
+        let mut aircraft = world
+            .get_mut::<Aircraft>(entity)
+            .ok_or("gear: only an aircraft has retractable gear")?;
+        aircraft.gear_down = down;
+        aircraft.gear = if down { 1.0 } else { 0.0 };
+    }
     Ok(json!({"id": entity.to_bits()}))
+}
+
+/// `"gear": "up"` or `"down"`: whether the landing gear is wanted out.
+fn gear_arg(args: &Value) -> Result<Option<bool>, String> {
+    match args.get("gear") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(g)) if g.eq_ignore_ascii_case("up") => Ok(Some(false)),
+        Some(Value::String(g)) if g.eq_ignore_ascii_case("down") => Ok(Some(true)),
+        Some(other) => Err(format!("gear: \"up\" or \"down\", not {other}")),
+    }
 }
 
 fn place_api(world: &mut World, args: Value) -> Result<Value, String> {
@@ -101,7 +121,17 @@ fn place_api(world: &mut World, args: Value) -> Result<Value, String> {
     } else {
         0.0
     };
-    let rotation = DQuat::from_rotation_y(-yaw.to_radians()).as_quat();
+    let angle = |key: &str| {
+        args.get(key)
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0)
+            .to_radians()
+    };
+    // Yaw, then the nose up by pitch, then the right wing down by roll.
+    let rotation = (DQuat::from_rotation_y(-yaw.to_radians())
+        * DQuat::from_rotation_x(angle("pitch_deg"))
+        * DQuat::from_rotation_z(-angle("roll_deg")))
+    .as_quat();
     let forward = rotation * Vec3::NEG_Z;
     let speed = args.get("speed").and_then(Value::as_f64).unwrap_or(0.0) as f32;
     let linear = match vec3_arg(&args, "velocity")? {
@@ -124,6 +154,11 @@ fn place_api(world: &mut World, args: Value) -> Result<Value, String> {
         i.reset();
     }
     crate::wheels::set_rolling(world, e, linear.dot(forward));
+    if let Some(k) = args.get("hull_temperature_k").and_then(Value::as_f64)
+        && let Some(mut shield) = world.get_mut::<HeatShield>(e)
+    {
+        shield.temperature_k = k as f32;
+    }
     // A path follower looks for its place on the path again, and a pilot picks its phase
     // (and runway) afresh (a drift keeps its phase).
     if let Some(mut ap) = world.get_mut::<Autopilot>(e)
@@ -175,13 +210,43 @@ fn control_api(world: &mut World, args: Value) -> Result<Value, String> {
         }
     }
     controls = serde_json::from_value(v).map_err(|e| e.to_string())?;
+    let assist = match args.get("assist") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            serde_json::from_value::<AssistMode>(v.clone()).map_err(|e| format!("assist: {e}"))?,
+        ),
+    };
+    if let Some(down) = gear_arg(&args)? {
+        let mut aircraft = world
+            .get_mut::<Aircraft>(e)
+            .ok_or("gear: only an aircraft has retractable gear")?;
+        aircraft.gear_down = down;
+    }
+    if let Some(mode) = assist {
+        let mut ship = world
+            .get_mut::<Spacecraft>(e)
+            .ok_or("assist: only a spacecraft has a flight assist")?;
+        ship.assist.mode = mode;
+    }
     // A human (or AI) at the wheel: the autopilot lets go.
     if let Some(mut ap) = world.get_mut::<Autopilot>(e) {
         ap.mode = AutopilotMode::Off;
         ap.phase.clear();
     }
     world.entity_mut(e).insert(controls);
-    serde_json::to_value(controls).map_err(|e| e.to_string())
+    let mut out = serde_json::to_value(controls).map_err(|e| e.to_string())?;
+    if let Value::Object(out) = &mut out {
+        if let Some(ship) = world.get::<Spacecraft>(e) {
+            out.insert("assist".into(), json!(ship.assist.mode));
+        }
+        if let Some(aircraft) = world.get::<Aircraft>(e) {
+            out.insert(
+                "gear".into(),
+                json!(if aircraft.gear_down { "down" } else { "up" }),
+            );
+        }
+    }
+    Ok(out)
 }
 
 fn autopilot_api(world: &mut World, args: Value) -> Result<Value, String> {
@@ -227,8 +292,8 @@ pub(crate) fn register(app: &mut App) {
     .register_api(
         "vehicles.spawn",
         "Spawn a vehicle preset at a point (world meters; resting on the ground there unless \
-         on_ground is false), facing yaw_deg (0 = −Z, 90 = +X), optionally named and with an \
-         autopilot. Returns its id.",
+         on_ground is false), facing yaw_deg (0 = −Z, 90 = +X), optionally named, with an \
+         autopilot and with its gear \"up\" (stowed) or \"down\". Returns its id.",
         r#"{"preset": "sports_car", "at": [0, 0, 0], "yaw_deg": 90, "name": "Red car", "autopilot": {"Drive": {"path": [[0,0,0],[100,0,0],[100,0,100]], "looped": true, "max_speed": 30, "lateral_g": 0.8}}}"#,
         spawn_api,
     )
@@ -238,7 +303,8 @@ pub(crate) fn register(app: &mut App) {
          false), facing yaw_deg (0 = −Z, 90 = +X), moving at speed (m/s, along the nose) or \
          velocity ([x, y, z] m/s) and turning left at yaw_rate_deg (°/s), with its wheels \
          rolling and its gearbox in the matching gear. A driving autopilot finds its place on \
-         its path again.",
+         its path again. Optional pitch_deg (nose up) and roll_deg (right wing down) tilt \
+         it; hull_temperature_k heats a spacecraft's heat shield, as re-entry would.",
         r#"{"vehicle": "Red car", "at": [120, 0, -40], "yaw_deg": 150, "speed": 30}"#,
         place_api,
     )
@@ -251,7 +317,9 @@ pub(crate) fn register(app: &mut App) {
     .register_api(
         "vehicles.control",
         "Drive a vehicle by hand: set any of throttle, brake (0..1), steer, pitch, yaw, lift, \
-         strafe (−1..1), handbrake, boost. Turns its autopilot off.",
+         strafe (−1..1), handbrake, boost, the landing gear (\"up\" or \"down\", folding over \
+         6 s) and a spacecraft's flight assist (Off, Rotation, Full or Hover). Turns its \
+         autopilot off.",
         r#"{"vehicle": "Red car", "throttle": 1.0, "steer": -0.3}"#,
         control_api,
     )

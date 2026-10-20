@@ -3,11 +3,11 @@
 //! A stand-in backend here only moves bodies by their velocity (the real solver is tested by
 //! the physics module); runs with or without the fetched models.
 
-use engine_anim::ragdoll::{BLEND_OUT_SECS, RAGDOLL_LAYER};
-use engine_anim::{AnimationPlugin, RagdollPart, RagdollRig};
+use engine_anim::ragdoll::{BLEND_OUT_SECS, GET_UP_BLEND_SECS, RAGDOLL_LAYER};
+use engine_anim::{AnimationPlugin, RagdollPart, RagdollRig, RagdollTone};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
-use engine_world::animation::{BodyRequest, Ragdoll, SkeletonPose};
+use engine_world::animation::{AnimationEvent, BodyRequest, Ragdoll, SkeletonPose};
 use engine_world::physics::{
     CharacterController, Collider, ContactEvent, ContactPhase, ExternalForce, Joint, RigidBody,
     Velocity, claim_backend,
@@ -40,6 +40,14 @@ fn listen(mut heard: ResMut<Heard>, mut contacts: MessageReader<GroundContact>) 
     heard.0.extend(contacts.read().copied());
 }
 
+/// Animation events, by name.
+#[derive(Resource, Default)]
+struct Said(Vec<String>);
+
+fn listen_events(mut said: ResMut<Said>, mut events: MessageReader<AnimationEvent>) {
+    said.0.extend(events.read().map(|e| e.name.clone()));
+}
+
 fn app(physics: bool) -> App {
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -52,7 +60,8 @@ fn app(physics: bool) -> App {
     }
     app.world.resource_mut::<FixedTime>().set_hz(60.0);
     app.world.init_resource::<Heard>();
-    app.add_systems(Last, listen);
+    app.world.init_resource::<Said>();
+    app.add_systems(Last, (listen, listen_events));
     app
 }
 
@@ -206,6 +215,88 @@ fn a_walker_goes_limp_keeps_moving_and_comes_back() {
     assert!(!app.world.get::<RagdollRig>(e).unwrap().is_blending_back());
 }
 
+/// Make `e` limp, topple every part forward about its feet onto the floor (then move it by
+/// `shift`) and let it lie still.
+fn lay_face_down(app: &mut App, e: Entity, shift: DVec3) {
+    app.world.entity_mut(e).insert(Ragdoll { weight: 1.0 });
+    app.update();
+    let topple = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+    let lift = DVec3::new(0.0, 0.12, 0.0) + shift;
+    for (p, _) in parts(app) {
+        let mut t = app.world.get_mut::<Transform>(p).unwrap();
+        t.translation = (topple * t.translation.as_vec3()).as_dvec3() + lift;
+        t.rotation = topple * t.rotation;
+        app.world.get_mut::<Velocity>(p).unwrap().linear = Vec3::ZERO;
+    }
+    wait(app, 0.5);
+}
+
+#[test]
+fn a_body_moved_far_from_its_entity_stands_up_there_without_a_get_up() {
+    let mut app = app(true);
+    let e = person(&mut app);
+    wait(&mut app, 0.5);
+    lay_face_down(&mut app, e, DVec3::new(5.0, 0.0, 0.0));
+    app.world.get_mut::<Ragdoll>(e).unwrap().weight = 0.0;
+    app.update();
+    app.update();
+    let rig = app.world.get::<RagdollRig>(e).unwrap();
+    assert!(rig.is_blending_back() && rig.getting_up().is_none());
+    wait(&mut app, BLEND_OUT_SECS as f64 + 0.1);
+    let standing = bone(&app, e, "hips");
+    assert!(
+        standing.y > 0.8 && standing.x.abs() < 0.1,
+        "stands at {standing}"
+    );
+}
+
+#[test]
+fn a_body_lying_face_down_gets_up_off_its_front_and_stands_on_its_entity() {
+    let mut app = app(true);
+    let e = person(&mut app);
+    wait(&mut app, 0.5);
+    lay_face_down(&mut app, e, DVec3::ZERO);
+    let lying = bone(&app, e, "hips");
+    assert!(
+        lying.y < 0.3 && lying.z < -0.6,
+        "lies face down ahead: {lying}"
+    );
+
+    app.world.resource_mut::<Said>().0.clear();
+    app.world.get_mut::<Ragdoll>(e).unwrap().weight = 0.0;
+    app.update();
+    app.update();
+    let rig = app.world.get::<RagdollRig>(e).unwrap();
+    assert_eq!(rig.getting_up(), Some("get_up_front"));
+    assert!(
+        app.world
+            .resource::<Said>()
+            .0
+            .iter()
+            .any(|n| n == "getting_up")
+    );
+    // It starts from where it lay, not from its feet.
+    let early = bone(&app, e, "hips");
+    assert!(early.y < 0.45, "starts on the floor: {early}");
+
+    // Halfway, it is still near where it lay and off the floor's surface.
+    wait(&mut app, 0.9);
+    let head = bone(&app, e, "head");
+    assert!(head.y > 0.2, "head off the floor: {head}");
+    wait(&mut app, 2.0 + GET_UP_BLEND_SECS as f64);
+    assert!(app.world.resource::<Said>().0.iter().any(|n| n == "got_up"));
+    let rig = app.world.get::<RagdollRig>(e).unwrap();
+    assert!(!rig.is_blending_back() && rig.getting_up().is_none());
+    let standing = bone(&app, e, "hips");
+    let origin = app.world.get::<GlobalTransform>(e).unwrap().translation();
+    assert!(
+        standing.y > origin.y + 0.8
+            && (standing.x - origin.x).abs() < 0.1
+            && (standing.z - origin.z).abs() < 0.25,
+        "stands on its entity: {standing} vs {origin}"
+    );
+}
+
 #[test]
 fn half_limp_bodies_are_pulled_toward_the_animation_and_held_up() {
     let mut app = app(true);
@@ -225,6 +316,66 @@ fn half_limp_bodies_are_pulled_toward_the_animation_and_held_up() {
         f.force
     );
     assert!(f.force.y > 100.0, "held up against gravity: {}", f.force);
+}
+
+#[test]
+fn a_toned_limp_body_holds_its_shape_without_being_held_up_and_relaxes_on_landing() {
+    let mut app = app(true);
+    let e = person(&mut app);
+    wait(&mut app, 0.5);
+    app.world
+        .entity_mut(e)
+        .insert((Ragdoll { weight: 1.0 }, RagdollTone::default()));
+    app.update();
+    let ps = parts(&mut app);
+    let forearm = ps.iter().find(|p| p.1.bone == "lower_arm_l").unwrap().0;
+    // Bend the forearm away from the pose: tone turns it back, with no force on any part.
+    let mut t = app.world.get_mut::<Transform>(forearm).unwrap();
+    t.rotation = Quat::from_rotation_x(1.0) * t.rotation;
+    app.update();
+    let f = app.world.get::<ExternalForce>(forearm).unwrap();
+    assert!(
+        f.torque.length() > 1.0,
+        "toned joint turns back: {}",
+        f.torque
+    );
+    for (p, _) in &ps {
+        let f = app.world.get::<ExternalForce>(*p).unwrap();
+        assert!(
+            f.force.length() < 1e-3,
+            "no pull and no support: {}",
+            f.force
+        );
+    }
+
+    // A hard hit lands it, and it goes slack.
+    wait(&mut app, 0.2);
+    let ground = app.world.spawn(Transform::default()).id();
+    app.world.write_message(ContactEvent {
+        phase: ContactPhase::Started,
+        a: forearm,
+        b: ground,
+        point: DVec3::new(0.0, 0.1, 0.0),
+        normal: Vec3::NEG_Y,
+        impulse: 40.0,
+        sensor: false,
+    });
+    app.update();
+    assert!(app.world.get::<RagdollTone>(e).unwrap().landed);
+    wait(&mut app, 0.3);
+    let tone = app.world.get::<RagdollTone>(e).unwrap();
+    assert_eq!(tone.tone, 0.0);
+    app.update();
+    let mut t = app.world.get_mut::<Transform>(forearm).unwrap();
+    t.rotation = Quat::from_rotation_x(1.0) * t.rotation;
+    app.update();
+    let slack = app
+        .world
+        .get::<ExternalForce>(forearm)
+        .unwrap()
+        .torque
+        .length();
+    assert!(slack < 20.0, "only friction once slack: {slack}");
 }
 
 #[test]

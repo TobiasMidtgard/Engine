@@ -194,9 +194,20 @@ pub struct RenderSettings {
     /// takes the regular instanced path.
     pub virtual_geometry: bool,
     /// Meshes with at least this many triangles take the cluster path. Smaller ones (props,
-    /// debris, fragments) are cheaper instanced; `MeshRenderer::virtual_geometry = false` keeps
-    /// a dense mesh off it too.
+    /// debris, fragments) are cheaper instanced; the `NoVirtualGeometry` marker keeps a dense
+    /// mesh off it too. Meshes with a `Displacement` take it whatever their triangle count.
     pub virtual_geometry_min_triangles: u32,
+    /// Occlusion culling of virtual geometry: clusters hidden behind what the depth prepass
+    /// drew (tested against last frame's depth, then this frame's) are not drawn.
+    pub virtual_geometry_occlusion: bool,
+    /// Keep built cluster hierarchies (and displaced tessellations) on disk, keyed by a hash of
+    /// the mesh and its displacement, so the next start loads them instead of building again.
+    pub virtual_geometry_cache: bool,
+    /// Folder of that cache; empty: `ENGINE_VG_CACHE`, else the user cache folder's
+    /// `engine/virtual-geometry`.
+    pub virtual_geometry_cache_dir: String,
+    /// Size budget of the cache folder, megabytes (least recently used builds go first).
+    pub virtual_geometry_cache_mb: u32,
     /// Largest geometric error a cluster may show on screen, pixels (lower = more triangles).
     pub cluster_error_px: f32,
     /// The same for shadow maps, in shadow map texels (cascade texels are much larger than
@@ -261,11 +272,32 @@ impl Default for RenderSettings {
             night_desaturation: 0.7,
             virtual_geometry: true,
             virtual_geometry_min_triangles: 50_000,
+            virtual_geometry_occlusion: true,
+            virtual_geometry_cache: true,
+            virtual_geometry_cache_dir: String::new(),
+            virtual_geometry_cache_mb: 2048,
             cluster_error_px: 1.0,
             cluster_shadow_error_texels: 2.0,
             material_texture_size: 1024,
             release_image_pixels: false,
         }
+    }
+}
+
+impl RenderSettings {
+    /// Show colors as authored, for pure 2D art (unlit sprites and tile maps, pixel art): no
+    /// tonemapping curve ([`Tonemapper::None`]: 1.0 is white), no grading, vignette, film grain,
+    /// bloom or night desaturation. Turn bloom back on for glowing sprites (colors above 1).
+    pub fn with_flat_colors(mut self) -> Self {
+        self.tonemapper = Tonemapper::None;
+        self.saturation = 1.0;
+        self.contrast = 1.0;
+        self.vignette = 0.0;
+        self.film_grain = 0.0;
+        self.white_balance = 0.0;
+        self.bloom_intensity = 0.0;
+        self.night_desaturation = 0.0;
+        self
     }
 }
 
@@ -428,11 +460,24 @@ impl Atmosphere {
     ///   Atmospheres using Mie Theory" (Computer Graphics Forum 43(2), Table 1: refractive
     ///   index n − 1 = 3.37e-6, depolarization 0.09), at 680, 550 and 440 nm: about 1.8 % of
     ///   Earth's.
-    /// - Dust: scattering and absorption at the surface from the same table (Mie theory for
-    ///   ~1.4 µm feldspar grains with 3 % hematite, which absorbs blue): albedo 0.96 red,
-    ///   0.83 green, 0.69 blue. Mixed through the gas's 11.1 km scale height, as Costa et al.
-    ///   2021 ("Interactive Visualization of Atmospheric Effects for Celestial Bodies", IEEE
-    ///   TVCG) do, it gives a vertical optical depth of 0.34: Mars' clear season.
+    /// - Dust: single-scattering albedo from the same table (Mie theory for ~1.4 µm feldspar
+    ///   grains with 3 % hematite, which absorbs blue): 0.96 red, 0.83 green, 0.69 blue. A
+    ///   vertical optical depth of 0.34 above datum: Mars' clear season (Gale's 880 nm record,
+    ///   taken 4.5 km below datum, runs from about 0.3 in the clear season to 1.5 in storms;
+    ///   Spirit's fell below 0.3, Lemmon et al. 2015, "Dust aerosol, clouds, and the atmospheric
+    ///   optical depth record over 5 Mars years of the Mars Exploration Rover mission", Icarus
+    ///   251).
+    /// - The dust thins over a 16 km scale height, not the gas's 11.1 km (which Costa et al.
+    ///   2021 assumed): the same column with less of it near the ground. Lemmon et al. fit 11.9
+    ///   km to Spirit's sky and 19.2 km to Opportunity's, which needed more dust up high; in the
+    ///   clear season the dust's mixing ratio peaks in layers 15–25 km up (Heavens et al. 2011,
+    ///   JGR 116, Mars Climate Sounder); and from inside Gale crater Curiosity measured less
+    ///   extinction along its line of sight to the rim, about 30 km away, than the column
+    ///   would give if well mixed, for most of the year (Moore et al. 2016, Icarus 264). Near
+    ///   the ground that is 0.022 per km (red): the rim of a crater 30 km away is seen through
+    ///   an optical depth of about 0.66. Below datum (canyon and crater floors) the air keeps
+    ///   datum's density: those deep floors hold no more dust than the plains (Moore et al.
+    ///   found Gale's floor a dust sink).
     /// - Anisotropy 0.7, rising toward blue (0.64, 0.7, 0.8): a single forward lobe can't hold
     ///   the diffraction peak, which for these grains is narrower and stronger in blue (and
     ///   stronger still where hematite absorbs blue, which Schneegans et al. name as a cause of
@@ -449,12 +494,12 @@ impl Atmosphere {
             planet_radius: radius,
             thickness: 100_000.0,
             rayleigh_scale_height: 11_100.0,
-            mie_scale_height: 11_100.0,
+            mie_scale_height: 16_000.0,
             mie_g: 0.7,
             ground_color: [0.3, 0.16, 0.08],
             rayleigh_scattering: [0.102e-6, 0.238e-6, 0.580e-6],
-            mie_scattering: [30.67e-6, 25.39e-6, 20.93e-6],
-            mie_absorption: [1.26e-6, 5.25e-6, 9.33e-6],
+            mie_scattering: [21.28e-6, 17.61e-6, 14.52e-6],
+            mie_absorption: [0.874e-6, 3.642e-6, 6.473e-6],
             ozone_absorption: [0.0; 3],
             mie_g_offset: [-0.06, 0.0, 0.1],
             density_scale: 1.0,

@@ -267,46 +267,62 @@ pub fn lip_ring(c: Vec3, n: Vec3, r: f32, tube_r: f32, sx: f32, sy: f32) -> Mesh
     tube(&path, |_| tube_r, 10, false)
 }
 
-/// Exhaust stubs: two per side under the cowl. Returns the pipes and their dark inner ends.
-pub fn exhausts() -> (Mesh, Mesh) {
-    let mut pipes = Mesh::default();
-    let mut ends = Mesh::default();
-    for side in [1.0f32, -1.0] {
-        for (k, dz) in [0.0f32, 0.075].into_iter().enumerate() {
+/// Exhaust stub tube radius, m.
+const STUB_R: f32 = 0.026;
+
+/// The exhaust stubs' center lines: two per side under the cowl, right side first.
+fn stub_paths() -> impl Iterator<Item = [Vec3; 4]> {
+    [1.0f32, -1.0].into_iter().flat_map(|side| {
+        [0.0f32, 0.075].into_iter().enumerate().map(move |(k, dz)| {
             let x = side * (0.20 + 0.035 * k as f32);
-            let path = [
+            [
                 Vec3::new(x * 0.9, -0.32, -2.36 + dz),
                 Vec3::new(x * 0.95, -0.39, -2.27 + dz),
                 Vec3::new(x, -0.45, -2.16 + dz),
                 Vec3::new(x * 1.02, -0.475, -2.08 + dz),
-            ];
-            let mut p = tube(&path, |_| 0.026, 16, false);
-            // Heat tint: straw to blue to dark toward the exit.
-            tint(&mut p, |pos, _| {
-                let t = ((pos.z - (-2.36 + dz)) / 0.28).clamp(0.0, 1.0);
-                let straw = Vec3::new(0.95, 0.80, 0.55);
-                let blue = Vec3::new(0.55, 0.55, 0.75);
-                let soot = Vec3::new(0.18, 0.16, 0.15);
-                let c = if t < 0.5 {
-                    straw.lerp(blue, t * 2.0)
-                } else {
-                    blue.lerp(soot, (t - 0.5) * 2.0)
-                };
-                c.extend(1.0)
-            });
-            pipes.merge(&p);
-            // A dark disc a little inside the open end.
-            let dir = (path[3] - path[2]).normalize();
-            let c = path[3] - dir * 0.01;
-            let ring: Vec<Vec3> = (0..16)
-                .map(|j| {
-                    let a = j as f32 / 16.0 * TAU;
-                    let q = Quat::from_rotation_arc(Vec3::Z, dir);
-                    c + q * Vec3::new(a.cos(), a.sin(), 0.0) * 0.024
-                })
-                .collect();
-            ends.merge(&fan(&ring, dir, |_| Vec2::ZERO));
-        }
+            ]
+        })
+    })
+}
+
+/// Each stub's open end: center, the way the gas leaves, and radius.
+pub fn exhaust_exits() -> Vec<(Vec3, Vec3, f32)> {
+    stub_paths()
+        .map(|path| (path[3], (path[3] - path[2]).normalize(), STUB_R))
+        .collect()
+}
+
+/// Exhaust stubs: two per side under the cowl. Returns the pipes and their dark inner ends.
+pub fn exhausts() -> (Mesh, Mesh) {
+    let mut pipes = Mesh::default();
+    let mut ends = Mesh::default();
+    for path in stub_paths() {
+        let mut p = tube(&path, |_| STUB_R, 16, false);
+        // Heat tint: straw to blue to dark toward the exit.
+        tint(&mut p, |pos, _| {
+            let t = ((pos.z - path[0].z) / 0.28).clamp(0.0, 1.0);
+            let straw = Vec3::new(0.95, 0.80, 0.55);
+            let blue = Vec3::new(0.55, 0.55, 0.75);
+            let soot = Vec3::new(0.18, 0.16, 0.15);
+            let c = if t < 0.5 {
+                straw.lerp(blue, t * 2.0)
+            } else {
+                blue.lerp(soot, (t - 0.5) * 2.0)
+            };
+            c.extend(1.0)
+        });
+        pipes.merge(&p);
+        // A dark disc a little inside the open end.
+        let dir = (path[3] - path[2]).normalize();
+        let c = path[3] - dir * 0.01;
+        let ring: Vec<Vec3> = (0..16)
+            .map(|j| {
+                let a = j as f32 / 16.0 * TAU;
+                let q = Quat::from_rotation_arc(Vec3::Z, dir);
+                c + q * Vec3::new(a.cos(), a.sin(), 0.0) * 0.024
+            })
+            .collect();
+        ends.merge(&fan(&ring, dir, |_| Vec2::ZERO));
     }
     (pipes, ends)
 }

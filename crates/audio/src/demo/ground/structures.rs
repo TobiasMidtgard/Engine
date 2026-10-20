@@ -5,7 +5,9 @@ use engine_core::math::{DVec3, Mat3, Quat, Vec2, Vec3, Vec4};
 use engine_core::prelude::*;
 use engine_render::{Mesh, PointLight};
 
-use super::procgen::{Rand, append, beveled_box, fbm_world, hex, smooth, tube, unit, vert};
+use super::procgen::{
+    Rand, append, beveled_box, beveled_box_segs, fbm_world, hex, smooth, tube, unit, vert,
+};
 use super::ribbon::{self, PATH_Y, Ribbon, Surf, columns, frame, point};
 use super::{Batch, Mat, Out, Part, sky_volume};
 use crate::ReverbZone;
@@ -131,58 +133,103 @@ pub(super) fn boardwalk() -> Out {
         s = e;
     }
 
-    // Planks across, with gaps, each with its own grain, tone and wear.
-    let pitch = 0.152;
-    let mut s = s0 + 0.012 + pitch * 0.5;
-    let tones = [
-        Vec3::new(1.0, 1.0, 1.0),
-        Vec3::new(0.9, 0.93, 0.97),
-        Vec3::new(1.06, 0.98, 0.88),
-        Vec3::new(0.82, 0.82, 0.82),
-        Vec3::new(0.97, 0.94, 0.9),
-    ];
-    while s < s1 - pitch * 0.4 {
-        let tone = tones[rng.below(tones.len())] * rng.range(0.9, 1.08);
-        let len = 2.6 + rng.normal(0.01);
+    // Planks across, with gaps, each with its own width, grain, wear and state: most
+    // silvered by the weather or still brown, some dark with damp, the odd newer
+    // replacement, a few green with moss along their edges. Laid by hand: lengths, ends and
+    // lines wander a little, and every board has cupped as it dried.
+    let gap = 0.012;
+    let mut edge = s0 + 0.012;
+    while edge < s1 - 0.1 {
+        let width = [0.12f32, 0.14, 0.14, 0.16][rng.below(4)];
+        let s = edge + width as f64 * 0.5;
+        if s + width as f64 * 0.5 > s1 - 0.012 {
+            break;
+        }
+        edge += width as f64 + gap + rng.normal(0.0015) as f64;
+        let state = rng.f();
+        let (tint, mossy) = if state < 0.4 {
+            (Vec3::new(0.85, 0.97, 1.15) * 1.08, false)
+        } else if state < 0.7 {
+            (Vec3::new(1.0, 0.95, 0.86), false)
+        } else if state < 0.85 {
+            (Vec3::new(0.62, 0.62, 0.64), false)
+        } else if state < 0.92 {
+            (Vec3::new(1.12, 1.02, 0.82) * 1.08, false)
+        } else {
+            (Vec3::new(0.9, 0.94, 0.9), true)
+        };
+        let tone = tint * rng.range(0.88, 1.06);
+        let len = 2.6 + rng.range(-0.04, 0.04);
         let off = Vec2::new(rng.range(0.0, 2.0), rng.range(0.0, 0.5));
         let moss_seed = rng.seed();
+        let cup = rng.range(0.0008, 0.0018);
         // Grit and dust carried on from the gravel, over the first boards.
         let carried = 1.0 - smooth(0.0, 1.8, (s - s0) as f32);
-        let mesh = beveled_box(Vec3::new(len, 0.028, 0.14), 0.0045, 0.2, off, |p| {
-            let ax = p.x.abs();
-            let end = smooth(0.95, 1.3, ax);
-            let worn = 1.0 - smooth(0.2, 0.7, ax);
-            let moss = end
-                * smooth(
+        let mut mesh = beveled_box_segs(
+            Vec3::new(len, 0.028, width),
+            0.0045,
+            Vec3::new(0.2, 1.0, 0.035),
+            off,
+            |p| {
+                let ax = p.x.abs();
+                let end = smooth(0.95, 1.3, ax);
+                let worn = 1.0 - smooth(0.2, 0.7, ax);
+                let side_edge = smooth(width * 0.3, width * 0.5, p.z.abs());
+                let patchy = smooth(
                     0.2,
                     0.6,
                     unit(super::procgen::hash((p.x * 8.0) as i32, 0, moss_seed)),
                 );
-            let under = 1.0 - smooth(-0.014, 0.0, p.y);
-            let c = tone * (1.0 + 0.1 * worn) * (1.0 - 0.3 * end) * (1.0 - 0.45 * under);
-            let c = c.lerp(Vec3::new(0.32, 0.4, 0.18), moss * 0.55);
-            let grit = carried
-                * (0.35 + 0.65 * worn)
-                * smooth(
-                    -0.3,
-                    0.3,
-                    fbm_world(p.x * 2.0, s as f32 * 3.0, 0.5, 2, moss_seed),
-                );
-            c.lerp(Vec3::new(0.62, 0.58, 0.52), grit * 0.6).extend(1.0)
-        });
+                let moss = (end + if mossy { 0.8 * side_edge } else { 0.0 }).min(1.0) * patchy;
+                let under = 1.0 - smooth(-0.014, 0.0, p.y);
+                let c = tone * (1.0 + 0.1 * worn) * (1.0 - 0.3 * end) * (1.0 - 0.45 * under);
+                let c = c.lerp(Vec3::new(0.3, 0.37, 0.18), moss * 0.55);
+                let grit = carried
+                    * (0.35 + 0.65 * worn)
+                    * smooth(
+                        -0.3,
+                        0.3,
+                        fbm_world(p.x * 2.0, s as f32 * 3.0, 0.5, 2, moss_seed),
+                    );
+                c.lerp(Vec3::new(0.62, 0.58, 0.52), grit * 0.6).extend(1.0)
+            },
+        );
+        // Cupped: the edges of the top a millimeter or two higher than its middle.
+        for v in &mut mesh.vertices {
+            if v.normal[1] > 0.5 {
+                let z = v.position[2] / (width * 0.5);
+                v.position[1] += cup * z * z;
+                let slope = 2.0 * cup * z / (width * 0.5);
+                v.normal = Vec3::new(v.normal[0], v.normal[1], v.normal[2] - slope)
+                    .normalize()
+                    .to_array();
+            }
+        }
         let rot = trail_rot(s)
-            * Quat::from_rotation_y(rng.normal(0.004))
+            * Quat::from_rotation_y(rng.normal(0.008))
             * Quat::from_rotation_z(rng.normal(0.003));
-        let at = point(s, rng.normal(0.01), PATH_Y - 0.014 + rng.normal(0.0008));
+        let at = point(
+            s,
+            rng.range(-0.025, 0.025),
+            PATH_Y - 0.014 - cup * 0.5 + rng.normal(0.0012),
+        );
         append(b.at(s, Mat::Planks), &mesh, rot, Vec3::ONE, at, Vec4::ONE);
-        // Two nails into every joist.
+        // Two nails into every joist (now and then one missing or standing proud).
+        let inset = width * 0.5 - 0.028;
         for &x in &joists {
-            for dz in [-0.042f32, 0.042] {
-                let p = point(s - dz as f64, x + rng.normal(0.004), PATH_Y + 0.0002);
+            for dz in [-inset, inset] {
+                if rng.chance(0.04) {
+                    continue;
+                }
+                let proud = if rng.chance(0.06) { 0.0015 } else { 0.0 };
+                let p = point(
+                    s - (dz + rng.normal(0.003)) as f64,
+                    x + rng.normal(0.004),
+                    PATH_Y + 0.0002 + proud,
+                );
                 nail(b.at(s, Mat::Steel), p, &mut rng);
             }
         }
-        s += pitch + rng.normal(0.002) as f64;
     }
     // End beams closing the boardwalk.
     for ss in [s0 + 0.035, s1 - 0.035] {
@@ -221,63 +268,89 @@ fn railings_timber(out: &mut Out, rng: &mut Rand, s0: f64, s1: f64) {
     let x = 1.37;
     let post_h = 1.08;
     let n = ((s1 - s0) / 1.8).round().max(1.0) as usize;
-    out.shared.push(("bw-post".into(), {
-        let mut m = beveled_box(
-            Vec3::new(0.095, post_h + 0.1, 0.095),
-            0.01,
-            0.3,
-            Vec2::new(0.3, 0.1),
-            |p| timber_color(p + Vec3::Y * (post_h + 0.1) * 0.5, 0.1, Vec3::splat(0.8)),
-        );
-        let cap = pyramid(0.052, 0.04, Vec4::new(0.6, 0.6, 0.6, 1.0));
-        append(
-            &mut m,
-            &cap,
-            Quat::IDENTITY,
-            Vec3::ONE,
-            Vec3::Y * ((post_h + 0.1) * 0.5),
-            Vec4::ONE,
-        );
-        m
-    }));
+    // Four posts cut from different stock: their own grain window, tone and weathering.
+    const POSTS: usize = 4;
+    for k in 0..POSTS {
+        let tone = [0.8f32, 0.72, 0.86, 0.68][k];
+        let tint = [
+            Vec3::new(1.0, 0.97, 0.92),
+            Vec3::new(0.9, 0.95, 1.05),
+            Vec3::new(1.02, 0.96, 0.88),
+            Vec3::new(0.92, 0.94, 0.96),
+        ][k] * tone;
+        let off = Vec2::new(rng.range(0.0, 2.0), rng.range(0.0, 0.5));
+        let half = (post_h + 0.1) * 0.5;
+        out.shared.push((format!("bw-post:{k}"), {
+            let mut m = beveled_box(Vec3::new(0.095, post_h + 0.1, 0.095), 0.01, 0.3, off, |p| {
+                // Weathered grey at the top, where rain runs off the end grain.
+                let top = smooth(half - 0.25, half, p.y);
+                let c = timber_color(p + Vec3::Y * half, 0.1, tint);
+                (c.truncate() * Vec3::ONE.lerp(Vec3::new(0.82, 0.86, 0.9), top * 0.6)).extend(1.0)
+            });
+            let cap = pyramid(0.052, 0.04, (tint * 0.62).extend(1.0));
+            append(
+                &mut m,
+                &cap,
+                Quat::IDENTITY,
+                Vec3::ONE,
+                Vec3::Y * half,
+                Vec4::ONE,
+            );
+            m
+        }));
+    }
     for side in [-1.0f32, 1.0] {
         for k in 0..=n {
             let s = s0 + 0.12 + (s1 - s0 - 0.24) * k as f64 / n as f64;
             let at = point(s, side * x, (post_h - 0.1) * 0.5);
             out.parts.push(Part::shared(
-                "bw-post",
+                &format!("bw-post:{}", rng.below(POSTS)),
                 Mat::Timber,
                 at,
-                trail_rot(s) * Quat::from_rotation_y(rng.normal(0.01)),
+                trail_rot(s)
+                    * Quat::from_rotation_y(rng.normal(0.03))
+                    * Quat::from_rotation_z(rng.normal(0.012))
+                    * Quat::from_rotation_x(rng.normal(0.01)),
                 Vec3::ONE,
             ));
         }
-        // Top rail (a flat cap rail) and a mid rail on the inner faces, in pieces.
+        // Top rail (a flat cap rail) and a mid rail on the inner faces, in pieces of
+        // different lengths and stock: greyer on top where the weather gets at them, darker
+        // at their ends.
         let mut s = s0 + 0.06;
         let end = s1 - 0.06;
         while s < end - 1e-3 {
-            let e = (s + 4.5).min(end);
+            let e = (s + rng.range(3.2, 4.6) as f64).min(end);
+            let e = if end - e < 1.0 { end } else { e };
             let len = (e - s) as f32;
             let mid = (s + e) * 0.5;
+            let tone = rng.range(0.78, 0.98);
+            let warm = rng.range(-0.04, 0.04);
+            let ends = move |z: f32| 1.0 - 0.25 * smooth(len * 0.5 - 0.12, len * 0.5, z.abs());
             let top = beveled_box(
                 Vec3::new(0.13, 0.042, len),
                 0.012,
                 0.4,
                 Vec2::new(rng.f() * 2.0, 0.2),
                 |p| {
-                    let c = Vec3::splat(0.92) * (1.0 + 0.08 * smooth(0.0, 0.02, p.y));
+                    let up = smooth(0.0, 0.02, p.y);
+                    let c = Vec3::new(1.0 + warm, 1.0, 1.0 - warm)
+                        * tone
+                        * Vec3::ONE.lerp(Vec3::new(0.95, 1.0, 1.08) * 1.06, up)
+                        * ends(p.z);
                     c.extend(1.0)
                 },
             );
             let mut part = Part::own(top, Mat::Timber, point(mid, side * x, post_h + 0.021));
             part.rot = trail_rot(mid);
             out.parts.push(part);
+            let tone = rng.range(0.75, 0.95);
             let midrail = beveled_box(
                 Vec3::new(0.04, 0.09, len),
                 0.008,
                 0.4,
                 Vec2::new(rng.f() * 2.0, 0.3),
-                |_| Vec4::new(0.85, 0.85, 0.85, 1.0),
+                |p| (Vec3::new(1.0 - warm, 1.0, 1.0 + warm) * tone * ends(p.z)).extend(1.0),
             );
             let mut part = Part::own(midrail, Mat::Timber, point(mid, side * (x - 0.068), 0.52));
             part.rot = trail_rot(mid);
@@ -432,7 +505,7 @@ pub(super) fn grating() -> Out {
                 // Moss creeping in from the lawn side.
                 let moss = smooth(0.2, 0.7, fbm_world(p.z, p.x * 3.0, 0.35, 3, seed ^ 0x55))
                     * smooth(-0.04, 0.14, p.x * side);
-                let c = Vec3::splat(0.8 * (1.0 - 0.3 * low) * (1.0 - 0.25 * stain));
+                let c = Vec3::splat(0.62 * (1.0 - 0.3 * low) * (1.0 - 0.35 * stain));
                 c.lerp(Vec3::new(0.32, 0.38, 0.18), moss * 0.7).extend(1.0)
             },
         );
@@ -448,7 +521,7 @@ pub(super) fn grating() -> Out {
             Vec2::new(rng.f(), 0.0),
             |p| {
                 let low = 1.0 - smooth(-0.03, 0.02, p.y);
-                (Vec3::splat(0.8) * (1.0 - 0.3 * low)).extend(1.0)
+                (Vec3::splat(0.62) * (1.0 - 0.3 * low)).extend(1.0)
             },
         );
         let mut part = Part::own(curb, Mat::Concrete, point(ss, 0.0, 0.021));
@@ -465,15 +538,45 @@ pub(super) fn grating() -> Out {
     let st_len = len - 0.04;
     for side in [-1.0f32, 1.0] {
         let seed = rng.seed();
-        for (size, x, y) in [
+        // Web, top flange, bottom flange: (size, x, y, which faces lie in the channel's
+        // recess and how much darker they are).
+        for (k, (size, x, y)) in [
             (Vec3::new(0.006, 0.063, st_len), PIT_HALF + 0.003, 0.0465),
             (Vec3::new(0.05, 0.006, st_len), PIT_HALF + 0.025, 0.075),
             (Vec3::new(0.05, 0.006, st_len), PIT_HALF + 0.025, 0.018),
-        ] {
-            let piece = beveled_box(size, 0.0015, 0.25, Vec2::new(rng.f(), 0.0), |p| {
-                weathered_steel(p.z, y + p.y, x * side, seed)
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut piece = beveled_box(size, 0.0015, 0.1, Vec2::new(rng.f(), 0.0), |p| {
+                let s = mid as f32 - p.z;
+                let mut c = weathered_steel(s, y + p.y, x * side, seed);
+                // Rust run down from the bolts through the web (every half meter).
+                let bolt = ((s - s0 as f32 - 0.3) / 0.5).round() * 0.5 + s0 as f32 + 0.3;
+                let streak = (1.0 - smooth(0.002, 0.009, (s - bolt).abs()))
+                    * smooth(0.05, 0.03, y + p.y)
+                    * smooth(0.0, 0.03, y + p.y);
+                c = c.lerp(Vec4::new(0.32, 0.17, 0.09, 1.0), streak * 0.7);
+                // Grime in the bottom flange's inner corner.
+                let from_web = (side * x + p.x).abs() - PIT_HALF;
+                let corner = (1.0 - smooth(0.006, 0.021, from_web)) * (k == 2) as u8 as f32;
+                c * Vec4::new(1.0, 1.0, 1.0, 1.0).lerp(Vec4::new(0.55, 0.53, 0.5, 1.0), corner)
             });
-            let mut part = Part::own(piece, Mat::Grating, point(mid, side * x, y));
+            for v in &mut piece.vertices {
+                let n = Vec3::from(v.normal);
+                let recess = match k {
+                    0 => n.x * side > 0.5,
+                    1 => n.y < -0.5,
+                    _ => n.y > 0.5,
+                };
+                if recess {
+                    let f = if k == 0 { 0.55 } else { 0.7 };
+                    for c in &mut v.color[..3] {
+                        *c *= f;
+                    }
+                }
+            }
+            let mut part = Part::own(piece, Mat::Stringer, point(mid, side * x, y));
             part.rot = trail_rot(mid);
             out.parts.push(part);
         }
@@ -485,7 +588,7 @@ pub(super) fn grating() -> Out {
                 weathered_steel(s as f32, p.y + 0.0465, side, seed)
             });
             append(
-                b.at(s, Mat::Grating),
+                b.at(s, Mat::Stringer),
                 &plate,
                 trail_rot(s),
                 Vec3::ONE,
@@ -538,13 +641,13 @@ pub(super) fn grating() -> Out {
             Vec4::ONE,
         );
         paint(&mut beam, |_| Vec4::new(0.45, 0.43, 0.4, 1.0));
-        let mut part = Part::own(beam, Mat::Grating, point(mid, 0.0, 0.027));
+        let mut part = Part::own(beam, Mat::Stringer, point(mid, 0.0, 0.027));
         part.rot = trail_rot(mid);
         out.parts.push(part);
     }
 
     // Grating panels, each a little different, held down by clips at their corners.
-    let panel_len = inner / panels as f32 - 0.006;
+    let panel_len = inner / panels as f32 - 0.003;
     let span = 2.0 * PIT_HALF - 0.012;
     for k in 0..panels {
         let s = (joint(k) + joint(k + 1)) * 0.5;
@@ -566,7 +669,9 @@ pub(super) fn grating() -> Out {
 fn weathered_steel(along: f32, y: f32, x: f32, seed: u32) -> Vec4 {
     let low = 1.0 - smooth(0.0, 0.07, y);
     let rust = smooth(0.15, 0.6, fbm_world(along, y * 6.0 + x, 0.3, 3, seed)) * (0.35 + 0.65 * low);
-    let grey = Vec3::splat(0.82 - 0.38 * low) * Vec3::new(1.0, 0.98, 0.94);
+    // Dull zinc, mottled with grime along the length; darker toward the ground.
+    let grime = 0.85 + 0.15 * fbm_world(along, x, 0.6, 2, seed ^ 0x77);
+    let grey = Vec3::splat((0.6 - 0.25 * low) * grime) * Vec3::new(1.0, 0.98, 0.94);
     grey.lerp(Vec3::new(0.52, 0.3, 0.16), rust * 0.75)
         .extend(1.0)
 }
@@ -700,7 +805,14 @@ fn grating_panel(tops: &mut Mesh, steel: &mut Mesh, span: f32, len: f32, s: f64,
     let edge = span * 0.5 - 0.005;
     let bars = (len / 0.033).floor() as usize;
     for k in 0..=bars {
-        let z = -len * 0.5 + 0.0075 + (len - 0.015) * k as f32 / bars as f32;
+        // Hand-welded panels are never quite regular: the jitter breaks the far bars' moiré
+        // into noise instead of bands.
+        let jitter = if k == 0 || k == bars {
+            0.0
+        } else {
+            rng.range(-0.0015, 0.0015)
+        };
+        let z = -len * 0.5 + 0.0075 + (len - 0.015) * k as f32 / bars as f32 + jitter;
         let bt = tone * rng.range(0.93, 1.05);
         let look = BarLook {
             top_uv: &top_uv,
@@ -709,10 +821,12 @@ fn grating_panel(tops: &mut Mesh, steel: &mut Mesh, span: f32, len: f32, s: f64,
         };
         flat_bar(tops, steel, false, z, -edge, edge, 0.004, &look);
     }
+    // The banding bars' outer faces are in the shade of the stringers.
+    let band_side = |x: f32, z: f32, t: f32| side(x, z, t) * Vec4::new(0.6, 0.6, 0.6, 1.0);
     let band = BarLook {
         top_uv: &top_uv,
         top: Vec4::new(tone, tone, tone, 1.0),
-        side: &side,
+        side: &band_side,
     };
     for z in [-len * 0.5 + 0.0025, len * 0.5 - 0.0025] {
         flat_bar(tops, steel, false, z, -span * 0.5, span * 0.5, 0.005, &band);
@@ -731,7 +845,12 @@ fn grating_panel(tops: &mut Mesh, steel: &mut Mesh, span: f32, len: f32, s: f64,
     }
     let rods = (span / 0.1).floor() as usize;
     for k in 0..=rods {
-        let x = -span * 0.5 + 0.02 + (span - 0.04) * k as f32 / rods as f32;
+        let jitter = if k == 0 || k == rods {
+            0.0
+        } else {
+            rng.range(-0.004, 0.004)
+        };
+        let x = -span * 0.5 + 0.02 + (span - 0.04) * k as f32 / rods as f32 + jitter;
         let pts: Vec<Vec3> = (0..=8)
             .map(|i| Vec3::new(x, -0.004, -len * 0.5 + len * i as f32 / 8.0))
             .collect();

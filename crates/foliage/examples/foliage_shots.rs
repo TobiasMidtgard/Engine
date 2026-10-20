@@ -5,6 +5,8 @@
 //! ```
 //!
 //! Name shots after the directory (by number or name: `06`, `burn_scar`) to take only those.
+//! `FOLIAGE_DEBUG_VIEW=sky|reflections|gi|normals|cascades` shows a renderer debug view instead
+//! (on the ground and rocks, `cascades` shows where the sun reaches, tinted by shadow cascade).
 //!
 //! Grows the showcase forest and mushroom cave, then photographs them from the demo's
 //! viewpoints: the old forest, the trail, the clear-cut, a tree mid-fall and after it lands, the
@@ -13,14 +15,13 @@
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
-use engine_foliage::scenery::random_rock;
 use engine_foliage::{
     FallingTree, FelledLog, FoliagePlugin, FoliageSeason, Plant, PlantLibrary, PlantStage,
     fell_tree,
 };
 use engine_foliage::{demo, season};
 use engine_render::prelude::*;
-use engine_render::{Exposure, RenderDisabled, Screenshots, SkyLightVolume};
+use engine_render::{DebugView, Exposure, RenderDisabled, RenderSettings, Screenshots};
 use engine_world::WeatherState;
 
 const FOREST: DVec3 = DVec3::new(0.0, 0.0, 0.0);
@@ -87,92 +88,6 @@ fn simulate(app: &mut App, frames: usize) {
     }
 }
 
-/// A simple cave around the cave demo (the showcase builds its own): plain walls and a roof,
-/// lined inside with crags so the walls read as rock.
-fn cave_walls(commands: &mut Commands, c: DVec3) {
-    let rock = StandardMaterial::hex(0x2c2a28).with_roughness(0.9);
-    let (w, h, d) = (30.0f32, 9.0f32, 34.0f32);
-    let mut wall = |size: [f32; 3], at: DVec3| {
-        commands.spawn((
-            Transform::from_translation(at),
-            MeshRenderer::new(Shape::Cuboid { size }, rock),
-        ));
-    };
-    wall(
-        [w, h, 2.0],
-        c + DVec3::new(0.0, h as f64 * 0.5, d as f64 * 0.5),
-    );
-    wall(
-        [2.0, h, d],
-        c + DVec3::new(-w as f64 * 0.5, h as f64 * 0.5, 0.0),
-    );
-    wall(
-        [2.0, h, d],
-        c + DVec3::new(w as f64 * 0.5, h as f64 * 0.5, 0.0),
-    );
-    wall(
-        [w + 24.0, 5.0, d + 16.0],
-        c + DVec3::new(0.0, h as f64 + 2.5, 4.0),
-    );
-    for x in [-1.0, 1.0] {
-        wall(
-            [10.0, h, 2.0],
-            c + DVec3::new(x * 10.0, h as f64 * 0.5, -d as f64 * 0.5),
-        );
-    }
-    commands.spawn((
-        Transform::from_translation(c + DVec3::new(0.0, h as f64 * 0.5, 0.0)),
-        // Past the walls' inner faces, or the sky lights them (and the cracks between them).
-        SkyLightVolume::new([w * 0.5 + 1.5, h * 0.5 + 0.5, d * 0.5 + 1.5])
-            .open(BoxFace::NegZ)
-            .with_fade(12.0),
-    ));
-
-    // Crags along the inside of the walls, just outside the cave floor's cover.
-    let mut rng = Rng::new(0xc4a6);
-    let (hx, hz) = (w * 0.5, d * 0.5);
-    let mut runs: Vec<(Vec2, Vec2)> = vec![
-        (Vec2::new(-hx, hz), Vec2::new(hx, hz)),
-        (Vec2::new(-hx, -hz), Vec2::new(-hx, hz)),
-        (Vec2::new(hx, -hz), Vec2::new(hx, hz)),
-    ];
-    for x in [-1.0, 1.0] {
-        runs.push((Vec2::new(x * 5.5, -hz), Vec2::new(x * hx, -hz)));
-    }
-    let mut crags = Vec::new();
-    for (a, b) in runs {
-        let n = (a.distance(b) / 3.2).ceil() as usize;
-        for i in 0..=n {
-            let width = rng.range(6.0, 9.0);
-            let mut r = random_rock(
-                &mut rng,
-                a.lerp(b, i as f32 / n as f32),
-                width,
-                false,
-                0.0,
-                [0.55, 0.53, 0.5],
-            );
-            r.size.y = rng.range(h * 0.45, h * 0.85);
-            r.rock.bury_m = r.size.y * 0.15;
-            r.rock.lichen = 0.1;
-            // Outside the cover, rocks keep their place: sink them by hand.
-            r.rock.settled = true;
-            crags.push(r);
-        }
-    }
-    let crags = crags.into_iter().map(move |r| {
-        (
-            Transform::from_translation(
-                c + DVec3::new(r.pos.x as f64, -r.rock.bury_m as f64, r.pos.y as f64),
-            )
-            .with_rotation(r.rotation)
-            .with_scale(r.size),
-            r.rock,
-        )
-    });
-    commands.spawn_batch(crags);
-}
-
 fn main() {
     engine_core::log::init("info,wgpu=warn,naga=warn");
     let out = std::env::args()
@@ -196,6 +111,16 @@ fn main() {
         .add_plugins(RenderPlugin)
         .add_plugins(FoliagePlugin);
 
+    if let Ok(view) = std::env::var("FOLIAGE_DEBUG_VIEW") {
+        app.world.resource_mut::<RenderSettings>().debug_view = match view.as_str() {
+            "sky" => DebugView::SkyVisibility,
+            "reflections" => DebugView::Reflections,
+            "gi" => DebugView::IndirectLight,
+            "normals" => DebugView::Normals,
+            "cascades" => DebugView::Cascades,
+            other => panic!("unknown debug view {other}"),
+        };
+    }
     app.world.resource_mut::<Atmosphere>().ground_color = [0.09, 0.18, 0.04];
     app.world.spawn((
         Transform::default(),
@@ -234,7 +159,7 @@ fn main() {
         let mut commands = app.world.commands();
         demo::spawn_demo(&mut commands, FOREST);
         demo::spawn_cave_demo(&mut commands, CAVE);
-        cave_walls(&mut commands, CAVE);
+        demo::spawn_cave_chamber(&mut commands, CAVE);
     }
     app.world.flush();
     // The demo fells a tree every 25 s; this tool fells its own.

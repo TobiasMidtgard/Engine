@@ -8,8 +8,10 @@ use engine_core::prelude::*;
 use engine_render::{AlphaMode, Image, MaterialRef, Mesh, MeshRef, MeshRenderer, StandardMaterial};
 
 use engine_assets::Assets;
+use engine_world::{Exhaust, Exhausts};
 
 use crate::aero::Aircraft;
+use crate::exhaust::thruster_kind;
 use crate::ship::{Thruster, ThrusterRole};
 use crate::visuals::{GearFold, HeatGlow, PlumeVisual, SurfaceVisual, WheelVisual};
 use crate::wheels::Wheels;
@@ -297,6 +299,52 @@ pub fn rcs_port(h: &Hull, t: &Thruster) -> (Vec3, Vec3, PortOn) {
     (q, n, PortOn::Hull)
 }
 
+/// Where a thruster's gas leaves the model, and its stand-in plume's full length.
+#[derive(Debug, Clone, Copy)]
+pub struct NozzleExit {
+    pub at: Vec3,
+    /// The way the gas leaves (unit).
+    pub dir: Vec3,
+    pub radius: f32,
+    pub length: f32,
+    pub kind: &'static str,
+}
+
+/// Each thruster's nozzle exit, in thruster order: the main bells' rims, the hover wells
+/// (a little inside the belly), the RCS ports on the skin.
+pub fn nozzle_exits(h: &Hull, thrusters: &[Thruster]) -> Vec<NozzleExit> {
+    thrusters
+        .iter()
+        .map(|t| {
+            let exhaust = -t.direction.normalize_or(Vec3::Z);
+            let (at, dir, radius, length, kind) = match t.role {
+                ThrusterRole::Main => (
+                    t.position + exhaust * BELL_EXIT.0,
+                    exhaust,
+                    BELL_EXIT.1 * 0.95,
+                    16.0,
+                    "main",
+                ),
+                ThrusterRole::Hover => {
+                    let (p, n) = h.exit(Vec3::new(t.position.x, -1.0, t.position.z), Vec3::NEG_Y);
+                    (p - n * 0.2, n, HOVER_R * 0.8, 7.0, "hover")
+                }
+                ThrusterRole::Rcs => {
+                    let (p, n, _) = rcs_port(h, t);
+                    (p + n * 0.01, n, 0.1, 1.4, "rcs")
+                }
+            };
+            NozzleExit {
+                at,
+                dir,
+                radius,
+                length,
+                kind,
+            }
+        })
+        .collect()
+}
+
 /// Port plates, hover wells and the like for the painters.
 pub fn layout(h: &Hull, thrusters: &[Thruster]) -> Layout {
     let mut lay = Layout {
@@ -428,10 +476,55 @@ fn plume_material(color: [f32; 3], strength: f32) -> StandardMaterial {
 // ---------------------------------------------------------------- build
 
 /// Fixed parts: (mesh, material, casts shadows, glows with heat).
+/// Shares of the heat-shield (nose) heating above ambient the rest of the skin gets,
+/// re-entering nose high: the shock layer is hottest at the nose cap and leading edges,
+/// a little cooler along the belly, and the top, in the lee, runs far cooler (a shuttle's
+/// nose 1 600 K, belly 1 300 to 1 500 K, upper tiles 600 to 900 K).
+const BELLY_HEAT: f32 = 0.85;
+const LEEWARD_HEAT: f32 = 0.45;
+
+/// Heat share for a part by its mesh name's suffix (see [`split_windward`]).
+fn heat_share(mesh: &str) -> f32 {
+    if mesh.ends_with("_leeward") {
+        LEEWARD_HEAT
+    } else if mesh.ends_with("_windward") {
+        BELLY_HEAT
+    } else {
+        1.0
+    }
+}
+
+/// The faces of `mesh` facing forward (nose cap, leading edges), facing down (the belly)
+/// and the rest, as three meshes on the same vertices.
+fn split_windward(mesh: &Mesh) -> (Mesh, Mesh, Mesh) {
+    let (mut nose, mut windward, mut leeward) = (Vec::new(), Vec::new(), Vec::new());
+    for tri in mesh.indices.as_chunks::<3>().0 {
+        let n = tri
+            .iter()
+            .map(|&i| Vec3::from(mesh.vertices[i as usize].normal))
+            .sum::<Vec3>()
+            .normalize_or_zero();
+        let side = if n.z < -0.6 {
+            &mut nose
+        } else if n.y < -0.15 {
+            &mut windward
+        } else {
+            &mut leeward
+        };
+        side.extend_from_slice(tri);
+    }
+    let part = |indices| Mesh::new(mesh.vertices.clone(), indices);
+    (part(nose), part(windward), part(leeward))
+}
+
 const FIXED: &[(&str, &str, bool, bool)] = &[
-    ("hull", "hull", true, true),
+    ("hull_nose", "hull", true, true),
+    ("hull_windward", "hull", true, true),
+    ("hull_leeward", "hull", true, true),
     ("base", "base", true, false),
-    ("wing", "wing", true, true),
+    ("wing_nose", "wing", true, true),
+    ("wing_windward", "wing", true, true),
+    ("wing_leeward", "wing", true, true),
     ("bells", "bell", true, false),
     ("bell_inside", "bell_inside", true, false),
     ("engine_hw", "engine_hw", true, false),
@@ -463,6 +556,10 @@ pub fn build() -> ModelAssets {
     let mut atlas = Atlas::new(HULL_ATLAS.0, HULL_ATLAS.1);
     atlas.raster(&hull, 1);
     out.baked(&key("tex/hull"), paint_hull(&atlas, &h, &lay));
+    let (nose, windward, leeward) = split_windward(&hull);
+    out.mesh(&key("hull_nose"), nose);
+    out.mesh(&key("hull_windward"), windward);
+    out.mesh(&key("hull_leeward"), leeward);
     out.mesh(&key("hull"), hull);
     out.mesh(&key("base"), base_mesh(&h));
 
@@ -477,10 +574,12 @@ pub fn build() -> ModelAssets {
     let oms = transformed(oms, Mat4::from_translation(OMS_CENTER.extend(0.0)));
     let tip = transformed(tip, Mat4::from_translation(TIP_POD));
     let right = merged([transformed(wing, wing_to_body(1.0)), oms, tip]);
-    out.mesh(
-        &key("wing"),
-        merged([mirrored_x(&right), right, transformed(fin, fin_to_body())]),
-    );
+    let wing = merged([mirrored_x(&right), right, transformed(fin, fin_to_body())]);
+    let (nose, windward, leeward) = split_windward(&wing);
+    out.mesh(&key("wing_nose"), nose);
+    out.mesh(&key("wing_windward"), windward);
+    out.mesh(&key("wing_leeward"), leeward);
+    out.mesh(&key("wing"), wing);
     for pv in pivots() {
         out.mesh(&key(&pivot_name(&pv)), pivot_mesh(&pv));
     }
@@ -663,7 +762,7 @@ pub fn spawn(
 ) {
     commands.queue(|world: &mut World| ensure(world, &key("hull"), build));
     // Parts that glow with re-entry heat, by material.
-    let mut glowing: Vec<(Entity, &'static str)> = Vec::new();
+    let mut glowing: Vec<(Entity, &'static str, f32)> = Vec::new();
     for &(mesh, material, shadows, glows) in FIXED {
         let e = spawn_part(
             commands,
@@ -674,7 +773,7 @@ pub fn spawn(
             shadows,
         );
         if glows {
-            glowing.push((e, material));
+            glowing.push((e, material, heat_share(mesh)));
         }
     }
     // Control surfaces: the elevons and body-flap halves follow their side's delta wing,
@@ -701,7 +800,7 @@ pub fn spawn(
                 ChildOf(body),
             ))
             .id();
-        glowing.push((e, "wing"));
+        glowing.push((e, "wing", BELLY_HEAT));
     }
     // Landing gear: legs and doors fold with the gear position.
     let h = Hull::new();
@@ -756,26 +855,26 @@ pub fn spawn(
             true,
         );
     }
-    // Plumes at every thruster's nozzle exit.
-    for (i, t) in thrusters.iter().enumerate() {
-        let exhaust = -t.direction.normalize_or(Vec3::Z);
-        let (at, dir, radius, length, kind) = match t.role {
-            ThrusterRole::Main => (
-                t.position + exhaust * BELL_EXIT.0,
-                exhaust,
-                BELL_EXIT.1 * 0.95,
-                16.0,
-                "main",
-            ),
-            ThrusterRole::Hover => {
-                let (p, n) = h.exit(Vec3::new(t.position.x, -1.0, t.position.z), Vec3::NEG_Y);
-                (p - n * 0.2, n, HOVER_R * 0.8, 7.0, "hover")
-            }
-            ThrusterRole::Rcs => {
-                let (p, n, _) = rcs_port(&h, t);
-                (p + n * 0.01, n, 0.1, 1.4, "rcs")
-            }
-        };
+    // Plumes at every thruster's nozzle exit, and the same nozzles for the effects modules.
+    let exits = nozzle_exits(&h, thrusters);
+    commands.entity(body).insert(Exhausts(
+        exits
+            .iter()
+            .zip(thrusters)
+            .map(|(n, t)| Exhaust::new(thruster_kind(t.role), n.at, n.dir, n.radius))
+            .collect(),
+    ));
+    for (
+        i,
+        &NozzleExit {
+            at,
+            dir,
+            radius,
+            length,
+            kind,
+        },
+    ) in exits.iter().enumerate()
+    {
         let mesh = if kind == "hover" {
             "plume_soft"
         } else {
@@ -801,16 +900,20 @@ pub fn spawn(
         let Some(materials) = world.get_resource::<Assets<StandardMaterial>>() else {
             return;
         };
-        let found: Vec<(Entity, StandardMaterial)> = glowing
+        let found: Vec<(Entity, StandardMaterial, f32)> = glowing
             .into_iter()
-            .filter_map(|(e, m)| {
+            .filter_map(|(e, m, share)| {
                 let h = materials.by_key(&key(&format!("mat/{m}")))?;
-                Some((e, *materials.get(h)?))
+                Some((e, *materials.get(h)?, share))
             })
             .collect();
-        for (e, base) in found {
+        for (e, base, share) in found {
             if let Ok(mut entity) = world.get_entity_mut(e) {
-                entity.insert(HeatGlow { base, level: 0 });
+                entity.insert(HeatGlow {
+                    base,
+                    level: 0,
+                    share,
+                });
             }
         }
     });

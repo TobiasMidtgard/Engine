@@ -255,6 +255,39 @@ pub(crate) fn register(app: &mut App) {
         },
     );
     app.register_api(
+        "movement.ladder_guest",
+        "Send a pilot up and down the ladder (any Climbable, placed by any module) nearest \
+         \"near\" (world meters) or else the active camera: it walks to the ladder, climbs it, \
+         steps off at the top, looks round, climbs back down and slides the rest, on a loop. \
+         Calling it again restarts that ladder's guest.",
+        r#"{"near": [15.0, 0.0, 22.0]}"#,
+        |world, args| {
+            let near = match args.get("near") {
+                None | Some(Value::Null) => None,
+                Some(v) => {
+                    let p: [f64; 3] = serde_json::from_value(v.clone())
+                        .map_err(|_| "\"near\" must be [x, y, z]".to_string())?;
+                    Some(DVec3::from_array(p))
+                }
+            };
+            let (guest, ladder) = crate::demo::spawn_ladder_guest(world, near)?;
+            Ok(json!({ "guest": guest.to_bits(), "ladder": ladder.to_bits() }))
+        },
+    );
+    app.register_api(
+        "movement.vaulter",
+        "Restart the movement demo's vaulter from the start of its loop: it sprints down the \
+         vault lane and vaults a railing, a concrete barrier and a stack of cases.",
+        "{}",
+        |world, _args| {
+            let n = crate::demo::restart_vaulters(world);
+            if n == 0 {
+                return Err("no vaulter in this world (spawn it with demo::spawn_demo)".into());
+            }
+            Ok(json!({ "vaulters": n }))
+        },
+    );
+    app.register_api(
         "movement.grappler",
         "Restart the movement demo's grappler from the start of its loop: it sprints at the \
          grapple tower, jumps, hooks its top edge, is reeled up the wall, climbs over, then runs \

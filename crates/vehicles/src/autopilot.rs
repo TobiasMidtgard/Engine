@@ -14,14 +14,17 @@
 //!   apoapsis, circularize). In flat worlds: climb and cruise at the target altitude.
 //! * [`AutopilotMode::Hold`]: hover a spacecraft at a point.
 //! * [`AutopilotMode::Hop`]: VTOL hops: lift off a pad, hover, land, rest, again.
+//! * [`AutopilotMode::Return`]: home from orbit (deorbit burn, re-entry, glide, landing
+//!   burn, touchdown on a pad).
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
-use engine_world::{Gravity, VehicleControls};
+use engine_world::{Atmospheres, Gravity, VehicleControls, WeatherState, WindField};
 
 use crate::aero::Aircraft;
-use crate::chassis::{VehicleForces, VehicleTelemetry};
-use crate::ship::{AssistMode, Spacecraft};
+use crate::chassis::{AeroBody, VehicleForces, VehicleTelemetry};
+use crate::entry::{AeroTable, Air, Glide};
+use crate::ship::{AssistMode, Spacecraft, ThrusterRole};
 use crate::wheels::Wheels;
 
 /// What the autopilot does.
@@ -80,6 +83,11 @@ pub enum AutopilotMode {
         hover_s: f32,
         rest_s: f32,
     },
+    /// Come home from orbit to `pad` (a point on the ground): burn out of orbit when the
+    /// glide down would end there, re-enter nose high, banking to stretch or shorten the
+    /// glide, glide to the pad and land on the hover engines (a winged spacecraft with lift
+    /// thrusters).
+    Return { pad: DVec3 },
 }
 
 /// Drives or flies the vehicle it is on.
@@ -107,6 +115,34 @@ pub struct Autopilot {
     /// nose pointed.
     #[serde(skip)]
     pub runway: Option<(DVec3, Vec3)>,
+    /// What the Return autopilot keeps between steps.
+    #[serde(skip)]
+    pub entry: EntryState,
+}
+
+/// The Return autopilot's guidance state.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EntryState {
+    /// The vehicle's lift and drag, tabulated when the autopilot first runs.
+    pub table: Option<AeroTable>,
+    /// Bank angle wanted, rad (+ = lift to the right of the motion).
+    pub bank: f32,
+    /// Bank angle flown now, rad: it rolls toward `bank` at [`ROLL_RATE_DEG_S`], through
+    /// wings level when the bank reverses, never the short way round through a nose-low
+    /// attitude.
+    pub rolled: f32,
+    /// Landing burn: the way the hover engines push now (world, unit). It swings toward
+    /// the way they should at [`PUSH_SWING_DEG_S`], so the air on the belly, which brakes
+    /// harder the more the ship leans back, doesn't rock it to and fro.
+    pub push: Vec3,
+    /// How far beyond the pad the glide is predicted to come down, m (− = short).
+    pub overshoot_m: f64,
+    /// Seconds since the last prediction.
+    pub since_predict: f32,
+    /// Waiting to burn out of orbit: the pad's lead over the predicted landing at the last
+    /// prediction, rad; and whether the moment has come.
+    pub last_gap: Option<f64>,
+    pub burn: bool,
 }
 
 impl Autopilot {
@@ -170,6 +206,9 @@ fn point_at(
 #[allow(clippy::type_complexity)]
 pub fn autopilot_system(
     gravity: Res<Gravity>,
+    atmospheres: Res<Atmospheres>,
+    weather: Res<WeatherState>,
+    wind: Res<WindField>,
     mut q: Query<(
         &mut Autopilot,
         &mut VehicleControls,
@@ -178,10 +217,16 @@ pub fn autopilot_system(
         Option<&Wheels>,
         Option<&mut Aircraft>,
         Option<&mut Spacecraft>,
+        Option<&AeroBody>,
     )>,
 ) {
+    let air = Air {
+        atmospheres: &atmospheres,
+        weather: &weather,
+        wind: &wind,
+    };
     q.par_iter_mut().for_each(
-        |(mut ap, mut controls, forces, tel, wheels, aircraft, ship)| {
+        |(mut ap, mut controls, forces, tel, wheels, aircraft, ship, body)| {
             let f = forces.frame;
             let dt = f.dt;
             if dt <= 0.0 {
@@ -271,6 +316,7 @@ pub fn autopilot_system(
                             &mut controls,
                             forces,
                             tel,
+                            aircraft,
                             &mut ship,
                             &gravity,
                             *target_altitude_m,
@@ -314,6 +360,24 @@ pub fn autopilot_system(
                             *height_m,
                             *hover_s,
                             *rest_s,
+                            up,
+                        );
+                    }
+                }
+                AutopilotMode::Return { pad } => {
+                    if let Some(mut ship) = ship {
+                        return_home(
+                            ap,
+                            &mut controls,
+                            forces,
+                            tel,
+                            wheels,
+                            aircraft,
+                            &mut ship,
+                            body,
+                            &gravity,
+                            air,
+                            *pad,
                             up,
                         );
                     }
@@ -791,12 +855,43 @@ fn stall_demo(
     }
 }
 
+/// Seconds to apoapsis the gravity turn keeps at least, so the climb never stalls.
+const CLIMB_HOLD_S: f32 = 45.0;
+
+/// Circular orbit speed `altitude` m above the nearest body's surface (None in flat worlds).
+fn circular_speed(gravity: &Gravity, at: DVec3, altitude: f64) -> Option<f32> {
+    let b = gravity.bodies.iter().min_by(|a, b| {
+        (at - a.center)
+            .length()
+            .total_cmp(&(at - b.center).length())
+    })?;
+    Some((b.mu / (b.radius + altitude)).sqrt() as f32)
+}
+
+/// How fast the vertical speed falls with the engines off (m/s²): gravity, less what the
+/// sideways speed's curve round the planet takes off it (0 in orbit).
+fn sink_rate(f: &crate::chassis::VehicleFrame, gravity: &Gravity, up: Vec3) -> f32 {
+    let v_side = (f.linear - up * f.linear.dot(up)).length();
+    let r = gravity
+        .bodies
+        .iter()
+        .map(|b| (f.com - b.center).length())
+        .fold(f64::MAX, f64::min);
+    let curve = if r < f64::MAX {
+        v_side * v_side / r as f32
+    } else {
+        0.0
+    };
+    (f.gravity.length() - curve).max(0.0)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ascend(
     ap: &mut Autopilot,
     c: &mut VehicleControls,
     forces: &VehicleForces,
     tel: &VehicleTelemetry,
+    aircraft: Option<Mut<Aircraft>>,
     ship: &mut Spacecraft,
     gravity: &Gravity,
     target_altitude: f64,
@@ -831,6 +926,13 @@ fn ascend(
         return;
     }
     let start = *ap.start_altitude.get_or_insert(alt);
+    // Gear up once clear of the pad.
+    if let Some(mut a) = aircraft {
+        let down = alt - start < 30.0;
+        if a.gear_down != down {
+            a.gear_down = down;
+        }
+    }
     if ap.phase.is_empty() {
         // A ship standing on its tail goes straight up; one lying on its belly (a VTOL
         // spaceplane) lifts off on its hover engines first and then stands up.
@@ -876,7 +978,33 @@ fn ascend(
             ship.assist.mode = AssistMode::Rotation;
             let x = ((alt - turn_start) / (turn_end - turn_start).max(1.0)).clamp(0.0, 1.0);
             let angle = (x.sqrt() * 85f64.to_radians()) as f32; // from vertical
-            let dir = up * angle.cos() + heading * angle.sin();
+            // Never let the climb stall: hold the time to apoapsis near `CLIMB_HOLD_S`. On a
+            // full-size planet the pitch program alone levels off at 50 km with orbital speed
+            // still far off, and the ship sinks back into thick air at Mach 16.
+            let v_up = f.linear.dot(up);
+            let sink = sink_rate(f, gravity, up);
+            let main: f32 = ship
+                .thrusters
+                .iter()
+                .filter(|t| t.role == ThrusterRole::Main)
+                .map(|t| t.max_thrust_n)
+                .sum();
+            let accel = (main / f.mass.max(1.0)).max(0.1);
+            // …and climb fast enough to coast up to the target height by the time the speed
+            // round the planet is nearly orbital, so apoapsis reaches it with the burn.
+            let v_side = (f.linear - up * v_up).length();
+            let to_go = (target_altitude - alt).max(0.0) as f32;
+            let orbital = circular_speed(gravity, f.com, target_altitude).unwrap_or(f32::MAX);
+            let coast_up = (2.0 * sink * to_go).sqrt() * (v_side / orbital).clamp(0.0, 1.0);
+            let climb = (sink * CLIMB_HOLD_S).max(coast_up);
+            let needed = ((sink + (climb - v_up) / 8.0) / accel)
+                .clamp(-0.3, 1.0)
+                .asin();
+            // The program sets the floor low down; past its end the hold steers alone (nose a
+            // little below the horizon if need be), so apoapsis comes soon after the burn.
+            let floor = (std::f32::consts::FRAC_PI_2 - angle) * (1.0 - x as f32) - 0.3 * x as f32;
+            let elevation = needed.max(floor);
+            let dir = up * elevation.sin() + heading * elevation.cos();
             // Never point far from where we're going once moving fast (less drag, no tumbling).
             let vel = f.linear.normalize_or_zero();
             let dir = if f.linear.length() > 200.0 && f.air.density > 0.01 {
@@ -904,7 +1032,10 @@ fn ascend(
             if tel.apoapsis_m < target_altitude * 0.98 {
                 c.throttle = 0.3;
             }
-            if tel.vertical_speed < 40.0 && alt > target_altitude * 0.8 {
+            // Near apoapsis: climbing slowly, or about to stop climbing.
+            let v_up = f.linear.dot(up);
+            let soon = v_up < sink_rate(f, gravity, up) * 20.0;
+            if (tel.vertical_speed < 40.0 || soon) && alt > target_altitude * 0.8 {
                 ap.set_phase("circularize");
             }
         }
@@ -916,7 +1047,10 @@ fn ascend(
                 .normalize_or_zero();
             aim(c, dir, up);
             let pe_short = (target_altitude * 0.9 - tel.periapsis_m).max(0.0);
-            c.throttle = (pe_short / 20_000.0).clamp(0.05, 1.0) as f32;
+            // Ease off as periapsis comes up: near orbital speed it rises ~100 km a second at
+            // full thrust, and the engines take a moment to shut down.
+            let ease = (target_altitude * 0.5).max(1_000.0);
+            c.throttle = (pe_short / ease).clamp(0.05, 1.0) as f32;
             if tel.periapsis_m >= target_altitude * 0.9 {
                 ap.set_phase("orbit");
             }
@@ -1086,4 +1220,382 @@ fn hop(
         }
         _ => ap.set_phase("hover"),
     }
+}
+
+/// Out of orbit, the periapsis goes this high (below ground: the orbit would end there): the
+/// ship meets the air about 1° down, steep enough not to skip off it, shallow enough to
+/// re-enter gently.
+const DEORBIT_PERIAPSIS_M: f64 = -20_000.0;
+/// Most aerodynamic load re-entry may put on the ship, g.
+const ENTRY_MAX_G: f32 = 2.5;
+/// Re-entry starts here: the air begins to bite.
+const ENTRY_INTERFACE_M: f64 = 120_000.0;
+/// Below this speed re-entry is over and the ship glides to the pad.
+const APPROACH_SPEED: f32 = 500.0;
+/// The glide ends this high over the pad, where the landing burn takes over (m).
+const HIGH_KEY_M: f64 = 2_500.0;
+/// Bank planned at the burn out of orbit, leaving room to bank more (shorter) or less.
+const NOMINAL_BANK_DEG: f32 = 50.0;
+/// How fast the Return autopilot rolls from one bank to another, °/s.
+pub const ROLL_RATE_DEG_S: f32 = 12.0;
+/// Below this speed re-entry stops managing range with the bank and flies wings level,
+/// turning only to face the pad, m/s.
+const TURN_ONLY_BELOW: f32 = crate::entry::LEVEL_BELOW;
+/// Braking the landing burn plans for, m/s².
+const LANDING_BRAKE: f32 = 4.0;
+/// How fast the landing burn swings the way its engines push, °/s.
+pub const PUSH_SWING_DEG_S: f32 = 20.0;
+
+/// Lift direction square to the motion `dir`, banked `bank` rad (+ right) from `up`.
+fn banked_lift(dir: Vec3, up: Vec3, bank: f32) -> Vec3 {
+    let up_perp = (up - dir * up.dot(dir)).normalize_or_zero();
+    let right = dir.cross(up_perp);
+    up_perp * bank.cos() + right * bank.sin()
+}
+
+/// Which way to the pad, from straight ahead, rad (+ = to the right).
+fn pad_to_the_right(f: &crate::chassis::VehicleFrame, pad: DVec3, up: Vec3) -> f32 {
+    let d = (pad - f.com).as_vec3();
+    let d = d - up * d.dot(up);
+    let heading = f.linear - up * f.linear.dot(up);
+    if d.length_squared() < 1.0 || heading.length_squared() < 1.0 {
+        return 0.0;
+    }
+    -signed_angle(heading.normalize(), d.normalize(), up)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn return_home(
+    ap: &mut Autopilot,
+    c: &mut VehicleControls,
+    forces: &VehicleForces,
+    tel: &VehicleTelemetry,
+    wheels: Option<&Wheels>,
+    aircraft: Option<Mut<Aircraft>>,
+    ship: &mut Spacecraft,
+    body: Option<&AeroBody>,
+    gravity: &Gravity,
+    air: Air,
+    pad: DVec3,
+    up: Vec3,
+) {
+    use crate::entry::{entry_alpha, predict, speed_for_periapsis, track_angle};
+    use std::f64::consts::TAU;
+    let f = &forces.frame;
+    let dt = f.dt;
+    let Some(planet) = engine_world::air::altitude(gravity, f.com).1 else {
+        return;
+    };
+    if ap.phase.is_empty() && ap.timer < 0.1 {
+        // The telemetry (orbit, wheels) is known once the vehicle has run.
+        return;
+    }
+    let planet = gravity.bodies[planet];
+    let (center, radius) = (planet.center, planet.radius);
+    let rates = ship.assist.max_rate_deg_s;
+    let mut aircraft = aircraft;
+    if ap.entry.table.is_none() {
+        ap.entry.table = Some(AeroTable::new(aircraft.as_deref(), body));
+    }
+    fn gear(aircraft: &mut Option<Mut<Aircraft>>, down: bool) {
+        if let Some(a) = aircraft.as_mut()
+            && a.gear_down != down
+        {
+            a.gear_down = down;
+        }
+    }
+    // In the air the elevons take over holding the nose: the trim creeps toward whatever
+    // the attitude hold keeps asking for. Elsewhere it centers.
+    fn trim(aircraft: &mut Option<Mut<Aircraft>>, pitch: Option<f32>, dt: f32) {
+        if let Some(a) = aircraft.as_mut() {
+            let next = match pitch {
+                Some(p) => (a.pitch_trim + p * 0.6 * dt).clamp(-1.0, 1.0),
+                None => 0.0,
+            };
+            if a.pitch_trim != next {
+                a.pitch_trim = next;
+            }
+        }
+    }
+    let table = ap.entry.table.take().unwrap_or_default();
+    let speed = f.linear.length();
+    let dir = f.linear.normalize_or_zero();
+    let v = f.linear.as_dvec3();
+    let normal = (f.com - center).cross(v).normalize_or_zero();
+    let pad_alt = (pad - center).length() - radius;
+    let above = (f.com - pad).dot(up.as_dvec3());
+    *c = VehicleControls::default();
+    ship.assist.mode = AssistMode::Rotation;
+    let aim = |c: &mut VehicleControls, nose: Vec3, top: Vec3| {
+        let (p, y, r) = point_at(forces, nose.normalize_or_zero(), top, rates, 1.2);
+        c.pitch = p;
+        c.yaw = y;
+        c.steer = r;
+    };
+    // Nose `alpha` above the motion, lift banked `bank` from up (rolling there at the roll
+    // rate).
+    let roll_step = ROLL_RATE_DEG_S.to_radians() * dt;
+    let fly = |c: &mut VehicleControls, alpha: f32, bank: f32, rolled: &mut f32| {
+        *rolled += (bank - *rolled).clamp(-roll_step, roll_step);
+        let lift = banked_lift(dir, up, *rolled);
+        aim(
+            c,
+            dir * alpha.cos() + lift * alpha.sin(),
+            lift * alpha.cos() - dir * alpha.sin(),
+        );
+    };
+    let glide = |bank: f32| Glide {
+        table: &table,
+        mass: f.mass,
+        bank,
+        max_g: ENTRY_MAX_G,
+    };
+    let overshoot = |bank: f32| {
+        let end = predict(
+            gravity,
+            air,
+            glide(bank),
+            f.com,
+            v,
+            pad_alt + HIGH_KEY_M,
+            4_000.0,
+        );
+        track_angle(center, pad, end.position, normal) * radius
+    };
+    if ap.phase.is_empty() {
+        ap.set_phase(if tel.periapsis_m > ENTRY_INTERFACE_M {
+            "deorbit wait"
+        } else if f.air.altitude_m > ENTRY_INTERFACE_M {
+            "entry coast"
+        } else if speed > APPROACH_SPEED {
+            "entry"
+        } else {
+            "approach"
+        });
+        ap.entry.bank = NOMINAL_BANK_DEG.to_radians() * pad_to_the_right(f, pad, up).signum();
+    }
+    ap.entry.since_predict += dt;
+    match ap.phase.as_str() {
+        "deorbit wait" | "deorbit burn" => {
+            gear(&mut aircraft, false);
+            trim(&mut aircraft, None, dt);
+            aim(c, -dir, up);
+            let aligned = f.forward().dot(-dir) > 0.98;
+            if ap.phase == "deorbit burn" {
+                if aligned {
+                    let excess = tel.periapsis_m - DEORBIT_PERIAPSIS_M;
+                    c.throttle = (excess / 30_000.0).clamp(0.05, 1.0) as f32;
+                }
+                if tel.periapsis_m <= DEORBIT_PERIAPSIS_M || ap.timer > 120.0 {
+                    ap.set_phase("entry coast");
+                }
+            } else if ap.entry.since_predict >= 1.0 || ap.entry.last_gap.is_none() {
+                // Where would the glide come down if the burn were now? Burn when that point
+                // reaches the pad.
+                ap.entry.since_predict = 0.0;
+                let r = f.com - center;
+                let radial = r.normalize_or_zero() * v.dot(r.normalize_or_zero());
+                let horizontal = (v - radial).normalize_or_zero();
+                let slow = speed_for_periapsis(planet.mu, r.length(), radius + DEORBIT_PERIAPSIS_M);
+                let after = radial + horizontal * slow;
+                let end = predict(
+                    gravity,
+                    air,
+                    glide(ap.entry.bank),
+                    f.com,
+                    after,
+                    pad_alt + HIGH_KEY_M,
+                    8_000.0,
+                );
+                let lead = |a: f64| a.rem_euclid(TAU);
+                let gap = lead(track_angle(center, f.com, pad, normal))
+                    - lead(track_angle(center, f.com, end.position, normal));
+                ap.entry.overshoot_m = -gap * radius;
+                if let Some(last) = ap.entry.last_gap
+                    && last > 0.0
+                    && gap <= 0.0
+                    && last - gap < 0.5
+                {
+                    ap.entry.burn = true;
+                }
+                ap.entry.last_gap = Some(gap);
+            }
+            if ap.phase == "deorbit wait" && ap.entry.burn && aligned {
+                ap.set_phase("deorbit burn");
+            }
+        }
+        "entry coast" | "entry" => {
+            gear(&mut aircraft, false);
+            if ap.phase == "entry" && ap.entry.since_predict >= 0.5 {
+                ap.entry.since_predict = 0.0;
+                // Across: bank toward the pad, reversing when it is too far off to one side.
+                // The margin narrows as the ship slows (15° to 6°): each reversal rolls
+                // through wings level, a stretch of glide the prediction leaves out, so
+                // they stay few; the last few degrees are turned out wings low below
+                // `TURN_ONLY_BELOW`.
+                let side = pad_to_the_right(f, pad, up);
+                if speed < TURN_ONLY_BELOW {
+                    // Slower, the glide's range is the wings' (the prediction flies wings
+                    // level from here): just turn to face the pad.
+                    ap.entry.bank = (side * 2.0).clamp(-0.5, 0.5);
+                    ap.entry.overshoot_m = overshoot(ap.entry.bank);
+                } else {
+                    let deadband = (4.0 + 11.0 * (speed / 7_500.0).clamp(0.0, 1.0)).to_radians();
+                    let mut sign = if ap.entry.bank == 0.0 {
+                        side.signum()
+                    } else {
+                        ap.entry.bank.signum()
+                    };
+                    if sign * side < -deadband {
+                        sign = -sign;
+                    }
+                    // Along: the bank whose glide comes down at the pad. More vertical lift
+                    // (cos bank) stretches the glide, but not evenly (near a skip a little more
+                    // lift carries it thousands of km), so try a spread of banks and take the
+                    // crossing nearest the bank flown now.
+                    let c0 = ap.entry.bank.cos();
+                    const TRIES: [f32; 6] = [0.05, 0.25, 0.45, 0.65, 0.85, 1.0];
+                    let errs = TRIES.map(|c| overshoot(sign * c.acos()));
+                    let mut bracket: Option<(f32, f64, f32, f64)> = None;
+                    for i in 0..TRIES.len() - 1 {
+                        let (ea, eb) = (errs[i], errs[i + 1]);
+                        let mid = (TRIES[i] + TRIES[i + 1]) * 0.5;
+                        if (ea <= 0.0) != (eb <= 0.0)
+                            && bracket.is_none_or(|(a, _, b, _)| {
+                                (mid - c0).abs() < ((a + b) * 0.5 - c0).abs()
+                            })
+                        {
+                            bracket = Some((TRIES[i], ea, TRIES[i + 1], eb));
+                        }
+                    }
+                    // Narrow the crossing down: the glide can change a lot within one gap.
+                    let best = bracket.map(|(mut a, mut ea, mut b, mut eb)| {
+                        for _ in 0..4 {
+                            let m = (a + b) * 0.5;
+                            let em = overshoot(sign * m.acos());
+                            if (em <= 0.0) == (ea <= 0.0) {
+                                (a, ea) = (m, em);
+                            } else {
+                                (b, eb) = (m, em);
+                            }
+                        }
+                        a + (b - a) * (ea / (ea - eb)) as f32
+                    });
+                    // No crossing: as near as it gets.
+                    let wanted = best.unwrap_or_else(|| {
+                        let i = (0..TRIES.len())
+                            .min_by(|&a, &b| errs[a].abs().total_cmp(&errs[b].abs()))
+                            .unwrap_or(0);
+                        TRIES[i]
+                    });
+                    // Hold the load under the limit: more lift up, at once, when the air pushes
+                    // hard (a steep dive would only get steeper).
+                    let pressed = crate::entry::load_floor(tel.g_load, ENTRY_MAX_G);
+                    let wanted = wanted.max(pressed);
+                    let next = (c0 + (wanted - c0).clamp(-0.1, 0.1 + pressed)).clamp(0.05, 1.0);
+                    ap.entry.bank = sign * next.acos();
+                    ap.entry.overshoot_m = overshoot(ap.entry.bank);
+                }
+            }
+            fly(c, entry_alpha(speed), ap.entry.bank, &mut ap.entry.rolled);
+            trim(&mut aircraft, Some(c.pitch), dt);
+            if ap.phase == "entry coast" && f.air.altitude_m < ENTRY_INTERFACE_M {
+                ap.set_phase("entry");
+            }
+            if ap.phase == "entry" && speed < APPROACH_SPEED {
+                ap.set_phase("approach");
+            }
+        }
+        "approach" => {
+            gear(&mut aircraft, false);
+            // Turn to the pad and glide down to the high key above it, under power if the
+            // glide falls short.
+            let side = pad_to_the_right(f, pad, up);
+            let bank = (side * 2.0).clamp(-1.0, 1.0);
+            let d = (pad - f.com).as_vec3();
+            let dist = (d - up * d.dot(up)).length();
+            let gamma = dir.dot(up).clamp(-1.0, 1.0).asin();
+            let wanted = ((HIGH_KEY_M - above) as f32).atan2(dist.max(1.0));
+            let alpha = (10f32.to_radians() + 1.5 * (wanted - gamma))
+                .clamp(3f32.to_radians(), 30f32.to_radians());
+            if wanted > gamma && speed < 160.0 {
+                c.throttle = (2.0 * (wanted - gamma) + (160.0 - speed) / 40.0).clamp(0.0, 1.0);
+            }
+            fly(c, alpha, bank, &mut ap.entry.rolled);
+            trim(&mut aircraft, Some(c.pitch), dt);
+            ap.entry.bank = bank;
+            let v_h = (f.linear - up * f.linear.dot(up)).length();
+            if dist < (v_h * v_h / (2.0 * LANDING_BRAKE)).max(2_500.0) || above < 1_500.0 {
+                ap.set_phase("landing burn");
+            }
+        }
+        "landing burn" => {
+            // Belly to the air: thrust on the hover engines toward a point over the pad,
+            // closing in no faster than the braking allows.
+            gear(&mut aircraft, above < 600.0);
+            trim(&mut aircraft, None, dt);
+            let lean = f.com - f.position;
+            let spot = pad + lean - up.as_dvec3() * lean.dot(up.as_dvec3());
+            let target = spot + up.as_dvec3() * 40.0;
+            let e = (target - f.com).as_vec3();
+            let gap = e.length();
+            let v_want = e.normalize_or_zero() * (2.0 * LANDING_BRAKE * gap).sqrt().min(250.0);
+            let push = (v_want - f.linear) / 3.0 - f.gravity;
+            let mut along = push.normalize_or_zero();
+            // Lean back at most 60° from upright to brake, but only 20° toward the pad: a
+            // ship nosed down toward it flies like a plane, gaining speed it then has to
+            // brake off again.
+            // The nose points at the pad, until nearly over it, where that way swings
+            // about wildly (and would spin the ship over): then it keeps its heading.
+            let d = (pad - f.com).as_vec3();
+            let d_h = d - up * d.dot(up);
+            let heading = (f.forward() - up * f.forward().dot(up)).normalize_or(d_h);
+            let ahead = if d_h.length() > 100.0 {
+                d_h.normalize()
+            } else {
+                heading
+            };
+            let tilt = along.dot(up);
+            let side = (along - up * tilt).normalize_or_zero();
+            let max_tilt = if side.dot(ahead) > 0.0 { 20f32 } else { 60.0 }.to_radians();
+            if tilt < max_tilt.cos() {
+                along = up * max_tilt.cos() + side * max_tilt.sin();
+            }
+            let was = if ap.entry.push == Vec3::ZERO {
+                f.up()
+            } else {
+                ap.entry.push
+            };
+            let swing = was.angle_between(along);
+            let step = PUSH_SWING_DEG_S.to_radians() * dt;
+            if swing > step {
+                along = was.slerp(along, step / swing);
+            }
+            ap.entry.push = along;
+            let nose = (ahead - along * ahead.dot(along)).normalize_or_zero();
+            aim(c, nose, along);
+            let cap = crate::ship::axis_capacity(&ship.thrusters);
+            c.lift = (push.dot(f.up()) * f.mass / cap[2].max(1.0)).clamp(0.0, 1.0);
+            if gap < 20.0 && speed < 4.0 {
+                ap.start_altitude = Some(3.0);
+                ap.hold_integral = Vec3::ZERO;
+                ap.set_phase("landing");
+            }
+        }
+        "landing" => {
+            hop(
+                ap, c, forces, tel, wheels, aircraft, ship, pad, 0.0, 0.0, 0.0, up,
+            );
+            if ap.phase == "on the pad" {
+                ap.set_phase("landed");
+            }
+        }
+        _ => {
+            // Landed: engines off, parking brake on.
+            ship.assist.mode = AssistMode::Off;
+            *c = VehicleControls::default();
+            c.handbrake = true;
+        }
+    }
+    ap.entry.table = Some(table);
 }

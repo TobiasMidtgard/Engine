@@ -2,7 +2,7 @@
 //! and saves one PNG per shot. Software Vulkan (lavapipe) is enough.
 //!
 //! ```sh
-//! cargo run -p engine_softbody --example yard --release -- [out_dir] [WIDTHxHEIGHT] [shot,shot]
+//! cargo run -p engine_softbody --example yard --release -- [out_dir] [WIDTHxHEIGHT] [shot,shot] [rain=MM]
 //! ```
 
 use engine_core::prelude::*;
@@ -111,6 +111,20 @@ const SHOTS: &[Shot] = &[
         eye: [8.0, 6.5, 19.0],
         target: [11.0, 2.5, 10.0],
         follow: None,
+    },
+    Shot {
+        name: "bridge_walker_close",
+        secs: 7.5,
+        eye: [-3.0, 1.75, -0.9],
+        target: [0.0, 1.1, 0.45],
+        follow: Some("Bridge walker"),
+    },
+    Shot {
+        name: "bridge_walker_cloak",
+        secs: 8.5,
+        eye: [-1.9, 2.0, 2.7],
+        target: [0.0, 0.95, 0.0],
+        follow: Some("Bridge walker"),
     },
     Shot {
         name: "bead_curtain",
@@ -223,6 +237,12 @@ fn main() {
         .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
         .unwrap_or((1280u32, 720u32));
     let only: Option<Vec<&str>> = args.get(3).map(|s| s.split(',').collect());
+    // `rain=MM`: rain at MM mm/h from the start, so the cloth soaks.
+    let rain: f32 = args
+        .get(4)
+        .and_then(|s| s.strip_prefix("rain="))
+        .and_then(|mm| mm.parse().ok())
+        .unwrap_or(0.0);
     engine_core::log::init("info,wgpu=warn,naga=warn");
 
     let mut app = App::new();
@@ -244,6 +264,11 @@ fn main() {
         engine_softbody::SoftBodyPlugin,
     ));
     app.world.resource_mut::<Atmosphere>().ground_color = [0.09, 0.18, 0.04];
+    if rain > 0.0 {
+        let mut weather = app.world.resource_mut::<engine_world::WeatherState>();
+        weather.precipitation_mm_h = rain;
+        weather.precipitation_kind = engine_world::PrecipitationKind::Rain;
+    }
     app.world.spawn((
         DirectionalLight {
             illuminance: 100_000.0,

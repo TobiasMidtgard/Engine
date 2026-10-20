@@ -11,8 +11,8 @@ use engine_assets::{Assets, Handle};
 use engine_core::math::noise::perlin2;
 use engine_core::prelude::*;
 use engine_render::{MaterialRef, Mesh, MeshRef, MeshRenderer};
-use engine_world::SurfaceMaterials;
 use engine_world::physics::{Collider, ColliderShape, PhysicsBackend};
+use engine_world::{Climbable, SurfaceMaterials};
 
 use crate::architecture::{self, TowerTop};
 use crate::assets::DestructionAssets;
@@ -181,6 +181,7 @@ pub fn build_prop_models_system(
             With<crate::door::Door>,
         )>,
     >,
+    climbables: Query<(), With<Climbable>>,
 ) {
     let (Some(assets), Some(mut meshes)) = (assets, meshes) else {
         return;
@@ -191,6 +192,9 @@ pub fn build_prop_models_system(
          key: String,
          solid: bool,
          parts: &dyn Fn() -> Vec<(DestructibleMaterial, MeshBuilder)>| {
+            // A ladder is climbed through its own box: a solid one pushes the climber off the
+            // climb line. As a sensor it keeps its surface, so the rungs still ring as steel.
+            let sensor = climbables.contains(e);
             let solid = solid && physics;
             let need_meshes = !cache.meshes.contains_key(&key);
             if need_meshes || (solid && !cache.solids.contains_key(&key)) {
@@ -228,6 +232,7 @@ pub fn build_prop_models_system(
                     shape: shape.clone(),
                     surface: surfaces.id_or_default(&props.surface),
                     density: props.density,
+                    sensor,
                     ..Collider::default()
                 });
             }

@@ -26,6 +26,13 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [0.0, 24.0, 44.0],
         [0.0, 2.0, -3.0],
     ),
+    // The wrecking ball's chain close up under the swinging ball's load (and later, below).
+    (
+        0.7,
+        "16_wrecking_chain_swinging",
+        [-31.5, 5.5, 16.0],
+        [-26.5, 4.6, 10.0],
+    ),
     (
         1.0,
         "02_ragdolls_on_stairs",
@@ -59,6 +66,13 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [-19.0, 2.4, 24.2],
         [-30.0, 1.3, 19.5],
     ),
+    // The rockfall: rocks pouring off the chute, then the heap.
+    (
+        2.4,
+        "18_rockfall_pouring",
+        [-15.0, 4.0, 7.0],
+        [-24.5, 2.0, -2.0],
+    ),
     (
         2.6,
         "05_pile_and_tower",
@@ -76,10 +90,23 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [24.0, 0.5, -9.8],
     ),
     (
+        10.0,
+        "19_rockfall_heap",
+        [-18.0, 2.4, 3.0],
+        [-23.0, 0.7, -2.0],
+    ),
+    (
         12.0,
         "09_overview_after",
         [0.0, 24.0, 44.0],
         [0.0, 2.0, -3.0],
+    ),
+    // Where the chain meets the ball, close up, as it swings on.
+    (
+        14.0,
+        "17_wrecking_chain_end",
+        [-21.5, 5.2, 15.0],
+        [-26.0, 4.8, 10.0],
     ),
     (
         20.0,

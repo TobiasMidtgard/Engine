@@ -5,8 +5,10 @@
 //! ends in a head: stones laid across the whole wall, so the end is built, not cut.
 //!
 //! A wall is a row of straight segments. Every segment is one of a few variants, each built as
-//! meshes the scenery shares: the stones up close (chamfered, rough-hewn), only their front
-//! faces a little further off, and the core, a tapered prism just inside the stones: dark up
+//! meshes the scenery shares: the stones, every one a weathered rock of its own
+//! ([`engine::render::rock::rock`]: break faces, rounded edges, pitting, dirt in the cracks),
+//! dense enough that the renderer draws a segment as virtual geometry, picking each cluster's
+//! detail by its size on screen; and the core, a tapered prism just inside the stones: dark up
 //! close (the shadowed rubble between the stones), stone-colored from afar, where it is the
 //! whole wall.
 //!
@@ -38,13 +40,10 @@ pub const HEAD_DEPTH: f32 = 0.55;
 
 /// One segment variant's meshes.
 pub struct WallSegment {
-    /// Chamfered, rough-hewn stones.
+    /// The stones (virtual geometry: the renderer picks their detail).
     pub near: Mesh,
-    /// The same stones' front faces.
-    pub mid: Mesh,
-    /// The last segment of a run: its coping stops short of the +X end, where the head goes.
+    /// The last segment of a run: its stones stop short of the +X end, where the head goes.
     pub near_end: Mesh,
-    pub mid_end: Mesh,
     /// The core between the faces: dark, for behind the stones. Open at its ends, which the
     /// neighbors close.
     pub core: Mesh,
@@ -54,10 +53,9 @@ pub struct WallSegment {
     pub core_far: Mesh,
 }
 
-/// A wall head's meshes: stones up close and their outer faces further off.
+/// A wall head's stones.
 pub struct WallHead {
     pub near: Mesh,
-    pub mid: Mesh,
 }
 
 /// Half the width of the body at height `y` (the faces batter in toward the top).
@@ -98,6 +96,8 @@ fn stone_tint(rng: &mut Rng, y: f32) -> Vec3 {
     c.lerp(c * Vec3::new(0.55, 0.68, 0.4), low * rng.range(0.4, 0.95))
 }
 
+/// How far inside the faces the core is, m.
+const CORE_INSET: f32 = 0.12;
 /// The dark core's sides and top.
 const DARK: Vec3 = Vec3::new(0.22, 0.21, 0.19);
 const DARK_TOP: Vec3 = Vec3::new(0.26, 0.25, 0.22);
@@ -110,15 +110,13 @@ const FACE_UNDER_HEAD: f32 = 0.2;
 /// Segment variant `seed`: stones up close, their fronts, and the two cores.
 pub fn segment(seed: u64) -> WallSegment {
     WallSegment {
-        near: stones(seed, false, false),
-        mid: stones(seed, true, false),
-        near_end: stones(seed, false, true),
-        mid_end: stones(seed, true, true),
+        near: stones(seed, false),
+        near_end: stones(seed, true),
         core: core(DARK, DARK_TOP, CoreEnds::Open),
         core_end: core(DARK, DARK_TOP, CoreEnds::UnderHead),
         core_far: core(
-            Vec3::new(0.42, 0.41, 0.38),
-            Vec3::new(0.52, 0.5, 0.46),
+            Vec3::new(0.33, 0.32, 0.3),
+            Vec3::new(0.4, 0.39, 0.36),
             CoreEnds::Closed,
         ),
     }
@@ -127,46 +125,77 @@ pub fn segment(seed: u64) -> WallSegment {
 /// Head variant `seed`.
 pub fn head(seed: u64) -> WallHead {
     WallHead {
-        near: head_stones(seed, false),
-        mid: head_stones(seed, true),
+        near: head_stones(seed),
     }
 }
 
-/// One rough stone: `center` and axes `ax` (along, up, out of the face), half extents `half`.
-/// `far` builds draw the same random numbers as near ones, so both show the same stones.
-#[allow(clippy::too_many_arguments)]
+/// One weathered stone: `center` and axes `ax` (along, up, out of the face), half extents
+/// `half`, shaded for a stone at height `y` in the wall.
 fn stone(
     mb: &mut Mb,
     rng: &mut Rng,
     seed: &mut u64,
-    far: bool,
     center: Vec3,
     ax: [Vec3; 3],
     half: Vec3,
     y: f32,
-    skip: u8,
 ) {
     *seed += 1;
-    // Field stones: well rounded, lumpy.
-    let c = rng.range(0.03, 0.07);
-    let tint = stone_tint(rng, y);
-    let rough = rng.range(0.02, 0.045);
-    // Without chamfers to bridge them, rough faces would open cracks at the stone's edges;
-    // from further off the lumps don't show anyway.
-    let rough = if far { 0.0 } else { rough };
-    mb.cbox_rough(center, ax, half, c, tint, skip, rough, *seed);
+    // (The rock texture is pale limestone; the tints darken it toward weathered gritstone.)
+    let tint = stone_tint(rng, y) * rng.range(0.58, 0.72);
+    // Rocks are rounder than the boxes they fill: a little bigger along the face, so their
+    // bellies meet and only chinks show between them.
+    let size = half * 2.0 * Vec3::new(1.18, 1.2, 1.0);
+    // About 1,300 triangles for small stones, 5,000 for the big ones: facets of a centimeter
+    // or two, which virtual geometry thins out with distance.
+    let detail = if size.max_element() > 0.6 { 4 } else { 3 };
+    // Dress it like a waller would: split along its bedding planes (flat top and bottom) with a
+    // squared-off face and ends, so it reads as a slab of gritstone rather than a river cobble.
+    // The rock starts a little bigger, so the dressed stone still fills `size`.
+    let dressed = Vec3::new(0.95, 0.92, 0.82);
+    let mut rock =
+        engine::render::rock::rock(size / dressed, (*seed % u32::MAX as u64) as u32, detail);
+    let limit = size * 0.5;
+    for v in &mut rock.vertices {
+        let p = Vec3::from(v.position);
+        v.position = [
+            soft_clamp(p.x, limit.x, size.x * 0.06),
+            soft_clamp(p.y, limit.y, size.y * 0.07),
+            soft_clamp(p.z, limit.z, size.z * 0.06),
+        ];
+    }
+    rock.compute_normals();
+    let base = mb.mesh.vertices.len() as u32;
+    mb.mesh.vertices.extend(rock.vertices.iter().map(|v| {
+        let p = Vec3::from(v.position);
+        let n = Vec3::from(v.normal);
+        let c = v.color;
+        let mut out = *v;
+        out.position = (center + ax[0] * p.x + ax[1] * p.y + ax[2] * p.z).to_array();
+        out.normal = (ax[0] * n.x + ax[1] * n.y + ax[2] * n.z).to_array();
+        out.color = [c[0] * tint.x, c[1] * tint.y, c[2] * tint.z, c[3]];
+        out
+    }));
+    mb.mesh
+        .indices
+        .extend(rock.indices.iter().map(|i| i + base));
+}
+
+/// `v` with its magnitude held under `limit`, the corner rounded over a width `k`.
+fn soft_clamp(v: f32, limit: f32, k: f32) -> f32 {
+    let a = v.abs();
+    let h = (0.5 + 0.5 * (limit - a) / k).clamp(0.0, 1.0);
+    v.signum() * (limit + (a - limit) * h - k * h * (1.0 - h))
 }
 
 /// Both faces' stones in uneven courses, pinning stones, through-stones and the coping (which
 /// leaves room for a head at the +X end when `end` is set).
-fn stones(seed: u64, far: bool, end: bool) -> Mesh {
+fn stones(seed: u64, end: bool) -> Mesh {
     let mut rng = Rng::new(seed);
-    let mut mb = Mb::new(far);
+    let mut mb = Mb::new(false);
     let x0 = -SEGMENT * 0.5;
     let x1 = SEGMENT * 0.5;
     let mut stone_seed = seed * 10_000;
-    // The back of a face stone is inside the wall; from further off only the fronts show.
-    let face_skip = if far { 0b01_1111 } else { 1 << 4 };
     for side in [-1.0f32, 1.0] {
         // The face's outward normal and its up direction, leaning in with the batter.
         let n = Vec3::new(0.0, BATTER, side).normalize();
@@ -216,46 +245,30 @@ fn stones(seed: u64, far: bool, end: bool) -> Mesh {
                 // Proud or set back, so the face is not a flat plane.
                 let out = rng.range(-0.03, 0.035);
                 let surface = Vec3::new((a + b) * 0.5, yc, side * half_width(yc)) + n * out;
-                let center = surface - n * depth * 0.5;
+                // A rock is widest through its middle: set that a little behind the face, so
+                // the stones' full outlines show and they bulge out a few centimeters.
+                let center = surface - n * depth * 0.2;
                 let tilt = Quat::from_axis_angle(n, rng.range(-0.14, 0.14))
                     * Quat::from_axis_angle(up, rng.range(-0.08, 0.08))
                     * Quat::from_axis_angle(Vec3::X, rng.range(-0.06, 0.06));
                 let ax = [tilt * Vec3::X, tilt * up, tilt * n];
                 let half = Vec3::new((b - a - gap) * 0.5, (sh - gap * 0.6) * 0.5, depth * 0.5);
-                stone(
-                    &mut mb,
-                    &mut rng,
-                    &mut stone_seed,
-                    far,
-                    center,
-                    ax,
-                    half,
-                    yc,
-                    face_skip,
-                );
-                // A pinning stone wedged into the joint above a short stone (drawn in far
-                // builds too, so the stones after it stay the same; too small to show there).
+                stone(&mut mb, &mut rng, &mut stone_seed, center, ax, half, yc);
+                // A pinning stone wedged into the joint above a short stone.
                 if sh < h * 0.85 && rng.chance(0.5) {
                     let py = yc + sh * 0.5 + (h - sh) * 0.35;
                     let px = rng.range(a + 0.04, b - 0.04);
                     let p = Vec3::new(px, py, side * (half_width(py) - 0.04));
                     let s = (h - sh).clamp(0.04, 0.08);
                     let half = Vec3::new(s * rng.range(0.9, 1.6), s * 0.5, 0.06);
-                    let mut skip = face_skip;
-                    if far {
-                        // Every side skipped: the draws happen, nothing is built.
-                        skip = 0b11_1111;
-                    }
                     stone(
                         &mut mb,
                         &mut rng,
                         &mut stone_seed,
-                        far,
                         p,
                         [Vec3::X, up, n],
                         half,
                         py,
-                        skip,
                     );
                 }
             }
@@ -275,22 +288,20 @@ fn stones(seed: u64, far: bool, end: bool) -> Mesh {
             &mut mb,
             &mut rng,
             &mut stone_seed,
-            far,
             Vec3::new(x, y, 0.0),
             [rot * Vec3::X, Vec3::Y, rot * Vec3::Z],
             half,
             y,
-            if far { 0b00_1111 } else { 0 },
         );
         x += rng.range(1.0, 1.7);
     }
-    coping(&mut mb, &mut rng, &mut stone_seed, x0, top_end, far);
+    coping(&mut mb, &mut rng, &mut stone_seed, x0, top_end);
     mb.mesh
 }
 
 /// Coping from `x0` to `x1`: flat stones set on edge across the top, tall and short in turn,
 /// leaning a little.
-fn coping(mb: &mut Mb, rng: &mut Rng, seed: &mut u64, x0: f32, x1: f32, far: bool) {
+fn coping(mb: &mut Mb, rng: &mut Rng, seed: &mut u64, x0: f32, x1: f32) {
     let mut x = x0 + 0.02;
     let mut tall = rng.chance(0.5);
     let lean = rng.range(-0.1, 0.1);
@@ -310,14 +321,10 @@ fn coping(mb: &mut Mb, rng: &mut Rng, seed: &mut u64, x0: f32, x1: f32, far: boo
             mb,
             rng,
             seed,
-            far,
             center,
             [rot * Vec3::X, rot * Vec3::Y, rot * Vec3::Z],
             Vec3::new(t * 0.5 - 0.008, h * 0.5, w),
             BODY + h,
-            // The bottom sits on the wall; from further off the ends against the neighbors
-            // don't show either.
-            if far { 0b00_0111 } else { 1 << 2 },
         );
         x += t;
     }
@@ -325,9 +332,9 @@ fn coping(mb: &mut Mb, rng: &mut Rng, seed: &mut u64, x0: f32, x1: f32, far: boo
 
 /// A head: courses of stones laid across the whole wall at its end, long and short in turn
 /// along it so they bond into the wall's faces, with a coping stone on top.
-fn head_stones(seed: u64, far: bool) -> Mesh {
+fn head_stones(seed: u64) -> Mesh {
     let mut rng = Rng::new(seed);
-    let mut mb = Mb::new(far);
+    let mut mb = Mb::new(false);
     let mut stone_seed = seed * 10_000 + 5_000;
     let mut y = -SINK;
     let mut long = rng.chance(0.5);
@@ -354,13 +361,10 @@ fn head_stones(seed: u64, far: bool) -> Mesh {
             &mut mb,
             &mut rng,
             &mut stone_seed,
-            far,
             center,
             [rot * Vec3::X, rot * Vec3::Y, rot * Vec3::Z],
             Vec3::new(reach * 0.5, h * 0.5 - 0.012, w),
             yc,
-            // From further off: the outer end and the two faces.
-            if far { 0b00_1101 } else { 0 },
         );
         y += h;
     }
@@ -370,12 +374,10 @@ fn head_stones(seed: u64, far: bool) -> Mesh {
         &mut mb,
         &mut rng,
         &mut stone_seed,
-        far,
         Vec3::new(-0.24, BODY + h * 0.5 - 0.03, 0.0),
         [Vec3::X, Vec3::Y, Vec3::Z],
         Vec3::new(0.26, h * 0.5, TOP * 0.5 + 0.04),
         BODY + h,
-        if far { 0b00_0101 } else { 1 << 2 },
     );
     mb.mesh
 }
@@ -396,7 +398,8 @@ enum CoreEnds {
 /// shortest coping stones' tops, with its sides `side` and its top `top` colored.
 fn core(side: Vec3, top: Vec3, ends: CoreEnds) -> Mesh {
     let mut mb = Mb::new(true);
-    let inset = 0.05;
+    // Deep enough that the rounded stones, not the core, fill the face.
+    let inset = CORE_INSET;
     let y1 = BODY + 0.08;
     let x0 = -SEGMENT * 0.5;
     let x1 = SEGMENT * 0.5
@@ -456,19 +459,16 @@ mod tests {
     #[test]
     fn segments_stay_in_budget_and_inside_their_box() {
         let s = segment(3);
-        assert!(tris(&s.near) < 14_000, "near {}", tris(&s.near));
-        assert!(
-            tris(&s.near_end) < tris(&s.near),
-            "end {}",
-            tris(&s.near_end)
-        );
-        assert!(tris(&s.mid) < tris(&s.near) / 6, "mid {}", tris(&s.mid));
+        // Dense enough for virtual geometry (50,000 triangles by default), not wasteful.
+        let near = tris(&s.near);
+        assert!((60_000..700_000).contains(&near), "near {near}");
+        assert!(tris(&s.near_end) < near, "end {}", tris(&s.near_end));
         assert!(tris(&s.core) <= 12, "core {}", tris(&s.core));
         assert!(tris(&s.core_far) <= 12, "far core {}", tris(&s.core_far));
         for v in &s.near.vertices {
             let p = Vec3::from(v.position);
-            assert!(p.x.abs() < SEGMENT * 0.5 + 0.25, "{p:?}");
-            assert!(p.z.abs() < HALF_FOOT + 0.14, "{p:?}");
+            assert!(p.x.abs() < SEGMENT * 0.5 + 0.3, "{p:?}");
+            assert!(p.z.abs() < HALF_FOOT + 0.22, "{p:?}");
             assert!((-SINK - 0.1..HEIGHT + 0.08).contains(&p.y), "{p:?}");
         }
         // An end segment's stones leave its +X end to the head.
@@ -477,40 +477,10 @@ mod tests {
         }
     }
 
-    /// The highest point of a mesh in each 0.25 m slice along the wall.
-    fn top_profile(m: &Mesh) -> Vec<f32> {
-        let mut top = vec![f32::MIN; (SEGMENT / 0.25) as usize + 4];
-        for v in &m.vertices {
-            let i =
-                ((v.position[0] + SEGMENT * 0.5) / 0.25 + 2.0).clamp(0.0, top.len() as f32 - 1.0);
-            top[i as usize] = top[i as usize].max(v.position[1]);
-        }
-        top
-    }
-
-    #[test]
-    fn the_lods_show_the_same_stones() {
-        // At the near-to-mid swap the coping must not jump: both are built from one stream.
-        for seed in [900, 901, 902, 903] {
-            let s = segment(seed);
-            for (near, mid) in [(&s.near, &s.mid), (&s.near_end, &s.mid_end)] {
-                let (pn, pm) = (top_profile(near), top_profile(mid));
-                // Inside the segment: at its ends a stone's leaning corner may or may not
-                // reach into the slice.
-                for (i, (a, b)) in pn.iter().zip(pm).enumerate().take(pn.len() - 4).skip(4) {
-                    if *a > f32::MIN && b > f32::MIN {
-                        assert!((a - b).abs() < 0.08, "seed {seed} slice {i}: {a} vs {b}");
-                    }
-                }
-            }
-        }
-    }
-
     #[test]
     fn heads_cover_the_end_of_the_wall() {
         let h = head(5);
-        assert!(tris(&h.near) < 2_000, "head {}", tris(&h.near));
-        assert!(tris(&h.mid) < tris(&h.near), "head mid {}", tris(&h.mid));
+        assert!(tris(&h.near) < 80_000, "head {}", tris(&h.near));
         let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for v in &h.near.vertices {
             let p = Vec3::from(v.position);
@@ -535,7 +505,10 @@ mod tests {
         for core in [&s.core, &s.core_end, &s.core_far] {
             for v in &core.vertices {
                 let p = Vec3::from(v.position);
-                assert!(p.z.abs() <= half_width(p.y.min(BODY)) - 0.049, "{p:?}");
+                assert!(
+                    p.z.abs() <= half_width(p.y.min(BODY)) - CORE_INSET + 1e-3,
+                    "{p:?}"
+                );
             }
         }
         // At a run's end the dark core stops inside the head, clear of its outer face.

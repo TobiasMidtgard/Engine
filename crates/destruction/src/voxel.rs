@@ -152,6 +152,10 @@ impl VoxelVolume {
 
 /// Voxels per mesh chunk edge.
 pub const CHUNK: usize = 16;
+
+/// Steepest step between neighboring columns, voxels, that topsoil still covers (about 70°);
+/// steeper faces stay bare rock.
+const MAX_SOIL_STEP: usize = 3;
 /// Density at and above which a voxel counts as solid.
 pub const SOLID: u8 = 128;
 
@@ -379,11 +383,49 @@ impl VoxelState {
         if let Some(top) = volume.topsoil {
             let layers = (volume.topsoil_depth / s).round() as usize;
             if layers > 0 {
+                // Each column's top solid voxel (`None` = no rock in the column).
+                let tops: Vec<Option<usize>> = (0..dims[2])
+                    .flat_map(|k| (0..dims[0]).map(move |i| (i, k)))
+                    .map(|(i, k)| {
+                        (0..dims[1])
+                            .rev()
+                            .find(|&j| state.density[state.idx(i, j, k)] >= SOLID)
+                    })
+                    .collect();
+                let top_at = |i: usize, k: usize| tops[k * dims[0] + i];
                 for k in 0..dims[2] {
                     for i in 0..dims[0] {
+                        let Some(h) = top_at(i, k) else {
+                            continue;
+                        };
+                        // Steps down to (`drop`) and up to (`rise`) the neighboring columns.
+                        let (mut drop, mut rise) = (0, 0);
+                        for (di, dk) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                            let (ni, nk) = (i as i64 + di, k as i64 + dk);
+                            if ni < 0 || nk < 0 || ni >= dims[0] as i64 || nk >= dims[2] as i64 {
+                                continue;
+                            }
+                            match top_at(ni as usize, nk as usize) {
+                                Some(t) => {
+                                    drop = drop.max(h.saturating_sub(t));
+                                    rise = rise.max(t.saturating_sub(h));
+                                }
+                                None => drop = drop.max(h + 1),
+                            }
+                        }
+                        // On a slope the soil also covers the step down to the next column, or
+                        // the risers would show rock in stripes. Down a face too steep for soil
+                        // the rock is bare; at its lip the soil keeps its own depth.
+                        let layers = if drop <= MAX_SOIL_STEP {
+                            layers.max(drop + 1)
+                        } else if rise < 2 {
+                            layers
+                        } else {
+                            continue;
+                        };
                         // Only the top surface: ledges down the face stay bare rock.
                         let mut depth = usize::MAX;
-                        for j in (0..dims[1]).rev() {
+                        for j in (0..=h).rev() {
                             let idx = state.idx(i, j, k);
                             if state.density[idx] >= SOLID {
                                 depth = if depth == usize::MAX { 0 } else { depth + 1 };
@@ -511,6 +553,71 @@ impl VoxelState {
         let t = ((d(j) - solid) / (d(j) - d(j + 1)).max(1.0)).clamp(0.0, 1.0);
         let top = self.center(i, j as usize, k).y + t * self.size;
         (top - p.y <= max_up).then_some(top)
+    }
+
+    /// Density at local `p`, blended between the eight voxel centers around it (the surface the
+    /// mesh draws is where this crosses [`SOLID`]).
+    pub fn density_at(&self, p: Vec3) -> f32 {
+        let g = (p - self.origin) / self.size - Vec3::splat(0.5);
+        let b = g.floor();
+        let f = g - b;
+        let (i, j, k) = (b.x as i64, b.y as i64, b.z as i64);
+        (0..8)
+            .map(|c| {
+                let (dx, dy, dz) = (c & 1, (c >> 1) & 1, c >> 2);
+                let w = |d: i64, f: f32| if d == 1 { f } else { 1.0 - f };
+                w(dx, f.x) * w(dy, f.y) * w(dz, f.z) * self.sample(i + dx, j + dy, k + dz) as f32
+            })
+            .sum()
+    }
+
+    /// Which way local `p`, inside rock, gets out of it soonest: toward the open voxels within
+    /// two of it, the nearest by far the most (out of a wall's face, down out of a ceiling, up out
+    /// of a floor; the open air just above a thin shelf outweighs the cave under it). `None`
+    /// when rock fills all of them.
+    pub fn outward(&self, p: Vec3) -> Option<Vec3> {
+        let g = (p - self.origin) / self.size;
+        let b = g.floor();
+        let (i, j, k) = (b.x as i64, b.y as i64, b.z as i64);
+        let mut sum = Vec3::ZERO;
+        for dk in -2..=2 {
+            for dj in -2..=2 {
+                for di in -2..=2 {
+                    if self.sample(i + di, j + dj, k + dk) >= SOLID {
+                        continue;
+                    }
+                    let o = Vec3::new(
+                        (i + di) as f32 + 0.5,
+                        (j + dj) as f32 + 0.5,
+                        (k + dk) as f32 + 0.5,
+                    ) - g;
+                    sum += o / o.length_squared().max(0.25).powi(2);
+                }
+            }
+        }
+        (sum.length_squared() > 1e-6).then(|| sum.normalize())
+    }
+
+    /// How far local `p` must move along `dir` to leave the rock: 0 outside it, `None` when
+    /// that is more than `max`.
+    pub fn exit_along(&self, p: Vec3, dir: Vec3, max: f32) -> Option<f32> {
+        let solid = SOLID as f32;
+        let step = self.size * 0.25;
+        let mut t = 0.0;
+        let mut d = self.density_at(p);
+        while d >= solid {
+            let next = self.density_at(p + dir * (t + step));
+            if next < solid {
+                // Where the blend crosses solid between the two samples.
+                return Some(t + step * ((d - solid) / (d - next).max(1e-3)).clamp(0.0, 1.0));
+            }
+            t += step;
+            if t > max {
+                return None;
+            }
+            d = next;
+        }
+        Some(t)
     }
 
     pub fn solid_count(&self) -> usize {
@@ -1533,7 +1640,6 @@ pub fn mesh_all(state: &VoxelState, look: &VoxelLook, center: Vec3) -> MeshBuild
     mesh_region(state, look, [-1, -1, -1], hi, center)
 }
 
-/// Local rotation-aware box SDF helper for `TerrainEdit` boxes.
 /// World height of the rock surface a point resting on rock touches, for things that land on
 /// rock as on the ground: the rock top under it, or, when it is inside rock, where it leaves
 /// the rock going up, at most `max_up` above it (deeper, it is inside a wall or under a
@@ -1562,18 +1668,80 @@ pub fn rock_contact(
         .reduce(f64::max)
 }
 
-/// How deep `p` is inside rock among `volumes`: how far it must rise to leave it (0 outside).
+/// How deep `p` is inside rock among `volumes`: how far it must move to leave it, up out of
+/// a floor or out of the rock's open side (a wall's face, a ceiling's underside); 0 outside.
 pub fn rock_depth(volumes: &[(&GlobalTransform, &VoxelState)], p: DVec3) -> f32 {
     volumes
         .iter()
         .filter_map(|(gt, state)| {
             let affine = gt.affine();
             let local = affine.inverse().transform_point3(p).as_vec3();
-            let top = state.exit_above(local, f32::INFINITY)?;
-            let world = affine.transform_point3(Vec3::new(local.x, top, local.z).as_dvec3());
-            Some((world.y - p.y) as f32)
+            let up = state.exit_above(local, f32::INFINITY).map(|top| {
+                let world = affine.transform_point3(Vec3::new(local.x, top, local.z).as_dvec3());
+                (world.y - p.y) as f32
+            });
+            let reach = up.map_or(DEPTH_REACH_M, |a| a.min(DEPTH_REACH_M));
+            let out = state
+                .outward(local)
+                .and_then(|dir| state.exit_along(local, dir, reach));
+            match (up, out) {
+                (_, Some(b)) => Some(up.map_or(b, |a| a.min(b))),
+                (Some(a), None) => Some(a),
+                // In rock with no way out within reach (deep in a volume's anchored bedrock).
+                (None, None) => (state.density_at(local) >= SOLID as f32).then_some(reach),
+            }
         })
         .fold(0.0, f32::max)
+}
+
+/// How far [`rock_depth`] looks along the rock's outward direction, m: deeper counts as this.
+const DEPTH_REACH_M: f32 = 2.0;
+
+/// Whether `p` is inside rock among `volumes`.
+pub fn in_rock(volumes: &[(&GlobalTransform, &VoxelState)], p: DVec3) -> bool {
+    volumes.iter().any(|(gt, state)| {
+        let local = gt.affine().inverse().transform_point3(p).as_vec3();
+        state.density_at(local) >= SOLID as f32
+    })
+}
+
+/// Rock's outward direction above which a point inside rock is in a floor (it rises out of
+/// it) rather than in a wall's side or a ceiling (it is pushed out sideways or down).
+const FLOOR_UP: f32 = 0.5;
+
+/// How rock pushes a point inside a wall's side or a ceiling out of it: the rock's outward
+/// direction (world) and how far along it the point is inside. `None` outside rock, in a floor
+/// (the rock opens upward, or the way up is no longer than the way out: it rises out of that,
+/// see [`rock_contact`]), or deeper than `reach`.
+pub fn rock_side(
+    volumes: &[(&GlobalTransform, &VoxelState)],
+    p: DVec3,
+    reach: f32,
+) -> Option<(Vec3, f32)> {
+    volumes
+        .iter()
+        .filter_map(|(gt, state)| {
+            let affine = gt.affine();
+            let local = affine.inverse().transform_point3(p).as_vec3();
+            if state.density_at(local) < SOLID as f32 {
+                return None;
+            }
+            let dir = state.outward(local)?;
+            if dir.y >= FLOOR_UP {
+                return None;
+            }
+            let depth = state.exit_along(local, dir, reach)?;
+            // Just under a floor's top (a thin shelf, a ledge's rim): it rises out of that.
+            if state
+                .exit_above(local, depth)
+                .is_some_and(|top| top - local.y <= depth)
+            {
+                return None;
+            }
+            let world = affine.transform_vector3(dir.as_dvec3()).as_vec3();
+            Some((world.normalize_or(dir), depth))
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
 }
 
 /// World height of the highest rock top under `p` among `volumes` (see
@@ -1594,6 +1762,7 @@ pub fn rock_below(volumes: &[(&GlobalTransform, &VoxelState)], p: DVec3) -> Opti
         .reduce(f64::max)
 }
 
+/// Local rotation-aware box SDF helper for `TerrainEdit` boxes (positive inside).
 pub fn box_sdf(p: Vec3, center: Vec3, half: Vec3, rotation: Quat) -> f32 {
     let q = rotation.inverse() * (p - center);
     let d = q.abs() - half;
@@ -1677,6 +1846,52 @@ mod tests {
         assert!(
             seen.contains(&(DestructibleMaterial::Dirt.index() as u8)),
             "bare soil on the flanks ({seen:?})"
+        );
+    }
+
+    #[test]
+    fn soil_covers_slopes_without_rock_stripes() {
+        // The default cliff's ends slope down in voxel steps; soil that only capped each step
+        // let the rock show on the risers in stripes.
+        let v = VoxelVolume::default();
+        let s = VoxelState::new(&v, &mats());
+        let soil = v.topsoil.unwrap().index() as u8;
+        let [nx, ny, nz] = s.dims;
+        let solid = |i: i64, j: i64, k: i64| s.sample(i, j, k) >= SOLID;
+        let top = |i: i64, k: i64| (0..ny as i64).rev().find(|&j| solid(i, j, k));
+        let mut striped = Vec::new();
+        for k in 1..nz as i64 - 1 {
+            for i in 1..nx as i64 - 1 {
+                let Some(h) = top(i, k) else { continue };
+                let drop = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+                    .iter()
+                    .map(|&(di, dk)| top(i + di, k + dk).map_or(h + 1, |t| (h - t).max(0)))
+                    .max()
+                    .unwrap();
+                if drop as usize > MAX_SOIL_STEP {
+                    continue;
+                }
+                for j in 0..h {
+                    let idx = s.idx(i as usize, j as usize, k as usize);
+                    let above = s.idx(i as usize, j as usize + 1, k as usize);
+                    // A riser: open to the side, under the open sky (not a pocket below an
+                    // overhang).
+                    let open_side = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+                        .iter()
+                        .any(|&(di, dk)| top(i + di, k + dk).is_none_or(|t| t < j));
+                    if solid(i, j, k)
+                        && open_side
+                        && s.material[idx] != soil
+                        && s.material[above] == soil
+                    {
+                        striped.push((i, j, k));
+                    }
+                }
+            }
+        }
+        assert!(
+            striped.is_empty(),
+            "rock under soil on a slope at {striped:?}"
         );
     }
 
@@ -1790,6 +2005,55 @@ mod tests {
         assert!((exit - top).abs() < 1e-4, "{exit} vs {top}");
         assert_eq!(s.exit_above(Vec3::new(0.1, 2.0, 0.1), 0.5), None);
         assert_eq!(s.exit_above(Vec3::new(0.1, 8.0, 0.1), 0.5), None);
+    }
+
+    #[test]
+    fn rock_pushes_out_of_its_nearest_face() {
+        // A 5 m cube of rock: x from −2.5 to 2.5, y from 0 to 5.
+        let v = VoxelVolume {
+            dims: [10, 10, 10],
+            voxel_size: 0.5,
+            shape: VoxelShape::Solid,
+            topsoil: None,
+            ..VoxelVolume::default()
+        };
+        let s = VoxelState::new(&v, &mats());
+        // Just inside the +X face, halfway up: out sideways, about 0.2 m.
+        let p = Vec3::new(2.3, 2.5, 0.1);
+        let dir = s.outward(p).unwrap();
+        assert!(dir.x > 0.9, "{dir}");
+        let depth = s.exit_along(p, dir, 1.0).unwrap();
+        assert!((depth - 0.2).abs() < 0.1, "{depth}");
+        // Just under the top: up.
+        assert!(s.outward(Vec3::new(0.1, 4.8, 0.1)).unwrap().y > 0.9);
+        // Deep inside, no open voxel nearby; outside, no depth.
+        assert_eq!(s.outward(Vec3::new(0.1, 2.5, 0.1)), None);
+        assert_eq!(
+            s.exit_along(Vec3::new(3.0, 2.5, 0.1), Vec3::X, 1.0),
+            Some(0.0)
+        );
+        assert_eq!(s.exit_along(p - Vec3::X, Vec3::X, 1.0), None);
+        // The same block hollowed out under a roof one voxel thick: anywhere just under its top
+        // a point rises out of it (a floor), it isn't pushed down through it.
+        let mut s = s;
+        for j in 0..9 {
+            for k in 1..9 {
+                for i in 1..9 {
+                    let idx = s.idx(i, j, k);
+                    s.density[idx] = 0;
+                }
+            }
+        }
+        let gts = GlobalTransform::default();
+        let volumes = [(&gts, &s)];
+        for i in 0..24 {
+            for depth in [0.004, 0.02, 0.04] {
+                let p = Vec3::new(-1.9 + i as f32 * 0.165, 5.0 - depth, 0.07 * i as f32 - 0.8);
+                if s.density_at(p) >= SOLID as f32 {
+                    assert_eq!(rock_side(&volumes, p.as_dvec3(), 0.6), None, "{p}");
+                }
+            }
+        }
     }
 
     #[test]
