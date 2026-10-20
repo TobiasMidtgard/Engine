@@ -27,6 +27,11 @@ struct VsOut {
     @location(9) glint: vec3<f32>,     // sky mirrored by water droplets (pre-exposed); plumes: x the air's thickness
     @location(10) sun: vec3<f32>,      // toward the sun in sprite space (x right, y up, z to eye); 0 if unlit
     @location(11) pixels: f32,         // sprite width on screen in pixels
+    // Crowns: the eye and this corner in the splash's own frame (units of its size; eye.w the
+    // size in meters), and its rotation to the world.
+    @location(12) eye: vec4<f32>,
+    @location(13) at: vec3<f32>,
+    @location(14) @interpolate(flat) quat: vec4<f32>,
 };
 
 // Narrowest a sprite is drawn, pixels.
@@ -90,12 +95,20 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) instance
         right = cx * cr + cy * sr;
         up = cy * cr - cx * sr;
     }
+    let is_crown = u32(e.spin_look.z) == 14u;
+    if (is_crown) {
+        // A crown is traced inside a camera-facing square around all it can reach.
+        right = frame.inv_view[0].xyz;
+        up = frame.inv_view[1].xyz;
+        center = rel + quat_rotate(e.rot, vec3<f32>(0.0, 0.4, 0.0)) * size;
+        half = vec2<f32>(size * 0.75);
+    }
     // Sprites thinner than MIN_PIXELS on screen grow to it and dim to match, so distant
     // sparks, stars and drops still show (and don't shimmer) with the same total light.
     let px_per_m = frame.proj[1][1] * frame.viewport.y * 0.5 / max(length(rel), 1e-3);
     let width_px = 2.0 * half.x * px_per_m;
     var dim = 1.0;
-    if (width_px < MIN_PIXELS && width_px > 0.0) {
+    if (width_px < MIN_PIXELS && width_px > 0.0 && !is_crown) {
         let grow = MIN_PIXELS / width_px;
         half.x *= grow;
         if ((facing == 1u && speed > 1e-3) || facing == 3u) {
@@ -137,8 +150,244 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) instance
         out.glint = pre_expose(sky) * fog.through * min(e.shade.y, 1.0);
     } else if (out.sprite == 13u) {
         out.glint = vec3<f32>(e.extra_vel.w, 0.0, 0.0);
+    } else if (is_crown) {
+        let inv = vec4<f32>(-e.rot.xyz, e.rot.w);
+        out.eye = vec4<f32>(quat_rotate(inv, -rel) / size, size);
+        out.at = quat_rotate(inv, pos - rel) / size;
+        out.quat = e.rot;
+        out.glint = fog.through;
     }
     return out;
+}
+
+// ---------------------------------------------------------------- splash crown
+// A splash's crown, traced inside its sprite: a thin wall of water thrown up in a ring, flaring
+// out as it rises, its rim drawn into fingers with a bead on each tip, tearing open and slumping
+// back while the jet shoots up from the middle. Units are the sprite's size, y up out of the
+// water, the splash at the origin.
+struct CrownShape {
+    h: f32,     // wall height
+    r0: f32,    // radius at the water
+    flare: f32, // how far the rim leans out past r0
+    tear: f32,  // 0..1, how much of the wall has torn away
+    jet: f32,   // jet height
+    bead: f32,  // radius of the beads on the fingertips
+};
+
+const CROWN_FINGERS: f32 = 17.0;
+
+fn crown_shape(t: f32) -> CrownShape {
+    var s: CrownShape;
+    let rise = 1.0 - sq(1.0 - saturate(t / 0.36));
+    let slump = smoothstep(0.4, 1.0, t);
+    s.h = 0.36 * rise * (1.0 - 0.85 * slump);
+    s.r0 = 0.13 + 0.09 * saturate(t / 0.5);
+    s.flare = 0.03 + 0.17 * rise;
+    s.tear = smoothstep(0.28, 0.8, t);
+    s.jet = 0.6 * smoothstep(0.3, 0.62, t) * (1.0 - smoothstep(0.72, 1.0, t));
+    s.bead = 0.022 * (1.0 - smoothstep(0.42, 0.7, t));
+    return s;
+}
+
+// Distance to the splash from `p`, and which part is nearest (0 the wall, 1 the jet).
+fn crown_sdf(p: vec3<f32>, s: CrownShape, seed: f32) -> vec2<f32> {
+    let rho = length(p.xz);
+    let ang = atan2(p.z, p.x);
+    // Which finger this is nearest, and how far across it (-0.5..0.5).
+    let fi = ang / TAU * CROWN_FINGERS + seed * 7.0;
+    let k = floor(fi + 0.5);
+    let f = fi - k;
+    let kk = k - CROWN_FINGERS * floor(k / CROWN_FINGERS);
+    let jit = hash12(vec2<f32>(kk, seed * 13.0 + 1.0));
+    let wave = value_noise2(vec2<f32>(cos(ang), sin(ang)) * 2.3 + seed * 17.0);
+    let finger = pow(saturate(1.0 - abs(f) * 3.4), 2.0) * (0.4 + jit);
+    let top = s.h * (0.84 + 0.16 * wave + 0.24 * finger);
+    let u = saturate(p.y / max(top, 1e-3));
+    let r = s.r0 + s.flare * pow(u, 1.6);
+    let w = mix(0.016, 0.005, u) + 0.008 * finger * u;
+    var d = max(abs(rho - r) - w, p.y - top);
+    d = max(d, -p.y);
+    if (s.bead > 0.001) {
+        let ac = (k - seed * 7.0) / CROWN_FINGERS * TAU;
+        let ht = s.h * (0.84 + 0.16 * wave + 0.24 * (0.4 + jit));
+        let tip = vec3<f32>(cos(ac) * (s.r0 + s.flare), ht + s.bead * 0.5, sin(ac) * (s.r0 + s.flare));
+        d = min(d, length(p - tip) - s.bead * (0.7 + 0.6 * jit));
+    }
+    var dj = 1e3;
+    if (s.jet > 0.01) {
+        // The jet: a column narrowing upward under a heavier drop about to break away.
+        let wob = vec2<f32>(value_noise2(vec2<f32>(p.y * 6.0, seed * 3.0)), value_noise2(vec2<f32>(p.y * 6.0 + 4.0, seed * 3.0))) - 0.5;
+        let q = p - vec3<f32>(wob.x, 0.0, wob.y) * 0.03 * p.y / max(s.jet, 1e-3);
+        let y = clamp(q.y, 0.0, s.jet);
+        let jr = mix(0.034, 0.016, y / max(s.jet, 1e-3));
+        dj = length(vec2<f32>(length(q.xz), q.y - y)) - jr;
+        dj = min(dj, length(q - vec3<f32>(0.0, s.jet + 0.02, 0.0)) - 0.034);
+    }
+    return select(vec2<f32>(d, 0.0), vec2<f32>(dj, 1.0), dj < d);
+}
+
+// Where the thinning wall has torn open.
+fn crown_torn(p: vec3<f32>, s: CrownShape, seed: f32) -> bool {
+    let u = saturate(p.y / max(s.h, 1e-3));
+    let n = fbm3(p * 11.0 + vec3<f32>(seed * 19.0), 3);
+    return n < s.tear * (0.25 + 0.7 * u);
+}
+
+fn crown_normal(p: vec3<f32>, s: CrownShape, seed: f32) -> vec3<f32> {
+    let e = vec2<f32>(0.0015, -0.0015);
+    return normalize(
+        e.xyy * crown_sdf(p + e.xyy, s, seed).x + e.yyx * crown_sdf(p + e.yyx, s, seed).x
+        + e.yxy * crown_sdf(p + e.yxy, s, seed).x + e.xxx * crown_sdf(p + e.xxx, s, seed).x);
+}
+
+// One surface of the splash, premultiplied: the sky mirrored in it, the sun's glint, and white
+// where the water froths (the rim, the beads, the jet's head).
+fn crown_surface(in: VsOut, p: vec3<f32>, rd: vec3<f32>, part: f32, s: CrownShape) -> vec4<f32> {
+    var n = crown_normal(p, s, in.seed);
+    if (dot(n, rd) > 0.0) { n = -n; }
+    let nv = saturate(dot(n, -rd));
+    let fres = 0.02 + 0.98 * pow(1.0 - nv, 5.0);
+    let nw = quat_rotate(in.quat, n);
+    let vw = quat_rotate(in.quat, -rd);
+    let sky = pre_expose(sample_env(reflect(-vw, nw)));
+    let l = frame.sun_dir.xyz;
+    let hv = normalize(l + vw);
+    let rel = quat_rotate(in.quat, p - in.eye.xyz) * in.eye.w;
+    let lit = shadow_factor(rel, nw) * saturate(dot(nw, l) * 4.0);
+    let glint = pre_expose(frame.sun_color.rgb) * (pow(saturate(dot(nw, hv)), 900.0) * 36.0 * fres * lit);
+    let u = saturate(p.y / max(s.h, 1e-3));
+    let froth = select(smoothstep(0.7, 1.05, u) * 0.5 + smoothstep(0.04, 0.0, p.y) * 0.25, smoothstep(s.jet * 0.8, s.jet, p.y) * 0.4 + 0.05, part > 0.5);
+    let body = select(0.025, 0.1, part > 0.5) + froth * 0.6;
+    let a = saturate(fres + (1.0 - fres) * body);
+    let rgb = sky * fres + glint + in.radiance * ((1.0 - fres) * body);
+    return vec4<f32>(rgb, a);
+}
+
+fn crown(in: VsOut) -> vec4<f32> {
+    let s = crown_shape(in.age);
+    let ro = in.eye.xyz;
+    let rd = normalize(in.at - ro);
+    // Clip the ray to a cylinder around all of it.
+    let rmax = s.r0 + s.flare + 0.06;
+    let ymax = max(s.h * 1.5, s.jet + 0.08) + 0.03;
+    let a2 = dot(rd.xz, rd.xz);
+    let b2 = dot(ro.xz, rd.xz);
+    let c2 = dot(ro.xz, ro.xz) - rmax * rmax;
+    let disc = b2 * b2 - a2 * c2;
+    if (disc <= 0.0 || a2 < 1e-8) { discard; }
+    let sq_disc = sqrt(disc);
+    var t0 = (-b2 - sq_disc) / a2;
+    var t1 = (-b2 + sq_disc) / a2;
+    if (abs(rd.y) > 1e-6) {
+        let ya = (0.0 - ro.y) / rd.y;
+        let yb = (ymax - ro.y) / rd.y;
+        t0 = max(t0, min(ya, yb));
+        t1 = min(t1, max(ya, yb));
+    }
+    t0 = max(t0, 0.0);
+    if (t1 <= t0) { discard; }
+
+    let scene = textureLoad(scene_depth, vec2<i32>(in.position.xy), 0);
+    let near = frame.exposure.z;
+    var acc = vec4<f32>(0.0);
+    var t = t0;
+    var inside = false;
+    var hits = 0;
+    for (var i = 0; i < 72; i++) {
+        if (t > t1 || hits >= 2 || acc.a > 0.97) { break; }
+        let p = ro + rd * t;
+        let d = crown_sdf(p, s, in.seed);
+        if (inside) {
+            // Step through the water to the far side of the wall (or the jet).
+            if (d.x > 0.0015) { inside = false; }
+            t += 0.004;
+            continue;
+        }
+        if (d.x < 0.0012) {
+            inside = true;
+            if (d.y < 0.5 && crown_torn(p, s, in.seed)) { continue; }
+            // Hidden behind the scene (the far wall behind a rock, or below the water)?
+            let rel = quat_rotate(in.quat, p - ro) * in.eye.w;
+            let clip = frame.view_proj * vec4<f32>(rel, 1.0);
+            let z = clip.z / clip.w;
+            var fade = 1.0;
+            if (scene > 0.0) {
+                let behind = near / scene - near / max(z, 1e-9);
+                fade = saturate(behind / (0.02 * in.eye.w));
+            }
+            if (fade <= 0.0) { break; }
+            let layer = crown_surface(in, p, rd, d.y, s) * fade;
+            acc += layer * (1.0 - acc.a);
+            hits += 1;
+            continue;
+        }
+        t += max(d.x * 0.65, 0.002);
+    }
+    let a = acc.a * in.coverage;
+    if (a <= 0.0005) { discard; }
+    return vec4<f32>(acc.rgb * in.glint * in.coverage + in.inscatter * a, a);
+}
+
+// ---------------------------------------------------------------- ripples and foam
+// A ripple: a packet of wavelets around 0.75 of the sprite's radius, shorter on the outside as
+// on real water, settling over its life. Bends what is behind it and catches the sky on its
+// crests; written as a difference with zero alpha, like haze.
+fn ripple(in: VsOut, c: vec2<f32>, r: f32, jx: vec2<f32>, jy: vec2<f32>) -> vec4<f32> {
+    let settle = in.coverage * sq(1.0 - in.age);
+    if (r >= 1.0 || settle <= 0.002) { discard; }
+    let x = r - 0.74;
+    let env = exp(-sq(x / 0.13)) * smoothstep(1.0, 0.92, r);
+    let k = 46.0 + 30.0 * saturate(x * 4.0);
+    let phase = x * k + in.seed * 6.0;
+    // Height and its slope across the ring.
+    let slope = env * (cos(phase) * k * 0.02 - sin(phase) * x * 0.02 * 2.0 / sq(0.13)) * settle;
+    let dir = c / max(r, 1e-4);
+    // How the sprite's coordinates change per pixel gives the shift on screen.
+    let inv = mat2x2<f32>(jx, jy);
+    let det = determinant(inv);
+    if (abs(det) < 1e-12) { discard; }
+    let to_px = mat2x2<f32>(vec2<f32>(inv[1].y, -inv[0].y), vec2<f32>(-inv[1].x, inv[0].x)) * (1.0 / det);
+    let shift = to_px * (dir * slope * 0.06);
+    let size = vec2<i32>(textureDimensions(scene_color));
+    let here = vec2<i32>(in.position.xy);
+    let there = clamp(vec2<i32>(in.position.xy + shift), vec2<i32>(0), size - 1);
+    if (textureLoad(scene_depth, there, 0) > in.position.z + 1e-7) { discard; }
+    let delta = textureLoad(scene_color, there, 0).rgb - textureLoad(scene_color, here, 0).rgb;
+    // Crests tilted toward the eye catch more of the sky.
+    let crest = saturate(sin(phase)) * env * settle;
+    return vec4<f32>(delta + in.radiance * crest * 0.1, 0.0);
+}
+
+// Distance to the nearest and second nearest of a jittered grid of cell centers.
+fn cells(p: vec2<f32>, seed: f32) -> vec2<f32> {
+    let i = floor(p);
+    let f = p - i;
+    var d1 = 8.0;
+    var d2 = 8.0;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let g = vec2<f32>(f32(x), f32(y));
+            let o = vec2<f32>(hash12(i + g + seed), hash12(i + g + seed + 17.3));
+            let d = length(g + o - f);
+            if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) { d2 = d; }
+        }
+    }
+    return vec2<f32>(d1, d2);
+}
+
+// Foam: bubble walls (where two cells meet) in a patchy lace that breaks up as it ages.
+fn foam(c: vec2<f32>, r: f32, seed: f32, age: f32, pixels: f32) -> f32 {
+    let s = seed * 37.0;
+    let big = cells(c * 3.2 + s, s);
+    let small = cells(c * 9.0 + s * 1.7, s + 3.0);
+    let vary = value_noise2(c * 5.0 + s * 3.0);
+    let walls = (smoothstep(0.12, 0.0, big.y - big.x) + 0.35 * smoothstep(0.1, 0.0, small.y - small.x)) * (0.4 + 0.8 * vary);
+    let clumps = fbm2(c * 2.2 + s, 3);
+    let keep = smoothstep(0.15 + age * 0.3, 0.35 + age * 0.3, clumps + 0.3 * (1.0 - r));
+    let fill = 0.35 * smoothstep(0.45, 0.9, clumps) * (1.0 - age * 0.6);
+    // Too small on screen to show its bubbles, it shows as their average whiteness.
+    let lace = mix(0.5 * (0.6 + 0.8 * vary), walls, smoothstep(40.0, 160.0, pixels));
+    return saturate((lace + fill) * keep) * smoothstep(1.0, 0.45, r);
 }
 
 // ---------------------------------------------------------------- sprites
@@ -382,6 +631,16 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
         }
         case 12u: { // portal: the scene behind it swirled into a vortex
             return vortex(in, c, r, jx, jy);
+        }
+        case 14u: { // crown: a splash's wall of water, traced
+            return crown(in);
+        }
+        case 15u: { // ripple: bends the water behind it
+            return ripple(in, c, r, jx, jy);
+        }
+        case 16u: { // foam: a lace of bubbles on the water
+            a = foam(c, r, in.seed, in.age, in.pixels);
+            rgb *= 0.9 + 0.2 * a;
         }
         case 13u: { // plume: an exhaust flame from the nozzle (uv.y 0) out
             let p = plume(c, in.uv.y, in.seed, in.glint.x);

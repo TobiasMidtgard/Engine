@@ -256,6 +256,15 @@ fn shots() -> Vec<Shot> {
             frames: 12,
             face_moon: false,
         },
+        // Fair-weather cumulus from up on a hill: their shadows dapple the land below.
+        Shot {
+            name: "14_cloud_shadows_on_the_valley",
+            setup: vec![dry(), set("partly_cloudy"), hour(11.0), advance(900.0)],
+            eye: DVec3::new(0.0, 80.0, 40.0),
+            target: DVec3::new(0.0, 0.0, -500.0),
+            frames: 10,
+            face_moon: false,
+        },
     ]
 }
 

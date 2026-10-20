@@ -285,6 +285,19 @@ pub enum Sprite {
     /// shimmers; its color is the flame's, whitened toward the core. The jet widens sooner and
     /// the diamonds fade as the air thins, as they do high up and in space.
     Plume,
+    /// A splash's crown, ray traced inside the sprite: a thin wall of water thrown up in a ring
+    /// that flares out, its rim drawn into fingers with a bead on each tip, then tears open and
+    /// slumps while the jet shoots up from the middle. Glassy: it mirrors the sky and glints in
+    /// the sun, and whitens where it froths. One particle per splash, still, with the effect's
+    /// up axis out of the water; `size` is the crown's span at its widest and its life the
+    /// whole splash. Lit; leave the color white.
+    Crown,
+    /// A ripple on water: a train of wavelets that bends the surface behind it and catches the
+    /// sky on its crests. Use with `facing: horizontal` and let it grow over its life.
+    Ripple,
+    /// A patch of foam floating on water: a lace of bubbles that breaks up and thins out over
+    /// its life. Use with `facing: horizontal`, lit.
+    Foam,
 }
 
 impl Sprite {
@@ -297,8 +310,8 @@ impl Sprite {
     pub fn translucency(self) -> f32 {
         match self {
             Sprite::Smoke | Sprite::Dust => 1.0,
-            Sprite::Droplet => 0.4,
-            Sprite::Shard | Sprite::Haze | Sprite::Vortex | Sprite::Plume => 0.0,
+            Sprite::Droplet | Sprite::Crown => 0.4,
+            Sprite::Shard | Sprite::Haze | Sprite::Vortex | Sprite::Plume | Sprite::Ripple => 0.0,
             _ => 0.6,
         }
     }

@@ -131,7 +131,7 @@ pub(crate) fn step(
             release(m, p, b.entity, out);
             return None;
         }
-        let busy = m.mantle.is_some() || m.hang.is_some() || m.dash.is_some();
+        let busy = m.mantle.is_some() || m.vault.is_some() || m.hang.is_some() || m.dash.is_some();
         if p.grapple && m.grapple_cooldown <= 0.0 && !busy {
             fire(m, p, b, probe, at, out);
         }

@@ -145,10 +145,20 @@ pub fn desired_parts(
                     pair(&crown, leaves),
                 ]
             } else {
+                // Up close, in full leaf, a broadleaf crown leaf by leaf.
+                let hero = vis.leaves_hero.filter(|_| {
+                    vis.glow.is_empty()
+                        && amount >= 1.0
+                        && distance < settings.tree_hero_distance_m * (0.5 + plant.size)
+                });
+                let crown = match (hero, v.foliage_hero) {
+                    (Some(m), Some(mesh)) => Some((mesh, m[tint])),
+                    _ => pair(&leafy(v.foliage, &v.foliage_thin, amount), leaves),
+                };
                 [
                     pair(&v.base, vis.bark_rigid),
                     pair(&v.wood, vis.bark),
-                    pair(&leafy(v.foliage, &v.foliage_thin, amount), leaves),
+                    crown,
                 ]
             }
         }
@@ -672,7 +682,9 @@ pub fn update_glow_lights(
                 g.base_lm = lm;
                 g.pulse_secs = pulse;
                 g.phase = (t.translation.x * 0.37 + t.translation.z * 0.61) as f32;
-                light.range = (4.0 + lm.sqrt() * 1.2).min(16.0);
+                // Far enough to light the cave's walls and roof faintly, not just the floor
+                // round each cluster.
+                light.range = (6.0 + lm.sqrt() * 1.8).min(28.0);
             }
             None => {
                 g.base_lm = 0.0;

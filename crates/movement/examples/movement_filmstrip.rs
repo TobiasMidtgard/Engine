@@ -42,6 +42,7 @@ struct Cast {
     climber: Entity,
     grappler: Entity,
     ladder: Entity,
+    vaulter: Entity,
 }
 
 struct Shot {
@@ -305,6 +306,25 @@ const SHOTS: &[Shot] = &[
             )
         },
     },
+    // Over the concrete barrier at a sprint, the left hand planted on its top and the legs
+    // swung over, from ahead on the vaulter's right.
+    Shot {
+        file: "16_vault_the_barrier.png",
+        when: |w, c| {
+            let x = pos(w, c.vaulter).x;
+            mover(w, c.vaulter)
+                .vault
+                .is_some_and(|v| !v.rising && (v.plant.x + 16.1).abs() < 0.2 && x > v.plant.x)
+        },
+        camera: |w, c| {
+            let p = pos(w, c.vaulter);
+            (
+                p + DVec3::new(2.6, 0.1, 3.3),
+                p + DVec3::new(-0.3, -0.15, 0.0),
+                50.0,
+            )
+        },
+    },
 ];
 
 fn build_app() -> (App, Cast, Entity) {
@@ -421,6 +441,7 @@ fn build_app() -> (App, Cast, Entity) {
         climber: named(&mut app, "Climber"),
         grappler: named(&mut app, "Grappler"),
         ladder: named(&mut app, "Ladder climber"),
+        vaulter: named(&mut app, "Vaulter"),
     };
     (app, cast, camera)
 }

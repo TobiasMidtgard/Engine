@@ -348,10 +348,32 @@ const MOON_LUX: f32 = 0.5;
 /// … and from which on for a sun, however dim (a sun under a storm deck gives about 10).
 const SUN_LUX: f32 = 2.0;
 
+/// The camera that renders: the active [`Camera`] with the highest `order`.
+pub fn active_camera(world: &mut World) -> Option<(Entity, Camera, GlobalTransform)> {
+    let mut best: Option<(Entity, Camera, GlobalTransform)> = None;
+    let mut q = world.query::<(Entity, &Camera, &GlobalTransform)>();
+    for (e, cam, gt) in q.iter(world) {
+        if !cam.active {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(_, b, _)| cam.order > b.order) {
+            best = Some((e, *cam, *gt));
+        }
+    }
+    best
+}
+
+/// Whether the camera that renders is a pixel-perfect one ([`crate::PixelPerfect`] on an
+/// orthographic camera): it renders without temporal anti-aliasing.
+pub fn active_camera_is_pixel_perfect(world: &mut World) -> bool {
+    active_camera(world)
+        .is_some_and(|(e, _, _)| crate::sprites::camera_pixel_grid(world, e, 1).is_some())
+}
+
 /// Build the view for the active camera (a default camera at the origin when there is none).
 ///
-/// `jitter_px` shifts the projection by a fraction of a pixel (temporal anti-aliasing);
-/// `previous` is the previous frame's view, for motion vectors.
+/// `jitter_px` shifts the projection by a fraction of a pixel (temporal anti-aliasing; ignored
+/// for a pixel-perfect camera); `previous` is the previous frame's view, for motion vectors.
 pub fn build_view(
     world: &mut World,
     width: u32,
@@ -363,23 +385,24 @@ pub fn build_view(
 ) -> ViewData {
     let settings = world.resource::<RenderSettings>().clone();
 
-    // Active camera with the highest order.
-    let mut best: Option<(Entity, Camera, GlobalTransform)> = None;
-    let mut q = world.query::<(Entity, &Camera, &GlobalTransform)>();
-    for (e, cam, gt) in q.iter(world) {
-        if !cam.active {
-            continue;
-        }
-        if best.as_ref().is_none_or(|(_, b, _)| cam.order > b.order) {
-            best = Some((e, *cam, *gt));
-        }
-    }
-    let (camera_entity, camera, gt) = match best {
+    let (camera_entity, camera, gt) = match active_camera(world) {
         Some((e, c, g)) => (Some(e), c, g),
         None => (None, Camera::default(), GlobalTransform::default()),
     };
-    let origin = gt.translation();
     let rotation = gt.rotation();
+    // A pixel-perfect camera (`PixelPerfect`): a whole number of pixels per art texel, the view
+    // moved to whole texels (or pixels) in its plane, and no sub-pixel jitter.
+    let pixel_grid =
+        camera_entity.and_then(|e| crate::sprites::camera_pixel_grid(world, e, height));
+    let origin = match &pixel_grid {
+        Some(grid) => grid.snap_camera(gt.translation(), rotation, width, height),
+        None => gt.translation(),
+    };
+    let jitter_px = if pixel_grid.is_some() {
+        Vec2::ZERO
+    } else {
+        jitter_px
+    };
     let aspect = width.max(1) as f32 / height.max(1) as f32;
     let view = Mat4::from_quat(rotation.inverse());
     let (proj, near, fov_y, orthographic) = match camera.projection {
@@ -396,12 +419,15 @@ pub fn build_view(
             height: h,
             near,
             far,
-        } => (
-            orthographic_reverse(h * aspect, h, near, far),
-            near,
-            0.0,
-            true,
-        ),
+        } => {
+            let h = pixel_grid.map_or(h, |g| g.height);
+            (
+                orthographic_reverse(h * aspect, h, near, far),
+                near,
+                0.0,
+                true,
+            )
+        }
     };
     let unjittered_proj = proj;
     let unjittered_view_proj = proj * view;
