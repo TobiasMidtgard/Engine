@@ -98,7 +98,8 @@ impl GpuCharacter {
             // Slicked into a bun, the scalp hardly shows between the hairs.
             HairStyle::Bun => 0.7,
             HairStyle::Short => 0.45,
-            _ => 0.5,
+            // Long hair lies flat over its roots: what shows between them reads as hair.
+            _ => 0.65,
         } * (1.0 - a.hair.color.grey * 0.5);
         let hc = a.hair_color();
         let bc = a.brow_color();

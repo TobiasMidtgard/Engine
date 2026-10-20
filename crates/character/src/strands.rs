@@ -642,7 +642,11 @@ fn grow_hair(
             // Swept back from the face and away from the part at the front and over the top;
             // straight down behind the crown (the part ends there).
             let front = ((d.z + 0.03) / 0.07).clamp(0.0, 1.0);
-            let swept = Vec3::new(side * 0.9, -0.2, -0.65);
+            // On the part's narrow side, hairline hair goes more to the side than back, so the
+            // front of the part stays covered (the wide side would sweep across the forehead).
+            let hairline = ((d.z - 0.02) / 0.04).clamp(0.0, 1.0) * f32::max(side, 0.0);
+            let swept =
+                Vec3::new(side * 0.9, -0.2, -0.65).lerp(Vec3::new(side, -0.3, -0.3), hairline);
             let down = Vec3::new(d.x * 3.0, -1.0, -0.35);
             swept * front + down * (1.0 - front)
         }
@@ -659,7 +663,17 @@ fn grow_hair(
     pts.push(sp.p);
     // Out of the scalp at a low angle along the flow (long hair lies flatter, so a part stays
     // a thin line).
-    let rise = if g.gravity > 0.5 { 0.18 } else { 0.24 };
+    // Next to the part, hair lifts off the scalp before falling over it, so the part stays
+    // narrow instead of opening into a bare strip.
+    let near_part = if matches!(a.hair.style, HairStyle::Medium | HairStyle::Long) {
+        (1.0 - ((d.x - PART_X).abs() / 0.025)).clamp(0.0, 1.0)
+            * ((d.y - 0.03) / 0.03).clamp(0.0, 1.0)
+            // Not at the front hairline, where lifted hair would fall onto the forehead.
+            * ((0.045 - d.z) / 0.035).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let rise = if g.gravity > 0.5 { 0.18 } else { 0.24 } + 0.4 * near_part;
     let mut dir = (tangent(flow, sp.n) + sp.n * rise).normalize();
     let bun_center = lm.head + Vec3::new(0.0, 0.06, -0.125);
     // Hair is moved off the face toward the side it is combed to.
