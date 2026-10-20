@@ -203,6 +203,8 @@ pub enum FractureShape {
         half_height: f32,
         sides: u32,
     },
+    /// A hollow box of boards `wall` meters thick (a wooden crate): it breaks into its boards.
+    Crate { half_extents: Vec3, wall: f32 },
 }
 
 impl Default for FractureShape {
@@ -216,7 +218,9 @@ impl Default for FractureShape {
 impl FractureShape {
     pub fn poly(&self) -> ConvexPoly {
         match *self {
-            FractureShape::Box { half_extents } => ConvexPoly::cuboid(half_extents),
+            FractureShape::Box { half_extents } | FractureShape::Crate { half_extents, .. } => {
+                ConvexPoly::cuboid(half_extents)
+            }
             FractureShape::Column {
                 radius,
                 half_height,
@@ -227,7 +231,9 @@ impl FractureShape {
 
     pub fn half_extents(&self) -> Vec3 {
         match *self {
-            FractureShape::Box { half_extents } => half_extents,
+            FractureShape::Box { half_extents } | FractureShape::Crate { half_extents, .. } => {
+                half_extents
+            }
             FractureShape::Column {
                 radius,
                 half_height,
@@ -239,6 +245,13 @@ impl FractureShape {
     pub fn volume(&self) -> f32 {
         match *self {
             FractureShape::Box { half_extents: h } => 8.0 * h.x * h.y * h.z,
+            FractureShape::Crate {
+                half_extents: h,
+                wall,
+            } => {
+                let inner = (h - Vec3::splat(wall)).max(Vec3::ZERO);
+                8.0 * (h.x * h.y * h.z - inner.x * inner.y * inner.z)
+            }
             FractureShape::Column {
                 radius,
                 half_height,
@@ -524,6 +537,60 @@ pub fn shatter_along_grain(
         .collect()
 }
 
+/// Width of a crate board, meters.
+const BOARD_W: f32 = 0.15;
+/// Gap between neighboring boards, meters.
+const BOARD_GAP: f32 = 0.004;
+
+/// The boards of a crate (a hollow box `half` with `wall`-thick sides): each side is a row of
+/// boards along its longer edge, and some boards snap in two.
+pub fn crate_boards(half: Vec3, wall: f32, rng: &mut Rng) -> Vec<(ConvexPoly, Vec3, f32)> {
+    let mut out = Vec::new();
+    for a in 0..3 {
+        for side in [-1.0f32, 1.0] {
+            // The side's slab; sides across lower axes stop short of them, so corners don't
+            // overlap.
+            let mut slab = half;
+            slab[a] = wall * 0.5;
+            for b in 0..a {
+                slab[b] = (half[b] - wall).max(wall);
+            }
+            let mut center = Vec3::ZERO;
+            center[a] = side * (half[a] - wall * 0.5);
+            let (u, v) = match a {
+                0 => (1, 2),
+                1 => (0, 2),
+                _ => (0, 1),
+            };
+            let (u, v) = if slab[u] >= slab[v] { (u, v) } else { (v, u) };
+            let n = ((2.0 * slab[v] / BOARD_W).round() as usize).clamp(2, 5);
+            let width = 2.0 * slab[v] / n as f32;
+            for k in 0..n {
+                let mut board = slab;
+                board[v] = (width - BOARD_GAP) * 0.5;
+                let mut c = center;
+                c[v] = -slab[v] + width * (k as f32 + 0.5);
+                // Some boards snap across, somewhere along their middle.
+                let cuts: Vec<(f32, f32)> = if rng.f32() < 0.35 {
+                    let t = rng.range(0.3, 0.7);
+                    vec![(0.0, t), (t, 1.0)]
+                } else {
+                    vec![(0.0, 1.0)]
+                };
+                for (t0, t1) in cuts {
+                    let mut piece = board;
+                    piece[u] = slab[u] * (t1 - t0);
+                    let mut pc = c;
+                    pc[u] = -slab[u] + slab[u] * (t0 + t1);
+                    let poly = ConvexPoly::cuboid(piece).translated(pc);
+                    out.push((poly, pc, 8.0 * piece.x * piece.y * piece.z));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Color for a piece's fragments: explicit, else the material's outside color.
 pub fn piece_colors(
     color: Option<[f32; 3]>,
@@ -546,6 +613,37 @@ pub fn piece_colors(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_crate_breaks_into_its_boards() {
+        let shape = FractureShape::Crate {
+            half_extents: Vec3::splat(0.4),
+            wall: 0.025,
+        };
+        let mut rng = Rng::new(3);
+        let boards = crate_boards(shape.half_extents(), 0.025, &mut rng);
+        assert!((24..=60).contains(&boards.len()), "{} boards", boards.len());
+        for (p, c, v) in &boards {
+            let (lo, hi) = p.bounds();
+            let d = hi - lo;
+            assert!(
+                (d.min_element() - 0.025).abs() < 1e-4,
+                "a board is one plank thick: {d}"
+            );
+            assert!(d.max_element() > 0.2, "a board is long: {d}");
+            assert!(
+                c.abs().max_element() > 0.35,
+                "every board is on the crate's skin: {c}"
+            );
+            assert!((p.volume_centroid().0 - v).abs() < 1e-5);
+        }
+        let wood: f32 = boards.iter().map(|b| b.2).sum();
+        let shell = shape.volume();
+        assert!(
+            wood > 0.9 * shell && wood < 1.01 * shell,
+            "the boards are the crate's shell ({wood} of {shell} m³)"
+        );
+    }
 
     #[test]
     fn a_post_split_along_its_grain_breaks_into_splinters() {

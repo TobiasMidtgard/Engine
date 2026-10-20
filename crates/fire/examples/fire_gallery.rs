@@ -92,6 +92,15 @@ const DETAILS: &[DemoView] = &[
         warmup_secs: 0.0,
     },
     DemoView {
+        key: "detail_coals",
+        name: "Smoldering ground behind the front",
+        eye: [5.0, 1.4, -19.0],
+        target: [1.0, 0.0, -13.0],
+        hour: 17.5,
+        at_secs: 32.0,
+        warmup_secs: 0.0,
+    },
+    DemoView {
         key: "detail_burnt",
         name: "Burnt trees and shed",
         eye: [10.0, 2.2, -8.0],

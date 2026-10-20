@@ -96,6 +96,22 @@ pub struct DebrisBody {
     pub on: Option<Entity>,
 }
 
+impl DebrisBody {
+    /// Area of its broadest side (m²), from the box around its contact points.
+    pub fn broad_area(&self) -> f32 {
+        let (lo, hi) = self.points.iter().fold(
+            (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+            |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+        );
+        if lo.x > hi.x {
+            return 0.0;
+        }
+        let e = hi - lo;
+        let (big, small) = (e.max_element(), e.min_element());
+        big * (e.x + e.y + e.z - big - small)
+    }
+}
+
 /// Whether debris lands on voxel rock as on the ground.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum RockContact {
@@ -821,6 +837,11 @@ impl<'a> Floor<'a> {
     }
 }
 
+/// Quadratic air drag of loose debris, `½ ρ_air C_d` (kg/m³) for a tumbling body: deceleration
+/// is `AIR_DRAG · area / mass · speed²`. A 5 cm stone chip still falls at about 30 m/s; a
+/// 30 cm drywall flake at about 11 m/s.
+const AIR_DRAG: f32 = 0.9;
+
 /// The built-in debris solver: gravity, ground and voxel rock contacts with friction and
 /// restitution, sleep. Runs in `FixedUpdate` (`SimSet::Physics`), so it slows down with time
 /// dilation.
@@ -902,7 +923,10 @@ pub fn simulate_debris_system(
         let g = env.gravity(t.translation);
         let up = env.up(t.translation);
         body.velocity += g * dt;
-        body.velocity *= 1.0 / (1.0 + 0.02 * dt);
+        // Air drag on its broadest face: light flakes and chips slow down hard and land near
+        // where they broke off instead of sailing across the yard.
+        let drag = AIR_DRAG * body.broad_area() * body.inv_mass;
+        body.velocity /= 1.0 + 0.02 * dt + drag * body.velocity.length() * dt;
         body.angular *= 1.0 / (1.0 + 0.15 * dt);
         t.translation += (body.velocity * dt).as_dvec3();
         let w = body.angular;
