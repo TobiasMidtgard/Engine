@@ -296,6 +296,24 @@ fn main() {
         app.update_n(60);
         shot(&mut app, &dir, "title");
     }
+    if want("loading") {
+        show(
+            &mut app,
+            "loading",
+            json!({"planet": "veyra", "place": "Hollow Reach", "at": 0.58, "simulate_s": 600.0}),
+        );
+        app.update_n(60);
+        shot(&mut app, &dir, "loading");
+    }
+    if want("loading_ready") {
+        show(
+            &mut app,
+            "loading",
+            json!({"planet": "thessaly", "place": "Skimmer Station Nine", "at": 1.0, "tip": 7}),
+        );
+        app.update_n(60);
+        shot(&mut app, &dir, "loading_ready");
+    }
     for (name, zoom, select) in [
         (
             "map_galaxy",

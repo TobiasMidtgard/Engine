@@ -1251,4 +1251,72 @@ fn the_title_screen_continues_the_newest_save_and_opens_load_and_quit() {
     app.update_n(30);
     assert!(actions_since(&mut app, since).contains(&"game.new".to_string()));
     assert!(!open(&mut app).contains(&"title".to_string()));
+    // ...and opens the loading screen for Veyra.
+    assert!(open(&mut app).contains(&"loading".to_string()));
+}
+
+#[test]
+fn the_loading_screen_follows_the_game_and_waits_to_be_dismissed() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.set_data",
+        json!({"path": "loading.progress", "value": 0.2}),
+    );
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "loading", "planet": "kell", "place": "Wreck Field", "progress": "loading.progress", "instant": true}),
+    );
+    app.update_n(30);
+    let shown = |app: &mut App| {
+        let mut q = app.world.query::<&engine_ui::loading::LoadingView>();
+        let v = q.iter(&app.world).next().expect("view").clone();
+        (v.progress, v.shown, v.ready())
+    };
+    let (p, s, ready) = shown(&mut app);
+    assert!((p - 0.2).abs() < 1e-4 && (s - 0.2).abs() < 0.01 && !ready);
+    assert_eq!(engine_ui::loading::stage(p), "Streaming terrain");
+    // Not done yet: a click does nothing.
+    let since = next_event(&mut app);
+    api(&mut app, "ui.click", json!({"id": "loading_backdrop"}));
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"loading".to_string()));
+    // Progress never runs backwards, even if the game writes a smaller value.
+    api(
+        &mut app,
+        "ui.set_data",
+        json!({"path": "loading.progress", "value": 0.1}),
+    );
+    app.update_n(3);
+    assert!((shown(&mut app).0 - 0.2).abs() < 1e-4);
+    // Done: the bar eases full, then the screen waits for a click.
+    api(
+        &mut app,
+        "ui.set_data",
+        json!({"path": "loading.progress", "value": 1.0}),
+    );
+    app.update_n(90);
+    assert!(shown(&mut app).2);
+    assert!(open(&mut app).contains(&"loading".to_string()));
+    api(&mut app, "ui.click", json!({"id": "loading_backdrop"}));
+    app.update_n(30);
+    assert!(!open(&mut app).contains(&"loading".to_string()));
+    assert!(actions_since(&mut app, since).contains(&"game.loading_done".to_string()));
+    // A simulated load with hold off closes by itself.
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "loading", "simulate_s": 0.5, "hold": false, "instant": true}),
+    );
+    // Half a second of loading, the bar easing full, a short beat and the close.
+    app.update_n(150);
+    assert!(!open(&mut app).contains(&"loading".to_string()));
+    // An unknown planet is an error, not an empty screen.
+    let r = call_api(
+        &mut app.world,
+        "ui.show",
+        json!({"screen": "loading", "planet": "nowhere"}),
+    );
+    assert!(r.is_err());
 }

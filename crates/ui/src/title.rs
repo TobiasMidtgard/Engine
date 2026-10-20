@@ -6,7 +6,7 @@
 //! ui::show(world, "title", &json!({}))?;
 //! ```
 //!
-//! Menu items send `game.new`, `game.load:<id>` (through [`crate::saves::load`]) and, after a
+//! New Game opens the loading screen for Veyra. Menu items send `game.new`, `game.load:<id>` (through [`crate::saves::load`]) and, after a
 //! confirm, `game.exit` for the game; Load Game and Settings open those screens over it.
 
 use bevy_ecs::message::MessageCursor;
@@ -382,14 +382,10 @@ pub fn title_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) 
             "title.new" => {
                 crate::input::dispatch(world, "game.new");
                 screens::close_screen(world, root, false);
-                toast::notify(
-                    world,
-                    ToastKind::Info,
-                    "star",
-                    "New game",
-                    "[b]Landfall[/b]  ·  Orbit above Veyra",
-                    2.4,
-                );
+                let args = json!({"planet": "veyra", "place": "Landfall"});
+                if let Err(e) = screens::show(world, "loading", &args) {
+                    toast::notify(world, ToastKind::Bad, "", "", &e, 2.4);
+                }
             }
             "title.load" => {
                 if let Err(e) = screens::show(world, "saves", &json!({"mode": "load"})) {
