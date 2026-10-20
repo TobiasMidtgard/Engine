@@ -243,6 +243,7 @@ impl NavCtx<'_> {
             walk: vec![true; (CHUNK * CHUNK) as usize],
         };
         let r2 = (s.agent_radius / s.cell).powi(2) + 0.01;
+        let mut near = Vec::new();
         for lz in 0..CHUNK {
             for lx in 0..CHUNK {
                 let (sx, sz) = (lx + margin, lz + margin);
@@ -263,6 +264,12 @@ impl NavCtx<'_> {
                         }
                     }
                 }
+                // Clearance: no wall, post or block side within the agent radius (the heights
+                // above are sampled a cell apart, so they miss a wall's end or a thin wall).
+                if ok {
+                    let (x, z) = self.cell_center(cx0 + sx, cz0 + sz);
+                    ok = !self.crowded(DVec3::new(x, h, z), &mut near);
+                }
                 let o = (lz * CHUNK + lx) as usize;
                 chunk.h[o] = (h - base) as f32;
                 chunk.walk[o] = ok;
@@ -270,6 +277,34 @@ impl NavCtx<'_> {
         }
         self.grid.chunks.insert(key, chunk);
         self.grid.chunks_built += 1;
+    }
+
+    /// Whether something stands in the way of a body at `p` (its feet): an obstacle side within
+    /// the agent radius that rises more than a step above its feet and whose bounds start below
+    /// its head (not one it stands on, not a lintel above it). A tilted ramp counts from its
+    /// lowest corner: the way under its high end is not taken, as bodies don't fit there.
+    fn crowded(&self, p: DVec3, near: &mut Vec<u32>) -> bool {
+        let s = self.grid.settings;
+        let r = s.agent_radius as f64;
+        let (step, head) = (p.y + s.max_step as f64, p.y + s.agent_height as f64);
+        self.world.obstacles_near(
+            DVec2::new(p.x - r, p.z - r),
+            DVec2::new(p.x + r, p.z + r),
+            near,
+        );
+        near.iter().any(|&i| {
+            let o = &self.world.obstacles[i as usize];
+            if o.max.y <= step || o.min.y >= head {
+                return false;
+            }
+            let (d, out) = o.footprint_distance(p);
+            if d as f64 >= r {
+                return false;
+            }
+            // How high it rises where it is nearest, just inside its edge.
+            let q = p - out.as_dvec3() * (d as f64 + 0.02);
+            o.vertical_span(q.x, q.z).is_none_or(|(top, _)| top > step)
+        })
     }
 
     fn cell(&mut self, x: i32, z: i32) -> (f64, bool) {
@@ -563,10 +598,17 @@ impl NavCtx<'_> {
             }
         }
         if reached && !clamped {
-            PathStatus::Complete
-        } else {
-            PathStatus::Partial
+            return PathStatus::Complete;
         }
+        // A goal just inside a wall's clearance (a cover spot, a mate lying by a wall): the
+        // path ends on the nearest free cell, and the last step goes on to the goal itself.
+        let last = to_world(self, end);
+        let short = DVec2::new(to.x - last.x, to.z - last.z).length();
+        if !clamped && short <= 1.0 && (to.y - last.y).abs() < 0.5 {
+            out.push(DVec3::new(to.x, last.y, to.z));
+            return PathStatus::Complete;
+        }
+        PathStatus::Partial
     }
 
     /// If one can walk straight from `from` to `to` over free cells (walkable, connected, no
