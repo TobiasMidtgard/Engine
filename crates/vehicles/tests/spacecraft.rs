@@ -226,6 +226,74 @@ fn climbs_from_the_ground_into_orbit_around_a_small_planet() {
     assert!(fuel > 10_000.0, "only {fuel:.0} kg propellant left");
 }
 
+/// On a full-size Earth (as in the showcase) the climb never stalls back into thick air, and
+/// the ship coasts to its 200 km apoapsis and circularizes there. Before, the pitch program
+/// levelled off at 54 km with orbital speed far off, and the ship sank back to 37 km at
+/// Mach 16.
+#[test]
+fn climbs_to_a_200_km_orbit_around_a_full_size_earth() {
+    let mut app = vehicle_app();
+    calm(&mut app);
+    {
+        let mut g = app.world.resource_mut::<Gravity>();
+        g.uniform = Vec3::ZERO;
+        g.bodies = vec![GravityBody {
+            center: DVec3::new(0.0, -6.371e6, 0.0),
+            mu: 3.986e14,
+            radius: 6.371e6,
+        }];
+    }
+    ground(&mut app, DVec3::ZERO, 400.0, "concrete");
+    let t = Transform::from_translation(DVec3::new(0.0, presets::ride_height("spaceplane"), 0.0));
+    let ship = spawn_with(&mut app, |c| presets::spaceplane(c, t));
+    let target = 200_000.0;
+    app.world
+        .entity_mut(ship)
+        .insert(Autopilot::new(AutopilotMode::Ascend {
+            target_altitude_m: target,
+            turn_start_m: 1_000.0,
+            turn_end_m: 45_000.0,
+            heading: Vec3::NEG_Z,
+        }));
+    let mut phases = Vec::<String>::new();
+    let (mut highest, mut sank) = (0.0f64, 0.0f64);
+    let took = run_until(&mut app, 900.0, |app| {
+        let p = phase(app, ship);
+        if !p.is_empty() && phases.last() != Some(&p) {
+            phases.push(p.clone());
+        }
+        let alt = telemetry(app, ship).altitude_m;
+        highest = highest.max(alt);
+        sank = sank.max(highest - alt);
+        p == "orbit"
+    })
+    .unwrap_or_else(|| panic!("no orbit; phases {phases:?}"));
+    assert_eq!(
+        phases,
+        [
+            "vertical lift",
+            "pitch up",
+            "liftoff",
+            "gravity turn",
+            "coast",
+            "circularize",
+            "orbit"
+        ]
+    );
+    assert!(sank < 500.0, "sank {sank:.0} m on the way up");
+    // A moment for the engines to spool down, then the orbit it is left in.
+    run_for(&mut app, 5.0);
+    let tel = telemetry(&app, ship);
+    assert!(
+        tel.periapsis_m > target * 0.9 && tel.apoapsis_m < target * 1.1,
+        "orbit {:.0} × {:.0} km after {took:.0} s",
+        tel.periapsis_m / 1e3,
+        tel.apoapsis_m / 1e3
+    );
+    let fuel = app.world.get::<Spacecraft>(ship).unwrap().propellant_kg;
+    assert!(fuel > 20_000.0, "only {fuel:.0} kg propellant left");
+}
+
 #[test]
 fn reentry_heats_the_shield_without_burning_through() {
     let mut app = vehicle_app();
@@ -325,4 +393,67 @@ fn hops_in_a_steady_wind_and_lands_on_its_spot() {
         worst_landing < 0.3,
         "landed {worst_landing:.1} m off the pad's center"
     );
+}
+
+/// `vehicles.spawn` puts a ship in the air with its gear stowed, and `vehicles.control`
+/// switches its flight assist and gear: with the assist off, a ship falling free coasts with
+/// every thruster idle, where the full assist fires against the fall; the gear comes down.
+#[test]
+fn the_control_api_turns_the_flight_assist_off_to_coast() {
+    let mut app = vehicle_app();
+    calm(&mut app);
+    let spawned = engine_core::registry::call_api(
+        &mut app.world,
+        "vehicles.spawn",
+        serde_json::json!({
+            "preset": "spaceplane",
+            "name": "Coaster",
+            "at": [0.0, 500.0, 0.0],
+            "on_ground": false,
+            "gear": "up",
+        }),
+    )
+    .unwrap();
+    let ship = Entity::from_bits(spawned["id"].as_u64().unwrap());
+    let gear = |app: &App| app.world.get::<Aircraft>(ship).unwrap().gear;
+    assert_eq!(gear(&app), 0.0, "spawned in flight with the gear stowed");
+    run_for(&mut app, 1.0);
+    let firing = |app: &App| {
+        let ship = app.world.get::<Spacecraft>(ship).unwrap();
+        ship.thrusters
+            .iter()
+            .map(|t| t.level)
+            .fold(0.0f32, f32::max)
+    };
+    assert!(firing(&app) > 0.05, "the full assist fights the fall");
+    assert_eq!(gear(&app), 0.0, "the gear stays up");
+
+    let set = engine_core::registry::call_api(
+        &mut app.world,
+        "vehicles.control",
+        serde_json::json!({"vehicle": "Coaster", "assist": "Off", "gear": "down"}),
+    );
+    let set = set.unwrap();
+    assert_eq!(
+        (&set["assist"], &set["gear"]),
+        (&"Off".into(), &"down".into())
+    );
+    assert_eq!(
+        app.world.get::<Spacecraft>(ship).unwrap().assist.mode,
+        AssistMode::Off
+    );
+    // The engines spool down (a quarter second for the hover wells) and stay off.
+    run_for(&mut app, 2.0);
+    assert!(firing(&app) < 1e-3, "coasting at {}", firing(&app));
+    // The gear comes down over six seconds.
+    run_for(&mut app, 4.5);
+    assert_eq!(gear(&app), 1.0);
+
+    for bad in [
+        serde_json::json!({"vehicle": "Coaster", "assist": "Warp"}),
+        serde_json::json!({"vehicle": "Coaster", "gear": "half"}),
+    ] {
+        let r = engine_core::registry::call_api(&mut app.world, "vehicles.control", bad);
+        assert!(r.is_err(), "{r:?}");
+    }
 }

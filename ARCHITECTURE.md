@@ -384,6 +384,26 @@ threshold, mixed in by `RenderSettings::bloom_intensity` (0.04). What a pixel br
 limited to `bloom_limit` times white at the current exposure (64; it rolls off smoothly from half
 of that), so a neon sign at night or the sun's disc glows instead of swamping the frame.
 
+**Depth of field** (built; `depth_of_field.rs`): a `DepthOfField` component on the camera (off
+without it) is a thin lens: the focal length follows from the vertical field of view and
+`sensor_height_mm` (`DepthOfField::fov_y_deg_for_lens(50.0, 24.0)` is a 50 mm full-frame lens),
+the aperture from `f_stop`, so f/1.4 blurs like the real lens and f/16 hardly at all. Focus is
+`focus_distance_m` or `autofocus` on the screen center (a center-weighted median of depths that
+ignores sky through gaps, eased at `autofocus_speed` and snapped after a camera cut; read back as
+`render.dof_focus_m`). A half-res gather after Jimenez 2014 with separate near and far fields:
+a blurred foreground spreads softly over whatever is behind it, a sharp object in front of a blurred
+background keeps a crisp edge, small lights open into round, even discs, up to `max_radius_px`.
+It runs on the scene before TAA (so TAA anti-aliases its silhouettes; next frame's reflections
+then see the defocused image) and before bloom and tonemapping.
+
+**Motion blur** (built; `motion_blur.rs`): a `MotionBlur` component on the camera (off without
+it). Velocity per pixel from the prepass motion vectors (moving objects included) or, where the
+prepass drew nothing, the camera's motion and the depth; McGuire 2012 reconstruction with tile and
+neighbor-max velocities and a depth-aware gather. The streak is the on-screen speed (per real
+second) times the exposure `shutter_fraction / reference_fps` (0.5 at 30: a 180° shutter, 1/60 s),
+so it doesn't change with the frame rate and shrinks in slow motion. No blur on the frame after a
+camera cut; with nothing moving the image is unchanged. Runs after TAA, before bloom and tonemap.
+
 **Thin sheets** (built): double-sided and alpha-masked materials (leaves, grass and fern cards,
 paper, cloth, fences) are shaded as sheets with no inside (`shade_thin_surface(s, rel,
 sun_visibility, face)`, `face` being the side of the geometry facing the camera): only that side
@@ -406,8 +426,17 @@ draws; the clusters then go through the depth prepass, the scene pass (the same
 atomics and indirect draws: every backend. Smaller meshes, alpha-masked or wind-animated
 materials and entities with the `NoVirtualGeometry` marker stay instanced; a changed mesh is drawn
 instanced until its own clusters are rebuilt. `DebugView::Clusters` and `ClusterLevels` show
-them; `render.stats` reports `clusters` (and their triangles). Next: occlusion culling (two-pass
-HZB), streaming, a compute rasterizer for tiny triangles, cached shadow pages.
+them; `render.stats` reports `clusters` (and their triangles). A `Displacement` component bakes
+height into the clusters (crack-free adaptive tessellation of the entity's mesh, normals from the
+displaced surface): a material's height map, a function, or a `rock::StoneFinish`;
+`rock::WallStone` (kind, size, seed: split-face, rough-hewn or slab with tool marks, fractures,
+lichen and grime) gives the base mesh plus its displacement, or a finished mesh via
+`wall_stone`. Builds are cached on disk (`virtual_geometry_cache`, the user cache dir or
+`ENGINE_VG_CACHE`, LRU-trimmed to `virtual_geometry_cache_mb`). Two-pass HZB occlusion
+(`virtual_geometry_occlusion`): camera clusters hidden behind last frame's depth pyramid are
+retested after the early prepass against this frame's and drawn in a late prepass if visible.
+Next: streaming, a compute rasterizer for tiny triangles, occlusion for shadow views, cached
+shadow pages.
 
 **Material presets** (built): `StandardMaterial::preset(MaterialPreset::Brick)` (and cobblestone,
 rock, concrete, plaster, wood planks, bark, rusty steel, painted metal, sand, forest soil,

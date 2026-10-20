@@ -14,6 +14,8 @@ struct Clouds {
     params: vec4<f32>,      // visibility (fades out high above the planet), detail period (m), env steps, night (0 day .. 1 dark night)
     detail: vec4<f32>,      // detail noise origin xyz (wrapped), 1 = draw rain shafts
     veil: vec4<f32>,        // falling rain or snow veils from x (m), fully from y (m); z = snow share 0..1
+    shadow: vec4<f32>,      // cloud shadow map: the shading light's dimming at the player, samples toward the light
+    far: vec4<f32>,         // far cloud layer drawn by another module: hand over from x to y m of ground distance, z = its weight
 };
 
 @group(1) @binding(0) var<uniform> clouds: Clouds;
@@ -146,6 +148,18 @@ struct CloudResult {
     rain_back: f32,         // its total along the ray (m)
 };
 
+// How much of the clouds at camera-relative `p` to draw: another module's far cloud layer
+// (space's cloud tops seen from high up) takes over beyond `clouds.far.x` of ground distance,
+// fully by `clouds.far.y`, as much as it is drawn (`FarCloudLayer::near_share`).
+fn near_share(p: vec3<f32>) -> f32 {
+    if (clouds.far.z <= 0.0 || frame.planet.w <= 0.0) { return 1.0; }
+    let a = normalize(p - frame.planet.xyz);
+    let b = normalize(-frame.planet.xyz);
+    let ground = frame.planet.w * asin(min(length(cross(a, b)), 1.0));
+    let t = saturate((ground - clouds.far.x) / max(clouds.far.y - clouds.far.x, 1e-3));
+    return 1.0 - clouds.far.z * t * t * (3.0 - 2.0 * t);
+}
+
 // Interleaved gradient noise: a stable per-pixel start offset that hides banding.
 fn ign(px: vec2<f32>) -> f32 {
     return fract(52.9829189 * fract(dot(px, vec2<f32>(0.06711056, 0.00583715))));
@@ -240,7 +254,8 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
         empty = 0;
         let dt = fine_dt;
         let d = cloud_density(p, h, w, true);
-        if (d > 0.0) {
+        let share = near_share(p);
+        if (d > 0.0 && share > 0.0) {
             let sigma = d * extinction;
             // Optical depth toward the light over samples that double in length, 1.24 km in
             // all however many there are (5 on screen: 40 m to 640 m), so the environment
@@ -303,7 +318,7 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
                 s += vec3<f32>(0.75, 0.82, 1.0) * clouds.flash.w / (d2 + 90000.0)
                     * exp(-sqrt(d2) * 0.0007) * (2.0 / (4.0 * PI));
             }
-            let tr = exp(-sigma * dt);
+            let tr = mix(1.0, exp(-sigma * dt), share);
             r.radiance += r.transmittance * s * (1.0 - tr);
             if (!hit && r.transmittance * tr < 0.97) {
                 hit = true;
@@ -646,4 +661,36 @@ fn fs_env(in: FullscreenOut) -> @location(0) vec4<f32> {
         c += (r.radiance + clear_sky(d) * r.transmittance) * 0.25;
     }
     return vec4<f32>(min(c, vec3(60000.0)), 1.0);
+}
+
+// The renderer's cloud shadow map (`cloud_shadows`): per texel, the sunlight that comes down
+// through the clouds to the cloud base plane, along the light the renderer shades with
+// (`frame.sun_dir`: the sun, or the moon at night). Relative to the dimming the weather already
+// gave that light for the deck at the player (`clouds.shadow.x`), so overcast isn't darkened
+// twice and the ground under a break in it stays at the dimmed sun.
+@fragment
+fn fs_cloud_shadow(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let l = frame.sun_dir.xyz;
+    if (l.y <= 0.0 || frame.planet.w <= 0.0) { return vec4<f32>(1.0); }
+    let start = cloud_shadow_plane_point(in.uv);
+    // From where the ray enters the layer (the plane sits a little below a curved layer far
+    // away) to the highest tops, at most 30 km along a low sun.
+    let h = planet_height(start);
+    let rise = max(dot(l, normalize(start - frame.planet.xyz)), 0.05);
+    let t0 = max(clouds.layer.x - h, 0.0) / rise;
+    let t1 = min(max(clouds.layer.y - h, 0.0) / rise, t0 + 30000.0);
+    if (t1 <= t0) { return vec4<f32>(1.0); }
+    let steps = i32(clouds.shadow.y);
+    let dt = (t1 - t0) / f32(steps);
+    var od = 0.0;
+    for (var i = 0; i < steps; i++) {
+        let q = start + l * (t0 + dt * (f32(i) + 0.5));
+        od += cloud_density(q, planet_height(q), weather_at_smooth(q.xz), true) * dt;
+    }
+    od *= clouds.layer.z;
+    // Light scattered forward through the cloud softens thin cloud's shadow; under a thick
+    // deck only the sky's light is left.
+    let through = max(exp(-od), 0.2 * exp(-0.3 * od));
+    let t = saturate(through / max(clouds.shadow.x, 1e-4));
+    return vec4<f32>(t, t, t, 1.0);
 }

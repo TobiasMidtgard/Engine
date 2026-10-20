@@ -368,6 +368,14 @@ fn main() {
             old_logs + DVec3::new(-2.5, 1.8, -3.5),
             old_logs + DVec3::new(5.0, 0.2, 4.0),
         );
+        // The same row from its sunlit side, at the distance a walker passes it.
+        shot(
+            &mut app,
+            &out,
+            "12_old_logs_lit",
+            old_logs + DVec3::new(5.5, 1.5, 9.5),
+            old_logs + DVec3::new(1.5, 0.3, 4.8),
+        );
     }
     if want("log_ends") {
         // The oak at the head of the row, from beside its sawn butt and its broken-off top.

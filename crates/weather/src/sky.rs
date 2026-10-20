@@ -186,7 +186,7 @@ pub(crate) fn sky_system(
     }
     for (mut t, mut light) in &mut moons {
         aim(&mut t, out.moon_dir);
-        light.illuminance = out.moon_lux * out.cloud_dimming.max(0.05);
+        light.illuminance = out.moon_lux * out.cloud_dimming.max(MOON_DIMMING_FLOOR);
     }
 
     // Night fill: a dim blue constant light so moonless nights still read.
@@ -226,7 +226,9 @@ pub fn compute_lights(sky: &Sky, climate: &Climate, sim: &WeatherSim) -> SkyLigh
 
 /// The least of the sun that thick cloud lets through as direct light (a storm leaves the
 /// ground lit by the cloud deck itself, which the renderer gets from the sky map).
-const SUN_DIMMING_FLOOR: f32 = 0.0001;
+pub(crate) const SUN_DIMMING_FLOOR: f32 = 0.0001;
+/// The least of the moon that thick cloud lets through.
+pub(crate) const MOON_DIMMING_FLOOR: f32 = 0.05;
 
 /// How much thick cloud dims the sun at the player (1 = not at all). Only kicks in when most
 /// of the sky is covered, so passing cumulus don't flicker the whole scene; the renderer's

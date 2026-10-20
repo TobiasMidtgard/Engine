@@ -316,3 +316,44 @@ fn a_gpu_cloth_follows_a_world_shift() {
         }
     }
 }
+
+#[test]
+fn a_gpu_flag_soaks_in_the_rain_like_a_cpu_one() {
+    let mut app = app();
+    {
+        let mut weather = app.world.resource_mut::<WeatherState>();
+        weather.precipitation_mm_h = 60.0;
+        weather.precipitation_kind = engine_world::PrecipitationKind::Rain;
+        weather.temperature_c = 15.0;
+    }
+    let on_gpu = app
+        .world
+        .spawn((Transform::from_xyz(0.0, 2.5, -3.0), flag(0x2040c0, true)))
+        .id();
+    let on_cpu = app
+        .world
+        .spawn((Transform::from_xyz(0.0, 2.5, 3.0), flag(0x2040c0, false)))
+        .id();
+    app.world.spawn((
+        Camera::perspective(60.0),
+        Transform::from_xyz(4.0, 3.0, 0.0).looking_at(DVec3::new(0.0, 2.0, 0.0), Vec3::Y),
+    ));
+    app.world.insert_resource(GpuClothProbe {
+        entity: Some(on_gpu),
+        ..Default::default()
+    });
+    app.update_n(120);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return;
+    }
+    let gpu_wet = app.world.resource::<GpuClothProbe>().wet;
+    let cpu = app.world.get::<SoftBodySim>(on_cpu).expect("CPU flag");
+    let cpu_wet = cpu.wet.iter().sum::<f32>() / cpu.wet.len() as f32;
+    eprintln!("wet after 2 s of heavy rain: GPU {gpu_wet:.3}, CPU {cpu_wet:.3}");
+    assert!(gpu_wet > 0.3, "the rain soaks it: {gpu_wet:.3}");
+    assert!(
+        (gpu_wet - cpu_wet).abs() < 0.05,
+        "as wet as the CPU flag: GPU {gpu_wet:.3}, CPU {cpu_wet:.3}"
+    );
+}

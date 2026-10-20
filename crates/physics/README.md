@@ -93,7 +93,29 @@ changing that one plugin line.
   and switch over when they rank among the nearest (a group already articulated counts as a
   fifth nearer, so groups at about the same distance don't trade places back and forth;
   sleeping groups keep their joints and don't count). Ten ragdolls tumbling at once cost 4.8 ms
-  per frame instead of 8.3. `articulated_joints: false` turns it all off.
+  per frame instead of 8.3. And only groups within `articulate_within_m` (20 m) of a focus are
+  articulated (one already articulated keeps it until a quarter farther): past that, the few
+  centimeters a constraint joint opens on a hard landing are about a pixel at 1080p. Seen from
+  the overview camera, the yard's busy first five seconds cost 8.6 ms a step instead of 14.5, and
+  the dummies' replay 4.6 instead of 13.3. With a focus, a group also needs to be moving: it is
+  articulated once its fastest point goes over 2.5 m/s (falling, tumbling, thrown) and lets go
+  under 1 m/s, when a settling or still ragdoll's constraint joints rest closed, so its place
+  goes to one still tumbling. Up close at the stairs the busy first five seconds then cost 12.3
+  ms instead of 16.1 and the replay 8.8 instead of 11.0, with the ragdolls' joints opening as
+  rarely as before (over 1 cm in 18 frames of 1,800 against 16; at most 3.3 cm for a frame).
+  `articulated_joints: false` turns it all off.
+- **Heavy loads on light chains** (`Simulation::hang_loads`): a chain pinned at one place holding
+  a body over 100× heavier than one of its links (a 17 t wrecking ball on 11 kg links, which
+  can't be an articulation) hung with its links up to 22 cm apart on constraint joints: the
+  solver's few passes can't carry such a load, so it rests stretched. Extra passes close it but
+  cost the whole island (40 ms a frame while the ball plows through the crate wall), and moving
+  the links back onto their joints after each step (PhysX's projection) left the ball swinging
+  half again too fast. So the heavy body also hangs from the pin on a hidden rope as long as the
+  chain pulled straight: one exact constraint carries it, the links carry only their own weight
+  and stay within 6 mm, and the ball swings as a pendulum should (7.8 m/s at the bottom of a
+  3.1 m drop, back to within 2 cm of where it was let go). A slack chain leaves the rope slack;
+  unpinning the chain, or a loop or a second pin, takes the rope away. Ropes, springs and
+  sliders in the chain end its rigid part.
 - **Characters**: `CharacterController` capsules moved by sweeps, so even an 800 m/s dash stops
   at a thin wall: steps (also while gravity pulls), slopes, ground snapping, crouching (change
   `height` between steps). They move after the bodies have stepped: whatever a character stood
@@ -194,6 +216,7 @@ proving ground with the overlay.
 | `max_substep_secs` | 1/120 | Longest substep. With constraint joints, 1/60 lets ragdoll joints gap ~5 cm on impact; 1/120 ~1.5 cm. |
 | `articulated_joints` | on | Solve free-floating jointed groups as articulations (no joint gap; see Articulations). |
 | `max_articulated` | 4 | Most moving groups articulated at once, nearest the focus first; the rest use constraint joints. |
+| `articulate_within_m` | 20 | Only groups this close to a focus are articulated (farther, joint gaps are under a pixel or two). |
 | `max_substeps` | 24 | Cap per fixed step (10× speed needs 20). |
 | `allowed_penetration_m` | 0.001 | How far contacts may sink before being pushed apart. |
 | `contact_stiffness_hz` | 60 | Contact spring frequency (static contacts 2×). 30 Hz lets a 30-box tower sag 24 cm, 60 Hz ~6 cm. |
