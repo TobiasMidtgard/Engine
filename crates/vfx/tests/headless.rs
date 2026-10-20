@@ -598,6 +598,64 @@ fn a_veil_of_light_is_brightest_at_its_foot_and_fades_as_it_rises() {
 }
 
 #[test]
+fn a_plasma_ball_glows_hottest_at_its_heart_and_nothing_beside_it_changes() {
+    // A ball of plasma about 1 m across floating 1 m up at dusk: its heart shines brightest,
+    // its edge less, and the air well beside it is untouched.
+    let mut app = app(DVec3::ZERO, 300.0);
+    let Some(before) = shot(&mut app, "vfx_plasma_before.png") else {
+        return;
+    };
+    let plasma = EffectDesc {
+        name: "test.plasma".into(),
+        emitters: vec![EmitterDesc {
+            bursts: vec![engine_vfx::Burst {
+                count: 1,
+                ..Default::default()
+            }],
+            offset: [0.0, 1.0, 0.0],
+            speed: [0.0, 0.0],
+            gravity: 0.0,
+            lifetime: [1.0, 1.0],
+            size: [1.6, 1.6],
+            local_space: true,
+            sprite: Sprite::Plasma,
+            color: Gradient::constant([0.6, 0.8, 1.0, 1.0]),
+            emissive: 1000.0,
+            additive: 1.0,
+            soft: 0.0,
+            wind: 0.0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    app.world
+        .resource_mut::<EffectLibrary>()
+        .insert(plasma)
+        .unwrap();
+    app.world.spawn((
+        Transform::from_translation(DVec3::ZERO),
+        ParticleEffect::new("test.plasma"),
+    ));
+    app.update_n(12);
+    let after = shot(&mut app, "vfx_plasma_after.png").unwrap();
+    let change = |x: f64, y: f64| {
+        let at = project(DVec3::new(x, y, 0.0));
+        luma(&after, at, 2) - luma(&before, at, 2)
+    };
+    let (heart, edge, side) = (change(0.0, 1.0), change(0.45, 1.0), change(1.6, 1.0));
+    eprintln!("plasma: heart {heart}, edge {edge}, side {side}");
+    assert!(heart > 8.0, "the ball should shine at its heart: {heart}");
+    assert!(
+        edge < heart,
+        "the heart should outshine the edge: heart {heart}, edge {edge}"
+    );
+    assert!(
+        side.abs() < 2.0,
+        "nothing beside the ball should change: {side}"
+    );
+}
+
+#[test]
 fn ice_spikes_stand_out_of_the_ground_and_nothing_beside_them_changes() {
     // A cluster of ice spikes 1.5 m tall standing on the origin in daylight: it shows low in
     // its middle and up its tallest spike, and leaves the air well beside it untouched.

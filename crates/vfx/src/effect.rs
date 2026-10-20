@@ -335,6 +335,12 @@ pub enum Sprite {
     /// horizontal` to spread over the ground, `rotation_deg` 0 to 360 to scatter them, a short
     /// life, a high `emissive` and `additive` 1.
     Arc,
+    /// A ball of crackling energy: a sphere about two thirds of the sprite across, near white at
+    /// its heart, laced with bright filaments that writhe and turn through it, its rim glowing,
+    /// in a soft halo (spell charges, wisps, energy orbs). Use with `facing: camera`, `additive`
+    /// 1, a high `emissive` and a couple of overlapping long-lived particles (`local_space`,
+    /// `steady`) so it never blinks.
+    Plasma,
 }
 
 impl Sprite {
@@ -355,7 +361,8 @@ impl Sprite {
             | Sprite::Ripple
             | Sprite::Blaze
             | Sprite::Veil
-            | Sprite::Arc => 0.0,
+            | Sprite::Arc
+            | Sprite::Plasma => 0.0,
             _ => 0.6,
         }
     }
