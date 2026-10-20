@@ -382,6 +382,10 @@ fn ctx<'a>(
     }
 }
 
+/// Thinnest half extent (m) of a landing piece that still bursts into pieces; thinner ones
+/// crumble into chips and dust.
+const CRUMBLE_HALF_M: f32 = 0.08;
+
 /// Debris marked [`ShatterOnImpact`] breaks into Voronoi pieces when it lands hard (stone and
 /// concrete slabs burst on the ground; wooden beams don't).
 #[allow(clippy::too_many_arguments)]
@@ -437,6 +441,34 @@ pub fn shatter_system(
             continue;
         }
         done.push(e);
+        let carry = body.map(|b| b.velocity * 0.4).unwrap_or(Vec3::ZERO);
+        let mut ctx = ctx(&settings, &table, rng, &mut out);
+        // Both ways below despawn the piece; free its mesh first.
+        if let (Some(m), Some(meshes)) = (mesh, meshes.as_deref_mut()) {
+            m.free(meshes);
+        }
+        // A thin slab (a plaster sheet) breaks up into grit and a puff, not into smaller slabs.
+        if s.half_extents.min_element() < CRUMBLE_HALF_M {
+            let props = table.get(d.material);
+            commands.entity(e).despawn();
+            ctx.chips(
+                t.translation,
+                carry + Vec3::Y * 1.5,
+                2.0,
+                8,
+                d.material,
+                props.chip_size,
+            );
+            ctx.dust(
+                t.translation,
+                s.half_extents.max_element() * 2.0,
+                props.dust_darkness,
+                2,
+                carry * 0.5,
+            );
+            ctx.stats.pieces_broken += 1;
+            continue;
+        }
         let half = s.half_extents * 0.8;
         let pieces = ((8.0 * half.x * half.y * half.z).cbrt() * 10.0) as u32;
         let f = Fracturable {
@@ -450,12 +482,6 @@ pub fn shatter_system(
             rotation: t.rotation,
             scale: Vec3::ONE,
         });
-        let carry = body.map(|b| b.velocity * 0.4).unwrap_or(Vec3::ZERO);
-        let mut ctx = ctx(&settings, &table, rng, &mut out);
-        // `break_fracturable` despawns the entity; free its mesh first.
-        if let (Some(m), Some(meshes)) = (mesh, meshes.as_deref_mut()) {
-            m.free(meshes);
-        }
         let impact = Vec3::new(0.0, -half.y, 0.0);
         break_fracturable(
             &mut ctx,
