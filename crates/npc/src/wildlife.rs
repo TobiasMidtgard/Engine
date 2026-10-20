@@ -377,6 +377,12 @@ impl PackRole {
     }
 }
 
+/// How far ahead of the quarry (along the pack's line) a flanker takes its post (m): about
+/// level with it, out wide. Posted well ahead, it lies where a quarry breaking off the line
+/// to that side runs, and the quarry slips round the outside of it, leaving it on the far
+/// side.
+const FLANK_POST: f32 = 2.0;
+
 /// An ambusher springs when the quarry comes this close (m); a deer fleeing the pack doesn't
 /// see it lying low in wait until then.
 pub const AMBUSH_RANGE: f32 = 12.0;
@@ -2005,7 +2011,9 @@ fn flee_direction(
         dir += mind.flee_dir * 1.2;
     }
     // Run with the herd: deer bunch up (pulled to the middle from 3 m out, harder the
-    // further out, kept a little apart close up).
+    // further out, kept a little apart close up). Not a deer the pack is running down: cut
+    // off from the herd, it runs its own line, and only keeps clear of the rest.
+    let singled = deer && mind.pursuer.is_some();
     let mut align = Vec3::ZERO;
     let mut center = DVec3::ZERO;
     let mut apart = Vec3::ZERO;
@@ -2025,8 +2033,10 @@ fn flee_direction(
         center += s.pos;
         n += 1.0;
     }
-    dir += align.normalize_or_zero() * if deer { 1.1 } else { 0.8 };
-    if n > 1.0 {
+    if !singled {
+        dir += align.normalize_or_zero() * if deer { 1.1 } else { 0.8 };
+    }
+    if n > 1.0 && !singled {
         let to_center = flat(center / n - pos);
         let far = to_center.length();
         if deer && far > 3.0 {
@@ -2378,7 +2388,7 @@ fn hunt(
                     lying_in_wait = false;
                     (at(-behind, across), stalk * 2.2)
                 } else {
-                    (at(6.0, across), stalk * 2.2)
+                    (at(FLANK_POST, across), stalk * 2.2)
                 }
             }
             PackRole::Ambusher => {

@@ -6,7 +6,7 @@
 
 use engine_core::math::{Quat, Vec3};
 use engine_core::prelude::*;
-use engine_render::{MeshRenderer, StandardMaterial};
+use engine_render::{Camera, MeshRenderer, StandardMaterial};
 use engine_world::{ExhaustEffects, VehicleControls};
 
 use crate::aero::{Aircraft, Propulsion};
@@ -368,7 +368,8 @@ pub fn heat_visuals(
 /// longer) as it grows; the wake trails along the airflow.
 pub fn plasma_visuals(
     time: Res<Time>,
-    shields: Query<&HeatShield>,
+    shields: Query<(&HeatShield, &GlobalTransform)>,
+    cameras: Query<(&Camera, &GlobalTransform)>,
     mut q: Query<(
         &ChildOf,
         &mut PlasmaVisual,
@@ -376,8 +377,14 @@ pub fn plasma_visuals(
         &mut Transform,
     )>,
 ) {
+    // The camera that renders to the screen (the active one with the highest order).
+    let eye = cameras
+        .iter()
+        .filter(|(c, _)| c.active)
+        .max_by_key(|(c, _)| c.order)
+        .map(|(_, g)| g.translation());
     for (parent, mut plasma, mut r, mut t) in &mut q {
-        let Ok(shield) = shields.get(parent.parent()) else {
+        let Ok((shield, ship)) = shields.get(parent.parent()) else {
             continue;
         };
         let glow = plasma_glow(shield.heat_flux_w_m2);
@@ -401,9 +408,21 @@ pub fn plasma_visuals(
             let clock = time.elapsed_secs() + from.x * 0.37 + wake.radius;
             let flicker = 1.0 + 0.05 * (clock * 23.0).sin() + 0.03 * (clock * 37.0).sin();
             let radius = wake.radius * (1.0 + 0.03 * (clock * 29.0).sin());
+            // The wake is a strip: turn it about its axis so it faces the camera.
+            let mut rotation = Quat::from_rotation_arc(Vec3::Z, flow);
+            if let Some(eye) = eye {
+                let to_eye = (ship.0.inverse().transform_point3(eye) - from.as_dvec3()).as_vec3();
+                let side = to_eye - flow * to_eye.dot(flow);
+                let normal = rotation * Vec3::Y;
+                if side.length_squared() > 1e-6 {
+                    let side = side.normalize();
+                    let roll = flow.dot(normal.cross(side)).atan2(normal.dot(side));
+                    rotation = Quat::from_axis_angle(flow, roll) * rotation;
+                }
+            }
             let new = Transform {
                 translation: from.as_dvec3(),
-                rotation: Quat::from_rotation_arc(Vec3::Z, flow),
+                rotation,
                 scale: Vec3::new(radius, radius, wake.length * glow.sqrt() * flicker),
             };
             if *t != new {

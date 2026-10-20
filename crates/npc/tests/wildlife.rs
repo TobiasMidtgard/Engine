@@ -949,54 +949,68 @@ fn flanking(app: &mut App, deer: &[Entity], pack: &[Entity]) -> Flanking {
     f
 }
 
-/// Over eight draws of each pack size: every hunt is a real chase, with the ambusher (in a
-/// pack of four or more) lying in wait well beyond the quarry as the tester rushes, the
+/// Over twenty-four draws of each pack size: every hunt is a real chase, with the ambusher
+/// (in a pack of four or more) lying in wait well beyond the quarry as the tester rushes, the
 /// tester driving it from behind, and never a flanker level with it on its far side. Each
 /// pack size (four as well as three and five) keeps both flankers out on their own sides for
-/// 85 % of its flanking, and in at least five of the eight hunts both run abreast of the
-/// quarry for a second (unless the flanking was over within two) and hold their sides for
-/// three quarters of it. (A deer at full sprint
-/// outruns a wolf, so on a long straight bolt the flankers fall back: hence not every hunt.)
-#[test]
-fn flankers_run_out_on_the_quarrys_sides() {
-    for wolves in [3, 4, 5] {
-        let (mut phase, mut sides, mut good) = (0, 0, 0);
-        for k in 0..8 {
-            let mut app = app();
-            let (deer, pack) = seeded_hunt(&mut app, 4, wolves, k);
-            let f = flanking(&mut app, &deer, &pack);
-            eprintln!("{wolves} wolves, draw {k}: {f:?}");
-            let at = format!("{wolves} wolves, draw {k}");
-            assert!(f.chase >= 60, "{at}: a real chase ({} steps)", f.chase);
-            assert_eq!(f.ambusher.is_some(), wolves >= 4, "{at}: an ambusher");
-            if let Some((beyond, lying_in_wait)) = f.ambusher {
-                assert!(beyond > 12.0, "{at}: the ambusher {beyond:.1} m beyond");
-                assert!(lying_in_wait, "{at}: the ambusher lying in wait");
-            }
-            assert!(
-                f.tester_behind * 10 >= f.phase * 9,
-                "{at}: the tester drives from behind ({} of {})",
-                f.tester_behind,
-                f.phase
-            );
-            assert_eq!(
-                f.wrong_level, 0,
-                "{at}: a flanker level with the quarry on its far side"
-            );
-            phase += f.phase;
-            sides += f.sides;
-            let abreast = f.abreast >= 60 || f.phase < 120;
-            good += (abreast && f.sides * 4 >= f.phase * 3) as usize;
+/// 85 % of its flanking, and in at least five of every eight hunts (15 of the 24) both run
+/// abreast of the quarry for a second (unless the flanking was over within two) and hold
+/// their sides for three quarters of it. (A deer at full sprint outruns a wolf, so on a long
+/// straight bolt the flankers fall back: hence not every hunt.)
+/// (Each pack size is its own test, so they run side by side.)
+fn flankers_run_out_on_the_quarrys_sides(wolves: usize) {
+    const DRAWS: usize = 24;
+    let (mut phase, mut sides, mut good) = (0, 0, 0);
+    for k in 0..DRAWS as u64 {
+        let mut app = app();
+        let (deer, pack) = seeded_hunt(&mut app, 4, wolves, k);
+        let f = flanking(&mut app, &deer, &pack);
+        eprintln!("{wolves} wolves, draw {k}: {f:?}");
+        let at = format!("{wolves} wolves, draw {k}");
+        assert!(f.chase >= 60, "{at}: a real chase ({} steps)", f.chase);
+        assert_eq!(f.ambusher.is_some(), wolves >= 4, "{at}: an ambusher");
+        if let Some((beyond, lying_in_wait)) = f.ambusher {
+            assert!(beyond > 12.0, "{at}: the ambusher {beyond:.1} m beyond");
+            assert!(lying_in_wait, "{at}: the ambusher lying in wait");
         }
         assert!(
-            sides * 20 >= phase * 17,
-            "{wolves} wolves: both flankers on their sides for {sides} of {phase} steps"
+            f.tester_behind * 10 >= f.phase * 9,
+            "{at}: the tester drives from behind ({} of {})",
+            f.tester_behind,
+            f.phase
         );
-        assert!(
-            good >= 5,
-            "{wolves} wolves: both flankers abreast and on their sides in {good} of 8 hunts"
+        assert_eq!(
+            f.wrong_level, 0,
+            "{at}: a flanker level with the quarry on its far side"
         );
+        phase += f.phase;
+        sides += f.sides;
+        let abreast = f.abreast >= 60 || f.phase < 120;
+        good += (abreast && f.sides * 4 >= f.phase * 3) as usize;
     }
+    assert!(
+        sides * 20 >= phase * 17,
+        "{wolves} wolves: both flankers on their sides for {sides} of {phase} steps"
+    );
+    assert!(
+        good * 8 >= DRAWS * 5,
+        "{wolves} wolves: both flankers abreast and on their sides in {good} of {DRAWS} hunts"
+    );
+}
+
+#[test]
+fn a_pack_of_three_runs_out_on_the_quarrys_sides() {
+    flankers_run_out_on_the_quarrys_sides(3);
+}
+
+#[test]
+fn a_pack_of_four_runs_out_on_the_quarrys_sides() {
+    flankers_run_out_on_the_quarrys_sides(4);
+}
+
+#[test]
+fn a_pack_of_five_runs_out_on_the_quarrys_sides() {
+    flankers_run_out_on_the_quarrys_sides(5);
 }
 
 /// Bearing (rad, 0 = straight ahead) from `e`'s facing to `at`.

@@ -3,6 +3,7 @@
 pub mod api;
 pub mod appearance;
 pub mod build;
+pub mod clothes;
 pub mod demo;
 pub mod eyes;
 pub mod face;

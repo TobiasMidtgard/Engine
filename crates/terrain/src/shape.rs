@@ -629,7 +629,23 @@ impl PlanetShape {
                 let (su, sv) = axes(pad.sea_azimuth_deg);
                 let ragged = fbm(22_000.0, s ^ 0x7B, octaves_for(22_000.0, 5.0), 3, 0.55);
                 let shore = (1.0 + 0.5 * ragged) * pad.sea_distance_m;
-                let half_width = 90_000.0 + 0.5 * su.max(D::ZERO) + ragged * 40_000.0;
+                // Hundreds of kilometers out, the gulf bends and its shores swell into capes
+                // and bights, so from orbit it is not a straight-sided wedge. (Near the pad it
+                // is as before.)
+                let out = su.max(D::ZERO);
+                let far = D::smooth(150_000.0, 700_000.0, su);
+                let (bend, swell) = if far.v > 0.0 {
+                    (
+                        fbm(500_000.0, s ^ 0x7E, 4.0, 3, 0.5),
+                        fbm(140_000.0, s ^ 0x7F, 5.0, 3, 0.6),
+                    )
+                } else {
+                    (D::ZERO, D::ZERO)
+                };
+                let sv = sv - bend * out * far * 1.2;
+                let half_width = 90_000.0
+                    + 0.5 * out * (1.0 + swell * far * 1.6).max(D::c(0.15))
+                    + ragged * 40_000.0;
                 sea = D::smooth_t((su - shore + 3_000.0) / 23_000.0)
                     * (1.0 - D::smooth_t((sv.abs() - half_width) / (half_width * 0.5)))
                     * (1.0 - D::smooth(1.5e6, 2.5e6, su))

@@ -260,14 +260,23 @@ pub fn load(world: &mut World, id: &str) -> Result<(), String> {
         .ok_or_else(|| format!("There is no save \"{id}\"."))?;
     crate::input::dispatch(world, &format!("game.load:{id}"));
     screens::hide_all(world, &["hud"], false);
-    toast::notify(
-        world,
-        ToastKind::Info,
-        "map_scroll",
-        "Loading",
-        &format!("[b]{}[/b]  ·  {}", slot.chapter, slot.location),
-        2.4,
-    );
+    // The loading screen for the save's world; a toast if the map doesn't know it.
+    let planet = world
+        .get_resource::<crate::map::MapData>()
+        .map(|m| m.player.planet.clone())
+        .unwrap_or_default();
+    let args =
+        serde_json::json!({"planet": planet, "place": slot.location, "tip": slot.seed as u64});
+    if screens::show(world, "loading", &args).is_err() {
+        toast::notify(
+            world,
+            ToastKind::Info,
+            "map_scroll",
+            "Loading",
+            &format!("[b]{}[/b]  ·  {}", slot.chapter, slot.location),
+            2.4,
+        );
+    }
     Ok(())
 }
 
