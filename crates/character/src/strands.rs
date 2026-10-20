@@ -458,7 +458,7 @@ fn grow_scalp(
         },
         HairStyle::Long => Groom {
             length: 0.42 * k,
-            points: 24,
+            points: 32,
             density: 80.0,
             gravity: 1.0,
             loft: 0.012,
@@ -507,17 +507,20 @@ fn grow_scalp(
     };
     let mut guides: Vec<(SkinPoint, Vec<Vec3>)> = Vec::with_capacity(guides_n);
     let mut gr = Rng::new(a.seed ^ 0x6D1E);
+    let curl = a.hair.curl.clamp(0.0, 1.0);
     for _ in 0..guides_n {
         let Some(sp) = sampler.sample(&mut gr) else {
             break;
         };
         let mut pts = grow_hair(a, &g, sp, collider, lm, rest, &mut gr, 1.0);
         if g.gravity > 0.5 {
-            // Each lock of hanging hair has a gentle wave of its own, so neighboring locks
-            // catch the light differently and read apart.
+            // Each lock of hanging hair has a wave of its own, so neighboring locks catch
+            // the light differently and read apart. Wavy hair waves as whole locks, shorter
+            // and deeper the curlier it is.
             let phase = gr.f32() * std::f32::consts::TAU;
-            let waves = gr.range(1.5, 3.0);
-            let amp = gr.range(0.003, 0.008);
+            let wavelength = (0.2 - 0.13 * curl) * gr.range(0.8, 1.25);
+            let waves = g.length / wavelength;
+            let amp = gr.range(0.003, 0.008) + 0.02 * curl;
             // Mostly toward and away from the head (which turns the lock's highlight), a
             // little sideways.
             let out = (sp.p - lm.head).normalize_or(Vec3::Z);
@@ -534,7 +537,6 @@ fn grow_scalp(
         guides.push((sp, pts));
     }
     let guide_grid = GuideGrid::new(&guides);
-    let curl = a.hair.curl.clamp(0.0, 1.0);
     for _ in 0..total {
         let Some(sp) = sampler.sample(&mut r) else {
             break;
@@ -568,7 +570,13 @@ fn grow_scalp(
             for (k, p) in pts.iter_mut().enumerate() {
                 let t = k as f32 / last as f32;
                 let follow = gpts[k] + off * (1.0 - c * t.powf(0.8));
-                let w = (c * 1.2 * t.sqrt()).min(1.0);
+                // Hanging hair takes its lock's shape all along (its own wander would cross
+                // its neighbors' and look like straw); short hair only toward the tip.
+                let w = if g.gravity > 0.5 {
+                    (c * 0.95 + 0.1 * t).min(1.0)
+                } else {
+                    (c * 1.2 * t.sqrt()).min(1.0)
+                };
                 *p = *p + (follow - *p) * w;
             }
         }
@@ -584,16 +592,30 @@ fn grow_scalp(
             }
         }
         // Curls: a helix around the hair, growing from the root (tight coils on short hair).
+        // Hanging hair waves with its lock (above), so its own coil is small and at least
+        // eight points a turn: a coarser helix zigzags, and the zigzags of neighboring hairs
+        // cross like straw.
         if curl > 0.02 && g.points > 4 {
-            let radius = (0.002 + 0.01 * curl) * (g.length / 0.05).min(1.0);
-            let turns = 2.0 + 10.0 * curl * (g.length / 0.2).min(2.0);
+            let hanging = g.gravity > 0.5;
+            let mut radius = (0.002 + 0.01 * curl) * (g.length / 0.05).min(1.0);
+            let mut turns = 2.0 + 10.0 * curl * (g.length / 0.2).min(2.0);
+            if hanging {
+                radius *= 0.3;
+                turns = turns.min((g.points - 1) as f32 / 8.0);
+            }
             let phase = r.f32() * std::f32::consts::TAU;
             let last = pts.len() - 1;
             let base = pts.clone();
             for k in 1..pts.len() {
                 let t = k as f32 / last as f32;
                 let dir = (base[k] - base[k - 1]).normalize_or(Vec3::NEG_Y);
-                let side = dir.any_orthonormal_vector();
+                // (A frame that turns smoothly along the hair for hanging hair.)
+                let side = if hanging {
+                    dir.cross(base[k] - lm.head)
+                        .normalize_or(dir.any_orthonormal_vector())
+                } else {
+                    dir.any_orthonormal_vector()
+                };
                 let up = dir.cross(side);
                 let a = phase + t * turns * std::f32::consts::TAU;
                 pts[k] += (side * a.cos() + up * a.sin()) * (radius * t.min(0.3) / 0.3);
@@ -752,6 +774,9 @@ fn grow_hair(
     // Hanging hair wanders smoothly (a random walk of its direction) rather than kinking at
     // every point, which made long hair look frizzy.
     let mut drift = Vec3::ZERO;
+    // How far this hair stands off the head (one value per hair: a new one at every point
+    // pushed hanging hair in and out into a crimp).
+    let lift = r.range(0.4, 1.0);
     for k in 1..n {
         let t = k as f32 / (n - 1) as f32;
         let p_prev = pts[k - 1];
@@ -782,7 +807,7 @@ fn grow_hair(
         if g.gravity > 0.5 {
             p = keep_off_face(p, &mut face_side, jitter, lm);
         }
-        let offset = 0.0008 + g.loft * (t / 0.4).min(1.0) * r.range(0.4, 1.0);
+        let offset = 0.0008 + g.loft * (t / 0.4).min(1.0) * lift;
         p = collider.push_out(p, offset);
         // Hair that fell past the shoulders hangs straight on.
         dir = (p - p_prev).normalize_or(next_dir);
