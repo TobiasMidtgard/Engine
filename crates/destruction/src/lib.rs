@@ -419,6 +419,14 @@ fn material_arg(name: Option<&str>) -> Result<Option<DestructibleMaterial>, Stri
     }
 }
 
+/// Set off an explosion: its [`WorldImpulse`] and the noise AI hears.
+pub(crate) fn blast(world: &mut World, impulse: WorldImpulse) {
+    world.write_message(impulse);
+    if let Some(noise) = impulse.noise() {
+        world.write_message(noise);
+    }
+}
+
 fn register_api(app: &mut App) {
     build_api(app);
     const BLAST: &str = r#"{"at": [0, 1, 0], "energy_j": 1000000}"#;
@@ -431,14 +439,17 @@ fn register_api(app: &mut App) {
             let a: BlastArgs = parse(args, BLAST)?;
             let center = DVec3::from_array(a.at);
             let scale = (a.energy_j / 1.0e5).cbrt();
-            world.write_message(WorldImpulse {
-                center,
-                radius: (4.0 * scale).clamp(1.0, 60.0),
-                strength: (25.0 * scale).clamp(5.0, 300.0),
-                energy_j: a.energy_j,
-                heat_c: 400.0,
-                source: None,
-            });
+            blast(
+                world,
+                WorldImpulse {
+                    center,
+                    radius: (4.0 * scale).clamp(1.0, 60.0),
+                    strength: (25.0 * scale).clamp(5.0, 300.0),
+                    energy_j: a.energy_j,
+                    heat_c: 400.0,
+                    source: None,
+                },
+            );
             Ok(json!({"ok": true}))
         },
     );
