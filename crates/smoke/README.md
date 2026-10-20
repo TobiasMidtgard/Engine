@@ -36,7 +36,9 @@ shadowed volumes.
   the flames under it, so a plume's underside glows orange at night. A
   raymarch through the box then lights every step with the sun (forward scattering, a few
   orders of multiple scattering so thick white smoke looks white from every side, and the
-  scene's shadow map), sky light from above and ground light from below, and firelight. Fine
+  scene's shadow map, softened by about a cell and taken only partly from the light that
+  bounced around inside the smoke, so a tree's shadow falls through a plume as a soft shaft
+  rather than a sharp dark copy of its crown), sky light from above and ground light from below, and firelight. Fine
   billows are added with noise (fading out with distance), the march stops at the scene's
   depth, and the result is fogged like the rest of the scene. Motion between simulation steps
   is blended so it stays smooth at any frame rate.
