@@ -19,6 +19,9 @@ pub const SMOLDER_GLOW: f32 = 8_000.0;
 /// Alpha levels of the dust materials.
 pub const DUST_LEVELS: usize = 6;
 
+/// Albedo scale of textured rock and soil chips.
+const CHIP_SHADE: f32 = 0.55;
+
 /// Handles shared by everything destruction draws.
 #[derive(Resource, Debug, Clone)]
 pub struct DestructionAssets {
@@ -238,6 +241,14 @@ impl DestructionAssets {
                 materials.add(t)
             });
             self.ghost_surface.push(ghosts);
+            // Rock and soil chips wear the ground's own texture, darkened like the ground's
+            // shaded relief, so a dig's spoil matches the ground it came from (flat fresh-break
+            // colors, or the bare texture in full sun, read as pale flakes on dark soil).
+            if matches!(*m, DestructibleMaterial::Rock | DestructibleMaterial::Dirt) {
+                let mut chip = mat;
+                chip.base_color = [CHIP_SHADE, CHIP_SHADE, CHIP_SHADE, 1.0];
+                materials.set(self.chip_material[i], chip);
+            }
             materials.set(self.surface[i], mat);
         }
         let mut grass = textured(SurfaceKind::Grass, 0xDE57_06A5, images);
