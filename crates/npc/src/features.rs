@@ -171,9 +171,9 @@ pub(crate) struct Blast {
 }
 
 /// Send a blast's world events: the impulse (out to 2.5 times its radius), a fire when
-/// `ignite` is given (with the prop that burns), a dark puff, the bang, and damage to whatever
-/// it reaches, falling off to nothing at its radius. With `cover`, nothing behind solid cover
-/// from the blast is hurt.
+/// `ignite` is given (with the prop that burns), a dark puff, the bang (heard as far as
+/// `WorldImpulse::noise` says), and damage to whatever it reaches, falling off to nothing at
+/// its radius. With `cover`, nothing behind solid cover from the blast is hurt.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn blast(
     b: &Blast,
@@ -187,14 +187,15 @@ pub(crate) fn blast(
     damage: &mut Messages<DamageEvent>,
 ) {
     let (center, radius) = (b.center, b.radius);
-    impulses.write(WorldImpulse {
+    let impulse = WorldImpulse {
         center,
         radius: radius * 2.5,
         strength: b.strength,
         energy_j: b.energy_j,
         heat_c: b.heat_c,
         source: b.source,
-    });
+    };
+    impulses.write(impulse);
     if let Some((ignite, by)) = ignite {
         ignite.write(IgniteRequest {
             position: center,
@@ -211,11 +212,9 @@ pub(crate) fn blast(
         temperature_c: 600.0,
         darkness: 0.85,
     });
-    noise.write(NoiseEvent {
-        position: center,
-        radius: 150.0,
-        source: b.source,
-    });
+    if let Some(bang) = impulse.noise() {
+        noise.write(bang);
+    }
     seen.near(center, radius as f64, near);
     for &k in near.iter() {
         let victim = seen.list[k as usize];
