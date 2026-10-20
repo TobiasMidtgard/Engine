@@ -7,8 +7,11 @@
 //! it, at most 0.35 s on hard ground and 0.6 s on soft), drops the ones that are not a clean
 //! step (a jump, a scrape, a step much quieter than its neighbours, one less than
 //! [`MIN_SNR_DB`] over the recording's hiss), labels each one walk or run, and normalizes
-//! every take to the same loudness. A surface left with fewer than [`MIN_TAKES`] takes is
-//! synthesized.
+//! every take to the same loudness. A step that misses the noise bar by up to 15 dB has the
+//! recording around it cleaned ([`denoise`]: rain, wind, room tone and hiss taken out, the
+//! tail gated) and must pass the bar again on the cleaned recording; cleaned takes only fill
+//! in where a ground has fewer than [`CLEAN_ENOUGH`] clean ones. A surface left with fewer
+//! than [`MIN_TAKES`] takes is synthesized.
 //!
 //! A footstep then plays one take, picked at random but never one of the last few on that
 //! surface, slightly re-pitched and re-levelled, brighter for heavier and faster steps, and
@@ -213,6 +216,13 @@ pub struct TakeStats {
     pub len_40_s: f32,
     /// The take's length, s.
     pub len_s: f32,
+    /// Where its onset is in the recording, s.
+    pub at_s: f32,
+    /// Whether the take was cleaned of its recording's background noise ([`denoise`]) to
+    /// pass [`MIN_SNR_DB`]; then `floor_db` is the noise left after cleaning.
+    pub cleaned: bool,
+    /// `floor_db` as recorded, before any cleaning, dB.
+    pub raw_floor_db: f32,
 }
 
 /// Silence kept before each take's onset, s.
@@ -384,48 +394,64 @@ fn load_sets(dir: &Path, feet: Feet) -> BTreeMap<String, TakeSet> {
         }
     }
     files.sort();
-    // Decode on a few threads (a minute of Vorbis takes a while in a debug build).
+    // Decode and cut on a few threads (a minute of Vorbis takes a while in a debug build),
+    // each taking the next file, the largest first, so they finish together.
     let workers = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2)
         .clamp(1, 4);
-    let chunks: Vec<&[(String, PathBuf)]> =
-        files.chunks(files.len().div_ceil(workers).max(1)).collect();
-    let cut: Vec<Vec<(String, Vec<Take>)>> = std::thread::scope(|s| {
-        let handles: Vec<_> = chunks
-            .iter()
-            .map(|chunk| {
-                s.spawn(move || {
-                    chunk
-                        .iter()
-                        .filter_map(|(folder, path)| match decode(path) {
+    let mut order: Vec<usize> = (0..files.len()).collect();
+    let size = |i: usize| std::fs::metadata(&files[i].1).map(|m| m.len()).unwrap_or(0);
+    order.sort_by_key(|&i| std::cmp::Reverse(size(i)));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut done: Vec<(usize, String, Vec<Take>)> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut mine = Vec::new();
+                    loop {
+                        let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&i) = order.get(k) else {
+                            break;
+                        };
+                        let (folder, path) = &files[i];
+                        match decode(path) {
                             Ok((x, sr)) => {
                                 let stem = path
                                     .file_stem()
                                     .map(|s| s.to_string_lossy().into_owned())
                                     .unwrap_or_default();
-                                Some((folder.clone(), cut_recording(feet, &stem, folder, &x, sr)))
+                                let takes = cut_recording(feet, &stem, folder, &x, sr);
+                                mine.push((i, folder.clone(), takes));
                             }
-                            Err(e) => {
-                                engine_core::log::warn!(
-                                    "audio: skipping footstep recording {}: {e}",
-                                    path.display()
-                                );
-                                None
-                            }
-                        })
-                        .collect()
+                            Err(e) => engine_core::log::warn!(
+                                "audio: skipping footstep recording {}: {e}",
+                                path.display()
+                            ),
+                        }
+                    }
+                    mine
                 })
             })
             .collect();
         handles
             .into_iter()
-            .map(|h| h.join().unwrap_or_default())
+            .flat_map(|h| h.join().unwrap_or_default())
             .collect()
     });
+    // In file order, whichever thread cut them.
+    done.sort_by_key(|d| d.0);
+    let cut = done.into_iter().map(|(_, folder, takes)| (folder, takes));
     let mut sets: BTreeMap<String, TakeSet> = BTreeMap::new();
-    for (folder, takes) in cut.into_iter().flatten() {
+    for (folder, takes) in cut {
         sets.entry(folder).or_default().takes.extend(takes);
+    }
+    // A ground with plenty of takes clean as recorded plays only those; cleaned ones fill in
+    // where they are scarce.
+    for set in sets.values_mut() {
+        if set.takes.iter().filter(|t| !t.stats.cleaned).count() >= CLEAN_ENOUGH {
+            set.takes.retain(|t| !t.stats.cleaned);
+        }
     }
     // A surface with too few clean takes is synthesized.
     sets.retain(|_, t| t.takes.len() >= MIN_TAKES);
@@ -643,8 +669,20 @@ const MAX_TAKES: usize = 24;
 pub const MAX_CREST_DB: f32 = 20.0;
 
 /// Least signal-to-noise ratio a take needs (its peak over the recording's noise just before
-/// it, 10 ms envelopes, dB): below it a take is as much hiss, wind or water as step.
+/// it, 10 ms envelopes, dB): below it a take is as much hiss, wind or water as step. A step
+/// that misses it is cleaned ([`denoise`]) and has to pass it again on the cleaned recording.
 pub const MIN_SNR_DB: f32 = 35.0;
+
+/// How far under the recording's background a cleaned take may follow its step's decay, dB.
+const BELOW_BACKGROUND_DB: f32 = 6.0;
+
+/// Least signal-to-noise ratio, as recorded, of a step that gets cleaned to try for
+/// [`MIN_SNR_DB`] (dB): under it the background is too much of the step to take out.
+pub const RESCUE_MIN_SNR_DB: f32 = 20.0;
+
+/// Takes clean as recorded a ground needs to do without cleaned ones ([`denoise`]): with as
+/// many, the cleaned takes of its recordings are left out.
+pub const CLEAN_ENOUGH: usize = 24;
 
 /// Fewest clean takes a surface needs to play recordings at all; with fewer it is synthesized,
 /// rather than repeating a handful.
@@ -751,29 +789,76 @@ pub fn cut_recording(feet: Feet, name: &str, folder: &str, x: &[f32], sr: f32) -
                     .into_iter()
                     .map(|mut c| {
                         c.range = from + c.range.start..from + c.range.end;
+                        c.onset += from;
+                        c.limit += from;
+                        c.stats.at_s = c.onset as f32 / sr;
                         c
                     }),
             );
         }
     }
-    // Keep the most typical steps of each gait when a recording has plenty.
+    // Steps that miss the noise bar, and only it, get a second chance: the recording around
+    // them is cleaned of its background and they are measured again.
+    let (mut cuts, noisy): (Vec<Cut>, Vec<Cut>) = cuts
+        .into_iter()
+        .partition(|c| c.peak_db - c.noise_db >= MIN_SNR_DB);
+    let cleaned = if noisy.is_empty() {
+        Vec::new()
+    } else {
+        let spans: Vec<std::ops::Range<usize>> = noisy.iter().map(|c| c.context(sr)).collect();
+        let y = denoise(x, sr, &spans);
+        let (d10, _) = envelopes(&y, sr);
+        cuts.extend(
+            noisy
+                .iter()
+                .filter_map(|n| rescue(&d10, n, &cutter, sr, y.len())),
+        );
+        cuts.sort_by_key(|c| c.range.start);
+        y
+    };
+    // Keep the most typical steps of each gait when a recording has plenty, the ones clean
+    // as recorded first.
     let mut out = Vec::new();
     for gait in [Gait::Walk, Gait::Run] {
         let mut of: Vec<&Cut> = cuts.iter().filter(|c| c.gait == gait).collect();
         if of.len() > MAX_TAKES {
-            let mut peaks: Vec<f32> = of.iter().map(|c| c.peak_db).collect();
+            // The typical step of those clean as recorded, when there are some.
+            let raw = of.iter().any(|c| !c.stats.cleaned);
+            let mut peaks: Vec<f32> = of
+                .iter()
+                .filter(|c| !(raw && c.stats.cleaned))
+                .map(|c| c.peak_db)
+                .collect();
             peaks.sort_by(f32::total_cmp);
             let median = peaks[peaks.len() / 2];
             of.sort_by(|p, q| {
-                (p.peak_db - median)
-                    .abs()
-                    .total_cmp(&(q.peak_db - median).abs())
+                (p.stats.cleaned, (p.peak_db - median).abs())
+                    .partial_cmp(&(q.stats.cleaned, (q.peak_db - median).abs()))
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
             of.truncate(MAX_TAKES);
             of.sort_by_key(|c| c.range.start);
         }
         for c in of {
-            let mut pcm = x[c.range.clone()].to_vec();
+            let mut pcm = if c.stats.cleaned {
+                cleaned[c.range.clone()].to_vec()
+            } else {
+                x[c.range.clone()].to_vec()
+            };
+            if let Some(at) = c.gate_at {
+                // A noise gate on a cleaned take's tail: once the step has sunk to the
+                // recording's background, it fades out over 15 ms and ends.
+                let at = at.min(pcm.len());
+                let fade = ((0.015 * sr) as usize).min(pcm.len() - at);
+                for j in 0..fade {
+                    pcm[at + j] *=
+                        0.5 + 0.5 * (std::f32::consts::PI * j as f32 / fade as f32).cos();
+                }
+                pcm.truncate(at + fade);
+                if pcm.len() < (0.02 * sr) as usize {
+                    continue;
+                }
+            }
             expand(&mut pcm, c.floor_db, sr);
             let tail = cutter
                 .tail
@@ -797,12 +882,14 @@ pub fn cut_recording(feet: Feet, name: &str, folder: &str, x: &[f32], sr: f32) -
             if !normalize(&mut pcm, sr) {
                 continue;
             }
+            let mut stats = c.stats;
+            stats.len_s = pcm.len() as f32 / sr;
             out.push(Take {
                 pcm: pcm.into(),
                 sample_rate: sr,
                 gait,
                 source: source.clone(),
-                stats: c.stats,
+                stats,
             });
         }
     }
@@ -894,9 +981,27 @@ struct Cut {
     gait: Gait,
     /// Peak of its 10 ms envelope, dB.
     peak_db: f32,
-    /// The recording's noise floor (10 ms envelope), dB.
+    /// The noise floor the take's background is expanded down from (10 ms envelope), dB:
+    /// the recording's, or for a cleaned take the noise left before it.
     floor_db: f32,
+    /// The recording's noise just before the step ([`noise_before`]), dB.
+    noise_db: f32,
+    /// Onset, and the latest the step may end (the next step, or the longest take), samples.
+    onset: usize,
+    limit: usize,
+    /// Where a cleaned take's tail gate closes, samples from the take's start.
+    gate_at: Option<usize>,
     stats: TakeStats,
+}
+
+impl Cut {
+    /// The stretch of recording a cleanup of this step needs: its noise window (and a little
+    /// more, so the cleaned window starts settled) up to its latest end, samples.
+    fn context(&self, sr: f32) -> std::ops::Range<usize> {
+        self.onset
+            .saturating_sub(((NOISE_WINDOW_S + 0.15) * sr) as usize)
+            ..self.limit + (0.02 * sr) as usize
+    }
 }
 
 /// The step period of a recording, s: the strongest repeat of its envelope between 0.25 and
@@ -937,7 +1042,8 @@ fn step_period(d10: &[f32], top: f32) -> Option<f32> {
 /// 9 dB over its level since the last step, at most once per 60 % of the step period, and
 /// ends once the envelope has fallen to within 6 dB of the noise before the step, or 40 dB
 /// under its peak, and stayed there (at most `c.max_s` long). Steps much quieter or louder
-/// than the median, too short, too noisy ([`MIN_SNR_DB`]) or swelling slowly (scrapes) are
+/// than the median, too short, far too noisy (under [`RESCUE_MIN_SNR_DB`]; between it and
+/// [`MIN_SNR_DB`] they are only candidates for a cleanup) or swelling slowly (scrapes) are
 /// dropped, and so are steps without a full [`NOISE_WINDOW_S`] of recording before them to
 /// measure the noise in (the first step of a file, or the first after digital silence that
 /// only opens the file): their noise can't be told. Onsets in the first `lead_ms` (the
@@ -945,27 +1051,7 @@ fn step_period(d10: &[f32], top: f32) -> Option<f32> {
 /// shorter times ([`Cutter`]).
 fn cut_steps(x: &[f32], sr: f32, part: Part, c: &Cutter, lead_ms: usize) -> Vec<Cut> {
     let hop = (sr * 0.001).max(1.0) as usize;
-    // High-passed envelope in dB at 1 ms hops.
-    let mut hp = Biquad::highpass(sr, 60.0, 0.7);
-    let mut sq = vec![0.0f64; x.len() + 1];
-    for (i, v) in x.iter().enumerate() {
-        let y = hp.process(*v) as f64;
-        sq[i + 1] = sq[i] + y * y;
-    }
-    let env = |win_s: f32| -> Vec<f32> {
-        let w = ((win_s * sr) as usize).max(1);
-        (0..x.len() / hop)
-            .map(|k| {
-                let c = k * hop;
-                let lo = c.saturating_sub(w / 2);
-                let hi = (c + w / 2).min(x.len());
-                let ms = (sq[hi] - sq[lo]) / (hi - lo).max(1) as f64;
-                (10.0 * (ms + 1e-14).log10()) as f32
-            })
-            .collect()
-    };
-    let d10 = env(0.010);
-    let d2 = env(0.002);
+    let (d10, d2) = envelopes(x, sr);
     if d10.len() < 100 {
         return Vec::new();
     }
@@ -1039,35 +1125,8 @@ fn cut_steps(x: &[f32], sr: f32, part: Part, c: &Cutter, lead_ms: usize) -> Vec<
         if limit <= o + 20 {
             continue;
         }
-        let peak = d10[o..(o + c.peak_ms).min(limit)]
-            .iter()
-            .fold(f32::MIN, |m, v| m.max(*v));
-        // The step is over once the envelope has fallen to just over the noise before it (or
-        // 40 dB under the peak) and stayed down for 50 ms (less for a paw or a hoof): what
-        // follows is the recording's
-        // hiss, wind or room, not the step.
-        let noise = noise_before(&d10, o);
-        let quiet = (noise + 6.0).max(peak - 40.0);
-        let mut end = limit;
-        let mut below = 0;
-        for (j, &level) in d10.iter().enumerate().take(limit).skip(o + 10) {
-            if level < quiet {
-                below += 1;
-                if below >= c.settle_ms {
-                    end = j + 1 - below;
-                    break;
-                }
-            } else {
-                below = 0;
-            }
-        }
-        let end = (end.max(o + c.min_len_ms.saturating_sub(10)) + 15).min(limit);
-        // Slow swells (a scrape, a shuffle) are not steps: nothing near the peak comes early.
-        // (A step's toe or compaction may well be louder than its heel.)
-        let rise = (o..(o + c.peak_ms).min(limit))
-            .position(|j| d10[j] >= peak - 6.0)
-            .unwrap_or(0);
-        steps.push((o, end, peak, rise, noise));
+        let (end, peak, rise, noise) = measure_step(&d10, o, limit, c, f32::MIN);
+        steps.push((o, end, peak, rise, noise, limit));
     }
     if steps.is_empty() {
         return Vec::new();
@@ -1077,22 +1136,28 @@ fn cut_steps(x: &[f32], sr: f32, part: Part, c: &Cutter, lead_ms: usize) -> Vec<
     let median = peaks[peaks.len() / 2];
     steps
         .into_iter()
-        .filter(|&(o, end, peak, rise, noise)| {
+        .filter(|&(o, end, peak, rise, noise, _)| {
             o >= measurable
                 && end - o >= c.min_len_ms
                 && rise <= c.max_rise_ms
                 && peak > median - 10.0
                 && peak < median + 8.0
-                && peak - noise >= MIN_SNR_DB
+                && peak - noise >= RESCUE_MIN_SNR_DB
         })
-        .map(|(o, end, peak, _, _)| {
+        .map(|(o, end, peak, _, noise, limit)| {
             let range = o.saturating_sub(pad) * hop..(end * hop).min(x.len());
+            let mut stats = take_stats(&d10, o, end, peak, range.len() as f32 / sr);
+            stats.raw_floor_db = stats.floor_db;
             Cut {
-                stats: take_stats(&d10, o, end, peak, range.len() as f32 / sr),
+                stats,
                 range,
                 gait,
                 peak_db: peak,
                 floor_db: floor,
+                noise_db: noise,
+                onset: o * hop,
+                limit: (limit * hop).min(x.len()),
+                gate_at: None,
             }
         })
         .filter(|c| c.range.end > c.range.start)
@@ -1111,6 +1176,116 @@ fn noise_before(d10: &[f32], o: usize) -> f32 {
     before.get(before.len() / 10).copied().unwrap_or(-140.0)
 }
 
+/// The high-passed (60 Hz) level of `x` in dB at 1 ms hops: over 10 ms windows, and over 2 ms.
+fn envelopes(x: &[f32], sr: f32) -> (Vec<f32>, Vec<f32>) {
+    let hop = (sr * 0.001).max(1.0) as usize;
+    let mut hp = Biquad::highpass(sr, 60.0, 0.7);
+    let mut sq = vec![0.0f64; x.len() + 1];
+    for (i, v) in x.iter().enumerate() {
+        let y = hp.process(*v) as f64;
+        sq[i + 1] = sq[i] + y * y;
+    }
+    let env = |win_s: f32| -> Vec<f32> {
+        let w = ((win_s * sr) as usize).max(1);
+        (0..x.len() / hop)
+            .map(|k| {
+                let c = k * hop;
+                let lo = c.saturating_sub(w / 2);
+                let hi = (c + w / 2).min(x.len());
+                let ms = (sq[hi] - sq[lo]) / (hi - lo).max(1) as f64;
+                (10.0 * (ms + 1e-14).log10()) as f32
+            })
+            .collect()
+    };
+    (env(0.010), env(0.002))
+}
+
+/// Measure the step with onset `o` on the 10 ms envelope `d10` (1 ms hops), at most until
+/// `limit`: where it ends, its peak (dB), how long it takes to come within 6 dB of the peak
+/// (ms) and the noise before it (dB). It ends where it falls to just over the noise before
+/// it, or over `background` (dB) when that is louder (a cleaned recording's step ends where
+/// it sank into the background as recorded).
+fn measure_step(
+    d10: &[f32],
+    o: usize,
+    limit: usize,
+    c: &Cutter,
+    background: f32,
+) -> (usize, f32, usize, f32) {
+    let limit = limit.min(d10.len());
+    let peak = d10[o.min(limit)..(o + c.peak_ms).min(limit)]
+        .iter()
+        .fold(f32::MIN, |m, v| m.max(*v));
+    // The step is over once the envelope has fallen to just over the noise before it (or
+    // 40 dB under the peak) and stayed down for 50 ms (less for a paw or a hoof): what
+    // follows is the recording's hiss, wind or room, not the step.
+    let noise = noise_before(d10, o);
+    let quiet = (noise.max(background) + 6.0).max(peak - 40.0);
+    let mut end = limit;
+    let mut below = 0;
+    for (j, &level) in d10.iter().enumerate().take(limit).skip(o + 10) {
+        if level < quiet {
+            below += 1;
+            if below >= c.settle_ms {
+                end = j + 1 - below;
+                break;
+            }
+        } else {
+            below = 0;
+        }
+    }
+    let end = (end.max(o + c.min_len_ms.saturating_sub(10)) + 15).min(limit);
+    // Slow swells (a scrape, a shuffle) are not steps: nothing near the peak comes early.
+    // (A step's toe or compaction may well be louder than its heel.)
+    let rise = (o..(o + c.peak_ms).min(limit))
+        .position(|j| d10[j] >= peak - 6.0)
+        .unwrap_or(0);
+    (end, peak, rise, noise)
+}
+
+/// Measure a step that missed [`MIN_SNR_DB`] again on its cleaned recording (`d10`, the
+/// cleaned 10 ms envelope; `len` samples): the take it gives if it now passes and is still a
+/// step (as long and as sharp as one). It ends about where it falls back into the background
+/// as recorded ([`BELOW_BACKGROUND_DB`] under it), and a gate closes its tail there.
+fn rescue(d10: &[f32], n: &Cut, c: &Cutter, sr: f32, len: usize) -> Option<Cut> {
+    let hop = (sr * 0.001).max(1.0) as usize;
+    let (o, limit) = (n.onset / hop, n.limit / hop);
+    if o + 20 >= limit.min(d10.len()) {
+        return None;
+    }
+    // What of the step stood over the background as recorded, and a little under it that the
+    // cleaning brings out: further down it is as much the background's remains as step.
+    let background = n.noise_db - BELOW_BACKGROUND_DB;
+    let (end, peak, rise, noise) = measure_step(d10, o, limit, c, background);
+    if peak - noise < MIN_SNR_DB || end - o < c.min_len_ms || rise > c.max_rise_ms {
+        return None;
+    }
+    let pad = (ONSET_PAD_S * 1000.0) as usize;
+    let start = o.saturating_sub(pad);
+    let last = (o..end)
+        .rev()
+        .find(|&j| d10[j] >= background.max(noise + 10.0))
+        .unwrap_or(o);
+    let gate = ((last + 5).max(o + c.min_len_ms.saturating_sub(15)) - start) * hop;
+    let range = start * hop..(end * hop).min(len);
+    let mut stats = take_stats(d10, o, end, peak, range.len() as f32 / sr);
+    stats.cleaned = true;
+    stats.raw_floor_db = n.stats.floor_db;
+
+    stats.at_s = n.stats.at_s;
+    Some(Cut {
+        stats,
+        range,
+        gait: n.gait,
+        peak_db: peak,
+        floor_db: noise,
+        noise_db: noise,
+        onset: n.onset,
+        limit: n.limit,
+        gate_at: Some(gate),
+    })
+}
+
 /// [`TakeStats`] of the step from `o` to `end` (1 ms hops of the 10 ms envelope `d10`).
 fn take_stats(d10: &[f32], o: usize, end: usize, peak: f32, len_s: f32) -> TakeStats {
     let floor = noise_before(d10, o);
@@ -1122,6 +1297,7 @@ fn take_stats(d10: &[f32], o: usize, end: usize, peak: f32, len_s: f32) -> TakeS
         tail_db: 10.0 * (tail_ms + 1e-14).log10() - peak,
         len_40_s: (last - o) as f32 * 0.001,
         len_s,
+        ..Default::default()
     }
 }
 
@@ -1141,6 +1317,290 @@ pub fn loudness(x: &[f32], sr: f32) -> f32 {
         })
         .sum();
     (e / n as f64).sqrt() as f32
+}
+
+// ---------------------------------------------------------------- cleaning noisy recordings
+
+/// How far the cleanup turns a recording's background down at most, dB: a floor, so what is
+/// left is the same background quieter rather than the warbling ("musical noise") that
+/// subtracting all of it leaves.
+pub const DENOISE_FLOOR_DB: f32 = -20.0;
+
+/// How many times its estimated noise a bin's power must be before the cleanup lets any of it
+/// through: over-subtraction, so the estimate's own scatter doesn't poke through as tones.
+const OVERSUBTRACT: f32 = 2.0;
+
+/// How fast a bin's gain may close after a sound, dB/s: 20 dB in 50 ms, so a step's decay
+/// is kept whole.
+const DENOISE_RELEASE_DB_S: f32 = 400.0;
+
+/// Time constant of the power each bin's gain is decided on, s: a few frames, so one
+/// random peak of the noise doesn't open it, while a step's onset still does at once.
+const DENOISE_SMOOTH_S: f32 = 0.01;
+
+/// How much recording on each side of a moment its noise is estimated from, s.
+const NOISE_ESTIMATE_S: f32 = 1.5;
+
+/// The share of that recording, its quietest frames, the noise is estimated from.
+const NOISE_QUANTILE: f32 = 0.2;
+
+/// Clean a recording's background (rain, wind, room tone, hiss, distant traffic) out of the
+/// sample ranges `spans` of `x`; the rest is returned as it was. A short-time Fourier
+/// transform (frames of about 11 ms, half overlapped, square-root Hann windows, so what
+/// passes untouched comes back exactly; two frames per complex transform) and a Wiener-style
+/// gain per frequency bin: the noise in each bin is estimated from the quietest fifth of the
+/// frames within 1.5 s (the gaps between steps), a bin well over it passes, one near it is
+/// turned down to [`DENOISE_FLOOR_DB`] at most. The power a gain is decided on is smoothed
+/// over neighbouring bins and a few frames, and a gain closes at most 20 dB in 50 ms after a
+/// sound, so a step and its decay come through whole. Noise that is not steady (a bird's
+/// call, a voice, a car passing close) is not taken out.
+pub fn denoise(x: &[f32], sr: f32, spans: &[std::ops::Range<usize>]) -> Vec<f32> {
+    let mut y = x.to_vec();
+    let n = if sr > 64_000.0 { 1024 } else { 512 };
+    let hop = n / 2;
+    let bins = n / 2 + 1;
+    let mut fft = Fft::new(n);
+    let window: Vec<f32> = (0..n)
+        .map(|i| (0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / n as f32).cos()).sqrt())
+        .collect();
+    let floor = db(DENOISE_FLOOR_DB);
+    let smooth = (-(hop as f32) / (DENOISE_SMOOTH_S * sr)).exp();
+    let release = db(-DENOISE_RELEASE_DB_S * hop as f32 / sr);
+    // Bins under 60 Hz (handling rumble, already high-passed) don't decide what is quiet.
+    let low = ((60.0 / sr * n as f32) as usize).max(1);
+    let mut p = vec![0.0f32; bins];
+    for span in merge_spans(spans, x.len()) {
+        // The noise: frames (not overlapped) over the span and 1.5 s on each side, the
+        // quietest of those around each half second.
+        let e0 = span.start.saturating_sub((NOISE_ESTIMATE_S * sr) as usize);
+        let e1 = (span.end + (NOISE_ESTIMATE_S * sr) as usize).min(x.len());
+        let starts: Vec<usize> = (e0..(e1 + 1).saturating_sub(n)).step_by(n).collect();
+        if starts.len() < 8 {
+            continue;
+        }
+        let mut frames: Vec<(f32, f32, Vec<f32>)> = Vec::with_capacity(starts.len());
+        for pair in starts.chunks(2) {
+            let second = pair.get(1).map(|&b| &x[b..b + n]);
+            fft.forward_pair(&x[pair[0]..pair[0] + n], second, &window);
+            for (j, &at) in pair.iter().enumerate() {
+                fft.power(j, &mut p);
+                let energy = p[low..].iter().sum::<f32>();
+                frames.push(((at + n / 2) as f32, energy, p.clone()));
+            }
+        }
+        let block = (0.5 * sr) as usize;
+        let reach = NOISE_ESTIMATE_S * sr;
+        let centres: Vec<f32> = (span.start..span.end + block)
+            .step_by(block)
+            .map(|c| c as f32)
+            .collect();
+        let estimates: Vec<Vec<f32>> = centres
+            .iter()
+            .map(|&c| {
+                let mut near: Vec<&(f32, f32, Vec<f32>)> =
+                    frames.iter().filter(|f| (f.0 - c).abs() <= reach).collect();
+                near.sort_by(|a, b| a.1.total_cmp(&b.1));
+                let k = ((near.len() as f32 * NOISE_QUANTILE) as usize).clamp(1, near.len());
+                let mut mean = vec![0.0f32; bins];
+                for f in &near[..k] {
+                    for (m, v) in mean.iter_mut().zip(&f.2) {
+                        *m += v / k as f32;
+                    }
+                }
+                // Smoothed across five bins: the estimate of a few frames scatters.
+                (0..bins)
+                    .map(|b| {
+                        let (lo, hi) = (b.saturating_sub(2), (b + 3).min(bins));
+                        (mean[lo..hi].iter().sum::<f32>() / (hi - lo) as f32).max(1e-20)
+                    })
+                    .collect()
+            })
+            .collect();
+        // The span with a frame of recording on each side, so its overlap-add is complete.
+        let a = span.start.saturating_sub(n);
+        let b = (span.end + n).min(x.len());
+        let mut padded = vec![0.0f32; n];
+        padded.extend_from_slice(&x[a..b]);
+        padded.extend(std::iter::repeat_n(0.0, 2 * n));
+        let mut out = vec![0.0f32; padded.len()];
+        let mut held = vec![0.0f32; bins];
+        let mut last = vec![floor; bins];
+        let mut gains = [vec![floor; bins], vec![floor; bins]];
+        let starts: Vec<usize> = (0..padded.len() + 1 - n).step_by(hop).collect();
+        for pair in starts.chunks(2) {
+            let second = pair.get(1).map(|&s| &padded[s..s + n]);
+            fft.forward_pair(&padded[pair[0]..pair[0] + n], second, &window);
+            for (j, &f0) in pair.iter().enumerate() {
+                // Which noise estimate: between the two nearest half-second blocks.
+                let t = (a + f0 + n / 2) as f32 - n as f32;
+                let pos = ((t - centres[0]) / block as f32).clamp(0.0, (centres.len() - 1) as f32);
+                let i0 = pos.floor() as usize;
+                let i1 = (i0 + 1).min(centres.len() - 1);
+                let w = pos - i0 as f32;
+                fft.power(j, &mut p);
+                for (h, v) in held.iter_mut().zip(&p) {
+                    *h = *h * smooth + v * (1.0 - smooth);
+                }
+                let g = &mut gains[j];
+                for k in 0..bins {
+                    let (lo, hi) = (k.saturating_sub(1), (k + 2).min(bins));
+                    let power = held[lo..hi].iter().sum::<f32>() / (hi - lo) as f32;
+                    let noise = estimates[i0][k] * (1.0 - w) + estimates[i1][k] * w;
+                    let xi = (power / noise - OVERSUBTRACT).max(0.0);
+                    g[k] = (xi / (1.0 + xi)).max(last[k] * release).max(floor);
+                }
+                last.copy_from_slice(g);
+            }
+            fft.inverse_pair(&gains[0], &gains[1]);
+            for (j, &f0) in pair.iter().enumerate() {
+                // Square-root Hann twice, half overlapped, sums to 1.
+                let frame = if j == 0 { &fft.re } else { &fft.im };
+                for (o, (v, w)) in out[f0..f0 + n].iter_mut().zip(frame.iter().zip(&window)) {
+                    *o += v * w;
+                }
+            }
+        }
+        for (i, v) in y[span.clone()].iter_mut().enumerate() {
+            *v = out[n + span.start - a + i];
+        }
+    }
+    y
+}
+
+/// `spans` clipped to `0..len`, sorted and with overlapping ones joined.
+fn merge_spans(spans: &[std::ops::Range<usize>], len: usize) -> Vec<std::ops::Range<usize>> {
+    let mut s: Vec<std::ops::Range<usize>> = spans
+        .iter()
+        .map(|r| r.start.min(len)..r.end.min(len))
+        .filter(|r| r.end > r.start)
+        .collect();
+    s.sort_by_key(|r| r.start);
+    let mut out: Vec<std::ops::Range<usize>> = Vec::new();
+    for r in s {
+        match out.last_mut() {
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => out.push(r),
+        }
+    }
+    out
+}
+
+/// A radix-2 complex FFT of one size (a power of two), with its own buffers, used two real
+/// frames at a time (one as the real part, one as the imaginary).
+struct Fft {
+    n: usize,
+    /// cos and sin of -2πk/n for k < n/2.
+    twiddle: Vec<(f32, f32)>,
+    reverse: Vec<usize>,
+    re: Vec<f32>,
+    im: Vec<f32>,
+    scratch: (Vec<f32>, Vec<f32>),
+}
+
+impl Fft {
+    fn new(n: usize) -> Self {
+        assert!(n.is_power_of_two() && n >= 2);
+        let bits = n.trailing_zeros();
+        Self {
+            n,
+            twiddle: (0..n / 2)
+                .map(|k| {
+                    let a = -std::f64::consts::TAU * k as f64 / n as f64;
+                    (a.cos() as f32, a.sin() as f32)
+                })
+                .collect(),
+            reverse: (0..n)
+                .map(|i| i.reverse_bits() >> (usize::BITS - bits))
+                .collect(),
+            re: vec![0.0; n],
+            im: vec![0.0; n],
+            scratch: (vec![0.0; n], vec![0.0; n]),
+        }
+    }
+
+    /// Transform the buffers in place; `inverse` also divides by `n`.
+    fn run(&mut self, inverse: bool) {
+        let n = self.n;
+        let (re, im) = (&mut self.re, &mut self.im);
+        for i in 0..n {
+            let j = self.reverse[i];
+            if j > i {
+                re.swap(i, j);
+                im.swap(i, j);
+            }
+        }
+        let mut len = 2;
+        while len <= n {
+            let step = n / len;
+            let half = len / 2;
+            for start in (0..n).step_by(len) {
+                for k in 0..half {
+                    let (c, s) = self.twiddle[k * step];
+                    let s = if inverse { -s } else { s };
+                    let (a, b) = (start + k, start + k + half);
+                    let tr = re[b] * c - im[b] * s;
+                    let ti = re[b] * s + im[b] * c;
+                    re[b] = re[a] - tr;
+                    im[b] = im[a] - ti;
+                    re[a] += tr;
+                    im[a] += ti;
+                }
+            }
+            len *= 2;
+        }
+        if inverse {
+            let k = 1.0 / n as f32;
+            re.iter_mut().for_each(|v| *v *= k);
+            im.iter_mut().for_each(|v| *v *= k);
+        }
+    }
+
+    /// The spectra of `a` and `b` (zeros without), each windowed by `window`, together.
+    fn forward_pair(&mut self, a: &[f32], b: Option<&[f32]>, window: &[f32]) {
+        for i in 0..self.n {
+            self.re[i] = a[i] * window[i];
+            self.im[i] = b.map_or(0.0, |b| b[i] * window[i]);
+        }
+        self.run(false);
+    }
+
+    /// Bin `k`'s value in the spectrum of frame `j` (0 or 1) of the last [`Fft::forward_pair`].
+    #[inline]
+    fn bin(&self, j: usize, k: usize) -> (f32, f32) {
+        let m = (self.n - k) % self.n;
+        let (zr, zi, mr, mi) = (self.re[k], self.im[k], self.re[m], self.im[m]);
+        if j == 0 {
+            (0.5 * (zr + mr), 0.5 * (zi - mi))
+        } else {
+            (0.5 * (zi + mi), -0.5 * (zr - mr))
+        }
+    }
+
+    /// The power spectrum (bins 0..=n/2) of frame `j` of the last [`Fft::forward_pair`].
+    fn power(&self, j: usize, out: &mut [f32]) {
+        for (k, o) in out.iter_mut().enumerate() {
+            let (r, i) = self.bin(j, k);
+            *o = r * r + i * i;
+        }
+    }
+
+    /// Scale the two spectra of the last [`Fft::forward_pair`] by real gains per bin (0..=n/2)
+    /// and transform back: the first frame ends up in `re`, the second in `im`.
+    fn inverse_pair(&mut self, g0: &[f32], g1: &[f32]) {
+        let n = self.n;
+        let (mut yr, mut yi) = std::mem::take(&mut self.scratch);
+        for k in 0..n {
+            let kk = k.min(n - k);
+            let (ar, ai) = self.bin(0, k);
+            let (br, bi) = self.bin(1, k);
+            yr[k] = g0[kk] * ar - g1[kk] * bi;
+            yi[k] = g0[kk] * ai + g1[kk] * br;
+        }
+        std::mem::swap(&mut self.re, &mut yr);
+        std::mem::swap(&mut self.im, &mut yi);
+        self.scratch = (yr, yi);
+        self.run(true);
+    }
 }
 
 // ---------------------------------------------------------------- playing a take
@@ -1540,15 +2000,26 @@ mod tests {
         assert!(run.len() >= 7 && run.iter().all(|t| t.gait == Gait::Run));
     }
 
+    /// `x` with white hiss of amplitude `level` added.
+    fn hiss(x: &[f32], level: f32, seed: u64) -> Vec<f32> {
+        let mut rng = Noise::new(seed);
+        x.iter().map(|v| v + rng.white() * level).collect()
+    }
+
     #[test]
-    fn noisy_steps_are_left_out_and_takes_end_with_the_step() {
-        // The same steps over hiss only about 25 dB under them: no takes.
-        let mut rng = Noise::new(9);
-        let noisy: Vec<f32> = steps(8, 0.6, 7)
-            .iter()
-            .map(|v| v + rng.white() * 0.02)
-            .collect();
-        assert!(takes_from_recording("unlisted", "grass", &noisy, SR).is_empty());
+    fn noisy_steps_are_cleaned_or_left_out_and_takes_end_with_the_step() {
+        // The same steps over hiss about 23 dB under them: cleaned, they pass.
+        let noisy = hiss(&steps(8, 0.6, 7), 0.02, 9);
+        let takes = takes_from_recording("unlisted", "grass", &noisy, SR);
+        assert_eq!(takes.len(), 8);
+        for t in &takes {
+            assert!(t.stats.cleaned, "{:?}", t.stats);
+            assert!(t.stats.raw_floor_db > -MIN_SNR_DB + 5.0, "{:?}", t.stats);
+            assert!(t.stats.floor_db <= -MIN_SNR_DB, "{:?}", t.stats);
+        }
+        // Hiss 14 dB under the steps is too much of them to take out: no takes.
+        let noisier = hiss(&steps(8, 0.6, 7), 0.06, 9);
+        assert!(takes_from_recording("unlisted", "grass", &noisier, SR).is_empty());
         // Clean steps end where the step does, not at the next one.
         for t in &takes_from_recording("unlisted", "grass", &steps(8, 0.6, 7), SR) {
             assert!(t.stats.floor_db < -MIN_SNR_DB);
@@ -1576,6 +2047,74 @@ mod tests {
         for t in &hard {
             assert!(t.stats.len_s <= 0.37, "{:?}", t.stats);
         }
+    }
+
+    #[test]
+    fn the_fft_transforms_two_frames_and_back() {
+        let n = 64;
+        let mut rng = Noise::new(3);
+        let a: Vec<f32> = (0..n).map(|_| rng.white()).collect();
+        let b: Vec<f32> = (0..n).map(|_| rng.white()).collect();
+        let ones = vec![1.0; n];
+        let mut fft = Fft::new(n);
+        fft.forward_pair(&a, Some(&b), &ones);
+        // Each frame's power spectrum is that of a direct DFT.
+        for (j, x) in [&a, &b].into_iter().enumerate() {
+            let mut p = vec![0.0; n / 2 + 1];
+            fft.power(j, &mut p);
+            for (k, got) in p.iter().enumerate() {
+                let (mut re, mut im) = (0.0f64, 0.0f64);
+                for (i, v) in x.iter().enumerate() {
+                    let w = -std::f64::consts::TAU * (k * i) as f64 / n as f64;
+                    re += *v as f64 * w.cos();
+                    im += *v as f64 * w.sin();
+                }
+                let want = (re * re + im * im) as f32;
+                assert!(
+                    (got - want).abs() <= 1e-3 * want.max(1.0),
+                    "{j} {k} {got} {want}"
+                );
+            }
+        }
+        // Unit gains give both frames back; a gain of a half halves only its frame.
+        let g1 = vec![1.0; n / 2 + 1];
+        let half = vec![0.5; n / 2 + 1];
+        fft.inverse_pair(&g1, &half);
+        for i in 0..n {
+            assert!((fft.re[i] - a[i]).abs() < 1e-4 && (fft.im[i] - 0.5 * b[i]).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn denoising_takes_out_steady_noise_and_keeps_the_steps() {
+        let clean = steps(8, 0.6, 7);
+        let noisy = hiss(&clean, 0.02, 9);
+        let y = denoise(&noisy, SR, std::slice::from_ref(&(0..noisy.len())));
+        let rms = |x: &[f32], at: f32, len: f32| {
+            let r = &x[(at * SR) as usize..((at + len) * SR) as usize];
+            (r.iter().map(|v| v * v).sum::<f32>() / r.len() as f32).sqrt()
+        };
+        for k in 1..7 {
+            let at = 0.4 + k as f32 * 0.6;
+            // The step's first 40 ms within 1 dB of the noisy recording's.
+            let step = 20.0 * (rms(&y, at, 0.04) / rms(&noisy, at, 0.04)).log10();
+            assert!(step.abs() < 1.0, "step {k}: {step} dB");
+            // Between the steps, the hiss at least 15 dB down (the floor is 20).
+            let gap = 20.0 * (rms(&y, at - 0.15, 0.1) / rms(&noisy, at - 0.15, 0.1)).log10();
+            assert!(
+                (-21.0..-15.0).contains(&gap),
+                "gap before step {k}: {gap} dB"
+            );
+        }
+        // Outside the spans nothing changes.
+        let part = denoise(
+            &noisy,
+            SR,
+            std::slice::from_ref(&(SR as usize..2 * SR as usize)),
+        );
+        assert_eq!(part[..SR as usize], noisy[..SR as usize]);
+        assert_eq!(part[2 * SR as usize..], noisy[2 * SR as usize..]);
+        assert!(rms(&part, 1.45, 0.1) < 0.3 * rms(&noisy, 1.45, 0.1));
     }
 
     #[test]
@@ -1879,6 +2418,31 @@ mod tests {
         // Tile borrows concrete's; nothing for snow.
         assert!(bank.takes("tile").is_some());
         assert!(bank.takes("snow").is_none());
+    }
+
+    #[test]
+    fn cleaned_takes_only_fill_in_where_clean_ones_are_scarce() {
+        let dir = std::env::temp_dir().join(format!("engine_audio_clean_{}", std::process::id()));
+        let noisy = hiss(&steps(8, 0.6, 51), 0.02, 52);
+        let wav = |path: &str, x: &[f32]| {
+            crate::wav::write_wav(&dir.join(path), x, 1, SR as u32).unwrap();
+        };
+        // Grass has 30 clean takes and a noisy recording; mud only the noisy recording.
+        wav("grass/a.wav", &steps(15, 0.6, 53));
+        wav("grass/b.wav", &steps(15, 0.6, 54));
+        wav("grass/noisy.wav", &noisy);
+        wav("mud/noisy.wav", &noisy);
+        let bank = SampleBank::load(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let grass = &bank.takes("grass").unwrap().takes;
+        assert_eq!(grass.len(), 30);
+        assert!(grass.iter().all(|t| !t.stats.cleaned));
+        let mud = &bank.takes("mud").unwrap().takes;
+        assert_eq!(mud.len(), 8);
+        assert!(
+            mud.iter()
+                .all(|t| t.stats.cleaned && t.stats.floor_db <= -MIN_SNR_DB)
+        );
     }
 
     #[test]

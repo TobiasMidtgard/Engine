@@ -14,7 +14,8 @@
 //! `horse_<surface>_{before,after,ab}.wav` (10 hooves of its 500 kg horse at 1.7 m/s).
 //! Without the fetched recordings "after" is the synthesis too. `--takes` also writes every
 //! take of each surface (`takes_<surface>.wav`, `takes_paws_<ground>.wav`, ...), lists them
-//! and writes each one's noise floor, tail level and length (`takes.csv`); `--dir` reads the
+//! and writes each one's noise floor, tail level, length, where it was in its recording and
+//! whether it was cleaned (`takes.csv`); `--dir` reads the
 //! recordings from another folder than `assets/fetched/audio` (with `footsteps`, `paws` and
 //! `hooves` in it).
 
@@ -179,13 +180,23 @@ fn main() {
             .iter()
             .flat_map(|f| bank.sets(*f).iter().map(move |(k, v)| (named(*f, k), v)))
             .collect();
-        let mut csv = String::from("surface,source,gait,floor_db,tail_db,len_40_s,len_s\n");
+        let mut csv = String::from(
+            "surface,source,gait,floor_db,tail_db,len_40_s,len_s,at_s,cleaned,raw_floor_db\n",
+        );
         for (name, set) in &all_sets {
             for t in &set.takes {
                 let s = t.stats;
                 csv += &format!(
-                    "{name},{},{:?},{:.1},{:.1},{:.3},{:.3}\n",
-                    t.source, t.gait, s.floor_db, s.tail_db, s.len_40_s, s.len_s
+                    "{name},{},{:?},{:.1},{:.1},{:.3},{:.3},{:.3},{},{:.1}\n",
+                    t.source,
+                    t.gait,
+                    s.floor_db,
+                    s.tail_db,
+                    s.len_40_s,
+                    s.len_s,
+                    s.at_s,
+                    s.cleaned,
+                    s.raw_floor_db
                 );
             }
         }

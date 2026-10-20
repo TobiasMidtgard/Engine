@@ -1,8 +1,8 @@
 # Owner: Audio and footsteps. Recorded footstep takes for engine_audio (crates/audio).
 # Format and rules: AGENTS.md, "Art and large files". Fetch with `cargo run -p fetch-assets -- audio`.
 # Freesound previews (Ogg Vorbis). Without them every footstep is synthesized; with them
-# engine_audio::samples cuts each recording into single-step takes. Paws (audio/paws/<ground>/)
-# and hooves (audio/hooves/<ground>/) have none yet: no recording found was clean enough.
+# engine_audio::samples cuts each recording into single-step takes (cleaning the background out
+# of those that need it). Paws are in audio/paws/<ground>/, hooves in audio/hooves/<ground>/.
 
 # Mountain boots on grass: 19 walking and 22 running steps, then jumps, scrapes and scuffs (Rode NTG4+).
 [[file]]
@@ -291,3 +291,239 @@ sha256 = "741893b1e44b462d591602cce9ccc7b8a5e3fe508ab543ffb57c18cbd671c92f"
 license = "CC-BY-4.0"
 source = "https://freesound.org/people/VlatkoBlazek/sounds/260979/"
 author = "VlatkoBlazek"
+
+# Round 3: recordings whose steps pass the noise bar once cleaned (engine_audio::samples::denoise).
+
+# Footsteps in squelchy mud. Credit: "Footsteps, Muddy, A.wav" by InspectorJ (www.jshaw.co.uk) of Freesound.org.
+[[file]]
+path = "audio/footsteps/mud/inspectorj_328166.ogg"
+url = "https://cdn.freesound.org/previews/328/328166_5121236-hq.ogg"
+sha256 = "45adb82888b843cae39dae8f52aacffd81f8dc4a9ec92d864c5a0edf0fdc4ac3"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/InspectorJ/sounds/328166/"
+author = "InspectorJ (www.jshaw.co.uk)"
+
+# Footsteps in squelchy mud. Credit: "Footsteps, Muddy, D.wav" by InspectorJ (www.jshaw.co.uk) of Freesound.org.
+[[file]]
+path = "audio/footsteps/mud/inspectorj_329603.ogg"
+url = "https://cdn.freesound.org/previews/329/329603_5121236-hq.ogg"
+sha256 = "6ec285c249df879b9016c86edbcd266ca3265c4394b8e71d0d6fef1b1f9ef566"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/InspectorJ/sounds/329603/"
+author = "InspectorJ (www.jshaw.co.uk)"
+
+# Footsteps in watery mud. Credit: "Footsteps, Muddy, E.wav" by InspectorJ (www.jshaw.co.uk) of Freesound.org.
+[[file]]
+path = "audio/footsteps/mud/inspectorj_339325.ogg"
+url = "https://cdn.freesound.org/previews/339/339325_5121236-hq.ogg"
+sha256 = "5c27ed51ec707848e9c905cbf79229fae40e10905f86a267cb4d61d928213ee1"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/InspectorJ/sounds/339325/"
+author = "InspectorJ (www.jshaw.co.uk)"
+
+# Footsteps in squelchy mud. Credit: "Footsteps, Muddy, B.wav" by InspectorJ (www.jshaw.co.uk) of Freesound.org.
+[[file]]
+path = "audio/footsteps/mud/inspectorj_328165.ogg"
+url = "https://cdn.freesound.org/previews/328/328165_5121236-hq.ogg"
+sha256 = "27386d025988a1dbca76db857f8a4e79516595703d253e54b09a45383a5fb5bf"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/InspectorJ/sounds/328165/"
+author = "InspectorJ (www.jshaw.co.uk)"
+
+# Heavy footsteps on soft ground and through mud (96 kHz).
+[[file]]
+path = "audio/footsteps/mud/yoyodaman234_349077.ogg"
+url = "https://cdn.freesound.org/previews/349/349077_2792951-hq.ogg"
+sha256 = "26f193a5ff5dcfd9d70d84d03818420ff1db7bea9e3b901f9dc8fa0df62366b0"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Yoyodaman234/sounds/349077/"
+author = "Yoyodaman234"
+
+# Walking boots in mud and twigs (MKH416).
+[[file]]
+path = "audio/footsteps/mud/omnisounddesign_334695.ogg"
+url = "https://cdn.freesound.org/previews/334/334695_5903232-hq.ogg"
+sha256 = "19e5cd4addb414118f990c159a0a0f0b9e5c2e96925f79ee2ae59054640c4f79"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/omnisounddesign/sounds/334695/"
+author = "omnisounddesign"
+
+# Footsteps through a very muddy, wet forest floor.
+[[file]]
+path = "audio/footsteps/mud/breviceps_508179.ogg"
+url = "https://cdn.freesound.org/previews/508/508179_9159316-hq.ogg"
+sha256 = "70ab6d0250ae167f09179fd5df5ded00d4b4891446fd843dfa415e982cfb34db"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Breviceps/sounds/508179/"
+author = "Breviceps"
+
+# Splashing through small puddles and mud. Credit: "Footsteps, Puddles, D.wav" by InspectorJ (www.jshaw.co.uk) of Freesound.org.
+[[file]]
+path = "audio/footsteps/water/inspectorj_329606.ogg"
+url = "https://cdn.freesound.org/previews/329/329606_5121236-hq.ogg"
+sha256 = "21012adcf305537907d44a259981d64322e8297aabdf5ebf61898cb8aa92f7be"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/InspectorJ/sounds/329606/"
+author = "InspectorJ (www.jshaw.co.uk)"
+
+# Footsteps in water (Foley & Atmos pack).
+[[file]]
+path = "audio/footsteps/water/phantastonia_623581.ogg"
+url = "https://cdn.freesound.org/previews/623/623581_5137631-hq.ogg"
+sha256 = "6ffbcd981e31eaf8ef385b8cd21f1086ec8aedf77b204ccdd260139d51d58c38"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/phantastonia/sounds/623581/"
+author = "phantastonia"
+
+# Footsteps splashing in small puddles and some mud. Credit: "Footsteps, Puddles, A.wav" by InspectorJ (www.jshaw.co.uk) of Freesound.org.
+[[file]]
+path = "audio/footsteps/water/inspectorj_328168.ogg"
+url = "https://cdn.freesound.org/previews/328/328168_5121236-hq.ogg"
+sha256 = "a1164dabfad4c21e38b7d5655b3c8c3c313bd48245bad14b825b0c6a0ec30fb6"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/InspectorJ/sounds/328168/"
+author = "InspectorJ (www.jshaw.co.uk)"
+
+# Walking and sloshing through a riverbed.
+[[file]]
+path = "audio/footsteps/water/cvltiv8r_803676.ogg"
+url = "https://cdn.freesound.org/previews/803/803676_2520418-hq.ogg"
+sha256 = "73cd21d927c1da967391518fbdbec7b225c1de02b09fe3f18fac853d17a81d26"
+license = "CC0-1.0"
+source = "https://freesound.org/people/CVLTIV8R/sounds/803676/"
+author = "CVLTIV8R"
+
+# Even-tempo footsteps on sand.
+[[file]]
+path = "audio/footsteps/sand/martinimeniscus_164459.ogg"
+url = "https://cdn.freesound.org/previews/164/164459_2320755-hq.ogg"
+sha256 = "eae29b5a290c70285fc85bfc8b7bcaf899a1633e7f15ae234346c79be2fdcfa9"
+license = "CC0-1.0"
+source = "https://freesound.org/people/martinimeniscus/sounds/164459/"
+author = "martinimeniscus"
+
+# Footsteps on dry coarse sand on a forest path.
+[[file]]
+path = "audio/footsteps/sand/trond_berntsen_621186.ogg"
+url = "https://cdn.freesound.org/previews/621/621186_2480839-hq.ogg"
+sha256 = "cbb9cf7548234fdb01f13374cd5dff99daa21f524a17c4f67a0f96e9d76b94e7"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/Trond_Berntsen/sounds/621186/"
+author = "Trond_Berntsen"
+
+# Slow footsteps in deep dirt or sand, close-miked.
+[[file]]
+path = "audio/footsteps/sand/craigsmith_480668.ogg"
+url = "https://cdn.freesound.org/previews/480/480668_2524442-hq.ogg"
+sha256 = "9e8263414f50dbc618ebafc9ee180786f9d867ea1a3a8719c766c6d5b9d265c1"
+license = "CC0-1.0"
+source = "https://freesound.org/people/craigsmith/sounds/480668/"
+author = "craigsmith"
+
+# A dog's claws clattering on a wooden floor.
+[[file]]
+path = "audio/paws/hard/djburnham_76776.ogg"
+url = "https://cdn.freesound.org/previews/76/76776_906700-hq.ogg"
+sha256 = "a8175210b78e0199b56c1c6322cab3a70973dc7b1fe149040139df1d13ef7103"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/DJ%20Burnham/sounds/76776/"
+author = "DJ Burnham"
+
+# A dog's footsteps on a hardwood floor.
+[[file]]
+path = "audio/paws/hard/jocelynlopez_635117.ogg"
+url = "https://cdn.freesound.org/previews/635/635117_13907218-hq.ogg"
+sha256 = "84619eebed50580abaeb78f8ce92f6166c21fb31818dc40c9b0cd52aa6e6940b"
+license = "CC0-1.0"
+source = "https://freesound.org/people/jocelynlopez/sounds/635117/"
+author = "jocelynlopez"
+
+# A dog walking towards the microphone on a vinyl floor (96 kHz).
+[[file]]
+path = "audio/paws/hard/anthousai_398731.ogg"
+url = "https://cdn.freesound.org/previews/398/398731_5923045-hq.ogg"
+sha256 = "74a9efb01ff3b5908ef4e64e6cce09a1d24cf0c4b0096501075e3ca28c95adae"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Anthousai/sounds/398731/"
+author = "Anthousai"
+
+# A dog walking on a wooden floor.
+[[file]]
+path = "audio/paws/hard/wdomino_517130.ogg"
+url = "https://cdn.freesound.org/previews/517/517130_5026978-hq.ogg"
+sha256 = "c2414c9d2fe6b4a2e06043c4ba9cbbf87deacb3210cd5f71076b61b747fcf493"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Wdomino/sounds/517130/"
+author = "Wdomino"
+
+# A dog running on a wooden floor.
+[[file]]
+path = "audio/paws/hard/nicola_461521.ogg"
+url = "https://cdn.freesound.org/previews/461/461521_9678908-hq.ogg"
+sha256 = "9ed930794941e0801a5e230e63cf7fbc9c98529f9701809b548eebeb2413e79c"
+license = "CC0-1.0"
+source = "https://freesound.org/people/15GPanskaBokstefflova_Nicola/sounds/461521/"
+author = "15GPanskaBokstefflova_Nicola"
+
+# Foley of a small-to-medium animal's footsteps.
+[[file]]
+path = "audio/paws/soft/ienba_658429.ogg"
+url = "https://cdn.freesound.org/previews/658/658429_9616576-hq.ogg"
+sha256 = "a3bd624a3b36fdf23b0b88bbd885766d0aeb4c9bef196a21743707e494c7298f"
+license = "CC0-1.0"
+source = "https://freesound.org/people/IENBA/sounds/658429/"
+author = "IENBA"
+
+# A small animal stepping on grass.
+[[file]]
+path = "audio/paws/soft/jigglesticks_635012.ogg"
+url = "https://cdn.freesound.org/previews/635/635012_10592956-hq.ogg"
+sha256 = "0a434e914bdf635fda4557a3930dbaca2678fa1dd79df2d9238094f241c09464"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/JiggleSticks/sounds/635012/"
+author = "JiggleSticks"
+
+# A horse trotting along a rural road, passing left to right.
+[[file]]
+path = "audio/hooves/hard/oscar_de_avila_139325.ogg"
+url = "https://cdn.freesound.org/previews/139/139325_2228523-hq.ogg"
+sha256 = "111419f116be9501bd3e7111ab9a63f45578a1e27c2ee77332bf1e44fe140902"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Oscar%20de%20%C3%81vila/sounds/139325/"
+author = "Oscar de Ávila"
+
+# A horse trotting past on pavement, hooves clattering.
+[[file]]
+path = "audio/hooves/hard/ylearkisto_369533.ogg"
+url = "https://cdn.freesound.org/previews/369/369533_4415905-hq.ogg"
+sha256 = "79f45a73558382516b2461d65b31747808409ece358935be6ff5685d38196f16"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/YleArkisto/sounds/369533/"
+author = "YleArkisto"
+
+# Horses walking back to the stables after a race (96 kHz).
+[[file]]
+path = "audio/hooves/hard/zabuhailo_166099.ogg"
+url = "https://cdn.freesound.org/previews/166/166099_2580450-hq.ogg"
+sha256 = "c77605e6a5b439cb2301ec97d5543faa4c14f59ba7d4a9ae93871272a3c1336e"
+license = "CC-BY-4.0"
+source = "https://freesound.org/people/Zabuhailo/sounds/166099/"
+author = "Zabuhailo"
+
+# A horse walking on an interior wooden floor.
+[[file]]
+path = "audio/hooves/wood/craigsmith_437102.ogg"
+url = "https://cdn.freesound.org/previews/437/437102_2524442-hq.ogg"
+sha256 = "d0235a44c68ab63bfb81cc84d22839a215abfa8ba1e42c500fe912d906d2d7bd"
+license = "CC0-1.0"
+source = "https://freesound.org/people/craigsmith/sounds/437102/"
+author = "craigsmith"
+
+# Horses walking on a gravel road.
+[[file]]
+path = "audio/hooves/gravel/ornery_233345.ogg"
+url = "https://cdn.freesound.org/previews/233/233345_737995-hq.ogg"
+sha256 = "a1559ea505ade723742ae3e38e1bfbd139d3f13cac8a2e36762943c11647738e"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Ornery/sounds/233345/"
+author = "Ornery"

@@ -18,16 +18,19 @@ the same grass sounds different wet, frozen, snowed on or burnt.
   speed). The ground's state (`SurfaceLayers`) changes them: wet ground
   squelches, puddles splash, snow cover crunches over whatever is under it, burnt ground
   crackles, mud freezes hard below 0 °C, and wading drags through water.
-- **Recorded footsteps** on most trail grounds (grass, snow, ice, gravel, wood, metal,
-  concrete, sand, leaves) and rock: CC0 and CC-BY field recordings from Freesound
-  (`assets/manifests/audio.toml`, about 19 MB) are cut into about 310 single-step takes at
-  startup (on a background thread), walking and running ones apart, each levelled to the
-  loudness of the synthesized step it replaces. A take ends where the step does (back at the
-  recording's noise, at most 0.35 s on hard ground, where its scuff fades out, and 0.6 s on
-  soft); jumps, scrapes, odd steps, steps less than 35 dB over the recording's hiss and steps
-  without 0.3 s of recording before them to measure it in are left out, and a ground with
-  fewer than 8 clean takes is synthesized: today mud and puddles (every recording found has
-  too much background or hiss).
+- **Recorded footsteps** on every trail ground (grass, mud, snow, ice, gravel, wood, metal,
+  concrete, sand, leaves, puddles) and rock: CC0 and CC-BY field recordings from Freesound
+  (`assets/manifests/audio.toml`, about 39 MB) are cut into about 730 single-step takes at
+  startup (on a background thread, about 4.5 s), walking and running ones apart, each
+  levelled to the loudness of the synthesized step it replaces. A take ends where the step
+  does (back at the recording's noise, at most 0.35 s on hard ground, where its scuff fades
+  out, and 0.6 s on soft); jumps, scrapes, odd steps and steps without 0.3 s of recording
+  before them to measure the noise in are left out. A step needs to stand 35 dB over that
+  noise; one 20-35 dB over it has the recording around it cleaned first (`samples::denoise`:
+  an STFT Wiener gain from the noise of the quietest frames nearby, at most 20 dB down, its
+  tail gated where the step sinks back into the background) and must pass the 35 dB on the
+  cleaned recording. Cleaned takes only fill in where clean ones are scarce (mud, puddles,
+  sand, paws and hooves); a ground with fewer than 8 takes is synthesized.
   A step plays a random take (never one of the last few), slightly re-pitched and
   re-levelled, louder and brighter for heavier and faster steps, duller when wet; the
   synthesis adds only what the recording lacks (rain's squelch, a puddle's splash, a heavy
@@ -35,10 +38,11 @@ the same grass sounds different wet, frozen, snowed on or burnt.
   are no takes (other grounds, wheels, falling bodies, CI). Deep snow plays snow whatever
   is under it. Rock has its own takes too; tile and asphalt borrow concrete's, stone rock's
   and planks wood's. Paws and hooves have folders of their own (`paws/`, `hooves/`, by
-  ground kind: hard, soft, water; hard, wood, gravel, dirt, water), cut shorter, and play
-  their takes the same way once one has 8 clean ones; none has yet, so they are
-  synthesized. A walker with `RecordedSteps { enabled: false }` always synthesizes its
-  steps.
+  ground kind: hard, soft, water; hard, wood, gravel, dirt, water), cut shorter: a dog's
+  paws play takes on hard and soft ground, a horse's hooves on hard ground, wood and gravel;
+  paws in water and hooves on dirt and in water are synthesized. A hoof (recorded or not)
+  is peak-limited, so a horse is 5-9 dB louder than a person's step but never clips.
+  A walker with `RecordedSteps { enabled: false }` always synthesizes its steps.
 - **Impacts** from physics contacts (what hit what, how hard), **splashes** from
   `WaterSplash`, **explosions** from `WorldImpulse`, **bullet whizzes and supersonic cracks**
   from `ProjectileTrace` passing near the listener, **whooshes** from melee, dash and spell
