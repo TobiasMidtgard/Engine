@@ -16,7 +16,9 @@ character's own speed and reactions.
   earlier, with the double jump back), and ladders (anything with the world's `Climbable`:
   walk or jump into one to grab it, climb with forward and back, faster sprinting, slide down
   holding crouch, step off over the top onto its exit or off the bottom, kick off with jump;
-  a moving ladder carries its climber, and the rungs ring under each step), and vaults (over
+  a moving ladder carries its climber, something overhead such as a closed hatch holds the
+  climber on the ladder until it opens, and the rungs ring under each step; a `Climbable`'s
+  line is where the body's axis goes, its rungs 0.2 m in front of it), and vaults (over
   a railing, barrier or crate up to the profile's `vault_max_height` and `vault_max_depth`
   at a sprint, on a jump or running into it in the air: the body rises just enough to clear
   it, goes over with the left hand planted on its top and drops off the far side keeping
@@ -248,7 +250,9 @@ API functions: `movement.status`, `movement.set_tempo` (`{"entity": "Player", "l
 (`{"round": "Blink" | "Focus" | "Pack" | null}`: restart the duel on that round and keep
 replaying it, or `null` to go back to cycling; tour stops use it to catch a chosen moment),
 `movement.climber` (restart the ledge climber's loop), `movement.ladder` (restart the
-ladder climber's loop), `movement.vaulter` (restart the vaulter's run), `movement.grappler`
+ladder climber's loop), `movement.ladder_guest` (`{"near": [x, y, z]}` or nothing: send a
+pilot up and down the ladder nearest that point or the active camera, any `Climbable` from
+any module, on a loop), `movement.vaulter` (restart the vaulter's run), `movement.grappler`
 (restart the
 grappler's loop), `movement.rider` (restart the freight rider's loop with the car about to
 pull out).
@@ -264,7 +268,9 @@ jump letting go of it with the double jump back, zip lines being faster downhill
 uphill, a rider moving with its line, climbing a ladder onto a roof and grabbing it again
 from the top to climb down, rungs ringing on metal, sliding down it and kicking off it,
 catching it out of a jump, a moving ladder carrying its climber and one that goes dropping
-it, sprinting over a low barrier without slowing down, a running jump vaulting where a run
+it, climbing up through a roof hatch over its header onto the deck (and, on the real physics
+backend, back down and waiting under a closed hatch), a ladder guest looping any ladder,
+sprinting over a low barrier without slowing down, a running jump vaulting where a run
 does not, a jump too early for the vault vaulting out of the air, deep or tall obstacles and
 drops beyond not being vaulted, wall-running on a wall that slides away and jumping off it with its
 speed, hanging from a rising, sliding ledge and climbing onto it, a hook riding a moving roof,
