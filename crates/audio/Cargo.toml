@@ -20,6 +20,8 @@ serde.workspace = true
 serde_json.workspace = true
 crossbeam-channel.workspace = true
 cpal = { version = "0.18", optional = true }
+# Decodes the recorded footstep takes (Freesound previews are Ogg Vorbis). Pure Rust.
+lewton = "0.10"
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 cpal = "0.18"
