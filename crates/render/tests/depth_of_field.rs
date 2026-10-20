@@ -680,6 +680,25 @@ fn focus_m(app: &App) -> f64 {
         .unwrap_or(f64::NAN)
 }
 
+/// Updates `app` until it has a focus reading measured in the `n`th frame or later after a change
+/// just made (the reading comes back from the GPU a varying number of frames late, more on a slow
+/// machine), and returns it with the frame it was measured in.
+fn focus_from_frame(app: &mut App, n: u64) -> (f64, u64) {
+    for k in 1..=n + 60 {
+        app.update();
+        let lag = app
+            .world
+            .resource::<Diagnostics>()
+            .get("render.dof_focus_lag_frames");
+        if let Some(lag) = lag
+            && k >= n + lag as u64
+        {
+            return (focus_m(app), k - lag as u64);
+        }
+    }
+    panic!("no focus reading from frame {n} or later after the change");
+}
+
 /// A checkerboard 1 m square `distance` m in front of the camera, cut down the middle by a slit
 /// a few pixels wide with nothing (sky) behind it, which the autofocus window straddles.
 fn slit_board(app: &mut App, distance: f64) -> [Entity; 2] {
@@ -721,7 +740,7 @@ fn autofocus_finds_the_object_at_the_center_past_a_gap() {
     if gpu_missing(&app) {
         return;
     }
-    let focus = focus_m(&app);
+    let (focus, _) = focus_from_frame(&mut app, 1);
     let img = shoot(&mut app, "autofocus");
     let mut off = self::app();
     camera(&mut off, None);
@@ -756,22 +775,21 @@ fn autofocus_eases_toward_a_new_distance_and_snaps_after_a_cut() {
     if gpu_missing(&app) {
         return;
     }
-    let settled = focus_m(&app);
+    let (settled, _) = focus_from_frame(&mut app, 1);
     // The subject steps back to 10 m: the focus follows over a fraction of a second.
     for b in boards {
         app.world.get_mut::<Transform>(b).unwrap().translation.z -= 5.0;
     }
-    app.update_n(4);
-    let easing = focus_m(&app);
+    let (easing, easing_frame) = focus_from_frame(&mut app, 4);
     app.update_n(60);
     let followed = focus_m(&app);
     // The camera cuts 6 m back: the focus jumps to the subject's new distance.
     app.world.get_mut::<Transform>(cam).unwrap().translation.z += 6.0;
-    app.update_n(3);
-    let after_cut = focus_m(&app);
+    let (after_cut, cut_frame) = focus_from_frame(&mut app, 1);
     eprintln!(
-        "focus: settled {settled:.2} m, 4 frames after the subject stepped back {easing:.2} m, \
-         a second later {followed:.2} m, 3 frames after the cut {after_cut:.2} m"
+        "focus: settled {settled:.2} m, {easing_frame} frames after the subject stepped back \
+         {easing:.2} m, a second later {followed:.2} m, {cut_frame} frames after the cut \
+         {after_cut:.2} m"
     );
     assert!((settled - 5.0).abs() < 0.15, "settled at {settled:.2} m");
     assert!(

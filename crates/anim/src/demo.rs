@@ -1,11 +1,11 @@
 //! The animation paddock: a showcase of every animation feature, spawned around one point.
 //!
 //! * **Muscle stage**: an athlete swings a sledgehammer (arms, shoulders and back tense on the
-//!   strike, then relax; veins show on the forearms; the ponytail whips), braces in a block,
-//!   and hits a double-biceps flex. Next to them, a man in a long-sleeved shirt goes up on
-//!   tiptoe to take hold of a lantern hanging from a beam: the sleeve bunches at the elbow as
-//!   the arm sweeps up, then rides up the straightened arm while the shirt pulls across his
-//!   back.
+//!   strike, then relax; veins show on the forearms; the ponytail whips), braces in a guard
+//!   with the handle across the face in both hands, and hits a double-biceps flex. Next to
+//!   them, a man in a long-sleeved shirt goes up on tiptoe to take hold of a lantern hanging
+//!   from a beam: the sleeve bunches at the elbow as the arm sweeps up, then rides up the
+//!   straightened arm while the shirt pulls across his back.
 //! * **Step course**: a walker climbs a ramp, crosses a deck, walks down stairs (feet planted
 //!   by foot IK), then runs back on the flat, leaning into the turns.
 //! * **Horse track**: a horse walks, trots, canters and gallops around an oval; its haunches
@@ -579,14 +579,26 @@ pub fn spawn_hammer(world: &mut World, person: Entity, near: DVec3) -> [Entity; 
         left: 0.0,
         right: 1.0,
     });
-    world.entity_mut(person).insert(ReachIk::new(vec![Reach {
-        target_bone: "hand_r".into(),
-        // The left wrist sits where the left fist closes around the handle's end.
-        target_offset: -dir * 0.11,
-        pole: Vec3::new(-0.5, -1.0, 0.3),
-        weight_curve: "grip".into(),
-        ..Reach::arm(0)
-    }]));
+    world.entity_mut(person).insert(ReachIk::new(vec![
+        Reach {
+            target_bone: "hand_r".into(),
+            // The left wrist sits where the left fist closes around the handle's end.
+            target_offset: -dir * 0.11,
+            pole: Vec3::new(-0.5, -1.0, 0.3),
+            weight_curve: "grip".into(),
+            ..Reach::arm(0)
+        },
+        Reach {
+            target_bone: "hand_r".into(),
+            // Blocking, the hands are spread along the handle, the left just below the head;
+            // its wrist sits below and behind the handle (in the block's right-hand frame)
+            // so the fist closes over it.
+            target_offset: GRIP + dir * 0.42 + Vec3::new(-0.07, 0.05, 0.015),
+            pole: Vec3::new(-0.6, -1.0, 0.2),
+            weight_curve: "guard".into(),
+            ..Reach::arm(0)
+        },
+    ]));
     ids
 }
 
@@ -930,9 +942,9 @@ pub const VIEWS: &[DemoView] = &[
     },
     DemoView {
         key: "paddock_block",
-        name: "Braced block, hammer on the shoulder",
-        eye: [-4.0, 1.75, 6.75],
-        target: [-2.65, 1.55, 5.4],
+        name: "Braced guard: the hammer handle across the face in both hands",
+        eye: [-4.6, 1.55, 7.7],
+        target: [-2.65, 1.15, 5.4],
         hour: 15.0,
         at: 4.82,
     },
@@ -1157,9 +1169,8 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         period: 11.0,
         steps: vec![
             DemoStep::trigger(0.5, "heavy_swing"),
-            DemoStep::param(3.6, "blocking", 1.0),
-            DemoStep::trigger(3.6, "block"),
-            DemoStep::param(6.4, "blocking", 0.0),
+            DemoStep::param(3.6, "hammer_guard", 1.0),
+            DemoStep::param(6.4, "hammer_guard", 0.0),
             DemoStep::trigger(7.6, "heavy_swing"),
         ],
         time: 0.0,

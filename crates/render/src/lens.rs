@@ -127,4 +127,9 @@ impl LensEffects {
     pub fn focus_distance_m(&self) -> Option<f32> {
         self.dof.as_ref().and_then(|d| d.focus_distance_m)
     }
+
+    /// How many frames ago that focus distance was measured.
+    pub fn focus_lag_frames(&self) -> Option<u64> {
+        self.dof.as_ref().and_then(|d| d.focus_lag_frames())
+    }
 }
