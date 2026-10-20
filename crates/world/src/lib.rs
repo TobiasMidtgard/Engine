@@ -21,13 +21,15 @@
 //! * **Module contracts** for the systems other modules build on, so each module can be ripped
 //!   out and replaced: [`physics`] (bodies, colliders, joints, character controller, queries,
 //!   plus a [`physics::conformance`] suite every backend must pass), [`animation`] (pose,
-//!   parameters, triggers, events, ragdoll, body requests), [`locomotion`] (move intent and
+//!   parameters, triggers, events, ragdoll, body requests), [`character`] (a person's look,
+//!   appearance requests, face controls), [`locomotion`] (move intent and
 //!   state, vehicle controls, ladders) and [`terrain`] (edits and change notifications).
 //!
 //! Units everywhere: meters, kilograms, seconds, °C, m/s.
 
 pub mod air;
 pub mod animation;
+pub mod character;
 pub mod environment;
 pub mod events;
 pub mod grid;
@@ -38,6 +40,10 @@ pub mod shift;
 pub mod terrain;
 
 pub use air::{AirSample, Atmospheres, BodyAtmosphere};
+pub use character::{
+    Appearance, AppearanceBodies, AppearanceRequest, CharacterQuality, FaceControls,
+    draws_appearances,
+};
 pub use environment::*;
 pub use events::*;
 pub use grid::{Blend, Grid2, Grid3};
@@ -199,6 +205,7 @@ impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         physics::register(app);
         animation::register(app);
+        character::register(app);
         locomotion::register(app);
         terrain::register(app);
         shift::register(app);
@@ -383,6 +390,10 @@ mod tests {
             "BodyRequest",
             "Climbable",
             "Exhausts",
+            "Appearance",
+            "AppearanceRequest",
+            "FaceControls",
+            "CharacterQuality",
         ] {
             assert!(
                 registry.component(name).is_some(),
