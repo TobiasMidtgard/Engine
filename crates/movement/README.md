@@ -17,7 +17,8 @@ character's own speed and reactions.
   walk or jump into one to grab it, climb with forward and back, faster sprinting, slide down
   holding crouch, step off over the top onto its exit or off the bottom, kick off with jump;
   a moving ladder carries its climber, something overhead such as a closed hatch holds the
-  climber on the ladder until it opens, and the rungs ring under each step; a `Climbable`'s
+  climber on the ladder, its head 0.45 m below it and clear of what drops when it is breached,
+  until it opens, and the rungs ring under each step; a `Climbable`'s
   line is where the body's axis goes, its rungs 0.2 m in front of it), and vaults (over
   a railing, barrier or crate up to the profile's `vault_max_height` and `vault_max_depth`
   at a sprint, on a jump or running into it in the air: the body rises just enough to clear
@@ -269,7 +270,7 @@ uphill, a rider moving with its line, climbing a ladder onto a roof and grabbing
 from the top to climb down, rungs ringing on metal, sliding down it and kicking off it,
 catching it out of a jump, a moving ladder carrying its climber and one that goes dropping
 it, climbing up through a roof hatch over its header onto the deck (and, on the real physics
-backend, back down and waiting under a closed hatch), a ladder guest looping any ladder,
+backend, back down), waiting a rung or two below a closed hatch until it opens, a ladder guest looping any ladder,
 sprinting over a low barrier without slowing down, a running jump vaulting where a run
 does not, a jump too early for the vault vaulting out of the air, deep or tall obstacles and
 drops beyond not being vaulted, wall-running on a wall that slides away and jumping off it with its

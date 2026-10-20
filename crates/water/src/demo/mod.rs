@@ -901,6 +901,36 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
         },
     ));
 
+    // A second wader fords the stream above the falls: its legs part the current, and the
+    // wake they make drifts downstream (the stream is as interactive as the tarn).
+    let ford = OUTLET * 34.0;
+    let across = Vec2::new(-OUTLET.y, OUTLET.x);
+    let ford_at = |k: f32| {
+        let p = ford + across * k;
+        at(p.x, tarn_height(p.x, p.y), p.y)
+    };
+    let e = spawn_prop(
+        commands,
+        "Stream wader",
+        Transform::from_translation(ford_at(-1.0) + DVec3::Y * WADER_HIP),
+        merged([(
+            props::wader(),
+            Mat4::from_translation(Vec3::Y * -WADER_HIP as f32),
+        )]),
+    );
+    commands.entity(e).insert(DemoRole::Wader {
+        from: ford_at(-1.0),
+        to: ford_at(1.0),
+        speed: 0.5,
+    });
+    // The stream only reaches its shins: they push the water, not its hips.
+    commands.spawn((
+        Name::new("Stream wader legs"),
+        Transform::from_translation(DVec3::Y * (0.1 - WADER_HIP)),
+        WaterInteractor::new(0.2).with_wake(1.5),
+        ChildOf(e),
+    ));
+
     // Logs that ride the stream over the falls into the pond.
     for k in 0..3 {
         let s = 31.0 + k as f32 * 2.5;

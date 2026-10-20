@@ -161,12 +161,15 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
     // Fog is smoke's soft, wide cousin: its noise is a few times larger, it stays solid where
     // it's thin (a fog bank's top is a soft surface, not wisps) and it doesn't rise.
     let fog = smoke.look.w;
-    let grain = mix(1.0, 5.0, fog);
+    // Volumes finer than half a meter hold small fires' thin wisps: smaller billows, and
+    // erosion that leaves thinner smoke standing (it would eat a campfire's wisp whole).
+    let fine = mix(clamp(cell / 0.5, 0.4, 1.0), 1.0, fog);
+    let grain = mix(1.0, 5.0, fog) * fine;
     let pixel_m = 2.0 / (frame.proj[1][1] * frame.viewport.y) * max(t0, 1.0);
     let detail = smoke.look.x * saturate(1.5 - pixel_m / (0.05 * grain));
     // Fine billows drift with the wind and rise a little.
     let drift = (frame.wind.xyz * 0.8 + vec3<f32>(0.0, 0.35 * (1.0 - fog), 0.0)) * (frame.time.x % 1000.0);
-    let half_sigma = mix(2.0, 0.06, fog);
+    let half_sigma = mix(2.0, 0.06, fog) * fine * fine;
 
     var transmittance = 1.0;
     var color = vec3(0.0);
@@ -203,13 +206,13 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
             var k = saturate((edge - cell * 3.0 * (lumps - 0.5)) / (cell * 5.0));
             if (detail > 0.0) {
                 // Erode: where the smoke is thin it breaks into round billows and wisps; dense
-                // cores keep their shape. `d` is how dense it is (σ = 2/m is halfway; for fog
-                // 0.06/m); `gaps`
-                // is high between billows; big lumps (`lumps`) erode less.
+                // cores keep their shape. `d` is how dense it is (σ = 2/m is halfway, less in
+                // fine volumes; for fog 0.06/m); `gaps` is high between billows; big lumps
+                // (`lumps`) erode less.
                 let bn = textureSampleLevel(detail_tex, linear_repeat, (tiling_pos(p) - drift * 1.3) / (BILLOW_TILE * grain), 0.0);
                 let gaps = 1.0 - (bn.g * 0.5 + bn.b * 0.3 + bn.a * 0.2);
                 let d = s.x / (s.x + half_sigma);
-                let e = saturate(gaps * 1.6 - 0.35) * mix(1.25, 0.7, lumps) * min(detail, 1.0) * mix(0.9, 0.55, fog);
+                let e = saturate(gaps * 1.6 - 0.35) * mix(1.25, 0.7, lumps) * min(detail, 1.0) * mix(0.9, 0.55, fog) * sqrt(fine);
                 k *= saturate((d - e) / max(1.0 - e, 1e-3)) / max(d, 1e-4);
                 crease = mix(1.0, mix(0.5, 1.15, 1.0 - gaps), min(detail, 1.0));
             }

@@ -181,7 +181,8 @@ impl WeatherPreset {
                 temperature_cap_c: -2.0,
                 humidity: 0.9,
                 pressure_offset_hpa: -8.0,
-                fog: 0.2,
+                // Light: the falling snow's own veil does most of the hiding.
+                fog: 0.08,
                 storm: 0.0,
             },
             WeatherPreset::Blizzard => Regime {

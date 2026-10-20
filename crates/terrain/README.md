@@ -183,13 +183,18 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   material) for every terrain, and keeps heightfield collider tiles around every focus
   point and under every dynamic body (awake or asleep, the nearest 64 away from a focus),
   so a crate dropped far off or a car driven by AI never falls through the ground.
+- **Where the woods are.** Installs the `ForestCover` provider: canopy cover (0..1) and needle
+  share at any point, by the same rules the shader paints its woods with (`forest.rs`; a
+  test fails when the shader's rules change without it), so the foliage module plants trees
+  where the ground shows forest. About 10 µs a lookup on open ground, 30 µs in woods (release).
+  `FOREST_MASK=1 terrain_shots ...` writes the cover under each view to lay over the shot.
 
 ## Contracts
 
 Reads: `GroundContact`, `TerrainEdit`, `SurfaceLayers`, `Weather`, `FocusPoints`,
 `SurfaceMaterials`, `RigidBody` (dynamic bodies, for their collider tiles).
 
-Writes: `Ground` (the query provider), `TerrainChanged`, static `Collider` heightfield tiles
+Writes: `Ground` and `ForestCover` (query providers), `TerrainChanged`, static `Collider` heightfield tiles
 (tagged `TerrainColliderTile`).
 
 Heightfield layout for physics: `heights[row * cols + col]`, rows along the tile's local +Z,

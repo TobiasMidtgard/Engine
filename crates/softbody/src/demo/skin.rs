@@ -33,8 +33,23 @@ pub struct SkinnedPart {
     pub key: String,
     pub material: MaterialRef,
     pub mesh: Option<Handle<Mesh>>,
+    /// Hair color painted on the scalp under a groom.
+    pub scalp: Option<ScalpPaint>,
     /// The owner's pose at the start of the latest fixed step.
     previous: Vec<BonePose>,
+}
+
+/// Hair color painted on the scalp under a groom, as games paint the scalp under their hair,
+/// so the gaps between strands show more hair instead of bare skin (or fiberglass). The
+/// region is a [`HairEmitter::Scalp`](crate::HairEmitter)'s, in the bind frame of `bone`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScalpPaint {
+    pub bone: usize,
+    pub center: Vec3,
+    pub radii: Vec3,
+    pub hairline: f32,
+    /// Multiplies the vertex color where hair covers the scalp.
+    pub tint: [f32; 3],
 }
 
 impl SkinnedPart {
@@ -45,7 +60,36 @@ impl SkinnedPart {
             key: key.to_string(),
             material: material.into(),
             mesh: None,
+            scalp: None,
             previous: Vec::new(),
+        }
+    }
+
+    pub fn with_scalp(mut self, paint: ScalpPaint) -> Self {
+        self.scalp = Some(paint);
+        self
+    }
+}
+
+/// Darken the template's vertex colors toward `paint.tint` where hair covers the scalp.
+fn paint_scalp(template: &SkinTemplate, paint: &ScalpPaint, vertices: &mut [Vertex]) {
+    let Some(bone) = template.bind.get(paint.bone) else {
+        return;
+    };
+    let to_bone = bone.rotation.conjugate();
+    let radii = paint.radii.max(Vec3::splat(0.01));
+    for v in vertices {
+        let local = to_bone * (Vec3::from(v.position) - bone.translation);
+        let d = (local - paint.center) / radii;
+        let len = d.length();
+        if !(1e-3..1.35).contains(&len) {
+            continue;
+        }
+        // Only the skin of the head itself, not the neck or shoulders below it.
+        let w =
+            crate::hair::scalp_cover(d / len, paint.hairline) * (1.0 - smoothstep(1.12, 1.35, len));
+        for (c, t) in v.color.iter_mut().zip(paint.tint) {
+            *c *= 1.0 + (t - 1.0) * w;
         }
     }
 }
@@ -168,7 +212,11 @@ pub fn skin_bodies(
         let handle = match part.mesh {
             Some(h) => h,
             None => {
-                let h = meshes.insert_keyed(&part.key, template.mesh());
+                let mut mesh = template.mesh();
+                if let Some(paint) = &part.scalp {
+                    paint_scalp(&template, paint, &mut mesh.vertices);
+                }
+                let h = meshes.insert_keyed(&part.key, mesh);
                 if let Some(skin) = library.skin(part.part) {
                     skins.0.insert(part.key.clone(), skin);
                 }
