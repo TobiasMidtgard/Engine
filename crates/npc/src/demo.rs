@@ -294,13 +294,17 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         (8.5, -6.0, 0.25),
         (-1.0, -9.5, 0.0),
         (13.0, 1.0, 1.4),
+        // Two barricades where the fight in the middle most often leaves someone down: cover
+        // for a mate to kneel behind.
+        (-8.5, -1.2, -0.1),
+        (8.0, 2.8, 0.1),
     ]
     .into_iter()
     .enumerate()
     {
         let e = solid(commands, o(x, z), low, yaw);
         // Ashlar walls and timber barricades, mixed.
-        let piece = if matches!(k, 1 | 3 | 6) {
+        let piece = if matches!(k, 1 | 3 | 6 | 7 | 8) {
             Piece::TimberWall
         } else {
             Piece::StoneWall(k as u32)
