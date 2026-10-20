@@ -48,6 +48,30 @@ fn eye_axis(a: vec3<f32>) -> vec3<f32> {
     return model_dir((skin_matrix(head, one, false) * vec4<f32>(d, 0.0)).xyz);
 }
 
+// An axis of the head's frame in camera-relative space (the eye's frame before the gaze).
+fn head_axis(a: vec3<f32>) -> vec3<f32> {
+    let head = vec4<u32>(pose.info.z, 0u, 0u, 0u);
+    let one = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    return model_dir((skin_matrix(head, one, false) * vec4<f32>(a, 0.0)).xyz);
+}
+
+// The eye sits deep in its socket under the lids and the brow, so outdoors it sees much less
+// of the sky than the cheek does and the upper lid shades it from a high sun. `h`: the point
+// in the head's frame (unit eye radius), `sun`: toward the sun in the head's frame. Returns
+// (sky seen, sun reaching).
+fn socket_light(h: vec3<f32>, sun: vec3<f32>) -> vec2<f32> {
+    // Under the upper lid, and into the corners.
+    let lid = smoothstep(0.05, 0.55, h.y) * 0.65 + smoothstep(0.5, 0.95, abs(h.x)) * 0.4;
+    // Brow, lids and nose hide much of the sky even in the middle of the eye.
+    let sky = (1.0 - lid) * 0.6;
+    // The upper lid's edge (with the lashes) stands about a third of a radius out from the eye:
+    // the higher the sun, the lower its shadow reaches.
+    let rise = max(sun.y, 0.0) / max(sun.z, 0.15);
+    let edge = 0.4 - 0.35 * rise;
+    let shade = smoothstep(edge - 0.1, edge + 0.1, h.y);
+    return vec2<f32>(sky, 1.0 - 0.85 * shade);
+}
+
 @vertex
 fn vs_eye(in: EyeIn) -> EyeOut {
     var out: EyeOut;
@@ -117,7 +141,7 @@ fn iris_color(uv: vec2<f32>, seed: f32) -> vec3<f32> {
 
 fn sclera_color(local: vec3<f32>, seed: f32) -> vec3<f32> {
     // Off-white: a sclera is never paper white (and reads as glowing if it is).
-    var c = vec3<f32>(0.64, 0.6, 0.56);
+    var c = vec3<f32>(0.6, 0.56, 0.52);
     // Warmer and greyer toward the back and the corners.
     let side = abs(local.x);
     c *= mix(1.0, 0.82, smoothstep(0.4, 0.95, side));
@@ -160,25 +184,36 @@ fn fs_eye(in: EyeOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         albedo = mix(albedo, iris, in_cornea * smoothstep(IRIS_RADIUS + 0.01, IRIS_RADIUS - 0.02, length(hit.xy)));
         under_n = normalize(mix(n, ez, in_cornea * 0.7));
     }
-    // Shadow of the lids and lashes over the top of the eye, and darker corners.
-    let lid = smoothstep(0.05, 0.55, local.y) * 0.65 + smoothstep(0.5, 0.95, abs(local.x)) * 0.4;
+    // Shadow of the socket, the lids and lashes over the eye, worked out in the head's frame
+    // (the lids don't turn with the gaze).
+    let h = gaze_turn(local, vec3<f32>(0.0), pose.gaze.x, pose.gaze.y, true);
+    let sun = frame.sun_dir.xyz;
+    let socket = socket_light(
+        h,
+        vec3<f32>(
+            dot(sun, head_axis(vec3<f32>(1.0, 0.0, 0.0))),
+            dot(sun, head_axis(vec3<f32>(0.0, 1.0, 0.0))),
+            dot(sun, head_axis(vec3<f32>(0.0, 0.0, 1.0))),
+        ),
+    );
     var s = default_surface();
     s.albedo = albedo;
     s.normal = under_n;
     s.roughness = 0.35;
     s.reflectance = 0.0;
-    s.occlusion = 1.0 - lid;
+    s.occlusion = socket.x;
     s.subsurface = 0.25;
-    var color = shade_surface(s, in.rel);
+    var color = shade_surface_shadowed(s, in.rel, socket.y);
     // The cornea and the tear film: a smooth coat over everything.
     var coat = default_surface();
     coat.albedo = vec3<f32>(0.0);
     coat.normal = n;
     coat.roughness = mix(0.16, 0.05, in_cornea);
-    // The wet sclera reflects less than the cornea, and the socket hides much of the sky.
-    coat.reflectance = mix(0.3, 0.6, in_cornea);
-    coat.occlusion = 1.0 - lid;
-    color += shade_surface(coat, in.rel);
+    // F0 of the tear film over the sclera (water, 2%) and of the cornea (index 1.376, 2.5%):
+    // any stronger and a bright sky veils the iris grey outdoors.
+    coat.reflectance = mix(0.35, 0.4, in_cornea);
+    coat.occlusion = socket.x;
+    color += shade_surface_shadowed(coat, in.rel, socket.y);
     return vec4<f32>(apply_fog(color, in.rel), 1.0);
 }
 
