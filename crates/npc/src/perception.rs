@@ -6,6 +6,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use engine_core::prelude::*;
+use engine_world::animation::AnimationParams;
 use engine_world::locomotion::{LocomotionMode, LocomotionState};
 use engine_world::physics::{CharacterController, PhysicsBackend, PhysicsQueries};
 use engine_world::{
@@ -31,6 +32,21 @@ pub struct Snapshot {
     pub blocking: bool,
     pub attacking: bool,
     pub vulnerable: bool,
+    /// Stamina as its mover reports it (0..1; dash charges for the player).
+    pub stamina: f32,
+    /// Changing magazines or reloading (its `AnimationParams` `reloading` above 0.5).
+    pub reloading: bool,
+}
+
+/// A mistake an enemy is caught in, for as long as it lasts: a window to punish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opening {
+    /// Recovering from a swing (a missed heavy one most of all), staggered or stumbling.
+    Recovering,
+    /// Reloading: it can't shoot back.
+    Reloading,
+    /// Out of stamina (no dash left to dodge with): it had some a moment ago, none now.
+    Spent,
 }
 
 /// Something an NPC knows about.
@@ -63,6 +79,25 @@ impl Known {
             .rev()
             .find(|s| s.time <= cutoff)
             .or_else(|| self.history.front())
+    }
+
+    /// The opening the NPC has had time to see, `reaction` seconds after it happened (see
+    /// [`Known::perceived`]): a short window closes before a slow fighter knows it was there.
+    pub fn opening(&self, now: f64, reaction: f32) -> Option<Opening> {
+        let p = self.perceived(now, reaction)?;
+        if p.vulnerable {
+            return Some(Opening::Recovering);
+        }
+        if p.reloading {
+            return Some(Opening::Reloading);
+        }
+        // Spent: none left now, some a moment before (a body whose mover reports none at all
+        // never had any to spend).
+        let had = self
+            .history
+            .iter()
+            .any(|s| s.time < p.time && s.stamina >= 0.3);
+        (p.stamina < 0.05 && had).then_some(Opening::Spent)
     }
 
     /// Where it probably is now, extrapolating its last known motion `ahead` seconds (capped).
@@ -182,6 +217,8 @@ pub struct Perceivable {
     pub blocking: bool,
     pub attacking: bool,
     pub vulnerable: bool,
+    pub stamina: f32,
+    pub reloading: bool,
 }
 
 /// Everything with a [`Faction`] this tick, with a spatial hash (rebuilt every tick).
@@ -245,6 +282,7 @@ type PerceivableItem<'a> = (
     Option<&'a NpcVitals>,
     Option<&'a NpcCombat>,
     Option<&'a NpcClock>,
+    Option<&'a AnimationParams>,
 );
 
 pub(crate) fn tick_clocks(time: Res<Time>, mut q: Query<(&mut NpcClock, Option<&LocalTimeScale>)>) {
@@ -263,7 +301,7 @@ pub(crate) fn collect_perceivables(mut out: ResMut<Perceivables>, q: Query<Perce
     for v in out.hash.values_mut() {
         v.clear();
     }
-    for (e, faction, t, loco, cc, motor, body, vitals, combat, clock) in &q {
+    for (e, faction, t, loco, cc, motor, body, vitals, combat, clock, params) in &q {
         if vitals.is_some_and(|v| v.downed) {
             continue;
         }
@@ -288,6 +326,8 @@ pub(crate) fn collect_perceivables(mut out: ResMut<Perceivables>, q: Query<Perce
             blocking: loco.blocking || combat.is_some_and(|c| c.is_blocking(now)),
             attacking: loco.attacking,
             vulnerable: loco.vulnerable || combat.is_some_and(|c| c.is_vulnerable(now)),
+            stamina: loco.stamina,
+            reloading: params.is_some_and(|p| p.get("reloading") > 0.5),
         });
         out.index.insert(e, i);
         let key = (
@@ -528,6 +568,8 @@ pub(crate) fn perceive(
                 blocking: other.blocking,
                 attacking: other.attacking,
                 vulnerable: other.vulnerable,
+                stamina: other.stamina,
+                reloading: other.reloading,
             });
             while k.history.len() > 24 || k.history.front().is_some_and(|s| now - s.time > 2.0) {
                 k.history.pop_front();
@@ -558,4 +600,69 @@ pub fn segment_distance(p: DVec3, a: DVec3, b: DVec3) -> f64 {
     }
     let t = ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
     p.distance(a + ab * t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seen(time: f64, f: impl Fn(&mut Snapshot)) -> Snapshot {
+        let mut s = Snapshot {
+            time,
+            position: DVec3::ZERO,
+            velocity: Vec3::ZERO,
+            forward: Vec3::NEG_Z,
+            mode: LocomotionMode::Idle,
+            blocking: false,
+            attacking: false,
+            vulnerable: false,
+            stamina: 1.0,
+            reloading: false,
+        };
+        f(&mut s);
+        s
+    }
+
+    fn known(history: Vec<Snapshot>) -> Known {
+        Known {
+            entity: Entity::PLACEHOLDER,
+            faction: Faction(0),
+            awareness: 1.0,
+            visible: true,
+            last_seen: 1.0,
+            last_position: DVec3::ZERO,
+            last_velocity: Vec3::ZERO,
+            reported: false,
+            history: history.into(),
+        }
+    }
+
+    #[test]
+    fn openings_show_only_once_the_reaction_time_has_passed() {
+        // Stamina spent at 0.6 s, a reload from 0.8 s.
+        let k = known(
+            (0..10)
+                .map(|i| {
+                    let t = i as f64 * 0.1;
+                    seen(t, |s| {
+                        s.stamina = if t < 0.55 { 0.8 } else { 0.0 };
+                        s.reloading = t > 0.75;
+                    })
+                })
+                .collect(),
+        );
+        assert_eq!(k.opening(0.9, 0.5), None, "not seen yet");
+        assert_eq!(k.opening(0.9, 0.25), Some(Opening::Spent));
+        assert_eq!(k.opening(0.9, 0.05), Some(Opening::Reloading));
+        // A body whose mover reports no stamina at all never spent any.
+        let k = known(
+            (0..10)
+                .map(|i| seen(i as f64 * 0.1, |s| s.stamina = 0.0))
+                .collect(),
+        );
+        assert_eq!(k.opening(0.9, 0.1), None);
+        // A recovery after a swing.
+        let k = known(vec![seen(0.0, |s| s.vulnerable = true)]);
+        assert_eq!(k.opening(0.3, 0.2), Some(Opening::Recovering));
+    }
 }
