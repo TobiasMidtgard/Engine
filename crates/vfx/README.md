@@ -65,7 +65,10 @@ flame and nozzle glow are `steady` layers, which keep their full rate whatever t
 sprite draws the flame procedurally: a white-hot core, a train of shock diamonds about a
 nozzle's width apart with the gas banded bright and dark around them, and a turbulent tail
 that flickers and tears away. A climbing rocket lays its smoke trail down per meter it travels, so the trail stands
-as one unbroken column however fast it goes.
+as one unbroken column however fast it goes. Per-meter spawning counts meters in the effect's own
+scale, so a small nozzle lays its smaller puffs as close together as a big one, and a ship
+sliding sideways on its hover rockets trails one plume, not a string of beads
+(`--example engines -- day hover`).
 
 Fires burn as one body, not a heap of paper cut-outs. The `blaze` sprite draws a whole fire
 standing on its fuel: a churning, domain-warped body that sways, breaks into a few tongues at

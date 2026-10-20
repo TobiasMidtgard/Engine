@@ -553,7 +553,9 @@ pub struct EmitterDesc {
     // ---- spawning
     /// Particles per second while emitting.
     pub rate: f32,
-    /// Extra particles per meter the emitter travels (dense trails behind fast projectiles).
+    /// Extra particles per meter the emitter travels (dense trails behind fast projectiles),
+    /// counted in the effect's own scale: at scale 0.5 a meter is two, so a small copy's
+    /// smaller particles lie as close together for their size.
     pub rate_per_meter: f32,
     /// Bursts at given moments.
     pub bursts: Vec<Burst>,
@@ -712,6 +714,11 @@ impl Default for EmitterDesc {
 const ASSUMED_EMITTER_SPEED: f32 = 30.0;
 
 impl EmitterDesc {
+    /// Particles a second its per-meter spawning lays at the assumed top speed, at `scale`.
+    fn per_meter_at_speed(&self, scale: f32) -> f32 {
+        self.rate_per_meter * ASSUMED_EMITTER_SPEED / scale.max(0.01)
+    }
+
     /// Longest a particle lives, seconds.
     pub fn max_lifetime(&self) -> f32 {
         self.lifetime[0].max(self.lifetime[1]).max(0.0)
@@ -719,12 +726,18 @@ impl EmitterDesc {
 
     /// Particles this layer needs room for at once.
     pub fn capacity(&self, rate_scale: f32) -> u32 {
+        self.capacity_at_scale(rate_scale, 1.0)
+    }
+
+    /// Particles this layer needs room for at once in a copy of its effect at `scale`, whose
+    /// per-meter spawning counts meters in that scale.
+    pub fn capacity_at_scale(&self, rate_scale: f32, scale: f32) -> u32 {
         if self.max_particles > 0 {
             return self.max_particles;
         }
         let rate_scale = if self.steady { 1.0 } else { rate_scale };
         let life = self.max_lifetime();
-        let steady = (self.rate + self.rate_per_meter * ASSUMED_EMITTER_SPEED) * life * rate_scale;
+        let steady = (self.rate + self.per_meter_at_speed(scale)) * life * rate_scale;
         let bursts: u32 = self.bursts.iter().map(Burst::total).sum();
         let bursts = (bursts as f32 * rate_scale).ceil() as u32;
         let n = (steady * 1.15).ceil() as u32 + bursts;
@@ -1005,20 +1018,26 @@ impl EffectDesc {
     /// Particles layer `i` needs room for at once. A fed layer's room comes from the particles
     /// its feeders lose each second (and all at once, for bursts).
     pub fn layer_capacity(&self, i: usize, rate_scale: f32) -> u32 {
-        self.layer_capacity_at(i, rate_scale, 0)
+        self.layer_capacity_at_scale(i, rate_scale, 1.0)
     }
 
-    fn layer_capacity_at(&self, i: usize, rate_scale: f32, depth: u32) -> u32 {
+    /// [`Self::layer_capacity`] for a copy of the effect at `scale` (see
+    /// [`EmitterDesc::capacity_at_scale`]).
+    pub fn layer_capacity_at_scale(&self, i: usize, rate_scale: f32, scale: f32) -> u32 {
+        self.layer_capacity_at(i, rate_scale, scale, 0)
+    }
+
+    fn layer_capacity_at(&self, i: usize, rate_scale: f32, scale: f32, depth: u32) -> u32 {
         let e = &self.emitters[i];
         if e.max_particles > 0 || depth > 4 || !self.is_fed(i) {
-            return e.capacity(rate_scale);
+            return e.capacity_at_scale(rate_scale, scale);
         }
         let (mut steady, mut bursts) = (0.0f32, 0.0f32);
         for (j, sub, kind) in self.feeders(i) {
             let f = &self.emitters[j];
             if kind == SubKind::Trail {
                 // Every particle of the feeder alive drops `count` a second.
-                let alive = self.layer_capacity_at(j, rate_scale, depth + 1) as f32;
+                let alive = self.layer_capacity_at(j, rate_scale, scale, depth + 1) as f32;
                 steady += alive * sub.yield_per_event();
                 continue;
             }
@@ -1026,10 +1045,10 @@ impl EffectDesc {
             let per = sub.yield_per_event() * if kind == SubKind::Hit { 2.0 } else { 1.0 };
             if self.is_fed(j) {
                 // Treat a fed feeder's whole population as dying at once (firework stars).
-                bursts += self.layer_capacity_at(j, rate_scale, depth + 1) as f32 * per;
+                bursts += self.layer_capacity_at(j, rate_scale, scale, depth + 1) as f32 * per;
                 continue;
             }
-            let mut rate = f.rate + f.rate_per_meter * ASSUMED_EMITTER_SPEED;
+            let mut rate = f.rate + f.per_meter_at_speed(scale);
             let mut burst = 0.0;
             for b in &f.bursts {
                 if b.repeat > 0.0 {
