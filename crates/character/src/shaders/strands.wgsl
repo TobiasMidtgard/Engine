@@ -7,11 +7,12 @@
 // (random per pixel, hair and frame); temporal anti-aliasing averages that into soft,
 // correctly thin hair.
 //
-// Shading follows the fiber model: diffuse light around the fiber (Kajiya-Kay), a white
-// highlight from the surface shifted toward the root, a colored second highlight from light
-// that went through the fiber and back (shifted toward the tip, with glints), and light
-// passing through when the hair is backlit. Each point's occlusion (how deep inside the hair
-// it sits) darkens all of it.
+// Shading is Marschner's fiber model in Karis's fit ("Physically Based Hair Shading in
+// Unreal", 2016): a white highlight reflected off the cuticle (R, shifted toward the root by the
+// tilted scales), a colored one from light that crossed the fiber twice (TRT, shifted toward the
+// tip, with glints), light passing straight through when backlit (TT), and an approximation of
+// the light scattered between many fibers, which gives hair its depth and saturated color.
+// Each point's occlusion (how deep inside the hair it sits) darkens all of it.
 
 @vertex
 fn vs_strand(@builtin(vertex_index) vertex: u32, @builtin(instance_index) hair: u32) -> StrandOut {
@@ -55,9 +56,66 @@ fn strand_base_color(kind: u32, random: f32) -> vec3<f32> {
     return c;
 }
 
-fn kk_spec(t: vec3<f32>, h: vec3<f32>, exponent: f32) -> f32 {
-    let th = dot(t, h);
-    return pow(sqrt(max(1.0 - th * th, 0.0)), exponent);
+const HAIR_F0: f32 = 0.04654; // cuticle, index 1.55
+
+fn hair_fresnel(cos_theta: f32) -> f32 {
+    return HAIR_F0 + (1.0 - HAIR_F0) * pow(1.0 - saturate(cos_theta), 5.0);
+}
+
+fn hair_gauss(b: f32, x: f32) -> f32 {
+    return exp(-0.5 * x * x / (b * b)) / (2.5066283 * b);
+}
+
+// Light from `l` scattered toward `v` by a fiber along `t` of color `base` (per unit of
+// incoming light; includes the fiber's projected width). `rough` is the cuticle's longitudinal
+// roughness, `glint` scales the TRT lobe per fiber.
+fn hair_bsdf(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: f32) -> vec3<f32> {
+    let sin_v = clamp(dot(t, v), -1.0, 1.0);
+    let sin_l = clamp(dot(t, l), -1.0, 1.0);
+    let cos_theta_d = max(cos(0.5 * abs(asin(sin_v) - asin(sin_l))), 0.05);
+    let lp = l - sin_l * t;
+    let vp = v - sin_v * t;
+    let cos_phi = dot(lp, vp) * inverseSqrt(dot(lp, lp) * dot(vp, vp) + 1e-4);
+    let cos_half_phi = sqrt(saturate(0.5 + 0.5 * cos_phi));
+    let n_prime = 1.19 / cos_theta_d + 0.36 * cos_theta_d;
+    let shift = 0.035;
+    let b = rough * rough;
+    let s = sin_l + sin_v;
+    let vol = dot(v, l);
+    var out = vec3<f32>(0.0);
+    // R: off the cuticle.
+    let mr = hair_gauss(b * 1.4142 * cos_theta_d, s + shift * 2.0);
+    out += vec3<f32>(mr * 0.4 * cos_half_phi * hair_fresnel(sqrt(saturate(0.5 + 0.5 * vol))));
+    // TT: through the fiber.
+    let mtt = hair_gauss(b * 0.5, s - shift);
+    let a = 1.0 / n_prime;
+    let h = cos_half_phi * (1.0 + a * (0.6 - 0.8 * cos_phi));
+    let ftt = hair_fresnel(cos_theta_d * sqrt(saturate(1.0 - h * h)));
+    let ttt = pow(base, vec3<f32>(0.5 * sqrt(saturate(1.0 - h * h * a * a)) / cos_theta_d));
+    out += mtt * exp(-3.65 * cos_phi - 3.98) * sq(1.0 - ftt) * ttt;
+    // TRT: in, off the back wall, out.
+    let mtrt = hair_gauss(b * 2.0, s - shift * 4.0);
+    let ftrt = hair_fresnel(cos_theta_d * 0.5);
+    let ttrt = pow(base, vec3<f32>(0.8 / cos_theta_d));
+    out += mtrt * exp(17.0 * cos_phi - 16.78) * sq(1.0 - ftrt) * ftrt * ttrt * glint;
+    return out;
+}
+
+// Light scattered between many fibers (Karis's approximation): soft, wrapped, and more
+// saturated where the hair shadows itself.
+fn hair_multiple(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, shadow: f32, scatter: f32) -> vec3<f32> {
+    let kajiya = 1.0 - abs(dot(t, l));
+    let nf = normalize(v - t * dot(v, t) + vec3<f32>(0.0, 1e-5, 0.0));
+    let nl = saturate((dot(nf, l) + 1.0) * 0.25);
+    let diffuse = INV_PI * mix(nl * 2.0, kajiya, 0.33) * scatter;
+    // Light that wandered through many fibers picks up more of their color.
+    let luma = max(dot(base, vec3<f32>(0.2126, 0.7152, 0.0722)), 1e-4);
+    let tint = pow(base / luma, vec3<f32>(0.3 * (1.0 - shadow)));
+    return base * diffuse * tint;
+}
+
+fn hair_light(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: f32, shadow: f32, scatter: f32) -> vec3<f32> {
+    return hair_bsdf(t, v, l, base, rough, glint) * shadow + hair_multiple(t, v, l, base, shadow, scatter);
 }
 
 @fragment
@@ -75,22 +133,18 @@ fn fs_strand(in: StrandOut) -> @location(0) vec4<f32> {
     let occ = in.attrs.x;
     // Glints: fibers differ in how they catch the light.
     let glint = 0.6 + 0.8 * fract(random * 91.7);
-    let shift_r = select(-0.08, -0.04, kind != 0u);
-    let t_r = normalize(t + nc * shift_r);
-    let t_trt = normalize(t + nc * 0.14);
+    // Scalp hair is smoother than brows and beard; fair hair scatters more light between
+    // fibers than dark.
+    let rough = select(0.42, 0.3, kind == 0u);
+    let scatter = mix(0.8, 1.3, saturate(dot(base, vec3<f32>(0.3, 0.5, 0.2)) * 2.5));
+    let lit = mix(occ, 1.0, 0.2);
     var color = vec3<f32>(0.0);
 
     let l = frame.sun_dir.xyz;
     let sun = frame.sun_color.rgb * sun_transmittance(in.rel) * cloud_shadow(in.rel);
     if (dot(sun, sun) > 0.0) {
         let shadow = shadow_factor(in.rel, nc);
-        let h = normalize(l + v);
-        let tl = dot(t, l);
-        let diffuse = base * INV_PI * sqrt(max(1.0 - tl * tl, 0.0)) * (0.5 + 0.5 * saturate(dot(nc, l) + 0.5));
-        let r = vec3<f32>(0.08) * kk_spec(t_r, h, 180.0);
-        let trt = base * 1.6 * kk_spec(t_trt, h, 30.0) * 0.22 * glint;
-        let tt = base * pow(saturate(dot(-l, v)), 8.0) * 0.6;
-        color += (diffuse + r + trt + tt) * sun * shadow * mix(occ, 1.0, 0.25);
+        color += hair_light(t, v, l, base, rough, glint, shadow, scatter) * sun * lit;
     }
     let count = frame.counts.x;
     for (var i = 0u; i < count; i++) {
@@ -101,21 +155,16 @@ fn fs_strand(in: StrandOut) -> @location(0) vec4<f32> {
         if (dist2 > range * range) { continue; }
         let pl = to_light * inverseSqrt(max(dist2, 1e-8));
         let falloff = sq(saturate(1.0 - sq(dist2 / (range * range)))) / max(dist2, sq(light.color_radius.w));
-        let h = normalize(pl + v);
-        let tl = dot(t, pl);
-        let diffuse = base * INV_PI * sqrt(max(1.0 - tl * tl, 0.0)) * (0.5 + 0.5 * saturate(dot(nc, pl) + 0.5));
-        let r = vec3<f32>(0.08) * kk_spec(t_r, h, 180.0);
-        let trt = base * 1.6 * kk_spec(t_trt, h, 30.0) * 0.22 * glint;
-        let tt = base * pow(saturate(dot(-pl, v)), 8.0) * 0.6;
-        color += (diffuse + r + trt + tt) * light.color_radius.rgb * falloff * mix(occ, 1.0, 0.25);
+        color += hair_light(t, v, pl, base, rough, glint, 1.0, scatter) * light.color_radius.rgb * falloff * lit;
     }
     let sky_vis = sky_visibility(in.rel, nc);
     let fill = frame.ambient.rgb;
     let sky = (sky_ambient_covered(nc, sky_vis) - fill) * sky_vis + fill;
     let ao = min(occ, screen_ao(in.rel));
-    color += base * sky * ao;
-    let env = sample_env_rough(reflect(-v, nc), 0.45) * sky_vis + fill;
-    color += env * 0.03 * ao;
+    color += base * sky * ao * (0.4 + 0.5 * scatter);
+    // The sky's sheen along the fibers.
+    let env = sample_env_rough(reflect(-v, nc), 0.35) * sky_vis + fill;
+    color += env * 0.04 * ao;
     return vec4<f32>(apply_fog(pre_expose(color), in.rel), 1.0);
 }
 

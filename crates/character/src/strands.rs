@@ -429,9 +429,9 @@ fn grow_scalp(
     let g = match a.hair_style() {
         HairStyle::Bald => return None,
         HairStyle::Buzz => Groom {
-            length: 0.005 * k,
-            points: 3,
-            density: 70.0,
+            length: 0.006 * k,
+            points: 5,
+            density: 110.0,
             gravity: 0.0,
             loft: 0.0015,
             clump: 0.0,
@@ -440,34 +440,34 @@ fn grow_scalp(
         HairStyle::Short => Groom {
             length: 0.055 * k,
             points: 10,
-            density: 48.0,
+            density: 80.0,
             gravity: 0.25,
-            loft: 0.006,
+            loft: 0.009,
             clump: 0.55,
             root_radius: 0.00011,
         },
         HairStyle::Medium => Groom {
             length: 0.2 * k,
             points: 18,
-            density: 60.0,
+            density: 80.0,
             gravity: 1.0,
-            loft: 0.012,
+            loft: 0.016,
             clump: 0.7,
             root_radius: 0.00012,
         },
         HairStyle::Long => Groom {
             length: 0.42 * k,
             points: 24,
-            density: 60.0,
+            density: 80.0,
             gravity: 1.0,
-            loft: 0.012,
+            loft: 0.016,
             clump: 0.75,
             root_radius: 0.00012,
         },
         HairStyle::Bun => Groom {
             length: 0.3,
             points: 20,
-            density: 60.0,
+            density: 80.0,
             gravity: 0.0,
             loft: 0.004,
             clump: 0.6,
@@ -481,7 +481,8 @@ fn grow_scalp(
         let d = rest - head;
         let theta = d.x.atan2(d.z);
         let line = crate::mesh::hairline(theta, recession);
-        let edge = ((d.y - line) / 0.006).clamp(0.0, 1.0);
+        // A soft hairline: hairs thin out over a centimetre (and grow finer, below).
+        let edge = ((d.y - line) / 0.012).clamp(0.0, 1.0).powf(0.7);
         let crown = 1.0
             - recession
                 * recession
@@ -496,8 +497,10 @@ fn grow_scalp(
     let mut r = Rng::new(a.seed ^ 0x5CA1);
     let mut set = StrandSet::new(StrandKind::Scalp, g.points);
     // Guides first: one per clump, grown in full; then the hairs that follow them.
+    // Long hair gathers into fewer, bigger locks.
+    let per_guide = if g.gravity > 0.5 { 90 } else { 40 };
     let guides_n = if g.clump > 0.0 {
-        (total / 40).clamp(60, 1500)
+        (total / per_guide).clamp(60, 1500)
     } else {
         0
     };
@@ -516,11 +519,19 @@ fn grow_scalp(
         let Some(sp) = sampler.sample(&mut r) else {
             break;
         };
-        let scale = r.range(0.85, 1.1);
+        // Hairs at the hairline are short and fine (vellus), as on a real forehead.
+        let d = sp.rest - head;
+        let line = crate::mesh::hairline(d.x.atan2(d.z), recession);
+        let fine = ((d.y - line) / 0.015).clamp(0.0, 1.0);
+        let scale = r.range(0.85, 1.1) * (0.3 + 0.7 * fine);
+        let thin = 0.55 + 0.45 * fine;
+        // A few hairs stray from the groom: flyaways.
+        let flyaway = g.points > 5 && r.f32() < 0.015;
         let mut pts = grow_hair(a, &g, sp, collider, lm, rest, &mut r, scale);
         // Follow the nearest guide if it is close (a lone hair far from any guide stays free).
-        if let Some(gi) = guide_grid.nearest(sp.p, &guides)
-            && (guides[gi].0.p - sp.p).length() < 0.012
+        if !flyaway
+            && let Some(gi) = guide_grid.nearest(sp.p, &guides)
+            && (guides[gi].0.p - sp.p).length() < if g.gravity > 0.5 { 0.018 } else { 0.012 }
         {
             let (gsp, gpts) = &guides[gi];
             let off = sp.p - gsp.p;
@@ -533,9 +544,20 @@ fn grow_scalp(
                 *p = *p + (follow - *p) * w;
             }
         }
-        // Curls: a helix around the hair, growing from the root.
+        if flyaway {
+            // Lifted off the hair and curving away, more toward the tip.
+            let out = (sp.p - lm.head).normalize_or(Vec3::Y);
+            let aside = Vec3::new(r.normal(), r.normal(), r.normal()) * 0.6;
+            let lift = r.range(0.003, 0.009) + g.length * 0.05;
+            let last = pts.len() - 1;
+            for (k, p) in pts.iter_mut().enumerate() {
+                let t = k as f32 / last as f32;
+                *p += (out + aside) * (lift * t * t);
+            }
+        }
+        // Curls: a helix around the hair, growing from the root (tight coils on short hair).
         if curl > 0.02 && g.points > 4 {
-            let radius = 0.002 + 0.01 * curl;
+            let radius = (0.002 + 0.01 * curl) * (g.length / 0.05).min(1.0);
             let turns = 2.0 + 10.0 * curl * (g.length / 0.2).min(2.0);
             let phase = r.f32() * std::f32::consts::TAU;
             let last = pts.len() - 1;
@@ -560,10 +582,11 @@ fn grow_scalp(
             }
             *p = collider.push_out(*p, 0.0008 + g.loft * t.min(0.4) / 0.4 * 0.6);
         }
+        // Hairs taper to a fine tip.
         set.push(
             &pts,
-            g.root_radius * HAIR_WIDTH,
-            g.root_radius * HAIR_WIDTH * 0.65,
+            g.root_radius * HAIR_WIDTH * thin,
+            g.root_radius * HAIR_WIDTH * thin * 0.35,
             r.f32(),
         );
     }
@@ -673,8 +696,17 @@ fn grow_hair(
     } else {
         0.0
     };
-    let rise = if g.gravity > 0.5 { 0.18 } else { 0.24 } + 0.4 * near_part;
-    let mut dir = (tangent(flow, sp.n) + sp.n * rise).normalize();
+    let curl = a.hair.curl.clamp(0.0, 1.0);
+    // Long hair lifts off the crown a little before it falls (volume at the roots).
+    let mut rise = if g.gravity > 0.5 { 0.26 } else { 0.24 } + 0.4 * near_part;
+    let mut along = tangent(flow, sp.n);
+    if matches!(a.hair_style(), HairStyle::Buzz | HairStyle::Short) {
+        // Coily hair isn't combed flat: it stands up and points every way.
+        let any = tangent(Vec3::new(r.normal(), r.normal(), r.normal()), sp.n);
+        along = (along * (1.0 - 0.85 * curl) + any * curl).normalize_or(along);
+        rise += 0.5 * curl;
+    }
+    let mut dir = (along + sp.n * rise).normalize();
     let bun_center = lm.head + Vec3::new(0.0, 0.06, -0.125);
     // Hair is moved off the face toward the side it is combed to.
     let mut face_side = Some(side);

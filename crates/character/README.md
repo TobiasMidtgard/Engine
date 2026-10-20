@@ -19,7 +19,9 @@ eye and hair shading meant for close-ups.
   anatomy (fibers, crypts, collarette, limbal ring), colored by melanin and lipochrome.
 - **Hair.** Strands grown on the skin: brows in a herringbone, lashes along the lid rims,
   beards (stubble, short, full, goatee) and scalp hair (buzz, short, medium, long, bun) with
-  clumping, curls and occlusion inside the hair.
+  clumped locks, curls (coily short hair stands up rather than combing flat), a soft hairline
+  of fine hairs, flyaways and occlusion inside the hair. Shaded with Marschner's fiber model
+  (Karis's fit) plus light scattered between fibers.
 - **Body and pose.** The whole body (`CharacterBuild::default()`; `portrait()` for a bust),
   dressed for now in a crew-neck shirt, belted trousers and shoes drawn on the skin. It is
   skinned on the GPU to anim's `SkeletonPose` by the humanoid bone names: MakeHuman's bones are
