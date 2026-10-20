@@ -14,11 +14,6 @@ use super::meshkit::*;
 use super::texgen::rand01;
 use super::*;
 
-/// A plain material from an sRGB hex color and a roughness.
-pub(super) fn mat(hex: u32, roughness: f32) -> StandardMaterial {
-    StandardMaterial::hex(hex).with_roughness(roughness)
-}
-
 /// A plain box shape of full `size` (meters), for stand-in props.
 #[allow(dead_code)]
 pub(super) fn cuboid(size: Vec3) -> Shape {
