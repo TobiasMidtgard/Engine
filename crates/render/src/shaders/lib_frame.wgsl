@@ -859,7 +859,14 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     let smooth_n = surface_smooth_normal(s);
     let sky_vis = sky_visibility(rel, smooth_n);
     let fill = frame.ambient.rgb;
-    let irradiance = ((sky_ambient_covered(n, sky_vis) - fill) * sky_vis + fill) * PI;
+    var sky_light = sky_ambient_covered(n, sky_vis);
+    // Far below the camera (seen from orbit or a high aircraft) the environment map's sky is
+    // the camera's, not the surface's: take the surface's own from the atmosphere.
+    let own_sky = atmosphere_sky_ambient_weight(rel);
+    if (own_sky > 0.0) {
+        sky_light = mix(sky_light, atmosphere_sky_ambient(rel, n) * frame.sun_color.rgb + fill, own_sky);
+    }
+    let irradiance = ((sky_light - fill) * sky_vis + fill) * PI;
     // Rough surfaces reflect around a direction between the mirror direction and the normal
     // (Lagarde and de Rousiers 2014).
     let r = reflect(-v, n);

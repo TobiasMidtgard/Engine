@@ -589,7 +589,14 @@ fn build(view: &View, size: (u32, u32)) -> App {
                 atmo.planet_center = tf.translation;
                 atmo.planet_radius = planet.shape.radius_m;
             }
-            World3::Moon | World3::Mars => atmo.enabled = false,
+            World3::Mars => {
+                *atmo = Atmosphere {
+                    planet_center: tf.translation,
+                    planet_radius: planet.shape.radius_m,
+                    ..Atmosphere::mars()
+                };
+            }
+            World3::Moon => atmo.enabled = false,
         }
     }
     app.world.spawn((tf, planet));

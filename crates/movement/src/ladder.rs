@@ -65,6 +65,12 @@ const SNAP_SPEED: f32 = 5.0;
 const BOARDING: f32 = 0.15;
 /// Held this far off the line (something is in the way): let go, m.
 const TORN_OFF: f32 = 1.0;
+/// Climbing up gets no further ahead of the body than this, m: with something in the way (a
+/// closed hatch overhead, a beam) the climber waits on the ladder until it can move on.
+const HELD_BACK: f32 = 0.1;
+/// Climbing up stops with this much room over the head, m: a climber waits a rung or two below
+/// a closed hatch, out of the way of whatever drops out of it when it is breached.
+const HEADROOM: f32 = 0.45;
 /// A hit pushing harder than this throws a climber off, m/s.
 pub(crate) const KNOCKED_OFF: f32 = 5.0;
 /// After letting go, no grabbing a ladder for this long, s.
@@ -99,6 +105,11 @@ impl Frame {
     /// Where the feet are `climbed` meters up.
     fn feet(&self, climbed: f32) -> DVec3 {
         self.line.at((climbed / self.len) as f64)
+    }
+
+    /// How far up the climb feet at `feet` are, m.
+    fn climbed_at(&self, feet: DVec3) -> f32 {
+        self.line.along(feet) as f32 * self.len
     }
 }
 
@@ -225,6 +236,14 @@ fn grab(
     Some(())
 }
 
+/// Whether something other than the ladder is less than [`HEADROOM`] over the head.
+fn no_headroom(probe: &Probe, b: &Body, ladder: Entity) -> bool {
+    let head = b.pos + (b.up * b.height * 0.5).as_dvec3();
+    probe
+        .ray(head, b.up, HEADROOM)
+        .is_some_and(|h| h.entity != ladder)
+}
+
 /// One step on the ladder held: get off, or climb. Returns the velocity.
 #[allow(clippy::too_many_arguments)]
 fn climb(
@@ -278,7 +297,14 @@ fn climb(
         (ask * p.ladder_speed * sprint, ACCEL)
     };
     l.speed += (target - l.speed).clamp(-accel * dt, accel * dt);
-    let next = l.climbed + l.speed * dt;
+    let mut next = l.climbed + l.speed * dt;
+    // Something overhead: wait below it, and for the body rather than climb on without it.
+    if l.speed > 0.0
+        && (no_headroom(probe, b, e) || next > f.climbed_at(b.feet()) + HELD_BACK + l.speed * dt)
+    {
+        l.speed = 0.0;
+        next = l.climbed;
+    }
     l.secs += dt;
     m.air_secs = 0.0;
     m.fall_speed = 0.0;

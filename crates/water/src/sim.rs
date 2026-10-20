@@ -189,13 +189,25 @@ pub fn ripple_system(
                 })
         });
     }
-    // Step a copy with the water unlocked: the step runs on the compute pool, and a thread
-    // waiting for it there may pick up another system that reads the water, which would
-    // wait for this lock forever. Readers see the last step's ripples until the swap.
+    if !state.ripples.needs_step() {
+        // Calm water: nothing to step, copy or upload.
+        state.ripples.pending.clear();
+        return;
+    }
+    // Step with the water unlocked: the step runs on the compute pool, and a thread waiting
+    // for it there may pick up another system that reads the water, which would wait for
+    // this lock forever. The field steps aside, and readers see a copy of what it held until
+    // it is swapped back.
     let field = spare.get_or_insert_with(|| state.ripples.clone());
-    field.clone_from(&state.ripples);
+    std::mem::swap(&mut state.ripples, field);
+    if state.ripples.n != field.n {
+        state.ripples = field.clone();
+    }
+    state.ripples.copy_view_from(field);
     state.ripples.pending.clear();
     drop(state);
+    field.current_damping = 1.1 / settings.current_life_s.max(0.1);
+    field.swirl = settings.swirl.max(0.0);
     field.step(dt, settings.ripple_damping, settings.foam_life_s);
     let mut state = shared.0.write();
     // Disturbances that came in meanwhile wait for the next step.

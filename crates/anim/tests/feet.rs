@@ -136,6 +136,11 @@ fn sidestepping_and_backpedalling_feet_do_not_slide() {
         (1.0, pi),
         (1.0, pi / 4.0),
         (1.0, -3.0 * pi / 4.0),
+        // Running sideways and backwards.
+        (2.0, pi / 2.0),
+        (3.0, -pi / 2.0),
+        (2.6, pi),
+        (3.0, 3.0 * pi / 4.0),
     ] {
         let s = stances_toward(speed, 0.0, heading);
         assert!(
@@ -150,4 +155,38 @@ fn sidestepping_and_backpedalling_feet_do_not_slide() {
             s.worst
         );
     }
+}
+
+#[test]
+fn a_person_leans_into_a_start_and_sits_back_into_a_stop() {
+    use engine_world::animation::AnimationParams;
+    let mut app = App::new();
+    app.world.resource_mut::<EngineConfig>().headless = true;
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual { step_secs: STEP });
+    app.add_plugins((WorldPlugin, AnimationPlugin));
+    let t = Transform::default();
+    let e = app
+        .world
+        .spawn((t, GlobalTransform::from(t), BodyRequest::human(0)))
+        .id();
+    app.update();
+    let (mut most, mut least, mut speed) = (0.0f32, 0.0f32, 0.0f64);
+    // Speed up ahead at 5 m/s² to 5 m/s, run, then brake at 7 m/s².
+    for frame in 0..(4.0 / STEP) as usize {
+        let secs = frame as f64 * STEP;
+        speed = if secs < 2.0 {
+            (speed + 5.0 * STEP).min(5.0)
+        } else {
+            (speed - 7.0 * STEP).max(0.0)
+        };
+        app.world.get_mut::<Transform>(e).unwrap().translation.z -= speed * STEP;
+        app.update();
+        let accel = app.world.get::<AnimationParams>(e).unwrap().values["accel"];
+        most = most.max(accel);
+        least = least.min(accel);
+    }
+    assert!(most > 0.8, "leant into the start at most {most}");
+    assert!(least < -0.8, "sat back into the stop at most {least}");
 }

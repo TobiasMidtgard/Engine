@@ -187,4 +187,9 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
 - Doc comment on every public item, written for someone (or an AI) using it for the first time,
   with units.
 - Errors returned to API callers are plain sentences that say what to do.
+- Never seed randomness or pick variations from `Entity::to_bits()` or other entity ids. In
+  bevy_ecs 0.20 every resource and message queue is an entity too, so a new resource or
+  message anywhere renumbers everything spawned after it and changes looks and behaviour
+  (an NPC revive test moved from 5.8 s to 6.6 s when engine_world gained one message). Store a
+  seed on the entity when it is spawned (like `BodyRequest::seed`) and use that.
 - Commit messages: imperative subject, body explains why.
