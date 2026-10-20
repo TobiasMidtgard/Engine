@@ -15,7 +15,7 @@ use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
 use engine_space::look::{FULL_MAP_WIDTH, LookBakes, bake_rings, bake_surface};
 use engine_space::{SpaceClock, SpacePlugin, SpaceState, StarLight, demo, system, travel_to};
-use engine_world::SimulationFocus;
+use engine_world::{SimulationFocus, WeatherState};
 
 struct View {
     name: &'static str,
@@ -245,7 +245,18 @@ fn main() {
         .and_then(|s| s.split_once('x'))
         .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
         .unwrap_or((1280, 720));
-    let only: Vec<&str> = args.iter().skip(2).map(String::as_str).collect();
+    // `cover=0.7` gives the weather's clouds that cover, which the cloud tops near the camera
+    // match; the rest name views.
+    let cover: Option<f32> = args
+        .iter()
+        .skip(2)
+        .find_map(|a| a.strip_prefix("cover=")?.parse().ok());
+    let only: Vec<&str> = args
+        .iter()
+        .skip(2)
+        .map(String::as_str)
+        .filter(|a| !a.starts_with("cover="))
+        .collect();
     std::fs::create_dir_all(&out).expect("output folder");
 
     for view in views() {
@@ -254,6 +265,12 @@ fn main() {
         }
         let started = std::time::Instant::now();
         let mut app = build(size);
+        if let Some(cloud_cover) = cover {
+            app.world.insert_resource(WeatherState {
+                cloud_cover,
+                ..Default::default()
+            });
+        }
         app.update();
         if let Some(d) = app.world.get_resource::<RenderDisabled>() {
             eprintln!("no GPU: {}", d.0);
