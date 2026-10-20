@@ -108,12 +108,32 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [-8.0, 9.0, 4.0],
         [-18.0, 3.0, -15.0],
     ),
+    // The Galton board: the hopper emptying through the funnel, the balls pouring through the
+    // pins (and close up), and the bins filled in a bell curve.
+    (
+        0.6,
+        "29_galton_pour_starts",
+        [10.35, 1.3, -15.85],
+        [10.0, 1.22, -18.0],
+    ),
+    (
+        2.5,
+        "31_galton_pins_close",
+        [10.12, 1.08, -17.6],
+        [10.0, 0.98, -18.0],
+    ),
     // The pendulum wave: nearly in step, in snakes, and in two alternate rows at half a minute.
     (
         3.0,
         "23_pendulum_wave_start",
         [16.0, 6.2, -3.4],
         [16.0, 1.5, -8.6],
+    ),
+    (
+        5.0,
+        "30_galton_pouring",
+        [10.35, 1.3, -15.85],
+        [10.0, 1.22, -18.0],
     ),
     (5.0, "06_dominoes", [8.0, 4.5, -4.0], [5.0, 0.4, -16.0]),
     (6.0, "07_bridge", [27.5, 4.0, 10.0], [18.0, 2.6, 10.0]),
@@ -161,6 +181,12 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         "13_barrel_run_sand",
         [22.5, 1.6, 23.9],
         [29.0, 0.4, 19.0],
+    ),
+    (
+        28.0,
+        "32_galton_bell_curve",
+        [10.35, 1.3, -15.85],
+        [10.0, 1.22, -18.0],
     ),
     (
         30.0,
