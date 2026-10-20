@@ -42,7 +42,8 @@ pub struct StrandSet {
     /// Per point: model-space position (m) and radius (m).
     pub points: Vec<[f32; 4]>,
     /// Per point: occlusion (0 dark .. 1 open), the hair's random value (0..1, picks grey
-    /// hairs and color variation), position along the hair (0 root .. 1 tip), unused.
+    /// hairs and color variation), position along the hair (0 root .. 1 tip), and how fine
+    /// the hair is (scalp hair: 0 full .. 1 the finest hairline hair).
     pub attrs: Vec<[f32; 4]>,
 }
 
@@ -526,7 +527,9 @@ fn grow_scalp(
         let scale = r.range(0.85, 1.1) * (0.3 + 0.7 * fine);
         let thin = 0.55 + 0.45 * fine;
         // A few hairs stray from the groom: flyaways.
-        let flyaway = g.points > 5 && r.f32() < 0.015;
+        // (Not from the front hairline, where they would cross the forehead.)
+        let at_front = fine < 1.0 || (d.z > 0.03 && d.y < 0.07);
+        let flyaway = g.points > 5 && !at_front && r.f32() < 0.015;
         let mut pts = grow_hair(a, &g, sp, collider, lm, rest, &mut r, scale);
         // Follow the nearest guide if it is close (a lone hair far from any guide stays free).
         if !flyaway
@@ -589,6 +592,11 @@ fn grow_scalp(
             g.root_radius * HAIR_WIDTH * thin * 0.35,
             r.f32(),
         );
+        // Fine hairline hairs are short, so they don't sit in their own root shadow.
+        let n = set.attrs.len();
+        for attr in &mut set.attrs[n - g.points as usize..] {
+            attr[3] = 1.0 - fine;
+        }
     }
     Some(set)
 }
@@ -813,7 +821,7 @@ fn occlude(set: &mut StrandSet, head: Vec3) {
         }
         // Near the root the scalp itself shadows too.
         let t = attr[2];
-        let root = 0.55 + 0.45 * (t / 0.25).min(1.0);
+        let root = 0.55 + 0.45 * ((t / 0.25).min(1.0)).max(attr[3]);
         attr[0] = (-sum * per_cell).exp().max(0.08) * root;
     }
 }
