@@ -463,13 +463,6 @@ pub(crate) struct AirOptics {
     pub mie_forward_peak: f32,
 }
 
-impl AirOptics {
-    /// The share of the Mie scattering in the forward peak, per channel.
-    pub fn mie_peak(&self) -> Vec3 {
-        self.mie_forward_peak * self.mie_g * self.mie_g
-    }
-}
-
 impl Atmosphere {
     /// Earth (the default): the Rayleigh, Mie and ozone of Bruneton's and Hillaire's (2020)
     /// reference atmosphere. A blue sky, red sunsets.
@@ -626,7 +619,7 @@ mod tests {
         assert_eq!(air.mie_extinction, Vec3::splat(4.40e-6));
         assert_eq!(air.ozone, Vec3::new(0.650e-6, 1.881e-6, 0.085e-6));
         assert_eq!(air.mie_g, Vec3::splat(0.8));
-        assert_eq!(air.mie_peak(), Vec3::ZERO);
+        assert_eq!(air.mie_forward_peak, 0.0);
     }
 
     #[test]
