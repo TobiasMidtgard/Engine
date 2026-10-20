@@ -39,6 +39,15 @@ fn gaze_turn(p: vec3<f32>, center: vec3<f32>, yaw: f32, pitch: f32, dir: bool) -
     return select(center + d, d, dir);
 }
 
+// An axis of the eye's own frame in camera-relative space: turned by the gaze, then by the
+// head (posed).
+fn eye_axis(a: vec3<f32>) -> vec3<f32> {
+    let head = vec4<u32>(pose.info.z, 0u, 0u, 0u);
+    let one = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    let d = gaze_turn(a, vec3<f32>(0.0), pose.gaze.x, pose.gaze.y, true);
+    return model_dir((skin_matrix(head, one, false) * vec4<f32>(d, 0.0)).xyz);
+}
+
 @vertex
 fn vs_eye(in: EyeIn) -> EyeOut {
     var out: EyeOut;
@@ -107,7 +116,8 @@ fn iris_color(uv: vec2<f32>, seed: f32) -> vec3<f32> {
 }
 
 fn sclera_color(local: vec3<f32>, seed: f32) -> vec3<f32> {
-    var c = vec3<f32>(0.78, 0.74, 0.70);
+    // Off-white: a sclera is never paper white (and reads as glowing if it is).
+    var c = vec3<f32>(0.64, 0.6, 0.56);
     // Warmer and greyer toward the back and the corners.
     let side = abs(local.x);
     c *= mix(1.0, 0.82, smoothstep(0.4, 0.95, side));
@@ -129,10 +139,10 @@ fn fs_eye(in: EyeOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let v = normalize(-in.rel);
     let seed = character.look.w * 113.0 + in.side * 7.0;
 
-    // The eye's local frame in camera-relative space (no roll: model axes).
-    let ex = model_dir(vec3<f32>(1.0, 0.0, 0.0));
-    let ey = model_dir(vec3<f32>(0.0, 1.0, 0.0));
-    let ez = model_dir(vec3<f32>(0.0, 0.0, 1.0));
+    // The eye's local frame in camera-relative space (it turns with the gaze and the head).
+    let ex = eye_axis(vec3<f32>(1.0, 0.0, 0.0));
+    let ey = eye_axis(vec3<f32>(0.0, 1.0, 0.0));
+    let ez = eye_axis(vec3<f32>(0.0, 0.0, 1.0));
     let v_local = normalize(vec3<f32>(dot(v, ex), dot(v, ey), dot(v, ez)));
     let n_local = normalize(vec3<f32>(dot(n, ex), dot(n, ey), dot(n, ez)));
 
@@ -151,7 +161,7 @@ fn fs_eye(in: EyeOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         under_n = normalize(mix(n, ez, in_cornea * 0.7));
     }
     // Shadow of the lids and lashes over the top of the eye, and darker corners.
-    let lid = smoothstep(0.05, 0.55, local.y) * 0.55 + smoothstep(0.55, 0.95, abs(local.x)) * 0.3;
+    let lid = smoothstep(0.05, 0.55, local.y) * 0.65 + smoothstep(0.5, 0.95, abs(local.x)) * 0.4;
     var s = default_surface();
     s.albedo = albedo;
     s.normal = under_n;
@@ -165,8 +175,9 @@ fn fs_eye(in: EyeOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     coat.albedo = vec3<f32>(0.0);
     coat.normal = n;
     coat.roughness = mix(0.16, 0.05, in_cornea);
-    coat.reflectance = 0.6;
-    coat.occlusion = 1.0 - lid * 0.7;
+    // The wet sclera reflects less than the cornea, and the socket hides much of the sky.
+    coat.reflectance = mix(0.3, 0.6, in_cornea);
+    coat.occlusion = 1.0 - lid;
     color += shade_surface(coat, in.rel);
     return vec4<f32>(apply_fog(color, in.rel), 1.0);
 }
