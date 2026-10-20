@@ -31,7 +31,7 @@ use engine_world::physics::{
 };
 use parking_lot::Mutex;
 use rapier3d::prelude::{
-    ActiveCollisionTypes, ActiveEvents, ActiveHooks, ColliderBuilder, ColliderHandle,
+    Aabb, ActiveCollisionTypes, ActiveEvents, ActiveHooks, ColliderBuilder, ColliderHandle,
     CollisionEvent, CollisionEventFlags, ContactModificationContext, ContactPair, EventHandler,
     ImpulseJointHandle, LockedAxes, MassProperties as RapierMassProperties, MultibodyJointHandle,
     PairFilterContext, PhysicsHooks, PhysicsWorld, Pose, RigidBodyBuilder, RigidBodyHandle,
@@ -74,6 +74,10 @@ pub struct Region {
     pub links: crate::articulation::Links,
     /// Hidden ropes carrying heavy bodies hung on light chains ([`Simulation::hang_loads`]).
     pub load_lines: Vec<LoadLine>,
+    /// Bounds of the convex hulls here at the pose they were measured at: a hull's bounds
+    /// visit every point, so they are only measured again when it moves ([`Self::update_bounds`]).
+    /// By collider index: generation, pose, shape address and bounds.
+    hull_bounds: Vec<Option<(u32, Pose, usize, Aabb)>>,
 }
 
 impl Region {
@@ -97,6 +101,7 @@ impl Region {
             stale_all: false,
             links: Default::default(),
             load_lines: Vec::new(),
+            hull_bounds: Vec::new(),
         }
     }
 
@@ -116,7 +121,6 @@ impl Region {
             .map(|(lo, hi)| (self.global(lo), self.global(hi)))
     }
 
-    /// Recompute [`Self::bounds`] from the colliders.
     /// Put colliders added or moved since the last step into the query tree now (the step
     /// would only do it after characters looked for the ground under them).
     pub fn refresh_queries(&mut self) {
@@ -142,9 +146,29 @@ impl Region {
         self.stale_all = false;
     }
 
+    /// Recompute [`Self::bounds`] from the colliders.
     pub fn update_bounds(&mut self) {
-        self.bounds = self.world.colliders.iter().fold(None, |acc, (_, c)| {
-            let a = c.compute_aabb();
+        let hulls = &mut self.hull_bounds;
+        self.bounds = self.world.colliders.iter().fold(None, |acc, (h, c)| {
+            let a = if c.shape().as_convex_polyhedron().is_some() {
+                // Measured again when it moves or gets a new shape.
+                let (i, generation) = h.into_raw_parts();
+                let (pose, shape) = (*c.position(), c.shape() as *const _ as *const () as usize);
+                if hulls.len() <= i as usize {
+                    hulls.resize(i as usize + 1, None);
+                }
+                let slot = &mut hulls[i as usize];
+                match *slot {
+                    Some((g, at, was, a)) if g == generation && at == pose && was == shape => a,
+                    _ => {
+                        let a = c.compute_aabb();
+                        *slot = Some((generation, pose, shape, a));
+                        a
+                    }
+                }
+            } else {
+                c.compute_aabb()
+            };
             Some(match acc {
                 None => (a.mins, a.maxs),
                 Some((lo, hi)) => (lo.min(a.mins), hi.max(a.maxs)),
@@ -422,6 +446,9 @@ pub struct Simulation {
     /// Bodies whose jointed group gained or lost a joint or a body, to hang its loads again
     /// ([`Self::hang_loads`]).
     pub rehang: Vec<Entity>,
+    /// Bodies with forces of their own set in Rapier (`BodyEntry::forces_set`), so a step
+    /// reaches the sleeping ones among them without visiting every body.
+    pub forced: EntityHashSet,
     /// Steps since the articulation budget last looked.
     pub budget_clock: u32,
     /// Steps since the water under sleeping bodies was last looked at.
@@ -1827,22 +1854,23 @@ impl Simulation {
 
     // ------------------------------------------------------------------ region upkeep
 
-    /// World position of every mover in a region (bodies and characters).
-    fn mover_positions(&self, id: RegionId) -> Vec<DVec3> {
+    /// World-space box around every mover in a region (bodies and characters: every body
+    /// there but the fixed ground).
+    fn mover_bounds(&self, id: RegionId) -> Option<(DVec3, DVec3)> {
         let region = self.region(id);
-        let bodies = self
+        region
+            .world
             .bodies
-            .values()
-            .filter(|b| b.region == id)
-            .filter_map(|b| region.world.bodies.get(b.handle))
-            .map(|rb| region.global(rb.translation()));
-        let chars = self
-            .characters
-            .values()
-            .filter(|c| c.region == id)
-            .filter_map(|c| region.world.bodies.get(c.body))
-            .map(|rb| region.global(rb.translation()));
-        bodies.chain(chars).collect()
+            .iter()
+            .filter(|(_, rb)| !rb.is_fixed())
+            .map(|(_, rb)| rb.translation())
+            .fold(None, |acc: Option<(Vec3, Vec3)>, p| {
+                Some(match acc {
+                    None => (p, p),
+                    Some((lo, hi)) => (lo.min(p), hi.max(p)),
+                })
+            })
+            .map(|(lo, hi)| (region.global(lo), region.global(hi)))
     }
 
     /// Re-center, split and merge regions so every mover stays near its region's anchor and
@@ -1865,32 +1893,32 @@ impl Simulation {
             if self.region(id).movers == 0 || self.region(id).frozen {
                 continue;
             }
-            let positions = self.mover_positions(id);
-            if positions.is_empty() {
+            let Some((lo, hi)) = self.mover_bounds(id) else {
                 continue;
-            }
-            let (mut lo, mut hi) = (positions[0], positions[0]);
-            for p in &positions {
-                lo = lo.min(*p);
-                hi = hi.max(*p);
-            }
+            };
             let center = (lo + hi) * 0.5;
             // Re-center when the movers drifted away from the anchor.
             if center.distance(self.region(id).anchor) > radius * 0.25 {
                 self.rebase(id, center);
             }
-            // Movers far outside the radius leave for another region.
+            // Movers far outside the radius leave for another region (only possible when the
+            // box around them reaches that far, so most steps there are none to look for).
             let anchor = self.region(id).anchor;
-            let strays: Vec<Entity> = self
-                .bodies
-                .iter()
-                .filter(|(_, b)| b.region == id)
-                .filter_map(|(e, b)| {
-                    let rb = self.region(id).world.bodies.get(b.handle)?;
-                    let p = self.region(id).global(rb.translation());
-                    (p.distance(anchor) > radius * 1.25).then_some(*e)
-                })
-                .collect();
+            let reach = radius * 1.25;
+            let farthest = (lo - anchor).abs().max((hi - anchor).abs());
+            let strays: Vec<Entity> = if farthest.length() > reach {
+                self.bodies
+                    .iter()
+                    .filter(|(_, b)| b.region == id)
+                    .filter_map(|(e, b)| {
+                        let rb = self.region(id).world.bodies.get(b.handle)?;
+                        let p = self.region(id).global(rb.translation());
+                        (p.distance(anchor) > reach).then_some(*e)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             for e in strays {
                 if self.bodies.get(&e).is_some_and(|b| b.region == id) {
                     let p = self.body_world_position(e);
@@ -2227,6 +2255,7 @@ impl Simulation {
             entry.region = target;
             entry.handle = nb;
             entry.forces_set = true;
+            self.forced.insert(e);
             for ce in collider_entities {
                 if let Some(c) = self.colliders.get_mut(&ce) {
                     for (rid, h) in c.handles.iter_mut() {
@@ -2423,6 +2452,18 @@ impl Simulation {
             .collect();
         for (key, h1, h2) in keys {
             let region = self.region(region_id);
+            // Neither side can move (asleep or fixed): the pair stays apart until one wakes.
+            let world = &region.world;
+            let still = |h: ColliderHandle| {
+                world.colliders.get(h).is_some_and(|c| {
+                    c.parent()
+                        .and_then(|b| world.bodies.get(b))
+                        .is_none_or(|b| b.is_sleeping() || b.is_fixed())
+                })
+            };
+            if still(h1) && still(h2) {
+                continue;
+            }
             let Some(pair) = region.world.narrow_phase.contact_pair(h1, h2) else {
                 self.contacts.pending.remove(&key);
                 continue;
