@@ -2,7 +2,7 @@
 //!
 //! - `ui.show {"screen": "pause"}` pauses game time (the UI keeps animating) and offers
 //!   Resume, Inventory, Star Map, Settings, Save and Quit. Menu items send `game.save`,
-//!   `game.load` and `game.quit` actions for the game to handle.
+//!   `game.quit` for the game to handle; Save and Load open the `saves` screen.
 //! - `ui.show {"screen": "settings"}`: Gameplay, Video, Audio, Controls and Interface tabs.
 //!   Video rows edit the renderer's `RenderSettings`, Interface rows `UiSettings`, Controls
 //!   lists and rebinds the input map's actions; the rest live in [`UiData`] under
@@ -39,7 +39,8 @@ pub struct PauseState {
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct PauseMenu;
 
-fn menu_item(icon: &str, label: &str, action: &str, key: &str, id: &str) -> El {
+/// A row of the pause or title menu: icon, label and an optional key.
+pub(crate) fn menu_item(icon: &str, label: &str, action: &str, key: &str, id: &str) -> El {
     let mut row = El::new()
         .class("menu_item")
         .id(id)
@@ -133,7 +134,7 @@ fn pause_el(world: &World) -> El {
         .child(menu_item(
             "map_scroll",
             "Load Game",
-            "game.load",
+            "pause.load",
             "F9",
             "pause_load",
         ))
@@ -946,16 +947,16 @@ pub fn menus_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) 
                     if let Err(e) = screens::show(world, screen, &Value::Null) {
                         tracing::warn!("{e}");
                     }
-                } else if action == "pause.save" {
-                    crate::input::dispatch(world, "game.save");
-                    toast::notify(
-                        world,
-                        ToastKind::Good,
-                        "scroll",
-                        "Game saved",
-                        "Hollow Reach  ·  autosave slot 1",
-                        2.5,
-                    );
+                } else if action == "pause.save" || action == "pause.load" {
+                    // The save and load screen, over the pause menu so Esc comes back to it.
+                    let mode = if action == "pause.save" {
+                        "save"
+                    } else {
+                        "load"
+                    };
+                    if let Err(e) = screens::show(world, "saves", &json!({"mode": mode})) {
+                        tracing::warn!("{e}");
+                    }
                 } else if action == "pause.quit" {
                     let args = json!({"title": "Quit to title?", "text": "Progress since your last save will be lost.", "confirm": "Quit", "action": "game.quit", "danger": true});
                     if let Err(e) = screens::show(world, "confirm", &args) {

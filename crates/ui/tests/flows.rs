@@ -1107,3 +1107,148 @@ fn a_short_or_unknown_recipe_cannot_be_crafted_until_learned() {
     );
     assert_eq!(player(&mut app).count_of("lockpick"), picks + 4);
 }
+
+fn saves(app: &mut App) -> engine_ui::saves::SaveSlots {
+    app.world.resource::<engine_ui::saves::SaveSlots>().clone()
+}
+
+fn saves_selected(app: &mut App) -> String {
+    let mut q = app.world.query::<&engine_ui::saves::SavesScreen>();
+    q.single(&app.world)
+        .unwrap()
+        .selected
+        .clone()
+        .unwrap_or_default()
+}
+
+#[test]
+fn loading_a_save_from_pause_asks_first_then_sends_game_load() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "pause", "instant": true}),
+    );
+    app.update_n(2);
+    api(&mut app, "ui.click", json!({"id": "pause_load"}));
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"saves".to_string()));
+    // Newest first: the autosave.
+    assert_eq!(saves_selected(&mut app), "auto");
+    api(&mut app, "ui.click", json!({"id": "save:save_3"}));
+    app.update_n(2);
+    assert_eq!(saves_selected(&mut app), "save_3");
+    let since = next_event(&mut app);
+    api(&mut app, "ui.click", json!({"id": "saves_go"}));
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"confirm".to_string()));
+    assert!(!actions_since(&mut app, since).contains(&"game.load:save_3".to_string()));
+    api(&mut app, "ui.click", json!({"id": "confirm_ok"}));
+    app.update_n(30);
+    assert!(actions_since(&mut app, since).contains(&"game.load:save_3".to_string()));
+    let screens = open(&mut app);
+    assert!(
+        !screens.contains(&"saves".to_string()) && !screens.contains(&"pause".to_string()),
+        "{screens:?}"
+    );
+}
+
+#[test]
+fn saving_new_over_and_deleting_slots() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "saves", "mode": "save", "instant": true}),
+    );
+    app.update_n(3);
+    let n = saves(&mut app).slots.len();
+    // Save mode opens on a new save; Save here writes the game as it is now.
+    let since = next_event(&mut app);
+    api(&mut app, "ui.click", json!({"id": "saves_go"}));
+    app.update_n(3);
+    let s = saves(&mut app);
+    assert_eq!(s.slots.len(), n + 1);
+    let new = s.get("save_5").expect("a new slot");
+    assert_eq!(new.location, "Hollow Reach");
+    assert_eq!(new.chapter, "The Silent Relay");
+    assert_eq!(new.playtime_s, 45_840);
+    assert!(actions_since(&mut app, since).contains(&"game.save:save_5".to_string()));
+    // Saving over a named slot keeps its name and asks first.
+    api(&mut app, "ui.click", json!({"id": "save:save_4"}));
+    app.update_n(2);
+    api(&mut app, "ui.click", json!({"id": "saves_go"}));
+    app.update_n(3);
+    assert_eq!(
+        saves(&mut app).get("save_4").unwrap().location,
+        "Frostspine Pass"
+    );
+    api(&mut app, "ui.click", json!({"id": "confirm_ok"}));
+    app.update_n(3);
+    let s4 = saves(&mut app).get("save_4").cloned().unwrap();
+    assert_eq!(
+        (s4.location.as_str(), s4.name.as_str()),
+        ("Hollow Reach", "Summit")
+    );
+    // Delete, after a confirm.
+    api(&mut app, "ui.click", json!({"id": "save:save_2"}));
+    app.update_n(2);
+    api(&mut app, "ui.click", json!({"id": "saves_delete"}));
+    app.update_n(3);
+    api(&mut app, "ui.click", json!({"id": "confirm_ok"}));
+    app.update_n(3);
+    assert!(saves(&mut app).get("save_2").is_none());
+    assert!(actions_since(&mut app, since).contains(&"game.delete_save:save_2".to_string()));
+    // The deleted slot's selection moves on, and the screen stays open.
+    assert_ne!(saves_selected(&mut app), "save_2");
+    assert!(open(&mut app).contains(&"saves".to_string()));
+}
+
+#[test]
+fn the_title_screen_continues_the_newest_save_and_opens_load_and_quit() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "title", "instant": true}),
+    );
+    app.update_n(3);
+    // Esc doesn't close the title screen.
+    press(&mut app, KeyCode::Escape);
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"title".to_string()));
+    // Load Game opens the saves screen over it; closing it comes back.
+    api(&mut app, "ui.click", json!({"id": "title_load"}));
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"saves".to_string()));
+    api(
+        &mut app,
+        "ui.hide",
+        json!({"screen": "saves", "instant": true}),
+    );
+    app.update_n(3);
+    // Quit asks first.
+    let since = next_event(&mut app);
+    api(&mut app, "ui.click", json!({"id": "title_quit"}));
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"confirm".to_string()));
+    assert!(!actions_since(&mut app, since).contains(&"game.exit".to_string()));
+    api(&mut app, "ui.click", json!({"id": "confirm_cancel"}));
+    app.update_n(30);
+    // Continue loads the newest save (the autosave) and leaves the title screen.
+    api(&mut app, "ui.click", json!({"id": "title_continue"}));
+    app.update_n(30);
+    assert!(actions_since(&mut app, since).contains(&"game.load:auto".to_string()));
+    assert!(!open(&mut app).contains(&"title".to_string()));
+    // New Game from a fresh title screen.
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "title", "instant": true}),
+    );
+    app.update_n(3);
+    api(&mut app, "ui.click", json!({"id": "title_new"}));
+    app.update_n(30);
+    assert!(actions_since(&mut app, since).contains(&"game.new".to_string()));
+    assert!(!open(&mut app).contains(&"title".to_string()));
+}

@@ -573,9 +573,9 @@ fn plain_parts(kind: Kind, team_hex: u32) -> Vec<(Part, MeshRenderer, Vec3)> {
 
 /// A joint frame: position and rotation in the owner's space.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct Bone {
-    pos: Vec3,
-    rot: Quat,
+pub(super) struct Bone {
+    pub(super) pos: Vec3,
+    pub(super) rot: Quat,
 }
 
 impl Bone {
@@ -584,7 +584,7 @@ impl Bone {
     }
 
     /// A point given in this frame.
-    fn at(&self, p: Vec3) -> Vec3 {
+    pub(super) fn at(&self, p: Vec3) -> Vec3 {
         self.pos + self.rot * p
     }
 
@@ -1188,19 +1188,21 @@ struct Shot {
     reload: bool,
 }
 
-/// The posed skeleton (owner space).
+/// The posed skeleton (owner space). The pelvis sits between the hip joints, the chest on the
+/// waist and the head on the neck; each limb segment on the joint it hangs from (its −Y along
+/// the segment, +X the hinge), the hand on the wrist, the foot on the ankle (toes −Z).
 #[derive(Debug, Clone, Copy, Default)]
-struct Skeleton {
-    pelvis: Bone,
-    chest: Bone,
-    head: Bone,
+pub(super) struct Skeleton {
+    pub(super) pelvis: Bone,
+    pub(super) chest: Bone,
+    pub(super) head: Bone,
     /// Left then right.
-    thigh: [Bone; 2],
-    shin: [Bone; 2],
-    foot: [Bone; 2],
-    upper: [Bone; 2],
-    fore: [Bone; 2],
-    hand: [Bone; 2],
+    pub(super) thigh: [Bone; 2],
+    pub(super) shin: [Bone; 2],
+    pub(super) foot: [Bone; 2],
+    pub(super) upper: [Bone; 2],
+    pub(super) fore: [Bone; 2],
+    pub(super) hand: [Bone; 2],
     tabard: [Bone; 2],
     /// Where each wrist was asked to go.
     want: [Vec3; 2],
@@ -1215,7 +1217,7 @@ struct Skeleton {
     held: Option<Bone>,
     /// The eyes' turn in the head (left, right); how far the upper lids are shut and the jaw
     /// open (0..1).
-    eyes: [Quat; 2],
+    pub(super) eyes: [Quat; 2],
     lids: f32,
     jaw: f32,
 }
@@ -1643,12 +1645,19 @@ pub(super) struct Motion {
     tend_knees: Vec3,
     /// Downed, how it lies as last posed (where a mate's hands and knees go to revive it).
     lying: Option<Lying>,
+    /// The skeleton and the face as last posed.
+    body: Option<(Skeleton, Expression)>,
 }
 
 impl Motion {
     /// Downed, how it lies as last posed (owner frame; see [`Motion::lying`]).
     pub(super) fn lying(&self) -> Option<Lying> {
         self.lying.filter(|_| self.posed && self.down)
+    }
+
+    /// The skeleton and the face as last posed (none before the first pose).
+    pub(super) fn body(&self) -> Option<&(Skeleton, Expression)> {
+        self.body.as_ref()
     }
 
     /// Set the feet down as a steady gait has them.
@@ -5591,7 +5600,7 @@ pub(super) fn humanoid(
             knees: m.tend_knees,
         }),
     };
-    let (look, lids, jaw, breath) = face(FaceIn {
+    let (look, lids, jaw, breath, expression) = face(FaceIn {
         g: &mut m.gaze,
         now,
         dt,
@@ -5608,6 +5617,7 @@ pub(super) fn humanoid(
         melee: !ranged,
         fall,
         tend: tending.then(|| seen.at + (facing * m.tend_at).as_dvec3()),
+        suppression: combat.map_or(0.0, |c| c.suppression),
     });
     let skeleton = solve(&Input {
         now: now_was,
@@ -5642,6 +5652,7 @@ pub(super) fn humanoid(
         seed,
     });
     m.lying = fall.filter(|_| is_down).map(|f| Lying::of(&skeleton, f));
+    m.body = Some((skeleton, expression));
     m.sway.step(now, &skeleton, m.vel, m.yaw);
     let spin = (now * 53.0 % TAU as f64) as f32;
     let slots = place(&skeleton, kind, flash, spin, &m.sway);
@@ -5668,6 +5679,26 @@ struct FaceIn<'a, 'b> {
     fall: Option<Fall>,
     /// Reviving a downed mate: where its chest lies.
     tend: Option<DVec3>,
+    /// How pinned down it is by fire (0..1).
+    suppression: f32,
+}
+
+/// What the face shows, for a face another module draws (see `character.rs`), each 0..1: the
+/// lids' blink alone (shut when downed); pain (the flinch of a blow, the ache of a wound);
+/// effort (a heavy blow set and shouted, a sprint, a guard braced, a draw held, a mate's chest
+/// pressed); fear (pinned down by fire, badly hurt in a fight); how hard it pants, and where
+/// in a breath it is (in 1, out −1); how far the jaw is open; and how slack the face is,
+/// downed.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(super) struct Expression {
+    pub(super) blink: f32,
+    pub(super) pain: f32,
+    pub(super) effort: f32,
+    pub(super) fear: f32,
+    pub(super) pant: f32,
+    pub(super) breath: f32,
+    pub(super) jaw: f32,
+    pub(super) slack: f32,
 }
 
 /// Where the eyes look, and the face: in a fight, at the foe; for a moment at whoever else
@@ -5677,8 +5708,8 @@ struct FaceIn<'a, 'b> {
 /// breathing hard through the mouth; struck, the eyes squeeze and the teeth bare a moment; a
 /// heavy blow sets the jaw and narrows the eyes through the telegraph and goes in with a
 /// shout; downed, the eyes close and the jaw goes slack. The look, how far the lids are shut
-/// and the jaw open, and the breath (in 1, out −1, deeper when winded).
-fn face(f: FaceIn) -> (Look, f32, f32, f32) {
+/// and the jaw open, the breath (in 1, out −1, deeper when winded), and the expression.
+fn face(f: FaceIn) -> (Look, f32, f32, f32, Expression) {
     let FaceIn {
         g,
         now,
@@ -5818,10 +5849,21 @@ fn face(f: FaceIn) -> (Look, f32, f32, f32) {
     }
     let u = (now - g.blink) as f32;
     let mut lids = step(0.0, 0.05, u) * (1.0 - step(0.09, 0.2, u));
+    let mut blink = lids;
     // The breath: quick and deep through the mouth after a sprint, or badly hurt.
-    let wounded = f.vitals.map_or(0.0, |v| 1.0 - step(0.3, 0.4, v.fraction()));
-    g.winded = (g.winded + dt * (0.2 * step(3.8, 5.5, f.speed) - 0.05)).clamp(0.0, 1.0);
+    let health = f.vitals.map_or(1.0, |v| v.fraction());
+    let wounded = f.vitals.map_or(0.0, |_| 1.0 - step(0.3, 0.4, health));
+    let sprint = step(3.8, 5.5, f.speed);
+    g.winded = (g.winded + dt * (0.2 * sprint - 0.05)).clamp(0.0, 1.0);
     let hard = g.winded.max(0.7 * wounded);
+    // The expression: a wound aches; running hard, and a breath still short, is an effort; pinned
+    // down, or badly hurt in a fight, it is afraid.
+    let mut pain = (0.6 * wounded).max(0.4 * (1.0 - health));
+    let mut effort = (0.7 * sprint).max(0.3 * g.winded);
+    let fear = (0.9 * f.suppression).max(if fighting { 0.6 * wounded } else { 0.0 });
+    if f.tend.is_some() {
+        effort = effort.max(0.35);
+    }
     g.breath += f64::from(dt * TAU / lerp(3.8, 1.2, hard));
     let breath = g.breath.sin() as f32;
     let mut jaw = hard * (0.3 + 0.3 * (1.0 + breath));
@@ -5831,25 +5873,68 @@ fn face(f: FaceIn) -> (Look, f32, f32, f32) {
         let k = step(0.0, 0.03, e) * (1.0 - step(0.25, 0.7, e)) * h.strength.min(1.0);
         lids = lids.max(0.65 * k);
         jaw = jaw.max(0.25 * k);
+        pain = pain.max(k);
     }
     match f.act {
         Act::Windup { p, heavy: true } if f.melee => {
             let set = step(0.1, 0.4, p);
             lids = lids.max(0.35 * set);
             jaw *= 1.0 - set;
+            effort = effort.max(set);
         }
         Act::Strike { t, heavy: true, .. } if f.melee => {
             let shout = step(0.0, 0.04, t) * (1.0 - step(0.2, 0.45, t));
             lids = lids.max(0.4 * shout);
             jaw = jaw.max(0.7 * shout);
+            effort = effort.max(shout);
         }
+        // A light blow, a draw or an aim held, a guard braced, a stagger fought.
+        Act::Windup { p, .. } => effort = effort.max(0.45 * step(0.1, 0.6, p)),
+        Act::Strike { t, .. } => effort = effort.max(0.45 * (1.0 - step(0.1, 0.3, t))),
+        Act::Block { k, .. } => effort = effort.max(0.6 * k),
+        Act::Stagger { k, .. } => pain = pain.max(0.5 * k),
         _ => {}
     }
+    let mut slack = 0.0;
     if let Some(fall) = f.fall {
         lids = lids.max(step(0.1, 0.5, fall.t));
         jaw = lerp(jaw, 0.3, step(0.2, 0.8, fall.t));
+        slack = step(0.1, 0.5, fall.t);
+        blink = blink.max(slack);
     }
-    (look, lids, jaw, breath * (1.0 + 2.0 * hard))
+    let calm = 1.0 - slack;
+    let expression = Expression {
+        blink,
+        pain: pain.min(1.0) * calm,
+        effort: effort.min(1.0) * calm,
+        fear: fear.min(1.0) * calm,
+        pant: hard * calm,
+        breath,
+        jaw,
+        slack,
+    };
+    (look, lids, jaw, breath * (1.0 + 2.0 * hard), expression)
+}
+
+/// Pieces held in the hands rather than worn (the weapon and its pieces, the shield, a
+/// magazine or arrow in hand, the muzzle flash): they stay when a character module draws the
+/// body.
+pub(super) fn held(part: Part) -> bool {
+    const HELD: [Part; 12] = [
+        Part::Weapon,
+        Part::Shield,
+        Part::Muzzle,
+        HILT,
+        LIMB_UPPER,
+        LIMB_LOWER,
+        STRING_UPPER,
+        STRING_LOWER,
+        ARROW,
+        MAGAZINE,
+        PLAIN_WEAPON,
+        PLAIN_SHIELD,
+    ];
+    slot(part).is_some_and(|i| HELD.iter().any(|&h| slot(h) == Some(i)))
 }
 
 /// Every part's pose.

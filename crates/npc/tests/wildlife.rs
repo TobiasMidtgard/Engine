@@ -9,7 +9,9 @@ use std::f32::consts::{PI, TAU};
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
-use engine_npc::wildlife::{PACK_CHASE_SECS, PACK_REST_SECS, SCENT_REACH, ZIGZAG_RANGE};
+use engine_npc::wildlife::{
+    ESCAPE_GAP, PACK_CHASE_SECS, PACK_REST_SECS, SCENT_REACH, TEST_SECS, ZIGZAG_RANGE,
+};
 use engine_npc::*;
 use engine_world::locomotion::{LocomotionMode, LocomotionState};
 use engine_world::physics::Collider;
@@ -950,9 +952,10 @@ fn flanking(app: &mut App, deer: &[Entity], pack: &[Entity]) -> Flanking {
 /// Over eight draws of each pack size: every hunt is a real chase, with the ambusher (in a
 /// pack of four or more) lying in wait well beyond the quarry as the tester rushes, the
 /// tester driving it from behind, and never a flanker level with it on its far side. Each
-/// pack size keeps both flankers out on their own sides for most of its flanking, and in at
-/// least half the hunts both run abreast of the quarry for a second (unless the flanking was
-/// over within two) and hold their sides for three quarters of it. (A deer at full sprint
+/// pack size (four as well as three and five) keeps both flankers out on their own sides for
+/// 85 % of its flanking, and in at least five of the eight hunts both run abreast of the
+/// quarry for a second (unless the flanking was over within two) and hold their sides for
+/// three quarters of it. (A deer at full sprint
 /// outruns a wolf, so on a long straight bolt the flankers fall back: hence not every hunt.)
 #[test]
 fn flankers_run_out_on_the_quarrys_sides() {
@@ -986,11 +989,11 @@ fn flankers_run_out_on_the_quarrys_sides() {
             good += (abreast && f.sides * 4 >= f.phase * 3) as usize;
         }
         assert!(
-            sides * 10 >= phase * 8,
+            sides * 20 >= phase * 17,
             "{wolves} wolves: both flankers on their sides for {sides} of {phase} steps"
         );
         assert!(
-            good >= 4,
+            good >= 5,
             "{wolves} wolves: both flankers abreast and on their sides in {good} of 8 hunts"
         );
     }
@@ -1288,12 +1291,10 @@ fn a_pack_stalks_a_herd_it_scents_from_afar() {
     );
 }
 
-#[test]
-fn the_pack_gives_up_a_long_chase_and_rests() {
-    let mut app = app();
+/// A wary deer in its prime that bolts while a pack of three is still well off, running
+/// `speed` m/s however long it runs (and with room to run), and the pack.
+fn long_chase(app: &mut App, speed: f32) -> (Entity, Vec<Entity>) {
     app.world.resource_mut::<WildlifeSettings>().respawn_secs = 0.0;
-    // A wary deer in its prime, that bolts while the pack is still well off and is too
-    // fast for it to run down (and has room to run).
     let deer = app
         .world
         .spawn((
@@ -1305,13 +1306,23 @@ fn the_pack_gives_up_a_long_chase_and_rests() {
             },
             Herd(1),
             NpcMotor {
-                run_speed: 11.5,
+                run_speed: speed,
+                sprint_speed: speed,
                 ..Species::Deer.motor()
             },
         ))
         .id();
-    let pack = herd(&mut app, Species::Wolf, DVec3::new(0.0, 0.0, -40.0), 3, 2);
+    let pack = herd(app, Species::Wolf, DVec3::new(0.0, 0.0, -40.0), 3, 2);
     app.update();
+    (deer, pack)
+}
+
+/// A deer just faster than the wolves (10.8 m/s against their 10.5) keeps its lead without
+/// getting away: the pack runs it to its time, gives up all together, rests and hunts again.
+#[test]
+fn the_pack_gives_up_a_long_chase_and_rests() {
+    let mut app = app();
+    let (deer, pack) = long_chase(&mut app, 10.8);
     let starve = |app: &mut App| {
         for &w in &pack {
             app.world.get_mut::<AnimalMind>(w).unwrap().hunger = 1.0;
@@ -1387,4 +1398,61 @@ fn the_pack_gives_up_a_long_chase_and_rests() {
         pack.iter().all(|&w| hunting(&app, w)),
         "the pack hunts again after its rest"
     );
+}
+
+/// A fit deer that outruns the pack (11.5 m/s) and keeps pulling away is let go once the
+/// pack has tested it, long before its time is up: all of it together, and it rests.
+#[test]
+fn the_pack_breaks_off_from_a_fit_deer_that_outruns_it() {
+    let mut app = app();
+    let (deer, pack) = long_chase(&mut app, 11.5);
+    for &w in &pack {
+        app.world.get_mut::<AnimalMind>(w).unwrap().hunger = 1.0;
+    }
+    let mut f = 0;
+    while !pack.iter().any(|&w| state(&app, w) == AnimalState::Chase) {
+        app.update();
+        f += 1;
+        assert!(f < 60 * 60, "the pack never ran");
+    }
+    let start = f;
+    let gap = |app: &App| {
+        pack.iter()
+            .map(|&w| flat(pos(app, w) - pos(app, deer)).length())
+            .fold(f32::MAX, f32::min)
+    };
+    let mut first = None;
+    loop {
+        app.update();
+        f += 1;
+        assert_ne!(state(&app, deer), AnimalState::Dead, "it can't be caught");
+        let secs = (f - start) as f64 / 60.0;
+        let resting = pack
+            .iter()
+            .filter(|&&w| state(&app, w) == AnimalState::Rest)
+            .count();
+        if resting > 0 {
+            first.get_or_insert((secs, gap(&app)));
+        }
+        if resting == pack.len() {
+            break;
+        }
+        assert!(secs < PACK_CHASE_SECS, "the pack ran on to its time");
+    }
+    let (at, lead) = first.unwrap();
+    let all = (f - start) as f64 / 60.0;
+    eprintln!("broke off {at:.1} s in, {lead:.1} m behind, all resting {all:.1} s in");
+    assert!(at > TEST_SECS, "it tested the deer first ({at:.1} s)");
+    assert!(
+        at < PACK_CHASE_SECS * 0.6,
+        "it let the deer go well before its time ({at:.1} s)"
+    );
+    assert!(lead > ESCAPE_GAP, "the deer had got away ({lead:.1} m)");
+    assert!(all - at < 0.5, "all together ({:.1} s apart)", all - at);
+    for _ in 0..60 * 10 {
+        app.update();
+        for &w in &pack {
+            assert_eq!(state(&app, w), AnimalState::Rest, "{w:?} rests");
+        }
+    }
 }

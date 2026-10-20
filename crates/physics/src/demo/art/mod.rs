@@ -9,6 +9,7 @@ pub(crate) mod barrel_run;
 pub(crate) mod dummy;
 pub(crate) mod kit;
 pub(crate) mod pendulums;
+pub(crate) mod pool;
 pub(crate) mod props;
 pub(crate) mod structures;
 pub(crate) mod textures;
@@ -67,6 +68,8 @@ pub(crate) enum Mat {
     Chrome,
     /// Glossy lacquer of this color (sRGB hex): the pendulum wave's bobs, the cradle's base.
     Lacquer(u32),
+    /// Billiard cloth of this color (sRGB hex).
+    Felt(u32),
 }
 
 /// Texture sets, generated once per app.
@@ -207,6 +210,7 @@ pub(crate) fn material(world: &mut World, m: Mat) -> Handle<StandardMaterial> {
             .with_metallic(1.0)
             .with_roughness(0.07),
         Mat::Lacquer(hex) => StandardMaterial::hex(hex).with_roughness(0.2),
+        Mat::Felt(hex) => StandardMaterial::hex(hex).with_roughness(0.93),
     };
     let h = world.resource_mut::<Assets<StandardMaterial>>().add(made);
     world.resource_mut::<ArtCache>().materials.insert(m, h);

@@ -1,10 +1,12 @@
 # engine_ui — UI
 
-**Owner:** UI system and maps. **Status:** round 8: every screen below works and has a test
+**Owner:** UI system and maps. **Status:** round 10: every screen below works and has a test
 and a gallery screenshot; the showcase's market street is detailed procedural art; quests and
 the journal drive the HUD tracker and the map waypoint; a quick-select wheel slows the world
 while you choose a weapon; a skill tree spends points on ranks of passive, active and ultimate
-skills; a crafting bench turns what is in the bag into potions, gear and gadgets.
+skills; a crafting bench turns what is in the bag into potions, gear and gadgets; save and load
+slots show a painted view of where each game was saved; a title screen opens the game over
+a turning view of the home world.
 Background research: `game-engine-research/ui.md` in the project files.
 
 ## What it is
@@ -33,6 +35,8 @@ to 0 and restores it when it closes.
 | `wheel` | Quick-select wheel: weapons, items and abilities around a ring, picked by pointing (mouse, locked-cursor motion or either stick), a click, A, Enter or a number key; slows the world while open; hold-and-release mode; picks write the HUD's `weapon.*` | `items` (default `wheel.items`), `current`, `slow`, `hold`, `hold_pad` |
 | `skills` | Skill tree (`SkillTree`): branches of passive, active and ultimate skills linked by prerequisites, with ranks, point costs and level gates; a details panel with every rank and what each needs; learn with the button, Space or X, reset (after a confirm) with R or Y; learning writes `skills.<id>` and `player.skill_points` and sends `skill.learned:<id>`; `skills.tree`, `skills.learn`, `skills.grant` and `skills.reset` drive it | `select` (skill id) |
 | `crafting` | Crafting bench (`RecipeBook`): alchemy, smithing and tinkering recipes with what each makes, its stats and the ingredients it needs against what the bag holds; unknown recipes show as silhouettes with where to learn them; choose how many and craft, a timed build-up in a ring of light, then ingredients leave the bag and the result lands in it (`craft.made:<id>`); `craft.recipes`, `craft.make` and `craft.learn` drive it | `station`, `select` (recipe id), `owner` |
+| `saves` | Save and load (`SaveSlots`): autosave, quicksave and manual saves as cards with a painted view of where each was made (valley, forest, village at night, snow, desert, orbit), chapter, place, level, play time and date; load after a confirm, save into a new slot or over one (keeping its name), delete after a confirm; sends `game.load:<id>`, `game.save:<id>` and `game.delete_save:<id>` for the game; Save and Load in the pause menu open it; `saves.list`, `saves.save` and `saves.delete` drive it | `mode` (`load`, `save`), `select` |
+| `title` | Title screen: the game's name over a slowly turning view of the home world, a moon, the galaxy and nebula light; Continue (the newest save, with its card), New Game (`game.new`), Load Game (the `saves` screen), Settings and Quit (asks, then `game.exit`); Esc doesn't close it | |
 | `pause` | Pause menu with a character card; pauses game time | |
 | `settings` | Gameplay, Video (`RenderSettings`), Audio, Controls (rebinding), Interface (scale, accent colour) | `tab` |
 | `confirm` | Yes/no dialog that sends `confirm:<action>` | `title`, `text`, `confirm`, `cancel`, `action`, `danger` |
@@ -90,7 +94,7 @@ Veil galaxy), builds the market street and pins world markers over Old Brannoc's
 showcase's `market` zone calls it, and its tour opens each screen in turn in front of the
 trader (`market_hud`, `market_dialogue`, `market_shop`, `market_inventory`, `market_journal`,
 `market_wheel`,
-`market_skills`, `market_crafting`, `market_map_*`, `market_pause`, `market_settings`; the camera is `demo::market::ui_view()`).
+`market_skills`, `market_crafting`, `market_saves`, `market_title`, `market_map_*`, `market_pause`, `market_settings`; the camera is `demo::market::ui_view()`).
 
 The market street (`demo::market`): five stalls around a cobbled square (produce, cloth, Old
 Brannoc the trader, potter, smith), each with its own striped awning, lantern light and goods;
@@ -112,9 +116,9 @@ square).
 
 - `cargo test -p engine_ui`: unit tests, `tests/flows.rs` (mouse click, dialogue choice opens
   the shop, buying, drag and drop, map zoom and waypoint, quests and the journal, the
-  quick-select wheel, the skill tree, crafting, pause and resume, key rebinding) and
+  quick-select wheel, the skill tree, crafting, save and load, the title screen, pause and resume, key rebinding) and
   `tests/headless.rs` (renders a panel and checks pixels; needs a GPU or lavapipe).
 - `cargo run -p engine_ui --example gallery --release -- <dir> [width] [height] [shot ...]`
   renders every screen (hud, wheel, dialogue, dialogue_choices, shop, shop_sell, inventory,
-  inventory_drag, journal, journal_finished, skills, crafting, crafting_busy, map_galaxy, map_system, map_globe, map_surface, pause, confirm, settings,
+  inventory_drag, journal, journal_finished, skills, crafting, crafting_busy, saves, saves_save, title, map_galaxy, map_system, map_globe, map_surface, pause, confirm, settings,
   settings_video, settings_controls, theme_cyan) to PNGs.

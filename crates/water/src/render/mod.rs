@@ -28,6 +28,10 @@ pub const SHADER: &str = include_str!("water.wgsl");
 /// Bodies drawn at once (the nearest ones).
 pub const MAX_BODIES: usize = 8;
 const MAX_SHOWERS: usize = 4;
+/// Most plunge pools boiling under falls (nearest first).
+const MAX_PLUNGES: usize = 8;
+/// Plunge pools further than this from the camera don't boil, meters.
+const PLUNGE_REACH: f64 = 400.0;
 /// Grid points around each ring.
 const SEGMENTS: u32 = 256;
 /// Most rings a body can use (≈ 60 km at the finest spacing).
@@ -118,6 +122,12 @@ fn fall_strip(
     }
 }
 
+/// Radius of the white boil where a fall of `power` watts lands, meters: about 2 m under a
+/// 5 m fall of 0.2 m³/s, growing with the root of flow times drop.
+fn boil_radius(power: f32) -> f32 {
+    (0.8 + 1.2 * (power / 9810.0).max(0.0).sqrt()).min(6.0)
+}
+
 /// The cloud of spray where a fall of `power` watts lands at `foot` (world; `rel` relative
 /// to the camera): a quad facing the camera (`right`, `up`), drawn over the curtain's foot.
 /// Corners go in `normal_frac.xy`, its radius in `.z` and how dense it is in `.w`.
@@ -182,6 +192,7 @@ struct Globals {
     counts: [u32; 4],
     under: [f32; 4],
     under2: [f32; 4],
+    plunges: [[f32; 4]; MAX_PLUNGES],
 }
 
 #[repr(C)]
@@ -704,7 +715,14 @@ impl WaterFeature {
     }
 
     /// Curtains of water falling free over the flowing regions' lips.
-    fn upload_falls(gpu: &mut Gpu, shared: &GpuShared, state: &WaterState, view: &ViewData) {
+    /// `plunges`: where the visible falls land (world) and their power (W).
+    fn upload_falls(
+        gpu: &mut Gpu,
+        shared: &GpuShared,
+        state: &WaterState,
+        view: &ViewData,
+        plunges: &[(DVec3, f32)],
+    ) {
         let mut lips: Vec<(f64, &crate::flow::FlowSim, crate::flow::Lip)> = state
             .flows
             .iter()
@@ -726,11 +744,9 @@ impl WaterFeature {
         // Spray clouds last, so they draw over the curtains' feet.
         if !lips.is_empty() {
             let (right, up) = (view.rotation * Vec3::X, view.rotation * Vec3::Y);
-            for sim in state.flows.iter().filter(|sim| sim.visible) {
-                for (foot, _, power) in sim.plunges((sim.cell * FALL_SLOPE).max(FALL_LEAST_DROP)) {
-                    if foot.distance(view.origin) < FALLS_REACH {
-                        mist_puff(foot, view.relative(foot), power, right, up, &mut vertices);
-                    }
+            for &(foot, power) in plunges {
+                if foot.distance(view.origin) < FALLS_REACH {
+                    mist_puff(foot, view.relative(foot), power, right, up, &mut vertices);
                 }
             }
         }
@@ -1211,6 +1227,24 @@ impl RenderFeature for WaterFeature {
             puddles_on as u32,
             0,
         ];
+        // Where the falls land, the water boils white (`plunge_boil`).
+        let plunges: Vec<(DVec3, f32)> = state
+            .flows
+            .iter()
+            .filter(|sim| sim.visible)
+            .flat_map(|sim| sim.plunges((sim.cell * FALL_SLOPE).max(FALL_LEAST_DROP)))
+            .map(|(foot, _, power)| (foot, power))
+            .collect();
+        let mut near: Vec<_> = plunges
+            .iter()
+            .map(|(foot, power)| (foot.distance(view.origin), *foot, *power))
+            .filter(|(d, ..)| *d < PLUNGE_REACH)
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (dst, (_, foot, power)) in g.plunges.iter_mut().zip(&near) {
+            *dst = view.relative(*foot).extend(boil_radius(*power)).to_array();
+        }
+        g.counts[3] = near.len().min(MAX_PLUNGES) as u32;
         if let Some((slot, depth)) = under {
             let b = &uniform.bodies[slot];
             g.rain[2] = slot as f32;
@@ -1226,7 +1260,7 @@ impl RenderFeature for WaterFeature {
 
         Self::upload_ripples(gpu, shared, &state);
         Self::upload_flows(gpu, shared, &state, view);
-        Self::upload_falls(gpu, shared, &state, view);
+        Self::upload_falls(gpu, shared, &state, view, &plunges);
 
         // Stats.
         let flows = gpu.flows.iter().filter(|f| f.drawn);
@@ -1379,8 +1413,8 @@ mod tests {
 
     #[test]
     fn uniform_layout_matches_the_shader() {
-        // WGSL: Globals 7 vec4 + 4 showers; GpuBody 10 vec4 + 24 waves of 2 vec4.
-        assert_eq!(std::mem::size_of::<Globals>(), (7 + 4) * 16);
+        // WGSL: Globals 7 vec4 + 4 showers + 8 plunges; GpuBody 10 vec4 + 24 waves of 2 vec4.
+        assert_eq!(std::mem::size_of::<Globals>(), (7 + 4 + 8) * 16);
         assert_eq!(std::mem::size_of::<GpuBody>(), (10 + MAX_WAVES * 2) * 16);
         assert_eq!(
             std::mem::size_of::<WaterUniform>(),

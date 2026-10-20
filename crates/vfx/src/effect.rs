@@ -322,6 +322,19 @@ pub enum Sprite {
     /// `facing: axis`, `additive` 1, `size` the column's height, `stretch` its width over its
     /// height, and a couple of overlapping long-lived particles (`local_space`, `steady`).
     Veil,
+    /// A cluster of ice spikes thrust out of a surface: seven faceted, glassy spikes fanned out
+    /// from one root, the middle ones tallest, deep blue at the root and pale at the tips,
+    /// mirroring the sky along their ridges. They grow out in the first moments of life, cloud
+    /// with cracks and thin away at its end (frost impacts, ice walls). Use with `facing:
+    /// axis`, `stretch` 1, `lit` 1, `additive` 0, `size` the cluster's height and a light
+    /// icy color; the effect's up axis is the way they grow.
+    Crystal,
+    /// An electric arc crawling out from the sprite's center along its +x: a jagged, white-hot
+    /// channel in a halo with a branch forking off it, re-striking along a new path several
+    /// times a second (lightning strikes, shorted machines, shock spells). Use with `facing:
+    /// horizontal` to spread over the ground, `rotation_deg` 0 to 360 to scatter them, a short
+    /// life, a high `emissive` and `additive` 1.
+    Arc,
 }
 
 impl Sprite {
@@ -334,14 +347,15 @@ impl Sprite {
     pub fn translucency(self) -> f32 {
         match self {
             Sprite::Smoke | Sprite::Dust => 1.0,
-            Sprite::Droplet | Sprite::Crown | Sprite::Jet => 0.4,
+            Sprite::Droplet | Sprite::Crown | Sprite::Jet | Sprite::Crystal => 0.4,
             Sprite::Shard
             | Sprite::Haze
             | Sprite::Vortex
             | Sprite::Plume
             | Sprite::Ripple
             | Sprite::Blaze
-            | Sprite::Veil => 0.0,
+            | Sprite::Veil
+            | Sprite::Arc => 0.0,
             _ => 0.6,
         }
     }

@@ -61,15 +61,22 @@
 //! grazing, alert freezes, rest, stalking, hopping, a starling's wing beat, bounds, glides,
 //! banks, takeoffs and landings, and falling over when killed.
 //!
+//! Fighters are ready for a character module's faces and bodies (see `character.rs`): they ask
+//! for a look, write their `SkeletonPose` and `FaceControls`, wear blood, bruises and dirt,
+//! and while a character module draws appearances, their own body is hidden (what they hold
+//! stays).
+//!
 //! With `NpcSettings::show_intent` on, a ring on the ground marks where each NPC decided to
 //! go and a line leads to it, colored by why: blue cover, orange flank, purple high ground,
 //! grey falling back, yellow investigating or searching.
 
 mod animal;
+pub(crate) mod character;
 mod humanoid;
 
 use engine_core::prelude::*;
 use engine_render::{MaterialRef, MeshRenderer, Shape, StandardMaterial};
+use engine_world::character::{Appearance, AppearanceBodies, AppearanceRequest};
 use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::{AttackEvent, AttackKind, DamageEvent};
 
@@ -278,6 +285,9 @@ type PoseItem<'a> = (
         Option<&'a BirdFlight>,
         Option<&'a NpcMotor>,
         Option<&'a NpcMemory>,
+        // A look a character module may draw instead of the stand-in body.
+        Has<Appearance>,
+        Has<AppearanceRequest>,
     ),
 );
 
@@ -301,7 +311,9 @@ pub(crate) struct Sightings {
 
 /// Pose every stand-in from its owner's state (a fighter's also from the attacks telegraphed
 /// at it, the blows that land on it, the attacker whose blow its guard meets, and the downed
-/// mate it revives).
+/// mate it revives). While a character module draws appearances, a fighter with a look shows
+/// only what it holds.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn pose_stand_ins(
     mut owners: Query<PoseItem, Without<StandInPart>>,
     foes: Query<FoeItem, Without<StandInPart>>,
@@ -310,6 +322,7 @@ pub(crate) fn pose_stand_ins(
     mut blows: MessageReader<DamageEvent>,
     mut seen: Local<Sightings>,
     seeds: Query<&crate::seed::Seed>,
+    drawn: Option<Res<AppearanceBodies>>,
 ) {
     let seen = &mut *seen;
     seen.attacks.clear();
@@ -351,7 +364,8 @@ pub(crate) fn pose_stand_ins(
     {
         let now = clock.map(|c| c.now).unwrap_or(0.0);
         let phase = mover.map(|m| m.phase).unwrap_or(0.0);
-        let (animal, mind, bird, motor, memory) = animal;
+        let (animal, mind, bird, motor, memory, looks, asks) = animal;
+        let drawn_elsewhere = drawn.is_some() && animal.is_none() && (looks || asks);
         let mut materials: Vec<(Part, StandardMaterial)> = Vec::new();
         let placed: Box<dyn Fn(Part) -> Placed> = match animal.map(|a| a.species) {
             None => {
@@ -437,8 +451,9 @@ pub(crate) fn pose_stand_ins(
             if *t != new {
                 *t = new;
             }
-            if r.visible != p.visible {
-                r.visible = p.visible;
+            let visible = p.visible && !(drawn_elsewhere && !humanoid::held(part.part));
+            if r.visible != visible {
+                r.visible = visible;
             }
             // Overridden this step, or back to the part's own material.
             let m = materials
