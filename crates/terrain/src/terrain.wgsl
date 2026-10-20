@@ -1184,6 +1184,28 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // up near the camera; elsewhere on a globe the streaks fade out.)
     let steep = smoothstep(0.35, 0.7, slope) * smoothstep(0.7, 0.9, abs(up.y)) * vegetation
         * (1.0 - smoothstep(8.0, 40.0, pixel));
+    // Bedded cliffs: beds about nine meters thick, each its own shade of gray or buff. Each bed
+    // weathers back from its top edge, so its face leans out toward the bottom (in shadow) and
+    // back toward the top (lit), with a dark notch at the bedding plane; harder beds stand out
+    // more.
+    var bed_tilt = 0.0;
+    let bed_fade = steep * (1.0 - smoothstep(1.0, 6.0, pixel));
+    if (steep > 0.0) {
+        let bed_h = altitude + (macro_v - 0.5) * 40.0 * macro_fade + (patch_v - 0.5) * 4.0 * clump_fade;
+        // (Uneven beds, five to thirteen meters.)
+        let bh = (bed_h + 7.0 * sin(bed_h * 0.083 + 1.7)) / 9.0;
+        let bed = floor(bh);
+        let f = bh - bed;
+        let hard = hash13(vec3<f32>(bed, 3.1, 7.7));
+        let tone = hash13(vec3<f32>(bed, 11.3, 1.9));
+        let bed_tone = mix(vec3<f32>(0.86, 0.88, 0.92), vec3<f32>(1.12, 1.04, 0.92), tone);
+        col[M_ROCK] *= mix(vec3<f32>(1.0), bed_tone, steep * (1.0 - smoothstep(4.0, 30.0, pixel)));
+        let profile = smoothstep(0.0, 0.85, f) * (1.0 - smoothstep(0.92, 1.0, f)) - 0.5;
+        // Some stretches of cliff are massive rock with the bedding barely showing.
+        let bedded = smoothstep(0.3, 0.6, macro_v + (variety - 0.5) * 0.4);
+        bed_tilt = profile * mix(0.3, 1.0, hard) * mix(0.55, 1.0, bedded) * bed_fade;
+        col[M_ROCK] *= 1.0 + bed_tilt * 0.2;
+    }
     if (steep > 0.0) {
         let s1 = pnoise3v(vec3<f32>(tp.x * 0.25, tp.y * 0.015625, tp.z * 0.25), vec3<f32>(1024.0, 64.0, 1024.0));
         let s2 = pnoise3v(vec3<f32>(tp.x * 0.0625, tp.y * 0.00390625 + 7.0, tp.z * 0.0625), vec3<f32>(256.0, 16.0, 256.0));
@@ -1303,6 +1325,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 let g = rock_ribs(tp, pixel) * steep;
                 let nr = ms[i].normal;
                 ms[i].normal = normalize(nr - (g - nr * dot(g, nr)) * 0.5);
+                // Each bed's face leans back toward its top.
+                ms[i].normal = normalize(ms[i].normal + up * bed_tilt * 0.9);
+                ms[i].occlusion *= 1.0 - max(-bed_tilt, 0.0) * 0.5;
             }
             // Barren worlds' bare ground is powdery regolith, not the cracked earth of the
             // soil texture: most of its relief and pattern is smoothed away (small craters
