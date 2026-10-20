@@ -31,6 +31,38 @@ fn glow_exposed(luminance: f32, cap: f32) -> f32 {
     return cap * (1.0 - exp(-v / cap));
 }
 
+// Burning stalks lying in the ash: in each cell of a grid (cell = 1) maybe one straight stalk
+// of random direction and length, `chance` of them. Returns how strongly the nearest stalk
+// glows at `p` (1 on its axis) and a random number for that stalk.
+fn stalks(p: vec2<f32>, chance: f32) -> vec2<f32> {
+    let i = floor(p);
+    var best = 0.0;
+    var id = 0.0;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let c = i + vec2<f32>(f32(x), f32(y));
+            let r = hash12(c + vec2<f32>(5.3, 71.9));
+            if (r >= chance) { continue; }
+            let o = c + vec2<f32>(hash12(c), hash12(c + vec2<f32>(37.1, 11.7)));
+            let a = hash12(c + vec2<f32>(91.3, 2.9)) * 6.2832;
+            let half = 0.3 + 0.45 * hash12(c + vec2<f32>(13.7, 47.1));
+            let d = vec2<f32>(cos(a), sin(a));
+            let along = clamp(dot(p - o, d), -half, half);
+            let dist = length(p - o - d * along);
+            // Thin, glowing unevenly along its length and fading at its ends.
+            let width = 0.05 + 0.04 * hash12(c + vec2<f32>(3.1, 8.8));
+            let k = (1.0 - smoothstep(width * 0.4, width, dist))
+                * (1.0 - smoothstep(half * 0.6, half, abs(along)))
+                * (0.45 + 0.55 * value_noise2(vec2<f32>(along * 9.0, r * 50.0)));
+            if (k > best) {
+                best = k;
+                id = r / chance;
+            }
+        }
+    }
+    return vec2<f32>(best, id);
+}
+
 @fragment
 fn fs_scorch(in: FullscreenOut) -> @location(0) vec4<f32> {
     let depth = textureLoad(scene_depth, vec2<i32>(in.position.xy), 0);
@@ -59,22 +91,25 @@ fn fs_scorch(in: FullscreenOut) -> @location(0) vec4<f32> {
     // Burnt ground: black char with grey ash flecks.
     var alpha = scorch * mix(0.78, 0.95, mottle) * height_fade;
     var emission = vec3<f32>(0.0);
-    // Coals: the smoldering litter on the ground is a scatter of glowing specks and thin
-    // glowing threads (the creeping edges of the char) that slowly breathe. Only on the ground:
-    // the stalks standing in it are burnt out, not glowing.
+    // Coals: burnt litter, mostly black, with stalks still glowing where they lie in the ash,
+    // a few lumps (stubble bases) and loose specks, gathered where it is hottest and each
+    // slowly breathing. Only on the ground: the stalks standing in it are burnt out.
     let t = params.ground.z;
     let drift = vec2<f32>(t * 0.05, -t * 0.03);
-    let thread_n = fbm2(tp.xz * 2.2 + drift, 3);
-    let threads = 1.0 - smoothstep(0.0, 0.03, abs(thread_n - 0.5));
-    let specks = smoothstep(0.8, 0.92, value_noise2(tp.xz * 18.0 + drift * 4.0));
+    let heat = smoothstep(0.3, 0.7, fbm2(tp.xz * 1.1 + drift, 3));
+    let st = stalks(tp.xz * 7.0, 0.3 + 0.5 * heat);
+    let lumps = smoothstep(0.76, 0.9, fbm2(tp.xz * 9.0, 3)) * (0.3 + 0.7 * heat);
+    let specks = smoothstep(0.86, 0.95, value_noise2(tp.xz * 22.0 + drift * 4.0))
+        * (0.3 + 0.7 * heat);
+    let glowing = max(st.x * (0.55 + 0.45 * heat), lumps);
     // That detail is a few centimeters across: where a pixel covers more ground than that (far
     // off, or the ground seen edge-on) it fades to its average glow instead of aliasing into
     // long red streaks.
     let ground_m = view_depth(rel) / (frame.proj[1].y * 0.5 * frame.viewport.y)
         / max(abs(normalize(rel).y), 0.03);
     let detail = 1.0 - smoothstep(0.012, 0.05, ground_m);
-    let pattern = mix(0.1, max(threads * 0.8, specks), detail);
-    let breathe = 0.7 + 0.3 * sin(t * 1.7 + thread_n * 20.0);
+    let pattern = mix(0.1, max(glowing, specks * 0.6), detail);
+    let breathe = 0.7 + 0.3 * sin(t * 1.7 + st.y * 20.0);
     let coal = glow * pattern * breathe * (1.0 - smoothstep(0.1, 0.3, h));
     emission += ember_color(900.0 + 300.0 * coal) * glow_exposed(3500.0 * coal * coal, 0.5);
     // Flame base: the burning litter glows under the flames, patchy.
