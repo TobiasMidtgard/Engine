@@ -115,6 +115,8 @@ pub struct SoftBodySim {
     pub lod_debt: f32,
     /// How wet each particle is, 0 (dry) .. 1 (soaked through).
     pub wet: Vec<f32>,
+    /// Simulated here but drawn by another module (hair from `HairGuides`).
+    pub drawn_elsewhere: bool,
     pub(crate) scratch_colliders: Vec<LocalCollider>,
 }
 
@@ -159,6 +161,7 @@ impl SoftBodySim {
             out: StepOutput::default(),
             lod_debt: 0.0,
             wet: Vec::new(),
+            drawn_elsewhere: false,
             scratch_colliders: Vec::new(),
         };
         body.update_bounds();
