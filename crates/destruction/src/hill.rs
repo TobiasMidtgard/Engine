@@ -1,8 +1,9 @@
 //! The Valheim-style dig-and-build hill, built by [`spawn_voxel_hill`] around an origin (for the
 //! showcase's voxel hill zone). One loop of [`HILL_CYCLE_SECS`]:
 //!
-//! - a pickaxe drives a tunnel into the hill's rocky side, then opens a chamber too wide for the
-//!   rock and soil above it, which caves in;
+//! - a pickaxe drives a tunnel into the hill's rocky side, timber sets go up behind it with a
+//!   lantern hung from one, then it opens a chamber too wide for the rock and soil above it,
+//!   which caves in;
 //! - a hoe cuts and fills a level terrace on the other flank, rounds its edges and levels a
 //!   floor pad in its middle;
 //! - beside the hill a timber shelter goes up piece by piece in build-mode support colors (blue
@@ -27,6 +28,7 @@ use std::f32::consts::{FRAC_PI_2, PI};
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
+use engine_render::{MeshRenderer, PointLight, Shape, StandardMaterial};
 use engine_world::{DamageEvent, DamageKind, EditOp, EditShape, SurfaceMaterials, TerrainEdit};
 
 use crate::DemoView;
@@ -77,6 +79,10 @@ const TERRACE_SUPPORT_AT: f32 = 22.0;
 const UNDERMINE: [(f32, f64); 3] = [(23.2, 1.3), (24.4, -1.3), (24.8, 0.0)];
 
 const TUNNEL_DIGS: u32 = 15;
+/// Timber sets shoring the tunnel: where along it (z from the origin) and after which dig.
+const SHORING: [(f64, u32); 3] = [(-9.9, 2), (-8.1, 5), (-6.3, 8)];
+/// The set the lantern hangs from.
+const LANTERN_SET: usize = 1;
 const CHAMBER_DIGS: u32 = 15;
 const RAISES: u32 = 6;
 /// Height of the leveled terrace above the hill's foot, m.
@@ -183,6 +189,8 @@ pub struct HillDemo {
     pub hill: Option<Entity>,
     /// Hut pieces built so far this loop.
     pub hut: Vec<Entity>,
+    /// The tunnel's timber sets and lantern.
+    pub shoring: Vec<Entity>,
     /// The builders of the yard and the terrace (by [`Site`]).
     pub builders: [Option<Entity>; 2],
 }
@@ -234,6 +242,8 @@ impl Site {
 enum Step {
     Build(usize),
     Tunnel(u32),
+    /// A timber set goes up in the tunnel.
+    Shore(usize),
     Chamber(u32),
     Raise(u32),
     Level,
@@ -263,6 +273,9 @@ fn timeline() -> Vec<(f32, Step)> {
     }
     for k in 0..TUNNEL_DIGS {
         t.push((1.0 + k as f32 * 0.45, Step::Tunnel(k)));
+    }
+    for (i, &(_, dig)) in SHORING.iter().enumerate() {
+        t.push((1.2 + dig as f32 * 0.45, Step::Shore(i)));
     }
     for k in 0..CHAMBER_DIGS {
         t.push((8.0 + k as f32 * 0.35, Step::Chamber(k)));
@@ -818,6 +831,75 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
                 None,
             );
         }
+        Step::Shore(i) => {
+            let z = SHORING[i].0;
+            let base = o + DVec3::new(-4.0, 0.0, z);
+            // Two posts leaning in a little and a cap, all into the rock at their ends.
+            let lean = 0.12;
+            let mut set = |name: &'static str, at: DVec3, rotation: Quat, size: Vec3, seed: u64| {
+                let t = Transform::from_translation(base + at).with_rotation(rotation);
+                let mut piece = StructuralPiece::new(DestructibleMaterial::Wood, size);
+                piece.break_energy_j = 6000.0;
+                let e = world
+                    .spawn((
+                        Name::new(name),
+                        t,
+                        GlobalTransform::from(t),
+                        PropModel::new(
+                            PropKind::Timber {
+                                size: size.to_array(),
+                            },
+                            seed,
+                        ),
+                        piece,
+                    ))
+                    .id();
+                demo.shoring.push(e);
+            };
+            let seed = 40 + i as u64 * 3;
+            for (k, side) in [-1.0f32, 1.0].into_iter().enumerate() {
+                set(
+                    "Tunnel post",
+                    DVec3::new(side as f64 * 0.7, 1.1, 0.0),
+                    Quat::from_rotation_z(side * lean),
+                    Vec3::new(0.18, 2.0, 0.18),
+                    seed + k as u64,
+                );
+            }
+            set(
+                "Tunnel cap",
+                DVec3::new(0.0, 2.17, 0.0),
+                Quat::IDENTITY,
+                Vec3::new(1.95, 0.2, 0.22),
+                seed + 2,
+            );
+            if i == LANTERN_SET {
+                // A lantern on a nail under the cap: the tunnel's only light.
+                let at = base + DVec3::new(0.35, 1.92, 0.14);
+                let t = Transform::from_translation(at);
+                let lantern = world
+                    .spawn((
+                        Name::new("Tunnel lantern"),
+                        t,
+                        GlobalTransform::from(t),
+                        MeshRenderer::new(
+                            Shape::Cuboid {
+                                size: [0.11, 0.17, 0.11],
+                            },
+                            StandardMaterial::color(0.9, 0.62, 0.3)
+                                .with_emissive([1.0, 0.62, 0.25], 6.0),
+                        ),
+                        PointLight {
+                            color: [1.0, 0.68, 0.36],
+                            intensity_lm: 1000.0,
+                            range: 10.0,
+                            radius: 0.05,
+                        },
+                    ))
+                    .id();
+                demo.shoring.push(lantern);
+            }
+        }
         Step::Chamber(k) => {
             // Widen the tunnel's end into a hall too wide for its roof (about 9 × 7 m).
             let (col, row) = ((k % 5) as f64, (k / 5) as f64);
@@ -1003,6 +1085,11 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
                 && let Some(mut v) = world.get_mut::<VoxelVolume>(h)
             {
                 v.set_changed();
+            }
+            for e in demo.shoring.drain(..) {
+                if world.get::<Debris>(e).is_none() && world.get_entity(e).is_ok() {
+                    world.despawn(e);
+                }
             }
             for e in demo.hut.drain(..) {
                 if world.get::<Debris>(e).is_none() && world.get_entity(e).is_ok() {
