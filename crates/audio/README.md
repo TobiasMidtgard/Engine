@@ -3,9 +3,10 @@
 **Owner:** Audio and footsteps. Background research: `game-engine-research/sound.md` in the
 project files.
 
-Spatial sound for the engine. Every sound is synthesized while it plays (no sample files
-yet), so footsteps never repeat exactly and follow the ground's state: the same grass sounds
-different wet, frozen, snowed on or burnt.
+Spatial sound for the engine. Footsteps play real recordings where they have been fetched
+(`cargo run -p fetch-assets -- audio`); everything else, and every footstep without them, is
+synthesized while it plays, so footsteps never repeat exactly and follow the ground's state:
+the same grass sounds different wet, frozen, snowed on or burnt.
 
 ## What you hear
 
@@ -17,6 +18,22 @@ different wet, frozen, snowed on or burnt.
   speed). The ground's state (`SurfaceLayers`) changes them: wet ground
   squelches, puddles splash, snow cover crunches over whatever is under it, burnt ground
   crackles, mud freezes hard below 0 °C, and wading drags through water.
+- **Recorded footsteps** on most trail grounds (grass, snow, gravel, wood, metal, concrete,
+  sand, leaves) and rock: CC0 and CC-BY field recordings from Freesound
+  (`assets/manifests/audio.toml`, about 10 MB) are cut into about 270 single-step takes at
+  startup (on a background thread), walking and running ones apart, each levelled to the
+  loudness of the synthesized step it replaces. A take ends where the step does (back at the
+  recording's noise, at most 0.35 s on hard ground, where its scuff fades out, and 0.6 s on
+  soft); jumps, scrapes, odd steps and steps less than 35 dB over the recording's hiss are
+  left out, and a ground with fewer than 8 clean takes is synthesized: today mud (one
+  recording hissy, the other bright noise), ice and puddles (too much background).
+  A step plays a random take (never one of the last few), slightly re-pitched and
+  re-levelled, louder and brighter for heavier and faster steps, duller when wet; the
+  synthesis adds only what the recording lacks (rain's squelch, a puddle's splash, a heavy
+  walker's thump) and takes over when the ground has changed too much (frozen mud) or there
+  are no takes (other grounds, paws, hooves, wheels, falling bodies, CI). Deep snow plays
+  snow whatever is under it. Rock has its own takes too; tile and asphalt borrow concrete's,
+  stone rock's and planks wood's.
 - **Impacts** from physics contacts (what hit what, how hard), **splashes** from
   `WaterSplash`, **explosions** from `WorldImpulse`, **bullet whizzes and supersonic cracks**
   from `ProjectileTrace` passing near the listener, **whooshes** from melee, dash and spell
@@ -88,7 +105,7 @@ Tunable at runtime (JSON, console, scripts, AI agents):
 
 | Name | What |
 |---|---|
-| `AudioSettings` | output, master volume, speed of sound, doppler, air absorption, how much slow motion lowers pitch, silence in space, footstep range, voice limit, weather, fires, water, vehicles, nature and occlusion on/off |
+| `AudioSettings` | output, master volume, speed of sound, doppler, air absorption, how much slow motion lowers pitch, silence in space, footstep range, recorded footsteps on/off, voice limit, weather, fires, water, vehicles, nature and occlusion on/off |
 | `AudioMix` | volume per bus (world, ambience, music, ui, voice) and mute |
 | `FootstepSurfaces` | how each surface sounds underfoot: 14 layer weights, brightness, pitch, gain |
 | `SoundRings` | coloured rings on the ground for each sound near a footstep trail (or everywhere) |
@@ -124,7 +141,9 @@ Reads (all from `engine_world`): `GroundContact`, `AnimationParams` (speed), `Co
 `WheelContacts` (vehicles), `WeatherState`, wind, temperature, air, water, ground and
 gravity bodies through `Env`, `PhysicsQueries::raycast` (roof over the listener,
 walls between the listener and each sound),
-`Time` / `TimeDilation` / `LocalTimeScale`, `engine_render::Camera`.
+`Time` / `TimeDilation` / `LocalTimeScale`, `engine_render::Camera`, and the fetched
+recordings in `<asset root>/fetched/audio/footsteps/<surface>/` (`AssetServer::root`, or
+`assets/` without one; licenses and credits in `assets/fetched/THIRD_PARTY_NOTICES.md`).
 
 Follows `WorldShift`: the ears, every playing sound and the trail's walkers move into the
 new frame, so a floating-origin move is silent.
@@ -154,18 +173,27 @@ character's and shows as a ring in its ground's colour.
   skidding, thunder at three distances, every bird's song, and crickets and cicadas to WAV
   files
   (`--layers` prints each footstep layer's level).
+- `cargo run -p engine_audio --release --example footstep_ab -- out/` renders the same six
+  steps on every trail ground synthesized and recorded (`<ground>_ab.wav`), plus light,
+  heavy, running, rain-soaked and puddle steps with the recordings (`<ground>_response.wav`);
+  `--takes` writes and lists every take, with its noise floor, tail and length in `takes.csv`.
 - `tests/plugin.rs`: contacts are heard, out-of-earshot steps are skipped, space is silent,
   the trail walks every surface, walls muffle what's behind them, burning ground and burning
   things are heard, shores lap and brooks babble, sounds stay put when the world shifts,
   lightning rolls thunder late, a waterfall roars instead of dripping, engines rev and tyres
   skid, sound travels at the speed the air allows, and birds sing at dawn, hush in rain and
-  give way to owls at night. `tests/screenshot.rs` renders the
-  trail headless.
+  give way to owls at night, and recorded takes play where a surface has some (the
+  synthesis everywhere else). Unit tests in `samples.rs` cut fake recordings into takes and
+  check the cutting and picking rules (takes end with the step, noisy steps and thin surfaces
+  left out, no repeats, walk or run, snow and puddles, the fallbacks); none
+  needs the fetched files. `tests/screenshot.rs` renders the trail headless.
 
 ## Done when
 
 - Footsteps change from grass to mud to snow; rain gets louder with intensity; slow motion
   lowers the pitch. ✓ (all three are in the trail recording and the tests)
 
-Next: music layers, and recorded samples alongside the synthesis (through the asset
-manifest, `assets/manifests/audio.toml`).
+Next: music layers; recorded takes for paws and hooves (still synthesized: boot takes
+re-pitched for a dog's and a horse's eight feet buried the trail's gaps in noise), cleaner
+recordings of mud, ice and puddles (what there is has too much hiss or background), and
+recordings for more grounds (dirt, fabric).
