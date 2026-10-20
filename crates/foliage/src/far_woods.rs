@@ -316,6 +316,8 @@ pub struct FarWoodCell {
     built_from: DVec3,
     /// Its meshes, dropped with it.
     meshes: Vec<Handle<Mesh>>,
+    /// The cover's version it was built from (see [`FarWoodsState::epoch`]).
+    epoch: u64,
 }
 
 /// Streaming state: the grid's origin (moved by world shifts), the cells by key and the
@@ -325,12 +327,19 @@ pub struct FarWoodsState {
     origin: DVec3,
     cells: HashMap<(i64, i64), Entity>,
     pending: HashMap<(i64, i64), Pending>,
+    /// Bumped whenever the terrain installs a new cover (a terrain edit, a terrain added or
+    /// moved). Cells from older ones rebuild once the cover has held still for
+    /// [`COVER_SETTLE_FRAMES`]: a terrain that reinstalls its cover every frame (one that
+    /// moves) doesn't keep every wood rebuilding or blinking out.
+    epoch: u64,
+    quiet_frames: u32,
     /// Still materials (no sway) per tree kind, made from the species' far leaves.
     materials: HashMap<FarTree, Handle<StandardMaterial>>,
 }
 
 /// A cell being built on a worker thread.
 struct Pending {
+    epoch: u64,
     band: i32,
     built_from: DVec3,
     /// Where the cell's corner is (moved by world shifts while it builds).
@@ -401,6 +410,9 @@ impl CellJob {
     }
 }
 
+/// Frames the cover must hold still before cells built from an older one rebuild.
+const COVER_SETTLE_FRAMES: u32 = 60;
+
 /// Spacing band for a distance: spacing doubles every two bands.
 fn band(settings: &FarWoods, d: f32) -> i32 {
     let s = (d * settings.spacing_per_m).max(settings.min_spacing_m);
@@ -444,7 +456,14 @@ pub fn stream_far_woods(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if !settings.enabled || settings.is_changed() || cover.is_changed() {
+    if cover.is_changed() {
+        state.epoch += 1;
+        state.quiet_frames = 0;
+    } else {
+        state.quiet_frames = state.quiet_frames.saturating_add(1);
+    }
+    let settled = state.quiet_frames >= COVER_SETTLE_FRAMES;
+    if !settings.enabled || settings.is_changed() {
         for (_, e) in std::mem::take(&mut state.cells) {
             drop_cell(e, &cells, &mut commands, &mut meshes);
         }
@@ -524,7 +543,11 @@ pub fn stream_far_woods(
             let inner = d - half_diag < settings.start_m + 64.0;
             let stale = match state.cells.get(&(i, j)).and_then(|&e| cells.get(e).ok()) {
                 None => true,
-                Some(c) => c.band != b || (inner && flat_distance(c.built_from) > 64.0),
+                Some(c) => {
+                    c.band != b
+                        || (inner && flat_distance(c.built_from) > 64.0)
+                        || (settled && c.epoch != state.epoch)
+                }
             };
             if stale {
                 todo.push((d, (i, j), b));
@@ -532,6 +555,7 @@ pub fn stream_far_woods(
         }
     }
     todo.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let epoch = state.epoch;
     let threads = settings.background_builds as usize;
     let room = if threads > 0 {
         threads.saturating_sub(state.pending.len())
@@ -559,6 +583,7 @@ pub fn stream_far_woods(
         state.pending.insert(
             key,
             Pending {
+                epoch,
                 band: b,
                 built_from: cam,
                 origin: corner(key),
@@ -602,6 +627,7 @@ pub fn stream_far_woods(
             band: p.band,
             built_from: p.built_from,
             meshes: handles,
+            epoch: p.epoch,
         });
         state.cells.insert(key, e);
     }
@@ -744,7 +770,20 @@ mod tests {
         );
         app.world
             .insert_resource(ForestCover(std::sync::Arc::new(Everywhere)));
-        app.update_n(2);
+        // A terrain reinstalling its cover every frame (a moving one) doesn't keep the woods
+        // rebuilding: the open cells stay until it holds still.
+        for _ in 0..10 {
+            app.world.resource_mut::<ForestCover>().set_changed();
+            app.update();
+        }
+        assert_eq!(
+            cells
+                .iter(&app.world)
+                .filter(|(c, _)| !c.meshes.is_empty())
+                .count(),
+            0
+        );
+        app.update_n(COVER_SETTLE_FRAMES as usize + 2);
         let drawn: Vec<_> = cells
             .iter(&app.world)
             .filter(|(c, _)| !c.meshes.is_empty())
