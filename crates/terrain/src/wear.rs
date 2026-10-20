@@ -16,10 +16,11 @@
 //! The renderer draws a window of it around the camera.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use engine_core::math::{DVec3, IVec2};
+use engine_core::math::{DQuat, DVec3, IVec2};
 use engine_core::prelude::*;
-use engine_world::{ContactKind, Deformation as Deform, SurfaceMaterial};
+use engine_world::{ContactKind, Deformation as Deform, SurfaceMaterial, WearQuery, WorldShift};
 
 /// Cells per tile side.
 pub const TILE: i32 = 64;
@@ -150,7 +151,8 @@ pub struct WearRegion {
     pub axis_u: DVec3,
     pub axis_v: DVec3,
     pub up: DVec3,
-    tiles: HashMap<IVec2, WearTile>,
+    /// (Shared with the snapshots `GroundWear` answers from; copied when written.)
+    tiles: HashMap<IVec2, Arc<WearTile>>,
 }
 
 impl WearRegion {
@@ -228,6 +230,8 @@ pub struct PathWear {
     pub dirty: HashSet<(Entity, usize, IVec2)>,
     /// Bumped whenever regions are added or cleared (the renderer redraws its window).
     pub generation: u64,
+    /// Bumped on every change (the `GroundWear` snapshot is refreshed when it moves).
+    pub revision: u64,
 }
 
 impl PathWear {
@@ -331,13 +335,19 @@ impl PathWear {
                     continue;
                 }
                 let key = IVec2::new(x.div_euclid(TILE), y.div_euclid(TILE));
-                let tile = region.tiles.entry(key).or_insert_with(WearTile::new);
+                let tile = Arc::make_mut(
+                    region
+                        .tiles
+                        .entry(key)
+                        .or_insert_with(|| Arc::new(WearTile::new())),
+                );
                 let i = (y.rem_euclid(TILE) * TILE + x.rem_euclid(TILE)) as usize;
                 let g = gain * share.min(1.0);
                 let w = &mut tile.wear[i];
                 *w += g * (1.0 - *w);
                 tile.ground[i] = ground;
                 self.dirty.insert((terrain, index, key));
+                self.revision += 1;
             }
         }
     }
@@ -362,6 +372,7 @@ impl PathWear {
         for (&terrain, regions) in &mut self.terrains {
             for (index, region) in regions.iter_mut().enumerate() {
                 region.tiles.retain(|&key, tile| {
+                    let tile = Arc::make_mut(tile);
                     let mut peak = 0.0f32;
                     for (w, g) in tile.wear.iter_mut().zip(&tile.ground) {
                         if *w > 0.0 {
@@ -378,6 +389,7 @@ impl PathWear {
                     self.dirty.insert((terrain, index, key));
                     peak > 0.0
                 });
+                self.revision += 1;
             }
         }
     }
@@ -441,6 +453,57 @@ impl PathWear {
                 );
             }
         }
+    }
+}
+
+/// What [`GroundWear`](engine_world::GroundWear) answers from: the wear map as it was at one
+/// moment, with each terrain's placement then. Tiles are shared with the live map until it
+/// writes them, so taking one costs little.
+#[derive(Debug, Clone, Default)]
+pub struct WearSnapshot {
+    cell_m: f32,
+    terrains: Vec<(DVec3, DQuat, Vec<WearRegion>)>,
+}
+
+impl WearSnapshot {
+    /// The map now, with each terrain at the world position and rotation `placement` gives
+    /// (terrains it has none for are left out).
+    pub fn of(wear: &PathWear, placement: impl Fn(Entity) -> Option<(DVec3, DQuat)>) -> Self {
+        Self {
+            cell_m: wear.cell_m,
+            terrains: wear
+                .terrains
+                .iter()
+                .filter_map(|(e, regions)| {
+                    let (p, r) = placement(*e)?;
+                    Some((p, r, regions.clone()))
+                })
+                .collect(),
+        }
+    }
+
+    /// The same map after the world re-anchored.
+    pub fn shifted(&self, s: &WorldShift) -> Self {
+        Self {
+            cell_m: self.cell_m,
+            terrains: self
+                .terrains
+                .iter()
+                .map(|(p, r, regions)| (s.point(*p), s.rotation * *r, regions.clone()))
+                .collect(),
+        }
+    }
+}
+
+impl WearQuery for WearSnapshot {
+    fn wear(&self, p: DVec3) -> f32 {
+        for (position, rotation, regions) in &self.terrains {
+            let local = rotation.inverse() * (p - *position);
+            if let Some(r) = regions.iter().find(|r| r.covers(local)) {
+                return r.sample(local, self.cell_m);
+            }
+        }
+        0.0
     }
 }
 

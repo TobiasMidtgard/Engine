@@ -207,7 +207,8 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
 Reads: `GroundContact`, `TerrainEdit`, `SurfaceLayers`, `Weather`, `FocusPoints`,
 `SurfaceMaterials`, `RigidBody` (dynamic bodies, for their collider tiles).
 
-Writes: `Ground` and `ForestCover` (query providers), `TerrainChanged`, static `Collider` heightfield tiles
+Writes: `Ground`, `ForestCover` and `GroundWear` (query providers; `GroundWear` from a
+snapshot of the worn-path map refreshed twice a second while paths change), `TerrainChanged`, static `Collider` heightfield tiles
 (tagged `TerrainColliderTile`).
 
 Heightfield layout for physics: `heights[row * cols + col]`, rows along the tile's local +Z,

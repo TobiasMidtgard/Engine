@@ -514,6 +514,7 @@ impl Plugin for TerrainPlugin {
             .insert_resource(settings)
             .insert_resource(PathWear::new(WearSettings::default().cell_m))
             .init_resource::<WearSettings>()
+            .init_resource::<WearProvider>()
             .init_resource::<collider::TerrainColliders>()
             .init_resource::<RecoverClock>()
             .register_component::<PlanetTerrain>(
@@ -541,6 +542,10 @@ impl Plugin for TerrainPlugin {
                     .in_set(UpdateSet::AfterPropagate),
             )
             .add_systems(PostUpdate, follow_world_shift.in_set(WorldShiftSet::Apply))
+            .add_systems(
+                PostUpdate,
+                shift_wear_provider.in_set(WorldShiftSet::Rebuild),
+            )
             .add_systems(
                 FixedUpdate,
                 (
@@ -840,6 +845,8 @@ fn wear_from_contacts(
     weather: Res<WeatherState>,
     surface_layers: Res<SurfaceLayers>,
     mut clock: Local<HealClock>,
+    mut provider: ResMut<WearProvider>,
+    mut ground_wear: ResMut<engine_world::GroundWear>,
 ) {
     if !settings.enabled || terrains.entries.is_empty() {
         contacts.clear();
@@ -898,6 +905,42 @@ fn wear_from_contacts(
             0.0
         };
         wear.heal(dt, snowfall, settings.heal_scale);
+    }
+    // What other modules read (`GroundWear`): a fresh snapshot a few times a second while
+    // paths change.
+    provider.since += time.delta_secs();
+    if wear.revision != provider.revision && provider.since >= 0.5 {
+        provider.since = 0.0;
+        provider.revision = wear.revision;
+        let snap = Arc::new(wear::WearSnapshot::of(&wear, |e| {
+            terrains.entries.get(&e).map(|t| (t.position, t.rotation))
+        }));
+        *ground_wear = engine_world::GroundWear(snap.clone());
+        provider.snapshot = Some(snap);
+    }
+}
+
+/// The snapshot installed as `GroundWear`, and when it was taken.
+#[derive(Resource, Default)]
+struct WearProvider {
+    snapshot: Option<Arc<wear::WearSnapshot>>,
+    revision: u64,
+    since: f32,
+}
+
+/// After the world re-anchors, `GroundWear` answers in the new frame at once.
+fn shift_wear_provider(
+    mut shifts: MessageReader<WorldShift>,
+    mut provider: ResMut<WearProvider>,
+    mut ground_wear: ResMut<engine_world::GroundWear>,
+) {
+    let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) else {
+        return;
+    };
+    if let Some(snap) = &provider.snapshot {
+        let moved = Arc::new(snap.shifted(&s));
+        *ground_wear = engine_world::GroundWear(moved.clone());
+        provider.snapshot = Some(moved);
     }
 }
 
@@ -1507,6 +1550,22 @@ mod tests {
         let off = wear_at(&mut app, DVec3::new(0.0, 0.0, 34.0));
         assert!(on > 0.3, "the crowd's line wore only {on}");
         assert!(off < 0.01, "4 m to the side wore {off}");
+        // Other modules see it through `GroundWear`.
+        app.update_n(40);
+        let shared = app.world.resource::<engine_world::GroundWear>().clone();
+        let seen = shared.wear(DVec3::new(0.0, 0.0, 30.0)) as f64;
+        assert!(
+            (seen - on).abs() < 0.1,
+            "GroundWear says {seen}, the map {on}"
+        );
+        assert!(shared.wear(DVec3::new(0.0, 0.0, 34.0)) < 0.01);
+        // After the world re-anchors it answers in the new frame.
+        app.world
+            .write_message(WorldShift::translate(DVec3::new(100.0, 0.0, 0.0)));
+        app.update();
+        let shared = app.world.resource::<engine_world::GroundWear>().clone();
+        let moved = shared.wear(DVec3::new(100.0, 0.0, 30.0)) as f64;
+        assert!(moved > 0.2, "after a shift GroundWear says {moved}");
     }
 
     #[test]
