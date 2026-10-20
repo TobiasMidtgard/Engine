@@ -60,6 +60,12 @@ pub struct Region {
     pub statics: EntityHashSet,
     /// Too far from every focus to simulate this step.
     pub frozen: bool,
+    /// Level of detail, from how near its nearest mover is to a focus ([`crate::lod`]): 0 full,
+    /// 1 coarse, 2 half rate.
+    pub tier: u8,
+    /// Half rate: world time the region has not stepped yet, seconds (it steps every other
+    /// frame, and its bodies are drawn moving on in between).
+    pub owed_secs: f32,
     /// Colliders changed while frozen: refresh the query structures before the next query.
     pub needs_refresh: bool,
     /// Collision events from Rapier, drained after every substep.
@@ -108,6 +114,8 @@ impl Region {
             home_statics: 0,
             statics: EntityHashSet::default(),
             frozen: false,
+            tier: 0,
+            owed_secs: 0.0,
             needs_refresh: true,
             collector: Collector::default(),
             bounds: None,
@@ -365,6 +373,8 @@ pub struct BodyEntry {
     /// The water's level (`-inf` when dry) and current at this body when it was last seen
     /// asleep, to wake it when the water changes (`step::wake_for_water`).
     pub water_mark: Option<(f64, Vec3)>,
+    /// How far its colliders reach from its origin, meters (never shrinks).
+    pub reach: f32,
 }
 
 /// A collider: attached to a body, or static (copied into every region it can touch).
@@ -582,6 +592,8 @@ pub struct Simulation {
     pub budget_clock: u32,
     /// Steps since the water under sleeping bodies was last looked at.
     pub water_clock: u32,
+    /// Steps since far movers were last split off into coarse regions ([`crate::lod`]).
+    pub lod_clock: u32,
 }
 
 /// Rapier hooks: drop the contacts listed in [`Simulation::no_contact`], and keep round bodies
@@ -695,7 +707,7 @@ impl Simulation {
             .filter_map(|(i, r)| r.as_ref().map(|r| (i as RegionId, r)))
     }
 
-    fn live_region_ids(&self) -> Vec<RegionId> {
+    pub(crate) fn live_region_ids(&self) -> Vec<RegionId> {
         self.live_regions().map(|(i, _)| i).collect()
     }
 
@@ -708,14 +720,23 @@ impl Simulation {
             .map(|(id, _)| id)
     }
 
-    /// The region a new mover at `p` belongs to (created if needed).
+    /// The region a new mover at `p` belongs to (created if needed): the nearest at full
+    /// detail in reach, or else the nearest in reach (a far one splits off again,
+    /// [`crate::lod`]).
     pub fn region_for_mover(&mut self, p: DVec3) -> RegionId {
         let join = self.settings.region_radius_m * 0.5;
-        self.nearest_region(p, join)
+        let full = self
+            .live_regions()
+            .filter(|(_, r)| r.tier == 0)
+            .map(|(id, r)| (id, r.anchor.distance(p)))
+            .filter(|(_, d)| *d <= join)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(id, _)| id);
+        full.or_else(|| self.nearest_region(p, join))
             .unwrap_or_else(|| self.create_region(p))
     }
 
-    fn create_region(&mut self, anchor: DVec3) -> RegionId {
+    pub(crate) fn create_region(&mut self, anchor: DVec3) -> RegionId {
         let region = Region::new(anchor, &self.settings);
         let id = match self.regions.iter().position(Option::is_none) {
             Some(i) => {
@@ -810,6 +831,7 @@ impl Simulation {
                 was_sleeping: false,
                 mass_dirty: true,
                 water_mark: None,
+                reach: 0.0,
             },
         );
     }
@@ -1008,9 +1030,13 @@ impl Simulation {
         restitution: f32,
     ) {
         self.remove_collider(entity, false);
-        let Some(b) = self.bodies.get(&body) else {
+        let Some(b) = self.bodies.get_mut(&body) else {
             return;
         };
+        let aabb = shape.compute_local_aabb();
+        let reach =
+            local_pose.translation.length() + aabb.center().length() + aabb.half_extents().length();
+        b.reach = b.reach.max(reach);
         let (region_id, handle) = (b.region, b.handle);
         let builder = Self::collider_builder(
             entity,
@@ -2003,7 +2029,8 @@ impl Simulation {
     }
 
     /// Re-center, split and merge regions so every mover stays near its region's anchor and
-    /// movers that could touch share a region. Also freezes regions far from every focus.
+    /// movers that could touch share a region. Also freezes regions far from every focus, and
+    /// sets each region's level of detail ([`crate::lod`]).
     pub fn maintain_regions(&mut self, foci: &[DVec3], max_speed_step: f64) {
         let radius = self.settings.region_radius_m;
         // Freeze far regions.
@@ -2015,7 +2042,18 @@ impl Simulation {
                 }
                 _ => false,
             };
+            if r.frozen {
+                // Paused, so not drawn moving on either.
+                r.owed_secs = 0.0;
+            }
         }
+        // Movers nearer than the margin may touch before regions are looked at again.
+        let margin = 20.0 + max_speed_step * 4.0;
+        self.lod_clock += 1;
+        if self.lod_clock.is_multiple_of(crate::lod::LOD_EVERY) {
+            self.split_far(foci, margin * 1.25);
+        }
+        self.update_tiers(foci);
 
         let mut bounds: Vec<(RegionId, DVec3, DVec3)> = Vec::new();
         for id in self.live_region_ids() {
@@ -2058,11 +2096,13 @@ impl Simulation {
                     self.migrate_group(e, target);
                 }
             }
-            let margin = 20.0 + max_speed_step * 4.0;
             bounds.push((id, lo - DVec3::splat(margin), hi + DVec3::splat(margin)));
         }
 
-        // Merge regions whose movers could touch (if the result still fits).
+        // Merge regions whose movers could touch (if the result still fits). Regions of
+        // different tiers lie inside each other's boxes (one holds the movers around the focus,
+        // the other the far ones), so for them the movers themselves are compared.
+        let look_closer = self.lod_clock.is_multiple_of(crate::lod::CLOSE_EVERY);
         for i in 0..bounds.len() {
             for j in (i + 1)..bounds.len() {
                 let (a, alo, ahi) = bounds[i];
@@ -2073,12 +2113,17 @@ impl Simulation {
                     s.regions.get(id as usize).is_some_and(|r| r.is_some())
                 };
                 if overlap && span < radius * 2.0 && live(self, a) && live(self, b) {
+                    let (ta, tb) = (self.region(a).tier, self.region(b).tier);
+                    if ta != tb && !(look_closer && self.movers_close(a, b, margin)) {
+                        continue;
+                    }
                     let (big, small) = if self.region(a).movers >= self.region(b).movers {
                         (a, b)
                     } else {
                         (b, a)
                     };
                     self.merge_regions(big, small);
+                    self.region_mut(big).tier = ta.min(tb);
                 }
             }
         }
@@ -2307,7 +2352,7 @@ impl Simulation {
     }
 
     /// Move bodies (with their colliders and the joints among them) into region `target`.
-    fn migrate_bodies(&mut self, entities: &[Entity], target: RegionId) {
+    pub(crate) fn migrate_bodies(&mut self, entities: &[Entity], target: RegionId) {
         // Joints touching these bodies are recreated in the target region.
         let set: EntityHashSet = entities.iter().copied().collect();
         for j in self.joints.values_mut() {
