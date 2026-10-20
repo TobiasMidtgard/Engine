@@ -175,7 +175,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   path with a bare middle, a trodden margin and ragged turf edges, sunk a few centimeters.
   In rain the bare earth turns to mud. The map is sparse and persistent (64-cell tiles where
   someone walked, kept per terrain in its own frame, one region per few kilometers walked);
-  the renderer draws a 512 m window of it around the camera. `WearSettings` sets the cell
+  the renderer draws a 512 m window of it around the camera, and beyond that, out to 2 km,
+  a four times coarser map of how much of each 2 m cell is bare path (paths show from hills
+  and the air). `WearSettings` sets the cell
   size, a `gain_scale` (paths form quicker) and a `heal_scale` (they fade quicker).
 - **Weather on the ground.** Wetness, puddles, snow depth and scorch from `SurfaceLayers`
   (written by the weather module, and by the water module along shores) darken and gloss
@@ -245,7 +247,7 @@ valley and a natural one at eye height, snow at eye height and over the valley, 
 underfoot, from low orbit, half lit and full, the Earth's climate belts from far out
 (`earth_globe`), a river at eye height (`earth_river`) and rivers from the air
 (`earth_rivers_air`), worn paths (`paths_meadow`, `paths_meadow_high`, `paths_rain`,
-`paths_snow`, `paths_beach`; `NO_PATHS=1` for the ground before), and Mars: from orbit (`mars_orbit`,
+`paths_snow`, `paths_beach`, `paths_hill` from 600 m off; `NO_PATHS=1` for the ground before), and Mars: from orbit (`mars_orbit`,
 `mars_valles`), Olympus Mons (`mars_olympus`), the north pole (`mars_pole`), and the floor and
 rim of Valles Marineris (`mars_canyon`, `mars_rim`))
 with the game's auto exposure, and `examples/terrain_map.rs` draws a relief map with rivers and lakes around

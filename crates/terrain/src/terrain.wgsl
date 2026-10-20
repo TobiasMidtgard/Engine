@@ -31,6 +31,7 @@ struct Maps {
     wear_origin: vec4<f32>, // worn paths window: corner relative to the camera, cell size
     wear_u: vec4<f32>,      // the window's column axis, cells per side
     wear_v: vec4<f32>,      // the window's row axis, 1 when paths are drawn
+    wear_far: vec4<f32>,    // the coarse window: corner relative to the camera, cell size
 };
 
 const C_LUSH: u32 = 0u;
@@ -59,7 +60,7 @@ struct Materials {
 @group(1) @binding(6) var mat_albedo: texture_2d_array<f32>;  // sRGB albedo, height in alpha
 @group(1) @binding(7) var mat_normal: texture_2d_array<f32>;  // normal xy, roughness, occlusion
 @group(1) @binding(8) var mat_sampler: sampler;
-@group(1) @binding(9) var wear_tex: texture_2d<f32>;  // r: path wear 0..1 (wear.rs)
+@group(1) @binding(9) var wear_tex: texture_2d_array<f32>;  // r: path wear 0..1 (wear.rs); layer 1: share of bare path in 4× coarser cells
 
 // Ground materials (`materials::GroundMaterial`).
 const M_GRASS: u32 = 0u;
@@ -132,20 +133,36 @@ fn surface_uv(rel: vec3<f32>) -> vec2<f32> {
     return (rel.xz - maps.surface.xy) / (maps.surface.z * dims);
 }
 
-// How worn the ground is at a camera-relative point, 0 untouched .. 1 a well-worn path (0
-// outside the window of paths around the camera, fading in over its outer cells).
+// How worn the ground is at a camera-relative point, 0 untouched .. 1 a well-worn path, from
+// the window of paths around the camera. Beyond it (fading over its outer cells), from the
+// coarse window: there a cell's share of bare path stands in, as the wear that shows that
+// much bare ground (a path is far narrower than a pixel there).
 fn path_wear(rel: vec3<f32>) -> f32 {
     if (maps.wear_v.w < 0.5) {
         return 0.0;
     }
+    let up = cross(maps.wear_u.xyz, maps.wear_v.xyz);
     let d = rel - maps.wear_origin.xyz;
     // (Only near the ground the paths lie on: the plane runs on under other planets.)
-    if (abs(dot(d, cross(maps.wear_u.xyz, maps.wear_v.xyz))) > 300.0) {
+    if (abs(dot(d, up)) > 600.0) {
         return 0.0;
     }
     let uv = vec2<f32>(dot(d, maps.wear_u.xyz), dot(d, maps.wear_v.xyz)) / (maps.wear_origin.w * maps.wear_u.w);
     let edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
-    return textureSampleLevel(wear_tex, map_sampler, uv, 0.0).r * smoothstep(0.0, 0.03, edge);
+    let near_in = smoothstep(0.0, 0.03, edge);
+    var near = 0.0;
+    if (near_in > 0.0) {
+        near = textureSampleLevel(wear_tex, map_sampler, uv, 0, 0.0).r;
+    }
+    if (near_in >= 1.0) {
+        return near;
+    }
+    let df = rel - maps.wear_far.xyz;
+    let fuv = vec2<f32>(dot(df, maps.wear_u.xyz), dot(df, maps.wear_v.xyz)) / (maps.wear_far.w * maps.wear_u.w);
+    let fedge = min(min(fuv.x, fuv.y), min(1.0 - fuv.x, 1.0 - fuv.y));
+    let bare = textureSampleLevel(wear_tex, map_sampler, fuv, 1, 0.0).r * smoothstep(0.0, 0.03, fedge);
+    let far = select(0.0, 0.45 + 0.4 * bare, bare > 0.004);
+    return mix(far, near, near_in);
 }
 
 fn inside01(uv: vec2<f32>) -> f32 {

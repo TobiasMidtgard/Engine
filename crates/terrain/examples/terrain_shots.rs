@@ -62,6 +62,8 @@ struct View {
     /// Paths worn into the ground before the picture (none with `NO_PATHS` set, for a
     /// before picture).
     paths: &'static [PathLine],
+    /// The eye and target the paths' points are measured from, when not this view's own.
+    paths_from: Option<(DVec3, DVec3)>,
 }
 
 /// A path walked `passes` times along a line of (meters ahead of the eye, meters to its
@@ -123,6 +125,7 @@ const BASE: View = View {
     painted: false,
     ground: Ground::Dry,
     paths: &[],
+    paths_from: None,
 };
 
 fn views() -> Vec<View> {
@@ -294,6 +297,21 @@ fn views() -> Vec<View> {
             target_above_ground: Some(0.0),
             sun: (230.0, 32.0),
             paths: MEADOW_PATHS,
+            ..BASE
+        },
+        // The same paths from a hill a few hundred meters off, beyond the fine window.
+        View {
+            name: "paths_hill",
+            eye: DVec3::new(620.0, 0.0, 790.0),
+            target: DVec3::new(1_000.0, 0.0, 120.0),
+            above_ground: Some(160.0),
+            target_above_ground: Some(0.0),
+            sun: (230.0, 32.0),
+            paths: MEADOW_PATHS,
+            paths_from: Some((
+                DVec3::new(900.0, 0.0, 300.0),
+                DVec3::new(1_300.0, 0.0, -400.0),
+            )),
             ..BASE
         },
         View {
@@ -887,7 +905,10 @@ fn main() {
             };
         }
         if !view.paths.is_empty() && std::env::var_os("NO_PATHS").is_none() {
-            wear_paths(&mut app, &view, eye, target, &place);
+            let (from, toward) = view.paths_from.map_or((eye, target), |(e, t)| {
+                (place(e, Some(1.7)), place(t, Some(0.0)))
+            });
+            wear_paths(&mut app, &view, from, toward, &place);
         }
         app.world.spawn((
             Camera {
