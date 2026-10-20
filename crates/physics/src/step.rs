@@ -524,7 +524,18 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             let r = sim.region(rid);
             (r.frozen, r.movers)
         };
-        if frozen || movers == 0 || substeps == 0 {
+        // Far regions step coarser, or sit a frame out (`crate::lod`).
+        let plan = if frozen || movers == 0 || substeps == 0 {
+            None
+        } else {
+            let r = sim.region_mut(rid);
+            let plan = r.plan(dt, &settings);
+            if plan.is_none() {
+                continue;
+            }
+            plan
+        };
+        let Some((substeps, sub_dt)) = plan else {
             place_kinematics(&mut sim, rid);
             let s = &mut *sim;
             let filter = ContactFilter {
@@ -543,7 +554,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 r.update_bounds();
             }
             continue;
-        }
+        };
         let g = gravity.at(sim.region(rid).anchor);
         sim.region_mut(rid).world.gravity = g;
         refresh_contact_hooks(&mut sim.region_mut(rid).world);
@@ -1429,10 +1440,20 @@ fn collect_writes(sim: &mut Simulation) {
                 angular: rb.angvel(),
             }
         };
+        // A half-rate region sitting this frame out: draw its bodies moving on.
+        let ahead = region.owed_secs;
+        let (translation, rotation) = if ahead > 0.0 && !sleeping {
+            (
+                p.translation + velocity.linear * ahead,
+                (Quat::from_scaled_axis(velocity.angular * ahead) * p.rotation).normalize(),
+            )
+        } else {
+            (p.translation, p.rotation)
+        };
         writes.push(BodyWrite {
             entity: *e,
-            translation: region.global(p.translation),
-            rotation: p.rotation,
+            translation: region.global(translation),
+            rotation,
             velocity,
         });
     }
