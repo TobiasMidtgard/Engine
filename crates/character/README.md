@@ -79,7 +79,7 @@ A person's look is the shared `engine_world::character::Appearance` (this crate 
   their rest pose.
 - `FaceControls`: expressions and gaze.
 
-The outfit (`Appearance::outfit`) sets the clothes' colours and cut: `shirt`, `tshirt` (sleeves to mid upper arm) or `none` (bare to the waist; women wear a band across the chest) on top, `trousers` or `shorts` (mid-thigh) below (`skirt` draws trousers for now), and an accent colour on the `collar` or an armband (`armband_l`, `armband_r`).
+The outfit (`Appearance::outfit`) sets the clothes' colours and cut: `shirt`, `tshirt` (sleeves to mid upper arm) or `none` (bare to the waist; women wear a band across the chest) on top, `trousers`, `shorts` (mid-thigh) or a `skirt` (to above the knees) below, and an accent colour on the `collar` or an armband (`armband_l`, `armband_r`).
 
 Once a person is built it writes `BodyFit` (their rest skeleton on the humanoid bones and standing height), and rewrites it when the build changes it, so posers can fit their skeletons and props to that person.
 

@@ -37,8 +37,9 @@ const SHOULDER: Vec3 = Vec3::new(0.168, 0.525, 0.015);
 const ELBOW: Vec3 = Vec3::new(0.313, 0.349, 0.013);
 /// A t-shirt's sleeves end this far down the upper arm from the shoulder joint, m.
 const SLEEVE_HEM: f32 = 0.12;
-/// Rest height of the shorts' hems, mid-thigh.
+/// Rest height of the shorts' hems, mid-thigh, and of the briefs' under a skirt.
 const SHORTS_HEM: f32 = -0.17;
+const BRIEFS_HEM: f32 = -0.07;
 /// The band a woman wears with no top: rest heights of its lower and upper edges.
 const BAND: [f32; 2] = [0.32, 0.45];
 
@@ -59,6 +60,8 @@ pub enum Bottom {
     #[default]
     Trousers,
     Shorts,
+    /// To above the knees (`crate::skirt`), over briefs.
+    Skirt,
 }
 
 /// Where the outfit's accent colour shows (`Outfit::accent_on`).
@@ -71,8 +74,8 @@ pub enum Accent {
     Collar,
 }
 
-/// How a person's clothes are cut, from their outfit's ids (unknown ids, and `skirt` for now,
-/// fall back to the defaults). The shaders cut the same way (`cover_depth` in common.wgsl).
+/// How a person's clothes are cut, from their outfit's ids (unknown ids fall back to the
+/// defaults). The shaders cut the same way (`cover_depth` in common.wgsl).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cut {
     pub top: Top,
@@ -93,6 +96,7 @@ impl Cut {
             },
             bottom: match o.bottom.as_str() {
                 "shorts" => Bottom::Shorts,
+                "skirt" => Bottom::Skirt,
                 _ => Bottom::Trousers,
             },
             accent: match o.accent_on.as_str() {
@@ -139,8 +143,12 @@ fn cover_depth(r: Vec3, head_z: f32, cut: Cut) -> f32 {
             Top::None if cut.male => d = d.min(WAIST - r.y),
             Top::None => d = d.min(bare_arms(0.0)).min(r.y - BAND[0]).min(BAND[1] - r.y),
         }
-    } else if cut.bottom == Bottom::Shorts {
-        d = d.min(r.y - SHORTS_HEM);
+    } else {
+        match cut.bottom {
+            Bottom::Trousers => {}
+            Bottom::Shorts => d = d.min(r.y - SHORTS_HEM),
+            Bottom::Skirt => d = d.min(r.y - BRIEFS_HEM),
+        }
     }
     d
 }

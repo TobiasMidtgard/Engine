@@ -39,7 +39,7 @@ struct SkinOut {
     @location(6) curvature: f32,
     @location(7) clip_now: vec4<f32>,
     @location(8) clip_prev: vec4<f32>,
-    // 0 skin, 1 teeth, 2 gums, 3 tongue.
+    // 0 skin, 1 teeth, 2 gums, 3 tongue, 4 shoes, 5 skirt.
     @location(9) @interpolate(flat) part: u32,
 };
 
@@ -51,9 +51,13 @@ fn vs_skin(in: SkinIn, @builtin(vertex_index) vertex: u32) -> SkinOut {
     // Clothes stand off the skin.
     let lift = n * cloth_lift(in.rest.xyz, in.m2.x);
     let now = skin_matrix(in.bones, in.weights, false);
-    let p = (now * vec4<f32>(in.position_curvature.xyz + m.dp + lift, 1.0)).xyz;
-    let p_prev = (skin_matrix(in.bones, in.weights, true)
+    var p = (now * vec4<f32>(in.position_curvature.xyz + m.dp + lift, 1.0)).xyz;
+    var p_prev = (skin_matrix(in.bones, in.weights, true)
         * vec4<f32>(in.position_curvature.xyz + m.dp_prev + lift, 1.0)).xyz;
+    if (u32(in.normal.w + 0.5) == 5u) {
+        p = clear_thighs(p, in.bones, false);
+        p_prev = clear_thighs(p_prev, in.bones, true);
+    }
     let rel = model_point(p);
     out.rel = rel;
     out.normal = model_dir((now * vec4<f32>(n, 0.0)).xyz);
@@ -353,6 +357,18 @@ fn mouth_surface(in: SkinOut, front: bool) -> SkinLight {
     s.n_soft = n;
     s.curvature = 0.0;
     s.thin = 0.0;
+    if (in.part == 5u) {
+        // A skirt in the outfit's bottom color: a fine twill, a darker waistband.
+        let seed = character.look.w * 917.0;
+        let mottle = 0.85 + 0.3 * value_noise3(r * vec3<f32>(400.0, 120.0, 400.0) + seed);
+        let band = smoothstep(WAIST - 0.03, WAIST - 0.026, r.y);
+        s.albedo = character.bottom.xyz * mottle * (1.0 - 0.3 * band);
+        s.roughness = 0.85;
+        s.specular = 0.25;
+        s.scatter = 0.0;
+        s.occlusion = 1.0;
+        return s;
+    }
     if (in.part == 4u) {
         // Shoes: black grained leather, a welt above pale rubber soles.
         let seed = character.look.w * 917.0;

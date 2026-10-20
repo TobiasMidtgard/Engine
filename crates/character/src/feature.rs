@@ -99,6 +99,9 @@ pub struct GpuCharacter {
     pub top: [f32; 4],
     pub bottom: [f32; 4],
     pub accent: [f32; 4],
+    /// A skirt's left thigh capsule: hip joint and radius, knee joint and radius (zero without).
+    pub thigh: [f32; 4],
+    pub knee: [f32; 4],
 }
 
 impl GpuCharacter {
@@ -161,6 +164,8 @@ impl GpuCharacter {
                 cut[1],
             ],
             accent: [o.accent[0], o.accent[1], o.accent[2], cut[2]],
+            thigh: [0.0; 4],
+            knee: [0.0; 4],
         }
     }
 }
@@ -1057,7 +1062,7 @@ mod tests {
 
     #[test]
     fn gpu_structs_match_wgsl_sizes() {
-        assert_eq!(std::mem::size_of::<GpuCharacter>(), 2 * 64 + 15 * 16);
+        assert_eq!(std::mem::size_of::<GpuCharacter>(), 2 * 64 + 17 * 16);
         assert_eq!(std::mem::size_of::<SkinVertex>(), 104);
         assert_eq!(std::mem::size_of::<GpuPose>(), 4 * 16 + 2 * 16 * 16);
         assert_eq!(std::mem::size_of::<EyeVertex>(), 48);

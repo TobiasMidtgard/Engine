@@ -21,7 +21,10 @@ fn vs_skin_shadow(
 ) -> @builtin(position) vec4<f32> {
     let m = morph_at(vertex);
     let local = position_curvature.xyz + m.dp + normalize(normal.xyz + m.dn) * cloth_lift(rest.xyz, m2.x);
-    let p = (skin_matrix(bones, weights, false) * vec4<f32>(local, 1.0)).xyz;
+    var p = (skin_matrix(bones, weights, false) * vec4<f32>(local, 1.0)).xyz;
+    if (u32(normal.w + 0.5) == 5u) {
+        p = clear_thighs(p, bones, false);
+    }
     var clip = shadow_view.view_proj * vec4<f32>(model_point(p), 1.0);
     // Pancake casters behind the near plane onto it so they still cast shadows.
     clip.z = max(clip.z, 0.0);

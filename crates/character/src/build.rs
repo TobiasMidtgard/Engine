@@ -13,6 +13,7 @@ use crate::mouth;
 use crate::pack::HumanPack;
 use crate::rig::Rig;
 use crate::shoes;
+use crate::skirt;
 use crate::strands::{self, StrandSet};
 
 /// Everything drawn for one character.
@@ -30,6 +31,9 @@ pub struct CharacterMeshes {
     pub landmarks: Option<Landmarks>,
     /// The skeleton the skin is weighted to (`None` when the pack has no rig).
     pub rig: Option<Rig>,
+    /// The left thigh as a capsule for a skirt to stay outside: hip and knee joints and radii
+    /// (`skirt::thigh`). `None` without a skirt.
+    pub thigh: Option<[[f32; 4]; 2]>,
     /// Expression shapes (empty when built without a face).
     pub face: FaceShapes,
 }
@@ -129,12 +133,21 @@ pub fn build(
         .iter()
         .map(|set| roots(&skin.positions, set.guides.iter().copied(), set.points_per))
         .collect();
-    clothes::dress(pack, regions, &morphed, &mut skin, clothes::Cut::of(a));
+    let cut = clothes::Cut::of(a);
+    clothes::dress(pack, regions, &morphed, &mut skin, cut);
     let face_shows = headgear.face_shows();
     if opts.face && face_shows {
         skin.add_mouth(pack, &mouth::build(pack, &morphed));
     }
     skin.add_mouth(pack, &shoes::build(pack, &morphed));
+    let thigh = (cut.bottom == clothes::Bottom::Skirt)
+        .then(|| skirt::thigh(pack, &morphed))
+        .flatten();
+    if cut.bottom == clothes::Bottom::Skirt {
+        let first = skin.positions.len();
+        skin.add_mouth(pack, &skirt::build(pack, &morphed));
+        skirt::reweight(pack, &mut skin, first);
+    }
     headgear.cover_skin(&mut skin, lm0.head);
     let face = if opts.face {
         face::build(pack, &skin, a)
@@ -143,6 +156,7 @@ pub fn build(
     };
     CharacterMeshes {
         rig: Rig::new(pack, &morphed),
+        thigh,
         skin,
         eyes: if face_shows {
             eyes_mesh
