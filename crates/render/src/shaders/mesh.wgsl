@@ -977,7 +977,8 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         return vec4<f32>(vt_debug_color() * lambert, 1.0);
     }
     var color: vec3<f32>;
-    if ((flags & 16u) != 0u) {
+    let unlit = (flags & 16u) != 0u;
+    if (unlit) {
         color = s.albedo + pre_expose(s.emissive);
     } else if (m.thin) {
         // Leaves, petals, cloth: lit from behind they glow by `subsurface`, never shine.
@@ -985,7 +986,30 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     } else {
         color = shade_surface_shadowed(s, in.rel, m.sun);
     }
-    color = apply_fog(color, in.rel);
+    var alpha = m.base.a;
+    if ((flags & 15u) == 2u) {
+        // Blended, drawn premultiplied. A smooth one (glass, water) covers what it is drawn on
+        // and lets part of it through: the light it scatters and gives off fades with its
+        // alpha, what it reflects doesn't (a clear pane or a puddle still mirrors the sky and
+        // the sun), and the share it reflects (Fresnel: most of it at grazing angles) hides what
+        // lies behind it as its alpha does. A rough one (smoke, dust, ghosts) covers only part
+        // of each pixel, so all of its light fades with its alpha.
+        if (unlit) {
+            color *= alpha;
+        } else {
+            let pane = 1.0 - smoothstep(0.25, 0.5, s.roughness);
+            let specular = min(shade_specular, color) * pane;
+            let f0 = mix(vec3(0.16 * s.reflectance * s.reflectance), s.albedo, s.metallic);
+            let n_dot_v = max(dot(s.normal, normalize(-in.rel)), 1e-4);
+            let reflected = env_brdf_approx(f0, s.roughness, n_dot_v);
+            color = (color - specular) * alpha + specular;
+            alpha = mix(alpha, 1.0, saturate(max(reflected.x, max(reflected.y, reflected.z))) * pane);
+        }
+        let fog = surface_fog(in.rel);
+        color = color * fog.transmittance + fog.inscatter * alpha;
+    } else {
+        color = apply_fog(color, in.rel);
+    }
     if (frame.counts.z == 2u) {
         let depth = view_depth(in.rel);
         var tint = vec3<f32>(1.0, 0.4, 0.4);
@@ -998,7 +1022,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         }
         color *= tint;
     }
-    return vec4<f32>(color, m.base.a);
+    return vec4<f32>(color, alpha);
 }
 
 // ---------------------------------------------------------------- depth prepass

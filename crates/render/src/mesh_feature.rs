@@ -539,7 +539,8 @@ impl MeshFeature {
         let mirror = variant & PIPE_MIRROR != 0;
         let main_targets = [Some(wgpu::ColorTargetState {
             format: gpu.formats.hdr,
-            blend: blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
+            // Premultiplied: a blended surface's reflections keep their strength (`fs_main`).
+            blend: blend.then_some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
             write_mask: wgpu::ColorWrites::ALL,
         })];
         let prepass_targets = gpu.prepass_targets();

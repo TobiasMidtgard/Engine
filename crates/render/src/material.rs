@@ -61,6 +61,11 @@ pub enum AlphaMode {
     /// Pixels with alpha below the cutoff are discarded (leaves, fences).
     Mask(f32),
     /// Alpha-blended, drawn after opaque geometry, sorted back to front (glass, water, ghosts).
+    /// What the surface scatters and gives off fades with its alpha. On a smooth one
+    /// (perceptual roughness under about 0.4: glass, water) what it reflects (the sun, lamps,
+    /// the sky) keeps its strength and hides what lies behind it as alpha does, most at grazing
+    /// angles (Fresnel), so a clear pane or a puddle still mirrors the sky; on a rough one
+    /// (smoke, dust) all of its light fades with alpha.
     Blend,
 }
 
