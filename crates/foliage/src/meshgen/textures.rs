@@ -882,7 +882,7 @@ fn broad_style(kind: LeafKind) -> BroadStyle {
             length: (0.075, 0.1),
             aspect: 0.78,
             petiole: 0.35,
-            green: [0.84, 0.92, 0.66],
+            green: [0.8, 0.92, 0.72],
         },
         _ => BroadStyle {
             shape: LeafShape {
