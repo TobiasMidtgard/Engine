@@ -10,8 +10,8 @@
 //! motion strips rendered small, each of which must show its animal. The full-size pictures
 //! (every close-up and strip, as an animator looks at them) are ignored tests:
 //! `cargo test -p engine_npc --test art_animals -- --ignored`, with `NPC_SCREENSHOT_DIR` set to
-//! keep the PNGs and `NPC_STRIPS` (names, comma separated) to shoot only some strips. They
-//! hold the same checks.
+//! keep the PNGs, `NPC_STRIPS` (names, comma separated) to shoot only some strips and
+//! `NPC_STRIP_SCALE=2` to shoot them twice the size. They hold the same checks.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -299,9 +299,9 @@ fn check(name: &str, img: &image::RgbaImage) {
 }
 
 /// What the file names of pictures rendered at `size` begin with: small ones are told apart
-/// from the full-size pictures.
+/// from the full-size pictures (and strips shot bigger still).
 fn tag(size: (u32, u32)) -> &'static str {
-    if size == (W, H) || size == (SW, SH) {
+    if size == (W, H) || full_strip(size) {
         ""
     } else {
         "small_"
@@ -332,6 +332,11 @@ fn render_held(shots: &[Shot], size: (u32, u32)) {
         };
         check(shot.0, &img);
     }
+}
+
+/// Whether strips shot at `size` are full size or bigger (`NPC_STRIP_SCALE`).
+fn full_strip(size: (u32, u32)) -> bool {
+    size.0 >= SW && size.0 * SH == size.1 * SW
 }
 
 /// Moves a close-up animal as the wildlife code would, with the fallback mover at the real
@@ -820,6 +825,9 @@ struct Cue {
     shot: Option<Vec2>,
     /// Hurt (not killed) by something here, the first moment it is set.
     hit: Option<Vec2>,
+    /// Deer: it raises the alarm at a predator it saw, the first moment it is set (so it
+    /// stots).
+    stot: bool,
 }
 
 impl Cue {
@@ -836,6 +844,7 @@ impl Cue {
             bite: false,
             shot: None,
             hit: None,
+            stot: false,
         }
     }
 }
@@ -916,6 +925,10 @@ fn drive(
             }
             d.prey
         });
+        if cue.stot && mind.alarm.is_none() {
+            mind.alarm = Some((clock.now, true));
+            mind.stots = true;
+        }
         // As the wildlife code bites: ready again 0.9..1.3 s on.
         if cue.bite && clock.now >= mind.bite_ready {
             mind.bite_ready = clock.now + 1.1;
@@ -1097,6 +1110,20 @@ fn deer_alarm(t: f32) -> Cue {
             sprint: true,
             threat: Some((at, 1.2)),
             ..Cue::new(AnimalState::Flee, 0.95, 0.3)
+        }
+    }
+}
+/// Grazing; it sees a wolf off to its left and bolts, stotting its first bounds.
+fn deer_stot(t: f32) -> Cue {
+    let at = Vec2::new(-4.0, -14.0);
+    if t < 1.0 {
+        Cue::new(AnimalState::Graze, 0.0, 0.0)
+    } else {
+        Cue {
+            sprint: t > 1.8,
+            threat: Some((at, 1.4)),
+            stot: true,
+            ..Cue::new(AnimalState::Flee, if t > 1.8 { 1.0 } else { 0.45 }, 0.0)
         }
     }
 }
@@ -1380,7 +1407,13 @@ fn wildlife_motion_strips() {
     // `NPC_STRIPS=deer-walk,rabbit-hop` shoots only those.
     let only = std::env::var("NPC_STRIPS").ok();
     let names: Option<Vec<&str>> = only.as_deref().map(|o| o.split(',').collect());
-    motion_strips(names.as_deref(), (SW, SH));
+    // `NPC_STRIP_SCALE=2` shoots them at twice the size, for close-ups cut from them.
+    let k: u32 = std::env::var("NPC_STRIP_SCALE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    motion_strips(names.as_deref(), (SW * k, SH * k));
 }
 
 /// A few motion strips rendered small (gaits, the hunt, a charge, a flinch, a hop and
@@ -1455,6 +1488,7 @@ fn motion_strips(only: Option<&[&str]>, size: (u32, u32)) {
             every(2.0, 0.067),
         ))),
         strip("deer-gallop", Species::Deer, deer_gallop, every(2.0, 0.05)),
+        strip("deer-stot", Species::Deer, deer_stot, every(1.05, 0.1)),
         strip(
             "deer-alarm",
             Species::Deer,
@@ -1618,7 +1652,7 @@ fn motion_strips(only: Option<&[&str]>, size: (u32, u32)) {
         .iter()
         .map(|s| grid(s.times[FRAMES - 1]))
         .fold(0.0, f64::max);
-    live_until(&mut app, probes[0], end + 0.05, size == (SW, SH));
+    live_until(&mut app, probes[0], end + 0.05, full_strip(size));
     let went: Vec<[DVec3; FRAMES]> = strips
         .iter()
         .zip(&probes)
@@ -1711,7 +1745,7 @@ fn motion_strips(only: Option<&[&str]>, size: (u32, u32)) {
     let mut order: Vec<usize> = (0..strips.len()).collect();
     order.sort_by(|&a, &b| shoot_at[a].total_cmp(&shoot_at[b]));
     for k in order {
-        live_until(&mut app, clock, shoot_at[k], size == (SW, SH));
+        live_until(&mut app, clock, shoot_at[k], full_strip(size));
         let (eye, target, fov) = views[k];
         let cam = camera(&mut app, eye, target, fov);
         let name = format!("{}animal_motion_{}.png", tag(size), strips[k].name);
@@ -2039,6 +2073,161 @@ fn pack_hunt(plan: Option<&[f64]>) -> Option<(f64, f64)> {
     }
     side_by_side(&frames, "animal_live_pack_hunt.png");
     Some((rush.unwrap_or(0.0), killed.unwrap_or(0.0)))
+}
+
+/// The hunt of [`a_pack_hunt_from_above`] as you would see it standing in the grass, with no
+/// markers: the camera low (1 m up) and close, beside the wolves (on the sunny side) as they
+/// creep in crouched on the herd, then beside the quarry's path as they close on it. Run once to time it, then again
+/// for three moments of the stalk, four of the chase and one at the kill. The PNG is
+/// `animal_live_pack_eye_level.png`.
+#[test]
+#[ignore = "full-size pictures: run with --ignored"]
+fn a_pack_closes_in_at_eye_level() {
+    let Some((creep, rush, kill)) = pack_at_eye_level(None) else {
+        return;
+    };
+    eprintln!("the pack creeps from {creep:.2} s, rushes at {rush:.2} s and kills at {kill:.2} s");
+    let mut plan = vec![creep + 0.5, (creep + rush) / 2.0, rush - 0.3];
+    plan.extend((1..5).map(|k| rush + (kill - rush) * k as f64 / 5.0));
+    plan.push(kill + 0.2);
+    pack_at_eye_level(Some(&plan));
+}
+
+/// [`a_pack_closes_in_at_eye_level`]'s hunt, shot at the moments of `plan` when there is one:
+/// when the first wolf crouched within 25 m of the herd, set off running, and when the quarry
+/// fell.
+fn pack_at_eye_level(plan: Option<&[f64]>) -> Option<(f64, f64, f64)> {
+    let mut app = live_app((640, 400))?;
+    let deer = live_herd(&mut app, Species::Deer, DVec3::ZERO, 4, 1);
+    let pack = live_herd(&mut app, Species::Wolf, DVec3::new(0.0, 0.0, -45.0), 4, 2);
+    tick(&mut app, deer[0]);
+    for &w in &pack {
+        app.world.get_mut::<AnimalMind>(w).unwrap().hunger = 1.0;
+    }
+    {
+        let mut v = app.world.get_mut::<NpcVitals>(deer[1]).unwrap();
+        v.health = v.max_health * 0.4;
+    }
+    let clock = deer[0];
+    let start = now_of(&app, clock);
+    let mut frames = Vec::new();
+    let (mut creep, mut rush, mut killed) = (None, None, None);
+    let herd_at = |app: &App| deer.iter().map(|&d| at(app, d)).sum::<DVec3>() / 4.0;
+    loop {
+        tick(&mut app, clock);
+        let t = now_of(&app, clock) - start;
+        assert!(t < 90.0, "the hunt took too long");
+        let near = |app: &App, w: Entity| {
+            deer.iter()
+                .map(|&d| flat_len(at(app, w) - at(app, d)))
+                .fold(f64::MAX, f64::min)
+        };
+        if creep.is_none()
+            && pack.iter().any(|&w| {
+                let crouched = app
+                    .world
+                    .get::<engine_world::locomotion::MoveIntent>(w)
+                    .is_some_and(|i| i.crouch);
+                crouched && near(&app, w) < 25.0
+            })
+        {
+            creep = Some(t);
+        }
+        if rush.is_none()
+            && pack
+                .iter()
+                .any(|&w| mind_of(&app, w).state == AnimalState::Chase)
+        {
+            rush = Some(t);
+        }
+        if killed.is_none()
+            && deer
+                .iter()
+                .any(|&d| mind_of(&app, d).state == AnimalState::Dead)
+        {
+            killed = Some(t);
+        }
+        let Some(plan) = plan else {
+            match (creep, rush, killed) {
+                (Some(c), Some(r), Some(k)) => return Some((c, r, k)),
+                _ => continue,
+            }
+        };
+        if frames.len() == plan.len() {
+            break;
+        }
+        if t < plan[frames.len()] {
+            continue;
+        }
+        let quarry = mind_of(&app, pack[0]).prey;
+        let running = rush.is_some_and(|r| t >= r);
+        // The wolf nearest what it is after (once they run, of those running), and that.
+        let goal = quarry.map_or_else(|| herd_at(&app), |q| at(&app, q));
+        let lead = pack
+            .iter()
+            .copied()
+            .filter(|&w| {
+                !running
+                    || matches!(
+                        mind_of(&app, w).state,
+                        AnimalState::Chase | AnimalState::Feed
+                    )
+            })
+            .min_by(|&a, &b| flat_len(at(&app, a) - goal).total_cmp(&flat_len(at(&app, b) - goal)))
+            .unwrap_or(pack[0]);
+        let wolf = at(&app, lead);
+        let mut line = goal - wolf;
+        line.y = 0.0;
+        let gap = line.length().max(1.0);
+        let line = line / gap;
+        // Seen from the sunny side.
+        let mut side = DVec3::new(-line.z, 0.0, line.x);
+        if side.dot(DVec3::new(-0.45, 0.0, 0.7)) < 0.0 {
+            side = -side;
+        }
+        let (eye, target) = if !running {
+            // Off to the side of the creeping wolf and a little behind it, the herd beyond.
+            let eye = wolf + side * 6.0 - line * 5.0;
+            (eye, wolf + line * (gap * 0.3).min(5.0))
+        } else {
+            // Off to the side of the run, taking in the wolf and the quarry.
+            let mid = (wolf + goal) / 2.0;
+            let back = (gap * 0.6 + 5.0).clamp(7.0, 16.0);
+            (mid + side * back - line * 2.0, mid)
+        };
+        let view = (
+            DVec3::new(eye.x, 1.0, eye.z),
+            DVec3::new(target.x, 0.6, target.z),
+            Vec3::Y,
+        );
+        let name = format!("animal_live_pack_eye_level_{}.png", frames.len());
+        eprintln!(
+            "frame {} at {t:.2} s: {:.1} m from wolf to {}, states {:?}, crouched {:?}",
+            frames.len(),
+            gap,
+            if quarry.is_some() { "quarry" } else { "herd" },
+            pack.iter()
+                .map(|&w| mind_of(&app, w).state)
+                .collect::<Vec<_>>(),
+            pack.iter()
+                .map(|&w| app
+                    .world
+                    .get::<engine_world::locomotion::MoveIntent>(w)
+                    .is_some_and(|i| i.crouch))
+                .collect::<Vec<_>>()
+        );
+        frames.push(live_shot(&mut app, view, 50.0, &name));
+    }
+    side_by_side(&frames, "animal_live_pack_eye_level.png");
+    Some((
+        creep.unwrap_or(0.0),
+        rush.unwrap_or(0.0),
+        killed.unwrap_or(0.0),
+    ))
+}
+
+fn flat_len(v: DVec3) -> f64 {
+    DVec3::new(v.x, 0.0, v.z).length()
 }
 
 /// A wary deer that can't outrun the wolf after it, from close behind and low: it runs straight

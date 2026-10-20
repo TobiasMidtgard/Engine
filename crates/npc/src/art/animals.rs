@@ -56,6 +56,9 @@ impl LegRest {
     }
 }
 
+/// Where a deer's rump patch sits on its croup (rest pose) and which way it flares out.
+pub use deer::{RUMP_AT as DEER_RUMP_AT, RUMP_OUT as DEER_RUMP_OUT};
+
 /// Rest-pose joints of a four-legged animal (deer, wolves and boars).
 #[derive(Debug, Clone, Copy)]
 pub struct QuadRig {
@@ -308,11 +311,12 @@ pub enum Piece {
     /// A boar's crest of long bristles: 0 down the nape (on the neck), 1 over the withers
     /// (on the torso). Raised, they slide up out of the coat.
     Mane(u8),
+    /// A deer's rump patch of long pale hair round the tail, riding on the croup: flared (as
+    /// it stots), it stands out of the coat, a bigger, whiter patch.
+    Rump,
     /// Leg `k` (0 left front, 1 right front, 2 left hind, 3 right hind), segment 0 (upper
-    /// arm or thigh) .. 3 (pastern or paw).
+    /// arm or thigh) .. 3 (pastern or paw, with the hoof or trotter).
     Leg(u8, u8),
-    /// Hoof of leg `k`, riding on its last segment.
-    Hoof(u8),
     /// Bird wing of side `s` (0 left, 1 right): 0 arm, 1 hand, 2 folded on the body.
     Wing(u8, u8),
     /// A bird's tail spread for flight (`Tail` is the folded one).
@@ -336,8 +340,8 @@ impl Piece {
             Piece::Tusks => "tusks".into(),
             Piece::UpperTusks => "tusks_upper".into(),
             Piece::Mane(s) => format!("mane{s}"),
+            Piece::Rump => "rump".into(),
             Piece::Leg(k, s) => format!("leg{k}_{s}"),
-            Piece::Hoof(k) => format!("hoof{k}"),
             Piece::Wing(s, w) => format!("wing{s}_{w}"),
             Piece::TailFan => "tailfan".into(),
         }
@@ -351,7 +355,6 @@ enum Skin {
     Coat,
     /// Eyes, nose and beak: wet and glossy, colored by the vertices.
     Gloss,
-    Hoof,
     Antler,
     /// Tusks: smooth ivory, colored by the vertices.
     Ivory,
@@ -443,13 +446,14 @@ fn piece_list(species: Species, male: bool, young: bool) -> Vec<(Piece, Skin)> {
                 (Piece::Neck, Skin::Coat),
                 (Piece::Neck2, Skin::Coat),
                 (Piece::Tail, Skin::Coat),
+                (Piece::Rump, Skin::Coat),
             ]);
             v.extend([(Piece::Ear(0), Skin::Coat), (Piece::Ear(1), Skin::Coat)]);
+            // The hooves are part of the pasterns.
             for k in 0..4 {
                 for s in 0..4 {
                     v.push((Piece::Leg(k, s), Skin::Coat));
                 }
-                v.push((Piece::Hoof(k), Skin::Hoof));
             }
             if male {
                 v.push((Piece::Antlers, Skin::Antler));
@@ -537,7 +541,6 @@ fn material(species: Species, skin: Skin, art: &mut ArtAssets) -> Option<Materia
             m.reflectance = 0.55;
             Some(MaterialRef::Inline(m))
         }
-        Skin::Hoof => art.material("animals/hoof", white, hoof_texture),
         Skin::Antler => art.material("animals/antler", white, antler_texture),
         Skin::Ivory => {
             let mut m = white.with_roughness(0.38);
@@ -634,9 +637,6 @@ pub fn species_jobs(species: Species) -> Vec<Job> {
     match species {
         Species::Deer => {
             jobs.push(Box::new(|| {
-                vec![Made::Tex("animals/hoof".into(), hoof_texture())]
-            }));
-            jobs.push(Box::new(|| {
                 vec![Made::Tex("animals/antler".into(), antler_texture())]
             }));
             deer::jobs(&mut jobs);
@@ -649,12 +649,7 @@ pub fn species_jobs(species: Species) -> Vec<Job> {
             }));
             bird::jobs(&mut jobs);
         }
-        Species::Boar => {
-            jobs.push(Box::new(|| {
-                vec![Made::Tex("animals/hoof".into(), hoof_texture())]
-            }));
-            boar::jobs(&mut jobs);
-        }
+        Species::Boar => boar::jobs(&mut jobs),
     }
     jobs
 }
@@ -1284,6 +1279,19 @@ fn sculpt(f: Field, region: Region, target: usize, paint: &Paint) -> Mesh {
             let c = (paint.color)(q, m) * ao;
             Vertex::new(p - paint.pivot, n, paint.flow.uv(q)).with_color(c.extend(1.0))
         })
+        .collect();
+    Mesh::new(vertices, indices)
+}
+
+/// Two meshes as one.
+fn joined(a: &Mesh, b: &Mesh) -> Mesh {
+    let base = a.vertices.len() as u32;
+    let vertices = a.vertices.iter().chain(&b.vertices).copied().collect();
+    let indices = a
+        .indices
+        .iter()
+        .copied()
+        .chain(b.indices.iter().map(|i| i + base))
         .collect();
     Mesh::new(vertices, indices)
 }
@@ -2064,21 +2072,6 @@ fn plumage_texel(tufts: &[Tuft], n: i32, uv: Vec2) -> Texel {
     }
 }
 
-fn hoof_texture() -> TextureSet {
-    TextureSet::bake(128, 0.05, |uv| {
-        let lines = perlin2(Vec2::new(uv.x * 40.0, uv.y * 3.0), 40, 3);
-        let rings = perlin2(Vec2::new(uv.x * 2.0, uv.y * 24.0), 2, 4);
-        let n = lines * 0.7 + rings * 0.3;
-        Texel {
-            albedo: Vec3::splat(0.9 + 0.12 * n),
-            height: 0.00015 * n,
-            roughness: 0.42 + 0.08 * lines,
-            metallic: 0.0,
-            occlusion: 1.0,
-        }
-    })
-}
-
 fn antler_texture() -> TextureSet {
     TextureSet::bake(256, 0.08, |uv| {
         // Grooves along the beam and pearled bumps.
@@ -2546,6 +2539,24 @@ mod deer {
         smin(ssub(smin(leaf, tip, 0.02), hollow, 0.006), roll, 0.015)
     }
 
+    /// The middle of the rump patch, round the tail (the flared patch's pivot).
+    pub const RUMP_AT: Vec3 = v3(0.0, 0.96, 0.6);
+    /// Which way the rump patch faces (it flares out this way).
+    pub const RUMP_OUT: Vec3 = v3(0.0, 0.33, 0.944);
+
+    /// The rump patch flared: a lens of long hair over the rump round the tail, standing up
+    /// to 1.6 cm out of the coat in the middle and lying flush with it at the edge.
+    pub fn rump(p: Vec3) -> f32 {
+        let r = ((p - RUMP_AT) * v3(1.35, 0.95, 1.0)).length();
+        let thick = 0.016 * (1.0 - smooth(0.04, 0.16, r));
+        let skin = torso(p);
+        let d = (skin - thick).max(-skin - 0.004).max(r - 0.17);
+        if d > 0.01 {
+            return d;
+        }
+        d - 0.003 * clumps(p, RUMP_OUT, 0.01, 67)
+    }
+
     /// Short, broad and flat, lying on the rump patch, with a tuft of longer hair at the tip.
     pub fn tail(p: Vec3) -> f32 {
         let tip = R.tail2 + (R.tail2 - R.tail) * 0.12;
@@ -2637,6 +2648,11 @@ mod deer {
                         smooth(0.1, 0.6, n.z) * smooth(0.66, 0.8, p.y) * smooth(0.42, 0.5, p.z);
                     c = mix(c, cream, patch * 0.7);
                 }
+            }
+            Piece::Rump => {
+                // Long pale hair, near white where it stands out most.
+                let r = ((p - RUMP_AT) * v3(1.35, 0.95, 1.0)).length();
+                c = mix(hex(0xece4d2), cream, smooth(0.06, 0.16, r));
             }
             Piece::Body | Piece::Croup => {
                 // Buff rump patch around the tail, edged darker above.
@@ -2823,6 +2839,22 @@ mod deer {
             variant: false,
             seam: None,
         });
+        // The rump patch, its hair running down and out from the root of the tail.
+        specs.push(Spec {
+            piece: Piece::Rump,
+            f: rump,
+            region: Region::aabb(
+                v3(-0.16, 0.74, 0.4),
+                v3(0.16, 1.16, 0.8),
+                Vec3::splat(0.004),
+            ),
+            target: 900,
+            flow: Flow::new(R.tail, RUMP_AT - Vec3::Y * 0.15, RUMP_OUT, 0.1),
+            pivot: RUMP_AT,
+            mirror: None,
+            variant: false,
+            seam: None,
+        });
         // Legs: right side sculpted, left mirrored.
         type Legs = (
             u8,
@@ -2854,25 +2886,32 @@ mod deer {
             let j = leg.joints;
             let across = [0.008, 0.0055, 0.004, 0.003];
             let along = [0.012, 0.01, 0.01, 0.0045];
+            let mut pastern = None;
             for s in 0..4 {
                 let (a, b) = if s == 3 {
                     (j[3], coronet(j[3], j[4]))
                 } else {
                     (j[s], j[s + 1])
                 };
-                specs.push(Spec {
+                let spec = Spec {
                     piece: Piece::Leg(k, s as u8),
                     f: fields[s],
                     region: Region::bone(a, b, reach[s], across[s], along[s]),
                     target: target[s],
                     flow: Flow::new(a, b, back, if s >= 2 { 0.09 } else { 0.12 }),
                     pivot: j[s],
-                    mirror: Some(Piece::Leg(k - 1, s as u8)),
+                    mirror: (s < 3).then_some(Piece::Leg(k - 1, s as u8)),
                     variant: false,
                     seam: None,
-                });
+                };
+                if s == 3 {
+                    pastern = Some(spec);
+                } else {
+                    specs.push(spec);
+                }
             }
-            // Hoof.
+            let pastern = pastern.expect("a pastern");
+            // The pastern and its hoof, one piece (sculpted apart, each painted its own way).
             jobs.push(Box::new(move || {
                 let color = |p: Vec3, n: Vec3| {
                     let sole = smooth(0.006, 0.0, p.y);
@@ -2893,13 +2932,17 @@ mod deer {
                     c + v3(0.045, 0.07, 0.07),
                     Vec3::splat(0.0018),
                 );
-                let mesh = sculpt(&hoof_f, region, 520, &paint);
+                let hoof = sculpt(&hoof_f, region, 520, &paint);
+                let Some(Made::Mesh(_, leg)) = pastern.run(KIND).pop() else {
+                    unreachable!("a pastern mesh")
+                };
+                let foot = joined(&leg, &hoof);
                 vec![
                     Made::Mesh(
-                        format!("animals/deer/{}", Piece::Hoof(k - 1).key()),
-                        mirrored(&mesh),
+                        format!("animals/deer/{}", Piece::Leg(k - 1, 3).key()),
+                        mirrored(&foot),
                     ),
-                    Made::Mesh(format!("animals/deer/{}", Piece::Hoof(k).key()), mesh),
+                    Made::Mesh(format!("animals/deer/{}", Piece::Leg(k, 3).key()), foot),
                 ]
             }));
         }

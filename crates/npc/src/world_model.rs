@@ -596,16 +596,11 @@ impl TacticalWorld {
     }
 
     /// Would a body of `radius` and `height` standing at `p` overlap an obstacle (other than
-    /// `except`)?
+    /// `except`)? Looks through the hash cells in place, so it allocates nothing (animals
+    /// steering their flight call it many times a tick).
     pub fn blocked_at(&self, p: DVec3, radius: f32, height: f32, except: Option<u32>) -> bool {
-        let mut near = Vec::new();
         let r = radius as f64;
-        self.obstacles_near(
-            DVec2::new(p.x - r, p.z - r),
-            DVec2::new(p.x + r, p.z + r),
-            &mut near,
-        );
-        near.iter().any(|&i| {
+        let hit = |i: u32| {
             if Some(i) == except {
                 return false;
             }
@@ -618,6 +613,26 @@ impl TacticalWorld {
                 o.vertical_span(p.x, p.z)
                     .is_none_or(|(top, _)| top > p.y + 0.3)
             }
+        };
+        if self.big.iter().any(|&i| hit(i)) {
+            return true;
+        }
+        let (min, max) = (DVec2::new(p.x - r, p.z - r), DVec2::new(p.x + r, p.z + r));
+        let (x0, z0) = hash_key(min.x, min.y);
+        let (x1, z1) = hash_key(max.x, max.y);
+        (x0..=x1).any(|x| {
+            (z0..=z1).any(|z| {
+                self.hash.get(&(x, z)).is_some_and(|list| {
+                    list.iter().any(|&i| {
+                        let o = &self.obstacles[i as usize];
+                        o.max.x >= min.x
+                            && o.min.x <= max.x
+                            && o.max.z >= min.y
+                            && o.min.z <= max.y
+                            && hit(i)
+                    })
+                })
+            })
         })
     }
 
