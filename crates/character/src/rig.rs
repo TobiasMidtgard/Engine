@@ -218,6 +218,64 @@ impl Rig {
         if feet > 0.0 {
             shift /= feet;
         }
+        // Hands go where the pose puts its hands (a sword grip, a rifle's), whatever this
+        // person's arm length: two-bone IK from the shoulder, the elbow bending the way the
+        // pose bends it, as far as the arm reaches at the pose's own bend.
+        for s in ["l", "r"] {
+            let index = |name: String| self.bones.iter().position(|b| *b == name);
+            let (Some(u), Some(f), Some(h)) = (
+                index(format!("upper_arm_{s}")),
+                index(format!("lower_arm_{s}")),
+                index(format!("hand_{s}")),
+            ) else {
+                continue;
+            };
+            let Some(target) = map[h]
+                .and_then(|i| pose.bones.get(i))
+                .map(|p| p.translation)
+            else {
+                continue;
+            };
+            let target = target - shift;
+            let (shoulder, elbow, wrist) = (at[u], at[f], at[h]);
+            let upper = (self.joints[f] - self.joints[u]).length();
+            let lower = (self.joints[h] - self.joints[f]).length();
+            let to = target - shoulder;
+            let reach = to.length();
+            if upper < 1e-4 || lower < 1e-4 || reach < 1e-4 {
+                continue;
+            }
+            let axis = to / reach;
+            // A hand out of reach points toward its target with the pose's own elbow bend
+            // rather than straightening the arm (a wave stays a wave on a short person).
+            let bent = (wrist - shoulder).length().max(1e-4);
+            let d = reach
+                .min(bent)
+                .clamp((upper - lower).abs() + 1e-5, upper + lower - 1e-5);
+            let along = (upper * upper - lower * lower + d * d) / (2.0 * d);
+            let out = (upper * upper - along * along).max(0.0).sqrt();
+            // The bend's direction: where the elbow already points off the shoulder-hand line
+            // (or, with the arm straight, back).
+            let perp = |v: Vec3| v - axis * v.dot(axis);
+            let mut pole = perp(elbow - shoulder);
+            if pole.length() < 1e-3 * upper {
+                // Elbows point back (the humanoid faces −Z), or down for an arm along Z.
+                pole = perp(Vec3::Z);
+                if pole.length() < 0.1 {
+                    pole = perp(Vec3::NEG_Y);
+                }
+            }
+            let pole = perp(pole.normalize_or(Vec3::Z)).normalize_or(Vec3::Z);
+            let new_elbow = shoulder + axis * along + pole * out;
+            let new_wrist = shoulder + axis * d;
+            let swing = |from: Vec3, to: Vec3| {
+                Quat::from_rotation_arc(from.normalize_or(Vec3::Y), to.normalize_or(Vec3::Y))
+            };
+            turn[u] = swing(elbow - shoulder, new_elbow - shoulder) * turn[u];
+            turn[f] = swing(wrist - elbow, new_wrist - new_elbow) * turn[f];
+            at[f] = new_elbow;
+            at[h] = new_wrist;
+        }
         let flip = Mat4::from_mat3(Mat3::from_diagonal(Vec3::new(-1.0, 1.0, -1.0)));
         for b in 0..n {
             let m = Mat4::from_translation(at[b] + shift)
@@ -340,7 +398,12 @@ mod tests {
         assert!((angle - 30.0).abs() < 0.5, "{angle}");
         let own = pack.positions[pack.bone("lower_arm_l").unwrap()]
             - pack.positions[pack.bone("upper_arm_l").unwrap()];
-        assert!((upper.length() - own.length()).abs() < 1e-4);
+        assert!(
+            (upper.length() - own.length()).abs() < 1e-4,
+            "{} {} {shoulder} {elbow} {wrist}",
+            upper.length(),
+            own.length()
+        );
         // The trunk doesn't move but for the half turn and standing on the origin.
         let head = at("head");
         assert!(
@@ -380,5 +443,59 @@ mod tests {
         let landed = apply(&palette[foot], pack.positions[foot]);
         let want = pose.bones[pose.index_of("foot_l").unwrap()].translation;
         assert!((landed - want).length() < 1e-4, "{landed} {want}");
+    }
+
+    #[test]
+    fn hands_reach_where_the_pose_holds_them() {
+        let pack = stick_pack();
+        let rig = Rig::new(&pack, &pack.positions).unwrap();
+        let mut pose = rig.rest_pose();
+        // A grip 8 cm in toward the left shoulder and 5 cm forward: the elbow has to bend.
+        let (shoulder, hand) = (
+            pose.index_of("upper_arm_l").unwrap(),
+            pose.index_of("hand_l").unwrap(),
+        );
+        let s = pose.bones[shoulder].translation;
+        let h = pose.bones[hand].translation;
+        let grip = h + (s - h).normalize() * 0.08 + Vec3::new(0.0, 0.0, -0.05);
+        pose.bones[hand].translation = grip;
+        let map = rig.map(&pose);
+        let mut palette = Vec::new();
+        rig.palette(&pose, &map, &mut palette);
+        let at = |name: &str| {
+            let b = pack.bone(name).unwrap();
+            apply(&palette[b], pack.positions[b])
+        };
+        assert!(
+            (at("hand_l") - grip).length() < 1e-3,
+            "{} {grip}",
+            at("hand_l")
+        );
+        // The arm keeps its lengths.
+        let len = |a: &str, b: &str| {
+            (pack.positions[pack.bone(a).unwrap()] - pack.positions[pack.bone(b).unwrap()]).length()
+        };
+        let upper = (at("lower_arm_l") - at("upper_arm_l")).length();
+        let lower = (at("hand_l") - at("lower_arm_l")).length();
+        assert!((upper - len("lower_arm_l", "upper_arm_l")).abs() < 1e-4);
+        assert!((lower - len("hand_l", "lower_arm_l")).abs() < 1e-4);
+        // The other hand stays put.
+        let other = pose.bones[pose.index_of("hand_r").unwrap()].translation;
+        assert!((at("hand_r") - other).length() < 1e-3);
+        // Out of reach, the hand points toward its target without straightening the arm.
+        let elbow = pose.index_of("lower_arm_l").unwrap();
+        pose.bones[elbow].rotation *= Quat::from_rotation_x(0.8);
+        pose.bones[hand].translation = s + (grip - s).normalize() * 2.0;
+        rig.palette(&pose, &map, &mut palette);
+        let at = |name: &str| {
+            let b = pack.bone(name).unwrap();
+            apply(&palette[b], pack.positions[b])
+        };
+        let upper = at("lower_arm_l") - at("upper_arm_l");
+        let lower = at("hand_l") - at("lower_arm_l");
+        assert!(upper.normalize().dot(lower.normalize()) < 0.99);
+        let toward = (at("hand_l") - at("upper_arm_l")).normalize();
+        let want = (pose.bones[hand].translation - at("upper_arm_l")).normalize();
+        assert!(toward.dot(want) > 0.999, "{toward} {want}");
     }
 }
