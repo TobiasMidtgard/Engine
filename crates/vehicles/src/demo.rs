@@ -824,8 +824,8 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                 DemoView::new(
                     "spaceport_reentry",
                     "Spaceplane re-entering, hull glowing at 1 390 K",
-                    [-26.0, entry_height + 7.0, -16.0],
-                    [0.0, entry_height - 1.0, 0.0],
+                    [-27.0, entry_height - 4.0, -20.0],
+                    [0.0, entry_height - 0.5, 0.0],
                 )
                 .at(18.0, ORBIT_WARMUP)
                 .call("entity.despawn", serde_json::json!({"name": "Orbiter"}))
