@@ -69,8 +69,8 @@ came from, then bolts a reaction time later (0.3 to 0.55 s), and the herd runs o
 (the ones out front ease off for the rest). A deer runs from all the wolves it sees at
 once, the nearest most, so one with a wolf on either side runs on between them; with a wolf
 close at its heels (`ZIGZAG_RANGE`) it cuts from side to side at sharp angles; the one that
-raised the alarm stots for its first bounds (`STOT_SECS`, not when wounded or with a wolf
-close); a wounded animal runs lame. A blow is felt at once (the animal reacts the same tick). Wolves prefer deer, take a boar only when nothing easier is about (a
+raised the alarm at a predator it saw stots for its first bounds (`STOT_SECS`; not at a
+bang or fire, when wounded, or with a wolf close); a wounded animal runs lame. A blow is felt at once (the animal reacts the same tick). Wolves prefer deer, take a boar only when nothing easier is about (a
 piglet sooner, a tusker last of all) and give room to a boar charging at them (not to one
 charging past them at something else). Bird flocks peck on the
 ground and lift off together. Gunfire, explosions, howls and fire scare everything.
@@ -317,14 +317,16 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   whoever hurt it (the shooter, not what it was watching), stands and scents when it can't
   find who rather than charge at nothing, and runs from fire rather than
   charge into it, a sow charges to defend her piglets (a lone sow runs), wolves give room to
-  a boar charging at them but not to one charging past (at six spots), wolves pick a piglet over its
-  elders, a pack of three, four or five picks the wounded deer from the start, runs only it
-  and catches it (unhurt, the herd's nearest), over eight seeded hunts for each pack size
-  its flankers run out on the quarry's sides (both on their own for most of the flanking,
-  abreast of it for a second in at least half the hunts, never level with it on the far
-  side) while the tester drives from behind and the ambusher lies in wait beyond the herd, a herd's alarm spreads within a reaction time (each deer looks toward the
-  shot before it bolts, and the herd stays bunched), a deer runs straight from a wolf well
-  back and zigzags once it is close, and a pack gives up a chase after its time, all
+  a boar charging at them but not to one charging past (at six spots), wolves pick a piglet
+  over its elders, a pack of three, four or five picks the wounded deer from the start, runs
+  only it and catches it (unhurt, the herd's nearest), over eight seeded hunts for each pack
+  size its flankers run out on the quarry's sides (both on their own for most of the
+  flanking, abreast of it for a second in at least half the hunts, never level with it on
+  the far side) while the tester drives from behind and the ambusher lies in wait beyond the
+  herd, a herd's alarm spreads within a reaction time (each deer looks toward the shot
+  before it bolts, and the herd stays bunched), a deer runs straight from a wolf well back
+  and zigzags once it is close, a deer stots at a wolf it sees but runs flat out from a bang, a pack stalks in on a herd it scents from further off than
+  it would run one down (`SCENT_REACH`), and a pack gives up a chase after its time, all
   together, rests its time out though hungry, and hunts again.
 - `tests/demo.rs`: the arena fight keeps going for a minute (shots, attacks, blocks, cover,
   downed and revived) inside the arena, and over six fights with different randomness squad

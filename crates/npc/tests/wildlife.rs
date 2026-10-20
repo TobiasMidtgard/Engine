@@ -1003,6 +1003,60 @@ fn bearing(app: &App, e: Entity, at: DVec3) -> f32 {
     f.angle_between(flat(at - pos(app, e)).normalize())
 }
 
+/// A deer that bolts from a wolf it sees stots its first bounds (a signal to the wolf); one
+/// that bolts at a bang just runs, flat out from the start.
+#[test]
+fn a_deer_stots_at_a_wolf_it_sees_but_not_at_a_bang() {
+    // How hard it stotted over its first second of flight, and how far it got in it.
+    let flight = |app: &mut App, deer: Entity| {
+        let (mut stot, mut from) = (0.0f32, None);
+        for _ in 0..60 * 4 {
+            app.update();
+            if state(app, deer) != AnimalState::Flee {
+                continue;
+            }
+            let now = app.world.get::<NpcClock>(deer).unwrap().now;
+            let start = *from.get_or_insert((now, pos(app, deer)));
+            if now - start.0 > 1.0 {
+                return (stot, flat(pos(app, deer) - start.1).length());
+            }
+            stot = stot.max(mind(app, deer).stot(now));
+        }
+        panic!("it never bolted");
+    };
+    let mut app = app();
+    let deer = animal(&mut app, Species::Deer, DVec3::ZERO, 1);
+    app.update_n(30);
+    animal(&mut app, Species::Wolf, DVec3::new(0.0, 0.0, -16.0), 2);
+    let (stot, ran) = flight(&mut app, deer);
+    eprintln!("at a wolf: stot {stot:.2}, {ran:.1} m in its first second");
+    assert!(stot > 0.9, "it stots at the wolf ({stot:.2})");
+    assert!(
+        mind(&app, deer).alarm.is_some_and(|a| a.1),
+        "it raised the alarm"
+    );
+
+    let mut app = self::app();
+    let deer = animal(&mut app, Species::Deer, DVec3::ZERO, 1);
+    app.update_n(30);
+    app.world.write_message(engine_world::NoiseEvent {
+        position: DVec3::new(0.0, 1.0, -12.0),
+        radius: 60.0,
+        source: None,
+    });
+    let (stot, ran) = flight(&mut app, deer);
+    eprintln!("at a bang: stot {stot:.2}, {ran:.1} m in its first second");
+    assert!(
+        mind(&app, deer).alarm.is_some_and(|a| a.1),
+        "it raised the alarm"
+    );
+    assert_eq!(stot, 0.0, "it doesn't stot at a bang");
+    assert!(
+        ran > 3.0,
+        "it runs flat out from the start ({ran:.1} m in a second)"
+    );
+}
+
 #[test]
 fn the_herds_alarm_spreads_within_a_reaction_time() {
     let mut app = app();

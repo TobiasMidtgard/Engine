@@ -512,6 +512,9 @@ pub struct AnimalMind {
     chaser: Option<Entity>,
     /// Flankers: when it came level with the quarry in this chase (animal clock).
     abreast: Option<f64>,
+    /// Deer: it raised the alarm at a predator it saw, so it stots as it sets off (not at a
+    /// bang, a blow or fire: then it just runs).
+    stots: bool,
     /// Away from everything it last saw or smelled that threatens it, weighted by danger.
     escape: Option<Vec3>,
     zig: f32,
@@ -533,7 +536,8 @@ impl AnimalMind {
     }
 
     /// Deer: 0..1, how hard it is stotting, the first stiff-legged bounds of a flight it
-    /// raised the alarm for (not when wounded, or with a wolf already close).
+    /// raised the alarm for at a predator it saw (not at a noise or fire, not when wounded,
+    /// and not with a wolf already close).
     pub fn stot(&self, now: f64) -> f32 {
         let Some((at, true)) = self.alarm else {
             return 0.0;
@@ -541,7 +545,12 @@ impl AnimalMind {
         let t = (now - at) as f32;
         let hurt = self.wounded.is_some_and(|(w, _, _)| now - w < 5.0);
         let close = self.pursuer.is_some_and(|p| p.1 < 12.0);
-        if self.state != AnimalState::Flee || hurt || close || !(0.0..STOT_SECS).contains(&t) {
+        if !self.stots
+            || self.state != AnimalState::Flee
+            || hurt
+            || close
+            || !(0.0..STOT_SECS).contains(&t)
+        {
             return 0.0;
         }
         let x = ((t - 0.55) / (STOT_SECS - 0.55)).clamp(0.0, 1.0);
@@ -1154,6 +1163,7 @@ pub(crate) fn animal_think(
             // It ran into danger itself (not caught from the herd): a deer bolting snorts
             // the alarm.
             let raised = danger >= 1.0;
+            let sighted = mind.escape.is_some();
             // Herd: panic spreads, alert mates make it look up (only from mates that sensed
             // the danger themselves, so a calm herd doesn't keep itself on edge).
             if species != Species::Wolf {
@@ -1250,6 +1260,7 @@ pub(crate) fn animal_think(
             {
                 // Snorts and flags its tail.
                 mind.alarm = Some((now, true));
+                mind.stots = sighted;
                 noise.write(NoiseEvent {
                     position: pos + DVec3::Y * 1.2,
                     radius: 25.0,
