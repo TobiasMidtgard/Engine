@@ -12,6 +12,7 @@ pub mod morph;
 pub mod mouth;
 pub mod pack;
 pub mod rig;
+pub mod shoes;
 pub mod sliders;
 pub mod strands;
 pub mod subdiv;
