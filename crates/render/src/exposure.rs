@@ -56,6 +56,8 @@ struct MeterParams {
 struct Readback {
     buffer: wgpu::Buffer,
     state: Arc<AtomicU8>,
+    /// [`ExposureMeter::restart`] count when this readback was recorded.
+    generation: u64,
 }
 
 /// Owns the histogram pass and its readbacks.
@@ -70,6 +72,8 @@ pub struct ExposureMeter {
     pending: Option<usize>,
     /// Latest measurement (EV100 of the metered average, without compensation).
     pub measured_ev100: Option<f32>,
+    /// Bumped by [`ExposureMeter::restart`]; readings recorded before it are dropped.
+    generation: u64,
 }
 
 impl ExposureMeter {
@@ -152,6 +156,7 @@ impl ExposureMeter {
                     mapped_at_creation: false,
                 }),
                 state: Arc::new(AtomicU8::new(FREE)),
+                generation: 0,
             })
             .collect();
         Self {
@@ -163,6 +168,7 @@ impl ExposureMeter {
             readbacks,
             pending: None,
             measured_ev100: None,
+            generation: 0,
         }
     }
 
@@ -227,10 +233,18 @@ impl ExposureMeter {
             let gy = height.div_ceil(STRIDE).div_ceil(WORKGROUP);
             pass.dispatch_workgroups(gx, gy, 1);
         }
-        let rb = &self.readbacks[slot];
+        let rb = &mut self.readbacks[slot];
+        rb.generation = self.generation;
         encoder.copy_buffer_to_buffer(&self.histogram, 0, &rb.buffer, 0, (BINS * 4) as u64);
         rb.state.store(IN_FLIGHT, Ordering::Release);
         self.pending = Some(slot);
+    }
+
+    /// Forget the measurement and ignore readings still in flight, after a camera cut: they
+    /// measured the old view. `measured_ev100` stays `None` until this frame's reading arrives.
+    pub fn restart(&mut self) {
+        self.generation += 1;
+        self.measured_ev100 = None;
     }
 
     /// Start mapping this frame's readback (call right after `queue.submit`).
@@ -260,7 +274,9 @@ impl ExposureMeter {
                     };
                     rb.buffer.unmap();
                     rb.state.store(FREE, Ordering::Release);
-                    if let Some(ev) = ev100_from_histogram(&bins) {
+                    if rb.generation == self.generation
+                        && let Some(ev) = ev100_from_histogram(&bins)
+                    {
                         self.measured_ev100 = Some(ev);
                     }
                 }

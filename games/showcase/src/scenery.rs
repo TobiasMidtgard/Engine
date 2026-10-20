@@ -16,19 +16,17 @@ use engine::prelude::*;
 /// Materials shared by the scenery (vertex colors carry the variation).
 pub struct Mats {
     pub terrain: Handle<StandardMaterial>,
-    pub bark: Handle<StandardMaterial>,
-    pub leaves: Handle<StandardMaterial>,
     pub grass: Handle<StandardMaterial>,
     pub flowers: Handle<StandardMaterial>,
     /// The village's procedural PBR materials (plaster, timber, tiles, glass, iron, ...).
     pub village: VillageMats,
 }
 
+/// A tree variant: Foliage's species for its kind and a seed for its genes.
 pub struct TreeHandles {
     pub kind: TreeKind,
-    pub trunk: Handle<Mesh>,
-    pub crown: Handle<Mesh>,
-    pub far: Handle<Mesh>,
+    pub species: engine_foliage::SpeciesId,
+    pub seed: u64,
 }
 
 /// One house archetype: a mesh per material, near and far versions.
@@ -73,8 +71,23 @@ pub struct Library {
     pub houses: Vec<HouseHandles>,
     pub lamp: LampHandles,
     pub props: Props,
+    /// Dry-stone wall segment variants and the heads that end a run.
+    pub walls: Vec<WallHandles>,
+    pub wall_heads: Vec<Handle<Mesh>>,
     /// The spaceport's 600 m tower.
     pub tower: crate::tower::TowerKit,
+}
+
+/// One dry-stone wall segment variant (see [`crate::walls`]).
+pub struct WallHandles {
+    pub near: Handle<Mesh>,
+    /// For the last segment of a run (its stones leave room for the head).
+    pub near_end: Handle<Mesh>,
+    /// The core: dark behind the stones (the run's last segment's stops inside the head),
+    /// stone-colored from afar.
+    pub core: Handle<Mesh>,
+    pub core_end: Handle<Mesh>,
+    pub core_far: Handle<Mesh>,
 }
 
 impl Library {
@@ -87,6 +100,7 @@ pub fn build_library(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
+    plants: &engine_foliage::PlantLibrary,
 ) -> Library {
     // Rock textures, boulders and the cliffs build on other threads meanwhile.
     let rock_job = crate::rocks::start_kit();
@@ -100,8 +114,6 @@ pub fn build_library(
     // The detail map averages about 0.85; lift the base so the vertex colors keep their value.
     terrain.base_color = [1.18, 1.18, 1.18, 1.0];
     terrain.normal_scale = 0.7;
-    let mut leaves = white(0.75).with_subsurface(0.5).with_wind_sway(0.12);
-    leaves.reflectance = 0.35;
     let mut grass = white(0.8).with_subsurface(0.6).with_wind_sway(0.18);
     grass.double_sided = true;
     let mut flowers = white(0.6).with_subsurface(0.4).with_wind_sway(0.15);
@@ -115,8 +127,6 @@ pub fn build_library(
     });
     let mats = Mats {
         terrain: materials.add(terrain),
-        bark: materials.add(white(0.9)),
-        leaves: materials.add(leaves),
         grass: materials.add(grass),
         flowers: materials.add(flowers),
         village: village_mats,
@@ -131,12 +141,21 @@ pub fn build_library(
     ] {
         for v in 0..variants {
             let seed = 1000 + kind as u64 * 100 + v;
-            let t = meshgen::tree(kind, seed);
+            // The valley's conifers are spruces with a few pines among them, the bushes hazel.
+            let name = match kind {
+                TreeKind::Oak => "oak",
+                TreeKind::Spruce if v % 3 == 2 => "pine",
+                TreeKind::Spruce => "spruce",
+                TreeKind::Birch => "birch",
+                TreeKind::Bush => "hazel",
+            };
+            let species = plants
+                .id(name)
+                .unwrap_or_else(|| panic!("Foliage has no {name}"));
             trees.push(TreeHandles {
                 kind,
-                trunk: meshes.add(t.trunk),
-                crown: meshes.add(t.crown),
-                far: meshes.add(meshgen::tree_far(kind, seed)),
+                species,
+                seed,
             });
         }
     }
@@ -200,6 +219,36 @@ pub fn build_library(
         near: (meshes.add(lamp.0.0), meshes.add(lamp.0.1)),
         far: (meshes.add(lamp.1.0), meshes.add(lamp.1.1)),
     };
+    // Hundreds of sculpted stones a variant: built side by side.
+    let (segments, heads) = std::thread::scope(|scope| {
+        let segments: Vec<_> = (0..4)
+            .map(|i| scope.spawn(move || crate::walls::segment(900 + i)))
+            .collect();
+        let heads: Vec<_> = (0..3)
+            .map(|i| scope.spawn(move || crate::walls::head(950 + i)))
+            .collect();
+        (
+            segments
+                .into_iter()
+                .map(|h| h.join().expect("wall builder"))
+                .collect::<Vec<_>>(),
+            heads
+                .into_iter()
+                .map(|h| h.join().expect("wall builder"))
+                .collect::<Vec<_>>(),
+        )
+    });
+    let walls = segments
+        .into_iter()
+        .map(|w| WallHandles {
+            near: meshes.add(w.near),
+            near_end: meshes.add(w.near_end),
+            core: meshes.add(w.core),
+            core_end: meshes.add(w.core_end),
+            core_far: meshes.add(w.core_far),
+        })
+        .collect();
+    let wall_heads = heads.into_iter().map(|h| meshes.add(h.near)).collect();
     engine::core::log::info!(
         "village: {} house types ({} triangles near, {} far), built in {:.2} s",
         houses.len(),
@@ -219,6 +268,8 @@ pub fn build_library(
         houses,
         lamp,
         props,
+        walls,
+        wall_heads,
         tower: tower_job.finish(meshes, materials, images),
     }
 }
@@ -306,35 +357,21 @@ pub fn spawn_terrain(
     }
 }
 
-/// One tree with near/far detail.
-pub fn spawn_tree(
-    commands: &mut Commands,
-    lib: &Library,
-    t: &TreeHandles,
-    pos: DVec3,
-    yaw: f32,
-    scale: f32,
-) {
-    let tf = Transform::from_translation(pos)
-        .with_rotation(Quat::from_rotation_y(yaw))
-        .with_scale(Vec3::splat(scale));
-    let switch = 220.0 * scale;
-    if t.kind != TreeKind::Bush {
-        commands.spawn((
-            tf,
-            MeshRenderer::new(t.trunk, lib.mats.bark),
-            Lod::hide_beyond(t.trunk, switch),
-        ));
-    }
+/// One of Foliage's scenery trees (it picks its own level of detail and follows the seasons).
+/// `scale` sizes it: a grown tree is about 1, saplings and young trees less.
+pub fn spawn_tree(commands: &mut Commands, t: &TreeHandles, pos: DVec3, yaw: f32, scale: f32) {
+    // Every tree its own genes (lean, height, crown), from its variant and where it stands.
+    let spot = (pos.x * 7.0).round() as i64 as u64 ^ ((pos.z * 13.0).round() as i64 as u64) << 21;
+    let genes = engine_foliage::Genes::random(&mut Rng::new(t.seed ^ spot));
+    // Foliage's level of detail counts the size, not the transform's scale. Mostly grown
+    // trees, so the woods' crowns meet.
+    let size = (0.75 + (scale - 0.75) * 0.6).clamp(0.6, 1.0);
     commands.spawn((
-        tf,
-        MeshRenderer::new(t.crown, lib.mats.leaves),
-        Lod {
-            near: t.crown,
-            far: Some(t.far),
-            switch,
-            hide: f32::INFINITY,
-            far_shown: false,
+        Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
+        engine_foliage::SceneryTree {
+            species: t.species,
+            size,
+            genes,
         },
     ));
 }
@@ -377,16 +414,16 @@ fn on_wooded_rim(x: f64, z: f64) -> bool {
     })
 }
 
-/// Inside a zone whose ground is paved, built over or its own (no scenery grass there).
-fn in_hard_zone(x: f64, z: f64) -> bool {
+/// Inside a zone whose ground is paved, built over or its own (no scenery grass there), or
+/// within `reach` of a grassy zone's bare footprint (how far the grass placed here spreads).
+fn in_hard_zone(x: f64, z: f64, reach: f64) -> bool {
     ZONES.iter().any(|zn| {
         let d = DVec2::new(x - zn.center.x, z - zn.center.z).length();
         d < zn.radius - 2.0 && !crate::zones::GRASSY_ZONES.contains(&zn.key)
     }) || crate::zones::BARE_FOOTPRINTS.iter().any(|&(key, rx, rz)| {
-        // A grass patch reaches about 2 m from its center.
         let c = crate::zones::zone(key).center;
-        (rx[0] - 2.0..rx[1] + 2.0).contains(&(x - c.x))
-            && (rz[0] - 2.0..rz[1] + 2.0).contains(&(z - c.z))
+        (rx[0] - reach..rx[1] + reach).contains(&(x - c.x))
+            && (rz[0] - reach..rz[1] + reach).contains(&(z - c.z))
     })
 }
 
@@ -433,11 +470,34 @@ pub fn spawn_woods(commands: &mut Commands, lib: &Library, land: &Landscape, rng
             let t = pick_tree(lib, kind, rng);
             let scale = rng.range(0.75, 1.25);
             let at = place(land, x, z, 0.1);
-            spawn_tree(commands, lib, t, at, rng.range(0.0, TAU), scale);
+            spawn_tree(commands, t, at, rng.range(0.0, TAU), scale);
             if near_wildlife(x, z) {
                 solid(commands, at, 0.35 * scale, 5.0 * scale);
             }
             count += 1;
+            // Deep in the woods a second tree shares the cell, so the canopy closes. (Its own
+            // rng, so the rest of the valley's layout stays put.)
+            if wood > 0.6 {
+                let mut extra = Rng::new(0x3f0d ^ ((i as u64) << 20) ^ j as u64);
+                if extra.chance(((wood - 0.6) * 2.0).min(0.8) as f32) {
+                    let (ex, ez) = (
+                        x + extra.range(-0.5, 0.5) as f64 * spacing,
+                        z + extra.range(-0.5, 0.5) as f64 * spacing,
+                    );
+                    if land.road_weight(ex, ez) == 0.0 && (!in_zone(ex, ez, 12.0) || rim) {
+                        let t = pick_tree(lib, kind, &mut extra);
+                        let at = place(land, ex, ez, 0.1);
+                        spawn_tree(
+                            commands,
+                            t,
+                            at,
+                            extra.range(0.0, TAU),
+                            extra.range(0.7, 1.2),
+                        );
+                        count += 1;
+                    }
+                }
+            }
             // Bushes along the wood edges.
             if wood < 0.6 && rng.chance(0.35) {
                 let a = rng.range(0.0, TAU) as f64;
@@ -446,7 +506,6 @@ pub fn spawn_woods(commands: &mut Commands, lib: &Library, land: &Landscape, rng
                     let b = pick_tree(lib, TreeKind::Bush, rng);
                     spawn_tree(
                         commands,
-                        lib,
                         b,
                         place(land, bx, bz, 0.2),
                         rng.range(0.0, TAU),
@@ -468,7 +527,8 @@ pub fn spawn_meadows(commands: &mut Commands, lib: &Library, land: &Landscape, r
         for j in 0..n {
             let x = -extent + (i as f64 + rng.range(0.2, 0.8) as f64) * spacing;
             let z = -extent + (j as f64 + rng.range(0.2, 0.8) as f64) * spacing;
-            if x * x + z * z > extent * extent || in_hard_zone(x, z) {
+            // A grass patch reaches about 2 m from its center.
+            if x * x + z * z > extent * extent || in_hard_zone(x, z, 2.0) {
                 continue;
             }
             if land.road_weight(x, z) > 0.05 || land.lake_depth(x, z) > -0.3 {
@@ -494,18 +554,13 @@ pub fn spawn_meadows(commands: &mut Commands, lib: &Library, land: &Landscape, r
             let tf = Transform::from_translation(DVec3::new(x, h - 0.03, z))
                 .with_rotation(tilt * Quat::from_rotation_y(rng.range(0.0, TAU)))
                 .with_scale(Vec3::new(1.0, rng.range(0.8, 1.3), 1.0));
-            let k = rng.range_i32(0, lib.grass.len() as i32) as usize;
-            commands.spawn((
-                tf,
-                MeshRenderer::new(lib.grass[k], lib.mats.grass).without_shadows(),
-                // Full blades up close; thin out gradually instead of ending in a hard line.
-                Lod::swap_then_hide(
-                    lib.grass[k],
-                    lib.grass_mid[k],
-                    rng.range(20.0, 26.0),
-                    rng.range(45.0, 95.0),
-                ),
-            ));
+            // The grass itself is the GPU meadow ([`spawn_meadow_grass`]); these draws stay so
+            // the scenery spawned after the meadows keeps its layout.
+            let _ = (
+                rng.range_i32(0, lib.grass.len() as i32),
+                rng.range(20.0, 26.0),
+                rng.range(45.0, 95.0),
+            );
             // Wildflowers in drifts.
             let drift = engine::core::math::noise::perlin2(x / 40.0, z / 40.0, 77);
             if !forest && drift > 0.15 && rng.chance(0.6) {
@@ -519,6 +574,114 @@ pub fn spawn_meadows(commands: &mut Commands, lib: &Library, land: &Landscape, r
             }
         }
     }
+}
+
+/// Side of the square the valley's GPU meadow covers, m, and its map's grid points per side.
+const MEADOW_SIZE: f32 = 1400.0;
+const MEADOW_GRID: u32 = 1001;
+/// Zones whose own modules grow grass blades over their ground.
+const OWN_GRASS_ZONES: &[&str] = &["forest", "meadow", "footsteps"];
+
+/// How thickly the valley's grass grows at (x, z), 0..1, and how dry it is.
+fn meadow_cover(land: &Landscape, x: f64, z: f64) -> (f32, f32) {
+    let r = (x * x + z * z).sqrt();
+    // (Density blends across a grid cell, about 1.4 m, so this keeps blades off the bare
+    // ground while the grass still grows right up to it.)
+    if r > MEADOW_SIZE as f64 * 0.5 || in_hard_zone(x, z, 0.7) {
+        return (0.0, 0.0);
+    }
+    if ZONES.iter().any(|zn| {
+        OWN_GRASS_ZONES.contains(&zn.key)
+            && DVec2::new(x - zn.center.x, z - zn.center.z).length() < zn.radius
+    }) {
+        return (0.0, 0.0);
+    }
+    // (Below the lake's level only counts by the lake: the valley floor dips under it too.)
+    if land.lake_t(x, z) < 1.3 && land.lake_depth(x, z) > -0.3 {
+        return (0.0, 0.0);
+    }
+    let h = land.height(x, z);
+    let cover = land.cover(x, z, h, land.normal(x, z, 1.5));
+    let mut density = match cover {
+        Cover::Grass => 1.0,
+        // Thin grass in the woods' shade.
+        Cover::Forest => 0.3,
+        _ => return (0.0, 0.0),
+    };
+    // Crop fields are their own, with grass along their margins; young green crops are short,
+    // sparse blades all over (low density grows them short).
+    if let Some((crop, edge)) = land.field_at(x, z)
+        && crop != Crop::Pasture
+    {
+        let inside = if crop == Crop::Young { 0.4 } else { 0.0 };
+        density *= 1.0 - (1.0 - inside) * engine::core::math::smoothstep(1.2, 2.4, edge as f32);
+        if crop == Crop::Young {
+            return (density, 0.0);
+        }
+    }
+    // Thinner on the high, rocky pastures and in patches.
+    let patches = engine::core::math::noise::perlin2(x / 13.0, z / 13.0, 91) * 0.5 + 0.5;
+    let high = engine::core::math::smoothstep(250.0, 600.0, h as f32);
+    density *= (1.0 - high * 0.6) * (0.65 + 0.35 * patches);
+    (density, land.grass_dryness(x, z))
+}
+
+/// The valley's meadows as GPU grass: one field of blades over the whole valley floor, thick
+/// on the pastures, thin under the trees and along the field margins, none on roads, water,
+/// fields and paved zones; yellowing where the ground paint shows hay and dry grass.
+pub fn spawn_meadow_grass(commands: &mut Commands, land: &Landscape) {
+    let t0 = std::time::Instant::now();
+    // A million grid points: sampled a band of rows per core.
+    let n = MEADOW_GRID as usize;
+    let mut maps = vec![(0.0f32, 0.0f32, 0.0f32); n * n];
+    let threads = std::thread::available_parallelism().map_or(4, |c| c.get());
+    let rows_per = n.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (band, chunk) in maps.chunks_mut(rows_per * n).enumerate() {
+            scope.spawn(move || {
+                for (k, out) in chunk.iter_mut().enumerate() {
+                    let (i, j) = (k % n, band * rows_per + k / n);
+                    let x = (i as f64 / (n - 1) as f64 - 0.5) * MEADOW_SIZE as f64;
+                    let z = (j as f64 / (n - 1) as f64 - 0.5) * MEADOW_SIZE as f64;
+                    let (density, dryness) = meadow_cover(land, x, z);
+                    // Roots a touch into the ground, so the terrain's coarser rows far off
+                    // don't leave blades hanging.
+                    *out = (land.height(x, z) as f32 - 0.03, density, dryness);
+                }
+            });
+        }
+    });
+    let field = GrassField {
+        size: [MEADOW_SIZE; 2],
+        resolution: [MEADOW_GRID; 2],
+        heights: maps.iter().map(|m| m.0).collect(),
+        density: maps.iter().map(|m| m.1).collect(),
+        dryness: maps.iter().map(|m| m.2).collect(),
+        ..Default::default()
+    }
+    .with_style(GrassStyle {
+        blades_per_m2: 520.0,
+        height: 0.36,
+        height_variation: 0.55,
+        width: 0.011,
+        bend: 0.38,
+        // The ground paint's meadow greens and hay, a little brighter for the blades' tips.
+        // (Lighter than the paint: the blades shade each other.)
+        lush_color: [0.09, 0.18, 0.042],
+        dry_color: [0.24, 0.21, 0.085],
+        // Far enough that the meadow thins out into the painted ground, not at a line.
+        draw_distance: 120.0,
+        shadow_distance: 22.0,
+        ..Default::default()
+    });
+    let covered = field.density.iter().filter(|&&d| d > 0.05).count();
+    engine::core::log::info!(
+        "scenery: GPU meadow {:.0} m across, grass on {:.0}% of it, mapped in {:.2} s",
+        MEADOW_SIZE,
+        100.0 * covered as f32 / field.density.len() as f32,
+        t0.elapsed().as_secs_f32()
+    );
+    commands.spawn((Transform::default(), field));
 }
 
 /// Near a scarp, where the cliff builds its own rock face and talus.
@@ -1255,8 +1418,14 @@ pub fn spawn_village(commands: &mut Commands, lib: &Library, land: &Landscape, r
 }
 
 /// Hedgerows along the farm fields and ripe grain in the wheat and barley fields near the
-/// village.
-pub fn spawn_farms(commands: &mut Commands, lib: &Library, land: &Landscape, rng: &mut Rng) {
+/// village. Returns the hedged edges (corner to corner), which get no wall.
+pub fn spawn_farms(
+    commands: &mut Commands,
+    lib: &Library,
+    land: &Landscape,
+    rng: &mut Rng,
+) -> Vec<(DVec2, DVec2)> {
+    let mut hedged = Vec::new();
     for (cell, crop) in &land.fields {
         let corners = field_corners(*cell);
         // Hedges on some edges.
@@ -1265,6 +1434,7 @@ pub fn spawn_farms(commands: &mut Commands, lib: &Library, land: &Landscape, rng
                 continue;
             }
             let (a, b) = (corners[k], corners[(k + 1) % 4]);
+            hedged.push((a, b));
             let len = (b - a).length();
             let steps = (len / 4.0) as i32;
             for i in 0..steps {
@@ -1287,7 +1457,6 @@ pub fn spawn_farms(commands: &mut Commands, lib: &Library, land: &Landscape, rng
                 };
                 spawn_tree(
                     commands,
-                    lib,
                     tree,
                     place(land, p.x, p.y, 0.2),
                     rng.range(0.0, TAU),
@@ -1326,6 +1495,381 @@ pub fn spawn_farms(commands: &mut Commands, lib: &Library, land: &Landscape, rng
                     ),
                 ));
             }
+        }
+    }
+    hedged
+}
+
+/// Field grid cells within this many cells of the middle can be walled.
+const WALL_CELLS: i32 = 17;
+/// Walls end here, m from the middle of the valley.
+const WALL_RADIUS: f64 = 700.0;
+/// The stones show within this distance, m (virtual geometry thins them out on the way).
+const WALL_STONES: f32 = 260.0;
+/// The core turns stone-colored beyond this distance, m, where the chinks no longer show; past
+/// [`WALL_STONES`] it stands for the whole wall.
+const WALL_MID: f32 = 160.0;
+/// Shorter runs of wall than this many segments are left out: stubs read as rubble.
+const WALL_MIN_RUN: usize = 3;
+/// Wall colliders exist within this distance of a focus point, m (and go beyond it plus
+/// [`WALL_COLLIDER_SLACK`]): there are well over a thousand segments in the valley, and every
+/// collider added or removed anywhere has the NPC tactical world rebuilt.
+const WALL_COLLIDER_DISTANCE: f64 = 150.0;
+const WALL_COLLIDER_SLACK: f64 = 20.0;
+
+/// One straight dry-stone wall segment, laid on the ground.
+#[derive(Debug, Clone, Copy)]
+pub struct WallSegment {
+    /// Middle of the segment's foot, on the ground.
+    pub pos: DVec3,
+    /// Turns the segment's build frame (along X) onto the ground, following its slope.
+    pub rot: Quat,
+    /// Length along the slope, m.
+    pub len: f32,
+    /// Which segment variant, and whether it is mirrored.
+    pub variant: usize,
+    pub mirrored: bool,
+    /// The first or last of its run: built with room for the head at its +X end (mirrored
+    /// for the first, so that end is the run's start).
+    pub end: bool,
+}
+
+/// The head ending a run of wall: its outer face at `pos`, facing along `rot`'s X.
+#[derive(Debug, Clone, Copy)]
+pub struct WallHeadPlace {
+    pub pos: DVec3,
+    pub rot: Quat,
+    pub variant: usize,
+}
+
+/// Where the dry-stone walls go.
+#[derive(Debug, Default)]
+pub struct WallPlan {
+    pub segments: Vec<WallSegment>,
+    pub heads: Vec<WallHeadPlace>,
+}
+
+/// Where the dry-stone walls go: along the field grid, on most edges of the farm fields that
+/// have no hedge and on many between the open pastures around them, so the valley floor reads
+/// as an old enclosed patchwork. Gateways here and there; none across roads, streams, zones,
+/// the lake or steep ground. Every run is at least [`WALL_MIN_RUN`] segments long and ends in
+/// a head at both ends.
+pub fn plan_walls(
+    land: &Landscape,
+    hedged: &[(DVec2, DVec2)],
+    variants: usize,
+    head_variants: usize,
+) -> WallPlan {
+    use crate::walls::SEGMENT;
+    // Its own stream, so the scenery spawned after the walls keeps its layout.
+    let mut rng = Rng::new(land.seed ^ 0x5707_e3a1);
+    let is_field = |cell: (i32, i32)| land.fields.iter().any(|f| f.0 == cell);
+    // Gentle, open ground a pasture could be on.
+    let open = |cell: (i32, i32)| {
+        let c = field_corners(cell);
+        let center = (c[0] + c[2]) * 0.5;
+        let r = center.length();
+        let heights = c.map(|p| land.height(p.x, p.y));
+        let relief = heights.iter().cloned().fold(f64::MIN, f64::max)
+            - heights.iter().cloned().fold(f64::MAX, f64::min);
+        (110.0..WALL_RADIUS).contains(&r)
+            && relief < 9.0
+            && land.woodland(center.x, center.y) < 0.3
+            && !in_zone(center.x, center.y, 10.0)
+            && (center - land.lake.center).length() > land.lake.radius * 1.6
+            && (center - land.cave.center).length() > land.cave.hill_radius
+    };
+    let is_hedged = |a: DVec2, b: DVec2| {
+        hedged.iter().any(|&(p, q)| {
+            (p.distance(a) < 0.5 && q.distance(b) < 0.5)
+                || (p.distance(b) < 0.5 && q.distance(a) < 0.5)
+        })
+    };
+    let blocked = |p: DVec2| {
+        land.road_weight(p.x, p.y) > 0.0
+            || in_zone(p.x, p.y, 6.0)
+            || land.pad_weight(p.x, p.y) > 0.5
+            || (land.lake_t(p.x, p.y) < 1.3 && land.lake_depth(p.x, p.y) > -0.6)
+            || p.length() > WALL_RADIUS + 40.0
+    };
+    let pick = |run: u64, i: u64, salt: u64, n: usize| {
+        ((crate::walls::segment_hash(run * 4 + salt, i) * n as f32) as usize).min(n.max(1) - 1)
+    };
+    let mut plan = WallPlan::default();
+    for iu in -WALL_CELLS..=WALL_CELLS {
+        for iv in -WALL_CELLS..=WALL_CELLS {
+            let cell = (iu, iv);
+            let c = field_corners(cell);
+            // The cell's edges on its low-v and low-u sides: each grid edge once.
+            for (a, b, other) in [(c[0], c[1], (iu, iv - 1)), (c[3], c[0], (iu - 1, iv))] {
+                let fields = is_field(cell) as u8 + is_field(other) as u8;
+                let keep = match fields {
+                    0 if open(cell) && open(other) => 0.6,
+                    0 => 0.0,
+                    _ if open(cell) || open(other) || fields == 2 => 0.85,
+                    _ => 0.5,
+                };
+                // Draw first, so the stream doesn't depend on the checks.
+                let roll = rng.f32();
+                let gate = rng.chance(0.4);
+                let gate_at = rng.f32();
+                if roll >= keep || is_hedged(a, b) {
+                    continue;
+                }
+                let len = (b - a).length();
+                let n = (len / SEGMENT as f64).ceil() as i32;
+                let step = len / n as f64;
+                let dir = (b - a) / len;
+                let gate = gate.then(|| 1 + (gate_at * (n - 2) as f32) as i32);
+                let yaw = Quat::from_rotation_y((-dir.y).atan2(dir.x) as f32);
+                let run_id = ((iu + 100) * 1000 + iv + 100) as u64 * 2 + (other.0 != iu) as u64;
+                // Each segment that can stand, then the runs of them long enough to keep.
+                let laid: Vec<Option<(DVec3, Quat, f32)>> = (0..n)
+                    .map(|i| {
+                        let p0 = a + dir * (i as f64 * step);
+                        let p1 = p0 + dir * step;
+                        let pm = (p0 + p1) * 0.5;
+                        if gate == Some(i)
+                            || [p0, pm, p1].into_iter().any(blocked)
+                            || near_scarp(land, pm.x, pm.y)
+                        {
+                            return None;
+                        }
+                        let (h0, h1) = (land.height(p0.x, p0.y), land.height(p1.x, p1.y));
+                        if (h1 - h0).abs() > step * 0.4 {
+                            return None;
+                        }
+                        let hm = land.height(pm.x, pm.y);
+                        let pitch = Quat::from_rotation_z(((h1 - h0) / step).atan() as f32);
+                        let y = ((h0 + h1) * 0.5).min(hm + 0.05);
+                        // Pitched along the slope, it must be as long as the slope is, or
+                        // neighbors part on a grade.
+                        let len = (step * step + (h1 - h0) * (h1 - h0)).sqrt() as f32;
+                        Some((DVec3::new(pm.x, y, pm.y), yaw * pitch, len))
+                    })
+                    .collect();
+                let mut i = 0;
+                while i < laid.len() {
+                    let start = i;
+                    while i < laid.len() && laid[i].is_some() {
+                        i += 1;
+                    }
+                    let run = &laid[start..i];
+                    i += 1;
+                    if run.len() < WALL_MIN_RUN {
+                        continue;
+                    }
+                    let last = run.len() - 1;
+                    for (k, &(pos, rot, len)) in run.iter().flatten().enumerate() {
+                        let idx = (start + k) as u64;
+                        let variant = pick(run_id, idx, 0, variants);
+                        let (end, mirrored) = match k {
+                            0 => (true, true),
+                            k if k == last => (true, false),
+                            // Mirrored half the time, for more variety from a few variants.
+                            _ => (false, (variant + idx as usize) % 2 == 1),
+                        };
+                        plan.segments.push(WallSegment {
+                            pos,
+                            rot,
+                            len,
+                            variant,
+                            mirrored,
+                            end,
+                        });
+                    }
+                    let (p_first, r_first, l_first) = run[0].expect("a run is laid segments");
+                    let (p_last, r_last, l_last) = run[last].expect("a run is laid segments");
+                    for (pos, rot, len, salt) in [
+                        (
+                            p_first,
+                            r_first * Quat::from_rotation_y(std::f32::consts::PI),
+                            l_first,
+                            1,
+                        ),
+                        (p_last, r_last, l_last, 2),
+                    ] {
+                        let x = (rot * Vec3::X * len * 0.5).as_dvec3();
+                        plan.heads.push(WallHeadPlace {
+                            pos: pos + x,
+                            rot,
+                            variant: pick(run_id, start as u64, salt, head_variants),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    plan
+}
+
+/// A wall segment's box collider, there while a focus point is near ([`stream_wall_colliders`]).
+#[derive(Component, Clone, Copy)]
+pub struct WallCollider {
+    pub half: Vec3,
+}
+
+/// The dry-stone walls ([`plan_walls`]): the stones, the core, a box collider per segment
+/// (streamed in near the action) and the heads that end the runs.
+pub fn spawn_walls(
+    commands: &mut Commands,
+    lib: &Library,
+    land: &Landscape,
+    hedged: &[(DVec2, DVec2)],
+) {
+    use crate::walls::{HALF_FOOT, HEIGHT, SEGMENT, SINK};
+    let plan = plan_walls(land, hedged, lib.walls.len(), lib.wall_heads.len());
+    // The boulders' rock: albedo, normal and occlusion maps under each stone's own tint.
+    let stone = lib.rocks.mats.rock;
+    for seg in &plan.segments {
+        let w = &lib.walls[seg.variant];
+        let flip = if seg.mirrored { -1.0 } else { 1.0 };
+        let tf = Transform::from_translation(seg.pos)
+            .with_rotation(seg.rot)
+            .with_scale(Vec3::new(flip * seg.len / SEGMENT, 1.0, 1.0));
+        let (near, core) = if seg.end {
+            (w.near_end, w.core_end)
+        } else {
+            (w.near, w.core)
+        };
+        commands.spawn((
+            tf,
+            MeshRenderer::new(near, stone),
+            Lod::hide_beyond(near, WALL_STONES),
+        ));
+        commands.spawn((
+            tf,
+            MeshRenderer::new(core, stone),
+            Lod::swap_then_hide(core, w.core_far, WALL_MID, f32::INFINITY),
+        ));
+        let mid_y = (HEIGHT - SINK) * 0.5;
+        commands.spawn((
+            Transform::from_translation(seg.pos + (seg.rot * Vec3::Y * mid_y).as_dvec3())
+                .with_rotation(seg.rot),
+            WallCollider {
+                half: Vec3::new(seg.len * 0.5, (HEIGHT + SINK) * 0.5, HALF_FOOT * 0.75),
+            },
+        ));
+    }
+    for head in &plan.heads {
+        let near = lib.wall_heads[head.variant];
+        commands.spawn((
+            Transform::from_translation(head.pos).with_rotation(head.rot),
+            MeshRenderer::new(near, stone),
+            Lod::hide_beyond(near, WALL_STONES),
+        ));
+    }
+    let nearest = plan
+        .segments
+        .iter()
+        .map(|s| s.pos)
+        .min_by(|a, b| a.length_squared().total_cmp(&b.length_squared()))
+        .unwrap_or_default();
+    engine::core::log::info!(
+        "scenery: {} dry-stone wall segments in {} runs, the nearest to the plaza at ({:.0}, {:.0})",
+        plan.segments.len(),
+        plan.heads.len() / 2,
+        nearest.x,
+        nearest.z
+    );
+}
+
+/// Gives wall segments near a focus point their colliders and takes them from those far off,
+/// twice a second.
+pub fn stream_wall_colliders(
+    mut commands: Commands,
+    mut timer: Local<f32>,
+    time: Res<Time>,
+    focus: Option<Res<engine::world::FocusPoints>>,
+    walls: Query<(
+        Entity,
+        &WallCollider,
+        &Transform,
+        Has<engine::world::physics::Collider>,
+    )>,
+) {
+    *timer -= time.real_delta_secs();
+    if *timer > 0.0 {
+        return;
+    }
+    *timer = 0.5;
+    let Some(focus) = focus.filter(|f| !f.points.is_empty()) else {
+        return;
+    };
+    for (e, wall, t, has) in &walls {
+        let d = focus.distance(t.translation);
+        if !has && d < WALL_COLLIDER_DISTANCE {
+            commands
+                .entity(e)
+                .insert(engine::world::physics::Collider::cuboid(wall.half));
+        } else if has && d > WALL_COLLIDER_DISTANCE + WALL_COLLIDER_SLACK {
+            commands
+                .entity(e)
+                .remove::<engine::world::physics::Collider>();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_meadow_grows_on_pastures_but_not_on_roads_water_or_paved_zones() {
+        let land = crate::landscape::shared();
+        let (mut grassy, mut total) = (0, 0);
+        for i in -60..=60 {
+            for j in -60..=60 {
+                let (x, z) = (i as f64 * 10.0 + 3.0, j as f64 * 10.0 + 7.0);
+                let (density, dryness) = meadow_cover(land, x, z);
+                assert!((0.0..=1.0).contains(&density) && (0.0..=1.0).contains(&dryness));
+                total += 1;
+                if density > 0.0 {
+                    grassy += 1;
+                    // Up to the ragged verge of a track, not on it.
+                    assert!(
+                        !matches!(land.cover_at(x, z), Cover::Dirt | Cover::Cobble),
+                        "on a road at {x}, {z}"
+                    );
+                    assert!(land.lake_t(x, z) > 1.0, "in the lake at {x}, {z}");
+                    assert!(!in_hard_zone(x, z, 0.0), "in a paved zone at {x}, {z}");
+                }
+            }
+        }
+        // Most of the valley floor is meadow.
+        assert!(grassy * 2 > total, "grass on {grassy} of {total} samples");
+    }
+
+    #[test]
+    fn walls_enclose_the_valley_floor_but_keep_off_roads_zones_and_water() {
+        let land = crate::landscape::shared();
+        let plan = plan_walls(land, &[], 4, 3);
+        assert!(
+            plan.segments.len() > 1000,
+            "only {} segments",
+            plan.segments.len()
+        );
+        // Two heads a run, and no run shorter than the minimum.
+        assert_eq!(plan.heads.len() % 2, 0);
+        assert!(plan.segments.len() >= plan.heads.len() / 2 * WALL_MIN_RUN);
+        for h in &plan.heads {
+            assert!(h.variant < 3);
+            assert!(
+                !in_zone(h.pos.x, h.pos.z, 3.0),
+                "head in a zone at {:?}",
+                h.pos
+            );
+        }
+        for s in &plan.segments {
+            let (x, z) = (s.pos.x, s.pos.z);
+            assert_eq!(land.road_weight(x, z), 0.0, "on a road at {x:.0}, {z:.0}");
+            assert!(!in_zone(x, z, 6.0), "in a zone at {x:.0}, {z:.0}");
+            assert!(land.lake_t(x, z) > 1.2, "in the lake at {x:.0}, {z:.0}");
+            assert!(s.variant < 4);
+            assert!(
+                (s.pos.y - land.height(x, z)).abs() < 0.5,
+                "off the ground at {x:.0}, {z:.0}"
+            );
         }
     }
 }

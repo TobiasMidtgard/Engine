@@ -350,6 +350,10 @@ impl HairGroom {
             follow: 0.35,
             prewarm_secs: 1.0,
             max_speed: 40.0,
+            // Keratin is a little denser than water; in it, hair drifts and fans out.
+            buoyancy: 0.85,
+            water_drag: 9.0,
+            soak: 0.5,
             ..SimSettings::default()
         }
     }

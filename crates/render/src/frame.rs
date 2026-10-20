@@ -9,6 +9,7 @@ use engine_core::math::Frustum;
 use engine_core::prelude::*;
 use engine_world::{SurfaceLayers, WeatherState, WindField};
 
+use crate::cloud_shadows::GpuCloudShadow;
 use crate::components::{
     AmbientLight, Camera, DirectionalLight, Exposure, PointLight, Projection, SkyLightVolume,
 };
@@ -80,6 +81,20 @@ pub struct FrameUniform {
     /// The open ground's weather in the map's encoding (wetness, standing water / 0.04 m, snow /
     /// 0.3 m, scorch): beyond the map, and for roofs over ground they keep dry.
     pub surface_open: [f32; 4],
+    /// The cloud shadow map (see [`crate::cloud_shadows`]); all zero (off) until a feature asks
+    /// for it, which the renderer fills in after `prepare`.
+    pub cloud_shadow: GpuCloudShadow,
+    /// The air ([`Atmosphere`], times its `density_scale`): Rayleigh scattering at the surface
+    /// (1/m) RGB, w unused.
+    pub air_rayleigh: [f32; 4],
+    /// Mie scattering at the surface (1/m) RGB, w unused.
+    pub air_mie: [f32; 4],
+    /// Mie extinction (scattering + absorption) at the surface (1/m) RGB, w unused.
+    pub air_mie_extinction: [f32; 4],
+    /// Ozone absorption at the layer's densest (1/m) RGB, w unused.
+    pub air_ozone: [f32; 4],
+    /// Mie anisotropy per channel RGB, w unused.
+    pub air_mie_g: [f32; 4],
 }
 
 /// Most [`SkyLightVolume`]s shaded per frame (nearest the camera first).
@@ -271,6 +286,9 @@ pub struct ExposureState {
     /// EV100 measured from a recent frame's luminance histogram (GPU metering). `None` until the
     /// first reading arrives; the scene-luminance estimate is used meanwhile.
     pub measured_ev100: Option<f32>,
+    /// Set on a camera cut: hold the exposure until the meter has measured the new view, then
+    /// jump straight to it instead of adapting from the old view's exposure.
+    pub snap: bool,
 }
 
 impl Default for ExposureState {
@@ -279,6 +297,7 @@ impl Default for ExposureState {
             ev100: 14.0,
             initialized: false,
             measured_ev100: None,
+            snap: false,
         }
     }
 }
@@ -329,10 +348,32 @@ const MOON_LUX: f32 = 0.5;
 /// … and from which on for a sun, however dim (a sun under a storm deck gives about 10).
 const SUN_LUX: f32 = 2.0;
 
+/// The camera that renders: the active [`Camera`] with the highest `order`.
+pub fn active_camera(world: &mut World) -> Option<(Entity, Camera, GlobalTransform)> {
+    let mut best: Option<(Entity, Camera, GlobalTransform)> = None;
+    let mut q = world.query::<(Entity, &Camera, &GlobalTransform)>();
+    for (e, cam, gt) in q.iter(world) {
+        if !cam.active {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(_, b, _)| cam.order > b.order) {
+            best = Some((e, *cam, *gt));
+        }
+    }
+    best
+}
+
+/// Whether the camera that renders is a pixel-perfect one ([`crate::PixelPerfect`] on an
+/// orthographic camera): it renders without temporal anti-aliasing.
+pub fn active_camera_is_pixel_perfect(world: &mut World) -> bool {
+    active_camera(world)
+        .is_some_and(|(e, _, _)| crate::sprites::camera_pixel_grid(world, e, 1).is_some())
+}
+
 /// Build the view for the active camera (a default camera at the origin when there is none).
 ///
-/// `jitter_px` shifts the projection by a fraction of a pixel (temporal anti-aliasing);
-/// `previous` is the previous frame's view, for motion vectors.
+/// `jitter_px` shifts the projection by a fraction of a pixel (temporal anti-aliasing; ignored
+/// for a pixel-perfect camera); `previous` is the previous frame's view, for motion vectors.
 pub fn build_view(
     world: &mut World,
     width: u32,
@@ -344,23 +385,24 @@ pub fn build_view(
 ) -> ViewData {
     let settings = world.resource::<RenderSettings>().clone();
 
-    // Active camera with the highest order.
-    let mut best: Option<(Entity, Camera, GlobalTransform)> = None;
-    let mut q = world.query::<(Entity, &Camera, &GlobalTransform)>();
-    for (e, cam, gt) in q.iter(world) {
-        if !cam.active {
-            continue;
-        }
-        if best.as_ref().is_none_or(|(_, b, _)| cam.order > b.order) {
-            best = Some((e, *cam, *gt));
-        }
-    }
-    let (camera_entity, camera, gt) = match best {
+    let (camera_entity, camera, gt) = match active_camera(world) {
         Some((e, c, g)) => (Some(e), c, g),
         None => (None, Camera::default(), GlobalTransform::default()),
     };
-    let origin = gt.translation();
     let rotation = gt.rotation();
+    // A pixel-perfect camera (`PixelPerfect`): a whole number of pixels per art texel, the view
+    // moved to whole texels (or pixels) in its plane, and no sub-pixel jitter.
+    let pixel_grid =
+        camera_entity.and_then(|e| crate::sprites::camera_pixel_grid(world, e, height));
+    let origin = match &pixel_grid {
+        Some(grid) => grid.snap_camera(gt.translation(), rotation, width, height),
+        None => gt.translation(),
+    };
+    let jitter_px = if pixel_grid.is_some() {
+        Vec2::ZERO
+    } else {
+        jitter_px
+    };
     let aspect = width.max(1) as f32 / height.max(1) as f32;
     let view = Mat4::from_quat(rotation.inverse());
     let (proj, near, fov_y, orthographic) = match camera.projection {
@@ -377,12 +419,15 @@ pub fn build_view(
             height: h,
             near,
             far,
-        } => (
-            orthographic_reverse(h * aspect, h, near, far),
-            near,
-            0.0,
-            true,
-        ),
+        } => {
+            let h = pixel_grid.map_or(h, |g| g.height);
+            (
+                orthographic_reverse(h * aspect, h, near, far),
+                near,
+                0.0,
+                true,
+            )
+        }
     };
     let unjittered_proj = proj;
     let unjittered_view_proj = proj * view;
@@ -428,7 +473,13 @@ pub fn build_view(
     let real_elapsed = time.real_elapsed_secs_f64();
     let delta = time.delta_secs();
     let ev100 = match camera.exposure {
-        Exposure::Manual { ev100 } => ev100,
+        Exposure::Manual { ev100 } => {
+            exposure_state.snap = false;
+            ev100
+        }
+        Exposure::Auto { .. } if exposure_state.snap && exposure_state.measured_ev100.is_none() => {
+            exposure_state.ev100
+        }
         Exposure::Auto {
             min_ev100,
             max_ev100,
@@ -443,8 +494,9 @@ pub fn build_view(
             let night = smoothstep(5.0, -2.0, metered) * settings.night_exposure_bias;
             let target = (metered + night - compensation - crate::exposure::METER_BIAS_EV)
                 .clamp(min_ev100, max_ev100);
-            if !exposure_state.initialized {
+            if !exposure_state.initialized || exposure_state.snap {
                 exposure_state.ev100 = target;
+                exposure_state.snap = false;
             } else {
                 let k = 1.0 - (-speed.max(0.0) * real_dt).exp();
                 exposure_state.ev100 += (target - exposure_state.ev100) * k;
@@ -605,6 +657,8 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         v.origin.z.rem_euclid(4096.0),
     );
     let ambient_rgb = Vec3::from(ambient.color) * ambient.brightness;
+    let air = atmosphere.optics();
+    let rgb0 = |v: Vec3| [v.x, v.y, v.z, 0.0];
     let mut cascades = [[[0.0; 4]; 4]; 4];
     for (i, c) in v.cascades.view_proj.iter().enumerate() {
         cascades[i] = mat(*c);
@@ -767,6 +821,12 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         ],
         surface_map: [0.0; 4],
         surface_open: [0.0; 4],
+        cloud_shadow: GpuCloudShadow::default(),
+        air_rayleigh: rgb0(air.rayleigh),
+        air_mie: rgb0(air.mie_scattering),
+        air_mie_extinction: rgb0(air.mie_extinction),
+        air_ozone: rgb0(air.ozone),
+        air_mie_g: rgb0(air.mie_g),
     }
 }
 
@@ -778,7 +838,7 @@ mod tests {
     fn frame_uniform_matches_wgsl_size() {
         // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4 + ground, sky occlusion, volumes, then the
         // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4),
-        // sky (vec4), surface weather (2 vec4).
+        // sky (vec4), surface weather (2 vec4), cloud shadows (mat4 + 2 vec4), the air (5 vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
             7 * 64
@@ -795,6 +855,9 @@ mod tests {
                 + 16
                 + 16
                 + 2 * 16
+                + 64
+                + 2 * 16
+                + 5 * 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);

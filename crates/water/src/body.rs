@@ -366,6 +366,11 @@ pub struct WaterSettings {
     pub ripple_damping: f32,
     /// Seconds for foam to fade to a third.
     pub foam_life_s: f32,
+    /// Seconds for the currents bodies stir up (a boat's wash, the eddies behind a swimmer)
+    /// to fade to a third.
+    pub current_life_s: f32,
+    /// How tightly those currents curl into swirls, 0 (smooth, they blur out) .. 1.
+    pub swirl: f32,
     /// Simulated raindrop impacts per m² per second for each mm/h of rain. The renderer adds
     /// the countless small rings procedurally; these are the ones that make real waves.
     pub rain_drops: f32,
@@ -373,6 +378,9 @@ pub struct WaterSettings {
     pub puddles: bool,
     /// Puddles are simulated within this distance of the focus, meters.
     pub puddle_radius_m: f32,
+    /// Water wets the ground it reaches (`SurfaceLayers::wetness`): a band of wet sand above a
+    /// lake's waterline, stream banks, the rock round a waterfall's foot.
+    pub wet_shores: bool,
     /// Interactors and splashes write `NoiseEvent`s AI can hear.
     pub noise_events: bool,
 }
@@ -384,10 +392,13 @@ impl Default for WaterSettings {
             ripple_cell_m: 0.25,
             ripple_speed: 1.3,
             ripple_damping: 0.35,
-            foam_life_s: 4.0,
+            foam_life_s: 6.0,
+            current_life_s: 9.0,
+            swirl: 0.5,
             rain_drops: 0.02,
             puddles: true,
             puddle_radius_m: 64.0,
+            wet_shores: true,
             noise_events: true,
         }
     }

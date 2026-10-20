@@ -71,6 +71,19 @@ pub struct FireClock {
     damage_acc: f32,
     gust_acc: f32,
     rng: Rng,
+    /// While fast-forwarding, only objects within this distance of this point are stepped (a
+    /// demo's jump leaves fires elsewhere where they are).
+    pub(crate) scope: Option<(DVec3, f64)>,
+}
+
+impl FireClock {
+    /// Start a demo's fresh fire from the same random sequence every time, so it burns the same
+    /// way whatever ran before it.
+    pub(crate) fn reset_for_demo(&mut self) {
+        let fast_forward = self.fast_forward;
+        *self = Self::default();
+        self.fast_forward = fast_forward;
+    }
 }
 
 impl Default for FireClock {
@@ -82,6 +95,7 @@ impl Default for FireClock {
             damage_acc: 0.0,
             gust_acc: 0.0,
             rng: Rng::new(0xF1BE),
+            scope: None,
         }
     }
 }
@@ -491,7 +505,13 @@ pub fn step_objects(
         0.0
     };
     let mut deposits: Vec<(DVec3, f32, f32)> = Vec::new();
+    let scope = clock.scope.filter(|_| clock.fast_forward);
     for (entity, gt, mut c, b, shape, contained) in &mut q {
+        if let Some((origin, radius)) = scope
+            && gt.translation().distance(origin) > radius
+        {
+            continue;
+        }
         let Some(mut b) = b else {
             commands.entity(entity).insert(Burning {
                 fuel0_kg: c.fuel_kg,
@@ -688,8 +708,10 @@ pub fn emit_outputs(
                 tile_hrr += hrr as f64;
                 tile_centroid += pos * hrr as f64;
                 // Smoke: flaming smoke rises hot; coals and wet fuel give whiter, cooler smoke.
+                // Grass coals only wisp: they glow for a minute after the flames, and more smoke
+                // than this lies over the burnt ground behind the front as a low brown bank.
                 let moisture = moisture / n;
-                let smolder = (glow / n) * 0.0004 * B as f32 * B as f32 * area * dt;
+                let smolder = (glow / n) * 0.00012 * B as f32 * B as f32 * area * dt;
                 let mass = consumed * settings.smoke_yield + smolder;
                 if mass > 0.0 {
                     let steam = (moisture / 0.6).clamp(0.0, 1.0);

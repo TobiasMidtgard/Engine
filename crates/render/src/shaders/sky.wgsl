@@ -56,8 +56,13 @@ fn planet_ground(dir: vec3<f32>, t: f32) -> vec3<f32> {
     let n = normalize(p - frame.planet.xyz);
     let sun = frame.sun_dir.xyz;
     let n_dot_l = dot(n, sun);
-    let sun_light = frame.sun_color.rgb * sun_transmittance(p + n * 10.0) * saturate(n_dot_l);
-    let sky_light = frame.sun_color.rgb * 0.12 * smoothstep(-0.15, 0.3, n_dot_l);
+    let sun_light = frame.sun_color.rgb * sun_transmittance(p + n * 10.0) * cloud_shadow(p) * saturate(n_dot_l);
+    var sky_light = frame.sun_color.rgb * 0.12 * smoothstep(-0.15, 0.3, n_dot_l);
+    // Seen from high above, the sky that lights it is the air's over the ground, as for terrain.
+    let own_sky = atmosphere_sky_ambient_weight(p);
+    if (own_sky > 0.0) {
+        sky_light = mix(sky_light, atmosphere_sky_ambient(p, n) * frame.sun_color.rgb * PI, own_sky);
+    }
     let albedo = frame.ground.rgb;
     return albedo * (sun_light + sky_light) * INV_PI + frame.ambient.rgb * albedo;
 }
@@ -67,7 +72,9 @@ fn sky_radiance(dir: vec3<f32>, with_sun: bool) -> vec3<f32> {
     // Transmittance toward space along `dir` (sun disc, stars).
     var to_space = vec3<f32>(1.0);
     if (frame.planet.w > 0.0) {
-        let h0 = frame.camera_world.w;
+        // Below the planet's mean surface (a canyon floor, a basin) the ground below the
+        // horizon is still there: the sky is as seen from just above the surface.
+        let h0 = max(frame.camera_world.w, 1.0);
         let mu = dot(dir, normalize(-frame.planet.xyz));
         if (sky_view_valid()) {
             c = sky_view_radiance(dir) * frame.sun_color.rgb;
@@ -130,9 +137,9 @@ fn vs_sky(@builtin(vertex_index) i: u32) -> FullscreenOut {
 @fragment
 fn fs_sky(in: FullscreenOut) -> @location(0) vec4<f32> {
     let dir = view_dir(in.uv);
-    // Fog in front of the sky, up to the volumetric fog's range: sunbeams against the sky and
-    // the sun's disc dimmed by mist.
-    let c = apply_sky_fog(pre_expose(sky_radiance(dir, true)), dir);
+    // Fog in front of the sky: sunbeams against the sky, the sun's disc dimmed by mist, and the
+    // height fog out to the horizon, as over distant ground.
+    let c = apply_full_sky_fog(pre_expose(sky_radiance(dir, true)), dir, in.position.xy);
     return vec4<f32>(min(c, vec3(60000.0)), 1.0);
 }
 

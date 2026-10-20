@@ -173,13 +173,24 @@ fn a_squad_mate_revives_a_downed_ally_where_it_lies() {
     assert!(brain(&app, reviver).revive.is_none());
 }
 
-/// A downed ally out in the open, the enemy 18 m off with a clear view of it. With `fire`, the
-/// enemy also keeps shots whizzing past the squad mate. Returns whether the squad mate went to
-/// revive within `secs`, and the app.
-fn exposed(skills: NpcSkills, fire: bool, secs: f32) -> (bool, App, Entity, Entity, Entity) {
+/// A downed ally out in the open, the enemy 18 m off watching it, every body's randomness from
+/// `seed`. With `fire`, the enemy also keeps shots whizzing past the squad mate. Returns whether
+/// the squad mate went to revive within `secs`, and the app.
+fn exposed(
+    skills: NpcSkills,
+    fire: bool,
+    secs: f32,
+    seed: u64,
+) -> (bool, App, Entity, Entity, Entity) {
     let mut app = app();
     let ally = mate(&mut app, DVec3::ZERO, NpcSkills::soldier());
     let reviver = mate(&mut app, DVec3::new(4.0, 0.0, 2.0), skills);
+    app.world
+        .entity_mut(ally)
+        .insert(Seed(hash_u64(2 * seed + 1)));
+    app.world
+        .entity_mut(reviver)
+        .insert(Seed(hash_u64(2 * seed + 2)));
     let enemy = player(&mut app, DVec3::new(0.0, 0.0, -18.0));
     // Both see the enemy first.
     run(&mut app, 1.5);
@@ -205,38 +216,90 @@ fn exposed(skills: NpcSkills, fire: bool, secs: f32) -> (bool, App, Entity, Enti
     (went, app, ally, reviver, enemy)
 }
 
+/// The runs of each case: every one with its own seeds, the same ones on every test run.
+const SEEDS: u64 = 16;
+
+/// `run(seed)` for each of the [`SEEDS`], side by side.
+fn each_seed<T: Send>(run: impl Fn(u64) -> T + Sync) -> Vec<T> {
+    let run = &run;
+    std::thread::scope(|s| {
+        let runs: Vec<_> = (0..SEEDS).map(|seed| s.spawn(move || run(seed))).collect();
+        runs.into_iter()
+            .map(|r| r.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    })
+}
+
+/// In how many of the [`SEEDS`] runs a squad mate with `skills` went in, printed run by run.
+fn went_in(name: &str, skills: NpcSkills, fire: bool, secs: f32) -> usize {
+    let runs = each_seed(|seed| exposed(skills, fire, secs, seed).0);
+    let n = runs.iter().filter(|&&w| w).count();
+    let marks: String = runs.iter().map(|&w| if w { 'x' } else { '.' }).collect();
+    eprintln!("{name}: went in {n}/{SEEDS} [{marks}]");
+    n
+}
+
+/// Once the downed ally's spot is safe, a squad mate gets it up within 14 s, in every run.
+fn revived_once_safe(name: &str, make_safe: impl Fn(&mut App, Entity) + Sync) {
+    let runs = each_seed(|seed| {
+        let (_, mut app, ally, reviver, enemy) = exposed(NpcSkills::elite(), false, 6.0, seed);
+        if !downed(&app, ally) {
+            return None; // went in under the enemy's eyes (counted above)
+        }
+        make_safe(&mut app, enemy);
+        for frame in 0..60 * 14 {
+            app.update();
+            if !downed(&app, ally) {
+                assert_eq!(stats(&app, reviver).revives, 1, "seed {seed}");
+                return Some(frame as f32 / 60.0);
+            }
+        }
+        panic!("seed {seed}: the elite never revived once {name}");
+    });
+    let up: Vec<String> = runs.iter().flatten().map(|s| format!("{s:.1}")).collect();
+    eprintln!("elite, {name}: up after {} s", up.join(" "));
+}
+
 #[test]
 fn skilled_fighters_do_not_revive_in_the_enemys_view_or_under_fire_but_rookies_run_in() {
-    // In the enemy's view, an elite holds off; a rookie runs straight in.
-    let (went, mut app, ally, reviver, enemy) = exposed(NpcSkills::elite(), false, 6.0);
-    assert!(!went, "the elite went in under the enemy's eyes");
-    assert!(downed(&app, ally));
-    // Once the enemy is gone, it goes.
-    app.world.despawn(enemy);
-    let mut revived = false;
-    for _ in 0..60 * 14 {
-        app.update();
-        if !downed(&app, ally) {
-            revived = true;
-            break;
-        }
-    }
-    assert!(revived, "the elite never revived once it was safe");
-    assert_eq!(stats(&app, reviver).revives, 1);
+    // In the enemy's view, an elite holds off and a veteran mostly does; a rookie runs
+    // straight in.
+    let elite = went_in("elite, watched", NpcSkills::elite(), false, 6.0);
+    let veteran = went_in("veteran, watched", NpcSkills::veteran(), false, 6.0);
+    let rookie = went_in("rookie, watched", NpcSkills::rookie(), false, 6.0);
+    let n = SEEDS as usize;
+    assert!(
+        elite * 10 <= n,
+        "elites went in under the enemy's eyes {elite}/{n}"
+    );
+    assert!(
+        rookie * 10 >= n * 9,
+        "rookies ran straight in only {rookie}/{n}"
+    );
+    assert!(
+        veteran * 2 <= rookie,
+        "veterans went in {veteran}/{n}, not clearly less than rookies ({rookie}/{n})"
+    );
 
-    let (went, ..) = exposed(NpcSkills::rookie(), false, 6.0);
-    assert!(went, "the rookie should run straight in");
+    // Once the spot is safe, it goes: the watcher looks away, or is gone.
+    revived_once_safe("the enemy looked away", |app, enemy| {
+        app.world
+            .get_mut::<Transform>(enemy)
+            .unwrap()
+            .look_to(Vec3::NEG_Z, Vec3::Y);
+    });
+    revived_once_safe("the enemy was gone", |app, enemy| {
+        app.world.despawn(enemy);
+    });
 
     // Shots whizzing past: no skilled fighter goes.
-    for skills in [
-        NpcSkills::veteran(),
-        NpcSkills::elite(),
-        NpcSkills::master(),
+    for (name, skills) in [
+        ("veteran, under fire", NpcSkills::veteran()),
+        ("elite, under fire", NpcSkills::elite()),
+        ("master, under fire", NpcSkills::master()),
     ] {
-        let (went, app, ally, reviver, _) = exposed(skills, true, 8.0);
-        assert!(!went, "{skills:?} went in under fire");
-        assert!(downed(&app, ally));
-        assert!(brain(&app, reviver).revive.is_none());
+        let went = went_in(name, skills, true, 8.0);
+        assert_eq!(went, 0, "{name}: went in {went}/{n}");
     }
 }
 
@@ -715,22 +778,28 @@ fn nobody_revives_a_mate_up_on_a_ledge_from_below() {
     assert_eq!(stats(&app, reviver).revives, 0);
 }
 
-/// The `exposed` scene with a medic of `skills` (teamwork 1, a carbine) as the squad mate.
-fn exposed_medic(skills: NpcSkills) -> (App, Entity, Entity, Entity) {
+/// The `exposed` scene with a medic of `skills` (teamwork 1, a carbine) as the squad mate,
+/// every body's randomness from `seed`.
+fn exposed_medic(skills: NpcSkills, seed: u64) -> (App, Entity, Entity, Entity) {
     let mut app = app();
     let ally = mate(&mut app, DVec3::ZERO, NpcSkills::soldier());
     let medic = medic(&mut app, DVec3::new(4.0, 0.0, 2.0), skills);
+    app.world
+        .entity_mut(ally)
+        .insert(Seed(hash_u64(2 * seed + 1)));
+    app.world
+        .entity_mut(medic)
+        .insert(Seed(hash_u64(2 * seed + 2)));
     let enemy = player(&mut app, DVec3::new(0.0, 0.0, -18.0));
     run(&mut app, 1.5);
     down(&mut app, ally);
     (app, ally, medic, enemy)
 }
 
-#[test]
-fn a_medic_smokes_a_watched_mate_and_goes_in_under_the_smoke() {
-    // An elite holds off a spot in the enemy's view (above); an elite medic throws smoke
-    // between them, and goes in once the smoke hides the spot.
-    let (mut app, ally, medic, _enemy) = exposed_medic(NpcSkills::elite());
+/// An elite medic in the `exposed` scene: when it threw smoke (s after the mate went down)
+/// and how many of its frames kneeling were hidden from the enemy, of how many.
+fn smoke_and_revive(seed: u64) -> (f32, usize, usize) {
+    let (mut app, ally, medic, _enemy) = exposed_medic(NpcSkills::elite(), seed);
     let eye = DVec3::new(0.0, 1.5, -18.0);
     let (mut thrown, mut hidden_kneeling, mut kneeling, mut up) = (None, 0, 0, false);
     for frame in 0..60 * 14 {
@@ -742,7 +811,7 @@ fn a_medic_smokes_a_watched_mate_and_goes_in_under_the_smoke() {
             let c = clouds.clouds[0].at;
             assert!(
                 c.z < -1.0 && c.distance(chest(&app, ally)) < 2.6,
-                "landed at {c:.1}"
+                "seed {seed}: landed at {c:.1}"
             );
         }
         let b = brain(&app, medic);
@@ -762,22 +831,34 @@ fn a_medic_smokes_a_watched_mate_and_goes_in_under_the_smoke() {
             break;
         }
     }
-    let thrown = thrown.expect("the medic threw no smoke");
+    let thrown = thrown.unwrap_or_else(|| panic!("seed {seed}: the medic threw no smoke"));
     assert!(
-        thrown < 3.0,
-        "threw it only {thrown:.1} s after the mate went down"
+        up,
+        "seed {seed}: the medic never revived its mate under the smoke"
     );
-    assert!(up, "the medic never revived its mate under the smoke");
-    assert_eq!(stats(&app, medic).revives, 1);
-    assert!(
-        hidden_kneeling * 10 >= kneeling * 9,
-        "hidden from the enemy {hidden_kneeling} of {kneeling} frames kneeling"
-    );
+    assert_eq!(stats(&app, medic).revives, 1, "seed {seed}");
+    (thrown, hidden_kneeling, kneeling)
+}
+
+#[test]
+fn a_medic_smokes_a_watched_mate_and_goes_in_under_the_smoke() {
+    // An elite holds off a spot in the enemy's view (above); an elite medic throws smoke
+    // between them and goes in once the smoke hides the spot, in every run.
+    for (seed, (thrown, hidden, kneeling)) in each_seed(smoke_and_revive).into_iter().enumerate() {
+        assert!(
+            thrown < 3.0,
+            "seed {seed}: threw it only {thrown:.1} s after the mate went down"
+        );
+        assert!(
+            hidden * 10 >= kneeling * 9,
+            "seed {seed}: hidden from the enemy {hidden} of {kneeling} frames kneeling"
+        );
+    }
 }
 
 #[test]
 fn only_a_medic_carries_smoke() {
-    let (went, app, ally, ..) = exposed(NpcSkills::elite(), false, 6.0);
+    let (went, app, ally, ..) = exposed(NpcSkills::elite(), false, 6.0, 0);
     assert!(!went && downed(&app, ally));
     let clouds = app.world.resource::<engine_npc::smoke::SmokeClouds>();
     assert!(

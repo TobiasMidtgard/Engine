@@ -9,7 +9,7 @@ use engine_physics::{PhysicsPlugin, PhysicsSettings, PhysicsStats};
 use engine_world::physics::{
     ApplyImpulse, Collider, Joint, JointKind, JointMotor, MassProperties, RigidBody, Velocity,
 };
-use engine_world::{Gravity, WorldPlugin, WorldShift};
+use engine_world::{Gravity, SimulationFocus, WorldPlugin, WorldShift};
 
 fn app(articulated: bool) -> App {
     let mut app = App::new();
@@ -279,6 +279,131 @@ fn cone_limits_hold_on_articulated_ball_joints() {
     }
 }
 
+/// Angle between `a`'s and `b`'s `local` axis, radians.
+fn axes_apart(app: &App, a: Entity, b: Entity, local: Vec3) -> f32 {
+    let (ra, rb) = (transform(app, a).rotation, transform(app, b).rotation);
+    (ra * local).angle_between(rb * local)
+}
+
+/// A heavy block with an arm hanging from its underside on a ball joint with a 0.4 rad cone.
+fn hanging_arm(app: &mut App) -> (Entity, Entity) {
+    let block = body(
+        app,
+        DVec3::new(0.0, 3.0, 0.0),
+        Quat::IDENTITY,
+        Collider::cuboid(Vec3::splat(0.5)),
+    );
+    let arm = body(
+        app,
+        DVec3::new(0.0, 1.9, 0.0),
+        Quat::IDENTITY,
+        Collider::cuboid(Vec3::new(0.08, 0.5, 0.08)),
+    );
+    joint(
+        app,
+        JointKind::Spherical {
+            cone_limit: Some(0.4),
+        },
+        block,
+        arm,
+        DVec3::new(0.0, 2.4, 0.0),
+    );
+    (block, arm)
+}
+
+/// A cone limit is round, around the limb's rest direction, and leaves the limb free to twist
+/// about itself: an arm kicked out diagonally stops at the same angle as one kicked straight
+/// out (a square cone lets the diagonal go 40% farther), and an arm turned half a turn about
+/// its own length stays turned, hanging straight.
+#[test]
+fn cone_limits_are_round_and_let_the_limb_twist() {
+    for articulated in [true, false] {
+        for kick in [Vec3::X, Vec3::new(1.0, 0.0, 1.0).normalize()] {
+            let mut app = app(articulated);
+            zero_g(&mut app);
+            let (block, arm) = hanging_arm(&mut app);
+            app.update();
+            // Swing the arm about the joint, its tip out along `kick`.
+            let turn = Vec3::NEG_Y.cross(kick) * 6.0;
+            *app.world.get_mut::<Velocity>(arm).unwrap() = Velocity {
+                linear: turn.cross(Vec3::NEG_Y * 0.5),
+                angular: turn,
+            };
+            let mut widest = 0.0f32;
+            for _ in 0..60 {
+                app.update();
+                widest = widest.max(axes_apart(&app, block, arm, Vec3::Y));
+            }
+            assert!(
+                (0.36..0.44).contains(&widest),
+                "articulated {articulated}, kicked along {kick}: swung {widest} rad (cone 0.4)"
+            );
+        }
+        let mut app = app(articulated);
+        zero_g(&mut app);
+        let (block, arm) = hanging_arm(&mut app);
+        app.update();
+        app.world.get_mut::<Transform>(arm).unwrap().rotation = Quat::from_rotation_y(2.0);
+        let mut widest = 0.0f32;
+        for _ in 0..60 {
+            app.update();
+            widest = widest.max(axes_apart(&app, block, arm, Vec3::Y));
+        }
+        let twist = angle(&app, block, arm, Vec3::Y);
+        assert!(
+            (twist - 2.0).abs() < 0.05 && widest < 0.05,
+            "articulated {articulated}: twisted back to {twist} rad (put at 2), swung {widest} rad"
+        );
+    }
+}
+
+/// A limb pressed against its cone's rim rubs there: an arm sticking out sideways, held at the
+/// bottom of its cone by gravity and swung along the rim, stops within a few swings instead of
+/// rocking along the rim for half a minute.
+#[test]
+fn a_limb_swinging_along_its_cone_rim_stops() {
+    for articulated in [true, false] {
+        let mut app = app(articulated);
+        ground(&mut app);
+        let block = body(
+            &mut app,
+            DVec3::new(0.0, 0.5, 0.0),
+            Quat::IDENTITY,
+            Collider::cuboid(Vec3::splat(0.5)),
+        );
+        let arm = body(
+            &mut app,
+            DVec3::new(1.1, 0.8, 0.0),
+            Quat::IDENTITY,
+            Collider::cuboid(Vec3::new(0.5, 0.08, 0.08)),
+        );
+        joint(
+            &mut app,
+            JointKind::Spherical {
+                cone_limit: Some(0.4),
+            },
+            block,
+            arm,
+            DVec3::new(0.6, 0.8, 0.0),
+        );
+        app.update_n(60);
+        // Send the tip along the rim, toward -Z.
+        app.world.get_mut::<Velocity>(arm).unwrap().angular = Vec3::Y * 3.0;
+        let mut moving = 0;
+        for f in 1..=360 {
+            app.update();
+            if vel(&app, arm).angular.length() > 0.05 {
+                moving = f;
+            }
+        }
+        let secs = moving as f32 / 60.0;
+        assert!(
+            secs < 3.0,
+            "articulated {articulated}: the arm swung along the rim for {secs} s"
+        );
+    }
+}
+
 /// Two arms hinged to a hub, each holding a motor's target angle. One of the two joints can't
 /// make the hub its child (it already has a parent), so it is made from the hub's side: the
 /// motor must still hold the same angle.
@@ -488,6 +613,20 @@ fn switching_articulated_joints_off_and_on_rebuilds_them() {
     assert!(parts.iter().all(|p| pos(&app, *p).y > 0.0));
 }
 
+/// Spin a chain in place about its middle, as one rigid body, fast enough (its ends at over
+/// 4 m/s) to be worth articulating.
+fn spin(app: &mut App, parts: &[Entity]) {
+    let w = Vec3::Y * 4.0;
+    let middle = parts.iter().map(|p| pos(app, *p)).sum::<DVec3>() / parts.len() as f64;
+    for p in parts {
+        let r = (pos(app, *p) - middle).as_vec3();
+        *app.world.get_mut::<Velocity>(*p).unwrap() = Velocity {
+            linear: w.cross(r),
+            angular: w,
+        };
+    }
+}
+
 fn articulated(app: &App) -> usize {
     app.world.resource::<PhysicsStats>().articulated
 }
@@ -562,4 +701,226 @@ fn a_far_heavier_body_keeps_its_group_on_constraint_joints() {
     assert_eq!(articulated(&app), 3);
     app.update_n(60);
     assert!(worst_gap(&app, &joints) < 1e-4);
+}
+
+/// Only the `max_articulated` moving groups nearest the focus are articulations; the rest use
+/// constraint joints. The budget follows the focus, and a group that falls asleep keeps its
+/// joints but gives its place to the next nearest.
+#[test]
+fn the_budget_articulates_the_groups_nearest_the_focus() {
+    let mut app = app(true);
+    zero_g(&mut app);
+    app.world.resource_mut::<PhysicsSettings>().max_articulated = 2;
+    let focus = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 5.0, -2.0),
+            SimulationFocus::default(),
+        ))
+        .id();
+    // Chain `i` has `i + 1` joints, so the count of articulated joints tells which are.
+    let chains: Vec<Vec<Entity>> = (0..6)
+        .map(|i| {
+            let (parts, _) = chain(&mut app, DVec3::new(0.0, 5.0, 4.0 * i as f64), i + 2);
+            spin(&mut app, &parts);
+            parts
+        })
+        .collect();
+    app.update_n(2);
+    assert_eq!(articulated(&app), 1 + 2, "the two chains nearest the focus");
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(0.0, 5.0, 22.0);
+    app.update_n(10);
+    assert_eq!(articulated(&app), 5 + 6, "the two nearest the moved focus");
+    // Those two stop: calm, they let go of their places, and the next two nearest take them.
+    for p in chains[4].iter().chain(&chains[5]) {
+        *app.world.get_mut::<Velocity>(*p).unwrap() = Velocity::default();
+    }
+    app.update_n(10);
+    assert_eq!(articulated(&app), 3 + 4);
+    app.update_n(240);
+    assert_eq!(
+        articulated(&app),
+        3 + 4,
+        "the still ones fall asleep on constraint joints"
+    );
+}
+
+/// A group too slow to land hard rests closed on constraint joints: it's only articulated once
+/// it moves fast (a ragdoll knocked over, thrown or falling), and lets go when it calms down.
+#[test]
+fn only_moving_groups_near_the_focus_are_articulated() {
+    let mut app = app(true);
+    zero_g(&mut app);
+    app.world.spawn((
+        Transform::from_xyz(0.0, 5.0, -2.0),
+        SimulationFocus::default(),
+    ));
+    let (parts, _) = chain(&mut app, DVec3::new(0.0, 5.0, 0.0), 4);
+    for p in &parts {
+        app.world.get_mut::<Velocity>(*p).unwrap().linear = Vec3::Y * 0.5;
+    }
+    app.update_n(10);
+    assert_eq!(articulated(&app), 0, "drifting slowly");
+    spin(&mut app, &parts);
+    app.update_n(10);
+    assert_eq!(articulated(&app), 3, "spinning");
+    for p in &parts {
+        app.world.get_mut::<Velocity>(*p).unwrap().linear = Vec3::Y * 0.5;
+        app.world.get_mut::<Velocity>(*p).unwrap().angular = Vec3::ZERO;
+    }
+    app.update_n(10);
+    assert_eq!(articulated(&app), 0, "slow again");
+}
+
+/// Only groups near the focus are articulated: farther away the few centimeters a constraint
+/// joint opens on a hard landing can't be seen, so the cost buys nothing.
+#[test]
+fn groups_far_from_the_focus_stay_on_constraint_joints() {
+    let mut app = app(true);
+    zero_g(&mut app);
+    let focus = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 5.0, 0.0),
+            SimulationFocus::default(),
+        ))
+        .id();
+    // Chain `i` has `i + 1` joints: 5, 15 and 35 m from the focus.
+    for (i, z) in [5.0, 15.0, 35.0].into_iter().enumerate() {
+        let (parts, _) = chain(&mut app, DVec3::new(0.0, 5.0, z), i + 2);
+        spin(&mut app, &parts);
+    }
+    app.update_n(10);
+    assert_eq!(articulated(&app), 1 + 2, "the two chains within 20 m");
+    // Walk up to the far one: it takes its place among the near ones.
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(0.0, 5.0, 32.0);
+    app.update_n(10);
+    assert_eq!(
+        articulated(&app),
+        2 + 3,
+        "the two within 20 m of the moved focus"
+    );
+    // A quarter farther before an articulated group lets go: 22 m from the middle one.
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(0.0, 5.0, 37.0);
+    app.update_n(10);
+    assert_eq!(articulated(&app), 2 + 3);
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(0.0, 5.0, 57.0);
+    app.update_n(10);
+    assert_eq!(articulated(&app), 3, "only the far one, 22 m away");
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(0.0, 5.0, 70.0);
+    app.update_n(10);
+    assert_eq!(articulated(&app), 0, "none within 25 m");
+}
+
+/// A light chain hung from the world holding a far heavier ball (a wrecking ball, which can't
+/// be articulated) would hang with its links tens of centimeters apart, since the solver can't
+/// carry the load in its few passes: the ball also hangs on a hidden rope from the pin, so the
+/// chain stays closed and the ball swings as a pendulum should.
+#[test]
+fn a_light_chain_holds_a_far_heavier_ball_without_stretching() {
+    let mut app = app(true);
+    ground(&mut app);
+    let pivot = DVec3::new(0.0, 8.0, 0.0);
+    let angle = 70f32.to_radians();
+    let down = Vec3::new(-angle.sin(), -angle.cos(), 0.0).as_dvec3();
+    let rotation = Quat::from_rotation_z(-angle);
+    let link = 0.66;
+    let mut joints = Vec::new();
+    let (mut prev, mut holder) = (None, None);
+    // Six 11 kg links.
+    for i in 0..6 {
+        let e = body(
+            &mut app,
+            pivot + down * (link * (i as f64 + 0.5)),
+            rotation,
+            Collider::capsule(0.07, 0.26).with_density(1200.0),
+        );
+        let top = pivot + down * (link * i as f64);
+        match prev {
+            None => holder = Some(pin(&mut app, e, top)),
+            Some(p) => joints.push(joint(
+                &mut app,
+                JointKind::Spherical { cone_limit: None },
+                p,
+                e,
+                top,
+            )),
+        }
+        prev = Some(e);
+    }
+    let ball = body(
+        &mut app,
+        pivot + down * (link * 6.0 + 0.8),
+        rotation,
+        Collider::sphere(0.8).with_density(7800.0),
+    );
+    joints.push(joint(
+        &mut app,
+        JointKind::Spherical { cone_limit: None },
+        prev.unwrap(),
+        ball,
+        pivot + down * (link * 6.0),
+    ));
+    app.update();
+    assert!(mass(&app, ball) > 1000.0 * mass(&app, prev.unwrap()));
+    let start = pos(&app, ball).y;
+    let (mut worst, mut highest) = (0.0f64, f64::MIN);
+    let mut fastest = 0.0f32;
+    for f in 0..360 {
+        app.update();
+        worst = worst.max(worst_gap(&app, &joints));
+        if f > 60 {
+            highest = highest.max(pos(&app, ball).y);
+        }
+        if f < 80 {
+            fastest = fastest.max(vel(&app, ball).linear.length());
+        }
+        if f % 15 == 0 {
+            let v = vel(&app, ball).linear.length() as f64;
+            let y = pos(&app, ball).y;
+            println!(
+                "E f{f} y {y:.2} v {v:.2} E {:.1} gap {:.3}",
+                9.81 * y + v * v / 2.0,
+                worst_gap(&app, &joints)
+            );
+        }
+    }
+    println!(
+        "worst joint gap {worst:.4} m; highest swing {highest:.2} m (let go at {start:.2}); fastest {fastest:.2}"
+    );
+    assert!(worst < 0.01, "the chain stretched {worst} m");
+    // Let go 3.13 m above the bottom of its swing: 7.84 m/s there.
+    assert!(
+        (fastest - 7.84).abs() < 0.3,
+        "{fastest} m/s at the bottom of the swing"
+    );
+    assert!(
+        (highest - start).abs() < 0.1,
+        "the swing came back to {highest} m, let go at {start} m"
+    );
+    // Unpinned, the rope goes with the pin: chain and ball fall together, still closed.
+    app.world.despawn(holder.unwrap());
+    let (from, mut worst) = (pos(&app, ball).y, 0.0f64);
+    for _ in 0..30 {
+        app.update();
+        worst = worst.max(worst_gap(&app, &joints));
+    }
+    assert!(pos(&app, ball).y < from - 1.0, "the ball still hangs");
+    assert!(worst < 0.02, "the falling chain opened {worst} m");
+}
+
+/// Pin `body` to the world at `at`.
+fn pin(app: &mut App, body: Entity, at: DVec3) -> Entity {
+    let t = transform(app, body);
+    app.world
+        .spawn(Joint {
+            kind: JointKind::Spherical { cone_limit: None },
+            body_a: body,
+            body_b: None,
+            anchor_a: t.rotation.inverse() * (at - t.translation).as_vec3(),
+            anchor_b: at,
+            break_force: None,
+            collide_connected: false,
+        })
+        .id()
 }

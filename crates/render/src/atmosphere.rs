@@ -1,7 +1,11 @@
 //! Atmosphere look-up tables (Hillaire 2020), computed on the GPU:
 //!
-//! - transmittance to the top of the atmosphere (256×64) and multiple scattering (32×32),
-//!   recomputed only when the planet or its air changes;
+//! - transmittance to the top of the atmosphere (256×64), and multiple scattering (all orders
+//!   and the two parts of the second, so the light it scatters toward the eye can follow where
+//!   it comes from) with the sky's light on the ground (four 32×32 tables in one 32×128
+//!   texture), recomputed
+//!   only when the planet or its air changes (its size, scale heights, ground, anisotropy, or
+//!   any scattering or absorption coefficient: Earth's air to Mars' rebuilds them);
 //! - the sky seen from the camera (192×108), every frame while the camera is inside the
 //!   atmosphere (from above it, shaders integrate the sky per pixel with the first two).
 //!
@@ -21,8 +25,12 @@ pub(crate) struct AtmosphereLuts {
     /// Transmittance, multiple scattering, sky view.
     passes: [LutPass; 3],
     /// Parameters the transmittance and multiple scattering tables were computed for.
-    key: Option<[f32; 8]>,
+    key: Option<[f32; KEY_LEN]>,
 }
+
+/// The planet's size, scale heights, ground, sun size, the air's four coefficients and its
+/// anisotropy (RGB).
+const KEY_LEN: usize = 8 + 5 * 3;
 
 struct LutPass {
     pipeline: wgpu::ComputePipeline,
@@ -37,7 +45,7 @@ impl AtmosphereLuts {
         let device = &shared.device;
         let usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING;
         let transmittance = Tex::new(device, "atmosphere transmittance", 256, 64, FORMAT, usage);
-        let multiscatter = Tex::new(device, "atmosphere multiscatter", 32, 32, FORMAT, usage);
+        let multiscatter = Tex::new(device, "atmosphere multiscatter", 32, 4 * 32, FORMAT, usage);
         let sky_view = Tex::new(device, "atmosphere sky view", 192, 108, FORMAT, usage);
         let module = shared.shader(
             "atmosphere tables",
@@ -136,7 +144,7 @@ impl AtmosphereLuts {
                 size: (writes.width, writes.height),
             }
         };
-        let passes = [
+        let mut passes = [
             pass(
                 "atmosphere transmittance",
                 "cs_transmittance",
@@ -156,6 +164,8 @@ impl AtmosphereLuts {
                 &sky_view,
             ),
         ];
+        // One invocation fills a texel of each of the four multiple scattering tables.
+        passes[1].size = (32, 32);
         Self {
             transmittance,
             multiscatter,
@@ -171,16 +181,7 @@ impl AtmosphereLuts {
         if radius <= 0.0 {
             return;
         }
-        let key = [
-            radius,
-            uniform.atmosphere[0],
-            uniform.atmosphere[1],
-            uniform.atmosphere[2],
-            uniform.ground[0],
-            uniform.ground[1],
-            uniform.ground[2],
-            uniform.sun_dir[3],
-        ];
+        let key = table_key(uniform);
         let rebuild = self.key != Some(key);
         let inside = uniform.camera_world[3] < uniform.atmosphere[0] - 1.0;
         if !rebuild && !inside {
@@ -203,6 +204,58 @@ impl AtmosphereLuts {
         }
         if inside {
             run(&self.passes[2]);
+        }
+    }
+}
+
+/// What the transmittance and multiple scattering tables depend on (the anisotropy through
+/// the sky's light on the ground).
+fn table_key(uniform: &FrameUniform) -> [f32; KEY_LEN] {
+    let mut key = [0.0; KEY_LEN];
+    key[..8].copy_from_slice(&[
+        uniform.planet[3],
+        uniform.atmosphere[0],
+        uniform.atmosphere[1],
+        uniform.atmosphere[2],
+        uniform.ground[0],
+        uniform.ground[1],
+        uniform.ground[2],
+        uniform.sun_dir[3],
+    ]);
+    let air = [
+        uniform.air_rayleigh,
+        uniform.air_mie,
+        uniform.air_mie_extinction,
+        uniform.air_ozone,
+        uniform.air_mie_g,
+    ];
+    for (i, c) in air.iter().enumerate() {
+        key[8 + 3 * i..11 + 3 * i].copy_from_slice(&c[..3]);
+    }
+    key
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytemuck::Zeroable;
+
+    #[test]
+    fn the_tables_follow_every_coefficient_of_the_air() {
+        let base = FrameUniform::zeroed();
+        let fields: [fn(&mut FrameUniform) -> &mut [f32; 4]; 5] = [
+            |u| &mut u.air_rayleigh,
+            |u| &mut u.air_mie,
+            |u| &mut u.air_mie_extinction,
+            |u| &mut u.air_ozone,
+            |u| &mut u.air_mie_g,
+        ];
+        for field in fields {
+            for c in 0..3 {
+                let mut changed = base;
+                field(&mut changed)[c] = 1e-6;
+                assert_ne!(table_key(&changed), table_key(&base));
+            }
         }
     }
 }

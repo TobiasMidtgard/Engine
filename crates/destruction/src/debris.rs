@@ -3,13 +3,19 @@
 //! Large chunks become physics-contract bodies (`RigidBody` + `Collider` + `Velocity`) when a
 //! physics backend is installed, so they stack and collide with everything. Without one, and
 //! always for small chips, a built-in lightweight solver tumbles them onto the ground (the
-//! `Ground` query), lets them settle and sleep. Everything sinks out of sight after its
-//! lifetime and a budget caps how much debris exists at once.
+//! `Ground` query), lets them settle and sleep, and piles them up: chunks at rest are boxes
+//! that later debris lands on, so a collapse leaves a heap rather than pieces sunk into each
+//! other. Everything sinks out of sight after its lifetime and a budget caps how much debris
+//! exists at once.
+
+use std::collections::{HashMap, HashSet};
 
 use engine_assets::{Assets, Handle};
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_render::{MaterialRef, Mesh, MeshRef, MeshRenderer};
+use engine_render::{
+    Billboard, MaterialRef, Mesh, MeshRef, MeshRenderer, Sprite, SpriteAlpha, SpriteAtlas,
+};
 use engine_world::physics::{
     BodyKind, Collider, ColliderShape, PhysicsBackend, RigidBody, Velocity,
 };
@@ -17,7 +23,8 @@ use engine_world::{ContactKind, Env, GroundContact, NoiseEvent, SurfaceMaterials
 
 use crate::assets::DestructionAssets;
 use crate::material::{DestructibleMaterial, DestructionMaterials};
-use crate::voxel::{VoxelState, rock_contact, rock_depth};
+use crate::textures::DUST_FRAMES;
+use crate::voxel::{VoxelState, in_rock, rock_contact, rock_depth, rock_side};
 use crate::{DebrisMode, DestructionSettings, DestructionStats};
 
 /// A piece of debris. Registered so tools and AI agents can see and tune it.
@@ -84,10 +91,12 @@ pub struct DebrisBody {
     pub last_impact: f32,
     /// Whether it lands on voxel rock.
     pub rock: RockContact,
+    /// The resting chunk it lies on, if any: it falls again when that one goes.
+    pub on: Option<Entity>,
 }
 
 /// Whether debris lands on voxel rock as on the ground.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum RockContact {
     /// Not looked at yet: decided on its first step.
     #[default]
@@ -97,17 +106,24 @@ pub enum RockContact {
     /// Started out buried in rock deeper than [`BURIED_M`]: lands on it once it has fallen
     /// clear.
     Buried,
-    /// Cut from the rock (a cave-in's boulders, a blast's rubble): passes through rock onto
-    /// the ground, so it doesn't catch on the rims of the hole it falls out of.
-    Ignores,
+    /// Cut from the rock at this point (a cave-in's boulders, a blast's rubble): passes through
+    /// rock until it has moved [`LEAVE_M`] from there and is clear of it, so it falls out of
+    /// the hole it came from instead of hanging on the hole's rims; then lands on rock (a
+    /// ledge, a cave's floor) like anything else.
+    Leaving(DVec3),
 }
 
 /// How deep debris may start out inside voxel rock and still land on it (a building piece
 /// resting on rock sits up to the ground tolerance in it), m.
 pub const BURIED_M: f32 = 0.15;
-/// How far rock pushes a point inside it up to its top; deeper, the point is inside a rock
-/// wall's side or under a ceiling, not on a floor, m.
+/// How far rock pushes a point inside it out: up to a floor's top, out of a wall's face, down
+/// out of a ceiling; deeper, it passes through, m.
 const ROCK_REACH_M: f32 = 0.6;
+/// How far debris cut from rock moves before it may land on rock, m (see
+/// [`RockContact::Leaving`]).
+pub const LEAVE_M: f32 = 0.5;
+/// Spacing of the points checked for rock before debris cut from rock may land, m.
+const LEAVE_LATTICE_M: f32 = 0.2;
 
 impl DebrisBody {
     /// Box-shaped body of `mass_kg` with half extents `half`, touching the ground at `points`.
@@ -132,6 +148,7 @@ impl DebrisBody {
             sinking: false,
             last_impact: 0.0,
             rock: RockContact::Unknown,
+            on: None,
         }
     }
 
@@ -147,6 +164,13 @@ impl DebrisBody {
 /// Glowing hot fragments (sparks): fade instead of sinking.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Spark;
+
+/// A dust sprite's quad, as a multiple of its puff's size: the soft cloud fades out well
+/// inside its quad, so the quad is larger than the mesh puff it replaces.
+const DUST_SPRITE_SCALE: f32 = 2.2;
+
+/// A dust sprite's opacity at its thickest.
+const DUST_SPRITE_ALPHA: f32 = 0.8;
 
 /// A puff of dust that grows, rises a little, drifts with the wind and fades.
 #[derive(Component, Debug, Clone, Copy)]
@@ -201,8 +225,8 @@ pub struct DebrisSpawn {
     pub scale: Option<Vec3>,
     /// Spawn already lying still on the ground (see [`settle`]).
     pub resting: bool,
-    /// Cut from voxel rock (a cave-in's boulders, a blast's rubble): it passes through rock
-    /// (see [`RockContact::Ignores`]).
+    /// Cut from voxel rock (a cave-in's boulders, a blast's rubble): it falls out of its hole
+    /// through the rock around it (see [`RockContact::Leaving`]).
     pub from_rock: bool,
 }
 
@@ -512,7 +536,7 @@ pub fn spawn_debris_system(
             body.angular = item.angular;
             body.asleep = item.resting;
             if item.from_rock {
-                body.rock = RockContact::Ignores;
+                body.rock = RockContact::Leaving(item.position);
             }
             // A piece that stood with a collider loses it: this solver moves it now.
             e.insert(body).remove::<Collider>();
@@ -538,24 +562,45 @@ pub fn spawn_debris_system(
             for _ in 0..count.clamp(1, 14) {
                 let offset = Vec3::new(next(), next() * 0.5 + 0.25, next()) * spread;
                 let size = d.size.min(0.8) * (0.6 + 0.4 * (next() + 0.5));
-                commands.spawn((
-                    Transform::from_translation(d.position + offset.as_dvec3())
-                        .with_scale(Vec3::splat(size * 0.4)),
-                    MeshRenderer::new(
-                        MeshRef::Handle(assets.dust_mesh),
-                        MaterialRef::Handle(assets.dust(d.darkness, 1.0)),
-                    )
-                    .without_shadows(),
-                    DustPuff {
-                        age: 0.0,
-                        life: 2.5 + 1.5 * (next() + 0.5),
-                        start_size: size * 0.4,
-                        end_size: size * 1.6,
-                        velocity: d.velocity + Vec3::new(next(), 0.3 + next() * 0.2, next()) * 0.8,
-                        darkness: d.darkness,
-                        opacity: 1.0,
-                    },
-                ));
+                let transform = Transform::from_translation(d.position + offset.as_dvec3())
+                    .with_scale(Vec3::splat(size * 0.4));
+                let mut puff = commands.spawn(transform);
+                match assets.dust_sprite {
+                    // A soft camera-facing cloud, lit by the sun and the sky.
+                    Some(image) => {
+                        let c = DestructionAssets::dust_color(d.darkness);
+                        let frame = ((next() + 0.5) * DUST_FRAMES as f32) as u32;
+                        puff.insert(
+                            Sprite::new(image, [DUST_SPRITE_SCALE; 2])
+                                .with_atlas(SpriteAtlas::grid(DUST_FRAMES, 1))
+                                .with_frame(frame.min(DUST_FRAMES - 1))
+                                .with_billboard(Billboard::FaceCamera)
+                                .with_alpha(SpriteAlpha::Blend)
+                                .with_color([c[0], c[1], c[2], 0.0])
+                                .lit()
+                                .with_roundness(0.8)
+                                .with_translucency(0.5),
+                        );
+                    }
+                    None => {
+                        puff.insert(
+                            MeshRenderer::new(
+                                MeshRef::Handle(assets.dust_mesh),
+                                MaterialRef::Handle(assets.dust(d.darkness, 1.0)),
+                            )
+                            .without_shadows(),
+                        );
+                    }
+                }
+                puff.insert(DustPuff {
+                    age: 0.0,
+                    life: 2.5 + 1.5 * (next() + 0.5),
+                    start_size: size * 0.4,
+                    end_size: size * 1.6,
+                    velocity: d.velocity + Vec3::new(next(), 0.3 + next() * 0.2, next()) * 0.8,
+                    darkness: d.darkness,
+                    opacity: 1.0,
+                });
             }
         }
     } else {
@@ -601,6 +646,128 @@ pub fn reduce_points(hull: &[Vec3], n: usize) -> Vec<Vec3> {
     out
 }
 
+/// Lightest chunk other debris lands on, kg: chips and pebbles are left to sink in.
+const SUPPORT_MIN_KG: f32 = 2.0;
+/// How far below a resting chunk's top a point is still pushed up onto it; deeper, it is
+/// beside or under the chunk, not on it, m.
+const SUPPORT_REACH_M: f32 = 0.25;
+/// Size of the buckets resting chunks are sorted into, m.
+const SUPPORT_CELL_M: f64 = 1.0;
+
+/// Most contacts the solver keeps per body and step.
+const MAX_CONTACTS: usize = 64;
+/// Steps along each edge of the lattice a falling chunk's box is sampled at against resting
+/// chunks (a chip just uses its corners).
+const LATTICE: usize = 4;
+
+/// Points of an `n`-step lattice (0..=n on each axis) on the surface of a box.
+fn box_lattice(n: usize) -> impl Iterator<Item = (f32, f32, f32)> {
+    (0..=n).flat_map(move |i| {
+        (0..=n).flat_map(move |j| {
+            (0..=n)
+                .filter(move |&k| [i, j, k].iter().any(|&c| c == 0 || c == n))
+                .map(move |k| (i as f32, j as f32, k as f32))
+        })
+    })
+}
+
+/// A chunk at rest, as a box later debris lands on.
+struct Support {
+    entity: Entity,
+    center: DVec3,
+    /// World to box space.
+    inv: Quat,
+    half: Vec3,
+}
+
+impl Support {
+    /// World height of the box's top straight above or below `p` (`p.y` ignored), if the
+    /// vertical line through `p` goes through it.
+    fn top_at(&self, p: DVec3) -> Option<f64> {
+        let o = self.inv
+            * Vec3::new(
+                (p.x - self.center.x) as f32,
+                0.0,
+                (p.z - self.center.z) as f32,
+            );
+        let d = self.inv * Vec3::Y;
+        let (mut t0, mut t1) = (f32::NEG_INFINITY, f32::INFINITY);
+        for k in 0..3 {
+            if d[k].abs() < 1e-6 {
+                if o[k].abs() > self.half[k] {
+                    return None;
+                }
+                continue;
+            }
+            let (a, b) = ((-self.half[k] - o[k]) / d[k], (self.half[k] - o[k]) / d[k]);
+            t0 = t0.max(a.min(b));
+            t1 = t1.min(a.max(b));
+        }
+        (t0 <= t1).then_some(self.center.y + t1 as f64)
+    }
+}
+
+/// Resting chunks, bucketed by where they lie.
+#[derive(Default)]
+struct Rubble {
+    supports: Vec<Support>,
+    cells: HashMap<(i64, i64), Vec<usize>>,
+    entities: HashSet<Entity>,
+}
+
+impl Rubble {
+    fn cell(p: DVec3) -> (i64, i64) {
+        (
+            (p.x / SUPPORT_CELL_M).floor() as i64,
+            (p.z / SUPPORT_CELL_M).floor() as i64,
+        )
+    }
+
+    fn add(&mut self, s: Support) {
+        let r = s.half.length() as f64;
+        let (lo, hi) = (
+            Self::cell(s.center - DVec3::splat(r)),
+            Self::cell(s.center + DVec3::splat(r)),
+        );
+        let k = self.supports.len();
+        for x in lo.0..=hi.0 {
+            for z in lo.1..=hi.1 {
+                self.cells.entry((x, z)).or_default().push(k);
+            }
+        }
+        self.entities.insert(s.entity);
+        self.supports.push(s);
+    }
+
+    /// The highest resting top under `p` within [`SUPPORT_REACH_M`] above it, other than
+    /// `skip`'s, and whose it is.
+    fn top_under(&self, p: DVec3, skip: Entity) -> Option<(f64, Entity)> {
+        let ids = self.cells.get(&Self::cell(p))?;
+        ids.iter()
+            .map(|&k| &self.supports[k])
+            .filter(|s| s.entity != skip)
+            .filter_map(|s| s.top_at(p).map(|h| (h, s.entity)))
+            .filter(|(h, _)| *h - p.y <= SUPPORT_REACH_M as f64)
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+    }
+
+    /// Whether any resting chunk lies within `r` of `p` (by bucket).
+    fn near(&self, p: DVec3, r: f64) -> bool {
+        if self.supports.is_empty() {
+            return false;
+        }
+        let (lo, hi) = (
+            Self::cell(p - DVec3::splat(r)),
+            Self::cell(p + DVec3::splat(r)),
+        );
+        (lo.0..=hi.0).any(|x| (lo.1..=hi.1).any(|z| self.cells.contains_key(&(x, z))))
+    }
+
+    fn contains(&self, e: Entity) -> bool {
+        self.entities.contains(&e)
+    }
+}
+
 /// The built-in debris solver: gravity, ground and voxel rock contacts with friction and
 /// restitution, sleep. Runs in `FixedUpdate` (`SimSet::Physics`), so it slows down with time
 /// dilation.
@@ -624,19 +791,43 @@ pub fn simulate_debris_system(
         .iter()
         .map(|(gt, state)| state.world_bounds(gt, 1.0))
         .collect();
+    // Chunks at rest are what the rest land on.
+    let mut rubble = Rubble::default();
+    for (entity, t, body, debris) in &q {
+        if !body.asleep || body.sinking || debris.chip || debris.mass_kg < SUPPORT_MIN_KG {
+            continue;
+        }
+        // Its box: the bounds of its contact points (its hull's extremes).
+        let Some((lo, hi)) = body.points.iter().fold(None, |b: Option<(Vec3, Vec3)>, p| {
+            let p = *p * t.scale;
+            Some(b.map_or((p, p), |(lo, hi)| (lo.min(p), hi.max(p))))
+        }) else {
+            continue;
+        };
+        rubble.add(Support {
+            entity,
+            center: t.translation + (t.rotation * ((lo + hi) * 0.5)).as_dvec3(),
+            inv: t.rotation.inverse(),
+            half: (hi - lo) * 0.5,
+        });
+    }
     for (entity, mut t, mut body, mut debris) in &mut q {
         let (t, body) = (&mut *t, &mut *body);
         if body.sinking {
             t.translation -= env.up(t.translation).as_dvec3() * (0.35 * dt) as f64;
             continue;
         }
+        // What it lay on was dug, blasted, woken, or sank away: it falls again.
+        let lost = body.on.is_some_and(|s| !rubble.contains(s));
         if body.asleep
-            && changed
-                .iter()
-                .any(|(lo, hi)| t.translation.cmpge(*lo).all() && t.translation.cmple(*hi).all())
+            && (lost
+                || changed.iter().any(|(lo, hi)| {
+                    t.translation.cmpge(*lo).all() && t.translation.cmple(*hi).all()
+                }))
         {
             body.asleep = false;
             body.still = 0.0;
+            body.on = None;
         }
         if body.asleep {
             continue;
@@ -665,6 +856,27 @@ pub fn simulate_debris_system(
         let scale = t.scale;
         let rot = t.rotation;
         let center = t.translation;
+        // Out of its hole: past the rims and all of it clear of the rock (its hull's extremes,
+        // its center and a lattice over its box no coarser than a thin shelf), it lands on rock
+        // from now on.
+        if let RockContact::Leaving(from) = body.rock
+            && center.distance(from) >= LEAVE_M as f64
+        {
+            let inside = |local: Vec3| in_rock(&rock, center + (rot * local).as_dvec3());
+            let (lo, hi) = body.points.iter().fold(
+                (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                |(lo, hi), p| (lo.min(*p * scale), hi.max(*p * scale)),
+            );
+            let steps = (((hi - lo).max_element() / LEAVE_LATTICE_M).ceil() as usize).clamp(1, 8);
+            let clear = !body.points.is_empty()
+                && !body.points.iter().any(|p| inside(*p * scale))
+                && !inside(Vec3::ZERO)
+                && !box_lattice(steps)
+                    .any(|(i, j, k)| inside(lo + (hi - lo) * Vec3::new(i, j, k) / steps as f32));
+            if clear {
+                body.rock = RockContact::Lands;
+            }
+        }
         if !rock.is_empty() && matches!(body.rock, RockContact::Unknown | RockContact::Buried) {
             let buried = body
                 .points
@@ -684,27 +896,71 @@ pub fn simulate_debris_system(
         }
         let on_rock = body.rock == RockContact::Lands && !rock.is_empty();
         // Collect penetrating points.
-        let mut touching: [(Vec3, f32); 16] = [(Vec3::ZERO, 0.0); 16];
+        let mut touching = [(Vec3::ZERO, 0.0f32, Vec3::ZERO); MAX_CONTACTS];
         let mut count = 0;
-        let mut deepest = 0.0f32;
+        let mut touch = |r: Vec3, depth: f32, normal: Vec3| {
+            if depth > 0.0 && count < MAX_CONTACTS {
+                touching[count] = (r, depth, normal);
+                count += 1;
+            }
+        };
+        // The ground and rock, at its hull's extreme points: rock floors hold it up like the
+        // ground, rock walls and ceilings push it out of their face, so it slides down a cliff
+        // onto the ledge below instead of catching on the cliff's edge.
         for p in &body.points {
             let r = rot * (*p * scale);
             let wp = center + r.as_dvec3();
             let mut h = env.ground_query.height(wp).unwrap_or(ground.height);
-            if on_rock && let Some(r) = rock_contact(&rock, wp, ROCK_REACH_M) {
-                h = h.max(r);
+            if on_rock {
+                match rock_side(&rock, wp, ROCK_REACH_M) {
+                    Some((normal, depth)) => touch(r, depth, normal),
+                    None => {
+                        if let Some(r) = rock_contact(&rock, wp, ROCK_REACH_M) {
+                            h = h.max(r);
+                        }
+                    }
+                }
             }
-            let depth = ((h - wp.y) as f32) * n.y.max(0.2);
-            if depth > 0.0 && count < touching.len() {
-                touching[count] = (r, depth);
-                count += 1;
-                deepest = deepest.max(depth);
+            touch(r, ((h - wp.y) as f32) * n.y.max(0.2), n);
+        }
+        // Resting chunks, box on box: a lattice over the lower half of its box, so it lies
+        // across an edge below it instead of tipping through it.
+        let mut on = None;
+        let reach = body
+            .points
+            .iter()
+            .map(|p| (*p * scale).length())
+            .fold(0.0f32, f32::max);
+        if !body.points.is_empty() && rubble.near(center, reach as f64) {
+            let (lo, hi) = body.points.iter().fold(
+                (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                |(lo, hi), p| (lo.min(*p * scale), hi.max(*p * scale)),
+            );
+            let mut best = 0.0f32;
+            let steps = if debris.chip { 1 } else { LATTICE };
+            for (i, j, k) in box_lattice(steps) {
+                let local = lo + (hi - lo) * Vec3::new(i, j, k) / steps as f32;
+                let r = rot * local;
+                if r.dot(up) > 0.0 {
+                    continue;
+                }
+                let wp = center + r.as_dvec3();
+                if let Some((top, s)) = rubble.top_under(wp, entity) {
+                    let depth = (top - wp.y) as f32;
+                    if depth > best {
+                        best = depth;
+                        on = Some(s);
+                    }
+                    touch(r, depth, n);
+                }
             }
         }
         if count == 0 {
             body.still = 0.0;
+            body.on = None;
             continue;
         }
+        body.on = on;
         let inv_i_world = |v: Vec3, b: &DebrisBody| rot * (b.inv_inertia * (rot.inverse() * v));
         let impact = -(body.velocity.dot(n)).min(0.0);
         body.last_impact = impact;
@@ -727,27 +983,35 @@ pub fn simulate_debris_system(
                 source: Some(entity),
             });
         }
-        let restitution = if impact > 1.5 { body.restitution } else { 0.0 };
-        let mut normal_impulse = [0.0f32; 16];
+        // Each contact pushes along its own normal: the ground's, or a rock face's.
+        let bounce = body.restitution;
+        let targets: [f32; MAX_CONTACTS] = std::array::from_fn(|k| {
+            let speed = -(body.velocity.dot(touching[k].2)).min(0.0);
+            if speed > 1.5 {
+                -bounce * speed.min(8.0)
+            } else {
+                0.0
+            }
+        });
+        let mut normal_impulse = [0.0f32; MAX_CONTACTS];
         for _ in 0..4 {
             for k in 0..count {
-                let (r, _) = touching[k];
+                let (r, _, nk) = touching[k];
                 let v = body.velocity + body.angular.cross(r);
-                let vn = v.dot(n);
-                let rn = r.cross(n);
-                let kn = body.inv_mass + inv_i_world(rn, body).cross(r).dot(n);
-                let target = -restitution * impact.min(8.0);
-                let mut j = (target - vn) / kn.max(1e-6);
+                let vn = v.dot(nk);
+                let rn = r.cross(nk);
+                let kn = body.inv_mass + inv_i_world(rn, body).cross(r).dot(nk);
+                let mut j = (targets[k] - vn) / kn.max(1e-6);
                 let old = normal_impulse[k];
                 normal_impulse[k] = (old + j).max(0.0);
                 j = normal_impulse[k] - old;
-                let imp = n * j;
+                let imp = nk * j;
                 body.velocity += imp * body.inv_mass;
                 let dw = inv_i_world(r.cross(imp), body);
                 body.angular += dw;
                 // Friction.
                 let v = body.velocity + body.angular.cross(r);
-                let vt = v - n * v.dot(n);
+                let vt = v - nk * v.dot(nk);
                 let speed_t = vt.length();
                 if speed_t > 1e-5 {
                     let tdir = vt / speed_t;
@@ -763,9 +1027,15 @@ pub fn simulate_debris_system(
         }
         // Rolling resistance so pieces settle instead of rocking forever.
         body.angular *= 1.0 / (1.0 + 2.5 * dt);
-        if deepest > 0.002 {
-            t.translation += (n * (deepest - 0.002) * 0.8).as_dvec3();
+        // Out of whatever it sank into: enough along each normal for its deepest point there.
+        let mut push = Vec3::ZERO;
+        for &(_, depth, normal) in &touching[..count] {
+            let need = depth - 0.002 - push.dot(normal);
+            if need > 0.0 {
+                push += normal * need;
+            }
         }
+        t.translation += (push * 0.8).as_dvec3();
         if body.velocity.length_squared() < 0.12 * 0.12 && body.angular.length_squared() < 0.3 * 0.3
         {
             body.still += dt;
@@ -798,7 +1068,16 @@ pub fn age_debris_system(
         Option<&Spark>,
         &Transform,
     )>,
-    mut dust: Query<(Entity, &mut DustPuff, &mut Transform, &mut MeshRenderer), Without<Debris>>,
+    mut dust: Query<
+        (
+            Entity,
+            &mut DustPuff,
+            &mut Transform,
+            Option<&mut MeshRenderer>,
+            Option<&mut Sprite>,
+        ),
+        Without<Debris>,
+    >,
     mut stats: ResMut<DestructionStats>,
     mut order: Local<Vec<(f32, Entity)>>,
 ) {
@@ -882,7 +1161,7 @@ pub fn age_debris_system(
         return;
     };
     let mut puffs = 0;
-    for (e, mut p, mut t, mut r) in &mut dust {
+    for (e, mut p, mut t, mesh, sprite) in &mut dust {
         let (p, t) = (&mut *p, &mut *t);
         puffs += 1;
         p.age += dt;
@@ -899,9 +1178,14 @@ pub fn age_debris_system(
         p.velocity.y *= 1.0 / (1.0 + 0.6 * dt);
         t.translation += (p.velocity * dt).as_dvec3();
         let opacity = p.opacity * (1.0 - k).powf(1.5) * (k * 8.0).min(1.0);
-        let handle = assets.dust(p.darkness, opacity);
-        if r.material != MaterialRef::Handle(handle) {
-            r.material = MaterialRef::Handle(handle);
+        if let Some(mut r) = mesh {
+            let handle = assets.dust(p.darkness, opacity);
+            if r.material != MaterialRef::Handle(handle) {
+                r.material = MaterialRef::Handle(handle);
+            }
+        }
+        if let Some(mut sprite) = sprite {
+            sprite.color[3] = opacity * DUST_SPRITE_ALPHA;
         }
     }
     stats.dust = puffs;

@@ -102,6 +102,7 @@ module's **contract** in `engine_world`:
 | `terrain`: `TerrainEdit`, `TerrainChanged`, plus the `Ground` query | `engine_terrain` | destruction, foliage, physics, water, npc |
 | `Obscurance`: smoke, fog and dust between two points (`transmittance`, `extinction`); sources stack by name and implementations pass `check_obscurance` | `engine_smoke` (weather fog and destruction dust can add their own) | npc, gameplay, ui |
 | `WorldShift` (+ `WorldShiftSet`, `FollowsWorldShift`): the world was re-anchored (floating origin, a new planet's frame). `engine_world` moves transforms, velocities, forces, intents, gravity, wind and sun, the fields, and pending contract messages; query providers answer in the new frame from `WorldShiftSet::Apply` on | written by `engine_space` | every module or crate that keeps world positions or directions of its own shifts them in `WorldShiftSet::Apply`: physics (bodies, statics, query caches), softbody, vehicles, movement, npc (memories, nav goals), anim (IK targets), vfx, fire, smoke, water, weather, terrain, foliage, destruction, audio, ui (map markers), render (sky and planet centers), debug |
+| `FarCloudLayer`: a far cloud layer (a planet's cloud tops seen from high up) and where the volumetric clouds hand over to it (`near_share`) | `engine_space` | weather |
 | `Water`, `Gravity`, fields and world events (see the crate docs) | water, space, weather, … | everyone |
 
 Anything a module needs that isn't there is a missing contract: ask the core owner to add it
@@ -148,6 +149,7 @@ Writes: `HeatField`, `WorldImpulse`, `IgniteRequest`, `DamageEvent`, `NoiseEvent
 |---|---|
 | `prepare(world, …)` | read the ECS, cull, upload buffers |
 | `compute(encoder, …)` | GPU simulation (particles, fluids, clouds) |
+| `cloud_shadows()` | ask for the top-down cloud shadow map (`CloudShadowRequest`), then draw it in `compute` into `ctx.cloud_shadows` (see "Cloud shadows") |
 | `draw_environment` | add to the sky environment map (clouds, nebulae); it is filtered afterwards, so what is drawn here lights every surface and shows in rough reflections |
 | `draw_prepass` | write depth, normal, roughness and motion for opaque geometry (`vs`/`fs` using `prepass_output` from `lib_frame.wgsl`, targets `GpuShared::prepass_targets()`); ambient occlusion, contact shadows and TAA motion work only on surfaces drawn here, and the scene pass must then write the same depth (mark clip positions `@invariant`) |
 | `draw_shadow(cascade)` | cast sun shadows; with `cascade == SKY_OCCLUSION_VIEW`, draw into the top-down sky occlusion map so whatever roofs over the ground (rock, buildings, canopies) keeps sky light and rain out |
@@ -165,6 +167,29 @@ mountains shade the valley at low sun and ridges shade themselves kilometers awa
 `shadow_factor` blends from the cascades into it over their last tenth; `DebugView::Cascades`
 shows its region in magenta.
 
+**Cloud shadows** (built; `cloud_shadows.rs`): a top-down map of the sunlight the clouds let
+through, frame binding 22 (`cloud_shadow_map`), anchored to the world. The module that draws
+clouds (weather) asks for it from its render feature: `RenderFeature::cloud_shadows()` returns a
+`CloudShadowRequest` (texels per side, meters across, the cloud layer's `base_height` and
+`top_height` in world y, the transmittance `outside` the map), and `compute` then gets
+`ctx.cloud_shadows`: a view of the map (`CLOUD_SHADOW_FORMAT`, Rgba16Float, a render target and
+a storage texture, already cleared to 1) and the `CloudShadowArea` it covers this frame. The
+renderer places the square around the camera snapped to whole texels, so texels never swim as
+the camera moves. Red holds the sunlight reaching the cloud base plane down the sun direction;
+shading reads it where the sun ray through the shaded point crosses that plane, so shadows fall
+away from the sun and are right at any height below the clouds, fade out inside the layer, and
+beyond the square take the `outside` value (the map fades into it over its outer tenth).
+`shade_surface`, `shade_thin_surface`, grass, the volumetric fog's sunlight, the height fog's
+sun glow beyond it and the planet's far ground multiply the sun by it; other crates' shaders
+call `cloud_shadow(rel)`. Writers draw a fullscreen triangle and get the camera-relative point on
+the cloud base under a texel from `cloud_shadow_plane_point(uv)`, or rasterize with
+`frame.cloud_shadow` (camera-relative → map clip space, projected along the sun); during
+`compute` the frame group binds a white stand-in at 22, so the pass that draws the map can bind
+it. Green, blue and alpha are not read: they are free for the writer's own top-down data
+(group 0 binds 15 sampled textures with the ground weather map; don't add another). Until a
+module draws it the map stays 1, the lookup is skipped and every image is unchanged;
+`RenderSettings::cloud_shadows` turns it off.
+
 **Sky occlusion** (built): a 512² top-down depth map of the highest surface within 128 m of
 the camera. `sky_visibility(rel, normal)` in `lib_frame.wgsl` returns how much open sky a point
 sees; shading and haze use it, and weather effects should use it to keep rain and snow off
@@ -181,7 +206,24 @@ walls around them. Sky light that does reach a covered point came in through ope
 bounced on the way, so it arrives more evenly from all around the less sky the point sees
 (`sky_ambient_covered(normal, sky_vis)`, used by `shade_surface`): a ceiling indoors isn't lit
 by the sunlit ground outside (olive by default), nor a cave's floor by the blue sky overhead.
-`RenderSettings::debug_view = SkyVisibility` shows the result.
+`shade_surface` looks the cover up with the surface's smooth normal (`Surface::smooth_normal`,
+the interpolated vertex normal; `StandardMaterial` meshes set it), not the normal-mapped one, so
+cover doesn't change wrinkle by wrinkle on a strong normal map; the shading normal still picks
+which part of the sky lights the point. Shaders in other crates that build a `Surface` with
+`default_surface()` and a normal map should set `smooth_normal` too (left at zero it falls back
+to `normal`; `surface_smooth_normal(s)` resolves it). Reflected sky is occluded along the
+reflection, not just by the cover overhead: `specular_sky_visibility(rel, dir, smooth_normal,
+roughness)` marches the map outward along the reflection's heading (18 taps from about 1 m to
+55 m, each a quarter farther, shifted per pixel so TAA averages walls thinner than the far gaps)
+and hides the sky where cover rises above the reflection, so a forest pond or a wet courtyard
+doesn't mirror the bright low sky that the trees or walls around it hide (with SSR off or off
+screen, the hidden part is left to the ambient fill). Cover at the surface's own level doesn't
+count, so open water stays bright to the horizon. `specular_horizon_fade(r, smooth_normal)`
+(Russell's horizon occlusion) fades reflections that a normal map tilts below the surface's own
+horizon. `shade_surface` takes the smaller of `sky_visibility` and the directional value for
+glossy surfaces (rough ones, whose lobe is wide, use the cover overhead alone; the march is
+skipped from perceptual roughness 0.71) and applies the fade to all. `RenderSettings::debug_view =
+SkyVisibility` shows the result.
 
 **Ground weather** (built): `SurfaceLayers` (the weather's 512 m grid of 1 m cells around the
 focus: wetness, standing water, snow, scorch) is uploaded as a texture (frame binding 21,
@@ -242,12 +284,36 @@ pushes blades aside (16 nearest the camera). `RenderSettings::grass_density` sca
 draw distance. `engine_foliage` drives grass by spawning fields from its soil grid; game code
 can spawn them directly.
 
+**Sprites and tile maps** (built; `sprites/`): 2D and 2.5D. A `Sprite` draws an image (or a solid
+color) as a quad at its entity's `Transform`: size in meters, an atlas frame (`SpriteAtlas::grid`,
+`grid_cells` or explicit rectangles), tint, flips, anchor, a `layer` that orders 2D scenes, and
+`Billboard::Fixed`, `FaceCamera` or `Upright` (turns about its own up axis only). `SpriteAnimation`
+steps `Sprite::frame` through a frame list (loop, once, ping-pong) on world time, so slow motion
+and `LocalTimeScale` slow it. A `TileMap` holds a grid of atlas frames (0 empty, Tiled's flip bits)
+and draws with one instanced draw per run of visible 32 × 32 chunks (one for a map wholly in view)
+from a GPU buffer rebuilt only when the map changes; a `Parallax` component moves a sprite or map
+with part of the camera's motion and can repeat it along x. Filtering is `Linear`, `Nearest` or
+`PixelArt` (sharp bilinear: texel centers, blending only across the one pixel a texel edge
+crosses), always kept inside the frame's rectangle so atlas neighbours never bleed.
+`SpriteAlpha::Cutout` sprites draw with the meshes (depth prepass, depth writes, sun shadows with
+the cut-out); `Blend` and `Additive` ones draw after them, sorted by layer and then back to front.
+Unlit sprites show their colors as authored (like unlit meshes); `lit` ones are shaded as thin
+sheets by the sun, sky light and point lights with shadows, optionally through a normal map,
+`roundness` (a bent normal, like a rounded volume) and `translucency`. A `PixelPerfect` component
+(art texels per meter, scale, snap) on an orthographic camera renders at full resolution with a
+whole number of screen pixels per art texel, moves the view and every sprite and tile corner to
+whole texels (or pixels), and turns temporal anti-aliasing off while it renders (jitter would blur
+the texel edges and there is nothing between them to smooth); full resolution keeps lighting,
+shadows and UI sharp without an extra target or upscale. Images come from the shared image cache.
+Nothing is built for scenes without sprites or tile maps.
+
 **Volumetric fog** (built): with `RenderSettings::volumetric_fog` (the default), fog within
 `volumetric_fog_range` (default 256 m) of the camera lives in a froxel grid fitted to the view,
 after Wronski 2014 and Hillaire 2015 (`volumetric_fog_quality`: `High` 8 px tiles and 128
 exponential depth slices, `Medium` 64 slices, `Low` 16 px and 64). A compute pass right after
 the depth prepass evaluates the medium in every froxel and lights it with the sun through the
-shadow cascades and the air (`sun_transmittance`, phase function `henyey_greenstein`), the sky
+shadow cascades, the cloud shadows and the air (`sun_transmittance`, phase function
+`henyey_greenstein`), the sky
 (kept out by the sky occlusion map and `SkyLightVolume`s) and the point lights (same falloff as
 surfaces, no shadows); air just below the ground seen at a froxel's pixel is lit from just above
 it, so the ground's own shadow doesn't darken the fog lying on it. It blends that with
@@ -272,9 +338,10 @@ stay dark. Other modules feed it two inputs and need nothing else:
 
 `apply_fog(color, rel)` reads the volume up to the range and continues the height fog
 analytically beyond it, so nothing is counted twice, then adds aerial perspective. Beyond the
-range the far shadow map shades the haze's sunlight (`height_fog_sun_visibility`: eight taps
-spread over what the haze scatters), so haze in a mountain's shadow doesn't glow and a mountain
-with the sun behind it keeps its contrast. With
+range the far shadow map and the cloud shadows shade the haze's sunlight and its glow around the
+sun (`height_fog_sun_visibility`: eight taps spread over what the haze scatters), so haze in a
+mountain's or a cloud's shadow doesn't glow and a mountain with the sun behind it keeps its
+contrast. With
 volumetric fog off, the analytic fog starts at the camera. `apply_sky_fog(color, dir)` fogs the
 sky up to the range. The frame uniform's `volumetrics` field holds the range (0 = off) and the
 slice mapping. Passes that write the volume see a clear stand-in at binding 19.
@@ -284,10 +351,10 @@ Shared pipelines the core will provide for modules (planned): **strands** for ha
 (a per-vertex tension value blends wrinkle/vein normal maps; written by `engine_anim` for skin,
 muscles and skinned clothes and by `engine_softbody` for simulated cloth).
 
-Shader library: `lib_types.wgsl` (types, noise, BRDF, `henyey_greenstein`), `lib_frame.wgsl` (group 0 frame
-data, `shade_surface`, `shade_surface_shadowed`, `shade_thin_surface`, `shadow_factor` (cascades, then `far_shadow_visibility`), `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog` (`color * transmittance + inscatter` of `surface_fog`, which returns a `SurfaceFog` for callers that need the two apart, such as blended particles),
+Shader library: `lib_types.wgsl` (types, noise, BRDF, `henyey_greenstein`, `default_surface`, `surface_smooth_normal`), `lib_frame.wgsl` (group 0 frame
+data, `shade_surface`, `shade_surface_shadowed`, `shade_thin_surface`, `shadow_factor` (cascades, then `far_shadow_visibility`), `cloud_shadow` (and `cloud_shadow_plane_point` for writers), `contact_shadow`, `screen_ao`, `sky_visibility`, `apply_fog` (`color * transmittance + inscatter` of `surface_fog`, which returns a `SurfaceFog` for callers that need the two apart, such as blended particles),
 `apply_sky_fog`, `volumetric_fog_at`, `height_fog_density`, `fog_sky_light`,
-`sample_env`, `sample_env_rough`, `sky_ambient`, `sky_ambient_covered`, `surface_weather`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
+`sample_env`, `sample_env_rough`, `sky_ambient`, `sky_ambient_covered`, `specular_sky_visibility`, `specular_horizon_fade`, `surface_weather`, `wind_offset`, `prepass_output`) and `lib_atmosphere.wgsl` (`atmosphere` for aerial perspective,
 `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
 
 **Shapes** (built): `Shape` builds procedural meshes. Round shapes given `segments: 0` get
@@ -317,6 +384,26 @@ threshold, mixed in by `RenderSettings::bloom_intensity` (0.04). What a pixel br
 limited to `bloom_limit` times white at the current exposure (64; it rolls off smoothly from half
 of that), so a neon sign at night or the sun's disc glows instead of swamping the frame.
 
+**Depth of field** (built; `depth_of_field.rs`): a `DepthOfField` component on the camera (off
+without it) is a thin lens: the focal length follows from the vertical field of view and
+`sensor_height_mm` (`DepthOfField::fov_y_deg_for_lens(50.0, 24.0)` is a 50 mm full-frame lens),
+the aperture from `f_stop`, so f/1.4 blurs like the real lens and f/16 hardly at all. Focus is
+`focus_distance_m` or `autofocus` on the screen center (a center-weighted median of depths that
+ignores sky through gaps, eased at `autofocus_speed` and snapped after a camera cut; read back as
+`render.dof_focus_m`). A half-res gather after Jimenez 2014 with separate near and far fields:
+a blurred foreground spreads softly over whatever is behind it, a sharp object in front of a blurred
+background keeps a crisp edge, small lights open into round, even discs, up to `max_radius_px`.
+It runs on the scene before TAA (so TAA anti-aliases its silhouettes; next frame's reflections
+then see the defocused image) and before bloom and tonemapping.
+
+**Motion blur** (built; `motion_blur.rs`): a `MotionBlur` component on the camera (off without
+it). Velocity per pixel from the prepass motion vectors (moving objects included) or, where the
+prepass drew nothing, the camera's motion and the depth; McGuire 2012 reconstruction with tile and
+neighbor-max velocities and a depth-aware gather. The streak is the on-screen speed (per real
+second) times the exposure `shutter_fraction / reference_fps` (0.5 at 30: a 180° shutter, 1/60 s),
+so it doesn't change with the frame rate and shrinks in slow motion. No blur on the frame after a
+camera cut; with nothing moving the image is unchanged. Runs after TAA, before bloom and tonemap.
+
 **Thin sheets** (built): double-sided and alpha-masked materials (leaves, grass and fern cards,
 paper, cloth, fences) are shaded as sheets with no inside (`shade_thin_surface(s, rel,
 sun_visibility, face)`, `face` being the side of the geometry facing the camera): only that side
@@ -339,8 +426,17 @@ draws; the clusters then go through the depth prepass, the scene pass (the same
 atomics and indirect draws: every backend. Smaller meshes, alpha-masked or wind-animated
 materials and entities with the `NoVirtualGeometry` marker stay instanced; a changed mesh is drawn
 instanced until its own clusters are rebuilt. `DebugView::Clusters` and `ClusterLevels` show
-them; `render.stats` reports `clusters` (and their triangles). Next: occlusion culling (two-pass
-HZB), streaming, a compute rasterizer for tiny triangles, cached shadow pages.
+them; `render.stats` reports `clusters` (and their triangles). A `Displacement` component bakes
+height into the clusters (crack-free adaptive tessellation of the entity's mesh, normals from the
+displaced surface): a material's height map, a function, or a `rock::StoneFinish`;
+`rock::WallStone` (kind, size, seed: split-face, rough-hewn or slab with tool marks, fractures,
+lichen and grime) gives the base mesh plus its displacement, or a finished mesh via
+`wall_stone`. Builds are cached on disk (`virtual_geometry_cache`, the user cache dir or
+`ENGINE_VG_CACHE`, LRU-trimmed to `virtual_geometry_cache_mb`). Two-pass HZB occlusion
+(`virtual_geometry_occlusion`): camera clusters hidden behind last frame's depth pyramid are
+retested after the early prepass against this frame's and drawn in a late prepass if visible.
+Next: streaming, a compute rasterizer for tiny triangles, occlusion for shadow views, cached
+shadow pages.
 
 **Material presets** (built): `StandardMaterial::preset(MaterialPreset::Brick)` (and cobblestone,
 rock, concrete, plaster, wood planks, bark, rusty steel, painted metal, sand, forest soil,
@@ -362,6 +458,26 @@ blending, for rocks, spheres and terrain without UVs. The prepass evaluates the 
 (parallax, triplanar, normal maps), so ambient occlusion, reflections and TAA see the detailed
 normals.
 
+**Shared images and image memory** (built; `image_cache.rs`): the renderer keeps one GPU copy
+of each `Image` asset that is drawn, shared by every feature. `GpuShared::image_texture(&images,
+handle, color)` returns it (`Arc<ImageTexture>`: `view`, `srgb`, size, mip levels, and an `id`
+that changes only when new pixels are uploaded, so bind groups are rebuilt only then), uploading
+it with its mip chain on first use and again when the asset gets new pixels; images nobody asks
+for in 600 frames leave the GPU. The mesh feature (and with it the cluster path) binds its
+material textures this way; features that upload `Image::data` themselves (the skinning feature,
+today) should switch to it. With `RenderSettings::release_image_pixels` (off by default) the
+renderer frees an uploaded image's CPU pixels (`data` and `mips`; size, format and flags stay,
+and `Image::is_released()` turns true) once its asset version has stayed the same for
+`RELEASE_AFTER_FRAMES` (120) frames, counted in frames so that a texture written every frame or
+every few frames never qualifies at any frame rate. Releasing bumps the asset version; the cache
+recognizes the emptied image and keeps its texture (no upload, same `id`), keeps a released image
+on the GPU however long it goes unused, and uploads again when new `data` is assigned.
+`Image::keep_pixels` opts an image out: set it on images that code reads on the CPU, writes in
+place less often than every two seconds, or uploads itself (an image that both the mesh feature
+and a skin use, until the skinning feature uses `image_texture`). `Diagnostics` reports
+`render.images_released` and `render.image_bytes_released` (since startup),
+`render.image_uploads` and `render.gpu_images`; `render.stats` includes them.
+
 **Sky light** (built): every time the sky environment map is redrawn
 (`RenderSettings::environment_interval`), the GPU filters it twice: prefiltered for GGX
 reflections, one mip per roughness step (`sample_env_rough(dir, roughness)`), and convolved into
@@ -371,11 +487,15 @@ blue in shadows by day, warm from the sunset side. Without a planet, the ground 
 is a plane lit by the sun and sky.
 
 **Atmosphere** (built): Rayleigh, Mie and ozone scattering on a spherical planet with multiple
-scattering, after Hillaire 2020. Look-up tables (sunlight transmittance and multiple scattering,
-recomputed when the planet or its air changes; the sky seen from the camera, every frame) make the
-sky cheap and physically consistent from the ground, from orbit and from the Moon. Clouds,
-fog and anything else lit by the sun should use `sun_transmittance(rel)` for the sunlight
-reaching a point. The sky draws its own flat cloud layer (a 2D deck 1.5 km up whose cover follows
+scattering, after Hillaire 2020. Each planet's air is data on `Atmosphere`: Rayleigh and Mie
+scattering, Mie and ozone absorption (per meter at the surface, RGB), scale heights, a Mie
+anisotropy per color channel and a density scale, which a planet module fills in per body;
+`Atmosphere::earth()` (the default) and `Atmosphere::mars()` (thin CO₂ under dust: a butterscotch
+sky by day, a blue glow around the setting sun) are presets. Look-up tables (sunlight
+transmittance and multiple scattering, recomputed when the planet or its air changes; the sky
+seen from the camera, every frame) make the sky cheap and physically consistent from the
+ground, from orbit and from the Moon. Clouds, fog and anything else lit by the sun should use
+`sun_transmittance(rel)` for the sunlight reaching a point. The sky draws its own flat cloud layer (a 2D deck 1.5 km up whose cover follows
 `WeatherState::cloud_cover`) in the sky and in the environment map; a feature that draws its own
 clouds turns it off with `RenderSettings::sky_cloud_layer = false` and blends over a clear sky.
 The sun is the brightest `DirectionalLight`, so a moon becomes the sky's light once it outshines

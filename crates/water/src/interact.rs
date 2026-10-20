@@ -4,7 +4,7 @@
 //! `WorldImpulse`, `WeatherState`), so water reacts to any module's characters, weapons and
 //! weather without knowing them.
 
-use engine_core::math::{DVec2, DVec3, Rng, Vec3};
+use engine_core::math::{DVec2, DVec3, Rng, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_world::{
     GroundContact, NoiseEvent, ProjectileTrace, WaterSplash, WeatherState, WorldImpulse,
@@ -18,6 +18,11 @@ use crate::state::{SharedWater, WaterState};
 /// motion: spawned in place, teleported, or shifted with the world before its transform caught
 /// up. It throws no spray and digs no wake for that step.
 const TELEPORT_SPEED: f32 = 150.0;
+/// Strouhal number of a body in the water: it sheds a pair of eddies every 1/0.2 = 5 body
+/// widths it travels (a Kármán vortex street).
+const STROUHAL: f32 = 0.2;
+/// How hard a shed eddy turns: its fastest water goes about 0.4 times the body's speed.
+const EDDY: f32 = 1.3;
 
 /// Something that pushes the water as it moves through it: a swimmer, a wading animal, a
 /// boat's hull, a dragging rope. Leaves wakes and rings, and splashes on entry.
@@ -41,6 +46,10 @@ pub struct WaterInteractor {
     /// Seconds the trough it dug under itself lasts after its last push (managed).
     #[serde(skip)]
     pub trough_s: f32,
+    /// Eddies shed so far, counting up as it moves (managed): each whole number sheds one,
+    /// off alternate sides.
+    #[serde(skip)]
+    pub shed: f32,
 }
 
 impl Default for WaterInteractor {
@@ -52,6 +61,7 @@ impl Default for WaterInteractor {
             wet: false,
             spray: 0.0,
             trough_s: 0.0,
+            shed: 0.0,
         }
     }
 }
@@ -77,6 +87,8 @@ pub fn splash(pos: DVec3, radius: f32, speed: f32) -> Disturbance {
         radius: radius.max(0.15),
         depth: (0.02 + 0.012 * speed).min(0.35) * radius.clamp(0.2, 2.0),
         foam: (0.25 + speed * 0.08).min(1.0),
+        stir: None,
+        spin: 0.0,
     }
 }
 
@@ -199,12 +211,58 @@ pub fn disturbance_system(
                         hulls.push((DVec2::new(p.x, p.z), r));
                     }
                     it.trough_s = 1.0;
+                    // The body drags the water it moves through along with it: the wash
+                    // behind it runs on and curls into eddies at its edges.
+                    let flat = Vec2::new(v.x, v.z);
                     out.push(Disturbance {
                         pos: DVec2::new(p.x, p.z),
                         radius: r * 0.9,
                         depth: push + bob,
-                        foam: (speed * 0.05 * it.wake).min(0.4) * dt * 30.0,
+                        foam: (speed * 0.07 * it.wake).min(0.5) * dt * 30.0,
+                        stir: (speed > 0.1).then_some(flat * 0.6),
+                        spin: 0.0,
                     });
+                    // Eddies peel off alternate sides behind it, turning the way the water
+                    // dragged past that side turns: its wake winds into a vortex street.
+                    if speed > 0.3 {
+                        let before = it.shed;
+                        it.shed += speed * step * 2.0 * STROUHAL / (2.0 * r);
+                        if it.shed.floor() > before.floor() {
+                            let dir = flat / speed;
+                            let left = Vec2::new(-dir.y, dir.x);
+                            let side = if it.shed.floor() as i64 % 2 == 0 {
+                                1.0
+                            } else {
+                                -1.0
+                            };
+                            let at = DVec2::new(p.x, p.z)
+                                - (dir * r * 1.2 - left * side * r * 0.7).as_dvec2();
+                            out.push(Disturbance {
+                                pos: at,
+                                radius: r * 0.9,
+                                spin: side * (EDDY * speed / r).min(12.0),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                    // A churning propeller also throws a jet of foamy water back past the
+                    // hull: the shear between the two rolls up into a trail of swirls.
+                    if it.wake > 1.0 && speed > 0.5 {
+                        let dir = flat / speed;
+                        let churn = (it.wake - 1.0).min(2.0);
+                        // Turbulent: the jet wavers from side to side, shedding eddies.
+                        let side = Vec2::new(-dir.y, dir.x) * (rng.f32() - 0.5) * r * 0.8;
+                        let wobble = Vec2::from_angle((rng.f32() - 0.5) * 1.2);
+                        let behind = DVec2::new(p.x, p.z) - (dir * r * 1.6 - side).as_dvec2();
+                        out.push(Disturbance {
+                            pos: behind,
+                            radius: r * 0.6,
+                            depth: 0.0,
+                            foam: (0.2 * churn * speed.min(6.0)).min(1.0) * dt * 30.0,
+                            stir: Some(wobble.rotate(flat) * (0.6 - 0.45 * churn)),
+                            spin: 0.0,
+                        });
+                    }
                 }
             }
             it.wet = touching;
@@ -222,6 +280,8 @@ pub fn disturbance_system(
                     radius: size.max(0.15) * 1.2,
                     depth,
                     foam: (0.15 + c.speed * 0.05).min(0.8),
+                    stir: None,
+                    spin: 0.0,
                 });
             }
         }
@@ -264,6 +324,8 @@ pub fn disturbance_system(
                 radius: 0.18,
                 depth: (0.03 + t.speed * 1e-4).min(0.12),
                 foam: 0.9,
+                stir: None,
+                spin: 0.0,
             });
             if settings.noise_events {
                 noises.push(NoiseEvent {
@@ -297,6 +359,8 @@ pub fn disturbance_system(
                 // Underwater blasts lift a dome; surface blasts punch a crater.
                 depth: gap.signum() * (i.strength * 0.02 * k).min(1.5),
                 foam: 1.0,
+                stir: None,
+                spin: 0.0,
             });
             if settings.noise_events {
                 noises.push(NoiseEvent {
@@ -333,6 +397,8 @@ pub fn disturbance_system(
                         radius: 0.14,
                         depth: 0.004 + rng.f32() * 0.01,
                         foam: 0.0,
+                        stir: None,
+                        spin: 0.0,
                     });
                 }
             };

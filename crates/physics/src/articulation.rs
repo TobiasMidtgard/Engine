@@ -23,7 +23,7 @@ use engine_core::math::{Mat3, Vec3};
 use engine_world::physics::{Joint, JointKind};
 use rapier3d::na::{DMatrix, DVector};
 use rapier3d::prelude::{
-    Multibody, MultibodyLinkId, PhysicsWorld, Pose, RigidBodyHandle, RigidBodySet,
+    Multibody, MultibodyLinkId, PhysicsWorld, Pose, RigidBody, RigidBodyHandle, RigidBodySet,
 };
 
 use crate::convert::{self, JointFrames};
@@ -42,6 +42,18 @@ pub(crate) fn close_masses(masses: impl IntoIterator<Item = f32>) -> bool {
         .fold((f32::MAX, 0.0f32), |(lo, hi), m| (lo.min(m), hi.max(m)));
     lightest > 0.0 && heaviest <= lightest * MAX_MASS_RATIO
 }
+
+/// Dry friction in the joints of a free-floating group (a ragdoll, a loose chain), as a
+/// fraction of the load its limb's weight puts on it (see [`friction_of`]).
+const JOINT_FRICTION: f32 = 0.1;
+
+/// Shortest lever [`friction_of`] weighs a link's friction torque with, meters (a link centered on
+/// its joint still has some size).
+const MIN_LEVER: f32 = 0.05;
+
+/// Standard gravity, m/s²: joint friction scales with the weight a link would have on Earth,
+/// so it stays the same in free fall and in space.
+const G: f32 = 9.81;
 
 /// A written link this far from its joint was moved, not posed, meters.
 const TORN: f32 = 0.01;
@@ -211,7 +223,8 @@ fn sync(mb: &mut Multibody, bodies: &mut RigidBodySet, last: &Links) {
         .speeds
         .get(&root)
         .is_none_or(|q| q.len() != mb.ndofs() || *q != mb.generalized_velocity());
-    if root_body.is_sleeping() {
+    let asleep = root_body.is_sleeping();
+    if asleep {
         // Asleep: the bodies are still, so are the coordinates (Rapier only zeroes the bodies).
         mb.generalized_velocity_mut().fill(0.0);
     }
@@ -230,6 +243,19 @@ fn sync(mb: &mut Multibody, bodies: &mut RigidBodySet, last: &Links) {
         written.push(state.is_none_or(|s| !same_pose(&s.pose, &pose)));
         known.push(state);
         poses.push(pose);
+    }
+    // Asleep and untouched since the last step (no pose or velocity written): nothing to fold
+    // in, and its damping and friction can wait until it wakes. A heap of sleeping ragdolls
+    // then costs next to nothing here.
+    if asleep
+        && !written.contains(&true)
+        && mb.links().zip(&known).all(|(link, s)| {
+            let rb = bodies.get(link.rigid_body_handle());
+            s.zip(rb)
+                .is_some_and(|(s, rb)| rb.linvel() == s.linvel && rb.angvel() == s.angvel)
+        })
+    {
+        return;
     }
 
     // Poses written since the last step. A written root, or a written link torn from its
@@ -299,6 +325,7 @@ fn sync(mb: &mut Multibody, bodies: &mut RigidBodySet, last: &Links) {
         apply_velocity_changes(mb, bodies, &changes);
     }
     damp(mb, bodies);
+    joint_friction(mb, bodies);
 }
 
 /// Give the coordinates the damping the link bodies ask for (Rapier ignores a link body's
@@ -327,6 +354,57 @@ fn damp(mb: &mut Multibody, bodies: &RigidBodySet) {
         }
     }
     mb.damping_mut().copy_from(&out);
+}
+
+/// Give every joint of the articulation a little dry friction, like a real joint's (see
+/// [`friction_of`]). A bent arm then comes to rest instead of rocking about its free twist for
+/// minutes, while a falling limb barely notices. The root's free coordinates, and coordinates a
+/// motor drives, get none.
+fn joint_friction(mb: &mut Multibody, bodies: &RigidBodySet) {
+    let mut out = DVector::<f32>::zeros(mb.ndofs());
+    for id in 1..mb.num_links() {
+        let Some(link) = mb.link(id) else {
+            continue;
+        };
+        let parent = link.parent_id().and_then(|p| mb.link(p));
+        let (Some(rb2), Some(rb1)) = (
+            bodies.get(link.rigid_body_handle()),
+            parent.and_then(|p| bodies.get(p.rigid_body_handle())),
+        ) else {
+            continue;
+        };
+        let joint = &link.joint.data;
+        let (torque, force) = friction_of(
+            (rb1, joint.local_frame1.translation),
+            (rb2, joint.local_frame2.translation),
+        );
+        let mut k = link.assembly_id();
+        for axis in 0..6 {
+            if joint.locked_axes.bits() & (1 << axis) == 0 {
+                if joint.motor_axes.bits() & (1 << axis) == 0 {
+                    out[k] = if axis < 3 { force } else { torque };
+                }
+                k += 1;
+            }
+        }
+    }
+    mb.frictions_mut().copy_from(&out);
+}
+
+/// The dry friction of a joint between two bodies (each with the joint's anchor in it), as
+/// torque and force: [`JOINT_FRICTION`] of the load the lighter body (the limb) puts on it by
+/// its weight, at the distance of its center from the joint.
+pub(crate) fn friction_of(a: (&RigidBody, Vec3), b: (&RigidBody, Vec3)) -> (f32, f32) {
+    let ((limb, anchor), _) = if a.0.mass() < b.0.mass() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let weight = limb.mass() * G;
+    let lever = (limb.mass_properties().local_mprops.local_com - anchor)
+        .length()
+        .max(MIN_LEVER);
+    (JOINT_FRICTION * weight * lever, JOINT_FRICTION * weight)
 }
 
 fn same_pose(a: &Pose, b: &Pose) -> bool {

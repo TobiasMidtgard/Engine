@@ -1,5 +1,6 @@
 //! The water test area: a tarn on a hilltop, spilling through a notch in its rim, down a
-//! waterfall and a stream into a pond at the foot of the hill.
+//! waterfall and a stream into a pond at the foot of the hill, with a crag across it whose
+//! spring cascades down a crevice into the tarn.
 //!
 //! Everything in it tests one thing water does, and keeps doing it so a screenshot at any
 //! moment shows it:
@@ -13,10 +14,12 @@
 //! | Interaction | A motorboat circling with a wake, a swimmer, a wader leaving rings in the shallows |
 //! | Impacts | Gunfire into the lake every 4 s, a depth charge every 11 s (dome, rings, foam, boats thrown) |
 //! | Weather | Rain over part of the lake and the pond: rings on the water, puddles on the grass |
+//! | Cascade | A spring high on the crag across the tarn falling down its crevice in tiers into a cove: free falls, rapids, a curtain sliding down a face |
 //!
 //! [`spawn_demo`] builds it around a point on the ground and [`demo_system`] (added by
 //! [`crate::WaterPlugin`]) drives it.
 
+pub mod crag;
 pub mod materials;
 pub mod props;
 pub mod scenery;
@@ -176,7 +179,7 @@ pub fn tarn_height(x: f32, z: f32) -> f32 {
         let end = smooth(DITCH_TO - 0.2, DITCH_TO + 0.3, along) * (1.0 - smooth(1.5, 4.0, across));
         h = h.max((bed + 0.45) * end);
     }
-    h + fine * 0.08
+    crag::shape(x, z, h + fine * 0.08)
 }
 
 /// `a.min(b)`, rounded over a band `k` wide where the two are close.
@@ -204,6 +207,10 @@ fn ground_color(x: f32, z: f32, h: f32, normal: Vec3) -> Vec3 {
     let n = noise::fbm2(x as f64 * 0.21, z as f64 * 0.21, 0xC0105, 3, 2.0, 0.5);
     let grass = srgb(0x55743a).lerp(srgb(0x6f7d3d), smooth(-0.2, 0.6, n));
     let rock = srgb(0x7d776f).lerp(srgb(0x5f5a53), smooth(-0.3, 0.5, -n));
+    // The crag is a cooler, darker stone, banded by its beds.
+    let bands = (h * 3.7 + n * 2.0).sin() * 0.5 + 0.5;
+    let stone = srgb(0x6a6b6c).lerp(srgb(0x4c4d50), smooth(0.2, 0.8, bands) * 0.7 + 0.3 * n);
+    let rock = rock.lerp(stone, crag::presence(x, z));
     let steep = 1.0 - normal.y;
     let mut c = grass.lerp(srgb(0x6b573b), smooth(0.15, 0.4, steep + n * 0.05) * 0.5);
     c = c.lerp(rock, smooth(0.3, 0.55, steep + n * 0.12));
@@ -231,6 +238,13 @@ fn ground_color(x: f32, z: f32, h: f32, normal: Vec3) -> Vec3 {
             wet,
         );
     }
+    // The crevice down the crag: dark wet rock, with a little moss where the spray reaches.
+    let wet = crag::wetness(x, z, h);
+    if wet > 0.0 {
+        let moss = srgb(0x3f4a2c).lerp(srgb(0x2f3326), smooth(-0.2, 0.4, n));
+        let damp = (c * 0.55).lerp(moss, smooth(0.2, 0.6, n) * 0.6);
+        c = c.lerp(damp, wet);
+    }
     let to_pond = Vec2::new(x, z) - OUTLET * POND_AT;
     let rp = pond_radius(to_pond.y.atan2(to_pond.x));
     let near_pond = 1.0 - smooth(rp, rp + 1.5, to_pond.length());
@@ -246,48 +260,120 @@ fn ground_color(x: f32, z: f32, h: f32, normal: Vec3) -> Vec3 {
 }
 
 /// The hill with the tarn, falls, stream and pond: a vertex-colored height mesh. Triangles
-/// that would lie on the ground plane are left out.
+/// that would lie on the ground plane are left out, and so is the crag's crevice
+/// ([`crag::PATCH`], which [`crag_mesh`] fills in finer).
 pub fn tarn_mesh(spacing: f32) -> Mesh {
-    let (lo, hi) = (-66.0f32, 66.0f32);
-    let n = ((hi - lo) / spacing).ceil() as u32 + 1;
-    let mut heights = Vec::with_capacity((n * n) as usize);
-    for j in 0..n {
-        for i in 0..n {
-            heights.push(tarn_height(
-                lo + i as f32 * spacing,
-                lo + j as f32 * spacing,
-            ));
+    height_mesh(
+        Vec2::splat(-66.0),
+        Vec2::splat(66.0),
+        spacing,
+        Some(crag::PATCH),
+        false,
+    )
+}
+
+/// The crag's crevice and the rock round it ([`crag::PATCH`]), at half the spacing of the
+/// hill's mesh around it (`hill_spacing`) so its ledges and drops come out sharp. Its border
+/// follows the hill's mesh exactly, so there are no cracks between them.
+pub fn crag_mesh(hill_spacing: f32) -> Mesh {
+    let (lo, hi) = crag::PATCH;
+    height_mesh(lo, hi, hill_spacing * 0.5, None, true)
+}
+
+/// A vertex-colored mesh of the area's ground over `lo`..`hi` (local x, z) every `spacing`
+/// meters, leaving out the quads inside `hole` and those on the ground plane. With
+/// `half_of_neighbor`, it sits in a hole in a mesh twice as coarse: the points along its
+/// border between that mesh's vertices are put on its edges.
+fn height_mesh(
+    lo: Vec2,
+    hi: Vec2,
+    spacing: f32,
+    hole: Option<(Vec2, Vec2)>,
+    half_of_neighbor: bool,
+) -> Mesh {
+    let nx = ((hi.x - lo.x) / spacing).round() as u32 + 1;
+    let nz = ((hi.y - lo.y) / spacing).round() as u32 + 1;
+    let pos = |i: u32, j: u32| lo + Vec2::new(i as f32, j as f32) * spacing;
+    let mut heights = Vec::with_capacity((nx * nz) as usize);
+    for j in 0..nz {
+        for i in 0..nx {
+            let p = pos(i, j);
+            heights.push(tarn_height(p.x, p.y));
         }
     }
-    let at = |i: u32, j: u32| heights[(j.min(n - 1) * n + i.min(n - 1)) as usize];
+    if half_of_neighbor {
+        for j in 0..nz {
+            for i in 0..nx {
+                let (edge_x, edge_z) = (i == 0 || i == nx - 1, j == 0 || j == nz - 1);
+                let k = (j * nx + i) as usize;
+                if edge_z && i % 2 == 1 {
+                    heights[k] = 0.5 * (heights[k - 1] + heights[k + 1]);
+                } else if edge_x && j % 2 == 1 {
+                    heights[k] = 0.5 * (heights[k - nx as usize] + heights[k + nx as usize]);
+                }
+            }
+        }
+    }
+    let slope = |i: u32, j: u32, w: i64| {
+        let (i, j) = (i as i64, j as i64);
+        // Past the mesh's edge, from the ground itself (a patch's normals match the mesh
+        // round it).
+        let e = |di: i64, dj: i64| {
+            let (ii, jj) = (i + di, j + dj);
+            if (0..nx as i64).contains(&ii) && (0..nz as i64).contains(&jj) {
+                heights[(jj * nx as i64 + ii) as usize]
+            } else {
+                let p = lo + Vec2::new(ii as f32, jj as f32) * spacing;
+                tarn_height(p.x, p.y)
+            }
+        };
+        Vec3::new(
+            e(-w, 0) - e(w, 0),
+            2.0 * w as f32 * spacing,
+            e(0, -w) - e(0, w),
+        )
+        .normalize()
+    };
     let mut vertices = Vec::with_capacity(heights.len());
-    for j in 0..n {
-        for i in 0..n {
-            let (x, z) = (lo + i as f32 * spacing, lo + j as f32 * spacing);
-            let h = at(i, j);
-            let dx = at(i + 1, j) - at(i.saturating_sub(1), j);
-            let dz = at(i, j + 1) - at(i, j.saturating_sub(1));
-            let normal = Vec3::new(-dx, 2.0 * spacing, -dz).normalize();
-            // Color by the slope over a wider area, so it doesn't flicker from vertex to vertex.
-            let wx = at(i + 3, j) - at(i.saturating_sub(3), j);
-            let wz = at(i, j + 3) - at(i, j.saturating_sub(3));
-            let broad = Vec3::new(-wx, 6.0 * spacing, -wz).normalize();
-            let color = ground_color(x, z, h, broad);
+    for j in 0..nz {
+        for i in 0..nx {
+            let p = pos(i, j);
+            let h = heights[(j * nx + i) as usize];
+            // Along its border a finer mesh takes its neighbor's normals (over its spacing), so
+            // the two shade the same where they meet, and blends to its own sharper normals
+            // over a few meters (a step there reads as a seam).
+            let normal = if half_of_neighbor {
+                let edge = i.min(j).min(nx - 1 - i).min(nz - 1 - j) as f32 * spacing;
+                let fine = smooth(0.5, 4.0, edge);
+                slope(i, j, 2).lerp(slope(i, j, 1), fine).normalize()
+            } else {
+                slope(i, j, 1)
+            };
+            // Color by the slope over a wider area (about 3 m), so it doesn't flicker from
+            // vertex to vertex.
+            let broad = slope(i, j, (1.5 / spacing).round().max(1.0) as i64);
+            let color = ground_color(p.x, p.y, h, broad);
             // Where the hill meets the plain it sinks smoothly under the ground plane.
             let y = h - 0.04 * (1.0 - smooth(0.0, 0.12, h));
-            vertices.push(
-                Vertex::new(Vec3::new(x, y, z), normal, Vec2::new(x, z))
-                    .with_color(color.extend(1.0)),
-            );
+            vertices
+                .push(Vertex::new(Vec3::new(p.x, y, p.y), normal, p).with_color(color.extend(1.0)));
         }
     }
+    let inside = |v: u32| {
+        let p = pos(v % nx, v / nx);
+        hole.is_some_and(|(a, b)| {
+            p.x >= a.x - 1e-3 && p.y >= a.y - 1e-3 && p.x <= b.x + 1e-3 && p.y <= b.y + 1e-3
+        })
+    };
     let mut indices = Vec::new();
-    for j in 0..n - 1 {
-        for i in 0..n - 1 {
-            let a = j * n + i;
-            let (b, c, d) = (a + 1, a + n, a + n + 1);
+    for j in 0..nz - 1 {
+        for i in 0..nx - 1 {
+            let a = j * nx + i;
+            let (b, c, d) = (a + 1, a + nx, a + nx + 1);
             let h = |v: u32| heights[v as usize];
-            if [a, b, c, d].iter().all(|v| h(*v) <= 0.015) {
+            if [a, b, c, d].iter().all(|v| h(*v) <= 0.015)
+                || [a, b, c, d].iter().all(|v| inside(*v))
+            {
                 continue;
             }
             // Split each quad along the diagonal that follows the ground (valleys and ridges
@@ -367,6 +453,9 @@ pub struct DemoView {
     pub hour: f32,
     /// Simulated seconds to wait on arriving before the shot.
     pub warmup_secs: f32,
+    /// Everything in the shot comes from CPU simulation (no particles), so a tour may run the
+    /// warm-up without drawing and draw only the frames that settle the picture.
+    pub quick_warmup: bool,
 }
 
 /// The test area's close-ups, one per thing it tests that the overview can't show.
@@ -378,6 +467,7 @@ pub const VIEWS: &[DemoView] = &[
         target: [-2.0, 5.0, 0.0],
         hour: 16.5,
         warmup_secs: 3.0,
+        quick_warmup: false,
     },
     DemoView {
         key: "water_falls",
@@ -386,6 +476,7 @@ pub const VIEWS: &[DemoView] = &[
         target: [27.0, 4.2, 27.4],
         hour: 16.5,
         warmup_secs: 3.0,
+        quick_warmup: false,
     },
     DemoView {
         key: "water_wake",
@@ -394,6 +485,7 @@ pub const VIEWS: &[DemoView] = &[
         target: [-5.0, 5.5, -3.0],
         hour: 16.5,
         warmup_secs: 3.0,
+        quick_warmup: false,
     },
     DemoView {
         key: "water_under",
@@ -402,6 +494,16 @@ pub const VIEWS: &[DemoView] = &[
         target: [5.0, 4.6, 17.5],
         hour: 16.5,
         warmup_secs: 3.0,
+        quick_warmup: true,
+    },
+    DemoView {
+        key: "water_cascade",
+        name: "A spring cascading down the crag's crevice into the tarn",
+        eye: [-8.2, 9.0, -15.3],
+        target: [-25.2, 13.0, -25.2],
+        hour: 10.0,
+        warmup_secs: 3.0,
+        quick_warmup: false,
     },
     DemoView {
         key: "water_pond",
@@ -410,6 +512,7 @@ pub const VIEWS: &[DemoView] = &[
         target: [46.7, 0.3, 46.7],
         hour: 16.5,
         warmup_secs: 3.0,
+        quick_warmup: false,
     },
 ];
 
@@ -549,6 +652,12 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
             Transform::from_translation(origin),
             vec![Part::new(tarn_mesh(0.5), Surface::Ground)],
         );
+        spawn_prop(
+            commands,
+            "Crag crevice",
+            Transform::from_translation(origin),
+            vec![Part::new(crag_mesh(0.5), Surface::Ground)],
+        );
     }
 
     // The tarn.
@@ -596,6 +705,10 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
             ..Default::default()
         },
     ));
+
+    // The crag's spring, cascading down its crevice into the cove.
+    let (place, region) = crag::cascade(origin, tarn_height);
+    commands.spawn((Name::new("Crag cascade"), place, region));
 
     // The culvert the pond's spill ditch drains into: its mouth faces back up the ditch and
     // the pipe runs on into the bank.
@@ -905,7 +1018,7 @@ pub fn demo_system(
                 let rel = (tf.translation - center).as_vec3() * Vec3::new(1.0, 0.0, 1.0);
                 let r = rel.length().max(0.1);
                 let tangent = Vec3::new(rel.z, 0.0, -rel.x) / r;
-                let pull = ((r - radius) * 0.12).clamp(-0.7, 0.7);
+                let pull = ((r - radius) * 0.25).clamp(-0.8, 0.8);
                 let desired = (tangent - rel / r * pull).normalize();
                 let fwd = tf.rotation * Vec3::X;
                 let mass = b.density * b.volume();
@@ -920,7 +1033,9 @@ pub fn demo_system(
                     let v = fl.velocity;
                     let side = Vec3::new(v.x, 0.0, v.z) - flat * flat.dot(Vec3::new(v.x, 0.0, v.z));
                     fl.force -= side * mass * 1.8;
-                    fl.torque.y += inertia * (2.5 * err - 2.2 * fl.angular_velocity.y);
+                    // Firm steering: the hull's turning drag needs a good rudder to hold a
+                    // 12 m lap at speed (softer, it ran wide onto the beach).
+                    fl.torque.y += inertia * (10.0 * err - 3.0 * fl.angular_velocity.y);
                 }
             }
             DemoRole::Swimmer {
@@ -1079,7 +1194,10 @@ mod tests {
         let rs = shore_radius(-1.0);
         let shore = Vec2::new((-1.0f32).cos(), (-1.0f32).sin()) * (rs + 0.8);
         assert_eq!(area_surface(shore.x, shore.y), AreaSurface::Sand);
-        assert_eq!(area_surface(-40.0, -40.0), AreaSurface::Grass);
+        assert_eq!(area_surface(40.0, -40.0), AreaSurface::Grass);
+        // The crag's face across the tarn is bare rock.
+        let face = crag::point(0.6, 6.0);
+        assert_eq!(area_surface(face.x, face.y), AreaSurface::Rock);
     }
 
     #[test]

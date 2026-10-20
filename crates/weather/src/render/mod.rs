@@ -45,6 +45,14 @@ pub struct CloudSettings {
     /// Moon disc size relative to the real one (the moon looks bigger to the eye than in a
     /// photo of the same view).
     pub moon_scale: f32,
+    /// Clouds cast shadows on the ground and into the fog (the renderer's cloud shadow map).
+    pub cloud_shadows: bool,
+    /// Texels per side of the cloud shadow map.
+    pub cloud_shadow_size: u32,
+    /// Side of the square the cloud shadow map covers around the camera, m.
+    pub cloud_shadow_extent_m: f32,
+    /// Samples toward the sun through the cloud layer per shadow texel.
+    pub cloud_shadow_steps: u32,
 }
 
 impl Default for CloudSettings {
@@ -63,6 +71,10 @@ impl Default for CloudSettings {
             rain_shafts: true,
             star_brightness: 4.0,
             moon_scale: 2.0,
+            cloud_shadows: true,
+            cloud_shadow_size: 512,
+            cloud_shadow_extent_m: 48_000.0,
+            cloud_shadow_steps: 16,
         }
     }
 }
@@ -142,7 +154,31 @@ pub(crate) fn register(app: &mut App) {
         )
         .add_render_feature(CloudFeature::default())
         .add_render_feature(GroundFeature::default())
-        .add_render_feature(PrecipitationFeature::default());
+        .add_render_feature(PrecipitationFeature::default())
+        .add_systems(Update, sky_cloud_layer_system);
+}
+
+/// While the volumetric clouds are on, the renderer's own flat cloud layer is off: where the
+/// clouds blend over the sky (`replace_sky` off) it showed as a second deck under them, and
+/// elsewhere it was drawn only to be painted over. It comes back when the clouds are switched
+/// off, unless something else had turned it off.
+fn sky_cloud_layer_system(
+    clouds: Res<CloudSettings>,
+    settings: Option<ResMut<engine_render::RenderSettings>>,
+    mut turned_off: Local<bool>,
+) {
+    let Some(mut settings) = settings else {
+        return;
+    };
+    if clouds.enabled {
+        if settings.sky_cloud_layer {
+            settings.sky_cloud_layer = false;
+            *turned_off = true;
+        }
+    } else if *turned_off {
+        settings.sky_cloud_layer = true;
+        *turned_off = false;
+    }
 }
 
 /// Standard alpha blending for premultiplied color where alpha is how much of the background

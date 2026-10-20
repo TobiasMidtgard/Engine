@@ -1,7 +1,10 @@
 # engine_ui — UI
 
-**Owner:** UI system and maps. **Status:** round 2: every screen below works and has a test
-and a gallery screenshot; the showcase's market street is rebuilt as detailed procedural art.
+**Owner:** UI system and maps. **Status:** round 7: every screen below works and has a test
+and a gallery screenshot; the showcase's market street is detailed procedural art; quests and
+the journal drive the HUD tracker and the map waypoint; a quick-select wheel slows the world
+while you choose a weapon; a skill tree spends points on ranks of passive, active and ultimate
+skills.
 Background research: `game-engine-research/ui.md` in the project files.
 
 ## What it is
@@ -25,7 +28,10 @@ to 0 and restores it when it closes.
 | `shop` | Buy and sell tabs, rarity-coloured item cards, quantity picker, price and gold | `vendor`, `owner`, `mode`, `select` |
 | `inventory` | Bag grid with drag and drop, equipment slots, weight, item details, use, drop, sort | `owner`, `tab`, `select` |
 | `hud` | Vitals with portrait, compass with waypoint bearing, minimap, quest tracker, hotbar with cooldowns, weapon, interaction prompt, slow-motion gauge, world markers | |
-| `map` | One map that zooms surface → planet globe → star system → galaxy, with POIs, layers, waypoint and info cards | `zoom` (0-4), `system`, `planet`, `select` |
+| `map` | One map that zooms surface → planet globe → star system → galaxy, with POIs, layers, waypoint and info cards | `zoom` (0-4), `system`, `planet`, `select`, `focus` |
+| `journal` | Quests by kind (main story, side quests, contracts), active and finished tabs, objectives with counts, rewards, who gave each, a live map of where it leads; track a quest or show its place on the map | `select` (quest id), `tab` |
+| `wheel` | Quick-select wheel: weapons, items and abilities around a ring, picked by pointing (mouse, locked-cursor motion or either stick), a click, A, Enter or a number key; slows the world while open; hold-and-release mode; picks write the HUD's `weapon.*` | `items` (default `wheel.items`), `current`, `slow`, `hold`, `hold_pad` |
+| `skills` | Skill tree (`SkillTree`): branches of passive, active and ultimate skills linked by prerequisites, with ranks, point costs and level gates; a details panel with every rank and what each needs; learn with the button, Space or X, reset (after a confirm) with R or Y; learning writes `skills.<id>` and `player.skill_points` and sends `skill.learned:<id>`; `skills.tree`, `skills.learn`, `skills.grant` and `skills.reset` drive it | `select` (skill id) |
 | `pause` | Pause menu with a character card; pauses game time | |
 | `settings` | Gameplay, Video (`RenderSettings`), Audio, Controls (rebinding), Interface (scale, accent colour) | `tab` |
 | `confirm` | Yes/no dialog that sends `confirm:<action>` | `title`, `text`, `confirm`, `cancel`, `action`, `danger` |
@@ -41,9 +47,21 @@ Toasts (`ui.notify`) and tooltips sit on their own layers.
 - `shop.*`: buy, sell, stock. `inventory.*`: give, list, use, move, sort, items.
 - `map.*`: data, systems, add_system, add_poi, set_player, waypoint, view, state.
 - `hud.*`: marker, markers, remove_marker.
+- `quest.*`: log, add, progress, track, accept, complete.
 
 Every call has a summary and an example in the registry (`ui.screens` also lists screen kinds
 with example arguments), so an AI agent can drive the whole UI as a player would.
+
+## Quests
+
+`quests::QuestLog` holds every quest (plain JSON: kind, state, level, giver, region, summary,
+objectives with counts and map places, rewards) and the tracked one. The tracked quest fills
+the HUD tracker's `quest.*` data and moves the map waypoint to its current objective's place,
+so the compass, minimap and world markers follow it. Steps after the current one stay hidden
+until it is done. Dialogue choices and buttons use the actions `quest.accept:<id>`,
+`quest.track:<id>`, `quest.advance:<id>`, `quest.complete:<id>` and `quest.fail:<id>`;
+completing a quest gives its gold and items to the Player's inventory and its XP to
+`player.xp`.
 
 ## Data binding
 
@@ -69,8 +87,9 @@ Cross-module interaction goes through `engine_world` (see AGENTS.md).
 `demo::spawn_demo(commands, origin)` fills the demo data (player, merchant, conversations, the
 Veil galaxy), builds the market street and pins world markers over Old Brannoc's stall. The
 showcase's `market` zone calls it, and its tour opens each screen in turn in front of the
-trader (`market_hud`, `market_dialogue`, `market_shop`, `market_inventory`, `market_map_*`,
-`market_pause`, `market_settings`; the camera is `demo::market::ui_view()`).
+trader (`market_hud`, `market_dialogue`, `market_shop`, `market_inventory`, `market_journal`,
+`market_wheel`,
+`market_skills`, `market_map_*`, `market_pause`, `market_settings`; the camera is `demo::market::ui_view()`).
 
 The market street (`demo::market`): five stalls around a cobbled square (produce, cloth, Old
 Brannoc the trader, potter, smith), each with its own striped awning, lantern light and goods;
@@ -91,9 +110,10 @@ square).
 ## Tests and screenshots
 
 - `cargo test -p engine_ui`: unit tests, `tests/flows.rs` (mouse click, dialogue choice opens
-  the shop, buying, drag and drop, map zoom and waypoint, pause and resume, key rebinding) and
+  the shop, buying, drag and drop, map zoom and waypoint, quests and the journal, the
+  quick-select wheel, the skill tree, pause and resume, key rebinding) and
   `tests/headless.rs` (renders a panel and checks pixels; needs a GPU or lavapipe).
 - `cargo run -p engine_ui --example gallery --release -- <dir> [width] [height] [shot ...]`
-  renders every screen (hud, dialogue, dialogue_choices, shop, shop_sell, inventory,
-  inventory_drag, map_galaxy, map_system, map_globe, map_surface, pause, confirm, settings,
+  renders every screen (hud, wheel, dialogue, dialogue_choices, shop, shop_sell, inventory,
+  inventory_drag, journal, journal_finished, skills, map_galaxy, map_system, map_globe, map_surface, pause, confirm, settings,
   settings_video, settings_controls, theme_cyan) to PNGs.

@@ -337,6 +337,100 @@ fn the_grappler_hooks_the_tower_climbs_over_and_rides_the_zip_line_down() {
 }
 
 #[test]
+fn the_ladder_climber_climbs_onto_the_tower_and_slides_back_down() {
+    let (mut app, _) = demo_app(None);
+    let mut q = app.world.query::<(Entity, &Name)>();
+    let climber = q
+        .iter(&app.world)
+        .find(|(_, n)| n.as_str() == "Ladder climber")
+        .unwrap()
+        .0;
+    let top = demo::layout::TOWER_TOP;
+    let (mut on_roof, mut fastest_up, mut fastest_down) = (None, 0.0f32, 0.0f32);
+    let (mut slid, mut back_down) = (false, None);
+    let secs = run_until(&mut app, 14.0, |w| {
+        let m = w.get::<Mover>(climber).unwrap();
+        let p = w.get::<Transform>(climber).unwrap().translation;
+        if let Some(l) = m.ladder {
+            fastest_up = fastest_up.max(l.speed);
+            fastest_down = fastest_down.min(l.speed);
+            slid |= l.sliding;
+        }
+        if m.grounded && p.y > top + 0.5 {
+            on_roof.get_or_insert(p);
+        }
+        if on_roof.is_some() && m.grounded && p.y < 1.5 {
+            back_down.get_or_insert(p);
+        }
+        back_down.is_some()
+    });
+    let summary = format!(
+        "after {secs:.1} s: on the roof at {on_roof:?}, up at {fastest_up:.1} m/s, down at \
+         {fastest_down:.1} m/s, slid {slid}, back down at {back_down:?}"
+    );
+    eprintln!("{summary}");
+    // Up the ladder at the pilot's climbing speed, over the top onto the roof…
+    assert_eq!(triggered(&app, climber, "ladder_grab"), 2, "{summary}");
+    assert_eq!(triggered(&app, climber, "ladder_exit"), 2, "{summary}");
+    let roof = on_roof.expect(&summary);
+    assert!((roof.x - 23.2).abs() < 0.3 && roof.z < 14.0, "{summary}");
+    assert!((fastest_up - 2.6).abs() < 0.1, "{summary}");
+    // …and back down the same ladder, sliding most of the way.
+    assert!(slid && fastest_down < -6.5, "{summary}");
+    let down = back_down.expect(&summary);
+    assert!((down.x - 23.2).abs() < 0.3 && down.z > 14.9, "{summary}");
+    assert!(secs < 11.0, "{summary}");
+}
+
+#[test]
+fn the_vaulter_vaults_the_railing_the_barrier_and_the_cases_at_a_sprint() {
+    let (mut app, _) = demo_app(None);
+    let mut q = app.world.query::<(Entity, &Name)>();
+    let vaulter = q
+        .iter(&app.world)
+        .find(|(_, n)| n.as_str() == "Vaulter")
+        .unwrap()
+        .0;
+    // Each vault: where it took off and its speed; the slowest speed down the lane after the
+    // first vault.
+    let mut vaults: Vec<(f64, f32)> = Vec::new();
+    let mut slowest = f32::MAX;
+    // When the body is over the barrier (the showcase tour's stop is timed on it).
+    let (mut t, mut over_barrier) = (0.0, None);
+    let secs = run_until(&mut app, 8.0, |w| {
+        let m = w.get::<Mover>(vaulter).unwrap();
+        let p = w.get::<Transform>(vaulter).unwrap().translation;
+        t += DT;
+        if let Some(v) = m.vault {
+            if v.secs == 0.0 {
+                vaults.push((p.x, m.velocity.x));
+            }
+            if (v.plant.x + 16.1).abs() < 0.2 && p.x > v.plant.x {
+                over_barrier.get_or_insert(t);
+            }
+        }
+        if !vaults.is_empty() && p.x < -8.0 {
+            slowest = slowest.min(m.velocity.x);
+        }
+        p.x > demo::layout::VAULT_END_X + 1.0 && m.grounded
+    });
+    let summary = format!(
+        "after {secs:.1} s: vaults {vaults:?}, over the barrier at {over_barrier:?} s, \
+         slowest {slowest:.1} m/s"
+    );
+    eprintln!("{summary}");
+    assert_eq!(triggered(&app, vaulter, "vault"), 3, "{summary}");
+    // Before the railing (x −22), the barrier (−16) and the cases (−10.6).
+    for ((x, _), face) in vaults.iter().zip([-22.04, -16.125, -10.6]) {
+        assert!(*x < face - 0.4 && *x > face - 2.0, "{summary}");
+    }
+    // At a sprint all the way.
+    assert!(slowest > 6.5, "{summary}");
+    assert!(secs < 5.0, "{summary}");
+    assert!(over_barrier.is_some(), "{summary}");
+}
+
+#[test]
 fn the_rider_wall_runs_along_the_moving_car_climbs_aboard_and_rides_it() {
     let (mut app, _) = demo_app(None);
     let mut q = app.world.query::<(Entity, &Name)>();
@@ -482,17 +576,23 @@ fn the_demo_spawns_the_same_static_collider_boxes() {
         ([-14.0, 1.35, 12.0], [0.15, 0.2, 3.5]),    // slide bar
         ([-14.0, 0.775, 8.5], [0.15, 0.775, 0.15]), // slide bar posts
         ([-14.0, 0.775, 15.5], [0.15, 0.775, 0.15]),
-        ([-2.0, 2.6, 14.8], [6.0, 2.5, 0.3]),       // wall A
-        ([12.5, 2.6, 9.2], [6.5, 2.5, 0.3]),        // wall B
-        ([22.0, 2.75, 11.0], [3.0, 2.75, 3.5]),     // tower
-        ([0.0, 0.05, -14.0], [8.0, 0.05, 8.0]),     // ring
-        ([0.0, 0.15, -25.5], [8.0, 0.15, 1.5]),     // stands
-        ([17.0, 0.05, 2.0], [6.0, 0.05, 3.5]),      // ledge station
-        ([17.0, 1.9, 1.2], [3.0, 1.8, 0.8]),        // ledge block
-        ([8.0, 0.05, 29.0], [5.0, 0.05, 11.0]),     // grapple pad
-        ([8.0, 4.5, 31.0], [4.0, 4.5, 3.0]),        // grapple tower
-        ([-14.0, 0.5, 25.4], [12.0, 0.5, 1.9]),     // freight platform
-        ([33.75, 0.05, 20.75], [5.25, 0.05, 5.25]), // zip line pad
+        ([-2.0, 2.6, 14.8], [6.0, 2.5, 0.3]),        // wall A
+        ([12.5, 2.6, 9.2], [6.5, 2.5, 0.3]),         // wall B
+        ([22.0, 2.75, 11.0], [3.0, 2.75, 3.5]),      // tower
+        ([0.0, 0.05, -14.0], [8.0, 0.05, 8.0]),      // ring
+        ([0.0, 0.15, -25.5], [8.0, 0.15, 1.5]),      // stands
+        ([17.0, 0.05, 2.0], [6.0, 0.05, 3.5]),       // ledge station
+        ([17.0, 1.9, 1.2], [3.0, 1.8, 0.8]),         // ledge block
+        ([8.0, 0.05, 29.0], [5.0, 0.05, 11.0]),      // grapple pad
+        ([8.0, 4.5, 31.0], [4.0, 4.5, 3.0]),         // grapple tower
+        ([-14.0, 0.5, 25.4], [12.0, 0.5, 1.9]),      // freight platform
+        ([33.75, 0.05, 20.75], [5.25, 0.05, 5.25]),  // zip line pad
+        ([-15.5, 0.05, 2.0], [13.0, 0.05, 2.5]),     // vault lane
+        ([-22.0, 0.65, 2.0], [0.04, 0.55, 2.0]),     // vault railing
+        ([-16.0, 0.305, 2.0], [0.125, 0.205, 1.48]), // vault barrier: body, foot, top
+        ([-16.0, 0.175, 2.0], [0.25, 0.075, 1.48]),
+        ([-16.0, 0.71, 2.0], [0.1, 0.2, 1.48]),
+        ([-10.0, 0.6, 2.0], [0.6, 0.5, 1.2]), // vault cases
     ];
     // The posts of the zip line's gantry and gate.
     for p in demo::layout::zip_posts() {

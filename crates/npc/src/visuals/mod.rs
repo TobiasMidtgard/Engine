@@ -309,6 +309,7 @@ pub(crate) fn pose_stand_ins(
     mut attacks: MessageReader<AttackEvent>,
     mut blows: MessageReader<DamageEvent>,
     mut seen: Local<Sightings>,
+    seeds: Query<&crate::seed::Seed>,
 ) {
     let seen = &mut *seen;
     seen.attacks.clear();
@@ -368,6 +369,7 @@ pub(crate) fn pose_stand_ins(
                     });
                 let view = humanoid::Seen {
                     me,
+                    vary: seeds.get(me).map_or(0.0, |s| s.unit()),
                     at: owner.translation,
                     attacks: &seen.attacks,
                     blows: &seen.blows,
@@ -408,7 +410,7 @@ pub(crate) fn pose_stand_ins(
                     vel: loco.velocity,
                     crouch: loco.mode == LocomotionMode::Crouch,
                     biting: mind.is_some_and(|m| now < m.bite_ready - 0.55),
-                    vary: ((me.to_bits() as u32) as f32 * 0.618_034).fract(),
+                    vary: seeds.get(me).map_or(0.0, |s| s.unit()),
                     senses: mind
                         .map(|m| animal::Senses {
                             prey: m

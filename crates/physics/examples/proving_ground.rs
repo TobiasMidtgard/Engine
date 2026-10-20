@@ -26,11 +26,25 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [0.0, 24.0, 44.0],
         [0.0, 2.0, -3.0],
     ),
+    // The wrecking ball's chain close up under the swinging ball's load (and later, below).
+    (
+        0.7,
+        "16_wrecking_chain_swinging",
+        [-31.5, 5.5, 16.0],
+        [-26.5, 4.6, 10.0],
+    ),
     (
         1.0,
         "02_ragdolls_on_stairs",
         [33.0, 4.5, -4.0],
         [24.0, 1.3, -12.0],
+    ),
+    // Ten dummies on the stairs: halfway down, then a heap at the foot, all asleep.
+    (
+        1.5,
+        "14_dummies_tumbling",
+        [30.0, 3.2, -5.5],
+        [24.0, 1.6, -12.0],
     ),
     (
         1.9,
@@ -63,10 +77,23 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
     (6.5, "08_turntable", [37.0, 6.5, 20.0], [30.0, 0.5, 10.0]),
     (7.9, "12_barrel_run", [0.0, 1.7, 23.2], [-9.0, 0.35, 18.9]),
     (
+        8.5,
+        "15_dummies_at_rest",
+        [28.0, 2.4, -5.0],
+        [24.0, 0.5, -9.8],
+    ),
+    (
         12.0,
         "09_overview_after",
         [0.0, 24.0, 44.0],
         [0.0, 2.0, -3.0],
+    ),
+    // Where the chain meets the ball, close up, as it swings on.
+    (
+        14.0,
+        "17_wrecking_chain_end",
+        [-21.5, 5.2, 15.0],
+        [-26.0, 4.8, 10.0],
     ),
     (
         20.0,

@@ -1,7 +1,8 @@
 //! Renders particles offscreen and checks the pixels: glowing particles appear where their
 //! emitter is (also 30 000 km from the world origin), a spell's light brightens the ground
 //! around it, smoke lit by the sun covers what's behind it, nearer puffs cover farther ones,
-//! and marks change the ground. Needs a GPU or a software
+//! an engine plume shows shock diamonds only in air, a splash's crown shows where it stands
+//! and nowhere else, and marks change the ground. Needs a GPU or a software
 //! Vulkan driver (lavapipe); passes with a note when neither is available (`RenderDisabled`),
 //! unless `ENGINE_REQUIRE_GPU=1`.
 
@@ -302,6 +303,183 @@ fn nearer_puffs_cover_farther_ones() {
         a > b + 80.0,
         "the nearest, whitest puff should be on top: {b} -> {a}"
     );
+}
+
+#[test]
+fn a_plume_shows_shock_diamonds_in_air_but_not_in_a_vacuum() {
+    // A plume lying along +X across the view, its nozzle at x = -2. In air its axis is banded:
+    // bright knots at the shock diamonds and darker gas between them. Without air there are no
+    // diamonds, so the same spots are as bright as the gaps.
+    const LENGTH: f64 = 4.0;
+    let nozzle = DVec3::new(-2.0, 1.0, 0.0);
+    // Knots and gaps alternate down the axis (see `plume` in particles_draw.wgsl), and their
+    // averages sit at the same distance, so the flame dimming along its length cancels.
+    let knots = [0.85, 1.85, 2.85].map(|k: f64| k / 6.5);
+    let gaps = [1.35, 2.35].map(|k: f64| k / 6.5);
+    let mut contrast = Vec::new();
+    for vacuum in [false, true] {
+        let mut app = app(DVec3::ZERO, 200.0);
+        app.add_plugins(engine_world::WorldPlugin);
+        if vacuum {
+            app.world.resource_mut::<engine_world::Atmospheres>().top_m = 0.0;
+        }
+        let plume = EffectDesc {
+            name: "test.plume".into(),
+            emitters: vec![EmitterDesc {
+                rate: 12.0,
+                speed: [0.0, 0.0],
+                lifetime: [0.2, 0.2],
+                size: [LENGTH as f32, LENGTH as f32],
+                rotation_deg: [0.0, 0.0],
+                local_space: true,
+                sprite: Sprite::Plume,
+                facing: engine_vfx::Facing::Axis,
+                stretch: 0.3,
+                color: Gradient::constant([1.0, 0.6, 0.3, 1.0]),
+                emissive: 500.0,
+                additive: 1.0,
+                soft: 0.0,
+                wind: 0.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        app.world
+            .resource_mut::<EffectLibrary>()
+            .insert(plume)
+            .unwrap();
+        app.world.spawn((
+            Transform::from_translation(nozzle)
+                .with_rotation(Quat::from_rotation_arc(Vec3::Y, Vec3::X)),
+            ParticleEffect::new("test.plume"),
+        ));
+        app.update_n(12);
+        let name = if vacuum { "vacuum" } else { "air" };
+        let Some(img) = shot(&mut app, &format!("vfx_plume_{name}.png")) else {
+            return;
+        };
+        let along = |t: f64| luma(&img, project(nozzle + DVec3::X * (t * LENGTH)), 1);
+        let mean = |ts: &[f64]| ts.iter().map(|t| along(*t)).sum::<f32>() / ts.len() as f32;
+        let (k, g) = (mean(&knots), mean(&gaps));
+        eprintln!("{name}: knots {k}, gaps {g}");
+        assert!(k > 30.0, "{name}: the plume should glow, knots {k}");
+        contrast.push(k - g);
+    }
+    assert!(
+        contrast[0] > 20.0 && contrast[0] > contrast[1] * 2.0 + 10.0,
+        "diamonds should stand out in air but not in a vacuum: knots - gaps {contrast:?}"
+    );
+}
+
+#[test]
+fn a_blaze_burns_hottest_low_in_its_heart_and_leaves_the_air_beside_it_clear() {
+    // A fire 2 m tall and 2 m wide standing on the origin. Its body is brightest low in the
+    // middle and cools toward its tongues; its ragged edge never strays out to the quad's sides.
+    let mut app = app(DVec3::ZERO, 200.0);
+    let Some(before) = shot(&mut app, "vfx_blaze_before.png") else {
+        return;
+    };
+    let blaze = EffectDesc {
+        name: "test.blaze".into(),
+        emitters: vec![EmitterDesc {
+            rate: 12.0,
+            speed: [0.0, 0.0],
+            lifetime: [0.2, 0.2],
+            size: [2.0, 2.0],
+            rotation_deg: [0.0, 0.0],
+            local_space: true,
+            sprite: Sprite::Blaze,
+            facing: engine_vfx::Facing::Axis,
+            stretch: 1.0,
+            color: Gradient::constant([1.0, 0.6, 0.25, 1.0]),
+            emissive: 500.0,
+            additive: 1.0,
+            soft: 0.0,
+            wind: 0.0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    app.world
+        .resource_mut::<EffectLibrary>()
+        .insert(blaze)
+        .unwrap();
+    app.world.spawn((
+        Transform::from_translation(DVec3::ZERO),
+        ParticleEffect::new("test.blaze"),
+    ));
+    app.update_n(12);
+    let after = shot(&mut app, "vfx_blaze_after.png").unwrap();
+    let lift = |x: f64, y: f64, r: i32| {
+        let at = project(DVec3::new(x, y, 0.0));
+        luma(&after, at, r) - luma(&before, at, r)
+    };
+    let heart = lift(0.0, 0.4, 2);
+    let top = lift(0.0, 1.1, 2);
+    eprintln!("blaze: heart {heart}, top {top}");
+    assert!(heart > 40.0, "the fire's heart should glow: {heart}");
+    assert!(
+        top < heart * 0.6,
+        "the fire should cool toward its tongues: {heart} -> {top}"
+    );
+    for x in [-0.95, 0.95] {
+        let side = lift(x, 0.3, 1).abs();
+        assert!(
+            side < 3.0,
+            "no flame should stand off at the side ({x}): {side}"
+        );
+    }
+}
+
+#[test]
+fn a_splash_crown_stands_out_of_the_ground_and_nothing_else_changes() {
+    let mut app = app(DVec3::ZERO, 30_000.0);
+    let Some(before) = shot(&mut app, "vfx_crown_before.png") else {
+        return;
+    };
+    let crown = EffectDesc {
+        name: "test.crown".into(),
+        emitters: vec![EmitterDesc {
+            bursts: vec![engine_vfx::Burst {
+                count: 1,
+                ..Default::default()
+            }],
+            speed: [0.0, 0.0],
+            gravity: 0.0,
+            lifetime: [1.0, 1.0],
+            size: [3.0, 3.0],
+            sprite: Sprite::Crown,
+            lit: 1.0,
+            color: Gradient::constant([1.0, 1.0, 1.0, 1.0]),
+            wind: 0.0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    app.world
+        .resource_mut::<EffectLibrary>()
+        .insert(crown)
+        .unwrap();
+    app.world.spawn((
+        Transform::from_translation(DVec3::ZERO),
+        ParticleEffect::new("test.crown"),
+    ));
+    // A third of the way through, the crown stands at its full height.
+    app.update_n(8);
+    let after = shot(&mut app, "vfx_crown_after.png").unwrap();
+    // Its wall leans out to about 1 m and stands about 1 m tall. Glassy water shows faintly
+    // against the bright ground, most where it mirrors the sky at a glance.
+    let mut most = 0.0f32;
+    for i in 0..=20 {
+        for j in 1..=4 {
+            let at = project(DVec3::new(-1.2 + i as f64 * 0.12, j as f64 * 0.2, 0.0));
+            most = most.max((luma(&after, at, 1) - luma(&before, at, 1)).abs());
+        }
+    }
+    assert!(most > 10.0, "the crown's wall should show: {most}");
+    let away = project(DVec3::new(3.5, 0.5, 0.0));
+    let off = (luma(&after, away, 2) - luma(&before, away, 2)).abs();
+    assert!(off < 3.0, "nothing beyond the crown should change: {off}");
 }
 
 #[test]

@@ -120,6 +120,22 @@ impl Road {
     }
 }
 
+/// A road's influence at a spot (see `Landscape::road_at`).
+#[derive(Debug, Clone, Copy)]
+struct RoadHit {
+    /// 0..1 weight of the road's flat cross-section (the land eases into it).
+    weight: f64,
+    /// Height of the road's centerline there.
+    height: f64,
+    paved: bool,
+    /// 0..1: on the road's surface, fading out over its edge.
+    edge: f64,
+    /// Distance from the centerline, m.
+    distance: f64,
+    /// Half the road's width, m.
+    half: f64,
+}
+
 /// The hill the mushroom cave is dug into: a mound with a box-shaped hole for the cave.
 #[derive(Debug, Clone, Copy)]
 pub struct CaveHill {
@@ -549,17 +565,22 @@ impl Landscape {
         h
     }
 
-    /// Road influence at `p`: (weight 0..1 of the road's flat cross-section, road height,
-    /// paved).
-    fn road_at(&self, p: DVec2) -> Option<(f64, f64, bool, f64)> {
-        let mut best: Option<(f64, f64, bool, f64)> = None;
+    /// The road with the most influence at `p`, if any.
+    fn road_at(&self, p: DVec2) -> Option<RoadHit> {
+        let mut best: Option<RoadHit> = None;
         for road in &self.roads {
             if let Some((d, q)) = road.closest(p) {
                 let half = road.width * 0.5;
                 let w = 1.0 - smooth(half, half + 7.0, d);
-                if w > 0.0 && best.is_none_or(|b| w > b.0) {
-                    let edge = 1.0 - smooth(half - 1.0, half + 0.8, d);
-                    best = Some((w, self.base_height(q.x, q.y), road.paved, edge));
+                if w > 0.0 && best.is_none_or(|b| w > b.weight) {
+                    best = Some(RoadHit {
+                        weight: w,
+                        height: self.base_height(q.x, q.y),
+                        paved: road.paved,
+                        edge: 1.0 - smooth(half - 1.0, half + 0.8, d),
+                        distance: d,
+                        half,
+                    });
                 }
             }
         }
@@ -580,7 +601,12 @@ impl Landscape {
     /// Height with roads but before streams cut into it (and without curvature).
     fn uncarved_height(&self, x: f64, z: f64) -> f64 {
         let mut h = self.base_height(x, z);
-        if let Some((w, rh, _, _)) = self.road_at(DVec2::new(x, z)) {
+        if let Some(RoadHit {
+            weight: w,
+            height: rh,
+            ..
+        }) = self.road_at(DVec2::new(x, z))
+        {
             h += (rh - h) * w;
         }
         h
@@ -675,7 +701,7 @@ impl Landscape {
     /// 0..1 road or stream coverage (1 on the road surface or in the water): scenery keeps
     /// off it.
     pub fn road_weight(&self, x: f64, z: f64) -> f64 {
-        let road = self.road_at(DVec2::new(x, z)).map_or(0.0, |r| r.3);
+        let road = self.road_at(DVec2::new(x, z)).map_or(0.0, |r| r.edge);
         let stream = self.streams.iter().fold(0.0, |w: f64, st| {
             st.closest(DVec2::new(x, z)).map_or(w, |(d, _)| {
                 w.max(1.0 - smooth(st.width * 0.5, st.width * 0.5 + 3.0, d))
@@ -740,13 +766,22 @@ impl Landscape {
         if slope > 0.32 {
             return Cover::Rock;
         }
-        if h < LAKE_LEVEL - 0.15 {
+        // (The valley floor dips below the lake's level in places, away from the lake.)
+        if h < LAKE_LEVEL - 0.15 && self.lake_t(x, z) < 1.05 {
             return Cover::LakeBed;
         }
-        if let Some((_, _, paved, edge)) = self.road_at(DVec2::new(x, z))
-            && edge > 0.5
+        if let Some(road) = self.road_at(DVec2::new(x, z))
+            && if road.paved {
+                road.edge > 0.5
+            } else {
+                road.distance < self.track_verge(x, z, road.half) as f64 + 0.1
+            }
         {
-            return if paved { Cover::Cobble } else { Cover::Dirt };
+            return if road.paved {
+                Cover::Cobble
+            } else {
+                Cover::Dirt
+            };
         }
         if self.lake_t(x, z) < 1.08 {
             return Cover::Sand;
@@ -852,13 +887,33 @@ impl Landscape {
         self.paint(x, z, h, normal, true)
     }
 
+    /// 0 = fresh .. 1 = dry, of the meadow grass at (x, z): where the ground paint yellows
+    /// (dry stretches and hay drifts), damp and green by the streams and the lake.
+    pub fn grass_dryness(&self, x: f64, z: f64) -> f32 {
+        let s = self.seed;
+        let n1 = fbm2(x / 55.0, z / 55.0, s + 20, 4, 2.0, 0.5) * 0.5 + 0.5;
+        let n2 = fbm2(x / 9.0, z / 9.0, s + 21, 3, 2.0, 0.5) * 0.5 + 0.5;
+        let dry = (n1 * 0.8 + n2 * 0.25 - 0.25).clamp(0.0, 1.0);
+        let drift = fbm2(x / 70.0 + 3.1, z / 70.0, s + 23, 3, 2.0, 0.5);
+        let hay = smoothstep(0.15, 0.5, drift);
+        let by_stream = self
+            .stream_at(x, z)
+            .map_or(0.0, |(d, _)| 1.0 - smoothstep(4.0, 28.0, d as f32));
+        let by_lake = 1.0 - smoothstep(1.15, 1.6, self.lake_t(x, z) as f32);
+        let t = (dry * 0.55 + hay * 0.5).min(1.0);
+        t * (1.0 - by_stream.max(by_lake) * 0.8)
+    }
+
     fn paint(&self, x: f64, z: f64, h: f64, normal: Vec3, roofed: bool) -> Vec3 {
         let s = self.seed;
         let n1 = fbm2(x / 55.0, z / 55.0, s + 20, 4, 2.0, 0.5) * 0.5 + 0.5;
         let n2 = fbm2(x / 9.0, z / 9.0, s + 21, 3, 2.0, 0.5) * 0.5 + 0.5;
         let slope = (1.0 - normal.y).clamp(0.0, 1.0);
-        let lush = Vec3::new(0.062, 0.15, 0.03);
-        let dry = Vec3::new(0.16, 0.17, 0.055);
+        // Meadow greens: olive rather than lime, yellowing where it is dry.
+        let lush = Vec3::new(0.068, 0.132, 0.033);
+        let dry = Vec3::new(0.165, 0.16, 0.062);
+        let damp = Vec3::new(0.045, 0.1, 0.032);
+        let hay = Vec3::new(0.2, 0.175, 0.07);
         let alpine = Vec3::new(0.11, 0.115, 0.06);
         let forest = Vec3::new(0.05, 0.07, 0.025);
         let dirt = Vec3::new(0.17, 0.12, 0.07);
@@ -868,7 +923,25 @@ impl Landscape {
         let rock_dark = Vec3::new(0.09, 0.085, 0.08);
         let snow = Vec3::new(0.82, 0.85, 0.9);
 
-        let grass = lush.lerp(dry, (n1 * 0.8 + n2 * 0.25 - 0.25).clamp(0.0, 1.0));
+        let mut grass = lush.lerp(dry, (n1 * 0.8 + n2 * 0.25 - 0.25).clamp(0.0, 1.0));
+        // Warmer and cooler stretches a few hundred meters across.
+        let warmth = fbm2(x / 190.0, z / 190.0, s + 22, 3, 2.0, 0.5).clamp(-1.0, 1.0);
+        let shift = if warmth > 0.0 {
+            Vec3::new(1.1, 1.0, 0.82)
+        } else {
+            Vec3::new(0.88, 0.98, 1.1)
+        };
+        grass *= Vec3::ONE.lerp(shift, warmth.abs() * 1.4);
+        // Hay meadows in flower: yellow-green drifts tens of meters across.
+        let drift = fbm2(x / 70.0 + 3.1, z / 70.0, s + 23, 3, 2.0, 0.5);
+        grass = grass.lerp(hay, smoothstep(0.15, 0.5, drift) * 0.5);
+        // Rich, dark grass in the damp ground along the streams and the lake.
+        let p = DVec2::new(x, z);
+        let by_stream = self
+            .stream_at(x, z)
+            .map_or(0.0, |(d, _)| 1.0 - smoothstep(4.0, 28.0, d as f32));
+        let by_lake = 1.0 - smoothstep(1.15, 1.6, self.lake_t(x, z) as f32);
+        grass = grass.lerp(damp, by_stream.max(by_lake) * 0.7);
         let altitude = smooth(250.0, 800.0, h) as f32;
         let mut c = grass.lerp(alpine, altitude);
         // Darker under the woods (the canopy above is instanced trees nearby, painted far away).
@@ -884,7 +957,6 @@ impl Landscape {
             * (1.0 - smoothstep(0.35, 0.6, slope));
         c = c.lerp(snow, snowy);
         // Lake shore and bed.
-        let p = DVec2::new(x, z);
         if (p - self.lake.center).length() < self.lake.radius * 1.6 {
             let beach = 1.0 - smoothstep(1.02, 1.12, self.lake_t(x, z) as f32);
             c = c.lerp(sand.lerp(dirt, n2 * 0.5), beach);
@@ -904,13 +976,12 @@ impl Landscape {
             c = c.lerp(fc, smoothstep(1.5, 3.0, edge as f32));
         }
         // Roads (they run into the cave, not over it).
-        if let Some((_, _, paved, edge)) = self.road_at(p).filter(|_| !roofed) {
-            let road = if paved {
-                cobble * (0.8 + 0.4 * n2)
+        if let Some(road) = self.road_at(p).filter(|_| !roofed) {
+            if road.paved {
+                c = c.lerp(cobble * (0.8 + 0.4 * n2), road.edge as f32);
             } else {
-                Vec3::new(0.24, 0.19, 0.13) * (0.85 + 0.3 * n2)
-            };
-            c = c.lerp(road, edge as f32);
+                c = self.track(x, z, road.distance as f32, road.half as f32, n2, c);
+            }
         }
         if let Some(pc) = self.patch_at(x, z).and_then(Cover::patch_color) {
             c = pc;
@@ -924,6 +995,41 @@ impl Landscape {
         }
         // Small-scale brightness variation everywhere.
         c * (0.85 + 0.3 * n2)
+    }
+
+    /// A worn dirt track over `grass`, `d` meters from its centerline: dusty in the middle,
+    /// darker in the two wheel tracks with grass between them, and grass creeping in from
+    /// ragged verges, the dust out to about the road's surface edge (`half` is half its
+    /// width), where its footsteps turn to dirt. The terrain samples this once per vertex,
+    /// meters apart away from the camera, so the narrow wheel tracks and strip stay faint: a
+    /// sample anywhere across the track still reads as track.
+    fn track(&self, x: f64, z: f64, d: f32, half: f32, n2: f32, grass: Vec3) -> Vec3 {
+        let ragged = self.track_ragged(x, z);
+        let verge = self.track_verge(x, z, half as f64);
+        let dust = Vec3::new(0.25, 0.2, 0.14) * (0.85 + 0.3 * n2);
+        let rut = Vec3::new(0.15, 0.115, 0.08) * (0.9 + 0.2 * n2);
+        let wheels = smoothstep(0.35, 0.75, d) * (1.0 - smoothstep(1.35, 1.8, d));
+        let mut t = dust.lerp(rut, wheels * 0.4);
+        // The grass strip between the wheel tracks, thicker in places.
+        let strip = (1.0 - smoothstep(0.2, 0.55, d)) * (0.25 + 0.2 * ragged.max(0.0));
+        t = t.lerp(grass * 0.85, strip);
+        // Worn grass at the verges, half dust.
+        let worn = grass.lerp(dust, 0.45);
+        let on = 1.0 - smoothstep(verge - 0.3, verge + 0.5, d);
+        let near = 1.0 - smoothstep(verge + 0.3, verge + 1.4, d);
+        grass.lerp(worn, near).lerp(t, on)
+    }
+
+    /// -1..1 noise that makes a dirt track's verges wander.
+    fn track_ragged(&self, x: f64, z: f64) -> f32 {
+        let s = self.seed;
+        perlin2(x / 6.0, z / 6.0, s + 24) * 0.7 + perlin2(x / 2.1, z / 2.1, s + 25) * 0.3
+    }
+
+    /// Where a dirt track `half` meters wide (from the centerline) gives way to grass at
+    /// (x, z), m from its centerline: about at the surface's edge, wandering half a meter.
+    fn track_verge(&self, x: f64, z: f64, half: f64) -> f32 {
+        half as f32 - 0.2 + self.track_ragged(x, z) * 0.6
     }
 
     /// What covers the ground at (x, z), from the height and slope there.

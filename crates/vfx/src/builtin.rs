@@ -3,7 +3,8 @@
 //!
 //! Naming: `spell.*` magic, `water.*` splashes and fountains, `impact.<surface>` hits on a
 //! surface material (the names `SurfaceMaterial::impact_effect` uses), `step.<surface>`
-//! footstep kicks, `impulse.*` ground shockwaves, `fire.*`, `ambient.*`, `magic.*`.
+//! footstep kicks, `impulse.*` ground shockwaves, `exhaust.*` engine flames and fumes, `fire.*`,
+//! `ambient.*`, `magic.*`.
 //!
 //! Glow is in cd/m²: daylight scenes expose for roughly 5 000–100 000 cd/m², so cores of
 //! 40 000–100 000 read as white-hot by day and bloom at night.
@@ -87,6 +88,17 @@ fn light(color: [f32; 3], lumens: f32, range: f32, flicker: f32, fade: f32) -> O
         offset: [0.0; 3],
         fade_secs: fade,
     })
+}
+
+/// A light `offset` m out from the effect along its local axes.
+fn light_at(
+    color: [f32; 3],
+    lumens: f32,
+    range: f32,
+    flicker: f32,
+    offset: [f32; 3],
+) -> Option<EffectLight> {
+    light(color, lumens, range, flicker, 0.15).map(|l| EffectLight { offset, ..l })
 }
 
 /// Fade in quickly, hold, fade out: `[t, alpha]` shape applied to one color.
@@ -301,14 +313,60 @@ fn ripples(name: &str, times: &[f32], grow: f32, life: f32, alpha: f32) -> Emitt
         lifetime: [life, life],
         size: [0.5, 0.5],
         size_over_life: c(&[(0.0, 0.5), (1.0, grow)]),
-        sprite: Sprite::Ring,
+        sprite: Sprite::Ripple,
         facing: Facing::Horizontal,
+        // Riding the surface: not held up or let down by the air.
+        local_space: true,
         rotation_deg: [0.0, 0.0],
         lit: 1.0,
-        color: g(&[(0.0, [0.9, 0.95, 1.0, alpha]), (1.0, [0.9, 0.95, 1.0, 0.0])]),
+        color: g(&[
+            (0.0, [0.9, 0.95, 1.0, alpha]),
+            (1.0, [0.9, 0.95, 1.0, alpha]),
+        ]),
         soft: 0.0,
         wind: 0.0,
         ..em(name)
+    }
+}
+
+/// The crown of a splash, `span` m across at its widest, lasting `life` s (see [`Sprite::Crown`]).
+fn crown(span: f32, life: f32) -> EmitterDesc {
+    EmitterDesc {
+        bursts: once(1),
+        speed: [0.0, 0.0],
+        gravity: 0.0,
+        lifetime: [life, life],
+        size: [span, span],
+        sprite: Sprite::Crown,
+        lit: 1.0,
+        color: g(&[(0.0, [1.0, 1.0, 1.0, 1.0]), (1.0, [1.0, 1.0, 1.0, 1.0])]),
+        soft: 0.0,
+        wind: 0.0,
+        ..em("crown_wall")
+    }
+}
+
+/// `count` patches of foam spreading over a disc of `radius` m and lasting about `life` s.
+fn foam(count: u32, radius: f32, size: [f32; 2], life: f32) -> EmitterDesc {
+    EmitterDesc {
+        bursts: once(count),
+        shape: EmitShape::Disc { radius },
+        offset: [0.0, 0.025, 0.0],
+        speed: [0.2, 0.7],
+        drag: 1.4,
+        gravity: 0.0,
+        lifetime: [life * 0.7, life],
+        size,
+        size_over_life: c(&[(0.0, 0.6), (0.3, 1.0), (1.0, 1.5)]),
+        sprite: Sprite::Foam,
+        facing: Facing::Horizontal,
+        local_space: true,
+        rotation_deg: [0.0, 360.0],
+        lit: 1.0,
+        color: fade([0.95, 0.97, 1.0], 0.9, 0.05, 0.75),
+        soft: 0.0,
+        wind: 0.0,
+        ..em("foam")
     }
 }
 
@@ -319,6 +377,7 @@ pub fn all() -> Vec<EffectDesc> {
     v.extend(water());
     v.extend(impacts());
     v.extend(steps());
+    v.extend(exhausts());
     v.extend(misc());
     v
 }
@@ -1482,71 +1541,50 @@ fn water() -> Vec<EffectDesc> {
         Some(0.45),
         vec![
             EmitterDesc {
-                size: [0.022, 0.05],
-                lifetime: [0.7, 1.4],
-                stretch: 0.04,
-                ..droplets("crown", 300, water_rgb, [1.5, 3.2], 3.8, Collide::Die)
-            },
-            // The crown's thin wall of water, rising and breaking up.
-            EmitterDesc {
-                bursts: once(40),
                 shape: EmitShape::Ring {
-                    radius: 0.25,
+                    radius: 0.2,
                     thickness: 0.05,
                 },
-                speed: [0.8, 1.4],
-                velocity: [0.0, 2.6, 0.0],
-                gravity: 1.0,
-                drag: 0.5,
-                turbulence: 0.0,
-                lifetime: [0.3, 0.5],
-                size: [0.18, 0.3],
-                size_over_life: c(&[(0.0, 1.0), (1.0, 1.6)]),
-                color: g(&[(0.0, [0.9, 0.95, 1.0, 0.55]), (1.0, [0.9, 0.95, 1.0, 0.0])]),
-                soft: 0.05,
-                ..smoke("sheet", 0.95, 0.55)
+                size: [0.008, 0.022],
+                lifetime: [0.7, 1.4],
+                stretch: 0.012,
+                ..droplets("crown", 160, water_rgb, [1.2, 2.6], 3.2, Collide::Die)
             },
+            // The crown's thin wall of water, rising, tearing and slumping back as the jet
+            // shoots up from the middle.
+            crown(1.3, 0.95),
+            // Drops breaking off the top of the jet.
             EmitterDesc {
-                bursts: vec![at(0.06, 150)],
+                bursts: vec![at(0.42, 40), at(0.5, 30)],
                 shape: EmitShape::Cone {
-                    angle_deg: 7.0,
-                    radius: 0.12,
+                    angle_deg: 9.0,
+                    radius: 0.03,
                 },
-                speed: [4.5, 7.5],
+                offset: [0.0, 0.5, 0.0],
+                speed: [1.0, 2.6],
                 velocity: [0.0, 0.0, 0.0],
-                lifetime: [1.0, 1.6],
-                size: [0.03, 0.065],
-                stretch: 0.045,
-                ..droplets("column", 150, water_rgb, [4.5, 7.5], 0.0, Collide::Die)
+                lifetime: [0.8, 1.3],
+                size: [0.03, 0.06],
+                stretch: 0.04,
+                ..droplets("column", 70, water_rgb, [1.0, 2.6], 0.0, Collide::Die)
             },
             EmitterDesc {
-                bursts: once(32),
-                shape: EmitShape::Hemisphere { radius: 0.35 },
-                speed: [0.8, 2.6],
+                bursts: once(10),
+                shape: EmitShape::Hemisphere { radius: 0.3 },
+                speed: [0.8, 2.2],
                 drag: 2.2,
                 gravity: 0.1,
-                lifetime: [0.9, 1.8],
-                size: [0.5, 0.9],
+                lifetime: [0.8, 1.5],
+                size: [0.3, 0.55],
                 size_over_life: c(&[(0.0, 0.6), (1.0, 2.0)]),
-                color: g(&[(0.0, [0.92, 0.96, 1.0, 0.6]), (1.0, [0.92, 0.96, 1.0, 0.0])]),
-                ..smoke("spray", 0.92, 0.6)
+                color: g(&[
+                    (0.0, [0.92, 0.96, 1.0, 0.28]),
+                    (1.0, [0.92, 0.96, 1.0, 0.0]),
+                ]),
+                ..smoke("spray", 0.92, 0.28)
             },
-            ripples("ripples", &[0.0, 0.18, 0.4], 7.0, 1.6, 0.7),
-            EmitterDesc {
-                bursts: once(30),
-                shape: EmitShape::Disc { radius: 0.4 },
-                offset: [0.0, 0.03, 0.0],
-                speed: [0.2, 0.8],
-                drag: 1.5,
-                lifetime: [1.2, 2.0],
-                size: [0.15, 0.3],
-                size_over_life: c(&[(0.0, 0.7), (1.0, 1.6)]),
-                sprite: Sprite::Dust,
-                lit: 1.0,
-                color: g(&[(0.0, [0.95, 0.97, 1.0, 0.6]), (1.0, [0.95, 0.97, 1.0, 0.0])]),
-                soft: 0.05,
-                ..em("foam")
-            },
+            ripples("ripples", &[0.0, 0.18, 0.4], 7.0, 2.2, 1.0),
+            foam(10, 0.4, [0.35, 0.6], 3.5),
         ],
     );
 
@@ -1556,12 +1594,18 @@ fn water() -> Vec<EffectDesc> {
          ripple.",
         Some(0.2),
         vec![
+            crown(0.32, 0.45),
             EmitterDesc {
-                size: [0.025, 0.045],
+                shape: EmitShape::Ring {
+                    radius: 0.05,
+                    thickness: 0.02,
+                },
+                size: [0.012, 0.025],
                 lifetime: [0.4, 0.8],
                 ..droplets("crown", 26, water_rgb, [0.6, 1.4], 1.8, Collide::Die)
             },
-            ripples("ripple", &[0.0], 3.5, 1.0, 0.6),
+            ripples("ripple", &[0.0, 0.12], 3.5, 1.4, 0.8),
+            foam(3, 0.06, [0.08, 0.14], 1.5),
         ],
     );
 
@@ -1734,20 +1778,8 @@ fn water() -> Vec<EffectDesc> {
                 ..smoke("mist", 0.95, 0.22)
             },
             EmitterDesc {
-                bursts: once(60),
-                shape: EmitShape::Disc { radius: 2.0 },
-                offset: [0.0, 0.03, 0.0],
                 speed: [0.4, 1.6],
-                drag: 1.2,
-                lifetime: [3.0, 5.0],
-                size: [0.4, 0.8],
-                size_over_life: c(&[(0.0, 0.7), (1.0, 2.2)]),
-                sprite: Sprite::Dust,
-                facing: Facing::Horizontal,
-                lit: 1.0,
-                color: fade([0.95, 0.97, 1.0], 0.65, 0.05, 0.5),
-                soft: 0.05,
-                ..em("foam")
+                ..foam(24, 2.0, [1.0, 1.8], 6.0)
             },
             EmitterDesc {
                 size: [1.5, 1.5],
@@ -2440,6 +2472,331 @@ fn steps() -> Vec<EffectDesc> {
     ]
 }
 
+/// The flame of one nozzle: short, overlapping plume sprites standing on the nozzle (so it
+/// shimmers), `length` m long and `width` m across at its widest, glowing `glow` cd/m².
+fn plume(name: &str, rgb: [f32; 3], length: f32, width: f32, glow: f32) -> EmitterDesc {
+    EmitterDesc {
+        rate: 12.0,
+        speed: [0.0, 0.0],
+        lifetime: [0.16, 0.24],
+        size: [length * 0.94, length * 1.06],
+        rotation_deg: [0.0, 0.0],
+        local_space: true,
+        steady: true,
+        sprite: Sprite::Plume,
+        facing: Facing::Axis,
+        stretch: width / length,
+        color: fade(rgb, 1.0, 0.3, 0.7),
+        emissive: glow,
+        additive: 1.0,
+        wind: 0.0,
+        soft: 0.4,
+        ..em(name)
+    }
+}
+
+/// The white-hot mouth of a nozzle, a glow that faces the camera so a flame seen end-on still
+/// shows: `size` m across.
+fn nozzle_glow(rgb: [f32; 3], size: f32, glow: f32) -> EmitterDesc {
+    EmitterDesc {
+        rate: 12.0,
+        speed: [0.0, 0.0],
+        offset: [0.0, size * 0.15, 0.0],
+        lifetime: [0.2, 0.3],
+        size: [size * 0.9, size * 1.1],
+        local_space: true,
+        steady: true,
+        color: fade(rgb, 1.0, 0.3, 0.6),
+        emissive: glow,
+        additive: 1.0,
+        wind: 0.0,
+        soft: 0.1,
+        ..em("nozzle")
+    }
+}
+
+/// Engine flames and fumes. Every one plays at a nozzle with its +Y axis pointing out of it,
+/// down the exhaust; `scale` 1 is the nozzle size each describes and `intensity` follows the
+/// throttle. Plumes widen and lose their shock diamonds as the air thins.
+fn exhausts() -> Vec<EffectDesc> {
+    const KEROSENE: [f32; 3] = [1.0, 0.6, 0.3];
+    const AFTERBURNER: [f32; 3] = [1.0, 0.55, 0.28];
+    const ION_BLUE: [f32; 3] = [0.55, 0.72, 1.0];
+    vec![
+        EffectDesc {
+            light: light_at(KEROSENE, 10_000.0, 30.0, 0.12, [0.0, 0.6, 0.0]),
+            ..effect(
+                "exhaust.rocket",
+                "A kerosene rocket engine at full thrust: a blinding orange plume with a train \
+                 of shock diamonds and a ragged tail, a white-hot nozzle and a cloud of exhaust \
+                 billowing up where the plume dies away. Scale 1 is a nozzle 1 m across.",
+                None,
+                vec![
+                    plume("plume", KEROSENE, 9.0, 3.3, 14_000.0),
+                    nozzle_glow([1.0, 0.86, 0.62], 1.0, 40_000.0),
+                    // Licks of flame torn off the plume's edge, streaking out along it.
+                    EmitterDesc {
+                        rate: 70.0,
+                        shape: EmitShape::Cone {
+                            angle_deg: 4.0,
+                            radius: 0.35,
+                        },
+                        offset: [0.0, 2.0, 0.0],
+                        speed: [24.0, 34.0],
+                        drag: 2.0,
+                        turbulence: 10.0,
+                        turbulence_scale: 1.0,
+                        lifetime: [0.12, 0.22],
+                        size: [0.7, 1.2],
+                        size_over_life: c(&[(0.0, 0.7), (1.0, 1.8)]),
+                        sprite: Sprite::Flame,
+                        facing: Facing::Velocity,
+                        stretch: 0.03,
+                        color: flame_colors(),
+                        emissive: 9000.0,
+                        additive: 1.0,
+                        wind: 0.0,
+                        soft: 0.3,
+                        ..em("licks")
+                    },
+                    // The exhaust cloud billowing up where the plume dies away.
+                    EmitterDesc {
+                        rate: 30.0,
+                        shape: EmitShape::Cone {
+                            angle_deg: 30.0,
+                            radius: 0.8,
+                        },
+                        offset: [0.0, 7.0, 0.0],
+                        speed: [4.0, 8.0],
+                        drag: 1.2,
+                        acceleration: [0.0, 0.5, 0.0],
+                        collide: Collide::Bounce {
+                            restitution: 0.05,
+                            friction: 0.05,
+                        },
+                        turbulence: 1.5,
+                        turbulence_scale: 4.0,
+                        lifetime: [3.0, 5.0],
+                        size: [1.6, 2.4],
+                        size_over_life: c(&[(0.0, 0.6), (1.0, 4.0)]),
+                        soft: 1.0,
+                        ..smoke("cloud", 0.68, 0.35)
+                    },
+                    // The trail a climbing rocket leaves: laid down per meter it travels, so it
+                    // stands as one unbroken column however fast it goes, lingering and
+                    // spreading long after the rocket has gone.
+                    EmitterDesc {
+                        rate_per_meter: 0.8,
+                        shape: EmitShape::Cone {
+                            angle_deg: 60.0,
+                            radius: 0.6,
+                        },
+                        offset: [0.0, 6.0, 0.0],
+                        speed: [0.5, 1.5],
+                        drag: 1.5,
+                        turbulence: 1.2,
+                        turbulence_scale: 6.0,
+                        lifetime: [8.0, 12.0],
+                        size: [1.8, 2.6],
+                        size_over_life: c(&[(0.0, 0.7), (0.2, 1.6), (1.0, 4.5)]),
+                        soft: 1.0,
+                        ..smoke("trail", 0.8, 0.5)
+                    },
+                    EmitterDesc {
+                        rate: 30.0,
+                        offset: [0.0, 2.0, 0.0],
+                        spread_deg: 6.0,
+                        speed: [12.0, 18.0],
+                        lifetime: [0.3, 0.5],
+                        size: [2.5, 3.5],
+                        size_over_life: c(&[(0.0, 0.6), (1.0, 1.6)]),
+                        ..haze("haze", 1.0)
+                    },
+                ],
+            )
+        },
+        EffectDesc {
+            light: light_at(AFTERBURNER, 120_000.0, 45.0, 0.15, [0.0, 2.0, 0.0]),
+            ..effect(
+                "exhaust.afterburner",
+                "A jet engine on afterburner: a long flame with glowing shock diamonds, a blue \
+                 heart in the nozzle and a stream of heat haze. Scale 1 is a nozzle 1 m across.",
+                None,
+                vec![
+                    plume("plume", AFTERBURNER, 7.0, 3.3, 16_000.0),
+                    nozzle_glow([0.35, 0.45, 1.0], 1.2, 10_000.0),
+                    EmitterDesc {
+                        rate: 36.0,
+                        offset: [0.0, 1.0, 0.0],
+                        spread_deg: 5.0,
+                        speed: [18.0, 26.0],
+                        lifetime: [0.35, 0.6],
+                        size: [1.4, 2.0],
+                        size_over_life: c(&[(0.0, 0.6), (1.0, 2.2)]),
+                        ..haze("haze", 1.0)
+                    },
+                ],
+            )
+        },
+        effect(
+            "exhaust.jet",
+            "A jet engine at dry thrust: no flame, only the dull glow of the turbine deep in \
+             the nozzle and a fast stream of shimmering hot air. Scale 1 is a nozzle 1 m across.",
+            None,
+            vec![
+                EmitterDesc {
+                    rate: 6.0,
+                    speed: [0.0, 0.0],
+                    offset: [0.0, -0.15, 0.0],
+                    lifetime: [0.4, 0.6],
+                    size: [0.8, 0.9],
+                    local_space: true,
+                    color: fade([1.0, 0.45, 0.2], 0.8, 0.3, 0.6),
+                    emissive: 2500.0,
+                    additive: 1.0,
+                    wind: 0.0,
+                    soft: 0.05,
+                    ..em("turbine")
+                },
+                EmitterDesc {
+                    rate: 40.0,
+                    shape: EmitShape::Cone {
+                        angle_deg: 5.0,
+                        radius: 0.3,
+                    },
+                    offset: [0.0, 0.5, 0.0],
+                    speed: [20.0, 30.0],
+                    lifetime: [0.4, 0.7],
+                    size: [1.0, 1.4],
+                    size_over_life: c(&[(0.0, 0.6), (1.0, 2.6)]),
+                    ..haze("haze", 1.0)
+                },
+            ],
+        ),
+        EffectDesc {
+            light: light_at(ION_BLUE, 50_000.0, 25.0, 0.05, [0.0, 1.0, 0.0]),
+            ..effect(
+                "exhaust.thruster",
+                "A spacecraft's thruster: a pale blue flame with a white-hot throat, which \
+                 balloons into a wide, faint bell in the vacuum of space. Scale 1 is a nozzle \
+                 1 m across.",
+                None,
+                vec![
+                    plume("plume", ION_BLUE, 6.0, 3.4, 8_000.0),
+                    nozzle_glow([0.75, 0.85, 1.0], 1.3, 30_000.0),
+                ],
+            )
+        },
+        effect(
+            "exhaust.tailpipe",
+            "A car's tailpipe at idle: faint puffs of fumes and a shimmer of hot air; raise \
+             `rate` as it revs. Scale 1 is a tailpipe 6 cm across.",
+            None,
+            vec![
+                EmitterDesc {
+                    rate: 9.0,
+                    shape: EmitShape::Cone {
+                        angle_deg: 12.0,
+                        radius: 0.02,
+                    },
+                    speed: [1.5, 2.5],
+                    drag: 2.5,
+                    acceleration: [0.0, 0.4, 0.0],
+                    turbulence: 0.5,
+                    turbulence_scale: 0.4,
+                    lifetime: [1.2, 2.2],
+                    size: [0.12, 0.2],
+                    size_over_life: c(&[(0.0, 0.8), (1.0, 6.0)]),
+                    soft: 0.1,
+                    ..smoke("fumes", 0.62, 0.3)
+                },
+                EmitterDesc {
+                    rate: 14.0,
+                    offset: [0.0, 0.1, 0.0],
+                    spread_deg: 10.0,
+                    speed: [1.0, 1.8],
+                    lifetime: [0.4, 0.7],
+                    size: [0.15, 0.22],
+                    size_over_life: c(&[(0.0, 0.6), (1.0, 2.0)]),
+                    ..haze("haze", 0.7)
+                },
+            ],
+        ),
+        EffectDesc {
+            light: light_at([1.0, 0.6, 0.3], 9000.0, 6.0, 0.6, [0.0, 0.3, 0.0]),
+            ..effect(
+                "exhaust.backfire",
+                "A tailpipe backfire: a bang of flame out of the pipe, a few sparks and a puff \
+                 of dark smoke. Scale 1 is a tailpipe 6 cm across.",
+                Some(0.06),
+                vec![
+                    EmitterDesc {
+                        rate: 0.0,
+                        bursts: vec![at(0.0, 1), at(0.03, 1)],
+                        lifetime: [0.09, 0.13],
+                        ..plume("flame", [1.0, 0.55, 0.22], 0.6, 0.25, 15_000.0)
+                    },
+                    EmitterDesc {
+                        color: g(&[(0.0, [1.0, 0.8, 0.45, 1.0]), (1.0, [1.0, 0.35, 0.08, 0.0])]),
+                        shape: EmitShape::Point,
+                        spread_deg: 25.0,
+                        lifetime: [0.2, 0.5],
+                        size: [0.008, 0.015],
+                        ..sparks("sparks", 10, [5.0, 10.0])
+                    },
+                    EmitterDesc {
+                        bursts: vec![at(0.02, 4)],
+                        shape: EmitShape::Cone {
+                            angle_deg: 20.0,
+                            radius: 0.03,
+                        },
+                        speed: [2.5, 4.0],
+                        drag: 3.0,
+                        lifetime: [0.8, 1.4],
+                        size: [0.15, 0.25],
+                        size_over_life: c(&[(0.0, 0.6), (1.0, 3.5)]),
+                        ..smoke("smoke", 0.12, 0.5)
+                    },
+                ],
+            )
+        },
+        EffectDesc {
+            light: light_at(ION_BLUE, 20_000.0, 8.0, 0.3, [0.0, 0.4, 0.0]),
+            ..effect(
+                "exhaust.jumpjet",
+                "A jump pack's jet: a short blue-white flame, a shimmer of hot air and a few \
+                 sparks, for as long as it fires. Scale 1 is a nozzle 12 cm across.",
+                None,
+                vec![
+                    plume("flame", [0.62, 0.78, 1.0], 1.1, 0.42, 12_000.0),
+                    nozzle_glow([0.8, 0.88, 1.0], 0.3, 30_000.0),
+                    EmitterDesc {
+                        rate: 40.0,
+                        offset: [0.0, 0.3, 0.0],
+                        spread_deg: 8.0,
+                        speed: [6.0, 9.0],
+                        lifetime: [0.25, 0.4],
+                        size: [0.3, 0.45],
+                        size_over_life: c(&[(0.0, 0.6), (1.0, 2.0)]),
+                        ..haze("haze", 0.9)
+                    },
+                    EmitterDesc {
+                        rate: 30.0,
+                        bursts: Vec::new(),
+                        color: g(&[(0.0, [0.85, 0.92, 1.0, 1.0]), (1.0, [0.4, 0.6, 1.0, 0.0])]),
+                        shape: EmitShape::Point,
+                        spread_deg: 12.0,
+                        gravity: 0.3,
+                        lifetime: [0.15, 0.35],
+                        size: [0.006, 0.012],
+                        ..sparks("sparks", 0, [8.0, 14.0])
+                    },
+                ],
+            )
+        },
+    ]
+}
+
 fn misc() -> Vec<EffectDesc> {
     let lightning_ground = EffectDesc {
         light: light([0.75, 0.82, 1.0], 400_000.0, 60.0, 0.9, 0.35),
@@ -2609,37 +2966,33 @@ fn misc() -> Vec<EffectDesc> {
                  flickering light.",
                 None,
                 vec![
-                    // The bed: short, wide, hot flames hugging the fuel, nearly white at the root.
+                    // The body of the fire: a few overlapping blazes standing on the coals,
+                    // each churning and swaying on its own, crossfading as they come and go.
                     EmitterDesc {
-                        rate: 36.0,
-                        offset: [0.0, 0.02, 0.0],
-                        shape: EmitShape::Disc { radius: 0.13 },
-                        speed: [0.1, 0.3],
-                        acceleration: [0.0, 2.0, 0.0],
-                        drag: 2.0,
-                        turbulence: 1.5,
-                        turbulence_scale: 0.3,
-                        wind: 0.3,
-                        lifetime: [0.22, 0.36],
-                        size: [0.2, 0.3],
-                        size_over_life: c(&[(0.0, 0.7), (0.35, 1.0), (1.0, 0.55)]),
-                        rotation_deg: [-15.0, 15.0],
-                        sprite: Sprite::Flame,
-                        color: g(&[
-                            (0.0, [1.0, 0.82, 0.5, 0.0]),
-                            (0.12, [1.0, 0.78, 0.42, 1.0]),
-                            (0.6, [1.0, 0.55, 0.16, 0.8]),
-                            (1.0, [1.0, 0.36, 0.06, 0.0]),
-                        ]),
-                        emissive: 14_000.0,
-                        additive: 0.7,
-                        ..em("bed")
+                        rate: 6.0,
+                        offset: [0.0, -0.02, 0.0],
+                        shape: EmitShape::Disc { radius: 0.08 },
+                        speed: [0.0, 0.0],
+                        lifetime: [0.9, 1.3],
+                        size: [0.46, 0.56],
+                        rotation_deg: [0.0, 0.0],
+                        local_space: true,
+                        steady: true,
+                        sprite: Sprite::Blaze,
+                        facing: Facing::Axis,
+                        stretch: 1.3,
+                        color: fade([1.0, 0.62, 0.24], 1.0, 0.3, 0.7),
+                        emissive: 11_000.0,
+                        additive: 0.45,
+                        wind: 0.0,
+                        soft: 0.05,
+                        ..em("blaze")
                     },
                     // Tongues: rise fast on their own heat, stretch, narrow to a point and redden.
                     EmitterDesc {
-                        rate: 48.0,
-                        offset: [0.0, 0.05, 0.0],
-                        shape: EmitShape::Disc { radius: 0.11 },
+                        rate: 10.0,
+                        offset: [0.0, 0.12, 0.0],
+                        shape: EmitShape::Disc { radius: 0.09 },
                         speed: [0.3, 0.6],
                         acceleration: [0.0, 2.5, 0.0],
                         drag: 1.4,
@@ -2653,13 +3006,13 @@ fn misc() -> Vec<EffectDesc> {
                         sprite: Sprite::Flame,
                         color: g(&[
                             (0.0, [1.0, 0.72, 0.32, 0.0]),
-                            (0.08, [1.0, 0.66, 0.26, 1.0]),
-                            (0.45, [1.0, 0.42, 0.08, 0.9]),
-                            (0.75, [0.9, 0.2, 0.03, 0.35]),
-                            (1.0, [0.5, 0.07, 0.01, 0.0]),
+                            (0.08, [1.0, 0.68, 0.28, 0.9]),
+                            (0.35, [1.0, 0.56, 0.18, 0.5]),
+                            (0.6, [1.0, 0.46, 0.12, 0.0]),
+                            (1.0, [1.0, 0.4, 0.1, 0.0]),
                         ]),
-                        emissive: 13_000.0,
-                        additive: 0.75,
+                        emissive: 9_000.0,
+                        additive: 0.9,
                         ..em("flames")
                     },
                     // Tips: scraps torn off the tongues' tops, flickering out within a blink.
@@ -2693,7 +3046,7 @@ fn misc() -> Vec<EffectDesc> {
                         shape: EmitShape::Disc { radius: 0.12 },
                         speed: [0.3, 0.8],
                         velocity: [0.0, 1.2, 0.0],
-                        acceleration: [0.0, 0.8, 0.0],
+                        acceleration: [0.0, 0.5, 0.0],
                         drag: 1.0,
                         turbulence: 4.0,
                         turbulence_scale: 0.35,

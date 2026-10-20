@@ -23,13 +23,14 @@ use crate::faction::{Faction, Squad};
 use crate::features::ExplosiveProp;
 use crate::learning::OpponentModels;
 use crate::perception::{NpcMemory, Perceivable, Perceivables};
+use crate::seed::{Seed, seed_of};
 use crate::skills::NpcSkills;
 use crate::squad::{AttackTokens, ReviveClaims};
 use crate::world_model::{TacticalWorld, physics_backend};
 
-/// Deterministic 0..1 noise from an entity, a time and a salt (combat rolls).
-pub(crate) fn roll(e: Entity, now: f64, salt: u64) -> f32 {
-    let h = hash_u64(e.to_bits() ^ (now * 1000.0) as u64 ^ salt.wrapping_mul(0x9e37_79b9));
+/// Deterministic 0..1 noise from a body's [`Seed`], a time and a salt (combat rolls).
+pub(crate) fn roll(seed: u64, now: f64, salt: u64) -> f32 {
+    let h = hash_u64(seed ^ (now * 1000.0) as u64 ^ salt.wrapping_mul(0x9e37_79b9));
     (h >> 40) as f32 / (1u64 << 24) as f32
 }
 
@@ -107,6 +108,7 @@ pub(crate) fn notice_attacks(
     seen: Res<Perceivables>,
     mut models: ResMut<OpponentModels>,
     time: Res<Time>,
+    seeds: Query<&Seed>,
 ) {
     for ev in events.read() {
         models
@@ -141,7 +143,8 @@ pub(crate) fn notice_attacks(
                 continue;
             }
             let model = models.get(ev.attacker);
-            let mut reaction = skills.reaction_time * (0.85 + 0.4 * roll(me, clock.now, 7));
+            let mut reaction =
+                skills.reaction_time * (0.85 + 0.4 * roll(seed_of(&seeds, me), clock.now, 7));
             // Rhythm learned: the guard is already half up when the swing comes.
             if let Some(expected) = model.next_attack_expected()
                 && (expected - time.elapsed_secs_f64()).abs() < 0.35
@@ -174,6 +177,7 @@ pub(crate) fn defend(
         &mut NpcBrain,
     )>,
     mut triggers: MessageWriter<AnimationTrigger>,
+    seeds: Query<&Seed>,
 ) {
     for (me, clock, skills, weapon, mut combat, vitals, brain) in &mut q {
         let now = clock.now;
@@ -207,7 +211,7 @@ pub(crate) fn defend(
                 && left > 0.2
                 && weapon.can_block
                 && skills.defense > 0.6
-                && roll(me, a.lands_at, 13) < skills.defense * 0.7
+                && roll(seed_of(&seeds, me), a.lands_at, 13) < skills.defense * 0.7
             {
                 continue;
             }
@@ -216,7 +220,7 @@ pub(crate) fn defend(
                 late += 1;
                 continue;
             }
-            let r = roll(me, now, 11);
+            let r = roll(seed_of(&seeds, me), now, 11);
             if r > skills.defense {
                 continue; // read it, but not well enough to do anything
             }
@@ -305,6 +309,8 @@ pub(crate) struct Strike {
     aim: DVec3,
     /// The attacker's clock when it landed (seeds the shot's scatter).
     at: f64,
+    /// The attacker's [`Seed`].
+    seed: u64,
 }
 
 type FighterItem<'a> = (
@@ -336,6 +342,7 @@ pub(crate) fn resolve_attacks(
     mut traces: MessageWriter<ProjectileTrace>,
     mut noise: MessageWriter<NoiseEvent>,
     mut strikes: Local<Vec<Strike>>,
+    seeds: Query<&Seed>,
 ) {
     strikes.clear();
     for (me, t, clock, skills, weapon, mut combat, _, intent) in &mut q {
@@ -392,6 +399,7 @@ pub(crate) fn resolve_attacks(
             forward: Vec3::new(fwd.x, 0.0, fwd.z).normalize_or(Vec3::NEG_Z),
             aim,
             at: now,
+            seed: seed_of(&seeds, me),
         });
     }
     if !settings.resolve_hits {
@@ -576,8 +584,8 @@ fn resolve_shot(
         * (1.0 + 3.0 * (1.0 - haze));
     // Random direction in a cone (deterministic per shot; seeded by when it is fired, so a
     // shooter standing still doesn't send every shot to the same spot).
-    let r1 = roll(s.attacker, s.at, 3);
-    let r2 = roll(s.attacker, s.at, 5);
+    let r1 = roll(s.seed, s.at, 3);
+    let r2 = roll(s.seed, s.at, 5);
     let ang = spread * r1.sqrt();
     let rot = r2 * TAU;
     let side = aim_dir.any_orthonormal_vector();
@@ -770,10 +778,10 @@ impl Lie {
         )
     }
 
-    /// How `e` lies, knocked over along `push` (see [`Downed::push`]); with none, back and a
-    /// little to one side. How it lands differs from one NPC to the next.
-    pub fn of(e: Entity, push: Option<f32>) -> Lie {
-        let vary = ((e.to_bits() as u32) as f32 * 0.618_034).fract();
+    /// How a body lies, knocked over along `push` (see [`Downed::push`]); with none, back and a
+    /// little to one side. How it lands differs from one NPC to the next: `vary` is its
+    /// [`Seed::unit`](crate::Seed::unit).
+    pub fn of(vary: f32, push: Option<f32>) -> Lie {
         Lie {
             yaw: push.unwrap_or((vary - 0.5) * 0.8),
             bent: usize::from(vary > 0.5),
@@ -1172,6 +1180,7 @@ mod tests {
             forward: -Vec3::Z,
             aim: target.position,
             at,
+            seed: 0,
         };
         let dir = -Vec3::Z;
         let (mut head, mut body, mut legs) = (0, 0, 0);

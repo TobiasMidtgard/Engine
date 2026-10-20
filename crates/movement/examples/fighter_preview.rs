@@ -3,11 +3,14 @@
 //! procedural animation.
 //!
 //! ```text
-//! cargo run -p engine_movement --release --example fighter_preview -- [out_dir] [quick]
+//! cargo run -p engine_movement --release --example fighter_preview -- [out_dir] [quick|ladder|vault]
 //! ```
 //!
 //! `quick` stops after the lineup, helmets, faces, backs and whole bodies (for iterating on
-//! armor).
+//! armor); `ladder` renders only pilots on a ladder (climbing at two moments of the hand over
+//! hand cycle, sliding down, and getting on with the sword going away) from the side and from
+//! behind; `vault` renders only pilots vaulting a barrier at a sprint (the take-off, the hand
+//! planted, the legs over and the drop).
 //!
 //! Each pose comes from the real animator ([`Animator`]) fed a short scripted timeline of
 //! movement and combat state, exactly as the demo feeds it from `Mover` and `CombatState`.
@@ -160,6 +163,209 @@ fn shoot(app: &mut App, camera: Entity, view: (DVec3, DVec3, f32), path: &Path) 
     }
 }
 
+/// Pilots on a ladder up a wall at `at`, each on its own ladder 3 m apart: climbing at two
+/// moments of the cycle, sliding down, and halfway through getting on. Shot from the side,
+/// from behind on the right and from behind on the left.
+fn ladder_shots(app: &mut App, camera: Entity, out: &Path, at: DVec3) {
+    use engine_movement::ladder::{RUNG, RUNG_AHEAD};
+    let v = DVec3::new;
+    let climbing = |climbed: f32, speed: f32, sliding: bool, secs: f32| {
+        simulate(Style::Pilot, secs, |t| AnimInput {
+            mode: LocomotionMode::Climb,
+            grounded: false,
+            velocity: Vec3::Y * speed,
+            fighter: false,
+            ladder: Some(rig::LadderAnim {
+                climbed: climbed - speed * (secs - t),
+                speed,
+                sliding,
+            }),
+            ..AnimInput::default()
+        })
+    };
+    // Getting on: from standing, a few frames into the ladder.
+    let getting_on = simulate(Style::Pilot, 1.12, |t| AnimInput {
+        mode: if t < 1.0 {
+            LocomotionMode::Idle
+        } else {
+            LocomotionMode::Climb
+        },
+        fighter: false,
+        ladder: (t >= 1.0).then_some(rig::LadderAnim {
+            climbed: 0.0,
+            speed: 0.0,
+            sliding: false,
+        }),
+        ..AnimInput::default()
+    });
+    let poses = [
+        ("climb_a", 1.05, climbing(1.05, 2.4, false, 1.0)),
+        ("climb_b", 1.2, climbing(1.2, 2.4, false, 1.0)),
+        ("slide", 1.2, climbing(1.2, -7.0, true, 1.0)),
+        ("getting_on", 0.0, getting_on),
+    ];
+    let mut paths = Vec::new();
+    // Turned round, the climbers face +Z with the low sun on their backs.
+    let turn = |x: f64, y: f64, z: f64| v(-x, y, -z);
+    for (k, (name, climbed, pose)) in poses.iter().enumerate() {
+        let base = at + v(k as f64 * 3.0, 0.0, 0.0);
+        // The wall, the rails and the rungs: the lowest rung 0.3 m up, the feet's line
+        // `RUNG_AHEAD` behind the rungs.
+        let z = -(RUNG_AHEAD as f64);
+        block(
+            &mut app.world,
+            base + turn(0.0, 3.0, z - 0.32),
+            [1.6, 6.0, 0.4],
+            0x8d8a84,
+        );
+        for x in [-0.23, 0.23] {
+            block(
+                &mut app.world,
+                base + turn(x, 3.0, z),
+                [0.044, 6.0, 0.044],
+                0x9aa1a8,
+            );
+        }
+        for i in 0..18 {
+            let y = 0.3 + i as f64 * RUNG as f64;
+            block(
+                &mut app.world,
+                base + turn(0.0, y, z),
+                [0.46, 0.032, 0.032],
+                0x9aa1a8,
+            );
+        }
+        let feet = base + v(0.0, 0.3 + *climbed, 0.0);
+        let a = spawn_actor(&mut app.world, Style::Pilot, feet, std::f32::consts::PI);
+        set_pose(&mut app.world, &a, pose);
+        for (side, eye, target) in [
+            ("side", turn(2.3, 1.2, -0.1), turn(0.0, 1.0, -0.15)),
+            ("back_right", turn(1.3, 1.9, 2.0), turn(0.0, 1.05, -0.1)),
+            ("back_left", turn(-1.4, 0.9, 1.9), turn(0.0, 1.1, -0.1)),
+        ] {
+            let p = out.join(format!("ladder_{name}_{side}.png"));
+            if shoot(app, camera, (feet + eye, feet + target, 40.0), &p) {
+                paths.push(p);
+            }
+        }
+    }
+    if !paths.is_empty() {
+        sheet(
+            &paths,
+            3,
+            WIDTH / 3,
+            HEIGHT / 3,
+            &out.join("ladder_sheet.png"),
+        );
+    }
+}
+
+/// A pilot sprinting into a vault over a concrete barrier, at four moments: the take-off, the
+/// left hand planted with the hips rising past the top, the legs swung over it, and the drop
+/// off the far side. Each over its own barrier 8 m apart, on the timing the movement module
+/// gives a sprinter; shot from ahead, from ahead on the right and from behind on the left.
+fn vault_shots(app: &mut App, camera: Entity, out: &Path, at: DVec3) {
+    use engine_movement::vault::{CLEAR, DROP, HAND_LEFT, KEEP, LIFT};
+    let v = DVec3::new;
+    // The barrier's top above the feet and its depth, and the pilot's capsule radius, m.
+    let (top, depth, radius) = (0.81f32, 0.25f32, 0.35f32);
+    // The run and the take-off: where rising at `LIFT` just clears the top at the face.
+    let run = 8.0f32;
+    let keep = run * KEEP;
+    let rise = top + CLEAR;
+    let gap = run * rise / LIFT + 0.1;
+    let lift = rise / (gap / run);
+    let s0 = -(radius + gap);
+    let risen = rise / lift;
+    let release = (depth + radius * 0.9 - s0) / keep;
+    let skim = rise + 0.03;
+    // At `t` s from the take-off: the feet's distance past the barrier's face and height, the
+    // velocity (forward, up), the mode and whether vaulting.
+    let state = |t: f32| -> (f32, f32, Vec3, LocomotionMode, bool) {
+        let s = s0 + if t < 0.0 { run * t } else { keep * t };
+        if t < 0.0 {
+            (s, 0.0, v3(run, 0.0), LocomotionMode::Sprint, false)
+        } else if t < risen {
+            (s, lift * t, v3(keep, lift), LocomotionMode::Mantle, true)
+        } else if t < release {
+            (s, skim, v3(keep, 0.0), LocomotionMode::Mantle, true)
+        } else {
+            let f = t - release;
+            let y = skim - DROP * f - 4.9 * f * f;
+            if y > 0.0 {
+                let vy = -DROP - 9.81 * f;
+                (s, y, v3(keep, vy), LocomotionMode::Air, false)
+            } else {
+                (s, 0.0, v3(keep, 0.0), LocomotionMode::Sprint, false)
+            }
+        }
+    };
+    let input = |t: f32| {
+        let (s, y, vel, mode, vaulting) = state(t);
+        AnimInput {
+            mode,
+            grounded: mode == LocomotionMode::Sprint,
+            velocity: vel,
+            fighter: false,
+            effort: 1.0,
+            vault: vaulting.then_some(rig::VaultAnim {
+                plant: Vec3::new(-HAND_LEFT, top - y, s),
+                along: s,
+                depth,
+            }),
+            ..AnimInput::default()
+        }
+    };
+    let moments = [
+        ("take_off", 0.04),
+        ("hand_planted", (-0.3 - s0) / keep),
+        ("legs_over", (depth * 0.6 - s0) / keep),
+        ("drop", release + 0.1),
+    ];
+    let mut paths = Vec::new();
+    // Turned round, the vaulters run toward +Z with the low sun behind them on the right.
+    let turn = |x: f64, y: f64, z: f64| v(-x, y, -z);
+    for (k, (name, t)) in moments.into_iter().enumerate() {
+        let base = at + v(k as f64 * 8.0, 0.0, 0.0);
+        block(
+            &mut app.world,
+            base + turn(0.0, top as f64 * 0.5, -(depth as f64) * 0.5),
+            [3.0, top, depth],
+            0x9c978e,
+        );
+        let pose = simulate(Style::Pilot, 1.0 + t, |tau| input(tau - 1.0));
+        let (s, y, ..) = state(t);
+        let feet = base + turn(0.0, y as f64, -s as f64);
+        let a = spawn_actor(&mut app.world, Style::Pilot, feet, std::f32::consts::PI);
+        set_pose(&mut app.world, &a, &pose);
+        let hips = feet + v(0.0, 0.85, 0.0);
+        for (side, eye) in [
+            ("front", turn(0.4, 0.2, -3.3)),
+            ("front_right", turn(2.3, 0.5, -2.4)),
+            ("back_left", turn(-2.0, 0.7, 2.4)),
+        ] {
+            let p = out.join(format!("vault_{k}_{name}_{side}.png"));
+            if shoot(app, camera, (hips + eye, hips, 40.0), &p) {
+                paths.push(p);
+            }
+        }
+    }
+    if !paths.is_empty() {
+        sheet(
+            &paths,
+            3,
+            WIDTH / 3,
+            HEIGHT / 3,
+            &out.join("vault_sheet.png"),
+        );
+    }
+}
+
+/// Forward and up speeds as a character-space velocity (forward is −Z).
+fn v3(forward: f32, up: f32) -> Vec3 {
+    Vec3::new(0.0, up, -forward)
+}
+
 /// Puts images on one sheet, `cols` across, each scaled to `tw`×`th`.
 fn sheet(paths: &[PathBuf], cols: u32, tw: u32, th: u32, out: &Path) {
     let rows = (paths.len() as u32).div_ceil(cols);
@@ -272,6 +478,15 @@ fn main() {
 
     let idle = AnimInput::default();
     let v = DVec3::new;
+
+    if std::env::args().nth(2).is_some_and(|a| a == "ladder") {
+        ladder_shots(&mut app, camera, &out, stage(30));
+        return;
+    }
+    if std::env::args().nth(2).is_some_and(|a| a == "vault") {
+        vault_shots(&mut app, camera, &out, stage(30));
+        return;
+    }
 
     // 0: the lineup.
     let mut lineup = Vec::new();

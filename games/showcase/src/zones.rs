@@ -221,6 +221,7 @@ pub const GRASSY_ZONES: &[&str] = &[
     "parkour",
     "fortress",
     "weather",
+    "footsteps",
 ];
 
 /// Rectangles inside grassy zones where a module's demo lays its own ground, so no grass grows
@@ -229,11 +230,14 @@ pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     // The weather station's asphalt yard, sand pit and stone patio.
     ("weather", [-13.5, 13.0], [-8.0, 9.0]),
     // The siege fortress's gravel breach range.
-    ("fortress", [-26.5, 26.5], [-14.0, -4.0]),
+    ("fortress", [-33.5, 26.5], [-14.0, -4.0]),
     // The siege fortress's breach house and the stair up its back wall.
     ("fortress", [11.2, 18.8], [17.7, 25.4]),
     // The market's cobbled square (grass still grows where its edge frays out).
     ("market", [-11.0, 11.0], [-11.0, 11.0]),
+    // The footstep trail and its own meadow, which thins out about 7 m from the path, where
+    // the valley's grass patches (reaching 2 m past this) take over.
+    ("footsteps", [-30.0, 30.0], [-12.0, 12.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south
@@ -265,10 +269,59 @@ fn lake_water<'a>(z: &Zone, ground: &'a dyn Fn(f64, f64) -> f64) -> engine_water
     }
 }
 
+/// A tour stop for one of the water module's views; those it marks as pure CPU simulation warm
+/// up without drawing.
+fn water_view(v: &engine_water::demo::DemoView) -> View {
+    let view = View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs);
+    if v.quick_warmup {
+        view.quick_warmup()
+    } else {
+        view
+    }
+}
+
 /// Where Physics' float test floats: out on the deep water south-east of the lake's middle,
 /// clear of the jetty and the dinghy's lane on the west side.
 fn float_test(lake: &Zone) -> DVec3 {
     lake.center + DVec3::new(20.0, crate::landscape::LAKE_LEVEL, -20.0)
+}
+
+/// Water over the stream's bed at the silk rinse, m (as the water sim runs it).
+const RINSE_DEPTH: f64 = 0.47;
+
+/// The yard's silk rinse: across the stream in the southern woods, 30 m above the falls, where
+/// it runs about half a meter deep at 1.3 m/s between steep banks 5.7 m apart. Returns the middle of the pole's
+/// span at the water's height (as the bed suggests), the way the stream runs, and the width
+/// from bank to bank at the water.
+fn rinse_site(land: &Landscape) -> (DVec3, DVec2, f64) {
+    let (a, b) = (DVec2::from(STREAM[2]), DVec2::from(STREAM[3]));
+    let down = (b - a).normalize();
+    let west = DVec2::new(down.y, -down.x);
+    let mid = a + down * 28.0;
+    let h = |k: f64| {
+        let p = mid + west * k;
+        land.height(p.x, p.y)
+    };
+    let bed = (-60..=60)
+        .map(|i| i as f64 * 0.1)
+        .min_by(|x, y| h(*x).total_cmp(&h(*y)))
+        .unwrap_or(0.0);
+    let water = h(bed) + RINSE_DEPTH;
+    // Out from the deepest point each way to where the bank rises out of the water.
+    let bank = |dir: f64| {
+        let mut k = bed;
+        while k.abs() < 8.0 && h(k) < water + 0.03 {
+            k += dir * 0.05;
+        }
+        k
+    };
+    let (east, west_bank) = (bank(-1.0), bank(1.0));
+    let center = mid + west * ((east + west_bank) * 0.5);
+    (
+        DVec3::new(center.x, water, center.y),
+        down,
+        west_bank - east,
+    )
 }
 
 /// The runway's two ends (x, z): 1.2 km north–south through the airfield.
@@ -370,6 +423,15 @@ pub fn spawn_demos(
                 commands
                     .entity(boat)
                     .insert(engine_water::WaterInteractor::new(0.8).with_wake(1.0));
+                // Dyed silks rinsed in the stream above the falls (they tie on once the
+                // lake zone's stream is running), the pole's ends against the banks.
+                let (at, down, width) = rinse_site(land);
+                engine_softbody::demo::rinse::spawn_rinse(
+                    commands,
+                    at,
+                    Vec3::new(down.x as f32, 0.0, down.y as f32),
+                    width as f32 + 0.1,
+                );
             }
             "magic" => engine_vfx::demo::spawn_demo(commands, z.center),
             "gallery2d" => ph::gallery2d(commands, lib, z),
@@ -551,10 +613,14 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
         "field" => engine_fire::demo::VIEWS
             .iter()
             .map(|v| {
-                // Each stop starts a fresh fire its own way along, so it catches its moment.
+                // Each stop starts a fresh fire its own way along in clear air, so it catches
+                // its moment whichever stop came before. Fire, smoke and embers are CPU
+                // simulations, so the warm-up runs undrawn.
                 View::new(v.key, v.name, v.eye, v.target, v.hour)
+                    .on_arrive("smoke.clear", "{}")
                     .on_arrive("fire.demo", &format!(r#"{{"at_secs": {}}}"#, v.at_secs))
                     .warmup(v.warmup_secs)
+                    .quick_warmup()
             })
             .collect(),
         "parkour" => {
@@ -654,6 +720,34 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.grappler", "{}")
                 .on_leave("movement.duel", cycle),
+                // The tower ladder: the climber restarts its loop on arrival and is caught
+                // halfway up the caged ladder, hand over hand, the roof railing above it.
+                View::new(
+                    "parkour_ladder",
+                    "Ladder: climb the tower's caged ladder hand over hand, slide back down",
+                    [26.6, 2.0, 19.4],
+                    [23.0, 3.6, 14.6],
+                    16.0,
+                )
+                // Halfway up about 2.9 s into the loop.
+                .warmup(2.45)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_arrive("movement.ladder", "{}")
+                .on_leave("movement.duel", cycle),
+                // The vault lane: the vaulter restarts its run on arrival and is caught going
+                // over the concrete barrier at a sprint, its left hand planted on the top.
+                View::new(
+                    "parkour_vault",
+                    "Vault: sprint over a railing, a concrete barrier and strapped cases without slowing",
+                    [-14.0, 1.3, 5.4],
+                    [-16.2, 1.15, 2.0],
+                    16.0,
+                )
+                // Over the barrier about 2.57 s into the run.
+                .warmup(1.92)
+                .on_arrive("movement.duel", &duel("Blink"))
+                .on_arrive("movement.vaulter", "{}")
+                .on_leave("movement.duel", cycle),
                 // The freight station: the rider restarts its loop on arrival, with the car
                 // about to pull out, and is caught leaping onto the car's side.
                 View::new(
@@ -731,13 +825,35 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 ui(
                     "market_shop",
                     "The trader's shop",
-                    r#"{"screen": "shop", "select": "rifle"}"#,
+                    r#"{"screen": "shop", "select": "staff"}"#,
                 ),
                 ui(
                     "market_inventory",
                     "Inventory and equipment",
                     r#"{"screen": "inventory", "select": "greatsword"}"#,
                 ),
+                ui(
+                    "market_journal",
+                    "Quest journal",
+                    r#"{"screen": "journal", "select": "silent_relay"}"#,
+                ),
+                ui(
+                    "market_skills",
+                    "Skill tree",
+                    r#"{"screen": "skills", "select": "c_cleave"}"#,
+                ),
+                // Over the HUD, so the slow-motion gauge shows the world slowing.
+                View::new(
+                    "market_wheel",
+                    "Quick-select wheel (slows time)",
+                    eye.to_array(),
+                    target.to_array(),
+                    15.0,
+                )
+                .warmup(1.5)
+                .on_arrive("ui.show", r#"{"screen": "hud", "instant": true}"#)
+                .on_arrive("ui.show", r#"{"screen": "wheel"}"#)
+                .on_leave("ui.hide_all", "{}"),
                 ui(
                     "market_map_galaxy",
                     "Galaxy map",
@@ -771,9 +887,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             let mut views: Vec<View> =
                 engine_water::demo::valley_views(&lake_water(z, &|x, z| land.height(x, z)))
                     .iter()
-                    .map(|v| {
-                        View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs)
-                    })
+                    .map(water_view)
                     .collect();
             // The float test from the south, 8 m off and 3 m up, a few seconds after a drop
             // (its cycle runs while the camera is near, so it drops as the camera arrives).
@@ -790,10 +904,7 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             );
             views
         }
-        "water" => engine_water::demo::VIEWS
-            .iter()
-            .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs))
-            .collect(),
+        "water" => engine_water::demo::VIEWS.iter().map(water_view).collect(),
         "yard" => vec![
             View::new(
                 "yard_banners",
@@ -847,7 +958,8 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 15.0,
             )
             .on_arrive("softbody.unveil", "{}")
-            .warmup(18.4),
+            .warmup(18.4)
+            .quick_warmup(),
             // On the lake: the dinghy's mooring is 85 m east and 110 m south of the yard. It
             // starts its lane over on arrival, so it is out on the water in view.
             View::new(
@@ -859,6 +971,27 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             )
             .on_arrive("softbody.sailboat_home", "{}")
             .warmup(12.0),
+            // From the stream's west bank, upstream of the silk rinse, with the afternoon sun
+            // behind: down through the clear water onto the silks streaming away.
+            // The stream is the lake zone's: render with `--tour yard_rinse --zones yard,lake`.
+            {
+                let land = crate::landscape::shared();
+                let (at, down, width) = rinse_site(land);
+                let west = DVec2::new(down.y, -down.x);
+                let c = DVec2::new(at.x, at.z);
+                let eye = c + west * (width * 0.5 + 1.0) - down * 1.2;
+                let eye_y = (at.y + 2.6).max(land.height(eye.x, eye.y) + 1.7);
+                let rel = |p: DVec2, y: f64| [p.x - z.center.x, y, p.y - z.center.z];
+                View::new(
+                    "yard_rinse",
+                    "Dyed silks rinsed in a mountain stream",
+                    rel(eye, eye_y),
+                    rel(c + down * 3.4, at.y - 0.2),
+                    15.0,
+                )
+                .warmup(6.0)
+                .quick_warmup()
+            },
         ],
         "fortress" => destruction_views(engine_destruction::demo::VIEWS),
         "voxel" => destruction_views(engine_destruction::hill::VIEWS),
@@ -1191,6 +1324,81 @@ pub fn moon_position() -> DVec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_silk_rinse_streams_out_in_the_running_stream() {
+        use engine::core::time::TimeSource;
+        use engine::world::{Ground, SurfaceMaterials, Water};
+        let land = crate::landscape::shared();
+        let mut app = App::new();
+        app.world.resource_mut::<EngineConfig>().headless = true;
+        app.world
+            .resource_mut::<Time>()
+            .set_source(TimeSource::Manual {
+                step_secs: 1.0 / 30.0,
+            });
+        app.add_plugins((
+            engine::world::WorldPlugin,
+            engine_water::WaterPlugin,
+            engine_softbody::SoftBodyPlugin,
+        ));
+        let ground =
+            crate::landscape::LandscapeGround::new(land.clone(), &mut SurfaceMaterials::default());
+        app.insert_resource(Ground(std::sync::Arc::new(ground)));
+        let (at, down, width) = rinse_site(land);
+        assert!(
+            (4.0..7.0).contains(&width),
+            "the stream is {width:.2} m wide there"
+        );
+        app.add_systems(Startup, move |mut commands: Commands| {
+            engine_water::demo::spawn_valley(
+                &mut commands,
+                &lake_water(zone("lake"), &|x, z| land.height(x, z)),
+            );
+            engine_softbody::demo::rinse::spawn_rinse(
+                &mut commands,
+                at,
+                Vec3::new(down.x as f32, 0.0, down.y as f32),
+                width as f32 + 0.1,
+            );
+        });
+        app.update_n(30 * 10);
+
+        // The stream runs deep and steady there, down this reach, as high as the bed suggests.
+        let w = app.world.resource::<Water>().0.sample(at + DVec3::Y * 10.0);
+        let w = w.expect("the stream at the rinse");
+        let flow = DVec2::new(w.velocity.x as f64, w.velocity.z as f64);
+        assert!(w.depth > 0.3, "{w:?}");
+        assert!(flow.dot(down) > 0.4, "{w:?}");
+        assert!(
+            (w.surface_height - at.y).abs() < 0.15,
+            "{w:?} vs {:.2}",
+            at.y
+        );
+        // Five silks tied on, wet, streaming downstream from the pole.
+        let mut q = app.world.query::<&engine_softbody::SoftBodySim>();
+        let silks: Vec<_> = q.iter(&app.world).collect();
+        assert_eq!(silks.len(), 5);
+        for b in silks {
+            let reach = (0..b.particle_count())
+                .map(|i| {
+                    let p = b.world_position(i);
+                    assert!(p.is_finite());
+                    let along = DVec2::new(p.x - at.x, p.z - at.z).dot(down);
+                    // Past the knot, in the water: not riding up the banks.
+                    assert!(
+                        along < 1.0 || p.y < w.surface_height + 0.15,
+                        "a silk rides {:.2} m above the water",
+                        p.y - w.surface_height
+                    );
+                    along
+                })
+                .fold(f64::MIN, f64::max);
+            let wet = b.wet.iter().sum::<f32>() / b.wet.len() as f32;
+            assert!(reach > 5.0, "a silk reaches only {reach:.2} m downstream");
+            assert!(wet > 0.5, "a silk is only {wet:.2} wet");
+        }
+    }
 
     #[test]
     fn the_float_test_has_open_deep_water() {

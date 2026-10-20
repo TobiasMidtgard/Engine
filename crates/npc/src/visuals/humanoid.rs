@@ -928,6 +928,8 @@ impl Foe {
 /// What a fighter's pose sees beyond its owner this step.
 pub(super) struct Seen<'a> {
     pub me: Entity,
+    /// 0..1, the same every step for this fighter (from its seed): how it lands differs.
+    pub vary: f32,
     /// Where the owner stands.
     pub at: DVec3,
     /// The attacks telegraphed this step: attacker, target and kind.
@@ -5438,7 +5440,7 @@ pub(super) fn humanoid(
                 .filter(|h| (h.since - since).abs() < 0.3)
                 .and_then(|h| Lie::pushed(h.push))
         });
-        let lie = Lie::of(seen.me, push);
+        let lie = Lie::of(seen.vary, push);
         Fall {
             t: (now - since).max(0.0) as f32,
             yaw: lie.yaw,
@@ -6802,6 +6804,7 @@ mod tests {
                 };
                 let seen = Seen {
                     me: Entity::PLACEHOLDER,
+                    vary: ((Entity::PLACEHOLDER.to_bits() as u32) as f32 * 0.618_034).fract(),
                     at: DVec3::ZERO,
                     attacks: &attacks,
                     blows: &landed,

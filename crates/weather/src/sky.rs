@@ -179,11 +179,14 @@ pub(crate) fn sky_system(
 
     for (mut t, mut light) in &mut suns {
         aim(&mut t, out.sun_dir);
-        light.illuminance = out.sun_lux * out.cloud_dimming;
+        // By day the sun stays brighter than the moon however thick the cloud: the renderer
+        // takes its brightest light for the sun that lights the sky, haze and fog, and a
+        // moon below the horizon turned a storm at noon black.
+        light.illuminance = out.sun_lux * out.cloud_dimming.max(SUN_DIMMING_FLOOR);
     }
     for (mut t, mut light) in &mut moons {
         aim(&mut t, out.moon_dir);
-        light.illuminance = out.moon_lux * out.cloud_dimming.max(0.05);
+        light.illuminance = out.moon_lux * out.cloud_dimming.max(MOON_DIMMING_FLOOR);
     }
 
     // Night fill: a dim blue constant light so moonless nights still read.
@@ -221,11 +224,17 @@ pub fn compute_lights(sky: &Sky, climate: &Climate, sim: &WeatherSim) -> SkyLigh
     }
 }
 
+/// The least of the sun that thick cloud lets through as direct light (a storm leaves the
+/// ground lit by the cloud deck itself, which the renderer gets from the sky map).
+pub(crate) const SUN_DIMMING_FLOOR: f32 = 0.0001;
+/// The least of the moon that thick cloud lets through.
+pub(crate) const MOON_DIMMING_FLOOR: f32 = 0.05;
+
 /// How much thick cloud dims the sun at the player (1 = not at all). Only kicks in when most
 /// of the sky is covered, so passing cumulus don't flicker the whole scene; the renderer's
 /// cloud shadows (when it has them) handle the patchy case.
 pub fn cloud_dimming(sim: &WeatherSim, sun_dir: Vec3) -> f32 {
-    let overcast = smoothstep(0.6, 0.95, sim.regional_cover);
+    let overcast = smoothstep(0.55, 0.88, sim.regional_cover);
     if overcast <= 0.0 {
         return 1.0;
     }

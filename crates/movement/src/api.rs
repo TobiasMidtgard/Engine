@@ -239,6 +239,35 @@ pub(crate) fn register(app: &mut App) {
         },
     );
     app.register_api(
+        "movement.ladder",
+        "Restart the movement demo's ladder climber from the start of its loop: it walks to the \
+         caged ladder on the back of the course tower, climbs it, steps off onto the roof, looks \
+         out over the course, then climbs back down a few rungs and slides the rest.",
+        "{}",
+        |world, _args| {
+            let n = crate::demo::restart_ladder_climbers(world);
+            if n == 0 {
+                return Err(
+                    "no ladder climber in this world (spawn it with demo::spawn_demo)".into(),
+                );
+            }
+            Ok(json!({ "ladder_climbers": n }))
+        },
+    );
+    app.register_api(
+        "movement.vaulter",
+        "Restart the movement demo's vaulter from the start of its loop: it sprints down the \
+         vault lane and vaults a railing, a concrete barrier and a stack of cases.",
+        "{}",
+        |world, _args| {
+            let n = crate::demo::restart_vaulters(world);
+            if n == 0 {
+                return Err("no vaulter in this world (spawn it with demo::spawn_demo)".into());
+            }
+            Ok(json!({ "vaulters": n }))
+        },
+    );
+    app.register_api(
         "movement.grappler",
         "Restart the movement demo's grappler from the start of its loop: it sprints at the \
          grapple tower, jumps, hooks its top edge, is reeled up the wall, climbs over, then runs \

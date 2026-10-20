@@ -5,6 +5,7 @@ mod articulation;
 mod buoyancy;
 mod capsule_box;
 mod character;
+mod cones;
 mod convert;
 mod debug;
 pub mod demo;
@@ -51,6 +52,9 @@ pub struct PhysicsStats {
     pub substeps: u32,
     /// Joints solved as articulations (see [`PhysicsSettings::articulated_joints`]).
     pub articulated: usize,
+    /// Static colliders copied into regions, all regions together (a static shared by two
+    /// regions counts twice).
+    pub static_copies: usize,
 }
 
 impl PhysicsStats {
@@ -77,6 +81,7 @@ impl PhysicsStats {
                 .values()
                 .filter(|j| matches!(j.created, Some((_, sim::JointHandle::Articulated { .. }))))
                 .count(),
+            static_copies: sim.live_regions().map(|(_, r)| r.statics.len()).sum(),
         }
     }
 }

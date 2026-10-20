@@ -246,6 +246,33 @@ fn shots() -> Vec<Shot> {
             frames: 12,
             face_moon: false,
         },
+        // Out of the rain under the bus shelter, looking out at the soaked yard: the ground
+        // under the roof is dry while everything in view past it is wet.
+        Shot {
+            name: "station_under_the_shelter",
+            setup: vec![dry(), set("rain"), hour(14.0), advance(900.0)],
+            eye: DVec3::new(-3.0, 1.5, -3.7),
+            target: DVec3::new(1.5, 0.4, 3.5),
+            frames: 12,
+            face_moon: false,
+        },
+        // Fair-weather cumulus from up on a hill: their shadows dapple the land below.
+        Shot {
+            name: "14_cloud_shadows_on_the_valley",
+            setup: vec![dry(), set("partly_cloudy"), hour(11.0), advance(900.0)],
+            eye: DVec3::new(0.0, 80.0, 40.0),
+            target: DVec3::new(0.0, 0.0, -500.0),
+            frames: 10,
+            face_moon: false,
+        },
+        Shot {
+            name: "15_flying_over_fair_weather_clouds",
+            setup: vec![set("partly_cloudy"), hour(10.0), advance(60.0)],
+            eye: DVec3::new(0.0, 4200.0, 0.0),
+            target: DVec3::new(0.0, 2600.0, -6000.0),
+            frames: 10,
+            face_moon: false,
+        },
     ]
 }
 
@@ -338,6 +365,9 @@ fn main() {
         }
         if let Some(v) = env("CLOUD_SHAPE") {
             c.shape_scale_m = v;
+        }
+        if let Some(v) = env("CLOUD_STEPS") {
+            c.steps = v as u32;
         }
     }
     // The weather clock spawns its sun and moon on the second frame.

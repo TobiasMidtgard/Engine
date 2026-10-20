@@ -20,6 +20,7 @@ use engine_world::LocomotionMode;
 
 use super::fighter::Style;
 use crate::combat::AttackPhase;
+use crate::ladder::{RUNG, RUNG_AHEAD};
 
 /// Height of the ankle joint above the sole, m.
 pub const ANKLE_HEIGHT: f32 = 0.085;
@@ -43,7 +44,7 @@ pub const BLADE_SORI: f32 = 0.02;
 pub const SHEATH_MOUTH: Vec3 = Vec3::new(-0.155, 0.995, -0.115);
 
 /// The bones of a fighter. The first [`Bone::ANIMATED`] are posed every frame (children of
-/// the character entity); `Sword` rides on the right hand and `Blade` on the sword.
+/// the character entity); `Blade` rides on the sword.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Bone {
     Pelvis,
@@ -72,7 +73,8 @@ pub enum Bone {
     TassetR,
     /// The scabbard on the left hip.
     Sheath,
-    /// The katana's grip (child of `HandR`).
+    /// The katana's grip: in the right hand, or where the pose leaves it when the hand lets
+    /// go ([`Pose::free_r`]).
     Sword,
     /// The blade, from the guard to the point (child of `Sword`).
     Blade,
@@ -111,7 +113,7 @@ impl Bone {
     ];
 
     /// Bones posed every frame (the rest ride on their parents).
-    pub const ANIMATED: usize = 23;
+    pub const ANIMATED: usize = 24;
 
     pub fn index(self) -> usize {
         self as usize
@@ -358,6 +360,11 @@ pub struct Pose {
     pub knee: [Vec3; 2],
     /// The sword (its grip, where the right hand holds it).
     pub sword: Xf,
+    /// The right hand (wrist) when it lets go of the sword ([`free_r`](Self::free_r)).
+    pub hand_r: Xf,
+    /// 0..1: the right hand has let go of the sword (left where `sword` is, in the scabbard
+    /// say) and reaches for `hand_r` instead.
+    pub free_r: f32,
     /// The left hand (wrist) when it isn't on the handle.
     pub hand_l: Xf,
     /// 0..1: the left hand on the sword's handle.
@@ -410,6 +417,11 @@ impl Pose {
             pos: Vec3::new(0.16, 0.82, 0.02),
             rot: Quat::IDENTITY,
         },
+        hand_r: Xf {
+            pos: Vec3::new(0.19, 0.89, 0.02),
+            rot: Quat::IDENTITY,
+        },
+        free_r: 0.0,
         hand_l: Xf {
             pos: Vec3::new(-0.19, 0.89, 0.02),
             rot: Quat::IDENTITY,
@@ -448,6 +460,8 @@ impl Pose {
         }
         if channels != Channels::Body {
             self.sword = self.sword.lerp(other.sword, t);
+            self.hand_r = self.hand_r.lerp(other.hand_r, t);
+            self.free_r += (other.free_r - self.free_r) * t;
             self.hand_l = self.hand_l.lerp(other.hand_l, t);
             self.grip_l += (other.grip_l - self.grip_l) * t;
             self.follow_l += (other.follow_l - self.follow_l) * t;
@@ -569,8 +583,9 @@ pub fn solve(p: &Pose) -> [Xf; BONES] {
         );
     }
 
-    // Right arm: the hand follows the sword.
-    let hand_r_target = p.sword.then(grip_r().inverse());
+    // Right arm: the hand follows the sword, or lets go of it and reaches for `hand_r`.
+    let free_r = p.free_r.clamp(0.0, 1.0);
+    let hand_r_target = p.sword.then(grip_r().inverse()).lerp(p.hand_r, free_r);
     let shoulder_r = chest.point(off(Bone::Chest, Bone::UpperArmR));
     let (elbow_r, wrist_r) = two_bone(
         shoulder_r,
@@ -610,7 +625,10 @@ pub fn solve(p: &Pose) -> [Xf; BONES] {
     out[Bone::PauldronL.index()] = Xf::new(shoulder_l, slerp(chest.rot, ua_l, 0.4));
 
     out[Bone::Sheath.index()] = p.sheath_xf();
-    let sword = hand_r.then(grip_r());
+    // In the hand, or (let go of) where the pose put it.
+    let sword = hand_r
+        .then(grip_r())
+        .lerp(p.sword, smooth(0.0, 0.15, free_r));
     out[Bone::Sword.index()] = sword;
     out[Bone::Blade.index()] = sword.then(Xf::at(Vec3::new(0.0, 0.0, BLADE_BASE_Z)));
 
@@ -637,6 +655,33 @@ pub struct AttackAnim {
     pub secs: f32,
 }
 
+/// A ladder being climbed, as the animation sees it: the rungs are [`RUNG`] apart from the
+/// lowest, [`RUNG_AHEAD`] in front of the feet (character space −Z).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LadderAnim {
+    /// How far the feet are above the lowest rung, m.
+    pub climbed: f32,
+    /// Speed up the ladder, m/s (negative going down).
+    pub speed: f32,
+    /// Sliding down on the rails.
+    pub sliding: bool,
+}
+
+/// A vault over an obstacle, as the animation sees it: the body takes off before it, is over
+/// its top from when the capsule's front reaches it (`along` about −0.35) until it is past it
+/// (`along` about `depth` + 0.35), and drops off beyond.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VaultAnim {
+    /// Where the left hand plants on the obstacle's top: its near edge (character space).
+    pub plant: Vec3,
+    /// How far the feet are past the plant along the way the vault goes, m: negative before
+    /// it. Facing the way the vault goes, this is `plant.z`; while still turning to it, it
+    /// keeps the timing right.
+    pub along: f32,
+    /// How deep the top is, m.
+    pub depth: f32,
+}
+
 /// Everything the animation reads, in character space and own seconds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AnimInput {
@@ -658,6 +703,10 @@ pub struct AnimInput {
     /// Riding a zip line: where the hand holds the cable and the way the line runs (unit),
     /// character space.
     pub zip: Option<(Vec3, Vec3)>,
+    /// Climbing a ladder.
+    pub ladder: Option<LadderAnim>,
+    /// Vaulting over an obstacle.
+    pub vault: Option<VaultAnim>,
     /// Part of a dash-strike.
     pub dash_strike: bool,
     pub attack: Option<AttackAnim>,
@@ -683,6 +732,8 @@ impl Default for AnimInput {
             ledge: None,
             grapple: None,
             zip: None,
+            ladder: None,
+            vault: None,
             dash_strike: false,
             attack: None,
             blocking: false,
@@ -885,6 +936,10 @@ struct Weights {
     reel: f32,
     /// Hanging from a zip line.
     zip: f32,
+    /// On a ladder.
+    ladder: f32,
+    /// Vaulting.
+    vault: f32,
     dash: f32,
     attack: f32,
     block: f32,
@@ -930,6 +985,10 @@ pub struct Animator {
     /// Swing about the zip line's grip (rad, legs forward when positive) and its rate.
     swing: f32,
     swing_rate: f32,
+    /// The ladder last climbed.
+    ladder: Option<LadderAnim>,
+    /// The last vault.
+    vault: Option<VaultAnim>,
     secs: f32,
     last: Option<Pose>,
 }
@@ -968,6 +1027,8 @@ impl Animator {
             zip_on: false,
             swing: 0.0,
             swing_rate: 0.0,
+            ladder: None,
+            vault: None,
             secs: 0.0,
             last: None,
         }
@@ -1000,6 +1061,16 @@ impl Animator {
             // Planted feet must not lag behind the gait.
             smoothed.ankle = pose.ankle;
             smoothed.foot = pose.foot;
+            // Nor hands holding rungs behind the climb, or one planted on a vaulted top.
+            let rungs = smooth(0.9, 1.0, self.w.ladder);
+            if rungs > 0.0 {
+                smoothed.hand_l = smoothed.hand_l.lerp(pose.hand_l, rungs);
+                smoothed.hand_r = smoothed.hand_r.lerp(pose.hand_r, rungs);
+            }
+            let planted = input.vault.map_or(0.0, vault_plant);
+            if planted > 0.0 {
+                smoothed.hand_l = smoothed.hand_l.lerp(pose.hand_l, planted);
+            }
             pose = smoothed;
         }
         self.last = Some(pose);
@@ -1076,7 +1147,13 @@ impl Animator {
         if let Some((hook, _)) = input.grapple {
             self.hook = Some(hook);
         }
-        if input.mode == LocomotionMode::Climb {
+        if input.ladder.is_some() {
+            self.ladder = input.ladder;
+        }
+        if input.vault.is_some() {
+            self.vault = input.vault;
+        }
+        if input.mode == LocomotionMode::Climb && input.ladder.is_none() {
             // One hand-over-hand cycle per 0.6 m along the ledge.
             self.shimmy = (self.shimmy + input.velocity.x * dt / 0.6).rem_euclid(1.0);
         }
@@ -1157,8 +1234,16 @@ impl Animator {
             9.0,
         );
         ease(&mut w.wall, on(mode == M::WallRun), 11.0);
-        ease(&mut w.mantle, on(mode == M::Mantle), 16.0);
-        ease(&mut w.hang, on(mode == M::Climb), 14.0);
+        // A mantle onto a ledge (stepping off the top of a ladder onto the floor is none).
+        let ledge = input.ledge.is_some_and(|(top, _)| top.y > 0.25);
+        ease(&mut w.mantle, on(mode == M::Mantle && ledge), 16.0);
+        ease(
+            &mut w.hang,
+            on(mode == M::Climb && input.ladder.is_none()),
+            14.0,
+        );
+        ease(&mut w.ladder, on(input.ladder.is_some()), 10.0);
+        ease(&mut w.vault, on(input.vault.is_some()), 18.0);
         ease(&mut w.aim, on(input.grapple.is_some()), 22.0);
         let reeling = input.grapple.is_some_and(|(_, bit)| bit) && mode == M::Air;
         ease(&mut w.reel, on(reeling), 10.0);
@@ -1217,6 +1302,18 @@ impl Animator {
         {
             p.blend(&mantle(top, rising), w.mantle, Channels::Body);
         }
+        if w.vault > 1e-3
+            && let Some(v) = self.vault
+        {
+            // Off the ground until over the top, and dropping off past it.
+            let weight = vault_weight(w.vault, input);
+            p.blend(&air(input.velocity.y, None), weight, Channels::Body);
+            p.blend(
+                &vault_body(v.plant.y),
+                weight * vault_over(v),
+                Channels::Body,
+            );
+        }
         if w.hang > 1e-3
             && let Some((top, _)) = self.ledge
         {
@@ -1232,6 +1329,11 @@ impl Animator {
             && let Some((grip, _)) = self.zip
         {
             p.blend(&zip_ride(grip, self.swing), w.zip, Channels::Body);
+        }
+        if w.ladder > 1e-3
+            && let Some(l) = self.ladder
+        {
+            p.blend(&ladder_body(l), w.ladder, Channels::Body);
         }
         if w.dash > 1e-3 {
             p.blend(&dash(input.dash_strike), w.dash, Channels::Body);
@@ -1328,6 +1430,13 @@ impl Animator {
         {
             p.blend(&mantle_arms(top, torso), w.mantle, Channels::Arms);
         }
+        if w.vault > 1e-3
+            && let Some(v) = self.vault
+        {
+            let mut a = to_ground(air_arms(0.0));
+            vault_arms(&mut a, v, torso);
+            p.blend(&a, vault_weight(w.vault, input), Channels::Arms);
+        }
         if w.hang > 1e-3
             && let Some((top, _)) = self.ledge
         {
@@ -1351,6 +1460,27 @@ impl Animator {
             let mut a = to_ground(zip_arms());
             zip_hand(&mut a, grip);
             p.blend(&a, w.zip, Channels::Arms);
+        }
+        if w.ladder > 1e-3
+            && let Some(l) = self.ladder
+        {
+            // Getting on, the sword goes into the scabbard first, then the hands go to the
+            // rungs (and back the other way getting off).
+            // On the ladder the scabbard swings down along the leg, the sword in it.
+            let in_sheath = |sheath: Quat| Pose { sheath, ..*body }.sheath_xf().then(sheathed());
+            if p.free_r <= 0.0 {
+                p.hand_r = p.sword.then(grip_r().inverse());
+            }
+            let mut a = p;
+            a.sword = in_sheath(p.sheath);
+            a.elbow[1] = torso.rot * v3(0.6, -0.5, 0.6);
+            p.blend(&a, smooth(0.0, 0.5, w.ladder), Channels::Arms);
+            if w.ladder > 0.5 {
+                let mut rungs = ladder_arms(l, torso);
+                rungs.sword = p.sword;
+                p.blend(&rungs, smooth(0.5, 1.0, w.ladder), Channels::Arms);
+                p.sword = in_sheath(p.sheath);
+            }
         }
         if w.dash > 1e-3 {
             p.blend(&to_ground(dash_arms()), w.dash, Channels::Arms);
@@ -1698,6 +1828,48 @@ fn mantle(top: Vec3, rising: bool) -> Pose {
     p
 }
 
+/// How far over the obstacle a vault is: 0 taking off, 1 over the top, 0 again dropping off
+/// the far side.
+fn vault_over(v: VaultAnim) -> f32 {
+    let z = v.along;
+    smooth(-1.3, -0.5, z) * (1.0 - smooth(v.depth + 0.1, v.depth + 0.5, z))
+}
+
+/// How firmly the left hand is planted on the top: from when it reaches it until the
+/// shoulder is past it.
+fn vault_plant(v: VaultAnim) -> f32 {
+    smooth(-0.6, -0.4, v.along) * (1.0 - smooth(0.15, 0.35, v.along))
+}
+
+/// How far the left hand has gone to the top: reaching for it, on it, then letting go.
+fn vault_hold(v: VaultAnim) -> f32 {
+    smooth(-1.2, -0.6, v.along) * (1.0 - smooth(0.15, 0.35, v.along))
+}
+
+/// How much of the vault pose shows, `eased` in over time: a vault that takes off close to
+/// the top (a low one, or one from the air) goes straight to it, so the hand is planted in time.
+fn vault_weight(eased: f32, input: &AnimInput) -> f32 {
+    input.vault.map_or(eased, |v| eased.max(vault_hold(v)))
+}
+
+/// Over an obstacle (a speed vault): the hips skimming its top, the legs swung out together
+/// to the right nearly straight and level with it, the body leaning left over the planted
+/// hand, the head level and looking ahead. The top is `top` above the feet (skimming it, about
+/// −0.11); the hips sink further onto a top that is lower than that so the hand still reaches it.
+fn vault_body(top: f32) -> Pose {
+    let mut p = Pose::BIND;
+    p.pelvis = v3(0.1, 0.14 + (top + 0.11).clamp(-0.15, 0.0), -0.02);
+    p.pelvis_rot = rz(0.3) * ry(-0.3);
+    p.spine = rz(0.35) * pitch(0.25);
+    p.chest = rz(0.2) * pitch(0.1) * ry(0.15);
+    p.neck = rz(-0.2) * pitch(-0.2);
+    p.head = rz(-0.3) * pitch(-0.25) * ry(-0.1);
+    p.ankle = [v3(0.8, 0.34, -0.36), v3(0.86, 0.24, -0.12)];
+    p.foot = [ry(-0.6) * pitch(0.2), ry(-0.6) * pitch(0.1)];
+    p.knee = [v3(0.2, 1.0, -0.6), v3(0.2, 1.0, -0.4)];
+    p
+}
+
 /// Hanging from a ledge whose top is at `top` (character space): the body below the hands,
 /// legs loose with the toes against the wall, looking up at the edge. `sway` (−1..1) swings
 /// the hips side to side while shimmying.
@@ -1787,7 +1959,128 @@ fn zip_hand(p: &mut Pose, grip: Vec3) {
     p.elbow[0] = v3(-1.0, -0.15, 0.25).normalize();
 }
 
-/// Dashing: a low forward lunge through the air.
+/// One limb's place on a ladder `climbed` m up (rungs [`RUNG`] apart from the lowest), the
+/// diagonal pair `pair` (0: left hand and right foot, 1: right hand and left foot): the height
+/// of the rung it holds or is moving to above the feet, m, and how far through a move between
+/// rungs it is (0 holding .. 1). The pairs take turns, each moving two rungs while the body
+/// climbs one: a foot stands a rung above the feet when it's put down and straightens as the
+/// body rises past it.
+fn rung_hold(climbed: f32, pair: usize) -> (f32, f32) {
+    let offset = pair as f32 * RUNG;
+    let cycle = (climbed + offset) / (2.0 * RUNG);
+    let k = cycle.floor();
+    let f = cycle - k;
+    let moving = ((f - 0.5) * 2.0).clamp(0.0, 1.0);
+    let s = moving * moving * (3.0 - 2.0 * moving);
+    let rung = 2.0 * RUNG * k - offset + RUNG + 2.0 * RUNG * s;
+    (rung - climbed, if f >= 0.5 { moving } else { 0.0 })
+}
+
+/// How far a moving hand or foot swings out from the ladder at `u` (0..1) through its move.
+fn rung_clear(u: f32) -> f32 {
+    (u * PI).sin()
+}
+
+/// The body on a ladder (character space: the feet's line at the origin, the rungs
+/// [`RUNG_AHEAD`] in front): close in to the rungs, a foot on one and the other moving to the
+/// next, the hips rocking with the legs and the head looking the way it climbs. Sliding, the
+/// feet clamp the rails from outside and the body leans back.
+fn ladder_body(l: LadderAnim) -> Pose {
+    let mut p = Pose::BIND;
+    let a = ANKLE_HEIGHT;
+    let rung_z = -RUNG_AHEAD;
+    if l.sliding {
+        p.pelvis = v3(0.0, 0.86, 0.12);
+        p.spine = pitch(-0.05);
+        p.chest = pitch(0.08);
+        p.head = pitch(0.45);
+        p.ankle = [
+            v3(-0.27, 0.12 + a, rung_z + 0.06),
+            v3(0.27, 0.05 + a, rung_z + 0.06),
+        ];
+        p.foot = [ry(-0.7) * pitch(0.2), ry(0.7) * pitch(0.2)];
+        p.knee = [v3(-0.8, 0.1, -0.6), v3(0.8, 0.1, -0.6)];
+        return p;
+    }
+    let up = smooth(0.2, 1.5, l.speed);
+    let down = smooth(0.2, 1.5, -l.speed);
+    // Feet: the right one goes with the left hand (pair 0), the left with the right (pair 1).
+    let mut lift = [0.0; 2];
+    for (i, pair) in [(0usize, 1usize), (1, 0)] {
+        let (y, u) = rung_hold(l.climbed, pair);
+        let side = if i == 0 { -0.12 } else { 0.12 };
+        let out = 0.12 * rung_clear(u);
+        // The ball of the foot on the rung, the ankle behind it.
+        p.ankle[i] = v3(side, y + a + 0.03 * rung_clear(u), rung_z + 0.1 + out);
+        p.foot[i] = pitch(0.1 + 0.35 * rung_clear(u));
+        p.knee[i] = v3(side * 5.0, 0.2, -1.0);
+        lift[i] = y;
+    }
+    // The hips rise with the higher foot and rock toward it.
+    let rock = ((lift[1] - lift[0]) / RUNG).clamp(-1.0, 1.0);
+    p.pelvis = v3(0.03 * rock, 0.9 + 0.04 * lift[0].max(lift[1]), 0.15);
+    p.pelvis_rot = rz(0.05 * rock) * ry(-0.04 * rock);
+    p.spine = pitch(0.1);
+    p.chest = pitch(0.04) * ry(0.05 * rock);
+    p.neck = pitch(-0.05);
+    p.head = pitch(-0.3 * up + 0.4 * down);
+    p
+}
+
+/// The hands on a ladder's rungs (or its rails, sliding), each fist closed around the rung as
+/// around a sword's handle, the sword in the scabbard.
+fn ladder_arms(l: LadderAnim, torso: Xf) -> Pose {
+    let mut p = Pose::BIND;
+    let rung_z = -RUNG_AHEAD;
+    // The forearm runs back and down from a fist on a rung; the fingers wrap over its top.
+    let over = v3(0.0, 0.75, -0.65).normalize();
+    let fist = |x: f32, y: f32, out: f32, thumb: Vec3, grip: Xf| {
+        Xf::new(v3(x, y, rung_z + out), sword_rot(thumb, over)).then(grip.inverse())
+    };
+    if l.sliding {
+        // Loose fists around the rails, thumbs up.
+        let rail = v3(0.0, 0.3, -1.0).normalize();
+        let on_rail = |x: f32, grip: Xf| {
+            Xf::new(v3(x, 1.45, rung_z + 0.02), sword_rot(Vec3::Y, rail)).then(grip.inverse())
+        };
+        p.hand_r = on_rail(0.24, grip_r());
+        p.hand_l = on_rail(-0.24, grip_l());
+        p.curl_l = 0.6;
+    } else {
+        // Hands five rungs above the feet: the left with the right foot, the right with the
+        // left.
+        let reach = 5.0 * RUNG;
+        let (yl, ul) = rung_hold(l.climbed, 0);
+        let (yr, ur) = rung_hold(l.climbed, 1);
+        p.hand_l = fist(-0.17, yl + reach, 0.1 * rung_clear(ul), Vec3::X, grip_l());
+        p.hand_r = fist(
+            0.17,
+            yr + reach,
+            0.1 * rung_clear(ur),
+            Vec3::NEG_X,
+            grip_r(),
+        );
+        p.curl_l = 1.0 - 0.7 * rung_clear(ul);
+    }
+    p.free_r = 1.0;
+    p.grip_l = 0.0;
+    p.follow_l = 0.0;
+    // Elbows down and a little out, under the hands.
+    p.elbow = [
+        torso.rot * v3(-0.45, -0.85, 0.25),
+        torso.rot * v3(0.45, -0.85, 0.25),
+    ];
+    p.sheath = ladder_sheath();
+    p
+}
+
+/// The scabbard turned to hang down along the left leg (instead of sticking out behind),
+/// out of the way of a ladder's cage.
+fn ladder_sheath() -> Quat {
+    let down = v3(-0.12, -0.95, 0.28).normalize();
+    Quat::from_rotation_arc(Vec3::NEG_Z, sheath_on_pelvis().rot.inverse() * down)
+}
+
 /// The left shoulder, before the body rotation.
 const SHOULDER_L: Vec3 = Vec3::new(-0.19, 1.44, 0.0);
 
@@ -1838,6 +2131,7 @@ fn aim_arm(p: &mut Pose, hook: Vec3, body: &Pose) {
     p.elbow[0] = (elbow.normalize() + v3(-0.4, 0.0, 0.0)).normalize();
 }
 
+/// Dashing: a low forward lunge through the air.
 fn dash(strike: bool) -> Pose {
     let mut p = Pose::BIND;
     let a = ANKLE_HEIGHT;
@@ -2077,6 +2371,26 @@ fn mantle_arms(top: Vec3, torso: Xf) -> Pose {
         torso.rot * v3(0.8, -0.3, 0.6),
     ];
     p
+}
+
+/// Vaulting: the left hand reaches for the top and plants on it, flat with the fingers
+/// ahead, until the body is past it; the sword arm swings out to the right for balance and
+/// the scabbard up along the legs, clear of the top.
+fn vault_arms(p: &mut Pose, v: VaultAnim, torso: Xf) {
+    let over = vault_over(v);
+    let hold = vault_hold(v);
+    let flat = Xf::new(
+        v.plant + v3(0.0, 0.065, 0.0),
+        left_hand(Vec3::NEG_Y, v3(0.4, 0.0, -1.0).normalize()),
+    );
+    p.hand_l = p.hand_l.lerp(flat, hold);
+    p.follow_l *= 1.0 - hold;
+    p.curl_l = lerp(p.curl_l, 0.05, hold);
+    p.elbow[0] = p.elbow[0].lerp(torso.rot * v3(-0.5, -0.2, 0.8), hold);
+    let balance = sword(v3(0.35, 0.7, 0.0), v3(0.45, -0.3, 0.85), v3(0.0, -1.0, 0.0));
+    p.sword = p.sword.lerp(balance, over);
+    p.elbow[1] = p.elbow[1].lerp(torso.rot * v3(0.7, -0.4, 0.4), over);
+    p.sheath = p.sheath.slerp(rx(-0.8), over);
 }
 
 /// Both hands on the ledge whose top is at `top` (character space). While shimmying
@@ -2328,6 +2642,149 @@ mod tests {
         let local = sheath.inverse().point(tip);
         assert!((local.z + BLADE_LENGTH).abs() < 0.08, "{local}");
         assert!(local.x.abs() < 0.01 && local.y.abs() < 0.03, "{local}");
+    }
+
+    #[test]
+    fn climbing_a_ladder_puts_the_hands_and_feet_on_rungs_and_the_sword_away() {
+        let mut anim = Animator::new(Style::Pilot);
+        let mut input = AnimInput {
+            mode: LocomotionMode::Climb,
+            grounded: false,
+            velocity: v3(0.0, 2.0, 0.0),
+            ladder: Some(LadderAnim {
+                climbed: 1.0,
+                speed: 2.0,
+                sliding: false,
+            }),
+            ..Default::default()
+        };
+        run(&mut anim, input, 0.8);
+        // On a rung: within a few centimeters of one (the grid `RUNG` apart from the lowest,
+        // which is at the feet's height at `climbed` 0), `RUNG_AHEAD` in front.
+        let on_rung = |p: Vec3, climbed: f32| {
+            let y = p.y + climbed;
+            ((y / RUNG).round() * RUNG - y).abs() < 0.03 && (p.z + RUNG_AHEAD).abs() < 0.03
+        };
+        let mut held = [0; 2];
+        for k in 0..120 {
+            // Climbing at 2 m/s.
+            let climbed = 1.0 + k as f32 * 2.0 * input.dt;
+            input.ladder = Some(LadderAnim {
+                climbed,
+                speed: 2.0,
+                sliding: false,
+            });
+            let pose = anim.update(&input);
+            let bones = solve(&pose);
+            let fists = [
+                bones[Bone::HandL.index()].then(grip_l()).pos,
+                bones[Bone::HandR.index()].then(grip_r()).pos,
+            ];
+            for (i, fist) in fists.into_iter().enumerate() {
+                assert!(fist.y > 1.4 && fist.y < 1.9, "hand {i} at {fist}");
+                if on_rung(fist, climbed) {
+                    held[i] += 1;
+                }
+            }
+            // At least one foot always stands on a rung; the soles never go through one.
+            let soles = [Bone::FootL, Bone::FootR]
+                .map(|f| bones[f.index()].pos - v3(0.0, ANKLE_HEIGHT, 0.0) + v3(0.0, 0.0, -0.1));
+            assert!(
+                soles.iter().any(|&s| on_rung(s, climbed)),
+                "no foot on a rung at {climbed:.2}: {soles:?}"
+            );
+            // The sword is in the scabbard.
+            let sheathed = pose.sheath_xf().then(sheathed());
+            assert!(bones[Bone::Sword.index()].pos.distance(sheathed.pos) < 0.01);
+        }
+        // Each hand holds a rung about half the time and moves to the next the other half.
+        assert!(held.iter().all(|&h| h > 40), "{held:?}");
+    }
+
+    #[test]
+    fn a_vault_plants_the_left_hand_on_the_top_and_swings_the_legs_over_it() {
+        // Sprinting at 8 m/s over a 0.5 m deep top: the feet rise as the capsule (radius 0.35)
+        // reaches it, overshoot the 0.11 m skim above it and settle to it, then drop off past
+        // it. Over a 1 m barrier taking off early, a low crate taking off late, and a top just
+        // above the feet reached in the air.
+        for (top, from) in [(1.0, -1.6), (0.5, -1.0), (0.25, -0.75)] {
+            let (depth, speed) = (0.5, 8.0);
+            let end = depth + 0.35;
+            let mut anim = Animator::new(Style::Pilot);
+            let mut input = AnimInput {
+                mode: LocomotionMode::Sprint,
+                velocity: v3(0.0, 0.0, -speed),
+                ..Default::default()
+            };
+            run(&mut anim, input, 0.5);
+            input.mode = LocomotionMode::Mantle;
+            input.grounded = false;
+            let (mut along, mut feet, mut fall, mut skim) = (from, 0.0f32, 0.0f32, 0.0f32);
+            let mut planted = 0;
+            while along < end {
+                along += speed * input.dt;
+                if along < -0.35 {
+                    feet = (top + 0.2) * (along - from) / (-0.35 - from);
+                } else if along > end - 0.04 {
+                    fall += 9.81 * input.dt;
+                    feet -= (2.0 + fall) * input.dt;
+                } else {
+                    skim += input.dt;
+                    feet = top + 0.11 + 0.09 * (-skim / 0.08).exp();
+                }
+                let plant = v3(-0.22, top - feet, along);
+                input.vault = Some(VaultAnim {
+                    plant,
+                    along,
+                    depth,
+                });
+                let pose = anim.update(&input);
+                let bones = solve(&pose);
+                let at = |b: Bone, local: Vec3| bones[b.index()].point(local);
+                // The left hand flat on the top while the body passes over it, from when the
+                // capsule is over its edge.
+                if (-0.3..=0.15).contains(&along) {
+                    let wrist = bones[Bone::HandL.index()].pos;
+                    let target = plant + v3(0.0, 0.065, 0.0);
+                    assert!(
+                        wrist.distance(target) < 0.04,
+                        "hand at {wrist} for {target} at {along:.2} over {top}"
+                    );
+                    planted += 1;
+                }
+                if (-0.35..=end).contains(&along) {
+                    // Nothing goes through the top: soles, toes, thighs and the scabbard's
+                    // tip stay above it while over it.
+                    let mut points = vec![("scabbard tip", at(Bone::Sheath, v3(0.0, 0.0, -0.77)))];
+                    for (foot, thigh) in [(Bone::FootL, Bone::ThighL), (Bone::FootR, Bone::ThighR)]
+                    {
+                        points.push(("toe", at(foot, v3(0.0, -ANKLE_HEIGHT, -0.215))));
+                        points.push(("heel", at(foot, v3(0.0, -ANKLE_HEIGHT, 0.085))));
+                        points.push(("thigh", at(thigh, v3(0.0, -THIGH * 0.5, 0.0))));
+                        points.push(("knee", at(thigh, v3(0.0, -THIGH, 0.0))));
+                    }
+                    for (name, p) in points {
+                        let over = p.z <= along && p.z >= along - depth;
+                        assert!(
+                            !over || p.y > top - feet,
+                            "{name} at {p} into the top ({:.2}) at {along:.2} over {top}",
+                            top - feet
+                        );
+                    }
+                }
+                if (-0.35..=depth + 0.1).contains(&along) {
+                    // The sword out to the right for balance, the hand on its grip.
+                    assert!(bones[Bone::Sword.index()].pos.x > 0.25);
+                    let grip = pose.sword.then(grip_r().inverse()).pos;
+                    let wrist = bones[Bone::HandR.index()].pos;
+                    assert!(
+                        wrist.distance(grip) < 0.02,
+                        "sword hand at {wrist} for {grip} at {along:.2}"
+                    );
+                }
+            }
+            assert!(planted >= 3, "{planted} over {top}");
+        }
     }
 
     #[test]

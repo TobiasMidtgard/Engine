@@ -253,7 +253,13 @@ pub struct Aircraft {
     pub pitch_trim: f32,
     /// Landing gear extended (drawing; wheels still need `Wheels` to touch down).
     pub gear_down: bool,
+    /// How far the gear is out, 0 (stowed) .. 1 (down): runs toward `gear_down` over
+    /// [`GEAR_TRAVEL_S`], doors first, then legs.
+    pub gear: f32,
 }
+
+/// Seconds for the landing gear to go all the way up or down.
+pub const GEAR_TRAVEL_S: f32 = 6.0;
 
 impl Default for Aircraft {
     fn default() -> Self {
@@ -262,6 +268,7 @@ impl Default for Aircraft {
             flaps: 0.0,
             pitch_trim: 0.0,
             gear_down: true,
+            gear: 1.0,
         }
     }
 }
@@ -290,6 +297,12 @@ pub fn aero_surfaces_system(
         .for_each(|(mut aircraft, controls, mut forces, mut tel)| {
             let f = forces.frame;
             let dt = f.dt;
+            let target = if aircraft.gear_down { 1.0 } else { 0.0 };
+            let step = dt / GEAR_TRAVEL_S;
+            let gear = aircraft.gear + (target - aircraft.gear).clamp(-step, step);
+            if gear != aircraft.gear {
+                aircraft.gear = gear;
+            }
             let flaps = aircraft.flaps.clamp(0.0, 1.0);
             let pitch = (controls.pitch + aircraft.pitch_trim).clamp(-1.0, 1.0);
             let mut stalled = false;

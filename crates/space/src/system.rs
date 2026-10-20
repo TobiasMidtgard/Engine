@@ -96,7 +96,9 @@ pub fn solar_system() -> Vec<CelestialBody> {
             "Moon" => b.look = BodyLook::Moon,
             "Mars" => {
                 b.look = BodyLook::Mars;
-                // Dust low down with a thin bluish haze above it.
+                // Its sky, from its ground and in low orbit.
+                b.atmosphere = Some(BodyAtmosphere::mars());
+                // Dust low down with a thin bluish haze above it (seen from elsewhere).
                 b.haze = Some(BodyHaze {
                     optical_depth: 0.3,
                     extinction: [0.9, 1.0, 1.15],

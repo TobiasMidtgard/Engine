@@ -35,6 +35,7 @@ mod texgen;
 mod tour;
 mod tower;
 mod village;
+mod walls;
 mod zones;
 
 use engine::prelude::*;
@@ -72,6 +73,7 @@ fn main() {
             Update,
             (camera::fly, places::run_pending, scenery::update_lods).chain(),
         )
+        .add_systems(Update, scenery::stream_wall_colliders)
         .add_systems(Update, report_assets);
     register_apis(&mut app);
 
@@ -144,9 +146,10 @@ fn setup(
         ResMut<engine::world::SurfaceMaterials>,
     ),
     config: Res<EngineConfig>,
-    (use_planet, demo_zones): (
+    (use_planet, demo_zones, plants): (
         Option<Res<planet::UsePlanet>>,
         Option<Res<zones::DemoZones>>,
+        Res<engine_foliage::PlantLibrary>,
     ),
 ) {
     let t0 = std::time::Instant::now();
@@ -154,6 +157,9 @@ fn setup(
     atmosphere.ground_color = [0.07, 0.13, 0.04];
     // Mountains a few km away should still be in the shadow maps' reach for the valley.
     settings.shadow_distance = settings.shadow_distance.max(400.0);
+    // Every image in the showcase and its module demos is built once and only sampled on the
+    // GPU (audited for round 11), so the CPU copies can go once they are uploaded.
+    settings.release_image_pixels = true;
     // Clear mountain air: a faint valley haze, about 130 km visibility (3.9 / density), so the
     // atmosphere gives the distant ranges their blue and the far shadow map their shade.
     fog.density = 0.00003;
@@ -162,7 +168,7 @@ fn setup(
     let ground = std::sync::Arc::new(landscape::LandscapeGround::new(land.clone(), &mut surfaces));
     // On the planet the terrain answers `Ground` (edits included) and asks this for surfaces.
     commands.insert_resource(engine::world::Ground(ground.clone()));
-    let lib = scenery::build_library(&mut meshes, &mut materials, &mut images);
+    let lib = scenery::build_library(&mut meshes, &mut materials, &mut images, &plants);
     let mut rng = Rng::new(config.seed);
     if use_planet.is_some() {
         planet::spawn(&mut commands, land.clone(), ground);
@@ -171,7 +177,9 @@ fn setup(
     }
     scenery::spawn_woods(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_meadows(&mut commands, &lib, &land, &mut rng);
-    scenery::spawn_farms(&mut commands, &lib, &land, &mut rng);
+    scenery::spawn_meadow_grass(&mut commands, &land);
+    let hedged = scenery::spawn_farms(&mut commands, &lib, &land, &mut rng);
+    scenery::spawn_walls(&mut commands, &lib, &land, &hedged);
     scenery::spawn_rocks(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_village(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_cliffs_and_stream(&mut commands, &mut meshes, &lib, &land, &mut rng);

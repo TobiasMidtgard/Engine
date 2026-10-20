@@ -8,7 +8,7 @@
 //! pictures are the same on every run.
 
 use engine_anim::demo::{DemoEntities, spawn_demo_world};
-use engine_anim::{AnimationPlugin, MuscleRig};
+use engine_anim::{AnimationPlugin, Animator, MuscleRig};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_render::prelude::*;
@@ -286,9 +286,16 @@ fn sequence(spec: &str) -> Vec<Shot> {
         "lifter" => |d| d.lifter,
         "reacher" => |d| d.reacher,
         "walker" => |d| d.walker,
+        "drill" => |d| d.drill,
+        "sparring" => |d| d.sparring,
         "horse" => |d| d.horse,
         "spider" => |d| d.spider,
         "dog" => |d| d.dog,
+        "stuntman" => |d| d.stuntman,
+        "runner" => |d| d.runner,
+        "coach" => |d| d.coach,
+        // The camera fixed in the paddock's frame.
+        "world" => |_| Entity::PLACEHOLDER,
         _ => |d| d.car,
     };
     let num = |i: usize, default: f64| parts.get(i).and_then(|p| p.parse().ok()).unwrap_or(default);
@@ -391,6 +398,12 @@ fn main() {
         Ok(spec) => sequence(&spec),
         Err(_) => shots(),
     };
+    // Play one graph state on the subject at a time, for a motion the demo only reaches
+    // through physics: GALLERY_TRIGGER=get_up_back:1.0 (the stuntman stops his routine).
+    let mut trigger = std::env::var("GALLERY_TRIGGER").ok().and_then(|spec| {
+        let (name, at) = spec.split_once(':')?;
+        Some((name.to_string(), at.parse::<f64>().ok()?))
+    });
     let step = 1.0 / 60.0;
     let mut time = step;
     let end = 40.0;
@@ -399,6 +412,15 @@ fn main() {
     app.world
         .insert_resource(RenderDisabled("parked between shots".into()));
     while !pending.is_empty() && time < end {
+        if let Some((name, _)) = trigger.take_if(|(_, at)| time >= *at) {
+            let e = demo.stuntman;
+            app.world
+                .entity_mut(e)
+                .remove::<engine_anim::stunt::Stunt>();
+            if let Some(mut animator) = app.world.get_mut::<Animator>(e) {
+                animator.trigger(&name);
+            }
+        }
         app.update();
         time += step;
         let mut k = 0;

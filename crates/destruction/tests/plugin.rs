@@ -2,7 +2,7 @@
 //! No GPU needed (mesh assets exist, nothing renders).
 
 use engine_assets::AssetAppExt;
-use engine_core::math::{DVec3, Vec2, Vec3};
+use engine_core::math::{DVec3, Quat, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_core::registry::call_api;
 use engine_core::time::TimeSource;
@@ -146,6 +146,405 @@ fn a_breach_charge_opens_drywall_but_only_scars_reinforced_concrete() {
         bars > 100,
         "the rebar mesh survives ({bars} cells with bars)"
     );
+}
+
+#[test]
+fn debris_piles_up_on_resting_chunks_and_falls_when_they_go() {
+    let mut app = app();
+    let half = Vec3::new(0.5, 0.1, 0.4);
+    let corners: Vec<Vec3> = (0..8)
+        .map(|k| {
+            let s = |b: usize| if k & b == 0 { -1.0 } else { 1.0 };
+            half * Vec3::new(s(1), s(2), s(4))
+        })
+        .collect();
+    let slab = |at: DVec3, asleep: bool| {
+        let mut body = debris::DebrisBody::new(80.0, half, corners.clone(), 0.6);
+        body.asleep = asleep;
+        (
+            Transform::from_translation(at),
+            Debris {
+                mass_kg: 80.0,
+                lifetime: 600.0,
+                ..Default::default()
+            },
+            body,
+        )
+    };
+    // A slab lies on the ground; another drops onto it, a little off center.
+    let below = app.world.spawn(slab(DVec3::new(0.0, 0.1, 0.0), true)).id();
+    let above = app
+        .world
+        .spawn(slab(DVec3::new(0.15, 1.5, 0.1), false))
+        .id();
+    run_secs(&mut app, 2.0);
+    let y = |app: &App| app.world.get::<Transform>(above).unwrap().translation.y;
+    assert!(
+        (y(&app) - 0.3).abs() < 0.03,
+        "lies on the slab below: {}",
+        y(&app)
+    );
+    let body = app.world.get::<debris::DebrisBody>(above).unwrap();
+    assert!(body.asleep && body.on == Some(below), "{:?}", body.on);
+    // Take the bottom one away: the top one drops to the ground.
+    app.world.despawn(below);
+    run_secs(&mut app, 2.0);
+    assert!((y(&app) - 0.1).abs() < 0.03, "on the ground: {}", y(&app));
+}
+
+#[test]
+fn rock_debris_lands_on_ledges_and_slides_off_rock_walls() {
+    let mut app = app();
+    // A 6 m block of rock, 6 m tall: its front half is cut back to a ledge 3 m up, so a 3 m
+    // wall rises behind the ledge with its face at z = 0, toward +Z.
+    let rock = VoxelVolume {
+        dims: [24, 24, 16],
+        voxel_size: 0.25,
+        shape: VoxelShape::Solid,
+        topsoil: None,
+        grass: None,
+        ..VoxelVolume::default()
+    };
+    app.world.spawn((Transform::default(), rock));
+    app.update();
+    app.world.write_message(TerrainEdit {
+        center: DVec3::new(0.0, 4.75, 1.5),
+        shape: EditShape::Box {
+            half_extents: Vec3::new(3.5, 1.75, 1.5),
+            rotation: Quat::IDENTITY,
+        },
+        op: EditOp::Remove,
+        surface: None,
+        source: None,
+    });
+    app.update();
+    let half = Vec3::splat(0.3);
+    let corners: Vec<Vec3> = (0..8)
+        .map(|k| {
+            let s = |b: usize| if k & b == 0 { -1.0 } else { 1.0 };
+            half * Vec3::new(s(1), s(2), s(4))
+        })
+        .collect();
+    let mut boulder = |at: DVec3| {
+        app.world
+            .spawn((
+                Transform::from_translation(at),
+                Debris {
+                    mass_kg: 600.0,
+                    material: DestructibleMaterial::Rock,
+                    lifetime: 600.0,
+                    ..Default::default()
+                },
+                debris::DebrisBody::new(600.0, half, corners.clone(), 0.6),
+            ))
+            .id()
+    };
+    // One drops onto the ledge from above.
+    let dropped = boulder(DVec3::new(-1.5, 5.0, 1.0));
+    // One broke off just under the wall's top and sits 10 cm into its face: the face pushes
+    // it out and it falls to the ledge, instead of being lifted onto the wall's top.
+    let rim = boulder(DVec3::new(1.5, 5.4, 0.2));
+    run_secs(&mut app, 3.0);
+    let at = |e: Entity| app.world.get::<Transform>(e).unwrap().translation;
+    let (a, b) = (at(dropped), at(rim));
+    assert!((a.y - 3.3).abs() < 0.08, "lands on the ledge: {a}");
+    assert!(
+        (b.y - 3.3).abs() < 0.08,
+        "slid off the wall onto the ledge: {b}"
+    );
+    assert!(b.z > 0.27, "out of the wall's face: {b}");
+    for e in [dropped, rim] {
+        assert!(app.world.get::<debris::DebrisBody>(e).unwrap().asleep);
+    }
+}
+
+#[test]
+fn rock_cut_loose_drops_through_its_narrowing_hole_onto_the_cave_floor() {
+    let mut app = app();
+    // A 6 m block of rock with a cave inside, its floor 1 m up, and a shaft from the block's
+    // top down into the cave's roof: 1.4 m wide for its top metre, 1 m wide below.
+    let rock = VoxelVolume {
+        dims: [24, 24, 16],
+        voxel_size: 0.25,
+        shape: VoxelShape::Solid,
+        topsoil: None,
+        grass: None,
+        ..VoxelVolume::default()
+    };
+    app.world.spawn((Transform::default(), rock));
+    app.update();
+    for (center, half) in [
+        (DVec3::new(1.5, 2.0, 0.0), Vec3::new(1.3, 1.0, 1.3)),
+        (DVec3::new(1.5, 5.55, 0.0), Vec3::new(0.7, 0.55, 0.7)),
+        (DVec3::new(1.5, 4.0, 0.0), Vec3::new(0.5, 1.0, 0.5)),
+    ] {
+        app.world.write_message(TerrainEdit {
+            center,
+            shape: EditShape::Box {
+                half_extents: half,
+                rotation: Quat::IDENTITY,
+            },
+            op: EditOp::Remove,
+            surface: None,
+            source: None,
+        });
+    }
+    app.update();
+    // A 1.2 m boulder broken loose in the shaft's wide top: rather than hang on the step where
+    // the shaft narrows, it drops out through the rock around it (as a cave-in's roof does),
+    // then lands on the cave's rock floor, not on the ground under the block.
+    let half = Vec3::splat(0.6);
+    let corners: Vec<Vec3> = (0..8)
+        .map(|k| {
+            let s = |b: usize| if k & b == 0 { -1.0 } else { 1.0 };
+            half * Vec3::new(s(1), s(2), s(4))
+        })
+        .collect();
+    let at = DVec3::new(1.5, 5.65, 0.0);
+    let mut body = debris::DebrisBody::new(4000.0, half, corners, 0.6);
+    body.rock = debris::RockContact::Leaving(at);
+    let boulder = app
+        .world
+        .spawn((
+            Transform::from_translation(at),
+            Debris {
+                mass_kg: 4000.0,
+                material: DestructibleMaterial::Rock,
+                lifetime: 600.0,
+                ..Default::default()
+            },
+            body,
+        ))
+        .id();
+    run_secs(&mut app, 3.0);
+    let p = app.world.get::<Transform>(boulder).unwrap().translation;
+    assert!((p.y - 1.6).abs() < 0.08, "on the cave floor: {p}");
+    let body = app.world.get::<debris::DebrisBody>(boulder).unwrap();
+    assert!(body.asleep && body.rock == debris::RockContact::Lands);
+}
+
+#[test]
+fn a_thin_rock_roof_holds_debris_up_and_cut_rock_drops_through_its_hole() {
+    let mut app = app();
+    // A 6 m block of rock hollowed into a cave up to a roof one voxel (25 cm) thick, with a
+    // 1 m hole through the roof.
+    let rock = VoxelVolume {
+        dims: [24, 24, 16],
+        voxel_size: 0.25,
+        shape: VoxelShape::Solid,
+        topsoil: None,
+        grass: None,
+        ..VoxelVolume::default()
+    };
+    app.world.spawn((Transform::default(), rock));
+    app.update();
+    for (center, half) in [
+        (DVec3::new(0.0, 3.375, 0.0), Vec3::new(2.7, 2.375, 1.7)),
+        (DVec3::new(1.5, 5.9, 0.0), Vec3::new(0.5, 0.3, 0.5)),
+    ] {
+        app.world.write_message(TerrainEdit {
+            center,
+            shape: EditShape::Box {
+                half_extents: half,
+                rotation: Quat::IDENTITY,
+            },
+            op: EditOp::Remove,
+            surface: None,
+            source: None,
+        });
+    }
+    app.update();
+    let boulder = |app: &mut App, at: DVec3, half: f32, rock: debris::RockContact| {
+        let half = Vec3::splat(half);
+        let corners: Vec<Vec3> = (0..8)
+            .map(|k| {
+                let s = |b: usize| if k & b == 0 { -1.0 } else { 1.0 };
+                half * Vec3::new(s(1), s(2), s(4))
+            })
+            .collect();
+        let mut body = debris::DebrisBody::new(1000.0, half, corners, 0.6);
+        body.rock = rock;
+        app.world
+            .spawn((
+                Transform::from_translation(at),
+                Debris {
+                    mass_kg: 1000.0,
+                    material: DestructibleMaterial::Rock,
+                    lifetime: 600.0,
+                    ..Default::default()
+                },
+                body,
+            ))
+            .id()
+    };
+    // One drops onto the roof: the cave under it doesn't pull it through.
+    let on_roof = boulder(
+        &mut app,
+        DVec3::new(-1.5, 7.0, 0.0),
+        0.3,
+        debris::RockContact::Unknown,
+    );
+    // One cut loose above the hole, wider than it: it drops through, and lands on the cave's
+    // floor rather than hanging by its top on the roof once its corners are clear.
+    let at = DVec3::new(1.5, 6.7, 0.0);
+    let cut = boulder(&mut app, at, 0.6, debris::RockContact::Leaving(at));
+    run_secs(&mut app, 3.0);
+    let y = |e: Entity| app.world.get::<Transform>(e).unwrap().translation.y;
+    assert!(
+        (y(on_roof) - 6.3).abs() < 0.08,
+        "on the roof: {}",
+        y(on_roof)
+    );
+    assert!((y(cut) - 1.6).abs() < 0.08, "on the cave floor: {}", y(cut));
+}
+
+#[test]
+fn reinforcement_stops_bullets_and_charges_but_thermite_burns_through() {
+    let mut app = app();
+    // A 3 m drywall facing +Z: two 1.5 m panels go up behind it, at x = −0.75 and +0.75.
+    let wall = spawn_wall(&mut app, DestructibleWall::soft(3.0, 3.0), DVec3::ZERO);
+    // The floor behind it is a gravel pad, a few centimeters up: the struts stand on that.
+    let pad = Transform::from_xyz(0.0, 0.0, -1.5);
+    app.world.spawn((
+        pad,
+        GlobalTransform::from(pad),
+        dress::GravelPad { size: [6.0, 3.0] },
+    ));
+    app.update();
+    app.world.write_message(ReinforceRequest { wall });
+    app.world.write_message(ReinforceRequest { wall });
+    run_secs(&mut app, 0.3);
+    let panels = app
+        .world
+        .get::<ReinforcedBy>(wall)
+        .expect("reinforced")
+        .0
+        .clone();
+    assert_eq!(panels.len(), 2, "one set of two panels for a 3 m wall");
+    let (a, b) = (panels[0], panels[1]);
+    let z = |app: &App, e: Entity| app.world.get::<Transform>(e).unwrap().translation.z;
+    assert!(z(&app, a) < -0.4, "still being carried in: {}", z(&app, a));
+    run_secs(&mut app, 2.0);
+    for p in [a, b] {
+        assert!(app.world.get::<Reinforcement>(p).unwrap().is_set());
+        assert!((-0.15..-0.06).contains(&z(&app, p)), "home: {}", z(&app, p));
+    }
+    let feet: Vec<DVec3> = app
+        .world
+        .query::<(&reinforce::Strut, &GlobalTransform)>()
+        .iter(&app.world)
+        .map(|(s, gt)| gt.transform_point(DVec3::new(0.0, -s.length as f64 * 0.5, 0.0)))
+        .collect();
+    assert_eq!(feet.len(), 4, "two struts a panel");
+    for f in &feet {
+        let floor = dress::GRAVEL_TOP as f64;
+        assert!(
+            (f.y - floor).abs() < 0.03,
+            "a strut foot on the gravel: {f}"
+        );
+        assert!(f.z < -0.9, "planted well behind: {f}");
+    }
+    // Bullets through the drywall stop on the steel.
+    for k in 0..6 {
+        let x = -0.95 + k as f64 * 0.08;
+        app.world.write_message(ProjectileTrace {
+            from: DVec3::new(x, 1.1, 6.0),
+            to: DVec3::new(x, 1.1, -6.0),
+            radius: 0.01,
+            speed: 850.0,
+            shooter: None,
+        });
+    }
+    run_secs(&mut app, 0.3);
+    let integrity = |app: &App, e: Entity| app.world.get::<WallState>(e).unwrap().integrity();
+    assert!(integrity(&app, wall) < 1.0, "the drywall is holed");
+    assert!(solid_at(&app, a, Vec2::new(0.0, 1.1)), "the panel is not");
+    assert!(integrity(&app, a) > 0.99, "{}", integrity(&app, a));
+    // A breach charge strips the drywall and only scars the panel behind.
+    let mut c = BreachCharge::explosive(wall, Vec2::new(-0.75, 1.6), 4.0e5);
+    c.fuse_secs = 0.1;
+    app.world.spawn(c);
+    run_secs(&mut app, 0.6);
+    assert!(
+        !solid_at(&app, wall, Vec2::new(-0.75, 1.6)),
+        "a hole in the drywall"
+    );
+    assert!(solid_at(&app, a, Vec2::new(0.0, 1.6)), "the panel holds");
+    assert!(integrity(&app, a) > 0.95, "{}", integrity(&app, a));
+    // Thermite on the drywall burns through the panel behind it, and only that one.
+    let mut charge = BreachCharge::thermite(wall, Vec2::new(0.75, 1.1), [1.0, 1.6]);
+    charge.fuse_secs = 0.2;
+    app.world.spawn(charge);
+    run_secs(&mut app, 5.5);
+    assert!(!solid_at(&app, wall, Vec2::new(0.75, 1.1)));
+    assert!(
+        !solid_at(&app, b, Vec2::new(0.0, 1.1)),
+        "cut through the panel"
+    );
+    assert!(!solid_at(&app, b, Vec2::new(0.3, 0.5)));
+    assert!(
+        solid_at(&app, b, Vec2::new(0.0, 2.6)),
+        "above the cut stays"
+    );
+    assert!(
+        solid_at(&app, a, Vec2::new(0.6, 1.1)),
+        "the other panel is untouched"
+    );
+    // Panels go with their wall.
+    app.world.despawn(wall);
+    run_secs(&mut app, 0.1);
+    assert!(app.world.get_entity(a).is_err() && app.world.get_entity(b).is_err());
+}
+
+#[test]
+fn ai_reinforces_the_wall_nearest_a_point() {
+    let mut app = app();
+    let wall = spawn_wall(
+        &mut app,
+        DestructibleWall::soft(5.4, 3.0),
+        DVec3::new(20.0, 0.0, 0.0),
+    );
+    app.update();
+    let out = call_api(
+        &mut app.world,
+        "destruction.reinforce",
+        json!({"near": [21, 1.5, -0.8]}),
+    )
+    .unwrap();
+    assert_eq!(out["wall"].as_u64().unwrap(), wall.to_bits(), "{out}");
+    assert_eq!(out["panels"].as_u64().unwrap(), 2, "{out}");
+    run_secs(&mut app, 2.0);
+    let panels = app.world.get::<ReinforcedBy>(wall).unwrap().0.clone();
+    assert_eq!(panels.len(), 2);
+    let again = call_api(
+        &mut app.world,
+        "destruction.reinforce",
+        json!({"entity": wall.to_bits()}),
+    )
+    .unwrap_err();
+    assert!(again.contains("already reinforced"), "{again}");
+    let panel = call_api(
+        &mut app.world,
+        "destruction.reinforce",
+        json!({"entity": panels[0].to_bits()}),
+    )
+    .unwrap_err();
+    assert!(panel.contains("reinforcement panel"), "{panel}");
+    let none = call_api(
+        &mut app.world,
+        "destruction.reinforce",
+        json!({"near": [60, 1.5, 0]}),
+    )
+    .unwrap_err();
+    assert!(none.contains("No wall"), "{none}");
+    reinforce::remove_reinforcement(&mut app.world, wall);
+    assert!(app.world.get_entity(panels[0]).is_err());
+    call_api(
+        &mut app.world,
+        "destruction.reinforce",
+        json!({"entity": wall.to_bits()}),
+    )
+    .unwrap();
 }
 
 fn spawn_flat(app: &mut App, wall: DestructibleWall, at: DVec3) -> Entity {
@@ -521,6 +920,17 @@ fn the_demo_starts_wrecked_and_keeps_going() {
     run_secs(&mut app, 2.5);
     let charges = app.world.query::<&BreachCharge>().iter(&app.world).count();
     assert!(charges >= 1, "the live charges are on their walls");
+    let reinforced: Vec<usize> = app
+        .world
+        .query::<&ReinforcedBy>()
+        .iter(&app.world)
+        .map(|b| b.0.len())
+        .collect();
+    assert_eq!(
+        reinforced,
+        [2],
+        "bay 8's drywall has two panels up behind it"
+    );
 }
 
 #[test]

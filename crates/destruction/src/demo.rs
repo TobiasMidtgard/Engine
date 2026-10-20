@@ -3,7 +3,7 @@
 //!
 //! **Breach range** (a row of bays facing −Z, toward the viewer): each bay is one test case.
 //! Five are an *aftermath*, already wrecked on the first frame with their rubble lying on the
-//! ground; two are *live* and get destroyed again every cycle:
+//! ground; three are *live* and get destroyed again every cycle:
 //!
 //! | bay | wall | test case |
 //! |---|---|---|
@@ -14,6 +14,7 @@
 //! | 5 | reinforced concrete | explosive charge: concrete blown off both faces, rebar mesh left standing |
 //! | 6 | drywall | **live**: rifle bursts, then a breach charge that also shatters the crates in front |
 //! | 7 | brick | a heavy blast hole |
+//! | 8 | drywall | **live**: Siege reinforcement. A burst goes through, a defender sets two steel panels behind it, the next bursts ring off the steel, a breach charge only strips the drywall, and thermite burns through both |
 //!
 //! **Behind the range** (live every cycle): a wooden watchtower in Valheim build-mode support
 //! colors loses its posts one by one and comes down; a stone gate is blasted and its lintel
@@ -42,6 +43,7 @@ use crate::dress::{ArchKind, ArchModel, GravelPad, PropModel};
 use crate::hits::{Hit, HitQueue};
 use crate::material::{DestructibleMaterial, linear};
 use crate::props::{self, PropKind};
+use crate::reinforce::{ReinforceRequest, remove_reinforcement};
 use crate::structure::{Fracturable, FractureShape, ShowSupport, StructuralPiece};
 use crate::voxel::VoxelVolume;
 use crate::wall::{DestructibleWall, WallAnchors, WallState};
@@ -52,7 +54,12 @@ pub const CYCLE_SECS: f32 = 20.0;
 const FOREVER: f32 = 1.0e9;
 
 /// Bay centers along X (relative to the origin) and the row's Z.
-const BAYS: [f64; 7] = [20.4, 13.6, 6.8, 0.0, -6.8, -13.6, -20.4];
+const BAYS: [f64; 8] = [20.4, 13.6, 6.8, 0.0, -6.8, -13.6, -20.4, -27.2];
+/// Middle of the row of bays along X.
+const ROW_MID: f64 = (BAYS[0] + BAYS[BAYS.len() - 1]) * 0.5;
+/// Where the live thermite goes on the reinforced bay's drywall (wall-local): in the middle of
+/// one of its two panels, clear of their frames.
+const REINFORCE_THERMITE: [f32; 2] = [1.35, 1.1];
 const ROW_Z: f64 = -8.0;
 const WALL_W: f32 = 5.4;
 const WALL_H: f32 = 3.2;
@@ -96,6 +103,8 @@ pub struct DemoTargets {
     pub roof: Vec<Entity>,
     pub hatch: Option<Entity>,
     pub steel_hatch: Option<Entity>,
+    /// The drywall a defender reinforces live (bay 8).
+    pub reinforced_wall: Option<Entity>,
 }
 
 /// The breach range's live moments (the zone's own stop is the overview from
@@ -174,6 +183,22 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 13.0,
     },
     DemoView {
+        key: "fortress_reinforce",
+        name: "Siege reinforcement: steel panels braced behind a drywall",
+        eye: [-23.6, 2.3, -2.6],
+        target: [-27.2, 1.3, -8.2],
+        hour: 15.0,
+        warmup_secs: 4.2,
+    },
+    DemoView {
+        key: "fortress_reinforce_thermite",
+        name: "Thermite burning through a reinforced wall",
+        eye: [-24.6, 1.8, -13.6],
+        target: [-26.4, 1.3, -8.0],
+        hour: 15.0,
+        warmup_secs: 13.0,
+    },
+    DemoView {
         key: "fortress_arch",
         name: "A rock arch blown off its foot",
         eye: [-26.0, 6.0, -4.0],
@@ -204,6 +229,11 @@ enum Step {
     BlastGate,
     BlastArch,
     RoofBurst(u32),
+    /// Bay 8: a burst at the drywall (through it before the panels go up, onto steel after).
+    ReinforceBurst(u32),
+    Reinforce,
+    ReinforceCharge,
+    ReinforceThermite,
     RoofCharge,
     ThermiteHatch,
     SmashHatch(u32),
@@ -233,6 +263,13 @@ fn timeline() -> Vec<(f32, Step)> {
     for k in 0..4 {
         t.push((9.2 + k as f32 * 0.4, Step::SmashHatch(k)));
     }
+    t.push((0.6, Step::ReinforceBurst(0)));
+    t.push((1.6, Step::Reinforce));
+    for k in 1..4 {
+        t.push((4.2 + (k - 1) as f32 * 0.4, Step::ReinforceBurst(k)));
+    }
+    t.push((6.0, Step::ReinforceCharge));
+    t.push((10.0, Step::ReinforceThermite));
     t.push((6.0, Step::SupportView(true)));
     t.push((12.0, Step::SupportView(false)));
     t.push((12.5, Step::BlastGate));
@@ -281,12 +318,12 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     let yaw = std::f32::consts::PI;
     spawn_fortress(commands, o);
     // The range: a gravel pad, concrete pillars between the bays and a steel lintel on top.
-    let (t, g) = placed(o + DVec3::new(0.0, 0.0, ROW_Z - 1.0), 0.0);
+    let (t, g) = placed(o + DVec3::new(ROW_MID, 0.0, ROW_Z - 1.0), 0.0);
     commands.spawn((
         Name::new("Range gravel"),
         t,
         g,
-        GravelPad { size: [52.0, 9.0] },
+        GravelPad { size: [59.0, 9.0] },
     ));
     for k in 0..=BAYS.len() {
         let x = BAYS[0] + 3.4 - k as f64 * 6.8;
@@ -308,7 +345,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             end_plates: true,
         },
         1,
-        o + DVec3::new(0.0, 4.0, ROW_Z),
+        o + DVec3::new(ROW_MID, 4.0, ROW_Z),
         0.0,
     );
 
@@ -366,6 +403,14 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         6,
         "Brick wall (blast)",
         DestructibleWall::masonry(DestructibleMaterial::Brick, WALL_W, WALL_H, 0.22).with_seed(17),
+    );
+    let b3 = wall(
+        commands,
+        7,
+        "Drywall (reinforced live)",
+        DestructibleWall::soft(WALL_W, WALL_H)
+            .with_seed(18)
+            .with_paint([0.6, 0.63, 0.6]),
     );
 
     // Bay 2: barricades in the doorway and the window.
@@ -427,6 +472,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         roof: house.roof,
         hatch: Some(house.hatch),
         steel_hatch: Some(house.steel_hatch),
+        reinforced_wall: Some(b3),
     };
     let (tower, posts) = spawn_tower(commands, o);
     crate::barn::spawn_barn(commands, o + DVec3::from_array(crate::barn::BARN), 0.0);
@@ -976,7 +1022,7 @@ fn spawn_breach_house(commands: &mut Commands, o: DVec3) -> House {
             0.0,
         );
         let (low, high) = props::ladder_rungs(ladder_h);
-        let feet = |y: f32| Vec3::new(0.0, y - ladder_h * 0.5, props::LADDER_STILE_Z + 0.05);
+        let feet = |y: f32| Vec3::new(0.0, y - ladder_h * 0.5, props::LADDER_STILE_Z + 0.2);
         let deck = at(hx, JOIST_TOP + DECK_T as f64, hz - half - 0.35) - ladder_at;
         commands.entity(ladder).insert(
             Climbable::ladder(feet(low), feet(high), Vec3::NEG_Z).with_exit(deck.as_vec3()),
@@ -1503,6 +1549,46 @@ fn run_step(world: &mut World, demo: &mut DestructionDemo, step: Step) {
                 });
             }
         }
+        Step::ReinforceBurst(k) => {
+            let Some(w) = t.reinforced_wall else {
+                return;
+            };
+            let mut rng = Rng::new(seed + 40 + k as u64);
+            let cx = [-0.9f32, 0.6, -1.6, 1.5][k as usize % 4];
+            let shooter = Vec3::new(cx * 0.4, 1.6, 9.0);
+            for _ in 0..6 {
+                let d = rng.in_unit_disk() * 0.3;
+                let aim = Vec3::new(cx + d.x, 1.5 + d.y + 0.2 * (k % 2) as f32, 0.0);
+                let dir = (aim - shooter).normalize();
+                world.write_message(ProjectileTrace {
+                    from: wall_world(world, w, shooter),
+                    to: wall_world(world, w, aim + dir * 5.0),
+                    radius: 0.01,
+                    speed: 850.0,
+                    shooter: None,
+                });
+            }
+        }
+        Step::Reinforce => {
+            if let Some(w) = t.reinforced_wall {
+                world.write_message(ReinforceRequest { wall: w });
+            }
+        }
+        Step::ReinforceCharge => {
+            if let Some(w) = t.reinforced_wall {
+                let mut c = BreachCharge::explosive(w, Vec2::new(-0.6, 1.1), 4.0e5);
+                c.fuse_secs = 1.5;
+                world.spawn((Name::new("Reinforced bay breach charge"), c));
+            }
+        }
+        Step::ReinforceThermite => {
+            if let Some(w) = t.reinforced_wall {
+                let [x, y] = REINFORCE_THERMITE;
+                let mut c = BreachCharge::thermite(w, Vec2::new(x, y), [1.1, 1.9]);
+                c.fuse_secs = 0.6;
+                world.spawn((Name::new("Reinforced bay thermite"), c));
+            }
+        }
         Step::SupportView(on) => {
             for &e in &t.tower {
                 if let Some(mut s) = world.get_mut::<ShowSupport>(e) {
@@ -1520,7 +1606,16 @@ fn run_step(world: &mut World, demo: &mut DestructionDemo, step: Step) {
             }
         }
         Step::Reset => {
-            let live = [t.thermite_wall, t.soft_wall, t.hatch, t.steel_hatch];
+            if let Some(w) = t.reinforced_wall {
+                remove_reinforcement(world, w);
+            }
+            let live = [
+                t.thermite_wall,
+                t.soft_wall,
+                t.hatch,
+                t.steel_hatch,
+                t.reinforced_wall,
+            ];
             for w in live.into_iter().flatten().chain(t.roof.iter().copied()) {
                 if let Some(mut wall) = world.get_mut::<DestructibleWall>(w) {
                     wall.set_changed();

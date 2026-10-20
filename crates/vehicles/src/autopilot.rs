@@ -21,7 +21,7 @@ use engine_world::{Gravity, VehicleControls};
 
 use crate::aero::Aircraft;
 use crate::chassis::{VehicleForces, VehicleTelemetry};
-use crate::ship::{AssistMode, Spacecraft};
+use crate::ship::{AssistMode, Spacecraft, ThrusterRole};
 use crate::wheels::Wheels;
 
 /// What the autopilot does.
@@ -99,9 +99,14 @@ pub struct Autopilot {
     /// Altitude when the autopilot was engaged (runway height), m.
     #[serde(skip)]
     pub start_altitude: Option<f64>,
-    /// Integrator for holding a spot (spacecraft): sideways error over time, m·s.
+    /// Integrator for holding a spot (spacecraft) or a runway's centerline (planes):
+    /// sideways error over time, m·s.
     #[serde(skip)]
     pub hold_integral: Vec3,
+    /// The runway's line for a take-off: where the roll began and the level direction the
+    /// nose pointed.
+    #[serde(skip)]
+    pub runway: Option<(DVec3, Vec3)>,
 }
 
 impl Autopilot {
@@ -266,6 +271,7 @@ pub fn autopilot_system(
                             &mut controls,
                             forces,
                             tel,
+                            aircraft,
                             &mut ship,
                             &gravity,
                             *target_altitude_m,
@@ -303,6 +309,7 @@ pub fn autopilot_system(
                             forces,
                             tel,
                             wheels,
+                            aircraft,
                             &mut ship,
                             *pad,
                             *height_m,
@@ -579,8 +586,6 @@ fn fly(
     dt: f32,
 ) {
     let f = &forces.frame;
-    let start = *ap.start_altitude.get_or_insert(tel.altitude_m);
-    let height = (tel.altitude_m - start) as f32;
     let Some(mut aircraft) = aircraft else { return };
     if waypoints.is_empty() {
         return;
@@ -592,22 +597,54 @@ fn fly(
     let heading_err = signed_angle(fwd_flat, to_flat, -up); // + = waypoint to the right
     c.brake = 0.0;
     c.handbrake = false;
-    let on_ground = tel.wheels_grounded > 0 && height < 2.0;
     if ap.phase.is_empty() && ap.timer < 0.1 {
-        // Wheel contacts aren't known until the wheels have run once.
+        // Wheel contacts and telemetry aren't known until the vehicle has run once.
         return;
     }
-    if ap.phase.is_empty() && on_ground {
-        ap.set_phase("takeoff roll");
-    } else if ap.phase.is_empty() {
-        ap.set_phase("cruise");
+    // Runway height, from this frame's air sample: the telemetry is a frame old and reads
+    // 0 m before the vehicle has run, which for a runway on high ground (or a planet's
+    // surface) put the plane far above it.
+    let altitude = f.air.altitude_m;
+    let start = *ap.start_altitude.get_or_insert(altitude);
+    let height = (altitude - start) as f32;
+    let on_ground = tel.wheels_grounded > 0 && height < 2.0;
+    if ap.phase.is_empty() {
+        // Too slow to fly means a take-off, even when the wheels are off the ground for a
+        // moment (a plane put down on a runway bounces as it settles). Cruise logic at
+        // walking speed would turn the nose into the wind and roll off the runway.
+        if on_ground || (tel.speed < rotate_speed * 0.5 && height < 2.0) {
+            ap.set_phase("takeoff roll");
+            ap.runway = Some((f.position, fwd_flat));
+        } else if tel.speed < rotate_speed * 0.5 && ap.timer < 1.0 {
+            // Slow and well off the ground: still settling (or falling onto something), so
+            // wait a moment before choosing.
+            return;
+        } else {
+            ap.set_phase("cruise");
+        }
     }
+    // On the runway: steer the nose wheel for a point on the runway's line ahead, which
+    // holds the centerline in a crosswind (with an integral for the steady push of the wind
+    // on the tail).
+    let (start, along) = ap.runway.unwrap_or((f.position, fwd_flat));
+    let right = along.cross(up);
+    let off = (f.position - start).as_vec3().dot(right);
+    if on_ground && ap.runway.is_some() {
+        ap.hold_integral.x = (ap.hold_integral.x + off * dt).clamp(-10.0, 10.0);
+    }
+    let off = off + ap.hold_integral.x * 0.4;
+    let runway_yaw = |speed: f32| {
+        let ahead = speed.max(10.0);
+        let aim = (along * ahead - right * off).normalize_or_zero();
+        let err = signed_angle(fwd_flat, aim, -up);
+        (err * 3.0 + f.local_angular().y * 0.5).clamp(-1.0, 1.0)
+    };
     match ap.phase.as_str() {
         "takeoff roll" => {
             aircraft.flaps = 0.4;
             aircraft.gear_down = true;
             c.throttle = 1.0;
-            c.yaw = (heading_err * 3.0 - f.local_angular().y * -0.5).clamp(-1.0, 1.0);
+            c.yaw = runway_yaw(tel.speed);
             c.steer = hold_bank(forces, 0.0, up);
             c.pitch = hold_pitch(forces, 0.0, up) * 0.3;
             if tel.airspeed > rotate_speed {
@@ -624,8 +661,13 @@ fn fly(
             } else {
                 hold_pitch(forces, target_pitch, up)
             };
-            c.steer = hold_bank(forces, (heading_err * 0.8).clamp(-0.25, 0.25), up);
-            c.yaw = (tel.sideslip_deg.to_radians() * 2.0).clamp(-1.0, 1.0);
+            if on_ground {
+                c.steer = hold_bank(forces, 0.0, up);
+                c.yaw = runway_yaw(tel.speed);
+            } else {
+                c.steer = hold_bank(forces, (heading_err * 0.8).clamp(-0.25, 0.25), up);
+                c.yaw = (tel.sideslip_deg.to_radians() * 2.0).clamp(-1.0, 1.0);
+            }
             if height > 15.0 {
                 ap.set_phase("climb");
                 aircraft.gear_down = false;
@@ -750,12 +792,43 @@ fn stall_demo(
     }
 }
 
+/// Seconds to apoapsis the gravity turn keeps at least, so the climb never stalls.
+const CLIMB_HOLD_S: f32 = 45.0;
+
+/// Circular orbit speed `altitude` m above the nearest body's surface (None in flat worlds).
+fn circular_speed(gravity: &Gravity, at: DVec3, altitude: f64) -> Option<f32> {
+    let b = gravity.bodies.iter().min_by(|a, b| {
+        (at - a.center)
+            .length()
+            .total_cmp(&(at - b.center).length())
+    })?;
+    Some((b.mu / (b.radius + altitude)).sqrt() as f32)
+}
+
+/// How fast the vertical speed falls with the engines off (m/s²): gravity, less what the
+/// sideways speed's curve round the planet takes off it (0 in orbit).
+fn sink_rate(f: &crate::chassis::VehicleFrame, gravity: &Gravity, up: Vec3) -> f32 {
+    let v_side = (f.linear - up * f.linear.dot(up)).length();
+    let r = gravity
+        .bodies
+        .iter()
+        .map(|b| (f.com - b.center).length())
+        .fold(f64::MAX, f64::min);
+    let curve = if r < f64::MAX {
+        v_side * v_side / r as f32
+    } else {
+        0.0
+    };
+    (f.gravity.length() - curve).max(0.0)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ascend(
     ap: &mut Autopilot,
     c: &mut VehicleControls,
     forces: &VehicleForces,
     tel: &VehicleTelemetry,
+    aircraft: Option<Mut<Aircraft>>,
     ship: &mut Spacecraft,
     gravity: &Gravity,
     target_altitude: f64,
@@ -772,7 +845,8 @@ fn ascend(
     } else {
         heading
     };
-    let alt = tel.altitude_m;
+    // This frame's air sample: the telemetry is a frame old.
+    let alt = f.air.altitude_m;
     let planet = !gravity.bodies.is_empty();
     c.strafe = 0.0;
     c.lift = 0.0;
@@ -784,7 +858,18 @@ fn ascend(
         c.yaw = y;
         c.steer = r;
     };
+    if ap.phase.is_empty() && ap.timer < 0.1 {
+        // The telemetry's altitude reads 0 m until the vehicle has run once.
+        return;
+    }
     let start = *ap.start_altitude.get_or_insert(alt);
+    // Gear up once clear of the pad.
+    if let Some(mut a) = aircraft {
+        let down = alt - start < 30.0;
+        if a.gear_down != down {
+            a.gear_down = down;
+        }
+    }
     if ap.phase.is_empty() {
         // A ship standing on its tail goes straight up; one lying on its belly (a VTOL
         // spaceplane) lifts off on its hover engines first and then stands up.
@@ -830,7 +915,33 @@ fn ascend(
             ship.assist.mode = AssistMode::Rotation;
             let x = ((alt - turn_start) / (turn_end - turn_start).max(1.0)).clamp(0.0, 1.0);
             let angle = (x.sqrt() * 85f64.to_radians()) as f32; // from vertical
-            let dir = up * angle.cos() + heading * angle.sin();
+            // Never let the climb stall: hold the time to apoapsis near `CLIMB_HOLD_S`. On a
+            // full-size planet the pitch program alone levels off at 50 km with orbital speed
+            // still far off, and the ship sinks back into thick air at Mach 16.
+            let v_up = f.linear.dot(up);
+            let sink = sink_rate(f, gravity, up);
+            let main: f32 = ship
+                .thrusters
+                .iter()
+                .filter(|t| t.role == ThrusterRole::Main)
+                .map(|t| t.max_thrust_n)
+                .sum();
+            let accel = (main / f.mass.max(1.0)).max(0.1);
+            // …and climb fast enough to coast up to the target height by the time the speed
+            // round the planet is nearly orbital, so apoapsis reaches it with the burn.
+            let v_side = (f.linear - up * v_up).length();
+            let to_go = (target_altitude - alt).max(0.0) as f32;
+            let orbital = circular_speed(gravity, f.com, target_altitude).unwrap_or(f32::MAX);
+            let coast_up = (2.0 * sink * to_go).sqrt() * (v_side / orbital).clamp(0.0, 1.0);
+            let climb = (sink * CLIMB_HOLD_S).max(coast_up);
+            let needed = ((sink + (climb - v_up) / 8.0) / accel)
+                .clamp(-0.3, 1.0)
+                .asin();
+            // The program sets the floor low down; past its end the hold steers alone (nose a
+            // little below the horizon if need be), so apoapsis comes soon after the burn.
+            let floor = (std::f32::consts::FRAC_PI_2 - angle) * (1.0 - x as f32) - 0.3 * x as f32;
+            let elevation = needed.max(floor);
+            let dir = up * elevation.sin() + heading * elevation.cos();
             // Never point far from where we're going once moving fast (less drag, no tumbling).
             let vel = f.linear.normalize_or_zero();
             let dir = if f.linear.length() > 200.0 && f.air.density > 0.01 {
@@ -858,7 +969,10 @@ fn ascend(
             if tel.apoapsis_m < target_altitude * 0.98 {
                 c.throttle = 0.3;
             }
-            if tel.vertical_speed < 40.0 && alt > target_altitude * 0.8 {
+            // Near apoapsis: climbing slowly, or about to stop climbing.
+            let v_up = f.linear.dot(up);
+            let soon = v_up < sink_rate(f, gravity, up) * 20.0;
+            if (tel.vertical_speed < 40.0 || soon) && alt > target_altitude * 0.8 {
                 ap.set_phase("circularize");
             }
         }
@@ -870,7 +984,10 @@ fn ascend(
                 .normalize_or_zero();
             aim(c, dir, up);
             let pe_short = (target_altitude * 0.9 - tel.periapsis_m).max(0.0);
-            c.throttle = (pe_short / 20_000.0).clamp(0.05, 1.0) as f32;
+            // Ease off as periapsis comes up: near orbital speed it rises ~100 km a second at
+            // full thrust, and the engines take a moment to shut down.
+            let ease = (target_altitude * 0.5).max(1_000.0);
+            c.throttle = (pe_short / ease).clamp(0.05, 1.0) as f32;
             if tel.periapsis_m >= target_altitude * 0.9 {
                 ap.set_phase("orbit");
             }
@@ -938,6 +1055,7 @@ fn hop(
     forces: &VehicleForces,
     tel: &VehicleTelemetry,
     wheels: Option<&Wheels>,
+    aircraft: Option<Mut<Aircraft>>,
     ship: &mut Spacecraft,
     pad: DVec3,
     height: f32,
@@ -948,6 +1066,16 @@ fn hop(
     let f = &forces.frame;
     let dt = f.dt;
     let on_ground = wheels.is_some_and(|w| w.grounded() > 0);
+    // Gear: tucked away while hovering high, out again before coming down.
+    let mut aircraft = aircraft;
+    let gear_out = aircraft.as_ref().map_or(1.0, |a| a.gear);
+    let mut gear = |down: bool| {
+        if let Some(a) = aircraft.as_mut()
+            && a.gear_down != down
+        {
+            a.gear_down = down;
+        }
+    };
     if ap.phase.is_empty() && ap.timer < 0.1 {
         // Wheel contacts aren't known until the wheels have run once.
         return;
@@ -976,6 +1104,7 @@ fn hop(
     };
     match ap.phase.as_str() {
         "on the pad" => {
+            gear(true);
             idle(c, ship);
             if on_ground && ap.timer > 0.5 && ap.timer < 1.0 {
                 // Settled on the gear: remember how high the ship sits.
@@ -990,6 +1119,9 @@ fn hop(
             hold(c, forces, ship, &mut ap.hold_integral, target, up, 12.0, dt);
             if ap.phase == "lift off" && (above - rest_height) > (height * 0.8) as f64 {
                 ap.set_phase("hover");
+            }
+            if ap.phase == "hover" && height > 10.0 {
+                gear(false);
             }
             if ap.phase == "hover" && ap.timer > hover_s {
                 ap.set_phase("landing");
@@ -1007,9 +1139,15 @@ fn hop(
                 12.0,
                 dt,
             );
-            // Come down fast high up, gently near the pad.
+            // Come down fast high up, gently near the pad; wait a few meters up for the
+            // gear to come all the way down.
+            gear(true);
             let h = (above - rest_height) as f32;
-            let sink = (h * 0.35).clamp(0.6, 8.0);
+            let sink = if gear_out < 1.0 && h < 5.0 {
+                0.0
+            } else {
+                (h * 0.35).clamp(0.6, 8.0)
+            };
             let v_up = tel.vertical_speed;
             let dv = -sink - v_up;
             c.lift = (dv * 0.4).clamp(-1.0, 1.0);

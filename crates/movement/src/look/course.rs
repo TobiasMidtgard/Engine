@@ -15,7 +15,8 @@
 //!   numbered backlit signs, floor paint, cables, conduits and vents. Behind it the grapple
 //!   station ([`grapple_tower`]): a nine-meter tower with a glowing anchor plate to hook, and
 //!   the zip line station ([`zip_station`]): a launch gantry on that tower's roof and a landing
-//!   gate on its own pad.
+//!   gate on its own pad. South of the runway the vault lane ([`vault_lane`]): a railing, a
+//!   concrete barrier and strapped cases to vault at a sprint.
 //! - **Ring**: a stone plinth with an octagonal board floor inside a carved stone band, an
 //!   engraved ring inlay that glows faintly, raked-gravel corners and apron, four stone
 //!   lanterns with warm lights, a torii gate, nobori banners, a taiko drum, a roofed stand
@@ -42,6 +43,7 @@ use crate::demo::layout;
 
 mod freight;
 mod grapple_tower;
+mod vault_lane;
 mod zip_station;
 
 type M = MeshBuilder;
@@ -189,6 +191,17 @@ const COURSE_SET: &[(&str, &str, bool)] = &[
     ("zip", RUBBER, true),
     ("zip", PAINT, false),
     ("zip", SIGN, false),
+    ("vault", CONCRETE, true),
+    ("vault", HAZARD, false),
+    ("vault", RUBBER, true),
+    ("vault", PAINT, false),
+    ("vault", STEEL_YELLOW, true),
+    ("vault", ALU, true),
+    ("vault", STEEL_DARK, false),
+    ("vault", PLANKS, true),
+    ("vault", STEEL_OLIVE, true),
+    ("vault", STEEL_ORANGE, true),
+    ("vault", SIGN, false),
 ];
 
 /// Mesh groups spawned once at the ring center.
@@ -296,6 +309,7 @@ pub fn generate(lib: &mut Library) {
     build_ledge().register(lib, "ledge");
     grapple_tower::build().register(lib, "grapple");
     zip_station::build().register(lib, "zip");
+    vault_lane::build().register(lib, "vault");
     freight::build_track().register(lib, "freight");
     freight::build_car().register(lib, "freight_car");
     build_plinth().register(lib, "plinth");
@@ -787,6 +801,7 @@ fn glyph(c: char) -> &'static [&'static [(f32, f32)]] {
             (4.0, 1.0),
             (4.0, 6.0),
         ]],
+        'V' => &[&[(0.0, 6.0), (2.0, 0.0), (4.0, 6.0)]],
         'W' => &[&[(0.0, 6.0), (0.0, 0.0), (2.0, 2.8), (4.0, 0.0), (4.0, 6.0)]],
         'Z' => &[&[(0.0, 6.0), (4.0, 6.0), (0.0, 0.0), (4.0, 0.0)]],
         '>' => &[&[(0.6, 6.0), (3.6, 3.0), (0.6, 0.0)]],
@@ -953,7 +968,12 @@ const PAINT_ROWS: &[(&str, usize, f32)] = &[
     ("MTRN 4108", 4, 160.0),
     ("09", 0, 480.0),
     ("ZIP LINE", 5, 400.0),
+    ("10", 0, 640.0),
+    ("VAULT", 2, 440.0),
 ];
+/// Shared paint rows.
+const PAINT_START: usize = 6;
+const PAINT_CHEVRONS: usize = 9;
 /// The freight station's paint rows.
 const PAINT_08: usize = 12;
 const PAINT_RIDE: usize = 13;
@@ -962,6 +982,9 @@ const PAINT_MARK: usize = 15;
 /// The zip line station's paint rows.
 const PAINT_09: usize = 16;
 const PAINT_ZIP: usize = 17;
+/// The vault lane's paint rows.
+const PAINT_10: usize = 18;
+const PAINT_VAULT: usize = 19;
 const PAINT_ROW_PX: f32 = 96.0;
 const PAINT_SCALE: f32 = 12.0;
 const PAINT_PAD: f32 = 12.0;
@@ -1043,9 +1066,12 @@ const SIGN_ROWS: &[(&str, usize, f32)] = &[
     ("07 GRAPPLE", 6, 384.0),
     ("08 RIDE", 4, 460.0),
     ("09 ZIP", 3, 600.0),
+    ("10 VAULT", 7, 512.0),
 ];
 /// The zip line station's sign row.
 const SIGN_ZIP: usize = 10;
+/// The vault lane's sign row.
+const SIGN_VAULT: usize = 11;
 const SIGN_ROW_PX: f32 = 128.0;
 const SIGN_SCALE: f32 = 11.0;
 
@@ -2566,7 +2592,7 @@ fn build_tower() -> Kit {
     // gap stays open) and the north-west corner (the mantle edge stays open).
     let rail_y = [top + 0.55, top + 1.07];
     let rail_off = 0.05;
-    let ladder_x = t1.x - 1.8;
+    let ladder_x = layout::LADDER_BOTTOM[0] as f32;
     for side in [-1.0f32, 1.0] {
         let z = if side < 0.0 {
             t0.z - rail_off
@@ -2712,7 +2738,7 @@ fn build_tower() -> Kit {
         let hoop: Vec<Vec3> = (0..=12)
             .map(|k| {
                 let a = k as f32 / 12.0 * PI;
-                cage_c(y) + v3(-a.cos() * 0.36, 0.0, a.sin() * 0.38)
+                cage_c(y) + v3(-a.cos() * 0.36, 0.0, a.sin() * 0.68)
             })
             .collect();
         steel.append(&pipe(&hoop, 0.012, 6), Mat4::IDENTITY);
@@ -2720,7 +2746,7 @@ fn build_tower() -> Kit {
     }
     for k in 1..6 {
         let a = k as f32 / 6.0 * PI;
-        let o = v3(-a.cos() * 0.36, 0.0, a.sin() * 0.38);
+        let o = v3(-a.cos() * 0.36, 0.0, a.sin() * 0.68);
         steel.append(
             &rod(cage_c(2.5) + o, cage_c(top + 1.0) + o, 0.01, 5),
             Mat4::IDENTITY,
@@ -5694,6 +5720,12 @@ mod tests {
         };
         rects(PAINT_ROWS.len(), &paint_rect);
         rects(SIGN_ROWS.len(), &sign_rect);
+        // Every letter on them is in the font.
+        for &(text, ..) in PAINT_ROWS.iter().chain(SIGN_ROWS) {
+            for c in text.chars().filter(|&c| c != ' ') {
+                assert!(!glyph(c).is_empty(), "no glyph for {c:?} in {text:?}");
+            }
+        }
         let crest = crest_image(64);
         assert!(crest.data.chunks(4).filter(|p| p[3] > 128).count() > 300);
     }

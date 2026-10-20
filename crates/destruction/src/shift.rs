@@ -1,14 +1,15 @@
 //! Following a [`WorldShift`] (a floating-origin move or a new reference frame). The shared
 //! contracts already move root transforms and physics velocities; this moves the world-space
-//! state destruction keeps itself: the built-in solver's debris motion, dust, debris queued for
-//! the next step, scripted builders' aim and the demo scripts' anchors.
+//! state destruction keeps itself: the built-in solver's debris motion (and where rock debris
+//! started out), dust, debris queued for the next step, scripted builders' aim and the demo
+//! scripts' anchors.
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_world::WorldShift;
 
 use crate::build::Builder;
-use crate::debris::{DebrisBody, DustPuff, PendingDebris};
+use crate::debris::{DebrisBody, DustPuff, PendingDebris, RockContact};
 use crate::demo::DestructionDemo;
 use crate::hill::HillDemo;
 
@@ -28,6 +29,10 @@ pub fn shift_system(
     // `GlobalTransform` still holds the old frame until transforms propagate after this set.
     let at = |g: Option<&GlobalTransform>| s.point(g.map_or(DVec3::ZERO, |g| g.translation()));
     for (mut b, g) in &mut bodies {
+        // Where a piece cut from rock started out (how far it has fallen out of its hole).
+        if let RockContact::Leaving(from) = b.rock {
+            b.rock = RockContact::Leaving(s.point(from));
+        }
         // Resting debris stays at rest on whatever it lies on, which moved with it.
         if b.asleep || b.sinking {
             continue;

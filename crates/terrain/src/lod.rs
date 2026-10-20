@@ -34,6 +34,9 @@ pub struct SelectInput<'a> {
     pub split_factor: f64,
     /// Frustum test for a terrain-local bounding sphere.
     pub visible: &'a dyn Fn(DVec3, f64) -> bool,
+    /// Patches never split into children smaller than this (m across; 0 = down to the finest
+    /// level). The far shadow map has texels of several meters, so its walk stops early.
+    pub min_size: f64,
 }
 
 /// Result of a walk.
@@ -187,9 +190,15 @@ impl Lod {
         true
     }
 
-    /// Walk the quadtree.
+    /// Walk the quadtree for a new frame.
     pub fn select(&mut self, input: &SelectInput) -> Selection {
         self.frame += 1;
+        self.walk(input)
+    }
+
+    /// Walk the quadtree again in the same frame (another view of it, such as a shadow map).
+    /// Patches it visits count as seen this frame.
+    pub fn walk(&mut self, input: &SelectInput) -> Selection {
         let mut out = Selection::default();
         let occluder = self.map.radius + self.height_range.0.min(0.0);
         let mut stack: Vec<NodeKey> = (0..self.map.roots()).map(NodeKey::root).collect();
@@ -211,7 +220,9 @@ impl Lod {
                 continue;
             }
             let size = self.map.node_size(key.level);
-            let split = key.level < self.max_level && dist < input.split_factor * size;
+            let split = key.level < self.max_level
+                && dist < input.split_factor * size
+                && size * 0.5 >= input.min_size;
             if split {
                 let children = key.children();
                 let mut ready = true;
@@ -283,6 +294,7 @@ mod tests {
                 camera: cam,
                 split_factor: 3.0,
                 visible: &visible,
+                min_size: 0.0,
             });
             if sel.missing.is_empty() {
                 return sel;
@@ -323,6 +335,37 @@ mod tests {
         let sel = settle(&mut lod, DVec3::new(0.0, r * 4.0, 0.0));
         assert!(sel.draw.len() < 120, "{}", sel.draw.len());
         assert!(sel.draw.iter().all(|k| k.level < 6));
+    }
+
+    #[test]
+    fn a_second_walk_keeps_the_frame_and_stops_at_its_minimum_size() {
+        let r = 1_000_000.0;
+        let map = SurfaceMap::new(TerrainDomain::Sphere, r);
+        let mut lod = Lod::new(map, (-100.0, 100.0), 1.0);
+        let cam = DVec3::new(0.0, r + 2.0, 0.0);
+        settle(&mut lod, cam);
+        let frame = lod.frame;
+        let visible = |_: DVec3, _: f64| true;
+        let sel = lod.walk(&SelectInput {
+            camera: cam,
+            split_factor: 3.0,
+            visible: &visible,
+            min_size: 200.0,
+        });
+        assert_eq!(lod.frame, frame);
+        // Coarser than the view's walk, so everything it wants is already built.
+        assert!(sel.missing.is_empty());
+        let smallest = sel
+            .draw
+            .iter()
+            .map(|k| map.node_size(k.level))
+            .fold(f64::INFINITY, f64::min);
+        assert!((200.0..400.0).contains(&smallest), "{smallest}");
+        // What it visits counts as seen this frame.
+        let finest = sel.draw.iter().map(|k| k.level).max().unwrap();
+        let under = map.node_at(cam, finest).unwrap();
+        assert!(sel.draw.contains(&under));
+        assert_eq!(lod.nodes[&under].last_seen, frame);
     }
 
     #[test]

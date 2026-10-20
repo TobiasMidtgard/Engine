@@ -318,20 +318,23 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   whoever hurt it, a sow charges to defend her piglets (a lone sow runs), and wolves pick a
   piglet over its elders.
 - `tests/demo.rs`: the arena fight keeps going for a minute (shots, attacks, blocks, cover,
-  downed and revived, squad mates reviving at least twice) inside the arena; the meadow lives for two minutes (grazing, wandering,
-  hunting, fleeing) without animals leaving.
+  downed and revived) inside the arena, and over six fights with different randomness squad
+  mates revive at least twice a minute on average and in every fight at least once; the meadow
+  lives for two minutes (grazing, wandering, hunting, fleeing) without animals leaving.
 - `tests/revive.rs`: a squad mate kneels beside a downed ally and gets it up where it lies,
-  its hands on the chest for as long as the revive takes. Skilled fighters don't go in the
-  enemy's view or under fire; a rookie does. A mate revives an ally behind a wall rather than
-  the nearer one in the open. A reviver that is hit lets go, stays put while it gets up and
-  tries again only later. Nobody revives when it is off, or once it is turned off midway. A
-  mate handed to game code does not hold up the showcase timer. The timer waits for a revive,
-  gets a fighter with a mate near up in place, and sends home only one that is alone. A
-  reviver going the long way round a wall is not taken for stuck, and nobody revives a mate
-  on a floor above it. The squad's medic is the usual reviver, melee mates screen it from the
-  enemy while it kneels, and a squad without one revives as before. An elite medic smokes a
-  watched mate and goes in under the smoke, hidden from the enemy as it kneels; only medics
-  carry smoke.
+  its hands on the chest for as long as the revive takes. Over 16 runs with different
+  randomness: elites go in under a watching enemy's eyes in at most a tenth, veterans in at
+  most half as many as rookies, rookies in nine tenths or more, and no skilled fighter goes in
+  under fire; once the enemy looks away or is gone, the elite gets it up in every run. A mate
+  revives an ally behind a wall rather than the nearer one in the open. A reviver that is hit
+  lets go, stays put while it gets up and tries again only later. Nobody revives when it is
+  off, or once it is turned off midway. A mate handed to game code does not hold up the
+  showcase timer. The timer waits for a revive, gets a fighter with a mate near up in place,
+  and sends home only one that is alone. A reviver going the long way round a wall is not
+  taken for stuck, and nobody revives a mate on a floor above it. The squad's medic is the
+  usual reviver, melee mates screen it from the enemy while it kneels, and a squad without one
+  revives as before. In every one of 16 runs an elite medic smokes a watched mate and goes in
+  under the smoke, hidden from the enemy as it kneels; only medics carry smoke.
 - `tests/art_revive.rs`: a captioned strip, before and after. Before, a lone fighter lies six
   seconds and is sent home. After, a squad mate runs in, kneels, sets its carbine down, puts
   its hands on the chest and looks up at the enemy, and the ally gets up where it lay. It
@@ -353,6 +356,12 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   the tactical world move exactly with the world, the rifleman keeps looking and shooting at
   the player, the deer keep running from what scared them and stay around their home, and
   paths go around a wall where it moved to, not where it was.
+- `tests/schedule_order.rs`: no two systems in the fixed step or `PostUpdate` touch the same
+  data without an order between them (the scheduler's ambiguity check), and the arena fight
+  and the meadow end bit for bit the same with unrelated systems, resources or entities added.
+  Randomness comes from each body's `Seed` (a hash of where it spawned and what it is, given
+  on its first step; insert one to choose it), never from `Entity` ids, which every new
+  resource moves.
 - `tests/art_fighters.rs`, `tests/art_animals.rs`, `tests/art_arena.rs`: close-up renders of
   the fighters, wildlife and arena in chosen poses and lights, flipbook strips of the wildlife
   on the move (gaits, starts and stops, an alarm, a bend, a stalk, a wolf's hunt from stalk

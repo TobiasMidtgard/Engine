@@ -673,8 +673,8 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                 DemoView::new(
                     "airfield_lineup",
                     "Sport plane lined up on the runway",
-                    [14.0, 3.5, -606.0],
-                    [0.0, 1.8, -584.0],
+                    [8.5, 2.0, -598.5],
+                    [0.0, 1.5, -585.0],
                 )
                 .at(10.0, 0.5)
                 .call(
@@ -684,12 +684,13 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                 .call("entity.despawn", gone.clone())
                 .call("vehicles.spawn", line_up.clone()),
                 // On the Rapier backend the plane rolls 130 m and rotates about 7.4 s after
-                // it is spawned; the shot catches the nose coming up.
+                // it is spawned; the shot (8 s after) catches the nose coming up near z −434,
+                // with room ahead of it in the frame.
                 DemoView::new(
                     "airfield_rotate",
                     "Sport plane rotating for take-off",
-                    [26.0, 3.0, -419.0],
-                    [0.0, 2.0, -438.0],
+                    [14.0, 1.6, -424.0],
+                    [0.0, 2.4, -431.0],
                 )
                 .at(10.0, 7.6)
                 .call(
@@ -700,38 +701,133 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                 .call("vehicles.spawn", line_up),
             ]
         }
-        "spaceport" => vec![
-            // Restart the hop so the shot lands in the hover: from the pad it lifts off
-            // after 5 s and hovers from about 9 s to 23 s; caught in the air, it hovers at once.
-            DemoView::new(
-                "spaceport_hover",
-                "Spaceplane hovering over the pad",
-                [38.0, 8.0, 46.0],
-                [0.0, 18.0, 0.0],
-            )
-            .at(17.0, 12.0)
-            .call(
-                "vehicles.autopilot",
-                serde_json::json!({
-                    "vehicle": "Hopper",
-                    "mode": {"Hop": {
-                        "pad": abs(0.0, 0.4, 0.0),
-                        "height_m": 18.0,
-                        "hover_s": 14.0,
-                        "rest_s": 5.0,
-                    }},
-                }),
-            ),
-            DemoView::new(
-                "spaceport_parked",
-                "Spaceplane parked on the apron",
-                [82.0, 5.0, -18.0],
-                [58.0, 3.0, -45.0],
-            )
-            .at(17.0, 0.5),
-        ],
+        "spaceport" => {
+            let launch = serde_json::json!({"Ascend": {
+                "target_altitude_m": 200_000.0,
+                "turn_start_m": 1_000.0,
+                "turn_end_m": 45_000.0,
+                "heading": [0.0, 0.0, -1.0],
+            }});
+            // The showcase's Earth: its center under the plaza, the zone on its surface.
+            let (radius, mu) = (6_371_000.0f64, 3.986e14f64);
+            let height = 200_000.0;
+            let orbit = center + DVec3::new(0.0, height, 0.0);
+            // Where the ship starts so it is at `orbit` when the shot is taken: a little higher
+            // for the fall.
+            let t = orbit_capture_secs(ORBIT_WARMUP as f64);
+            let fall = 0.5 * mu / (radius + height).powi(2) * t * t;
+            let orbit_from = orbit + DVec3::new(0.0, fall, 0.0);
+            vec![
+                // Restart the hop so the shot lands in the hover: from the pad it lifts off
+                // after 5 s and hovers from about 9 s to 23 s; caught in the air, it hovers at once.
+                DemoView::new(
+                    "spaceport_hover",
+                    "Spaceplane hovering over the pad",
+                    [24.0, 6.0, 29.0],
+                    [0.0, 17.0, 0.0],
+                )
+                .at(17.0, 12.0)
+                // Back over the pad first, in case it was sent off to orbit.
+                .call(
+                    "vehicles.place",
+                    serde_json::json!({
+                        "vehicle": "Hopper",
+                        "at": abs(0.0, 18.4, 0.0),
+                        "yaw_deg": 0.0,
+                        "velocity": [0.0, 0.0, 0.0],
+                    }),
+                )
+                .call(
+                    "vehicles.autopilot",
+                    serde_json::json!({
+                        "vehicle": "Hopper",
+                        "mode": {"Hop": {
+                            "pad": abs(0.0, 0.4, 0.0),
+                            "height_m": 18.0,
+                            "hover_s": 14.0,
+                            "rest_s": 5.0,
+                        }},
+                    }),
+                ),
+                DemoView::new(
+                    "spaceport_parked",
+                    "Spaceplane parked on the apron",
+                    [75.0, 3.6, -26.0],
+                    [58.0, 3.0, -45.0],
+                )
+                .at(17.0, 0.5),
+                // The hopper launches for a 200 km orbit from the pad: it lifts off on its hover
+                // engines, stands on its tail and climbs on its main engines past the tower, seen
+                // from a drone south-west of the pad as it passes 150 m.
+                DemoView::new(
+                    "spaceport_launch",
+                    "Spaceplane launching for orbit",
+                    [-75.0, 55.0, -100.0],
+                    [5.0, 95.0, 10.0],
+                )
+                .at(17.0, 5.5)
+                .call(
+                    "vehicles.place",
+                    serde_json::json!({
+                        "vehicle": "Hopper",
+                        "at": abs(0.0, 0.4, 0.0),
+                        "yaw_deg": 0.0,
+                        "velocity": [0.0, 0.0, 0.0],
+                    }),
+                )
+                .call(
+                    "vehicles.autopilot",
+                    serde_json::json!({"vehicle": "Hopper", "mode": launch}),
+                ),
+                // At orbit height, 200 km up (the climb there and the orbit run in the tests,
+                // nine minutes of it). The ship is held still beside the camera: at 7.8 km/s it
+                // would cross the frame in a single tour step.
+                DemoView::new(
+                    "spaceport_orbit",
+                    "Spaceplane 200 km up, at orbit height",
+                    [22.0, height + 9.0, 14.0],
+                    [0.0, height - 2.0, -2.0],
+                )
+                .at(17.0, ORBIT_WARMUP)
+                .call("entity.despawn", serde_json::json!({"name": "Orbiter"}))
+                .call(
+                    "vehicles.spawn",
+                    serde_json::json!({
+                        "preset": "spaceplane",
+                        "name": "Orbiter",
+                        "at": [orbit_from.x, orbit_from.y, orbit_from.z],
+                        "on_ground": false,
+                        "gear": "up",
+                    }),
+                )
+                .call(
+                    "vehicles.place",
+                    serde_json::json!({
+                        "vehicle": "Orbiter",
+                        "at": [orbit_from.x, orbit_from.y, orbit_from.z],
+                        "on_ground": false,
+                        "yaw_deg": 0.0,
+                        "velocity": [0.0, 0.0, 0.0],
+                    }),
+                )
+                // Coasting, as in orbit: the assist would fire the hover engines against the fall.
+                .call(
+                    "vehicles.control",
+                    serde_json::json!({"vehicle": "Orbiter", "assist": "Off"}),
+                ),
+            ]
+        }
         _ => Vec::new(),
     }
+}
+
+/// Warmup of the in-orbit shot (s).
+const ORBIT_WARMUP: f32 = 0.5;
+
+/// Seconds from a tour stop's arrival calls to its shot: the showcase tour steps 0.05 s, runs
+/// the warmup and then nine more steps.
+fn orbit_capture_secs(warmup: f64) -> f64 {
+    (9.0 + (warmup / 0.05).ceil()) * 0.05
 }
 
 #[cfg(test)]
@@ -749,6 +845,12 @@ mod tests {
                         "vehicles.spawn" => args.get("autopilot"),
                         "vehicles.autopilot" => args.get("mode"),
                         "entity.despawn" => None,
+                        "vehicles.control" => {
+                            let assist = args["assist"].clone();
+                            serde_json::from_value::<crate::ship::AssistMode>(assist)
+                                .unwrap_or_else(|e| panic!("{} assist: {e}", v.key));
+                            None
+                        }
                         "vehicles.place" => {
                             for key in ["at", "velocity"] {
                                 serde_json::from_value::<[f64; 3]>(args[key].clone())

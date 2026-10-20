@@ -331,6 +331,8 @@ impl Theme {
                     .center()
                     .gap(5.0)
                     .padding([3.0, 9.0])
+                    // A chip keeps its width; a row of chips wraps instead.
+                    .shrink(0.0)
                     .radius(Corners::all(999.0))
                     .background(Color::WHITE.fade(0.07))
                     .border(1.0, p.line)

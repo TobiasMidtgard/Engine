@@ -130,6 +130,33 @@ impl Default for Glow {
     }
 }
 
+/// How a deciduous plant follows the year ([`crate::season`]): its buds open in spring, its
+/// leaves turn and fall in autumn, and it stands bare (or dies back to the ground) through
+/// winter. Days of the year on the northern calendar (0 = 1 January, 100 ≈ 10 April).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Seasons {
+    /// Buds open: the crown fills in over the next two weeks or so.
+    pub leaf_out_day: f32,
+    /// Leaves start to turn.
+    pub turn_day: f32,
+    /// The last leaves are down.
+    pub bare_day: f32,
+    /// Leaves fully turned (linear RGB).
+    pub autumn_color: [f32; 3],
+}
+
+impl Default for Seasons {
+    fn default() -> Self {
+        Self {
+            leaf_out_day: 115.0,
+            turn_day: 270.0,
+            bare_day: 312.0,
+            autumn_color: srgb(0xc29a2e),
+        }
+    }
+}
+
 /// Which leaf texture a species uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum LeafStyle {
@@ -262,6 +289,9 @@ pub struct PlantSpecies {
     pub wind_sway_m: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub glow: Option<Glow>,
+    /// Deciduous: leafs out, turns and drops its leaves through the year. None = evergreen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seasons: Option<Seasons>,
     pub shape: PlantShape,
 
     // ---- fire
@@ -302,6 +332,7 @@ impl Default for PlantSpecies {
             accent_color: srgb(0x7d8f2e),
             wind_sway_m: 0.25,
             glow: None,
+            seasons: None,
             shape: PlantShape::default(),
             fuel_kg: 400.0,
             ignition_c: 300.0,
@@ -488,9 +519,16 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             min_spacing_m: 3.2,
             resprouts: true,
             bark_color: srgb(0x6a6055),
-            leaf_color: srgb(0x51702c),
-            accent_color: srgb(0x7b8a2a),
+            leaf_color: srgb(0x465f27),
+            accent_color: srgb(0x68772b),
             wind_sway_m: 0.22,
+            // Late to leaf, late to turn: russet and brown, holding on into November.
+            seasons: Some(Seasons {
+                leaf_out_day: 122.0,
+                turn_day: 282.0,
+                bare_day: 325.0,
+                autumn_color: srgb(0xa8702c),
+            }),
             shape: PlantShape {
                 crown_base: 0.26,
                 branches: 9,
@@ -528,9 +566,16 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             min_spacing_m: 1.8,
             resprouts: true,
             bark_color: srgb(0xe2ddd2),
-            leaf_color: srgb(0x6f9234),
-            accent_color: srgb(0xa3b13a),
+            leaf_color: srgb(0x5c7a2d),
+            accent_color: srgb(0x838f33),
             wind_sway_m: 0.35,
+            // First to turn: clear yellow.
+            seasons: Some(Seasons {
+                leaf_out_day: 110.0,
+                turn_day: 262.0,
+                bare_day: 302.0,
+                autumn_color: srgb(0xd8b13a),
+            }),
             shape: PlantShape {
                 crown_base: 0.34,
                 branches: 14,
@@ -552,7 +597,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             form: PlantForm::Conifer,
             layer: Layer::Canopy,
             max_height_m: 20.0,
-            crown_radius_m: 3.0,
+            crown_radius_m: 3.8,
             trunk_radius_m: 0.32,
             years_to_mature: 28.0,
             lifespan_years: 250.0,
@@ -567,11 +612,12 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             establishment: 0.1,
             min_spacing_m: 2.4,
             bark_color: srgb(0x8a5a3c),
-            leaf_color: srgb(0x35532b),
-            accent_color: srgb(0x4b6a2e),
+            // Scots pine needles are a dark grey- to blue-green.
+            leaf_color: srgb(0x384c3b),
+            accent_color: srgb(0x48594a),
             wind_sway_m: 0.3,
             shape: PlantShape {
-                crown_base: 0.55,
+                crown_base: 0.58,
                 branches: 6,
                 angle_low_deg: 84.0,
                 angle_high_deg: 62.0,
@@ -592,7 +638,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             form: PlantForm::Conifer,
             layer: Layer::Canopy,
             max_height_m: 19.0,
-            crown_radius_m: 2.9,
+            crown_radius_m: 3.4,
             trunk_radius_m: 0.3,
             years_to_mature: 32.0,
             lifespan_years: 200.0,
@@ -608,8 +654,8 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             establishment: 0.12,
             min_spacing_m: 2.2,
             bark_color: srgb(0x5b4a3e),
-            leaf_color: srgb(0x26402a),
-            accent_color: srgb(0x37563a),
+            leaf_color: srgb(0x283e2c),
+            accent_color: srgb(0x36523b),
             wind_sway_m: 0.25,
             shape: PlantShape {
                 crown_base: 0.05,
@@ -649,9 +695,16 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             min_spacing_m: 1.8,
             resprouts: true,
             bark_color: srgb(0x7a6553),
-            leaf_color: srgb(0x557a2e),
-            accent_color: srgb(0x86993a),
+            leaf_color: srgb(0x4a6a2a),
+            accent_color: srgb(0x6e7e32),
             wind_sway_m: 0.25,
+            // Early leaves, butter yellow in autumn.
+            seasons: Some(Seasons {
+                leaf_out_day: 104.0,
+                turn_day: 272.0,
+                bare_day: 312.0,
+                autumn_color: srgb(0xc9b040),
+            }),
             shape: PlantShape {
                 crown_base: 0.2,
                 branches: 8,
@@ -691,6 +744,13 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             leaf_color: srgb(0x4c7a2c),
             accent_color: srgb(0x6e9233),
             wind_sway_m: 0.12,
+            // Bracken: fronds unroll in May, turn rust and die back to the ground.
+            seasons: Some(Seasons {
+                leaf_out_day: 128.0,
+                turn_day: 258.0,
+                bare_day: 308.0,
+                autumn_color: srgb(0x8c4e24),
+            }),
             shape: PlantShape {
                 crown_base: 0.0,
                 branches: 9,
@@ -771,6 +831,13 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             leaf_color: srgb(0xf2efe6),
             accent_color: srgb(0xd8392b),
             wind_sway_m: 0.1,
+            // Flowers through summer, straw-colored seed heads by autumn.
+            seasons: Some(Seasons {
+                leaf_out_day: 112.0,
+                turn_day: 240.0,
+                bare_day: 285.0,
+                autumn_color: srgb(0x8f7a3a),
+            }),
             shape: PlantShape {
                 crown_base: 0.0,
                 branches: 9,
@@ -811,6 +878,13 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             leaf_color: srgb(0x5b62c8),
             accent_color: srgb(0x7b5bd0),
             wind_sway_m: 0.06,
+            // Up early in spring, gone by late summer.
+            seasons: Some(Seasons {
+                leaf_out_day: 85.0,
+                turn_day: 215.0,
+                bare_day: 245.0,
+                autumn_color: srgb(0x8a7a40),
+            }),
             shape: PlantShape {
                 crown_base: 0.0,
                 branches: 7,

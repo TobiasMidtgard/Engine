@@ -12,12 +12,11 @@
 // Radiance is per lux of sunlight above the atmosphere (multiply by `frame.sun_color`).
 // Lengths are meters; `h` is a height above the planet surface, `mu` the cosine of a direction's
 // angle from the local zenith.
+//
+// The air is the planet's (`Atmosphere` on the CPU): Rayleigh and Mie scattering, Mie and ozone
+// absorption per meter at the surface (frame.air_*), so Earth's sky is blue and Mars' is
+// butterscotch with a blue sunset.
 // ============================================================================
-
-const RAYLEIGH_BETA: vec3<f32> = vec3<f32>(5.802e-6, 13.558e-6, 33.1e-6);
-const MIE_BETA: f32 = 3.996e-6;
-const MIE_EXT: f32 = 4.40e-6;
-const OZONE_BETA: vec3<f32> = vec3<f32>(0.650e-6, 1.881e-6, 0.085e-6);
 
 const TRANSMITTANCE_LUT_SIZE: vec2<f32> = vec2<f32>(256.0, 64.0);
 const MULTISCATTER_LUT_SIZE: vec2<f32> = vec2<f32>(32.0, 32.0);
@@ -130,6 +129,13 @@ fn phase_mie(cos_t: f32, g: f32) -> f32 {
         / ((2.0 + g2) * pow(max(1.0 + g2 - 2.0 * g * cos_t, 1e-4), 1.5));
 }
 
+// `phase_mie` with an anisotropy per color channel (the air's: frame.air_mie_g).
+fn phase_mie_rgb(cos_t: f32, g: vec3<f32>) -> vec3<f32> {
+    let g2 = g * g;
+    return 3.0 / (8.0 * PI) * ((1.0 - g2) * (1.0 + cos_t * cos_t))
+        / ((2.0 + g2) * pow(max(1.0 + g2 - 2.0 * g * cos_t, vec3<f32>(1e-4)), vec3<f32>(1.5)));
+}
+
 fn ozone_density(h: f32) -> f32 {
     return max(0.0, 1.0 - abs(h - 25000.0) / 15000.0);
 }
@@ -140,21 +146,23 @@ fn atmo_density(h: f32) -> vec3<f32> {
     return vec3<f32>(exp(-hh / frame.atmosphere.y), exp(-hh / frame.atmosphere.z), ozone_density(hh));
 }
 
+// Extinction (1/m, or optical depth) of the air for densities (or optical depths) `od` of
+// (rayleigh, mie, ozone).
 fn extinction(od: vec3<f32>) -> vec3<f32> {
-    return RAYLEIGH_BETA * od.x + vec3(MIE_EXT) * od.y + OZONE_BETA * od.z;
+    return frame.air_rayleigh.rgb * od.x + frame.air_mie_extinction.rgb * od.y + frame.air_ozone.rgb * od.z;
 }
 
 struct Medium {
     rayleigh: vec3<f32>,    // Rayleigh scattering coefficient (1/m)
-    mie: f32,               // Mie scattering coefficient (1/m)
+    mie: vec3<f32>,         // Mie scattering coefficient (1/m)
     extinction: vec3<f32>,  // total extinction (1/m)
 };
 
 fn atmo_medium(h: f32) -> Medium {
     let d = atmo_density(h);
     var m: Medium;
-    m.rayleigh = RAYLEIGH_BETA * d.x;
-    m.mie = MIE_BETA * d.y;
+    m.rayleigh = frame.air_rayleigh.rgb * d.x;
+    m.mie = frame.air_mie.rgb * d.y;
     m.extinction = extinction(d);
     return m;
 }
@@ -215,13 +223,99 @@ fn transmittance_to_space(h: f32, mu: f32) -> vec3<f32> {
     return transmittance_to_top(top, mu_entry);
 }
 
-// Radiance of all scattering orders above the first, per unit scattering coefficient.
-fn multiscatter(h: f32, mu_s: f32) -> vec3<f32> {
-    let uv = vec2<f32>(
+// The multiple scattering texture holds four tables of MULTISCATTER_LUT_SIZE over (sun zenith
+// cosine, height), one above the other: all orders of multiple scattering, the two parts of its
+// second order (sunlight scattered once by the air; sunlight off the ground), and the sky's light
+// on the ground (`atmosphere_sky_irradiance`).
+fn multiscatter_lut_uv(h: f32, mu_s: f32, table: f32) -> vec2<f32> {
+    return vec2<f32>(
         unit_to_texel(mu_s * 0.5 + 0.5, MULTISCATTER_LUT_SIZE.x),
-        unit_to_texel(saturate(h / frame.atmosphere.x), MULTISCATTER_LUT_SIZE.y),
+        (unit_to_texel(saturate(h / frame.atmosphere.x), MULTISCATTER_LUT_SIZE.y) + table) * 0.25,
     );
-    return textureSampleLevel(multiscatter_lut, linear_clamp, uv, 0.0).rgb;
+}
+
+// Radiance of all scattering orders above the first, per unit scattering coefficient, averaged
+// over all directions it arrives from.
+fn multiscatter(h: f32, mu_s: f32) -> vec3<f32> {
+    return textureSampleLevel(multiscatter_lut, linear_clamp, multiscatter_lut_uv(h, mu_s, 0.0), 0.0).rgb;
+}
+
+// `multiscatter` (total) and the two parts of its second order: sunlight the air scattered once
+// (which arrives mostly from around the sun when the air scatters forward, as dust does) and
+// sunlight off the ground (which arrives from below).
+struct MultiScatter {
+    total: vec3<f32>,
+    sunlit_air: vec3<f32>,
+    ground: vec3<f32>,
+};
+
+fn multiscatter_parts(h: f32, mu_s: f32) -> MultiScatter {
+    var m: MultiScatter;
+    m.total = multiscatter(h, mu_s);
+    m.sunlit_air = textureSampleLevel(multiscatter_lut, linear_clamp, multiscatter_lut_uv(h, mu_s, 1.0), 0.0).rgb;
+    m.ground = textureSampleLevel(multiscatter_lut, linear_clamp, multiscatter_lut_uv(h, mu_s, 2.0), 0.0).rgb;
+    return m;
+}
+
+// The Henyey-Greenstein phase function per channel, times 4 pi (1 on average over directions).
+fn atmo_lobe_hg_rgb(cos_t: vec3<f32>, g: vec3<f32>) -> vec3<f32> {
+    let g2 = g * g;
+    return (vec3<f32>(1.0) - g2) / pow(max(vec3<f32>(1.0) + g2 - 2.0 * g * cos_t, vec3<f32>(1e-4)), vec3<f32>(1.5));
+}
+
+// Light scattered toward the eye by the air (per unit scattering coefficient, phase
+// anisotropy `g`) out of multiple scattering `ms`, for a view of zenith cosine `mu` there and
+// cosine `nu` to the sun. Hillaire's tables take it as arriving evenly from all directions,
+// which forward-scattering dust doesn't see: it scatters the light it gets from around the sun
+// on toward directions near the sun, and the light from the ground below on upward. So the
+// second order is scattered by where it comes from: the air's (in the sunlight's own phase,
+// spread once more: a lobe of `g` times the forward-scattering share `g1` of what lit it; two
+// Henyey-Greenstein lobes in a row make one of their product) and the ground's (from the lower
+// hemisphere: the phase function's share of it), and only the higher orders are taken as even.
+fn multiscatter_inscatter(ms: MultiScatter, mu: f32, nu: f32, g: vec3<f32>, g1: vec3<f32>) -> vec3<f32> {
+    let rest = max(ms.total - ms.sunlit_air - ms.ground, vec3<f32>(0.0));
+    let air = ms.sunlit_air * atmo_lobe_hg_rgb(vec3<f32>(nu), g * g1);
+    // Share of the phase function over the lower hemisphere for a view of zenith cosine mu
+    // (Legendre terms up to the third), times 2: the ground's light fills half the sphere.
+    let x = -mu;
+    let p3 = 0.5 * (5.0 * x * x * x - 3.0 * x);
+    let below = clamp(vec3<f32>(0.5) + 0.75 * g * x - 0.4375 * g * g * g * p3, vec3<f32>(0.0), vec3<f32>(1.0));
+    return rest + air + ms.ground * (2.0 * below);
+}
+
+// Sky light on an upward-facing surface at height h (all scattering orders, from the whole
+// sky above it) for sun zenith cosine mu_s, per lux of sun and divided by pi: the radiance of
+// a white diffuse surface it lights, as `sky_ambient` gives it.
+fn atmosphere_sky_irradiance(h: f32, mu_s: f32) -> vec3<f32> {
+    return textureSampleLevel(multiscatter_lut, linear_clamp, multiscatter_lut_uv(h, mu_s, 3.0), 0.0).rgb;
+}
+
+// Sky light (as `sky_ambient(n)`, without the ambient fill, per lux of sun) on a surface at
+// camera-relative `rel` facing `n`, from the air around it rather than around the camera:
+// the sky above it and the sunlit ground below it, by how much of each the surface faces.
+fn atmosphere_sky_ambient(rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    let h = planet_height(rel);
+    let up = normalize(rel - frame.planet.xyz);
+    let mu_s = dot(up, frame.sun_dir.xyz);
+    let sky = atmosphere_sky_irradiance(h, mu_s);
+    // The ground: lit by the sun and the sky, seen through the air below the surface (which
+    // the sky term's ground-facing half leaves out; it is thin over the ground itself).
+    let sun_on_ground = transmittance_to_top(0.0, mu_s) * sun_above_horizon(0.0, mu_s) * saturate(mu_s) * INV_PI;
+    let ground = frame.ground.rgb * (sun_on_ground + atmosphere_sky_irradiance(0.0, mu_s));
+    let c = dot(n, up);
+    return sky * (0.5 + 0.5 * c) + ground * (0.5 - 0.5 * c);
+}
+
+// How much a surface at camera-relative `rel` takes its sky light from the air around itself
+// (`atmosphere_sky_ambient`) rather than from the environment map, which holds the sky as seen
+// from the camera: 0 for surfaces at about the camera's height or above it, 1 for surfaces a
+// scale height of air or more below it. From orbit the environment map is black space above
+// the planet, and the ground would lose all its sky light.
+fn atmosphere_sky_ambient_weight(rel: vec3<f32>) -> f32 {
+    if (frame.planet.w <= 0.0) { return 0.0; }
+    let below = frame.camera_world.w - planet_height(rel);
+    let scale = max(frame.atmosphere.y, frame.atmosphere.z);
+    return smoothstep(0.25, 1.0, below / max(scale, 1.0));
 }
 
 // Sky-view table coordinates for a camera at height h (Hillaire's mapping: dense at the
@@ -272,19 +366,25 @@ struct AtmosphereSample {
 // distances t0 and t1. mu_s is the sun's zenith cosine at the start, nu the cosine between the
 // ray and the sun. Samples are spaced quadratically (dense near t0).
 fn integrate_atmosphere(h0: f32, mu: f32, mu_s: f32, nu: f32, t0: f32, t1: f32, steps: i32) -> AtmosphereSample {
+    return integrate_atmosphere_spaced(h0, mu, mu_s, nu, t0, t1, steps, 0.0);
+}
+
+// `integrate_atmosphere` with the samples dense near t0 (`dense_end` 0), near t1 (1, for rays
+// that descend into the air, where it is densest at their end), or in between.
+fn integrate_atmosphere_spaced(h0: f32, mu: f32, mu_s: f32, nu: f32, t0: f32, t1: f32, steps: i32, dense_end: f32) -> AtmosphereSample {
     var result: AtmosphereSample;
     result.ground_t = -1.0;
     let radius = frame.planet.w;
     let r0 = radius + h0;
     let pr = phase_rayleigh(nu);
-    let pm = phase_mie(nu, frame.atmosphere.w);
+    let pm = phase_mie_rgb(nu, frame.air_mie_g.rgb);
     let len = t1 - t0;
     var prev = 0.0;
     var throughput = vec3<f32>(1.0);
     var radiance = vec3<f32>(0.0);
     for (var i = 0; i < steps; i++) {
         let f = f32(i + 1) / f32(steps);
-        let t = len * f * f;
+        let t = len * mix(f * f, 1.0 - (1.0 - f) * (1.0 - f), dense_end);
         let dt = t - prev;
         let tm = t0 + (prev + t) * 0.5;
         prev = t;
@@ -292,8 +392,11 @@ fn integrate_atmosphere(h0: f32, mu: f32, mu_s: f32, nu: f32, t0: f32, t1: f32, 
         let mu_s_t = clamp((r0 * mu_s + tm * nu) / (radius + h), -1.0, 1.0);
         let m = atmo_medium(h);
         let sun = transmittance_to_top(h, mu_s_t) * sun_above_horizon(h, mu_s_t);
-        let scattering = m.rayleigh + vec3<f32>(m.mie);
-        let s = sun * (m.rayleigh * pr + vec3<f32>(m.mie * pm)) + multiscatter(h, mu_s_t) * scattering;
+        let ms = multiscatter_parts(h, mu_s_t);
+        let mu_t = clamp((r0 * mu + tm) / (radius + h), -1.0, 1.0);
+        let g1 = m.mie * frame.air_mie_g.rgb / max(m.mie + m.rayleigh, vec3<f32>(1e-20));
+        let mie_ms = multiscatter_inscatter(ms, mu_t, nu, frame.air_mie_g.rgb, g1);
+        let s = sun * (m.rayleigh * pr + m.mie * pm) + ms.total * m.rayleigh + mie_ms * m.mie;
         let seg = exp(-m.extinction * dt);
         radiance += throughput * (s - s * seg) / max(m.extinction, vec3<f32>(1e-12));
         throughput *= seg;
@@ -326,7 +429,12 @@ fn atmosphere(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32, steps: i32) -> A
     }
     if (t1 <= t0) { return result; }
     let ground_t = result.ground_t;
-    result = integrate_atmosphere(h0, mu, dot(sun, up), dot(dir, sun), t0, t1, steps);
+    // A ray that descends through a scale height of air or more (from orbit, from a high
+    // aircraft) meets most of it near its end: sample it densely there.
+    let h_start = select(h0, frame.atmosphere.x, t0 > 0.0);
+    let descent = h_start - height_along(h0, mu, t1);
+    let dense_end = smoothstep(0.5, 1.5, descent / max(max(frame.atmosphere.y, frame.atmosphere.z), 1.0));
+    result = integrate_atmosphere_spaced(h0, mu, dot(sun, up), dot(dir, sun), t0, t1, steps, dense_end);
     result.ground_t = ground_t;
     return result;
 }

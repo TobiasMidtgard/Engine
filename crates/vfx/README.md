@@ -32,8 +32,9 @@ An effect has emitters (layers). Each emitter says when it spawns (`rate`, `rate
 `bursts`, `delay`, `duration`), where (`shape`: point, sphere, hemisphere, cone, ring, disc,
 box, line), how particles move (`speed`, `velocity`, `orbit_speed`, `gravity`, `drag`, `wind`,
 `turbulence`, `vortex`, `attract`, `collide` with the ground or water: bounce, die or stick) and
-how they look (`sprite`: glow, spark, smoke, flame, droplet, ring, star, rune, shard, dust;
-`facing`: camera, velocity or horizontal; `color` and `size_over_life`; `emissive` in cd/m²;
+how they look (`sprite`: glow, spark, smoke, flame, droplet, ring, star, rune, shard, dust,
+haze, billow, vortex, plume, crown, ripple, foam, blaze; `facing`: camera, velocity, horizontal or axis (standing along the
+emitter's direction); `color` and `size_over_life`; `emissive` in cd/m²;
 `lit` by sun, sky and point lights; `additive`; `soft`), or `debris` to draw solid 3D pieces
 instead of sprites ([`Debris`]: rock, splinter, shard or scrap). An effect can also carry a point
 `light` with flicker and fade, a `trail`, and `prewarm` so loops look settled from the first
@@ -50,16 +51,46 @@ than 1.5 pixels are drawn 1.5 pixels wide and dimmed to match, so distant sparks
 Effects are authored for flat ground in sea-level air and adapt to where they play: gravity
 comes from `Env::gravity`, buoyancy (`acceleration`) turns to the local up on a planet, and
 buoyancy, `drag` and `turbulence` scale with the air's density from `Env::air`. Smoke barely
-rises on Mars, and dust kicked up on the Moon flies in clean ballistic arcs.
+rises on Mars, dust kicked up on the Moon flies in clean ballistic arcs, and an engine's plume
+loses its shock diamonds and balloons out as the air thins toward space.
+
+Engine exhausts (`exhaust.*`) play at a nozzle with the effect's +Y pointing down the exhaust;
+`scale` 1 is the nozzle size each one names and `intensity` follows the throttle. Every nozzle
+of an `Exhausts` component (written by vehicles, jump kits) gets its kind's effect by itself,
+sized by its radius and following its level; running jets and tailpipes keep idling while the
+entity's `EngineState` says the engine runs, and each runs on its owner's `LocalTimeScale`
+([`exhaust`]). A cut engine's smoke drifts on, and it relights without starting over. The
+flame and nozzle glow are `steady` layers, which keep their full rate whatever the effect's
+`rate` and the density setting (stopping only at rate 0), so they never thin into flicker. The `plume`
+sprite draws the flame procedurally: a white-hot core, a train of shock diamonds about a
+nozzle's width apart with the gas banded bright and dark around them, and a turbulent tail
+that flickers and tears away. A climbing rocket lays its smoke trail down per meter it travels, so the trail stands
+as one unbroken column however fast it goes.
+
+Fires burn as one body, not a heap of paper cut-outs. The `blaze` sprite draws a whole fire
+standing on its fuel: a churning, domain-warped body that sways, breaks into a few tongues at
+the top and colors itself by heat, deep red at the rim, the layer's color in the body and near
+white only in the core. `fire.torch` stands a few overlapping blazes on the coals (`steady`, in
+its own space) and lets narrower flame tongues, tips and embers rise out of them.
+
+Splashes are water, not white puffs. The `crown` sprite ray traces the splash's crown inside
+its square: a wall of water thrown up in a ring that flares out, its rim drawn into fingers
+with a bead on each tip, then tears open and slumps while the jet shoots up from the middle. It
+mirrors the sky at a glance, glints in the sun and whitens only where it froths. `ripple`
+bends the water behind it in a train of wavelets and catches the sky on their crests, and
+`foam` floats a lace of bubbles that breaks up over a few seconds (an even whiteness when too
+far away to show its bubbles). Both ride the surface in the effect's own space, so the air
+neither holds them up nor lets them sink.
 
 ## Built-in effects
 
 | Family | Effects |
 |---|---|
 | Spells | `spell.fireball`, `spell.fireball_impact`, `spell.frost_bolt`, `spell.frost_impact`, `spell.arcane_portal`, `spell.portal_gate`, `spell.heal_aura`, `spell.charge`, `spell.lightning_hit`, `spell.starburst`, `magic.orb` |
-| Water | `water.splash`, `water.splash_small`, `water.fountain` |
+| Water | `water.splash`, `water.splash_small`, `water.fountain`, `water.column`, `water.bow_spray`, `water.mist` |
 | Impacts | `impact.<surface>` for every surface material (dirt, rock, concrete, wood, sand, grass, leaves, snow, mud, water, flesh, ice, glass, metal, default), `impact.sparks`, `impulse.dust`, `explosion.large` |
 | Footsteps | `step.dirt`, `step.sand`, `step.snow`, `step.mud`, `step.puddle`, `step.water`, `step.leaves`, `step.default` |
+| Engines | `exhaust.rocket`, `exhaust.afterburner`, `exhaust.jet`, `exhaust.thruster`, `exhaust.tailpipe`, `exhaust.backfire`, `exhaust.jumpjet` |
 | Other | `muzzle.flash`, `fire.torch`, `ambient.fireflies` |
 
 ## Automatic reactions
@@ -108,8 +139,9 @@ and `VfxReactions`. Components: `ParticleEffect`, `Trail`, `Beam`.
   particle, a second writes the new ones (spread along the emitter's path so fast spells leave
   a continuous stream). Particles that hit, die or fly on for a sub-emitter append events,
   and a third pass turns them into particles of the fed layer, claiming slots in its ring
-  with an atomic cursor (up to 65 536 events a frame). Lit particles get sun (with shadows and forward scattering for smoke),
-  sky and point lights, refreshed every fourth frame. A last pass sorts each visible layer's
+  with an atomic cursor (up to 65 536 events a frame). Lit particles get sun (with shadows,
+  and for smoke forward scattering over a floor for the light a thick puff scatters many
+  times), sky and point lights, refreshed every fourth frame. A last pass sorts each visible layer's
   particles by distance (a bitonic sort per run of 2048 slots), so nearer puffs of smoke
   cover farther ones. Sprites are procedural, drawn as one instanced quad per particle, layers
   and particles far to near, softened against the scene depth.
@@ -125,7 +157,9 @@ and `VfxReactions`. Components: `ParticleEffect`, `Trail`, `Beam`.
 ## Contracts
 
 Reads: `WindField`, `Gravity`, `Ground`, `Water`, `SurfaceLayers` (puddles, snow),
-`SurfaceMaterials`, `TimeDilation`/`LocalTimeScale`, and the messages above.
+`SurfaceMaterials`, `Exhausts` and `EngineState`, `TimeDilation`/`LocalTimeScale`, and the
+messages above. Inserts `ExhaustEffects` (`draws_exhausts`), so owners hide their stand-in
+plumes.
 Writes: rendering only (plus the point lights of effects). The showcase demo writes
 `GroundContact` and `WorldImpulse` like a game would.
 
@@ -133,18 +167,21 @@ Writes: rendering only (plus the point lights of effects). The showcase demo wri
 
 `demo::spawn_demo` builds the test area in the showcase's `magic` zone, and `demo::VIEWS` lists
 its tour stops (`magic_spells` at dusk, `magic_portal`, `magic_starburst`, `magic_splashes`,
-`magic_footsteps`, `magic_marks` and `magic_impacts`): an arcane portal with orbiting orbs before
+`magic_footsteps`, `magic_marks`, `magic_engine` and `magic_impacts`): an arcane portal with orbiting orbs before
 a gate whose arch holds a standing portal swirling the valley seen through it, a mortar firing
 starburst fireworks over the court, fireballs and frost bolts scorching and frosting a wall,
 lightning between two obelisks, a healing aura, a fountain, an anvil throwing sparks that
 split as they skid, a pond with stones splashing in, a golem stomping over mud, snow, sand and
 water, shot impacts on six materials (chipping the rock), and braziers burning charcoal around
-the rim, with fireflies in the shrubs beyond. Its glowing stone (runes, crystals, coals)
+the rim, with fireflies in the shrubs beyond. Outside the north-east rim a rocket motor on a
+stone test stand fires every eleven seconds: an igniter's burst of sparks, then ten seconds of
+plume with shock diamonds and a cloud of exhaust rolling away. Its glowing stone (runes, crystals, coals)
 follows the camera's exposure as particle glow does ([`VfxSettings::glow_exposure`]), so it
 keeps its color at night instead of turning white.
 `cargo run -p engine_vfx --release --example sub_emitters` renders the firework and the
-splitting sparks; `--example braziers` renders the brazier fires and `--example court` the
-whole court, each by day, at dusk and at night.
+splitting sparks; `--example braziers` renders the brazier fires, `--example engines` every
+exhaust side on and a rocket lifting off (add `vacuum` to take the air away), `--example splashes` the splashes close up
+as they unfold, and `--example court` the whole court, each by day, at dusk and at night.
 
 ## Next
 

@@ -6,15 +6,32 @@
 //!
 //! Ground under a foot comes from three places, highest surface wins: the `Ground` query
 //! (terrain), a downward ray through the physics contract (`PhysicsQueries`, when a physics
-//! backend is installed), and [`IkSurface`] boxes, ramps and stairs, which let scenes without
-//! physics colliders (and animation test stages) still plant feet correctly.
+//! backend is installed; ragdoll parts don't count), and [`IkSurface`] boxes, ramps and
+//! stairs, which let scenes without physics colliders (and animation test stages) still plant
+//! feet correctly.
 
 use engine_core::prelude::*;
 use engine_world::physics::{PhysicsQueries, QueryFilter};
 use engine_world::{Ground, SurfaceId};
 
 use crate::animator::{Animator, PoseEdit};
-use crate::xform::{rotation_between, smoothing};
+use crate::xform::{rotation_between, smoothing, twist_angle};
+
+/// How fast a planted foot's hold takes over, and how long a released one takes to rejoin
+/// the animation, s.
+const LOCK_IN_SECS: f32 = 0.04;
+const LOCK_OUT_SECS: f32 = 0.15;
+/// A standing foot steps when the body has turned this far from it, degrees; the step takes
+/// `STEP_SECS` and lifts the foot `STEP_HEIGHT` (model units).
+const STEP_TURN: f32 = 35.0;
+const STEP_SECS: f32 = 0.3;
+const STEP_HEIGHT: f32 = 0.07;
+/// Feet step round only while the body moves slower than this (m/s); a walking foot the body
+/// leaves behind just lets go, as the walk lifts it anyway.
+const STEP_BELOW_SPEED: f32 = 0.4;
+/// A foot coming down only plants once the animation has it (nearly) still on the ground:
+/// slower than this plus half the body's speed, m/s (a swinging foot skims low and fast).
+const PLANT_SPEED: f32 = 0.5;
 
 // ------------------------------------------------------------------------------- solvers
 
@@ -288,9 +305,11 @@ impl GroundProbe<'_> {
             });
         }
         if let Some(phys) = self.physics {
-            let filter = match self.exclude {
-                Some(e) => QueryFilter::excluding(e),
-                None => QueryFilter::default(),
+            // Ragdoll parts aren't ground: a body's own limbs would lift its feet.
+            let filter = QueryFilter {
+                layers: !crate::ragdoll::RAGDOLL_LAYER,
+                exclude: self.exclude.into_iter().collect(),
+                include_sensors: false,
             };
             if let Some(hit) = phys.raycast(
                 DVec3::new(p.x, top, p.z),
@@ -383,10 +402,42 @@ pub struct FootIk {
     pub align: f32,
     /// Largest foot tilt, degrees.
     pub max_tilt_deg: f32,
+    /// Hold planted feet still on the ground (no sliding when the clip's stride doesn't
+    /// match the body's motion, or the body turns on the spot).
+    pub lock: bool,
+    /// Lift above the ground (meters) under which a foot counts as planted.
+    pub lock_lift: f32,
+    /// Farthest a held foot may lag behind the animation before it lets go, meters.
+    pub lock_reach: f32,
     #[serde(skip)]
     pub pelvis_offset: f32,
     #[serde(skip)]
     pub foot_offsets: Vec<f32>,
+    #[serde(skip)]
+    pub locks: Vec<FootLock>,
+    /// Where the body was last frame and how fast it moves over the ground (smoothed), m/s.
+    #[serde(skip)]
+    pub last_body: Option<DVec3>,
+    #[serde(skip)]
+    pub body_speed: f32,
+}
+
+/// Where a planted foot is held (world space), and how strongly.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct FootLock {
+    /// The held ankle position; kept while the hold fades after letting go.
+    pub at: Option<DVec3>,
+    /// The held foot's rotation (world; its heading is kept).
+    pub rot: Quat,
+    /// Whether the foot is held now.
+    pub held: bool,
+    /// Whether it let go to step (the body turned or moved away from it while it stood),
+    /// rather than lifting with the animation: it then swings over in a small arc.
+    pub step: bool,
+    /// 0 free .. 1 fully held.
+    pub blend: f32,
+    /// Where the animation had the ankle last frame (world), for its speed over the ground.
+    pub last: Option<DVec3>,
 }
 
 impl Default for FootIk {
@@ -402,8 +453,14 @@ impl Default for FootIk {
             pelvis_smoothing: 0.08,
             align: 1.0,
             max_tilt_deg: 35.0,
+            lock: true,
+            lock_lift: 0.02,
+            lock_reach: 0.18,
             pelvis_offset: 0.0,
             foot_offsets: Vec::new(),
+            locks: Vec::new(),
+            last_body: None,
+            body_speed: 0.0,
         }
     }
 }
@@ -562,6 +619,8 @@ pub fn solve_feet(
     let Some(pelvis) = skeleton.index_of(&ik.pelvis) else {
         return;
     };
+    // A body on the floor (the `floor` curve of a get-up) isn't standing on its feet.
+    let weight = ik.weight * (1.0 - animator.curve("floor")).clamp(0.0, 1.0);
     let legs: Vec<(usize, usize, usize, Option<usize>, Vec3)> = ik
         .legs
         .iter()
@@ -580,6 +639,20 @@ pub fn solve_feet(
     let up_model = (gt.rotation().conjugate() * Vec3::Y).normalize();
     // Per foot: how far (model units along up) the ankle must move to sit on the ground.
     ik.foot_offsets.resize(legs.len(), 0.0);
+    ik.locks.resize(legs.len(), FootLock::default());
+    let can_lock = ik.lock && weight > 0.5 && dt > 0.0;
+    let body = gt.translation();
+    if dt > 0.0 {
+        let moved = ik
+            .last_body
+            .map_or(0.0, |b| (body - b).with_y(0.0).length()) as f32;
+        ik.body_speed += (moved / dt - ik.body_speed) * smoothing(dt, 0.1);
+    }
+    ik.last_body = Some(body);
+    // One foot steps at a time, and only while the body (nearly) stands.
+    let body_speed = ik.body_speed;
+    let may_step = body_speed < STEP_BELOW_SPEED;
+    let mut stepping = !may_step || ik.locks.iter().any(|l| !l.held && l.step && l.blend > 0.0);
     let mut hits = Vec::with_capacity(legs.len());
     let mut min_offset = f32::INFINITY;
     for (n, &(_, _, foot, _, _)) in legs.iter().enumerate() {
@@ -601,22 +674,87 @@ pub fn solve_feet(
         };
         ik.foot_offsets[n] = offset;
         hits.push(hit);
+        // A foot that comes down is held where it landed until it lifts again (or the body
+        // has moved so far that it must let go), then eased back to the animation.
+        // A held foot the body turns or moves away from while it stands steps over to
+        // where the animation has it.
+        let (lock_lift, reach) = (ik.lock_lift, (ik.lock_reach * scale) as f64);
+        let rot = gt.rotation() * animator.model[foot].r;
+        let l = &mut ik.locks[n];
+        let foot_speed = match (l.last, dt > 0.0) {
+            (Some(p), true) => ((p - world).with_y(0.0).length() as f32) / dt,
+            _ => 0.0,
+        };
+        l.last = Some(world);
+        let planted = foot_speed < PLANT_SPEED + 0.5 * body_speed;
+        if l.held {
+            let drift = l.at.map_or(f64::INFINITY, |a| {
+                ((a.x - world.x).powi(2) + (a.z - world.z).powi(2)).sqrt()
+            });
+            let turned = twist_angle(l.rot * rot.inverse(), Vec3::Y).abs() > STEP_TURN.to_radians();
+            if !can_lock || lift > 2.0 * lock_lift {
+                l.held = false;
+                l.step = false;
+            } else if ((drift > reach || turned) && !stepping) || drift > 2.0 * reach {
+                l.held = false;
+                l.step = may_step;
+                stepping = true;
+            }
+        } else if can_lock && lift < lock_lift && planted && !(l.step && l.blend > 0.0) {
+            l.held = true;
+            l.step = false;
+            l.at = Some(world);
+            l.rot = rot;
+        }
+        l.blend = if l.held {
+            (l.blend + dt / LOCK_IN_SECS).min(1.0)
+        } else if l.step {
+            (l.blend - dt / STEP_SECS).max(0.0)
+        } else {
+            (l.blend - dt / LOCK_OUT_SECS).max(0.0)
+        };
+        if !l.held && l.blend <= 0.0 {
+            l.at = None;
+        }
         min_offset = min_offset.min(offset);
     }
     if !min_offset.is_finite() {
         min_offset = 0.0;
     }
     // The pelvis goes down to let the lower foot reach (never up: legs can't stretch).
-    let target = min_offset.clamp(-ik.max_step_down, 0.0) * ik.weight;
+    let target = min_offset.clamp(-ik.max_step_down, 0.0) * weight;
     ik.pelvis_offset += (target - ik.pelvis_offset) * smoothing(dt, ik.pelvis_smoothing);
     let mut edit = animator.edit();
     edit.translate_model(pelvis, up_model * ik.pelvis_offset);
     for (n, &(upper, lower, foot, toe, knee)) in legs.iter().enumerate() {
         let ankle = edit.position(foot);
-        let goal = ankle + up_model * (ik.foot_offsets[n] * ik.weight - ik.pelvis_offset);
-        // Keep the animated foot rotation while the leg bends.
-        let foot_rot = edit.model[foot].r;
+        let mut base = ankle;
+        // Keep the animated foot rotation while the leg bends (a held foot keeps its own).
+        let mut foot_rot = edit.model[foot].r;
+        if let Some(l) = ik.locks.get(n).copied()
+            && let Some(at) = l.at
+            && l.blend > 0.0
+        {
+            let d = to_model(gt, at) - ankle;
+            base += (d - up_model * d.dot(up_model)) * l.blend;
+            // Only its heading: the animation still rolls it heel to toe.
+            let animated = gt.rotation() * foot_rot;
+            let yaw = twist_angle(l.rot * animated.inverse(), Vec3::Y);
+            foot_rot = (Quat::from_axis_angle(up_model, yaw * l.blend) * foot_rot).normalize();
+            if l.step && !l.held {
+                base += up_model * STEP_HEIGHT * (std::f32::consts::PI * l.blend).sin();
+            }
+        }
+        let goal = base + up_model * (ik.foot_offsets[n] * weight - ik.pelvis_offset);
+        let animated = (edit.model[upper].r, edit.model[lower].r);
         two_bone(&mut edit, upper, lower, foot, goal, knee, 1.0);
+        if weight < 1.0 {
+            // Fade the knee's re-aim toward `knee` too, not only the goal: at weight 0 the
+            // leg keeps its animated bend (knees up while sitting on the floor).
+            let solved = (edit.model[upper].r, edit.model[lower].r);
+            edit.set_model_rotation(upper, animated.0.slerp(solved.0, weight));
+            edit.set_model_rotation(lower, animated.1.slerp(solved.1, weight));
+        }
         edit.set_model_rotation(foot, foot_rot);
         // Tilt the foot to the ground, more when planted than when swinging.
         if let Some(h) = hits[n]
@@ -627,7 +765,7 @@ pub fn solve_feet(
             let planted = (1.0 - lift / 0.15).clamp(0.0, 1.0);
             let tilt = rotation_between(up_model, n_model);
             let (axis, angle) = tilt.to_axis_angle();
-            let angle = angle.min(ik.max_tilt_deg.to_radians()) * ik.align * planted * ik.weight;
+            let angle = angle.min(ik.max_tilt_deg.to_radians()) * ik.align * planted * weight;
             if angle > 1e-4 {
                 edit.rotate_model(foot, Quat::from_axis_angle(axis, angle));
             }
@@ -638,7 +776,7 @@ pub fn solve_feet(
                 if flat != Vec3::ZERO && fwd.dot(n_model) < 0.0 {
                     let bend = rotation_between(fwd, flat);
                     let (axis, angle) = bend.to_axis_angle();
-                    let angle = angle.min(50f32.to_radians()) * planted * ik.weight;
+                    let angle = angle.min(50f32.to_radians()) * planted * weight;
                     edit.rotate_model(t, Quat::from_axis_angle(axis, angle));
                 }
             }
