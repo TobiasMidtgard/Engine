@@ -33,7 +33,7 @@ An effect has emitters (layers). Each emitter says when it spawns (`rate`, `rate
 box, line), how particles move (`speed`, `velocity`, `orbit_speed`, `gravity`, `drag`, `wind`,
 `turbulence`, `vortex`, `attract`, `collide` with the ground or water: bounce, die or stick) and
 how they look (`sprite`: glow, spark, smoke, flame, droplet, ring, star, rune, shard, dust,
-haze, billow, vortex, plume, crown, ripple, foam; `facing`: camera, velocity, horizontal or axis (standing along the
+haze, billow, vortex, plume, crown, ripple, foam, blaze; `facing`: camera, velocity, horizontal or axis (standing along the
 emitter's direction); `color` and `size_over_life`; `emissive` in cd/m²;
 `lit` by sun, sky and point lights; `additive`; `soft`), or `debris` to draw solid 3D pieces
 instead of sprites ([`Debris`]: rock, splinter, shard or scrap). An effect can also carry a point
@@ -65,6 +65,12 @@ flame and nozzle glow are `steady` layers, which keep their full rate whatever t
 sprite draws the flame procedurally: a white-hot core, a train of shock diamonds about a
 nozzle's width apart with the gas banded bright and dark around them, and a turbulent tail
 that flickers and tears away.
+
+Fires burn as one body, not a heap of paper cut-outs. The `blaze` sprite draws a whole fire
+standing on its fuel: a churning, domain-warped body that sways, breaks into a few tongues at
+the top and colors itself by heat, deep red at the rim, the layer's color in the body and near
+white only in the core. `fire.torch` stands a few overlapping blazes on the coals (`steady`, in
+its own space) and lets narrower flame tongues, tips and embers rise out of them.
 
 Splashes are water, not white puffs. The `crown` sprite ray traces the splash's crown inside
 its square: a wall of water thrown up in a ring that flares out, its rim drawn into fingers
