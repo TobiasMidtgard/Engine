@@ -15,6 +15,7 @@ pub mod perception;
 pub mod seed;
 mod shift;
 pub mod skills;
+pub mod smoke;
 pub mod squad;
 pub mod tactics;
 pub mod training;
@@ -24,7 +25,7 @@ pub mod world_model;
 
 pub use agent::{
     AlertLevel, AttackPhase, Defense, Npc, NpcAction, NpcBrain, NpcClock, NpcCombat, NpcMotor,
-    NpcOrder, NpcSettings, NpcVitals, NpcWeapon, WeaponStyle,
+    NpcOrder, NpcRole, NpcSettings, NpcVitals, NpcWeapon, WeaponStyle,
 };
 pub use combat::Downed;
 pub use faction::{Faction, Factions, Squad};
@@ -38,7 +39,9 @@ pub use skills::{NpcSkills, Perception};
 pub use squad::{AttackTokens, ReviveClaims, SquadSettings};
 pub use training::SparringPost;
 pub use visuals::{IntentMarker, Part, StandIn, StandInPart};
-pub use wildlife::{Animal, AnimalMind, AnimalState, BirdFlight, Herd, Species, WildlifeSettings};
+pub use wildlife::{
+    Animal, AnimalMind, AnimalState, BirdFlight, Herd, PackRole, Species, WildlifeSettings,
+};
 pub use world_model::{CoverPoint, TacticalWorld, WorldModelSettings};
 
 use engine_core::prelude::*;
@@ -74,6 +77,7 @@ impl Plugin for NpcPlugin {
             .init_resource::<Perceivables>()
             .init_resource::<AttackTokens>()
             .init_resource::<ReviveClaims>()
+            .init_resource::<smoke::SmokeClouds>()
             .init_resource::<OpponentModels>()
             .init_resource::<WildlifeSettings>()
             .init_resource::<seed::SeedsGiven>()
@@ -177,6 +181,7 @@ impl Plugin for NpcPlugin {
                         combat::apply_damage,
                         features::explosives,
                         combat::revive,
+                        smoke::smoke_clouds,
                         training::swing_posts,
                     )
                         .chain()
@@ -188,6 +193,7 @@ impl Plugin for NpcPlugin {
                         training::build_posts,
                         training::pose_posts,
                         art::arena::flicker_fires,
+                        smoke::show_clouds,
                     )
                         .chain()
                         .in_set(NpcSet::Show),
