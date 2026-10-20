@@ -1309,7 +1309,8 @@ fn the_loading_screen_follows_the_game_and_waits_to_be_dismissed() {
         "ui.show",
         json!({"screen": "loading", "simulate_s": 0.5, "hold": false, "instant": true}),
     );
-    app.update_n(80);
+    // Half a second of loading, the bar easing full, a short beat and the close.
+    app.update_n(150);
     assert!(!open(&mut app).contains(&"loading".to_string()));
     // An unknown planet is an error, not an empty screen.
     let r = call_api(
