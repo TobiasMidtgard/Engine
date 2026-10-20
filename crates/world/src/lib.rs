@@ -5,9 +5,10 @@
 //!
 //! * **Fields** ([`environment`]): wind, weather, ground wetness/snow/scorch, heat. One owner
 //!   writes each; anyone reads. Sample them through [`Env`], a system parameter.
-//! * **Queries** ([`physical`]): [`Gravity`], [`Ground`] and [`Water`] answer "what is at this
-//!   point" for any implementation (heightmap, voxel, planet; lake, ocean, river), and
-//!   [`Obscurance`] answers "how much smoke, fog or dust is between these two points".
+//! * **Queries** ([`physical`]): [`Gravity`], [`Ground`], [`Water`] and [`ForestCover`] answer
+//!   "what is at this point" for any implementation (heightmap, voxel, planet; lake, ocean,
+//!   river; painted woods), and [`Obscurance`] answers "how much smoke, fog or dust is between
+//!   these two points".
 //! * **Air** ([`air`]): density, pressure, temperature, speed of sound and wind anywhere,
 //!   per planet (`Env::air`).
 //! * **Materials** ([`SurfaceMaterials`]): one table of friction, fuel, deformation, sounds.
@@ -21,13 +22,15 @@
 //! * **Module contracts** for the systems other modules build on, so each module can be ripped
 //!   out and replaced: [`physics`] (bodies, colliders, joints, character controller, queries,
 //!   plus a [`physics::conformance`] suite every backend must pass), [`animation`] (pose,
-//!   parameters, triggers, events, ragdoll, body requests), [`locomotion`] (move intent and
+//!   parameters, triggers, events, ragdoll, body requests), [`character`] (a person's look,
+//!   appearance requests, face controls), [`locomotion`] (move intent and
 //!   state, vehicle controls, ladders) and [`terrain`] (edits and change notifications).
 //!
 //! Units everywhere: meters, kilograms, seconds, °C, m/s.
 
 pub mod air;
 pub mod animation;
+pub mod character;
 pub mod environment;
 pub mod events;
 pub mod grid;
@@ -38,6 +41,10 @@ pub mod shift;
 pub mod terrain;
 
 pub use air::{AirSample, Atmospheres, BodyAtmosphere};
+pub use character::{
+    Appearance, AppearanceBodies, AppearanceRequest, CharacterQuality, FaceControls, HairGuide,
+    HairGuides, HairGuidesPosed, draws_appearances,
+};
 pub use environment::*;
 pub use events::*;
 pub use grid::{Blend, Grid2, Grid3};
@@ -199,6 +206,7 @@ impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         physics::register(app);
         animation::register(app);
+        character::register(app);
         locomotion::register(app);
         terrain::register(app);
         shift::register(app);
@@ -210,6 +218,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<Atmospheres>()
             .init_resource::<Ground>()
             .init_resource::<Water>()
+            .init_resource::<ForestCover>()
             .init_resource::<Obscurance>()
             .init_resource::<SurfaceMaterials>()
             .init_resource::<FocusPoints>()
@@ -374,6 +383,8 @@ mod tests {
     fn contracts_are_registered() {
         let mut app = App::new();
         app.add_plugins(WorldPlugin);
+        let woods = app.world.resource::<ForestCover>();
+        assert_eq!(woods.sample(DVec3::new(10.0, 0.0, -20.0)), None);
         let registry = app.world.resource::<TypeRegistry>();
         for name in [
             "RigidBody",
@@ -384,6 +395,12 @@ mod tests {
             "BodyRequest",
             "Climbable",
             "Exhausts",
+            "Appearance",
+            "AppearanceRequest",
+            "FaceControls",
+            "CharacterQuality",
+            "HairGuides",
+            "HairGuidesPosed",
         ] {
             assert!(
                 registry.component(name).is_some(),

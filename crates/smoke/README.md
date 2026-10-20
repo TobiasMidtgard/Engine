@@ -9,7 +9,10 @@ shadowed volumes.
 - **Smoke lives in boxes of simulated air** (`SmokeVolume`): a grid of voxels (0.25–2 m)
   holding air velocity, smoke density (kg/m³), temperature and color. Place a volume over a
   battlefield, a burning meadow or a room. Smoke released anywhere else gets a volume of its
-  own (`SmokeSettings::auto_size_m`), which goes away once its smoke has gone.
+  own (`SmokeSettings::auto_size_m`), which goes away once its smoke has gone. Where volumes
+  overlap, smoke goes to the finest one, so a small fine box around a campfire (0.3 m) inside a
+  meadow's coarse one keeps its thin wisp; volumes finer than 0.5 m also draw smaller billows
+  and erode thin smoke less.
 - **It moves like smoke:** hot smoke rises (buoyancy from its temperature) and cools as it
   mixes; dense, cold smoke sinks and spreads along the ground. The air takes up the wind
   (`WindField`, sampled every few voxels), swirls (vorticity confinement), stays
