@@ -1216,8 +1216,8 @@ fn moss_foot(mesh: &mut engine_render::Mesh, seed: u64) {
 /// their rings meet at the cut without cracks (which would show the cut faces through them).
 const TRUNK_SIDES: u32 = 14;
 
-/// Vertex color for bark at height `y`.
-fn bark_color(sp: &PlantSpecies, y: f32, h: f32, ring: usize, seed: u64) -> Vec4 {
+/// Vertex color for bark at height `y` and `around` (0..1) the stem.
+fn bark_color(sp: &PlantSpecies, y: f32, h: f32, ring: usize, around: f32, seed: u64) -> Vec4 {
     let n = engine_core::math::hash01(ring as i64, 0, 0, seed);
     let base = Vec3::from(sp.bark_color);
     let c = match sp.shape.bark {
@@ -1243,7 +1243,29 @@ fn bark_color(sp: &PlantSpecies, y: f32, h: f32, ring: usize, seed: u64) -> Vec4
         }
     };
     let ao = 0.55 + 0.45 * smoothstep(0.0, 0.7, y);
-    (c * ao).extend(1.0)
+    (c * ao * bark_weathering(sp.shape.bark, y, around, seed)).extend(1.0)
+}
+
+/// Weathering over the bark texture, meters across, so a trunk or log doesn't show its 1 m
+/// tile repeating: patches of green-grey algae and lichen, darker streaks where rain runs
+/// down the bark, and one side bleached a little paler. A tint (≈1) from the stem's seed;
+/// smooth round the stem (`around` 0..1 wraps) and along it.
+fn bark_weathering(style: BarkStyle, y: f32, around: f32, seed: u64) -> Vec3 {
+    let (algae, wet, bleach) = match style {
+        BarkStyle::Plain => (0.85, 0.42, 0.08),
+        BarkStyle::Pine => (0.4, 0.3, 0.05),
+        BarkStyle::Birch => (0.3, 0.15, 0.0),
+    };
+    let patch = 0.65 * bark::periodic_noise(around * 3.0, y * 0.8, 3, 1 << 12, seed ^ 0x1c4e)
+        + 0.35 * bark::periodic_noise(around * 6.0, y * 1.6, 6, 1 << 13, seed ^ 0x51a7);
+    // Streaks run down: barely changing along the stem.
+    let streak = bark::periodic_noise(around * 5.0, y * 0.15, 5, 1 << 10, seed ^ 0x7a1d);
+    let side = (std::f32::consts::TAU * (around - engine_core::math::hash01(3, 0, 0, seed))).cos();
+    let lichen = Vec3::new(0.84, 1.06, 0.74);
+    Vec3::ONE.lerp(lichen, smoothstep(0.0, 0.45, patch) * algae)
+        * (1.0 + 0.12 * patch)
+        * (1.0 - wet * smoothstep(0.15, 0.6, streak))
+        * (1.0 + bleach * side)
 }
 
 /// Cut wood with growth rings (r = 0 center .. 1 bark).
@@ -1296,8 +1318,8 @@ fn add_branches(
             (true, _) => (0.7, 0.65),
             _ => (1.0, 0.0),
         };
-        let color = |i: usize, _a: f32| {
-            let c = bark_color(sp, path[i].y, h, i + bi * 7, seed) * shade.wood_ao(path[i]);
+        let color = |i: usize, a: f32| {
+            let c = bark_color(sp, path[i].y, h, i + bi * 7, a, seed) * shade.wood_ao(path[i]);
             let luma = c.truncate().dot(Vec3::new(0.3, 0.55, 0.15));
             (c.truncate().lerp(Vec3::splat(luma), grey) * dim).extend(1.0)
         };
@@ -1622,7 +1644,7 @@ fn assemble(
     let branches = &crowns.branches;
     // The bark rim round the cut faces, as dark as the bark there (a pale rim would show as a
     // hairline round a birch's black foot where the stump and the wood above it meet).
-    let rim = (bark_color(sp, cut, h, cut_i, seed).truncate() * 0.6).extend(1.0);
+    let rim = (bark_color(sp, cut, h, cut_i, 0.0, seed).truncate() * 0.6).extend(1.0);
     // No trunk is a true cylinder: fluted, bulging at old knots (the near level only).
     let trunk_shape = TrunkShape::new(trunk_path, trunk_r, seed);
     let bark_v_shift = engine_core::math::hash01(11, 0, 0, seed);
@@ -1632,7 +1654,7 @@ fn assemble(
         b.bark_v_shift = bark_v_shift;
         let path = &trunk_path[..=cut_i];
         let rad = &trunk_r[..=cut_i];
-        let color = |i: usize, _a: f32| bark_color(sp, path[i].y, h, i, seed);
+        let color = |i: usize, a: f32| bark_color(sp, path[i].y, h, i, a, seed);
         let cap = |r: f32| cut_color(rim, r);
         b.tube(path, rad, TRUNK_SIDES, 0.5, &color, None, Some(&cap));
         if sp.trunk_radius_m > 0.12 {
@@ -1656,7 +1678,7 @@ fn assemble(
                     d * r0 * len + side - Vec3::Y * (0.5 * r0),
                 ];
                 let radius = [0.5, 0.42, 0.34, 0.26, 0.16].map(|f| f * r0 * thick);
-                let color = |i: usize, _a: f32| bark_color(sp, root[i].y, h, i + 40, seed) * 0.85;
+                let color = |i: usize, a: f32| bark_color(sp, root[i].y, h, i + 40, a, seed) * 0.85;
                 b.tube(&root, &radius, 8, 0.5, &color, None, None);
             }
         }
@@ -1683,7 +1705,7 @@ fn assemble(
         let top_y = trunk_path[end - 1].y;
         let path = &trunk_path[cut_i..end];
         let rad = &trunk_r[cut_i..end];
-        let color = |i: usize, _a: f32| bark_color(sp, path[i].y, h, i + cut_i, seed);
+        let color = |i: usize, a: f32| bark_color(sp, path[i].y, h, i + cut_i, a, seed);
         let cap = |r: f32| cut_color(rim, r);
         let rotten = |r: f32| (Vec3::new(0.018, 0.013, 0.009) * (0.6 + 0.4 * r)).extend(1.0);
         let broken = |_: f32| rgb(sp.bark_color, 0.55);
@@ -1706,7 +1728,7 @@ fn assemble(
             let d = (br.path[1] - br.path[0]).normalize_or(Vec3::Y);
             let stub = [br.path[0], br.path[0] + d * len];
             let r = [br.radius[0] * 0.9, br.radius[0] * 0.55];
-            let color = |i: usize, _a: f32| bark_color(sp, stub[i].y, h, i + bi * 7, seed);
+            let color = |i: usize, a: f32| bark_color(sp, stub[i].y, h, i + bi * 7, a, seed);
             b.tube(&stub, &r, 5, 0.5, &color, None, Some(&broken));
         }
         let mut log = b.finish();
@@ -1781,7 +1803,7 @@ fn assemble(
         }
         let path = &path;
         let rad = &trunk_r[start..];
-        let color = |i: usize, _a: f32| bark_color(sp, path[i].y, h, i + start, seed);
+        let color = |i: usize, a: f32| bark_color(sp, path[i].y, h, i + start, a, seed);
         let cap = |r: f32| cut_color(rim, r);
         let tip = |_: f32| rgb(sp.bark_color, 0.8);
         b.tube(
@@ -1843,7 +1865,7 @@ fn distant_wood(
     }
     let p: Vec<Vec3> = pick.iter().map(|&i| path[i]).collect();
     let r: Vec<f32> = pick.iter().map(|&i| radius[i]).collect();
-    let color = |i: usize, _a: f32| bark_color(sp, p[i].y, h, pick[i], seed);
+    let color = |i: usize, a: f32| bark_color(sp, p[i].y, h, pick[i], a, seed);
     // No cap: the trunk's top is hidden in the crown.
     b.tube(&p, &r, 4, 0.5, &color, None, None);
     for (k, br) in branches
@@ -1854,7 +1876,7 @@ fn distant_wood(
         let m = br.path.len() / 2;
         let pts = [br.path[0], br.path[m], *br.path.last().unwrap()];
         let rr = [br.radius[0], br.radius[m], *br.radius.last().unwrap()];
-        let color = |i: usize, _a: f32| bark_color(sp, pts[i].y, h, k + 50, seed);
+        let color = |i: usize, a: f32| bark_color(sp, pts[i].y, h, k + 50, a, seed);
         b.tube(&pts, &rr, 3, 0.5, &color, None, None);
     }
     b.finish()
