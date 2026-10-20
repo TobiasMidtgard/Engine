@@ -15,6 +15,10 @@
 //! [`engine_world::SurfaceLayers`]: rain makes dirt and grass squish, puddles add splashes,
 //! fresh snow covers whatever is under it, scorched grass crackles like ash, and frozen mud
 //! turns hard.
+//!
+//! Worn paths ([`engine_world::GroundWear`]) change it too: as wear passes about 0.5 a
+//! meadow's step turns to the dull thud and light grit of bare earth ([`WornPath`]), mud once
+//! the ground is wet, and trodden snow packs into a tight, squeaky crunch.
 
 use std::collections::BTreeMap;
 
@@ -65,6 +69,9 @@ pub struct SurfaceSound {
     pub pitch: f32,
     /// Overall level, dB.
     pub gain_db: f32,
+    /// 0 loose .. 1 packed hard (a trodden path, packed snow): grit and crunch are shorter
+    /// and denser.
+    pub firmness: f32,
 }
 
 impl Default for SurfaceSound {
@@ -87,6 +94,7 @@ impl Default for SurfaceSound {
             brightness: 0.5,
             pitch: 1.0,
             gain_db: 0.0,
+            firmness: 0.0,
         }
     }
 }
@@ -117,10 +125,12 @@ impl SurfaceSound {
         brightness: 0.5,
         pitch: 1.0,
         gain_db: 0.0,
+        firmness: 0.0,
     };
 
     /// Built-in sounds for the default [`engine_world::SurfaceMaterials`] names (plus
-    /// `gravel`). `None` for names it doesn't know.
+    /// `gravel`, and the worn-path surfaces `path` and `packed_snow`, see [`WornPath`]).
+    /// `None` for names it doesn't know.
     pub fn preset(name: &str) -> Option<Self> {
         Some(match name {
             "default" => SurfaceSound::default(),
@@ -161,6 +171,18 @@ impl SurfaceSound {
             "flesh" => surface!(thump: 0.9, squelch: 0.3, brightness: 0.2, pitch: 0.8),
             "gravel" => surface!(thump: 0.55, grit: 1.0, crunch: 0.2, scuff: 0.2, brightness: 0.6),
             "ash" => surface!(thump: 0.5, crackle: 0.6, hiss: 0.4, grit: 0.2, brightness: 0.4),
+            // Bare earth trodden hard: a fuller, duller thud than loose dirt, a firmer heel, a
+            // scrape as the toe rolls off and only a little grit.
+            "path" => surface!(
+                thump: 1.0, click: 0.12, scuff: 0.4, grit: 0.2, brightness: 0.4, pitch: 0.95,
+                firmness: 0.6, gain_db: -1.0
+            ),
+            // Snow trodden into a track: a short, tight crunch, higher and squeakier than
+            // powder's long soft one, on a firmer base.
+            "packed_snow" => surface!(
+                thump: 0.5, click: 0.2, scuff: 0.2, crunch: 0.65, squeak: 0.2, brightness: 0.8,
+                pitch: 1.15, firmness: 0.8, gain_db: -1.5
+            ),
             _ => return None,
         })
     }
@@ -273,6 +295,7 @@ impl SurfaceSound {
             brightness: l(self.brightness, o.brightness),
             pitch: l(self.pitch, o.pitch),
             gain_db: l(self.gain_db, o.gain_db),
+            firmness: l(self.firmness, o.firmness),
         }
     }
 
@@ -355,8 +378,26 @@ pub struct FootstepSurfaces {
 impl Default for FootstepSurfaces {
     fn default() -> Self {
         let names = [
-            "default", "rock", "concrete", "dirt", "grass", "mud", "sand", "snow", "ice", "water",
-            "wood", "leaves", "metal", "glass", "fabric", "flesh", "gravel", "ash",
+            "default",
+            "rock",
+            "concrete",
+            "dirt",
+            "grass",
+            "mud",
+            "sand",
+            "snow",
+            "ice",
+            "water",
+            "wood",
+            "leaves",
+            "metal",
+            "glass",
+            "fabric",
+            "flesh",
+            "gravel",
+            "ash",
+            "path",
+            "packed_snow",
         ];
         Self {
             surfaces: names
@@ -377,11 +418,155 @@ impl FootstepSurfaces {
     }
 
     pub fn snow(&self) -> SurfaceSound {
+        self.named("snow")
+    }
+
+    /// The sound of the surface called `name`: its entry, else its preset, else the default.
+    pub fn named(&self, name: &str) -> SurfaceSound {
         self.surfaces
-            .get("snow")
+            .get(name)
             .copied()
-            .or_else(|| SurfaceSound::preset("snow"))
+            .or_else(|| SurfaceSound::preset(name))
             .unwrap_or_default()
+    }
+
+    /// What a path worn `wear` deep (0 untouched .. 1 well worn, from
+    /// [`engine_world::GroundWear`]) into `material` does to a step on it, given the ground's
+    /// state `cell` (its wetness turns bare earth to mud). Untouched ground gives
+    /// [`WornPath::NONE`]'s blend of 0, so the step is exactly as without wear.
+    pub fn worn_path(&self, material: &SurfaceMaterial, wear: f32, cell: &SurfaceCell) -> WornPath {
+        let t = path_blend(wear);
+        let packed = self.named("packed_snow");
+        // Snow lying on the ground packs down under the same feet, whatever is under it.
+        let snow = if t > 0.0 {
+            self.snow().blend(&packed, t)
+        } else {
+            self.snow()
+        };
+        let mud = smooth(0.3, 0.85, cell.wetness);
+        match PathGround::of(material) {
+            PathGround::Earth if t > 0.0 => WornPath {
+                t,
+                sound: self.named("path").blend(&self.named("mud"), mud),
+                path: "path",
+                mud,
+                packed: t,
+                snow,
+                absorbency: 0.7,
+            },
+            PathGround::Snow if t > 0.0 => WornPath {
+                t,
+                sound: packed,
+                path: "packed_snow",
+                mud: 0.0,
+                packed: t,
+                snow,
+                absorbency: material.absorbency,
+            },
+            _ => WornPath {
+                packed: t,
+                snow,
+                ..WornPath::NONE
+            },
+        }
+    }
+}
+
+/// How far a path worn `wear` deep (0..1) has turned a step into the path's sound: none
+/// below 0.2, half at 0.5, all of it from 0.8 (smooth in between, so there is no line where it
+/// switches).
+pub fn path_blend(wear: f32) -> f32 {
+    smooth(0.2, 0.8, wear)
+}
+
+/// What a material wears to under many feet, as a footstep hears it. Mirrors the terrain's
+/// kinds of wear without depending on it: grass, leaf litter and soil wear to bare earth,
+/// snow packs down; mud stays mud, and sand, gravel and hard ground sound the same worn or not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathGround {
+    /// Turf and soil: bare, trodden earth (mud when wet).
+    Earth,
+    /// Snow: a packed track.
+    Snow,
+    /// Sounds the same however worn.
+    Unchanged,
+}
+
+impl PathGround {
+    pub fn of(m: &SurfaceMaterial) -> Self {
+        match m.name.as_str() {
+            "grass" | "leaves" | "moss" | "turf" | "dirt" | "soil" | "regolith" | "ash" => {
+                Self::Earth
+            }
+            "snow" => Self::Snow,
+            "mud" | "sand" | "gravel" | "scree" | "pebbles" | "default" => Self::Unchanged,
+            _ => match m.deformation {
+                Deformation::Flatten { .. } => Self::Earth,
+                Deformation::Plastic { depth_m } if depth_m < 0.03 => Self::Earth,
+                Deformation::Snow => Self::Snow,
+                _ => Self::Unchanged,
+            },
+        }
+    }
+}
+
+/// A worn path under one step ([`FootstepSurfaces::worn_path`]): how far the step has gone
+/// from its ground's own sound to the path's, and what the path sounds like. Synthesis blends
+/// the two ([`WornPath::apply`]); recorded takes play the path's recordings instead of the
+/// ground's on a share `t` of the steps
+/// ([`FootstepSamples::recorded`](crate::samples::FootstepSamples::recorded)), the layers
+/// on top making up the rest of the blend.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WornPath {
+    /// 0 the ground's own sound .. 1 the path's ([`path_blend`] of the wear; 0 on ground
+    /// that sounds the same worn).
+    pub t: f32,
+    /// The path's sound before the ground's state: bare earth (turning to mud with
+    /// wetness) or packed snow.
+    pub sound: SurfaceSound,
+    /// Name of the path's surface, whose recordings it plays: `path` or `packed_snow`.
+    pub path: &'static str,
+    /// How much of the earth path has turned to mud (0 dry .. 1 soaked): that share of its
+    /// recorded steps play mud's takes.
+    pub mud: f32,
+    /// How packed snow lying here is (0..1, the same blend of the wear): fresh snow on any
+    /// ground packs where people walk.
+    pub packed: f32,
+    /// What snow lying here sounds like (fresh snow packed by `packed`), for
+    /// [`SurfaceSound::with_state`].
+    pub snow: SurfaceSound,
+    /// How much water the path's surface soaks up (bare earth more than turf).
+    pub absorbency: f32,
+}
+
+impl WornPath {
+    /// No path: the ground as it is.
+    pub const NONE: WornPath = WornPath {
+        t: 0.0,
+        sound: SurfaceSound::SILENT,
+        path: "path",
+        mud: 0.0,
+        packed: 0.0,
+        snow: SurfaceSound::SILENT,
+        absorbency: 0.0,
+    };
+
+    /// `dry` (the ground's own sound) with the path blended in.
+    pub fn apply(&self, dry: &SurfaceSound) -> SurfaceSound {
+        if self.t <= 0.0 {
+            *dry
+        } else {
+            dry.blend(&self.sound, self.t)
+        }
+    }
+
+    /// The ground's absorbency (`material`'s) with the path's blended in.
+    pub fn absorbency(&self, material: f32) -> f32 {
+        if self.t <= 0.0 {
+            material
+        } else {
+            material + (self.absorbency - material) * self.t
+        }
     }
 }
 
@@ -1290,6 +1475,13 @@ impl FootstepSound {
         if kind == ContactKind::Hoof {
             me.ceiling = me.gain * HOOF_CEILING;
         }
+        if s.firmness > 0.0 {
+            // Packed ground gives way less and all at once: a shorter, denser crunch.
+            let f = s.firmness.clamp(0.0, 1.0);
+            me.crunch.dur *= 1.0 - 0.55 * f;
+            me.crunch.rate *= 1.0 + 0.8 * f;
+            me.grit.dur *= 1.0 - 0.4 * f;
+        }
         me
     }
 
@@ -1655,6 +1847,171 @@ mod tests {
         assert!(frozen_mud.click > 0.5 && frozen_mud.squelch < 0.2);
     }
 
+    /// A walking step on default material `name` worn `wear` deep in state `cell`, as
+    /// `play_footsteps` builds it.
+    fn worn(name: &str, wear: f32, cell: &SurfaceCell) -> SurfaceSound {
+        let mats = SurfaceMaterials::default();
+        let m = mats.get(mats.id(name).unwrap());
+        let surfaces = FootstepSurfaces::default();
+        let w = surfaces.worn_path(m, wear, cell);
+        w.apply(&surfaces.get(m))
+            .with_state(cell, w.absorbency(m.absorbency), 12.0, 0.0, &w.snow)
+    }
+
+    fn render_of(s: SurfaceSound, seed: u64) -> Vec<f32> {
+        let st = Step::from_contact(s, ContactKind::Foot, 75.0, 1.4, seed);
+        render_mono(&mut FootstepSound::new(FS, &st), 3.0, FS)
+    }
+
+    /// Seconds the step stays within 20 dB of its peak (5 ms envelope).
+    fn length_20db(x: &[f32]) -> f32 {
+        let h = (0.005 * FS) as usize;
+        let env: Vec<f32> = x
+            .chunks(h)
+            .map(|c| (c.iter().map(|v| v * v).sum::<f32>() / c.len() as f32).sqrt())
+            .collect();
+        let top = env.iter().cloned().fold(0.0, f32::max);
+        env.iter().filter(|e| **e > top * 0.1).count() as f32 * h as f32 / FS
+    }
+
+    #[test]
+    fn untouched_ground_sounds_exactly_as_without_wear() {
+        let mats = SurfaceMaterials::default();
+        let surfaces = FootstepSurfaces::default();
+        let cells = [
+            SurfaceCell::default(),
+            SurfaceCell {
+                wetness: 1.0,
+                snow_m: 0.1,
+                ..Default::default()
+            },
+        ];
+        for m in &mats.materials {
+            for cell in &cells {
+                let w = surfaces.worn_path(m, 0.0, cell);
+                let dry = surfaces.get(m);
+                assert_eq!(w.t, 0.0, "{}", m.name);
+                assert_eq!(w.apply(&dry), dry, "{}", m.name);
+                assert_eq!(w.absorbency(m.absorbency), m.absorbency);
+                assert_eq!(w.snow, surfaces.snow());
+                // Barely worn (below 0.2) is still untouched.
+                assert_eq!(surfaces.worn_path(m, 0.15, cell).apply(&dry), dry);
+            }
+        }
+        let before = SurfaceSound::preset("grass").unwrap().with_state(
+            &SurfaceCell::default(),
+            0.6,
+            12.0,
+            0.0,
+            &SurfaceSound::preset("snow").unwrap(),
+        );
+        assert_eq!(worn("grass", 0.0, &SurfaceCell::default()), before);
+        assert_eq!(
+            render_of(before, 5),
+            render_of(worn("grass", 0.0, &SurfaceCell::default()), 5)
+        );
+    }
+
+    #[test]
+    fn a_worn_meadow_sounds_like_bare_earth() {
+        let dry = SurfaceCell::default();
+        let grass = SurfaceSound::preset("grass").unwrap();
+        let dirt = SurfaceSound::preset("dirt").unwrap();
+        let path = worn("grass", 1.0, &dry);
+        assert_eq!(path, SurfaceSound::preset("path").unwrap());
+        // Layer for layer it is dirt's, not grass's: no rustle, the earth's thud and grit.
+        assert!(path.rustle < 0.01 && path.crackle < 0.01);
+        assert!(path.kept(&dirt) > 0.75, "{}", path.kept(&dirt));
+        assert!(path.kept(&grass) < 0.45, "{}", path.kept(&grass));
+        // …and so is its sound: as dark as dirt, far darker than grass.
+        let avg = |s: SurfaceSound| (0..6).map(|k| brightness(&render_of(s, k))).sum::<f32>() / 6.0;
+        let (b_grass, b_path, b_dirt) = (avg(grass), avg(path), avg(dirt));
+        assert!(b_path < b_grass * 0.5, "path {b_path} grass {b_grass}");
+        assert!(
+            (b_path / b_dirt - 1.0).abs() < 0.35,
+            "path {b_path} dirt {b_dirt}"
+        );
+        // Half worn is half of each, and no step of wear makes a jump.
+        let half = worn("grass", 0.5, &dry);
+        assert!(
+            (half.rustle - 0.5 * grass.rustle).abs() < 0.05,
+            "{}",
+            half.rustle
+        );
+        let mut last = grass;
+        for k in 1..=40 {
+            let now = worn("grass", k as f32 / 40.0, &dry);
+            assert!(now.rustle <= last.rustle + 1e-6);
+            assert!(
+                (now.rustle - last.rustle).abs() < 0.1 && (now.thump - last.thump).abs() < 0.05
+            );
+            last = now;
+        }
+        // Rock wears to polished rock: the same sound.
+        assert_eq!(
+            worn("rock", 1.0, &dry),
+            SurfaceSound::preset("rock").unwrap()
+        );
+    }
+
+    #[test]
+    fn a_worn_path_in_the_rain_is_mud() {
+        let wet = SurfaceCell {
+            wetness: 1.0,
+            ..Default::default()
+        };
+        let mud = SurfaceSound::preset("mud").unwrap();
+        let path = worn("grass", 1.0, &wet);
+        let meadow = worn("grass", 0.0, &wet);
+        assert!(
+            path.squelch >= mud.squelch && path.suction > 0.5,
+            "{path:?}"
+        );
+        assert!(path.kept(&mud) > 0.85, "{}", path.kept(&mud));
+        // Wet grass only squishes; the path squelches and sucks at the boot.
+        assert!(path.squelch > meadow.squelch * 1.5 && meadow.suction == 0.0);
+        // Damp, it is part way.
+        let damp = worn(
+            "grass",
+            1.0,
+            &SurfaceCell {
+                wetness: 0.55,
+                ..Default::default()
+            },
+        );
+        assert!(damp.suction > 0.1 && damp.suction < path.suction);
+    }
+
+    #[test]
+    fn trodden_snow_packs_into_a_tight_squeaky_crunch() {
+        let dry = SurfaceCell::default();
+        let powder = worn("snow", 0.0, &dry);
+        let packed = worn("snow", 1.0, &dry);
+        assert!(packed.crunch < powder.crunch && packed.squeak > 0.1);
+        assert!(packed.firmness > 0.5 && packed.thump > powder.thump);
+        // Shorter, with its crunch higher.
+        let avg = |s: SurfaceSound, f: &dyn Fn(&[f32]) -> f32| {
+            (0..8).map(|k| f(&render_of(s, 20 + k))).sum::<f32>() / 8.0
+        };
+        let (l0, l1) = (avg(powder, &length_20db), avg(packed, &length_20db));
+        assert!(l1 < l0 * 0.85, "packed {l1} s, powder {l0} s");
+        // Snow lying on a worn path packs too, whatever is under it.
+        let covered = SurfaceCell {
+            snow_m: 0.2,
+            ..Default::default()
+        };
+        let on_path = worn("grass", 1.0, &covered);
+        let on_meadow = worn("grass", 0.0, &covered);
+        assert!(
+            on_path.squeak > 0.1 && on_path.firmness > 0.5,
+            "{on_path:?}"
+        );
+        assert_eq!(
+            on_meadow.crunch,
+            SurfaceSound::preset("snow").unwrap().crunch
+        );
+    }
+
     #[test]
     fn unknown_materials_get_a_sensible_guess() {
         let mats = SurfaceMaterials::default();
@@ -1719,6 +2076,7 @@ mod tests {
             gain: 0.5,
             shelf_db: 0.0,
             lowpass_hz: 20_000.0,
+            length_s: f32::INFINITY,
         };
         let silent = Step::from_contact(SurfaceSound::SILENT, ContactKind::Foot, 75.0, 1.4, 3);
         let render = || {

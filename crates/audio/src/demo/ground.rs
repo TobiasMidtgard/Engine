@@ -202,6 +202,28 @@ pub struct TrailGroundCache {
 }
 
 /// Lay the grounds, dress every stretch and build the underpass round `origin`.
+/// How worn the ground the trail draws is at `x` meters right of the centre line, `s` along
+/// it (`w` the point's world X/Z from the origin): the bare earth line down the middle of the
+/// grass and the trench trodden through the snow, 0 elsewhere. See [`super::TrailWear`].
+pub(super) fn drawn_wear(name: &str, s: f64, x: f32, w: engine_core::math::Vec2) -> f32 {
+    match name {
+        "grass" => {
+            // The earth line (`dress`): solid to 0.1 m either side, frayed out to 0.4 m, and
+            // fading in and out over 1.2 m near the stretch's ends.
+            let Some(s0) = super::stretch_start("grass") else {
+                return 0.0;
+            };
+            let s1 = s0 + super::STRETCHES[0].1;
+            let s = s as f32;
+            let ends = procgen::smooth(s0 as f32 + 0.6, s0 as f32 + 1.8, s)
+                * (1.0 - procgen::smooth(s1 as f32 - 2.0, s1 as f32 - 0.8, s));
+            (1.0 - procgen::smooth(0.1, 0.45, x.abs())) * ends
+        }
+        "snow" => snow::snow().at(s, x, w).trodden.clamp(0.0, 1.0),
+        _ => 0.0,
+    }
+}
+
 pub(super) fn spawn(commands: &mut Commands, origin: DVec3) {
     commands.queue(move |world: &mut World| {
         structures::underpass_volumes(world, origin);

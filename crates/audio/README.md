@@ -17,7 +17,16 @@ the same grass sounds different wet, frozen, snowed on or burnt.
   are louder and sharper (a contact without a speed takes its walker's `AnimationParams`
   speed). The ground's state (`SurfaceLayers`) changes them: wet ground
   squelches, puddles splash, snow cover crunches over whatever is under it, burnt ground
-  crackles, mud freezes hard below 0 °C, and wading drags through water.
+  crackles, mud freezes hard below 0 °C, and wading drags through water. Worn paths
+  (`GroundWear`) change them too: from about wear 0.5 a meadow, leaf litter or soil sounds
+  like trodden bare earth (the `path` surface: a full dull thud, a firm heel, a toe scrape
+  and a little grit), mud as the ground gets wet, and trodden snow packs into a short, tight,
+  squeaky crunch (`packed_snow`), as does snow lying on a path. The blend is smooth
+  (`footstep::path_blend`: none below 0.2, all from 0.8); mud, sand, gravel and hard ground
+  sound the same worn. With recordings, a share of the steps rising with the wear plays the
+  path's takes: bare earth has no recordings, so it borrows gravel's under a 1.8 kHz low-pass,
+  cut to 0.3 s; packed snow plays snow's cut to 0.2 s, brighter and higher; a soaked path
+  plays mud's. A `footsteps/path/` or `footsteps/packed_snow/` folder replaces the borrowing.
 - **Recorded footsteps** on every trail ground (grass, mud, snow, ice, gravel, wood, metal,
   concrete, sand, leaves, puddles) and rock: CC0 and CC-BY field recordings from Freesound
   (`assets/manifests/audio.toml`, about 39 MB) are cut into about 730 single-step takes at
@@ -145,7 +154,8 @@ tween system cost more than writing the mixer.
 
 Reads (all from `engine_world`): `GroundContact`, `AnimationParams` (speed), `ContactEvent`, `WaterSplash`,
 `WorldImpulse`, `ProjectileTrace`, `AttackEvent`, `LightningStrike`, `Collider::surface`,
-`SurfaceMaterials`, `SurfaceLayers` (wetness, puddles, snow, scorch), `HeatField` and
+`SurfaceMaterials`, `SurfaceLayers` (wetness, puddles, snow, scorch), `GroundWear` (worn
+paths), `HeatField` and
 `Combustible` (fires), `WaterQuery` (shores and currents), `EngineState` and
 `WheelContacts` (vehicles), `WeatherState`, wind, temperature, air, water, ground and
 gravity bodies through `Env`, `PhysicsQueries::raycast` (roof over the listener,
@@ -187,6 +197,11 @@ character's and shows as a ring in its ground's colour.
   heavy, running, rain-soaked and puddle steps with the recordings (`<ground>_response.wav`),
   and the dog's paws and the horse's hooves on each (`dog_<ground>_ab.wav`, ...);
   `--takes` writes and lists every take, with its noise floor, tail and length in `takes.csv`.
+- `cargo run -p engine_audio --release --example footstep_worn -- out/` renders eight steps on
+  grass worn 0, 0.5 and 1, snow worn 0 and 1 and rain-soaked grass worn 0 and 1, recorded and
+  synthesized, and twenty steps across a meadow onto a worn path and off it (`crossing.wav`).
+  `trail_stills --follow hiker --on grass --worn` walks the trail with `demo::TrailWear`, its
+  drawn earth line and snow trench as the ground's wear.
 - `tests/plugin.rs`: contacts are heard, out-of-earshot steps are skipped, space is silent,
   the trail walks every surface, walls muffle what's behind them, burning ground and burning
   things are heard, shores lap and brooks babble, sounds stay put when the world shifts,

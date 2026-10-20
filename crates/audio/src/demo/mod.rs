@@ -123,6 +123,30 @@ pub fn surface_under(offset: DVec3) -> Option<&'static str> {
     (side <= TRAIL_WIDTH as f64 * 0.5).then(|| surface_at(along))
 }
 
+/// The trail's worn ground as a [`engine_world::GroundWear`] provider: the bare earth line it
+/// draws down the middle of the grass (worn through, fraying out to the turf 0.45 m either
+/// side) and the trench trodden through the snow, so footsteps there sound like the path they
+/// are on. A terrain under the trail keeps its own wear map, fed by the walkers' steps; this is
+/// for tools that walk the trail without one (`trail_stills --worn`):
+/// `app.insert_resource(GroundWear(Arc::new(TrailWear { origin })))`.
+#[derive(Debug, Clone, Copy)]
+pub struct TrailWear {
+    /// The trail's origin, world meters.
+    pub origin: DVec3,
+}
+
+impl engine_world::WearQuery for TrailWear {
+    fn wear(&self, p: DVec3) -> f32 {
+        let offset = p - self.origin;
+        let (along, _) = nearest_on_trail(offset);
+        let (centre, d) = trail_point(along);
+        let right = Vec3::new(-d.z, 0.0, d.x).as_dvec3();
+        let x = (offset - centre).dot(right) as f32;
+        let w = engine_core::math::Vec2::new(offset.x as f32, offset.z as f32);
+        ground::drawn_wear(surface_at(along), along, x, w)
+    }
+}
+
 /// Where each stretch starts, meters along the trail.
 pub fn stretch_start(name: &str) -> Option<f64> {
     let mut s = 0.0;
@@ -514,6 +538,29 @@ fn walk_trail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_trail_is_worn_where_it_is_drawn_bare() {
+        use engine_world::WearQuery;
+        let origin = DVec3::new(100.0, 5.0, -40.0);
+        let wear = TrailWear { origin };
+        let at = |stretch: &str, into: f64, x: f64| {
+            let (p, d) = trail_point(stretch_start(stretch).unwrap() + into);
+            let right = DVec3::new(-d.z as f64, 0.0, d.x as f64);
+            wear.wear(origin + p + right * x)
+        };
+        // The earth line down the middle of the grass, the turf beside it.
+        assert!(at("grass", 6.0, 0.0) > 0.99);
+        assert!(at("grass", 6.0, -0.05) > 0.99);
+        let edge = at("grass", 6.0, 0.3);
+        assert!(edge > 0.05 && edge < 0.6, "{edge}");
+        assert_eq!(at("grass", 6.0, 0.9), 0.0);
+        assert!(at("grass", 0.2, 0.0) < 0.01);
+        // The trench through the snow, none on the gravel.
+        assert!(at("snow", 6.0, 0.0) > 0.5, "{}", at("snow", 6.0, 0.0));
+        assert!(at("snow", 6.0, 0.0) > at("snow", 6.0, 1.7));
+        assert_eq!(at("gravel", 2.0, 0.0), 0.0);
+    }
 
     #[test]
     fn walkers_step_aside_to_pass() {

@@ -21,7 +21,7 @@
 
 use std::path::PathBuf;
 
-use engine_audio::footstep::{FootstepSound, FootstepSurfaces, Step, render_mono};
+use engine_audio::footstep::{FootstepSound, FootstepSurfaces, Step, WornPath, render_mono};
 use engine_audio::samples::{AUDIO_DIR, Feet, FootstepSamples, SampleBank};
 use engine_audio::wav::write_wav;
 use engine_world::{ContactKind, SurfaceCell};
@@ -120,9 +120,19 @@ fn render(
     for (k, at) in steps.iter().enumerate() {
         let sound = dry.with_state(&at.cell, 0.6, 12.0, 0.0, &snow);
         let step = Step::from_contact(sound, at.kind, at.load, at.speed, 1_000 + k as u64 * 77);
-        let recorded = samples
-            .as_deref_mut()
-            .and_then(|s| s.recorded(surface, &dry, &at.cell, 0.0, surfaces, &step, FS, true));
+        let recorded = samples.as_deref_mut().and_then(|s| {
+            s.recorded(
+                surface,
+                &dry,
+                &WornPath::NONE,
+                &at.cell,
+                0.0,
+                surfaces,
+                &step,
+                FS,
+                true,
+            )
+        });
         let mut voice = match &recorded {
             Some((synth, take)) => FootstepSound::with_sample(FS, synth, take),
             None => FootstepSound::new(FS, &step),
