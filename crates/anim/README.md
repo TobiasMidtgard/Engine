@@ -61,8 +61,11 @@ compresses and stretches.
   generated body.
 - **Directions and blows.** People blend by `heading` (where they move relative to where
   they face, positive left): walking ahead, sidestepping (stance widened so the feet never
-  cross) and backpedalling, clips solved by leg IK so planted feet move at the body's speed;
-  generated people stroll on whole steps below walking speed. A `DamageEvent` makes the
+  cross) and backpedalling, jogging and running sideways (hips turned into the run) and
+  backwards, clips solved by leg IK so planted feet move at the body's speed; generated
+  people stroll on whole steps below walking speed. `accel` (from the motion: speeding up
+  along the facing) tips the trunk forward into a start and sits it back on bent knees into
+  a stop. A `DamageEvent` makes the
   struck person flinch (`HitReaction`): joints below the hit give with the blow, joints above
   lag, the hips are shoved, the face winces, and it all springs back.
 - **Contracts.** Reads `AnimationParams` and `AnimationTrigger` (`attack_heavy` swings,
@@ -174,6 +177,7 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 | Shirt reach | Sleeves bunch at the elbows on the wind-up, the shirt stretches across the back on the reach |
 | Step course | A walker climbs a ramp, crosses a deck, walks down stairs with feet planted by IK, then runs back leaning into the turns |
 | Footwork drill | An athlete walks a square facing one way: ahead, sidestepping left, backpedalling, sidestepping right, blending through the corners, every planted foot still on the sand (`paddock_footwork`) |
+| Shuttle lane | An athlete sprints the lane from a standing start (leaning into it), digs in to stop, runs back backwards, turns on the spot and runs sideways to the start; a coach beside the lane turns where they stand to keep watching, the head first and the feet stepping round once the runner is well off to one side (`paddock_sprint_start`, `paddock_sprint_stop`) |
 | Sparring partner | A lifter takes a jab to the chin (head snaps back), a hook to the side of the head, a blow to the stomach (folds over it) and a shove on the back of a shoulder, flinching away from each and recovering (`paddock_flinch`) |
 | Horse oval | A textured horse walks, trots, canters and gallops by speed; in the swing the knees fold, the hocks bend and the hooves curl back behind the fetlocks; haunches and shoulders flex with each stride; the mane rides the neck and the tail streams |
 | Dog run | A furred Labrador walks off, trots, canters out of a turn and gallops down the far straight, the spine flexing with each stride, ears and tail swinging; it pants as it goes (`paddock_dog_trot`, `paddock_dog`) |
@@ -202,8 +206,10 @@ renders a skinned character on the GPU and checks the pixels follow the pose, an
 textured submeshes each draw with their own surface, and that fur shells grow strands over a
 furred skin. `tests/world_shift.rs` runs two
 paddocks, shifts one halfway, and checks every pose and place still matches.
-`tests/feet.rs` walks, runs, turns, sidesteps and backpedals a person and measures how far
-each planted foot slides (under 1 cm per step), and that one turned on the spot steps round.
+`tests/feet.rs` walks, runs, turns, sidesteps, backpedals and runs sideways and backwards
+a person and measures how far each planted foot slides (under 1 cm per step), that one
+turned on the spot steps round, and that a sprint start and a hard stop lean it forward and
+back.
 `tests/hits.rs` punches a person and checks the head snaps back and recovers.
 `tests/body_request.rs` asks for a hiker, a horse, a 40 cm dog and an unknown kind on
 entities the test moves itself: the bodies walk, run and gallop from that motion, step on the ground, keep the

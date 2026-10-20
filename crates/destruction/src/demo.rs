@@ -1022,7 +1022,7 @@ fn spawn_breach_house(commands: &mut Commands, o: DVec3) -> House {
             0.0,
         );
         let (low, high) = props::ladder_rungs(ladder_h);
-        let feet = |y: f32| Vec3::new(0.0, y - ladder_h * 0.5, props::LADDER_STILE_Z + 0.05);
+        let feet = |y: f32| Vec3::new(0.0, y - ladder_h * 0.5, props::LADDER_STILE_Z + 0.2);
         let deck = at(hx, JOIST_TOP + DECK_T as f64, hz - half - 0.35) - ladder_at;
         commands.entity(ladder).insert(
             Climbable::ladder(feet(low), feet(high), Vec3::NEG_Z).with_exit(deck.as_vec3()),
