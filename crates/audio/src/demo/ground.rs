@@ -450,11 +450,15 @@ fn material(mat: Mat, tex: &std::collections::HashMap<&str, TexHandles>) -> Stan
             .with_subsurface(0.5)
             .with_wind_sway(0.04),
         Mat::Water => {
-            // Murky and shallow: the ground under it shows through.
+            // Murky and shallow: silty water about as light as the wet mud under it, which
+            // still shows through. Not darker: from above water mirrors only a few percent of
+            // the sky, so a dark film reads as a black hole in the path. Blending scales the
+            // reflection by the opacity as well, so the reflectance makes up for it: 0.62 of
+            // 0.75 (9% head-on) keeps the sky's sheen on it, rising toward the horizon.
             // A faint ripple from the ice's normal map (puddle UVs are world meters), and the
             // vertex alpha thins it toward the shore (see `dress::puddle`).
-            let mut m = plain(0x2b2419, 0.04).with_alpha(0.72);
-            m.reflectance = 0.5;
+            let mut m = plain(0x463d33, 0.04).with_alpha(0.62);
+            m.reflectance = 0.75;
             m.receives_wetness = false;
             if let Some((_, n, _)) = tex.get("ice") {
                 m.normal_texture = *n;
