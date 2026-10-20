@@ -7,7 +7,8 @@
 //! brow in a herringbone, lashes curl up and out, a short crop is combed back from the crown,
 //! long hair falls under gravity over the head and shoulders. Long hair grows from *guides*:
 //! nearby hairs follow one guide more closely toward their tips, which forms the clumps real
-//! hair has. Hairs never pass into the skin: each point is pushed back out over the nearest
+//! hair has. Hanging guides are then settled by a short simulation (gravity, bending, the skin
+//! and the face) so they drape over the head and shoulders. Hairs never pass into the skin: each point is pushed back out over the nearest
 //! skin vertex.
 //!
 //! Shading needs to know how deep in the hair each point sits (light reaching the inside of a
@@ -459,10 +460,10 @@ fn grow_scalp(
         HairStyle::Long => Groom {
             length: 0.42 * k,
             points: 32,
-            density: 80.0,
+            density: 140.0,
             gravity: 1.0,
             loft: 0.012,
-            clump: 0.9,
+            clump: 0.75,
             root_radius: 0.00012,
         },
         HairStyle::Bun => Groom {
@@ -499,7 +500,7 @@ fn grow_scalp(
     let mut set = StrandSet::new(StrandKind::Scalp, g.points);
     // Guides first: one per clump, grown in full; then the hairs that follow them.
     // Long hair gathers into fewer, bigger locks.
-    let per_guide = if g.gravity > 0.5 { 150 } else { 40 };
+    let per_guide = if g.gravity > 0.5 { 90 } else { 40 };
     let guides_n = if g.clump > 0.0 {
         (total / per_guide).clamp(60, 1500)
     } else {
@@ -514,6 +515,7 @@ fn grow_scalp(
         };
         let mut pts = grow_hair(a, &g, sp, collider, lm, rest, &mut gr, 1.0);
         if g.gravity > 0.5 {
+            settle(&mut pts, sp, collider, lm, rest);
             // Each lock of hanging hair has a wave of its own, so neighboring locks catch
             // the light differently and read apart. Wavy hair waves as whole locks, shorter
             // and deeper the curlier it is.
@@ -573,7 +575,7 @@ fn grow_scalp(
                 // Hanging hair takes its lock's shape all along (its own wander would cross
                 // its neighbors' and look like straw); short hair only toward the tip.
                 let w = if g.gravity > 0.5 {
-                    (c * 0.95 + 0.1 * t).min(1.0)
+                    (0.9 + 0.1 * t).min(1.0)
                 } else {
                     (c * 1.2 * t.sqrt()).min(1.0)
                 };
@@ -651,6 +653,86 @@ fn grow_scalp(
         }
     }
     Some(set)
+}
+
+/// Hanging hair settled under gravity: the grown guide is a first guess (lifted off the head),
+/// and a short simulation lets it fall and drape over the scalp, the ears and the shoulders the
+/// way hair does, instead of standing out where the walk left it. The guide is a chain of
+/// points with fixed lengths that resists bending (stiffer at the root, where hair leaves the
+/// scalp at its own angle), collides with the skin, and keeps off the face. Hair has no room
+/// to lie in the scalp, so each guide rests on a layer of its own: hair from the crown over the
+/// hair from lower down, as it is combed.
+fn settle(
+    pts: &mut [Vec3],
+    sp: SkinPoint,
+    collider: &SkinCollider,
+    lm: &Landmarks,
+    rest: &Landmarks,
+) {
+    const STEPS: usize = 120;
+    const ITERATIONS: usize = 4;
+    // m per step²: how far gravity pulls each step.
+    const GRAVITY: f32 = 0.0006;
+    let n = pts.len();
+    if n < 4 {
+        return;
+    }
+    let seg: Vec<f32> = pts.windows(2).map(|w| (w[1] - w[0]).length()).collect();
+    // How high the root sits on the head: higher roots lie on top.
+    let d = sp.rest - rest.head;
+    let layer = ((d.y + 0.04) / 0.14).clamp(0.0, 1.0);
+    let lie = |k: usize| {
+        let t = k as f32 / (n - 1) as f32;
+        0.0008 + (0.0015 + 0.0065 * layer) * (t / 0.15).min(1.0)
+    };
+    let jitter = hash01(sp.rest);
+    let mut face_side = Some(if d.x > PART_X { 1.0 } else { -1.0 });
+    let grown = pts.to_vec();
+    let mut prev = pts.to_vec();
+    // Points resting on the skin hold there by friction, so combed hair stays combed where it
+    // lies on the head and only what hangs free falls.
+    let mut touching = vec![false; n];
+    for _ in 0..STEPS {
+        // Move, damped (hair in air settles quickly).
+        let moving = pts[2..].iter_mut().zip(&mut prev[2..]).zip(&touching[2..]);
+        for ((p, last), touch) in moving {
+            let (keep, pull) = if *touch { (0.2, 0.25) } else { (0.75, 1.0) };
+            let v = (*p - *last) * keep;
+            *last = *p;
+            *p += v + Vec3::new(0.0, -GRAVITY * pull, 0.0);
+        }
+        for it in 0..ITERATIONS {
+            // Bending: each point toward the middle of its neighbors (stiffer near the root).
+            for k in 2..n - 1 {
+                let t = k as f32 / (n - 1) as f32;
+                let stiff = 0.05 + 0.3 * (1.0 - t / 0.25).max(0.0);
+                let mid = (pts[k - 1] + pts[k + 1]) * 0.5;
+                pts[k] += (mid - pts[k]) * stiff;
+            }
+            // Lengths: from the root out, so the root stays put.
+            for k in 1..n {
+                let dir = (pts[k] - pts[k - 1]).normalize_or(Vec3::NEG_Y);
+                pts[k] = pts[k - 1] + dir * seg[k - 1];
+            }
+            // The skin (and the face kept clear, eased so the chain doesn't jump), once the
+            // chain has its shape.
+            if it + 1 < ITERATIONS {
+                continue;
+            }
+            for k in 2..n {
+                let aside = keep_off_face(pts[k], &mut face_side, jitter, lm);
+                let p = pts[k] + (aside - pts[k]) * 0.35;
+                let out = collider.push_out(p, lie(k));
+                touching[k] = (out - p).length_squared() > 0.0;
+                pts[k] = out;
+            }
+        }
+    }
+    // A guide that crumpled (caught between the face and the skin) keeps its grown shape.
+    let crumpled = pts.windows(3).any(|w| (w[1] - w[0]).dot(w[2] - w[1]) < 0.0);
+    if crumpled {
+        pts.copy_from_slice(&grown);
+    }
 }
 
 /// The part of long hair: on the character's left, 2.5 cm off center.
