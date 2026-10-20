@@ -875,6 +875,11 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     r#"{"screen": "saves", "select": "save_3"}"#,
                 ),
                 ui("market_title", "Title screen", r#"{"screen": "title"}"#),
+                ui(
+                    "market_loading",
+                    "Loading screen",
+                    r#"{"screen": "loading", "planet": "veyra", "place": "Hollow Reach", "simulate_s": 9.0}"#,
+                ),
                 // Over the HUD, so the slow-motion gauge shows the world slowing.
                 View::new(
                     "market_wheel",
