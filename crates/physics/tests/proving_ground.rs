@@ -408,3 +408,73 @@ fn the_galton_board_fills_its_bins_in_a_bell_curve() {
         "the heap leans to one side: {bins:?}"
     );
 }
+
+/// The catapult (`demo::catapult`): the counterweight swings the arm up into its crossbar, the
+/// ball leaves the cup at the speed the falling counterweight's energy gives it (less a little
+/// lost to the hinge and the cup), flies high over the frame and brings down the top of the
+/// crate wall down range, and the arm stays on its axle.
+#[test]
+fn the_catapult_throws_its_ball_into_the_crate_wall() {
+    use demo::catapult;
+    let mut app = app();
+    app.update();
+    let base = Station::Catapult.base() + DVec3::Y * demo::SLAB_RISE;
+    let axle = base + DVec3::Y * catapult::AXLE as f64;
+    let ball = named(&mut app, "Catapult ball")[0];
+    let arm = named(&mut app, "Catapult arm")[0];
+    let crates = named(&mut app, "Catapult target crate");
+    let start: Vec<DVec3> = crates
+        .iter()
+        .map(|&c| app.world.get::<Transform>(c).unwrap().translation)
+        .collect();
+    let (mut release, mut highest) = (0.0f32, f64::MIN);
+    for _ in 0..(8 * 60) {
+        app.update();
+        let p = app.world.get::<Transform>(ball).unwrap().translation - base;
+        // Behind the axle the ball is in the cup or just out of it, climbing and slowing: its
+        // fastest there is its speed leaving the cup.
+        if p.x < 0.0 {
+            let v = app.world.get::<Velocity>(ball).unwrap().linear.length();
+            release = release.max(v);
+        }
+        highest = highest.max(p.y);
+        let hub = app.world.get::<Transform>(arm).unwrap().translation;
+        assert!(
+            (hub - axle).length() < 0.03,
+            "the arm left its axle by {:.3} m",
+            (hub - axle).length()
+        );
+    }
+    let r = app.world.get::<Transform>(arm).unwrap().rotation;
+    let (axis, angle) = r.to_axis_angle();
+    let angle = angle * axis.z.signum();
+    assert!(
+        (angle - catapult::STOP).abs() < 0.03,
+        "the arm came to rest at {:.1}°, not against the crossbar at {:.1}°",
+        angle.to_degrees(),
+        catapult::STOP.to_degrees()
+    );
+    let ideal = catapult::release_speed();
+    assert!(
+        release > 0.95 * ideal && release < 1.01 * ideal,
+        "the ball left at {release:.2} m/s; the counterweight's energy gives {ideal:.2} m/s"
+    );
+    assert!(highest > 7.0, "the ball only rose to {highest:.1} m");
+    let mut fell = 0;
+    for (&c, s) in crates.iter().zip(&start) {
+        let p = app.world.get::<Transform>(c).unwrap().translation;
+        // The yard is built around the origin here.
+        assert!(
+            p.x.abs() < demo::YARD_SIZE[0] * 0.5 && p.z.abs() < demo::YARD_SIZE[1] * 0.5,
+            "a crate left the yard: at {p}"
+        );
+        if s.y - p.y > 0.4 {
+            fell += 1;
+        }
+    }
+    assert!(
+        fell >= 4,
+        "the ball brought down only {fell} of the wall's {} crates",
+        crates.len()
+    );
+}
