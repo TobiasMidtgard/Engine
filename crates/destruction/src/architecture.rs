@@ -4569,7 +4569,7 @@ impl Kit {
                 let mut c = mulc([1.1, 1.07, 1.0], 0.9 + 0.3 * patch);
                 // Lime dust and stone grit near the wall, grass creeping in at the toe.
                 let dust = 1.0 - smoothstep(0.0, reach * 0.7, d);
-                c = mix3(c, [1.6, 1.55, 1.45], 0.6 * dust);
+                c = mix3(c, [1.3, 1.27, 1.2], 0.6 * dust);
                 let green = smoothstep(0.45, 0.9, d / reach + 0.3 * patch);
                 mix3(c, [0.62, 0.78, 0.42], 0.6 * green)
             };
@@ -4599,8 +4599,8 @@ impl Kit {
                 }
             }
             // Rubble and fallen ashlar on the heap.
-            let lumps = if side == 0 { 38 } else { 26 };
-            for i in 0..lumps + 16 {
+            let lumps = if side == 0 { 150 } else { 110 };
+            for i in 0..lumps + 22 {
                 let block = i >= lumps;
                 let x = (xc + (self.rng.f32() + self.rng.f32() - 1.0) * 0.42 * len)
                     .clamp(x0 + 0.7, x1 - 0.7);

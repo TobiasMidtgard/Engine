@@ -146,7 +146,7 @@ fn mars_sunset_glows_blue_around_the_sun() {
     // the sky at the same height 90° to the side. The glow is far brighter than the sky away
     // from it, so it gets a darker exposure (blue over red doesn't depend on exposure).
     let band = (row_at(8.0), row_at(4.0));
-    let mut toward = sky_app(Atmosphere::mars(), 0.0, 2.0, 0.0, 16.0);
+    let mut toward = sky_app(Atmosphere::mars(), 0.0, 2.0, 0.0, 16.5);
     let Some(toward) = render(&mut toward, "mars_sunset_toward_sun") else {
         return;
     };

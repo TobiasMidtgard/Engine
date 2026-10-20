@@ -17,8 +17,8 @@
 //! | 8 | drywall | **live**: Siege reinforcement. A burst goes through, a defender sets two steel panels behind it, the next bursts ring off the steel, a breach charge only strips the drywall, and thermite burns through both |
 //!
 //! **Behind the range** (live every cycle): a wooden watchtower in Valheim build-mode support
-//! colors loses its posts one by one and comes down; a stone gate is blasted and its lintel
-//! falls; a voxel cliff is mined until its overhang loses support and breaks off; a rock arch
+//! colors loses its posts one by one and comes down; a stone gate is blasted at one foot and
+//! half its arch comes down; a voxel cliff is mined until its overhang loses support and breaks off; a rock arch
 //! loses a pillar and its span collapses.
 //!
 //! **Breach house** (Siege vertical play, north of the tower): a brick room with an open front
@@ -860,45 +860,82 @@ fn spawn_tower(commands: &mut Commands, o: DVec3) -> (Vec<Entity>, Vec<Entity>) 
     (all, posts)
 }
 
-/// A stone gate: two towers of blocks and a three-block lintel (stone: strong upward, weak
-/// sideways).
+/// A stone gate: two piers of blocks carrying a round arch of seven voussoirs, spandrels over
+/// the piers, a capping course and merlons (stone: strong upward, weak sideways, so when one
+/// pier goes, half the arch hangs from the other like a ruin).
 fn spawn_gate(commands: &mut Commands, o: DVec3) -> Vec<Entity> {
     let base = o + DVec3::from_array(GATE);
     let mut out = Vec::new();
     let mut rng = Rng::new(9);
     let s = DestructibleMaterial::Stone;
-    let mut block = |commands: &mut Commands, x: f64, y: f64, size: Vec3, rng: &mut Rng| {
-        let shade = rng.range(0.85, 1.08);
-        let c = linear(0x9a9386);
-        let look = StandardMaterial::color(c[0] * shade, c[1] * shade, c[2] * shade * 0.98)
-            .with_roughness(0.9);
-        out.push(piece(
-            commands,
-            "Stone block",
-            base + DVec3::new(x, y, 0.0),
-            Quat::IDENTITY,
-            size,
-            s,
-            look,
-            false,
-        ));
-    };
+    let mut block =
+        |commands: &mut Commands, x: f64, y: f64, turn: f32, size: Vec3, rng: &mut Rng| {
+            let shade = rng.range(0.85, 1.08);
+            let c = linear(0x9a9386);
+            let look = StandardMaterial::color(c[0] * shade, c[1] * shade, c[2] * shade * 0.98)
+                .with_roughness(0.9);
+            out.push(piece(
+                commands,
+                "Stone block",
+                base + DVec3::new(x, y, 0.0),
+                Quat::from_rotation_z(turn),
+                size,
+                s,
+                look,
+                false,
+            ));
+        };
     for x in [-1.6, 1.6] {
         for k in 0..4 {
             block(
                 commands,
                 x,
                 0.5 + k as f64,
+                0.0,
                 Vec3::new(1.2, 0.98, 1.2),
                 &mut rng,
             );
         }
     }
-    for x in [-1.1, 0.0, 1.1] {
-        block(commands, x, 4.45, Vec3::new(1.08, 0.9, 1.1), &mut rng);
+    // The arch springs from the piers' inner edges at 4 m: 1 m intrados, 0.5 m deep rings.
+    let (spring, inner, ring) = (4.0, 1.0, 0.5);
+    let n = 7;
+    for k in 0..n {
+        let a = (k as f32 + 0.5) / n as f32 * std::f32::consts::PI;
+        let r = inner + ring * 0.5;
+        // Tangential width meets the next voussoir at the extrados.
+        let width = 2.0 * (inner + ring) * (std::f32::consts::PI / n as f32 * 0.5).tan();
+        block(
+            commands,
+            (r * a.cos()) as f64,
+            spring + (r * a.sin()) as f64,
+            a - std::f32::consts::FRAC_PI_2,
+            Vec3::new(width * 0.92, ring * 0.98, 1.1),
+            &mut rng,
+        );
+    }
+    // Spandrels over the piers, outside the arch's extrados.
+    for side in [-1.0, 1.0] {
+        for (x, y, size) in [
+            (1.85, 4.37, Vec3::new(0.68, 0.72, 1.1)),
+            (1.85, 5.12, Vec3::new(0.68, 0.72, 1.1)),
+            (1.3, 5.26, Vec3::new(0.38, 0.46, 1.1)),
+        ] {
+            block(commands, side * x, y, 0.0, size, &mut rng);
+        }
+    }
+    for x in [-1.65, -0.55, 0.55, 1.65] {
+        block(
+            commands,
+            x,
+            5.74,
+            0.0,
+            Vec3::new(1.08, 0.46, 1.16),
+            &mut rng,
+        );
     }
     for x in [-2.0, -1.2, 1.2, 2.0] {
-        block(commands, x, 5.15, Vec3::new(0.45, 0.5, 0.9), &mut rng);
+        block(commands, x, 6.23, 0.0, Vec3::new(0.45, 0.5, 0.9), &mut rng);
     }
     out
 }

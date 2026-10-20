@@ -26,7 +26,7 @@ use crate::ik::to_model;
 const BONES: [(&str, f32); 7] = [
     ("spine", 0.5),
     ("chest", 0.6),
-    ("neck", 0.9),
+    ("neck", 1.45),
     ("head", 1.7),
     ("upper_arm_l", 1.2),
     ("upper_arm_r", 1.2),

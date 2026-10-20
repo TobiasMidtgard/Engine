@@ -39,6 +39,7 @@ pub const BACK_JOG_SPEED: f32 = 1.7;
 pub const SIDE_RUN_SPEED: f32 = 3.0;
 pub const BACK_RUN_SPEED: f32 = 2.6;
 pub const RUN_SPEED: f32 = 3.8;
+pub const SPRINT_SPEED: f32 = 7.0;
 /// Height of the hips at rest, m (the clips' positions are for this size of body and scale
 /// with the hips of a fitted skeleton).
 pub const HIPS_HEIGHT: f32 = 0.98;
@@ -982,13 +983,20 @@ fn walk_with(s: &Skeleton, name: &str, secs: f32, stride: f32) -> AnimationClip 
                 4.0 * bump(q, 0.0, 0.06) - 14.0 * bump(q, 0.55, 0.08) + 6.0 * bump(q, 0.8, 0.1);
             let toe = 24.0 * bump(q, 0.53, 0.07);
             leg(&mut p, side, hip, 1.0, knee, ankle, toe);
+            // The arm swings against its leg, further forward than back; the forearm lags
+            // the upper arm a little and bends most as the arm comes forward, the hand
+            // trailing at the wrist.
+            let fore = -cq * swing;
+            let lag = -cycle(q - 0.07) * swing;
             arm(
                 &mut p,
                 side,
                 Arm {
-                    flex: -16.0 * swing * cq + 2.0,
-                    elbow: 20.0 - 6.0 * swing * cq,
-                    protract: -3.0 * swing * cq,
+                    flex: 2.0 + if fore > 0.0 { 24.0 } else { 22.0 } * fore,
+                    abduct: -13.0,
+                    elbow: 14.0 + 22.0 * lag.max(0.0) + 4.0 * fore.abs(),
+                    wrist: 8.0 * lag,
+                    protract: 4.0 * fore,
                     ..Arm::HANG
                 },
             );
@@ -1242,6 +1250,69 @@ fn run(s: &Skeleton) -> AnimationClip {
                     elbow: 82.0 - 12.0 * cq,
                     wrist: 5.0,
                     protract: -6.0 * cq,
+                    ..Arm::HANG
+                },
+            );
+        }
+        p.take()
+    })
+    .with_event(0.02, "footstep", Some("foot_r"))
+    .with_event(0.52, "footstep", Some("foot_l"))
+}
+
+/// Flat-out running: the trunk tipped forward, knees driven high and heels kicked up under
+/// the hips, arms pumping hard from the hip to the chin with the elbows held near a right
+/// angle. Each foot is down for about a fifth of the cycle.
+fn sprint(s: &Skeleton) -> AnimationClip {
+    AnimationClip::from_fn("sprint", 0.56, 41, true, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let c = cycle(ph);
+        p.rot_move(
+            "hips",
+            Vec3::new(
+                0.01 * cycle_sin(ph),
+                -0.06 - 0.03 * cycle((ph - 0.12) * 2.0),
+                0.0,
+            ),
+            -3.0,
+            9.0 * c,
+            5.0 * cycle_sin(ph),
+        );
+        spine(
+            &mut p,
+            [-15.0, -9.0, 10.0, 6.0],
+            [-5.0 * c, -10.0 * c, 4.0 * c, 2.0 * c],
+            [
+                -2.0 * cycle_sin(ph),
+                -cycle_sin(ph),
+                1.5 * cycle_sin(ph),
+                cycle_sin(ph),
+            ],
+        );
+        for side in 0..2 {
+            let q = (ph + if side == 1 { 0.0 } else { 0.5 }).rem_euclid(1.0);
+            // Thigh furthest back just after toe-off, highest late in the swing. The heel
+            // folds up to the seat as the thigh passes under the hips, the shin hangs under
+            // the raised thigh and only reaches out just before the foot lands under the
+            // hips.
+            let hip = 22.0 + 50.0 * cycle(q - 0.75);
+            let knee = 24.0
+                + 14.0 * bump(q, 0.1, 0.08)
+                + 100.0 * bump(q, 0.42, 0.15)
+                + 60.0 * bump(q, 0.66, 0.14);
+            let ankle = -6.0 - 24.0 * bump(q, 0.24, 0.07) + 18.0 * bump(q, 0.8, 0.1);
+            let toe = 25.0 * bump(q, 0.22, 0.06);
+            leg(&mut p, side, hip, 1.0, knee, ankle, toe);
+            let cq = cycle(q - 0.02);
+            arm(
+                &mut p,
+                side,
+                Arm {
+                    flex: 20.0 - 60.0 * cq,
+                    abduct: -9.0,
+                    elbow: 88.0 - 28.0 * cq,
+                    wrist: 4.0,
+                    protract: -10.0 * cq,
                     ..Arm::HANG
                 },
             );
@@ -2694,6 +2765,7 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         walk_slow(s),
         walk(s),
         run(s),
+        sprint(s),
         sidestep_left(s),
         sidestep_right(s),
         backpedal(s),
@@ -2744,6 +2816,9 @@ pub struct Locomotion {
     pub walk_speed: f32,
     pub run: String,
     pub run_speed: f32,
+    /// Flat out, above the run; empty for none.
+    pub sprint: String,
+    pub sprint_speed: f32,
 }
 
 impl Default for Locomotion {
@@ -2756,6 +2831,8 @@ impl Default for Locomotion {
             walk_speed: WALK_SPEED,
             run: "run".into(),
             run_speed: RUN_SPEED,
+            sprint: "sprint".into(),
+            sprint_speed: SPRINT_SPEED,
         }
     }
 }
@@ -2784,6 +2861,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
         (motion.slow_walk_speed, &motion.slow_walk),
         (motion.walk_speed, &motion.walk),
         (motion.run_speed, &motion.run),
+        (motion.sprint_speed, &motion.sprint),
     ]);
     let back = || {
         by_speed(&[
@@ -3069,6 +3147,58 @@ mod tests {
         let mut model = s.rest_model.clone();
         s.to_model(&local, &mut model);
         model
+    }
+
+    #[test]
+    fn walk_arms_reach_forward_more_than_back_with_a_soft_elbow() {
+        let s = skeleton();
+        let clip = walk(&s);
+        for side in 0..2 {
+            let (mut front, mut back, mut bend_min) = (0.0f32, 0.0f32, f32::MAX);
+            for i in 0..60 {
+                let m = model_at(&s, &clip, i as f32 / 60.0);
+                let shoulder = m[s.bone(UPPER_ARM[side])].t;
+                let elbow = m[s.bone(LOWER_ARM[side])].t;
+                let hand = m[s.bone(HAND[side])].t;
+                // The body faces −Z.
+                let reach = shoulder.z - hand.z;
+                front = front.max(reach);
+                back = back.max(-reach);
+                let bend = (elbow - shoulder).angle_between(hand - elbow).to_degrees();
+                bend_min = bend_min.min(bend);
+            }
+            assert!(
+                front > 0.12 && front > back * 1.3,
+                "{side}: {front} vs {back}"
+            );
+            assert!(back > 0.05, "{side}: the arm never swings back ({back})");
+            assert!(bend_min > 8.0, "{side}: elbow locks straight ({bend_min}°)");
+        }
+    }
+
+    #[test]
+    fn sprint_pumps_the_arms_higher_and_folds_the_heel_higher_than_the_run() {
+        let s = skeleton();
+        // Highest hand and highest heel over a cycle, relative to the chest and the hips.
+        let reach = |clip: &AnimationClip| {
+            let (mut hand, mut heel, mut lean) = (f32::MIN, f32::MIN, 0.0f32);
+            for i in 0..40 {
+                let m = model_at(&s, clip, i as f32 / 40.0);
+                let chest = m[s.bone("chest")].t;
+                let hips = m[s.bone("hips")].t;
+                hand = hand.max(m[s.bone(HAND[1])].t.y - chest.y);
+                heel = heel.max(m[s.bone(FOOT[1])].t.y - hips.y);
+                let up = (m[s.bone("neck")].t - hips).normalize();
+                lean += up.z / 40.0;
+            }
+            (hand, heel, lean)
+        };
+        let (run_hand, run_heel, run_lean) = reach(&run(&s));
+        let (hand, heel, lean) = reach(&sprint(&s));
+        assert!(hand > run_hand + 0.08, "hand {hand} vs run {run_hand}");
+        assert!(heel > run_heel + 0.08, "heel {heel} vs run {run_heel}");
+        // The body faces −Z: a forward lean tips the neck toward −Z.
+        assert!(lean < run_lean - 0.05, "lean {lean} vs run {run_lean}");
     }
 
     #[test]
