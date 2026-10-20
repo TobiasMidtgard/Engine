@@ -1275,7 +1275,10 @@ fn sculpt(f: Field, region: Region, target: usize, paint: &Paint) -> Mesh {
                 }
                 p -= gradient(f, p, e) * d;
             }
-            let n = gradient(f, p, e);
+            let mut n = gradient(f, p, e);
+            if let Some(s) = paint.seam {
+                (p, n) = s.onto_skin(p, n, region.voxel.max_element(), e);
+            }
             let (q, m) = paint.source(p, n);
             let ao = occlusion(&f, &ao_field, q, m, paint.scale);
             let c = (paint.color)(q, m) * ao;
@@ -1323,6 +1326,9 @@ fn mirrored(mesh: &Mesh) -> Mesh {
 struct Seam {
     pivot: Vec3,
     reach: f32,
+    /// The whole torso: by the cut, the fore half's rim is laid on its skin and shaded with
+    /// its normals, so no crease shows where the halves meet.
+    skin: SdfFn,
 }
 
 /// How far the fore half of a torso reaches past the cut, so no face lies on it (m).
@@ -1330,6 +1336,11 @@ const SEAM_OVERLAP: f32 = 0.003;
 /// How far the croup reaches into the fore half, a hair inside its skin, so the croup's edge
 /// (which meshing rounds off) stays hidden there (m).
 const SEAM_TUCK: f32 = 0.02;
+/// How far the croup stands proud of the fore half's ball at rest, away from the cut, so the
+/// two never share a surface there (m).
+const SEAM_PROUD: f32 = 0.0015;
+/// How far at most the croup swells over the ball behind the cut (m).
+const SEAM_SWELL: f32 = 0.006;
 
 impl Seam {
     /// The fore half of `torso` with its ball.
@@ -1344,14 +1355,52 @@ impl Seam {
         let swept = torso(v3(p.x, self.pivot.y + rho.copysign(r.y), self.pivot.z));
         let (s, c) = self.reach.sin_cos();
         let sector = r.z.abs() * c - r.y.abs() * s;
-        ahead.min(swept.max(sector).max(behind))
+        // Where the torso falls away behind the cut much faster than the ball's arc (the top
+        // of a back sloping steeply to the rump), the ball keeps within `SEAM_SWELL` of it.
+        let held = torso(p) - SEAM_SWELL;
+        ahead.min(swept.max(sector).max(behind).max(held))
     }
 
-    /// The croup: `torso` behind the cut, reaching a little way into the fore half.
+    /// The croup: `torso` behind the cut, reaching a little way into the fore half. Where the
+    /// torso falls away behind the cut faster than the ball's arc (a back sloping down to the
+    /// rump, tufts of coat), the croup swells over the ball (by `SEAM_SWELL` at most), a hair
+    /// proud of it, and eases back onto the torso further back: at rest the ball stays hidden,
+    /// with no step or crease where it would have broken through, and as the back bends the
+    /// croup's edge still meets the ball flush.
     fn croup(&self, torso: SdfFn, p: Vec3) -> f32 {
         let cut = self.pivot.z;
+        let r = p - self.pivot;
+        let d = torso(p);
+        if r.z > 0.0 {
+            let a = r.z.atan2(r.y.abs());
+            let w = smooth(2.5 * self.reach, self.reach, a);
+            if w <= 0.0 {
+                return d;
+            }
+            let rho = r.y.hypot(r.z);
+            let ball = torso(v3(p.x, self.pivot.y + rho.copysign(r.y), cut));
+            let proud = SEAM_PROUD * smooth(0.0, self.reach, a);
+            return d + w * (ball - proud - d).clamp(-SEAM_SWELL - proud, 0.0);
+        }
         let inset = 0.0025 * smooth(cut, cut - SEAM_TUCK, p.z);
-        (torso(p) + inset).max(cut - SEAM_TUCK - p.z)
+        (d + inset).max(cut - SEAM_TUCK - p.z)
+    }
+
+    /// A point of the fore half by the cut (where meshing rounds its rim off just under the
+    /// skin) laid on the whole torso's skin, with the skin's normal: within `voxel` of the
+    /// skin, fading out by twice that.
+    fn onto_skin(&self, p: Vec3, n: Vec3, voxel: f32, e: f32) -> (Vec3, Vec3) {
+        let z = p.z - self.pivot.z;
+        let d = (self.skin)(p);
+        let w =
+            smooth(2.0 * voxel, voxel, d.abs()) * smooth(-0.04, -0.02, z) * smooth(0.015, 0.008, z);
+        if w <= 0.0 {
+            return (p, n);
+        }
+        let g = gradient(&self.skin, p, e);
+        let p = p - g * d * w;
+        let g = gradient(&self.skin, p, e);
+        (p, n.lerp(g, w).normalize_or(g))
     }
 
     /// The rest point and normal a point of the fore half is painted as: on the ball, turned
@@ -2158,6 +2207,7 @@ mod deer {
     pub(super) const SEAM: Seam = Seam {
         pivot: R.loin,
         reach: 0.25,
+        skin: torso,
     };
 
     fn fore(p: Vec3) -> f32 {
@@ -3061,6 +3111,7 @@ mod wolf {
     pub(super) const SEAM: Seam = Seam {
         pivot: R.loin,
         reach: 0.36,
+        skin: torso,
     };
 
     fn fore(p: Vec3) -> f32 {
@@ -3805,7 +3856,8 @@ mod boar {
     /// The cut between the fore half of the torso and the croup.
     pub(super) const SEAM: Seam = Seam {
         pivot: R.loin,
-        reach: 0.1,
+        reach: 0.24,
+        skin: torso,
     };
 
     fn fore(p: Vec3) -> f32 {
@@ -5831,30 +5883,42 @@ pub use deer::{FWD as DEER_HEAD_FWD, UP as DEER_HEAD_UP};
 mod tests {
     use super::*;
 
-    /// Deer, wolf and boar torsos bend at the loin: the fore half's ball stays inside the
-    /// torso, and the croup, bent either way a little further than the gallop bends it, stays
+    /// Deer, wolf and boar torsos bend at the loin: at rest the fore half's ball stays inside
+    /// the croup over the whole height of the torso (a sloping back or a tuft of coat would
+    /// otherwise break through it as a step and a crease), the croup swelling over it only a
+    /// little; and the croup, bent either way a little further than the gallop bends it, stays
     /// inside the fore half (no lip where the halves meet).
     #[test]
     fn torso_halves_stay_joined_when_the_back_bends() {
         let cases: [(&str, Seam, SdfFn, f32); 3] = [
             ("deer", deer::SEAM, deer::torso, 0.2),
             ("wolf", wolf::SEAM, wolf::torso, 0.32),
-            ("boar", boar::SEAM, boar::torso, 0.2),
+            ("boar", boar::SEAM, boar::torso, 0.26),
         ];
         for (name, seam, torso, bend) in cases {
-            let (mut ball, mut lip) = (0.0f32, 0.0f32);
+            let (mut ball, mut lip, mut swell) = (0.0f32, 0.0f32, 0.0f32);
+            let mut top = 0;
             for ix in 0..40 {
-                for iy in 0..120 {
+                for iy in 0..200 {
                     for iz in 0..70 {
                         let p = seam.pivot
                             + v3(
                                 ix as f32 * 0.005,
-                                iy as f32 * 0.005 - 0.45,
+                                iy as f32 * 0.005 - 0.5,
                                 iz as f32 * 0.005 - 0.12,
                             );
                         let f = seam.fore(torso, p);
+                        let croup = seam.croup(torso, p);
                         if f < 0.0 {
-                            ball = ball.max(torso(p));
+                            top = top.max(iy);
+                            if p.z > seam.pivot.z + SEAM_OVERLAP {
+                                ball = ball.max(croup);
+                            } else {
+                                ball = ball.max(torso(p));
+                            }
+                        }
+                        if p.z > seam.pivot.z && croup.abs() < 0.003 {
+                            swell = swell.max(torso(p) - croup);
                         }
                         if p.z < seam.pivot.z {
                             for th in [-bend, bend] {
@@ -5867,14 +5931,22 @@ mod tests {
                     }
                 }
             }
-            eprintln!("{name}: ball out {ball:.4} m, croup out {lip:.4} m");
+            eprintln!("{name}: ball out {ball:.4} m, croup out {lip:.4} m, swell {swell:.4} m");
             assert!(
-                ball < 0.002,
-                "{name}: the ball stands {ball:.4} m out of the torso"
+                top < 199,
+                "{name}: the torso reaches past the probed height"
+            );
+            assert!(
+                ball < 0.0005,
+                "{name}: the ball stands {ball:.4} m out of the croup"
             );
             assert!(
                 lip < 0.0025,
                 "{name}: the croup stands {lip:.4} m out at the seam"
+            );
+            assert!(
+                swell < SEAM_SWELL + SEAM_PROUD + 0.0005,
+                "{name}: the croup swells {swell:.4} m"
             );
         }
     }

@@ -1180,6 +1180,9 @@ struct Build {
     /// At a gallop the hind feet come down this much further forward and further out (rig
     /// m), reaching under the chest past the fore feet.
     tuck: (f32, f32),
+    /// At a gallop the fore feet come down this much further back (rig m), under the chest
+    /// rather than reaching out ahead of it.
+    fore_back: f32,
     /// How the neck follows the spine through the gallop: raised (+) or lowered as it flexes
     /// (rad per rad), the head turned back level.
     nod: f32,
@@ -1216,6 +1219,7 @@ const DEER_BUILD: Build = Build {
     flex: 0.18,
     gather: 0.9,
     tuck: (0.05, 0.015),
+    fore_back: 0.0,
     nod: 0.5,
 };
 
@@ -1234,6 +1238,7 @@ const WOLF_BUILD: Build = Build {
     flex: 0.3,
     gather: 0.85,
     tuck: (0.13, 0.03),
+    fore_back: 0.0,
     nod: -0.35,
 };
 
@@ -1245,7 +1250,7 @@ const BOAR_BUILD: Build = Build {
     stride: (0.4, 0.9),
     duty: (0.2, 0.55, 2.0),
     lift: [0.05, 0.045],
-    lift_fast: [0.11, 0.1],
+    lift_fast: [0.15, 0.1],
     reach: [0.24, 0.27],
     blade: 0.04,
     low: 0.02,
@@ -1253,6 +1258,7 @@ const BOAR_BUILD: Build = Build {
     flex: 0.14,
     gather: 0.9,
     tuck: (0.06, 0.015),
+    fore_back: 0.07,
     nod: 0.2,
 };
 
@@ -1267,6 +1273,8 @@ const PIGLET_BUILD: Build = Build {
     bounce: (0.03, 0.065),
     flex: 0.09,
     tuck: (0.03, 0.01),
+    // A piglet's short legs reach no further back under it than they already do.
+    fore_back: 0.0,
     ..BOAR_BUILD
 };
 
@@ -1308,7 +1316,7 @@ impl Build {
             let (fwd, out) = if k >= 2 {
                 (self.tuck.0 * fast, self.tuck.1 * fast)
             } else {
-                (0.0, 0.0)
+                (-self.fore_back * fast, 0.0)
             };
             Vec2::new(toe.x + out * toe.x.signum(), toe.z - fwd)
         });
@@ -1598,7 +1606,8 @@ fn quad(
         );
         pos += Vec3::new(-from.sin(), 0.0, from.cos()) * 0.13 * size * jolt;
         pos.y -= 0.08 * size * duck + 0.08 * size * stumble;
-        roll += from.sin() * 0.24 * jolt;
+        let sway = track(t, &[(0.0, 0.0, Both), (0.1, 1.0, Out), (0.6, 0.0, Both)]);
+        roll += from.sin() * (0.24 * jolt + 0.08 * sway);
         // From behind, the rump jumps up.
         pitch -= 0.06 * jolt * (-from.cos()).max(0.0) + 0.22 * stumble;
         flex += 0.22 * duck;
@@ -1678,7 +1687,11 @@ fn quad(
         if pl.down {
             (-0.45 * smooth(0.65, 1.0, pl.u) * stepping, 0.0)
         } else {
-            let fold = (PI * pl.u.powf(0.75)).sin().max(0.0) * if p.stepping { 1.0 } else { 0.5 };
+            // At speed a hind leg pushes off extended and peels off the ground before it
+            // folds (folding at once would drag the hock along the ground behind).
+            let late = if front { 0.0 } else { 0.18 * fast };
+            let u = ((pl.u - late) / (1.0 - late)).max(0.0);
+            let fold = (PI * u.powf(0.75)).sin().max(0.0) * if p.stepping { 1.0 } else { 0.5 };
             (
                 -(if front { 1.3 } else { 0.9 }) * fold,
                 g_flex * fold * if front { -1.0 } else { 0.75 },
@@ -1880,11 +1893,20 @@ fn quad_look(
             } else {
                 0.0
             };
+            // A boar scents for what it can't see: the snout comes up again and again, the
+            // nose working at the air.
+            let scent = if boar {
+                let c = (k.clock / 1.7 + k.seed * 5.3).fract();
+                smooth(0.0, 0.2, c) * (1.0 - smooth(0.55, 0.85, c))
+            } else {
+                0.0
+            };
+            let nose = scent * (0.24 + 0.05 * (k.clock * 11.0).sin().max(0.0));
             Some((
                 Look {
-                    neck: beast.by(0.3, 0.12, 0.2),
+                    neck: beast.by(0.3, 0.12, 0.2) + 0.05 * scent,
                     neck2: if deer { 0.18 } else { 0.0 },
-                    head: beast.by(0.5, 0.02, 0.15),
+                    head: beast.by(0.5, 0.02, 0.15) + nose,
                     yaw: scan,
                     ear_up: if boar { 0.4 } else { 0.35 },
                     tail: match beast {
@@ -2204,11 +2226,23 @@ fn quad_look(
                 (0.6, 0.0, Both),
             ],
         );
+        // The head and neck swing hard away from the blow and hold a moment, so a blow from
+        // the far side reads from this side too (the face turned to it).
+        let sway = track(
+            t,
+            &[
+                (0.0, 0.0, Both),
+                (0.08, 1.0, Out),
+                (0.32, 0.85, Both),
+                (0.75, 0.0, Both),
+            ],
+        );
         let pin = smooth(0.0, 0.06, t) * (1.0 - smooth(1.2, 1.8, t));
         let clamp = smooth(0.0, 0.06, t) * (1.0 - smooth(0.4, 0.8, t));
         l.neck += 0.4 * jolt;
         l.head -= 0.2 * jolt;
-        l.yaw += from.sin() * 0.5 * jolt;
+        l.yaw += from.sin() * 0.85 * sway;
+        l.gaze += from.sin() * 0.35 * sway;
         for e in &mut l.ears {
             *e = lerp(*e, -1.6, pin);
         }
@@ -2694,7 +2728,7 @@ fn rabbit(i: &Input, m: &mut Motion, k: &Tick, out: &mut Pose) {
     let root_of = |n: usize, toe: Vec3| {
         let j = joints(n);
         if n < 2 {
-            let along = (0.5 * (toe.z - j[2].z)).clamp(-0.045, 0.04);
+            let along = (0.5 * (toe.z - j[2].z)).clamp(-0.045, 0.05);
             j[0] + Vec3::new(0.0, 0.0, along)
         } else {
             j[0]
@@ -2715,7 +2749,17 @@ fn rabbit(i: &Input, m: &mut Motion, k: &Tick, out: &mut Pose) {
                 let flat = Vec2::new(d.x, d.z).length();
                 if flat < reach {
                     let need = -d.y - (reach * reach - flat * flat).sqrt();
-                    drop[n / 2] = drop[n / 2].max(reach_need(pl, need, reach));
+                    // A fore paw peeling off at a run is still as far back as its short leg
+                    // goes: the frame it lifts, the chest stays down over it (unless the other
+                    // paw is coming down) so it leaves the ground where it stood.
+                    let other = plants[n ^ 1];
+                    let landing = !other.down && other.u > 0.6;
+                    let need = if n < 2 && !pl.down && pl.u < 0.05 && !landing {
+                        need.min(0.25 * reach)
+                    } else {
+                        reach_need(pl, need, reach)
+                    };
+                    drop[n / 2] = drop[n / 2].max(need);
                 }
             }
             if drop[0] <= 0.0 && drop[1] <= 0.0 {
@@ -3802,6 +3846,14 @@ mod tests {
                 s.went,
                 s.worst
             );
+            // A rabbit's paws stand still to within a hair, even the frame they peel off.
+            if species == Species::Rabbit {
+                assert!(
+                    s.worst < 0.001,
+                    "{name}: a paw slid {:.4} m in a frame",
+                    s.worst
+                );
+            }
             if s.went > 1.0 {
                 assert!(
                     s.lifts.iter().all(|&n| n >= 2),
@@ -4235,7 +4287,9 @@ mod tests {
                     .map(|p| p.y)
                     .fold(0.0, f32::max);
                 let fwd = body.rot * Vec3::NEG_Z;
-                let now = (body.pos, (-up.x).atan2(up.y), ear, lift, -fwd.y);
+                let ahead = pose.place(Part::Head).rot * Vec3::NEG_Z;
+                let turn = (-ahead.x).atan2(-ahead.z);
+                let now = (body.pos, (-up.x).atan2(up.y), ear, lift, -fwd.y, turn);
                 if hit {
                     after.push((t - 1.0, now));
                 } else {
@@ -4244,8 +4298,11 @@ mod tests {
             }
             let rest = rest.expect("stood");
             let (mut away, mut roll, mut pinned, mut stepped) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-            let (mut dip, mut sank) = (0.0f32, 0.0f32);
-            for (t, (pos, r, ear, lift, nose)) in &after {
+            let (mut dip, mut sank, mut swung) = (0.0f32, 0.0f32, 0.0f32);
+            for (t, (pos, r, ear, lift, nose, turn)) in &after {
+                if (0.1..0.4).contains(t) {
+                    swung = swung.max(turn - rest.5);
+                }
                 if *t < 0.3 {
                     away = away.max(rest.0.x - pos.x);
                     roll = roll.max(*r - rest.1);
@@ -4264,7 +4321,7 @@ mod tests {
                 }
             }
             eprintln!(
-                "{species:?}: jolted {away:.3} m away, rolled {roll:.2} rad, ears turned {pinned:.2} rad, a foot up {stepped:.3} m, stumbled {dip:.3} rad nose down, sank {sank:.3} m"
+                "{species:?}: jolted {away:.3} m away, rolled {roll:.2} rad, ears turned {pinned:.2} rad, a foot up {stepped:.3} m, stumbled {dip:.3} rad nose down, sank {sank:.3} m, head swung {swung:.2} rad away"
             );
             assert!(away > 0.05, "{species:?}: jolted only {away:.3} m");
             assert!(roll > 0.1, "{species:?}: rolled only {roll:.2} rad");
@@ -4275,7 +4332,11 @@ mod tests {
             assert!(stepped > 0.02, "{species:?}: no foot stepped");
             assert!(dip > 0.15, "{species:?}: stumbled only {dip:.3} rad");
             assert!(sank > 0.06, "{species:?}: its legs gave only {sank:.3} m");
-            for (t, (pos, r, _, _, _)) in after.iter().filter(|a| a.0 > 1.3) {
+            assert!(
+                swung > 0.8,
+                "{species:?}: the head swung only {swung:.2} rad away"
+            );
+            for (t, (pos, r, _, _, _, _)) in after.iter().filter(|a| a.0 > 1.3) {
                 assert!(
                     (pos.x - rest.0.x).abs() < 0.01 && (r - rest.1).abs() < 0.02,
                     "{species:?}: still flinching at {t:.2} s"

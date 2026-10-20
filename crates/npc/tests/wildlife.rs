@@ -543,6 +543,38 @@ fn a_wounded_boar_turns_on_the_shooter_not_on_what_it_was_watching() {
 }
 
 #[test]
+fn a_boar_hurt_by_something_it_cannot_find_stands_and_scents_for_it() {
+    let mut app = app();
+    let tusker = boar(&mut app, DVec3::ZERO, 40, true, false);
+    app.update_n(60);
+    // A blow from 3 m off, and no one there: it stands its ground facing that way, looking
+    // and scenting, and slashes at nothing.
+    let at = pos(&app, tusker);
+    app.world.write_message(DamageEvent {
+        target: tusker,
+        amount: 20.0,
+        kind: DamageKind::Ballistic,
+        point: at + DVec3::new(3.0, 0.0, 0.0),
+        impulse: Vec3::ZERO,
+        source: None,
+    });
+    let mut looked = false;
+    for f in 0..60 * 4 {
+        app.update();
+        let s = state(&app, tusker);
+        assert_ne!(s, AnimalState::Charge, "it charged at nothing");
+        looked |= s == AnimalState::Alert;
+        if f == 60 * 2 {
+            let moved = pos(&app, tusker).distance(at);
+            assert!(moved < 1.0, "it ran {moved:.1} m instead of looking about");
+        }
+    }
+    assert!(looked, "it stands and looks about");
+    let mind = app.world.get::<AnimalMind>(tusker).unwrap();
+    assert!(mind.bite.is_none(), "it struck at nothing");
+}
+
+#[test]
 fn a_wounded_boar_runs_from_fire_rather_than_charge_into_it() {
     let mut app = app();
     let tusker = boar(&mut app, DVec3::ZERO, 40, true, false);

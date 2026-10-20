@@ -1676,11 +1676,26 @@ fn boar_fights(
     let foe = boar_foe(mind, now, w);
     let target = foe.map(|f| f.1);
     let flat = |p: DVec3| DVec2::new(p.x - pos.x, p.z - pos.z).length() as f32;
+    // Hurt close by, by something it can't find (gone, or no one at all): it stands its
+    // ground facing where the blow came from, crest up, scenting for it, rather than charging
+    // at nothing; then it carries on as its senses tell it.
+    let hurt_at = mind.wounded.map(|(at, _, _)| at);
+    let unseen = foe.is_some_and(|f| f.0.is_none()) && target.is_some_and(|p| flat(p) < 20.0);
+    if unseen && hurt_at.is_some_and(|at| now - at < SEARCH_SECS) {
+        if mind.state != AnimalState::Alert {
+            mind.set(AnimalState::Alert, now);
+        }
+        mind.wait_until = mind.wait_until.max(now + 1.0);
+        return true;
+    }
     if mind.state == AnimalState::Charge {
         let struck = mind
             .slashed_at
             .is_some_and(|t| t >= mind.since && now - t > 0.35);
-        if !struck && now - mind.since < 6.0 && target.is_some_and(|p| flat(p) < 25.0) {
+        if !struck
+            && now - mind.since < 6.0
+            && foe.is_some_and(|f| f.0.is_some() && flat(f.1) < 25.0)
+        {
             return true;
         }
         // Away for a moment.
@@ -1700,7 +1715,7 @@ fn boar_fights(
     }
     // Something real to turn on: what just hurt it, or a threat it senses now.
     let wounded = mind.wounded.is_some_and(|(at, _, _)| now - at < WOUND_SECS);
-    let Some(at) = target else {
+    let Some((Some(_), at, _)) = foe else {
         return false;
     };
     let d = flat(at);
@@ -1721,20 +1736,29 @@ fn boar_fights(
 
 /// How long a boar remembers who hurt it, and turns on them (s).
 const WOUND_SECS: f64 = 15.0;
+/// How long a boar hurt by something it can't find stands looking for it (s).
+const SEARCH_SECS: f64 = 4.0;
 
-/// What a boar turns on: whoever hurt it in the last [`WOUND_SECS`] (where they are now, or
-/// failing that where the blow came from), else a threat it sensed in the last second (where
-/// it is now). The entity to strike (if it is one), where it is and how it is moving.
+/// What a boar turns on: whoever hurt it in the last [`WOUND_SECS`] (where they are now),
+/// else a threat it sensed in the last second (where it is now); hurt by something it can't
+/// find and sensing nothing, where the blow came from (with no one to strike). The entity to
+/// strike (if there is one), where it is and how it is moving.
 fn boar_foe(mind: &AnimalMind, now: f64, w: &AnimalWorld) -> Option<(Option<Entity>, DVec3, Vec3)> {
     let live = |e: Entity| w.seen.get(e).map(|p| (Some(e), p.position, p.velocity));
-    if let Some((at, from, source)) = mind.wounded
-        && now - at < WOUND_SECS
-    {
-        return source.and_then(live).or(Some((None, from, Vec3::ZERO)));
-    }
-    mind.threat
+    let wound = mind.wounded.filter(|(at, _, _)| now - at < WOUND_SECS);
+    let sensed = mind
+        .threat
         .filter(|_| now - mind.threat_seen < 1.0)
-        .and_then(live)
+        .and_then(live);
+    match wound {
+        Some((_, from, source)) => {
+            source
+                .and_then(live)
+                .or(sensed)
+                .or(Some((None, from, Vec3::ZERO)))
+        }
+        None => sensed,
+    }
 }
 
 /// Boars: run at the threat, head down, and slash it with the tusks when close.
@@ -1757,7 +1781,8 @@ fn charge(
     out.direction = dir;
     out.look = Some(dir);
     out.sprint = mind.stamina > 0.1;
-    if d < 1.5 && now >= mind.bite_ready && traits.bite > 0.0 {
+    // Only at someone: never a slash at nothing.
+    if d < 1.5 && now >= mind.bite_ready && traits.bite > 0.0 && foe.is_some() {
         mind.bite = foe;
         mind.slashed_at = Some(now);
         mind.bite_ready = now + 1.0 + 0.3 * mind.random() as f64;

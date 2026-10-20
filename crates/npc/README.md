@@ -46,7 +46,8 @@ piglets, `Animal::young`) or alone (tuskers, `Animal::male`), root for food with
 shuffling on as they go, and are about at night. They run from threats like the rest, but a
 boar turns and charges when it is cornered (its flight finds no way out, or the threat is on
 top of it) or wounded (it goes for whoever hurt it, not for whatever it happened to be
-watching), and a sow charges anyone who comes close to her piglets while they scatter; the
+watching; when it can't find who, it stands and scents for them, bristling, rather than
+charge at nothing), and a sow charges anyone who comes close to her piglets while they scatter; the
 charge ends in a slash of the tusks (damage), then the boar breaks off and runs for a moment
 before it may turn again. Fire always means flight: a boar never turns to fight in the
 flames. Wolf packs roam, get hungry, track prey by scent, stalk
@@ -89,7 +90,8 @@ stands. Animals plant their feet too (a
 test fails if a hoof or paw on the ground slides) in each species' footfalls: deer walk in
 lateral sequence, trot and gallop (rotary) and bound away when they bolt from a stand, wolves
 walk, trot, lope and gallop, boars walk, trot and gallop (transverse) on quick, short strides
-(piglets scamper, quicker still and bouncing high),
+(the fore feet coming down under the chest, folded high as they swing; piglets scamper,
+quicker still and bouncing high),
 rabbits hop and half-bound with the hind feet landing ahead of the fore feet. Strides lengthen
 and quicken with speed; deer, wolf and boar backs bend at the loin,
 arching as the hind feet swing up past the fore feet and hollowing as the legs stretch out
@@ -105,7 +107,8 @@ the jaw working, and lifts its head now and then to scent the air; alarmed, it c
 jaws; it runs with its tail up, and charges head down to hook its tusks up and sideways
 through what it strikes; alarmed or charging, its crest of long, pale-tipped bristles stands
 up along its nape and withers. Hurt but not killed, an animal flinches, big enough to read
-at 25 m: it jolts and rolls away from the blow, hunched and ducking, head jerking away, ears
+at 25 m: it jolts and rolls away from the blow, hunched and ducking, head and neck swinging
+hard away (so a blow from the far side reads from this side too), ears
 pinned flat and tail clamped, stumbles as a foreleg gives, hitches in its stride and
 staggers a step or two before it runs. A killed animal goes down forequarters first (onto its
 chest and knees on the run), then over onto its side away from the blow, and settles. Starlings beat their wings (extended
@@ -135,7 +138,9 @@ All art is generated in code (`src/art`), since no third-party art may go in the
   the tuskers, the upper pair in the lip and the lower on the jaw, and a size down,
   pale-striped piglets, striped down to the jaw) and European rabbits, with fur
   textures that follow the coat, baked ambient occlusion, IK legs and planted feet, deer, wolf
-  and boar torsos in two halves that bend at the loin over a closed seam, and starlings with
+  and boar torsos in two halves that bend at the loin over a closed seam (no crease: the fore
+  half's rim lies on the skin with its normals, and the croup swells a hair over the fore
+  half's hinge where the back slopes away behind it), and starlings with
   iridescent spotted plumage and feathered wings that fold, spread and beat.
 - **Arena** (`art/arena.rs`): a sandstone amphitheater with arched stands, gates with
   portcullises, fluted columns, banners, braziers with flickering fire and light, rubble,
@@ -291,7 +296,8 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   through a herd, a wolf pack stalks, charges, kills and feeds, birds take off together and
   land again, a sounder roots about and wanders together, boars run from a sprinter in the
   open, a boar cornered in a pen charges before it is trodden on and slashes, a wounded boar turns on
-  whoever hurt it (the shooter, not what it was watching) and runs from fire rather than
+  whoever hurt it (the shooter, not what it was watching), stands and scents when it can't
+  find who rather than charge at nothing, and runs from fire rather than
   charge into it, a sow charges to defend her piglets (a lone sow runs), wolves give room to
   a boar charging at them but not to one charging past, and wolves pick a piglet over its
   elders.
@@ -327,10 +333,11 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   every collider. Each walking animal's close-up is a still from a real run at the game's
   rate (it walks on toward the camera's mark and is shot at its moment), so its legs are
   where its gait has them. The animal unit tests check that no planted foot slides in any
-  gait (boars, tuskers and piglets included) and that a rabbit's fore paws never land out of
-  reach, that a rooting boar's snout reaches the soil, that a tusker's upper tusks stay in its
+  gait (boars, tuskers and piglets included; a rabbit's paws by under a millimetre a frame,
+  even as they peel off at a run) and that a rabbit's fore paws never land out of reach, that a rooting boar's snout reaches the soil, that a tusker's upper tusks stay in its
   lip as its jaw opens, that a hurt animal jolts away from the blow, pins its ears, stumbles,
-  steps, hitches in its stride and settles, and that the flinch does not jump when the state
+  steps, hitches in its stride and settles, its head swinging well away from a blow from
+  either side, and that the flinch does not jump when the state
   changes, that heads turn to a threat and to a noise before the neck, and that a shot
   starling lands as it was tumbling.
 - `tests/screenshots.rs`: renders the arena, its stands, a cover fight, the sparring lane, the
