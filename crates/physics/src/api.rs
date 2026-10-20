@@ -194,14 +194,19 @@ fn blast(world: &mut World, args: Value) -> Result<Value, String> {
     if a.radius <= 0.0 || a.strength <= 0.0 {
         return Err("radius and strength must be positive".into());
     }
-    world.write_message(WorldImpulse {
+    let impulse = WorldImpulse {
         center: a.center,
         radius: a.radius,
         strength: a.strength,
         energy_j: a.energy_j,
         heat_c: a.heat_c,
         source: None,
-    });
+    };
+    world.write_message(impulse);
+    // An explosion is heard: NPCs and wildlife turn toward it.
+    if let Some(noise) = impulse.noise() {
+        world.write_message(noise);
+    }
     Ok(json!({ "ok": true }))
 }
 
@@ -276,7 +281,8 @@ pub(crate) fn register(app: &mut App) {
     .register_api(
         "physics.blast",
         "Explosion at a point: pushes bodies (and wind, smoke, foliage, destruction through \
-         WorldImpulse). radius in m, strength = peak air speed m/s; optional energy_j, heat_c.",
+         WorldImpulse). radius in m, strength = peak air speed m/s; optional energy_j, heat_c \
+         (with either, it is an explosion and is heard: NoiseEvent).",
         r#"{"center": [0, 0.5, 0], "radius": 8, "strength": 120}"#,
         blast,
     )
