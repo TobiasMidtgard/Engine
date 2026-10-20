@@ -13,9 +13,11 @@ pub(crate) fn register(app: &mut App) {
     app.register_api(
         "audio.status",
         "Audio output (device name, offline or off), sample rate, voices playing, level meters, \
-         listener position and whether a recording is running.",
+         listener position, whether a recording is running, and the recorded footstep takes \
+         per surface (empty: every step is synthesized).",
         "{}",
         |world, _| {
+            let takes = world.resource::<crate::FootstepSamples>().summary();
             let audio = world.resource::<Audio>();
             let m = audio.meters();
             let p = audio.listener_position();
@@ -27,6 +29,7 @@ pub(crate) fn register(app: &mut App) {
                 "rms_db": to_db(m.master_rms),
                 "listener": [p.x, p.y, p.z],
                 "recording": audio.is_recording(),
+                "footstep_takes": takes,
             }))
         },
     )

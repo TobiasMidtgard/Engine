@@ -94,10 +94,15 @@ fn cloud_density(p: vec3<f32>, h: f32, w: vec4<f32>, with_detail: bool) -> f32 {
     let np = (p + clouds.noise.xyz) / clouds.noise.w;
     // Big lumps break up the map's smooth outlines (towers, cloud streets, gaps).
     let lump = textureSampleLevel(shape_noise, linear_repeat, np * 0.27 + vec3(0.37, 0.11, 0.73), 0.0).g;
+    // Fair-weather heaps come in families: a few big ones where neighbors have merged, small
+    // ones around them, open sky between the groups. Without it every heap was the same
+    // round puff, spread evenly like popcorn.
+    let family = textureSampleLevel(shape_noise, linear_repeat, np * 0.55 + vec3(0.71, 0.29, 0.13), 0.0).g;
+    let heaped = smoothstep(0.3, 0.5, w.g) * (1.0 - smoothstep(0.6, 0.8, w.g)) * (1.0 - smoothstep(0.6, 0.85, w.r));
     let tower = smoothstep(0.55, 0.9, w.g);
     // Towers narrow as they climb, then spread into an anvil under the tropopause.
     let anvil = smoothstep(0.75, 1.0, w.g) * smoothstep(0.72, 0.92, h01);
-    var cov = w.r * (0.72 + 0.56 * lump) - tower * 0.3 * smoothstep(0.1, 0.7, h01) + anvil * 0.55 * smoothstep(0.4, 0.8, w.r);
+    var cov = w.r * (0.72 + 0.56 * lump) * mix(1.0, 0.75 + 0.65 * smoothstep(0.3, 0.75, family), heaped) - tower * 0.3 * smoothstep(0.1, 0.7, h01) + anvil * 0.55 * smoothstep(0.4, 0.8, w.r);
     cov = saturate(cov);
     if (cov <= 0.002) { return 0.0; }
     let s = textureSampleLevel(shape_noise, linear_repeat, np, 0.0);
