@@ -107,12 +107,15 @@ pub enum PackStatus {
 }
 
 /// The human pack and its region masks, loaded in the background at startup.
+/// A loaded pack and its regions, or why loading failed.
+type LoadResult = Result<(HumanPack, mesh::Regions), String>;
+
 #[derive(Resource)]
 pub struct HumanAssets {
     pub pack: Option<Arc<HumanPack>>,
     pub regions: Option<Arc<mesh::Regions>>,
     pub status: PackStatus,
-    rx: Mutex<Option<Receiver<Result<(HumanPack, mesh::Regions), String>>>>,
+    rx: Mutex<Option<Receiver<LoadResult>>>,
 }
 
 impl HumanAssets {

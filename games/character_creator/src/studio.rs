@@ -129,18 +129,39 @@ pub fn setup(mut commands: Commands, mut settings: ResMut<RenderSettings>) {
     ));
 }
 
+type SubjectQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Transform,
+        &'static Appearance,
+        Option<&'static BuiltCharacter>,
+    ),
+    With<Subject>,
+>;
+type CameraQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Transform,
+        &'static mut Orbit,
+        &'static mut Camera,
+    ),
+    (Without<Subject>, Without<Backdrop>),
+>;
+type BackdropQuery<'w, 's> =
+    Query<'w, 's, &'static mut Transform, (With<Backdrop>, Without<Subject>, Without<Orbit>)>;
+
 /// Places the camera from its [`Orbit`]; in the window, left-drag turns and scroll zooms.
+#[allow(clippy::too_many_arguments)]
 pub fn orbit_camera(
     config: Res<EngineConfig>,
     mouse: Res<ButtonInput<MouseButton>>,
     motion: Res<Mouse>,
     ui: Option<Res<engine_ui::input::UiInputState>>,
-    subject: Query<(&Transform, &Appearance, Option<&BuiltCharacter>), With<Subject>>,
-    mut cams: Query<
-        (&mut Transform, &mut Orbit, &mut Camera),
-        (Without<Subject>, Without<Backdrop>),
-    >,
-    mut backdrops: Query<&mut Transform, (With<Backdrop>, Without<Subject>, Without<Orbit>)>,
+    subject: SubjectQuery,
+    mut cams: CameraQuery,
+    mut backdrops: BackdropQuery,
     mut dragging: Local<bool>,
 ) {
     let eyes = crate::subject_eyes(&subject)

@@ -113,7 +113,7 @@ mod tests {
             "{front}"
         );
         // Outward normals, counter-clockwise triangles seen from outside.
-        for t in m.indices.chunks_exact(3).take(500) {
+        for t in m.indices.as_chunks::<3>().0.iter().take(500) {
             let [a, b, c] = [t[0], t[1], t[2]].map(|i| m.vertices[i as usize].position);
             let n = (b - a).cross(c - a);
             let center = if a.x > 0.0 {

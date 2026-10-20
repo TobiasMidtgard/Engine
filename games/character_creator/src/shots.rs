@@ -51,7 +51,7 @@ fn view(name: &str) -> Option<(Orbit, u8)> {
         ),
         "profile" => (
             Orbit {
-                yaw: 1.5708,
+                yaw: std::f32::consts::FRAC_PI_2,
                 pitch: 0.0,
                 ..c
             },
@@ -83,7 +83,13 @@ fn view(name: &str) -> Option<(Orbit, u8)> {
             },
             0,
         ),
-        "back" => (Orbit { yaw: 3.1416, ..c }, 0),
+        "back" => (
+            Orbit {
+                yaw: std::f32::consts::PI,
+                ..c
+            },
+            0,
+        ),
         "masks" => (c, 1),
         "normals" => (c, 2),
         _ => return None,

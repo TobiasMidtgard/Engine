@@ -18,6 +18,9 @@ fn main() {
     );
     let a = Appearance::preset(preset).expect("preset");
     let m = build::build(&pack, &regions, &a, BuildOptions::default());
+    if let Some(lm) = m.landmarks {
+        println!("head {:?} eyes {:?}", lm.head, lm.eyes);
+    }
     let sets: Vec<serde_json::Value> = m
         .strands
         .iter()

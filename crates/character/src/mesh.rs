@@ -480,7 +480,7 @@ pub fn build_from(
 /// Area-weighted vertex normals of a triangle list.
 pub fn vertex_normals(positions: &[Vec3], indices: &[u32]) -> Vec<Vec3> {
     let mut n = vec![Vec3::ZERO; positions.len()];
-    for t in indices.chunks_exact(3) {
+    for t in indices.as_chunks::<3>().0 {
         let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
         let f = (positions[b] - positions[a]).cross(positions[c] - positions[a]);
         n[a] += f;

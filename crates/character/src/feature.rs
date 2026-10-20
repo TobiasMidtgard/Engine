@@ -210,6 +210,7 @@ enum Pass {
     Shadow,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pipeline(
     gpu: &GpuShared,
     label: &str,

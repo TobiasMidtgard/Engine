@@ -95,7 +95,7 @@ impl<'a> Sampler<'a> {
         let mut tris = Vec::new();
         let mut total = 0.0;
         let c = channel as usize;
-        for (t, tri) in skin.indices.chunks_exact(3).enumerate() {
+        for (t, tri) in skin.indices.as_chunks::<3>().0.iter().enumerate() {
             let (a, b, cc) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
             let m = (skin.masks[a * MASKS + c]
                 + skin.masks[b * MASKS + c]
@@ -552,12 +552,13 @@ fn grow_scalp(
         // Keep out of the skin (and off the face) after clumping and curls.
         let last = pts.len() - 1;
         let mut face_side = None;
-        for k in 1..pts.len() {
+        let jitter = hash01(sp.rest);
+        for (k, p) in pts.iter_mut().enumerate().skip(1) {
             let t = k as f32 / last as f32;
-            pts[k] = collider.push_out(pts[k], 0.0008 + g.loft * t.min(0.4) / 0.4 * 0.6);
             if g.gravity > 0.5 {
-                pts[k] = keep_off_face(pts[k], &mut face_side, lm);
+                *p = keep_off_face(*p, &mut face_side, jitter, lm);
             }
+            *p = collider.push_out(*p, 0.0008 + g.loft * t.min(0.4) / 0.4 * 0.6);
         }
         set.push(
             &pts,
@@ -572,23 +573,36 @@ fn grow_scalp(
 /// The part of long hair: on the character's left, 2.5 cm off center.
 const PART_X: f32 = 0.025;
 
-/// Hair that would hang in front of the face is moved aside to frame it: below the brows, in
-/// front of the ears, no closer to the middle than the cheekbones. A hair goes aside on the side
-/// it first needs moving on (`side`, kept from point to point), so it never jumps across.
-fn keep_off_face(p: Vec3, side: &mut Option<f32>, lm: &Landmarks) -> Vec3 {
+/// Hair that would hang in front of the face is moved aside to frame it: easing out over the
+/// forehead (so a hair bends aside instead of jumping), then beside the eyes and cheeks and back
+/// into the side curtain rather than in front of the face. A hair goes aside on one side
+/// (`side`, kept from point to point, picked where it first needs moving if not given), so it
+/// never jumps across; `jitter` (0..1) spreads the hairs that were moved so they don't line up.
+fn keep_off_face(p: Vec3, side: &mut Option<f32>, jitter: f32, lm: &Landmarks) -> Vec3 {
     let d = p - lm.head;
-    if d.y > 0.02 || d.z < -0.015 {
+    // In front of the ears, from the forehead down to the shoulders.
+    if d.y > 0.06 || d.y < -0.26 || d.z < 0.025 {
         return p;
     }
-    // Over the eyes and cheekbones; above the brows hair may fall across the forehead.
-    let fade = ((0.02 - d.y) / 0.02).clamp(0.0, 1.0);
-    let half = 0.083 * fade;
+    let t = ((0.06 - d.y) / 0.06).clamp(0.0, 1.0);
+    let below = ((d.y + 0.26) / 0.06).clamp(0.0, 1.0);
+    let fade = t * t * (3.0 - 2.0 * t) * below;
+    let half = (0.083 + 0.014 * jitter) * fade;
     let s = *side.get_or_insert(if d.x < 0.0 { -1.0 } else { 1.0 });
-    if d.x * s < half {
-        Vec3::new(lm.head.x + s * half, p.y, p.z)
-    } else {
-        p
+    if d.x * s >= half {
+        return p;
     }
+    // From the eyes down, also back toward the ears.
+    let back = ((0.01 - d.y) / 0.03).clamp(0.0, 1.0);
+    let z = p.z.min(lm.head.z + 0.035 + 0.03 * jitter);
+    Vec3::new(lm.head.x + s * half, p.y, p.z + (z - p.z) * back)
+}
+
+/// A stable 0..1 value from a position (so a hair's guide pass and final pass agree).
+fn hash01(p: Vec3) -> f32 {
+    ((p.x * 12.9898 + p.y * 78.233 + p.z * 37.719).sin() * 43758.547)
+        .fract()
+        .abs()
 }
 
 fn smooth_bump(d: f32, r: f32) -> f32 {
@@ -597,6 +611,7 @@ fn smooth_bump(d: f32, r: f32) -> f32 {
 }
 
 /// Grow one hair from its root, following the style's flow, gravity and the head's shape.
+#[allow(clippy::too_many_arguments)]
 fn grow_hair(
     a: &Appearance,
     g: &Groom,
@@ -647,7 +662,9 @@ fn grow_hair(
     let rise = if g.gravity > 0.5 { 0.18 } else { 0.24 };
     let mut dir = (tangent(flow, sp.n) + sp.n * rise).normalize();
     let bun_center = lm.head + Vec3::new(0.0, 0.06, -0.125);
-    let mut face_side = None;
+    // Hair is moved off the face toward the side it is combed to.
+    let mut face_side = Some(side);
+    let jitter = hash01(sp.rest);
     for k in 1..n {
         let t = k as f32 / (n - 1) as f32;
         let p_prev = pts[k - 1];
@@ -670,11 +687,11 @@ fn grow_hair(
             next_dir = (dir + pull + flow.normalize_or(Vec3::NEG_Y) * 0.05 + wander).normalize();
         }
         let mut p = p_prev + next_dir * seg;
+        if g.gravity > 0.5 {
+            p = keep_off_face(p, &mut face_side, jitter, lm);
+        }
         let offset = 0.0008 + g.loft * (t / 0.4).min(1.0) * r.range(0.4, 1.0);
         p = collider.push_out(p, offset);
-        if g.gravity > 0.5 {
-            p = keep_off_face(p, &mut face_side, lm);
-        }
         // Hair that fell past the shoulders hangs straight on.
         dir = (p - p_prev).normalize_or(next_dir);
         pts.push(p);
