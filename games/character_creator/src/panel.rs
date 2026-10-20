@@ -5,7 +5,7 @@
 use bevy_ecs::message::MessageCursor;
 use engine::prelude::*;
 use engine_character::sliders::SLIDERS;
-use engine_character::{Appearance, BeardStyle, HairStyle, HumanAssets, PackStatus};
+use engine_character::{Appearance, AppearanceExt, BeardStyle, HairStyle, HumanAssets, PackStatus};
 use engine_ui::input::read_events;
 use engine_ui::style::{Overflow, Position};
 use engine_ui::widgets::{self, Slider};
@@ -177,7 +177,7 @@ fn tab_content(tab: usize, group: usize, a: &Appearance) -> Vec<El> {
             out.push(styles(
                 HairStyle::ALL
                     .iter()
-                    .map(|s| (s.name(), *s == a.hair.style)),
+                    .map(|s| (s.name(), *s == a.hair_style())),
                 "creator.hair",
             ));
             out.push(slider("Length", "hair.length", 0.5, 1.5, 0.02));
@@ -199,7 +199,7 @@ fn tab_content(tab: usize, group: usize, a: &Appearance) -> Vec<El> {
             out.push(styles(
                 BeardStyle::ALL
                     .iter()
-                    .map(|s| (s.name(), *s == a.beard.style)),
+                    .map(|s| (s.name(), *s == a.beard_style())),
                 "creator.beard",
             ));
             out.push(slider("Density", "beard.density", 0.0, 1.0, 0.02));
@@ -281,12 +281,12 @@ pub fn apply_actions(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>)
             }
             "hair" => {
                 if let Some(s) = HairStyle::ALL.into_iter().find(|s| s.name() == arg) {
-                    a.hair.style = s;
+                    a.hair.style = s.name().into();
                 }
             }
             "beard" => {
                 if let Some(s) = BeardStyle::ALL.into_iter().find(|s| s.name() == arg) {
-                    a.beard.style = s;
+                    a.beard.style = s.name().into();
                 }
             }
             _ => {}

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use engine_core::math::Vec3;
 
-use crate::appearance::Appearance;
+use crate::appearance::{AncestryExt, Appearance, AppearanceExt};
 use crate::pack::HumanPack;
 use crate::sliders::SLIDERS;
 

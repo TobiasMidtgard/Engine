@@ -19,7 +19,7 @@ use engine_render::shadows::SKY_OCCLUSION_VIEW;
 use engine_render::wgpu;
 use wgpu::util::DeviceExt;
 
-use crate::appearance::{Appearance, BeardStyle, HairStyle};
+use crate::appearance::{Appearance, AppearanceExt, BeardStyle, HairStyle};
 use crate::build::CharacterMeshes;
 use crate::mesh::Landmarks;
 use crate::{BuiltCharacter, CharacterDebug};
@@ -87,12 +87,12 @@ impl GpuCharacter {
         let age_lines = ((a.age - 28.0) / 45.0).clamp(0.0, 1.0);
         let wrinkles = (age_lines + a.skin.wrinkles * 0.5).clamp(0.0, 1.0);
         let male = a.sex.clamp(0.0, 1.0);
-        let shadow = match a.beard.style {
+        let shadow = match a.beard_style() {
             BeardStyle::None => 0.35 * male * ((a.age - 16.0) / 6.0).clamp(0.0, 1.0),
             BeardStyle::Stubble => 0.9,
             _ => 0.7,
         } * (0.4 + 0.6 * a.beard_color().melanin);
-        let scalp_tint = match a.hair.style {
+        let scalp_tint = match a.hair_style() {
             HairStyle::Bald => 0.0,
             HairStyle::Buzz => 0.85,
             // Slicked into a bun, the scalp hardly shows between the hairs.

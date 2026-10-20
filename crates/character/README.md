@@ -28,7 +28,7 @@ commands.spawn((Transform::default(), Appearance::preset("Kofi").unwrap()));
 ```
 
 Change the entity's `Appearance` (or call `character.set`) and it is rebuilt in the background.
-`Appearance::random(seed)` gives a plausible random person; `CharacterQuality` picks bust or
+`Appearance::random(seed)` gives a plausible random person; `CharacterBuild` (or the shared `CharacterQuality` override) picks bust or
 head and how smooth.
 
 ## The creator
@@ -41,8 +41,17 @@ adds close-ups and debug views. `cargo run -p engine_character --example dump_st
 
 ## Contracts
 
-Reads nothing from other modules yet. Writes nothing to `engine_world`. It draws through its
-own `RenderFeature` (`character`).
+A person's look is the shared `engine_world::character::Appearance` (this crate adds
+`AppearanceExt`: sliders by key, presets, random people). It reads:
+
+- `Appearance`: builds and draws the person.
+- `AppearanceRequest`: fills in an `Appearance` from the seed, sex, age range and ancestry
+  (people with the same `family` seed share ancestry and lean toward one coloring and face).
+- `CharacterQuality`: picks the detail (close-up, mid, crowd) unless a `CharacterBuild` is set.
+
+It doesn't yet skin people to anim's `SkeletonPose`, apply `FaceControls` or write
+`HairGuides`, so it doesn't call `draws_appearances`: people stand in their rest pose, and
+anim's own bodies stay as they are. It draws through its own `RenderFeature` (`character`).
 
 ## API
 
