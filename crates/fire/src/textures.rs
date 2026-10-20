@@ -857,11 +857,12 @@ pub fn leaves(size: u32, seed: u32) -> TexSet {
 /// - `0.5 ≤ u < 0.875`: split faces (long grain), v along the log;
 /// - `u ≥ 0.875`, `v < 0.125`: end grain of the outer (unburnt) end, a disc;
 /// - `u ≥ 0.875`, `0.125 ≤ v < 0.25`: end grain of the charred end;
-/// - `u ≥ 0.875`, `0.25 ≤ v < 0.5`: live charcoal, glowing in its cracks and wherever its ash
-///   skin has flaked off.
+/// - `u ≥ 0.875`, `0.25 ≤ v < 0.5`: live charcoal, glowing in its cracks (dimmer under its
+///   grey ash skin).
 ///
 /// The fire end (`v` near 0) is black, alligator-cracked char whose cracks glow (emissive);
-/// it fades through scorched brown to fresh wood and bark by `v` = 0.6.
+/// it fades through scorched brown to fresh wood and bark by `v` = 0.75 (a tended fire's logs
+/// are burnt over half their length).
 pub fn firewood(size: u32, seed: u32) -> TexSet {
     let s = size as f32;
     let texels = par_texels(size, size, |x, y| {
@@ -947,11 +948,11 @@ pub fn firewood(size: u32, seed: u32) -> TexSet {
         // Char: alligator cracks toward the fire end.
         let char_amount = 1.0
             - smooth(
-                0.2,
-                0.36,
-                along_char + 0.08 * fbm(u * 9.0, v * 9.0, 0, 0, 2, 0.5, seed),
+                0.38,
+                0.56,
+                along_char + 0.1 * fbm(u * 9.0, v * 9.0, 0, 0, 2, 0.5, seed),
             );
-        let scorch = 1.0 - smooth(0.3, 0.5, along_char);
+        let scorch = 1.0 - smooth(0.5, 0.75, along_char);
         let blocks = cells(u * 40.0, v * 22.0, 40, 22, 0.7, seed ^ 0x41);
         let crack = 1.0 - smooth(0.02, 0.12, blocks.f2 - blocks.f1);
         let block_shade = (blocks.id >> 8) as f32 / 16_777_216.0;
@@ -973,7 +974,7 @@ pub fn firewood(size: u32, seed: u32) -> TexSet {
                 + char_amount * (0.003 * (1.0 - crack) + 0.001 * block_shade),
             roughness: mix(fresh.roughness, 0.95, char_amount),
             ao: fresh.ao * (1.0 - 0.4 * crack * char_amount),
-            emissive: crack * char_amount * smooth(0.0, 0.25, 0.3 - along_char),
+            emissive: crack * char_amount * smooth(0.0, 0.3, 0.42 - along_char),
             ..fresh
         }
     });
