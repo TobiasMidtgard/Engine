@@ -314,7 +314,7 @@ pub fn heat_visuals(
         let (color, strength) = blackbody(shield.temperature_k);
         // 24 steps on a log scale keep the number of distinct materials small.
         const STEPS: f32 = 24.0;
-        const MAX_LOG: f32 = 4.8;
+        const MAX_LOG: f32 = 6.0;
         let level = ((strength + 1.0).log10() / MAX_LOG * STEPS).clamp(0.0, STEPS) as u8;
         if level == glow.level {
             continue;
