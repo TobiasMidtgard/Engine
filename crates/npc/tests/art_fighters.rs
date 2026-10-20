@@ -5,6 +5,10 @@
 //! The fighters here have no AI: their combat state is set by hand and the NPC clock stands
 //! still at 0. The PNGs land in the test's temp dir; set `NPC_SCREENSHOT_DIR` to also copy
 //! them there.
+//!
+//! Drawing is costly without a GPU, so nothing is drawn between pictures (the renderer is
+//! parked), and without `NPC_SCREENSHOT_DIR` only the pictures a check counts pixels in are
+//! taken: the scenes are still set up and lived through, and every check runs.
 
 use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -12,7 +16,7 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_npc::*;
 use engine_render::prelude::*;
-use engine_render::{RenderDisabled, capture_now};
+use engine_render::{RenderDisabled, Renderer, capture_now};
 use engine_world::locomotion::{LocomotionMode, LocomotionState};
 use engine_world::{AttackEvent, AttackKind, DamageEvent, DamageKind, WorldPlugin};
 
@@ -40,6 +44,8 @@ fn app_on(w: u32, h: u32, ground: u32) -> App {
         .resource_mut::<Time>()
         .set_source(TimeSource::Manual { step_secs: 0.05 });
     app.add_plugins((WorldPlugin, RenderPlugin, NpcPlugin));
+    // Nothing is drawn until a picture is taken.
+    app.world.insert_resource(RenderDisabled(PARKED.into()));
     app.world.spawn((
         DirectionalLight {
             illuminance: 90_000.0,
@@ -145,7 +151,10 @@ fn spawn(app: &mut App, p: Pose) -> Entity {
                 downed: true,
                 ..Default::default()
             },
-            Downed { since: -2.0 },
+            Downed {
+                since: -2.0,
+                push: None,
+            },
         ));
     }
     e.id()
@@ -163,24 +172,71 @@ fn camera(app: &mut App, eye: DVec3, target: DVec3, fov: f32) -> Entity {
         .id()
 }
 
-fn shoot(app: &mut App, cam: Entity, name: &str) -> Option<image::RgbaImage> {
+/// Whether the full sets of pictures are wanted (`NPC_SCREENSHOT_DIR` is set); otherwise only
+/// the pictures a check counts pixels in are taken.
+fn pictures() -> bool {
+    std::env::var_os("NPC_SCREENSHOT_DIR").is_some()
+}
+
+/// What holds drawing off between pictures (see [`park`]).
+const PARKED: &str = "parked between pictures";
+
+/// The renderer, put aside between pictures.
+#[derive(Resource)]
+struct Parked(Renderer);
+
+/// Stop drawing (until the next picture).
+fn park(app: &mut App) {
+    if let Some(r) = app.world.remove_resource::<Renderer>() {
+        app.world.insert_resource(Parked(r));
+    }
+    if !app.world.contains_resource::<RenderDisabled>() {
+        app.world.insert_resource(RenderDisabled(PARKED.into()));
+    }
+}
+
+/// Draw again (the renderer made on the first picture). False without a GPU.
+fn unpark(app: &mut App) -> bool {
+    if app
+        .world
+        .get_resource::<RenderDisabled>()
+        .is_some_and(|d| d.0 == PARKED)
+    {
+        app.world.remove_resource::<RenderDisabled>();
+    }
+    if let Some(Parked(r)) = app.world.remove_resource::<Parked>() {
+        app.world.insert_resource(r);
+    }
+    !app.world.contains_resource::<RenderDisabled>()
+}
+
+/// Through `cam`, a few frames drawn (as the picture settles), then the picture; `None`
+/// without a GPU.
+fn picture(app: &mut App, cam: Entity, path: &std::path::Path) -> Option<image::RgbaImage> {
     let mut q = app.world.query::<(Entity, &mut Camera)>();
     for (e, mut c) in q.iter_mut(&mut app.world) {
         c.active = e == cam;
     }
+    unpark(app);
     app.update_n(3);
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
         eprintln!("skipping: no GPU ({})", d.0);
         return None;
     }
+    capture_now(&mut app.world, path).expect("screenshot");
+    park(app);
+    Some(image::open(path).expect("png").to_rgba8())
+}
+
+fn shoot(app: &mut App, cam: Entity, name: &str) -> Option<image::RgbaImage> {
     let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
-    capture_now(&mut app.world, &path).expect("screenshot");
+    let img = picture(app, cam, &path)?;
     if let Ok(dir) = std::env::var("NPC_SCREENSHOT_DIR") {
         let _ = std::fs::create_dir_all(&dir);
         std::fs::copy(&path, std::path::Path::new(&dir).join(name)).expect("copy screenshot");
     }
     eprintln!("wrote {}", path.display());
-    Some(image::open(&path).expect("png").to_rgba8())
+    Some(img)
 }
 
 #[test]
@@ -313,10 +369,6 @@ fn fighter_closeups() {
         55.0,
     );
     app.update_n(2);
-    if app.world.get_resource::<RenderDisabled>().is_some() {
-        eprintln!("skipping: no GPU");
-        return;
-    }
     let Some(img) = shoot(&mut app, lineup, "npc_fighters_lineup.png") else {
         return;
     };
@@ -325,6 +377,9 @@ fn fighter_closeups() {
         .filter(|p| p[0] as f32 > 70.0 && p[0] as f32 > p[1] as f32 * 1.7)
         .count();
     assert!(red > 500, "red fighters visible: {red} px");
+    if !pictures() {
+        return;
+    }
     shoot(&mut app, left, "npc_fighters_melee_ranged.png");
     shoot(&mut app, right, "npc_fighters_moving.png");
     shoot(&mut app, duelist, "npc_fighters_duelist.png");
@@ -362,11 +417,9 @@ fn fighter_faces() {
         22.0,
     );
     app.update_n(2);
-    if app.world.get_resource::<RenderDisabled>().is_some() {
-        eprintln!("skipping: no GPU");
-        return;
+    if pictures() {
+        shoot(&mut app, cam, "npc_fighters_squad_faces.png");
     }
-    shoot(&mut app, cam, "npc_fighters_squad_faces.png");
 }
 
 /// Fresh, worn and battered paint side by side: a rookie, a soldier and a master. Their plates
@@ -402,12 +455,10 @@ fn fighter_armor_wear() {
         32.0,
     );
     app.update_n(2);
-    if app.world.get_resource::<RenderDisabled>().is_some() {
-        eprintln!("skipping: no GPU");
-        return;
+    if pictures() {
+        shoot(&mut app, squad, "npc_fighters_armor_wear.png");
+        shoot(&mut app, close, "npc_fighters_armor_closeup.png");
     }
-    shoot(&mut app, squad, "npc_fighters_armor_wear.png");
-    shoot(&mut app, close, "npc_fighters_armor_closeup.png");
 }
 
 /// Pixels that read as the red or the blue team (as the arena screenshots count them).
@@ -488,14 +539,12 @@ fn fighter_teams_at_distance() {
         40.0,
     );
     app.update_n(2);
-    if app.world.get_resource::<RenderDisabled>().is_some() {
-        eprintln!("skipping: no GPU");
-        return;
-    }
     let Some(img) = shoot(&mut app, cam, "npc_fighters_teams_far.png") else {
         return;
     };
-    shoot(&mut app, struck, "npc_fighters_hit_flash.png");
+    if pictures() {
+        shoot(&mut app, struck, "npc_fighters_hit_flash.png");
+    }
     // Each fighter, a box round it (60 cm to each side, feet to crest): about 6 × 24 pixels.
     let mut squads = [0; 2];
     for (team, at) in fighters {
@@ -1027,7 +1076,13 @@ fn actor(
     ));
     match scene {
         Scene::Fall => {
-            ent.insert((NpcVitals::default(), Downed { since: EVENT }));
+            ent.insert((
+                NpcVitals::default(),
+                Downed {
+                    since: EVENT,
+                    push: None,
+                },
+            ));
         }
         Scene::Revive => {
             ent.insert((
@@ -1035,7 +1090,10 @@ fn actor(
                     downed: true,
                     ..Default::default()
                 },
-                Downed { since: EVENT - 5.0 },
+                Downed {
+                    since: EVENT - 5.0,
+                    push: None,
+                },
             ));
         }
         Scene::Wounded { .. } => {
@@ -1136,10 +1194,6 @@ fn roll_warm(app: &mut App, shots: Vec<(Entity, String)>, warm: f64) {
         .resource_mut::<Time>()
         .set_source(TimeSource::Manual { step_secs: 0.1 });
     app.update_n((warm / 0.1).round() as usize);
-    if app.world.get_resource::<RenderDisabled>().is_some() {
-        eprintln!("skipping: no GPU");
-        return;
-    }
     app.world
         .resource_mut::<Time>()
         .set_source(TimeSource::Manual { step_secs: 0.0 });
@@ -1149,6 +1203,9 @@ fn roll_warm(app: &mut App, shots: Vec<(Entity, String)>, warm: f64) {
         .map(|(s, c)| (c.now - s.cap).abs())
         .fold(0.0, f64::max);
     eprintln!("the frames are within {lag:.3} s of their moments");
+    if !pictures() {
+        return;
+    }
     for (cam, name) in shots {
         shoot(app, cam, &name);
     }
@@ -1616,7 +1673,7 @@ fn stage_tiles(app: &mut App, rows: &[Tiles], warm: f64) -> Vec<(Vec<Entity>, St
 /// [`roll_warm`] for tiles: each row's pictures side by side in one.
 fn roll_tiles(app: &mut App, rows: Vec<(Vec<Entity>, String)>, warm: f64) {
     roll_warm(app, Vec::new(), warm);
-    if app.world.get_resource::<RenderDisabled>().is_some() {
+    if !pictures() {
         return;
     }
     for (cams, name) in rows {
@@ -1625,6 +1682,9 @@ fn roll_tiles(app: &mut App, rows: Vec<(Vec<Entity>, String)>, warm: f64) {
             .enumerate()
             .filter_map(|(i, &cam)| shoot_quiet(app, cam, &format!("tile_{i}_{name}")))
             .collect();
+        if shots.is_empty() {
+            return;
+        }
         let (w, h) = shots[0].dimensions();
         let mut sheet = image::RgbaImage::new(w * shots.len() as u32, h);
         for (i, img) in shots.iter().enumerate() {
@@ -1642,14 +1702,11 @@ fn roll_tiles(app: &mut App, rows: Vec<(Vec<Entity>, String)>, warm: f64) {
 
 /// [`shoot`] to the test's temp dir only.
 fn shoot_quiet(app: &mut App, cam: Entity, name: &str) -> Option<image::RgbaImage> {
-    let mut q = app.world.query::<(Entity, &mut Camera)>();
-    for (e, mut c) in q.iter_mut(&mut app.world) {
-        c.active = e == cam;
-    }
-    app.update_n(3);
-    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
-    capture_now(&mut app.world, &path).expect("screenshot");
-    Some(image::open(&path).expect("png").to_rgba8())
+    picture(
+        app,
+        cam,
+        &std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name),
+    )
 }
 
 /// The face and the look, close: on guard, struck in the body and on the head, through a

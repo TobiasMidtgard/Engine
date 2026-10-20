@@ -1606,33 +1606,78 @@ fn water() -> Vec<EffectDesc> {
         prewarm: 3.0,
         ..effect(
             "water.fountain",
-            "A fountain jet: a column of water rising 2.5 m and falling back, with ripples and \
-             mist where it lands. The landing layers sit 0.6 m below the nozzle.",
+            "A fountain jet: a glassy rod of water rising 2.3 m, breaking into beads at the top \
+             and raining back around itself, with ripples and mist where it lands. The landing \
+             layers sit 0.6 m below the nozzle.",
             None,
             vec![
+                // The jet itself: a glassy rod of water rising 2.3 m, a few overlapping copies
+                // crossfading so it flows without a break.
                 EmitterDesc {
-                    rate: 420.0,
+                    rate: 4.0,
+                    speed: [0.0, 0.0],
+                    lifetime: [0.7, 0.9],
+                    size: [2.3, 2.3],
+                    rotation_deg: [0.0, 0.0],
+                    local_space: true,
+                    steady: true,
+                    sprite: Sprite::Jet,
+                    facing: Facing::Axis,
+                    stretch: 0.09,
+                    lit: 1.0,
+                    color: fade([0.8, 0.88, 0.95], 0.8, 0.3, 0.7),
+                    wind: 0.0,
+                    soft: 0.0,
+                    ..em("jet")
+                },
+                // Water turning over at the top and raining back down around the jet.
+                EmitterDesc {
+                    rate: 700.0,
                     shape: EmitShape::Cone {
-                        angle_deg: 5.0,
-                        radius: 0.04,
+                        angle_deg: 85.0,
+                        radius: 0.05,
                     },
-                    speed: [6.4, 7.2],
+                    offset: [0.0, 2.15, 0.0],
+                    speed: [0.2, 1.1],
                     gravity: 1.0,
                     drag: 0.08,
                     wind: 0.4,
                     collide: Collide::Die,
-                    lifetime: [1.6, 1.9],
-                    size: [0.04, 0.08],
+                    lifetime: [0.9, 1.1],
+                    size: [0.016, 0.032],
                     sprite: Sprite::Droplet,
                     facing: Facing::Velocity,
-                    stretch: 0.015,
+                    stretch: 0.03,
                     lit: 1.0,
                     color: g(&[
-                        (0.0, [0.8, 0.88, 0.95, 0.85]),
-                        (1.0, [0.8, 0.88, 0.95, 0.8]),
+                        (0.0, [0.8, 0.88, 0.95, 0.0]),
+                        (0.1, [0.8, 0.88, 0.95, 0.55]),
+                        (1.0, [0.8, 0.88, 0.95, 0.5]),
                     ]),
                     soft: 0.05,
-                    ..em("jet")
+                    ..em("fall")
+                },
+                // Spray shed along the jet as it rises.
+                EmitterDesc {
+                    rate: 60.0,
+                    shape: EmitShape::Cone {
+                        angle_deg: 3.0,
+                        radius: 0.03,
+                    },
+                    speed: [5.0, 6.9],
+                    gravity: 1.0,
+                    drag: 0.1,
+                    wind: 0.4,
+                    collide: Collide::Die,
+                    lifetime: [1.4, 1.8],
+                    size: [0.008, 0.016],
+                    sprite: Sprite::Droplet,
+                    facing: Facing::Velocity,
+                    stretch: 0.03,
+                    lit: 1.0,
+                    color: fade([0.8, 0.88, 0.95], 0.45, 0.05, 0.8),
+                    soft: 0.05,
+                    ..em("spray")
                 },
                 EmitterDesc {
                     rate: 25.0,
@@ -1641,10 +1686,10 @@ fn water() -> Vec<EffectDesc> {
                     speed: [0.1, 0.4],
                     velocity: [0.0, 0.3, 0.0],
                     lifetime: [1.5, 2.5],
-                    size: [0.5, 0.9],
+                    size: [0.3, 0.6],
                     size_over_life: c(&[(0.0, 0.7), (1.0, 2.0)]),
-                    color: fade([0.92, 0.96, 1.0], 0.22, 0.15, 0.5),
-                    ..smoke("mist", 0.9, 0.22)
+                    color: fade([0.92, 0.96, 1.0], 0.08, 0.15, 0.5),
+                    ..smoke("mist", 0.9, 0.08)
                 },
                 EmitterDesc {
                     rate: 7.0,
@@ -1663,7 +1708,7 @@ fn water() -> Vec<EffectDesc> {
                     velocity: [0.0, 1.3, 0.0],
                     bursts: Vec::new(),
                     lifetime: [0.3, 0.6],
-                    size: [0.025, 0.05],
+                    size: [0.012, 0.024],
                     ..droplets("splashes", 0, water_rgb, [0.3, 0.8], 1.3, Collide::None)
                 },
             ],

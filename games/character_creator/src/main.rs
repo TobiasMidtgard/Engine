@@ -4,13 +4,16 @@
 //!
 //! `cargo run -p character_creator --release -- --headless --size 1024x1024 --shots <dir>`
 //! renders portrait sheets of every preset (front, three-quarter and profile) to `<dir>`;
-//! `--only kofi,mei` limits them to some people, `--views front` to some views.
+//! `--only kofi,mei` limits them to some people, `--views front` to some views (`body` and
+//! `body34` for the whole person in `--pose walk`, `smile` or `surprise` for expressions).
 
 mod panel;
+mod pose;
 mod shots;
 mod studio;
 
 use engine::prelude::*;
+use engine::world::animation::SkeletonPose;
 use engine_character::{Appearance, BuiltCharacter, CharacterPlugin};
 
 fn main() {
@@ -22,7 +25,10 @@ fn main() {
     app.add_plugins(DefaultPlugins)
         .add_plugins(CharacterPlugin)
         .add_systems(Startup, studio::setup)
-        .add_systems(Update, studio::orbit_camera);
+        .add_systems(
+            Update,
+            (pose::drive, studio::face_camera, studio::orbit_camera).chain(),
+        );
     if let Some(plan) = shots {
         app.insert_resource(plan)
             .add_systems(Update, shots::run_shots.after(studio::orbit_camera));
@@ -38,13 +44,21 @@ fn main() {
 #[derive(Component)]
 pub struct Subject;
 
+/// The subject's queried parts for [`subject_eyes`].
+pub type SubjectParts<'a> = (
+    &'a Transform,
+    &'a Appearance,
+    Option<&'a BuiltCharacter>,
+    Option<&'a SkeletonPose>,
+);
+
 /// Eye level of the subject in world space once it is built (the camera aims there).
-pub fn subject_eyes(
-    q: &Query<(&Transform, &Appearance, Option<&BuiltCharacter>), With<Subject>>,
-) -> Option<(DVec3, bool)> {
-    let (t, a, built) = q.iter().next()?;
+pub fn subject_eyes<'a>(mut q: impl Iterator<Item = SubjectParts<'a>>) -> Option<(DVec3, bool)> {
+    let (t, a, built, skeleton) = q.next()?;
     let built = built?;
-    let lm = built.meshes.landmarks?;
-    let eyes = (lm.eyes[0] + lm.eyes[1]) * 0.5;
-    Some((t.translation + eyes.as_dvec3(), built.appearance == *a))
+    let eyes = pose::eye_point(built, skeleton)?;
+    Some((
+        t.translation + (t.rotation * eyes).as_dvec3(),
+        built.appearance == *a,
+    ))
 }

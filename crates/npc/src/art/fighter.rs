@@ -2704,12 +2704,26 @@ fn slab(half: Vec3, r: f32, b: f32) -> Mesh {
 /// height `lo` to `hi`, standing `t` proud with its edges eased down: `n` steps round.
 /// Texture coordinates in meters, round it and across.
 fn wrap_band(f: &dyn Fn(Vec3) -> f32, axis: Vec3, lo: f32, hi: f32, t: f32, n: usize) -> Mesh {
+    wrap_arc(f, axis, (lo, hi), (0.0, TAU), t, n)
+}
+
+/// Part of a [`wrap_band`]: from height `lo` to `hi` and from angle `a0` to `a1` round the
+/// limb (radians from −Z, the front, towards +X), a patch standing `t` proud, `n` steps round.
+fn wrap_arc(
+    f: &dyn Fn(Vec3) -> f32,
+    axis: Vec3,
+    (lo, hi): (f32, f32),
+    (a0, a1): (f32, f32),
+    t: f32,
+    n: usize,
+) -> Mesh {
+    let whole = a1 - a0 >= TAU - 1e-4;
     let e = (0.25 * (hi - lo)).min(0.004);
     let rows = [(hi, 0.25), (hi - e, 1.0), (lo + e, 1.0), (lo, 0.25)];
     let r = rows.len();
     let mut verts = Vec::with_capacity((n + 1) * r);
     for i in 0..=n {
-        let a = TAU * i as f32 / n as f32;
+        let a = a0 + (a1 - a0) * i as f32 / n as f32;
         let dir = v3(a.sin(), 0.0, -a.cos());
         for &(y, k) in &rows {
             let (p, nrm) = cast(f, v3(axis.x, y, axis.z), dir, 0.15);
@@ -2733,7 +2747,7 @@ fn wrap_band(f: &dyn Fn(Vec3) -> f32, axis: Vec3, lo: f32, hi: f32, t: f32, n: u
     fix_winding(&mut m);
     m.compute_normals();
     // One normal either side of the texture seam.
-    for j in 0..r {
+    for j in (0..r).filter(|_| whole) {
         let (a, b) = (j, n * r + j);
         let nrm = (Vec3::from(m.vertices[a].normal) + Vec3::from(m.vertices[b].normal))
             .normalize_or(Vec3::Y)
@@ -4801,6 +4815,56 @@ fn upper_arm() -> PieceMesh {
     b.finish(&field, 1.0)
 }
 
+/// A medic's armband, worn over the left arm's brassard (built on the right arm, then
+/// mirrored): a band of bleached linen, narrower than the brassard so the team's color edges
+/// it, with a red cross on the outside of the arm.
+fn armband() -> PieceMesh {
+    let mut b = Builder::default();
+    let (lo, hi) = (-0.246, -0.182);
+    let mid = 0.5 * (lo + hi);
+    let linen = Tint::Rgb(lin(0xe9e5da));
+    let red = Tint::Rgb(lin(0xa81e1a));
+    b.add(
+        wrap_band(&upper_arm_suit, Vec3::ZERO, lo, hi, 0.0058, 24),
+        Zone::Cloth,
+        linen,
+    );
+    // The cross faces out (+X, a quarter turn from the front): the upright, then the arms
+    // either side of it.
+    let (out, up_half, arm_half) = (FRAC_PI_2, 0.18, 0.52);
+    let proud = 0.0074;
+    b.add(
+        wrap_arc(
+            &upper_arm_suit,
+            Vec3::ZERO,
+            (mid - 0.026, mid + 0.026),
+            (out - up_half, out + up_half),
+            proud,
+            4,
+        ),
+        Zone::Cloth,
+        red,
+    );
+    for (a0, a1) in [
+        (out - arm_half, out - up_half),
+        (out + up_half, out + arm_half),
+    ] {
+        b.add(
+            wrap_arc(
+                &upper_arm_suit,
+                Vec3::ZERO,
+                (mid - 0.009, mid + 0.009),
+                (a0, a1),
+                proud,
+                4,
+            ),
+            Zone::Cloth,
+            red,
+        );
+    }
+    b.finish(&upper_arm_suit, 1.0)
+}
+
 fn forearm_suit(p: Vec3) -> f32 {
     let elbow = sphere(p, Vec3::ZERO, 0.043);
     let arm = round_cone(p, Vec3::ZERO, v3(0.0, -FOREARM + 0.01, 0.0), 0.046, 0.031);
@@ -5863,10 +5927,12 @@ pub enum Piece {
     /// [`Kit::lids`]).
     Jaw,
     Lids,
+    /// A medic's armband with its red cross, over the left upper arm.
+    Armband,
 }
 
 impl Piece {
-    pub const ALL: [Piece; 36] = [
+    pub const ALL: [Piece; 37] = [
         Piece::Helmet,
         Piece::Face,
         Piece::Visor,
@@ -5903,6 +5969,7 @@ impl Piece {
         Piece::Eye,
         Piece::Jaw,
         Piece::Lids,
+        Piece::Armband,
     ];
 
     /// Asset key fragment.
@@ -5944,6 +6011,7 @@ impl Piece {
             Piece::Eye => "eye",
             Piece::Jaw => "jaw",
             Piece::Lids => "lids",
+            Piece::Armband => "armband",
         }
     }
 
@@ -6112,6 +6180,7 @@ fn build_kit() -> Kit {
         Job::Pieces(|| pair(Piece::ShinR, Piece::ShinL, shin)),
         Job::Pieces(|| pair(Piece::UpperArmR, Piece::UpperArmL, upper_arm)),
         Job::Pieces(|| vec![(Piece::Crest, crest())]),
+        Job::Pieces(|| vec![(Piece::Armband, armband().mirrored())]),
         Job::Pieces(|| pair(Piece::ForearmR, Piece::ForearmL, forearm)),
         Job::Pieces(|| vec![(Piece::Pelvis, pelvis())]),
         Job::Pieces(|| pair(Piece::HandR, Piece::HandL, hand)),
