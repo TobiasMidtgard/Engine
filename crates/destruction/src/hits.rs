@@ -1383,17 +1383,23 @@ fn dig(ctx: &mut Ctx, targets: &mut Targets, edit: &TerrainEdit, surfaces: &Surf
             EditOp::Smooth { strength } => VoxelOp::Smooth(strength),
             EditOp::Paint => VoxelOp::Paint(material),
         };
+        // Chips of what was dug out: soil under the grass, rock deeper in.
+        let dug = match op {
+            VoxelOp::Remove => state.material_in(lo, hi, &sdf),
+            _ => None,
+        }
+        .unwrap_or(volume.material);
         let removed = state.edit(lo, hi, sdf, op);
         if removed > 0.0 {
             ctx.stats.voxels_removed_m3 += removed;
-            let props: MaterialProps = ctx.table.get(volume.material);
+            let props: MaterialProps = ctx.table.get(dug);
             let at = edit.center;
             ctx.chips(
                 at,
                 Vec3::Y * 2.0,
                 2.0,
                 ((removed * 20.0) as usize).clamp(1, 8),
-                volume.material,
+                dug,
                 props.chip_size,
             );
             ctx.dust(
