@@ -837,6 +837,11 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     "Quest journal",
                     r#"{"screen": "journal", "select": "silent_relay"}"#,
                 ),
+                ui(
+                    "market_skills",
+                    "Skill tree",
+                    r#"{"screen": "skills", "select": "c_cleave"}"#,
+                ),
                 // Over the HUD, so the slow-motion gauge shows the world slowing.
                 View::new(
                     "market_wheel",

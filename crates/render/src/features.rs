@@ -321,6 +321,22 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// geometry discards the same pixels as in the opaque pass.
     fn draw_prepass(&self, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}
 
+    /// The depth prepass is recorded and `depth` (reverse-Z) holds what it drew. Record work
+    /// that tests against it (virtual geometry's occlusion culling) and return true to draw
+    /// more into the prepass with [`draw_prepass_late`](Self::draw_prepass_late).
+    fn after_prepass(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        depth: &wgpu::TextureView,
+        ctx: &FrameContext,
+    ) -> bool {
+        false
+    }
+
+    /// Draw into the depth prepass again (same targets and group 0, contents kept) when some
+    /// feature's `after_prepass` returned true: what turned out visible only then.
+    fn draw_prepass_late(&self, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}
+
     /// Draw into the HDR scene.
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}
 

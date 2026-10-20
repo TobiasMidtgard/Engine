@@ -20,6 +20,7 @@ pub mod procedural;
 pub mod ragdoll;
 pub mod retarget;
 mod shift;
+pub mod shuttle;
 pub mod skeleton;
 pub mod skin;
 pub mod stunt;

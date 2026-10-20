@@ -85,7 +85,12 @@ pub struct BodyMotion {
     /// Which way it moves relative to where it faces, radians (smoothed): 0 ahead, positive
     /// to the left, ±π backwards.
     pub heading: f32,
-    owners: [Owner; 5],
+    /// Velocity, m/s (smoothed).
+    pub velocity: Vec3,
+    /// How fast it speeds up along where it faces, m/s² (smoothed; negative slowing down or
+    /// setting off backwards).
+    pub accel: f32,
+    owners: [Owner; 6],
 }
 
 /// Who sets one of a person's animation parameters.
@@ -100,7 +105,14 @@ enum Owner {
     Others,
 }
 
-const PARAMS: [&str; 5] = ["speed", "turn", "move_effort", "blocking", "heading"];
+const PARAMS: [&str; 6] = [
+    "speed",
+    "turn",
+    "move_effort",
+    "blocking",
+    "heading",
+    "accel",
+];
 
 /// Build bodies for new or changed requests.
 pub(crate) fn answer_requests(world: &mut World) {
@@ -160,6 +172,10 @@ pub(crate) fn drive_bodies(
         }
         let k = smoothing(dt, 0.15);
         motion.speed += (velocity.length() - motion.speed) * k;
+        let was = motion.velocity;
+        motion.velocity = was + (velocity - was) * k;
+        let forward = ((motion.velocity - was) / dt).dot(f.with_y(0.0).normalize_or_zero());
+        motion.accel += (forward - motion.accel) * smoothing(dt, 0.2);
         let mut turn = yaw - last_yaw;
         turn =
             (turn + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
@@ -186,6 +202,7 @@ pub(crate) fn drive_bodies(
             // Holds the graph's block pose while the mover says it blocks.
             locomotion.map(|l| if l.blocking { 1.0 } else { 0.0 }),
             Some(motion.heading),
+            Some(accel_param(motion.accel)),
         ];
         for (i, (name, value)) in PARAMS.iter().zip(values).enumerate() {
             let Some(value) = value else {
@@ -202,6 +219,14 @@ pub(crate) fn drive_bodies(
             };
         }
     }
+}
+
+/// Acceleration (m/s²) at which a person leans fully into a start or back into a stop.
+pub const FULL_LEAN_ACCEL: f32 = 4.0;
+
+/// The `accel` animation parameter (−1..1) for an acceleration along the facing, m/s².
+pub fn accel_param(accel: f32) -> f32 {
+    (accel / FULL_LEAN_ACCEL).clamp(-1.0, 1.0)
 }
 
 impl BodyMotion {

@@ -12,9 +12,7 @@
 
 use engine_core::math::Vec3;
 use engine_world::{Deformation, SurfaceMaterial};
-use rapier3d::prelude::{
-    Collider, ColliderHandle, ContactPair, RigidBody, RigidBodyHandle, ShapeType,
-};
+use rapier3d::prelude::{Collider, ColliderHandle, RigidBody, RigidBodyHandle, ShapeType};
 
 use crate::convert;
 use crate::sim::{RegionId, Simulation};
@@ -30,7 +28,7 @@ pub(crate) fn sinkage(m: &SurfaceMaterial) -> f32 {
     }
 }
 
-fn rolls(shape: ShapeType) -> bool {
+pub(crate) fn rolls(shape: ShapeType) -> bool {
     matches!(
         shape,
         ShapeType::Ball
@@ -105,8 +103,13 @@ struct Resist {
     budget: f32,
 }
 
-/// Take rolling resistance and spin friction out of the contacts touched in the last substep.
-pub(crate) fn resist_rolling(sim: &mut Simulation, rid: RegionId) {
+/// Take rolling resistance and spin friction out of the contacts touched in the last substep:
+/// `spins`, the pairs with a round or articulated side ([`crate::sim::Region::touches`]).
+pub(crate) fn resist_rolling(
+    sim: &mut Simulation,
+    rid: RegionId,
+    spins: &[(ColliderHandle, ColliderHandle)],
+) {
     let base = sim.settings.rolling_resistance.max(0.0);
     let materials = &sim.materials;
     let Some(region) = sim.regions[rid as usize].as_mut() else {
@@ -114,47 +117,20 @@ pub(crate) fn resist_rolling(sim: &mut Simulation, rid: RegionId) {
     };
     let world = &mut region.world;
     let mut pushes = Vec::new();
-    // Only a pair with an awake body can need a push: walk the awake bodies' contacts rather
-    // than every resting pair in the region (each pair once).
-    let key = |pair: &ContactPair| {
-        (
-            pair.collider1.into_raw_parts(),
-            pair.collider2.into_raw_parts(),
-        )
-    };
-    let mut awake: Vec<&ContactPair> = world
-        .islands
-        .active_bodies()
-        .filter_map(|h| world.bodies.get(h))
-        .filter(|rb| rb.is_dynamic())
-        .flat_map(|rb| rb.colliders())
-        .flat_map(|&c| world.narrow_phase.contact_pairs_with(c))
-        .collect();
-    awake.sort_unstable_by_key(|pair| key(pair));
-    awake.dedup_by_key(|pair| key(pair));
-    for pair in awake {
-        if !pair.has_any_active_contact() {
-            continue;
-        }
-        let (Some(c1), Some(c2)) = (
-            world.colliders.get(pair.collider1),
-            world.colliders.get(pair.collider2),
-        ) else {
+    // Spin friction where Rapier has none: round shapes touch at a point, links get none.
+    for &(h1, h2) in spins {
+        let Some(pair) = world.narrow_phase.contact_pair(h1, h2) else {
             continue;
         };
+        let (c1, c2) = (
+            &world.colliders[pair.collider1],
+            &world.colliders[pair.collider2],
+        );
         let (round1, round2) = (
             rolls(c1.shape().shape_type()),
             rolls(c2.shape().shape_type()),
         );
         let (a, b) = (c1.parent(), c2.parent());
-        let link = |h: Option<RigidBodyHandle>| {
-            h.is_some_and(|h| world.multibody_joints.rigid_body_link(h).is_some())
-        };
-        // Spin friction where Rapier has none: round shapes touch at a point, links get none.
-        let spins = round1 || round2 || link(a) || link(b);
-        if !spins {
-            continue;
-        }
         let dynamic = |h: Option<RigidBodyHandle>| {
             h.and_then(|h| world.bodies.get(h))
                 .is_some_and(|rb| rb.is_dynamic() && !rb.is_sleeping())
