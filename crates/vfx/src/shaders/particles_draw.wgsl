@@ -665,6 +665,30 @@ fn arc(c: vec2<f32>, seed: f32, age: f32) -> f32 {
     return saturate(glow) * flicker;
 }
 
+// A ball of crackling energy: a sphere 0.65 of the sprite across, near white at its heart,
+// laced with bright filaments that writhe through it and turn with time, its rim glowing where
+// the eye looks through the most of it, in a soft halo out to the sprite's edge.
+fn plasma(c: vec2<f32>, seed: f32) -> f32 {
+    let time = frame.time.x % 3600.0;
+    let r = length(c) / 0.65;
+    let halo = 0.25 * exp(-sq(max(r - 1.0, 0.0) * 3.0)) * smoothstep(1.55, 1.0, r);
+    if (r >= 1.0) { return halo; }
+    let z = sqrt(1.0 - r * r);
+    // Turn the point on the ball's surface about its vertical axis as time passes.
+    let spin = time * 0.9 + seed * 6.0;
+    let p = vec3<f32>(c / 0.65, z);
+    let q = vec3<f32>(p.x * cos(spin) - p.z * sin(spin), p.y, p.x * sin(spin) + p.z * cos(spin));
+    // Filaments are the noise's contour lines: thin bright threads, with finer ones writhing the
+    // other way between them.
+    let n1 = fbm3(q * 2.2 + vec3<f32>(seed * 17.0, time * 0.7, seed * 5.0), 3);
+    let n2 = fbm3(q * 4.5 + vec3<f32>(seed * 9.0, -time * 1.1, 3.0), 2);
+    let filaments = exp(-abs(n1 - 0.5) * 48.0) + 0.55 * exp(-abs(n2 - 0.5) * 36.0);
+    // The rim glows but melts into the halo instead of ending in a hard edge.
+    let rim = 0.55 * pow(1.0 - z, 3.0) * smoothstep(1.0, 0.85, r);
+    let heart = 0.9 * exp(-r * r * 14.0);
+    return saturate(0.03 + 0.06 * z + filaments * (0.35 + 0.65 * z) + rim + heart) + halo;
+}
+
 // ---------------------------------------------------------------- fireball
 // A ball of burning gas traced through its sprite as a volume: a lumpy body rolled into lobes,
 // glowing from inside (near white deep in, reddening outward), turning to dark soot from the
@@ -860,6 +884,12 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
         case 22u: { // arc: electricity crawling out from the sprite's center along +x
             a = arc(c, in.seed, in.age);
             rgb *= 1.0 + 2.0 * a * a;
+        }
+        case 23u: { // plasma: a crackling ball of energy in a soft halo
+            let e = plasma(c, in.seed);
+            a = saturate(e);
+            // Only its heart burns toward white; the threads keep the spell's color.
+            rgb = mix(rgb, vec3<f32>(dot(rgb, vec3<f32>(0.3, 0.5, 0.2))), saturate((e - 1.0) * 2.0) * 0.7) * (0.4 + e);
         }
         case 18u: { // fireball: a burning, cooling volume of gas
             let f = fireball(in, c);

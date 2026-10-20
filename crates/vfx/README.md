@@ -33,7 +33,7 @@ An effect has emitters (layers). Each emitter says when it spawns (`rate`, `rate
 box, line), how particles move (`speed`, `velocity`, `orbit_speed`, `gravity`, `drag`, `wind`,
 `turbulence`, `vortex`, `attract`, `collide` with the ground or water: bounce, die or stick) and
 how they look (`sprite`: glow, spark, smoke, flame, droplet, ring, star, rune, shard, dust,
-haze, billow, vortex, plume, crown, ripple, foam, blaze, fireball, jet, veil, crystal, arc; `facing`: camera, velocity, horizontal or axis (standing along the
+haze, billow, vortex, plume, crown, ripple, foam, blaze, fireball, jet, veil, crystal, arc, plasma; `facing`: camera, velocity, horizontal or axis (standing along the
 emitter's direction); `color` and `size_over_life`; `emissive` in cd/m²;
 `lit` by sun, sky and point lights; `additive`; `soft`), or `debris` to draw solid 3D pieces
 instead of sprites ([`Debris`]: rock, splinter, shard or scrap). An effect can also carry a point
@@ -105,6 +105,12 @@ jagged, white-hot channel in a halo running out from the strike, with a branch f
 and re-strikes along a new path several times a second so it crackles; `spell.lightning_hit`
 scatters seven of them around the flash, and its scorched smoke is a thin wisp now, not dark
 balls. `--example explosions -- spell.lightning` renders it.
+
+A charging spell and a floating light orb hold a ball of plasma. The `plasma` sprite draws a
+see-through sphere threaded with bright filaments that turn as it spins, a hot heart and a rim
+brightening toward its edge, inside a faint halo; `spell.charge` (blue) and `magic.orb`
+(amber) use it for their cores. `--example orbs` renders both close up by day, at dusk and at
+night.
 
 Splashes are water, not white puffs. The `crown` sprite ray traces the splash's crown inside
 its square: a wall of water thrown up in a ring that flares out, its rim drawn into fingers
@@ -214,7 +220,8 @@ keeps its color at night instead of turning white.
 `cargo run -p engine_vfx --release --example sub_emitters` renders the firework and the
 splitting sparks; `--example braziers` renders the brazier fires, `--example engines` every
 exhaust side on and a rocket lifting off (add `vacuum` to take the air away), `--example splashes` the splashes, `--example explosions` the explosions close up
-as they unfold, `--example fountain` and `--example aura` the fountain and the healing aura, and `--example court` the whole court, each by day, at dusk and at night.
+as they unfold, `--example fountain`, `--example aura` and `--example orbs` the fountain, the healing aura and
+the charge and orb, and `--example court` the whole court, each by day, at dusk and at night.
 
 ## Next
 
