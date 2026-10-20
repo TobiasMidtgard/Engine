@@ -16,19 +16,17 @@ use engine::prelude::*;
 /// Materials shared by the scenery (vertex colors carry the variation).
 pub struct Mats {
     pub terrain: Handle<StandardMaterial>,
-    pub bark: Handle<StandardMaterial>,
-    pub leaves: Handle<StandardMaterial>,
     pub grass: Handle<StandardMaterial>,
     pub flowers: Handle<StandardMaterial>,
     /// The village's procedural PBR materials (plaster, timber, tiles, glass, iron, ...).
     pub village: VillageMats,
 }
 
+/// A tree variant: Foliage's species for its kind and a seed for its genes.
 pub struct TreeHandles {
     pub kind: TreeKind,
-    pub trunk: Handle<Mesh>,
-    pub crown: Handle<Mesh>,
-    pub far: Handle<Mesh>,
+    pub species: engine_foliage::SpeciesId,
+    pub seed: u64,
 }
 
 /// One house archetype: a mesh per material, near and far versions.
@@ -102,6 +100,7 @@ pub fn build_library(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
+    plants: &engine_foliage::PlantLibrary,
 ) -> Library {
     // Rock textures, boulders and the cliffs build on other threads meanwhile.
     let rock_job = crate::rocks::start_kit();
@@ -115,8 +114,6 @@ pub fn build_library(
     // The detail map averages about 0.85; lift the base so the vertex colors keep their value.
     terrain.base_color = [1.18, 1.18, 1.18, 1.0];
     terrain.normal_scale = 0.7;
-    let mut leaves = white(0.75).with_subsurface(0.5).with_wind_sway(0.12);
-    leaves.reflectance = 0.35;
     let mut grass = white(0.8).with_subsurface(0.6).with_wind_sway(0.18);
     grass.double_sided = true;
     let mut flowers = white(0.6).with_subsurface(0.4).with_wind_sway(0.15);
@@ -130,8 +127,6 @@ pub fn build_library(
     });
     let mats = Mats {
         terrain: materials.add(terrain),
-        bark: materials.add(white(0.9)),
-        leaves: materials.add(leaves),
         grass: materials.add(grass),
         flowers: materials.add(flowers),
         village: village_mats,
@@ -146,12 +141,21 @@ pub fn build_library(
     ] {
         for v in 0..variants {
             let seed = 1000 + kind as u64 * 100 + v;
-            let t = meshgen::tree(kind, seed);
+            // The valley's conifers are spruces with a few pines among them, the bushes hazel.
+            let name = match kind {
+                TreeKind::Oak => "oak",
+                TreeKind::Spruce if v % 3 == 2 => "pine",
+                TreeKind::Spruce => "spruce",
+                TreeKind::Birch => "birch",
+                TreeKind::Bush => "hazel",
+            };
+            let species = plants
+                .id(name)
+                .unwrap_or_else(|| panic!("Foliage has no {name}"));
             trees.push(TreeHandles {
                 kind,
-                trunk: meshes.add(t.trunk),
-                crown: meshes.add(t.crown),
-                far: meshes.add(meshgen::tree_far(kind, seed)),
+                species,
+                seed,
             });
         }
     }
@@ -353,35 +357,21 @@ pub fn spawn_terrain(
     }
 }
 
-/// One tree with near/far detail.
-pub fn spawn_tree(
-    commands: &mut Commands,
-    lib: &Library,
-    t: &TreeHandles,
-    pos: DVec3,
-    yaw: f32,
-    scale: f32,
-) {
-    let tf = Transform::from_translation(pos)
-        .with_rotation(Quat::from_rotation_y(yaw))
-        .with_scale(Vec3::splat(scale));
-    let switch = 220.0 * scale;
-    if t.kind != TreeKind::Bush {
-        commands.spawn((
-            tf,
-            MeshRenderer::new(t.trunk, lib.mats.bark),
-            Lod::hide_beyond(t.trunk, switch),
-        ));
-    }
+/// One of Foliage's scenery trees (it picks its own level of detail and follows the seasons).
+/// `scale` sizes it: a grown tree is about 1, saplings and young trees less.
+pub fn spawn_tree(commands: &mut Commands, t: &TreeHandles, pos: DVec3, yaw: f32, scale: f32) {
+    // Every tree its own genes (lean, height, crown), from its variant and where it stands.
+    let spot = (pos.x * 7.0).round() as i64 as u64 ^ ((pos.z * 13.0).round() as i64 as u64) << 21;
+    let genes = engine_foliage::Genes::random(&mut Rng::new(t.seed ^ spot));
+    // Foliage's level of detail counts the size, not the transform's scale. Mostly grown
+    // trees, so the woods' crowns meet.
+    let size = (0.75 + (scale - 0.75) * 0.6).clamp(0.6, 1.0);
     commands.spawn((
-        tf,
-        MeshRenderer::new(t.crown, lib.mats.leaves),
-        Lod {
-            near: t.crown,
-            far: Some(t.far),
-            switch,
-            hide: f32::INFINITY,
-            far_shown: false,
+        Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
+        engine_foliage::SceneryTree {
+            species: t.species,
+            size,
+            genes,
         },
     ));
 }
@@ -424,16 +414,16 @@ fn on_wooded_rim(x: f64, z: f64) -> bool {
     })
 }
 
-/// Inside a zone whose ground is paved, built over or its own (no scenery grass there).
-fn in_hard_zone(x: f64, z: f64) -> bool {
+/// Inside a zone whose ground is paved, built over or its own (no scenery grass there), or
+/// within `reach` of a grassy zone's bare footprint (how far the grass placed here spreads).
+fn in_hard_zone(x: f64, z: f64, reach: f64) -> bool {
     ZONES.iter().any(|zn| {
         let d = DVec2::new(x - zn.center.x, z - zn.center.z).length();
         d < zn.radius - 2.0 && !crate::zones::GRASSY_ZONES.contains(&zn.key)
     }) || crate::zones::BARE_FOOTPRINTS.iter().any(|&(key, rx, rz)| {
-        // A grass patch reaches about 2 m from its center.
         let c = crate::zones::zone(key).center;
-        (rx[0] - 2.0..rx[1] + 2.0).contains(&(x - c.x))
-            && (rz[0] - 2.0..rz[1] + 2.0).contains(&(z - c.z))
+        (rx[0] - reach..rx[1] + reach).contains(&(x - c.x))
+            && (rz[0] - reach..rz[1] + reach).contains(&(z - c.z))
     })
 }
 
@@ -480,11 +470,34 @@ pub fn spawn_woods(commands: &mut Commands, lib: &Library, land: &Landscape, rng
             let t = pick_tree(lib, kind, rng);
             let scale = rng.range(0.75, 1.25);
             let at = place(land, x, z, 0.1);
-            spawn_tree(commands, lib, t, at, rng.range(0.0, TAU), scale);
+            spawn_tree(commands, t, at, rng.range(0.0, TAU), scale);
             if near_wildlife(x, z) {
                 solid(commands, at, 0.35 * scale, 5.0 * scale);
             }
             count += 1;
+            // Deep in the woods a second tree shares the cell, so the canopy closes. (Its own
+            // rng, so the rest of the valley's layout stays put.)
+            if wood > 0.6 {
+                let mut extra = Rng::new(0x3f0d ^ ((i as u64) << 20) ^ j as u64);
+                if extra.chance(((wood - 0.6) * 2.0).min(0.8) as f32) {
+                    let (ex, ez) = (
+                        x + extra.range(-0.5, 0.5) as f64 * spacing,
+                        z + extra.range(-0.5, 0.5) as f64 * spacing,
+                    );
+                    if land.road_weight(ex, ez) == 0.0 && (!in_zone(ex, ez, 12.0) || rim) {
+                        let t = pick_tree(lib, kind, &mut extra);
+                        let at = place(land, ex, ez, 0.1);
+                        spawn_tree(
+                            commands,
+                            t,
+                            at,
+                            extra.range(0.0, TAU),
+                            extra.range(0.7, 1.2),
+                        );
+                        count += 1;
+                    }
+                }
+            }
             // Bushes along the wood edges.
             if wood < 0.6 && rng.chance(0.35) {
                 let a = rng.range(0.0, TAU) as f64;
@@ -493,7 +506,6 @@ pub fn spawn_woods(commands: &mut Commands, lib: &Library, land: &Landscape, rng
                     let b = pick_tree(lib, TreeKind::Bush, rng);
                     spawn_tree(
                         commands,
-                        lib,
                         b,
                         place(land, bx, bz, 0.2),
                         rng.range(0.0, TAU),
@@ -515,7 +527,8 @@ pub fn spawn_meadows(commands: &mut Commands, lib: &Library, land: &Landscape, r
         for j in 0..n {
             let x = -extent + (i as f64 + rng.range(0.2, 0.8) as f64) * spacing;
             let z = -extent + (j as f64 + rng.range(0.2, 0.8) as f64) * spacing;
-            if x * x + z * z > extent * extent || in_hard_zone(x, z) {
+            // A grass patch reaches about 2 m from its center.
+            if x * x + z * z > extent * extent || in_hard_zone(x, z, 2.0) {
                 continue;
             }
             if land.road_weight(x, z) > 0.05 || land.lake_depth(x, z) > -0.3 {
@@ -572,7 +585,9 @@ const OWN_GRASS_ZONES: &[&str] = &["forest", "meadow", "footsteps"];
 /// How thickly the valley's grass grows at (x, z), 0..1, and how dry it is.
 fn meadow_cover(land: &Landscape, x: f64, z: f64) -> (f32, f32) {
     let r = (x * x + z * z).sqrt();
-    if r > MEADOW_SIZE as f64 * 0.5 || in_hard_zone(x, z) {
+    // (Density blends across a grid cell, about 1.4 m, so this keeps blades off the bare
+    // ground while the grass still grows right up to it.)
+    if r > MEADOW_SIZE as f64 * 0.5 || in_hard_zone(x, z, 0.7) {
         return (0.0, 0.0);
     }
     if ZONES.iter().any(|zn| {
@@ -1442,7 +1457,6 @@ pub fn spawn_farms(
                 };
                 spawn_tree(
                     commands,
-                    lib,
                     tree,
                     place(land, p.x, p.y, 0.2),
                     rng.range(0.0, TAU),
@@ -1818,7 +1832,7 @@ mod tests {
                         "on a road at {x}, {z}"
                     );
                     assert!(land.lake_t(x, z) > 1.0, "in the lake at {x}, {z}");
-                    assert!(!in_hard_zone(x, z), "in a paved zone at {x}, {z}");
+                    assert!(!in_hard_zone(x, z, 0.0), "in a paved zone at {x}, {z}");
                 }
             }
         }
