@@ -92,3 +92,52 @@ fn without_a_character_module_the_person_is_drawn_as_before() {
     }
     assert!(app.world.get::<SkinnedMeshRenderer>(e).unwrap().visible);
 }
+
+#[test]
+fn paddock_spectators_watch_the_hammer_and_wince() {
+    let mut app = app(true);
+    let demo = engine_anim::demo::spawn_demo_world(&mut app.world, DVec3::ZERO);
+    app.update();
+    // The character module would fill in each look from its request; stand in for it.
+    for (n, &e) in demo.spectators.iter().enumerate() {
+        app.world.entity_mut(e).insert(Appearance {
+            seed: 401 + n as u64,
+            ..Default::default()
+        });
+    }
+    engine_anim::character::finish_loading(&mut app.world);
+    let (mut blinked, mut squeeze, mut calm, mut gaze_down) = ([false; 3], 0.0f32, 1.0f32, 0.0f32);
+    for frame in 1..=(9.0 / STEP) as usize {
+        app.update();
+        let t = frame as f64 * STEP;
+        for (n, &e) in demo.spectators.iter().enumerate() {
+            let Some(face) = app.world.get::<FaceControls>(e) else {
+                continue;
+            };
+            let w = |i: usize| face.weights.get(i).copied().unwrap_or(0.0);
+            blinked[n] |= w(arkit::EYE_BLINK_LEFT) > 0.8;
+            // The first strike lands at 1.56 s; each face squeezes just after it.
+            let brow = w(arkit::BROW_DOWN_LEFT).max(w(arkit::EYE_SQUINT_LEFT));
+            if (1.6..2.0).contains(&t) {
+                squeeze = squeeze.max(brow);
+            }
+            if (4.0..6.0).contains(&t) {
+                calm = calm.min(1.0 - brow);
+            }
+            // The first watches the tire, below and ahead.
+            if n == 0 && t > 3.0 {
+                gaze_down = gaze_down.min(face.gaze_pitch);
+            }
+        }
+    }
+    assert!(blinked.iter().all(|&b| b), "blinks {blinked:?}");
+    assert!(squeeze > 0.4, "the wince squeezed the faces to {squeeze}");
+    assert!(
+        calm > 0.7,
+        "faces stayed screwed up between strikes ({calm})"
+    );
+    assert!(
+        gaze_down < -0.05,
+        "the watcher's eyes didn't drop to the tire ({gaze_down})"
+    );
+}

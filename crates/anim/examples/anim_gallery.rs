@@ -294,6 +294,7 @@ fn sequence(spec: &str) -> Vec<Shot> {
         "stuntman" => |d| d.stuntman,
         "runner" => |d| d.runner,
         "coach" => |d| d.coach,
+        "spectator" => |d| d.spectators[0],
         // The camera fixed in the paddock's frame.
         "world" => |_| Entity::PLACEHOLDER,
         _ => |d| d.car,
