@@ -43,13 +43,21 @@ also use `PhysicsQueries`.
 commands.spawn((Transform::from_xyz(5.0, 0.0, 3.0), Animal::new(Species::Deer), Herd(1), StandIn::default()));
 ```
 
-Deer and rabbits graze, wander with their herd, drink at the nearest water's edge, bed down at
-night and bolt from anything inside their flight distance. That distance grows when the
+Deer and rabbits graze, wander with their herd, drink at the nearest water's edge, bed down
+and bolt from anything inside their flight distance. Deer and boar keep the world's hours
+(`DayPart`, from `WeatherState`'s clock and sun, as the day/night cycle writes them): they
+move out at dawn and dusk, up from their beds one by one and down to water to drink, graze
+through the morning and afternoon, and bed down at midday (`MIDDAY_H`) and in the dark, each
+herd lying up close together (`BED_SPREAD`). They drink at a pond's shore or a stream's
+bank alike (anything `Water` reports): each goes to its own place along the bank, stands
+square on to the water a muzzle's reach back from the edge, and drinks, head down (a boar
+laps rather than roots). Bedded deer chew the cud, heads up, and now and then doze with the
+chin laid on the ground; rabbits bed down in the dark; wolves hunt through it. That distance grows when the
 threat runs or attacks and shrinks a lot when it sneaks, so a crouching player gets close.
 Deer smell what's upwind. Panic spreads through a herd a moment after the first one bolts, and
 alert deer make the rest look up. Wild boar live in sounders (sows with their striped
 piglets, `Animal::young`) or alone (tuskers, `Animal::male`), root for food with the snout,
-shuffling on as they go, and are about at night. They run from threats like the rest, but a
+shuffling on as they go. They run from threats like the rest, but a
 boar turns and charges when it is cornered (its flight finds no way out, or the threat is on
 top of it) or wounded (it goes for whoever hurt it, not for whatever it happened to be
 watching; when it can't find who, it stands and scents for them, bristling, rather than
@@ -207,7 +215,11 @@ falls back to primitive shapes so tests stay fast.
 Fighters are ready for the faces and bodies a character module draws (`engine_world::
 character`; `visuals/character.rs`):
 
-- **Looks.** On its first step each fighter gets an `AppearanceRequest`: its own `Seed`, its
+- **Off by default.** `NpcSettings::character_looks` is false: fighters keep their own bodies
+  and ask for no looks. A character module draws people with their own limb lengths, open hands
+  and plain clothes, so held weapons miss short people's hands and squads lose their armour and
+  colours. Turn it on once the contract carries body size, a grip and armour or team colours.
+- **Looks.** With `character_looks` on, on its first step each fighter gets an `AppearanceRequest`: its own `Seed`, its
   squad (with its faction) as the family seed so squad mates look related, a sex picked from
   the seed and an age range by skill (a rookie 18 to 26, a master 34 to 52). An
   `Appearance` already there is kept. No full `Appearance` is put on fighters.
@@ -479,7 +491,13 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   stalks in on a herd it scents from further off than
   it would run one down (`SCENT_REACH`), a pack gives up a chase after its time, all
   together, rests its time out though hungry, and hunts again, and breaks off sooner from a
-  fit deer that outruns it (past its test, the deer more than `ESCAPE_GAP` ahead).
+  fit deer that outruns it (past its test, the deer more than `ESCAPE_GAP` ahead), deer and
+  boar keep a day's hours by a pond (grazing in the morning, bedded down close together at
+  midday, up in the afternoon, down to drink at dusk, each at its own place along the bank
+  facing the water with its muzzle at the edge, bedded in the dark, up one by one at dawn
+  and down to drink again), and a herd drinks at a stream's bank the same way. The test
+  apps run each system in turn on one thread (`SingleThreadedExecutor`): far quicker than a
+  thread pool for a handful of agents, and the same outcome, the order being fixed.
 - `tests/alloc_free.rs`: `TacticalWorld::blocked_at`, which a fleeing animal calls for every
   way it might turn, finds walls, a pillar and a big slab and allocates nothing.
 - `tests/demo.rs`: the arena fight keeps going for a minute (shots, attacks, blocks, cover,
@@ -562,7 +580,7 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   every collider. In `tests/art_animals.rs` only the checks run by default (the budgets, and a
   few close-ups and strips rendered small, each of which must show its animal, the animals
   living on undrawn between shots); the full-size close-ups and strips are ignored tests
-  (`-- --ignored`), and so are six pictures of the AI at work, each one live run shot at
+  (`-- --ignored`), and so are eight pictures of the AI at work, each one live run shot at
   eight moments: a pack's hunt from above with its parts marked in colour
   (`animal_live_pack_hunt.png`), the same kind of hunt from the grass at eye height, no
   markers, the wolves creeping crouched (`animal_live_pack_eye_level.png`), a chased deer
@@ -570,7 +588,9 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   (`animal_live_zigzag.png`), a herd's alarm spreading (`animal_live_herd_alarm.png`) and a
   sounder rooting, then its tusker charging a wolf that bit it, from the grass with no
   markers (`animal_live_boar_eye_level.png`), and a flock of starlings bursting up at a
-  gunshot, from the grass (`animal_live_birds_gunshot.png`). Each walking animal's close-up is a still from a real run at the game's
+  gunshot, from the grass (`animal_live_birds_gunshot.png`), a herd moving out at dusk and
+  down to a pond to drink, from the far bank (`animal_live_deer_drinking.png`), and a herd
+  bedding down at midday, chewing the cud and dozing (`animal_live_deer_bedded.png`). Each walking animal's close-up is a still from a real run at the game's
   rate (it walks on toward the camera's mark and is shot at its moment), so its legs are
   where its gait has them. The animal unit tests check that no planted foot slides in any
   gait by more than a millimetre a frame (boars, tuskers and piglets included, deer as they

@@ -657,6 +657,11 @@ pub struct NpcSettings {
     pub ally_revive_health: f32,
     /// Squad mates farther than this from a downed NPC leave it be, meters.
     pub ally_revive_range: f32,
+    /// Fighters ask a character module for their looks (an `AppearanceRequest`) and, while it
+    /// draws them, hide their own bodies. Off until the character contract carries what fighters
+    /// need to be drawn by it: their body size (so held weapons meet the hands), a grip, armour
+    /// and team colours.
+    pub character_looks: bool,
 }
 
 impl Default for NpcSettings {
@@ -671,6 +676,7 @@ impl Default for NpcSettings {
             ally_revive_secs: 2.0,
             ally_revive_health: 0.4,
             ally_revive_range: 20.0,
+            character_looks: false,
         }
     }
 }

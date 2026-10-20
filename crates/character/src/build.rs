@@ -7,6 +7,7 @@ use crate::appearance::Appearance;
 use crate::clothes;
 use crate::eyes::{self, EyeMesh};
 use crate::face::{self, FaceShapes};
+use crate::headgear::Headgear;
 use crate::mesh::{self, Landmarks, Region, Regions, SkinMesh};
 use crate::mouth;
 use crate::pack::HumanPack;
@@ -102,7 +103,8 @@ pub fn build(
         head: shift(lm0.head),
         mouth: shift(lm0.mouth),
     };
-    let strands = if opts.hair {
+    let headgear = Headgear::from_id(&a.headgear);
+    let mut strands = if opts.hair {
         let margins = regions.lid_margins.clone().map(|lids| {
             lids.map(|lid| lid.iter().map(|v| morphed[*v as usize]).collect::<Vec<_>>())
         });
@@ -110,15 +112,18 @@ pub fn build(
     } else {
         Vec::new()
     };
+    headgear.cover_hair(&mut strands);
     let strand_roots = strands
         .iter()
         .map(|set| roots(&skin.positions, set))
         .collect();
     clothes::dress(pack, regions, &morphed, &mut skin);
-    if opts.face {
+    let face_shows = headgear.face_shows();
+    if opts.face && face_shows {
         skin.add_mouth(pack, &mouth::build(pack, &morphed));
     }
     skin.add_mouth(pack, &shoes::build(pack, &morphed));
+    headgear.cover_skin(&mut skin, lm0.head);
     let face = if opts.face {
         face::build(pack, &skin, a)
     } else {
@@ -127,7 +132,11 @@ pub fn build(
     CharacterMeshes {
         rig: Rig::new(pack, &morphed),
         skin,
-        eyes: eyes_mesh,
+        eyes: if face_shows {
+            eyes_mesh
+        } else {
+            EyeMesh::default()
+        },
         strands,
         strand_roots,
         landmarks: Some(landmarks),

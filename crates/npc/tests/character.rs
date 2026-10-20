@@ -24,6 +24,12 @@ fn app() -> App {
             step_secs: 1.0 / 60.0,
         });
     app.add_plugins((WorldPlugin, NpcPlugin));
+    app.world.resource_mut::<NpcSettings>().character_looks = true;
+    // Running each system in turn on the test's own thread is far quicker than handing them
+    // about a thread pool, and changes nothing (the order is fixed: `tests/schedule_order.rs`).
+    for (_, schedule) in app.world.resource_mut::<Schedules>().iter_mut() {
+        schedule.set_executor(engine_core::ecs::schedule::SingleThreadedExecutor::new());
+    }
     app
 }
 
@@ -486,5 +492,35 @@ fn each_footstep_is_an_animation_event_on_its_foot() {
             other => panic!("{other}"),
         };
         assert_eq!(bone.as_deref(), Some(want));
+    }
+}
+
+#[test]
+fn fighters_ask_for_no_looks_by_default() {
+    let mut app = App::new();
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual {
+            step_secs: 1.0 / 60.0,
+        });
+    app.add_plugins((WorldPlugin, NpcPlugin));
+    let e = fighter(
+        &mut app,
+        DVec3::ZERO,
+        Vec3::NEG_Z,
+        Faction::ENEMY,
+        NpcWeapon::sword_and_shield(),
+    );
+    draws_appearances(&mut app, "test");
+    run(&mut app, 0.5);
+    assert!(app.world.get::<AppearanceRequest>(e).is_none());
+    // With no look asked for, the fighter keeps its own body even while people are drawn.
+    let shown: Vec<Part> = parts(&app, e)
+        .into_iter()
+        .filter(|p| p.2)
+        .map(|p| p.0)
+        .collect();
+    for p in [Part::Fighter(18), Part::Fighter(19), Part::Fighter(20)] {
+        assert!(shown.contains(&p), "{p:?} hidden without a look asked for");
     }
 }

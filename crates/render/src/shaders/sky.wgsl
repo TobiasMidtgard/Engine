@@ -106,6 +106,8 @@ fn sky_radiance(dir: vec3<f32>, with_sun: bool) -> vec3<f32> {
     let moon = smoothstep(0.9997, 0.99985, dot(dir, moon_dir)) * frame.sky.z * 0.5;
     c += vec3(moon);
     if (with_sun) {
+        // The haze's forward peak around the sun (Mars' dust), drawn with the sun's disc.
+        c += atmosphere_aureole(dir) * frame.sun_color.rgb;
         let cos_r = cos(frame.sun_dir.w);
         let cd = dot(dir, frame.sun_dir.xyz);
         if (cd > cos_r) {

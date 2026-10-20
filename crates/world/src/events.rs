@@ -22,6 +22,9 @@ pub struct ProjectileTrace {
 }
 
 /// A pressure impulse: explosions, shockwaves, heavy landings, magic blasts.
+///
+/// An explosion ([`WorldImpulse::is_explosion`]) is loud: whoever writes it also writes the
+/// [`NoiseEvent`] from [`WorldImpulse::noise`], so AI hears every blast the same way.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct WorldImpulse {
     pub center: DVec3,
@@ -33,6 +36,30 @@ pub struct WorldImpulse {
     /// Heat added at the center, °C (0 = none; > 300 can ignite flammables).
     pub heat_c: f32,
     pub source: Option<Entity>,
+}
+
+impl WorldImpulse {
+    /// Energy whose blast is heard [`Self::BLAST_HEARD_M`] away (a fuel barrel), joules.
+    pub const BLAST_REFERENCE_J: f32 = 250_000.0;
+    /// How far a [`Self::BLAST_REFERENCE_J`] blast is heard, meters.
+    pub const BLAST_HEARD_M: f32 = 150.0;
+
+    /// Destructive or hot enough to count as an explosion (`energy_j > 0` or `heat_c > 300`).
+    pub fn is_explosion(&self) -> bool {
+        self.energy_j > 0.0 || self.heat_c > 300.0
+    }
+
+    /// The noise an explosion makes at `center`, or `None` for a plain shockwave or landing.
+    /// Heard 150 m × cbrt(energy / 250 kJ) away, clamped to 40..400 m.
+    pub fn noise(&self) -> Option<NoiseEvent> {
+        self.is_explosion().then(|| NoiseEvent {
+            position: self.center,
+            radius: (Self::BLAST_HEARD_M
+                * (self.energy_j.max(0.0) / Self::BLAST_REFERENCE_J).cbrt())
+            .clamp(40.0, 400.0),
+            source: self.source,
+        })
+    }
 }
 
 /// Something touched the ground with weight: feet, paws, wheels, bodies.
@@ -370,5 +397,25 @@ mod tests {
             ..strike(1)
         };
         assert!(s.path(4).iter().all(|p| *p == s.from));
+    }
+
+    #[test]
+    fn blasts_are_heard_by_their_energy() {
+        let blast = |energy_j: f32, heat_c: f32| WorldImpulse {
+            center: DVec3::new(5.0, 1.0, -3.0),
+            radius: 6.0,
+            strength: 40.0,
+            energy_j,
+            heat_c,
+            source: None,
+        };
+        let barrel = blast(250_000.0, 900.0).noise().unwrap();
+        assert!((barrel.radius - 150.0).abs() < 0.01);
+        assert_eq!(barrel.position, DVec3::new(5.0, 1.0, -3.0));
+        assert_eq!(blast(1.0e12, 0.0).noise().unwrap().radius, 400.0);
+        // A fireball with no blast energy is still heard nearby.
+        assert_eq!(blast(0.0, 500.0).noise().unwrap().radius, 40.0);
+        // A heavy landing's shockwave is not an explosion.
+        assert!(blast(0.0, 0.0).noise().is_none());
     }
 }

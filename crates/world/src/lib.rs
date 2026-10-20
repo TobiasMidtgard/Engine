@@ -42,8 +42,8 @@ pub mod terrain;
 
 pub use air::{AirSample, Atmospheres, BodyAtmosphere};
 pub use character::{
-    Appearance, AppearanceBodies, AppearanceRequest, CharacterQuality, FaceControls, HairGuide,
-    HairGuides, HairGuidesPosed, draws_appearances,
+    Appearance, AppearanceBodies, AppearanceRequest, BodyFit, CharacterQuality, FaceControls,
+    HairGuide, HairGuides, HairGuidesPosed, HandControls, Outfit, draws_appearances,
 };
 pub use environment::*;
 pub use events::*;
@@ -401,6 +401,8 @@ mod tests {
             "CharacterQuality",
             "HairGuides",
             "HairGuidesPosed",
+            "HandControls",
+            "BodyFit",
         ] {
             assert!(
                 registry.component(name).is_some(),

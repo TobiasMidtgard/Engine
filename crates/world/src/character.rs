@@ -22,15 +22,21 @@
 //!   simulation (the softbody module) to move; it writes them back posed as
 //!   [`HairGuidesPosed`]. Without a simulation the character module draws its hair from the
 //!   rest guides skinned to the pose.
+//! * [`HandControls`]: how closed each hand is. One writer per entity: NPC AI for the fighters
+//!   it poses itself, the animation module for `BodyRequest` people.
+//! * [`BodyFit`]: the person's own rest skeleton on the animation module's humanoid bones,
+//!   written by the character module, so a poser can fit its skeleton (and held items) to the
+//!   person's stature.
 //!
-//! Catalogs that will grow (hair and beard styles, headgear) are string ids; unknown ids fall
-//! back to the default. Seeds are stored at spawn, never taken from entity ids.
+//! Catalogs that will grow (hair and beard styles, headgear, garments) are string ids; unknown
+//! ids fall back to the default. Seeds are stored at spawn, never taken from entity ids.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use engine_core::prelude::*;
 
-use crate::animation::BonePose;
+use crate::animation::{BonePose, SkeletonPose};
 
 /// A whole person's look. Every field has a default, so data only needs what differs.
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,6 +72,8 @@ pub struct Appearance {
     /// What covers the head. Built-in ids: `none`, `hood`, `open_helm` (hides hair, ears and
     /// neck, keeps the face from brow to chin), `closed_helm` (the head is not drawn).
     pub headgear: String,
+    /// What the person wears.
+    pub outfit: Outfit,
 }
 
 impl Default for Appearance {
@@ -87,6 +95,40 @@ impl Default for Appearance {
             beard: Beard::default(),
             wear: Wear::default(),
             headgear: "none".into(),
+            outfit: Outfit::default(),
+        }
+    }
+}
+
+/// Clothes: garment styles by id and their colours, so squads and teams can be told apart.
+/// Unknown ids fall back to the default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Outfit {
+    /// Upper garment. Built-in ids: `shirt` (long sleeves, the default), `tshirt`, `none`.
+    pub top: String,
+    /// Linear RGB, 0..1.
+    pub top_color: [f32; 3],
+    /// Lower garment. Built-in ids: `trousers` (the default), `shorts`, `skirt`.
+    pub bottom: String,
+    /// Linear RGB, 0..1.
+    pub bottom_color: [f32; 3],
+    /// A team or role colour (linear RGB, 0..1) shown where `accent_on` says.
+    pub accent: [f32; 3],
+    /// Where the accent shows. Built-in ids: `none` (the default), `armband_l`, `armband_r`,
+    /// `collar`.
+    pub accent_on: String,
+}
+
+impl Default for Outfit {
+    fn default() -> Self {
+        Self {
+            top: "shirt".into(),
+            top_color: [0.075, 0.085, 0.1],
+            bottom: "trousers".into(),
+            bottom_color: [0.038, 0.04, 0.046],
+            accent: [0.6, 0.05, 0.04],
+            accent_on: "none".into(),
         }
     }
 }
@@ -441,6 +483,50 @@ pub enum CharacterQuality {
     Crowd,
 }
 
+/// How closed each hand is: 0 open .. 1 a closed grip, left then right (read clamped to 0..1).
+/// One writer per entity: NPC AI for the fighters it poses itself (1 while holding), the
+/// animation module for `BodyRequest` people. The character module curls the fingers.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HandControls {
+    pub grip: [f32; 2],
+}
+
+impl HandControls {
+    /// The grip of the left (0) or right (1) hand, clamped to 0..1.
+    pub fn grip(&self, side: usize) -> f32 {
+        self.grip.get(side).copied().unwrap_or(0.0).clamp(0.0, 1.0)
+    }
+}
+
+/// A person's own rest skeleton on the animation module's humanoid bones: their limb lengths
+/// and stature, for a poser to fit its skeleton (and the items it holds) to them. The character
+/// module writes it once the person is built and rewrites it when the look changes, so readers
+/// must not keep it across [`Appearance`] changes.
+#[derive(Component, Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BodyFit {
+    /// Humanoid bone names (engine_anim's README).
+    pub names: Vec<String>,
+    /// Parent index per bone (`None` for roots).
+    pub parents: Vec<Option<u16>>,
+    /// Model-space rest transforms, in `names` order.
+    pub rest: Vec<BonePose>,
+    /// Standing height, m.
+    pub height: f32,
+}
+
+impl BodyFit {
+    /// The rest skeleton as a pose (for `fit_skeleton`).
+    pub fn pose(&self) -> SkeletonPose {
+        SkeletonPose {
+            names: Arc::from(self.names.clone()),
+            parents: Arc::from(self.parents.clone()),
+            bones: self.rest.clone(),
+        }
+    }
+}
+
 /// Present while a module draws every [`Appearance`] (see [`draws_appearances`]); the animation
 /// module then poses those people but doesn't draw its own mesh for them. Check for it when
 /// systems run, not in `Plugin::build`, since the drawing plugin may be added later.
@@ -524,7 +610,7 @@ impl HairGuidesPosed {
 pub(crate) fn register(app: &mut App) {
     app.register_component::<Appearance>(
         "A person's look: sex, age (years), body shape, face sliders, skin, eyes, hair, wear, \
-         headgear.",
+         headgear, outfit (garment ids, linear RGB colours, accent).",
     )
     .register_component::<AppearanceRequest>(
         "Ask for a person by seed, family seed, sex and age range (years); the character module \
@@ -543,6 +629,13 @@ pub(crate) fn register(app: &mut App) {
     .register_component::<HairGuidesPosed>(
         "Simulated hair guide points in the person's model space, in HairGuides order; version \
          echoes the guides simulated.",
+    )
+    .register_component::<HandControls>(
+        "How closed each hand is: grip [left, right], 0 open .. 1 closed.",
+    )
+    .register_component::<BodyFit>(
+        "A person's own rest skeleton on the humanoid bones (names, parents, model-space rest \
+         transforms) and standing height (m), written by the character module.",
     );
 }
 
@@ -573,6 +666,44 @@ mod tests {
         assert_eq!(request.sex, None);
         let quality: CharacterQuality = serde_json::from_str(r#""Crowd""#).unwrap();
         assert_eq!(quality, CharacterQuality::Crowd);
+    }
+
+    #[test]
+    fn old_appearances_load_with_the_default_outfit() {
+        let a: Appearance = serde_json::from_str(r#"{"age": 30, "headgear": "hood"}"#).unwrap();
+        assert_eq!(a.outfit, Outfit::default());
+        let o: Outfit =
+            serde_json::from_str(r#"{"accent_on": "armband_l", "accent": [0, 0.2, 0.9]}"#).unwrap();
+        assert_eq!(o.top, "shirt");
+        assert_eq!(o.bottom, "trousers");
+        assert_eq!(o.accent, [0.0, 0.2, 0.9]);
+        let hands = HandControls { grip: [1.4, -0.2] };
+        assert_eq!((hands.grip(0), hands.grip(1)), (1.0, 0.0));
+    }
+
+    #[test]
+    fn a_body_fit_round_trips_as_a_pose() {
+        let fit = BodyFit {
+            names: vec!["hips".into(), "spine".into()],
+            parents: vec![None, Some(0)],
+            rest: vec![
+                BonePose {
+                    translation: Vec3::new(0.0, 0.95, 0.0),
+                    ..Default::default()
+                },
+                BonePose {
+                    translation: Vec3::new(0.0, 1.07, 0.0),
+                    ..Default::default()
+                },
+            ],
+            height: 1.62,
+        };
+        let pose = fit.pose();
+        assert_eq!(pose.index_of("spine"), Some(1));
+        assert_eq!(&*pose.parents, &[None, Some(0)]);
+        assert_eq!(pose.bones, fit.rest);
+        let back: BodyFit = serde_json::from_str(&serde_json::to_string(&fit).unwrap()).unwrap();
+        assert_eq!(back, fit);
     }
 
     #[test]
