@@ -261,6 +261,24 @@ fn views() -> Vec<View> {
             sun: (230.0, 35.0),
             ..BASE
         },
+        // Woods up the foothills of the northern range: broadleaf below, dark conifers above.
+        View {
+            name: "woods_slopes",
+            eye: DVec3::new(-2_500.0, 0.0, -11_000.0),
+            target: DVec3::new(-1_500.0, 1_000.0, -21_000.0),
+            above_ground: Some(350.0),
+            sun: (200.0, 30.0),
+            ..BASE
+        },
+        View {
+            name: "woods_cold_aerial",
+            eye: DVec3::new(-1_000.0, 0.0, -19_700.0),
+            target: DVec3::new(-1_000.0, 0.0, -19_950.0),
+            above_ground: Some(90.0),
+            target_above_ground: Some(0.0),
+            sun: (200.0, 35.0),
+            ..BASE
+        },
         View {
             name: "earth_coast",
             eye: DVec3::new(-7_000.0, 0.0, 12_500.0),
