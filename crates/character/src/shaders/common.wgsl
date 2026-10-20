@@ -129,12 +129,88 @@ fn belt_band(r: vec3<f32>) -> f32 {
 }
 
 // How far clothes stand off the skin at rest position `r` (`sleeves`: the vertex cloth mask,
-// 0 on bare hands).
+// 0 on bare hands), folds included.
 fn cloth_lift(r: vec3<f32>, sleeves: f32) -> f32 {
     let covered = smoothstep(-0.004, 0.004, collar_depth(r)) * sleeves;
     // (The shoes are their own shell; the feet stay inside it.)
     let thickness = array<f32, 3>(0.004, 0.006, 0.0);
-    return covered * thickness[garment(r)];
+    let g = garment(r);
+    return covered * (thickness[g] + cloth_folds(r, g).x);
+}
+
+// ---------------------------------------------------------------- folds
+// Joints of the base mesh at rest (the character's left; the right mirrors in x).
+const SHOULDER: vec3<f32> = vec3<f32>(0.168, 0.525, 0.015);
+const ELBOW: vec3<f32> = vec3<f32>(0.313, 0.349, 0.013);
+const WRIST: vec3<f32> = vec3<f32>(0.493, 0.19, 0.013);
+const HIP: vec3<f32> = vec3<f32>(0.11, 0.049, 0.012);
+const KNEE: vec3<f32> = vec3<f32>(0.158, -0.369, 0.032);
+const ANKLE: vec3<f32> = vec3<f32>(0.22, -0.745, 0.0);
+
+// Where `r` is along the limb from `a` to `b`: x the distance along it from `a` (m), y the
+// distance from its axis, z the angle around it.
+fn along_limb(r: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
+    let ax = normalize(b - a);
+    let t = dot(r - a, ax);
+    let off = r - a - ax * t;
+    let side = normalize(cross(ax, vec3<f32>(0.0, 0.0, 1.0)));
+    let up = cross(ax, side);
+    return vec3<f32>(t, length(off), atan2(dot(off, up), dot(off, side)));
+}
+
+// Folds of cloth bunched along a limb or around the body (`s`: distance along it, `angle`
+// around it): wavy, broken rings, so they read as fabric rather than a spring. Returns the
+// ridge (0 in a crease .. 1 on a fold) and how much fold there is here.
+fn fold_rings(s: f32, angle: f32, r: vec3<f32>, wavelength: f32) -> vec2<f32> {
+    let warp = (value_noise3(r * 12.0) - 0.5) * 2.0
+        + sin(angle * 1.5 + value_noise3(r * 6.0) * 4.0) * 0.6;
+    let ridge = sin((s / wavelength + warp) * 6.2831853) * 0.5 + 0.5;
+    let present = smoothstep(0.25, 0.6, value_noise3(r * vec3<f32>(9.0, 16.0, 9.0) + 3.7));
+    return vec2<f32>(ridge, present);
+}
+
+// Folds of the shirt and trousers at rest position `r` of garment `g`: height (m, larger is
+// outward) and how deep in a crease it is (0..1). Sleeves bunch at the elbows and wrists, the
+// shirt blouses over the belt, trouser legs crease behind the knees and break over the shoes.
+fn cloth_folds(r: vec3<f32>, g: u32) -> vec2<f32> {
+    let m = vec3<f32>(select(-1.0, 1.0, r.x > 0.0), 1.0, 1.0);
+    var amp = 0.0;
+    var f = vec2<f32>(0.5, 0.0);
+    if (g == 0u) {
+        let up = along_limb(r, SHOULDER * m, ELBOW * m);
+        let lo = along_limb(r, ELBOW * m, WRIST * m);
+        let upper = length(ELBOW - SHOULDER);
+        let lower = length(WRIST - ELBOW);
+        if (up.x > 0.04 && (lo.x < 0.0 && up.y < 0.07 || lo.x >= 0.0 && lo.y < 0.06)) {
+            let s = select(up.x, upper + lo.x, lo.x >= 0.0);
+            let angle = select(up.z, lo.z, lo.x >= 0.0);
+            let e = (s - upper) / 0.055;
+            let elbow = exp(-e * e);
+            let cuff = smoothstep(upper + lower * 0.5, upper + lower * 0.95, s);
+            amp = 0.0008 + 0.005 * elbow + 0.004 * cuff;
+            f = fold_rings(s, angle, r, 0.035);
+            // Fade in from the shoulder.
+            amp *= smoothstep(0.04, 0.1, up.x);
+        } else if (r.y < WAIST + 0.08) {
+            amp = 0.004 * (1.0 - smoothstep(WAIST + 0.015, WAIST + 0.09, r.y));
+            f = fold_rings(r.y, atan2(r.x, r.z) * 2.0, r, 0.035);
+        }
+    } else if (g == 1u) {
+        let up = along_limb(r, HIP * m, KNEE * m);
+        let lo = along_limb(r, KNEE * m, ANKLE * m);
+        let upper = length(KNEE - HIP);
+        let lower = length(ANKLE - KNEE);
+        if (r.y < WAIST - 0.06) {
+            let s = select(up.x, upper + lo.x, lo.x >= 0.0);
+            let angle = select(up.z, lo.z, lo.x >= 0.0);
+            let e = (s - upper) / 0.065;
+            let knee = exp(-e * e);
+            let hem = smoothstep(upper + lower - 0.16, upper + lower, s);
+            amp = 0.0008 + 0.004 * knee + 0.006 * hem;
+            f = fold_rings(s, angle, r, 0.045);
+        }
+    }
+    return vec2<f32>(amp * (f.x - 0.5) * f.y, (1.0 - f.x) * (1.0 - f.x) * f.y * saturate(amp / 0.005));
 }
 
 fn unpack_bytes(v: u32) -> vec4<u32> {
