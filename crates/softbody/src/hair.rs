@@ -882,6 +882,15 @@ pub(crate) fn strand_omegas(stiffness: f32) -> (f32, f32) {
 /// goals toward `rest` from stiff at the root to loose at the tip (at least `held(arc)` times
 /// 35% of the root's frequency), tethers to the root, and optionally a skin plane each
 /// particle stays above. Returns the first particle.
+/// How firmly (0..1) hair rooted with outward `normal` (the person faces −Z) is held along
+/// its grown shape `arc` meters from the root. Hair from the front and the crown is swept back
+/// over the head and held along the sweep, as the roots and the hair around them hold it, else
+/// it slides off the crown over the face.
+pub(crate) fn swept_hold(normal: Vec3, arc: f32) -> f32 {
+    let sweep = (-normal.z).max(normal.y).clamp(0.0, 1.0);
+    sweep * (1.0 - smoothstep(0.14, 0.26, arc))
+}
+
 pub(crate) fn push_strand(
     sim: &mut Sim,
     frame: u16,
@@ -1033,9 +1042,7 @@ pub fn build(
                 p += dir * seg_len;
                 rest.push(p);
             }
-            // Hair swept back over the head is held along the sweep (as roots and the hair
-            // around them hold it), else it slides off the crown over the face.
-            let held = |arc: f32| sweep * (1.0 - smoothstep(0.14, 0.26, arc));
+            let held = |arc: f32| swept_hold(root.normal, arc);
             let skin_plane = match root.skin {
                 Skin::Plane { point, normal } => Some((point, normal)),
                 _ => None,

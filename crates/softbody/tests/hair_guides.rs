@@ -199,3 +199,72 @@ fn people_without_colliders_get_humanoid_ones_and_bad_guides_are_reported_once()
     want.sort();
     assert_eq!(sims, want);
 }
+
+/// Locks from the front hairline, combed back over the crown along the skull and falling
+/// behind it.
+fn swept_back(version: u32) -> HairGuides {
+    let center = HEAD + SKULL;
+    let guides = [-0.04f32, 0.0, 0.04]
+        .into_iter()
+        .map(|x| {
+            // On the great circle through the top of the head, from 60° in front of the top.
+            let at = |phi: f32| {
+                let d = Vec3::new(x * 10.0, phi.cos(), phi.sin()).normalize();
+                center + d * 0.104
+            };
+            let step = 0.035 / 0.104;
+            let points = (0..9).map(|i| at(-1.05 + step * i as f32)).collect();
+            HairGuide {
+                bones: [1, 1],
+                blend: 0.0,
+                points,
+                normal: (at(-1.05) - center).normalize(),
+                thickness: 0.004,
+            }
+        })
+        .collect();
+    HairGuides {
+        version,
+        guides,
+        grown_on: pose().bones,
+        stiffness: 0.2,
+    }
+}
+
+#[test]
+fn hair_combed_back_from_the_hairline_stays_back_when_the_head_bows() {
+    let mut app = app();
+    let person = app
+        .world
+        .spawn((
+            Transform::default(),
+            pose(),
+            BoneColliders {
+                capsules: vec![BoneCapsule::sphere("head", 0.1, SKULL.to_array())],
+                friction: 0.3,
+            },
+            swept_back(1),
+        ))
+        .id();
+    steps(&mut app, 30);
+    // The head bows 50° forward and stays bowed.
+    let bow = Quat::from_rotation_x(-50f32.to_radians());
+    app.world.get_mut::<SkeletonPose>(person).unwrap().bones[1].rotation = bow;
+    steps(&mut app, 120);
+
+    let rest = swept_back(1);
+    let posed = app.world.get::<HairGuidesPosed>(person).unwrap().clone();
+    for (i, g) in rest.guides.iter().enumerate() {
+        let p = posed.guide(&rest, i).unwrap();
+        // Back in the head's frame, the sweep over the crown keeps its grown shape (unheld,
+        // it slid 6 to 25 cm forward over the face).
+        for (k, (q, r)) in p.iter().zip(&g.points).enumerate().take(5) {
+            let local = HEAD + bow.inverse() * (*q - HEAD);
+            let slid = local.distance(*r);
+            assert!(
+                slid < 0.03,
+                "lock {i} point {k} slid {slid:.3} m off the sweep"
+            );
+        }
+    }
+}
