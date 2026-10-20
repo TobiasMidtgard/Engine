@@ -228,9 +228,9 @@ pub(crate) fn cell_cards(
                 tree,
                 foot: Vec3::new(x, (y - origin.y) as f32, z),
                 height,
-                width: (height * wide).max(spacing * 1.15),
+                width: (height * wide).max(spacing * 1.4),
                 yaw: h(6) * std::f32::consts::PI,
-                shade: 0.85 + 0.25 * h(7),
+                shade: 0.62 + 0.22 * h(7),
             });
         }
     }
@@ -247,7 +247,7 @@ pub(crate) fn cell_meshes(cards: &[FarCard]) -> Vec<(FarTree, Mesh)> {
         let conifer = matches!(c.tree, FarTree::Spruce | FarTree::Pine);
         // Conifers stand as the tall spray cells, broad crowns as the round cluster.
         let cell = if conifer {
-            if c.shade > 0.97 { 1 } else { 0 }
+            if c.shade > 0.73 { 1 } else { 0 }
         } else {
             CLUSTER_CELL
         };
@@ -286,10 +286,16 @@ pub(crate) fn cell_meshes(cards: &[FarCard]) -> Vec<(FarTree, Mesh)> {
             b.tri(first, first + 2, first + 1);
             b.tri(first, first + 3, first + 2);
         }
-        if !matches!(c.tree, FarTree::Spruce) {
-            // The crown seen from above.
+        {
+            // The crown seen from above (a spruce's narrow spire is a small one).
             let (uv0, uv1) = atlas_cell(kind, CLUSTER_CELL);
-            let y = y0 + (y1 - y0) * 0.72;
+            let (y, half) = if matches!(c.tree, FarTree::Spruce) {
+                (y0 + (y1 - y0) * 0.45, half * 0.6)
+            } else {
+                // Wider than the upright cards, so neighbouring crowns close over the gaps
+                // their round outlines leave.
+                (y0 + (y1 - y0) * 0.72, half * 1.35)
+            };
             let (s, co) = c.yaw.sin_cos();
             let (u, w) = (Vec3::new(co, 0.0, s), Vec3::new(-s, 0.0, co));
             let corners = [
