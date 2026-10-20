@@ -367,6 +367,7 @@ pub fn heat_visuals(
 /// Re-entry plasma: shown once the heat flux makes the air glow, brighter (and the wake
 /// longer) as it grows; the wake trails along the airflow.
 pub fn plasma_visuals(
+    time: Res<Time>,
     shields: Query<&HeatShield>,
     mut q: Query<(
         &ChildOf,
@@ -396,10 +397,14 @@ pub fn plasma_visuals(
             let from = wake
                 .from
                 .unwrap_or_else(|| flow * (wake.skin * flow).length() * 0.45);
+            // The gas flickers as it tears past (each wake out of step with the others).
+            let clock = time.elapsed_secs() + from.x * 0.37 + wake.radius;
+            let flicker = 1.0 + 0.05 * (clock * 23.0).sin() + 0.03 * (clock * 37.0).sin();
+            let radius = wake.radius * (1.0 + 0.03 * (clock * 29.0).sin());
             let new = Transform {
                 translation: from.as_dvec3(),
                 rotation: Quat::from_rotation_arc(Vec3::Z, flow),
-                scale: Vec3::new(wake.radius, wake.radius, wake.length * glow.sqrt()),
+                scale: Vec3::new(radius, radius, wake.length * glow.sqrt() * flicker),
             };
             if *t != new {
                 *t = new;

@@ -458,8 +458,8 @@ fn the_control_api_turns_the_flight_assist_off_to_coast() {
     }
 }
 
-/// Re-entry plasma: at 7 km/s and 70 km the shock layer, the wake and the wingtip
-/// streamers show, trailing behind and above a ship flying nose 40° up; held still at the same height,
+/// Re-entry plasma: at 7 km/s and 70 km the shock layer and wake (each a hot and an outer
+/// part) and the wingtip streamers show, trailing behind and above a ship flying nose 40° up; held still at the same height,
 /// or in vacuum, neither does.
 #[test]
 fn reentry_air_glows_and_trails_the_ship() {
@@ -493,8 +493,8 @@ fn reentry_air_glows_and_trails_the_ship() {
         eprintln!("{altitude} m at {speed} m/s: nose flux {flux:.0} W/m²");
         assert_eq!(
             parts.len(),
-            4,
-            "a shock layer, a wake and two wingtip streamers"
+            6,
+            "a shock layer and a wake (hot and outer parts) and two wingtip streamers"
         );
         parts
     };
