@@ -526,6 +526,28 @@ fn paint_tree(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
                 p.text_dim,
             );
         }
+        // The level a gated node waits on, in a pill under it.
+        if v.level < s.level && s.rank == 0 {
+            let label = format!("LV {}", s.level);
+            let y = c.y + r + 14.0 * px;
+            let w = (label.len() as f32 * 7.0 + 16.0) * px;
+            let h = 18.0 * px;
+            ctx.rect(
+                Rect::new(c.x - w * 0.5, y - h * 0.5, w, h),
+                Color::hexa(0x0a0f18e8),
+                h * 0.5,
+                1.0 * px,
+                col.with_alpha(0.45),
+            );
+            ctx.text(
+                &label,
+                11.0,
+                700,
+                col.lerp(Color::WHITE, 0.35).with_alpha(0.9),
+                Vec2::new(c.x, y),
+                Vec2::splat(0.5),
+            );
+        }
     }
 }
 
@@ -1700,7 +1722,7 @@ mod tests {
             let r = node_size(a) * 0.5;
             assert!(p.x - r > 0.0 && p.x + r < TREE_W, "{} off the sides", a.id);
             assert!(
-                p.y - r > 50.0 && p.y + r + 14.0 < TREE_H,
+                p.y - r > 50.0 && p.y + r + 24.0 < TREE_H,
                 "{} off the ends",
                 a.id
             );
