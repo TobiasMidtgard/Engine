@@ -45,6 +45,11 @@ struct Seen {
     biceps_at_strike: f32,
     biceps_relaxed: f32,
     lifter_flex: f32,
+    /// Through the guard: the left hand's largest distance from the handle, the hammer
+    /// head's lowest height and the feet's smallest stagger (front to back), m.
+    guard_hand_off: f64,
+    guard_head_low: f64,
+    guard_stagger: f64,
     /// Farthest the reacher's right wrist gets from its hold on the lantern, m.
     lantern_miss: f64,
     /// How high the reacher's heels and balls of the feet rise while holding it, m.
@@ -76,6 +81,8 @@ fn every_test_case_does_what_it_shows() {
     let start_car = app.world.get::<Transform>(d.car).unwrap().translation;
     let mut seen = Seen {
         closest_strike: f64::MAX,
+        guard_head_low: f64::MAX,
+        guard_stagger: f64::MAX,
         dog_spine: (f32::MAX, f32::MIN),
         ..Default::default()
     };
@@ -103,6 +110,20 @@ fn every_test_case_does_what_it_shows() {
             let gap =
                 bone_world(w, d.athlete, "hand_l").distance(bone_world(w, d.athlete, "hand_r"));
             seen.max_hand_gap_while_gripping = seen.max_hand_gap_while_gripping.max(gap);
+        }
+        // Guard: from 3.6 s to 6.4 s, settled in by 4 s.
+        if (4.0..6.3).contains(&t) {
+            let grip = bone_world(w, d.athlete, "hand_r");
+            let head = hammer_head(w, d.athlete).unwrap();
+            let hand = bone_world(w, d.athlete, "hand_l");
+            let along = (hand - grip).dot(head - grip) / (head - grip).length_squared();
+            let on_handle = grip + (head - grip) * along.clamp(0.0, 1.0);
+            seen.guard_hand_off = seen.guard_hand_off.max(hand.distance(on_handle));
+            seen.guard_head_low = seen.guard_head_low.min(head.y);
+            // The athlete faces +Z.
+            let stagger =
+                bone_world(w, d.athlete, "foot_l").z - bone_world(w, d.athlete, "foot_r").z;
+            seen.guard_stagger = seen.guard_stagger.min(stagger);
         }
         if (3.4..3.5).contains(&t) {
             seen.biceps_relaxed = activation(w, d.athlete, "biceps_r");
@@ -224,6 +245,14 @@ fn every_test_case_does_what_it_shows() {
         seen.lifter_flex > 0.6,
         "flex activation {}",
         seen.lifter_flex
+    );
+    assert!(
+        seen.guard_hand_off < 0.1 && seen.guard_head_low > 1.5 && seen.guard_stagger > 0.2,
+        "guard: left hand {:.2} m off the handle, hammer head down to {:.2} m, feet staggered \
+         {:.2} m",
+        seen.guard_hand_off,
+        seen.guard_head_low,
+        seen.guard_stagger
     );
     assert!(
         seen.lantern_miss < 0.05,

@@ -1387,6 +1387,9 @@ impl Renderer {
             }
             if let Some(focus) = self.lens.focus_distance_m() {
                 d.set("render.dof_focus_m", focus as f64);
+                if let Some(lag) = self.lens.focus_lag_frames() {
+                    d.set("render.dof_focus_lag_frames", lag as f64);
+                }
             }
         }
         world.insert_resource(stats);

@@ -21,7 +21,8 @@ use crate::fracture::{BreakLook, ConvexPoly};
 use crate::material::{DestructibleMaterial, DestructionMaterials, MaterialProps};
 use crate::meshing::MeshBuilder;
 use crate::structure::{
-    Fracturable, Obb, PieceState, StructuralPiece, piece_colors, shatter, shatter_along_grain,
+    Fracturable, Obb, PieceState, StructuralPiece, crate_boards, piece_colors, shatter,
+    shatter_along_grain,
 };
 use crate::sync::{VoxelChunk, WallTile};
 use crate::voxel::{VoxelOp, VoxelState, VoxelVolume, box_sdf, capsule_sdf};
@@ -1463,7 +1464,9 @@ pub(crate) fn break_fracturable(
     let (ext, int) = piece_colors(f.color, f.material, ctx.table, ctx.textured);
     let half = f.shape.half_extents();
     // Long timber (posts, beams, planks) splits along its grain into splinters.
-    let parts = if f.material == DestructibleMaterial::Wood
+    let parts = if let crate::structure::FractureShape::Crate { half_extents, wall } = f.shape {
+        crate_boards(half_extents, wall, ctx.rng)
+    } else if f.material == DestructibleMaterial::Wood
         && half.max_element() >= GRAIN_ASPECT * half.min_element()
     {
         let grain = Vec3::AXES[half.max_position()];

@@ -31,7 +31,7 @@ fn vs_strand(@builtin(vertex_index) vertex: u32, @builtin(instance_index) hair: 
     out.hair = hair;
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     out.clip_now = motion_clip(rel);
-    out.clip_prev = prev_motion_clip(prev_model_point(rp.model) + side * (half_width * ribbon_side(vertex % 6u)));
+    out.clip_prev = prev_motion_clip(prev_model_point(rp.prev_model) + side * (half_width * ribbon_side(vertex % 6u)));
     return out;
 }
 

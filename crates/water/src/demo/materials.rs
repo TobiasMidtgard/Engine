@@ -100,11 +100,14 @@ pub enum Surface {
     PaintedWoodRed,
     /// [`Surface::PaintedWood`] with blue paint (shares its normal and ORM maps).
     PaintedWoodBlue,
+    /// [`Surface::Rock`]'s textures on a cliff: mapped along all three axes (no UVs) at a
+    /// larger scale, its vertex color carrying the crag's tone relative to the stone's.
+    Cliff,
 }
 
 impl Surface {
     /// Every surface, in declaration order.
-    pub const ALL: [Surface; 26] = [
+    pub const ALL: [Surface; 27] = [
         Surface::Planks,
         Surface::Post,
         Surface::PaintedWood,
@@ -131,6 +134,7 @@ impl Surface {
         Surface::PaintedWoodGreen,
         Surface::PaintedWoodRed,
         Surface::PaintedWoodBlue,
+        Surface::Cliff,
     ];
 
     /// The surface whose textures this one is generated with (itself, except paint colors).
@@ -139,6 +143,7 @@ impl Surface {
             Surface::PaintedWoodGreen | Surface::PaintedWoodRed | Surface::PaintedWoodBlue => {
                 Surface::PaintedWood
             }
+            Surface::Cliff => Surface::Rock,
             s => s,
         }
     }
@@ -203,6 +208,12 @@ impl DemoMaterials {
                 let albedo = images.add(image);
                 sets.push((variant, textured(variant, albedo, normal, orm)));
             }
+            if b.surface == Surface::Rock {
+                sets.push((
+                    Surface::Cliff,
+                    textured(Surface::Cliff, albedo, normal, orm),
+                ));
+            }
         }
         sets.sort_by_key(|(s, _)| *s as usize);
         Self { sets }
@@ -222,6 +233,12 @@ impl DemoMaterials {
 /// `uv_scale = 1 / tile_size`, so mesh UVs are plain meters.
 pub fn tile_size(surface: Surface) -> [f32; 2] {
     spec(surface).tile
+}
+
+/// About the mean color (linear RGB) of `surface`'s albedo texture.
+pub fn mean_color(surface: Surface) -> Vec3 {
+    let c = plain(surface.source()).base_color;
+    Vec3::new(c[0], c[1], c[2])
 }
 
 /// An untextured stand-in with the surface's color and roughness (tests, no GPU).
@@ -254,6 +271,8 @@ pub fn plain(surface: Surface) -> StandardMaterial {
         PaintedWoodGreen => ([0.03, 0.10, 0.05], 0.45, 0.0),
         PaintedWoodRed => ([0.30, 0.025, 0.018], 0.45, 0.0),
         PaintedWoodBlue => ([0.025, 0.065, 0.19], 0.45, 0.0),
+        // Weathered faces, a shade paler than fresh rock.
+        Cliff => ([0.31, 0.3, 0.285], 0.8, 0.0),
     };
     let sp = spec(surface);
     let mut m = StandardMaterial::color(rgb[0], rgb[1], rgb[2])
@@ -298,7 +317,7 @@ fn textured(
     }
     // The ground runs up cliffs (the crag): projected along all three axes, it never
     // stretches down a face. (Its meshes share one transform, so it stays seamless.)
-    if surface == Surface::Ground {
+    if matches!(surface, Surface::Ground | Surface::Cliff) {
         m = m.with_triplanar();
     }
     m
@@ -387,6 +406,11 @@ fn spec(surface: Surface) -> Spec {
             res: [1024, 1024],
             cavity: [(0.006, 0.6), (0.04, 0.5)],
             ..base
+        },
+        // A crag seen from tens of meters: the same stone, its grains and lichen coarser.
+        Cliff => Spec {
+            tile: [3.0, 3.0],
+            ..spec(Rock)
         },
         Concrete => Spec {
             tile: [1.0, 1.0],
@@ -618,7 +642,7 @@ fn synthesize(surface: Surface, size: u32) -> Built {
         Surface::NonSlip => non_slip(&c, seed),
         Surface::Bark => bark(&c, seed),
         Surface::EndGrain => end_grain(&c, seed),
-        Surface::Rock => rock(&c, seed),
+        Surface::Rock | Surface::Cliff => rock(&c, seed),
         Surface::Concrete => concrete(&c, seed),
         Surface::Galvanized => galvanized(&c, seed),
         Surface::Plastic => plastic(&c, seed),
