@@ -747,8 +747,8 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     [20.5, 7.3, 26.8],
                     16.0,
                 )
-                // Past the middle of the line about 7.75 s into the loop.
-                .warmup(7.3)
+                // Past the middle of the line about 6.6 s into the loop.
+                .warmup(6.15)
                 .on_arrive("movement.duel", &duel("Blink"))
                 .on_arrive("movement.grappler", "{}")
                 .on_leave("movement.duel", cycle),
