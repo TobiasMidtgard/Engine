@@ -23,8 +23,11 @@ use crate::texture::{Image, PixelFormat, f32_to_f16};
 /// cache levels, unused.
 pub const HEADER_WORDS: u32 = 8;
 /// Words per texture record: width, height, root | atlas << 8, unused, 16 level offsets,
-/// mean color (4 × f16), unused.
-pub const INFO_WORDS: u32 = 24;
+/// mean color (4 × f16), unused, then the texture at 4×4 texels (16 × 4 f16, rows from the
+/// top): the levels past the root slot's mip tail, filtered in the shader.
+pub const INFO_WORDS: u32 = 56;
+/// First word of the 4×4 level in a record.
+const LOW_WORD: usize = 24;
 /// Most virtual textures drawn at once (ids are 8 bits, 0 = not virtual).
 pub const MAX_TEXTURES: usize = 255;
 /// First word of the page tables.
@@ -69,6 +72,8 @@ struct VirtualTex {
     /// Counts up when the id is reused, so stale loads are dropped.
     generation: u32,
     mean: [f32; 4],
+    /// The texture at 4×4 texels (decoded like `mean`).
+    low: [[f32; 4]; 16],
     /// The record (size, levels, mean) must be uploaded.
     info_dirty: bool,
     /// The root tile is being loaded.
@@ -103,8 +108,8 @@ struct Loaded {
     generation: u32,
     tile: Tile,
     data: Result<Vec<u8>, String>,
-    /// Mean color of a root tile (linear for sRGB color).
-    mean: Option<[f32; 4]>,
+    /// Mean color and 4×4 level of a root tile (linear for sRGB color).
+    mean: Option<([f32; 4], [[f32; 4]; 16])>,
     /// Frame it arrived (stale ones are dropped).
     arrived: u64,
 }
@@ -136,7 +141,12 @@ impl Workers {
                             .read_tile(job.tile.level, job.tile.x, job.tile.y, &mut tile)
                             .map(|()| {
                                 if job.root {
-                                    mean = Some(tile_mean(&tile, job.srgb));
+                                    let (w, h) = job.provider.size();
+                                    let size = (
+                                        (w >> job.tile.level).clamp(1, TILE),
+                                        (h >> job.tile.level).clamp(1, TILE),
+                                    );
+                                    mean = Some(root_summary(&tile, job.srgb, size));
                                 }
                                 let levels = tile_levels(&tile, job.srgb, job.levels);
                                 if job.compress {
@@ -776,8 +786,9 @@ impl VirtualTextureSystem {
             self.upload_tile(gpu, atlas, slot, data);
             if let Some(t) = self.textures[l.id as usize - 1].as_mut() {
                 t.residency.commit(l.tile, slot);
-                if let Some(mean) = l.mean {
+                if let Some((mean, low)) = l.mean {
                     t.mean = mean;
+                    t.low = low;
                     t.info_dirty = true;
                 }
             }
@@ -935,6 +946,11 @@ impl VirtualTextureSystem {
                 let h = t.mean.map(f32_to_f16);
                 info[20] = h[0] as u32 | (h[1] as u32) << 16;
                 info[21] = h[2] as u32 | (h[3] as u32) << 16;
+                for (i, texel) in t.low.iter().enumerate() {
+                    let h = texel.map(f32_to_f16);
+                    info[LOW_WORD + 2 * i] = h[0] as u32 | (h[1] as u32) << 16;
+                    info[LOW_WORD + 2 * i + 1] = h[2] as u32 | (h[3] as u32) << 16;
+                }
                 let at = (HEADER_WORDS + INFO_WORDS * i as u32) as u64 * 4;
                 gpu.queue
                     .write_buffer(&self.data, at, bytemuck::cast_slice(&info));
@@ -1167,6 +1183,7 @@ impl VirtualTextureSystem {
             last_used: self.frame,
             generation,
             mean: [0.5, 0.5, 0.5, 1.0],
+            low: [[0.5, 0.5, 0.5, 1.0]; 16],
             info_dirty: true,
             root_requested: false,
             failed: false,
@@ -1213,29 +1230,57 @@ impl VirtualTextureSystem {
     }
 }
 
-/// Mean color of a tile's 128² content, decoded to linear light for sRGB color (what the
-/// shader gets through the sRGB cache).
-fn tile_mean(tile: &[u8], srgb: bool) -> [f32; 4] {
-    let mut sum = [0.0f64; 4];
-    for y in BORDER..BORDER + TILE {
-        for x in BORDER..BORDER + TILE {
-            let o = ((y * SLOT + x) * 4) as usize;
-            for c in 0..4 {
-                let v = tile[o + c] as f64 / 255.0;
-                sum[c] += if srgb && c < 3 {
-                    if v <= 0.04045 {
-                        v / 12.92
-                    } else {
-                        ((v + 0.055) / 1.055).powf(2.4)
+/// Mean color and 4×4 box-filtered level of a root tile whose level is `size` texels (at
+/// most 128² inside the border), decoded to linear light for sRGB color (what the shader gets
+/// through the sRGB cache). The 4×4 level is what a whole texture's mip chain has a few
+/// levels past the root slot's tail.
+fn root_summary(tile: &[u8], srgb: bool, size: (u32, u32)) -> ([f32; 4], [[f32; 4]; 16]) {
+    let decode = |v: u8, c: usize| {
+        let v = v as f64 / 255.0;
+        if srgb && c < 3 {
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        } else {
+            v
+        }
+    };
+    // Cell bounds: a quarter of the level each way, at least one texel.
+    let span = |n: u32, i: u32| {
+        let a = (i * n / 4).min(n - 1);
+        (a, ((i + 1) * n / 4).max(a + 1))
+    };
+    let mut low = [[0.0f32; 4]; 16];
+    let mut total = [0.0f64; 4];
+    for cy in 0..4 {
+        let (y0, y1) = span(size.1, cy);
+        for cx in 0..4 {
+            let (x0, x1) = span(size.0, cx);
+            let mut sum = [0.0f64; 4];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let o = (((BORDER + y) * SLOT + BORDER + x) * 4) as usize;
+                    for (c, s) in sum.iter_mut().enumerate() {
+                        *s += decode(tile[o + c], c);
                     }
-                } else {
-                    v
-                };
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as f64;
+            low[(cy * 4 + cx) as usize] = sum.map(|s| (s / n) as f32);
+        }
+    }
+    for y in 0..size.1 {
+        for x in 0..size.0 {
+            let o = (((BORDER + y) * SLOT + BORDER + x) * 4) as usize;
+            for (c, s) in total.iter_mut().enumerate() {
+                *s += decode(tile[o + c], c);
             }
         }
     }
-    let n = (TILE * TILE) as f64;
-    sum.map(|s| (s / n) as f32)
+    let n = (size.0 * size.1) as f64;
+    (total.map(|s| (s / n) as f32), low)
 }
 
 /// Whether fragment shaders write tile feedback on this device: Vulkan, Metal and DX12 write
@@ -1278,4 +1323,37 @@ pub fn shader_source(feedback_writes: bool) -> String {
         &src[..begin],
         &src[end..]
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_summary_box_filters_the_level_to_four_by_four() {
+        // A 64×32 root level (inside the border): left half 255, right half 0, in the red
+        // channel; linear data.
+        let mut tile = vec![0u8; (SLOT * SLOT * 4) as usize];
+        for y in 0..32 {
+            for x in 0..32 {
+                tile[(((BORDER + y) * SLOT + BORDER + x) * 4) as usize] = 255;
+            }
+        }
+        let (mean, low) = root_summary(&tile, false, (64, 32));
+        assert!((mean[0] - 0.5).abs() < 1e-6, "mean {mean:?}");
+        for cy in 0..4 {
+            for cx in 0..4 {
+                let expect = if cx < 2 { 1.0 } else { 0.0 };
+                assert_eq!(low[cy * 4 + cx][0], expect, "cell ({cx}, {cy})");
+            }
+        }
+    }
+
+    #[test]
+    fn the_shader_record_layout_matches() {
+        let src = include_str!("../shaders/virtual_texture.wgsl");
+        assert!(src.contains(&format!("const VT_INFO_WORDS: u32 = {INFO_WORDS}u;")));
+        assert!(src.contains(&format!("const VT_LOW_WORD: u32 = {LOW_WORD}u;")));
+        assert!(src.contains(&format!("const VT_HEADER_WORDS: u32 = {HEADER_WORDS}u;")));
+    }
 }

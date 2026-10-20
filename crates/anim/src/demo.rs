@@ -26,9 +26,9 @@ use engine_core::prelude::*;
 use engine_render::{
     GltfScene, MaterialPreset, Mesh, MeshRenderer, Shape as MeshShape, StandardMaterial,
 };
-use engine_world::Ground;
 use engine_world::animation::AnimationParams;
 use engine_world::physics::PhysicsQueries;
+use engine_world::{DamageEvent, DamageKind, Ground};
 use serde_json::{Value, json};
 
 use crate::animator::{AnimationLibrary, Animator, AnimatorSettings};
@@ -78,6 +78,10 @@ pub struct DemoEntities {
     pub lifter: Entity,
     pub reacher: Entity,
     pub walker: Entity,
+    /// Walks a square facing one way: sidesteps and backpedals.
+    pub drill: Entity,
+    /// Flinches from blows on a timeline.
+    pub sparring: Entity,
     pub horse: Entity,
     pub spider: Entity,
     pub dog: Entity,
@@ -86,8 +90,8 @@ pub struct DemoEntities {
 }
 
 /// Follows a closed, smooth path through `waypoints` (`[x, z, speed]`, meters and m/s,
-/// relative to `origin`), standing on whatever ground is there. Sets the `speed`, `turn`
-/// and `move_effort` animation parameters.
+/// relative to `origin`), standing on whatever ground is there. Sets the `speed`, `turn`,
+/// `heading` and `move_effort` animation parameters.
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DemoPath {
@@ -99,6 +103,9 @@ pub struct DemoPath {
     pub speed: f32,
     /// Speed at which `move_effort` reaches 1, m/s.
     pub effort_speed: f32,
+    /// Keep facing this way (yaw, radians) instead of along the path: a person then
+    /// sidesteps and backpedals round it.
+    pub facing: Option<f32>,
     #[serde(skip)]
     samples: Vec<(Vec2, f32, f32)>,
     #[serde(skip)]
@@ -115,6 +122,7 @@ impl Default for DemoPath {
             distance: 0.0,
             speed: 1.0,
             effort_speed: humanoid::RUN_SPEED,
+            facing: None,
             samples: Vec::new(),
             yaw_rate: 0.0,
             started: false,
@@ -200,7 +208,7 @@ pub struct DemoScript {
     pub time: f32,
 }
 
-/// One step of a [`DemoScript`]: a trigger and/or a parameter value at `at` seconds.
+/// One step of a [`DemoScript`]: a trigger, a parameter value and/or a blow at `at` seconds.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DemoStep {
@@ -208,6 +216,9 @@ pub struct DemoStep {
     pub trigger: String,
     pub param: String,
     pub value: f32,
+    /// Strike the entity: a [`DamageEvent`] at this point with this push (N·s), both in its
+    /// own frame (it faces −Z).
+    pub hit: Option<(Vec3, Vec3)>,
 }
 
 impl DemoStep {
@@ -223,6 +234,13 @@ impl DemoStep {
             at,
             param: name.into(),
             value,
+            ..Default::default()
+        }
+    }
+    pub fn hit(at: f32, point: Vec3, push: Vec3) -> Self {
+        Self {
+            at,
+            hit: Some((point, push)),
             ..Default::default()
         }
     }
@@ -931,20 +949,52 @@ pub const VIEWS: &[DemoView] = &[
         at: 3.6,
     },
     DemoView {
+        key: "paddock_face",
+        name: "Face under effort: brows knit, eyes narrowed, teeth gritted",
+        eye: [0.7, 2.06, 6.45],
+        target: [0.7, 2.02, 5.6],
+        hour: 15.0,
+        at: 1.6,
+    },
+    DemoView {
         key: "paddock_stunt",
-        name: "Stunt fall: limp off the deck with the run's momentum",
+        name: "Stunt fall: off the deck with the run's momentum, braced for the mat",
         eye: [0.0, 1.7, 34.6],
         target: [0.4, 1.2, 28.0],
         hour: 15.0,
-        at: 6.62,
+        at: 6.55,
     },
     DemoView {
         key: "paddock_stunt_down",
-        name: "Ragdoll come to rest on the crash mat",
+        name: "Ragdoll come to rest on the crash mat, face slack",
         eye: [5.0, 0.95, 29.6],
         target: [3.6, 0.5, 28.1],
         hour: 15.0,
         at: 8.3,
+    },
+    DemoView {
+        key: "paddock_stunt_up",
+        name: "Getting up off the mat: a hand and a knee planted",
+        eye: [5.6, 1.25, 31.2],
+        target: [3.0, 0.6, 27.9],
+        hour: 15.0,
+        at: 9.9,
+    },
+    DemoView {
+        key: "paddock_footwork",
+        name: "Sidestepping round a square, feet planted",
+        eye: [-3.2, 1.6, -9.2],
+        target: [-6.0, 0.8, -4.6],
+        hour: 15.0,
+        at: 5.5,
+    },
+    DemoView {
+        key: "paddock_flinch",
+        name: "A jab to the chin snaps the head back",
+        eye: [-3.6, 1.35, 1.2],
+        target: [-6.0, 1.15, 1.0],
+        hour: 15.0,
+        at: 0.92,
     },
 ];
 
@@ -1208,6 +1258,57 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         ),
     ));
 
+    // Footwork drill: round a square facing one way, walking ahead, sidestepping left,
+    // backpedalling and sidestepping right.
+    let drill = spawn_humanoid(
+        world,
+        humanoid::Outfit::Shirt,
+        Transform::from_translation(at(-4.5, 0.0, -2.0)),
+    );
+    dress(world, drill, "athlete", SkinMaterial::default());
+    let (ahead, side, back) = (1.2, humanoid::SIDESTEP_SPEED, 0.9);
+    world.entity_mut(drill).insert((
+        Name::new("Footwork drill"),
+        DemoPath {
+            facing: Some(0.0),
+            ..DemoPath::new(
+                origin,
+                vec![
+                    [-4.5, -2.0, ahead],
+                    [-4.5, -4.0, ahead],
+                    [-4.5, -6.0, side],
+                    [-6.0, -6.0, side],
+                    [-7.5, -6.0, back],
+                    [-7.5, -4.0, back],
+                    [-7.5, -2.0, side],
+                    [-6.0, -2.0, side],
+                ],
+            )
+        },
+    ));
+
+    // Sparring partner: struck in turn on the chin, the side of the head, the stomach and
+    // the back of a shoulder, flinching away from each blow.
+    let sparring = spawn_humanoid(
+        world,
+        humanoid::Outfit::Shirt,
+        Transform::from_translation(at(-6.0, 0.0, 1.0)).with_rotation(facing(180.0)),
+    );
+    dress(world, sparring, "lifter", SkinMaterial::default());
+    world.entity_mut(sparring).insert((
+        Name::new("Sparring partner"),
+        DemoScript {
+            period: 6.0,
+            steps: vec![
+                DemoStep::hit(0.8, Vec3::new(0.0, 1.62, -0.12), Vec3::new(0.0, 0.0, 26.0)),
+                DemoStep::hit(2.3, Vec3::new(-0.1, 1.6, -0.03), Vec3::new(24.0, 0.0, 6.0)),
+                DemoStep::hit(3.8, Vec3::new(0.02, 1.1, -0.15), Vec3::new(0.0, 0.0, 32.0)),
+                DemoStep::hit(5.0, Vec3::new(0.18, 1.42, 0.08), Vec3::new(0.0, 0.0, -24.0)),
+            ],
+            time: 0.0,
+        },
+    ));
+
     // --- Horse track: an oval with a white rail.
     let horse_path = vec![
         [16.0, 7.0, 1.6],
@@ -1361,6 +1462,8 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         lifter,
         reacher,
         walker,
+        drill,
+        sparring,
         horse: horse_e,
         spider: spider_e,
         dog: dog_e,
@@ -1409,7 +1512,8 @@ fn demo_path_system(
         } else {
             pos.y = target_y;
         }
-        let yaw = (-dir.x).atan2(-dir.y);
+        let along = (-dir.x).atan2(-dir.y);
+        let yaw = path.facing.unwrap_or(along);
         let old_yaw = {
             let f = t.rotation * Vec3::NEG_Z;
             (-f.x).atan2(-f.z)
@@ -1430,6 +1534,7 @@ fn demo_path_system(
         if let Some(mut params) = params {
             params.set("speed", speed);
             params.set("turn", (path.yaw_rate / 1.2).clamp(-1.0, 1.0));
+            params.set("heading", (along - yaw + PI).rem_euclid(2.0 * PI) - PI);
             params.set(
                 "move_effort",
                 (speed / path.effort_speed.max(0.1)).clamp(0.0, 1.0),
@@ -1441,14 +1546,17 @@ fn demo_path_system(
 #[allow(clippy::type_complexity)]
 fn demo_script_system(
     time: Res<Time>,
+    mut damage: MessageWriter<DamageEvent>,
     mut q: Query<(
+        Entity,
         &mut DemoScript,
         Option<&mut Animator>,
         Option<&mut AnimationParams>,
+        Option<&GlobalTransform>,
         Option<&LocalTimeScale>,
     )>,
 ) {
-    for (mut script, mut animator, mut params, local) in &mut q {
+    for (entity, mut script, mut animator, mut params, gt, local) in &mut q {
         let dt = time.delta_for(local);
         if script.period <= 0.0 || dt <= 0.0 {
             continue;
@@ -1472,6 +1580,16 @@ fn demo_script_system(
                 && let Some(p) = params.as_mut()
             {
                 p.set(&step.param, step.value);
+            }
+            if let (Some((point, push)), Some(gt)) = (step.hit, gt) {
+                damage.write(DamageEvent {
+                    target: entity,
+                    amount: push.length() * 0.2,
+                    kind: DamageKind::Blunt,
+                    point: gt.translation() + (gt.rotation() * point).as_dvec3(),
+                    impulse: gt.rotation() * push,
+                    source: None,
+                });
             }
         }
     }

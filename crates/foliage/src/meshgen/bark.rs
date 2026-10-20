@@ -52,7 +52,7 @@ pub mod layout {
     pub const CUT_RADIUS: [f32; 2] = [0.23, 0.46];
     /// Nominal width of one bark tile around a trunk, meters. A tube repeats the tile a whole
     /// number of times around, so the real width varies a little.
-    pub const TILE_WIDTH_M: f32 = 0.5;
+    pub const TILE_WIDTH_M: f32 = 1.0;
     /// Height / width of the bark tile (in texels, and so on the trunk).
     pub const TILE_ASPECT: f32 = 0.5 / (BARK_U1 - BARK_U0);
 }
@@ -111,10 +111,10 @@ impl BarkKind {
     /// the detail each bark shows up close, within a ~20 MB budget for all kinds together.
     pub fn sizes(self) -> [u32; 3] {
         match self {
-            BarkKind::Oak | BarkKind::Pine => [1024, 1024, 256],
-            BarkKind::Birch | BarkKind::Spruce => [1024, 512, 256],
-            BarkKind::Hazel => [512, 512, 256],
-            BarkKind::Stem => [256, 256, 128],
+            BarkKind::Oak | BarkKind::Pine => [2048, 2048, 512],
+            BarkKind::Birch | BarkKind::Spruce => [2048, 1024, 512],
+            BarkKind::Hazel => [1024, 1024, 512],
+            BarkKind::Stem => [512, 512, 256],
         }
     }
 
@@ -152,6 +152,19 @@ impl BarkKind {
             BarkKind::Birch => 0.8,
             BarkKind::Hazel => 0.7,
             BarkKind::Stem => 0.6,
+        }
+    }
+
+    /// The material's procedural surface detail (`StandardMaterial::with_detail`): strength,
+    /// and bump size in meters. Grain finer than the texture's texels up close, and broad
+    /// light and dark patches (eight times the bump size) that hide the tile's repeats.
+    pub fn detail(self) -> (f32, f32) {
+        match self {
+            BarkKind::Oak | BarkKind::Pine => (0.5, 0.03),
+            BarkKind::Spruce => (0.4, 0.025),
+            BarkKind::Birch => (0.3, 0.025),
+            BarkKind::Hazel => (0.3, 0.015),
+            BarkKind::Stem => (0.2, 0.01),
         }
     }
 
@@ -578,9 +591,33 @@ fn gnoise(x: f32, y: f32, px: i32, py: i32, seed: u64) -> f32 {
     (a + (b - a) * v) * 1.41
 }
 
-/// Fractal noise over the unit tile (u, v in 0..1 wrap), `fx × fy` lattice cells in the first
-/// octave, doubling per octave. About [-1, 1].
+/// The painters' lattice and cell counts are per [`PATTERN_M`] of bark; the tile holds
+/// `TILE_PATTERNS` of that each way, all different, so the bark repeats only every
+/// [`layout::TILE_WIDTH_M`] instead of every half meter.
+const PATTERN_M: f32 = 0.5;
+const TILE_PATTERNS: i32 = (layout::TILE_WIDTH_M / PATTERN_M) as i32;
+
+/// `cells` per pattern as cells per tile.
+fn per_tile(cells: (i32, i32)) -> (i32, i32) {
+    (cells.0 * TILE_PATTERNS, cells.1 * TILE_PATTERNS)
+}
+
+/// Gradient noise over the tile (u, v in 0..1 wrap) with `px × py` lattice cells per pattern.
+fn tile_noise(u: f32, v: f32, px: i32, py: i32, seed: u64) -> f32 {
+    let (px, py) = per_tile((px, py));
+    gnoise(u * px as f32, v * py as f32, px, py, seed)
+}
+
+/// Fractal noise over the tile (u, v in 0..1 wrap), `fx × fy` lattice cells per pattern in
+/// the first octave, doubling per octave. About [-1, 1].
 fn fbm(u: f32, v: f32, fx: i32, fy: i32, octaves: u32, gain: f32, seed: u64) -> f32 {
+    let (fx, fy) = per_tile((fx, fy));
+    fbm_lattice(u, v, fx, fy, octaves, gain, seed)
+}
+
+/// Fractal noise over the unit square (u, v in 0..1 wrap), `fx × fy` lattice cells in the
+/// first octave, doubling per octave. About [-1, 1].
+fn fbm_lattice(u: f32, v: f32, fx: i32, fy: i32, octaves: u32, gain: f32, seed: u64) -> f32 {
     let (mut sum, mut amp, mut norm) = (0.0, 1.0, 0.0);
     for o in 0..octaves {
         let (px, py) = (fx << o, fy << o);
@@ -611,10 +648,25 @@ struct Cell {
     across: Vec2,
 }
 
-/// Periodic Voronoi cells: `cells` across a tile of `size` (same units as `p`), feature points
-/// jittered by `jitter` (0..1) of a cell. Distances are true Euclidean (borders via the
+/// Periodic Voronoi cells: `cells` per pattern across a tile of `size` (same units as `p`),
+/// feature points jittered by `jitter` (0..1) of a cell. Distances are true Euclidean (borders via the
 /// bisector of the two nearest points).
 fn voronoi(p: Vec2, size: Vec2, cells: (i32, i32), jitter: f32, seed: u64) -> Cell {
+    voronoi_merged(p, size, cells, jitter, 0.0, seed)
+}
+
+/// [`voronoi`] with a share `merge` of neighboring cells joined into one (no border between
+/// them), so the cells come in a range of sizes instead of all alike. A joined cell takes the
+/// smallest id among its parts.
+fn voronoi_merged(
+    p: Vec2,
+    size: Vec2,
+    cells: (i32, i32),
+    jitter: f32,
+    merge: f32,
+    seed: u64,
+) -> Cell {
+    let cells = per_tile(cells);
     let cs = size / Vec2::new(cells.0 as f32, cells.1 as f32);
     let g = (p / cs).floor();
     let (gx, gy) = (g.x as i32, g.y as i32);
@@ -633,13 +685,23 @@ fn voronoi(p: Vec2, size: Vec2, cells: (i32, i32), jitter: f32, seed: u64) -> Ce
             }
         }
     }
-    let (mut edge, mut across) = (f32::MAX, Vec2::X);
+    let joined = |h: u64| {
+        let (a, b) = (id.min(h), id.max(h));
+        merge > 0.0 && rnd(a ^ b.rotate_left(17), 7) < merge
+    };
+    let (mut edge, mut across, mut plate) = (f32::MAX, Vec2::X, id);
     for dy in -2..=2 {
         for dx in -2..=2 {
             if dx == 0 && dy == 0 {
                 continue;
             }
-            let (f, _) = feature(bc.0 + dx, bc.1 + dy);
+            let (f, h) = feature(bc.0 + dx, bc.1 + dy);
+            if joined(h) {
+                if dx.abs() <= 1 && dy.abs() <= 1 {
+                    plate = plate.min(h);
+                }
+                continue;
+            }
             let d = f - best;
             let len = d.length();
             if len > 1e-6 {
@@ -652,7 +714,7 @@ fn voronoi(p: Vec2, size: Vec2, cells: (i32, i32), jitter: f32, seed: u64) -> Ce
     }
     Cell {
         edge: edge.max(0.0),
-        id,
+        id: plate,
         rel: p - best,
         across,
     }
@@ -660,7 +722,7 @@ fn voronoi(p: Vec2, size: Vec2, cells: (i32, i32), jitter: f32, seed: u64) -> Ce
 
 /// A short horizontal mark (lenticel) scattered on a grid: returns the signed distance to the
 /// nearest mark (negative inside, meters), its position along the mark (-1..1) and its id.
-/// `cells` grid across the tile, `chance(center)` of a mark per cell, half lengths and half
+/// `cells` grid per pattern, `chance(center)` of a mark per cell, half lengths and half
 /// thicknesses in meters.
 #[allow(clippy::too_many_arguments)]
 fn dashes(
@@ -673,6 +735,7 @@ fn dashes(
     half_thick: (f32, f32),
     seed: u64,
 ) -> (f32, f32, u64) {
+    let cells = per_tile(cells);
     let cs = Vec2::new(tile.wm / cells.0 as f32, tile.hm / cells.1 as f32);
     let (gx, gy) = ((x / cs.x).floor() as i32, (y / cs.y).floor() as i32);
     let reach = (half_len.1 / cs.x).ceil() as i32 + 1;
@@ -737,6 +800,7 @@ fn flakes(
     aspect: f32,
     seed: u64,
 ) -> Option<Flake> {
+    let cells = per_tile(cells);
     let cs = Vec2::new(tile.wm / cells.0 as f32, tile.hm / cells.1 as f32);
     let p = Vec2::new(x, y);
     let (gx, gy) = ((x / cs.x).floor() as i32, (y / cs.y).floor() as i32);
@@ -857,7 +921,7 @@ fn oak(t: &Tile, x: f32, y: f32) -> Texel {
         None => (0.0, 0.0),
     };
     h += top * (0.0022 * order - 0.0012 * edge);
-    h += 0.0006 * gnoise(u * 140.0, v * 12.0, 140, 12, s + 9);
+    h += 0.0006 * tile_noise(u, v, 140, 12, s + 9);
     let grit = speckle(u, v, s + 10);
     h += 0.0004 * grit;
 
@@ -909,7 +973,7 @@ fn birch(t: &Tile, x: f32, y: f32) -> Texel {
     let warm = smoothstep(0.25, 0.7, fbm(u, v, 4, 3, 3, 0.5, s + 5));
     c = c.lerp(srgb3(0xc8b5a3), warm * 0.35);
     // Paper striations around the trunk.
-    let stria = gnoise(u * 5.0, v * 150.0, 5, 150, s + 6);
+    let stria = tile_noise(u, v, 5, 150, s + 6);
     let mut h = 0.00012 * stria;
     c *= 1.0 - 0.04 * stria.abs();
     let mut rough = 0.6 + 0.1 * smudge;
@@ -1004,12 +1068,14 @@ fn birch(t: &Tile, x: f32, y: f32) -> Texel {
 fn pine(t: &Tile, x: f32, y: f32) -> Texel {
     let s = t.seed;
     let (u, v) = (x / t.wm, y / t.hm);
-    let wx = 0.018 * fbm(u, v, 2, 3, 3, 0.5, s + 1) + 0.005 * fbm(u, v, 18, 14, 2, 0.5, s + 2);
-    let wy = 0.02 * fbm(u, v, 3, 2, 3, 0.5, s + 3) + 0.004 * fbm(u, v, 14, 18, 2, 0.5, s + 4);
-    let stretch = 2.0;
+    // A strong, broad warp and joined cells keep the plates from looking alike: tall and
+    // narrow, short and broad, a few big ones.
+    let wx = 0.032 * fbm(u, v, 2, 3, 3, 0.5, s + 1) + 0.006 * fbm(u, v, 18, 14, 2, 0.5, s + 2);
+    let wy = 0.04 * fbm(u, v, 3, 2, 3, 0.5, s + 3) + 0.005 * fbm(u, v, 14, 18, 2, 0.5, s + 4);
+    let stretch = 2.4;
     let q = Vec2::new(x + wx, (y + wy) / stretch);
     let size = Vec2::new(t.wm, t.hm / stretch);
-    let cell = voronoi(q, size, (4, 3), 0.95, s + 5);
+    let cell = voronoi_merged(q, size, (5, 3), 0.95, 0.3, s + 5);
     let r = rnd(cell.id, 1);
     // Vertical fissures (neighbor to the side) are wide and deep, cross breaks narrow; their
     // width wanders, and here and there two plates nearly touch.
@@ -1166,8 +1232,7 @@ fn hazel(t: &Tile, x: f32, y: f32) -> Texel {
 fn stem(t: &Tile, x: f32, y: f32) -> Texel {
     let s = t.seed;
     let (u, v) = (x / t.wm, y / t.hm);
-    let fib = gnoise(u * 70.0, v * 5.0, 70, 5, s + 1) * 0.6
-        + gnoise(u * 160.0, v * 9.0, 160, 9, s + 2) * 0.4;
+    let fib = tile_noise(u, v, 70, 5, s + 1) * 0.6 + tile_noise(u, v, 160, 9, s + 2) * 0.4;
     let low = fbm(u, v, 2, 2, 3, 0.5, s + 3);
     let mut c = Vec3::splat(0.8) * (0.93 + 0.08 * low + 0.07 * fib);
     let (sd, _, _) = dashes(
@@ -1259,13 +1324,29 @@ fn wood_params(kind: BarkKind) -> WoodParams {
     }
 }
 
+/// The mean color (linear RGB) a kind's cut face is painted in inside the bark: what a cap
+/// shows under the [`CUT_VERTEX_WOOD`] vertex color. Tints of weathered cut faces are set
+/// relative to it.
+pub fn cut_wood_mean(kind: BarkKind) -> [f32; 3] {
+    let w = wood_params(kind);
+    // Heartwood fills heart_r² of the face; late wood darkens about a third of each ring.
+    let heart = w.heart_r * w.heart_r;
+    (w.sap.lerp(w.heart, heart) * (1.0 - 0.3 * w.late)).to_array()
+}
+
+/// Whether a kind of wood has a distinct, durable heartwood (oak, pine), which outlasts the
+/// sapwood around it as a stump rots, rather than rotting from the heart out (birch, spruce).
+pub fn has_heartwood(kind: BarkKind) -> bool {
+    wood_params(kind).heart_r > 0.0
+}
+
 /// Paint end grain at disc coordinates `p` (|p| ≤ 1).
 fn paint_cut(w: &WoodParams, seed: u64, p: Vec2) -> Texel {
     let r = p.length();
     let ang = p.y.atan2(p.x);
     // Noise on the plane of the disc (the period is far larger than the disc).
     let n2 = |q: Vec2, f: f32, oct: u32, salt: u64| {
-        fbm(
+        fbm_lattice(
             q.x * f / 64.0 + 0.5,
             q.y * f / 64.0 + 0.5,
             64,
@@ -1481,7 +1562,8 @@ mod tests {
                     .sum::<usize>()
             })
             .sum();
-        assert!(bytes < 24 << 20, "{} MB of bark textures", bytes >> 20);
+        // Every kind at about a millimeter per texel over a one-meter tile.
+        assert!(bytes < 96 << 20, "{} MB of bark textures", bytes >> 20);
     }
 
     #[test]

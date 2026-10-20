@@ -226,6 +226,8 @@ fn fighters_revive_before_and_after() {
     };
     let (mut up_at, mut glanced, mut set_down, mut sent_home) = (None, false, false, false);
     let (mut up_from, mut up_health, mut home_at) = (DVec3::ZERO, 0.0, None);
+    // When the mate's current kneel began (a revive it let go of starts over).
+    let (mut knelt_at, mut first_knelt) = (None, None);
     let before = [0.6, 1.5, 3.0, 4.5, 5.9];
     while t < 14.0 {
         app.update();
@@ -265,6 +267,14 @@ fn fighters_revive_before_and_after() {
         };
         let near = at(&app, mate).distance(chest_b);
         let kneeling = action == NpcAction::Revive && progress > 0.0;
+        if up_at.is_none() {
+            if !kneeling {
+                knelt_at = None;
+            } else if knelt_at.is_none() {
+                knelt_at = Some(t);
+                first_knelt.get_or_insert(t);
+            }
+        }
         if pictures[1][0].is_none() && t >= 0.6 {
             shot(
                 &mut app,
@@ -352,7 +362,22 @@ fn fighters_revive_before_and_after() {
     assert!(sent_home, "the lone fighter was not sent home");
     assert!(lies_a.distance(home) > 10.0);
     let up = up_at.expect("the squad mate never revived its ally");
-    assert!(up < 6.0, "revived after {up:.1} s (the timer's 6 s)");
+    // The mate has to be at it before the 6 s timer would send its ally home (the timer then
+    // waits for it), and once it is, the revive takes as long as the settings say, no longer.
+    let first = first_knelt.expect("the squad mate never knelt to revive");
+    let knelt = knelt_at.unwrap_or(first);
+    eprintln!("first knelt at {first:.2} s, last kneel from {knelt:.2} s, ally up at {up:.2} s");
+    assert!(
+        first < 6.0,
+        "began the revive at {first:.1} s (the timer's 6 s)"
+    );
+    let settings = app.world.resource::<NpcSettings>();
+    let takes = settings.ally_revive_secs as f64 * 1.2;
+    assert!(
+        up - knelt <= takes + 0.5,
+        "the revive took {:.1} s (the setting's {takes:.1} s)",
+        up - knelt
+    );
     assert_eq!(app.world.get::<NpcCombat>(mate).unwrap().stats.revives, 1);
     let moved = up_from.distance(lies_b);
     assert!(

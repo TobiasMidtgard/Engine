@@ -82,7 +82,10 @@ pub struct BodyMotion {
     pub speed: f32,
     /// Turn rate, rad/s (smoothed; positive turns left).
     pub yaw_rate: f32,
-    owners: [Owner; 3],
+    /// Which way it moves relative to where it faces, radians (smoothed): 0 ahead, positive
+    /// to the left, ±π backwards.
+    pub heading: f32,
+    owners: [Owner; 5],
 }
 
 /// Who sets one of a person's animation parameters.
@@ -97,7 +100,7 @@ enum Owner {
     Others,
 }
 
-const PARAMS: [&str; 3] = ["speed", "turn", "move_effort"];
+const PARAMS: [&str; 5] = ["speed", "turn", "move_effort", "blocking", "heading"];
 
 /// Build bodies for new or changed requests.
 pub(crate) fn answer_requests(world: &mut World) {
@@ -161,15 +164,33 @@ pub(crate) fn drive_bodies(
         turn =
             (turn + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
         motion.yaw_rate += (turn / dt - motion.yaw_rate) * smoothing(dt, 0.25);
+        // Heading follows the motion; standing still it drifts back to ahead (unseen, as the
+        // blends are all standing then) so a person sets off forwards.
+        let pi = std::f32::consts::PI;
+        let wrap = |a: f32| (a + pi).rem_euclid(std::f32::consts::TAU) - pi;
+        let ahead = velocity.dot(f.with_y(0.0).normalize_or_zero());
+        let left = velocity.dot(Vec3::new(f.z, 0.0, -f.x).normalize_or_zero());
+        let (target, tau) = if velocity.length() > 0.2 {
+            (left.atan2(ahead), 0.12)
+        } else {
+            (0.0, 0.5)
+        };
+        motion.heading = wrap(motion.heading + wrap(target - motion.heading) * smoothing(dt, tau));
         if body.kind != BodyKind::Human {
             continue;
         }
         let values = [
-            motion.speed,
-            (motion.yaw_rate / 1.2).clamp(-1.0, 1.0),
-            (motion.speed / EFFORT_SPEED).clamp(0.0, 1.0),
+            Some(motion.speed),
+            Some((motion.yaw_rate / 1.2).clamp(-1.0, 1.0)),
+            Some((motion.speed / EFFORT_SPEED).clamp(0.0, 1.0)),
+            // Holds the graph's block pose while the mover says it blocks.
+            locomotion.map(|l| if l.blocking { 1.0 } else { 0.0 }),
+            Some(motion.heading),
         ];
         for (i, (name, value)) in PARAMS.iter().zip(values).enumerate() {
+            let Some(value) = value else {
+                continue;
+            };
             let current = params.values.get(*name).copied();
             motion.owners[i] = match motion.owners[i] {
                 Owner::Wrote(w) if current != Some(w) => Owner::Others,

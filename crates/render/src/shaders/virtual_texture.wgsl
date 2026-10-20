@@ -4,14 +4,15 @@
 //
 // `vt_data` holds a header (frame, mip bias, cache side in texels, slots per row, slot levels),
 // one record per texture (size, root level, which cache, page table offsets per level, mean
-// color) and the page tables. An entry is the slot (bits 0-15) and level (16-20) of the finest
+// color, the texture at 4×4 texels) and the page tables. An entry is the slot (bits 0-15) and level (16-20) of the finest
 // resident tile covering that tile, bit 31 set; the root tile is always resident.
 
 const VT_TILE: u32 = 128u;
 const VT_BORDER: f32 = 8.0;
 const VT_SLOT: f32 = 144.0;
 const VT_HEADER_WORDS: u32 = 8u;
-const VT_INFO_WORDS: u32 = 24u;
+const VT_INFO_WORDS: u32 = 56u;
+const VT_LOW_WORD: u32 = 24u;
 const VT_MAX_ANISO: f32 = 8.0;
 
 @group(2) @binding(7) var<storage, read> vt_data: array<u32>;
@@ -75,6 +76,22 @@ fn vt_mean(id: u32) -> vec4<f32> {
     return vec4<f32>(unpack2x16float(vt_data[base + 20u]), unpack2x16float(vt_data[base + 21u]));
 }
 
+// Virtual texture `id` at 4×4 texels, bilinear at `uv` (wrapping): the level a whole texture's
+// mip chain has a few levels past the root slot's tail.
+fn vt_low(id: u32, uv: vec2<f32>) -> vec4<f32> {
+    let base = VT_HEADER_WORDS + (id - 1u) * VT_INFO_WORDS + VT_LOW_WORD;
+    let t = fract(uv) * 4.0 - 0.5;
+    let i = floor(t);
+    let f = t - i;
+    var c: array<vec4<f32>, 4>;
+    for (var k = 0u; k < 4u; k++) {
+        let xy = (vec2<i32>(i) + vec2<i32>(i32(k & 1u), i32(k >> 1u)) + 4) & vec2<i32>(3);
+        let w = base + u32(xy.y * 4 + xy.x) * 2u;
+        c[k] = vec4<f32>(unpack2x16float(vt_data[w]), unpack2x16float(vt_data[w + 1u]));
+    }
+    return mix(mix(c[0], c[1], f.x), mix(c[2], c[3], f.x), f.y);
+}
+
 // Sample virtual texture `id` at texture coordinate `uv` (wrapping, like the material sampler)
 // with screen derivatives `d1`, `d2`: trilinear and anisotropic, from the finest resident tile
 // at or above the wanted level.
@@ -125,9 +142,18 @@ fn vt_sample(id: u32, uv: vec2<f32>, d1: vec2<f32>, d2: vec2<f32>) -> vec4<f32> 
         c = textureSampleGrad(vt_cache_linear, vt_sampler, p, g1, g2);
     }
     // The root's slot holds the mip tail down to 16² (RGBA8; 32² with BC7). Beyond it the
-    // texture fades to its mean color over four levels, as the rest of a full mip chain would.
+    // record's 4×4 level takes over, then the mean color, as the rest of a full mip chain
+    // would.
     let tail_end = f32(root + vt_data[4]) - 1.0;
-    return mix(c, vt_mean(id), saturate((lod - tail_end) * 0.25));
+    if (lod <= tail_end) {
+        return c;
+    }
+    let low_level = floor(log2(f32(max(size.x, size.y)))) - 2.0;
+    let low = vt_low(id, uv);
+    if (lod < low_level) {
+        return mix(c, low, saturate((lod - tail_end) / max(low_level - tail_end, 1.0)));
+    }
+    return mix(low, vt_mean(id), saturate((lod - low_level) * 0.5));
 }
 
 // The debug view's color: the level shown (blue full detail .. white 7+), tile edges darker,

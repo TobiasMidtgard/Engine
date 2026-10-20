@@ -399,9 +399,18 @@ const HEX_CONTRAST: f32 = 0.6;
 // enough to keep its larger features whole.
 const HEX_GRID: f32 = 1.7320508;
 
+// Two numbers in [0, 1) from a hexagon's integer cell coordinates: an integer hash, so it is
+// the same on every GPU and on the CPU (`material::hex_hash`, which displacement uses).
 fn hex_hash(p: vec2<f32>) -> vec2<f32> {
-    let r = vec2<f32>(dot(p, vec2<f32>(127.1, 311.7)), dot(p, vec2<f32>(269.5, 183.3)));
-    return fract(sin(r) * 43758.5453);
+    var v = bitcast<vec2<u32>>(vec2<i32>(p));
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    return vec2<f32>(v >> vec2<u32>(8u)) * (1.0 / 16777216.0);
 }
 
 fn hex_rotation(v: vec2<f32>, rotate: bool) -> vec2<f32> {

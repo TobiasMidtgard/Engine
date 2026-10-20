@@ -22,6 +22,9 @@ use crate::demo::trail_point;
 pub(crate) const PATH_Y: f32 = 0.06;
 /// How far a tongue lies above the ground it overlaps, meters.
 const TONGUE_LIFT: f32 = 0.003;
+/// How far a tongue of leaf litter lies above the ground it overlaps: its own thickness, so
+/// it ends in a lip that catches the light and casts a shadow.
+const LITTER_LIFT: f32 = 0.009;
 
 /// Centre (relative to the origin), heading and right of the trail at `s`.
 pub(super) fn frame(s: f64) -> (Vec3, Vec3, Vec3) {
@@ -199,11 +202,16 @@ fn chunk(r: &Ribbon, ka: i64, kb: i64) -> Option<Part> {
             let surf = (r.surface)(s, x, wxz);
             look[i * w + j] = (surf.cover, surf.tint);
             let mut y = surf.y;
+            let lift = if r.mat == Mat::Forest {
+                LITTER_LIFT
+            } else {
+                TONGUE_LIFT
+            };
             if r.fade_in > 0.0 {
-                y += TONGUE_LIFT * (1.0 - smooth(r.s0 as f32, r.s0 as f32 + 0.3, s as f32));
+                y += lift * (1.0 - smooth(r.s0 as f32, r.s0 as f32 + 0.3, s as f32));
             }
             if r.fade_out > 0.0 {
-                y += TONGUE_LIFT * smooth(r.s1 as f32 - 0.3, r.s1 as f32, s as f32);
+                y += lift * smooth(r.s1 as f32 - 0.3, r.s1 as f32, s as f32);
             }
             pos[i * w + j] = flat + Vec3::Y * y;
             world[i * w + j] = wxz;

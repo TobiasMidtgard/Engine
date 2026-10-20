@@ -17,6 +17,14 @@
 //! 4. `draw_prepass`, `draw_scene`, `draw_shadow`: one `draw_indirect` per slot. The vertex
 //!    stage fetches its triangle corner from the cluster buffers (`cluster_fetch.wgsl`).
 //!
+//! Occlusion culling (`RenderSettings::virtual_geometry_occlusion`), two passes: step 3 also
+//! tests the camera's clusters against last frame's hierarchical depth (HZB) and sets aside
+//! those it hides. After the depth prepass, [`encode_late`](ClusterRenderer::encode_late)
+//! builds this frame's HZB from that depth (`cluster_hzb.wgsl`) and tests them again; the ones
+//! still visible go into late draw slots, drawn by
+//! [`draw_prepass_late`](ClusterRenderer::draw_prepass_late) and, with the rest, by
+//! `draw_scene`. The next frame starts from that HZB.
+//!
 //! Mesh data lives in four pools (vertices, indices, clusters, levels) that grow by copying
 //! on the GPU and hand out ranges to meshes, so adding a mesh never rebuilds the others. A
 //! later streaming step can fill the same pools page by page.
@@ -25,11 +33,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use engine_core::prelude::*;
 
-use super::{CLUSTER_TRIANGLES, ClusterDag, Sphere, build};
+use super::cache::{BuildCache, build_key};
+use super::{
+    CLUSTER_TRIANGLES, ClusterDag, Displacement, HeightField, Sphere, StableHasher, build,
+    tessellate,
+};
 use crate::features::{GpuShared, GrowBuffer};
 use crate::frame::ViewData;
 use crate::mesh::Mesh;
@@ -44,6 +57,7 @@ const CLUSTER_CULL: &str = include_str!("../shaders/cluster_cull.wgsl");
 const CLUSTER_FETCH: &str = include_str!("../shaders/cluster_fetch.wgsl");
 const CLUSTER_SCENE: &str = include_str!("../shaders/cluster.wgsl");
 const CLUSTER_SHADOW: &str = include_str!("../shaders/cluster_shadow.wgsl");
+const CLUSTER_HZB: &str = include_str!("../shaders/cluster_hzb.wgsl");
 
 /// Views culled every frame: the camera (0), the shadow cascades (1..=MAX_CASCADES), the sky
 /// occlusion map (`1 + SKY_OCCLUSION_VIEW`) and the far shadow map
@@ -62,9 +76,9 @@ const CLUSTER_VERTICES: u32 = 3 * CLUSTER_TRIANGLES as u32;
 /// `DrawIndirectArgs` per draw slot.
 const HEADER_BYTES: u64 = 128;
 const ARGS_BYTES: u64 = 16;
-/// Header words read back for stats: chunks, overflow, two unused, then triangles and
-/// clusters drawn per view.
-const COUNTER_WORDS: usize = 4 + 2 * VIEWS;
+/// Header words read back for stats: chunks, overflow, two unused, triangles and clusters
+/// drawn per view, then the camera clusters tested late and those still hidden.
+const COUNTER_WORDS: usize = 6 + 2 * VIEWS;
 const READBACKS: usize = 3;
 /// Most visible clusters in one draw slot.
 const MAX_SLOT_ENTRIES: u32 = 1 << 18;
@@ -76,7 +90,7 @@ const MAX_INSTANCES: usize = 600_000;
 /// kept for meshes under `SMALL_BUILD_TRIANGLES`.
 const MAX_LARGE_BUILDS: usize = 2;
 /// Meshes under this many triangles build in well under a second (in release builds).
-const SMALL_BUILD_TRIANGLES: usize = 200_000;
+pub const SMALL_BUILD_TRIANGLES: usize = 200_000;
 /// A mesh is built once its version has stayed the same for this many frames, so meshes
 /// that change every frame don't keep restarting builds (they stay on the instanced path).
 const SETTLE_FRAMES: u64 = 4;
@@ -85,7 +99,7 @@ const EVICT_AFTER_FRAMES: u64 = 600;
 
 /// The transform mirrors the mesh (`INSTANCE_MIRRORED` in `cluster_types.wgsl`).
 const INSTANCE_MIRRORED: u32 = 1;
-/// Normal cones are valid: single-sided, rigid, uniformly scaled.
+/// Normal cones are valid: single-sided, rotated and scaled without shear.
 const INSTANCE_CONE_CULL: u32 = 2;
 const INSTANCE_CASTS_SHADOWS: u32 = 4;
 
@@ -131,13 +145,70 @@ struct CullView {
 struct CullParams {
     counts: [u32; 4],
     views: [CullView; VIEWS],
+    occlusion: [[f32; 4]; 4],
+    current: [[f32; 4]; 4],
+    occlusion_eye: [f32; 4],
+    hzb: [u32; 4],
+    occ: [u32; 4],
+}
+
+/// Hierarchical depth for occlusion culling (`cluster_hzb.wgsl`): level 0 is half the depth
+/// buffer, each level half the one before, down to 1 x 1.
+struct Hzb {
+    /// Every level, for culling.
+    view: wgpu::TextureView,
+    /// One view per level, for building.
+    levels: Vec<wgpu::TextureView>,
+    /// Depth buffer size it is made for.
+    depth_size: [u32; 2],
+    size: [u32; 2],
+    /// Camera-relative view-projection and camera position of the frame it holds, once built.
+    built: Option<(Mat4, DVec3)>,
+}
+
+impl Hzb {
+    fn new(device: &wgpu::Device, depth_size: [u32; 2]) -> Self {
+        let size = depth_size.map(|s| (s / 2).max(1));
+        let count = 32 - size[0].max(size[1]).leading_zeros();
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cluster hzb"),
+            size: wgpu::Extent3d {
+                width: size[0],
+                height: size[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: count,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let levels = (0..count)
+            .map(|level| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    base_mip_level: level,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        Self {
+            view,
+            levels,
+            depth_size,
+            size,
+            built: None,
+        }
+    }
 }
 
 /// One entity drawn as clusters this frame.
 #[derive(Debug, Clone, Copy)]
 pub struct ClusterInstance {
-    /// Mesh asset index (see [`ClusterRenderer::ready`]).
-    pub mesh: u32,
+    /// Key of the built mesh (see [`ClusterRenderer::ready`]).
+    pub mesh: u64,
     /// Camera-relative model matrix.
     pub model: Mat4,
     /// Last frame's model matrix, relative to last frame's camera (motion vectors).
@@ -166,6 +237,101 @@ pub struct ClusterStats {
     pub overflow: u32,
     /// Indirect draws issued this frame.
     pub draw_calls: u32,
+}
+
+/// What a build turns into clusters: a mesh, or a base mesh to tessellate and displace first.
+pub struct BuildJob {
+    pub mesh: Mesh,
+    pub displacement: Option<DisplacedJob>,
+}
+
+/// The displacement part of a [`BuildJob`].
+pub struct DisplacedJob {
+    pub displacement: Displacement,
+    /// Resolved amplitude, meters ([`Displacement::amplitude_for`]).
+    pub amplitude: f32,
+    pub field: Arc<dyn HeightField>,
+    /// Identifies the field's data for the build cache (its texels, or its parameters).
+    pub field_key: u64,
+}
+
+impl BuildJob {
+    /// What besides the mesh's own data decides the build (0 for a plain mesh).
+    fn extra_key(&self) -> u64 {
+        match &self.displacement {
+            None => 0,
+            Some(d) => {
+                let mut h = StableHasher::new(0xd15b_1ace);
+                h.write_u64(d.displacement.settings_key());
+                h.write_u64(d.field_key);
+                h.write_u32(d.amplitude.to_bits());
+                h.finish()
+            }
+        }
+    }
+
+    /// Build (or load from `cache`) the cluster hierarchy. Runs on a build thread.
+    fn run(self, cache: Option<BuildCache>) -> BuildOutput {
+        let started = Instant::now();
+        let key = cache
+            .as_ref()
+            .map(|_| build_key(&self.mesh, self.extra_key()));
+        if let (Some(cache), Some(key)) = (&cache, key)
+            && let Some(dag) = cache.load(key)
+        {
+            return BuildOutput {
+                dag,
+                cached: true,
+                seconds: started.elapsed().as_secs_f32(),
+                cache_bytes: 0,
+            };
+        }
+        let mesh = match self.displacement {
+            Some(d) => tessellate(&self.mesh, &d.displacement, d.amplitude, d.field.as_ref()),
+            None => self.mesh,
+        };
+        let dag = build(&mesh);
+        drop(mesh);
+        let mut cache_bytes = 0;
+        if let (Some(cache), Some(key)) = (&cache, key) {
+            match cache.store(key, &dag) {
+                Ok(bytes) => cache_bytes = bytes,
+                Err(e) => tracing::warn!(
+                    "could not write the cluster cache in {}: {e}",
+                    cache.dir.display()
+                ),
+            }
+        }
+        BuildOutput {
+            dag,
+            cached: false,
+            seconds: started.elapsed().as_secs_f32(),
+            cache_bytes,
+        }
+    }
+}
+
+struct BuildOutput {
+    dag: ClusterDag,
+    /// Loaded from the disk cache instead of built.
+    cached: bool,
+    seconds: f32,
+    /// Bytes written to the cache (0 when loaded or not cached).
+    cache_bytes: u64,
+}
+
+/// Cluster builds since startup: how many were built and loaded from the disk cache, and the
+/// time they took (on their background threads).
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+pub struct BuildStats {
+    pub built: u32,
+    pub loaded: u32,
+    pub build_seconds: f32,
+    pub load_seconds: f32,
+    /// Triangles of the meshes clustered (after displacement).
+    pub source_triangles: u64,
+    /// Bytes written to the disk cache.
+    pub cache_bytes_written: u64,
 }
 
 /// Free ranges of a pool (start, length), sorted by start and merged; first fit.
@@ -311,11 +477,11 @@ struct Entry {
 }
 
 struct Build {
-    mesh: u32,
+    mesh: u64,
     version: u64,
     /// Under `SMALL_BUILD_TRIANGLES`.
     small: bool,
-    handle: JoinHandle<ClusterDag>,
+    handle: JoinHandle<BuildOutput>,
 }
 
 const FREE: u8 = 0;
@@ -331,12 +497,12 @@ struct Readback {
 
 /// Composed sources of the cluster shaders, before `compose_shader`: (label, source, whether
 /// they need the frame library). For shader validation.
-pub fn shader_sources() -> [(&'static str, String, bool); 3] {
+pub fn shader_sources() -> [(&'static str, String, bool); 4] {
     shader_sources_for(true)
 }
 
 /// [`shader_sources`] with virtual texture feedback writes on or compiled out.
-pub fn shader_sources_for(feedback_writes: bool) -> [(&'static str, String, bool); 3] {
+pub fn shader_sources_for(feedback_writes: bool) -> [(&'static str, String, bool); 4] {
     let mesh = mesh_source(feedback_writes);
     let mesh_shadow = mesh_shadow_source(feedback_writes);
     [
@@ -361,6 +527,7 @@ pub fn shader_sources_for(feedback_writes: bool) -> [(&'static str, String, bool
             .join("\n"),
             false,
         ),
+        ("cluster_hzb", CLUSTER_HZB.to_string(), false),
     ]
 }
 
@@ -374,6 +541,11 @@ pub struct ClusterRenderer {
     cull_dispatch: wgpu::ComputePipeline,
     cull_clusters: wgpu::ComputePipeline,
     cull_finish: wgpu::ComputePipeline,
+    cull_late_dispatch: wgpu::ComputePipeline,
+    cull_late: wgpu::ComputePipeline,
+    cull_late_finish: wgpu::ComputePipeline,
+    hzb_from_depth: wgpu::ComputePipeline,
+    hzb_reduce: wgpu::ComputePipeline,
     /// Scene and prepass pipelines, indexed by double-sided.
     scene: [wgpu::RenderPipeline; 2],
     prepass: [wgpu::RenderPipeline; 2],
@@ -395,12 +567,27 @@ pub struct ClusterRenderer {
     visible_capacity: u64,
     dispatch: wgpu::Buffer,
     dispatch_group: wgpu::BindGroup,
+    hzb: Hzb,
+    /// Camera clusters to test again after the prepass.
+    late_list: wgpu::Buffer,
+    late_capacity: u32,
+    /// Occlusion culling this frame: the late pass runs, its slots start here.
+    late: bool,
+    late_first: u32,
+    /// This frame's camera-relative view-projection and camera position.
+    frame_view: (Mat4, DVec3),
+    /// Read back: camera clusters last frame's depth hid, and of those, this frame's too.
+    late_tested: u32,
+    occluded: u32,
     /// Rebuilt when a buffer they bind is recreated.
     cull_group: Option<wgpu::BindGroup>,
     draw_group: Option<wgpu::BindGroup>,
 
-    meshes: HashMap<u32, Entry>,
+    meshes: HashMap<u64, Entry>,
     running: Vec<Build>,
+    /// Where finished builds are kept on disk (None: no cache).
+    cache: Option<BuildCache>,
+    builds: BuildStats,
     frame: u64,
 
     pending: Vec<ClusterInstance>,
@@ -452,6 +639,16 @@ impl ClusterRenderer {
                 layout_entry(4, compute, storage(false)),
                 layout_entry(5, compute, storage(false)),
                 layout_entry(6, compute, storage(false)),
+                layout_entry(
+                    7,
+                    compute,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
+                layout_entry(8, compute, storage(false)),
             ],
         });
         let dispatch_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -465,7 +662,8 @@ impl ClusterRenderer {
                 .collect::<Vec<_>>(),
         });
 
-        let [cull_source, scene_source, shadow_source] = shader_sources_for(feedback_writes(gpu));
+        let [cull_source, scene_source, shadow_source, hzb_source] =
+            shader_sources_for(feedback_writes(gpu));
         let cull_shader = gpu.shader("cluster cull", &cull_source.1, false);
         let with_dispatch = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("cluster cull"),
@@ -493,6 +691,22 @@ impl ClusterRenderer {
         let cull_dispatch = compute_pipeline(&with_dispatch, "cs_dispatch");
         let cull_clusters = compute_pipeline(&without_dispatch, "cs_clusters");
         let cull_finish = compute_pipeline(&without_dispatch, "cs_finish");
+        let cull_late_dispatch = compute_pipeline(&with_dispatch, "cs_cluster_late_dispatch");
+        let cull_late = compute_pipeline(&without_dispatch, "cs_cluster_late");
+        let cull_late_finish = compute_pipeline(&without_dispatch, "cs_cluster_late_finish");
+        let hzb_shader = gpu.shader("cluster hzb", &hzb_source.1, false);
+        let hzb_pipeline = |entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: None,
+                module: &hzb_shader,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let hzb_from_depth = hzb_pipeline("cs_vg_hzb_from_depth");
+        let hzb_reduce = hzb_pipeline("cs_vg_hzb_reduce");
 
         let scene_shader = gpu.shader("cluster", &scene_source.1, true);
         let scene_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -596,7 +810,7 @@ impl ClusterRenderer {
             })
         };
         use wgpu::BufferUsages as U;
-        let dispatch = buffer("cluster dispatch", 16, U::STORAGE | U::INDIRECT);
+        let dispatch = buffer("cluster dispatch", 32, U::STORAGE | U::INDIRECT);
         let dispatch_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("cluster dispatch"),
             layout: &dispatch_layout,
@@ -622,6 +836,11 @@ impl ClusterRenderer {
             cull_dispatch,
             cull_clusters,
             cull_finish,
+            cull_late_dispatch,
+            cull_late,
+            cull_late_finish,
+            hzb_from_depth,
+            hzb_reduce,
             scene,
             prepass,
             shadow,
@@ -653,10 +872,20 @@ impl ClusterRenderer {
             visible_capacity: 4096,
             dispatch,
             dispatch_group,
+            hzb: Hzb::new(device, [1, 1]),
+            late_list: buffer("cluster late list", 8 * 1024, U::STORAGE),
+            late_capacity: 1024,
+            late: false,
+            late_first: 0,
+            frame_view: (Mat4::IDENTITY, DVec3::ZERO),
+            late_tested: 0,
+            occluded: 0,
             cull_group: None,
             draw_group: None,
             meshes: HashMap::new(),
             running: Vec::new(),
+            cache: None,
+            builds: BuildStats::default(),
             frame: 0,
             pending: Vec::new(),
             gpu_instances: Vec::new(),
@@ -693,33 +922,50 @@ impl ClusterRenderer {
                 continue; // the mesh changed while it was being built
             }
             entry.state = match result {
-                Ok(dag) => match upload(
-                    gpu,
-                    [
-                        &mut self.vertices,
-                        &mut self.indices,
-                        &mut self.clusters,
-                        &mut self.levels,
-                    ],
-                    self.max_bytes,
-                    &dag,
-                ) {
-                    Some(gpu_dag) => {
-                        // Pools may have been recreated.
-                        self.cull_group = None;
-                        self.draw_group = None;
-                        State::Ready(gpu_dag)
+                Ok(BuildOutput {
+                    dag,
+                    cached,
+                    seconds,
+                    cache_bytes,
+                }) => {
+                    if cached {
+                        self.builds.loaded += 1;
+                        self.builds.load_seconds += seconds;
+                    } else {
+                        self.builds.built += 1;
+                        self.builds.build_seconds += seconds;
                     }
-                    None => {
-                        tracing::warn!(
-                            "mesh {} ({} clusters) does not fit in GPU memory; drawing it \
+                    self.builds.source_triangles += dag.source_triangles as u64;
+                    self.builds.cache_bytes_written += cache_bytes;
+                    let uploaded = upload(
+                        gpu,
+                        [
+                            &mut self.vertices,
+                            &mut self.indices,
+                            &mut self.clusters,
+                            &mut self.levels,
+                        ],
+                        self.max_bytes,
+                        &dag,
+                    );
+                    match uploaded {
+                        Some(gpu_dag) => {
+                            // Pools may have been recreated.
+                            self.cull_group = None;
+                            self.draw_group = None;
+                            State::Ready(gpu_dag)
+                        }
+                        None => {
+                            tracing::warn!(
+                                "mesh {} ({} clusters) does not fit in GPU memory; drawing it \
                              without virtual geometry",
-                            b.mesh,
-                            dag.clusters.len()
-                        );
-                        State::Failed
+                                b.mesh,
+                                dag.clusters.len()
+                            );
+                            State::Failed
+                        }
                     }
-                },
+                }
                 Err(_) => {
                     tracing::error!(
                         "building clusters of mesh {} failed; drawing it without virtual geometry",
@@ -733,7 +979,7 @@ impl ClusterRenderer {
         // Meshes nobody drew for a while.
         if self.frame.is_multiple_of(120) {
             let frame = self.frame;
-            let stale: Vec<u32> = self
+            let stale: Vec<u64> = self
                 .meshes
                 .iter()
                 .filter(|(_, e)| e.last_used + EVICT_AFTER_FRAMES < frame)
@@ -772,6 +1018,8 @@ impl ClusterRenderer {
                         self.stats.shadow_triangles =
                             triangles[1..].iter().map(|&t| t as u64).sum();
                         self.stats.shadow_clusters = clusters[1..].iter().sum();
+                        self.late_tested = words[4 + 2 * VIEWS];
+                        self.occluded = words[5 + 2 * VIEWS];
                     }
                     rb.buffer.unmap();
                     rb.state.store(FREE, Ordering::Release);
@@ -785,10 +1033,24 @@ impl ClusterRenderer {
         }
     }
 
-    /// Whether mesh `mesh` (asset index) at `version` can be drawn as clusters. The first call
-    /// for a mesh (or a new version of it) starts building its clusters in the background;
-    /// until they are on the GPU this returns false and the mesh should be drawn as usual.
-    pub fn ready(&mut self, mesh: u32, version: u64, data: &Mesh) -> bool {
+    /// Keep finished builds on disk in `cache` (None: build every time).
+    pub fn set_cache(&mut self, cache: Option<BuildCache>) {
+        self.cache = cache;
+    }
+
+    /// Whether the mesh `mesh` (a key naming the mesh and anything it is built with, such as
+    /// its displacement) at `version` can be drawn as clusters. The first call for a key (or a
+    /// new version of it) starts building its clusters in the background from what `job`
+    /// returns (called only then); until they are on the GPU this returns false and the mesh
+    /// should be drawn as usual. `small` builds (under 200 000 triangles) get a slot of their
+    /// own.
+    pub fn ready(
+        &mut self,
+        mesh: u64,
+        version: u64,
+        small: bool,
+        job: impl FnOnce() -> Option<BuildJob>,
+    ) -> bool {
         let frame = self.frame;
         let entry = self.meshes.entry(mesh).or_insert(Entry {
             version,
@@ -814,7 +1076,6 @@ impl ClusterRenderer {
         }
         // Small meshes (a damaged wall being rebuilt) have a build slot of their own, so they
         // never wait behind large builds.
-        let small = data.indices.len() / 3 < SMALL_BUILD_TRIANGLES;
         let large_running = self.running.iter().filter(|b| !b.small).count();
         let slot_free = self.running.len() < MAX_LARGE_BUILDS + 1
             && (small || large_running < MAX_LARGE_BUILDS);
@@ -823,10 +1084,13 @@ impl ClusterRenderer {
         match entry.state {
             State::Ready(_) => true,
             State::Waiting if slot_free && settled => {
-                let copy = data.clone();
+                let Some(job) = job() else {
+                    return false;
+                };
+                let cache = self.cache.clone();
                 match std::thread::Builder::new()
                     .name("cluster build".into())
-                    .spawn(move || build(&copy))
+                    .spawn(move || job.run(cache))
                 {
                     Ok(handle) => {
                         entry.state = State::Building;
@@ -849,7 +1113,7 @@ impl ClusterRenderer {
     }
 
     /// Mesh-space bounding sphere of a mesh [`ready`](Self::ready) to be drawn as clusters.
-    pub fn bounds(&self, mesh: u32) -> Option<Sphere> {
+    pub fn bounds(&self, mesh: u64) -> Option<Sphere> {
         match self.meshes.get(&mesh) {
             Some(Entry {
                 state: State::Ready(dag),
@@ -926,16 +1190,25 @@ impl ClusterRenderer {
             let axes = [model.x_axis, model.y_axis, model.z_axis].map(|a| a.truncate());
             let lengths = axes.map(Vec3::length);
             let scale = lengths[0].max(lengths[1]).max(lengths[2]);
-            // Normal cones survive rotation and uniform scale (not shear or stretch).
-            let conformal = lengths[0].min(lengths[1]).min(lengths[2]) >= scale * 0.99
+            // Normal cones survive rotation and scale, uniform or not (not shear): a scale
+            // along the axes turns a normal's angle to the cone axis from a to at most
+            // asin(stretch * sin a), stretch = largest^2 / (middle * smallest) scale.
+            let smallest = lengths[0].min(lengths[1]).min(lengths[2]);
+            let middle = lengths[0] + lengths[1] + lengths[2] - scale - smallest;
+            let orthogonal = smallest > 1e-6
                 && [(0, 1), (1, 2), (0, 2)]
                     .iter()
                     .all(|&(a, b)| axes[a].dot(axes[b]).abs() <= 0.01 * scale * scale);
+            let stretch = if orthogonal {
+                scale * scale / (middle * smallest)
+            } else {
+                f32::INFINITY
+            };
             let mut flags = 0;
             if Mat3::from_mat4(model).determinant() < 0.0 {
                 flags |= INSTANCE_MIRRORED;
             }
-            if !inst.double_sided && conformal {
+            if !inst.double_sided && stretch < 4.0 {
                 flags |= INSTANCE_CONE_CULL;
             }
             let views = 1 + if inst.casts_shadows {
@@ -954,7 +1227,7 @@ impl ClusterRenderer {
                 extra: [inst.material, flags, base.extra[2], base.extra[3]],
                 sphere: [center.x, center.y, center.z, dag.bounds.radius * scale],
                 mesh: [dag.levels.0 as u32, dag.levels.1 as u32, bucket, 0],
-                lod: [scale, 0.0, 0.0, 0.0],
+                lod: [scale, stretch.min(4.0), 0.0, 0.0],
             });
             entries += dag.clusters.1;
             chunks += dag.chunks as u64 * views;
@@ -969,13 +1242,19 @@ impl ClusterRenderer {
             return;
         }
 
-        // Draw slots: the camera's buckets, then one per shadow view that is on.
+        // Draw slots: the camera's buckets, then one per shadow view that is on, then the
+        // camera's buckets again for the clusters occlusion culling draws late.
         let mut slots = self.buckets.len() as u32;
         for (v, on) in shadow_views.iter().enumerate() {
             if *on {
                 self.shadow_slots[v] = Some(slots);
                 slots += 1;
             }
+        }
+        self.late = settings.virtual_geometry_occlusion;
+        self.late_first = slots;
+        if self.late {
+            slots += self.buckets.len() as u32;
         }
         // Every slot's list holds as many clusters as the instances have, within the limits
         // of a draw's vertex index (slot * entries * vertices < 2^32) and of the device.
@@ -996,6 +1275,21 @@ impl ClusterRenderer {
             });
             self.cull_group = None;
             self.draw_group = None;
+        }
+        if per_slot > self.late_capacity {
+            self.late_capacity = per_slot.next_power_of_two();
+            self.late_list = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("cluster late list"),
+                size: self.late_capacity as u64 * 8,
+                usage: U::STORAGE,
+                mapped_at_creation: false,
+            });
+            self.cull_group = None;
+        }
+        let depth_size = [view.width.max(1), view.height.max(1)];
+        if self.hzb.depth_size != depth_size {
+            self.hzb = Hzb::new(device, depth_size);
+            self.cull_group = None;
         }
         let chunk_capacity = (chunks.min(MAX_CHUNKS as u64) as u32).max(1);
         if chunk_capacity > self.chunk_capacity {
@@ -1079,6 +1373,16 @@ impl ClusterRenderer {
             cull.lod = [texels_per_meter, shadow_threshold, 1.0, min_radius];
             cull.slots = [slot, 1, per_slot, 1];
         }
+        // Occlusion: the HZB holds last frame's depth when the camera didn't cut.
+        self.frame_view = (view.view_proj, view.origin);
+        let previous = self
+            .hzb
+            .built
+            .filter(|_| self.late && view.history_valid && !view.orthographic);
+        let (occlusion, eye_offset) = match previous {
+            Some((view_proj, origin)) => (view_proj, (view.origin - origin).as_vec3()),
+            None => (Mat4::IDENTITY, Vec3::ZERO),
+        };
         let params = CullParams {
             counts: [
                 self.gpu_instances.len() as u32,
@@ -1087,6 +1391,23 @@ impl ClusterRenderer {
                 self.buckets.len() as u32,
             ],
             views,
+            occlusion: occlusion.to_cols_array_2d(),
+            current: view.view_proj.to_cols_array_2d(),
+            occlusion_eye: eye_offset
+                .extend(previous.is_some() as u32 as f32)
+                .to_array(),
+            hzb: [
+                self.hzb.size[0],
+                self.hzb.size[1],
+                self.hzb.levels.len() as u32,
+                self.late_first,
+            ],
+            occ: [
+                depth_size[0],
+                depth_size[1],
+                self.late_capacity.min(per_slot),
+                self.late as u32,
+            ],
         };
         gpu.queue
             .write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
@@ -1101,7 +1422,7 @@ impl ClusterRenderer {
             .write_buffer(&self.draws, 0, bytemuck::cast_slice(&draws));
 
         if self.cull_group.is_none() {
-            let entries: [&wgpu::Buffer; 7] = [
+            let buffers: [&wgpu::Buffer; 7] = [
                 &self.params,
                 &self.instances.buffer,
                 &self.clusters.buffer,
@@ -1110,12 +1431,27 @@ impl ClusterRenderer {
                 &self.draws,
                 &self.visible,
             ];
-            self.cull_group = Some(bind_buffers(
-                device,
-                "cluster cull",
-                &self.cull_layout,
-                &entries,
-            ));
+            let mut entries: Vec<wgpu::BindGroupEntry> = buffers
+                .iter()
+                .enumerate()
+                .map(|(i, b)| wgpu::BindGroupEntry {
+                    binding: i as u32,
+                    resource: b.as_entire_binding(),
+                })
+                .collect();
+            entries.push(wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(&self.hzb.view),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 8,
+                resource: self.late_list.as_entire_binding(),
+            });
+            self.cull_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("cluster cull"),
+                layout: &self.cull_layout,
+                entries: &entries,
+            }));
         }
         if self.draw_group.is_none() {
             let entries: [&wgpu::Buffer; 5] = [
@@ -1135,7 +1471,8 @@ impl ClusterRenderer {
         self.slots = slots;
         self.active = true;
         // Prepass and scene per bucket, one per shadow view.
-        self.stats.draw_calls = 2 * self.buckets.len() as u32 + shadow_count as u32;
+        self.stats.draw_calls =
+            (2 + self.late as u32 * 2) * self.buckets.len() as u32 + shadow_count as u32;
     }
 
     /// Cull every view and fill the draw slots (the mesh feature's compute).
@@ -1170,6 +1507,90 @@ impl ClusterRenderer {
             pass.set_pipeline(&self.cull_finish);
             pass.dispatch_workgroups(self.slots.div_ceil(WORKGROUP), 1, 1);
         }
+        // With occlusion culling the counters are final after the late pass.
+        if !self.late {
+            self.read_counters(encoder);
+        }
+    }
+
+    /// Occlusion culling, after the depth prepass drew what [`encode_culling`] found visible:
+    /// build the HZB from `depth` (the prepass depth, reverse-Z), test the clusters last
+    /// frame's HZB hid against it, and fill the late draw slots with those still visible.
+    /// True when there are late slots to draw ([`draw_prepass_late`]).
+    ///
+    /// [`encode_culling`]: Self::encode_culling
+    /// [`draw_prepass_late`]: Self::draw_prepass_late
+    pub fn encode_late(
+        &mut self,
+        gpu: &GpuShared,
+        encoder: &mut wgpu::CommandEncoder,
+        depth: &wgpu::TextureView,
+    ) -> bool {
+        if !self.active || !self.late {
+            return false;
+        }
+        let Some(cull) = &self.cull_group else {
+            return false;
+        };
+        let device = &gpu.device;
+        // The HZB: level 0 from the depth, then each level from the one before.
+        {
+            let mut groups = Vec::with_capacity(self.hzb.levels.len());
+            for (level, out) in self.hzb.levels.iter().enumerate() {
+                let (pipeline, input) = if level == 0 {
+                    (&self.hzb_from_depth, (1, depth))
+                } else {
+                    (&self.hzb_reduce, (2, &self.hzb.levels[level - 1]))
+                };
+                let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("cluster hzb"),
+                    layout: &pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(out),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: input.0,
+                            resource: wgpu::BindingResource::TextureView(input.1),
+                        },
+                    ],
+                });
+                groups.push((pipeline, group));
+            }
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("cluster hzb"),
+                timestamp_writes: None,
+            });
+            for (level, (pipeline, group)) in groups.iter().enumerate() {
+                let size = self.hzb.size.map(|s| (s >> level).max(1));
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, group, &[]);
+                pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
+            }
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("cluster culling: late"),
+                timestamp_writes: None,
+            });
+            pass.set_bind_group(0, cull, &[]);
+            pass.set_bind_group(1, &self.dispatch_group, &[]);
+            pass.set_pipeline(&self.cull_late_dispatch);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(&self.cull_late);
+            pass.set_bind_group(0, cull, &[]);
+            pass.dispatch_workgroups_indirect(&self.dispatch, 16);
+            pass.set_pipeline(&self.cull_late_finish);
+            pass.dispatch_workgroups((self.buckets.len() as u32).div_ceil(WORKGROUP), 1, 1);
+        }
+        self.hzb.built = Some(self.frame_view);
+        self.read_counters(encoder);
+        true
+    }
+
+    /// Copy this frame's counters for [`stats`](Self::stats), once its culling is recorded.
+    fn read_counters(&mut self, encoder: &mut wgpu::CommandEncoder) {
         if let Some(slot) = self
             .readbacks
             .iter()
@@ -1193,17 +1614,19 @@ impl ClusterRenderer {
         pass: &mut wgpu::RenderPass<'_>,
         pipelines: &'a [wgpu::RenderPipeline; 2],
         textures: impl Fn(u32) -> Option<&'a wgpu::BindGroup>,
+        first_slot: u32,
     ) {
         let Some(group) = self.draw_group.as_ref().filter(|_| self.active) else {
             return;
         };
-        for (slot, &(double, set)) in self.buckets.iter().enumerate() {
+        for (bucket, &(double, set)) in self.buckets.iter().enumerate() {
             pass.set_pipeline(&pipelines[double as usize]);
             if let Some(t) = textures(set) {
                 pass.set_bind_group(2, t, &[]);
             }
             pass.set_bind_group(3, group, &[]);
-            pass.draw_indirect(&self.draws, HEADER_BYTES + ARGS_BYTES * slot as u64);
+            let slot = first_slot as u64 + bucket as u64;
+            pass.draw_indirect(&self.draws, HEADER_BYTES + ARGS_BYTES * slot);
         }
     }
 
@@ -1214,7 +1637,19 @@ impl ClusterRenderer {
         pass: &mut wgpu::RenderPass<'_>,
         textures: impl Fn(u32) -> Option<&'a wgpu::BindGroup>,
     ) {
-        self.draw_camera(pass, &self.prepass, textures);
+        self.draw_camera(pass, &self.prepass, textures, 0);
+    }
+
+    /// Draw the clusters occlusion culling found visible late into the prepass (after
+    /// [`encode_late`](Self::encode_late) returned true).
+    pub fn draw_prepass_late<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'_>,
+        textures: impl Fn(u32) -> Option<&'a wgpu::BindGroup>,
+    ) {
+        if self.late {
+            self.draw_camera(pass, &self.prepass, textures, self.late_first);
+        }
     }
 
     /// Draw the camera's clusters into the scene (opaque phase; group 1 bound).
@@ -1223,7 +1658,10 @@ impl ClusterRenderer {
         pass: &mut wgpu::RenderPass<'_>,
         textures: impl Fn(u32) -> Option<&'a wgpu::BindGroup>,
     ) {
-        self.draw_camera(pass, &self.scene, textures);
+        self.draw_camera(pass, &self.scene, &textures, 0);
+        if self.late {
+            self.draw_camera(pass, &self.scene, &textures, self.late_first);
+        }
     }
 
     /// Draw the clusters of shadow cascade `cascade`, of the sky occlusion map when it is
@@ -1250,6 +1688,11 @@ impl ClusterRenderer {
         self.stats
     }
 
+    /// Builds since startup.
+    pub fn build_stats(&self) -> BuildStats {
+        self.builds
+    }
+
     /// State for `render.stats`.
     pub fn describe(&self) -> serde_json::Value {
         let count = |f: fn(&State) -> bool| self.meshes.values().filter(|e| f(&e.state)).count();
@@ -1264,6 +1707,13 @@ impl ClusterRenderer {
             "stats": self.stats,
             "pool_bytes": pool_bytes,
             "buckets": self.buckets.len(),
+            "builds": self.builds,
+            "occlusion": {
+                "on": self.late,
+                "tested_late": self.late_tested,
+                "occluded": self.occluded,
+            },
+            "cache_dir": self.cache.as_ref().map(|c| c.dir.display().to_string()),
         })
     }
 }
@@ -1421,7 +1871,10 @@ mod tests {
         assert_eq!(std::mem::size_of::<GpuInstance>(), 208);
         assert_eq!(std::mem::size_of::<GpuCluster>(), 96);
         assert_eq!(std::mem::size_of::<CullView>(), 160);
-        assert_eq!(std::mem::size_of::<CullParams>(), 16 + 160 * VIEWS);
+        assert_eq!(
+            std::mem::size_of::<CullParams>(),
+            16 + 160 * VIEWS + 128 + 48
+        );
         assert_eq!(CLUSTER_VERTICES, 384);
     }
 

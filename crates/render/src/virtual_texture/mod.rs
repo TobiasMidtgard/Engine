@@ -45,8 +45,9 @@
 //! slots of 144² texels (the tile plus an 8-texel border copied from its neighbors, so bilinear,
 //! trilinear and up to 8× anisotropic filtering never see a seam). Each slot has its own mip
 //! levels (coarser copies of the tile), so the hardware filters trilinearly between a tile and
-//! its next coarser level with one lookup, and the root tile's slot holds the mip tail, beyond
-//! which the texture fades to its mean color. With
+//! its next coarser level with one lookup, and the root tile's slot holds the mip tail. Beyond
+//! it the texture's 4×4 level (kept in its page-table record) and then its mean color stand
+//! in, the same levels a whole texture's mip chain has. With
 //! `RenderSettings::virtual_texture_compression` and a device that supports it, the cache is
 //! BC7-compressed (a quarter of the memory); otherwise RGBA8.
 //!

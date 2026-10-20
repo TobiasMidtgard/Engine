@@ -47,13 +47,20 @@
 //! 200 000 triangles have a build slot of their own so they never wait behind large builds.
 
 mod build;
+mod cache;
+mod displace;
 mod gpu;
 mod simplify;
 
 pub use build::build;
+pub use cache::{BUILDER_VERSION, BuildCache, build_key, default_dir as default_cache_dir};
+pub use displace::{
+    Displacement, DisplacementSource, HeightField, HeightFunction, HeightImage,
+    MaterialHeightField, StableHasher, tessellate,
+};
 pub use gpu::{
-    ClusterInstance, ClusterRenderer, ClusterStats, FAR_SHADOW_CLUSTERS, shader_sources,
-    shader_sources_for,
+    BuildJob, BuildStats, ClusterInstance, ClusterRenderer, ClusterStats, DisplacedJob,
+    FAR_SHADOW_CLUSTERS, SMALL_BUILD_TRIANGLES, shader_sources, shader_sources_for,
 };
 
 use engine_core::math::Vec3;

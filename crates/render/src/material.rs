@@ -112,6 +112,81 @@ impl TextureMapping {
             TextureMapping::AntiTiled { projection, .. } => projection,
         }
     }
+
+    /// A small number that tells mappings apart (for cache keys).
+    pub fn key(self) -> u32 {
+        match self {
+            TextureMapping::Uv => 0,
+            TextureMapping::Triplanar => 1,
+            TextureMapping::TriplanarWorld => 2,
+            TextureMapping::AntiTiled { projection, rotate } => {
+                4 + projection as u32 * 2 + rotate as u32
+            }
+        }
+    }
+}
+
+/// Hex-tiling of [`TextureMapping::AntiTiled`] on the CPU, as `anti_tiles` and `tiled_height`
+/// in `mesh.wgsl` compute it up close (where the shader's blend is sharpest): the three
+/// hexagons around texture coordinate `uv` (1 = one tile), as (texture coordinate to sample,
+/// weight) pairs whose weights sum to 1. Displacement uses it so geometry follows the same
+/// hexagons the shading shows.
+pub fn hex_tiles(uv: [f32; 2], rotate: bool) -> [([f32; 2], f32); 3] {
+    const HEX_GRID: f32 = 1.732_050_8;
+    const HEX_SHARPNESS: i32 = 7;
+    let s = [uv[0] * HEX_GRID, uv[1] * HEX_GRID];
+    let skew = [s[0] - 0.577_350_27 * s[1], 1.154_700_5 * s[1]];
+    let cell = [skew[0].floor(), skew[1].floor()];
+    let f = [skew[0] - cell[0], skew[1] - cell[1]];
+    let z = 1.0 - f[0] - f[1];
+    let flip = if z < 0.0 { 1.0 } else { 0.0 };
+    let sgn = 2.0 * flip - 1.0;
+    let w = [-z * sgn, flip - f[1] * sgn, flip - f[0] * sgn];
+    let v = [
+        [cell[0] + flip, cell[1] + flip],
+        [cell[0] + flip, cell[1] + 1.0 - flip],
+        [cell[0] + 1.0 - flip, cell[1] + flip],
+    ];
+    let wp = w.map(|w| w.max(0.0).powi(HEX_SHARPNESS));
+    let total = (wp[0] + wp[1] + wp[2]).max(1e-6);
+    std::array::from_fn(|i| {
+        let v = v[i];
+        let r = if rotate {
+            let a = (hex_hash([v[0] + 17.0, v[1] + 3.0])[0] * 2.0 - 1.0) * std::f32::consts::PI;
+            [a.cos(), a.sin()]
+        } else {
+            [1.0, 0.0]
+        };
+        let center = [
+            (v[0] + 0.5 * v[1]) / HEX_GRID,
+            v[1] / 1.154_700_5 / HEX_GRID,
+        ];
+        let d = [uv[0] - center[0], uv[1] - center[1]];
+        let offset = hex_hash(v);
+        let p = [
+            r[0] * d[0] - r[1] * d[1] + center[0] + offset[0],
+            r[1] * d[0] + r[0] * d[1] + center[1] + offset[1],
+        ];
+        (p, wp[i] / total)
+    })
+}
+
+/// `hex_hash` in `mesh.wgsl`: two numbers in [0, 1) from a hexagon's integer cell
+/// coordinates, the same bit for bit on the CPU and the GPU.
+pub fn hex_hash(p: [f32; 2]) -> [f32; 2] {
+    let mut v = [p[0] as i32 as u32, p[1] as i32 as u32];
+    let m = |x: u32| x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    v = [m(v[0]), m(v[1])];
+    v[0] = v[0].wrapping_add(v[1].wrapping_mul(1_664_525));
+    v[1] = v[1].wrapping_add(v[0].wrapping_mul(1_664_525));
+    v = [v[0] ^ (v[0] >> 16), v[1] ^ (v[1] >> 16)];
+    v[0] = v[0].wrapping_add(v[1].wrapping_mul(1_664_525));
+    v[1] = v[1].wrapping_add(v[0].wrapping_mul(1_664_525));
+    v = [v[0] ^ (v[0] >> 16), v[1] ^ (v[1] >> 16)];
+    [
+        (v[0] >> 8) as f32 / 16_777_216.0,
+        (v[1] >> 8) as f32 / 16_777_216.0,
+    ]
 }
 
 /// Physically based material (metallic/roughness workflow).
@@ -652,5 +727,59 @@ mod tests {
             brick.key(),
             StandardMaterial::preset(MaterialPreset::Rock).key()
         );
+    }
+
+    #[test]
+    fn hex_tiles_blend_continuously_with_weights_summing_to_one() {
+        // A smooth, periodic stand-in for a height map.
+        let height = |p: [f32; 2]| {
+            let t = std::f32::consts::TAU;
+            (p[0] * t).sin() * 0.5 + (p[1] * t * 2.0).cos() * 0.25
+        };
+        let tiled = |uv: [f32; 2], rotate: bool| -> f32 {
+            hex_tiles(uv, rotate)
+                .iter()
+                .map(|(p, w)| w * height(*p))
+                .sum()
+        };
+        for rotate in [false, true] {
+            let mut worst = 0.0f32;
+            for i in 0..4000 {
+                let uv = [i as f32 * 0.00731 - 7.0, i as f32 * 0.00413 - 3.0];
+                let sum: f32 = hex_tiles(uv, rotate).iter().map(|(_, w)| w).sum();
+                assert!((sum - 1.0).abs() < 1e-4, "weights sum to {sum}");
+                // A step of 1/4096 of a tile changes the height by little: no seams.
+                let step = 1.0 / 4096.0;
+                let d = (tiled([uv[0] + step, uv[1]], rotate) - tiled(uv, rotate)).abs();
+                worst = worst.max(d);
+            }
+            assert!(
+                worst < 0.02,
+                "rotate {rotate}: jump of {worst} between neighbors"
+            );
+        }
+        // Rotated and plain hexagons differ, so the option does something.
+        assert_ne!(
+            hex_tiles([0.3, 0.7], true)[0].0,
+            hex_tiles([0.3, 0.7], false)[0].0
+        );
+    }
+
+    #[test]
+    fn hex_hash_is_pinned() {
+        // `hex_hash` in mesh.wgsl must give the same numbers: change both or neither.
+        // (Values from the integer math worked by hand: 24-bit results over 2^24.)
+        let unit = 1.0 / 16_777_216.0;
+        for (p, expect) in [
+            ([0.0, 0.0], [1_631_281.0, 351_732.0]),
+            ([-3.0, 5.0], [4_535_027.0, 8_934_057.0]),
+            ([17.0, 3.0], [9_209_228.0, 9_275_636.0]),
+        ] {
+            assert_eq!(
+                hex_hash(p),
+                [expect[0] * unit, expect[1] * unit],
+                "at {p:?}"
+            );
+        }
     }
 }

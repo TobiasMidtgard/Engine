@@ -104,6 +104,13 @@ pub fn smooth(a: f32, b: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Quintic step from 0 at `a` to 1 at `b` (flat at both ends, so a slope it shapes eases in
+/// and out over more of its width than [`smooth`]).
+#[inline]
+pub fn smoother(a: f32, b: f32, x: f32) -> f32 {
+    quintic(((x - a) / (b - a)).clamp(0.0, 1.0))
+}
+
 /// A period that never repeats in practice, for world-space noise.
 pub const NO_WRAP: i32 = 1 << 20;
 
@@ -678,13 +685,25 @@ pub fn beveled_box(
     uv_offset: Vec2,
     color: impl Fn(Vec3) -> Vec4,
 ) -> Mesh {
+    beveled_box_segs(size, bevel, Vec3::splat(seg), uv_offset, color)
+}
+
+/// [`beveled_box`] with its own split length per axis (`seg.x` for faces' extent along x,
+/// and so on), for boxes that bend or carry colour detail one way only.
+pub fn beveled_box_segs(
+    size: Vec3,
+    bevel: f32,
+    seg: Vec3,
+    uv_offset: Vec2,
+    color: impl Fn(Vec3) -> Vec4,
+) -> Mesh {
     let h = size * 0.5;
     let b = bevel.min(h.min_element() * 0.95).max(1e-4);
     let inner = h - Vec3::splat(b);
     let coords = |axis: usize| -> Vec<f32> {
         let (ha, ia) = (h[axis], inner[axis]);
         let mut c = vec![-ha, -ha + b * 0.3, -ia];
-        let n = ((2.0 * ia) / seg).ceil().max(1.0) as usize;
+        let n = ((2.0 * ia) / seg[axis]).ceil().max(1.0) as usize;
         for k in 1..n {
             c.push(-ia + 2.0 * ia * k as f32 / n as f32);
         }

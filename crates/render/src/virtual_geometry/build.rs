@@ -593,7 +593,7 @@ fn simplify_group(
 }
 
 /// `f` over `items` on up to four threads, results in order.
-fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+pub(super) fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let threads = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
         .clamp(1, 4);

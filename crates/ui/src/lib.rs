@@ -26,6 +26,7 @@ pub mod style;
 pub mod text;
 pub mod theme;
 pub mod toast;
+pub mod wheel;
 pub mod widgets;
 
 pub use color::Color;
@@ -100,6 +101,7 @@ impl Plugin for UiPlugin {
             widgets::add_painters(&mut painters);
             hud::add_painters(&mut painters);
             map::add_painters(&mut painters);
+            wheel::add_painters(&mut painters);
         }
         app.init_resource::<items::ItemDatabase>()
             .init_resource::<dialogue::DialogueLibrary>()
@@ -145,6 +147,12 @@ impl Plugin for UiPlugin {
                 quests::build_screen,
             );
             screens.add(
+                "wheel",
+                "The quick-select wheel: weapons, items and abilities around a ring, picked by pointing (mouse or either stick), a click, Enter or A, or a number key. The world slows to `slow` (default 0.2) while it is open. `items` are slots (id, icon, label, kind, count, details, color, action, data, disabled, instant = used at once, not taken in hand; default: UiData wheel.items); `current` is the id in hand; `hold` (a key name like \"Tab\") and/or `hold_pad` (a pad button like \"LeftBumper\") pick the pointed slot when released.",
+                r#"{"current": "pistol", "slow": 0.2, "hold": "Tab"}"#,
+                wheel::build_screen,
+            );
+            screens.add(
                 "pause",
                 "The pause menu (stops game time while open): resume, inventory, journal, map, settings, save, quit.",
                 "{}",
@@ -177,6 +185,7 @@ impl Plugin for UiPlugin {
                 hud::hud_system,
                 map::map_system,
                 quests::quests_system,
+                wheel::wheel_system,
                 menus::menus_system,
             ),
         )

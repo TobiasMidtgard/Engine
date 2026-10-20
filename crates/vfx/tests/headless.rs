@@ -1,7 +1,8 @@
 //! Renders particles offscreen and checks the pixels: glowing particles appear where their
 //! emitter is (also 30 000 km from the world origin), a spell's light brightens the ground
 //! around it, smoke lit by the sun covers what's behind it, nearer puffs cover farther ones,
-//! an engine plume shows shock diamonds only in air, and marks change the ground. Needs a GPU or a software
+//! an engine plume shows shock diamonds only in air, a splash's crown shows where it stands
+//! and nowhere else, and marks change the ground. Needs a GPU or a software
 //! Vulkan driver (lavapipe); passes with a note when neither is available (`RenderDisabled`),
 //! unless `ENGINE_REQUIRE_GPU=1`.
 
@@ -368,6 +369,57 @@ fn a_plume_shows_shock_diamonds_in_air_but_not_in_a_vacuum() {
         contrast[0] > 20.0 && contrast[0] > contrast[1] * 2.0 + 10.0,
         "diamonds should stand out in air but not in a vacuum: knots - gaps {contrast:?}"
     );
+}
+
+#[test]
+fn a_splash_crown_stands_out_of_the_ground_and_nothing_else_changes() {
+    let mut app = app(DVec3::ZERO, 30_000.0);
+    let Some(before) = shot(&mut app, "vfx_crown_before.png") else {
+        return;
+    };
+    let crown = EffectDesc {
+        name: "test.crown".into(),
+        emitters: vec![EmitterDesc {
+            bursts: vec![engine_vfx::Burst {
+                count: 1,
+                ..Default::default()
+            }],
+            speed: [0.0, 0.0],
+            gravity: 0.0,
+            lifetime: [1.0, 1.0],
+            size: [3.0, 3.0],
+            sprite: Sprite::Crown,
+            lit: 1.0,
+            color: Gradient::constant([1.0, 1.0, 1.0, 1.0]),
+            wind: 0.0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    app.world
+        .resource_mut::<EffectLibrary>()
+        .insert(crown)
+        .unwrap();
+    app.world.spawn((
+        Transform::from_translation(DVec3::ZERO),
+        ParticleEffect::new("test.crown"),
+    ));
+    // A third of the way through, the crown stands at its full height.
+    app.update_n(8);
+    let after = shot(&mut app, "vfx_crown_after.png").unwrap();
+    // Its wall leans out to about 1 m and stands about 1 m tall. Glassy water shows faintly
+    // against the bright ground, most where it mirrors the sky at a glance.
+    let mut most = 0.0f32;
+    for i in 0..=20 {
+        for j in 1..=4 {
+            let at = project(DVec3::new(-1.2 + i as f64 * 0.12, j as f64 * 0.2, 0.0));
+            most = most.max((luma(&after, at, 1) - luma(&before, at, 1)).abs());
+        }
+    }
+    assert!(most > 10.0, "the crown's wall should show: {most}");
+    let away = project(DVec3::new(3.5, 0.5, 0.0));
+    let off = (luma(&after, away, 2) - luma(&before, away, 2)).abs();
+    assert!(off < 3.0, "nothing beyond the crown should change: {off}");
 }
 
 #[test]

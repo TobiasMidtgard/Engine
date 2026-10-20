@@ -75,7 +75,7 @@ pub struct Library {
     pub props: Props,
     /// Dry-stone wall segment variants and the heads that end a run.
     pub walls: Vec<WallHandles>,
-    pub wall_heads: Vec<(Handle<Mesh>, Handle<Mesh>)>,
+    pub wall_heads: Vec<Handle<Mesh>>,
     /// The spaceport's 600 m tower.
     pub tower: crate::tower::TowerKit,
 }
@@ -83,10 +83,8 @@ pub struct Library {
 /// One dry-stone wall segment variant (see [`crate::walls`]).
 pub struct WallHandles {
     pub near: Handle<Mesh>,
-    pub mid: Handle<Mesh>,
-    /// For the last segment of a run (its coping leaves room for the head).
+    /// For the last segment of a run (its stones leave room for the head).
     pub near_end: Handle<Mesh>,
-    pub mid_end: Handle<Mesh>,
     /// The core: dark behind the stones (the run's last segment's stops inside the head),
     /// stone-colored from afar.
     pub core: Handle<Mesh>,
@@ -217,26 +215,36 @@ pub fn build_library(
         near: (meshes.add(lamp.0.0), meshes.add(lamp.0.1)),
         far: (meshes.add(lamp.1.0), meshes.add(lamp.1.1)),
     };
-    let walls = (0..4)
-        .map(|i| {
-            let w = crate::walls::segment(900 + i);
-            WallHandles {
-                near: meshes.add(w.near),
-                mid: meshes.add(w.mid),
-                near_end: meshes.add(w.near_end),
-                mid_end: meshes.add(w.mid_end),
-                core: meshes.add(w.core),
-                core_end: meshes.add(w.core_end),
-                core_far: meshes.add(w.core_far),
-            }
+    // Hundreds of sculpted stones a variant: built side by side.
+    let (segments, heads) = std::thread::scope(|scope| {
+        let segments: Vec<_> = (0..4)
+            .map(|i| scope.spawn(move || crate::walls::segment(900 + i)))
+            .collect();
+        let heads: Vec<_> = (0..3)
+            .map(|i| scope.spawn(move || crate::walls::head(950 + i)))
+            .collect();
+        (
+            segments
+                .into_iter()
+                .map(|h| h.join().expect("wall builder"))
+                .collect::<Vec<_>>(),
+            heads
+                .into_iter()
+                .map(|h| h.join().expect("wall builder"))
+                .collect::<Vec<_>>(),
+        )
+    });
+    let walls = segments
+        .into_iter()
+        .map(|w| WallHandles {
+            near: meshes.add(w.near),
+            near_end: meshes.add(w.near_end),
+            core: meshes.add(w.core),
+            core_end: meshes.add(w.core_end),
+            core_far: meshes.add(w.core_far),
         })
         .collect();
-    let wall_heads = (0..3)
-        .map(|i| {
-            let h = crate::walls::head(950 + i);
-            (meshes.add(h.near), meshes.add(h.mid))
-        })
-        .collect();
+    let wall_heads = heads.into_iter().map(|h| meshes.add(h.near)).collect();
     engine::core::log::info!(
         "village: {} house types ({} triangles near, {} far), built in {:.2} s",
         houses.len(),
@@ -533,18 +541,13 @@ pub fn spawn_meadows(commands: &mut Commands, lib: &Library, land: &Landscape, r
             let tf = Transform::from_translation(DVec3::new(x, h - 0.03, z))
                 .with_rotation(tilt * Quat::from_rotation_y(rng.range(0.0, TAU)))
                 .with_scale(Vec3::new(1.0, rng.range(0.8, 1.3), 1.0));
-            let k = rng.range_i32(0, lib.grass.len() as i32) as usize;
-            commands.spawn((
-                tf,
-                MeshRenderer::new(lib.grass[k], lib.mats.grass).without_shadows(),
-                // Full blades up close; thin out gradually instead of ending in a hard line.
-                Lod::swap_then_hide(
-                    lib.grass[k],
-                    lib.grass_mid[k],
-                    rng.range(20.0, 26.0),
-                    rng.range(45.0, 95.0),
-                ),
-            ));
+            // The grass itself is the GPU meadow ([`spawn_meadow_grass`]); these draws stay so
+            // the scenery spawned after the meadows keeps its layout.
+            let _ = (
+                rng.range_i32(0, lib.grass.len() as i32),
+                rng.range(20.0, 26.0),
+                rng.range(45.0, 95.0),
+            );
             // Wildflowers in drifts.
             let drift = engine::core::math::noise::perlin2(x / 40.0, z / 40.0, 77);
             if !forest && drift > 0.15 && rng.chance(0.6) {
@@ -558,6 +561,112 @@ pub fn spawn_meadows(commands: &mut Commands, lib: &Library, land: &Landscape, r
             }
         }
     }
+}
+
+/// Side of the square the valley's GPU meadow covers, m, and its map's grid points per side.
+const MEADOW_SIZE: f32 = 1400.0;
+const MEADOW_GRID: u32 = 1001;
+/// Zones whose own modules grow grass blades over their ground.
+const OWN_GRASS_ZONES: &[&str] = &["forest", "meadow", "footsteps"];
+
+/// How thickly the valley's grass grows at (x, z), 0..1, and how dry it is.
+fn meadow_cover(land: &Landscape, x: f64, z: f64) -> (f32, f32) {
+    let r = (x * x + z * z).sqrt();
+    if r > MEADOW_SIZE as f64 * 0.5 || in_hard_zone(x, z) {
+        return (0.0, 0.0);
+    }
+    if ZONES.iter().any(|zn| {
+        OWN_GRASS_ZONES.contains(&zn.key)
+            && DVec2::new(x - zn.center.x, z - zn.center.z).length() < zn.radius
+    }) {
+        return (0.0, 0.0);
+    }
+    // (Below the lake's level only counts by the lake: the valley floor dips under it too.)
+    if land.lake_t(x, z) < 1.3 && land.lake_depth(x, z) > -0.3 {
+        return (0.0, 0.0);
+    }
+    let h = land.height(x, z);
+    let cover = land.cover(x, z, h, land.normal(x, z, 1.5));
+    let mut density = match cover {
+        Cover::Grass => 1.0,
+        // Thin grass in the woods' shade.
+        Cover::Forest => 0.3,
+        _ => return (0.0, 0.0),
+    };
+    // Crop fields are their own, with grass along their margins; young green crops are short,
+    // sparse blades all over (low density grows them short).
+    if let Some((crop, edge)) = land.field_at(x, z)
+        && crop != Crop::Pasture
+    {
+        let inside = if crop == Crop::Young { 0.4 } else { 0.0 };
+        density *= 1.0 - (1.0 - inside) * engine::core::math::smoothstep(1.2, 2.4, edge as f32);
+        if crop == Crop::Young {
+            return (density, 0.0);
+        }
+    }
+    // Thinner on the high, rocky pastures and in patches.
+    let patches = engine::core::math::noise::perlin2(x / 13.0, z / 13.0, 91) * 0.5 + 0.5;
+    let high = engine::core::math::smoothstep(250.0, 600.0, h as f32);
+    density *= (1.0 - high * 0.6) * (0.65 + 0.35 * patches);
+    (density, land.grass_dryness(x, z))
+}
+
+/// The valley's meadows as GPU grass: one field of blades over the whole valley floor, thick
+/// on the pastures, thin under the trees and along the field margins, none on roads, water,
+/// fields and paved zones; yellowing where the ground paint shows hay and dry grass.
+pub fn spawn_meadow_grass(commands: &mut Commands, land: &Landscape) {
+    let t0 = std::time::Instant::now();
+    // A million grid points: sampled a band of rows per core.
+    let n = MEADOW_GRID as usize;
+    let mut maps = vec![(0.0f32, 0.0f32, 0.0f32); n * n];
+    let threads = std::thread::available_parallelism().map_or(4, |c| c.get());
+    let rows_per = n.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (band, chunk) in maps.chunks_mut(rows_per * n).enumerate() {
+            scope.spawn(move || {
+                for (k, out) in chunk.iter_mut().enumerate() {
+                    let (i, j) = (k % n, band * rows_per + k / n);
+                    let x = (i as f64 / (n - 1) as f64 - 0.5) * MEADOW_SIZE as f64;
+                    let z = (j as f64 / (n - 1) as f64 - 0.5) * MEADOW_SIZE as f64;
+                    let (density, dryness) = meadow_cover(land, x, z);
+                    // Roots a touch into the ground, so the terrain's coarser rows far off
+                    // don't leave blades hanging.
+                    *out = (land.height(x, z) as f32 - 0.03, density, dryness);
+                }
+            });
+        }
+    });
+    let field = GrassField {
+        size: [MEADOW_SIZE; 2],
+        resolution: [MEADOW_GRID; 2],
+        heights: maps.iter().map(|m| m.0).collect(),
+        density: maps.iter().map(|m| m.1).collect(),
+        dryness: maps.iter().map(|m| m.2).collect(),
+        ..Default::default()
+    }
+    .with_style(GrassStyle {
+        blades_per_m2: 520.0,
+        height: 0.36,
+        height_variation: 0.55,
+        width: 0.011,
+        bend: 0.38,
+        // The ground paint's meadow greens and hay, a little brighter for the blades' tips.
+        // (Lighter than the paint: the blades shade each other.)
+        lush_color: [0.09, 0.18, 0.042],
+        dry_color: [0.24, 0.21, 0.085],
+        // Far enough that the meadow thins out into the painted ground, not at a line.
+        draw_distance: 120.0,
+        shadow_distance: 22.0,
+        ..Default::default()
+    });
+    let covered = field.density.iter().filter(|&&d| d > 0.05).count();
+    engine::core::log::info!(
+        "scenery: GPU meadow {:.0} m across, grass on {:.0}% of it, mapped in {:.2} s",
+        MEADOW_SIZE,
+        100.0 * covered as f32 / field.density.len() as f32,
+        t0.elapsed().as_secs_f32()
+    );
+    commands.spawn((Transform::default(), field));
 }
 
 /// Near a scarp, where the cliff builds its own rock face and talus.
@@ -1381,8 +1490,10 @@ pub fn spawn_farms(
 const WALL_CELLS: i32 = 17;
 /// Walls end here, m from the middle of the valley.
 const WALL_RADIUS: f64 = 700.0;
-/// Stones up close within this distance, m; only their fronts out to the second.
-const WALL_NEAR: f32 = 30.0;
+/// The stones show within this distance, m (virtual geometry thins them out on the way).
+const WALL_STONES: f32 = 260.0;
+/// The core turns stone-colored beyond this distance, m, where the chinks no longer show; past
+/// [`WALL_STONES`] it stands for the whole wall.
 const WALL_MID: f32 = 160.0;
 /// Shorter runs of wall than this many segments are left out: stubs read as rubble.
 const WALL_MIN_RUN: usize = 3;
@@ -1464,7 +1575,7 @@ pub fn plan_walls(
         land.road_weight(p.x, p.y) > 0.0
             || in_zone(p.x, p.y, 6.0)
             || land.pad_weight(p.x, p.y) > 0.5
-            || land.lake_depth(p.x, p.y) > -0.6
+            || (land.lake_t(p.x, p.y) < 1.3 && land.lake_depth(p.x, p.y) > -0.6)
             || p.length() > WALL_RADIUS + 40.0
     };
     let pick = |run: u64, i: u64, salt: u64, n: usize| {
@@ -1594,22 +1705,23 @@ pub fn spawn_walls(
 ) {
     use crate::walls::{HALF_FOOT, HEIGHT, SEGMENT, SINK};
     let plan = plan_walls(land, hedged, lib.walls.len(), lib.wall_heads.len());
-    let stone = lib.mats.village.stone;
+    // The boulders' rock: albedo, normal and occlusion maps under each stone's own tint.
+    let stone = lib.rocks.mats.rock;
     for seg in &plan.segments {
         let w = &lib.walls[seg.variant];
         let flip = if seg.mirrored { -1.0 } else { 1.0 };
         let tf = Transform::from_translation(seg.pos)
             .with_rotation(seg.rot)
             .with_scale(Vec3::new(flip * seg.len / SEGMENT, 1.0, 1.0));
-        let (near, mid, core) = if seg.end {
-            (w.near_end, w.mid_end, w.core_end)
+        let (near, core) = if seg.end {
+            (w.near_end, w.core_end)
         } else {
-            (w.near, w.mid, w.core)
+            (w.near, w.core)
         };
         commands.spawn((
             tf,
             MeshRenderer::new(near, stone),
-            Lod::swap_then_hide(near, mid, WALL_NEAR, WALL_MID),
+            Lod::hide_beyond(near, WALL_STONES),
         ));
         commands.spawn((
             tf,
@@ -1626,11 +1738,11 @@ pub fn spawn_walls(
         ));
     }
     for head in &plan.heads {
-        let (near, mid) = lib.wall_heads[head.variant];
+        let near = lib.wall_heads[head.variant];
         commands.spawn((
             Transform::from_translation(head.pos).with_rotation(head.rot),
             MeshRenderer::new(near, stone),
-            Lod::swap_then_hide(near, mid, WALL_NEAR, WALL_MID),
+            Lod::hide_beyond(near, WALL_STONES),
         ));
     }
     let nearest = plan
@@ -1689,6 +1801,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_meadow_grows_on_pastures_but_not_on_roads_water_or_paved_zones() {
+        let land = crate::landscape::shared();
+        let (mut grassy, mut total) = (0, 0);
+        for i in -60..=60 {
+            for j in -60..=60 {
+                let (x, z) = (i as f64 * 10.0 + 3.0, j as f64 * 10.0 + 7.0);
+                let (density, dryness) = meadow_cover(land, x, z);
+                assert!((0.0..=1.0).contains(&density) && (0.0..=1.0).contains(&dryness));
+                total += 1;
+                if density > 0.0 {
+                    grassy += 1;
+                    // Up to the ragged verge of a track, not on it.
+                    assert!(
+                        !matches!(land.cover_at(x, z), Cover::Dirt | Cover::Cobble),
+                        "on a road at {x}, {z}"
+                    );
+                    assert!(land.lake_t(x, z) > 1.0, "in the lake at {x}, {z}");
+                    assert!(!in_hard_zone(x, z), "in a paved zone at {x}, {z}");
+                }
+            }
+        }
+        // Most of the valley floor is meadow.
+        assert!(grassy * 2 > total, "grass on {grassy} of {total} samples");
+    }
+
+    #[test]
     fn walls_enclose_the_valley_floor_but_keep_off_roads_zones_and_water() {
         let land = crate::landscape::shared();
         let plan = plan_walls(land, &[], 4, 3);
@@ -1712,10 +1850,7 @@ mod tests {
             let (x, z) = (s.pos.x, s.pos.z);
             assert_eq!(land.road_weight(x, z), 0.0, "on a road at {x:.0}, {z:.0}");
             assert!(!in_zone(x, z, 6.0), "in a zone at {x:.0}, {z:.0}");
-            assert!(
-                land.lake_depth(x, z) < -0.6,
-                "in the lake at {x:.0}, {z:.0}"
-            );
+            assert!(land.lake_t(x, z) > 1.2, "in the lake at {x:.0}, {z:.0}");
             assert!(s.variant < 4);
             assert!(
                 (s.pos.y - land.height(x, z)).abs() < 0.5,

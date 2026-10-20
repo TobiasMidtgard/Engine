@@ -2,7 +2,8 @@
 //! cache must look like the same texture uploaded whole, close up and at grazing angles (no
 //! seams), load only coarse tiles for far views, stay within the cache while flying, never show
 //! black or magenta while tiles stream in, and work in every material path (normal maps, sRGB
-//! and linear data, triplanar, parallax, alpha-masked shadows, the cluster path, instancing).
+//! and linear data, triplanar, parallax, alpha-masked shadows, the cluster path, displaced
+//! clusters, instancing).
 //! Also checks that anti-tiling breaks up a repeated texture. Needs a GPU or a software Vulkan
 //! driver (lavapipe); passes with a note when neither is available.
 //!
@@ -732,6 +733,62 @@ fn every_material_path_matches_the_whole_textures() {
         stats.textures, 4,
         "color, normal, height and cutout are virtual: {stats:?}"
     );
+    assert!(
+        d.mean < 3.0 && d.worst_block < 12.0,
+        "virtual differs from whole: mean {}, p99 {}, worst 8x8 block {}",
+        d.mean,
+        d.p99,
+        d.worst_block
+    );
+}
+
+/// Displaced geometry (virtual geometry clusters, tessellated on the CPU from the material's
+/// height map) with virtual color, normal and height maps, anti-tiled: the relief follows the
+/// same hexagons the shading shows, and the clusters (drawn in the early and the late
+/// occlusion-culling prepass) drive the tile feedback. Must match the scene with whole textures.
+#[test]
+fn displaced_clusters_with_virtual_textures_match_the_whole_textures() {
+    let color = ground_image(2048);
+    let normal = normal_image(2048);
+    let height = height_image(2048);
+    let Some((a, b, stats)) = render_both(
+        "displaced",
+        DVec3::new(0.15, 0.4, 0.55),
+        DVec3::new(0.0, 0.0, 0.0),
+        |s| s.virtual_geometry_occlusion = true,
+        true,
+        |app| {
+            let color = add_image(app, color.clone());
+            let normal = add_image(app, normal.clone());
+            let height = add_image(app, height.clone());
+            let material = StandardMaterial::color(1.0, 1.0, 1.0)
+                .with_base_color_texture(color)
+                .with_normal_texture(normal)
+                .with_height_texture(height, 0.03)
+                .with_texture_scale(0.5)
+                .with_anti_tiling(true);
+            app.world.spawn((
+                Transform::default(),
+                MeshRenderer::new(
+                    Shape::Plane {
+                        size: [1.2, 1.2],
+                        subdivisions: 4,
+                    },
+                    material,
+                ),
+                Displacement::material_height(0.03).with_edges(0.006, 0.024),
+            ));
+        },
+    ) else {
+        return;
+    };
+    let d = compare(&a, &b);
+    eprintln!("displaced: {:?} {stats:?}", (d.mean, d.p99, d.worst_block));
+    assert_eq!(
+        stats.textures, 3,
+        "color, normal and height are virtual: {stats:?}"
+    );
+    assert_no_black_or_magenta(&a, "displaced, virtual");
     assert!(
         d.mean < 3.0 && d.worst_block < 12.0,
         "virtual differs from whole: mean {}, p99 {}, worst 8x8 block {}",
