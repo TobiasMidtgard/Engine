@@ -10,7 +10,8 @@
 //! `<surface>_ab.wav` (both, a second apart) and `<surface>_response.wav` (recorded: light,
 //! normal and heavy walkers, a run, then the ground soaked by rain and a puddle). Without the
 //! fetched recordings "after" is the synthesis too. `--takes` also writes every take of each
-//! surface (`takes_<surface>.wav`) and lists them; `--dir` reads the recordings from another
+//! surface (`takes_<surface>.wav`), lists them and writes each one's noise floor, tail level
+//! and length (`takes.csv`); `--dir` reads the recordings from another
 //! folder than `assets/fetched/audio/footsteps`.
 
 use std::path::PathBuf;
@@ -145,6 +146,19 @@ fn main() {
         t0.elapsed().as_secs_f32()
     );
     if args.iter().any(|a| a == "--takes") {
+        // Every take's cleanliness and length in its recording, for measuring the cutter.
+        let mut csv = String::from("surface,source,gait,floor_db,tail_db,len_40_s,len_s\n");
+        for (name, set) in &bank.surfaces {
+            for t in &set.takes {
+                let s = t.stats;
+                csv += &format!(
+                    "{name},{},{:?},{:.1},{:.1},{:.3},{:.3}\n",
+                    t.source, t.gait, s.floor_db, s.tail_db, s.len_40_s, s.len_s
+                );
+            }
+        }
+        std::fs::create_dir_all(&out).expect("create the output folder");
+        std::fs::write(out.join("takes.csv"), csv).expect("write takes.csv");
         for (name, set) in &bank.surfaces {
             let mut all = Vec::new();
             let mut sources: std::collections::BTreeMap<&str, (usize, usize)> = Default::default();

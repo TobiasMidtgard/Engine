@@ -886,6 +886,7 @@ fn recorded_takes_play_where_there_are_some_and_the_synthesis_everywhere_else() 
         sample_rate: fs,
         gait: Gait::Walk,
         source: "tone".into(),
+        stats: Default::default(),
     };
     let heard = |surface: &str, recorded: bool| {
         let mut app = app();

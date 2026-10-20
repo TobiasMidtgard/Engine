@@ -3,9 +3,12 @@
 //! The recordings are CC0 and CC-BY Freesound previews listed in
 //! `assets/manifests/audio.toml` and fetched to `assets/fetched/audio/footsteps/<surface>/`
 //! (`cargo run -p fetch-assets -- audio`). Each file holds a run of steps; loading cuts it
-//! into one take per step (where the envelope jumps), drops the ones that are not a clean step
-//! (a jump, a scrape, a step much quieter than its neighbours), labels each one walk or run,
-//! and normalizes every take to the same loudness.
+//! into one take per step (where the envelope jumps, until it falls back to the noise before
+//! it, at most 0.35 s on hard ground and 0.6 s on soft), drops the ones that are not a clean
+//! step (a jump, a scrape, a step much quieter than its neighbours, one less than
+//! [`MIN_SNR_DB`] over the recording's hiss), labels each one walk or run, and normalizes
+//! every take to the same loudness. A surface left with fewer than [`MIN_TAKES`] takes is
+//! synthesized.
 //!
 //! A footstep then plays one take, picked at random but never one of the last few on that
 //! surface, slightly re-pitched and re-levelled, brighter for heavier and faster steps, and
@@ -49,6 +52,23 @@ pub struct Take {
     pub gait: Gait,
     /// Which recording it came from (the file name without extension).
     pub source: Arc<str>,
+    /// How clean and how long it was in its recording.
+    pub stats: TakeStats,
+}
+
+/// What the cutter measured of a take in its recording, on the 10 ms envelope: dB are
+/// relative to the step's peak, so `-floor_db` is its signal-to-noise ratio.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TakeStats {
+    /// The recording's noise just before the onset (the quietest tenth of the 0.3 s before
+    /// it), dB.
+    pub floor_db: f32,
+    /// Level of the take's last 100 ms, dB.
+    pub tail_db: f32,
+    /// How long the step stays within 40 dB of its peak, s.
+    pub len_40_s: f32,
+    /// The take's length, s.
+    pub len_s: f32,
 }
 
 /// Silence kept before each take's onset, s.
@@ -159,7 +179,10 @@ impl SampleBank {
                                         .file_stem()
                                         .map(|s| s.to_string_lossy().into_owned())
                                         .unwrap_or_default();
-                                    Some((surface.clone(), takes_from_recording(&stem, &x, sr)))
+                                    Some((
+                                        surface.clone(),
+                                        takes_from_recording(&stem, surface, &x, sr),
+                                    ))
                                 }
                                 Err(e) => {
                                     engine_core::log::warn!(
@@ -186,7 +209,8 @@ impl SampleBank {
                 .takes
                 .extend(takes);
         }
-        bank.surfaces.retain(|_, t| !t.takes.is_empty());
+        // A surface with too few clean takes is synthesized.
+        bank.surfaces.retain(|_, t| t.takes.len() >= MIN_TAKES);
         for set in bank.surfaces.values_mut() {
             match_sources(&mut set.takes);
         }
@@ -348,12 +372,12 @@ enum Part {
     Steps,
 }
 
-/// The parts of each known recording worth cutting (seconds), by file name. Other stretches
-/// (jumps and landings, scrapes, barefoot) are left out. Recordings not listed are cut whole
-/// and their steps labelled by spacing.
 /// Stretches of one recording: start and end (s) and what they hold.
 type Parts = &'static [(f32, f32, Part)];
 
+/// The parts of each known recording worth cutting (seconds), by file name. Other stretches
+/// (jumps and landings, scrapes, barefoot) are left out; a recording with none is not used.
+/// Recordings not listed are cut whole and their steps labelled by spacing.
 const PARTS: &[(&str, Parts)] = &[
     // Nox_Sound's mountain-boot sequences: walk, run, then jumps, scrapes and scuffs.
     (
@@ -368,10 +392,10 @@ const PARTS: &[(&str, Parts)] = &[
         "nox_sound_564893",
         &[(0.0, 26.4, Part::Walk), (26.7, 35.2, Part::Run)],
     ),
-    (
-        "nox_sound_548384",
-        &[(0.0, 5.4, Part::Walk), (5.6, 10.3, Part::Run)],
-    ),
+    // Mud, clean but bright and noise-like (spectral flatness 0.33 and a 4.8 kHz centroid
+    // in its steps, against 0.11-0.15 for gravel and sand): a hiss, not a squelch. With the
+    // other mud recording too noisy, mud is synthesized.
+    ("nox_sound_548384", &[]),
     (
         "nox_sound_gritty_530589",
         &[(0.0, 5.5, Part::Walk), (6.0, 11.5, Part::Run)],
@@ -425,8 +449,44 @@ const MAX_TAKES: usize = 24;
 /// about the synthesized steps' crest, so recorded steps stay as peak-safe as they were.
 pub const MAX_CREST_DB: f32 = 20.0;
 
-/// Cut a recording into takes (see the [module docs](self)).
-pub fn takes_from_recording(name: &str, x: &[f32], sr: f32) -> Vec<Take> {
+/// Least signal-to-noise ratio a take needs (its peak over the recording's noise just before
+/// it, 10 ms envelopes, dB): below it a take is as much hiss, wind or water as step.
+pub const MIN_SNR_DB: f32 = 35.0;
+
+/// Fewest clean takes a surface needs to play recordings at all; with fewer it is synthesized,
+/// rather than repeating a handful.
+pub const MIN_TAKES: usize = 8;
+
+/// Hard ground, where a step is a click (heel, then toe) and a short scuff.
+pub fn hard_ground(surface: &str) -> bool {
+    matches!(
+        surface,
+        "concrete"
+            | "metal"
+            | "wood"
+            | "ice"
+            | "rock"
+            | "glass"
+            | "tile"
+            | "asphalt"
+            | "stone"
+            | "planks"
+    )
+}
+
+/// Longest take on a surface, s: a click and a short scuff on hard ground, a longer squelch,
+/// crunch or rustle on soft ground.
+pub fn max_take_s(surface: &str) -> f32 {
+    if hard_ground(surface) { 0.35 } else { 0.6 }
+}
+
+/// On hard ground, how long after the onset a take plays untouched (heel and toe), s, and
+/// the time constant of its fade after that, s: what a recording holds on past them (a
+/// sustained scuff, the room) dies away instead of standing 20 dB under the click.
+const HARD_TAIL_S: (f32, f32) = (0.15, 0.15);
+
+/// Cut a recording of steps on `surface` into takes (see the [module docs](self)).
+pub fn takes_from_recording(name: &str, surface: &str, x: &[f32], sr: f32) -> Vec<Take> {
     let parts: Vec<(f32, f32, Part)> = PARTS
         .iter()
         .find(|(n, _)| *n == name)
@@ -442,10 +502,15 @@ pub fn takes_from_recording(name: &str, x: &[f32], sr: f32) -> Vec<Take> {
         let a = ((a * sr) as usize).min(x.len());
         let b = ((b * sr) as usize).min(x.len());
         if b > a {
-            cuts.extend(cut_steps(&x[a..b], sr, part).into_iter().map(|mut c| {
-                c.range = a + c.range.start..a + c.range.end;
-                c
-            }));
+            let max_s = max_take_s(surface);
+            cuts.extend(
+                cut_steps(&x[a..b], sr, part, max_s)
+                    .into_iter()
+                    .map(|mut c| {
+                        c.range = a + c.range.start..a + c.range.end;
+                        c
+                    }),
+            );
         }
     }
     // Keep the most typical steps of each gait when a recording has plenty.
@@ -467,6 +532,13 @@ pub fn takes_from_recording(name: &str, x: &[f32], sr: f32) -> Vec<Take> {
         for c in of {
             let mut pcm = x[c.range.clone()].to_vec();
             expand(&mut pcm, c.floor_db, sr);
+            if hard_ground(surface) {
+                let (start, tau) = HARD_TAIL_S;
+                let from = ((ONSET_PAD_S + start) * sr) as usize;
+                for (j, v) in pcm.iter_mut().enumerate().skip(from) {
+                    *v *= (-((j - from) as f32) / (tau * sr)).exp();
+                }
+            }
             let fade_in = ((0.002 * sr) as usize).min(pcm.len());
             for (j, v) in pcm.iter_mut().take(fade_in).enumerate() {
                 *v *= j as f32 / fade_in as f32;
@@ -485,6 +557,7 @@ pub fn takes_from_recording(name: &str, x: &[f32], sr: f32) -> Vec<Take> {
                 sample_rate: sr,
                 gait,
                 source: source.clone(),
+                stats: c.stats,
             });
         }
     }
@@ -578,6 +651,7 @@ struct Cut {
     peak_db: f32,
     /// The recording's noise floor (10 ms envelope), dB.
     floor_db: f32,
+    stats: TakeStats,
 }
 
 /// The step period of a recording, s: the strongest repeat of its envelope between 0.25 and
@@ -615,10 +689,12 @@ fn step_period(d10: &[f32], top: f32) -> Option<f32> {
 }
 
 /// Find the steps in a recording: each starts where the 10 ms envelope jumps by more than
-/// 9 dB over its level since the last step, at most once per 60 % of the step period.
-/// Steps much quieter or louder than the median, too short, or swelling slowly (scrapes)
-/// are dropped.
-fn cut_steps(x: &[f32], sr: f32, part: Part) -> Vec<Cut> {
+/// 9 dB over its level since the last step, at most once per 60 % of the step period, and
+/// ends once the envelope has fallen to within 6 dB of the noise before the step, or 40 dB
+/// under its peak, and stayed there (at most `max_s` long). Steps much quieter or louder
+/// than the median, too short, too noisy ([`MIN_SNR_DB`]) or swelling slowly (scrapes) are
+/// dropped.
+fn cut_steps(x: &[f32], sr: f32, part: Part, max_s: f32) -> Vec<Cut> {
     let hop = (sr * 0.001).max(1.0) as usize;
     // High-passed envelope in dB at 1 ms hops.
     let mut hp = Biquad::highpass(sr, 60.0, 0.7);
@@ -687,7 +763,9 @@ fn cut_steps(x: &[f32], sr: f32, part: Part) -> Vec<Cut> {
         }
         k += 1;
     }
-    let max_len = ((period * 1100.0) as usize).clamp(250, 700);
+    let max_len = ((period * 1100.0) as usize)
+        .clamp(250, 700)
+        .min((max_s * 1000.0) as usize);
     let pad = (ONSET_PAD_S * 1000.0) as usize;
     let gait = match part {
         Part::Walk => Gait::Walk,
@@ -705,17 +783,31 @@ fn cut_steps(x: &[f32], sr: f32, part: Part) -> Vec<Cut> {
         let peak = d10[o..(o + 150).min(limit)]
             .iter()
             .fold(f32::MIN, |m, v| m.max(*v));
+        // The step is over once the envelope has fallen to just over the noise before it (or
+        // 40 dB under the peak) and stayed down for 50 ms: what follows is the recording's
+        // hiss, wind or room, not the step.
+        let noise = noise_before(&d10, o);
+        let quiet = (noise + 6.0).max(peak - 40.0);
         let mut end = limit;
-        while end > o + 60 && d10[end - 1] < peak - 36.0 {
-            end -= 1;
+        let mut below = 0;
+        for (j, &level) in d10.iter().enumerate().take(limit).skip(o + 10) {
+            if level < quiet {
+                below += 1;
+                if below >= 50 {
+                    end = j + 1 - below;
+                    break;
+                }
+            } else {
+                below = 0;
+            }
         }
-        let end = (end + 15).min(limit);
+        let end = (end.max(o + 80) + 15).min(limit);
         // Slow swells (a scrape, a shuffle) are not steps: nothing near the peak comes early.
         // (A step's toe or compaction may well be louder than its heel.)
         let rise = (o..(o + 150).min(limit))
             .position(|j| d10[j] >= peak - 6.0)
             .unwrap_or(0);
-        steps.push((o, end, peak, rise));
+        steps.push((o, end, peak, rise, noise));
     }
     if steps.is_empty() {
         return Vec::new();
@@ -725,17 +817,48 @@ fn cut_steps(x: &[f32], sr: f32, part: Part) -> Vec<Cut> {
     let median = peaks[peaks.len() / 2];
     steps
         .into_iter()
-        .filter(|&(o, end, peak, rise)| {
-            end - o >= 90 && rise <= 100 && peak > median - 10.0 && peak < median + 8.0
+        .filter(|&(o, end, peak, rise, noise)| {
+            end - o >= 90
+                && rise <= 100
+                && peak > median - 10.0
+                && peak < median + 8.0
+                && peak - noise >= MIN_SNR_DB
         })
-        .map(|(o, end, peak, _)| Cut {
-            range: o.saturating_sub(pad) * hop..(end * hop).min(x.len()),
-            gait,
-            peak_db: peak,
-            floor_db: floor,
+        .map(|(o, end, peak, _, _)| {
+            let range = o.saturating_sub(pad) * hop..(end * hop).min(x.len());
+            Cut {
+                stats: take_stats(&d10, o, end, peak, range.len() as f32 / sr),
+                range,
+                gait,
+                peak_db: peak,
+                floor_db: floor,
+            }
         })
         .filter(|c| c.range.end > c.range.start)
         .collect()
+}
+
+/// The recording's noise just before onset `o`: the quietest tenth of the 10 ms envelope
+/// `d10` (1 ms hops) over the 0.3 s before it, dB (-140 in digital silence, and a step at the
+/// very start of a recording counts as clean).
+fn noise_before(d10: &[f32], o: usize) -> f32 {
+    let mut before = d10[o.saturating_sub(300)..o.saturating_sub(5)].to_vec();
+    before.sort_by(f32::total_cmp);
+    before.get(before.len() / 10).copied().unwrap_or(-140.0)
+}
+
+/// [`TakeStats`] of the step from `o` to `end` (1 ms hops of the 10 ms envelope `d10`).
+fn take_stats(d10: &[f32], o: usize, end: usize, peak: f32, len_s: f32) -> TakeStats {
+    let floor = noise_before(d10, o);
+    let tail = &d10[end.saturating_sub(100).max(o)..end];
+    let tail_ms = tail.iter().map(|v| 10f32.powf(v / 10.0)).sum::<f32>() / tail.len().max(1) as f32;
+    let last = (o..end).rev().find(|&j| d10[j] >= peak - 40.0).unwrap_or(o);
+    TakeStats {
+        floor_db: floor - peak,
+        tail_db: 10.0 * (tail_ms + 1e-14).log10() - peak,
+        len_40_s: (last - o) as f32 * 0.001,
+        len_s,
+    }
 }
 
 /// Loudness of a step: its whole energy, K-weighted as in ITU-R BS.1770 (+4 dB above
@@ -1089,13 +1212,14 @@ mod tests {
             sample_rate: SR,
             gait,
             source: "test".into(),
+            stats: TakeStats::default(),
         }
     }
 
     #[test]
     fn a_recording_is_cut_into_one_take_per_step() {
         let x = steps(8, 0.6, 1);
-        let takes = takes_from_recording("unlisted", &x, SR);
+        let takes = takes_from_recording("unlisted", "grass", &x, SR);
         assert_eq!(takes.len(), 8);
         for t in &takes {
             assert_eq!(t.gait, Gait::Walk);
@@ -1106,8 +1230,46 @@ mod tests {
             assert!(t.pcm.len() < (0.6 * SR) as usize);
         }
         // Close-together steps are running.
-        let run = takes_from_recording("unlisted", &steps(8, 0.33, 2), SR);
+        let run = takes_from_recording("unlisted", "grass", &steps(8, 0.33, 2), SR);
         assert!(run.len() >= 7 && run.iter().all(|t| t.gait == Gait::Run));
+    }
+
+    #[test]
+    fn noisy_steps_are_left_out_and_takes_end_with_the_step() {
+        // The same steps over hiss only about 25 dB under them: no takes.
+        let mut rng = Noise::new(9);
+        let noisy: Vec<f32> = steps(8, 0.6, 7)
+            .iter()
+            .map(|v| v + rng.white() * 0.02)
+            .collect();
+        assert!(takes_from_recording("unlisted", "grass", &noisy, SR).is_empty());
+        // Clean steps end where the step does, not at the next one.
+        for t in &takes_from_recording("unlisted", "grass", &steps(8, 0.6, 7), SR) {
+            assert!(t.stats.floor_db < -MIN_SNR_DB);
+            assert!(t.stats.len_s < 0.3, "{:?}", t.stats);
+        }
+        // Long ringing steps are capped, shorter on hard ground.
+        let mut rng = Noise::new(10);
+        let mut x: Vec<f32> = (0..(7.0 * SR) as usize)
+            .map(|_| rng.white() * 0.0005)
+            .collect();
+        for k in 0..8 {
+            let at = ((0.2 + k as f32 * 0.8) * SR) as usize;
+            for j in 0..(0.75 * SR) as usize {
+                if let Some(v) = x.get_mut(at + j) {
+                    *v += rng.white() * 0.3 * (-(j as f32 / SR) * 4.0).exp();
+                }
+            }
+        }
+        let soft = takes_from_recording("unlisted", "grass", &x, SR);
+        let hard = takes_from_recording("unlisted", "concrete", &x, SR);
+        assert!(soft.len() >= 6 && hard.len() >= 6);
+        for t in &soft {
+            assert!((0.45..=0.62).contains(&t.stats.len_s), "{:?}", t.stats);
+        }
+        for t in &hard {
+            assert!(t.stats.len_s <= 0.37, "{:?}", t.stats);
+        }
     }
 
     #[test]
@@ -1118,7 +1280,7 @@ mod tests {
         for v in &mut x[at..at + (0.3 * SR) as usize] {
             *v *= 0.05;
         }
-        let takes = takes_from_recording("unlisted", &x, SR);
+        let takes = takes_from_recording("unlisted", "grass", &x, SR);
         assert_eq!(takes.len(), 6);
     }
 
@@ -1187,6 +1349,7 @@ mod tests {
                 sample_rate: SR,
                 gait,
                 source: "tone".into(),
+                stats: TakeStats::default(),
             }
         };
         let mut b = SampleBank::default();
@@ -1320,11 +1483,15 @@ mod tests {
     #[test]
     fn wav_recordings_load_from_a_folder() {
         let dir = std::env::temp_dir().join(format!("engine_audio_takes_{}", std::process::id()));
-        let x = steps(6, 0.6, 5);
+        let x = steps(8, 0.6, 5);
         crate::wav::write_wav(&dir.join("concrete/test_steps.wav"), &x, 1, SR as u32).unwrap();
+        // Too few steps to play: synthesized.
+        let few = steps(5, 0.6, 6);
+        crate::wav::write_wav(&dir.join("mud/test_steps.wav"), &few, 1, SR as u32).unwrap();
         let bank = SampleBank::load(&dir);
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(bank.takes("concrete").map(|t| t.takes.len()), Some(6));
+        assert_eq!(bank.takes("concrete").map(|t| t.takes.len()), Some(8));
+        assert!(bank.takes("mud").is_none());
         // Tile borrows concrete's; nothing for snow.
         assert!(bank.takes("tile").is_some());
         assert!(bank.takes("snow").is_none());

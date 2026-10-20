@@ -1658,6 +1658,7 @@ mod tests {
                 sample_rate: 24_000.0,
                 gait: Gait::Walk,
                 source: "test".into(),
+                stats: Default::default(),
             },
             speed: 1.0,
             gain: 0.5,
