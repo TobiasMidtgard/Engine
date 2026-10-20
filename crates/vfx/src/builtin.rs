@@ -1182,32 +1182,34 @@ fn spells() -> Vec<EffectDesc> {
              brightening as they near a crackling white-blue ball of energy.",
             None,
             vec![
-                // Motes appear faint and blue on a sphere around the core and spiral in on
-                // comet tails, so the pull reads at a glance instead of as scattered dashes.
+                // Motes appear faint and blue on a sphere around the core and spiral in as fine
+                // sparks on comet tails, so the pull reads at a glance instead of as scattered
+                // dashes.
                 EmitterDesc {
-                    rate: 70.0,
+                    rate: 110.0,
                     shape: EmitShape::Sphere {
                         radius: 2.2,
                         surface: true,
                     },
                     speed: [0.0, 0.0],
                     attract: 16.0,
-                    vortex: 9.0,
+                    vortex: 5.0,
                     drag: 1.2,
                     wind: 0.0,
                     local_space: true,
                     lifetime: [0.7, 1.0],
-                    size: [0.06, 0.1],
+                    size: [0.016, 0.03],
                     size_over_life: c(&[(0.0, 0.6), (0.7, 1.0), (1.0, 0.5)]),
+                    sprite: Sprite::Spark,
                     facing: Facing::Velocity,
-                    stretch: 0.05,
+                    stretch: 0.022,
                     color: g(&[
                         (0.0, [0.35, 0.55, 1.0, 0.0]),
                         (0.45, [0.45, 0.65, 1.0, 0.7]),
                         (0.85, [0.75, 0.88, 1.0, 1.0]),
                         (1.0, [0.9, 0.95, 1.0, 0.0]),
                     ]),
-                    emissive: 10_000.0,
+                    emissive: 20_000.0,
                     additive: 1.0,
                     soft: 0.0,
                     ..em("converge")
