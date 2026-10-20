@@ -705,12 +705,17 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     let wgt = abs(phase0 - 0.5) * 2.0;
     var g = mix(g0, g1, wgt) * (1.0 + speed * 0.5);
     g += rain_gradient(wp, rain_at(in.rel.xz), saturate(1.0 - pixel / 0.02));
+    // Rings, wakes and foam from whatever moves through the stream (the interactive field
+    // covers streams near the camera too).
+    let rp = ripple_at(in.rel.xz);
+    g += rp.zw;
     let n = normalize(in.normal + vec3<f32>(-g.x, 0.0, -g.y));
     // White water: fast, steep or tumbling. Fast water breaks into streaks and patches of
     // white over its riffles, never a white sheet; drops churn it white all over.
     let steep = 1.0 - in.normal.y;
     var foam = saturate((speed - 1.8) * 0.25) * 0.5 + saturate(steep * 2.5 - 0.3) * 1.3;
     foam *= saturate(in.depth * 30.0);
+    foam += rp.y * 1.2;
     var color: vec3<f32>;
     if (front) {
         // Streams run shallow over riffles: only the last centimeter fades.

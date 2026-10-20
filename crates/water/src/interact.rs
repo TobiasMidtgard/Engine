@@ -159,8 +159,11 @@ pub fn disturbance_system(
                 .map(|l| ((p - l) / step as f64).as_vec3())
                 .filter(|v| v.length() < TELEPORT_SPEED)
                 .unwrap_or(Vec3::ZERO);
+            // What makes the wake is how it moves through the water: a wader standing in a
+            // stream parts the current as one walking through still water does.
+            let through = v - water.velocity;
             if touching {
-                let speed = Vec3::new(v.x, 0.0, v.z).length();
+                let speed = Vec3::new(through.x, 0.0, through.z).length();
                 // Entering the water fast: a splash.
                 if !it.wet && v.y < -1.5 {
                     out.push(splash(p, r, -v.y));
@@ -193,7 +196,7 @@ pub fn disturbance_system(
                 if fast > 0.0 && it.wake >= 1.0 {
                     it.spray += 1000.0 * r * r * fast * fast * 0.004 * it.wake * step;
                     if it.spray > 2.0 {
-                        let dir = Vec3::new(v.x, 0.0, v.z) / speed;
+                        let dir = Vec3::new(through.x, 0.0, through.z) / speed;
                         let side = Vec3::new(-dir.z, 0.0, dir.x)
                             * if rng.f32() < 0.5 { -1.0 } else { 1.0 };
                         let at = p + (dir * r * 1.6 + side * r * 0.4).as_dvec3();
@@ -224,7 +227,7 @@ pub fn disturbance_system(
                     it.trough_s = 1.0;
                     // The body drags the water it moves through along with it: the wash
                     // behind it runs on and curls into eddies at its edges.
-                    let flat = Vec2::new(v.x, v.z);
+                    let flat = Vec2::new(through.x, through.z);
                     out.push(Disturbance {
                         pos: DVec2::new(p.x, p.z),
                         radius: r * 0.9,
@@ -313,14 +316,16 @@ pub fn disturbance_system(
             // layer of water under it).
             let layer = 1000.0 * std::f32::consts::PI * r * r * 0.01;
             let solid = (d.mass_kg.max(0.0) / layer).sqrt().clamp(0.4, 1.0);
-            let plunge = (-v.y).max(0.0).min(10.0);
-            let lift = v.y.max(0.0).min(10.0);
+            let plunge = (-v.y).clamp(0.0, 10.0);
+            let lift = v.y.clamp(0.0, 10.0);
             let depth = (0.5 * sweep + 0.8 * plunge - 0.3 * lift) * r * dt.max(1e-4) * solid;
             out.push(Disturbance {
                 pos: DVec2::new(d.position.x, d.position.z),
                 radius: r,
                 depth: depth.clamp(-0.05, 0.08),
-                foam: ((plunge - 0.8).max(0.0) * 0.25 + sweep * 0.03).min(0.6) * solid,
+                // Slapping in churns up a little white; dragging through the water only a
+                // thin film over time (a sheet held in a stream all day stays a sheet).
+                foam: ((plunge - 0.8).max(0.0) * 0.25 + sweep * 0.06 * dt).min(0.6) * solid,
                 stir: (sweep > 0.1).then_some(flat.clamp_length_max(4.0) * 0.5 * solid),
                 spin: 0.0,
             });

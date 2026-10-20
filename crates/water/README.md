@@ -19,12 +19,15 @@ Background research: `game-engine-research/graphics.md` in the project files.
   where the face drops away (`FlowSim::fall_path`), so falls cascade down crevices instead of
   cutting through them. Regions step in parallel bands and skip dry ground.
 - **Interaction**: a fluid field follows the camera (or the first `SimulationFocus`) over the
-  nearest interactive body: shallow water on a staggered grid, so pushes make ripples that
+  nearest interactive body, or the stream beside it (where rings, wakes and foam drift
+  downstream with the current): shallow water on a staggered grid, so pushes make ripples that
   bend in the shallows and reflect off the shore, and bodies moving through it drag the water
   along. Their wash curls into eddies (vortex shedding behind hulls and swimmers, vorticity
   confinement keeps the swirls tight), a propeller churns, and foam rides the currents.
   `WaterSettings::current_life_s` and `swirl` tune it. It steps only the 16-cell tiles where
-  something moves, in parallel: calm water costs nothing. Swimmers and waders (`WaterInteractor`, `GroundContact`), bullets
+  something moves, in parallel: calm water costs nothing. Swimmers and waders
+  (`WaterInteractor`, `GroundContact`; wakes come from how they move through the water, so one
+  standing in a stream parts it), cloth, ropes, hair and paddles (`WaterDisturbance`), bullets
   (`ProjectileTrace`), blasts (`WorldImpulse`, domes from underwater charges), drops and wakes
   push it. Every splash is published as `WaterSplash` (particles, audio) and `NoiseEvent` (AI),
   including steady puffs of spray from fast boats' bows and from the foot of every waterfall
@@ -85,7 +88,8 @@ cargo run -p engine_water --example water_gallery --release -- <out_dir> [second
 ```
 
 Views: overview, falls, shore, under, pond, wake, aerial, swirl (looking down on the
-motorboat's wake), ditch, cascade, crevice.
+motorboat's wake), ditch, cascade, crevice, ford (a wader in the stream). Asked for one
+view, it simulates from there, so a stream's interactive water is live in it.
 
 To try shader changes without rebuilding, point `ENGINE_WATER_SHADER` at a copy of
 `src/render/water.wgsl`; the gallery and the showcase then load the shader from that file.
@@ -93,7 +97,7 @@ To try shader changes without rebuilding, point `ENGINE_WATER_SHADER` at a copy 
 ## Contracts
 
 Reads: `WindField`, `WeatherState` (rain, temperature, wind), `Ground` and `SurfaceMaterials`,
-`FocusPoints`, `GroundContact`, `ProjectileTrace`, `WorldImpulse`.
+`FocusPoints`, `GroundContact`, `WaterDisturbance`, `ProjectileTrace`, `WorldImpulse`.
 
 Writes: the `Water` query (surface height, depth, velocity, normal), `SurfaceLayers` puddles
 and wetness by the water, `WaterSplash`, `NoiseEvent`.
