@@ -1,0 +1,96 @@
+name: Showcase build
+
+# Builds the showcase for Windows and Linux with every fetched asset next to it, zipped so it
+# runs with a double-click. Pushing a `showcase-*` tag (or running this by hand) publishes the
+# zips on that release; a pull request that changes this file only builds them, as artifacts.
+on:
+  push:
+    tags: ["showcase-*"]
+  pull_request:
+    paths: [".github/workflows/release.yml", ".github/release/**"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release to publish to (created if missing)
+        default: showcase-latest
+
+permissions:
+  contents: write
+
+concurrency:
+  group: showcase-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_RELEASE_DEBUG: 0
+
+jobs:
+  build:
+    name: Showcase (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows
+            runner: windows-latest
+            exe: showcase.exe
+          - os: linux
+            runner: ubuntu-latest
+            exe: showcase
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux libraries
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan1 libwayland-dev libxkbcommon-dev
+      - name: Install Rust (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: showcase-release
+      - name: Build
+        run: cargo build --release --locked -p showcase -p fetch-assets
+      - name: Fetch assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo run --release --locked -q -p fetch-assets
+      - name: Package
+        shell: bash
+        run: |
+          dir=engine-showcase-${{ matrix.os }}
+          mkdir -p "$dir"
+          cp "target/release/${{ matrix.exe }}" "$dir/"
+          cp -r assets "$dir/assets"
+          rm -rf "$dir/assets/manifests"
+          cp .github/release/PLAY.txt "$dir/"
+          cp assets/fetched/THIRD_PARTY_NOTICES.md "$dir/" 2>/dev/null || true
+          cp LICENSE* "$dir/" 2>/dev/null || true
+          if [ "${{ matrix.os }}" = windows ]; then
+            7z a -tzip -mx=5 "$dir.zip" "$dir" > /dev/null
+          else
+            zip -qr -6 "$dir.zip" "$dir"
+          fi
+          ls -l "$dir.zip"
+          echo "ZIP=$dir.zip" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'pull_request'
+        with:
+          name: engine-showcase-${{ matrix.os }}
+          path: ${{ env.ZIP }}
+          retention-days: 7
+      - name: Publish on the release
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          gh release view "$TAG" > /dev/null 2>&1 || gh release create "$TAG" --prerelease \
+            --target "$GITHUB_SHA" --title "Engine showcase ($TAG)" \
+            --notes "Download the zip for your system, unpack it and start showcase (PLAY.txt has the controls). Built from $GITHUB_SHA."
+          gh release upload "$TAG" "$ZIP" --clobber
