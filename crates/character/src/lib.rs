@@ -8,6 +8,7 @@ pub mod demo;
 pub mod eyes;
 pub mod face;
 pub mod feature;
+pub mod headgear;
 pub mod mesh;
 pub mod morph;
 pub mod mouth;
