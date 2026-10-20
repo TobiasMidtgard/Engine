@@ -634,6 +634,37 @@ fn crystal(in: VsOut, c: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(col, saturate(a));
 }
 
+// How far a jagged electric channel strays sideways at `x` along it (s picks its path).
+fn jag(x: f32, s: f32) -> f32 {
+    return (value_noise2(vec2<f32>(x * 6.0, s)) - 0.5) * 0.35 * sqrt(max(x, 0.0))
+        + (value_noise2(vec2<f32>(x * 22.0, s + 5.0)) - 0.5) * 0.07 * x;
+}
+
+// Glow of a jagged channel `len` long running along +x from the origin: a thin white-hot core
+// in a wider halo, thinning out toward its end.
+fn channel(p: vec2<f32>, len: f32, s: f32) -> f32 {
+    if (p.x < -0.03 || p.x > len) { return 0.0; }
+    let d = abs(p.y - jag(p.x, s));
+    let thin = smoothstep(len, len * 0.55, p.x);
+    return (exp(-sq(d / 0.012)) + 0.3 * exp(-sq(d / 0.06))) * thin;
+}
+
+// An electric arc crawling over the ground from where lightning struck (the sprite's center)
+// out along +x, with a branch forking off it. It re-strikes along a new path several times a
+// second, so it crackles.
+fn arc(c: vec2<f32>, seed: f32, age: f32) -> f32 {
+    let strike = floor(age * 7.0);
+    let s = seed * 17.0 + strike * 3.7;
+    var glow = channel(c, 0.95, s);
+    let bx = 0.25 + 0.3 * hash12(vec2<f32>(s, 1.3));
+    let turn = select(-0.7, 0.7, hash12(vec2<f32>(s, 2.9)) > 0.5);
+    let dir = vec2<f32>(cos(turn), sin(turn));
+    let q = c - vec2<f32>(bx, jag(bx, s));
+    glow += 0.7 * channel(vec2<f32>(dot(q, dir), q.y * dir.x - q.x * dir.y), 0.4, s + 9.0);
+    let flicker = 0.55 + 0.45 * hash12(vec2<f32>(s, 4.1));
+    return saturate(glow) * flicker;
+}
+
 // ---------------------------------------------------------------- fireball
 // A ball of burning gas traced through its sprite as a volume: a lumpy body rolled into lobes,
 // glowing from inside (near white deep in, reddening outward), turning to dark soot from the
@@ -825,6 +856,10 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
             let k = crystal(in, c);
             rgb = k.rgb;
             a = k.a;
+        }
+        case 22u: { // arc: electricity crawling out from the sprite's center along +x
+            a = arc(c, in.seed, in.age);
+            rgb *= 1.0 + 2.0 * a * a;
         }
         case 18u: { // fireball: a burning, cooling volume of gas
             let f = fireball(in, c);

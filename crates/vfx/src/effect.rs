@@ -329,6 +329,12 @@ pub enum Sprite {
     /// axis`, `stretch` 1, `lit` 1, `additive` 0, `size` the cluster's height and a light
     /// icy color; the effect's up axis is the way they grow.
     Crystal,
+    /// An electric arc crawling out from the sprite's center along its +x: a jagged, white-hot
+    /// channel in a halo with a branch forking off it, re-striking along a new path several
+    /// times a second (lightning strikes, shorted machines, shock spells). Use with `facing:
+    /// horizontal` to spread over the ground, `rotation_deg` 0 to 360 to scatter them, a short
+    /// life, a high `emissive` and `additive` 1.
+    Arc,
 }
 
 impl Sprite {
@@ -348,7 +354,8 @@ impl Sprite {
             | Sprite::Plume
             | Sprite::Ripple
             | Sprite::Blaze
-            | Sprite::Veil => 0.0,
+            | Sprite::Veil
+            | Sprite::Arc => 0.0,
             _ => 0.6,
         }
     }
