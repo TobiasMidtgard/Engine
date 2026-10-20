@@ -20,6 +20,8 @@ struct Precip {
 const SPEED_CLASSES: u32 = 3u;
 // Half-width of a bolt's quad in core widths (the rest is glow).
 const BOLT_HALO: f32 = 6.0;
+// Share of the light behind a snowflake that it blocks (the rest passes through its lace).
+const FLAKE_COVER: f32 = 0.6;
 
 fn pcg3(v0: vec3<u32>) -> vec3<f32> {
     var v = v0 * 1664525u + vec3<u32>(1013904223u);
@@ -121,6 +123,25 @@ fn drop_light(rel: vec3<f32>, view: vec3<f32>) -> vec3<f32> {
     return c;
 }
 
+// Light falling on a flake from lamps and lightning flashes: a thin white scrap lit from
+// either side, so it shows bright in a lamp's cone or a flash instead of a black speck
+// against the lit air behind it.
+fn flake_point_light(rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    var c = vec3<f32>(0.0);
+    for (var i = 0u; i < min(frame.counts.x, 16u); i++) {
+        let l = point_lights[i];
+        let d = l.position_range.xyz - rel;
+        let d2 = dot(d, d);
+        let range = l.position_range.w;
+        if (d2 < range * range) {
+            let wrap = saturate(dot(n, d * inverseSqrt(d2))) * 0.5 + 0.5;
+            let falloff = sq(saturate(1.0 - sq(d2 / (range * range))));
+            c += l.color_radius.rgb * wrap * falloff / max(d2, 0.25) * INV_PI;
+        }
+    }
+    return c;
+}
+
 @vertex
 fn vs_rain(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> PrecipOut {
     let h = pcg3(vec3<u32>(i, i * 7u + 3u, 911u));
@@ -182,13 +203,10 @@ fn vs_snow(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> Pr
     out.misc = vec4(0.0);
     out.position = frame.view_proj * vec4<f32>(p, 1.0);
     out.uv = vec2<f32>(c.x, c.y * 2.0 - 1.0);
-    // White, lit by sky and sun (with shadows) like any rough surface. Flakes are thin lace
-    // that lets part of the light behind them through, so against a bright overcast they
-    // read as soft grey specks, not as dark ash.
+    // White, lit by sky, sun (with shadows), lamps and flashes like any rough surface.
     let n = normalize(to_eye + vec3<f32>(0.0, 0.6, 0.0));
     let sun = frame.sun_camera.rgb * saturate(dot(n, frame.sun_dir.xyz) * 0.5 + 0.5) * shadow_factor(rel, n) * INV_PI;
-    let behind = sample_env(-to_eye);
-    let light = (sky_ambient(n) + sun) * 0.9 * 0.65 + behind * 0.4;
+    let light = (sky_ambient(n) + sun + flake_point_light(rel, n)) * 0.9 * 0.65;
     out.color = vec4<f32>(pre_expose(light), precip.look.y * fade * coverage);
     return out;
 }
@@ -197,7 +215,9 @@ fn vs_snow(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> Pr
 fn fs_snow(in: PrecipOut) -> @location(0) vec4<f32> {
     let r = length(in.uv);
     let a = saturate(in.color.a * smoothstep(1.0, 0.35, r));
-    return vec4<f32>(min(in.color.rgb, vec3(60000.0)) * a, a);
+    // The background shows through the lace, so against a bright overcast or the air lit by
+    // a flash flakes read as soft specks, not as dark ash.
+    return vec4<f32>(min(in.color.rgb, vec3(60000.0)) * a, a * FLAKE_COVER);
 }
 
 // Splashes: little crowns of droplets where rain lands, on the ground and on roofs.
