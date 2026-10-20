@@ -3,7 +3,7 @@
 //! `cargo run -p engine_ui --example gallery -- <out_dir> [width] [height] [shot ...]`
 //!
 //! Shots: hud, wheel, dialogue, dialogue_choices, shop, shop_sell, inventory, inventory_drag,
-//! journal, journal_finished, map_galaxy, map_system, map_globe, map_surface, pause, confirm, settings, settings_video,
+//! journal, journal_finished, skills, map_galaxy, map_system, map_globe, map_surface, pause, confirm, settings, settings_video,
 //! settings_controls, theme_cyan (all by default).
 //! Needs a GPU or a software Vulkan driver (lavapipe).
 
@@ -258,6 +258,11 @@ fn main() {
         );
         app.update_n(30);
         shot(&mut app, &dir, "journal_finished");
+    }
+    if want("skills") {
+        show(&mut app, "skills", json!({"select": "c_cleave"}));
+        app.update_n(30);
+        shot(&mut app, &dir, "skills");
     }
     for (name, zoom, select) in [
         (
