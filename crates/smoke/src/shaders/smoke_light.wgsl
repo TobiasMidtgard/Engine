@@ -1,6 +1,7 @@
 // Smoke lighting, once per simulation step: for every voxel, how much smoke lies toward the
 // sun, up toward the sky, out toward the horizon and down toward the ground (optical depths),
-// and the firelight and lamplight that reach it through the smoke.
+// and the firelight and lamplight that reach it through the smoke (and from the flames under
+// smoke still hot from them).
 
 struct SmokeParams {
     min_rel: vec4<f32>,   // box min (camera-relative), voxel size
@@ -14,11 +15,19 @@ struct SmokeParams {
 @group(1) @binding(1) var density: texture_3d<f32>;
 @group(1) @binding(2) var light_out: texture_storage_3d<rgba16float, write>;
 @group(1) @binding(3) var glow_out: texture_storage_3d<rgba16float, write>;
+@group(1) @binding(4) var heat: texture_3d<f32>;
 
 const SUN_STEPS: i32 = 32;
 const SKY_STEPS: i32 = 16;
 const SIDE_STEPS: i32 = 8;
 const LAMP_STEPS: i32 = 6;
+// Smoke this much hotter than the air (°C) starts to be lit by the flames under it...
+const FIRELIT_FROM_C: f32 = 40.0;
+// ...and fully at this.
+const FIRELIT_FULL_C: f32 = 500.0;
+// Illuminance from the flames on fully hot smoke, lux.
+const FIRELIT_LUX: f32 = 300.0;
+const FLAME_COLOR: vec3<f32> = vec3<f32>(1.0, 0.42, 0.12);
 
 // Extinction (1/m) at voxel-space point `q` (0 outside the box).
 fn sigma_at(q: vec3<f32>) -> f32 {
@@ -84,5 +93,12 @@ fn cs_light(@builtin(global_invocation_id) id: vec3<u32>) {
         let tau = optical_depth(q, dir, LAMP_STEPS, span / f32(LAMP_STEPS), 1.0);
         glow += light.color_radius.rgb * falloff * exp(-tau);
     }
+    // The flames under a plume light it from below over their whole length, which a few point
+    // lights at their centers can't: smoke still hot from the fire (it cools within meters of
+    // the flames) gets the flames' light, up to a few hundred lux. It shows at dusk and at
+    // night, when the plume's underside glows orange; by day the sun outshines it.
+    let hot = saturate((textureLoad(heat, vec3<i32>(id), 0).x - FIRELIT_FROM_C)
+        / (FIRELIT_FULL_C - FIRELIT_FROM_C));
+    glow += FLAME_COLOR * FIRELIT_LUX * hot * sqrt(hot);
     textureStore(glow_out, id, vec4<f32>(glow / smoke.dims.w, 0.0));
 }
