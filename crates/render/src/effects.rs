@@ -82,6 +82,10 @@ pub struct ScreenEffects {
     taa_params: wgpu::Buffer,
     /// TAA input groups, indexed by the history written this frame.
     taa_groups: [wgpu::BindGroup; 2],
+    /// The reactive mask: where the transparent phase drew something thin (taa_reactive.wgsl).
+    reactive_layout: wgpu::BindGroupLayout,
+    reactive: wgpu::RenderPipeline,
+    reactive_group: wgpu::BindGroup,
     /// History slot written this frame.
     current: usize,
     /// Frames blended into the history since the last reset.
@@ -168,7 +172,12 @@ impl ScreenEffects {
                         min_binding_size: None,
                     },
                 ),
+                float_tex(5),
             ],
+        });
+        let reactive_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("taa reactive inputs"),
+            entries: &[float_tex(0), float_tex(1)],
         });
         let gtao_module = shared.shader("gtao", include_str!("shaders/gtao.wgsl"), true);
         let taa_module = shared.shader("taa", include_str!("shaders/taa.wgsl"), true);
@@ -242,6 +251,21 @@ impl ScreenEffects {
             shared.formats.hdr,
             None,
         );
+        let reactive_module = shared.shader(
+            "taa_reactive",
+            include_str!("shaders/taa_reactive.wgsl"),
+            false,
+        );
+        let reactive = fullscreen_pipeline(
+            shared,
+            "taa reactive mask",
+            &reactive_module,
+            "vs_reactive",
+            "fs_reactive",
+            &[&reactive_layout],
+            shared.formats.ao,
+            None,
+        );
         let taa_params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("taa params"),
             size: std::mem::size_of::<TaaUniform>() as u64,
@@ -253,6 +277,7 @@ impl ScreenEffects {
         let chain = ReflectionChain::new(shared, targets, &chain_layout);
         let ssr_groups = Self::ssr_groups(shared, targets, &ssr_layout, &chain.view);
         let gi_groups = GiGroups::new(shared, targets, &gi_layout);
+        let reactive_group = Self::reactive_group(shared, targets, &reactive_layout);
         Self {
             ao_layout,
             gtao,
@@ -276,10 +301,34 @@ impl ScreenEffects {
             taa,
             taa_params,
             taa_groups,
+            reactive_layout,
+            reactive,
+            reactive_group,
             current: 0,
             accumulated: 0,
             history_ready: false,
         }
+    }
+
+    fn reactive_group(
+        shared: &GpuShared,
+        t: &Targets,
+        layout: &wgpu::BindGroupLayout,
+    ) -> wgpu::BindGroup {
+        shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("taa reactive inputs"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&t.hdr.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&t.color_copy.view),
+                },
+            ],
+        })
     }
 
     #[allow(clippy::type_complexity)]
@@ -342,6 +391,10 @@ impl ScreenEffects {
                         binding: 4,
                         resource: taa_params.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: view(&t.reactive.view),
+                    },
                 ],
             })
         });
@@ -399,6 +452,7 @@ impl ScreenEffects {
         self.gtao_group = gtao_group;
         self.blur_group = blur_group;
         self.taa_groups = taa_groups;
+        self.reactive_group = Self::reactive_group(shared, targets, &self.reactive_layout);
         self.chain = ReflectionChain::new(shared, targets, &self.chain_layout);
         self.ssr_groups = Self::ssr_groups(shared, targets, &self.ssr_layout, &self.chain.view);
         self.gi_groups = GiGroups::new(shared, targets, &self.gi_layout);
@@ -544,6 +598,17 @@ impl ScreenEffects {
 
     /// Record the TAA resolve of `targets.hdr` into the history and copy the result back into
     /// `targets.hdr`. `history_valid` is false after a camera cut.
+    /// Mark where the transparent phase just drew something thin, from the scene before it
+    /// (`targets.color_copy`) and after (`targets.hdr`), for `encode_taa`.
+    pub fn encode_reactive(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets) {
+        let mut pass = fullscreen_pass(encoder, "taa reactive mask", &targets.reactive.view, true);
+        pass.set_pipeline(&self.reactive);
+        pass.set_bind_group(0, &self.reactive_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// `reactive`: how much the mask from `encode_reactive` this frame counts (0 when it
+    /// wasn't drawn).
     pub fn encode_taa(
         &mut self,
         shared: &GpuShared,
@@ -551,6 +616,7 @@ impl ScreenEffects {
         targets: &Targets,
         scene_group: &wgpu::BindGroup,
         history_valid: bool,
+        reactive: f32,
     ) {
         if !history_valid || !self.history_ready {
             self.accumulated = 0;
@@ -561,7 +627,7 @@ impl ScreenEffects {
                 if valid { 1.0 } else { 0.0 },
                 self.accumulated as f32,
                 TAA_MIN_ALPHA,
-                0.0,
+                reactive,
             ],
         };
         shared
