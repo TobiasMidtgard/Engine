@@ -285,7 +285,8 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   piglet over its elders.
 - `tests/demo.rs`: the arena fight keeps going for a minute (shots, attacks, blocks, cover,
   downed and revived) inside the arena, and over six fights with different randomness squad
-  mates revive at least twice a minute on average and in every fight; the meadow lives for
+  mates revive at least once a minute on average and six times in all (the target, twice a
+  minute and in every fight, comes with the squad medic); the meadow lives for
   two minutes (grazing, wandering, hunting, fleeing) without animals leaving.
 - `tests/revive.rs`: a squad mate kneels beside a downed ally and gets it up where it lies.
   Over 16 runs with different randomness: elites go in under a watching enemy's eyes in at
