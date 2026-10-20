@@ -37,6 +37,9 @@ pub struct DestructionAssets {
     pub spark: Handle<StandardMaterial>,
     /// Dust puff sphere.
     pub dust_mesh: Handle<Mesh>,
+    /// Soft dust puff frames ([`textures::dust_puffs`]) for camera-facing sprites; `None`
+    /// (no image store) draws puffs as [`Self::dust_mesh`].
+    pub dust_sprite: Option<Handle<Image>>,
     /// Dust materials from faint to dense, per darkness level (light, mid, dark).
     pub dust: [[Handle<StandardMaterial>; DUST_LEVELS]; 3],
     /// Breach charge body and its glowing thermite strip.
@@ -136,17 +139,8 @@ impl DestructionAssets {
             m.compute_normals();
             meshes.add(m)
         };
-        let dust_color = |darkness: f32| {
-            let light = [0.62, 0.58, 0.52];
-            let dark = [0.12, 0.11, 0.1];
-            [
-                light[0] + (dark[0] - light[0]) * darkness,
-                light[1] + (dark[1] - light[1]) * darkness,
-                light[2] + (dark[2] - light[2]) * darkness,
-            ]
-        };
         let dust = [0.1f32, 0.45, 0.85].map(|darkness| {
-            let c = dust_color(darkness);
+            let c = Self::dust_color(darkness);
             std::array::from_fn(|level| {
                 let alpha = 0.3 * (level + 1) as f32 / DUST_LEVELS as f32;
                 let mut m = StandardMaterial::color(c[0], c[1], c[2])
@@ -198,6 +192,7 @@ impl DestructionAssets {
             chip_material,
             spark,
             dust_mesh,
+            dust_sprite: None,
             dust,
             charge_body,
             thermite_glow,
@@ -253,6 +248,7 @@ impl DestructionAssets {
         materials.set(self.gravel, gravel);
         self.texture_char(materials, images);
         self.texture_broken(materials, images);
+        self.dust_sprite = Some(images.add(textures::dust_puffs(64, 0xD057)));
         self.textured = true;
     }
 
@@ -364,6 +360,13 @@ impl DestructionAssets {
             .position(|s| *s == original)
             .and_then(|i| self.support_surface.get(i))
             .map_or(self.support[level], |tints| tints[level])
+    }
+
+    /// Linear color of dust `darkness` dark (0 pale stone dust, 1 soot).
+    pub fn dust_color(darkness: f32) -> [f32; 3] {
+        let light = [0.62, 0.58, 0.52];
+        let dark = [0.12, 0.11, 0.1];
+        std::array::from_fn(|k| light[k] + (dark[k] - light[k]) * darkness)
     }
 
     /// Dust material for a darkness (0..1) and opacity (0..1).

@@ -794,6 +794,66 @@ fn a_ship_in_low_orbit_coasts_through_warp_and_keeps_its_motion() {
 }
 
 #[test]
+fn a_ship_burns_its_engine_on_the_rails_and_turns_to_point_it() {
+    let mut app = app();
+    let r = 6_371_000.0 + 400_000.0;
+    let mu = state(&app).body("Earth").unwrap().mu;
+    let speed = (mu / r).sqrt();
+    let ship = launch(
+        &mut app,
+        "Earth",
+        DVec3::new(r, 0.0, 0.0),
+        DVec3::new(0.0, 0.0, -speed),
+    );
+    let mut rb = engine_world::physics::RigidBody::dynamic();
+    rb.mass_kg = Some(2_000.0);
+    app.world.entity_mut(ship).insert(rb);
+    app.world.resource_mut::<SpaceClock>().warp = 100.0;
+    app.update();
+    assert!(rails_of(&app, ship).is_some(), "on rails");
+
+    // Turning it while it coasts sticks.
+    let turned = Quat::from_rotation_y(0.7) * Quat::from_rotation_x(0.3);
+    app.world.get_mut::<Transform>(ship).unwrap().rotation = turned;
+    app.update();
+    let now = app.world.get::<Transform>(ship).unwrap().rotation;
+    assert!(
+        now.angle_between(turned) < 0.01,
+        "{}",
+        now.angle_between(turned)
+    );
+
+    // 1 m/s² prograde for ~50 s of space time adds ~50 m/s to its orbit.
+    let (_, v0) = against(&mut app, ship, "Earth");
+    let energy = |d: f64, v: DVec3| v.length_squared() / 2.0 - mu / d;
+    let (d0, _) = against(&mut app, ship, "Earth");
+    let e0 = energy(d0, v0);
+    let along = app.world.get::<Velocity>(ship).unwrap().linear.normalize();
+    app.world
+        .entity_mut(ship)
+        .insert(engine_world::physics::ExternalForce {
+            force: along * 2_000.0,
+            ..Default::default()
+        });
+    let t0 = app.world.resource::<SpaceClock>().seconds;
+    for _ in 0..30 {
+        app.update();
+    }
+    app.world
+        .entity_mut(ship)
+        .remove::<engine_world::physics::ExternalForce>();
+    let burned = app.world.resource::<SpaceClock>().seconds - t0;
+    let (d1, v1) = against(&mut app, ship, "Earth");
+    let gained = energy(d1, v1) - e0;
+    let expected = speed * burned + burned * burned / 2.0;
+    assert!(
+        (gained / expected - 1.0).abs() < 0.03,
+        "gained {gained} J/kg, expected {expected}"
+    );
+    assert!(rails_of(&app, ship).is_some(), "still coasting");
+}
+
+#[test]
 fn a_ship_sent_past_the_moon_swings_by_it() {
     let mut app = app();
     let (moon_mu, moon_soi) = {

@@ -113,6 +113,20 @@ const SHOTS: &[Shot] = &[
         follow: None,
     },
     Shot {
+        name: "bridge_walker_close",
+        secs: 7.5,
+        eye: [-3.0, 1.75, -0.9],
+        target: [0.0, 1.1, 0.45],
+        follow: Some("Bridge walker"),
+    },
+    Shot {
+        name: "bridge_walker_cloak",
+        secs: 8.5,
+        eye: [-1.9, 2.0, 2.7],
+        target: [0.0, 0.95, 0.0],
+        follow: Some("Bridge walker"),
+    },
+    Shot {
         name: "bead_curtain",
         secs: 9.0,
         eye: [0.5, 2.2, 15.0],

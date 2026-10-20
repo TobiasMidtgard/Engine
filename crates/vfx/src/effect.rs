@@ -298,6 +298,18 @@ pub enum Sprite {
     /// A patch of foam floating on water: a lace of bubbles that breaks up and thins out over
     /// its life. Use with `facing: horizontal`, lit.
     Foam,
+    /// A whole fire in one sprite: turbulent heat rising through a body that narrows to a
+    /// few flickering tongues and sways more the higher it gets, deep red at its rim, its color
+    /// in the body and near white only in the heart. Use with `facing: axis`, `additive` about
+    /// 0.5 (so it hides a little of a bright sky), a few overlapping long-lived particles
+    /// standing on the fuel (`local_space`, `steady`) so it burns continuously; `stretch` is its
+    /// width over its height.
+    Blaze,
+    /// A ball of burning gas, traced through as a volume: a lumpy body rolled into lobes that
+    /// glows from inside, near white deep in and reddening outward, and chars to dark soot from
+    /// the outside in over its life. Use with `facing: camera`, `lit` 1 (the soot catches the
+    /// sun), a dozen or so big particles expanding as they rise.
+    Fireball,
 }
 
 impl Sprite {
@@ -311,7 +323,12 @@ impl Sprite {
         match self {
             Sprite::Smoke | Sprite::Dust => 1.0,
             Sprite::Droplet | Sprite::Crown => 0.4,
-            Sprite::Shard | Sprite::Haze | Sprite::Vortex | Sprite::Plume | Sprite::Ripple => 0.0,
+            Sprite::Shard
+            | Sprite::Haze
+            | Sprite::Vortex
+            | Sprite::Plume
+            | Sprite::Ripple
+            | Sprite::Blaze => 0.0,
             _ => 0.6,
         }
     }

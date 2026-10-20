@@ -322,8 +322,12 @@ impl Landforms {
                     octaves(w * 0.25, 6.0),
                     0.3,
                 ) * 0.12;
-            let x = dist / w + wall;
-            let floor = 1.0 - smooth(0.7, 1.0, x);
+            // Bays and promontories a few widths long, so the rim is ragged from orbit too.
+            let bays = fbm(w * 2.5, salt + 3, 3.0) * 0.22;
+            let x = dist / w + wall + bays;
+            // Walls about as steep everywhere (7 km down over ~13 km), however wide the floor.
+            let wall_share = (canyon.depth_m * 1.8 / w).clamp(0.12, 0.3);
+            let floor = 1.0 - smooth(1.0 - wall_share, 1.0, x);
             if floor > 0.0 {
                 // Landslide aprons at the foot of the walls, and dunes and layered mounds on
                 // the floor.

@@ -43,8 +43,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
 - **The real Mars.** `PlanetShape::mars` lays the real planet's landmarks where they are
   (`landforms::Landforms`, by latitude and longitude, degrees east): the northern lowlands,
   the Tharsis and Elysium rises, Olympus Mons (21 km, its scarp cliff and nested caldera) and
-  the other shield volcanoes, Valles Marineris (7 km deep, spurred walls, landslides, dark
-  dune floors) with Noctis Labyrinthus at its head and chaos terrain at its mouth, the Hellas,
+  the other shield volcanoes, Valles Marineris (7 km deep and up to ~200 km wide in Melas, with
+  Candor, Ophir, Ius's twin troughs and Coprates Catena; steep spurred walls with bays and
+  promontories, landslides, dark dune floors) with Noctis Labyrinthus at its head and chaos terrain at its mouth, the Hellas,
   Argyre and Isidis basins, both polar caps on their layered domes with spiral troughs and
   Chasma Boreale, the dark regions seen from Earth (Syrtis Major, Mare Acidalium, ...) with
   wind-streaked edges, and a dusty mottling between them. The seed varies only the small

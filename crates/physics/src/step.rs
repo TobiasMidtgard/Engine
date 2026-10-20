@@ -596,10 +596,12 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             if scaled {
                 scale_time(&mut sim, rid, &special, false);
             }
-            crate::rolling::resist_rolling(&mut sim, rid);
+            let min_speed = settings.contact_events.then_some(settings.impact_min_speed);
+            let touches = sim.region_mut(rid).touches(sub_dt, min_speed);
+            crate::rolling::resist_rolling(&mut sim, rid, &touches.spins);
             crate::cones::rub(&mut sim, rid);
             if settings.contact_events {
-                sim.process_contacts(rid, sub_dt);
+                sim.process_contacts(rid, sub_dt, &touches.hits);
             } else {
                 sim.region(rid).collector.0.lock().clear();
             }

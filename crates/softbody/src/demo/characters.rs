@@ -589,9 +589,8 @@ pub(super) fn mannequin(
     man
 }
 
-/// Turn a walking entity (the bridge walker) into a skinned mannequin: a skeleton, a body and
-/// the walk cycle on its own [`DemoClock`].
-#[allow(dead_code)]
+/// Turn a walking entity (the bridge walker) into a skinned mannequin in a traveling cloak:
+/// a skeleton, a body, the cloak, and a walk cycle paced by its [`DemoStride`].
 pub(super) fn bridge_walker_body(commands: &mut Commands, walker: Entity) {
     commands.entity(walker).insert((
         skeleton(&HUMANOID, Rig::Humanoid),
@@ -611,6 +610,20 @@ pub(super) fn bridge_walker_body(commands: &mut Commands, walker: Entity) {
             "Bridge walker body",
             fiberglass(0xc8a27a, 0.72),
         ),
+        ChildOf(walker),
+    ));
+    // A heavy wool cloak, long enough to swing about the knees as the deck sways.
+    let wool = SoftMaterial::hex(0x2f4858)
+        .with_pattern(Pattern::Border, 0x9c7a3c, 0xc9a35a)
+        .with_roughness(0.95)
+        .with_sheen(0.45);
+    commands.spawn((
+        Name::new("Bridge walker cloak"),
+        Transform::from_xyz(0.0, 1.475, 0.125),
+        Cloth {
+            mass_per_m2: 0.5,
+            ..Cloth::cape([0.6, 1.25], wool, &["chest"])
+        },
         ChildOf(walker),
     ));
 }
@@ -807,9 +820,19 @@ pub(crate) fn dog_fur_zones() -> Vec<FurZone> {
 }
 
 /// Procedural walk and trot cycles.
-pub fn animate_skeletons(mut rigs: Query<(&DemoSkeleton, &DemoClock, &mut SkeletonPose)>) {
-    for (rig, clock, mut pose) in &mut rigs {
-        let phase = clock.0 / rig.cycle.max(0.05) * TAU;
+pub fn animate_skeletons(
+    mut rigs: Query<(
+        &DemoSkeleton,
+        &DemoClock,
+        Option<&DemoStride>,
+        &mut SkeletonPose,
+    )>,
+) {
+    for (rig, clock, walked, mut pose) in &mut rigs {
+        let phase = match walked {
+            Some(walked) => walked.0 / rig.stride.max(0.05) * TAU,
+            None => clock.0 / rig.cycle.max(0.05) * TAU,
+        };
         pose_rig_stride(rig.rig, phase, rig.stride, &mut pose);
     }
 }
