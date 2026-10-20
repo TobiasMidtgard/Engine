@@ -321,6 +321,8 @@ fn inspect(world: &mut World, args: Value) -> Result<Value, String> {
             json!({"hunger": round(m.hunger as f64), "thirst": round(m.thirst as f64), "fatigue": round(m.fatigue as f64), "stamina": round(m.stamina as f64)}),
         );
         out.insert("water".into(), json!(m.water.flatten().map(arr)));
+        out.insert("drink_at".into(), json!(m.drink_at.map(|d| arr(d.0))));
+        out.insert("day".into(), json!(m.day.map(|d| d.name())));
         return Ok(Value::Object(out));
     }
     let Some(brain) = world.get::<NpcBrain>(e) else {

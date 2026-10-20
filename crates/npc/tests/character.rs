@@ -25,6 +25,11 @@ fn app() -> App {
         });
     app.add_plugins((WorldPlugin, NpcPlugin));
     app.world.resource_mut::<NpcSettings>().character_looks = true;
+    // Running each system in turn on the test's own thread is far quicker than handing them
+    // about a thread pool, and changes nothing (the order is fixed: `tests/schedule_order.rs`).
+    for (_, schedule) in app.world.resource_mut::<Schedules>().iter_mut() {
+        schedule.set_executor(engine_core::ecs::schedule::SingleThreadedExecutor::new());
+    }
     app
 }
 
