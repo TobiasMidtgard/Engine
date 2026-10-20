@@ -371,7 +371,10 @@ pub fn cloud_cell(r: &Regime, drifted: DVec2, seed: u64) -> CloudCell {
         2.1,
         0.5,
     );
-    let amp = 0.08 + 2.0 * c * (1.0 - c);
+    // Showers come in clusters with wide clear gaps between them; fair-weather heaps and
+    // layer cloud spread more evenly (a partly cloudy day isn't blue for 10 km at a time).
+    let gappy = 0.5 + 0.5 * smoothstep(0.6, 0.75, r.cloud_type);
+    let amp = 0.08 + 2.0 * c * (1.0 - c) * gappy;
     let coverage = (c + n * amp).clamp(0.0, 1.0);
     // Storm cells: towers where the second pattern peaks, lower cloud between them.
     let cells = fbm2(
@@ -533,7 +536,12 @@ pub fn step(
         .wind_dir
         .lerp(dir, 1.0 - (-wind_rate * dt_w).exp())
         .normalize_or(dir);
-    air.wind_speed = damp(air.wind_speed, speed, 1.0 / 30.0, dt_w);
+    // Weather switched on at once blows at its own speed now, like its air is its own now.
+    air.wind_speed = if ease {
+        damp(air.wind_speed, speed, 1.0 / 30.0, dt_w)
+    } else {
+        speed
+    };
     air.gustiness = (regime.gustiness + sim.gust_front * 0.5).min(1.0);
 
     // Clouds drift with the wind aloft (stronger than at the ground).
@@ -837,6 +845,30 @@ mod tests {
     }
 
     #[test]
+    fn a_storm_switched_on_at_once_blows_now() {
+        let mut weather = Weather {
+            preset: WeatherPreset::Clear,
+            transition_s: 0.0,
+            ..Default::default()
+        };
+        let mut sim = WeatherSim::new(&weather);
+        let mut state = WeatherState::default();
+        run(&mut sim, &mut weather, 600.0);
+        weather.preset = WeatherPreset::Storm;
+        run(&mut sim, &mut weather, 2.0);
+        write_state(&sim, &mut state);
+        let storm = WeatherPreset::Storm.regime().wind_speed;
+        assert!(state.wind.length() > storm * 0.95, "{state:?}");
+
+        // A front carrying the weather in still lets the wind drop slowly.
+        weather.transition_s = 600.0;
+        weather.preset = WeatherPreset::Clear;
+        run(&mut sim, &mut weather, 2.0);
+        write_state(&sim, &mut state);
+        assert!(state.wind.length() > storm * 0.8, "{state:?}");
+    }
+
+    #[test]
     fn forecast_runs_in_order_and_auto_keeps_changing() {
         let mut weather = Weather {
             preset: WeatherPreset::Clear,
@@ -912,6 +944,29 @@ mod tests {
             "overcast range {} vs clear {}",
             temps[1],
             temps[0]
+        );
+    }
+
+    #[test]
+    fn fair_weather_cloud_spreads_evenly_and_showers_keep_their_gaps() {
+        // Coverage at the 5th and 95th percentile over a 150 km square.
+        let spread = |preset: WeatherPreset| {
+            let r = preset.regime();
+            let mut v: Vec<f32> = (0..2500)
+                .map(|i| {
+                    let p = DVec2::new((i % 50) as f64, (i / 50) as f64) * 3000.0;
+                    cloud_cell(&r, p, 7).coverage
+                })
+                .collect();
+            v.sort_by(f32::total_cmp);
+            (v[125], v[2375])
+        };
+        let (lo, hi) = spread(WeatherPreset::PartlyCloudy);
+        assert!(lo > 0.3 && hi < 0.65, "partly cloudy spans {lo}..{hi}");
+        let (s_lo, s_hi) = spread(WeatherPreset::Showers);
+        assert!(
+            s_hi - s_lo > 1.5 * (hi - lo),
+            "showers span only {s_lo}..{s_hi}"
         );
     }
 }

@@ -12,6 +12,11 @@ use engine::render::{RenderDisabled, Renderer};
 const SETTLE_FRAMES: u32 = 8;
 /// Simulated seconds per tour frame.
 const STEP_SECS: f32 = 0.05;
+/// Before settling, a stop waits for meshes still being clustered in the background (the
+/// displaced relief of stones, rocks and bark), while they keep finishing...
+const BUILD_STALL_SECS: f32 = 90.0;
+/// ...but never longer than this, wall-clock seconds.
+const BUILD_WAIT_SECS: f32 = 900.0;
 
 /// The renderer, parked while a stop with [`Place::quick_warmup`] warms up.
 #[derive(Resource)]
@@ -23,6 +28,9 @@ pub struct Tour {
     pub index: usize,
     pub frames: u32,
     pub out_dir: String,
+    /// While a stop waits for background builds: when it started, the meshes ready and when
+    /// that last changed.
+    waiting: Option<(std::time::Instant, u64, std::time::Instant)>,
 }
 
 impl Tour {
@@ -38,6 +46,7 @@ impl Tour {
             index: 0,
             frames: 0,
             out_dir: "screenshots/tour".into(),
+            waiting: None,
         }
     }
 }
@@ -70,13 +79,19 @@ fn at(key: &str) -> Option<Place> {
     })
 }
 
-/// Install the tour: deterministic time steps and fast-adapting exposure.
+/// Install the tour: deterministic time steps, fast-adapting exposure and far woods built at once.
 pub fn install(app: &mut App, only: Option<&str>) {
     app.world
         .resource_mut::<Time>()
         .set_source(engine::core::time::TimeSource::Manual {
             step_secs: STEP_SECS as f64,
         });
+    // The far woods build every cell in view on the first frame instead of a couple a frame,
+    // which a tour's few frames per stop would never finish.
+    if let Some(mut far) = app.world.get_resource_mut::<engine_foliage::FarWoods>() {
+        far.background_builds = 0;
+        far.cells_per_frame = u32::MAX;
+    }
     app.insert_resource(Tour::new(only));
     app.add_systems(Update, run.after(camera::fly));
 }
@@ -128,6 +143,9 @@ fn run(world: &mut World) {
     }
     if frames == settle_from {
         unpark(world);
+        if wait_for_builds(world) {
+            return;
+        }
     }
 
     if frames == capture_at {
@@ -147,6 +165,45 @@ fn run(world: &mut World) {
     } else {
         tour.frames += 1;
     }
+}
+
+/// Hold the stop (true) while virtual geometry is still building meshes in view, so the
+/// picture shows their finished relief, not the smooth shapes drawn until it is ready.
+fn wait_for_builds(world: &mut World) -> bool {
+    let Some(state) = world.get_resource::<Renderer>().map(|r| {
+        let describe = r.describe();
+        describe["features"]
+            .as_array()
+            .and_then(|f| f.iter().find(|f| f["name"] == "meshes"))
+            .map(|f| f["state"]["virtual_geometry"].clone())
+            .unwrap_or_default()
+    }) else {
+        return false;
+    };
+    let building = state["meshes_building"].as_u64().unwrap_or(0);
+    let ready = state["meshes_ready"].as_u64().unwrap_or(0);
+    let now = std::time::Instant::now();
+    let mut tour = world.resource_mut::<Tour>();
+    let Some((since, last_ready, changed)) = tour.waiting else {
+        // One frame first: a renderer parked through a quick warm-up has only just seen the
+        // meshes in view.
+        tour.waiting = Some((now, ready, now));
+        return true;
+    };
+    let changed = if ready != last_ready { now } else { changed };
+    let waited = now.duration_since(since).as_secs_f32();
+    let stalled = now.duration_since(changed).as_secs_f32();
+    if building == 0 || waited > BUILD_WAIT_SECS || stalled > BUILD_STALL_SECS {
+        if waited > 1.0 {
+            engine::core::log::info!(
+                "  waited {waited:.0} s for {ready} meshes' clusters ({building} not ready)"
+            );
+        }
+        tour.waiting = None;
+        return false;
+    }
+    tour.waiting = Some((since, ready, changed));
+    true
 }
 
 /// Take the renderer out of the world, so frames run the simulation only (as the module

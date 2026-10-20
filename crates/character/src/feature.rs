@@ -3,8 +3,14 @@
 //!
 //! Each character keeps its own GPU buffers, rebuilt when its [`BuiltCharacter`] changes, and a
 //! small uniform (`GpuCharacter`) refreshed every frame: where it is relative to the camera and
-//! the colors its [`Appearance`] asks for. Hair sets each have a uniform and two storage
-//! buffers (points and their attributes) that the strand shaders expand into ribbons.
+//! the colors its [`Appearance`] asks for. Hair sets each have a uniform and three storage
+//! buffers (points, their attributes, and each hair's root) that the strand shaders expand into
+//! ribbons.
+//!
+//! People with a `SkeletonPose` are skinned on the GPU: a pose buffer per character holds one
+//! matrix per bone (from [`Rig::palette`]) for this frame and the last, the expression channel
+//! weights from its `FaceControls`, and the gaze. Skin vertices carry four bones and weights;
+//! hairs ride the skin vertex they grow from; eyes ride the head and turn to the gaze.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,9 +25,14 @@ use engine_render::shadows::SKY_OCCLUSION_VIEW;
 use engine_render::wgpu;
 use wgpu::util::DeviceExt;
 
-use crate::appearance::{Appearance, BeardStyle, HairStyle};
+use engine_world::animation::SkeletonPose;
+use engine_world::character::FaceControls;
+
+use crate::appearance::{Appearance, AppearanceExt, BeardStyle, HairStyle};
 use crate::build::CharacterMeshes;
+use crate::face::{self, MAX_CHANNELS};
 use crate::mesh::Landmarks;
+use crate::rig::Rig;
 use crate::{BuiltCharacter, CharacterDebug};
 
 pub const COMMON_WGSL: &str = include_str!("shaders/common.wgsl");
@@ -87,12 +98,12 @@ impl GpuCharacter {
         let age_lines = ((a.age - 28.0) / 45.0).clamp(0.0, 1.0);
         let wrinkles = (age_lines + a.skin.wrinkles * 0.5).clamp(0.0, 1.0);
         let male = a.sex.clamp(0.0, 1.0);
-        let shadow = match a.beard.style {
+        let shadow = match a.beard_style() {
             BeardStyle::None => 0.35 * male * ((a.age - 16.0) / 6.0).clamp(0.0, 1.0),
             BeardStyle::Stubble => 0.9,
             _ => 0.7,
         } * (0.4 + 0.6 * a.beard_color().melanin);
-        let scalp_tint = match a.hair.style {
+        let scalp_tint = match a.hair_style() {
             HairStyle::Bald => 0.0,
             HairStyle::Buzz => 0.85,
             // Slicked into a bun, the scalp hardly shows between the hairs.
@@ -142,11 +153,27 @@ struct SkinVertex {
     normal: [f32; 4],
     rest: [f32; 4],
     masks: [f32; 12],
+    bones: [u8; 4],
+    weights: [u8; 4],
 }
 
-const SKIN_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
-    0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4
+const SKIN_ATTRIBUTES: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
+    0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
+    6 => Uint8x4, 7 => Unorm8x4
 ];
+
+/// The fixed part of the pose buffer; must match `struct Pose` in common.wgsl (its bone
+/// matrices follow: this frame's, then last frame's).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct GpuPose {
+    info: [u32; 4],
+    gaze: [f32; 4],
+    eye_l: [f32; 4],
+    eye_r: [f32; 4],
+    weights: [[f32; 4]; MAX_CHANNELS / 4],
+    prev_weights: [[f32; 4]; MAX_CHANNELS / 4],
+}
 
 /// Eye vertex; must match `EyeIn` in eye.wgsl.
 #[repr(C)]
@@ -166,9 +193,34 @@ struct GpuStrands {
     vertices: u32,
 }
 
+/// What a character's pose buffer held last frame.
+struct LastPose {
+    palette: Vec<Mat4>,
+    weights: [f32; MAX_CHANNELS],
+    gaze: [f32; 2],
+    /// The pose skeleton the bone map was made for (its names), and the map.
+    names: Option<Arc<[String]>>,
+    map: Vec<Option<usize>>,
+}
+
+impl Default for LastPose {
+    fn default() -> Self {
+        Self {
+            palette: Vec::new(),
+            weights: [0.0; MAX_CHANNELS],
+            gaze: [0.0; 2],
+            names: None,
+            map: Vec::new(),
+        }
+    }
+}
+
 struct GpuMeshes {
     version: u64,
     uniform: wgpu::Buffer,
+    pose: wgpu::Buffer,
+    bones: usize,
+    last: LastPose,
     group: wgpu::BindGroup,
     skin_vertices: wgpu::Buffer,
     skin_indices: wgpu::Buffer,
@@ -201,9 +253,20 @@ struct Pipelines {
 pub struct CharacterFeature {
     pipelines: Option<Pipelines>,
     characters: HashMap<Entity, GpuMeshes>,
-    query: Option<QueryState<(Entity, &'static GlobalTransform, &'static BuiltCharacter)>>,
+    query: Option<QueryState<CharacterItem>>,
     stats: FeatureStats,
+    /// Scratch for this frame's bone matrices and pose buffer bytes.
+    palette: Vec<Mat4>,
+    pose_bytes: Vec<u8>,
 }
+
+type CharacterItem = (
+    Entity,
+    &'static GlobalTransform,
+    &'static BuiltCharacter,
+    Option<&'static SkeletonPose>,
+    Option<&'static FaceControls>,
+);
 
 enum Pass {
     Scene,
@@ -297,6 +360,13 @@ fn storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 impl CharacterFeature {
     fn upload(p: &Pipelines, gpu: &GpuShared, m: &CharacterMeshes, version: u64) -> GpuMeshes {
         let device = &gpu.device;
+        let n_skin = m.skin.skin_vertices();
+        let part = |i: usize| {
+            i.checked_sub(n_skin)
+                .and_then(|e| m.skin.extra_parts.get(e))
+                .copied()
+                .unwrap_or(0)
+        };
         let skin: Vec<SkinVertex> = (0..m.skin.positions.len())
             .map(|i| {
                 let p = m.skin.positions[i];
@@ -306,9 +376,11 @@ impl CharacterFeature {
                 masks.copy_from_slice(&m.skin.masks[i * 12..i * 12 + 12]);
                 SkinVertex {
                     position_curvature: [p.x, p.y, p.z, m.skin.curvature[i]],
-                    normal: [n.x, n.y, n.z, 0.0],
+                    normal: [n.x, n.y, n.z, part(i) as f32],
                     rest: [r.x, r.y, r.z, 0.0],
                     masks,
+                    bones: m.skin.bones.get(i).copied().unwrap_or_default(),
+                    weights: m.skin.weights.get(i).copied().unwrap_or([255, 0, 0, 0]),
                 }
             })
             .collect();
@@ -337,16 +409,48 @@ impl CharacterFeature {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let bones = m.rig.as_ref().map_or(1, |r| r.bones.len()).max(1);
+        let pose = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("character pose"),
+            size: (std::mem::size_of::<GpuPose>() + 2 * bones * 64) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let morph_offsets = buffer(
+            "character expression offsets",
+            bytemuck::cast_slice(&m.face.offsets),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let morph_entries = buffer(
+            "character expression shapes",
+            bytemuck::cast_slice(&m.face.entries),
+            wgpu::BufferUsages::STORAGE,
+        );
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("character"),
             layout: &p.char_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: pose.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: morph_offsets.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: morph_entries.as_entire_binding(),
+                },
+            ],
         });
+        let pack = |b: [u8; 4]| u32::from_le_bytes(b);
         let mut strands = Vec::new();
-        for set in &m.strands {
+        for (si, set) in m.strands.iter().enumerate() {
             let hairs = set.strand_count() as u32;
             if hairs == 0 || set.points_per < 2 {
                 continue;
@@ -367,6 +471,28 @@ impl CharacterFeature {
                 bytemuck::cast_slice(&set.attrs),
                 wgpu::BufferUsages::STORAGE,
             );
+            let roots: Vec<[u32; 4]> = (0..hairs as usize)
+                .map(|h| {
+                    let v = m
+                        .strand_roots
+                        .get(si)
+                        .and_then(|r| r.get(h))
+                        .copied()
+                        .unwrap_or(u32::MAX);
+                    let at = v as usize;
+                    [
+                        v,
+                        pack(m.skin.bones.get(at).copied().unwrap_or_default()),
+                        pack(m.skin.weights.get(at).copied().unwrap_or([255, 0, 0, 0])),
+                        0,
+                    ]
+                })
+                .collect();
+            let roots = buffer(
+                "character strand roots",
+                bytemuck::cast_slice(&roots),
+                wgpu::BufferUsages::STORAGE,
+            );
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("character strands"),
                 layout: &p.strand_layout,
@@ -383,6 +509,10 @@ impl CharacterFeature {
                         binding: 2,
                         resource: attrs.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: roots.as_entire_binding(),
+                    },
                 ],
             });
             strands.push(GpuStrands {
@@ -394,6 +524,9 @@ impl CharacterFeature {
         GpuMeshes {
             version,
             uniform,
+            pose,
+            bones,
+            last: LastPose::default(),
             group,
             skin_vertices: buffer(
                 "character skin vertices",
@@ -472,11 +605,21 @@ impl RenderFeature for CharacterFeature {
         let device = &gpu.device;
         let char_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("character"),
-            entries: &[uniform_entry(0)],
+            entries: &[
+                uniform_entry(0),
+                storage_entry(1),
+                storage_entry(2),
+                storage_entry(3),
+            ],
         });
         let strand_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("character strands"),
-            entries: &[uniform_entry(0), storage_entry(1), storage_entry(2)],
+            entries: &[
+                uniform_entry(0),
+                storage_entry(1),
+                storage_entry(2),
+                storage_entry(3),
+            ],
         });
         let [
             skin_src,
@@ -621,7 +764,7 @@ impl RenderFeature for CharacterFeature {
         for c in self.characters.values_mut() {
             c.seen = false;
         }
-        for (entity, transform, built) in query.iter(world) {
+        for (entity, transform, built, skeleton, face) in query.iter(world) {
             let entry = self.characters.entry(entity);
             let c = match entry {
                 std::collections::hash_map::Entry::Occupied(o) => {
@@ -663,6 +806,15 @@ impl RenderFeature for CharacterFeature {
             u.prev_model = prev_model.to_cols_array_2d();
             gpu.queue
                 .write_buffer(&c.uniform, 0, bytemuck::bytes_of(&u));
+            write_pose(
+                gpu,
+                c,
+                &built.meshes,
+                skeleton,
+                face,
+                &mut self.palette,
+                &mut self.pose_bytes,
+            );
             self.stats.instances += 1;
             self.stats.triangles += c.triangles;
             self.stats.draw_calls += 2 + c.strands.len() as u32;
@@ -702,6 +854,77 @@ impl RenderFeature for CharacterFeature {
 /// The meshes a character feature draws, shared with the build system.
 pub type SharedMeshes = Arc<CharacterMeshes>;
 
+/// Fill a character's pose buffer: bone matrices from its `SkeletonPose` (identity without
+/// one), expression weights from its `FaceControls`, and last frame's of each.
+fn write_pose(
+    gpu: &GpuShared,
+    c: &mut GpuMeshes,
+    m: &CharacterMeshes,
+    skeleton: Option<&SkeletonPose>,
+    face_controls: Option<&FaceControls>,
+    palette: &mut Vec<Mat4>,
+    bytes: &mut Vec<u8>,
+) {
+    let rig: Option<&Rig> = m.rig.as_ref();
+    palette.clear();
+    let posed = match (rig, skeleton) {
+        (Some(rig), Some(pose)) => {
+            let same = c
+                .last
+                .names
+                .as_ref()
+                .is_some_and(|n| Arc::ptr_eq(n, &pose.names));
+            if !same {
+                c.last.map = rig.map(pose);
+                c.last.names = Some(pose.names.clone());
+            }
+            rig.palette(pose, &c.last.map, palette);
+            true
+        }
+        _ => false,
+    };
+    palette.resize(c.bones, Mat4::IDENTITY);
+    if c.last.palette.len() != c.bones {
+        c.last.palette = palette.clone();
+    }
+    let mut weights = [0.0f32; MAX_CHANNELS];
+    let mut gaze = [0.0f32; 2];
+    if let Some(f) = face_controls {
+        face::channel_weights(f, &mut weights);
+        gaze = [f.gaze_yaw, f.gaze_pitch];
+    }
+    let head = rig
+        .and_then(|r| r.bones.iter().position(|b| b == "head"))
+        .unwrap_or(0);
+    let eyes = m.landmarks.map(|l| l.eyes).unwrap_or([Vec3::ZERO; 2]);
+    let e = |p: Vec3| [p.x, p.y, p.z, 0.0];
+    let fours = |w: &[f32; MAX_CHANNELS]| {
+        let mut out = [[0.0f32; 4]; MAX_CHANNELS / 4];
+        for (i, v) in w.iter().enumerate() {
+            out[i / 4][i % 4] = *v;
+        }
+        out
+    };
+    let header = GpuPose {
+        info: [c.bones as u32, posed as u32, head as u32, 0],
+        gaze: [gaze[0], gaze[1], c.last.gaze[0], c.last.gaze[1]],
+        eye_l: e(eyes[0]),
+        eye_r: e(eyes[1]),
+        weights: fours(&weights),
+        prev_weights: fours(&c.last.weights),
+    };
+    bytes.clear();
+    bytes.extend_from_slice(bytemuck::bytes_of(&header));
+    for mat in palette.iter().chain(c.last.palette.iter()) {
+        bytes.extend_from_slice(bytemuck::bytes_of(&mat.to_cols_array()));
+    }
+    gpu.queue.write_buffer(&c.pose, 0, bytes);
+    c.last.palette.clear();
+    c.last.palette.extend_from_slice(palette);
+    c.last.weights = weights;
+    c.last.gaze = gaze;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,7 +941,8 @@ mod tests {
     #[test]
     fn gpu_structs_match_wgsl_sizes() {
         assert_eq!(std::mem::size_of::<GpuCharacter>(), 2 * 64 + 12 * 16);
-        assert_eq!(std::mem::size_of::<SkinVertex>(), 96);
+        assert_eq!(std::mem::size_of::<SkinVertex>(), 104);
+        assert_eq!(std::mem::size_of::<GpuPose>(), 4 * 16 + 2 * 16 * 16);
         assert_eq!(std::mem::size_of::<EyeVertex>(), 48);
     }
 }

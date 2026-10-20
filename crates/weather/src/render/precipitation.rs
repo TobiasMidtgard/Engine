@@ -258,7 +258,8 @@ impl RenderFeature for PrecipitationFeature {
                     let a = (s.a - view.origin).as_vec3();
                     let e = (s.b - view.origin).as_vec3();
                     segs.push([a.x, a.y, a.z, s.width]);
-                    segs.push([e.x, e.y, e.z, s.brightness * b]);
+                    segs.push([e.x, e.y, e.z, b]);
+                    segs.push([s.brightness, 0.0, 0.0, 0.0]);
                 }
             }
         }
@@ -289,7 +290,7 @@ impl RenderFeature for PrecipitationFeature {
         self.drops = drops;
         self.flakes = flakes;
         self.splashes = splashes;
-        self.segments = (segs.len() / 2) as u32;
+        self.segments = (segs.len() / 3) as u32;
     }
 
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {

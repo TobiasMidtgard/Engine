@@ -18,6 +18,9 @@ use crate::ground::GroundTerrain;
 /// are measured over this distance (not a boulder's flank).
 const DETAIL_M: f64 = 4.0;
 
+/// The paint layer of woods' floor ("leaves", see [`crate::edits::PAINT_NAMES`]).
+const LEAVES: u8 = 10;
+
 /// Dave Hoskins' hash without sine (`lib_types.wgsl`).
 fn hash13(p: [f32; 3]) -> f32 {
     let mut p3 = p.map(|v| fract(v * 0.1031));
@@ -123,10 +126,13 @@ pub(crate) fn woods(
     let mut density = woodland.max(gallery).min(veg);
     let desert = (1.0 - smoothstep(0.08, 0.22, moisture + (variety - 0.5) * 0.1))
         * smoothstep(12.0, 22.0, temp_c);
-    // Painted ground (paths, fields, yards) clears the woods; snow and mud lie on top.
-    if s.paint.0 >= 3 {
-        density *= 1.0 - saturate(s.paint.1);
-    }
+    // Painted ground (a level's paths, fields and yards) takes the place of the natural
+    // ground, and painted leaves are a level's woods; snow and mud lie on top.
+    let (painted, leaves) = match s.paint {
+        (l, w) if l >= 3 => (saturate(w), if l == LEAVES { saturate(w) } else { 0.0 }),
+        _ => (0.0, 0.0),
+    };
+    density *= 1.0 - painted;
     // Rivers and lakes.
     density *= 1.0 - smoothstep(0.3, 0.6, s.water);
     // Needle trees in the cold: up mountains and toward the poles, mixed woods in between.
@@ -137,7 +143,7 @@ pub(crate) fn woods(
     );
     if density * (1.0 - desert) <= 0.0 {
         return ForestSample {
-            density: 0.0,
+            density: leaves,
             conifer,
         };
     }
@@ -162,7 +168,7 @@ pub(crate) fn woods(
         * saturate(smoothstep(rock_slope - 0.14, rock_slope - 0.04, slope) * 0.7 + alpine * 0.6);
     density *= (1.0 - scree) * (1.0 - rock);
     ForestSample {
-        density: saturate(density),
+        density: saturate(density + leaves),
         conifer,
     }
 }
@@ -220,9 +226,12 @@ mod tests {
             "let desert = vegetation * (1.0 - smoothstep(0.08, 0.22, moisture + (variety - 0.5) * 0.1",
             "let alpine = smoothstep(2100.0, 3000.0, altitude + (variety - 0.5) * 800.0) * vegetation;",
             "w[M_FOREST] = min(woods, veg);",
+            "for (var i = 0u; i < MAT_COUNT; i++) { w[i] *= 1.0 - paint_base; }",
+            "case 10u: { return M_FOREST; }",
             "let macro_v = tile_fbm(tp, 1.0 / 64.0, 3);",
             "let mid_v = tile_fbm(tp, 1.0 / 8.0, 3);",
             "let patch_v = tile_fbm(tp, 1.0 / 32.0, 3);",
+            "let conifer = smoothstep(11.0, 3.0, temp_c + (variety - 0.5) * 5.0 + (macro_v - 0.5) * 3.0 * macro_fade + (moisture - 0.5) * 2.0);",
             "let meadow_v = tile_fbm(tp, 1.0 / 512.0, 3);",
             "sum += amp * pnoise3(tp * f + f32(i) * 17.0, 4096.0 * f);",
             "let i1 = (i0 + 1.0) - period * floor((i0 + 1.0) / period);",
@@ -284,6 +293,10 @@ mod tests {
         let mut road = sample(0.9, 10.0, 300.0);
         road.paint = (9, 1.0);
         assert_eq!(woods(&road, 0.6, 0.2, || 0.0, 0.3, tp).density, 0.0);
+        // A level's painted woods are woods, also where the land is too dry or steep for them.
+        let mut painted = sample(0.1, 20.0, 300.0);
+        painted.paint = (LEAVES, 0.8);
+        assert_eq!(woods(&painted, 0.4, 0.8, || 0.9, 0.3, tp).density, 0.8);
         let mut banks = sample(0.2, 14.0, 300.0);
         banks.banks = 0.9;
         assert!(woods(&banks, 0.4, 0.8, || 0.0, 0.3, tp).density > 0.8);

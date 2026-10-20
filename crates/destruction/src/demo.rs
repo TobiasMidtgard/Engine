@@ -82,8 +82,10 @@ const DECK_LEN: f32 = 6.1;
 /// Middles (x, z) of the wooden hatch (bay 2) and the steel one (bay 3), 1 m square.
 const HATCH: [f64; 2] = [-0.855, -1.6];
 const STEEL_HATCH: [f64; 2] = [0.855, -1.6];
-/// How fast the cut steel hatch plate leaves sideways, m/s.
-const HATCH_TIP_SPEED: f32 = 2.5;
+/// How the breacher heaves the cut steel hatch plate out (hatch-local m/s): up out of the hole
+/// and toward bay 4, away from the wooden hatch, so it lands on the deck and never drops onto
+/// the climber waiting on the ladder below.
+const HATCH_HEAVE: [f32; 3] = [2.0, 0.0, 3.5];
 const HATCH_M: f32 = 1.0;
 /// Where the live breach charge sits on the roof (house-local x, z): in front of the steel
 /// hatch, mid-room, so what it blows through rains onto the floor.
@@ -505,6 +507,9 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     commands.queue(move |world: &mut World| apply_aftermath(world, ids));
 }
 
+/// Board thickness of the range's wooden crates, meters.
+const CRATE_WALL: f32 = 0.025;
+
 fn spawn_props(commands: &mut Commands, o: DVec3) -> Vec<Entity> {
     let mut out = Vec::new();
     let x0 = BAYS[5];
@@ -527,8 +532,9 @@ fn spawn_props(commands: &mut Commands, o: DVec3) -> Vec<Entity> {
                     g,
                     PropModel::new(PropKind::WoodenCrate { size: [s, s, s] }, k as u64),
                     Fracturable {
-                        shape: FractureShape::Box {
+                        shape: FractureShape::Crate {
                             half_extents: Vec3::splat(s * 0.5),
+                            wall: CRATE_WALL,
                         },
                         material: DestructibleMaterial::Wood,
                         break_energy_j: 2500.0,
@@ -1248,7 +1254,7 @@ fn apply_aftermath(world: &mut World, ids: Aftermath) {
         max: Vec2::new(0.6, 2.1),
         front: true,
         melt: false,
-        tip: Vec2::ZERO,
+        tip: Vec3::ZERO,
     });
     // Bay 5: an explosive charge against reinforced concrete: the bars survive.
     hits.push(Hit::Blast {
@@ -1527,10 +1533,8 @@ fn run_step(world: &mut World, demo: &mut DestructionDemo, step: Step) {
         Step::ThermiteHatch => {
             if let Some(hatch) = t.steel_hatch {
                 let mid = Vec2::new(0.0, HATCH_M * 0.5);
-                // The plate falls forward, clear of the ladder under the hatch's back edge
-                // (wall-local +y is the back).
                 let mut c = BreachCharge::thermite(hatch, mid, [0.8, 0.8])
-                    .with_tip(Vec2::new(0.0, -HATCH_TIP_SPEED));
+                    .with_tip(Vec3::from_array(HATCH_HEAVE));
                 c.fuse_secs = 0.6;
                 world.spawn((Name::new("Hatch thermite charge"), c));
             }

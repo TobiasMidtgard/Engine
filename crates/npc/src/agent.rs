@@ -43,6 +43,21 @@ pub struct Npc {
     pub active: bool,
     /// Override the weapon's preferred fighting distance, meters.
     pub preferred_range: Option<f32>,
+    /// What it is in its squad (see [`NpcRole`]).
+    pub role: NpcRole,
+}
+
+/// What an NPC is in its squad.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum NpcRole {
+    /// A fighter like any other.
+    #[default]
+    Fighter,
+    /// The squad's medic: it fights from the back line and goes for downed squad mates first
+    /// (it notices them sooner and wants it more, and its mates leave the revive to it while it
+    /// is near). While it kneels over one, its mates cover it: the shooters fire at whoever can
+    /// see it, the melee fighters stand between it and the enemy. It wears an armband.
+    Medic,
 }
 
 impl Default for Npc {
@@ -52,6 +67,7 @@ impl Default for Npc {
             patrol_radius: 8.0,
             active: true,
             preferred_range: None,
+            role: NpcRole::Fighter,
         }
     }
 }
@@ -65,7 +81,8 @@ pub enum WeaponStyle {
 }
 
 /// The NPC's weapon. Presets: [`NpcWeapon::sword`], [`sword_and_shield`](NpcWeapon::sword_and_shield),
-/// [`rifle`](NpcWeapon::rifle), [`bow`](NpcWeapon::bow), [`claws`](NpcWeapon::claws).
+/// [`rifle`](NpcWeapon::rifle), [`carbine`](NpcWeapon::carbine), [`bow`](NpcWeapon::bow),
+/// [`claws`](NpcWeapon::claws).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NpcWeapon {
@@ -140,6 +157,18 @@ impl NpcWeapon {
         }
     }
 
+    /// A light rifle (a medic's): it hits less hard and less far, and fires a little faster.
+    pub fn carbine() -> Self {
+        Self {
+            damage: 12.0,
+            range: 30.0,
+            windup: 0.3,
+            cooldown: 0.45,
+            spread_deg: 8.0,
+            ..Self::rifle()
+        }
+    }
+
     pub fn bow() -> Self {
         Self {
             damage: 30.0,
@@ -165,12 +194,13 @@ impl NpcWeapon {
         }
     }
 
-    /// Named preset: `sword`, `sword_and_shield`, `rifle`, `bow`, `claws`.
+    /// Named preset: `sword`, `sword_and_shield`, `rifle`, `carbine`, `bow`, `claws`.
     pub fn preset(name: &str) -> Option<Self> {
         Some(match name {
             "sword" => Self::sword(),
             "sword_and_shield" => Self::sword_and_shield(),
             "rifle" => Self::rifle(),
+            "carbine" => Self::carbine(),
             "bow" => Self::bow(),
             "claws" => Self::claws(),
             _ => return None,
@@ -397,8 +427,14 @@ pub struct NpcBrain {
     pub next_strafe_flip: f64,
     /// A direct order overrides utility scoring until done.
     pub order: Option<NpcOrder>,
-    /// Squad role this think (`"suppress"`, `"flank"`, `"wait"`, `"attack"`).
+    /// Squad role this think (`"suppress"`, `"flank"`, `"cover"` a mate reviving, `"screen"` a
+    /// kneeling medic).
     pub role: &'static str,
+    /// Where the squad's medic kneels over a downed mate, while this one covers or screens it
+    /// (`"cover"` / `"screen"`).
+    pub guard: Option<DVec3>,
+    /// When a medic has its next smoke canister ready (world clock, s; see [`crate::smoke`]).
+    pub smoke_ready: f64,
     /// Random stream for this NPC's decisions.
     pub rng_state: u64,
     /// Where it came from (patrol center when `Npc::home` is not set).
@@ -424,19 +460,43 @@ pub struct NpcBrain {
     pub low_cover: bool,
     /// The downed squad mate it is going to revive (with [`NpcAction::Revive`]).
     pub revive: Option<Entity>,
-    /// Seconds it has knelt over that squad mate so far (its own clock); the squad mate gets
-    /// up when this reaches its revive time. Lost if the revive is broken off.
+    /// Seconds it has knelt beside that squad mate so far (its own clock): the first
+    /// [`NpcBrain::REVIVE_KNEEL_SECS`] it gets down on its knees, its weapon set down, and puts
+    /// its hands on the chest. Lost if the revive is broken off.
+    pub revive_kneel: f32,
+    /// Seconds its hands have been on that squad mate's chest so far (its own clock): the
+    /// squad mate gets up when this reaches its revive time. Lost if the revive is broken off.
     pub revive_progress: f32,
     /// After breaking off a revive, it doesn't try one again before this time (NPC clock).
     pub revive_retry: f64,
-    /// On the way to revive: the closest it has come to its kneeling spot (m), and how long it
-    /// has been on its way since it last got closer (s; not counting time spent defending).
-    /// One that stops getting closer gives up.
+    /// On the way to revive: the shortest way it has had left to its kneeling spot (m, along
+    /// its path), and how long it has been on its way since that last got shorter (s). One
+    /// that stops getting closer gives up.
     pub revive_closest: f32,
     pub revive_stalled: f32,
+    /// Getting up from kneeling by a mate (done, or broken off), it stays where it is until
+    /// this time, taking its weapon up again (NPC clock; see [`NpcBrain::REVIVE_STAND_SECS`]).
+    pub revive_rise_until: f64,
 }
 
 impl NpcBrain {
+    /// How long a reviver takes to get down beside a downed squad mate, set its weapon down
+    /// and put its hands on the chest (s); the revive counts from then.
+    pub const REVIVE_KNEEL_SECS: f32 = 1.2;
+
+    /// How long a reviver takes to get up off its knees and take its weapon up again before it
+    /// moves (s).
+    pub const REVIVE_STAND_SECS: f64 = 0.85;
+
+    /// How long a revived fighter takes to get up off the ground (s, the slowest: a bow
+    /// fighter); it revives nobody before then.
+    pub const GET_UP_SECS: f64 = 2.3;
+
+    /// Down on its knees by a downed squad mate (getting down, or its hands on the chest).
+    pub fn kneeling(&self) -> bool {
+        self.action == NpcAction::Revive && self.revive_kneel > 0.0
+    }
+
     /// Deterministic per-NPC random number in 0..1.
     pub fn random(&mut self) -> f32 {
         self.rng_state = hash_u64(self.rng_state.wrapping_add(0x9e37_79b9_7f4a_7c15));

@@ -1,7 +1,7 @@
 //! Debug: `cargo run -p engine_character --example dump_strands -- <preset> <out.json>` writes
 //! every strand set's points and the skin's scalp mask, for plotting.
 
-use engine_character::{Appearance, BuildOptions, HumanPack, build, mesh};
+use engine_character::{Appearance, AppearanceExt, BuildOptions, HumanPack, build, mesh};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

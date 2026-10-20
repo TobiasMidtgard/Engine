@@ -1,14 +1,17 @@
 //! Squads: NPCs that share a [`Squad`](crate::faction::Squad) tell each other what they see
 //! (a shouted callout, which enemies can hear too), take turns attacking in melee so they don't
 //! crowd one opponent, and split into suppressors and a flanker against the same target. When
-//! one of them kneels to revive a downed squad mate, the other shooters cover it.
+//! one of them kneels to revive a downed squad mate, the other shooters cover it. While the
+//! squad's medic kneels, they fire at whoever can see it, and its melee mates screen it.
 
 use std::collections::HashMap;
 
 use engine_core::prelude::*;
 use engine_world::NoiseEvent;
 
-use crate::agent::{NpcAction, NpcBrain, NpcClock, NpcVitals, NpcWeapon, WeaponStyle};
+use crate::agent::{
+    Npc, NpcAction, NpcBrain, NpcClock, NpcRole, NpcVitals, NpcWeapon, WeaponStyle,
+};
 use crate::faction::{Faction, Squad};
 use crate::perception::NpcMemory;
 use crate::skills::NpcSkills;
@@ -109,6 +112,18 @@ impl ReviveClaims {
     /// How long a claim lasts without being renewed (world seconds).
     const SECS: f64 = 1.0;
 
+    /// How much better placed a mate must be to take a claim over (revive score).
+    const MARGIN: f32 = 0.05;
+
+    /// Whether `me` bidding `score` to revive `downed` at world time `now` would hold the
+    /// claim (see [`ReviveClaims::bid`]): nobody else holds it, or they are not there yet
+    /// and `me` is clearly better placed.
+    pub fn open_to(&self, downed: Entity, me: Entity, score: f32, now: f64) -> bool {
+        self.claims.get(&downed).is_none_or(|c| {
+            c.until <= now || c.reviver == me || (!c.locked && score > c.score + 0.05)
+        })
+    }
+
     /// `me` bids `score` to revive `downed` at world time `now` (`locked`: it is there and
     /// nobody should take over). Returns true if `me` holds the claim now.
     pub fn bid(&mut self, downed: Entity, me: Entity, score: f32, now: f64, locked: bool) -> bool {
@@ -119,8 +134,7 @@ impl ReviveClaims {
             locked,
         };
         let c = self.claims.entry(downed).or_insert(mine);
-        let free = c.until <= now || c.reviver == me || (!c.locked && score > c.score + 0.05);
-        if free {
+        if c.until <= now || c.reviver == me || (!c.locked && score > c.score + Self::MARGIN) {
             *c = mine;
         }
         c.reviver == me
@@ -176,7 +190,7 @@ type MemberItem<'a> = (
     &'a Transform,
     &'a NpcSkills,
     &'a NpcWeapon,
-    &'a NpcClock,
+    (&'a NpcClock, &'a Npc),
     &'a NpcVitals,
     &'a mut NpcBrain,
     &'a mut NpcMemory,
@@ -187,6 +201,7 @@ struct Member {
     squad: Squad,
     skills: NpcSkills,
     ranged: bool,
+    medic: bool,
     target: Option<Entity>,
 }
 
@@ -208,18 +223,33 @@ pub(crate) fn plan_squads(
     let mut sightings: Vec<(Squad, Entity, Entity, Faction, DVec3, Vec3, DVec3)> = Vec::new();
     // Squads with a member kneeling over (or on its way to) a downed mate.
     let mut reviving: Vec<Squad> = Vec::new();
-    for (e, squad, _, t, skills, weapon, _, vitals, brain, memory) in q.iter() {
+    // Squads whose medic goes to or kneels over a downed mate, and where it kneels.
+    let mut medics: Vec<(Squad, DVec3)> = Vec::new();
+    for (e, squad, _, t, skills, weapon, (clock, npc), vitals, brain, memory) in q.iter() {
         if vitals.downed {
             continue;
         }
-        if brain.action == NpcAction::Revive && !reviving.contains(squad) {
+        // (One handed to game code or stopped in time revives nobody.)
+        let acting = npc.active && clock.dt > 0.0;
+        if brain.action == NpcAction::Revive && acting && !reviving.contains(squad) {
             reviving.push(*squad);
+        }
+        let medic = npc.role == NpcRole::Medic;
+        if medic && acting && brain.action == NpcAction::Revive {
+            // (Its mates get there as it does.)
+            let at = if brain.kneeling() {
+                t.translation
+            } else {
+                brain.destination.unwrap_or(t.translation)
+            };
+            medics.push((*squad, at));
         }
         members.push(Member {
             e,
             squad: *squad,
             skills: *skills,
             ranged: weapon.style == WeaponStyle::Ranged,
+            medic,
             target: brain.target,
         });
         for k in &memory.known {
@@ -238,7 +268,7 @@ pub(crate) fn plan_squads(
     }
     // Callouts.
     let mut shouted: Vec<Entity> = Vec::new();
-    for (e, squad, _, t, skills, _, clock, vitals, mut brain, mut memory) in q.iter_mut() {
+    for (e, squad, _, t, skills, _, (clock, _), vitals, mut brain, mut memory) in q.iter_mut() {
         if vitals.downed {
             continue;
         }
@@ -280,14 +310,15 @@ pub(crate) fn plan_squads(
             .filter(|m| m.ranged)
             .collect();
         if ranged.len() >= 2 {
+            // (The medic stays back.)
             let flanker = ranged
                 .iter()
-                .filter(|m| m.skills.teamwork >= 0.3 && m.skills.logic >= 0.35)
+                .filter(|m| !m.medic && m.skills.teamwork >= 0.3 && m.skills.logic >= 0.35)
                 .max_by(|a, b| a.skills.logic.total_cmp(&b.skills.logic));
             for m in &ranged {
                 let role = if flanker.is_some_and(|f| f.e == m.e) {
                     "flank"
-                } else if m.skills.teamwork >= 0.3 {
+                } else if m.skills.teamwork >= 0.3 && !m.medic {
                     "suppress"
                 } else {
                     ""
@@ -298,18 +329,28 @@ pub(crate) fn plan_squads(
     }
     // While a mate revives someone, the other shooters cover it: they hold where they are and
     // keep the enemy's heads down (fire at where it was last seen), instead of flanking.
+    // A medic going to kneel or kneeling most of all: the shooters fire at whoever can see
+    // its spot, and the melee fighters go stand between it and the enemy.
+    let mut guards: HashMap<Entity, DVec3> = HashMap::new();
     for m in &members {
-        if m.ranged && m.skills.teamwork >= 0.3 && reviving.contains(&m.squad) {
+        if m.skills.teamwork < 0.3 {
+            continue;
+        }
+        if m.ranged && reviving.contains(&m.squad) {
             roles.insert(m.e, "cover");
+        }
+        if let Some(&(_, at)) = medics.iter().find(|(sq, _)| *sq == m.squad) {
+            if !m.ranged {
+                roles.insert(m.e, "screen");
+            }
+            guards.insert(m.e, at);
         }
     }
     for (e, _, _, _, _, _, _, _, mut brain, _) in q.iter_mut() {
         let role = roles.get(&e).copied().unwrap_or("");
-        brain.role = if brain.action == NpcAction::Revive {
-            ""
-        } else {
-            role
-        };
+        let reviving = brain.action == NpcAction::Revive;
+        brain.role = if reviving { "" } else { role };
+        brain.guard = guards.get(&e).copied().filter(|_| !reviving);
     }
 }
 

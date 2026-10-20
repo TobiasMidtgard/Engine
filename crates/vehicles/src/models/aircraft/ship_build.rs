@@ -453,39 +453,46 @@ fn plume_glow() -> Image {
 }
 
 /// Shells of the re-entry wake, outside in: radius where it leaves the ship (1 = the
-/// wake's radius) and at its end, and opacity. Many faint shells read as a soft column of
-/// gas instead of a tube.
-const WAKE_SHELLS: [(f32, f32, f32); 8] = [
-    (1.0, 2.6, 0.03),
-    (0.86, 2.2, 0.035),
-    (0.72, 1.85, 0.04),
-    (0.6, 1.5, 0.045),
-    (0.48, 1.2, 0.05),
-    (0.36, 0.9, 0.06),
-    (0.25, 0.62, 0.07),
-    (0.15, 0.38, 0.09),
+/// wake's radius) and at its end, opacity, and how fast it cools along its length. Many faint
+/// shells read as a soft column of gas instead of a tube. The outer gas glows pink-violet
+/// ([`WAKE_COLOR`]); the core, hottest and cooling fastest, orange-white ([`HOT_COLOR`]).
+const WAKE_OUTER: [(f32, f32, f32, f32); 6] = [
+    (1.0, 2.6, 0.022, 1.8),
+    (0.9, 2.3, 0.026, 2.0),
+    (0.8, 2.05, 0.03, 2.2),
+    (0.7, 1.8, 0.034, 2.4),
+    (0.61, 1.55, 0.038, 2.6),
+    (0.52, 1.32, 0.042, 2.8),
+];
+const WAKE_CORE: [(f32, f32, f32, f32); 6] = [
+    (0.44, 1.1, 0.04, 3.2),
+    (0.37, 0.9, 0.045, 3.6),
+    (0.3, 0.72, 0.05, 4.0),
+    (0.23, 0.55, 0.06, 4.4),
+    (0.17, 0.4, 0.07, 4.8),
+    (0.11, 0.26, 0.09, 5.2),
 ];
 
 /// Streamers peeling off the wingtips, where the shock layer spills round the wing's edge:
-/// thin and bright, like the wake's shells.
-const STREAMER_SHELLS: [(f32, f32, f32); 4] = [
-    (1.0, 3.2, 0.05),
-    (0.7, 2.3, 0.07),
-    (0.45, 1.5, 0.1),
-    (0.25, 0.75, 0.14),
+/// thin, hot and short-lived.
+const STREAMER_SHELLS: [(f32, f32, f32, f32); 4] = [
+    (1.0, 3.2, 0.05, 2.0),
+    (0.7, 2.3, 0.07, 3.0),
+    (0.45, 1.5, 0.1, 4.0),
+    (0.25, 0.75, 0.14, 5.0),
 ];
 
 /// A unit re-entry wake along +Z (radius 1 where it leaves the ship, length 1) from
 /// `shells`: it starts at `neck` of its radius right behind the ship (the air closing in
-/// behind the body) and widens like a cone. It fades in over its first few percent, then out,
-/// fastest in its core, the hottest gas, which cools first. It is streaked along its length
+/// behind the body) and widens like a cone. It fades in over its first few percent, then out
+/// as each shell cools. It is streaked along its length
 /// like the turbulent gas it is (streaks drift around it downstream).
-fn wake_mesh(shells: &[(f32, f32, f32)], seg: usize, rows: usize, neck: f32) -> Mesh {
+fn wake_mesh(shells: &[(f32, f32, f32, f32)], seg: usize, rows: usize, neck: f32) -> Mesh {
     let ts: Vec<f32> = (0..=rows)
         .map(|i| (i as f32 / rows as f32).powf(1.6))
         .collect();
     let mut out = Mesh::default();
-    for (k, &(r0, r1, a0)) in shells.iter().enumerate() {
+    for (k, &(r0, r1, a0, cooling)) in shells.iter().enumerate() {
         let phase = k as f32 * 1.9;
         let radius = |t: f32| r0 * neck + (r1 - r0 * neck) * t.powf(0.7);
         let ring: Vec<Vec<Vec3>> = ts
@@ -502,7 +509,6 @@ fn wake_mesh(shells: &[(f32, f32, f32)], seg: usize, rows: usize, neck: f32) -> 
         let mut m = grid(&ring, true, false, |i, j| {
             Vec2::new(j as f32 / seg as f32, ts[i])
         });
-        let cooling = 2.0 + 3.0 * k as f32 / (shells.len() - 1) as f32;
         for (i, v) in m.vertices.iter_mut().enumerate() {
             let t = ts[i / (seg + 1)];
             let a = (i % (seg + 1)) as f32 / seg as f32 * TAU;
@@ -522,15 +528,10 @@ const NOSE_Z: f32 = -10.8;
 /// The angle of attack the shock layer is drawn for: the one the entry flies.
 const SHEATH_AOA_DEG: f32 = 40.0;
 /// Shock-layer shells over the skin, inside out: standoff from the skin facing straight
-/// into the flow (m) and opacity there. Faces turned away from the flow get none.
-const SHEATH_SHELLS: [(f32, f32); 6] = [
-    (0.07, 0.085),
-    (0.2, 0.075),
-    (0.38, 0.065),
-    (0.62, 0.05),
-    (0.92, 0.036),
-    (1.3, 0.022),
-];
+/// into the flow (m) and opacity there. Faces turned away from the flow get none. The gas
+/// nearest the skin is the hottest, orange-white; farther out it glows pink.
+const SHEATH_HOT: [(f32, f32); 3] = [(0.07, 0.085), (0.2, 0.075), (0.38, 0.065)];
+const SHEATH_OUTER: [(f32, f32); 3] = [(0.62, 0.05), (0.92, 0.036), (1.3, 0.022)];
 
 /// Cell size the shock layer's skin is simplified to, m: a soft glow needs no detail.
 const SHEATH_CELL: f32 = 0.6;
@@ -581,13 +582,13 @@ fn coarse(mesh: &Mesh, cell: f32) -> Mesh {
 /// where the heating is: at the nose cap and the leading edges, fading aft along the belly
 /// as the boundary layer thickens (heating falls off as 1/√distance from the nose, and the
 /// gas's glow faster still).
-fn sheath_mesh(skins: &[&Mesh]) -> Mesh {
+fn sheath_mesh(skins: &[&Mesh], shells: &[(f32, f32)]) -> Mesh {
     let a = SHEATH_AOA_DEG.to_radians();
     // The way the ship moves through the air, in its own axes.
     let into = Vec3::new(0.0, -a.sin(), -a.cos());
     let mut out = Mesh::default();
     let skins: Vec<Mesh> = skins.iter().map(|m| coarse(m, SHEATH_CELL)).collect();
-    for &(standoff, opacity) in &SHEATH_SHELLS {
+    for &(standoff, opacity) in shells {
         for skin in &skins {
             let mut used = vec![u32::MAX; skin.vertices.len()];
             let mut vertices: Vec<Vertex> = Vec::new();
@@ -732,7 +733,8 @@ pub fn build() -> ModelAssets {
     out.mesh(&key("hull_nose"), nose);
     out.mesh(&key("hull_windward"), windward);
     out.mesh(&key("hull_leeward"), leeward);
-    let mut sheath = sheath_mesh(&[&hull]);
+    let mut sheath_hot = sheath_mesh(&[&hull], &SHEATH_HOT);
+    let mut sheath = sheath_mesh(&[&hull], &SHEATH_OUTER);
     out.mesh(&key("base"), base_mesh(&h));
 
     // ---- wings, fin, pods, control surfaces (one atlas)
@@ -751,7 +753,9 @@ pub fn build() -> ModelAssets {
     out.mesh(&key("wing_nose"), nose);
     out.mesh(&key("wing_windward"), windward);
     out.mesh(&key("wing_leeward"), leeward);
-    sheath.merge(&sheath_mesh(&[&wing]));
+    sheath_hot.merge(&sheath_mesh(&[&wing], &SHEATH_HOT));
+    sheath.merge(&sheath_mesh(&[&wing], &SHEATH_OUTER));
+    out.mesh(&key("plasma_sheath_hot"), sheath_hot);
     out.mesh(&key("plasma_sheath"), sheath);
     for pv in pivots() {
         out.mesh(&key(&pivot_name(&pv)), pivot_mesh(&pv));
@@ -795,7 +799,8 @@ pub fn build() -> ModelAssets {
     out.mesh(&key("rcs_inside"), rcs_inside);
     out.mesh(&key("plume"), plume_mesh(&PLUME_SHELLS));
     out.mesh(&key("plume_soft"), plume_mesh(&HOVER_SHELLS));
-    out.mesh(&key("plasma_wake"), wake_mesh(&WAKE_SHELLS, 24, 18, 0.6));
+    out.mesh(&key("plasma_wake"), wake_mesh(&WAKE_OUTER, 24, 18, 0.6));
+    out.mesh(&key("plasma_wake_hot"), wake_mesh(&WAKE_CORE, 24, 18, 0.6));
     out.mesh(
         &key("plasma_streamer"),
         wake_mesh(&STREAMER_SHELLS, 12, 12, 1.0),
@@ -899,8 +904,10 @@ pub fn build() -> ModelAssets {
 // ---------------------------------------------------------------- spawn
 
 /// Glowing air of a re-entry: nitrogen and oxygen lines, pink-orange.
-const SHEATH_COLOR: [f32; 3] = [1.0, 0.42, 0.62];
-const WAKE_COLOR: [f32; 3] = [1.0, 0.5, 0.52];
+const SHEATH_COLOR: [f32; 3] = [1.0, 0.4, 0.66];
+const WAKE_COLOR: [f32; 3] = [0.92, 0.4, 0.72];
+/// The hottest gas, nearest the skin and in the wake's core: orange-white.
+const HOT_COLOR: [f32; 3] = [1.0, 0.68, 0.42];
 /// Where the right wingtip's streamer peels off (the left one is its mirror), m.
 const WINGTIP_EDGE: Vec3 = Vec3::new(7.1, -0.75, 9.6);
 /// Half extents of the hull and wings (span, height, length), m.
@@ -1076,42 +1083,50 @@ pub fn spawn(
             ChildOf(body),
         ));
     }
-    // Re-entry plasma: the shock layer over the windward skin and the wake streaming behind.
+    // Re-entry plasma: the shock layer over the windward skin and the wake streaming behind,
+    // each an orange-white hot part and a pink outer part, and streamers off the wingtips.
+    let wake = PlasmaWake {
+        from: None,
+        skin: SKIN_HALF,
+        radius: 4.5,
+        length: 160.0,
+    };
+    let streamer = |from: Vec3| PlasmaWake {
+        from: Some(from),
+        radius: 0.7,
+        length: 70.0,
+        ..wake
+    };
     for (mesh, base, wake) in [
+        (
+            "plasma_sheath_hot",
+            plume_material(HOT_COLOR, 70_000.0),
+            None,
+        ),
         (
             "plasma_sheath",
             plume_material(SHEATH_COLOR, 30_000.0),
             None,
         ),
         (
+            "plasma_wake_hot",
+            plume_material(HOT_COLOR, 90_000.0),
+            Some(wake),
+        ),
+        (
             "plasma_wake",
             plume_material(WAKE_COLOR, 40_000.0),
-            Some(PlasmaWake {
-                from: None,
-                skin: SKIN_HALF,
-                radius: 4.5,
-                length: 160.0,
-            }),
+            Some(wake),
         ),
         (
             "plasma_streamer",
-            plume_material(WAKE_COLOR, 40_000.0),
-            Some(PlasmaWake {
-                from: Some(WINGTIP_EDGE),
-                skin: SKIN_HALF,
-                radius: 0.7,
-                length: 70.0,
-            }),
+            plume_material(HOT_COLOR, 60_000.0),
+            Some(streamer(WINGTIP_EDGE)),
         ),
         (
             "plasma_streamer",
-            plume_material(WAKE_COLOR, 40_000.0),
-            Some(PlasmaWake {
-                from: Some(WINGTIP_EDGE * Vec3::new(-1.0, 1.0, 1.0)),
-                skin: SKIN_HALF,
-                radius: 0.7,
-                length: 70.0,
-            }),
+            plume_material(HOT_COLOR, 60_000.0),
+            Some(streamer(WINGTIP_EDGE * Vec3::new(-1.0, 1.0, 1.0))),
         ),
     ] {
         let mut r = MeshRenderer::new(MeshRef::Asset(key(mesh)), MaterialRef::from(base));

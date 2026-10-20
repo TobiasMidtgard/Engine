@@ -551,7 +551,10 @@ fn sync_terrains(
     materials: Res<SurfaceMaterials>,
     mut ground: ResMut<engine_world::Ground>,
     mut forest: ResMut<engine_world::ForestCover>,
-    mut installed: Local<bool>,
+    diagnostics: Option<ResMut<Diagnostics>>,
+    // Whether a provider is installed, and how many times one was (a diagnostic: the ground
+    // is rebuilt only when a terrain is added, removed or moved).
+    mut installed: Local<(bool, u32)>,
 ) {
     let mut changed = false;
     let mut seen = Vec::with_capacity(terrains.entries.len());
@@ -587,7 +590,9 @@ fn sync_terrains(
         if t.position != pos || t.rotation != rot {
             t.position = pos;
             t.rotation = rot;
-            changed = true;
+            // Only a terrain that answers the ground moves the providers (other planets in a
+            // solar system move every frame).
+            changed |= t.config.ground;
         }
     }
     let before = terrains.entries.len();
@@ -603,16 +608,20 @@ fn sync_terrains(
         .map(TerrainRuntime::ground_terrain)
         .collect();
     if list.is_empty() {
-        if *installed {
+        if installed.0 {
             *ground = engine_world::Ground::default();
             *forest = engine_world::ForestCover::default();
-            *installed = false;
+            installed.0 = false;
         }
     } else {
         let provider = ground::provider(list, &materials);
         *forest = engine_world::ForestCover(provider.clone());
         *ground = engine_world::Ground(provider);
-        *installed = true;
+        installed.0 = true;
+        installed.1 += 1;
+        if let Some(mut d) = diagnostics {
+            d.set("terrain.ground_installs", installed.1 as f64);
+        }
     }
 }
 
@@ -953,6 +962,36 @@ mod tests {
     }
 
     #[test]
+    fn the_ground_is_installed_once_while_the_terrain_stays_put() {
+        let mut app = app_with_planet();
+        app.update_n(10);
+        let d = app
+            .world
+            .resource::<engine_core::diagnostics::Diagnostics>();
+        assert_eq!(d.get("terrain.ground_installs"), Some(1.0));
+    }
+
+    #[test]
+    fn moving_planets_without_ground_leave_the_providers_alone() {
+        let mut app = app_with_planet();
+        let mut moon = PlanetTerrain::moon(3).with_radius(1_737_400.0);
+        moon.ground = false;
+        let moon = app
+            .world
+            .spawn((Transform::from_xyz(0.0, 0.0, 384_400_000.0), moon))
+            .id();
+        app.update_n(3);
+        for i in 0..5 {
+            app.world.get_mut::<Transform>(moon).unwrap().translation.x += 1_000.0 * (i + 1) as f64;
+            app.update();
+        }
+        let d = app
+            .world
+            .resource::<engine_core::diagnostics::Diagnostics>();
+        assert_eq!(d.get("terrain.ground_installs"), Some(1.0));
+    }
+
+    #[test]
     fn forest_cover_reports_woods_and_open_land() {
         let mut app = app_with_planet();
         app.update_n(2);
@@ -1121,6 +1160,52 @@ mod tests {
         let edge = at(-9_500.0, 0.0);
         assert!(edge.paint.1 > 0.0 && edge.paint.1 < 1.0, "{}", edge.paint.1);
         assert_eq!(at(-12_000.0, 0.0).paint.1, 0.0);
+    }
+
+    /// Far patches show hand-made ground as the mean over each vertex's cell: covers changing
+    /// within a vertex spacing average out instead of aliasing into blocks.
+    #[test]
+    fn far_patches_average_hand_made_paint() {
+        let pad = FlatPad::default();
+        let t = PlanetTerrain::earthlike(3)
+            .with_radius(6_371_000.0)
+            .with_pad(pad)
+            .with_overlay(8_000.0, 3_000.0, |_, _| 5.0)
+            .with_overlay_paint(|x, _| {
+                Some(if x.rem_euclid(24.0) < 12.0 {
+                    OverlayPaint::layer("sand", 1.0).tinted([0.0; 3], 1.0)
+                } else {
+                    OverlayPaint::layer("rock", 1.0).tinted([1.0; 3], 1.0)
+                })
+            });
+        let tf = t.home_transform(pad);
+        let src = ChunkSource {
+            map: SurfaceMap::new(TerrainDomain::Sphere, t.shape.radius_m),
+            shape: std::sync::Arc::new(t.shape.clone()),
+            edits: std::sync::Arc::new(EditLayer::default()),
+            ocean_surface: true,
+        };
+        let local =
+            tf.rotation.as_dquat().inverse() * (DVec3::new(1_500.0, 5.0, 1_500.0) - tf.translation);
+        let level = (0..24)
+            .find(|&l| src.map.node_size(l) / chunk::QUADS as f64 <= 40.0)
+            .unwrap();
+        let key = src.map.node_at(local, level).unwrap();
+        let c = chunk::build_chunk(&src, key);
+        assert!(c.spacing > 10.0, "{}", c.spacing);
+        let (sand, rock) = (
+            paint_index("sand") as usize - 1,
+            paint_index("rock") as usize - 1,
+        );
+        for v in &c.vertices[..chunk::GRID * chunk::GRID] {
+            let (s, r) = (v.paint[sand] as f32 / 255.0, v.paint[rock] as f32 / 255.0);
+            assert!((s + r - 1.0).abs() < 0.02, "{s} + {r}");
+            assert!((0.2..=0.8).contains(&s), "sand {s}");
+            // The tint is the cells' mean too: gray between the black and white stripes.
+            let gray = (v.tint[0] as f32 / 255.0).powi(2);
+            assert!((0.2..=0.8).contains(&gray), "tint {gray}");
+            assert_eq!(v.tint[3], 255);
+        }
     }
 
     #[test]

@@ -1721,23 +1721,32 @@ fn wall_palette(
     materials: &mut Assets<StandardMaterial>,
 ) -> WallPalette {
     use crate::walls::{HERO_CLASSES, HERO_VARIANTS};
-    use engine::render::rock::WallStone;
+    use engine::render::rock::{StoneKind, WallStone};
     let mut stones = Vec::with_capacity(HERO_CLASSES.len() * HERO_VARIANTS);
     for (c, &(kind, size)) in HERO_CLASSES.iter().enumerate() {
         // Lichen likes the dry tops: the coping and the capstones.
-        let lichen = if matches!(c, 4 | 6) { 0.5 } else { 0.3 };
+        let lichen = if matches!(c, 4 | 6) { 0.65 } else { 0.45 };
         for v in 0..HERO_VARIANTS {
+            // One face stone in four was picked square rather than split: rounder, worn arrises.
+            let kind = if c < 3 && v == HERO_VARIANTS - 1 {
+                StoneKind::RoughHewn
+            } else {
+                kind
+            };
             let stone = WallStone::new(kind, size, 7000 + (c * HERO_VARIANTS + v) as u32)
-                .with_lichen(lichen);
+                .with_lichen(lichen)
+                .with_grime(0.7);
             stones.push((meshes.add(stone.base_mesh()), stone.displacement()));
         }
     }
     // Each stone a little lighter or darker, warmer or cooler than its palette mesh.
     let shades = [
-        [1.0, 1.0, 1.0],
-        [0.86, 0.85, 0.83],
-        [1.06, 1.02, 0.95],
-        [0.78, 0.79, 0.8],
+        [0.94, 0.94, 0.93],
+        [0.8, 0.79, 0.77],
+        [1.0, 0.95, 0.86],
+        [0.7, 0.71, 0.72],
+        [0.62, 0.62, 0.58],
+        [0.88, 0.84, 0.78],
     ]
     .iter()
     .map(|&[r, g, b]| {
