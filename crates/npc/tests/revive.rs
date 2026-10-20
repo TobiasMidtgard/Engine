@@ -714,3 +714,74 @@ fn nobody_revives_a_mate_up_on_a_ledge_from_below() {
     );
     assert_eq!(stats(&app, reviver).revives, 0);
 }
+
+/// The `exposed` scene with a medic of `skills` (teamwork 1, a carbine) as the squad mate.
+fn exposed_medic(skills: NpcSkills) -> (App, Entity, Entity, Entity) {
+    let mut app = app();
+    let ally = mate(&mut app, DVec3::ZERO, NpcSkills::soldier());
+    let medic = medic(&mut app, DVec3::new(4.0, 0.0, 2.0), skills);
+    let enemy = player(&mut app, DVec3::new(0.0, 0.0, -18.0));
+    run(&mut app, 1.5);
+    down(&mut app, ally);
+    (app, ally, medic, enemy)
+}
+
+#[test]
+fn a_medic_smokes_a_watched_mate_and_goes_in_under_the_smoke() {
+    // An elite holds off a spot in the enemy's view (above); an elite medic throws smoke
+    // between them, and goes in once the smoke hides the spot.
+    let (mut app, ally, medic, _enemy) = exposed_medic(NpcSkills::elite());
+    let eye = DVec3::new(0.0, 1.5, -18.0);
+    let (mut thrown, mut hidden_kneeling, mut kneeling, mut up) = (None, 0, 0, false);
+    for frame in 0..60 * 14 {
+        app.update();
+        let clouds = app.world.resource::<engine_npc::smoke::SmokeClouds>();
+        if thrown.is_none() && !clouds.clouds.is_empty() {
+            thrown = Some(frame as f32 / 60.0);
+            // Between the spot and the enemy, about 2 m off the chest.
+            let c = clouds.clouds[0].at;
+            assert!(
+                c.z < -1.0 && c.distance(chest(&app, ally)) < 2.6,
+                "landed at {c:.1}"
+            );
+        }
+        let b = brain(&app, medic);
+        if b.action == NpcAction::Revive && b.revive_kneel > 0.0 {
+            kneeling += 1;
+            let head = at(&app, medic) + DVec3::Y * 0.9;
+            let seen = app
+                .world
+                .resource::<engine_world::Obscurance>()
+                .transmittance(eye, head);
+            if seen < 0.25 {
+                hidden_kneeling += 1;
+            }
+        }
+        if !downed(&app, ally) {
+            up = true;
+            break;
+        }
+    }
+    let thrown = thrown.expect("the medic threw no smoke");
+    assert!(
+        thrown < 3.0,
+        "threw it only {thrown:.1} s after the mate went down"
+    );
+    assert!(up, "the medic never revived its mate under the smoke");
+    assert_eq!(stats(&app, medic).revives, 1);
+    assert!(
+        hidden_kneeling * 10 >= kneeling * 9,
+        "hidden from the enemy {hidden_kneeling} of {kneeling} frames kneeling"
+    );
+}
+
+#[test]
+fn only_a_medic_carries_smoke() {
+    let (went, app, ally, ..) = exposed(NpcSkills::elite(), false, 6.0);
+    assert!(!went && downed(&app, ally));
+    let clouds = app.world.resource::<engine_npc::smoke::SmokeClouds>();
+    assert!(
+        clouds.clouds.is_empty(),
+        "a fighter that is no medic threw smoke"
+    );
+}

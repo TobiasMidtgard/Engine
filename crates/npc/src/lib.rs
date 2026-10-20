@@ -14,6 +14,7 @@ pub mod nav;
 pub mod perception;
 mod shift;
 pub mod skills;
+pub mod smoke;
 pub mod squad;
 pub mod tactics;
 pub mod training;
@@ -72,6 +73,7 @@ impl Plugin for NpcPlugin {
             .init_resource::<Perceivables>()
             .init_resource::<AttackTokens>()
             .init_resource::<ReviveClaims>()
+            .init_resource::<smoke::SmokeClouds>()
             .init_resource::<OpponentModels>()
             .init_resource::<WildlifeSettings>()
             .register_component::<Npc>(
@@ -168,6 +170,7 @@ impl Plugin for NpcPlugin {
                         combat::apply_damage,
                         features::explosives,
                         combat::revive,
+                        smoke::smoke_clouds,
                         training::swing_posts,
                     )
                         .chain()
@@ -179,6 +182,7 @@ impl Plugin for NpcPlugin {
                         training::build_posts,
                         training::pose_posts,
                         art::arena::flicker_fires,
+                        smoke::show_clouds,
                     )
                         .chain()
                         .in_set(NpcSet::Show),

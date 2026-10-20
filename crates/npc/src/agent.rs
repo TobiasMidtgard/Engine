@@ -433,6 +433,8 @@ pub struct NpcBrain {
     /// Where the squad's medic kneels over a downed mate, while this one covers or screens it
     /// (`"cover"` / `"screen"`).
     pub guard: Option<DVec3>,
+    /// When a medic has its next smoke canister ready (world clock, s; see [`crate::smoke`]).
+    pub smoke_ready: f64,
     /// Random stream for this NPC's decisions.
     pub rng_state: u64,
     /// Where it came from (patrol center when `Npc::home` is not set).

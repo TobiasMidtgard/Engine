@@ -24,6 +24,7 @@ use crate::learning::OpponentModels;
 use crate::nav::{NavAgent, NavGrid, PathStatus};
 use crate::perception::{Known, NpcMemory, Perceivables, Snapshot};
 use crate::skills::NpcSkills;
+use crate::smoke::SmokeClouds;
 use crate::squad::{AttackTokens, ReviveClaims, SquadSettings};
 use crate::tactics::{PositionQuery, PositionWeights, TacticsCtx, choose_position};
 use crate::world_model::{Sight, TacticalWorld, physics_backend};
@@ -46,6 +47,7 @@ pub(crate) struct BrainWorld<'w, 's> {
     models: Res<'w, OpponentModels>,
     focus: Res<'w, FocusPoints>,
     time: Res<'w, Time>,
+    smoke: ResMut<'w, SmokeClouds>,
     props: Query<'w, 's, (Entity, &'static Transform, &'static ExplosiveProp)>,
     attacks: MessageWriter<'w, AttackEvent>,
     triggers: MessageWriter<'w, AnimationTrigger>,
@@ -205,7 +207,7 @@ pub(crate) fn think_and_act(
             let jitter = 0.8 + 0.4 * brain.random();
             let pace = w.settings.think_secs * (1.3 - 0.5 * skills.logic) * jitter;
             brain.next_think = now + (pace * if far { 6.0 } else { 1.0 }) as f64;
-            think(
+            let smoke = think(
                 me,
                 npc,
                 pos,
@@ -221,6 +223,9 @@ pub(crate) fn think_and_act(
                 (&s.claims, &s.fallen),
                 &mut revives,
             );
+            if let Some(at) = smoke {
+                w.smoke.throw(at, world_now);
+            }
         }
         // Pick a spot for actions that need one.
         let positional = matches!(
@@ -274,8 +279,7 @@ fn think(
     w: &BrainWorld,
     (claims, fallen): (&[Claim], &[Fallen]),
     revives: &mut ReviveClaims,
-) {
-    let _ = npc;
+) -> Option<DVec3> {
     // Target.
     let ordered_target = match brain.order {
         Some(NpcOrder::Attack { target }) => Some(Entity::from_bits(target)),
@@ -464,6 +468,14 @@ fn think(
             bid = Some(p);
         }
     }
+    // The squad's medic throws smoke between the enemy and a downed mate's watched spot (and
+    // waits, as any skilled fighter does, for it to hide the spot).
+    let smoke = squad
+        .filter(|_| npc.role == NpcRole::Medic && world_now >= brain.smoke_ready)
+        .and_then(|&sq| smoke_target(me, pos, sq, faction, now, world_now, memory, w, fallen));
+    if smoke.is_some() {
+        brain.smoke_ready = world_now + SMOKE_EVERY_SECS;
+    }
     if brain.order.is_some() {
         add(NpcAction::Obey, 2.0);
     }
@@ -510,6 +522,63 @@ fn think(
             }
         }
     }
+    smoke
+}
+
+/// How far a medic throws a smoke canister (m), and how often it has one ready (s).
+const SMOKE_RANGE: f64 = 24.0;
+const SMOKE_EVERY_SECS: f64 = 14.0;
+
+/// Where a medic throws smoke, if anywhere: between a downed mate of its squad within throwing
+/// range (down a moment, its spot not hidden already) and the enemy with the clearest view of
+/// a body kneeling over it, 2 m off the chest on the enemy's side.
+#[allow(clippy::too_many_arguments)]
+fn smoke_target(
+    me: Entity,
+    pos: DVec3,
+    squad: Squad,
+    faction: &Faction,
+    now: f64,
+    world_now: f64,
+    memory: &NpcMemory,
+    w: &BrainWorld,
+    fallen: &[Fallen],
+) -> Option<DVec3> {
+    let sight = Sight {
+        world: &w.world,
+        physics: physics_backend(&w.backend, &w.physics),
+        ground: &w.ground,
+        obscurance: Some(&w.obscurance),
+    };
+    let flat = |a: DVec3, b: DVec3| DVec2::new(b.x - a.x, b.z - a.z);
+    fallen
+        .iter()
+        .filter(|f| f.squad == squad && f.faction == *faction && f.e != me && f.down_for > 0.5)
+        .filter(|f| f.chest().distance(pos) <= SMOKE_RANGE)
+        .filter(|f| !w.smoke.covers(f.chest(), world_now))
+        .filter_map(|f| {
+            let kneeling = f.chest() + DVec3::Y * 0.9;
+            memory
+                .known
+                .iter()
+                .filter(|k| k.awareness >= 0.8 && now - k.last_seen < 3.0)
+                .filter(|k| flat(f.chest(), k.last_position).length() < 45.0)
+                .map(|k| {
+                    let eye = k.last_position + DVec3::Y * 1.5;
+                    (
+                        sight.visibility(eye, kneeling, &[me, k.entity, f.e]),
+                        k.last_position,
+                    )
+                })
+                .filter(|(v, _)| *v > 0.3)
+                .max_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(v, from)| (v, f.chest(), from))
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, chest, from)| {
+            let d = flat(chest, from).normalize_or_zero() * 2.0;
+            DVec3::new(chest.x + d.x, chest.y, chest.z + d.y)
+        })
 }
 
 /// A revive it could go for: the downed squad mate, how much it wants to (see

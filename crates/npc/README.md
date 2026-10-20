@@ -261,6 +261,15 @@ comes within 5 m of it (`role` "screen"; `NpcBrain::guard` holds the spot). A sq
 a medic revives as before. A medic wears a bleached armband with a red cross over its left
 brassard.
 
+A medic also carries smoke (`smoke::SmokeClouds`). When an enemy has a clear view of a
+downed mate's spot within 24 m, it throws a canister to land 2 m off the chest on that
+enemy's side, one every 14 s at most. The cloud pops 0.9 s later, swells to 3.2 m over two
+seconds, hangs and thins out over the last five of its 22 s. It hides the spot, so the medic
+goes in as a skilled fighter does once a watched spot is out of view, and shots into it are
+mostly guesses. With a smoke module installed (one that registers the "smoke" obscurance
+source) the canister's gas goes to it as a `SmokeEmission`; without one the NPC module keeps a
+plain cloud of its own under the "npc_smoke" source.
+
 | Setting | Default | Does |
 | --- | --- | --- |
 | `ally_revive_secs` | 2 s | How long a revive takes. 0 turns squad revives off. |
@@ -320,7 +329,9 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   gets a fighter with a mate near up in place, and sends home only one that is alone. A
   reviver going the long way round a wall is not taken for stuck, and nobody revives a mate
   on a floor above it. The squad's medic is the usual reviver, melee mates screen it from the
-  enemy while it kneels, and a squad without one revives as before.
+  enemy while it kneels, and a squad without one revives as before. An elite medic smokes a
+  watched mate and goes in under the smoke, hidden from the enemy as it kneels; only medics
+  carry smoke.
 - `tests/art_revive.rs`: a captioned strip, before and after. Before, a lone fighter lies six
   seconds and is sent home. After, a squad mate runs in, kneels, sets its carbine down, puts
   its hands on the chest and looks up at the enemy, and the ally gets up where it lay. It
