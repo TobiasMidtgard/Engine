@@ -20,7 +20,7 @@ use crate::character;
 use crate::convert;
 use crate::settings::PhysicsSettings;
 use crate::sim::{BodyWrite, ContactFilter, MaterialCache, RegionId, Simulation};
-use crate::{PhysicsStats, SharedSimulation};
+use crate::{FineSteps, PhysicsStats, SharedSimulation};
 
 /// World pose (translation, rotation, scale) of `e`, composing `Transform`s up the hierarchy.
 /// `GlobalTransform` is only updated in `PostUpdate`, so the step computes poses itself.
@@ -116,6 +116,7 @@ pub(crate) struct StepQueries {
         ),
     >,
     time_scaled: QueryState<(Entity, &'static LocalTimeScale), With<RigidBody>>,
+    fine: QueryState<(Entity, &'static FineSteps), With<RigidBody>>,
     character_inputs: QueryState<
         (
             Entity,
@@ -139,6 +140,7 @@ impl FromWorld for StepQueries {
             changed_characters: world.query_filtered(),
             body_inputs: world.query_filtered(),
             time_scaled: world.query_filtered(),
+            fine: world.query_filtered(),
             character_inputs: world.query_filtered(),
         }
     }
@@ -453,6 +455,12 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         let time = world.resource::<Time>().clone();
         for entry in sim.bodies.values_mut() {
             entry.time_factor = 1.0;
+            entry.fine = None;
+        }
+        for (e, f) in q.fine.iter(world) {
+            if let Some(entry) = sim.bodies.get_mut(&e) {
+                entry.fine = Some(f.substep_secs.max(1e-4));
+            }
         }
         for (e, l) in q.time_scaled.iter(world) {
             if let Some(entry) = sim.bodies.get_mut(&e)
@@ -597,6 +605,8 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 };
                 let r = s.regions[rid as usize].as_mut().expect("live region");
                 r.world.integration_parameters.dt = sub_dt;
+                r.world.integration_parameters.num_solver_iterations =
+                    crate::fine::iterations(&settings, r.fine, sub_dt);
                 let collector = std::mem::take(&mut r.collector);
                 crate::articulation::before_step(&mut r.world, &r.links);
                 r.world.step_with_events(&filter, &collector);

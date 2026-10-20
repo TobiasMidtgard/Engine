@@ -8,6 +8,7 @@
 pub(crate) mod barrel_run;
 pub(crate) mod dummy;
 pub(crate) mod kit;
+pub(crate) mod pendulums;
 pub(crate) mod props;
 pub(crate) mod structures;
 pub(crate) mod textures;
@@ -62,6 +63,10 @@ pub(crate) enum Mat {
     Galvanized,
     /// Freshly broken granite: the rockfall's rocks.
     Granite,
+    /// Polished chrome: the Newton's cradle's balls and frames.
+    Chrome,
+    /// Glossy lacquer of this color (sRGB hex): the pendulum wave's bobs, the cradle's base.
+    Lacquer(u32),
 }
 
 /// Texture sets, generated once per app.
@@ -198,6 +203,10 @@ pub(crate) fn material(world: &mut World, m: Mat) -> Handle<StandardMaterial> {
         Mat::Paint => StandardMaterial::hex(0xe9e6dc).with_roughness(0.55),
         Mat::Galvanized => textured(world, Tex::Galvanized, white),
         Mat::Granite => textured(world, Tex::Granite, white),
+        Mat::Chrome => StandardMaterial::hex(0xe4e6e9)
+            .with_metallic(1.0)
+            .with_roughness(0.07),
+        Mat::Lacquer(hex) => StandardMaterial::hex(hex).with_roughness(0.2),
     };
     let h = world.resource_mut::<Assets<StandardMaterial>>().add(made);
     world.resource_mut::<ArtCache>().materials.insert(m, h);
