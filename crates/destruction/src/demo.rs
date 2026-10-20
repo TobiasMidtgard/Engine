@@ -507,6 +507,9 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     commands.queue(move |world: &mut World| apply_aftermath(world, ids));
 }
 
+/// Board thickness of the range's wooden crates, meters.
+const CRATE_WALL: f32 = 0.025;
+
 fn spawn_props(commands: &mut Commands, o: DVec3) -> Vec<Entity> {
     let mut out = Vec::new();
     let x0 = BAYS[5];
@@ -529,8 +532,9 @@ fn spawn_props(commands: &mut Commands, o: DVec3) -> Vec<Entity> {
                     g,
                     PropModel::new(PropKind::WoodenCrate { size: [s, s, s] }, k as u64),
                     Fracturable {
-                        shape: FractureShape::Box {
+                        shape: FractureShape::Crate {
                             half_extents: Vec3::splat(s * 0.5),
+                            wall: CRATE_WALL,
                         },
                         material: DestructibleMaterial::Wood,
                         break_energy_j: 2500.0,
