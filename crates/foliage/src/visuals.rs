@@ -119,11 +119,10 @@ pub fn desired_parts(
             let distant = !is_small(sp)
                 && distance > settings.tree_distant_distance_m * (0.5 + plant.size)
                 && v.foliage_distant.is_some();
-            let leaves = if vis.glow.is_empty() {
-                vis.leaves[tint]
-            } else {
-                vis.glow[tint % vis.glow.len()][glow_level(plant)]
-            };
+            let glow =
+                (!vis.glow.is_empty()).then(|| vis.glow[tint % vis.glow.len()][glow_level(plant)]);
+            let leaves = glow.unwrap_or(vis.leaves[tint]);
+            let leaves_far = glow.unwrap_or(vis.leaves_far[tint]);
             let amount = if is_small(sp) { 1.0 } else { leafing.amount };
             if sapling {
                 let crown = leafy(v.sapling_foliage, &v.sapling_foliage_thin, amount);
@@ -132,12 +131,19 @@ pub fn desired_parts(
                 // The whole trunk stands in for the base too (swaying with the crown; it
                 // barely moves near the ground).
                 let crown = leafy(v.foliage_distant, &v.foliage_distant_thin, amount);
-                [None, pair(&v.wood_distant, vis.bark), pair(&crown, leaves)]
+                [
+                    None,
+                    pair(&v.wood_distant, vis.bark),
+                    pair(&crown, leaves_far),
+                ]
             } else if lod && (v.wood_lod.is_some() || v.foliage_lod.is_some()) {
                 let or = |a: &Option<Handle<Mesh>>, b: &Option<Handle<Mesh>>| a.or(*b);
-                let crown = match v.foliage_lod {
-                    Some(_) => leafy(v.foliage_lod, &v.foliage_lod_thin, amount),
-                    None => leafy(v.foliage, &v.foliage_thin, amount),
+                let (crown, leaves) = match v.foliage_lod {
+                    Some(_) => (
+                        leafy(v.foliage_lod, &v.foliage_lod_thin, amount),
+                        leaves_far,
+                    ),
+                    None => (leafy(v.foliage, &v.foliage_thin, amount), leaves),
                 };
                 [
                     pair(&v.base, vis.bark_rigid),

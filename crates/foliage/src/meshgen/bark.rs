@@ -1013,6 +1013,13 @@ fn birch(t: &Tile, x: f32, y: f32) -> Texel {
     c = c.lerp(srgb3(0x7a736a), faint * 0.55);
     h += -0.0004 * core + 0.0003 * halo - 0.0001 * faint;
     rough = rough.max(0.82 * core);
+    // Black patches of rough, cracked bark a few centimeters across, stretched around the
+    // trunk: what still reads as birch from thirty meters, when the lenticels are too small.
+    let blot = fbm(u, v, 2, 16, 4, 0.6, s + 20) + 0.2 * fbm(u, v, 24, 70, 2, 0.5, s + 21);
+    let patch = smoothstep(0.26, 0.3, blot);
+    c = c.lerp(srgb3(0x1e1a18), patch * 0.94);
+    h -= 0.0003 * patch;
+    rough = rough.max(0.85 * patch);
 
     // Thin strips of paper curling away, showing the peach inner bark.
     let peel = voronoi(
