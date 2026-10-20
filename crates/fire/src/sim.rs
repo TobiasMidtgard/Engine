@@ -752,7 +752,11 @@ pub fn emit_outputs(
             .unwrap_or_else(|| FlameShape::from_fuel(b.fuel0_kg));
         let center = shape.center(gt.translation());
         let top = shape.base(gt.translation()) + DVec3::Y * shape.height as f64;
-        let mass = b.consumed_kg * settings.smoke_yield * (1.0 + c.moisture)
+        // Small fires burn less completely (cool edges, logs smoldering where they leave the
+        // flames), so a campfire or torch makes up to three times the smoke per kg of a
+        // bonfire.
+        let small = 3.0 - 2.0 * ((b.fuel0_kg - 0.5) / 4.5).clamp(0.0, 1.0);
+        let mass = b.consumed_kg * settings.smoke_yield * (1.0 + c.moisture) * small
             + b.glow * 0.0002 * shape.radius * dt;
         if mass > 0.0 {
             let hot = (b.intensity).clamp(0.0, 1.0);
