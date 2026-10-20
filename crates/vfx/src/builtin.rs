@@ -1179,7 +1179,7 @@ fn spells() -> Vec<EffectDesc> {
         ..effect(
             "spell.charge",
             "Gathering energy before a cast: motes drawn in from all around on spiraling paths, \
-             brightening as they near a pulsing white-blue core.",
+             brightening as they near a crackling white-blue ball of energy.",
             None,
             vec![
                 // Motes appear faint and blue on a sphere around the core and spiral in on
@@ -1212,17 +1212,21 @@ fn spells() -> Vec<EffectDesc> {
                     soft: 0.0,
                     ..em("converge")
                 },
-                // Few enough overlapping puffs that the core stays blue around a white heart.
+                // The gathered charge: a crackling ball of energy, a few overlapping copies
+                // crossfading so it never blinks.
                 EmitterDesc {
-                    rate: 20.0,
+                    rate: 3.0,
                     speed: [0.0, 0.0],
                     local_space: true,
-                    lifetime: [0.25, 0.4],
-                    size: [0.6, 1.0],
-                    size_over_life: c(&[(0.0, 0.4), (0.5, 1.0), (1.0, 0.7)]),
-                    color: g(&[(0.0, [0.85, 0.92, 1.0, 1.0]), (1.0, [0.5, 0.7, 1.0, 0.0])]),
-                    emissive: 9_000.0,
+                    steady: true,
+                    lifetime: [0.7, 0.7],
+                    size: [0.9, 0.9],
+                    rotation_deg: [0.0, 360.0],
+                    sprite: Sprite::Plasma,
+                    color: fade([0.6, 0.8, 1.0], 1.0, 0.3, 0.7),
+                    emissive: 5_000.0,
                     additive: 1.0,
+                    soft: 0.0,
                     wind: 0.0,
                     ..em("core")
                 },
@@ -1307,19 +1311,23 @@ fn spells() -> Vec<EffectDesc> {
         light: light([1.0, 0.75, 0.45], 700.0, 6.0, 0.15, 0.4),
         ..effect(
             "magic.orb",
-            "A floating light orb (wisp, lantern spirit): a small white-hot heart in a soft amber \
-             halo, with orbiting sparkles.",
+            "A floating light orb (wisp, lantern spirit): a small crackling ball of light, \
+             white-hot at its heart, in a soft amber halo, with orbiting sparkles.",
             None,
             vec![
                 EmitterDesc {
-                    rate: 30.0,
+                    rate: 3.0,
                     speed: [0.0, 0.0],
                     local_space: true,
-                    lifetime: [0.2, 0.3],
-                    size: [0.13, 0.17],
-                    color: g(&[(0.0, [1.0, 0.9, 0.7, 0.95]), (1.0, [1.0, 0.7, 0.4, 0.0])]),
-                    emissive: 25_000.0,
+                    steady: true,
+                    lifetime: [0.8, 0.8],
+                    size: [0.32, 0.32],
+                    rotation_deg: [0.0, 360.0],
+                    sprite: Sprite::Plasma,
+                    color: fade([1.0, 0.7, 0.4], 1.0, 0.3, 0.7),
+                    emissive: 5_000.0,
                     additive: 1.0,
+                    soft: 0.0,
                     wind: 0.0,
                     ..em("core")
                 },
