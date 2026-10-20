@@ -64,16 +64,15 @@ fn the_arena_fight_keeps_going() {
         .map(|&e| app.world.get::<NpcCombat>(e).unwrap().stats)
         .collect();
     let shots: u32 = stats.iter().map(|s| s.shots).sum();
-    let revives: u32 = stats.iter().map(|s| s.revives).sum();
     let attacks: u32 = stats.iter().map(|s| s.attacks).sum();
     let defended: u32 = stats.iter().map(|s| s.blocks + s.parries + s.dodges).sum();
     assert!(shots > 30, "shots {shots}");
     assert!(attacks > 40, "attacks {attacks}");
     assert!(defended > 5, "defended {defended}");
     assert!(downed_seen > 0, "nobody went down");
-    // Squad mates run to the downed and get them up where they lie.
+    // Squad mates run to the downed and get them up where they lie (how often:
+    // `squad_mates_revive_the_downed_every_minute`).
     assert!(actions.contains(&NpcAction::Revive), "{actions:?}");
-    assert!(revives >= 2, "squad mates revived {revives} in a minute");
     assert!(actions.contains(&NpcAction::Engage), "{actions:?}");
     // Shooters use cover: as a TakeCover action when pinned, or by picking covered spots to
     // fight from.
@@ -99,6 +98,52 @@ fn the_arena_fight_keeps_going() {
     shares.sort_by(|a, b| a.0.total_cmp(&b.0));
     assert!(shares.iter().all(|s| s.1 >= 15.0), "{shares:?}");
     assert!(shares[0].0 < 0.2 && shares[4].0 > 0.85, "{shares:?}");
+}
+
+/// Revives in a minute of the arena fight, with every fighter's and post's randomness from
+/// `seed`.
+fn arena_revives(seed: u64) -> u32 {
+    let mut app = app();
+    {
+        let mut commands = app.world.commands();
+        demo::spawn_demo(&mut commands, DVec3::new(-70.0, 0.0, 170.0));
+    }
+    app.world.flush();
+    let mut q = app
+        .world
+        .query_filtered::<Entity, Or<(With<Npc>, With<SparringPost>)>>();
+    let bodies: Vec<Entity> = q.iter(&app.world).collect();
+    for (i, e) in bodies.into_iter().enumerate() {
+        let s = Seed(hash_u64(seed.wrapping_mul(1000) + i as u64));
+        app.world.entity_mut(e).insert(s);
+    }
+    app.update_n(60 * 60);
+    let mut q = app.world.query::<&NpcCombat>();
+    q.iter(&app.world).map(|c| c.stats.revives).sum()
+}
+
+/// Across fights with different randomness, squad mates get the downed up at least twice a
+/// minute on average, and in every fight at least once.
+#[test]
+fn squad_mates_revive_the_downed_every_minute() {
+    let runs: Vec<u32> = std::thread::scope(|s| {
+        let runs: Vec<_> = (0..6)
+            .map(|seed| s.spawn(move || arena_revives(seed)))
+            .collect();
+        runs.into_iter()
+            .map(|r| r.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    });
+    let mean = runs.iter().sum::<u32>() as f32 / runs.len() as f32;
+    eprintln!("revives in a minute, seed by seed: {runs:?} (mean {mean:.2})");
+    assert!(
+        mean >= 2.0,
+        "squad mates revived {mean:.2} a minute: {runs:?}"
+    );
+    assert!(
+        runs.iter().all(|&n| n > 0),
+        "a fight without a revive: {runs:?}"
+    );
 }
 
 #[test]

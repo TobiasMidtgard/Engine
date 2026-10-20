@@ -284,10 +284,14 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   whoever hurt it, a sow charges to defend her piglets (a lone sow runs), and wolves pick a
   piglet over its elders.
 - `tests/demo.rs`: the arena fight keeps going for a minute (shots, attacks, blocks, cover,
-  downed and revived, squad mates reviving at least twice) inside the arena; the meadow lives for two minutes (grazing, wandering,
-  hunting, fleeing) without animals leaving.
+  downed and revived) inside the arena, and over six fights with different randomness squad
+  mates revive at least twice a minute on average and in every fight; the meadow lives for
+  two minutes (grazing, wandering, hunting, fleeing) without animals leaving.
 - `tests/revive.rs`: a squad mate kneels beside a downed ally and gets it up where it lies.
-  Skilled fighters don't go in the enemy's view or under fire; a rookie does. A reviver that is
+  Over 16 runs with different randomness: elites go in under a watching enemy's eyes in at
+  most a tenth, veterans in at most half as many as rookies, rookies in nine tenths or more,
+  and no skilled fighter goes in under fire; once the enemy looks away or is gone, the elite
+  gets it up in every run. A reviver that is
   hit lets go and tries again later. Nobody revives when it is off. The showcase timer waits
   for a revive, gets a fighter with a mate near up in place, and sends home only one that is
   alone.
