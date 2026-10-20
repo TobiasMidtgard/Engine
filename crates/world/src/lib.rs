@@ -5,9 +5,10 @@
 //!
 //! * **Fields** ([`environment`]): wind, weather, ground wetness/snow/scorch, heat. One owner
 //!   writes each; anyone reads. Sample them through [`Env`], a system parameter.
-//! * **Queries** ([`physical`]): [`Gravity`], [`Ground`] and [`Water`] answer "what is at this
-//!   point" for any implementation (heightmap, voxel, planet; lake, ocean, river), and
-//!   [`Obscurance`] answers "how much smoke, fog or dust is between these two points".
+//! * **Queries** ([`physical`]): [`Gravity`], [`Ground`], [`Water`] and [`ForestCover`] answer
+//!   "what is at this point" for any implementation (heightmap, voxel, planet; lake, ocean,
+//!   river; painted woods), and [`Obscurance`] answers "how much smoke, fog or dust is between
+//!   these two points".
 //! * **Air** ([`air`]): density, pressure, temperature, speed of sound and wind anywhere,
 //!   per planet (`Env::air`).
 //! * **Materials** ([`SurfaceMaterials`]): one table of friction, fuel, deformation, sounds.
@@ -210,6 +211,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<Atmospheres>()
             .init_resource::<Ground>()
             .init_resource::<Water>()
+            .init_resource::<ForestCover>()
             .init_resource::<Obscurance>()
             .init_resource::<SurfaceMaterials>()
             .init_resource::<FocusPoints>()
@@ -373,6 +375,8 @@ mod tests {
     fn contracts_are_registered() {
         let mut app = App::new();
         app.add_plugins(WorldPlugin);
+        let woods = app.world.resource::<ForestCover>();
+        assert_eq!(woods.sample(DVec3::new(10.0, 0.0, -20.0)), None);
         let registry = app.world.resource::<TypeRegistry>();
         for name in [
             "RigidBody",
