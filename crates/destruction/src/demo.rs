@@ -69,8 +69,8 @@ const GATE: [f64; 3] = [-22.0, 0.0, 7.0];
 const CLIFF: [f64; 3] = [-4.0, 0.0, 16.0];
 const ARCH: [f64; 3] = [-36.0, 0.0, 16.0];
 /// The gate and arch charges are cutting charges: a hot flash, short of lighting the grass
-/// round them (engine_fire's grass catches at 300 °C).
-const CUT_CHARGE_HEAT_C: f32 = 280.0;
+/// round them (engine_fire lights what a blast of 250 °C or more touches).
+const CUT_CHARGE_HEAT_C: f32 = 200.0;
 /// The breach house's floor middle (north of the tower, in the sun); its open front looks +Z.
 pub const HOUSE: [f64; 3] = [15.0, 0.0, 22.0];
 /// House-local: top of the walls and joists (the roof deck lies on them) and the deck boards.

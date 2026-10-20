@@ -45,7 +45,9 @@ in another layer where a particle hits the ground, water or something on screen 
 of the surface), `on_death` where it dies, and `trailing` drops `count` a second along each
 particle's path. The fed layer has no spawning of its own; give `count`, `chance` and
 `inherit_velocity`. Metal sparks split as they skid this way, and `spell.starburst` is a shell
-that bursts into stars, each trailing glitter and crackling as it burns out. Sprites narrower
+that bursts into stars, each trailing a violet streak that cools to gold glitter, with bits
+of the glitter flashing as they die (a fed layer can feed another), and crackling as it burns
+out. Sprites narrower
 than 1.5 pixels are drawn 1.5 pixels wide and dimmed to match, so distant sparks still show.
 
 Effects are authored for flat ground in sea-level air and adapt to where they play: gravity

@@ -1477,8 +1477,9 @@ fn spells() -> Vec<EffectDesc> {
     let starburst = effect(
         "spell.starburst",
         "A mage's firework: a shell streaks about 25 m up on a tail of sparks and bursts into a \
-         sphere of violet stars around a gold heart; each star trails glitter, droops, and \
-         crackles as it burns out, leaving a drifting smoke ball. Fire it from the ground, up \
+         sphere of violet stars around a gold heart; each star trails a streak of twinkling \
+         gold glitter, droops, and crackles as it burns out, leaving a smoke ball the burst \
+         lights from inside. Fire it from the ground, up \
          axis to the sky.",
         Some(0.1),
         vec![
@@ -1522,16 +1523,17 @@ fn spells() -> Vec<EffectDesc> {
                     inherit_velocity: 0.3,
                     ..SubEmit::new("crackle", 3)
                 }),
-                trailing: Some(SubEmit::new("star_tail", 30)),
+                trailing: Some(SubEmit::new("star_tail", 90)),
                 ..stars(
                     "stars",
                     [14.0, 16.0],
                     [2.0, 2.7],
                     g(&[
                         (0.0, [1.0, 0.95, 1.0, 1.0]),
-                        (0.08, [0.8, 0.52, 1.0, 1.0]),
-                        (0.6, [0.62, 0.3, 1.0, 1.0]),
-                        (1.0, [0.95, 0.4, 0.9, 0.0]),
+                        (0.08, [0.72, 0.38, 1.0, 1.0]),
+                        (0.6, [0.55, 0.18, 1.0, 1.0]),
+                        (0.85, [0.95, 0.25, 0.85, 0.9]),
+                        (1.0, [1.0, 0.3, 0.7, 0.0]),
                     ]),
                 )
             },
@@ -1550,18 +1552,42 @@ fn spells() -> Vec<EffectDesc> {
                 [0.3, 0.7],
                 g(&[(0.0, [1.0, 0.75, 0.4, 1.0]), (1.0, [1.0, 0.35, 0.08, 0.0])]),
             ),
-            // Gold glitter, dimmer than the stars so it stays gold rather than white at night.
+            // The star's trail: violet right behind the star, cooling to gold glitter dimmer than
+            // the stars so it stays gold rather than white at night. Dense enough to read as one
+            // line rather than dashes; now and then a bit flashes as it burns out.
             EmitterDesc {
-                emissive: 12_000.0,
+                size: [0.1, 0.16],
+                // Swollen just behind the star, so each star burns inside a violet halo.
+                size_over_life: c(&[(0.0, 2.4), (0.12, 1.0), (1.0, 0.3)]),
+                emissive: 5_000.0,
+                on_death: Some(SubEmit {
+                    chance: 0.12,
+                    ..SubEmit::new("glitter", 1)
+                }),
                 ..tail(
                     "star_tail",
-                    [0.5, 1.1],
+                    [0.4, 1.0],
                     g(&[
-                        (0.0, [1.0, 0.78, 0.9, 0.9]),
-                        (0.25, [1.0, 0.62, 0.3, 0.75]),
-                        (1.0, [1.0, 0.4, 0.12, 0.0]),
+                        (0.0, [0.68, 0.35, 1.0, 0.6]),
+                        (0.15, [1.0, 0.72, 0.4, 0.85]),
+                        (0.5, [1.0, 0.55, 0.2, 0.55]),
+                        (1.0, [1.0, 0.38, 0.1, 0.0]),
                     ]),
                 )
+            },
+            EmitterDesc {
+                speed: [0.0, 0.0],
+                gravity: 0.2,
+                wind: 0.3,
+                lifetime: [0.06, 0.16],
+                size: [0.14, 0.26],
+                sprite: Sprite::Star,
+                rotation_deg: [0.0, 90.0],
+                color: g(&[(0.0, [1.0, 0.95, 0.85, 1.0]), (1.0, [1.0, 0.8, 0.5, 0.0])]),
+                emissive: 40_000.0,
+                additive: 1.0,
+                soft: 0.0,
+                ..em("glitter")
             },
             EmitterDesc {
                 shape: EmitShape::Sphere {
@@ -1611,6 +1637,15 @@ fn spells() -> Vec<EffectDesc> {
                 lifetime: [6.0, 8.0],
                 size: [4.0, 6.0],
                 size_over_life: c(&[(0.0, 0.6), (1.0, 1.6)]),
+                // Lit from inside by the stars at first, so it hangs as a pale violet ball
+                // rather than a dark hole in the night sky.
+                color: g(&[
+                    (0.0, [0.8, 0.65, 1.0, 0.0]),
+                    (0.08, [0.8, 0.65, 1.0, 0.12]),
+                    (0.35, [0.6, 0.57, 0.64, 0.1]),
+                    (1.0, [0.66, 0.65, 0.67, 0.0]),
+                ]),
+                emissive: 6.0,
                 ..smoke("burst_smoke", 0.45, 0.14)
             },
             // The launch: a spurt of sparks and smoke from the ground.
