@@ -1530,7 +1530,7 @@ fn draw_system(
 }
 
 /// Half of a planet's ring system: the far half (drawn before the planet) or the near half.
-fn ring_half(ctx: &mut DrawCtx, c: Vec2, pr: f32, back: bool) {
+pub(crate) fn ring_half(ctx: &mut DrawCtx, c: Vec2, pr: f32, back: bool) {
     let (start, sweep) = if back { (PI * 1.5, PI) } else { (PI * 0.5, PI) };
     for (k, a, w) in [
         (1.55f32, 0.55f32, 0.18f32),

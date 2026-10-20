@@ -12,7 +12,7 @@ use engine_world::physics::{
 };
 use engine_world::{
     ContactKind, Env, GroundContact, IgniteRequest, NoiseEvent, ProjectileTrace, SmokeEmission,
-    SurfaceMaterials, WorldImpulse, WorldShift,
+    SurfaceMaterials, WaterDisturbance, WorldImpulse, WorldShift,
 };
 
 use crate::body::{FrameSource, SoftBodySim, SoftKind};
@@ -21,7 +21,7 @@ use crate::collide::{LocalCollider, LocalShape};
 use crate::field::{BAKE_REACH, FieldCache};
 use crate::rope::{BridgePlank, SoftLoad};
 use crate::settings::SoftBodyConfig;
-use crate::solver::{ColliderImpulse, WaterSurface};
+use crate::solver::{ColliderImpulse, Sim, WaterSurface};
 use crate::{Cloth, HairGroom, Rope, RopeBridge, SoftVolume, cloth, hair, rope, volume};
 
 /// A frame turning further than this in one step (radians) has been teleported, not turned.
@@ -43,6 +43,9 @@ pub struct StepOutput {
     pub smoke: Vec<DVec3>,
     /// Landing speed and point.
     pub impact: Option<(f32, DVec3)>,
+    /// Where it pushed the water's surface this step: point on the surface, velocity
+    /// relative to the water, radius and mass (for `WaterDisturbance`).
+    pub water: Vec<(DVec3, Vec3, f32, f32)>,
 }
 
 /// A collider as every soft body sees it this step.
@@ -1029,9 +1032,61 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     if b.kind == SoftKind::Volume && speed > 1.5 {
         b.out.impact = Some((speed, origin + at.as_dvec3()));
     }
+    b.out.water = surface_pushes(&b.sim, origin);
     b.update_bounds();
     b.scratch_colliders = local;
     b.step_ms = started.elapsed().as_secs_f32() * 1000.0;
+}
+
+/// Patches of the water's surface a body's pushes are gathered into, m across.
+const PUSH_CELL: f32 = 0.6;
+/// Pushes sent per body per step, at most (the strongest).
+const MAX_PUSHES: usize = 6;
+/// Slower than this through the water (m/s), a particle makes no rings: cloth drifting with
+/// the current or lying still on a pond leaves the surface alone.
+const PUSH_SPEED: f32 = 0.12;
+
+/// What crosses or moves along the water's surface, gathered into a few patches: where on
+/// the surface (world), velocity relative to the water, radius and mass.
+fn surface_pushes(sim: &Sim, origin: DVec3) -> Vec<(DVec3, Vec3, f32, f32)> {
+    let Some(water) = sim.water else {
+        return Vec::new();
+    };
+    let band = 2.0 * sim.params.radius.max(0.01);
+    // Per patch: weighted position, velocity, mass, and the push (mass × speed).
+    let mut cells: HashMap<(i32, i32), (Vec3, Vec3, f32, f32)> = HashMap::new();
+    for (i, (&x, &v)) in sim.pos.iter().zip(&sim.vel).enumerate() {
+        let w = sim.inv_mass[i];
+        if w <= 0.0 || water.depth(x).abs() > band {
+            continue;
+        }
+        let rel = v - water.current;
+        let speed = rel.length();
+        if speed < PUSH_SPEED {
+            continue;
+        }
+        let m = 1.0 / w;
+        let key = (
+            (x.x / PUSH_CELL).floor() as i32,
+            (x.z / PUSH_CELL).floor() as i32,
+        );
+        let c = cells.entry(key).or_default();
+        c.0 += x * m;
+        c.1 += rel * m;
+        c.2 += m;
+        c.3 += m * speed;
+    }
+    let mut pushes: Vec<_> = cells.into_values().collect();
+    pushes.sort_by(|a, b| b.3.total_cmp(&a.3));
+    pushes.truncate(MAX_PUSHES);
+    pushes
+        .into_iter()
+        .map(|(x, v, m, _)| {
+            let at = x / m;
+            let on = Vec3::new(at.x, water.height(at), at.z);
+            (origin + on.as_dvec3(), v / m, PUSH_CELL * 0.5, m)
+        })
+        .collect()
 }
 
 /// Seconds for a particle fully under water to soak through.
@@ -1165,7 +1220,7 @@ fn ground_plane(env: &Env, at: DVec3, origin: DVec3) -> [f32; 4] {
 /// Send reaction impulses, smoke, landings and noise to the world.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_outputs(
-    bodies: Query<&SoftBodySim>,
+    bodies: Query<(Entity, &SoftBodySim)>,
     colliders: Res<ColliderWorld>,
     rigid: Query<&RigidBody>,
     parents: Query<&ChildOf>,
@@ -1175,10 +1230,20 @@ pub fn emit_outputs(
     mut smoke: MessageWriter<SmokeEmission>,
     mut contacts: MessageWriter<GroundContact>,
     mut noise: MessageWriter<NoiseEvent>,
+    mut water: MessageWriter<WaterDisturbance>,
     mut sums: Local<HashMap<Entity, (Vec3, Vec3)>>,
 ) {
     sums.clear();
-    for body in &bodies {
+    for (entity, body) in &bodies {
+        for &(position, velocity, radius, mass_kg) in &body.out.water {
+            water.write(WaterDisturbance {
+                position,
+                velocity,
+                radius,
+                mass_kg,
+                source: Some(entity),
+            });
+        }
         for (id, imp) in &body.out.impulses {
             let Some(c) = colliders.list.get(*id as usize) else {
                 continue;

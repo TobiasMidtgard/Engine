@@ -483,44 +483,53 @@ const STREAMER_SHELLS: [(f32, f32, f32, f32); 4] = [
 ];
 
 /// A unit re-entry wake along +Z (radius 1 where it leaves the ship, length 1) from
-/// `shells`: it starts at `neck` of its radius right behind the ship (the air closing in
-/// behind the body) and widens like a cone. It fades in over its first few percent, then out
-/// as each shell cools. It is streaked along its length
-/// like the turbulent gas it is (streaks drift around it downstream).
-fn wake_mesh(shells: &[(f32, f32, f32, f32)], seg: usize, rows: usize, neck: f32) -> Mesh {
+/// `shells`, drawn as a flat strip across local X that [`crate::visuals::plasma_visuals`]
+/// turns about the axis to face the camera. Across the strip each shell adds the glow a
+/// column of hot gas of its radius shows side on (densest on the axis, fading smoothly to
+/// its edge), so the wake reads as one soft volume with no rim at each shell. It starts at
+/// `neck` of its radius right behind the ship (the air closing in behind the body) and widens
+/// like a cone. It fades in over its first few percent, then out as each shell cools, and is
+/// streaked along its length like the turbulent gas it is.
+fn wake_mesh(shells: &[(f32, f32, f32, f32)], cols: usize, rows: usize, neck: f32) -> Mesh {
     let ts: Vec<f32> = (0..=rows)
         .map(|i| (i as f32 / rows as f32).powf(1.6))
         .collect();
-    let mut out = Mesh::default();
-    for (k, &(r0, r1, a0, cooling)) in shells.iter().enumerate() {
-        let phase = k as f32 * 1.9;
-        let radius = |t: f32| r0 * neck + (r1 - r0 * neck) * t.powf(0.7);
-        let ring: Vec<Vec<Vec3>> = ts
+    let radius = |r0: f32, r1: f32, t: f32| r0 * neck + (r1 - r0 * neck) * t.powf(0.7);
+    // Out to where the widest shell's glow has faded.
+    let half = |t: f32| {
+        shells
             .iter()
-            .map(|&t| {
-                (0..seg)
-                    .map(|j| {
-                        let a = j as f32 / seg as f32 * TAU;
-                        Vec3::new(a.cos() * radius(t), a.sin() * radius(t), t)
-                    })
-                    .collect()
-            })
-            .collect();
-        let mut m = grid(&ring, true, false, |i, j| {
-            Vec2::new(j as f32 / seg as f32, ts[i])
-        });
-        for (i, v) in m.vertices.iter_mut().enumerate() {
-            let t = ts[i / (seg + 1)];
-            let a = (i % (seg + 1)) as f32 / seg as f32 * TAU;
-            let streaks = 0.55
-                + 0.25 * (5.0 * a + 7.0 * t + phase).sin()
-                + 0.2 * (11.0 * a - 13.0 * t + 2.0 * phase).sin();
+            .map(|s| radius(s.0, s.1, t))
+            .fold(0.0, f32::max)
+            * 1.3
+    };
+    let strip: Vec<Vec<Vec3>> = ts
+        .iter()
+        .map(|&t| {
+            (0..=cols)
+                .map(|j| Vec3::new((j as f32 / cols as f32 * 2.0 - 1.0) * half(t), 0.0, t))
+                .collect()
+        })
+        .collect();
+    let mut m = grid(&strip, false, false, |i, j| {
+        Vec2::new(j as f32 / cols as f32, ts[i])
+    });
+    for v in m.vertices.iter_mut() {
+        let (x, t) = (v.position[0], v.position[2]);
+        let mut a = 0.0;
+        for (k, &(r0, r1, a0, cooling)) in shells.iter().enumerate() {
+            let phase = k as f32 * 1.9;
+            let u = x / radius(r0, r1, t);
+            let streaks = 0.6
+                + 0.22 * (9.0 * u + 7.0 * t + phase).sin()
+                + 0.18 * (23.0 * u - 13.0 * t + 2.0 * phase).sin();
             let glow = smoothstep(0.0, 0.03, t) * (-cooling * t).exp() * (1.0 - t);
-            v.color = [1.0, 1.0, 1.0, a0 * 1.6 * glow * streaks];
+            // A shell seen side on: twice its own opacity on the axis (front and back).
+            a += 2.0 * a0 * 1.6 * glow * streaks * (-2.2 * u * u).exp();
         }
-        out.merge(&m);
+        v.color = [1.0, 1.0, 1.0, a.min(1.0)];
     }
-    out
+    m
 }
 
 /// Where the nose cap is, on the body's long axis, m.
@@ -799,11 +808,11 @@ pub fn build() -> ModelAssets {
     out.mesh(&key("rcs_inside"), rcs_inside);
     out.mesh(&key("plume"), plume_mesh(&PLUME_SHELLS));
     out.mesh(&key("plume_soft"), plume_mesh(&HOVER_SHELLS));
-    out.mesh(&key("plasma_wake"), wake_mesh(&WAKE_OUTER, 24, 18, 0.6));
-    out.mesh(&key("plasma_wake_hot"), wake_mesh(&WAKE_CORE, 24, 18, 0.6));
+    out.mesh(&key("plasma_wake"), wake_mesh(&WAKE_OUTER, 32, 24, 0.6));
+    out.mesh(&key("plasma_wake_hot"), wake_mesh(&WAKE_CORE, 32, 24, 0.6));
     out.mesh(
         &key("plasma_streamer"),
-        wake_mesh(&STREAMER_SHELLS, 12, 12, 1.0),
+        wake_mesh(&STREAMER_SHELLS, 12, 16, 1.0),
     );
 
     // ---- details
