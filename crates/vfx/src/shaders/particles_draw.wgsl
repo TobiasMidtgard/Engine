@@ -143,13 +143,16 @@ fn vs_particle(@builtin(vertex_index) vi: u32, @builtin(instance_index) instance
         let l = frame.sun_dir.xyz;
         out.sun = vec3<f32>(dot(l, right), dot(l, up), dot(l, to_eye)) * saturate(frame.sun_dir.y * 8.0 + 0.4);
     }
-    if (out.sprite == 4u) {
+    if (out.sprite == 4u || out.sprite == 19u) {
         // Clear water mirrors the sky beyond it, just above the horizon.
         let ahead = normalize(vec3<f32>(rel.x, 0.0, rel.z) + vec3<f32>(1e-4, 0.0, 0.0));
         let sky = sample_env(normalize(ahead + vec3<f32>(0.0, 0.4, 0.0)));
         out.glint = pre_expose(sky) * fog.through * min(e.shade.y, 1.0);
     } else if (out.sprite == 13u) {
         out.glint = vec3<f32>(e.extra_vel.w, 0.0, 0.0);
+    } else if (out.sprite == 18u) {
+        // A fireball's soot is lit by the scene alone, not by its own glow.
+        out.glint = pre_expose(p.light * e.shade.y) * fog.through;
     } else if (is_crown) {
         let inv = vec4<f32>(-e.rot.xyz, e.rot.w);
         out.eye = vec4<f32>(quat_rotate(inv, -rel) / size, size);
@@ -500,6 +503,14 @@ fn plume(c: vec2<f32>, t: f32, seed: f32, air: f32) -> vec3<f32> {
     return vec3<f32>(glow / max(a, 1e-3), saturate(core * 1.2 + diamonds), a);
 }
 
+// Blackbody-like: deep red where it is coolest, `rgb` (the layer's color) in the body and near
+// white only where hottest, so overlapping flames don't all wash out to yellow.
+fn heat_color(rgb: vec3<f32>, heat: f32) -> vec3<f32> {
+    let deep = rgb * vec3<f32>(1.0, 0.4, 0.15);
+    let hot = mix(rgb, vec3<f32>(1.0, 0.92, 0.75), 0.65);
+    return mix(mix(deep, rgb, smoothstep(0.1, 0.55, heat)), hot, smoothstep(0.55, 1.0, heat));
+}
+
 // A whole fire, `t` from its base (0) up (1) and `c.x` across: turbulent heat rising through
 // a body that narrows upward and sways more the higher it gets, licks tearing off its top.
 // Returns the heat (0 clear .. 1 white hot) and the coverage.
@@ -524,6 +535,75 @@ fn blaze(c: vec2<f32>, t: f32, seed: f32) -> vec2<f32> {
     // The base, right on the fuel, is clear and blue-dim; licks fade as they cool.
     let a = smoothstep(0.1, 0.28, heat) * smoothstep(0.0, 0.1, t);
     return vec2<f32>(heat, a);
+}
+
+// ---------------------------------------------------------------- jet
+// A fountain's jet from the nozzle (t = 0) up to where it turns over (t = 1): a glassy rod of
+// water, clear in the middle and mirroring the sky at its edges, streaked as it flows,
+// swelling as it slows and breaking into beads and threads near the top. c.x is across it.
+fn jet(c: vec2<f32>, t: f32, seed: f32, rgb: vec3<f32>, sky: vec3<f32>) -> vec4<f32> {
+    let time = frame.time.x % 3600.0;
+    let w = mix(0.3, 0.85, t * t);
+    let x = c.x / w;
+    if (abs(x) >= 1.0) { return vec4<f32>(0.0); }
+    let thick = sqrt(1.0 - x * x);
+    let rise = t * 7.0 - time * 5.0 + seed * 13.0;
+    let breakup = smoothstep(0.5, 0.95, t);
+    let beads = smoothstep(0.3, 0.55, value_noise2(vec2<f32>(x * 1.5 + seed * 7.0, rise)));
+    let keep = mix(1.0, beads, breakup) * smoothstep(1.0, 0.82, t) * smoothstep(0.0, 0.03, t);
+    let fresnel = pow(1.0 - thick, 2.0);
+    let a = (0.45 + 0.5 * fresnel) * keep * smoothstep(1.0, 0.8, abs(x));
+    let streaks = value_noise2(vec2<f32>(x * 5.0 + seed * 3.0, t * 2.5 - time * 3.0));
+    let glint = exp(-sq((x + 0.4) / 0.13)) * (0.6 + 0.8 * streaks);
+    // Air churned into the water whitens its core.
+    let col = rgb * (0.6 + 0.5 * thick) * (0.8 + 0.4 * streaks) + sky * (fresnel * 0.9 + glint);
+    return vec4<f32>(col, a);
+}
+
+// ---------------------------------------------------------------- fireball
+// A ball of burning gas traced through its sprite as a volume: a lumpy body rolled into lobes,
+// glowing from inside (near white deep in, reddening outward), turning to dark soot from the
+// outside in as it cools with age. Units are the sprite's radius; the eye looks down -z.
+fn fireball_field(p: vec3<f32>, seed: f32, age: f32, time: f32) -> vec2<f32> {
+    let q = p * 2.2 + vec3<f32>(seed * 17.0, seed * 31.0 - time * 0.4 - age * 1.5, seed * 7.0);
+    let lobes = fbm3(q, 3) * 1.14;
+    let fine = fbm3(q * 2.2 + vec3<f32>(3.7, 1.9, 5.3), 2) * 1.33;
+    let r = length(p);
+    let edge = 0.42 + 0.5 * lobes + 0.06 * fine;
+    let density = saturate((edge - r) * 7.0);
+    // Hot throughout while young, hottest deep inside and in the swelling lobes, cooling
+    // from the creases between them as it ages.
+    let depth = 1.0 - r / max(edge, 0.05);
+    let heat = saturate(1.0 + depth * 0.6 + (fine - 0.5) * 0.9 - (1.0 - lobes) * 0.5 - age * 1.7);
+    return vec2<f32>(density, heat);
+}
+
+fn fireball(in: VsOut, c: vec2<f32>) -> vec4<f32> {
+    let r2 = dot(c, c);
+    if (r2 >= 1.0) { return vec4<f32>(0.0); }
+    let time = frame.time.x % 3600.0;
+    let half_len = sqrt(1.0 - r2);
+    let steps = 12;
+    let dz = 2.0 * half_len / f32(steps);
+    // A per-pixel offset into the first step hides the slices.
+    let jitter = fract(sin(dot(in.position.xy, vec2<f32>(12.9898, 78.233))) * 43758.547);
+    // Soot is dark smoke lit by the scene, brighter on its sun side.
+    let n = vec3<f32>(c, half_len);
+    let sun_side = 0.55 + 0.45 * saturate(dot(n, in.sun) * 0.8 + 0.4);
+    let soot = in.glint * 0.06 * sun_side;
+    var trans = 1.0;
+    var light = vec3<f32>(0.0);
+    for (var i = 0; i < steps; i++) {
+        let z = half_len - (f32(i) + jitter) * dz;
+        let f = fireball_field(vec3<f32>(c, z), in.seed, in.age, time);
+        let a = 1.0 - exp(-f.x * 6.0 * dz);
+        let glow = heat_color(in.radiance, f.y * 0.85) * (2.2 * f.y * f.y * f.y * smoothstep(0.2, 0.55, f.y));
+        light += trans * a * (glow + soot);
+        trans *= 1.0 - a;
+        if (trans < 0.02) { break; }
+    }
+    let alpha = 1.0 - trans;
+    return vec4<f32>(light / max(alpha, 1e-4), alpha);
 }
 
 // A portal: the world behind it swirled into a vortex that sinks into the portal's color and
@@ -658,15 +738,20 @@ fn fs_particle(in: VsOut) -> @location(0) vec4<f32> {
         case 12u: { // portal: the scene behind it swirled into a vortex
             return vortex(in, c, r, jx, jy);
         }
+        case 19u: { // jet: a fountain's rising rod of water, from the nozzle (uv.y 0) up
+            let j = jet(c, in.uv.y, in.seed, rgb, in.glint);
+            rgb = j.rgb;
+            a = j.a;
+        }
+        case 18u: { // fireball: a burning, cooling volume of gas
+            let f = fireball(in, c);
+            rgb = f.rgb;
+            a = f.a;
+        }
         case 17u: { // blaze: a whole fire from its base (uv.y 0) up
             let b = blaze(c, in.uv.y, in.seed);
             a = b.y;
-            // Blackbody-like: deep red at the cool rim, the layer's color in the body, near
-            // white only in the hottest core, so overlapping blazes don't all wash to yellow.
-            let deep = rgb * vec3<f32>(1.0, 0.4, 0.15);
-            let hot = mix(rgb, vec3<f32>(1.0, 0.92, 0.75), 0.65);
-            let col = mix(mix(deep, rgb, smoothstep(0.1, 0.55, b.x)), hot, smoothstep(0.55, 1.0, b.x));
-            rgb = col * (0.3 + 1.4 * b.x * b.x * b.x);
+            rgb = heat_color(rgb, b.x) * (0.3 + 1.4 * b.x * b.x * b.x);
         }
         case 14u: { // crown: a splash's wall of water, traced
             return crown(in);

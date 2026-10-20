@@ -457,3 +457,263 @@ fn the_control_api_turns_the_flight_assist_off_to_coast() {
         assert!(r.is_err(), "{r:?}");
     }
 }
+
+/// Re-entry plasma: at 7 km/s and 70 km the shock layer and wake (each a hot and an outer
+/// part) and the wingtip streamers show, trailing behind and above a ship flying nose 40° up; held still at the same height,
+/// or in vacuum, neither does.
+#[test]
+fn reentry_air_glows_and_trails_the_ship() {
+    use engine_render::MeshRenderer;
+    use engine_vehicles::visuals::PlasmaVisual;
+    let plasma = |altitude: f64, speed: f32| {
+        let mut app = vehicle_app();
+        calm(&mut app);
+        let t = Transform::from_translation(DVec3::new(0.0, altitude, 0.0))
+            .with_rotation(Quat::from_rotation_x(40f32.to_radians()));
+        let ship = spawn_with(&mut app, |c| presets::spaceplane(c, t));
+        app.world.entity_mut(ship).insert(Velocity {
+            linear: Vec3::NEG_Z * speed,
+            angular: Vec3::ZERO,
+        });
+        app.world.get_mut::<Spacecraft>(ship).unwrap().assist.mode = AssistMode::Off;
+        run_for(&mut app, 0.2);
+        let flux = app.world.get::<HeatShield>(ship).unwrap().heat_flux_w_m2;
+        let mut q = app
+            .world
+            .query::<(&ChildOf, &PlasmaVisual, &MeshRenderer, &Transform)>();
+        // (is a wake, is the main wake, shown, placed)
+        let parts: Vec<(bool, bool, bool, Transform)> = q
+            .iter(&app.world)
+            .filter(|(p, ..)| p.parent() == ship)
+            .map(|(_, v, r, t)| {
+                let main = v.wake.is_some_and(|w| w.from.is_none());
+                (v.wake.is_some(), main, r.visible, *t)
+            })
+            .collect();
+        eprintln!("{altitude} m at {speed} m/s: nose flux {flux:.0} W/m²");
+        assert_eq!(
+            parts.len(),
+            6,
+            "a shock layer and a wake (hot and outer parts) and two wingtip streamers"
+        );
+        parts
+    };
+    for (wake, main, visible, t) in plasma(70_000.0, 7_000.0) {
+        assert!(visible);
+        if wake {
+            let along = t.rotation * Vec3::Z;
+            let a = 40f32.to_radians();
+            eprintln!(
+                "wake {:.0} m along {along:.2} from {:.1}",
+                t.scale.z, t.translation
+            );
+            assert!(along.distance(Vec3::new(0.0, a.sin(), a.cos())) < 0.05);
+            assert!(t.scale.z > if main { 100.0 } else { 40.0 });
+        }
+    }
+    for (altitude, speed) in [(70_000.0, 0.0), (200_000.0, 7_800.0), (2_000.0, 250.0)] {
+        assert!(
+            plasma(altitude, speed)
+                .iter()
+                .all(|(.., visible, _)| !visible)
+        );
+    }
+}
+
+/// `vehicles.place` sets a ship nose up and banked, with its shield as hot as re-entry
+/// leaves it (the re-entry tour shot holds the ship like this).
+#[test]
+fn the_place_api_tilts_a_ship_and_heats_its_shield() {
+    let mut app = vehicle_app();
+    let spawned = engine_core::registry::call_api(
+        &mut app.world,
+        "vehicles.spawn",
+        serde_json::json!({"preset": "spaceplane", "name": "Hot", "at": [0.0, 900.0, 0.0],
+            "on_ground": false}),
+    )
+    .unwrap();
+    let ship = Entity::from_bits(spawned["id"].as_u64().unwrap());
+    engine_core::registry::call_api(
+        &mut app.world,
+        "vehicles.place",
+        serde_json::json!({"vehicle": "Hot", "at": [0.0, 900.0, 0.0], "on_ground": false,
+            "yaw_deg": 90.0, "pitch_deg": 40.0, "roll_deg": 30.0,
+            "hull_temperature_k": 1_390.0}),
+    )
+    .unwrap();
+    let r = transform(&app, ship).rotation;
+    let (nose, right) = (r * Vec3::NEG_Z, r * Vec3::X);
+    assert!((nose.y - 40f32.to_radians().sin()).abs() < 1e-4, "{nose}");
+    assert!(nose.x > 0.7, "heading +X: {nose}");
+    // Rolled about the nose: the right wing drops 30° of the way round from level.
+    let down = 30f32.to_radians().sin() * 40f32.to_radians().cos();
+    assert!((right.y + down).abs() < 1e-4, "right wing down: {right}");
+    let shield = app.world.get::<HeatShield>(ship).unwrap();
+    assert_eq!(shield.temperature_k, 1_390.0);
+}
+
+const EARTH_R: f64 = 6.371e6;
+const EARTH_MU: f64 = 3.986e14;
+
+/// How a flight home went.
+struct Homecoming {
+    phases: Vec<String>,
+    peak_k: f32,
+    peak_g: f32,
+    /// Where the ship ended, and the seconds it took to land (None: it never did).
+    at: DVec3,
+    took: Option<f64>,
+}
+
+/// The spaceplane flying home (the Return autopilot) to a pad at the origin of a full-size
+/// Earth: `lead` round the planet before the pad, `altitude_m` up, at `speed` along its
+/// path (horizontal, toward the pad, −Z over it) with `propellant_kg` aboard, for at most
+/// `max_s` seconds.
+fn fly_home(
+    lead_deg: f64,
+    altitude_m: f64,
+    speed: f64,
+    propellant_kg: f32,
+    max_s: f64,
+) -> Homecoming {
+    let mut app = vehicle_app();
+    calm(&mut app);
+    let center = DVec3::new(0.0, -EARTH_R, 0.0);
+    {
+        let mut g = app.world.resource_mut::<Gravity>();
+        g.uniform = Vec3::ZERO;
+        g.bodies = vec![GravityBody {
+            center,
+            mu: EARTH_MU,
+            radius: EARTH_R,
+        }];
+    }
+    let pad = DVec3::ZERO;
+    ground(&mut app, pad, 200.0, "concrete");
+    let lead = lead_deg.to_radians();
+    let at = center + DVec3::new(0.0, lead.cos(), lead.sin()) * (EARTH_R + altitude_m);
+    let along = Vec3::new(0.0, lead.sin() as f32, -lead.cos() as f32);
+    let up = (at - center).normalize().as_vec3();
+    let t = Transform::from_translation(at).with_rotation(Quat::from_mat3(
+        &engine_core::math::Mat3::from_cols(-along.cross(up), up, -along),
+    ));
+    let ship = spawn_with(&mut app, |c| presets::spaceplane(c, t));
+    app.world.entity_mut(ship).insert(Velocity {
+        linear: along * speed as f32,
+        angular: Vec3::ZERO,
+    });
+    app.world.get_mut::<Spacecraft>(ship).unwrap().propellant_kg = propellant_kg;
+    {
+        let mut a = app.world.get_mut::<Aircraft>(ship).unwrap();
+        a.gear_down = false;
+        a.gear = 0.0;
+    }
+    app.world
+        .entity_mut(ship)
+        .insert(Autopilot::new(AutopilotMode::Return { pad }));
+    let mut phases = Vec::<String>::new();
+    let (mut peak_k, mut peak_g) = (0.0f32, 0.0f32);
+    let mut last_print = -100.0;
+    let mut clock = 0.0;
+    let took = run_until(&mut app, max_s, |app| {
+        clock += 1.0 / 60.0;
+        let p = phase(app, ship);
+        if !p.is_empty() && phases.last() != Some(&p) {
+            eprintln!("{clock:7.1} s: {p}");
+            phases.push(p.clone());
+        }
+        let tel = telemetry(app, ship);
+        peak_k = peak_k.max(tel.hull_temperature_k);
+        if tel.altitude_m < 150_000.0 {
+            peak_g = peak_g.max(tel.g_load);
+        }
+        let every = if p.starts_with("landing") { 2.0 } else { 20.0 };
+        if clock - last_print > every {
+            last_print = clock;
+            let ap = app.world.get::<Autopilot>(ship).unwrap();
+            let x = transform(app, ship);
+            eprintln!(
+                "{clock:7.1} s {p:12} alt {:7.0} m speed {:6.0} aoa {:5.1} bank {:6.1} over {:6.0} km hull {:5.0} K g {:4.1} to pad {:8.2} km fuel {:6.0} kg upright {:5.2}",
+                tel.altitude_m,
+                tel.speed,
+                tel.aoa_deg,
+                ap.entry.bank.to_degrees(),
+                ap.entry.overshoot_m / 1e3,
+                tel.hull_temperature_k,
+                tel.g_load,
+                (x.translation - pad).length() / 1e3,
+                app.world.get::<Spacecraft>(ship).unwrap().propellant_kg,
+                (x.rotation * Vec3::Y)
+                    .as_dvec3()
+                    .dot((x.translation - center).normalize()),
+            );
+        }
+        p == "landed"
+    });
+    let at = transform(&app, ship).translation;
+    eprintln!("took {took:?}, phases {phases:?}, peak {peak_k:.0} K {peak_g:.1} g, at {at:?}");
+    let shield = *app.world.get::<HeatShield>(ship).unwrap();
+    assert!(peak_k < shield.max_temperature_k, "{peak_k:.0} K");
+    Homecoming {
+        phases,
+        peak_k,
+        peak_g,
+        at,
+        took,
+    }
+}
+
+fn assert_on_the_pad(home: &Homecoming) {
+    let took = home
+        .took
+        .unwrap_or_else(|| panic!("never landed; phases {:?}", home.phases));
+    let off = home.at - DVec3::Y * home.at.y;
+    assert!(
+        off.length() < 10.0,
+        "landed {:.1} m off the pad after {took:.0} s",
+        off.length()
+    );
+}
+
+/// Home from a 200 km orbit around a full-size Earth: the spaceplane waits for the moment to
+/// burn out of orbit, re-enters nose high with its heat shield glowing but intact, banks to
+/// come down at the pad, glides to it and lands on its hover engines.
+#[test]
+fn returns_from_orbit_and_lands_on_the_pad() {
+    let orbit = EARTH_R + 200_000.0;
+    let home = fly_home(
+        190.0,
+        200_000.0,
+        (EARTH_MU / orbit).sqrt(),
+        25_000.0,
+        5_000.0,
+    );
+    assert_eq!(
+        home.phases,
+        [
+            "deorbit wait",
+            "deorbit burn",
+            "entry coast",
+            "entry",
+            "approach",
+            "landing burn",
+            "landing",
+            "landed"
+        ],
+    );
+    assert!(home.peak_k > 1_000.0, "{:.0} K", home.peak_k);
+    assert!(home.peak_g < 4.0, "{:.1} g", home.peak_g);
+    assert_on_the_pad(&home);
+}
+
+/// The last of the way home: gliding in high and fast 40 km out, the spaceplane comes down
+/// to the pad, brakes on its hover engines and sets down on it.
+#[test]
+fn glides_in_and_lands_on_the_pad() {
+    let home = fly_home(0.36, 12_000.0, 400.0, 6_000.0, 600.0);
+    assert_eq!(
+        home.phases,
+        ["approach", "landing burn", "landing", "landed"],
+    );
+    assert_on_the_pad(&home);
+}

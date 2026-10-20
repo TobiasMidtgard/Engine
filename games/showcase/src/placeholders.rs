@@ -212,14 +212,7 @@ pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
             at(p + DVec3::new(0.0, 0.4, 0.0)),
         );
         let t = &lib.trees_of(TreeKind::Oak).nth(k).expect("oak");
-        scenery::spawn_tree(
-            commands,
-            lib,
-            t,
-            p + DVec3::new(0.0, 0.8, 0.0),
-            a as f32,
-            0.8,
-        );
+        scenery::spawn_tree(commands, t, p + DVec3::new(0.0, 0.8, 0.0), a as f32, 0.8);
     }
 }
 
@@ -295,67 +288,29 @@ pub fn cave_shell(
     rng: &mut Rng,
 ) {
     let c = crate::zones::zone("cave").center;
-    let (hx, hz, h) = CAVE_INSIDE;
+    let (_, hz, h) = CAVE_INSIDE;
     let kit = &lib.rocks;
-    // Back and side walls, thick enough to reach the edge of the hole the landscape digs, and
-    // the front wall either side of the 10 m mouth: the kit's rock, so the face reads as stone.
-    let (fx, fz, fh) = (hx as f32, hz as f32, h as f32);
-    let mut walls = crate::meshgen::Builder::default();
-    walls.cuboid(
-        Vec3::new(0.0, 5.0, fz + 3.5),
-        Vec3::new(22.0, 5.0, 3.5),
-        Quat::IDENTITY,
-        ROCK_TINT,
-    );
-    for s in [-1.0, 1.0] {
-        walls.cuboid(
-            Vec3::new(s * (fx + 3.5), 5.0, 2.5),
-            Vec3::new(3.5, 5.0, 21.5),
-            Quat::IDENTITY,
-            ROCK_TINT,
-        );
-        walls.cuboid(
-            Vec3::new(s * 10.0, fh * 0.5, -fz - 0.5),
-            Vec3::new(5.0, fh * 0.5, 1.5),
-            Quat::IDENTITY,
-            ROCK_TINT,
-        );
-    }
-    commands.spawn((
-        at(c),
-        MeshRenderer::new(meshes.add(rock_face(walls)), kit.mats.rock),
-    ));
+    // The rock inside: Foliage's sculpted chamber (walls bulging into alcoves, ledges,
+    // flowstone, stalactites, a vaulted roof, the 10 m mouth in its −Z wall and no sky light
+    // but through the mouth), the same size as the hole the landscape digs.
+    engine_foliage::demo::spawn_cave_chamber(commands, c);
     cave_roof(commands, meshes, lib, land, c, h, rng);
-    // Boulders sunk into the walls and hanging from the ceiling, so the inside reads as rock
-    // rather than a box. Each sits with its flat base in the wall and its rounded face out.
-    // (Shapes and tilts come from their own stream; the shared one advances as before.)
+    // (The boulders that once lined the box walls are gone with them; their draws stay, so
+    // everything laid out after them keeps its place.)
     let mut pick = Rng::new(0x00ca_7eb0_u64);
     for k in 0..64 {
-        let along = rng.range(-1.0, 1.0) as f64;
-        let y = rng.range(-0.5, h as f32 - 1.0) as f64;
-        let (p, inward) = match k % 4 {
-            0 => (DVec3::new(-hx - 0.4, y, along * hz), Vec3::X),
-            1 => (DVec3::new(hx + 0.4, y, along * hz), Vec3::NEG_X),
-            2 => (DVec3::new(along * hx, y, hz + 0.4), Vec3::NEG_Z),
-            _ => (
-                DVec3::new(along * hx, h + 0.4, rng.range(-hz as f32, hz as f32) as f64),
-                Vec3::NEG_Y,
-            ),
-        };
-        let _ = rng.range_i32(0, 6);
-        let yaw = rng.range(0.0, TAU);
-        let tilt = rng.range(-0.6, 0.6) * 0.5;
-        let scale = rng.range(1.4, 3.0) * 0.6;
-        let v = kit.pick(crate::rocks::RockSize::Large, pick.chance(0.5), &mut pick);
-        let sink = (inward * v.extent.y * scale * 0.45).as_dvec3();
-        let tf = Transform::from_translation(c + p - sink)
-            .with_rotation(
-                Quat::from_rotation_arc(Vec3::Y, inward)
-                    * Quat::from_rotation_y(yaw)
-                    * Quat::from_rotation_x(tilt),
-            )
-            .with_scale(Vec3::new(scale, scale * pick.range(0.7, 1.0), scale));
-        kit.spawn(commands, v, tf, crate::rocks::RockLook::default());
+        let _ = (rng.range(-1.0, 1.0), rng.range(-0.5, h as f32 - 1.0));
+        if k % 4 == 3 {
+            let _ = rng.range(-hz as f32, hz as f32);
+        }
+        let _ = (
+            rng.range_i32(0, 6),
+            rng.range(0.0, TAU),
+            rng.range(-0.6, 0.6),
+        );
+        let _ = rng.range(1.4, 3.0);
+        let _ = kit.pick(crate::rocks::RockSize::Large, pick.chance(0.5), &mut pick);
+        let _ = pick.range(0.7, 1.0);
     }
     // Rocky arch over the mouth: blocks set into the hillside, faces out and a little up.
     for i in 0..9 {
@@ -435,13 +390,6 @@ pub fn cave_shell(
         }
         x += 2.9;
     }
-    commands.spawn((
-        at(c + DVec3::new(0.0, h * 0.5, 0.0)),
-        // Just past the inner wall faces so the walls count as inside too.
-        SkyLightVolume::new([hx as f32 + 0.5, h as f32 * 0.5 + 0.5, hz as f32 + 0.5])
-            .open(BoxFace::NegZ)
-            .with_fade(12.0),
-    ));
 }
 
 /// The cave's roof: the hillside carried on over the cave (grass on top, rock underneath and

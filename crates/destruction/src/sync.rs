@@ -172,7 +172,9 @@ pub fn piece_colliders_system(
         let props = table.get(prop.material);
         commands.entity(e).insert(Collider {
             shape: match prop.shape {
-                FractureShape::Box { half_extents } => ColliderShape::Cuboid { half_extents },
+                FractureShape::Box { half_extents } | FractureShape::Crate { half_extents, .. } => {
+                    ColliderShape::Cuboid { half_extents }
+                }
                 FractureShape::Column {
                     radius,
                     half_height,

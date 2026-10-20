@@ -12,23 +12,23 @@ use crate::texgen::VillageMats;
 use crate::village::{self, Part, PropKind, PropSpot};
 use crate::zones::{ZONES, zone};
 use engine::prelude::*;
+use engine::render::Displacement;
+use std::sync::Arc;
 
 /// Materials shared by the scenery (vertex colors carry the variation).
 pub struct Mats {
     pub terrain: Handle<StandardMaterial>,
-    pub bark: Handle<StandardMaterial>,
-    pub leaves: Handle<StandardMaterial>,
     pub grass: Handle<StandardMaterial>,
     pub flowers: Handle<StandardMaterial>,
     /// The village's procedural PBR materials (plaster, timber, tiles, glass, iron, ...).
     pub village: VillageMats,
 }
 
+/// A tree variant: Foliage's species for its kind and a seed for its genes.
 pub struct TreeHandles {
     pub kind: TreeKind,
-    pub trunk: Handle<Mesh>,
-    pub crown: Handle<Mesh>,
-    pub far: Handle<Mesh>,
+    pub species: engine_foliage::SpeciesId,
+    pub seed: u64,
 }
 
 /// One house archetype: a mesh per material, near and far versions.
@@ -76,6 +76,9 @@ pub struct Library {
     /// Dry-stone wall segment variants and the heads that end a run.
     pub walls: Vec<WallHandles>,
     pub wall_heads: Vec<Handle<Mesh>>,
+    pub wall_head_placed: Vec<Arc<[crate::walls::Placed]>>,
+    /// The hero stones' palette, for the walls up close.
+    pub wall_palette: WallPalette,
     /// The spaceport's 600 m tower.
     pub tower: crate::tower::TowerKit,
 }
@@ -90,6 +93,19 @@ pub struct WallHandles {
     pub core: Handle<Mesh>,
     pub core_end: Handle<Mesh>,
     pub core_far: Handle<Mesh>,
+    /// Where `near`'s and `near_end`'s stones are, for the hero stones.
+    pub placed: Arc<[crate::walls::Placed]>,
+    pub placed_end: Arc<[crate::walls::Placed]>,
+}
+
+/// The hero wall stones' meshes and materials ([`crate::walls::HERO_CLASSES`]).
+#[derive(Resource, Clone)]
+pub struct WallPalette {
+    /// Per class, [`crate::walls::HERO_VARIANTS`] stones: a light base mesh and the
+    /// displacement that finishes it into real relief.
+    pub stones: Vec<(Handle<Mesh>, Displacement)>,
+    /// A material per shade ([`crate::walls::HERO_SHADES`]).
+    pub shades: Vec<Handle<StandardMaterial>>,
 }
 
 impl Library {
@@ -102,6 +118,7 @@ pub fn build_library(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
+    plants: &engine_foliage::PlantLibrary,
 ) -> Library {
     // Rock textures, boulders and the cliffs build on other threads meanwhile.
     let rock_job = crate::rocks::start_kit();
@@ -115,8 +132,6 @@ pub fn build_library(
     // The detail map averages about 0.85; lift the base so the vertex colors keep their value.
     terrain.base_color = [1.18, 1.18, 1.18, 1.0];
     terrain.normal_scale = 0.7;
-    let mut leaves = white(0.75).with_subsurface(0.5).with_wind_sway(0.12);
-    leaves.reflectance = 0.35;
     let mut grass = white(0.8).with_subsurface(0.6).with_wind_sway(0.18);
     grass.double_sided = true;
     let mut flowers = white(0.6).with_subsurface(0.4).with_wind_sway(0.15);
@@ -130,8 +145,6 @@ pub fn build_library(
     });
     let mats = Mats {
         terrain: materials.add(terrain),
-        bark: materials.add(white(0.9)),
-        leaves: materials.add(leaves),
         grass: materials.add(grass),
         flowers: materials.add(flowers),
         village: village_mats,
@@ -146,12 +159,21 @@ pub fn build_library(
     ] {
         for v in 0..variants {
             let seed = 1000 + kind as u64 * 100 + v;
-            let t = meshgen::tree(kind, seed);
+            // The valley's conifers are spruces with a few pines among them, the bushes hazel.
+            let name = match kind {
+                TreeKind::Oak => "oak",
+                TreeKind::Spruce if v % 3 == 2 => "pine",
+                TreeKind::Spruce => "spruce",
+                TreeKind::Birch => "birch",
+                TreeKind::Bush => "hazel",
+            };
+            let species = plants
+                .id(name)
+                .unwrap_or_else(|| panic!("Foliage has no {name}"));
             trees.push(TreeHandles {
                 kind,
-                trunk: meshes.add(t.trunk),
-                crown: meshes.add(t.crown),
-                far: meshes.add(meshgen::tree_far(kind, seed)),
+                species,
+                seed,
             });
         }
     }
@@ -242,9 +264,15 @@ pub fn build_library(
             core: meshes.add(w.core),
             core_end: meshes.add(w.core_end),
             core_far: meshes.add(w.core_far),
+            placed: w.placed.into(),
+            placed_end: w.placed_end.into(),
         })
         .collect();
-    let wall_heads = heads.into_iter().map(|h| meshes.add(h.near)).collect();
+    let (wall_heads, wall_head_placed) = heads
+        .into_iter()
+        .map(|h| (meshes.add(h.near), Arc::from(h.placed)))
+        .unzip();
+    let wall_palette = wall_palette(meshes, materials);
     engine::core::log::info!(
         "village: {} house types ({} triangles near, {} far), built in {:.2} s",
         houses.len(),
@@ -266,6 +294,8 @@ pub fn build_library(
         props,
         walls,
         wall_heads,
+        wall_head_placed,
+        wall_palette,
         tower: tower_job.finish(meshes, materials, images),
     }
 }
@@ -307,7 +337,12 @@ impl Lod {
 /// Swap meshes or hide entities by distance to the active camera.
 pub fn update_lods(
     cameras: Query<(&Camera, &GlobalTransform)>,
-    mut q: Query<(&GlobalTransform, &mut Lod, &mut MeshRenderer)>,
+    mut q: Query<(
+        &GlobalTransform,
+        &mut Lod,
+        &mut MeshRenderer,
+        Option<&HideWithin>,
+    )>,
 ) {
     let Some(eye) = cameras
         .iter()
@@ -317,21 +352,24 @@ pub fn update_lods(
     else {
         return;
     };
-    q.par_iter_mut().for_each(|(t, mut lod, mut renderer)| {
-        let d2 = (t.translation() - eye).length_squared();
-        let far = d2 > (lod.switch as f64).powi(2);
-        let shown = d2 <= (lod.hide as f64).powi(2) && (!far || lod.far.is_some());
-        if far == lod.far_shown && renderer.visible == shown {
-            return;
-        }
-        lod.far_shown = far;
-        renderer.visible = shown;
-        match (far, lod.far) {
-            (false, _) => renderer.mesh = MeshRef::Handle(lod.near),
-            (true, Some(f)) => renderer.mesh = MeshRef::Handle(f),
-            (true, None) => {}
-        }
-    });
+    q.par_iter_mut()
+        .for_each(|(t, mut lod, mut renderer, within)| {
+            let d2 = (t.translation() - eye).length_squared();
+            let far = d2 > (lod.switch as f64).powi(2);
+            let shown = d2 <= (lod.hide as f64).powi(2)
+                && (!far || lod.far.is_some())
+                && within.is_none_or(|w| d2 >= (w.0 as f64).powi(2));
+            if far == lod.far_shown && renderer.visible == shown {
+                return;
+            }
+            lod.far_shown = far;
+            renderer.visible = shown;
+            match (far, lod.far) {
+                (false, _) => renderer.mesh = MeshRef::Handle(lod.near),
+                (true, Some(f)) => renderer.mesh = MeshRef::Handle(f),
+                (true, None) => {}
+            }
+        });
 }
 
 fn place(land: &Landscape, x: f64, z: f64, sink: f64) -> DVec3 {
@@ -353,35 +391,21 @@ pub fn spawn_terrain(
     }
 }
 
-/// One tree with near/far detail.
-pub fn spawn_tree(
-    commands: &mut Commands,
-    lib: &Library,
-    t: &TreeHandles,
-    pos: DVec3,
-    yaw: f32,
-    scale: f32,
-) {
-    let tf = Transform::from_translation(pos)
-        .with_rotation(Quat::from_rotation_y(yaw))
-        .with_scale(Vec3::splat(scale));
-    let switch = 220.0 * scale;
-    if t.kind != TreeKind::Bush {
-        commands.spawn((
-            tf,
-            MeshRenderer::new(t.trunk, lib.mats.bark),
-            Lod::hide_beyond(t.trunk, switch),
-        ));
-    }
+/// One of Foliage's scenery trees (it picks its own level of detail and follows the seasons).
+/// `scale` sizes it: a grown tree is about 1, saplings and young trees less.
+pub fn spawn_tree(commands: &mut Commands, t: &TreeHandles, pos: DVec3, yaw: f32, scale: f32) {
+    // Every tree its own genes (lean, height, crown), from its variant and where it stands.
+    let spot = (pos.x * 7.0).round() as i64 as u64 ^ ((pos.z * 13.0).round() as i64 as u64) << 21;
+    let genes = engine_foliage::Genes::random(&mut Rng::new(t.seed ^ spot));
+    // Foliage's level of detail counts the size, not the transform's scale. Mostly grown
+    // trees, so the woods' crowns meet.
+    let size = (0.75 + (scale - 0.75) * 0.6).clamp(0.6, 1.0);
     commands.spawn((
-        tf,
-        MeshRenderer::new(t.crown, lib.mats.leaves),
-        Lod {
-            near: t.crown,
-            far: Some(t.far),
-            switch,
-            hide: f32::INFINITY,
-            far_shown: false,
+        Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
+        engine_foliage::SceneryTree {
+            species: t.species,
+            size,
+            genes,
         },
     ));
 }
@@ -424,16 +448,16 @@ fn on_wooded_rim(x: f64, z: f64) -> bool {
     })
 }
 
-/// Inside a zone whose ground is paved, built over or its own (no scenery grass there).
-fn in_hard_zone(x: f64, z: f64) -> bool {
+/// Inside a zone whose ground is paved, built over or its own (no scenery grass there), or
+/// within `reach` of a grassy zone's bare footprint (how far the grass placed here spreads).
+fn in_hard_zone(x: f64, z: f64, reach: f64) -> bool {
     ZONES.iter().any(|zn| {
         let d = DVec2::new(x - zn.center.x, z - zn.center.z).length();
         d < zn.radius - 2.0 && !crate::zones::GRASSY_ZONES.contains(&zn.key)
     }) || crate::zones::BARE_FOOTPRINTS.iter().any(|&(key, rx, rz)| {
-        // A grass patch reaches about 2 m from its center.
         let c = crate::zones::zone(key).center;
-        (rx[0] - 2.0..rx[1] + 2.0).contains(&(x - c.x))
-            && (rz[0] - 2.0..rz[1] + 2.0).contains(&(z - c.z))
+        (rx[0] - reach..rx[1] + reach).contains(&(x - c.x))
+            && (rz[0] - reach..rz[1] + reach).contains(&(z - c.z))
     })
 }
 
@@ -480,7 +504,7 @@ pub fn spawn_woods(commands: &mut Commands, lib: &Library, land: &Landscape, rng
             let t = pick_tree(lib, kind, rng);
             let scale = rng.range(0.75, 1.25);
             let at = place(land, x, z, 0.1);
-            spawn_tree(commands, lib, t, at, rng.range(0.0, TAU), scale);
+            spawn_tree(commands, t, at, rng.range(0.0, TAU), scale);
             if near_wildlife(x, z) {
                 solid(commands, at, 0.35 * scale, 5.0 * scale);
             }
@@ -493,7 +517,6 @@ pub fn spawn_woods(commands: &mut Commands, lib: &Library, land: &Landscape, rng
                     let b = pick_tree(lib, TreeKind::Bush, rng);
                     spawn_tree(
                         commands,
-                        lib,
                         b,
                         place(land, bx, bz, 0.2),
                         rng.range(0.0, TAU),
@@ -515,7 +538,8 @@ pub fn spawn_meadows(commands: &mut Commands, lib: &Library, land: &Landscape, r
         for j in 0..n {
             let x = -extent + (i as f64 + rng.range(0.2, 0.8) as f64) * spacing;
             let z = -extent + (j as f64 + rng.range(0.2, 0.8) as f64) * spacing;
-            if x * x + z * z > extent * extent || in_hard_zone(x, z) {
+            // A grass patch reaches about 2 m from its center.
+            if x * x + z * z > extent * extent || in_hard_zone(x, z, 2.0) {
                 continue;
             }
             if land.road_weight(x, z) > 0.05 || land.lake_depth(x, z) > -0.3 {
@@ -572,7 +596,9 @@ const OWN_GRASS_ZONES: &[&str] = &["forest", "meadow", "footsteps"];
 /// How thickly the valley's grass grows at (x, z), 0..1, and how dry it is.
 fn meadow_cover(land: &Landscape, x: f64, z: f64) -> (f32, f32) {
     let r = (x * x + z * z).sqrt();
-    if r > MEADOW_SIZE as f64 * 0.5 || in_hard_zone(x, z) {
+    // (Density blends across a grid cell, about 1.4 m, so this keeps blades off the bare
+    // ground while the grass still grows right up to it.)
+    if r > MEADOW_SIZE as f64 * 0.5 || in_hard_zone(x, z, 0.7) {
         return (0.0, 0.0);
     }
     if ZONES.iter().any(|zn| {
@@ -1442,7 +1468,6 @@ pub fn spawn_farms(
                 };
                 spawn_tree(
                     commands,
-                    lib,
                     tree,
                     place(land, p.x, p.y, 0.2),
                     rng.range(0.0, TAU),
@@ -1689,6 +1714,177 @@ pub fn plan_walls(
     plan
 }
 
+/// The hero stones' palette: Rendering's dressed wall stones, a few of each class, their
+/// relief built (and cached on disk) by virtual geometry the first time one is drawn.
+fn wall_palette(
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) -> WallPalette {
+    use crate::walls::{HERO_CLASSES, HERO_VARIANTS};
+    use engine::render::rock::{StoneKind, WallStone};
+    let mut stones = Vec::with_capacity(HERO_CLASSES.len() * HERO_VARIANTS);
+    for (c, &(kind, size)) in HERO_CLASSES.iter().enumerate() {
+        // Lichen likes the dry tops: the coping and the capstones.
+        let lichen = if matches!(c, 4 | 6) { 0.65 } else { 0.45 };
+        for v in 0..HERO_VARIANTS {
+            // One face stone in four was picked square rather than split: rounder, worn arrises.
+            let kind = if c < 3 && v == HERO_VARIANTS - 1 {
+                StoneKind::RoughHewn
+            } else {
+                kind
+            };
+            let stone = WallStone::new(kind, size, 7000 + (c * HERO_VARIANTS + v) as u32)
+                .with_lichen(lichen)
+                .with_grime(0.7);
+            stones.push((meshes.add(stone.base_mesh()), stone.displacement()));
+        }
+    }
+    // Each stone a little lighter or darker, warmer or cooler than its palette mesh.
+    let shades = [
+        [0.94, 0.94, 0.93],
+        [0.8, 0.79, 0.77],
+        [1.0, 0.95, 0.86],
+        [0.7, 0.71, 0.72],
+        [0.62, 0.62, 0.58],
+        [0.88, 0.84, 0.78],
+    ]
+    .iter()
+    .map(|&[r, g, b]| {
+        materials.add(
+            StandardMaterial::color(r, g, b)
+                .with_roughness(0.88)
+                .with_detail(0.35, 0.004),
+        )
+    })
+    .collect();
+    WallPalette { stones, shades }
+}
+
+/// Hero stones are drawn within this distance of the camera, m; the merged rocks beyond it.
+const HERO_IN: f32 = 30.0;
+/// Hero stones are spawned this close, so their relief is ready by [`HERO_IN`], m...
+const HERO_SPAWN: f32 = 38.0;
+/// ...and despawned beyond this, m.
+const HERO_OUT: f32 = 46.0;
+
+/// Hidden closer than this to the camera, m (where something finer stands in).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct HideWithin(pub f32);
+
+/// A wall segment's or head's stones as hero stones up close ([`stream_wall_heroes`]).
+#[derive(Component)]
+pub struct WallHeroes {
+    placed: Arc<[crate::walls::Placed]>,
+    stones: Vec<Entity>,
+    shown: bool,
+}
+
+impl WallHeroes {
+    fn new(placed: Arc<[crate::walls::Placed]>) -> Self {
+        Self {
+            placed,
+            stones: Vec::new(),
+            shown: false,
+        }
+    }
+}
+
+/// One hero stone.
+#[derive(Component)]
+pub struct HeroStone;
+
+/// A placed stone's transform under its segment: its box stretched from the palette stone's,
+/// a reflection (the wall's -Z face is laid mirrored) as a negative scale.
+fn hero_transform(p: &crate::walls::Placed) -> Transform {
+    let m = Mat3::from_cols(p.ax[0], p.ax[1], p.ax[2]);
+    let mirror = m.determinant() < 0.0;
+    let rot = if mirror {
+        Mat3::from_cols(p.ax[0], p.ax[1], -p.ax[2])
+    } else {
+        m
+    };
+    let mut scale = p.size / crate::walls::HERO_CLASSES[p.class as usize].1;
+    if mirror {
+        scale.z = -scale.z;
+    }
+    Transform::from_translation(p.center.as_dvec3())
+        .with_rotation(Quat::from_mat3(&rot))
+        .with_scale(scale)
+}
+
+/// Swaps wall segments and heads near the camera to hero stones (spawned a little before they
+/// show, despawned well after) four times a second, and shows them exactly where the merged
+/// rocks hide ([`HideWithin`]).
+#[allow(clippy::type_complexity)]
+pub fn stream_wall_heroes(
+    mut commands: Commands,
+    mut timer: Local<f32>,
+    time: Res<Time>,
+    palette: Option<Res<WallPalette>>,
+    cameras: Query<(&Camera, &GlobalTransform)>,
+    mut walls: Query<(Entity, &GlobalTransform, &mut WallHeroes)>,
+    mut stones: Query<&mut MeshRenderer, With<HeroStone>>,
+) {
+    let Some(palette) = palette else {
+        return;
+    };
+    let Some(eye) = cameras
+        .iter()
+        .filter(|(c, _)| c.active)
+        .max_by_key(|(c, _)| c.order)
+        .map(|(_, t)| t.translation())
+    else {
+        return;
+    };
+    *timer -= time.real_delta_secs();
+    let restream = *timer <= 0.0;
+    if restream {
+        *timer = 0.25;
+    }
+    for (e, t, mut w) in &mut walls {
+        let d2 = (t.translation() - eye).length_squared();
+        // As `update_lods` decides the merged rocks' `HideWithin`.
+        let show = d2 < (HERO_IN as f64).powi(2);
+        if restream && w.stones.is_empty() && d2 < (HERO_SPAWN as f64).powi(2) {
+            let mut spawned = Vec::with_capacity(w.placed.len());
+            for p in w.placed.iter() {
+                let (mesh, displacement) = &palette.stones
+                    [p.class as usize * crate::walls::HERO_VARIANTS + p.variant as usize];
+                let mut r = MeshRenderer::new(*mesh, palette.shades[p.shade as usize]);
+                r.visible = show;
+                spawned.push(
+                    commands
+                        .spawn((
+                            hero_transform(p),
+                            r,
+                            displacement.clone(),
+                            HeroStone,
+                            ChildOf(e),
+                        ))
+                        .id(),
+                );
+            }
+            w.stones = spawned;
+            w.shown = show;
+            continue;
+        }
+        if restream && !w.stones.is_empty() && d2 > (HERO_OUT as f64).powi(2) {
+            for s in w.stones.drain(..) {
+                commands.entity(s).despawn();
+            }
+            continue;
+        }
+        if show != w.shown && !w.stones.is_empty() {
+            for &s in &w.stones {
+                if let Ok(mut r) = stones.get_mut(s) {
+                    r.visible = show;
+                }
+            }
+            w.shown = show;
+        }
+    }
+}
+
 /// A wall segment's box collider, there while a focus point is near ([`stream_wall_colliders`]).
 #[derive(Component, Clone, Copy)]
 pub struct WallCollider {
@@ -1718,10 +1914,17 @@ pub fn spawn_walls(
         } else {
             (w.near, w.core)
         };
+        let placed = if seg.end {
+            w.placed_end.clone()
+        } else {
+            w.placed.clone()
+        };
         commands.spawn((
             tf,
             MeshRenderer::new(near, stone),
             Lod::hide_beyond(near, WALL_STONES),
+            HideWithin(HERO_IN),
+            WallHeroes::new(placed),
         ));
         commands.spawn((
             tf,
@@ -1743,8 +1946,11 @@ pub fn spawn_walls(
             Transform::from_translation(head.pos).with_rotation(head.rot),
             MeshRenderer::new(near, stone),
             Lod::hide_beyond(near, WALL_STONES),
+            HideWithin(HERO_IN),
+            WallHeroes::new(lib.wall_head_placed[head.variant].clone()),
         ));
     }
+    commands.insert_resource(lib.wall_palette.clone());
     let nearest = plan
         .segments
         .iter()
@@ -1818,7 +2024,7 @@ mod tests {
                         "on a road at {x}, {z}"
                     );
                     assert!(land.lake_t(x, z) > 1.0, "in the lake at {x}, {z}");
-                    assert!(!in_hard_zone(x, z), "in a paved zone at {x}, {z}");
+                    assert!(!in_hard_zone(x, z, 0.0), "in a paved zone at {x}, {z}");
                 }
             }
         }

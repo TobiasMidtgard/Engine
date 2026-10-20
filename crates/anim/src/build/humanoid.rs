@@ -32,6 +32,12 @@ pub const SLOW_WALK_SPEED: f32 = 0.65;
 /// Speeds of the sidestep and backpedal clips, m/s.
 pub const SIDESTEP_SPEED: f32 = 0.6;
 pub const BACKPEDAL_SPEED: f32 = 1.0;
+/// Speeds of the jogging sidesteps and backward jog, between the steps and the runs, m/s.
+pub const SIDE_JOG_SPEED: f32 = 1.4;
+pub const BACK_JOG_SPEED: f32 = 1.7;
+/// Speeds of the running sidesteps and the backward run, m/s.
+pub const SIDE_RUN_SPEED: f32 = 3.0;
+pub const BACK_RUN_SPEED: f32 = 2.6;
 pub const RUN_SPEED: f32 = 3.8;
 /// Height of the hips at rest, m (the clips' positions are for this size of body and scale
 /// with the hips of a fitted skeleton).
@@ -889,15 +895,47 @@ fn walk(s: &Skeleton) -> AnimationClip {
 }
 
 fn sidestep_left(s: &Skeleton) -> AnimationClip {
-    step_cycle(s, "sidestep_left", Vec2::X, SIDESTEP_SPEED, 0.65)
+    step_cycle(
+        s,
+        "sidestep_left",
+        Gait::walk(Vec2::X, SIDESTEP_SPEED, 0.65),
+    )
 }
 
 fn sidestep_right(s: &Skeleton) -> AnimationClip {
-    step_cycle(s, "sidestep_right", -Vec2::X, SIDESTEP_SPEED, 0.65)
+    step_cycle(
+        s,
+        "sidestep_right",
+        Gait::walk(-Vec2::X, SIDESTEP_SPEED, 0.65),
+    )
 }
 
 fn backpedal(s: &Skeleton) -> AnimationClip {
-    step_cycle(s, "backpedal", -Vec2::Y, BACKPEDAL_SPEED, 0.9)
+    step_cycle(s, "backpedal", Gait::walk(-Vec2::Y, BACKPEDAL_SPEED, 0.9))
+}
+
+fn jog_left(s: &Skeleton) -> AnimationClip {
+    step_cycle(s, "jog_left", Gait::jog(Vec2::X, SIDE_JOG_SPEED, 0.66))
+}
+
+fn jog_right(s: &Skeleton) -> AnimationClip {
+    step_cycle(s, "jog_right", Gait::jog(-Vec2::X, SIDE_JOG_SPEED, 0.66))
+}
+
+fn jog_back(s: &Skeleton) -> AnimationClip {
+    step_cycle(s, "jog_back", Gait::jog(-Vec2::Y, BACK_JOG_SPEED, 0.78))
+}
+
+fn run_left(s: &Skeleton) -> AnimationClip {
+    step_cycle(s, "run_left", Gait::run(Vec2::X, SIDE_RUN_SPEED, 0.68))
+}
+
+fn run_right(s: &Skeleton) -> AnimationClip {
+    step_cycle(s, "run_right", Gait::run(-Vec2::X, SIDE_RUN_SPEED, 0.68))
+}
+
+fn run_back(s: &Skeleton) -> AnimationClip {
+    step_cycle(s, "run_back", Gait::run(-Vec2::Y, BACK_RUN_SPEED, 0.66))
 }
 
 /// A shorter, slower walk for strolling: whole steps with the feet clear of the ground,
@@ -961,8 +999,64 @@ fn walk_with(s: &Skeleton, name: &str, secs: f32, stride: f32) -> AnimationClip 
     .with_event(0.52, "footstep", Some("foot_l"))
 }
 
-/// Fraction of a step cycle each foot stands on the ground in [`step_cycle`].
-const STANCE: f32 = 0.62;
+/// How a [`step_cycle`] moves: `dir` is (left, ahead) relative to facing, at `speed` m/s,
+/// one stride per `secs`; each foot stands for `stance` of the cycle (under a half: a run,
+/// with both feet off the ground between steps) and lifts `lift` m as it swings.
+#[derive(Debug, Clone, Copy)]
+struct Gait {
+    dir: Vec2,
+    speed: f32,
+    secs: f32,
+    stance: f32,
+    lift: f32,
+    /// How far the hips turn towards a sideways move (the shoulders stay facing), degrees.
+    turn_in: f32,
+    /// Forward lean of the trunk, degrees.
+    lean: f32,
+}
+
+impl Gait {
+    /// Walking steps: long stances, low swings, sidesteps that shuffle without crossing.
+    fn walk(dir: Vec2, speed: f32, secs: f32) -> Self {
+        Self {
+            dir,
+            speed,
+            secs,
+            stance: 0.62,
+            lift: 0.08,
+            turn_in: 0.0,
+            lean: 2.0,
+        }
+    }
+
+    /// Between a walk and a run, so neighbouring speeds blend steps that land and lift
+    /// nearly together.
+    fn jog(dir: Vec2, speed: f32, secs: f32) -> Self {
+        Self {
+            dir,
+            speed,
+            secs,
+            stance: 0.5,
+            lift: 0.12,
+            turn_in: 20.0,
+            lean: 4.0,
+        }
+    }
+
+    /// Running: short stances with a flight between them, high knees, and the hips turned
+    /// into a sideways run so the legs run more ahead than across.
+    fn run(dir: Vec2, speed: f32, secs: f32) -> Self {
+        Self {
+            dir,
+            speed,
+            secs,
+            stance: 0.36,
+            lift: 0.2,
+            turn_in: 50.0,
+            lean: 7.0,
+        }
+    }
+}
 
 /// A walk in any direction relative to facing, solved by leg IK rather than keyed angles:
 /// `dir` is (left, ahead), at `speed` m/s, one stride per `secs`. Each planted foot moves
@@ -970,7 +1064,15 @@ const STANCE: f32 = 0.62;
 /// arc, and plants like the walk does: the right foot at phase 0, the left at 0.5, so it
 /// blends in step with the walk. Stepping sideways widens the stance so the feet never
 /// cross; the hips sink as far as the stance legs need.
-fn step_cycle(s: &Skeleton, name: &str, dir: Vec2, speed: f32, secs: f32) -> AnimationClip {
+fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
+    let Gait {
+        dir,
+        speed,
+        secs,
+        stance,
+        lift,
+        ..
+    } = gait;
     let rest = |b: &str| {
         let mut model = Vec::new();
         s.to_model(&s.rest, &mut model);
@@ -983,20 +1085,30 @@ fn step_cycle(s: &Skeleton, name: &str, dir: Vec2, speed: f32, secs: f32) -> Ani
     // Movement in model space (forward is −Z, left is −X).
     let dir = dir.normalize_or_zero();
     let m = Vec3::new(-dir.x, 0.0, -dir.y);
+    // The hips turn into a sideways run (left is a positive yaw), and the feet are placed
+    // about the turned hips.
+    let yaw = (gait.turn_in * dir.x).to_radians();
+    let turn = Quat::from_rotation_y(yaw);
     // Each foot travels 2·half while it stands.
-    let half = speed * STANCE * secs * 0.5;
-    let width = hip.x.abs() + dir.x.abs() * (half + 0.06 - hip.x.abs()).max(0.0);
-    let lift = 0.08;
+    let half = speed * stance * secs * 0.5;
+    // Walking sidesteps widen the stance so the feet never cross; a run has one foot down
+    // at a time, so its feet may.
+    let across = (turn.conjugate() * m).x.abs();
+    let width = if stance > 0.5 {
+        hip.x.abs() + across * (half + 0.06 - hip.x.abs()).max(0.0)
+    } else {
+        hip.x.abs() * 0.8
+    };
     let reach = 0.985 * (thigh + shin);
     // Where each foot is (model space, relative to the hips' rest place) at `q` phase since
     // it planted, and how far it is through its swing (0 while it stands).
     let foot = |side: usize, q: f32| {
-        let base = Vec3::new(S[side] * width, ankle_y, 0.0);
-        if q < STANCE {
-            let u = q / STANCE;
+        let base = turn * Vec3::new(S[side] * width, 0.0, 0.0) + Vec3::Y * ankle_y;
+        if q < stance {
+            let u = q / stance;
             (base + m * half * (1.0 - 2.0 * u), 0.0)
         } else {
-            let u = (q - STANCE) / (1.0 - STANCE);
+            let u = (q - stance) / (1.0 - stance);
             let e = u * u * (3.0 - 2.0 * u);
             let at = base + m * half * (2.0 * e - 1.0);
             (at + Vec3::Y * lift * (std::f32::consts::PI * u).sin(), u)
@@ -1011,26 +1123,38 @@ fn step_cycle(s: &Skeleton, name: &str, dir: Vec2, speed: f32, secs: f32) -> Ani
         // The hips sink until both feet are in reach (knees soft), and dip a little as each
         // foot takes the weight.
         let mut drop: f32 = 0.015;
+        let joint_at = |side: usize, drop: f32| {
+            turn * Vec3::new(S[side] * hip.x.abs(), 0.0, hip.z) + Vec3::Y * (hip.y - drop)
+        };
         for (side, (at, _)) in feet.iter().enumerate() {
-            let joint = Vec3::new(S[side] * hip.x.abs(), hip.y, hip.z);
+            let joint = joint_at(side, 0.0);
             let flat = (*at - joint).with_y(0.0).length();
             let below = (reach * reach - flat * flat).max(0.0).sqrt();
             drop = drop.max(joint.y - at.y - below);
         }
         drop += 0.012 * (1.0 - cycle(ph * 2.0)) * 0.5;
-        // A slight stoop, leaning into a sidestep with the head kept level.
+        // A stoop (more running), leaning into a sidestep with the head kept level; the
+        // spine turns the shoulders back to face ahead over hips turned into a run.
         let roll = 3.0 * dir.x;
-        p.rot_move("hips", Vec3::new(0.0, -drop, 0.0), 0.0, 0.0, 0.0);
+        let lean = gait.lean;
+        let yaw_deg = yaw.to_degrees();
+        p.rot_move("hips", Vec3::new(0.0, -drop, 0.0), 0.0, yaw_deg, 0.0);
         spine(
             &mut p,
-            [-2.0, -1.0, 1.5, 0.5],
-            [0.0; 4],
+            [-lean * 0.6, -lean * 0.4, 1.5 + lean * 0.4, 0.5 + lean * 0.3],
+            [
+                -yaw_deg * 0.4,
+                -yaw_deg * 0.35,
+                -yaw_deg * 0.15,
+                -yaw_deg * 0.1,
+            ],
             [roll, roll * 0.5, -roll * 0.7, -roll * 0.8],
         );
         for (side, &(at, swing)) in feet.iter().enumerate() {
             let sign = S[side];
-            let joint = Vec3::new(sign * hip.x.abs(), hip.y - drop, hip.z);
-            let d = at - joint;
+            let joint = joint_at(side, drop);
+            // The leg is solved in the hips' turned frame.
+            let d = turn.conjugate() * (at - joint);
             // Abduction swings the leg's plane out about the forward axis; flexion and the
             // knee reach within it.
             let out = d.x * sign;
@@ -1051,16 +1175,20 @@ fn step_cycle(s: &Skeleton, name: &str, dir: Vec2, speed: f32, secs: f32) -> Ani
                 .rot(LOWER_LEG[side], -knee, 0.0, 0.0)
                 .rot(FOOT[side], knee - flex + toe_up, 0.0, -abduct * sign)
                 .rot(TOE[side], 0.0, 0.0, 0.0);
-            // Arms swing against the opposite leg's travel, and open a little stepping sideways.
+            // Arms swing against the opposite leg's travel (pumping, elbows bent, in a run),
+            // and open a little stepping sideways.
             let other = feet[1 - side].0;
-            let swing_arm = (other.dot(m) / half.max(0.05)).clamp(-1.0, 1.0) * dir.y;
+            let ahead_of_hips = turn * Vec3::NEG_Z;
+            let swing_arm = (other.dot(ahead_of_hips) / half.max(0.05)).clamp(-1.0, 1.0);
+            let walk_swing = swing_arm * dir.y;
+            let running = if stance < 0.5 { 1.0 } else { 0.0 };
             arm(
                 &mut p,
                 side,
                 Arm {
-                    flex: 2.0 + 12.0 * swing_arm,
-                    elbow: 18.0 + 6.0 * swing_arm.abs(),
-                    abduct: -15.0 - 6.0 * dir.x.abs(),
+                    flex: 2.0 + 12.0 * walk_swing * (1.0 - running) - 30.0 * swing_arm * running,
+                    elbow: 18.0 + 6.0 * walk_swing.abs() + 62.0 * running,
+                    abduct: -15.0 - 6.0 * dir.x.abs() * (1.0 - running),
                     ..Arm::HANG
                 },
             );
@@ -1133,6 +1261,28 @@ fn lean(s: &Skeleton, name: &str, dir: f32) -> AnimationClip {
             [0.0; 4],
             [2.0 * dir, 3.0 * dir, 2.0 * dir, 3.0 * dir],
             [7.0 * dir, 5.0 * dir, -4.0 * dir, -6.0 * dir],
+        );
+        p.take()
+    })
+}
+
+/// Leaning into a change of speed (added on top of moving, by `accel`): `dir` 1 tips the
+/// trunk forward to drive off, −1 sits back on bent knees to dig in and stop. The head stays
+/// nearer level than the trunk.
+fn lean_pitch(s: &Skeleton, name: &str, dir: f32) -> AnimationClip {
+    AnimationClip::from_fn(name, 1.0, 2, true, |_| {
+        let mut p = PoseBuilder::new(s);
+        let (trunk, drop) = if dir > 0.0 {
+            (-16.0, 0.02)
+        } else {
+            (10.0, 0.05)
+        };
+        p.rot_move("hips", Vec3::new(0.0, -drop, 0.0), trunk * 0.3, 0.0, 0.0);
+        spine(
+            &mut p,
+            [trunk * 0.45, trunk * 0.4, -trunk * 0.35, -trunk * 0.3],
+            [0.0; 4],
+            [0.0; 4],
         );
         p.take()
     })
@@ -1320,6 +1470,70 @@ fn block(s: &Skeleton) -> AnimationClip {
     .with_curve("brace", 2, |_| 1.0)
 }
 
+/// The right hand of the hammer block: the handle held across in front of the face,
+/// pointing left, the forearm up.
+const BLOCK_ARM: Arm = Arm {
+    flex: 3.0,
+    twist: -20.0,
+    abduct: 38.0,
+    elbow: 138.0,
+    wrist: -34.5,
+    protract: 6.0,
+    elevate: 6.0,
+};
+
+/// Everything of the hammer block but the right arm: a fighting stance with the left foot
+/// forward and the knees bent, turned a little to the right, chin down behind the handle,
+/// the left arm up toward the handle (its `ReachIk` puts the hand on it while `guard` is on).
+/// `tremble` (−1..1) shakes the arms under the load.
+fn block_body(p: &mut PoseBuilder, tremble: f32) {
+    // Low enough that both feet reach the floor; foot IK bends the front knee the rest.
+    p.rot_move("hips", Vec3::new(0.0, -0.065, 0.0), 0.0, -14.0, 0.0);
+    leg(p, 0, 22.0, 3.0, 34.0, 12.0, 0.0);
+    leg(p, 1, -6.0, 5.0, 26.0, 20.0, 0.0);
+    spine(p, [-8.0, -6.0, 2.0, -12.0], [5.0, 5.0, 2.0, 2.0], [0.0; 4]);
+    arm(
+        p,
+        0,
+        Arm {
+            flex: 75.0 + 0.6 * tremble,
+            twist: 20.0,
+            abduct: 10.0,
+            elbow: 95.0 + 0.8 * tremble,
+            wrist: -10.0,
+            protract: 6.0,
+            elevate: 6.0,
+        },
+    );
+}
+
+/// A braced block with the hammer: the handle held across in front of the face in both
+/// hands, held while `hammer_guard` stays on.
+fn hammer_block(s: &Skeleton) -> AnimationClip {
+    AnimationClip::from_fn("hammer_block", 1.2, 25, true, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let tremble = (ph * 6.0 * std::f32::consts::TAU).sin();
+        block_body(&mut p, tremble);
+        arm(
+            &mut p,
+            1,
+            Arm {
+                flex: BLOCK_ARM.flex + 0.6 * tremble,
+                elbow: BLOCK_ARM.elbow + 0.8 * tremble,
+                ..BLOCK_ARM
+            },
+        );
+        p.take()
+    })
+    .with_curve("effort", 25, |ph| {
+        0.85 + 0.05 * (ph * 3.0 * std::f32::consts::TAU).sin()
+    })
+    .with_curve("brace", 2, |_| 1.0)
+    .with_curve("guard", 2, |_| 1.0)
+    // The left hand closes round the handle (the right holds the hammer anyway).
+    .with_curve("fist", 2, |_| 0.85)
+}
+
 /// Bracing for a fall: arms reaching forward and down to take it, knees bent, chin tucked,
 /// held for its length. A ragdoll with [`RagdollTone`](crate::ragdoll::RagdollTone) holds
 /// this shape in the air until it lands.
@@ -1366,96 +1580,163 @@ fn fall_brace(s: &Skeleton) -> AnimationClip {
     .with_curve("effort", 16, |ph| (ph / 0.2).clamp(0.0, 1.0) * 0.9)
 }
 
+/// Up on tiptoe to take hold of something overhead with the right hand (the paddock's
+/// lantern): a glance up and a small dip, the arm sweeping up past the face with the elbow
+/// leading while the heels rise, the hand closing at the top and holding while the body
+/// balances, then down onto the heels with a little give in the knees. The `reach_hand`
+/// curve hands the wrist to a [`ReachIk`](crate::ik::ReachIk) for the hold, and `grip`
+/// closes the hand.
 fn reach(s: &Skeleton) -> AnimationClip {
+    // Phase keys: glance and dip, top of the rise, end of the hold, landing.
+    const DIP: f32 = 0.12;
+    const TOP: f32 = 0.38;
+    const HOLD: f32 = 0.7;
+    const LAND: f32 = 0.86;
     let effort = [
         (0.0, 0.0),
-        (0.22, 0.25),
+        (TOP, 0.35),
         (0.5, 0.45),
-        (0.78, 0.4),
+        (HOLD, 0.4),
         (1.0, 0.0),
     ];
-    AnimationClip::from_fn("reach", 2.6, 53, false, |ph| {
+    let grip = [
+        (0.0, 0.0),
+        (TOP, 0.05),
+        (0.45, 0.6),
+        (HOLD, 0.6),
+        (0.76, 0.0),
+    ];
+    let reach_hand = [
+        (0.0, 0.0),
+        (0.24, 0.0),
+        (0.4, 1.0),
+        (HOLD, 1.0),
+        (0.82, 0.0),
+    ];
+    AnimationClip::from_fn("reach", 3.0, 61, false, |ph| {
         let mut p = PoseBuilder::new(s);
         let k = |keys: &[(f32, f32)]| keyed(ph, keys);
+        // Balancing on the balls of the feet: a slow sway while up.
+        let up = k(&[(0.0, 0.0), (TOP, 1.0), (HOLD, 1.0), (0.8, 0.0)]);
+        let sway = (ph * 5.0 * std::f32::consts::TAU).sin() * up;
+        // Legs: a small dip that keeps the feet flat, then up onto the toes. The ankle points
+        // the foot and the toes bend back by as much, so the balls of the feet stay down
+        // while the heels and hips rise 6.6 cm (see the toe joint's offset).
+        let legs = [
+            (0.0, 0.0),
+            (DIP, -1.0),
+            (TOP, 1.0),
+            (HOLD, 1.0),
+            (LAND, -1.0),
+            (1.0, 0.0),
+        ];
+        let rise = k(&legs).max(0.0);
+        let dip = (-k(&legs)).max(0.0);
         p.rot_move(
             "hips",
-            Vec3::new(
-                0.0,
-                -0.01,
-                k(&[(0.0, 0.0), (0.5, 0.04), (0.78, 0.04), (1.0, 0.0)]),
-            ),
-            k(&[(0.0, 0.0), (0.5, 6.0), (0.78, 6.0), (1.0, 0.0)]),
+            Vec3::new(0.006 * sway, -0.01 + 0.066 * rise - 0.013 * dip, 0.0),
             0.0,
-            0.0,
+            -3.0 * rise,
+            1.0 * sway,
         );
+        // The trunk lengthens up the reaching side and turns that shoulder in; the head tips
+        // back to watch the hand.
+        let look = k(&[
+            (0.0, 0.0),
+            (DIP, 0.7),
+            (TOP, 1.0),
+            (HOLD, 1.0),
+            (LAND, 0.2),
+            (1.0, 0.0),
+        ]);
         spine(
             &mut p,
+            [2.0 * rise - 2.0 * dip, 5.0 * rise, 12.0 * look, 20.0 * look],
+            [2.0 * rise, 5.0 * rise, -2.0 * look, -3.0 * look],
             [
-                k(&[(0.0, 0.0), (0.5, -8.0), (0.78, -8.0), (1.0, 0.0)]),
-                k(&[
+                3.0 * rise - 0.8 * sway,
+                4.0 * rise,
+                -3.0 * rise,
+                -3.0 * rise,
+            ],
+        );
+        // Right arm: the elbow leads the hand up past the face, the arm straightens overhead
+        // with the shoulder blade lifting, then comes down with the elbow bending again.
+        arm(
+            &mut p,
+            1,
+            Arm {
+                flex: k(&[
+                    (0.0, 4.0),
+                    (DIP, 18.0),
+                    (TOP, 162.0),
+                    (HOLD, 162.0),
+                    (1.0, 4.0),
+                ]),
+                twist: k(&[
                     (0.0, 0.0),
-                    (0.22, 2.0),
-                    (0.5, -16.0),
-                    (0.78, -16.0),
+                    (DIP, 10.0),
+                    (TOP, -10.0),
+                    (HOLD, -10.0),
                     (1.0, 0.0),
                 ]),
-                k(&[(0.0, 0.0), (0.5, 9.0), (0.78, 9.0), (1.0, 0.0)]),
-                k(&[(0.0, 0.0), (0.5, 8.0), (0.78, 8.0), (1.0, 0.0)]),
-            ],
-            [0.0; 4],
-            [0.0; 4],
+                abduct: k(&[
+                    (0.0, -15.0),
+                    (DIP, -12.0),
+                    (TOP, -6.0),
+                    (HOLD, -6.0),
+                    (1.0, -15.0),
+                ]),
+                elbow: k(&[
+                    (0.0, 12.0),
+                    (DIP, 35.0),
+                    (0.24, 75.0),
+                    (TOP, 14.0),
+                    (HOLD, 14.0),
+                    (0.84, 55.0),
+                    (1.0, 12.0),
+                ]),
+                wrist: k(&[(0.0, 0.0), (DIP, 15.0), (TOP, 6.0), (HOLD, 6.0), (1.0, 0.0)]),
+                protract: k(&[(0.0, 0.0), (TOP, 10.0), (HOLD, 10.0), (1.0, 0.0)]),
+                elevate: k(&[
+                    (0.0, 0.0),
+                    (DIP, 2.0),
+                    (TOP, 22.0),
+                    (HOLD, 22.0),
+                    (1.0, 0.0),
+                ]),
+            },
+        );
+        // Left arm: drifts out a little for balance while up on the toes.
+        arm(
+            &mut p,
+            0,
+            Arm {
+                flex: 4.0 + 10.0 * up,
+                twist: 0.0,
+                abduct: -15.0 + 4.0 * up + 1.5 * sway,
+                elbow: 12.0 + 16.0 * up,
+                wrist: 4.0 * up,
+                protract: 0.0,
+                elevate: 0.0,
+            },
         );
         for side in 0..2 {
-            arm(
+            leg(
                 &mut p,
                 side,
-                Arm {
-                    flex: k(&[
-                        (0.0, 4.0),
-                        (0.22, 45.0),
-                        (0.32, 45.0),
-                        (0.5, 92.0),
-                        (0.78, 92.0),
-                        (1.0, 4.0),
-                    ]),
-                    twist: k(&[(0.0, 0.0), (0.22, 25.0), (0.5, 0.0)]),
-                    abduct: k(&[
-                        (0.0, -15.0),
-                        (0.22, -20.0),
-                        (0.5, -4.0),
-                        (0.78, -4.0),
-                        (1.0, -15.0),
-                    ]),
-                    elbow: k(&[
-                        (0.0, 12.0),
-                        (0.22, 135.0),
-                        (0.32, 135.0),
-                        (0.5, 4.0),
-                        (0.78, 4.0),
-                        (1.0, 12.0),
-                    ]),
-                    wrist: k(&[
-                        (0.0, 0.0),
-                        (0.22, -10.0),
-                        (0.5, 10.0),
-                        (0.78, 10.0),
-                        (1.0, 0.0),
-                    ]),
-                    protract: k(&[
-                        (0.0, 0.0),
-                        (0.22, -5.0),
-                        (0.5, 24.0),
-                        (0.78, 24.0),
-                        (1.0, 0.0),
-                    ]),
-                    elevate: k(&[(0.0, 0.0), (0.5, 4.0), (1.0, 0.0)]),
-                },
+                2.0 * (1.0 - rise) + 10.0 * dip,
+                1.5,
+                3.0 * (1.0 - rise) + 20.0 * dip,
+                1.0 - 31.0 * rise + 10.0 * dip,
+                31.0 * rise,
             );
-            leg(&mut p, side, 2.0, 1.5, 3.0, 1.0, 0.0);
         }
         p.take()
     })
-    .with_curve("effort", 53, |ph| keyed(ph, &effort))
+    .with_curve("effort", 61, |ph| keyed(ph, &effort))
+    .with_curve("grip", 61, |ph| keyed(ph, &grip))
+    .with_curve("reach_hand", 61, |ph| keyed(ph, &reach_hand))
 }
 
 fn flex(s: &Skeleton) -> AnimationClip {
@@ -2092,10 +2373,19 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         sidestep_left(s),
         sidestep_right(s),
         backpedal(s),
+        jog_left(s),
+        jog_right(s),
+        jog_back(s),
+        run_left(s),
+        run_right(s),
+        run_back(s),
         lean(s, "lean_left", 1.0),
         lean(s, "lean_right", -1.0),
+        lean_pitch(s, "lean_forward", 1.0),
+        lean_pitch(s, "lean_back", -1.0),
         heavy_swing(s),
         block(s),
+        hammer_block(s),
         reach(s),
         flex(s),
         get_up_back(s),
@@ -2106,7 +2396,8 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
 
 /// Locomotion (idle/walk/run by `speed`, leaning by `turn`), plus `heavy_swing` (also on
 /// the contract's `attack_heavy`), `block` (on its trigger or while `blocking` > 0.5, held
-/// while it stays there), `reach` and `flex` actions, and getting up off the floor
+/// while it stays there), `hammer_block` (while `hammer_guard` > 0.5), `reach` and `flex`
+/// actions, and getting up off the floor
 /// (`get_up_back`, `get_up_front`: triggered by the ragdoll when a limp body comes round), and
 /// `fall_brace` (bracing for a fall, on its trigger from anywhere).
 pub fn graph() -> AnimGraph {
@@ -2166,7 +2457,14 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
         (motion.walk_speed, &motion.walk),
         (motion.run_speed, &motion.run),
     ]);
-    let back = || by_speed(&[(0.0, &motion.idle), (BACKPEDAL_SPEED, "backpedal")]);
+    let back = || {
+        by_speed(&[
+            (0.0, &motion.idle),
+            (BACKPEDAL_SPEED, "backpedal"),
+            (BACK_JOG_SPEED, "jog_back"),
+            (BACK_RUN_SPEED, "run_back"),
+        ])
+    };
     let pi = std::f32::consts::PI;
     let locomotion = NodeDef::Blend1d {
         param: "heading".into(),
@@ -2174,12 +2472,22 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
             (-pi, back()),
             (
                 -pi / 2.0,
-                by_speed(&[(0.0, &motion.idle), (SIDESTEP_SPEED, "sidestep_right")]),
+                by_speed(&[
+                    (0.0, &motion.idle),
+                    (SIDESTEP_SPEED, "sidestep_right"),
+                    (SIDE_JOG_SPEED, "jog_right"),
+                    (SIDE_RUN_SPEED, "run_right"),
+                ]),
             ),
             (0.0, ahead),
             (
                 pi / 2.0,
-                by_speed(&[(0.0, &motion.idle), (SIDESTEP_SPEED, "sidestep_left")]),
+                by_speed(&[
+                    (0.0, &motion.idle),
+                    (SIDESTEP_SPEED, "sidestep_left"),
+                    (SIDE_JOG_SPEED, "jog_left"),
+                    (SIDE_RUN_SPEED, "run_left"),
+                ]),
             ),
             (pi, back()),
         ]
@@ -2212,6 +2520,30 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
         }),
         weight: Weight::default(),
     };
+    // Leaning into a start and sitting back into a stop, by `accel` (−1..1).
+    let leaning = NodeDef::Additive {
+        base: Box::new(leaning),
+        additive: Box::new(NodeDef::Blend1d {
+            param: "accel".into(),
+            children: vec![
+                Blend1dChild {
+                    at: -1.0,
+                    node: NodeDef::clip("lean_back"),
+                },
+                Blend1dChild {
+                    at: 0.0,
+                    node: NodeDef::Rest,
+                },
+                Blend1dChild {
+                    at: 1.0,
+                    node: NodeDef::clip("lean_forward"),
+                },
+            ],
+            sync: false,
+            match_speed: false,
+        }),
+        weight: Weight::default(),
+    };
     let state = |name: &str, node: NodeDef| StateDef {
         name: name.into(),
         node,
@@ -2224,6 +2556,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 state("move", leaning),
                 state("heavy_swing", NodeDef::one_shot("heavy_swing")),
                 state("block", NodeDef::clip("block")),
+                state("hammer_block", NodeDef::clip("hammer_block")),
                 state("reach", NodeDef::one_shot("reach")),
                 state("flex", NodeDef::one_shot("flex")),
                 state("get_up_back", NodeDef::one_shot("get_up_back")),
@@ -2259,6 +2592,19 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                     "block",
                     "move",
                     Condition::param("blocking", Cmp::Lt, 0.5),
+                    0.3,
+                ),
+                TransitionDef::new(
+                    "move",
+                    "hammer_block",
+                    Condition::param("hammer_guard", Cmp::Gt, 0.5),
+                    0.15,
+                )
+                .inertialize(),
+                TransitionDef::new(
+                    "hammer_block",
+                    "move",
+                    Condition::param("hammer_guard", Cmp::Lt, 0.5),
                     0.3,
                 ),
                 TransitionDef::new("move", "reach", Condition::trigger("reach"), 0.25),

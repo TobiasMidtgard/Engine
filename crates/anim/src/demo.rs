@@ -1,9 +1,11 @@
 //! The animation paddock: a showcase of every animation feature, spawned around one point.
 //!
 //! * **Muscle stage**: an athlete swings a sledgehammer (arms, shoulders and back tense on the
-//!   strike, then relax; veins show on the forearms; the ponytail whips), braces in a block,
-//!   and hits a double-biceps flex. Next to them, a man in a long-sleeved shirt reaches
-//!   forward: the sleeves bunch at the elbows, then the shirt stretches across his back.
+//!   strike, then relax; veins show on the forearms; the ponytail whips), braces in a guard
+//!   with the handle across the face in both hands, and hits a double-biceps flex. Next to
+//!   them, a man in a long-sleeved shirt goes up on tiptoe to take hold of a lantern hanging
+//!   from a beam: the sleeve bunches at the elbow as the arm sweeps up, then rides up the
+//!   straightened arm while the shirt pulls across his back.
 //! * **Step course**: a walker climbs a ramp, crosses a deck, walks down stairs (feet planted
 //!   by foot IK), then runs back on the flat, leaning into the turns.
 //! * **Horse track**: a horse walks, trots, canters and gallops around an oval; its haunches
@@ -40,6 +42,7 @@ use crate::ik::{GroundProbe, IkShape, IkSurface, IkSurfaces, LookAt, Reach, Reac
 use crate::muscle::{MorphWeights, MuscleRig};
 use crate::procedural::spring::SpringChains;
 use crate::retarget::HandGrip;
+use crate::shuttle::{Shuttle, ShuttleLeg, Watch};
 use crate::skin::{SkinMaterial, SkinnedMesh, SkinnedMeshRenderer};
 use crate::stunt;
 use crate::xform::smoothing;
@@ -52,6 +55,10 @@ const ATHLETE: DVec3 = DVec3::new(-2.6, 0.0, 5.4);
 const TIRE_AHEAD: f64 = 1.3;
 /// The dog's run ([x, z, speed], m and m/s from the paddock's center): it walks off at the
 /// west end, trots, canters out of the east turn and gallops down the far straight.
+/// Start of the shuttle lane (x, z from the paddock's center; it runs towards −Z) and its
+/// length, m.
+const LANE: DVec3 = DVec3::new(-23.0, 0.0, 7.0);
+const LANE_LENGTH: f32 = 15.0;
 const DOG_PATH: [[f32; 3]; 10] = [
     [-12.0, 12.0, 1.1],
     [-6.0, 12.0, 2.6],
@@ -87,6 +94,8 @@ pub struct DemoEntities {
     pub dog: Entity,
     pub car: Entity,
     pub stuntman: Entity,
+    pub runner: Entity,
+    pub coach: Entity,
 }
 
 /// Follows a closed, smooth path through `waypoints` (`[x, z, speed]`, meters and m/s,
@@ -110,6 +119,12 @@ pub struct DemoPath {
     samples: Vec<(Vec2, f32, f32)>,
     #[serde(skip)]
     yaw_rate: f32,
+    /// Velocity on the ground (x, z), m/s, and the acceleration along the facing, m/s²
+    /// (smoothed).
+    #[serde(skip)]
+    velocity: Vec2,
+    #[serde(skip)]
+    accel: f32,
     #[serde(skip)]
     started: bool,
 }
@@ -125,6 +140,8 @@ impl Default for DemoPath {
             facing: None,
             samples: Vec::new(),
             yaw_rate: 0.0,
+            velocity: Vec2::ZERO,
+            accel: 0.0,
             started: false,
         }
     }
@@ -280,12 +297,24 @@ pub(crate) fn register(app: &mut App) {
     .register_component::<DemoScript>(
         "Demo timeline: triggers and parameter values at times (s), repeating every period.",
     )
+    .register_component::<Shuttle>(
+        "Shuttle runner: straight legs from a standing start to a standing stop, turning on \
+         the spot between them.",
+    )
+    .register_component::<Watch>("Watcher: turns where it stands to keep watching a target.")
     .register_component::<stunt::Stunt>(
         "Stunt yard routine: run off the deck, fall limp onto the mat, get up, walk back.",
     )
     .add_systems(
         Update,
-        (demo_path_system, demo_script_system, stunt::stunt_system).in_set(UpdateSet::Logic),
+        (
+            demo_path_system,
+            demo_script_system,
+            stunt::stunt_system,
+            crate::shuttle::shuttle_system,
+            crate::shuttle::watch_system,
+        )
+            .in_set(UpdateSet::Logic),
     )
     .register_api(
         "anim.spawn",
@@ -550,15 +579,42 @@ pub fn spawn_hammer(world: &mut World, person: Entity, near: DVec3) -> [Entity; 
         left: 0.0,
         right: 1.0,
     });
-    world.entity_mut(person).insert(ReachIk::new(vec![Reach {
-        target_bone: "hand_r".into(),
-        // The left wrist sits where the left fist closes around the handle's end.
-        target_offset: -dir * 0.11,
-        pole: Vec3::new(-0.5, -1.0, 0.3),
-        weight_curve: "grip".into(),
-        ..Reach::arm(0)
-    }]));
+    world.entity_mut(person).insert(ReachIk::new(vec![
+        Reach {
+            target_bone: "hand_r".into(),
+            // The left wrist sits where the left fist closes around the handle's end.
+            target_offset: -dir * 0.11,
+            pole: Vec3::new(-0.5, -1.0, 0.3),
+            weight_curve: "grip".into(),
+            ..Reach::arm(0)
+        },
+        Reach {
+            target_bone: "hand_r".into(),
+            // Blocking, the hands are spread along the handle, the left just below the head;
+            // its wrist sits below and behind the handle (in the block's right-hand frame)
+            // so the fist closes over it.
+            target_offset: GRIP + dir * 0.42 + Vec3::new(-0.07, 0.05, 0.015),
+            pole: Vec3::new(-0.6, -1.0, 0.2),
+            weight_curve: "guard".into(),
+            ..Reach::arm(0)
+        },
+    ]));
     ids
+}
+
+/// Where the reacher stands on the muscle stage (x, z; it faces +Z).
+const REACHER: DVec3 = DVec3::new(3.1, 0.0, 5.8);
+
+/// The middle of the lantern the reacher takes hold of, for a paddock at `origin`: a little
+/// in front of them and to their right, just above what their wrist reaches flat-footed.
+pub fn lantern_grip(origin: DVec3) -> DVec3 {
+    origin + DVec3::new(REACHER.x - 0.12, 0.4 + 2.04, REACHER.z + 0.25)
+}
+
+/// Where the reacher's right wrist goes to hold the lantern: below the glass and beside it on
+/// their right (world −X), so the palm closes on its side.
+pub fn lantern_wrist(origin: DVec3) -> DVec3 {
+    lantern_grip(origin) + DVec3::new(-0.095, -0.03, 0.0)
 }
 
 /// The point on the tire's near rim the hammer should hit, for a paddock at `origin`.
@@ -878,17 +934,17 @@ pub const VIEWS: &[DemoView] = &[
     },
     DemoView {
         key: "paddock_reach",
-        name: "Shirt sleeves bunching on a reach",
-        eye: [2.14, 1.77, 7.14],
-        target: [3.0, 1.6, 6.05],
+        name: "Up on tiptoe to the lantern, shirt riding up the raised arm",
+        eye: [2.2, 1.75, 8.0],
+        target: [3.0, 1.85, 5.95],
         hour: 15.0,
-        at: 1.2,
+        at: 2.2,
     },
     DemoView {
         key: "paddock_block",
-        name: "Braced block, hammer on the shoulder",
-        eye: [-4.0, 1.75, 6.75],
-        target: [-2.65, 1.55, 5.4],
+        name: "Braced guard: the hammer handle across the face in both hands",
+        eye: [-4.6, 1.55, 7.7],
+        target: [-2.65, 1.15, 5.4],
         hour: 15.0,
         at: 4.82,
     },
@@ -996,6 +1052,22 @@ pub const VIEWS: &[DemoView] = &[
         hour: 15.0,
         at: 0.92,
     },
+    DemoView {
+        key: "paddock_sprint_start",
+        name: "Driving off into a sprint, leaning into it",
+        eye: [-18.6, 1.3, 7.8],
+        target: [-23.0, 1.0, 5.2],
+        hour: 15.0,
+        at: 1.35,
+    },
+    DemoView {
+        key: "paddock_sprint_stop",
+        name: "Digging in to stop from a sprint, sitting back; the coach turns to watch",
+        eye: [-17.8, 1.4, -10.4],
+        target: [-22.6, 0.9, -6.4],
+        hour: 15.0,
+        at: 4.3,
+    },
 ];
 
 fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
@@ -1097,9 +1169,8 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         period: 11.0,
         steps: vec![
             DemoStep::trigger(0.5, "heavy_swing"),
-            DemoStep::param(3.6, "blocking", 1.0),
-            DemoStep::trigger(3.6, "block"),
-            DemoStep::param(6.4, "blocking", 0.0),
+            DemoStep::param(3.6, "hammer_guard", 1.0),
+            DemoStep::param(6.4, "hammer_guard", 0.0),
             DemoStep::trigger(7.6, "heavy_swing"),
         ],
         time: 0.0,
@@ -1139,14 +1210,94 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     let reacher = spawn_humanoid(
         world,
         humanoid::Outfit::Shirt,
-        Transform::from_translation(at(3.1, 0.4, 5.8)).with_rotation(facing(180.0)),
+        Transform::from_translation(at(REACHER.x, 0.4, REACHER.z)).with_rotation(facing(180.0)),
     );
     dress(world, reacher, "reacher", shirt_detail());
     world.entity_mut(reacher).insert(DemoScript {
-        period: 5.5,
+        period: 6.0,
         steps: vec![DemoStep::trigger(0.5, "reach")],
         time: 0.0,
     });
+    // A lantern hanging from a beam just out of reach: the reacher goes up on tiptoe and
+    // takes hold of it, the palm on the glass from their right.
+    let lantern = lantern_grip(origin);
+    world.entity_mut(reacher).insert(ReachIk::new(vec![Reach {
+        target: lantern_wrist(origin),
+        pole: Vec3::new(1.0, -0.2, -0.4),
+        weight_curve: "reach_hand".into(),
+        ..Reach::arm(1)
+    }]));
+    let beam_y = 0.4 + 2.65;
+    for x in [REACHER.x - 0.85, REACHER.x + 0.75] {
+        props(
+            world,
+            Transform::from_translation(at(x, 0.4 + 1.325, lantern.z - origin.z)),
+            MeshShape::Cuboid {
+                size: [0.1, 2.65, 0.1],
+            },
+            dark_wood,
+        );
+    }
+    props(
+        world,
+        Transform::from_translation(at(REACHER.x - 0.05, beam_y - 0.07, lantern.z - origin.z)),
+        MeshShape::Cuboid {
+            size: [1.8, 0.14, 0.12],
+        },
+        dark_wood,
+    );
+    let iron = StandardMaterial::hex(0x2a2826)
+        .with_metallic(1.0)
+        .with_roughness(0.55);
+    let glass = StandardMaterial::hex(0xffd9a0)
+        .with_roughness(0.2)
+        .with_emissive([1.0, 0.72, 0.38], 2.5);
+    let top = lantern.y + 0.11;
+    for (y, shape, material) in [
+        (
+            (beam_y - 0.14 + top) * 0.5,
+            MeshShape::Cylinder {
+                radius: 0.008,
+                height: (beam_y - 0.14 - top) as f32,
+                segments: 8,
+            },
+            iron,
+        ),
+        (
+            top,
+            MeshShape::Cylinder {
+                radius: 0.082,
+                height: 0.03,
+                segments: 24,
+            },
+            iron,
+        ),
+        (
+            lantern.y,
+            MeshShape::Cylinder {
+                radius: 0.066,
+                height: 0.19,
+                segments: 24,
+            },
+            glass,
+        ),
+        (
+            lantern.y - 0.105,
+            MeshShape::Cylinder {
+                radius: 0.08,
+                height: 0.025,
+                segments: 24,
+            },
+            iron,
+        ),
+    ] {
+        props(
+            world,
+            Transform::from_translation(DVec3::new(lantern.x, y, lantern.z)),
+            shape,
+            material,
+        );
+    }
 
     // --- Step course: ramp up to a deck, stairs down the other side.
     for (t, surface, size, material) in [
@@ -1306,6 +1457,66 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
                 DemoStep::hit(5.0, Vec3::new(0.18, 1.42, 0.08), Vec3::new(0.0, 0.0, -24.0)),
             ],
             time: 0.0,
+        },
+    ));
+
+    // --- Shuttle lane: sprint down it, dig in to stop, run back backwards, turn and run
+    // sideways back to the start; a coach beside it turns to keep watching.
+    let runner = spawn_humanoid(
+        world,
+        humanoid::Outfit::Athlete,
+        Transform::from_translation(at(LANE.x, 0.0, LANE.z)),
+    );
+    dress(world, runner, "athlete", SkinMaterial::default());
+    let (x, z) = (LANE.x as f32, LANE.z as f32);
+    world.entity_mut(runner).insert((
+        Name::new("Shuttle runner"),
+        Shuttle {
+            origin,
+            start: [x, z],
+            legs: vec![
+                ShuttleLeg {
+                    to: [x, z - LANE_LENGTH],
+                    facing_deg: 0.0,
+                    top: 5.0,
+                },
+                ShuttleLeg {
+                    to: [x, z - LANE_LENGTH * 0.45],
+                    facing_deg: 0.0,
+                    top: humanoid::BACK_RUN_SPEED,
+                },
+                ShuttleLeg {
+                    to: [x, z],
+                    facing_deg: -90.0,
+                    top: humanoid::SIDE_RUN_SPEED,
+                },
+            ],
+            ..Default::default()
+        },
+    ));
+    let coach = spawn_humanoid(
+        world,
+        humanoid::Outfit::Shirt,
+        Transform::from_translation(at(LANE.x - 2.6, 0.0, LANE.z - LANE_LENGTH as f64 * 0.55))
+            .with_rotation(facing(-90.0)),
+    );
+    dress(world, coach, "reacher", shirt_detail());
+    world.entity_mut(coach).insert((
+        Name::new("Coach"),
+        Watch {
+            target: Some(runner),
+            ..Default::default()
+        },
+        LookAt {
+            chain: vec![
+                ("chest".into(), 0.2),
+                ("neck".into(), 0.35),
+                ("head".into(), 0.45),
+            ],
+            max_angle_deg: 75.0,
+            weight: 0.9,
+            smoothing: 0.15,
+            ..Default::default()
         },
     ));
 
@@ -1469,6 +1680,8 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         dog: dog_e,
         car: car_e,
         stuntman,
+        runner,
+        coach,
     }
 }
 
@@ -1525,9 +1738,14 @@ fn demo_path_system(
         while dyaw < -PI {
             dyaw += 2.0 * PI;
         }
+        let velocity = dir * speed;
         if dt > 0.0 && path.started {
             path.yaw_rate += (dyaw / dt - path.yaw_rate) * smoothing(dt, 0.25);
+            let forward = Vec2::new(-yaw.sin(), -yaw.cos());
+            let accel = ((velocity - path.velocity) / dt).dot(forward);
+            path.accel += (accel - path.accel) * smoothing(dt, 0.2);
         }
+        path.velocity = velocity;
         path.started = true;
         t.translation = pos;
         t.rotation = Quat::from_rotation_y(yaw);
@@ -1535,6 +1753,7 @@ fn demo_path_system(
             params.set("speed", speed);
             params.set("turn", (path.yaw_rate / 1.2).clamp(-1.0, 1.0));
             params.set("heading", (along - yaw + PI).rem_euclid(2.0 * PI) - PI);
+            params.set("accel", crate::body::accel_param(path.accel));
             params.set(
                 "move_effort",
                 (speed / path.effort_speed.max(0.1)).clamp(0.0, 1.0),

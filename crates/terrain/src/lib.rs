@@ -6,6 +6,7 @@ pub mod cube;
 pub mod deform;
 pub mod demo;
 pub mod edits;
+pub mod forest;
 pub mod ground;
 pub mod landforms;
 pub mod lod;
@@ -549,7 +550,11 @@ fn sync_terrains(
     q: Query<PlanetPlacement>,
     materials: Res<SurfaceMaterials>,
     mut ground: ResMut<engine_world::Ground>,
-    mut installed: Local<bool>,
+    mut forest: ResMut<engine_world::ForestCover>,
+    diagnostics: Option<ResMut<Diagnostics>>,
+    // Whether a provider is installed, and how many times one was (a diagnostic: the ground
+    // is rebuilt only when a terrain is added, removed or moved).
+    mut installed: Local<(bool, u32)>,
 ) {
     let mut changed = false;
     let mut seen = Vec::with_capacity(terrains.entries.len());
@@ -585,7 +590,9 @@ fn sync_terrains(
         if t.position != pos || t.rotation != rot {
             t.position = pos;
             t.rotation = rot;
-            changed = true;
+            // Only a terrain that answers the ground moves the providers (other planets in a
+            // solar system move every frame).
+            changed |= t.config.ground;
         }
     }
     let before = terrains.entries.len();
@@ -601,13 +608,20 @@ fn sync_terrains(
         .map(TerrainRuntime::ground_terrain)
         .collect();
     if list.is_empty() {
-        if *installed {
+        if installed.0 {
             *ground = engine_world::Ground::default();
-            *installed = false;
+            *forest = engine_world::ForestCover::default();
+            installed.0 = false;
         }
     } else {
-        *ground = engine_world::Ground(ground::provider(list, &materials));
-        *installed = true;
+        let provider = ground::provider(list, &materials);
+        *forest = engine_world::ForestCover(provider.clone());
+        *ground = engine_world::Ground(provider);
+        installed.0 = true;
+        installed.1 += 1;
+        if let Some(mut d) = diagnostics {
+            d.set("terrain.ground_installs", installed.1 as f64);
+        }
     }
 }
 
@@ -620,12 +634,14 @@ struct PendingEdits(Vec<(TerrainEdit, u32)>);
 /// Frames an edit waits for a terrain before it is dropped.
 const EDIT_WAIT_FRAMES: u32 = 600;
 
+#[allow(clippy::too_many_arguments)]
 fn apply_edits(
     mut edits: MessageReader<TerrainEdit>,
     mut terrains: ResMut<Terrains>,
     materials: Res<SurfaceMaterials>,
     mut changed: MessageWriter<TerrainChanged>,
     mut ground: ResMut<engine_world::Ground>,
+    mut forest: ResMut<engine_world::ForestCover>,
     mut pending: Local<PendingEdits>,
     mut prints: ResMut<DeformationMap>,
 ) {
@@ -693,7 +709,9 @@ fn apply_edits(
             .map(TerrainRuntime::ground_terrain)
             .collect();
         if !list.is_empty() {
-            *ground = engine_world::Ground(ground::provider(list, &materials));
+            let provider = ground::provider(list, &materials);
+            *forest = engine_world::ForestCover(provider.clone());
+            *ground = engine_world::Ground(provider);
         }
     }
 }
@@ -941,6 +959,87 @@ mod tests {
         // Far from the pad the ground has relief.
         let far = g.sample(DVec3::new(9_000.0, 0.0, 12_000.0)).unwrap();
         assert!(far.height.is_finite());
+    }
+
+    #[test]
+    fn the_ground_is_installed_once_while_the_terrain_stays_put() {
+        let mut app = app_with_planet();
+        app.update_n(10);
+        let d = app
+            .world
+            .resource::<engine_core::diagnostics::Diagnostics>();
+        assert_eq!(d.get("terrain.ground_installs"), Some(1.0));
+    }
+
+    #[test]
+    fn moving_planets_without_ground_leave_the_providers_alone() {
+        let mut app = app_with_planet();
+        let mut moon = PlanetTerrain::moon(3).with_radius(1_737_400.0);
+        moon.ground = false;
+        let moon = app
+            .world
+            .spawn((Transform::from_xyz(0.0, 0.0, 384_400_000.0), moon))
+            .id();
+        app.update_n(3);
+        for i in 0..5 {
+            app.world.get_mut::<Transform>(moon).unwrap().translation.x += 1_000.0 * (i + 1) as f64;
+            app.update();
+        }
+        let d = app
+            .world
+            .resource::<engine_core::diagnostics::Diagnostics>();
+        assert_eq!(d.get("terrain.ground_installs"), Some(1.0));
+    }
+
+    #[test]
+    fn forest_cover_reports_woods_and_open_land() {
+        let mut app = app_with_planet();
+        app.update_n(2);
+        let woods = app.world.resource::<engine_world::ForestCover>().clone();
+        let (mut wooded, mut open) = (0, 0);
+        for i in 0..20 {
+            for j in 0..20 {
+                let p = DVec3::new(
+                    i as f64 * 2_000.0 - 20_000.0,
+                    0.0,
+                    j as f64 * 2_000.0 - 20_000.0,
+                );
+                match woods.sample(p) {
+                    Some(s) => {
+                        assert!(s.density > 0.0 && s.density <= 1.0, "{s:?}");
+                        assert!((0.0..=1.0).contains(&s.conifer), "{s:?}");
+                        if s.density > 0.5 {
+                            wooded += 1;
+                        }
+                    }
+                    None => open += 1,
+                }
+            }
+        }
+        assert!(wooded > 20 && open > 20, "wooded {wooded}, open {open}");
+    }
+
+    /// Cost of a forest lookup (`cargo test --release -p engine_terrain forest_cover_cost --
+    /// --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn forest_cover_cost() {
+        let mut app = app_with_planet();
+        app.update_n(2);
+        let woods = app.world.resource::<engine_world::ForestCover>().clone();
+        let n = 20_000;
+        let t = std::time::Instant::now();
+        let mut wooded = 0;
+        for i in 0..n {
+            let p = DVec3::new(
+                (i % 200) as f64 * 25.0 - 2_500.0,
+                0.0,
+                (i / 200) as f64 * 25.0 - 2_500.0,
+            );
+            wooded += woods.sample(p).is_some() as u32;
+        }
+        let us = t.elapsed().as_secs_f64() * 1e6 / n as f64;
+        println!("forest lookup {us:.1} µs ({wooded} of {n} wooded)");
     }
 
     #[test]

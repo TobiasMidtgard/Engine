@@ -1,6 +1,6 @@
 //! Moving parts: wheels that steer, spin and ride the suspension, landing gear that folds
 //! away, control surfaces that deflect, propellers that spin, exhaust plumes that grow with
-//! thrust, brake lights, and hulls that glow with re-entry heat. All are child entities of the
+//! thrust, brake lights, hulls that glow with re-entry heat and the glowing air around them. All are child entities of the
 //! vehicle, updated in `Update` from the simulation state, so they work with any physics
 //! backend.
 
@@ -117,7 +117,41 @@ pub struct HeatGlow {
     pub base: StandardMaterial,
     /// Quantized glow level currently shown.
     pub level: u8,
+    /// How much of the shield's heating above 288 K this part gets: 1 on the windward belly,
+    /// nose and leading edges; far less in the lee, which the hot flow skips over.
+    pub share: f32,
 }
+
+/// Glowing air of a re-entry, brightening with the parent's [`HeatShield`] heat flux: the
+/// shock layer hugging the windward skin (`wake: None`), or the wake streaming behind the
+/// ship along the airflow.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct PlasmaVisual {
+    /// Material at full glow ([`PLASMA_FULL_FLUX`]).
+    pub base: StandardMaterial,
+    /// Quantized glow level currently shown (0 = hidden).
+    pub level: u8,
+    pub wake: Option<PlasmaWake>,
+}
+
+/// How a [`PlasmaVisual`] wake sits: a unit cone along +Z (see the vehicle model) scaled
+/// to the airflow.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlasmaWake {
+    /// Where it leaves the ship (body axes), such as a wingtip; `None` for the main wake,
+    /// which leaves from the far side of the ship's skin.
+    pub from: Option<Vec3>,
+    /// Half extents of the ship's skin (body axes), for the main wake.
+    pub skin: Vec3,
+    /// Wake radius where it leaves the ship, m.
+    pub radius: f32,
+    /// Wake length at full glow, m.
+    pub length: f32,
+}
+
+/// Nose heat flux at which re-entry plasma glows fully, W/m² (about the peak of a return
+/// from low orbit: 7 km/s at 70 km). Air starts to glow faintly at about 5% of it.
+pub const PLASMA_FULL_FLUX: f32 = 3.0e5;
 
 /// Wheels: position along the suspension, steering, spin; retract with aircraft gear.
 pub fn wheel_visuals(
@@ -311,10 +345,11 @@ pub fn heat_visuals(
         let Ok(shield) = shields.get(parent.parent()) else {
             continue;
         };
-        let (color, strength) = blackbody(shield.temperature_k);
+        let t = 288.0 + (shield.temperature_k - 288.0) * glow.share;
+        let (color, strength) = blackbody(t);
         // 24 steps on a log scale keep the number of distinct materials small.
         const STEPS: f32 = 24.0;
-        const MAX_LOG: f32 = 4.8;
+        const MAX_LOG: f32 = 6.0;
         let level = ((strength + 1.0).log10() / MAX_LOG * STEPS).clamp(0.0, STEPS) as u8;
         if level == glow.level {
             continue;
@@ -326,5 +361,76 @@ pub fn heat_visuals(
             m = m.with_emissive(color, s);
         }
         r.material = m.into();
+    }
+}
+
+/// Re-entry plasma: shown once the heat flux makes the air glow, brighter (and the wake
+/// longer) as it grows; the wake trails along the airflow.
+pub fn plasma_visuals(
+    time: Res<Time>,
+    shields: Query<&HeatShield>,
+    mut q: Query<(
+        &ChildOf,
+        &mut PlasmaVisual,
+        &mut MeshRenderer,
+        &mut Transform,
+    )>,
+) {
+    for (parent, mut plasma, mut r, mut t) in &mut q {
+        let Ok(shield) = shields.get(parent.parent()) else {
+            continue;
+        };
+        let glow = plasma_glow(shield.heat_flux_w_m2);
+        let flow = shield.flow_local;
+        // 16 steps on a log scale, from 1% to 150% of full, keep materials few.
+        const STEPS: f32 = 16.0;
+        let level = if glow > 0.0 && flow != Vec3::ZERO {
+            1 + ((glow / 0.01).log10() / 2.18 * STEPS).clamp(0.0, STEPS) as u8
+        } else {
+            0
+        };
+        if let Some(wake) = plasma.wake
+            && level > 0
+        {
+            // The main wake leaves from the ship's far side along the flow (on an ellipsoid
+            // around its skin), streamers from their edge; both grow with the glow.
+            let from = wake
+                .from
+                .unwrap_or_else(|| flow * (wake.skin * flow).length() * 0.45);
+            // The gas flickers as it tears past (each wake out of step with the others).
+            let clock = time.elapsed_secs() + from.x * 0.37 + wake.radius;
+            let flicker = 1.0 + 0.05 * (clock * 23.0).sin() + 0.03 * (clock * 37.0).sin();
+            let radius = wake.radius * (1.0 + 0.03 * (clock * 29.0).sin());
+            let new = Transform {
+                translation: from.as_dvec3(),
+                rotation: Quat::from_rotation_arc(Vec3::Z, flow),
+                scale: Vec3::new(radius, radius, wake.length * glow.sqrt() * flicker),
+            };
+            if *t != new {
+                *t = new;
+            }
+        }
+        if level == plasma.level {
+            continue;
+        }
+        plasma.level = level;
+        r.visible = level > 0;
+        if level > 0 {
+            let s = 0.01 * 10f32.powf((level - 1) as f32 / STEPS * 2.18);
+            let mut m = plasma.base;
+            m.emissive_strength *= s;
+            r.material = m.into();
+        }
+    }
+}
+
+/// How brightly the air glows at a nose heat flux, 0 (none) to 1.5 (relative to
+/// [`PLASMA_FULL_FLUX`]): nothing below 5% of full, then rising with the flux.
+pub fn plasma_glow(heat_flux_w_m2: f32) -> f32 {
+    let x = heat_flux_w_m2 / PLASMA_FULL_FLUX;
+    if x < 0.05 {
+        0.0
+    } else {
+        ((x - 0.05) / 0.95).clamp(0.0, 1.5)
     }
 }

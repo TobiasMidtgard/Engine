@@ -13,8 +13,9 @@
 //! 150 m, and a wood of 12,000 scenery trees from a hill (with and without the distant level). Name shots after the directory to render
 //! only those (`lineup`, `lineup_lod`, `lineup_distant`, `roots`, `crown_front`,
 //! `leaves_close`, `crown_back`, `conifers`, `pine_crown`, `birch_hazel`, `grove`,
-//! `grove_far`, `valley`, `valley_far`), `textures`
-//! to save the leaf atlases, their normal maps and three of their mip levels instead, or `stats` to print triangle counts.
+//! `grove_far`, `valley`, `valley_far`, `far_woods`, `far_woods_off`), `textures`
+//! to save the leaf atlases, their normal maps, three of their mip levels and the mass atlases far
+//! crowns draw with instead, or `stats` to print triangle counts.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -62,7 +63,9 @@ fn shot(app: &mut App, out: &str, name: &str, eye: DVec3, target: DVec3, to_sun:
 
 /// Save every tree leaf atlas (color with alpha, and normal map) as PNGs.
 fn save_textures(out: &str) {
-    use engine_foliage::meshgen::textures::{LeafKind, leaf_textures};
+    use engine_foliage::meshgen::textures::{
+        LeafKind, MASS_ATLAS_SIZE, leaf_textures, mass_textures,
+    };
     for (name, kind) in [
         ("oak", LeafKind::Lobed),
         ("hazel", LeafKind::Broad),
@@ -78,6 +81,16 @@ fn save_textures(out: &str) {
         );
         for (suffix, img) in [("color", &t.color), ("normal", &t.normal)] {
             let path = format!("{out}/leaves_{name}_{suffix}.png");
+            image::RgbaImage::from_raw(img.width, img.height, img.data.clone())
+                .expect("rgba")
+                .save(&path)
+                .expect("png");
+            println!("saved {path}");
+        }
+        // The mass atlas far and distant crowns draw with.
+        let m = mass_textures(kind, MASS_ATLAS_SIZE, 0x1eaf);
+        for (suffix, img) in [("color", &m.color), ("normal", &m.normal)] {
+            let path = format!("{out}/mass_{name}_{suffix}.png");
             image::RgbaImage::from_raw(img.width, img.height, img.data.clone())
                 .expect("rgba")
                 .save(&path)
@@ -405,6 +418,40 @@ fn main() {
             Vec3::new(-0.6, 0.5, 0.35),
         );
     }
+    if wanted("far_woods") || wanted("far_woods_off") {
+        // Patchy woods painted by a stand-in terrain out to 6 km, seen from 80 m up: only the
+        // far woods draw them (`far_woods_off`: none, the land the terrain paints today).
+        app.world.spawn((
+            Transform::from_xyz(0.0, -0.05, -3000.0),
+            MeshRenderer::new(
+                Shape::Plane {
+                    size: [14_000.0, 14_000.0],
+                    subdivisions: 1,
+                },
+                StandardMaterial::hex(0x4f5f33).with_roughness(0.95),
+            ),
+        ));
+        app.world
+            .insert_resource(engine_world::ForestCover(std::sync::Arc::new(PatchyWoods)));
+        let eye = DVec3::new(0.0, 80.0, 400.0);
+        let target = DVec3::new(0.0, 0.0, -2000.0);
+        let sun = Vec3::new(-0.6, 0.5, 0.35);
+        // Build every cell at once, in the frame.
+        {
+            let mut far = app.world.resource_mut::<engine_foliage::FarWoods>();
+            far.background_builds = 0;
+            far.cells_per_frame = u32::MAX;
+        }
+        if wanted("far_woods") {
+            app.update_n(6);
+            shot(&mut app, &out, "far_woods", eye, target, sun);
+        }
+        if wanted("far_woods_off") {
+            app.world.resource_mut::<engine_foliage::FarWoods>().enabled = false;
+            app.update_n(4);
+            shot(&mut app, &out, "far_woods_off", eye, target, sun);
+        }
+    }
     if wanted("valley") || wanted("valley_far") {
         // A wood of scenery trees (no simulation) seen from a hill: the nearest draw in full,
         // then far, then distant out to a kilometer (`valley_far`: no distant level).
@@ -423,6 +470,23 @@ fn main() {
             app.update_n(10);
             shot(&mut app, &out, "valley_far", eye, target, sun);
         }
+    }
+}
+
+/// A stand-in terrain's woods: soft patches with glades, conifers to the east.
+struct PatchyWoods;
+
+impl engine_world::ForestQuery for PatchyWoods {
+    fn sample(&self, p: DVec3) -> Option<engine_world::ForestSample> {
+        let (x, z) = (p.x as f32, p.z as f32);
+        let patch = (x * 0.0021).sin() * (z * 0.0017 + 1.3).cos()
+            + 0.6 * (x * 0.0007 - z * 0.0011).sin()
+            + 0.25 * (x * 0.009 + z * 0.007).sin();
+        let density = ((patch + 0.2) * 1.6).clamp(0.0, 1.0);
+        (density > 0.02).then(|| engine_world::ForestSample {
+            density,
+            conifer: (0.5 + x * 0.0003).clamp(0.1, 0.9),
+        })
     }
 }
 

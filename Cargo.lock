@@ -528,6 +528,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
+name = "character_creator"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "engine",
+ "engine_character",
+ "engine_ui",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -973,6 +985,21 @@ dependencies = [
  "image",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "engine_character"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "bytemuck",
+ "engine_assets",
+ "engine_core",
+ "engine_render",
+ "engine_world",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

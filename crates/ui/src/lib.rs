@@ -3,6 +3,7 @@
 pub mod api;
 pub mod atlas;
 pub mod color;
+pub mod crafting;
 pub mod data;
 pub mod demo;
 pub mod dialogue;
@@ -22,6 +23,7 @@ pub mod planet_noise;
 pub mod quests;
 pub mod screens;
 pub mod shop;
+pub mod skills;
 pub mod style;
 pub mod text;
 pub mod theme;
@@ -102,11 +104,15 @@ impl Plugin for UiPlugin {
             hud::add_painters(&mut painters);
             map::add_painters(&mut painters);
             wheel::add_painters(&mut painters);
+            skills::add_painters(&mut painters);
+            crafting::add_painters(&mut painters);
         }
         app.init_resource::<items::ItemDatabase>()
             .init_resource::<dialogue::DialogueLibrary>()
             .init_resource::<map::MapData>()
             .init_resource::<quests::QuestLog>()
+            .init_resource::<skills::SkillTree>()
+            .init_resource::<crafting::RecipeBook>()
             .init_resource::<menus::PauseState>();
         {
             let mut screens = app.world.resource_mut::<ScreenRegistry>();
@@ -153,6 +159,18 @@ impl Plugin for UiPlugin {
                 wheel::build_screen,
             );
             screens.add(
+                "crafting",
+                "The crafting bench: recipes by station (alchemy, smithing, tinkering) with what each makes and needs from the bag; pick how many and craft (a timed build-up, then the items land in the bag). `station` opens a bench, `select` a recipe id, `owner` the crafter (default Player).",
+                r#"{"station": "alchemy", "select": "r_potion_mana"}"#,
+                crafting::build_screen,
+            );
+            screens.add(
+                "skills",
+                "The skill tree: branches of passive, active and ultimate skills linked by prerequisites, with ranks, point costs and level gates (SkillTree). Pick a node for its details; learn with the button, Space or X; reset with R or Y. `select` a skill id.",
+                r#"{"select": "c_momentum"}"#,
+                skills::build_screen,
+            );
+            screens.add(
                 "pause",
                 "The pause menu (stops game time while open): resume, inventory, journal, map, settings, save, quit.",
                 "{}",
@@ -186,6 +204,8 @@ impl Plugin for UiPlugin {
                 map::map_system,
                 quests::quests_system,
                 wheel::wheel_system,
+                skills::skills_system,
+                crafting::crafting_system,
                 menus::menus_system,
             ),
         )
@@ -220,6 +240,8 @@ impl Plugin for UiPlugin {
         hud::register_api(app);
         map::register_api(app);
         quests::register_api(app);
+        skills::register_api(app);
+        crafting::register_api(app);
     }
 }
 

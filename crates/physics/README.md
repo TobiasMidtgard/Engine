@@ -30,6 +30,9 @@ changing that one plugin line.
   their own, and never takes a sleeping one mutably from Rapier (which would make Rapier redo its
   bookkeeping for it). 3,000 rock-shaped debris pieces asleep in a pit cost 0.44 ms per step
   (8.4 ms before): `cargo run -p engine_physics --release --example debris_field -- 3000`.
+  While they tumble, the touching pairs that need spin friction or report hard hits are found in
+  one pass that reads each pair once, in storage order when much of the region is awake: 52 ms
+  per step for the 3,000 (102 ms before), of which Rapier's own step is ~37 ms.
 - **Colliders**: sphere, cuboid, capsule, cylinder, convex hull, triangle mesh, heightfield,
   compound; on the body entity or on its children (one compound body). Shapes scale with the
   entity's `Transform::scale`. Changing a `Collider` rebuilds it. Friction and restitution come
@@ -191,6 +194,41 @@ under a micrometer).
 - Static colliders are copied into every region that could touch them (the shape data is
   shared); a region travelling with its bodies drops the copies it leaves behind, so a ship
   crossing a continent holds only the statics near it. Regions far from every `SimulationFocus` pause (`freeze_distance_m`).
+- Level of detail (`src/lod.rs`): far physics simulates more coarsely, where a pixel spans
+  more than the difference (15 cm at 150 m, 60 cm at 600 m on a 1080p screen). A region whose
+  nearest body is past `coarse_beyond_m` (150 m) from every focus takes substeps twice as
+  long; past `half_rate_beyond_m` (600 m) it steps every other frame with substeps four times
+  as long, and its bodies are drawn moving on at their velocity in between (a region with
+  characters stays coarse: they walk every frame). Most of a scene shares one region, so every
+  half second busy far clusters split off: bodies are grouped by how close they are (and by
+  joints), and a group wholly far away, with something awake in it and no character, moves
+  into a coarse region of its own. Sleeping groups stay put (they cost almost nothing).
+  Regions of different tiers merge as soon as their bodies come within reach of each other, so
+  a ball thrown in from 260 m hits the crate by the player at full detail. Most of what tumbling
+  bodies cost is finding their collisions, which the longer substeps do half or a quarter as
+  often; fewer solver iterations saved little more and kept a far heap awake, so they stay.
+  906 rocks tumbling in six drums cost 19.8 ms a step at full detail, 12.0 ms coarse and 6.4 ms
+  at half rate, and no rock leaves its drum; with two drums near the player, two at 300–380 m
+  and two at 0.9–1.1 km, 13.5 ms instead of 19.8
+  (`cargo run -p engine_physics --release --example lod_field`). `PHYSICS_FOCUS=400,0,0` on
+  the proving ground example simulates the yard as if the player were 400 m away: the
+  rockfall pours a little slower there and heaps a little tighter, at half the cost (14 ms a
+  step instead of 27.5 while pouring).
+- Fine steps (`FineSteps`, `src/fine.rs`): the solver settles all of a substep's contacts
+  together, so when a Newton's cradle ball swings in, the 3 mm gaps of the whole row close in
+  one 8 ms substep and the row swings off as one lump, where steel passes the blow down the
+  row and only the last ball flies. A body with `FineSteps` asks for substeps short enough
+  that each touch is its own (1/960 s by default: a ball at 2 m/s moves 2 mm, less than the
+  gap). Rows of hard bodies that pass a blow on (cradles, billiard racks, clockwork) need it.
+  Stepping a whole scene that finely would cost several times as much, so such bodies keep to
+  regions of their own: a group of them (by distance and joints) leaves a region that holds
+  others too, and they merge again only when bodies come within 0.5 m plus three steps of
+  travel, looked at every step, so a ball rolled at the cradle joins it before it hits. A fine
+  region steps finely only in frames where two of its bodies may meet, and then with as many
+  solver iterations per second as elsewhere (one per 1 ms substep): a five-ball cradle near
+  the player costs about 0.3 ms a step (1.4 ms without those two savings). Gaps between
+  resting bodies must exceed Rapier's 2 mm contact prediction, or resting balls touch before
+  the blow arrives. `PhysicsStats::fine_awake` counts the awake bodies stepping finely.
 - A `WorldShift` (the space module re-anchoring the world) moves the simulation in the same
   frame. A floating-origin move only moves region anchors: sleeping bodies stay asleep and
   contacts carry on. A turn into another planet's frame rotates each region's contents about
@@ -202,8 +240,9 @@ With `engine_debug::DebugPlugin` in the app, `PhysicsDebug` (a registered resour
 `physics.debug {"all": true}`) draws over the scene, within `radius_m` (150 m) of the focus or
 camera:
 
-- `colliders`: wireframes, green awake, blue-gray asleep, yellow kinematic, gray static,
-  magenta sensors, cyan characters (big meshes and heightfields as their bounds).
+- `colliders`: wireframes, green awake (orange far away and coarse, red at half rate),
+  blue-gray asleep, yellow kinematic, gray static, magenta sensors, cyan characters (big
+  meshes and heightfields as their bounds).
 - `contacts`: touching points with an arrow along the normal that grows with the force.
 - `joints`: both anchors joined by a line, orange turning red as a breakable joint nears its
   break force or the anchors pull apart; a ring marks a world pin.
@@ -226,6 +265,8 @@ proving ground with the overlay.
 | `contact_stiffness_hz` | 60 | Contact spring frequency (static contacts 2×). 30 Hz lets a 30-box tower sag 24 cm, 60 Hz ~6 cm. |
 | `region_radius_m` | 1000 | Size of a region. |
 | `freeze_distance_m` | 25 000 | Pause regions this far from every focus (`None` = never). |
+| `coarse_beyond_m` | 150 | Bodies this far from every focus take substeps twice as long (`None` = full detail everywhere). |
+| `half_rate_beyond_m` | 600 | Farther still, they step every other frame (`None` = never). |
 | `rolling_resistance` | 0.01 | Rolling resistance on hard ground (rubber on concrete); soft surfaces add more, 0 = roll forever. |
 | `max_speed` | 100 000 m/s | Velocity clamp (spaceships are fast). |
 | `contact_events`, `impact_events` | on | Send `ContactEvent` / impact `NoiseEvent` + `GroundContact`. |
@@ -234,7 +275,8 @@ proving ground with the overlay.
 | `blast_response`, `blast_scale` | on, 1 | Explosions push bodies; 1 = real blast wind, action games use 3–10. |
 
 `PhysicsStats` (resource, also `physics.*` in `Diagnostics`): bodies, awake bodies, regions,
-touching pairs, step time, substeps, articulated joints, static copies.
+touching pairs, step time, substeps, articulated joints, static copies, and the awake bodies
+simulated coarsely and at half rate.
 
 ## API functions
 
@@ -261,7 +303,13 @@ touching pairs, step time, substeps, articulated joints, static copies.
 yard (with a curb, so nothing rolls off) with a 30-crate tower, a bin filling with 250
 crates/barrels/balls, a domino snake, ten crash test dummy ragdolls tumbling down a steep staircase together,
 a wrecking ball smashing a crate wall, a seesaw catapult, a motor-driven paddle wheel, a sagging
-plank bridge, a kinematic turntable, bouncing rubber balls and, along the front, a **barrel run**:
+plank bridge, a kinematic turntable, bouncing rubber balls, a **pendulum wave** (15 lacquered steel bobs under an A-frame gantry,
+swinging 20 to 34 times a minute: they fall out of step into waves and snakes, swing in two
+alternate rows at half a minute and are back in step at a minute) in front of a **Newton's
+cradle** on a plinth (five 20 cm chrome balls on 80 cm wires, stepping finely, so the blow passes
+down the row and only the last ball flies), a **rockfall** (300 crushed granite
+rocks, faceted convex hulls 30 to 55 cm across, pour out of a hopper, slide down a 40° steel chute
+and drop off its lip into a heap with a 35° face) and, along the front, a **barrel run**:
 three oil drums roll off a 2 m ramp and 47 m down an asphalt runway (one triangle mesh, an edge
 every 2 m) into a sand pit, staying flat and in their painted lanes, past galvanized guardrails to a
 tire wall. It sits on the ground at `origin`, its top `demo::SLAB_RISE` (10 cm) above it; the
@@ -269,15 +317,17 @@ showcase's physics zone places it. Render it alone with
 `cargo run -p engine_physics --release --example proving_ground -- out_dir`.
 
 The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,
-seesaw and balls every 20 s, the barrel run every 25 s, dominoes, wrecking ball and bridge every
-30 s, the pile every 45 s; the tower, wheel and turntable run on), so the zone is always
+seesaw, balls and cradle every 20 s, the barrel run every 25 s, dominoes, wrecking ball and bridge every
+30 s, the rockfall every 30 s, the pile every 45 s, the pendulum wave every minute, as it comes
+back into step; the tower, wheel and turntable run on), so the zone is always
 playing when someone walks in.
 They pause while no focus point is within 250 m.
 `physics.proving_ground.replay {"station": "dominoes"}` restarts one now (`{}` restarts all).
 `demo::VIEWS` are tour stops for the action stations: arriving restarts the station, and the
 warm-up lands on its best moment. `tests/proving_ground.rs` checks that stations replay without
 piling up bodies, that the barrel run's drums stay within 1 cm of the deck and 30 cm of their
-lanes and stop in the sand, and that the ten dummies all leave the landing and are asleep well
+lanes and stop in the sand, that the rockfall's rocks leave the chute and come to rest in a
+heap, and that the ten dummies all leave the landing and are asleep well
 before their replay (about 6.6 s; four tumble articulated, six on constraint joints).
 
 Everything in it is drawn with detailed procedural art (`src/demo/art/`): beveled meshes sized to
@@ -324,7 +374,13 @@ once); rolling resistance (`tests/rolling.rs`: balls and logs slow at `Crr·g/(1
 concrete, faster on grass and sand, the same on terrain and meshes, barrels stop on sand, barrels at
 4 and 8 m/s roll over terrain and meshes within 5 mm of flat and 25 cm of straight, a ball spun
 on its spot slows at `μ·g·1 cm/(⅖r²)` and stops where it is); the debug view
-(`tests/debug_draw.rs`, contacts on terrain included); a headless screenshot of the proving ground.
+(`tests/debug_draw.rs`, contacts on terrain included); the level of detail (`tests/lod.rs`:
+far drums tumble coarsely and at half rate and keep their rocks, far heaps still fall asleep,
+a ball flying in from afar hits the crate by the player at full detail, a far walker steps every
+frame); pendulums (`tests/pendulums.rs`: a Newton's cradle with fine steps passes one or two
+balls' blow down the row while the middle stays within 2 cm, without them the middle swings off,
+a cradle keeps to its own region beside tumbling crates and a ball rolled at it still hits it,
+and a pendulum wave is in two alternate rows at half a minute and back in step at a minute); a headless screenshot of the proving ground.
 
 ## Done when
 

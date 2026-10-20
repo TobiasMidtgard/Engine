@@ -13,7 +13,9 @@ use std::collections::{HashMap, HashSet};
 use engine_assets::{Assets, Handle};
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_render::{MaterialRef, Mesh, MeshRef, MeshRenderer};
+use engine_render::{
+    Billboard, MaterialRef, Mesh, MeshRef, MeshRenderer, Sprite, SpriteAlpha, SpriteAtlas,
+};
 use engine_world::physics::{
     BodyKind, Collider, ColliderShape, PhysicsBackend, RigidBody, Velocity,
 };
@@ -21,7 +23,9 @@ use engine_world::{ContactKind, Env, GroundContact, NoiseEvent, SurfaceMaterials
 
 use crate::assets::DestructionAssets;
 use crate::material::{DestructibleMaterial, DestructionMaterials};
+use crate::textures::DUST_FRAMES;
 use crate::voxel::{VoxelState, in_rock, rock_contact, rock_depth, rock_side};
+use crate::wall::WallState;
 use crate::{DebrisMode, DestructionSettings, DestructionStats};
 
 /// A piece of debris. Registered so tools and AI agents can see and tune it.
@@ -161,6 +165,13 @@ impl DebrisBody {
 /// Glowing hot fragments (sparks): fade instead of sinking.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Spark;
+
+/// A dust sprite's quad, as a multiple of its puff's size: the soft cloud fades out well
+/// inside its quad, so the quad is larger than the mesh puff it replaces.
+const DUST_SPRITE_SCALE: f32 = 2.2;
+
+/// A dust sprite's opacity at its thickest.
+const DUST_SPRITE_ALPHA: f32 = 0.8;
 
 /// A puff of dust that grows, rises a little, drifts with the wind and fades.
 #[derive(Component, Debug, Clone, Copy)]
@@ -552,24 +563,45 @@ pub fn spawn_debris_system(
             for _ in 0..count.clamp(1, 14) {
                 let offset = Vec3::new(next(), next() * 0.5 + 0.25, next()) * spread;
                 let size = d.size.min(0.8) * (0.6 + 0.4 * (next() + 0.5));
-                commands.spawn((
-                    Transform::from_translation(d.position + offset.as_dvec3())
-                        .with_scale(Vec3::splat(size * 0.4)),
-                    MeshRenderer::new(
-                        MeshRef::Handle(assets.dust_mesh),
-                        MaterialRef::Handle(assets.dust(d.darkness, 1.0)),
-                    )
-                    .without_shadows(),
-                    DustPuff {
-                        age: 0.0,
-                        life: 2.5 + 1.5 * (next() + 0.5),
-                        start_size: size * 0.4,
-                        end_size: size * 1.6,
-                        velocity: d.velocity + Vec3::new(next(), 0.3 + next() * 0.2, next()) * 0.8,
-                        darkness: d.darkness,
-                        opacity: 1.0,
-                    },
-                ));
+                let transform = Transform::from_translation(d.position + offset.as_dvec3())
+                    .with_scale(Vec3::splat(size * 0.4));
+                let mut puff = commands.spawn(transform);
+                match assets.dust_sprite {
+                    // A soft camera-facing cloud, lit by the sun and the sky.
+                    Some(image) => {
+                        let c = DestructionAssets::dust_color(d.darkness);
+                        let frame = ((next() + 0.5) * DUST_FRAMES as f32) as u32;
+                        puff.insert(
+                            Sprite::new(image, [DUST_SPRITE_SCALE; 2])
+                                .with_atlas(SpriteAtlas::grid(DUST_FRAMES, 1))
+                                .with_frame(frame.min(DUST_FRAMES - 1))
+                                .with_billboard(Billboard::FaceCamera)
+                                .with_alpha(SpriteAlpha::Blend)
+                                .with_color([c[0], c[1], c[2], 0.0])
+                                .lit()
+                                .with_roundness(0.8)
+                                .with_translucency(0.5),
+                        );
+                    }
+                    None => {
+                        puff.insert(
+                            MeshRenderer::new(
+                                MeshRef::Handle(assets.dust_mesh),
+                                MaterialRef::Handle(assets.dust(d.darkness, 1.0)),
+                            )
+                            .without_shadows(),
+                        );
+                    }
+                }
+                puff.insert(DustPuff {
+                    age: 0.0,
+                    life: 2.5 + 1.5 * (next() + 0.5),
+                    start_size: size * 0.4,
+                    end_size: size * 1.6,
+                    velocity: d.velocity + Vec3::new(next(), 0.3 + next() * 0.2, next()) * 0.8,
+                    darkness: d.darkness,
+                    opacity: 1.0,
+                });
             }
         }
     } else {
@@ -737,6 +769,58 @@ impl Rubble {
     }
 }
 
+/// How far under a floor's top a debris point still counts as on it, meters: deeper than a
+/// step's fall, shallower than the room below.
+const FLOOR_REACH_M: f64 = 0.25;
+
+/// A wall laid flat (a floor, roof deck or hatch cover) that debris lands on.
+struct Floor<'a> {
+    affine: engine_core::math::DAffine3,
+    inv: engine_core::math::DAffine3,
+    state: &'a WallState,
+}
+
+impl<'a> Floor<'a> {
+    fn of(gt: &GlobalTransform, state: &'a WallState) -> Option<Self> {
+        ((gt.rotation() * Vec3::Z).y > 0.9).then(|| Self {
+            affine: gt.affine(),
+            inv: gt.affine().inverse(),
+            state,
+        })
+    }
+
+    /// Height of its top over `p` when `p` is on or just under it, over a solid cell.
+    fn top_under(&self, p: DVec3) -> Option<f64> {
+        let g = &self.state.grid;
+        let lp = self.inv.transform_point3(p);
+        let idx = g.cell_at(engine_core::math::Vec2::new(lp.x as f32, lp.y as f32))?;
+        if !g.solid[idx] {
+            return None;
+        }
+        let top = (g.thickness * 0.5 - g.front[idx]) as f64;
+        (lp.z <= top && lp.z >= top - FLOOR_REACH_M)
+            .then(|| self.affine.transform_point3(DVec3::new(lp.x, lp.y, top)).y)
+    }
+
+    fn bounds(&self, margin: f64) -> (DVec3, DVec3) {
+        let g = &self.state.grid;
+        let size = DVec3::new(
+            g.cell.x as f64 * g.nx as f64,
+            g.cell.y as f64 * g.ny as f64,
+            g.thickness as f64,
+        );
+        let o = DVec3::new(g.origin.x as f64, g.origin.y as f64, -size.z * 0.5);
+        let (mut lo, mut hi) = (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY));
+        for c in 0..8 {
+            let k = DVec3::new((c & 1) as f64, ((c >> 1) & 1) as f64, (c >> 2) as f64);
+            let w = self.affine.transform_point3(o + size * k);
+            lo = lo.min(w);
+            hi = hi.max(w);
+        }
+        (lo - DVec3::splat(margin), hi + DVec3::splat(margin))
+    }
+}
+
 /// The built-in debris solver: gravity, ground and voxel rock contacts with friction and
 /// restitution, sleep. Runs in `FixedUpdate` (`SimSet::Physics`), so it slows down with time
 /// dilation.
@@ -747,6 +831,8 @@ pub fn simulate_debris_system(
     mut q: Query<(Entity, &mut Transform, &mut DebrisBody, &mut Debris)>,
     volumes: Query<(&GlobalTransform, &VoxelState)>,
     rock_changed: Query<(&GlobalTransform, &VoxelState), Changed<VoxelState>>,
+    walls: Query<(&GlobalTransform, &WallState)>,
+    walls_changed: Query<(&GlobalTransform, &WallState), Changed<WallState>>,
     mut contacts: MessageWriter<GroundContact>,
     mut noise: MessageWriter<NoiseEvent>,
 ) {
@@ -756,10 +842,22 @@ pub fn simulate_debris_system(
     }
     let rock: Vec<(&GlobalTransform, &VoxelState)> = volumes.iter().collect();
     // Rock dug or blasted: whatever rests on or by it looks again.
-    let changed: Vec<(DVec3, DVec3)> = rock_changed
+    let mut changed: Vec<(DVec3, DVec3)> = rock_changed
         .iter()
         .map(|(gt, state)| state.world_bounds(gt, 1.0))
         .collect();
+    // Floors and roof decks (walls laid flat, front face up) hold debris up on their solid
+    // cells; whatever rests on one that was shot or blasted looks again.
+    let floors: Vec<Floor> = walls
+        .iter()
+        .filter_map(|(gt, s)| Floor::of(gt, s))
+        .collect();
+    changed.extend(
+        walls_changed
+            .iter()
+            .filter_map(|(gt, s)| Floor::of(gt, s))
+            .map(|f| f.bounds(0.5)),
+    );
     // Chunks at rest are what the rest land on.
     let mut rubble = Rubble::default();
     for (entity, t, body, debris) in &q {
@@ -880,6 +978,11 @@ pub fn simulate_debris_system(
             let r = rot * (*p * scale);
             let wp = center + r.as_dvec3();
             let mut h = env.ground_query.height(wp).unwrap_or(ground.height);
+            for f in &floors {
+                if let Some(top) = f.top_under(wp) {
+                    h = h.max(top);
+                }
+            }
             if on_rock {
                 match rock_side(&rock, wp, ROCK_REACH_M) {
                     Some((normal, depth)) => touch(r, depth, normal),
@@ -1037,7 +1140,16 @@ pub fn age_debris_system(
         Option<&Spark>,
         &Transform,
     )>,
-    mut dust: Query<(Entity, &mut DustPuff, &mut Transform, &mut MeshRenderer), Without<Debris>>,
+    mut dust: Query<
+        (
+            Entity,
+            &mut DustPuff,
+            &mut Transform,
+            Option<&mut MeshRenderer>,
+            Option<&mut Sprite>,
+        ),
+        Without<Debris>,
+    >,
     mut stats: ResMut<DestructionStats>,
     mut order: Local<Vec<(f32, Entity)>>,
 ) {
@@ -1121,7 +1233,7 @@ pub fn age_debris_system(
         return;
     };
     let mut puffs = 0;
-    for (e, mut p, mut t, mut r) in &mut dust {
+    for (e, mut p, mut t, mesh, sprite) in &mut dust {
         let (p, t) = (&mut *p, &mut *t);
         puffs += 1;
         p.age += dt;
@@ -1138,9 +1250,14 @@ pub fn age_debris_system(
         p.velocity.y *= 1.0 / (1.0 + 0.6 * dt);
         t.translation += (p.velocity * dt).as_dvec3();
         let opacity = p.opacity * (1.0 - k).powf(1.5) * (k * 8.0).min(1.0);
-        let handle = assets.dust(p.darkness, opacity);
-        if r.material != MaterialRef::Handle(handle) {
-            r.material = MaterialRef::Handle(handle);
+        if let Some(mut r) = mesh {
+            let handle = assets.dust(p.darkness, opacity);
+            if r.material != MaterialRef::Handle(handle) {
+                r.material = MaterialRef::Handle(handle);
+            }
+        }
+        if let Some(mut sprite) = sprite {
+            sprite.color[3] = opacity * DUST_SPRITE_ALPHA;
         }
     }
     stats.dust = puffs;

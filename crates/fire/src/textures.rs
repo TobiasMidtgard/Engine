@@ -856,14 +856,39 @@ pub fn leaves(size: u32, seed: u32) -> TexSet {
 /// - `u < 0.5`: bark (u around the log's round side, v along the log from its fire end);
 /// - `0.5 ≤ u < 0.875`: split faces (long grain), v along the log;
 /// - `u ≥ 0.875`, `v < 0.125`: end grain of the outer (unburnt) end, a disc;
-/// - `u ≥ 0.875`, `0.125 ≤ v < 0.25`: end grain of the charred end.
+/// - `u ≥ 0.875`, `0.125 ≤ v < 0.25`: end grain of the charred end;
+/// - `u ≥ 0.875`, `0.25 ≤ v < 0.5`: live charcoal, glowing in its cracks (dimmer under its
+///   grey ash skin).
 ///
 /// The fire end (`v` near 0) is black, alligator-cracked char whose cracks glow (emissive);
-/// it fades through scorched brown to fresh wood and bark by `v` = 0.6.
+/// it fades through scorched brown to fresh wood and bark by `v` = 0.75 (a tended fire's logs
+/// are burnt over half their length).
 pub fn firewood(size: u32, seed: u32) -> TexSet {
     let s = size as f32;
     let texels = par_texels(size, size, |x, y| {
         let (u, v) = (x as f32 / s, y as f32 / s);
+        if u >= 0.875 && (0.25..0.5).contains(&v) {
+            // Live charcoal: blocky char split by glowing fissures, under a patchy grey skin.
+            let blocks = cells(u * 40.0, v * 40.0, 0, 0, 0.8, seed ^ 0x61);
+            let crack = 1.0 - smooth(0.06, 0.3, blocks.f2 - blocks.f1);
+            let skin = smooth(
+                0.45,
+                0.7,
+                fbm(u * 90.0, v * 90.0, 0, 0, 3, 0.5, seed ^ 0x62),
+            );
+            let shade = (blocks.id >> 8) as f32 / 16_777_216.0;
+            let char_c = mix3(rgb(0x120e0c), rgb(0x2c2826), shade * 0.7);
+            let mut a = mix3(char_c, rgb(0x9a948e), skin * 0.8);
+            a = mix3(a, rgb(0x1a0804), crack);
+            return Texel {
+                albedo: a,
+                height: 0.002 * (1.0 - crack) + 0.0008 * skin,
+                roughness: 0.95,
+                ao: 1.0 - 0.5 * crack,
+                emissive: crack * (1.0 - 0.6 * skin),
+                ..Default::default()
+            };
+        }
         let (fresh, along_char) = if u >= 0.875 && v < 0.25 {
             // End grain discs.
             let charred_end = v >= 0.125;
@@ -923,11 +948,11 @@ pub fn firewood(size: u32, seed: u32) -> TexSet {
         // Char: alligator cracks toward the fire end.
         let char_amount = 1.0
             - smooth(
-                0.2,
-                0.36,
-                along_char + 0.08 * fbm(u * 9.0, v * 9.0, 0, 0, 2, 0.5, seed),
+                0.38,
+                0.56,
+                along_char + 0.1 * fbm(u * 9.0, v * 9.0, 0, 0, 2, 0.5, seed),
             );
-        let scorch = 1.0 - smooth(0.3, 0.5, along_char);
+        let scorch = 1.0 - smooth(0.5, 0.75, along_char);
         let blocks = cells(u * 40.0, v * 22.0, 40, 22, 0.7, seed ^ 0x41);
         let crack = 1.0 - smooth(0.02, 0.12, blocks.f2 - blocks.f1);
         let block_shade = (blocks.id >> 8) as f32 / 16_777_216.0;
@@ -949,7 +974,7 @@ pub fn firewood(size: u32, seed: u32) -> TexSet {
                 + char_amount * (0.003 * (1.0 - crack) + 0.001 * block_shade),
             roughness: mix(fresh.roughness, 0.95, char_amount),
             ao: fresh.ao * (1.0 - 0.4 * crack * char_amount),
-            emissive: crack * char_amount * smooth(0.0, 0.25, 0.3 - along_char),
+            emissive: crack * char_amount * smooth(0.0, 0.3, 0.42 - along_char),
             ..fresh
         }
     });
@@ -1249,20 +1274,46 @@ fn ash(u: f32, v: f32, seed: u32) -> Texel {
     col *= 0.9 + 0.1 * fine;
     let soil = smooth(0.25, 0.45, -tone);
     col = mix3(col, rgb(0x2a2420), soil * 0.7);
-    let ch = cells(u * 36.0, v * 36.0, 36, 36, 1.0, seed ^ 0x4);
-    let is_coal = hash01(ch.id as i32, 1, seed) < 0.35;
-    let cr = 0.25 + 0.2 * hash01(ch.id as i32, 2, seed);
-    let coal = if is_coal {
-        1.0 - smooth(cr * 0.8, cr, ch.f1)
-    } else {
-        0.0
-    };
+    // Charcoal: angular chunks and grit of every size, gathered in drifts rather than
+    // sprinkled evenly, some only half burnt (brown).
+    let gather = smooth(-0.2, 0.6, fbm(u * 4.0, v * 4.0, 4, 4, 3, 0.5, seed ^ 0x6));
+    let mut coal = 0.0f32;
+    let mut lift = 0.0f32;
+    let mut brown = 0.0f32;
+    for (scale, chance, size, k) in [
+        (14.0f32, 0.1 + 0.35 * gather, 0.4f32, 0x4u32),
+        (36.0, 0.15 + 0.45 * gather, 0.38, 0x14),
+        (90.0, 0.2 + 0.5 * gather, 0.3, 0x24),
+    ] {
+        let p = scale as i32;
+        let ch = cells(u * scale, v * scale, p, p, 1.0, seed ^ k);
+        let id = ch.id as i32;
+        if hash01(id, 1, seed ^ k) >= chance {
+            continue;
+        }
+        // Angular: a few flat sides, turned and stretched per chunk.
+        let angle = ch.offset.y.atan2(ch.offset.x) + 6.0 * hash01(id, 4, seed ^ k);
+        let sides = 3.0 + (hash01(id, 5, seed ^ k) * 3.0).floor();
+        let facet = (std::f32::consts::PI / sides).cos()
+            / ((angle * sides / std::f32::consts::TAU).rem_euclid(1.0) * std::f32::consts::TAU
+                / sides
+                - std::f32::consts::PI / sides)
+                .cos();
+        let r = size * (0.45 + 0.55 * hash01(id, 2, seed ^ k)) * facet;
+        let inside = 1.0 - smooth(r * 0.85, r, ch.f1);
+        if inside > coal {
+            coal = inside;
+            lift = (1.0 - ch.f1 / r).max(0.0) * size / scale;
+            brown = smooth(0.75, 0.95, hash01(id, 3, seed ^ k));
+        }
+    }
     let facets = cells(u * 300.0, v * 300.0, 300, 300, 1.0, seed ^ 0x5);
     let sheen = (facets.id >> 8) as f32 / 16_777_216.0;
-    col = mix3(col, rgb(0x141210) * (0.8 + 0.6 * sheen), coal);
+    let char_c = mix3(rgb(0x141210), rgb(0x3a2a1c), brown) * (0.8 + 0.6 * sheen);
+    col = mix3(col, char_c, coal);
     Texel {
         albedo: col,
-        height: 0.002 * tone + 0.0003 * fine + 0.004 * coal * (1.0 - ch.f1 / cr),
+        height: 0.002 * tone + 0.0003 * fine + 0.25 * lift * coal,
         roughness: mix(0.95, 0.6 + 0.3 * sheen, coal),
         ao: 1.0 - 0.2 * soil,
         ..Default::default()
