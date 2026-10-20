@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use engine_core::math::Vec3;
 
-use crate::appearance::{Appearance, BeardStyle, HairStyle, Rng};
+use crate::appearance::{Appearance, AppearanceExt, BeardStyle, HairStyle, Rng};
 use crate::mesh::{Landmarks, MASKS, Mask, SkinMesh};
 
 /// Drawn hairs are fewer than real ones (tens per cm² where a scalp has ~150), so each stands
@@ -345,14 +345,14 @@ fn grow_lashes(a: &Appearance, margins: &[[Vec<Vec3>; 2]; 2], lm: &Landmarks) ->
 }
 
 fn grow_beard(a: &Appearance, skin: &SkinMesh, collider: &SkinCollider) -> Option<StrandSet> {
-    let (len, per_cm2, n) = match a.beard.style {
+    let (len, per_cm2, n) = match a.beard_style() {
         BeardStyle::None => return None,
         BeardStyle::Stubble => (0.0016, 55.0, 3u32),
         BeardStyle::Short => (0.009, 60.0, 6),
         BeardStyle::Full => (0.03, 60.0, 9),
         BeardStyle::Goatee => (0.014, 60.0, 7),
     };
-    let goatee = a.beard.style == BeardStyle::Goatee;
+    let goatee = a.beard_style() == BeardStyle::Goatee;
     let sampler = Sampler::new(skin, Mask::Beard, |rest, m| {
         if goatee && rest.x.abs() > 0.024 {
             0.0
@@ -426,7 +426,7 @@ fn grow_scalp(
     rest: &Landmarks,
 ) -> Option<StrandSet> {
     let k = a.hair.length.clamp(0.5, 1.5);
-    let g = match a.hair.style {
+    let g = match a.hair_style() {
         HairStyle::Bald => return None,
         HairStyle::Buzz => Groom {
             length: 0.005 * k,
@@ -626,7 +626,7 @@ fn grow_hair(
     let d = sp.rest - rest.head;
     let side = if d.x > PART_X { 1.0 } else { -1.0 };
     let crown = Vec3::new(0.012, 0.085, -0.055);
-    let flow = match a.hair.style {
+    let flow = match a.hair_style() {
         HairStyle::Buzz | HairStyle::Short => {
             // Away from the crown whorl, front hair swept back and toward the part's far side.
             let from_crown = Vec3::new(d.x - crown.x, 0.0, d.z - crown.z);
@@ -665,7 +665,7 @@ fn grow_hair(
     // a thin line).
     // Next to the part, hair lifts off the scalp before falling over it, so the part stays
     // narrow instead of opening into a bare strip.
-    let near_part = if matches!(a.hair.style, HairStyle::Medium | HairStyle::Long) {
+    let near_part = if matches!(a.hair_style(), HairStyle::Medium | HairStyle::Long) {
         (1.0 - ((d.x - PART_X).abs() / 0.025)).clamp(0.0, 1.0)
             * ((d.y - 0.03) / 0.03).clamp(0.0, 1.0)
             // Not at the front hairline, where lifted hair would fall onto the forehead.
@@ -683,7 +683,7 @@ fn grow_hair(
         let t = k as f32 / (n - 1) as f32;
         let p_prev = pts[k - 1];
         let next_dir;
-        if a.hair.style == HairStyle::Bun {
+        if a.hair_style() == HairStyle::Bun {
             // Along the scalp toward the bun, then wound around it.
             let to_bun = bun_center - p_prev;
             if to_bun.length() < 0.045 {

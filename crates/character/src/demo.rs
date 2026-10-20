@@ -2,7 +2,7 @@
 
 use engine_core::prelude::*;
 
-use crate::appearance::Appearance;
+use crate::appearance::{Appearance, AppearanceExt};
 
 /// Spawn every preset as a bust in a row along +X at `origin` (facing +Z), 0.6 m apart, with
 /// their heads at about eye height.

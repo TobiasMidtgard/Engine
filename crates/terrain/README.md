@@ -255,6 +255,3 @@ from `Ground` when they apply), so the lab works on uneven ground too.
 - River and lake water is drawn by the terrain and has no water query yet, so nothing floats
   or swims in it. A water module can draw and simulate it from `river_network().segments()`.
 - No caves or overhangs yet (voxel volumes are next).
-- Mars has a black sky: the renderer's atmosphere scatters light with Earth's colors only, so
-  the test views turn it off there. A thin, dusty, butterscotch sky needs per-planet
-  scattering in the renderer.

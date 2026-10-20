@@ -2,7 +2,7 @@
 //! light behind, and a camera that orbits the subject's face.
 
 use engine::prelude::*;
-use engine_character::{Appearance, BuiltCharacter, CharacterQuality};
+use engine_character::{Appearance, AppearanceExt, BuiltCharacter, CharacterBuild};
 
 use crate::Subject;
 
@@ -125,7 +125,7 @@ pub fn setup(mut commands: Commands, mut settings: ResMut<RenderSettings>) {
         Subject,
         Transform::from_xyz(0.0, 1.0, 0.0),
         Appearance::preset("Kofi").unwrap_or_default(),
-        CharacterQuality::default(),
+        CharacterBuild::default(),
     ));
 }
 
