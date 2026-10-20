@@ -20,7 +20,9 @@ use crate::debris::{
 use crate::fracture::{BreakLook, ConvexPoly};
 use crate::material::{DestructibleMaterial, DestructionMaterials, MaterialProps};
 use crate::meshing::MeshBuilder;
-use crate::structure::{Fracturable, Obb, PieceState, StructuralPiece, piece_colors, shatter};
+use crate::structure::{
+    Fracturable, Obb, PieceState, StructuralPiece, piece_colors, shatter, shatter_along_grain,
+};
 use crate::sync::{VoxelChunk, WallTile};
 use crate::voxel::{VoxelOp, VoxelState, VoxelVolume, box_sdf, capsule_sdf};
 use crate::wall::{DestructibleWall, LostCell, WallHit, WallLook, WallState, mesh_cells};
@@ -1439,6 +1441,11 @@ pub(crate) fn break_piece(
     ctx.stats.pieces_broken += 1;
 }
 
+/// Wood this many times longer than it is thin breaks along its grain.
+const GRAIN_ASPECT: f32 = 2.5;
+/// How many times longer than wide its splinters run.
+const SPLINTER_STRETCH: f32 = 4.0;
+
 /// Shatter a fracturable into Voronoi pieces around `impact` (local) and remove it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn break_fracturable(
@@ -1454,9 +1461,25 @@ pub(crate) fn break_fracturable(
 ) {
     let props = ctx.table.get(f.material);
     let (ext, int) = piece_colors(f.color, f.material, ctx.table, ctx.textured);
-    let parts = shatter(&f.shape.poly(), impact, f.pieces, ctx.rng);
+    let half = f.shape.half_extents();
+    // Long timber (posts, beams, planks) splits along its grain into splinters.
+    let parts = if f.material == DestructibleMaterial::Wood
+        && half.max_element() >= GRAIN_ASPECT * half.min_element()
+    {
+        let grain = Vec3::AXES[half.max_position()];
+        shatter_along_grain(
+            &f.shape.poly(),
+            impact,
+            f.pieces,
+            grain,
+            SPLINTER_STRETCH,
+            ctx.rng,
+        )
+    } else {
+        shatter(&f.shape.poly(), impact, f.pieces, ctx.rng)
+    };
     let rot = gt.rotation();
-    let size = f.shape.half_extents().max_element() * 2.0;
+    let size = half.max_element() * 2.0;
     let look = BreakLook::of(f.material, ext, int);
     for (poly, c, vol) in parts {
         let (outside, inside) = poly.broken_meshes(c, &look, ctx.rng.next_u64());
