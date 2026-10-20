@@ -78,6 +78,20 @@ pub struct Region {
     /// visit every point, so they are only measured again when it moves ([`Self::update_bounds`]).
     /// By collider index: generation, pose, shape address and bounds.
     hull_bounds: Vec<Option<(u32, Pose, usize, Aabb)>>,
+    /// The awake colliders of the last [`Self::touches`] walk, by collider index: the walk's
+    /// stamp, the body's mass and whether the collider can spin ([`Touch::spins`]).
+    touch_marks: Vec<(u64, f32, bool)>,
+    touch_stamp: u64,
+}
+
+/// The contact pairs a substep left for a closer look ([`Region::touches`]), each sorted by
+/// collider handles.
+#[derive(Default)]
+pub(crate) struct Touches {
+    /// Pairs where a side is a round shape or an articulation link.
+    pub spins: Vec<(ColliderHandle, ColliderHandle)>,
+    /// Hard hits, with the pair's impulse.
+    pub hits: Vec<(ColliderHandle, ColliderHandle, f32)>,
 }
 
 impl Region {
@@ -102,7 +116,122 @@ impl Region {
             links: Default::default(),
             load_lines: Vec::new(),
             hull_bounds: Vec::new(),
+            touch_marks: Vec::new(),
+            touch_stamp: 0,
         }
+    }
+
+    /// The contact pairs of the awake bodies that need a closer look after a substep, from one
+    /// pass over them: pairs that can spin or roll ([`crate::rolling`]) and, with `min_speed`,
+    /// hard hits ([`Simulation::process_contacts`]). A heap of rocks has thousands of resting
+    /// pairs and few of either, and each pair's contact data is scattered in memory, so every
+    /// pair is read once: the awake colliders' masses and shapes are noted first.
+    pub(crate) fn touches(&mut self, sub_dt: f32, min_speed: Option<f32>) -> Touches {
+        let world = &self.world;
+        let g = world.gravity.length();
+        self.touch_stamp += 1;
+        let stamp = self.touch_stamp;
+        let marks = &mut self.touch_marks;
+        let link = |h: RigidBodyHandle| world.multibody_joints.rigid_body_link(h).is_some();
+        let (mut awake, mut bodies) = (Vec::new(), 0usize);
+        for h in world.islands.active_bodies() {
+            let Some(rb) = world.bodies.get(h).filter(|rb| rb.is_dynamic()) else {
+                continue;
+            };
+            bodies += 1;
+            let linked = link(h);
+            for &c in rb.colliders() {
+                let Some(co) = world.colliders.get(c) else {
+                    continue;
+                };
+                let spins = linked || crate::rolling::rolls(co.shape().shape_type());
+                let i = c.into_raw_parts().0 as usize;
+                if marks.len() <= i {
+                    marks.resize(i + 1, (0, 0.0, false));
+                }
+                marks[i] = (stamp, rb.mass(), spins);
+                awake.push(c);
+            }
+        }
+        // A side's mass (infinite unless dynamic) and whether it spins: awake ones were noted
+        // above, the rest (fixed, kinematic or asleep) are looked up.
+        let noted = |h: ColliderHandle| {
+            marks
+                .get(h.into_raw_parts().0 as usize)
+                .filter(|m| m.0 == stamp)
+                .map(|m| (m.1, m.2))
+        };
+        let lookup = |h: ColliderHandle| {
+            let co = world.colliders.get(h)?;
+            let body = co.parent().and_then(|b| Some((b, world.bodies.get(b)?)));
+            let mass = body
+                .filter(|(_, rb)| rb.is_dynamic())
+                .map_or(f32::INFINITY, |(_, rb)| rb.mass());
+            let spins = crate::rolling::rolls(co.shape().shape_type())
+                || body.is_some_and(|(b, _)| link(b));
+            Some((mass, spins))
+        };
+        let mut out = Touches::default();
+        if awake.is_empty() {
+            return out;
+        }
+        let mut look = |pair: &ContactPair, (m1, s1): (f32, bool), (m2, s2): (f32, bool)| {
+            if !pair.has_any_active_contact() {
+                return;
+            }
+            let key = (pair.collider1, pair.collider2);
+            if s1 || s2 {
+                out.spins.push(key);
+            }
+            // A hit: an impulse that changes the lighter dynamic side's speed (the one it
+            // changes most) by `min_speed` beyond holding it up.
+            if let Some(min_speed) = min_speed {
+                let impulse = pair.total_impulse_magnitude();
+                if impulse / m1.min(m2).max(1e-3) - g * sub_dt >= min_speed {
+                    out.hits.push((key.0, key.1, impulse));
+                }
+            }
+        };
+        if bodies * 4 >= self.movers as usize {
+            // Much of the region is awake: read every pair in the order they are stored,
+            // skipping those with no awake side (cheaper than hopping from collider to
+            // collider through the contact graph).
+            for pair in world.narrow_phase.contact_pairs() {
+                let (n1, n2) = (noted(pair.collider1), noted(pair.collider2));
+                if n1.is_none() && n2.is_none() {
+                    continue;
+                }
+                let (Some(a), Some(b)) = (
+                    n1.or_else(|| lookup(pair.collider1)),
+                    n2.or_else(|| lookup(pair.collider2)),
+                ) else {
+                    continue;
+                };
+                look(pair, a, b);
+            }
+        } else {
+            // Only the awake colliders' pairs; one with two awake sides from its first.
+            for c in awake {
+                for pair in world.narrow_phase.contact_pairs_with(c) {
+                    let (n1, n2) = (noted(pair.collider1), noted(pair.collider2));
+                    if n1.is_some() && n2.is_some() && pair.collider1 != c {
+                        continue;
+                    }
+                    let (Some(a), Some(b)) = (
+                        n1.or_else(|| lookup(pair.collider1)),
+                        n2.or_else(|| lookup(pair.collider2)),
+                    ) else {
+                        continue;
+                    };
+                    look(pair, a, b);
+                }
+            }
+        }
+        // The narrow phase runs on several threads: sort so results don't depend on timing.
+        let raw = |h: ColliderHandle| h.into_raw_parts();
+        out.spins.sort_unstable_by_key(|&(a, b)| (raw(a), raw(b)));
+        out.hits.sort_unstable_by_key(|&(a, b, _)| (raw(a), raw(b)));
+        out
     }
 
     /// World position → this region's local `f32` coordinates.
@@ -2281,7 +2410,12 @@ impl Simulation {
     // ------------------------------------------------------------------ contacts
 
     /// Turn Rapier's collision events from the last substep into contract events.
-    pub fn process_contacts(&mut self, region_id: RegionId, sub_dt: f32) {
+    pub(crate) fn process_contacts(
+        &mut self,
+        region_id: RegionId,
+        sub_dt: f32,
+        hits: &[(ColliderHandle, ColliderHandle, f32)],
+    ) {
         let mut events: Vec<CollisionEvent> =
             std::mem::take(&mut *self.region(region_id).collector.0.lock());
         // The narrow phase runs on several threads: sort so results don't depend on timing.
@@ -2338,7 +2472,7 @@ impl Simulation {
             }
         }
         self.confirm_pending(region_id, sub_dt);
-        self.rehits(region_id, sub_dt);
+        self.rehits(region_id, hits);
     }
 
     /// Hard hits between colliders already touching. Rapier keeps a pair in contact while the
@@ -2346,47 +2480,13 @@ impl Simulation {
     /// bouncing down a runway or a ragdoll's limbs slapping down send `Started` once; every later
     /// landing is a spike in the pair's impulse. A hit is a substep whose impulse changes the
     /// lighter body's speed by `impact_min_speed` beyond holding it up against gravity, on a
-    /// pair whose previous substep was no hit (one hit lasts a substep or two).
-    fn rehits(&mut self, region_id: RegionId, sub_dt: f32) {
-        let min_speed = self.settings.impact_min_speed;
-        let region = self.region(region_id);
-        let world = &region.world;
-        let g = world.gravity.length();
-        let key_of = |pair: &ContactPair| {
-            (
-                pair.collider1.into_raw_parts(),
-                pair.collider2.into_raw_parts(),
-            )
-        };
-        let mut pairs: Vec<&ContactPair> = world
-            .islands
-            .active_bodies()
-            .filter_map(|h| world.bodies.get(h))
-            .filter(|rb| rb.is_dynamic())
-            .flat_map(|rb| rb.colliders())
-            .flat_map(|&c| world.narrow_phase.contact_pairs_with(c))
-            .filter(|pair| pair.has_any_active_contact())
-            .collect();
-        pairs.sort_unstable_by_key(|pair| key_of(pair));
-        pairs.dedup_by_key(|pair| key_of(pair));
+    /// pair whose previous substep was no hit (one hit lasts a substep or two). `hits` are the
+    /// substep's hits, from [`Region::touches`].
+    fn rehits(&mut self, region_id: RegionId, hits: &[(ColliderHandle, ColliderHandle, f32)]) {
+        let world = &self.region(region_id).world;
         let mut hard = Vec::new();
-        for pair in pairs {
-            let impulse = pair.total_impulse_magnitude();
-            // The lighter dynamic side: the one whose speed the impulse changes most.
-            let mass = [pair.collider1, pair.collider2]
-                .iter()
-                .filter_map(|&h| world.colliders.get(h)?.parent())
-                .filter_map(|b| world.bodies.get(b))
-                .filter(|b| b.is_dynamic())
-                .map(|b| b.mass())
-                .fold(f32::INFINITY, f32::min);
-            if !mass.is_finite() || impulse / mass.max(1e-3) - g * sub_dt < min_speed {
-                continue;
-            }
-            let (Some(c1), Some(c2)) = (
-                world.colliders.get(pair.collider1),
-                world.colliders.get(pair.collider2),
-            ) else {
+        for &(h1, h2, impulse) in hits {
+            let (Some(c1), Some(c2)) = (world.colliders.get(h1), world.colliders.get(h2)) else {
                 continue;
             };
             if c1.is_sensor() || c2.is_sensor() {
@@ -2396,14 +2496,7 @@ impl Simulation {
                 convert::entity_of(c1.user_data),
                 convert::entity_of(c2.user_data),
             );
-            hard.push((
-                pair_key(a, b),
-                a,
-                b,
-                pair.collider1,
-                pair.collider2,
-                impulse,
-            ));
+            hard.push((pair_key(a, b), a, b, h1, h2, impulse));
         }
         let mut was: Vec<(Entity, Entity)> = Vec::new();
         self.contacts.hitting.retain(|k, r| {
