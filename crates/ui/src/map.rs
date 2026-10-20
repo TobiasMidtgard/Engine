@@ -738,7 +738,7 @@ pub fn add_demo_map(world: &mut World) {
     if let Some(mut data) = world.get_resource_mut::<UiData>() {
         data.set(
             "location",
-            json!({"name": "Hollow Reach", "region": "Veyra · Northern Ridge", "time": "14:32"}),
+            json!({"name": "Hollow Reach", "region": "Veyra · Northern Ridge", "time": "14:32", "scene": "valley"}),
         );
     }
 }
