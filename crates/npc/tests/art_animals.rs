@@ -2226,6 +2226,157 @@ fn pack_at_eye_level(plan: Option<&[f64]>) -> Option<(f64, f64, f64)> {
     ))
 }
 
+/// A sounder of wild boar rooting, then its tusker charging a wolf that bit it, as you would
+/// see it standing in the grass, with no markers: the camera low (1 m up) off to the sunny
+/// side of the sounder as it roots, then beside the tusker and a little behind it, looking
+/// along its run at the wolf. The wolf,
+/// well out of the way until then, is set down 12 m from the tusker and bites it from there
+/// (as in the behaviour tests). Run once to time the charge, then again for three moments of
+/// the rooting, four of the charge and one as the tusker breaks off. The PNG is
+/// `animal_live_boar_eye_level.png`.
+#[test]
+#[ignore = "full-size pictures: run with --ignored"]
+fn a_tusker_charges_at_eye_level() {
+    let Some((charge, done)) = boar_at_eye_level(None) else {
+        return;
+    };
+    eprintln!("the tusker charges from {charge:.2} s and breaks off at {done:.2} s");
+    let mut plan = vec![3.0, 5.5, BITE_AT - 0.2];
+    plan.extend((0..4).map(|k| charge + (done - charge) * (k as f64 + 0.5) / 4.0));
+    plan.push(done + 0.4);
+    boar_at_eye_level(Some(&plan));
+}
+
+/// When the wolf bites the tusker in [`a_tusker_charges_at_eye_level`] (s).
+const BITE_AT: f64 = 8.0;
+
+/// [`a_tusker_charges_at_eye_level`]'s scene, shot at the moments of `plan` when there is
+/// one: when the tusker set off at the wolf and when it broke off.
+fn boar_at_eye_level(plan: Option<&[f64]>) -> Option<(f64, f64)> {
+    let mut app = live_app((640, 400))?;
+    // A tusker, two sows and three piglets.
+    let sounder: Vec<Entity> = [
+        (true, false),
+        (false, false),
+        (false, false),
+        (false, true),
+        (false, true),
+        (false, true),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(k, &(male, young))| {
+        let a = k as f64 * 2.4;
+        let r = match k {
+            0 => 0.0,
+            _ if young => 1.8,
+            _ => 3.0,
+        };
+        app.world
+            .spawn((
+                Transform::from_translation(DVec3::new(a.cos() * r, 0.0, a.sin() * r)),
+                Animal {
+                    male,
+                    young,
+                    ..Animal::new(Species::Boar)
+                },
+                Herd(5),
+                StandIn::default(),
+            ))
+            .id()
+    })
+    .collect();
+    let tusker = sounder[0];
+    let wolf = live_animal(&mut app, Species::Wolf, DVec3::new(-300.0, 0.0, 0.0), 2);
+    tick(&mut app, tusker);
+    app.world.get_mut::<AnimalMind>(wolf).unwrap().hunger = 0.0;
+    let clock = tusker;
+    let start = now_of(&app, clock);
+    // The camera is on the sunny side; the wolf bites from across the view.
+    let sunny = DVec3::new(-0.45, 0.0, 0.7).normalize();
+    let across = DVec3::new(sunny.z, 0.0, -sunny.x);
+    let mut frames = Vec::new();
+    let (mut bitten, mut charge, mut done) = (false, None, None);
+    loop {
+        tick(&mut app, clock);
+        let t = now_of(&app, clock) - start;
+        assert!(t < 40.0, "the tusker never charged and broke off");
+        if !bitten && t >= BITE_AT {
+            bitten = true;
+            let point = at(&app, tusker);
+            app.world.get_mut::<Transform>(wolf).unwrap().translation = point + across * 12.0;
+            app.world.write_message(engine_world::DamageEvent {
+                target: tusker,
+                amount: 20.0,
+                kind: engine_world::DamageKind::Slash,
+                point,
+                impulse: Vec3::ZERO,
+                source: Some(wolf),
+            });
+        }
+        let charging = mind_of(&app, tusker).state == AnimalState::Charge;
+        if bitten && charge.is_none() && charging {
+            charge = Some(t);
+        }
+        if charge.is_some() && done.is_none() && !charging {
+            done = Some(t);
+        }
+        let Some(plan) = plan else {
+            match (charge, done) {
+                (Some(c), Some(d)) => return Some((c, d)),
+                _ => continue,
+            }
+        };
+        if frames.len() == plan.len() {
+            break;
+        }
+        if t < plan[frames.len()] {
+            continue;
+        }
+        let (eye, target) = if !bitten {
+            // Off the sounder's sunny side, taking it all in.
+            let mid = sounder.iter().map(|&b| at(&app, b)).sum::<DVec3>() / sounder.len() as f64;
+            (mid + sunny * 8.0, mid)
+        } else {
+            // Off to the side of the tusker and a little behind it, looking along its run at
+            // the wolf.
+            let (boar, w) = (at(&app, tusker), at(&app, wolf));
+            let mut line = w - boar;
+            line.y = 0.0;
+            let gap = line.length().max(1.0);
+            let line = line / gap;
+            let mut side = DVec3::new(-line.z, 0.0, line.x);
+            if side.dot(sunny) < 0.0 {
+                side = -side;
+            }
+            (
+                boar + side * 5.0 - line * 3.5,
+                boar + line * (gap * 0.5).min(5.0),
+            )
+        };
+        let view = (
+            DVec3::new(eye.x, 1.0, eye.z),
+            DVec3::new(target.x, 0.4, target.z),
+            Vec3::Y,
+        );
+        let name = format!("animal_live_boar_eye_level_{}.png", frames.len());
+        eprintln!(
+            "frame {} at {t:.2} s: tusker {:?} {:.1} m from the wolf, sounder {:?}, wolf {:?}",
+            frames.len(),
+            mind_of(&app, tusker).state,
+            flat_len(at(&app, wolf) - at(&app, tusker)),
+            sounder
+                .iter()
+                .map(|&b| mind_of(&app, b).state)
+                .collect::<Vec<_>>(),
+            mind_of(&app, wolf).state,
+        );
+        frames.push(live_shot(&mut app, view, 50.0, &name));
+    }
+    side_by_side(&frames, "animal_live_boar_eye_level.png");
+    Some((charge.unwrap_or(0.0), done.unwrap_or(0.0)))
+}
+
 fn flat_len(v: DVec3) -> f64 {
     DVec3::new(v.x, 0.0, v.z).length()
 }
