@@ -225,6 +225,8 @@ pub(super) struct Senses {
     pub hurt: Option<DVec3>,
     /// Its last wound: how long ago (s), and where the blow came from.
     pub wound: Option<(f32, DVec3)>,
+    /// Deer: 0..1, stotting (see `AnimalMind::stot`).
+    pub stot: f32,
 }
 
 impl Default for Senses {
@@ -238,6 +240,7 @@ impl Default for Senses {
             prey: None,
             hurt: None,
             wound: None,
+            stot: 0.0,
         }
     }
 }
@@ -247,7 +250,9 @@ impl Senses {
         Self {
             threat: m.threat_pos,
             danger: m.danger,
-            alarmed: (now - m.last_danger).clamp(0.0, 1e3) as f32,
+            // Its own fright, or the herd's alarm reaching it.
+            alarmed: (now - m.alarm.map_or(m.last_danger, |a| a.0.max(m.last_danger)))
+                .clamp(0.0, 1e3) as f32,
             heard: m.heard.map(|(p, _)| p),
             stamina: m.stamina,
             prey: None,
@@ -255,6 +260,7 @@ impl Senses {
             wound: m
                 .wounded
                 .map(|(at, from, _)| ((now - at).max(0.0) as f32, from)),
+            stot: m.stot(now),
         }
     }
 }
@@ -1203,6 +1209,8 @@ const ROTARY_WOLF: [f32; 4] = [0.35, 1.45, 0.0, 0.9];
 const TRANSVERSE: [f32; 4] = [0.45, 0.55, 0.0, 0.1];
 /// A bounding leap: the hind feet push off together, the fore feet land together.
 const BOUND: [f32; 4] = [0.42, 0.45, 0.0, 0.02];
+/// A stot (pronk): all four together.
+const STOT: [f32; 4] = [0.0, 0.01, 0.02, 0.03];
 
 const DEER_BUILD: Build = Build {
     gaits: &[WALK, TROT, ROTARY_DEER],
@@ -1495,7 +1503,17 @@ fn quad(
     } else {
         0.0
     };
+    // A deer stotting: all four feet push off and land together, the legs held stiff, in
+    // high bounds that carry it on only slowly.
+    let stot = if beast == Beast::Deer { i.stot } else { 0.0 };
+    let bound = bound * (1.0 - stot);
     let mut p = b.pattern(rig, m.gait, v_eff, bound);
+    if stot > 0.0 && p.stepping {
+        p.offsets = mix_phases(p.offsets, STOT, stot);
+        p.duty = p.duty.map(|d| lerp(d, 0.3, stot));
+        p.freq = lerp(p.freq, 2.0, stot);
+        p.lift = p.lift.map(|l| l * (1.0 + 1.5 * stot));
+    }
     if fall.is_some() {
         // The dead don't step.
         p.reach = [f32::MAX; 4];
@@ -1579,6 +1597,7 @@ fn quad(
         // Coiled for an instant, then away.
         pos.y -= 0.04 * (1.0 - smooth(0.05, 0.25, k.t));
     }
+    let mut twist = 0.0;
     if let Some((t, from)) = k.flinch {
         // Hurt: jolted away from the blow, rolling off it, hunched (the croup tucked under)
         // and ducking as the legs give a little, then gathering itself.
@@ -1608,11 +1627,16 @@ fn quad(
         pos.y -= 0.08 * size * duck + 0.08 * size * stumble;
         let sway = track(t, &[(0.0, 0.0, Both), (0.1, 1.0, Out), (0.6, 0.0, Both)]);
         roll += from.sin() * (0.24 * jolt + 0.08 * sway);
+        // And it slews: the forequarters swing away from a blow from the side, the planted
+        // legs left slanting under it (so a shove toward or away from the camera still reads
+        // from the side, in the legs).
+        twist = from.sin() * (0.2 * jolt + 0.14 * sway);
         // From behind, the rump jumps up.
         pitch -= 0.06 * jolt * (-from.cos()).max(0.0) + 0.22 * stumble;
         flex += 0.22 * duck;
     }
-    let mut rot = Quat::from_rotation_z(roll) * Quat::from_rotation_x(pitch);
+    let mut rot =
+        Quat::from_rotation_y(twist) * Quat::from_rotation_z(roll) * Quat::from_rotation_x(pitch);
     if lie > 0.0 {
         pos.y -= (rig.belly - beast.by(0.1, 0.06, 0.04)) * lie;
         rot = Quat::from_rotation_x(pitch * (1.0 - lie) + 0.03 * lie);
@@ -1691,7 +1715,9 @@ fn quad(
             // folds (folding at once would drag the hock along the ground behind).
             let late = if front { 0.0 } else { 0.18 * fast };
             let u = ((pl.u - late) / (1.0 - late)).max(0.0);
-            let fold = (PI * u.powf(0.75)).sin().max(0.0) * if p.stepping { 1.0 } else { 0.5 };
+            let fold = (PI * u.powf(0.75)).sin().max(0.0)
+                * if p.stepping { 1.0 } else { 0.5 }
+                * (1.0 - 0.75 * stot);
             (
                 -(if front { 1.3 } else { 0.9 }) * fold,
                 g_flex * fold * if front { -1.0 } else { 0.75 },
@@ -1713,9 +1739,10 @@ fn quad(
         fall: fall.map(|t| (t, k.side)),
         upright,
     };
-    // The body comes down as far as a planted foot needs to reach the ground.
+    // The body comes down as far as a planted foot needs to reach the ground (a few goes, so
+    // a foot landing far out in a long stride reaches its spot the frame it lands).
     if upright > 0.0 {
-        for _ in 0..2 {
+        for _ in 0..4 {
             let (df, dh) = q.reach_drop();
             if df <= 0.0 && dh <= 0.0 {
                 break;
@@ -3513,6 +3540,9 @@ mod tests {
         lifts: [u32; 4],
         /// The lowest a toe went (m).
         sink: f32,
+        /// Times all four feet were off the ground together, and the body's highest (m).
+        flights: u32,
+        top: f32,
     }
 
     /// Rabbit leg joints (shoulder or hip, wrist or heel, toe) of leg `n`.
@@ -3546,6 +3576,7 @@ mod tests {
         crouch: bool,
         secs: f32,
         course: impl Fn(f32) -> (Vec2, f32),
+        senses: Senses,
     ) -> Steps {
         const GROUND: f32 = 0.006;
         let dt = 1.0 / 60.0;
@@ -3560,7 +3591,10 @@ mod tests {
             down: [0.0; 4],
             lifts: [0; 4],
             sink: f32::MAX,
+            flights: 0,
+            top: f32::MIN,
         };
+        let mut was_up = false;
         let mut was_down = [true; 4];
         let n = (secs / dt).round() as usize;
         for f in 0..n {
@@ -3588,11 +3622,17 @@ mod tests {
                 crouch,
                 biting: false,
                 vary: 0.37,
-                senses: Senses::default(),
+                senses,
                 bird: None,
             };
             let pose = animal(&input, &mut m);
             let pts = toes(species, (male, young), &pose).map(|p| pos + facing * p);
+            out.top = out.top.max(pose.place(Part::Body).pos.y);
+            let up = pts.iter().all(|p| p.y >= GROUND);
+            if up && !was_up && f > 0 {
+                out.flights += 1;
+            }
+            was_up = up;
             for k in 0..4 {
                 out.sink = out.sink.min(pts[k].y);
                 let on = pts[k].y < GROUND;
@@ -3834,6 +3874,7 @@ mod tests {
                 state == Stalk,
                 secs,
                 course,
+                Senses::default(),
             );
             eprintln!(
                 "{name}: went {:.2} m, turned {:.2} rad, slid {:.4} m (worst {:.4} m in a frame), down {:.2?}, lifts {:?}, lowest toe {:.4} m",
@@ -3846,14 +3887,13 @@ mod tests {
                 s.went,
                 s.worst
             );
-            // A rabbit's paws stand still to within a hair, even the frame they peel off.
-            if species == Species::Rabbit {
-                assert!(
-                    s.worst < 0.001,
-                    "{name}: a paw slid {:.4} m in a frame",
-                    s.worst
-                );
-            }
+            // Feet and paws stand still to within a hair, even the frame they land or peel
+            // off.
+            assert!(
+                s.worst < 0.001,
+                "{name}: a foot slid {:.4} m in a frame",
+                s.worst
+            );
             if s.went > 1.0 {
                 assert!(
                     s.lifts.iter().all(|&n| n >= 2),
@@ -3875,6 +3915,45 @@ mod tests {
             );
             assert!(s.sink > -0.02, "{name}: a toe sank to {:.3} m", s.sink);
         }
+    }
+
+    #[test]
+    fn a_deer_stots_on_all_fours() {
+        // Setting off at a stot, and the same pace without: high bounds, all four feet off
+        // the ground together each time, and the feet still don't slide.
+        let go = |stot: f32| {
+            run(
+                Species::Deer,
+                (false, false),
+                AnimalState::Flee,
+                false,
+                2.0,
+                |_| (Vec2::new(0.0, -2.9), 0.0),
+                Senses {
+                    stot,
+                    ..Senses::default()
+                },
+            )
+        };
+        let (stot, lope) = (go(1.0), go(0.0));
+        eprintln!(
+            "stotting: {} bounds, body up to {:.3} m, worst slide {:.4} m; without: {} flights, \
+             up to {:.3} m",
+            stot.flights, stot.top, stot.worst, lope.flights, lope.top
+        );
+        assert!(stot.flights >= 3, "{} bounds in 2 s", stot.flights);
+        assert!(
+            stot.top > lope.top + 0.08,
+            "it bounds high: {:.3} m against {:.3} m",
+            stot.top,
+            lope.top
+        );
+        assert!(
+            stot.worst < 0.001,
+            "a foot slid {:.4} m in a frame",
+            stot.worst
+        );
+        assert!(stot.sink > -0.02, "a toe sank to {:.3} m", stot.sink);
     }
 
     /// One step of an animal in `state` (since then) at `pos` facing −Z at `speed` m/s.
@@ -4289,7 +4368,8 @@ mod tests {
                 let fwd = body.rot * Vec3::NEG_Z;
                 let ahead = pose.place(Part::Head).rot * Vec3::NEG_Z;
                 let turn = (-ahead.x).atan2(-ahead.z);
-                let now = (body.pos, (-up.x).atan2(up.y), ear, lift, -fwd.y, turn);
+                let slew = (-fwd.x).atan2(-fwd.z);
+                let now = (body.pos, (-up.x).atan2(up.y), ear, lift, -fwd.y, turn, slew);
                 if hit {
                     after.push((t - 1.0, now));
                 } else {
@@ -4298,8 +4378,11 @@ mod tests {
             }
             let rest = rest.expect("stood");
             let (mut away, mut roll, mut pinned, mut stepped) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-            let (mut dip, mut sank, mut swung) = (0.0f32, 0.0f32, 0.0f32);
-            for (t, (pos, r, ear, lift, nose, turn)) in &after {
+            let (mut dip, mut sank, mut swung, mut slewed) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            for (t, (pos, r, ear, lift, nose, turn, slew)) in &after {
+                if *t < 0.45 {
+                    slewed = slewed.max(slew - rest.6);
+                }
                 if (0.1..0.4).contains(t) {
                     swung = swung.max(turn - rest.5);
                 }
@@ -4321,7 +4404,13 @@ mod tests {
                 }
             }
             eprintln!(
-                "{species:?}: jolted {away:.3} m away, rolled {roll:.2} rad, ears turned {pinned:.2} rad, a foot up {stepped:.3} m, stumbled {dip:.3} rad nose down, sank {sank:.3} m, head swung {swung:.2} rad away"
+                "{species:?}: jolted {away:.3} m away, rolled {roll:.2} rad, ears turned {pinned:.2} rad, a foot up {stepped:.3} m, stumbled {dip:.3} rad nose down, sank {sank:.3} m, head swung {swung:.2} rad away, body slewed {slewed:.2} rad away"
+            );
+            // The body slews off the blow too, so a blow from the far side reads from this
+            // one, in the slant of the legs.
+            assert!(
+                slewed > 0.2,
+                "{species:?}: the body slewed only {slewed:.2} rad"
             );
             assert!(away > 0.05, "{species:?}: jolted only {away:.3} m");
             assert!(roll > 0.1, "{species:?}: rolled only {roll:.2} rad");
@@ -4336,9 +4425,11 @@ mod tests {
                 swung > 0.8,
                 "{species:?}: the head swung only {swung:.2} rad away"
             );
-            for (t, (pos, r, _, _, _, _)) in after.iter().filter(|a| a.0 > 1.3) {
+            for (t, (pos, r, _, _, _, _, slew)) in after.iter().filter(|a| a.0 > 1.3) {
                 assert!(
-                    (pos.x - rest.0.x).abs() < 0.01 && (r - rest.1).abs() < 0.02,
+                    (pos.x - rest.0.x).abs() < 0.01
+                        && (r - rest.1).abs() < 0.02
+                        && (slew - rest.6).abs() < 0.02,
                     "{species:?}: still flinching at {t:.2} s"
                 );
             }

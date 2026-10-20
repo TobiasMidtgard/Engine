@@ -1,10 +1,15 @@
 //! Wildlife behavior tests: herds bolt from a runner but let a sneaker come closer, panic
 //! spreads through a herd, wolf packs run prey down and feed, birds take off together and
 //! land again, boars root about and run from a runner but turn and charge when cornered or
-//! wounded, a sow charges to defend her piglets, and wolves pick a piglet over its elders.
+//! wounded, a sow charges to defend her piglets, wolves pick a piglet over its elders, a pack
+//! singles out a wounded deer, flanks it and lies in wait for it and gives up a long chase,
+//! a herd's alarm spreads within a reaction time, and a deer zigzags from a wolf at its heels.
+
+use std::f32::consts::{PI, TAU};
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
+use engine_npc::wildlife::{PACK_CHASE_SECS, PACK_REST_SECS, ZIGZAG_RANGE};
 use engine_npc::*;
 use engine_world::locomotion::{LocomotionMode, LocomotionState};
 use engine_world::physics::Collider;
@@ -726,4 +731,487 @@ fn wolves_pick_a_piglet_over_its_elders() {
         }
     }
     panic!("the pack never picked a quarry");
+}
+
+fn mind(app: &App, e: Entity) -> &AnimalMind {
+    app.world.get::<AnimalMind>(e).unwrap()
+}
+
+fn flat(v: DVec3) -> Vec3 {
+    Vec3::new(v.x as f32, 0.0, v.z as f32)
+}
+
+/// A pack of `wolves` 45 m from a herd of `deer`, hungry.
+fn hunt(app: &mut App, deer: usize, wolves: usize) -> (Vec<Entity>, Vec<Entity>) {
+    app.world.resource_mut::<WildlifeSettings>().respawn_secs = 0.0;
+    let herd_ = herd(app, Species::Deer, DVec3::ZERO, deer, 1);
+    let pack = herd(app, Species::Wolf, DVec3::new(0.0, 0.0, -45.0), wolves, 2);
+    app.update();
+    for &w in &pack {
+        app.world.get_mut::<AnimalMind>(w).unwrap().hunger = 1.0;
+    }
+    (herd_, pack)
+}
+
+/// Run until a deer is killed (or `secs` pass): which one, the pack's first pick, and every
+/// quarry a running wolf was after.
+fn run_down(
+    app: &mut App,
+    deer: &[Entity],
+    pack: &[Entity],
+    secs: f64,
+) -> (Option<Entity>, Option<Entity>, Vec<Entity>) {
+    let (mut first, mut chased) = (None, Vec::new());
+    for _ in 0..(secs * 60.0) as usize {
+        app.update();
+        for &w in pack {
+            let m = mind(app, w);
+            first = first.or(m.prey);
+            if m.state == AnimalState::Chase
+                && let Some(p) = m.prey
+                && !chased.contains(&p)
+            {
+                chased.push(p);
+            }
+        }
+        if let Some(&d) = deer.iter().find(|&&d| state(app, d) == AnimalState::Dead) {
+            return (Some(d), first, chased);
+        }
+    }
+    (None, first, chased)
+}
+
+#[test]
+fn a_pack_singles_out_the_wounded_deer() {
+    for wolves in [3, 4, 5] {
+        // The deer furthest from the pack is wounded: the pack picks it from the start, runs
+        // it and only it, and catches it.
+        let mut app = app();
+        let (deer, pack) = hunt(&mut app, 4, wolves);
+        let hurt = deer[1];
+        for &d in &deer {
+            assert!(
+                pos(&app, d).z <= pos(&app, hurt).z,
+                "the wounded deer is the furthest"
+            );
+        }
+        {
+            let mut v = app.world.get_mut::<NpcVitals>(hurt).unwrap();
+            v.health = v.max_health * 0.4;
+        }
+        let (killed, first, chased) = run_down(&mut app, &deer, &pack, 90.0);
+        assert_eq!(first, Some(hurt), "{wolves} wolves picked the wounded deer");
+        assert_eq!(
+            chased,
+            vec![hurt],
+            "{wolves} wolves ran only the wounded deer"
+        );
+        assert_eq!(
+            killed,
+            Some(hurt),
+            "{wolves} wolves caught the wounded deer"
+        );
+
+        // Unhurt, it is the last they would pick: they take the nearest, and catch one.
+        let mut app = self::app();
+        let (deer, pack) = hunt(&mut app, 4, wolves);
+        let (killed, first, _) = run_down(&mut app, &deer, &pack, 90.0);
+        assert_eq!(first, Some(deer[3]), "{wolves} wolves, a healthy herd");
+        assert!(killed.is_some(), "{wolves} wolves catch a healthy deer too");
+    }
+}
+
+#[test]
+fn flankers_run_out_on_the_quarrys_sides() {
+    for wolves in [3, 4, 5] {
+        let mut app = app();
+        let (deer, pack) = hunt(&mut app, 4, wolves);
+        // Where each wolf is from the quarry, across (toward a flanker's own side) and along
+        // its line of flight, at every step of the chase.
+        let (mut frames, mut both, mut run, mut longest) = (0, 0, 0, 0);
+        let (mut wrong_side, mut tester_behind) = (0, 0);
+        let (mut rushed, mut ambushed) = (false, false);
+        for _ in 0..60 * 90 {
+            app.update();
+            if deer.iter().any(|&d| state(&app, d) == AnimalState::Dead) {
+                break;
+            }
+            let Some(tester) = pack
+                .iter()
+                .copied()
+                .find(|&w| mind(&app, w).role == PackRole::Tester)
+            else {
+                continue;
+            };
+            let m = mind(&app, tester);
+            let (true, Some(q)) = (m.state == AnimalState::Chase, m.prey) else {
+                continue;
+            };
+            let first = !rushed;
+            rushed = true;
+            if first
+                && let Some(&a) = pack
+                    .iter()
+                    .find(|&&w| mind(&app, w).role == PackRole::Ambusher)
+            {
+                // As the tester rushes, the ambusher lies in wait well beyond the quarry.
+                let line = flat(pos(&app, q) - pos(&app, tester)).normalize();
+                let beyond = flat(pos(&app, a) - pos(&app, q)).dot(line);
+                eprintln!("{wolves} wolves: the ambusher lies {beyond:.1} m beyond the quarry");
+                assert!(
+                    beyond > 12.0,
+                    "{wolves} wolves: the ambusher {beyond:.1} m beyond"
+                );
+                assert_eq!(state(&app, a), AnimalState::Stalk, "lying in wait");
+                ambushed = true;
+            }
+            let v = app.world.get::<LocomotionState>(q).unwrap().velocity;
+            let v = Vec3::new(v.x, 0.0, v.z);
+            if v.length() < 3.0 {
+                continue;
+            }
+            let ahead = v.normalize();
+            let left = Vec3::new(ahead.z, 0.0, -ahead.x);
+            frames += 1;
+            // Out on its own side, abreast of the quarry (or already on it, biting).
+            let (mut abeam, mut on_it) = (0, 0);
+            for &w in &pack {
+                let r = mind(&app, w).role;
+                let off = flat(pos(&app, w) - pos(&app, q));
+                let (across, along) = (off.dot(left) * r.side(), off.dot(ahead));
+                if r.side() != 0.0 && off.length() < 12.0 {
+                    if across > 1.5 && along.abs() < across + 1.0 {
+                        abeam += 1;
+                    } else if off.length() < 1.6 {
+                        on_it += 1;
+                    }
+                    // (Not in the scrimmage at the end, where they close in from all sides.)
+                    if across < -1.5 && off.length() > 4.0 {
+                        wrong_side += 1;
+                    }
+                }
+                if r == PackRole::Tester && along < 0.0 {
+                    tester_behind += 1;
+                }
+            }
+            if abeam + on_it == 2 {
+                both += 1;
+            }
+            run = if abeam == 2 { run + 1 } else { 0 };
+            longest = longest.max(run);
+        }
+        eprintln!(
+            "{wolves} wolves: chase steps {frames}, both flankers at its sides {both}, both \
+             abreast {longest} steps running, a flanker on the wrong side {wrong_side}, the \
+             tester behind {tester_behind}"
+        );
+        assert!(
+            frames >= 60,
+            "{wolves} wolves: a real chase ({frames} steps)"
+        );
+        assert_eq!(ambushed, wolves >= 4, "{wolves} wolves: an ambusher");
+        assert!(
+            both * 10 >= frames * 6,
+            "{wolves} wolves: both flankers at the quarry's sides for {both} of {frames} steps"
+        );
+        assert!(
+            longest >= 60,
+            "{wolves} wolves: both flankers running abreast of it for a second ({longest} steps)"
+        );
+        assert!(
+            wrong_side == 0,
+            "{wolves} wolves: a flanker on the wrong side for {wrong_side} of {frames} steps"
+        );
+        assert!(
+            tester_behind * 10 >= frames * 9,
+            "{wolves} wolves: the tester drives from behind ({tester_behind} of {frames})"
+        );
+    }
+}
+
+/// Bearing (rad, 0 = straight ahead) from `e`'s facing to `at`.
+fn bearing(app: &App, e: Entity, at: DVec3) -> f32 {
+    let f = app.world.get::<Transform>(e).unwrap().forward();
+    let f = Vec3::new(f.x, 0.0, f.z).normalize();
+    f.angle_between(flat(at - pos(app, e)).normalize())
+}
+
+#[test]
+fn the_herds_alarm_spreads_within_a_reaction_time() {
+    let mut app = app();
+    let deer = herd(&mut app, Species::Deer, DVec3::ZERO, 6, 3);
+    app.update_n(60);
+    // Shot from the side by someone the herd can't see: the one hit bolts, snorting; each
+    // of the others turns to look where the alarm came from, then bolts with it.
+    let at = DVec3::new(-40.0, 1.5, 0.0);
+    let shooter = app.world.spawn(Transform::from_translation(at)).id();
+    app.world.write_message(DamageEvent {
+        target: deer[0],
+        amount: 5.0,
+        kind: DamageKind::Ballistic,
+        point: pos(&app, deer[0]),
+        impulse: Vec3::ZERO,
+        source: Some(shooter),
+    });
+    let n = deer.len();
+    let (mut alert, mut fled) = (vec![None; n], vec![None; n]);
+    let mut facing = vec![(0.0f32, 0.0f32); n];
+    let mut spread = 0.0f32;
+    for f in 0..60 * 4 {
+        app.update();
+        for (k, &d) in deer.iter().enumerate() {
+            let s = state(&app, d);
+            if s == AnimalState::Alert && alert[k].is_none() && fled[k].is_none() {
+                alert[k] = Some(f);
+                facing[k].0 = bearing(&app, d, at);
+            }
+            if s == AnimalState::Flee && fled[k].is_none() {
+                fled[k] = Some(f);
+                facing[k].1 = bearing(&app, d, at);
+            }
+        }
+        // From two and a half seconds into the flight: how far the herd strings out.
+        if f >= 150 {
+            let c = deer.iter().map(|&d| pos(&app, d)).sum::<DVec3>() / n as f64;
+            let s = deer
+                .iter()
+                .map(|&d| flat(pos(&app, d) - c).length())
+                .fold(0.0, f32::max);
+            spread = spread.max(s);
+        }
+    }
+    let t0 = fled[0].expect("the deer that was hit bolts");
+    assert!(t0 <= 1, "at once: {t0}");
+    assert_eq!(alert[0], None, "the one hit doesn't stop to look");
+    assert!(
+        mind(&app, deer[0]).alarm.is_some_and(|a| a.1),
+        "it raised the alarm"
+    );
+    for k in 1..n {
+        let (Some(a), Some(b)) = (alert[k], fled[k]) else {
+            panic!("deer {k}: looked {:?}, bolted {:?}", alert[k], fled[k]);
+        };
+        let secs = |f: usize| (f as f32 - t0 as f32) / 60.0;
+        eprintln!(
+            "deer {k}: looks up {:.2} s, bolts {:.2} s after the alarm; facing the shot {:.2} \
+             -> {:.2} rad",
+            secs(a),
+            secs(b),
+            facing[k].0,
+            facing[k].1
+        );
+        assert!(
+            secs(a) <= 0.3,
+            "deer {k} looked up {:.2} s after the alarm",
+            secs(a)
+        );
+        assert!(
+            secs(b) - secs(a) >= 0.29,
+            "deer {k} turned to look before it bolted: {:.2} s",
+            secs(b) - secs(a)
+        );
+        assert!(
+            (0.3..=0.85).contains(&secs(b)),
+            "deer {k} bolted {:.2} s after the alarm",
+            secs(b)
+        );
+        assert!(
+            facing[k].1 < facing[k].0 - 0.25 || facing[k].1 < 0.5,
+            "deer {k} turned toward the shot: {:.2} -> {:.2} rad",
+            facing[k].0,
+            facing[k].1
+        );
+        assert!(
+            mind(&app, deer[k]).alarm.is_some_and(|a| !a.1),
+            "deer {k} caught the alarm"
+        );
+    }
+    eprintln!("strung out over {spread:.1} m");
+    assert!(spread < 4.0, "the herd bunches as it runs: {spread:.1} m");
+}
+
+#[test]
+fn a_deer_zigzags_once_a_wolf_is_close() {
+    let mut app = app();
+    app.world.resource_mut::<WildlifeSettings>().respawn_secs = 0.0;
+    // A wary deer that bolts while the wolf is still well back but can't outrun it (an old
+    // one, say), and a hungry wolf.
+    let deer = app
+        .world
+        .spawn((
+            Transform::from_translation(DVec3::ZERO),
+            Animal {
+                skittishness: 6.0,
+                range: 200.0,
+                ..Animal::new(Species::Deer)
+            },
+            Herd(1),
+            NpcMotor {
+                run_speed: 6.0,
+                sprint_speed: 7.0,
+                ..Species::Deer.motor()
+            },
+        ))
+        .id();
+    let wolf = animal(&mut app, Species::Wolf, DVec3::new(0.0, 0.0, -30.0), 2);
+    app.update();
+    app.world.get_mut::<AnimalMind>(wolf).unwrap().hunger = 1.0;
+    // How fast the deer swings its line of flight (rad/s, left positive) while the wolf is
+    // well back, and once it is close.
+    let (mut far, mut close) = (Vec::new(), Vec::new());
+    let mut last: Option<f32> = None;
+    for _ in 0..60 * 40 {
+        app.update();
+        if state(&app, deer) == AnimalState::Dead {
+            break;
+        }
+        let v = app.world.get::<LocomotionState>(deer).unwrap().velocity;
+        let running = state(&app, deer) == AnimalState::Flee
+            && state(&app, wolf) == AnimalState::Chase
+            && Vec3::new(v.x, 0.0, v.z).length() > 2.0;
+        if !running {
+            last = None;
+            continue;
+        }
+        let yaw = v.x.atan2(v.z);
+        let Some(was) = last.replace(yaw) else {
+            continue;
+        };
+        let swing = (yaw - was + PI).rem_euclid(TAU) - PI;
+        let rate = swing * 60.0;
+        let d = flat(pos(&app, deer) - pos(&app, wolf)).length();
+        let pursuer = mind(&app, deer).pursuer.map(|p| p.1);
+        assert!(
+            pursuer.is_some_and(|p| (p - d).abs() < 3.0),
+            "the deer knows the wolf is after it: {pursuer:?} vs {d:.1} m"
+        );
+        if d > ZIGZAG_RANGE + 3.0 {
+            far.push(rate);
+        } else if d < ZIGZAG_RANGE {
+            close.push(rate);
+        }
+    }
+    let hard = |r: &&f32| r.abs() > 1.5;
+    assert!(far.len() > 60, "the wolf runs it from well back");
+    let swerves = far.iter().filter(hard).count();
+    assert!(
+        swerves * 20 < far.len(),
+        "it runs straight away while the wolf is well back: {swerves} of {} steps swerving",
+        far.len()
+    );
+    // Within a second and a half of the wolf closing in, it has cut hard one way, the other
+    // way and back again.
+    let mut cuts: Vec<f32> = close
+        .iter()
+        .take(90)
+        .filter(hard)
+        .map(|r| r.signum())
+        .collect();
+    cuts.dedup();
+    assert!(
+        cuts.len() >= 3,
+        "it zigzags once the wolf is close: cut {cuts:?} in {} steps",
+        close.len().min(90)
+    );
+}
+
+#[test]
+fn the_pack_gives_up_a_long_chase_and_rests() {
+    let mut app = app();
+    app.world.resource_mut::<WildlifeSettings>().respawn_secs = 0.0;
+    // A wary deer in its prime, that bolts while the pack is still well off and is too
+    // fast for it to run down (and has room to run).
+    let deer = app
+        .world
+        .spawn((
+            Transform::from_translation(DVec3::ZERO),
+            Animal {
+                skittishness: 6.0,
+                range: 200.0,
+                ..Animal::new(Species::Deer)
+            },
+            Herd(1),
+            NpcMotor {
+                run_speed: 11.5,
+                ..Species::Deer.motor()
+            },
+        ))
+        .id();
+    let pack = herd(&mut app, Species::Wolf, DVec3::new(0.0, 0.0, -40.0), 3, 2);
+    app.update();
+    let starve = |app: &mut App| {
+        for &w in &pack {
+            app.world.get_mut::<AnimalMind>(w).unwrap().hunger = 1.0;
+        }
+    };
+    starve(&mut app);
+    let step = |app: &mut App| {
+        app.update();
+        assert_ne!(state(app, deer), AnimalState::Dead, "it can't be caught");
+    };
+    let hunting =
+        |app: &App, w: Entity| matches!(state(app, w), AnimalState::Stalk | AnimalState::Chase);
+    // The pack sets off ...
+    let mut f = 0;
+    while !pack.iter().any(|&w| state(&app, w) == AnimalState::Chase) {
+        step(&mut app);
+        f += 1;
+        assert!(f < 60 * 60, "the pack never ran");
+    }
+    let start = f;
+    // ... keeps on at it until its time is up, then all of it gives up together ...
+    let limit = (PACK_CHASE_SECS * 60.0) as usize;
+    loop {
+        step(&mut app);
+        f += 1;
+        let resting = pack
+            .iter()
+            .filter(|&&w| state(&app, w) == AnimalState::Rest)
+            .count();
+        if f - start < limit - 20 {
+            assert_eq!(
+                resting,
+                0,
+                "gave up early, {:.1} s in",
+                (f - start) as f32 / 60.0
+            );
+            for &w in &pack {
+                assert!(
+                    hunting(&app, w),
+                    "{w:?} stopped hunting {:.1} s in",
+                    (f - start) as f32 / 60.0
+                );
+            }
+        }
+        if resting == pack.len() {
+            break;
+        }
+        assert!(f - start < limit + 30, "the pack kept on past its time");
+    }
+    // ... and rests its time out, hungry as it is ...
+    let rest = f;
+    while f - rest < ((PACK_REST_SECS - 1.0) * 60.0) as usize {
+        starve(&mut app);
+        step(&mut app);
+        f += 1;
+        for &w in &pack {
+            assert_eq!(
+                state(&app, w),
+                AnimalState::Rest,
+                "{w:?} back up {:.1} s into its rest",
+                (f - rest) as f32 / 60.0
+            );
+        }
+    }
+    // ... before it hunts again (the deer back in reach).
+    app.world.get_mut::<Transform>(deer).unwrap().translation =
+        pos(&app, pack[0]) + DVec3::new(0.0, 0.0, 40.0);
+    for _ in 0..60 * 10 {
+        starve(&mut app);
+        step(&mut app);
+    }
+    assert!(
+        pack.iter().all(|&w| hunting(&app, w)),
+        "the pack hunts again after its rest"
+    );
 }

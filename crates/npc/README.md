@@ -50,9 +50,23 @@ watching; when it can't find who, it stands and scents for them, bristling, rath
 charge at nothing), and a sow charges anyone who comes close to her piglets while they scatter; the
 charge ends in a slash of the tusks (damage), then the boar breaks off and runs for a moment
 before it may turn again. Fire always means flight: a boar never turns to fight in the
-flames. Wolf packs roam, get hungry, track prey by scent, stalk
-low while spreading out around it, then charge, cut it off and bite; they feed on the kill and
-back away from people. Wolves prefer deer, take a boar only when nothing easier is about (a
+flames. Wolf packs roam, get hungry, track prey by scent and hunt together, each wolf in a
+part by its place in the pack (`AnimalMind::role`, a `PackRole`): the tester creeps straight
+at the herd, singles out the weakest (wounded, young or straggling; it picks over the herd
+again as its rush sets it running) and drives it; two flankers swing wide to its sides and
+run out level with it to cut its escape line, then cut in; a fourth wolf circles wide
+round the herd and lies in wait where it will run, springing when it comes near; any more
+drive with the tester. The tester rushes once the pack is in place. A pack gives up a chase
+`PACK_CHASE_SECS` after its first wolf set off (all of it together, on the wolves' own
+clocks) and rests `PACK_REST_SECS`, hungry or not. They feed on the kill and back away from
+people. Deer raise the alarm: the first to bolt snorts (a noise other animals hear, though
+not its own herd) and flags its tail; each of the others turns its head to where the alarm
+came from, then bolts a reaction time later (0.3 to 0.55 s), and the herd runs off bunched
+(the ones out front ease off for the rest). A deer runs from all the wolves it sees at
+once, the nearest most, so one with a wolf on either side runs on between them; with a wolf
+close at its heels (`ZIGZAG_RANGE`) it cuts from side to side at sharp angles; the one that
+raised the alarm stots for its first bounds (`STOT_SECS`, not when wounded or with a wolf
+close); a wounded animal runs lame. A blow is felt at once (the animal reacts the same tick). Wolves prefer deer, take a boar only when nothing easier is about (a
 piglet sooner, a tusker last of all) and give room to a boar charging at them (not to one
 charging past them at something else). Bird flocks peck on the
 ground and lift off together. Gunfire, explosions, howls and fire scare everything.
@@ -299,8 +313,14 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   whoever hurt it (the shooter, not what it was watching), stands and scents when it can't
   find who rather than charge at nothing, and runs from fire rather than
   charge into it, a sow charges to defend her piglets (a lone sow runs), wolves give room to
-  a boar charging at them but not to one charging past, and wolves pick a piglet over its
-  elders.
+  a boar charging at them but not to one charging past, wolves pick a piglet over its
+  elders, a pack of three, four or five picks the wounded deer from the start, runs only it
+  and catches it (unhurt, the herd's nearest), its flankers run out on the quarry's sides
+  (never the wrong one) while the tester drives from behind and the ambusher lies in wait
+  beyond the herd, a herd's alarm spreads within a reaction time (each deer looks toward the
+  shot before it bolts, and the herd stays bunched), a deer runs straight from a wolf well
+  back and zigzags once it is close, and a pack gives up a chase after its time, all
+  together, rests its time out though hungry, and hunts again.
 - `tests/demo.rs`: the arena fight keeps going for a minute (shots, attacks, blocks, cover,
   downed and revived, squad mates reviving at least twice) inside the arena; the meadow lives for two minutes (grazing, wandering,
   hunting, fleeing) without animals leaving.
@@ -333,11 +353,15 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   every collider. In `tests/art_animals.rs` only the checks run by default (the budgets, and a
   few close-ups and strips rendered small, each of which must show its animal, the animals
   living on undrawn between shots); the full-size close-ups and strips are ignored tests
-  (`-- --ignored`). Each walking animal's close-up is a still from a real run at the game's
+  (`-- --ignored`), and so are three pictures of the AI at work, each one live run shot at
+  eight moments: a pack's hunt from above with its parts marked in colour
+  (`animal_live_pack_hunt.png`), a chased deer zigzagging seen from low behind
+  (`animal_live_zigzag.png`) and a herd's alarm spreading (`animal_live_herd_alarm.png`). Each walking animal's close-up is a still from a real run at the game's
   rate (it walks on toward the camera's mark and is shot at its moment), so its legs are
   where its gait has them. The animal unit tests check that no planted foot slides in any
-  gait (boars, tuskers and piglets included; a rabbit's paws by under a millimetre a frame,
-  even as they peel off at a run) and that a rabbit's fore paws never land out of reach, that a rooting boar's snout reaches the soil, that a tusker's upper tusks stay in its
+  gait by more than a millimetre a frame (boars, tuskers and piglets included, deer as they
+  bolt and pull up, a rabbit's paws even as they peel off at a run), that a stotting deer
+  bounds high on all fours and that a rabbit's fore paws never land out of reach, that a rooting boar's snout reaches the soil, that a tusker's upper tusks stay in its
   lip as its jaw opens, that a hurt animal jolts away from the blow, pins its ears, stumbles,
   steps, hitches in its stride and settles, its head swinging well away from a blow from
   either side, and that the flinch does not jump when the state
