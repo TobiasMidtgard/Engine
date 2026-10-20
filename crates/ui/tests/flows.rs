@@ -920,3 +920,190 @@ fn showing_the_wheel_again_without_slow_motion_lets_time_run() {
     assert!(open(&mut app).contains(&"wheel".to_string()));
     assert!((dilation(&mut app) - 1.0).abs() < 1e-3);
 }
+
+fn skills(app: &mut App) -> engine_ui::skills::SkillTree {
+    app.world.resource::<engine_ui::skills::SkillTree>().clone()
+}
+
+fn skill_selected(app: &mut App) -> String {
+    let mut q = app.world.query::<&engine_ui::skills::SkillsScreen>();
+    q.single(&app.world)
+        .unwrap()
+        .selected
+        .clone()
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_skill_tree_opens_from_pause_and_learns_with_a_point() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "pause", "instant": true}),
+    );
+    app.update_n(2);
+    api(&mut app, "ui.click", json!({"id": "pause_skills"}));
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"skills".to_string()));
+    // It opens on the first skill with a rank to learn; a click picks another.
+    assert_eq!(skill_selected(&mut app), "c_momentum");
+    api(&mut app, "ui.click", json!({"id": "skill:c_cleave"}));
+    app.update_n(2);
+    assert_eq!(skill_selected(&mut app), "c_cleave");
+    let before = skills(&mut app).points;
+    let since = next_event(&mut app);
+    api(&mut app, "ui.click", json!({"id": "skills_learn"}));
+    app.update_n(2);
+    let tree = skills(&mut app);
+    assert_eq!(tree.get("c_cleave").unwrap().rank, 1);
+    assert_eq!(tree.points, before - 1);
+    assert!(actions_since(&mut app, since).contains(&"skill.learned:c_cleave".to_string()));
+    let data = app.world.resource::<UiData>();
+    assert_eq!(data.get_f64("skills.c_cleave"), Some(1.0));
+    assert_eq!(
+        data.get_f64("player.skill_points"),
+        Some((before - 1) as f64)
+    );
+    // Space ranks it up again.
+    press(&mut app, KeyCode::Space);
+    assert_eq!(skills(&mut app).get("c_cleave").unwrap().rank, 2);
+}
+
+#[test]
+fn a_locked_skill_refuses_and_reset_refunds_after_a_confirm() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "skills", "instant": true}),
+    );
+    app.update_n(3);
+    // Whirlwind needs Cleave first; Thousand Cuts needs level 20.
+    api(&mut app, "ui.click", json!({"id": "skill:c_whirl"}));
+    app.update_n(2);
+    assert_eq!(skill_selected(&mut app), "c_whirl");
+    let points = skills(&mut app).points;
+    // Its Learn button is disabled.
+    assert!(call_api(&mut app.world, "ui.click", json!({"id": "skills_learn"})).is_err());
+    press(&mut app, KeyCode::Space);
+    assert_eq!(skills(&mut app).get("c_whirl").unwrap().rank, 0);
+    assert_eq!(skills(&mut app).points, points);
+    assert!(engine_ui::skills::learn(&mut app.world, "c_ult").is_err());
+    // Reset asks first, then gives every point back.
+    let spent = skills(&mut app).spent();
+    assert!(spent > 0);
+    api(&mut app, "ui.click", json!({"id": "skills_reset"}));
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"confirm".to_string()));
+    assert_eq!(skills(&mut app).spent(), spent);
+    api(&mut app, "ui.click", json!({"id": "confirm_ok"}));
+    app.update_n(3);
+    let tree = skills(&mut app);
+    assert_eq!(tree.spent(), 0);
+    assert_eq!(tree.points, points + spent);
+    let screens = open(&mut app);
+    assert!(
+        screens.contains(&"skills".to_string()) && !screens.contains(&"confirm".to_string()),
+        "{screens:?}"
+    );
+}
+
+#[test]
+fn the_skills_api_learns_and_grants_points() {
+    let mut app = app();
+    let v = api(&mut app, "skills.grant", json!({"points": 2}));
+    assert_eq!(v["points"], 5, "{v}");
+    api(&mut app, "skills.learn", json!({"id": "t_overclock"}));
+    assert_eq!(skills(&mut app).get("t_overclock").unwrap().rank, 1);
+    assert!(call_api(&mut app.world, "skills.learn", json!({"id": "t_ult"})).is_err());
+    let tree = api(&mut app, "skills.tree", json!({}));
+    assert!(tree.to_string().contains("t_overclock"));
+}
+
+fn crafting(app: &mut App) -> engine_ui::crafting::CraftingScreen {
+    let mut q = app.world.query::<&engine_ui::crafting::CraftingScreen>();
+    q.single(&app.world).unwrap().clone()
+}
+
+#[test]
+fn crafting_three_brews_takes_time_then_moves_items() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "crafting", "instant": true}),
+    );
+    app.update_n(3);
+    // The alchemy bench opens on the first brew the bag can make.
+    assert_eq!(
+        crafting(&mut app).selected.as_deref(),
+        Some("r_potion_health")
+    );
+    let (herbs, brews) = (
+        player(&mut app).count_of("herb"),
+        player(&mut app).count_of("potion_health"),
+    );
+    api(&mut app, "ui.click", json!({"id": "craft_more"}));
+    app.update_n(2);
+    api(&mut app, "ui.click", json!({"id": "craft_more"}));
+    app.update_n(2);
+    assert_eq!(crafting(&mut app).quantity, 3);
+    let since = next_event(&mut app);
+    api(&mut app, "ui.click", json!({"id": "craft_go"}));
+    app.update_n(2);
+    // Nothing leaves the bag until the craft finishes.
+    assert!(crafting(&mut app).job.is_some());
+    assert_eq!(player(&mut app).count_of("herb"), herbs);
+    app.update_n(160);
+    assert!(crafting(&mut app).job.is_none());
+    assert_eq!(player(&mut app).count_of("herb"), herbs - 9);
+    assert_eq!(player(&mut app).count_of("potion_health"), brews + 6);
+    assert!(actions_since(&mut app, since).contains(&"craft.made:r_potion_health".to_string()));
+}
+
+#[test]
+fn a_short_or_unknown_recipe_cannot_be_crafted_until_learned() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "crafting", "station": "smithing", "instant": true}),
+    );
+    app.update_n(3);
+    assert_eq!(
+        crafting(&mut app).station,
+        engine_ui::crafting::Station::Smithing
+    );
+    // The sword needs an Oak Log the bag doesn't have.
+    api(&mut app, "ui.click", json!({"id": "recipe:r_sword"}));
+    app.update_n(2);
+    assert_eq!(crafting(&mut app).selected.as_deref(), Some("r_sword"));
+    assert!(call_api(&mut app.world, "ui.click", json!({"id": "craft_go"})).is_err());
+    press(&mut app, KeyCode::Space);
+    app.update_n(5);
+    assert!(crafting(&mut app).job.is_none());
+    // Tinkering, one station along: the rail rifle is unknown until its schematic is learned.
+    api(&mut app, "ui.click", json!({"id": "craft.station:2"}));
+    app.update_n(2);
+    assert_eq!(
+        crafting(&mut app).station,
+        engine_ui::crafting::Station::Tinkering
+    );
+    assert!(call_api(&mut app.world, "craft.make", json!({"id": "r_rifle"})).is_err());
+    let v = api(&mut app, "craft.learn", json!({"id": "r_rifle"}));
+    assert_eq!(v["learned"], true);
+    // Learned, the bag holds just enough for one.
+    api(&mut app, "craft.make", json!({"id": "r_rifle"}));
+    assert_eq!(player(&mut app).count_of("rifle"), 1);
+    let err = call_api(&mut app.world, "craft.make", json!({"id": "r_rifle"})).unwrap_err();
+    assert!(err.contains("Missing"), "{err}");
+    // The API crafts at once.
+    let picks = player(&mut app).count_of("lockpick");
+    api(
+        &mut app,
+        "craft.make",
+        json!({"id": "r_lockpick", "count": 2}),
+    );
+    assert_eq!(player(&mut app).count_of("lockpick"), picks + 4);
+}

@@ -3,7 +3,9 @@
 //! relax, the walker climbs the course, the horse gallops with working flanks, the dog runs
 //! through all its gaits with a flexing spine, the spider and the car move.
 
-use engine_anim::demo::{DemoEntities, hammer_head, spawn_demo_world, tire_strike_point};
+use engine_anim::demo::{
+    DemoEntities, hammer_head, lantern_wrist, spawn_demo_world, tire_strike_point,
+};
 use engine_anim::{AnimationPlugin, Animator, LeggedGait, MuscleRig};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -43,6 +45,16 @@ struct Seen {
     biceps_at_strike: f32,
     biceps_relaxed: f32,
     lifter_flex: f32,
+    /// Through the guard: the left hand's largest distance from the handle, the hammer
+    /// head's lowest height and the feet's smallest stagger (front to back), m.
+    guard_hand_off: f64,
+    guard_head_low: f64,
+    guard_stagger: f64,
+    /// Farthest the reacher's right wrist gets from its hold on the lantern, m.
+    lantern_miss: f64,
+    /// How high the reacher's heels and balls of the feet rise while holding it, m.
+    heel_rise: f64,
+    toe_rise: f64,
     walker_max_height: f64,
     walker_max_speed: f32,
     walker_foot_float: f64,
@@ -69,14 +81,23 @@ fn every_test_case_does_what_it_shows() {
     let start_car = app.world.get::<Transform>(d.car).unwrap().translation;
     let mut seen = Seen {
         closest_strike: f64::MAX,
+        guard_head_low: f64::MAX,
+        guard_stagger: f64::MAX,
         dog_spine: (f32::MAX, f32::MIN),
         ..Default::default()
     };
     let frames = (14.0 / STEP) as usize;
+    let mut rest_feet = (0.0, 0.0);
     for frame in 1..=frames {
         app.update();
         let t = frame as f64 * STEP;
         let w = &app.world;
+        if frame == 20 {
+            rest_feet = (
+                bone_world(w, d.reacher, "foot_l").y,
+                bone_world(w, d.reacher, "toe_l").y,
+            );
+        }
         // Swing: triggered at 0.5 s, impact at 53% of 2 s.
         if (1.45..1.7).contains(&t) {
             let head = hammer_head(w, d.athlete).unwrap();
@@ -90,11 +111,40 @@ fn every_test_case_does_what_it_shows() {
                 bone_world(w, d.athlete, "hand_l").distance(bone_world(w, d.athlete, "hand_r"));
             seen.max_hand_gap_while_gripping = seen.max_hand_gap_while_gripping.max(gap);
         }
+        // Guard: from 3.6 s to 6.4 s, settled in by 4 s.
+        if (4.0..6.3).contains(&t) {
+            let grip = bone_world(w, d.athlete, "hand_r");
+            let head = hammer_head(w, d.athlete).unwrap();
+            let hand = bone_world(w, d.athlete, "hand_l");
+            let along = (hand - grip).dot(head - grip) / (head - grip).length_squared();
+            let on_handle = grip + (head - grip) * along.clamp(0.0, 1.0);
+            seen.guard_hand_off = seen.guard_hand_off.max(hand.distance(on_handle));
+            seen.guard_head_low = seen.guard_head_low.min(head.y);
+            // The athlete faces +Z.
+            let stagger =
+                bone_world(w, d.athlete, "foot_l").z - bone_world(w, d.athlete, "foot_r").z;
+            seen.guard_stagger = seen.guard_stagger.min(stagger);
+        }
         if (3.4..3.5).contains(&t) {
             seen.biceps_relaxed = activation(w, d.athlete, "biceps_r");
         }
         if (2.2..2.8).contains(&t) {
             seen.lifter_flex = seen.lifter_flex.max(activation(w, d.lifter, "biceps_l"));
+        }
+        // The reach: triggered at 0.5 s, holding the lantern from 40% to 70% of 3 s.
+        if (1.8..2.5).contains(&t) {
+            let hand = bone_world(w, d.reacher, "hand_r");
+            seen.lantern_miss = seen
+                .lantern_miss
+                .max(hand.distance(lantern_wrist(DVec3::ZERO)));
+            let heel = bone_world(w, d.reacher, "foot_l")
+                .y
+                .min(bone_world(w, d.reacher, "foot_r").y);
+            let toe = bone_world(w, d.reacher, "toe_l")
+                .y
+                .max(bone_world(w, d.reacher, "toe_r").y);
+            seen.heel_rise = seen.heel_rise.max(heel - rest_feet.0);
+            seen.toe_rise = seen.toe_rise.max(toe - rest_feet.1);
         }
         let walker = w.get::<GlobalTransform>(d.walker).unwrap().translation();
         seen.walker_max_height = seen.walker_max_height.max(walker.y);
@@ -195,6 +245,25 @@ fn every_test_case_does_what_it_shows() {
         seen.lifter_flex > 0.6,
         "flex activation {}",
         seen.lifter_flex
+    );
+    assert!(
+        seen.guard_hand_off < 0.1 && seen.guard_head_low > 1.5 && seen.guard_stagger > 0.2,
+        "guard: left hand {:.2} m off the handle, hammer head down to {:.2} m, feet staggered \
+         {:.2} m",
+        seen.guard_hand_off,
+        seen.guard_head_low,
+        seen.guard_stagger
+    );
+    assert!(
+        seen.lantern_miss < 0.05,
+        "the reacher's hand missed the lantern by {:.2} m",
+        seen.lantern_miss
+    );
+    assert!(
+        seen.heel_rise > 0.035 && seen.toe_rise < 0.015,
+        "the reacher didn't go up on tiptoe: heels {:.3} m, balls of the feet {:.3} m",
+        seen.heel_rise,
+        seen.toe_rise
     );
     assert!(
         seen.walker_max_height > 0.6,

@@ -420,7 +420,12 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
     let ndv0 = dot(n, v);
     if (ndv0 < 0.02) { n = normalize(n + v * (0.02 - ndv0)); }
     let n_dot_v = max(dot(n, v), 1e-3);
-    let fresnel = 0.02 + 0.98 * pow(1.0 - n_dot_v, 5.0);
+    // Wind roughens the water below what the waves and ripples resolve: the facets' slopes
+    // spread by about 0.003 + 0.00512·U (Cox–Munk), more of it unresolved further off. A gale
+    // blurs the reflections and breaks up the grazing mirror (facets tilt toward the eye).
+    let unresolved = sqrt(0.003 + 0.00512 * wind) * smoothstep(5.0, 14.0, wind)
+        * mix(0.6, 1.5, saturate(dist / 80.0));
+    let fresnel = 0.02 + 0.98 * pow(1.0 - n_dot_v, 5.0) * (1.0 - 0.55 * saturate(unresolved * 2.0));
     let size = vec2<f32>(textureDimensions(scene_color));
     let pix = vec2<i32>(frag.xy);
     let uv0 = frag.xy / size;
@@ -473,7 +478,7 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
     // ---- reflection
     var r = reflect(-v, n);
     if (r.y < 0.02) { r = normalize(vec3<f32>(r.x, 0.02 + (0.02 - r.y) * 0.5, r.z)); }
-    let rough = clamp(look.roughness + 0.01 * wind + dist * 0.00015, 0.02, 0.6);
+    let rough = clamp(look.roughness + 0.01 * wind + dist * 0.00015 + unresolved, 0.02, 0.75);
     let sky_vis = sky_visibility(rel, vec3<f32>(0.0, 1.0, 0.0));
     let fill = frame.ambient.rgb;
     let env = (mix(sample_env(r), sky_ambient(r), saturate(rough * 1.5)) - fill) * sky_vis + fill;
@@ -615,6 +620,27 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     let wind = water.bodies[bi].bed.z;
     foam += saturate((0.55 - in.jac) * 2.5) * saturate((wind - 4.0) * 0.25);
     let wp = tiling_pos(in.rel).xz;
+    // In a strong wind the crests break all over, in patches too small and quick for the waves
+    // above to pinch: about 3.84e-6·U^3.41 of the sea is white (Monahan), the breakers drawn
+    // out downwind. The wind drags the surface along at about 3% of its speed, so foam streaks
+    // run with it.
+    let wind_dir = normalize(water.bodies[bi].wind.xy + vec2<f32>(1e-4, 0.0));
+    let caps = 3.84e-6 * pow(max(wind, 0.0), 3.41);
+    if (caps > 0.002) {
+        let across = vec2<f32>(-wind_dir.y, wind_dir.x);
+        let q = vec2<f32>(dot(wp, wind_dir) * 0.35, dot(wp, across)) - vec2<f32>(time_s() * 0.4, 0.0);
+        let breaking = value_noise2(q * 1.7) * 0.6 + value_noise2(q * 4.1 + vec2<f32>(3.1, 7.7)) * 0.4;
+        // The noise rarely tops 0.9: a threshold of 1 − 1.5·√caps whitens about `caps` of it.
+        let edge = 1.0 - min(1.5 * sqrt(caps), 0.45);
+        // A breaker is froth, not a sheet: fine noise tears holes in it.
+        let lace = value_noise2(wp * 5.3 + vec2<f32>(time_s() * 0.9, 0.0)) * 0.6
+            + value_noise2(wp * 13.0 + vec2<f32>(1.7, time_s() * 1.3)) * 0.4;
+        foam += smoothstep(edge, edge + 0.1, breaking) * smoothstep(0.3, 0.6, lace) * 1.3;
+        // From a near gale on, the foam the breakers leave is drawn into rows along the wind.
+        let rows = value_noise2(vec2<f32>(dot(wp, wind_dir) * 0.06, dot(wp, across) * 1.1));
+        foam += smoothstep(0.6, 0.8, rows) * 0.35 * smoothstep(10.0, 16.0, wind);
+        vel += wind_dir * wind * 0.03;
+    }
     var g = capillary_gradient(wp, water.bodies[bi].wind.xy, wind, footprint(in.rel));
     g += rain_gradient(wp, rain_at(in.rest), saturate(1.0 - pixel / 0.02));
     n = normalize(n + vec3<f32>(-g.x, 0.0, -g.y));
@@ -705,12 +731,17 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     let wgt = abs(phase0 - 0.5) * 2.0;
     var g = mix(g0, g1, wgt) * (1.0 + speed * 0.5);
     g += rain_gradient(wp, rain_at(in.rel.xz), saturate(1.0 - pixel / 0.02));
+    // Rings, wakes and foam from whatever moves through the stream (the interactive field
+    // covers streams near the camera too).
+    let rp = ripple_at(in.rel.xz);
+    g += rp.zw;
     let n = normalize(in.normal + vec3<f32>(-g.x, 0.0, -g.y));
     // White water: fast, steep or tumbling. Fast water breaks into streaks and patches of
     // white over its riffles, never a white sheet; drops churn it white all over.
     let steep = 1.0 - in.normal.y;
     var foam = saturate((speed - 1.8) * 0.25) * 0.5 + saturate(steep * 2.5 - 0.3) * 1.3;
     foam *= saturate(in.depth * 30.0);
+    foam += rp.y * 1.2;
     var color: vec3<f32>;
     if (front) {
         // Streams run shallow over riffles: only the last centimeter fades.
@@ -800,7 +831,12 @@ fn fall_streaks(u: f32, t0: f32, fine: f32) -> f32 {
 @fragment
 fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     if (in.kind > 0.5) { return fall_mist(in); }
-    let q = in.look.x;
+    // No lip is level: the water gathers into tongues where the rock dips and runs thin
+    // between them (the pattern is fixed to the rock, `u` being meters across in the world).
+    let gather = value_noise2(vec2<f32>(in.uv.x * 0.45, 3.7)) * 0.65
+        + value_noise2(vec2<f32>(in.uv.x * 1.3, 9.1)) * 0.35;
+    let tongue = smoothstep(0.3, 0.7, gather);
+    let q = in.look.x * mix(0.4, 1.5, tongue);
     let frac = in.look.y;
     let side = in.look.z;
     let tau = in.uv.y;
@@ -825,8 +861,23 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     // fingers with the rock showing between them, and thin threads are see-through.
     let body = saturate(q * 8.0 + 0.15);
     let gaps = smoothstep(0.1, 1.0, frac) * 0.45 * (1.2 - body * 0.4);
-    var alpha = smoothstep(gaps, gaps + 0.2, s) * body * (0.7 + 0.3 * smoothstep(0.2, 0.7, s));
+    // Falling free, the fingers tear into packets of water lower down (the pattern rides with
+    // the water, so they stretch as it speeds up), each fraying at its edges into spray, and a
+    // thin haze of drops hangs between them. A thick flow and a sheet sliding down rock stay
+    // whole.
+    // (From afar the torn packets blur together with the spray: the fall reads whole.)
+    let tear = smoothstep(0.15, 0.9, frac) * (1.0 - rock * 0.7) * mix(0.35, 1.0, fine);
+    let packets = fbm2(vec2<f32>(u * 3.1 + 7.7, t0 * 7.0), 3) / 0.875;
+    let edge = 0.2 + 0.3 * tear;
+    var alpha = smoothstep(gaps, gaps + edge, s - (1.0 - packets) * 0.35 * tear * (1.3 - body * 0.7)) * body
+        * (0.7 + 0.3 * smoothstep(0.2, 0.7, s));
+    let drops = value_noise2(vec2<f32>(u * 23.0 + 1.9, t0 * 31.0));
+    alpha = max(alpha, tear * body * 0.3 * smoothstep(0.35, 0.95, drops) * smoothstep(0.1, 0.5, s));
+    // From afar those drops blur into a veil across the gaps.
+    alpha = max(alpha, (1.0 - fine) * body * 0.4 * smoothstep(0.15, 0.9, frac) * smoothstep(0.0, 0.35, s));
     alpha *= 1.0 - smoothstep(0.6, 1.0, abs(side) + (s - 0.5) * 0.4);
+    // Between the tongues only the strongest streaks pour, as threads.
+    alpha *= mix(smoothstep(0.55, 0.85, s) * 0.85, 1.0, tongue);
     // Soft where it meets the rock behind it and the pool it lands in.
     let size = vec2<f32>(textureDimensions(scene_color));
     let pix = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), size - 1.0));

@@ -125,36 +125,57 @@ pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
             ),
         );
     }
+    // A carved fountain in the middle of the marble (Particles' court fountain, a third bigger),
+    // its jets falling into the basin.
+    let fountain = 1.3;
+    engine_vfx::demo::art::spawn_prop(
+        commands,
+        "plaza.fountain",
+        at(c + DVec3::new(0.0, 0.2, 0.0)).with_scale(Vec3::splat(fountain)),
+        engine_vfx::demo::art::props::water::fountain,
+    );
+    commands.spawn((
+        at(c + DVec3::new(
+            0.0,
+            0.2 + (engine_vfx::demo::art::props::water::NOZZLE * fountain) as f64,
+            0.0,
+        )),
+        engine_vfx::ParticleEffect::new("water.fountain"),
+    ));
+    // Polished garden spheres on stone pedestals in a ring round it: a roughness sweep in red
+    // glaze on the near side and in gilt on the far side, smooth to matte left to right.
     for i in 0..7 {
         let r = i as f32 / 6.0;
-        let x = (i as f64 - 3.0) * 2.6;
         let ball = Shape::Sphere {
-            radius: 1.0,
+            radius: 0.45,
             segments: 48,
         };
-        spawn(
-            commands,
-            ball,
-            mat(0xc0392b, r.max(0.05)),
-            at(c + DVec3::new(x, 1.2, 4.0)),
-        );
-        spawn(
-            commands,
-            ball,
-            StandardMaterial::hex(0xe6b450)
-                .with_metallic(1.0)
-                .with_roughness(r.max(0.05)),
-            at(c + DVec3::new(x, 1.2, 0.0)),
-        );
-        for zz in [0.0, 4.0] {
-            spawn(
-                commands,
-                cyl(0.5, 0.2),
-                stone(),
-                at(c + DVec3::new(x, 0.3, zz)),
-            );
+        for (side, material) in [
+            (1.0, mat(0xc0392b, r.max(0.05))),
+            (
+                -1.0,
+                StandardMaterial::hex(0xe6b450)
+                    .with_metallic(1.0)
+                    .with_roughness(r.max(0.05)),
+            ),
+        ] {
+            // 25° to 155° round the near (+Z) or the far (−Z) half.
+            let a = (25.0 + i as f64 * 130.0 / 6.0).to_radians();
+            let p = DVec3::new(-a.cos() * 11.5, 0.0, side * a.sin() * 11.5);
+            // A marble pedestal: plinth, slim shaft and a cap the ball sits in.
+            for (radius, height, y) in [(0.36, 0.12, 0.26), (0.24, 0.72, 0.68), (0.32, 0.1, 1.09)] {
+                spawn(
+                    commands,
+                    cyl(radius, height),
+                    StandardMaterial::preset(MaterialPreset::Marble).with_triplanar(),
+                    at(c + p + DVec3::Y * y),
+                );
+            }
+            spawn(commands, ball, material, at(c + p + DVec3::Y * 1.56));
         }
     }
+    // Behind them, toward the north road: a glass globe in a glowing ring, between two steel
+    // sculptures on plinths.
     spawn(
         commands,
         Shape::Torus {
@@ -163,7 +184,7 @@ pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
             segments: 64,
         },
         StandardMaterial::hex(0x202830).with_emissive([0.3, 0.7, 1.0], 600.0),
-        Transform::from_translation(c + DVec3::new(0.0, 3.5, -6.0))
+        Transform::from_translation(c + DVec3::new(0.0, 3.5, -19.0))
             .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
     );
     let mut glass = StandardMaterial::hex(0xd8f0ff)
@@ -177,14 +198,14 @@ pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
             segments: 64,
         },
         glass,
-        at(c + DVec3::new(0.0, 3.5, -6.0)),
+        at(c + DVec3::new(0.0, 3.5, -19.0)),
     );
-    for (i, x) in [-9.0, 9.0].into_iter().enumerate() {
+    for (i, x) in [-6.0, 6.0].into_iter().enumerate() {
         spawn(
             commands,
             cuboid(2.0, 1.0, 2.0),
             stone(),
-            at(c + DVec3::new(x, 0.7, -6.0)),
+            at(c + DVec3::new(x, 0.7, -19.0)),
         );
         let shape = if i == 0 {
             Shape::Capsule {
@@ -199,7 +220,7 @@ pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
                 segments: 48,
             }
         };
-        spawn(commands, shape, metal(), at(c + DVec3::new(x, 2.4, -6.0)));
+        spawn(commands, shape, metal(), at(c + DVec3::new(x, 2.4, -19.0)));
     }
     // Trees in big planters at the four diagonals.
     for k in 0..4 {
@@ -212,14 +233,7 @@ pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
             at(p + DVec3::new(0.0, 0.4, 0.0)),
         );
         let t = &lib.trees_of(TreeKind::Oak).nth(k).expect("oak");
-        scenery::spawn_tree(
-            commands,
-            lib,
-            t,
-            p + DVec3::new(0.0, 0.8, 0.0),
-            a as f32,
-            0.8,
-        );
+        scenery::spawn_tree(commands, t, p + DVec3::new(0.0, 0.8, 0.0), a as f32, 0.8);
     }
 }
 
@@ -295,67 +309,29 @@ pub fn cave_shell(
     rng: &mut Rng,
 ) {
     let c = crate::zones::zone("cave").center;
-    let (hx, hz, h) = CAVE_INSIDE;
+    let (_, hz, h) = CAVE_INSIDE;
     let kit = &lib.rocks;
-    // Back and side walls, thick enough to reach the edge of the hole the landscape digs, and
-    // the front wall either side of the 10 m mouth: the kit's rock, so the face reads as stone.
-    let (fx, fz, fh) = (hx as f32, hz as f32, h as f32);
-    let mut walls = crate::meshgen::Builder::default();
-    walls.cuboid(
-        Vec3::new(0.0, 5.0, fz + 3.5),
-        Vec3::new(22.0, 5.0, 3.5),
-        Quat::IDENTITY,
-        ROCK_TINT,
-    );
-    for s in [-1.0, 1.0] {
-        walls.cuboid(
-            Vec3::new(s * (fx + 3.5), 5.0, 2.5),
-            Vec3::new(3.5, 5.0, 21.5),
-            Quat::IDENTITY,
-            ROCK_TINT,
-        );
-        walls.cuboid(
-            Vec3::new(s * 10.0, fh * 0.5, -fz - 0.5),
-            Vec3::new(5.0, fh * 0.5, 1.5),
-            Quat::IDENTITY,
-            ROCK_TINT,
-        );
-    }
-    commands.spawn((
-        at(c),
-        MeshRenderer::new(meshes.add(rock_face(walls)), kit.mats.rock),
-    ));
+    // The rock inside: Foliage's sculpted chamber (walls bulging into alcoves, ledges,
+    // flowstone, stalactites, a vaulted roof, the 10 m mouth in its −Z wall and no sky light
+    // but through the mouth), the same size as the hole the landscape digs.
+    engine_foliage::demo::spawn_cave_chamber(commands, c);
     cave_roof(commands, meshes, lib, land, c, h, rng);
-    // Boulders sunk into the walls and hanging from the ceiling, so the inside reads as rock
-    // rather than a box. Each sits with its flat base in the wall and its rounded face out.
-    // (Shapes and tilts come from their own stream; the shared one advances as before.)
+    // (The boulders that once lined the box walls are gone with them; their draws stay, so
+    // everything laid out after them keeps its place.)
     let mut pick = Rng::new(0x00ca_7eb0_u64);
     for k in 0..64 {
-        let along = rng.range(-1.0, 1.0) as f64;
-        let y = rng.range(-0.5, h as f32 - 1.0) as f64;
-        let (p, inward) = match k % 4 {
-            0 => (DVec3::new(-hx - 0.4, y, along * hz), Vec3::X),
-            1 => (DVec3::new(hx + 0.4, y, along * hz), Vec3::NEG_X),
-            2 => (DVec3::new(along * hx, y, hz + 0.4), Vec3::NEG_Z),
-            _ => (
-                DVec3::new(along * hx, h + 0.4, rng.range(-hz as f32, hz as f32) as f64),
-                Vec3::NEG_Y,
-            ),
-        };
-        let _ = rng.range_i32(0, 6);
-        let yaw = rng.range(0.0, TAU);
-        let tilt = rng.range(-0.6, 0.6) * 0.5;
-        let scale = rng.range(1.4, 3.0) * 0.6;
-        let v = kit.pick(crate::rocks::RockSize::Large, pick.chance(0.5), &mut pick);
-        let sink = (inward * v.extent.y * scale * 0.45).as_dvec3();
-        let tf = Transform::from_translation(c + p - sink)
-            .with_rotation(
-                Quat::from_rotation_arc(Vec3::Y, inward)
-                    * Quat::from_rotation_y(yaw)
-                    * Quat::from_rotation_x(tilt),
-            )
-            .with_scale(Vec3::new(scale, scale * pick.range(0.7, 1.0), scale));
-        kit.spawn(commands, v, tf, crate::rocks::RockLook::default());
+        let _ = (rng.range(-1.0, 1.0), rng.range(-0.5, h as f32 - 1.0));
+        if k % 4 == 3 {
+            let _ = rng.range(-hz as f32, hz as f32);
+        }
+        let _ = (
+            rng.range_i32(0, 6),
+            rng.range(0.0, TAU),
+            rng.range(-0.6, 0.6),
+        );
+        let _ = rng.range(1.4, 3.0);
+        let _ = kit.pick(crate::rocks::RockSize::Large, pick.chance(0.5), &mut pick);
+        let _ = pick.range(0.7, 1.0);
     }
     // Rocky arch over the mouth: blocks set into the hillside, faces out and a little up.
     for i in 0..9 {
@@ -435,13 +411,6 @@ pub fn cave_shell(
         }
         x += 2.9;
     }
-    commands.spawn((
-        at(c + DVec3::new(0.0, h * 0.5, 0.0)),
-        // Just past the inner wall faces so the walls count as inside too.
-        SkyLightVolume::new([hx as f32 + 0.5, h as f32 * 0.5 + 0.5, hz as f32 + 0.5])
-            .open(BoxFace::NegZ)
-            .with_fade(12.0),
-    ));
 }
 
 /// The cave's roof: the hillside carried on over the cave (grass on top, rock underneath and

@@ -9,7 +9,10 @@ shadowed volumes.
 - **Smoke lives in boxes of simulated air** (`SmokeVolume`): a grid of voxels (0.25–2 m)
   holding air velocity, smoke density (kg/m³), temperature and color. Place a volume over a
   battlefield, a burning meadow or a room. Smoke released anywhere else gets a volume of its
-  own (`SmokeSettings::auto_size_m`), which goes away once its smoke has gone.
+  own (`SmokeSettings::auto_size_m`), which goes away once its smoke has gone. Where volumes
+  overlap, smoke goes to the finest one, so a small fine box around a campfire (0.3 m) inside a
+  meadow's coarse one keeps its thin wisp; volumes finer than 0.5 m also draw smaller billows
+  and erode thin smoke less.
 - **It moves like smoke:** hot smoke rises (buoyancy from its temperature) and cools as it
   mixes; dense, cold smoke sinks and spreads along the ground. The air takes up the wind
   (`WindField`, sampled every few voxels), swirls (vorticity confinement), stays
@@ -28,7 +31,9 @@ shadowed volumes.
   `WindField` too. A `SmokeObstacle` (a car, a character) pushes smoke aside as it moves.
 - **Drawing:** each volume's density goes to a 3D texture. Once per simulation step a compute
   pass works out, for every voxel, how much smoke lies toward the sun, up toward the sky and
-  down toward the ground, and how much firelight and lamplight (point lights) reaches it. A
+  down toward the ground, and how much firelight and lamplight (point lights) reaches it.
+  Smoke still hot from a fire (its heat goes up as a second texture) also gets the light of
+  the flames under it, so a plume's underside glows orange at night. A
   raymarch through the box then lights every step with the sun (forward scattering, a few
   orders of multiple scattering so thick white smoke looks white from every side, and the
   scene's shadow map), sky light from above and ground light from below, and firelight. Fine
@@ -128,6 +133,6 @@ and relights a volume only when it changed.
 ## Not yet
 
 - Smoke crossing from one volume into a neighbor (each volume is on its own).
-- Smoke lit from below by the flames' own shape (firelight is point lights). Heat haze is
-  drawn by the fire module.
+- Smoke lit by the exact shape of the flames (hot smoke gets the flames' light from its
+  heat, other smoke from point lights). Heat haze is drawn by the fire module.
 - Half-resolution raymarching for very large volumes on slow GPUs.

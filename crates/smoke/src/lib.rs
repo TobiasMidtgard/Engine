@@ -268,6 +268,21 @@ mod tests {
     use super::*;
     use engine_world::{ProjectileTrace, WorldImpulse};
 
+    #[test]
+    fn a_fine_volume_inside_a_coarse_one_gets_the_smoke_released_in_it() {
+        use engine_core::math::UVec3;
+        let owner = |i| Some(Entity::from_raw_u32(i).unwrap());
+        let mut d = SmokeDomains::default();
+        let coarse = d.add(owner(1), Domain::new(DVec3::ZERO, 2.0, UVec3::splat(20)));
+        let fine = d.add(
+            owner(2),
+            Domain::new(DVec3::splat(10.0), 0.25, UVec3::splat(16)),
+        );
+        assert_eq!(d.find(DVec3::splat(11.0)), Some(fine));
+        assert_eq!(d.find(DVec3::splat(5.0)), Some(coarse));
+        assert_eq!(d.find(DVec3::splat(-1.0)), None);
+    }
+
     fn app() -> App {
         let mut app = App::new();
         app.world

@@ -1658,18 +1658,23 @@ pub fn campfire_wood(seed: u64) -> Mesh {
         );
         split_log(&mut b, length, radius, wedge, rng.next_u32(), m);
     }
-    // Charcoal: chunky lumps from the char region of the atlas.
-    for _ in 0..16 {
+    // Charcoal: a bed of chunky lumps from the live-coal region of the atlas, glowing between
+    // the logs.
+    for _ in 0..30 {
         let a = rng.range(0.0, TAU);
-        let d = rng.range(0.0, 0.32);
+        let d = rng.range(0.0, 0.34).sqrt() * 0.58;
         let size = Vec3::new(
-            rng.range(0.03, 0.07),
-            rng.range(0.02, 0.04),
-            rng.range(0.025, 0.05),
+            rng.range(0.035, 0.08),
+            rng.range(0.025, 0.045),
+            rng.range(0.03, 0.06),
         );
         let s = rng.next_u32();
+        let (du, dv) = (rng.range(-0.02, 0.02), rng.range(-0.06, 0.06));
         let mut lump = rounded_box(size, size.min_element() * 0.35, Vec4::ONE, &|_, q| {
-            Vec2::new(0.1 + q.x * 2.0 + q.z, 0.04 + q.y * 0.5)
+            Vec2::new(
+                0.9375 + du + (q.x + q.z) * 0.5,
+                0.375 + dv + q.y + (q.x - q.z) * 0.5,
+            )
         });
         for v in &mut lump.vertices {
             let p = Vec3::from(v.position);

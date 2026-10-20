@@ -16,7 +16,7 @@ use engine_core::time::TimeSource;
 use engine_physics::{PhysicsDebug, PhysicsPlugin, PhysicsStats, demo};
 use engine_render::prelude::*;
 use engine_render::{RenderDisabled, Renderer, capture_now};
-use engine_world::WorldPlugin;
+use engine_world::{SimulationFocus, WorldPlugin};
 
 /// (world seconds, file name, camera position, look-at target), yard-local.
 const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
@@ -26,12 +26,26 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [0.0, 24.0, 44.0],
         [0.0, 2.0, -3.0],
     ),
+    // The Newton's cradle: the first ball swinging in, the last flying out with the middle three
+    // still, and the first flying out again.
+    (
+        0.3,
+        "20_cradle_swinging_in",
+        [17.3, 2.3, -2.2],
+        [16.0, 1.75, -4.5],
+    ),
     // The wrecking ball's chain close up under the swinging ball's load (and later, below).
     (
         0.7,
         "16_wrecking_chain_swinging",
         [-31.5, 5.5, 16.0],
         [-26.5, 4.6, 10.0],
+    ),
+    (
+        0.95,
+        "21_cradle_last_ball_out",
+        [17.3, 2.3, -2.2],
+        [16.0, 1.75, -4.5],
     ),
     (
         1.0,
@@ -45,6 +59,12 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         "14_dummies_tumbling",
         [30.0, 3.2, -5.5],
         [24.0, 1.6, -12.0],
+    ),
+    (
+        1.8,
+        "22_cradle_first_ball_out_again",
+        [17.3, 2.3, -2.2],
+        [16.0, 1.75, -4.5],
     ),
     (
         1.9,
@@ -66,11 +86,25 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [-19.0, 2.4, 24.2],
         [-30.0, 1.3, 19.5],
     ),
+    // The rockfall: rocks pouring off the chute, then the heap.
+    (
+        2.4,
+        "18_rockfall_pouring",
+        [-15.0, 4.0, 7.0],
+        [-24.5, 2.0, -2.0],
+    ),
     (
         2.6,
         "05_pile_and_tower",
         [-8.0, 9.0, 4.0],
         [-18.0, 3.0, -15.0],
+    ),
+    // The pendulum wave: nearly in step, in snakes, and in two alternate rows at half a minute.
+    (
+        3.0,
+        "23_pendulum_wave_start",
+        [16.0, 6.2, -3.4],
+        [16.0, 1.5, -8.6],
     ),
     (5.0, "06_dominoes", [8.0, 4.5, -4.0], [5.0, 0.4, -16.0]),
     (6.0, "07_bridge", [27.5, 4.0, 10.0], [18.0, 2.6, 10.0]),
@@ -81,6 +115,18 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         "15_dummies_at_rest",
         [28.0, 2.4, -5.0],
         [24.0, 0.5, -9.8],
+    ),
+    (
+        10.0,
+        "19_rockfall_heap",
+        [-18.0, 2.4, 3.0],
+        [-23.0, 0.7, -2.0],
+    ),
+    (
+        10.0,
+        "24_pendulum_wave_snakes",
+        [16.0, 6.2, -3.4],
+        [16.0, 1.5, -8.6],
     ),
     (
         12.0,
@@ -100,6 +146,12 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         "13_barrel_run_sand",
         [22.5, 1.6, 23.9],
         [29.0, 0.4, 19.0],
+    ),
+    (
+        30.0,
+        "25_pendulum_wave_two_rows",
+        [16.0, 6.2, -3.4],
+        [16.0, 1.5, -8.6],
     ),
     // The dominoes replay every 30 s: standing again, the first one tipping.
     (
@@ -132,6 +184,16 @@ fn main() {
     app.add_plugins(WorldPlugin);
     app.add_plugins(PhysicsPlugin);
     let debug = std::env::var("PHYSICS_DEBUG").is_ok_and(|v| v != "0");
+    // `PHYSICS_FOCUS=x,y,z` simulates as if the player stood there (far away, the yard
+    // simulates at a coarser level of detail).
+    let focus: Option<DVec3> = std::env::var("PHYSICS_FOCUS").ok().and_then(|v| {
+        let p: Vec<f64> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        (p.len() == 3).then(|| DVec3::new(p[0], p[1], p[2]))
+    });
+    if let Some(at) = focus {
+        app.world
+            .spawn((Transform::from_translation(at), SimulationFocus::default()));
+    }
     if debug {
         app.add_plugins(engine_debug::DebugPlugin);
         *app.world.resource_mut::<PhysicsDebug>() = PhysicsDebug {
@@ -139,7 +201,8 @@ fn main() {
             contacts: true,
             joints: true,
             centers_of_mass: true,
-            radius_m: 80.0,
+            // Drawn around the focus, so around it and the yard both when it is far.
+            radius_m: focus.map_or(80.0, |f| f.length() + 80.0),
             ..Default::default()
         };
     }
@@ -198,16 +261,25 @@ fn main() {
             eprintln!("no GPU: {}", d.0);
             return;
         }
-        let suffix = if debug { "_debug" } else { "" };
+        let suffix = match (debug, focus) {
+            (true, Some(_)) => "_debug_far",
+            (true, None) => "_debug",
+            (false, Some(_)) => "_far",
+            (false, None) => "",
+        };
         let path = out.join(format!("{name}{suffix}.png"));
         match capture_now(&mut app.world, &path) {
             Ok(_) => {
                 let s = *app.world.resource::<PhysicsStats>();
                 println!(
-                    "t = {t:5.2} s  {}  ({} bodies, {} awake, step {:.2} ms)",
+                    "t = {t:5.2} s  {}  ({} bodies, {} awake ({} coarse, {} half rate, {} fine), {} regions, step {:.2} ms)",
                     path.display(),
                     s.bodies,
                     s.awake,
+                    s.coarse_awake,
+                    s.half_rate_awake,
+                    s.fine_awake,
+                    s.regions,
                     s.step_ms
                 );
             }

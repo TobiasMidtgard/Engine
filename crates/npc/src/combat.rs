@@ -23,13 +23,14 @@ use crate::faction::{Faction, Squad};
 use crate::features::ExplosiveProp;
 use crate::learning::OpponentModels;
 use crate::perception::{NpcMemory, Perceivable, Perceivables};
+use crate::seed::{Seed, seed_of};
 use crate::skills::NpcSkills;
 use crate::squad::{AttackTokens, ReviveClaims};
 use crate::world_model::{TacticalWorld, physics_backend};
 
-/// Deterministic 0..1 noise from an entity, a time and a salt (combat rolls).
-pub(crate) fn roll(e: Entity, now: f64, salt: u64) -> f32 {
-    let h = hash_u64(e.to_bits() ^ (now * 1000.0) as u64 ^ salt.wrapping_mul(0x9e37_79b9));
+/// Deterministic 0..1 noise from a body's [`Seed`], a time and a salt (combat rolls).
+pub(crate) fn roll(seed: u64, now: f64, salt: u64) -> f32 {
+    let h = hash_u64(seed ^ (now * 1000.0) as u64 ^ salt.wrapping_mul(0x9e37_79b9));
     (h >> 40) as f32 / (1u64 << 24) as f32
 }
 
@@ -107,6 +108,7 @@ pub(crate) fn notice_attacks(
     seen: Res<Perceivables>,
     mut models: ResMut<OpponentModels>,
     time: Res<Time>,
+    seeds: Query<&Seed>,
 ) {
     for ev in events.read() {
         models
@@ -141,7 +143,8 @@ pub(crate) fn notice_attacks(
                 continue;
             }
             let model = models.get(ev.attacker);
-            let mut reaction = skills.reaction_time * (0.85 + 0.4 * roll(me, clock.now, 7));
+            let mut reaction =
+                skills.reaction_time * (0.85 + 0.4 * roll(seed_of(&seeds, me), clock.now, 7));
             // Rhythm learned: the guard is already half up when the swing comes.
             if let Some(expected) = model.next_attack_expected()
                 && (expected - time.elapsed_secs_f64()).abs() < 0.35
@@ -174,11 +177,20 @@ pub(crate) fn defend(
         &mut NpcBrain,
     )>,
     mut triggers: MessageWriter<AnimationTrigger>,
+    seeds: Query<&Seed>,
 ) {
     for (me, clock, skills, weapon, mut combat, vitals, brain) in &mut q {
         let now = clock.now;
         combat.incoming.retain(|a| now < a.lands_at + 0.6);
         if vitals.downed {
+            continue;
+        }
+        // Down on its knees by a mate (the weapon set down, the hands on the chest), or getting
+        // up from there: it can neither block nor dodge.
+        if brain.kneeling() || now < brain.revive_rise_until {
+            if combat.defense != Defense::None {
+                combat.defense = Defense::None;
+            }
             continue;
         }
         let staggered = combat.is_staggered(now);
@@ -199,7 +211,7 @@ pub(crate) fn defend(
                 && left > 0.2
                 && weapon.can_block
                 && skills.defense > 0.6
-                && roll(me, a.lands_at, 13) < skills.defense * 0.7
+                && roll(seed_of(&seeds, me), a.lands_at, 13) < skills.defense * 0.7
             {
                 continue;
             }
@@ -208,7 +220,7 @@ pub(crate) fn defend(
                 late += 1;
                 continue;
             }
-            let r = roll(me, now, 11);
+            let r = roll(seed_of(&seeds, me), now, 11);
             if r > skills.defense {
                 continue; // read it, but not well enough to do anything
             }
@@ -297,6 +309,8 @@ pub(crate) struct Strike {
     aim: DVec3,
     /// The attacker's clock when it landed (seeds the shot's scatter).
     at: f64,
+    /// The attacker's [`Seed`].
+    seed: u64,
 }
 
 type FighterItem<'a> = (
@@ -328,6 +342,7 @@ pub(crate) fn resolve_attacks(
     mut traces: MessageWriter<ProjectileTrace>,
     mut noise: MessageWriter<NoiseEvent>,
     mut strikes: Local<Vec<Strike>>,
+    seeds: Query<&Seed>,
 ) {
     strikes.clear();
     for (me, t, clock, skills, weapon, mut combat, _, intent) in &mut q {
@@ -384,6 +399,7 @@ pub(crate) fn resolve_attacks(
             forward: Vec3::new(fwd.x, 0.0, fwd.z).normalize_or(Vec3::NEG_Z),
             aim,
             at: now,
+            seed: seed_of(&seeds, me),
         });
     }
     if !settings.resolve_hits {
@@ -568,8 +584,8 @@ fn resolve_shot(
         * (1.0 + 3.0 * (1.0 - haze));
     // Random direction in a cone (deterministic per shot; seeded by when it is fired, so a
     // shooter standing still doesn't send every shot to the same spot).
-    let r1 = roll(s.attacker, s.at, 3);
-    let r2 = roll(s.attacker, s.at, 5);
+    let r1 = roll(s.seed, s.at, 3);
+    let r2 = roll(s.seed, s.at, 5);
     let ang = spread * r1.sqrt();
     let rot = r2 * TAU;
     let side = aim_dir.any_orthonormal_vector();
@@ -726,15 +742,93 @@ fn ray_segment(o: DVec3, d: Vec3, a: DVec3, b: DVec3) -> (f32, f32) {
     (sc as f32, p_ray.distance(p_seg) as f32)
 }
 
-/// Marks a downed NPC (health reached 0) and when it went down (NPC clock).
-#[derive(Component, Debug, Clone, Copy)]
+/// Marks a downed NPC (health reached 0): when it went down (NPC clock), and which way the
+/// blow that felled it knocked it, if it did (see [`Lie`]).
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
 pub struct Downed {
     pub since: f64,
+    /// The turn (rad about Y off straight back, left positive) of the way the felling blow
+    /// knocked it over, if it pushed it back or to a side.
+    pub push: Option<f32>,
 }
+
+/// How a downed NPC lies, as its body falls and as its squad mates see it: on its back,
+/// fallen along `yaw` (rad about Y off straight back from the way it faced, left positive),
+/// the leg on side `bent` folded out to the side and the arm on side `flung` flung out wide (0
+/// its left, 1 its right); the other leg lies straight, the other arm along the body.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Lie {
+    pub yaw: f32,
+    pub bent: usize,
+    pub flung: usize,
+}
+
+impl Lie {
+    /// About where its breastbone lies, in the frame it fell in (on the ground between where
+    /// its feet stood, its head toward +Z and its right toward +X): a little toward the side
+    /// of the folded leg (the hips roll that way), and not quite as far round as the frame
+    /// turns (the feet stay where they stood as the body goes over). How it stood when it fell
+    /// moves it a few cm more.
+    pub fn sternum(self) -> Vec3 {
+        let bent = if self.bent == 0 { -1.0 } else { 1.0 };
+        Vec3::new(
+            -0.015 + 0.029 * bent - 0.13 * self.yaw,
+            0.28,
+            0.76 - 0.03 * self.yaw * self.yaw,
+        )
+    }
+
+    /// How a body lies, knocked over along `push` (see [`Downed::push`]); with none, back and a
+    /// little to one side. How it lands differs from one NPC to the next: `vary` is its
+    /// [`Seed::unit`](crate::Seed::unit).
+    pub fn of(vary: f32, push: Option<f32>) -> Lie {
+        Lie {
+            yaw: push.unwrap_or((vary - 0.5) * 0.8),
+            bent: usize::from(vary > 0.5),
+            flung: usize::from((vary * 7.0).fract() > 0.45),
+        }
+    }
+
+    /// Which way a blow pushing along `push` (owner frame x, z) knocks a fighter over (see
+    /// [`Downed::push`]): along the push if it pushes back or to a side, at most a little past
+    /// square to the side.
+    pub fn pushed(push: Vec2) -> Option<f32> {
+        let p = push.normalize_or_zero();
+        (p.y > -0.2 && p.length() > 0.1).then(|| p.x.atan2(p.y).clamp(-0.9, 0.9))
+    }
+
+    /// The side of the arm along its body (0 its left, 1 its right), where a squad mate
+    /// kneels to revive it when it can (see [`Lie::kneel_by`]).
+    pub fn along(self) -> usize {
+        1 - self.flung
+    }
+
+    /// Where a squad mate's knees go to revive it from side `side` (0 its left, 1 its right),
+    /// from its breastbone in the frame it fell in (flat; see [`Lie::sternum`]): beside its chest, outside the arm
+    /// along its body (what that hand let go of lies by the thigh, clear of the knees); on the
+    /// side of the arm flung out wide (and of what it flung), beside its belly, short of that
+    /// arm. A mate kneels on the side of the arm along the body when it can.
+    pub fn kneel_by(self, side: usize) -> Vec3 {
+        let s = if side == 0 { -1.0 } else { 1.0 };
+        let k = if side == self.flung {
+            KNEEL_BY_BELLY
+        } else {
+            KNEEL_BY_ARM
+        };
+        Vec3::new(s * k.x, 0.0, k.y)
+    }
+}
+
+/// Where the knees go from a downed NPC's breastbone (out to the side, toward its head; see
+/// [`Lie::kneel_by`]): outside the arm along its body, or beside its belly below the arm flung
+/// out wide.
+const KNEEL_BY_ARM: Vec2 = Vec2::new(0.5, 0.08);
+const KNEEL_BY_BELLY: Vec2 = Vec2::new(0.32, -0.2);
 
 type VictimItem<'a> = (
     Entity,
     &'a NpcClock,
+    &'a Transform,
     &'a mut NpcVitals,
     &'a mut NpcCombat,
     &'a mut NpcBrain,
@@ -751,7 +845,7 @@ pub(crate) fn apply_damage(
     mut triggers: MessageWriter<AnimationTrigger>,
 ) {
     for h in hurts.read() {
-        let Ok((e, clock, mut vitals, mut combat, mut brain, mut intent)) = q.get_mut(h.target)
+        let Ok((e, clock, t, mut vitals, mut combat, mut brain, mut intent)) = q.get_mut(h.target)
         else {
             continue;
         };
@@ -785,13 +879,17 @@ pub(crate) fn apply_damage(
             brain.switch(NpcAction::Down, now);
             brain.destination = None;
             brain.revive = None;
+            brain.revive_kneel = 0.0;
             brain.revive_progress = 0.0;
             *intent = MoveIntent::default();
             tokens.release(e);
             revives.release(e);
+            // Knocked over along the blow (the body falls that way; its mates kneel by it).
+            let p = t.rotation.inverse() * h.impulse;
+            let push = Lie::pushed(Vec2::new(p.x, p.z));
             commands
                 .entity(e)
-                .insert((Downed { since: now }, Ragdoll { weight: 1.0 }));
+                .insert((Downed { since: now, push }, Ragdoll { weight: 1.0 }));
         }
     }
 }
@@ -839,6 +937,8 @@ fn get_up(
     brain.switch(NpcAction::Idle, now);
     brain.next_think = now;
     brain.destination = None;
+    // Up off the ground before it kneels by another.
+    brain.revive_retry = brain.revive_retry.max(now + NpcBrain::GET_UP_SECS);
 }
 
 /// Revives. A squad mate kneeling over a downed NPC for its revive time (see
@@ -859,14 +959,21 @@ pub(crate) fn revive(
     s.done.clear();
     s.tended.clear();
     s.standing.clear();
-    for (e, _, _, skills, (faction, squad, _), vitals, brain, _, _, t) in q.iter() {
+    // Squad revives off: nobody is being revived (those on their way give up at their next
+    // think).
+    let on = settings.ally_revive_secs > 0.0;
+    for (e, npc, clock, skills, (faction, squad, _), vitals, brain, _, _, t) in q.iter() {
         if vitals.downed {
             continue;
         }
         if let Some(&squad) = squad {
             s.standing.push((squad, *faction, t.translation));
         }
-        let Some(ally) = brain.revive.filter(|_| brain.action == NpcAction::Revive) else {
+        // (One that is not acting, handed to game code or stopped in time, revives nobody.)
+        let Some(ally) = brain
+            .revive
+            .filter(|_| brain.action == NpcAction::Revive && on && npc.active && clock.dt > 0.0)
+        else {
             continue;
         };
         if brain.revive_progress >= revive_secs(&settings, skills) {
@@ -891,11 +998,13 @@ pub(crate) fn revive(
         if let Ok((_, _, clock, _, _, _, mut brain, mut combat, ..)) = q.get_mut(reviver) {
             let now = clock.now;
             brain.revive = None;
+            brain.revive_kneel = 0.0;
             brain.revive_progress = 0.0;
             brain.destination = None;
             brain.switch(NpcAction::Idle, now);
-            // A moment to take its weapon up again before it thinks on.
-            brain.next_think = now + 0.4;
+            // Off its knees and its weapon taken up again before it thinks on.
+            brain.revive_rise_until = now + NpcBrain::REVIVE_STAND_SECS;
+            brain.next_think = now + NpcBrain::REVIVE_STAND_SECS;
             if up {
                 combat.stats.revives += 1;
             }
@@ -961,6 +1070,72 @@ mod tests {
     use crate::faction::Faction;
 
     #[test]
+    fn a_reviver_on_its_knees_neither_blocks_nor_dodges() {
+        use bevy_ecs::message::Messages;
+        use bevy_ecs::system::RunSystemOnce;
+        use bevy_ecs::world::World;
+        // Shots coming at a skilled shield bearer, and at a skilled rifleman (who dodges some).
+        for weapon in [NpcWeapon::sword_and_shield(), NpcWeapon::rifle()] {
+            for kneeling in [false, true] {
+                let mut defended = 0;
+                for n in 0..12 {
+                    let now = 1.0 + 0.37 * f64::from(n);
+                    let mut world = World::new();
+                    world.init_resource::<Messages<AnimationTrigger>>();
+                    let attacker = world.spawn_empty().id();
+                    let brain = NpcBrain {
+                        action: if kneeling {
+                            NpcAction::Revive
+                        } else {
+                            NpcAction::Engage
+                        },
+                        revive_kneel: if kneeling { 2.0 } else { 0.0 },
+                        ..Default::default()
+                    };
+                    let e = world
+                        .spawn((
+                            NpcClock {
+                                now,
+                                dt: 1.0 / 60.0,
+                                rate: 1.0,
+                            },
+                            NpcSkills {
+                                defense: 1.0,
+                                ..NpcSkills::master()
+                            },
+                            weapon,
+                            NpcCombat {
+                                incoming: vec![IncomingAttack {
+                                    attacker,
+                                    lands_at: now + 0.5,
+                                    react_at: now - 0.1,
+                                    ranged: true,
+                                    reach: 40.0,
+                                    handled: false,
+                                }],
+                                ..Default::default()
+                            },
+                            NpcVitals::default(),
+                            brain,
+                        ))
+                        .id();
+                    world.run_system_once(defend).unwrap();
+                    let c = world.get::<NpcCombat>(e).unwrap();
+                    if c.defense != Defense::None {
+                        defended += 1;
+                    }
+                }
+                let case = format!("{:?} kneeling {kneeling}", weapon.style);
+                if kneeling {
+                    assert_eq!(defended, 0, "{case}");
+                } else {
+                    assert!(defended > 0, "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn ray_segment_distance() {
         let (t, d) = ray_segment(
             DVec3::ZERO,
@@ -1005,6 +1180,7 @@ mod tests {
             forward: -Vec3::Z,
             aim: target.position,
             at,
+            seed: 0,
         };
         let dir = -Vec3::Z;
         let (mut head, mut body, mut legs) = (0, 0, 0);

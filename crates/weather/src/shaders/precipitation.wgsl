@@ -18,6 +18,10 @@ struct Precip {
 @group(1) @binding(1) var<storage, read> segments: array<vec4<f32>>;
 
 const SPEED_CLASSES: u32 = 3u;
+// Half-width of a bolt's quad in core widths (the rest is glow).
+const BOLT_HALO: f32 = 6.0;
+// Share of the light behind a snowflake that it blocks (the rest passes through its lace).
+const FLAKE_COVER: f32 = 0.6;
 
 fn pcg3(v0: vec3<u32>) -> vec3<f32> {
     var v = v0 * 1664525u + vec3<u32>(1013904223u);
@@ -119,6 +123,25 @@ fn drop_light(rel: vec3<f32>, view: vec3<f32>) -> vec3<f32> {
     return c;
 }
 
+// Light falling on a flake from lamps and lightning flashes: a thin white scrap lit from
+// either side, so it shows bright in a lamp's cone or a flash instead of a black speck
+// against the lit air behind it.
+fn flake_point_light(rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    var c = vec3<f32>(0.0);
+    for (var i = 0u; i < min(frame.counts.x, 16u); i++) {
+        let l = point_lights[i];
+        let d = l.position_range.xyz - rel;
+        let d2 = dot(d, d);
+        let range = l.position_range.w;
+        if (d2 < range * range) {
+            let wrap = saturate(dot(n, d * inverseSqrt(d2))) * 0.5 + 0.5;
+            let falloff = sq(saturate(1.0 - sq(d2 / (range * range))));
+            c += l.color_radius.rgb * wrap * falloff / max(d2, 0.25) * INV_PI;
+        }
+    }
+    return c;
+}
+
 @vertex
 fn vs_rain(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> PrecipOut {
     let h = pcg3(vec3<u32>(i, i * 7u + 3u, 911u));
@@ -180,13 +203,10 @@ fn vs_snow(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> Pr
     out.misc = vec4(0.0);
     out.position = frame.view_proj * vec4<f32>(p, 1.0);
     out.uv = vec2<f32>(c.x, c.y * 2.0 - 1.0);
-    // White, lit by sky and sun (with shadows) like any rough surface. Flakes are thin lace
-    // that lets part of the light behind them through, so against a bright overcast they
-    // read as soft grey specks, not as dark ash.
+    // White, lit by sky, sun (with shadows), lamps and flashes like any rough surface.
     let n = normalize(to_eye + vec3<f32>(0.0, 0.6, 0.0));
     let sun = frame.sun_camera.rgb * saturate(dot(n, frame.sun_dir.xyz) * 0.5 + 0.5) * shadow_factor(rel, n) * INV_PI;
-    let behind = sample_env(-to_eye);
-    let light = (sky_ambient(n) + sun) * 0.9 * 0.65 + behind * 0.4;
+    let light = (sky_ambient(n) + sun + flake_point_light(rel, n)) * 0.9 * 0.65;
     out.color = vec4<f32>(pre_expose(light), precip.look.y * fade * coverage);
     return out;
 }
@@ -195,7 +215,9 @@ fn vs_snow(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> Pr
 fn fs_snow(in: PrecipOut) -> @location(0) vec4<f32> {
     let r = length(in.uv);
     let a = saturate(in.color.a * smoothstep(1.0, 0.35, r));
-    return vec4<f32>(min(in.color.rgb, vec3(60000.0)) * a, a);
+    // The background shows through the lace, so against a bright overcast or the air lit by
+    // a flash flakes read as soft specks, not as dark ash.
+    return vec4<f32>(min(in.color.rgb, vec3(60000.0)) * a, a * FLAKE_COVER);
 }
 
 // Splashes: little crowns of droplets where rain lands, on the ground and on roofs.
@@ -252,8 +274,11 @@ fn fs_splash(in: PrecipOut) -> @location(0) vec4<f32> {
 // Lightning: blinding channel with a soft halo, fading inside the cloud.
 @vertex
 fn vs_bolt(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> PrecipOut {
-    let a = segments[i * 2u];
-    let b = segments[i * 2u + 1u];
+    // Per segment: start and core width (m), end and the flash's brightness, the segment's
+    // share of it (1 on the main channel, less on branches).
+    let a = segments[i * 3u];
+    let b = segments[i * 3u + 1u];
+    let share = segments[i * 3u + 2u].x;
     let c = corner(v);
     let p0 = a.xyz;
     let p1 = b.xyz;
@@ -262,7 +287,8 @@ fn vs_bolt(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> Pr
     let axis = normalize(p1 - p0 + vec3(1e-5));
     let side = normalize(cross(axis, -mid / max(dist, 1e-3)) + vec3(1e-5));
     let core = max(a.w, dist * pixel_angle() * 1.5);
-    let p = mid + side * core * c.x;
+    // The quad reaches well past the core for the glow of the air and rain around it.
+    let p = mid + side * core * c.x * BOLT_HALO;
     var out: PrecipOut;
     out.misc = vec4(0.0);
     out.position = frame.view_proj * vec4<f32>(p, 1.0);
@@ -271,13 +297,17 @@ fn vs_bolt(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> Pr
     let in_cloud = exp(-max(altitude - precip.bolt.w, 0.0) / 250.0);
     let haze = exp(-dist / 30000.0);
     // Display-referred cap: blinding white, but bloom stays a glow instead of a wall of light.
-    out.color = vec4<f32>(min(pre_expose(precip.bolt.rgb * b.w * in_cloud * haze), vec3(40.0)), 1.0);
+    // Branches take their share after the cap, so they stay dimmer than the channel.
+    out.color = vec4<f32>(min(pre_expose(precip.bolt.rgb * b.w * in_cloud * haze), vec3(40.0)) * share, 1.0);
     return out;
 }
 
 @fragment
 fn fs_bolt(in: PrecipOut) -> @location(0) vec4<f32> {
-    // A hot core with soft edges; the renderer's bloom adds the glow around it.
-    let core = smoothstep(1.0, 0.2, abs(in.uv.x));
-    return vec4<f32>(min(in.color.rgb, vec3(60000.0)) * core, 0.0);
+    // A hot core with soft edges, and a faint glow in the air and rain around it that
+    // the renderer's bloom (which only spreads what is bright) doesn't give a thin channel.
+    let x = abs(in.uv.x) * BOLT_HALO;
+    let core = smoothstep(1.0, 0.2, x);
+    let glow = 0.06 * exp(-1.2 * x) * (1.0 - smoothstep(0.6, 1.0, abs(in.uv.x)));
+    return vec4<f32>(min(in.color.rgb, vec3(60000.0)) * (core + glow), 0.0);
 }

@@ -57,6 +57,8 @@ struct VolumeGpu {
     density_views: [wgpu::TextureView; 2],
     light_view: wgpu::TextureView,
     glow_view: wgpu::TextureView,
+    /// How much hotter than the air the smoke is (°C), for the firelight under a plume.
+    heat: wgpu::Texture,
     params: wgpu::Buffer,
     /// Draw bind group for each choice of current texture.
     draw_groups: [Option<wgpu::BindGroup>; 2],
@@ -88,6 +90,7 @@ pub struct SmokeFeature {
     /// Indices into `volumes` whose smoke or shadow is in view, back to front.
     order: Vec<usize>,
     pack: Vec<[u16; 4]>,
+    pack_heat: Vec<u16>,
     frames_since_light: u32,
     stats: FeatureStats,
 }
@@ -110,6 +113,18 @@ pub fn pack_density(domain: &Domain, extinction_m2_kg: f32, out: &mut Vec<[u16; 
             f16(sigma * albedo.z),
         ]);
     }
+}
+
+/// Pack a domain's heat (°C above the air, where there is smoke) as half floats.
+pub fn pack_heat(domain: &Domain, out: &mut Vec<u16>) {
+    out.clear();
+    out.extend(domain.voxels.iter().map(|v| {
+        if v.density <= 1e-9 {
+            0
+        } else {
+            f16(v.heat.clamp(0.0, 2000.0))
+        }
+    }));
 }
 
 /// f32 → IEEE half (round to nearest; values here are finite and non-negative).
@@ -167,6 +182,21 @@ impl SmokeFeature {
             density[0].create_view(&Default::default()),
             density[1].create_view(&Default::default()),
         ];
+        let heat = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("smoke heat"),
+            size: wgpu::Extent3d {
+                width: dims.x,
+                height: dims.y,
+                depth_or_array_layers: dims.z,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::R16Float,
+            usage: sampled,
+            view_formats: &[],
+        });
+        let heat_view = heat.create_view(&Default::default());
         let light = texture_3d(gpu, "smoke light", dims, storage);
         let glow = texture_3d(gpu, "smoke firelight", dims, storage);
         let light_view = light.create_view(&Default::default());
@@ -198,6 +228,10 @@ impl SmokeFeature {
                         binding: 3,
                         resource: wgpu::BindingResource::TextureView(&glow_view),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&heat_view),
+                    },
                 ],
             })
         };
@@ -209,6 +243,7 @@ impl SmokeFeature {
             density_views,
             light_view,
             glow_view,
+            heat,
             params,
             draw_groups: [None, None],
             light_groups,
@@ -250,6 +285,21 @@ impl SmokeFeature {
         if first {
             write(&v.density[1 - v.current]);
         }
+        pack_heat(domain, &mut self.pack_heat);
+        gpu.queue.write_texture(
+            v.heat.as_image_copy(),
+            bytemuck::cast_slice(&self.pack_heat),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(dims.x * 2),
+                rows_per_image: Some(dims.y),
+            },
+            wgpu::Extent3d {
+                width: dims.x,
+                height: dims.y,
+                depth_or_array_layers: dims.z,
+            },
+        );
         v.version = domain.version;
         v.resampled = domain.resampled;
         v.light_dirty = true;
@@ -328,7 +378,13 @@ impl RenderFeature for SmokeFeature {
         let cs = wgpu::ShaderStages::COMPUTE;
         let light_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("smoke light"),
-            entries: &[uniform(0, cs), tex3d(1, cs), storage(2), storage(3)],
+            entries: &[
+                uniform(0, cs),
+                tex3d(1, cs),
+                storage(2),
+                storage(3),
+                tex3d(4, cs),
+            ],
         });
 
         let shader = gpu.shader("smoke", SMOKE_SHADER, true);
@@ -840,6 +896,23 @@ mod tests {
         let sigma = half(out[i][0]);
         assert!((sigma - v.density * 1000.0).abs() < sigma * 0.01);
         assert!(half(out[i][1]) > half(out[i][2]) * 5.0);
+    }
+
+    #[test]
+    fn packs_heat_only_where_there_is_smoke() {
+        let mut d = Domain::new(DVec3::ZERO, 1.0, UVec3::splat(4));
+        d.splat(DVec3::splat(2.5), 0.8, 0.01, 300.0, Vec3::ZERO, Vec3::ONE);
+        // Hot clear air: nothing there to light.
+        let clear = d.index(0, 0, 0);
+        d.voxels[clear].density = 0.0;
+        d.voxels[clear].heat = 500.0;
+        let mut out = Vec::new();
+        pack_heat(&d, &mut out);
+        assert_eq!(out.len(), 64);
+        let i = d.index(2, 2, 2);
+        assert!(d.voxels[i].heat > 100.0);
+        assert_eq!(out[i], f16(d.voxels[i].heat));
+        assert_eq!(out[clear], 0);
     }
 
     #[test]

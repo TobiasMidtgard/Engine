@@ -31,7 +31,7 @@ use engine_world::physics::{
 };
 use parking_lot::Mutex;
 use rapier3d::prelude::{
-    ActiveCollisionTypes, ActiveEvents, ActiveHooks, ColliderBuilder, ColliderHandle,
+    Aabb, ActiveCollisionTypes, ActiveEvents, ActiveHooks, ColliderBuilder, ColliderHandle,
     CollisionEvent, CollisionEventFlags, ContactModificationContext, ContactPair, EventHandler,
     ImpulseJointHandle, LockedAxes, MassProperties as RapierMassProperties, MultibodyJointHandle,
     PairFilterContext, PhysicsHooks, PhysicsWorld, Pose, RigidBodyBuilder, RigidBodyHandle,
@@ -60,6 +60,19 @@ pub struct Region {
     pub statics: EntityHashSet,
     /// Too far from every focus to simulate this step.
     pub frozen: bool,
+    /// Level of detail, from how near its nearest mover is to a focus ([`crate::lod`]): 0 full,
+    /// 1 coarse, 2 half rate.
+    pub tier: u8,
+    /// Half rate: world time the region has not stepped yet, seconds (it steps every other
+    /// frame, and its bodies are drawn moving on in between).
+    pub owed_secs: f32,
+    /// The shortest substep a body here asks for (`FineSteps`), seconds ([`crate::fine`]).
+    pub fine: Option<f32>,
+    /// Holds bodies that ask for fine steps and others too (as of the last step).
+    pub mixed: bool,
+    /// How far the farthest-reaching body here reaches from its origin, meters (as of the
+    /// last step).
+    pub reach: f64,
     /// Colliders changed while frozen: refresh the query structures before the next query.
     pub needs_refresh: bool,
     /// Collision events from Rapier, drained after every substep.
@@ -74,6 +87,24 @@ pub struct Region {
     pub links: crate::articulation::Links,
     /// Hidden ropes carrying heavy bodies hung on light chains ([`Simulation::hang_loads`]).
     pub load_lines: Vec<LoadLine>,
+    /// Bounds of the convex hulls here at the pose they were measured at: a hull's bounds
+    /// visit every point, so they are only measured again when it moves ([`Self::update_bounds`]).
+    /// By collider index: generation, pose, shape address and bounds.
+    hull_bounds: Vec<Option<(u32, Pose, usize, Aabb)>>,
+    /// The awake colliders of the last [`Self::touches`] walk, by collider index: the walk's
+    /// stamp, the body's mass and whether the collider can spin ([`Touch::spins`]).
+    touch_marks: Vec<(u64, f32, bool)>,
+    touch_stamp: u64,
+}
+
+/// The contact pairs a substep left for a closer look ([`Region::touches`]), each sorted by
+/// collider handles.
+#[derive(Default)]
+pub(crate) struct Touches {
+    /// Pairs where a side is a round shape or an articulation link.
+    pub spins: Vec<(ColliderHandle, ColliderHandle)>,
+    /// Hard hits, with the pair's impulse.
+    pub hits: Vec<(ColliderHandle, ColliderHandle, f32)>,
 }
 
 impl Region {
@@ -90,6 +121,11 @@ impl Region {
             home_statics: 0,
             statics: EntityHashSet::default(),
             frozen: false,
+            tier: 0,
+            owed_secs: 0.0,
+            fine: None,
+            mixed: false,
+            reach: 0.0,
             needs_refresh: true,
             collector: Collector::default(),
             bounds: None,
@@ -97,7 +133,123 @@ impl Region {
             stale_all: false,
             links: Default::default(),
             load_lines: Vec::new(),
+            hull_bounds: Vec::new(),
+            touch_marks: Vec::new(),
+            touch_stamp: 0,
         }
+    }
+
+    /// The contact pairs of the awake bodies that need a closer look after a substep, from one
+    /// pass over them: pairs that can spin or roll ([`crate::rolling`]) and, with `min_speed`,
+    /// hard hits ([`Simulation::process_contacts`]). A heap of rocks has thousands of resting
+    /// pairs and few of either, and each pair's contact data is scattered in memory, so every
+    /// pair is read once: the awake colliders' masses and shapes are noted first.
+    pub(crate) fn touches(&mut self, sub_dt: f32, min_speed: Option<f32>) -> Touches {
+        let world = &self.world;
+        let g = world.gravity.length();
+        self.touch_stamp += 1;
+        let stamp = self.touch_stamp;
+        let marks = &mut self.touch_marks;
+        let link = |h: RigidBodyHandle| world.multibody_joints.rigid_body_link(h).is_some();
+        let (mut awake, mut bodies) = (Vec::new(), 0usize);
+        for h in world.islands.active_bodies() {
+            let Some(rb) = world.bodies.get(h).filter(|rb| rb.is_dynamic()) else {
+                continue;
+            };
+            bodies += 1;
+            let linked = link(h);
+            for &c in rb.colliders() {
+                let Some(co) = world.colliders.get(c) else {
+                    continue;
+                };
+                let spins = linked || crate::rolling::rolls(co.shape().shape_type());
+                let i = c.into_raw_parts().0 as usize;
+                if marks.len() <= i {
+                    marks.resize(i + 1, (0, 0.0, false));
+                }
+                marks[i] = (stamp, rb.mass(), spins);
+                awake.push(c);
+            }
+        }
+        // A side's mass (infinite unless dynamic) and whether it spins: awake ones were noted
+        // above, the rest (fixed, kinematic or asleep) are looked up.
+        let noted = |h: ColliderHandle| {
+            marks
+                .get(h.into_raw_parts().0 as usize)
+                .filter(|m| m.0 == stamp)
+                .map(|m| (m.1, m.2))
+        };
+        let lookup = |h: ColliderHandle| {
+            let co = world.colliders.get(h)?;
+            let body = co.parent().and_then(|b| Some((b, world.bodies.get(b)?)));
+            let mass = body
+                .filter(|(_, rb)| rb.is_dynamic())
+                .map_or(f32::INFINITY, |(_, rb)| rb.mass());
+            let spins = crate::rolling::rolls(co.shape().shape_type())
+                || body.is_some_and(|(b, _)| link(b));
+            Some((mass, spins))
+        };
+        let mut out = Touches::default();
+        if awake.is_empty() {
+            return out;
+        }
+        let mut look = |pair: &ContactPair, (m1, s1): (f32, bool), (m2, s2): (f32, bool)| {
+            if !pair.has_any_active_contact() {
+                return;
+            }
+            let key = (pair.collider1, pair.collider2);
+            if s1 || s2 {
+                out.spins.push(key);
+            }
+            // A hit: an impulse that changes the lighter dynamic side's speed (the one it
+            // changes most) by `min_speed` beyond holding it up.
+            if let Some(min_speed) = min_speed {
+                let impulse = pair.total_impulse_magnitude();
+                if impulse / m1.min(m2).max(1e-3) - g * sub_dt >= min_speed {
+                    out.hits.push((key.0, key.1, impulse));
+                }
+            }
+        };
+        if bodies * 4 >= self.movers as usize {
+            // Much of the region is awake: read every pair in the order they are stored,
+            // skipping those with no awake side (cheaper than hopping from collider to
+            // collider through the contact graph).
+            for pair in world.narrow_phase.contact_pairs() {
+                let (n1, n2) = (noted(pair.collider1), noted(pair.collider2));
+                if n1.is_none() && n2.is_none() {
+                    continue;
+                }
+                let (Some(a), Some(b)) = (
+                    n1.or_else(|| lookup(pair.collider1)),
+                    n2.or_else(|| lookup(pair.collider2)),
+                ) else {
+                    continue;
+                };
+                look(pair, a, b);
+            }
+        } else {
+            // Only the awake colliders' pairs; one with two awake sides from its first.
+            for c in awake {
+                for pair in world.narrow_phase.contact_pairs_with(c) {
+                    let (n1, n2) = (noted(pair.collider1), noted(pair.collider2));
+                    if n1.is_some() && n2.is_some() && pair.collider1 != c {
+                        continue;
+                    }
+                    let (Some(a), Some(b)) = (
+                        n1.or_else(|| lookup(pair.collider1)),
+                        n2.or_else(|| lookup(pair.collider2)),
+                    ) else {
+                        continue;
+                    };
+                    look(pair, a, b);
+                }
+            }
+        }
+        // The narrow phase runs on several threads: sort so results don't depend on timing.
+        let raw = |h: ColliderHandle| h.into_raw_parts();
+        out.spins.sort_unstable_by_key(|&(a, b)| (raw(a), raw(b)));
+        out.hits.sort_unstable_by_key(|&(a, b, _)| (raw(a), raw(b)));
+        out
     }
 
     /// World position → this region's local `f32` coordinates.
@@ -116,7 +268,6 @@ impl Region {
             .map(|(lo, hi)| (self.global(lo), self.global(hi)))
     }
 
-    /// Recompute [`Self::bounds`] from the colliders.
     /// Put colliders added or moved since the last step into the query tree now (the step
     /// would only do it after characters looked for the ground under them).
     pub fn refresh_queries(&mut self) {
@@ -142,9 +293,29 @@ impl Region {
         self.stale_all = false;
     }
 
+    /// Recompute [`Self::bounds`] from the colliders.
     pub fn update_bounds(&mut self) {
-        self.bounds = self.world.colliders.iter().fold(None, |acc, (_, c)| {
-            let a = c.compute_aabb();
+        let hulls = &mut self.hull_bounds;
+        self.bounds = self.world.colliders.iter().fold(None, |acc, (h, c)| {
+            let a = if c.shape().as_convex_polyhedron().is_some() {
+                // Measured again when it moves or gets a new shape.
+                let (i, generation) = h.into_raw_parts();
+                let (pose, shape) = (*c.position(), c.shape() as *const _ as *const () as usize);
+                if hulls.len() <= i as usize {
+                    hulls.resize(i as usize + 1, None);
+                }
+                let slot = &mut hulls[i as usize];
+                match *slot {
+                    Some((g, at, was, a)) if g == generation && at == pose && was == shape => a,
+                    _ => {
+                        let a = c.compute_aabb();
+                        *slot = Some((generation, pose, shape, a));
+                        a
+                    }
+                }
+            } else {
+                c.compute_aabb()
+            };
             Some(match acc {
                 None => (a.mins, a.maxs),
                 Some((lo, hi)) => (lo.min(a.mins), hi.max(a.maxs)),
@@ -212,6 +383,10 @@ pub struct BodyEntry {
     /// The water's level (`-inf` when dry) and current at this body when it was last seen
     /// asleep, to wake it when the water changes (`step::wake_for_water`).
     pub water_mark: Option<(f64, Vec3)>,
+    /// How far its colliders reach from its origin, meters (never shrinks).
+    pub reach: f32,
+    /// The longest substep it asks for (`FineSteps`), seconds.
+    pub fine: Option<f32>,
 }
 
 /// A collider: attached to a body, or static (copied into every region it can touch).
@@ -422,10 +597,15 @@ pub struct Simulation {
     /// Bodies whose jointed group gained or lost a joint or a body, to hang its loads again
     /// ([`Self::hang_loads`]).
     pub rehang: Vec<Entity>,
+    /// Bodies with forces of their own set in Rapier (`BodyEntry::forces_set`), so a step
+    /// reaches the sleeping ones among them without visiting every body.
+    pub forced: EntityHashSet,
     /// Steps since the articulation budget last looked.
     pub budget_clock: u32,
     /// Steps since the water under sleeping bodies was last looked at.
     pub water_clock: u32,
+    /// Steps since far movers were last split off into coarse regions ([`crate::lod`]).
+    pub lod_clock: u32,
 }
 
 /// Rapier hooks: drop the contacts listed in [`Simulation::no_contact`], and keep round bodies
@@ -539,7 +719,7 @@ impl Simulation {
             .filter_map(|(i, r)| r.as_ref().map(|r| (i as RegionId, r)))
     }
 
-    fn live_region_ids(&self) -> Vec<RegionId> {
+    pub(crate) fn live_region_ids(&self) -> Vec<RegionId> {
         self.live_regions().map(|(i, _)| i).collect()
     }
 
@@ -552,14 +732,23 @@ impl Simulation {
             .map(|(id, _)| id)
     }
 
-    /// The region a new mover at `p` belongs to (created if needed).
+    /// The region a new mover at `p` belongs to (created if needed): the nearest at full
+    /// detail (and without fine steps) in reach, or else the nearest in reach (a far one splits off again,
+    /// [`crate::lod`]).
     pub fn region_for_mover(&mut self, p: DVec3) -> RegionId {
         let join = self.settings.region_radius_m * 0.5;
-        self.nearest_region(p, join)
+        let full = self
+            .live_regions()
+            .filter(|(_, r)| r.tier == 0 && r.fine.is_none())
+            .map(|(id, r)| (id, r.anchor.distance(p)))
+            .filter(|(_, d)| *d <= join)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(id, _)| id);
+        full.or_else(|| self.nearest_region(p, join))
             .unwrap_or_else(|| self.create_region(p))
     }
 
-    fn create_region(&mut self, anchor: DVec3) -> RegionId {
+    pub(crate) fn create_region(&mut self, anchor: DVec3) -> RegionId {
         let region = Region::new(anchor, &self.settings);
         let id = match self.regions.iter().position(Option::is_none) {
             Some(i) => {
@@ -654,6 +843,8 @@ impl Simulation {
                 was_sleeping: false,
                 mass_dirty: true,
                 water_mark: None,
+                reach: 0.0,
+                fine: None,
             },
         );
     }
@@ -852,9 +1043,13 @@ impl Simulation {
         restitution: f32,
     ) {
         self.remove_collider(entity, false);
-        let Some(b) = self.bodies.get(&body) else {
+        let Some(b) = self.bodies.get_mut(&body) else {
             return;
         };
+        let aabb = shape.compute_local_aabb();
+        let reach =
+            local_pose.translation.length() + aabb.center().length() + aabb.half_extents().length();
+        b.reach = b.reach.max(reach);
         let (region_id, handle) = (b.region, b.handle);
         let builder = Self::collider_builder(
             entity,
@@ -1827,26 +2022,28 @@ impl Simulation {
 
     // ------------------------------------------------------------------ region upkeep
 
-    /// World position of every mover in a region (bodies and characters).
-    fn mover_positions(&self, id: RegionId) -> Vec<DVec3> {
+    /// World-space box around every mover in a region (bodies and characters: every body
+    /// there but the fixed ground).
+    fn mover_bounds(&self, id: RegionId) -> Option<(DVec3, DVec3)> {
         let region = self.region(id);
-        let bodies = self
+        region
+            .world
             .bodies
-            .values()
-            .filter(|b| b.region == id)
-            .filter_map(|b| region.world.bodies.get(b.handle))
-            .map(|rb| region.global(rb.translation()));
-        let chars = self
-            .characters
-            .values()
-            .filter(|c| c.region == id)
-            .filter_map(|c| region.world.bodies.get(c.body))
-            .map(|rb| region.global(rb.translation()));
-        bodies.chain(chars).collect()
+            .iter()
+            .filter(|(_, rb)| !rb.is_fixed())
+            .map(|(_, rb)| rb.translation())
+            .fold(None, |acc: Option<(Vec3, Vec3)>, p| {
+                Some(match acc {
+                    None => (p, p),
+                    Some((lo, hi)) => (lo.min(p), hi.max(p)),
+                })
+            })
+            .map(|(lo, hi)| (region.global(lo), region.global(hi)))
     }
 
     /// Re-center, split and merge regions so every mover stays near its region's anchor and
-    /// movers that could touch share a region. Also freezes regions far from every focus.
+    /// movers that could touch share a region. Also freezes regions far from every focus, and
+    /// sets each region's level of detail ([`crate::lod`]).
     pub fn maintain_regions(&mut self, foci: &[DVec3], max_speed_step: f64) {
         let radius = self.settings.region_radius_m;
         // Freeze far regions.
@@ -1858,39 +2055,57 @@ impl Simulation {
                 }
                 _ => false,
             };
+            if r.frozen {
+                // Paused, so not drawn moving on either.
+                r.owed_secs = 0.0;
+            }
         }
+        // Movers nearer than the margin may touch before regions are looked at again.
+        let margin = 20.0 + max_speed_step * 4.0;
+        self.lod_clock += 1;
+        // Bodies asking for fine steps keep to regions of their own (`crate::fine`).
+        let fine_margin = crate::fine::MARGIN + max_speed_step * 3.0;
+        let newly_mixed = self.update_fine();
+        if self.lod_clock.is_multiple_of(crate::lod::LOD_EVERY) {
+            self.split_far(foci, margin * 1.25);
+        }
+        if newly_mixed || self.lod_clock.is_multiple_of(crate::lod::LOD_EVERY) {
+            self.split_fine(fine_margin * 1.25);
+        }
+        self.update_fine();
+        self.update_tiers(foci);
 
         let mut bounds: Vec<(RegionId, DVec3, DVec3)> = Vec::new();
         for id in self.live_region_ids() {
             if self.region(id).movers == 0 || self.region(id).frozen {
                 continue;
             }
-            let positions = self.mover_positions(id);
-            if positions.is_empty() {
+            let Some((lo, hi)) = self.mover_bounds(id) else {
                 continue;
-            }
-            let (mut lo, mut hi) = (positions[0], positions[0]);
-            for p in &positions {
-                lo = lo.min(*p);
-                hi = hi.max(*p);
-            }
+            };
             let center = (lo + hi) * 0.5;
             // Re-center when the movers drifted away from the anchor.
             if center.distance(self.region(id).anchor) > radius * 0.25 {
                 self.rebase(id, center);
             }
-            // Movers far outside the radius leave for another region.
+            // Movers far outside the radius leave for another region (only possible when the
+            // box around them reaches that far, so most steps there are none to look for).
             let anchor = self.region(id).anchor;
-            let strays: Vec<Entity> = self
-                .bodies
-                .iter()
-                .filter(|(_, b)| b.region == id)
-                .filter_map(|(e, b)| {
-                    let rb = self.region(id).world.bodies.get(b.handle)?;
-                    let p = self.region(id).global(rb.translation());
-                    (p.distance(anchor) > radius * 1.25).then_some(*e)
-                })
-                .collect();
+            let reach = radius * 1.25;
+            let farthest = (lo - anchor).abs().max((hi - anchor).abs());
+            let strays: Vec<Entity> = if farthest.length() > reach {
+                self.bodies
+                    .iter()
+                    .filter(|(_, b)| b.region == id)
+                    .filter_map(|(e, b)| {
+                        let rb = self.region(id).world.bodies.get(b.handle)?;
+                        let p = self.region(id).global(rb.translation());
+                        (p.distance(anchor) > reach).then_some(*e)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             for e in strays {
                 if self.bodies.get(&e).is_some_and(|b| b.region == id) {
                     let p = self.body_world_position(e);
@@ -1901,11 +2116,13 @@ impl Simulation {
                     self.migrate_group(e, target);
                 }
             }
-            let margin = 20.0 + max_speed_step * 4.0;
             bounds.push((id, lo - DVec3::splat(margin), hi + DVec3::splat(margin)));
         }
 
-        // Merge regions whose movers could touch (if the result still fits).
+        // Merge regions whose movers could touch (if the result still fits). Regions of
+        // different tiers lie inside each other's boxes (one holds the movers around the focus,
+        // the other the far ones), so for them the movers themselves are compared.
+        let look_closer = self.lod_clock.is_multiple_of(crate::lod::CLOSE_EVERY);
         for i in 0..bounds.len() {
             for j in (i + 1)..bounds.len() {
                 let (a, alo, ahi) = bounds[i];
@@ -1916,12 +2133,30 @@ impl Simulation {
                     s.regions.get(id as usize).is_some_and(|r| r.is_some())
                 };
                 if overlap && span < radius * 2.0 && live(self, a) && live(self, b) {
+                    let (ta, tb) = (self.region(a).tier, self.region(b).tier);
+                    let (fa, fb) = (self.region(a).fine, self.region(b).fine);
+                    // Regions with and without fine steps are compared every step: the fine
+                    // ones are small, and their margin covers only a step of travel.
+                    let apart = if ta != tb {
+                        !(look_closer && self.movers_close(a, b, margin))
+                    } else if fa.is_some() != fb.is_some() {
+                        let (fine, other) = if fa.is_some() { (a, b) } else { (b, a) };
+                        !self.movers_near(fine, other, fine_margin)
+                    } else {
+                        false
+                    };
+                    if apart {
+                        continue;
+                    }
                     let (big, small) = if self.region(a).movers >= self.region(b).movers {
                         (a, b)
                     } else {
                         (b, a)
                     };
                     self.merge_regions(big, small);
+                    let merged = self.region_mut(big);
+                    merged.tier = ta.min(tb);
+                    merged.fine = crate::fine::finest(fa, fb);
                 }
             }
         }
@@ -2150,7 +2385,7 @@ impl Simulation {
     }
 
     /// Move bodies (with their colliders and the joints among them) into region `target`.
-    fn migrate_bodies(&mut self, entities: &[Entity], target: RegionId) {
+    pub(crate) fn migrate_bodies(&mut self, entities: &[Entity], target: RegionId) {
         // Joints touching these bodies are recreated in the target region.
         let set: EntityHashSet = entities.iter().copied().collect();
         for j in self.joints.values_mut() {
@@ -2227,6 +2462,7 @@ impl Simulation {
             entry.region = target;
             entry.handle = nb;
             entry.forces_set = true;
+            self.forced.insert(e);
             for ce in collider_entities {
                 if let Some(c) = self.colliders.get_mut(&ce) {
                     for (rid, h) in c.handles.iter_mut() {
@@ -2252,7 +2488,12 @@ impl Simulation {
     // ------------------------------------------------------------------ contacts
 
     /// Turn Rapier's collision events from the last substep into contract events.
-    pub fn process_contacts(&mut self, region_id: RegionId, sub_dt: f32) {
+    pub(crate) fn process_contacts(
+        &mut self,
+        region_id: RegionId,
+        sub_dt: f32,
+        hits: &[(ColliderHandle, ColliderHandle, f32)],
+    ) {
         let mut events: Vec<CollisionEvent> =
             std::mem::take(&mut *self.region(region_id).collector.0.lock());
         // The narrow phase runs on several threads: sort so results don't depend on timing.
@@ -2309,7 +2550,7 @@ impl Simulation {
             }
         }
         self.confirm_pending(region_id, sub_dt);
-        self.rehits(region_id, sub_dt);
+        self.rehits(region_id, hits);
     }
 
     /// Hard hits between colliders already touching. Rapier keeps a pair in contact while the
@@ -2317,47 +2558,13 @@ impl Simulation {
     /// bouncing down a runway or a ragdoll's limbs slapping down send `Started` once; every later
     /// landing is a spike in the pair's impulse. A hit is a substep whose impulse changes the
     /// lighter body's speed by `impact_min_speed` beyond holding it up against gravity, on a
-    /// pair whose previous substep was no hit (one hit lasts a substep or two).
-    fn rehits(&mut self, region_id: RegionId, sub_dt: f32) {
-        let min_speed = self.settings.impact_min_speed;
-        let region = self.region(region_id);
-        let world = &region.world;
-        let g = world.gravity.length();
-        let key_of = |pair: &ContactPair| {
-            (
-                pair.collider1.into_raw_parts(),
-                pair.collider2.into_raw_parts(),
-            )
-        };
-        let mut pairs: Vec<&ContactPair> = world
-            .islands
-            .active_bodies()
-            .filter_map(|h| world.bodies.get(h))
-            .filter(|rb| rb.is_dynamic())
-            .flat_map(|rb| rb.colliders())
-            .flat_map(|&c| world.narrow_phase.contact_pairs_with(c))
-            .filter(|pair| pair.has_any_active_contact())
-            .collect();
-        pairs.sort_unstable_by_key(|pair| key_of(pair));
-        pairs.dedup_by_key(|pair| key_of(pair));
+    /// pair whose previous substep was no hit (one hit lasts a substep or two). `hits` are the
+    /// substep's hits, from [`Region::touches`].
+    fn rehits(&mut self, region_id: RegionId, hits: &[(ColliderHandle, ColliderHandle, f32)]) {
+        let world = &self.region(region_id).world;
         let mut hard = Vec::new();
-        for pair in pairs {
-            let impulse = pair.total_impulse_magnitude();
-            // The lighter dynamic side: the one whose speed the impulse changes most.
-            let mass = [pair.collider1, pair.collider2]
-                .iter()
-                .filter_map(|&h| world.colliders.get(h)?.parent())
-                .filter_map(|b| world.bodies.get(b))
-                .filter(|b| b.is_dynamic())
-                .map(|b| b.mass())
-                .fold(f32::INFINITY, f32::min);
-            if !mass.is_finite() || impulse / mass.max(1e-3) - g * sub_dt < min_speed {
-                continue;
-            }
-            let (Some(c1), Some(c2)) = (
-                world.colliders.get(pair.collider1),
-                world.colliders.get(pair.collider2),
-            ) else {
+        for &(h1, h2, impulse) in hits {
+            let (Some(c1), Some(c2)) = (world.colliders.get(h1), world.colliders.get(h2)) else {
                 continue;
             };
             if c1.is_sensor() || c2.is_sensor() {
@@ -2367,14 +2574,7 @@ impl Simulation {
                 convert::entity_of(c1.user_data),
                 convert::entity_of(c2.user_data),
             );
-            hard.push((
-                pair_key(a, b),
-                a,
-                b,
-                pair.collider1,
-                pair.collider2,
-                impulse,
-            ));
+            hard.push((pair_key(a, b), a, b, h1, h2, impulse));
         }
         let mut was: Vec<(Entity, Entity)> = Vec::new();
         self.contacts.hitting.retain(|k, r| {
@@ -2423,6 +2623,18 @@ impl Simulation {
             .collect();
         for (key, h1, h2) in keys {
             let region = self.region(region_id);
+            // Neither side can move (asleep or fixed): the pair stays apart until one wakes.
+            let world = &region.world;
+            let still = |h: ColliderHandle| {
+                world.colliders.get(h).is_some_and(|c| {
+                    c.parent()
+                        .and_then(|b| world.bodies.get(b))
+                        .is_none_or(|b| b.is_sleeping() || b.is_fixed())
+                })
+            };
+            if still(h1) && still(h2) {
+                continue;
+            }
             let Some(pair) = region.world.narrow_phase.contact_pair(h1, h2) else {
                 self.contacts.pending.remove(&key);
                 continue;

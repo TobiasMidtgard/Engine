@@ -216,9 +216,13 @@ pub fn apply_season_colors(
             let l = seasons.leafing(season.day_of_year, shift);
             let [r, g, b] = seasons.color(vis.leaf_colors[tint], l, tint);
             let hero = vis.leaves_hero.map(|h| h[tint]);
-            for handle in [vis.leaves[tint], vis.leaves_still[tint]]
-                .into_iter()
-                .chain(hero)
+            for handle in [
+                vis.leaves[tint],
+                vis.leaves_far[tint],
+                vis.leaves_still[tint],
+            ]
+            .into_iter()
+            .chain(hero)
             {
                 if let Some(m) = materials.get_mut(handle)
                     && m.base_color[..3] != [r, g, b]

@@ -68,12 +68,16 @@ fn main() {
             engine_audio::AudioPlugin,
         ))
         .add_plugins(engine_softbody::SoftBodyPlugin)
+        // People with an Appearance are drawn by the character creator's module (faces that
+        // blink, look around and wince); anim still poses them.
+        .add_plugins(engine_character::CharacterPlugin)
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (camera::fly, places::run_pending, scenery::update_lods).chain(),
         )
         .add_systems(Update, scenery::stream_wall_colliders)
+        .add_systems(Update, scenery::stream_wall_heroes)
         .add_systems(Update, report_assets);
     register_apis(&mut app);
 
@@ -146,9 +150,10 @@ fn setup(
         ResMut<engine::world::SurfaceMaterials>,
     ),
     config: Res<EngineConfig>,
-    (use_planet, demo_zones): (
+    (use_planet, demo_zones, plants): (
         Option<Res<planet::UsePlanet>>,
         Option<Res<zones::DemoZones>>,
+        Res<engine_foliage::PlantLibrary>,
     ),
 ) {
     let t0 = std::time::Instant::now();
@@ -167,7 +172,7 @@ fn setup(
     let ground = std::sync::Arc::new(landscape::LandscapeGround::new(land.clone(), &mut surfaces));
     // On the planet the terrain answers `Ground` (edits included) and asks this for surfaces.
     commands.insert_resource(engine::world::Ground(ground.clone()));
-    let lib = scenery::build_library(&mut meshes, &mut materials, &mut images);
+    let lib = scenery::build_library(&mut meshes, &mut materials, &mut images, &plants);
     let mut rng = Rng::new(config.seed);
     if use_planet.is_some() {
         planet::spawn(&mut commands, land.clone(), ground);

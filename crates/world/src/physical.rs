@@ -299,6 +299,45 @@ impl Ground {
     }
 }
 
+/// How wooded the land is at one spot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ForestSample {
+    /// Canopy cover, 0 (open) to 1 (closed wood).
+    pub density: f32,
+    /// Share of needle trees, 0 (all broadleaf) to 1 (all conifers).
+    pub conifer: f32,
+}
+
+/// Implemented by the terrain module (its painted far woods and climate belts). Lets foliage
+/// grow trees where the terrain paints woods, without depending on how terrain works.
+pub trait ForestQuery: Send + Sync + 'static {
+    /// Woods at world position `p` (the ground below it), `None` where none are painted.
+    fn sample(&self, p: DVec3) -> Option<ForestSample>;
+}
+
+/// The active forest provider. Defaults to no woods anywhere.
+#[derive(Resource, Clone)]
+pub struct ForestCover(pub Arc<dyn ForestQuery>);
+
+struct NoForest;
+impl ForestQuery for NoForest {
+    fn sample(&self, _p: DVec3) -> Option<ForestSample> {
+        None
+    }
+}
+
+impl Default for ForestCover {
+    fn default() -> Self {
+        Self(Arc::new(NoForest))
+    }
+}
+
+impl ForestCover {
+    pub fn sample(&self, p: DVec3) -> Option<ForestSample> {
+        self.0.sample(p)
+    }
+}
+
 /// Water at one spot.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WaterSample {

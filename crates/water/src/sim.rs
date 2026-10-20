@@ -72,7 +72,9 @@ pub fn sync_bodies_system(
         format!("{:?}{:?}{}", body.extent, body.bed, body.interactive).hash(&mut hasher);
 
         let depth = typical_depth(body, center, &state.ground);
-        let w = wind.sample(center + DVec3::Y * 10.0);
+        // The sea answers to the mean wind 10 m up, not to each passing gust (a storm's gusts
+        // swing the wind by ±90%); local disturbances such as rotor wash still count.
+        let w = wind.prevailing + wind.local.sample(center + DVec3::Y * 10.0);
         let target = build_waves(&body.waves, Vec2::new(w.x, w.z), depth);
         let idx = match state.bodies.iter().position(|b| b.entity == entity) {
             Some(i) => i,
@@ -99,8 +101,15 @@ pub fn sync_bodies_system(
             b.body = body.clone();
         }
         b.mean_depth = depth;
+        // The sea builds and calms over `response_s`; a wind that jumps in one step (the
+        // weather skipped ahead, a tour stop set a storm) brings its sea state with it.
+        let jump = Vec2::new(w.x - b.wind.x, w.z - b.wind.z).length() > WIND_JUMP;
         b.wind = w;
-        let t = 1.0 - (-dt / body.waves.response_s.max(0.05)).exp();
+        let t = if jump {
+            1.0
+        } else {
+            1.0 - (-dt / body.waves.response_s.max(0.05)).exp()
+        };
         b.waves.blend_toward(&target, t);
         b.waves.advance(dt);
         seen.push(entity);
@@ -126,10 +135,25 @@ pub fn focus_point(focus: &FocusPoints, cameras: &Query<(&GlobalTransform, &Came
         .map_or(DVec3::ZERO, |(g, _)| g.translation())
 }
 
-/// Where the ripple grid goes: on the focus when it is over interactive water, else over the
-/// nearest such water within 150 m (so a camera on the shore sees wakes on the lake).
+/// A change in the wind over one step bigger than this, m/s, is a jump (gusts change far
+/// more slowly): the waves take on the new sea state at once.
+const WIND_JUMP: f32 = 4.0;
+
+/// Where the ripple grid goes: on the focus when it is over interactive water or near a
+/// stream, else over the nearest interactive water within 150 m (so a camera on the shore
+/// sees wakes on the lake).
 fn ripple_center(state: &WaterState, focus: DVec3, half: f64) -> DVec2 {
     let p = DVec2::new(focus.x, focus.z);
+    // Over or beside a stream: follow the focus (rings, wakes and foam show on the stream
+    // round it).
+    let margin = half * 0.5;
+    if state.flows.iter().any(|f| {
+        let l = f.local(focus);
+        let (w, d) = ((f.nx as f32 * f.cell) as f64, (f.nz as f32 * f.cell) as f64);
+        f.visible && l.x > -margin && l.y > -margin && l.x < w + margin && l.y < d + margin
+    }) {
+        return p;
+    }
     let mut best: Option<(f64, DVec2)> = None;
     for b in state.bodies.iter().filter(|b| b.body.interactive) {
         let inset = b.body.extent.inset(b.local(focus)) as f64;
@@ -175,18 +199,30 @@ pub fn ripple_system(
     if moved || book.since_rebuild > 2.0 {
         book.since_rebuild = 0.0;
         let state = &mut *state;
-        let (bodies, ground) = (&state.bodies, &state.ground);
+        let (bodies, flows, ground) = (&state.bodies, &state.flows, &state.ground);
         let speed = settings.ripple_speed;
         let level_y = f.y;
+        // Lakes and streams: footsteps, cloth and swimmers ring both.
         state.ripples.rebuild_speeds(speed, |p| {
             let p3 = DVec3::new(p.x, level_y, p.y);
             bodies
                 .iter()
                 .filter(|b| b.body.interactive)
                 .filter_map(|b| b.depth_at(p3, ground))
+                .chain(flows.iter().filter(|f| f.visible).filter_map(|f| {
+                    f.sample(DVec3::new(p.x, f.origin.y, p.y))
+                        .map(|(_, depth, _)| depth)
+                }))
                 .fold(None, |acc: Option<f32>, d| {
                     Some(acc.map_or(d, |a| a.max(d)))
                 })
+        });
+        // Streams carry their rings and foam downstream.
+        state.ripples.rebuild_drift(|p| {
+            flows.iter().filter(|f| f.visible).find_map(|f| {
+                f.sample(DVec3::new(p.x, f.origin.y, p.y))
+                    .map(|(_, _, v)| v)
+            })
         });
     }
     if !state.ripples.needs_step() {

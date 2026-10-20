@@ -229,6 +229,9 @@ pub const GRASSY_ZONES: &[&str] = &[
 pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     // The weather station's asphalt yard, sand pit and stone patio.
     ("weather", [-13.5, 13.0], [-8.0, 9.0]),
+    // The animation paddock's sand floor (35 m round, fenced at 35.5 m), where people's feet
+    // must show; the meadow frames it outside the fence.
+    ("paddock", [-34.0, 34.0], [-34.0, 34.0]),
     // The siege fortress's gravel breach range.
     ("fortress", [-33.5, 26.5], [-14.0, -4.0]),
     // The siege fortress's breach house and the stair up its back wall.
@@ -238,6 +241,15 @@ pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     // The footstep trail and its own meadow, which thins out about 7 m from the path, where
     // the valley's grass patches (reaching 2 m past this) take over.
     ("footsteps", [-30.0, 30.0], [-12.0, 12.0]),
+    // The movement course's concrete: the runway, the vault lane, the ledge station, the
+    // grapple pad, the zip line pad, the freight platform with its track bed, and the ring.
+    ("parkour", [-28.0, 28.0], [7.0, 17.0]),
+    ("parkour", [-28.5, -2.5], [-0.5, 4.5]),
+    ("parkour", [11.0, 23.0], [-1.5, 5.5]),
+    ("parkour", [3.0, 13.0], [18.0, 40.0]),
+    ("parkour", [28.5, 39.0], [15.5, 26.0]),
+    ("parkour", [-29.9, 2.4], [23.5, 32.6]),
+    ("parkour", [-8.0, 8.0], [-22.0, -6.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south
@@ -502,6 +514,16 @@ pub fn spawn_demos(
                     engine_smoke::SmokeVolume {
                         size: [100.0, 40.0, 60.0],
                         cell_m: 1.25,
+                    },
+                ));
+                // Finer air around the campfire (fire::demo puts it 22 m west, 20.5 m south of
+                // the center), so its thin wisp isn't smeared into the meadow's coarse cells.
+                commands.spawn((
+                    Name::new("Fire demo: campfire smoke"),
+                    Transform::from_translation(z.center + DVec3::new(-25.0, -1.0, -19.5)),
+                    engine_smoke::SmokeVolume {
+                        size: [16.0, 13.0, 10.0],
+                        cell_m: 0.3,
                     },
                 ));
             }
@@ -837,6 +859,16 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     "Quest journal",
                     r#"{"screen": "journal", "select": "silent_relay"}"#,
                 ),
+                ui(
+                    "market_skills",
+                    "Skill tree",
+                    r#"{"screen": "skills", "select": "c_cleave"}"#,
+                ),
+                ui(
+                    "market_crafting",
+                    "Crafting bench",
+                    r#"{"screen": "crafting", "select": "r_elixir"}"#,
+                ),
                 // Over the HUD, so the slow-motion gauge shows the world slowing.
                 View::new(
                     "market_wheel",
@@ -884,6 +916,31 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                     .iter()
                     .map(water_view)
                     .collect();
+            // The jetty in a gale: from above the bank, past the boats and out over the open
+            // lake, where whitecaps and spray streaks run downwind.
+            if let Some(jetty) = views.iter().find(|v| v.key == "lake_jetty") {
+                let eye = DVec3::from(jetty.eye) + DVec3::Y * 1.5;
+                let water_y = jetty.target[1] - 0.3;
+                let out = DVec3::from(jetty.target) - eye;
+                let far = eye + DVec3::new(out.x, 0.0, out.z) * 4.0;
+                let gale = View::new(
+                    "lake_gale",
+                    "The lake in a gale: whitecaps, spray streaks and boats riding it out",
+                    eye.to_array(),
+                    [far.x, water_y, far.z],
+                    15.0,
+                )
+                .warmup(6.0)
+                .quick_warmup()
+                .on_arrive("weather.set", r#"{"preset": "storm", "transition_s": 0}"#)
+                // The wind takes a few minutes to rise to the storm's (the rain doesn't).
+                .on_arrive("weather.advance", r#"{"seconds": 180}"#)
+                .on_leave(
+                    "weather.set",
+                    r#"{"preset": "partly_cloudy", "transition_s": 0}"#,
+                );
+                views.push(gale);
+            }
             // The float test from the south, 8 m off and 3 m up, a few seconds after a drop
             // (its cycle runs while the camera is near, so it drops as the camera arrives).
             let at = (float_test(z) - z.center).to_array();
@@ -1119,9 +1176,15 @@ fn destruction_views(views: &[engine_destruction::DemoView]) -> Vec<View> {
     views
         .iter()
         .map(|v| {
-            View::new(v.key, v.name, v.eye, v.target, v.hour)
+            let view = View::new(v.key, v.name, v.eye, v.target, v.hour)
                 .warmup(v.warmup_secs)
-                .on_arrive(engine_destruction::RESTART_API, "{}")
+                .on_arrive(engine_destruction::RESTART_API, "{}");
+            // Someone climbs the breach house ladders and up through the hatches once they open.
+            if v.key == "fortress_hatches" {
+                view.on_arrive("movement.ladder_guest", "{}")
+            } else {
+                view
+            }
         })
         .collect()
 }

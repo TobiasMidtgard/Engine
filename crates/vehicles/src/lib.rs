@@ -6,6 +6,7 @@ pub mod autopilot;
 pub mod chassis;
 pub mod demo;
 pub mod drivetrain;
+pub mod entry;
 pub mod events;
 pub mod exhaust;
 pub mod models;
@@ -111,6 +112,7 @@ impl Plugin for VehiclesPlugin {
                     visuals::plume_visuals,
                     visuals::light_visuals,
                     visuals::heat_visuals,
+                    visuals::plasma_visuals,
                     models::cars::caliper_visuals,
                 )
                     .in_set(UpdateSet::Logic),

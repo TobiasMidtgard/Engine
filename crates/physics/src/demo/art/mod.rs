@@ -8,6 +8,7 @@
 pub(crate) mod barrel_run;
 pub(crate) mod dummy;
 pub(crate) mod kit;
+pub(crate) mod pendulums;
 pub(crate) mod props;
 pub(crate) mod structures;
 pub(crate) mod textures;
@@ -60,6 +61,12 @@ pub(crate) enum Mat {
     Paint,
     /// Hot-dip galvanized steel: guardrails.
     Galvanized,
+    /// Freshly broken granite: the rockfall's rocks.
+    Granite,
+    /// Polished chrome: the Newton's cradle's balls and frames.
+    Chrome,
+    /// Glossy lacquer of this color (sRGB hex): the pendulum wave's bobs, the cradle's base.
+    Lacquer(u32),
 }
 
 /// Texture sets, generated once per app.
@@ -80,6 +87,7 @@ enum Tex {
     Asphalt,
     Sand,
     Galvanized,
+    Granite,
 }
 
 /// Generated texture sets' images.
@@ -117,7 +125,7 @@ impl Tex {
             Tex::Slab => textures::concrete_slab(res(1024)),
             Tex::Concrete => textures::cast_concrete(res(512)),
             Tex::Hazard => textures::hazard_stripes(res(512)),
-            Tex::Yellow => textures::painted_steel(res(512), paint(0xd6a21e), 0.2),
+            Tex::Yellow => textures::painted_steel(res(512), paint(0xd6a21e), 0.08),
             Tex::Dark => textures::painted_steel(res(512), paint(0x3d4247), 0.35),
             Tex::Steel => textures::forged_steel(res(512)),
             Tex::Timber => textures::weathered_timber(res(512)),
@@ -129,6 +137,7 @@ impl Tex {
             Tex::Asphalt => textures::asphalt(res(1024)),
             Tex::Sand => textures::raked_sand(res(512)),
             Tex::Galvanized => textures::galvanized(res(512)),
+            Tex::Granite => textures::granite(res(512)),
         }
     }
 }
@@ -193,6 +202,11 @@ pub(crate) fn material(world: &mut World, m: Mat) -> Handle<StandardMaterial> {
         Mat::Sand => textured(world, Tex::Sand, white),
         Mat::Paint => StandardMaterial::hex(0xe9e6dc).with_roughness(0.55),
         Mat::Galvanized => textured(world, Tex::Galvanized, white),
+        Mat::Granite => textured(world, Tex::Granite, white),
+        Mat::Chrome => StandardMaterial::hex(0xe4e6e9)
+            .with_metallic(1.0)
+            .with_roughness(0.07),
+        Mat::Lacquer(hex) => StandardMaterial::hex(hex).with_roughness(0.2),
     };
     let h = world.resource_mut::<Assets<StandardMaterial>>().add(made);
     world.resource_mut::<ArtCache>().materials.insert(m, h);

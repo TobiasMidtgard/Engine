@@ -190,6 +190,23 @@ fn clouds_at(uv: vec2<f32>) -> vec4<f32> {
     return c * 0.25;
 }
 
+// The cloud's front and back (km) at `uv`: those of the nearest of the four march texels around
+// it, not their blend. Blended with a clear texel's front (the march's far end), a cloud's edge
+// seemed to lie far behind the ground and dropped out texel by texel: stair-stepped cloud edges
+// over hills and over the planet seen from high up.
+fn cloud_span(uv: vec2<f32>) -> vec2<f32> {
+    let size = vec2<i32>(textureDimensions(cloud_depth));
+    let base = vec2<i32>(floor(uv * vec2<f32>(size) - 0.5));
+    var span = vec2<f32>(1e9);
+    for (var y = 0; y < 2; y++) {
+        for (var x = 0; x < 2; x++) {
+            let d = textureLoad(cloud_depth, clamp(base + vec2<i32>(x, y), vec2<i32>(0), size - 1), 0).xy;
+            if (d.x < span.x) { span = d; }
+        }
+    }
+    return span;
+}
+
 // The renderer's fog in front of the sky (`apply_full_sky_fog`) only out to `far` meters along
 // `dir`: what lies in front of rain or snow thick enough to hide the rest. Built the same way:
 // the volumetric fog to its range, then the analytic height fog, shaded by the far shadow map
@@ -363,7 +380,8 @@ fn fs_geo(in: FullscreenOut) -> @location(0) vec4<f32> {
         veil_mid = min(dist, rain_distance(half_opacity_depth(tau), depth, back_km));
     }
     // The part of the cloud between its front and back (mountains reaching into it).
-    let in_cloud = saturate((dist - depth.x * 1000.0) / max((depth.y - depth.x) * 1000.0, 1.0));
+    let span = cloud_span(in.uv);
+    let in_cloud = saturate((dist - span.x * 1000.0) / max((span.y - span.x) * 1000.0, 1.0));
     if (veil <= 0.0 && in_cloud <= 0.0) { discard; }
     let cl = clouds_at(in.uv);
     // Share of everything the sky shows in front of the surface: the rain's, then the cloud's.

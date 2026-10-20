@@ -7,17 +7,26 @@
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
-use engine_world::physics::{ApplyImpulse, BodyKind, ContactEvent, ContactPhase, RigidBody};
+use engine_world::physics::{
+    ApplyImpulse, BodyKind, ContactEvent, ContactPhase, PhysicsQueries, QueryFilter, RigidBody,
+};
 use engine_world::{
-    ContactKind, DamageEvent, DamageKind, EngineKind, EngineState, GroundContact, NoiseEvent,
-    SmokeEmission, VehicleControls, WheelContact, WheelContacts, WindField, WorldImpulse,
+    ContactKind, DamageEvent, DamageKind, EngineKind, EngineState, Gravity, Ground, GroundContact,
+    NoiseEvent, SmokeEmission, VehicleControls, WheelContact, WheelContacts, WindField,
+    WorldImpulse,
 };
 
 use crate::aero::{Propulsion, PropulsorKind};
 use crate::chassis::{Vehicle, VehicleForces, VehicleKind, VehicleSettings, VehicleTelemetry};
 use crate::drivetrain::Drivetrain;
 use crate::ship::{HeatShield, Spacecraft, ThrusterRole};
-use crate::wheels::Wheels;
+use crate::wheels::{Wheels, cast_down};
+
+/// How far a rocket jet of `thrust_n` reaches before it is too weak to raise dust, m: about
+/// 20 m for a small thruster, 80 m for a 1 MN engine.
+pub fn wash_reach_m(thrust_n: f32) -> f32 {
+    20.0 + 60.0 * (thrust_n / 1.0e6).sqrt().min(1.5)
+}
 
 /// Per-vehicle timers for periodic events.
 #[derive(Component, Debug, Clone, Copy, Default)]
@@ -97,8 +106,12 @@ const SMOKE_INTERVAL_S: f32 = 0.1;
 
 /// Engine noise for AI, exhaust smoke and jet/rocket wash.
 #[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 pub fn engine_events_system(
     settings: Res<VehicleSettings>,
+    queries: Res<PhysicsQueries>,
+    ground: Res<Ground>,
+    gravity: Res<Gravity>,
     mut wind: ResMut<WindField>,
     mut q: Query<(
         Entity,
@@ -112,6 +125,7 @@ pub fn engine_events_system(
     mut noise: MessageWriter<NoiseEvent>,
     mut smoke: MessageWriter<SmokeEmission>,
 ) {
+    let use_ground = settings.use_ground_query && gravity.bodies.is_empty();
     for (entity, vehicle, forces, tel, mut timers, propulsion, ship) in &mut q {
         let f = forces.frame;
         let dt = f.dt;
@@ -147,14 +161,24 @@ pub fn engine_events_system(
                 if t.role != ThrusterRole::Rcs {
                     radius = radius.max(10_000.0 * (thrust / 1.0e6).sqrt().min(1.0));
                 }
-                // Rocket wash near the ground fans out along it, blowing dust and smoke
-                // around the pad (outward, not back up into the ship's own wings).
-                let height = f.air.altitude_m as f32;
-                if thrust > 20_000.0 && height < 150.0 && f.air.density > 0.1 {
+                // Rocket wash that reaches the ground fans out along it, blowing dust and
+                // smoke around the pad (outward, not back up into the ship's own wings).
+                // Only where the exhaust really hits the ground, within the jet's reach.
+                let reach = wash_reach_m(thrust);
+                let hit = if thrust > 20_000.0 && f.air.density > 0.1 {
+                    let filter = QueryFilter::excluding(entity);
+                    let fallback = use_ground.then_some(&*ground);
+                    cast_down(&queries, fallback, at, exhaust, reach, &filter)
+                } else {
+                    None
+                };
+                if let Some(hit) = hit {
                     let exhaust_speed = (thrust / 1.0e5).sqrt() * 30.0;
-                    let ground = at + (exhaust * height.clamp(1.0, 60.0)).as_dvec3();
+                    let ground = hit.point;
+                    // How much of the jet is left when it gets there.
+                    let near = (1.0 - hit.distance / reach).clamp(0.0, 1.0);
                     // Steady state ≈ the exhaust speed (capped) against the field's 1.5/s decay.
-                    let strength = exhaust_speed.min(30.0) * 1.5 * dt;
+                    let strength = exhaust_speed.min(30.0) * 1.5 * dt * near.sqrt();
                     let spread = 6.0 + thrust.sqrt() * 0.005;
                     let (a, b) = exhaust.any_orthonormal_pair();
                     for k in 0..6 {
@@ -171,7 +195,6 @@ pub fn engine_events_system(
                         // Clean exhaust is nearly invisible; what shows is dust and steam
                         // kicked up off the pad: about 0.25 kg/s under a 1 MN hover (five smoke
                         // grenades), fading out as the ship climbs, mixed down to warm air.
-                        let near = (1.0 - height / 150.0).clamp(0.0, 1.0);
                         let rate = 0.25 * (thrust / 1.0e6).sqrt() * near * near;
                         smoke.write(SmokeEmission {
                             position: ground,

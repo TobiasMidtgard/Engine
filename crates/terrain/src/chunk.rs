@@ -199,14 +199,74 @@ pub fn decode_convexity(flags: u8) -> f32 {
 /// A painted layer and its weight as one weight per layer (layers 1..=10), then regional
 /// variety and local patches (0..1).
 fn encode_paint((layer, weight): (u8, f32), variety: f32, patches: f32) -> [u8; 12] {
+    let mut weights = [0.0; 10];
+    if (1..=10).contains(&layer) {
+        weights[layer as usize - 1] = weight;
+    }
+    encode_paint_weights(&weights, variety, patches)
+}
+
+/// Weights of layers 1..=10, then regional variety and local patches (0..1).
+fn encode_paint_weights(weights: &[f32; 10], variety: f32, patches: f32) -> [u8; 12] {
     let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     let mut out = [0; 12];
-    if (1..=10).contains(&layer) {
-        out[layer as usize - 1] = q(weight);
+    for (o, &w) in out.iter_mut().zip(weights) {
+        *o = q(w);
     }
     out[10] = q(variety);
     out[11] = q(patches);
     out
+}
+
+/// Vertices this far apart (m) or more show hand-made ground's paint as the mean over their
+/// cell rather than the point under them.
+const FILTER_PAINT_SPACING: f64 = 2.0;
+/// Paint samples across a vertex's cell, per side.
+const PAINT_TAPS: usize = 3;
+
+/// Hand-made ground's paint and tint over the cell of the vertex at face coordinates `(a, b)`
+/// (`step` wide), `height` above sea level: per-layer weights and the mean tint. A level's
+/// covers change within meters (a wood's edge, a snowfield, a field), so samples a vertex
+/// spacing apart alias into blocks and staircases on far patches; the cell's mean is what the
+/// patch can show, and the shader shapes the edges per pixel. `None` outside the overlay.
+fn filtered_paint(
+    src: &ChunkSource,
+    face: u8,
+    a: f64,
+    b: f64,
+    step: f64,
+    height: f64,
+) -> Option<([f32; 10], [f32; 4])> {
+    let overlay = src.shape.overlay.as_ref().filter(|o| o.paint.is_some())?;
+    let mut weights = [0.0f32; 10];
+    let (mut tint, mut amount) = ([0.0f32; 3], 0.0f32);
+    let mut any = false;
+    for tj in 0..PAINT_TAPS {
+        for ti in 0..PAINT_TAPS {
+            let off = |t: usize| ((t as f64 + 0.5) / PAINT_TAPS as f64 - 0.5) * step;
+            let (_, _, dir) = src.map.base(face, a + off(ti), b + off(tj));
+            let Some(op) = overlay.paint_at(dir, src.shape.radius_m, height) else {
+                continue;
+            };
+            any = true;
+            if (1..=10).contains(&op.layer) {
+                weights[op.layer as usize - 1] += op.weight;
+            }
+            for (t, c) in tint.iter_mut().zip(op.tint) {
+                *t += c * op.tint_amount;
+            }
+            amount += op.tint_amount;
+        }
+    }
+    if !any {
+        return None;
+    }
+    let n = (PAINT_TAPS * PAINT_TAPS) as f32;
+    for w in &mut weights {
+        *w /= n;
+    }
+    let color = tint.map(|c| if amount > 0.0 { c / amount } else { 0.0 });
+    Some((weights, [color[0], color[1], color[2], amount / n]))
 }
 
 /// Tint color stored as its square root (finer steps in the darks), amount linear.
@@ -297,6 +357,30 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
         }
     }
 
+    // Hand-made ground on far patches: its paint averaged over each vertex's cell, unless an
+    // edit's paint (a crater's ash, a dug pit) wins there, as in `ChunkSource::sample`.
+    let mut filtered = vec![None; GRID * GRID];
+    if spacing >= FILTER_PAINT_SPACING {
+        for j in 1..=GRID {
+            for i in 1..=GRID {
+                let idx = j * S + i;
+                let a = lo.x + (i as f64 - 1.0) * step;
+                let b = lo.y + (j as f64 - 1.0) * step;
+                let Some((weights, tint)) =
+                    filtered_paint(src, key.face, a, b, step, samples[idx].height)
+                else {
+                    continue;
+                };
+                let (layer, weight) = src.edit_paint(bases[idx], ups[idx], dirs[idx]);
+                let strongest = weights.iter().copied().fold(0.0, f32::max);
+                if layer != 0 && strongest <= weight * 2.0 {
+                    continue;
+                }
+                filtered[(j - 1) * GRID + i - 1] = Some((weights, tint));
+            }
+        }
+    }
+
     let mut vertices = Vec::with_capacity(VERTS_PER_CHUNK);
     let (mut min_h, mut max_h) = (f64::MAX, f64::MIN);
     let mut radius2 = 0.0f64;
@@ -351,12 +435,19 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
                     (s.mare.clamp(0.0, 1.0) * 255.0) as u8,
                     encode_convexity(convexity) | if ocean { FLAG_OCEAN } else { 0 },
                 ],
-                paint: encode_paint(
-                    s.paint,
-                    variety(src, dirs[idx], spacing),
-                    patches(src, dirs[idx], spacing),
-                ),
-                tint: encode_tint(s.tint),
+                paint: match &filtered[(j - 1) * GRID + i - 1] {
+                    Some((weights, _)) => encode_paint_weights(
+                        weights,
+                        variety(src, dirs[idx], spacing),
+                        patches(src, dirs[idx], spacing),
+                    ),
+                    None => encode_paint(
+                        s.paint,
+                        variety(src, dirs[idx], spacing),
+                        patches(src, dirs[idx], spacing),
+                    ),
+                },
+                tint: encode_tint(filtered[(j - 1) * GRID + i - 1].map_or(s.tint, |f| f.1)),
                 river: [
                     (s.water.clamp(0.0, 1.0) * 255.0).round() as u8,
                     (s.lake.clamp(0.0, 1.0) * 255.0).round() as u8,
@@ -405,7 +496,7 @@ pub fn build_chunk(src: &ChunkSource, key: NodeKey) -> ChunkMesh {
 /// Regional variety 0..1 (patches of forest, meadow and scrub a few kilometers across),
 /// without the layers finer than the vertices can carry: sampled kilometers apart they turned
 /// into random blotches the size of a vertex, a camouflage pattern seen from orbit.
-fn variety(src: &ChunkSource, dir: DVec3, spacing: f64) -> f32 {
+pub(crate) fn variety(src: &ChunkSource, dir: DVec3, spacing: f64) -> f32 {
     let p = dir * (src.shape.radius_m / 18_000.0);
     let octaves = ((18_000.0 / (2.0 * spacing)).log2() + 1.0).clamp(0.0, 4.0);
     let n = crate::noise::fbm_smooth(p, src.shape.seed ^ 0xB10E, octaves, 0.55);
@@ -414,7 +505,7 @@ fn variety(src: &ChunkSource, dir: DVec3, spacing: f64) -> f32 {
 
 /// Local patches 0..1 (woods, meadows and fields a few hundred meters across), fading to 0.5
 /// where vertices are too far apart to carry them.
-fn patches(src: &ChunkSource, dir: DVec3, spacing: f64) -> f32 {
+pub(crate) fn patches(src: &ChunkSource, dir: DVec3, spacing: f64) -> f32 {
     let fade = 1.0 - ((spacing - 60.0) / 240.0).clamp(0.0, 1.0);
     if fade <= 0.0 {
         return 0.5;

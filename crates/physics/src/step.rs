@@ -20,7 +20,7 @@ use crate::character;
 use crate::convert;
 use crate::settings::PhysicsSettings;
 use crate::sim::{BodyWrite, ContactFilter, MaterialCache, RegionId, Simulation};
-use crate::{PhysicsStats, SharedSimulation};
+use crate::{FineSteps, PhysicsStats, SharedSimulation};
 
 /// World pose (translation, rotation, scale) of `e`, composing `Transform`s up the hierarchy.
 /// `GlobalTransform` is only updated in `PostUpdate`, so the step computes poses itself.
@@ -116,6 +116,7 @@ pub(crate) struct StepQueries {
         ),
     >,
     time_scaled: QueryState<(Entity, &'static LocalTimeScale), With<RigidBody>>,
+    fine: QueryState<(Entity, &'static FineSteps), With<RigidBody>>,
     character_inputs: QueryState<
         (
             Entity,
@@ -139,6 +140,7 @@ impl FromWorld for StepQueries {
             changed_characters: world.query_filtered(),
             body_inputs: world.query_filtered(),
             time_scaled: world.query_filtered(),
+            fine: world.query_filtered(),
             character_inputs: world.query_filtered(),
         }
     }
@@ -443,6 +445,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             let entry = sim.bodies.get_mut(&e).unwrap();
             entry.external = force;
             entry.forces_set = true;
+            sim.forced.insert(e);
             if let Some(rb) = sim.region_mut(rid).world.bodies.get_mut(handle) {
                 rb.wake_up(true);
             }
@@ -452,6 +455,12 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         let time = world.resource::<Time>().clone();
         for entry in sim.bodies.values_mut() {
             entry.time_factor = 1.0;
+            entry.fine = None;
+        }
+        for (e, f) in q.fine.iter(world) {
+            if let Some(entry) = sim.bodies.get_mut(&e) {
+                entry.fine = Some(f.substep_secs.max(1e-4));
+            }
         }
         for (e, l) in q.time_scaled.iter(world) {
             if let Some(entry) = sim.bodies.get_mut(&e)
@@ -488,9 +497,16 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
     }
 
     // ---------------------------------------------------------------- regions
+    // Only awake bodies move (sleeping ones are held still).
     let max_step = sim
         .live_regions()
-        .flat_map(|(_, r)| r.world.bodies.iter().map(|(_, b)| b.linvel().length()))
+        .flat_map(|(_, r)| {
+            let w = &r.world;
+            w.islands
+                .active_bodies()
+                .filter_map(|h| w.bodies.get(h))
+                .map(|b| b.linvel().length())
+        })
         .fold(0.0f32, f32::max) as f64
         * dt as f64;
     sim.maintain_regions(&foci, max_step);
@@ -516,7 +532,18 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             let r = sim.region(rid);
             (r.frozen, r.movers)
         };
-        if frozen || movers == 0 || substeps == 0 {
+        // Far regions step coarser, or sit a frame out (`crate::lod`).
+        let plan = if frozen || movers == 0 || substeps == 0 {
+            None
+        } else {
+            let r = sim.region_mut(rid);
+            let plan = r.plan(dt, &settings);
+            if plan.is_none() {
+                continue;
+            }
+            plan
+        };
+        let Some((substeps, sub_dt)) = plan else {
             place_kinematics(&mut sim, rid);
             let s = &mut *sim;
             let filter = ContactFilter {
@@ -535,7 +562,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 r.update_bounds();
             }
             continue;
-        }
+        };
         let g = gravity.at(sim.region(rid).anchor);
         sim.region_mut(rid).world.gravity = g;
         refresh_contact_hooks(&mut sim.region_mut(rid).world);
@@ -546,6 +573,16 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             }
             character::find_platforms(&mut sim, rid, &gravity);
         }
+        // The kinematic and time-scaled bodies here, found once for all substeps.
+        let special: Vec<Entity> = sim
+            .bodies
+            .iter()
+            .filter(|(_, b)| {
+                b.region == rid
+                    && (b.kind == BodyKind::Kinematic || (b.time_factor - 1.0).abs() > 1e-3)
+            })
+            .map(|(e, _)| *e)
+            .collect();
         for sub in 0..substeps {
             // Every substep: water pressure follows the pose (forces held over several
             // substeps lag behind it and pump energy into a floating body's rocking).
@@ -557,9 +594,9 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 water.as_ref(),
                 settings.buoyancy,
             );
-            drive_kinematics(&mut sim, rid, sub_dt, substeps - sub);
+            drive_kinematics(&mut sim, rid, &special, sub_dt, substeps - sub);
             crate::cones::orient(&mut sim, rid);
-            let scaled = scale_time(&mut sim, rid, true);
+            let scaled = scale_time(&mut sim, rid, &special, true);
             {
                 let s = &mut *sim;
                 let filter = ContactFilter {
@@ -568,6 +605,8 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 };
                 let r = s.regions[rid as usize].as_mut().expect("live region");
                 r.world.integration_parameters.dt = sub_dt;
+                r.world.integration_parameters.num_solver_iterations =
+                    crate::fine::iterations(&settings, r.fine, sub_dt);
                 let collector = std::mem::take(&mut r.collector);
                 crate::articulation::before_step(&mut r.world, &r.links);
                 r.world.step_with_events(&filter, &collector);
@@ -576,12 +615,14 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 r.needs_refresh = false;
             }
             if scaled {
-                scale_time(&mut sim, rid, false);
+                scale_time(&mut sim, rid, &special, false);
             }
-            crate::rolling::resist_rolling(&mut sim, rid);
+            let min_speed = settings.contact_events.then_some(settings.impact_min_speed);
+            let touches = sim.region_mut(rid).touches(sub_dt, min_speed);
+            crate::rolling::resist_rolling(&mut sim, rid, &touches.spins);
             crate::cones::rub(&mut sim, rid);
             if settings.contact_events {
-                sim.process_contacts(rid, sub_dt);
+                sim.process_contacts(rid, sub_dt, &touches.hits);
             } else {
                 sim.region(rid).collector.0.lock().clear();
             }
@@ -885,6 +926,15 @@ fn wake_for_water(sim: &mut Simulation, water: &Water) {
         if !sleeping && !flowing {
             continue;
         }
+        // No water here, now or when it fell asleep: nothing can reach the body, so its
+        // bounds aren't needed (they visit every point of a hull).
+        let then = entry.water_mark.map_or(f64::NEG_INFINITY, |m| m.0);
+        if now.0 == f64::NEG_INFINITY && then == f64::NEG_INFINITY {
+            if sleeping && entry.water_mark.is_none() {
+                entry.water_mark = Some(now);
+            }
+            continue;
+        }
         let (mut bottom, mut top) = (f32::INFINITY, f32::NEG_INFINITY);
         for &ch in rb.colliders() {
             if let Some(c) = world.colliders.get(ch)
@@ -954,14 +1004,28 @@ fn prepare_forces(
     buoyancy: bool,
 ) {
     let varying = !gravity.bodies.is_empty();
-    let entities: Vec<Entity> = sim
-        .bodies
-        .iter()
-        .filter(|(_, b)| b.region == rid && b.kind == BodyKind::Dynamic)
-        .map(|(e, _)| *e)
-        .collect();
+    // The awake bodies and those with forces set: a sleeping body without forces has nothing
+    // to do here, and there may be thousands of them (settled debris).
+    let mut entities: Vec<Entity> = {
+        let world = &sim.region(rid).world;
+        world
+            .islands
+            .active_bodies()
+            .filter_map(|h| world.bodies.get(h))
+            .map(|rb| convert::entity_of(rb.user_data))
+            .chain(sim.forced.iter().copied())
+            .collect()
+    };
+    entities.sort_unstable();
+    entities.dedup();
     for e in entities {
-        let entry = sim.bodies.get_mut(&e).unwrap();
+        let Some(entry) = sim.bodies.get_mut(&e) else {
+            sim.forced.remove(&e);
+            continue;
+        };
+        if entry.region != rid || entry.kind != BodyKind::Dynamic {
+            continue;
+        }
         let (h, external, gravity_scale, had_forces, k) = (
             entry.handle,
             entry.external,
@@ -972,7 +1036,9 @@ fn prepare_forces(
         let region = sim.regions[rid as usize].as_mut().unwrap();
         let hulls = &mut sim.hulls;
         let anchor = region.anchor;
-        let Some(rb) = region.world.bodies.get_mut(h) else {
+        // Read only: Rapier's `get_mut` flags the body as changed, which costs a sleeping one
+        // its place in Rapier's bookkeeping every substep.
+        let Some(rb) = region.world.bodies.get(h) else {
             continue;
         };
         if rb.is_sleeping() && !had_forces {
@@ -1086,7 +1152,11 @@ fn prepare_forces(
                 rb.add_torque(torque, false);
             }
         }
-        sim.bodies.get_mut(&e).unwrap().forces_set = needs || (wet && had_forces);
+        let forced = needs || (wet && had_forces);
+        sim.bodies.get_mut(&e).unwrap().forces_set = forced;
+        if !forced {
+            sim.forced.remove(&e);
+        }
     }
 }
 
@@ -1193,11 +1263,17 @@ fn refresh_contact_hooks(world: &mut PhysicsWorld) {
 /// Kinematic bodies moved by gameplay: those driven by `Velocity` advance by one substep, and
 /// those put somewhere through their `Transform` go 1/`left` of the rest of the way there
 /// (`left` substeps of this step remain, this one included).
-fn drive_kinematics(sim: &mut Simulation, rid: RegionId, sub_dt: f32, left: u32) {
+fn drive_kinematics(
+    sim: &mut Simulation,
+    rid: RegionId,
+    special: &[Entity],
+    sub_dt: f32,
+    left: u32,
+) {
     // `Velocity` is in the body's own seconds: `time_factor` of it per world second.
-    let moving: Vec<(rapier3d::prelude::RigidBodyHandle, Velocity)> = sim
-        .bodies
-        .values()
+    let moving: Vec<(rapier3d::prelude::RigidBodyHandle, Velocity)> = special
+        .iter()
+        .filter_map(|e| sim.bodies.get(e))
         .filter(|b| b.region == rid && b.kinematic_by_velocity)
         .map(|b| {
             let v = b.written_velocity.unwrap_or_default();
@@ -1211,11 +1287,10 @@ fn drive_kinematics(sim: &mut Simulation, rid: RegionId, sub_dt: f32, left: u32)
             )
         })
         .collect();
-    let gliding: Vec<(rapier3d::prelude::RigidBodyHandle, Pose)> = sim
-        .bodies
-        .values_mut()
-        .filter(|b| b.region == rid)
-        .filter_map(|b| {
+    let gliding: Vec<(rapier3d::prelude::RigidBodyHandle, Pose)> = special
+        .iter()
+        .filter_map(|e| {
+            let b = sim.bodies.get_mut(e).filter(|b| b.region == rid)?;
             let goal = if left <= 1 {
                 b.kinematic_goal.take()
             } else {
@@ -1275,10 +1350,10 @@ fn place_kinematics(sim: &mut Simulation, rid: RegionId) {
 
 /// Bodies with their own time rate (`LocalTimeScale`): scale velocity and gravity so they move
 /// `factor`× as fast as the world for one substep (`apply = true`), then undo it.
-fn scale_time(sim: &mut Simulation, rid: RegionId, apply: bool) -> bool {
-    let scaled: Vec<(rapier3d::prelude::RigidBodyHandle, f32, f32, [f32; 2])> = sim
-        .bodies
-        .values()
+fn scale_time(sim: &mut Simulation, rid: RegionId, special: &[Entity], apply: bool) -> bool {
+    let scaled: Vec<(rapier3d::prelude::RigidBodyHandle, f32, f32, [f32; 2])> = special
+        .iter()
+        .filter_map(|e| sim.bodies.get(e))
         .filter(|b| {
             b.region == rid && b.kind == BodyKind::Dynamic && (b.time_factor - 1.0).abs() > 1e-3
         })
@@ -1375,10 +1450,20 @@ fn collect_writes(sim: &mut Simulation) {
                 angular: rb.angvel(),
             }
         };
+        // A half-rate region sitting this frame out: draw its bodies moving on.
+        let ahead = region.owed_secs;
+        let (translation, rotation) = if ahead > 0.0 && !sleeping {
+            (
+                p.translation + velocity.linear * ahead,
+                (Quat::from_scaled_axis(velocity.angular * ahead) * p.rotation).normalize(),
+            )
+        } else {
+            (p.translation, p.rotation)
+        };
         writes.push(BodyWrite {
             entity: *e,
-            translation: region.global(p.translation),
-            rotation: p.rotation,
+            translation: region.global(translation),
+            rotation,
             velocity,
         });
     }

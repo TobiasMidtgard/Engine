@@ -9,6 +9,8 @@ mod cones;
 mod convert;
 mod debug;
 pub mod demo;
+mod fine;
+mod lod;
 mod queries;
 mod rolling;
 mod settings;
@@ -24,6 +26,7 @@ use engine_world::{GroundContact, NoiseEvent, WorldImpulse};
 use parking_lot::RwLock;
 
 pub use debug::PhysicsDebug;
+pub use fine::FineSteps;
 pub use settings::PhysicsSettings;
 
 /// Rigid-body physics on Rapier: bodies, colliders, joints, characters and scene queries,
@@ -55,20 +58,32 @@ pub struct PhysicsStats {
     /// Static colliders copied into regions, all regions together (a static shared by two
     /// regions counts twice).
     pub static_copies: usize,
+    /// Awake bodies simulated coarsely, far from every focus (see
+    /// [`PhysicsSettings::coarse_beyond_m`]).
+    pub coarse_awake: usize,
+    /// Awake bodies simulated at half rate, farther still (see
+    /// [`PhysicsSettings::half_rate_beyond_m`]).
+    pub half_rate_awake: usize,
+    /// Awake bodies in regions stepping in fine substeps (see [`FineSteps`]).
+    pub fine_awake: usize,
 }
 
 impl PhysicsStats {
     fn from_sim(sim: &sim::Simulation, step_ms: f64, substeps: u32) -> Self {
-        let awake = sim
-            .live_regions()
-            .map(|(_, r)| {
-                r.world
-                    .bodies
-                    .iter()
-                    .filter(|(_, b)| !b.is_fixed() && !b.is_sleeping())
-                    .count()
-            })
-            .sum();
+        let (mut by_tier, mut fine_awake) = ([0usize; 3], 0);
+        for (_, r) in sim.live_regions() {
+            let awake = r
+                .world
+                .bodies
+                .iter()
+                .filter(|(_, b)| !b.is_fixed() && !b.is_sleeping())
+                .count();
+            by_tier[r.tier.min(2) as usize] += awake;
+            if r.fine.is_some() {
+                fine_awake += awake;
+            }
+        }
+        let awake = by_tier.iter().sum();
         Self {
             bodies: sim.bodies.len() + sim.characters.len(),
             awake,
@@ -82,6 +97,9 @@ impl PhysicsStats {
                 .filter(|j| matches!(j.created, Some((_, sim::JointHandle::Articulated { .. }))))
                 .count(),
             static_copies: sim.live_regions().map(|(_, r)| r.statics.len()).sum(),
+            coarse_awake: by_tier[1],
+            half_rate_awake: by_tier[2],
+            fine_awake,
         }
     }
 }

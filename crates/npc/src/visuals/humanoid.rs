@@ -33,7 +33,7 @@ use crate::agent::{
 };
 use crate::art::ArtAssets;
 use crate::art::fighter::{FACE_SHAPES, Piece, WEARS, basis, kit, rig, weapons};
-use crate::combat::Downed;
+use crate::combat::{Downed, Lie};
 use crate::faction::Faction;
 use crate::perception::NpcMemory;
 use crate::skills::NpcSkills;
@@ -82,6 +82,8 @@ const EYE_L: Part = Part::Fighter(FACE0);
 const EYE_R: Part = Part::Fighter(FACE0 + 1);
 const LIDS: Part = Part::Fighter(FACE0 + 2);
 const JAW: Part = Part::Fighter(FACE0 + 3);
+/// A medic's armband, over the left upper arm (only medics have the part).
+const ARMBAND: Part = Part::Fighter(FACE0 + 4);
 const FACE0: u8 = PAINT0 + HUES * PAINTED.len() as u8;
 /// Pieces with painted plates. Those are a mesh of their own (textured by the paint texture
 /// in the team color, as worn as the fighter's skill says), a part posed with its piece: the
@@ -104,9 +106,9 @@ const PAINTED: [Part; 11] = [
 const PAINT0: u8 = 34;
 
 /// Every part's place in a pose: the named parts, the fighter's own up to the painted plates
-/// (which share their pieces'), then the face's.
+/// (which share their pieces'), then the face's and the armband's.
 const FACE_SLOT: usize = 11 + PAINT0 as usize;
-const SLOTS: usize = FACE_SLOT + 4;
+const SLOTS: usize = FACE_SLOT + 5;
 
 /// Skin tones (sRGB), picked per fighter.
 const SKIN_TONES: [u32; 6] = [0xdcb8a0, 0xc29479, 0xa27760, 0x86614c, 0x5f4537, 0xd4a88f];
@@ -293,12 +295,13 @@ fn tinted_flash(albedo: Vec3) -> StandardMaterial {
 /// The string between a bow tip and the nock (constant: the limbs bend instead).
 const STRING_HALF: f32 = 0.6516;
 
-/// The parts of a fighter's body.
+/// The parts of a fighter's body (a medic's with its armband).
 pub(super) fn parts(
     stand_in: &StandIn,
     weapon: Option<&NpcWeapon>,
     faction: Option<&Faction>,
     skills: Option<&NpcSkills>,
+    medic: bool,
     art: &mut ArtAssets,
 ) -> Vec<(Part, MeshRenderer, Vec3)> {
     let kind = Kind::of(&weapon.copied().unwrap_or_default());
@@ -355,6 +358,9 @@ pub(super) fn parts(
     ];
     if !stand_in.plain {
         list.push((Part::Band, Piece::Crest));
+    }
+    if medic {
+        list.push((ARMBAND, Piece::Armband));
     }
     match kind {
         Kind::Longsword => list.extend([(Part::Weapon, Piece::LongBlade), (HILT, Piece::LongHilt)]),
@@ -859,6 +865,36 @@ struct Fall {
     flung: usize,
 }
 
+impl Fall {
+    /// How it lies, as its squad mates see it.
+    fn lie(&self) -> Lie {
+        Lie {
+            yaw: self.yaw,
+            bent: self.bent,
+            flung: self.flung,
+        }
+    }
+}
+
+/// A downed fighter as a mate reviving it sees it (owner frame): the front of its chest over
+/// the breastbone (where the hands go), and where the knees go beside it, from its left and
+/// from its right (see [`Lie::kneel_by`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Lying {
+    pub chest: Vec3,
+    pub knees: [Vec3; 2],
+}
+
+impl Lying {
+    /// Lying as `s`, fallen as `f`.
+    fn of(s: &Skeleton, f: Fall) -> Lying {
+        let chest = s.chest.at(STERNUM);
+        let knees =
+            [0, 1].map(|side| v3(chest.x, 0.0, chest.z) + ry(f.yaw) * f.lie().kneel_by(side));
+        Lying { chest, knees }
+    }
+}
+
 /// Another fighter's state, as a defender reads its attacker.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Foe {
@@ -892,6 +928,8 @@ impl Foe {
 /// What a fighter's pose sees beyond its owner this step.
 pub(super) struct Seen<'a> {
     pub me: Entity,
+    /// 0..1, the same every step for this fighter (from its seed): how it lands differs.
+    pub vary: f32,
     /// Where the owner stands.
     pub at: DVec3,
     /// The attacks telegraphed this step: attacker, target and kind.
@@ -905,8 +943,8 @@ pub(super) struct Seen<'a> {
     /// What the owner knows (the foes it has seen, the last noise it heard).
     pub memory: Option<&'a NpcMemory>,
     /// Reviving a downed mate: where its chest lies as last posed (the front over the
-    /// breastbone).
-    pub patient: Option<DVec3>,
+    /// breastbone), and where the knees go beside it.
+    pub patient: Option<(DVec3, DVec3)>,
 }
 
 /// Everything the pose depends on.
@@ -964,30 +1002,36 @@ struct Input {
 }
 
 /// Reviving a downed squad mate: how far into it (0 standing, 1 down on both knees beside
-/// it, the weapon set down or held aside and the hands on its chest), and where its chest is
-/// (owner frame).
+/// it, the weapon set down or held aside and the hands on its chest), where its chest is and
+/// where the knees go (owner frame).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Tend {
     k: f32,
     at: Vec3,
+    knees: Vec3,
 }
 
 /// How long going down beside a downed mate takes, the weapon set down and the hands on it
-/// (s), and getting up from it again.
-const TEND_DOWN: f32 = 1.2;
+/// (s: as long as the brain has it kneel before the revive counts), and getting up from it
+/// again (about as long as the brain keeps it where it is: see
+/// [`NpcBrain::REVIVE_STAND_SECS`]).
+const TEND_DOWN: f32 = NpcBrain::REVIVE_KNEEL_SECS;
 const TEND_UP: f32 = 1.0;
+/// How high its eyes are, down on its knees beside a downed mate (m).
+const TEND_EYES: f32 = 1.05;
 /// The hands press on the chest this often (Hz) and this deep (m).
 const PRESS_HZ: f32 = 1.6;
 const PRESS: f32 = 0.03;
 /// The front of the chest over the breastbone, where the hands go (chest frame).
 const STERNUM: Vec3 = Vec3::new(0.0, 0.22, -0.14);
-/// How far short of the chest the knees go down (m), and how far the body may kneel off the
-/// owner's place to get there.
-const KNEE_GAP: f32 = 0.27;
-const KNEEL_REACH: f32 = 0.7;
+/// How far the body may kneel off the owner's place to get its knees where they go (m): as
+/// far as a reviver may be off its spot and stay down (see [`crate::brain::REVIVE_STAY`]),
+/// and a little over for how far off it reckons where the chest lies (see [`Lie::sternum`]).
+const KNEEL_REACH: f32 = 1.15;
 
 /// Getting up, `t` s after being revived, from lying as it fell (see [`Fall`]) from what it
-/// was doing then (`was`, at `since` on its clock, the feet where they stood).
+/// was doing then (`was`, at `since` on its clock, the feet where they stood; kneeling by a
+/// mate as `knelt`, if it was).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Rise {
     t: f32,
@@ -995,6 +1039,7 @@ struct Rise {
     was: Act,
     since: f64,
     feet: [Plant; 2],
+    knelt: Option<Tend>,
 }
 
 /// How badly a wound (see [`Input`]) hobbles the gait (0..1; one to the body less than one
@@ -1576,8 +1621,9 @@ pub(super) struct Motion {
     /// The blow telegraphed or recovered from is a heavy one.
     heavy: bool,
     down: bool,
-    /// Downed: when it went down, and what it was doing then (the pose it falls from).
-    fell: Option<(f64, Act)>,
+    /// Downed: when it went down, and what it was doing then (the pose it falls from: how it
+    /// knelt by a mate, if it was).
+    fell: Option<(f64, Act, Option<Tend>)>,
     /// Downed, how it lies (to get up from).
     lay: Option<Rise>,
     /// Getting up: when it was revived, and how it lay.
@@ -1590,18 +1636,18 @@ pub(super) struct Motion {
     /// low ready of a wary fighter (0..1; see [`Input`]).
     up: f32,
     wary: f32,
-    /// Reviving a downed mate: how far down beside it (0..1, see [`Tend`]), and where its
-    /// chest is (owner frame).
+    /// Reviving a downed mate: how far down beside it (0..1, see [`Tend`]), where its chest
+    /// is and where the knees go (owner frame).
     tend: f32,
     tend_at: Vec3,
-    /// Downed, where its chest lies as last posed (owner frame: the front over the breastbone,
-    /// where a mate's hands go to revive it).
-    lying: Option<Vec3>,
+    tend_knees: Vec3,
+    /// Downed, how it lies as last posed (where a mate's hands and knees go to revive it).
+    lying: Option<Lying>,
 }
 
 impl Motion {
-    /// Downed, where its chest lies as last posed (owner frame; see [`Motion::lying`]).
-    pub(super) fn lying_chest(&self) -> Option<Vec3> {
+    /// Downed, how it lies as last posed (owner frame; see [`Motion::lying`]).
+    pub(super) fn lying(&self) -> Option<Lying> {
         self.lying.filter(|_| self.posed && self.down)
     }
 
@@ -2224,7 +2270,9 @@ fn solve(i: &Input) -> Skeleton {
     }
     let mut s = stand(i);
     if let Some(f) = i.fall {
-        fallen(&mut s, i.kind, f);
+        // Downed as it knelt by a mate: it goes down from the kneel.
+        let knelt = i.tend.filter(|t| t.k > 0.0).map(|t| tended(i, t));
+        fallen(&mut s, i.kind, f, knelt.as_ref());
         (s.lids, s.jaw) = (i.lids, i.jaw);
     }
     s
@@ -2856,27 +2904,44 @@ fn about(axis: Vec3, a: Vec3, b: Vec3, x: f32) -> Vec3 {
     Quat::from_axis_angle(d, turn * x) * pa
 }
 
+/// How far the hips may have to go to where they land (m, flat) for a fall at its full
+/// pace (from standing, or kneeling about square to a mate).
+const FALL_REACH: f32 = 0.45;
+
+/// How low a falling body's knee joint may go (m): about on the ground, the kneecap just
+/// touching it.
+const KNEE_FLOOR: f32 = 0.04;
+
 /// The body `t` s after going down, from standing as `s0`, the weapon still in hand: the
 /// knees give and the hips drop, the body topples back along the fall, the hips land, then
 /// the back, then the head (each bouncing a little), the legs kick up as it rolls back and
 /// come down, one straight, one folded out to the side, and the arms go limp, swing up and
 /// flop out onto the ground. Each part starts from where it stood, so the fall picks up from
 /// any pose.
-fn fall_pose(s0: &Skeleton, kind: Kind, f: Fall, t: f32) -> Skeleton {
+fn fall_pose(s0: &Skeleton, stood: &Skeleton, kind: Kind, f: Fall, t: f32) -> Skeleton {
     use Ease::{Both, In, Out};
     let r = ry(f.yaw);
     let ri = r.inverse();
-    let mid = (s0.foot[0].pos + s0.foot[1].pos) * 0.5;
+    let mid = (stood.foot[0].pos + stood.foot[1].pos) * 0.5;
     let c0 = v3(mid.x, 0.0, mid.z);
     // Into the fall's frame (on the ground between the feet, falling toward +Z), and back.
     let into = |b: Bone| Bone::new(ri * (b.pos - c0), ri * b.rot);
     let back = |b: Bone| Bone::new(c0 + r * b.pos, r * b.rot);
     let sgn = |k: usize| if k == 0 { -1.0 } else { 1.0 };
     let (bs, fs) = (sgn(f.bent), sgn(f.flung));
+    // From a kneel leaning well over to one side (to a mate's chest), the hips have farther to
+    // go to where they land than from standing: it goes down that much slower.
+    let t = {
+        let p = into(s0.pelvis).pos;
+        let far = Vec2::new(p.x, p.z - 0.42).length();
+        t * (FALL_REACH / far).min(1.0)
+    };
 
     // ---------------------------------------------------------------- trunk
     let p0 = into(s0.pelvis);
     let (py, px, pz) = p0.rot.to_euler(EulerRot::YXZ);
+    // It lies turned a little the way it stood.
+    let stood_yaw = into(stood.pelvis).rot.to_euler(EulerRot::YXZ).0;
     let at = v3(
         track(t, &[(0.0, p0.pos.x, Both), (0.6, 0.03 * bs, Both)]),
         track(
@@ -2908,7 +2973,7 @@ fn fall_pose(s0: &Skeleton, kind: Kind, f: Fall, t: f32) -> Skeleton {
             (0.8, HIPS_LIE, Both),
         ],
     );
-    let yaw = track(t, &[(0.0, py, Both), (0.8, 0.4 * py, Both)]);
+    let yaw = track(t, &[(0.0, py, Both), (0.8, 0.4 * stood_yaw, Both)]);
     let roll = track(t, &[(0.0, pz, Both), (0.5, 0.0, Both)]);
     // Rolled a little onto the hip of the leg that folds out.
     let spin = track(
@@ -2923,7 +2988,7 @@ fn fall_pose(s0: &Skeleton, kind: Kind, f: Fall, t: f32) -> Skeleton {
         pelvis.at(rig::WAIST),
         ry(track(
             t,
-            &[(0.0, cy, Both), (0.8, 0.4 * py + 0.1 * fs, Both)],
+            &[(0.0, cy, Both), (0.8, 0.4 * stood_yaw + 0.1 * fs, Both)],
         )) * rx(track(
             t,
             &[
@@ -2998,11 +3063,25 @@ fn fall_pose(s0: &Skeleton, kind: Kind, f: Fall, t: f32) -> Skeleton {
             0.0
         };
         let lift = if bent { 0.1 } else { 0.2 } * kick + settle;
-        let target = a0.pos.lerp(rest, step(0.3, 0.8, t)) + Vec3::Y * lift;
-        // The knees bend toward the front of the hips (up, once lying), the folded one
-        // falling out to the side.
+        // (From down on the knees, the feet come out from under it first, before the hips
+        // sit back onto them.)
+        let kneeling = into(s0.shin[k]).pos.y < 0.25;
+        let out = if kneeling {
+            step(0.0, 0.45, t)
+        } else {
+            step(0.3, 0.8, t)
+        };
+        let target = a0.pos.lerp(rest, out) + Vec3::Y * lift;
+        // The knees bend the way they were bent (toward the front of the hips, for a leg
+        // near straight; up, once lying), the folded one falling out to the side.
         let toes = a0.rot * Vec3::NEG_Z;
-        let knee0 = v3(toes.x, 0.0, toes.z).normalize_or(Vec3::NEG_Z) + v3(0.0, 0.1, 0.0);
+        let hip0 = into(s0.pelvis).at(v3(sg * rig::HIP_X, 0.0, 0.0));
+        let bend0 = into(s0.shin[k]).pos - (hip0 + a0.pos) * 0.5;
+        let knee0 = if bend0.length() > 0.03 {
+            bend0
+        } else {
+            v3(toes.x, 0.0, toes.z).normalize_or(Vec3::NEG_Z) + v3(0.0, 0.1, 0.0)
+        };
         let knee1 = pelvis.rot
             * if bent {
                 v3(sg * 0.9, 0.0, -0.45)
@@ -3010,15 +3089,54 @@ fn fall_pose(s0: &Skeleton, kind: Kind, f: Fall, t: f32) -> Skeleton {
                 v3(sg * 0.2, 0.0, -1.0)
             };
         let hip = pelvis.at(v3(sg * rig::HIP_X, 0.0, 0.0));
-        let pole = about(target - hip, knee0, knee1, step(0.05, 0.6, t));
-        let (thigh, shin, ankle) = chain(
-            hip,
-            target,
-            (rig::THIGH, rig::SHIN),
-            pole,
-            pelvis.rot * Vec3::X,
-            true,
-        );
+        let pole = if kneeling {
+            // From down on the knees: the knee keeps pointing the way it did (forward and
+            // down, forward as the hips sit back onto the heels, up as the feet come out
+            // ahead), so it doesn't flip as the leg swings round under the hips.
+            let ahead = v3(knee0.x, 0.0, knee0.z).normalize_or(Vec3::NEG_Z);
+            let ahead = about(target - hip, knee0, ahead, step(0.0, 0.2, t));
+            // (The folded one falls out to the side early, as its foot comes in by the hips.)
+            let out = if bent {
+                step(0.1, 0.4, t)
+            } else {
+                step(0.2, 0.5, t)
+            };
+            about(target - hip, ahead, knee1, out)
+        } else {
+            about(target - hip, knee0, knee1, step(0.05, 0.6, t))
+        };
+        let leg = |pole: Vec3| {
+            chain(
+                hip,
+                target,
+                (rig::THIGH, rig::SHIN),
+                pole,
+                pelvis.rot * Vec3::X,
+                true,
+            )
+        };
+        // Where the knee would go into the ground (the leg swinging round under the hips
+        // from a kneel with the mate well off to one side), it stays on the ground instead,
+        // the way it was headed, and the foot trails from it.
+        let floor = into(s0.shin[k]).pos.y.min(KNEE_FLOOR);
+        let (mut thigh, mut shin, mut ankle) = leg(pole);
+        let onto = 1.0 - step(floor - 0.04, floor, shin.pos.y);
+        if onto > 0.0 {
+            let drop = (hip.y - floor).min(rig::THIGH - 1e-3);
+            let way = Vec2::new(shin.pos.x - hip.x, shin.pos.z - hip.z).normalize_or(Vec2::NEG_Y);
+            let out = (rig::THIGH * rig::THIGH - drop * drop).sqrt();
+            let on = hip + v3(way.x * out, -drop, way.y * out);
+            let knee = hip + (shin.pos.lerp(on, onto) - hip).normalize() * rig::THIGH;
+            let foot = knee + (target - knee).normalize_or(Vec3::Z) * rig::SHIN;
+            (thigh, shin, ankle) = chain(
+                hip,
+                foot,
+                (rig::THIGH, rig::SHIN),
+                knee - (hip + foot) * 0.5,
+                pelvis.rot * Vec3::X,
+                true,
+            );
+        }
         s.thigh[k] = thigh;
         s.shin[k] = shin;
         // The foot goes slack, pointing on along the shin.
@@ -3067,7 +3185,9 @@ fn fall_pose(s0: &Skeleton, kind: Kind, f: Fall, t: f32) -> Skeleton {
         );
         s.upper[k] = upper;
         s.fore[k] = fore;
-        s.hand[k] = Bone::new(wrist, w0.rot.slerp(fore.rot, limp));
+        // The hand goes along with the forearm as it swings (going limp, in line with it).
+        let carried = fore.rot * into(s0.fore[k]).rot.inverse() * w0.rot;
+        s.hand[k] = Bone::new(wrist, carried.slerp(fore.rot, limp));
         s.want[k] = target;
     }
     // Still in hand (the bow in the left, anything else in the right; the shield on the left
@@ -3146,7 +3266,8 @@ fn risen(i: &Input, r: Rise) -> Skeleton {
     let s0 = stand(&was);
     let mid = (s0.foot[0].pos + s0.foot[1].pos) * 0.5;
     let mut lying = s0;
-    fallen(&mut lying, i.kind, r.fall);
+    let knelt = r.knelt.filter(|t| t.k > 0.0).map(|t| tended(&was, t));
+    fallen(&mut lying, i.kind, r.fall, knelt.as_ref());
     let kneel = stand(&Input {
         rising: 1.0,
         up: 0.0,
@@ -3199,80 +3320,128 @@ fn rise_pose(
     let grab_shield = 0.28;
 
     // ---------------------------------------------------------------- trunk
-    let (p0, pk) = (into(l.pelvis), into(k.pelvis));
-    let ((p0y, p0x, p0z), (pky, pkx, pkz)) = (euler(p0.rot), euler(pk.rot));
-    let at = v3(
-        along(&[
-            (0.0, p0.pos.x),
-            (0.4, side * 0.12),
-            (0.75, 0.5 * (side * 0.06 + pk.pos.x)),
-            (1.0, pk.pos.x),
-        ]),
-        along(&[(0.0, p0.pos.y), (0.4, 0.15), (0.75, 0.42), (1.0, pk.pos.y)]),
-        along(&[(0.0, p0.pos.z), (0.4, 0.42), (0.75, 0.15), (1.0, pk.pos.z)]),
-    );
-    let pelvis = Bone::new(
-        at,
-        ry(along(&[
-            (0.0, p0y),
-            (0.4, side * 0.35),
-            (0.75, 0.7 * pky + side * 0.15),
-            (1.0, pky),
-        ])) * rx(along(&[(0.0, p0x), (0.4, 0.85), (0.75, 0.25), (1.0, pkx)]))
-            * rz(along(&[
-                (0.0, p0z),
-                (0.4, -side * 0.12),
-                (0.75, 0.0),
-                (1.0, pkz),
-            ])),
-    );
-    // Sitting up leaning back, rolled toward the weapon (toward the shield first); leaning
-    // forward over the knee as it comes up onto it.
-    let (c0e, cke) = (euler(into(l.chest).rot), euler(into(k.chest).rot));
-    let roll = if shielded {
-        along(&[
-            (0.0, c0e.2),
-            (0.25, side * 0.35),
-            (0.5, -side * 0.3),
-            (0.75, -side * 0.05),
-            (1.0, cke.2),
-        ])
-    } else {
-        along(&[
-            (0.0, c0e.2),
-            (0.4, -side * 0.3),
-            (0.75, -side * 0.05),
-            (1.0, cke.2),
-        ])
+    // (Its hips and chest `u` of the way.)
+    let trunk = |u: f32| {
+        let along = |keys: &[(f32, f32)]| {
+            let keys: Vec<(f32, f32, Ease)> = keys.iter().map(|&(t, v)| (t, v, Both)).collect();
+            track(u, &keys)
+        };
+        let (p0, pk) = (into(l.pelvis), into(k.pelvis));
+        let ((p0y, p0x, p0z), (pky, pkx, pkz)) = (euler(p0.rot), euler(pk.rot));
+        let at = v3(
+            along(&[
+                (0.0, p0.pos.x),
+                (0.4, side * 0.12),
+                (0.75, 0.5 * (side * 0.06 + pk.pos.x)),
+                (1.0, pk.pos.x),
+            ]),
+            along(&[(0.0, p0.pos.y), (0.4, 0.15), (0.75, 0.42), (1.0, pk.pos.y)]),
+            along(&[(0.0, p0.pos.z), (0.4, 0.42), (0.75, 0.15), (1.0, pk.pos.z)]),
+        );
+        let pelvis = Bone::new(
+            at,
+            ry(along(&[
+                (0.0, p0y),
+                (0.4, side * 0.35),
+                (0.75, 0.7 * pky + side * 0.15),
+                (1.0, pky),
+            ])) * rx(along(&[(0.0, p0x), (0.4, 0.85), (0.75, 0.25), (1.0, pkx)]))
+                * rz(along(&[
+                    (0.0, p0z),
+                    (0.4, -side * 0.12),
+                    (0.75, 0.0),
+                    (1.0, pkz),
+                ])),
+        );
+        // Sitting up leaning back, rolled toward the weapon (toward the shield first); leaning
+        // forward over the knee as it comes up onto it.
+        let (c0e, cke) = (euler(into(l.chest).rot), euler(into(k.chest).rot));
+        let roll = if shielded {
+            along(&[
+                (0.0, c0e.2),
+                (0.25, side * 0.35),
+                (0.5, -side * 0.3),
+                (0.75, -side * 0.05),
+                (1.0, cke.2),
+            ])
+        } else {
+            along(&[
+                (0.0, c0e.2),
+                (0.4, -side * 0.3),
+                (0.75, -side * 0.05),
+                (1.0, cke.2),
+            ])
+        };
+        let turn = if shielded {
+            along(&[
+                (0.0, c0e.0),
+                (0.25, -side * 0.3),
+                (0.5, side * 0.55),
+                (0.75, 0.6 * cke.0 + side * 0.2),
+                (1.0, cke.0),
+            ])
+        } else {
+            along(&[
+                (0.0, c0e.0),
+                (0.4, side * 0.55),
+                (0.75, 0.6 * cke.0 + side * 0.2),
+                (1.0, cke.0),
+            ])
+        };
+        let chest_rot = ry(turn)
+            * rx(along(&[
+                (0.0, c0e.1),
+                (0.25, 0.9),
+                (0.42, 0.45),
+                (0.75, -0.25),
+                (1.0, cke.1),
+            ]))
+            * rz(roll);
+        // The breath's rise of the chest on the knee, coming in at the end.
+        let lift = into(k.chest).pos - pk.at(rig::WAIST);
+        let chest = Bone::new(pelvis.at(rig::WAIST) + lift * step(0.6, 1.0, u), chest_rot);
+        (pelvis, chest)
     };
-    let turn = if shielded {
-        along(&[
-            (0.0, c0e.0),
-            (0.25, -side * 0.3),
-            (0.5, side * 0.55),
-            (0.75, 0.6 * cke.0 + side * 0.2),
-            (1.0, cke.0),
-        ])
-    } else {
-        along(&[
-            (0.0, c0e.0),
-            (0.4, side * 0.55),
-            (0.75, 0.6 * cke.0 + side * 0.2),
-            (1.0, cke.0),
-        ])
+    // How the kneel holds the weapon (and the shield) in hand, and where the hand goes to take
+    // it up where it lies.
+    let grip_of =
+        |h: Bone, w: Bone| Bone::new(h.rot.inverse() * (w.pos - h.pos), h.rot.inverse() * w.rot);
+    let to_take = |w: Bone, g: Bone| {
+        let inv = g.rot.inverse();
+        into(w).then(Bone::new(-(inv * g.pos), inv))
     };
-    let chest_rot = ry(turn)
-        * rx(along(&[
-            (0.0, c0e.1),
-            (0.25, 0.9),
-            (0.42, 0.45),
-            (0.75, -0.25),
-            (1.0, cke.1),
-        ]))
-        * rz(roll);
-    // The breath's rise of the chest on the knee, coming in at the end.
-    let lift = into(k.chest).pos - pk.at(rig::WAIST);
-    let chest = Bone::new(pelvis.at(rig::WAIST) + lift * step(0.6, 1.0, u), chest_rot);
+    let held = grip_of(k.hand[holder], k.weapon);
+    let shield_held = grip_of(k.hand[0], k.shield);
+    // (A weapon lying farther from the hand is taken up a little later, the hand getting
+    // there no faster.)
+    let grab = if shielded || kind == Kind::Fists {
+        grab
+    } else {
+        let far = (to_take(l.weapon, held).pos - into(l.hand[holder]).pos).length();
+        grab + 0.4 * (far - 0.7).clamp(0.0, 0.5)
+    };
+    // A weapon lying beyond the arm's reach when the hand gets to it (one a reviver set down,
+    // fallen from the kneel with the mate well off to one side): the chest bends over toward
+    // it as the hand goes for it, as far as the arm falls short, so the hand gets there rather
+    // than the weapon being drawn in over the ground; then it straightens over the knee.
+    let (pelvis, chest) = trunk(u);
+    let bend = if set_down(kind).is_none() {
+        Quat::IDENTITY
+    } else {
+        let (_, at_grab) = trunk(grab);
+        let (waist, sh) = (at_grab.pos, at_grab.at(shoulder(holder)));
+        let to = to_take(l.weapon, held).pos - sh;
+        let arm = rig::UPPER_ARM + rig::FOREARM - 0.03;
+        let short = (to.length() - arm).max(0.0);
+        let lever = sh - waist;
+        let axis = lever.cross(to).normalize_or_zero();
+        let angle = (short / lever.length()).min(0.6);
+        Quat::from_axis_angle(
+            axis,
+            angle * step(0.0, grab, u) * (1.0 - step(grab, 1.0, u)),
+        )
+    };
+    let chest = Bone::new(chest.pos, bend * chest.rot);
     // The head looks at the weapon as the hand goes for it.
     let rel = |c: Bone, h: Bone| euler(c.rot.inverse() * h.rot);
     let (h0, hk) = (rel(l.chest, l.head), rel(k.chest, k.head));
@@ -3367,21 +3536,11 @@ fn rise_pose(
     ];
 
     // ---------------------------------------------------------------- arms
-    // How the kneel holds the weapon (and the shield) in hand, and where the hand goes to take
-    // it up where it lies.
-    let grip_of =
-        |h: Bone, w: Bone| Bone::new(h.rot.inverse() * (w.pos - h.pos), h.rot.inverse() * w.rot);
-    let to_take = |w: Bone, g: Bone| {
-        let inv = g.rot.inverse();
-        into(w).then(Bone::new(-(inv * g.pos), inv))
-    };
-    let held = grip_of(k.hand[holder], k.weapon);
-    let shield_held = grip_of(k.hand[0], k.shield);
     for j in 0..2 {
         let sg = sgn(j);
         let sh = chest.at(shoulder(j));
         let (w0, wk) = (into(l.hand[j]), into(k.hand[j]));
-        let (target, rot) = if j == holder || (shielded && j == 0) {
+        let (target, rot) = if (j == holder && kind != Kind::Fists) || (shielded && j == 0) {
             // Reaching for it, taking it up, and bringing it round (lifted on the way).
             // (The shield, lying on its face, by its rim: it comes up into the grip.)
             let (take, when) = if j == holder {
@@ -3391,7 +3550,9 @@ fn rise_pose(
                 (Bone::new(rim.pos + Vec3::Y * 0.07, rim.rot), grab_shield)
             };
             if u < when {
-                let x = step(when - 0.25, when, u);
+                // (Reaching sooner for one lying farther off.)
+                let far = (take.pos - w0.pos).length();
+                let x = step((when - 0.25 - 0.3 * (far - 0.5).max(0.0)).max(0.0), when, u);
                 (w0.pos.lerp(take.pos, x), w0.rot.slerp(take.rot, x))
             } else {
                 let x = step(when, 1.0, u);
@@ -3402,9 +3563,10 @@ fn rise_pose(
                 )
             }
         } else {
-            // Pushing off the ground behind, then in front, then to where the kneel has it.
-            let behind = v3(-side * 0.3, WRISTS_DOWN, 0.55);
-            let ahead = v3(-side * 0.22, WRISTS_DOWN, 0.12);
+            // Pushing off the ground behind, then in front, then to where the kneel has it
+            // (bare fists, both hands).
+            let behind = v3(sg * 0.3, WRISTS_DOWN, 0.55);
+            let ahead = v3(sg * 0.22, WRISTS_DOWN, 0.12);
             let pos = w0
                 .pos
                 .lerp(behind, step(0.05, 0.3, u))
@@ -3417,7 +3579,8 @@ fn rise_pose(
         let target = sh + (target - sh).clamp_length_max(arm);
         let elbow = |b: &Skeleton, w: Vec3| into(b.fore[j]).pos - (into(b.upper[j]).pos + w) * 0.5;
         let reach = target - sh;
-        let out = v3(sg * 0.8, 0.2, 0.3);
+        // (Bare fists pushing off with both hands: the elbows kept up off the ground.)
+        let out = v3(sg * 0.8, if kind == Kind::Fists { 0.3 } else { 0.2 }, 0.3);
         let pole = about(reach, elbow(l, w0.pos), out, step(0.0, 0.3, u));
         let pole = about(reach, pole, elbow(k, wk.pos), step(0.55, 1.0, u));
         let (upper, fore, wrist) = chain(
@@ -3433,8 +3596,11 @@ fn rise_pose(
         s.hand[j] = Bone::new(wrist, rot);
         s.want[j] = target;
     }
-    // Each comes up into the hand that took it (settling into the grip).
-    let taken = step(grab, grab + 0.08, u);
+    // Each comes up into the hand that took it (settling into the grip; the body leans over
+    // to one lying out of reach, so the hand gets there first).
+    let short = (to_take(l.weapon, held).pos - chest.at(shoulder(holder))).length()
+        - (rig::UPPER_ARM + rig::FOREARM - 0.015);
+    let taken = step(grab, grab + 0.08 + 0.5 * short.max(0.0), u);
     s.weapon = into(l.weapon).mix(s.hand[holder].then(held), taken);
     s.shield = if !shielded {
         s.weapon
@@ -3465,29 +3631,59 @@ fn rise_pose(
 
 /// Downed: the body falls from its standing pose `s` (see [`fall_pose`]), and the weapon and
 /// the shield slip from the hands as the knees give and drop beside it.
-fn fallen(s: &mut Skeleton, kind: Kind, f: Fall) {
+fn fallen(s: &mut Skeleton, kind: Kind, f: Fall, knelt: Option<&Skeleton>) {
     let s0 = *s;
-    *s = fall_pose(&s0, kind, f, f.t);
+    let from = knelt.unwrap_or(&s0);
+    *s = fall_pose(from, &s0, kind, f, f.t);
+    // A weapon set down by a mate stays where it lies.
+    let laid = knelt
+        .filter(|k| set_down(kind).is_some() && k.weapon.pos.y < 0.1)
+        .map(|k| k.weapon);
+    if let Some(w) = laid {
+        s.weapon = w;
+        if kind != Kind::SwordShield {
+            s.shield = w;
+        }
+    }
     if f.t <= LET_GO || kind == Kind::Fists {
         return;
     }
-    let held = fall_pose(&s0, kind, f, LET_GO);
+    let held = fall_pose(from, &s0, kind, f, LET_GO);
     let mid = (s0.foot[0].pos + s0.foot[1].pos) * 0.5;
     let (r, c0) = (ry(f.yaw), v3(mid.x, 0.0, mid.z));
     // Where they come to lie (in the fall's frame): blades and carbines on their sides, the
-    // shield on its back, the bow flat.
+    // shield on its back, the bow flat; out wide with the arm flung out (from the hand that
+    // held it), else let go of beside the thigh, along the body (a squad mate kneels on that
+    // side: see [`Lie::kneel_by`]).
     let lying = |at: Vec3, rot: Quat| Bone::new(c0 + r * at, r * rot);
+    let wide = |hand: usize| f.flung == hand;
     let weapon = match kind {
-        Kind::Rifle => lying(v3(0.6, 0.03, 0.7), ry(-0.4) * rz(FRAC_PI_2)),
-        Kind::Bow => lying(v3(-0.6, 0.03, 0.8), ry(0.3) * rx(-FRAC_PI_2)),
-        _ => lying(v3(0.62, 0.02, 0.75), ry(-0.5) * rz(FRAC_PI_2)),
+        Kind::Rifle if wide(1) => lying(v3(0.6, 0.03, 0.7), ry(-0.4) * rz(FRAC_PI_2)),
+        Kind::Rifle => lying(DROP_RIFLE, ry(-0.1) * rz(FRAC_PI_2)),
+        Kind::Bow if wide(0) => lying(v3(-0.6, 0.03, 0.8), ry(0.3) * rx(-FRAC_PI_2)),
+        Kind::Bow => lying(DROP_BOW, ry(0.33) * rz(FRAC_PI_2) * rx(-FRAC_PI_2)),
+        _ if wide(1) => lying(v3(0.62, 0.02, 0.75), ry(-0.5) * rz(FRAC_PI_2)),
+        _ => lying(DROP_BLADE, ry(-0.12) * rz(FRAC_PI_2)),
     };
-    s.weapon = dropped(held.weapon, weapon, f.t - LET_GO);
+    if laid.is_none() {
+        s.weapon = dropped(held.weapon, weapon, f.t - LET_GO);
+    }
     if kind == Kind::SwordShield {
-        let shield = lying(v3(-0.75, 0.02, 0.45), ry(0.3) * rx(FRAC_PI_2));
+        let shield = if wide(0) {
+            lying(v3(-0.75, 0.02, 0.45), ry(0.3) * rx(FRAC_PI_2))
+        } else {
+            lying(DROP_SHIELD, ry(0.15) * rx(FRAC_PI_2))
+        };
         s.shield = dropped(held.shield, shield, f.t - LET_GO - 0.05);
     }
 }
+
+/// Where what is let go of beside the thigh lies (see [`fallen`]; in the fall's frame): a
+/// blade, a carbine, a bow and a shield.
+const DROP_BLADE: Vec3 = Vec3::new(0.5, 0.02, 0.0);
+const DROP_RIFLE: Vec3 = Vec3::new(0.5, 0.03, -0.05);
+const DROP_BOW: Vec3 = Vec3::new(-0.55, 0.03, -0.15);
+const DROP_SHIELD: Vec3 = Vec3::new(-0.62, 0.02, -0.25);
 
 /// Something let go of as `from` `e` s ago, falling to lie as `to`: across at an even pace,
 /// down ever faster, turning as it goes; a little hop as it lands.
@@ -3516,9 +3712,9 @@ fn dropped(from: Bone, to: Bone, e: f32) -> Bone {
 fn set_down(kind: Kind) -> Option<Bone> {
     let back = |turn: f32| ry(PI + turn) * rz(FRAC_PI_2);
     match kind {
-        Kind::Rifle => Some(Bone::new(v3(0.4, 0.03, 0.18), back(0.35))),
-        Kind::Longsword => Some(Bone::new(v3(0.4, 0.02, 0.12), back(0.3))),
-        Kind::SwordShield => Some(Bone::new(v3(0.4, 0.02, 0.14), back(0.35))),
+        Kind::Rifle => Some(Bone::new(v3(0.42, 0.03, 0.34), back(0.35))),
+        Kind::Longsword => Some(Bone::new(v3(0.42, 0.02, 0.3), back(0.3))),
+        Kind::SwordShield => Some(Bone::new(v3(0.42, 0.02, 0.3), back(0.35))),
         _ => None,
     }
 }
@@ -3528,9 +3724,9 @@ fn set_down(kind: Kind) -> Option<Bone> {
 fn held_aside(kind: Kind) -> Option<Bone> {
     match kind {
         // The string toward the archer.
-        Kind::Bow => Some(Bone::new(v3(-0.4, 0.68, -0.02), ry(FRAC_PI_2) * rz(-0.08))),
+        Kind::Bow => Some(Bone::new(v3(-0.4, 0.68, 0.18), ry(FRAC_PI_2) * rz(-0.08))),
         // The face out to the left.
-        Kind::SwordShield => Some(Bone::new(v3(-0.42, 0.45, -0.02), ry(FRAC_PI_2) * rz(-0.1))),
+        Kind::SwordShield => Some(Bone::new(v3(-0.42, 0.55, 0.16), ry(FRAC_PI_2) * rz(-0.1))),
         _ => None,
     }
 }
@@ -3576,15 +3772,17 @@ fn tended(i: &Input, t: Tend) -> Skeleton {
         step(0.4, 1.0, k)
     };
     let bend = step(0.0, 0.8, lay) * (1.0 - on);
-    // Glancing up (the eyes well above the chest), and the pressing (waiting meanwhile).
-    let glance = step(-0.8, -0.3, i.look.head.y) * i.look.focus * on;
+    // Glancing up (the eyes well above the chest, however far off it kneels), and the
+    // pressing (waiting meanwhile).
+    let to_chest = (t.at.y - TEND_EYES).atan2(Vec2::new(t.at.x, t.at.z).length().max(0.3));
+    let glance = step(0.25, 0.6, i.look.head.y - to_chest) * i.look.focus * on;
     let beat = ((i.now * f64::from(PRESS_HZ)).fract() as f32 * TAU).cos();
     let press = on * (1.0 - glance) * (0.5 - 0.5 * beat);
 
-    // The kneel's frame: the knees short of the chest, facing it.
-    let flat = Vec2::new(t.at.x, t.at.z);
-    let dir = flat.normalize_or(Vec2::NEG_Y);
-    let knees = (flat - dir * KNEE_GAP).clamp_length_max(KNEEL_REACH);
+    // The kneel's frame: the knees where they go beside the mate (as far as the body kneels
+    // off the owner's place), facing its chest.
+    let knees = Vec2::new(t.knees.x, t.knees.z).clamp_length_max(KNEEL_REACH);
+    let dir = (Vec2::new(t.at.x, t.at.z) - knees).normalize_or(Vec2::NEG_Y);
     let r = ry((-dir.x).atan2(-dir.y));
     let o = v3(knees.x, 0.0, knees.y);
     let at = |p: Vec3| o + r * p;
@@ -3592,10 +3790,11 @@ fn tended(i: &Input, t: Tend) -> Skeleton {
     let mate = r.inverse() * (t.at - o);
 
     // ---------------------------------------------------------------- trunk
-    // Up on the knees over the chest; sat back on the heels to set the weapon down (the hips
-    // going round the knees, which stay on the ground).
+    // Up on the knees; sat back on the heels to set the weapon down (the hips going round the
+    // knees, which stay on the ground); then over the chest, the shoulders over the hands.
     let side = if laid.is_some() { 1.0 } else { 0.0 };
-    let back = lerp(0.03, 0.92, bend);
+    let (over, bow) = over_chest(mate);
+    let back = lerp(lerp(0.03, over, on), 0.92, bend);
     let mut hips = Bone::new(
         v3(side * 0.1 * bend, 0.05, 0.0) + v3(0.0, back.cos(), back.sin()) * 0.448,
         rx(-lerp(0.2, 0.45, bend)),
@@ -3603,7 +3802,7 @@ fn tended(i: &Input, t: Tend) -> Skeleton {
     hips.pos.y -= 0.012 * press;
     let pelvis = s0.pelvis.mix(frame(hips), down);
     // Leaning over the chest (and, sat back, over to the weapon's side).
-    let lean = 0.3 * down + 0.6 * bend + 0.5 * on - 0.15 * glance + 0.05 * press;
+    let lean = 0.3 * down + 0.6 * bend + (bow - 0.3) * on - 0.15 * glance + 0.05 * press;
     let waist = pelvis.at(rig::WAIST) + (s0.chest.pos - s0.pelvis.at(rig::WAIST)) * (1.0 - down);
     let chest = Bone::new(
         waist,
@@ -3757,16 +3956,60 @@ fn tended(i: &Input, t: Tend) -> Skeleton {
         Kind::Fists => chest,
         _ => s.weapon,
     };
-    // The string let down (an arrow nocked stays on it); a magazine or an arrow in hand put
-    // away as the hand leaves.
+    // The string let down (an arrow nocked stays on it); a magazine in hand seated in the
+    // carbine on its way down, an arrow in hand put back in the quiver.
     s.draw = s0.draw * (1.0 - down);
     s.bend = limb_bend(s.draw);
     let free = usize::from(kind == Kind::Bow);
-    s.held = s0
-        .held
-        .filter(|_| k < 0.2)
-        .map(|h| s.hand[free].then(relative(s0.hand[free], h)));
+    let away = step(0.05, 0.35, k);
+    s.held = s0.held.filter(|_| away < 1.0).map(|h| {
+        let in_hand = s.hand[free].then(relative(s0.hand[free], h));
+        let put = if kind == Kind::Bow {
+            let (mouth, bottom) = (weapons::QUIVER_MOUTH, weapons::QUIVER_BOTTOM);
+            chest.then(Bone::new(mouth, aim(bottom - mouth, Vec3::Z)))
+        } else {
+            s.weapon.then(Bone::new(weapons::RIFLE_MAG, Quat::IDENTITY))
+        };
+        in_hand.mix(put, away)
+    });
     s
+}
+
+/// How a reviver kneels over a downed mate's chest at `mate` (kneel frame: the knees at the
+/// origin) to press on it: how far the hips swing round the knees (rad, back positive; see
+/// [`tended`]) and how far the body leans over (rad), so the shoulders come over the hands with
+/// the arms near straight, whether the chest is near the knees or a little farther off.
+fn over_chest(mate: Vec3) -> (f32, f32) {
+    let s = rig::SHOULDER;
+    let (rad, phase) = (Vec2::new(s.y, s.z).length(), s.z.atan2(s.y));
+    // The wrists over the breastbone (see the hands on the chest), and the shoulders a little
+    // behind and above them.
+    let wrists = mate + v3(0.0, 0.045, 0.075);
+    let (spread, arms, behind) = (s.x - 0.055, 0.93 * (rig::UPPER_ARM + rig::FOREARM), 0.04);
+    let up = (arms * arms - spread * spread - behind * behind)
+        .max(0.0)
+        .sqrt();
+    let want = wrists + v3(0.0, up, behind);
+    // The lean that brings the shoulders to that height with the hips swung `back`, and how
+    // far toward the chest they are then.
+    let tilt = rx(-0.2);
+    let lean_at = |back: f32| {
+        let hips = v3(0.0, 0.05 + 0.448 * back.cos(), 0.448 * back.sin());
+        let waist = hips + tilt * rig::WAIST;
+        let lean = phase + ((want.y - waist.y) / rad).clamp(-1.0, 1.0).acos();
+        (lean, waist.z - s.y * lean.sin() + s.z * lean.cos())
+    };
+    let (mut lo, mut hi) = (-0.7f32, 0.6f32);
+    for _ in 0..20 {
+        let mid = 0.5 * (lo + hi);
+        if lean_at(mid).1 < want.z {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let back = 0.5 * (lo + hi);
+    (back, lean_at(back).0)
 }
 
 /// How far the bow's limbs bend (radians) for the string pulled `draw` past brace height:
@@ -5181,25 +5424,32 @@ pub(super) fn humanoid(
         } else {
             act
         };
-        m.fell = Some((since.min(now), was));
+        // Down on its knees by a mate, it goes down from there.
+        let knelt = (!stale && m.tend > 0.0).then_some(Tend {
+            k: m.tend,
+            at: m.tend_at,
+            knees: m.tend_knees,
+        });
+        m.fell = Some((since.min(now), was, knelt));
     }
-    let vary = ((seen.me.to_bits() as u32) as f32 * 0.618_034).fract();
-    let fall = m.fell.map(|(since, _)| {
+    // (As its squad mates see it lie: see [`Lie`]; else along the blow seen landing then.)
+    let fall = m.fell.map(|(since, ..)| {
         let since = downed.map_or(since, |d| d.since);
-        let push = m
-            .hurt
-            .filter(|h| (h.since - since).abs() < 0.3)
-            .map(|h| h.push)
-            .filter(|p| p.y > -0.2 && p.length() > 0.1);
+        let push = downed.and_then(|d| d.push).or_else(|| {
+            m.hurt
+                .filter(|h| (h.since - since).abs() < 0.3)
+                .and_then(|h| Lie::pushed(h.push))
+        });
+        let lie = Lie::of(seen.vary, push);
         Fall {
             t: (now - since).max(0.0) as f32,
-            yaw: push.map_or((vary - 0.5) * 0.8, |p| p.x.atan2(p.y).clamp(-0.9, 0.9)),
-            bent: usize::from(vary > 0.5),
-            flung: usize::from((vary * 7.0).fract() > 0.45),
+            yaw: lie.yaw,
+            bent: lie.bent,
+            flung: lie.flung,
         }
     });
     let (now_was, act) = match m.fell {
-        Some((since, was)) => (since, was),
+        Some((since, was, _)) => (since, was),
         None => (now, act),
     };
     // The weapon comes up from its carry at ease: at once against a blow or for a blow of its
@@ -5261,13 +5511,14 @@ pub(super) fn humanoid(
             pitch: 0.0,
             ..p
         });
-        if let (Some(fall), Some((_, was))) = (fall, m.fell) {
+        if let (Some(fall), Some((_, was, knelt))) = (fall, m.fell) {
             m.lay = Some(Rise {
                 t: 0.0,
                 fall,
                 was,
                 since: now_was,
                 feet,
+                knelt,
             });
         }
         (Gait::new(Vec2::ZERO, 0.0, ready), feet, None)
@@ -5297,32 +5548,49 @@ pub(super) fn humanoid(
             reload,
         })
     });
-    // Reviving a downed mate: once kneeling there, down beside it, the weapon set down and the
-    // hands on its chest; up again after. Its chest is kept in the owner's frame (turning and
-    // moving with the owner) between sightings of it.
-    let tending =
-        !is_down && brain.is_some_and(|b| b.action == NpcAction::Revive && b.revive_progress > 0.0);
-    if let Some(p) = seen.patient {
-        m.tend_at = facing.inverse() * (p - seen.at).as_vec3();
+    // Reviving a downed mate: down beside it as the brain kneels it there, the weapon set down
+    // and the hands on its chest by the time the revive counts; up again after. Its chest and
+    // where the knees go are kept in the owner's frame (turning and moving with the owner)
+    // between sightings of it.
+    let kneeling = brain
+        .filter(|b| !is_down && b.action == NpcAction::Revive && b.revive_kneel > 0.0)
+        .map(|b| (b.revive_kneel / TEND_DOWN).min(1.0));
+    let tending = kneeling.is_some();
+    if let Some((chest, knees)) = seen.patient {
+        m.tend_at = facing.inverse() * (chest - seen.at).as_vec3();
+        m.tend_knees = facing.inverse() * (knees - seen.at).as_vec3();
     } else if m.tend > 0.0 && !stale {
-        m.tend_at = ry(-turned) * m.tend_at - v3(m.vel.x, 0.0, m.vel.y) * dt;
+        let moved = |p: Vec3| ry(-turned) * p - v3(m.vel.x, 0.0, m.vel.y) * dt;
+        (m.tend_at, m.tend_knees) = (moved(m.tend_at), moved(m.tend_knees));
     } else if m.tend <= 0.0 {
-        m.tend_at = v3(0.0, 0.28, -(KNEE_GAP + 0.35));
+        (m.tend_at, m.tend_knees) = (v3(0.0, 0.28, -0.75), v3(0.0, 0.0, -0.35));
     }
-    let to = if tending { 1.0 } else { 0.0 };
-    m.tend = if is_down {
-        0.0
-    } else if stale {
-        to
-    } else if to > m.tend {
-        (m.tend + dt / TEND_DOWN).min(1.0)
+    // Down at the pace the brain kneels it (from where it is, whatever it was doing
+    // meanwhile), and up again (quicker if it moves off meanwhile: the knees don't drag). Not
+    // while it gets up after a revive itself: it kneels once it is up.
+    let speed = Vec2::new(loco.velocity.x, loco.velocity.z).length();
+    let (up, lower) = if stale {
+        (0.0, 1.0)
     } else {
-        (m.tend - dt / TEND_UP).max(0.0)
+        (
+            m.tend - dt / TEND_UP * (1.0 + speed),
+            m.tend + 1.2 * dt / TEND_DOWN,
+        )
     };
-    let tend = (m.tend > 0.0).then_some(Tend {
-        k: m.tend,
-        at: m.tend_at,
-    });
+    m.tend = if is_down || m.rise.is_some() {
+        0.0
+    } else {
+        kneeling.unwrap_or(0.0).min(lower).max(up).max(0.0)
+    };
+    // Downed: how it knelt as it went down (it falls from there).
+    let tend = match m.fell {
+        Some((.., knelt)) => knelt,
+        None => (m.tend > 0.0).then_some(Tend {
+            k: m.tend,
+            at: m.tend_at,
+            knees: m.tend_knees,
+        }),
+    };
     let (look, lids, jaw, breath) = face(FaceIn {
         g: &mut m.gaze,
         now,
@@ -5334,7 +5602,7 @@ pub(super) fn humanoid(
         seen,
         brain,
         vitals,
-        speed: Vec2::new(loco.velocity.x, loco.velocity.z).length(),
+        speed,
         hurt: m.hurt,
         act,
         melee: !ranged,
@@ -5373,7 +5641,7 @@ pub(super) fn humanoid(
         tend,
         seed,
     });
-    m.lying = is_down.then(|| skeleton.chest.at(STERNUM));
+    m.lying = fall.filter(|_| is_down).map(|f| Lying::of(&skeleton, f));
     m.sway.step(now, &skeleton, m.vel, m.yaw);
     let spin = (now * 53.0 % TAU as f64) as f32;
     let slots = place(&skeleton, kind, flash, spin, &m.sway);
@@ -5436,7 +5704,11 @@ fn face(f: FaceIn) -> (Look, f32, f32, f32) {
     }
     // Toward a point in the world (`h` over it), from the eyes (down on the knees beside a
     // downed mate, lower): yaw and pitch in the owner's frame.
-    let eyes = if f.tend.is_some() { 1.05 } else { 1.62 };
+    let eyes = if f.tend.is_some() {
+        f64::from(TEND_EYES)
+    } else {
+        1.62
+    };
     let toward = |p: DVec3, h: f64| {
         let d = f.facing.inverse() * (p + DVec3::Y * h - seen.at - DVec3::Y * eyes).as_vec3();
         let flat = Vec2::new(d.x, d.z).length().max(0.3);
@@ -5638,6 +5910,7 @@ fn place(s: &Skeleton, kind: Kind, flash: bool, spin: f32, sway: &Sway) -> [Plac
     put(FOOT_L, s.foot[0]);
     put(FOOT_R, s.foot[1]);
     put(Part::ArmL, s.upper[0]);
+    put(ARMBAND, s.upper[0]);
     put(Part::ArmR, s.upper[1]);
     put(FOREARM_L, s.fore[0]);
     put(FOREARM_R, s.fore[1]);
@@ -6474,7 +6747,7 @@ mod tests {
         memory: &'a dyn Fn(f64) -> Option<NpcMemory>,
         attacks: &'a dyn Fn(f64) -> Vec<(Entity, Option<Entity>, AttackKind)>,
         /// Reviving a downed mate, where its chest lies (world).
-        patient: &'a dyn Fn(f64) -> Option<DVec3>,
+        patient: &'a dyn Fn(f64) -> Option<(DVec3, DVec3)>,
     }
 
     impl Run<'_> {
@@ -6522,6 +6795,7 @@ mod tests {
                 let downed = match vitals {
                     Some(v) if v.downed => Some(Downed {
                         since: *down_since.get_or_insert(now),
+                        push: None,
                     }),
                     _ => {
                         down_since = None;
@@ -6530,6 +6804,7 @@ mod tests {
                 };
                 let seen = Seen {
                     me: Entity::PLACEHOLDER,
+                    vary: ((Entity::PLACEHOLDER.to_bits() as u32) as f32 * 0.618_034).fract(),
                     at: DVec3::ZERO,
                     attacks: &attacks,
                     blows: &landed,
@@ -7532,6 +7807,7 @@ mod tests {
                             was: Act::Guard,
                             since: was.now,
                             feet: was.feet,
+                            knelt: None,
                         }),
                         ..input(kind, Act::Guard, true)
                     })
@@ -7811,14 +8087,16 @@ mod tests {
             Kind::Bow,
             Kind::Fists,
         ];
-        // The mate's chest ahead, ahead and to one side, and further off to the other.
+        // The mate's chest ahead, the knees going down short of it (beside the arm along its
+        // body, beside its belly); ahead and to one side; and further off to the other, the
+        // knees a step off.
         let chests = [
-            v3(0.0, 0.28, -0.62),
-            v3(0.3, 0.3, -0.55),
-            v3(-0.5, 0.26, -0.8),
+            (v3(0.0, 0.28, -0.62), v3(0.0, 0.0, -0.18)),
+            (v3(0.3, 0.3, -0.55), v3(0.05, 0.0, -0.25)),
+            (v3(-0.5, 0.26, -0.8), v3(-0.3, 0.0, -0.45)),
         ];
         for kind in kinds {
-            for (n, at) in chests.into_iter().enumerate() {
+            for (n, (at, knees)) in chests.into_iter().enumerate() {
                 for fighting in [true, false] {
                     let act = if fighting { Act::Guard } else { Act::Relaxed };
                     let case = format!("{kind:?} chest {n} fighting {fighting}");
@@ -7826,7 +8104,7 @@ mod tests {
                     let pose = |k: f32, now: f64| {
                         solve(&Input {
                             now,
-                            tend: Some(Tend { k, at }),
+                            tend: Some(Tend { k, at, knees }),
                             ..base
                         })
                     };
@@ -7965,7 +8243,7 @@ mod tests {
             } else {
                 NpcAction::Idle
             },
-            revive_progress: if tending(now) {
+            revive_kneel: if tending(now) {
                 (now - from) as f32 + 0.01
             } else {
                 0.0
@@ -7973,7 +8251,8 @@ mod tests {
             ..Default::default()
         };
         let others = |e: Entity| (e == foe).then_some(foe_at);
-        let patient = |now: f64| tending(now).then_some(chest);
+        let knees = DVec3::new(0.05, 0.0, -0.22);
+        let patient = |now: f64| tending(now).then_some((chest, knees));
         for weapon in [
             NpcWeapon::sword(),
             NpcWeapon::sword_and_shield(),
@@ -8076,6 +8355,873 @@ mod tests {
                 off < 0.03,
                 "{case}: the weapon {off:.2} m off the hand after"
             );
+        }
+    }
+
+    /// Balls (centre, radius) standing in for a shape.
+    type Balls = Vec<(Vec3, f32)>;
+
+    /// Balls along `a`..`b`, their radius going from `ra` to `rb`: a limb, a blade or a stock
+    /// as the clearance checks see it.
+    fn capsule(a: Vec3, b: Vec3, ra: f32, rb: f32) -> Vec<(Vec3, f32)> {
+        let n = ((b - a).length() / 0.02).ceil().max(1.0) as usize;
+        (0..=n)
+            .map(|i| {
+                let t = i as f32 / n as f32;
+                (a.lerp(b, t), lerp(ra, rb, t))
+            })
+            .collect()
+    }
+
+    /// How far apart two shapes made of balls are (m, surface to surface; below 0 where one
+    /// cuts into the other).
+    fn clearance(a: &[(Vec3, f32)], b: &[(Vec3, f32)]) -> f32 {
+        a.iter()
+            .flat_map(|&(p, r)| b.iter().map(move |&(q, s)| p.distance(q) - r - s))
+            .fold(f32::MAX, f32::min)
+    }
+
+    /// What a fighter of `kind` posed as `s` holds, has set down or has let go of, as balls:
+    /// a blade with its cross-guard, a carbine, a bow (grip and limbs), a shield (its face).
+    fn gear_balls(kind: Kind, s: &Skeleton) -> Vec<(Vec3, f32)> {
+        let w = s.weapon;
+        let blade = |tip: Vec3, pommel: f32, guard: f32| {
+            let mut v = capsule(w.at(v3(0.0, 0.0, pommel)), w.at(tip), 0.025, 0.01);
+            let (a, b) = (w.at(v3(0.0, -guard, -0.02)), w.at(v3(0.0, guard, -0.02)));
+            v.extend(capsule(a, b, 0.015, 0.015));
+            v
+        };
+        let mut v = match kind {
+            Kind::Rifle => capsule(
+                w.at(weapons::RIFLE_BUTT),
+                w.at(weapons::RIFLE_MUZZLE),
+                0.04,
+                0.025,
+            ),
+            Kind::Longsword => blade(weapons::LONGSWORD_TIP, 0.25, 0.12),
+            Kind::SwordShield => blade(weapons::ARMING_TIP, 0.12, 0.1),
+            Kind::Bow => {
+                let tip = weapons::BOW_TIP;
+                let mut v = capsule(w.pos, w.at(tip), 0.025, 0.015);
+                v.extend(capsule(w.pos, w.at(v3(0.0, -tip.y, tip.z)), 0.025, 0.015));
+                v
+            }
+            Kind::Fists => Vec::new(),
+        };
+        if kind == Kind::SwordShield {
+            // The heater's face (curved round from side to side), from its point to its top.
+            let (w, round) = (0.28, (0.28 * 0.28 + 0.42 * 0.42) / (2.0 * 0.28));
+            for i in 0..=12 {
+                for j in 0..=16 {
+                    let (x, y) = (
+                        -w + 2.0 * w * i as f32 / 12.0,
+                        -0.42 + 0.75 * j as f32 / 16.0,
+                    );
+                    let side = if y < 0.0 {
+                        Vec2::new(x.abs() + round - w, y).length() - round
+                    } else {
+                        x.abs() - w
+                    };
+                    if side <= 0.0 {
+                        let z = 0.415 - (0.25 - x * x).sqrt();
+                        v.push((s.shield.at(v3(x, y, z)), 0.025));
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    /// Arm `j` (upper arm, forearm and hand) as balls.
+    fn arm_balls(s: &Skeleton, j: usize) -> Vec<(Vec3, f32)> {
+        let mut v = capsule(s.upper[j].pos, s.fore[j].pos, 0.055, 0.045);
+        v.extend(capsule(s.fore[j].pos, s.hand[j].pos, 0.045, 0.035));
+        v.extend(capsule(
+            s.hand[j].pos,
+            s.hand[j].at(v3(0.0, -0.1, 0.0)),
+            0.045,
+            0.04,
+        ));
+        v
+    }
+
+    /// Leg `k` as balls: the knee, and the whole leg (thigh, shin and foot).
+    fn leg_balls(s: &Skeleton, k: usize) -> (Balls, Balls) {
+        let mut leg = capsule(s.thigh[k].pos, s.shin[k].pos, 0.08, 0.06);
+        leg.extend(capsule(s.shin[k].pos, s.foot[k].pos, 0.05, 0.037));
+        for z in [0.094, -0.213] {
+            let toe = s.foot[k].at(v3(0.0, -rig::ANKLE_Y, z));
+            leg.extend(capsule(s.foot[k].pos, toe, 0.04, 0.03));
+        }
+        (vec![(s.shin[k].pos, 0.056)], leg)
+    }
+
+    #[test]
+    fn a_reviver_kneels_clear_of_its_mate_and_of_what_it_let_go_of() {
+        const KNEE_ARM: &str = "a knee from an arm";
+        const LEG_ARM: &str = "a leg from an arm";
+        const LEG_BODY: &str = "a leg from the body";
+        const LEG_DROPPED: &str = "a leg from the mate's weapon";
+        const GEAR_DROPPED: &str = "its weapon from the mate's";
+        const GEAR_ARM: &str = "its weapon from an arm";
+        const GEAR_BODY: &str = "its weapon from the body";
+        // The least clearance of each kind, and where.
+        let mut least = std::collections::BTreeMap::<&str, (f32, String)>::new();
+        fn note<'a>(
+            least: &mut std::collections::BTreeMap<&'a str, (f32, String)>,
+            what: &'a str,
+            d: f32,
+            case: impl FnOnce() -> String,
+        ) {
+            let e = least.entry(what).or_insert((f32::MAX, String::new()));
+            if d < e.0 {
+                *e = (d, case());
+            }
+        }
+        let kinds = [
+            Kind::Longsword,
+            Kind::SwordShield,
+            Kind::Rifle,
+            Kind::Bow,
+            Kind::Fists,
+        ];
+        let fighters = || {
+            kinds
+                .into_iter()
+                .flat_map(|k| [(k, true), (k, false)])
+                .map(|(k, fighting)| {
+                    let act = if fighting { Act::Guard } else { Act::Relaxed };
+                    (format!("{k:?} ({act:?})"), k, input(k, act, fighting))
+                })
+        };
+        for (mate, pk, was) in fighters() {
+            for (bent, flung) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                let fall = Fall {
+                    t: 5.0,
+                    yaw: 0.6,
+                    bent,
+                    flung,
+                };
+                let lying = solve(&Input {
+                    fall: Some(fall),
+                    ..was
+                });
+                let at = Lying::of(&lying, fall);
+                // It kneels on the side of the arm along the body (the brain sends it there),
+                // the arm flung out wide (and what that hand flung) across the body from it.
+                let side = fall.lie().along();
+                let slot = at.knees[side];
+                let arms = [arm_balls(&lying, 0), arm_balls(&lying, 1)];
+                let dropped = gear_balls(pk, &lying);
+                let mut body = capsule(lying.pelvis.pos, lying.chest.pos, 0.15, 0.17);
+                body.extend(capsule(
+                    lying.head.pos,
+                    lying.head.at(v3(0.0, 0.12, 0.0)),
+                    0.11,
+                    0.11,
+                ));
+                for k in 0..2 {
+                    let (knee, leg) = leg_balls(&lying, k);
+                    body.extend(knee);
+                    body.extend(leg);
+                }
+                // Stopped on the spot, or short of it, out from the mate (it kneels over to
+                // the spot).
+                let out = (slot - at.chest) * v3(1.0, 0.0, 1.0);
+                for root in [slot, slot + out.normalize() * 0.5] {
+                    let to = at.chest - root;
+                    let facing = ry((-to.x).atan2(-to.z));
+                    let local = |p: Vec3| facing.inverse() * (p - root);
+                    let world = |v: Vec<(Vec3, f32)>| -> Vec<(Vec3, f32)> {
+                        v.into_iter().map(|(p, r)| (root + facing * p, r)).collect()
+                    };
+                    for (reviver, rk, base) in fighters() {
+                        let case = format!(
+                            "{reviver} reviving {mate} (bent {bent}, flung {flung}) from {:.2}",
+                            root - slot
+                        );
+                        let pose = |k: f32| {
+                            solve(&Input {
+                                tend: Some(Tend {
+                                    k,
+                                    at: local(at.chest),
+                                    knees: local(slot),
+                                }),
+                                ..base
+                            })
+                        };
+                        // Getting down, sat back setting its weapon down, and on its knees over
+                        // the chest.
+                        for k in [0.45, 0.7, 1.0] {
+                            let s = pose(k);
+                            for j in 0..2 {
+                                let (knee, leg) = leg_balls(&s, j);
+                                let (knee, leg) = (world(knee), world(leg));
+                                let at = || format!("{case}: leg {j} at {k}");
+                                for arm in &arms {
+                                    note(&mut least, KNEE_ARM, clearance(&knee, arm), at);
+                                    note(&mut least, LEG_ARM, clearance(&leg, arm), at);
+                                }
+                                note(&mut least, LEG_BODY, clearance(&leg, &body), at);
+                                note(&mut least, LEG_DROPPED, clearance(&leg, &dropped), at);
+                            }
+                        }
+                        // Its own weapon set down (or a bow or a shield held aside).
+                        let gear = world(gear_balls(rk, &pose(1.0)));
+                        if gear.is_empty() {
+                            continue;
+                        }
+                        let at = || case.clone();
+                        note(&mut least, GEAR_DROPPED, clearance(&gear, &dropped), at);
+                        for arm in &arms {
+                            note(&mut least, GEAR_ARM, clearance(&gear, arm), at);
+                        }
+                        note(&mut least, GEAR_BODY, clearance(&gear, &body), at);
+                    }
+                }
+            }
+        }
+        // The knees well clear of the arms (the one flung out wide, and the one along the body
+        // it kneels by); the legs clear of the arms, of the body and of what the mate let go
+        // of; its own weapon well clear of the mate's, and clear of its arms and its body.
+        let short: Vec<String> = [
+            (KNEE_ARM, 0.05),
+            (LEG_ARM, 0.03),
+            (LEG_BODY, 0.03),
+            (LEG_DROPPED, 0.03),
+            (GEAR_DROPPED, 0.05),
+            (GEAR_ARM, 0.02),
+            (GEAR_BODY, 0.02),
+        ]
+        .into_iter()
+        .filter_map(|(what, need)| {
+            let (d, case) = &least[what];
+            println!("{what}: {d:.3} m ({case})");
+            (*d <= need).then(|| format!("{what}: {d:.3} m ({case})"))
+        })
+        .collect();
+        assert!(short.is_empty(), "{short:#?}");
+    }
+
+    #[test]
+    fn a_reviver_puts_its_hands_on_the_chest_from_anywhere_it_kneels() {
+        use crate::brain::{REVIVE_ARRIVE, REVIVE_STAY};
+        // The brain sends a reviver to kneel by where it reckons the breastbone lies, and lets
+        // it kneel (and stay down) within so far of that spot: the body kneels over to it
+        // from anywhere that close.
+        const RECKONED: f32 = 0.1;
+        assert!(REVIVE_ARRIVE < REVIVE_STAY && REVIVE_STAY as f32 + RECKONED <= KNEEL_REACH);
+        let kinds = [
+            Kind::Longsword,
+            Kind::SwordShield,
+            Kind::Rifle,
+            Kind::Bow,
+            Kind::Fists,
+        ];
+        let lies = [-0.9, -0.3, 0.4, 0.9]
+            .into_iter()
+            .flat_map(|yaw| [(0, 0), (0, 1), (1, 0), (1, 1)].map(|(b, f)| (yaw, b, f)));
+        for pk in kinds {
+            for fighting in [true, false] {
+                let act = if fighting { Act::Guard } else { Act::Relaxed };
+                for (yaw, bent, flung) in lies.clone() {
+                    let fall = Fall {
+                        t: 5.0,
+                        yaw,
+                        bent,
+                        flung,
+                    };
+                    let lying = solve(&Input {
+                        fall: Some(fall),
+                        ..input(pk, act, fighting)
+                    });
+                    let at = Lying::of(&lying, fall);
+                    let mate = format!("{pk:?} ({act:?}, along {yaw}, bent {bent}, flung {flung})");
+                    // Where the brain reckons it lies (from where it stood, turned as it fell).
+                    let turn = ry(fall.yaw);
+                    let reckoned = turn * fall.lie().sternum();
+                    let off = (reckoned - at.chest).length();
+                    assert!(
+                        off < RECKONED,
+                        "{mate}: the chest {off:.3} m off the reckoning"
+                    );
+                    for side in 0..2 {
+                        let spot = turn * (fall.lie().sternum() * v3(1.0, 0.0, 1.0))
+                            + turn * fall.lie().kneel_by(side);
+                        let off = (spot - at.knees[side]).length();
+                        assert!(off < RECKONED, "{mate}: the knees {off:.3} m off the spot");
+                        let rings = (0..12).map(|n| {
+                            let a = n as f32 * TAU / 12.0;
+                            spot + v3(a.cos(), 0.0, a.sin()) * REVIVE_STAY as f32
+                        });
+                        for root in std::iter::once(spot).chain(rings) {
+                            let to = at.chest - root;
+                            let facing = ry((-to.x).atan2(-to.z));
+                            let local = |p: Vec3| facing.inverse() * (p - root);
+                            for rk in kinds {
+                                let s = solve(&Input {
+                                    tend: Some(Tend {
+                                        k: 1.0,
+                                        at: local(at.chest),
+                                        knees: local(at.knees[side]),
+                                    }),
+                                    ..input(rk, Act::Guard, true)
+                                });
+                                // The palms, side by side over the breastbone (or one alone,
+                                // the other holding a bow or a shield aside).
+                                let palm = |j: usize| {
+                                    let x = if j == 0 { 0.045 } else { -0.045 };
+                                    root + facing * s.hand[j].at(v3(x, -0.075, 0.0))
+                                };
+                                let on = match rk {
+                                    Kind::Bow | Kind::SwordShield => palm(1),
+                                    _ => (palm(0) + palm(1)) * 0.5,
+                                };
+                                let flat = Vec2::new(on.x - at.chest.x, on.z - at.chest.z);
+                                let (miss, depth) = (flat.length(), at.chest.y - on.y);
+                                assert!(
+                                    miss < 0.03 && (-0.02..PRESS + 0.02).contains(&depth),
+                                    "{rk:?} reviving {mate} from side {side}, {:.2} off the \
+                                     spot: the hands {miss:.3} m off the chest, {depth:.3} m \
+                                     into it",
+                                    root - spot
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The most a part of `frames` moves in a frame between `from` and `to` (m), which part
+    /// and when.
+    fn worst_jump(frames: &[(f64, Vec<Vec3>)], from: f64, to: f64) -> (f32, usize, f64) {
+        let mut most = (0.0f32, 0, 0.0);
+        for w in frames.windows(2).filter(|w| (from..to).contains(&w[1].0)) {
+            for (n, (a, b)) in w[0].1.iter().zip(&w[1].1).enumerate() {
+                if (*a - *b).length() > most.0 {
+                    most = ((*a - *b).length(), n, w[1].0);
+                }
+            }
+        }
+        most
+    }
+
+    const TEND_PARTS: [Part; 12] = [
+        PELVIS,
+        Part::Torso,
+        Part::Head,
+        SHIN_L,
+        SHIN_R,
+        FOOT_L,
+        FOOT_R,
+        FOREARM_L,
+        FOREARM_R,
+        HAND_L,
+        HAND_R,
+        Part::Weapon,
+    ];
+
+    #[test]
+    fn a_reviver_downed_as_it_kneels_goes_down_from_the_kneel_and_gets_up_from_there() {
+        // Kneeling with the mate's chest ahead (a little to one side), and well off to either
+        // side (the body kneels over to it).
+        let tends = [
+            (v3(0.0, 0.28, -0.62), v3(0.0, 0.0, -0.18)),
+            (v3(0.05, 0.28, -0.62), v3(0.0, 0.0, -0.2)),
+            (v3(0.3, 0.3, -0.55), v3(0.05, 0.0, -0.25)),
+            (v3(-0.5, 0.26, -0.8), v3(-0.3, 0.0, -0.45)),
+        ]
+        .map(|(at, knees)| Tend { k: 1.0, at, knees });
+        // (Bare fists hold nothing.)
+        let joints = |kind: Kind, s: &Skeleton| {
+            let mut v = tend_joints(s);
+            if kind == Kind::Fists {
+                v.remove(3);
+            }
+            v
+        };
+        let off = |kind: Kind, a: &Skeleton, b: &Skeleton| {
+            joints(kind, a)
+                .iter()
+                .zip(joints(kind, b))
+                .map(|(p, q)| (*p - q).length())
+                .fold(0.0, f32::max)
+        };
+        for kind in [
+            Kind::Longsword,
+            Kind::SwordShield,
+            Kind::Rifle,
+            Kind::Bow,
+            Kind::Fists,
+        ] {
+            let lies = [-0.9, -0.4, 0.0, 0.3, 0.6, 0.9]
+                .into_iter()
+                .flat_map(|yaw| [(0, 0), (0, 1), (1, 0), (1, 1)].map(|(b, f)| (yaw, b, f)));
+            for ((yaw, bent, flung), (n, tend)) in
+                lies.flat_map(|lie| tends.into_iter().enumerate().map(move |t| (lie, t)))
+            {
+                let case = format!(
+                    "{kind:?} by chest {n}, fallen along {yaw}, bent {bent}, flung {flung}"
+                );
+                let base = input(kind, Act::Guard, true);
+                let kneel = solve(&Input {
+                    tend: Some(tend),
+                    ..base
+                });
+                let fall = |t: f32| Fall {
+                    t,
+                    yaw,
+                    bent,
+                    flung,
+                };
+                let pose = |t: f32| {
+                    solve(&Input {
+                        tend: Some(tend),
+                        fall: Some(fall(t)),
+                        ..base
+                    })
+                };
+                let laid = set_down(kind).is_some();
+                // It goes down from the kneel (no pop up first), at 60 Hz without a jump, the
+                // weapon it set down staying where it lies.
+                let start = off(kind, &pose(0.0), &kneel);
+                assert!(
+                    start < 0.01,
+                    "{case}: a pop of {start:.3} m as it goes down: {:.2?} from {:.2?}",
+                    joints(kind, &pose(0.0)),
+                    joints(kind, &kneel)
+                );
+                let mut last = pose(0.0);
+                for f in 1..=96 {
+                    let t = f as f32 / 60.0;
+                    let s = pose(t);
+                    for j in 0..2 {
+                        let len = |a: Bone, b: Bone| (b.pos - a.pos).length();
+                        assert!((len(s.thigh[j], s.shin[j]) - rig::THIGH).abs() < 1e-3);
+                        assert!((len(s.shin[j], s.foot[j]) - rig::SHIN).abs() < 1e-3);
+                        assert!((len(s.upper[j], s.fore[j]) - rig::UPPER_ARM).abs() < 1e-3);
+                        assert!((len(s.fore[j], s.hand[j]) - rig::FOREARM).abs() < 1e-3);
+                    }
+                    for (n, p) in joints(kind, &s).into_iter().enumerate() {
+                        assert!(
+                            p.y > -0.02,
+                            "{case}: joint {n} in the ground at {t:.2} s ({p:.3})"
+                        );
+                    }
+                    let jump = off(kind, &s, &last);
+                    assert!(
+                        jump < 0.12,
+                        "{case}: a joint jumps {jump:.2} m at {t:.2} s: {:.2?} from {:.2?}",
+                        joints(kind, &s),
+                        joints(kind, &last)
+                    );
+                    if laid {
+                        let moved = (s.weapon.pos - kneel.weapon.pos).length();
+                        assert!(moved < 1e-3, "{case}: the weapon moved {moved:.3} m");
+                    }
+                    last = s;
+                }
+                let lying = pose(3.0);
+                assert!(
+                    lying.pelvis.pos.y < 0.35 && lying.head.pos.y < 0.35,
+                    "{case}: the hips at {:.2} m, the head at {:.2} m",
+                    lying.pelvis.pos.y,
+                    lying.head.pos.y
+                );
+                // Revived, it gets up from there (the weapon taken up from where it lies, and
+                // not drawn over the ground to the hand; bare fists push off the ground).
+                let armed = kind != Kind::Fists;
+                let rise = |t: f32| {
+                    solve(&Input {
+                        rise: Some(Rise {
+                            t,
+                            fall: fall(3.0),
+                            was: Act::Guard,
+                            since: base.now,
+                            feet: base.feet,
+                            knelt: Some(tend),
+                        }),
+                        ..base
+                    })
+                };
+                let start = off(kind, &rise(0.0), &lying);
+                assert!(start < 1e-3, "{case}: a pop of {start:.3} m as it gets up");
+                let end = off(kind, &rise(rise_secs(kind)), &solve(&base));
+                assert!(end < 1e-3, "{case}: ends {end:.3} m off its guard");
+                let (mut last, mut taken) = (rise(0.0), false);
+                for f in 1..=(rise_secs(kind) * 60.0).ceil() as usize {
+                    let t = f as f32 / 60.0;
+                    let s = rise(t);
+                    let jump = off(kind, &s, &last);
+                    assert!(
+                        jump < 0.1,
+                        "{case}: a joint jumps {jump:.2} m at {t:.2} s up: {:.2?} from {:.2?}",
+                        joints(kind, &s),
+                        joints(kind, &last)
+                    );
+                    for (n, p) in joints(kind, &s).into_iter().enumerate() {
+                        assert!(
+                            p.y > -0.02,
+                            "{case}: joint {n} in the ground at {t:.2} s up ({p:.3})"
+                        );
+                    }
+                    if !armed {
+                        last = s;
+                        continue;
+                    }
+                    let (w, lay) = (s.weapon.pos, lying.weapon.pos);
+                    let slid = Vec2::new(w.x - lay.x, w.z - lay.z).length();
+                    if w.y < lay.y + 0.01 {
+                        assert!(
+                            slid < 0.02,
+                            "{case}: the weapon drawn {slid:.3} m over the ground at {t:.2} s up"
+                        );
+                    }
+                    let moved = (s.weapon.pos - lying.weapon.pos).length();
+                    if !taken && moved > 1e-4 {
+                        taken = true;
+                        assert!(
+                            moved < 0.03,
+                            "{case}: the weapon leaps {moved:.2} m to hand"
+                        );
+                    }
+                    last = s;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_reviver_shot_down_on_its_knees_falls_from_them_and_one_revived_kneels_once_it_is_up() {
+        let chest = DVec3::new(0.05, 0.28, -0.62);
+        let knees = DVec3::new(0.0, 0.0, -0.2);
+        for weapon in [
+            NpcWeapon::sword(),
+            NpcWeapon::sword_and_shield(),
+            NpcWeapon::rifle(),
+            NpcWeapon::bow(),
+        ] {
+            let kind = Kind::of(&weapon);
+            let case = format!("{kind:?}");
+            let laid = set_down(kind).is_some();
+            // Kneeling by a mate from 1.5 s, shot down there at 3.5 s.
+            let (from, shot) = (1.5, 3.5);
+            let brain = |now: f64| {
+                let tending = (from..shot).contains(&now);
+                NpcBrain {
+                    alert: AlertLevel::Combat,
+                    action: if tending {
+                        NpcAction::Revive
+                    } else if now >= shot {
+                        NpcAction::Down
+                    } else {
+                        NpcAction::Idle
+                    },
+                    revive_kneel: if tending {
+                        (now - from) as f32 + 0.01
+                    } else {
+                        0.0
+                    },
+                    ..Default::default()
+                }
+            };
+            let vitals = |now: f64| {
+                Some(NpcVitals {
+                    downed: now >= shot,
+                    ..Default::default()
+                })
+            };
+            let patient = |now: f64| (from..shot).contains(&now).then_some((chest, knees));
+            let mut frames: Vec<(f64, Vec<Vec3>)> = Vec::new();
+            Run {
+                brain: &brain,
+                vitals: &vitals,
+                patient: &patient,
+                ..Run::new(5.5, weapon)
+            }
+            .look(|now, pose| frames.push((now, TEND_PARTS.map(|p| pose(p).pos).to_vec())));
+            let at = |t: f64| &frames.iter().find(|f| f.0 >= t).unwrap().1;
+            let jump = worst_jump(&frames, 0.0, 10.0);
+            assert!(jump.0 < 0.12, "{case}: a part jumps going down: {jump:.2?}");
+            let kneeling = at(shot - 0.02);
+            assert!(
+                kneeling[0].y < 0.55,
+                "{case}: the hips at {:.2} m",
+                kneeling[0].y
+            );
+            let down = at(shot + 2.5);
+            assert!(down[0].y < 0.35, "{case}: the hips at {:.2} m", down[0].y);
+            if laid {
+                // The weapon it set down stays where it lies.
+                let moved = frames
+                    .iter()
+                    .filter(|f| f.0 >= shot - 0.02)
+                    .map(|f| (f.1[11] - kneeling[11]).length())
+                    .fold(0.0, f32::max);
+                assert!(moved < 0.01, "{case}: the weapon moved {moved:.2} m");
+            }
+
+            // Revived (down until 2 s), and kneeling by another mate as soon as it is (the
+            // brain has it wait, but the pose doesn't count on that): it gets up first, then
+            // goes down to the mate, without a jump.
+            let (down_from, up) = (1.2, 2.0);
+            let vitals = |now: f64| {
+                Some(NpcVitals {
+                    downed: (down_from..up).contains(&now),
+                    ..Default::default()
+                })
+            };
+            let brain = |now: f64| NpcBrain {
+                alert: AlertLevel::Combat,
+                action: if now >= up + 0.05 {
+                    NpcAction::Revive
+                } else {
+                    NpcAction::Idle
+                },
+                revive_kneel: (now - up - 0.05).max(0.0) as f32,
+                ..Default::default()
+            };
+            let patient = |now: f64| (now >= up + 0.05).then_some((chest, knees));
+            let mut frames: Vec<(f64, Vec<Vec3>)> = Vec::new();
+            Run {
+                brain: &brain,
+                vitals: &vitals,
+                patient: &patient,
+                ..Run::new(6.0, weapon)
+            }
+            .look(|now, pose| frames.push((now, TEND_PARTS.map(|p| pose(p).pos).to_vec())));
+            let jump = worst_jump(&frames, up - 0.01, 10.0);
+            assert!(
+                jump.0 < 0.1,
+                "{case}: a part jumps getting up to kneel: {jump:.2?}"
+            );
+            let at = |t: f64| &frames.iter().find(|f| f.0 >= t).unwrap().1;
+            let risen = up + f64::from(rise_secs(kind));
+            let stood = at(risen - 0.02);
+            assert!(
+                stood[0].y > 0.8,
+                "{case}: still getting up, the hips at {:.2} m",
+                stood[0].y
+            );
+            let knelt = at(risen + f64::from(TEND_DOWN) + 0.1);
+            assert!(knelt[0].y < 0.55, "{case}: the hips at {:.2} m", knelt[0].y);
+        }
+    }
+
+    #[test]
+    fn a_reviver_getting_up_does_not_drag_its_knees_over_the_ground() {
+        // Kneeling until 3 s, then (were the brain not to hold it a moment) off at once, a run
+        // picking up at 20 m/s².
+        let (from, until) = (1.2, 3.0);
+        let chest = DVec3::new(0.05, 0.28, -0.62);
+        let knees = DVec3::new(0.0, 0.0, -0.2);
+        let tending = |now: f64| (from..until).contains(&now);
+        let brain = |now: f64| NpcBrain {
+            alert: AlertLevel::Combat,
+            action: if tending(now) {
+                NpcAction::Revive
+            } else {
+                NpcAction::Idle
+            },
+            revive_kneel: if tending(now) {
+                (now - from) as f32 + 0.01
+            } else {
+                0.0
+            },
+            ..Default::default()
+        };
+        let patient = |now: f64| tending(now).then_some((chest, knees));
+        for hold in [0.0, NpcBrain::REVIVE_STAND_SECS] {
+            let speed = move |now: f64| (20.0 * (now - until - hold)).clamp(0.0, 4.5) as f32;
+            let vel = move |now: f64| Vec3::X * speed(now);
+            for weapon in [NpcWeapon::sword(), NpcWeapon::rifle(), NpcWeapon::bow()] {
+                let case = format!("{:?} held {hold} s", Kind::of(&weapon));
+                // Where the knees are in the world (the owner moving off along +X).
+                let (mut went, mut frames) = (0.0f32, Vec::new());
+                Run {
+                    brain: &brain,
+                    patient: &patient,
+                    vel: &vel,
+                    ..Run::new(4.0, weapon)
+                }
+                .look(|now, pose| {
+                    let knees = [SHIN_L, SHIN_R].map(|p| pose(p).pos + Vec3::X * went);
+                    frames.push((now, knees));
+                    went += speed(now) / 60.0;
+                });
+                let set = frames.iter().find(|f| f.0 >= until - 0.02).unwrap().1;
+                for (now, k) in frames.iter().filter(|f| f.0 >= until) {
+                    for j in 0..2 {
+                        // (On the ground: about as low as kneeling has it.)
+                        if k[j].y < 0.1 {
+                            let slid = Vec2::new(k[j].x - set[j].x, k[j].z - set[j].z).length();
+                            assert!(
+                                slid < 0.1,
+                                "{case}: knee {j} slid {slid:.2} m over the ground at {now:.2}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Held, it is about up when it may move.
+        let k = 1.0 - NpcBrain::REVIVE_STAND_SECS as f32 / TEND_UP;
+        assert!(step(0.0, 0.55, k) < 0.2, "still {k:.2} down when it moves");
+    }
+
+    #[test]
+    fn nobody_kneels_by_a_mate_before_it_is_up_itself() {
+        for kind in [
+            Kind::Longsword,
+            Kind::SwordShield,
+            Kind::Rifle,
+            Kind::Bow,
+            Kind::Fists,
+        ] {
+            assert!(
+                f64::from(rise_secs(kind)) <= NpcBrain::GET_UP_SECS,
+                "{kind:?} takes {} s to get up",
+                rise_secs(kind)
+            );
+        }
+    }
+
+    #[test]
+    fn a_reviver_looking_at_the_chest_from_a_step_off_presses_and_one_glancing_up_waits() {
+        // The chest a step off the knees (kneeling over to it), the eyes on it, or up at a foe.
+        let at = v3(0.0, 0.28, -1.2);
+        let knees = v3(0.0, 0.0, -0.75);
+        let eyes = |p: Vec3| {
+            let d = p - v3(0.0, TEND_EYES, 0.0);
+            Vec2::new((-d.x).atan2(-d.z), d.y.atan2(Vec2::new(d.x, d.z).length()))
+        };
+        for kind in [Kind::Longsword, Kind::Rifle, Kind::Bow] {
+            for (up, toward) in [(false, at), (true, v3(4.0, 1.55, -8.0))] {
+                let case = format!(
+                    "{kind:?} looking {}",
+                    if up { "up" } else { "at the chest" }
+                );
+                let base = input(kind, Act::Guard, true);
+                let pose = |now: f64| {
+                    solve(&Input {
+                        now,
+                        tend: Some(Tend { k: 1.0, at, knees }),
+                        look: Look {
+                            head: eyes(toward),
+                            eyes: eyes(toward),
+                            focus: 1.0,
+                            ..Default::default()
+                        },
+                        ..base
+                    })
+                };
+                let (lo, hi) = (0..40)
+                    .map(|f| pose(base.now + f64::from(f) / 40.0 / f64::from(PRESS_HZ)))
+                    .map(|s| s.hand[1].pos.y)
+                    .fold((f32::MAX, f32::MIN), |(lo, hi), y| (lo.min(y), hi.max(y)));
+                let depth = hi - lo;
+                let gaze = (pose(base.now).head.rot * Vec3::NEG_Z).y;
+                if up {
+                    assert!(depth < 0.3 * PRESS, "{case}: the hands press {depth:.3} m");
+                    assert!(gaze > -0.3, "{case}: the head looks along {gaze:.2}");
+                } else {
+                    assert!(
+                        (depth - PRESS).abs() < 0.01,
+                        "{case}: the hands press {depth:.3} m"
+                    );
+                    assert!(gaze < -0.5, "{case}: the head looks along {gaze:.2}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_magazine_or_an_arrow_in_hand_goes_away_smoothly_as_a_reviver_kneels() {
+        let at = v3(0.0, 0.28, -0.62);
+        let knees = v3(0.0, 0.0, -0.18);
+        for kind in [Kind::Rifle, Kind::Bow] {
+            let base = input(kind, Act::Guard, true);
+            let ready = if kind == Kind::Rifle { 2.5 } else { 1.0 };
+            let shot = |since: f32| Shot {
+                since,
+                ready,
+                reload: kind == Kind::Rifle,
+            };
+            // A moment in the shot when something is in hand.
+            let times: Vec<f32> = (0..300)
+                .map(|n| n as f32 * 0.01)
+                .filter(|&t| {
+                    solve(&Input {
+                        shot: Some(shot(t)),
+                        ..base
+                    })
+                    .held
+                    .is_some()
+                })
+                .collect();
+            assert!(!times.is_empty(), "{kind:?}: nothing in hand");
+            let since = times[times.len() / 2];
+            let item = |s: &Skeleton| match kind {
+                Kind::Rifle => Some(
+                    s.held
+                        .unwrap_or(s.weapon.then(Bone::new(weapons::RIFLE_MAG, Quat::IDENTITY)))
+                        .pos,
+                ),
+                _ if s.nocked => None,
+                _ => s.held.map(|b| b.pos),
+            };
+            let n = (TEND_DOWN * 60.0).ceil() as usize;
+            let mut last: Option<Vec3> = None;
+            let mut last_carriers = [Vec3::ZERO; 3];
+            let mut gone = false;
+            for f in 0..=n {
+                let k = f as f32 / n as f32;
+                let s = solve(&Input {
+                    shot: Some(shot(since)),
+                    tend: Some(Tend { k, at, knees }),
+                    ..base
+                });
+                let now = item(&s);
+                // It goes along with what carries it (the hand, then the carbine or the
+                // quiver), never faster.
+                let carriers = [
+                    s.hand[usize::from(kind == Kind::Bow)].pos,
+                    s.weapon.at(weapons::RIFLE_MAG),
+                    s.chest.at(weapons::QUIVER_MOUTH),
+                ];
+                let carried = carriers
+                    .iter()
+                    .zip(last_carriers)
+                    .map(|(a, b)| (*a - b).length())
+                    .fold(0.0, f32::max);
+                last_carriers = carriers;
+                match (last, now) {
+                    (Some(a), Some(b)) => {
+                        let jump = (b - a).length();
+                        assert!(
+                            jump < carried + 0.02,
+                            "{kind:?}: it jumps {jump:.2} m at {k:.2} (what carries it {carried:.2} m)"
+                        );
+                    }
+                    (Some(a), None) => {
+                        // Put back in the quiver as it goes.
+                        let mouth = s.chest.at(weapons::QUIVER_MOUTH);
+                        let off = (a - mouth).length();
+                        assert!(
+                            off < 0.05,
+                            "{kind:?}: gone {off:.2} m off the quiver at {k:.2}"
+                        );
+                        gone = true;
+                    }
+                    _ => {}
+                }
+                last = now;
+            }
+            if kind == Kind::Bow {
+                assert!(gone, "the arrow stayed in hand");
+            }
         }
     }
 }

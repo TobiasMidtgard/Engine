@@ -228,7 +228,7 @@ struct Crowns {
 // random size and height, standing in groups. A tree stands with probability `density`, so
 // woods thin out tree by tree at their edges and close their canopy inside. Each crown casts
 // a shadow away from the sun (`to_sun`, world) onto the gaps and crowns beside it.
-fn crowns(tp: vec3<f32>, density: f32, pixel: f32, to_sun: vec3<f32>) -> Crowns {
+fn crowns(tp: vec3<f32>, density: f32, conifer: f32, pixel: f32, to_sun: vec3<f32>) -> Crowns {
     let cell = 8.0;
     let p = tp.xz / cell;
     let base = floor(p);
@@ -253,19 +253,30 @@ fn crowns(tp: vec3<f32>, density: f32, pixel: f32, to_sun: vec3<f32>) -> Crowns 
             // Groups of trees a few dozen meters across, clearings between them.
             let group = pnoise3(vec3<f32>(k.x * 0.25, 5.0, k.y * 0.25), 128.0) - 0.5;
             if (h.z < density + group * 0.5 * density * (1.0 - density) * 4.0) {
-                let r = mix(0.32, 0.72, hash13(vec3<f32>(k, 19.3))) * mix(0.8, 1.0, density);
+                // Young trees to broad old ones (a few meters to over 11 m across).
+                let size = hash13(vec3<f32>(k, 19.3));
+                let tone = hash13(vec3<f32>(k, 29.5));
+                // Spruces (most trees in the cold): narrow, pointed cones with a star of
+                // branches, casting long shadows.
+                let spruce = tone < spruce_share(conifer);
+                let r = mix(0.22, 0.74, size * size * (3.0 - 2.0 * size)) * mix(0.8, 1.0, density) * select(1.0, 0.6, spruce);
                 let center = c + 0.1 + h.xy * 0.8;
                 let o = (p - center) / r;
-                let d2 = dot(o, o);
+                // Lumpy outlines: a few big boughs bulge out of each crown.
+                let ang = atan2(o.y, o.x);
+                let lobes = select(1.0 + 0.16 * sin(ang * 5.0 + h.x * 6.28) + 0.09 * sin(ang * 3.0 + h.y * 6.28),
+                    1.0 + 0.2 * abs(sin(ang * 4.0 + h.x * 6.28)) - 0.1, spruce);
+                let d2 = dot(o, o) / (lobes * lobes);
                 // Taller trees hide the edges of the crowns next to them.
-                let t = (1.0 - d2) * mix(0.8, 1.0, hash13(vec3<f32>(k, 23.9)));
+                let rise = mix(0.8, 1.0, hash13(vec3<f32>(k, 23.9)));
+                let t = select(1.0 - d2, 1.0 - sqrt(d2), spruce) * rise;
                 if (t > top) {
                     top = t;
                     win = n;
-                    cr.slope = o / sqrt(max(1.0 - d2, 0.09));
-                    cr.tone = hash13(vec3<f32>(k, 29.5));
+                    cr.slope = select(o / sqrt(max(1.0 - d2, 0.09)), o * 1.4 / max(sqrt(d2), 0.15), spruce);
+                    cr.tone = tone;
                 }
-                let s = (p - (center - sun_xz * reach)) / r;
+                let s = (p - (center - sun_xz * reach * select(1.0, 2.2, spruce))) / r;
                 shade[n] = 1.0 - smoothstep(0.6, 1.0, dot(s, s));
             }
             n++;
@@ -308,6 +319,11 @@ fn crowns(tp: vec3<f32>, density: f32, pixel: f32, to_sun: vec3<f32>) -> Crowns 
     cr.slope *= cr.cover;
     cr.shadow = shadow * sun_up * (1.0 - smoothstep(0.3, 0.9, top));
     return cr;
+}
+
+// Share of crowns that are spruces, for a woods' needle share (`conifer`).
+fn spruce_share(conifer: f32) -> f32 {
+    return mix(0.12, 0.92, conifer);
 }
 
 // Fractal sum of `pnoise3` on tiling coordinates, starting at `freq` cycles per meter (a power
@@ -690,6 +706,9 @@ fn bump(n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, dh1: f32, dh2: f32) -> vec
     let len = length(b);
     return select(n, b / len, len > 1e-12);
 }
+
+// A hand-made ground's tint that means snow (linear).
+const SNOW_TINT = vec3<f32>(0.8, 0.83, 0.88);
 
 // Weight of each painted layer (index 0 = none) at a pixel.
 fn paint_weights(in: VertexOut) -> array<f32, 11> {
@@ -1084,6 +1103,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         * smoothstep(-6.0, 4.0, temp_c)
         * (1.0 - smoothstep(1800.0, 2600.0, altitude));
     let forest = max(woodland, gallery);
+    // Needle trees in the cold: up mountains and toward the poles, mixed woods in between.
+    // (`ForestCover` reports the same share, so the foliage module's trees match the paint.)
+    let conifer = smoothstep(11.0, 3.0, temp_c + (variety - 0.5) * 5.0 + (macro_v - 0.5) * 3.0 * macro_fade + (moisture - 0.5) * 2.0);
     // From a couple of hundred meters the canopy (the foliage module draws trees near the camera,
     // and bare leaf litter there read as a brown hole in the land). Up close: ferns and grass
     // with patches of litter between them.
@@ -1098,14 +1120,16 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var crown = Crowns(1.0, vec2<f32>(0.0), 0.5, 0.0, 0.0);
     var woods = forest;
     if (crown_k > 0.0) {
-        crown = crowns(tp, saturate(forest * 1.5 - 0.25), pixel, frame.sun_dir.xyz);
+        crown = crowns(tp, saturate(forest * 1.5 - 0.25), conifer, pixel, frame.sun_dir.xyz);
         woods = mix(forest, max(crown.cover, smoothstep(0.8, 1.0, forest)), crown_k);
     }
     let undergrowth = planet.colors[C_LUSH].rgb * vec3<f32>(0.6, 0.7, 0.55);
     let litter = mix(planet.colors[C_SOIL].rgb * vec3<f32>(0.75, 0.72, 0.65), undergrowth, 0.3);
     let forest_floor = mix(undergrowth, litter, smoothstep(0.6, 0.8, patch_v));
-    // From high up, dark needle woods and lighter broadleaf ones.
-    let canopy_tone = mix(vec3<f32>(0.5, 0.55, 0.7), mix(vec3<f32>(0.34, 0.45, 0.42), vec3<f32>(0.56, 0.63, 0.42), saturate(far_n.y * 2.5 - 0.75)), far);
+    // Dark needle woods and lighter broadleaf ones, and from high up stands of each.
+    let needle = saturate(conifer + (far_n.y - 0.5) * 1.5 * far);
+    let canopy_tone = mix(mix(vec3<f32>(0.5, 0.55, 0.7), vec3<f32>(0.56, 0.63, 0.42), far),
+        mix(vec3<f32>(0.36, 0.44, 0.62), vec3<f32>(0.34, 0.45, 0.42), far), needle);
     col[M_FOREST] = mix(forest_floor, planet.colors[C_LUSH].rgb * canopy_tone, canopy);
     // Beaches and deserts. A beach is a strip some tens of meters wide above the water, its
     // width wandering along the coast: on a gentle coast it reaches only a little above the
@@ -1205,10 +1229,17 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         }
     }
     // Hand-made ground's tint (fields, roads): its color with each material's texture detail.
-    // Snow and mud lie on top of the ground and keep their own colors.
-    if (in.tint.a > 0.001) {
+    // Snow and mud lie on top of the ground and keep their own colors. A tint as white as snow
+    // is the level's snow: it settles as snow below (per pixel), and the ground it leaves bare
+    // keeps its own color instead of turning white in the shape of the vertex grid.
+    // (Far vertices carry the mean over their cell, so a tint partly snow is part white: that
+    // share is snow, and the rest of the color is the ground's.)
+    let tint_white = smoothstep(0.22, 0.75, min(in.tint.r, min(in.tint.g, in.tint.b)));
+    let tint_ground = clamp((in.tint.rgb - SNOW_TINT * tint_white) / max(1.0 - tint_white, 0.05), vec3(0.0), vec3(1.0));
+    let tint_a = in.tint.a * (1.0 - tint_white);
+    if (tint_a > 0.001) {
         for (var i = 0u; i < MAT_COUNT; i++) {
-            if (i != M_SNOW && i != M_MUD) { col[i] = mix(col[i], in.tint.rgb, in.tint.a); }
+            if (i != M_SNOW && i != M_MUD) { col[i] = mix(col[i], tint_ground, tint_a); }
         }
     }
     // Grass grows in clumps whatever its color (natural, painted or tinted): straw-colored
@@ -1255,10 +1286,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 // Crowns: sunlit domes, each tree its own shade of green, over dark gaps.
                 if (k > 0.0) {
                     let dome = normalize(n_geo + vec3<f32>(crown.slope.x, 0.0, crown.slope.y) * 0.5);
-                    // Mostly broadleaf greens; here and there a dark spruce or a pale birch.
+                    // Broadleaf greens, dark spruces (most of the trees in the cold) and now and
+                    // then a pale birch.
                     let t = crown.tone;
-                    let tree = select(select(mix(vec3<f32>(0.8, 0.86, 0.9), vec3<f32>(1.05, 1.03, 0.9), (t - 0.2) / 0.65),
-                        vec3<f32>(1.2, 1.15, 0.8), t > 0.85), vec3<f32>(0.6, 0.72, 0.8), t < 0.2);
+                    let tree = select(select(mix(vec3<f32>(0.8, 0.86, 0.9), vec3<f32>(1.05, 1.03, 0.9), saturate((t - 0.2) / 0.65)),
+                        vec3<f32>(1.2, 1.15, 0.8), t > mix(0.85, 0.97, conifer)), vec3<f32>(0.6, 0.72, 0.8), t < spruce_share(conifer));
                     let lit = mix(vec3<f32>(0.3), tree * 0.7 * (1.0 - crown.crevice * 0.5), crown.cover) * (1.0 - crown.shadow * 0.55);
                     ms[i].normal = normalize(mix(ms[i].normal, dome, k));
                     ms[i].detail = mix(ms[i].detail, lit, k);
@@ -1385,7 +1417,16 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let fallen = layers.z;
     let weather_snow = smoothstep(0.004, 0.04, fallen + (detail_f - 0.5) * 0.01 * fine_fade)
         * (1.0 - smoothstep(0.55, 0.8, snow_slope));
-    let painted_snow = pw[2];
+    // Hand-made snow (snow paint, or a snow-white tint) comes per vertex, tens of meters apart
+    // on far mountains: on its own it lies in straight-edged blocks across faces too steep to
+    // hold it. Per pixel it settles like the climate's snow: off the steep faces, deeper in the
+    // hollows, thinner on the crests, its edges ragged instead of following the triangles.
+    let hand_snow = max(pw[2], tint_white * smoothstep(0.0, 0.5, in.tint.a));
+    let hand_edge = ((patch_v - 0.5) * 0.6 * macro_fade + (macro_v - 0.5) * 0.5 * macro_fade
+        + (mid_v - 0.5) * 0.3 * clump_fade + gully * 0.3 - crest * 0.2 + (far_n.x - 0.5) * 0.8 * far)
+        * (0.25 + 3.0 * hand_snow * (1.0 - hand_snow));
+    let painted_snow = smoothstep(0.3, 0.7, hand_snow + hand_edge)
+        * (1.0 - smoothstep(rock_slope + 0.12, rock_slope + 0.32, snow_slope - gully * 0.12 + (detail_n - 0.5) * 0.1 * fine_fade));
     let snow_amount = saturate(max(max(climate_snow, weather_snow), painted_snow)) * (1.0 - ocean);
     var snow = 0.0;
     var glint = 0.0;
