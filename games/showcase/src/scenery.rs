@@ -12,6 +12,8 @@ use crate::texgen::VillageMats;
 use crate::village::{self, Part, PropKind, PropSpot};
 use crate::zones::{ZONES, zone};
 use engine::prelude::*;
+use engine::render::Displacement;
+use std::sync::Arc;
 
 /// Materials shared by the scenery (vertex colors carry the variation).
 pub struct Mats {
@@ -74,6 +76,9 @@ pub struct Library {
     /// Dry-stone wall segment variants and the heads that end a run.
     pub walls: Vec<WallHandles>,
     pub wall_heads: Vec<Handle<Mesh>>,
+    pub wall_head_placed: Vec<Arc<[crate::walls::Placed]>>,
+    /// The hero stones' palette, for the walls up close.
+    pub wall_palette: WallPalette,
     /// The spaceport's 600 m tower.
     pub tower: crate::tower::TowerKit,
 }
@@ -88,6 +93,19 @@ pub struct WallHandles {
     pub core: Handle<Mesh>,
     pub core_end: Handle<Mesh>,
     pub core_far: Handle<Mesh>,
+    /// Where `near`'s and `near_end`'s stones are, for the hero stones.
+    pub placed: Arc<[crate::walls::Placed]>,
+    pub placed_end: Arc<[crate::walls::Placed]>,
+}
+
+/// The hero wall stones' meshes and materials ([`crate::walls::HERO_CLASSES`]).
+#[derive(Resource, Clone)]
+pub struct WallPalette {
+    /// Per class, [`crate::walls::HERO_VARIANTS`] stones: a light base mesh and the
+    /// displacement that finishes it into real relief.
+    pub stones: Vec<(Handle<Mesh>, Displacement)>,
+    /// A material per shade ([`crate::walls::HERO_SHADES`]).
+    pub shades: Vec<Handle<StandardMaterial>>,
 }
 
 impl Library {
@@ -246,9 +264,15 @@ pub fn build_library(
             core: meshes.add(w.core),
             core_end: meshes.add(w.core_end),
             core_far: meshes.add(w.core_far),
+            placed: w.placed.into(),
+            placed_end: w.placed_end.into(),
         })
         .collect();
-    let wall_heads = heads.into_iter().map(|h| meshes.add(h.near)).collect();
+    let (wall_heads, wall_head_placed) = heads
+        .into_iter()
+        .map(|h| (meshes.add(h.near), Arc::from(h.placed)))
+        .unzip();
+    let wall_palette = wall_palette(meshes, materials);
     engine::core::log::info!(
         "village: {} house types ({} triangles near, {} far), built in {:.2} s",
         houses.len(),
@@ -270,6 +294,8 @@ pub fn build_library(
         props,
         walls,
         wall_heads,
+        wall_head_placed,
+        wall_palette,
         tower: tower_job.finish(meshes, materials, images),
     }
 }
@@ -311,7 +337,12 @@ impl Lod {
 /// Swap meshes or hide entities by distance to the active camera.
 pub fn update_lods(
     cameras: Query<(&Camera, &GlobalTransform)>,
-    mut q: Query<(&GlobalTransform, &mut Lod, &mut MeshRenderer)>,
+    mut q: Query<(
+        &GlobalTransform,
+        &mut Lod,
+        &mut MeshRenderer,
+        Option<&HideWithin>,
+    )>,
 ) {
     let Some(eye) = cameras
         .iter()
@@ -321,21 +352,24 @@ pub fn update_lods(
     else {
         return;
     };
-    q.par_iter_mut().for_each(|(t, mut lod, mut renderer)| {
-        let d2 = (t.translation() - eye).length_squared();
-        let far = d2 > (lod.switch as f64).powi(2);
-        let shown = d2 <= (lod.hide as f64).powi(2) && (!far || lod.far.is_some());
-        if far == lod.far_shown && renderer.visible == shown {
-            return;
-        }
-        lod.far_shown = far;
-        renderer.visible = shown;
-        match (far, lod.far) {
-            (false, _) => renderer.mesh = MeshRef::Handle(lod.near),
-            (true, Some(f)) => renderer.mesh = MeshRef::Handle(f),
-            (true, None) => {}
-        }
-    });
+    q.par_iter_mut()
+        .for_each(|(t, mut lod, mut renderer, within)| {
+            let d2 = (t.translation() - eye).length_squared();
+            let far = d2 > (lod.switch as f64).powi(2);
+            let shown = d2 <= (lod.hide as f64).powi(2)
+                && (!far || lod.far.is_some())
+                && within.is_none_or(|w| d2 >= (w.0 as f64).powi(2));
+            if far == lod.far_shown && renderer.visible == shown {
+                return;
+            }
+            lod.far_shown = far;
+            renderer.visible = shown;
+            match (far, lod.far) {
+                (false, _) => renderer.mesh = MeshRef::Handle(lod.near),
+                (true, Some(f)) => renderer.mesh = MeshRef::Handle(f),
+                (true, None) => {}
+            }
+        });
 }
 
 fn place(land: &Landscape, x: f64, z: f64, sink: f64) -> DVec3 {
@@ -1703,6 +1737,168 @@ pub fn plan_walls(
     plan
 }
 
+/// The hero stones' palette: Rendering's dressed wall stones, a few of each class, their
+/// relief built (and cached on disk) by virtual geometry the first time one is drawn.
+fn wall_palette(
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) -> WallPalette {
+    use crate::walls::{HERO_CLASSES, HERO_VARIANTS};
+    use engine::render::rock::WallStone;
+    let mut stones = Vec::with_capacity(HERO_CLASSES.len() * HERO_VARIANTS);
+    for (c, &(kind, size)) in HERO_CLASSES.iter().enumerate() {
+        // Lichen likes the dry tops: the coping and the capstones.
+        let lichen = if matches!(c, 4 | 6) { 0.5 } else { 0.3 };
+        for v in 0..HERO_VARIANTS {
+            let stone = WallStone::new(kind, size, 7000 + (c * HERO_VARIANTS + v) as u32)
+                .with_lichen(lichen);
+            stones.push((meshes.add(stone.base_mesh()), stone.displacement()));
+        }
+    }
+    // Each stone a little lighter or darker, warmer or cooler than its palette mesh.
+    let shades = [
+        [1.0, 1.0, 1.0],
+        [0.86, 0.85, 0.83],
+        [1.06, 1.02, 0.95],
+        [0.78, 0.79, 0.8],
+    ]
+    .iter()
+    .map(|&[r, g, b]| {
+        materials.add(
+            StandardMaterial::color(r, g, b)
+                .with_roughness(0.88)
+                .with_detail(0.35, 0.004),
+        )
+    })
+    .collect();
+    WallPalette { stones, shades }
+}
+
+/// Hero stones are drawn within this distance of the camera, m; the merged rocks beyond it.
+const HERO_IN: f32 = 30.0;
+/// Hero stones are spawned this close, so their relief is ready by [`HERO_IN`], m...
+const HERO_SPAWN: f32 = 38.0;
+/// ...and despawned beyond this, m.
+const HERO_OUT: f32 = 46.0;
+
+/// Hidden closer than this to the camera, m (where something finer stands in).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct HideWithin(pub f32);
+
+/// A wall segment's or head's stones as hero stones up close ([`stream_wall_heroes`]).
+#[derive(Component)]
+pub struct WallHeroes {
+    placed: Arc<[crate::walls::Placed]>,
+    stones: Vec<Entity>,
+    shown: bool,
+}
+
+impl WallHeroes {
+    fn new(placed: Arc<[crate::walls::Placed]>) -> Self {
+        Self {
+            placed,
+            stones: Vec::new(),
+            shown: false,
+        }
+    }
+}
+
+/// One hero stone.
+#[derive(Component)]
+pub struct HeroStone;
+
+/// A placed stone's transform under its segment: its box stretched from the palette stone's,
+/// a reflection (the wall's -Z face is laid mirrored) as a negative scale.
+fn hero_transform(p: &crate::walls::Placed) -> Transform {
+    let m = Mat3::from_cols(p.ax[0], p.ax[1], p.ax[2]);
+    let mirror = m.determinant() < 0.0;
+    let rot = if mirror {
+        Mat3::from_cols(p.ax[0], p.ax[1], -p.ax[2])
+    } else {
+        m
+    };
+    let mut scale = p.size / crate::walls::HERO_CLASSES[p.class as usize].1;
+    if mirror {
+        scale.z = -scale.z;
+    }
+    Transform::from_translation(p.center.as_dvec3())
+        .with_rotation(Quat::from_mat3(&rot))
+        .with_scale(scale)
+}
+
+/// Swaps wall segments and heads near the camera to hero stones (spawned a little before they
+/// show, despawned well after) four times a second, and shows them exactly where the merged
+/// rocks hide ([`HideWithin`]).
+#[allow(clippy::type_complexity)]
+pub fn stream_wall_heroes(
+    mut commands: Commands,
+    mut timer: Local<f32>,
+    time: Res<Time>,
+    palette: Option<Res<WallPalette>>,
+    cameras: Query<(&Camera, &GlobalTransform)>,
+    mut walls: Query<(Entity, &GlobalTransform, &mut WallHeroes)>,
+    mut stones: Query<&mut MeshRenderer, With<HeroStone>>,
+) {
+    let Some(palette) = palette else {
+        return;
+    };
+    let Some(eye) = cameras
+        .iter()
+        .filter(|(c, _)| c.active)
+        .max_by_key(|(c, _)| c.order)
+        .map(|(_, t)| t.translation())
+    else {
+        return;
+    };
+    *timer -= time.real_delta_secs();
+    let restream = *timer <= 0.0;
+    if restream {
+        *timer = 0.25;
+    }
+    for (e, t, mut w) in &mut walls {
+        let d2 = (t.translation() - eye).length_squared();
+        // As `update_lods` decides the merged rocks' `HideWithin`.
+        let show = d2 < (HERO_IN as f64).powi(2);
+        if restream && w.stones.is_empty() && d2 < (HERO_SPAWN as f64).powi(2) {
+            let mut spawned = Vec::with_capacity(w.placed.len());
+            for p in w.placed.iter() {
+                let (mesh, displacement) = &palette.stones
+                    [p.class as usize * crate::walls::HERO_VARIANTS + p.variant as usize];
+                let mut r = MeshRenderer::new(*mesh, palette.shades[p.shade as usize]);
+                r.visible = show;
+                spawned.push(
+                    commands
+                        .spawn((
+                            hero_transform(p),
+                            r,
+                            displacement.clone(),
+                            HeroStone,
+                            ChildOf(e),
+                        ))
+                        .id(),
+                );
+            }
+            w.stones = spawned;
+            w.shown = show;
+            continue;
+        }
+        if restream && !w.stones.is_empty() && d2 > (HERO_OUT as f64).powi(2) {
+            for s in w.stones.drain(..) {
+                commands.entity(s).despawn();
+            }
+            continue;
+        }
+        if show != w.shown && !w.stones.is_empty() {
+            for &s in &w.stones {
+                if let Ok(mut r) = stones.get_mut(s) {
+                    r.visible = show;
+                }
+            }
+            w.shown = show;
+        }
+    }
+}
+
 /// A wall segment's box collider, there while a focus point is near ([`stream_wall_colliders`]).
 #[derive(Component, Clone, Copy)]
 pub struct WallCollider {
@@ -1732,10 +1928,17 @@ pub fn spawn_walls(
         } else {
             (w.near, w.core)
         };
+        let placed = if seg.end {
+            w.placed_end.clone()
+        } else {
+            w.placed.clone()
+        };
         commands.spawn((
             tf,
             MeshRenderer::new(near, stone),
             Lod::hide_beyond(near, WALL_STONES),
+            HideWithin(HERO_IN),
+            WallHeroes::new(placed),
         ));
         commands.spawn((
             tf,
@@ -1757,8 +1960,11 @@ pub fn spawn_walls(
             Transform::from_translation(head.pos).with_rotation(head.rot),
             MeshRenderer::new(near, stone),
             Lod::hide_beyond(near, WALL_STONES),
+            HideWithin(HERO_IN),
+            WallHeroes::new(lib.wall_head_placed[head.variant].clone()),
         ));
     }
+    commands.insert_resource(lib.wall_palette.clone());
     let nearest = plan
         .segments
         .iter()
