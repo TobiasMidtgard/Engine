@@ -1790,13 +1790,30 @@ fn rockfall(y: &mut Yard, base: DVec3) {
             ..base
         })
     };
+    // The chute's plates are worn smooth by the rock (friction 0.35; with the rock's 1.0, 0.68
+    // between them: rock slides from 34 degrees). On plain steel (0.75 between them, 37
+    // degrees) a few rocks wedged against a side plate and stopped on the 40-degree chute.
+    let chute = {
+        let mut table = y.world.get_resource_or_init::<SurfaceMaterials>();
+        match table.id("worn_chute_steel") {
+            Some(id) => id,
+            None => {
+                let base = table.get(y.metal).clone();
+                table.add(SurfaceMaterial {
+                    name: "worn_chute_steel".into(),
+                    friction: 0.35,
+                    ..base
+                })
+            }
+        }
+    };
     let (plates, floor_at, top) = chute_plates();
     for &(at, rotation, half, _) in &plates {
         y.fixed(
             base + at.as_dvec3(),
             rotation,
             ColliderShape::Cuboid { half_extents: half },
-            y.metal,
+            chute,
         );
     }
     let art = y.parts(
