@@ -488,3 +488,64 @@ fn the_catapult_throws_its_ball_into_the_crate_wall() {
         crates.len()
     );
 }
+
+/// Giant Jenga: the rod pokes the three loose middle blocks out and the tower stands on, every
+/// other block where it was; then it pushes out a block the tower rests on and the top half
+/// comes down, all of it staying near the tower.
+#[test]
+fn the_jenga_tower_stands_three_pokes_and_falls_at_the_fourth() {
+    use demo::jenga;
+    let mut app = app();
+    app.update();
+    let base = Station::Jenga.base() + DVec3::Y * demo::SLAB_RISE;
+    let mut blocks = Vec::new();
+    for level in 0..jenga::LEVELS {
+        for slot in [-1, 0, 1] {
+            let e = named(&mut app, &format!("Jenga block {level} {slot}"))[0];
+            let at = base + jenga::block(level, slot).0.as_dvec3();
+            blocks.push((level, slot, e, at));
+        }
+    }
+    let at = |app: &App, e: Entity| app.world.get::<Transform>(e).unwrap().translation;
+    let poked = |level: usize, slot: i32| jenga::POKES[..3].contains(&(level, slot));
+    // Just before the last poke: the three loose blocks are out on the slab, the rest stand.
+    let before_last = (jenga::last_poke() * 60.0) as usize;
+    app.update_n(before_last);
+    let mut worst = 0.0f64;
+    for &(level, slot, e, start) in &blocks {
+        let p = at(&app, e);
+        if poked(level, slot) {
+            assert!(
+                p.y - base.y < 0.5 && p.x - base.x > 0.5,
+                "poked block {level} {slot} is at {:?}",
+                p - base
+            );
+        } else {
+            worst = worst.max((p - start).length());
+        }
+    }
+    assert!(
+        worst < 0.03,
+        "a block of the standing tower moved {:.1} cm",
+        worst * 100.0
+    );
+    // The last poke: the top half falls.
+    app.update_n(12 * 60);
+    let top: Vec<f64> = blocks
+        .iter()
+        .filter(|b| b.0 == jenga::LEVELS - 1)
+        .map(|b| at(&app, b.2).y - base.y)
+        .collect();
+    let spread = blocks
+        .iter()
+        .map(|b| (at(&app, b.2) - base).with_y(0.0).length())
+        .fold(0.0f64, f64::max);
+    assert!(
+        top.iter().all(|y| *y < 1.0),
+        "the top level is still up at {top:?}"
+    );
+    assert!(
+        spread < 6.0,
+        "a block ended up {spread:.1} m from the tower"
+    );
+}

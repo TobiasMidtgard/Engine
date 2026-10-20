@@ -327,7 +327,10 @@ iron-bound box of stone on the short end of a 5 m oak arm swings it up into a pa
 and the 38 kg granite ball flies on out of its cup, 7.4 m up and 11 m down range, into the top of
 a five-course crate wall; the arm is one body with the oak's and the stone's masses set on it,
 stopped by its hinge's limit where the crossbar stands, and nothing lets the ball go: the cup
-stops and it doesn't) and, along the front, a **barrel run**:
+stops and it doesn't), a **giant Jenga** tower (54 oak blocks, 18 levels of three; a test rig's
+kinematic steel rod pokes the loose middle blocks, 3 mm thinner as in a real set, out of three
+levels and the tower stands on, then pushes out a block it rests on and the top half topples)
+and, along the front, a **barrel run**:
 three oil drums roll off a 2 m ramp and 47 m down an asphalt runway (one triangle mesh, an edge
 every 2 m) into a sand pit, staying flat and in their painted lanes, past galvanized guardrails to a
 tire wall. It sits on the ground at `origin`, its top `demo::SLAB_RISE` (10 cm) above it; the
@@ -336,7 +339,7 @@ showcase's physics zone places it. Render it alone with
 
 The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,
 seesaw, balls, cradle and catapult every 20 s, the barrel run and pool table every 25 s, dominoes, wrecking ball and bridge every
-30 s, the rockfall every 30 s, the Galton board every 40 s, the pile every 45 s, the pendulum wave every minute, as it comes
+30 s, the rockfall every 30 s, Jenga every 32 s, the Galton board every 40 s, the pile every 45 s, the pendulum wave every minute, as it comes
 back into step; the tower, wheel and turntable run on), so the zone is always
 playing when someone walks in.
 They pause while no focus point is within 250 m.
@@ -409,7 +412,10 @@ sliding off a 4 mm pin falls within 10 frames and 2 cm, and one dropped on one o
 ball widths apart drops through); the catapult (`tests/proving_ground.rs`: the arm stays on its
 axle and comes to rest against the crossbar, the ball leaves the cup at 95 to 101% of the speed
 the counterweight's fall gives it without losses (99%: 10.1 of 10.2 m/s), rises over 7 m and
-brings down at least four of the wall's crates, and no crate leaves the yard); a headless
+brings down at least four of the wall's crates, and no crate leaves the yard); Jenga
+(`tests/proving_ground.rs`: after three pokes the poked blocks lie on the slab past the tower
+and no other block moved 3 cm, and after the fourth the top level is on the slab and nothing
+lies over 6 m from the tower); a headless
 screenshot of the proving ground.
 
 ## Done when

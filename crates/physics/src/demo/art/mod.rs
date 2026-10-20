@@ -9,6 +9,7 @@ pub(crate) mod barrel_run;
 pub(crate) mod catapult;
 pub(crate) mod dummy;
 pub(crate) mod galton;
+pub(crate) mod jenga;
 pub(crate) mod kit;
 pub(crate) mod pendulums;
 pub(crate) mod pool;
@@ -76,6 +77,8 @@ pub(crate) enum Mat {
     Brass,
     /// Clear glass: the Galton board's front pane.
     Glass,
+    /// Sanded pale hardwood: the giant Jenga blocks.
+    Oak,
 }
 
 /// Texture sets, generated once per app.
@@ -97,6 +100,7 @@ enum Tex {
     Sand,
     Galvanized,
     Granite,
+    Oak,
 }
 
 /// Generated texture sets' images.
@@ -140,6 +144,7 @@ impl Tex {
             Tex::Timber => textures::weathered_timber(res(512)),
             Tex::Diamond => textures::diamond_plate(res(512)),
             Tex::CrateWood(seed) => textures::crate_wood_seeded(res(512), seed as u32),
+            Tex::Oak => textures::sanded_wood(res(512), 7),
             Tex::Drum(hex) => textures::painted_steel(res(256), paint(hex), 0.35),
             Tex::Rubber => textures::rubber(res(512)),
             Tex::Vinyl => textures::vinyl_skin(res(512)),
@@ -220,6 +225,7 @@ pub(crate) fn material(world: &mut World, m: Mat) -> Handle<StandardMaterial> {
         Mat::Brass => StandardMaterial::hex(0xd6b25e)
             .with_metallic(1.0)
             .with_roughness(0.25),
+        Mat::Oak => textured(world, Tex::Oak, white),
         Mat::Glass => StandardMaterial::hex(0xe8f1f4)
             .with_roughness(0.04)
             .with_alpha(0.12),

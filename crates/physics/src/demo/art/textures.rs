@@ -400,6 +400,16 @@ pub fn crate_wood(res: u32) -> TextureSet {
 /// [`crate_wood`] with another seed: same look, different boards (for crate variants that
 /// should not show identical faces).
 pub fn crate_wood_seeded(res: u32, seed: u32) -> TextureSet {
+    wood(res, seed, false)
+}
+
+/// Sanded hardwood blocks (the giant Jenga set): [`crate_wood_seeded`]'s grain and knots, paler,
+/// with no nail holes, saw marks, weathering or grime, and a smoother finish.
+pub fn sanded_wood(res: u32, seed: u32) -> TextureSet {
+    wood(res, seed, true)
+}
+
+fn wood(res: u32, seed: u32, sanded: bool) -> TextureSet {
     const T: f32 = 1.0;
     const RINGS: f32 = 34.0;
     let n = res.max(16);
@@ -467,8 +477,11 @@ pub fn crate_wood_seeded(res: u32, seed: u32) -> TextureSet {
         let fiber = fbm(u, v, 4, 64, oct_fiber, 0.6, sd + 410);
         let canal = sstep(0.42, 0.62, fbm(u, v, 30, 160, 1, 0.5, sd + 411));
 
-        let early_c = [0.7, 0.49, 0.25];
-        let late_c = [0.43, 0.25, 0.095];
+        let (early_c, late_c) = if sanded {
+            ([0.86, 0.69, 0.47], [0.68, 0.49, 0.28])
+        } else {
+            ([0.7, 0.49, 0.25], [0.43, 0.25, 0.095])
+        };
         let mut c = mix3(early_c, late_c, late);
         c = scale3(
             c,
@@ -477,16 +490,22 @@ pub fn crate_wood_seeded(res: u32, seed: u32) -> TextureSet {
         c = mul3(c, [1.0 + 0.03 * l[2], 1.0, 1.0 - 0.05 * l[2]]);
         c = mul3(c, [1.0 - 0.1 * halo, 1.0 - 0.15 * halo, 1.0 - 0.22 * halo]);
         // Boards stored outdoors grey a little in patches.
-        let grey = sstep(0.1, 0.5, l[5]) * 0.25;
+        let grey = if sanded {
+            0.0
+        } else {
+            sstep(0.1, 0.5, l[5]) * 0.25
+        };
         let lum = 0.3 * c[0] + 0.6 * c[1] + 0.1 * c[2];
         c = mix3(c, [lum * 1.02, lum, lum * 0.95], grey);
-        let mut r = 0.8 - 0.08 * late + 0.05 * fiber + 0.03 * grain;
+        let mut r = if sanded { 0.62 } else { 0.8 } - 0.08 * late + 0.05 * fiber + 0.03 * grain;
         let mut h = 0.00012 * late + 0.00008 * fiber - 0.00003 * canal + 0.00002 * grain;
         let mut ao = 1.0;
 
         // Bandsaw marks across the grain, in patches.
         let saw_phase = u * 150.0 + v * 6.0 + 0.25 * l[4];
-        let saw = (0.5 + 0.5 * (TAU * saw_phase).sin()).powi(3) * sstep(-0.15, 0.35, l[4]);
+        let saw = (0.5 + 0.5 * (TAU * saw_phase).sin()).powi(3)
+            * sstep(-0.15, 0.35, l[4])
+            * if sanded { 0.0 } else { 1.0 };
         h += 0.00012 * saw;
         c = scale3(c, 1.0 + 0.04 * saw);
         r += 0.03 * saw;
@@ -522,7 +541,7 @@ pub fn crate_wood_seeded(res: u32, seed: u32) -> TextureSet {
         }
 
         // Nail holes with blue-black iron-tannin stains.
-        for &(nx, ny) in &nails {
+        for &(nx, ny) in nails.iter().filter(|_| !sanded) {
             let (dx, dy) = (wrap_d(u, nx) * T, wrap_d(v, ny) * T);
             let d = (dx * dx + dy * dy).sqrt();
             if d < 0.012 {
@@ -536,7 +555,7 @@ pub fn crate_wood_seeded(res: u32, seed: u32) -> TextureSet {
         }
 
         // Light dirt and handling grime.
-        let dirt = sstep(0.05, 0.55, l[3]);
+        let dirt = sstep(0.05, 0.55, l[3]) * if sanded { 0.0 } else { 1.0 };
         c = mix3(c, mul3(c, [0.8, 0.78, 0.76]), dirt * 0.6);
         r += 0.03 * dirt;
         Px {

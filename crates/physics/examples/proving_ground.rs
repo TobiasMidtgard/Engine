@@ -228,7 +228,21 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [8.0, 4.5, -4.0],
         [5.0, 0.4, -16.0],
     ),
+    // Giant Jenga, in its second cycle (it replays at 32 s): standing, the rod pushing the
+    // first loose block out, three gaps and their blocks on the slab, the top half falling
+    // when the rod pushes out a block it rests on, and the heap.
+    (33.0, "38_jenga_standing", JENGA_EYE, JENGA_AT),
+    (36.4, "39_jenga_poke", JENGA_EYE, JENGA_AT),
+    (49.6, "40_jenga_three_out", JENGA_EYE, JENGA_AT),
+    (54.4, "41_jenga_falling_a", JENGA_EYE, JENGA_AT),
+    (55.0, "41_jenga_falling_b", JENGA_EYE, JENGA_AT),
+    (55.6, "41_jenga_falling_c", JENGA_EYE, JENGA_AT),
+    (59.5, "42_jenga_fallen", JENGA_EYE, JENGA_AT),
 ];
+
+/// The camera on the Jenga tower: off its +X, +Z corner, where blocks leave and the top falls.
+const JENGA_EYE: [f64; 3] = [-6.6, 2.3, -1.4];
+const JENGA_AT: [f64; 3] = [-10.0, 1.35, -5.5];
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
