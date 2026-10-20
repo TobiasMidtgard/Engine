@@ -1221,6 +1221,8 @@ const STOT: [f32; 4] = [0.0; 4];
 /// high flights (nearly half a second, over a quarter of a metre up for a deer).
 const STOT_DUTY: f32 = 0.22;
 const STOT_FREQ: f32 = 1.65;
+/// How much of a stotting deer's arch tips its fore half forward (the rest lifts it).
+const STOT_TIP: f32 = 0.35;
 
 const DEER_BUILD: Build = Build {
     gaits: &[WALK, TROT, ROTARY_DEER],
@@ -1446,6 +1448,9 @@ struct Quad<'a> {
     /// Killed this long ago (s), falling onto this side (+1 its right side up).
     fall: Option<(f32, f32)>,
     upright: f32,
+    /// Stotting (0..1): the legs hang straight in the air, so a swinging foot doesn't pull
+    /// the body down after its spot.
+    stot: f32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1631,12 +1636,13 @@ fn quad(
     let lz = rig.hind.joints[0].z - rig.front.joints[0].z;
     let mut pitch = (dy_f - dy_h) / lz + m.lean.x - look.stoop;
     let mut pos = rig.body + Vec3::new(0.0, (dy_f + dy_h) * 0.5 + arc - low + breath, m.surge.x);
-    // ... the loin humped up over straight legs: the fore half tips forward about the
-    // shoulders just as far as the tucked croup would lower the hips, so neither pair of legs
-    // bends.
+    // ... the loin humped up over straight legs, the body near level: the tucked croup would
+    // lower the hips, so the body rises that far (the fore legs, a little bent at a stand,
+    // straightening under it) and tips forward about the shoulders only a little.
     let tip = -arch * (rig.hind.joints[0].z - rig.loin.z) / lz;
-    pitch += tip;
-    pos.y += (rig.front.joints[0].z - rig.body.z) * tip;
+    let lean = STOT_TIP * tip;
+    pitch += lean;
+    pos.y += (rig.front.joints[0].z - rig.body.z) * lean - (tip - lean) * lz;
     let sink = beast.by(0.12, 0.13, 0.1) * crouch;
     pos.y -= sink;
     pitch -= 0.04 * crouch;
@@ -1790,6 +1796,7 @@ fn quad(
         dead,
         fall: fall.map(|t| (t, k.side)),
         upright,
+        stot,
     };
     // The body comes down as far as a planted foot needs to reach the ground (a few goes, so
     // a foot landing far out in a long stride reaches its spot the frame it lands).
@@ -1805,8 +1812,8 @@ fn quad(
         }
     }
     // Head and neck steady against the bob and pitch of the body (crouching, it keeps them
-    // down with it).
-    let bob = body.pos.y - rig.body.y + low + sink;
+    // down with it; stotting, the head rides up with each bound, held high).
+    let bob = (body.pos.y - rig.body.y + low + sink) * (1.0 - stot);
     let tilt = (body.rot * Vec3::NEG_Z).y.asin() + look.stoop;
     q.look.neck -= (1.4 * bob + 0.6 * tilt) * upright;
     q.look.head -= 0.3 * tilt * upright;
@@ -1878,7 +1885,40 @@ fn quad_look(
     };
     let chew = (k.clock * beast.by(9.0, 7.0, 6.0)).sin();
     let target = match st {
-        AnimalState::Graze | AnimalState::Drink if boar => {
+        AnimalState::Drink if boar => {
+            // Drinking: the snout down in the water, lapping (the head dipping a little with
+            // each lap, the jaw working), every so often the head up to listen.
+            let lap = (k.clock * 4.5 + k.seed * 2.0).sin();
+            let listen = {
+                let x = k.t - 5.0 - 3.0 * k.vary;
+                if x > 0.0 {
+                    let w = x % (8.0 + 3.0 * k.vary);
+                    smooth(0.0, 0.35, w) * (1.0 - smooth(1.6, 2.1, w))
+                } else {
+                    0.0
+                }
+            };
+            let down = Look {
+                neck: ROOT.0 - 0.08 - 0.03 * lap,
+                head: ROOT.1 - 0.05 + 0.03 * lap,
+                stoop: ROOT.2,
+                ear_up: 0.0,
+                jaw: -0.06 - 0.06 * lap.max(0.0),
+                tail_swish: calm.tail_swish,
+                ..Look::default()
+            }
+            .ear_fwd(0.3);
+            let up = Look {
+                neck: -0.15,
+                head: 0.15,
+                ear_up: 0.2,
+                tail_swish: calm.tail_swish,
+                ..Look::default()
+            }
+            .ear_fwd(0.6);
+            Some((down.mix(up, listen).mix(l, smooth(0.5, 1.0, k.speed)), 0.8))
+        }
+        AnimalState::Graze if boar => {
             // Rooting: the snout shoved into the soil and levered up out of it, over and over,
             // sweeping from side to side, the jaw working on what it turns up; every so often
             // the head comes up to scent the air.
@@ -1924,6 +1964,10 @@ fn quad_look(
             } else {
                 0.0
             };
+            // Drinking: the muzzle in the water, sucking it up in long draughts (the jaw and
+            // throat working, the head still).
+            let drinking = if st == AnimalState::Drink { 1.0 } else { 0.0 };
+            let sip = drinking * (k.clock * 3.2 + k.seed * 4.0).sin().max(0.0);
             let tear = if st == AnimalState::Feed {
                 twitch(k.clock, 1.6, k.seed)
             } else {
@@ -1932,14 +1976,16 @@ fn quad_look(
             let down = Look {
                 neck: if deer { -1.65 } else { -1.9 } + 0.05 * pull + 0.12 * tear,
                 neck2: if deer { -0.3 } else { 0.0 } + 0.1 * pull,
-                head: if deer { 1.22 } else { 0.9 } + 0.03 * chew - 0.08 * pull - 0.2 * tear,
+                head: if deer { 1.22 } else { 0.9 } + 0.03 * chew * (1.0 - drinking)
+                    - 0.08 * pull
+                    - 0.2 * tear,
                 stoop: if deer { 0.05 } else { 0.12 },
-                yaw: 0.12 * drift(k.clock, 0.5, k.seed),
+                yaw: (0.12 - 0.09 * drinking) * drift(k.clock, 0.5, k.seed),
                 ear_up: -0.15,
                 jaw: if st == AnimalState::Feed {
                     -0.25 - 0.2 * chew
                 } else {
-                    0.0
+                    -0.05 * sip
                 },
                 tail_swish: calm.tail_swish,
                 ..Look::default()
@@ -2066,22 +2112,35 @@ fn quad_look(
             .ear_fwd(0.6),
             0.5,
         )),
-        AnimalState::Rest => Some((
-            Look {
+        AnimalState::Rest => {
+            // Deer chew the cud lying down, head up, and now and then doze with the chin
+            // laid on the ground before them; a boar lies with its chin on the ground.
+            let doze = if deer { dozing(k) } else { 0.0 };
+            let cud = if deer { chew * (1.0 - doze) } else { 0.0 };
+            let up = Look {
                 neck: beast.by(0.1, -0.1, -0.12),
                 neck2: if deer { 0.12 } else { 0.0 },
-                // Deer chew the cud lying down; a boar lies with its chin on the ground.
-                head: beast.by(0.2 + 0.01 * chew, 0.25, 0.12),
+                head: beast.by(0.2 + 0.01 * cud, 0.25, 0.12),
                 yaw: 0.4 * drift(k.clock, 0.15, k.seed),
+                jaw: -0.03 * cud.max(0.0),
                 // Wolves lie with the tail curled round to the side.
                 tail: if wolf { 0.8 } else { 0.0 },
                 tail2: if wolf { 0.35 } else { 0.0 },
                 tail_swish: beast.by(0.0, 0.75, 0.3 * calm.tail_swish),
                 ..Look::default()
             }
-            .ear_fwd(0.2 * drift(k.clock, 0.3, k.seed)),
-            1.2,
-        )),
+            .ear_fwd(0.2 * drift(k.clock, 0.3, k.seed));
+            let asleep = Look {
+                neck: DOZE.0,
+                neck2: DOZE.1,
+                head: DOZE.2,
+                yaw: 0.1 * drift(k.clock, 0.1, k.seed),
+                ear_up: -0.35,
+                ..Look::default()
+            }
+            .ear_fwd(-0.4);
+            Some((up.mix(asleep, doze), 1.2))
+        }
         AnimalState::Dead => {
             // The head drops as the legs give, the neck lags as the body goes over, then the
             // head hits the ground, bounces once and lies, the jaw falling slack.
@@ -2349,6 +2408,20 @@ fn flinch_slew(t: f32, from: f32) -> f32 {
     from.sin() * (0.07 * jolt + 0.05 * sway)
 }
 
+/// A bedded deer dozing with its chin on the ground before it: neck, upper neck and head (rad).
+const DOZE: (f32, f32, f32) = (-0.95, -0.2, 0.75);
+
+/// A bedded deer, how far into a doze (0..1): after it has lain a while, it lays its head down
+/// for a spell, then lifts it again to chew the cud, over and over.
+fn dozing(k: &Tick) -> f32 {
+    let x = k.t - 12.0 - 6.0 * k.vary;
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let w = x % (40.0 + 12.0 * k.vary);
+    smooth(0.0, 2.0, w) * (1.0 - smooth(18.0, 20.0, w))
+}
+
 /// A rooting boar's neck, head and stoop (rad) with its snout in the soil.
 const ROOT: (f32, f32, f32) = (-0.9, 0.8, 0.2);
 
@@ -2507,7 +2580,7 @@ impl Quad<'_> {
         let mut drop = [0.0f32; 2];
         for k in 0..4u8 {
             let pl = &self.plants[k as usize];
-            if !pl.down && pl.u > 0.35 && pl.u < 0.55 {
+            if !pl.down && (pl.u > 0.35 && pl.u < 0.55 || self.stot > 0.5) {
                 continue;
             }
             let j = self.rig.leg(k);
@@ -4038,7 +4111,8 @@ mod tests {
     fn a_stot_is_a_pronk() {
         // Stotting at 2.9 m/s, and loping at the same pace: each bound, all four feet leave
         // the ground and land again together on legs held stiff and straight under it, the
-        // back arched, the body flung high, and the pale rump patch flared out of the coat.
+        // back arched, the body flung high and near level, the head held up, and the pale
+        // rump patch flared out of the coat.
         let dt = 1.0 / 60.0;
         let go = |stot: f32| {
             let mut m = Motion::default();
@@ -4062,6 +4136,8 @@ mod tests {
             let rump_rest = rump(&standing);
             let body_rest = standing.place(Part::Body).pos.y;
             let (mut bent, mut arch, mut top, mut flared) = (1.0f32, f32::MAX, 0.0f32, 0.0f32);
+            let (mut level, mut level_air) = (0.0f32, 0.0f32);
+            let (mut head_low, mut head_dip) = (f32::MAX, f32::MAX);
             // How long from the first foot leaving the ground to the last, and from the
             // first landing to the last (s).
             let (mut first_off, mut first_on, mut spread) = (None, None, 0.0f32);
@@ -4104,6 +4180,16 @@ mod tests {
                     for (k, s) in straight.iter().enumerate() {
                         bent = bent.min(reach(&pose, k) / s);
                     }
+                    // The body's pitch (nose up +) and the head's height over it and pitch.
+                    let b = pose.place(Part::Body);
+                    let h = pose.place(Part::Head);
+                    let pitch = (b.rot * Vec3::NEG_Z).y.asin();
+                    level = level.max(pitch.abs());
+                    if on.iter().all(|&o| !o) {
+                        level_air = level_air.max(pitch.abs());
+                    }
+                    head_low = head_low.min(h.pos.y - b.pos.y);
+                    head_dip = head_dip.min((h.rot * Vec3::NEG_Z).y.asin());
                     let body = pose.place(Part::Body).rot;
                     let croup = pose.place(Part::Beast(CROUP)).rot;
                     let (axis, angle) = (body.inverse() * croup).to_axis_angle();
@@ -4112,15 +4198,38 @@ mod tests {
                     flared = flared.max((rump(&pose) - rump_rest).length());
                 }
             }
-            (bent, arch, top, flared, spread)
+            (
+                bent,
+                arch,
+                top,
+                flared,
+                spread,
+                (level, level_air, head_low, head_dip),
+            )
         };
-        let (bent, arch, top, flared, spread) = go(1.0);
+        let (bent, arch, top, flared, spread, (level, level_air, head_low, head_dip)) = go(1.0);
         let lope = go(0.0);
         eprintln!(
             "pronk: legs at least {bent:.3} of straight, back arched {arch:.2} rad, body up \
-             {top:.3} m, rump out {flared:.3} m, feet {spread:.3} s apart; loping at the pace: \
-             legs {:.3}, arch {:.2}, up {:.3} m, rump {:.3} m",
-            lope.0, lope.1, lope.2, lope.3
+             {top:.3} m, rump out {flared:.3} m, feet {spread:.3} s apart, body pitched at most \
+             {level:.3} rad ({level_air:.3} in the air), head at least {head_low:.3} m over the \
+             body pitched {head_dip:.3}; loping at the pace: legs {:.3}, arch {:.2}, up {:.3} m, \
+             rump {:.3} m, head at least {:.3} m over the body",
+            lope.0,
+            lope.1,
+            lope.2,
+            lope.3,
+            (lope.5).2
+        );
+        // Near level, the head up, not tipped nose down at the top of each bound.
+        assert!(level < 0.12, "the body pitched {level:.3} rad");
+        assert!(
+            level_air < 0.06,
+            "in the air the body pitched {level_air:.3} rad"
+        );
+        assert!(
+            head_low > 0.25 && head_dip > -0.1,
+            "the head dropped to {head_low:.3} m over the body, pitched {head_dip:.3}"
         );
         assert!(bent > 0.96, "the legs bent to {bent:.3} of straight");
         assert!(lope.0 < 0.9, "loping, the legs fold ({:.3})", lope.0);

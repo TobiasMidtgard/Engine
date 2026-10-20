@@ -6,6 +6,12 @@
 //! gives): following paths, spacing and circling in melee, striking at openings,
 //! dash-attacking when skilled, shooting from cover, crouching behind low walls, kneeling over
 //! a downed mate, blocking and dodging.
+//!
+//! A flanker of a squad maneuver (see `squad`) bounds round to its spot along a path that
+//! keeps out of the target's sight, from hidden point to cover, holding at each while its mate
+//! moves; a suppressor keeps firing at the cover the target was last seen behind. A shooter
+//! too dull to plan (`RUSH_LOGIC`) rushes straight in. Openings the target shows (a recovery,
+//! a reload, spent stamina), seen through the reaction delay, are struck or fired into.
 
 use engine_core::prelude::*;
 use engine_world::animation::AnimationTrigger;
@@ -22,7 +28,7 @@ use crate::faction::{Faction, Squad};
 use crate::features::ExplosiveProp;
 use crate::learning::OpponentModels;
 use crate::nav::{NavAgent, NavGrid, PathStatus};
-use crate::perception::{Known, NpcMemory, Perceivables, Snapshot};
+use crate::perception::{Known, NpcMemory, Opening, Perceivables, Snapshot};
 use crate::skills::NpcSkills;
 use crate::smoke::SmokeClouds;
 use crate::squad::{AttackTokens, ReviveClaims, SquadSettings};
@@ -383,7 +389,10 @@ fn think(
     {
         add(NpcAction::Search, 0.42 + 0.2 * k.awareness);
     }
-    if confirmed && (visible || lost_secs < 2.0) {
+    // Pinning an enemy in cover or going round it, the squad keeps at it for a while without
+    // seeing it.
+    let maneuver = matches!(brain.role, "suppress" | "flank") && lost_secs < MANEUVER_SECS;
+    if confirmed && (visible || lost_secs < 2.0 || maneuver) {
         let mut engage = if ranged {
             0.55 + 0.1 * skills.aggression - supp * (1.0 - skills.courage) * 0.5
         } else {
@@ -1013,6 +1022,22 @@ fn pick_spot(
     } else {
         0.0
     };
+    // A rookie with a gun doesn't weigh positions: it rushes straight at the enemy.
+    if brain.action == NpcAction::Engage
+        && weapon.style == WeaponStyle::Ranged
+        && skills.logic < RUSH_LOGIC
+    {
+        let mut ctx = w.nav.ctx(&w.world, &w.ground, &w.water);
+        let back = DVec3::new(pos.x - target_pos.x, 0.0, pos.z - target_pos.z);
+        let back = back.normalize_or(DVec3::Z) * RUSH_GAP.min(back.length());
+        let spot = target_pos + back;
+        brain.destination = Some(ctx.nearest_walkable(spot, 1.5).unwrap_or(spot));
+        brain.destination_reason = "rush";
+        brain.in_cover = false;
+        brain.low_cover = false;
+        brain.next_position = now + 1.0;
+        return;
+    }
     let ideal = match brain.action {
         NpcAction::Retreat => weapon.ideal_range().max(8.0) * 2.2,
         NpcAction::Flank => weapon.ideal_range().clamp(6.0, 14.0),
@@ -1065,7 +1090,21 @@ fn pick_spot(
         ideal_range: ideal,
         current_destination: brain.destination,
         logic: skills.logic,
-        weights: PositionWeights::for_action(brain.action, skills.logic),
+        weights: if brain.role == "suppress" {
+            // Pinning: a spot to fire on the enemy's cover from and stay at, not a way round
+            // to a shot at the enemy itself (that's the flankers' job).
+            let w = PositionWeights::for_action(brain.action, skills.logic);
+            PositionWeights {
+                flank: 0.0,
+                pincer: 0.0,
+                can_shoot: w.can_shoot * 0.3,
+                travel: w.travel + 0.7,
+                stay: w.stay + 1.5,
+                ..w
+            }
+        } else {
+            PositionWeights::for_action(brain.action, skills.logic)
+        },
         explosives,
         search_radius: (ideal + 10.0).clamp(14.0, 32.0),
     };
@@ -1105,7 +1144,60 @@ fn pick_spot(
         _ => 2.0,
     } * (0.8 + 0.4 * brain.random() as f64);
     brain.next_position = now + settle;
-    if let Some(spot) = chosen {
+    let going_round = brain.action == NpcAction::Flank && brain.role == "flank";
+    if let Some(spot) = chosen.filter(|_| going_round) {
+        // Round to the flank with the squad: a way out of the enemy's sight, taken from cover
+        // to cover in turns (see `bound`).
+        let eye = target_pos + DVec3::Y * 1.6;
+        let ignore = [me, target];
+        let sight = Sight {
+            world,
+            physics: physics_backend(backend, physics),
+            ground,
+            obscurance: Some(obscurance),
+        };
+        let seen = |p: DVec3| sight.clear(eye, p + DVec3::Y * BODY_SEEN, &ignore);
+        let mut ctx = grid.ctx(world, ground, water);
+        let mut cost = |p: DVec3| {
+            let h = heat.sample(p + DVec3::Y * 0.5);
+            if h > 150.0 {
+                f32::INFINITY
+            } else {
+                (h / 25.0).max(0.0) + if seen(p) { IN_SIGHT_COST } else { 0.0 }
+            }
+        };
+        ctx.find_path(pos, spot.position, &mut cost, &mut s.path);
+        if s.path.is_empty() {
+            s.path.push(spot.position);
+        }
+        let moved = brain
+            .flank_goal
+            .is_none_or(|g| g.distance(spot.position) > 1.5);
+        if moved {
+            brain.in_position = false;
+        }
+        brain.flank_goal = Some(spot.position);
+        brain.flank_route.clear();
+        let mut from = pos;
+        brain.flank_route.push(pos);
+        for &p in &s.path {
+            let n = (from.distance(p) / ROUTE_STEP).ceil().max(1.0) as usize;
+            for k in 1..=n {
+                brain.flank_route.push(from.lerp(p, k as f64 / n as f64));
+            }
+            from = p;
+        }
+        brain.destination_reason = "flank";
+        brain.in_cover = spot.covered;
+        brain.low_cover = spot.low_cover;
+        if brain.in_position {
+            brain.destination = Some(spot.position);
+        } else if brain.holding {
+            brain.destination = Some(pos);
+        } else {
+            next_hop(brain, nav, now, &sight, eye, &ignore);
+        }
+    } else if let Some(spot) = chosen {
         brain.destination = Some(spot.position);
         brain.destination_reason = match brain.action {
             NpcAction::TakeCover => "cover",
@@ -1147,6 +1239,143 @@ fn pick_spot(
             }
         }
     }
+}
+
+/// How long a squad keeps pinning an enemy in cover or going round it without seeing it (s).
+const MANEUVER_SECS: f32 = 10.0;
+/// Below this much logic a shooter rushes straight at its enemy (to this far from it, m).
+const RUSH_LOGIC: f32 = 0.3;
+const RUSH_GAP: f64 = 4.0;
+/// Going round to a flank: a body is seen at this height (m); a stretch of the way the enemy
+/// sees costs this many times its length more; the way is followed in steps this long (m).
+const BODY_SEEN: f64 = 1.2;
+const IN_SIGHT_COST: f32 = 4.0;
+const ROUTE_STEP: f64 = 1.0;
+/// A bound from cover to cover is at least this long (m), and a cover more than this far on
+/// is taken before it (or, with no cover, a stop this far on); the flanker holds each cover
+/// at least this long (s).
+const HOP_MIN: f64 = 3.5;
+const HOP_MAX: f64 = 9.0;
+const HOLD_SECS: f64 = 0.6;
+
+/// How long after it last saw its enemy a shooter keeps firing at where it was: the squad's
+/// suppressor as long as the maneuver lasts, a flanker holding a cover (covering its mate) or
+/// a shooter covering a revive a few seconds.
+fn suppress_secs(brain: &NpcBrain) -> f64 {
+    match brain.role {
+        "suppress" => MANEUVER_SECS as f64,
+        "cover" => 4.0,
+        "flank" if brain.holding || !brain.bound => 4.0,
+        _ => 0.0,
+    }
+}
+
+/// The flanker's next bound along its way round: to the last spot out of the enemy's sight
+/// before the way shows it (at least [`HOP_MIN`] on), to a cover once it is [`HOP_MAX`] on, or,
+/// with no cover, a stop a little farther; the flank spot itself last.
+fn next_hop(
+    brain: &mut NpcBrain,
+    nav: &mut NavAgent,
+    now: f64,
+    sight: &Sight,
+    eye: DVec3,
+    ignore: &[Entity],
+) {
+    let route = &brain.flank_route;
+    if route.is_empty() {
+        return;
+    }
+    let hidden = |p: DVec3| !sight.clear(eye, p + DVec3::Y * BODY_SEEN, ignore);
+    let mut along = 0.0;
+    let mut pick = route.len() - 1;
+    let mut cover = None;
+    for i in 1..route.len() {
+        along += route[i - 1].distance(route[i]);
+        if hidden(route[i]) {
+            if along >= HOP_MIN {
+                cover = Some(i);
+            }
+        } else if let Some(c) = cover {
+            pick = c;
+            break;
+        }
+        if along >= HOP_MAX
+            && let Some(c) = cover
+        {
+            pick = c;
+            break;
+        }
+        if along >= HOP_MAX * 1.6 {
+            pick = i;
+            break;
+        }
+    }
+    nav.path.clear();
+    nav.path.extend_from_slice(&route[1..=pick]);
+    brain.flank_route.drain(..pick);
+    let hop = brain.flank_route[0];
+    brain.destination = Some(hop);
+    nav.goal = Some(hop);
+    nav.status = Some(PathStatus::Complete);
+    nav.planned_at = now;
+}
+
+/// Flanking with the squad: it holds the cover it has reached while it isn't its turn
+/// (crouched, covering the mate that moves) and a moment after, then runs on to the next cover
+/// on its way round; at its flank spot it stays. Returns whether it is where it should be
+/// now (holding, or there): it shoots from there.
+#[allow(clippy::too_many_arguments)]
+fn bound(
+    me: Entity,
+    pos: DVec3,
+    known: Option<&Known>,
+    now: f64,
+    brain: &mut NpcBrain,
+    nav: &mut NavAgent,
+    w: &mut BrainWorld,
+    s: &mut Scratch,
+    out: &mut MoveIntent,
+) -> bool {
+    let Some(goal) = brain.flank_goal else {
+        return true;
+    };
+    if brain.in_position {
+        follow(pos, goal, JOG, nav, now, w, s, out);
+        return true;
+    }
+    if !brain.bound || (brain.holding && now < brain.hold_until) {
+        out.crouch = true;
+        return true;
+    }
+    if brain.holding {
+        // Its turn again: on to the next cover.
+        brain.holding = false;
+        if let (Some(k), Some(target)) = (known, brain.target) {
+            let sight = Sight {
+                world: &w.world,
+                physics: physics_backend(&w.backend, &w.physics),
+                ground: &w.ground,
+                obscurance: Some(&w.obscurance),
+            };
+            let eye = k.last_position + DVec3::Y * 1.6;
+            next_hop(brain, nav, now, &sight, eye, &[me, target]);
+        }
+    }
+    let Some(dest) = brain.destination else {
+        return true;
+    };
+    let far = DVec2::new(dest.x - pos.x, dest.z - pos.z).length() > 2.5;
+    let there = follow(pos, dest, 1.0, nav, now, w, s, out);
+    out.sprint = far;
+    if there {
+        if dest.distance(goal) < 1.0 {
+            brain.in_position = true;
+        } else {
+            brain.holding = true;
+            brain.hold_until = now + HOLD_SECS;
+        }
+    }
+    there
 }
 
 /// A melee mate screening a kneeling medic stands this far from it toward the enemy (m, flat),
@@ -1506,7 +1735,12 @@ fn drive(
                 _ => JOG,
             };
             let mut arrived = true;
-            if let Some(dest) = brain.destination {
+            let bounding = brain.action == NpcAction::Flank
+                && brain.role == "flank"
+                && brain.flank_goal.is_some();
+            if bounding {
+                arrived = bound(me, pos, known, now, brain, nav, w, s, &mut out);
+            } else if let Some(dest) = brain.destination {
                 arrived = follow(pos, dest, urgency, nav, now, w, s, &mut out);
                 if !arrived && matches!(brain.action, NpcAction::TakeCover | NpcAction::Retreat) {
                     out.sprint = combat.suppression > 0.3 || brain.action == NpcAction::Retreat;
@@ -1530,7 +1764,9 @@ fn drive(
                 // Flankers keep quiet until they're in position (if they're smart).
                 let quiet = brain.action == NpcAction::Flank && !arrived && skills.logic > 0.6;
                 let on_the_move = !arrived && skills.accuracy < 0.7;
-                if !quiet && !on_the_move {
+                // An enemy caught reloading or spent is worth a shot on the run.
+                let opening = k.visible && k.opening(now, skills.reaction_time).is_some();
+                if !quiet && (!on_the_move || opening) {
                     ranged_fire(
                         me,
                         pos,
@@ -1672,7 +1908,12 @@ fn melee(
     let has_turn = ready
         && w.tokens
             .request(k.entity, me, world_now, max_attackers, w.squad.token_secs);
-    let opening = p.vulnerable;
+    // An opening it has seen (as late as its reactions let it: a short one is over before a
+    // slow fighter knows it was there). A long one (a reload, stamina spent) is worth running
+    // in for.
+    let seen = k.opening(now, skills.reaction_time);
+    let opening = seen.is_some();
+    let long = matches!(seen, Some(Opening::Reloading | Opening::Spent));
     if has_turn && now >= brain.next_commit_roll {
         brain.next_commit_roll = now + 0.5;
         if brain.random() < 0.25 + 0.6 * skills.aggression {
@@ -1680,7 +1921,7 @@ fn melee(
         }
     }
     // Punish openings at once (as fast as reactions allow: `p` is already reaction-delayed).
-    if ready && opening && dist < reach + motor.dash_distance + 0.5 {
+    if ready && opening && (dist < reach + motor.dash_distance + 0.5 || (long && dist < 12.0)) {
         brain.committed_until = now + 1.0;
     }
     let committed = has_turn && now < brain.committed_until;
@@ -1693,13 +1934,17 @@ fn melee(
     if (committed && !counter) || (ready && opening) {
         if dist > reach + 0.15 {
             let gap = dist - reach * 0.7;
+            // (Into an opening, from any way out: the window is short.)
             if (opening || skills.agility >= 1.1)
                 && skills.agility >= 1.0
-                && dist > reach + 0.8
+                && (dist > reach + 0.8 || opening)
                 && gap < motor.dash_distance
             {
                 // Blink in and strike.
                 out.dash_to = Some(pos + (dir * gap).as_dvec3());
+                if opening {
+                    combat.stats.punishes += 1;
+                }
                 begin_attack(
                     me,
                     combat,
@@ -1717,7 +1962,7 @@ fn melee(
                 brain.committed_until = 0.0;
             } else {
                 out.direction = dir;
-                out.sprint = dist > 5.0;
+                out.sprint = dist > if long { 3.0 } else { 5.0 };
             }
         } else {
             let model = w.models.get(k.entity);
@@ -1728,6 +1973,9 @@ fn melee(
                 && !opening
                 && skills.logic > 0.45
                 && brain.random() < 0.08 + 0.55 * blocks_a_lot;
+            if opening {
+                combat.stats.punishes += 1;
+            }
             begin_attack(
                 me,
                 combat,
@@ -1815,12 +2063,15 @@ fn ranged_fire(
         // Lead moving targets (smart shooters).
         let flight = dist / weapon.projectile_speed.max(1.0) + weapon.windup;
         p.0 + DVec3::Y * 1.15 + (p.1 * flight * skills.logic).as_dvec3()
-    } else if matches!(brain.role, "suppress" | "cover") && now - k.last_seen < 4.0 {
+    } else if now - k.last_seen < suppress_secs(brain) {
         // Pin it behind its cover.
         k.last_position + DVec3::Y * 1.0
     } else {
         return;
     };
+    if k.visible && k.opening(now, skills.reaction_time).is_some() {
+        combat.stats.punishes += 1;
+    }
     let d =
         Vec3::new((aim.x - pos.x) as f32, 0.0, (aim.z - pos.z) as f32).normalize_or(Vec3::NEG_Z);
     out.look = Some(d);

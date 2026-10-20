@@ -17,7 +17,7 @@ struct PlanetGpu {
     params: vec4<f32>,              // snow below °C, rock slope, vegetation (0/1), ocean surface (0/1)
     params2: vec4<f32>,             // sphere (0/1), crater density, largest crater radius, crater seed
     motion: vec4<f32>,              // how far the terrain moved in the world since last frame
-    params3: vec4<f32>,             // regolith scattering (0..1), rayed craters, young areas, unused
+    params3: vec4<f32>,             // regolith scattering (0..1), rayed craters, young areas, smallest crater radius
     rays: array<vec4<f32>, 8>,      // rayed craters: center (planet-local unit direction), radius on the ground (m)
     young: array<vec4<f32>, 12>,    // young ground: middle (planet-local direction) × youth, angular radius
 };
@@ -419,12 +419,74 @@ fn crater_slope(x: f32, depth: f32, rim: f32, fl: f32, worn: f32) -> f32 {
     return mix(bowl, dish, worn);
 }
 
-// Small craters on barren ground near the camera (none of them in the shape): slope along the
-// surface (xyz) and the albedo gain of fresh ones (w). Cells of 8 m down to 1 m divide the
+// Height (meters) of `crater_profile` in shape.rs.
+fn crater_height(x: f32, depth: f32, rim: f32, fl: f32, worn: f32) -> f32 {
+    if (x >= 1.5) {
+        return 0.0;
+    }
+    var bowl = rim * (1.0 - smoothstep(1.0, 1.5, x)) * (1.5 - x) * 2.0;
+    if (x < 1.0) {
+        let xf = max((x - fl) / (1.0 - fl), 0.0);
+        bowl = depth * (xf * xf - 1.0) + rim * smoothstep(0.6, 1.0, x);
+    }
+    let dish = depth * (smoothstep(fl * 0.8, 1.25, x) - 1.0) + rim * (1.0 - smoothstep(0.0, 0.4, abs(x - 1.05)));
+    return mix(bowl, dish, worn);
+}
+
+// How much of the sun a crater's own rim hides at `d` (meters from its center, which may lie
+// off the surface: see `craters` in shape.rs), 0..1: under a low sun the side of the bowl
+// toward the sun lies in the rim's shadow. Normals alone only tilt the light, so without
+// this small craters stayed lit to the bottom.
+fn crater_shadow(d: vec3<f32>, up: vec3<f32>, sun: vec3<f32>, rc: f32, depth: f32, rim: f32, fl: f32, worn: f32) -> f32 {
+    let sin_e = dot(sun, up);
+    let flat_sun = sun - up * sin_e;
+    let cos_e = length(flat_sun);
+    if (sin_e <= 0.0 || cos_e < 1e-4) {
+        return 0.0;
+    }
+    let toward = flat_sun / cos_e;
+    let dz = dot(d, up);
+    let o = d - up * dz;
+    // The rim's circle on the ground, and how far it lies toward the sun.
+    let r2 = rc * rc - dz * dz;
+    let oo = dot(o, o);
+    if (oo >= r2) {
+        return 0.0;
+    }
+    let u = dot(o, toward);
+    let to_rim = -u + sqrt(max(r2 - (oo - u * u), 0.0));
+    let crest = max(crater_height(1.0, depth, rim, fl, worn), crater_height(1.05, depth, rim, fl, worn));
+    let below = crest - crater_height(length(d) / rc, depth, rim, fl, worn) - to_rim * sin_e / cos_e;
+    // A soft edge: the sun is half a degree wide, and the rim is not a perfect circle.
+    let soft = 0.01 * rc + 0.0045 * to_rim;
+    return smoothstep(0.0, 2.0 * soft, below);
+}
+
+// The rim's shadow where a crater too small for the mesh is drawn on flat ground: what the
+// near rim would hide from the eye (`crater_shadow` toward the eye) shows the far wall in a
+// real bowl, mostly lit, so the shadow is left out there. Otherwise a crater seen at a low
+// angle with the sun behind the viewer drew a black disc where its lit far wall should be.
+fn crater_seen_shadow(d: vec3<f32>, up: vec3<f32>, sun: vec3<f32>, eye: vec3<f32>, rc: f32, depth: f32, rim: f32, fl: f32, worn: f32) -> f32 {
+    let shade = crater_shadow(d, up, sun, rc, depth, rim, fl, worn);
+    if (shade <= 0.0) {
+        return 0.0;
+    }
+    return shade * (1.0 - crater_shadow(d, up, eye, rc, depth, rim, fl, worn));
+}
+
+// Small craters on barren ground near the camera (none of them in the shape): their slopes,
+// the albedo gain of fresh ones and their rims' shadows. Cells of 8 m down to 1 m divide the
 // 4096 m tiling period, so `tp` keeps them in place.
-fn micro_craters(tp: vec3<f32>, up: vec3<f32>, pixel: f32) -> vec4<f32> {
+struct Pocks {
+    grad: vec3<f32>,  // slope along the surface
+    bright: f32,      // albedo gain of fresh ones
+    shadow: f32,      // share of the sun their rims hide
+};
+
+fn micro_craters(tp: vec3<f32>, up: vec3<f32>, sun: vec3<f32>, eye: vec3<f32>, pixel: f32, pixel_across: f32) -> Pocks {
     var grad = vec3<f32>(0.0);
     var bright = 0.0;
+    var shadow = 0.0;
     var cell = 8.0;
     for (var size_class = 0u; size_class < 4u; size_class++) {
         let radius = cell / 3.2;
@@ -436,7 +498,9 @@ fn micro_craters(tp: vec3<f32>, up: vec3<f32>, pixel: f32) -> vec4<f32> {
         let cs = 0x5eedu ^ (size_class * 0x9e37u);
         for (var k = 0; k < 8; k++) {
             let c = base + vec3<i32>(k & 1, (k >> 1) & 1, (k >> 2) & 1);
-            if (crater_hash(c, cs, 1u) > 0.55) {
+            // Crowded: below a few hundred meters the Moon's craters are as many as the ground
+            // holds (new ones wipe out old ones).
+            if (crater_hash(c, cs, 1u) > 0.8) {
                 continue;
             }
             let center = (vec3<f32>(c) + vec3<f32>(crater_hash(c, cs, 2u), crater_hash(c, cs, 3u), crater_hash(c, cs, 4u))) * cell;
@@ -453,13 +517,22 @@ fn micro_craters(tp: vec3<f32>, up: vec3<f32>, pixel: f32) -> vec4<f32> {
             let depth = rc * 0.2 * wear;
             let rim = rc * 0.05 * wear * wear;
             let dh = crater_slope(x, depth, rim, 0.0, worn);
-            grad += d * (dh / (rc * max(dist, 1e-4))) * seen;
+            // Right under the camera a crater meters across would need its bowl in the mesh to
+            // read as a pit: its shading and shadow alone look like a stain on flat ground
+            // there, so it fades out.
+            let flat_near = 1.0 - smoothstep(150.0 * pixel_across, 400.0 * pixel_across, rc);
+            grad += d * (dh / (rc * max(dist, 1e-4))) * seen * flat_near;
+            shadow = max(shadow, crater_seen_shadow(d, up, sun, eye, rc, depth, rim, 0.0, worn) * seen * flat_near);
             let fresh = 1.0 - smoothstep(0.1, 0.3, age);
             bright += fresh * seen * smoothstep(0.5, 0.9, x) * (1.0 - smoothstep(1.05, 1.5, x)) * 0.25;
         }
         cell *= 0.5;
     }
-    return vec4<f32>(grad - up * dot(grad, up), bright);
+    var out: Pocks;
+    out.grad = grad - up * dot(grad, up);
+    out.bright = bright;
+    out.shadow = shadow;
+    return out;
 }
 
 // Slope (x/z) of low lumps and swales in the dust, 2 m and 50 cm across, a few centimeters
@@ -485,15 +558,19 @@ fn dust_lumps(tp: vec3<f32>) -> vec2<f32> {
 struct Craters {
     slope: vec3<f32>, // gradient of the crater height along the surface (world)
     bright: f32,      // albedo gain of fresh walls and ejecta
+    shadow: f32,      // share of the sun the rims hide
 };
 
 // The craters the shape scatters (`craters` in shape.rs, same hash and profile) that the
 // vertices are too far apart to draw, as slopes for shading, and the bright walls and ejecta
-// of fresh ones. Only craters at least a pixel across, and 40 m or more.
-fn crater_detail(p: PlanetGpu, rel: vec3<f32>, pixel: f32, spacing: f32) -> Craters {
+// of fresh ones (only craters at least a pixel across, and 40 m or more); and the shadows the
+// rims of all of them down to the smallest cast into their bowls (the shadow maps are far too
+// coarse for them).
+fn crater_detail(p: PlanetGpu, rel: vec3<f32>, altitude: f32, pixel: f32, pixel_across: f32, spacing: f32) -> Craters {
     var out: Craters;
     out.slope = vec3<f32>(0.0);
     out.bright = 0.0;
+    out.shadow = 0.0;
     var radius = p.params2.z;
     let rot = planet_rot(p);
     let local = transpose(rot) * (rel - p.center.xyz);
@@ -501,14 +578,23 @@ fn crater_detail(p: PlanetGpu, rel: vec3<f32>, pixel: f32, spacing: f32) -> Crat
     // Young lava keeps a tenth of the craters (the shape decides at each crater's center).
     let density = p.params2.y * (1.0 - 0.9 * youth_at(p, up));
     let pos = up * p.center.w;
+    // The point from each crater's center as a small per-pixel part (camera-relative, down to
+    // the base radius) plus the camera's offset from the center, the same for every pixel:
+    // subtracting two planet-sized numbers per pixel left stair steps along shadow edges.
+    let near = transpose(rot) * rel - up * altitude;
+    let cam = -(transpose(rot) * p.center.xyz);
     let seed = u32(p.params2.w);
     let smallest = max(pixel * 0.7, 40.0);
+    let smallest_shadow = max(pixel * 0.7, p.params3.w);
+    let sun = transpose(rot) * frame.sun_dir.xyz;
+    let eye = transpose(rot) * normalize(-rel);
     var grad = vec3<f32>(0.0);
     var size_class = 0u;
     loop {
-        if (radius < smallest || size_class > 16u) {
+        if (radius < smallest_shadow || size_class > 20u) {
             break;
         }
+        let detail = radius >= smallest;
         // Vertices draw craters a few spacings across; pixels show ones a couple of pixels across.
         let shade = 1.0 - smoothstep(1.5 * spacing, 6.0 * spacing, radius);
         let seen = smoothstep(0.7 * pixel, 2.0 * pixel, radius);
@@ -522,7 +608,7 @@ fn crater_detail(p: PlanetGpu, rel: vec3<f32>, pixel: f32, spacing: f32) -> Crat
             }
             let center = (vec3<f32>(c) + vec3<f32>(crater_hash(c, cs, 2u), crater_hash(c, cs, 3u), crater_hash(c, cs, 4u))) * cell;
             let rc = radius * (0.55 + 0.45 * crater_hash(c, cs, 5u));
-            let d = pos - center;
+            let d = near + (cam - center);
             let dist = length(d);
             let x = dist / rc;
             if (x >= 1.5) {
@@ -534,6 +620,12 @@ fn crater_detail(p: PlanetGpu, rel: vec3<f32>, pixel: f32, spacing: f32) -> Crat
             let wear = 1.0 - 0.65 * worn;
             let depth = rc * select(0.18, 0.06, big) * wear;
             let rim = rc * 0.045 * wear * wear;
+            // (Large on the screen, the mesh carries the bowl and the shadow maps its shadow.)
+            let small = 1.0 - smoothstep(150.0 * pixel_across, 400.0 * pixel_across, rc);
+            out.shadow = max(out.shadow, crater_seen_shadow(d, up, sun, eye, rc, depth, rim, select(0.0, 0.55, big), worn) * seen * small);
+            if (!detail) {
+                continue;
+            }
             let dh = crater_slope(x, depth, rim, select(0.0, 0.55, big), worn);
             grad += d * (dh / (rc * max(dist, 1e-3))) * shade;
             // Fresh craters are bright all over (new rock on the floor and walls, a blanket of
@@ -995,6 +1087,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let dp1 = dpdx(in.rel);
     let dp2 = dpdy(in.rel);
     let pixel = max(length(dp1), length(dp2));
+    // (The pixel's short side: how large things look on the screen, however low the view.)
+    let pixel_across = min(length(dp1), length(dp2));
     // The ground textures are filtered anisotropically (up to 16:1), so seen at a glancing
     // angle they stay sharp across the view while foreshortened along it: their detail lasts
     // as long as the pixel's narrow side is small. (Procedural patterns aren't filtered and go
@@ -1031,8 +1125,14 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let dr1 = dpdx(ripple_h);
     let dr2 = dpdy(ripple_h);
 
-    // Sea: below sea level, with a smooth coastline between vertices.
-    let ocean = planet.params.w * saturate(0.5 - altitude / alt_width);
+    // Sea: below sea level, with a smooth coastline between vertices. Seen from high up the
+    // vertices are kilometers apart and the sea-level line across each triangle is straight,
+    // so the coast drew the mesh's zigzag; there it wanders by up to a vertex spacing with the
+    // per-pixel noise, into capes, bays and inlets.
+    let coast_wander = (far_n.y - 0.5) * 1.6 * fwidth(altitude) / max(pixel, 1e-3) * in.lod.x * far;
+    // Beaches, shallows and the wash follow the same wandering coast.
+    let coast_alt = altitude + coast_wander;
+    let ocean = planet.params.w * saturate(0.5 - coast_alt / alt_width);
 
     // Ground maps around the focus.
     let duv = deform_uv(in.rel);
@@ -1074,7 +1174,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     // Grass: lush to dry by moisture, with sunlit meadows and hay fields between the woods.
     var grass = mix(planet.colors[C_DRY].rgb, planet.colors[C_LUSH].rgb, smoothstep(0.2, 0.7, moisture + wet_bias));
-    let field = vegetation * smoothstep(0.56, 0.64, patches + (variety - 0.5) * 0.2) * smoothstep(4.0, 12.0, temp_c);
+    // (Patches come per vertex, kilometers apart from high up: the per-pixel noise breaks the
+    // fields' edges there instead of drawing the mesh's squares.)
+    let field = vegetation * smoothstep(0.56 - 0.06 * far, 0.64 + 0.06 * far, patches + (variety - 0.5) * 0.2 + (far_n.x - 0.5) * 0.5 * far)
+        * smoothstep(4.0, 12.0, temp_c);
     grass = mix(grass, mix(planet.colors[C_DRY].rgb, planet.colors[C_LUSH].rgb, 0.45), field * 0.35);
     let clump_fade = 1.0 - smoothstep(1.0, 12.0, pixel);
     let worn = smoothstep(0.72, 0.84, patch_v + (patches - 0.5) * 0.3);
@@ -1140,10 +1243,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let shore_tan = sqrt(max(1.0 - nu * nu, 0.0)) / nu;
     let beach_w = mix(40.0, 160.0, saturate((meadow_v - 0.35) * 2.5));
     let beach_top = clamp(shore_tan * beach_w, 0.8, 5.0);
-    let beach_h = altitude + (mid_v - 0.5) * 0.5 * beach_top * clump_fade;
-    let beach = vegetation * (1.0 - smoothstep(beach_top * 0.55, beach_top * 1.15, beach_h)) * step(-1.0, altitude) * (1.0 - 0.85 * smoothstep(30.0, 300.0, pixel));
+    let beach_h = coast_alt + (mid_v - 0.5) * 0.5 * beach_top * clump_fade;
+    let beach = vegetation * (1.0 - smoothstep(beach_top * 0.55, beach_top * 1.15, beach_h)) * step(-1.0, coast_alt) * (1.0 - 0.85 * smoothstep(30.0, 300.0, pixel));
     // Behind it, grass that salt and wind keep pale and thin.
-    let dune = vegetation * planet.params.w * (1.0 - smoothstep(beach_top * 1.5, beach_top * 3.0, beach_h)) * step(0.0, altitude);
+    let dune = vegetation * planet.params.w * (1.0 - smoothstep(beach_top * 1.5, beach_top * 3.0, beach_h)) * step(0.0, coast_alt);
     let desert = vegetation * (1.0 - smoothstep(0.08, 0.22, moisture + (variety - 0.5) * 0.1 + (far_n.y - 0.5) * 0.15 * far)) * smoothstep(12.0, 22.0, temp_c);
     let sandy = saturate(beach + desert);
     col[M_SAND] = planet.colors[C_SAND].rgb;
@@ -1373,11 +1476,16 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Large-scale variation beyond the textures' reach.
     albedo *= mix(1.0, 0.88 + 0.24 * macro_v, macro_fade) * mix(1.0, 0.9 + 0.2 * far_n.x, far)
         * mix(1.0, 0.8 + 0.4 * far_n.y, airless_far);
+    // Sun hidden by the rims of craters too small for the shadow maps.
+    var crater_shade = 0.0;
     // Pockmarks near the camera: craters from 2.5 m down to 30 cm, smaller than the shape's.
     if (barren > 0.0 && planet.params2.y > 0.0 && pixel < 0.5) {
-        let pock = micro_craters(tp, up, pixel);
-        n = normalize(n - pock.xyz * barren * w[M_SOIL]);
-        albedo *= 1.0 + pock.w * barren * w[M_SOIL];
+        let pock = micro_craters(tp, up, frame.sun_dir.xyz, normalize(-in.rel), pixel, pixel_across);
+        // (In the dust, and among the stones strewn on it.)
+        let dusty = barren * saturate(w[M_SOIL] * 2.5);
+        n = normalize(n - pock.grad * dusty);
+        albedo *= 1.0 + pock.bright * dusty;
+        crater_shade = max(crater_shade, pock.shadow * dusty);
         // The dust is never quite flat: gentle lumps and swales a meter or two across.
         let lump_k = (1.0 - smoothstep(0.05, 0.4, pixel)) * barren * w[M_SOIL];
         if (lump_k > 0.0) {
@@ -1388,12 +1496,13 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     // Craters too small for the vertices, and fresh craters' bright ejecta.
     if (planet.params2.y > 0.0 && planet.params2.z > 0.0) {
-        let crater = crater_detail(planet, in.rel, pixel, in.lod.x);
+        let crater = crater_detail(planet, in.rel, altitude, pixel, pixel_across, in.lod.x);
         // Past the terminator the walls of real craters sit in the shadow of the land around
         // them (which these slopes cannot cast), so they only shade where the sun is up.
         let sun_up = smoothstep(-0.02, 0.2, dot(up, frame.sun_dir.xyz));
         n = normalize(n - crater.slope * sun_up);
         albedo *= 1.0 + crater.bright;
+        crater_shade = max(crater_shade, crater.shadow);
         let ray = crater_rays(planet, in.rel, pixel) * (1.0 - vegetation);
         albedo = mix(albedo, max(albedo, planet.colors[C_ROCK].rgb * 1.25), ray * 0.75);
     }
@@ -1585,7 +1694,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     roughness = mix(roughness, 0.95, scorch);
 
     // ---- Open sea.
-    let sea_depth = max(-altitude, 0.0);
+    let sea_depth = max(-coast_alt, 0.0);
     // The wind roughens the sea: the mean square slope of its waves (Cox and Munk 1954) sets
     // how wide the sun's glitter spreads, and the waves it raises break higher on the shore.
     let wind = min(length(frame.wind.xz), 20.0);
@@ -1648,8 +1757,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // The beach the waves wash: dark wet sand up to where the biggest ones run, and the thin
     // sheet of each wave sliding up it and back, glossy, with froth along its edge.
     let runup = 0.2 + breaker * 0.6;
-    let shore_h = altitude + (detail_n - 0.5) * 0.06 * fine_fade;
-    let washed = (1.0 - smoothstep(runup * 0.8, runup * 1.2, shore_h)) * step(0.0, altitude) * coast_near * (1.0 - ocean);
+    let shore_h = coast_alt + (detail_n - 0.5) * 0.06 * fine_fade;
+    let washed = (1.0 - smoothstep(runup * 0.8, runup * 1.2, shore_h)) * step(0.0, coast_alt) * coast_near * (1.0 - ocean);
     let surge = runup * (0.45 + 0.4 * sin(6.2832 * (frame.time.x / wave_period + (meadow_v - 0.5) * 0.7)));
     let swash = (1.0 - smoothstep(surge - 0.02, surge, shore_h)) * washed;
     let swash_edge = smoothstep(surge - 0.06, surge - 0.015, shore_h) * swash * broken;
@@ -1721,6 +1830,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let dip = sqrt(2.0 * max(altitude - 3000.0, 0.0) / planet.center.w);
         planet_lit = smoothstep(-dip - 0.015, -dip + 0.01, dot(up, to_sun));
     }
+    planet_lit *= 1.0 - crater_shade;
     var color = shade_surface_shadowed(s, in.rel, planet_lit);
     let glitter = ocean * (1.0 - foam);
     if (glitter > 0.0 && dot(n, to_sun) > 0.0 && planet_lit > 0.0) {

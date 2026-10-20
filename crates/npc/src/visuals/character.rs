@@ -44,7 +44,7 @@ use engine_world::{DamageEvent, DamageKind};
 
 use super::StandInState;
 use super::humanoid::{Bone, Expression, Skeleton};
-use crate::agent::{Npc, NpcAction, NpcBrain, NpcClock, NpcVitals};
+use crate::agent::{Npc, NpcAction, NpcBrain, NpcClock, NpcSettings, NpcVitals};
 use crate::faction::{Faction, Squad};
 use crate::seed::Seed;
 use crate::skills::NpcSkills;
@@ -309,6 +309,7 @@ type Unasked<'a> = (
 #[allow(clippy::type_complexity)]
 pub(crate) fn request_appearances(
     mut commands: Commands,
+    settings: Res<NpcSettings>,
     q: Query<
         Unasked,
         (
@@ -319,6 +320,9 @@ pub(crate) fn request_appearances(
         ),
     >,
 ) {
+    if !settings.character_looks {
+        return;
+    }
     for (e, &seed, squad, faction, skills) in &q {
         let request = appearance_request(seed, squad.copied(), faction.copied(), skills);
         commands.entity(e).try_insert(request);

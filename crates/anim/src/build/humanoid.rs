@@ -39,6 +39,7 @@ pub const BACK_JOG_SPEED: f32 = 1.7;
 pub const SIDE_RUN_SPEED: f32 = 3.0;
 pub const BACK_RUN_SPEED: f32 = 2.6;
 pub const RUN_SPEED: f32 = 3.8;
+pub const SPRINT_SPEED: f32 = 7.0;
 /// Height of the hips at rest, m (the clips' positions are for this size of body and scale
 /// with the hips of a fitted skeleton).
 pub const HIPS_HEIGHT: f32 = 0.98;
@@ -982,13 +983,20 @@ fn walk_with(s: &Skeleton, name: &str, secs: f32, stride: f32) -> AnimationClip 
                 4.0 * bump(q, 0.0, 0.06) - 14.0 * bump(q, 0.55, 0.08) + 6.0 * bump(q, 0.8, 0.1);
             let toe = 24.0 * bump(q, 0.53, 0.07);
             leg(&mut p, side, hip, 1.0, knee, ankle, toe);
+            // The arm swings against its leg, further forward than back; the forearm lags
+            // the upper arm a little and bends most as the arm comes forward, the hand
+            // trailing at the wrist.
+            let fore = -cq * swing;
+            let lag = -cycle(q - 0.07) * swing;
             arm(
                 &mut p,
                 side,
                 Arm {
-                    flex: -16.0 * swing * cq + 2.0,
-                    elbow: 20.0 - 6.0 * swing * cq,
-                    protract: -3.0 * swing * cq,
+                    flex: 2.0 + if fore > 0.0 { 24.0 } else { 22.0 } * fore,
+                    abduct: -13.0,
+                    elbow: 14.0 + 22.0 * lag.max(0.0) + 4.0 * fore.abs(),
+                    wrist: 8.0 * lag,
+                    protract: 4.0 * fore,
                     ..Arm::HANG
                 },
             );
@@ -1252,6 +1260,69 @@ fn run(s: &Skeleton) -> AnimationClip {
     .with_event(0.52, "footstep", Some("foot_l"))
 }
 
+/// Flat-out running: the trunk tipped forward, knees driven high and heels kicked up under
+/// the hips, arms pumping hard from the hip to the chin with the elbows held near a right
+/// angle. Each foot is down for about a fifth of the cycle.
+fn sprint(s: &Skeleton) -> AnimationClip {
+    AnimationClip::from_fn("sprint", 0.56, 41, true, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let c = cycle(ph);
+        p.rot_move(
+            "hips",
+            Vec3::new(
+                0.01 * cycle_sin(ph),
+                -0.06 - 0.03 * cycle((ph - 0.12) * 2.0),
+                0.0,
+            ),
+            -3.0,
+            9.0 * c,
+            5.0 * cycle_sin(ph),
+        );
+        spine(
+            &mut p,
+            [-15.0, -9.0, 10.0, 6.0],
+            [-5.0 * c, -10.0 * c, 4.0 * c, 2.0 * c],
+            [
+                -2.0 * cycle_sin(ph),
+                -cycle_sin(ph),
+                1.5 * cycle_sin(ph),
+                cycle_sin(ph),
+            ],
+        );
+        for side in 0..2 {
+            let q = (ph + if side == 1 { 0.0 } else { 0.5 }).rem_euclid(1.0);
+            // Thigh furthest back just after toe-off, highest late in the swing. The heel
+            // folds up to the seat as the thigh passes under the hips, the shin hangs under
+            // the raised thigh and only reaches out just before the foot lands under the
+            // hips.
+            let hip = 22.0 + 50.0 * cycle(q - 0.75);
+            let knee = 24.0
+                + 14.0 * bump(q, 0.1, 0.08)
+                + 100.0 * bump(q, 0.42, 0.15)
+                + 60.0 * bump(q, 0.66, 0.14);
+            let ankle = -6.0 - 24.0 * bump(q, 0.24, 0.07) + 18.0 * bump(q, 0.8, 0.1);
+            let toe = 25.0 * bump(q, 0.22, 0.06);
+            leg(&mut p, side, hip, 1.0, knee, ankle, toe);
+            let cq = cycle(q - 0.02);
+            arm(
+                &mut p,
+                side,
+                Arm {
+                    flex: 20.0 - 60.0 * cq,
+                    abduct: -9.0,
+                    elbow: 88.0 - 28.0 * cq,
+                    wrist: 4.0,
+                    protract: -10.0 * cq,
+                    ..Arm::HANG
+                },
+            );
+        }
+        p.take()
+    })
+    .with_event(0.02, "footstep", Some("foot_r"))
+    .with_event(0.52, "footstep", Some("foot_l"))
+}
+
 /// Upper-body lean into a turn (additive). `dir`: +1 left, −1 right.
 fn lean(s: &Skeleton, name: &str, dir: f32) -> AnimationClip {
     AnimationClip::from_fn(name, 1.0, 2, true, |_| {
@@ -1284,6 +1355,53 @@ fn lean_pitch(s: &Skeleton, name: &str, dir: f32) -> AnimationClip {
             [0.0; 4],
             [0.0; 4],
         );
+        p.take()
+    })
+}
+
+/// Additive posture for the ground's slope (`climb` up a flight of stairs, `descend` down
+/// one): leaning into a climb with the head up to see the top; going down, the knees softer,
+/// the chin down to watch the steps and the arms a little out for balance.
+fn grade_posture(s: &Skeleton, name: &str, dir: f32) -> AnimationClip {
+    AnimationClip::from_fn(name, 1.0, 2, true, |_| {
+        let mut p = PoseBuilder::new(s);
+        if dir > 0.0 {
+            p.rot_move("hips", Vec3::new(0.0, -0.02, 0.0), -5.0, 0.0, 0.0);
+            spine(&mut p, [-5.0, -4.0, 3.0, 4.0], [0.0; 4], [0.0; 4]);
+            for side in 0..2 {
+                arm(
+                    &mut p,
+                    side,
+                    Arm {
+                        flex: 4.0,
+                        twist: 0.0,
+                        abduct: 0.0,
+                        elbow: 10.0,
+                        wrist: 0.0,
+                        protract: 0.0,
+                        elevate: 0.0,
+                    },
+                );
+            }
+        } else {
+            p.rot_move("hips", Vec3::new(0.0, -0.035, 0.0), -1.0, 0.0, 0.0);
+            spine(&mut p, [-1.0, -4.0, -8.0, -16.0], [0.0; 4], [0.0; 4]);
+            for side in 0..2 {
+                arm(
+                    &mut p,
+                    side,
+                    Arm {
+                        flex: 6.0,
+                        twist: 0.0,
+                        abduct: 12.0,
+                        elbow: 16.0,
+                        wrist: 0.0,
+                        protract: 0.0,
+                        elevate: 2.0,
+                    },
+                );
+            }
+        }
         p.take()
     })
 }
@@ -1468,6 +1586,73 @@ fn block(s: &Skeleton) -> AnimationClip {
         0.85 + 0.05 * (ph * 3.0 * std::f32::consts::TAU).sin()
     })
     .with_curve("brace", 2, |_| 1.0)
+}
+
+/// A boxer's guard, held loose: left foot forward, knees soft, the trunk turned to show the
+/// left shoulder, chin tucked, the lead fist out at chin height and the rear fist by the
+/// cheek, bouncing lightly on the balls of the feet with the hands working a little.
+fn guard(s: &Skeleton) -> AnimationClip {
+    AnimationClip::from_fn("guard", 1.6, 49, true, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let tau = std::f32::consts::TAU;
+        // Two bounces a loop, and a slow weave from side to side once.
+        let bounce = (ph * 2.0 * tau).sin();
+        let weave = (ph * tau).sin();
+        p.rot_move(
+            "hips",
+            Vec3::new(0.012 * weave, -0.045 + 0.008 * bounce, 0.0),
+            2.0,
+            -24.0,
+            0.0,
+        );
+        spine(
+            &mut p,
+            [-2.0, -3.0 + 0.8 * bounce, 2.0, -8.0],
+            [2.0, 3.0, 6.0, 8.0 + 2.0 * weave],
+            [-1.5 * weave, -2.0 * weave, 0.0, 1.5 * weave],
+        );
+        // Lead (left) fist out in front of the chin, rear (right) fist by the cheek.
+        arm(
+            &mut p,
+            0,
+            Arm {
+                flex: 50.0 + 3.0 * weave,
+                twist: 0.0,
+                abduct: -16.0,
+                elbow: 110.0 - 4.0 * weave,
+                wrist: -6.0,
+                protract: 8.0,
+                elevate: 7.0,
+            },
+        );
+        arm(
+            &mut p,
+            1,
+            Arm {
+                flex: 55.0 - 2.0 * weave,
+                twist: 10.0,
+                abduct: -28.0,
+                elbow: 145.0 + 3.0 * weave,
+                wrist: -8.0,
+                protract: 5.0,
+                elevate: 9.0,
+            },
+        );
+        // Stance: the lead leg ahead, the rear heel up off the ground.
+        leg(
+            &mut p,
+            0,
+            20.0,
+            4.0,
+            26.0 + 3.0 * bounce,
+            8.0 + 1.5 * bounce,
+            0.0,
+        );
+        leg(&mut p, 1, -6.0, 6.0, 20.0 + 3.0 * bounce, -6.0, 8.0);
+        p.take()
+    })
+    .with_curve("effort", 49, |_| 0.15)
+    .with_curve("fist", 2, |_| 0.9)
 }
 
 /// The right hand of the hammer block: the handle held across in front of the face,
@@ -2580,6 +2765,7 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         walk_slow(s),
         walk(s),
         run(s),
+        sprint(s),
         sidestep_left(s),
         sidestep_right(s),
         backpedal(s),
@@ -2593,9 +2779,12 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         lean(s, "lean_right", -1.0),
         lean_pitch(s, "lean_forward", 1.0),
         lean_pitch(s, "lean_back", -1.0),
+        grade_posture(s, "climb", 1.0),
+        grade_posture(s, "descend", -1.0),
         heavy_swing(s),
         block(s),
         hammer_block(s),
+        guard(s),
         wince(s),
         reach(s),
         flex(s),
@@ -2607,8 +2796,8 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
 
 /// Locomotion (idle/walk/run by `speed`, leaning by `turn`), plus `heavy_swing` (also on
 /// the contract's `attack_heavy`), `block` (on its trigger or while `blocking` > 0.5, held
-/// while it stays there), `hammer_block` (while `hammer_guard` > 0.5), `reach`, `flex` and
-/// `wince` actions, and getting up off the floor
+/// while it stays there), `hammer_block` (while `hammer_guard` > 0.5), `guard` (a boxer's
+/// guard while `guarding` > 0.5), `reach`, `flex` and `wince` actions, and getting up off the floor
 /// (`get_up_back`, `get_up_front`: triggered by the ragdoll when a limp body comes round), and
 /// `fall_brace` (bracing for a fall, on its trigger from anywhere).
 pub fn graph() -> AnimGraph {
@@ -2627,6 +2816,9 @@ pub struct Locomotion {
     pub walk_speed: f32,
     pub run: String,
     pub run_speed: f32,
+    /// Flat out, above the run; empty for none.
+    pub sprint: String,
+    pub sprint_speed: f32,
 }
 
 impl Default for Locomotion {
@@ -2639,6 +2831,8 @@ impl Default for Locomotion {
             walk_speed: WALK_SPEED,
             run: "run".into(),
             run_speed: RUN_SPEED,
+            sprint: "sprint".into(),
+            sprint_speed: SPRINT_SPEED,
         }
     }
 }
@@ -2667,6 +2861,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
         (motion.slow_walk_speed, &motion.slow_walk),
         (motion.walk_speed, &motion.walk),
         (motion.run_speed, &motion.run),
+        (motion.sprint_speed, &motion.sprint),
     ]);
     let back = || {
         by_speed(&[
@@ -2755,6 +2950,30 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
         }),
         weight: Weight::default(),
     };
+    // Leaning into a climb and watching the steps on the way down, by `grade` (−1..1).
+    let leaning = NodeDef::Additive {
+        base: Box::new(leaning),
+        additive: Box::new(NodeDef::Blend1d {
+            param: "grade".into(),
+            children: vec![
+                Blend1dChild {
+                    at: -1.0,
+                    node: NodeDef::clip("descend"),
+                },
+                Blend1dChild {
+                    at: 0.0,
+                    node: NodeDef::Rest,
+                },
+                Blend1dChild {
+                    at: 1.0,
+                    node: NodeDef::clip("climb"),
+                },
+            ],
+            sync: false,
+            match_speed: false,
+        }),
+        weight: Weight::default(),
+    };
     let state = |name: &str, node: NodeDef| StateDef {
         name: name.into(),
         node,
@@ -2768,6 +2987,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                 state("heavy_swing", NodeDef::one_shot("heavy_swing")),
                 state("block", NodeDef::clip("block")),
                 state("hammer_block", NodeDef::clip("hammer_block")),
+                state("guard", NodeDef::clip("guard")),
                 state("reach", NodeDef::one_shot("reach")),
                 state("flex", NodeDef::one_shot("flex")),
                 state("wince", NodeDef::one_shot("wince")),
@@ -2818,6 +3038,20 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
                     "move",
                     Condition::param("hammer_guard", Cmp::Lt, 0.5),
                     0.3,
+                ),
+                // A boxer's guard while `guarding` is up (a sparring partner).
+                TransitionDef::new(
+                    "move",
+                    "guard",
+                    Condition::param("guarding", Cmp::Gt, 0.5),
+                    0.3,
+                )
+                .inertialize(),
+                TransitionDef::new(
+                    "guard",
+                    "move",
+                    Condition::param("guarding", Cmp::Lt, 0.5),
+                    0.4,
                 ),
                 TransitionDef::new("move", "reach", Condition::trigger("reach"), 0.25),
                 TransitionDef::new("reach", "move", Condition::Finished, 0.35).inertialize(),
@@ -2913,6 +3147,58 @@ mod tests {
         let mut model = s.rest_model.clone();
         s.to_model(&local, &mut model);
         model
+    }
+
+    #[test]
+    fn walk_arms_reach_forward_more_than_back_with_a_soft_elbow() {
+        let s = skeleton();
+        let clip = walk(&s);
+        for side in 0..2 {
+            let (mut front, mut back, mut bend_min) = (0.0f32, 0.0f32, f32::MAX);
+            for i in 0..60 {
+                let m = model_at(&s, &clip, i as f32 / 60.0);
+                let shoulder = m[s.bone(UPPER_ARM[side])].t;
+                let elbow = m[s.bone(LOWER_ARM[side])].t;
+                let hand = m[s.bone(HAND[side])].t;
+                // The body faces −Z.
+                let reach = shoulder.z - hand.z;
+                front = front.max(reach);
+                back = back.max(-reach);
+                let bend = (elbow - shoulder).angle_between(hand - elbow).to_degrees();
+                bend_min = bend_min.min(bend);
+            }
+            assert!(
+                front > 0.12 && front > back * 1.3,
+                "{side}: {front} vs {back}"
+            );
+            assert!(back > 0.05, "{side}: the arm never swings back ({back})");
+            assert!(bend_min > 8.0, "{side}: elbow locks straight ({bend_min}°)");
+        }
+    }
+
+    #[test]
+    fn sprint_pumps_the_arms_higher_and_folds_the_heel_higher_than_the_run() {
+        let s = skeleton();
+        // Highest hand and highest heel over a cycle, relative to the chest and the hips.
+        let reach = |clip: &AnimationClip| {
+            let (mut hand, mut heel, mut lean) = (f32::MIN, f32::MIN, 0.0f32);
+            for i in 0..40 {
+                let m = model_at(&s, clip, i as f32 / 40.0);
+                let chest = m[s.bone("chest")].t;
+                let hips = m[s.bone("hips")].t;
+                hand = hand.max(m[s.bone(HAND[1])].t.y - chest.y);
+                heel = heel.max(m[s.bone(FOOT[1])].t.y - hips.y);
+                let up = (m[s.bone("neck")].t - hips).normalize();
+                lean += up.z / 40.0;
+            }
+            (hand, heel, lean)
+        };
+        let (run_hand, run_heel, run_lean) = reach(&run(&s));
+        let (hand, heel, lean) = reach(&sprint(&s));
+        assert!(hand > run_hand + 0.08, "hand {hand} vs run {run_hand}");
+        assert!(heel > run_heel + 0.08, "heel {heel} vs run {run_heel}");
+        // The body faces −Z: a forward lean tips the neck toward −Z.
+        assert!(lean < run_lean - 0.05, "lean {lean} vs run {run_lean}");
     }
 
     #[test]

@@ -87,13 +87,15 @@ pub struct FrameUniform {
     /// The air ([`Atmosphere`], times its `density_scale`): Rayleigh scattering at the surface
     /// (1/m) RGB, w unused.
     pub air_rayleigh: [f32; 4],
-    /// Mie scattering at the surface (1/m) RGB, w unused.
+    /// Mie scattering at the surface (1/m) RGB, less the forward peak that passes as
+    /// unscattered light ([`Atmosphere::mie_forward_peak`]), w unused.
     pub air_mie: [f32; 4],
-    /// Mie extinction (scattering + absorption) at the surface (1/m) RGB, w unused.
+    /// Mie extinction (scattering + absorption) at the surface (1/m) RGB, less the forward
+    /// peak, w unused.
     pub air_mie_extinction: [f32; 4],
     /// Ozone absorption at the layer's densest (1/m) RGB, w unused.
     pub air_ozone: [f32; 4],
-    /// Mie anisotropy per channel RGB, w unused.
+    /// Mie anisotropy per channel RGB (of the whole lobe), w [`Atmosphere::mie_forward_peak`].
     pub air_mie_g: [f32; 4],
 }
 
@@ -827,7 +829,7 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         air_mie: rgb0(air.mie_scattering),
         air_mie_extinction: rgb0(air.mie_extinction),
         air_ozone: rgb0(air.ozone),
-        air_mie_g: rgb0(air.mie_g),
+        air_mie_g: [air.mie_g.x, air.mie_g.y, air.mie_g.z, air.mie_forward_peak],
     }
 }
 

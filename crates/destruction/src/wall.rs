@@ -273,11 +273,28 @@ pub enum CellKind {
     /// Part of a built opening (doorway, window, hatch hole): no material, and its edges are
     /// straight like the wall's outer border, not broken.
     Opening,
+    /// Burned out by a thermite cut: its edges are straight cuts, dark with slag.
+    Cut,
 }
 
 /// Rebar bits per cell.
 pub const VBAR: u8 = 1;
 pub const HBAR: u8 = 2;
+
+/// Exposed rebar's radius, m (a 20 mm bar).
+const REBAR_RADIUS: f32 = 0.01;
+/// How far exposed rebar bows out of a hole: `REBAR_BEND · d²` m at `d` m from the concrete
+/// holding it.
+const REBAR_BEND: f32 = 1.2;
+/// Cells from the concrete beyond which exposed rebar bends no further.
+const REBAR_BEND_CELLS: usize = 8;
+
+/// A thermite cut's edges against the material's broken face: blackened by the burn, with a
+/// warm tint of slag.
+const SLAG_SHADE: f32 = 0.22;
+const SLAG_TINT: [f32; 3] = [1.0, 0.92, 0.84];
+/// How far a thermite cut's line wanders, in cells (a blast break wanders 0.75).
+const SLAG_WANDER: f32 = 0.25;
 
 /// The damage grid of a wall (or of a chunk that broke off one).
 #[derive(Debug, Clone, Default)]
@@ -848,6 +865,7 @@ impl WallState {
                     continue;
                 }
                 g.rebar[idx] = 0;
+                g.kind[idx] = CellKind::Cut;
                 out.touch(i, j);
                 if g.solid[idx] {
                     out.volume += g.remaining(idx) * area;
@@ -1163,6 +1181,7 @@ pub fn mesh_cells(
             let mut any_solid = false;
             let mut damaged = false;
             let mut stud = false;
+            let mut burned = false;
             for (di, dj) in [(0usize, 0usize), (1, 0), (0, 1), (1, 1)] {
                 if vi < di || vj < dj {
                     continue;
@@ -1180,7 +1199,7 @@ pub fn mesh_cells(
                     if grid.front[c] > 1e-3 || grid.back[c] > 1e-3 {
                         damaged = true;
                     }
-                } else if grid.kind[c] != CellKind::Opening {
+                } else if !matches!(grid.kind[c], CellKind::Opening | CellKind::Cut) {
                     damaged = true;
                     f += grid.front[c].min(t);
                     b += grid.back[c].min(t);
@@ -1188,6 +1207,7 @@ pub fn mesh_cells(
                 sc[0] += grid.scorch[c][0];
                 sc[1] += grid.scorch[c][1];
                 stud |= grid.kind[c] == CellKind::Stud;
+                burned |= grid.kind[c] == CellKind::Cut;
             }
             if !any_solid {
                 continue;
@@ -1209,6 +1229,11 @@ pub fn mesh_cells(
                 let jx = hash3(gx, gy, 1, look.seed) - 0.5;
                 let jy = hash3(gx, gy, 2, look.seed) - 0.5;
                 xy += Vec2::new(jx * grid.cell.x, jy * grid.cell.y) * 0.75;
+            } else if burned && !(look.straight_border && on_border) {
+                // A burned cut wanders a little along its line.
+                let jx = hash3(gx, gy, 1, look.seed) - 0.5;
+                let jy = hash3(gx, gy, 2, look.seed) - 0.5;
+                xy += Vec2::new(jx * grid.cell.x, jy * grid.cell.y) * SLAG_WANDER;
             }
             verts[(vj - j0) * vw + (vi - i0)] = Some(GridVertex {
                 xy,
@@ -1319,9 +1344,14 @@ pub fn mesh_cells(
                 let (Some(va), Some(vb)) = (vert(a.0, a.1), vert(b.0, b.1)) else {
                     continue;
                 };
-                let built = neighbor.is_some_and(|k| grid.kind[k] == CellKind::Opening);
-                let broken = (neighbor.is_some() && !built) || !look.straight_border;
-                let color = if broken {
+                let kind = neighbor.map(|k| grid.kind[k]);
+                let built = kind == Some(CellKind::Opening);
+                let burned = kind == Some(CellKind::Cut);
+                let broken = (neighbor.is_some() && !built && !burned) || !look.straight_border;
+                let color = if burned {
+                    let c = scale(interior_of(stud), SLAG_SHADE);
+                    std::array::from_fn(|k| c[k] * SLAG_TINT[k])
+                } else if broken {
                     scale(interior_of(stud), 0.86)
                 } else {
                     scale(look.exterior, 0.8)
@@ -1388,8 +1418,50 @@ pub fn mesh_cells(
         }
     }
 
-    // Exposed rebar.
-    let radius = 0.008;
+    // Exposed rebar, bowed out of the hole the way the blast went: the further a bar runs
+    // from the concrete holding it, the further it bends.
+    let radius = REBAR_RADIUS;
+    let reach = REBAR_BEND_CELLS;
+    let (ri0, rj0) = (i0.saturating_sub(reach), j0.saturating_sub(reach));
+    let (ri1, rj1) = ((i1 + reach).min(nx), (j1 + reach).min(ny));
+    let rw = ri1 - ri0;
+    // Cells (4-neighbor steps) from each open cell to the nearest solid one.
+    let mut steps = vec![u32::MAX; rw * (rj1 - rj0)];
+    let mut queue = std::collections::VecDeque::new();
+    for j in rj0..rj1 {
+        for i in ri0..ri1 {
+            if grid.solid[grid.idx(i, j)] {
+                steps[(j - rj0) * rw + (i - ri0)] = 0;
+                queue.push_back((i, j));
+            }
+        }
+    }
+    while let Some((i, j)) = queue.pop_front() {
+        let d = steps[(j - rj0) * rw + (i - ri0)];
+        for (di, dj) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+            let (ni, nj) = (i as i64 + di, j as i64 + dj);
+            if ni < ri0 as i64 || nj < rj0 as i64 || ni >= ri1 as i64 || nj >= rj1 as i64 {
+                continue;
+            }
+            let slot = (nj as usize - rj0) * rw + (ni as usize - ri0);
+            if steps[slot] == u32::MAX {
+                steps[slot] = d + 1;
+                queue.push_back((ni as usize, nj as usize));
+            }
+        }
+    }
+    let step_at = |i: usize, j: usize| -> f32 {
+        if i < ri0 || j < rj0 || i >= ri1 || j >= rj1 {
+            return 0.0;
+        }
+        steps[(j - rj0) * rw + (i - ri0)].min(reach as u32) as f32
+    };
+    let cell = grid.cell.min_element();
+    // Bend at the boundary between cells `a` and `b`, toward `side`.
+    let bend = |a: (usize, usize), b: (usize, usize), side: f32| {
+        let along = ((step_at(a.0, a.1) + step_at(b.0, b.1)) * 0.5 - 0.5).max(0.0) * cell;
+        side * REBAR_BEND * along * along
+    };
     for j in j0..j1 {
         for i in i0..i1 {
             let c = grid.idx(i, j);
@@ -1400,23 +1472,41 @@ pub fn mesh_cells(
             let x0 = grid.origin.x + i as f32 * grid.cell.x;
             let y0 = grid.origin.y + j as f32 * grid.cell.y;
             let wob = |a: i64, b: i64, s: u64| (hash3(a, b, s as i64, look.seed) - 0.5) * 0.012;
+            // Away from the scorched face: the blast came from that side.
+            let side = if grid.scorch[c][0] >= grid.scorch[c][1] {
+                -1.0
+            } else {
+                1.0
+            };
             if grid.rebar[c] & VBAR != 0 {
                 let x = x0 + grid.cell.x * 0.5;
-                let a = Vec3::new(x + wob(gx, gy, 21), y0, wob(gx, gy, 22));
+                let below = (i, j.saturating_sub(1));
+                let above = (i, (j + 1).min(ny - 1));
+                let a = Vec3::new(
+                    x + wob(gx, gy, 21),
+                    y0,
+                    wob(gx, gy, 22) + bend((i, j), below, side),
+                );
                 let b = Vec3::new(
                     x + wob(gx, gy + 1, 21),
                     y0 + grid.cell.y,
-                    wob(gx, gy + 1, 22),
+                    wob(gx, gy + 1, 22) + bend((i, j), above, side),
                 );
                 mb.rod(a, b, radius, look.rebar);
             }
             if grid.rebar[c] & HBAR != 0 {
                 let y = y0 + grid.cell.y * 0.5;
-                let a = Vec3::new(x0, y + wob(gx, gy, 23), 0.012 + wob(gx, gy, 24));
+                let left = (i.saturating_sub(1), j);
+                let right = ((i + 1).min(nx - 1), j);
+                let a = Vec3::new(
+                    x0,
+                    y + wob(gx, gy, 23),
+                    0.012 + wob(gx, gy, 24) + bend((i, j), left, side),
+                );
                 let b = Vec3::new(
                     x0 + grid.cell.x,
                     y + wob(gx + 1, gy, 23),
-                    0.012 + wob(gx + 1, gy, 24),
+                    0.012 + wob(gx + 1, gy, 24) + bend((i, j), right, side),
                 );
                 mb.rod(a, b, radius, look.rebar);
             }
@@ -1544,6 +1634,67 @@ mod tests {
         assert!(!cut.lost.is_empty());
         let c = s.grid.cell_at(Vec2::new(0.0, 1.5)).unwrap();
         assert_eq!(s.grid.rebar[c], 0, "thermite cuts the rebar");
+    }
+
+    #[test]
+    fn exposed_rebar_bows_away_from_the_blast() {
+        let wall = DestructibleWall::reinforced(3.0, 3.0);
+        let mut s = state(&wall);
+        let p = props(DestructibleMaterial::ReinforcedConcrete);
+        s.blast(&p, Vec3::new(0.0, 1.5, 0.15), 4.0e6, 2.5e6);
+        let look = WallLook::new(&wall, &DestructionMaterials::default());
+        let m = mesh_cells(&s.grid, &look, (0, 0, s.grid.nx, s.grid.ny), Vec3::ZERO);
+        let rebar = [look.rebar[0], look.rebar[1], look.rebar[2], 1.0];
+        let z: Vec<f32> = m
+            .vertices
+            .iter()
+            .filter(|v| v.color == rebar)
+            .map(|v| v.position[2])
+            .collect();
+        assert!(!z.is_empty(), "the blast exposes rebar");
+        let (lo, hi) = z
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), &z| (lo.min(z), hi.max(z)));
+        assert!(lo < -0.035, "bars bow out of the back of the hole ({lo})");
+        assert!(hi < 0.05, "no bar bends toward the charge ({hi})");
+    }
+
+    #[test]
+    fn a_thermite_cut_leaves_straight_dark_edges() {
+        let wall = DestructibleWall::reinforced(3.0, 3.0);
+        let mut s = state(&wall);
+        s.cut_rect(Vec2::new(-0.6, 0.0), Vec2::new(0.6, 2.0));
+        let c = s.grid.cell_at(Vec2::new(0.0, 1.0)).unwrap();
+        assert_eq!(s.grid.kind[c], CellKind::Cut);
+        let look = WallLook::new(&wall, &DestructionMaterials::default());
+        let g = &s.grid;
+        let mesh = mesh_cells(g, &look, (0, 0, g.nx, g.ny), Vec3::ZERO);
+        // The cut's jambs (side faces next to the cut): straight, off their cell line by no
+        // more than a quarter cell, where a blast break wanders three quarters.
+        let jamb: Vec<_> = mesh
+            .vertices
+            .iter()
+            .filter(|v| {
+                let (x, y) = (v.position[0], v.position[1]);
+                v.normal[0].abs() > 0.9 && (0.3..1.7).contains(&y) && (x.abs() - 0.6).abs() < 0.3
+            })
+            .collect();
+        assert!(!jamb.is_empty());
+        for v in &jamb {
+            let k = (v.position[0] - g.origin.x) / g.cell.x;
+            assert!(
+                (k - k.round()).abs() <= 0.26,
+                "jamb vertex {:?} off its line",
+                v.position
+            );
+        }
+        // And it is darker than a blast break of the same concrete.
+        let dark = jamb.iter().map(|v| v.color[0]).fold(f32::MAX, f32::min);
+        assert!(
+            dark < look.interior[0] * 0.5,
+            "jamb {dark} vs interior {}",
+            look.interior[0]
+        );
     }
 
     #[test]

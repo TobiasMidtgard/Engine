@@ -1458,11 +1458,11 @@ fn draw_system(
         let look = pl.look();
         let halo = if look.atmosphere[3] > 0.0 { 0.08 } else { 0.0 };
         if pl.rings {
-            ring_half(ctx, q, pr, true);
+            ring_half(ctx, q, pr, true, az);
         }
         ctx.planet(q, pr, look, t * 0.05 + pl.seed, 0.3, az, el, halo);
         if pl.rings {
-            ring_half(ctx, q, pr, false);
+            ring_half(ctx, q, pr, false, az);
         }
         // Moons as tiny dots.
         for m in 0..pl.moons.min(4) {
@@ -1530,23 +1530,62 @@ fn draw_system(
 }
 
 /// Half of a planet's ring system: the far half (drawn before the planet) or the near half.
-fn ring_half(ctx: &mut DrawCtx, c: Vec2, pr: f32, back: bool) {
+/// Ringlets of varying density and tint (a faint inner ring, a bright dense middle, a dark
+/// main gap, an outer ring with a narrow gap and a thin edge ringlet), with the planet's
+/// shadow cast across them away from the sun (`sun_az` as given to [`DrawCtx::planet`]).
+pub(crate) fn ring_half(ctx: &mut DrawCtx, c: Vec2, pr: f32, back: bool, sun_az: f32) {
+    // Ring arcs: 0 = up (the far side), clockwise.
     let (start, sweep) = if back { (PI * 1.5, PI) } else { (PI * 0.5, PI) };
-    for (k, a, w) in [
-        (1.55f32, 0.55f32, 0.18f32),
-        (1.85, 0.4, 0.22),
-        (2.15, 0.25, 0.12),
-    ] {
-        ctx.ring(
+    // In the ring plane a point at arc angle a sits at (sin a, cos a) (x right, depth away);
+    // light travels away from the sun, so the shadow points the other way.
+    let shadow_at = (-sun_az.sin()).atan2(sun_az.cos());
+    let (inner, outer) = (1.32f32, 2.32f32);
+    const N: usize = 44;
+    let step = (outer - inner) / N as f32;
+    for i in 0..N {
+        let x = (i as f32 + 0.5) / N as f32;
+        let k = inner + step * (i as f32 + 0.5);
+        let density = ring_density(x) * (0.78 + 0.22 * ring_hash(i));
+        if density < 0.02 {
+            continue;
+        }
+        let tint = if x < 0.16 {
+            Color::hex(0x8c7c68).lerp(Color::hex(0xcdb894), x / 0.16)
+        } else if x < 0.52 {
+            Color::hex(0xcdb894).lerp(Color::hex(0xeee2c8), (x - 0.16) / 0.36)
+        } else {
+            Color::hex(0xd6ccb8).lerp(Color::hex(0xa8a49c), (x - 0.52) / 0.48)
+        };
+        let radii = Vec2::new(pr * k, pr * k * 0.3);
+        let width = pr * step * 1.15;
+        ctx.ring_shadowed(
             c,
-            Vec2::new(pr * k, pr * k * 0.3),
-            pr * w,
-            Color::hex(0xe0cfae).with_alpha(a),
+            radii,
+            width,
+            tint.with_alpha(density),
             start,
             sweep,
-            0.0,
+            pr,
+            shadow_at,
+            0.86,
         );
     }
+}
+
+/// How much ring material there is at `x` (0 inner edge .. 1 outer edge).
+fn ring_density(x: f32) -> f32 {
+    let band = |a: f32, b: f32| ((x - a) * 60.0).clamp(0.0, 1.0) * ((b - x) * 60.0).clamp(0.0, 1.0);
+    let c_ring = band(0.0, 0.16) * (0.16 + 0.10 * (x * 70.0).sin().abs());
+    let b_ring = band(0.16, 0.5) * (0.62 + 0.25 * ((x - 0.16) / 0.34) + 0.12 * (x * 90.0).sin());
+    let a_ring = band(0.56, 0.9) * (0.48 + 0.08 * (x * 55.0).sin()) * (1.0 - band(0.81, 0.83));
+    let f_ring = band(0.95, 0.975) * 0.55;
+    (c_ring + b_ring + a_ring + f_ring).clamp(0.0, 0.95)
+}
+
+fn ring_hash(i: usize) -> f32 {
+    let h = (i as u32).wrapping_mul(0x9E37_79B9) ^ 0x5bd1_e995;
+    let h = (h ^ (h >> 15)).wrapping_mul(0x2c1b_3c6d);
+    ((h ^ (h >> 12)) & 0xffff) as f32 / 65535.0
 }
 
 fn draw_globe(
@@ -1574,7 +1613,7 @@ fn draw_globe(
     let halo = if look.atmosphere[3] > 0.0 { 0.07 } else { 0.0 };
     let (az, el) = (-0.75, 0.3);
     if pl.rings {
-        ring_half(ctx, c, rad, true);
+        ring_half(ctx, c, rad, true, az);
     }
     // Sci-fi frame: a thin ring with ticks around the globe.
     ctx.ring(
@@ -1597,7 +1636,7 @@ fn draw_globe(
     );
     ctx.planet(c, rad, look, yaw, pitch, az, el, halo);
     if pl.rings {
-        ring_half(ctx, c, rad, false);
+        ring_half(ctx, c, rad, false, az);
     }
     // Places on the visible side.
     let project = |lon: f64, lat: f64| {
@@ -3075,6 +3114,11 @@ pub fn register_api(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rings_have_a_dark_gap_between_two_bright_rings() {
+        assert!(ring_density(0.53) < 0.05 && ring_density(0.4) > 0.5 && ring_density(0.7) > 0.3);
+    }
 
     #[test]
     fn great_circle_matches_known_values() {

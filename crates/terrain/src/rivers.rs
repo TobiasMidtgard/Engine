@@ -94,6 +94,12 @@ struct Segment {
     /// between the ends (a meander), meters.
     side: DVec3,
     bow: f64,
+    /// Meanders on top: the channel swings `meander` meters to either side (signed), through
+    /// `turns` half-integer waves between the ends, so it crosses the ends' points (where the
+    /// next segments carry on) heading the same way as they do.
+    meander: f64,
+    turns: f64,
+    skew: f64,
 }
 
 /// A cell of a lake: the basin it lies in is filled to `level` (meters above sea level).
@@ -257,10 +263,27 @@ impl Rivers {
                 let off = q - (s.a + ab * t);
                 let across = off.dot(s.side);
                 let rest = (off.length_squared() - across * across).max(0.0);
-                let d = ((across - s.bow * (PI * t).sin()).powi(2) + rest).sqrt();
-                if d >= s.reach {
+                let bowed = across - s.bow * (PI * t).sin();
+                // The valley follows the segment; the channel winds about in it.
+                let valley_d = (bowed * bowed + rest).sqrt();
+                if valley_d >= s.reach {
                     continue;
                 }
+                let len = ab.length();
+                let wavelength = len / s.turns.max(0.5);
+                let meander =
+                    s.meander * (1.0 - smooth(wavelength * 0.1, wavelength * 0.35, finest));
+                // Leaning bends: real meanders are rarely symmetric.
+                let even = 2.0 * PI * s.turns * t;
+                let swing = even + s.skew * even.sin();
+                // Across the channel rather than across the segment: it runs slanted where it
+                // swings.
+                let heading = meander * 2.0 * PI * s.turns / len.max(1.0)
+                    * (1.0 + s.skew * even.cos())
+                    * swing.cos();
+                let d = ((bowed - meander * swing.sin()).powi(2) / (1.0 + heading * heading)
+                    + rest)
+                    .sqrt();
                 let half = lerp(s.half[0], s.half[1], t) * weight;
                 if half < 0.05 {
                     continue;
@@ -279,8 +302,8 @@ impl Rivers {
                 let wall = 0.1 + 0.45 * smooth(50.0, 1_200.0, h - level);
                 let profile = level - depth
                     + (depth + bank_h) * smooth(wide * 0.8, wide + bank_w, d)
-                    + wall * (d - plain).max(0.0);
-                let fade = 1.0 - smooth(s.reach * 0.55, s.reach, d);
+                    + wall * (valley_d - plain - meander.abs()).max(0.0);
+                let fade = 1.0 - smooth(s.reach * 0.55, s.reach, valley_d);
                 out.carve = out.carve.max((h - profile).max(0.0) * fade * weight);
                 out.water = out
                     .water
@@ -673,6 +696,8 @@ fn solve(
 
     // Segments from each river cell to the cell it drains into; at the coast, on out to sea.
     let mut segments = Vec::new();
+    // Which way each river cell's meanders swing as they leave it upstream (1 or -1).
+    let mut heading = vec![1.0f64; n];
     for &k in &order {
         if !river(k) || dry[k as usize] || lake[k as usize] {
             continue;
@@ -695,6 +720,9 @@ fn solve(
                 reach: 0.0,
                 side: DVec3::ZERO,
                 bow: 0.0,
+                meander: 0.0,
+                turns: 0.5,
+                skew: 0.0,
             }
         } else if river(p) && !dry[p as usize] {
             // (Into a lake too: the river ends one cell in.)
@@ -723,13 +751,40 @@ fn solve(
                 reach: 0.0,
                 side: DVec3::ZERO,
                 bow: swing * len * amount * (1.0 - smooth(0.004, 0.04, slope)),
+                meander: 0.0,
+                turns: 0.5,
+                skew: 0.0,
             }
         } else {
             continue;
         };
         let widest = seg.half[0].max(seg.half[1]);
+        // Meanders of the river's own size (about ten channel widths from bend to bend, swinging
+        // up to three widths to either side: Leopold and Wolman 1960) on flat ground; down
+        // steep slopes the river runs straight. Each segment holds a whole number of half
+        // waves, turned so it leaves its upstream end heading the way the segment above came
+        // in.
+        let len = (seg.b - seg.a).length();
+        let slope = (seg.level[0] - seg.level[1]).max(0.0) / len.max(1.0);
+        let rnd = |salt| noise::cell_random(k as i64, 2, 0, shape.seed, salt);
+        let width = seg.half[0] + seg.half[1];
+        let wavelength = 10.0 * width * (0.8 + 0.4 * rnd(0x54));
+        let turns = ((2.0 * len / wavelength).round() * 0.5).max(0.5);
+        let meander = (3.0 * width * (0.6 + 0.6 * rnd(0x55)) * (1.0 - smooth(0.01, 0.06, slope)))
+            .min(0.3 * len / turns);
+        let below = if p != NONE { heading[p as usize] } else { 1.0 };
+        // (Half-integer turns end heading the other way from where they start.)
+        let sign = if (turns * 2.0) as u64 % 2 == 1 {
+            -below
+        } else {
+            below
+        };
+        heading[k] = sign;
         segments.push(Segment {
-            reach: widest * 4.0 + 30.0 + style.valley_m,
+            reach: widest * 4.0 + 30.0 + style.valley_m + meander,
+            meander: meander * sign,
+            turns,
+            skew: 0.7 * (rnd(0x56) - 0.5),
             side: (seg.a + seg.b)
                 .normalize()
                 .cross(seg.b - seg.a)

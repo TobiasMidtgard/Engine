@@ -477,6 +477,18 @@ pub struct NpcBrain {
     /// Getting up from kneeling by a mate (done, or broken off), it stays where it is until
     /// this time, taking its weapon up again (NPC clock; see [`NpcBrain::REVIVE_STAND_SECS`]).
     pub revive_rise_until: f64,
+    /// Flanking with its squad (role `"flank"`), it bounds from cover to cover: `bound` is its
+    /// turn to move (the squad gives it; a mate holding a cover covers it meanwhile), and
+    /// `holding` that it has reached a cover on the way and keeps to it until `hold_until`
+    /// (NPC clock) and its next turn, covering the mate that moves.
+    pub bound: bool,
+    pub holding: bool,
+    pub hold_until: f64,
+    /// The rest of its way round to the flank, kept out of the enemy's sight where it can be,
+    /// and the flank spot it ends at; `in_position` once it is there.
+    pub flank_route: Vec<DVec3>,
+    pub flank_goal: Option<DVec3>,
+    pub in_position: bool,
 }
 
 impl NpcBrain {
@@ -576,6 +588,10 @@ pub struct CombatStats {
     pub revives: u32,
     /// Revives it broke off (hit, staggered, or the spot got too hot).
     pub revives_aborted: u32,
+    /// Attacks and shots it started into an enemy's opening (a recovery or stumble, a reload,
+    /// stamina spent) as soon as it saw it.
+    #[serde(default)]
+    pub punishes: u32,
 }
 
 /// Weapon and defense state.
@@ -641,6 +657,11 @@ pub struct NpcSettings {
     pub ally_revive_health: f32,
     /// Squad mates farther than this from a downed NPC leave it be, meters.
     pub ally_revive_range: f32,
+    /// Fighters ask a character module for their looks (an `AppearanceRequest`) and, while it
+    /// draws them, hide their own bodies. Off until the character contract carries what fighters
+    /// need to be drawn by it: their body size (so held weapons meet the hands), a grip, armour
+    /// and team colours.
+    pub character_looks: bool,
 }
 
 impl Default for NpcSettings {
@@ -655,6 +676,7 @@ impl Default for NpcSettings {
             ally_revive_secs: 2.0,
             ally_revive_health: 0.4,
             ally_revive_range: 20.0,
+            character_looks: false,
         }
     }
 }

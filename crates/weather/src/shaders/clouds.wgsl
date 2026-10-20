@@ -14,7 +14,8 @@ struct Clouds {
     params: vec4<f32>,      // visibility (fades out high above the planet), detail period (m), env steps, night (0 day .. 1 dark night)
     detail: vec4<f32>,      // detail noise origin xyz (wrapped), 1 = draw rain shafts
     veil: vec4<f32>,        // falling rain or snow veils from x (m), fully from y (m); z = snow share 0..1
-    shadow: vec4<f32>,      // cloud shadow map: the shading light's dimming at the player, samples toward the light
+    shadow: vec4<f32>,      // cloud shadow map: the shading light's dimming at the player, samples toward the light;
+                            // share of the ambient fill left (the rest comes with the moon), moonlight's glow (0..1)
     far: vec4<f32>,         // far cloud layer drawn by another module: hand over from x to y m of ground distance, z = its weight
 };
 
@@ -93,10 +94,15 @@ fn cloud_density(p: vec3<f32>, h: f32, w: vec4<f32>, with_detail: bool) -> f32 {
     let np = (p + clouds.noise.xyz) / clouds.noise.w;
     // Big lumps break up the map's smooth outlines (towers, cloud streets, gaps).
     let lump = textureSampleLevel(shape_noise, linear_repeat, np * 0.27 + vec3(0.37, 0.11, 0.73), 0.0).g;
+    // Fair-weather heaps come in families: a few big ones where neighbors have merged, small
+    // ones around them, open sky between the groups. Without it every heap was the same
+    // round puff, spread evenly like popcorn.
+    let family = textureSampleLevel(shape_noise, linear_repeat, np * 0.55 + vec3(0.71, 0.29, 0.13), 0.0).g;
+    let heaped = smoothstep(0.3, 0.5, w.g) * (1.0 - smoothstep(0.6, 0.8, w.g)) * (1.0 - smoothstep(0.6, 0.85, w.r));
     let tower = smoothstep(0.55, 0.9, w.g);
     // Towers narrow as they climb, then spread into an anvil under the tropopause.
     let anvil = smoothstep(0.75, 1.0, w.g) * smoothstep(0.72, 0.92, h01);
-    var cov = w.r * (0.72 + 0.56 * lump) - tower * 0.3 * smoothstep(0.1, 0.7, h01) + anvil * 0.55 * smoothstep(0.4, 0.8, w.r);
+    var cov = w.r * (0.72 + 0.56 * lump) * mix(1.0, 0.75 + 0.65 * smoothstep(0.3, 0.75, family), heaped) - tower * 0.3 * smoothstep(0.1, 0.7, h01) + anvil * 0.55 * smoothstep(0.4, 0.8, w.r);
     cov = saturate(cov);
     if (cov <= 0.002) { return 0.0; }
     let s = textureSampleLevel(shape_noise, linear_repeat, np, 0.0);
@@ -229,7 +235,7 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
     let ground_tint = mix(vec3(dot(albedo, vec3<f32>(0.2126, 0.7152, 0.0722))), albedo, 0.4);
     let ground_sun = ground_tint * key * saturate(ldir.y) * INV_PI;
     let ground_sky = ground_tint * sky * 0.4;
-    let fill = frame.ambient.rgb;
+    let fill = frame.ambient.rgb * clouds.shadow.z;
 
     // Big strides through empty air; on touching cloud, step back and walk it finely.
     let len = t1 - t0;
@@ -311,7 +317,15 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
             // diffuses down through it like through frosted glass, white and without direction:
             // two-stream transmittance 1 / (1 + 0.75 (1 - g) τ), g ≈ 0.85. Without it a storm
             // deck's base was lit only by the blue sky and turned navy.
-            light = max(light, saturate(ldir.y + 0.05) * INV_PI / (1.0 + 0.11 * od));
+            // Under the moon the light keeps some of its forward bias through the first few
+            // optical depths: seen from below, a deck of moderate depth glows broadly where the
+            // moon is behind it. Without it a moonlit deck was one flat grey and the moon behind
+            // it left no trace. Only a gain, as from the lit side the same light comes back
+            // diffusely reflected (dimming it made sunlit heaps grey); and not by day, when
+            // the octaves above and the bright sky around already give the sun its glow, and the
+            // extra light flattened the heaps' shading and filled in their shadows.
+            let aureole = 1.0 + clouds.shadow.w * max(4.0 * PI * hg(cos_t, 0.5 * exp(-0.15 * od)) - 1.0, 0.0);
+            light = max(light, saturate(ldir.y + 0.05) * INV_PI / (1.0 + 0.11 * od) * aureole);
             // Dark edges facing the light ("powder"): fewer photons scattered back out.
             let powder = 1.0 - 0.45 * exp(-sigma * 150.0);
             let h01 = saturate((h - base) / type_thickness(w.g));

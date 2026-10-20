@@ -441,6 +441,15 @@ pub struct Atmosphere {
     /// Scales the density of the whole air, every coefficient above (1 = as given, 2 = twice as
     /// dense, 0 = no air): a season of higher pressure, a thicker variant of the same air.
     pub density_scale: f32,
+    /// How much of the haze's or dust's forward peak passes as unscattered light (0..1, the
+    /// delta-Eddington approximation). Grains a little larger than the wavelength (Mars' dust)
+    /// scatter a good part of their light into a diffraction peak a few degrees wide, which
+    /// barely turns it: the ground seen through them keeps its image and sunlight stays sunlight.
+    /// One Henyey-Greenstein lobe can't hold that peak, so at 1 a share g² of the scattering
+    /// (per channel) counts as passing straight on and the rest scatters with the lobe that is
+    /// left, of anisotropy g / (1 + g); the glow around the sun keeps the full lobe. 0 (Earth,
+    /// the default) counts all of it as scattered.
+    pub mie_forward_peak: f32,
 }
 
 impl Default for Atmosphere {
@@ -460,6 +469,7 @@ impl Default for Atmosphere {
             ozone_absorption: [0.650e-6, 1.881e-6, 0.085e-6],
             mie_g_offset: [0.0; 3],
             density_scale: 1.0,
+            mie_forward_peak: 0.0,
         }
     }
 }
@@ -469,12 +479,17 @@ impl Default for Atmosphere {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct AirOptics {
     pub rayleigh: Vec3,
+    /// Mie scattering, less the forward peak that passes as unscattered
+    /// ([`Atmosphere::mie_forward_peak`]).
     pub mie_scattering: Vec3,
-    /// Mie scattering plus absorption.
+    /// Mie scattering plus absorption, less the forward peak.
     pub mie_extinction: Vec3,
     pub ozone: Vec3,
-    /// Mie anisotropy per channel.
+    /// Mie anisotropy per channel (of the whole lobe, the forward peak included).
     pub mie_g: Vec3,
+    /// [`Atmosphere::mie_forward_peak`]: the share g² of the scattering in the forward peak is
+    /// this times g² per channel.
+    pub mie_forward_peak: f32,
 }
 
 impl Atmosphere {
@@ -520,6 +535,9 @@ impl Atmosphere {
     ///   0.4 green, 0.67 blue), which Schneegans et al. find gives a very wide blue halo;
     ///   Collienne et al. 2013, "Physically Based Rendering of the Martian Atmosphere", used a
     ///   single 0.76.
+    /// - The forward peak passes as unscattered light (`mie_forward_peak` 1, delta-Eddington):
+    ///   that diffraction peak is a few degrees wide for these grains, so the ground seen from
+    ///   orbit keeps its detail through the haze, as it does in orbiters' images.
     /// - Ground: rusty regolith, linear albedo 0.3 red to 0.08 blue (Mars' Bond albedo is 0.25).
     pub fn mars() -> Self {
         let radius = 3_389_500.0;
@@ -538,6 +556,7 @@ impl Atmosphere {
             ozone_absorption: [0.0; 3],
             mie_g_offset: [-0.06, 0.0, 0.1],
             density_scale: 1.0,
+            mie_forward_peak: 1.0,
         }
     }
 
@@ -545,19 +564,26 @@ impl Atmosphere {
     pub(crate) fn optics(&self) -> AirOptics {
         let k = self.density_scale.max(0.0);
         let scaled = |c: [f32; 3]| Vec3::from(c) * k;
-        let g = Vec3::splat(self.mie_g) + Vec3::from(self.mie_g_offset);
+        let g = (Vec3::splat(self.mie_g) + Vec3::from(self.mie_g_offset))
+            .clamp(Vec3::splat(-0.999), Vec3::splat(0.999));
+        let forward_peak = self.mie_forward_peak.clamp(0.0, 1.0);
+        let peak = forward_peak * g * g;
+        let scattering = scaled(self.mie_scattering);
         AirOptics {
             rayleigh: scaled(self.rayleigh_scattering),
-            mie_scattering: scaled(self.mie_scattering),
-            mie_extinction: (Vec3::from(self.mie_scattering) + Vec3::from(self.mie_absorption)) * k,
+            mie_scattering: scattering * (Vec3::ONE - peak),
+            mie_extinction: (Vec3::from(self.mie_scattering) + Vec3::from(self.mie_absorption)) * k
+                - scattering * peak,
             ozone: scaled(self.ozone_absorption),
-            mie_g: g.clamp(Vec3::splat(-0.999), Vec3::splat(0.999)),
+            mie_g: g,
+            mie_forward_peak: forward_peak,
         }
     }
 
     /// Fraction of sunlight (RGB) reaching camera-relative point `p` through the atmosphere,
     /// matching `sun_transmittance` in the shader library: through the gas (Rayleigh) and the
-    /// haze or dust (Mie scattering and absorption), times `density_scale`. It leaves out the
+    /// haze or dust (Mie scattering and absorption, less a forward peak that passes straight on,
+    /// [`Self::mie_forward_peak`]), times `density_scale`. It leaves out the
     /// thin ozone layer, as it always has (a few percent of Earth's noon sun).
     pub fn sun_transmittance(&self, p_rel: DVec3, center_rel: DVec3, sun_dir: Vec3) -> Vec3 {
         if !self.enabled || self.planet_radius <= 0.0 {
@@ -622,6 +648,7 @@ mod tests {
         assert_eq!(air.mie_extinction, Vec3::splat(4.40e-6));
         assert_eq!(air.ozone, Vec3::new(0.650e-6, 1.881e-6, 0.085e-6));
         assert_eq!(air.mie_g, Vec3::splat(0.8));
+        assert_eq!(air.mie_forward_peak, 0.0);
     }
 
     #[test]
@@ -629,12 +656,13 @@ mod tests {
         let (earth, mars) = (Atmosphere::earth(), Atmosphere::mars());
         let blue_over_red = |t: Vec3| t.z / t.x.max(1e-9);
 
-        // Overhead, Mars' dust (optical depth about 0.34) lets through less than Earth's air.
+        // Overhead, Mars' dust (optical depth about 0.34, of which its forward peak passes
+        // straight on: about 0.2 is left) lets through less than Earth's air.
         let earth_noon = sun_at_surface(&earth, 90.0);
         let mars_noon = sun_at_surface(&mars, 90.0);
         eprintln!("noon: Earth {earth_noon}, Mars {mars_noon}");
         assert!(
-            (0.65..0.8).contains(&mars_noon.y),
+            (0.75..0.87).contains(&mars_noon.y),
             "Mars' noon sun: {mars_noon}"
         );
         assert!(earth_noon.y > 0.85, "Earth's noon sun: {earth_noon}");
@@ -652,7 +680,7 @@ mod tests {
             "Mars' low sun is reddened: {mars_low}"
         );
         assert!(
-            mars_low.y < earth_low.y * 0.5,
+            mars_low.y < earth_low.y * 0.6,
             "Mars' dust doesn't dim the low sun: {mars_low} vs Earth's {earth_low}"
         );
 

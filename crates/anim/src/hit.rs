@@ -6,7 +6,9 @@
 //! each joint about the axis from it to the point crossed with the push, so a jab to the
 //! left shoulder twists it back, a blow to the face snaps the head away and one to the
 //! stomach folds the body over it. Bones nearer the point take more of it, an arm that was
-//! hit swings with the blow, and the hips are shoved along it. Each bone then settles on a
+//! hit swings with the blow, and a blow low on the body shoves the hips along it (one to
+//! the head barely moves them); the knees give and the trunk leans against the shove to
+//! keep the body over its planted feet. Each bone then settles on a
 //! critically damped spring, and the face winces (the `brace` curve the [`Face`] reads) for
 //! as long as it lasts. It runs before foot IK, so planted feet stay put.
 //!
@@ -24,8 +26,8 @@ use crate::ik::to_model;
 const BONES: [(&str, f32); 7] = [
     ("spine", 0.5),
     ("chest", 0.6),
-    ("neck", 0.5),
-    ("head", 0.8),
+    ("neck", 1.45),
+    ("head", 1.7),
     ("upper_arm_l", 1.2),
     ("upper_arm_r", 1.2),
     ("hips", 0.05),
@@ -84,7 +86,10 @@ impl HitReaction {
         // A critically damped spring kicked at rate v peaks at v / (e·ω).
         let omega = self.omega();
         let flat = push.with_y(0.0);
-        let shove = (flat.length() * self.shove_per_impulse).min(0.12);
+        // Blows near the hips move them; one to the head mostly moves the head.
+        let above = (point.y - pelvis.y - 0.1).max(0.0) / 0.4;
+        let low = (-above * above).exp();
+        let shove = (flat.length() * self.shove_per_impulse * low).min(0.12);
         self.shove.1 += flat.normalize_or_zero() * shove * std::f32::consts::E * omega;
         for ((&(_, take), (_, rate)), at) in BONES.iter().zip(&mut self.state).zip(bones) {
             let Some(at) = at else {
@@ -190,10 +195,24 @@ pub(crate) fn flinch_system(
         if wince < 1e-3 {
             continue;
         }
+        // Edit this frame's pose: model space is stale until refreshed (left alone, each
+        // frame's edit would build on the last one and the hips would slide away).
+        animator.refresh_model();
         let skeleton = animator.skeleton.clone();
         let mut edit = animator.edit();
+        let shove = reaction.shove.0;
         if let Some(hips) = skeleton.index_of("hips") {
-            edit.translate_model(hips, reaction.shove.0);
+            // The knees give a little as the hips are driven back.
+            edit.translate_model(hips, shove - Vec3::Y * 0.5 * shove.length());
+        }
+        // The trunk leans against the shove, so the body bends rather than tipping over
+        // its planted feet like a plank.
+        if let Some(spine) = skeleton.index_of("spine") {
+            let lean = Vec3::Y.cross(-shove.with_y(0.0));
+            if lean.length() > 1e-6 {
+                let angle = lean.length() / 0.45;
+                edit.rotate_model(spine, Quat::from_axis_angle(lean.normalize(), angle));
+            }
         }
         for ((name, _), (angle, _)) in BONES.iter().zip(&reaction.state) {
             let Some(bone) = skeleton.index_of(name) else {
@@ -261,7 +280,7 @@ mod tests {
             }
         }
         assert!(
-            (8.0..30.0).contains(&peak.to_degrees()),
+            (12.0..40.0).contains(&peak.to_degrees()),
             "peak {}°",
             peak.to_degrees()
         );

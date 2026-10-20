@@ -3,14 +3,18 @@
 //! land again, boars root about and run from a runner but turn and charge when cornered or
 //! wounded, a sow charges to defend her piglets, wolves pick a piglet over its elders, a pack
 //! singles out a wounded deer, flanks it and lies in wait for it and gives up a long chase,
-//! a herd's alarm spreads within a reaction time, and a deer zigzags from a wolf at its heels.
+//! a herd's alarm spreads within a reaction time, a deer zigzags from a wolf at its heels,
+//! birds burst up at a gunshot, deer and boar look up at one and move off (and bolt from one
+//! close by), an explosion sends everything running, and deer and boar keep a day's hours:
+//! grazing, bedded at midday and in the dark, out at dawn and dusk to drink at a pond or a
+//! stream.
 
 use std::f32::consts::{PI, TAU};
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_npc::wildlife::{
-    ESCAPE_GAP, PACK_CHASE_SECS, PACK_REST_SECS, SCENT_REACH, TEST_SECS, ZIGZAG_RANGE,
+    DayPart, ESCAPE_GAP, PACK_CHASE_SECS, PACK_REST_SECS, SCENT_REACH, TEST_SECS, ZIGZAG_RANGE,
 };
 use engine_npc::*;
 use engine_world::locomotion::{LocomotionMode, LocomotionState};
@@ -25,6 +29,12 @@ fn app() -> App {
             step_secs: 1.0 / 60.0,
         });
     app.add_plugins((WorldPlugin, NpcPlugin));
+    // A handful of animals: running each system in turn on the test's own thread is far
+    // quicker than handing them about a thread pool (the order is fixed either way:
+    // `tests/schedule_order.rs`).
+    for (_, schedule) in app.world.resource_mut::<Schedules>().iter_mut() {
+        schedule.set_executor(engine_core::ecs::schedule::SingleThreadedExecutor::new());
+    }
     app
 }
 
@@ -949,54 +959,68 @@ fn flanking(app: &mut App, deer: &[Entity], pack: &[Entity]) -> Flanking {
     f
 }
 
-/// Over eight draws of each pack size: every hunt is a real chase, with the ambusher (in a
-/// pack of four or more) lying in wait well beyond the quarry as the tester rushes, the
+/// Over twenty-four draws of each pack size: every hunt is a real chase, with the ambusher
+/// (in a pack of four or more) lying in wait well beyond the quarry as the tester rushes, the
 /// tester driving it from behind, and never a flanker level with it on its far side. Each
 /// pack size (four as well as three and five) keeps both flankers out on their own sides for
-/// 85 % of its flanking, and in at least five of the eight hunts both run abreast of the
-/// quarry for a second (unless the flanking was over within two) and hold their sides for
-/// three quarters of it. (A deer at full sprint
-/// outruns a wolf, so on a long straight bolt the flankers fall back: hence not every hunt.)
-#[test]
-fn flankers_run_out_on_the_quarrys_sides() {
-    for wolves in [3, 4, 5] {
-        let (mut phase, mut sides, mut good) = (0, 0, 0);
-        for k in 0..8 {
-            let mut app = app();
-            let (deer, pack) = seeded_hunt(&mut app, 4, wolves, k);
-            let f = flanking(&mut app, &deer, &pack);
-            eprintln!("{wolves} wolves, draw {k}: {f:?}");
-            let at = format!("{wolves} wolves, draw {k}");
-            assert!(f.chase >= 60, "{at}: a real chase ({} steps)", f.chase);
-            assert_eq!(f.ambusher.is_some(), wolves >= 4, "{at}: an ambusher");
-            if let Some((beyond, lying_in_wait)) = f.ambusher {
-                assert!(beyond > 12.0, "{at}: the ambusher {beyond:.1} m beyond");
-                assert!(lying_in_wait, "{at}: the ambusher lying in wait");
-            }
-            assert!(
-                f.tester_behind * 10 >= f.phase * 9,
-                "{at}: the tester drives from behind ({} of {})",
-                f.tester_behind,
-                f.phase
-            );
-            assert_eq!(
-                f.wrong_level, 0,
-                "{at}: a flanker level with the quarry on its far side"
-            );
-            phase += f.phase;
-            sides += f.sides;
-            let abreast = f.abreast >= 60 || f.phase < 120;
-            good += (abreast && f.sides * 4 >= f.phase * 3) as usize;
+/// 85 % of its flanking, and in at least five of every eight hunts (15 of the 24) both run
+/// abreast of the quarry for a second (unless the flanking was over within two) and hold
+/// their sides for three quarters of it. (A deer at full sprint outruns a wolf, so on a long
+/// straight bolt the flankers fall back: hence not every hunt.)
+/// (Each pack size is its own test, so they run side by side.)
+fn flankers_run_out_on_the_quarrys_sides(wolves: usize) {
+    const DRAWS: usize = 24;
+    let (mut phase, mut sides, mut good) = (0, 0, 0);
+    for k in 0..DRAWS as u64 {
+        let mut app = app();
+        let (deer, pack) = seeded_hunt(&mut app, 4, wolves, k);
+        let f = flanking(&mut app, &deer, &pack);
+        eprintln!("{wolves} wolves, draw {k}: {f:?}");
+        let at = format!("{wolves} wolves, draw {k}");
+        assert!(f.chase >= 60, "{at}: a real chase ({} steps)", f.chase);
+        assert_eq!(f.ambusher.is_some(), wolves >= 4, "{at}: an ambusher");
+        if let Some((beyond, lying_in_wait)) = f.ambusher {
+            assert!(beyond > 12.0, "{at}: the ambusher {beyond:.1} m beyond");
+            assert!(lying_in_wait, "{at}: the ambusher lying in wait");
         }
         assert!(
-            sides * 20 >= phase * 17,
-            "{wolves} wolves: both flankers on their sides for {sides} of {phase} steps"
+            f.tester_behind * 10 >= f.phase * 9,
+            "{at}: the tester drives from behind ({} of {})",
+            f.tester_behind,
+            f.phase
         );
-        assert!(
-            good >= 5,
-            "{wolves} wolves: both flankers abreast and on their sides in {good} of 8 hunts"
+        assert_eq!(
+            f.wrong_level, 0,
+            "{at}: a flanker level with the quarry on its far side"
         );
+        phase += f.phase;
+        sides += f.sides;
+        let abreast = f.abreast >= 60 || f.phase < 120;
+        good += (abreast && f.sides * 4 >= f.phase * 3) as usize;
     }
+    assert!(
+        sides * 20 >= phase * 17,
+        "{wolves} wolves: both flankers on their sides for {sides} of {phase} steps"
+    );
+    assert!(
+        good * 8 >= DRAWS * 5,
+        "{wolves} wolves: both flankers abreast and on their sides in {good} of {DRAWS} hunts"
+    );
+}
+
+#[test]
+fn a_pack_of_three_runs_out_on_the_quarrys_sides() {
+    flankers_run_out_on_the_quarrys_sides(3);
+}
+
+#[test]
+fn a_pack_of_four_runs_out_on_the_quarrys_sides() {
+    flankers_run_out_on_the_quarrys_sides(4);
+}
+
+#[test]
+fn a_pack_of_five_runs_out_on_the_quarrys_sides() {
+    flankers_run_out_on_the_quarrys_sides(5);
 }
 
 /// Bearing (rad, 0 = straight ahead) from `e`'s facing to `at`.
@@ -1455,4 +1479,498 @@ fn the_pack_breaks_off_from_a_fit_deer_that_outruns_it() {
             assert_eq!(state(&app, w), AnimalState::Rest, "{w:?} rests");
         }
     }
+}
+
+/// A gunshot from `at` (a carbine like the arena's: the bullet's trace and the bang), fired by
+/// `by` toward +X.
+fn gunshot(app: &mut App, at: DVec3, by: Option<Entity>) {
+    app.world.write_message(engine_world::ProjectileTrace {
+        from: at,
+        to: at + DVec3::new(60.0, 0.0, 0.0),
+        radius: 0.08,
+        speed: 900.0,
+        shooter: by,
+    });
+    app.world.write_message(engine_world::NoiseEvent {
+        position: at,
+        radius: 90.0,
+        source: by,
+    });
+}
+
+/// An explosion at `at`, like a barrel's: the blast (`WorldImpulse`) alone, no noise.
+fn blast(app: &mut App, at: DVec3, strength: f32, energy_j: f32) {
+    app.world.write_message(engine_world::WorldImpulse {
+        center: at,
+        radius: 8.0,
+        strength,
+        energy_j,
+        heat_c: 0.0,
+        source: None,
+    });
+}
+
+/// Birds burst up at a gunshot well off (and not at an arrow loosed from the same spot).
+#[test]
+fn birds_burst_up_at_a_gunshot() {
+    let mut app = app();
+    let flock = herd(&mut app, Species::Bird, DVec3::ZERO, 6, 5);
+    app.update_n(30);
+    // An arrow: no crack, nothing.
+    app.world.write_message(engine_world::ProjectileTrace {
+        from: DVec3::new(-70.0, 1.5, 0.0),
+        to: DVec3::new(-10.0, 1.5, 0.0),
+        radius: 0.02,
+        speed: 60.0,
+        shooter: None,
+    });
+    app.update_n(60);
+    assert!(
+        flock
+            .iter()
+            .all(|&b| state(&app, b) == AnimalState::Perched),
+        "an arrow doesn't flush them"
+    );
+    let shooter = app.world.spawn(Transform::default()).id();
+    gunshot(&mut app, DVec3::new(-70.0, 1.5, 0.0), Some(shooter));
+    app.update_n(30);
+    let up = flock
+        .iter()
+        .filter(|&&b| state(&app, b) == AnimalState::Flying)
+        .count();
+    assert_eq!(up, flock.len(), "a gunshot 70 m off flushes the flock");
+    app.update_n(60);
+    let high = flock.iter().filter(|&&b| pos(&app, b).y > 2.0).count();
+    assert!(high >= 5, "{high} are up in the air");
+}
+
+/// Deer and boar look up at a gunshot well off (at the shot), keep their heads, and then move
+/// off from it at a walk; a shot close by, they bolt.
+#[test]
+fn deer_and_boar_look_up_at_a_far_gunshot_then_move_off() {
+    let mut app = app();
+    let deer = herd(&mut app, Species::Deer, DVec3::ZERO, 4, 1);
+    let sounder: Vec<Entity> = (0..3)
+        .map(|k| {
+            let at = DVec3::new(f64::from(k) * 2.0, 0.0, 30.0);
+            boar(&mut app, at, 40, k == 0, false)
+        })
+        .collect();
+    let all: Vec<Entity> = deer.iter().chain(&sounder).copied().collect();
+    app.update_n(60);
+    // A shot 60 m to the west of them (in earshot, but well off).
+    let shot = DVec3::new(-60.0, 1.5, 15.0);
+    let start: Vec<f64> = all
+        .iter()
+        .map(|&a| flat(pos(&app, a) - shot).length() as f64)
+        .collect();
+    let shooter = app.world.spawn(Transform::from_translation(shot)).id();
+    gunshot(&mut app, shot, Some(shooter));
+    let mut looked = vec![false; all.len()];
+    for _ in 0..60 {
+        app.update();
+        for (k, &a) in all.iter().enumerate() {
+            let m = mind(&app, a);
+            assert_ne!(
+                m.state,
+                AnimalState::Flee,
+                "it doesn't bolt from a shot 60 m off"
+            );
+            looked[k] |= m.state == AnimalState::Alert
+                && m.threat_pos.is_some_and(|p| p.distance(shot) < 1.0);
+        }
+    }
+    assert!(
+        looked.iter().all(|&l| l),
+        "each looks up toward the shot within a second: {looked:?}"
+    );
+    // Then each moves off from it, at a walk, not a run.
+    let mut fastest = 0.0f32;
+    for _ in 0..60 * 15 {
+        app.update();
+        for &a in &all {
+            assert_ne!(state(&app, a), AnimalState::Flee, "it moves off, not bolts");
+            let v = app.world.get::<LocomotionState>(a).unwrap().velocity;
+            fastest = fastest.max(Vec3::new(v.x, 0.0, v.z).length());
+        }
+    }
+    for (k, &a) in all.iter().enumerate() {
+        let now = flat(pos(&app, a) - shot).length() as f64;
+        assert!(
+            now > start[k] + 15.0,
+            "{k}: it moved off from the shot ({:.1} m to {now:.1} m)",
+            start[k]
+        );
+    }
+    assert!(fastest < 4.0, "at a walk ({fastest:.1} m/s at most)");
+
+    // A shot 20 m off: they bolt.
+    let mut app = self::app();
+    let deer = herd(&mut app, Species::Deer, DVec3::ZERO, 3, 1);
+    let tusker = boar(&mut app, DVec3::new(0.0, 0.0, 8.0), 40, true, false);
+    app.update_n(60);
+    gunshot(&mut app, DVec3::new(-20.0, 1.5, 4.0), None);
+    app.update_n(30);
+    for &a in deer.iter().chain([&tusker]) {
+        assert_eq!(
+            state(&app, a),
+            AnimalState::Flee,
+            "a shot 20 m off: it bolts"
+        );
+    }
+}
+
+/// An explosion sends deer, boar and birds running, even 120 m off; a mere thump (a light
+/// impulse with no energy behind it) doesn't, and one beyond earshot doesn't either.
+#[test]
+fn an_explosion_sends_everything_running() {
+    let run = |strength: f32, energy_j: f32, off: f64| {
+        let mut app = app();
+        let deer = herd(&mut app, Species::Deer, DVec3::ZERO, 3, 1);
+        let tusker = boar(&mut app, DVec3::new(0.0, 0.0, 10.0), 40, true, false);
+        let flock = herd(&mut app, Species::Bird, DVec3::new(10.0, 0.0, 0.0), 4, 5);
+        app.update_n(60);
+        blast(&mut app, DVec3::new(-off, 0.5, 0.0), strength, energy_j);
+        app.update_n(30);
+        let ran = deer
+            .iter()
+            .chain([&tusker])
+            .filter(|&&a| state(&app, a) == AnimalState::Flee)
+            .count();
+        let flew = flock
+            .iter()
+            .filter(|&&b| state(&app, b) == AnimalState::Flying)
+            .count();
+        (ran, flew)
+    };
+    assert_eq!(
+        run(30.0, 250_000.0, 120.0),
+        (4, 4),
+        "a barrel going up 120 m off"
+    );
+    assert_eq!(run(6.0, 0.0, 30.0), (0, 0), "a thump 30 m off");
+    assert_eq!(
+        run(30.0, 250_000.0, 260.0),
+        (0, 0),
+        "a blast out of earshot"
+    );
+}
+
+/// A round pond: the ground drops away 0.8 m inside `radius` of `center` under water standing
+/// level with the grass around it.
+struct Pond {
+    center: DVec3,
+    radius: f64,
+}
+
+impl Pond {
+    fn inside(&self, p: DVec3) -> bool {
+        DVec3::new(p.x - self.center.x, 0.0, p.z - self.center.z).length() < self.radius
+    }
+
+    /// How far from the edge `p` is (m, positive out on the bank).
+    fn off_edge(&self, p: DVec3) -> f64 {
+        DVec3::new(p.x - self.center.x, 0.0, p.z - self.center.z).length() - self.radius
+    }
+}
+
+impl engine_world::GroundQuery for Pond {
+    fn sample(&self, p: DVec3) -> Option<engine_world::GroundSample> {
+        Some(engine_world::GroundSample {
+            height: if self.inside(p) { -0.8 } else { 0.0 },
+            normal: Vec3::Y,
+            surface: engine_world::SurfaceId(3),
+        })
+    }
+}
+
+impl engine_world::WaterQuery for Pond {
+    fn sample(&self, p: DVec3) -> Option<engine_world::WaterSample> {
+        self.inside(p).then_some(engine_world::WaterSample {
+            surface_height: 0.0,
+            depth: 0.8,
+            velocity: Vec3::ZERO,
+            normal: Vec3::Y,
+        })
+    }
+}
+
+fn pond(app: &mut App, center: DVec3, radius: f64) {
+    let pond = std::sync::Arc::new(Pond { center, radius });
+    app.world
+        .insert_resource(engine_world::Ground(pond.clone()));
+    app.world.insert_resource(engine_world::Water(pond));
+}
+
+/// Sets the world's clock to `hour`, the sun where it would be then (up from 6 to 18 h, at
+/// most 0.85 high at noon), as the day/night cycle writes them.
+fn set_clock(app: &mut App, hour: f32) {
+    let mut w = app.world.resource_mut::<engine_world::WeatherState>();
+    w.time_of_day_h = hour;
+    let up = ((hour - 6.0) / 12.0 * PI).sin() * 0.85;
+    w.sun_direction = Vec3::new(0.3, up, -(1.0 - up * up).max(0.0).sqrt()).normalize();
+}
+
+fn forward(app: &App, e: Entity) -> Vec3 {
+    let f = app.world.get::<Transform>(e).unwrap().rotation * Vec3::NEG_Z;
+    Vec3::new(f.x, 0.0, f.z).normalize()
+}
+
+#[test]
+fn the_day_turns_by_the_clock_and_the_sun() {
+    use engine_npc::wildlife::day_part;
+    let part = |hour: f32| {
+        let up = ((hour - 6.0) / 12.0 * PI).sin() * 0.85;
+        day_part(hour, up)
+    };
+    assert_eq!(part(2.0), DayPart::Night);
+    assert_eq!(part(6.0), DayPart::Dawn);
+    assert_eq!(part(9.0), DayPart::Morning);
+    assert_eq!(part(12.5), DayPart::Midday);
+    assert_eq!(part(16.0), DayPart::Afternoon);
+    assert_eq!(part(18.0), DayPart::Dusk);
+    assert_eq!(part(22.0), DayPart::Night);
+    // The sun, not the clock alone: a summer sun still well up at 19 h is afternoon.
+    assert_eq!(day_part(19.0, 0.3), DayPart::Afternoon);
+    // Bedded at midday and in the dark only.
+    for p in [DayPart::Night, DayPart::Midday] {
+        assert!(p.bed_time());
+    }
+    for p in [
+        DayPart::Dawn,
+        DayPart::Morning,
+        DayPart::Afternoon,
+        DayPart::Dusk,
+    ] {
+        assert!(!p.bed_time());
+    }
+}
+
+/// A day for a herd of deer and a sounder of boar by a pond: grazing through the morning,
+/// bedded down together at midday, up again in the afternoon, down to the water at dusk to
+/// drink (each at its own place along the bank, facing the water, its muzzle at the edge),
+/// bedded down in the dark, and up and down to the water again at dawn.
+#[test]
+fn deer_and_boar_keep_the_days_hours() {
+    let mut app = app();
+    let water = DVec3::new(30.0, 0.0, 0.0);
+    pond(&mut app, water, 8.0);
+    let bank = Pond {
+        center: water,
+        radius: 8.0,
+    };
+    set_clock(&mut app, 9.0);
+    let deer = herd(&mut app, Species::Deer, DVec3::ZERO, 4, 1);
+    let sounder = [
+        boar(&mut app, DVec3::new(2.0, 0.0, 16.0), 2, false, false),
+        boar(&mut app, DVec3::new(0.0, 0.0, 17.0), 2, false, true),
+        boar(&mut app, DVec3::new(-2.0, 0.0, 16.0), 2, false, true),
+    ];
+    let all: Vec<Entity> = deer.iter().chain(&sounder).copied().collect();
+    let count = |app: &App, s: AnimalState| all.iter().filter(|&&a| state(app, a) == s).count();
+    let day = |app: &App, a: Entity| mind(app, a).day;
+
+    // Morning: up and about, none bedded.
+    app.update_n(60 * 20);
+    assert_eq!(
+        count(&app, AnimalState::Rest),
+        0,
+        "nobody beds down in the morning"
+    );
+    assert!(all.iter().all(|&a| day(&app, a) == Some(DayPart::Morning)));
+
+    // Midday: every one bedded down, each herd lying up together.
+    set_clock(&mut app, 12.5);
+    app.update_n(60 * 45);
+    assert_eq!(
+        count(&app, AnimalState::Rest),
+        all.len(),
+        "all bedded down at midday"
+    );
+    for group in [&deer[..], &sounder[..]] {
+        let mid = group.iter().map(|&a| pos(&app, a)).sum::<DVec3>() / group.len() as f64;
+        for &a in group {
+            let off = pos(&app, a).distance(mid);
+            assert!(
+                off < 4.0,
+                "{a:?} lies up close by its herd ({off:.1} m out)"
+            );
+        }
+    }
+
+    // Afternoon: up again, grazing.
+    set_clock(&mut app, 16.0);
+    app.update_n(60 * 65);
+    assert_eq!(
+        count(&app, AnimalState::Rest),
+        0,
+        "all up again in the afternoon"
+    );
+
+    // Dusk: they move out, down to the water, and drink.
+    set_clock(&mut app, 18.0);
+    let mut drank = vec![None::<(f64, f32)>; all.len()];
+    for _ in 0..60 * 60 {
+        app.update();
+        for (k, &a) in all.iter().enumerate() {
+            if state(&app, a) == AnimalState::Drink
+                && now(&app, a) - mind(&app, a).since > 2.0
+                && drank[k].is_none()
+            {
+                let young = app.world.get::<Animal>(a).unwrap().young;
+                let reach = match (app.world.get::<Animal>(a).unwrap().species, young) {
+                    (Species::Deer, _) => 1.05,
+                    (_, false) => 0.8,
+                    (_, true) => 0.48,
+                };
+                let muzzle = pos(&app, a) + (forward(&app, a) * reach).as_dvec3();
+                let to_water = flat(water - pos(&app, a)).normalize();
+                drank[k] = Some((
+                    bank.off_edge(muzzle),
+                    forward(&app, a).angle_between(to_water),
+                ));
+            }
+        }
+    }
+    eprintln!("at dusk, muzzle off the edge (m) and turned from the water (rad): {drank:.2?}");
+    for (k, d) in drank.iter().enumerate() {
+        let Some((edge, turned)) = *d else {
+            panic!("{:?} never drank at dusk", all[k]);
+        };
+        assert!(
+            edge.abs() < 0.25,
+            "{:?} drinks with its muzzle at the water's edge ({edge:+.2} m)",
+            all[k]
+        );
+        assert!(
+            turned < 0.3,
+            "{:?} faces the water ({turned:.2} rad off)",
+            all[k]
+        );
+    }
+    // Each at its own place along the bank.
+    for (i, &a) in all.iter().enumerate() {
+        for &b in &all[i + 1..] {
+            let gap = flat(pos(&app, a) - pos(&app, b)).length();
+            assert!(gap > 0.5, "{a:?} and {b:?} drink apart ({gap:.2} m)");
+        }
+    }
+
+    // Dark: bedded down again, deer and boar alike.
+    set_clock(&mut app, 23.0);
+    app.update_n(60 * 60);
+    assert_eq!(
+        count(&app, AnimalState::Rest),
+        all.len(),
+        "all bedded down in the dark"
+    );
+
+    // Dawn: up, one by one within a few seconds, and down to the water again.
+    set_clock(&mut app, 6.0);
+    let mut up = vec![None::<f64>; all.len()];
+    let mut drink_again = vec![false; all.len()];
+    let start = now(&app, deer[0]);
+    for _ in 0..60 * 60 {
+        app.update();
+        for (k, &a) in all.iter().enumerate() {
+            if up[k].is_none() && state(&app, a) != AnimalState::Rest {
+                up[k] = Some(now(&app, a) - start);
+            }
+            if state(&app, a) == AnimalState::Drink && bank.off_edge(pos(&app, a)) < 1.5 {
+                drink_again[k] = true;
+            }
+        }
+    }
+    for (k, &a) in all.iter().enumerate() {
+        let t = up[k].unwrap_or_else(|| panic!("{a:?} stays bedded at dawn"));
+        assert!(t < 10.0, "{a:?} up {t:.1} s after first light");
+    }
+    eprintln!("up at dawn after (s): {up:.1?}");
+    let first = up.iter().flatten().cloned().fold(f64::MAX, f64::min);
+    let last = up.iter().flatten().cloned().fold(0.0, f64::max);
+    assert!(
+        last - first > 1.0,
+        "they get up one by one ({first:.1} .. {last:.1} s)"
+    );
+    assert!(
+        drink_again.iter().all(|&d| d),
+        "all down at the water to drink after dawn: {drink_again:?}"
+    );
+}
+
+/// A stream 3 m wide running north-south (along z) at `x`, flowing south at 0.6 m/s.
+struct Stream {
+    x: f64,
+}
+
+impl engine_world::GroundQuery for Stream {
+    fn sample(&self, p: DVec3) -> Option<engine_world::GroundSample> {
+        Some(engine_world::GroundSample {
+            height: if (p.x - self.x).abs() < 1.5 {
+                -0.6
+            } else {
+                0.0
+            },
+            normal: Vec3::Y,
+            surface: engine_world::SurfaceId(3),
+        })
+    }
+}
+
+impl engine_world::WaterQuery for Stream {
+    fn sample(&self, p: DVec3) -> Option<engine_world::WaterSample> {
+        ((p.x - self.x).abs() < 1.5).then_some(engine_world::WaterSample {
+            surface_height: -0.05,
+            depth: 0.55,
+            velocity: Vec3::new(0.0, 0.0, 0.6),
+            normal: Vec3::Y,
+        })
+    }
+}
+
+/// At dusk a herd goes down to a stream to drink as it would to a pond: lined up along the
+/// near bank, facing across the water, muzzles at its edge.
+#[test]
+fn deer_drink_at_a_stream() {
+    let mut app = app();
+    let stream = std::sync::Arc::new(Stream { x: -20.0 });
+    app.world
+        .insert_resource(engine_world::Ground(stream.clone()));
+    app.world.insert_resource(engine_world::Water(stream));
+    set_clock(&mut app, 16.0);
+    let deer = herd(&mut app, Species::Deer, DVec3::ZERO, 4, 1);
+    app.update_n(60 * 5);
+    set_clock(&mut app, 18.0);
+    let mut drank = vec![None::<(f64, f32)>; deer.len()];
+    for _ in 0..60 * 50 {
+        app.update();
+        for (k, &a) in deer.iter().enumerate() {
+            if drank[k].is_none()
+                && state(&app, a) == AnimalState::Drink
+                && now(&app, a) - mind(&app, a).since > 2.0
+            {
+                let muzzle = pos(&app, a) + (forward(&app, a) * 1.05).as_dvec3();
+                // The near bank is at x = -18.5; across the water is west (-x).
+                drank[k] = Some((muzzle.x + 18.5, forward(&app, a).angle_between(Vec3::NEG_X)));
+            }
+        }
+    }
+    eprintln!("at the stream, muzzle off the edge (m) and turned from across (rad): {drank:.2?}");
+    for (k, d) in drank.iter().enumerate() {
+        let (edge, turned) = d.unwrap_or_else(|| panic!("{:?} never drank", deer[k]));
+        assert!(
+            edge.abs() < 0.25,
+            "{:?} muzzle at the edge ({edge:+.2} m)",
+            deer[k]
+        );
+        assert!(
+            turned < 0.3,
+            "{:?} faces across ({turned:.2} rad off)",
+            deer[k]
+        );
+    }
+}
+
+fn now(app: &App, e: Entity) -> f64 {
+    app.world.get::<NpcClock>(e).unwrap().now
 }

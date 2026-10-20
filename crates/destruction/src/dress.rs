@@ -191,6 +191,7 @@ pub fn build_prop_models_system(
         |e: Entity,
          key: String,
          solid: bool,
+         grit: bool,
          parts: &dyn Fn() -> Vec<(DestructibleMaterial, MeshBuilder)>| {
             // A ladder is climbed through its own box: a solid one pushes the climber off the
             // climb line. As a sensor it keeps its surface, so the rungs still ring as steel.
@@ -223,7 +224,12 @@ pub fn build_prop_models_system(
                 }
             }
             for (mesh, material) in &cache.meshes[&key] {
-                spawn_part(&mut commands, e, *mesh, assets.surface(*material));
+                let surface = if grit && *material == DestructibleMaterial::Dirt {
+                    assets.gravel
+                } else {
+                    assets.surface(*material)
+                };
+                spawn_part(&mut commands, e, *mesh, surface);
             }
             let mut ec = commands.entity(e);
             if solid && let Some((shape, material)) = cache.solids.get(&key) {
@@ -244,6 +250,7 @@ pub fn build_prop_models_system(
             e,
             format!("{:?}#{}", model.kind, model.seed),
             solid,
+            false,
             &|| {
                 model
                     .kind
@@ -254,12 +261,14 @@ pub fn build_prop_models_system(
             },
         );
     }
+    // The masonry's earth is the spoil of a breach: stone grit and rubble, drawn as gravel.
     for (e, model) in &arches {
         let solid = !gameplay.contains(e);
         dress(
             e,
             format!("{:?}#{}", model.kind, model.seed),
             solid,
+            true,
             &|| {
                 model
                     .kind

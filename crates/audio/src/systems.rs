@@ -20,8 +20,8 @@ use crate::footstep::{FootstepSound, Step, SurfaceSound};
 use crate::mixer::{Bus, Clock, Command, VoiceId};
 use crate::thunder;
 use crate::{
-    Audio, AudioCue, AudioListener, AudioMix, AudioSettings, FootstepSurfaces, PlayOptions,
-    ReverbZone,
+    Audio, AudioCue, AudioListener, AudioMix, AudioSettings, FootstepSamples, FootstepSurfaces,
+    PlayOptions, ReverbZone,
 };
 
 pub(crate) fn ensure_output(
@@ -180,6 +180,7 @@ pub(crate) fn play_footsteps(
     mut audio: ResMut<Audio>,
     env: Env,
     surfaces: Res<FootstepSurfaces>,
+    mut samples: ResMut<FootstepSamples>,
     settings: Res<AudioSettings>,
     scales: Query<&LocalTimeScale>,
     animated: Query<&AnimationParams>,
@@ -209,13 +210,8 @@ pub(crate) fn play_footsteps(
             .filter(|d| *d > 0.0)
             .unwrap_or(0.0)
             .min(1.5);
-        let sound = surfaces.get(material).with_state(
-            &cell,
-            material.absorbency,
-            temperature,
-            wading,
-            &snow,
-        );
+        let dry = surfaces.get(material);
+        let sound = dry.with_state(&cell, material.absorbency, temperature, wading, &snow);
         // A contact that leaves its speed out (an animation clip's footstep) goes at the pace
         // its walker's animation says, so a stride sounds like a stride.
         let speed = match c.entity.and_then(|e| animated.get(e).ok()) {
@@ -229,7 +225,26 @@ pub(crate) fn play_footsteps(
             .clock(clock_for(c.entity, &scales))
             .source(c.entity)
             .reverb(0.35);
-        let voice = audio.play(FootstepSound::new(fs, &step), opts);
+        let recorded = if settings.recorded_footsteps {
+            let wait = audio.is_offline();
+            samples.recorded(
+                &material.name,
+                &dry,
+                &cell,
+                wading,
+                &surfaces,
+                &step,
+                fs,
+                wait,
+            )
+        } else {
+            None
+        };
+        let sound = match &recorded {
+            Some((synth, take)) => FootstepSound::with_sample(fs, synth, take),
+            None => FootstepSound::new(fs, &step),
+        };
+        let voice = audio.play(sound, opts);
         if !voice.is_none() {
             played += 1;
             cues.write(AudioCue {

@@ -511,6 +511,17 @@ fn deer_shots() -> Vec<Shot<'static>> {
             0.0,
         ),
         ("deer_stag_rest", stag(AnimalState::Rest), 4.5, 40.0),
+        // Bedded a while: dozing, the chin laid on the ground.
+        (
+            "deer_stag_doze",
+            Pose {
+                t: 24.0,
+                ..stag(AnimalState::Rest)
+            },
+            4.5,
+            40.0,
+        ),
+        ("deer_hind_drink", p(AnimalState::Drink), 4.2, 40.0),
         ("deer_hind_dead", p(AnimalState::Dead), 4.5, 60.0),
         ("deer_hind_rear", p(AnimalState::Alert), 3.5, -140.0),
     ]
@@ -641,6 +652,7 @@ fn boar_shots() -> Vec<Shot<'static>> {
             30.0,
         ),
         ("boar_sow_rest", sow(AnimalState::Rest), 3.2, 40.0),
+        ("boar_sow_drink", sow(AnimalState::Drink), 3.2, 40.0),
         ("boar_sow_dead", sow(AnimalState::Dead), 3.2, 60.0),
         ("boar_tusker_rear", tusker(AnimalState::Wander), 3.0, -140.0),
         ("boar_sow_feet", sow(AnimalState::Wander), 0.8, 25.0),
@@ -2226,6 +2238,256 @@ fn pack_at_eye_level(plan: Option<&[f64]>) -> Option<(f64, f64, f64)> {
     ))
 }
 
+/// A sounder of wild boar rooting, then its tusker charging a wolf that bit it, as you would
+/// see it standing in the grass, with no markers: the camera low (1 m up) off to the sunny
+/// side of the sounder as it roots (far enough back to take all of it in), then beside the
+/// tusker and a little behind it, looking along its run at the wolf (close beside it as it
+/// sets off). The wolf,
+/// well out of the way until then, is set down 12 m from the tusker and bites it from there
+/// (as in the behaviour tests). Run once to time the charge, then again for three moments of
+/// the rooting, four of the charge and one as the tusker breaks off. The PNG is
+/// `animal_live_boar_eye_level.png`.
+#[test]
+#[ignore = "full-size pictures: run with --ignored"]
+fn a_tusker_charges_at_eye_level() {
+    let Some((charge, done)) = boar_at_eye_level(None) else {
+        return;
+    };
+    eprintln!("the tusker charges from {charge:.2} s and breaks off at {done:.2} s");
+    let mut plan = vec![3.0, 5.5, BITE_AT - 0.2];
+    plan.extend((0..4).map(|k| charge + (done - charge) * (k as f64 + 0.5) / 4.0));
+    plan.push(done + 0.4);
+    boar_at_eye_level(Some(&plan));
+}
+
+/// When the wolf bites the tusker in [`a_tusker_charges_at_eye_level`] (s).
+const BITE_AT: f64 = 8.0;
+
+/// [`a_tusker_charges_at_eye_level`]'s scene, shot at the moments of `plan` when there is
+/// one: when the tusker set off at the wolf and when it broke off.
+fn boar_at_eye_level(plan: Option<&[f64]>) -> Option<(f64, f64)> {
+    let mut app = live_app((640, 400))?;
+    // A tusker, two sows and three piglets.
+    let sounder: Vec<Entity> = [
+        (true, false),
+        (false, false),
+        (false, false),
+        (false, true),
+        (false, true),
+        (false, true),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(k, &(male, young))| {
+        let a = k as f64 * 2.4;
+        let r = match k {
+            0 => 0.0,
+            _ if young => 1.8,
+            _ => 3.0,
+        };
+        app.world
+            .spawn((
+                Transform::from_translation(DVec3::new(a.cos() * r, 0.0, a.sin() * r)),
+                Animal {
+                    male,
+                    young,
+                    ..Animal::new(Species::Boar)
+                },
+                Herd(5),
+                StandIn::default(),
+            ))
+            .id()
+    })
+    .collect();
+    let tusker = sounder[0];
+    let wolf = live_animal(&mut app, Species::Wolf, DVec3::new(-300.0, 0.0, 0.0), 2);
+    tick(&mut app, tusker);
+    app.world.get_mut::<AnimalMind>(wolf).unwrap().hunger = 0.0;
+    let clock = tusker;
+    let start = now_of(&app, clock);
+    // The camera is on the sunny side; the wolf bites from across the view.
+    let sunny = DVec3::new(-0.45, 0.0, 0.7).normalize();
+    let across = DVec3::new(sunny.z, 0.0, -sunny.x);
+    let mut frames = Vec::new();
+    let (mut bitten, mut charge, mut done) = (false, None, None);
+    loop {
+        tick(&mut app, clock);
+        let t = now_of(&app, clock) - start;
+        assert!(t < 40.0, "the tusker never charged and broke off");
+        if !bitten && t >= BITE_AT {
+            bitten = true;
+            let point = at(&app, tusker);
+            app.world.get_mut::<Transform>(wolf).unwrap().translation = point + across * 12.0;
+            app.world.write_message(engine_world::DamageEvent {
+                target: tusker,
+                amount: 20.0,
+                kind: engine_world::DamageKind::Slash,
+                point,
+                impulse: Vec3::ZERO,
+                source: Some(wolf),
+            });
+        }
+        let charging = mind_of(&app, tusker).state == AnimalState::Charge;
+        if bitten && charge.is_none() && charging {
+            charge = Some(t);
+        }
+        if charge.is_some() && done.is_none() && !charging {
+            done = Some(t);
+        }
+        let Some(plan) = plan else {
+            match (charge, done) {
+                (Some(c), Some(d)) => return Some((c, d)),
+                _ => continue,
+            }
+        };
+        if frames.len() == plan.len() {
+            break;
+        }
+        if t < plan[frames.len()] {
+            continue;
+        }
+        let (eye, target) = if !bitten {
+            // Off the sounder's sunny side, far enough back to take all of it in: each boar
+            // a metre clear of the picture's sides (it is 50° high, 1.6 times as wide).
+            let mid = sounder.iter().map(|&b| at(&app, b)).sum::<DVec3>() / sounder.len() as f64;
+            let across = DVec3::new(-sunny.z, 0.0, sunny.x);
+            let half = (25f64.to_radians().tan() * 1.6) * 0.85;
+            let back = sounder
+                .iter()
+                .map(|&b| {
+                    let off = at(&app, b) - mid;
+                    (off.dot(across).abs() + 1.0) / half + off.dot(sunny)
+                })
+                .fold(7.0, f64::max);
+            (mid + sunny * back, mid)
+        } else if frames.len() == 3 {
+            // Setting off: close beside the tusker and a little behind it, the wolf ahead.
+            let (boar, w) = (at(&app, tusker), at(&app, wolf));
+            let line = DVec3::new(w.x - boar.x, 0.0, w.z - boar.z).normalize();
+            let mut side = DVec3::new(-line.z, 0.0, line.x);
+            if side.dot(sunny) < 0.0 {
+                side = -side;
+            }
+            (boar + side * 3.0 - line * 2.0, boar + line * 2.0)
+        } else {
+            // Off to the side of the tusker and a little behind it, looking along its run at
+            // the wolf.
+            let (boar, w) = (at(&app, tusker), at(&app, wolf));
+            let mut line = w - boar;
+            line.y = 0.0;
+            let gap = line.length().max(1.0);
+            let line = line / gap;
+            let mut side = DVec3::new(-line.z, 0.0, line.x);
+            if side.dot(sunny) < 0.0 {
+                side = -side;
+            }
+            (
+                boar + side * 5.0 - line * 3.5,
+                boar + line * (gap * 0.5).min(5.0),
+            )
+        };
+        let view = (
+            DVec3::new(eye.x, 1.0, eye.z),
+            DVec3::new(target.x, 0.4, target.z),
+            Vec3::Y,
+        );
+        let name = format!("animal_live_boar_eye_level_{}.png", frames.len());
+        eprintln!(
+            "frame {} at {t:.2} s: tusker {:?} {:.1} m from the wolf, sounder {:?}, wolf {:?}",
+            frames.len(),
+            mind_of(&app, tusker).state,
+            flat_len(at(&app, wolf) - at(&app, tusker)),
+            sounder
+                .iter()
+                .map(|&b| mind_of(&app, b).state)
+                .collect::<Vec<_>>(),
+            mind_of(&app, wolf).state,
+        );
+        frames.push(live_shot(&mut app, view, 50.0, &name));
+    }
+    side_by_side(&frames, "animal_live_boar_eye_level.png");
+    Some((charge.unwrap_or(0.0), done.unwrap_or(0.0)))
+}
+
+/// A flock of starlings pecking in the grass bursting up at a gunshot 60 m off (out of the
+/// picture), as you would see it standing in the grass, with no markers: the camera low (1 m
+/// up) off to the flock's sunny side, held still and turning to follow the flock up. Two
+/// moments before the shot and six after it. The PNG is `animal_live_birds_gunshot.png`.
+#[test]
+#[ignore = "full-size pictures: run with --ignored"]
+fn birds_lift_off_at_a_gunshot_at_eye_level() {
+    /// When the shot is fired (s).
+    const SHOT_AT: f64 = 3.0;
+    let Some(mut app) = live_app((640, 400)) else {
+        return;
+    };
+    let flock = live_herd(&mut app, Species::Bird, DVec3::ZERO, 9, 7);
+    let clock = flock[0];
+    tick(&mut app, clock);
+    let start = now_of(&app, clock);
+    let plan = [
+        1.0,
+        SHOT_AT - 0.05,
+        SHOT_AT + 0.08,
+        SHOT_AT + 0.18,
+        SHOT_AT + 0.3,
+        SHOT_AT + 0.45,
+        SHOT_AT + 0.65,
+        SHOT_AT + 0.9,
+    ];
+    let sunny = DVec3::new(-0.45, 0.0, 0.7).normalize();
+    let mut frames = Vec::new();
+    let mut fired = false;
+    let mut eye = None;
+    while frames.len() < plan.len() {
+        tick(&mut app, clock);
+        let t = now_of(&app, clock) - start;
+        if !fired && t >= SHOT_AT {
+            fired = true;
+            // A carbine shot from 60 m off to the side, as the arena's fighters fire: the
+            // bullet's trace and its bang.
+            let muzzle = DVec3::new(60.0, 1.5, -20.0);
+            app.world.write_message(engine_world::ProjectileTrace {
+                from: muzzle,
+                to: muzzle + DVec3::new(0.0, 0.0, -80.0),
+                radius: 0.08,
+                speed: 900.0,
+                shooter: None,
+            });
+            app.world.write_message(engine_world::NoiseEvent {
+                position: muzzle,
+                radius: 90.0,
+                source: None,
+            });
+        }
+        if t < plan[frames.len()] {
+            continue;
+        }
+        let mid = flock.iter().map(|&b| at(&app, b)).sum::<DVec3>() / flock.len() as f64;
+        // The camera stays where it was set up, off the flock's sunny side.
+        let eye = *eye.get_or_insert(DVec3::new(mid.x, 1.0, mid.z) + sunny * 5.0);
+        let view = (eye, DVec3::new(mid.x, mid.y.max(0.3), mid.z), Vec3::Y);
+        let name = format!("animal_live_birds_gunshot_{}.png", frames.len());
+        eprintln!(
+            "frame {} at {t:.2} s: {} of {} flying, the flock {:.1} m up",
+            frames.len(),
+            flock
+                .iter()
+                .filter(|&&b| mind_of(&app, b).state == AnimalState::Flying)
+                .count(),
+            flock.len(),
+            mid.y
+        );
+        frames.push(live_shot(&mut app, view, 50.0, &name));
+    }
+    let flying = flock
+        .iter()
+        .filter(|&&b| mind_of(&app, b).state == AnimalState::Flying)
+        .count();
+    assert_eq!(flying, flock.len(), "the whole flock went up at the shot");
+    side_by_side(&frames, "animal_live_birds_gunshot.png");
+}
+
 fn flat_len(v: DVec3) -> f64 {
     DVec3::new(v.x, 0.0, v.z).length()
 }
@@ -2384,4 +2646,277 @@ fn the_herds_alarm_spreads() {
         }
     }
     side_by_side(&frames, "animal_live_herd_alarm.png");
+}
+
+/// A round pond for the live pictures: the ground drops 0.8 m inside `radius` under water
+/// standing level with the grass (as the AI sees it), drawn as a still, dark sheet of water
+/// with a muddy rim.
+struct Pond {
+    center: DVec3,
+    radius: f64,
+}
+
+impl Pond {
+    fn inside(&self, p: DVec3) -> bool {
+        DVec3::new(p.x - self.center.x, 0.0, p.z - self.center.z).length() < self.radius
+    }
+}
+
+impl engine_world::GroundQuery for Pond {
+    fn sample(&self, p: DVec3) -> Option<engine_world::GroundSample> {
+        Some(engine_world::GroundSample {
+            height: if self.inside(p) { -0.8 } else { 0.0 },
+            normal: Vec3::Y,
+            surface: engine_world::SurfaceId(3),
+        })
+    }
+}
+
+impl engine_world::WaterQuery for Pond {
+    fn sample(&self, p: DVec3) -> Option<engine_world::WaterSample> {
+        self.inside(p).then_some(engine_world::WaterSample {
+            surface_height: 0.0,
+            depth: 0.8,
+            velocity: Vec3::ZERO,
+            normal: Vec3::Y,
+        })
+    }
+}
+
+fn live_pond(app: &mut App, center: DVec3, radius: f64) {
+    let pond = std::sync::Arc::new(Pond { center, radius });
+    app.world
+        .insert_resource(engine_world::Ground(pond.clone()));
+    app.world.insert_resource(engine_world::Water(pond));
+    // Mud a little way up the bank, then the water.
+    for (r, top, rgb, rough) in [
+        (radius + 0.7, 0.008, 0x4f4330, 0.9),
+        (radius, 0.016, 0x22383c, 0.06),
+    ] {
+        app.world.spawn((
+            Transform::from_translation(center + DVec3::Y * (top - 0.05)),
+            MeshRenderer::new(
+                Shape::Cylinder {
+                    radius: r as f32,
+                    height: 0.1,
+                    segments: 96,
+                },
+                StandardMaterial::hex(rgb).with_roughness(rough),
+            ),
+        ));
+    }
+}
+
+/// The world's clock at `hour`, the sun where it would be then (up from 6 to 18 h, at most
+/// 0.85 high at noon), as the day/night cycle writes them. Only the animals go by it: the
+/// pictures keep their one light.
+fn live_clock(app: &mut App, hour: f32) {
+    let mut w = app.world.resource_mut::<engine_world::WeatherState>();
+    w.time_of_day_h = hour;
+    let up = ((hour - 6.0) / 12.0 * std::f32::consts::PI).sin() * 0.85;
+    w.sun_direction = Vec3::new(0.3, up, -(1.0 - up * up).max(0.0).sqrt()).normalize();
+}
+
+/// A herd of red deer (a stag and three hinds) moving out at dusk and down to a pond to drink,
+/// as you would see it from the grass on the far bank, 1 m up, with no markers: grazing in the
+/// afternoon, setting off when the sun goes down, coming down to the water, each to its own
+/// place along the bank, square on to the water, and drinking, heads down, now and then one
+/// looking up. The PNG is `animal_live_deer_drinking.png`.
+#[test]
+#[ignore = "full-size pictures: run with --ignored"]
+fn deer_drink_at_a_pond_at_eye_level() {
+    let Some(mut app) = live_app((640, 400)) else {
+        return;
+    };
+    let water = DVec3::new(13.0, 0.0, -2.0);
+    let radius = 4.0;
+    live_pond(&mut app, water, radius);
+    live_clock(&mut app, 16.0);
+    let deer = live_herd(&mut app, Species::Deer, DVec3::ZERO, 4, 1);
+    app.world.get_mut::<Animal>(deer[0]).unwrap().male = true;
+    let clock = deer[0];
+    tick(&mut app, clock);
+    let start = now_of(&app, clock);
+    // Across the pond from where they come down to it, looking back at the near bank.
+    let toward = DVec3::new(water.x, 0.0, water.z).normalize();
+    let eye = water + toward * (radius + 1.2) + DVec3::Y;
+    let drinking = |app: &App| {
+        deer.iter()
+            .filter(|&&d| mind_of(app, d).state == AnimalState::Drink)
+            .count()
+    };
+    let setting_off = |app: &App| {
+        deer.iter().any(|&d| {
+            let m = mind_of(app, d);
+            m.state == AnimalState::Wander && m.thirst > 0.75 && m.drink_at.is_some()
+        })
+    };
+    let mut frames = Vec::new();
+    let mut dusk = false;
+    let mut off = None;
+    let mut first_drink = None;
+    let mut all_drink = None;
+    let mut shots: Vec<f64> = vec![1.0];
+    while frames.len() < 8 {
+        tick(&mut app, clock);
+        let t = now_of(&app, clock) - start;
+        if !dusk && t >= 2.0 {
+            live_clock(&mut app, 18.0);
+            dusk = true;
+        }
+        if dusk && off.is_none() && setting_off(&app) {
+            // Moving out: on their way down to the water.
+            off = Some(t);
+            shots.push(t + 1.5);
+        }
+        let n = drinking(&app);
+        if off.is_some() && first_drink.is_none() && n > 0 {
+            // The first at the water.
+            first_drink = Some(t);
+            shots.push((t + 0.6).max(shots[shots.len() - 1] + 0.5));
+        }
+        if first_drink.is_some() && all_drink.is_none() && n == deer.len() {
+            all_drink = Some(t);
+            let last = shots[shots.len() - 1];
+            shots.extend([0.5, 1.5, 3.0, 4.5, 6.0].map(|d| (t + d).max(last + d)));
+        }
+        if t > 120.0 {
+            panic!("the herd never all drank ({n} of {})", deer.len());
+        }
+        let Some(&when) = shots.get(frames.len()) else {
+            continue;
+        };
+        if t < when {
+            continue;
+        }
+        let mid = deer.iter().map(|&d| at(&app, d)).sum::<DVec3>() / deer.len() as f64;
+        // Once they set off, from the far bank straight across from where they drink,
+        // looking at their places along the near bank; until then from across where they
+        // will come down to it, on the herd.
+        let spots: Vec<DVec3> = deer
+            .iter()
+            .filter_map(|&d| mind_of(&app, d).drink_at.map(|s| s.0))
+            .collect();
+        let view = if off.is_some() && !spots.is_empty() {
+            let at_bank = spots.iter().sum::<DVec3>() / spots.len() as f64;
+            let across = DVec3::new(water.x - at_bank.x, 0.0, water.z - at_bank.z).normalize();
+            // Back on the far bank, or further back still if that won't take in every
+            // place along the near one (each a metre and a half clear of the sides).
+            let side = DVec3::new(-across.z, 0.0, across.x);
+            let half = 15f64.to_radians().tan() * 1.6;
+            let back = spots
+                .iter()
+                .map(|&p| ((p - at_bank).dot(side).abs() + 1.5) / half)
+                .fold(2.0 * radius + 1.2, f64::max);
+            (
+                at_bank + across * back + DVec3::Y,
+                DVec3::new(at_bank.x, 0.45, at_bank.z),
+                Vec3::Y,
+            )
+        } else {
+            (eye, DVec3::new(mid.x, 0.5, mid.z), Vec3::Y)
+        };
+        let name = format!("animal_live_deer_drinking_{}.png", frames.len());
+        eprintln!(
+            "frame {} at {t:.2} s: {:?}",
+            frames.len(),
+            deer.iter()
+                .map(|&d| mind_of(&app, d).state.name())
+                .collect::<Vec<_>>()
+        );
+        frames.push(live_shot(&mut app, view, 30.0, &name));
+    }
+    side_by_side(&frames, "animal_live_deer_drinking.png");
+}
+
+/// A small herd of red deer (a stag and two hinds) bedding down at midday, as you would see it
+/// from the grass, 1 m up off its sunny side, with no markers: grazing late in the morning,
+/// gathering when midday comes, lying down one by one, legs folded under, then bedded: heads
+/// up chewing the cud, and later dozing with their chins on the ground. The PNG is
+/// `animal_live_deer_bedded.png`.
+#[test]
+#[ignore = "full-size pictures: run with --ignored"]
+fn deer_bed_down_at_midday_at_eye_level() {
+    let Some(mut app) = live_app((640, 400)) else {
+        return;
+    };
+    live_clock(&mut app, 10.5);
+    let deer = live_herd(&mut app, Species::Deer, DVec3::ZERO, 3, 1);
+    app.world.get_mut::<Animal>(deer[0]).unwrap().male = true;
+    let clock = deer[0];
+    tick(&mut app, clock);
+    let start = now_of(&app, clock);
+    let sunny = DVec3::new(-0.45, 0.0, 0.7).normalize();
+    let resting = |app: &App| {
+        deer.iter()
+            .filter(|&&d| mind_of(app, d).state == AnimalState::Rest)
+            .count()
+    };
+    let mut frames = Vec::new();
+    let mut noon = false;
+    let mut first_down = None;
+    let mut all_down = None;
+    let mut shots: Vec<f64> = vec![1.0];
+    let mut eye = None;
+    while frames.len() < 8 {
+        tick(&mut app, clock);
+        let t = now_of(&app, clock) - start;
+        if !noon && t >= 2.0 {
+            live_clock(&mut app, 12.5);
+            noon = true;
+        }
+        let n = resting(&app);
+        if first_down.is_none() && n > 0 {
+            // Going down: onto its knees, then lying.
+            first_down = Some(t);
+            shots.extend([t + 0.5, t + 1.2]);
+        }
+        if first_down.is_some() && all_down.is_none() && n == deer.len() {
+            // Bedded and chewing the cud; then dozing (each lays its head down 14 to 20 s
+            // after lying down, for 16 s).
+            all_down = Some(t);
+            let last = shots[shots.len() - 1];
+            shots.extend([3.0, 6.0, 10.0, 22.0, 27.0].map(|d| (t + d).max(last + 0.5)));
+        }
+        if t > 150.0 {
+            panic!("the herd never all bedded down ({n} of {})", deer.len());
+        }
+        let Some(&when) = shots.get(frames.len()) else {
+            continue;
+        };
+        if t < when {
+            continue;
+        }
+        let mid = deer.iter().map(|&d| at(&app, d)).sum::<DVec3>() / deer.len() as f64;
+        // Set up off the sunny side, far enough back to take the herd in; it stays put once
+        // they have lain down.
+        let place = |app: &App| {
+            let across = DVec3::new(-sunny.z, 0.0, sunny.x);
+            let half = (16f64.to_radians().tan() * 1.6) * 0.85;
+            let back = deer
+                .iter()
+                .map(|&d| {
+                    let off = at(app, d) - mid;
+                    (off.dot(across).abs() + 1.2) / half + off.dot(sunny)
+                })
+                .fold(5.0, f64::max);
+            DVec3::new(mid.x, 1.0, mid.z) + sunny * back
+        };
+        let e = if all_down.is_some() {
+            *eye.get_or_insert_with(|| place(&app))
+        } else {
+            place(&app)
+        };
+        let view = (e, DVec3::new(mid.x, 0.45, mid.z), Vec3::Y);
+        let name = format!("animal_live_deer_bedded_{}.png", frames.len());
+        eprintln!(
+            "frame {} at {t:.2} s: {:?}",
+            frames.len(),
+            deer.iter()
+                .map(|&d| mind_of(&app, d).state.name())
+                .collect::<Vec<_>>()
+        );
+        frames.push(live_shot(&mut app, view, 32.0, &name));
+    }
+    side_by_side(&frames, "animal_live_deer_bedded.png");
 }

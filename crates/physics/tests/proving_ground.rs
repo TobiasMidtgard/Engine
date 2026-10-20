@@ -336,3 +336,75 @@ fn the_break_scatters_the_rack_into_the_pockets_and_the_balls_stop() {
     assert!(pocketed <= 6, "{pocketed} balls went down");
     assert!(moved >= 12, "only {moved} of the 15 balls spread out");
 }
+
+/// The Galton board (`demo::galton`): the balls pour through the pins without jamming, all (one
+/// at most may jam, as on a real board; with contacts reused for 5 cm, four to ten hung on old
+/// contact planes) end in the bins and come to rest, and the bins hold a bell curve about the
+/// middle, spread about as wide as the curve printed behind them.
+#[test]
+fn the_galton_board_fills_its_bins_in_a_bell_curve() {
+    use demo::galton;
+    let mut app = app();
+    app.update();
+    let origin = Station::Galton.base() + DVec3::Y * demo::SLAB_RISE;
+    let balls = named(&mut app, "Galton ball");
+    assert_eq!(balls.len(), galton::BALLS);
+    // The board replays 40 s after it was built; the pour is over in about 20.
+    app.update_n(30 * 60);
+    let mut bins = [0usize; galton::BINS];
+    let mut caught = Vec::new();
+    for &b in &balls {
+        let p = app.world.get::<Transform>(b).unwrap().translation - origin;
+        let v = app.world.get::<Velocity>(b).unwrap();
+        assert!(
+            p.x.abs() < galton::HALF_WIDTH as f64 && p.z.abs() < galton::SLOT as f64,
+            "a ball left the board: at {p}"
+        );
+        assert!(v.linear.length() < 0.05, "a ball is still moving: {v:?}");
+        if p.y > galton::BIN_TOP as f64 {
+            caught.push(p);
+        } else {
+            bins[galton::bin_of(p.x as f32)] += 1;
+        }
+    }
+    assert!(
+        caught.len() <= 1,
+        "{} balls are caught on the pins: {caught:?}",
+        caught.len()
+    );
+    let n = bins.iter().sum::<usize>() as f64;
+    let mid = (galton::BINS / 2) as f64;
+    let mean = bins
+        .iter()
+        .enumerate()
+        .map(|(j, &c)| j as f64 * c as f64)
+        .sum::<f64>()
+        / n;
+    let spread = (bins
+        .iter()
+        .enumerate()
+        .map(|(j, &c)| (j as f64 - mean).powi(2) * c as f64)
+        .sum::<f64>()
+        / n)
+        .sqrt();
+    let near = |r: std::ops::RangeInclusive<usize>| bins[r].iter().sum::<usize>() as f64 / n;
+    let last = galton::BINS - 1;
+    assert!(
+        (mean - mid).abs() < 0.6,
+        "the heap is off center: {mean:.2} {bins:?}"
+    );
+    assert!(
+        (2.5..4.0).contains(&spread),
+        "the heap's spread is {spread:.2} bins, the curve's {}: {bins:?}",
+        galton::SPREAD
+    );
+    assert!(near(7..=9) > 0.28, "the middle bins hold too few: {bins:?}");
+    assert!(
+        near(0..=1) + near(last - 1..=last) < 0.08,
+        "the end bins hold too many: {bins:?}"
+    );
+    assert!(
+        (near(0..=7) - near(9..=last)).abs() < 0.12,
+        "the heap leans to one side: {bins:?}"
+    );
+}

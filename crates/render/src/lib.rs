@@ -248,7 +248,7 @@ impl Plugin for RenderPlugin {
             )
             .register_resource::<FogSettings>("Height fog everywhere (volumetric within volumetric_fog_range, with light shafts): density (extinction 1/m at base_height, visibility about 3.9 / density: 0.00002 clear air, 0.0001 light haze, 0.0005 haze, 0.05 ground fog), height_falloff (1/m), base_height (m), max_opacity, color (albedo), sun_scattering (Henyey-Greenstein g, 0.6 = forward scattering, glow around the sun).")
             .register_resource::<Atmosphere>(
-                "Planet atmosphere used for the sky and sunlight: planet_center (world), planet_radius, thickness (m), scale heights (m), and the planet's air per meter at the surface, RGB: rayleigh_scattering, mie_scattering, mie_absorption, ozone_absorption; mie_g (+ mie_g_offset per channel), density_scale (1 = as given). Presets: Atmosphere::earth() (default), Atmosphere::mars().",
+                "Planet atmosphere used for the sky and sunlight: planet_center (world), planet_radius, thickness (m), scale heights (m), and the planet's air per meter at the surface, RGB: rayleigh_scattering, mie_scattering, mie_absorption, ozone_absorption; mie_g (+ mie_g_offset per channel), density_scale (1 = as given), mie_forward_peak (0..1: the share g² of the haze's scattering passing as unscattered, delta-Eddington; Mars 1). Presets: Atmosphere::earth() (default), Atmosphere::mars().",
             )
             .register_resource::<AmbientLight>("Ambient fill light in cd/m² added on top of sky light.")
             .add_systems(
