@@ -378,6 +378,14 @@ pub enum Brain {
         #[serde(skip)]
         origin: DVec3,
     },
+    /// Loops a ladder another module placed (`movement.ladder_guest`): climb it, step off at
+    /// the top, look round, climb back down.
+    LadderGuest {
+        step: Rungs,
+        secs: f32,
+        #[serde(skip)]
+        ladder: Option<Entity>,
+    },
     /// Loops the vault lane: sprint over the railing, the barrier and the cases.
     Vaulter {
         step: Vaults,
@@ -782,6 +790,7 @@ pub(crate) fn register(app: &mut App) {
             run_runner,
             run_climber,
             run_ladder_climber,
+            run_ladder_guest,
             run_vaulter,
             run_grappler,
             run_rider,
@@ -1173,6 +1182,161 @@ pub(crate) fn restart_ladder_climbers(world: &mut World) -> usize {
         }
     }
     n
+}
+
+// ------------------------------------------------------------------------ ladder guests
+
+/// A ladder guest waits this long for a way up (a hatch to open) before starting over, s.
+const GUEST_PATIENCE: f32 = 15.0;
+
+#[allow(clippy::type_complexity)]
+fn run_ladder_guest(
+    time: Res<Time>,
+    ladders: Query<(&Climbable, &Transform, &GlobalTransform, Has<ChildOf>)>,
+    mut q: Query<
+        (
+            &mut Brain,
+            &mut Transform,
+            &mut Mover,
+            &mut MoveIntent,
+            Option<&mut TransformInterpolation>,
+        ),
+        Without<Climbable>,
+    >,
+) {
+    let real = time.real_delta_secs();
+    for (mut brain, mut t, mut m, mut intent, interp) in &mut q {
+        let Brain::LadderGuest { step, secs, ladder } = &mut *brain else {
+            continue;
+        };
+        *intent = MoveIntent::default();
+        let Some(line) = ladder
+            .and_then(|e| ladders.get(e).ok())
+            .map(|(c, lt, g, parented)| crate::locomotion::climb_line(c, lt, g, parented))
+        else {
+            // The ladder is gone: stand still.
+            continue;
+        };
+        *secs += real;
+        let facing = line.facing;
+        let len = (line.top - line.bottom).length() as f32;
+        let feet = t.translation - DVec3::Y * 0.9;
+        let next = match *step {
+            Rungs::Start => {
+                if *secs < 0.02 {
+                    let at = line.bottom - (facing * 1.4).as_dvec3();
+                    t.translation = at + DVec3::Y * 0.95;
+                    t.rotation =
+                        engine_core::transform::look_rotation(facing, Vec3::Y).unwrap_or_default();
+                    m.reset_motion();
+                    m.facing = facing;
+                    if let Some(mut i) = interp {
+                        i.reset();
+                    }
+                }
+                intent.look = Some(facing);
+                (*secs >= 0.8).then_some(Rungs::Walk)
+            }
+            Rungs::Walk => {
+                intent.direction = facing * 0.6;
+                m.ladder.is_some().then_some(Rungs::Up)
+            }
+            Rungs::Up => {
+                intent.direction = facing;
+                let on_top = feet.y > line.top.y - 0.3;
+                (m.ladder.is_none() && m.grounded && on_top && m.mode != LocomotionMode::Mantle)
+                    .then_some(Rungs::Look)
+            }
+            Rungs::Look => {
+                intent.look = Some(-facing);
+                (*secs >= 1.6).then_some(Rungs::Down)
+            }
+            Rungs::Down => {
+                intent.direction = -facing * 0.6;
+                let on = m.ladder.map(|l| l.climbed);
+                if on.is_some_and(|c| c < len - layout::LADDER_SLIDE_FROM) {
+                    Some(Rungs::Slide)
+                } else {
+                    (on.is_none() && m.grounded && feet.y < line.top.y - 1.0).then_some(Rungs::Off)
+                }
+            }
+            Rungs::Slide => {
+                intent.crouch = m.ladder.is_some();
+                (m.ladder.is_none() && m.grounded).then_some(Rungs::Off)
+            }
+            Rungs::Off => {
+                intent.direction = -facing * 0.5;
+                intent.look = Some(facing);
+                (*secs >= 0.6).then_some(Rungs::Rest)
+            }
+            Rungs::Rest => (*secs >= 0.8).then_some(Rungs::Start),
+        };
+        // Stuck (knocked off, a hatch that stays shut): start over.
+        if *secs > GUEST_PATIENCE {
+            *step = Rungs::Start;
+            *secs = 0.0;
+        } else if let Some(n) = next {
+            *step = n;
+            *secs = 0.0;
+        }
+    }
+}
+
+/// Sends a pilot up and down the ladder nearest `near` (world meters; else the active
+/// camera): restarts the guest already on it, or spawns one. Returns the guest and the ladder.
+pub(crate) fn spawn_ladder_guest(
+    world: &mut World,
+    near: Option<DVec3>,
+) -> Result<(Entity, Entity), String> {
+    let near = near
+        .or_else(|| crate::play::active_camera(world).map(|(_, g)| g.translation()))
+        .ok_or("no point given and no active camera")?;
+    let mut ladders = world.query::<(
+        Entity,
+        &Climbable,
+        &Transform,
+        &GlobalTransform,
+        Has<ChildOf>,
+    )>();
+    let (ladder, line) = ladders
+        .iter(world)
+        .map(|(e, c, t, g, parented)| (e, crate::locomotion::climb_line(c, t, g, parented)))
+        .min_by(|a, b| a.1.distance(near).total_cmp(&b.1.distance(near)))
+        .ok_or("no ladder (Climbable) in this world")?;
+    let mut brains = world.query::<(Entity, &mut Brain)>();
+    for (e, mut b) in brains.iter_mut(world) {
+        if let Brain::LadderGuest {
+            step,
+            secs,
+            ladder: Some(on),
+        } = &mut *b
+            && *on == ladder
+        {
+            *step = Rungs::Start;
+            *secs = 0.0;
+            return Ok((e, ladder));
+        }
+    }
+    let at = line.bottom - (line.facing * 1.4).as_dvec3() + DVec3::Y * 0.95;
+    let mut queue = engine_core::ecs::world::CommandQueue::default();
+    let guest = {
+        let mut commands = Commands::new(&mut queue, world);
+        spawn_character(
+            &mut commands,
+            "Ladder guest",
+            at,
+            line.facing,
+            Style::Pilot,
+            MovementProfile::pilot(),
+            Brain::LadderGuest {
+                step: Rungs::Start,
+                secs: 0.0,
+                ladder: Some(ladder),
+            },
+        )
+    };
+    queue.apply(world);
+    Ok((guest, ladder))
 }
 
 // ------------------------------------------------------------------------ the vaulter

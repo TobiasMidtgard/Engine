@@ -125,7 +125,9 @@ same share of sky, with a thin veil under broken cloud. The tops are lit through
 veiled by it, and cast their shadows on the ground between them, offset away from the sun
 (long at a low sun), so the terrain under the layer is shaded like the far globe. Within
 `SpaceSettings::cloud_hole_m` (60 km) of the camera the layer leaves
-the sky to the weather's own volumetric clouds. Views `earth_leo` (400 km) and `earth_edge`
+the sky to the weather's own volumetric clouds, and near that hole the layer takes the
+weather's `cloud_cover` (back to its own map by three hole radii), so the two decks meet at the
+same share of sky. Views `earth_leo` (400 km) and `earth_edge`
 (35 km) in `space_shots` show it, and `mars_low` and `mars_edge` the same heights over Mars.
 
 ## Known limits (next rounds)

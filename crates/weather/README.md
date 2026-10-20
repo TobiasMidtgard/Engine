@@ -39,7 +39,7 @@ gusts and a gust front ahead of storms. Fires warm the ground around them throug
 
 **Volumetric clouds.** Ray-marched clouds carved from a cloud map (coverage, type, rain,
 density) with Perlin-Worley shape noise and Worley detail noise: flat stratus sheets, heaped
-cumulus with cauliflower tops, and towering storm clouds that narrow as they climb and spread
+cumulus with cauliflower tops and crisp edges, and towering storm clouds that narrow as they climb and spread
 into an anvil. Lit by the sun or the moon with self-shadowing, a strong forward glow (silver
 linings), multiple scattering, light that diffuses down through thick decks (a storm's base is
 grey, not navy), dark rain bellies, sky and ground ambient light, and lightning lighting them
@@ -113,7 +113,8 @@ snow and a storm.
 `cargo run -p engine_weather --release --example weather_tour [out_dir] [shots]` renders the
 station through a day of changing weather (clear morning, fair-weather clouds, a storm rolling
 in, a downpour, puddles after the rain, night rain under lamps, lightning, a foggy morning,
-sunset, above the clouds, snow, a moonlit night, a rainbow in the showers), then close-ups of
+sunset, above the clouds, snow, a moonlit night, a rainbow in the showers, cloud shadows on
+the valley, flying over fair-weather clouds), then close-ups of
 the station (the last from under the bus shelter in the rain), and saves a screenshot of each.
 Around the station the tour builds its own landscape: a meadow with grass, wooded hills, rocks,
 a farm track and a mountain range. Puddles only form within a few centimeters of the ground, so
