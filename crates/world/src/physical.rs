@@ -338,6 +338,38 @@ impl ForestCover {
     }
 }
 
+/// Implemented by the terrain module (its wear map, fed by `GroundContact`s). Lets foliage thin
+/// out on paths, AI prefer them and footsteps sound like bare dirt, without depending on how
+/// terrain keeps it.
+pub trait WearQuery: Send + Sync + 'static {
+    /// How worn the ground below world position `p` is: 0 untouched .. 1 a well-worn path.
+    fn wear(&self, p: DVec3) -> f32;
+}
+
+/// The active ground-wear provider. Defaults to untouched ground everywhere.
+#[derive(Resource, Clone)]
+pub struct GroundWear(pub Arc<dyn WearQuery>);
+
+struct NoWear;
+impl WearQuery for NoWear {
+    fn wear(&self, _p: DVec3) -> f32 {
+        0.0
+    }
+}
+
+impl Default for GroundWear {
+    fn default() -> Self {
+        Self(Arc::new(NoWear))
+    }
+}
+
+impl GroundWear {
+    /// Wear at `p`, clamped to 0..1.
+    pub fn wear(&self, p: DVec3) -> f32 {
+        self.0.wear(p).clamp(0.0, 1.0)
+    }
+}
+
 /// Water at one spot.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WaterSample {

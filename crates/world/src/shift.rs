@@ -14,9 +14,9 @@
 //! memories and nav goals, IK targets, audio emitters, sky and planet centers, debug shapes)
 //! reads the message and shifts them in `Apply` too, so the frame renders right. Query
 //! providers stored here ([`crate::Ground`], [`crate::Water`], [`crate::ForestCover`],
-//! [`crate::physics::PhysicsQueries`], [`crate::Obscurance`] sources) answer in the new
-//! frame from [`WorldShiftSet::Rebuild`] on. Modules with world-space messages of their own register them with
-//! [`WorldShiftAppExt::shift_messages`].
+//! [`crate::GroundWear`], [`crate::physics::PhysicsQueries`], [`crate::Obscurance`] sources)
+//! answer in the new frame from [`WorldShiftSet::Rebuild`] on. Modules with world-space
+//! messages of their own register them with [`WorldShiftAppExt::shift_messages`].
 //!
 //! A shift with `velocity` or `angular_velocity` adds that motion to everything that has a
 //! velocity here. Things without one (static colliders, `Transform`-driven props) keep their

@@ -5,10 +5,10 @@
 //!
 //! * **Fields** ([`environment`]): wind, weather, ground wetness/snow/scorch, heat. One owner
 //!   writes each; anyone reads. Sample them through [`Env`], a system parameter.
-//! * **Queries** ([`physical`]): [`Gravity`], [`Ground`], [`Water`] and [`ForestCover`] answer
-//!   "what is at this point" for any implementation (heightmap, voxel, planet; lake, ocean,
-//!   river; painted woods), and [`Obscurance`] answers "how much smoke, fog or dust is between
-//!   these two points".
+//! * **Queries** ([`physical`]): [`Gravity`], [`Ground`], [`GroundWear`], [`Water`] and
+//!   [`ForestCover`] answer "what is at this point" for any implementation (heightmap, voxel,
+//!   planet; worn paths; lake, ocean, river; painted woods), and [`Obscurance`] answers "how
+//!   much smoke, fog or dust is between these two points".
 //! * **Air** ([`air`]): density, pressure, temperature, speed of sound and wind anywhere,
 //!   per planet (`Env::air`).
 //! * **Materials** ([`SurfaceMaterials`]): one table of friction, fuel, deformation, sounds.
@@ -219,6 +219,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<Ground>()
             .init_resource::<Water>()
             .init_resource::<ForestCover>()
+            .init_resource::<GroundWear>()
             .init_resource::<Obscurance>()
             .init_resource::<SurfaceMaterials>()
             .init_resource::<FocusPoints>()
@@ -385,6 +386,8 @@ mod tests {
         app.add_plugins(WorldPlugin);
         let woods = app.world.resource::<ForestCover>();
         assert_eq!(woods.sample(DVec3::new(10.0, 0.0, -20.0)), None);
+        let wear = app.world.resource::<GroundWear>();
+        assert_eq!(wear.wear(DVec3::new(10.0, 0.0, -20.0)), 0.0);
         let registry = app.world.resource::<TypeRegistry>();
         for name in [
             "RigidBody",
