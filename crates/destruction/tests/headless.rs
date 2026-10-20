@@ -53,6 +53,7 @@ fn a_thermite_doorway_shows_the_world_behind_the_wall() {
         max: Vec2::new(0.6, 2.4),
         front: true,
         melt: false,
+        tip: Vec3::ZERO,
     });
     app.update_n(3);
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {

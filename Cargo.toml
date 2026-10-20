@@ -36,6 +36,7 @@ engine_npc = { path = "crates/npc" }
 engine_vehicles = { path = "crates/vehicles" }
 engine_space = { path = "crates/space" }
 engine_destruction = { path = "crates/destruction" }
+engine_character = { path = "crates/character" }
 engine_script = { path = "crates/script" }
 
 # --- ECS / core ---

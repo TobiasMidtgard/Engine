@@ -39,7 +39,9 @@ pub use skills::{NpcSkills, Perception};
 pub use squad::{AttackTokens, ReviveClaims, SquadSettings};
 pub use training::SparringPost;
 pub use visuals::{IntentMarker, Part, StandIn, StandInPart};
-pub use wildlife::{Animal, AnimalMind, AnimalState, BirdFlight, Herd, Species, WildlifeSettings};
+pub use wildlife::{
+    Animal, AnimalMind, AnimalState, BirdFlight, Herd, PackRole, Species, WildlifeSettings,
+};
 pub use world_model::{CoverPoint, TacticalWorld, WorldModelSettings};
 
 use engine_core::prelude::*;

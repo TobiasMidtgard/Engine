@@ -13,7 +13,7 @@
 //! buffers, broadphase and query caches, simulation grids, cloth and rope particles, NPC
 //! memories and nav goals, IK targets, audio emitters, sky and planet centers, debug shapes)
 //! reads the message and shifts them in `Apply` too, so the frame renders right. Query
-//! providers stored here ([`crate::Ground`], [`crate::Water`],
+//! providers stored here ([`crate::Ground`], [`crate::Water`], [`crate::ForestCover`],
 //! [`crate::physics::PhysicsQueries`], [`crate::Obscurance`] sources) answer in the new
 //! frame from [`WorldShiftSet::Rebuild`] on. Modules with world-space messages of their own register them with
 //! [`WorldShiftAppExt::shift_messages`].
@@ -443,6 +443,14 @@ impl FollowsWorldShift for WaterSplash {
     }
 }
 
+impl FollowsWorldShift for WaterDisturbance {
+    fn follow(&mut self, s: &WorldShift) {
+        self.position = s.point(self.position);
+        // Relative to the water, which moves with the world.
+        self.velocity = s.direction(self.velocity);
+    }
+}
+
 impl FollowsWorldShift for LightningStrike {
     fn follow(&mut self, s: &WorldShift) {
         self.from = s.point(self.from);
@@ -492,6 +500,7 @@ pub(crate) fn register_messages(app: &mut App) {
         .shift_messages::<NoiseEvent>()
         .shift_messages::<SmokeEmission>()
         .shift_messages::<WaterSplash>()
+        .shift_messages::<WaterDisturbance>()
         .shift_messages::<LightningStrike>()
         .shift_messages::<ApplyImpulse>()
         .shift_messages::<ContactEvent>()

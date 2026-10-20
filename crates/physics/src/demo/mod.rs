@@ -1647,6 +1647,43 @@ fn chute_plates() -> (Vec<(Vec3, Quat, Vec3, u8)>, impl Fn(f32) -> f32, Vec3) {
             ));
         }
     }
+    // Flat-bar stiffeners standing 10 cm proud of the hopper's walls every 75 cm, and dark
+    // angle posts on its corners.
+    let (rib, proud) = (0.03f32, 0.05f32);
+    for k in 1..4 {
+        let along = k as f32 * hop / 4.0 - hop * 0.5;
+        for s in [-1.0f32, 1.0] {
+            out.push((
+                Vec3::new(cx + along, (low + rim) * 0.5, s * (half_w + t + proud)),
+                Quat::IDENTITY,
+                Vec3::new(rib, (rim - low) * 0.5 - 0.08, proud),
+                1,
+            ));
+        }
+        let back = top.y - 0.3;
+        out.push((
+            Vec3::new(top.x - t - proud, (back + rim) * 0.5, along),
+            Quat::IDENTITY,
+            Vec3::new(proud, (rim - back) * 0.5 - 0.08, rib),
+            1,
+        ));
+        out.push((
+            Vec3::new(front_x + t + proud, (low + mouth + rim) * 0.5, along),
+            Quat::IDENTITY,
+            Vec3::new(proud, (rim - low - mouth) * 0.5 - 0.08, rib),
+            1,
+        ));
+    }
+    for (x, bottom) in [(top.x - t, top.y - 0.3), (front_x + t, low)] {
+        for s in [-1.0f32, 1.0] {
+            out.push((
+                Vec3::new(x, (bottom + rim) * 0.5, s * (half_w + t)),
+                Quat::IDENTITY,
+                Vec3::new(0.06, (rim - bottom) * 0.5, 0.06),
+                2,
+            ));
+        }
+    }
     // Legs (16 cm box section) under the floor's edges at the lip, the middle and under the
     // hopper, braced across at knee height.
     let leg = 0.08f32;

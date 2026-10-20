@@ -144,6 +144,24 @@ pub struct WaterSplash {
     pub source: Option<Entity>,
 }
 
+/// Something pushed the water at its surface without being a footstep or the water module's
+/// own interactor: cloth, ropes and hair crossing the surface, a dragged net, a paddle. The
+/// water module turns these into rings and wakes and, when one is fast enough, writes a
+/// [`WaterSplash`] for it, so spray, sound and AI follow. Send a few per object per step
+/// (batch nearby contacts into one with a larger `radius`), not one per particle.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct WaterDisturbance {
+    /// Where on the surface, world meters.
+    pub position: DVec3,
+    /// Velocity of what pushed relative to the water, m/s (negative y = going in).
+    pub velocity: Vec3,
+    /// Size of the pushed patch, meters.
+    pub radius: f32,
+    /// Mass that pushed this step, kg (how big the rings get).
+    pub mass_kg: f32,
+    pub source: Option<Entity>,
+}
+
 /// Smoke or gas released into the air (fires, explosions, exhausts, smoke grenades).
 /// The smoke module turns these into volumetric smoke; particles may add soot.
 #[derive(Message, Debug, Clone, Copy)]

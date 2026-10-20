@@ -73,6 +73,11 @@ compresses and stretches.
   frame and `AnimationEvent` at marked frames, so movement, AI, cloth and hair never depend
   on this crate. Footsteps and hoof falls become `GroundContact` (foot, paw or hoof, with
   load and speed) and `NoiseEvent`; hammer impacts are loud `NoiseEvent`s.
+- **Character contract.** People with an `Appearance` get a `Face` seeded from it that
+  writes `FaceControls` every frame (ARKit blink, squint, brows, cheeks, mouth and jaw
+  weights from effort, wincing and limpness, plus gaze from the humanoid head). While a
+  character module draws appearances (`AppearanceBodies`), those people keep their humanoid
+  `SkeletonPose` but no fetched model and no mesh of this crate's (`tests/appearance.rs`).
 - **Bodies on request.** A module that moves an entity itself puts `BodyRequest` on it
   (`human`, `horse`, `dog` or `spider`, an optional model path, height and seed) and gets a body:
   the paddock's rigs and models, animated from the entity's motion (`LocomotionState` or
@@ -137,6 +142,27 @@ To animate your own character, register a `Skeleton`, clips and an `AnimGraph` i
 `build::sdf::Body` turns smooth-blended capsules, ellipsoids and boxes into a skinned mesh
 with automatic weights and muscle morph targets.
 
+People's `SkeletonPose` uses the humanoid skeleton (`build::humanoid::skeleton()`), whether
+they wear a generated body or a fetched model (fitted with `fit_skeleton`, which keeps these
+names and parents). Model space, meters, facing −Z, +X to the person's right; `_l` / `_r` are
+the person's own left and right. Each bone below is followed by its parent:
+
+| Bone | Parent | | Bone | Parent |
+|---|---|---|---|---|
+| `root` | — | | `clavicle_l`, `clavicle_r` | `chest` |
+| `hips` | `root` | | `upper_arm_l`, `upper_arm_r` | `clavicle_l`, `clavicle_r` |
+| `spine` | `hips` | | `lower_arm_l`, `lower_arm_r` | `upper_arm_l`, `upper_arm_r` |
+| `chest` | `spine` | | `hand_l`, `hand_r` | `lower_arm_l`, `lower_arm_r` |
+| `neck` | `chest` | | `upper_leg_l`, `upper_leg_r` | `hips` |
+| `head` | `neck` | | `lower_leg_l`, `lower_leg_r` | `upper_leg_l`, `upper_leg_r` |
+| `ponytail_1` | `head` | | `foot_l`, `foot_r` | `lower_leg_l`, `lower_leg_r` |
+| `ponytail_2` | `ponytail_1` | | `toe_l`, `toe_r` | `foot_l`, `foot_r` |
+| `ponytail_3` | `ponytail_2` | | | |
+
+There are no finger bones yet (hands pose as a whole); the ponytail bones swing on spring
+chains. The order in `SkeletonPose::names` is the one to index by; don't assume the order
+of this table.
+
 Tunable at runtime (JSON, console, scripts, AI agents): `AnimatorSettings`, `FootIk`,
 `LookAt`, `ReachIk`, `IkSurface`, `SpringChains`, `LeggedGait`, `VehicleRig`, `MuscleRig`,
 `SkinnedMeshRenderer` (with its `SkinMaterial`), `BoneAttachment`, `DemoPath`, `DemoScript`,
@@ -174,7 +200,7 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 |---|---|
 | Hammer athlete | Two-handed sledgehammer strike onto a tractor tire: arms, shoulders and back tense on the strike and relax after; veins on the forearms; the ponytail whips; then a braced block |
 | Lifter | Double-biceps flex: biceps, shoulders and chest bulge |
-| Shirt reach | Sleeves bunch at the elbows on the wind-up, the shirt stretches across the back on the reach |
+| Shirt reach | Up on tiptoe to a hanging lantern: a glance up and a dip, the elbow leads the arm up, `ReachIk` puts the hand on the glass while `grip` closes it, then down onto the heels with a give in the knees; the sleeve bunches at the elbow and rides up the raised arm |
 | Step course | A walker climbs a ramp, crosses a deck, walks down stairs with feet planted by IK, then runs back leaning into the turns |
 | Footwork drill | An athlete walks a square facing one way: ahead, sidestepping left, backpedalling, sidestepping right, blending through the corners, every planted foot still on the sand (`paddock_footwork`) |
 | Shuttle lane | An athlete sprints the lane from a standing start (leaning into it), digs in to stop, runs back backwards, turns on the spot and runs sideways to the start; a coach beside the lane turns where they stand to keep watching, the head first and the feet stepping round once the runner is well off to one side (`paddock_sprint_start`, `paddock_sprint_stop`) |

@@ -51,12 +51,34 @@ alert deer make the rest look up. Wild boar live in sounders (sows with their st
 piglets, `Animal::young`) or alone (tuskers, `Animal::male`), root for food with the snout,
 shuffling on as they go, and are about at night. They run from threats like the rest, but a
 boar turns and charges when it is cornered (its flight finds no way out, or the threat is on
-top of it) or wounded, and a sow charges anyone who comes close to her piglets while they
-scatter; the charge ends in a slash of the tusks (damage), then the boar breaks off and runs
-for a moment before it may turn again. Wolf packs roam, get hungry, track prey by scent, stalk
-low while spreading out around it, then charge, cut it off and bite; they feed on the kill and
-back away from people. Wolves prefer deer, take a boar only when nothing easier is about (a
-piglet sooner, a tusker last of all) and give a charging boar room. Bird flocks peck on the
+top of it) or wounded (it goes for whoever hurt it, not for whatever it happened to be
+watching; when it can't find who, it stands and scents for them, bristling, rather than
+charge at nothing), and a sow charges anyone who comes close to her piglets while they scatter; the
+charge ends in a slash of the tusks (damage), then the boar breaks off and runs for a moment
+before it may turn again. Fire always means flight: a boar never turns to fight in the
+flames. Wolf packs roam, get hungry, track prey by scent and hunt together, each wolf in a
+part by its place in the pack (`AnimalMind::role`, a `PackRole`): the tester creeps straight
+at the herd, singles out the weakest (wounded, young or straggling; it picks over the herd
+again as its rush sets it running) and drives it; two flankers swing wide to its sides and
+run out level with it to cut its escape line, holding its side until it tires or a wolf is
+on it, then cut in; a fourth wolf circles wide round the herd and lies in wait where it
+will run, springing when it comes within 12 m (or the pack's charge misses, or it has
+waited a minute); any more drive with the tester. While they stalk, the wolves keep 10 m
+clear of the herd and crouch within 30 m of it, and the flankers loop round behind it to
+their posts off its flanks rather than cross in front. The tester rushes once the pack is
+in place. A pack gives up a chase
+`PACK_CHASE_SECS` after its first wolf set off (all of it together, on the wolves' own
+clocks) and rests `PACK_REST_SECS`, hungry or not. They feed on the kill and back away from
+people. Deer raise the alarm: the first to bolt snorts (a noise other animals hear, though
+not its own herd) and flags its tail; each of the others turns its head to where the alarm
+came from, then bolts a reaction time later (0.3 to 0.55 s), and the herd runs off bunched
+(the ones out front ease off for the rest). A deer runs from all the wolves it sees at
+once, the nearest most, so one with a wolf on either side runs on between them; with a wolf
+close at its heels (`ZIGZAG_RANGE`) it cuts from side to side at sharp angles; the one that
+raised the alarm at a predator it saw stots for its first bounds (`STOT_SECS`; not at a
+bang or fire, when wounded, or with a wolf close); a wounded animal runs lame. A blow is felt at once (the animal reacts the same tick). Wolves prefer deer, take a boar only when nothing easier is about (a
+piglet sooner, a tusker last of all) and give room to a boar charging at them (not to one
+charging past them at something else). Bird flocks peck on the
 ground and lift off together. Gunfire, explosions, howls and fire scare everything.
 `WildlifeSettings` tunes respawn, thirst, hunger, skittishness and howling.
 
@@ -93,7 +115,9 @@ stands. Shot down on its knees, it falls from there, its weapon left where it se
 plant their feet too (a
 test fails if a hoof or paw on the ground slides) in each species' footfalls: deer walk in
 lateral sequence, trot and gallop (rotary) and bound away when they bolt from a stand, wolves
-walk, trot, lope and gallop, boars walk, trot and gallop (transverse) on quick, short strides,
+walk, trot, lope and gallop, boars walk, trot and gallop (transverse) on quick, short strides
+(the fore feet coming down under the chest, folded high as they swing; piglets scamper,
+quicker still and bouncing high),
 rabbits hop and half-bound with the hind feet landing ahead of the fore feet. Strides lengthen
 and quicken with speed; deer, wolf and boar backs bend at the loin,
 arching as the hind feet swing up past the fore feet and hollowing as the legs stretch out
@@ -107,8 +131,11 @@ crouched, reaches with jaws open as it closes and snaps, grips and shakes on the
 rooting boar shoves its snout into the soil and levers it up, sweeping from side to side with
 the jaw working, and lifts its head now and then to scent the air; alarmed, it champs its
 jaws; it runs with its tail up, and charges head down to hook its tusks up and sideways
-through what it strikes. Hurt but not killed, an animal flinches: it jolts and rolls away
-from the blow, hunched and ducking, head jerking away, ears pinned flat and tail clamped, and
+through what it strikes; alarmed or charging, its crest of long, pale-tipped bristles stands
+up along its nape and withers. Hurt but not killed, an animal flinches, big enough to read
+at 25 m: it jolts and rolls away from the blow, hunched and ducking, head and neck swinging
+hard away (so a blow from the far side reads from this side too), ears
+pinned flat and tail clamped, stumbles as a foreleg gives, hitches in its stride and
 staggers a step or two before it runs. A killed animal goes down forequarters first (onto its
 chest and knees on the run), then over onto its side away from the blow, and settles. Starlings beat their wings (extended
 downstroke, folded upstroke), bound on folded wings between bursts, glide, bank into turns,
@@ -129,11 +156,17 @@ All art is generated in code (`src/art`), since no third-party art may go in the
   skeleton with two-bone IK for arms and legs poses them for every combat state. Each team
   shares one mesh per piece.
 - **Wildlife** (`art/animals.rs`): sculpted red deer (stags with antlers and a neck mane),
-  grey wolves, wild boar (a bristly dark coat with a mane along the spine, a wedge head with
-  the flat snout disc, small eyes and pricked ears, cloven trotters with dewclaws, curved
-  tusks on the tuskers, and a size down, pale-striped piglets) and European rabbits, with fur
+  grey wolves, wild boar (front-heavy and wedge-shaped: a deep chest and massive shoulders
+  under the hump of the withers, the back sloping to a narrow, low rump, short stout legs, a
+  short thick neck and a big wedge head tapering to the flat snout disc; a bristly dark coat
+  with a crest of pale-tipped bristles down the nape and over the withers that rises when the
+  boar is roused, small eyes and pricked ears, cloven trotters with dewclaws, curved tusks on
+  the tuskers, the upper pair in the lip and the lower on the jaw, and a size down,
+  pale-striped piglets, striped down to the jaw) and European rabbits, with fur
   textures that follow the coat, baked ambient occlusion, IK legs and planted feet, deer, wolf
-  and boar torsos in two halves that bend at the loin over a closed seam, and starlings with
+  and boar torsos in two halves that bend at the loin over a closed seam (no crease: the fore
+  half's rim lies on the skin with its normals, and the croup swells a hair over the fore
+  half's hinge where the back slopes away behind it), and starlings with
   iridescent spotted plumage and feathered wings that fold, spread and beat.
 - **Arena** (`art/arena.rs`): a sandstone amphitheater with arched stands, gates with
   portcullises, fluted columns, banners, braziers with flickering fire and light, rubble,
@@ -323,10 +356,22 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   enemies, and that a ranged squad sends a flanker.
 - `tests/wildlife.rs`: deer bolt from a runner but let a sneaker much closer, panic spreads
   through a herd, a wolf pack stalks, charges, kills and feeds, birds take off together and
-  land again, a sounder roots about and wanders, boars run from a sprinter in the open, a
-  boar cornered in a pen charges before it is trodden on and slashes, a wounded boar turns on
-  whoever hurt it, a sow charges to defend her piglets (a lone sow runs), and wolves pick a
-  piglet over its elders.
+  land again, a sounder roots about and wanders together, boars run from a sprinter in the
+  open, a boar cornered in a pen charges before it is trodden on and slashes, a wounded boar turns on
+  whoever hurt it (the shooter, not what it was watching), stands and scents when it can't
+  find who rather than charge at nothing, and runs from fire rather than
+  charge into it, a sow charges to defend her piglets (a lone sow runs), wolves give room to
+  a boar charging at them but not to one charging past (at six spots), wolves pick a piglet
+  over its elders, a pack of three, four or five picks the wounded deer from the start, runs
+  only it and catches it (unhurt, the herd's nearest), over eight seeded hunts for each pack
+  size its flankers run out on the quarry's sides (both on their own for most of the
+  flanking, abreast of it for a second in at least half the hunts, never level with it on
+  the far side) while the tester drives from behind and the ambusher lies in wait beyond the
+  herd, a herd's alarm spreads within a reaction time (each deer looks toward the shot
+  before it bolts, and the herd stays bunched), a deer runs straight from a wolf well back
+  and zigzags once it is close, a deer stots at a wolf it sees but runs flat out from a bang, a pack stalks in on a herd it scents from further off than
+  it would run one down (`SCENT_REACH`), and a pack gives up a chase after its time, all
+  together, rests its time out though hungry, and hunts again.
 - `tests/demo.rs`: the arena fight keeps going for a minute (shots, attacks, blocks, cover,
   downed and revived) inside the arena, and over six fights with different randomness squad
   mates revive at least twice a minute on average and in every fight at least once; the meadow
@@ -378,9 +423,23 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   to bite, a boar rooting and its charge and slash, deer, wolves and boars flinching from a
   blow, a deer killed at a gallop, a starling's flight; `NPC_STRIPS=deer-walk,...` shoots
   only some), plus triangle and build-time budgets and a check that the arena art sits on
-  every collider. The animal unit tests check that no planted foot slides in any gait (boars,
-  tuskers and piglets included), that a rooting boar's snout reaches the soil, and that a
-  hurt animal jolts away from the blow, pins its ears, steps and settles.
+  every collider. In `tests/art_animals.rs` only the checks run by default (the budgets, and a
+  few close-ups and strips rendered small, each of which must show its animal, the animals
+  living on undrawn between shots); the full-size close-ups and strips are ignored tests
+  (`-- --ignored`), and so are three pictures of the AI at work, each one live run shot at
+  eight moments: a pack's hunt from above with its parts marked in colour
+  (`animal_live_pack_hunt.png`), a chased deer zigzagging seen from low behind
+  (`animal_live_zigzag.png`) and a herd's alarm spreading (`animal_live_herd_alarm.png`). Each walking animal's close-up is a still from a real run at the game's
+  rate (it walks on toward the camera's mark and is shot at its moment), so its legs are
+  where its gait has them. The animal unit tests check that no planted foot slides in any
+  gait by more than a millimetre a frame (boars, tuskers and piglets included, deer as they
+  bolt and pull up, a rabbit's paws even as they peel off at a run), that a stotting deer
+  bounds high on all fours and that a rabbit's fore paws never land out of reach, that a rooting boar's snout reaches the soil, that a tusker's upper tusks stay in its
+  lip as its jaw opens, that a hurt animal jolts away from the blow, pins its ears, stumbles,
+  steps, hitches in its stride and settles, its head swinging well away from a blow from
+  either side, and that the flinch does not jump when the state
+  changes, that heads turn to a threat and to a noise before the neck, and that a shot
+  starling lands as it was tumbling.
 - `tests/screenshots.rs`: renders the arena, its stands, a cover fight, the sparring lane, the
   duel and the meadow on a GPU or lavapipe and checks the fighters and deer show up.
   `NPC_SCREENSHOT_DIR=dir` keeps the PNGs.

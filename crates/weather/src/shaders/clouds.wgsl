@@ -322,8 +322,12 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
             // The ambient fill is light from all around: a cloud scattering nearly all it gets
             // shines with it as fog does (darkening it made night decks several times darker
             // than the fog under them).
+            // The blue sky over the top diffuses down through a thick deck like the sun does
+            // (the last term): without it an overcast's underside took only the sun's color
+            // and a snowfall looked beige.
             var s = key * light * powder * mix(belly, 1.0, 0.4)
-                + mix(ground_below, sky, sqrt(h01)) * belly * (0.5 + 0.5 * h01) + fill;
+                + mix(ground_below, sky, sqrt(h01)) * belly * (0.5 + 0.5 * h01) + fill
+                + sky * (1.0 - sqrt(h01)) * mix(belly, 1.0, 0.4) / (1.0 + 0.11 * od);
             // Lightning lights the cloud from inside: the light diffuses through kilometers of
             // droplets, so the whole cloud base around the channel glows.
             if (clouds.flash.w > 0.0) {

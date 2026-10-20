@@ -421,6 +421,9 @@ pub struct HeatShield {
     pub temperature_k: f32,
     /// Heat flux at the nose right now, W/m².
     pub heat_flux_w_m2: f32,
+    /// Which way the air streams past the ship, in its own axes (unit; zero in vacuum or
+    /// at rest): where its glowing wake trails.
+    pub flow_local: Vec3,
 }
 
 impl Default for HeatShield {
@@ -433,6 +436,7 @@ impl Default for HeatShield {
             max_temperature_k: 1_900.0,
             temperature_k: 288.0,
             heat_flux_w_m2: 0.0,
+            flow_local: Vec3::ZERO,
         }
     }
 }
@@ -446,7 +450,8 @@ pub fn heating_system(mut q: Query<(&mut HeatShield, &VehicleForces, &mut Vehicl
     q.par_iter_mut().for_each(|(mut shield, forces, mut tel)| {
         let f = forces.frame;
         let dt = f.dt;
-        let v = f.airspeed_vector().length();
+        let air = f.airspeed_vector();
+        let v = air.length();
         let rho = f.air.density.max(0.0);
         let flux = SUTTON_GRAVES * (rho / shield.nose_radius_m.max(0.05)).sqrt() * v * v * v;
         let ambient = if rho > 0.0 { f.air.temperature_k } else { 3.0 };
@@ -467,6 +472,11 @@ pub fn heating_system(mut q: Query<(&mut HeatShield, &VehicleForces, &mut Vehicl
             next
         };
         shield.heat_flux_w_m2 = flux;
+        shield.flow_local = if rho > 0.0 && v > 1.0 {
+            f.rotation.inverse() * (-air / v)
+        } else {
+            Vec3::ZERO
+        };
         tel.hull_temperature_k = shield.temperature_k;
     });
 }

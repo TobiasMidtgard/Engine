@@ -126,6 +126,7 @@ impl Plugin for AnimationPlugin {
                     animator::queue_triggers,
                     (model::spawn_rig_models, model::despawn_orphan_parts),
                     body::drive_bodies,
+                    body::hide_drawn_bodies,
                 )
                     .chain()
                     .in_set(AnimSet::Setup),
@@ -161,6 +162,7 @@ impl Plugin for AnimationPlugin {
                     animator::publish_pose,
                     retarget::retarget_poses,
                     face::face_system,
+                    (face::give_appearance_faces, face::appearance_face_system),
                     (
                         skin::update_skin_poses,
                         attach::attachment_system,

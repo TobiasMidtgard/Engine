@@ -458,6 +458,68 @@ fn the_control_api_turns_the_flight_assist_off_to_coast() {
     }
 }
 
+/// Re-entry plasma: at 7 km/s and 70 km the shock layer and wake (each a hot and an outer
+/// part) and the wingtip streamers show, trailing behind and above a ship flying nose 40° up; held still at the same height,
+/// or in vacuum, neither does.
+#[test]
+fn reentry_air_glows_and_trails_the_ship() {
+    use engine_render::MeshRenderer;
+    use engine_vehicles::visuals::PlasmaVisual;
+    let plasma = |altitude: f64, speed: f32| {
+        let mut app = vehicle_app();
+        calm(&mut app);
+        let t = Transform::from_translation(DVec3::new(0.0, altitude, 0.0))
+            .with_rotation(Quat::from_rotation_x(40f32.to_radians()));
+        let ship = spawn_with(&mut app, |c| presets::spaceplane(c, t));
+        app.world.entity_mut(ship).insert(Velocity {
+            linear: Vec3::NEG_Z * speed,
+            angular: Vec3::ZERO,
+        });
+        app.world.get_mut::<Spacecraft>(ship).unwrap().assist.mode = AssistMode::Off;
+        run_for(&mut app, 0.2);
+        let flux = app.world.get::<HeatShield>(ship).unwrap().heat_flux_w_m2;
+        let mut q = app
+            .world
+            .query::<(&ChildOf, &PlasmaVisual, &MeshRenderer, &Transform)>();
+        // (is a wake, is the main wake, shown, placed)
+        let parts: Vec<(bool, bool, bool, Transform)> = q
+            .iter(&app.world)
+            .filter(|(p, ..)| p.parent() == ship)
+            .map(|(_, v, r, t)| {
+                let main = v.wake.is_some_and(|w| w.from.is_none());
+                (v.wake.is_some(), main, r.visible, *t)
+            })
+            .collect();
+        eprintln!("{altitude} m at {speed} m/s: nose flux {flux:.0} W/m²");
+        assert_eq!(
+            parts.len(),
+            6,
+            "a shock layer and a wake (hot and outer parts) and two wingtip streamers"
+        );
+        parts
+    };
+    for (wake, main, visible, t) in plasma(70_000.0, 7_000.0) {
+        assert!(visible);
+        if wake {
+            let along = t.rotation * Vec3::Z;
+            let a = 40f32.to_radians();
+            eprintln!(
+                "wake {:.0} m along {along:.2} from {:.1}",
+                t.scale.z, t.translation
+            );
+            assert!(along.distance(Vec3::new(0.0, a.sin(), a.cos())) < 0.05);
+            assert!(t.scale.z > if main { 100.0 } else { 40.0 });
+        }
+    }
+    for (altitude, speed) in [(70_000.0, 0.0), (200_000.0, 7_800.0), (2_000.0, 250.0)] {
+        assert!(
+            plasma(altitude, speed)
+                .iter()
+                .all(|(.., visible, _)| !visible)
+        );
+    }
+}
+
 /// `vehicles.place` sets a ship nose up and banked, with its shield as hot as re-entry
 /// leaves it (the re-entry tour shot holds the ship like this).
 #[test]
