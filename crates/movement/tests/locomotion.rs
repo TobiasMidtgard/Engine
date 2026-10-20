@@ -1396,9 +1396,8 @@ fn roof_hatch(app: &mut App) -> Entity {
 
 #[test]
 fn climbs_up_through_a_roof_hatch_onto_the_deck() {
-    // Climbing back down through it, and waiting under a closed hatch, are checked against
-    // the real physics backend: the stand-in pushes a capsule out of a box the shortest way,
-    // up through a closed hatch or onto the header's edge.
+    // Climbing back down through it is checked against the real physics backend: the
+    // stand-in pushes a capsule out of a box the shortest way, onto the header's edge.
     let mut app = app();
     roof_hatch(&mut app);
     let c = character(
@@ -1423,6 +1422,50 @@ fn climbs_up_through_a_roof_hatch_onto_the_deck() {
         "on the deck: {p:?}"
     );
     assert_eq!(triggered(&app, c, "ladder_exit"), 1);
+}
+
+#[test]
+fn waits_a_rung_or_two_below_a_closed_hatch_until_it_opens() {
+    let mut app = app();
+    roof_hatch(&mut app);
+    let cover = block(
+        &mut app,
+        DVec3::new(0.0, 3.265, -1.6),
+        Vec3::new(1.0, 0.05, 1.0),
+    );
+    let c = character(
+        &mut app,
+        DVec3::new(0.0, 0.9, 1.5),
+        MovementProfile::pilot(),
+    );
+    intent(&mut app, c, |i| i.direction = Vec3::NEG_Z);
+    run_until(&mut app, 3.0, |w| {
+        w.get::<Mover>(c).unwrap().ladder.is_some()
+    });
+    // Up the ladder, then held with room over the head: out of the way of a cover that drops.
+    let mut head = 0.0f64;
+    let secs = run_until(&mut app, 4.0, |w| {
+        head = head.max(w.get::<Transform>(c).unwrap().translation.y + 0.9);
+        false
+    });
+    assert!(secs >= 4.0);
+    let underside = 3.24;
+    assert!(
+        underside - head >= 0.4 && underside - head < 0.6,
+        "head {head:.2} under a cover at {underside}"
+    );
+    assert!(app.world.get::<Mover>(c).unwrap().ladder.is_some());
+    // Breached: on up and onto the deck.
+    app.world.despawn(cover);
+    run_until(&mut app, 4.0, |w| {
+        let m = w.get::<Mover>(c).unwrap();
+        m.grounded && m.mode != LocomotionMode::Mantle && m.ladder.is_none()
+    });
+    let p = pos(&app, c);
+    assert!(
+        (p.y - 3.29 - 0.9).abs() < 0.05 && p.z < -2.2,
+        "on the deck: {p:?}"
+    );
 }
 
 #[test]

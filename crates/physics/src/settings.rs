@@ -29,6 +29,16 @@ pub struct PhysicsSettings {
     /// Regions farther than this from every `SimulationFocus` pause (bodies there keep their
     /// state). `None` = simulate everywhere. Has no effect when there is no focus.
     pub freeze_distance_m: Option<f64>,
+    /// Level of detail: bodies farther than this from every `SimulationFocus` simulate with
+    /// substeps twice as long, meters. A pixel there spans 15 cm (1080p, 60° field of view),
+    /// more than the difference. Busy far piles split off
+    /// into regions of their own for it, and merge back when they come near. `None` = full
+    /// detail everywhere. Has no effect when there is no focus.
+    pub coarse_beyond_m: Option<f64>,
+    /// Farther than this (and past `coarse_beyond_m`), bodies step every other frame with
+    /// substeps four times as long, and are drawn moving on at their velocity in between,
+    /// meters. Regions with characters stay coarse. `None` = never at half rate.
+    pub half_rate_beyond_m: Option<f64>,
     /// Rolling resistance coefficient on hard ground: how much balls, barrels, wheels and
     /// capsules slow down rolling (≈ 0.01 for rubber on concrete; 0 = roll forever). Mud, sand,
     /// snow and grass add more, from the surface's deformation.
@@ -80,6 +90,8 @@ impl Default for PhysicsSettings {
             contact_stiffness_hz: 60.0,
             region_radius_m: 1000.0,
             freeze_distance_m: Some(25_000.0),
+            coarse_beyond_m: Some(150.0),
+            half_rate_beyond_m: Some(600.0),
             rolling_resistance: 0.01,
             max_speed: 100_000.0,
             contact_events: true,

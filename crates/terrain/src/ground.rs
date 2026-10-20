@@ -4,7 +4,9 @@
 use std::sync::Arc;
 
 use engine_core::math::{DQuat, DVec3, Vec3};
-use engine_world::{GroundQuery, GroundSample, SurfaceId, SurfaceMaterials};
+use engine_world::{
+    ForestQuery, ForestSample, GroundQuery, GroundSample, SurfaceId, SurfaceMaterials,
+};
 
 use crate::chunk::ChunkSource;
 use crate::palette::{SurfaceIds, TerrainPalette};
@@ -50,24 +52,7 @@ impl GroundTerrain {
         // Solid ground, also under the sea (the sea itself is the water module's `Water`).
         let s = self.source.sample(base, up, dir, 0.0);
         let point_local = base + up * s.height;
-
-        // Normal from two nearby samples (0.5 m apart).
-        let e = 0.5;
-        let t1 = up.any_orthonormal_vector();
-        let t2 = up.cross(t1);
-        let probe = |offset: DVec3| -> DVec3 {
-            let q = base + offset;
-            match self.source.map.locate(q) {
-                Some((d, u, b)) => b + u * self.source.sample(b, u, d, 0.0).height,
-                None => q,
-            }
-        };
-        let pa = probe(t1 * e);
-        let pb = probe(t2 * e);
-        let mut n = (pa - point_local).cross(pb - point_local).normalize_or(up);
-        if n.dot(up) < 0.0 {
-            n = -n;
-        }
+        let n = self.local_normal(base, up, point_local, 0.5, 0.0);
         let slope = 1.0 - n.dot(up);
         let under_sea = s.height < 0.0 && self.source.shape.ocean;
         let mut surface = self.palette.classify(&s, slope, under_sea, ids);
@@ -84,6 +69,31 @@ impl GroundTerrain {
             surface = g.surface;
         }
         Some((world_point, world_normal, surface, s.height))
+    }
+
+    /// Terrain-local ground normal at `point_local` (the surface over `base`), from two
+    /// samples `e` meters away with detail down to `min_wavelength`.
+    pub(crate) fn local_normal(
+        &self,
+        base: DVec3,
+        up: DVec3,
+        point_local: DVec3,
+        e: f64,
+        min_wavelength: f64,
+    ) -> DVec3 {
+        let t1 = up.any_orthonormal_vector();
+        let t2 = up.cross(t1);
+        let probe = |offset: DVec3| -> DVec3 {
+            let q = base + offset;
+            match self.source.map.locate(q) {
+                Some((d, u, b)) => b + u * self.source.sample(b, u, d, min_wavelength).height,
+                None => q,
+            }
+        };
+        let pa = probe(t1 * e);
+        let pb = probe(t2 * e);
+        let n = (pa - point_local).cross(pb - point_local).normalize_or(up);
+        if n.dot(up) < 0.0 { -n } else { n }
     }
 }
 
@@ -133,6 +143,13 @@ impl GroundQuery for TerrainGround {
             normal,
             surface,
         })
+    }
+}
+
+/// The same terrains answer [`engine_world::ForestCover`]: woods where their ground shows forest.
+impl ForestQuery for TerrainGround {
+    fn sample(&self, p: DVec3) -> Option<ForestSample> {
+        self.nearest(p)?.forest(p)
     }
 }
 

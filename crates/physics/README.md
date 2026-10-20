@@ -194,6 +194,26 @@ under a micrometer).
 - Static colliders are copied into every region that could touch them (the shape data is
   shared); a region travelling with its bodies drops the copies it leaves behind, so a ship
   crossing a continent holds only the statics near it. Regions far from every `SimulationFocus` pause (`freeze_distance_m`).
+- Level of detail (`src/lod.rs`): far physics simulates more coarsely, where a pixel spans
+  more than the difference (15 cm at 150 m, 60 cm at 600 m on a 1080p screen). A region whose
+  nearest body is past `coarse_beyond_m` (150 m) from every focus takes substeps twice as
+  long; past `half_rate_beyond_m` (600 m) it steps every other frame with substeps four times
+  as long, and its bodies are drawn moving on at their velocity in between (a region with
+  characters stays coarse: they walk every frame). Most of a scene shares one region, so every
+  half second busy far clusters split off: bodies are grouped by how close they are (and by
+  joints), and a group wholly far away, with something awake in it and no character, moves
+  into a coarse region of its own. Sleeping groups stay put (they cost almost nothing).
+  Regions of different tiers merge as soon as their bodies come within reach of each other, so
+  a ball thrown in from 260 m hits the crate by the player at full detail. Most of what tumbling
+  bodies cost is finding their collisions, which the longer substeps do half or a quarter as
+  often; fewer solver iterations saved little more and kept a far heap awake, so they stay.
+  906 rocks tumbling in six drums cost 19.8 ms a step at full detail, 12.0 ms coarse and 6.4 ms
+  at half rate, and no rock leaves its drum; with two drums near the player, two at 300–380 m
+  and two at 0.9–1.1 km, 13.5 ms instead of 19.8
+  (`cargo run -p engine_physics --release --example lod_field`). `PHYSICS_FOCUS=400,0,0` on
+  the proving ground example simulates the yard as if the player were 400 m away: the
+  rockfall pours a little slower there and heaps a little tighter, at half the cost (14 ms a
+  step instead of 27.5 while pouring).
 - A `WorldShift` (the space module re-anchoring the world) moves the simulation in the same
   frame. A floating-origin move only moves region anchors: sleeping bodies stay asleep and
   contacts carry on. A turn into another planet's frame rotates each region's contents about
@@ -205,8 +225,9 @@ With `engine_debug::DebugPlugin` in the app, `PhysicsDebug` (a registered resour
 `physics.debug {"all": true}`) draws over the scene, within `radius_m` (150 m) of the focus or
 camera:
 
-- `colliders`: wireframes, green awake, blue-gray asleep, yellow kinematic, gray static,
-  magenta sensors, cyan characters (big meshes and heightfields as their bounds).
+- `colliders`: wireframes, green awake (orange far away and coarse, red at half rate),
+  blue-gray asleep, yellow kinematic, gray static, magenta sensors, cyan characters (big
+  meshes and heightfields as their bounds).
 - `contacts`: touching points with an arrow along the normal that grows with the force.
 - `joints`: both anchors joined by a line, orange turning red as a breakable joint nears its
   break force or the anchors pull apart; a ring marks a world pin.
@@ -229,6 +250,8 @@ proving ground with the overlay.
 | `contact_stiffness_hz` | 60 | Contact spring frequency (static contacts 2×). 30 Hz lets a 30-box tower sag 24 cm, 60 Hz ~6 cm. |
 | `region_radius_m` | 1000 | Size of a region. |
 | `freeze_distance_m` | 25 000 | Pause regions this far from every focus (`None` = never). |
+| `coarse_beyond_m` | 150 | Bodies this far from every focus take substeps twice as long (`None` = full detail everywhere). |
+| `half_rate_beyond_m` | 600 | Farther still, they step every other frame (`None` = never). |
 | `rolling_resistance` | 0.01 | Rolling resistance on hard ground (rubber on concrete); soft surfaces add more, 0 = roll forever. |
 | `max_speed` | 100 000 m/s | Velocity clamp (spaceships are fast). |
 | `contact_events`, `impact_events` | on | Send `ContactEvent` / impact `NoiseEvent` + `GroundContact`. |
@@ -237,7 +260,8 @@ proving ground with the overlay.
 | `blast_response`, `blast_scale` | on, 1 | Explosions push bodies; 1 = real blast wind, action games use 3–10. |
 
 `PhysicsStats` (resource, also `physics.*` in `Diagnostics`): bodies, awake bodies, regions,
-touching pairs, step time, substeps, articulated joints, static copies.
+touching pairs, step time, substeps, articulated joints, static copies, and the awake bodies
+simulated coarsely and at half rate.
 
 ## API functions
 
@@ -330,7 +354,10 @@ once); rolling resistance (`tests/rolling.rs`: balls and logs slow at `Crr·g/(1
 concrete, faster on grass and sand, the same on terrain and meshes, barrels stop on sand, barrels at
 4 and 8 m/s roll over terrain and meshes within 5 mm of flat and 25 cm of straight, a ball spun
 on its spot slows at `μ·g·1 cm/(⅖r²)` and stops where it is); the debug view
-(`tests/debug_draw.rs`, contacts on terrain included); a headless screenshot of the proving ground.
+(`tests/debug_draw.rs`, contacts on terrain included); the level of detail (`tests/lod.rs`:
+far drums tumble coarsely and at half rate and keep their rocks, far heaps still fall asleep,
+a ball flying in from afar hits the crate by the player at full detail, a far walker steps every
+frame); a headless screenshot of the proving ground.
 
 ## Done when
 

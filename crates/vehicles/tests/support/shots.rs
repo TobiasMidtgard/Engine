@@ -33,6 +33,36 @@ pub fn gallery_shot(name: &str, warmup: f64, scene: impl FnOnce(&mut App), camer
 /// A vehicle app that renders: the scene runs `warmup` seconds with the renderer held back,
 /// then a few frames render (so exposure settles) and one is saved as `name`.png.
 pub fn shoot(name: &str, warmup: f64, scene: impl FnOnce(&mut App), camera: Transform) {
+    shoot_from(
+        name,
+        warmup,
+        |app| {
+            scene(app);
+            None
+        },
+        camera,
+    );
+}
+
+/// [`shoot`] with the camera riding on the vehicle the scene returns (`camera` in its
+/// frame), for a ship too fast for a camera standing still. Gallery only.
+pub fn gallery_ride(
+    name: &str,
+    warmup: f64,
+    scene: impl FnOnce(&mut App) -> Entity,
+    camera: Transform,
+) {
+    if gallery(name) {
+        shoot_from(name, warmup, |app| Some(scene(app)), camera);
+    }
+}
+
+fn shoot_from(
+    name: &str,
+    warmup: f64,
+    scene: impl FnOnce(&mut App) -> Option<Entity>,
+    camera: Transform,
+) {
     let mut app = vehicle_app();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
@@ -52,9 +82,13 @@ pub fn shoot(name: &str, warmup: f64, scene: impl FnOnce(&mut App), camera: Tran
         ))
         .id()
     });
-    scene(&mut app);
+    let ride = scene(&mut app);
     spawn_with(&mut app, |c| {
-        c.spawn((Camera::perspective(45.0), camera)).id()
+        let mut e = c.spawn((Camera::perspective(45.0), camera));
+        if let Some(vehicle) = ride {
+            e.insert(ChildOf(vehicle));
+        }
+        e.id()
     });
     run_for(&mut app, warmup);
     app.world.remove_resource::<RenderDisabled>();
