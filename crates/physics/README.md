@@ -26,6 +26,13 @@ changing that one plugin line.
   no thickness, or a free-floating 5 cm plank; without it, a 1000 m/s ball flies through the
   plank.
   `MassProperties` is written back.
+  Settled bodies cost next to nothing: a step visits only awake bodies and those with forces of
+  their own, and never takes a sleeping one mutably from Rapier (which would make Rapier redo its
+  bookkeeping for it). 3,000 rock-shaped debris pieces asleep in a pit cost 0.44 ms per step
+  (8.4 ms before): `cargo run -p engine_physics --release --example debris_field -- 3000`.
+  While they tumble, the touching pairs that need spin friction or report hard hits are found in
+  one pass that reads each pair once, in storage order when much of the region is awake: 52 ms
+  per step for the 3,000 (102 ms before), of which Rapier's own step is ~37 ms.
 - **Colliders**: sphere, cuboid, capsule, cylinder, convex hull, triangle mesh, heightfield,
   compound; on the body entity or on its children (one compound body). Shapes scale with the
   entity's `Transform::scale`. Changing a `Collider` rebuilds it. Friction and restitution come

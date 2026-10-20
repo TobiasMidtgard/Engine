@@ -21,7 +21,7 @@
 //! level above: averaged, hair-thin needles melt into solid leaf-shaped blobs, so each level
 //! keeps a share of its needles as sharp strokes a pixel wide (see [`Canvas::needle_width`]).
 
-use engine_core::math::{Rng, Vec2, Vec3, noise::perlin2, smoothstep};
+use engine_core::math::{Rng, Vec2, Vec3, hash01, noise::perlin2, smoothstep};
 use engine_render::Image;
 
 const PI: f32 = std::f32::consts::PI;
@@ -347,6 +347,46 @@ impl Canvas {
                 let n = Vec3::new(-(hx - h0), hy - h0, 1.0).normalize();
                 self.put(x, y, color, n, cov);
             }
+        }
+    }
+
+    /// Flip left to right (normals too).
+    fn mirror(&mut self) {
+        let s = self.size as usize;
+        for y in 0..s {
+            self.px[y * s..(y + 1) * s].reverse();
+            self.nrm[y * s..(y + 1) * s].reverse();
+        }
+        for n in &mut self.nrm {
+            n[0] = -n[0];
+        }
+    }
+
+    /// Darken everything painted by `f`.
+    fn shade(&mut self, f: f32) {
+        for p in &mut self.px {
+            for c in &mut p[..3] {
+                *c *= f;
+            }
+        }
+    }
+
+    /// Lay this canvas over `under` (the same size): what this one leaves uncovered shows
+    /// `under`.
+    fn over(&mut self, under: &Canvas) {
+        for ((p, n), (q, m)) in self
+            .px
+            .iter_mut()
+            .zip(&mut self.nrm)
+            .zip(under.px.iter().zip(&under.nrm))
+        {
+            let a = p[3];
+            for c in 0..3 {
+                // Colors are blended onto black, so they are already weighted by coverage.
+                p[c] += q[c] * (1.0 - a);
+                n[c] = m[c] + (n[c] - m[c]) * a;
+            }
+            p[3] = a + q[3] * (1.0 - a);
         }
     }
 
@@ -1768,6 +1808,171 @@ fn paint_atlas(kind: LeafKind, cs: u32, seed: u64, min_needle_px: f32) -> Canvas
     atlas
 }
 
+/// Texels per side of a mass atlas ([`mass_textures`]): far cards are a few dozen pixels on
+/// screen.
+pub const MASS_ATLAS_SIZE: u32 = 512;
+
+/// Paint the atlas far and distant crowns draw with: each cell's spray (the same layout as
+/// [`leaf_textures`], so the cards keep their UVs) in front of two darker sprays from deeper
+/// in the crown, over a dark lumpy mass of shaded leaves rounded at its edges. A far crown
+/// keeps only a third of the cards, so each must read as a clump of foliage rather than one
+/// twig with sky showing through it.
+pub fn mass_textures(kind: LeafKind, size: u32, seed: u64) -> LeafTextures {
+    let n = ATLAS_CELLS;
+    let cs = (size / n).max(1);
+    // Needles are painted at least a pixel wide (see `Canvas::needle_width`).
+    let min_px = if kind.is_needles() { 1.0 } else { 0.0 };
+    let cells: Vec<Canvas> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..(n * n) as usize)
+            .map(|c| scope.spawn(move || mass_cell(kind, c, cs, seed, min_px)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("leaf painter"))
+            .collect()
+    });
+    let mut atlas = Canvas::new(cs * n);
+    for (c, cell) in cells.iter().enumerate() {
+        let (ox, oy) = ((c as u32 % n) * cs, (c as u32 / n) * cs);
+        for y in 0..cs {
+            let src = (y * cs) as usize..((y + 1) * cs) as usize;
+            let dst = ((oy + y) * cs * n + ox) as usize..((oy + y) * cs * n + ox + cs) as usize;
+            atlas.px[dst.clone()].copy_from_slice(&cell.px[src.clone()]);
+            atlas.nrm[dst].copy_from_slice(&cell.nrm[src]);
+        }
+    }
+    atlas.into_textures()
+}
+
+/// One cell of [`mass_textures`].
+fn mass_cell(kind: LeafKind, cell: usize, cs: u32, seed: u64, min_px: f32) -> Canvas {
+    let mut front = paint_cell(kind, cell, cs, seed, min_px);
+    // Two sprays from deeper in the crown, mirrored so their twigs don't line up with the
+    // front one's, in its shade.
+    for (layer, shade) in [(1u64, 0.62f32), (2, 0.45)] {
+        let mut back = paint_cell(kind, cell, cs, seed ^ (0xb0d1 * layer), min_px);
+        if layer == 1 {
+            back.mirror();
+        }
+        back.shade(shade);
+        front.over(&back);
+    }
+    // The mass behind them: leaves in deep shade, packed where the sprays' coverage blurred
+    // says the crown is thick. Each leaf is a cell of jittered points with its own shade and
+    // tilt, darker where it tucks under its neighbors; whole leaves drop out toward the
+    // thin edges, so the outline stays ragged instead of a smooth blob.
+    let s = cs as usize;
+    let r = (0.06 * cs as f32).max(1.0) as usize;
+    let blurred = box_blur(&front.px, s, r);
+    let alpha_at = |x: f32, y: f32| {
+        let (xx, yy) = (
+            (x as i32).clamp(0, s as i32 - 1) as usize,
+            (y as i32).clamp(0, s as i32 - 1) as usize,
+        );
+        blurred[yy * s + xx][3]
+    };
+    let leaf = match kind {
+        LeafKind::Lobed => 0.07,
+        LeafKind::Broad => 0.06,
+        LeafKind::Small => 0.04,
+        LeafKind::LongNeedles => 0.035,
+        LeafKind::ShortNeedles | LeafKind::Frond => 0.03,
+    } * cs as f32;
+    let edge = (0.04 * cs as f32).max(1.0);
+    let cell_seed = seed ^ (cell as u64).wrapping_mul(0x51ed_270b) ^ 0x3a55;
+    let mut fill = Canvas::new(cs);
+    for y in 0..s {
+        for x in 0..s {
+            // Fade out at the cell's border so it never bleeds into its neighbors.
+            let border = (x.min(y).min(s - 1 - x).min(s - 1 - y) as f32 / edge).min(1.0);
+            let a = blurred[y * s + x][3];
+            if border <= 0.0 || a < 0.05 {
+                continue;
+            }
+            let p = Vec2::new(x as f32, y as f32) / leaf;
+            let (gx, gy) = (p.x.floor() as i64, p.y.floor() as i64);
+            let (mut d1, mut d2, mut id) = (f32::MAX, f32::MAX, (0i64, 0i64));
+            for (ox, oy) in (-1..=1).flat_map(|ox| (-1..=1).map(move |oy| (ox, oy))) {
+                let (cx, cy) = (gx + ox, gy + oy);
+                let c = Vec2::new(
+                    cx as f32 + hash01(cx, cy, 0, cell_seed),
+                    cy as f32 + hash01(cx, cy, 1, cell_seed),
+                );
+                let d = (p - c).length_squared();
+                if d < d1 {
+                    (d2, d1, id) = (d1, d, (cx, cy));
+                } else if d < d2 {
+                    d2 = d;
+                }
+            }
+            let (cx, cy) = id;
+            let center = Vec2::new(
+                cx as f32 + hash01(cx, cy, 0, cell_seed),
+                cy as f32 + hash01(cx, cy, 1, cell_seed),
+            ) * leaf;
+            let thick = alpha_at(center.x, center.y);
+            if thick < 0.3 + 0.25 * hash01(cx, cy, 2, cell_seed) {
+                continue;
+            }
+            let gap = (d2.sqrt() - d1.sqrt()).min(1.0);
+            let tuck = 0.55 + 0.45 * smoothstep(0.0, 0.25, gap);
+            let shade = (0.2 + 0.2 * hash01(cx, cy, 3, cell_seed)) * tuck;
+            let base = blurred[y * s + x];
+            let color = [0, 1, 2].map(|c| base[c] / a.max(1e-3) * shade);
+            let tilt = Vec2::new(
+                hash01(cx, cy, 4, cell_seed) - 0.5,
+                hash01(cx, cy, 5, cell_seed) - 0.5,
+            ) * 0.7;
+            let normal = Vec3::new(tilt.x, tilt.y, 1.0).normalize();
+            fill.put(x as i32, y as i32, color, normal, border);
+        }
+    }
+    front.over(&fill);
+    front
+}
+
+/// Box blur of a square image `s` texels wide, radius `r` texels (two passes of running sums).
+fn box_blur(px: &[[f32; 4]], s: usize, r: usize) -> Vec<[f32; 4]> {
+    let pass = |src: &[[f32; 4]], horizontal: bool| {
+        let mut out = vec![[0.0f32; 4]; s * s];
+        let idx = |line: usize, k: usize| {
+            if horizontal {
+                line * s + k
+            } else {
+                k * s + line
+            }
+        };
+        let norm = 1.0 / (2 * r + 1) as f32;
+        for line in 0..s {
+            let mut acc = [0.0f32; 4];
+            for k in 0..=r.min(s - 1) {
+                for c in 0..4 {
+                    acc[c] += src[idx(line, k)][c];
+                }
+            }
+            for k in 0..s {
+                for c in 0..4 {
+                    out[idx(line, k)][c] = acc[c] * norm;
+                }
+                if k + r + 1 < s {
+                    let add = src[idx(line, k + r + 1)];
+                    for c in 0..4 {
+                        acc[c] += add[c];
+                    }
+                }
+                if k >= r {
+                    let sub = src[idx(line, k - r)];
+                    for c in 0..4 {
+                        acc[c] -= sub[c];
+                    }
+                }
+            }
+        }
+        out
+    };
+    pass(&pass(px, true), false)
+}
+
 /// Paint a leaf texture (color and alpha only; see [`leaf_textures`] for the normal map).
 pub fn leaf_texture(kind: LeafKind, size: u32, seed: u64) -> Image {
     leaf_textures(kind, size, seed).color
@@ -1801,6 +2006,45 @@ mod tests {
             assert!(c0 > 0.08 && c0 < 0.9, "{kind:?} coverage {c0}");
             let c3 = cover(&img.mips[2]);
             assert!((c3 - c0).abs() < 0.12, "{kind:?} mip coverage {c3} vs {c0}");
+        }
+    }
+
+    #[test]
+    fn mass_atlases_are_denser_clumps_inside_their_cells() {
+        let cover = |img: &Image, cell: Option<u32>| {
+            let s = img.width;
+            let mut n = 0;
+            let mut total = 0;
+            for (i, p) in img.data.as_chunks::<4>().0.iter().enumerate() {
+                let (x, y) = (i as u32 % s, i as u32 / s);
+                let half = s / ATLAS_CELLS;
+                // `Some(k)`: only texels within k of a cell's border.
+                if let Some(k) = cell {
+                    let (cx, cy) = (x % half, y % half);
+                    if cx.min(cy).min(half - 1 - cx).min(half - 1 - cy) >= k {
+                        continue;
+                    }
+                }
+                total += 1;
+                if p[3] as f32 / 255.0 >= ALPHA_CUTOFF {
+                    n += 1;
+                }
+            }
+            n as f32 / total.max(1) as f32
+        };
+        for kind in [
+            LeafKind::Broad,
+            LeafKind::Small,
+            LeafKind::Lobed,
+            LeafKind::LongNeedles,
+            LeafKind::ShortNeedles,
+        ] {
+            let leaves = leaf_textures(kind, 256, 7).color;
+            let mass = mass_textures(kind, 256, 7).color;
+            let (l, m) = (cover(&leaves, None), cover(&mass, None));
+            assert!(m > l * 1.6 && m < 0.85, "{kind:?}: mass {m} vs leaves {l}");
+            // Nothing at the cells' borders, so filtering doesn't bleed into a neighbor.
+            assert!(cover(&mass, Some(1)) < 0.01, "{kind:?} border");
         }
     }
 

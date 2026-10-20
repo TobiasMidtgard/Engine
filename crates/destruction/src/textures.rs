@@ -2214,9 +2214,66 @@ fn ice(t: &Tile, s: u64, x: f32, y: f32) -> Texel {
     }
 }
 
+/// Frames in [`dust_puffs`].
+pub const DUST_FRAMES: u32 = 4;
+
+/// Soft dust puffs for camera-facing sprites: [`DUST_FRAMES`] frames side by side, each a
+/// white cloud whose alpha falls off to nothing before the frame's edge, with a ragged rim and
+/// denser knots inside, so overlapping puffs blend into one cloud with no visible outline.
+pub fn dust_puffs(size: u32, seed: u64) -> Image {
+    use engine_core::math::noise::fbm2;
+    let n = size.max(8);
+    let w = n * DUST_FRAMES;
+    let mut px = vec![[0u8; 4]; (w * n) as usize];
+    for f in 0..DUST_FRAMES {
+        let s = seed.wrapping_add(f as u64 * 977);
+        for r in 0..n {
+            for c in 0..n {
+                // -1..1 across the frame.
+                let x = (c as f32 + 0.5) / n as f32 * 2.0 - 1.0;
+                let y = (r as f32 + 0.5) / n as f32 * 2.0 - 1.0;
+                let (xd, yd) = (x as f64, y as f64);
+                // The rim wanders in and out by angle and the cloud thins in places.
+                let rim = 0.72 + 0.2 * fbm2(xd * 1.6 + 7.0, yd * 1.6, s, 3, 2.0, 0.5);
+                let d = (x * x + y * y).sqrt() / rim.max(0.3);
+                let edge = (1.0 - d).clamp(0.0, 1.0);
+                let body = edge * edge * (3.0 - 2.0 * edge);
+                let knots =
+                    (0.65 + 0.6 * fbm2(xd * 3.2, yd * 3.2, s + 1, 4, 2.0, 0.55)).clamp(0.0, 1.0);
+                let a = (body * knots).clamp(0.0, 1.0);
+                // Brighter knots, a little darker where thin.
+                let v = linear_to_srgb8(0.8 + 0.2 * knots);
+                px[(r * w + f * n + c) as usize] = [v, v, v, (a * 255.0).round() as u8];
+            }
+        }
+    }
+    Image::new(w, n, px.into_iter().flatten().collect(), true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dust_puffs_fade_out_before_their_frame_edges() {
+        // A hard outline at the quad's edge is what made the old mesh puffs look like blobs.
+        let n = 32;
+        let img = dust_puffs(n, 7);
+        let w = n * DUST_FRAMES;
+        let alpha = |x: u32, y: u32| img.data[((y * w + x) * 4 + 3) as usize];
+        for f in 0..DUST_FRAMES {
+            let x0 = f * n;
+            for k in 0..n {
+                for (x, y) in [(x0 + k, 0), (x0 + k, n - 1), (x0, k), (x0 + n - 1, k)] {
+                    assert_eq!(alpha(x, y), 0, "frame {f} edge texel ({x}, {y})");
+                }
+            }
+            assert!(
+                alpha(x0 + n / 2, n / 2) > 100,
+                "frame {f} is dense in the middle"
+            );
+        }
+    }
 
     fn decode(img: &Image) -> Vec<[f32; 4]> {
         img.data
