@@ -72,7 +72,9 @@ pub fn sync_bodies_system(
         format!("{:?}{:?}{}", body.extent, body.bed, body.interactive).hash(&mut hasher);
 
         let depth = typical_depth(body, center, &state.ground);
-        let w = wind.sample(center + DVec3::Y * 10.0);
+        // The sea answers to the mean wind 10 m up, not to each passing gust (a storm's gusts
+        // swing the wind by ±90%); local disturbances such as rotor wash still count.
+        let w = wind.prevailing + wind.local.sample(center + DVec3::Y * 10.0);
         let target = build_waves(&body.waves, Vec2::new(w.x, w.z), depth);
         let idx = match state.bodies.iter().position(|b| b.entity == entity) {
             Some(i) => i,
@@ -99,8 +101,15 @@ pub fn sync_bodies_system(
             b.body = body.clone();
         }
         b.mean_depth = depth;
+        // The sea builds and calms over `response_s`; a wind that jumps in one step (the
+        // weather skipped ahead, a tour stop set a storm) brings its sea state with it.
+        let jump = Vec2::new(w.x - b.wind.x, w.z - b.wind.z).length() > WIND_JUMP;
         b.wind = w;
-        let t = 1.0 - (-dt / body.waves.response_s.max(0.05)).exp();
+        let t = if jump {
+            1.0
+        } else {
+            1.0 - (-dt / body.waves.response_s.max(0.05)).exp()
+        };
         b.waves.blend_toward(&target, t);
         b.waves.advance(dt);
         seen.push(entity);
@@ -125,6 +134,10 @@ pub fn focus_point(focus: &FocusPoints, cameras: &Query<(&GlobalTransform, &Came
         .max_by_key(|(_, c)| c.order)
         .map_or(DVec3::ZERO, |(g, _)| g.translation())
 }
+
+/// A change in the wind over one step bigger than this, m/s, is a jump (gusts change far
+/// more slowly): the waves take on the new sea state at once.
+const WIND_JUMP: f32 = 4.0;
 
 /// Where the ripple grid goes: on the focus when it is over interactive water or near a
 /// stream, else over the nearest interactive water within 150 m (so a camera on the shore

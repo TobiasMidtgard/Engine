@@ -466,18 +466,29 @@ const WAKE_SHELLS: [(f32, f32, f32); 8] = [
     (0.15, 0.38, 0.09),
 ];
 
-/// A unit re-entry wake along +Z (radius 1 where it leaves the ship, length 1): it fades
-/// in over its first few percent, then out, fastest in its core, and is streaked along its
-/// length like the turbulent gas it is (streaks drift around it downstream).
-fn wake_mesh() -> Mesh {
-    let seg = 24;
-    let n = 18;
-    let ts: Vec<f32> = (0..=n).map(|i| (i as f32 / n as f32).powf(1.6)).collect();
+/// Streamers peeling off the wingtips, where the shock layer spills round the wing's edge:
+/// thin and bright, like the wake's shells.
+const STREAMER_SHELLS: [(f32, f32, f32); 4] = [
+    (1.0, 3.2, 0.05),
+    (0.7, 2.3, 0.07),
+    (0.45, 1.5, 0.1),
+    (0.25, 0.75, 0.14),
+];
+
+/// A unit re-entry wake along +Z (radius 1 where it leaves the ship, length 1) from
+/// `shells`: it starts at `neck` of its radius right behind the ship (the air closing in
+/// behind the body) and widens like a cone. It fades in over its first few percent, then out,
+/// fastest in its core, the hottest gas, which cools first. It is streaked along its length
+/// like the turbulent gas it is (streaks drift around it downstream).
+fn wake_mesh(shells: &[(f32, f32, f32)], seg: usize, rows: usize, neck: f32) -> Mesh {
+    let ts: Vec<f32> = (0..=rows)
+        .map(|i| (i as f32 / rows as f32).powf(1.6))
+        .collect();
     let mut out = Mesh::default();
-    for (k, &(r0, r1, a0)) in WAKE_SHELLS.iter().enumerate() {
+    for (k, &(r0, r1, a0)) in shells.iter().enumerate() {
         let phase = k as f32 * 1.9;
-        let radius = |t: f32| r0 + (r1 - r0) * t.powf(0.7);
-        let rows: Vec<Vec<Vec3>> = ts
+        let radius = |t: f32| r0 * neck + (r1 - r0 * neck) * t.powf(0.7);
+        let ring: Vec<Vec<Vec3>> = ts
             .iter()
             .map(|&t| {
                 (0..seg)
@@ -488,23 +499,18 @@ fn wake_mesh() -> Mesh {
                     .collect()
             })
             .collect();
-        let mut m = grid(&rows, true, false, |i, j| {
+        let mut m = grid(&ring, true, false, |i, j| {
             Vec2::new(j as f32 / seg as f32, ts[i])
         });
-        // Inner shells are the hottest gas, which cools first.
-        let fade = 1.6 + 1.4 * k as f32 / (WAKE_SHELLS.len() - 1) as f32;
+        let cooling = 2.0 + 3.0 * k as f32 / (shells.len() - 1) as f32;
         for (i, v) in m.vertices.iter_mut().enumerate() {
             let t = ts[i / (seg + 1)];
             let a = (i % (seg + 1)) as f32 / seg as f32 * TAU;
             let streaks = 0.55
                 + 0.25 * (5.0 * a + 7.0 * t + phase).sin()
                 + 0.2 * (11.0 * a - 13.0 * t + 2.0 * phase).sin();
-            v.color = [
-                1.0,
-                1.0,
-                1.0,
-                a0 * smoothstep(0.0, 0.04, t) * (1.0 - t).powf(fade) * streaks,
-            ];
+            let glow = smoothstep(0.0, 0.03, t) * (-cooling * t).exp() * (1.0 - t);
+            v.color = [1.0, 1.0, 1.0, a0 * 1.6 * glow * streaks];
         }
         out.merge(&m);
     }
@@ -789,7 +795,11 @@ pub fn build() -> ModelAssets {
     out.mesh(&key("rcs_inside"), rcs_inside);
     out.mesh(&key("plume"), plume_mesh(&PLUME_SHELLS));
     out.mesh(&key("plume_soft"), plume_mesh(&HOVER_SHELLS));
-    out.mesh(&key("plasma_wake"), wake_mesh());
+    out.mesh(&key("plasma_wake"), wake_mesh(&WAKE_SHELLS, 24, 18, 0.6));
+    out.mesh(
+        &key("plasma_streamer"),
+        wake_mesh(&STREAMER_SHELLS, 12, 12, 1.0),
+    );
 
     // ---- details
     out.mesh(&key("frames"), window_frames(&h));
@@ -891,6 +901,8 @@ pub fn build() -> ModelAssets {
 /// Glowing air of a re-entry: nitrogen and oxygen lines, pink-orange.
 const SHEATH_COLOR: [f32; 3] = [1.0, 0.42, 0.62];
 const WAKE_COLOR: [f32; 3] = [1.0, 0.5, 0.52];
+/// Where the right wingtip's streamer peels off (the left one is its mirror), m.
+const WINGTIP_EDGE: Vec3 = Vec3::new(7.1, -0.75, 9.6);
 /// Half extents of the hull and wings (span, height, length), m.
 const SKIN_HALF: Vec3 = Vec3::new(7.2, 2.6, 10.8);
 
@@ -1075,9 +1087,30 @@ pub fn spawn(
             "plasma_wake",
             plume_material(WAKE_COLOR, 40_000.0),
             Some(PlasmaWake {
+                from: None,
                 skin: SKIN_HALF,
                 radius: 4.5,
                 length: 160.0,
+            }),
+        ),
+        (
+            "plasma_streamer",
+            plume_material(WAKE_COLOR, 40_000.0),
+            Some(PlasmaWake {
+                from: Some(WINGTIP_EDGE),
+                skin: SKIN_HALF,
+                radius: 0.7,
+                length: 70.0,
+            }),
+        ),
+        (
+            "plasma_streamer",
+            plume_material(WAKE_COLOR, 40_000.0),
+            Some(PlasmaWake {
+                from: Some(WINGTIP_EDGE * Vec3::new(-1.0, 1.0, 1.0)),
+                skin: SKIN_HALF,
+                radius: 0.7,
+                length: 70.0,
             }),
         ),
     ] {
