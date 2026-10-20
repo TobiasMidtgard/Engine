@@ -9,6 +9,7 @@ pub mod far_woods;
 pub mod felling;
 pub mod grass;
 pub mod meshgen;
+pub mod near_woods;
 pub mod plant;
 pub mod scenery;
 pub mod scenery_tree;
@@ -26,6 +27,7 @@ pub use api::spawn_plant;
 pub use ecology::{InRegion, RegionState, RegionStats};
 pub use far_woods::{FarWoods, KeepClear};
 pub use felling::{ChopResult, FallingTree, FoliageCollider, LogPose, chop, fell_tree};
+pub use near_woods::{NearWoods, NearWoodsTree};
 pub use plant::{
     Disturbance, EcologyRegion, EcologySettings, FelledLog, Genes, Plant, PlantStage,
     RegionHistory, ResourceSource,
@@ -49,6 +51,8 @@ impl Plugin for FoliagePlugin {
             .init_resource::<visuals::GlowLights>()
             .init_resource::<FarWoods>()
             .init_resource::<far_woods::FarWoodsState>()
+            .init_resource::<NearWoods>()
+            .init_resource::<near_woods::NearWoodsState>()
             .add_message::<engine_world::DamageEvent>()
             .add_message::<engine_world::WorldImpulse>()
             .add_message::<engine_world::NoiseEvent>()
@@ -66,8 +70,13 @@ impl Plugin for FoliagePlugin {
             .register_resource::<FarWoods>(
                 "Cheap 3D woods from start_m to end_m (meters from the camera) wherever the \
                  terrain's ForestCover says the land is wooded: crossed crown cards in streamed \
-                 cells, spaced wider with distance. keep_clear leaves circles (a valley with \
-                 trees of its own) alone.",
+                 cells, spaced wider with distance. Ground under placed scenery trees is left to \
+                 them; keep_clear leaves more circles alone.",
+            )
+            .register_resource::<NearWoods>(
+                "Real scenery trees planted inside the far woods' start_m wherever the terrain's \
+                 ForestCover says the land is wooded (spacing_m apart in a closed wood, in \
+                 streamed cells of cell_m), so walking into painted forest finds trees all round.",
             )
             .register_resource::<FoliageSeason>(
                 "The time of year plants show (day_of_year, 100 ≈ 10 April, 290 ≈ 17 October; \
@@ -155,7 +164,11 @@ impl Plugin for FoliagePlugin {
         )
         .add_systems(
             PostUpdate,
-            (shift::follow_world_shift, far_woods::follow_world_shift)
+            (
+                shift::follow_world_shift,
+                far_woods::follow_world_shift,
+                near_woods::follow_world_shift,
+            )
                 .in_set(engine_world::WorldShiftSet::Apply),
         )
         .add_systems(
@@ -175,6 +188,7 @@ impl Plugin for FoliagePlugin {
                     visuals::sync_plant_visuals,
                     scenery_tree::sync_scenery_trees,
                     far_woods::stream_far_woods,
+                    near_woods::stream_near_woods,
                     visuals::sync_log_visuals,
                     visuals::update_glow_lights,
                     visuals::pulse_glow,
