@@ -124,9 +124,9 @@ impl Default for Outfit {
     fn default() -> Self {
         Self {
             top: "shirt".into(),
-            top_color: [0.045, 0.05, 0.06],
+            top_color: [0.075, 0.085, 0.1],
             bottom: "trousers".into(),
-            bottom_color: [0.02, 0.02, 0.025],
+            bottom_color: [0.038, 0.04, 0.046],
             accent: [0.6, 0.05, 0.04],
             accent_on: "none".into(),
         }
