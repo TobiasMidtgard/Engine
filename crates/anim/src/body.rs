@@ -13,6 +13,11 @@
 //! * `spider`: eight procedural legs.
 //!
 //! Other kinds get no body (one warning per kind), so the requester's stand-in stays.
+//!
+//! While a character module draws every [`Appearance`] (`AppearanceBodies` exists), people
+//! with an appearance (or asking for one) keep the generated humanoid skeleton, posed as
+//! always, but none of this module's meshes: the character module skins its own body to their
+//! `SkeletonPose`.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -20,6 +25,7 @@ use std::sync::Mutex;
 use engine_core::prelude::*;
 use engine_world::LocomotionState;
 use engine_world::animation::{AnimationParams, BodyRequest, SkeletonPose};
+use engine_world::character::{Appearance, AppearanceBodies, AppearanceRequest};
 
 use crate::animator::{Animator, AnimatorSettings};
 use crate::build::dog;
@@ -128,6 +134,29 @@ pub(crate) fn answer_requests(world: &mut World) {
             strip(world, entity);
         }
         build(world, entity, request);
+    }
+}
+
+/// Whether a character module draws this person (see the module docs).
+fn drawn_elsewhere(world: &World, entity: Entity) -> bool {
+    world.contains_resource::<AppearanceBodies>()
+        && world
+            .get_entity(entity)
+            .is_ok_and(|e| e.contains::<Appearance>() || e.contains::<AppearanceRequest>())
+}
+
+/// Hide this module's mesh on people a character module draws.
+pub(crate) fn hide_drawn_bodies(
+    bodies: Option<Res<AppearanceBodies>>,
+    mut q: Query<&mut SkinnedMeshRenderer, With<Appearance>>,
+) {
+    if bodies.is_none() {
+        return;
+    }
+    for mut renderer in &mut q {
+        if renderer.visible {
+            renderer.visible = false;
+        }
     }
 }
 
@@ -266,7 +295,10 @@ fn build(world: &mut World, entity: Entity, request: BodyRequest) {
     let params = e.get::<AnimationParams>().cloned();
     let model = match kind {
         BodyKind::Human => {
-            let (model, outfit) = person(&request);
+            let (mut model, outfit) = person(&request);
+            if drawn_elsewhere(world, entity) {
+                model = None;
+            }
             give_humanoid_body(world, entity, outfit);
             if let Some(m) = &model {
                 world.entity_mut(entity).insert(m.clone());

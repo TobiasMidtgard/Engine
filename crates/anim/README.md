@@ -73,6 +73,11 @@ compresses and stretches.
   frame and `AnimationEvent` at marked frames, so movement, AI, cloth and hair never depend
   on this crate. Footsteps and hoof falls become `GroundContact` (foot, paw or hoof, with
   load and speed) and `NoiseEvent`; hammer impacts are loud `NoiseEvent`s.
+- **Character contract.** People with an `Appearance` get a `Face` seeded from it that
+  writes `FaceControls` every frame (ARKit blink, squint, brows, cheeks, mouth and jaw
+  weights from effort, wincing and limpness, plus gaze from the humanoid head). While a
+  character module draws appearances (`AppearanceBodies`), those people keep their humanoid
+  `SkeletonPose` but no fetched model and no mesh of this crate's (`tests/appearance.rs`).
 - **Bodies on request.** A module that moves an entity itself puts `BodyRequest` on it
   (`human`, `horse`, `dog` or `spider`, an optional model path, height and seed) and gets a body:
   the paddock's rigs and models, animated from the entity's motion (`LocomotionState` or
