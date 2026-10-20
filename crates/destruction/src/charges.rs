@@ -54,9 +54,10 @@ pub struct BreachCharge {
     pub timer: f32,
     /// Thermite burn progress 0..1.
     pub progress: f32,
-    /// Sideways velocity (wall-local, m/s) a thermite-cut panel leaves with, so it can fall
-    /// clear of what is under it (a ladder under a hatch); zero drops it straight out.
-    pub tip: Vec2,
+    /// Velocity (wall-local, m/s; +Z is out of the front) a thermite-cut panel leaves with, so
+    /// it can be lifted clear of what is under it (a climber on the ladder under a hatch); zero
+    /// lets the cut push it straight out.
+    pub tip: Vec3,
 }
 
 impl Default for BreachCharge {
@@ -70,7 +71,7 @@ impl Default for BreachCharge {
             armed: true,
             timer: 0.0,
             progress: 0.0,
-            tip: Vec2::ZERO,
+            tip: Vec3::ZERO,
         }
     }
 }
@@ -99,8 +100,8 @@ impl BreachCharge {
         }
     }
 
-    /// The cut panel leaves sideways at `tip` (wall-local, m/s); see [`Self::tip`].
-    pub fn with_tip(mut self, tip: Vec2) -> Self {
+    /// The cut panel leaves at `tip` (wall-local, m/s); see [`Self::tip`].
+    pub fn with_tip(mut self, tip: Vec3) -> Self {
         self.tip = tip;
         self
     }
