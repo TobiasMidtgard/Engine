@@ -25,6 +25,7 @@ use crate::assets::DestructionAssets;
 use crate::material::{DestructibleMaterial, DestructionMaterials};
 use crate::textures::DUST_FRAMES;
 use crate::voxel::{VoxelState, in_rock, rock_contact, rock_depth, rock_side};
+use crate::wall::WallState;
 use crate::{DebrisMode, DestructionSettings, DestructionStats};
 
 /// A piece of debris. Registered so tools and AI agents can see and tune it.
@@ -768,6 +769,58 @@ impl Rubble {
     }
 }
 
+/// How far under a floor's top a debris point still counts as on it, meters: deeper than a
+/// step's fall, shallower than the room below.
+const FLOOR_REACH_M: f64 = 0.25;
+
+/// A wall laid flat (a floor, roof deck or hatch cover) that debris lands on.
+struct Floor<'a> {
+    affine: engine_core::math::DAffine3,
+    inv: engine_core::math::DAffine3,
+    state: &'a WallState,
+}
+
+impl<'a> Floor<'a> {
+    fn of(gt: &GlobalTransform, state: &'a WallState) -> Option<Self> {
+        ((gt.rotation() * Vec3::Z).y > 0.9).then(|| Self {
+            affine: gt.affine(),
+            inv: gt.affine().inverse(),
+            state,
+        })
+    }
+
+    /// Height of its top over `p` when `p` is on or just under it, over a solid cell.
+    fn top_under(&self, p: DVec3) -> Option<f64> {
+        let g = &self.state.grid;
+        let lp = self.inv.transform_point3(p);
+        let idx = g.cell_at(engine_core::math::Vec2::new(lp.x as f32, lp.y as f32))?;
+        if !g.solid[idx] {
+            return None;
+        }
+        let top = (g.thickness * 0.5 - g.front[idx]) as f64;
+        (lp.z <= top && lp.z >= top - FLOOR_REACH_M)
+            .then(|| self.affine.transform_point3(DVec3::new(lp.x, lp.y, top)).y)
+    }
+
+    fn bounds(&self, margin: f64) -> (DVec3, DVec3) {
+        let g = &self.state.grid;
+        let size = DVec3::new(
+            g.cell.x as f64 * g.nx as f64,
+            g.cell.y as f64 * g.ny as f64,
+            g.thickness as f64,
+        );
+        let o = DVec3::new(g.origin.x as f64, g.origin.y as f64, -size.z * 0.5);
+        let (mut lo, mut hi) = (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY));
+        for c in 0..8 {
+            let k = DVec3::new((c & 1) as f64, ((c >> 1) & 1) as f64, (c >> 2) as f64);
+            let w = self.affine.transform_point3(o + size * k);
+            lo = lo.min(w);
+            hi = hi.max(w);
+        }
+        (lo - DVec3::splat(margin), hi + DVec3::splat(margin))
+    }
+}
+
 /// The built-in debris solver: gravity, ground and voxel rock contacts with friction and
 /// restitution, sleep. Runs in `FixedUpdate` (`SimSet::Physics`), so it slows down with time
 /// dilation.
@@ -778,6 +831,8 @@ pub fn simulate_debris_system(
     mut q: Query<(Entity, &mut Transform, &mut DebrisBody, &mut Debris)>,
     volumes: Query<(&GlobalTransform, &VoxelState)>,
     rock_changed: Query<(&GlobalTransform, &VoxelState), Changed<VoxelState>>,
+    walls: Query<(&GlobalTransform, &WallState)>,
+    walls_changed: Query<(&GlobalTransform, &WallState), Changed<WallState>>,
     mut contacts: MessageWriter<GroundContact>,
     mut noise: MessageWriter<NoiseEvent>,
 ) {
@@ -787,10 +842,22 @@ pub fn simulate_debris_system(
     }
     let rock: Vec<(&GlobalTransform, &VoxelState)> = volumes.iter().collect();
     // Rock dug or blasted: whatever rests on or by it looks again.
-    let changed: Vec<(DVec3, DVec3)> = rock_changed
+    let mut changed: Vec<(DVec3, DVec3)> = rock_changed
         .iter()
         .map(|(gt, state)| state.world_bounds(gt, 1.0))
         .collect();
+    // Floors and roof decks (walls laid flat, front face up) hold debris up on their solid
+    // cells; whatever rests on one that was shot or blasted looks again.
+    let floors: Vec<Floor> = walls
+        .iter()
+        .filter_map(|(gt, s)| Floor::of(gt, s))
+        .collect();
+    changed.extend(
+        walls_changed
+            .iter()
+            .filter_map(|(gt, s)| Floor::of(gt, s))
+            .map(|f| f.bounds(0.5)),
+    );
     // Chunks at rest are what the rest land on.
     let mut rubble = Rubble::default();
     for (entity, t, body, debris) in &q {
@@ -911,6 +978,11 @@ pub fn simulate_debris_system(
             let r = rot * (*p * scale);
             let wp = center + r.as_dvec3();
             let mut h = env.ground_query.height(wp).unwrap_or(ground.height);
+            for f in &floors {
+                if let Some(top) = f.top_under(wp) {
+                    h = h.max(top);
+                }
+            }
             if on_rock {
                 match rock_side(&rock, wp, ROCK_REACH_M) {
                     Some((normal, depth)) => touch(r, depth, normal),

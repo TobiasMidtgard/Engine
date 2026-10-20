@@ -653,6 +653,31 @@ impl VoxelState {
         }
     }
 
+    /// The most common material among the solid voxels inside `sdf` (positive inside) over the
+    /// local box `[lo, hi]`: what a dig there brings out. `None` when nothing solid is inside.
+    pub fn material_in(
+        &self,
+        lo: Vec3,
+        hi: Vec3,
+        sdf: impl Fn(Vec3) -> f32,
+    ) -> Option<DestructibleMaterial> {
+        let a = ((lo - self.origin) / self.size).floor().max(Vec3::ZERO);
+        let b = ((hi - self.origin) / self.size).ceil().max(Vec3::ZERO);
+        let mut counts = [0u32; DestructibleMaterial::ALL.len()];
+        for k in (a.z as usize)..(b.z as usize).min(self.dims[2]) {
+            for j in (a.y as usize)..(b.y as usize).min(self.dims[1]) {
+                for i in (a.x as usize)..(b.x as usize).min(self.dims[0]) {
+                    let idx = self.idx(i, j, k);
+                    if self.density[idx] >= SOLID && sdf(self.center(i, j, k)) > 0.0 {
+                        counts[self.material[idx] as usize % counts.len()] += 1;
+                    }
+                }
+            }
+        }
+        let (best, n) = counts.iter().enumerate().max_by_key(|(_, n)| **n)?;
+        (*n > 0).then(|| DestructibleMaterial::ALL[best])
+    }
+
     /// Apply an edit described by a signed distance function (meters, positive inside the
     /// shape) over the local box `[lo, hi]`. Returns the solid volume removed (m³, negative
     /// when material was added).

@@ -502,6 +502,28 @@ pub fn shatter(
         .collect()
 }
 
+/// Like [`shatter`], but the pieces run `stretch` times longer along `grain` (a unit axis) than
+/// across it: wood splits into splinters along its grain instead of breaking into blocks.
+pub fn shatter_along_grain(
+    shape: &ConvexPoly,
+    impact: Vec3,
+    pieces: u32,
+    grain: Vec3,
+    stretch: f32,
+    rng: &mut Rng,
+) -> Vec<(ConvexPoly, Vec3, f32)> {
+    // Voronoi cells of the shape squeezed along the grain, stretched back out.
+    let squeeze = Vec3::ONE - grain.abs() * (1.0 - 1.0 / stretch.max(1.0));
+    shatter(&shape.scaled(squeeze), impact * squeeze, pieces, rng)
+        .into_iter()
+        .map(|(p, ..)| {
+            let p = p.scaled(squeeze.recip());
+            let (v, c) = p.volume_centroid();
+            (p, c, v)
+        })
+        .collect()
+}
+
 /// Color for a piece's fragments: explicit, else the material's outside color.
 pub fn piece_colors(
     color: Option<[f32; 3]>,
@@ -524,6 +546,38 @@ pub fn piece_colors(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_post_split_along_its_grain_breaks_into_splinters() {
+        // A 2.4 m post, 0.2 m thick, broken by a hit at its middle.
+        let post = ConvexPoly::cuboid(Vec3::new(0.1, 1.2, 0.1));
+        let slender = |parts: &[(ConvexPoly, Vec3, f32)]| {
+            let n = parts.len() as f32;
+            let ratio: f32 = parts
+                .iter()
+                .map(|(p, ..)| {
+                    let (lo, hi) = p.bounds();
+                    let d = hi - lo;
+                    d.y / d.x.max(d.z)
+                })
+                .sum();
+            ratio / n
+        };
+        let mut rng = Rng::new(7);
+        let blocks = shatter(&post, Vec3::ZERO, 8, &mut rng);
+        let mut rng = Rng::new(7);
+        let splinters = shatter_along_grain(&post, Vec3::ZERO, 8, Vec3::Y, 4.0, &mut rng);
+        let volume: f32 = splinters.iter().map(|p| p.2).sum();
+        assert!(
+            (volume - 0.096).abs() < 1e-3,
+            "the splinters make up the post ({volume} m³)"
+        );
+        let (b, s) = (slender(&blocks), slender(&splinters));
+        assert!(
+            s > 2.0 && s > 1.5 * b,
+            "splinters run along the grain ({s:.2} long per wide, blocks {b:.2})"
+        );
+    }
 
     fn obb(c: [f64; 3], h: [f32; 3]) -> Obb {
         Obb {

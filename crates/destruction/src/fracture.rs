@@ -149,6 +149,21 @@ impl ConvexPoly {
         out
     }
 
+    /// Stretched by `s` along each axis (all components positive).
+    pub fn scaled(&self, s: Vec3) -> ConvexPoly {
+        ConvexPoly {
+            faces: self
+                .faces
+                .iter()
+                .map(|f| Face {
+                    points: f.points.iter().map(|&p| p * s).collect(),
+                    normal: (f.normal / s).normalize_or(f.normal),
+                    interior: f.interior,
+                })
+                .collect(),
+        }
+    }
+
     /// Axis-aligned bounds `(min, max)`.
     pub fn bounds(&self) -> (Vec3, Vec3) {
         let mut lo = Vec3::splat(f32::INFINITY);
