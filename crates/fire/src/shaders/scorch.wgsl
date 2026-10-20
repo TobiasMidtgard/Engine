@@ -5,7 +5,8 @@
 
 struct ScorchParams {
     rect: vec4<f32>,   // camera-relative x, z of the map's min corner; size x, z (m)
-    ground: vec4<f32>, // camera-relative y of the map's base height, texel size (m), time, 0
+    ground: vec4<f32>, // camera-relative y of the map's base height, texel size (m), time, painted grounds
+    self_charred: array<vec4<f32>, 4>, // painted grounds: camera-relative min x, z, max x, z
 };
 
 @group(1) @binding(0) var<uniform> params: ScorchParams;
@@ -88,8 +89,16 @@ fn fs_scorch(in: FullscreenOut) -> @location(0) vec4<f32> {
     let height_fade = 1.0 - smoothstep(0.6, 3.5, h);
     let mottle = fbm2(tp.xz * 0.9, 4);
     let ash = smoothstep(0.55, 0.85, value_noise2(tp.xz * 3.1));
-    // Burnt ground: black char with grey ash flecks.
-    var alpha = scorch * mix(0.78, 0.95, mottle) * height_fade;
+    // Burnt ground: black char with grey ash flecks. Painted ground and its grass char
+    // themselves (to their own char, with ash), so there only what stands taller darkens.
+    var own = 0.0;
+    for (var i = 0u; i < min(u32(params.ground.w), 4u); i++) {
+        let r = params.self_charred[i];
+        let inside = min(min(rel.x - r.x, r.z - rel.x), min(rel.z - r.y, r.w - rel.z));
+        own = max(own, smoothstep(0.0, 1.0, inside));
+    }
+    own *= 1.0 - smoothstep(0.9, 1.4, h);
+    var alpha = scorch * mix(0.78, 0.95, mottle) * height_fade * (1.0 - own);
     var emission = vec3<f32>(0.0);
     // Coals: burnt litter, mostly black, with stalks still glowing where they lie in the ash,
     // a few lumps (stubble bases) and loose specks, gathered where it is hottest and each
