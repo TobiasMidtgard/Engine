@@ -50,7 +50,7 @@ pub(super) fn ring_style(loudness: f32) -> RingStyle {
     RingStyle {
         size: 0.2 + 1.7 * l,
         life: 0.3 + 0.55 * l.min(1.0),
-        peak: 0.55 + 0.4 * loud,
+        peak: 0.6 + 0.35 * loud,
         loud,
     }
 }
@@ -128,25 +128,37 @@ const RING_NAMES: &[&str] = &[
     "other",
 ];
 
-/// A ring's material at opacity `step` of [`FADE_STEPS`]: its ground's colour, translucent,
-/// with a soft glow of its own that fades with it, so it reads in shade too.
+/// A ring's material at opacity `step` of [`FADE_STEPS`]: a pale tint of its ground's colour
+/// (so an orange ring still stands out on orange leaves), translucent, with a soft glow of its
+/// own that fades with it, so it reads in shade too.
 fn ring_material(color: usize, step: usize) -> StandardMaterial {
     let c = ring_color(RING_NAMES[color.min(RING_NAMES.len() - 1)]);
     let a = step.min(FADE_STEPS) as f32 / FADE_STEPS as f32;
-    let mut m = StandardMaterial::color(c[0] * 0.8, c[1] * 0.8, c[2] * 0.8)
+    let pale = |v: f32| 0.5 + 0.4 * v;
+    let mut m = StandardMaterial::color(pale(c[0]), pale(c[1]), pale(c[2]))
         .with_roughness(0.6)
-        .with_emissive(c, 500.0 * a)
+        .with_emissive(c, 900.0 * a)
         .with_alpha(a);
     m.receives_wetness = false;
     m
 }
 
-/// A thin band: rings near the camera (a film riding behind a walker) would otherwise read as
-/// a hoop lying on the path.
-fn ring_shape() -> Shape {
+/// A thin band, about 2 cm across on the ground whatever the ring's size: rings near the
+/// camera (a film riding behind a walker) would otherwise read as a hoop lying on the path,
+/// and a small ring's band would shrink to a hairline.
+const BAND_M: f32 = 0.019;
+
+/// The ring's torus (radius 1, scaled to `size`): its tube, in a few steps so rings share
+/// meshes, is the band's width at that size.
+fn ring_tube(size: f32) -> f32 {
+    let tube = (BAND_M / size.max(0.01)).clamp(0.012, 0.04);
+    (tube * 500.0).round() / 500.0
+}
+
+fn ring_shape(tube: f32) -> Shape {
     Shape::Torus {
         radius: 1.0,
-        tube: 0.012,
+        tube,
         segments: 96,
     }
 }
@@ -192,7 +204,8 @@ pub(super) fn spawn_rings(
                 step: 0,
             },
             Transform::from_translation(at).with_uniform_scale(0.05),
-            MeshRenderer::new(ring_shape(), ring_material(color, 0)).without_shadows(),
+            MeshRenderer::new(ring_shape(ring_tube(style.size)), ring_material(color, 0))
+                .without_shadows(),
         ));
     }
 }
@@ -225,8 +238,8 @@ pub(super) fn grow_rings(
         }
         let grow = 1.0 - (1.0 - k).powi(3);
         let s = r.style.size * (0.08 + 0.92 * grow);
-        // The band stays about 2 cm high and, even for a loud step, a few centimetres across.
-        t.scale = Vec3::new(s, 0.8, s);
+        // The band stays about 2 cm high, flattened from its tube.
+        t.scale = Vec3::new(s, 0.8 * 0.012 / ring_tube(r.style.size), s);
         if step != r.step {
             r.step = step;
             mesh.material = ring_material(r.color, step).into();
@@ -269,7 +282,7 @@ mod tests {
         // Round a 0.56 m dog: a ring under half a meter, gone in about a third of a second
         // and faint; the horse's spreads past a meter and a half, nearly opaque.
         assert!(
-            dog.size < 0.5 && dog.life < 0.4 && dog.peak < 0.4,
+            dog.size < 0.5 && dog.life < 0.4 && dog.peak < 0.65,
             "{dog:?}"
         );
         assert!(horse.size > 1.4 && horse.peak > 0.8, "{horse:?}");
@@ -325,5 +338,15 @@ mod tests {
         // A horse's hooves, a quarter second apart, each get their own.
         let hoof = ring_style(0.79);
         assert!(!joins(next, 0.79, &[(first, 0.26, 0.79, hoof)]));
+    }
+
+    #[test]
+    fn small_and_large_rings_have_the_same_band() {
+        // A dog's ring and a horse's lie on the ground as bands of about the same width.
+        for l in [0.17, 0.4, 0.79] {
+            let size = ring_style(l).size;
+            let band = ring_tube(size) * size;
+            assert!((band - BAND_M).abs() < BAND_M * 0.3, "{l}: {band}");
+        }
     }
 }
