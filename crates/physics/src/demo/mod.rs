@@ -19,6 +19,8 @@
 //! * rubber balls bouncing in the middle,
 //! * a pendulum wave: 15 bobs that fall out of step into waves and snakes and come back into
 //!   step every minute, behind a Newton's cradle on a plinth passing its blow down the row,
+//! * a pool table: the cue ball breaks a rack of fifteen and they scatter, bank off the cushions
+//!   and drop into the pockets,
 //! * along the front, three oil drums rolling down a ramp and 47 m along an asphalt runway
 //!   (one triangle mesh) into a sand pit: they stay flat and in their lanes.
 //!
@@ -27,6 +29,7 @@
 
 mod art;
 mod floaters;
+pub mod pool;
 
 pub(crate) use floaters::replay_floaters;
 pub use floaters::{FLOAT_CYCLE_SECS, FloatTest, spawn_floaters};
@@ -166,6 +169,15 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 0.9,
     },
     DemoView {
+        key: "physics_pool",
+        name: "A break on a pool table: fifteen balls scattering off the cushions into the pockets",
+        eye: [8.6, 1.9, -6.6],
+        target: [9.6, 0.8, -8.6],
+        hour: 16.0,
+        station: Some(Station::Pool),
+        warmup_secs: 0.5,
+    },
+    DemoView {
         key: "physics_turntable",
         name: "A turntable carrying crates and a rider",
         eye: [37.0, 6.5, 20.0],
@@ -193,10 +205,11 @@ pub enum Station {
     Rockfall,
     Pendulums,
     Cradle,
+    Pool,
 }
 
 impl Station {
-    pub const ALL: [Station; 14] = [
+    pub const ALL: [Station; 15] = [
         Station::Tower,
         Station::Pile,
         Station::Dominoes,
@@ -211,6 +224,7 @@ impl Station {
         Station::Rockfall,
         Station::Pendulums,
         Station::Cradle,
+        Station::Pool,
     ];
 
     /// The station's name in the `physics.proving_ground.replay` API.
@@ -230,6 +244,7 @@ impl Station {
             Station::Rockfall => "rockfall",
             Station::Pendulums => "pendulums",
             Station::Cradle => "cradle",
+            Station::Pool => "pool",
         }
     }
 
@@ -250,6 +265,7 @@ impl Station {
             Station::Rockfall => (-24.0, -2.0),
             Station::Pendulums => (16.0, -8.5),
             Station::Cradle => (16.0, -4.5),
+            Station::Pool => (9.0, -8.5),
         };
         DVec3::new(x, 0.0, z)
     }
@@ -267,6 +283,7 @@ impl Station {
             // The wave is back in step after exactly its cycle, so the replay is seamless.
             Station::Pendulums => Some(WAVE_CYCLE_SECS as f64),
             Station::Cradle => Some(20.0),
+            Station::Pool => Some(25.0),
         }
     }
 
@@ -291,6 +308,7 @@ impl Station {
             Station::Rockfall => rockfall(y, base),
             Station::Pendulums => pendulum_wave(y, base),
             Station::Cradle => newtons_cradle(y, base),
+            Station::Pool => pool::pool_table(y, base),
         }
     }
 }

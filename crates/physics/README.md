@@ -307,7 +307,10 @@ plank bridge, a kinematic turntable, bouncing rubber balls, a **pendulum wave** 
 swinging 20 to 34 times a minute: they fall out of step into waves and snakes, swing in two
 alternate rows at half a minute and are back in step at a minute) in front of a **Newton's
 cradle** on a plinth (five 20 cm chrome balls on 80 cm wires, stepping finely, so the blow passes
-down the row and only the last ball flies), a **rockfall** (300 crushed granite
+down the row and only the last ball flies), a **pool table** (a 9 ft table with mahogany rails,
+pockets cut into them and six turned legs: the cue ball breaks a rack of fifteen numbered balls at
+8 m/s, in 0.5 ms substeps so the blow passes from ball to ball, and they spread over the cloth,
+off the cushions and down a few pockets, still within about ten seconds), a **rockfall** (300 crushed granite
 rocks, faceted convex hulls 30 to 55 cm across, pour out of a hopper, slide down a 40° steel chute
 and drop off its lip into a heap with a 35° face) and, along the front, a **barrel run**:
 three oil drums roll off a 2 m ramp and 47 m down an asphalt runway (one triangle mesh, an edge
@@ -317,7 +320,7 @@ showcase's physics zone places it. Render it alone with
 `cargo run -p engine_physics --release --example proving_ground -- out_dir`.
 
 The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,
-seesaw, balls and cradle every 20 s, the barrel run every 25 s, dominoes, wrecking ball and bridge every
+seesaw, balls and cradle every 20 s, the barrel run and pool table every 25 s, dominoes, wrecking ball and bridge every
 30 s, the rockfall every 30 s, the pile every 45 s, the pendulum wave every minute, as it comes
 back into step; the tower, wheel and turntable run on), so the zone is always
 playing when someone walks in.
@@ -380,7 +383,10 @@ a ball flying in from afar hits the crate by the player at full detail, a far wa
 frame); pendulums (`tests/pendulums.rs`: a Newton's cradle with fine steps passes one or two
 balls' blow down the row while the middle stays within 2 cm, without them the middle swings off,
 a cradle keeps to its own region beside tumbling crates and a ball rolled at it still hits it,
-and a pendulum wave is in two alternate rows at half a minute and back in step at a minute); a headless screenshot of the proving ground.
+and a pendulum wave is in two alternate rows at half a minute and back in step at a minute); the
+pool table's break (`tests/proving_ground.rs`: all sixteen balls step finely, at least 12 of the 15
+spread more than 30 cm, at least one goes down a pocket, none leaves the table, and all are still
+before the table resets); a headless screenshot of the proving ground.
 
 ## Done when
 
