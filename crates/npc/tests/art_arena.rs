@@ -1,9 +1,11 @@
 //! The arena's procedural art: builds it with the renderer's asset stores, checks the budget
-//! (triangles, build time) and that every piece of art sits on its collider, and renders
-//! close-ups of the stone, sand, wood, metal and cloth when a GPU or a software Vulkan driver
-//! (lavapipe) is available (otherwise those shots are skipped with a note).
+//! (triangles, build time) and that every piece of art sits on its collider, and draws the
+//! whole arena once, small, when a GPU or a software Vulkan driver (lavapipe) is available
+//! (otherwise that frame is skipped with a note).
 //!
-//! The PNGs land in the test's temp dir; set `NPC_SCREENSHOT_DIR` to also copy them there.
+//! Set `NPC_SCREENSHOT_DIR` to also render full-size close-ups of the stone, sand, wood, metal
+//! and cloth and keep the PNGs there. Without it they are not rendered, which keeps the test
+//! quick on lavapipe in CI.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -13,16 +15,25 @@ use engine_render::{MeshRef, RenderDisabled, capture_now};
 use engine_world::WorldPlugin;
 use engine_world::physics::{Collider, ColliderShape};
 
+/// The close-ups kept with `NPC_SCREENSHOT_DIR`.
 const W: u32 = 960;
 const H: u32 = 540;
+/// The frame of the whole arena drawn on every run.
+const CHECK_W: u32 = 320;
+const CHECK_H: u32 = 180;
 
-fn app() -> App {
+/// Where to keep the full-size close-ups, when they are wanted.
+fn picture_dir() -> Option<String> {
+    std::env::var("NPC_SCREENSHOT_DIR").ok()
+}
+
+fn app(width: u32, height: u32) -> App {
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
         let mut w = app.world.resource_mut::<Window>();
-        w.width = W;
-        w.height = H;
+        w.width = width;
+        w.height = height;
     }
     app.world
         .resource_mut::<Time>()
@@ -90,9 +101,11 @@ fn child_bounds(app: &mut App, e: Entity, keep: impl Fn(Vec3) -> bool) -> Option
     any.then_some((lo, hi))
 }
 
+/// The budget and the colliders, then one small frame of the whole arena, so every piece of
+/// art goes through the renderer (its meshes, baked textures and materials).
 #[test]
 fn arena_art_fits_the_budget_and_the_colliders() {
-    let mut app = app();
+    let mut app = app(CHECK_W, CHECK_H);
     let d = app.world.resource::<Diagnostics>();
     let tris = d.get("npc.arena_triangles").expect("arena dressed");
     let ms = d.get("npc.arena_build_ms").unwrap_or(0.0);
@@ -166,6 +179,37 @@ fn arena_art_fits_the_budget_and_the_colliders() {
         checked >= 7 + 4 + 1 + 3 + 1 + 1 + 8 + 4,
         "checked {checked} pieces"
     );
+
+    // The whole arena from above, as `art_aerial.png` frames it.
+    let cam = camera(&mut app, DVec3::new(0.0, 55.0, -85.0), DVec3::ZERO, 50.0);
+    app.world.get_mut::<Camera>(cam).unwrap().active = true;
+    // One step without drawing places everything, then the one drawn frame starts the renderer
+    // (or finds there is no GPU).
+    let render = app
+        .world
+        .resource_mut::<Schedules>()
+        .remove(Render)
+        .expect("render schedule");
+    app.world
+        .resource_mut::<Schedules>()
+        .insert(Schedule::new(Render));
+    app.update();
+    app.world.resource_mut::<Schedules>().insert(render);
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("art_arena_small.png");
+    let shot = capture_now(&mut app.world, &path);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping the arena frame: no GPU ({})", d.0);
+        return;
+    }
+    shot.expect("screenshot");
+    eprintln!("wrote {}", path.display());
+    let img = image::open(&path).expect("png").to_rgba8();
+    assert_eq!(img.dimensions(), (CHECK_W, CHECK_H), "arena frame size");
+    let first = *img.get_pixel(0, 0);
+    assert!(
+        img.pixels().any(|p| *p != first),
+        "the arena frame is one flat color"
+    );
 }
 
 fn camera(app: &mut App, eye: DVec3, target: DVec3, fov: f32) -> Entity {
@@ -188,7 +232,7 @@ fn shoot(app: &mut App, cam: Entity, name: &str) {
     app.update_n(2);
     let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     capture_now(&mut app.world, &path).expect("screenshot");
-    if let Ok(dir) = std::env::var("NPC_SCREENSHOT_DIR") {
+    if let Some(dir) = picture_dir() {
         let _ = std::fs::create_dir_all(&dir);
         std::fs::copy(&path, std::path::Path::new(&dir).join(name)).expect("copy screenshot");
     }
@@ -197,7 +241,11 @@ fn shoot(app: &mut App, cam: Entity, name: &str) {
 
 #[test]
 fn arena_art_close_ups() {
-    let mut app = app();
+    if picture_dir().is_none() {
+        eprintln!("close-ups not rendered: set NPC_SCREENSHOT_DIR to render and keep them");
+        return;
+    }
+    let mut app = app(W, H);
     let v = |x: f64, y: f64, z: f64| DVec3::new(x, y, z);
     let ring = demo::DUEL_RING;
     let lane = demo::SPARRING_LANE;
