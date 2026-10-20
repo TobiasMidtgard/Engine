@@ -120,7 +120,7 @@ impl Tex {
             Tex::Slab => textures::concrete_slab(res(1024)),
             Tex::Concrete => textures::cast_concrete(res(512)),
             Tex::Hazard => textures::hazard_stripes(res(512)),
-            Tex::Yellow => textures::painted_steel(res(512), paint(0xd6a21e), 0.2),
+            Tex::Yellow => textures::painted_steel(res(512), paint(0xd6a21e), 0.08),
             Tex::Dark => textures::painted_steel(res(512), paint(0x3d4247), 0.35),
             Tex::Steel => textures::forged_steel(res(512)),
             Tex::Timber => textures::weathered_timber(res(512)),
