@@ -310,6 +310,12 @@ pub enum Sprite {
     /// the outside in over its life. Use with `facing: camera`, `lit` 1 (the soot catches the
     /// sun), a dozen or so big particles expanding as they rise.
     Fireball,
+    /// A fountain's jet: a glassy rod of water rising from the nozzle, clear in the middle and
+    /// mirroring the sky at its edges, streaked as it flows, swelling as it slows and breaking
+    /// into beads near the top. Use with `facing: axis`, `lit` 1, `size` the jet's height,
+    /// `stretch` its width over its height, and a couple of overlapping long-lived particles
+    /// (`local_space`, `steady`) so it flows without a break.
+    Jet,
 }
 
 impl Sprite {
@@ -322,7 +328,7 @@ impl Sprite {
     pub fn translucency(self) -> f32 {
         match self {
             Sprite::Smoke | Sprite::Dust => 1.0,
-            Sprite::Droplet | Sprite::Crown => 0.4,
+            Sprite::Droplet | Sprite::Crown | Sprite::Jet => 0.4,
             Sprite::Shard
             | Sprite::Haze
             | Sprite::Vortex

@@ -491,6 +491,57 @@ fn a_fireball_glows_while_young_and_chars_to_soot() {
 }
 
 #[test]
+fn a_fountain_jet_stands_as_a_rod_of_water() {
+    // A jet 2 m tall and 0.4 m across standing on the origin in daylight: it shows along its
+    // middle, near the nozzle as well as high up, and leaves the air beside it untouched.
+    let mut app = app(DVec3::ZERO, 30_000.0);
+    let Some(before) = shot(&mut app, "vfx_jet_before.png") else {
+        return;
+    };
+    let jet = EffectDesc {
+        name: "test.jet".into(),
+        emitters: vec![EmitterDesc {
+            rate: 12.0,
+            speed: [0.0, 0.0],
+            lifetime: [0.2, 0.2],
+            size: [2.0, 2.0],
+            rotation_deg: [0.0, 0.0],
+            local_space: true,
+            sprite: Sprite::Jet,
+            facing: engine_vfx::Facing::Axis,
+            stretch: 0.2,
+            lit: 1.0,
+            color: Gradient::constant([0.8, 0.88, 0.95, 1.0]),
+            soft: 0.0,
+            wind: 0.0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    app.world
+        .resource_mut::<EffectLibrary>()
+        .insert(jet)
+        .unwrap();
+    app.world.spawn((
+        Transform::from_translation(DVec3::ZERO),
+        ParticleEffect::new("test.jet"),
+    ));
+    app.update_n(12);
+    let after = shot(&mut app, "vfx_jet_after.png").unwrap();
+    let change = |x: f64, y: f64| {
+        let at = project(DVec3::new(x, y, 0.0));
+        (luma(&after, at, 1) - luma(&before, at, 1)).abs()
+    };
+    let (low, high, side) = (change(0.0, 0.3), change(0.0, 1.2), change(0.5, 0.8));
+    eprintln!("jet: low {low}, high {high}, side {side}");
+    assert!(
+        low > 4.0 && high > 4.0,
+        "the rod should show: low {low}, high {high}"
+    );
+    assert!(side < 2.0, "nothing beside the rod should change: {side}");
+}
+
+#[test]
 fn a_splash_crown_stands_out_of_the_ground_and_nothing_else_changes() {
     let mut app = app(DVec3::ZERO, 30_000.0);
     let Some(before) = shot(&mut app, "vfx_crown_before.png") else {
