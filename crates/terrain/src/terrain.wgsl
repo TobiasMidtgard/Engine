@@ -228,7 +228,7 @@ struct Crowns {
 // random size and height, standing in groups. A tree stands with probability `density`, so
 // woods thin out tree by tree at their edges and close their canopy inside. Each crown casts
 // a shadow away from the sun (`to_sun`, world) onto the gaps and crowns beside it.
-fn crowns(tp: vec3<f32>, density: f32, pixel: f32, to_sun: vec3<f32>) -> Crowns {
+fn crowns(tp: vec3<f32>, density: f32, conifer: f32, pixel: f32, to_sun: vec3<f32>) -> Crowns {
     let cell = 8.0;
     let p = tp.xz / cell;
     let base = floor(p);
@@ -255,22 +255,28 @@ fn crowns(tp: vec3<f32>, density: f32, pixel: f32, to_sun: vec3<f32>) -> Crowns 
             if (h.z < density + group * 0.5 * density * (1.0 - density) * 4.0) {
                 // Young trees to broad old ones (a few meters to over 11 m across).
                 let size = hash13(vec3<f32>(k, 19.3));
-                let r = mix(0.22, 0.74, size * size * (3.0 - 2.0 * size)) * mix(0.8, 1.0, density);
+                let tone = hash13(vec3<f32>(k, 29.5));
+                // Spruces (most trees in the cold): narrow, pointed cones with a star of
+                // branches, casting long shadows.
+                let spruce = tone < spruce_share(conifer);
+                let r = mix(0.22, 0.74, size * size * (3.0 - 2.0 * size)) * mix(0.8, 1.0, density) * select(1.0, 0.6, spruce);
                 let center = c + 0.1 + h.xy * 0.8;
                 let o = (p - center) / r;
                 // Lumpy outlines: a few big boughs bulge out of each crown.
                 let ang = atan2(o.y, o.x);
-                let lobes = 1.0 + 0.16 * sin(ang * 5.0 + h.x * 6.28) + 0.09 * sin(ang * 3.0 + h.y * 6.28);
+                let lobes = select(1.0 + 0.16 * sin(ang * 5.0 + h.x * 6.28) + 0.09 * sin(ang * 3.0 + h.y * 6.28),
+                    1.0 + 0.2 * abs(sin(ang * 4.0 + h.x * 6.28)) - 0.1, spruce);
                 let d2 = dot(o, o) / (lobes * lobes);
                 // Taller trees hide the edges of the crowns next to them.
-                let t = (1.0 - d2) * mix(0.8, 1.0, hash13(vec3<f32>(k, 23.9)));
+                let rise = mix(0.8, 1.0, hash13(vec3<f32>(k, 23.9)));
+                let t = select(1.0 - d2, 1.0 - sqrt(d2), spruce) * rise;
                 if (t > top) {
                     top = t;
                     win = n;
-                    cr.slope = o / sqrt(max(1.0 - d2, 0.09));
-                    cr.tone = hash13(vec3<f32>(k, 29.5));
+                    cr.slope = select(o / sqrt(max(1.0 - d2, 0.09)), o * 1.4 / max(sqrt(d2), 0.15), spruce);
+                    cr.tone = tone;
                 }
-                let s = (p - (center - sun_xz * reach)) / r;
+                let s = (p - (center - sun_xz * reach * select(1.0, 2.2, spruce))) / r;
                 shade[n] = 1.0 - smoothstep(0.6, 1.0, dot(s, s));
             }
             n++;
@@ -313,6 +319,11 @@ fn crowns(tp: vec3<f32>, density: f32, pixel: f32, to_sun: vec3<f32>) -> Crowns 
     cr.slope *= cr.cover;
     cr.shadow = shadow * sun_up * (1.0 - smoothstep(0.3, 0.9, top));
     return cr;
+}
+
+// Share of crowns that are spruces, for a woods' needle share (`conifer`).
+fn spruce_share(conifer: f32) -> f32 {
+    return mix(0.12, 0.92, conifer);
 }
 
 // Fractal sum of `pnoise3` on tiling coordinates, starting at `freq` cycles per meter (a power
@@ -1106,7 +1117,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var crown = Crowns(1.0, vec2<f32>(0.0), 0.5, 0.0, 0.0);
     var woods = forest;
     if (crown_k > 0.0) {
-        crown = crowns(tp, saturate(forest * 1.5 - 0.25), pixel, frame.sun_dir.xyz);
+        crown = crowns(tp, saturate(forest * 1.5 - 0.25), conifer, pixel, frame.sun_dir.xyz);
         woods = mix(forest, max(crown.cover, smoothstep(0.8, 1.0, forest)), crown_k);
     }
     let undergrowth = planet.colors[C_LUSH].rgb * vec3<f32>(0.6, 0.7, 0.55);
@@ -1269,7 +1280,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                     // then a pale birch.
                     let t = crown.tone;
                     let tree = select(select(mix(vec3<f32>(0.8, 0.86, 0.9), vec3<f32>(1.05, 1.03, 0.9), saturate((t - 0.2) / 0.65)),
-                        vec3<f32>(1.2, 1.15, 0.8), t > mix(0.85, 0.97, conifer)), vec3<f32>(0.6, 0.72, 0.8), t < mix(0.12, 0.92, conifer));
+                        vec3<f32>(1.2, 1.15, 0.8), t > mix(0.85, 0.97, conifer)), vec3<f32>(0.6, 0.72, 0.8), t < spruce_share(conifer));
                     let lit = mix(vec3<f32>(0.3), tree * 0.7 * (1.0 - crown.crevice * 0.5), crown.cover) * (1.0 - crown.shadow * 0.55);
                     ms[i].normal = normalize(mix(ms[i].normal, dome, k));
                     ms[i].detail = mix(ms[i].detail, lit, k);
