@@ -473,6 +473,12 @@ fn recipe_row(theme: &Theme, db: &ItemDatabase, inv: &Inventory, r: &Recipe, sel
             p.bad.lerp(p.text_dim, 0.25),
         )
     };
+    // On the lit (selected) card, text needs more light to stay readable.
+    let status_color = if selected {
+        status_color.lerp(Color::WHITE, 0.6)
+    } else {
+        status_color
+    };
     let mut row = El::new()
         .class("card")
         .id(format!("recipe:{}", r.id))
@@ -495,7 +501,9 @@ fn recipe_row(theme: &Theme, db: &ItemDatabase, inv: &Inventory, r: &Recipe, sel
                     El::text(name)
                         .text_style(|t| t.semibold().nowrap())
                         .with_style(|s| {
-                            s.font_size(15.0).color(if r.known {
+                            s.font_size(15.0).color(if selected {
+                                Color::WHITE
+                            } else if r.known {
                                 rc.lerp(Color::WHITE, 0.25)
                             } else {
                                 p.text_dim
@@ -771,10 +779,11 @@ fn details(world: &World, st: &CraftingScreen) -> El {
     } else {
         "Craft".to_string()
     };
-    let go = El::button(label, "craft.go")
+    // While crafting the button stays lit and shows the percentage, but does nothing.
+    let go = El::button(label, if busy { "craft.busy" } else { "craft.go" })
         .class(if blocker.is_none() { "primary" } else { "" })
         .id("craft_go")
-        .disabled(blocker.is_some() || busy)
+        .disabled(blocker.is_some())
         .with_style(|s| s.width(300.0).height(50.0));
     panel
         .child_opt(blocker.map(|why| {
@@ -911,7 +920,11 @@ fn build(world: &World, st: &CraftingScreen) -> El {
                         }),
                 )
                 .child(El::new().class("spacer"))
-                .child(El::text(format!("{} recipes", book.at(station).count())).class("caption")),
+                .child(
+                    El::text(format!("{} recipes", book.at(station).count()))
+                        .text_style(|t| t.nowrap())
+                        .with_style(|s| s.font_size(13.0).color(p.text_dim)),
+                ),
         )
         .child(
             El::new()
