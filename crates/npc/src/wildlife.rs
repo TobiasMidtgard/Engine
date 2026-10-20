@@ -1,6 +1,7 @@
-//! Dynamic fauna: deer and rabbits that graze, wander as a herd, drink at water, bed down at
-//! night and bolt when something comes near; wild boar that root about in sounders (sows with
-//! their young) or alone (males) and run, but turn and charge with their tusks when cornered or
+//! Dynamic fauna: deer and rabbits that graze, wander as a herd, drink at water, bed down and
+//! bolt when something comes near (deer and boar keep the day's hours: out at dawn and dusk to
+//! drink, grazing through the morning and afternoon, bedded at midday and in the dark); wild
+//! boar that root about in sounders (sows with their young) or alone (males) and run, but turn and charge with their tusks when cornered or
 //! wounded, or when a sow's young are threatened; wolf packs that roam and hunt together (one
 //! tests the herd and singles out the weakest, two flank it, one lies in wait ahead; they give
 //! up a long chase and rest), then feed; bird flocks that peck on the ground and take off
@@ -400,6 +401,90 @@ pub const BLAST_REACH: f32 = 160.0;
 const WARY_DIST: f64 = 35.0;
 const WARY_SECS: f64 = 20.0;
 
+/// Where the day is, for the animals that keep hours (deer and boar): they move out at dawn and
+/// dusk (up from their beds, down to water to drink, then grazing), graze through the morning
+/// and afternoon, and bed down at midday and in the dark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DayPart {
+    /// Dark: bedded down.
+    Night,
+    /// First light until the sun is up: moving out.
+    Dawn,
+    Morning,
+    /// The middle of the day (`MIDDAY_H`): bedded down, chewing the cud.
+    Midday,
+    Afternoon,
+    /// Sundown until dark: moving out.
+    Dusk,
+}
+
+/// How close to the middle of its herd a deer or boar lies up (m).
+pub const BED_SPREAD: f64 = 3.0;
+/// The hours the herds lie up through the middle of the day.
+pub const MIDDAY_H: (f32, f32) = (11.0, 15.0);
+/// The sun's height (the y of its direction) under which it is dark (night), and over which it
+/// is up (dawn and dusk are between).
+pub const DARK_SUN: f32 = -0.1;
+pub const RISEN_SUN: f32 = 0.2;
+
+/// Where the day is at `hour` (0..24) with the sun at height `sun_y` (the y of the direction
+/// toward it): both as `WeatherState` has them, the day/night cycle writing the two together.
+pub fn day_part(hour: f32, sun_y: f32) -> DayPart {
+    let morning = hour.rem_euclid(24.0) < 12.5;
+    if sun_y < DARK_SUN {
+        DayPart::Night
+    } else if sun_y < RISEN_SUN {
+        if morning {
+            DayPart::Dawn
+        } else {
+            DayPart::Dusk
+        }
+    } else if (MIDDAY_H.0..MIDDAY_H.1).contains(&hour) {
+        DayPart::Midday
+    } else if morning {
+        DayPart::Morning
+    } else {
+        DayPart::Afternoon
+    }
+}
+
+impl DayPart {
+    pub fn name(self) -> &'static str {
+        match self {
+            DayPart::Night => "night",
+            DayPart::Dawn => "dawn",
+            DayPart::Morning => "morning",
+            DayPart::Midday => "midday",
+            DayPart::Afternoon => "afternoon",
+            DayPart::Dusk => "dusk",
+        }
+    }
+
+    /// Bedded down (deer and boar).
+    pub fn bed_time(self) -> bool {
+        matches!(self, DayPart::Night | DayPart::Midday)
+    }
+}
+
+/// Deer and boar keep the day's hours ([`DayPart`]); rabbits bed down in the dark, wolves
+/// hunt through it.
+fn keeps_hours(species: Species) -> bool {
+    matches!(species, Species::Deer | Species::Boar)
+}
+
+/// How far ahead of an animal's middle its muzzle reaches with its head down (m): it stands
+/// this far back from the water's edge to drink.
+fn drink_reach(species: Species, young: bool) -> f64 {
+    let full = match species {
+        Species::Deer => 1.05,
+        Species::Boar => 0.8,
+        Species::Wolf => 0.85,
+        Species::Rabbit => 0.15,
+        Species::Bird => 0.05,
+    };
+    if young { full * 0.6 } else { full }
+}
+
 /// An ambusher springs when the quarry comes this close (m); a deer fleeing the pack doesn't
 /// see it lying low in wait until then.
 pub const AMBUSH_RANGE: f32 = 12.0;
@@ -523,9 +608,9 @@ pub struct AnimalMind {
     /// Loudest noise heard since the last think: (where, how loud relative to distance).
     pub heard: Option<(DVec3, f32)>,
     /// A gunshot heard since the last think, too far off to bolt from: where.
-    shot: Option<DVec3>,
+    pub(crate) shot: Option<DVec3>,
     /// The last gunshot it moves off from: where, and when (animal clock).
-    wary: Option<(DVec3, f64)>,
+    pub(crate) wary: Option<(DVec3, f64)>,
     /// Hurt since the last think, by something at this position.
     pub hurt_from: Option<DVec3>,
     /// When it was last hurt (animal clock), where the blow came from and who struck it, if
@@ -536,6 +621,11 @@ pub struct AnimalMind {
     pub bite_ready: f64,
     /// Searched for water: `Some(None)` = none in range.
     pub water: Option<Option<DVec3>>,
+    /// Where it stands to drink, a muzzle's reach back from the water's edge, and which way
+    /// it faces (toward the water).
+    pub drink_at: Option<(DVec3, Vec3)>,
+    /// The part of the day it last knew (deer and boar keep hours: [`DayPart`]).
+    pub day: Option<DayPart>,
     /// Wolves: its part in the pack's hunt; in place for the pack's rush (an ambusher: lying
     /// in wait); when it joined the pack's chase and when it last gave one up (animal clock).
     pub role: PackRole,
@@ -1002,6 +1092,9 @@ pub(crate) fn animal_think(
     let snaps = &*snaps;
     let herds = &*herds;
     let daylight = w.weather.as_ref().map(|w| w.daylight()).unwrap_or(1.0);
+    let part = w.weather.as_ref().map_or(DayPart::Morning, |w| {
+        day_part(w.time_of_day_h, w.sun_direction.y)
+    });
     let mut replans = 0u32;
     for (
         e,
@@ -1089,6 +1182,18 @@ pub(crate) fn animal_think(
         // ------------------------------------------------------------ needs and stamina
         let night = daylight < 0.25;
         mind.thirst = (mind.thirst + dt / w.settings.thirst_secs.max(1.0)).min(1.0);
+        // The day turning: at dawn and dusk the herds move out, up from their beds (each in its
+        // own time) and down to water.
+        if keeps_hours(species) && mind.day != Some(part) {
+            let moving_out = mind.day.is_some() && matches!(part, DayPart::Dawn | DayPart::Dusk);
+            mind.day = Some(part);
+            if moving_out {
+                mind.thirst = mind.thirst.max(0.8);
+                if mind.state == AnimalState::Rest {
+                    mind.wait_until = now + 1.0 + 8.0 * mind.random() as f64;
+                }
+            }
+        }
         let hunger_rate = if night { 1.5 } else { 1.0 };
         mind.hunger = (mind.hunger + dt * hunger_rate / w.settings.hunger_secs.max(1.0)).min(1.0);
         if mind.state == AnimalState::Rest {
@@ -1440,6 +1545,16 @@ pub(crate) fn animal_think(
                 {
                     mind.destination = None;
                 }
+                // Drinking: up to its place at the edge, facing the water.
+                if mind.state == AnimalState::Drink
+                    && let Some((spot, face)) = mind.drink_at
+                {
+                    let to = flat(spot - pos);
+                    if to.length() > 0.12 {
+                        intent.direction = to.normalize() * walk * (to.length() / 0.6).min(0.6);
+                    }
+                    intent.look = Some(face);
+                }
                 if mind.state == AnimalState::Feed
                     && let Some(dest) = mind.destination
                     && walk_to(
@@ -1479,7 +1594,11 @@ pub(crate) fn animal_think(
                         if species == Species::Wolf {
                             mind.set(AnimalState::Graze, now);
                             mind.wait_until = now + 3.0 + 6.0 * mind.random() as f64;
-                        } else if mind.thirst > 0.75 && mind.water.flatten().is_some() {
+                        } else if mind.thirst > 0.75
+                            && mind
+                                .drink_at
+                                .is_some_and(|d| flat(d.0 - pos).length() < 1.5)
+                        {
                             mind.set(AnimalState::Drink, now);
                             mind.wait_until = now + 8.0 + 6.0 * mind.random() as f64;
                         } else {
@@ -1861,8 +1980,13 @@ fn decide(
         }
     }
     // ---------------------------------------------------------------- calm life
-    // Wolves and boars are about at night; the others bed down.
-    let nocturnal = matches!(species, Species::Wolf | Species::Boar);
+    // Deer and boar bed down at midday and in the dark (`DayPart`); rabbits in the dark;
+    // wolves are about at night.
+    let bed_time = if keeps_hours(species) {
+        mind.day.is_some_and(DayPart::bed_time)
+    } else {
+        night && species == Species::Rabbit
+    };
     if mind.water.is_none() && species != Species::Wolf {
         mind.water = Some(find_water(home, animal.range * 3.0, &w.ground, &w.water));
     }
@@ -1879,18 +2003,37 @@ fn decide(
         if n > 0.0 { sum / n } else { pos }
     };
     let resting = mind.state == AnimalState::Rest;
-    let should_rest = (night && !nocturnal) || mind.fatigue > 0.9;
+    let should_rest = bed_time || mind.fatigue > 0.9;
     if resting {
-        if now < mind.wait_until || (night && !nocturnal) {
+        if now < mind.wait_until || bed_time {
             return;
         }
         mind.set(AnimalState::Graze, now);
         mind.wait_until = now + 4.0;
         return;
     }
-    if should_rest && pos.distance(herd_center) < 8.0 && mind.state != AnimalState::Wander {
+    // Still drinking, or still on its way somewhere: it finishes first.
+    let busy = mind.state == AnimalState::Wander
+        || mind.state == AnimalState::Drink && now < mind.wait_until;
+    // Deer and boar lie up close together; anything else tired lies down near its herd.
+    let lie_up = if bed_time && keeps_hours(species) {
+        BED_SPREAD
+    } else {
+        8.0
+    };
+    if should_rest && !busy && pos.distance(herd_center) < lie_up {
         mind.set(AnimalState::Rest, now);
         mind.wait_until = now + 30.0 + 30.0 * mind.random() as f64;
+        return;
+    }
+    // Time to lie up, away from the rest: it joins them first.
+    if bed_time && !busy && mind.state != AnimalState::Alert {
+        let a = mind.random() * TAU;
+        let r = BED_SPREAD as f32 * (0.3 + 0.5 * mind.random());
+        mind.set(AnimalState::Wander, now);
+        mind.destination = Some(
+            herd_center + DVec3::new(a.cos() as f64 * r as f64, 0.0, a.sin() as f64 * r as f64),
+        );
         return;
     }
     match mind.state {
@@ -1950,8 +2093,22 @@ fn decide(
             let dest = if mind.thirst > 0.75
                 && let Some(Some(water)) = mind.water
             {
-                let a = mind.random() * TAU;
-                water + DVec3::new(a.cos() as f64 * 2.0, 0.0, a.sin() as f64 * 2.0)
+                // Down to the water: its own place along the bank, facing the water, its
+                // muzzle's reach back from the edge.
+                let toward = flat(water - home).normalize_or(Vec3::X);
+                let along = Vec3::new(-toward.z, 0.0, toward.x);
+                let slot = mates.iter().position(|&m| m == me).unwrap_or(0) as f32;
+                let gap = if species == Species::Deer { 1.3 } else { 1.0 };
+                let off = (slot - (mates.len().max(1) - 1) as f32 * 0.5) * gap
+                    + 0.3 * (mind.random() - 0.5);
+                let near = water + (along * off).as_dvec3();
+                let reach = drink_reach(species, animal.young);
+                mind.drink_at = Some(
+                    shore(near, toward, &w.ground, &w.water)
+                        .map(|(edge, face)| (edge - face.as_dvec3() * reach, face))
+                        .unwrap_or((water - toward.as_dvec3() * reach, toward)),
+                );
+                mind.drink_at.map_or(water, |d| d.0)
             } else if species == Species::Wolf
                 && let Some(l) = leader.and_then(|l| snaps.get(&l)).map(|s| s.pos)
             {
@@ -2018,6 +2175,54 @@ fn find_water(home: DVec3, max: f32, ground: &Ground, water: &Water) -> Option<D
             }
         }
         r += 6.0;
+    }
+    None
+}
+
+/// The water's edge from `near`, looking along `toward`: where the bank meets the water to a
+/// few centimetres, and the way to the water there, square on to the bank.
+fn shore(near: DVec3, toward: Vec3, ground: &Ground, water: &Water) -> Option<(DVec3, Vec3)> {
+    let wet = |p: DVec3| {
+        let g = ground.height(p).unwrap_or(p.y);
+        water
+            .sample(DVec3::new(p.x, g, p.z))
+            .is_some_and(|s| s.surface_height > g + 0.15)
+    };
+    let dir = toward.as_dvec3();
+    // Step from 4 m back to 8 m on for the first wet ground after dry.
+    let mut dry = near - dir * 4.0;
+    if wet(dry) {
+        return None;
+    }
+    let mut t = -4.0;
+    while t < 8.0 {
+        t += 0.25;
+        let p = near + dir * t;
+        if wet(p) {
+            // Halve the step down to a few centimetres.
+            let mut wet_at = p;
+            for _ in 0..4 {
+                let mid = (dry + wet_at) * 0.5;
+                if wet(mid) {
+                    wet_at = mid;
+                } else {
+                    dry = mid;
+                }
+            }
+            let mut edge = (dry + wet_at) * 0.5;
+            edge.y = ground.height(dry).unwrap_or(near.y);
+            // Square on to the bank: toward the water all round it.
+            let mut face = Vec3::ZERO;
+            for k in 0..16 {
+                let a = k as f32 / 16.0 * TAU;
+                let d = Vec3::new(a.cos(), 0.0, a.sin());
+                if wet(edge + d.as_dvec3() * 1.5) {
+                    face += d;
+                }
+            }
+            return Some((edge, face.normalize_or(toward)));
+        }
+        dry = p;
     }
     None
 }

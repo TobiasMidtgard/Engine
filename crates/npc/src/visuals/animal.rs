@@ -1885,7 +1885,40 @@ fn quad_look(
     };
     let chew = (k.clock * beast.by(9.0, 7.0, 6.0)).sin();
     let target = match st {
-        AnimalState::Graze | AnimalState::Drink if boar => {
+        AnimalState::Drink if boar => {
+            // Drinking: the snout down in the water, lapping (the head dipping a little with
+            // each lap, the jaw working), every so often the head up to listen.
+            let lap = (k.clock * 4.5 + k.seed * 2.0).sin();
+            let listen = {
+                let x = k.t - 5.0 - 3.0 * k.vary;
+                if x > 0.0 {
+                    let w = x % (8.0 + 3.0 * k.vary);
+                    smooth(0.0, 0.35, w) * (1.0 - smooth(1.6, 2.1, w))
+                } else {
+                    0.0
+                }
+            };
+            let down = Look {
+                neck: ROOT.0 - 0.08 - 0.03 * lap,
+                head: ROOT.1 - 0.05 + 0.03 * lap,
+                stoop: ROOT.2,
+                ear_up: 0.0,
+                jaw: -0.06 - 0.06 * lap.max(0.0),
+                tail_swish: calm.tail_swish,
+                ..Look::default()
+            }
+            .ear_fwd(0.3);
+            let up = Look {
+                neck: -0.15,
+                head: 0.15,
+                ear_up: 0.2,
+                tail_swish: calm.tail_swish,
+                ..Look::default()
+            }
+            .ear_fwd(0.6);
+            Some((down.mix(up, listen).mix(l, smooth(0.5, 1.0, k.speed)), 0.8))
+        }
+        AnimalState::Graze if boar => {
             // Rooting: the snout shoved into the soil and levered up out of it, over and over,
             // sweeping from side to side, the jaw working on what it turns up; every so often
             // the head comes up to scent the air.
@@ -1931,6 +1964,10 @@ fn quad_look(
             } else {
                 0.0
             };
+            // Drinking: the muzzle in the water, sucking it up in long draughts (the jaw and
+            // throat working, the head still).
+            let drinking = if st == AnimalState::Drink { 1.0 } else { 0.0 };
+            let sip = drinking * (k.clock * 3.2 + k.seed * 4.0).sin().max(0.0);
             let tear = if st == AnimalState::Feed {
                 twitch(k.clock, 1.6, k.seed)
             } else {
@@ -1939,14 +1976,16 @@ fn quad_look(
             let down = Look {
                 neck: if deer { -1.65 } else { -1.9 } + 0.05 * pull + 0.12 * tear,
                 neck2: if deer { -0.3 } else { 0.0 } + 0.1 * pull,
-                head: if deer { 1.22 } else { 0.9 } + 0.03 * chew - 0.08 * pull - 0.2 * tear,
+                head: if deer { 1.22 } else { 0.9 } + 0.03 * chew * (1.0 - drinking)
+                    - 0.08 * pull
+                    - 0.2 * tear,
                 stoop: if deer { 0.05 } else { 0.12 },
-                yaw: 0.12 * drift(k.clock, 0.5, k.seed),
+                yaw: (0.12 - 0.09 * drinking) * drift(k.clock, 0.5, k.seed),
                 ear_up: -0.15,
                 jaw: if st == AnimalState::Feed {
                     -0.25 - 0.2 * chew
                 } else {
-                    0.0
+                    -0.05 * sip
                 },
                 tail_swish: calm.tail_swish,
                 ..Look::default()
@@ -2073,22 +2112,35 @@ fn quad_look(
             .ear_fwd(0.6),
             0.5,
         )),
-        AnimalState::Rest => Some((
-            Look {
+        AnimalState::Rest => {
+            // Deer chew the cud lying down, head up, and now and then doze with the chin
+            // laid on the ground before them; a boar lies with its chin on the ground.
+            let doze = if deer { dozing(k) } else { 0.0 };
+            let cud = if deer { chew * (1.0 - doze) } else { 0.0 };
+            let up = Look {
                 neck: beast.by(0.1, -0.1, -0.12),
                 neck2: if deer { 0.12 } else { 0.0 },
-                // Deer chew the cud lying down; a boar lies with its chin on the ground.
-                head: beast.by(0.2 + 0.01 * chew, 0.25, 0.12),
+                head: beast.by(0.2 + 0.01 * cud, 0.25, 0.12),
                 yaw: 0.4 * drift(k.clock, 0.15, k.seed),
+                jaw: -0.03 * cud.max(0.0),
                 // Wolves lie with the tail curled round to the side.
                 tail: if wolf { 0.8 } else { 0.0 },
                 tail2: if wolf { 0.35 } else { 0.0 },
                 tail_swish: beast.by(0.0, 0.75, 0.3 * calm.tail_swish),
                 ..Look::default()
             }
-            .ear_fwd(0.2 * drift(k.clock, 0.3, k.seed)),
-            1.2,
-        )),
+            .ear_fwd(0.2 * drift(k.clock, 0.3, k.seed));
+            let asleep = Look {
+                neck: DOZE.0,
+                neck2: DOZE.1,
+                head: DOZE.2,
+                yaw: 0.1 * drift(k.clock, 0.1, k.seed),
+                ear_up: -0.35,
+                ..Look::default()
+            }
+            .ear_fwd(-0.4);
+            Some((up.mix(asleep, doze), 1.2))
+        }
         AnimalState::Dead => {
             // The head drops as the legs give, the neck lags as the body goes over, then the
             // head hits the ground, bounces once and lies, the jaw falling slack.
@@ -2354,6 +2406,20 @@ fn flinch_slew(t: f32, from: f32) -> f32 {
     );
     let sway = track(t, &[(0.0, 0.0, Both), (0.1, 1.0, Out), (0.6, 0.0, Both)]);
     from.sin() * (0.07 * jolt + 0.05 * sway)
+}
+
+/// A bedded deer dozing with its chin on the ground before it: neck, upper neck and head (rad).
+const DOZE: (f32, f32, f32) = (-0.95, -0.2, 0.75);
+
+/// A bedded deer, how far into a doze (0..1): after it has lain a while, it lays its head down
+/// for a spell, then lifts it again to chew the cud, over and over.
+fn dozing(k: &Tick) -> f32 {
+    let x = k.t - 12.0 - 6.0 * k.vary;
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let w = x % (40.0 + 12.0 * k.vary);
+    smooth(0.0, 2.0, w) * (1.0 - smooth(18.0, 20.0, w))
 }
 
 /// A rooting boar's neck, head and stoop (rad) with its snout in the soil.
