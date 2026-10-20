@@ -83,10 +83,12 @@ shout as it lands, grimace when hit and breathe hard when tired; badly hurt, the
 struck leg or hunch over a body wound and press a hand to it at ease. At ease the weapon rests
 on the shoulder or hangs low and comes to guard when a foe is spotted, and a revived fighter
 rolls over, kneels, takes up its weapon and stands into its guard where it lay. A fighter
-reviving a mate goes down on both knees beside it. It sets its sword or carbine down on the
-ground; an archer or a shield bearer holds the bow or shield aside. It puts its hands on the
-chest and presses, and looks up at the enemy now and then. Then it takes its weapon up and
-stands. Animals plant their feet too (a
+reviving a mate goes down on both knees beside it, on the side of the arm along the body
+(clear of the arm flung out and of what the mate let go of). It sets its sword or carbine down
+on the ground; an archer or a shield bearer holds the bow or shield aside. It puts its hands on
+the chest and presses, and looks up at the enemy now and then. Then it takes its weapon up and
+stands. Shot down on its knees, it falls from there, its weapon left where it set it. Animals
+plant their feet too (a
 test fails if a hoof or paw on the ground slides) in each species' footfalls: deer walk in
 lateral sequence, trot and gallop (rotary) and bound away when they bolt from a stand, wolves
 walk, trot, lope and gallop, boars walk, trot and gallop (transverse) on quick, short strides
@@ -175,7 +177,7 @@ Entities are addressed by `id` or `name`.
 
 `demo::spawn_demo(commands, origin)` builds the whole combat arena (`demo::ARENA_RADIUS`, 48 m):
 a sand floor ringed by stepped stone stands with red and blue banners, pillars, braziers, a ramp
-and a wall-run wall. Two five-fighter squads of mixed skill fight across low walls, crates,
+and a wall-run wall. Two six-fighter squads of mixed skill (a medic in each) fight across low walls, crates,
 explosive barrels and a raised platform; a master and a veteran duel in a ring; and a sparring
 lane on the east side puts five sword-and-shield fighters, rookie to master, in front of posts
 that swing at them, so you can watch skill decide who gets hit, who blocks and who parries.
@@ -246,10 +248,42 @@ placed mate of the squad goes. Ranged mates with some teamwork cover it with sup
 
 Skill changes the choice. A rookie notices late, then runs straight in. A skilled fighter waits
 while the spot is watched or it is under fire, and goes once things calm down. The reviver runs
-over, kneels beside the chest and works on it. After `ally_revive_secs` the ally gets up where
-it lies with `ally_revive_health` of its health. Teamwork 1 makes it a fifth quicker, teamwork
-0 a fifth slower. A reviver that is hit, staggered or stuck, or that finds it too hot, lets go.
-It waits a moment before it tries again.
+over and kneels beside the chest, on the side of the arm along the body (the other side if
+that one is blocked). Getting down, setting its weapon down and putting its hands on takes
+1.2 s (`NpcBrain::REVIVE_KNEEL_SECS`). The revive counts only once the hands are on. After
+`ally_revive_secs` of that, the ally gets up where it lies with `ally_revive_health` of its
+health. Teamwork 1 makes it a fifth quicker, teamwork 0 a fifth slower. A mate weighs every
+downed squad mate in range and goes for the one it most wants to, so an ally in the open does
+not keep it from one behind a wall. A kneeling reviver can neither block nor dodge. A reviver
+that is hit, staggered or stuck (its way along the path stops getting shorter), or that finds
+it too hot, lets go. It gets up off its knees where it is before it moves (0.85 s), and waits a
+moment before it tries again. A fighter just revived revives nobody until it is up. One handed
+to game code (`Npc::active = false`) gives its revive up, and one stopped in time revives
+nobody, so neither holds up the showcase timer. `npc.inspect` shows `kneeling_secs` and
+`hands_on_secs`.
+
+### Squad medics
+
+`Npc::role = NpcRole::Medic` makes a fighter its squad's medic (the arena's squads have one
+each, with teamwork 1 and a carbine, `NpcWeapon::carbine()`: lighter and shorter-ranged than
+the rifle). A medic fights from 3 m behind where it would otherwise stand, notices a downed
+mate twice as soon, goes half as far again (`ally_revive_range` × 1.5) and wants the revive
+far more, so it is usually the one that goes. While it is near, its mates hold off for the
+first 3 s, unless the medic is the one down. Once the medic goes, its mates cover it: ranged
+mates with some teamwork engage whoever has the best view of its spot (`role` "cover"), and
+melee mates stand 2 m off the spot on the side of the nearest enemy and take on whoever
+comes within 5 m of it (`role` "screen"; `NpcBrain::guard` holds the spot). A squad without
+a medic revives as before. A medic wears a bleached armband with a red cross over its left
+brassard.
+
+A medic also carries smoke (`smoke::SmokeClouds`). When an enemy has a clear view of a
+downed mate's spot within 24 m, it throws a canister to land 2 m off the chest on that
+enemy's side, one every 14 s at most. The cloud pops 0.9 s later, swells to 3.2 m over two
+seconds, hangs and thins out over the last five of its 22 s. It hides the spot, so the medic
+goes in as a skilled fighter does once a watched spot is out of view, and shots into it are
+mostly guesses. With a smoke module installed (one that registers the "smoke" obscurance
+source) the canister's gas goes to it as a `SmokeEmission`; without one the NPC module keeps a
+plain cloud of its own under the "npc_smoke" source.
 
 | Setting | Default | Does |
 | --- | --- | --- |
@@ -303,21 +337,32 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   elders.
 - `tests/demo.rs`: the arena fight keeps going for a minute (shots, attacks, blocks, cover,
   downed and revived) inside the arena, and over six fights with different randomness squad
-  mates revive at least once a minute on average and six times in all (the target, twice a
-  minute and in every fight, comes with the squad medic); the meadow lives for
-  two minutes (grazing, wandering, hunting, fleeing) without animals leaving.
-- `tests/revive.rs`: a squad mate kneels beside a downed ally and gets it up where it lies.
-  Over 16 runs with different randomness: elites go in under a watching enemy's eyes in at
-  most a tenth, veterans in at most half as many as rookies, rookies in nine tenths or more,
-  and no skilled fighter goes in under fire; once the enemy looks away or is gone, the elite
-  gets it up in every run. A reviver that is
-  hit lets go and tries again later. Nobody revives when it is off. The showcase timer waits
-  for a revive, gets a fighter with a mate near up in place, and sends home only one that is
-  alone.
+  mates revive at least twice a minute on average and in every fight at least once; the meadow
+  lives for two minutes (grazing, wandering, hunting, fleeing) without animals leaving.
+- `tests/revive.rs`: a squad mate kneels beside a downed ally and gets it up where it lies,
+  its hands on the chest for as long as the revive takes. Over 16 runs with different
+  randomness: elites go in under a watching enemy's eyes in at most a tenth, veterans in at
+  most half as many as rookies, rookies in nine tenths or more, and no skilled fighter goes in
+  under fire; once the enemy looks away or is gone, the elite gets it up in every run. A mate
+  revives an ally behind a wall rather than the nearer one in the open. A reviver that is hit
+  lets go, stays put while it gets up and tries again only later. Nobody revives when it is
+  off, or once it is turned off midway. A mate handed to game code does not hold up the
+  showcase timer. The timer waits for a revive, gets a fighter with a mate near up in place,
+  and sends home only one that is alone. A reviver going the long way round a wall is not
+  taken for stuck, and nobody revives a mate on a floor above it. The squad's medic is the
+  usual reviver, melee mates screen it from the enemy while it kneels, and a squad without one
+  revives as before. In every one of 16 runs an elite medic smokes a watched mate and goes in
+  under the smoke, hidden from the enemy as it kneels; only medics carry smoke.
 - `tests/art_revive.rs`: a captioned strip, before and after. Before, a lone fighter lies six
   seconds and is sent home. After, a squad mate runs in, kneels, sets its carbine down, puts
   its hands on the chest and looks up at the enemy, and the ally gets up where it lay. It
-  writes `fighters-revive-before-after.png`.
+  writes `fighters-revive-before-after.png`. A close-up from two sides
+  (`fighters-revive-kneel-closeup.png`) shows the reviver getting down, its hands on the chest
+  with its carbine set down clear of the mate's, and looking up. It checks that the mate kneels
+  before the six-second timer and that the revive then takes no longer than the setting
+  allows (from the hands on, and from the kneel with the 1.2 s getting down). It draws only
+  with `NPC_SCREENSHOT_DIR` set; without it the scenes play out the same and every check runs.
+  `tests/art_fighters.rs` likewise draws only the two pictures it counts pixels in.
 - `tests/training.rs`: the same post swings at a rookie, soldier, veteran, elite and master;
   the share of swings defended climbs with skill (0 % to about 100 %) and the master parries.
 - `tests/smoke.rs`: thick smoke hides a player until it clears, thin smoke slows spotting,

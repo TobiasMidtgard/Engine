@@ -8,9 +8,10 @@
 //!   suppress and flank, sword fighters close in and take turns. A master and a veteran duel
 //!   in a ring in front (block, parry, feint, punish). On the east side a sparring lane puts
 //!   five fighters from rookie to master in front of swinging posts, so you can see skill
-//!   decide who gets hit, who blocks and who parries. A squad mate often runs to a downed
-//!   fighter, kneels and gets it up where it lies; one nobody reaches gets up by itself after
-//!   six seconds, and barrels come back, so the fight never ends. Rings on the ground show
+//!   decide who gets hit, who blocks and who parries. Each squad has a medic (an armband, a
+//!   carbine, the back line): it runs to a downed squad mate, kneels and gets it up where it
+//!   lies while its mates cover it; one nobody reaches gets up by itself after six seconds,
+//!   and barrels come back, so the fight never ends. Rings on the ground show
 //!   where each fighter decided to go and why.
 //! * [`spawn_wildlife`]: a living meadow. A deer herd grazes and wanders, rabbits nibble near
 //!   cover, bird flocks peck in the open, a sounder of wild boar (two sows and their striped
@@ -23,7 +24,7 @@ use engine_core::prelude::*;
 use engine_render::PointLight;
 use engine_world::physics::{Collider, ColliderShape};
 
-use crate::agent::{Npc, NpcSettings, NpcWeapon};
+use crate::agent::{Npc, NpcRole, NpcSettings, NpcWeapon};
 use crate::art::arena::{self, ArenaLayout, Piece, Team};
 use crate::faction::{Faction, Factions, Squad};
 use crate::features::ExplosiveProp;
@@ -219,6 +220,38 @@ fn fighter(
     e.id()
 }
 
+/// A squad's medic (see [`NpcRole::Medic`]): a carbine, all for its mates.
+fn medic(
+    commands: &mut Commands,
+    at: DVec3,
+    face: DVec3,
+    faction: Faction,
+    squad: u32,
+    skills: NpcSkills,
+) -> Entity {
+    let skills = NpcSkills {
+        teamwork: 1.0,
+        ..skills
+    };
+    let e = fighter(
+        commands,
+        at,
+        face,
+        faction,
+        Some(squad),
+        skills,
+        NpcWeapon::carbine(),
+        3.0,
+    );
+    commands.entity(e).insert(Npc {
+        home: Some(at),
+        patrol_radius: 3.0,
+        role: NpcRole::Medic,
+        ..Default::default()
+    });
+    e
+}
+
 /// The combat arena around `origin` (see the module docs). Fits in a 36 m radius and leaves
 /// the line from the arena's south side (−Z) to its center open for the camera.
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
@@ -261,13 +294,17 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         (8.5, -6.0, 0.25),
         (-1.0, -9.5, 0.0),
         (13.0, 1.0, 1.4),
+        // Two barricades where the fight in the middle most often leaves someone down: cover
+        // for a mate to kneel behind.
+        (-8.5, -1.2, -0.1),
+        (8.0, 2.8, 0.1),
     ]
     .into_iter()
     .enumerate()
     {
         let e = solid(commands, o(x, z), low, yaw);
         // Ashlar walls and timber barricades, mixed.
-        let piece = if matches!(k, 1 | 3 | 6) {
+        let piece = if matches!(k, 1 | 3 | 6 | 7 | 8) {
             Piece::TimberWall
         } else {
             Piece::StoneWall(k as u32)
@@ -318,9 +355,17 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
         layout.pieces.push((e, Piece::Barrel(k as u32)));
     }
     // ------------------------------------------------------------------ squads
-    // Red (north) and blue (south), each with a spread of skill.
+    // Red (north) and blue (south), each with a spread of skill and a medic in the back line.
     let north = o(0.0, 0.0) + DVec3::Z * 30.0;
     let south = o(0.0, 0.0) - DVec3::Z * 30.0;
+    medic(
+        commands,
+        o(2.0, 22.0),
+        south,
+        Faction::ENEMY,
+        101,
+        NpcSkills::soldier(),
+    );
     for (x, z, skills, weapon) in [
         (0.0, 17.0, NpcSkills::master(), NpcWeapon::rifle()),
         (-4.0, 18.0, NpcSkills::veteran(), NpcWeapon::rifle()),
@@ -344,6 +389,14 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             3.0,
         );
     }
+    medic(
+        commands,
+        o(2.5, -21.0),
+        north,
+        Faction::RIVAL,
+        102,
+        NpcSkills::veteran(),
+    );
     for (x, z, skills, weapon) in [
         (0.0, -16.0, NpcSkills::elite(), NpcWeapon::rifle()),
         (5.0, -17.0, NpcSkills::veteran(), NpcWeapon::rifle()),
