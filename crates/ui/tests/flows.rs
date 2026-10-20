@@ -642,3 +642,381 @@ fn short_labels_stay_on_one_line() {
         assert_eq!(lines, 1, "a short label wrapped");
     }
 }
+
+fn dilation(app: &mut App) -> f32 {
+    app.world
+        .resource::<engine_core::time::TimeDilation>()
+        .factor()
+}
+
+fn data_str(app: &mut App, path: &str) -> String {
+    let d = app.world.resource::<engine_ui::data::UiData>();
+    d.get(path)
+        .map(|v| {
+            v.as_str()
+                .map(String::from)
+                .unwrap_or_else(|| v.to_string())
+        })
+        .unwrap_or_default()
+}
+
+fn wheel_hovered(app: &mut App) -> Option<usize> {
+    let mut q = app.world.query::<&engine_ui::wheel::WheelView>();
+    q.iter(&app.world).next().and_then(|v| v.hovered)
+}
+
+fn press(app: &mut App, key: KeyCode) {
+    input(app, InputEvent::Key { key, pressed: true });
+    input(
+        app,
+        InputEvent::Key {
+            key,
+            pressed: false,
+        },
+    );
+}
+
+#[test]
+fn the_wheel_slows_time_points_with_the_cursor_and_equips_on_click() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "hud", "instant": true}),
+    );
+    api(&mut app, "ui.show", json!({"screen": "wheel"}));
+    app.update_n(40);
+    // The world slows while it is open; the HUD stays up underneath.
+    assert!(dilation(&mut app) < 0.3, "{}", dilation(&mut app));
+    let hud = open(&mut app).contains(&"hud".to_string());
+    assert!(hud);
+    // The pistol is in hand, so it starts hovered.
+    assert_eq!(wheel_hovered(&mut app), Some(0));
+    // Point to the right of the middle: slot 2 (the greatsword, clockwise from the top).
+    let c = center(&mut app, "wheel_canvas");
+    input(
+        &mut app,
+        InputEvent::CursorMoved {
+            position: c + Vec2::new(220.0, 0.0),
+        },
+    );
+    assert_eq!(wheel_hovered(&mut app), Some(2));
+    let since = next_event(&mut app);
+    input(
+        &mut app,
+        InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+        },
+    );
+    input(
+        &mut app,
+        InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: false,
+        },
+    );
+    assert!(
+        actions_since(&mut app, since).contains(&"weapon.equip:greatsword".to_string()),
+        "{:?}",
+        actions_since(&mut app, since)
+    );
+    assert_eq!(data_str(&mut app, "weapon.icon"), "greatsword");
+    assert_eq!(data_str(&mut app, "wheel.current"), "greatsword");
+    app.update_n(60);
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    // Time runs again once it has closed.
+    assert!((dilation(&mut app) - 1.0).abs() < 1e-3);
+    // The HUD shows the new weapon.
+    let e = engine_ui::input::find_id(&mut app.world, "hud_weapon_icon").unwrap();
+    assert_eq!(app.world.get::<Icon>(e).unwrap().name, "greatsword");
+}
+
+#[test]
+fn number_keys_pick_a_slot_and_unavailable_slots_stay_shut() {
+    let mut app = app();
+    api(&mut app, "ui.show", json!({"screen": "wheel"}));
+    app.update_n(20);
+    // Slot 7 is Time Slow, cooling down: nothing happens and the wheel stays open.
+    press(&mut app, KeyCode::Digit7);
+    app.update_n(5);
+    assert!(open(&mut app).contains(&"wheel".to_string()));
+    assert_eq!(data_str(&mut app, "wheel.current"), "pistol");
+    // Slot 2 is the rail rifle.
+    press(&mut app, KeyCode::Digit2);
+    app.update_n(60);
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    assert_eq!(data_str(&mut app, "weapon.icon"), "rifle");
+    assert_eq!(data_str(&mut app, "weapon.ammo"), "4");
+}
+
+#[test]
+fn a_held_wheel_picks_on_release_and_cancels_if_the_pointer_never_moved() {
+    let mut app = app();
+    // Held with Tab, let go without pointing: closes, nothing changes.
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: true,
+        },
+    );
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "wheel", "hold": "Tab"}),
+    );
+    app.update_n(20);
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: false,
+        },
+    );
+    app.update_n(60);
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    assert_eq!(data_str(&mut app, "wheel.selected"), "");
+    // Held again with the cursor locked: raw motion straight down aims at the grenades
+    // (slot 5 of 8, clockwise from the top).
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: true,
+        },
+    );
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "wheel", "hold": "Tab"}),
+    );
+    app.update_n(20);
+    input(
+        &mut app,
+        InputEvent::MouseMotion {
+            delta: Vec2::new(0.0, 160.0),
+        },
+    );
+    assert_eq!(wheel_hovered(&mut app), Some(4));
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: false,
+        },
+    );
+    app.update_n(60);
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    assert_eq!(data_str(&mut app, "wheel.selected"), "grenade");
+    // Grenades are thrown, not held: the pistol stays in hand.
+    assert_eq!(data_str(&mut app, "wheel.current"), "pistol");
+}
+
+#[test]
+fn the_click_that_picks_from_the_wheel_does_not_also_attack() {
+    let mut app = app();
+    app.world
+        .resource_mut::<InputMap>()
+        .bind("attack", Binding::Mouse(MouseButton::Left));
+    api(&mut app, "ui.show", json!({"screen": "wheel"}));
+    app.update_n(20);
+    let c = center(&mut app, "wheel_canvas");
+    input(
+        &mut app,
+        InputEvent::CursorMoved {
+            position: c + Vec2::new(0.0, -220.0),
+        },
+    );
+    // Press, hold while the wheel closes, then let go: the game never sees an attack.
+    app.world.write_message(InputEvent::MouseButton {
+        button: MouseButton::Left,
+        pressed: true,
+    });
+    let mut attacked = false;
+    for _ in 0..30 {
+        app.update();
+        let a = app
+            .world
+            .resource::<engine_input::ActionState>()
+            .get("attack");
+        attacked |= a.just_pressed || a.pressed_since_tick;
+    }
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    input(
+        &mut app,
+        InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: false,
+        },
+    );
+    let a = app
+        .world
+        .resource::<engine_input::ActionState>()
+        .get("attack");
+    attacked |= a.just_pressed || a.pressed_since_tick;
+    assert!(!attacked);
+    // The next click attacks as usual.
+    input(
+        &mut app,
+        InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+        },
+    );
+    assert!(
+        app.world
+            .resource::<engine_input::ActionState>()
+            .get("attack")
+            .pressed
+    );
+}
+
+#[test]
+fn letting_go_over_an_unavailable_slot_closes_the_wheel_and_restores_time() {
+    let mut app = app();
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: true,
+        },
+    );
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "wheel", "hold": "Tab"}),
+    );
+    app.update_n(20);
+    // Left points at Time Slow, which is cooling down.
+    input(
+        &mut app,
+        InputEvent::MouseMotion {
+            delta: Vec2::new(-160.0, 0.0),
+        },
+    );
+    assert_eq!(wheel_hovered(&mut app), Some(6));
+    input(
+        &mut app,
+        InputEvent::Key {
+            key: KeyCode::Tab,
+            pressed: false,
+        },
+    );
+    app.update_n(60);
+    assert!(!open(&mut app).contains(&"wheel".to_string()));
+    assert_eq!(data_str(&mut app, "wheel.selected"), "");
+    assert!((dilation(&mut app) - 1.0).abs() < 1e-3);
+}
+
+#[test]
+fn showing_the_wheel_again_without_slow_motion_lets_time_run() {
+    let mut app = app();
+    api(&mut app, "ui.show", json!({"screen": "wheel"}));
+    app.update_n(30);
+    assert!(dilation(&mut app) < 0.3);
+    api(&mut app, "ui.show", json!({"screen": "wheel", "slow": 1.0}));
+    app.update_n(60);
+    assert!(open(&mut app).contains(&"wheel".to_string()));
+    assert!((dilation(&mut app) - 1.0).abs() < 1e-3);
+}
+
+fn skills(app: &mut App) -> engine_ui::skills::SkillTree {
+    app.world.resource::<engine_ui::skills::SkillTree>().clone()
+}
+
+fn skill_selected(app: &mut App) -> String {
+    let mut q = app.world.query::<&engine_ui::skills::SkillsScreen>();
+    q.single(&app.world)
+        .unwrap()
+        .selected
+        .clone()
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_skill_tree_opens_from_pause_and_learns_with_a_point() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "pause", "instant": true}),
+    );
+    app.update_n(2);
+    api(&mut app, "ui.click", json!({"id": "pause_skills"}));
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"skills".to_string()));
+    // It opens on the first skill with a rank to learn; a click picks another.
+    assert_eq!(skill_selected(&mut app), "c_momentum");
+    api(&mut app, "ui.click", json!({"id": "skill:c_cleave"}));
+    app.update_n(2);
+    assert_eq!(skill_selected(&mut app), "c_cleave");
+    let before = skills(&mut app).points;
+    let since = next_event(&mut app);
+    api(&mut app, "ui.click", json!({"id": "skills_learn"}));
+    app.update_n(2);
+    let tree = skills(&mut app);
+    assert_eq!(tree.get("c_cleave").unwrap().rank, 1);
+    assert_eq!(tree.points, before - 1);
+    assert!(actions_since(&mut app, since).contains(&"skill.learned:c_cleave".to_string()));
+    let data = app.world.resource::<UiData>();
+    assert_eq!(data.get_f64("skills.c_cleave"), Some(1.0));
+    assert_eq!(
+        data.get_f64("player.skill_points"),
+        Some((before - 1) as f64)
+    );
+    // Space ranks it up again.
+    press(&mut app, KeyCode::Space);
+    assert_eq!(skills(&mut app).get("c_cleave").unwrap().rank, 2);
+}
+
+#[test]
+fn a_locked_skill_refuses_and_reset_refunds_after_a_confirm() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "skills", "instant": true}),
+    );
+    app.update_n(3);
+    // Whirlwind needs Cleave first; Thousand Cuts needs level 20.
+    api(&mut app, "ui.click", json!({"id": "skill:c_whirl"}));
+    app.update_n(2);
+    assert_eq!(skill_selected(&mut app), "c_whirl");
+    let points = skills(&mut app).points;
+    // Its Learn button is disabled.
+    assert!(call_api(&mut app.world, "ui.click", json!({"id": "skills_learn"})).is_err());
+    press(&mut app, KeyCode::Space);
+    assert_eq!(skills(&mut app).get("c_whirl").unwrap().rank, 0);
+    assert_eq!(skills(&mut app).points, points);
+    assert!(engine_ui::skills::learn(&mut app.world, "c_ult").is_err());
+    // Reset asks first, then gives every point back.
+    let spent = skills(&mut app).spent();
+    assert!(spent > 0);
+    api(&mut app, "ui.click", json!({"id": "skills_reset"}));
+    app.update_n(3);
+    assert!(open(&mut app).contains(&"confirm".to_string()));
+    assert_eq!(skills(&mut app).spent(), spent);
+    api(&mut app, "ui.click", json!({"id": "confirm_ok"}));
+    app.update_n(3);
+    let tree = skills(&mut app);
+    assert_eq!(tree.spent(), 0);
+    assert_eq!(tree.points, points + spent);
+    let screens = open(&mut app);
+    assert!(
+        screens.contains(&"skills".to_string()) && !screens.contains(&"confirm".to_string()),
+        "{screens:?}"
+    );
+}
+
+#[test]
+fn the_skills_api_learns_and_grants_points() {
+    let mut app = app();
+    let v = api(&mut app, "skills.grant", json!({"points": 2}));
+    assert_eq!(v["points"], 5, "{v}");
+    api(&mut app, "skills.learn", json!({"id": "t_overclock"}));
+    assert_eq!(skills(&mut app).get("t_overclock").unwrap().rank, 1);
+    assert!(call_api(&mut app.world, "skills.learn", json!({"id": "t_ult"})).is_err());
+    let tree = api(&mut app, "skills.tree", json!({}));
+    assert!(tree.to_string().contains("t_overclock"));
+}

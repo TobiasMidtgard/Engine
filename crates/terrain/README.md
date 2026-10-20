@@ -16,14 +16,45 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   flying fast, and a teleport builds until the view is complete. Vertices geomorph toward the
   parent patch's shape before a split or merge, so detail never pops. Positions are `f64` and
   rendered camera-relative, so a 6,371 km Earth is exact to the centimeter at the surface.
+  A planet that fills only part of the view gets finer patches in its share of the screen
+  (up to 4× finer split distance, aiming at `TerrainSettings::patch_budget` patches for a
+  planet that fills the view), so seen from orbit its canyons, volcanoes and coasts stay
+  sharp instead of dissolving into a few big patches.
   Patches also draw the renderer's depth prepass (depth, normal, motion; moving planets
   carry their own motion), so the ground gets ambient occlusion and contact shadows from
   what stands on it and anti-aliasing reprojects it cleanly.
+- **Shadows kilometers long.** Patches cast into the sun's shadow cascades and into the
+  renderer's far shadow map (out to `RenderSettings::far_shadow_distance`, 8 km), so at low sun
+  ridges shade the valleys beside them and a range throws its shadow across the plain. A second
+  walk of the quadtree from the camera picks the patches for the far map: the ground the map
+  covers plus what lies toward the sun from it, outside the view too, one level coarser than
+  the view and never finer than about half a shadow texel between vertices, and builds what
+  it lacks a few patches a frame after the view's own.
 - **Planet shapes.** `PlanetShape` presets for an Earth-like world (continents, oceans,
   eroded mountains whose steep sides break into rock ledges, hills, climate bands), the
-  Moon (craters, maria) and Mars (craters, plains, dry ice caps), all seeded and
+  Moon (craters, maria) and Mars, all seeded and
   deterministic. Detail is generated down to
-  `finest_spacing_m` (0.5 m by default).
+  `finest_spacing_m` (0.5 m by default). On the Moon the maria are big impact basins ringed by
+  worn massifs and flooded with lava of different shades, plus lava that spilled across the
+  lowlands, gathered on the face a tidally locked moon turns to its planet (planet-local +Z,
+  which engine_space turns to the parent; `PlanetShape::lava_basins` 0 leaves basins pale and
+  dusty, as on Mars). Craters age from crisp bowls into soft dishes, and
+  on airless worlds hills and mountains are worn round (`PlanetShape::worn`).
+- **The real Mars.** `PlanetShape::mars` lays the real planet's landmarks where they are
+  (`landforms::Landforms`, by latitude and longitude, degrees east): the northern lowlands,
+  the Tharsis and Elysium rises, Olympus Mons (21 km, its scarp cliff and nested caldera) and
+  the other shield volcanoes, Valles Marineris (7 km deep and up to ~200 km wide in Melas, with
+  Candor, Ophir, Ius's twin troughs and Coprates Catena; steep spurred walls with bays and
+  promontories, landslides, dark dune floors) with Noctis Labyrinthus at its head and chaos terrain at its mouth, the Hellas,
+  Argyre and Isidis basins, both polar caps on their layered domes with spiral troughs and
+  Chasma Boreale, the dark regions seen from Earth (Syrtis Major, Mare Acidalium, ...) with
+  wind-streaked edges, and a dusty mottling between them. The seed varies only the small
+  things. Any planet can carry its own `Landforms`. Young lava keeps few craters: the shape
+  and the shader thin them out on the volcanoes (to a tenth), the rises and the lowland
+  plains (`Landforms::youth`). Ice on barren worlds takes on the planet's dust where it is
+  thin. Climate temperatures run from −130 to +60 °C. On airless worlds (no atmosphere to
+  hide the sun below the horizon) the ground past the terminator stays dark however its
+  slopes face, except peaks standing far above the land around them.
 - **Flat pads and a view worth having.** `FlatPad` blends the planet into level ground for a
   level, town or spaceport. `PlanetTerrain::home_transform(pad)` places the planet so the pad
   sits at the world origin with +Y up (north toward −Z; `heading_deg` 180 turns north to +Z,
@@ -61,10 +92,42 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   near the camera.) Mountainsides are a patchwork: grass and woods hold
   steep ground below the tree line, outcrops stand on spurs with grass and scree in the
   hollows, and weathered rock (iron-stained faces, dark wet gullies) takes over on cliffs
-  and high up. From orbit, noise per pixel gives woods, snowfields and coasts natural
+  and high up. On Earth-like worlds, cliff faces are eroded into ribs and runnels along the
+  fall line (8 m and 32 m across, sixteen times as long) and streaked where water runs down
+  them: dark varnish and pale mineral stains. From orbit, noise per pixel gives woods, snowfields and coasts natural
   shapes instead of the vertices' blocky ones. On cratered worlds the shader shades the
   craters too small for the vertices, per pixel, from the same scatter as the shape (so
-  nothing pops on the way down), fresh ones with bright walls and ejecta.
+  nothing pops on the way down); fresh ones are bright spots with halos, and the youngest
+  big ones throw rays of bright ejecta across the globe, like Tycho and Copernicus. Moon
+  dust scatters light the way regolith does (`TerrainPalette::regolith`), so a full Moon is
+  as bright at its edge as in its middle and brightens toward full phase. Underfoot the
+  regolith is powdery and gently lumpy, with stones poking out of it everywhere.
+- **Climate zones from orbit.** On worlds with air and sea (`Climate::circulation`, 0 for
+  the Moon and Mars), rain follows the planet's wind belts: wet near the equator, desert
+  belts around 25° north and south, wetter storm tracks around 55°, dry poles. Ground far
+  inland is drier, and land behind a mountain range (upwind is west poleward of 30°, east
+  nearer the equator) lies in its rain shadow. Ocean currents warm and cool the sea by up
+  to 9 °C, so sea ice reaches further toward the equator in some places than others; the
+  ice breaks into floes at its edge. Shallow shelf seas glow teal (more so in warm water),
+  cold deep seas are greener, and deserts mix sand with dark stony plains.
+- **Rivers and lakes.** Water drains across the whole planet (a priority flood on a 40 km
+  grid) and, finer, around the home pad (600 m cells, 240 km across): rivers start in wet
+  high ground, join into networks and run downhill to the sea, widening as they gather
+  water, so big rivers stay thin threads from orbit and small streams show up close. They
+  bend in meanders that flatten out in steep country, cut channels with low banks into
+  their valleys, and grow strips of woods along them in dry land. Deep, wet hollows hold
+  lakes with ragged shores; shallow ones are breached and drained. River water is a water
+  surface underfoot (`Ground` reports it), freezes in the cold, and the home pad and the
+  hand-made overlay stay dry. Turn it off with `PlanetShape::rivers = false` (the Moon and
+  Mars have none); `shape.river_network()` returns the solved network, and its
+  `segments()` give every river piece with its water level and width.
+- **Seas and coasts.** The open sea shows the bed through clear shallows (turquoise in warm
+  water, greener in cold, with weed patches), darkening with depth. Wind sets how rough it
+  is (Cox–Munk slope spread) and so how wide the sun's glitter spreads, and how high the
+  breakers run: surf lines roll in toward the shore, break into froth at the waterline and
+  wash up the sand, leaving a darker wet band behind. Beaches are strips some tens of meters
+  wide whose height follows the coast's slope, with pale dune grass behind them, and they
+  fade out from afar so coasts seen from orbit get no outline.
 - **Detailed ground materials up close.** Nine PBR materials (turf in tufts over thatch,
   leaf litter with needles and twigs, soil, churned mud, rock, snow, rippled sand, gravel,
   concrete) are generated procedurally in `materials.rs` like a node-graph material: height
@@ -82,7 +145,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   across the view at glancing angles. Grass grows in clumps whatever its color, painted and
   tinted grass included: straw-colored tufts beside dark, dense ones, and sunburnt and lush
   stretches tens of meters across; dirt, sand and gravel lie in damp, darker and dry, paler
-  patches. `examples/material_swatches.rs` saves a lit preview of each.
+  patches. Grass tinted to one color (a level's painted pasture) also lies across the land
+  the way grass grows: lusher and darker in hollows, sun-dried on crests and knolls, in
+  drifts tens to hundreds of meters across, so it doesn't read as a lawn from the air. `examples/material_swatches.rs` saves a lit preview of each.
 - **Photo-scanned ground where fetched.** Seven materials (grass, forest floor, soil, mud,
   rock, sand, gravel) have CC0 Poly Haven scans listed in `assets/manifests/terrain.toml`.
   After `cargo run -p fetch-assets -- terrain` they replace the procedural versions
@@ -100,7 +165,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   rim, snow compacts down to its depth, sand is granular and slowly fills back in, grass is
   flattened and springs back. Prints outside the grid are kept and re-stamped when it moves.
 - **Weather on the ground.** Wetness, puddles, snow depth and scorch from `SurfaceLayers`
-  (written by the weather module) darken and gloss the ground, turn soil to mud, fill
+  (written by the weather module, and by the water module along shores) darken and gloss
+  the ground (wet sand to about half its dry brightness, without turning to mud), turn soil
+  to mud, fill
   footprints, ruts and the hollows of the mud texture with water (with rain ripples), and
   cover the ground in snow that settles in hollows and on ledges first and that footprints
   cut through. The wind lays snow in low drifts and ridges along the prevailing east-west
@@ -113,12 +180,14 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
 - **Ocean.** Optional sea surface at sea level (`PlanetTerrain::ocean_surface`) with depth
   tint and waves; turn it off when a water module draws the sea.
 - **Ground query and colliders.** Installs the `Ground` provider (height, normal, surface
-  material) for every terrain, and keeps heightfield collider tiles around the focus.
+  material) for every terrain, and keeps heightfield collider tiles around every focus
+  point and under every dynamic body (awake or asleep, the nearest 64 away from a focus),
+  so a crate dropped far off or a car driven by AI never falls through the ground.
 
 ## Contracts
 
 Reads: `GroundContact`, `TerrainEdit`, `SurfaceLayers`, `Weather`, `FocusPoints`,
-`SurfaceMaterials`.
+`SurfaceMaterials`, `RigidBody` (dynamic bodies, for their collider tiles).
 
 Writes: `Ground` (the query provider), `TerrainChanged`, static `Collider` heightfield tiles
 (tagged `TerrainColliderTile`).
@@ -151,9 +220,15 @@ commands.entity(bodies["Moon"]).insert(PlanetTerrain::moon(7).with_radius(1_737_
 
 `examples/terrain_shots.rs` renders the test views headless (lab prints, rain, snow, painted
 ground and a patchwork of painted layers, a meadow tinted the way the showcase paints its
-valley and a natural one at eye height, snow at eye height and over the valley, woods from the air, the range, the coast, the Moon and Mars from orbit)
-with the game's auto exposure, and `examples/terrain_map.rs` draws a relief map around the
-home pad for tuning shapes.
+valley and a natural one at eye height, snow at eye height and over the valley, woods from the air, the range, the range at dusk
+(`range_dusk`: ridges casting long shadows), the coast, a beach at eye height (`earth_beach`), the painted patchwork after rain (`painted_wet`), the Moon
+underfoot, from low orbit, half lit and full, the Earth's climate belts from far out
+(`earth_globe`), a river at eye height (`earth_river`) and rivers from the air
+(`earth_rivers_air`), and Mars: from orbit (`mars_orbit`,
+`mars_valles`), Olympus Mons (`mars_olympus`), the north pole (`mars_pole`), and the floor and
+rim of Valles Marineris (`mars_canyon`, `mars_rim`))
+with the game's auto exposure, and `examples/terrain_map.rs` draws a relief map with rivers and lakes around
+the home pad for tuning shapes.
 
 ## Test cases in the showcase
 
@@ -172,4 +247,9 @@ from `Ground` when they apply), so the lab works on uneven ground too.
 
 - Prints are recorded in world X/Z, which is right on level ground near the focus (the
   showcase map, or anywhere once the space module re-centers the world on the player).
+- River and lake water is drawn by the terrain and has no water query yet, so nothing floats
+  or swims in it. A water module can draw and simulate it from `river_network().segments()`.
 - No caves or overhangs yet (voxel volumes are next).
+- Mars has a black sky: the renderer's atmosphere scatters light with Earth's colors only, so
+  the test views turn it off there. A thin, dusty, butterscotch sky needs per-planet
+  scattering in the renderer.

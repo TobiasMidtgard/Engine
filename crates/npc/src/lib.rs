@@ -12,6 +12,7 @@ pub mod learning;
 pub mod locomotion;
 pub mod nav;
 pub mod perception;
+pub mod seed;
 mod shift;
 pub mod skills;
 pub mod squad;
@@ -32,6 +33,7 @@ pub use learning::{OpponentModel, OpponentModels};
 pub use locomotion::{FootKind, Footfall, MoverState, SelfPropelled};
 pub use nav::{NavAgent, NavGrid, NavSettings, PathStatus};
 pub use perception::{BodyHeight, Known, NpcMemory, Perceivables};
+pub use seed::Seed;
 pub use skills::{NpcSkills, Perception};
 pub use squad::{AttackTokens, ReviveClaims, SquadSettings};
 pub use training::SparringPost;
@@ -76,6 +78,7 @@ impl Plugin for NpcPlugin {
             .init_resource::<ReviveClaims>()
             .init_resource::<OpponentModels>()
             .init_resource::<WildlifeSettings>()
+            .init_resource::<seed::SeedsGiven>()
             .register_component::<Npc>(
                 "An AI fighter: home and patrol radius, active flag, preferred range override. \
                  Adds skills, perception, weapon, vitals, faction and runtime state.",
@@ -146,6 +149,7 @@ impl Plugin for NpcPlugin {
                 FixedUpdate,
                 (
                     (
+                        seed::seed_bodies,
                         world_model::rebuild_world_model,
                         wildlife::init_animals,
                         perception::tick_clocks,
@@ -153,7 +157,12 @@ impl Plugin for NpcPlugin {
                     )
                         .chain()
                         .in_set(NpcSet::Prepare),
-                    (perception::perceive, wildlife::animal_senses).in_set(NpcSet::Perceive),
+                    // Both touch `NpcVitals` (fighters' and animals'), so they are chained:
+                    // nothing in this schedule runs in an order the scheduler picks
+                    // (`tests/schedule_order.rs`).
+                    (perception::perceive, wildlife::animal_senses)
+                        .chain()
+                        .in_set(NpcSet::Perceive),
                     (
                         squad::plan_squads,
                         combat::notice_attacks,

@@ -3,10 +3,13 @@
 //! motion, steps on the ground, and goes again with the request. Runs with or without the
 //! fetched models.
 
-use engine_anim::{AnimationPlugin, Body, BodyKind, HorseModel, LeggedGait};
+use engine_anim::{AnimationPlugin, Animator, Body, BodyKind, HorseModel, LeggedGait};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
-use engine_world::animation::{AnimationEvent, AnimationParams, BodyRequest, SkeletonPose};
+use engine_world::animation::{
+    AnimationEvent, AnimationParams, AnimationTrigger, BodyRequest, SkeletonPose,
+};
+use engine_world::locomotion::LocomotionState;
 use engine_world::{ContactKind, GroundContact, WorldPlugin};
 
 const STEP: f64 = 1.0 / 60.0;
@@ -308,5 +311,47 @@ fn unknown_kinds_get_no_body_and_set_parameters_stay_with_the_requester() {
     assert!(
         w.get::<AnimationParams>(mime).is_some(),
         "the requester's parameters stay"
+    );
+}
+
+#[test]
+fn a_person_blocks_while_its_mover_blocks_and_swings_on_attack_heavy() {
+    let mut app = app();
+    let fighter = requester(&mut app, "Fighter", BodyRequest::human(3));
+    app.world
+        .entity_mut(fighter)
+        .insert(LocomotionState::default());
+    walk(&mut app, fighter, 0.0, 0.3);
+    let in_state = |app: &App, name: &str| {
+        app.world
+            .get::<Animator>(fighter)
+            .and_then(|a| a.graph())
+            .is_some_and(|g| g.in_state(name))
+    };
+    assert!(in_state(&app, "move"));
+
+    app.world
+        .get_mut::<LocomotionState>(fighter)
+        .unwrap()
+        .blocking = true;
+    walk(&mut app, fighter, 0.0, 0.3);
+    let p = app.world.get::<AnimationParams>(fighter).unwrap();
+    assert_eq!(p.get("blocking"), 1.0);
+    assert!(in_state(&app, "block"), "guard up while blocking");
+    app.world
+        .get_mut::<LocomotionState>(fighter)
+        .unwrap()
+        .blocking = false;
+    walk(&mut app, fighter, 0.0, 0.6);
+    assert!(in_state(&app, "move"), "guard down again");
+
+    app.world.write_message(AnimationTrigger {
+        entity: fighter,
+        name: "attack_heavy".into(),
+    });
+    walk(&mut app, fighter, 0.0, 0.3);
+    assert!(
+        in_state(&app, "heavy_swing"),
+        "the contract's heavy attack swings"
     );
 }

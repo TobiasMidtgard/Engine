@@ -519,8 +519,8 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             min_spacing_m: 3.2,
             resprouts: true,
             bark_color: srgb(0x6a6055),
-            leaf_color: srgb(0x51702c),
-            accent_color: srgb(0x7b8a2a),
+            leaf_color: srgb(0x465f27),
+            accent_color: srgb(0x68772b),
             wind_sway_m: 0.22,
             // Late to leaf, late to turn: russet and brown, holding on into November.
             seasons: Some(Seasons {
@@ -566,8 +566,8 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             min_spacing_m: 1.8,
             resprouts: true,
             bark_color: srgb(0xe2ddd2),
-            leaf_color: srgb(0x6f9234),
-            accent_color: srgb(0xa3b13a),
+            leaf_color: srgb(0x5c7a2d),
+            accent_color: srgb(0x838f33),
             wind_sway_m: 0.35,
             // First to turn: clear yellow.
             seasons: Some(Seasons {
@@ -597,7 +597,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             form: PlantForm::Conifer,
             layer: Layer::Canopy,
             max_height_m: 20.0,
-            crown_radius_m: 3.0,
+            crown_radius_m: 3.8,
             trunk_radius_m: 0.32,
             years_to_mature: 28.0,
             lifespan_years: 250.0,
@@ -612,11 +612,12 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             establishment: 0.1,
             min_spacing_m: 2.4,
             bark_color: srgb(0x8a5a3c),
-            leaf_color: srgb(0x35532b),
-            accent_color: srgb(0x4b6a2e),
+            // Scots pine needles are a dark grey- to blue-green.
+            leaf_color: srgb(0x384c3b),
+            accent_color: srgb(0x48594a),
             wind_sway_m: 0.3,
             shape: PlantShape {
-                crown_base: 0.55,
+                crown_base: 0.58,
                 branches: 6,
                 angle_low_deg: 84.0,
                 angle_high_deg: 62.0,
@@ -637,7 +638,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             form: PlantForm::Conifer,
             layer: Layer::Canopy,
             max_height_m: 19.0,
-            crown_radius_m: 2.9,
+            crown_radius_m: 3.4,
             trunk_radius_m: 0.3,
             years_to_mature: 32.0,
             lifespan_years: 200.0,
@@ -653,8 +654,8 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             establishment: 0.12,
             min_spacing_m: 2.2,
             bark_color: srgb(0x5b4a3e),
-            leaf_color: srgb(0x26402a),
-            accent_color: srgb(0x37563a),
+            leaf_color: srgb(0x283e2c),
+            accent_color: srgb(0x36523b),
             wind_sway_m: 0.25,
             shape: PlantShape {
                 crown_base: 0.05,
@@ -694,8 +695,8 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             min_spacing_m: 1.8,
             resprouts: true,
             bark_color: srgb(0x7a6553),
-            leaf_color: srgb(0x557a2e),
-            accent_color: srgb(0x86993a),
+            leaf_color: srgb(0x4a6a2a),
+            accent_color: srgb(0x6e7e32),
             wind_sway_m: 0.25,
             // Early leaves, butter yellow in autumn.
             seasons: Some(Seasons {

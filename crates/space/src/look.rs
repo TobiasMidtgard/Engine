@@ -125,6 +125,12 @@ impl BodyLook {
         }
     }
 
+    /// True for looks with a cloud layer over the ground (drawn as its own layer from high
+    /// up, over the terrain).
+    pub fn clouds(&self) -> bool {
+        matches!(self, BodyLook::Earthlike)
+    }
+
     /// True for looks with a solid surface (a terrain may cover them up close).
     pub fn solid(&self) -> bool {
         matches!(

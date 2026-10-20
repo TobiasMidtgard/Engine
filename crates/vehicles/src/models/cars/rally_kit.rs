@@ -1640,13 +1640,27 @@ fn brushed_texture() -> (Image, Image) {
     })
 }
 
+/// The tail surface around the exhaust hole's rim (z, m).
+fn tip_rim(plain: Field, c: Vec2, r: f32) -> f32 {
+    surface_point(plain, Proj::Back, c + Vec2::new(0.0, r + 0.01), GROUND)
+        .map(|(p, _)| p.z)
+        .unwrap_or(2.0)
+}
+
+/// The exhaust tip's open end (center, the way the gas leaves, bore radius): the lip stands
+/// 2.2 cm behind the valance.
+pub fn exhaust_exits(body: &Body) -> Vec<(Vec3, Vec3, f32)> {
+    let plain = |p: Vec3| body.shell_plain(p);
+    let (c, r) = body.features.exhaust;
+    let z = tip_rim(&plain, c, r) + 0.022;
+    vec![(Vec3::new(c.x, c.y - GROUND, z), Vec3::Z, r - 0.01)]
+}
+
 /// The big single exhaust tip in the rear valance (heat-tinted).
 fn exhaust(body: &Body, plain: Field) -> Mesh {
     let (c, r) = body.features.exhaust;
     let ro = r - 0.006;
-    let rim = surface_point(plain, Proj::Back, c + Vec2::new(0.0, r + 0.01), GROUND)
-        .map(|(p, _)| p.z)
-        .unwrap_or(2.0);
+    let rim = tip_rim(plain, c, r);
     let prof = [
         Vec2::new(-0.16, ro - 0.004),
         Vec2::new(0.008, ro - 0.004),

@@ -611,7 +611,11 @@ type InitItem<'a> = (
 );
 
 /// Fill in species defaults for new animals (components left at their generic defaults).
-pub(crate) fn init_animals(mut commands: Commands, mut q: Query<InitItem, Added<Animal>>) {
+pub(crate) fn init_animals(
+    mut commands: Commands,
+    mut q: Query<InitItem, Added<Animal>>,
+    seeds: Query<&crate::seed::Seed>,
+) {
     for (e, animal, t, mut mind, mut motor, mut foot, mut body, mut faction, mut vitals) in &mut q {
         if mind.initialized {
             continue;
@@ -650,7 +654,7 @@ pub(crate) fn init_animals(mut commands: Commands, mut q: Query<InitItem, Added<
             vitals.health = vitals.max_health;
         }
         mind.initialized = true;
-        mind.rng = hash_u64(e.to_bits() ^ 0x00A4_1AA1);
+        mind.rng = hash_u64(crate::seed::seed_of(&seeds, e) ^ 0x00A4_1AA1);
         mind.home = Some(animal.home.unwrap_or(t.translation));
         mind.stamina = 1.0;
         // Packs start fed and get hungry over `hunger_secs`.
@@ -821,6 +825,7 @@ pub(crate) fn animal_think(
     mut q: Query<AnimalItem>,
     mut noise: MessageWriter<NoiseEvent>,
     mut scratch: Local<AnimalScratch>,
+    seeds: Query<&crate::seed::Seed>,
 ) {
     if !w.settings.enabled {
         return;
@@ -1258,7 +1263,18 @@ pub(crate) fn animal_think(
         // ------------------------------------------------------------ act
         if let Some(mut b) = bird {
             fly(
-                &mut mind, &mut b, &mut t, &mut loco, e, home, mates, snaps, now, dt, &w,
+                &mut mind,
+                &mut b,
+                &mut t,
+                &mut loco,
+                e,
+                crate::seed::seed_of(&seeds, e),
+                home,
+                mates,
+                snaps,
+                now,
+                dt,
+                &w,
             );
             if let Some(mut a) = anim {
                 a.set("flap", b.flap);
@@ -2317,6 +2333,7 @@ fn fly(
     t: &mut Transform,
     loco: &mut LocomotionState,
     me: Entity,
+    seed: u64,
     home: DVec3,
     mates: &[Entity],
     snaps: &HashMap<Entity, Snap>,
@@ -2422,7 +2439,8 @@ fn fly(
                 }
             } else {
                 // Climb to cruising height and circle home.
-                let cruise = floor + 12.0 + 4.0 * ((now * 0.3 + me.index_u32() as f64).sin());
+                let cruise =
+                    floor + 12.0 + 4.0 * ((now * 0.3 + (seed >> 40) as f64 / 1024.0).sin());
                 acc.y += ((cruise - pos.y) as f32 * 1.5 - b.velocity.y).clamp(-8.0, 8.0);
                 let off = (pos - home).as_vec3();
                 let flat = Vec3::new(off.x, 0.0, off.z);

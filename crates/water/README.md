@@ -14,8 +14,17 @@ Background research: `game-engine-research/graphics.md` in the project files.
 - **Streams, waterfalls and floods** (`FlowRegion`): shallow-water flow on a grid (virtual
   pipes): water runs downhill, pools in hollows and spills over lips. Sources and drains,
   basins filled at the start, open or walled edges. Lake bodies feed regions that overlap them (reservoirs).
-- **Interaction**: a ripple field follows the camera (or the first `SimulationFocus`) over the
-  nearest interactive body. Swimmers and waders (`WaterInteractor`, `GroundContact`), bullets
+  Water over a lip falls on its arc until it meets the rock: onto a ledge or into a pool it
+  lands, down a face too steep to land on it clings and slides, white, and leaves it again
+  where the face drops away (`FlowSim::fall_path`), so falls cascade down crevices instead of
+  cutting through them. Regions step in parallel bands and skip dry ground.
+- **Interaction**: a fluid field follows the camera (or the first `SimulationFocus`) over the
+  nearest interactive body: shallow water on a staggered grid, so pushes make ripples that
+  bend in the shallows and reflect off the shore, and bodies moving through it drag the water
+  along. Their wash curls into eddies (vortex shedding behind hulls and swimmers, vorticity
+  confinement keeps the swirls tight), a propeller churns, and foam rides the currents.
+  `WaterSettings::current_life_s` and `swirl` tune it. It steps only the 16-cell tiles where
+  something moves, in parallel: calm water costs nothing. Swimmers and waders (`WaterInteractor`, `GroundContact`), bullets
   (`ProjectileTrace`), blasts (`WorldImpulse`, domes from underwater charges), drops and wakes
   push it. Every splash is published as `WaterSplash` (particles, audio) and `NoiseEvent` (AI),
   including steady puffs of spray from fast boats' bows and from the foot of every waterfall
@@ -61,6 +70,7 @@ flow region from its spring, prewarmed so it already runs into the lake.
 | Depth charge every 11 s | A dome and ring waves from an underwater blast, boats thrown |
 | Logs over the falls | Floating things carried by flowing water |
 | Outlet, waterfall, rapids and stream | Shallow-water flow, white water, flow-mapped ripples |
+| Crag across the tarn: a spring cascading down a crevice into a cove | Falls in tiers: a free fall onto a ledge pool, rapids down a slab, a curtain sliding down a face, a last fall into the lake |
 | Pond, spill ditch and culvert | Water pooling at the foot of the stream, a drain |
 | Two rain showers | Raindrop rings on water, puddles filling in hollows |
 
@@ -74,7 +84,8 @@ Screenshots from several viewpoints, without a window:
 cargo run -p engine_water --example water_gallery --release -- <out_dir> [seconds] [views]
 ```
 
-Views: overview, falls, shore, under, pond, wake, aerial, ditch.
+Views: overview, falls, shore, under, pond, wake, aerial, swirl (looking down on the
+motorboat's wake), ditch, cascade, crevice.
 
 To try shader changes without rebuilding, point `ENGINE_WATER_SHADER` at a copy of
 `src/render/water.wgsl`; the gallery and the showcase then load the shader from that file.
@@ -94,7 +105,7 @@ ask the core owner to add it rather than depending on another module's crate.
 
 - Oceans: an FFT spectrum, horizon LOD and a showcase coast; planet oceans (spherical surface,
   per-planet gravity and optics).
-- GPU ripple simulation (larger, finer interactive area); flow beds that follow terrain the
+- A larger, finer interactive area (on the GPU); flow beds that follow terrain the
   destruction module changes.
 - Wave shoaling and shore breakers from a depth map of the ground under each body.
 

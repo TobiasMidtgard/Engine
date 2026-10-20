@@ -1,8 +1,8 @@
 //! Procedural textures for the yard's props and ground: tileable noise (gradient, value,
 //! cellular), and generators for weathered wood (an atlas with long and end grain), painted
 //! steel, galvanized steel, painted cast iron, worn metal, stone, concrete, rope, the boat's
-//! finishes (varnished wood, enamel, antifouling), statuary marble, packed earth with gravel,
-//! and grass.
+//! finishes (varnished wood, enamel, antifouling), statuary marble, dried bamboo, packed earth
+//! with gravel, and grass.
 //!
 //! Every generator returns a [`TexSet`]: an sRGB albedo, a tangent-space normal map (+Y up,
 //! derived from a height field in meters) and a half-resolution ORM map (R ambient
@@ -1057,6 +1057,44 @@ pub fn antifoul(size: u32) -> TexSet {
     });
     let t = 0.5 / size as f32;
     finish(size, size, &px, |_, _| (t, t), 0.1)
+}
+
+// ---------------------------------------------------------------------------------------
+// Bamboo
+
+/// Size of one tile of [`bamboo`]: meters around the culm (u) and along it (v).
+pub const BAMBOO_TILE_M: (f32, f32) = (0.24, 1.2);
+
+/// Dried, weathered bamboo skin, one tile [`BAMBOO_TILE_M`] (0.24 m around, u; 1.2 m along,
+/// v): straw gold drifting toward olive and grey where it weathered, fine fibers along the
+/// culm, faint dark flecks, and a waxy skin that is glossier than wood.
+pub fn bamboo(w: u32, h: u32) -> TexSet {
+    let px = par_texels(w, h, |x, y| {
+        let (u, v) = uv_of(x, y, w, h);
+        let fibers = fbm(u, v, (48, 2), 3, 0.55, 1701);
+        let fine = gnoise(u * 160.0, v * 6.0, 160, 6, 1702);
+        let drift = fbm(u, v, (1, 3), 3, 0.5, 1703);
+        let grey = smoothstep(0.15, 0.55, fbm(u, v, (2, 4), 3, 0.5, 1704));
+        let fleck = smoothstep(0.55, 0.8, gnoise(u * 90.0, v * 30.0, 90, 30, 1705))
+            * smoothstep(0.0, 0.4, fbm(u, v, (3, 6), 2, 0.5, 1706));
+        let straw = srgb(0.80, 0.67, 0.42);
+        let olive = srgb(0.64, 0.60, 0.38);
+        let weathered = srgb(0.62, 0.59, 0.53);
+        let mut col = straw.lerp(olive, smoothstep(-0.4, 0.5, drift));
+        col = col.lerp(weathered, grey * 0.6);
+        col *= 0.9 + 0.1 * fibers + 0.05 * fine;
+        col *= 1.0 - 0.45 * fleck;
+        Px {
+            albedo: col,
+            height: fibers * 0.00004 + fine * 0.00002,
+            rough: (0.5 + 0.08 * fibers + 0.25 * grey + 0.1 * fleck).clamp(0.3, 1.0),
+            metal: 0.0,
+            ao: 1.0,
+            alpha: 1.0,
+        }
+    });
+    let (du, dv) = (BAMBOO_TILE_M.0 / w as f32, BAMBOO_TILE_M.1 / h as f32);
+    finish(w, h, &px, |_, _| (du, dv), 0.0)
 }
 
 // ---------------------------------------------------------------------------------------

@@ -208,7 +208,7 @@ fn register_apis(app: &mut App) {
     .register_api(
         "fire.demo",
         "Start the fire demo's next fire now, already `at_secs` along (0 = just lit); each of \
-         its views (demo::VIEWS) lists its moment, like the front at 35.",
+         its views (demo::VIEWS) jumps there and watches its smoke rise, like the plume at 25 for 20 s.",
         r#"{"at_secs": 54}"#,
         |world, args| {
             let at = f32_arg(&args, "at_secs", 0.0);

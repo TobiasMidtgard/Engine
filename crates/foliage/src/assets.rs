@@ -16,7 +16,10 @@ use crate::meshgen::small::small;
 use crate::meshgen::small_textures::{
     Fungus, SMALL_ALPHA_CUTOFF, TextureSet, fern_pinna, fungus, meadow_atlas,
 };
-use crate::meshgen::textures::{ALPHA_CUTOFF, LeafKind, kind_of, leaf_textures};
+use crate::meshgen::textures::{
+    ALPHA_CUTOFF, HERO_ATLAS_SIZE, LeafKind, MASS_ATLAS_SIZE, atlas_seed, hero_leaf_textures,
+    kind_of, leaf_textures, mass_textures,
+};
 use crate::meshgen::tree::{PlantMeshes, woody};
 use crate::species::{LeafStyle, PlantForm, PlantLibrary, PlantSpecies, srgb};
 
@@ -31,10 +34,21 @@ pub const TINTS: usize = 3;
 #[derive(Debug, Clone, Default)]
 pub struct VariantMeshes {
     pub base: Option<Handle<Mesh>>,
+    /// The stump (`base`) weathered, one per `tree::STUMP_WEATHER` step after the first.
+    pub base_weathered: Vec<Handle<Mesh>>,
+    /// The moss cushions on each of those.
+    pub base_moss: Vec<Option<Handle<Mesh>>>,
     pub wood: Option<Handle<Mesh>>,
     pub foliage: Option<Handle<Mesh>>,
+    /// The crown leaf by leaf, up close (broadleaves; `tree::PlantMeshes::foliage_hero`),
+    /// drawn with `SpeciesVisual::leaves_hero`.
+    pub foliage_hero: Option<Handle<Mesh>>,
     pub wood_lod: Option<Handle<Mesh>>,
     pub foliage_lod: Option<Handle<Mesh>>,
+    /// The cheapest level, hundreds of meters off (trees and shrubs): the whole trunk (no
+    /// base with it) and a few big crown cards.
+    pub wood_distant: Option<Handle<Mesh>>,
+    pub foliage_distant: Option<Handle<Mesh>>,
     pub sapling_wood: Option<Handle<Mesh>>,
     pub sapling_foliage: Option<Handle<Mesh>>,
     /// Thinned crowns for leaf fall and leaf-out, one per [`crate::meshgen::tree::LEAF_STEPS`]
@@ -42,11 +56,21 @@ pub struct VariantMeshes {
     /// `sapling_foliage`.
     pub foliage_thin: Vec<Handle<Mesh>>,
     pub foliage_lod_thin: Vec<Handle<Mesh>>,
+    pub foliage_distant_thin: Vec<Handle<Mesh>>,
     pub sapling_foliage_thin: Vec<Handle<Mesh>>,
     /// Limbed trunk for old logs.
     pub log: Option<Handle<Mesh>>,
+    /// The same log further on in its decay, mossier (one per `tree::LOG_MOSS` step after
+    /// the first).
+    pub log_mossy: Vec<Handle<Mesh>>,
+    /// The moss cushions on the log at each `tree::LOG_MOSS` step.
+    pub log_moss: Vec<Option<Handle<Mesh>>>,
     /// The same trunk standing dead (snags and burnt trees).
     pub snag: Option<Handle<Mesh>>,
+    /// Bracket fungi on the log, the snag and the stump.
+    pub log_fungi: Option<Handle<Mesh>>,
+    pub snag_fungi: Option<Handle<Mesh>>,
+    pub stump_fungi: Option<Handle<Mesh>>,
     /// Height of the full mesh, meters.
     pub height: f32,
     pub cut_height: f32,
@@ -63,6 +87,11 @@ pub struct SpeciesVisual {
     /// The stump and roots (rigid).
     pub bark_rigid: Handle<StandardMaterial>,
     pub leaves: [Handle<StandardMaterial>; TINTS],
+    /// `leaves` with the single-leaf atlas, double-sided, for crowns drawn leaf by leaf.
+    pub leaves_hero: Option<[Handle<StandardMaterial>; TINTS]>,
+    /// `leaves` with the mass atlas (clumps of foliage rather than single sprays), for the far
+    /// and distant crowns; the same as `leaves` without an atlas.
+    pub leaves_far: [Handle<StandardMaterial>; TINTS],
     /// The summer color of each tint of `leaves` (linear RGB); the season recolors from it.
     pub leaf_colors: [[f32; 3]; TINTS],
     pub dead_leaves: Handle<StandardMaterial>,
@@ -71,6 +100,10 @@ pub struct SpeciesVisual {
     pub dead_leaves_still: Handle<StandardMaterial>,
     pub dead_bark: Handle<StandardMaterial>,
     pub burnt: Handle<StandardMaterial>,
+    /// Bracket fungi on deadwood (colors in the vertex colors).
+    pub fungi: Handle<StandardMaterial>,
+    /// Moss cushions on old logs (shared by every species).
+    pub moss: Handle<StandardMaterial>,
     /// `glow[tint][level]` for glowing species.
     pub glow: Vec<[Handle<StandardMaterial>; GLOW_LEVELS]>,
 }
@@ -84,6 +117,8 @@ pub struct FoliageVisuals {
     /// Bark texture sets, one per kind of bark, shared by every species with that bark.
     bark_textures: HashMap<BarkKind, BarkImages>,
     small_textures: HashMap<SmallKind, SmallMaps>,
+    /// The moss cushions on old logs ([`deadwood_moss`]), shared by every species.
+    moss: Option<Handle<StandardMaterial>>,
 }
 
 /// The images of one bark texture set ([`crate::meshgen::bark`]).
@@ -146,24 +181,41 @@ impl FoliageVisuals {
 struct LeafImages {
     color: Handle<Image>,
     normal: Option<Handle<Image>>,
+    /// The single-leaf atlas (color, normal) for crowns drawn leaf by leaf (broadleaves).
+    hero: Option<(Handle<Image>, Handle<Image>)>,
+    /// The mass atlas (color, normal) for far and distant crowns.
+    mass: Option<(Handle<Image>, Handle<Image>)>,
 }
 
-/// Paint the leaf images of a style: a 1024² atlas of sprays with a normal map for trees and
-/// shrubs, a single 256² image for fern fronds.
+/// Texels per side of a tree or shrub leaf atlas (up close, broadleaf crowns are drawn leaf by
+/// leaf with the single-leaf atlas instead).
+const LEAF_ATLAS_SIZE: u32 = 1024;
+
+/// Paint the leaf images of a style: a [`LEAF_ATLAS_SIZE`]² atlas of sprays with a normal map
+/// for trees and shrubs, a single 256² image for fern fronds.
 fn paint_leaves(style: LeafStyle, images: &mut Assets<Image>) -> LeafImages {
     let kind = kind_of(style);
-    let seed = 0x1eaf ^ style as u64;
+    let seed = atlas_seed(style);
     if kind == LeafKind::Frond {
         let t = leaf_textures(kind, 256, seed);
         return LeafImages {
             color: images.add(t.color),
             normal: None,
+            hero: None,
+            mass: None,
         };
     }
-    let t = leaf_textures(kind, 1024, seed);
+    let t = leaf_textures(kind, LEAF_ATLAS_SIZE, seed);
+    let hero = (!kind.is_needles()).then(|| {
+        let h = hero_leaf_textures(kind, HERO_ATLAS_SIZE, seed);
+        (images.add(h.color), images.add(h.normal))
+    });
+    let m = mass_textures(kind, MASS_ATLAS_SIZE, seed);
     LeafImages {
         color: images.add(t.color),
         normal: Some(images.add(t.normal)),
+        hero,
+        mass: Some((images.add(m.color), images.add(m.normal))),
     }
 }
 
@@ -236,7 +288,18 @@ pub fn ensure_species_visuals(
                 }
             })
         });
-        let visual = build_species(sp, texture, bark, small_maps, &mut meshes, &mut materials);
+        let moss = *visuals
+            .moss
+            .get_or_insert_with(|| deadwood_moss(&mut images, &mut materials));
+        let visual = build_species(
+            sp,
+            texture,
+            bark,
+            small_maps,
+            moss,
+            &mut meshes,
+            &mut materials,
+        );
         visuals.species[i] = Some(visual);
         tracing::debug!("foliage: built visuals for {}", sp.name);
     }
@@ -247,6 +310,7 @@ fn build_species(
     texture: Option<LeafImages>,
     bark_images: Option<BarkImages>,
     small_maps: Option<SmallMaps>,
+    moss: Handle<StandardMaterial>,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) -> SpeciesVisual {
@@ -263,21 +327,45 @@ fn build_species(
             |v: Vec<Mesh>| -> Vec<Handle<Mesh>> { v.into_iter().map(|m| meshes.add(m)).collect() };
         let foliage_thin = add_all(full.foliage_thin);
         let foliage_lod_thin = add_all(full.foliage_lod_thin);
+        let foliage_distant_thin = add_all(full.foliage_distant_thin);
         let sapling_foliage_thin = add_all(sapling_thin);
+        let log_mossy = add_all(full.log_mossy);
+        let base_weathered = add_all(full.base_weathered);
+        let base_moss = full
+            .base_moss
+            .into_iter()
+            .map(|m| m.map(|m| meshes.add(m)))
+            .collect();
+        let log_moss = full
+            .log_moss
+            .into_iter()
+            .map(|m| m.map(|m| meshes.add(m)))
+            .collect();
         let mut add = |m: Option<Mesh>| m.map(|m| meshes.add(m));
         variants.push(VariantMeshes {
             base: add(full.base),
+            base_weathered,
+            base_moss,
             wood: add(full.wood),
             foliage: add(full.foliage),
+            foliage_hero: add(full.foliage_hero),
             wood_lod: add(full.wood_lod),
             foliage_lod: add(full.foliage_lod),
+            wood_distant: add(full.wood_distant),
+            foliage_distant: add(full.foliage_distant),
             sapling_wood,
             sapling_foliage,
             foliage_thin,
             foliage_lod_thin,
+            foliage_distant_thin,
             sapling_foliage_thin,
             log: add(full.log),
+            log_mossy,
+            log_moss,
             snag: add(full.snag),
+            log_fungi: add(full.log_fungi),
+            snag_fungi: add(full.snag_fungi),
+            stump_fungi: add(full.stump_fungi),
             height: full.height,
             cut_height: full.cut_height,
         });
@@ -311,7 +399,7 @@ fn build_species(
         // are thicker. Both are matte enough that a grazing sun doesn't turn them white.
         let mut m = StandardMaterial::color(color[0], color[1], color[2])
             .with_roughness(if needles { 0.82 } else { 0.86 })
-            .with_subsurface(if needles { 0.45 } else { 0.65 })
+            .with_subsurface(if needles { 0.3 } else { 0.65 })
             .with_wind_sway(sp.wind_sway_m);
         // Leaves reflect less than the default dielectric (F0 ≈ 0.03).
         m.reflectance = 0.3;
@@ -352,6 +440,27 @@ fn build_species(
     let mix = |a: [f32; 3], b: [f32; 3], t: f32| [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t);
     let tint_colors = [0.0, 0.35, 0.7].map(|t| mix(sp.leaf_color, sp.accent_color, t));
     let leaves = tint_colors.map(|c| materials.add(leaf_material(c)));
+    let leaves_hero = texture.and_then(|t| t.hero).map(|(color, normal)| {
+        tint_colors.map(|c| {
+            let mut m = leaf_material(c);
+            m.base_color_texture = Some(color);
+            m.normal_texture = Some(normal);
+            // One quad per leaf, seen from either side.
+            m.double_sided = true;
+            materials.add(m)
+        })
+    });
+    let leaves_far = match texture.and_then(|t| t.mass) {
+        Some((color, normal)) => tint_colors.map(|c| {
+            let mut m = leaf_material(c);
+            m.base_color_texture = Some(color);
+            m.normal_texture = Some(normal);
+            // A clump is many leaves deep: less light makes it through.
+            m.subsurface *= 0.5;
+            materials.add(m)
+        }),
+        None => leaves,
+    };
     // What the season recolors from (flowers keep white: their petals are in the texture).
     let leaf_colors = tint_colors.map(|c| {
         let [r, g, b, _] = leaf_material(c).base_color;
@@ -412,14 +521,59 @@ fn build_species(
         bark: materials.add(bark),
         bark_rigid: materials.add(bark_rigid),
         leaves,
+        leaves_hero,
+        leaves_far,
         leaf_colors,
         dead_leaves,
         leaves_still,
         dead_leaves_still,
         dead_bark,
         burnt,
+        fungi: materials.add(
+            StandardMaterial::color(1.0, 1.0, 1.0)
+                .with_roughness(0.82)
+                .with_subsurface(0.15),
+        ),
+        moss,
         glow,
     }
+}
+
+/// The moss cushions on old logs: the forest floor's moss layer
+/// ([`crate::scenery::GroundLayer::Moss`]) as an alpha-masked material. The texture's alpha
+/// is the cushions' height and the mesh's vertex alpha the cover, so thin cover keeps only the
+/// tallest cushions.
+fn deadwood_moss(
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+) -> Handle<StandardMaterial> {
+    use crate::scenery::{GroundLayer, paint_layer};
+    let n = 256;
+    let layer = paint_layer(GroundLayer::Moss, n);
+    // The layer packs normal xy, roughness and occlusion into one image; split it into a
+    // normal map and an occlusion (R) / roughness (G) map.
+    let mut normal = Vec::with_capacity(n * n * 4);
+    let mut orm = Vec::with_capacity(n * n * 4);
+    for px in layer.normal_rough_ao.as_chunks::<4>().0 {
+        let x = px[0] as f32 / 127.5 - 1.0;
+        let y = px[1] as f32 / 127.5 - 1.0;
+        let z = (1.0 - x * x - y * y).max(0.0).sqrt();
+        normal.extend_from_slice(&[px[0], px[1], ((z * 0.5 + 0.5) * 255.0).round() as u8, 255]);
+        orm.extend_from_slice(&[px[3], px[2], 0, 255]);
+    }
+    let size = n as u32;
+    let albedo = images.add(Image::new(size, size, layer.albedo_height, true));
+    let normal = images.add(Image::new(size, size, normal, false));
+    let orm = images.add(Image::new(size, size, orm, false));
+    let mut m = StandardMaterial::color(1.0, 1.0, 1.0)
+        .with_base_color_texture(albedo)
+        .with_normal_texture(normal)
+        .with_metallic_roughness_texture(orm)
+        .with_occlusion_texture(orm)
+        .with_roughness(1.0)
+        .with_subsurface(0.15);
+    m.alpha_mode = AlphaMode::Mask(0.45);
+    materials.add(m)
 }
 
 /// Living bark (swaying), living bark (rigid: stumps, roots, logs), dead grey bark and charred
@@ -451,12 +605,14 @@ fn bark_materials(sp: &PlantSpecies, images: Option<BarkImages>) -> [StandardMat
             let [r, g, b] = [0, 1, 2].map(|c| gain[c] / reference[c].max(1e-3));
             m.base_color = [r, g, b, 1.0];
             m.normal_scale = img.kind.normal_scale();
-            m
+            let (strength, scale) = img.kind.detail();
+            m.with_detail(strength, scale)
         };
         bark = textured(bark, [1.0; 3], 1.0);
-        // Dead wood weathers to silvery grey, keeping a hint of the bark's own color.
-        let grey = srgb(0x7a756d);
-        let dead_color = [0, 1, 2].map(|c| (0.25 * mean[c] + 0.75 * grey[c]) / mean[c].max(1e-3));
+        // Dead bark on the damp forest floor weathers to a dull grey-brown (only sun-dried wood
+        // silvers), keeping some of the bark's own color.
+        let grey = srgb(0x5e564c);
+        let dead_color = [0, 1, 2].map(|c| (0.4 * mean[c] + 0.6 * grey[c]) / mean[c].max(1e-3));
         dead = textured(dead, dead_color, 1.0);
         // Charcoal: near black, a dull sheen on the ridges.
         let char_color = [0.014, 0.012, 0.011];

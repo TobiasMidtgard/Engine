@@ -79,6 +79,7 @@ pub fn fly(
     views: Query<&GlobalTransform, Without<ShowcaseCamera>>,
     mut play_view: Local<Option<(DVec3, Vec3)>>,
     bodies: Query<(&engine_space::CelestialBody, &Transform), Without<ShowcaseCamera>>,
+    ui: Option<Res<engine_ui::UiInputCapture>>,
 ) {
     // While someone plays (P), the pilot's camera renders and owns the keys, mouse and cursor.
     // This one waits, then carries on from where the pilot's camera was when play ends.
@@ -99,6 +100,11 @@ pub fn fly(
     if mouse_buttons.just_released(MouseButton::Right) {
         window.cursor_mode = CursorMode::Normal;
     }
+    // While a modal UI screen has the keyboard its keys are its own (2 on the quick-select
+    // wheel picks a weapon, not the forest bookmark). WASD and look come through ActionState,
+    // which the UI clears.
+    let ui_has_keys = ui.is_some_and(|c| c.keyboard);
+    let pressed = |k: KeyCode| !ui_has_keys && keys.just_pressed(k);
     let bookmark = [
         (KeyCode::Digit0, "overview"),
         (KeyCode::Digit1, "plaza"),
@@ -114,7 +120,7 @@ pub fn fly(
         (KeyCode::M, "moon"),
     ]
     .into_iter()
-    .find(|(k, _)| keys.just_pressed(*k))
+    .find(|(k, _)| pressed(*k))
     .and_then(|(_, key)| places::find(key))
     .map(|p| match bodies.iter().find(|(b, _)| b.name == "Moon") {
         // The Moon moves: aim at it where it is now.
@@ -124,13 +130,13 @@ pub fn fly(
         _ => p,
     });
 
-    if keys.just_pressed(KeyCode::BracketLeft) {
+    if pressed(KeyCode::BracketLeft) {
         sky.hour = (sky.hour - 1.0).rem_euclid(24.0);
     }
-    if keys.just_pressed(KeyCode::BracketRight) {
+    if pressed(KeyCode::BracketRight) {
         sky.hour = (sky.hour + 1.0).rem_euclid(24.0);
     }
-    if keys.just_pressed(KeyCode::T) {
+    if pressed(KeyCode::T) {
         sky.hours_per_second = if sky.hours_per_second == 0.0 {
             0.25
         } else {

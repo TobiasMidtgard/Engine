@@ -32,6 +32,8 @@ struct StrandPoint {
     t: f32,
     width: f32,
     shade: f32,
+    // How wet the hair is here, 0..1.
+    wet: f32,
     // Random per drawn strand, 0..1.
     seed: f32,
     groom: u32,
@@ -69,6 +71,17 @@ fn guide_eval(g: StrandGuide, f: f32) -> mat2x3<f32> {
     return mat2x3<f32>(pos, tan);
 }
 
+// Wetness along the guide (the points' w), linear between particles.
+fn guide_wet(g: StrandGuide, f: f32) -> f32 {
+    let last = i32(g.count) - 1;
+    let i = clamp(i32(floor(f)), 0, max(last - 1, 0));
+    let u = clamp(f - f32(i), 0.0, 1.0);
+    let base = i32(g.first);
+    let a = strand_points[u32(base + i)].w;
+    let b = strand_points[u32(base + min(i + 1, last))].w;
+    return mix(a, b, u);
+}
+
 fn find_groom(instance: u32) -> u32 {
     var k = 0u;
     for (var i = 1u; i < arrayLength(&grooms); i++) {
@@ -97,14 +110,17 @@ fn strand_point(instance: u32, vertex: u32) -> StrandPoint {
     let e = guide_eval(guide, f);
     let tan = safe_normalize(e[1], guide.normal.xyz);
     // Offset around the guide: a disc at the root, transported along the strand.
+    // Wet hair lies flat at the root and gathers into tails along the guides.
+    let wet = guide_wet(guide, f);
     let n0 = guide.normal.xyz;
     let t0 = guide.tangent.xyz;
     let b0 = cross(n0, t0);
-    let r = groom.shape.x * sqrt(h1) * select(1.0, 0.0, child == 0u);
+    let r = groom.shape.x * sqrt(h1) * select(1.0, 0.0, child == 0u) * (1.0 - 0.35 * wet);
     let theta = 6.2831853 * h2;
     let off0 = (t0 * cos(theta) + b0 * sin(theta)) * r;
     var off = off0 - tan * dot(off0, tan);
-    off *= mix(1.0, 1.0 - groom.shape.y, pow(t, 0.8));
+    let clump = mix(groom.shape.y, 0.92, wet);
+    off *= mix(1.0, 1.0 - clump, pow(t, mix(0.8, 0.4, wet)));
     // Curl around the strand.
     let curl = groom.shape.z;
     if (curl > 0.0) {
@@ -121,6 +137,7 @@ fn strand_point(instance: u32, vertex: u32) -> StrandPoint {
     p.t = t;
     p.width = groom.color.w * mix(1.0, 0.2, t);
     p.shade = 0.8 + 0.4 * h4;
+    p.wet = wet;
     p.seed = hash_u(seed + 4u);
     p.groom = gi;
     return p;

@@ -175,7 +175,7 @@ pub struct Domain {
     /// Bumped every step that changed anything visible.
     pub version: u64,
     /// Bumped when the contents jumped instead of flowing (resampled into a turned world), so
-    /// the renderer doesn't blend from what was there before.
+    /// the renderer doesn't blend from what was there before (also on [`Domain::clear`]).
     pub resampled: u64,
     /// Smoke in the box, kg.
     pub mass_kg: f32,
@@ -1167,6 +1167,8 @@ impl Domain {
         self.mass_kg = 0.0;
         self.max_density = 0.0;
         self.version += 1;
+        // The contents jumped: the renderer must not blend from the old smoke.
+        self.resampled += 1;
     }
 }
 
