@@ -630,6 +630,34 @@ fn a_floor_is_shot_up_through_from_below_and_blown_open_from_above() {
 }
 
 #[test]
+fn a_tipped_thermite_cut_drops_the_plate_clear_of_the_ladder_side() {
+    let mut app = app();
+    // Flat at y = 3, local +y toward world -z: the ladder side is the back (z < 0).
+    let steel = spawn_flat(
+        &mut app,
+        DestructibleWall::steel_hatch(1.0, 1.0),
+        DVec3::new(0.0, 3.0, 0.5),
+    );
+    app.update();
+    let mut c = BreachCharge::thermite(steel, Vec2::new(0.0, 0.5), [0.8, 0.8])
+        .with_tip(Vec2::new(0.0, -2.5));
+    c.fuse_secs = 0.1;
+    app.world.spawn(c);
+    run_secs(&mut app, 4.4);
+    let mut q = app.world.query::<(&Debris, &Transform)>();
+    let plate: Vec<DVec3> = q
+        .iter(&app.world)
+        .filter(|(d, _)| !d.chip && d.material == DestructibleMaterial::Metal)
+        .map(|(_, t)| t.translation)
+        .collect();
+    assert!(!plate.is_empty(), "the cut plate fell out");
+    assert!(
+        plate.iter().all(|p| p.z > 0.4 || p.y > 3.2),
+        "the plate fell forward, out of the ladder side of the hatch: {plate:?}"
+    );
+}
+
+#[test]
 fn hatches_give_way_to_a_hammer_or_thermite_but_steel_stops_bullets_and_charges() {
     let mut app = app();
     let hatch = spawn_flat(

@@ -1124,9 +1124,15 @@ fn destruction_views(views: &[engine_destruction::DemoView]) -> Vec<View> {
     views
         .iter()
         .map(|v| {
-            View::new(v.key, v.name, v.eye, v.target, v.hour)
+            let view = View::new(v.key, v.name, v.eye, v.target, v.hour)
                 .warmup(v.warmup_secs)
-                .on_arrive(engine_destruction::RESTART_API, "{}")
+                .on_arrive(engine_destruction::RESTART_API, "{}");
+            // Someone climbs the breach house ladders and up through the hatches once they open.
+            if v.key == "fortress_hatches" {
+                view.on_arrive("movement.ladder_guest", "{}")
+            } else {
+                view
+            }
         })
         .collect()
 }
