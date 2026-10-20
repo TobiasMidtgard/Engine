@@ -23,8 +23,10 @@ eye and hair shading meant for close-ups.
   of fine hairs, flyaways and occlusion inside the hair. Shaded with Marschner's fiber model
   (Karis's fit) plus light scattered between fibers.
 - **Body and pose.** The whole body (`CharacterBuild::default()`; `portrait()` for a bust),
-  dressed for now in a crew-neck shirt and belted trousers drawn on the skin, and leather
-  shoes built as a shell over each foot (`shoes.rs`). It is skinned on the GPU to anim's
+  dressed in a crew-neck shirt and belted trousers that are a layer of their own over the
+  skin (`clothes.rs`: trouser legs hang from the knees, the shirt from the chest, sleeves are
+  loose, with folds at the elbows, wrists, waist, knees and hems), and leather shoes built as a
+  shell over each foot (`shoes.rs`). It is skinned on the GPU to anim's
   `SkeletonPose` by the humanoid bone names: MakeHuman's bones are folded onto anim's 22
   (`tools/bake_makehuman.py`), each limb is turned from the person's own rest direction to
   anim's, and the feet land where the pose puts them, so a short or tall person follows any
