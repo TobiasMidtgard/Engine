@@ -377,12 +377,22 @@ impl PackRole {
     }
 }
 
+/// An ambusher springs when the quarry comes this close (m); a deer fleeing the pack doesn't
+/// see it lying low in wait until then.
+pub const AMBUSH_RANGE: f32 = 12.0;
+
 /// A pack gives up a chase this long (s, on its own clock) after its first wolf set off, and
 /// rests this long before it hunts again.
 pub const PACK_CHASE_SECS: f64 = 20.0;
 pub const PACK_REST_SECS: f64 = 25.0;
 /// The tester picks over the fleeing herd for the weakest this long into its rush (s).
 pub const TEST_SECS: f64 = 4.0;
+/// Past its test, a pack breaks off from a fit quarry (unhurt, grown) that is this far (m)
+/// ahead of its nearest wolf and still pulling away (by `ESCAPE_GAIN` m over `ESCAPE_SECS`),
+/// rather than run on to `PACK_CHASE_SECS` after one it can't catch.
+pub const ESCAPE_GAP: f32 = 18.0;
+pub const ESCAPE_GAIN: f32 = 1.5;
+pub const ESCAPE_SECS: f64 = 2.0;
 /// A wolf scents deer this far off (m), and stalks a herd it scents until it is past this.
 pub const SCENT_REACH: f64 = 110.0;
 /// A deer chased by a wolf this close (m) cuts from side to side.
@@ -512,9 +522,12 @@ pub struct AnimalMind {
     chaser: Option<Entity>,
     /// Flankers: when it came level with the quarry in this chase (animal clock).
     abreast: Option<f64>,
+    /// In a chase: the pack's lead on the quarry (its nearest wolf's distance, m) when it
+    /// last looked (animal clock), to tell whether a fit quarry is getting away.
+    gap_mark: Option<(f64, f32)>,
     /// Deer: it raised the alarm at a predator it saw, so it stots as it sets off (not at a
     /// bang, a blow or fire: then it just runs).
-    stots: bool,
+    pub stots: bool,
     /// Away from everything it last saw or smelled that threatens it, weighted by danger.
     escape: Option<Vec3>,
     zig: f32,
@@ -1076,10 +1089,15 @@ pub(crate) fn animal_think(
                     * w.settings.skittishness
                     * f
                     * if asleep { 0.6 } else { 1.0 };
+                // Running flat out from a pack, it doesn't see a wolf lying low in wait ahead
+                // until it is almost on it (though it may smell it).
+                let lying_low = mind.state == AnimalState::Flee
+                    && p.mode == LocomotionMode::Crouch
+                    && other.is_some_and(|o| o.state == AnimalState::Stalk);
                 let mut sensed = false;
                 if d < 4.0 {
                     sensed = true;
-                } else if d < sight * f.max(0.6) {
+                } else if d < sight * f.max(0.6) && !(lying_low && d > AMBUSH_RANGE) {
                     let target = p.position + DVec3::Y * (p.height * 0.7) as f64;
                     sensed = w.world.raycast(eye, target).is_none();
                 }
@@ -1636,8 +1654,30 @@ fn decide(
             } else {
                 SCENT_REACH + 10.0
             };
-            if d > lost || pack_chase > PACK_CHASE_SECS || mate_gave_up {
-                // Lost it, or run out of steam: the pack gives up and catches its breath.
+            // Tested, a fit quarry pulling away from the whole pack is let go.
+            let mut outrun = false;
+            if mind.state == AnimalState::Chase && pack_chase > TEST_SECS {
+                let gap = mates
+                    .iter()
+                    .filter_map(|m| snaps.get(m))
+                    .filter(|s| !s.dead)
+                    .map(|s| flat(s.pos - p.pos).length())
+                    .fold(d as f32, f32::min);
+                match mind.gap_mark {
+                    Some((at, was)) if now - at >= ESCAPE_SECS => {
+                        let fit = p.hurt < 0.1 && !p.young;
+                        outrun = fit && gap > ESCAPE_GAP && gap - was > ESCAPE_GAIN;
+                        mind.gap_mark = Some((now, gap));
+                    }
+                    Some(_) => {}
+                    None => mind.gap_mark = Some((now, gap)),
+                }
+            } else {
+                mind.gap_mark = None;
+            }
+            if d > lost || pack_chase > PACK_CHASE_SECS || mate_gave_up || outrun {
+                // Lost it, outrun, or run out of steam: the pack gives up and catches its
+                // breath.
                 mind.prey = None;
                 mind.role = PackRole::None;
                 mind.chase_from = None;
@@ -1662,7 +1702,7 @@ fn decide(
                     PackRole::Ambusher => {
                         let away = flat(pos - p.pos).dot(p.vel) <= 0.0;
                         let missed = pack_chase > 3.0 && d > 20.0 && away;
-                        d < 12.0 || pack_charging && missed || stalk_secs > 60.0
+                        d < f64::from(AMBUSH_RANGE) || pack_charging && missed || stalk_secs > 60.0
                     }
                     // Rushes the herd once the pack is in place.
                     PackRole::Tester => {
@@ -2360,6 +2400,19 @@ fn hunt(
             PackRole::Chaser => (at(-(10.0f32 + behind).max(14.0), 5.0 * spread), stalk * 1.6),
             _ => (at(-(10.0f32 + behind).max(14.0), 0.0), stalk * 1.6),
         };
+        // Once the pack sets off, an ambusher out in front of the quarry lies still and low
+        // where it is, to spring as it comes (moving, it would only show itself).
+        let charging = mates
+            .iter()
+            .any(|m| *m != me && snaps.get(m).is_some_and(|s| s.state == AnimalState::Chase));
+        if mind.role == PackRole::Ambusher && charging && along_me > 4.0 {
+            nav.clear();
+            out.direction = Vec3::ZERO;
+            out.crouch = true;
+            out.look = flat(prey_pos - pos).try_normalize();
+            mind.placed = true;
+            return;
+        }
         // Backs off from any of the herd that wanders too close, before it is seen.
         let clear = 10.0;
         let away = flat(pos - nearest_at).normalize_or_zero();
@@ -2395,6 +2448,8 @@ fn hunt(
     };
     let t = (d / motor.sprint_speed.max(1.0)).min(1.2);
     let lead = prey_pos + (prey_vel * t).as_dvec3();
+    let trailing =
+        mind.role == PackRole::Ambusher && d > 3.0 && flat(pos - prey_pos).dot(heading) < 2.0;
     let aim = match mind.role {
         PackRole::FlankLeft | PackRole::FlankRight => {
             let side = left_of(heading) * mind.role.side();
@@ -2411,10 +2466,10 @@ fn hunt(
                 _ if d < 3.0 => flank,
                 Some(at) if level && tiring && now - at > 1.0 => flank,
                 // Up with it: run alongside it in a lane out on its side, closing it off from
-                // that side, easing in to the lane and aiming well ahead so as not to lose
-                // ground.
+                // that side, easing in to the lane (quicker from far out) and aiming well ahead
+                // so as not to lose ground.
                 Some(_) => {
-                    let lane = (across - 2.0).max(4.5);
+                    let lane = (across - 2.0).min(across * 0.7).max(4.5);
                     prey_pos + (prey_vel * 0.6 + side * lane).as_dvec3()
                 }
                 // Still behind: run out wide and up level with it.
@@ -2422,12 +2477,18 @@ fn hunt(
             }
         }
         PackRole::Chaser if d > 6.0 => lead + (left * 3.0 * spread).as_dvec3(),
+        // Sprung, the ambusher heads the quarry off while it is still coming on; once it is
+        // past, it drops back onto its trail well behind it and follows on, rather than
+        // cutting in from the side it was on (which only turns it into the flanker on the
+        // other side).
+        PackRole::Ambusher if trailing => prey_pos - (heading * 12.0).as_dvec3(),
         _ => lead,
     };
     let dir = flat(aim - pos).normalize_or(Vec3::X);
     out.direction = dir;
     out.look = Some(dir);
-    out.sprint = mind.stamina > 0.15;
+    // (Following on, it runs, saving itself, unless it is falling far behind.)
+    out.sprint = mind.stamina > 0.15 && !(trailing && d < 18.0);
     if d < 1.6 && now >= mind.bite_ready && traits.bite > 0.0 {
         mind.bite = mind.prey;
         mind.bite_ready = now + 0.9 + 0.4 * mind.random() as f64;

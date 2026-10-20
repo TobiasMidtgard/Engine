@@ -5,8 +5,8 @@ use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 use engine_core::registry::call_api;
 use engine_core::time::TimeSource;
-use engine_physics::PhysicsPlugin;
 use engine_physics::demo::{self, Station};
+use engine_physics::{PhysicsPlugin, PhysicsStats};
 use engine_world::physics::{BodyKind, Collider, ColliderShape, RigidBody, Velocity};
 use engine_world::{SimulationFocus, WorldPlugin};
 use serde_json::json;
@@ -279,4 +279,60 @@ fn rocks_pour_down_the_chute_into_a_heap_and_come_to_rest() {
             "a rock is still moving: {v:?}"
         );
     }
+}
+
+/// The pool table's break (`demo::pool`): the cue ball at 8 m/s opens the rack, a few balls
+/// drop into the pockets, the rest spread over the cloth, and everything is still before the
+/// table resets.
+#[test]
+fn the_break_scatters_the_rack_into_the_pockets_and_the_balls_stop() {
+    let mut app = app();
+    app.update();
+    let origin = Station::Pool.base() + DVec3::Y * demo::SLAB_RISE;
+    let cloth = origin.y + demo::pool::BED as f64;
+    let balls: Vec<(String, Entity)> = (0..16)
+        .map(|n| {
+            let name = match n {
+                0 => "Cue ball".to_string(),
+                n => format!("Pool ball {n}"),
+            };
+            let found = named(&mut app, &name);
+            assert_eq!(found.len(), 1, "{name}: {found:?}");
+            (name, found[0])
+        })
+        .collect();
+    let at = |app: &App, e: Entity| app.world.get::<Transform>(e).unwrap().translation;
+    let start: Vec<DVec3> = balls.iter().map(|(_, b)| at(&app, *b)).collect();
+    // The cue ball reaches the rack after about 0.16 s; the pack steps finely meanwhile.
+    app.update_n(18);
+    let s = *app.world.resource::<PhysicsStats>();
+    assert!(s.fine_awake >= 16, "{s:?}");
+    // The table resets 25 s after it was built.
+    app.update_n(20 * 60);
+    let [hl, hw] = demo::pool::HALF.map(|h| h as f64);
+    let r = demo::pool::BALL as f64;
+    let (mut pocketed, mut moved) = (0, 0);
+    for (i, (name, b)) in balls.iter().enumerate() {
+        let p = at(&app, *b);
+        let d = p - origin;
+        let v = app.world.get::<Velocity>(*b).unwrap();
+        assert!(
+            v.linear.length() < 0.01 && v.angular.length() < 0.5,
+            "{name} is still rolling: {v:?}"
+        );
+        // On the cloth inside the cushions, or down a pocket on the catch under the table.
+        let on_cloth = (p.y - cloth - r).abs() < 0.005 && d.x.abs() < hl && d.z.abs() < hw;
+        let in_pocket = p.y < cloth - 0.1
+            && p.y > cloth - 0.25
+            && d.x.abs() < hl + 0.18
+            && d.z.abs() < hw + 0.18;
+        assert!(on_cloth || in_pocket, "{name} left the table: at {d}");
+        pocketed += in_pocket as usize;
+        if i > 0 && (p - start[i]).length() > 0.3 {
+            moved += 1;
+        }
+    }
+    assert!(pocketed >= 1, "the break pocketed nothing");
+    assert!(pocketed <= 6, "{pocketed} balls went down");
+    assert!(moved >= 12, "only {moved} of the 15 balls spread out");
 }

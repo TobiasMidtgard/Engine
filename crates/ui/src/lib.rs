@@ -21,6 +21,7 @@ pub mod menus;
 pub mod node;
 pub mod planet_noise;
 pub mod quests;
+pub mod saves;
 pub mod screens;
 pub mod shop;
 pub mod skills;
@@ -106,6 +107,7 @@ impl Plugin for UiPlugin {
             wheel::add_painters(&mut painters);
             skills::add_painters(&mut painters);
             crafting::add_painters(&mut painters);
+            saves::add_painters(&mut painters);
         }
         app.init_resource::<items::ItemDatabase>()
             .init_resource::<dialogue::DialogueLibrary>()
@@ -113,6 +115,7 @@ impl Plugin for UiPlugin {
             .init_resource::<quests::QuestLog>()
             .init_resource::<skills::SkillTree>()
             .init_resource::<crafting::RecipeBook>()
+            .init_resource::<saves::SaveSlots>()
             .init_resource::<menus::PauseState>();
         {
             let mut screens = app.world.resource_mut::<ScreenRegistry>();
@@ -171,6 +174,12 @@ impl Plugin for UiPlugin {
                 skills::build_screen,
             );
             screens.add(
+                "saves",
+                "Save and load: the game's save slots (SaveSlots) as cards with a painted view of where each was made, chapter, place, level, play time and date. Load (after a confirm), save into a new slot or over one, delete. Sends game.load:<id>, game.save:<id>, game.delete_save:<id>. `mode` \"load\" or \"save\", `select` a slot id.",
+                r#"{"mode": "load"}"#,
+                saves::build_screen,
+            );
+            screens.add(
                 "pause",
                 "The pause menu (stops game time while open): resume, inventory, journal, map, settings, save, quit.",
                 "{}",
@@ -206,6 +215,7 @@ impl Plugin for UiPlugin {
                 wheel::wheel_system,
                 skills::skills_system,
                 crafting::crafting_system,
+                saves::saves_system,
                 menus::menus_system,
             ),
         )
@@ -242,6 +252,7 @@ impl Plugin for UiPlugin {
         quests::register_api(app);
         skills::register_api(app);
         crafting::register_api(app);
+        saves::register_api(app);
     }
 }
 
@@ -278,6 +289,9 @@ fn register_types(app: &mut App) {
     .register_component::<UiId>("Stable name of a UI node for events, ui.click and ui.tree.")
     .register_component::<widgets::Bar>(
         "Value bar painted in a bar_track node: value 0..1 or bind/bind_max (data paths), color/color2 gradient, segments, low (pulse threshold), label.",
+    )
+    .register_component::<saves::SaveThumb>(
+        "A painted view for a save slot (paint: save_thumb): scene (valley, forest, village_night, snow, desert, orbit) and seed.",
     )
     .register_component::<widgets::Cooldown>(
         "Cooldown sweep over a slot: remaining/total seconds (or bind/bind_total), label.",

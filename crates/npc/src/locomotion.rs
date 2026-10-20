@@ -7,10 +7,12 @@
 //! It accelerates toward the wished velocity, dashes, follows the ground and walkable tops of crates and
 //! platforms, slides along walls, swims in deep water, turns toward where it looks, writes
 //! `LocomotionState` and `AnimationParams`, and sends a `GroundContact` per footstep so
-//! terrain, grass and audio react to NPCs and animals the same way they react to the player.
+//! terrain, grass and audio react to NPCs and animals the same way they react to the player,
+//! with a `footstep_left` or `footstep_right` `AnimationEvent` (on the humanoid skeleton's
+//! `foot_l` or `foot_r` for people).
 
 use engine_core::prelude::*;
-use engine_world::animation::AnimationParams;
+use engine_world::animation::{AnimationEvent, AnimationParams};
 use engine_world::locomotion::{LocomotionBackend, LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::physics::CharacterController;
 use engine_world::{ContactKind, Ground, GroundContact, Water, WorldShift};
@@ -114,6 +116,7 @@ pub(crate) fn fallback_move(
     water: Res<Water>,
     mut q: Query<MoverItem, Without<SelfPropelled>>,
     mut contacts: MessageWriter<GroundContact>,
+    mut events: MessageWriter<AnimationEvent>,
 ) {
     if !settings.builtin_locomotion {
         return;
@@ -317,6 +320,17 @@ pub(crate) fn fallback_move(
                 },
                 surface: None,
                 entity: Some(e),
+            });
+            // A person's foot is the humanoid skeleton's (see `visuals::character`).
+            let (name, bone) = if mover.left {
+                ("footstep_left", "foot_l")
+            } else {
+                ("footstep_right", "foot_r")
+            };
+            events.write(AnimationEvent {
+                entity: e,
+                name: name.to_string(),
+                bone: (foot.kind == FootKind::Foot).then(|| bone.to_string()),
             });
         }
     }
