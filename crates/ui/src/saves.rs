@@ -439,6 +439,12 @@ fn paint_thumb(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
                 Color::TRANSPARENT,
             );
         }
+        // Moonlit snow is blue-grey, daylit snow near white.
+        let snow_col = if t.scene == "village_night" {
+            hex(0x8796b4)
+        } else {
+            hex(0xeef4fb).with_alpha(0.92)
+        };
         // Hills, far to near, each a run of columns under its ridge, with haze between.
         let step = (2.5 * px).max(1.0);
         let cols = (r.w / step).ceil() as u32 + 1;
@@ -453,7 +459,7 @@ fn paint_thumb(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
                 ctx.line(
                     Vec2::new(x, top),
                     Vec2::new(x, r.y + r.h),
-                    step + 0.6,
+                    step + 1.5 * px,
                     color,
                     0.0,
                 );
@@ -464,8 +470,8 @@ fn paint_thumb(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
                         ctx.line(
                             Vec2::new(x, top),
                             Vec2::new(x, top + cap),
-                            step + 0.6,
-                            hex(0xeef4fb).with_alpha(0.92),
+                            step + 1.5 * px,
+                            snow_col,
                             0.0,
                         );
                     }
@@ -492,10 +498,10 @@ fn paint_thumb(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
             {
                 let y = r.y + r.h * 0.70;
                 ctx.rect_fill(
-                    Rect::new(r.x + r.w * 0.18, y, r.w * 0.64, r.h * 0.07),
+                    Rect::new(r.x + r.w * 0.18, y, r.w * 0.64, r.h * 0.05),
                     Fill::Linear {
-                        from: hex(sc.sky[2]).lerp(hex(w), 0.4),
-                        to: hex(w),
+                        from: hex(sc.sky[2]).lerp(hex(w), 0.75).with_alpha(0.9),
+                        to: hex(w).with_alpha(0.9),
                         angle_deg: 90.0,
                     },
                     [r.h * 0.03; 4],
@@ -531,7 +537,7 @@ fn paint_thumb(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
                     let f = j as f32 / rows as f32;
                     // Wider toward the bottom, in three tiers.
                     let tier = (f * 3.0).fract();
-                    let half = w * 0.5 * (0.25 + f * 0.75) * (0.55 + tier * 0.45);
+                    let half = w * 0.5 * (0.08 + f * 0.92) * (0.78 + tier * 0.22);
                     let y = gy - h + f * h;
                     ctx.line(
                         Vec2::new(cx - half, y),
@@ -841,7 +847,7 @@ fn details(world: &World, st: &SavesScreen) -> El {
         s.title(slots.index_of(&s.id))
     };
     panel = panel
-        .child(thumb(&s.scene, s.seed, 484.0, 272.0))
+        .child(thumb(&s.scene, s.seed, 484.0, 236.0))
         .child(
             El::new()
                 .class("col")
@@ -863,7 +869,6 @@ fn details(world: &World, st: &SavesScreen) -> El {
                 ),
         )
         .child(widgets::divider())
-        .child(detail_row("Character", s.character.clone()))
         .child(detail_row("Location", s.location.clone()))
         .child(detail_row("Level", s.level.to_string()))
         .child(detail_row("Play time", playtime(s.playtime_s)))
