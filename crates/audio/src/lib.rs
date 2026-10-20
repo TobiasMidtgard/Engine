@@ -28,7 +28,7 @@ use engine_world::{FollowsWorldShift, WorldShift, WorldShiftAppExt};
 
 pub use footstep::{FootstepSound, FootstepSurfaces, Step, SurfaceSound};
 pub use mixer::{Bus, Clock, Meters, Sound, Spatial, VoiceId};
-pub use samples::FootstepSamples;
+pub use samples::{FootstepSamples, RecordedSteps};
 
 use mixer::{Command, Mixer, MixerEvent, MixerSettings, Play};
 use output::Backend;
@@ -79,6 +79,10 @@ impl Plugin for AudioPlugin {
             .register_component::<ReverbZone>(
                 "A room or cave: inside the box (half_extents, m, entity axes) sounds get reverb \
                  (room 0..1 size, damping 0..1, wet 0..1), fading in over fade_m meters.",
+            )
+            .register_component::<RecordedSteps>(
+                "Per walker: enabled (default true) lets its feet, paws or hooves play recorded \
+                 takes where they are fetched; false always synthesizes its steps.",
             )
             .add_systems(Startup, (systems::ensure_output, samples::start_loading))
             .add_systems(
@@ -154,10 +158,11 @@ pub struct AudioSettings {
     pub space_is_silent: bool,
     /// Footsteps farther than this from the listener are not played, meters.
     pub footstep_distance_m: f32,
-    /// Footsteps play recorded takes where they are fetched (`cargo run -p fetch-assets --
-    /// audio`, into `<asset root>/fetched/audio/footsteps/`), with the synthesis adding only
-    /// what the recording lacks; off (or without the files) every step is synthesized. Read
-    /// at startup to load them; turning it off later goes back to the synthesis.
+    /// Footsteps, paws and hooves play recorded takes where they are fetched (`cargo run -p
+    /// fetch-assets -- audio`, into `<asset root>/fetched/audio/{footsteps,paws,hooves}/`),
+    /// with the synthesis adding only what the recording lacks; off (or without the files)
+    /// every step is synthesized. Read at startup to load them; turning it off later goes
+    /// back to the synthesis. [`RecordedSteps`] turns takes off for one walker.
     pub recorded_footsteps: bool,
     /// Most voices at once; new sounds beyond it are skipped.
     pub max_voices: u32,
