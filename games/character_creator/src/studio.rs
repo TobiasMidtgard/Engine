@@ -39,7 +39,14 @@ impl Orbit {
 /// Exposure for the studio light (EV100).
 pub const EV100: f32 = 14.0;
 
+/// `--daylight`: the subject outdoors at midday under the open sky (no backdrop, no studio
+/// lamps), to check how people read in the game's own light.
+fn daylight() -> bool {
+    std::env::args().any(|a| a == "--daylight")
+}
+
 pub fn setup(mut commands: Commands, mut settings: ResMut<RenderSettings>) {
+    let daylight = daylight();
     // Close-up quality: tight, sharp shadow cascades and short-range occlusion.
     settings.shadow_distance = 6.0;
     settings.far_shadow_distance = 0.0;
@@ -52,7 +59,12 @@ pub fn setup(mut commands: Commands, mut settings: ResMut<RenderSettings>) {
     settings.sharpness = 0.25;
 
     let mut camera = Camera::perspective(Orbit::CLOSE_UP.fov_deg);
-    camera.exposure = Exposure::Manual { ev100: EV100 };
+    // Outdoors the camera adapts like the game's.
+    camera.exposure = if daylight {
+        Exposure::default()
+    } else {
+        Exposure::Manual { ev100: EV100 }
+    };
     if let Projection::Perspective { near, .. } = &mut camera.projection {
         *near = 0.02;
     }
@@ -62,39 +74,53 @@ pub fn setup(mut commands: Commands, mut settings: ResMut<RenderSettings>) {
         Orbit::CLOSE_UP,
         Transform::from_xyz(0.0, 1.7, 0.8),
     ));
-    // Key light: late-afternoon sun from the front left, softened like a big window.
-    commands.spawn((
-        Name::new("key light"),
-        DirectionalLight {
-            color: [0.97, 0.97, 1.0],
-            illuminance: 90_000.0,
-            cast_shadows: true,
-            angular_size_deg: 2.0,
-        },
-        Transform::default().looking_at(DVec3::new(0.55, -0.62, -0.56), Vec3::Y),
-    ));
-    // Rim light behind the right shoulder: separates hair and jaw from the backdrop.
-    commands.spawn((
-        Name::new("rim light"),
-        PointLight {
-            color: [1.0, 0.86, 0.7],
-            intensity_lm: 260_000.0,
-            range: 6.0,
-            radius: 0.25,
-        },
-        Transform::from_xyz(0.9, 2.1, -0.9),
-    ));
-    // Fill from the right, cool and soft.
-    commands.spawn((
-        Name::new("fill light"),
-        PointLight {
-            color: [1.0, 0.97, 0.94],
-            intensity_lm: 220_000.0,
-            range: 8.0,
-            radius: 0.6,
-        },
-        Transform::from_xyz(-1.4, 1.7, 1.3).looking_at(DVec3::new(0.0, 1.7, 0.0), Vec3::Y),
-    ));
+    if daylight {
+        // Late-morning sun from the front left, the open sky does the rest.
+        commands.spawn((
+            Name::new("sun"),
+            DirectionalLight {
+                color: [1.0, 0.97, 0.92],
+                illuminance: 100_000.0,
+                cast_shadows: true,
+                angular_size_deg: 0.53,
+            },
+            Transform::default().looking_at(DVec3::new(0.5, -0.6, -0.62), Vec3::Y),
+        ));
+    } else {
+        // Key light: late-afternoon sun from the front left, softened like a big window.
+        commands.spawn((
+            Name::new("key light"),
+            DirectionalLight {
+                color: [0.97, 0.97, 1.0],
+                illuminance: 90_000.0,
+                cast_shadows: true,
+                angular_size_deg: 2.0,
+            },
+            Transform::default().looking_at(DVec3::new(0.55, -0.62, -0.56), Vec3::Y),
+        ));
+        // Rim light behind the right shoulder: separates hair and jaw from the backdrop.
+        commands.spawn((
+            Name::new("rim light"),
+            PointLight {
+                color: [1.0, 0.86, 0.7],
+                intensity_lm: 260_000.0,
+                range: 6.0,
+                radius: 0.25,
+            },
+            Transform::from_xyz(0.9, 2.1, -0.9),
+        ));
+        // Fill from the right, cool and soft.
+        commands.spawn((
+            Name::new("fill light"),
+            PointLight {
+                color: [1.0, 0.97, 0.94],
+                intensity_lm: 220_000.0,
+                range: 8.0,
+                radius: 0.6,
+            },
+            Transform::from_xyz(-1.4, 1.7, 1.3).looking_at(DVec3::new(0.0, 1.7, 0.0), Vec3::Y),
+        ));
+    }
     // A backdrop that stays behind the subject whichever way the camera turns (it casts no
     // shadow, so it never blocks the key light), and a floor.
     let mut backdrop = MeshRenderer::new(
@@ -104,12 +130,14 @@ pub fn setup(mut commands: Commands, mut settings: ResMut<RenderSettings>) {
         StandardMaterial::hex(0x55585e).with_roughness(0.95),
     );
     backdrop.cast_shadows = false;
-    commands.spawn((
-        Name::new("backdrop"),
-        Backdrop,
-        Transform::from_xyz(0.0, 1.6, -1.6),
-        backdrop,
-    ));
+    if !daylight {
+        commands.spawn((
+            Name::new("backdrop"),
+            Backdrop,
+            Transform::from_xyz(0.0, 1.6, -1.6),
+            backdrop,
+        ));
+    }
     commands.spawn((
         Name::new("floor"),
         Transform::default(),
@@ -118,7 +146,7 @@ pub fn setup(mut commands: Commands, mut settings: ResMut<RenderSettings>) {
                 size: [20.0, 20.0],
                 subdivisions: 1,
             },
-            StandardMaterial::hex(0x2e2d2b).with_roughness(0.9),
+            StandardMaterial::hex(if daylight { 0xb08850 } else { 0x2e2d2b }).with_roughness(0.9),
         ),
     ));
     commands.spawn((

@@ -16,11 +16,15 @@ eye and hair shading meant for close-ups.
   diffusing under the skin (softer, redder wrap and shadow edges; ears glow when backlit) with
   two highlight lobes.
 - **Eyes.** A sphere with a cornea; the iris is seen refracted through it and drawn from its
-  anatomy (fibers, crypts, collarette, limbal ring), colored by melanin and lipochrome.
+  anatomy (fibers, crypts, collarette, limbal ring), colored by melanin and lipochrome. The
+  socket, brow and lids hide much of the sky from the eye and the upper lid shades it from a
+  high sun, so the whites don't glare outdoors.
 - **Hair.** Strands grown on the skin: brows in a herringbone, lashes along the lid rims,
   beards (stubble, short, full, goatee) and scalp hair (buzz, short, medium, long, bun) with
   clumped locks, curls (coily short hair stands up rather than combing flat), a soft hairline
-  of fine hairs, flyaways and occlusion inside the hair. Shaded with Marschner's fiber model
+  of fine hairs, flyaways and occlusion inside the hair. Long and medium hair is settled by a
+  short simulation when the person is built (gravity, bending, collisions with the skin, crown
+  hair layered over the hair below it), so it lies on the head and drapes over the shoulders. Shaded with Marschner's fiber model
   (Karis's fit) plus light scattered between fibers.
 - **Body and pose.** The whole body (`CharacterBuild::default()`; `portrait()` for a bust),
   dressed in a crew-neck shirt and belted trousers that are a layer of their own over the
@@ -58,7 +62,7 @@ face. `-- --headless --shots <dir>` renders portrait sheets; `--views eyes,masks
 adds close-ups and debug views, `--views body,body34 --pose walk` (also `wave`, `think`,
 `turn`) the whole person posed, `--views feet` the shoes, and `--views smile,laugh34`
 expressions (`neutral`, `smile`, `laugh`, `sad`, `surprise`, `angry`, `disgust`, `blink`,
-`look`). `cargo run -p engine_character --example dump_strands -- <Preset> out.json` dumps the
+`look`). `--daylight` shoots outdoors under the midday sky instead of the studio. `cargo run -p engine_character --example dump_strands -- <Preset> out.json` dumps the
 grown hair for plotting.
 
 ## Contracts

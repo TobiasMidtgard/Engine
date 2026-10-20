@@ -68,7 +68,8 @@ charge misses, or it has waited a minute); once the quarry is past, it drops bac
 trail and follows on at a run rather than cut in from the side; any more drive with the
 tester. While they stalk, the wolves keep 10 m
 clear of the herd and crouch within 30 m of it, and the flankers loop round behind it to
-their posts off its flanks rather than cross in front. The tester rushes once the pack is
+their posts out wide, about level with the quarry (`FLANK_POST`), rather than cross in
+front. The tester rushes once the pack is
 in place. A pack gives up a chase
 `PACK_CHASE_SECS` after its first wolf set off, or sooner, once its test is over, from a fit
 (unhurt, grown) quarry that is `ESCAPE_GAP` ahead of its nearest wolf and still pulling away
@@ -77,7 +78,9 @@ rests `PACK_REST_SECS`, hungry or not. They feed on the kill and back away from
 people. Deer raise the alarm: the first to bolt snorts (a noise other animals hear, though
 not its own herd) and flags its tail; each of the others turns its head to where the alarm
 came from, then bolts a reaction time later (0.3 to 0.55 s), and the herd runs off bunched
-(the ones out front ease off for the rest). A deer runs from all the wolves it sees at
+(the ones out front ease off for the rest). The deer the pack is running down is cut off
+from its herd: it no longer runs with the others or is drawn back to them (it only keeps
+clear of them), so it runs its own line from the wolves. A deer runs from all the wolves it sees at
 once, the nearest most, so one with a wolf on either side runs on between them; with a wolf
 close at its heels (`ZIGZAG_RANGE`) it cuts from side to side at sharp angles; the one that
 raised the alarm at a predator it saw stots (pronks) for its first bounds (`STOT_SECS`;
@@ -129,8 +132,9 @@ arching as the hind feet swing up past the fore feet and hollowing as the legs s
 through the gallop, the body flies an arc when no foot is down, sits back setting off and
 pitches forward stopping, leans into turns and breathes harder after a run, and heads steady
 against the bob. A stotting deer pronks: all four feet push off and land together on legs
-held stiff and straight, the back arched, each bound high, the white rump patch flared out
-of the coat (quickly up, slowly down after). Ears swivel toward noises and threats and flick, tails swish (a deer's flags
+held stiff and straight, the back arched, each bound high, the body near level and the head
+held high, riding up with each bound, the white rump patch flared out of the coat (quickly
+up, slowly down after). Ears swivel toward noises and threats and flick, tails swish (a deer's flags
 up when alarmed), grazing deer tear the grass and look up to chew and watch, an alert animal
 turns its head toward what it heard before its neck follows and freezes, and states blend
 into each other. A hunting wolf stalks low with its head on its prey, rushes from the stalk
@@ -171,7 +175,9 @@ All art is generated in code (`src/art`), since no third-party art may go in the
   boar is roused, small eyes and pricked ears, cloven trotters with dewclaws, curved tusks on
   the tuskers, the upper pair in the lip and the lower on the jaw, and a size down,
   pale-striped piglets, striped down to the jaw) and European rabbits, with fur
-  textures that follow the coat, baked ambient occlusion, IK legs and planted feet, deer, wolf
+  textures that follow the coat (a deer's hooves are part of the pastern piece, to keep the
+  stag within its part budget, yet dark, smoother horn: their vertices sample a few-texel
+  horn swatch baked into a corner of the coat texture), baked ambient occlusion, IK legs and planted feet, deer, wolf
   and boar torsos in two halves that bend at the loin over a closed seam (no crease: the fore
   half's rim lies on the skin with its normals, and the croup swells a hair over the fore
   half's hinge where the back slopes away behind it), and starlings with
@@ -415,10 +421,10 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   charge into it, a sow charges to defend her piglets (a lone sow runs), wolves give room to
   a boar charging at them but not to one charging past (at six spots), wolves pick a piglet
   over its elders, a pack of three, four or five picks the wounded deer from the start, runs
-  only it and catches it (unhurt, the herd's nearest), over eight seeded hunts for each pack
-  size its flankers run out on the quarry's sides (both on their own for 85 % of the
-  flanking, abreast of it for a second in five hunts or more, never level with it on the
-  far side) while the tester drives from behind and the ambusher lies in wait beyond the
+  only it and catches it (unhurt, the herd's nearest), over twenty-four seeded hunts for
+  each pack size (a test for each) its flankers run out on the quarry's sides (both on their
+  own for 85 % of the flanking, abreast of it for a second in five of every eight hunts or
+  more, never level with it on the far side) while the tester drives from behind and the ambusher lies in wait beyond the
   herd, a herd's alarm spreads within a reaction time (each deer looks toward the shot
   before it bolts, and the herd stays bunched), a deer runs straight from a wolf well back
   and zigzags once it is close, a deer stots at a wolf it sees but runs flat out from a bang, a pack stalks in on a herd it scents from further off than
@@ -491,18 +497,21 @@ The crate depends only on core crates (`engine_core`, `engine_world`, `engine_re
   every collider. In `tests/art_animals.rs` only the checks run by default (the budgets, and a
   few close-ups and strips rendered small, each of which must show its animal, the animals
   living on undrawn between shots); the full-size close-ups and strips are ignored tests
-  (`-- --ignored`), and so are four pictures of the AI at work, each one live run shot at
+  (`-- --ignored`), and so are five pictures of the AI at work, each one live run shot at
   eight moments: a pack's hunt from above with its parts marked in colour
   (`animal_live_pack_hunt.png`), the same kind of hunt from the grass at eye height, no
   markers, the wolves creeping crouched (`animal_live_pack_eye_level.png`), a chased deer
   zigzagging seen from low behind
-  (`animal_live_zigzag.png`) and a herd's alarm spreading (`animal_live_herd_alarm.png`). Each walking animal's close-up is a still from a real run at the game's
+  (`animal_live_zigzag.png`), a herd's alarm spreading (`animal_live_herd_alarm.png`) and a
+  sounder rooting, then its tusker charging a wolf that bit it, from the grass with no
+  markers (`animal_live_boar_eye_level.png`). Each walking animal's close-up is a still from a real run at the game's
   rate (it walks on toward the camera's mark and is shot at its moment), so its legs are
   where its gait has them. The animal unit tests check that no planted foot slides in any
   gait by more than a millimetre a frame (boars, tuskers and piglets included, deer as they
   bolt and pull up, a rabbit's paws even as they peel off at a run), that a stotting deer
   bounds high on all fours and pronks (legs straight, back arched, feet off and down
-  together, rump patch flared) and that a rabbit's fore paws never land out of reach, that a rooting boar's snout reaches the soil, that a tusker's upper tusks stay in its
+  together, rump patch flared, the body within 0.12 rad of level and 0.06 in the air, the
+  head held high) and that a rabbit's fore paws never land out of reach, that a rooting boar's snout reaches the soil, that a tusker's upper tusks stay in its
   lip as its jaw opens, that a hurt animal jolts away from the blow, pins its ears, stumbles,
   steps, hitches in its stride and settles, its head swinging well away from a blow from
   either side, its body turning only a little (the front feet stepping out instead, no

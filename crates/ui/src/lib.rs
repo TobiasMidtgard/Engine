@@ -16,6 +16,7 @@ pub mod input;
 pub mod inventory;
 pub mod items;
 pub mod layout;
+pub mod loading;
 pub mod map;
 pub mod menus;
 pub mod node;
@@ -28,6 +29,7 @@ pub mod skills;
 pub mod style;
 pub mod text;
 pub mod theme;
+pub mod title;
 pub mod toast;
 pub mod wheel;
 pub mod widgets;
@@ -108,6 +110,8 @@ impl Plugin for UiPlugin {
             skills::add_painters(&mut painters);
             crafting::add_painters(&mut painters);
             saves::add_painters(&mut painters);
+            title::add_painters(&mut painters);
+            loading::add_painters(&mut painters);
         }
         app.init_resource::<items::ItemDatabase>()
             .init_resource::<dialogue::DialogueLibrary>()
@@ -180,6 +184,18 @@ impl Plugin for UiPlugin {
                 saves::build_screen,
             );
             screens.add(
+                "title",
+                "The title screen over a turning view of the home world and the galaxy: Continue (the newest save in SaveSlots), New Game (sends game.new), Load Game, Settings and Quit (asks, then sends game.exit).",
+                "{}",
+                title::build_screen,
+            );
+            screens.add(
+                "loading",
+                "The loading screen for travel: the destination planet (MapData id, default the player's) turning slowly, its name, `place`, description and facts, a progress bar with loading stages, a spinner and fading tips. `progress` names a data path the game writes 0..1 to; without it the bar fills over `simulate_s` seconds from `at`. Waits for Enter or a click when done (`hold`, default true), then sends game.loading_done. `tips` replaces the tip list, `tip` picks the first.",
+                r#"{"planet": "veyra", "place": "Hollow Reach", "simulate_s": 6.0}"#,
+                loading::build_screen,
+            );
+            screens.add(
                 "pause",
                 "The pause menu (stops game time while open): resume, inventory, journal, map, settings, save, quit.",
                 "{}",
@@ -216,6 +232,8 @@ impl Plugin for UiPlugin {
                 skills::skills_system,
                 crafting::crafting_system,
                 saves::saves_system,
+                title::title_system,
+                loading::loading_system,
                 menus::menus_system,
             ),
         )
@@ -292,6 +310,12 @@ fn register_types(app: &mut App) {
     )
     .register_component::<saves::SaveThumb>(
         "A painted view for a save slot (paint: save_thumb): scene (valley, forest, village_night, snow, desert, orbit) and seed.",
+    )
+    .register_component::<loading::LoadingView>(
+        "The loading screen's painted state (paint: loading_backdrop): time, progress, shown (eased bar), planet, tips, tip_from, ready_for.",
+    )
+    .register_component::<title::TitleView>(
+        "The title screen backdrop's clock (paint: title_backdrop): time in seconds.",
     )
     .register_component::<widgets::Cooldown>(
         "Cooldown sweep over a slot: remaining/total seconds (or bind/bind_total), label.",

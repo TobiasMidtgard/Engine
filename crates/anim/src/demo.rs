@@ -1088,11 +1088,11 @@ pub const VIEWS: &[DemoView] = &[
     },
     DemoView {
         key: "paddock_flinch",
-        name: "A jab to the chin snaps the head back",
+        name: "In a boxer's guard, a jab to the chin snaps the head back",
         eye: [-3.6, 1.35, 1.2],
         target: [-6.0, 1.15, 1.0],
         hour: 15.0,
-        at: 0.92,
+        at: 0.9,
     },
     DemoView {
         key: "paddock_sprint_start",
@@ -1529,8 +1529,8 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         },
     ));
 
-    // Sparring partner: struck in turn on the chin, the side of the head, the stomach and
-    // the back of a shoulder, flinching away from each blow.
+    // Sparring partner: in a boxer's guard, struck in turn on the chin, the side of the head,
+    // the stomach and the back of a shoulder, flinching away from each blow.
     let sparring = spawn_humanoid(
         world,
         humanoid::Outfit::Shirt,
@@ -1542,7 +1542,8 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         DemoScript {
             period: 6.0,
             steps: vec![
-                DemoStep::hit(0.8, Vec3::new(0.0, 1.62, -0.12), Vec3::new(0.0, 0.0, 26.0)),
+                DemoStep::param(0.05, "guarding", 1.0),
+                DemoStep::hit(0.8, Vec3::new(0.0, 1.58, -0.12), Vec3::new(0.0, 0.0, 26.0)),
                 DemoStep::hit(2.3, Vec3::new(-0.1, 1.6, -0.03), Vec3::new(24.0, 0.0, 6.0)),
                 DemoStep::hit(3.8, Vec3::new(0.02, 1.1, -0.15), Vec3::new(0.0, 0.0, 32.0)),
                 DemoStep::hit(5.0, Vec3::new(0.18, 1.42, 0.08), Vec3::new(0.0, 0.0, -24.0)),

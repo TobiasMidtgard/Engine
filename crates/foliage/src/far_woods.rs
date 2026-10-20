@@ -253,9 +253,17 @@ pub(crate) fn cell_meshes(cards: &[FarCard]) -> Vec<(FarTree, Mesh)> {
             CLUSTER_CELL
         };
         let (uv0, uv1) = atlas_cell(kind, cell);
-        let y0 = c.foot.y + c.height * base;
-        let y1 = c.foot.y + c.height;
+        // A card standing for a clump of crowns (far out, where cards are wider than one
+        // crown) keeps a crown's proportions: its band grows with its width, or it would read
+        // as a flat disc hanging over the slope.
         let half = c.width * 0.5;
+        let y1 = c.foot.y + c.height;
+        // Wide cards also sink a little: far terrain is drawn coarser than the ground it was
+        // sampled from, lower on ridges, where a card standing on the true height would float.
+        let band = (c.height * (1.0 - base)).max(c.width * 0.55);
+        let sink = c.width * 0.15;
+        let y0 = (y1 - band).max(c.foot.y - 1.0) - sink;
+        let y1 = y0 + band;
         let lit = |up: bool| {
             let v = if up { c.shade } else { c.shade * 0.55 };
             Vec4::new(v, v, v, 1.0)
@@ -288,30 +296,40 @@ pub(crate) fn cell_meshes(cards: &[FarCard]) -> Vec<(FarTree, Mesh)> {
             b.tri(first, first + 3, first + 2);
         }
         {
-            // The crown seen from above (a spruce's narrow spire is a small one).
+            // The crown seen from above: a low pyramid from partway up the band to its top,
+            // which closes the canopy from a hill and from the side stays inside the crown's
+            // outline (a flat card there shows as a disc floating over the slope). Broad
+            // crowns reach a little wider than their upright cards, over the gaps their round
+            // outlines leave; a spruce's spire is a narrow one.
             let (uv0, uv1) = atlas_cell(kind, CLUSTER_CELL);
-            let (y, half) = if matches!(c.tree, FarTree::Spruce) {
-                (y0 + (y1 - y0) * 0.45, half * 0.6)
+            let (from, reach) = if matches!(c.tree, FarTree::Spruce) {
+                (0.35, 0.6)
             } else {
-                // Wider than the upright cards, so neighbouring crowns close over the gaps
-                // their round outlines leave.
-                (y0 + (y1 - y0) * 0.72, half * 1.35)
+                (0.5, 1.25)
             };
+            let y = y0 + (y1 - y0) * from;
+            let half = half * reach;
             let (s, co) = c.yaw.sin_cos();
             let (u, w) = (Vec3::new(co, 0.0, s), Vec3::new(-s, 0.0, co));
-            let corners = [
+            let rim = [
                 c.foot.with_y(y) - u * half - w * half,
                 c.foot.with_y(y) + u * half - w * half,
                 c.foot.with_y(y) + u * half + w * half,
                 c.foot.with_y(y) - u * half + w * half,
             ];
-            let uvs = [
-                Vec2::new(uv0.x, uv1.y),
-                Vec2::new(uv1.x, uv1.y),
-                Vec2::new(uv1.x, uv0.y),
-                Vec2::new(uv0.x, uv0.y),
-            ];
-            b.card(corners, uvs, Vec3::Y, [lit(true); 4]);
+            let apex = c.foot.with_y(y1);
+            let mid = (uv0.x + uv1.x) * 0.5;
+            for i in 0..4 {
+                let (p, q) = (rim[i], rim[(i + 1) % 4]);
+                let out = ((p + q) * 0.5 - c.foot.with_y(y)).normalize_or(Vec3::X);
+                let n = (out * 0.6 + Vec3::Y).normalize();
+                let first = b.vertices.len() as u32;
+                b.vertex(p, n, Vec2::new(uv0.x, uv1.y), lit(true));
+                b.vertex(q, n, Vec2::new(uv1.x, uv1.y), lit(true));
+                b.vertex(apex, n, Vec2::new(mid, uv0.y), lit(true));
+                b.tri(first, first + 1, first + 2);
+                b.tri(first, first + 2, first + 1);
+            }
         }
     }
     let mut out: Vec<_> = builders.into_iter().map(|(t, b)| (t, b.finish())).collect();
@@ -776,13 +794,31 @@ mod tests {
         // Kept-clear places get none.
         let west = cell_cards(o, 128.0, 8.0, 3, &full, &flat, &|p| p.x < 1064.0);
         assert!(!west.is_empty() && west.iter().all(|c| c.foot.x >= 64.0));
-        // Each card is two crossed cards (and a top for all but spruce), four triangles each.
+        // Each card is two crossed cards (four triangles each, both sides) and a four-sided
+        // cap (two triangles a side).
         let meshes = cell_meshes(&cards);
         let tris: usize = meshes.iter().map(|(_, m)| m.triangle_count()).sum();
-        assert!(
-            tris >= cards.len() * 8 && tris <= cards.len() * 12,
-            "{tris}"
-        );
+        assert_eq!(tris, cards.len() * 16);
+    }
+
+    #[test]
+    fn a_clump_card_keeps_a_crowns_proportions() {
+        // Far out a card stands for a clump: 60 m wide, on 20 m trees.
+        let card = FarCard {
+            tree: FarTree::Oak,
+            foot: Vec3::new(0.0, 5.0, 0.0),
+            height: 20.0,
+            width: 60.0,
+            yaw: 0.3,
+            shade: 0.8,
+        };
+        let meshes = cell_meshes(&[card]);
+        let ys = meshes[0].1.vertices.iter().map(|v| v.position[1]);
+        let (lo, hi) = ys.fold((f32::MAX, f32::MIN), |(a, b), y| (a.min(y), b.max(y)));
+        // Not a 6 m band under a 60 m disc: a mound at least half as tall as it is wide, its
+        // foot a little into the ground.
+        assert!(hi - lo >= 30.0, "{lo}..{hi}");
+        assert!((5.0 - 60.0 * 0.2..5.0).contains(&lo), "{lo}");
     }
 
     #[test]
