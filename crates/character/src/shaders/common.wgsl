@@ -17,6 +17,11 @@ struct Character {
     rest_eye_r: vec4<f32>,
     rest_head: vec4<f32>,
     rest_mouth: vec4<f32>,
+    top: vec4<f32>,           // shirt color (linear), style (0 shirt, 1 t-shirt, 2 none)
+    bottom: vec4<f32>,        // trousers color, style (0 trousers, 1 shorts, 2 skirt)
+    accent: vec4<f32>,        // accent color, where (0 nowhere, 1 left armband, 2 right, 3 collar)
+    thigh: vec4<f32>,         // a skirt's left thigh capsule: hip joint (base mesh space), radius
+    knee: vec4<f32>,          // knee joint, radius (the right thigh mirrors; radius 0: no skirt)
 };
 
 @group(1) @binding(0) var<uniform> character: Character;
@@ -95,11 +100,45 @@ fn skin_matrix(bones: vec4<u32>, w: vec4<f32>, prev: bool) -> mat4x4<f32> {
         + pose.bones[o + bones.z] * w.z + pose.bones[o + bones.w] * w.w;
 }
 
+// A skirt point pushed out of both thighs (`bones`: hips, left and right upper leg, as the
+// skirt is skinned), so a striding leg carries the skirt instead of poking through it.
+fn clear_thighs(p: vec3<f32>, bones: vec4<u32>, prev: bool) -> vec3<f32> {
+    if (pose.info.y == 0u || character.thigh.w <= 0.0) {
+        return p;
+    }
+    let o = select(0u, pose.info.x, prev);
+    var q = p;
+    for (var s = 0u; s < 2u; s++) {
+        let m = vec3<f32>(select(1.0, -1.0, s == 1u), 1.0, 1.0);
+        let b = pose.bones[o + select(bones.y, bones.z, s == 1u)];
+        let a = (b * vec4<f32>(character.thigh.xyz * m, 1.0)).xyz;
+        let k = (b * vec4<f32>(character.knee.xyz * m, 1.0)).xyz;
+        let ab = k - a;
+        let t = clamp(dot(q - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+        let c = a + ab * t;
+        let r = mix(character.thigh.w, character.knee.w, t) + 0.012;
+        let d = q - c;
+        let len = length(d);
+        // Not up at the hip joint, where the skirt hangs from the hips instead.
+        let reach = smoothstep(0.02, 0.15, t);
+        if (len < r && reach > 0.0) {
+            q += d / max(len, 1e-5) * (r - len) * reach;
+        }
+    }
+    return q;
+}
+
 // ---------------------------------------------------------------- clothes
 // Rest-space heights (m) of the waistband's top, the shoes' tops and the soles' tops.
 const WAIST: f32 = 0.105;
 const SHOE_TOP: f32 = -0.715;
 const SOLE_TOP: f32 = -0.802;
+// The outfit's cuts (clothes.rs): a t-shirt's hem down the upper arm (m from the shoulder
+// joint), the shorts' hem height, and the band a woman wears with no top (lower, upper edge).
+const SLEEVE_HEM: f32 = 0.12;
+const SHORTS_HEM: f32 = -0.17;
+const BRIEFS_HEM: f32 = -0.07;
+const BAND: vec2<f32> = vec2<f32>(0.32, 0.45);
 
 // How far inside a crew-neck shirt a rest position is, m (negative outside): below the
 // neckline, which dips in front, or out on the shoulders, wider than the neck.
@@ -113,6 +152,59 @@ fn collar_depth(r: vec3<f32>) -> f32 {
     let k = 0.008;
     let h = saturate(0.5 + 0.5 * (a - shoulders) / k);
     return mix(shoulders, a, h) + k * h * (1.0 - h);
+}
+
+// How far past a sleeve's hem (`hem`: m down the upper arm from the shoulder joint) a rest
+// position is, or 1e3 off the arms (`sleeve_past` in clothes.rs).
+fn sleeve_past(r: vec3<f32>, hem: f32) -> f32 {
+    let m = vec3<f32>(select(-1.0, 1.0, r.x > 0.0), 1.0, 1.0);
+    let a = SHOULDER * m;
+    let ax = normalize((ELBOW - SHOULDER) * m);
+    let t = dot(r - a, ax);
+    let off = length(r - a - ax * t);
+    // Around the upper arm (the torso is over 0.1 m from its axis), or out on the forearm.
+    return select(-1e3, t - hem, off < 0.075 || abs(r.x) > 0.19);
+}
+
+// How far inside the clothes' edges a rest position is, m (negative outside): the neckline,
+// and the sleeves, shorts and band where the outfit has them (`cover_depth` in clothes.rs).
+fn cover_depth(r: vec3<f32>) -> f32 {
+    var d = collar_depth(r);
+    let top = u32(character.top.w + 0.5);
+    if (r.y >= WAIST) {
+        if (top == 1u) {
+            d = min(d, -sleeve_past(r, SLEEVE_HEM));
+        } else if (top == 2u) {
+            if (character.look.y > 0.5) {
+                d = min(d, WAIST - r.y);
+            } else {
+                d = min(min(d, -sleeve_past(r, 0.0)), min(r.y - BAND.x, BAND.y - r.y));
+            }
+        }
+    } else {
+        let bottom = u32(character.bottom.w + 0.5);
+        if (bottom == 1u) {
+            d = min(d, r.y - SHORTS_HEM);
+        } else if (bottom == 2u) {
+            d = min(d, r.y - BRIEFS_HEM);
+        }
+    }
+    return d;
+}
+
+// 1 on the outfit's accent: a band round one sleeve, or the collar.
+fn accent_band(r: vec3<f32>, collar: f32) -> f32 {
+    let at = u32(character.accent.w + 0.5);
+    if (at == 3u) {
+        return collar;
+    }
+    if (at == 0u || (at == 1u) != (r.x > 0.0)) {
+        return 0.0;
+    }
+    // Just above a t-shirt's hem, or high on a long sleeve.
+    let hem = select(0.115, SLEEVE_HEM - 0.004, u32(character.top.w + 0.5) == 1u);
+    let past = sleeve_past(r, hem);
+    return smoothstep(-0.041, -0.039, past) * smoothstep(0.001, -0.001, past);
 }
 
 // What covers a rest position below the neckline: 0 shirt, 1 trousers, 2 shoes.
@@ -131,7 +223,7 @@ fn belt_band(r: vec3<f32>) -> f32 {
 // How far clothes stand off the skin at rest position `r` (`sleeves`: the vertex cloth mask,
 // 0 on bare hands), folds included.
 fn cloth_lift(r: vec3<f32>, sleeves: f32) -> f32 {
-    let covered = smoothstep(-0.004, 0.004, collar_depth(r)) * sleeves;
+    let covered = smoothstep(-0.004, 0.004, cover_depth(r)) * sleeves;
     // (The shoes are their own shell; the feet stay inside it.)
     let thickness = array<f32, 3>(0.004, 0.006, 0.0);
     let g = garment(r);

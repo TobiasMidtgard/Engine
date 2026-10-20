@@ -215,6 +215,11 @@ fn previews() -> Vec<Preview> {
             make: Box::new(|| textures::granite(512)),
             tint: white,
         },
+        Preview {
+            name: "sanded_wood",
+            make: Box::new(|| textures::sanded_wood(512, 7)),
+            tint: white,
+        },
     ]
 }
 

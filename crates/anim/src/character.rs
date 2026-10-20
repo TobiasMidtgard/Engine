@@ -250,6 +250,7 @@ pub fn add_locomotion(
             } else {
                 motion.run = name;
                 motion.run_speed = info.speed.max(motion.walk_speed + 0.5);
+                motion.sprint_speed = motion.sprint_speed.max(motion.run_speed + 1.5);
             }
         }
         c.clips.push(clip);

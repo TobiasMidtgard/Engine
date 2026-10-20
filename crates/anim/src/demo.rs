@@ -1574,7 +1574,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
                 ShuttleLeg {
                     to: [x, z - LANE_LENGTH],
                     facing_deg: 0.0,
-                    top: 5.0,
+                    top: humanoid::SPRINT_SPEED,
                 },
                 ShuttleLeg {
                     to: [x, z - LANE_LENGTH * 0.45],
@@ -1599,6 +1599,11 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     dress(world, coach, "reacher", shirt_detail());
     world.entity_mut(coach).insert((
         Name::new("Coach"),
+        DemoScript {
+            period: 1000.0,
+            steps: vec![DemoStep::param(0.05, "arms_folded", 1.0)],
+            time: 0.0,
+        },
         Watch {
             target: Some(runner),
             ..Default::default()

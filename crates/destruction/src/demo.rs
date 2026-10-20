@@ -17,8 +17,8 @@
 //! | 8 | drywall | **live**: Siege reinforcement. A burst goes through, a defender sets two steel panels behind it, the next bursts ring off the steel, a breach charge only strips the drywall, and thermite burns through both |
 //!
 //! **Behind the range** (live every cycle): a wooden watchtower in Valheim build-mode support
-//! colors loses its posts one by one and comes down; a stone gate is blasted and its lintel
-//! falls; a voxel cliff is mined until its overhang loses support and breaks off; a rock arch
+//! colors loses its posts one by one and comes down; a stone gate is blasted at one foot and
+//! half its arch comes down; a voxel cliff is mined until its overhang loses support and breaks off; a rock arch
 //! loses a pillar and its span collapses.
 //!
 //! **Breach house** (Siege vertical play, north of the tower): a brick room with an open front
@@ -68,6 +68,9 @@ const TOWER: [f64; 3] = [18.0, 0.0, 9.0];
 const GATE: [f64; 3] = [-22.0, 0.0, 7.0];
 const CLIFF: [f64; 3] = [-4.0, 0.0, 16.0];
 const ARCH: [f64; 3] = [-36.0, 0.0, 16.0];
+/// The gate and arch charges are cutting charges: a hot flash, short of lighting the grass
+/// round them (engine_fire's grass catches at 300 °C).
+const CUT_CHARGE_HEAT_C: f32 = 280.0;
 /// The breach house's floor middle (north of the tower, in the sun); its open front looks +Z.
 pub const HOUSE: [f64; 3] = [15.0, 0.0, 22.0];
 /// House-local: top of the walls and joists (the roof deck lies on them) and the deck boards.
@@ -708,7 +711,7 @@ fn spawn_cliff(commands: &mut Commands, o: DVec3) -> Entity {
 
 fn spawn_arch(commands: &mut Commands, o: DVec3) -> Entity {
     let (t, g) = placed(o + DVec3::from_array(ARCH), 0.35);
-    let v = VoxelVolume::arch(12.0, 8.0, 3.0, 0.2).with_seed(5);
+    let v = VoxelVolume::arch(12.0, 8.0, 4.0, 0.2).with_seed(5);
     commands.spawn((Name::new("Rock arch"), t, g, v)).id()
 }
 
@@ -757,7 +760,8 @@ fn piece(
     e.id()
 }
 
-/// A two-storey wooden watchtower with a cantilevered balcony (Valheim build-mode colors).
+/// A two-storey wooden watchtower with knee braces, a board deck, a railed cantilevered
+/// balcony and a shingled roof (Valheim build-mode colors).
 fn spawn_tower(commands: &mut Commands, o: DVec3) -> (Vec<Entity>, Vec<Entity>) {
     let base = o + DVec3::from_array(TOWER);
     let wood = mat(0x7a5634, 0.85);
@@ -813,25 +817,90 @@ fn spawn_tower(commands: &mut Commands, o: DVec3) -> (Vec<Entity>, Vec<Entity>) 
             ));
         }
     }
-    // Floor and a balcony sticking out over the range (−Z).
-    for (x, z) in [
+    // Knee braces from each post up to the beams it carries, on all four faces.
+    let quarter = std::f32::consts::FRAC_PI_4;
+    let brace = Vec3::new(0.12, 1.0, 0.12);
+    for s in [-1.6, 1.6] {
+        for (along, lean) in [(1.25, quarter), (-1.25, -quarter)] {
+            all.push(piece(
+                commands,
+                "Knee brace",
+                p(along, 2.65, s),
+                Quat::from_rotation_z(lean),
+                brace,
+                w,
+                wood,
+                true,
+            ));
+            all.push(piece(
+                commands,
+                "Knee brace",
+                p(s, 2.65, along),
+                Quat::from_rotation_x(-lean),
+                brace,
+                w,
+                wood,
+                true,
+            ));
+        }
+    }
+    // Board decking (battens underneath) and a balcony sticking out over the range (−Z).
+    let deck = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+    for (k, (x, z)) in [
         (-0.9, -0.9),
         (0.9, -0.9),
         (-0.9, 0.9),
         (0.9, 0.9),
         (-0.9, -2.7),
         (0.9, -2.7),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let size = Vec3::new(1.8, 1.8, 0.12);
+        let e = piece(commands, "Floor", p(x, 3.26, z), deck, size, w, wood, true);
+        commands.entity(e).insert(PropModel::new(
+            PropKind::BoardWall {
+                size: size.to_array(),
+            },
+            20 + k as u64,
+        ));
+        all.push(e);
+    }
+    // Hand and mid rails round the lookout and the balcony, on two balcony stanchions.
+    for x in [-1.75, 1.75] {
         all.push(piece(
             commands,
-            "Floor",
-            p(x, 3.26, z),
+            "Stanchion",
+            p(x, 3.85, -3.5),
             Quat::IDENTITY,
-            Vec3::new(1.8, 0.12, 1.8),
+            Vec3::new(0.1, 1.05, 0.1),
             w,
             wood,
             true,
         ));
+    }
+    for y in [3.85, 4.35] {
+        let rails = [
+            (p(0.0, y, 1.6), Vec3::new(3.2, 0.1, 0.07)),
+            (p(-1.6, y, 0.0), Vec3::new(0.07, 0.1, 3.2)),
+            (p(1.6, y, 0.0), Vec3::new(0.07, 0.1, 3.2)),
+            (p(0.0, y, -3.5), Vec3::new(3.4, 0.1, 0.07)),
+            (p(-1.75, y, -2.6), Vec3::new(0.07, 0.1, 1.75)),
+            (p(1.75, y, -2.6), Vec3::new(0.07, 0.1, 1.75)),
+        ];
+        for (at, size) in rails {
+            all.push(piece(
+                commands,
+                "Rail",
+                at,
+                Quat::IDENTITY,
+                size,
+                w,
+                wood,
+                true,
+            ));
+        }
     }
     // Roof: two shingled panels on the upper beams (each panel's X runs down its slope).
     for s in [-1.0f32, 1.0] {
@@ -860,45 +929,82 @@ fn spawn_tower(commands: &mut Commands, o: DVec3) -> (Vec<Entity>, Vec<Entity>) 
     (all, posts)
 }
 
-/// A stone gate: two towers of blocks and a three-block lintel (stone: strong upward, weak
-/// sideways).
+/// A stone gate: two piers of blocks carrying a round arch of seven voussoirs, spandrels over
+/// the piers, a capping course and merlons (stone: strong upward, weak sideways, so when one
+/// pier goes, half the arch hangs from the other like a ruin).
 fn spawn_gate(commands: &mut Commands, o: DVec3) -> Vec<Entity> {
     let base = o + DVec3::from_array(GATE);
     let mut out = Vec::new();
     let mut rng = Rng::new(9);
     let s = DestructibleMaterial::Stone;
-    let mut block = |commands: &mut Commands, x: f64, y: f64, size: Vec3, rng: &mut Rng| {
-        let shade = rng.range(0.85, 1.08);
-        let c = linear(0x9a9386);
-        let look = StandardMaterial::color(c[0] * shade, c[1] * shade, c[2] * shade * 0.98)
-            .with_roughness(0.9);
-        out.push(piece(
-            commands,
-            "Stone block",
-            base + DVec3::new(x, y, 0.0),
-            Quat::IDENTITY,
-            size,
-            s,
-            look,
-            false,
-        ));
-    };
+    let mut block =
+        |commands: &mut Commands, x: f64, y: f64, turn: f32, size: Vec3, rng: &mut Rng| {
+            let shade = rng.range(0.85, 1.08);
+            let c = linear(0x9a9386);
+            let look = StandardMaterial::color(c[0] * shade, c[1] * shade, c[2] * shade * 0.98)
+                .with_roughness(0.9);
+            out.push(piece(
+                commands,
+                "Stone block",
+                base + DVec3::new(x, y, 0.0),
+                Quat::from_rotation_z(turn),
+                size,
+                s,
+                look,
+                false,
+            ));
+        };
     for x in [-1.6, 1.6] {
         for k in 0..4 {
             block(
                 commands,
                 x,
                 0.5 + k as f64,
+                0.0,
                 Vec3::new(1.2, 0.98, 1.2),
                 &mut rng,
             );
         }
     }
-    for x in [-1.1, 0.0, 1.1] {
-        block(commands, x, 4.45, Vec3::new(1.08, 0.9, 1.1), &mut rng);
+    // The arch springs from the piers' inner edges at 4 m: 1 m intrados, 0.5 m deep rings.
+    let (spring, inner, ring) = (4.0, 1.0, 0.5);
+    let n = 7;
+    for k in 0..n {
+        let a = (k as f32 + 0.5) / n as f32 * std::f32::consts::PI;
+        let r = inner + ring * 0.5;
+        // Tangential width meets the next voussoir at the extrados.
+        let width = 2.0 * (inner + ring) * (std::f32::consts::PI / n as f32 * 0.5).tan();
+        block(
+            commands,
+            (r * a.cos()) as f64,
+            spring + (r * a.sin()) as f64,
+            a - std::f32::consts::FRAC_PI_2,
+            Vec3::new(width * 0.92, ring * 0.98, 1.1),
+            &mut rng,
+        );
+    }
+    // Spandrels over the piers, outside the arch's extrados.
+    for side in [-1.0, 1.0] {
+        for (x, y, size) in [
+            (1.85, 4.37, Vec3::new(0.68, 0.72, 1.1)),
+            (1.85, 5.12, Vec3::new(0.68, 0.72, 1.1)),
+            (1.3, 5.26, Vec3::new(0.38, 0.46, 1.1)),
+        ] {
+            block(commands, side * x, y, 0.0, size, &mut rng);
+        }
+    }
+    for x in [-1.65, -0.55, 0.55, 1.65] {
+        block(
+            commands,
+            x,
+            5.74,
+            0.0,
+            Vec3::new(1.08, 0.46, 1.16),
+            &mut rng,
+        );
     }
     for x in [-2.0, -1.2, 1.2, 2.0] {
-        block(commands, x, 5.15, Vec3::new(0.45, 0.5, 0.9), &mut rng);
+        block(commands, x, 6.23, 0.0, Vec3::new(0.45, 0.5, 0.9), &mut rng);
     }
     out
 }
@@ -1468,34 +1574,40 @@ fn run_step(world: &mut World, demo: &mut DestructionDemo, step: Step) {
             }
         }
         Step::BlastGate => {
-            world.write_message(WorldImpulse {
-                center: o + DVec3::from_array(GATE) + DVec3::new(-1.6, 0.6, -0.9),
-                radius: 6.0,
-                strength: 60.0,
-                energy_j: 2.5e6,
-                heat_c: 400.0,
-                source: None,
-            });
+            crate::blast(
+                world,
+                WorldImpulse {
+                    center: o + DVec3::from_array(GATE) + DVec3::new(-1.6, 0.6, -0.9),
+                    radius: 6.0,
+                    strength: 60.0,
+                    energy_j: 2.5e6,
+                    heat_c: CUT_CHARGE_HEAT_C,
+                    source: None,
+                },
+            );
         }
         Step::BlastArch => {
             if let Some(arch) = t.arch {
                 let tr = world.get::<Transform>(arch).copied().unwrap_or_default();
                 let g = GlobalTransform::from(tr);
                 let foot = Vec3::new(-3.72, 1.0, 0.0);
-                world.write_message(WorldImpulse {
-                    center: g.transform_point((foot + Vec3::new(0.0, 0.0, -1.6)).as_dvec3()),
-                    radius: 8.0,
-                    strength: 80.0,
-                    energy_j: 6.0e6,
-                    heat_c: 400.0,
-                    source: None,
-                });
+                crate::blast(
+                    world,
+                    WorldImpulse {
+                        center: g.transform_point((foot + Vec3::new(0.0, 0.0, -1.6)).as_dvec3()),
+                        radius: 8.0,
+                        strength: 80.0,
+                        energy_j: 6.0e6,
+                        heat_c: CUT_CHARGE_HEAT_C,
+                        source: None,
+                    },
+                );
                 // The blast cuts through the pillar.
                 world.write_message(TerrainEdit {
                     center: g.transform_point((foot + Vec3::new(0.0, 0.0, -2.0)).as_dvec3()),
                     shape: EditShape::Capsule {
                         to: tr.rotation * Vec3::new(0.0, 0.6, 4.0),
-                        radius: 1.35,
+                        radius: 1.7,
                     },
                     op: EditOp::Remove,
                     surface: None,

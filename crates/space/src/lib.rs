@@ -59,6 +59,9 @@ pub struct BodyAtmosphere {
     pub mie_g_offset: [f32; 3],
     /// Scales the density of the whole air (1 = as given).
     pub density_scale: f32,
+    /// Share (0..1) of the haze's sharp forward peak passed on as unscattered light (dust on
+    /// Mars 1, Earth 0): see `Atmosphere::mie_forward_peak`.
+    pub mie_forward_peak: f32,
 }
 
 impl Default for BodyAtmosphere {
@@ -93,6 +96,7 @@ impl BodyAtmosphere {
             ozone_absorption: a.ozone_absorption,
             mie_g_offset: a.mie_g_offset,
             density_scale: a.density_scale,
+            mie_forward_peak: a.mie_forward_peak,
         }
     }
 
@@ -109,6 +113,7 @@ impl BodyAtmosphere {
         a.ozone_absorption = self.ozone_absorption;
         a.mie_g_offset = self.mie_g_offset;
         a.density_scale = self.density_scale;
+        a.mie_forward_peak = self.mie_forward_peak;
     }
 }
 

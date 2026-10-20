@@ -101,7 +101,7 @@ module's **contract** in `engine_world`:
 | `locomotion`: `MoveIntent`, `LocomotionState`, `VehicleControls`, `LocomotionBackend` (`claim_backend`, so fallback movers can step aside), `Climbable` (ladders any module places) | `engine_movement`, `engine_vehicles` (`Climbable` placed by destruction and games, climbed by movement) | npc, player input, cameras, UI |
 | `EngineState`, `WheelContacts`, `Exhausts`: what a vehicle's engine and wheels are doing, and where each nozzle is and how hard it fires (`ExhaustEffects`/`draws_exhausts`, so stand-in plumes step aside) | `engine_vehicles` (also movement's jump kits for `Exhausts`) | audio (engine and tyre sounds), ui (HUDs), npc (hearing), vfx (spray, flames, plumes, smoke) |
 | `air`: `Atmospheres` per planet and `Env::air(p)` (density, pressure, temperature, speed of sound, wind, altitude) | games and `engine_space` tune `Atmospheres`; weather drives sea-level conditions | vehicles, weather, audio, vfx, smoke, space |
-| `terrain`: `TerrainEdit`, `TerrainChanged`, plus the `Ground` query and `ForestCover` (where terrain paints woods: canopy density, conifer share) | `engine_terrain` (`ForestCover` from `engine_space`'s painted far woods) | destruction, foliage, physics, water, npc |
+| `terrain`: `TerrainEdit`, `TerrainChanged`, plus the `Ground` query, `ForestCover` (where terrain paints woods: canopy density, conifer share) and `GroundWear` (how worn the ground is, 0..1, from footsteps and wheels) | `engine_terrain` (`ForestCover` from `engine_space`'s painted far woods) | destruction, foliage, physics, water, npc |
 | `Obscurance`: smoke, fog and dust between two points (`transmittance`, `extinction`); sources stack by name and implementations pass `check_obscurance` | `engine_smoke` (weather fog and destruction dust can add their own) | npc, gameplay, ui |
 | `WorldShift` (+ `WorldShiftSet`, `FollowsWorldShift`): the world was re-anchored (floating origin, a new planet's frame). `engine_world` moves transforms, velocities, forces, intents, gravity, wind and sun, the fields, and pending contract messages; query providers answer in the new frame from `WorldShiftSet::Apply` on | written by `engine_space` | every module or crate that keeps world positions or directions of its own shifts them in `WorldShiftSet::Apply`: physics (bodies, statics, query caches), softbody, vehicles, movement, npc (memories, nav goals), anim (IK targets), vfx, fire, smoke, water, weather, terrain, foliage, destruction, audio, ui (map markers), render (sky and planet centers), debug |
 | `FarCloudLayer`: a far cloud layer (a planet's cloud tops seen from high up) and where the volumetric clouds hand over to it (`near_share`) | `engine_space` | weather |
@@ -439,6 +439,23 @@ lichen and grime) gives the base mesh plus its displacement, or a finished mesh 
 retested after the early prepass against this frame's and drawn in a late prepass if visible.
 Next: streaming, a compute rasterizer for tiny triangles, occlusion for shadow views, cached
 shadow pages.
+
+**Virtual textures** (built: `crates/render/src/virtual_texture`, whose module docs explain it):
+any `StandardMaterial` texture slot can hold a texture far larger than the GPU could take whole
+(16k scans). RGBA8 images over
+`RenderSettings::virtual_texture_threshold` (4096) are tiled at first use; `VirtualTextures::load`
+streams a PNG or JPEG from disk through a tiled copy baked once next to it (`<file>.vtex`);
+`VirtualTextures::add_procedural` takes a `TileSource` that paints tiles on demand. 128² tiles
+with 8-texel borders live in two fixed-size caches (sRGB and linear, BC7 where supported), one
+page table per texture maps every tile to the finest resident one, the depth prepass records
+which tiles each pixel wanted (1 in 16 pixels per frame), and loader threads read, decode and
+compress the missing ones under a per-frame upload budget, least recently used leaves evicted
+first; the root tile is always resident, so nothing ever shows missing. Works in every material
+path (triplanar, parallax, masked shadows, the cluster path in the early and late prepass,
+displaced clusters). `DebugView::VirtualTextures` shows
+levels and tile edges; `render.stats` reports the cache under `virtual_textures`.
+`TextureMapping::AntiTiled` (`with_anti_tiling`) hex-tiles any texture so a repeated one shows no
+pattern; displacement of an anti-tiled material follows the same hexagons (`material::hex_tiles`).
 
 **Material presets** (built): `StandardMaterial::preset(MaterialPreset::Brick)` (and cobblestone,
 rock, concrete, plaster, wood planks, bark, rusty steel, painted metal, sand, forest soil,

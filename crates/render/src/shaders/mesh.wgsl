@@ -11,7 +11,9 @@ struct Material {
                          //    7-12 texture present (base color, normal, metallic/roughness, emissive,
                          //    occlusion, height), 13 detail anchored to the world,
                          //    14-15 mapping (0 UV, 1 triplanar, 2 triplanar in world space),
-                         //    16 parallax self-shadowing
+                         //    16 parallax self-shadowing, 17 anti-tiling, 18 anti-tiling rotates;
+                         // y: virtual texture ids of slots 0-3 (8 bits each, 0 = an ordinary texture),
+                         // z: of slots 4-5
 };
 
 const TEX_BASE_COLOR: u32 = 128u;
@@ -24,6 +26,17 @@ const TEX_ANY: u32 = 8064u;
 const DETAIL_IN_WORLD: u32 = 8192u;
 const MAPPING_SHIFT: u32 = 14u;
 const PARALLAX_SHADOWS: u32 = 65536u;
+const ANTI_TILING: u32 = 131072u;
+const ANTI_TILING_ROTATE: u32 = 262144u;
+// Whether the pipeline hex-tiles anti-tiled materials (`ShaderFeatures`): off until a scene has
+// one.
+override ANTI_TILING_ENABLED: bool = true;
+const SLOT_BASE_COLOR: u32 = 0u;
+const SLOT_NORMAL: u32 = 1u;
+const SLOT_METALLIC_ROUGHNESS: u32 = 2u;
+const SLOT_EMISSIVE: u32 = 3u;
+const SLOT_OCCLUSION: u32 = 4u;
+const SLOT_HEIGHT: u32 = 5u;
 
 @group(1) @binding(0) var<storage, read> materials: array<Material>;
 
@@ -325,6 +338,249 @@ fn triplanar_projection(k: u32, s: f32, q: vec3<f32>, q1: vec3<f32>, q2: vec3<f3
     return p;
 }
 
+// ---------------------------------------------------------------- reading a texture slot
+// A slot holds an ordinary texture, or a streamed virtual texture (virtual_texture.wgsl) when
+// the material's flags name one for it.
+
+fn slot_virtual(mat: Material, slot: u32) -> u32 {
+    let word = select(mat.flags.y, mat.flags.z, slot >= 4u);
+    return (word >> ((slot & 3u) * 8u)) & 255u;
+}
+
+fn slot_sample(mat: Material, slot: u32, uv: vec2<f32>, d1: vec2<f32>, d2: vec2<f32>) -> vec4<f32> {
+    if (VT_ENABLED) {
+        let vt = slot_virtual(mat, slot);
+        if (vt != 0u) {
+            return vt_sample(vt, uv, d1, d2);
+        }
+    }
+    switch slot {
+        case 0u: { return textureSampleGrad(base_color_texture, material_sampler, uv, d1, d2); }
+        case 1u: { return textureSampleGrad(normal_texture, material_sampler, uv, d1, d2); }
+        case 2u: { return textureSampleGrad(metallic_roughness_texture, material_sampler, uv, d1, d2); }
+        case 3u: { return textureSampleGrad(emissive_texture, material_sampler, uv, d1, d2); }
+        case 4u: { return textureSampleGrad(occlusion_texture, material_sampler, uv, d1, d2); }
+        default: { return textureSampleGrad(height_texture, material_sampler, uv, d1, d2); }
+    }
+}
+
+// The slot's mean color (its coarsest level).
+fn slot_mean(mat: Material, slot: u32) -> vec4<f32> {
+    if (VT_ENABLED) {
+        let vt = slot_virtual(mat, slot);
+        if (vt != 0u) {
+            return vt_mean(vt);
+        }
+    }
+    if (slot == 0u) {
+        return textureSampleLevel(base_color_texture, material_sampler, vec2<f32>(0.5), 16.0);
+    }
+    return vec4<f32>(0.5);
+}
+
+// ---------------------------------------------------------------- anti-tiling
+// Hex-tiling (Mikkelsen 2022, "Practical Real-Time Hex-Tiling"): the texture is laid on a grid
+// of hexagons, each showing it at a random offset (and, for textures without a direction, a
+// random rotation), blended across the triangles between hexagon centers with weights that
+// favor the brighter texel, so the blend follows the texture's own features instead of
+// smearing. Color keeps its contrast in the blends by a variance-preserving blend around the
+// texture's mean (Heitz and Neyret 2018; Burley 2019), so the repetition of a tiled texture
+// disappears without the image getting flat.
+
+struct AntiTiles {
+    uv0: vec2<f32>,
+    uv1: vec2<f32>,
+    uv2: vec2<f32>,
+    rot0: vec2<f32>,  // cos, sin of each hexagon's rotation
+    rot1: vec2<f32>,
+    rot2: vec2<f32>,
+    w: vec3<f32>,     // barycentric weights (sharpened later)
+    count: u32,       // 1: plain tiling (uv0 only), 3: hex-tiled
+    sharp: f32,       // weight exponent and luminance preference: see `anti_tiles`
+    contrast: f32,
+};
+
+const HEX_SHARPNESS: f32 = 7.0;
+const HEX_CONTRAST: f32 = 0.6;
+// Triangle grid cells per texture repeat: hexagons about two thirds of the texture across, big
+// enough to keep its larger features whole.
+const HEX_GRID: f32 = 1.7320508;
+
+// Two numbers in [0, 1) from a hexagon's integer cell coordinates: an integer hash, so it is
+// the same on every GPU and on the CPU (`material::hex_hash`, which displacement uses).
+fn hex_hash(p: vec2<f32>) -> vec2<f32> {
+    var v = bitcast<vec2<u32>>(vec2<i32>(p));
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    return vec2<f32>(v >> vec2<u32>(8u)) * (1.0 / 16777216.0);
+}
+
+fn hex_rotation(v: vec2<f32>, rotate: bool) -> vec2<f32> {
+    if (!rotate) { return vec2<f32>(1.0, 0.0); }
+    let a = (hex_hash(v + vec2<f32>(17.0, 3.0)).x * 2.0 - 1.0) * 3.14159265;
+    return vec2<f32>(cos(a), sin(a));
+}
+
+fn hex_rotate(r: vec2<f32>, d: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(r.x * d.x - r.y * d.y, r.y * d.x + r.x * d.y);
+}
+
+fn hex_tile_uv(uv: vec2<f32>, v: vec2<f32>, r: vec2<f32>) -> vec2<f32> {
+    // The hexagon's center in texture coordinates; rotate around it, then shift.
+    let center = vec2<f32>(v.x + 0.5 * v.y, v.y / 1.15470054) / HEX_GRID;
+    return hex_rotate(r, uv - center) + center + hex_hash(v);
+}
+
+// The three hexagons around `uv`; `d1`, `d2` its screen derivatives.
+fn anti_tiles(mat: Material, uv: vec2<f32>, d1: vec2<f32>, d2: vec2<f32>) -> AntiTiles {
+    var t: AntiTiles;
+    t.uv0 = uv;
+    t.rot0 = vec2<f32>(1.0, 0.0);
+    t.w = vec3<f32>(1.0, 0.0, 0.0);
+    t.count = 1u;
+    t.sharp = HEX_SHARPNESS;
+    t.contrast = HEX_CONTRAST;
+    if (!ANTI_TILING_ENABLED || (mat.flags.x & ANTI_TILING) == 0u) {
+        return t;
+    }
+    // Sharp, feature-following transitions while hexagons are big on screen; softer ones as
+    // they shrink to a few dozen pixels, where crisp edges between differently lit hexagons
+    // would read as a honeycomb.
+    let hex_px = 1.0 / (HEX_GRID * max(max(length(d1), length(d2)), 1e-8));
+    let near = smoothstep(16.0, 96.0, hex_px);
+    t.sharp = mix(2.0, HEX_SHARPNESS, near);
+    t.contrast = HEX_CONTRAST * near;
+    let rotate = (mat.flags.x & ANTI_TILING_ROTATE) != 0u;
+    // Triangle grid: which three hexagon centers surround the point, and its barycentrics.
+    let s = uv * HEX_GRID;
+    let skew = vec2<f32>(s.x - 0.57735027 * s.y, 1.15470054 * s.y);
+    let cell = floor(skew);
+    let f = fract(skew);
+    let z = 1.0 - f.x - f.y;
+    let flip = select(0.0, 1.0, z < 0.0);
+    let sgn = 2.0 * flip - 1.0;
+    t.w = vec3<f32>(-z * sgn, flip - f.y * sgn, flip - f.x * sgn);
+    let v0 = cell + vec2<f32>(flip, flip);
+    let v1 = cell + vec2<f32>(flip, 1.0 - flip);
+    let v2 = cell + vec2<f32>(1.0 - flip, flip);
+    t.rot0 = hex_rotation(v0, rotate);
+    t.rot1 = hex_rotation(v1, rotate);
+    t.rot2 = hex_rotation(v2, rotate);
+    t.uv0 = hex_tile_uv(uv, v0, t.rot0);
+    t.uv1 = hex_tile_uv(uv, v1, t.rot1);
+    t.uv2 = hex_tile_uv(uv, v2, t.rot2);
+    t.count = 3u;
+    return t;
+}
+
+fn anti_tile_uv(t: AntiTiles, i: u32) -> vec2<f32> {
+    if (i == 1u) { return t.uv1; }
+    if (i == 2u) { return t.uv2; }
+    return t.uv0;
+}
+
+fn anti_tile_rot(t: AntiTiles, i: u32) -> vec2<f32> {
+    if (i == 1u) { return t.rot1; }
+    if (i == 2u) { return t.rot2; }
+    return t.rot0;
+}
+
+// Sharpened blend weights; `lum` the luminance of the three base color samples (1 = ignore).
+fn anti_tile_weights(t: AntiTiles, lum: vec3<f32>) -> vec3<f32> {
+    if (t.count == 1u) { return vec3<f32>(1.0, 0.0, 0.0); }
+    let w = mix(vec3<f32>(1.0), lum, t.contrast) * pow(max(t.w, vec3<f32>(0.0)), vec3<f32>(t.sharp));
+    return w / max(w.x + w.y + w.z, 1e-6);
+}
+
+// A slot read through the tiling, blended with `w`.
+fn tiled_sample(mat: Material, slot: u32, t: AntiTiles, w: vec3<f32>, d1: vec2<f32>, d2: vec2<f32>) -> vec4<f32> {
+    var sum = vec4<f32>(0.0);
+    for (var i = 0u; i < t.count; i++) {
+        if (w[i] <= 0.0) { continue; }
+        let r = anti_tile_rot(t, i);
+        sum += w[i] * slot_sample(mat, slot, anti_tile_uv(t, i), hex_rotate(r, d1), hex_rotate(r, d2));
+    }
+    return sum;
+}
+
+// The base color through the tiling, and the weights the other slots blend with.
+struct TiledBase {
+    color: vec4<f32>,
+    w: vec3<f32>,
+};
+
+fn tiled_base(mat: Material, t: AntiTiles, d1: vec2<f32>, d2: vec2<f32>) -> TiledBase {
+    var out: TiledBase;
+    if (t.count == 1u) {
+        out.color = slot_sample(mat, SLOT_BASE_COLOR, t.uv0, d1, d2);
+        out.w = vec3<f32>(1.0, 0.0, 0.0);
+        return out;
+    }
+    // Each hexagon shows another part of the texture; a scan's slow variation (a grassier
+    // corner, a darker patch) would then show as light and dark hexagons. Only the detail is
+    // hex-tiled: each sample's own low-pass (the texture blurred to a quarter of its size) is
+    // swapped for the texture's mean color.
+    let mean = slot_mean(mat, SLOT_BASE_COLOR);
+    let q = vec2<f32>(0.25, 0.0);
+    let mean_rgb = vec4<f32>(mean.rgb, 0.0);
+    let c0 = slot_sample(mat, SLOT_BASE_COLOR, t.uv0, hex_rotate(t.rot0, d1), hex_rotate(t.rot0, d2))
+        - vec4<f32>(slot_sample(mat, SLOT_BASE_COLOR, t.uv0, q, q.yx).rgb, 0.0) + mean_rgb;
+    let c1 = slot_sample(mat, SLOT_BASE_COLOR, t.uv1, hex_rotate(t.rot1, d1), hex_rotate(t.rot1, d2))
+        - vec4<f32>(slot_sample(mat, SLOT_BASE_COLOR, t.uv1, q, q.yx).rgb, 0.0) + mean_rgb;
+    let c2 = slot_sample(mat, SLOT_BASE_COLOR, t.uv2, hex_rotate(t.rot2, d1), hex_rotate(t.rot2, d2))
+        - vec4<f32>(slot_sample(mat, SLOT_BASE_COLOR, t.uv2, q, q.yx).rgb, 0.0) + mean_rgb;
+    let lw = vec3<f32>(0.299, 0.587, 0.114);
+    let w = anti_tile_weights(t, vec3<f32>(dot(c0.rgb, lw), dot(c1.rgb, lw), dot(c2.rgb, lw)));
+    // Variance-preserving blend around the mean: blending lowers contrast by sqrt(sum w²).
+    let k = inverseSqrt(max(dot(w, w), 1e-4));
+    let blended = c0 * w.x + c1 * w.y + c2 * w.z;
+    // Within the range of the samples blended, so no texel turns darker or brighter than the
+    // texture has where two features overlap.
+    var lo = vec4<f32>(2.0);
+    var hi = vec4<f32>(-1.0);
+    if (w.x > 0.01) { lo = min(lo, c0); hi = max(hi, c0); }
+    if (w.y > 0.01) { lo = min(lo, c1); hi = max(hi, c1); }
+    if (w.z > 0.01) { lo = min(lo, c2); hi = max(hi, c2); }
+    let c = clamp(mean + (blended - mean) * k, min(lo, blended), max(hi, blended));
+    out.color = clamp(c, vec4<f32>(0.0), vec4<f32>(1.0));
+    out.w = w;
+    return out;
+}
+
+// The tangent-space normal through the tiling (each hexagon's normal turned back by its
+// rotation), blended with `w`; as filtered (shorter than 1 where texels disagree).
+fn tiled_normal(mat: Material, t: AntiTiles, w: vec3<f32>, d1: vec2<f32>, d2: vec2<f32>) -> vec3<f32> {
+    if (t.count == 1u) {
+        return slot_sample(mat, SLOT_NORMAL, t.uv0, d1, d2).xyz * 2.0 - 1.0;
+    }
+    var sum = vec3<f32>(0.0);
+    let q = vec2<f32>(0.25, 0.0);
+    for (var i = 0u; i < t.count; i++) {
+        if (w[i] <= 0.0) { continue; }
+        let r = anti_tile_rot(t, i);
+        let uv = anti_tile_uv(t, i);
+        var tn = slot_sample(mat, SLOT_NORMAL, uv, hex_rotate(r, d1), hex_rotate(r, d2)).xyz * 2.0 - 1.0;
+        // Like the color, only the detail is hex-tiled: a scan's slow slope (or an overall tilt)
+        // turned a different way in each hexagon would light each hexagon differently.
+        tn = vec3<f32>(tn.xy - (slot_sample(mat, SLOT_NORMAL, uv, q, q.yx).xy * 2.0 - 1.0), tn.z);
+        // In texture axes (u, -v); turn by the inverse rotation.
+        let q = vec2<f32>(r.x * tn.x - r.y * tn.y, -r.y * tn.x - r.x * tn.y);
+        sum += w[i] * vec3<f32>(q.x, -q.y, tn.z);
+    }
+    return sum;
+}
+
+// The height map at `uv` through the tiling (parallax steps through it).
+fn tiled_height(mat: Material, uv: vec2<f32>, d1: vec2<f32>, d2: vec2<f32>) -> f32 {
+    let t = anti_tiles(mat, uv, d1, d2);
+    return tiled_sample(mat, SLOT_HEIGHT, t, anti_tile_weights(t, vec3<f32>(1.0)), d1, d2).r;
+}
+
 const PARALLAX_MAX_STEPS: i32 = 32;
 const PARALLAX_SHADOW_STEPS: i32 = 10;
 
@@ -332,17 +588,17 @@ const PARALLAX_SHADOW_STEPS: i32 = 10;
 // (1 = the polygon's surface, 0 = `depth` meters below it) in `steps`, refine the hit linearly
 // between the last two samples, and return the texture coordinate there with the hit height.
 // `offset` is how far the texture coordinate moves when the ray sinks the full depth.
-fn parallax_march(uv: vec2<f32>, offset: vec2<f32>, d1: vec2<f32>, d2: vec2<f32>, steps: i32) -> vec3<f32> {
+fn parallax_march(mat: Material, uv: vec2<f32>, offset: vec2<f32>, d1: vec2<f32>, d2: vec2<f32>, steps: i32) -> vec3<f32> {
     var prev_uv = uv;
     var prev_ray = 1.0;
-    var prev_gap = 1.0 - textureSampleGrad(height_texture, material_sampler, uv, d1, d2).r;
+    var prev_gap = 1.0 - tiled_height(mat, uv, d1, d2);
     if (prev_gap <= 0.0) { return vec3<f32>(uv, 1.0); }
     let step = 1.0 / f32(steps);
     for (var i = 1; i <= PARALLAX_MAX_STEPS; i++) {
         if (i > steps) { break; }
         let ray = 1.0 - f32(i) * step;
         let p = uv + offset * (1.0 - ray);
-        let h = textureSampleGrad(height_texture, material_sampler, p, d1, d2).r;
+        let h = tiled_height(mat, p, d1, d2);
         let gap = ray - h;
         if (gap <= 0.0) {
             // The ray crossed the height field between the previous sample and this one.
@@ -360,14 +616,14 @@ fn parallax_march(uv: vec2<f32>, offset: vec2<f32>, d1: vec2<f32>, d2: vec2<f32>
 // march up toward the light and darken by how far the height field rises above the ray, the
 // more the closer to the hit (Tatarchuk 2006). `offset` is the texture coordinate shift for a
 // full-depth rise toward the light.
-fn parallax_shadow(uv: vec2<f32>, h: f32, offset: vec2<f32>, d1: vec2<f32>, d2: vec2<f32>) -> f32 {
+fn parallax_shadow(mat: Material, uv: vec2<f32>, h: f32, offset: vec2<f32>, d1: vec2<f32>, d2: vec2<f32>) -> f32 {
     let rise = 1.0 - h;
     if (rise <= 0.02) { return 1.0; }
     var blocked = 0.0;
     for (var i = 1; i <= PARALLAX_SHADOW_STEPS; i++) {
         let f = f32(i) / f32(PARALLAX_SHADOW_STEPS);
         let ray = h + rise * f;
-        let above = textureSampleGrad(height_texture, material_sampler, uv + offset * rise * f, d1, d2).r - ray;
+        let above = tiled_height(mat, uv + offset * rise * f, d1, d2) - ray;
         blocked = max(blocked, above * (1.0 - f) * 12.0);
     }
     return 1.0 - saturate(blocked);
@@ -395,7 +651,7 @@ fn sample_projection(mat: Material, p: Projection, n: vec3<f32>, v: vec3<f32>, f
             let offset = vec2<f32>(dot(p.grad_u, lateral), dot(p.grad_v, lateral));
             let lateral_px = length(lateral) / max(footprint, 1e-6);
             let steps = i32(clamp(lateral_px * 0.5 + relief_px * 0.25, 6.0, f32(PARALLAX_MAX_STEPS)));
-            let hit = parallax_march(uv, offset, p.d1, p.d2, steps);
+            let hit = parallax_march(mat, uv, offset, p.d1, p.d2, steps);
             uv = hit.xy;
             out.height = mix(1.0, hit.z, fade);
             let l = frame.sun_dir.xyz;
@@ -403,29 +659,34 @@ fn sample_projection(mat: Material, p: Projection, n: vec3<f32>, v: vec3<f32>, f
             if (shadows && (flags & PARALLAX_SHADOWS) != 0u && l_n > 0.0) {
                 let toward = (l - n * l_n) / max(l_n, 0.1) * depth * fade;
                 let l_offset = vec2<f32>(dot(p.grad_u, toward), dot(p.grad_v, toward));
-                out.sun = parallax_shadow(uv, hit.z, l_offset, p.d1, p.d2);
+                out.sun = parallax_shadow(mat, uv, hit.z, l_offset, p.d1, p.d2);
             }
         }
     }
+    // Anti-tiling: the hexagons around the (parallax-shifted) point; plain tiling otherwise.
+    let tiles = anti_tiles(mat, uv, p.d1, p.d2);
+    var w = anti_tile_weights(tiles, vec3<f32>(1.0));
     out.base = vec4<f32>(1.0);
     if ((flags & TEX_BASE_COLOR) != 0u) {
-        out.base = textureSampleGrad(base_color_texture, material_sampler, uv, p.d1, p.d2);
+        let b = tiled_base(mat, tiles, p.d1, p.d2);
+        out.base = b.color;
+        w = b.w;
     }
     out.tangent_normal = vec3<f32>(0.0, 0.0, 1.0);
     if ((flags & TEX_NORMAL) != 0u) {
-        out.tangent_normal = textureSampleGrad(normal_texture, material_sampler, uv, p.d1, p.d2).xyz * 2.0 - 1.0;
+        out.tangent_normal = tiled_normal(mat, tiles, w, p.d1, p.d2);
     }
     out.metallic_roughness = vec4<f32>(1.0);
     if ((flags & TEX_METALLIC_ROUGHNESS) != 0u) {
-        out.metallic_roughness = textureSampleGrad(metallic_roughness_texture, material_sampler, uv, p.d1, p.d2);
+        out.metallic_roughness = tiled_sample(mat, SLOT_METALLIC_ROUGHNESS, tiles, w, p.d1, p.d2);
     }
     out.emissive = vec3<f32>(1.0);
     if ((flags & TEX_EMISSIVE) != 0u) {
-        out.emissive = textureSampleGrad(emissive_texture, material_sampler, uv, p.d1, p.d2).rgb;
+        out.emissive = tiled_sample(mat, SLOT_EMISSIVE, tiles, w, p.d1, p.d2).rgb;
     }
     out.occlusion = 1.0;
     if ((flags & TEX_OCCLUSION) != 0u) {
-        out.occlusion = textureSampleGrad(occlusion_texture, material_sampler, uv, p.d1, p.d2).r;
+        out.occlusion = tiled_sample(mat, SLOT_OCCLUSION, tiles, w, p.d1, p.d2).r;
     }
     return out;
 }
@@ -668,6 +929,8 @@ fn surface_in(in: VertexOut, front: bool) -> SurfaceIn {
 fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let mat = materials[in.material];
     let flags = mat.flags.x;
+    // Blended materials have no prepass: they ask for their virtual texture tiles here.
+    vt_feedback_on = (flags & 15u) == 2u && vt_feedback_pixel(in.clip.xy);
     let m = evaluate_material(surface_in(in, front), true);
     if ((flags & 15u) == 1u && m.base.a < mat.params.w) {
         discard;
@@ -707,6 +970,11 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     if (frame.counts.z == 7u || frame.counts.z == 8u) {
         let lambert = 0.25 + 0.75 * saturate(dot(n, frame.sun_dir.xyz));
         return vec4<f32>(in.color.rgb * lambert, 1.0);
+    }
+    // Virtual textures: the level shown, tile edges, fallbacks (virtual_texture.wgsl).
+    if (frame.counts.z == 9u) {
+        let lambert = 0.35 + 0.65 * saturate(dot(n, frame.sun_dir.xyz));
+        return vec4<f32>(vt_debug_color() * lambert, 1.0);
     }
     var color: vec3<f32>;
     if ((flags & 16u) != 0u) {
@@ -784,6 +1052,7 @@ fn standard_prepass_vertex(in: VertexIn) -> PrepassVertexOut {
 @fragment
 fn fs_prepass(in: PrepassVertexOut, @builtin(front_facing) front: bool) -> PrepassOutput {
     let mat = materials[in.material];
+    vt_feedback_on = vt_feedback_pixel(in.clip.xy);
     let si = SurfaceIn(in.rel, in.normal, in.uv, in.color, in.material, in.local, in.object_normal,
         mat3x3<f32>(in.axis_x, in.axis_y, in.axis_z), front);
     let m = evaluate_material(si, false);

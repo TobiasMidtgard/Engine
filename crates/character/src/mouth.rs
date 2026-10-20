@@ -22,6 +22,8 @@ pub enum MouthPart {
     Tongue = 3,
     /// Not in the mouth: shoes are built and drawn the same way (see `crate::shoes`).
     Shoe = 4,
+    /// A skirt, built the same way (see `crate::skirt`).
+    Skirt = 5,
 }
 
 /// Mouth geometry in the character's model space.

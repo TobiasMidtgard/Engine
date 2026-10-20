@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use engine_core::prelude::*;
 
-use crate::material::{StandardMaterial, TextureMapping};
+use crate::material::{StandardMaterial, TextureMapping, TextureProjection, hex_tiles};
 use crate::mesh::{Mesh, Vertex};
 use crate::texture::{Image, PixelFormat, f16_to_f32};
 
@@ -428,7 +428,7 @@ impl MaterialHeightField {
     /// Hash of the image and its mapping (for the build cache).
     pub fn key(&self) -> u64 {
         let mut h = StableHasher::new(self.image.key());
-        h.write_u32(self.mapping as u32);
+        h.write_u32(self.mapping.key());
         h.write_u32(self.uv_scale.x.to_bits());
         h.write_u32(self.uv_scale.y.to_bits());
         h.write_u32(self.tiles_per_m.to_bits());
@@ -438,11 +438,11 @@ impl MaterialHeightField {
 
 impl HeightField for MaterialHeightField {
     fn height(&self, p: Vec3, n: Vec3, uv: Vec2) -> f32 {
-        match self.mapping {
-            TextureMapping::Uv => self.image.sample(uv * self.uv_scale * self.tiles_per_m),
+        match self.mapping.projection() {
+            TextureProjection::Uv => self.sample(uv * self.uv_scale * self.tiles_per_m),
             // The mesh shader's triplanar projections (mesh.wgsl, `triplanar_projection`), in
             // mesh space.
-            TextureMapping::Triplanar | TextureMapping::TriplanarWorld => {
+            TextureProjection::Triplanar | TextureProjection::TriplanarWorld => {
                 let q = p * self.tiles_per_m;
                 let mut w = n.abs().powf(TRIPLANAR_SHARPNESS);
                 w /= (w.x + w.y + w.z).max(1e-12);
@@ -451,16 +451,30 @@ impl HeightField for MaterialHeightField {
                 let side = |c: f32| if c >= 0.0 { 1.0 } else { -1.0 };
                 let mut sum = 0.0;
                 if w.x > 0.0 {
-                    sum += w.x * self.image.sample(Vec2::new(-side(n.x) * q.z, -q.y));
+                    sum += w.x * self.sample(Vec2::new(-side(n.x) * q.z, -q.y));
                 }
                 if w.y > 0.0 {
-                    sum += w.y * self.image.sample(Vec2::new(side(n.y) * q.x, q.z));
+                    sum += w.y * self.sample(Vec2::new(side(n.y) * q.x, q.z));
                 }
                 if w.z > 0.0 {
-                    sum += w.z * self.image.sample(Vec2::new(side(n.z) * q.x, -q.y));
+                    sum += w.z * self.sample(Vec2::new(side(n.z) * q.x, -q.y));
                 }
                 sum
             }
+        }
+    }
+}
+
+impl MaterialHeightField {
+    /// The height at texture coordinate `uv` of one projection: hex-tiled like the shader
+    /// when the material is anti-tiled, so the relief follows the hexagons the shading shows.
+    fn sample(&self, uv: Vec2) -> f32 {
+        match self.mapping {
+            TextureMapping::AntiTiled { rotate, .. } => hex_tiles(uv.into(), rotate)
+                .iter()
+                .map(|(p, w)| w * self.image.sample(Vec2::from(*p)))
+                .sum(),
+            _ => self.image.sample(uv),
         }
     }
 }

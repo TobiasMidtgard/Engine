@@ -491,20 +491,30 @@ pub fn gait() -> LeggedGait {
         full_speed: 11.0,
         turn_radius: 1.2,
         mass_kg: 500.0,
+        // The neck pumps once a stride, lowest as the leading foreleg takes the weight
+        // (mid-stance at about 0.75 of a canter or gallop stride) and highest through the
+        // hind push and suspension; the head counters part of it so the face stays steadier.
         sway: vec![
             GaitSway {
                 bone: "neck_1".into(),
                 axis: Vec3::X,
-                amplitude_deg: 5.0,
+                amplitude_deg: 11.0,
                 frequency: 1.0,
                 phase: 0.0,
             },
             GaitSway {
-                bone: "head".into(),
+                bone: "neck_2".into(),
                 axis: Vec3::X,
                 amplitude_deg: 4.0,
                 frequency: 1.0,
-                phase: 0.3,
+                phase: 0.03,
+            },
+            GaitSway {
+                bone: "head".into(),
+                axis: Vec3::X,
+                amplitude_deg: -7.0,
+                frequency: 1.0,
+                phase: 0.05,
             },
         ],
         ..Default::default()

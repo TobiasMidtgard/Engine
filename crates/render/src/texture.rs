@@ -365,7 +365,14 @@ fn footprint(d: u32, src: u32, dst: u32) -> std::ops::Range<u32> {
     start.min(src - 1)..end.max(start + 1)
 }
 
-fn downsample_rgba8(src: &[u8], w: u32, h: u32, nw: u32, nh: u32, srgb: bool) -> Vec<u8> {
+pub(crate) fn downsample_rgba8(
+    src: &[u8],
+    w: u32,
+    h: u32,
+    nw: u32,
+    nh: u32,
+    srgb: bool,
+) -> Vec<u8> {
     let lut = srgb_to_linear_lut();
     let mut out = Vec::with_capacity(nw as usize * nh as usize * 4);
     for y in 0..nh {

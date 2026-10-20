@@ -353,7 +353,7 @@ fn foam(count: u32, radius: f32, size: [f32; 2], life: f32) -> EmitterDesc {
         local_space: true,
         rotation_deg: [0.0, 360.0],
         lit: 1.0,
-        color: fade([0.95, 0.97, 1.0], 0.9, 0.05, 0.75),
+        color: fade([0.95, 0.97, 1.0], 0.75, 0.05, 0.75),
         soft: 0.0,
         wind: 0.0,
         ..em("foam")
@@ -375,23 +375,34 @@ pub fn all() -> Vec<EffectDesc> {
 fn spells() -> Vec<EffectDesc> {
     let fireball = EffectDesc {
         light: light([1.0, 0.55, 0.2], 12_000.0, 14.0, 0.35, 0.3),
-        trail: Some(Trail {
-            width: 0.7,
-            lifetime: 0.3,
-            min_spacing: 0.12,
-            color: g(&[(0.0, [1.0, 0.7, 0.3, 0.9]), (1.0, [1.0, 0.2, 0.02, 0.0])]),
-            width_over_life: c(&[(0.0, 1.0), (1.0, 0.3)]),
-            emissive: 9000.0,
-            additive: 1.0,
-            style: RibbonStyle::Energy,
-            ..Default::default()
-        }),
         ..effect(
             "spell.fireball",
-            "A flying fireball: white-hot core, licking flames, sparks, a smoke tail, a trail and \
-             a warm light. Move its entity to fly it.",
+            "A flying fireball: a roiling ball of fire round a white-hot heart, a tail of burning \
+             gas cooling to soot behind it, sparks and a warm light. Move its entity to \
+             fly it.",
             None,
             vec![
+                // The ball itself: rolling fire round the heart, a few overlapping copies
+                // turning and crossfading, gone before they cool.
+                EmitterDesc {
+                    rate: 16.0,
+                    steady: true,
+                    speed: [0.0, 0.0],
+                    local_space: true,
+                    lifetime: [0.3, 0.3],
+                    size: [0.6, 0.6],
+                    rotation_deg: [-180.0, 180.0],
+                    spin_deg: [-90.0, 90.0],
+                    sprite: Sprite::Fireball,
+                    lit: 1.0,
+                    color: fade([1.0, 0.5, 0.15], 1.0, 0.1, 0.2),
+                    emissive: 18_000.0,
+                    additive: 0.0,
+                    soft: 0.2,
+                    wind: 0.0,
+                    ..em("ball")
+                },
+                // The white-hot heart, drawn over the ball so it shows through.
                 EmitterDesc {
                     rate: 90.0,
                     shape: EmitShape::Sphere {
@@ -400,7 +411,7 @@ fn spells() -> Vec<EffectDesc> {
                     },
                     speed: [0.0, 0.2],
                     lifetime: [0.12, 0.22],
-                    size: [0.55, 0.8],
+                    size: [0.45, 0.6],
                     size_over_life: c(&[(0.0, 1.0), (1.0, 0.6)]),
                     local_space: true,
                     color: g(&[(0.0, FIRE_CORE), (1.0, [1.0, 0.45, 0.1, 0.0])]),
@@ -410,28 +421,33 @@ fn spells() -> Vec<EffectDesc> {
                     soft: 0.1,
                     ..em("core")
                 },
+                // Burning gas shed behind it in flight, swelling, rising and cooling to soot,
+                // so the tail runs from fire at the ball to smoke further back.
                 EmitterDesc {
-                    rate: 140.0,
-                    rate_per_meter: 25.0,
+                    rate: 20.0,
+                    rate_per_meter: 12.0,
                     shape: EmitShape::Sphere {
-                        radius: 0.18,
+                        radius: 0.2,
                         surface: false,
                     },
-                    speed: [0.2, 0.9],
-                    lifetime: [0.25, 0.5],
-                    size: [0.35, 0.6],
-                    size_over_life: c(&[(0.0, 0.6), (0.3, 1.0), (1.0, 0.2)]),
-                    rotation_deg: [-15.0, 15.0],
-                    acceleration: [0.0, 2.5, 0.0],
+                    speed: [0.3, 1.2],
                     drag: 2.0,
-                    wind: 0.5,
+                    acceleration: [0.0, 1.5, 0.0],
                     turbulence: 3.0,
-                    turbulence_scale: 0.6,
-                    sprite: Sprite::Flame,
-                    color: flame_colors(),
-                    emissive: 8800.0,
-                    additive: 0.9,
-                    ..em("flames")
+                    turbulence_scale: 0.5,
+                    wind: 0.5,
+                    lifetime: [0.35, 0.8],
+                    size: [0.25, 0.6],
+                    size_over_life: c(&[(0.0, 0.7), (0.3, 1.0), (1.0, 2.0)]),
+                    rotation_deg: [-180.0, 180.0],
+                    spin_deg: [-60.0, 60.0],
+                    sprite: Sprite::Fireball,
+                    lit: 1.0,
+                    color: fade([1.0, 0.45, 0.12], 1.0, 0.03, 0.4),
+                    emissive: 18_000.0,
+                    additive: 0.0,
+                    soft: 0.3,
+                    ..em("tail")
                 },
                 EmitterDesc {
                     rate: 35.0,
@@ -465,22 +481,10 @@ fn spells() -> Vec<EffectDesc> {
                     lifetime: [1.2, 2.2],
                     size: [0.35, 0.6],
                     acceleration: [0.0, 0.7, 0.0],
-                    ..smoke("smoke", 0.2, 0.45)
+                    ..smoke("smoke", 0.3, 0.35)
                 },
-                EmitterDesc {
-                    rate: 30.0,
-                    rate_per_meter: 8.0,
-                    shape: EmitShape::Sphere {
-                        radius: 0.2,
-                        surface: false,
-                    },
-                    speed: [0.1, 0.3],
-                    acceleration: [0.0, 1.0, 0.0],
-                    lifetime: [0.3, 0.55],
-                    size: [0.8, 1.1],
-                    size_over_life: c(&[(0.0, 0.8), (1.0, 1.4)]),
-                    ..haze("haze", 1.0)
-                },
+                // No heat haze: drawn after the fire it would paint the scene behind back over
+                // the burning tail, a band of horizon cut through it.
             ],
         )
     };
@@ -614,42 +618,59 @@ fn spells() -> Vec<EffectDesc> {
     let frost_bolt = EffectDesc {
         light: light([0.5, 0.75, 1.0], 7000.0, 12.0, 0.1, 0.3),
         trail: Some(Trail {
-            width: 0.35,
-            lifetime: 0.35,
+            width: 0.12,
+            lifetime: 0.25,
             min_spacing: 0.1,
             color: g(&[(0.0, [0.7, 0.9, 1.0, 0.8]), (1.0, [0.4, 0.7, 1.0, 0.0])]),
-            emissive: 12_000.0,
+            emissive: 8000.0,
             style: RibbonStyle::Smooth,
             ..Default::default()
         }),
         ..effect(
             "spell.frost_bolt",
-            "An ice bolt: pale glowing core, glinting stars, tumbling ice shards and cold mist.",
+            "An ice bolt: a crackling ball of cold light, glinting frost, tumbling ice shards and \
+             a thin cold mist.",
             None,
             vec![
                 EmitterDesc {
                     rate: 80.0,
                     lifetime: [0.12, 0.2],
-                    size: [0.45, 0.6],
+                    size: [0.2, 0.28],
                     speed: [0.0, 0.1],
                     local_space: true,
-                    color: g(&[(0.0, [0.45, 0.78, 1.0, 1.0]), (1.0, [0.2, 0.5, 1.0, 0.0])]),
+                    color: g(&[(0.0, [0.7, 0.88, 1.0, 1.0]), (1.0, [0.4, 0.7, 1.0, 0.0])]),
                     emissive: 14_000.0,
                     additive: 1.0,
                     wind: 0.0,
                     ..em("core")
                 },
                 EmitterDesc {
-                    rate: 50.0,
-                    rate_per_meter: 10.0,
+                    rate: 3.0,
+                    steady: true,
+                    speed: [0.0, 0.0],
+                    local_space: true,
+                    lifetime: [0.6, 0.6],
+                    size: [0.75, 0.75],
+                    rotation_deg: [0.0, 360.0],
+                    sprite: Sprite::Plasma,
+                    color: fade([0.55, 0.8, 1.0], 1.0, 0.3, 0.7),
+                    emissive: 5_000.0,
+                    additive: 1.0,
+                    soft: 0.0,
+                    wind: 0.0,
+                    ..em("ball")
+                },
+                EmitterDesc {
+                    rate: 20.0,
+                    rate_per_meter: 4.0,
                     shape: EmitShape::Sphere {
                         radius: 0.2,
                         surface: false,
                     },
                     speed: [0.2, 1.0],
                     drag: 2.0,
-                    lifetime: [0.3, 0.6],
-                    size: [0.12, 0.22],
+                    lifetime: [0.2, 0.4],
+                    size: [0.05, 0.1],
                     spin_deg: [-200.0, 200.0],
                     sprite: Sprite::Star,
                     color: g(&[(0.0, [0.8, 0.95, 1.0, 1.0]), (1.0, [0.5, 0.8, 1.0, 0.0])]),
@@ -691,9 +712,9 @@ fn spells() -> Vec<EffectDesc> {
                     },
                     speed: [0.1, 0.3],
                     lifetime: [0.8, 1.4],
-                    size: [0.25, 0.4],
-                    emissive: 150.0,
-                    color: fade([0.85, 0.93, 1.0], 0.12, 0.15, 0.35),
+                    size: [0.35, 0.55],
+                    emissive: 30.0,
+                    color: fade([0.85, 0.93, 1.0], 0.05, 0.15, 0.35),
                     ..smoke("mist", 0.85, 0.35)
                 },
             ],
@@ -1649,23 +1670,43 @@ fn water() -> Vec<EffectDesc> {
             // The crown's thin wall of water, rising, tearing and slumping back as the jet
             // shoots up from the middle.
             crown(1.3, 0.95),
+            // The jet shooting up from the middle as the crater closes: a glassy rod of water
+            // that rises, stalls and sinks back.
+            EmitterDesc {
+                bursts: vec![at(0.3, 1)],
+                speed: [0.0, 0.0],
+                gravity: 0.0,
+                lifetime: [0.5, 0.5],
+                size: [0.9, 0.9],
+                size_over_life: c(&[(0.0, 0.15), (0.35, 1.0), (1.0, 0.2)]),
+                rotation_deg: [0.0, 0.0],
+                local_space: true,
+                sprite: Sprite::Jet,
+                facing: Facing::Axis,
+                stretch: 0.09,
+                lit: 1.0,
+                color: fade([0.8, 0.88, 0.95], 0.85, 0.1, 0.6),
+                wind: 0.0,
+                soft: 0.0,
+                ..em("jet")
+            },
             // Drops breaking off the top of the jet.
             EmitterDesc {
-                bursts: vec![at(0.42, 40), at(0.5, 30)],
+                bursts: vec![at(0.42, 16), at(0.5, 12)],
                 shape: EmitShape::Cone {
-                    angle_deg: 9.0,
+                    angle_deg: 30.0,
                     radius: 0.03,
                 },
-                offset: [0.0, 0.5, 0.0],
-                speed: [1.0, 2.6],
+                offset: [0.0, 0.8, 0.0],
+                speed: [0.8, 2.0],
                 velocity: [0.0, 0.0, 0.0],
-                lifetime: [0.8, 1.3],
-                size: [0.03, 0.06],
-                stretch: 0.04,
-                ..droplets("column", 70, water_rgb, [1.0, 2.6], 0.0, Collide::Die)
+                lifetime: [0.6, 1.0],
+                size: [0.015, 0.03],
+                stretch: 0.03,
+                ..droplets("column", 28, water_rgb, [0.8, 2.0], 0.0, Collide::Die)
             },
             EmitterDesc {
-                bursts: once(10),
+                bursts: once(6),
                 shape: EmitShape::Hemisphere { radius: 0.3 },
                 speed: [0.8, 2.2],
                 drag: 2.2,
@@ -1674,10 +1715,10 @@ fn water() -> Vec<EffectDesc> {
                 size: [0.3, 0.55],
                 size_over_life: c(&[(0.0, 0.6), (1.0, 2.0)]),
                 color: g(&[
-                    (0.0, [0.92, 0.96, 1.0, 0.28]),
+                    (0.0, [0.92, 0.96, 1.0, 0.12]),
                     (1.0, [0.92, 0.96, 1.0, 0.0]),
                 ]),
-                ..smoke("spray", 0.92, 0.28)
+                ..smoke("spray", 0.92, 0.12)
             },
             ripples("ripples", &[0.0, 0.18, 0.4], 7.0, 2.2, 1.0),
             foam(10, 0.4, [0.35, 0.6], 3.5),

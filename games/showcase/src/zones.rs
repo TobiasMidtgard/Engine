@@ -757,8 +757,8 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
                 View::new(
                     "parkour_ladder",
                     "Ladder: climb the tower's caged ladder hand over hand, slide back down",
-                    [26.6, 2.0, 19.4],
-                    [23.0, 3.6, 14.6],
+                    [29.0, 2.1, 17.6],
+                    [23.0, 3.4, 14.4],
                     16.0,
                 )
                 // Halfway up about 2.9 s into the loop.
@@ -1192,14 +1192,19 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
     }
 }
 
-/// The destruction demos' viewpoints: each restarts its demo on arrival so its moment plays.
+/// The destruction demos' viewpoints: each restarts its demo on arrival so its moment plays,
+/// warming up without drawing.
 fn destruction_views(views: &[engine_destruction::DemoView]) -> Vec<View> {
     views
         .iter()
         .map(|v| {
-            let view = View::new(v.key, v.name, v.eye, v.target, v.hour)
+            let mut view = View::new(v.key, v.name, v.eye, v.target, v.hour)
                 .warmup(v.warmup_secs)
                 .on_arrive(engine_destruction::RESTART_API, "{}");
+            // Breaking runs on the CPU; only the storehouse fire needs drawing to burn.
+            if v.key != "fortress_fire" {
+                view = view.quick_warmup();
+            }
             // Someone climbs the breach house ladders and up through the hatches once they open.
             if v.key == "fortress_hatches" {
                 view.on_arrive("movement.ladder_guest", "{}")

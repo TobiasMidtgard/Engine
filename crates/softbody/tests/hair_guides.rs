@@ -268,3 +268,93 @@ fn hair_combed_back_from_the_hairline_stays_back_when_the_head_bows() {
         }
     }
 }
+
+/// A person standing in a T pose: hips, chest, neck, head and arms held out to the sides.
+fn t_pose() -> SkeletonPose {
+    let bones = [
+        ("pelvis", None, Vec3::new(0.0, 1.0, 0.0)),
+        ("chest", Some(0), Vec3::new(0.0, 1.3, 0.0)),
+        ("neck", Some(1), Vec3::new(0.0, 1.45, 0.0)),
+        ("head", Some(2), Vec3::new(0.0, 1.55, 0.0)),
+        ("upper_arm_l", Some(1), Vec3::new(0.18, 1.42, 0.0)),
+        ("lower_arm_l", Some(4), Vec3::new(0.46, 1.42, 0.0)),
+        ("hand_l", Some(5), Vec3::new(0.7, 1.42, 0.0)),
+    ];
+    SkeletonPose {
+        names: Arc::from(bones.iter().map(|b| b.0.to_string()).collect::<Vec<_>>()),
+        parents: Arc::from(bones.iter().map(|b| b.1).collect::<Vec<_>>()),
+        bones: bones
+            .iter()
+            .map(|b| BonePose {
+                translation: b.2,
+                ..BonePose::default()
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn hair_grown_lying_on_an_arm_slides_off_it_without_sinking_in_or_being_flung() {
+    let mut app = app();
+    // Locks from the side of the head down onto the arm, then lying along the top of it
+    // (the humanoid upper arm is 5.5 cm thick), a little in front of and behind its crest.
+    let arm = |x: f32, z: f32| {
+        let up = (0.058f32 * 0.058 - z * z).sqrt();
+        Vec3::new(x, 1.42 + up, z)
+    };
+    let guides: Vec<HairGuide> = [-0.02f32, 0.0, 0.02]
+        .into_iter()
+        .map(|z| {
+            let root = Vec3::new(0.08, 1.62, z * 0.5);
+            let on = arm(0.2, z);
+            let mut points: Vec<Vec3> = (0..5).map(|i| root.lerp(on, i as f32 / 4.0)).collect();
+            points.extend((1..8).map(|i| arm(0.2 + 0.03 * i as f32, z)));
+            HairGuide {
+                bones: [3, 3],
+                blend: 0.0,
+                points,
+                normal: Vec3::X,
+                thickness: 0.004,
+            }
+        })
+        .collect();
+    let grown = HairGuides {
+        version: 1,
+        guides,
+        grown_on: t_pose().bones,
+        stiffness: 0.2,
+    };
+    let person = app
+        .world
+        .spawn((Transform::default(), t_pose(), grown.clone()))
+        .id();
+    let axis = |p: Vec3| Vec3::new(0.0, p.y - 1.42, p.z).length();
+    let mut last: Option<Vec<Vec3>> = None;
+    for step in 0..120 {
+        app.update();
+        let Some(posed) = app.world.get::<HairGuidesPosed>(person) else {
+            continue;
+        };
+        for (i, g) in grown.guides.iter().enumerate() {
+            let p = posed.guide(&grown, i).unwrap();
+            for (k, (q, r)) in p.iter().zip(&g.points).enumerate().skip(5) {
+                // Never deeper into the arm than it was grown, beyond the collision slop.
+                assert!(
+                    axis(*q) > axis(*r) - 0.004,
+                    "step {step}: lock {i} point {k} sank to {:.3} m from the arm's axis",
+                    axis(*q)
+                );
+            }
+        }
+        if let Some(last) = &last {
+            let fastest = posed
+                .points
+                .iter()
+                .zip(last)
+                .map(|(a, b)| a.distance(*b) * 60.0)
+                .fold(0.0, f32::max);
+            assert!(fastest < 3.0, "step {step}: hair flung at {fastest:.1} m/s");
+        }
+        last = Some(posed.points.clone());
+    }
+}

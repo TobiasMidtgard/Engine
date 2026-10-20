@@ -281,6 +281,12 @@ pub enum CellKind {
 pub const VBAR: u8 = 1;
 pub const HBAR: u8 = 2;
 
+/// Drywall board thickness on each face of a stud wall, m: between the studs the rest is
+/// hollow.
+const BOARD: f32 = 0.016;
+/// How dark the hollow between studs is: the back of the far board, shut in by studs.
+const CAVITY_SHADE: [f32; 3] = [0.42, 0.38, 0.33];
+
 /// Exposed rebar's radius, m (a 20 mm bar).
 const REBAR_RADIUS: f32 = 0.01;
 /// How far exposed rebar bows out of a hole: `REBAR_BEND · d²` m at `d` m from the concrete
@@ -1080,6 +1086,11 @@ pub struct WallLook {
     pub reference: [f32; 3],
     /// How readily cracks run out from damage ([`crate::cracks::brittleness`]).
     pub cracks: f32,
+    /// Stud walls: board thickness on each face; once a board breaks, the hollow behind it
+    /// shows, back to the far board.
+    pub board: Option<f32>,
+    /// The far board's back seen through a broken board.
+    pub cavity: [f32; 3],
 }
 
 impl WallLook {
@@ -1098,6 +1109,8 @@ impl WallLook {
             mortar: wall.masonry.is_some(),
             reference: props.exterior,
             cracks: crate::cracks::brittleness(wall.material),
+            board: (wall.stud_spacing > 0.0).then_some(BOARD.min(wall.thickness * 0.3)),
+            cavity: std::array::from_fn(|k| props.interior[k] * CAVITY_SHADE[k]),
         }
     }
 
@@ -1113,6 +1126,7 @@ impl WallLook {
             self.interior = rel(self.interior);
             self.stud_interior = rel(self.stud_interior);
             self.rebar = rel(self.rebar);
+            self.cavity = rel(self.cavity);
             self.masonry = None;
         }
         self
@@ -1155,6 +1169,8 @@ struct GridVertex {
     removed_back: f32,
     scorch: [f32; 2],
     stud: bool,
+    /// Front, back: the board there is broken and the face is the hollow behind it.
+    hollow: [bool; 2],
 }
 
 /// Mesh of the cells in `[i0, i1) × [j0, j1)` of `grid` (local wall space, plus `offset`).
@@ -1215,6 +1231,18 @@ pub fn mesh_cells(
             f /= count;
             b /= count;
             sc = sc.map(|x| x / count);
+            // Through a broken board there's nothing until the far board.
+            let mut hollow = [false; 2];
+            if let Some(board) = look.board.filter(|_| !stud) {
+                if f > board {
+                    f = f.max(t - board - b.min(board));
+                    hollow[0] = true;
+                }
+                if b > board {
+                    b = b.max(t - board - f.min(board));
+                    hollow[1] = true;
+                }
+            }
             let max_sum = t * 0.92;
             if f + b > max_sum {
                 let s = max_sum / (f + b);
@@ -1243,6 +1271,7 @@ pub fn mesh_cells(
                 removed_back: b,
                 scorch: sc,
                 stud,
+                hollow,
             });
         }
     }
@@ -1258,6 +1287,9 @@ pub fn mesh_cells(
     };
     let surface_color = |v: &GridVertex, front: bool, removed: f32, gx: i64, gy: i64| {
         let scorch = v.scorch[usize::from(!front)];
+        if v.hollow[usize::from(!front)] {
+            return scale(look.cavity, 1.0 - 0.6 * scorch);
+        }
         let base = scale(look.outside_color(v.xy, gx, gy), 1.0 - 0.8 * scorch);
         let k = ((removed - 0.002) / 0.02).clamp(0.0, 1.0);
         let inner = scale(interior_of(v.stud), 1.0 - 0.5 * scorch);
@@ -1634,6 +1666,39 @@ mod tests {
         assert!(!cut.lost.is_empty());
         let c = s.grid.cell_at(Vec2::new(0.0, 1.5)).unwrap();
         assert_eq!(s.grid.rebar[c], 0, "thermite cuts the rebar");
+    }
+
+    #[test]
+    fn a_broken_drywall_board_shows_the_hollow_behind_it() {
+        let wall = DestructibleWall::soft(3.0, 3.0);
+        let mut s = state(&wall);
+        let p = props(DestructibleMaterial::Plaster);
+        s.blast(&p, Vec3::new(0.2, 1.5, 0.1), 3.0e5, 2.5e5);
+        let look = WallLook::new(&wall, &DestructionMaterials::default());
+        let m = mesh_cells(&s.grid, &look, (0, 0, s.grid.nx, s.grid.ny), Vec3::ZERO);
+        // Cavity colored, darkened by scorch alone.
+        let is_cavity = |c: &[f32; 4]| {
+            let k = c[0] / look.cavity[0];
+            k <= 1.0 + 1e-4 && (0..3).all(|i| (c[i] - look.cavity[i] * k).abs() < 1e-4)
+        };
+        let deep: Vec<_> = m
+            .vertices
+            .iter()
+            .filter(|v| v.normal[2] > 0.5 && is_cavity(&v.color))
+            .collect();
+        assert!(!deep.is_empty(), "the blast breaks the front board");
+        // Behind a broken board the face drops back to the far board (or what's left of it
+        // after spalling), not into a shallow crater.
+        let far_board = -wall.thickness * 0.5 + 2.0 * BOARD;
+        let at_far_board = deep
+            .iter()
+            .filter(|v| v.position[2] < far_board + 1e-3)
+            .count();
+        assert!(
+            at_far_board * 2 > deep.len(),
+            "{at_far_board} of {} hollow vertices reach the far board",
+            deep.len()
+        );
     }
 
     #[test]

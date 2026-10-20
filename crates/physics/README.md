@@ -322,7 +322,15 @@ a little off true as by hand, into seventeen bins behind glass, and heap up in t
 printed on the back board: steel bounces over more than one pin, so the curve is the normal
 curve this board gives, σ ≈ 3.2 bins, wider than a coin tossed at every row would make), a **rockfall** (300 crushed granite
 rocks, faceted convex hulls 30 to 55 cm across, pour out of a hopper, slide down a 40° steel chute
-and drop off its lip into a heap with a 35° face) and, along the front, a **barrel run**:
+and drop off its lip into a heap with a 35° face), a **counterweight catapult** (a 1.2 t
+iron-bound box of stone on the short end of a 5 m oak arm swings it up into a padded crossbar,
+and the 38 kg granite ball flies on out of its cup, 7.4 m up and 11 m down range, into the top of
+a five-course crate wall; the arm is one body with the oak's and the stone's masses set on it,
+stopped by its hinge's limit where the crossbar stands, and nothing lets the ball go: the cup
+stops and it doesn't), a **giant Jenga** tower (54 oak blocks, 18 levels of three; a test rig's
+kinematic steel rod pokes the loose middle blocks, 3 mm thinner as in a real set, out of three
+levels and the tower stands on, then pushes out a block it rests on and the top half topples)
+and, along the front, a **barrel run**:
 three oil drums roll off a 2 m ramp and 47 m down an asphalt runway (one triangle mesh, an edge
 every 2 m) into a sand pit, staying flat and in their painted lanes, past galvanized guardrails to a
 tire wall. It sits on the ground at `origin`, its top `demo::SLAB_RISE` (10 cm) above it; the
@@ -330,8 +338,8 @@ showcase's physics zone places it. Render it alone with
 `cargo run -p engine_physics --release --example proving_ground -- out_dir`.
 
 The stations replay on their own cycles (`demo::Station::cycle_secs`, world time: ragdolls,
-seesaw, balls and cradle every 20 s, the barrel run and pool table every 25 s, dominoes, wrecking ball and bridge every
-30 s, the rockfall every 30 s, the Galton board every 40 s, the pile every 45 s, the pendulum wave every minute, as it comes
+seesaw, balls, cradle and catapult every 20 s, the barrel run and pool table every 25 s, dominoes, wrecking ball and bridge every
+30 s, the rockfall every 30 s, Jenga every 32 s, the Galton board every 40 s, the pile every 45 s, the pendulum wave every minute, as it comes
 back into step; the tower, wheel and turntable run on), so the zone is always
 playing when someone walks in.
 They pause while no focus point is within 250 m.
@@ -401,7 +409,14 @@ are still, at most one stays caught on the pins, and the heap is centered within
 2.5 to 4 bins, over 28% of the balls in the middle three bins, under 8% in the outer four, and no
 more than 12% more on one side); contacts on small bodies (`tests/contacts.rs`: a 14 mm ball
 sliding off a 4 mm pin falls within 10 frames and 2 cm, and one dropped on one of two pins three
-ball widths apart drops through); a headless screenshot of the proving ground.
+ball widths apart drops through); the catapult (`tests/proving_ground.rs`: the arm stays on its
+axle and comes to rest against the crossbar, the ball leaves the cup at 95 to 101% of the speed
+the counterweight's fall gives it without losses (99%: 10.1 of 10.2 m/s), rises over 7 m and
+brings down at least four of the wall's crates, and no crate leaves the yard); Jenga
+(`tests/proving_ground.rs`: after three pokes the poked blocks lie on the slab past the tower
+and no other block moved 3 cm, and after the fourth the top level is on the slab and nothing
+lies over 6 m from the tower); a headless
+screenshot of the proving ground.
 
 ## Done when
 

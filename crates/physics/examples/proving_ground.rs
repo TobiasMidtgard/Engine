@@ -42,6 +42,14 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [17.3, 2.3, -2.2],
         [16.0, 1.75, -4.5],
     ),
+    // The catapult: cocked, the arm slamming into its crossbar as the ball leaves, the ball at
+    // the top of its flight over the yard, the crate wall as it hits, and the wall after.
+    (
+        0.3,
+        "33_catapult_cocked",
+        [-8.6, 2.3, 9.8],
+        [-4.4, 2.1, 3.0],
+    ),
     (0.35, "27_pool_break", [8.6, 1.9, -6.6], [9.6, 0.8, -8.6]),
     // The wrecking ball's chain close up under the swinging ball's load (and later, below).
     (
@@ -57,6 +65,12 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [16.0, 1.75, -4.5],
     ),
     (
+        0.97,
+        "34_catapult_release",
+        [-8.6, 2.3, 9.8],
+        [-4.4, 2.6, 3.0],
+    ),
+    (
         1.0,
         "02_ragdolls_on_stairs",
         [33.0, 4.5, -4.0],
@@ -68,6 +82,12 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         "14_dummies_tumbling",
         [30.0, 3.2, -5.5],
         [24.0, 1.6, -12.0],
+    ),
+    (
+        1.7,
+        "35_catapult_ball_flying",
+        [0.0, 7.0, -11.0],
+        [2.0, 4.0, 3.0],
     ),
     (
         1.8,
@@ -123,6 +143,7 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [10.0, 0.98, -18.0],
     ),
     // The pendulum wave: nearly in step, in snakes, and in two alternate rows at half a minute.
+    (2.8, "36_catapult_impact", [3.0, 2.5, -2.0], [7.6, 1.6, 3.0]),
     (
         3.0,
         "23_pendulum_wave_start",
@@ -138,6 +159,12 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
     (5.0, "06_dominoes", [8.0, 4.5, -4.0], [5.0, 0.4, -16.0]),
     (6.0, "07_bridge", [27.5, 4.0, 10.0], [18.0, 2.6, 10.0]),
     (6.5, "08_turntable", [37.0, 6.5, 20.0], [30.0, 0.5, 10.0]),
+    (
+        7.0,
+        "37_catapult_wall_after",
+        [0.0, 7.0, -11.0],
+        [2.0, 2.5, 3.0],
+    ),
     (7.9, "12_barrel_run", [0.0, 1.7, 23.2], [-9.0, 0.35, 18.9]),
     (
         8.5,
@@ -201,7 +228,21 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [8.0, 4.5, -4.0],
         [5.0, 0.4, -16.0],
     ),
+    // Giant Jenga, in its second cycle (it replays at 32 s): standing, the rod pushing the
+    // first loose block out, three gaps and their blocks on the slab, the top half falling
+    // when the rod pushes out a block it rests on, and the heap.
+    (33.0, "38_jenga_standing", JENGA_EYE, JENGA_AT),
+    (36.4, "39_jenga_poke", JENGA_EYE, JENGA_AT),
+    (49.6, "40_jenga_three_out", JENGA_EYE, JENGA_AT),
+    (54.4, "41_jenga_falling_a", JENGA_EYE, JENGA_AT),
+    (55.0, "41_jenga_falling_b", JENGA_EYE, JENGA_AT),
+    (55.6, "41_jenga_falling_c", JENGA_EYE, JENGA_AT),
+    (59.5, "42_jenga_fallen", JENGA_EYE, JENGA_AT),
 ];
+
+/// The camera on the Jenga tower: off its +X, +Z corner, where blocks leave and the top falls.
+const JENGA_EYE: [f64; 3] = [-6.6, 2.3, -1.4];
+const JENGA_AT: [f64; 3] = [-10.0, 1.35, -5.5];
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

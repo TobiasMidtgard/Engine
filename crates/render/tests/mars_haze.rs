@@ -7,8 +7,9 @@
 //! survives (their transmittance) and the light the air adds (the haze), in linear color with
 //! the tone curve off. A CPU reference computes both for the same air: single scattering by
 //! quadrature, plus multiple scattering (dust, gas and ground bounces) by a deterministic
-//! Monte Carlo in a plane-parallel atmosphere. Needs a GPU or lavapipe; passes with a note when
-//! neither is available.
+//! Monte Carlo in a plane-parallel atmosphere, with the dust's forward peak passing as
+//! unscattered light (delta-Eddington, `Atmosphere::mie_forward_peak`). Needs a GPU or
+//! lavapipe; passes with a note when neither is available.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
@@ -315,12 +316,20 @@ impl Pcg {
 
 /// One color channel of the air, in a plane-parallel atmosphere (heights above datum; below
 /// datum the air is as dense as at datum, as the renderer has it).
+///
+/// The dust's phase function is a forward peak holding a share f = `mie_forward_peak` · g² of
+/// its scattering, which passes straight on (delta-Eddington), plus the lobe left, of anisotropy
+/// (g − f) / (1 − f). So the dust's scattering and extinction here leave the peak out, and the
+/// light it scatters follows the lobe left. (The renderer draws the peak's glow around the sun
+/// in the visible sky only; none of these views look toward the sun.)
 struct Air {
     rayleigh: f64,
+    /// Without the forward peak.
     mie_scattering: f64,
     mie_extinction: f64,
     rayleigh_h: f64,
     mie_h: f64,
+    /// The lobe left without the forward peak.
     g: f64,
     top: f64,
     ground_albedo: f64,
@@ -329,13 +338,17 @@ struct Air {
 impl Air {
     fn channel(a: &Atmosphere, c: usize) -> Self {
         let k = a.density_scale as f64;
+        let g = (a.mie_g + a.mie_g_offset[c]) as f64;
+        let peak = a.mie_forward_peak.clamp(0.0, 1.0) as f64 * g * g;
+        let scattering = a.mie_scattering[c] as f64 * k;
         Self {
             rayleigh: a.rayleigh_scattering[c] as f64 * k,
-            mie_scattering: a.mie_scattering[c] as f64 * k,
-            mie_extinction: (a.mie_scattering[c] + a.mie_absorption[c]) as f64 * k,
+            mie_scattering: scattering * (1.0 - peak),
+            mie_extinction: (a.mie_scattering[c] + a.mie_absorption[c]) as f64 * k
+                - scattering * peak,
             rayleigh_h: a.rayleigh_scale_height as f64,
             mie_h: a.mie_scale_height as f64,
-            g: (a.mie_g + a.mie_g_offset[c]) as f64,
+            g: (g - peak) / (1.0 - peak),
             top: a.thickness as f64,
             ground_albedo: a.ground_color[c] as f64,
         }
@@ -384,10 +397,15 @@ impl Air {
         3.0 / (16.0 * std::f64::consts::PI) * (1.0 + nu * nu)
     }
 
-    fn phase_mie(&self, nu: f64) -> f64 {
-        let g2 = self.g * self.g;
+    fn cornette_shanks(g: f64, nu: f64) -> f64 {
+        let g2 = g * g;
         3.0 / (8.0 * std::f64::consts::PI) * (1.0 - g2) * (1.0 + nu * nu)
-            / ((2.0 + g2) * (1.0 + g2 - 2.0 * self.g * nu).max(1e-9).powf(1.5))
+            / ((2.0 + g2) * (1.0 + g2 - 2.0 * g * nu).max(1e-9).powf(1.5))
+    }
+
+    /// The lobe left without the forward peak.
+    fn phase_mie(&self, nu: f64) -> f64 {
+        Self::cornette_shanks(self.g, nu)
     }
 
     /// Where along a direction the optical depth from z reaches `tau` (at most `max_len`).

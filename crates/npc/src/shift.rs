@@ -97,7 +97,8 @@ pub(crate) fn shift_agents(
     }
 }
 
-/// Animals' homes, threats, destinations, noises heard, water spots, flight and landing spots.
+/// Animals' homes, threats, destinations, noises and gunshots heard, where they were hurt
+/// from, who runs them down, water and drinking spots, flight and landing spots.
 pub(crate) fn shift_wildlife(
     mut shifts: MessageReader<WorldShift>,
     mut animals: Query<&mut Animal>,
@@ -119,6 +120,11 @@ pub(crate) fn shift_wildlife(
         m.hurt_from = m.hurt_from.map(moved);
         m.heard = m.heard.map(|(at, loud)| (moved(at), loud));
         m.water = m.water.map(|w| w.map(moved));
+        m.drink_at = m.drink_at.map(|(at, face)| (moved(at), level(&s, face)));
+        m.shot = m.shot.map(moved);
+        m.wary = m.wary.map(|(at, when)| (moved(at), when));
+        m.wounded = m.wounded.map(|(when, at, by)| (when, moved(at), by));
+        m.pursuer = m.pursuer.map(|(at, d)| (moved(at), d));
         m.flee_dir = level(&s, m.flee_dir);
     }
     for (mut bird, g) in &mut birds {

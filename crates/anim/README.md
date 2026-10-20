@@ -81,6 +81,9 @@ compresses and stretches.
   weights from effort, wincing and limpness, plus gaze from the humanoid head). While a
   character module draws appearances (`AppearanceBodies`), those people keep their humanoid
   `SkeletonPose` but no fetched model and no mesh of this crate's (`tests/appearance.rs`).
+  Requested people also get `HandControls`: each hand's grip from the clips' `grip`, `flex`
+  and `fist` curves, at least what it holds (`HandGrip`), for the character module to curl
+  the fingers (`tests/hands.rs`).
 - **Bodies on request.** A module that moves an entity itself puts `BodyRequest` on it
   (`human`, `horse`, `dog` or `spider`, an optional model path, height and seed) and gets a body:
   the paddock's rigs and models, animated from the entity's motion (`LocomotionState` or
@@ -206,7 +209,7 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 | Shirt reach | Up on tiptoe to a hanging lantern: a glance up and a dip, the elbow leads the arm up, `ReachIk` puts the hand on the glass while `grip` closes it, then down onto the heels with a give in the knees; the sleeve bunches at the elbow and rides up the raised arm |
 | Step course | A walker leans into a ramp, crosses a deck, walks down stairs watching the steps with feet planted by IK and arms a little out, then runs back leaning into the turns (`paddock_stairs`) |
 | Footwork drill | An athlete walks a square facing one way: ahead, sidestepping left, backpedalling, sidestepping right, blending through the corners, every planted foot still on the sand (`paddock_footwork`) |
-| Shuttle lane | An athlete sprints the lane from a standing start (leaning into it), digs in to stop, runs back backwards, turns on the spot and runs sideways to the start; a coach beside the lane turns where they stand to keep watching, the head first and the feet stepping round once the runner is well off to one side (`paddock_sprint_start`, `paddock_sprint_stop`) |
+| Shuttle lane | An athlete sprints the lane flat out from a standing start (leaning into it, then at 7 m/s with the trunk forward, knees driven high, heels kicked up and arms pumping from hip to chin), digs in to stop, runs back backwards, turns on the spot and runs sideways to the start; a coach beside the lane, arms folded, turns where they stand to keep watching, the head first and the feet stepping round once the runner is well off to one side (`paddock_sprint_start`, `paddock_sprint_stop`) |
 | Sparring partner | A lifter in a boxer's guard (lead foot and fist forward, elbows tucked, bouncing lightly) takes a jab to the chin (head snaps back), a hook to the side of the head, a blow to the stomach (folds over it) and a shove on the back of a shoulder, flinching away from each and recovering to the guard without being shoved off his feet (`paddock_flinch`) |
 | Horse oval | A textured horse walks, trots, canters and gallops by speed; in the swing the knees fold, the hocks bend and the hooves curl back behind the fetlocks; haunches and shoulders flex with each stride; the mane rides the neck and the tail streams |
 | Dog run | A furred Labrador walks off, trots, canters out of a turn and gallops down the far straight, the spine flexing with each stride, ears and tail swinging; it pants as it goes (`paddock_dog_trot`, `paddock_dog`) |

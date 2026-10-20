@@ -6,7 +6,7 @@
 use engine_core::math::{DVec3, Quat, Rng, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::{MaterialRef, MeshRef, MeshRenderer, Shape};
-use engine_world::WorldImpulse;
+use engine_world::{NoiseEvent, WorldImpulse};
 
 use crate::assets::DestructionAssets;
 use crate::debris::{DebrisLook, DebrisSpawn, PendingDebris};
@@ -156,6 +156,7 @@ pub fn charges_system(
     mut queue: ResMut<HitQueue>,
     mut pending: ResMut<PendingDebris>,
     mut impulses: MessageWriter<WorldImpulse>,
+    mut noise: MessageWriter<NoiseEvent>,
     mut rng: Local<Option<Rng>>,
 ) {
     let dt = time.delta_secs();
@@ -193,14 +194,19 @@ pub fn charges_system(
         match charge.kind {
             ChargeKind::Explosive { energy_j } => {
                 let scale = (energy_j / 1.0e5).cbrt();
-                impulses.write(WorldImpulse {
+                let blast = WorldImpulse {
                     center: t.translation + (normal * 0.04).as_dvec3(),
                     radius: (3.0 * scale).clamp(1.0, 30.0),
                     strength: (30.0 * scale).clamp(5.0, 200.0),
                     energy_j,
                     heat_c: 500.0,
                     source: Some(e),
-                });
+                };
+                impulses.write(blast);
+                // Loud: fighters nearby hear the breach.
+                if let Some(n) = blast.noise() {
+                    noise.write(n);
+                }
                 commands.entity(e).despawn();
             }
             ChargeKind::Thermite { size, burn_secs } => {

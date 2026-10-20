@@ -138,6 +138,12 @@ impl Plugin for PhysicsPlugin {
             )
             .add_systems(FixedUpdate, step::physics_step.in_set(SimSet::Physics))
             .add_systems(FixedUpdate, demo::replay_stations.in_set(SimSet::Gameplay))
+            .add_systems(
+                FixedUpdate,
+                demo::jenga::drive_rods
+                    .in_set(SimSet::Gameplay)
+                    .after(demo::replay_stations),
+            )
             .add_systems(FixedUpdate, demo::replay_floaters.in_set(SimSet::Gameplay))
             .add_systems(
                 PostUpdate,

@@ -1086,6 +1086,11 @@ pub struct FootstepSound {
     /// How loud the splash's bubbles are: 1 when synthesized whole (the splash layer's weight
     /// only scales its spray), the splash weight over a recording, which has its own.
     splash_bubbles: f32,
+    /// Highest the synthesized layers may peak (0: unlimited), and the limiter's envelope and
+    /// release coefficient.
+    ceiling: f32,
+    limit_env: f32,
+    limit_release: f32,
 }
 
 impl FootstepSound {
@@ -1093,7 +1098,7 @@ impl FootstepSound {
     /// the step [`FootstepSamples::recorded`](crate::samples::FootstepSamples::recorded)
     /// returns, whose layers are only what the recording lacks).
     pub fn with_sample(fs: f32, step: &Step, sample: &StepSample) -> Self {
-        let mut me = Self::new(fs, step);
+        let mut me = Self::build(fs, step, true);
         me.splash_bubbles = step.surface.splash.min(1.0);
         let voice = SampleVoice::new(fs, sample);
         me.max_len = me.max_len.max(voice.remaining() + 64);
@@ -1102,6 +1107,11 @@ impl FootstepSound {
     }
 
     pub fn new(fs: f32, step: &Step) -> Self {
+        Self::build(fs, step, false)
+    }
+
+    /// `over_take`: the step's layers play over a recorded take, which has its own clack.
+    fn build(fs: f32, step: &Step, over_take: bool) -> Self {
         let mut rng = Noise::new(step.seed);
         let mut s = step.surface;
         let kind = step.kind;
@@ -1114,8 +1124,14 @@ impl FootstepSound {
                 s.suction *= 0.5;
             }
             ContactKind::Hoof => {
-                s.click = s.click.max(0.6) * 1.6;
-                s.hollow += 0.6;
+                // A shod hoof's clack and hollow knock, unless a recorded hoof (which has its
+                // own) plays under the layers.
+                if over_take {
+                    s.click *= 1.6;
+                } else {
+                    s.click = s.click.max(0.6) * 1.6;
+                    s.hollow += 0.6;
+                }
                 hollow_pitch *= 4.0;
                 s.scuff *= 0.5;
             }
@@ -1168,7 +1184,7 @@ impl FootstepSound {
         }
         let last = strikes[..count].iter().map(|s| s.0).max().unwrap_or(0);
         let body = if kind == ContactKind::Body { 1.6 } else { 1.0 };
-        Self {
+        let mut me = Self {
             thump: Thump::new(fs, &s, kind, &mut rng),
             click: Click::new(fs, &s, &mut rng),
             scuff: Scuff::new(fs, &s, &mut rng),
@@ -1258,6 +1274,9 @@ impl FootstepSound {
             splash_bubbles: 1.0,
             fs,
             gain: db(s.gain_db) * 0.42 * i.powf(0.8) * rng.range(0.85, 1.15),
+            ceiling: 0.0,
+            limit_env: 0.0,
+            limit_release: decay_coef(fs, HOOF_LIMIT_RELEASE_S),
             rng,
             s,
             kind,
@@ -1267,7 +1286,11 @@ impl FootstepSound {
             t: 0,
             end_after: last + (0.06 * fs) as u32,
             max_len: last + (2.5 * fs) as u32,
+        };
+        if kind == ContactKind::Hoof {
+            me.ceiling = me.gain * HOOF_CEILING;
         }
+        me
     }
 
     fn strike(&mut self, which: Strike, k: f32) {
@@ -1442,19 +1465,51 @@ impl Sound for FootstepSound {
             if let Some(sample) = &mut self.sample {
                 *o += sample.next();
             }
+            if self.ceiling > 0.0 {
+                // An instant-attack peak limiter on the whole step, recorded or synthesized
+                // (hooves, see [`HOOF_CEILING`]).
+                let a = o.abs();
+                self.limit_env = a.max(self.limit_env * self.limit_release);
+                if self.limit_env > self.ceiling {
+                    *o *= self.ceiling / self.limit_env;
+                }
+            }
             self.t += 1;
         }
         out.len()
     }
 }
 
+/// Highest a synthesized hoof may peak, relative to its gain. A shod hoof's clack is one
+/// sharp strike: unlimited it peaked 26-31 dB over its loudness (a person's step 19-28 dB),
+/// up to 5x full scale at 1 m for the trail's 500 kg horse at a walk, and drove the mixer's
+/// limiter whenever a horse walked by within about 5 m. Limited, it peaks at most 0.75 at
+/// 1 m, 16-20 dB over its loudness, and is still 5-9 dB louder than a person's step.
+const HOOF_CEILING: f32 = 0.9;
+
+/// Release of that limiter, s: it lets go before the hoof's ring, so only the clack's first
+/// milliseconds are held down.
+const HOOF_LIMIT_RELEASE_S: f32 = 0.01;
+
 /// Loudness ([`crate::samples::loudness`]) of a synthesized reference step on `surface`: a
 /// 75 kg walker at 1.4 m/s, averaged over four steps. Recorded takes are levelled to it, so a
 /// surface sounds as loud recorded as synthesized.
 pub fn reference_loudness(surface: &SurfaceSound, fs: f32) -> f32 {
+    reference_loudness_of(surface, ContactKind::Foot, 1.0, fs)
+}
+
+/// [`reference_loudness`] of a `kind` of contact (a paw, a hoof) at `intensity` (see
+/// [`Step::intensity`]), so recorded paws and hooves are levelled to their own synthesis.
+pub fn reference_loudness_of(
+    surface: &SurfaceSound,
+    kind: ContactKind,
+    intensity: f32,
+    fs: f32,
+) -> f32 {
     let mut total = 0.0;
     for seed in 1..=4u64 {
-        let step = Step::from_contact(*surface, ContactKind::Foot, 75.0, 1.4, seed * 7_919);
+        let mut step = Step::from_contact(*surface, kind, 75.0, 1.4, seed * 7_919);
+        step.intensity = intensity;
         let x = render_mono(&mut FootstepSound::new(fs, &step), 1.0, fs);
         total += crate::samples::loudness(&x, fs);
     }
@@ -1712,6 +1767,29 @@ mod tests {
             let st = Step::from_contact(s, kind, 300.0, 3.0, 4);
             let x = render_mono(&mut FootstepSound::new(FS, &st), 3.0, FS);
             assert!(peak(&x) > 0.02, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_horse_is_louder_than_a_person_but_its_hooves_never_clip() {
+        // The trail's 500 kg horse at a walk (half its weight on a landing hoof) and a 75 kg
+        // walker, on the hardest grounds, at 1 m.
+        for name in ["concrete", "rock", "metal", "wood", "grass"] {
+            let s = SurfaceSound::preset(name).unwrap();
+            let (mut hoof_peak, mut hoof, mut foot) = (0.0f32, 0.0, 0.0);
+            for seed in 0..12 {
+                let st = Step::from_contact(s, ContactKind::Hoof, 250.0, 1.7, seed);
+                let x = render_mono(&mut FootstepSound::new(FS, &st), 3.0, FS);
+                hoof_peak = hoof_peak.max(peak(&x));
+                hoof += crate::samples::loudness(&x, FS);
+                foot += crate::samples::loudness(&step(name, seed + 1), FS);
+            }
+            assert!(hoof_peak < 0.8, "{name}: a hoof peaks at {hoof_peak}");
+            let louder = 20.0 * (hoof / foot).log10();
+            assert!(
+                (3.0..12.0).contains(&louder),
+                "{name}: {louder} dB over a step"
+            );
         }
     }
 }

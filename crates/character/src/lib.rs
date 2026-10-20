@@ -8,6 +8,7 @@ pub mod demo;
 pub mod eyes;
 pub mod face;
 pub mod feature;
+pub mod hair_motion;
 pub mod headgear;
 pub mod mesh;
 pub mod morph;
@@ -15,6 +16,7 @@ pub mod mouth;
 pub mod pack;
 pub mod rig;
 pub mod shoes;
+pub mod skirt;
 pub mod sliders;
 pub mod strands;
 pub mod subdiv;
@@ -25,8 +27,8 @@ use std::sync::{Arc, Mutex};
 
 use engine_core::prelude::*;
 use engine_render::RenderAppExt;
-use engine_world::character::AppearanceBodies;
 pub use engine_world::character::CharacterQuality;
+use engine_world::character::{AppearanceBodies, BodyFit};
 
 pub use appearance::{
     Ancestry, AncestryExt, Appearance, AppearanceExt, AppearanceRequest, Beard, BeardStyle, Brows,
@@ -217,7 +219,13 @@ impl Plugin for CharacterPlugin {
             .add_systems(Startup, load_pack)
             .add_systems(
                 Update,
-                (answer_requests, poll_pack, start_builds, finish_builds)
+                (
+                    answer_requests,
+                    poll_pack,
+                    start_builds,
+                    finish_builds,
+                    hair_motion::publish_hair_guides,
+                )
                     .chain()
                     .in_set(CharacterSet),
             )
@@ -338,13 +346,18 @@ fn start_builds(
 fn finish_builds(
     mut commands: Commands,
     assets: Option<Res<HumanAssets>>,
-    q: Query<(Entity, &PendingBuild, Option<&BuiltCharacter>)>,
+    q: Query<(
+        Entity,
+        &PendingBuild,
+        Option<&BuiltCharacter>,
+        Option<&BodyFit>,
+    )>,
 ) {
     let rest = assets
         .as_ref()
         .and_then(|a| a.regions.as_ref())
         .map(|r| r.landmarks);
-    for (entity, pending, built) in &q {
+    for (entity, pending, built, fit) in &q {
         let msg = pending
             .rx
             .lock()
@@ -356,16 +369,28 @@ fn finish_builds(
                     continue;
                 };
                 let version = built.map_or(1, |b| b.version + 1);
-                commands
-                    .entity(entity)
-                    .remove::<PendingBuild>()
-                    .insert(BuiltCharacter {
-                        meshes: Arc::new(meshes),
-                        version,
-                        uniform: GpuCharacter::new(&appearance, &rest, 0),
-                        appearance,
-                        options,
-                    });
+                let mut uniform = GpuCharacter::new(&appearance, &rest, 0);
+                if let Some([thigh, knee]) = meshes.thigh {
+                    (uniform.thigh, uniform.knee) = (thigh, knee);
+                }
+                let mut e = commands.entity(entity);
+                // The person's own limb lengths, for posers that fit a skeleton to them.
+                match meshes.rig.as_ref().map(|r| r.body_fit()) {
+                    Some(f) if fit != Some(&f) => {
+                        e.insert(f);
+                    }
+                    Some(_) => {}
+                    None => {
+                        e.remove::<BodyFit>();
+                    }
+                }
+                e.remove::<PendingBuild>().insert(BuiltCharacter {
+                    meshes: Arc::new(meshes),
+                    version,
+                    uniform,
+                    appearance,
+                    options,
+                });
             }
             Err(TryRecvError::Disconnected) => {
                 tracing::warn!("character: a build stopped unexpectedly; retrying");

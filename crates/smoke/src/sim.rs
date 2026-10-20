@@ -411,6 +411,36 @@ fn deposit(
     }
 }
 
+/// Size of the wind's eddies that smoke feels, m. Near the ground the biggest eddies are
+/// about as big as their height; tens of meters is what tears and sways a fire's plume.
+const EDDY_M: f64 = 14.0;
+
+/// The wind at `p` with its eddies: the steady wind (`WindField::sample`) plus gusts that
+/// change its direction too, about `turbulence` × its speed across and along it and half that
+/// up and down (the air near the ground is never steady). The eddy pattern drifts with the
+/// wind and slowly changes as it goes, so a plume meanders, puffs and spreads.
+pub fn turbulent_wind(wind: &WindField, p: DVec3, turbulence: f32, time: f64) -> Vec3 {
+    let steady = wind.sample(p);
+    let speed = wind.prevailing.length();
+    if turbulence <= 0.0 || speed < 0.05 {
+        return steady;
+    }
+    let q = (p - wind.gust_origin - wind.prevailing.as_dvec3() * time) / EDDY_M;
+    let n = |seed: u64| {
+        let a = engine_core::math::noise::perlin3(q.x, q.y, q.z + time * 0.04, seed);
+        let b = engine_core::math::noise::perlin3(
+            q.x * 2.3 + 17.0,
+            q.y * 2.3,
+            q.z * 2.3 + time * 0.1,
+            seed + 1,
+        );
+        a + 0.45 * b
+    };
+    // Perlin noise's spread is about a third of its range.
+    let eddy = Vec3::new(n(0xEDD1), 0.5 * n(0xEDD3), n(0xEDD5)) * (3.0 * speed * turbulence);
+    steady + eddy
+}
+
 /// Run `secs` of sources and simulation at once (no bullets or blasts), e.g. so a demo
 /// starts with its smoke already built up. Volumes must exist (`SmokeDomains`).
 pub fn fast_forward(world: &mut World, secs: f32) {
@@ -422,7 +452,8 @@ pub fn fast_forward(world: &mut World, secs: f32) {
     let ambient = world.resource::<WeatherState>().temperature_c;
     let params = settings.step_params(dt, ambient);
     let mut q = world.query::<(&GlobalTransform, &mut SmokeSource)>();
-    for _ in 0..(secs / dt).ceil() as u32 {
+    let start = world.resource::<WindField>().time as f64;
+    for i in 0..(secs / dt).ceil() as u32 {
         let puffs: Vec<_> = q
             .iter_mut(world)
             .filter_map(|(gt, mut s)| run_source(&mut s, gt.translation(), dt))
@@ -431,7 +462,8 @@ pub fn fast_forward(world: &mut World, secs: f32) {
             let ground = world.resource::<Ground>();
             deposit(&mut domains, &settings, ground, ambient, puffs);
             let wind = world.resource::<WindField>();
-            let wind_fn = |p: DVec3| wind.sample(p);
+            let time = start + i as f64 * dt as f64;
+            let wind_fn = |p: DVec3| turbulent_wind(wind, p, settings.turbulence, time);
             for d in &mut domains.list {
                 d.domain.step(&params, &wind_fn);
             }
@@ -587,7 +619,7 @@ pub fn step(
         );
     }
     let params = settings.step_params(dt, weather.temperature_c);
-    let wind_fn = |p: DVec3| wind.sample(p);
+    let wind_fn = |p: DVec3| turbulent_wind(&wind, p, settings.turbulence, wind.time as f64);
     let started = std::time::Instant::now();
     let mut stepped = 0;
     for d in &mut domains.list {

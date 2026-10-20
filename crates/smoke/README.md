@@ -42,6 +42,10 @@ shadowed volumes.
   billows are added with noise (fading out with distance), the march stops at the scene's
   depth, and the result is fogged like the rest of the scene. Motion between simulation steps
   is blended so it stays smooth at any frame rate.
+- **Eddies in the wind:** the wind smoke feels has gusts that swing its direction too
+  (`SmokeSettings::turbulence`, a share of the wind's speed; 0.3 by default, half that up and
+  down), about 14 m across, drifting with the wind and slowly changing. A fire's plume
+  meanders, puffs and widens as it drifts instead of streaming off as a straight tube.
 - **Fog banks:** a `FogBank` on a `SmokeVolume` fills that volume's low ground with fog up to
   a level (`depth_m` above the lowest ground, with a soft top): valleys and hollows fill,
   hills stand out of it. The fog is chilled, white air in the same simulation, so it sinks,

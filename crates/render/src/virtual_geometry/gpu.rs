@@ -50,6 +50,9 @@ use crate::mesh_feature::MeshInstance;
 use crate::renderer::layout_entry;
 use crate::settings::RenderSettings;
 use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
+use crate::virtual_texture::system::{
+    ShaderFeatures, feedback_writes, mesh_shadow_source, mesh_source,
+};
 
 const CLUSTER_TYPES: &str = include_str!("../shaders/cluster_types.wgsl");
 const CLUSTER_CULL: &str = include_str!("../shaders/cluster_cull.wgsl");
@@ -57,8 +60,6 @@ const CLUSTER_FETCH: &str = include_str!("../shaders/cluster_fetch.wgsl");
 const CLUSTER_SCENE: &str = include_str!("../shaders/cluster.wgsl");
 const CLUSTER_SHADOW: &str = include_str!("../shaders/cluster_shadow.wgsl");
 const CLUSTER_HZB: &str = include_str!("../shaders/cluster_hzb.wgsl");
-const MESH: &str = include_str!("../shaders/mesh.wgsl");
-const MESH_SHADOW: &str = include_str!("../shaders/mesh_shadow.wgsl");
 
 /// Views culled every frame: the camera (0), the shadow cascades (1..=MAX_CASCADES), the sky
 /// occlusion map (`1 + SKY_OCCLUSION_VIEW`) and the far shadow map
@@ -499,6 +500,13 @@ struct Readback {
 /// Composed sources of the cluster shaders, before `compose_shader`: (label, source, whether
 /// they need the frame library). For shader validation.
 pub fn shader_sources() -> [(&'static str, String, bool); 4] {
+    shader_sources_for(true)
+}
+
+/// [`shader_sources`] with virtual texture feedback writes on or compiled out.
+pub fn shader_sources_for(feedback_writes: bool) -> [(&'static str, String, bool); 4] {
+    let mesh = mesh_source(feedback_writes);
+    let mesh_shadow = mesh_shadow_source(feedback_writes);
     [
         (
             "cluster_cull",
@@ -507,12 +515,18 @@ pub fn shader_sources() -> [(&'static str, String, bool); 4] {
         ),
         (
             "cluster",
-            [MESH, CLUSTER_TYPES, CLUSTER_FETCH, CLUSTER_SCENE].join("\n"),
+            [mesh.as_str(), CLUSTER_TYPES, CLUSTER_FETCH, CLUSTER_SCENE].join("\n"),
             true,
         ),
         (
             "cluster_shadow",
-            [MESH_SHADOW, CLUSTER_TYPES, CLUSTER_FETCH, CLUSTER_SHADOW].join("\n"),
+            [
+                mesh_shadow.as_str(),
+                CLUSTER_TYPES,
+                CLUSTER_FETCH,
+                CLUSTER_SHADOW,
+            ]
+            .join("\n"),
             false,
         ),
         ("cluster_hzb", CLUSTER_HZB.to_string(), false),
@@ -534,9 +548,13 @@ pub struct ClusterRenderer {
     cull_late_finish: wgpu::ComputePipeline,
     hzb_from_depth: wgpu::ComputePipeline,
     hzb_reduce: wgpu::ComputePipeline,
-    /// Scene and prepass pipelines, indexed by double-sided.
-    scene: [wgpu::RenderPipeline; 2],
-    prepass: [wgpu::RenderPipeline; 2],
+    /// Scene and prepass pipelines, indexed by double-sided: created the first frame that
+    /// draws clusters (most scenes never do, and each is a large shader to compile).
+    scene: Option<ScenePipelines>,
+    /// What they are created from.
+    scene_shader: wgpu::ShaderModule,
+    scene_layout: wgpu::PipelineLayout,
+    features: ShaderFeatures,
     shadow: wgpu::RenderPipeline,
 
     vertices: Pool,
@@ -594,13 +612,81 @@ pub struct ClusterRenderer {
     stats: ClusterStats,
 }
 
+/// Scene and prepass pipelines, each single- and double-sided.
+type ScenePipelines = ([wgpu::RenderPipeline; 2], [wgpu::RenderPipeline; 2]);
+
+/// The cluster scene and prepass pipelines, with the mesh shader's optional parts in
+/// `features`.
+fn scene_pipelines(
+    gpu: &GpuShared,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    features: ShaderFeatures,
+) -> ScenePipelines {
+    let device = &gpu.device;
+    let constants = features.mesh_constants();
+    let compilation = wgpu::PipelineCompilationOptions {
+        constants: &constants,
+        ..Default::default()
+    };
+    let prepass_targets = gpu.prepass_targets();
+    let scene_targets = [Some(wgpu::ColorTargetState {
+        format: gpu.formats.hdr,
+        blend: None,
+        write_mask: wgpu::ColorWrites::ALL,
+    })];
+    // Mirrored instances swap two corners of every triangle (cluster_fetch.wgsl), so front
+    // faces are always counter-clockwise.
+    let render_pipeline = |double: bool, prepass: bool| {
+        let (vs, fs, targets): (_, _, &[Option<wgpu::ColorTargetState>]) = if prepass {
+            ("vs_cluster_prepass", "fs_prepass", &prepass_targets)
+        } else {
+            ("vs_cluster", "fs_main", &scene_targets)
+        };
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(if prepass {
+                "cluster prepass"
+            } else {
+                "cluster"
+            }),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some(vs),
+                compilation_options: compilation.clone(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: if double { None } else { Some(wgpu::Face::Back) },
+                ..Default::default()
+            },
+            depth_stencil: Some(gpu.depth_state(true)),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some(fs),
+                compilation_options: compilation.clone(),
+                targets,
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
+    };
+    (
+        [render_pipeline(false, false), render_pipeline(true, false)],
+        [render_pipeline(false, true), render_pipeline(true, true)],
+    )
+}
+
 impl ClusterRenderer {
     /// Create the pipelines. `material_layout` and `texture_layout` are the mesh feature's
-    /// groups 1 and 2, shared with the instanced path.
+    /// groups 1 and 2, shared with the instanced path; `features` the mesh shader's optional
+    /// parts (`set_shader_features` changes them).
     pub fn new(
         gpu: &GpuShared,
         material_layout: &wgpu::BindGroupLayout,
         texture_layout: &wgpu::BindGroupLayout,
+        features: ShaderFeatures,
     ) -> Self {
         let device = &gpu.device;
         let storage = |read_only| wgpu::BindingType::Buffer {
@@ -650,7 +736,8 @@ impl ClusterRenderer {
                 .collect::<Vec<_>>(),
         });
 
-        let [cull_source, scene_source, shadow_source, hzb_source] = shader_sources();
+        let [cull_source, scene_source, shadow_source, hzb_source] =
+            shader_sources_for(feedback_writes(gpu));
         let cull_shader = gpu.shader("cluster cull", &cull_source.1, false);
         let with_dispatch = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("cluster cull"),
@@ -706,51 +793,6 @@ impl ClusterRenderer {
             ],
             immediate_size: 0,
         });
-        let prepass_targets = gpu.prepass_targets();
-        let scene_targets = [Some(wgpu::ColorTargetState {
-            format: gpu.formats.hdr,
-            blend: None,
-            write_mask: wgpu::ColorWrites::ALL,
-        })];
-        // Mirrored instances swap two corners of every triangle (cluster_fetch.wgsl), so front
-        // faces are always counter-clockwise.
-        let render_pipeline = |double: bool, prepass: bool| {
-            let (vs, fs, targets): (_, _, &[Option<wgpu::ColorTargetState>]) = if prepass {
-                ("vs_cluster_prepass", "fs_prepass", &prepass_targets)
-            } else {
-                ("vs_cluster", "fs_main", &scene_targets)
-            };
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(if prepass {
-                    "cluster prepass"
-                } else {
-                    "cluster"
-                }),
-                layout: Some(&scene_layout),
-                vertex: wgpu::VertexState {
-                    module: &scene_shader,
-                    entry_point: Some(vs),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState {
-                    cull_mode: if double { None } else { Some(wgpu::Face::Back) },
-                    ..Default::default()
-                },
-                depth_stencil: Some(gpu.depth_state(true)),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &scene_shader,
-                    entry_point: Some(fs),
-                    compilation_options: Default::default(),
-                    targets,
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-        let scene = [render_pipeline(false, false), render_pipeline(true, false)];
-        let prepass = [render_pipeline(false, true), render_pipeline(true, true)];
 
         let shadow_shader = gpu.shader("cluster shadow", &shadow_source.1, false);
         let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -828,8 +870,10 @@ impl ClusterRenderer {
             cull_late_finish,
             hzb_from_depth,
             hzb_reduce,
-            scene,
-            prepass,
+            scene: None,
+            scene_shader,
+            scene_layout,
+            features,
             shadow,
             vertices: Pool::new(device, "cluster vertices", 48, 4096),
             indices: Pool::new(device, "cluster indices", 4, 16384),
@@ -888,6 +932,13 @@ impl ClusterRenderer {
 
     /// Start of a frame's prepare: upload finished builds, release unused meshes, collect
     /// counters from earlier frames.
+    /// Recreates the scene and prepass pipelines (when next needed) with the mesh shader's
+    /// optional parts in `features`.
+    pub fn set_shader_features(&mut self, features: ShaderFeatures) {
+        self.features = features;
+        self.scene = None;
+    }
+
     pub fn begin_frame(&mut self, gpu: &GpuShared) {
         self.frame += 1;
         self.pending.clear();
@@ -1456,6 +1507,14 @@ impl ClusterRenderer {
             ));
         }
         self.slots = slots;
+        if self.scene.is_none() {
+            self.scene = Some(scene_pipelines(
+                gpu,
+                &self.scene_shader,
+                &self.scene_layout,
+                self.features,
+            ));
+        }
         self.active = true;
         // Prepass and scene per bucket, one per shadow view.
         self.stats.draw_calls =
@@ -1624,7 +1683,9 @@ impl ClusterRenderer {
         pass: &mut wgpu::RenderPass<'_>,
         textures: impl Fn(u32) -> Option<&'a wgpu::BindGroup>,
     ) {
-        self.draw_camera(pass, &self.prepass, textures, 0);
+        if let Some((_, prepass)) = &self.scene {
+            self.draw_camera(pass, prepass, textures, 0);
+        }
     }
 
     /// Draw the clusters occlusion culling found visible late into the prepass (after
@@ -1634,8 +1695,10 @@ impl ClusterRenderer {
         pass: &mut wgpu::RenderPass<'_>,
         textures: impl Fn(u32) -> Option<&'a wgpu::BindGroup>,
     ) {
-        if self.late {
-            self.draw_camera(pass, &self.prepass, textures, self.late_first);
+        if self.late
+            && let Some((_, prepass)) = &self.scene
+        {
+            self.draw_camera(pass, prepass, textures, self.late_first);
         }
     }
 
@@ -1645,9 +1708,12 @@ impl ClusterRenderer {
         pass: &mut wgpu::RenderPass<'_>,
         textures: impl Fn(u32) -> Option<&'a wgpu::BindGroup>,
     ) {
-        self.draw_camera(pass, &self.scene, &textures, 0);
+        let Some((scene, _)) = &self.scene else {
+            return;
+        };
+        self.draw_camera(pass, scene, &textures, 0);
         if self.late {
-            self.draw_camera(pass, &self.scene, &textures, self.late_first);
+            self.draw_camera(pass, scene, &textures, self.late_first);
         }
     }
 

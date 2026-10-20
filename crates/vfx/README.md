@@ -82,6 +82,12 @@ deep in and orange at its surface, and chars to dark, sunlit soot from the creas
 its life. `explosion.large` throws a dozen or so of them up and out, and the fireball spell's
 impact a smaller handful, with the smoke rising only once the fire has burnt through.
 
+The same sprite flies with the fireball spell: `spell.fireball` is a ball of rolling fire round
+a white-hot heart, shedding burning gas in flight that swells, rises and chars, so its tail runs
+from fire at the ball to smoke further back. `spell.frost_bolt` is a ball of cold, crackling
+light (the `plasma` sprite) on a thin bright trail, with glinting frost, tumbling shards and a
+faint mist. `--example bolts` renders both flying past side on.
+
 The court's fountain is a jet of water, not a cloud of drops. The `jet` sprite draws a glassy
 rod rising from the nozzle, clear in the middle and mirroring the sky at its edges, streaked as
 it flows and breaking into beads where it turns over; fine drops rain back around it into the
@@ -114,10 +120,11 @@ night.
 
 Splashes are water, not white puffs. The `crown` sprite ray traces the splash's crown inside
 its square: a wall of water thrown up in a ring that flares out, its rim drawn into fingers
-with a bead on each tip, then tears open and slumps while the jet shoots up from the middle. It
+with a bead on each tip, then tears open and slumps while the jet (a short `jet` rod with a few
+fine drops breaking off its top) shoots up from the middle and sinks back. It
 mirrors the sky at a glance, glints in the sun and whitens only where it froths. `ripple`
 bends the water behind it in a train of wavelets and catches the sky on their crests, and
-`foam` floats a lace of bubbles that breaks up over a few seconds (an even whiteness when too
+`foam` floats a lace of bubbles that breaks up over a few seconds (a thin pale film when too
 far away to show its bubbles). Both ride the surface in the effect's own space, so the air
 neither holds them up nor lets them sink.
 
@@ -220,8 +227,8 @@ keeps its color at night instead of turning white.
 `cargo run -p engine_vfx --release --example sub_emitters` renders the firework and the
 splitting sparks; `--example braziers` renders the brazier fires, `--example engines` every
 exhaust side on and a rocket lifting off (add `vacuum` to take the air away), `--example splashes` the splashes, `--example explosions` the explosions close up
-as they unfold, `--example fountain`, `--example aura` and `--example orbs` the fountain, the healing aura and
-the charge and orb, and `--example court` the whole court, each by day, at dusk and at night.
+as they unfold, `--example bolts` the spells in flight, `--example fountain`, `--example aura`
+and `--example orbs` the fountain, the healing aura and the charge and orb, and `--example court` the whole court, each by day, at dusk and at night.
 
 ## Next
 

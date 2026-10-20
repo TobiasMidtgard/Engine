@@ -100,16 +100,30 @@ fn cloud_density(p: vec3<f32>, h: f32, w: vec4<f32>, with_detail: bool) -> f32 {
     let family = textureSampleLevel(shape_noise, linear_repeat, np * 0.55 + vec3(0.71, 0.29, 0.13), 0.0).g;
     let heaped = smoothstep(0.3, 0.5, w.g) * (1.0 - smoothstep(0.6, 0.8, w.g)) * (1.0 - smoothstep(0.6, 0.85, w.r));
     let tower = smoothstep(0.55, 0.9, w.g);
+    // Towers boil up in turrets half a kilometer to two across, far smaller than the
+    // billows: they bulge from the flanks and stand on the top. Without them a storm cell
+    // was one smooth egg, its outline the weather map's soft blob filled solid.
+    var turret = 0.5;
+    if (tower > 0.0) {
+        let s2 = textureSampleLevel(shape_noise, linear_repeat, np * 2.0 + vec3(0.17, 0.53, 0.91), 0.0);
+        turret = s2.g * 0.7 + s2.b * 0.3;
+    }
     // Towers narrow as they climb, then spread into an anvil under the tropopause.
     let anvil = smoothstep(0.75, 1.0, w.g) * smoothstep(0.72, 0.92, h01);
-    var cov = w.r * (0.72 + 0.56 * lump) * mix(1.0, 0.75 + 0.65 * smoothstep(0.3, 0.75, family), heaped) - tower * 0.3 * smoothstep(0.1, 0.7, h01) + anvil * 0.55 * smoothstep(0.4, 0.8, w.r);
+    var cov = w.r * (0.72 + 0.56 * lump) * mix(1.0, 0.75 + 0.65 * smoothstep(0.3, 0.75, family), heaped)
+        - tower * 0.3 * smoothstep(0.1, 0.7, h01) + anvil * 0.55 * smoothstep(0.4, 0.8, w.r);
+    // Even a tower's core never fills solid: where the turret noise is low the cover drops
+    // to a third, so the shape noise carves the gaps between turrets right into the flanks.
     cov = saturate(cov);
-    if (cov <= 0.002) { return 0.0; }
+    // The carve moves the outline only: what stands keeps the tower's full density, so the
+    // storm still shades the valley.
+    let carved = cov * mix(1.0, 0.35 + 0.9 * smoothstep(0.3, 0.7, turret), tower);
+    if (carved <= 0.002) { return 0.0; }
     let s = textureSampleLevel(shape_noise, linear_repeat, np, 0.0);
     // Heaped clouds end in cauliflower tops, not one smooth dome: the top sinks between
     // the billows.
     let billows = s.g * 0.7 + s.b * 0.3;
-    let hb = h01 + smoothstep(0.35, 0.9, w.g) * 0.35 * (0.7 - billows);
+    let hb = h01 + smoothstep(0.35, 0.9, w.g) * 0.35 * (0.7 - billows) + tower * 0.12 * (0.65 - turret);
     if (hb >= 1.0) { return 0.0; }
     // Raining decks (nimbostratus, the bases of storms) hang in ragged lumps instead of one
     // flat ceiling; fair-weather heaps keep their flat bases.
@@ -119,7 +133,7 @@ fn cloud_density(p: vec3<f32>, h: f32, w: vec4<f32>, with_detail: bool) -> f32 {
     let profile = height_profile(saturate(hb), w.g) * smoothstep(carve, carve + 0.06, h01);
     let fbm = s.g * 0.625 + s.b * 0.25 + s.a * 0.125;
     let shape = remap(s.r, fbm - 1.0, 1.0, 0.0, 1.0);
-    var d = saturate(remap(shape * profile, 1.0 - cov, 1.0, 0.0, 1.0)) * cov;
+    var d = saturate(remap(shape * profile, 1.0 - carved, 1.0, 0.0, 1.0)) * cov;
     if (d <= 0.0) { return 0.0; }
     if (with_detail) {
         let dp = (p + clouds.detail.xyz) / clouds.params.y;
@@ -339,8 +353,16 @@ fn march_clouds(dir: vec3<f32>, steps: i32, light_steps: i32, jitter: f32) -> Cl
             // The blue sky over the top diffuses down through a thick deck like the sun does
             // (the last term): without it an overcast's underside took only the sun's color
             // and a snowfall looked beige.
+            // The sky's light comes from above: under a turret's overhang and down in the folds
+            // between billows the cloud overhead hides most of it, while the tops see it all.
+            // On a face turned from the sun that is all the relief there is: without it a storm
+            // tower's shaded side was one smooth dark dome.
+            let up = normalize(p - frame.planet.xyz);
+            let above = cloud_density(p + up * 120.0, h + 120.0, w, false)
+                + cloud_density(p + up * 360.0, h + 360.0, w, false);
+            let sky_seen = mix(0.3, 1.0, exp(-1.5 * above));
             var s = key * light * powder * mix(belly, 1.0, 0.4)
-                + mix(ground_below, sky, sqrt(h01)) * belly * (0.5 + 0.5 * h01) + fill
+                + mix(ground_below, sky * sky_seen, sqrt(h01)) * belly * (0.5 + 0.5 * h01) + fill
                 + sky * (1.0 - sqrt(h01)) * mix(belly, 1.0, 0.4) / (1.0 + 0.11 * od);
             // Lightning lights the cloud from inside: the light diffuses through kilometers of
             // droplets, so the whole cloud base around the channel glows.

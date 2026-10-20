@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Fast checks for the crates a change touches, to run before pushing to main.
+
+    scripts/quick-check          # fmt, clippy and unit tests of the touched crates
+    scripts/quick-check --full   # also their integration tests (tests/*.rs, render tests)
+    scripts/quick-check -n       # only print what it would run
+
+"Touched" is every file changed since this branch left origin/main, committed or not. A change
+to a core crate (engine_core, engine_world, engine) or to the workspace's Cargo files also
+lints the whole workspace, so a contract change can't break another module's build unseen.
+CI on main still runs every test; this is the quick path (AGENTS.md, "Build & test").
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+CORE = {"engine_core", "engine_world", "engine"}
+WORKSPACE_FILES = {"Cargo.toml", "Cargo.lock", "rust-toolchain.toml"}
+
+
+def git(*args):
+    return subprocess.run(["git", *args], capture_output=True, text=True).stdout
+
+
+def changed_files():
+    base = git("merge-base", "HEAD", "origin/main").strip() or "HEAD~1"
+    files = set(git("diff", "--name-only", base).split())
+    for line in git("status", "--porcelain", "--untracked-files=all").splitlines():
+        files.add(line[3:].split(" -> ")[-1])
+    return sorted(f for f in files if f)
+
+
+def main():
+    full = "--full" in sys.argv
+    dry = "-n" in sys.argv
+    root = git("rev-parse", "--show-toplevel").strip()
+    os.chdir(root)
+    meta = json.loads(
+        subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    )
+    packages = []
+    for p in meta["packages"]:
+        rel = os.path.relpath(os.path.dirname(p["manifest_path"]), root)
+        kinds = {k for t in p["targets"] for k in t["kind"]}
+        packages.append((rel + "/", p["name"], kinds))
+    packages.sort(key=lambda p: -len(p[0]))
+
+    touched, whole = {}, False
+    for f in changed_files():
+        if f in WORKSPACE_FILES:
+            whole = True
+        for prefix, name, kinds in packages:
+            if f.startswith(prefix):
+                touched[name] = kinds
+                break
+    whole = whole or bool(CORE & touched.keys())
+    if not touched and not whole:
+        print("quick-check: no crate changed, nothing to build")
+        return 0
+
+    steps = [["cargo", "fmt", "--all", "--check"]]
+    lint = ["--workspace"] if whole else [a for n in sorted(touched) for a in ("-p", n)]
+    steps.append(["cargo", "clippy", *lint, "--all-targets", "--", "-D", "warnings"])
+    for name in sorted(touched):
+        kinds = touched[name]
+        if full:
+            steps.append(["cargo", "test", "-p", name])
+        elif "lib" in kinds or "rlib" in kinds or "proc-macro" in kinds:
+            steps.append(["cargo", "test", "-p", name, "--lib"])
+        elif "bin" in kinds:
+            steps.append(["cargo", "test", "-p", name, "--bins"])
+
+    for step in steps:
+        print("+", " ".join(step), flush=True)
+        if not dry and subprocess.run(step).returncode != 0:
+            print("quick-check: failed:", " ".join(step), file=sys.stderr)
+            return 1
+    print("quick-check: ok" if not dry else "quick-check: dry run")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
