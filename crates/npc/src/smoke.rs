@@ -6,10 +6,11 @@
 //! The canister's gas goes out as a [`SmokeEmission`] when a smoke module is installed (it
 //! registers the "smoke" [`Obscurance`] source and simulates the cloud). Without one, the NPC
 //! module keeps a plain cloud of its own (a ball that swells, hangs and thins out) under the
-//! "npc_smoke" source, so sight dims all the same, and draws it as a few soft grey puffs.
+//! "npc_smoke" source, so sight dims all the same, and draws it as many faint grey puffs.
 
 use std::sync::Arc;
 
+use engine_core::math::hash_u64;
 use engine_core::prelude::*;
 use engine_render::{AlphaMode, MeshRenderer, Shape, StandardMaterial};
 use engine_world::{Obscurance, ObscuranceQuery, SmokeEmission};
@@ -113,6 +114,13 @@ impl ObscuranceQuery for Balls {
     }
 }
 
+/// How long a canister gives off gas into a smoke module (s), and how fast (kg/s): about
+/// a quarter of a kilogram in all, enough for a cloud a few meters across that nothing sees
+/// through at its heart and that thins out towards its edge (more piles up into a bank that
+/// buries the whole fight). A light grey, not steam white.
+const EMIT_SECS: f64 = 3.0;
+const EMIT_KG_S: f32 = 0.08;
+
 /// Pops the canisters that land, and keeps the clouds' sight up to date.
 pub(crate) fn smoke_clouds(
     mut clouds: ResMut<SmokeClouds>,
@@ -128,16 +136,16 @@ pub(crate) fn smoke_clouds(
     let mut balls = Vec::new();
     for c in &mut clouds.clouds {
         let age = now - c.thrown - FLIGHT_SECS;
-        if module && (0.0..4.0).contains(&age) {
+        if module && (0.0..EMIT_SECS).contains(&age) {
             // A smoke module's cloud from the canister's gas, the first few seconds.
             c.emitted = true;
             emit.write(SmokeEmission {
                 position: c.at + DVec3::Y * 0.2,
                 velocity: Vec3::Y * 0.6,
                 radius: 0.6,
-                mass_kg: 0.25 * time.delta_secs(),
+                mass_kg: EMIT_KG_S * time.delta_secs(),
                 temperature_c: 60.0,
-                darkness: 0.1,
+                darkness: 0.25,
             });
         }
         if !c.emitted
@@ -156,31 +164,39 @@ pub(crate) fn smoke_clouds(
     }
 }
 
-/// One shell of one puff of a cloud the NPC module keeps itself. A puff is a few faint grey
-/// balls one inside the other, so it is thick in the middle and thins out to its edge.
+/// One shell of one puff of a cloud the NPC module keeps itself: a faint grey ball, one of
+/// many.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct CloudPuff {
     cloud: u32,
-    n: usize,
-    shell: usize,
+    n: u32,
+    shell: u8,
 }
 
-/// Where a cloud's puffs sit (offsets and sizes, in its radius): a low, lumpy heap.
-const PUFFS: [(Vec3, f32); 8] = [
-    (Vec3::new(0.0, -0.05, 0.0), 0.7),
-    (Vec3::new(0.5, -0.25, 0.2), 0.5),
-    (Vec3::new(-0.45, -0.2, -0.25), 0.55),
-    (Vec3::new(0.15, 0.3, -0.3), 0.45),
-    (Vec3::new(-0.25, -0.3, 0.45), 0.5),
-    (Vec3::new(0.3, -0.3, -0.5), 0.42),
-    (Vec3::new(-0.55, -0.35, 0.2), 0.4),
-    (Vec3::new(-0.1, 0.25, 0.3), 0.42),
-];
+/// Puffs in a cloud. Many small, very faint ones (the cloud's thickness is how many overlap
+/// along a line of sight) rather than a few big ones, which read as balls.
+pub const PUFF_COUNT: u32 = 48;
 
-/// A puff's shells, outermost first (in its size).
-const SHELLS: [f32; 3] = [1.0, 0.8, 0.58];
+/// Each puff is a few nested balls (their radii, of the puff's), so it fades out towards its
+/// rim instead of ending in a hard edge.
+const PUFF_SHELLS: [f32; 3] = [1.0, 0.72, 0.45];
 
-/// Draws the clouds the NPC module keeps itself (a smoke module draws its own).
+/// How faint each ball is, from the cloud's middle out to its edge (alpha).
+const PUFF_ALPHA: [f32; 3] = [0.045, 0.03, 0.018];
+
+/// Where puff `n` of cloud `id` sits in it: its direction from the middle (flattened, a low
+/// heap), how far out (0..1, of the cloud's radius), and a phase for its drift.
+fn puff_place(id: u32, n: u32) -> (Vec3, f32, f32) {
+    let h = hash_u64(u64::from(id) << 16 | u64::from(n));
+    let u = |k: u32| ((h >> (k * 16)) & 0xffff) as f32 / 65535.0;
+    let (a, z) = (u(0) * std::f32::consts::TAU, u(1) * 2.0 - 1.0);
+    let ring = (1.0 - z * z).sqrt();
+    let dir = Vec3::new(ring * a.cos(), z * 0.55 - 0.15, ring * a.sin());
+    (dir, u(2).sqrt(), u(3) * std::f32::consts::TAU)
+}
+
+/// Draws the clouds the NPC module keeps itself (a smoke module draws its own): many faint
+/// puffs, bigger and fainter towards the edge, drifting and rising a little as it hangs.
 pub(crate) fn show_clouds(
     mut commands: Commands,
     clouds: Res<SmokeClouds>,
@@ -194,10 +210,18 @@ pub(crate) fn show_clouds(
         let cloud = clouds.clouds.iter().find(|c| c.id == p.cloud);
         match cloud.and_then(|c| size(c).map(|s| (c, s))) {
             Some((c, (r, k))) => {
-                let (off, scale) = PUFFS[p.n];
-                let r = r as f32 * (0.5 + 0.5 * k / CLOUD_EXTINCTION);
-                t.translation = c.at + DVec3::Y * 0.8 + (off * r).as_dvec3();
-                t.scale = Vec3::new(1.0, 0.85, 1.0) * (r * scale * SHELLS[p.shell]);
+                let r = r as f32;
+                let age = (now - c.thrown - FLIGHT_SECS) as f32;
+                let (dir, out, phase) = puff_place(c.id, p.n);
+                let drift = Vec3::new(
+                    (age * 0.35 + phase).sin(),
+                    (age * 0.04).min(0.5),
+                    (age * 0.3 + phase * 1.7).cos(),
+                ) * (0.3 * r);
+                t.translation = c.at + DVec3::Y * 0.8 + (dir * out * r * 0.85 + drift).as_dvec3();
+                let thin = 0.6 + 0.4 * k / CLOUD_EXTINCTION;
+                let shell = PUFF_SHELLS[usize::from(p.shell)];
+                t.scale = Vec3::splat(r * (0.18 + 0.34 * out) * thin * shell);
                 have.push(p.cloud);
             }
             None => commands.entity(e).despawn(),
@@ -207,18 +231,20 @@ pub(crate) fn show_clouds(
         if have.contains(&c.id) {
             continue;
         }
-        let haze = StandardMaterial {
-            base_color: [0.7, 0.7, 0.68, 0.17],
+        let haze = PUFF_ALPHA.map(|a| StandardMaterial {
+            base_color: [0.7, 0.7, 0.68, a],
             alpha_mode: AlphaMode::Blend,
             perceptual_roughness: 1.0,
             ..Default::default()
-        };
-        for n in 0..PUFFS.len() {
-            for shell in 0..SHELLS.len() {
-                let ball = Shape::Sphere {
-                    radius: 1.0,
-                    segments: 16,
-                };
+        });
+        for n in 0..PUFF_COUNT {
+            let (_, out, _) = puff_place(c.id, n);
+            let tier = ((out * PUFF_ALPHA.len() as f32) as usize).min(PUFF_ALPHA.len() - 1);
+            let ball = Shape::Sphere {
+                radius: 1.0,
+                segments: 12,
+            };
+            for shell in 0..PUFF_SHELLS.len() as u8 {
                 commands.spawn((
                     CloudPuff {
                         cloud: c.id,
@@ -226,7 +252,7 @@ pub(crate) fn show_clouds(
                         shell,
                     },
                     Transform::from_translation(c.at).with_scale(Vec3::ZERO),
-                    MeshRenderer::new(ball, haze).without_shadows(),
+                    MeshRenderer::new(ball.clone(), haze[tier].clone()).without_shadows(),
                 ));
             }
         }

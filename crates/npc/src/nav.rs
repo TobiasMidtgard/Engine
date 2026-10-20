@@ -417,7 +417,8 @@ impl NavCtx<'_> {
         };
         if !win.walk[si] || (win.h[si] - from.y).abs() > 1.2 {
             // Standing next to a wall (inside the clearance margin): start from the nearest
-            // walkable cell on the same level.
+            // walkable cell on the same level, one a step from its feet before one on top of
+            // the barrel or crate it stands beside (it can't get up there).
             let mut best: Option<(i32, usize)> = None;
             for dz in -4..=4 {
                 for dx in -4..=4 {
@@ -425,7 +426,8 @@ impl NavCtx<'_> {
                         && win.walk[i]
                         && (win.h[i] - from.y).abs() <= 1.2
                     {
-                        let d2 = dx * dx + dz * dz;
+                        let off_level = (win.h[i] - from.y).abs() > s.max_step as f64;
+                        let d2 = dx * dx + dz * dz + if off_level { 100 } else { 0 };
                         if best.is_none_or(|b| d2 < b.0) {
                             best = Some((d2, i));
                         }
@@ -867,6 +869,42 @@ mod tests {
             path.iter().any(|p| p.z > 3.5 && p.y < 1.4),
             "path should use the ramp: {path:?}"
         );
+    }
+
+    #[test]
+    fn a_path_starts_on_the_ground_beside_a_barrel() {
+        // Pressed against a barrel by a wall's end (inside the clearance margin): the nearest
+        // free cell is the barrel's top, a meter up, but the way out is along the ground.
+        let barrel = Obstacle::new(
+            Entity::from_raw_u32(2).unwrap(),
+            DVec3::new(1.8, 0.5, 11.2),
+            Quat::IDENTITY,
+            ObstacleShape::Cylinder {
+                radius: 0.32,
+                half_height: 0.5,
+            },
+        );
+        let world = TacticalWorld::from_obstacles(
+            vec![
+                wall(
+                    1,
+                    DVec3::new(0.0, 0.55, 10.5),
+                    Vec3::new(1.6, 0.55, 0.25),
+                    Quat::IDENTITY,
+                ),
+                barrel,
+            ],
+            &Ground::default(),
+        );
+        let mut grid = NavGrid::default();
+        let (ground, water) = (Ground::default(), Water::default());
+        let mut ctx = grid.ctx(&world, &ground, &water);
+        let mut path = Vec::new();
+        let from = DVec3::new(1.67, 0.0, 11.99);
+        let to = DVec3::new(-10.0, 0.0, -3.8);
+        let status = ctx.find_path(from, to, &mut |_| 0.0, &mut path);
+        assert_eq!(status, PathStatus::Complete, "{path:?}");
+        assert!(path.iter().all(|p| p.y < 0.2), "{path:?}");
     }
 
     #[test]

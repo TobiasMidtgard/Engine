@@ -121,6 +121,49 @@ fn aim(app: &mut App, cam: Entity, eye: DVec3, target: DVec3) {
         Transform::from_translation(eye).looking_at(target, Vec3::Y);
 }
 
+/// Where around `at`, `r` m off (flat), a camera sees it from outside any smoke cloud and from
+/// the side away from it (so the cloud hangs behind the subject, not in front): of the spots
+/// clear of the clouds, the one `prefer` (of the flat direction from `at`) likes best.
+fn clear_of_smoke(app: &App, at: DVec3, r: f64, prefer: impl Fn(DVec3) -> f64) -> DVec3 {
+    let clouds = &app
+        .world
+        .resource::<engine_npc::smoke::SmokeClouds>()
+        .clouds;
+    let flat = |p: DVec3, q: DVec3| DVec2::new(p.x - q.x, p.z - q.z);
+    // The puffs reach past the cloud's radius (their own size and drift).
+    let clear = |p: DVec3| {
+        clouds
+            .iter()
+            .all(|c| flat(p, c.at).length() > engine_npc::smoke::CLOUD_RADIUS * 1.6)
+    };
+    let away = |d: DVec3| -> f64 {
+        clouds
+            .iter()
+            .map(|c| flat(at, c.at).normalize_or_zero().dot(DVec2::new(d.x, d.z)))
+            .sum()
+    };
+    let around = (0..24).map(|k| {
+        let a = k as f64 / 24.0 * std::f64::consts::TAU;
+        DVec3::new(a.cos(), 0.0, a.sin())
+    });
+    let mut best: Option<(f64, DVec3)> = None;
+    for d in around {
+        // As near as it can, out to twice as far.
+        let Some(p) = [1.0, 1.25, 1.5, 1.75, 2.0]
+            .into_iter()
+            .map(|k| at + d * r * k)
+            .find(|&p| clear(p))
+        else {
+            continue;
+        };
+        let score = prefer(d) + away(d) - 0.25 * p.distance(at) / r;
+        if best.is_none_or(|(b, _)| score > b) {
+            best = Some((score, p));
+        }
+    }
+    best.map_or(at + DVec3::new(0.0, 0.0, r), |(_, p)| p)
+}
+
 /// Which way `e`'s chest faces, flat (its stand-in's, else its own).
 fn facing(app: &App, e: Entity) -> DVec3 {
     let f = part(app, e, Part::Torso).map_or_else(
@@ -519,7 +562,7 @@ fn fighters_revive_kneel_closeup() {
     app.update_n((1.5 / STEP) as usize);
     hit(&mut app, ally, 1000.0);
     // Two sides of it, set once it starts to get down: from its right, and from across the
-    // mate, looking at it over the chest.
+    // mate on its left, looking down at its face over the chest.
     let mut cams: Option<[Entity; 2]> = None;
     let mut pictures: [[Picture; 3]; 2] = Default::default();
     let (mut t, mut clear, mut on_chest) = (0.0f64, f64::MAX, f64::MAX);
@@ -553,9 +596,9 @@ fn fighters_revive_kneel_closeup() {
                 ),
                 camera(
                     &mut app,
-                    chest + d * 1.9 + DVec3::new(-d.z, 0.0, d.x) * 0.7 + DVec3::Y * 1.2,
-                    mid + DVec3::Y * 0.1,
-                    36.0,
+                    chest + d * 1.9 - DVec3::new(-d.z, 0.0, d.x) * 1.2 + DVec3::Y * 1.7,
+                    mid - d * 0.15 + DVec3::Y * 0.15,
+                    44.0,
                 ),
             ]
         });
@@ -731,6 +774,7 @@ fn fighters_medic_revives_under_covering_fire() {
     let mut close_shots: [Picture; 2] = Default::default();
     let (mut t, mut knelt_at, mut fired_from, mut screened) = (0.0f64, None, None, false);
     let mut fired = 0;
+    let mut up_since: Option<f64> = None;
     while t < 16.0 {
         app.update();
         t += STEP;
@@ -777,17 +821,14 @@ fn fighters_medic_revives_under_covering_fire() {
             );
         }
         if going && progress > 0.5 {
-            // The close-up: from its left, a little ahead, at the height of its arm.
+            // The close-up: on its left (its armband), from outside the smoke.
             if close_shots[0].is_none() {
                 let m = at(&app, medic);
+                let mid = (m * 2.0 + at(&app, ally)) / 3.0;
                 let f = facing(&app, medic);
                 let left = DVec3::new(f.z, 0.0, -f.x);
-                aim(
-                    &mut app,
-                    close,
-                    m + left * 1.5 + f * 0.6 + DVec3::Y * 0.9,
-                    m + DVec3::Y * 0.55,
-                );
+                let eye = clear_of_smoke(&app, mid, 3.0, |d| d.dot(left) + 0.3 * d.dot(f));
+                aim(&mut app, close, eye + DVec3::Y * 1.1, mid + DVec3::Y * 0.5);
             }
             take(
                 &mut app,
@@ -804,15 +845,17 @@ fn fighters_medic_revives_under_covering_fire() {
                 format!("{t:.1} S: HANDS ON, COVERED"),
             );
         }
-        if !downed(&app, ally) {
+        // Both on their feet: the patient takes a moment to get up off the ground.
+        if up_since.is_none() && !downed(&app, ally) {
+            up_since = Some(t);
+        }
+        if up_since.is_some_and(|u| t >= u + NpcBrain::GET_UP_SECS + 0.2) {
             if close_shots[1].is_none() {
-                let m = at(&app, medic);
-                aim(
-                    &mut app,
-                    close,
-                    m + DVec3::new(-2.6, 1.6, 2.4),
-                    m + DVec3::Y * 0.8,
-                );
+                let (m, a) = (at(&app, medic), at(&app, ally));
+                let mid = (m + a) * 0.5;
+                // From behind a shoulder, the smoke they got up in ahead of them.
+                let eye = clear_of_smoke(&app, mid, 3.4, |d| 0.5 * d.x.abs());
+                aim(&mut app, close, eye + DVec3::Y * 1.3, mid + DVec3::Y * 0.9);
             }
             take(
                 &mut app,

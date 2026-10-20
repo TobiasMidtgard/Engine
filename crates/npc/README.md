@@ -33,7 +33,8 @@ change. A grid cell is walkable only with no obstacle side within the agent radi
 rises more than a step and starts below head height, so paths keep clear of wall ends and pinches
 instead of running into them (a tilted ramp counts from its lowest corner, so the way under its
 high end is not taken); a goal just inside that clearance (a cover spot by a wall) is still
-reached with a last straight step. When a physics backend is installed, sight and shot checks
+reached with a last straight step, and a body standing inside it starts from the nearest free
+cell at its own level (not the top of the barrel beside it). When a physics backend is installed, sight and shot checks
 also use `PhysicsQueries`.
 
 ## Wildlife
@@ -275,7 +276,9 @@ seconds, hangs and thins out over the last five of its 22 s. It hides the spot, 
 goes in as a skilled fighter does once a watched spot is out of view, and shots into it are
 mostly guesses. With a smoke module installed (one that registers the "smoke" obscurance
 source) the canister's gas goes to it as a `SmokeEmission`; without one the NPC module keeps a
-plain cloud of its own under the "npc_smoke" source.
+plain cloud of its own under the "npc_smoke" source, drawn as many faint grey puffs (each a
+few nested balls, so it fades out at its rim), bigger and fainter towards the cloud's edge and
+drifting as it hangs.
 
 | Setting | Default | Does |
 | --- | --- | --- |
