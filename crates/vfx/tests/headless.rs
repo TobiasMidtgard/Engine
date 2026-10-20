@@ -372,6 +372,66 @@ fn a_plume_shows_shock_diamonds_in_air_but_not_in_a_vacuum() {
 }
 
 #[test]
+fn a_blaze_burns_hottest_low_in_its_heart_and_leaves_the_air_beside_it_clear() {
+    // A fire 2 m tall and 2 m wide standing on the origin. Its body is brightest low in the
+    // middle and cools toward its tongues; its ragged edge never strays out to the quad's sides.
+    let mut app = app(DVec3::ZERO, 200.0);
+    let Some(before) = shot(&mut app, "vfx_blaze_before.png") else {
+        return;
+    };
+    let blaze = EffectDesc {
+        name: "test.blaze".into(),
+        emitters: vec![EmitterDesc {
+            rate: 12.0,
+            speed: [0.0, 0.0],
+            lifetime: [0.2, 0.2],
+            size: [2.0, 2.0],
+            rotation_deg: [0.0, 0.0],
+            local_space: true,
+            sprite: Sprite::Blaze,
+            facing: engine_vfx::Facing::Axis,
+            stretch: 1.0,
+            color: Gradient::constant([1.0, 0.6, 0.25, 1.0]),
+            emissive: 500.0,
+            additive: 1.0,
+            soft: 0.0,
+            wind: 0.0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    app.world
+        .resource_mut::<EffectLibrary>()
+        .insert(blaze)
+        .unwrap();
+    app.world.spawn((
+        Transform::from_translation(DVec3::ZERO),
+        ParticleEffect::new("test.blaze"),
+    ));
+    app.update_n(12);
+    let after = shot(&mut app, "vfx_blaze_after.png").unwrap();
+    let lift = |x: f64, y: f64, r: i32| {
+        let at = project(DVec3::new(x, y, 0.0));
+        luma(&after, at, r) - luma(&before, at, r)
+    };
+    let heart = lift(0.0, 0.4, 2);
+    let top = lift(0.0, 1.1, 2);
+    eprintln!("blaze: heart {heart}, top {top}");
+    assert!(heart > 40.0, "the fire's heart should glow: {heart}");
+    assert!(
+        top < heart * 0.6,
+        "the fire should cool toward its tongues: {heart} -> {top}"
+    );
+    for x in [-0.95, 0.95] {
+        let side = lift(x, 0.3, 1).abs();
+        assert!(
+            side < 3.0,
+            "no flame should stand off at the side ({x}): {side}"
+        );
+    }
+}
+
+#[test]
 fn a_splash_crown_stands_out_of_the_ground_and_nothing_else_changes() {
     let mut app = app(DVec3::ZERO, 30_000.0);
     let Some(before) = shot(&mut app, "vfx_crown_before.png") else {
