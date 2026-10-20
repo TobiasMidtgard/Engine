@@ -241,6 +241,15 @@ pub const BARE_FOOTPRINTS: &[(&str, [f64; 2], [f64; 2])] = &[
     // The footstep trail and its own meadow, which thins out about 7 m from the path, where
     // the valley's grass patches (reaching 2 m past this) take over.
     ("footsteps", [-30.0, 30.0], [-12.0, 12.0]),
+    // The movement course's concrete: the runway, the vault lane, the ledge station, the
+    // grapple pad, the zip line pad, the freight platform with its track bed, and the ring.
+    ("parkour", [-28.0, 28.0], [7.0, 17.0]),
+    ("parkour", [-28.5, -2.5], [-0.5, 4.5]),
+    ("parkour", [11.0, 23.0], [-1.5, 5.5]),
+    ("parkour", [3.0, 13.0], [18.0, 40.0]),
+    ("parkour", [28.5, 39.0], [15.5, 26.0]),
+    ("parkour", [-29.9, 2.4], [23.5, 32.6]),
+    ("parkour", [-8.0, 8.0], [-22.0, -6.0]),
 ];
 
 /// The stream's course (x, z), spring first: through the southern woods, over the cliff south

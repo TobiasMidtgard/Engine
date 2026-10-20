@@ -3437,6 +3437,7 @@ dependencies = [
  "engine",
  "engine_anim",
  "engine_audio",
+ "engine_character",
  "engine_destruction",
  "engine_fire",
  "engine_foliage",
