@@ -212,14 +212,7 @@ pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
             at(p + DVec3::new(0.0, 0.4, 0.0)),
         );
         let t = &lib.trees_of(TreeKind::Oak).nth(k).expect("oak");
-        scenery::spawn_tree(
-            commands,
-            lib,
-            t,
-            p + DVec3::new(0.0, 0.8, 0.0),
-            a as f32,
-            0.8,
-        );
+        scenery::spawn_tree(commands, t, p + DVec3::new(0.0, 0.8, 0.0), a as f32, 0.8);
     }
 }
 
