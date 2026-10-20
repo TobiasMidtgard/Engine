@@ -93,15 +93,18 @@ fn paint_backdrop(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
         0.55,
         0.06,
     );
-    // A small moon over the planet's limb.
+    // A small moon over the planet's limb, lit from the sun's side (in front of the
+    // backlit world, so it reads as a crescent-to-half disc rather than a black hole).
+    let moon = at(0.90, 0.40);
+    ctx.glow(moon, h * 0.11, Color::hex(0xc8d4e8).with_alpha(0.07), 1.4);
     ctx.planet(
-        at(0.90, 0.40),
+        moon,
         h * 0.045,
-        PlanetKind::Barren.look(8.4),
+        PlanetKind::Ice.look(8.4),
         0.4 + t * 0.012,
         0.1,
-        -2.3,
-        0.55,
+        -1.15,
+        0.35,
         0.0,
     );
     // Darker on the left, where the menu sits.
