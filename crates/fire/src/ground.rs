@@ -212,7 +212,7 @@ fn scorch_texels(field: &FireField, min: DVec2, size: [u32; 2], cell: f64) -> Ve
     let tile_size = field.tile_size();
     let max = min + DVec2::new(size[0] as f64, size[1] as f64) * cell;
     for t in &field.tiles {
-        let o = t.key.as_dvec2() * tile_size;
+        let o = field.tile_origin(t.key);
         if o.x > max.x || o.y > max.y || o.x + tile_size < min.x || o.y + tile_size < min.y {
             continue;
         }
@@ -735,6 +735,23 @@ mod tests {
                 .iter()
                 .all(|&v| v == 0.0)
         );
+    }
+
+    #[test]
+    fn scorch_lands_where_the_fire_burnt_wherever_the_field_starts() {
+        use engine_core::math::IVec2;
+        // A floating-origin shift moves the field's origin off zero.
+        let mut field = FireField::new(0.5);
+        field.origin = DVec2::new(103.0, -41.5);
+        let mut fuel = |_: DVec3| (crate::fuel::CellFuel::NONE, 0.0);
+        let i = field.ensure_tile(IVec2::ZERO, 0.0, &mut fuel).unwrap();
+        field.tiles[i].cell_mut(IVec2::new(3, 5)).scorch = 1.0;
+        // That cell's center is at origin + (3.5, 5.5) cells.
+        let center = field.origin + DVec2::new(3.5, 5.5) * 0.5;
+        let min = center - DVec2::splat(2.0);
+        let data = scorch_texels(&field, min, [8, 8], 0.5);
+        assert_eq!(data[4 * 8 + 4], 255, "{data:?}");
+        assert_eq!(data.iter().filter(|&&v| v > 0).count(), 1);
     }
 
     #[test]

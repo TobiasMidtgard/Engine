@@ -195,6 +195,7 @@ fn fs_ground(in: GroundOut) -> @location(0) vec4<f32> {
     let suv = (p + jitter * 0.9 + half) / (2.0 * half);
     let scorch_raw = textureSampleLevel(scorch_map, scorch_sampler, suv, 0.0).r;
     let scorch = smoothstep(0.05, 0.6, scorch_raw * (0.8 + 0.4 * value_noise2(wp * 0.8)));
+    var sheen = 1.0;
     if (scorch > 0.0) {
         // Ash: thin grey streaks where stalks lay (two crossing directions), in patches.
         let qa = vec2<f32>(wp.x * 0.8 + wp.y * 0.6, wp.y * 0.8 - wp.x * 0.6);
@@ -208,9 +209,13 @@ fn fs_ground(in: GroundOut) -> @location(0) vec4<f32> {
         let survives = smoothstep(0.8, 0.95, value_noise2(wp * 3.3 + 9.0)) * (1.0 - scorch_raw) * 0.6;
         let k = scorch * (1.0 - survives);
         albedo = mix(albedo, char_c, k);
-        rough = mix(rough, 0.95, k);
+        rough = mix(rough, 1.0, k);
         ao = mix(ao, 1.0, k * 0.5);
-        nrm *= 1.0 - 0.6 * k;
+        nrm *= 1.0 - 0.3 * k;
+        // Soot is about the mattest thing there is: its fluffy surface traps light, so burnt
+        // ground has almost no sheen even looking into a low sun (where a plain rough
+        // surface's grazing reflection would light it up like bare dirt).
+        sheen = 1.0 - 0.85 * k;
     }
 
     // Tangent space: +X along world X, image-up along world -Z, tilted with the ground.
@@ -224,7 +229,7 @@ fn fs_ground(in: GroundOut) -> @location(0) vec4<f32> {
     s.normal = n;
     s.roughness = clamp(rough, 0.03, 1.0);
     s.occlusion = ao;
-    s.reflectance = 0.5;
+    s.reflectance = 0.5 * sheen;
     if (frame.counts.z == 1u) {
         return vec4<f32>(n * 0.5 + 0.5, 1.0);
     }
