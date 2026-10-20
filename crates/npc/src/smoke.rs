@@ -213,7 +213,7 @@ pub(crate) fn show_clouds(
             commands.spawn((
                 CloudPuff { cloud: c.id, n },
                 Transform::from_translation(c.at).with_scale(Vec3::ZERO),
-                MeshRenderer::new(ball, haze.clone()).without_shadows(),
+                MeshRenderer::new(ball, haze).without_shadows(),
             ));
         }
     }
