@@ -8,6 +8,7 @@ pub mod collide;
 pub mod demo;
 pub mod field;
 pub mod gpu_cloth;
+pub mod guides;
 pub mod hair;
 pub mod render;
 pub mod rope;
@@ -90,7 +91,12 @@ impl Plugin for SoftBodyPlugin {
                     )
                         .in_set(SoftBodySet::Prepare),
                     systems::step_bodies.in_set(SoftBodySet::Step),
-                    (systems::emit_outputs, systems::drive_planks).in_set(SoftBodySet::Output),
+                    (
+                        systems::emit_outputs,
+                        systems::drive_planks,
+                        guides::write_posed_guides,
+                    )
+                        .in_set(SoftBodySet::Output),
                 ),
             )
             .add_systems(
@@ -100,7 +106,11 @@ impl Plugin for SoftBodyPlugin {
             )
             .add_systems(
                 PostUpdate,
-                (systems::rebuild_changed, systems::build_bodies)
+                (
+                    systems::rebuild_changed,
+                    systems::build_bodies,
+                    guides::build_guide_hair,
+                )
                     .chain()
                     .in_set(UpdateSet::AfterPropagate),
             )
