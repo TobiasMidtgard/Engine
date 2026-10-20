@@ -1,0 +1,16 @@
+[package]
+name = "engine_character"
+description = "People from a morphable human model (MakeHuman's CC0 base mesh and targets): faces and bodies by slider, skin, eye and hair shading, presets and random people."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engine_core.workspace = true
+engine_render.workspace = true
+engine_assets.workspace = true
+bevy_ecs.workspace = true
+bytemuck.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

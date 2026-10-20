@@ -794,5 +794,57 @@ fn main() {
             }
             Err(e) => eprintln!("{}: {e}", view.name),
         }
+        if std::env::var_os("FOREST_MASK").is_some() {
+            let mask = out.join(format!("{}_forest.pgm", view.name));
+            forest_mask(&app, &ground, (eye, target, up), view.fov, size, &mask);
+        }
     }
+}
+
+/// With `FOREST_MASK` set: what [`engine_world::ForestCover`] reports at the ground under every
+/// fourth pixel of the view, as a grayscale image (canopy cover 0..255), to lay over the shot.
+fn forest_mask(
+    app: &App,
+    ground: &engine_world::Ground,
+    (eye, target, up): (DVec3, DVec3, Vec3),
+    fov_y_deg: f32,
+    (w, h): (u32, u32),
+    path: &std::path::Path,
+) {
+    let woods = app.world.resource::<engine_world::ForestCover>().clone();
+    let forward = (target - eye).normalize();
+    let right = forward.cross(up.as_dvec3()).normalize();
+    let cam_up = right.cross(forward);
+    let tan = ((fov_y_deg as f64).to_radians() * 0.5).tan();
+    let aspect = w as f64 / h as f64;
+    let (mw, mh) = (w / 4, h / 4);
+    let below = |p: DVec3| ground.height(p).is_some_and(|g| p.y < g);
+    let mut px = Vec::with_capacity((mw * mh) as usize);
+    for j in 0..mh {
+        for i in 0..mw {
+            let x = (2.0 * (i as f64 + 0.5) / mw as f64 - 1.0) * tan * aspect;
+            let y = (1.0 - 2.0 * (j as f64 + 0.5) / mh as f64) * tan;
+            let dir = (forward + right * x + cam_up * y).normalize();
+            let (mut a, mut t) = (0.0, 1.0);
+            let mut hit = None;
+            while t < 40_000.0 {
+                if below(eye + dir * t) {
+                    let mut b = t;
+                    for _ in 0..10 {
+                        let m = 0.5 * (a + b);
+                        if below(eye + dir * m) { b = m } else { a = m }
+                    }
+                    hit = Some(eye + dir * b);
+                    break;
+                }
+                a = t;
+                t += (t * 0.01).max(2.0);
+            }
+            let d = hit.and_then(|p| woods.sample(p)).map_or(0.0, |s| s.density);
+            px.push((d * 255.0).round() as u8);
+        }
+    }
+    let mut file = format!("P5\n{mw} {mh}\n255\n").into_bytes();
+    file.extend(px);
+    std::fs::write(path, file).expect("forest mask");
 }

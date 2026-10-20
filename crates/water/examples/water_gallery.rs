@@ -31,6 +31,8 @@ const VIEWS: &[(&str, [f64; 3], [f64; 3])] = &[
     // Across the cove at the foot of the crag, and up close under its crevice.
     ("cascade", [-8.2, 9.0, -15.3], [-25.2, 13.0, -25.2]),
     ("crevice", [-14.9, 8.0, -18.5], [-23.0, 10.5, -23.0]),
+    // The wader fording the stream above the falls.
+    ("ford", [19.5, 9.0, 27.0], [24.5, 5.3, 24.0]),
 ];
 
 fn main() {
@@ -81,11 +83,19 @@ fn main() {
             Transform::default().looking_at(-to_sun.as_dvec3(), Vec3::Y),
         ))
         .id();
-    let camera = w
-        // Over the tarn while the simulation runs, so the ripple grid (which follows the
-        // camera) covers all of it.
-        .spawn((Camera::default(), Transform::from_xyz(-3.0, 30.0, 0.0)))
-        .id();
+    // Over the tarn while the simulation runs, so the ripple grid (which follows the camera)
+    // covers all of it; at the one view asked for, so the water there is the live part (a
+    // stream's wakes, say).
+    let single = only
+        .as_ref()
+        .filter(|o| o.len() == 1)
+        .and_then(|o| VIEWS.iter().find(|(k, ..)| *k == o[0].as_str()))
+        .filter(|(k, ..)| *k != "swirl");
+    let sim_from = single.map_or(Transform::from_xyz(-3.0, 30.0, 0.0), |(_, eye, target)| {
+        Transform::from_translation(DVec3::from_array(*eye))
+            .looking_at(DVec3::from_array(*target), Vec3::Y)
+    });
+    let camera = w.spawn((Camera::default(), sim_from)).id();
     app.add_systems(Startup, |mut commands: Commands| {
         demo::spawn_demo(&mut commands, DVec3::ZERO);
     });

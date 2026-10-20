@@ -279,6 +279,77 @@ fn aircraft_spaceplane_heat() {
     );
 }
 
+/// Re-entry for real: the spaceplane at `altitude_m`, moving at `speed` m/s nose 40° up
+/// (the Return autopilot's entry attitude), its shield at the 1 390 K the flight home peaks
+/// at; the camera rides along at `eye`, in the ship's frame, looking at `target`.
+fn reentry(name: &str, altitude_m: f64, speed: f32, eye: [f64; 3], target: [f64; 3]) {
+    gallery_ride(
+        name,
+        0.3,
+        |app| {
+            let t = Transform::from_translation(DVec3::new(0.0, altitude_m, 0.0))
+                .with_rotation(engine_core::math::Quat::from_rotation_x(40f32.to_radians()));
+            let e = support::spawn_with(app, |c| engine_vehicles::presets::spaceplane(c, t));
+            app.world
+                .entity_mut(e)
+                .insert(engine_world::physics::Velocity {
+                    linear: Vec3::NEG_Z * speed,
+                    angular: Vec3::ZERO,
+                });
+            if let Some(mut a) = app.world.get_mut::<engine_vehicles::Aircraft>(e) {
+                a.gear_down = false;
+                a.gear = 0.0;
+            }
+            if let Some(mut s) = app.world.get_mut::<engine_vehicles::Spacecraft>(e) {
+                s.assist.mode = engine_vehicles::AssistMode::Off;
+            }
+            if let Some(mut shield) = app.world.get_mut::<engine_vehicles::HeatShield>(e) {
+                shield.temperature_k = 1_390.0;
+            }
+            e
+        },
+        Transform::from_xyz(eye[0], eye[1], eye[2])
+            .looking_at(DVec3::new(target[0], target[1], target[2]), Vec3::Y),
+    );
+}
+
+/// Peak heating, 7 km/s at 70 km, from the side: the shock layer wraps the nose and belly
+/// and the glowing wake streams off behind and above.
+#[test]
+fn aircraft_spaceplane_reentry_plasma() {
+    reentry(
+        "aircraft_spaceplane_reentry_plasma",
+        70_000.0,
+        7_000.0,
+        [-60.0, -12.0, -18.0],
+        [0.0, 5.0, 18.0],
+    );
+}
+
+/// The same from below and ahead, looking up at the glowing belly.
+#[test]
+fn aircraft_spaceplane_reentry_belly() {
+    reentry(
+        "aircraft_spaceplane_reentry_belly",
+        70_000.0,
+        7_000.0,
+        [-26.0, -30.0, -34.0],
+        [0.0, 0.0, 2.0],
+    );
+}
+
+/// Early in the entry, 7.6 km/s at 85 km: the air just starting to glow.
+#[test]
+fn aircraft_spaceplane_reentry_early() {
+    reentry(
+        "aircraft_spaceplane_reentry_early",
+        85_000.0,
+        7_600.0,
+        [-60.0, -12.0, -18.0],
+        [0.0, 5.0, 18.0],
+    );
+}
+
 /// Both aircraft parked on the apron.
 #[test]
 fn aircraft_apron() {

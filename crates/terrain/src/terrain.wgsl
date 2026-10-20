@@ -253,10 +253,15 @@ fn crowns(tp: vec3<f32>, density: f32, pixel: f32, to_sun: vec3<f32>) -> Crowns 
             // Groups of trees a few dozen meters across, clearings between them.
             let group = pnoise3(vec3<f32>(k.x * 0.25, 5.0, k.y * 0.25), 128.0) - 0.5;
             if (h.z < density + group * 0.5 * density * (1.0 - density) * 4.0) {
-                let r = mix(0.32, 0.72, hash13(vec3<f32>(k, 19.3))) * mix(0.8, 1.0, density);
+                // Young trees to broad old ones (a few meters to over 11 m across).
+                let size = hash13(vec3<f32>(k, 19.3));
+                let r = mix(0.22, 0.74, size * size * (3.0 - 2.0 * size)) * mix(0.8, 1.0, density);
                 let center = c + 0.1 + h.xy * 0.8;
                 let o = (p - center) / r;
-                let d2 = dot(o, o);
+                // Lumpy outlines: a few big boughs bulge out of each crown.
+                let ang = atan2(o.y, o.x);
+                let lobes = 1.0 + 0.16 * sin(ang * 5.0 + h.x * 6.28) + 0.09 * sin(ang * 3.0 + h.y * 6.28);
+                let d2 = dot(o, o) / (lobes * lobes);
                 // Taller trees hide the edges of the crowns next to them.
                 let t = (1.0 - d2) * mix(0.8, 1.0, hash13(vec3<f32>(k, 23.9)));
                 if (t > top) {
