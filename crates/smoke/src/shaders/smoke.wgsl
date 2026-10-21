@@ -168,8 +168,6 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
     let amb_down = sky_ambient(vec3<f32>(0.0, -1.0, 0.0));
     let flat_dir = vec3<f32>(dir.x, 0.0, dir.z) + vec3<f32>(1e-4, 0.0, 0.0);
     let amb_side = 0.5 * (sky_ambient(normalize(flat_dir)) + sky_ambient(normalize(-flat_dir)));
-    // Billows finer than a pixel only shimmer: fade the detail out with distance (the size
-    // of a pixel at the volume, against the detail noise's ~1 m scale).
     // Fog is smoke's soft, wide cousin: its noise is a few times larger, it stays solid where
     // it's thin (a fog bank's top is a soft surface, not wisps) and it doesn't rise.
     let fog = smoke.look.w;
@@ -177,8 +175,11 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
     // erosion that leaves thinner smoke standing (it would eat a campfire's wisp whole).
     let fine = mix(clamp(cell / 0.5, 0.4, 1.0), 1.0, fog);
     let grain = mix(1.0, 5.0, fog) * fine;
-    let pixel_m = 2.0 / (frame.proj[1][1] * frame.viewport.y) * max(t0, 1.0);
-    let detail = smoke.look.x * saturate(1.5 - pixel_m / (0.05 * grain));
+    // Billows finer than a pixel only shimmer: fade the detail out with distance (the size of
+    // a pixel where each step is, against the detail noise's ~1 m scale). Judged per step, not
+    // where the ray enters the box: a big box's far side is many times farther, and billows
+    // eroded there broke the thin edge of a plume into a spray of single-pixel flecks.
+    let pixel_per_m = 2.0 / (frame.proj[1][1] * frame.viewport.y);
     // Fine billows drift with the wind and rise a little.
     let drift = (frame.wind.xyz * 0.8 + vec3<f32>(0.0, 0.35 * (1.0 - fog), 0.0)) * (frame.time.x % 1000.0);
     let half_sigma = mix(2.0, 0.06, fog) * fine * fine;
@@ -195,6 +196,7 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
         let p = dir * t;
         var q = p;
         var lumps = 0.5;
+        let detail = smoke.look.x * saturate(1.5 - pixel_per_m * max(t, 1.0) / (0.1 * grain));
         if (detail > 0.0) {
             // Warp the lookup so the voxels' smooth shapes break up into billows.
             let wn = textureSampleLevel(detail_tex, linear_repeat, (tiling_pos(p) - drift) / (WARP_TILE * grain), 0.0);
