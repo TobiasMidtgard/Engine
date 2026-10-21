@@ -147,3 +147,31 @@ fn from_orbit_the_limb_glows_above_a_dark_space() {
     assert!(luma(space) < 0.01, "space is not dark: {space:?}");
     assert!(luma(planet) > 0.02, "the planet is not lit: {planet:?}");
 }
+
+#[test]
+fn from_orbit_haze_over_the_night_side_stays_dark() {
+    // 400 km up, looking straight down at a sea where the sun set 15° ago; the camera itself
+    // still sees the sun (the horizon is 20° below level up there). Exposed for a night side
+    // (EV -1, as night photos from orbit are). Haze over the sea must not scatter the sunlight
+    // or the sunlit sky that reach the camera, which are not the haze's. Lit at the camera, the
+    // haze glowed about ten times brighter than this allows.
+    let mut app = sky_app(400_000.0, -89.0, -15.0, -1.0);
+    app.world.resource_mut::<FogSettings>().density = 0.00002;
+    // A dark sea under the camera, so the haze is applied to a surface as it is over terrain.
+    app.world.spawn((
+        Transform::default(),
+        MeshRenderer::new(
+            Shape::Plane {
+                size: [2_000_000.0, 2_000_000.0],
+                subdivisions: 1,
+            },
+            StandardMaterial::color(0.02, 0.04, 0.06),
+        ),
+    ));
+    let Some(img) = render(&mut app, "sky_orbit_night") else {
+        return;
+    };
+    let sea = mean_rgb(&img, H / 2 - 10, H / 2 + 10);
+    eprintln!("orbit night side: {sea:?}");
+    assert!(luma(sea) < 0.05, "the night side glows: {sea:?}");
+}
