@@ -62,6 +62,7 @@ pub fn region_style(library: &PlantLibrary, region: &EcologyRegion) -> Option<Gr
         wind_response: 1.0,
         draw_distance: 65.0,
         shadow_distance: 18.0,
+        ..Default::default()
     })
 }
 

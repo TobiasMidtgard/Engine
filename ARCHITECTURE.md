@@ -65,7 +65,7 @@ zone's entry; the rest of the showcase belongs to the Beautiful showcase world t
 | `engine_ai_bridge`, `tools/engine-mcp` | JSON-RPC/MCP bridge so AI agents can inspect, edit, step and screenshot a running game | Core (architecture and integration) |
 | `tools/fetch-assets`, `assets/manifests/core.toml` | Large art pipeline: manifests, download cache, release mirror, the no-large-files test (each thread owns its own `assets/manifests/<area>.toml`) | Core (architecture and integration) |
 | `engine_debug` | Debug drawing (lines, shapes, gizmos) for every module | Core (architecture and integration) |
-| `engine_render` | Renderer, lighting, shadows, sky and sky occlusion, materials, grass; the planned strand renderer (hair, fur), wrinkle maps, and 2D/2.5D rendering | Rendering and lighting |
+| `engine_render` | Renderer, lighting, shadows, sky and sky occlusion, materials, grass; the planned strand renderer (hair, fur), wrinkle maps, and 2D/2.5D rendering | Rendering and lighting (grass: `src/grass.rs` and `shaders/grass*.wgsl` belong to Foliage and ecology) |
 | `games/showcase` | The tech showcase world: environment, viewpoints, screenshot tour, and the list of every test case with its owner | Beautiful showcase world |
 | `engine_physics` | Rigid-body simulation, colliders, joints, ragdolls, queries, character controller, floating-origin physics islands | Physics and rigid bodies |
 | `engine_vehicles` | Cars (suspension, tires, drivetrain), planes (aero surfaces), spaceships (thrusters, RCS) | Cars, planes and spaceships |
@@ -280,7 +280,12 @@ with the wind (`WindField`/`WeatherState`), with gusts rolling across the field,
 thin out smoothly with distance (survivors widen to keep the cover; `style.draw_distance`), cast
 sun shadows near the camera, and go through the depth prepass, so AO, bounce light and TAA see
 them. Lit from behind, sunlight shines through the blades. Meadows grow in patches (taller,
-greener hollows, shorter, drier rises). `GrassBender { radius }` on feet, bodies or vehicles
+greener hollows, shorter, drier rises), and blades grow in clumps (after Ghost of Tsushima's
+grass): each clump pulls its blades in, fans them out and gives them its own height and color
+(`style.clump_*`). Blades are cubic Beziers that arch over and droop (`style.droop`, scale it
+with gravity), are widened in view when seen edge-on, and have a glossy midrib (`style.gloss`)
+and tinted tips (`style.tip_tint`). `GrassStyle::meadow`, `savanna`, `tundra`, `marsh` and
+`alien` are starting points for biomes and other worlds. `GrassBender { radius }` on feet, bodies or vehicles
 pushes blades aside (16 nearest the camera). `RenderSettings::grass_density` scales every field
 (quality). Give the ground under a field `style.ground_color()` so it reads as grass past the
 draw distance. `engine_foliage` drives grass by spawning fields from its soil grid; game code
