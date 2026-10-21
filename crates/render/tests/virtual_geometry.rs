@@ -444,6 +444,34 @@ fn a_changed_mesh_is_rebuilt_alone() {
 }
 
 #[test]
+fn a_mesh_that_keeps_changing_is_not_reported_as_building() {
+    let target = DVec3::ZERO;
+    let mut app = rock_app(DVec3::new(0.0, 1.0, 9.0), target, rock_material(), |s| {
+        s.virtual_geometry_min_triangles = 10_000;
+    });
+    // A mesh edited every frame (a deforming sheet): it stays on the instanced path, and
+    // whoever waits for builds to finish (the showcase tour) must not wait for it.
+    let wobbly = app.world.resource_mut::<Assets<Mesh>>().add(rock(6));
+    app.world.spawn((
+        Transform::from_xyz(3.0, 0.0, 0.0),
+        MeshRenderer::new(wobbly, rock_material()),
+    ));
+    if !wait_for_clusters(&mut app, 1) {
+        return;
+    }
+    for frame in 0..40 {
+        if let Some(m) = app.world.resource_mut::<Assets<Mesh>>().get_mut(wobbly) {
+            m.vertices[0].position[1] += 0.001 * frame as f32;
+        }
+        app.update();
+    }
+    let state = cluster_state(&app);
+    assert_eq!(state["meshes_ready"], 1, "{state}");
+    assert_eq!(state["meshes_building"], 0, "{state}");
+    assert_eq!(state["meshes_changing"], 1, "{state}");
+}
+
+#[test]
 fn mirrored_rocks_keep_their_outside() {
     let eye = DVec3::new(-0.6, 0.9, 3.4);
     let target = DVec3::new(0.0, 0.1, 0.0);
