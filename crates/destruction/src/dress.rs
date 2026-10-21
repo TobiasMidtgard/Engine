@@ -27,11 +27,23 @@ use crate::structure::{Fracturable, StructuralPiece};
 pub struct PropModel {
     pub kind: PropKind,
     pub seed: u64,
+    /// Linear RGB scale on the prop's colors: white as built, below it weathered or grimy.
+    pub tint: [f32; 3],
 }
 
 impl PropModel {
     pub fn new(kind: PropKind, seed: u64) -> Self {
-        Self { kind, seed }
+        Self {
+            kind,
+            seed,
+            tint: [1.0; 3],
+        }
+    }
+
+    /// Tint the prop's colors (see [`PropModel::tint`]).
+    pub fn with_tint(mut self, tint: [f32; 3]) -> Self {
+        self.tint = tint;
+        self
     }
 }
 
@@ -246,20 +258,26 @@ pub fn build_prop_models_system(
         };
     for (e, model) in &props {
         let solid = !gameplay.contains(e);
-        dress(
-            e,
-            format!("{:?}#{}", model.kind, model.seed),
-            solid,
-            false,
-            &|| {
-                model
-                    .kind
-                    .build(model.seed)
-                    .into_iter()
-                    .map(|p| (p.material, p.mesh))
-                    .collect()
-            },
-        );
+        let key = if model.tint == [1.0; 3] {
+            format!("{:?}#{}", model.kind, model.seed)
+        } else {
+            format!("{:?}#{}~{:?}", model.kind, model.seed, model.tint)
+        };
+        dress(e, key, solid, false, &|| {
+            model
+                .kind
+                .build(model.seed)
+                .into_iter()
+                .map(|mut p| {
+                    for v in &mut p.mesh.vertices {
+                        for (c, t) in v.color.iter_mut().zip(model.tint) {
+                            *c *= t;
+                        }
+                    }
+                    (p.material, p.mesh)
+                })
+                .collect()
+        });
     }
     // The masonry's earth is the spoil of a breach: stone grit and rubble, drawn as gravel.
     for (e, model) in &arches {

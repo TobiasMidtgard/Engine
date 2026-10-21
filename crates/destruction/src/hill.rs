@@ -79,6 +79,10 @@ const TERRACE_SUPPORT_AT: f32 = 22.0;
 const UNDERMINE: [(f32, f64); 3] = [(23.2, 1.3), (24.4, -1.3), (24.8, 0.0)];
 
 const TUNNEL_DIGS: u32 = 15;
+/// Mine timbers are old, damp and grimy: darker than fresh-sawn wood and grey-brown rather
+/// than orange (green and blue lifted against red on the wood's own color).
+const MINE_TIMBER: [f32; 3] = [0.52, 0.76, 1.2];
+
 /// Timber sets shoring the tunnel: where along it (z from the origin) and after which dig.
 const SHORING: [(f64, u32); 3] = [(-9.9, 2), (-8.1, 5), (-6.3, 8)];
 /// The set the lantern hangs from.
@@ -850,7 +854,8 @@ fn run_step(world: &mut World, demo: &mut HillDemo, step: Step) {
                                 size: size.to_array(),
                             },
                             seed,
-                        ),
+                        )
+                        .with_tint(MINE_TIMBER),
                         piece,
                     ))
                     .id();

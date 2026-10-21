@@ -256,9 +256,10 @@ impl DestructionAssets {
         self.textured = true;
     }
 
-    /// Chips of rock, soil and masonry wear their broken surface's texture, darkened like
-    /// shaded relief, so spoil and rubble match what they came from (flat fresh-break colors,
-    /// or a bare texture in full sun, read as pale flakes on soil and grass).
+    /// Chips of rock, soil, masonry and wood wear their broken surface's texture, darkened
+    /// like shaded relief, so spoil, rubble and splinters match what they came from (flat
+    /// fresh-break colors, or a bare texture in full sun, read as pale or glowing yellow flakes
+    /// on soil and grass).
     fn texture_chips(&mut self, materials: &mut Assets<StandardMaterial>) {
         use DestructibleMaterial as M;
         for m in [
@@ -268,6 +269,7 @@ impl DestructionAssets {
             M::Brick,
             M::Concrete,
             M::ReinforcedConcrete,
+            M::Wood,
         ] {
             let Some(mut chip) = materials.get(self.broken[m.index()]).copied() else {
                 continue;
