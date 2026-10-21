@@ -10,6 +10,11 @@ struct ShadowView {
 
 @group(0) @binding(0) var<uniform> shadow_view: ShadowView;
 
+// Snow depth (m) for `grass_blade`: the ground's by the camera (shadows are cast only nearby).
+fn grass_snow_depth(f: GrassField, rel: vec3<f32>) -> f32 {
+    return f.look.w;
+}
+
 @vertex
 fn vs_shadow(@builtin(instance_index) instance: u32, @builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
     let b = grass_blade(instance, vertex, shadow_view.time.x, shadow_view.wind.xyz, shadow_view.camera_frac.xyz);

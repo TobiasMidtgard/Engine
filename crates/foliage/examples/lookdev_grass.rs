@@ -8,8 +8,9 @@
 //! `meadow_low` (knee height, the blades up close), `meadow_back` (looking toward a low sun
 //! through the blades), `savanna` (tall dry tussocks), `tundra` (short, dense, olive and
 //! russet), `marsh` (tall, upright, dark), `alien` (a low-gravity world's violet grass under a
-//! paler sky), `path` (a footpath worn through the meadow: `GrassWear`). Each biome is its own
-//! field 1 km from the others, on ground of its own color.
+//! paler sky), `path` (a footpath worn through the meadow: `GrassWear`), `snow` (the meadow
+//! under 12 cm of fresh snow). Each biome is its own field 1 km from the others, on ground of
+//! its own color.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -38,6 +39,7 @@ fn biomes() -> Vec<Biome> {
     add("marsh", GrassStyle::marsh());
     add("alien", GrassStyle::alien());
     add("path", GrassStyle::meadow());
+    add("snow", GrassStyle::meadow());
     out
 }
 
@@ -241,6 +243,33 @@ fn main() {
                     eye + DVec3::new(6.0, -0.9, -7.5),
                     toward,
                 );
+            }
+        } else if b.name == "snow" {
+            if wanted("snow") {
+                let mut layers = engine_world::SurfaceLayers {
+                    grid: engine_world::Grid2::centered(
+                        DVec2::new(o.x, o.z),
+                        200.0,
+                        1.0,
+                        Default::default(),
+                    ),
+                };
+                layers.grid.fill(engine_world::SurfaceCell {
+                    snow_m: 0.12,
+                    wetness: 0.3,
+                    ..Default::default()
+                });
+                app.world.insert_resource(layers);
+                let eye = o + DVec3::new(-15.0, 1.65, 15.0);
+                shot(
+                    &mut app,
+                    &out,
+                    "snow",
+                    eye,
+                    eye + DVec3::new(12.0, -1.5, -14.0),
+                    side_sun,
+                );
+                app.world.remove_resource::<engine_world::SurfaceLayers>();
             }
         } else if b.name == "path" {
             if wanted("path") {

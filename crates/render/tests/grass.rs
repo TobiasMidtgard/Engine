@@ -163,3 +163,22 @@ fn wind_moves_the_blades() {
         "the wind doesn't move the grass: {windy:.2} vs {calm:.2} calm"
     );
 }
+
+#[test]
+fn deep_snow_buries_the_meadow() {
+    let mut app = meadow_app(Vec3::ZERO);
+    let mut layers = engine_world::SurfaceLayers::default();
+    layers.grid.fill(engine_world::SurfaceCell {
+        snow_m: 0.6,
+        ..Default::default()
+    });
+    app.world.insert_resource(layers);
+    let Some(img) = render(&mut app, "grass_snowed", 6) else {
+        return;
+    };
+    // Near the camera: snow, no green blades standing out of it.
+    let (near, _) = band(&img, H - 40, H);
+    eprintln!("near ground under snow: color {near:?}");
+    let green = near[1] - 0.5 * (near[0] + near[2]);
+    assert!(green < 4.0, "green blades stand out of deep snow: {near:?}");
+}
