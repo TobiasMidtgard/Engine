@@ -1168,7 +1168,8 @@ fn the_breach_house_roof_is_breached_from_below_and_above_every_cycle() {
         "the steel hatch is cut out ({})",
         integrity(&app, steel)
     );
-    run_secs(&mut app, 7.0);
+    // Half a second into the next cycle (13.5 s have run).
+    run_secs(&mut app, demo::CYCLE_SECS as f64 - 13.0);
     for e in [roof, shot, hatch, steel] {
         assert!(integrity(&app, e) > 0.999, "rebuilt for the next cycle");
     }

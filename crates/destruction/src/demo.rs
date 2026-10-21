@@ -48,8 +48,10 @@ use crate::structure::{Fracturable, FractureShape, ShowSupport, StructuralPiece}
 use crate::voxel::VoxelVolume;
 use crate::wall::{DestructibleWall, WallAnchors, WallState};
 
-/// Seconds per live cycle.
-pub const CYCLE_SECS: f32 = 20.0;
+/// Seconds per live cycle: the show takes its first 15, then the wreckage stands until the
+/// rebuild. Looping faster piled up dust: the smoke module keeps a cloud for minutes, and
+/// six shows' worth hung over the range like fog.
+pub const CYCLE_SECS: f32 = 60.0;
 /// Lifetime given to aftermath rubble (it never sinks).
 const FOREVER: f32 = 1.0e9;
 
