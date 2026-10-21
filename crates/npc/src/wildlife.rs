@@ -28,8 +28,8 @@ use engine_core::prelude::*;
 use engine_world::animation::{AnimationParams, AnimationTrigger};
 use engine_world::locomotion::{LocomotionMode, LocomotionState, MoveIntent};
 use engine_world::{
-    DamageEvent, DamageKind, Ground, HeatField, NoiseEvent, ProjectileTrace, Water, WeatherState,
-    WindField, WorldImpulse,
+    DamageEvent, DamageKind, Ground, GroundWear, HeatField, NoiseEvent, ProjectileTrace, Water,
+    WeatherState, WindField, WorldImpulse,
 };
 
 use crate::agent::{NpcClock, NpcMotor, NpcVitals};
@@ -1000,6 +1000,8 @@ pub(crate) struct AnimalWorld<'w> {
     grid: ResMut<'w, NavGrid>,
     ground: Res<'w, Ground>,
     water: Res<'w, Water>,
+    /// Worn paths, which routes and grazing steps lean toward.
+    wear: Option<Res<'w, GroundWear>>,
     heat: Res<'w, HeatField>,
     weather: Option<Res<'w, WeatherState>>,
     wind: Option<Res<'w, WindField>>,
@@ -2073,8 +2075,9 @@ fn decide(
                     && mind.random() < often
                 {
                     let a = mind.random() * TAU;
-                    mind.destination =
-                        Some(pos + DVec3::new(a.cos() as f64 * step, 0.0, a.sin() as f64 * step));
+                    let dir =
+                        lean_to_wear(w.wear.as_deref(), pos, Vec3::new(a.cos(), 0.0, a.sin()));
+                    mind.destination = Some(pos + dir.as_dvec3() * step);
                 }
                 return;
             }
@@ -2136,6 +2139,12 @@ fn decide(
                 if off.length() > animal.range as f64 {
                     p = home + off.normalize() * animal.range as f64;
                 }
+                // Set off a little toward a worn path, if one is near.
+                let go = flat(p - pos);
+                if go.length() > 0.5 {
+                    let dir = lean_to_wear(w.wear.as_deref(), pos, go.normalize());
+                    p = pos + (dir * go.length()).as_dvec3();
+                }
                 p
             };
             mind.set(AnimalState::Wander, now);
@@ -2146,6 +2155,27 @@ fn decide(
             mind.wait_until = now + 3.0;
         }
     }
+}
+
+/// Turn a grazing or wandering animal's heading `dir` a little toward worn ground: it
+/// compares the wear a few meters ahead to its left and right and turns up to `WEAR_LEAN`
+/// toward the more worn side, so game trails form and get used, while herds still spread
+/// out to graze. Unchanged without wear.
+fn lean_to_wear(wear: Option<&GroundWear>, pos: DVec3, dir: Vec3) -> Vec3 {
+    const WEAR_LEAN: f32 = 0.3;
+    let Some(wear) = wear else {
+        return dir;
+    };
+    let at = |turn: f32| {
+        let d = Quat::from_rotation_y(turn) * dir;
+        wear.wear(pos + d.as_dvec3() * 3.0)
+    };
+    // Positive: the side a positive turn faces is more worn.
+    let pull = at(0.5) - at(-0.5);
+    if pull.abs() < 0.02 {
+        return dir;
+    }
+    Quat::from_rotation_y(pull.clamp(-1.0, 1.0) * WEAR_LEAN) * dir
 }
 
 /// Find the water's edge nearest `home`: walk rings outward until a sample is under water,
@@ -2249,7 +2279,10 @@ fn walk_to(
     if stale && *replans < 6 {
         *replans += 1;
         let heat = &w.heat;
-        let mut ctx = w.grid.ctx(&w.world, &w.ground, &w.water);
+        let mut ctx = w
+            .grid
+            .ctx(&w.world, &w.ground, &w.water)
+            .worn(w.wear.as_deref());
         let mut cost = |p: DVec3| {
             let h = heat.sample(p + DVec3::Y * 0.5);
             if h > 120.0 {
@@ -3121,5 +3154,30 @@ mod tests {
         assert_eq!(boar.faction(), Faction::PREY);
         assert!(boar.is_prey() && boar.traits().bite > 0.0);
         assert!(wolf.motor().sprint_speed > boar.motor().sprint_speed);
+    }
+
+    #[test]
+    fn grazing_steps_lean_a_little_toward_a_worn_trail() {
+        /// A worn trail along z = 2.5.
+        struct Trail;
+        impl engine_world::WearQuery for Trail {
+            fn wear(&self, p: DVec3) -> f32 {
+                (1.0 - ((p.z - 2.5).abs() as f32 - 0.5)).clamp(0.0, 1.0)
+            }
+        }
+        let wear = GroundWear(std::sync::Arc::new(Trail));
+        let pos = DVec3::ZERO;
+        // Heading along +X with the trail off to +Z: it turns toward the trail, a little.
+        let dir = lean_to_wear(Some(&wear), pos, Vec3::X);
+        assert!(dir.z > 0.05, "{dir}");
+        assert!(dir.angle_between(Vec3::X) <= 0.31, "{dir}");
+        assert!((dir.length() - 1.0).abs() < 1e-4);
+        // Heading away from it, it still mostly goes its own way.
+        let away = lean_to_wear(Some(&wear), pos, -Vec3::Z);
+        assert!(away.z < -0.9, "{away}");
+        // Without worn ground (or with none near), headings are left alone.
+        assert_eq!(lean_to_wear(None, pos, Vec3::X), Vec3::X);
+        let untouched = GroundWear::default();
+        assert_eq!(lean_to_wear(Some(&untouched), pos, Vec3::X), Vec3::X);
     }
 }

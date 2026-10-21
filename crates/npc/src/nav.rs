@@ -7,6 +7,9 @@
 //! * Cells next to walls are shrunk away by the agent radius; deep water is not walkable.
 //! * Callers add their own per-cell cost (fire heat, enemy sight lines) when they search, so
 //!   NPCs route around burning grass or through cover.
+//! * Given the world's [`GroundWear`] ([`NavCtx::worn`]), walking over worn ground costs less
+//!   (down to half on a well-worn path), so routes take the paths feet have worn and the
+//!   paths wear deeper the more they're used.
 //! * Chunks are rebuilt when the world model changes (colliders appear or move, terrain is
 //!   edited), and only where someone asks for a path, so it scales to planet-sized maps.
 
@@ -15,12 +18,18 @@ use std::collections::{BinaryHeap, HashMap};
 use std::hash::{BuildHasherDefault, Hasher};
 
 use engine_core::prelude::*;
-use engine_world::{Ground, Water};
+use engine_world::{Ground, GroundWear, Water};
 
 use crate::world_model::TacticalWorld;
 
 /// Cells per chunk side.
 const CHUNK: i32 = 32;
+
+/// How much cheaper a well-worn path (wear 1) is to walk than untouched ground.
+pub const WORN_DISCOUNT: f32 = 0.5;
+
+/// Wear below this anywhere near a trip is treated as none (a few stray footprints).
+const WORN_MIN: f32 = 0.05;
 
 /// Hashes chunk coordinates with one multiply-xorshift per value (path searches look chunks up
 /// thousands of times per step, and the default hasher is built for untrusted keys).
@@ -125,6 +134,8 @@ pub struct NavCtx<'a> {
     pub world: &'a TacticalWorld,
     pub ground: &'a Ground,
     pub water: &'a Water,
+    /// How worn the ground is: worn cells cost less to cross (see [`NavCtx::worn`]).
+    pub wear: Option<&'a GroundWear>,
 }
 
 impl NavGrid {
@@ -144,6 +155,7 @@ impl NavGrid {
             world,
             ground,
             water,
+            wear: None,
         }
     }
 
@@ -196,7 +208,38 @@ impl Window {
     }
 }
 
-impl NavCtx<'_> {
+impl<'a> NavCtx<'a> {
+    /// Searches prefer worn ground: a step onto a cell costs `1 - WORN_DISCOUNT * wear` of
+    /// its usual length (its extra cost is unchanged, so a worn path through fire or an
+    /// enemy's sight line is no safer). Without wear (`None`, or none anywhere near the
+    /// trip) paths are exactly as before.
+    pub fn worn(mut self, wear: Option<&'a GroundWear>) -> Self {
+        self.wear = wear;
+        self
+    }
+
+    /// The highest wear on a coarse lattice (every other cell) over the cells a search from
+    /// `a` to `b` with `margin` would cover; 0 without a wear source.
+    fn wear_peak(&self, a: (i32, i32), b: (i32, i32), margin: i32, y: f64) -> f32 {
+        let Some(wear) = self.wear else {
+            return 0.0;
+        };
+        let max = self.grid.settings.max_window;
+        let (x0, z0) = (a.0.min(b.0) - margin, a.1.min(b.1) - margin);
+        let x1 = (a.0.max(b.0) + margin).min(x0 + max);
+        let z1 = (a.1.max(b.1) + margin).min(z0 + max);
+        let mut peak = 0.0f32;
+        for z in (z0..=z1).step_by(2) {
+            for x in (x0..=x1).step_by(2) {
+                let (cx, cz) = self.cell_center(x, z);
+                peak = peak.max(wear.wear(DVec3::new(cx, y, cz)));
+                if peak >= 1.0 {
+                    return 1.0;
+                }
+            }
+        }
+        peak
+    }
     fn cell_of(&self, p: DVec3) -> (i32, i32) {
         let c = self.grid.settings.cell as f64;
         ((p.x / c).floor() as i32, (p.z / c).floor() as i32)
@@ -406,8 +449,11 @@ impl NavCtx<'_> {
         let s = self.grid.settings;
         let start = self.cell_of(from);
         let goal = self.cell_of(to);
+        // Worn ground anywhere the search could go: it may be worth a detour, so search.
+        let peak = self.wear_peak(start, goal, 24, from.y);
+        let worn = peak > WORN_MIN;
         // Most trips in open ground are a straight walk: skip the search for those.
-        if let Some(h) = self.straight_walk(from, to, extra_cost) {
+        if !worn && let Some(h) = self.straight_walk(from, to, extra_cost) {
             out.push(DVec3::new(to.x, h, to.z));
             return PathStatus::Complete;
         }
@@ -451,11 +497,33 @@ impl NavCtx<'_> {
         let mut closed = vec![false; n];
         let mut extra = vec![f32::NAN; n];
         let mut open = BinaryHeap::new();
+        // What a step onto each cell costs per meter before its extra cost: 1, or less on
+        // worn ground.
+        let mut tread = if worn { vec![f32::NAN; n] } else { Vec::new() };
+        let wear = self.wear.filter(|_| worn);
+        let mut tread_at = |ctx: &Self, i: usize| -> f32 {
+            let Some(wear) = wear else {
+                return 1.0;
+            };
+            if tread[i].is_nan() {
+                let (x, z) = ((i as i32) % win.w + win.x0, (i as i32) / win.w + win.z0);
+                let (cx, cz) = ctx.cell_center(x, z);
+                tread[i] = 1.0 - WORN_DISCOUNT * wear.wear(DVec3::new(cx, win.h[i], cz));
+            }
+            tread[i]
+        };
+        // The cheapest a meter can be (the coarse peak can miss a cell's true top, so allow
+        // a little more): keeps the estimate from overshooting, so worn detours are found.
+        let floor = if worn {
+            1.0 - WORN_DISCOUNT * (peak * 1.25).min(1.0)
+        } else {
+            1.0
+        };
         let (gx, gz) = ((gi as i32) % win.w, (gi as i32) / win.w);
         let heuristic = |i: usize| {
             let (x, z) = ((i as i32) % win.w, (i as i32) / win.w);
             let (dx, dz) = ((x - gx).abs() as f32, (z - gz).abs() as f32);
-            (dx.max(dz) + 0.4142 * dx.min(dz)) * s.cell
+            (dx.max(dz) + 0.4142 * dx.min(dz)) * s.cell * floor
         };
         g[si] = 0.0;
         open.push(Open {
@@ -524,7 +592,7 @@ impl NavCtx<'_> {
                     1.0
                 } * s.cell;
                 let climb = (win.h[j] - win.h[i]).abs() as f32;
-                let cost = g[i] + (step + climb) * (1.0 + extra[j]);
+                let cost = g[i] + (step + climb) * (tread_at(self, j) + extra[j]);
                 if cost < g[j] {
                     g[j] = cost;
                     parent[j] = i as u32;
@@ -580,6 +648,15 @@ impl NavCtx<'_> {
                     s.max_step,
                     &mut |ctx, i| cost_at(ctx, i) <= path_cost + 0.05,
                 )
+                // On worn ground a shortcut must also cost no more than the path it skips
+                // (or string pulling would cut the worn path's bends off).
+                && (!worn || {
+                    let (a, b) = (cells[anchor], cells[k + 1]);
+                    let line = self.line_cost(&win, a, b, &mut |ctx, i| {
+                        tread_at(ctx, i) + cost_at(ctx, i)
+                    });
+                    line <= (g[b] - g[a]) * 1.02 + 0.05
+                })
             {
                 k += 1;
                 continue;
@@ -663,6 +740,33 @@ impl NavCtx<'_> {
             }
         }
         (prev.0 == b && (to.y - prev.1).abs() < 1.0).then_some(prev.1)
+    }
+
+    /// What walking straight between window cells `a` and `b` costs, with `per_m` the cost
+    /// per meter of a cell (sampled along the center line, climbs left out).
+    fn line_cost(
+        &self,
+        win: &Window,
+        a: usize,
+        b: usize,
+        per_m: &mut dyn FnMut(&Self, usize) -> f32,
+    ) -> f32 {
+        let (ax, az) = ((a as i32) % win.w, (a as i32) / win.w);
+        let (bx, bz) = ((b as i32) % win.w, (b as i32) / win.w);
+        let (dx, dz) = (bx - ax, bz - az);
+        let n = dx.abs().max(dz.abs()) * 2;
+        if n == 0 {
+            return 0.0;
+        }
+        let len = ((dx * dx + dz * dz) as f32).sqrt() * self.grid.settings.cell;
+        let mut sum = 0.0;
+        for k in 1..=n {
+            let t = (k as f32 - 0.5) / n as f32;
+            let x = (ax as f32 + 0.5 + dx as f32 * t).floor() as i32;
+            let z = (az as f32 + 0.5 + dz as f32 * t).floor() as i32;
+            sum += per_m(self, (z * win.w + x) as usize);
+        }
+        len * sum / n as f32
     }
 
     /// Can one walk straight between window cells `a` and `b` (every crossed cell walkable
@@ -780,7 +884,7 @@ impl NavAgent {
 mod tests {
     use super::*;
     use crate::world_model::{Obstacle, ObstacleShape};
-    use engine_world::{WaterQuery, WaterSample};
+    use engine_world::{WaterQuery, WaterSample, WearQuery};
     use std::sync::Arc;
 
     fn wall(i: u32, center: DVec3, half: Vec3, rot: Quat) -> Obstacle {
@@ -968,5 +1072,240 @@ mod tests {
         assert_eq!(status, PathStatus::Partial);
         let end = *path.last().unwrap();
         assert!(end.x > -5.0 && end.x < -4.0, "{end}");
+    }
+
+    /// Wear 1 within half a meter of a polyline, fading out by 1.2 m.
+    struct Trail(Vec<DVec3>);
+    impl WearQuery for Trail {
+        fn wear(&self, p: DVec3) -> f32 {
+            let q = DVec2::new(p.x, p.z);
+            let mut d = f64::INFINITY;
+            for s in self.0.windows(2) {
+                let (a, b) = (DVec2::new(s[0].x, s[0].z), DVec2::new(s[1].x, s[1].z));
+                let t = ((q - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+                d = d.min(q.distance(a + (b - a) * t));
+            }
+            (1.0 - (d as f32 - 0.5) / 0.7).clamp(0.0, 1.0)
+        }
+    }
+
+    /// The share of a path's length on ground worn at least `at`.
+    fn share_worn(from: DVec3, path: &[DVec3], wear: &GroundWear, at: f32) -> f64 {
+        let (mut on, mut all) = (0.0, 0.0);
+        let mut prev = from;
+        for &p in path {
+            let n = (prev.distance(p) / 0.25).ceil().max(1.0) as usize;
+            for k in 0..n {
+                let q = prev.lerp(p, (k as f64 + 0.5) / n as f64);
+                let l = prev.distance(p) / n as f64;
+                all += l;
+                if wear.wear(q) >= at {
+                    on += l;
+                }
+            }
+            prev = p;
+        }
+        on / all.max(1e-9)
+    }
+
+    #[test]
+    fn a_worn_path_bends_a_route_onto_it() {
+        let world = TacticalWorld::from_obstacles(Vec::new(), &Ground::default());
+        let mut grid = NavGrid::default();
+        let (ground, water) = (Ground::default(), Water::default());
+        let from = DVec3::new(-15.0, 0.0, 0.0);
+        let to = DVec3::new(15.0, 0.0, 0.0);
+        // A path worn out to the side and back: 1.24x and 1.41x the straight walk.
+        for out in [7.0, 10.0] {
+            let trail = vec![
+                from,
+                DVec3::new(-10.0, 0.0, out),
+                DVec3::new(10.0, 0.0, out),
+                to,
+            ];
+            let trail_len = path_len(from, &trail[1..]);
+            let ratio = trail_len / from.distance(to);
+            let wear = GroundWear(Arc::new(Trail(trail)));
+            let mut ctx = grid.ctx(&world, &ground, &water).worn(Some(&wear));
+            let mut path = Vec::new();
+            let status = ctx.find_path(from, to, &mut |_| 0.0, &mut path);
+            assert_eq!(status, PathStatus::Complete);
+            let len = path_len(from, &path);
+            let on = share_worn(from, &path, &wear, 0.5);
+            assert!(
+                path.iter().any(|p| p.z > out - 1.0),
+                "{ratio:.2}x: the route keeps off the worn path: {path:?}"
+            );
+            assert!(
+                on > 0.9 && (len / trail_len - 1.0).abs() < 0.06,
+                "{ratio:.2}x: {:.0}% of the {len:.1} m route is on the {trail_len:.1} m path: \
+                 {path:?}",
+                on * 100.0
+            );
+        }
+        // Worn ground straight across the way changes nothing: still a straight walk.
+        let across = GroundWear(Arc::new(Trail(vec![
+            DVec3::new(0.0, 0.0, -10.0),
+            DVec3::new(0.0, 0.0, 10.0),
+        ])));
+        let mut ctx = grid.ctx(&world, &ground, &water).worn(Some(&across));
+        let mut path = Vec::new();
+        ctx.find_path(from, to, &mut |_| 0.0, &mut path);
+        assert!(path_len(from, &path) < 30.2, "{path:?}");
+    }
+
+    #[test]
+    fn without_wear_routes_are_unchanged() {
+        struct Untouched;
+        impl WearQuery for Untouched {
+            fn wear(&self, _p: DVec3) -> f32 {
+                0.0
+            }
+        }
+        let world = TacticalWorld::from_obstacles(
+            vec![wall(
+                1,
+                DVec3::new(0.0, 2.0, 0.0),
+                Vec3::new(6.0, 2.0, 0.3),
+                Quat::IDENTITY,
+            )],
+            &Ground::default(),
+        );
+        let (ground, water) = (Ground::default(), Water::default());
+        let default = GroundWear::default();
+        let untouched = GroundWear(Arc::new(Untouched));
+        let trips = [
+            (DVec3::new(0.0, 0.0, -5.0), DVec3::new(0.0, 0.0, 5.0)),
+            (DVec3::new(-9.0, 0.0, -3.0), DVec3::new(8.0, 0.0, 4.0)),
+            (DVec3::new(-20.0, 0.0, 2.0), DVec3::new(20.0, 0.0, 9.0)),
+            (DVec3::new(3.0, 0.0, 1.0), DVec3::new(-3.0, 0.0, -1.5)),
+        ];
+        let fire = |p: DVec3| {
+            if (p.x - 8.0).abs() < 2.0 && p.z.abs() < 3.0 {
+                f32::INFINITY
+            } else if p.z > 4.0 {
+                0.7
+            } else {
+                0.0
+            }
+        };
+        for (from, to) in trips {
+            let mut runs = Vec::new();
+            for wear in [None, Some(&default), Some(&untouched)] {
+                let mut grid = NavGrid::default();
+                let mut ctx = grid.ctx(&world, &ground, &water).worn(wear);
+                let mut path = Vec::new();
+                let status = ctx.find_path(from, to, &mut { fire }, &mut path);
+                runs.push((status, path));
+            }
+            assert_eq!(runs[0], runs[1], "{from} -> {to}");
+            assert_eq!(runs[0], runs[2], "{from} -> {to}");
+        }
+    }
+
+    /// A small wear map that walkers tread: each walk adds wear along its line and the rest
+    /// heals a little (a stand-in for terrain's, which this crate can't use).
+    #[derive(Clone)]
+    struct Field {
+        wear: Vec<f32>,
+    }
+    const FIELD_W: i32 = 100;
+    const FIELD_D: i32 = 80;
+    impl Field {
+        fn index(p: DVec3) -> Option<usize> {
+            let (x, z) = (
+                ((p.x + 25.0) / 0.5).floor() as i32,
+                ((p.z + 20.0) / 0.5).floor() as i32,
+            );
+            (x >= 0 && z >= 0 && x < FIELD_W && z < FIELD_D).then_some((z * FIELD_W + x) as usize)
+        }
+        fn tread(&mut self, from: DVec3, path: &[DVec3]) {
+            for w in &mut self.wear {
+                *w *= 0.99;
+            }
+            let mut prev = from;
+            let mut hit = std::collections::HashSet::new();
+            for &p in path {
+                let n = (prev.distance(p) / 0.2).ceil().max(1.0) as usize;
+                for k in 0..=n {
+                    if let Some(i) = Self::index(prev.lerp(p, k as f64 / n as f64)) {
+                        hit.insert(i);
+                    }
+                }
+                prev = p;
+            }
+            for i in hit {
+                self.wear[i] = (self.wear[i] + 0.12).min(1.0);
+            }
+        }
+    }
+    impl WearQuery for Field {
+        fn wear(&self, p: DVec3) -> f32 {
+            Self::index(p).map_or(0.0, |i| self.wear[i])
+        }
+    }
+
+    /// Walkers cross a field between two loose crowds of start and end points; returns how
+    /// wide the band of worn ground (wear > 0.5) is across the middle, and its peak.
+    fn walk_the_field(prefer_worn: bool) -> (f64, f32) {
+        let world = TacticalWorld::from_obstacles(Vec::new(), &Ground::default());
+        let (ground, water) = (Ground::default(), Water::default());
+        let mut grid = NavGrid::default();
+        let mut field = Field {
+            wear: vec![0.0; (FIELD_W * FIELD_D) as usize],
+        };
+        let mut seed = 0x2545_F491_u32;
+        let mut rand = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f64 / u32::MAX as f64
+        };
+        // A walk every few seconds for a quarter of an hour, alternating ways.
+        for k in 0..240 {
+            let mut end = |x: f64| {
+                let (a, r) = (rand() * std::f64::consts::TAU, 5.0 * rand().sqrt());
+                DVec3::new(x + a.cos() * r, 0.0, a.sin() * r)
+            };
+            let (mut from, mut to) = (end(-16.0), end(16.0));
+            if k % 2 == 1 {
+                std::mem::swap(&mut from, &mut to);
+            }
+            let wear = GroundWear(Arc::new(field.clone()));
+            let mut ctx = grid
+                .ctx(&world, &ground, &water)
+                .worn(prefer_worn.then_some(&wear));
+            let mut path = Vec::new();
+            ctx.find_path(from, to, &mut |_| 0.0, &mut path);
+            field.tread(from, &path);
+        }
+        // Across the middle of the field.
+        let across: Vec<f32> = (0..FIELD_D)
+            .map(|z| {
+                let zm = z as f64 * 0.5 - 20.0 + 0.25;
+                (-4..=4)
+                    .map(|dx| field.wear(DVec3::new(dx as f64 * 0.5, 0.0, zm)))
+                    .sum::<f32>()
+                    / 9.0
+            })
+            .collect();
+        let worn = across.iter().filter(|w| **w > 0.5).count() as f64 * 0.5;
+        (worn, across.iter().cloned().fold(0.0, f32::max))
+    }
+
+    #[test]
+    fn walkers_wear_a_path_that_draws_them_onto_it() {
+        let (band, peak) = walk_the_field(true);
+        let (spread, flat) = walk_the_field(false);
+        // Taking the worn line, they wear one narrow path deep; walking straight, they wear
+        // the field over a wide strip and nowhere deeply.
+        assert!(
+            peak > 0.8 && band > 0.0 && band <= 3.0,
+            "preferring worn ground: band {band} m wide, peak {peak}"
+        );
+        assert!(
+            flat < peak - 0.2 || spread > band * 2.0,
+            "walking straight: band {spread} m, peak {flat} (vs {band} m, {peak})"
+        );
     }
 }

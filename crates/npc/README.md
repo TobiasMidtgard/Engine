@@ -37,6 +37,14 @@ reached with a last straight step, and a body standing inside it starts from the
 cell at its own level (not the top of the barrel beside it). When a physics backend is installed, sight and shot checks
 also use `PhysicsQueries`.
 
+Worn paths (`GroundWear`, which terrain fills from everyone's footsteps) are cheaper to walk:
+a step costs `1 - 0.5 × wear` of its length (`nav::WORN_DISCOUNT`), so fighters on the move and
+wildlife take a worn path when the detour is worth it (a path up to about twice the straight
+walk's length, if it is worn end to end), and the paths they keep to wear deeper: desire paths
+and game trails reinforce themselves. Danger costs (fire, enemy sight lines) are not discounted.
+Grazing and wandering animals also turn their headings up to 0.3 rad toward worn ground a few
+meters ahead, so herds still spread out to graze. Without wear nearby, paths are unchanged.
+
 ## Wildlife
 
 ```rust,ignore
@@ -478,7 +486,7 @@ a turned world also rebuilds the tactical world from the colliders.
 ## Contracts
 
 Reads: `Collider` / `RigidBody` (tactical world), `PhysicsQueries` when present, `Ground`,
-`Water`, `HeatField` (avoid fire), `Obscurance` (smoke, fog and dust), `NoiseEvent`, `DamageEvent`, `AttackEvent` (telegraphs to
+`Water`, `GroundWear` (prefer worn paths), `HeatField` (avoid fire), `Obscurance` (smoke, fog and dust), `NoiseEvent`, `DamageEvent`, `AttackEvent` (telegraphs to
 defend against), `ProjectileTrace` (near misses), `LocomotionState` of targets (and their
 `vulnerable` and `stamina` for openings), targets' `AnimationParams` "reloading", `TerrainChanged`,
 `LocalTimeScale` / `TimeDilation`, `LocomotionBackend`, `WorldShift`, `AppearanceBodies`,

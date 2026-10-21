@@ -19,7 +19,7 @@ use engine_core::prelude::*;
 use engine_world::animation::AnimationTrigger;
 use engine_world::locomotion::MoveIntent;
 use engine_world::physics::{PhysicsBackend, PhysicsQueries};
-use engine_world::{AttackEvent, FocusPoints, Ground, HeatField, Obscurance, Water};
+use engine_world::{AttackEvent, FocusPoints, Ground, GroundWear, HeatField, Obscurance, Water};
 
 use crate::agent::{
     AlertLevel, AttackPhase, Defense, Npc, NpcAction, NpcBrain, NpcClock, NpcCombat, NpcMotor,
@@ -46,6 +46,8 @@ pub(crate) struct BrainWorld<'w, 's> {
     nav: ResMut<'w, NavGrid>,
     ground: Res<'w, Ground>,
     water: Res<'w, Water>,
+    /// Worn paths, which routes prefer (when some module provides them).
+    wear: Option<Res<'w, GroundWear>>,
     heat: Res<'w, HeatField>,
     obscurance: Res<'w, Obscurance>,
     physics: Res<'w, PhysicsQueries>,
@@ -2024,7 +2026,10 @@ fn follow(
         || (nav.status == Some(PathStatus::Partial) && now - nav.planned_at > 1.5);
     if stale && s.replans < 8 {
         s.replans += 1;
-        let mut ctx = w.nav.ctx(&w.world, &w.ground, &w.water);
+        let mut ctx = w
+            .nav
+            .ctx(&w.world, &w.ground, &w.water)
+            .worn(w.wear.as_deref());
         let heat = &w.heat;
         let mut cost = |p: DVec3| {
             let h = heat.sample(p + DVec3::Y * 0.5);
