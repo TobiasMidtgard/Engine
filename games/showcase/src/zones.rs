@@ -214,7 +214,6 @@ pub const GRASSY_ZONES: &[&str] = &[
     "market",
     "paddock",
     "yard",
-    "magic",
     "gallery2d",
     "forest",
     "meadow",
@@ -347,14 +346,16 @@ pub struct DemoZones(pub Vec<String>);
 /// field's, the smoke stops (`smoke_range`) the range's, and the sunset and night views look
 /// across the plaza, so a tour of them shows its fountain and spheres. The overview and the
 /// tower look down on the whole valley, where only the lake's water reads from that height
-/// (without it the lake is a bare basin), so they load just the lake.
-const ZONE_ALIASES: [(&str, &str); 6] = [
+/// (without it the lake is a bare basin), so they load just the lake, as does the waterfall
+/// that feeds it.
+const ZONE_ALIASES: [(&str, &str); 7] = [
     ("fire", "field"),
     ("smoke", "range"),
     ("sunset", "plaza"),
     ("night", "plaza"),
     ("overview", "lake"),
     ("tower", "lake"),
+    ("falls", "lake"),
 ];
 
 /// The zone a viewpoint belongs to: the zone with its key, or whose key and `_` start it

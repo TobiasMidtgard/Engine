@@ -23,6 +23,7 @@
 
 mod camera;
 mod film;
+mod forest;
 mod landscape;
 mod meshgen;
 mod placeholders;
@@ -76,6 +77,7 @@ fn main() {
             Update,
             (camera::fly, places::run_pending, scenery::update_lods).chain(),
         )
+        .add_systems(Update, forest::install)
         .add_systems(Update, scenery::stream_wall_colliders)
         .add_systems(Update, scenery::stream_wall_heroes)
         .add_systems(Update, report_assets);
