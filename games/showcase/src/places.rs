@@ -35,6 +35,27 @@ impl Place {
         self.quick_warmup = true;
         self
     }
+
+    /// Make an API call on arriving.
+    fn arriving(mut self, name: &str, args: String) -> Self {
+        self.on_arrive.push((name.to_string(), args));
+        self
+    }
+}
+
+/// The footpath villagers have worn from the end of the east road across the grass to the
+/// lake shore (x, z): past the village's houses, round the cloth yard.
+pub const LAKE_TRAIL: [[f64; 2]; 3] = [[82.0, -33.0], [95.0, -90.0], [172.0, -122.0]];
+
+/// Whether (x, z) is within `margin` meters of [`LAKE_TRAIL`]'s line (trees, rocks and grass
+/// keep off it, so the worn ground shows).
+pub fn near_lake_trail(x: f64, z: f64, margin: f64) -> bool {
+    let p = DVec2::new(x, z);
+    LAKE_TRAIL.windows(2).any(|leg| {
+        let (a, b) = (DVec2::from_array(leg[0]), DVec2::from_array(leg[1]));
+        let t = ((p - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+        p.distance(a + (b - a) * t) < margin
+    })
 }
 
 /// Make `place` the current one: run the previous place's `on_leave` calls, then this one's
@@ -226,6 +247,20 @@ pub fn places() -> Vec<Place> {
             16.5,
         ),
         place("falls", "Waterfall into the lake", falls_view(), 15.0),
+        lake_trail(place(
+            "lake_trail",
+            "A footpath worn bare across the grass to the lake",
+            {
+                let [a, b, c] = LAKE_TRAIL.map(DVec2::from_array);
+                let eye = a - (b - a).normalize() * 14.0;
+                let mid = (b + (b + c) * 0.5) * 0.5;
+                (
+                    above_ground(DVec3::new(eye.x, 20.0, eye.y), 18.0),
+                    DVec3::new(mid.x, 0.0, mid.y),
+                )
+            },
+            10.0,
+        )),
         place(
             "footsteps",
             "Footstep trail: grass, mud, snow, ice, gravel, boards, grate, underpass, sand",
@@ -391,6 +426,20 @@ pub fn places() -> Vec<Place> {
         }
     }
     list
+}
+
+/// Wear [`LAKE_TRAIL`] into the ground on arriving: years of villagers walking to the lake,
+/// so the ground decides how it shows (bare earth through turf, a rut through mud).
+fn lake_trail(place: Place) -> Place {
+    LAKE_TRAIL.windows(2).fold(place, |place, leg| {
+        let ([ax, az], [bx, bz]) = (leg[0], leg[1]);
+        place.arriving(
+            "terrain.walk_path",
+            format!(
+                r#"{{"from": [{ax}, 0, {az}], "to": [{bx}, 0, {bz}], "passes": 10000, "load_kg": 75, "spread_m": 0.4}}"#
+            ),
+        )
+    })
 }
 
 /// Below the waterfall, looking up at it across the plunge pool.

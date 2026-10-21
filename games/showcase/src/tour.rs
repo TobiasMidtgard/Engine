@@ -15,6 +15,10 @@ const STEP_SECS: f32 = 0.05;
 /// Before settling, a stop waits for meshes still being clustered in the background (the
 /// displaced relief of stones, rocks and bark), while they keep finishing...
 const BUILD_STALL_SECS: f32 = 90.0;
+/// ...or, in the wait before a stop's arrival calls, while any finish this often: a timed
+/// stop should do its long waiting there, where the clock hasn't started (a software renderer
+/// can take minutes over one stone).
+const ARRIVAL_STALL_SECS: f32 = 600.0;
 /// ...but never longer than this, wall-clock seconds.
 const BUILD_WAIT_SECS: f32 = 900.0;
 
@@ -141,7 +145,7 @@ fn run(world: &mut World) {
     // meanwhile don't eat into the warm-up: a timed moment (a vault, a leap onto a moving car)
     // is caught when the warm-up says, however long the builds take.
     if frames == 1 {
-        if wait_for_builds(world) {
+        if wait_for_builds(world, ARRIVAL_STALL_SECS) {
             return;
         }
         crate::places::visit_soon(world, &place);
@@ -156,7 +160,7 @@ fn run(world: &mut World) {
     // Anything the calls brought into view gets the same wait before the picture.
     if frames == settle_from {
         unpark(world);
-        if wait_for_builds(world) {
+        if wait_for_builds(world, BUILD_STALL_SECS) {
             return;
         }
     }
@@ -182,7 +186,7 @@ fn run(world: &mut World) {
 
 /// Hold the stop (true) while virtual geometry is still building meshes in view, so the
 /// picture shows their finished relief, not the smooth shapes drawn until it is ready.
-fn wait_for_builds(world: &mut World) -> bool {
+fn wait_for_builds(world: &mut World, stall_secs: f32) -> bool {
     let Some(state) = world.get_resource::<Renderer>().map(|r| {
         let describe = r.describe();
         describe["features"]
@@ -206,7 +210,7 @@ fn wait_for_builds(world: &mut World) -> bool {
     let changed = if ready != last_ready { now } else { changed };
     let waited = now.duration_since(since).as_secs_f32();
     let stalled = now.duration_since(changed).as_secs_f32();
-    if building == 0 || waited > BUILD_WAIT_SECS || stalled > BUILD_STALL_SECS {
+    if building == 0 || waited > BUILD_WAIT_SECS || stalled > stall_secs {
         if waited > 1.0 {
             engine::core::log::info!(
                 "  waited {waited:.0} s for {ready} meshes' clusters ({building} not ready)"

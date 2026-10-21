@@ -481,7 +481,10 @@ pub fn spawn_woods(commands: &mut Commands, lib: &Library, land: &Landscape, rng
             if rng.f32() as f64 > p {
                 continue;
             }
-            if land.road_weight(x, z) > 0.0 || (land.pad_weight(x, z) > 0.3 && !rim) {
+            if land.road_weight(x, z) > 0.0
+                || (land.pad_weight(x, z) > 0.3 && !rim)
+                || crate::places::near_lake_trail(x, z, 4.0)
+            {
                 continue;
             }
             let h = land.height(x, z);
@@ -542,7 +545,10 @@ pub fn spawn_meadows(commands: &mut Commands, lib: &Library, land: &Landscape, r
             if x * x + z * z > extent * extent || in_hard_zone(x, z, 2.0) {
                 continue;
             }
-            if land.road_weight(x, z) > 0.05 || land.lake_depth(x, z) > -0.3 {
+            if land.road_weight(x, z) > 0.05
+                || land.lake_depth(x, z) > -0.3
+                || crate::places::near_lake_trail(x, z, 2.5)
+            {
                 continue;
             }
             let h = land.height(x, z);
@@ -714,7 +720,10 @@ pub fn spawn_rocks(commands: &mut Commands, lib: &Library, land: &Landscape, rng
     for _ in 0..2600 {
         let p = rng.in_unit_disk() * 1400.0;
         let (x, z) = (p.x as f64, p.y as f64);
-        if in_zone(x, z, 5.0) || land.road_weight(x, z) > 0.0 {
+        if in_zone(x, z, 5.0)
+            || land.road_weight(x, z) > 0.0
+            || crate::places::near_lake_trail(x, z, 3.0)
+        {
             continue;
         }
         let h = land.height(x, z);
