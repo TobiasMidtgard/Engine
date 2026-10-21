@@ -20,7 +20,8 @@
 //! recording sounds like. The synthesized layers of [`crate::footstep`] still play on top,
 //! but only what the recording lacks: the squelch of wet ground, a puddle's splash, a heavy
 //! walker's thump, cold snow's squeak. On half-worn ground the ground's take and the path's
-//! play together ([`FootstepSamples::recorded`]). A surface with no takes, or a missing folder, falls
+//! play together, and on a damp path an earth take and a mud take as bright as it
+//! ([`FootstepSamples::recorded`]). A surface with no takes, or a missing folder, falls
 //! back to the synthesis alone, so nothing needs the fetched files (CI never fetches them).
 //!
 //! Shoes and boots, a dog's paws and a horse's hooves each have their own recordings
@@ -224,6 +225,9 @@ pub struct TakeStats {
     pub cleaned: bool,
     /// `floor_db` as recorded, before any cleaning, dB.
     pub raw_floor_db: f32,
+    /// Energy-weighted mean frequency of the take as it plays (after [`match_sources`]), Hz;
+    /// 0 when not measured.
+    pub centroid_hz: f32,
 }
 
 /// Silence kept before each take's onset, s.
@@ -254,6 +258,13 @@ impl TakeSet {
     /// and none of the last few picks comes back. Deterministic for a given `rng` state and
     /// pick history.
     pub fn pick(&mut self, run: f32, rng: &mut Noise) -> Option<&Take> {
+        self.pick_near(run, None, rng)
+    }
+
+    /// [`Self::pick`], but with `near_hz` only among the takes whose
+    /// [`TakeStats::centroid_hz`] is nearest it (the closest quarter of those it could pick, at
+    /// least three): a take to layer with another so the two sound like one ground.
+    pub fn pick_near(&mut self, run: f32, near_hz: Option<f32>, rng: &mut Noise) -> Option<&Take> {
         if self.takes.is_empty() {
             return None;
         }
@@ -278,6 +289,13 @@ impl TakeSet {
             .copied()
             .collect();
         pool.retain(|i| !recent.contains(i));
+        if let Some(hz) = near_hz.filter(|h| *h > 0.0)
+            && pool.iter().all(|&i| self.takes[i].stats.centroid_hz > 0.0)
+        {
+            let off = |i: usize| (self.takes[i].stats.centroid_hz / hz).log2().abs();
+            pool.sort_by(|&a, &b| off(a).total_cmp(&off(b)).then(a.cmp(&b)));
+            pool.truncate((pool.len() / 4).max(3));
+        }
         let i = pool[((rng.uniform() * pool.len() as f32) as usize).min(pool.len() - 1)];
         self.recent.push(i);
         if self.recent.len() > 8 {
@@ -466,6 +484,9 @@ fn load_sets(dir: &Path, feet: Feet) -> BTreeMap<String, TakeSet> {
     sets.retain(|_, t| t.takes.len() >= MIN_TAKES);
     for set in sets.values_mut() {
         match_sources(&mut set.takes);
+        for t in &mut set.takes {
+            t.stats.centroid_hz = centroid(&t.pcm, t.sample_rate);
+        }
     }
     sets
 }
@@ -743,19 +764,26 @@ const PARTS: &[(&str, Parts)] = &[
     ("vrymaa_825854", &[(0.0, 38.2, Part::Walk)]),
     ("softdistortionfx_398937", &[(0.0, 91.1, Part::Walk)]),
     ("sturmankin_272253", &[(0.0, 30.2, Part::Walk)]),
-    // Boots on soil (bare earth): leave out the five steps whose sole scrapes the grit, 40-50 %
-    // of their energy a hiss over 3 kHz, twice as bright as the others (3.3-4.5 kHz centroid
-    // against 0.7-2.5 kHz), which made them sound like another ground.
+    // A dirt country path outdoors: leave out where birds sing over the steps (a held
+    // whistle 19-32 dB over the step's own spectrum, against at most 15 dB for the others).
     (
-        "sturmankin_278913",
+        "sadiquecat_802067",
         &[
-            (2.4, 5.8, Part::Walk),
-            (6.5, 16.2, Part::Walk),
-            (16.9, 21.9, Part::Walk),
-            (22.6, 25.2, Part::Walk),
-            (25.9, 32.1, Part::Walk),
+            (0.0, 15.6, Part::Walk),
+            (16.6, 77.2, Part::Walk),
+            (78.4, 87.7, Part::Walk),
+            (102.0, 111.0, Part::Walk),
+            (112.2, 134.1, Part::Walk),
         ],
     ),
+];
+
+/// Recordings with more rumble under their steps than the 50 Hz high-pass takes out, and the
+/// frequency (Hz) a steeper one cuts them at.
+const RUMBLE: &[(&str, f32)] = &[
+    // Walked holding a tripod: a third of each step's energy is its handling thump under
+    // 60 Hz, which put the steps two octaves under the other bare-earth recordings.
+    ("sadiquecat_802067", 90.0),
 ];
 
 /// Most takes kept per recording and gait: the ones closest to the recording's typical step.
@@ -870,9 +898,21 @@ pub fn cut_recording(feet: Feet, name: &str, folder: &str, x: &[f32], sr: f32) -
         .map(|(_, p)| p.to_vec())
         .unwrap_or_else(|| vec![(0.0, f32::MAX, Part::Steps)]);
     let source: Arc<str> = name.into();
-    // Rumble and handling noise below the lowest footfall thud.
-    let mut hp = Biquad::highpass(sr, 50.0, 0.7);
-    let x: Vec<f32> = x.iter().map(|&v| hp.process(v)).collect();
+    // Rumble and handling noise below the lowest footfall thud (higher, and twice as steep,
+    // in recordings that have more of it).
+    let x: Vec<f32> = match RUMBLE.iter().find(|(n, _)| *n == name) {
+        Some(&(_, hz)) => {
+            let (mut a, mut b) = (
+                Biquad::highpass(sr, hz, 0.54),
+                Biquad::highpass(sr, hz, 1.31),
+            );
+            x.iter().map(|&v| b.process(a.process(v))).collect()
+        }
+        None => {
+            let mut hp = Biquad::highpass(sr, 50.0, 0.7);
+            x.iter().map(|&v| hp.process(v)).collect()
+        }
+    };
     let x = &x[..];
     let mut cuts = Vec::new();
     for (a, b, part) in parts {
@@ -1718,10 +1758,35 @@ pub struct StepSample {
     /// Longest it plays, s (of the take as recorded): a take cut short fades out over
     /// [`CUT_FADE_S`] there. `f32::INFINITY` plays it whole.
     pub length_s: f32,
-    /// A second take played with this one, onsets together: on half-worn ground the
-    /// ground's own take under the path's, each at its share of the blend, so the step is
-    /// one in-between ground instead of either.
+    /// A second take played with this one, onsets together (and it may have one of its
+    /// own): on half-worn ground the ground's own take under the path's, on a damp path mud's
+    /// under the earth's, each at its share of the blend, so the step is one in-between
+    /// ground instead of either.
     pub under: Option<Box<StepSample>>,
+}
+
+impl StepSample {
+    /// This take and every take under it, top first.
+    pub fn layers(&self) -> impl Iterator<Item = &StepSample> {
+        std::iter::successors(Some(self), |s| s.under.as_deref())
+    }
+
+    /// Scale this take's gain and every one under it by `g`.
+    pub fn scale(&mut self, g: f32) {
+        let mut s = Some(self);
+        while let Some(x) = s {
+            x.gain *= g;
+            s = x.under.as_deref_mut();
+        }
+    }
+
+    /// Put `s` (and what is under it) under the last of this take's layers.
+    fn push_under(&mut self, s: StepSample) {
+        match &mut self.under {
+            Some(u) => u.push_under(s),
+            None => self.under = Some(Box::new(s)),
+        }
+    }
 }
 
 /// Plays a [`StepSample`] at the mixer's rate (Catmull-Rom resampling).
@@ -1939,8 +2004,11 @@ impl FootstepSamples {
     /// `wading_m` the ground's state, and `wait` blocks for a bank that is still loading.
     ///
     /// On a worn path the path's recordings join the ground's: bare earth's (its own
-    /// `footsteps/path/` takes, else borrowed ones, see [`borrowed`]), mud's on a share
-    /// `worn.mud` of the steps as the ground gets wet, packed snow's on trodden snow. Between
+    /// `footsteps/path/` takes, else borrowed ones, see [`borrowed`]) turning to mud's as the
+    /// ground gets wet, packed snow's on trodden snow. A damp path (`worn.mud` between
+    /// [`LAYER_FROM`] and `1 - LAYER_FROM`) plays an earth take and a mud take together on
+    /// every step, onsets aligned, at `1 - mud` and `mud` of the power, so it is one damp
+    /// earth rather than earth one step and mud the next. Between
     /// [`LAYER_FROM`] and `1 - LAYER_FROM` of the way (`worn.t`) every step plays both takes
     /// together, the ground's at `1 - t` of the power and the path's at `t`, so half-worn
     /// ground is one in-between ground step after step rather than turf one step and earth
@@ -1965,80 +2033,94 @@ impl FootstepSamples {
         let snow = surfaces.snow();
         let cover = smooth(0.005, 0.07, cell.snow_m);
         let puddle = smooth(0.002, 0.03, cell.puddle_m);
-        let mut path_rng = Noise::new(step.seed ^ 0x9A7B_0E4A_2D11_C3F5);
         let (ground, path, path_t) = if cover >= 0.5 && dry.crunch < snow.crunch {
             (("snow", snow), "packed_snow", worn.packed)
         } else if (puddle >= 0.5 || wading_m > 0.05) && material != "water" {
             (("water", surfaces.named("water")), "", 0.0)
         } else {
-            let path = if worn.path == "path" && path_rng.chance(worn.mud) {
-                "mud"
-            } else {
-                worn.path
-            };
-            ((material, *dry), path, worn.t)
+            ((material, *dry), worn.path, worn.t)
         };
-        let path = (path_t > 0.0).then(|| (path, surfaces.named(path)));
+        // How much of an earth path's take is mud's.
+        let mud = if path == "path" { worn.mud } else { 0.0 };
         let pick_kept = |me: &mut Self, (name, base): (&str, SurfaceSound), min_kept: f32| {
-            me.recorded_as(feet, name, &base, step, surfaces, fs, wait, min_kept)
+            me.recorded_as(feet, name, &base, step, surfaces, fs, wait, min_kept, None)
         };
         let pick = |me: &mut Self, g: (&str, SurfaceSound)| pick_kept(me, g, MIN_KEPT);
-        let chosen = match path {
-            // Untouched ground never tries the path's takes.
-            None => pick(self, ground).map(|g| (g, None)),
-            Some(p) if path_t >= 1.0 - LAYER_FROM => pick(self, p)
-                .or_else(|| pick(self, ground))
-                .map(|x| (x, None)),
-            Some(p) if path_t <= LAYER_FROM => pick(self, ground)
-                .or_else(|| pick(self, p))
-                .map(|x| (x, None)),
-            // Both takes, if together they hold enough of the step (each alone may not: a
-            // nearly worn meadow keeps too little of grass for grass's take on its own).
-            Some(p) => match (pick_kept(self, ground, 0.0), pick_kept(self, p, 0.0)) {
-                (Some(g), Some(p))
-                    if step.surface.kept(&g.recorded.blend(&p.recorded, path_t)) >= MIN_KEPT =>
-                {
-                    Some((p, Some(g)))
-                }
-                _ => pick(self, ground)
-                    .or_else(|| pick(self, p))
-                    .map(|x| (x, None)),
-            },
+        // Two picks played together, onsets aligned, `b` at `t` of the power and `a` at the
+        // rest, if together they hold `min_kept` of the step (each alone may not: a nearly
+        // worn meadow keeps too little of grass for grass's take on its own).
+        let both = |a: Pick, b: Pick, t: f32, min_kept: f32| {
+            let recorded = a.recorded.blend(&b.recorded, t);
+            (step.surface.kept(&recorded) >= min_kept).then(|| {
+                let mut sample = b.sample;
+                sample.scale(t.sqrt());
+                let mut under = a.sample;
+                under.scale((1.0 - t).sqrt());
+                sample.push_under(under);
+                Pick { recorded, sample }
+            })
         };
-        let (top, under) = chosen?;
-        Some(Self::finish(feet, step, top, under, path_t))
-    }
-
-    /// The step for the layers and the take(s) to play, from the take picked (`top`) and, on
-    /// half-worn ground, the ground's take under it (`under`; `top` is then the path's,
-    /// `t` the path's share).
-    fn finish(
-        feet: Feet,
-        step: &Step,
-        top: Pick,
-        under: Option<Pick>,
-        t: f32,
-    ) -> (Step, StepSample) {
-        let state = step.surface;
-        let i_rel = step.intensity.max(0.05) / feet.recorded_intensity();
-        let (recorded, mut sample) = match under {
-            None => (top.recorded, top.sample),
-            Some(g) => {
-                let t = t.clamp(0.0, 1.0);
-                let mut sample = top.sample;
-                sample.gain *= t.sqrt();
-                let mut g_sample = g.sample;
-                g_sample.gain *= (1.0 - t).sqrt();
-                sample.under = Some(Box::new(g_sample));
-                (g.recorded.blend(&top.recorded, t), sample)
+        // The path's take: on a damp earth path, the earth's and mud's together.
+        let pick_path = |me: &mut Self, min_kept: f32| {
+            let earth = (path, surfaces.named(path));
+            let wet = ("mud", surfaces.named("mud"));
+            if mud <= LAYER_FROM {
+                // Dry earth, or packed snow (never mud).
+                pick_kept(me, earth, min_kept)
+            } else if mud >= 1.0 - LAYER_FROM {
+                pick_kept(me, wet, min_kept).or_else(|| pick_kept(me, earth, min_kept))
+            } else {
+                // Mud's take as bright as the earth's, so the two are one damp ground: mud's
+                // takes range from a dull squelch to a bright splash.
+                let earth_take = pick_kept(me, earth, 0.0);
+                let near = earth_take.as_ref().map(|e| e.sample.take.stats.centroid_hz);
+                let (name, base) = wet;
+                let wet_take =
+                    me.recorded_as(feet, name, &base, step, surfaces, fs, wait, 0.0, near);
+                match (earth_take, wet_take) {
+                    (Some(e), Some(m)) => both(e, m, mud, min_kept),
+                    _ => None,
+                }
+                .or_else(|| {
+                    let (first, second) = if mud < 0.5 {
+                        (earth, wet)
+                    } else {
+                        (wet, earth)
+                    };
+                    pick_kept(me, first, min_kept).or_else(|| pick_kept(me, second, min_kept))
+                })
             }
         };
+        let chosen = if path_t <= 0.0 {
+            // Untouched ground never tries the path's takes.
+            pick(self, ground)
+        } else if path_t >= 1.0 - LAYER_FROM {
+            pick_path(self, MIN_KEPT).or_else(|| pick(self, ground))
+        } else if path_t <= LAYER_FROM {
+            pick(self, ground).or_else(|| pick_path(self, MIN_KEPT))
+        } else {
+            match (pick_kept(self, ground, 0.0), pick_path(self, 0.0)) {
+                (Some(g), Some(p)) => both(g, p, path_t, MIN_KEPT),
+                _ => None,
+            }
+            .or_else(|| pick(self, ground))
+            .or_else(|| pick_path(self, MIN_KEPT))
+        };
+        Some(Self::finish(feet, step, chosen?))
+    }
+
+    /// The step for the layers and the take(s) to play, from the take(s) picked: the path's
+    /// over the ground's on half-worn ground, mud's over the earth's on a damp path, each
+    /// already at its share of the power.
+    fn finish(feet: Feet, step: &Step, pick: Pick) -> (Step, StepSample) {
+        let state = step.surface;
+        let i_rel = step.intensity.max(0.05) / feet.recorded_intensity();
+        let Pick {
+            recorded,
+            mut sample,
+        } = pick;
         // Level follows how much of the recorded surface the step keeps.
-        let k = state.kept(&recorded).sqrt();
-        sample.gain *= k;
-        if let Some(u) = &mut sample.under {
-            u.gain *= k;
-        }
+        sample.scale(state.kept(&recorded).sqrt());
         // Synthesize what the recording lacks, plus a little of what it has: weight (a
         // heavier walker thumps more) and per-step grain.
         let mut over = state.over_recording(&recorded, 0.12);
@@ -2055,7 +2137,8 @@ impl FootstepSamples {
     /// A take of the surface `name` (whose own sound is `base`) for `step`, if it (or the
     /// surface it borrows from) has takes and the step keeps at least `min_kept` of what they
     /// hold: its gain before [`Self::finish`] levels it by how much of the recorded surface
-    /// the step keeps.
+    /// the step keeps. With `near_hz`, the take is one of those whose spectral centroid is
+    /// nearest it ([`TakeSet::pick_near`]).
     #[allow(clippy::too_many_arguments)]
     fn recorded_as(
         &mut self,
@@ -2067,6 +2150,7 @@ impl FootstepSamples {
         fs: f32,
         wait: bool,
         min_kept: f32,
+        near_hz: Option<f32>,
     ) -> Option<Pick> {
         let bank = self.bank(wait)?;
         let (folder, borrow) = match bank.folder_for(feet, name) {
@@ -2098,7 +2182,7 @@ impl FootstepSamples {
         let take = bank
             .sets_mut(feet)
             .get_mut(&folder)?
-            .pick(run, &mut rng)?
+            .pick_near(run, near_hz, &mut rng)?
             .clone();
 
         let i = step.intensity.max(0.05);
@@ -2697,6 +2781,139 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_take_to_layer_is_picked_near_the_others_brightness() {
+        // Twenty takes from 200 Hz to 4 kHz (log-spaced centroids).
+        let takes: Vec<Take> = (0..20)
+            .map(|k| {
+                let mut t = take(Gait::Walk, k as f32);
+                t.stats.centroid_hz = 200.0 * 20f32.powf(k as f32 / 19.0);
+                t
+            })
+            .collect();
+        let mut set = TakeSet::new(takes);
+        let mut rng = Noise::new(3);
+        for _ in 0..60 {
+            let t = set.pick_near(0.0, Some(1_000.0), &mut rng).unwrap();
+            let off = (t.stats.centroid_hz / 1_000.0).log2().abs();
+            // The nearest four of the sixteen not just played (0.23 octave apart) lie
+            // within an octave, where a plain pick ranges over four.
+            assert!(off < 1.0, "{}", t.stats.centroid_hz);
+        }
+        // Unmeasured takes are picked as usual.
+        let mut plain = TakeSet::new((0..6).map(|k| take(Gait::Walk, k as f32)).collect());
+        let mut a = Noise::new(9);
+        let mut b = Noise::new(9);
+        let mut twin = plain.clone();
+        for _ in 0..10 {
+            let x = plain.pick_near(0.0, Some(1_000.0), &mut a).unwrap().pcm[0];
+            assert_eq!(x, twin.pick(0.0, &mut b).unwrap().pcm[0]);
+        }
+    }
+
+    #[test]
+    fn a_damp_path_is_one_damp_earth_step_after_step() {
+        let b = bank_of(&[("grass", 500.0), ("path", 1_100.0), ("mud", 2_100.0)]);
+        let at = |wetness: f32| SurfaceCell {
+            wetness,
+            ..Default::default()
+        };
+        // How much of the path is mud at that wetness, as the path says.
+        let mud_of = |wetness: f32| {
+            let mats = engine_world::SurfaceMaterials::default();
+            let m = mats.get(mats.id("grass").unwrap());
+            FootstepSurfaces::default()
+                .worn_path(m, 1.0, &at(wetness))
+                .mud
+        };
+        // The level a surface's takes play at (its synthesized loudness).
+        let level = |s: &mut FootstepSamples, name: &str| {
+            let sound = FootstepSurfaces::default().named(name);
+            s.reference_loudness(Feet::Shoes, ContactKind::Foot, name, &sound, SR)
+        };
+        // Damp: every step plays an earth take with a mud take on it, onsets together, mud's
+        // share of the power the path's mud share, rising with the wetness.
+        let mut last = 0.0;
+        for wetness in [0.4, 0.5, 0.575, 0.65, 0.75] {
+            let mud = mud_of(wetness);
+            assert!(
+                mud > LAYER_FROM && mud < 1.0 - LAYER_FROM,
+                "{wetness}: {mud}"
+            );
+            let mut s = FootstepSamples::from_bank(b.clone());
+            let mut share = 0.0;
+            for k in 0..30u64 {
+                let (_, r) = worn_step(&mut s, "grass", 1.0, &at(wetness), 40 + k * 23);
+                let top = r.expect("a take").1;
+                let layers: Vec<&StepSample> = top.layers().collect();
+                assert_eq!(layers.len(), 2, "{wetness}");
+                assert!((tone_hz(layers[0]) - 2_100.0).abs() < 100.0);
+                assert!((tone_hz(layers[1]) - 1_100.0).abs() < 60.0);
+                // Each take's power against its own surface's level (±1.5 dB a step).
+                let (m, e) = (
+                    (layers[0].gain / level(&mut s, "mud")).powi(2),
+                    (layers[1].gain / level(&mut s, "path")).powi(2),
+                );
+                assert!(
+                    (m / (m + e) - mud).abs() < 0.25,
+                    "{wetness}: {}",
+                    m / (m + e)
+                );
+                share += m / (m + e) / 30.0;
+            }
+            assert!((share - mud).abs() < 0.08, "{wetness}: {share} vs {mud}");
+            assert!(share > last, "{wetness}: {share}");
+            last = share;
+        }
+        // Dry earth and soaked mud play one take each.
+        let mut s = FootstepSamples::from_bank(b.clone());
+        for (wetness, hz) in [(0.0, 1_100.0), (0.2, 1_100.0), (1.0, 2_100.0)] {
+            let (_, r) = worn_step(&mut s, "grass", 1.0, &at(wetness), 5);
+            let take = r.unwrap().1;
+            assert!(take.under.is_none(), "{wetness}");
+            assert!((tone_hz(&take) - hz).abs() < hz * 0.06, "{wetness}");
+        }
+        // Every damp step sounds alike: no step is an earth step or a mud step.
+        let centroids = |wetness: f32| {
+            let mut s = FootstepSamples::from_bank(b.clone());
+            let mut c: Vec<f32> = (0..30u64)
+                .map(|k| {
+                    let (_, r) = worn_step(&mut s, "grass", 1.0, &at(wetness), 300 + k * 29);
+                    centroid(&play_takes(&r.unwrap().1), SR)
+                })
+                .collect();
+            c.sort_by(f32::total_cmp);
+            c
+        };
+        let (dry, damp, soaked) = (centroids(0.0), centroids(0.575), centroids(1.0));
+        let (lo, hi) = (dry[15], soaked[15]);
+        assert!(hi > lo * 1.4, "{lo} {hi}");
+        let (a, z) = (damp[0], damp[29]);
+        assert!(
+            a > lo + 0.1 * (hi - lo) && z < hi - 0.1 * (hi - lo),
+            "{a}..{z}"
+        );
+        assert!(z - a < 0.3 * (hi - lo), "{a}..{z}");
+        // Half worn and damp: the grass's take under both, at 1 - t of the power.
+        let mut s = FootstepSamples::from_bank(b.clone());
+        let (_, r) = worn_step(&mut s, "grass", 0.5, &at(0.575), 11);
+        let top = r.unwrap().1;
+        let hz: Vec<f32> = top.layers().map(tone_hz).collect();
+        assert_eq!(hz.len(), 3, "{hz:?}");
+        assert!((hz[2] - 500.0).abs() < 30.0, "{hz:?}");
+        let p: Vec<f32> = top
+            .layers()
+            .zip(["mud", "path", "grass"])
+            .map(|(l, name)| (l.gain / level(&mut s, name)).powi(2))
+            .collect();
+        let total: f32 = p.iter().sum();
+        assert!((p[2] / total - 0.5).abs() < 0.2, "{p:?}");
+        assert!(
+            p[0] / (p[0] + p[1]) > 0.2 && p[0] / (p[0] + p[1]) < 0.8,
+            "{p:?}"
+        );
     }
 
     #[test]

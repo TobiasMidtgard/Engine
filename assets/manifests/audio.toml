@@ -528,16 +528,9 @@ license = "CC0-1.0"
 source = "https://freesound.org/people/Ornery/sounds/233345/"
 author = "Ornery"
 
-# Bare earth (worn paths): boots walking on soil (a box of earth on a carpet in a basement, Zoom H2).
-[[file]]
-path = "audio/footsteps/path/sturmankin_278913.ogg"
-url = "https://cdn.freesound.org/previews/278/278913_4181170-hq.ogg"
-sha256 = "db7e3722f0b4301aa3775ba02381ee36645233e3d9d4d349be2a840a75a564d1"
-license = "CC0-1.0"
-source = "https://freesound.org/people/sturmankin/sounds/278913/"
-author = "sturmankin"
-
-# Boots running on soil (same session).
+# Bare earth (worn paths), running: boots running on soil (a box of earth on a carpet in a
+# basement, Zoom H2). Its walking session (sturmankin 278913) is left out for the outdoor
+# walks below: a box of loose soil, brighter and grittier than a trodden path.
 [[file]]
 path = "audio/footsteps/path/sturmankin_278930.ogg"
 url = "https://cdn.freesound.org/previews/278/278930_4181170-hq.ogg"
@@ -555,3 +548,24 @@ sha256 = "05fec80b6e7ded695de9a5fd7f40bf81d0984670558f8f10feb0d8a15bc30698"
 license = "CC0-1.0"
 source = "https://freesound.org/people/TRP/sounds/577313/"
 author = "TRP"
+
+# Bare earth outdoors: walking on a dirt country path with a few cobbles (Rode NT5, Gergueil;
+# the stretches where birds sing over the steps are left out).
+[[file]]
+path = "audio/footsteps/path/sadiquecat_802067.ogg"
+url = "https://cdn.freesound.org/previews/802/802067_5287430-hq.ogg"
+sha256 = "7f0de04d2437f8b6014718ea3eac0779c3a0a7b8794af6ee12844ef39f9e90c6"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Sadiquecat/sounds/802067/"
+author = "Sadiquecat"
+
+# Bare earth outdoors: heavy hiking boots on a hard-packed trail, Springbrook National Park
+# (Zoom H6 mid-side; its steps clean as recorded play, the rest are left out while bare earth
+# has plenty of clean walking steps).
+[[file]]
+path = "audio/footsteps/path/yoyodaman234_349078.ogg"
+url = "https://cdn.freesound.org/previews/349/349078_2792951-hq.ogg"
+sha256 = "c89e1d72d834ccdae66700de129015d841c68e1b6a9bc1a492b5aeef626b20b3"
+license = "CC0-1.0"
+source = "https://freesound.org/people/Yoyodaman234/sounds/349078/"
+author = "Yoyodaman234"

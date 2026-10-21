@@ -9,6 +9,7 @@
 //!     [--only grass,mud,mud-snow,wide] [--size 1280x720] [--walkers] [--panels]
 //!     [--wide eye_x,eye_y,eye_z,at_x,at_y,at_z] [--sun x,y,z] [--ev ev100]
 //!     [--follow dog --on mud[+meters] --secs 2 --frames 6 --every 0.25] [--worn]
+//!     [--cross lane_m] [--alone] [--no-video]
 //! cargo run -p engine_audio --example trail_stills -- --measure
 //! ```
 //!
@@ -25,14 +26,21 @@
 //! `--worn` wears the ground where the trail is drawn worn ([`TrailWear`]: the earth line down
 //! the grass, the trench through the snow), so footsteps there sound like the path; its
 //! files end in `_worn`.
+//! `--cross` (with `--follow`) walks the walker `lane_m` meters off the trail's middle (on the
+//! meadow beside the earth line, from 0.6 m), over onto the middle 1.5-3 m after its start,
+//! along it for 1.5 m and back off 4.5-6 m after its start, keeping to that course whoever
+//! comes by ([`TrailWalker::keep_course`]); its files end in `_cross`. At the hiker's pace
+//! `--secs 0 --frames 160 --every 0.0333` films it all. `--alone` (with `--follow`) takes the
+//! other walkers off the trail, so the recording holds only the followed one's steps, and
+//! `--no-video` records the sound without rendering (no stills, much faster).
 //! Headless rendering needs a GPU or lavapipe (`mesa-vulkan-drivers`).
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use engine_audio::demo::{
-    STRETCHES, SoundRings, TrailWalker, TrailWear, spawn_backdrop, spawn_demo, stretch_start,
-    trail_point,
+    STRETCHES, SoundRings, TRAIL_LENGTH, TrailWalker, TrailWear, spawn_backdrop, spawn_demo,
+    stretch_start, trail_point,
 };
 use engine_audio::{Audio, AudioOutput, AudioPlugin, AudioSettings};
 use engine_core::prelude::*;
@@ -64,6 +72,12 @@ struct Options {
     every: f32,
     /// `--worn`: the trail's drawn wear as the ground's ([`TrailWear`]).
     worn: bool,
+    /// `--cross`: how far off the middle the followed walker starts and ends, meters.
+    cross: Option<f32>,
+    /// `--alone`: only the followed walker stays on the trail.
+    alone: bool,
+    /// `--no-video`: no renderer, so `--follow` records only the sound.
+    video: bool,
 }
 
 fn options() -> Options {
@@ -83,6 +97,9 @@ fn options() -> Options {
         frames: 6,
         every: 0.25,
         worn: false,
+        cross: None,
+        alone: false,
+        video: true,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -102,6 +119,8 @@ fn options() -> Options {
             "--panels" => o.panels = true,
             "--measure" => o.measure = true,
             "--worn" => o.worn = true,
+            "--alone" => o.alone = true,
+            "--no-video" => o.video = false,
             "--wide" => {
                 let v: Vec<f64> = next
                     .split(',')
@@ -142,6 +161,10 @@ fn options() -> Options {
                 o.every = next.parse().expect("--every takes seconds");
                 i += 1;
             }
+            "--cross" => {
+                o.cross = Some(next.parse().expect("--cross takes meters"));
+                i += 1;
+            }
             "--ev" => {
                 o.ev100 = Some(next.parse().expect("--ev takes an EV100"));
                 i += 1;
@@ -166,7 +189,7 @@ fn main() {
     }
     std::fs::create_dir_all(&o.out).expect("create output folder");
 
-    let mut app = scene_app(o.size, true);
+    let mut app = scene_app(o.size, true, o.video);
     if o.worn {
         app.insert_resource(GroundWear(std::sync::Arc::new(TrailWear {
             origin: DVec3::ZERO,
@@ -331,17 +354,36 @@ fn film_walker(app: &mut App, o: &Options, who: &str, on: &str, meters: f64) {
     for (e, name, mut w) in q.iter_mut(&mut app.world) {
         if name.as_str().to_lowercase().contains(who) {
             w.along = start;
+            if let Some(lane) = o.cross {
+                w.keep_course(start + 1.5, 1.5, lane, 0.0);
+            }
             found = Some(e);
         }
     }
     let walker = found.unwrap_or_else(|| panic!("no walker called {who}"));
+    if o.alone {
+        let others: Vec<Entity> = app
+            .world
+            .query_filtered::<Entity, With<TrailWalker>>()
+            .iter(&app.world)
+            .filter(|e| *e != walker)
+            .collect();
+        for e in others {
+            app.world.despawn(e);
+        }
+    }
     let size = match who {
         "dog" => 0.56 / 1.75,
         "horse" => 1.52 / 1.75,
         _ => 1.0,
     };
     let step = 1.0 / 30.0;
-    let tag = if o.worn { "_worn" } else { "" };
+    let tag = format!(
+        "{}{}",
+        if o.worn { "_worn" } else { "" },
+        if o.cross.is_some() { "_cross" } else { "" }
+    );
+    let mut back_off = o.cross;
     let wav = o.out.join(format!("follow_{who}_{on}{tag}.wav"));
     app.world
         .resource_mut::<Audio>()
@@ -351,6 +393,14 @@ fn film_walker(app: &mut App, o: &Options, who: &str, on: &str, meters: f64) {
     let mut shot = 0;
     let mut next = o.secs;
     while shot < o.frames {
+        // Once on the middle, plan the move back off it.
+        if let Some(lane) = back_off {
+            let mut w = app.world.get_mut::<TrailWalker>(walker).expect("walker");
+            if (w.along - start).rem_euclid(TRAIL_LENGTH) > 3.5 {
+                w.keep_course(start + 4.5, 1.5, 0.0, lane);
+                back_off = None;
+            }
+        }
         let w = app
             .world
             .get::<TrailWalker>(walker)
@@ -379,10 +429,12 @@ fn film_walker(app: &mut App, o: &Options, who: &str, on: &str, meters: f64) {
             };
         }
         if t + 1e-4 >= next {
-            let file = o.out.join(format!("follow_{who}_{on}{tag}_{shot}.png"));
-            app.world.resource_mut::<Screenshots>().request(&file);
+            if o.video {
+                let file = o.out.join(format!("follow_{who}_{on}{tag}_{shot}.png"));
+                app.world.resource_mut::<Screenshots>().request(&file);
+                println!("{}", file.display());
+            }
             app.update();
-            println!("{}", file.display());
             shot += 1;
             next += o.every;
         } else {
@@ -418,7 +470,7 @@ fn stack(files: &[PathBuf], out: &Path) {
 #[derive(Resource)]
 struct WithDemo(bool);
 
-fn scene_app(size: (u32, u32), demo: bool) -> App {
+fn scene_app(size: (u32, u32), demo: bool, video: bool) -> App {
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
     {
@@ -435,7 +487,9 @@ fn scene_app(size: (u32, u32), demo: bool) -> App {
         output: AudioOutput::Offline,
         ..Default::default()
     });
-    app.add_plugins(RenderPlugin);
+    if video {
+        app.add_plugins(RenderPlugin);
+    }
     app.add_plugins((WorldPlugin, AudioPlugin));
     if let Some(mut a) = app.world.get_resource_mut::<Atmosphere>() {
         a.ground_color = [0.09, 0.18, 0.04];
@@ -483,14 +537,14 @@ fn census(world: &mut World) -> (usize, u64) {
 /// Time `spawn_demo` (cold, then warm in the same world) and count what it adds.
 fn measure() {
     // Without the trail: the baseline scene and its first frame.
-    let mut base = scene_app((640, 360), false);
+    let mut base = scene_app((640, 360), false, true);
     let t = Instant::now();
     base.update();
     let base_first = t.elapsed().as_secs_f32();
     base.update();
     let (base_entities, base_tris) = census(&mut base.world);
 
-    let mut app = scene_app((640, 360), true);
+    let mut app = scene_app((640, 360), true, true);
     let t = Instant::now();
     app.update();
     let first = t.elapsed().as_secs_f32();

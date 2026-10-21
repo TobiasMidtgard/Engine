@@ -527,8 +527,8 @@ impl PathGround {
 
 /// A worn path under one step ([`FootstepSurfaces::worn_path`]): how far the step has gone
 /// from its ground's own sound to the path's, and what the path sounds like. Synthesis blends
-/// the two ([`WornPath::apply`]); recorded takes play the path's recordings instead of the
-/// ground's on a share `t` of the steps
+/// the two ([`WornPath::apply`]); recorded takes play the ground's and the path's recordings
+/// together at `1 - t` and `t` of the power
 /// ([`FootstepSamples::recorded`](crate::samples::FootstepSamples::recorded)), the layers
 /// on top making up the rest of the blend.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -541,8 +541,8 @@ pub struct WornPath {
     pub sound: SurfaceSound,
     /// Name of the path's surface, whose recordings it plays: `path` or `packed_snow`.
     pub path: &'static str,
-    /// How much of the earth path has turned to mud (0 dry .. 1 soaked): that share of its
-    /// recorded steps play mud's takes.
+    /// How much of the earth path has turned to mud (0 dry .. 1 soaked): its recorded steps
+    /// play an earth take and a mud take together, mud's at that share of the power.
     pub mud: f32,
     /// How packed snow lying here is (0..1, the same blend of the wear): fresh snow on any
     /// ground packs where people walk.

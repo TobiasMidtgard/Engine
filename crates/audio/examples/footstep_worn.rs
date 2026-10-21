@@ -12,7 +12,8 @@
 //! `<ground>_w<wear>_synth.wav` (the same steps synthesized only); `grass_ab.wav` (wear 0,
 //! 0.5, 1 a second apart), `snow_ab.wav`, `mild_snow_ab.wav`, `wet_ab.wav` (0, 1),
 //! `grass_walk24_w<wear>.wav` (24 steps on grass worn 0, 0.5 and 1, for how alike its steps
-//! are),
+//! are), `path_walk24_wet<wetness>.wav` (24 steps on the worn path at wetness 0, 0.45, 0.575,
+//! 0.7 and 1: dry earth through damp to mud), `damp_w<wear>.wav` (wetness 0.575, half mud),
 //! `crossing.wav` (twenty steps along a meadow that wears from untouched to a bare path and
 //! back) and `wheels.wav` (a car's tyre at 8 m/s across a meadow, onto a worn path and off,
 //! then on powder snow onto a packed track, at -8 °C). Without the fetched recordings the
@@ -122,11 +123,17 @@ fn main() {
         wetness: 1.0,
         ..Default::default()
     };
-    let cases: [(&str, &str, &SurfaceCell, f32, &[f32]); 4] = [
+    // Damp: half the worn path's earth has turned to mud (wetness 0.575).
+    let damp = SurfaceCell {
+        wetness: 0.575,
+        ..Default::default()
+    };
+    let cases: [(&str, &str, &SurfaceCell, f32, &[f32]); 5] = [
         ("grass", "grass", &dry, 12.0, &[0.0, 0.5, 1.0]),
         ("snow", "snow", &dry, -8.0, &[0.0, 1.0]),
         ("mild_snow", "snow", &dry, 2.0, &[0.0, 1.0]),
         ("wet", "grass", &wet, 12.0, &[0.0, 1.0]),
+        ("damp", "grass", &damp, 12.0, &[0.0, 1.0]),
     ];
     let rms_db = |x: &[f32]| {
         let e = x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32;
@@ -177,6 +184,25 @@ fn main() {
         let mut samples = FootstepSamples::from_bank(bank.clone());
         let long = walk("grass", &[w; 24], &dry, 12.0, &surfaces, Some(&mut samples));
         let name = format!("grass_walk24_w{w:.1}.wav");
+        write_wav(&out.join(name), &long, 1, FS as u32).expect("write");
+    }
+    // 24 steps on the worn path (wear 1) as it gets wetter: dry earth, a quarter, half and
+    // most of the way to mud, and soaked.
+    for wetness in [0.0, 0.45, 0.575, 0.7, 1.0] {
+        let cell = SurfaceCell {
+            wetness,
+            ..Default::default()
+        };
+        let mut samples = FootstepSamples::from_bank(bank.clone());
+        let long = walk(
+            "grass",
+            &[1.0; 24],
+            &cell,
+            12.0,
+            &surfaces,
+            Some(&mut samples),
+        );
+        let name = format!("path_walk24_wet{wetness:.3}.wav");
         write_wav(&out.join(name), &long, 1, FS as u32).expect("write");
     }
     let mut samples = FootstepSamples::from_bank(bank);

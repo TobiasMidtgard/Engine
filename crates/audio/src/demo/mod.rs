@@ -185,6 +185,8 @@ pub struct TrailWalker {
     to_next_step: f32,
     /// Where it walks across the trail; walkers step aside to pass each other.
     lane: Lane,
+    /// Keeps to the course set with [`TrailWalker::keep_course`] instead of making way.
+    kept: bool,
 }
 
 /// A walker's sideways place on the trail, meters from the middle (+ toward the inside of the
@@ -259,7 +261,23 @@ impl TrailWalker {
             next_foot: 0,
             to_next_step: step_len * 0.5,
             lane: Lane::stay(along),
+            kept: false,
         }
+    }
+
+    /// Walk `from` meters off the trail's middle (+ toward the inside of the loop) until
+    /// `start` meters along the trail, then move over to `to` across the next `len` meters
+    /// and stay there, whoever else is about (the walker no longer makes way for anyone).
+    /// Films use it to walk someone off the path and back. Set it before the walker's feet
+    /// head for `start`, or planted feet move.
+    pub fn keep_course(&mut self, start: f64, len: f64, from: f32, to: f32) {
+        self.lane = Lane {
+            start,
+            len: len.max(0.1),
+            from,
+            to,
+        };
+        self.kept = true;
     }
 
     /// Sideways offset from the trail's middle at `along`, meters (+ toward the inside).
@@ -481,8 +499,10 @@ fn walk_trail(
         .map(|(_, w, _, _, _)| (w.along, w.speed, w.reach()))
         .collect();
     for (i, (_, mut w, _, _, _)) in walkers.iter_mut().enumerate() {
-        let lane = wanted_lane(i, &all);
-        w.steer_to(lane);
+        if !w.kept {
+            let lane = wanted_lane(i, &all);
+            w.steer_to(lane);
+        }
     }
     for (entity, mut w, mut t, scale, dressed) in &mut walkers {
         let dt = time.delta_for(scale);
@@ -560,6 +580,32 @@ mod tests {
         assert!(at("snow", 6.0, 0.0) > 0.5, "{}", at("snow", 6.0, 0.0));
         assert!(at("snow", 6.0, 0.0) > at("snow", 6.0, 1.7));
         assert_eq!(at("gravel", 2.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn a_kept_course_walks_off_the_earth_line_and_onto_it() {
+        use engine_world::WearQuery;
+        let wear = TrailWear {
+            origin: DVec3::ZERO,
+        };
+        let s0 = stretch_start("grass").unwrap();
+        let mut w = TrailWalker::new(DVec3::ZERO, s0 + 1.0, ContactKind::Foot, 75.0, 1.4);
+        w.keep_course(s0 + 3.0, 2.0, 0.65, 0.0);
+        // Under each foot, a step's length apart: the meadow beside the line, then the line.
+        let under = |w: &TrailWalker, along: f64| {
+            let (p, _, _) = bodies::gait::footprint(w, 0, along);
+            let (q, _, _) = bodies::gait::footprint(w, 1, along);
+            wear.wear(p).max(wear.wear(q))
+        };
+        assert_eq!(under(&w, s0 + 1.5), 0.0);
+        assert_eq!(under(&w, s0 + 2.0), 0.0);
+        assert!(under(&w, s0 + 5.5) > 0.95, "{}", under(&w, s0 + 5.5));
+        // Others coming by don't move it: it no longer makes way.
+        assert!(w.kept);
+        // And back off it.
+        w.keep_course(s0 + 7.0, 2.0, 0.0, 0.65);
+        assert!(under(&w, s0 + 6.0) > 0.95);
+        assert_eq!(under(&w, s0 + 9.5), 0.0);
     }
 
     #[test]
