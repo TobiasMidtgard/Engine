@@ -856,36 +856,76 @@ fn spine(p: &mut PoseBuilder, x: [f32; 4], yaw: [f32; 4], roll: [f32; 4]) {
     }
 }
 
+/// Arms let hang while standing about: close to the sides with the elbows soft and the palms
+/// turned in toward the thighs.
+const RELAXED: Arm = Arm {
+    flex: 4.0,
+    twist: -12.0,
+    abduct: -21.0,
+    elbow: 15.0,
+    wrist: 6.0,
+    protract: 0.0,
+    elevate: 0.0,
+};
+
+/// Standing about: the weight settles onto the left leg, the right hip dropping and its knee
+/// easing forward with the shoulders tilted against the hips, then shifts across onto the
+/// right leg and back through the middle, breathing three times a loop. Starts with the
+/// weight even ([`Key::STAND`]).
 fn idle(s: &Skeleton) -> AnimationClip {
-    AnimationClip::from_fn("idle", 3.2, 33, true, |ph| {
+    // Weight on the left leg at +1, on the right at -1.
+    let weight = [
+        (0.0, 0.0),
+        (0.1, 1.0),
+        (0.45, 0.85),
+        (0.6, -1.0),
+        (0.9, -0.85),
+        (1.0, 0.0),
+    ];
+    AnimationClip::from_fn("idle", 9.6, 97, true, |ph| {
         let mut p = PoseBuilder::new(s);
-        let breath = cycle_sin(ph);
-        let sway = cycle_sin(ph);
+        let breath = cycle_sin(ph * 3.0);
+        let w = keyed(ph, &weight);
         p.rot_move(
             "hips",
-            Vec3::new(0.012 * sway, -0.008, 0.0),
+            // Over the standing foot (the left is −X), sinking a touch as it settles.
+            Vec3::new(-0.06 * w, -0.008 - 0.012 * w.abs(), 0.0),
             0.0,
-            2.0 * sway,
-            -1.5 * sway,
+            4.0 * w,
+            -5.0 * w,
         );
         spine(
             &mut p,
             [-1.0, 1.2 * breath, 1.0, -1.0 - 0.6 * breath],
-            [-sway, -0.8 * sway, 0.5 * sway, 1.0 * sway],
-            [1.0 * sway, 0.5 * sway, -0.8 * sway, -0.8 * sway],
+            [-w, -w, 0.5 * w, w],
+            [3.0 * w, 4.0 * w, -1.5 * w, -0.5 * w],
         );
-        for (side, s) in S.iter().enumerate() {
+        for (side, sign) in S.iter().enumerate() {
+            // How free this leg is: 1 with the weight on the other, -1 standing on it.
+            let free = w * sign;
             arm(
                 &mut p,
                 side,
                 Arm {
+                    flex: RELAXED.flex + 1.0 * breath + 2.0 * free,
                     elevate: 1.2 * breath,
-                    flex: 4.0 + 1.0 * breath,
-                    ..Arm::HANG
+                    ..RELAXED
                 },
             );
-            let k = 4.0 + 2.0 * s * sway;
-            leg(&mut p, side, 2.0 + k * 0.5, 1.5, k, k * 0.5 - 2.0, 0.0);
+            let (hip, knee) = if free > 0.0 {
+                (4.0 + 8.0 * free, 4.0 + 20.0 * free)
+            } else {
+                (4.0 + 2.0 * free, 4.0 + 3.0 * free)
+            };
+            leg(
+                &mut p,
+                side,
+                hip,
+                1.5 + 2.5 * free,
+                knee,
+                0.5 * knee - 2.0,
+                0.0,
+            );
         }
         p.take()
     })
@@ -1756,7 +1796,8 @@ fn hammer_block(s: &Skeleton) -> AnimationClip {
 }
 
 /// A wince at something hard to watch (a hammer coming down): the shoulders jump up, the
-/// chin pulls in and the head turns a little away, the hands twitch up, the eyes squeeze
+/// chin pulls in and the head turns a little away, the arms pull in with the hands drawn up
+/// in front of the body (the right toward the chest), the eyes squeeze
 /// (the `effort` curve, which the face reads), then it all lets go.
 fn wince(s: &Skeleton) -> AnimationClip {
     let squeeze = [(0.0, 0.0), (0.1, 1.0), (0.4, 0.85), (1.0, 0.0)];
@@ -1784,16 +1825,19 @@ fn wince(s: &Skeleton) -> AnimationClip {
             [0.0, 0.0, 2.0 * away, 4.0 * away],
         );
         for side in 0..2 {
+            // The arms pull in and the hands come up in front of the belly, the right one
+            // higher, toward the chest.
+            let high = if side == 1 { 1.0 } else { 0.0 };
             arm(
                 &mut p,
                 side,
                 Arm {
-                    flex: 4.0 + 16.0 * jump,
-                    twist: 0.0,
-                    abduct: -15.0 + 6.0 * jump,
-                    elbow: 12.0 + 38.0 * jump,
-                    wrist: 10.0 * jump,
-                    protract: 6.0 * jump,
+                    flex: RELAXED.flex + (18.0 + 14.0 * high) * jump,
+                    twist: RELAXED.twist + (34.0 + 10.0 * high) * jump,
+                    abduct: RELAXED.abduct - 4.0 * jump,
+                    elbow: RELAXED.elbow + (50.0 + 30.0 * high) * jump,
+                    wrist: RELAXED.wrist + 10.0 * jump,
+                    protract: 8.0 * jump,
                     elevate: 14.0 * jump,
                 },
             );
@@ -2298,16 +2342,7 @@ impl Key {
         yaw: 0.0,
         roll: 0.0,
         spine: [-1.0, 0.0, 1.0, -1.0],
-        arm: [
-            Arm {
-                flex: 4.0,
-                ..Arm::HANG
-            },
-            Arm {
-                flex: 4.0,
-                ..Arm::HANG
-            },
-        ],
+        arm: [RELAXED, RELAXED],
         leg: [[4.0, 1.5, 4.0, 0.0], [4.0, 1.5, 4.0, 0.0]],
         plant: [None; 4],
         knee: [Vec3::NEG_Z; 2],
@@ -3299,6 +3334,42 @@ mod tests {
             (right.y - chest.y).abs() < 0.12,
             "hands {left} {right} chest {chest}"
         );
+    }
+
+    #[test]
+    fn standing_shifts_the_weight_from_leg_to_leg_with_the_arms_at_the_sides() {
+        let s = skeleton();
+        let clip = idle(&s);
+        let at = |ph: f32, b: &str| model_at(&s, &clip, ph)[s.bone(b)].t;
+        // On the left leg (−X) a third of the way in, on the right three quarters in; the
+        // free knee eases forward.
+        assert!(at(0.3, "hips").x < -0.04, "{}", at(0.3, "hips"));
+        assert!(at(0.75, "hips").x > 0.04, "{}", at(0.75, "hips"));
+        assert!(at(0.3, LOWER_LEG[1]).z < at(0.3, LOWER_LEG[0]).z - 0.03);
+        assert!(at(0.75, LOWER_LEG[0]).z < at(0.75, LOWER_LEG[1]).z - 0.03);
+        // The hands hang close beside the thighs, not out to the sides.
+        for ph in [0.0, 0.3, 0.75] {
+            for side in 0..2 {
+                let out = (at(ph, HAND[side]).x - at(ph, UPPER_LEG[side]).x).abs();
+                assert!(out < 0.22, "hand {side} {out} m out from the hip at {ph}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_wince_draws_the_hands_in_and_up() {
+        let s = skeleton();
+        let clip = wince(&s);
+        let at = |ph: f32, b: &str| model_at(&s, &clip, ph)[s.bone(b)].t;
+        for (side, hand) in HAND.iter().enumerate() {
+            let (calm, flinch) = (at(0.0, hand), at(0.15, hand));
+            assert!(
+                flinch.x.abs() < calm.x.abs() - 0.03,
+                "{side}: {calm} -> {flinch}"
+            );
+            assert!(flinch.y > calm.y + 0.15, "{side}: {calm} -> {flinch}");
+        }
+        assert!(at(0.15, HAND[1]).y > at(0.15, HAND[0]).y + 0.05);
     }
 
     #[test]
