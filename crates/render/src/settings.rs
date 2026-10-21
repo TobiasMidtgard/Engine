@@ -196,6 +196,12 @@ pub struct RenderSettings {
     /// How many EV darker than "average gray" very dark scenes are shown (0 = a moonlit night
     /// is exposed like noon; 2.5 = night looks like night). Ramps in below EV100 ≈ 5.
     pub night_exposure_bias: f32,
+    /// Up to how many EV brighter than "average gray" auto exposure shows a scene that is
+    /// brighter than gray things would be in the light falling on it: a sunlit snowfield, a sea
+    /// of cloud tops, white sand. The meter alone would show them gray, as a camera's does; this
+    /// opens up as a photographer does over snow, by how far the meter reads above the light
+    /// (less while facing the sun, whose glow brightens the sky, not the scene). 0 = off.
+    pub bright_scene_exposure: f32,
     /// 0..1 loss of color in very dark areas (scotopic vision: moonlight looks blue-gray).
     pub night_desaturation: f32,
     /// Virtual geometry: dense opaque meshes are drawn as clusters whose level of detail and
@@ -298,6 +304,7 @@ impl Default for RenderSettings {
             sky_occlusion_size: 512,
             cloud_shadows: true,
             night_exposure_bias: 2.5,
+            bright_scene_exposure: 2.0,
             night_desaturation: 0.7,
             virtual_geometry: true,
             virtual_geometry_min_triangles: 50_000,

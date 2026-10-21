@@ -304,6 +304,11 @@ impl Default for ExposureState {
     }
 }
 
+/// How far above the light's gray (`estimate_scene_luminance`) the meter may read before auto
+/// exposure takes a scene for a bright one (`RenderSettings::bright_scene_exposure`), in EV: a
+/// view of sunlit grass and sky reads about 0.15 EV above it, a snowfield 2.4.
+const BRIGHT_SCENE_START_EV: f32 = 0.4;
+
 /// Estimate the scene's average luminance from the light setup (cd/m²).
 ///
 /// A physically motivated heuristic: 18% gray lit by direct sun (mix of horizontal and
@@ -494,7 +499,20 @@ pub fn build_view(
             });
             // Dark scenes stay darker than average gray, like the eye sees them.
             let night = smoothstep(5.0, -2.0, metered) * settings.night_exposure_bias;
-            let target = (metered + night - compensation - crate::exposure::METER_BIAS_EV)
+            // Bright scenes by day (snow, cloud tops) show brighter than average gray: by how
+            // far the meter reads above gray things in the light here, past what an ordinary
+            // view of sky and land reads above it. Not at night, when lamps outshine the light
+            // the estimate knows of.
+            let incident = (estimate_scene_luminance(sun_dir, sun_camera, ambient_lum).max(1e-4)
+                * 100.0
+                / 12.5)
+                .log2();
+            let facing_sun = smoothstep(0.3, 0.8, (rotation * Vec3::NEG_Z).dot(sun_dir));
+            let bright = (metered - incident - BRIGHT_SCENE_START_EV)
+                .clamp(0.0, settings.bright_scene_exposure.max(0.0))
+                * (1.0 - facing_sun)
+                * smoothstep(0.0, 0.1, sun_dir.y);
+            let target = (metered + night - bright - compensation - crate::exposure::METER_BIAS_EV)
                 .clamp(min_ev100, max_ev100);
             if !exposure_state.initialized || exposure_state.snap {
                 exposure_state.ev100 = target;
