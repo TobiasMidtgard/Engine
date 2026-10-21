@@ -82,6 +82,8 @@ pub(crate) enum Mat {
     Oak,
     /// Worn yellow floor paint: the yard's walkway.
     LinePaint,
+    /// Laid hemp rope: the bridge's railings; strand tints are vertex colors.
+    Rope,
 }
 
 /// Texture sets, generated once per app.
@@ -230,6 +232,7 @@ pub(crate) fn material(world: &mut World, m: Mat) -> Handle<StandardMaterial> {
             .with_roughness(0.25),
         Mat::Oak => textured(world, Tex::Oak, white),
         Mat::LinePaint => StandardMaterial::hex(0xe3b22a).with_roughness(0.7),
+        Mat::Rope => StandardMaterial::hex(0xb39566).with_roughness(0.95),
         Mat::Glass => StandardMaterial::hex(0xe8f1f4)
             .with_roughness(0.04)
             .with_alpha(0.12),

@@ -1349,7 +1349,7 @@ fn paddle_wheel(y: &mut Yard, center: DVec3) {
 }
 
 /// Fifteen 0.82 m planks hinged together between two posts 12 m apart, so the deck sags about
-/// 1.2 m; three crates drop onto it.
+/// 1.2 m; three crates drop onto it, and its rope railings keep them aboard.
 fn bridge(y: &mut Yard, center: DVec3) {
     let (span, planks, plank, height) = (12.0f64, 15usize, 0.82f64, 4.5f64);
     let tower_half = Vec3::new(1.3, height as f32 * 0.5, 0.3);
@@ -1408,15 +1408,38 @@ fn bridge(y: &mut Yard, center: DVec3) {
         let (a, b) = (ends[k], ends[k + 1]);
         let dir = (b - a).normalize().as_vec3();
         let half = Vec3::new(1.0, 0.06, (a.distance(b) * 0.5) as f32);
-        let c = Collider::cuboid(half)
-            .with_surface(y.wood)
-            .with_density(500.0);
+        // The deck, and a thin wall in each railing's rope plane so crates stay aboard.
+        let (rail_y, rail_x) = (
+            (structures::BRIDGE_HAND + 0.05) * 0.5,
+            half.x + structures::BRIDGE_RAIL_OUT,
+        );
+        let wall = ColliderShape::Cuboid {
+            half_extents: Vec3::new(0.015, (structures::BRIDGE_HAND - 0.05) * 0.5, half.z),
+        };
+        let c = Collider {
+            shape: ColliderShape::Compound(vec![
+                (
+                    Vec3::ZERO,
+                    Quat::IDENTITY,
+                    ColliderShape::Cuboid { half_extents: half },
+                ),
+                (
+                    Vec3::new(-rail_x, rail_y, 0.0),
+                    Quat::IDENTITY,
+                    wall.clone(),
+                ),
+                (Vec3::new(rail_x, rail_y, 0.0), Quat::IDENTITY, wall),
+            ]),
+            ..Default::default()
+        }
+        .with_surface(y.wood)
+        .with_density(500.0);
         let parts = y.parts(
             &format!("bridge_plank/{k}"),
-            [Mat::Timber, Mat::Steel],
+            [Mat::Timber, Mat::Steel, Mat::Rope],
             || {
                 let p = structures::bridge_plank(half, k);
-                [p.timber, p.steel]
+                [p.timber, p.steel, p.rope]
             },
         );
         let plank = y.body(

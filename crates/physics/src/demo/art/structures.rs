@@ -2842,12 +2842,46 @@ pub struct BridgePlank {
     /// Weathered timber: three boards across the deck, grain along X.
     pub timber: Mesh,
     /// Bare forged steel: the two cables under the boards, their hinge knuckles and the
-    /// U-bolts clamping each board.
+    /// U-bolts clamping each board, and the railing posts' straps and rope clamps.
     pub steel: Mesh,
+    /// Laid hemp rope: the railing's hand and knee ropes and the lacing down to the deck.
+    pub rope: Mesh,
 }
 
 /// Radius of the bridge's cables, meters.
 pub const BRIDGE_CABLE: f32 = 0.016;
+
+/// The railing on each side of a plank: the hand rope's and knee rope's heights above the
+/// hinge axes, and the rope plane's distance outside the cables, meters. The demo's side
+/// colliders stand in this plane.
+pub const BRIDGE_HAND: f32 = 1.0;
+pub const BRIDGE_KNEE: f32 = 0.5;
+pub const BRIDGE_RAIL_OUT: f32 = 0.11;
+
+/// A three-strand laid rope of radius `r` from `a` to `c`, sagging `sag` in the middle.
+fn laid_rope(b: &mut MeshBuilder, a: Vec3, c: Vec3, sag: f32, r: f32, seed: u32) {
+    let len = a.distance(c);
+    let along = (c - a) / len;
+    let u = along.cross(Vec3::X).try_normalize().unwrap_or(Vec3::Y);
+    let v = along.cross(u);
+    // One full twist of the strands every 7 rope diameters, six points per twist.
+    let lay = 14.0 * r;
+    let n = ((len / lay) * 6.0).ceil().max(2.0) as usize;
+    let phase = hash(seed) * TAU;
+    for strand in 0..3u32 {
+        let path: Vec<Vec3> = (0..=n)
+            .map(|i| {
+                let t = i as f32 / n as f32;
+                let phi = phase + strand as f32 * TAU / 3.0 + t * len / lay * TAU;
+                a + (c - a) * t - Vec3::Y * (4.0 * sag * t * (1.0 - t))
+                    + (u * phi.cos() + v * phi.sin()) * (r * 0.5)
+            })
+            .collect();
+        b.colored(grey(0.9 + 0.1 * hash(seed * 3 + strand)), |b| {
+            b.tube(&path, r * 0.58, 5, false, false)
+        });
+    }
+}
 
 /// One bridge plank, `half` its collider's half extents (the demo: 1.0 × 0.06 × ~0.41);
 /// `index` varies the boards from plank to plank.
@@ -2939,9 +2973,88 @@ pub fn bridge_plank(half: Vec3, index: usize) -> BridgePlank {
             }
         });
     }
+    // The railing on each side: a post at every other plank's -Z end, hand and knee ropes
+    // along it and lacing zigzagging from the hand rope down to the boards. The ropes reach
+    // 4 cm past the hinge axes: where the deck bends, neighbours' ropes overlap instead of
+    // parting.
+    let mut r = MeshBuilder::new();
+    let post_half = 0.03;
+    let post = index.is_multiple_of(2);
+    for sx in [-1.0f32, 1.0] {
+        let x = sx * (hx + BRIDGE_RAIL_OUT);
+        let px = x + sx * (post_half + 0.022);
+        let pz = -hz + post_half + 0.03;
+        if post {
+            w.colored(board_tint(seed, 7 + (sx > 0.0) as u32), |b| {
+                plate(
+                    b,
+                    at(Vec3::new(px, (BRIDGE_HAND + 0.1 - 0.14) * 0.5, pz)),
+                    Vec3::new(post_half, (BRIDGE_HAND + 0.1 + 0.14) * 0.5, post_half),
+                    0.008,
+                );
+            });
+            s.colored(grey(0.9), |b| {
+                // A strap down the post's inner face, bolted under the boards to the cable.
+                plate(
+                    b,
+                    at(Vec3::new(px - sx * (post_half + 0.004), 0.05, pz)),
+                    Vec3::new(0.004, 0.2, 0.03),
+                    0.002,
+                );
+                plate(
+                    b,
+                    at(Vec3::new(sx * (hx + 0.05), -0.12, pz)),
+                    Vec3::new(BRIDGE_RAIL_OUT * 0.5 + post_half + 0.02, 0.004, 0.03),
+                    0.002,
+                );
+                for y in [BRIDGE_HAND, BRIDGE_KNEE] {
+                    // A clamp holding the rope to the post.
+                    b.placed(
+                        rot_at(
+                            Quat::from_rotation_z(FRAC_PI_2),
+                            Vec3::new(px - sx * 0.02, y, pz),
+                        ),
+                        |b| b.cylinder(0.026, 0.05, 10, 0.004),
+                    );
+                }
+            });
+        }
+        let (z0, z1) = (-hz - 0.04, hz + 0.04);
+        laid_rope(
+            &mut r,
+            Vec3::new(x, BRIDGE_HAND, z0),
+            Vec3::new(x, BRIDGE_HAND, z1),
+            0.012,
+            0.02,
+            seed + 1 + (sx > 0.0) as u32,
+        );
+        laid_rope(
+            &mut r,
+            Vec3::new(x, BRIDGE_KNEE, z0),
+            Vec3::new(x, BRIDGE_KNEE, z1),
+            0.01,
+            0.014,
+            seed + 3 + (sx > 0.0) as u32,
+        );
+        // Lacing: down from the hand rope at each end to the boards' edge mid-plank.
+        let foot = Vec3::new(sx * (hx + 0.1), hy - 0.01, 0.0);
+        r.colored(grey(0.85), |b| {
+            for z in [-hz, hz] {
+                let top = Vec3::new(x, BRIDGE_HAND - 0.02, z * 0.98);
+                b.tube(
+                    &[top, top.lerp(foot, 0.5) - Vec3::Y * 0.01, foot],
+                    0.006,
+                    5,
+                    false,
+                    false,
+                );
+            }
+        });
+    }
     BridgePlank {
         timber: w.build(),
         steel: s.build(),
+        rope: r.build(),
     }
 }
 
