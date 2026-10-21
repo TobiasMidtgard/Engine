@@ -503,9 +503,41 @@ pub fn build_skin(
     region: Region,
     levels: u32,
 ) -> (SkinMesh, Vec<Vec3>) {
-    let morphed = morph::morph(pack, a);
+    let mut morphed = morph::morph(pack, a);
+    seal_lips(pack, regions, &mut morphed);
     let skin = build_from(pack, regions, &morphed, region, levels);
     (skin, morphed)
+}
+
+/// Where the base mesh's lips part, m below the mouth landmark (the shaders' `LIP_LINE`).
+pub const LIP_LINE: f32 = -0.0071;
+
+/// Close the base mesh's lips: at rest they stand almost a millimeter apart, which shows a
+/// row of teeth through the slit. The lips are drawn together onto the line where they part,
+/// less toward the corners (which already meet); expressions still open them from there.
+pub fn seal_lips(pack: &HumanPack, regions: &Regions, morphed: &mut [Vec3]) {
+    let Some(body) = pack.group("body") else {
+        return;
+    };
+    let mouth = regions.landmarks.mouth;
+    let mut seen = vec![false; morphed.len()];
+    for q in pack.quads.iter().filter(|q| q.group == body) {
+        for v in q.v {
+            let i = v as usize;
+            if std::mem::replace(&mut seen[i], true) {
+                continue;
+            }
+            let r = pack.positions[i] - mouth;
+            let d = r.y - LIP_LINE;
+            if r.x.abs() > 0.026 || d.abs() > 0.005 || r.z < -0.012 {
+                continue;
+            }
+            let reach = 1.0 - smoothstep(0.021, 0.026, r.x.abs());
+            let pull = (0.0007 * (1.0 - smoothstep(0.0008, 0.005, d.abs())) * reach)
+                .min((d.abs() - 0.00002).max(0.0));
+            morphed[i].y -= pull * d.signum();
+        }
+    }
 }
 
 /// [`build_skin`] from already morphed base positions.
@@ -714,5 +746,16 @@ mod tests {
         for c in k {
             assert!((c - 10.0).abs() < 0.5, "{c}");
         }
+    }
+
+    #[test]
+    fn the_shader_parts_the_lips_on_the_same_line() {
+        let src = include_str!("shaders/skin.wgsl");
+        let line = src
+            .lines()
+            .find_map(|l| l.strip_prefix("const LIP_LINE: f32 = "))
+            .and_then(|v| v.trim_end_matches(';').parse::<f32>().ok())
+            .unwrap();
+        assert!((line - LIP_LINE * 1000.0).abs() < 1e-4, "{line}");
     }
 }

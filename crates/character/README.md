@@ -41,7 +41,9 @@ eye and hair shading meant for close-ups.
   halves, applied as sparse morphs on the GPU and driven by `FaceControls` (ARKit names) plus
   gaze; lids follow the eyes down.
 - **Mouth.** Teeth (fourteen per jaw, fitted to each person's dental arch), gums and a tongue,
-  moving with the jaw and lips.
+  moving with the jaw and lips. The lips are outlined per pixel in rest space (a crisp
+  vermilion border with a cupid's bow and a pale raised edge, philtrum ridges above, moist
+  inner band, shadowed corners), and close at rest instead of showing the teeth through a slit.
 
 ## Use
 

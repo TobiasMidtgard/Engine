@@ -75,6 +75,16 @@ fn view(name: &str) -> Option<(Orbit, u8)> {
             },
             0,
         ),
+        "mouth" => (
+            Orbit {
+                yaw: 0.25,
+                distance: 0.3,
+                drop: 0.075,
+                fov_deg: 20.0,
+                ..c
+            },
+            0,
+        ),
         "bust" => (
             Orbit {
                 yaw: 0.35,

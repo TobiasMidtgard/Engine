@@ -98,16 +98,80 @@ fn skin_tone(m: f32) -> vec3<f32> {
     return mix(tones[i], tones[i + 1], s);
 }
 
+// ---------------------------------------------------------------- lips
+// The red of the lips (vermilion) is outlined in rest space, in mm from the base mesh's mouth
+// by distance from the midline: the upper border with its cupid's bow, the lower one rounder,
+// meeting at the corners. Morphs move the skin under it, so the outline fits any lip shape,
+// and it is as sharp as the pixel (vertex masks are as soft as the mesh is coarse).
+const LIP_UPPER = array<vec2<f32>, 9>(
+    vec2<f32>(0.0, 2.6), vec2<f32>(3.0, 3.4), vec2<f32>(6.5, 4.2), vec2<f32>(10.0, 3.6),
+    vec2<f32>(14.0, 2.0), vec2<f32>(18.0, -0.6), vec2<f32>(21.0, -3.0), vec2<f32>(23.5, -5.6),
+    vec2<f32>(26.0, -9.5),
+);
+const LIP_LOWER = array<vec2<f32>, 9>(
+    vec2<f32>(0.0, -18.8), vec2<f32>(6.0, -18.6), vec2<f32>(10.0, -17.8), vec2<f32>(14.0, -16.0),
+    vec2<f32>(17.0, -13.6), vec2<f32>(20.0, -10.6), vec2<f32>(22.0, -8.0), vec2<f32>(23.5, -6.2),
+    vec2<f32>(26.0, -2.5),
+);
+// The lips part here (mm below the mouth landmark).
+const LIP_LINE: f32 = -7.1;
+
+// Height of a border at `a` mm from the midline, and its slope.
+fn lip_border(upper: bool, a: f32) -> vec2<f32> {
+    var t = LIP_LOWER;
+    if (upper) {
+        t = LIP_UPPER;
+    }
+    var i = 0;
+    for (; i < 7; i++) {
+        if (a < t[i + 1].x) { break; }
+    }
+    let p0 = t[i];
+    let p1 = t[i + 1];
+    let slope = (p1.y - p0.y) / (p1.x - p0.x);
+    return vec2<f32>(p0.y + (a - p0.x) * slope, slope);
+}
+
+struct LipShape {
+    amount: f32,  // 1 on the vermilion
+    border: f32,  // distance to its border, mm (positive on the lip)
+    upper: f32,   // 1 on the upper lip, 0 on the lower
+    line: f32,    // distance from where the lips part, mm
+    a: f32,       // distance from the midline, mm
+    y: f32,       // height from the mouth landmark, mm
+};
+
+fn lip_shape(r: vec3<f32>, footprint: f32) -> LipShape {
+    var s: LipShape;
+    let q = (r - character.rest_mouth.xyz) * 1000.0;
+    let a = abs(q.x);
+    s.a = a;
+    s.y = q.y;
+    let up = lip_border(true, a);
+    let lo = lip_border(false, a);
+    let du = (up.x - q.y) * inverseSqrt(1.0 + up.y * up.y);
+    let dl = (q.y - lo.x) * inverseSqrt(1.0 + lo.y * lo.y);
+    s.border = min(du, dl);
+    // The border is crisp, but the red deepens over the first millimeter.
+    let blur = max(footprint * 1000.0, 0.3);
+    s.amount = smoothstep(-blur, blur + 1.0, s.border);
+    s.upper = smoothstep(-0.3, 0.3, q.y - LIP_LINE);
+    s.line = abs(q.y - LIP_LINE);
+    return s;
+}
+
 struct SkinDetail {
     height: f32,
     pore: f32,      // 1 inside a pore
+    lines: f32,     // in a line of the lips (0..1)
     wrinkle: f32,   // depth of the wrinkle here (0..1)
 };
 
 // Skin relief at rest position `r` (meters; larger is outward).
 fn skin_relief(r: vec3<f32>, m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, footprint: f32) -> SkinDetail {
     var d: SkinDetail;
-    let lips = m0.x;
+    let lip = lip_shape(r, footprint);
+    let lips = lip.amount;
     let nose = m0.y;
     let lids = m0.z;
     let cloth = m2.x;
@@ -140,11 +204,27 @@ fn skin_relief(r: vec3<f32>, m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, footpr
         let l = pow(1.0 - abs(sin(a)), 6.0) + pow(1.0 - abs(sin(b)), 6.0) * 0.8;
         h -= l * 0.000014 * lines_vis * (0.6 + 0.6 * value_noise3(r * 150.0));
     }
-    // Lips: fine vertical lines.
+    // Lips: fine vertical lines, fading toward the border; the raised edge of the vermilion
+    // (the white roll), and the two ridges of the philtrum from the cupid's bow to the nose
+    // with the groove between them.
     if (lips > 0.01) {
         let wave = r.x * 6283.0 / 1.15 + value_noise3(r * 900.0) * 3.0;
-        let line = pow(1.0 - abs(sin(wave)), 5.0);
-        h -= line * lips * 0.000035 * saturate((0.0009 / max(footprint, 1e-7) - 1.0));
+        let line = pow(1.0 - abs(sin(wave)), 5.0) * smoothstep(0.3, 1.5, lip.border);
+        d.lines = line * lips * saturate((0.0009 / max(footprint, 1e-7) - 1.0));
+        h -= d.lines * 0.00005;
+    }
+    if (lip.a < 28.0 && lip.y > -24.0 && lip.y < 16.0) {
+        let edge = lip.border + 0.3;
+        h += exp(-edge * edge * 3.0) * mix(0.00005, 0.0001, lip.upper);
+        let bow = lip_border(true, 0.0).x;
+        let up = (lip.y - bow) / 9.0;
+        if (up > -0.2 && up < 1.2) {
+            let fade = smoothstep(-0.1, 0.15, up) * (1.0 - smoothstep(0.75, 1.1, up));
+            let column = mix(5.6, 3.4, saturate(up));
+            let ridge = exp(-sq((lip.a - column) / 1.5));
+            let groove = 1.0 - smoothstep(0.0, column, lip.a);
+            h += (ridge * 0.0002 - groove * 0.0001) * fade;
+        }
     }
     // Wrinkles, with age.
     let wr = character.skin2.z;
@@ -441,7 +521,8 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
         smoothstep(-0.0008, 0.0008, cover_depth(r)) * smoothstep(0.25, 0.75, in.m2.x),
         in.m2.yzw,
     );
-    let lips = m0.x;
+    let lip = lip_shape(r, footprint);
+    let lips = lip.amount;
     let nose = m0.y;
     let lids = m0.z;
     let cheeks = m1.x;
@@ -504,11 +585,21 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     albedo *= select(vec3<f32>(1.0, 1.0 - 0.04 * ut, 1.0 + 0.04 * ut), vec3<f32>(1.0, 1.0 - 0.02 * ut, 1.0 - 0.16 * ut), ut > 0.0);
     // Darker, slightly violet skin around the eyes.
     albedo *= mix(vec3<f32>(1.0), vec3<f32>(0.88, 0.83, 0.88), lids * 0.55);
-    // Lips: redder on fair skin, deeper and browner on dark skin; paler at the edge.
-    let lip_fair = albedo * vec3<f32>(0.93, 0.62, 0.62);
-    let lip_dark = albedo * vec3<f32>(0.8, 0.66, 0.7);
-    let lip = mix(lip_fair, lip_dark, saturate(mel * 1.4)) * (0.92 + 0.16 * value_noise3(r * 700.0));
-    albedo = mix(albedo, lip, smoothstep(0.1, 0.8, lips));
+    // Lips: thin skin over blood, rose on fair skin, deeper on dark skin, where the outer
+    // band holds more melanin than the moist inner part; a pale, raised line just outside the
+    // border (the white roll); the corners tuck into shadow.
+    let wet = 1.0 - smoothstep(0.8, 3.5, lip.line);
+    let lip_fair = albedo * vec3<f32>(0.88, 0.6, 0.63);
+    let lip_dark = albedo * vec3<f32>(0.85, 0.6, 0.68);
+    var lip_color = mix(lip_fair, lip_dark, saturate(mel * 1.4));
+    let outer = 1.0 - smoothstep(0.2, 2.5, lip.border);
+    lip_color *= mix(vec3<f32>(1.0), vec3<f32>(0.72, 0.7, 0.72), outer * saturate(mel * 1.6 - 0.3));
+    lip_color *= mix(vec3<f32>(1.0), vec3<f32>(0.86, 0.74, 0.8), wet);
+    lip_color *= (0.92 + 0.16 * value_noise3(r * 700.0)) * (1.0 - 0.12 * d0.lines);
+    let roll = exp(-sq(lip.border + 0.45) * 4.0) * (1.0 - lips) * (0.4 + 0.6 * lip.upper);
+    albedo *= 1.0 + 0.07 * roll * (1.0 - saturate(mel * 1.5));
+    albedo = mix(albedo, lip_color, lips);
+    let corner = exp(-(sq(lip.a - 23.5) + sq(lip.y - LIP_LINE) * 2.0) / 6.0);
     // The wet, pink rim of the eyelids.
     albedo = mix(albedo, albedo * vec3<f32>(1.0, 0.62, 0.62), rim * 0.7);
     // Moles.
@@ -551,7 +642,7 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     let oil = character.skin.w;
     var rough = 0.56 - 0.12 * oil * saturate(forehead + nose + chin) - 0.08 * oil;
     rough += (value_noise3(r * 300.0 + seed) - 0.5) * 0.06 + (value_noise3(r * 900.0 + seed) - 0.5) * 0.05;
-    rough = mix(rough, 0.42, lips);
+    rough = mix(rough, mix(0.4, 0.28, wet), lips);
     rough = mix(rough, 0.18, rim);
     rough += 0.12 * d0.pore + 0.1 * d0.wrinkle + 0.06 * scalp_tint;
     var specular = (1.0 - 0.6 * d0.pore) * (1.0 - 0.3 * scalp_tint);
@@ -598,7 +689,7 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     s.scatter = scatter;
     s.curvature = in.curvature;
     s.thin = saturate(ears + nose * 0.3) * scatter;
-    s.occlusion = 1.0 - 0.35 * d0.wrinkle;
+    s.occlusion = (1.0 - 0.35 * d0.wrinkle) * (1.0 - 0.5 * corner * (1.0 - cloth));
     return s;
 }
 
@@ -606,7 +697,8 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
 fn skin_debug(in: SkinOut, s: SkinLight) -> vec3<f32> {
     let mode = u32(character.eye2.y + 0.5);
     if (mode == 1u) {
-        return vec3<f32>(in.m0.x + in.m1.y * 0.5, in.m0.w + in.m1.z * 0.5, in.m0.y + in.m0.z * 0.5 + in.m2.w);
+        let lips = lip_shape(in.rest, max(length(dpdx(in.rest)), length(dpdy(in.rest)))).amount;
+        return vec3<f32>(lips + in.m1.y * 0.5, in.m0.w + in.m1.z * 0.5, in.m0.y + in.m0.z * 0.5 + in.m2.w);
     }
     if (mode == 2u) {
         return s.n * 0.5 + 0.5;
