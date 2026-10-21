@@ -10,7 +10,9 @@
 // toward its tip and drooping under its own weight; it sways in the wind (gusts roll across the
 // field in broken bands, and a ripple runs up each blade) and is pushed aside by
 // `GrassBender`s. On worn ground (a field's `GrassWear` map) blades shorten, lie flat, dry
-// toward straw and thin out, gone where it is worn bare. It is shaded as if rounded across its
+// toward straw and thin out, gone where it is worn bare. Snow on the ground (`grass_snow_depth`,
+// which each shader including this one defines) buries the blades' lower parts, short blades
+// wholly, bows the rest under its weight and frosts them. It is shaded as if rounded across its
 // width, and widened in view when seen edge-on so a field stays full instead of breaking into
 // slivers. Blades thin out with distance by their rank: blade `i` of a tile is drawn while i / blades < density x lod(distance), and
 // shrinks into the ground just before it goes, so thinning has no visible steps; the survivors
@@ -37,7 +39,7 @@ struct GrassField {
     dry: vec4<f32>,     // dry albedo (linear), wind response
     lod: vec4<f32>,     // full-density distance (m), draw distance (m), unused, unused
     clump: vec4<f32>,   // clump size (m, 0 = none), pull to center, fan out, height spread
-    look: vec4<f32>,    // clump color spread, droop, gloss, unused
+    look: vec4<f32>,    // clump color spread, droop, gloss, snow depth by the camera (m)
     tip: vec4<f32>,     // tip tint (rgb, x the blade's color), unused
     wear: vec4<f32>,    // worn-ground map: first point (field-local m, xz), points per m, 1 = present
 };
@@ -219,9 +221,14 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, wind: vec3<f32>, tiling: vec3
     // Clumps differ in height, and a tuft stands tallest in its middle.
     let clump_height = 1.0 + f.clump.w * (clump.hash.z * 2.0 - 1.0);
     let dome = mix(1.0, 1.12 - 0.4 * clump.dist, f.clump.y);
-    let height = f.shape.x * (1.0 + f.shape.y * (r0.z * 2.0 - 1.0)) * mix(0.55, 1.0, saturate(m.y))
+    let grown = f.shape.x * (1.0 + f.shape.y * (r0.z * 2.0 - 1.0)) * mix(0.55, 1.0, saturate(m.y))
         * mix(0.75, 1.2, meadow_patch) * clump_height * dome * fade * (1.0 - 0.45 * trodden);
-    if (height < 0.005) { return out; }
+    // Snow buries the lower part of a blade (the ground's snow is drawn on the ground, so what
+    // stands out of it is drawn from the ground up).
+    let snow = max(grass_snow_depth(f, root), 0.0);
+    let height = grown - snow;
+    if (height < 0.008) { return out; }
+    let snowed = smoothstep(0.0, 0.06, snow);
     let width = f.shape.z * (0.75 + 0.5 * r1.x) * clamp(inverseSqrt(max(lod, 1e-3)), 1.0, 3.0);
 
     // Blade frame: facing its own way, or fanning out from its clump's center; leaning over
@@ -253,8 +260,8 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, wind: vec3<f32>, tiling: vec3
             tip_dir = normalize(mix(tip_dir, normalize(away + up * 0.15), push));
         }
     }
-    // Trodden blades lie down.
-    tip_dir = normalize(mix(tip_dir, normalize(facing + up * 0.2), trodden * 0.75));
+    // Trodden blades lie down; snow bows them over.
+    tip_dir = normalize(mix(tip_dir, normalize(facing + up * 0.2), max(trodden * 0.75, snowed * 0.45)));
     // Cubic Bezier: rising straight from the root, arching over toward the tip, which droops
     // under its weight the further the blade leans.
     let over = tip_dir - up * dot(tip_dir, up);
@@ -308,6 +315,8 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, wind: vec3<f32>, tiling: vec3
     // A slight hue drift between patches and clumps, bluer in the lush hollows.
     albedo *= mix(vec3<f32>(0.9, 1.0, 1.08), vec3<f32>(1.08, 1.02, 0.85), clump.hash.z * 0.5 + meadow_patch * 0.5);
     albedo = mix(albedo, albedo * f.tip.rgb, u * u);
+    // Snow caught on the blades, most on their arched upper parts.
+    albedo = mix(albedo, vec3<f32>(0.82, 0.85, 0.88), snowed * (0.25 + 0.45 * u));
     out.albedo = albedo;
     // Glossy up close; far off the sheen would only sparkle.
     out.gloss = f.look.z * (1.0 - smoothstep(8.0, 35.0, d));

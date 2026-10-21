@@ -10,6 +10,11 @@ struct GrassOut {
     @location(5) gloss: f32,
 };
 
+// Snow depth (m) on the ground at camera-relative `rel` (for `grass_blade`).
+fn grass_snow_depth(f: GrassField, rel: vec3<f32>) -> f32 {
+    return surface_weather(rel).z * SURFACE_SNOW_SCALE_M;
+}
+
 // Collapses an invisible blade to a point outside the view.
 const GRASS_HIDDEN: vec4<f32> = vec4<f32>(0.0, 0.0, -2.0, 1.0);
 
