@@ -24,6 +24,7 @@ pub mod planet_noise;
 pub mod quests;
 pub mod saves;
 pub mod screens;
+pub mod settings_help;
 pub mod shop;
 pub mod skills;
 pub mod style;
@@ -112,6 +113,7 @@ impl Plugin for UiPlugin {
             saves::add_painters(&mut painters);
             title::add_painters(&mut painters);
             loading::add_painters(&mut painters);
+            settings_help::add_painters(&mut painters);
         }
         app.init_resource::<items::ItemDatabase>()
             .init_resource::<dialogue::DialogueLibrary>()
@@ -313,6 +315,9 @@ fn register_types(app: &mut App) {
     )
     .register_component::<loading::LoadingView>(
         "The loading screen's painted state (paint: loading_backdrop): time, progress, shown (eased bar), planet, tips, tip_from, ready_for.",
+    )
+    .register_component::<settings_help::SettingPreview>(
+        "A settings row's live preview (paint: setting_preview): kind, the path it reads, min, max, decimals, suffix and accent index.",
     )
     .register_component::<title::TitleView>(
         "The title screen backdrop's clock (paint: title_backdrop): time in seconds.",

@@ -1397,3 +1397,65 @@ fn the_loading_screen_follows_the_game_and_waits_to_be_dismissed() {
     );
     assert!(r.is_err());
 }
+
+fn detail_title(app: &mut App) -> String {
+    let e = engine_ui::input::find_id(&mut app.world, "settings_detail_title")
+        .expect("the detail panel has a title");
+    app.world.get::<Text>(e).unwrap().text.clone()
+}
+
+#[test]
+fn the_settings_detail_panel_follows_the_highlighted_row() {
+    let mut app = app();
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "settings", "instant": true}),
+    );
+    app.update_n(10);
+    // Before anything is highlighted, the tab's first row is described.
+    assert_eq!(detail_title(&mut app), "Field of view");
+    let p = center(&mut app, "set_sens");
+    input(&mut app, InputEvent::CursorMoved { position: p });
+    app.update_n(2);
+    assert_eq!(detail_title(&mut app), "Look sensitivity");
+    let e = engine_ui::input::find_id(&mut app.world, "settings_preview").unwrap();
+    let preview = app
+        .world
+        .get::<engine_ui::settings_help::SettingPreview>(e)
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (preview.kind.as_str(), preview.path.as_str()),
+        ("sens", "settings.sensitivity")
+    );
+    assert_eq!((preview.min, preview.max, preview.decimals), (0.1, 3.0, 2));
+    // The row it describes is marked.
+    let row = engine_ui::input::find_id(&mut app.world, "set_sens").unwrap();
+    assert!(app.world.get::<Interaction>(row).unwrap().selected);
+    // A toggle row reads as on/off.
+    let p = center(&mut app, "set_shake");
+    input(&mut app, InputEvent::CursorMoved { position: p });
+    app.update_n(2);
+    assert_eq!(detail_title(&mut app), "Camera shake");
+    let e = engine_ui::input::find_id(&mut app.world, "settings_preview").unwrap();
+    let preview = app
+        .world
+        .get::<engine_ui::settings_help::SettingPreview>(e)
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (preview.path.as_str(), preview.decimals),
+        ("settings.camera_shake", -1)
+    );
+    // A new tab starts on its own first row (with the pointer off the rows).
+    input(
+        &mut app,
+        InputEvent::CursorMoved {
+            position: Vec2::new(5.0, 5.0),
+        },
+    );
+    api(&mut app, "ui.click", json!({"id": "settings.tab:4"}));
+    app.update_n(2);
+    assert_eq!(detail_title(&mut app), "Interface scale");
+}

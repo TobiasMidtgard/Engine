@@ -22,6 +22,7 @@ use crate::el::{self, El};
 use crate::input::UiEvent;
 use crate::node::*;
 use crate::screens;
+use crate::settings_help;
 use crate::style::{Align, Corners, Fill, Justify, Pick, Position, pct};
 use crate::theme::Theme;
 use crate::toast::{self, ToastKind};
@@ -437,6 +438,8 @@ pub struct SettingsScreen {
     pub tab: usize,
     /// Waiting for a key to bind to this action.
     pub rebinding: Option<String>,
+    /// The row the detail panel describes (the highlighted one, or the tab's first).
+    pub shown: Option<String>,
 }
 
 fn default_settings() -> Value {
@@ -472,6 +475,8 @@ fn slider(
         },
     )
     .id(id)
+    // Hovering anywhere on the row shows its help.
+    .on_click(format!("settings.pick:{id}"))
 }
 
 fn section(title: &str) -> El {
@@ -503,7 +508,7 @@ pub fn key_label(k: KeyCode) -> String {
     }
 }
 
-fn binding_label(b: &Binding) -> Option<(String, bool)> {
+pub(crate) fn binding_label(b: &Binding) -> Option<(String, bool)> {
     match b {
         Binding::Key(k) => Some((key_label(*k), false)),
         Binding::Mouse(m) => Some((format!("Mouse {m:?}"), false)),
@@ -546,7 +551,7 @@ fn binding_chip(label: String, pad: bool) -> El {
         )
 }
 
-fn pretty_action(a: &str) -> String {
+pub(crate) fn pretty_action(a: &str) -> String {
     let mut s = a.replace(['_', '.'], " ");
     if let Some(f) = s.get(0..1) {
         let up = f.to_uppercase();
@@ -803,7 +808,7 @@ fn settings_rows(world: &World, tab: usize, rebinding: Option<&str>) -> Vec<El> 
 }
 
 /// Accent presets: name, accent, light, dark.
-const ACCENTS: [(&str, u32, u32, u32); 5] = [
+pub(crate) const ACCENTS: [(&str, u32, u32, u32); 5] = [
     ("Gold", 0xe8b65a, 0xf7d999, 0x9c7330),
     ("Cyan", 0x5fd0ff, 0xa8e8ff, 0x2a7aa0),
     ("Violet", 0xb08cff, 0xd8c8ff, 0x6a4ab0),
@@ -821,7 +826,8 @@ fn settings_el(world: &World, st: &SettingsScreen) -> El {
                 .class("panel")
                 .id("settings_panel")
                 .with_style(|s| {
-                    s.width(1040.0)
+                    s.width(1340.0)
+                        .max_width(pct(96.0))
                         .height(780.0)
                         .max_height(pct(92.0))
                         .gap(18.0)
@@ -843,16 +849,37 @@ fn settings_el(world: &World, st: &SettingsScreen) -> El {
                 )
                 .child(
                     El::new()
-                        .class("scroll")
-                        .id("settings_rows")
+                        .class("row")
                         .with_style(|s| {
                             s.grow(1.0)
                                 .shrink(1.0)
                                 .basis(0.0)
-                                .gap(6.0)
-                                .padding([0.0, 8.0, 0.0, 0.0])
+                                .min_height(0.0)
+                                .gap(20.0)
+                                .align_items(Align::Stretch)
                         })
-                        .children(rows),
+                        .child(
+                            El::new()
+                                .class("scroll")
+                                .id("settings_rows")
+                                .with_style(|s| {
+                                    s.grow(1.0)
+                                        .shrink(1.0)
+                                        .basis(0.0)
+                                        .gap(6.0)
+                                        .padding([0.0, 8.0, 0.0, 0.0])
+                                })
+                                .children(rows),
+                        )
+                        .child(settings_help::detail_el(
+                            world,
+                            st.shown.as_deref(),
+                            &settings_help::preview_for(
+                                world,
+                                st.shown.as_deref().unwrap_or(""),
+                                None,
+                            ),
+                        )),
                 )
                 .child(
                     El::new()
@@ -894,6 +921,7 @@ pub fn build_settings(world: &mut World, args: &Value) -> Result<Entity, String>
     let st = SettingsScreen {
         tab,
         rebinding: None,
+        shown: settings_help::first_of_tab(world, tab),
     };
     let el = settings_el(world, &st);
     let sp = screens::spawn_screen(
@@ -908,11 +936,65 @@ pub fn build_settings(world: &mut World, args: &Value) -> Result<Entity, String>
         &el,
     )?;
     let root = sp.root.ok_or("The settings screen is empty.")?;
+    // The preview needs the row's slider or toggle, which exist only now.
+    show_detail(world, root, &st);
     world.entity_mut(root).insert(st);
     Ok(root)
 }
 
+/// Fill the detail panel for `st.shown` and mark that row selected.
+fn show_detail(world: &mut World, root: Entity, st: &SettingsScreen) {
+    let Some(panel) = screens::find_in(world, root, "settings_detail") else {
+        return;
+    };
+    let id = st.shown.clone().unwrap_or_default();
+    let row = screens::find_in(world, root, &id);
+    let preview = settings_help::preview_for(world, &id, row);
+    let children = settings_help::detail_children(world, &id, &preview);
+    if let Err(e) = el::replace_children(world, panel, &children) {
+        tracing::warn!("settings: {e}");
+    }
+    if let Some(list) = screens::find_in(world, root, "settings_rows") {
+        for e in screens::subtree(world, list) {
+            let Some(uid) = world.get::<UiId>(e).map(|u| u.0.clone()) else {
+                continue;
+            };
+            if !settings_help::known(&uid) {
+                continue;
+            }
+            let selected = uid == id;
+            match world.get_mut::<Interaction>(e) {
+                Some(mut it) => it.selected = selected,
+                None => {
+                    world.entity_mut(e).insert(Interaction {
+                        selected,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// The row a highlighted node belongs to, if the detail panel knows it.
+fn row_of(world: &World, mut e: Entity, root: Entity) -> Option<String> {
+    while e != root {
+        if let Some(id) = world.get::<UiId>(e)
+            && settings_help::known(&id.0)
+        {
+            return Some(id.0.clone());
+        }
+        e = world.get::<ChildOf>(e)?.parent();
+    }
+    None
+}
+
 fn refresh_settings(world: &mut World, root: Entity, st: &SettingsScreen) {
+    let mut st = st.clone();
+    if st.shown.is_none() {
+        st.shown = settings_help::first_of_tab(world, st.tab);
+    }
+    let st = &st;
     let rows = settings_rows(world, st.tab, st.rebinding.as_deref());
     if let Some(list) = screens::find_in(world, root, "settings_rows") {
         if let Err(e) = el::replace_children(world, list, &rows) {
@@ -929,6 +1011,7 @@ fn refresh_settings(world: &mut World, root: Entity, st: &SettingsScreen) {
             it.selected = i == st.tab;
         }
     }
+    show_detail(world, root, st);
     world.entity_mut(root).insert(st.clone());
 }
 
@@ -975,13 +1058,18 @@ pub fn menus_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) 
                     with_settings(world, |st| {
                         st.tab = t.min(SETTINGS_TABS.len() - 1);
                         st.rebinding = None;
+                        st.shown = None;
                     });
                 } else if action == "settings.reset" {
                     if let Some(mut d) = world.get_resource_mut::<UiData>() {
                         d.set("settings", default_settings());
                     }
                     let _ = crate::data::write(world, "$UiSettings.scale", json!(1.0));
-                    let _ = crate::data::write(world, "$UiSettings.tooltip_delay", json!(0.45));
+                    let _ = crate::data::write(
+                        world,
+                        "$UiSettings.tooltip_delay",
+                        json!(crate::layout::UiSettings::default().tooltip_delay),
+                    );
                     if world.contains_resource::<engine_render::RenderSettings>() {
                         world.insert_resource(engine_render::RenderSettings::default());
                     }
@@ -1007,7 +1095,10 @@ pub fn menus_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) 
                     }
                 } else if let Some(a) = action.strip_prefix("settings.rebind:") {
                     let a = a.to_string();
-                    with_settings(world, |st| st.rebinding = Some(a.clone()));
+                    with_settings(world, |st| {
+                        st.rebinding = Some(a.clone());
+                        st.shown = Some(format!("bind:{a}"));
+                    });
                 }
             }
             UiEvent::Tab { screen, delta } if screen == "settings" => {
@@ -1015,9 +1106,29 @@ pub fn menus_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) 
                 with_settings(world, |st| {
                     st.tab = (st.tab as i32 + d).rem_euclid(SETTINGS_TABS.len() as i32) as usize;
                     st.rebinding = None;
+                    st.shown = None;
                 });
             }
             UiEvent::ScreenClosed { screen } if screen == "pause" => resume_time(world),
+            UiEvent::Highlighted {
+                entity: Some(e), ..
+            } => {
+                let open = {
+                    let mut q = world.query::<(Entity, &SettingsScreen, &Screen)>();
+                    q.iter(world)
+                        .find(|(_, _, s)| !s.closing)
+                        .map(|(root, st, _)| (root, st.clone()))
+                };
+                if let Some((root, mut st)) = open
+                    && world.get_entity(*e).is_ok()
+                    && let Some(id) = row_of(world, *e, root)
+                    && st.shown.as_deref() != Some(id.as_str())
+                {
+                    st.shown = Some(id);
+                    show_detail(world, root, &st);
+                    world.entity_mut(root).insert(st);
+                }
+            }
             _ => {}
         }
     }

@@ -518,6 +518,10 @@ fn widget_classes(p: &Palette, c: &mut BTreeMap<String, ClassStyle>) {
             focused: s()
                 .border_color(p.accent.fade(0.8))
                 .background(p.accent.fade(0.08)),
+            // The row the settings detail panel describes.
+            selected: s()
+                .border_color(p.accent.fade(0.35))
+                .background(Color::WHITE.fade(0.055)),
             ..Default::default()
         },
     );

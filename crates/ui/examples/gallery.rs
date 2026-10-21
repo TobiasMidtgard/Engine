@@ -3,7 +3,7 @@
 //! `cargo run -p engine_ui --example gallery -- <out_dir> [width] [height] [shot ...]`
 //!
 //! Shots: hud, wheel, dialogue, dialogue_choices, dialogue_log, shop, shop_sell, inventory, inventory_drag,
-//! journal, journal_finished, skills, crafting, crafting_busy, saves, saves_save, title, loading, loading_ready, map_galaxy, map_system, map_globe, map_surface, map_rings, pause, confirm, settings, settings_video,
+//! journal, journal_finished, skills, crafting, crafting_busy, saves, saves_save, title, loading, loading_ready, map_galaxy, map_system, map_globe, map_surface, map_rings, pause, confirm, settings, settings_gameplay, settings_video, settings_audio,
 //! settings_controls, theme_cyan (all by default).
 //! Needs a GPU or a software Vulkan driver (lavapipe).
 
@@ -394,7 +394,9 @@ fn main() {
     }
     for (name, tab, hover_id) in [
         ("settings", "interface", "set_scale"),
+        ("settings_gameplay", "gameplay", "set_fov"),
         ("settings_video", "video", "set_bloom"),
+        ("settings_audio", "audio", "set_music"),
         ("settings_controls", "controls", "bind:interact"),
     ] {
         if want(name) {

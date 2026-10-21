@@ -39,7 +39,7 @@ to 0 and restores it when it closes.
 | `title` | Title screen: the game's name over a slowly turning view of the home world, a moon, the galaxy and nebula light; Continue (the newest save, with its card), New Game (`game.new`), Load Game (the `saves` screen), Settings and Quit (asks, then `game.exit`); Esc doesn't close it | |
 | `loading` | Loading screen for travel: the destination planet turning slowly with its name, the arrival place, description and facts; a progress bar with loading stages, a spinner and tips that fade from one to the next; waits for Enter or a click when done, then sends `game.loading_done`. New Game and loading a save open it | `planet`, `place`, `progress` (data path, 0..1), `simulate_s`, `at`, `hold`, `tips`, `tip` |
 | `pause` | Pause menu with a character card; pauses game time | |
-| `settings` | Gameplay, Video (`RenderSettings`), Audio, Controls (rebinding), Interface (scale, accent colour) | `tab` |
+| `settings` | Gameplay, Video (`RenderSettings`), Audio, Controls (rebinding), Interface (scale, accent colour); a side panel explains the highlighted row with a live preview of its value | `tab` |
 | `confirm` | Yes/no dialog that sends `confirm:<action>` | `title`, `text`, `confirm`, `cancel`, `action`, `danger` |
 | `layout` | Any JSON layout | `layout` |
 
@@ -122,4 +122,4 @@ square).
 - `cargo run -p engine_ui --example gallery --release -- <dir> [width] [height] [shot ...]`
   renders every screen (hud, wheel, dialogue, dialogue_choices, dialogue_log, shop, shop_sell, inventory,
   inventory_drag, journal, journal_finished, skills, crafting, crafting_busy, saves, saves_save, title, loading, loading_ready, map_galaxy, map_system, map_globe, map_surface, map_rings, pause, confirm, settings,
-  settings_video, settings_controls, theme_cyan) to PNGs.
+  settings_gameplay, settings_video, settings_audio, settings_controls, theme_cyan) to PNGs.
