@@ -960,14 +960,53 @@ fn fog_sky_light() -> vec3<f32> {
 }
 
 // Radiance (cd/m^2, not pre-exposed) of height fog thick enough to hide everything behind it,
-// seen along `dir` with the fog at `at`: sunlight through the air with the fog's phase function
-// (`sun`: the share of the fog it reaches past mountains and clouds,
-// `height_fog_sun_visibility`) and sky light, both
-// scaled by `lit` (the open sky the fog sees), plus the ambient fill. This is the fog beyond
-// the volumetric range (or all of it with volumetrics off).
+// seen along `dir` with the fog at `at` (camera-relative; `height_fog_scatter_point`): sunlight
+// through the air with the fog's phase function (`sun`: the share of the fog it reaches past
+// mountains and clouds, `height_fog_sun_visibility`) and sky light, both scaled by `lit` (the
+// open sky the fog sees), plus the ambient fill. This is the fog beyond the volumetric range
+// (or all of it with volumetrics off). Sunlight and sky light are the fog's own: haze over
+// the night side of a planet seen from orbit gets neither the sun nor the sunlit sky around
+// the camera.
 fn height_fog_radiance(dir: vec3<f32>, at: vec3<f32>, lit: f32, sun: f32) -> vec3<f32> {
     let sunlight = frame.sun_color.rgb * sun_transmittance(at) * henyey_greenstein(dot(dir, frame.sun_dir.xyz), frame.fog_color.w);
-    return frame.fog_color.rgb * ((sunlight * sun + fog_sky_light()) * lit + frame.ambient.rgb);
+    var sky = fog_sky_light();
+    // Far below the camera the environment map's sky is the camera's (black space above the
+    // planet from orbit): take the sky around the fog from the atmosphere, as surfaces do.
+    let own = atmosphere_sky_ambient_weight(at);
+    if (own > 0.0) {
+        let up = normalize(at - frame.planet.xyz);
+        let around = 0.5 * (atmosphere_sky_ambient(at, up) + atmosphere_sky_ambient(at, -up));
+        sky = mix(sky, around * frame.sun_color.rgb, own);
+    }
+    return frame.fog_color.rgb * ((sunlight * sun + sky) * lit + frame.ambient.rgb);
+}
+
+// How far past `t0` along `dir` the height fog between `t0` and `t1` reaches optical depth
+// `tau` (the inverse of `height_fog_optical_depth`, with height linear along the ray), clamped
+// to the segment.
+fn height_fog_depth_at(dir: vec3<f32>, t0: f32, t1: f32, tau: f32) -> f32 {
+    let falloff = max(frame.fog.y, 1e-5);
+    let density = max(frame.fog.x, 1e-12);
+    let ha = max(fog_height(dir * t0) - frame.fog.z, -100.0);
+    let hb = max(fog_height(dir * t1) - frame.fog.z, -100.0);
+    let len = t1 - t0;
+    let dh = hb - ha;
+    let ea = exp(-falloff * ha);
+    var t = tau / (density * ea);
+    if (abs(dh) > 0.01) {
+        let slope = dh / len;
+        let e = max(ea - tau * falloff * slope / density, 1e-30);
+        t = (-log(e) / falloff - ha) / slope;
+    }
+    return clamp(t, 0.0, len);
+}
+
+// Where the height fog between `t0` and `t1` along `dir` scatters most of its light from, for
+// its lighting (`height_fog_radiance`): the point by which half of it is reached. Ground haze
+// seen from orbit is lit where it lies, not at the top of the air.
+fn height_fog_scatter_point(dir: vec3<f32>, t0: f32, t1: f32, tr: f32) -> vec3<f32> {
+    let tau = -log(1.0 - 0.5 * (1.0 - tr));
+    return dir * (t0 + height_fog_depth_at(dir, t0, t1, tau));
 }
 
 // Whether sunlight reaches camera-relative point `rel` in the air past the far shadow map's
@@ -997,26 +1036,12 @@ fn height_fog_sun_visibility(dir: vec3<f32>, t0: f32, t1: f32, tr: f32, noise: f
     let mountains = frame.far_shadow_params.x > 0.0 && frame.sun_color.w > 0.5;
     let clouds = frame.cloud_shadow_params.x > 0.5;
     if ((!mountains && !clouds) || tr >= 1.0) { return 1.0; }
-    let falloff = max(frame.fog.y, 1e-5);
-    let density = max(frame.fog.x, 1e-12);
-    let ha = max(fog_height(dir * t0) - frame.fog.z, -100.0);
-    let hb = max(fog_height(dir * t1) - frame.fog.z, -100.0);
-    let len = t1 - t0;
-    let dh = hb - ha;
-    let ea = exp(-falloff * ha);
     var sum = 0.0;
     for (var i = 0; i < HAZE_SHADOW_SAMPLES; i++) {
         // Optical depth from t0 at which this share of the segment's scattering is reached,
-        // then where along the ray the fog adds up to it (the inverse of
-        // `height_fog_optical_depth`).
+        // then where along the ray the fog adds up to it.
         let tau = -log(1.0 - (f32(i) + noise) / f32(HAZE_SHADOW_SAMPLES) * (1.0 - tr));
-        var t = tau / (density * ea);
-        if (abs(dh) > 0.01) {
-            let slope = dh / len;
-            let e = max(ea - tau * falloff * slope / density, 1e-30);
-            t = (-log(e) / falloff - ha) / slope;
-        }
-        let q = dir * (t0 + clamp(t, 0.0, len));
+        let q = dir * (t0 + height_fog_depth_at(dir, t0, t1, tau));
         var lit = 1.0;
         if (mountains) { lit = far_shadow_sun(q); }
         if (clouds) { lit *= cloud_shadow(q); }
@@ -1161,7 +1186,8 @@ fn surface_fog(rel: vec3<f32>) -> SurfaceFog {
             // what's behind it).
             let lit = fog_sky_visibility(rel);
             let sun = height_fog_sun_visibility(dir, start, dist, tr, frame_noise(pixel_of(rel)));
-            let l = pre_expose(height_fog_radiance(dir, dir * start, lit, sun)) * (1.0 - tr);
+            let at = height_fog_scatter_point(dir, start, dist, tr);
+            let l = pre_expose(height_fog_radiance(dir, at, lit, sun)) * (1.0 - tr);
             fog = vec4<f32>(fog.rgb + l * fog.a, fog.a * tr);
         }
     }
@@ -1226,7 +1252,8 @@ fn apply_full_sky_fog(color: vec3<f32>, dir: vec3<f32>, pixel: vec2<f32>) -> vec
         let tr = exp(-height_fog_optical_depth(dir, start, end));
         if (tr < 0.9999) {
             let sun = height_fog_sun_visibility(dir, start, end, tr, frame_noise(pixel));
-            let l = pre_expose(height_fog_radiance(dir, dir * start, 1.0, sun)) * (1.0 - tr);
+            let at = height_fog_scatter_point(dir, start, end, tr);
+            let l = pre_expose(height_fog_radiance(dir, at, 1.0, sun)) * (1.0 - tr);
             fog = vec4<f32>(fog.rgb + l * fog.a, fog.a * tr);
         }
     }
