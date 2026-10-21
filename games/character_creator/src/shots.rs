@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use engine::prelude::*;
-use engine::world::character::FaceControls;
+use engine::world::character::{FaceControls, HandControls};
 use engine_character::{Appearance, AppearanceExt, BuiltCharacter, CharacterBuild, CharacterDebug};
 
 use crate::Subject;
@@ -35,6 +35,8 @@ pub struct ShotPlan {
     settled: u32,
     requested: bool,
     completed_before: u64,
+    /// `--grip g`: both hands this closed (0 open .. 1 a fist).
+    grip: Option<f32>,
 }
 
 fn view(name: &str) -> Option<(Orbit, u8)> {
@@ -122,6 +124,22 @@ fn body_view(name: &str) -> Option<Orbit> {
             yaw: std::f32::consts::PI,
             ..body
         },
+        // The hands at the sides, from a little in front and above.
+        "hands" => Orbit {
+            yaw: 0.35,
+            pitch: 0.25,
+            distance: 1.5,
+            drop: 0.85,
+            fov_deg: 30.0,
+        },
+        // A close look at the left hand, from that side.
+        "hand" => Orbit {
+            yaw: 1.35,
+            pitch: 0.15,
+            distance: 0.75,
+            drop: 0.82,
+            fov_deg: 30.0,
+        },
         // The shoes, from the front and a little above.
         "feet" => Orbit {
             yaw: 0.5,
@@ -150,8 +168,8 @@ fn linear_from_hex(hex: &str) -> Option<[f32; 3]> {
 
 impl ShotPlan {
     /// `--shots <dir> [--only name,name] [--views front,34,...] [--pose walk] [--headgear id]
-    /// [--outfit top,bottom,accent_on] [--colors top,bottom,accent]` (colors as sRGB hex,
-    /// `2a4d8f`), or None without
+    /// [--outfit top,bottom,accent_on] [--colors top,bottom,accent] [--grip 0..1]` (colors as
+    /// sRGB hex, `2a4d8f`), or None without
     /// `--shots`. Views are close-ups (`front`, `34`, `profile`, `eyes`, ...), whole-body views
     /// (`body`, `body34`, `bodyside`, `bodyback`, `feet`, in `--pose`), or expressions in close-up
     /// (`smile`, `sad`, `surprise`, ...; `<expression>34` from three-quarters).
@@ -171,6 +189,7 @@ impl ShotPlan {
         let headgear = value("--headgear");
         let outfit = value("--outfit");
         let colors = value("--colors");
+        let grip = value("--grip").and_then(|g| g.parse::<f32>().ok());
         let mut people: Vec<(String, Appearance)> = Appearance::presets()
             .into_iter()
             .map(|(n, a)| (n.to_lowercase(), a))
@@ -248,6 +267,7 @@ impl ShotPlan {
             settled: 0,
             requested: false,
             completed_before: 0,
+            grip,
         })
     }
 }
@@ -311,6 +331,11 @@ pub fn run_shots(
             None => commands.entity(entity).remove::<PoseName>(),
         };
         changed = true;
+    }
+    if let Some(g) = plan.grip {
+        commands
+            .entity(entity)
+            .insert(HandControls { grip: [g, g] });
     }
     if face != Some(&shot.face) {
         commands.entity(entity).insert(shot.face.clone());

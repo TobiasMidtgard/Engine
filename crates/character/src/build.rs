@@ -7,6 +7,7 @@ use crate::appearance::Appearance;
 use crate::clothes;
 use crate::eyes::{self, EyeMesh};
 use crate::face::{self, FaceShapes};
+use crate::hands::{self, HandFrame};
 use crate::headgear::Headgear;
 use crate::hood;
 use crate::mesh::{self, Landmarks, Region, Regions, SkinMesh};
@@ -35,6 +36,8 @@ pub struct CharacterMeshes {
     /// The left thigh as a capsule for a skirt to stay outside: hip and knee joints and radii
     /// (`skirt::thigh`). `None` without a skirt.
     pub thigh: Option<[[f32; 4]; 2]>,
+    /// Each hand's frame for curling its fingers (left, right).
+    pub hands: Option<[HandFrame; 2]>,
     /// Expression shapes (empty when built without a face).
     pub face: FaceShapes,
 }
@@ -160,6 +163,7 @@ pub fn build(
     };
     CharacterMeshes {
         rig: Rig::new(pack, &morphed),
+        hands: hands::frames(pack, &morphed),
         thigh,
         skin,
         eyes: if face_shows {

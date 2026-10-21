@@ -88,6 +88,9 @@ Headgear (`Appearance::headgear`) leaves out what a helmet covers, for whoever d
 It calls `draws_appearances`, so anim poses people with an `Appearance` without drawing its
 own mesh for them. It writes `HairGuides` for posed people whose hair moves, and draws each
 hair blended from its three nearest guides as the hair simulation moves them.
+It curls each hand's fingers by its `HandControls` grip (0 open .. 1 a fist): the pack has no
+finger bones, so the skin shader bends the fingers at their joints and the thumb across the palm
+(`hands.rs`).
 It draws through its own `RenderFeature` (`character`).
 
 ## API

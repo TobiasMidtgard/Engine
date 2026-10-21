@@ -20,7 +20,8 @@ fn vs_skin_shadow(
     @builtin(vertex_index) vertex: u32,
 ) -> @builtin(position) vec4<f32> {
     let m = morph_at(vertex);
-    let local = position_curvature.xyz + m.dp + normalize(normal.xyz + m.dn) * cloth_lift(rest.xyz, m2.x);
+    let hand = curl_hand(position_curvature.xyz + m.dp, normalize(normal.xyz + m.dn), bones, weights, false);
+    let local = hand.p + hand.n * cloth_lift(rest.xyz, m2.x);
     var p = (skin_matrix(bones, weights, false) * vec4<f32>(local, 1.0)).xyz;
     if (u32(normal.w + 0.5) == 5u) {
         p = clear_thighs(p, bones, false);

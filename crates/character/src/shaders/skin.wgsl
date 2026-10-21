@@ -47,13 +47,18 @@ struct SkinOut {
 fn vs_skin(in: SkinIn, @builtin(vertex_index) vertex: u32) -> SkinOut {
     var out: SkinOut;
     let m = morph_at(vertex);
-    let n = normalize(in.normal.xyz + m.dn);
+    let n0 = normalize(in.normal.xyz + m.dn);
+    // Fingers curl by the hands' grip.
+    let hand = curl_hand(in.position_curvature.xyz + m.dp, n0, in.bones, in.weights, false);
+    let hand_prev =
+        curl_hand(in.position_curvature.xyz + m.dp_prev, n0, in.bones, in.weights, true);
+    let n = hand.n;
     // Clothes stand off the skin.
     let lift = n * cloth_lift(in.rest.xyz, in.m2.x);
     let now = skin_matrix(in.bones, in.weights, false);
-    var p = (now * vec4<f32>(in.position_curvature.xyz + m.dp + lift, 1.0)).xyz;
+    var p = (now * vec4<f32>(hand.p + lift, 1.0)).xyz;
     var p_prev = (skin_matrix(in.bones, in.weights, true)
-        * vec4<f32>(in.position_curvature.xyz + m.dp_prev + lift, 1.0)).xyz;
+        * vec4<f32>(hand_prev.p + lift, 1.0)).xyz;
     if (u32(in.normal.w + 0.5) == 5u) {
         p = clear_thighs(p, in.bones, false);
         p_prev = clear_thighs(p_prev, in.bones, true);

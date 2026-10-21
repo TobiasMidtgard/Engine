@@ -22,6 +22,10 @@ struct Character {
     accent: vec4<f32>,        // accent color, where (0 nowhere, 1 left armband, 2 right, 3 collar)
     thigh: vec4<f32>,         // a skirt's left thigh capsule: hip joint (base mesh space), radius
     knee: vec4<f32>,          // knee joint, radius (the right thigh mirrors; radius 0: no skirt)
+    // Per hand, left then right (base mesh space): knuckles, finger length; along the hand,
+    // its bone; out of the palm, thumb side of along x palm (+-1); wrist; thumb tip. Length 0:
+    // no hand.
+    hands: array<vec4<f32>, 10>,
 };
 
 @group(1) @binding(0) var<uniform> character: Character;
@@ -33,6 +37,7 @@ struct Pose {
     gaze: vec4<f32>,                     // yaw, pitch this frame; yaw, pitch last frame (rad)
     eye_l: vec4<f32>,                    // eye centers (model space before posing)
     eye_r: vec4<f32>,
+    grip: vec4<f32>,                     // left, right hand grip (0..1); last frame's
     weights: array<vec4<f32>, 16>,       // expression channels this frame
     prev_weights: array<vec4<f32>, 16>,  // and last frame
     bones: array<mat4x4<f32>>,           // this frame's bones, then last frame's
@@ -98,6 +103,117 @@ fn skin_matrix(bones: vec4<u32>, w: vec4<f32>, prev: bool) -> mat4x4<f32> {
     let o = select(0u, pose.info.x, prev);
     return pose.bones[o + bones.x] * w.x + pose.bones[o + bones.y] * w.y
         + pose.bones[o + bones.z] * w.z + pose.bones[o + bones.w] * w.w;
+}
+
+// ---------------------------------------------------------------- hands
+// Finger curl (hands.rs, whose `curl` this mirrors): the fingers bend at their three joints,
+// palm side inside, as far as a fist's at a full grip; the thumb bends at its own and turns
+// toward the palm.
+const THUMB_TURN: f32 = 0.9;
+const KNUCKLES: f32 = 0.45;
+const HAND: f32 = 0.177;
+const THUMB_ROOT: f32 = 0.015;
+const JOINT_SPAN: f32 = 0.007;
+const DIGIT_STEPS: u32 = 16u;
+const FINGER_BENDS: vec3<f32> = vec3<f32>(1.6, 1.9, 1.25);
+const THUMB_BENDS: vec3<f32> = vec3<f32>(0.0, 0.7, 1.0);
+
+struct Bent {
+    p: vec3<f32>,
+    n: vec3<f32>,
+};
+
+// `n` turned in the plane of `a` and `b`, from `a` toward `b`.
+fn turn(n: vec3<f32>, a: vec3<f32>, b: vec3<f32>, s: f32, c: f32) -> vec3<f32> {
+    let x = dot(n, a);
+    let y = dot(n, b);
+    return n - a * x - b * y + a * (x * c - y * s) + b * (x * s + y * c);
+}
+
+// How far a digit has bent by `t` along it from its root (joints at 0, 0.45 and 0.75 of `len`).
+fn digit_angle(t: f32, len: f32, span: f32, bends: vec3<f32>) -> f32 {
+    return bends.x * smoothstep(-span, span, t)
+        + bends.y * smoothstep(0.45 * len - span, 0.45 * len + span, t)
+        + bends.z * smoothstep(0.75 * len - span, 0.75 * len + span, t);
+}
+
+// A point and normal of a finger (or thumb) bent at its joints, palm side (`up`) inside: the
+// finger's bent middle line traced out to the point, the point's height above it carried
+// round with it.
+fn bend_digit(b: Bent, root: vec3<f32>, along: vec3<f32>, up: vec3<f32>, len: f32,
+    bends: vec3<f32>, span: f32) -> Bent {
+    let d = b.p - root;
+    let s = dot(d, along);
+    if (s <= -span || max(bends.x, max(bends.y, bends.z)) <= 0.0) {
+        return b;
+    }
+    let step = (s + span) / f32(DIGIT_STEPS);
+    var line = along * -span;
+    for (var i = 0u; i < DIGIT_STEPS; i++) {
+        let f = digit_angle(-span + (f32(i) + 0.5) * step, len, span, bends);
+        line += (along * cos(f) + up * sin(f)) * step;
+    }
+    let height = dot(d, up);
+    let f = digit_angle(s, len, span, bends);
+    let sn = sin(f);
+    let cs = cos(f);
+    return Bent(
+        b.p + line - along * s - up * height + (up * cs - along * sn) * height,
+        turn(b.n, along, up, sn, cs),
+    );
+}
+
+// A point and normal (base mesh space) of a hand bent by this frame's grip, or last frame's.
+fn curl_hand(p0: vec3<f32>, n0: vec3<f32>, bones: vec4<u32>, w: vec4<f32>, prev: bool) -> Bent {
+    var out = Bent(p0, n0);
+    for (var side = 0u; side < 2u; side++) {
+        let o = side * 5u;
+        let k = character.hands[o];
+        let a = character.hands[o + 1u];
+        if (k.w <= 0.0) {
+            continue;
+        }
+        let bone = u32(a.w + 0.5);
+        let on = dot(w, vec4<f32>(bones == vec4<u32>(bone)));
+        let g = select(pose.grip.xy, pose.grip.zw, prev);
+        let grip = saturate(select(g.x, g.y, side == 1u)) * smoothstep(0.3, 0.7, on);
+        if (grip <= 0.0) {
+            continue;
+        }
+        let along = a.xyz;
+        let palm = character.hands[o + 2u].xyz;
+        let thumb = cross(along, palm) * character.hands[o + 2u].w;
+        let wrist = character.hands[o + 3u].xyz;
+        let tip = character.hands[o + 4u].xyz;
+        let size = k.w / (1.0 - KNUCKLES) / HAND;
+        let v = out.p - wrist;
+        let edge = min(0.012 + 0.42 * dot(v, along) / size, 0.05) * size;
+        // Not the wrist (or a cuff around it) on the thumb's side.
+        let thumbness = smoothstep(edge - 0.004, edge + 0.004, dot(v, thumb))
+            * smoothstep(0.0, 0.02 * size, dot(v, along));
+        let span = JOINT_SPAN * size;
+        out = bend_digit(out, k.xyz, along, palm, k.w, FINGER_BENDS * (grip * (1.0 - thumbness)), span);
+        let root = wrist + thumb * (THUMB_ROOT * size);
+        let toward = normalize(tip - root);
+        // The thumb flexes across the palm, toward the little finger.
+        let across = palm * 0.3 - thumb;
+        let up = normalize(across - toward * dot(across, toward));
+        out = bend_digit(out, root, toward, up, length(tip - root), THUMB_BENDS * (grip * thumbness), span);
+        // The thumb turns about an axis along the hand, at its root, toward the palm.
+        let t = grip * THUMB_TURN * thumbness;
+        if (t > 0.0) {
+            let q = out.p - root;
+            let x = dot(q, thumb);
+            let y = dot(q, palm);
+            let sn = sin(t);
+            let cs = cos(t);
+            out = Bent(
+                out.p + thumb * (x * cs - y * sn - x) + palm * (x * sn + y * cs - y),
+                turn(out.n, thumb, palm, sn, cs),
+            );
+        }
+    }
+    return out;
 }
 
 // A skirt point pushed out of both thighs (`bones`: hips, left and right upper leg, as the

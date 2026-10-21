@@ -30,7 +30,7 @@ use engine_render::wgpu;
 use wgpu::util::DeviceExt;
 
 use engine_world::animation::SkeletonPose;
-use engine_world::character::FaceControls;
+use engine_world::character::{FaceControls, HandControls};
 use engine_world::{HairGuides, HairGuidesPosed};
 
 use crate::appearance::{Appearance, AppearanceExt, BeardStyle, HairStyle};
@@ -102,6 +102,9 @@ pub struct GpuCharacter {
     /// A skirt's left thigh capsule: hip joint and radius, knee joint and radius (zero without).
     pub thigh: [f32; 4],
     pub knee: [f32; 4],
+    /// Each hand's frame for curling the fingers, left then right (`HandFrame::gpu`; zero
+    /// without hands).
+    pub hands: [[[f32; 4]; 5]; 2],
 }
 
 impl GpuCharacter {
@@ -166,6 +169,7 @@ impl GpuCharacter {
             accent: [o.accent[0], o.accent[1], o.accent[2], cut[2]],
             thigh: [0.0; 4],
             knee: [0.0; 4],
+            hands: [[[0.0; 4]; 5]; 2],
         }
     }
 }
@@ -196,6 +200,7 @@ struct GpuPose {
     gaze: [f32; 4],
     eye_l: [f32; 4],
     eye_r: [f32; 4],
+    grip: [f32; 4],
     weights: [[f32; 4]; MAX_CHANNELS / 4],
     prev_weights: [[f32; 4]; MAX_CHANNELS / 4],
 }
@@ -231,6 +236,7 @@ struct LastPose {
     palette: Vec<Mat4>,
     weights: [f32; MAX_CHANNELS],
     gaze: [f32; 2],
+    grip: [f32; 2],
     /// The pose skeleton the bone map was made for (its names), and the map.
     names: Option<Arc<[String]>>,
     map: Vec<Option<usize>>,
@@ -242,6 +248,7 @@ impl Default for LastPose {
             palette: Vec::new(),
             weights: [0.0; MAX_CHANNELS],
             gaze: [0.0; 2],
+            grip: [0.0; 2],
             names: None,
             map: Vec::new(),
         }
@@ -300,6 +307,7 @@ type CharacterItem = (
     &'static BuiltCharacter,
     Option<&'static SkeletonPose>,
     Option<&'static FaceControls>,
+    Option<&'static HandControls>,
     Option<&'static HairGuides>,
     Option<&'static HairGuidesPosed>,
 );
@@ -857,7 +865,7 @@ impl RenderFeature for CharacterFeature {
         for c in self.characters.values_mut() {
             c.seen = false;
         }
-        for (entity, transform, built, skeleton, face, guides, posed) in query.iter(world) {
+        for (entity, transform, built, skeleton, face, hands, guides, posed) in query.iter(world) {
             let entry = self.characters.entry(entity);
             let c = match entry {
                 std::collections::hash_map::Entry::Occupied(o) => {
@@ -904,7 +912,7 @@ impl RenderFeature for CharacterFeature {
                 c,
                 &built.meshes,
                 skeleton,
-                face,
+                (face, hands),
                 &mut self.palette,
                 &mut self.pose_bytes,
             );
@@ -977,13 +985,14 @@ fn write_motion(
 }
 
 /// Fill a character's pose buffer: bone matrices from its `SkeletonPose` (identity without
-/// one), expression weights from its `FaceControls`, and last frame's of each.
+/// one), expression weights from its `FaceControls`, grips from its `HandControls`, and last
+/// frame's of each.
 fn write_pose(
     gpu: &GpuShared,
     c: &mut GpuMeshes,
     m: &CharacterMeshes,
     skeleton: Option<&SkeletonPose>,
-    face_controls: Option<&FaceControls>,
+    (face_controls, hands): (Option<&FaceControls>, Option<&HandControls>),
     palette: &mut Vec<Mat4>,
     bytes: &mut Vec<u8>,
 ) {
@@ -1015,6 +1024,7 @@ fn write_pose(
         face::channel_weights(f, &mut weights);
         gaze = [f.gaze_yaw, f.gaze_pitch];
     }
+    let grip = hands.map_or([0.0; 2], |h| [h.grip(0), h.grip(1)]);
     let head = rig
         .and_then(|r| r.bones.iter().position(|b| b == "head"))
         .unwrap_or(0);
@@ -1032,6 +1042,7 @@ fn write_pose(
         gaze: [gaze[0], gaze[1], c.last.gaze[0], c.last.gaze[1]],
         eye_l: e(eyes[0]),
         eye_r: e(eyes[1]),
+        grip: [grip[0], grip[1], c.last.grip[0], c.last.grip[1]],
         weights: fours(&weights),
         prev_weights: fours(&c.last.weights),
     };
@@ -1045,6 +1056,7 @@ fn write_pose(
     c.last.palette.extend_from_slice(palette);
     c.last.weights = weights;
     c.last.gaze = gaze;
+    c.last.grip = grip;
 }
 
 #[cfg(test)]
@@ -1062,9 +1074,9 @@ mod tests {
 
     #[test]
     fn gpu_structs_match_wgsl_sizes() {
-        assert_eq!(std::mem::size_of::<GpuCharacter>(), 2 * 64 + 17 * 16);
+        assert_eq!(std::mem::size_of::<GpuCharacter>(), 2 * 64 + 27 * 16);
         assert_eq!(std::mem::size_of::<SkinVertex>(), 104);
-        assert_eq!(std::mem::size_of::<GpuPose>(), 4 * 16 + 2 * 16 * 16);
+        assert_eq!(std::mem::size_of::<GpuPose>(), 5 * 16 + 2 * 16 * 16);
         assert_eq!(std::mem::size_of::<EyeVertex>(), 48);
     }
 }

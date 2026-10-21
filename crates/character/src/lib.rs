@@ -9,6 +9,7 @@ pub mod eyes;
 pub mod face;
 pub mod feature;
 pub mod hair_motion;
+pub mod hands;
 pub mod headgear;
 pub mod hood;
 pub mod mesh;
@@ -373,6 +374,9 @@ fn finish_builds(
                 let mut uniform = GpuCharacter::new(&appearance, &rest, 0);
                 if let Some([thigh, knee]) = meshes.thigh {
                     (uniform.thigh, uniform.knee) = (thigh, knee);
+                }
+                if let Some(hands) = meshes.hands {
+                    uniform.hands = hands.map(|h| h.gpu());
                 }
                 let mut e = commands.entity(entity);
                 // The person's own limb lengths, for posers that fit a skeleton to them.
