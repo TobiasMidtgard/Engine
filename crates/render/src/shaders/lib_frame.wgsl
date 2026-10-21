@@ -706,6 +706,12 @@ fn surface_weather(rel: vec3<f32>) -> vec4<f32> {
 }
 
 // ---------------------------------------------------------------- surface shading
+// The specular part (pre-exposed) of the last `shade_surface`, `shade_surface_shadowed` or
+// `shade_thin_surface` this invocation ran: what the surface reflects, sun, lamps and sky, as
+// opposed to what it scatters (diffuse) or gives off. A blended surface keeps it whole while
+// its diffuse light fades with its alpha (mesh.wgsl).
+var<private> shade_specular: vec3<f32>;
+
 // Returns pre-exposed radiance for a lit surface at camera-relative position `rel`.
 fn shade_surface(s: Surface, rel: vec3<f32>) -> vec3<f32> {
     return shade_surface_shadowed(s, rel, 1.0);
@@ -775,6 +781,8 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     let translucent = thin && s.subsurface > 0.0;
     let through_color = thin_surface_tint(diffuse_color) * select(0.0, saturate(s.subsurface), translucent);
     var color = vec3(0.0);
+    // The reflected part of `color` (`shade_specular`).
+    var specular = vec3(0.0);
 
     // Sun.
     let l = frame.sun_dir.xyz;
@@ -791,15 +799,18 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
             // bends its normals so a crown or a tuft of cards shades as one rounded volume.
             // Highlights and contact shadows only come with the sun on the side in view.
             var reflected = diffuse_color * INV_PI;
+            var highlight = vec3(0.0);
             var contact = 1.0;
             if (sides.x > 0.0) {
                 let h = normalize(l + v);
                 let spec = d_ggx(saturate(dot(n, h)), roughness) * v_smith_ggx_correlated(n_dot_v, n_dot_l, roughness)
                     * f_schlick(f0, saturate(dot(l, h)));
-                reflected += spec * sides.x;
+                highlight = spec * sides.x;
+                reflected += highlight;
                 contact = mix(1.0, contact_shadow(rel, face), sides.x);
             }
             color += reflected * (n_dot_l * contact * shadow) * sun_light;
+            specular += highlight * (n_dot_l * contact * shadow) * sun_light;
         }
         if (shadow > 0.0 && sides.y > 0.0) {
             color += through_color * (thin_surface_through(n_dot_l_raw, v, l) * sides.y * shadow) * sun_light;
@@ -817,6 +828,7 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
         let wrap = saturate((n_dot_l_raw + s.subsurface) / ((1.0 + s.subsurface) * (1.0 + s.subsurface)));
         let diffuse = diffuse_color * INV_PI * select(n_dot_l, wrap, s.subsurface > 0.0);
         color += (diffuse + spec * n_dot_l) * sun_light * shadow;
+        specular += spec * n_dot_l * sun_light * shadow;
         // Back-lit translucency (leaves glowing against the sun).
         if (s.subsurface > 0.0) {
             let back = pow(saturate(dot(v, -l)), 4.0) * s.subsurface * 0.35;
@@ -846,10 +858,12 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
             let reflected = (diffuse_color * INV_PI + spec * lit.x) * nl;
             let through = through_color * (thin_surface_through(dot(n, pl), v, pl) * lit.y);
             color += (reflected + through) * light.color_radius.rgb * falloff;
+            specular += spec * (lit.x * nl) * light.color_radius.rgb * falloff;
             continue;
         }
         let wrap = saturate((dot(n, pl) + s.subsurface) / (1.0 + s.subsurface));
         color += (diffuse_color * INV_PI * max(nl, wrap * s.subsurface) + spec * nl) * light.color_radius.rgb * falloff;
+        specular += spec * nl * light.color_radius.rgb * falloff;
     }
 
     // Sky / ambient (occluded in caves and interiors; the constant fill stays), darkened in
@@ -892,9 +906,12 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     }
     // Light bounced from nearby surfaces (its rays already stop at whatever occludes them).
     color += diffuse_color * screen_gi(rel);
-    color += spec_env * env_brdf * specular_occlusion(n_dot_v, visibility, roughness);
+    let reflected_sky = spec_env * env_brdf * specular_occlusion(n_dot_v, visibility, roughness);
+    color += reflected_sky;
+    specular += reflected_sky;
 
     color += s.emissive;
+    shade_specular = pre_expose(specular);
     return pre_expose(color);
 }
 
