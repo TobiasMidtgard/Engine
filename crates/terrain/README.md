@@ -179,6 +179,15 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   a four times coarser map of how much of each 2 m cell is bare path (paths show from hills
   and the air). `WearSettings` sets the cell
   size, a `gain_scale` (paths form quicker) and a `heal_scale` (they fade quicker).
+- **Trails people lay themselves.** `PathWear::walk_between` sends walkers between places
+  (each weighted by how busy it is). Each takes the way that feels shortest on a coarse
+  grid where a path that shows feels easier than open ground (`TrailWalk::attraction`, 0.5:
+  a path up to 60° off the way beats cutting across) and paths a few meters off draw them
+  in, each with a whim of their own off the paths; the way is pulled taut (the grid's own
+  directions don't show), eased round corners, and feet find a path's trodden middle.
+  Unused ground heals between trips. So the walkers' first lines are reinforced or
+  forgotten, and trails emerge that share a trunk toward places in the same direction and
+  fork in curves, instead of a straight line between every pair.
 - **Weather on the ground.** Wetness, puddles, snow depth and scorch from `SurfaceLayers`
   (written by the weather module, and by the water module along shores) darken and gloss
   the ground (wet sand to about half its dry brightness, without turning to mud), turn soil
@@ -219,7 +228,8 @@ tile center.
 
 API: `terrain.height {x, y, z}`, `terrain.edit {...}`, `terrain.footprint {...}`,
 `terrain.wear {at}` (how worn the ground is, 0..1), `terrain.walk_path {from, to, passes,
-load_kg, spread_m}` (wear a path at once), `terrain.stats`.
+load_kg, spread_m}` (wear a path at once), `terrain.walk_between {places, trips, load_kg,
+attraction, trips_per_day}` (people lay their own trails between places), `terrain.stats`.
 
 ## Use it
 
@@ -247,7 +257,9 @@ valley and a natural one at eye height, snow at eye height and over the valley, 
 underfoot, from low orbit, half lit and full, the Earth's climate belts from far out
 (`earth_globe`), a river at eye height (`earth_river`) and rivers from the air
 (`earth_rivers_air`), worn paths (`paths_meadow`, `paths_meadow_high`, `paths_rain`,
-`paths_snow`, `paths_beach`, `paths_hill` from 600 m off; `NO_PATHS=1` for the ground before), and Mars: from orbit (`mars_orbit`,
+`paths_snow`, `paths_beach`, `paths_hill` from 600 m off; `NO_PATHS=1` for the ground before;
+trails laid by walkers between a farm and four places, `paths_desire` from the air and
+`paths_desire_eye` at the fork, `STRAIGHT=1` for everyone on straight lines), and Mars: from orbit (`mars_orbit`,
 `mars_valles`), Olympus Mons (`mars_olympus`), the north pole (`mars_pole`), and the floor and
 rim of Valles Marineris (`mars_canyon`, `mars_rim`))
 with the game's auto exposure, and `examples/terrain_map.rs` draws a relief map with rivers and lakes around

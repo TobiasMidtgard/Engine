@@ -64,6 +64,11 @@ struct View {
     paths: &'static [PathLine],
     /// The eye and target the paths' points are measured from, when not this view's own.
     paths_from: Option<(DVec3, DVec3)>,
+    /// Places people walk between, `trips` times in all, laying their own trails (meters
+    /// ahead of the eye, meters to its right, how busy). With `STRAIGHT` set everyone walks
+    /// the straight line instead, for a before picture.
+    places: &'static [(f64, f64, f32)],
+    trips: u32,
 }
 
 /// A path walked `passes` times along a line of (meters ahead of the eye, meters to its
@@ -126,7 +131,22 @@ const BASE: View = View {
     ground: Ground::Dry,
     paths: &[],
     paths_from: None,
+    places: &[],
+    trips: 0,
 };
+
+/// A farm by the meadow's edge and four places its people walk to (and between).
+const MEADOW_PLACES: &[(f64, f64, f32)] = &[
+    (5.0, 0.0, 4.0),
+    (170.0, -55.0, 1.0),
+    (185.0, 5.0, 1.0),
+    (140.0, 70.0, 1.0),
+    (60.0, 95.0, 1.0),
+];
+const MEADOW_FRAME: (DVec3, DVec3) = (
+    DVec3::new(900.0, 0.0, 300.0),
+    DVec3::new(1_300.0, 0.0, -400.0),
+);
 
 fn views() -> Vec<View> {
     vec![
@@ -297,6 +317,30 @@ fn views() -> Vec<View> {
             target_above_ground: Some(0.0),
             sun: (230.0, 32.0),
             paths: MEADOW_PATHS,
+            ..BASE
+        },
+        // People walking between a farm and four places lay their own trails.
+        View {
+            name: "paths_desire",
+            eye: DVec3::new(835.5, 0.0, 332.0),
+            target: DVec3::new(962.0, 0.0, 222.0),
+            above_ground: Some(95.0),
+            target_above_ground: Some(0.0),
+            sun: (230.0, 32.0),
+            paths_from: Some(MEADOW_FRAME),
+            places: MEADOW_PLACES,
+            trips: 6000,
+            ..BASE
+        },
+        View {
+            name: "paths_desire_eye",
+            eye: DVec3::new(905.0, 0.0, 291.3),
+            target: DVec3::new(985.0, 0.0, 151.0),
+            above_ground: Some(1.7),
+            sun: (230.0, 32.0),
+            paths_from: Some(MEADOW_FRAME),
+            places: MEADOW_PLACES,
+            trips: 6000,
             ..BASE
         },
         // The same paths from a hill a few hundred meters off, beyond the fine window.
@@ -904,7 +948,9 @@ fn main() {
                 None => (tf.rotation.as_dquat() * DVec3::Y).as_vec3(),
             };
         }
-        if !view.paths.is_empty() && std::env::var_os("NO_PATHS").is_none() {
+        if (!view.paths.is_empty() || !view.places.is_empty())
+            && std::env::var_os("NO_PATHS").is_none()
+        {
             let (from, toward) = view.paths_from.map_or((eye, target), |(e, t)| {
                 (place(e, Some(1.7)), place(t, Some(0.0)))
             });
@@ -1018,9 +1064,66 @@ fn wear_paths(
             ));
         }
     }
+    let spots: Vec<DVec3> = view
+        .places
+        .iter()
+        .map(|&(a, r, _)| place(eye + fwd * a + right * r, Some(0.0)))
+        .collect();
+    let places: Vec<(DVec3, f32)> = spots
+        .iter()
+        .zip(view.places)
+        .map(|(&p, &(_, _, busy))| (t.to_local(p), busy))
+        .collect();
+    let place_kind = spots.first().map_or(WornGround::Turf, |&p| {
+        terrains
+            .surface_at(p, &mats)
+            .map_or(WornGround::Turf, |(_, _, s, _)| WornGround::of(mats.get(s)))
+    });
+    let up = places.first().map_or(DVec3::Y, |p| t.local_up(p.0));
     let mut wear = world.resource_mut::<PathWear>();
     for (a, b, up, passes, spread, kind, seed) in lines {
         wear.walk_line(entity, a, b, up, passes, 75.0, kind, spread, seed);
+    }
+    if places.len() < 2 {
+        return;
+    }
+    if std::env::var_os("STRAIGHT").is_some() {
+        // Everyone on the straight line: each pair's share of the trips.
+        let total: f32 = places.iter().map(|p| p.1).sum();
+        for i in 0..places.len() {
+            for j in i + 1..places.len() {
+                let share = places[i].1 * places[j].1
+                    / (total * total - places.iter().map(|p| p.1 * p.1).sum::<f32>())
+                    * 2.0;
+                let passes = (view.trips as f32 * share).round() as u32;
+                wear.walk_line(
+                    entity,
+                    places[i].0,
+                    places[j].0,
+                    up,
+                    passes,
+                    75.0,
+                    place_kind,
+                    0.25,
+                    (i * 7 + j) as u32,
+                );
+            }
+        }
+    } else {
+        wear.walk_between(
+            entity,
+            &places,
+            up,
+            view.trips,
+            75.0,
+            place_kind,
+            // A busy farm: hundreds of trips a day.
+            engine_terrain::TrailWalk {
+                trips_per_day: 800.0,
+                ..Default::default()
+            },
+            5,
+        );
     }
 }
 

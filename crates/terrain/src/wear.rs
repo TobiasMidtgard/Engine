@@ -355,6 +355,25 @@ impl PathWear {
     /// Lets every worn cell heal for `dt` seconds. `snowfall_m_s`: fresh snow falling (meters
     /// per second), which buries packed snow.
     pub fn heal(&mut self, dt: f32, snowfall_m_s: f32, heal_scale: f32) {
+        let terrains: Vec<(Entity, usize)> = self
+            .terrains
+            .iter()
+            .flat_map(|(&e, r)| (0..r.len()).map(move |i| (e, i)))
+            .collect();
+        for (terrain, index) in terrains {
+            self.heal_region(terrain, index, dt, snowfall_m_s, heal_scale);
+        }
+    }
+
+    /// [`heal`](Self::heal) for one region only.
+    fn heal_region(
+        &mut self,
+        terrain: Entity,
+        index: usize,
+        dt: f32,
+        snowfall_m_s: f32,
+        heal_scale: f32,
+    ) {
         let scale = heal_scale.max(1e-6);
         let rates: [f32; 6] = std::array::from_fn(|k| {
             let ground = [
@@ -369,29 +388,33 @@ impl PathWear {
         });
         // Ten centimeters of new snow buries a packed track.
         let buried = snowfall_m_s * dt * 10.0;
-        for (&terrain, regions) in &mut self.terrains {
-            for (index, region) in regions.iter_mut().enumerate() {
-                region.tiles.retain(|&key, tile| {
-                    let tile = Arc::make_mut(tile);
-                    let mut peak = 0.0f32;
-                    for (w, g) in tile.wear.iter_mut().zip(&tile.ground) {
-                        if *w > 0.0 {
-                            *w *= rates[*g as usize];
-                            if *g == WornGround::Snow {
-                                *w = (*w - buried).max(0.0);
-                            }
-                            if *w < 1e-3 {
-                                *w = 0.0;
-                            }
-                            peak = peak.max(*w);
-                        }
+        let Some(region) = self
+            .terrains
+            .get_mut(&terrain)
+            .and_then(|r| r.get_mut(index))
+        else {
+            return;
+        };
+        let dirty = &mut self.dirty;
+        region.tiles.retain(|&key, tile| {
+            let tile = Arc::make_mut(tile);
+            let mut peak = 0.0f32;
+            for (w, g) in tile.wear.iter_mut().zip(&tile.ground) {
+                if *w > 0.0 {
+                    *w *= rates[*g as usize];
+                    if *g == WornGround::Snow {
+                        *w = (*w - buried).max(0.0);
                     }
-                    self.dirty.insert((terrain, index, key));
-                    peak > 0.0
-                });
-                self.revision += 1;
+                    if *w < 1e-3 {
+                        *w = 0.0;
+                    }
+                    peak = peak.max(*w);
+                }
             }
-        }
+            dirty.insert((terrain, index, key));
+            peak > 0.0
+        });
+        self.revision += 1;
     }
 
     /// Forget every path of a terrain (it was removed).
@@ -452,6 +475,461 @@ impl PathWear {
                     1.0,
                 );
             }
+        }
+    }
+
+    /// Walkers going back and forth between `points` (terrain-local, on the ground; `up` the
+    /// ground's up), `trips` trips in all, each from one point to another picked at random,
+    /// in proportion to how busy each is (the `f32` beside it).
+    /// Like people, each takes the way that feels shortest: straight across the grass while
+    /// nothing is worn, but along a worn path where it runs their way, since walking a path
+    /// is easier than wading through grass (see [`TrailWalk::attraction`]). Paths nobody uses
+    /// heal between trips. So the first walkers' lines are reinforced or forgotten, and a few
+    /// shared trails emerge that join and part at forks, instead of a straight line between
+    /// every pair. Only the region under the points heals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn walk_between(
+        &mut self,
+        terrain: Entity,
+        points: &[(DVec3, f32)],
+        up: DVec3,
+        trips: u32,
+        load_kg: f32,
+        ground: WornGround,
+        walk: TrailWalk,
+        seed: u32,
+    ) {
+        if points.len() < 2 || trips == 0 {
+            return;
+        }
+        let up = up.normalize_or_zero();
+        // Make sure the region exists (and find it) before the first trip.
+        self.tread(
+            terrain,
+            points[0].0,
+            up,
+            [0.0, 0.0],
+            1.0,
+            ContactKind::Foot,
+            ground,
+            0.0,
+            0.0,
+        );
+        let Some((index, region)) = self.region_at(terrain, points[0].0) else {
+            return;
+        };
+        let places: Vec<DVec3> = points.iter().map(|p| p.0).collect();
+        let mut map = RouteMap::new(region, &places, self.cell_m);
+        let day_s = 86_400.0 / walk.trips_per_day.max(1e-3);
+        let refresh = 10u32;
+        for trip in 0..trips {
+            if trip % refresh == 0 {
+                if trip > 0 {
+                    self.heal_region(terrain, index, day_s * refresh as f32, 0.0, walk.heal_scale);
+                }
+                map.read(&self.terrains[&terrain][index]);
+            }
+            // Two different places, the busier ones more often.
+            let pick = |r: f64, skip: Option<usize>| {
+                let total: f64 = (0..points.len())
+                    .filter(|&i| Some(i) != skip)
+                    .map(|i| points[i].1.max(0.0) as f64)
+                    .sum();
+                let mut left = r * total;
+                let mut last = 0;
+                for i in (0..points.len()).filter(|&i| Some(i) != skip) {
+                    last = i;
+                    left -= points[i].1.max(0.0) as f64;
+                    if left < 0.0 {
+                        break;
+                    }
+                }
+                last
+            };
+            let a = pick(hash(seed, trip, 0), None);
+            let b = pick(hash(seed, trip, 1), Some(a));
+            if a == b {
+                continue;
+            }
+            // Everyone starts and ends a step or two from the exact spot.
+            let side = up.any_orthonormal_vector();
+            let other = up.cross(side);
+            let jitter = |k: u32| {
+                side * (hash(seed, trip, k) - 0.5) * 2.0
+                    + other * (hash(seed, trip, k + 1) - 0.5) * 2.0
+            };
+            let from = points[a].0 + jitter(2);
+            let to = points[b].0 + jitter(4);
+            let route = map.route(from, to, walk.attraction, seed ^ trip.wrapping_mul(0x9E37));
+            // Each walker keeps a little to one side of the way (most near it, a few well off).
+            let lane =
+                (hash(seed, trip, 6) + hash(seed, trip, 7) - 1.0) * 1.6 * walk.spread_m as f64;
+            // Steps along the way, eased round its corners as a walker cuts them (over a few
+            // meters, so trails join and part in curves).
+            let step = 0.7;
+            let mut steps = Vec::new();
+            let mut along = hash(seed, trip, 8) * step;
+            for pair in route.windows(2) {
+                let len = pair[0].distance(pair[1]);
+                while along < len {
+                    steps.push(pair[0].lerp(pair[1], along / len));
+                    along += step;
+                }
+                along -= len;
+            }
+            steps.push(to);
+            for _ in 0..2 {
+                steps = (0..steps.len())
+                    .map(|i| {
+                        let k = 4.min(i).min(steps.len() - 1 - i);
+                        let (mut sum, mut total) = (DVec3::ZERO, 0.0);
+                        for (j, &p) in steps.iter().enumerate().take(i + k + 1).skip(i - k) {
+                            let wgt = (k + 1 - j.abs_diff(i)) as f64;
+                            sum += p * wgt;
+                            total += wgt;
+                        }
+                        sum / total
+                    })
+                    .collect();
+            }
+            for (s, pair) in steps.windows(2).enumerate() {
+                let dir = (pair[1] - pair[0]).normalize_or_zero();
+                let right = up.cross(dir).normalize_or_zero();
+                // On a path, feet find its trodden middle (which keeps a path narrow).
+                let region = &self.terrains[&terrain][index];
+                let (mut pull, mut total) = (0.0, 0.0);
+                for k in -4..=4 {
+                    let off = k as f64 * 0.25;
+                    let w = region.sample(pair[0] + right * (lane + off), self.cell_m) as f64;
+                    pull += w * w * off;
+                    total += w * w;
+                }
+                let lane = if total > 0.05 {
+                    lane + pull / total * 0.8
+                } else {
+                    lane
+                };
+                // Feet alternate a hand's width either side of the walker's line.
+                let foot = if s % 2 == 0 { 0.12 } else { -0.12 };
+                let sway = (hash(seed, trip, s as u32 + 9) - 0.5) * 0.15;
+                self.tread(
+                    terrain,
+                    pair[0] + right * (lane + foot + sway),
+                    up,
+                    [0.11, 0.27],
+                    load_kg,
+                    ContactKind::Foot,
+                    ground,
+                    0.0,
+                    1.0,
+                );
+            }
+        }
+    }
+}
+
+/// How far off walkers see a path and drift toward it (meters).
+const SIGHT_M: f64 = 6.0;
+/// How much a walker's whim weighs against the way's length, and over how many meters it
+/// changes.
+const WHIM: f64 = 0.25;
+const WHIM_M: f64 = 15.0;
+
+/// The ground between a set of points as walkers judge it: a coarse grid of how worn each
+/// patch is, to find the way that feels shortest.
+struct RouteMap {
+    anchor: DVec3,
+    axis_u: DVec3,
+    axis_v: DVec3,
+    /// Grid corner in region cells, and region cells per node.
+    corner: IVec2,
+    per_node: i32,
+    node_m: f64,
+    size: IVec2,
+    wear: Vec<f32>,
+}
+
+impl RouteMap {
+    fn new(region: &WearRegion, points: &[DVec3], cell_m: f32) -> Self {
+        let cells: Vec<(f64, f64)> = points.iter().map(|&p| region.cell_of(p, cell_m)).collect();
+        let (mut lo, mut hi) = ((f64::MAX, f64::MAX), (f64::MIN, f64::MIN));
+        for &(u, v) in &cells {
+            lo = (lo.0.min(u), lo.1.min(v));
+            hi = (hi.0.max(u), hi.1.max(v));
+        }
+        let span = (hi.0 - lo.0).max(hi.1 - lo.1) * cell_m as f64;
+        // Room to swing wide of the points, and nodes no finer than a stride but few enough
+        // to search quickly.
+        let margin = (span * 0.2).max(20.0) / cell_m as f64;
+        let node_m = (span / 160.0).max(1.5);
+        let per_node = ((node_m / cell_m as f64).round() as i32).max(1);
+        let corner = IVec2::new(
+            (lo.0 - margin).floor() as i32,
+            (lo.1 - margin).floor() as i32,
+        );
+        let size = IVec2::new(
+            ((hi.0 - lo.0 + 2.0 * margin) / per_node as f64).ceil() as i32 + 1,
+            ((hi.1 - lo.1 + 2.0 * margin) / per_node as f64).ceil() as i32 + 1,
+        );
+        Self {
+            anchor: region.anchor,
+            axis_u: region.axis_u,
+            axis_v: region.axis_v,
+            corner,
+            per_node,
+            node_m: per_node as f64 * cell_m as f64,
+            size,
+            wear: vec![0.0; (size.x * size.y) as usize],
+        }
+    }
+
+    /// Read the wear under every node: the most worn of its cells (a path narrower than a
+    /// node still counts).
+    fn read(&mut self, region: &WearRegion) {
+        for y in 0..self.size.y {
+            for x in 0..self.size.x {
+                let (cx, cy) = (
+                    self.corner.x + x * self.per_node,
+                    self.corner.y + y * self.per_node,
+                );
+                let mut w = 0.0f32;
+                for j in 0..self.per_node {
+                    for i in 0..self.per_node {
+                        w = w.max(region.cell(cx + i, cy + j));
+                    }
+                }
+                // A path draws walkers once it shows: faint wear goes unnoticed.
+                let t = ((w - 0.1) / 0.4).clamp(0.0, 1.0);
+                self.wear[(y * self.size.x + x) as usize] = t * t * (3.0 - 2.0 * t);
+            }
+        }
+        // Walkers see a path from a few meters off and drift toward it: near a path feels
+        // nearly as easy as on it, fading out over `SIGHT_M` (a sweep each way spreads every
+        // path's wear outward, less with distance).
+        let (sx, sy) = (self.size.x, self.size.y);
+        let fall = (self.node_m / SIGHT_M) as f32;
+        let diag = fall * std::f32::consts::SQRT_2;
+        let reach = [(-1, 0, fall), (-1, -1, diag), (0, -1, fall), (1, -1, diag)];
+        for y in 0..sy {
+            for x in 0..sx {
+                let i = (y * sx + x) as usize;
+                for &(dx, dy, f) in &reach {
+                    let (nx, ny) = (x + dx, y + dy);
+                    if nx >= 0 && ny >= 0 && nx < sx {
+                        let n = self.wear[(ny * sx + nx) as usize] - f;
+                        self.wear[i] = self.wear[i].max(n);
+                    }
+                }
+            }
+        }
+        for y in (0..sy).rev() {
+            for x in (0..sx).rev() {
+                let i = (y * sx + x) as usize;
+                for &(dx, dy, f) in &reach {
+                    let (nx, ny) = (x - dx, y - dy);
+                    if nx >= 0 && ny < sy && nx < sx {
+                        let n = self.wear[(ny * sx + nx) as usize] - f;
+                        self.wear[i] = self.wear[i].max(n);
+                    }
+                }
+            }
+        }
+    }
+
+    fn node_of(&self, p: DVec3) -> IVec2 {
+        let d = p - self.anchor;
+        let cell = self.per_node as f64 / self.node_m;
+        let u = d.dot(self.axis_u) * cell - self.corner.x as f64;
+        let v = d.dot(self.axis_v) * cell - self.corner.y as f64;
+        IVec2::new(
+            ((u / self.per_node as f64).floor() as i32).clamp(0, self.size.x - 1),
+            ((v / self.per_node as f64).floor() as i32).clamp(0, self.size.y - 1),
+        )
+    }
+
+    fn point_of(&self, n: IVec2, height_from: DVec3) -> DVec3 {
+        let cell_m = self.node_m / self.per_node as f64;
+        let u = (self.corner.x as f64 + (n.x as f64 + 0.5) * self.per_node as f64) * cell_m;
+        let v = (self.corner.y as f64 + (n.y as f64 + 0.5) * self.per_node as f64) * cell_m;
+        let d = height_from - self.anchor;
+        let flat = d - self.axis_u * d.dot(self.axis_u) - self.axis_v * d.dot(self.axis_v);
+        self.anchor + flat + self.axis_u * u + self.axis_v * v
+    }
+
+    /// The way from `from` to `to` that feels shortest when a well-worn path feels
+    /// `attraction` shorter than open ground (0..0.9), as a walker's line.
+    fn route(&self, from: DVec3, to: DVec3, attraction: f32, seed: u32) -> Vec<DVec3> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+        let c = attraction.clamp(0.0, 0.9) as f64;
+        let (start, goal) = (self.node_of(from), self.node_of(to));
+        let (sx, sy) = (self.size.x, self.size.y);
+        let idx = |n: IVec2| (n.y * sx + n.x) as usize;
+        // What a meter costs at each node. Each walker's whim adds to it: off the paths
+        // nobody keeps to one line, so their ways wander over a few meters (smooth over
+        // `WHIM_M`), while a path that shows holds them.
+        let lattice = (WHIM_M / self.node_m).max(1.0);
+        let knots_x = (sx as f64 / lattice).ceil() as usize + 2;
+        let knots: Vec<f64> = (0..knots_x * ((sy as f64 / lattice).ceil() as usize + 2))
+            .map(|k| hash(seed, (k % knots_x) as u32, (k / knots_x) as u32))
+            .collect();
+        let mut cost = vec![0.0f64; self.wear.len()];
+        for y in 0..sy {
+            let v = y as f64 / lattice;
+            let (ky, fy) = (v.floor() as usize, v.fract());
+            let fy = fy * fy * (3.0 - 2.0 * fy);
+            for x in 0..sx {
+                let u = x as f64 / lattice;
+                let (kx, fx) = (u.floor() as usize, u.fract());
+                let fx = fx * fx * (3.0 - 2.0 * fx);
+                let k = ky * knots_x + kx;
+                let a = knots[k] * (1.0 - fx) + knots[k + 1] * fx;
+                let b = knots[k + knots_x] * (1.0 - fx) + knots[k + knots_x + 1] * fx;
+                let i = (y * sx + x) as usize;
+                cost[i] = 1.0 - c * self.wear[i] as f64 + (a * (1.0 - fy) + b * fy) * WHIM;
+            }
+        }
+        let floor = 1.0 - c;
+        let h = |n: IVec2| (n - goal).as_dvec2().length() * floor;
+        const MOVES: [(i32, i32); 16] = [
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+            (1, 1),
+            (1, -1),
+            (-1, 1),
+            (-1, -1),
+            (2, 1),
+            (2, -1),
+            (-2, 1),
+            (-2, -1),
+            (1, 2),
+            (1, -2),
+            (-1, 2),
+            (-1, -2),
+        ];
+        let mut best = vec![f64::INFINITY; cost.len()];
+        let mut came = vec![u32::MAX; cost.len()];
+        let mut open = BinaryHeap::new();
+        best[idx(start)] = 0.0;
+        open.push((Reverse(OrdF64(h(start))), start.x, start.y));
+        while let Some((Reverse(OrdF64(f)), x, y)) = open.pop() {
+            let n = IVec2::new(x, y);
+            if n == goal {
+                break;
+            }
+            let g = best[idx(n)];
+            if f > g + h(n) + 1e-9 {
+                continue;
+            }
+            for (dx, dy) in MOVES {
+                let m = IVec2::new(x + dx, y + dy);
+                if m.x < 0 || m.y < 0 || m.x >= sx || m.y >= sy {
+                    continue;
+                }
+                let len = ((dx * dx + dy * dy) as f64).sqrt();
+                // (A knight's move crosses the two nodes between too.)
+                let per_m = if dx.abs() + dy.abs() == 3 {
+                    let a = IVec2::new(x + dx / 2, y + dy / 2);
+                    let b = IVec2::new(x + dx - dx / 2, y + dy - dy / 2);
+                    (cost[idx(n)] + cost[idx(a)] + cost[idx(b)] + cost[idx(m)]) * 0.25
+                } else {
+                    (cost[idx(n)] + cost[idx(m)]) * 0.5
+                };
+                let ng = g + len * per_m;
+                if ng < best[idx(m)] {
+                    best[idx(m)] = ng;
+                    came[idx(m)] = idx(n) as u32;
+                    open.push((Reverse(OrdF64(ng + h(m))), m.x, m.y));
+                }
+            }
+        }
+        let mut nodes = vec![goal];
+        let mut at = idx(goal);
+        while came[at] != u32::MAX {
+            at = came[at] as usize;
+            nodes.push(IVec2::new(at as i32 % sx, at as i32 / sx));
+        }
+        nodes.reverse();
+        // Pull the grid's way taut: from each turn, straight on to the farthest node the
+        // straight line reaches for no more than the grid's way costs. (The grid alone
+        // prefers its own directions, and walkers would lay paths along them.)
+        let line_cost = |a: IVec2, b: IVec2| {
+            let d = (b - a).as_dvec2();
+            let len = d.length();
+            let n = (len * 2.0).ceil().max(1.0) as i32;
+            let mut sum = 0.0;
+            for k in 0..=n {
+                let p = a.as_dvec2() + d * (k as f64 / n as f64);
+                let q = IVec2::new(p.x.round() as i32, p.y.round() as i32);
+                let wgt = if k == 0 || k == n { 0.5 } else { 1.0 };
+                sum += cost[idx(q)] * wgt;
+            }
+            sum / n as f64 * len
+        };
+        let mut taut = vec![nodes[0]];
+        let mut i = 0;
+        while i + 1 < nodes.len() {
+            let mut j = i + 1;
+            while j + 1 < nodes.len() {
+                let grid = best[idx(nodes[j + 1])] - best[idx(nodes[i])];
+                if line_cost(nodes[i], nodes[j + 1]) > grid * 1.002 + 1e-6 {
+                    break;
+                }
+                j += 1;
+            }
+            taut.push(nodes[j]);
+            i = j;
+        }
+        let mut line: Vec<DVec3> = Vec::with_capacity(taut.len() + 2);
+        line.push(from);
+        for &n in taut.iter().skip(1).take(taut.len().saturating_sub(2)) {
+            line.push(self.point_of(n, from));
+        }
+        line.push(to);
+        line
+    }
+}
+
+/// An `f64` that sorts (no NaNs here).
+#[derive(PartialEq)]
+struct OrdF64(f64);
+impl Eq for OrdF64 {}
+impl PartialOrd for OrdF64 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for OrdF64 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+/// How the walkers of [`PathWear::walk_between`] choose their way.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrailWalk {
+    /// How much shorter a well-worn path feels than open ground (0..0.9): 0 nobody keeps to
+    /// a path (and none forms); 0.5 a walker keeps to a path that runs up to 60° off their
+    /// way rather than cut across.
+    pub attraction: f32,
+    /// How far walkers keep to either side of their way (meters).
+    pub spread_m: f32,
+    /// Trips a day: how much time passes between trips, for healing.
+    pub trips_per_day: f32,
+    /// Multiplies the healing half-lives.
+    pub heal_scale: f32,
+}
+
+impl Default for TrailWalk {
+    fn default() -> Self {
+        Self {
+            attraction: 0.5,
+            spread_m: 0.25,
+            trips_per_day: 200.0,
+            heal_scale: 1.0,
         }
     }
 }
@@ -663,5 +1141,51 @@ mod tests {
         assert_eq!(wear.terrains[&e].len(), 2);
         let mid = DVec3::Y * r + DVec3::Y.any_orthonormal_vector() * 2.0;
         assert!(wear.wear_at(e, mid) > 0.15, "{}", wear.wear_at(e, mid));
+    }
+
+    /// Bands of worn ground (wear above 0.3) crossing a line across the way.
+    fn bands(wear: &PathWear, e: Entity, along: f64) -> usize {
+        let mut bands = 0;
+        let mut inside = false;
+        for k in -60..=60 {
+            let w = wear.wear_at(e, DVec3::new(k as f64 * 0.25, 0.0, along));
+            if w > 0.3 && !inside {
+                bands += 1;
+            }
+            inside = w > 0.3;
+        }
+        bands
+    }
+
+    #[test]
+    fn walkers_share_a_trail_toward_places_in_the_same_direction() {
+        // From a farm to two places 14° apart, and back: straight lines would be two paths
+        // 8 m apart halfway; walkers who keep to paths wear one shared trail that forks.
+        let e = Entity::PLACEHOLDER;
+        let places = [
+            (DVec3::ZERO, 2.0),
+            (DVec3::new(-8.0, 0.0, 65.0), 1.0),
+            (DVec3::new(8.0, 0.0, 65.0), 1.0),
+        ];
+        let walk = |attraction| {
+            let mut wear = PathWear::new(0.5);
+            let trail = TrailWalk {
+                attraction,
+                trips_per_day: 800.0,
+                ..Default::default()
+            };
+            wear.walk_between(e, &places, DVec3::Y, 500, 80.0, WornGround::Turf, trail, 3);
+            wear
+        };
+        let paths = walk(0.5);
+        assert_eq!(bands(&paths, e, 20.0), 1, "no shared trail near the farm");
+        assert_eq!(bands(&paths, e, 64.0), 2, "the trail never forks");
+        // Walkers who don't care for paths go straight, each to their own place.
+        let straight = walk(0.0);
+        assert_eq!(
+            bands(&straight, e, 20.0),
+            2,
+            "straight walkers shared a path"
+        );
     }
 }

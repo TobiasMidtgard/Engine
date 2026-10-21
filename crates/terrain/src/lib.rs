@@ -39,7 +39,7 @@ pub use shape::{
     Climate, FlatPad, HeightOverlay, OverlayPaintFn, PlanetShape, ShapeSample, dir_from_lat_lon,
     lat_lon_from_dir,
 };
-pub use wear::{PathWear, WearSettings, WornGround};
+pub use wear::{PathWear, TrailWalk, WearSettings, WornGround};
 
 /// A procedural terrain: a whole planet (or a flat square) with level of detail from orbit
 /// down to half a meter, oceans, mountains, craters, flat building pads, painted materials and
@@ -1033,6 +1033,67 @@ fn register_apis(app: &mut App) {
         },
     )
     .register_api(
+        "terrain.walk_between",
+        "Let people walk between places `trips` times and lay their own trails: each takes \
+         the way that feels shortest, cutting across open ground but keeping to a worn path \
+         that runs their way, so shared trails that fork emerge (and unused ones heal). \
+         `places` are world points, each with how busy it is; `attraction` 0..0.9 is how \
+         much easier a path feels than open ground; `trips_per_day` sets how much time \
+         passes between trips for healing.",
+        r#"{"places": [[0, 0, 0, 3], [120, 0, 40, 1], [90, 0, -80, 1]], "trips": 3000, "load_kg": 80, "attraction": 0.5, "trips_per_day": 800}"#,
+        |world, args| {
+            let places: Vec<(DVec3, f32)> = args
+                .get("places")
+                .and_then(|v| v.as_array())
+                .ok_or("Pass \"places\": [[x, y, z, busy], ...].")?
+                .iter()
+                .filter_map(|p| {
+                    let p = p.as_array()?;
+                    let at = DVec3::new(p.first()?.as_f64()?, p.get(1)?.as_f64()?, p.get(2)?.as_f64()?);
+                    let busy = p.get(3).and_then(|b| b.as_f64()).unwrap_or(1.0) as f32;
+                    Some((at, busy))
+                })
+                .collect();
+            if places.len() < 2 {
+                return Err("Pass at least two places.".into());
+            }
+            let trips = args.get("trips").and_then(|v| v.as_u64()).unwrap_or(3000) as u32;
+            let load = args.get("load_kg").and_then(|v| v.as_f64()).unwrap_or(80.0) as f32;
+            let defaults = TrailWalk::default();
+            let walk = TrailWalk {
+                attraction: args
+                    .get("attraction")
+                    .and_then(|v| v.as_f64())
+                    .map_or(defaults.attraction, |v| v as f32),
+                trips_per_day: args
+                    .get("trips_per_day")
+                    .and_then(|v| v.as_f64())
+                    .map_or(800.0, |v| v as f32),
+                ..defaults
+            };
+            let terrains = world.resource::<Terrains>();
+            let mats = world.resource::<SurfaceMaterials>();
+            let (entity, t) = terrains
+                .nearest(places[0].0)
+                .ok_or("There is no terrain here. Spawn an entity with PlanetTerrain first.")?;
+            let ground = t.ground_terrain();
+            let ids = palette::SurfaceIds::new(mats);
+            let (first, _, surface, _) = ground
+                .surface(places[0].0, &ids)
+                .ok_or("No ground under the first place.")?;
+            let kind = WornGround::of(mats.get(surface));
+            let mut local = Vec::with_capacity(places.len());
+            for &(p, busy) in &places {
+                let (at, _, _, _) = ground.surface(p, &ids).ok_or("No ground under a place.")?;
+                local.push((t.to_local(at), busy));
+            }
+            let up = t.local_up(t.to_local(first));
+            let mut wear = world.resource_mut::<PathWear>();
+            wear.walk_between(entity, &local, up, trips.min(20_000), load, kind, walk, 1);
+            Ok(serde_json::json!({ "ground": format!("{kind:?}").to_lowercase() }))
+        },
+    )
+    .register_api(
         "terrain.edit",
         "Change the terrain: dig (\"remove\"), build up (\"add\"), \"smooth\" or \"paint\" a \
          material, with a sphere (radius) or a trench (\"to\" offset). Lengths in meters.",
@@ -1577,6 +1638,7 @@ mod tests {
             "terrain.edit",
             "terrain.wear",
             "terrain.walk_path",
+            "terrain.walk_between",
             "terrain.footprint",
             "terrain.stats",
         ] {
