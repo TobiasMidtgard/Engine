@@ -39,7 +39,7 @@ struct SkinOut {
     @location(6) curvature: f32,
     @location(7) clip_now: vec4<f32>,
     @location(8) clip_prev: vec4<f32>,
-    // 0 skin, 1 teeth, 2 gums, 3 tongue, 4 shoes, 5 skirt.
+    // 0 skin, 1 teeth, 2 gums, 3 tongue, 4 shoes, 5 skirt, 6 hood.
     @location(9) @interpolate(flat) part: u32,
 };
 
@@ -357,6 +357,17 @@ fn mouth_surface(in: SkinOut, front: bool) -> SkinLight {
     s.n_soft = n;
     s.curvature = 0.0;
     s.thin = 0.0;
+    if (in.part == 6u) {
+        // A hood: the top's heather knit.
+        let seed = character.look.w * 917.0;
+        let heather = 0.82 + 0.36 * value_noise3(r * vec3<f32>(900.0, 300.0, 900.0) + seed);
+        s.albedo = character.top.xyz * heather;
+        s.roughness = 0.9;
+        s.specular = 0.25;
+        s.scatter = 0.0;
+        s.occlusion = 0.9;
+        return s;
+    }
     if (in.part == 5u) {
         // A skirt in the outfit's bottom color: a fine twill, a darker waistband.
         let seed = character.look.w * 917.0;

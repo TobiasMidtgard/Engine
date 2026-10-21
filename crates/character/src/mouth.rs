@@ -24,6 +24,8 @@ pub enum MouthPart {
     Shoe = 4,
     /// A skirt, built the same way (see `crate::skirt`).
     Skirt = 5,
+    /// A hood (see `crate::hood`).
+    Hood = 6,
 }
 
 /// Mouth geometry in the character's model space.

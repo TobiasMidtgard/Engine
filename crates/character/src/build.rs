@@ -8,6 +8,7 @@ use crate::clothes;
 use crate::eyes::{self, EyeMesh};
 use crate::face::{self, FaceShapes};
 use crate::headgear::Headgear;
+use crate::hood;
 use crate::mesh::{self, Landmarks, Region, Regions, SkinMesh};
 use crate::mouth;
 use crate::pack::HumanPack;
@@ -147,6 +148,9 @@ pub fn build(
         let first = skin.positions.len();
         skin.add_mouth(pack, &skirt::build(pack, &morphed));
         skirt::reweight(pack, &mut skin, first);
+    }
+    if headgear == Headgear::Hood {
+        skin.add_mouth(pack, &hood::build(pack, &morphed, lm0.head));
     }
     headgear.cover_skin(&mut skin, lm0.head);
     let face = if opts.face {

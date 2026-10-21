@@ -10,6 +10,7 @@ pub mod face;
 pub mod feature;
 pub mod hair_motion;
 pub mod headgear;
+pub mod hood;
 pub mod mesh;
 pub mod morph;
 pub mod mouth;

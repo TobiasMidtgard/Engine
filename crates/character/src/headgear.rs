@@ -1,7 +1,8 @@
 //! What covers the head (`Appearance::headgear`): the parts of the person a helmet hides are
 //! left out, so whoever draws the helmet (an equipment or NPC module) draws it over a head that
 //! doesn't poke through. `open_helm` hides the hair, ears and neck and keeps the face from brow
-//! to chin; `closed_helm` hides the whole head and neck. `hood` and unknown ids hide nothing yet.
+//! to chin; `closed_helm` hides the whole head and neck. A `hood` is drawn here (`crate::hood`)
+//! and hides the scalp hair under it; unknown ids hide nothing.
 
 use engine_core::math::Vec3;
 
@@ -14,6 +15,7 @@ const NECK_BASE: f32 = 0.55;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Headgear {
     None,
+    Hood,
     OpenHelm,
     ClosedHelm,
 }
@@ -21,6 +23,7 @@ pub enum Headgear {
 impl Headgear {
     pub fn from_id(id: &str) -> Self {
         match id {
+            "hood" => Headgear::Hood,
             "open_helm" => Headgear::OpenHelm,
             "closed_helm" => Headgear::ClosedHelm,
             _ => Headgear::None,
@@ -30,7 +33,7 @@ impl Headgear {
     /// Whether a rest-space point is under the headgear. `head`: the rest head center (between
     /// the ears, level with the eyes).
     pub fn hides(self, rest: Vec3, head: Vec3) -> bool {
-        if self == Headgear::None || rest.y < NECK_BASE {
+        if matches!(self, Headgear::None | Headgear::Hood) || rest.y < NECK_BASE {
             return false;
         }
         if self == Headgear::ClosedHelm {
@@ -49,7 +52,7 @@ impl Headgear {
 
     /// Leave out the skin (and anything anchored to it, such as teeth) under the headgear.
     pub fn cover_skin(self, skin: &mut SkinMesh, head: Vec3) {
-        if self == Headgear::None {
+        if matches!(self, Headgear::None | Headgear::Hood) {
             return;
         }
         let hidden: Vec<bool> = skin.rest.iter().map(|r| self.hides(*r, head)).collect();
@@ -69,7 +72,7 @@ impl Headgear {
     pub fn cover_hair(self, strands: &mut Vec<StrandSet>) {
         match self {
             Headgear::None => {}
-            Headgear::OpenHelm => strands.retain(|s| s.kind != StrandKind::Scalp),
+            Headgear::Hood | Headgear::OpenHelm => strands.retain(|s| s.kind != StrandKind::Scalp),
             Headgear::ClosedHelm => strands.clear(),
         }
     }
