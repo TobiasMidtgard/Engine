@@ -8,7 +8,7 @@
 // them its own height and color, so a field grows in tufts rather than as an even carpet. A blade
 // is a cubic Bezier from the root (on the field's height map) rising straight, arching over
 // toward its tip and drooping under its own weight; it sways in the wind (gusts roll across the
-// field as scrolling noise, and a ripple runs up each blade) and is pushed aside by
+// field in broken bands, and a ripple runs up each blade) and is pushed aside by
 // `GrassBender`s. It is shaded as if rounded across its width, and widened in view when seen
 // edge-on so a field stays full instead of breaking into slivers. Blades thin out with distance
 // by their rank: blade `i` of a tile is drawn while i / blades < density x lod(distance), and
@@ -136,11 +136,14 @@ fn grass_wind(p: vec3<f32>, t: f32, wind: vec3<f32>, phase: f32) -> vec3<f32> {
     let dir = select(vec3<f32>(1.0, 0.0, 0.0), wind / max(speed, 1e-3), speed > 0.01);
     let along = dot(p, dir);
     let across = dot(p.xz, vec2<f32>(-dir.z, dir.x));
-    // Gust fronts: noise scrolling downwind, broad along the wind and patchy across it.
-    let drift = t * (0.5 + speed * 0.35);
-    let q = vec2<f32>(along * 0.09 - drift * 0.09, across * 0.05);
+    // Gust fronts roll downwind as waves, stronger in patches of noise drifting with the wind,
+    // so they sweep across the field in broken bands rather than as straight lines.
+    let wave = along * 0.18 - t * (0.6 + speed * 0.45) + 0.8 * sin(across * 0.07 + t * 0.21);
+    let roll = pow(0.5 + 0.5 * sin(wave), 2.0);
+    let drift = t * (0.5 + speed * 0.9);
+    let q = vec2<f32>(along * 0.06 - drift * 0.06, across * 0.05);
     let n = 0.65 * value_noise2(q) + 0.35 * value_noise2(q * 2.7 + vec2<f32>(5.3, 1.7));
-    let gust = smoothstep(0.3, 0.85, n);
+    let gust = min(roll * (0.5 + 0.75 * smoothstep(0.25, 0.8, n)), 1.0);
     let flutter = sin(t * (2.0 + speed * 0.3) + phase * TAU + along * 0.9) * 0.25;
     let strength = min(speed / 9.0, 1.4);
     let idle = 0.03 * sin(t * 1.3 + phase * TAU);
@@ -249,11 +252,11 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, wind: vec3<f32>, tiling: vec3
     let q = 1.0 - u;
     var pos = q * q * q * p0 + 3.0 * q * q * u * p1 + 3.0 * q * u * u * p2 + u * u * u * p3;
     let tangent = normalize(3.0 * q * q * (p1 - p0) + 6.0 * q * u * (p2 - p1) + 3.0 * u * u * (p3 - p2) + up * 1e-4);
-    // A ripple runs up the blade, strongest at the tip.
+    // A ripple runs up the blade, strongest at the tip (barely at all in still air).
     let speed = length(wind);
     let wind_dir = select(facing, wind / max(speed, 1e-3), speed > 0.01);
     let ripple = sin(t * (3.1 + speed * 0.25) + r0.w * TAU - u * 2.2) * u * u;
-    pos += wind_dir * (ripple * height * (0.012 + 0.05 * min(speed / 8.0, 1.5)) * f.dry.w);
+    pos += wind_dir * (ripple * height * (0.003 + 0.06 * min(speed / 8.0, 1.5)) * f.dry.w);
     let half_width = 0.5 * width * pow(q, 0.6);
     // Seen edge-on a blade is widened across the view, so the field keeps its cover (from a
     // few meters out: close up it would read as a broad ribbon).
