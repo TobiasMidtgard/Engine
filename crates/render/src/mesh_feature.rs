@@ -421,6 +421,8 @@ pub struct MeshFeature {
     shadow_pipeline: Option<wgpu::RenderPipeline>,
     /// Alpha-tested shadow pipeline (masked casters).
     shadow_masked_pipeline: Option<wgpu::RenderPipeline>,
+    /// Sky albedo pipeline (`draw_sky_albedo`).
+    sky_albedo_pipeline: Option<wgpu::RenderPipeline>,
     material_layout: Option<wgpu::BindGroupLayout>,
     texture_layout: Option<wgpu::BindGroupLayout>,
     sampler: Option<wgpu::Sampler>,
@@ -504,7 +506,10 @@ impl MeshFeature {
             }
         }
         if masked && self.shadow_masked_pipeline.is_none() {
-            self.shadow_masked_pipeline = self.shadow_masked_pipeline(gpu);
+            self.shadow_masked_pipeline = self.shadow_masked_pipeline(gpu, false);
+        }
+        if !self.shadow[SKY_OCCLUSION_VIEW].is_empty() && self.sky_albedo_pipeline.is_none() {
+            self.sky_albedo_pipeline = self.shadow_masked_pipeline(gpu, true);
         }
     }
 
@@ -513,6 +518,7 @@ impl MeshFeature {
         self.pipelines = (0..PIPELINE_VARIANTS).map(|_| None).collect();
         self.prepass_pipelines = (0..PIPELINE_VARIANTS).map(|_| None).collect();
         self.shadow_masked_pipeline = None;
+        self.sky_albedo_pipeline = None;
     }
 
     /// A scene (or, with `prepass`, depth prepass) pipeline for `variant`'s `PIPE_*` bits.
@@ -583,8 +589,13 @@ impl MeshFeature {
         )
     }
 
-    /// The alpha-tested shadow pipeline (masked casters).
-    fn shadow_masked_pipeline(&self, gpu: &GpuShared) -> Option<wgpu::RenderPipeline> {
+    /// The alpha-tested shadow pipeline (masked casters), or with `albedo` the sky albedo
+    /// pipeline (every caster's color over the sky occlusion map's depth).
+    fn shadow_masked_pipeline(
+        &self,
+        gpu: &GpuShared,
+        albedo: bool,
+    ) -> Option<wgpu::RenderPipeline> {
         let (Some(shader), Some(layout)) = (&self.shadow_shader, &self.shadow_masked_layout) else {
             return None;
         };
@@ -600,11 +611,19 @@ impl MeshFeature {
         Some(
             gpu.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("mesh shadow masked"),
+                    label: Some(if albedo {
+                        "mesh sky albedo"
+                    } else {
+                        "mesh shadow masked"
+                    }),
                     layout: Some(layout),
                     vertex: wgpu::VertexState {
                         module: shader,
-                        entry_point: Some("vs_shadow_masked"),
+                        entry_point: Some(if albedo {
+                            "vs_shadow_albedo"
+                        } else {
+                            "vs_shadow_masked"
+                        }),
                         compilation_options: compilation.clone(),
                         buffers: &buffers,
                     },
@@ -613,13 +632,29 @@ impl MeshFeature {
                         unclipped_depth: gpu.features.contains(wgpu::Features::DEPTH_CLIP_CONTROL),
                         ..Default::default()
                     },
-                    depth_stencil: Some(gpu.shadow_depth_state()),
+                    depth_stencil: Some(if albedo {
+                        gpu.sky_albedo_depth_state()
+                    } else {
+                        gpu.shadow_depth_state()
+                    }),
                     multisample: Default::default(),
                     fragment: Some(wgpu::FragmentState {
                         module: shader,
-                        entry_point: Some("fs_shadow_masked"),
+                        entry_point: Some(if albedo {
+                            "fs_shadow_albedo"
+                        } else {
+                            "fs_shadow_masked"
+                        }),
                         compilation_options: compilation,
-                        targets: &[],
+                        targets: if albedo {
+                            &[Some(wgpu::ColorTargetState {
+                                format: crate::shadows::SKY_ALBEDO_FORMAT,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })]
+                        } else {
+                            &[]
+                        },
                     }),
                     multiview_mask: None,
                     cache: None,
@@ -1500,7 +1535,12 @@ impl RenderFeature for MeshFeature {
                     };
                     if inside {
                         self.instance_data.push(item.instance);
-                        self.keys.push(shadow_key(item));
+                        // The sky albedo map draws these with their textures.
+                        let mut key = shadow_key(item);
+                        if c == SKY_OCCLUSION_VIEW {
+                            key.textures = item.textures;
+                        }
+                        self.keys.push(key);
                     }
                 }
                 Self::batch(&self.keys, first as u32, &mut self.shadow[c]);
@@ -1680,6 +1720,25 @@ impl RenderFeature for MeshFeature {
 
     fn draw_far_shadow(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
         self.draw_shadow_view(pass, &self.far_shadow, FAR_SHADOW_CLUSTERS);
+    }
+
+    fn draw_sky_albedo(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
+        // Clusters (virtual geometry) don't draw here: the ground under them is taken to be
+        // `Atmosphere::ground_color`.
+        let batches = &self.shadow[SKY_OCCLUSION_VIEW];
+        let (Some(pipeline), Some(group), Some(instances)) = (
+            &self.sky_albedo_pipeline,
+            &self.material_group,
+            &self.instances,
+        ) else {
+            return;
+        };
+        if batches.is_empty() {
+            return;
+        }
+        pass.set_bind_group(1, group, &[]);
+        pass.set_vertex_buffer(1, instances.buffer.slice(..));
+        self.draw_batches(pass, batches, |_| Some(pipeline), |_| true);
     }
 
     fn stats(&self) -> FeatureStats {

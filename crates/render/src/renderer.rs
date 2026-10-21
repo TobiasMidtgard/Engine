@@ -130,6 +130,8 @@ struct ShadowResources {
     size: u32,
     /// Top-down depth map of the highest surface around the camera (see `SkyOcclusionView`).
     occlusion: wgpu::TextureView,
+    /// The color of those surfaces (`RenderFeature::draw_sky_albedo`), same size.
+    albedo: wgpu::TextureView,
     occlusion_size: u32,
 }
 
@@ -468,6 +470,8 @@ impl Renderer {
                 layout_entry(21, all, float_texture),
                 // Cloud shadows (cloud_shadows.rs). The 15th sampled texture in group 0.
                 layout_entry(22, all, float_texture),
+                // The sky albedo map (`ground_bounce`), beside the sky occlusion map.
+                layout_entry(23, all, float_texture),
             ],
         });
         let shadow_view_layout =
@@ -781,6 +785,7 @@ impl Renderer {
             self.shadow.occlusion_size = view.sky_occlusion.map_size;
             self.shadow.occlusion =
                 create_occlusion_target(&self.shared, self.shadow.occlusion_size);
+            self.shadow.albedo = create_albedo_target(&self.shared, self.shadow.occlusion_size);
             self.sky_camera
                 .set_inputs(&self.shared, &self.frame_buffer, &self.shadow.occlusion);
         }
@@ -997,6 +1002,37 @@ impl Renderer {
                 pass.set_bind_group(0, &self.shadow.view_bind_groups[SKY_OCCLUSION_VIEW], &[]);
                 for f in &self.features {
                     f.draw_shadow(&mut pass, SKY_OCCLUSION_VIEW, &ctx);
+                }
+            }
+        }
+        // Sky albedo: the color of those highest surfaces, for light bounced off the ground.
+        // Cleared to nothing drawn (the ground is then `Atmosphere::ground_color`).
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("sky albedo"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.shadow.albedo,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow.occlusion,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            if view.sky_occlusion.enabled && view.ground_bounce > 0.0 {
+                pass.set_bind_group(0, &self.shadow.view_bind_groups[SKY_OCCLUSION_VIEW], &[]);
+                for f in &self.features {
+                    f.draw_sky_albedo(&mut pass, &ctx);
                 }
             }
         }
@@ -1652,6 +1688,7 @@ fn create_shadow_resources(shared: &GpuShared, size: u32, occlusion_size: u32) -
         compare_sampler,
         size,
         occlusion: create_occlusion_target(shared, occlusion_size),
+        albedo: create_albedo_target(shared, occlusion_size),
         occlusion_size,
     }
 }
@@ -1670,6 +1707,26 @@ fn create_occlusion_target(shared: &GpuShared, size: u32) -> wgpu::TextureView {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: shared.formats.shadow,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+fn create_albedo_target(shared: &GpuShared, size: u32) -> wgpu::TextureView {
+    shared
+        .device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("sky albedo"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: crate::shadows::SKY_ALBEDO_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         })
@@ -1829,6 +1886,10 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 22,
                 resource: view(clouds),
+            },
+            wgpu::BindGroupEntry {
+                binding: 23,
+                resource: view(&shadow.albedo),
             },
         ],
     })

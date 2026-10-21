@@ -187,6 +187,15 @@ impl GpuShared {
             },
         }
     }
+
+    /// Depth state for `RenderFeature::draw_sky_albedo`: tests against the sky occlusion map's
+    /// depth with the shadow pass's bias (passing where the same surface set it), no writes.
+    pub fn sky_albedo_depth_state(&self) -> wgpu::DepthStencilState {
+        wgpu::DepthStencilState {
+            depth_write_enabled: Some(false),
+            ..self.shadow_depth_state()
+        }
+    }
 }
 
 /// Build the full WGSL source for a feature shader.
@@ -313,6 +322,17 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// cliffs, large buildings. Same pipeline and group 0 layout as `draw_shadow`. Features that
     /// don't implement it simply cast no shadows past the cascades.
     fn draw_far_shadow(&self, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}
+
+    /// Draw the diffuse color (linear RGB, alpha 1) of what you drew into the sky occlusion map
+    /// into the sky albedo map: the color of the highest surface over each spot, which lights
+    /// the undersides of things above it with the light it bounces (a ship's belly over a
+    /// concrete pad, eaves over a sunlit plaza; `ground_bounce` in `lib_frame.wgsl`). Group 0
+    /// is the sky occlusion view as in `draw_shadow`; use the same vertex math and
+    /// [`GpuShared::sky_albedo_depth_state`] with [`SKY_ALBEDO_FORMAT`](crate::shadows::SKY_ALBEDO_FORMAT)
+    /// as the color target, so only the surfaces that set the map's depth pass. One color per
+    /// material is plenty: a texel is about half a meter. Where no feature draws, the ground is
+    /// taken to be `Atmosphere::ground_color`.
+    fn draw_sky_albedo(&self, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}
 
     /// Draw the depth prepass: opaque geometry with depth writes, returning `PrepassOutput`
     /// (world normal, roughness, motion) into [`GpuShared::prepass_targets`]. Use the same

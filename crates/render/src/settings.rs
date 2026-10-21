@@ -189,6 +189,12 @@ pub struct RenderSettings {
     /// Width of the area it covers, meters (resolution is `sky_occlusion_size`²).
     pub sky_occlusion_extent: f32,
     pub sky_occlusion_size: u32,
+    /// Light bounced up off the ground near the camera, from the color of what the sky
+    /// occlusion map sees there: a ship's belly over a concrete pad is lit gray by it, eaves
+    /// over a sunlit plaza warm, the inside of a carport's roof by the drive outside. 0..1
+    /// (0 = the environment map's ground alone, `Atmosphere::ground_color`); needs
+    /// `sky_occlusion`.
+    pub ground_bounce: f32,
     /// Cloud shadows: when a module draws the cloud shadow map (the weather's clouds; see
     /// `cloud_shadows`), the sunlight on every surface and in the fog is shaded by it. Off: the
     /// map is not drawn and nothing is shaded by clouds.
@@ -302,6 +308,7 @@ impl Default for RenderSettings {
             sky_occlusion: true,
             sky_occlusion_extent: 256.0,
             sky_occlusion_size: 512,
+            ground_bounce: 1.0,
             cloud_shadows: true,
             night_exposure_bias: 2.5,
             bright_scene_exposure: 2.0,

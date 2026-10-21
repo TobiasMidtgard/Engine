@@ -73,6 +73,10 @@ pub struct SkyOcclusionView {
     pub view: Mat4,
 }
 
+/// Color format of the sky albedo map (`RenderFeature::draw_sky_albedo`): linear diffuse
+/// color, alpha 1 where a feature drew.
+pub const SKY_ALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
 /// Cascade index passed to `RenderFeature::draw_shadow` for the sky occlusion map.
 pub const SKY_OCCLUSION_VIEW: usize = MAX_CASCADES;
 

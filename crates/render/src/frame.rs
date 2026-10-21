@@ -73,7 +73,8 @@ pub struct FrameUniform {
     pub far_shadow_params: [f32; 4],
     /// Sky: the flat cloud layer on (1/0, `RenderSettings::sky_cloud_layer`), night (0 day ..
     /// 1 night: stars and the night sky's floor; see [`sky_night`]), the stand-in moon's glow
-    /// opposite a sun below the horizon (0..1), unused.
+    /// opposite a sun below the horizon (0..1), light bounced off the ground as the sky albedo
+    /// map has it (0..1, [`ViewData::ground_bounce`]).
     pub sky: [f32; 4],
     /// The ground's weather map (`surface_weather`, set by the renderer): its minimum corner
     /// relative to the camera (x, z, m) and its size along x and z (m; 0 = no map).
@@ -194,6 +195,9 @@ pub struct ViewData {
     pub far_shadow: FarShadowView,
     /// Top-down sky occlusion map around the camera.
     pub sky_occlusion: SkyOcclusionView,
+    /// How much light the ground bounces up as the sky albedo map has it
+    /// (`RenderSettings::ground_bounce`; 0 = off, or no sky occlusion map).
+    pub ground_bounce: f32,
     /// Multiply radiance by this before writing HDR (1 / max luminance).
     pub exposure: f32,
     pub ev100: f32,
@@ -627,6 +631,11 @@ pub fn build_view(
             800.0,
             settings.sky_occlusion,
         ),
+        ground_bounce: if settings.sky_occlusion {
+            settings.ground_bounce.clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
         exposure: ev100_to_exposure(ev100),
         ev100,
         wind,
@@ -838,7 +847,7 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
             if settings.sky_cloud_layer { 1.0 } else { 0.0 },
             night,
             stand_in_moon,
-            0.0,
+            v.ground_bounce,
         ],
         surface_map: [0.0; 4],
         surface_open: [0.0; 4],

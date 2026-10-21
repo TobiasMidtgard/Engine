@@ -115,3 +115,57 @@ fn fs_shadow_masked(in: MaskedOut) {
         discard;
     }
 }
+
+// The sky albedo map (`RenderFeature::draw_sky_albedo`): the diffuse color of the highest
+// surface over each spot, seen from above, for light bounced off the ground (`ground_bounce`
+// in lib_frame.wgsl). Drawn over the sky occlusion map's depth with the same bias, so only the
+// surfaces that set it pass. One color per material (its base color texture's mean): the map's
+// texels are a good part of a meter wide.
+struct AlbedoOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) @interpolate(flat) material: u32,
+};
+
+@vertex
+fn vs_shadow_albedo(in: VertexIn) -> AlbedoOut {
+    var out: AlbedoOut;
+    out.clip = shadow_clip(in);
+    let mat = materials[in.extra.x];
+    out.uv = in.uv * mat.uv.xy * mat.mapping.x;
+    out.color = vec4<f32>(in.color.rgb, select(in.color.a, 1.0, mat.params2.y > 0.0));
+    out.material = in.extra.x;
+    return out;
+}
+
+@fragment
+fn fs_shadow_albedo(in: AlbedoOut) -> @location(0) vec4<f32> {
+    let mat = materials[in.material];
+    let d1 = dpdx(in.uv);
+    let d2 = dpdy(in.uv);
+    var base = vec4<f32>(1.0);
+    var alpha = mat.base_color.a * in.color.a;
+    if ((mat.flags.x & 128u) != 0u) {
+        let vt = mat.flags.y & 255u;
+        if (VT_ENABLED && vt != 0u) {
+            base = vt_mean(vt);
+        } else {
+            base = textureSampleLevel(base_color_texture, material_sampler, vec2<f32>(0.5), 16.0);
+        }
+        // Alpha-tested cards cut out the same holes as in the occlusion map.
+        if ((mat.flags.x & 15u) == 1u) {
+            if (VT_ENABLED && vt != 0u) {
+                alpha *= vt_sample(vt, in.uv, d1, d2).a;
+            } else {
+                alpha *= textureSampleGrad(base_color_texture, material_sampler, in.uv, d1, d2).a;
+            }
+        }
+    }
+    if ((mat.flags.x & 15u) == 1u && alpha < mat.params.w) {
+        discard;
+    }
+    // Metals bounce little diffuse light: their color goes into the mirror image instead.
+    let albedo = mat.base_color.rgb * in.color.rgb * base.rgb * (1.0 - 0.5 * mat.params.x);
+    return vec4<f32>(saturate(albedo), 1.0);
+}
