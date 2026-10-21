@@ -8,12 +8,13 @@
 //! `meadow_low` (knee height, the blades up close), `meadow_back` (looking toward a low sun
 //! through the blades), `savanna` (tall dry tussocks), `tundra` (short, dense, olive and
 //! russet), `marsh` (tall, upright, dark), `alien` (a low-gravity world's violet grass under a
-//! paler sky). Each biome is its own field 1 km from the others, on ground of its own color.
+//! paler sky), `path` (a footpath worn through the meadow: `GrassWear`). Each biome is its own
+//! field 1 km from the others, on ground of its own color.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_render::prelude::*;
-use engine_render::{Exposure, GrassField, GrassStyle, Screenshots};
+use engine_render::{Exposure, GrassField, GrassStyle, GrassWear, Screenshots};
 use engine_world::WeatherState;
 
 const STEP: f64 = 1.0 / 30.0;
@@ -36,6 +37,7 @@ fn biomes() -> Vec<Biome> {
     add("tundra", GrassStyle::tundra());
     add("marsh", GrassStyle::marsh());
     add("alien", GrassStyle::alien());
+    add("path", GrassStyle::meadow());
     out
 }
 
@@ -50,6 +52,35 @@ fn field(style: GrassStyle) -> GrassField {
             (0.0, density, dryness)
         })
         .with_style(style)
+}
+
+/// Field-local x of the footpath's middle at field-local z (it runs along z, wandering).
+fn path_x(z: f32) -> f32 {
+    80.0 + (z * 0.06).sin() * 0.7 + (z * 0.17).sin() * 0.25
+}
+
+/// A footpath down the middle of the 160 m field: worn bare along its middle, trodden flat
+/// toward its edges, ragged where feet strayed.
+fn footpath() -> GrassWear {
+    let cell = 0.25;
+    let (x0, w) = (76.0, 8.0);
+    let resolution = [(w / cell) as u32 + 1, (160.0 / cell) as u32 + 1];
+    let mut wear = Vec::new();
+    for j in 0..resolution[1] {
+        for i in 0..resolution[0] {
+            let (x, z) = (x0 + i as f32 * cell, j as f32 * cell);
+            let ragged =
+                engine_core::math::noise::fbm2(x as f64 * 0.9, z as f64 * 0.9, 5, 3, 2.0, 0.5);
+            let off = (x - path_x(z)).abs() + 0.35 * ragged;
+            wear.push(1.0 - engine_core::math::smoothstep(0.2, 1.9, off));
+        }
+    }
+    GrassWear {
+        origin: [x0, 0.0],
+        cell,
+        resolution,
+        wear,
+    }
 }
 
 fn aim(world: &mut World, eye: DVec3, target: DVec3) {
@@ -126,8 +157,28 @@ fn main() {
                 StandardMaterial::color(r, g, bl).with_roughness(0.95),
             ),
         ));
-        app.world
-            .spawn((Transform::from_translation(at), field(b.style)));
+        let grass = app
+            .world
+            .spawn((Transform::from_translation(at), field(b.style)))
+            .id();
+        if b.name == "path" {
+            app.world.entity_mut(grass).insert(footpath());
+            // Bare earth under the path, in pieces that follow its wander.
+            for k in 0..80 {
+                let z = k as f32 * 2.0 + 1.0;
+                let p = at + DVec3::new(path_x(z) as f64 - 80.0, 0.004, z as f64 - 80.0);
+                app.world.spawn((
+                    Transform::from_translation(p),
+                    MeshRenderer::new(
+                        Shape::Plane {
+                            size: [2.3, 2.05],
+                            subdivisions: 1,
+                        },
+                        StandardMaterial::color(0.16, 0.12, 0.08).with_roughness(0.95),
+                    ),
+                ));
+            }
+        }
     }
     app.world.spawn((
         DirectionalLight {
@@ -189,6 +240,18 @@ fn main() {
                     eye,
                     eye + DVec3::new(6.0, -0.9, -7.5),
                     toward,
+                );
+            }
+        } else if b.name == "path" {
+            if wanted("path") {
+                let eye = o + DVec3::new(0.3, 1.65, 70.0);
+                shot(
+                    &mut app,
+                    &out,
+                    "path",
+                    eye,
+                    eye + DVec3::new(-0.6, -1.4, -14.0),
+                    side_sun,
                 );
             }
         } else if wanted(b.name) {
