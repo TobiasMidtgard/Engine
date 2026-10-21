@@ -476,6 +476,12 @@ struct Entry {
     last_used: u64,
     /// Frame its version last changed (or it was first seen).
     changed: u64,
+    /// Frame its current run of changes began: a mesh that keeps changing (deforming, being
+    /// edited) without settling is never built, and isn't reported as building.
+    streak: u64,
+    /// Its build job couldn't be made last time it was tried (its mesh isn't loaded, or its
+    /// displacement can't be resolved). Tried again while it waits.
+    no_job: bool,
 }
 
 struct Build {
@@ -1095,12 +1101,17 @@ impl ClusterRenderer {
             state: State::Waiting,
             last_used: frame,
             changed: frame,
+            streak: frame,
+            no_job: false,
         });
         entry.last_used = frame;
         if entry.version != version {
             // Only this mesh's clusters are dropped and rebuilt; nothing else moves.
             let old = std::mem::replace(&mut entry.state, State::Waiting);
             entry.version = version;
+            if frame > entry.changed + SETTLE_FRAMES {
+                entry.streak = frame;
+            }
             entry.changed = frame;
             release_dag(
                 [
@@ -1123,8 +1134,10 @@ impl ClusterRenderer {
             State::Ready(_) => true,
             State::Waiting if slot_free && settled => {
                 let Some(job) = job() else {
+                    entry.no_job = true;
                     return false;
                 };
+                entry.no_job = false;
                 let cache = self.cache.clone();
                 match std::thread::Builder::new()
                     .name("cluster build".into())
@@ -1749,13 +1762,37 @@ impl ClusterRenderer {
     /// State for `render.stats`.
     pub fn describe(&self) -> serde_json::Value {
         let count = |f: fn(&State) -> bool| self.meshes.values().filter(|e| f(&e.state)).count();
+        // Waiting meshes that will build as soon as a slot is free count as building, so a
+        // caller waiting for builds to finish sees 0 once nothing more is coming. Not those
+        // that keep changing, whose job can't be made, or that nobody drew lately (they wait
+        // until drawn again).
+        let frame = self.frame;
+        let (mut building, mut changing, mut unbuildable, mut unseen) = (0, 0, 0, 0);
+        for e in self.meshes.values() {
+            match e.state {
+                State::Building => building += 1,
+                State::Waiting if e.last_used + SETTLE_FRAMES < frame => unseen += 1,
+                State::Waiting if e.no_job => unbuildable += 1,
+                State::Waiting
+                    if frame < e.changed + SETTLE_FRAMES
+                        && frame >= e.streak + 4 * SETTLE_FRAMES =>
+                {
+                    changing += 1
+                }
+                State::Waiting => building += 1,
+                _ => {}
+            }
+        }
         let pool_bytes: u64 = [&self.vertices, &self.indices, &self.clusters, &self.levels]
             .iter()
             .map(|p| p.capacity * p.stride)
             .sum();
         serde_json::json!({
             "meshes_ready": count(|s| matches!(s, State::Ready(_))),
-            "meshes_building": count(|s| matches!(s, State::Building | State::Waiting)),
+            "meshes_building": building,
+            "meshes_changing": changing,
+            "meshes_unbuildable": unbuildable,
+            "meshes_unseen": unseen,
             "meshes_failed": count(|s| matches!(s, State::Failed)),
             "stats": self.stats,
             "pool_bytes": pool_bytes,

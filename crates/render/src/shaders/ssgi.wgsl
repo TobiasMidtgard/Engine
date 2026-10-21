@@ -10,7 +10,11 @@
 //    `sky_ambient` times the ambient occlusion. Output: mean radiance per ray (cd/m^2).
 // 2. Temporal: blend into last frame's result where the surface was visible (motion vectors,
 //    depth check), about 10 frames deep.
-// 3. Blur: edge-aware 5x5 by depth and normal.
+// 3. Blur, twice (a-trous): edge-aware 5x5 by depth and normal, first over neighboring pixels,
+//    then over every third. Two rays a pixel that now and then hit a small bright surface (a
+//    glowing lamp globe) are fireflies; the first pass weights samples down by their brightness
+//    (Karis 2014) so one doesn't spread into a blotch, and covering every pixel before the wide
+//    pass keeps the wide pass's spacing from showing as a dotted grid.
 // `shade_surface` adds the result times the diffuse albedo (`screen_gi`).
 
 @group(1) @binding(0) var normal_input: texture_2d<f32>;   // prepass normals (octahedral xy, roughness, written)
@@ -26,6 +30,9 @@ const STEPS: i32 = 16;
 // from farther fades out gradually rather than stopping at a hard edge.
 const RADIUS: f32 = 6.0;
 const HISTORY_WEIGHT: f32 = 0.9;
+// Samples brighter on screen than about 1 / FIREFLY_SCALE (1 = white) lose weight in the near
+// blur: bounce light itself rarely gets that bright, a ray that hit a lamp globe does.
+const FIREFLY_SCALE: f32 = 0.25;
 
 @vertex
 fn vs_gi(@builtin(vertex_index) i: u32) -> FullscreenOut {
@@ -164,9 +171,10 @@ fn fs_temporal(in: FullscreenOut) -> @location(0) vec4<f32> {
     return vec4<f32>(result, depth);
 }
 
-@fragment
-fn fs_blur(in: FullscreenOut) -> @location(0) vec4<f32> {
-    let px = vec2<i32>(floor(in.position.xy));
+// Edge-aware 5x5 blur of `gi_input` with taps `stride` pixels apart. `fireflies` weights each
+// sample by 1 / (1 + its brightness on screen), which keeps rare very bright samples from
+// dominating. Alpha out: the center's view depth, for a following pass.
+fn blur(px: vec2<i32>, stride: i32, fireflies: bool) -> vec4<f32> {
     let center = textureLoad(gi_input, px, 0);
     if (center.a <= 0.0) { return vec4<f32>(0.0); }
     let n = view_normal(px);
@@ -174,15 +182,29 @@ fn fs_blur(in: FullscreenOut) -> @location(0) vec4<f32> {
     var weight = 0.0;
     for (var y = -2; y <= 2; y++) {
         for (var x = -2; x <= 2; x++) {
-            let q = clamp(px + vec2<i32>(x, y) * 2, vec2<i32>(0), size_i() - 1);
+            let q = clamp(px + vec2<i32>(x, y) * stride, vec2<i32>(0), size_i() - 1);
             let s = textureLoad(gi_input, q, 0);
             if (s.a <= 0.0) { continue; }
             let wd = exp(-abs(s.a - center.a) / (0.02 * center.a + 0.01));
             let wn = pow(saturate(dot(view_normal(q), n)), 8.0);
-            let w = wd * wn * exp(-f32(x * x + y * y) / 6.0);
+            var w = wd * wn * exp(-f32(x * x + y * y) / 6.0);
+            if (fireflies) {
+                w /= 1.0 + luminance(s.rgb) * frame.reflections.y * FIREFLY_SCALE;
+            }
             sum += s.rgb * w;
             weight += w;
         }
     }
-    return vec4<f32>(sum / max(weight, 1e-4), 1.0);
+    return vec4<f32>(sum / max(weight, 1e-12), center.a);
+}
+
+@fragment
+fn fs_blur_near(in: FullscreenOut) -> @location(0) vec4<f32> {
+    return blur(vec2<i32>(floor(in.position.xy)), 1, true);
+}
+
+@fragment
+fn fs_blur(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let b = blur(vec2<i32>(floor(in.position.xy)), 3, false);
+    return vec4<f32>(b.rgb, select(0.0, 1.0, b.a > 0.0));
 }

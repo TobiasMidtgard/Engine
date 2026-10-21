@@ -68,6 +68,7 @@ pub struct ScreenEffects {
     gi_layout: wgpu::BindGroupLayout,
     gi_trace: wgpu::RenderPipeline,
     gi_temporal: wgpu::RenderPipeline,
+    gi_blur_near: wgpu::RenderPipeline,
     gi_blur: wgpu::RenderPipeline,
     /// GI groups: trace (indexed like `ssr_groups`), temporal and blur (indexed by the GI
     /// history written this frame).
@@ -240,6 +241,7 @@ impl ScreenEffects {
         };
         let gi_trace = gi_pipeline("screen-space gi trace", "fs_trace");
         let gi_temporal = gi_pipeline("screen-space gi temporal", "fs_temporal");
+        let gi_blur_near = gi_pipeline("screen-space gi blur near", "fs_blur_near");
         let gi_blur = gi_pipeline("screen-space gi blur", "fs_blur");
         let taa = fullscreen_pipeline(
             shared,
@@ -293,6 +295,7 @@ impl ScreenEffects {
             gi_layout,
             gi_trace,
             gi_temporal,
+            gi_blur_near,
             gi_blur,
             gi_groups,
             gi_current: 0,
@@ -562,10 +565,18 @@ impl ScreenEffects {
                 &self.gi_groups.temporal[g],
                 &targets.gi_history[g].view,
             ),
+            // The trace's target is free again: the near blur goes there, and the wide blur
+            // reads it through the temporal pass's inputs.
+            (
+                "screen-space gi blur near",
+                &self.gi_blur_near,
+                &self.gi_groups.blur[g],
+                &targets.gi_raw.view,
+            ),
             (
                 "screen-space gi blur",
                 &self.gi_blur,
-                &self.gi_groups.blur[g],
+                &self.gi_groups.temporal[g],
                 &targets.gi.view,
             ),
         ];
