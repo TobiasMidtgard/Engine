@@ -184,9 +184,19 @@ fn bar(
             },
         )
         .with_style(|s| {
-            s.width(pct(100.0))
+            let s = s
+                .width(pct(100.0))
                 .height(height)
-                .radius(Corners::all(height * 0.5))
+                .radius(Corners::all(height * 0.5));
+            // A thin bar has no room for the track's border and padding: the fill would be
+            // a hairline.
+            if height < 9.0 {
+                s.padding(0.0)
+                    .border(0.0, Color::TRANSPARENT)
+                    .background(Color::WHITE.fade(0.1))
+            } else {
+                s
+            }
         })
 }
 
@@ -482,9 +492,11 @@ fn hotbar(p: &crate::theme::Palette, world: &World) -> El {
         .map(|a| a.len())
         .unwrap_or(0)
         .clamp(1, 10);
-    let mut slots = hud_panel()
-        .class("row")
-        .with_style(|s| s.gap(8.0).padding(8.0).radius(Corners::all(14.0)));
+    let mut slots = hud_panel().class("row").id("hud_hotbar").with_style(|s| {
+        s.gap(10.0)
+            .padding([9.0, 10.0, 15.0, 10.0])
+            .radius(Corners::all(16.0))
+    });
     for i in 0..n {
         let icon = world
             .get_resource::<UiData>()
@@ -495,67 +507,84 @@ fn hotbar(p: &crate::theme::Palette, world: &World) -> El {
             .and_then(|d| d.get_str(&format!("abilities.{i}.key")).map(String::from))
             .unwrap_or_else(|| (i + 1).to_string());
         let pad = ["X", "Y", "B", "A", "LB", "RB", "LT", "RT", "L3", "R3"][i];
+        let slot = El::new()
+            .class("slot")
+            .id(format!("hud_ability:{i}"))
+            .with_style(|s| {
+                s.size(64.0, 64.0)
+                    .radius(Corners::all(12.0))
+                    .background(Fill::Radial {
+                        inner: p.info.fade(0.1),
+                        outer: Color::hexa(0x060910f0),
+                    })
+                    .border(1.0, Color::WHITE.fade(0.16))
+            })
+            .child(
+                El::icon(icon)
+                    .with_style(|s| s.size(48.0, 48.0))
+                    .pick_ignore(),
+            )
+            .child(
+                // The sweep and the seconds left draw over the icon.
+                El::new()
+                    .paint("cooldown")
+                    .attach(
+                        "Cooldown",
+                        &Cooldown {
+                            bind: format!("abilities.{i}.cooldown"),
+                            bind_total: format!("abilities.{i}.total"),
+                            ..Default::default()
+                        },
+                    )
+                    .with_style(|s| {
+                        s.position(Position::Absolute)
+                            .left(0.0)
+                            .top(0.0)
+                            .right(0.0)
+                            .bottom(0.0)
+                            .radius(Corners::all(11.0))
+                    })
+                    .pick_ignore(),
+            );
+        // The key sits on the slot's bottom edge, clear of the icon.
+        let key_chip = El::new()
+            .class("row")
+            .with_style(|s| {
+                s.position(Position::Absolute)
+                    .left(0.0)
+                    .right(0.0)
+                    .bottom(-9.0)
+                    .justify(Justify::Center)
+            })
+            .pick_ignore()
+            .child(
+                El::new()
+                    .class("kbd")
+                    .attach(
+                        "KeyHint",
+                        &KeyHint {
+                            key: key.clone(),
+                            pad: pad.into(),
+                        },
+                    )
+                    .text_style(|t| t.semibold().nowrap())
+                    .with_style(|s| {
+                        s.min_width(20.0)
+                            .height(18.0)
+                            .font_size(11.0)
+                            .background(Fill::vertical(
+                                Color::hexa(0x2a3348ff),
+                                Color::hexa(0x121826ff),
+                            ))
+                            .border(1.0, Color::WHITE.fade(0.3))
+                    })
+                    .pick_ignore(),
+            );
         slots = slots.child(
             El::new()
-                .class("slot")
-                .id(format!("hud_ability:{i}"))
-                .with_style(|s| {
-                    s.size(62.0, 62.0)
-                        .background(Fill::Radial {
-                            inner: p.info.fade(0.12),
-                            outer: Color::hexa(0x060910d0),
-                        })
-                        .border(1.0, Color::WHITE.fade(0.14))
-                })
-                .child(
-                    El::icon(icon)
-                        .with_style(|s| s.size(44.0, 44.0))
-                        .pick_ignore(),
-                )
-                .child(
-                    // The sweep draws over the icon.
-                    El::new()
-                        .paint("cooldown")
-                        .attach(
-                            "Cooldown",
-                            &Cooldown {
-                                bind: format!("abilities.{i}.cooldown"),
-                                bind_total: format!("abilities.{i}.total"),
-                                ..Default::default()
-                            },
-                        )
-                        .with_style(|s| {
-                            s.position(Position::Absolute)
-                                .left(0.0)
-                                .top(0.0)
-                                .right(0.0)
-                                .bottom(0.0)
-                                .radius(Corners::all(10.0))
-                        })
-                        .pick_ignore(),
-                )
-                .child(
-                    El::new()
-                        .class("kbd")
-                        .attach(
-                            "KeyHint",
-                            &KeyHint {
-                                key: key.clone(),
-                                pad: pad.into(),
-                            },
-                        )
-                        .text_style(|t| t.semibold().nowrap())
-                        .with_style(|s| {
-                            s.position(Position::Absolute)
-                                .left(-5.0)
-                                .top(-7.0)
-                                .min_width(18.0)
-                                .height(18.0)
-                                .font_size(10.0)
-                                .background(Color::hexa(0x0b1019f0))
-                        })
-                        .pick_ignore(),
-                ),
+                .with_style(|s| s.size(64.0, 64.0))
+                .child(slot)
+                .child(key_chip),
         );
     }
     El::new()
@@ -572,16 +601,31 @@ fn hotbar(p: &crate::theme::Palette, world: &World) -> El {
             El::new()
                 .class("col")
                 .with_style(|s| s.align_items(Align::Center).gap(8.0))
-                .child(El::new().with_style(|s| s.width(360.0)).child(bar(
-                    "player.mana",
-                    "player.mana_max",
-                    Color::hex(0x6b5cff),
-                    Color::hex(0xb98cff),
-                    6.0,
-                    8,
-                    0.0,
-                    false,
-                )))
+                .child(
+                    El::new()
+                        .class("row")
+                        .with_style(|s| s.width(380.0).gap(10.0).align_items(Align::Center))
+                        .child(
+                            El::text("[color=#8a94a8]MANA[/color] {player.mana:0}")
+                                .text_style(|t| t.tabular().nowrap().shadow())
+                                .with_style(|s| {
+                                    s.font_size(11.0)
+                                        .font_weight(700)
+                                        .color(Color::hex(0xc8b8ff))
+                                        .min_width(64.0)
+                                }),
+                        )
+                        .child(El::new().with_style(|s| s.grow(1.0)).child(bar(
+                            "player.mana",
+                            "player.mana_max",
+                            Color::hex(0x6b5cff),
+                            Color::hex(0xb98cff),
+                            8.0,
+                            8,
+                            0.0,
+                            false,
+                        ))),
+                )
                 .child(slots),
         )
 }
@@ -980,6 +1024,17 @@ fn step_aside_for_menus(world: &mut World) {
     }
 }
 
+/// HUD panels world markers fade behind.
+const HUD_PANELS: [&str; 7] = [
+    "hud_vitals",
+    "hud_minimap",
+    "hud_quest",
+    "hud_weapon",
+    "hud_time",
+    "hud_hotbar",
+    "hud_prompt",
+];
+
 fn markers_update(world: &mut World) {
     let hud = screens::find_screen(world, "hud").map_or(0.0, |e| {
         let presence = world.get::<Screen>(e).map_or(0.0, |s| s.presence);
@@ -994,6 +1049,17 @@ fn markers_update(world: &mut World) {
         1.0 - world.get::<Screen>(e).map_or(1.0, |s| s.presence)
     });
     let hud = hud * wheel;
+    // HUD panels in front of a marker: the marker fades so the panel stays readable.
+    let panels: Vec<Rect> = screens::find_screen(world, "hud")
+        .map(|root| {
+            HUD_PANELS
+                .iter()
+                .filter_map(|id| screens::find_in(world, root, id))
+                .filter_map(|e| world.get::<ComputedNode>(e).map(|c| c.rect))
+                .filter(|r| !r.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
     let nav = world
         .get_resource::<MapData>()
         .and_then(|m| m.waypoint_nav())
@@ -1013,6 +1079,16 @@ fn markers_update(world: &mut World) {
                 a.edge_direction,
                 if m.always { 1.0 } else { hud },
             )
+        })
+        .collect();
+    let items: Vec<_> = items
+        .into_iter()
+        .map(|(e, show, distance, clamped, dir, opacity)| {
+            let covered = world.get::<ComputedNode>(e).is_some_and(|c| {
+                !c.rect.is_empty() && panels.iter().any(|p| !p.intersect(&c.rect).is_empty())
+            });
+            let opacity = if covered { opacity * 0.2 } else { opacity };
+            (e, show, distance, clamped, dir, opacity)
         })
         .collect();
     for (e, show, distance, clamped, dir, opacity) in items {

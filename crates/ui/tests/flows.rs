@@ -1459,3 +1459,53 @@ fn the_settings_detail_panel_follows_the_highlighted_row() {
     app.update_n(2);
     assert_eq!(detail_title(&mut app), "Interface scale");
 }
+
+#[test]
+fn markers_fade_behind_hud_panels() {
+    use engine_core::math::{DVec3, Vec3};
+    let mut app = app();
+    app.world.spawn((
+        engine_render::Camera::perspective(60.0),
+        Transform::default().looking_at(DVec3::new(0.0, 0.0, -1.0), Vec3::Y),
+    ));
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "hud", "instant": true}),
+    );
+    api(
+        &mut app,
+        "hud.marker",
+        json!({"title": "Ahead", "position": [0.0, 0.0, -10.0]}),
+    );
+    // Lands on the quest tracker, top right.
+    api(
+        &mut app,
+        "hud.marker",
+        json!({"title": "Tucked", "position": [8.3, 1.9, -10.0]}),
+    );
+    app.update_n(12);
+    let opacity = |app: &mut App, id: &str| {
+        let e = engine_ui::input::find_id(&mut app.world, id).unwrap();
+        app.world
+            .get::<Node>(e)
+            .unwrap()
+            .style
+            .opacity
+            .unwrap_or(1.0)
+    };
+    let tracker = {
+        let e = engine_ui::input::find_id(&mut app.world, "hud_quest").unwrap();
+        app.world.get::<ComputedNode>(e).unwrap().rect
+    };
+    let tucked = {
+        let e = engine_ui::input::find_id(&mut app.world, "marker:Tucked").unwrap();
+        app.world.get::<ComputedNode>(e).unwrap().rect
+    };
+    assert!(
+        !tracker.intersect(&tucked).is_empty(),
+        "{tracker:?} {tucked:?}"
+    );
+    assert!(opacity(&mut app, "marker:Ahead") > 0.9);
+    assert!(opacity(&mut app, "marker:Tucked") < 0.3);
+}

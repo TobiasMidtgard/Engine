@@ -350,6 +350,7 @@ fn paint_cooldown(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
         return;
     };
     let r = ctx.rect;
+    let c = world.get::<ComputedNode>(e).cloned().unwrap_or_default();
     let center = r.center();
     let frac = if cd.total > 0.0 {
         (cd.remaining / cd.total).clamp(0.0, 1.0)
@@ -357,44 +358,56 @@ fn paint_cooldown(world: &mut World, e: Entity, ctx: &mut DrawCtx) {
         0.0
     };
     if frac > 0.0 {
-        // Dark sweep: a thick ring wide enough to fill the slot, from the top clockwise.
-        let radius = r.w.max(r.h) * 0.36;
+        let px = ctx.px;
+        let corner = c.style.radius.0[0].max(0.0) * px;
+        // The whole slot dims while it recharges, the part still to come darker: a round
+        // sweep from the top, clockwise, inside the slot's rounded corners.
+        ctx.rect(r, Color::hexa(0x05080e70), corner, 0.0, Color::TRANSPARENT);
+        let radius = (r.w.min(r.h) * 0.5 - 3.0 * px).max(1.0);
         let start = (1.0 - frac) * std::f32::consts::TAU;
-        ctx.with_clip(r.inflate(-1.0), |ctx| {
-            ctx.ring(
-                center,
-                Vec2::splat(radius),
-                radius * 2.0,
-                Color::hexa(0x05080eb8),
-                start,
-                frac * std::f32::consts::TAU,
-                0.0,
-            );
-        });
-        // Bright edge of the sweep.
         ctx.ring(
             center,
-            Vec2::splat(r.w.min(r.h) * 0.5 - 2.0 * ctx.px),
-            2.0 * ctx.px,
-            Color::hex(0x5fd0ff).with_alpha(0.85),
+            Vec2::splat(radius * 0.5),
+            radius,
+            Color::hexa(0x05080eb0),
             start,
             frac * std::f32::consts::TAU,
             0.0,
         );
+        // Bright edge of the sweep, and a tick where it is.
+        ctx.ring(
+            center,
+            Vec2::splat(radius),
+            2.0 * px,
+            Color::hex(0x5fd0ff).with_alpha(0.9),
+            start,
+            frac * std::f32::consts::TAU,
+            0.0,
+        );
+        let tip = center + Vec2::new(start.sin(), -start.cos()) * radius;
+        ctx.glow(tip, 7.0 * px, Color::hex(0x9fe6ff).with_alpha(0.8), 1.6);
         if cd.label {
             let secs = if cd.remaining >= 10.0 {
                 format!("{:.0}", cd.remaining.ceil())
             } else {
                 format!("{:.1}", cd.remaining)
             };
-            ctx.text(
-                &secs,
-                (r.h / ctx.px * 0.3).clamp(10.0, 22.0),
-                700,
-                Color::WHITE,
-                center,
-                Vec2::splat(0.5),
-            );
+            let size = (r.h / px * 0.32).clamp(10.0, 22.0);
+            for (o, a) in [(1.5, 0.9), (0.0, 0.0)] {
+                let color = if a > 0.0 {
+                    Color::BLACK.with_alpha(a)
+                } else {
+                    Color::WHITE
+                };
+                ctx.text(
+                    &secs,
+                    size,
+                    800,
+                    color,
+                    center + Vec2::splat(o * px),
+                    Vec2::splat(0.5),
+                );
+            }
         }
     }
     if cd.flash > 0.0 {
