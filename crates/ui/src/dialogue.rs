@@ -18,6 +18,11 @@
 //! Open one with `ui.show {"screen": "dialogue", "tree": "merchant_intro"}` (a tree in the
 //! [`DialogueLibrary`]) or pass the tree itself in `tree`. Enter / Space / A or a click
 //! finishes the line or continues; 1-9 pick a choice.
+//!
+//! A choice with a `chance` (0..1) is a skill check: its tag shows the odds, and a failed
+//! roll goes to `fail` instead of `next` (and sends `dialogue.check:<tag>:fail`, or `:pass`).
+//! Choices already picked in this conversation are dimmed with a tick. H (or the Log hint)
+//! shows what has been said so far.
 
 use std::collections::BTreeMap;
 
@@ -90,6 +95,24 @@ pub struct Choice {
     pub requires: Option<String>,
     /// A tag shown before the text: `"Persuade"`, `"Lie"`, `"Trade"`.
     pub tag: Option<String>,
+    /// Odds of a skill check (0..1), shown with the tag; a failed roll goes to `fail`.
+    pub chance: Option<f32>,
+    /// Node after a failed check (none = end the conversation).
+    pub fail: Option<String>,
+}
+
+/// One entry of the conversation log: a line someone said, or a choice the player made.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LogLine {
+    /// Speaker key in the tree.
+    pub speaker: String,
+    /// Markup and `{bindings}` allowed.
+    pub text: String,
+    /// The player picked this (shown as a reply).
+    pub choice: bool,
+    /// A skill check's tag and whether it passed.
+    pub check: Option<(String, bool)>,
 }
 
 /// One line of the conversation.
@@ -167,6 +190,13 @@ pub struct DialogueScreen {
     pub choices_shown: bool,
     pub plain: Vec<char>,
     pub t: f32,
+    /// Choices picked so far, as (node, index).
+    pub seen: std::collections::BTreeSet<(String, usize)>,
+    /// What has been said, oldest first.
+    pub log: Vec<LogLine>,
+    pub log_open: bool,
+    /// Skill-check rolls so far (varies the next roll).
+    pub rolls: u32,
 }
 
 impl DialogueScreen {
@@ -253,6 +283,124 @@ fn portrait_el(sp: &Speaker, side: Side, active: bool, id: &str) -> El {
     )
 }
 
+/// Green for good odds, amber for even, red for long shots.
+pub fn odds_color(chance: f32, p: &crate::theme::Palette) -> Color {
+    if chance >= 0.67 {
+        p.good
+    } else if chance >= 0.34 {
+        p.warn
+    } else {
+        p.bad
+    }
+}
+
+/// Who answers when the player picks a choice: the speaker on the other side.
+fn player_key(tree: &DialogueTree, node: &DialogueNode) -> String {
+    let side = tree
+        .speakers
+        .get(&node.speaker)
+        .map_or(Side::Left, |s| s.side);
+    tree.speakers
+        .iter()
+        .find(|(_, s)| s.side != side)
+        .map_or_else(|| node.speaker.clone(), |(k, _)| k.clone())
+}
+
+/// The last lines of the conversation, newest at the bottom, over the text box.
+fn log_panel(st: &DialogueScreen, p: &crate::theme::Palette) -> El {
+    const SHOWN: usize = 9;
+    let start = st.log.len().saturating_sub(SHOWN);
+    let mut list = El::new()
+        .class("col")
+        .id("dlg_log_list")
+        .with_style(|s| s.gap(10.0));
+    if st.log.is_empty() {
+        list = list.child(El::text("Nothing said yet.").class("caption"));
+    }
+    for (n, line) in st.log[start..].iter().enumerate() {
+        let sp = st
+            .tree
+            .speakers
+            .get(&line.speaker)
+            .cloned()
+            .unwrap_or_default();
+        // Older lines fade back.
+        let age = (st.log.len() - start - 1 - n) as f32;
+        let fade = (1.0 - age * 0.07).max(0.45);
+        let mut head = El::new()
+            .class("row")
+            .with_style(|s| s.gap(8.0).align_items(Align::Center))
+            .child(
+                El::text(sp.name.clone())
+                    .text_style(|t| t.bold().nowrap().color(sp.color.lerp(Color::WHITE, 0.2)))
+                    .with_style(|s| s.font_size(14.0)),
+            );
+        if line.choice {
+            head = head.child(El::text("you").class("caption").text_style(|t| t.nowrap()));
+        }
+        if let Some((tag, pass)) = &line.check {
+            let c = if *pass { p.good } else { p.bad };
+            head = head.child(
+                El::text(format!(
+                    "{}  ·  {}",
+                    tag.to_uppercase(),
+                    if *pass { "SUCCESS" } else { "FAILED" }
+                ))
+                .class("chip")
+                .text_style(|t| t.bold().nowrap().color(c))
+                .with_style(|s| s.font_size(11.0).border_color(c.fade(0.5))),
+            );
+        }
+        list = list.child(
+            El::new()
+                .class("col")
+                .with_style(|s| {
+                    s.gap(3.0).opacity(fade).padding([
+                        0.0,
+                        0.0,
+                        0.0,
+                        if line.choice { 18.0 } else { 0.0 },
+                    ])
+                })
+                .child(head)
+                .child(
+                    El::text(line.text.clone())
+                        .text_style(|t| t.line_height(1.4))
+                        .with_style(|s| {
+                            s.font_size(16.0)
+                                .color(if line.choice { p.text_dim } else { p.text })
+                        }),
+                ),
+        );
+    }
+    El::new()
+        .class("dialogue_box")
+        .id("dlg_log")
+        .with_style(|s| {
+            s.position(Position::Absolute)
+                .bottom(0.0)
+                .left(0.0)
+                .right(0.0)
+                .gap(12.0)
+                .padding([18.0, 26.0, 22.0, 26.0])
+                .shadow(Shadow::new(Color::hexa(0x000000b0), 40.0, 12.0))
+                .pick(Pick::Block)
+        })
+        .child(
+            El::new()
+                .class("row")
+                .with_style(|s| s.gap(10.0).align_items(Align::Center))
+                .child(
+                    El::text("CONVERSATION LOG")
+                        .text_style(|t| t.bold().nowrap().color(p.accent))
+                        .with_style(|s| s.font_size(12.0)),
+                )
+                .child(El::new().class("spacer"))
+                .child(widgets::key_hint("H", "Y", "Close").pick_ignore()),
+        )
+        .child(list)
+}
+
 fn build(world: &World, st: &DialogueScreen) -> El {
     let theme = world.resource::<Theme>().clone();
     let p = &theme.palette;
@@ -282,13 +430,22 @@ fn build(world: &World, st: &DialogueScreen) -> El {
     }
 
     let mut root = El::new().with_style(|s| s.fill_parent().pick(Pick::Ignore));
-    // A thin letterbox shade at the top.
+    // Letterbox: a black bar at the top fading into the scene.
     root = root.child(El::new().with_style(|s| {
         s.position(Position::Absolute)
             .left(0.0)
             .right(0.0)
             .top(0.0)
-            .height(70.0)
+            .height(46.0)
+            .bg(Color::BLACK)
+            .pick(Pick::Ignore)
+    }));
+    root = root.child(El::new().with_style(|s| {
+        s.position(Position::Absolute)
+            .left(0.0)
+            .right(0.0)
+            .top(46.0)
+            .height(90.0)
             .background(Fill::Linear {
                 from: Color::hexa(0x000000d8),
                 to: Color::hexa(0x00000000),
@@ -342,6 +499,16 @@ fn build(world: &World, st: &DialogueScreen) -> El {
                 .class("caption")
                 .text_style(|t| t.nowrap())
                 .with_style(|s| s.margin([0.0, 0.0, 3.0, 0.0]))
+        }))
+        .child(El::new().class("spacer"))
+        .child_opt((!st.log_open).then(|| {
+            El::new()
+                .class("row")
+                .id("dlg_log_hint")
+                .on_click("dialogue.log")
+                .focusable(false)
+                .with_style(|s| s.gap(8.0).margin([0.0, 0.0, 3.0, 0.0]))
+                .child(widgets::key_hint("H", "Y", "Log").pick_ignore())
         }));
     let text = El::text(node.text.clone())
         .id("dlg_text")
@@ -364,6 +531,7 @@ fn build(world: &World, st: &DialogueScreen) -> El {
             .id("dlg_choices")
             .with_style(|s| s.gap(6.0).margin([6.0, 0.0, 0.0, 0.0]));
         for (n, (i, c)) in choices.iter().enumerate() {
+            let seen = st.seen.contains(&(st.node.clone(), *i));
             let mut row = El::new()
                 .class("list_item choice")
                 .id(format!("choice:{n}"))
@@ -379,20 +547,47 @@ fn build(world: &World, st: &DialogueScreen) -> El {
                         .text_style(|t| t.nowrap())
                         .pick_ignore(),
                 );
-            if let Some(tag) = &c.tag {
-                row = row.child(
-                    El::text(format!("[{tag}]"))
-                        .text_style(|t| t.semibold().nowrap().color(p.info))
-                        .with_style(|s| s.font_size(18.0))
-                        .pick_ignore(),
-                );
+            match (&c.tag, c.chance) {
+                (Some(tag), Some(chance)) => {
+                    let col = odds_color(chance, p);
+                    row = row.child(
+                        El::text(format!("{}  {:.0}%", tag.to_uppercase(), chance * 100.0))
+                            .class("chip")
+                            .id(format!("choice_odds:{n}"))
+                            .text_style(|t| t.bold().nowrap().color(col))
+                            .with_style(|s| {
+                                s.font_size(12.0)
+                                    .border_color(col.fade(0.55))
+                                    .background(col.fade(0.12))
+                            })
+                            .pick_ignore(),
+                    );
+                }
+                (Some(tag), None) => {
+                    row = row.child(
+                        El::text(format!("[{tag}]"))
+                            .text_style(|t| t.semibold().nowrap().color(p.info))
+                            .with_style(|s| s.font_size(18.0))
+                            .pick_ignore(),
+                    );
+                }
+                _ => {}
             }
-            let ends = c.next.is_none();
+            let ends = c.next.is_none() && (c.chance.is_none() || c.fail.is_none());
             row = row.child(
                 El::text(c.text.clone())
+                    .text_style(|t| if seen { t.color(p.text_faint) } else { t })
                     .with_style(|s| s.font_size(19.0).grow(1.0).shrink(1.0))
                     .pick_ignore(),
             );
+            if seen {
+                row = row.child(
+                    El::icon("ui_check")
+                        .icon_tint(p.text_faint)
+                        .with_style(|s| s.size(14.0, 14.0))
+                        .pick_ignore(),
+                );
+            }
             if ends {
                 row = row.child(El::text("End").class("caption").pick_ignore());
             }
@@ -467,6 +662,18 @@ fn build(world: &World, st: &DialogueScreen) -> El {
         }))
         .child(body)
         .child(cont);
+    let panel = if st.log_open {
+        El::new()
+            .with_style(|s| s.width(1040.0).max_width(pct(70.0)).column())
+            .child(
+                El::new()
+                    .with_style(|s| s.height(0.0))
+                    .child(log_panel(st, p).with_style(|s| s.bottom(12.0))),
+            )
+            .child(panel.with_style(|s| s.max_width(pct(100.0))))
+    } else {
+        panel
+    };
     root.child(
         El::new()
             .with_style(|s| {
@@ -537,10 +744,19 @@ pub fn build_screen(world: &mut World, args: &Value) -> Result<Entity, String> {
         choices_shown: false,
         plain: Vec::new(),
         t: 0.0,
+        seen: Default::default(),
+        log: Vec::new(),
+        log_open: args.get("log").and_then(Value::as_bool).unwrap_or(false),
+        rolls: 0,
     };
     let text = st.tree.nodes[&st.node].text.clone();
     st.plain = plain_text(world, &text);
     st.total = st.plain.len();
+    st.log.push(LogLine {
+        speaker: st.tree.nodes[&st.node].speaker.clone(),
+        text,
+        ..Default::default()
+    });
     let el = El::new().class("screen").child(build(world, &st));
     let sp = screens::spawn_screen(
         world,
@@ -598,6 +814,11 @@ fn go(world: &mut World, root: Entity, next: Option<String>) {
             let text = st.tree.nodes[&st.node].text.clone();
             st.plain = plain_text(world, &text);
             st.total = st.plain.len();
+            st.log.push(LogLine {
+                speaker: st.tree.nodes[&st.node].speaker.clone(),
+                text,
+                ..Default::default()
+            });
             let action = st.tree.nodes[&st.node].action.clone();
             world.entity_mut(root).insert(st);
             rebuild(world, root);
@@ -625,11 +846,54 @@ pub fn choose(world: &mut World, root: Entity, index: usize) -> Result<(), Strin
         .into_iter()
         .find(|(i, _)| *i == index)
         .ok_or_else(|| format!("This line has no choice {index}."))?;
-    if let Some(a) = &c.action {
+    let mut st = st;
+    st.seen.insert((st.node.clone(), index));
+    // A skill check rolls against its odds; a failure takes the `fail` branch.
+    let passed = c.chance.map(|chance| {
+        st.rolls += 1;
+        roll(st.t, st.rolls) < chance
+    });
+    let tag = c.tag.clone().unwrap_or_else(|| "Check".into());
+    st.log.push(LogLine {
+        speaker: player_key(&st.tree, &node),
+        text: c.text.clone(),
+        choice: true,
+        check: passed.map(|p| (tag.clone(), p)),
+    });
+    world.entity_mut(root).insert(st);
+    if let Some(p) = passed {
+        input::dispatch(
+            world,
+            &format!(
+                "dialogue.check:{}:{}",
+                tag.to_lowercase(),
+                if p { "pass" } else { "fail" }
+            ),
+        );
+    }
+    if passed != Some(false)
+        && let Some(a) = &c.action
+    {
         input::dispatch(world, a);
     }
-    go(world, root, c.next.clone());
+    let next = if passed == Some(false) {
+        c.fail.clone()
+    } else {
+        c.next.clone()
+    };
+    go(world, root, next);
     Ok(())
+}
+
+/// A roll in 0..1 from the conversation clock and the roll count.
+fn roll(t: f32, n: u32) -> f32 {
+    let mut h = t.to_bits() ^ n.wrapping_mul(0x9E37_79B9);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7feb_352d);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846c_a68b);
+    h ^= h >> 16;
+    (h & 0x00ff_ffff) as f32 / 16_777_216.0
 }
 
 /// Finish the line, or continue to the next one.
@@ -645,6 +909,34 @@ pub fn advance(world: &mut World, root: Entity) {
     let node = st.tree.nodes.get(&st.node).cloned().unwrap_or_default();
     if visible_choices(world, &node).is_empty() {
         go(world, root, node.next.clone());
+    }
+}
+
+/// Show or hide the conversation log.
+pub fn toggle_log(world: &mut World, root: Entity) {
+    if let Some(mut st) = world.get_mut::<DialogueScreen>(root) {
+        st.log_open = !st.log_open;
+    }
+    rebuild(world, root);
+    if world
+        .get::<DialogueScreen>(root)
+        .is_some_and(|s| s.choices_shown)
+    {
+        reveal_choices(world, root);
+    }
+}
+
+/// Let the choice rows slide in (they are built hidden).
+fn reveal_choices(world: &mut World, root: Entity) {
+    if let Some(list) = screens::find_in(world, root, "dlg_choices") {
+        for c in screens::subtree(world, list).into_iter().skip(1) {
+            if world.get::<OnClick>(c).is_some()
+                && let Some(mut n) = world.get_mut::<Node>(c)
+            {
+                n.style.opacity = None;
+                n.style.translate = None;
+            }
+        }
     }
 }
 
@@ -666,6 +958,9 @@ pub fn dialogue_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>
             .collect()
         })
         .unwrap_or_default();
+    let log_key = world
+        .get_resource::<ButtonInput<KeyCode>>()
+        .is_some_and(|k| k.just_pressed(KeyCode::H));
     let mut q = world.query::<(Entity, &DialogueScreen, &Screen)>();
     let open: Vec<Entity> = q
         .iter(world)
@@ -678,7 +973,9 @@ pub fn dialogue_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>
                 if entity.is_some_and(|e| !screens::is_descendant(world, e, root)) {
                     continue;
                 }
-                if action == "dialogue.next" {
+                if action == "dialogue.log" {
+                    toggle_log(world, root);
+                } else if action == "dialogue.next" {
                     advance(world, root);
                 } else if let Some(i) = action
                     .strip_prefix("dialogue.choose:")
@@ -689,12 +986,15 @@ pub fn dialogue_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>
                 }
             }
         }
-        let Some(mut st) = world.get::<DialogueScreen>(root).cloned() else {
-            continue;
-        };
         if world.get::<Screen>(root).is_none_or(|s| s.closing) {
             continue;
         }
+        if log_key {
+            toggle_log(world, root);
+        }
+        let Some(mut st) = world.get::<DialogueScreen>(root).cloned() else {
+            continue;
+        };
         // Number keys pick the n-th visible choice.
         if st.choices_shown
             && let Some(&n) = digits.first()
@@ -750,17 +1050,7 @@ pub fn dialogue_system(world: &mut World, mut seen: Local<MessageCursor<UiEvent>
         world.entity_mut(root).insert(st);
         if show_choices && !node.choices.is_empty() {
             rebuild(world, root);
-            // Let the choices slide in.
-            if let Some(list) = screens::find_in(world, root, "dlg_choices") {
-                for c in screens::subtree(world, list).into_iter().skip(1) {
-                    if world.get::<OnClick>(c).is_some()
-                        && let Some(mut n) = world.get_mut::<Node>(c)
-                    {
-                        n.style.opacity = None;
-                        n.style.translate = None;
-                    }
-                }
-            }
+            reveal_choices(world, root);
         }
         set_reveal(world, root, reveal);
         // Portrait frames.
@@ -853,9 +1143,10 @@ pub fn register_api(app: &mut engine_core::prelude::App) {
             let speaker = st.tree.speakers.get(&node.speaker).map(|s| s.name.clone());
             let choices: Vec<Value> = visible_choices(world, &node)
                 .into_iter()
-                .map(|(i, c)| json!({"index": i, "text": c.text, "ends": c.next.is_none()}))
+                .map(|(i, c)| json!({"index": i, "text": c.text, "ends": c.next.is_none(), "chance": c.chance, "seen": st.seen.contains(&(st.node.clone(), i))}))
                 .collect();
-            Ok(json!({"tree": st.id, "node": st.node, "speaker": speaker, "text": node.text, "typing": st.typing(), "choices": choices}))
+            let log: Vec<Value> = st.log.iter().map(|l| json!({"speaker": l.speaker, "text": l.text, "choice": l.choice, "check": l.check})).collect();
+            Ok(json!({"tree": st.id, "node": st.node, "speaker": speaker, "text": node.text, "typing": st.typing(), "choices": choices, "log": log, "log_open": st.log_open}))
         },
     );
     app.register_api(
@@ -870,6 +1161,19 @@ pub fn register_api(app: &mut engine_core::prelude::App) {
                 .ok_or("Pass \"index\".")? as usize;
             choose(world, root, i)?;
             Ok(json!({"ok": true}))
+        },
+    );
+    app.register_api(
+        "dialogue.log",
+        "Show or hide the conversation log (what has been said so far).",
+        "{}",
+        |world, _| {
+            let root = open_dialogue(world)?;
+            toggle_log(world, root);
+            let open = world
+                .get::<DialogueScreen>(root)
+                .is_some_and(|s| s.log_open);
+            Ok(json!({"open": open}))
         },
     );
     app.register_api(
@@ -911,7 +1215,7 @@ pub fn add_demo_trees(world: &mut World) {
                       "choices": [
                           {"text": "Show me what you've got.", "tag": "Trade", "action": "ui.show:shop", "next": "browse"},
                           {"text": "Tell me about the relay tower.", "next": "relay"},
-                          {"text": "That rifle. \"Mostly\"?", "tag": "Persuade", "next": "rifle"},
+                          {"text": "That rifle. \"Mostly\"? Knock something off and I'll take it.", "tag": "Persuade", "chance": 0.64, "next": "rifle", "fail": "rifle_no"},
                           {"text": "Another time.", "next": null}
                       ]},
             "browse": {"speaker": "brannoc", "text": "Take your time. Don't touch the jar on the left.", "next": null},
@@ -922,6 +1226,7 @@ pub fn add_demo_trees(world: &mut World) {
                            {"text": "I'll take those medkits.", "tag": "Trade", "action": "ui.show:shop", "next": null},
                            {"text": "I've heard enough. Goodbye.", "next": null}
                        ]},
+            "rifle_no": {"speaker": "brannoc", "text": "Ha! Nice try, courier. The price is the price. The flare's [i]free[/i], though.", "next": "offer"},
             "rifle": {"speaker": "brannoc", "text": "Ninety-six percent of the time it fires a slug at a tenth of light speed. The other four percent, it's a very expensive flare. For you? [color=#e8b65a]Ten percent off.[/color]", "next": "offer"}
         }
     }))

@@ -120,6 +120,6 @@ square).
   quick-select wheel, the skill tree, crafting, save and load, the title screen, the loading screen, pause and resume, key rebinding) and
   `tests/headless.rs` (renders a panel and checks pixels; needs a GPU or lavapipe).
 - `cargo run -p engine_ui --example gallery --release -- <dir> [width] [height] [shot ...]`
-  renders every screen (hud, wheel, dialogue, dialogue_choices, shop, shop_sell, inventory,
+  renders every screen (hud, wheel, dialogue, dialogue_choices, dialogue_log, shop, shop_sell, inventory,
   inventory_drag, journal, journal_finished, skills, crafting, crafting_busy, saves, saves_save, title, loading, loading_ready, map_galaxy, map_system, map_globe, map_surface, map_rings, pause, confirm, settings,
   settings_video, settings_controls, theme_cyan) to PNGs.

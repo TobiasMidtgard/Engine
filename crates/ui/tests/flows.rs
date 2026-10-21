@@ -155,6 +155,83 @@ fn choosing_trade_in_a_conversation_opens_the_shop() {
 }
 
 #[test]
+fn skill_checks_branch_on_their_odds_and_the_log_keeps_what_was_said() {
+    let mut app = app();
+    let tree = json!({
+        "start": "ask",
+        "speakers": {
+            "me": {"name": "Mara", "side": "left"},
+            "g": {"name": "Guard", "side": "right"}
+        },
+        "nodes": {
+            "ask": {"speaker": "g", "text": "Papers.", "choices": [
+                {"text": "I'm expected.", "tag": "Lie", "chance": 1.0, "next": "ok", "fail": "no"},
+                {"text": "You don't need to see them.", "tag": "Persuade", "chance": 0.0, "next": "ok", "fail": "no"},
+                {"text": "Here.", "next": null}
+            ]},
+            "ok": {"speaker": "g", "text": "Go on, then.", "next": "ask"},
+            "no": {"speaker": "g", "text": "Nice try.", "next": "ask"}
+        }
+    });
+    api(
+        &mut app,
+        "ui.show",
+        json!({"screen": "dialogue", "tree": tree, "speed": 0}),
+    );
+    app.update_n(5);
+    let since = next_event(&mut app);
+    let st = api(&mut app, "dialogue.state", json!({}));
+    assert_eq!(st["choices"][0]["chance"], 1.0);
+    // A sure thing passes...
+    api(&mut app, "dialogue.choose", json!({"index": 0}));
+    app.update_n(3);
+    assert_eq!(api(&mut app, "dialogue.state", json!({}))["node"], "ok");
+    assert!(actions_since(&mut app, since).contains(&"dialogue.check:lie:pass".to_string()));
+    // ...and back at the question, that choice is marked as said.
+    api(&mut app, "dialogue.next", json!({}));
+    app.update_n(3);
+    api(&mut app, "dialogue.next", json!({}));
+    app.update_n(3);
+    let st = api(&mut app, "dialogue.state", json!({}));
+    assert_eq!(st["node"], "ask");
+    assert_eq!(st["choices"][0]["seen"], true);
+    assert_eq!(st["choices"][1]["seen"], false);
+    // A long shot fails and takes the fail branch.
+    api(&mut app, "dialogue.choose", json!({"index": 1}));
+    app.update_n(3);
+    assert_eq!(api(&mut app, "dialogue.state", json!({}))["node"], "no");
+    assert!(actions_since(&mut app, since).contains(&"dialogue.check:persuade:fail".to_string()));
+    // The log has every line and both replies, with the checks' results.
+    let st = api(&mut app, "dialogue.state", json!({}));
+    let log = st["log"].as_array().unwrap();
+    let texts: Vec<&str> = log.iter().map(|l| l["text"].as_str().unwrap()).collect();
+    assert_eq!(
+        texts,
+        [
+            "Papers.",
+            "I'm expected.",
+            "Go on, then.",
+            "Papers.",
+            "You don't need to see them.",
+            "Nice try."
+        ]
+    );
+    assert_eq!(log[1]["speaker"], "me");
+    assert_eq!(log[1]["check"], json!(["Lie", true]));
+    assert_eq!(log[4]["check"], json!(["Persuade", false]));
+    // The log opens over the text box and closes again.
+    api(&mut app, "ui.click", json!({"id": "dlg_log_hint"}));
+    app.update_n(3);
+    assert_eq!(api(&mut app, "dialogue.state", json!({}))["log_open"], true);
+    api(&mut app, "dialogue.log", json!({}));
+    app.update_n(3);
+    assert_eq!(
+        api(&mut app, "dialogue.state", json!({}))["log_open"],
+        false
+    );
+}
+
+#[test]
 fn buying_moves_gold_and_items() {
     let mut app = app();
     let before = player(&mut app);

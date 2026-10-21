@@ -2,8 +2,8 @@
 //!
 //! `cargo run -p engine_ui --example gallery -- <out_dir> [width] [height] [shot ...]`
 //!
-//! Shots: hud, wheel, dialogue, dialogue_choices, shop, shop_sell, inventory, inventory_drag,
-//! journal, journal_finished, skills, crafting, crafting_busy, saves, saves_save, title, map_galaxy, map_system, map_globe, map_surface, map_rings, pause, confirm, settings, settings_video,
+//! Shots: hud, wheel, dialogue, dialogue_choices, dialogue_log, shop, shop_sell, inventory, inventory_drag,
+//! journal, journal_finished, skills, crafting, crafting_busy, saves, saves_save, title, loading, loading_ready, map_galaxy, map_system, map_globe, map_surface, map_rings, pause, confirm, settings, settings_video,
 //! settings_controls, theme_cyan (all by default).
 //! Needs a GPU or a software Vulkan driver (lavapipe).
 
@@ -176,16 +176,34 @@ fn main() {
         eyes_open(&mut app);
         shot(&mut app, &dir, "dialogue");
     }
-    if want("dialogue_choices") {
+    // Back at Brannoc's offer after asking about the rifle: that choice is ticked as said.
+    let rifle_asked = |app: &mut App| {
         show(
-            &mut app,
+            app,
             "dialogue",
             json!({"tree": "merchant_intro", "node": "offer"}),
         );
-        app.update_n(240);
+        api(app, "dialogue.next", json!({}));
+        app.update_n(5);
+        api(app, "dialogue.choose", json!({"index": 2}));
+        app.update_n(5);
+        api(app, "dialogue.next", json!({}));
+        app.update_n(5);
+        api(app, "dialogue.next", json!({}));
+        app.update_n(260);
+    };
+    if want("dialogue_choices") {
+        rifle_asked(&mut app);
         hover(&mut app, "choice:1");
         eyes_open(&mut app);
         shot(&mut app, &dir, "dialogue_choices");
+    }
+    if want("dialogue_log") {
+        rifle_asked(&mut app);
+        api(&mut app, "dialogue.log", json!({}));
+        app.update_n(30);
+        eyes_open(&mut app);
+        shot(&mut app, &dir, "dialogue_log");
     }
     if want("shop") {
         show(&mut app, "shop", json!({"vendor": "Merchant"}));
