@@ -349,6 +349,26 @@ fn skin_spec(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, rough: f32) -> f32 {
     return d * vis * f * n_dot_l;
 }
 
+// Sun visibility on skin. Hairs lying close above the skin cast shadows as crisp as they are
+// near, which the shadow map's dither leaves as rows of specks along the hairline; but light
+// scatters through hair and spreads under the skin, so their shade is soft. Skin averages its
+// shadow over a few millimeters around it.
+const SKIN_SHADOW_SPREAD: f32 = 0.004;
+fn skin_shadow(rel: vec3<f32>, n: vec3<f32>, scatter: f32) -> f32 {
+    if (scatter <= 0.0) {
+        return shadow_factor(rel, n);
+    }
+    let t1 = normalize(cross(n, select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(n.y) > 0.9)));
+    let t2 = cross(n, t1);
+    let spread = SKIN_SHADOW_SPREAD * scatter;
+    var sum = 0.0;
+    for (var i = 0; i < 6; i++) {
+        let o = vogel_disk(i, 6, 0.4) * spread;
+        sum += shadow_factor(rel + t1 * o.x + t2 * o.y, n);
+    }
+    return sum / 6.0;
+}
+
 fn shade_skin(s: SkinLight, rel: vec3<f32>) -> vec3<f32> {
     let v = normalize(-rel);
     let n_dot_v = max(dot(s.n, v), 1e-4);
@@ -366,7 +386,7 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> vec3<f32> {
     if (dot(sun, sun) > 0.0) {
         let nl = vec3<f32>(dot(nr, l), dot(ng, l), dot(nb, l));
         // Shadow test from the smooth surface, so pores don't self-shadow at grazing light.
-        var shadow = shadow_factor(rel, s.n_soft);
+        var shadow = skin_shadow(rel, s.n_soft, s.scatter);
         if (nl.z > 0.0) {
             shadow *= contact_shadow(rel, s.n_soft);
         }

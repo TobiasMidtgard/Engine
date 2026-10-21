@@ -481,10 +481,10 @@ fn grow_scalp(
         HairStyle::Medium => Groom {
             length: 0.2 * k,
             points: 18,
-            density: 80.0,
+            density: 120.0,
             gravity: 1.0,
             loft: 0.016,
-            clump: 0.7,
+            clump: 0.6,
             root_radius: 0.00012,
         },
         HairStyle::Long => Groom {
@@ -546,18 +546,20 @@ fn grow_scalp(
         let mut pts = grow_hair(a, &g, sp, collider, lm, rest, &mut gr, 1.0);
         if g.gravity > 0.5 {
             settle(&mut pts, sp, collider, lm, rest);
-            // Each lock of hanging hair has a wave of its own, so neighboring locks catch
-            // the light differently and read apart. Wavy hair waves as whole locks, shorter
-            // and deeper the curlier it is.
-            let phase = gr.f32() * std::f32::consts::TAU;
-            let wavelength = (0.2 - 0.13 * curl) * gr.range(0.8, 1.25);
+            // Hanging hair waves as whole locks, shorter and deeper the curlier it is.
+            // Neighboring locks wave nearly in step (as real waves set across the hair), with
+            // enough difference that they catch the light apart; waves of their own would
+            // read as separate ribbons.
+            let around = (sp.rest - rest.head).x.atan2((sp.rest - rest.head).z);
+            let phase = around * 1.5 + (sp.rest.y - rest.head.y) * 20.0 + gr.range(-0.9, 0.9);
+            let wavelength = (0.2 - 0.13 * curl) * gr.range(0.9, 1.1);
             let waves = g.length / wavelength;
             let amp = gr.range(0.003, 0.008) + 0.02 * curl;
             // Mostly toward and away from the head (which turns the lock's highlight), a
             // little sideways.
             let out = (sp.p - lm.head).normalize_or(Vec3::Z);
             let side = out.cross(Vec3::Y).normalize_or(Vec3::X);
-            let tilt = gr.range(-0.5, 0.5);
+            let tilt = gr.range(-0.3, 0.3);
             let dir = (out + side * tilt).normalize();
             let last = pts.len() - 1;
             for (k, p) in pts.iter_mut().enumerate() {
@@ -680,7 +682,7 @@ fn grow_scalp(
             // Hanging locks part toward their tips, and the hair seen between them is
             // deeper in shadow: darken each lock's edge.
             if g.gravity > 0.5 {
-                attr[0] = 1.0 - 0.4 * lock_edge * lock_edge * attr[2].sqrt();
+                attr[0] = 1.0 - 0.25 * lock_edge * lock_edge * attr[2].sqrt();
             }
         }
         if moves {

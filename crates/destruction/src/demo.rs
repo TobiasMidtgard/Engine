@@ -28,12 +28,16 @@
 //! a sledgehammer smashes the wooden hatch in. A stair up the back climbs to the roof and a
 //! steel ladder hangs under each hatch.
 
+use bevy_ecs::message::{Message, Messages};
 use bevy_ecs::system::RunSystemOnce;
 use bevy_ecs::world::CommandQueue;
 use engine_core::math::{DVec3, Quat, Rng, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::{MeshRenderer, Shape, StandardMaterial};
-use engine_world::{Climbable, EditOp, EditShape, ProjectileTrace, TerrainEdit, WorldImpulse};
+use engine_world::{
+    Climbable, EditOp, EditShape, NoiseEvent, ProjectileTrace, SmokeEmission, TerrainEdit,
+    WorldImpulse,
+};
 
 use crate::DemoView;
 use crate::architecture::TowerTop;
@@ -1400,7 +1404,13 @@ fn apply_aftermath(world: &mut World, ids: Aftermath) {
         }
     }
     world.resource_mut::<HitQueue>().hits.extend(hits);
+    // The aftermath is old damage: its blasts' dust clouds and bangs are long gone, so only
+    // what other systems wrote is kept (a cloud per wrecked bay hid the range on arrival).
+    let smoke = take_messages::<SmokeEmission>(world);
+    let noise = take_messages::<NoiseEvent>(world);
     let _ = world.run_system_once(crate::hits::apply_hits_system);
+    put_messages(world, smoke);
+    put_messages(world, noise);
     let ground = {
         let g = world.resource::<engine_world::Ground>().clone();
         move |p: DVec3| g.height(p).unwrap_or(0.0)
@@ -1420,6 +1430,24 @@ fn apply_aftermath(world: &mut World, ids: Aftermath) {
     run_commands(world, |commands| props = spawn_props(commands, ids.origin));
     if let Some(mut d) = world.get_mut::<DestructionDemo>(ids.demo) {
         d.targets.props = props;
+    }
+}
+
+/// Take every pending `T` message out of `world`.
+fn take_messages<T: Message>(world: &mut World) -> Vec<T> {
+    world
+        .get_resource_mut::<Messages<T>>()
+        .map(|mut m| m.drain().collect())
+        .unwrap_or_default()
+}
+
+/// Replace the pending `T` messages with `kept`, dropping any written since they were taken.
+fn put_messages<T: Message>(world: &mut World, kept: Vec<T>) {
+    if let Some(mut m) = world.get_resource_mut::<Messages<T>>() {
+        m.clear();
+        for msg in kept {
+            m.write(msg);
+        }
     }
 }
 

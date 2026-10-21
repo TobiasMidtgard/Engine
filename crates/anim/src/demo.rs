@@ -552,11 +552,21 @@ pub fn give_humanoid_body(world: &mut World, person: Entity, outfit: humanoid::O
         humanoid::Outfit::Shirt => ("anim/humanoid/shirt", shirt_detail()),
     };
     let handle = mesh_handle(world, key, || humanoid::mesh(outfit));
-    let anim = animator(world, humanoid::SKELETON, humanoid::GRAPH);
+    let mut anim = animator(world, humanoid::SKELETON, humanoid::GRAPH);
     let morphs = morphs(world, handle);
+    // Keep the pace and head start the entity was given.
+    let given = world
+        .get::<AnimatorSettings>(person)
+        .cloned()
+        .unwrap_or_default();
+    anim.preroll(given.start_secs);
     let mut e = world.entity_mut(person);
     e.insert((
-        AnimatorSettings::new(humanoid::SKELETON, humanoid::GRAPH),
+        AnimatorSettings {
+            speed: given.speed,
+            start_secs: given.start_secs,
+            ..AnimatorSettings::new(humanoid::SKELETON, humanoid::GRAPH)
+        },
         anim,
         SkinnedMeshRenderer::new(handle, material),
         morphs,
@@ -1351,6 +1361,12 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
                 t,
                 GlobalTransform::from(t),
                 BodyRequest::human(seed),
+                // Each a different way into the standing idle, so they shift their weight
+                // at different times.
+                AnimatorSettings {
+                    start_secs: (seed % 400) as f32 * 3.1,
+                    ..Default::default()
+                },
                 AppearanceRequest {
                     seed,
                     sex: Some(sex),
@@ -1366,10 +1382,14 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
                 // 11 s round).
                 DemoScript {
                     period: 11.0,
-                    steps: vec![
+                    steps: [
                         DemoStep::trigger(wince_at, "wince"),
                         DemoStep::trigger(wince_at + 7.1, "wince"),
-                    ],
+                    ]
+                    .into_iter()
+                    // The one who glances about stands with his arms folded.
+                    .chain((!watch).then(|| DemoStep::param(0.05, "arms_folded", 1.0)))
+                    .collect(),
                     time: 0.0,
                 },
             ))

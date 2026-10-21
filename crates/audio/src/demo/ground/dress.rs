@@ -1548,6 +1548,7 @@ pub(super) fn meadow() -> GrassField {
             wind_response: 0.8,
             draw_distance: 45.0,
             shadow_distance: 14.0,
+            ..Default::default()
         })
         .sample(res, |x, z| {
             let w = Vec2::new(x, z);

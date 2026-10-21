@@ -86,6 +86,9 @@ pub struct AnimatorSettings {
     /// Beyond this distance from the nearest simulation focus (meters), the graph updates at
     /// a quarter rate. 0 = always full rate.
     pub lod_distance: f32,
+    /// Start the graph this many seconds in, so people sharing clips (a crowd standing about)
+    /// don't move in step.
+    pub start_secs: f32,
 }
 
 impl Default for AnimatorSettings {
@@ -97,6 +100,7 @@ impl Default for AnimatorSettings {
             paused: false,
             root_motion: false,
             lod_distance: 80.0,
+            start_secs: 0.0,
         }
     }
 }
@@ -254,6 +258,17 @@ impl Animator {
         self.base.clone_from(&self.local);
     }
 
+    /// Run the graph `secs` ahead with default parameters, dropping what it fires (see
+    /// [`AnimatorSettings::start_secs`]).
+    pub fn preroll(&mut self, secs: f32) {
+        if secs > 0.0 {
+            self.evaluate(&AnimationParams::default(), secs);
+            self.events.clear();
+            self.curves.clear();
+            self.root_delta = Vec3::ZERO;
+        }
+    }
+
     /// Start this frame from the last evaluated pose without advancing the graph.
     fn hold(&mut self) {
         self.dt = 0.0;
@@ -329,7 +344,8 @@ pub(crate) fn build_animators(
             continue;
         }
         match library.instantiate(&settings.skeleton, &settings.graph) {
-            Ok(animator) => {
+            Ok(mut animator) => {
+                animator.preroll(settings.start_secs);
                 commands.entity(entity).insert(animator);
             }
             Err(e) => tracing::warn!("animator for {entity}: {e}"),

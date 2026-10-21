@@ -788,7 +788,9 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     let l = frame.sun_dir.xyz;
     let n_dot_l_raw = dot(n, l);
     let n_dot_l = saturate(n_dot_l_raw);
-    let sun_light = frame.sun_color.rgb * sun_transmittance(rel) * cloud_shadow(rel);
+    let sun_above = frame.sun_color.rgb * sun_transmittance(rel) * cloud_shadow(rel);
+    let in_fog = height_fog_sunlight(rel);
+    let sun_light = sun_above * in_fog.x;
     let sides = thin_surface_sides(face, l);
     if (thin && dot(sun_light, sun_light) > 0.0 && (n_dot_l > 0.0 || (translucent && sides.y > 0.0))) {
         // Shadowed as seen from the sheet's sunlit side, so the sheet doesn't shadow itself.
@@ -880,6 +882,10 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     if (own_sky > 0.0) {
         sky_light = mix(sky_light, atmosphere_sky_ambient(rel, n) * frame.sun_color.rgb + fill, own_sky);
     }
+    // Sunlight the fog above scatters down, from the whole sky above.
+    if (in_fog.y > 0.0) {
+        sky_light += sun_above * (in_fog.y * INV_PI * (0.5 + 0.5 * dot(n, fog_up(rel))));
+    }
     let irradiance = ((sky_light - fill) * sky_vis + fill) * PI;
     // Rough surfaces reflect around a direction between the mirror direction and the normal
     // (Lagarde and de Rousiers 2014).
@@ -951,6 +957,50 @@ fn height_fog_optical_depth(dir: vec3<f32>, t0: f32, t1: f32) -> f32 {
     return frame.fog.x * len * ea;
 }
 
+// Local up at camera-relative `rel`: away from the planet's center, or +y without a planet.
+fn fog_up(rel: vec3<f32>) -> vec3<f32> {
+    if (frame.planet.w > 0.0) { return normalize(rel - frame.planet.xyz); }
+    return vec3<f32>(0.0, 1.0, 0.0);
+}
+
+// Sunlight inside the height fog at camera-relative `rel`, as shares of the sunlight above the
+// fog: x the direct beam the fog above lets through (dimmed along the sun's slanted path through
+// the fog's column), y the light the fog scatters down from it, which arrives from the whole
+// sky above (per unit of horizontal sunlight irradiance above the fog). Deep in a fog bank the
+// sun's disc fades, shadows soften and the light comes from the fog around. Two-stream
+// transmission of a conservative layer with the fog's anisotropy, times the fog's albedo.
+fn height_fog_sunlight(rel: vec3<f32>) -> vec2<f32> {
+    return height_fog_sunlight_between(rel, rel);
+}
+
+// `height_fog_sunlight` averaged over the fog between camera-relative `a` and `b`, weighted by
+// its density, so a stretch of fog reaching into a thin ground layer (a far froxel) is lit as
+// the layer's fog is, exactly for any length.
+fn height_fog_sunlight_between(a: vec3<f32>, b: vec3<f32>) -> vec2<f32> {
+    if (frame.fog.x <= 0.0) { return vec2<f32>(1.0, 0.0); }
+    let falloff = max(frame.fog.y, 1e-5);
+    // u: the density relative to the base height's; the fog's column above a point is
+    // `column * u`.
+    let ua = exp(-falloff * max(fog_height(a) - frame.fog.z, -100.0));
+    let ub = exp(-falloff * max(fog_height(b) - frame.fog.z, -100.0));
+    let u0 = min(ua, ub);
+    let u1 = max(ua, ub);
+    let column = frame.fog.x / falloff;
+    if (column * u1 < 1e-4) { return vec2<f32>(1.0, 0.0); }
+    let mu = dot(fog_up(0.5 * (a + b)), frame.sun_dir.xyz);
+    // Optical depths per unit of u: the sun's slanted path, and the layer's diffuse thickness.
+    let k = column / max(mu, 0.02);
+    let d = 0.75 * (1.0 - frame.fog_color.w) * column;
+    let du = u1 - u0;
+    let um = 0.5 * (u0 + u1);
+    var direct = exp(-k * um);
+    if (k * du > 1e-3) { direct = (exp(-k * u0) - exp(-k * u1)) / (k * du); }
+    if (mu <= 0.0) { return vec2<f32>(direct, 0.0); }
+    var total = 1.0 / (1.0 + d * um);
+    if (d * du > 1e-3) { total = log((1.0 + d * u1) / (1.0 + d * u0)) / (d * du); }
+    return vec2<f32>(direct, max(total - direct, 0.0) * mu * luminance(frame.fog_color.rgb));
+}
+
 // Sky light reaching fog from every direction (cd/m^2, without the ambient fill): the sky's and
 // the ground's radiance averaged over the whole sphere, which fog scatters about evenly.
 fn fog_sky_light() -> vec3<f32> {
@@ -966,9 +1016,20 @@ fn fog_sky_light() -> vec3<f32> {
 // open sky the fog sees), plus the ambient fill. This is the fog beyond the volumetric range
 // (or all of it with volumetrics off). Sunlight and sky light are the fog's own: haze over
 // the night side of a planet seen from orbit gets neither the sun nor the sunlit sky around
-// the camera.
+// the camera. Deep in a fog bank the fog above dims the sun and lights it from all around
+// (`height_fog_sunlight`).
 fn height_fog_radiance(dir: vec3<f32>, at: vec3<f32>, lit: f32, sun: f32) -> vec3<f32> {
-    let sunlight = frame.sun_color.rgb * sun_transmittance(at) * henyey_greenstein(dot(dir, frame.sun_dir.xyz), frame.fog_color.w);
+    return height_fog_lit(dir, at, height_fog_sunlight(at), lit, sun);
+}
+
+// `height_fog_radiance` with the sunlight inside the fog given (`height_fog_sunlight_along`).
+fn height_fog_lit(dir: vec3<f32>, at: vec3<f32>, in_fog: vec2<f32>, lit: f32, sun: f32) -> vec3<f32> {
+    let sun_above = frame.sun_color.rgb * sun_transmittance(at);
+    // The direct beam, and what the fog above scatters down from it, which arrives from the
+    // upper half of the sphere; both shaded as the sun is (`sun`: under a cloud the fog above is
+    // in its shadow too).
+    let sunlight = sun_above * (in_fog.x * henyey_greenstein(dot(dir, frame.sun_dir.xyz), frame.fog_color.w)
+        + in_fog.y * 0.5 * INV_PI);
     var sky = fog_sky_light();
     // Far below the camera the environment map's sky is the camera's (black space above the
     // planet from orbit): take the sky around the fog from the atmosphere, as surfaces do.
@@ -1007,6 +1068,16 @@ fn height_fog_depth_at(dir: vec3<f32>, t0: f32, t1: f32, tau: f32) -> f32 {
 fn height_fog_scatter_point(dir: vec3<f32>, t0: f32, t1: f32, tr: f32) -> vec3<f32> {
     let tau = -log(1.0 - 0.5 * (1.0 - tr));
     return dir * (t0 + height_fog_depth_at(dir, t0, t1, tau));
+}
+
+// `height_fog_sunlight` for the fog between `t0` and `t1` along `dir` (transmittance `tr`):
+// averaged over where a quarter and three quarters of its light is scattered, as the dimming
+// changes fast with height in a thin layer.
+fn height_fog_sunlight_along(dir: vec3<f32>, t0: f32, t1: f32, tr: f32) -> vec2<f32> {
+    let scattered = 1.0 - tr;
+    let near = dir * (t0 + height_fog_depth_at(dir, t0, t1, -log(1.0 - 0.25 * scattered)));
+    let far = dir * (t0 + height_fog_depth_at(dir, t0, t1, -log(1.0 - 0.75 * scattered)));
+    return 0.5 * (height_fog_sunlight(near) + height_fog_sunlight(far));
 }
 
 // Whether sunlight reaches camera-relative point `rel` in the air past the far shadow map's
@@ -1111,7 +1182,28 @@ fn volumetric_fog_at(rel: vec3<f32>, depth: f32) -> vec4<f32> {
     if (radiance_weight > 1e-3) {
         light = radiance / radiance_weight * (1.0 - t);
     }
-    return vec4<f32>(light, t);
+    return vec4<f32>(light * froxel_fog_sun_dimming(rel / max(dist, 1e-6), dist * d / max(view_depth(rel), 1e-6)), t);
+}
+
+// The froxels light their height fog by the sunlight above it; deep in a fog bank the fog above
+// dims the sun (`height_fog_sunlight`). This scales what they scatter toward the camera along
+// `dir` up to `len` meters (where they end) by how much that dims the fog's light at the
+// stretch's scatter point, as
+// the fog beyond them is lit (`height_fog_radiance`): per pixel, so a thin ground layer seen at
+// a glance shows no rows of froxels, whose rays cross it meters apart. The sun's share of the
+// fog's light is taken shaded by the clouds only.
+fn froxel_fog_sun_dimming(dir: vec3<f32>, len: f32) -> f32 {
+    if (frame.fog.x <= 0.0) { return 1.0; }
+    let tr = exp(-height_fog_optical_depth(dir, 0.0, len));
+    if (tr > 0.9999) { return 1.0; }
+    let in_fog = height_fog_sunlight_along(dir, 0.0, len, tr);
+    if (in_fog.x > 0.9999) { return 1.0; }
+    let at = height_fog_scatter_point(dir, 0.0, len, tr);
+    let sun = luminance(frame.sun_color.rgb * sun_transmittance(at)) * cloud_shadow(at);
+    let direct = sun * henyey_greenstein(dot(dir, frame.sun_dir.xyz), frame.fog_color.w);
+    let sky = luminance(fog_sky_light() + frame.ambient.rgb);
+    let lit = direct * in_fog.x + sky + sun * in_fog.y * 0.5 * INV_PI;
+    return lit / max(direct + sky, 1e-12);
 }
 
 // Column `cell` of the volumetric fog up to fraction `f` of slice `k`: in-scattered light and
@@ -1187,7 +1279,8 @@ fn surface_fog(rel: vec3<f32>) -> SurfaceFog {
             let lit = fog_sky_visibility(rel);
             let sun = height_fog_sun_visibility(dir, start, dist, tr, frame_noise(pixel_of(rel)));
             let at = height_fog_scatter_point(dir, start, dist, tr);
-            let l = pre_expose(height_fog_radiance(dir, at, lit, sun)) * (1.0 - tr);
+            let in_fog = height_fog_sunlight_along(dir, start, dist, tr);
+            let l = pre_expose(height_fog_lit(dir, at, in_fog, lit, sun)) * (1.0 - tr);
             fog = vec4<f32>(fog.rgb + l * fog.a, fog.a * tr);
         }
     }
@@ -1253,7 +1346,8 @@ fn apply_full_sky_fog(color: vec3<f32>, dir: vec3<f32>, pixel: vec2<f32>) -> vec
         if (tr < 0.9999) {
             let sun = height_fog_sun_visibility(dir, start, end, tr, frame_noise(pixel));
             let at = height_fog_scatter_point(dir, start, end, tr);
-            let l = pre_expose(height_fog_radiance(dir, at, 1.0, sun)) * (1.0 - tr);
+            let in_fog = height_fog_sunlight_along(dir, start, end, tr);
+            let l = pre_expose(height_fog_lit(dir, at, in_fog, 1.0, sun)) * (1.0 - tr);
             fog = vec4<f32>(fog.rgb + l * fog.a, fog.a * tr);
         }
     }

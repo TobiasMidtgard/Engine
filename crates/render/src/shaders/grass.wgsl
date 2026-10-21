@@ -6,6 +6,8 @@ struct GrassOut {
     @location(1) normal: vec3<f32>,
     @location(2) albedo: vec3<f32>,
     @location(3) along: f32,
+    @location(4) across: f32,
+    @location(5) gloss: f32,
 };
 
 // Collapses an invisible blade to a point outside the view.
@@ -20,6 +22,8 @@ fn vs_main(@builtin(instance_index) instance: u32, @builtin(vertex_index) vertex
     out.normal = b.normal;
     out.albedo = b.albedo;
     out.along = b.along;
+    out.across = b.across;
+    out.gloss = b.gloss;
     return out;
 }
 
@@ -28,10 +32,12 @@ fn grass_surface(in: GrassOut, front: bool) -> Surface {
     var n = normalize(in.normal);
     if (!front) { n = -n; }
     s.normal = n;
-    // Lower parts of a meadow sit in the shade of the blades around them.
-    s.albedo = in.albedo * mix(0.7, 1.0, in.along);
+    // Lower parts of a meadow sit in the shade of the blades around them. The midrib is a
+    // little paler and glossier than the edges.
+    let mid = 1.0 - abs(in.across);
+    s.albedo = in.albedo * mix(0.7, 1.0, in.along) * (0.94 + 0.1 * mid);
     s.occlusion = mix(0.3, 1.0, sqrt(in.along));
-    s.roughness = 0.65;
+    s.roughness = mix(0.7, 0.36, in.gloss * mid);
     s.reflectance = 0.35;
     s.subsurface = 0.5;
     return s;

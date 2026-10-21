@@ -230,7 +230,8 @@ fn fog_in_front(dir: vec3<f32>, pixel: vec2<f32>, far: f32) -> vec4<f32> {
         let tr = exp(-height_fog_optical_depth(dir, start, end));
         if (tr < 0.9999) {
             let sun = height_fog_sun_visibility(dir, start, end, tr, frame_noise(pixel));
-            let l = pre_expose(height_fog_radiance(dir, dir * start, 1.0, sun)) * (1.0 - tr);
+            let at = height_fog_scatter_point(dir, start, end, tr);
+            let l = pre_expose(height_fog_radiance(dir, at, 1.0, sun)) * (1.0 - tr);
             fog = vec4<f32>(fog.rgb + l * fog.a, fog.a * tr);
         }
     }

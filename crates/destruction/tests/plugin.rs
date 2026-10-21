@@ -13,8 +13,8 @@ use engine_world::physics::{
     PhysicsQuery, QueryFilter, RigidBody,
 };
 use engine_world::{
-    DamageEvent, DamageKind, EditOp, EditShape, NoiseEvent, ProjectileTrace, SurfaceMaterials,
-    TerrainEdit, WorldPlugin, WorldShift,
+    DamageEvent, DamageKind, EditOp, EditShape, NoiseEvent, ProjectileTrace, SmokeEmission,
+    SurfaceMaterials, TerrainEdit, WorldPlugin, WorldShift,
 };
 use serde_json::json;
 
@@ -1100,6 +1100,33 @@ fn the_demo_starts_wrecked_and_keeps_going() {
         reinforced,
         [2],
         "bay 8's drywall has two panels up behind it"
+    );
+}
+
+#[test]
+fn the_demo_wrecks_its_aftermath_bays_without_a_cloud_or_a_bang() {
+    let mut app = app();
+    app.add_systems(Startup, |mut commands: Commands| {
+        demo::spawn_demo(&mut commands, DVec3::new(100.0, 0.0, 0.0));
+    });
+    let (mut clouds, mut bangs) = (0, 0);
+    // Cursors from before the first frame, so the startup's messages count too.
+    let mut smoke = app.world.resource::<Messages<SmokeEmission>>().get_cursor();
+    let mut noise = app.world.resource::<Messages<NoiseEvent>>().get_cursor();
+    // Before the first live step (thermite at 0.3 s).
+    for _ in 0..10 {
+        app.update();
+        clouds += smoke
+            .read(app.world.resource::<Messages<SmokeEmission>>())
+            .count();
+        bangs += noise
+            .read(app.world.resource::<Messages<NoiseEvent>>())
+            .count();
+    }
+    assert_eq!(
+        (clouds, bangs),
+        (0, 0),
+        "old damage raises no dust cloud and makes no noise"
     );
 }
 
