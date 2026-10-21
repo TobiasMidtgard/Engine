@@ -42,6 +42,7 @@ pub fn lawn_style() -> GrassStyle {
         wind_response: 0.8,
         draw_distance: 60.0,
         shadow_distance: 12.0,
+        ..Default::default()
     }
 }
 

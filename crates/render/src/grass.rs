@@ -141,6 +141,23 @@ pub struct GrassStyle {
     pub draw_distance: f32,
     /// Blades cast sun shadows up to this distance from the camera, meters (0 = never).
     pub shadow_distance: f32,
+    /// Blades grow in clumps about this far apart, meters (0 = evenly, no clumps).
+    pub clump_size: f32,
+    /// 0..1: how far blades crowd in toward their clump's center (tufts and tussocks).
+    pub clump_pull: f32,
+    /// 0..1: how much blades turn to fan out from their clump's center.
+    pub clump_fan: f32,
+    /// 0..1: how much clumps differ in height.
+    pub clump_height: f32,
+    /// 0..1: how much clumps differ in color (keep it small: a few percent reads natural).
+    pub clump_color: f32,
+    /// 0..1: how far leaning tips droop under their own weight. Scale it with gravity: about
+    /// 0.3 on Earth, less on a light world, more on a heavy one.
+    pub droop: f32,
+    /// 0..1: sheen along the blades' midribs up close (0 = matte).
+    pub gloss: f32,
+    /// Tint (× the blade's color) toward the tips: paler and yellower on most grasses.
+    pub tip_tint: [f32; 3],
 }
 
 impl Default for GrassStyle {
@@ -157,11 +174,138 @@ impl Default for GrassStyle {
             wind_response: 1.0,
             draw_distance: 70.0,
             shadow_distance: 20.0,
+            clump_size: 0.7,
+            clump_pull: 0.2,
+            clump_fan: 0.5,
+            clump_height: 0.35,
+            clump_color: 0.06,
+            droop: 0.3,
+            gloss: 0.35,
+            tip_tint: [1.35, 1.2, 0.7],
         }
     }
 }
 
 impl GrassStyle {
+    /// A temperate summer meadow: knee-high, fresh green, yellowing at the tips.
+    pub fn meadow() -> Self {
+        Self {
+            blades_per_m2: 520.0,
+            height: 0.38,
+            height_variation: 0.5,
+            width: 0.011,
+            bend: 0.38,
+            lush_color: [0.085, 0.17, 0.04],
+            dry_color: [0.26, 0.22, 0.09],
+            dryness: 0.15,
+            clump_size: 0.6,
+            clump_pull: 0.18,
+            clump_fan: 0.5,
+            clump_height: 0.35,
+            clump_color: 0.05,
+            droop: 0.3,
+            gloss: 0.35,
+            tip_tint: [1.3, 1.2, 0.75],
+            ..Default::default()
+        }
+    }
+
+    /// Savanna: tall, sparse, sun-bleached tussocks.
+    pub fn savanna() -> Self {
+        Self {
+            blades_per_m2: 260.0,
+            height: 0.85,
+            height_variation: 0.45,
+            width: 0.009,
+            bend: 0.55,
+            lush_color: [0.2, 0.19, 0.07],
+            dry_color: [0.46, 0.36, 0.17],
+            dryness: 0.7,
+            // Tussocks: blades crowded into fans, tips bleached.
+            clump_size: 0.9,
+            clump_pull: 0.6,
+            clump_fan: 0.85,
+            clump_height: 0.5,
+            clump_color: 0.08,
+            droop: 0.45,
+            gloss: 0.2,
+            tip_tint: [1.25, 1.15, 0.9],
+            ..Default::default()
+        }
+    }
+
+    /// Tundra: short, dense, olive and russet sedges.
+    pub fn tundra() -> Self {
+        Self {
+            blades_per_m2: 800.0,
+            height: 0.13,
+            height_variation: 0.4,
+            width: 0.008,
+            bend: 0.3,
+            lush_color: [0.09, 0.11, 0.04],
+            dry_color: [0.25, 0.14, 0.07],
+            dryness: 0.45,
+            // Small cushions, russet patches and russet tips.
+            clump_size: 0.45,
+            clump_pull: 0.25,
+            clump_fan: 0.6,
+            clump_height: 0.4,
+            clump_color: 0.12,
+            droop: 0.15,
+            gloss: 0.15,
+            tip_tint: [1.35, 1.0, 0.8],
+            ..Default::default()
+        }
+    }
+
+    /// Marsh: tall, upright, dark sedge and reed.
+    pub fn marsh() -> Self {
+        Self {
+            blades_per_m2: 420.0,
+            height: 0.8,
+            height_variation: 0.35,
+            width: 0.014,
+            bend: 0.18,
+            lush_color: [0.05, 0.11, 0.035],
+            dry_color: [0.22, 0.2, 0.1],
+            dryness: 0.2,
+            // Broad stands of upright, glossy blades.
+            clump_size: 1.2,
+            clump_pull: 0.2,
+            clump_fan: 0.25,
+            clump_height: 0.3,
+            clump_color: 0.05,
+            droop: 0.15,
+            gloss: 0.5,
+            tip_tint: [1.15, 1.15, 0.8],
+            ..Default::default()
+        }
+    }
+
+    /// Another world's grass: violet and teal blades, tall and upright under low gravity.
+    pub fn alien() -> Self {
+        Self {
+            blades_per_m2: 380.0,
+            height: 0.6,
+            height_variation: 0.5,
+            width: 0.012,
+            bend: 0.2,
+            lush_color: [0.12, 0.05, 0.16],
+            dry_color: [0.05, 0.16, 0.16],
+            dryness: 0.3,
+            // Low gravity: hardly any droop. Tips flushed pink.
+            clump_size: 0.8,
+            clump_pull: 0.25,
+            clump_fan: 0.6,
+            clump_height: 0.4,
+            clump_color: 0.1,
+            droop: 0.05,
+            gloss: 0.55,
+            tip_tint: [1.5, 0.9, 1.3],
+            ..Default::default()
+        }
+    }
+
     /// A ground albedo (linear RGB) that matches the meadow from afar: give it to the terrain
     /// under the field so the ground past the draw distance and between thinned-out blades
     /// reads as grass rather than bare soil.
@@ -216,12 +360,13 @@ fn full_density_distance(draw_distance: f32) -> f32 {
     (draw_distance * 0.2).clamp(4.0, 20.0)
 }
 
-/// Quads per blade at distance `d`.
+/// Quads per blade at distance `d`: enough near the camera for a smooth arch.
 fn segments_at(d: f32) -> u32 {
     match d {
-        d if d < 8.0 => 4,
-        d if d < 20.0 => 3,
-        d if d < 40.0 => 2,
+        d if d < 6.0 => 6,
+        d if d < 14.0 => 4,
+        d if d < 28.0 => 3,
+        d if d < 45.0 => 2,
         _ => 1,
     }
 }
@@ -248,6 +393,9 @@ struct GpuField {
     lush: [f32; 4],
     dry: [f32; 4],
     lod: [f32; 4],
+    clump: [f32; 4],
+    look: [f32; 4],
+    tip: [f32; 4],
 }
 
 #[repr(C)]
@@ -738,6 +886,24 @@ impl RenderFeature for GrassFeature {
                     style.wind_response.max(0.0),
                 ],
                 lod: [full, far, 0.0, 0.0],
+                clump: [
+                    style.clump_size.max(0.0),
+                    style.clump_pull.clamp(0.0, 0.95),
+                    style.clump_fan.clamp(0.0, 1.0),
+                    style.clump_height.clamp(0.0, 0.9),
+                ],
+                look: [
+                    style.clump_color.clamp(0.0, 0.5),
+                    style.droop.clamp(0.0, 1.0),
+                    style.gloss.clamp(0.0, 1.0),
+                    0.0,
+                ],
+                tip: [
+                    style.tip_tint[0].max(0.0),
+                    style.tip_tint[1].max(0.0),
+                    style.tip_tint[2].max(0.0),
+                    0.0,
+                ],
             });
         }
         self.maps.retain(|e, _| seen.contains(e));
@@ -869,6 +1035,37 @@ mod tests {
             assert!(f <= prev + 1e-6);
             prev = f;
         }
+    }
+
+    #[test]
+    fn gpu_field_matches_the_shader_struct() {
+        // Twelve vec4s, as `GrassField` in grass_common.wgsl.
+        assert_eq!(std::mem::size_of::<GpuField>(), 12 * 16);
+    }
+
+    #[test]
+    fn biome_presets_grow_clumped_grass_of_their_own() {
+        let presets = [
+            GrassStyle::meadow(),
+            GrassStyle::savanna(),
+            GrassStyle::tundra(),
+            GrassStyle::marsh(),
+            GrassStyle::alien(),
+        ];
+        for (i, p) in presets.iter().enumerate() {
+            assert!(p.height > 0.05 && p.blades_per_m2 > 0.0, "{p:?}");
+            assert!(
+                p.clump_size > 0.0 && (0.0..1.0).contains(&p.clump_pull),
+                "{p:?}"
+            );
+            assert!(p.ground_color().iter().all(|c| (0.0..1.0).contains(c)));
+            for q in &presets[i + 1..] {
+                assert_ne!(p, q);
+            }
+        }
+        // Savanna tussocks crowd tighter and stand taller than tundra cushions.
+        assert!(GrassStyle::savanna().height > 4.0 * GrassStyle::tundra().height);
+        assert!(GrassStyle::alien().droop < GrassStyle::meadow().droop);
     }
 
     #[test]
