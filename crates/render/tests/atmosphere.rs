@@ -175,3 +175,21 @@ fn from_orbit_haze_over_the_night_side_stays_dark() {
     eprintln!("orbit night side: {sea:?}");
     assert!(luma(sea) < 0.05, "the night side glows: {sea:?}");
 }
+
+#[test]
+fn twilight_sky_is_blue_overhead() {
+    // Looking straight up with the sun 4° below the horizon (civil dusk). Overhead the sky is
+    // deep blue: the light up there crossed the ozone layer edgewise, which takes out orange.
+    // With the air's coefficients taken at 680, 550 and 440 nm alone it came out purple (red
+    // above green), as did the whole dusk scene it lit.
+    let mut app = sky_app(2.0, 89.0, -4.0, 6.0);
+    let Some(img) = render(&mut app, "sky_twilight") else {
+        return;
+    };
+    let zenith = mean_rgb(&img, H / 2 - 10, H / 2 + 10);
+    eprintln!("twilight zenith: {zenith:?}");
+    assert!(
+        zenith[1] > zenith[0] * 1.2 && zenith[2] > zenith[1] * 1.8,
+        "the twilight sky overhead is not blue: {zenith:?}"
+    );
+}
