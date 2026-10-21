@@ -148,7 +148,8 @@ pub struct Aero {
     /// Skin friction along the cloth (streams flags out).
     pub friction: f32,
     /// Lift at an angle to the wind, across it (a sail drawing on a reach, a kite): peaks
-    /// with the wind 45° to the cloth. 0 for flags and curtains.
+    /// with the wind 45° to the cloth; a little on a flag keeps its ripples running. 0 for
+    /// curtains.
     pub lift: f32,
 }
 

@@ -60,6 +60,8 @@ fn app() -> App {
 fn flag(color: u32, gpu: bool) -> Cloth {
     let mut flag = Cloth::flag([1.2, 0.8], SoftMaterial::hex(color));
     flag.resolution = [16, 10];
+    // The GPU kernel has no aerodynamic lift, so both fly without it to compare like for like.
+    flag.aero_lift = 0.0;
     flag.sim.gpu = gpu;
     flag
 }

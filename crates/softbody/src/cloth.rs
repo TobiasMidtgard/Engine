@@ -133,13 +133,18 @@ impl Default for Cloth {
 }
 
 impl Cloth {
-    /// A flag of `size` on a pole along its left edge.
+    /// A flag of `size` on a pole along its left edge. Fine (6 cm cells), supple bunting that
+    /// lifts across the wind: ripples run down it in waves, as a flag flies, instead of the
+    /// whole flag swinging out stiff like a board.
     pub fn flag(size: [f32; 2], material: SoftMaterial) -> Self {
-        let res_u = ((size[0] / 0.12).round() as u32).clamp(6, 40);
-        let res_v = ((size[1] / 0.12).round() as u32).clamp(4, 30);
+        let res_u = ((size[0] / 0.06).round() as u32).clamp(6, 60);
+        let res_v = ((size[1] / 0.06).round() as u32).clamp(4, 40);
         Self {
             size,
             resolution: [res_u, res_v],
+            mass_per_m2: 0.2,
+            bend_compliance: 2e-2,
+            aero_lift: 0.8,
             material,
             sim: SimSettings {
                 prewarm_secs: 2.0,
