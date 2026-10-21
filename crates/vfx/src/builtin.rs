@@ -377,8 +377,8 @@ fn spells() -> Vec<EffectDesc> {
         light: light([1.0, 0.55, 0.2], 12_000.0, 14.0, 0.35, 0.3),
         ..effect(
             "spell.fireball",
-            "A flying fireball: a roiling ball of fire round a white-hot heart, a tail of burning \
-             gas cooling to soot behind it, sparks and a warm light. Move its entity to \
+            "A flying fireball: a roiling ball of fire round a white-hot heart, a tapering tail of \
+             burning gas trailing smoke, sparks and a warm light. Move its entity to \
              fly it.",
             None,
             vec![
@@ -421,11 +421,13 @@ fn spells() -> Vec<EffectDesc> {
                     soft: 0.1,
                     ..em("core")
                 },
-                // Burning gas shed behind it in flight, swelling, rising and cooling to soot,
-                // so the tail runs from fire at the ball to smoke further back.
+                // Burning gas shed behind it in flight, swelling and rising: dense enough to
+                // merge into one tapering flame, partly additive so it glows against a day sky,
+                // and faded out before it cools to soot, which by day reads as dark lumps. The
+                // smoke layer carries on behind it.
                 EmitterDesc {
-                    rate: 20.0,
-                    rate_per_meter: 12.0,
+                    rate: 30.0,
+                    rate_per_meter: 22.0,
                     shape: EmitShape::Sphere {
                         radius: 0.2,
                         surface: false,
@@ -436,16 +438,16 @@ fn spells() -> Vec<EffectDesc> {
                     turbulence: 3.0,
                     turbulence_scale: 0.5,
                     wind: 0.5,
-                    lifetime: [0.35, 0.8],
-                    size: [0.25, 0.6],
-                    size_over_life: c(&[(0.0, 0.7), (0.3, 1.0), (1.0, 2.0)]),
+                    lifetime: [0.3, 0.6],
+                    size: [0.35, 0.6],
+                    size_over_life: c(&[(0.0, 0.8), (0.3, 1.0), (1.0, 1.4)]),
                     rotation_deg: [-180.0, 180.0],
                     spin_deg: [-60.0, 60.0],
                     sprite: Sprite::Fireball,
                     lit: 1.0,
-                    color: fade([1.0, 0.45, 0.12], 1.0, 0.03, 0.4),
+                    color: fade([1.0, 0.45, 0.12], 0.9, 0.03, 0.12),
                     emissive: 18_000.0,
-                    additive: 0.0,
+                    additive: 0.35,
                     soft: 0.3,
                     ..em("tail")
                 },
@@ -701,8 +703,8 @@ fn spells() -> Vec<EffectDesc> {
                     ]),
                     ..em("shards")
                 },
-                // Many faint overlapping puffs, so the cold mist trails as one wisp rather
-                // than a string of separate balls.
+                // Many faint overlapping soft puffs with no shaded edge of their own, so the
+                // cold mist trails as one wisp rather than a string of separate balls.
                 EmitterDesc {
                     rate: 30.0,
                     rate_per_meter: 16.0,
@@ -712,9 +714,10 @@ fn spells() -> Vec<EffectDesc> {
                     },
                     speed: [0.1, 0.3],
                     lifetime: [0.8, 1.4],
-                    size: [0.35, 0.55],
+                    size: [0.5, 0.8],
+                    sprite: Sprite::Dust,
                     emissive: 30.0,
-                    color: fade([0.85, 0.93, 1.0], 0.05, 0.15, 0.35),
+                    color: fade([0.85, 0.93, 1.0], 0.06, 0.15, 0.5),
                     ..smoke("mist", 0.85, 0.35)
                 },
             ],

@@ -85,10 +85,11 @@ its life. `explosion.large` throws a dozen or so of them up and out, and the fir
 impact a smaller handful, with the smoke rising only once the fire has burnt through.
 
 The same sprite flies with the fireball spell: `spell.fireball` is a ball of rolling fire round
-a white-hot heart, shedding burning gas in flight that swells, rises and chars, so its tail runs
-from fire at the ball to smoke further back. `spell.frost_bolt` is a ball of cold, crackling
-light (the `plasma` sprite) on a thin bright trail, with glinting frost, tumbling shards and a
-faint mist. `--example bolts` renders both flying past side on.
+a white-hot heart, shedding burning gas in flight that merges into one tapering flame and fades
+before it chars (charred puffs read as dark lumps by day), with smoke further back.
+`spell.frost_bolt` is a ball of cold, crackling light (the `plasma` sprite) on a thin bright
+trail, with glinting frost, tumbling shards and a faint mist of soft `dust` puffs that trails as
+one wisp. `--example bolts` renders both flying past side on.
 
 The court's fountain is a jet of water, not a cloud of drops. The `jet` sprite draws a glassy
 rod rising from the nozzle, clear in the middle and mirroring the sky at its edges, streaked as
