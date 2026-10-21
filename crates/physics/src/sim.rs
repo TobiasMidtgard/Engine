@@ -645,6 +645,8 @@ pub struct JointEntry {
     /// keeps its limits): body A's rotation seen from side B (B's body space, or the world's
     /// axes when B is the world or a static body).
     pub rest: Option<Quat>,
+    /// Breaks above this torque, N·m ([`crate::BreakTorque`]).
+    pub break_torque: Option<f32>,
 }
 
 impl JointEntry {
@@ -654,7 +656,19 @@ impl JointEntry {
             created: None,
             no_contact: Vec::new(),
             rest: None,
+            break_torque: None,
         }
+    }
+
+    /// Whether this joint can break (by force or by torque). Breakable joints stay constraint
+    /// joints, whose forces the solver reports, and are never articulated.
+    pub fn breakable(&self) -> bool {
+        self.desc.break_force.is_some() || self.break_torque.is_some()
+    }
+
+    /// A breakable fixed joint, held by capped motors ([`convert::yielding`]).
+    pub fn yields(&self) -> bool {
+        self.breakable() && matches!(self.desc.kind, JointKind::Fixed)
     }
 }
 
@@ -1831,10 +1845,17 @@ impl Simulation {
             JointSide::World(_) => false,
         };
         let articulate = articulable
-            && desc.break_force.is_none()
+            && !self.joints[&entity].breakable()
             && convert::articulates(&desc.kind)
             && free(&side_a)
             && free(&side_b);
+        let entry = &self.joints[&entity];
+        let yields = entry.yields().then(|| {
+            (
+                desc.break_force.unwrap_or(f32::MAX),
+                entry.break_torque.unwrap_or(f32::MAX),
+            )
+        });
         let region = self.region_mut(region_id);
         let world = &mut region.world;
         let handle = articulate
@@ -1842,6 +1863,9 @@ impl Simulation {
             .flatten()
             .unwrap_or_else(|| {
                 let mut joint = convert::joint(&desc.kind, frames, desc.collide_connected);
+                if let Some((force, torque)) = yields {
+                    convert::yielding(&mut joint, force, torque);
+                }
                 // The joints of a free-floating group (a ragdoll on constraint joints) rub
                 // like an articulation's.
                 if floating
@@ -2151,7 +2175,7 @@ impl Simulation {
                 for e in &g.joints {
                     let j = self.joints.get_mut(e).unwrap();
                     if let Some((rid, h @ JointHandle::Impulse(_))) = j.created
-                        && j.desc.break_force.is_none()
+                        && !j.breakable()
                         && convert::articulates(&j.desc.kind)
                     {
                         j.created = None;
@@ -2382,7 +2406,7 @@ impl Simulation {
                 done.extend(j.desc.body_b);
                 if ok
                     && let Some((rid, h @ JointHandle::Impulse(_))) = j.created
-                    && j.desc.break_force.is_none()
+                    && !j.breakable()
                     && convert::articulates(&j.desc.kind)
                 {
                     j.created = None;

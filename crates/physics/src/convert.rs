@@ -192,6 +192,33 @@ pub fn articulation(
     build(kind, frames, collide_connected, false)
 }
 
+/// A breakable fixed joint's spring rate (as an acceleration per meter or radian, Rapier's
+/// `AccelerationBased` motors) and damping: 60 Hz, critically damped, as stiff as the contacts
+/// (a 0.07 mm sag under gravity).
+const YIELD_STIFFNESS: f32 =
+    (2.0 * std::f32::consts::PI * 60.0) * (2.0 * std::f32::consts::PI * 60.0);
+const YIELD_DAMPING: f32 = 2.0 * 2.0 * std::f32::consts::PI * 60.0;
+
+/// Turn a fixed joint into one that gives way at its strength: its six degrees of freedom are
+/// held by stiff motors whose force (and torque) is capped at `force` (and `torque`), instead of
+/// locked. A locked joint takes whatever a blow puts through it within the solve and only
+/// breaks afterwards, so a ball thrown at a pegged post bounced off as from a wall and the post
+/// never moved. Capped, the joint passes on at most its strength and the rest of the blow moves
+/// the body; [`crate::step`] breaks it once a motor runs at its cap (`crate::breaking`).
+pub fn yielding(joint: &mut GenericJoint, force: f32, torque: f32) {
+    joint.locked_axes = JointAxesMask::empty();
+    for (axes, cap) in [
+        ([JointAxis::LinX, JointAxis::LinY, JointAxis::LinZ], force),
+        ([JointAxis::AngX, JointAxis::AngY, JointAxis::AngZ], torque),
+    ] {
+        for axis in axes {
+            joint.set_motor_model(axis, MotorModel::AccelerationBased);
+            joint.set_motor(axis, 0.0, 0.0, YIELD_STIFFNESS, YIELD_DAMPING);
+            joint.set_motor_max_force(axis, cap);
+        }
+    }
+}
+
 /// Whether `kind` can be an articulation link (ropes and springs are constraints by nature).
 pub fn articulates(kind: &JointKind) -> bool {
     matches!(

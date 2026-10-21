@@ -258,7 +258,10 @@ impl Pen<'_> {
                         joint.data.local_frame1,
                         joint.body2(),
                         joint.data.local_frame2,
-                        Some(joint.impulses),
+                        // A yielding joint's load is in its motors (`convert::yielding`).
+                        Some(std::array::from_fn::<f32, 6, _>(|k| {
+                            joint.impulses[k] + joint.data.motors[k].impulse
+                        })),
                     )
                 }
                 JointHandle::Articulated { link, .. } => {
@@ -286,13 +289,17 @@ impl Pen<'_> {
             if !self.near(a, 0.0) {
                 continue;
             }
-            let force = impulses.map_or(0.0, |i| {
-                Vec3::new(i[0], i[1], i[2]).length() * iterations / sub_dt
-            });
-            let stress = match entry.desc.break_force {
-                Some(limit) if limit > 0.0 => (force / limit).clamp(0.0, 1.0),
+            let load = |k: usize| {
+                impulses.map_or(0.0, |i| {
+                    Vec3::new(i[k], i[k + 1], i[k + 2]).length() * iterations / sub_dt
+                })
+            };
+            let share = |load: f32, limit: Option<f32>| match limit {
+                Some(limit) if limit > 0.0 => (load / limit).clamp(0.0, 1.0),
                 _ => 0.0,
             };
+            let stress =
+                share(load(0), entry.desc.break_force).max(share(load(3), entry.break_torque));
             let gap = (a.distance(b) / 0.02).clamp(0.0, 1.0) as f32;
             let c = color::mix(color::ORANGE, color::RED, stress.max(gap));
             self.draw.cross(a, 0.08, c).depth(DepthMode::OnTop);

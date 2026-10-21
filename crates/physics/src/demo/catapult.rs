@@ -1,6 +1,7 @@
 //! A counterweight catapult: a tonne of stone in an iron-bound box drops on the short end of an
 //! oak arm, the long end whips up and over, and when the arm slams into its stop the granite
-//! ball in its cup flies on, over the yard and into a wall of empty crates.
+//! ball in its cup flies on, over the yard and into a timber watchtower (`demo::watchtower`),
+//! whose pegged joints snap and bring it down.
 //!
 //! Everything here is plain rigid bodies: the arm is one body (beam, counterweight box and cup
 //! as one compound collider, with the masses of oak, stone and iron set on it), hinged to the
@@ -48,14 +49,9 @@ pub const STOP: f32 = -45.0 * PI / 180.0;
 /// The frame's sides stand this far either side of the arm (their inner faces), meters.
 pub const FRAME_GAP: f32 = 0.55;
 
-/// The crate wall the ball is thrown at: its middle this far down range from the axle, meters,
-/// and its crates' half size.
+/// The watchtower the ball is thrown at (`demo::watchtower`): its middle this far down range
+/// from the axle, meters.
 pub const WALL_RANGE: f32 = 11.6;
-pub const CRATE: f32 = 0.3;
-/// Crates across the wall's bottom course (the courses between have one fewer) and courses
-/// up it.
-pub const WALL_WIDE: usize = 5;
-pub const WALL_HIGH: usize = 5;
 
 /// The ball's center in the arm's frame (on the beam's top face, in the cup).
 pub fn ball_in_arm() -> Vec3 {
@@ -270,27 +266,6 @@ pub(super) fn catapult(y: &mut Yard, base: DVec3) {
     let ball = y.body(ball_at, Quat::IDENTITY, c, parts);
     y.name(ball, "Catapult ball");
 
-    // The crate wall down range, laid in courses like brickwork (each crate on two below), a
-    // little apart so they stand on their own.
-    let step = 2.0 * CRATE as f64 + 0.01;
-    for row in 0..WALL_HIGH {
-        let wide = WALL_WIDE - row % 2;
-        for k in 0..wide {
-            let z = (k as f64 - (wide - 1) as f64 * 0.5) * step;
-            let at = base
-                + DVec3::new(
-                    WALL_RANGE as f64,
-                    CRATE as f64 + 0.005 + row as f64 * step,
-                    z,
-                );
-            let c = y.crate_of(
-                at,
-                Vec3::splat(CRATE),
-                Quat::IDENTITY,
-                (row * 7 + k) as u32,
-                40.0,
-            );
-            y.name(c, "Catapult target crate");
-        }
-    }
+    // The watchtower down range, a corner post toward the catapult.
+    super::watchtower::watchtower(y, base + DVec3::X * WALL_RANGE as f64);
 }

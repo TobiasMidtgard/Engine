@@ -40,6 +40,7 @@ pub mod galton;
 pub mod jenga;
 pub mod pool;
 mod settle;
+pub mod watchtower;
 
 pub(crate) use art::busy as art_busy;
 pub use floaters::{FLOAT_CYCLE_SECS, FloatTest, spawn_floaters};
@@ -233,13 +234,24 @@ pub const VIEWS: &[DemoView] = &[
     },
     DemoView {
         key: "physics_catapult",
-        name: "A counterweight catapult throwing a granite ball through a crate wall",
+        name: "A counterweight catapult bringing down a timber watchtower",
         eye: [0.0, 7.0, -11.0],
         target: [2.0, 4.0, 3.0],
         hour: 16.0,
         station: Some(Station::Catapult),
         // The ball leaves the cup at 1.0 s and tops its flight over the yard at 1.7 s.
         warmup_secs: 1.3,
+    },
+    DemoView {
+        key: "physics_watchtower",
+        name: "The catapult's ball brings down a pegged timber watchtower",
+        eye: [1.6, 3.5, -4.0],
+        target: [7.6, 2.4, 3.0],
+        hour: 16.0,
+        station: Some(Station::Catapult),
+        // The ball strikes the corner post at 2.7 s; the deck, on three posts, leans and comes
+        // down from about 6 s (`demo::watchtower`).
+        warmup_secs: 6.6,
     },
     DemoView {
         key: "physics_jenga",

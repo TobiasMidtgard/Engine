@@ -17,8 +17,8 @@ use engine_world::{
     SurfaceMaterials, Water, WorldImpulse,
 };
 use rapier3d::prelude::{
-    ActiveHooks, ColliderHandle, PhysicsWorld, Pose, QueryFilter as RFilter, RigidBodyHandle,
-    SharedShape,
+    ActiveHooks, ColliderHandle, ImpulseJointHandle, PhysicsWorld, Pose, QueryFilter as RFilter,
+    RigidBodyHandle, SharedShape,
 };
 
 use crate::buoyancy::{Surface, WATER_DENSITY};
@@ -469,7 +469,9 @@ pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>)
             continue;
         }
         sim.remove_joint(e);
-        sim.joints.insert(e, crate::sim::JointEntry::new(desc));
+        let mut entry = crate::sim::JointEntry::new(desc);
+        entry.break_torque = world.get::<crate::BreakTorque>(e).map(|b| b.0);
+        sim.joints.insert(e, entry);
     }
     if !sim.regroup.is_empty() {
         let graph = sim.joint_graph();
@@ -2968,17 +2970,24 @@ const COPIES_PER_STEP: usize = 640;
 /// Points a batch of new shapes must hold before [`build_shapes`] spreads it over threads.
 const BUILD_SPREAD_POINTS: usize = 4096;
 
-/// Remove joints whose constraint force went over their `break_force`.
+/// Remove joints whose constraint force went over their `break_force`, or whose constraint
+/// torque went over their [`crate::BreakTorque`] (as PhysX's and Unity's joints break on
+/// either).
 fn break_joints(sim: &mut Simulation, rid: RegionId, sub_dt: f32) {
     if sub_dt <= 0.0 {
         return;
     }
-    let candidates: Vec<(Entity, rapier3d::prelude::ImpulseJointHandle, f32)> = sim
+    let candidates: Vec<(Entity, ImpulseJointHandle, f32, f32, bool)> = sim
         .joints
         .iter()
         .filter_map(|(e, j)| {
             let (r, h) = j.created?;
-            (r == rid).then_some((*e, h.impulse()?, j.desc.break_force?))
+            if r != rid || !j.breakable() {
+                return None;
+            }
+            let force = j.desc.break_force.unwrap_or(f32::INFINITY);
+            let torque = j.break_torque.unwrap_or(f32::INFINITY);
+            Some((*e, h.impulse()?, force, torque, j.yields()))
         })
         .collect();
     // (The iterations the region last stepped with: fewer under load, `crate::budget`.)
@@ -2988,15 +2997,31 @@ fn break_joints(sim: &mut Simulation, rid: RegionId, sub_dt: f32) {
         .integration_parameters
         .num_solver_iterations
         .clamp(1, 64) as f32;
-    for (e, h, limit) in candidates {
+    for (e, h, force_limit, torque_limit, yields) in candidates {
         let region = sim.region_mut(rid);
         let Some(joint) = region.world.impulse_joints.get(h) else {
             continue;
         };
-        // Joint impulses are per solver iteration (each iteration is a small substep).
+        // Joint impulses are per solver iteration (each iteration is a small substep). A
+        // yielding joint's are its motors' (`convert::yielding`), each capped at its limit: it
+        // breaks when one runs at (nearly) its cap.
         let i = joint.impulses;
-        let force = Vec3::new(i[0], i[1], i[2]).length() * iterations / sub_dt;
-        if force > limit {
+        let m = &joint.data.motors;
+        let per_second = iterations / sub_dt;
+        let axis = |k: usize| (i[k] + m[k].impulse) * per_second;
+        let force = Vec3::new(axis(0), axis(1), axis(2));
+        let torque = Vec3::new(axis(3), axis(4), axis(5));
+        let (force, torque) = if yields {
+            // At the cap on one axis is a yield, whatever the others carry.
+            (
+                force.abs().max_element() / 0.98,
+                torque.abs().max_element() / 0.98,
+            )
+        } else {
+            (force.length(), torque.length())
+        };
+        if force > force_limit || torque > torque_limit {
+            let region = sim.region_mut(rid);
             region.world.impulse_joints.remove(h, true);
             sim.joints.get_mut(&e).unwrap().created = None;
             sim.broken_joints.push(e);
