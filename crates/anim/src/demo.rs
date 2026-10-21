@@ -12,7 +12,8 @@
 //!   by foot IK), then runs back on the flat, leaning into the turns.
 //! * **Horse track**: a horse walks, trots, canters and gallops around an oval; its haunches
 //!   and shoulders flex with every stride, its tail streams behind.
-//! * **Spider garden**: a giant furred tarantula climbs over boulders on eight procedural legs.
+//! * **Spider garden**: a giant furred tarantula climbs over boulders on eight procedural legs,
+//!   and stops in the open to rear up in threat.
 //! * **Car loop**: a car drives over speed bumps (springy suspension) and rolls in the corners
 //!   while its front wheels steer and every wheel spins.
 //!
@@ -136,7 +137,31 @@ pub struct DemoPath {
     grade: f32,
     #[serde(skip)]
     started: bool,
+    /// Stops along the way.
+    pub pauses: Vec<DemoPause>,
+    /// The stop under way (index into `pauses`) and seconds spent at it.
+    #[serde(skip)]
+    pause: Option<(usize, f32)>,
+    /// Each stop's parameter as eased so far.
+    #[serde(skip)]
+    pause_weights: Vec<f32>,
 }
+
+/// A stop on a [`DemoPath`]: on reaching waypoint `waypoint` the walker slows to a halt and
+/// waits `secs`, with the parameter `param` eased up to 1 while it waits and back to 0 before
+/// it moves on.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DemoPause {
+    pub waypoint: usize,
+    pub secs: f32,
+    pub param: String,
+}
+
+/// How far before and after a stop a walker slows down and gets going again, m.
+const PAUSE_EASE_M: f32 = 0.8;
+/// How long a stop's parameter takes to ease in and out, s.
+const PAUSE_PARAM_SECS: f32 = 0.6;
 
 impl Default for DemoPath {
     fn default() -> Self {
@@ -153,6 +178,9 @@ impl Default for DemoPath {
             accel: 0.0,
             grade: 0.0,
             started: false,
+            pauses: Vec::new(),
+            pause: None,
+            pause_weights: Vec::new(),
         }
     }
 }
@@ -209,6 +237,68 @@ impl DemoPath {
             total += (first.0 - last).length();
             self.samples.push((first.0, total, first.2));
         }
+    }
+
+    /// Distance along the loop at waypoint `i`, m.
+    fn waypoint_distance(&self, i: usize) -> f32 {
+        self.samples.get(i * 24).map_or(0.0, |s| s.1)
+    }
+
+    /// Move along the loop for `dt` seconds, slowing into each stop, waiting there and picking
+    /// up again after it; returns the speed, m/s.
+    fn advance(&mut self, dt: f32) -> f32 {
+        let len = self.samples.last().map_or(0.0, |s| s.1).max(1e-3);
+        if let Some((i, t)) = self.pause {
+            let t = t + dt;
+            if t < self.pauses[i].secs {
+                self.pause = Some((i, t));
+                return 0.0;
+            }
+            self.pause = None;
+        }
+        let (_, _, base) = self.at(self.distance);
+        let d = self.distance.rem_euclid(len);
+        // Slow down into a stop and pick up again after it.
+        let mut ease = 1.0f32;
+        for p in &self.pauses {
+            let at = self.waypoint_distance(p.waypoint);
+            let ahead = (at - d).rem_euclid(len);
+            let behind = (d - at).rem_euclid(len);
+            let near = ahead.min(behind) / PAUSE_EASE_M;
+            ease = ease.min(0.25 + 0.75 * near.clamp(0.0, 1.0).powf(0.7));
+        }
+        let speed = base * self.speed * ease;
+        let step = speed * dt;
+        let reached = self.pauses.iter().position(|p| {
+            let ahead = (self.waypoint_distance(p.waypoint) - d).rem_euclid(len);
+            ahead > 1e-4 && ahead <= step
+        });
+        match reached {
+            Some(i) => {
+                let ahead = (self.waypoint_distance(self.pauses[i].waypoint) - d).rem_euclid(len);
+                self.distance += ahead;
+                self.pause = Some((i, 0.0));
+            }
+            None => self.distance += step,
+        }
+        speed
+    }
+
+    /// Ease each stop's parameter toward 1 while the walker waits there (until near the end
+    /// of the wait) and toward 0 otherwise; returns (name, value) pairs.
+    fn pause_params(&mut self, dt: f32) -> Vec<(String, f32)> {
+        self.pause_weights.resize(self.pauses.len(), 0.0);
+        let k = smoothing(dt, PAUSE_PARAM_SECS * 0.3);
+        let mut out = Vec::with_capacity(self.pauses.len());
+        for (i, p) in self.pauses.iter().enumerate() {
+            let on = self
+                .pause
+                .is_some_and(|(j, t)| j == i && t < p.secs - PAUSE_PARAM_SECS);
+            let w = &mut self.pause_weights[i];
+            *w += (f32::from(u8::from(on)) - *w) * k;
+            out.push((p.param.clone(), *w));
+        }
+        out
     }
 
     /// Position, direction and speed at a distance along the loop.
@@ -1019,6 +1109,14 @@ pub const VIEWS: &[DemoView] = &[
         at: 6.02,
     },
     DemoView {
+        key: "paddock_spider_threat",
+        name: "The tarantula rears up in threat, front legs high and fangs out",
+        eye: [17.3, 0.75, 10.5],
+        target: [16.0, 0.5, 12.4],
+        hour: 15.0,
+        at: 21.5,
+    },
+    DemoView {
         key: "paddock_dog_trot",
         name: "Dog trotting, its coat in the sun",
         eye: [-4.6, 0.7, 10.0],
@@ -1689,6 +1787,12 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     let spider_e = spawn_spider(world, Transform::from_translation(at(8.0, 0.0, 12.0)));
     world.entity_mut(spider_e).insert(DemoPath {
         effort_speed: 2.5,
+        // On the far side of the garden, in the open, it stops and rears up in threat.
+        pauses: vec![DemoPause {
+            waypoint: 5,
+            secs: 5.0,
+            param: "threat".into(),
+        }],
         ..DemoPath::new(
             origin,
             vec![
@@ -1807,9 +1911,8 @@ fn demo_path_system(
         if path.samples.len() < 2 {
             continue;
         }
-        let (_, _, speed) = path.at(path.distance);
-        let speed = speed * path.speed;
-        path.distance += speed * dt;
+        let speed = path.advance(dt);
+        let paused = path.pause_params(dt);
         let (p, dir, _) = path.at(path.distance);
         let probe = GroundProbe {
             ground: &ground,
@@ -1874,6 +1977,9 @@ fn demo_path_system(
                 "move_effort",
                 (speed / path.effort_speed.max(0.1)).clamp(0.0, 1.0),
             );
+            for (name, value) in paused {
+                params.set(&name, value);
+            }
         }
     }
 }
@@ -1953,5 +2059,54 @@ mod tests {
         // Speeds follow the waypoints.
         let (_, _, s) = path.at(0.0);
         assert!((s - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_walker_slows_into_a_stop_waits_there_and_moves_on() {
+        let mut path = DemoPath {
+            pauses: vec![DemoPause {
+                waypoint: 1,
+                secs: 3.0,
+                param: "threat".into(),
+            }],
+            ..DemoPath::new(
+                DVec3::ZERO,
+                vec![
+                    [0.0, 0.0, 1.0],
+                    [10.0, 0.0, 1.0],
+                    [10.0, 10.0, 1.0],
+                    [0.0, 10.0, 1.0],
+                ],
+            )
+        };
+        path.length();
+        let stop = path.waypoint_distance(1);
+        let dt = 1.0 / 60.0;
+        let mut slowest_before = f32::MAX;
+        let mut held = 0.0;
+        let mut most = 0.0f32;
+        let mut t = 0.0;
+        while t < 30.0 {
+            let waiting = path.pause.is_some();
+            let speed = path.advance(dt);
+            let w = path.pause_params(dt)[0].1;
+            most = most.max(w);
+            if path.pause.is_some() {
+                held += dt;
+                assert!((path.distance - stop).abs() < 1e-4);
+                if waiting {
+                    assert_eq!(speed, 0.0);
+                }
+            } else if path.distance < stop && stop - path.distance < 0.3 {
+                slowest_before = slowest_before.min(speed);
+            }
+            t += dt;
+        }
+        // It eased down before stopping, waited the full stop once and went on round.
+        assert!(slowest_before < 0.6, "{slowest_before}");
+        assert!((held - 3.0).abs() < 0.05, "held {held}");
+        assert!(most > 0.95, "the stop's parameter only reached {most}");
+        assert!(path.distance > stop + 5.0, "{}", path.distance);
+        assert!(path.pause_params(dt)[0].1 < 0.05);
     }
 }

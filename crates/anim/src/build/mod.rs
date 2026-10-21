@@ -73,6 +73,20 @@ impl<'a> PoseBuilder<'a> {
         self
     }
 
+    /// Rotate `bone` by `q` in its rest frame.
+    pub fn turn(&mut self, bone: &'static str, q: Quat) -> &mut Self {
+        let rest = self.rest(bone);
+        self.out.push((
+            bone,
+            Xf {
+                t: Vec3::ZERO,
+                r: rest.r * q,
+                s: Vec3::ONE,
+            },
+        ));
+        self
+    }
+
     /// Rotate and move `bone` (offset from its rest position, parent space).
     pub fn rot_move(
         &mut self,

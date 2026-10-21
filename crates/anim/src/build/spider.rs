@@ -7,13 +7,18 @@
 //! with a wave running from the back legs forward, each coxa yawing toward its foot; the
 //! abdomen bobs with the steps and lags on a spring. The idle clip works the palps and the
 //! chelicerae and breathes, and keeps doing so while the legs walk.
+//!
+//! Brought to a halt, it can rear up in threat (the `threat` parameter, 0..1; ease it): the
+//! front of the body tips up, the first two pairs of legs come off the ground (they are
+//! [`GaitLeg::release`]d by the clip's `release_front` curve) and rise high and wide, the
+//! palps lift and the fangs unfold, while the back legs stay planted.
 
 use engine_core::prelude::*;
 
 use super::sdf::{Body, Paint, Shape};
 use super::{PoseBuilder, bone, cycle_sin};
 use crate::clip::AnimationClip;
-use crate::graph::{AnimGraph, NodeDef};
+use crate::graph::{AnimGraph, BoneMaskDef, NodeDef, Weight};
 use crate::procedural::gait::{FootKind, GaitLeg, GaitSway, LegStyle, LeggedGait};
 use crate::procedural::spring::SpringChainDef;
 use crate::skeleton::Skeleton;
@@ -31,6 +36,39 @@ const BODY_HEIGHT: f32 = 0.3;
 /// Height of a planted leg tip above the ground, meters.
 const SOLE: f32 = 0.02;
 const SIDE: [&str; 2] = ["l", "r"];
+/// The first two legs on each side, `[side][leg]`: coxa, femur, tibia and tarsus.
+const FRONT_LEGS: [[[&str; 4]; 2]; 2] = [
+    [
+        [
+            "leg_l1_coxa",
+            "leg_l1_femur",
+            "leg_l1_tibia",
+            "leg_l1_tarsus",
+        ],
+        [
+            "leg_l2_coxa",
+            "leg_l2_femur",
+            "leg_l2_tibia",
+            "leg_l2_tarsus",
+        ],
+    ],
+    [
+        [
+            "leg_r1_coxa",
+            "leg_r1_femur",
+            "leg_r1_tibia",
+            "leg_r1_tarsus",
+        ],
+        [
+            "leg_r2_coxa",
+            "leg_r2_femur",
+            "leg_r2_tibia",
+            "leg_r2_tarsus",
+        ],
+    ],
+];
+/// The curve that frees the front legs from the ground.
+const RELEASE_FRONT: &str = "release_front";
 
 fn leg_name(side: usize, i: usize, part: &str) -> String {
     format!("leg_{}{}_{part}", SIDE[side], i + 1)
@@ -448,6 +486,11 @@ pub fn gait() -> LeggedGait {
                 foot_size: [0.04, 0.07],
                 sole: SOLE,
                 stance_offset: Vec3::ZERO,
+                release: if leg < 2 {
+                    RELEASE_FRONT.into()
+                } else {
+                    String::new()
+                },
             });
         }
     }
@@ -509,14 +552,77 @@ fn idle(s: &Skeleton) -> AnimationClip {
     })
 }
 
+/// Threat: the front of the body tips up and rises on the back legs, the abdomen hangs low
+/// behind, the first two pairs of legs lift high and wide (the first pair highest, the knees
+/// opened out so the dark legs show their orange bands), the palps rise and the fangs swing
+/// down out of their sheaths. The raised legs wave slowly and everything held up trembles.
+fn threat(s: &Skeleton) -> AnimationClip {
+    AnimationClip::from_fn("spider_threat", 3.0, 91, true, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let tau = std::f32::consts::TAU;
+        let wave = cycle_sin(ph * 2.0);
+        let quiver = (ph * 27.0 * tau).sin();
+        let breath = cycle_sin(ph * 3.0);
+        p.rot_move(
+            "body",
+            Vec3::new(0.0, 0.07, 0.03),
+            18.0 + 1.5 * wave + 0.3 * quiver,
+            0.0,
+            0.0,
+        )
+        .rot("abdomen", -14.0 + 1.5 * breath, 0.0, 0.0);
+        // Femur, knee (patella and tibia) and foot lift for the first and second pairs: the
+        // femurs rise near upright with the body's tilt, the knees open so the first pair's
+        // lower legs point up and out ahead and the second pair's reach out level.
+        const LIFT: [[f32; 3]; 2] = [[16.0, 40.0, 8.0], [10.0, 24.0, 6.0]];
+        for (side, legs) in FRONT_LEGS.iter().enumerate() {
+            for (leg, [coxa, femur, tibia, tarsus]) in legs.iter().enumerate() {
+                // Lift about the horizontal across the leg (each joint's axis at rest).
+                let d = leg_dir(side, leg);
+                let across = d.cross(Vec3::Y).normalize();
+                // The two sides wave out of step; the first pair spreads a little wider.
+                let sway = if side == 0 { wave } else { -wave };
+                let [femur_deg, knee_deg, foot_deg] = LIFT[leg];
+                let spread: f32 = if leg == 0 { -10.0 } else { 0.0 };
+                let out = if side == 0 { 1.0 } else { -1.0 };
+                let lift = |deg: f32| Quat::from_axis_angle(across, deg.to_radians());
+                p.turn(coxa, Quat::from_rotation_y((out * spread).to_radians()))
+                    .turn(femur, lift(femur_deg + 4.0 * sway + 0.6 * quiver))
+                    .turn(tibia, lift(knee_deg - 3.0 * sway))
+                    .turn(tarsus, lift(foot_deg + 2.0 * sway));
+            }
+        }
+        // Palps up beside the jaws, the chelicerae raised and the fangs unfolded.
+        p.rot("palp_l_femur", 40.0 + 3.0 * wave, 6.0, 0.0)
+            .rot("palp_l_tibia", 16.0, 0.0, 0.0)
+            .rot("palp_r_femur", 40.0 - 3.0 * wave, -6.0, 0.0)
+            .rot("palp_r_tibia", 16.0, 0.0, 0.0)
+            .rot("chelicera_l", 16.0, 0.0, 0.0)
+            .rot("chelicera_r", 16.0, 0.0, 0.0)
+            .rot("fang_l", 58.0 + 2.0 * quiver, 0.0, 0.0)
+            .rot("fang_r", 58.0 - 2.0 * quiver, 0.0, 0.0);
+        p.take()
+    })
+    .with_curve(RELEASE_FRONT, 2, |_| 1.0)
+}
+
 pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
-    vec![idle(s)]
+    vec![idle(s), threat(s)]
 }
 
 pub fn graph() -> AnimGraph {
     AnimGraph {
         name: GRAPH.into(),
-        root: NodeDef::clip("spider_idle"),
+        root: NodeDef::Layer {
+            base: Box::new(NodeDef::clip("spider_idle")),
+            overlay: Box::new(NodeDef::clip("spider_threat")),
+            mask: BoneMaskDef {
+                bones: vec!["body".into()],
+                include_children: true,
+            },
+            weight: Weight::param("threat"),
+            additive: false,
+        },
     }
 }
 
@@ -553,6 +659,51 @@ mod tests {
             .map(|v| v.position.y)
             .fold(f32::MAX, f32::min);
         assert!(lowest.abs() < 0.01, "legs end at {lowest}");
+    }
+
+    #[test]
+    fn in_threat_the_front_legs_rise_and_the_fangs_unfold_over_planted_back_legs() {
+        let s = skeleton();
+        let clip = threat(&s);
+        let binding = crate::clip::ClipBinding::new(&clip, &s);
+        let mut local = s.rest.clone();
+        clip.sample(0.0, &binding, &mut local);
+        let mut model = s.rest_model.clone();
+        s.to_model(&local, &mut model);
+        let at = |name: &str| model[s.bone(name)].t;
+        let rest = |name: &str| s.rest_model[s.bone(name)].t;
+        for side in 0..2 {
+            // The first pair's feet go up above the knees' rest height, out ahead of the
+            // jaws; the second pair's come well off the ground.
+            let first = at(&leg_name(side, 0, "tip"));
+            assert!(
+                first.y > rest(&leg_name(side, 0, "tibia")).y + 0.1,
+                "{first}"
+            );
+            assert!(first.z < rest("chelicera_l").z - 0.3, "{first}");
+            let second = at(&leg_name(side, 1, "tip"));
+            assert!(second.y > 0.3, "{second}");
+            // The back legs are left to the gait.
+            for leg in 2..4 {
+                let name = leg_name(side, leg, "femur");
+                assert!(
+                    clip.tracks.iter().all(|t| t.bone != name),
+                    "{name} animated"
+                );
+            }
+            // The fang swings down out of its sheath (folded back along the underside at rest).
+            let fang = model[s.bone(&format!("fang_{}", SIDE[side]))];
+            let body = model[s.bone("body")];
+            let along = body.r.inverse() * (fang.r * Vec3::new(0.0, -0.016, 0.065));
+            assert!(along.y < -0.05, "fang points along {along}");
+        }
+        // The front of the body tips up.
+        let body = model[s.bone("body")];
+        assert!((body.r * Vec3::NEG_Z).y > 0.25);
+        assert_eq!(clip.curve(RELEASE_FRONT, 1.0), Some(1.0));
+        let gait = gait();
+        let released: Vec<_> = gait.legs.iter().filter(|l| !l.release.is_empty()).collect();
+        assert_eq!(released.len(), 4);
     }
 
     #[test]

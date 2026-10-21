@@ -578,6 +578,7 @@ pub fn gait(scale: f32) -> LeggedGait {
                 } else {
                     Vec3::new(0.0, 0.0, -0.04 * s)
                 },
+                ..Default::default()
             });
         }
     }

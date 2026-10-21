@@ -72,6 +72,11 @@ pub struct GaitLeg {
     /// that stands behind its hip strides from under the hip, so it reaches as far back as
     /// forward.
     pub stance_offset: Vec3,
+    /// A curve (empty: none) that frees the leg from the ground: at 1 the leg takes the
+    /// animated pose (a tarantula's front legs raised in threat), between it blends there
+    /// from the planted pose. The foot stays where it was planted and the leg comes back
+    /// down onto it as the curve falls.
+    pub release: String,
 }
 
 impl Default for GaitLeg {
@@ -85,6 +90,7 @@ impl Default for GaitLeg {
             foot_size: [0.1, 0.25],
             sole: 0.05,
             stance_offset: Vec3::ZERO,
+            release: String::new(),
         }
     }
 }
@@ -605,11 +611,23 @@ pub fn step_gait(
     }
 
     // Legs.
+    let released: Vec<f32> = gait
+        .legs
+        .iter()
+        .map(|l| {
+            if l.release.is_empty() {
+                0.0
+            } else {
+                animator.curve(&l.release).clamp(0.0, 1.0)
+            }
+        })
+        .collect();
     for (i, leg) in legs.iter().enumerate() {
         let def = &gait.legs[i];
         let target = to_model(gt, rt.feet[i].pos);
         let swing = rt.feet[i].swing;
         let normal_model = (gt.rotation().conjugate() * rt.feet[i].normal).normalize();
+        let animated: Vec<Quat> = leg.bones.iter().map(|&b| animator.local[b].r).collect();
         let mut edit = animator.edit();
         match (def.style, leg.bones.as_slice()) {
             (LegStyle::TwoBone, &[a, b, c, ..]) => {
@@ -685,6 +703,15 @@ pub fn step_gait(
             if angle > 1e-3 {
                 edit.rotate_model(leg.end, Quat::from_axis_angle(axis, angle.min(0.6)));
             }
+        }
+        // A released leg goes over to its animated pose.
+        let w = released[i];
+        if w > 0.0 {
+            for (&b, &r) in leg.bones.iter().zip(&animated) {
+                edit.local[b].r = edit.local[b].r.slerp(r, w).normalize();
+            }
+            edit.skeleton
+                .update_model_subtree(edit.local, edit.model, leg.bones[0]);
         }
     }
     gait_outputs(gait, params, dt, legs);

@@ -28,7 +28,8 @@ compresses and stretches.
   two-bone, yaw-root (spiders), hoofed (in the swing the cannon folds and the hoof curls back
   behind the fetlock; a planted foot far behind tips the cannon on its toe) and scapular (a
   hoofed leg under a rocking shoulder blade, for dogs and cats); `stance_offset` centers a
-  leg's stride, so hind legs stride from under the hip. `VehicleRig` gives cars sprung
+  leg's stride, so hind legs stride from under the hip, and a leg's `release` curve frees it
+  from the ground for the animated pose (a tarantula's raised front legs). `VehicleRig` gives cars sprung
   suspension, body roll and pitch from acceleration, steering and wheel spin.
   `SpringChains` make tails, manes and ponytails lag and swing.
 - **Muscles.** `MuscleRig` activates each muscle from joint angles, clip curves (`effort`,
@@ -198,7 +199,9 @@ belly, drop ears and an otter tail on springs, a furred golden coat, and a rotar
 whose speeds and stride rate scale with its size. The spider is a giant red-knee tarantula
 from code ([`build::spider`](src/build/spider.rs)): a tan-rimmed carapace with fovea and
 grooves, eight eyes, furred chelicerae over folded fangs, tapping pedipalps, a long-haired
-abdomen on a spring, and stout hairy legs with orange knees. The paddock's props wear the
+abdomen on a spring, and stout hairy legs with orange knees; the `threat` parameter rears
+it up with its front legs raised and fangs out. A `DemoPath` can stop at waypoints
+(`DemoPause`), easing a parameter up while it waits. The paddock's props wear the
 renderer's generated materials (planks, concrete, sand, rock), and the spider climbs
 [`build::rock`](src/build/rock.rs) boulders whose flat tops are its walkable boxes.
 
@@ -213,7 +216,7 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 | Sparring partner | A lifter in a boxer's guard (lead foot and fist forward, elbows tucked, bouncing lightly) takes a jab to the chin (head snaps back), a hook to the side of the head, a blow to the stomach (folds over it) and a shove on the back of a shoulder, flinching away from each and recovering to the guard without being shoved off his feet (`paddock_flinch`) |
 | Horse oval | A textured horse walks, trots, canters and gallops by speed; in the swing the knees fold, the hocks bend and the hooves curl back behind the fetlocks; haunches and shoulders flex with each stride; the mane rides the neck and the tail streams |
 | Dog run | A furred Labrador walks off, trots, canters out of a turn and gallops down the far straight, the spine flexing with each stride, ears and tail swinging; it pants as it goes (`paddock_dog_trot`, `paddock_dog`) |
-| Spider garden | A furred red-knee tarantula climbs over boulders in alternating sets of legs, a wave running from the back legs forward; its palps tap, its jaws work and its abdomen sways (`paddock_spider`) |
+| Spider garden | A furred red-knee tarantula climbs over boulders in alternating sets of legs, a wave running from the back legs forward; its palps tap, its jaws work and its abdomen sways (`paddock_spider`). On the far side it slows to a stop and rears up in threat: the front of the body tips up on the planted back legs, the first pair of legs rises high and the second reaches out level, the palps lift and the fangs unfold, then it settles back onto its footholds and walks on (`paddock_spider_threat`) |
 | Car loop | A concept car: suspension over speed bumps, roll in corners, steering and spinning wheels with the brake calipers held still |
 | Parked car | A second concept car inside the loop swings its doors open on their front hinges, holds, and shuts them with a bounce on the latch |
 | Stunt yard | A stuntman climbs the stairs to a deck, sprints across and goes off the edge braced, arms out and knees bent; he goes limp on the crash mat with the run's momentum, lies still with a slack face, gets up off his back or front with a hand and a knee planted, and walks back round (`paddock_stunt`, `paddock_stunt_down`, `paddock_stunt_up`; needs the physics module) |
