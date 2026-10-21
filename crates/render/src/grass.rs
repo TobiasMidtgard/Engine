@@ -864,6 +864,11 @@ impl RenderFeature for GrassFeature {
         } else {
             0
         };
+        // Snow on the ground by the camera, for the shadow pass (which can't read the frame's
+        // surface weather; the scene pass reads it under every blade).
+        let snow_here = world
+            .get_resource::<engine_world::SurfaceLayers>()
+            .map_or(0.0, |l| l.grid.sample(view.origin).snow_m.max(0.0));
         let mut seen = Vec::new();
         let mut q = world.query::<(
             Entity,
@@ -1023,7 +1028,7 @@ impl RenderFeature for GrassFeature {
                     style.clump_color.clamp(0.0, 0.5),
                     style.droop.clamp(0.0, 1.0),
                     style.gloss.clamp(0.0, 1.0),
-                    0.0,
+                    snow_here,
                 ],
                 tip: [
                     style.tip_tint[0].max(0.0),
