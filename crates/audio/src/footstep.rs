@@ -5,7 +5,8 @@
 //! ([`crate::samples`]), a footstep plays one of them and the layers only add what the
 //! recording lacks ([`FootstepSound::with_sample`]); without them the layers make the whole
 //! step. Grass rustles, gravel rattles (each pebble a tiny
-//! resonator), snow crunches as it compacts (and squeaks when it is colder than about −5 °C),
+//! resonator), snow crunches as it compacts (and squeaks in the cold: packed snow below
+//! 0 °C, any snow below about −4 °C),
 //! mud squelches through a closing resonance and pops on lift-off with a suction bubble,
 //! puddles splash with bubbles that ring at their Minnaert pitch, planks knock with wood
 //! modes, metal grates ring. Every step is different (seeded randomness), so a walk never
@@ -18,7 +19,8 @@
 //!
 //! Worn paths ([`engine_world::GroundWear`]) change it too: as wear passes about 0.5 a
 //! meadow's step turns to the dull thud and light grit of bare earth ([`WornPath`]), mud once
-//! the ground is wet, and trodden snow packs into a tight, squeaky crunch.
+//! the ground is wet, and trodden snow packs into a tight crunch that squeaks when it is
+//! cold.
 
 use std::collections::BTreeMap;
 
@@ -61,7 +63,8 @@ pub struct SurfaceSound {
     pub ring: f32,
     /// Fine granular hiss (sand).
     pub hiss: f32,
-    /// Squeak of very cold snow (set automatically below about −5 °C).
+    /// Squeak of cold snow: a surface's own (packed snow's) sounds from 0 °C down, full at
+    /// −6 °C ([`cold_squeak`]), and any snow squeaks below about −4 °C (set automatically).
     pub squeak: f32,
     /// 0 dull .. 1 bright: filters and grain resonances.
     pub brightness: f32,
@@ -172,13 +175,16 @@ impl SurfaceSound {
             "gravel" => surface!(thump: 0.55, grit: 1.0, crunch: 0.2, scuff: 0.2, brightness: 0.6),
             "ash" => surface!(thump: 0.5, crackle: 0.6, hiss: 0.4, grit: 0.2, brightness: 0.4),
             // Bare earth trodden hard: a fuller, duller thud than loose dirt, a firmer heel, a
-            // scrape as the toe rolls off and only a little grit.
+            // scrape as the toe rolls off and only a little grit. Levelled 1 dB under grass
+            // (K-weighted, as recordings are levelled, for the reference walker): its energy
+            // sits low, under 150 Hz, so unweighted it still measures about 2 dB over.
             "path" => surface!(
                 thump: 1.0, click: 0.12, scuff: 0.4, grit: 0.2, brightness: 0.4, pitch: 0.95,
-                firmness: 0.6, gain_db: -1.0
+                firmness: 0.6, gain_db: -3.0
             ),
-            // Snow trodden into a track: a short, tight crunch, higher and squeakier than
-            // powder's long soft one, on a firmer base.
+            // Snow trodden into a track: a short, tight crunch, higher than powder's long
+            // soft one, on a firmer base, and a squeak once it is below freezing
+            // ([`cold_squeak`]).
             "packed_snow" => surface!(
                 thump: 0.5, click: 0.2, scuff: 0.2, crunch: 0.65, squeak: 0.2, brightness: 0.8,
                 pitch: 1.15, firmness: 0.8, gain_db: -1.5
@@ -346,6 +352,9 @@ impl SurfaceSound {
             self.suction *= 1.0 - f;
             self.splash *= 1.0 - f;
         }
+        // Snow squeaks only when it is cold: packed snow's squeak fades out toward 0 °C (none
+        // in mild weather), and any snow squeaks below about -4 °C.
+        self.squeak *= cold_squeak(temperature_c);
         if self.crunch > 0.0 && temperature_c < -4.0 {
             self.squeak = self
                 .squeak
@@ -360,6 +369,12 @@ impl SurfaceSound {
         }
         self
     }
+}
+
+/// How much of a surface's own squeak (packed snow's) sounds at `temperature_c`: all of it
+/// from -6 °C down, none from 0 °C up.
+pub fn cold_squeak(temperature_c: f32) -> f32 {
+    smooth(0.0, -6.0, temperature_c)
 }
 
 pub(crate) fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
@@ -1189,27 +1204,47 @@ impl Modes {
     }
 }
 
+/// Cold snow's squeak: crystals sticking and slipping as they are pressed, a short rough
+/// chirp. Mostly noise in a narrow band around 0.7-1.4 kHz (a new band each strike), with a
+/// little jittery tone and stick-slip roughness on top, so it never sounds like an
+/// oscillator.
 struct Squeak {
     phase: f32,
     f0: f32,
+    f: f32,
     env: Env,
     wobble: Biquad,
-    bp: Biquad,
+    rough: Biquad,
+    band: Biquad,
+    band2: Biquad,
 }
 
 impl Squeak {
     fn new(fs: f32, rng: &mut Noise) -> Self {
+        let f0 = rng.range(700.0, 1_400.0);
         Self {
             phase: 0.0,
-            f0: rng.range(650.0, 1_150.0),
+            f0,
+            f: f0,
             env: Env::default(),
-            wobble: Biquad::lowpass(fs, 18.0, 0.7),
-            bp: Biquad::bandpass(fs, 1_500.0, 0.8),
+            wobble: Biquad::lowpass(fs, 45.0, 0.7),
+            rough: Biquad::lowpass(fs, 160.0, 0.7),
+            band: Biquad::bandpass(fs, f0, 3.5),
+            band2: Biquad::bandpass(fs, f0 * 2.1, 4.0),
         }
     }
 
-    fn strike(&mut self, fs: f32, s: f32, dur: f32) {
-        self.env.trigger(fs, s, dur * 0.7, 0.12);
+    /// `dur` sets the chirp's length (s); every strike lands at a slightly different pitch.
+    fn strike(&mut self, fs: f32, s: f32, dur: f32, rng: &mut Noise) {
+        self.f = self.f0 * rng.range(0.85, 1.18);
+        self.band = Biquad::bandpass(fs, self.f, 3.5);
+        self.band2 = Biquad::bandpass(fs, self.f * rng.range(1.9, 2.3), 4.0);
+        self.env.trigger(
+            fs,
+            s,
+            dur * rng.range(0.1, 0.2),
+            dur * rng.range(0.35, 0.55),
+        );
     }
 
     #[inline]
@@ -1218,11 +1253,16 @@ impl Squeak {
         if e < 1e-5 {
             return 0.0;
         }
-        let f = self.f0 * (1.0 + 6.0 * self.wobble.process(rng.white()));
+        let n = rng.white();
+        // Narrow-band noise (gain makes up for the band's share of white noise's power).
+        let band = (self.band.process(n) + 0.5 * self.band2.process(n)) * 9.5;
+        // A faint tone that wanders fast (about 9 % rms).
+        let f = self.f * (1.0 + 3.0 * self.wobble.process(rng.white()));
         self.phase = (self.phase + f / fs).fract();
-        let p = self.phase * std::f32::consts::TAU;
-        let x = p.sin() + 0.5 * (2.0 * p).sin() + 0.33 * (3.0 * p).sin();
-        self.bp.process(x) * e
+        let tone = (self.phase * std::f32::consts::TAU).sin() * 0.8;
+        // Stick-slip: the level stutters.
+        let rough = (0.4 + 6.0 * self.rough.process(rng.white()).abs()).min(1.6);
+        (band + tone) * rough * e
     }
 
     fn active(&self) -> bool {
@@ -1332,6 +1372,10 @@ impl FootstepSound {
                 s.scuff *= 0.3;
             }
             ContactKind::Foot => {}
+        }
+        if over_take {
+            // A recorded step has its own crunch: the squeak stays under it.
+            s.squeak *= 0.4;
         }
         let b = s.brightness;
         let bright = 0.7 + 0.6 * b;
@@ -1532,7 +1576,7 @@ impl FootstepSound {
         if s.crunch > 0.0 {
             self.crunch.strike(fs, k, grain_scale);
             if s.squeak > 0.0 {
-                self.squeak.strike(fs, k, 0.13 * grain_scale);
+                self.squeak.strike(fs, k, 0.13 * grain_scale, rng);
             }
         }
         if s.crackle > 0.0 {
@@ -1651,7 +1695,7 @@ impl Sound for FootstepSound {
                 y += self.ring.next(rng) * s.ring * 0.1;
             }
             if s.squeak > 0.0 {
-                y += self.squeak.next(fs, rng) * s.squeak * 0.15;
+                y += self.squeak.next(fs, rng) * s.squeak * 0.4;
             }
             *o = self.hp.process(y) * self.gain;
             if let Some(sample) = &mut self.sample {
@@ -1850,12 +1894,22 @@ mod tests {
     /// A walking step on default material `name` worn `wear` deep in state `cell`, as
     /// `play_footsteps` builds it.
     fn worn(name: &str, wear: f32, cell: &SurfaceCell) -> SurfaceSound {
+        worn_at(name, wear, cell, 12.0)
+    }
+
+    /// [`worn`] at `temperature_c`.
+    fn worn_at(name: &str, wear: f32, cell: &SurfaceCell, temperature_c: f32) -> SurfaceSound {
         let mats = SurfaceMaterials::default();
         let m = mats.get(mats.id(name).unwrap());
         let surfaces = FootstepSurfaces::default();
         let w = surfaces.worn_path(m, wear, cell);
-        w.apply(&surfaces.get(m))
-            .with_state(cell, w.absorbency(m.absorbency), 12.0, 0.0, &w.snow)
+        w.apply(&surfaces.get(m)).with_state(
+            cell,
+            w.absorbency(m.absorbency),
+            temperature_c,
+            0.0,
+            &w.snow,
+        )
     }
 
     fn render_of(s: SurfaceSound, seed: u64) -> Vec<f32> {
@@ -1985,8 +2039,8 @@ mod tests {
     #[test]
     fn trodden_snow_packs_into_a_tight_squeaky_crunch() {
         let dry = SurfaceCell::default();
-        let powder = worn("snow", 0.0, &dry);
-        let packed = worn("snow", 1.0, &dry);
+        let powder = worn_at("snow", 0.0, &dry, -8.0);
+        let packed = worn_at("snow", 1.0, &dry, -8.0);
         assert!(packed.crunch < powder.crunch && packed.squeak > 0.1);
         assert!(packed.firmness > 0.5 && packed.thump > powder.thump);
         // Shorter, with its crunch higher.
@@ -2000,7 +2054,7 @@ mod tests {
             snow_m: 0.2,
             ..Default::default()
         };
-        let on_path = worn("grass", 1.0, &covered);
+        let on_path = worn_at("grass", 1.0, &covered, -8.0);
         let on_meadow = worn("grass", 0.0, &covered);
         assert!(
             on_path.squeak > 0.1 && on_path.firmness > 0.5,
@@ -2009,6 +2063,76 @@ mod tests {
         assert_eq!(
             on_meadow.crunch,
             SurfaceSound::preset("snow").unwrap().crunch
+        );
+    }
+
+    /// Highest normalized autocorrelation at a lag of 0.6-2 ms (a 500-1700 Hz period): near
+    /// 1 for a steady tone, low for noise.
+    fn tonality(x: &[f32]) -> f32 {
+        let e: f32 = x.iter().map(|v| v * v).sum();
+        if e <= 0.0 {
+            return 0.0;
+        }
+        ((0.0006 * FS) as usize..(0.002 * FS) as usize)
+            .map(|lag| x.iter().zip(&x[lag..]).map(|(a, b)| a * b).sum::<f32>() / e)
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn packed_snow_squeaks_only_in_the_cold_and_sounds_like_snow_not_a_tone() {
+        let dry = SurfaceCell::default();
+        let squeak = |t: f32| worn_at("snow", 1.0, &dry, t).squeak;
+        // None in mild weather, fading in below 0 °C, all of it from -6 °C.
+        assert_eq!(squeak(5.0), 0.0);
+        assert_eq!(squeak(0.0), 0.0);
+        assert!(squeak(-2.0) > 0.0 && squeak(-2.0) < squeak(-4.0));
+        assert!((squeak(-6.0) - 0.2).abs() < 0.02, "{}", squeak(-6.0));
+        // The squeak alone: short, rough and noisy rather than a whistle.
+        let only = surface!(crunch: 1e-6, squeak: 1.0);
+        let mut tone = 0.0;
+        let mut len = 0.0;
+        for k in 0..8 {
+            let x = render_of(only, 40 + k);
+            tone += tonality(&x) / 8.0;
+            len += length_20db(&x) / 8.0;
+        }
+        assert!(tone < 0.6, "tonality {tone}");
+        assert!(len < 0.09, "{len} s");
+        // Over a recorded take it stays under the take: 8 dB down.
+        let st = Step::from_contact(only, ContactKind::Foot, 75.0, 1.4, 3);
+        let synth = render_mono(&mut FootstepSound::new(FS, &st), 3.0, FS);
+        let over = render_mono(&mut FootstepSound::build(FS, &st, true), 3.0, FS);
+        let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt();
+        assert!(rms(&over) < 0.6 * rms(&synth));
+    }
+
+    #[test]
+    fn a_bare_earth_path_is_as_loud_as_the_grass_it_was_worn_into() {
+        // K-weighted (the loudness recordings are levelled to) and unweighted energy over
+        // the same 0.4 s, 16 reference steps each.
+        let level = |s: SurfaceSound| {
+            let (mut k, mut flat) = (0.0, 0.0);
+            for seed in 1..=16u64 {
+                let st = Step::from_contact(s, ContactKind::Foot, 75.0, 1.4, seed * 7_919);
+                let x = render_mono(&mut FootstepSound::new(FS, &st), 1.0, FS);
+                k += crate::samples::loudness(&x, FS).powi(2) / 16.0;
+                flat += x.iter().map(|v| v * v).sum::<f32>() / (0.4 * FS) / 16.0;
+            }
+            (10.0 * k.log10(), 10.0 * flat.log10())
+        };
+        let dry = SurfaceCell::default();
+        let (grass, path) = (
+            level(worn("grass", 0.0, &dry)),
+            level(worn("grass", 1.0, &dry)),
+        );
+        assert!(
+            (path.0 - grass.0).abs() < 1.2,
+            "K-weighted {grass:?} {path:?}"
+        );
+        // Its energy is low (a 70 Hz thud), so unweighted it measures a little louder.
+        assert!(
+            (path.1 - grass.1).abs() < 2.6,
+            "unweighted {grass:?} {path:?}"
         );
     }
 
@@ -2077,6 +2201,7 @@ mod tests {
             shelf_db: 0.0,
             lowpass_hz: 20_000.0,
             length_s: f32::INFINITY,
+            under: None,
         };
         let silent = Step::from_contact(SurfaceSound::SILENT, ContactKind::Foot, 75.0, 1.4, 3);
         let render = || {

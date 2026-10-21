@@ -10,7 +10,8 @@
 //! every take to the same loudness. A step that misses the noise bar by up to 15 dB has the
 //! recording around it cleaned ([`denoise`]: rain, wind, room tone and hiss taken out, the
 //! tail gated) and must pass the bar again on the cleaned recording; cleaned takes only fill
-//! in where a ground has fewer than [`CLEAN_ENOUGH`] clean ones. A surface left with fewer
+//! in where a ground has fewer than [`CLEAN_ENOUGH`] clean ones of that gait. A surface left
+//! with fewer
 //! than [`MIN_TAKES`] takes is synthesized.
 //!
 //! A footstep then plays one take, picked at random but never one of the last few on that
@@ -18,7 +19,8 @@
 //! duller and quieter when the ground's state (rain, a puddle, frost) has changed what the
 //! recording sounds like. The synthesized layers of [`crate::footstep`] still play on top,
 //! but only what the recording lacks: the squelch of wet ground, a puddle's splash, a heavy
-//! walker's thump, a snow crust's squeak. A surface with no takes, or a missing folder, falls
+//! walker's thump, cold snow's squeak. On half-worn ground the ground's take and the path's
+//! play together ([`FootstepSamples::recorded`]). A surface with no takes, or a missing folder, falls
 //! back to the synthesis alone, so nothing needs the fetched files (CI never fetches them).
 //!
 //! Shoes and boots, a dog's paws and a horse's hooves each have their own recordings
@@ -446,10 +448,18 @@ fn load_sets(dir: &Path, feet: Feet) -> BTreeMap<String, TakeSet> {
         sets.entry(folder).or_default().takes.extend(takes);
     }
     // A ground with plenty of takes clean as recorded plays only those; cleaned ones fill in
-    // where they are scarce.
+    // where they are scarce. Walking and running count apart, so a ground with many clean
+    // walking steps and a couple of clean running ones still runs on more than two.
     for set in sets.values_mut() {
-        if set.takes.iter().filter(|t| !t.stats.cleaned).count() >= CLEAN_ENOUGH {
-            set.takes.retain(|t| !t.stats.cleaned);
+        for gait in [Gait::Walk, Gait::Run] {
+            let clean = set
+                .takes
+                .iter()
+                .filter(|t| t.gait == gait && !t.stats.cleaned)
+                .count();
+            if clean >= CLEAN_ENOUGH {
+                set.takes.retain(|t| t.gait != gait || !t.stats.cleaned);
+            }
         }
     }
     // A surface with too few clean takes is synthesized.
@@ -539,7 +549,8 @@ pub struct Borrowed {
     pub max_s: f32,
 }
 
-/// The takes a worn-path surface borrows (see [`Borrowed`]).
+/// The takes a worn-path surface borrows (see [`Borrowed`]) where it has no folder of its own
+/// (bare earth's real recordings are in `footsteps/path/`; these are its fallback).
 ///
 /// - `path` (bare trodden earth): gravel takes under a 1.8 kHz low-pass, which leaves the
 ///   boot's thud and the crunch of the fines and takes off the stones' rattle; held to 0.3 s,
@@ -548,7 +559,8 @@ pub struct Borrowed {
 ///   earth's fuller thud, firmer heel and toe scrape.
 /// - `packed_snow`: snow takes cut to 0.2 s, so the long soft crunch of powder becomes a short
 ///   tight one; the tone difference (brighter, a little higher) comes from `packed_snow`'s
-///   own brightness and pitch over snow's, and the synthesis adds the squeak and heel.
+///   own brightness and pitch over snow's, and the synthesis adds the heel (and the squeak,
+///   in the cold).
 pub fn borrowed(surface: &str) -> Option<Borrowed> {
     Some(match surface {
         "path" => Borrowed {
@@ -574,6 +586,23 @@ pub fn borrowed(surface: &str) -> Option<Borrowed> {
         },
         _ => return None,
     })
+}
+
+/// Where on a worn path's blend (`t`, [`WornPath::t`]) a step starts playing the ground's
+/// and the path's takes together, and (at `1 -` it) stops: nearer the ends the other take
+/// would be more than 13 dB down, too quiet to change how the step sounds.
+pub const LAYER_FROM: f32 = 0.05;
+
+/// Least share of a recording's layers a step must keep for the recording to play
+/// ([`SurfaceSound::kept`]): below it the ground has changed too much (frozen mud is not mud,
+/// gravel is not a lawn) and the step is synthesized.
+const MIN_KEPT: f32 = 0.4;
+
+/// One take picked for a step, before it is levelled ([`FootstepSamples::recorded`]).
+struct Pick {
+    /// What the take holds, as layers.
+    recorded: SurfaceSound,
+    sample: StepSample,
 }
 
 /// How long a take cut short ([`StepSample::length_s`]) fades out, s.
@@ -714,6 +743,19 @@ const PARTS: &[(&str, Parts)] = &[
     ("vrymaa_825854", &[(0.0, 38.2, Part::Walk)]),
     ("softdistortionfx_398937", &[(0.0, 91.1, Part::Walk)]),
     ("sturmankin_272253", &[(0.0, 30.2, Part::Walk)]),
+    // Boots on soil (bare earth): leave out the five steps whose sole scrapes the grit, 40-50 %
+    // of their energy a hiss over 3 kHz, twice as bright as the others (3.3-4.5 kHz centroid
+    // against 0.7-2.5 kHz), which made them sound like another ground.
+    (
+        "sturmankin_278913",
+        &[
+            (2.4, 5.8, Part::Walk),
+            (6.5, 16.2, Part::Walk),
+            (16.9, 21.9, Part::Walk),
+            (22.6, 25.2, Part::Walk),
+            (25.9, 32.1, Part::Walk),
+        ],
+    ),
 ];
 
 /// Most takes kept per recording and gait: the ones closest to the recording's typical step.
@@ -735,8 +777,9 @@ const BELOW_BACKGROUND_DB: f32 = 6.0;
 /// [`MIN_SNR_DB`] (dB): under it the background is too much of the step to take out.
 pub const RESCUE_MIN_SNR_DB: f32 = 20.0;
 
-/// Takes clean as recorded a ground needs to do without cleaned ones ([`denoise`]): with as
-/// many, the cleaned takes of its recordings are left out.
+/// Takes clean as recorded a ground needs, per gait, to do without cleaned ones ([`denoise`]):
+/// with as many walking (or running) takes, the cleaned walking (running) takes of its
+/// recordings are left out.
 pub const CLEAN_ENOUGH: usize = 24;
 
 /// Fewest clean takes a surface needs to play recordings at all; with fewer it is synthesized,
@@ -1675,6 +1718,10 @@ pub struct StepSample {
     /// Longest it plays, s (of the take as recorded): a take cut short fades out over
     /// [`CUT_FADE_S`] there. `f32::INFINITY` plays it whole.
     pub length_s: f32,
+    /// A second take played with this one, onsets together: on half-worn ground the
+    /// ground's own take under the path's, each at its share of the blend, so the step is
+    /// one in-between ground instead of either.
+    pub under: Option<Box<StepSample>>,
 }
 
 /// Plays a [`StepSample`] at the mixer's rate (Catmull-Rom resampling).
@@ -1690,6 +1737,8 @@ pub(crate) struct SampleVoice {
     /// Where it stops (of `pcm`), and over how many samples before that it fades out.
     end: usize,
     fade_len: f64,
+    /// [`StepSample::under`]'s voice.
+    under: Option<Box<SampleVoice>>,
 }
 
 impl SampleVoice {
@@ -1713,20 +1762,28 @@ impl SampleVoice {
             shelf: Biquad::high_shelf(fs, 2_500.0, s.shelf_db.clamp(-12.0, 12.0)),
             lp: Biquad::lowpass(fs, s.lowpass_hz.clamp(200.0, nyq), 0.707),
             fade: 1.0,
+            under: s.under.as_ref().map(|u| Box::new(SampleVoice::new(fs, u))),
         }
     }
 
     /// Output samples left (at the mixer's rate).
     pub(crate) fn remaining(&self) -> u32 {
-        ((self.end as f64 - self.pos).max(0.0) / self.inc) as u32
+        let own = ((self.end as f64 - self.pos).max(0.0) / self.inc) as u32;
+        own.max(self.under.as_ref().map_or(0, |u| u.remaining()))
     }
 
     pub(crate) fn active(&self) -> bool {
-        (self.pos as usize) + 2 < self.end
+        (self.pos as usize) + 2 < self.end || self.under.as_ref().is_some_and(|u| u.active())
     }
 
     #[inline]
     pub(crate) fn next(&mut self) -> f32 {
+        let under = self.under.as_mut().map_or(0.0, |u| u.next());
+        under + self.own()
+    }
+
+    #[inline]
+    fn own(&mut self) -> f32 {
         let i = self.pos as usize;
         let n = self.end;
         if i + 2 >= n {
@@ -1881,11 +1938,14 @@ impl FootstepSamples {
     /// into it ([`FootstepSurfaces::worn_path`]; [`WornPath::NONE`] for none), `cell` and
     /// `wading_m` the ground's state, and `wait` blocks for a bank that is still loading.
     ///
-    /// On a worn path a share of the steps (`worn.t`, rising smoothly with the wear) play the
-    /// path's recordings instead of the ground's: bare earth's (borrowed, see [`borrowed`]),
-    /// mud's on a share `worn.mud` of those as the ground gets wet, packed snow's on trodden
-    /// snow. Whichever plays, the layers on top add what the blended step has beyond it, so
-    /// both kinds of step sound like the same half-worn ground.
+    /// On a worn path the path's recordings join the ground's: bare earth's (its own
+    /// `footsteps/path/` takes, else borrowed ones, see [`borrowed`]), mud's on a share
+    /// `worn.mud` of the steps as the ground gets wet, packed snow's on trodden snow. Between
+    /// [`LAYER_FROM`] and `1 - LAYER_FROM` of the way (`worn.t`) every step plays both takes
+    /// together, the ground's at `1 - t` of the power and the path's at `t`, so half-worn
+    /// ground is one in-between ground step after step rather than turf one step and earth
+    /// the next; nearer either end only that end's take plays. The layers on top add what the
+    /// blended step has beyond the takes.
     #[allow(clippy::too_many_arguments)]
     pub fn recorded(
         &mut self,
@@ -1918,23 +1978,84 @@ impl FootstepSamples {
             };
             ((material, *dry), path, worn.t)
         };
-        // Ground first, or the path's on a share `path_t` of the steps; the other if the first
-        // has no fitting takes. Untouched ground never tries the path's.
         let path = (path_t > 0.0).then(|| (path, surfaces.named(path)));
-        let order = match path {
-            Some(p) if path_rng.chance(path_t) => [Some(p), Some(ground)],
-            p => [Some(ground), p],
+        let pick_kept = |me: &mut Self, (name, base): (&str, SurfaceSound), min_kept: f32| {
+            me.recorded_as(feet, name, &base, step, surfaces, fs, wait, min_kept)
         };
-        for (name, base) in order.into_iter().flatten() {
-            if let Some(r) = self.recorded_as(feet, name, &base, step, surfaces, fs, wait) {
-                return Some(r);
-            }
-        }
-        None
+        let pick = |me: &mut Self, g: (&str, SurfaceSound)| pick_kept(me, g, MIN_KEPT);
+        let chosen = match path {
+            // Untouched ground never tries the path's takes.
+            None => pick(self, ground).map(|g| (g, None)),
+            Some(p) if path_t >= 1.0 - LAYER_FROM => pick(self, p)
+                .or_else(|| pick(self, ground))
+                .map(|x| (x, None)),
+            Some(p) if path_t <= LAYER_FROM => pick(self, ground)
+                .or_else(|| pick(self, p))
+                .map(|x| (x, None)),
+            // Both takes, if together they hold enough of the step (each alone may not: a
+            // nearly worn meadow keeps too little of grass for grass's take on its own).
+            Some(p) => match (pick_kept(self, ground, 0.0), pick_kept(self, p, 0.0)) {
+                (Some(g), Some(p))
+                    if step.surface.kept(&g.recorded.blend(&p.recorded, path_t)) >= MIN_KEPT =>
+                {
+                    Some((p, Some(g)))
+                }
+                _ => pick(self, ground)
+                    .or_else(|| pick(self, p))
+                    .map(|x| (x, None)),
+            },
+        };
+        let (top, under) = chosen?;
+        Some(Self::finish(feet, step, top, under, path_t))
     }
 
-    /// [`Self::recorded`] with takes of the surface `name` (whose own sound is `base`), if it
-    /// (or the surface it borrows from) has fitting takes.
+    /// The step for the layers and the take(s) to play, from the take picked (`top`) and, on
+    /// half-worn ground, the ground's take under it (`under`; `top` is then the path's,
+    /// `t` the path's share).
+    fn finish(
+        feet: Feet,
+        step: &Step,
+        top: Pick,
+        under: Option<Pick>,
+        t: f32,
+    ) -> (Step, StepSample) {
+        let state = step.surface;
+        let i_rel = step.intensity.max(0.05) / feet.recorded_intensity();
+        let (recorded, mut sample) = match under {
+            None => (top.recorded, top.sample),
+            Some(g) => {
+                let t = t.clamp(0.0, 1.0);
+                let mut sample = top.sample;
+                sample.gain *= t.sqrt();
+                let mut g_sample = g.sample;
+                g_sample.gain *= (1.0 - t).sqrt();
+                sample.under = Some(Box::new(g_sample));
+                (g.recorded.blend(&top.recorded, t), sample)
+            }
+        };
+        // Level follows how much of the recorded surface the step keeps.
+        let k = state.kept(&recorded).sqrt();
+        sample.gain *= k;
+        if let Some(u) = &mut sample.under {
+            u.gain *= k;
+        }
+        // Synthesize what the recording lacks, plus a little of what it has: weight (a
+        // heavier walker thumps more) and per-step grain.
+        let mut over = state.over_recording(&recorded, 0.12);
+        over.thump += recorded.thump.min(state.thump) * (0.25 * (i_rel - 1.0)).clamp(0.0, 0.5);
+        (
+            Step {
+                surface: over,
+                ..*step
+            },
+            sample,
+        )
+    }
+
+    /// A take of the surface `name` (whose own sound is `base`) for `step`, if it (or the
+    /// surface it borrows from) has takes and the step keeps at least `min_kept` of what they
+    /// hold: its gain before [`Self::finish`] levels it by how much of the recorded surface
+    /// the step keeps.
     #[allow(clippy::too_many_arguments)]
     fn recorded_as(
         &mut self,
@@ -1945,7 +2066,8 @@ impl FootstepSamples {
         surfaces: &FootstepSurfaces,
         fs: f32,
         wait: bool,
-    ) -> Option<(Step, StepSample)> {
+        min_kept: f32,
+    ) -> Option<Pick> {
         let bank = self.bank(wait)?;
         let (folder, borrow) = match bank.folder_for(feet, name) {
             Some(f) => (f.to_string(), None),
@@ -1964,8 +2086,7 @@ impl FootstepSamples {
             (None, _) => (surfaces.named(feet.recorded_on(&folder)), *base),
         };
         let state = step.surface;
-        let kept = state.kept(&recorded);
-        if kept < 0.4 {
+        if state.kept(&recorded) < min_kept {
             // The ground has changed too much (frozen mud is not mud, gravel is not a lawn):
             // synthesize it.
             return None;
@@ -1986,7 +2107,7 @@ impl FootstepSamples {
         // 22 kg dog, one hoof of a 500 kg horse), plus ±1.5 dB per step.
         let law = |i: f32| i.powf(0.8) * i.min(2.0).sqrt();
         let i0 = feet.recorded_intensity();
-        let gain = reference * law(i) / law(i0) * kept.sqrt() * db(rng.range(-1.5, 1.5));
+        let gain = reference * law(i) / law(i0) * db(rng.range(-1.5, 1.5));
         // Tone follows how hard the step is against that walker's.
         let i_rel = i / i0;
         let pitch = (state.pitch / tone_of.pitch.max(0.05)).clamp(0.7, 1.4);
@@ -2003,26 +2124,20 @@ impl FootstepSamples {
             lowpass_hz = lowpass_hz.min(b.lowpass_hz);
             length_s = b.max_s;
         }
-        // Synthesize what the recording lacks, plus a little of what it has: weight (a
-        // heavier walker thumps more) and per-step grain.
-        let mut over = step.surface.over_recording(&recorded, 0.12);
-        over.thump += recorded.thump.min(state.thump) * (0.25 * (i_rel - 1.0)).clamp(0.0, 0.5);
-        let synth = Step {
-            surface: over,
-            ..*step
-        };
-        Some((
-            synth,
-            StepSample {
+        Some(Pick {
+            recorded,
+            sample: StepSample {
                 take,
                 speed,
                 gain,
                 shelf_db,
                 lowpass_hz,
                 length_s,
+                under: None,
             },
-        ))
+        })
     }
+
     /// Loudness of the synthesized reference step of `kind` on `surface`, as hard as the
     /// steps in `feet`'s recordings (cached until its sound is changed in
     /// [`FootstepSurfaces`]).
@@ -2432,7 +2547,7 @@ mod tests {
     }
 
     #[test]
-    fn worn_paths_play_the_paths_takes_on_a_share_of_steps_rising_with_wear() {
+    fn worn_paths_layer_the_paths_takes_with_the_grounds_rising_with_wear() {
         let b = bank_of(&[
             ("grass", 500.0),
             ("snow", 900.0),
@@ -2480,11 +2595,31 @@ mod tests {
             assert_eq!(r.1.length_s, f32::INFINITY);
         }
         assert_eq!(share("grass", 0.0, &dry, 500.0), 1.0);
-        // Half worn: about half the steps play bare earth's (borrowed gravel) takes.
-        let half = share("grass", 0.5, &dry, 1_700.0);
-        assert!((0.35..0.65).contains(&half), "{half}");
-        assert!(share("grass", 0.3, &dry, 1_700.0) < half);
+        // Half worn: every step plays bare earth's (borrowed gravel) take with the grass's
+        // under it, the earth's share of the power rising with the wear.
+        let path_power = |wear: f32| {
+            let mut s = FootstepSamples::from_bank(b.clone());
+            (0..40u64)
+                .map(|k| {
+                    let (_, r) = worn_step(&mut s, "grass", wear, &dry, 100 + k * 17);
+                    let top = r.expect("a take").1;
+                    assert!((tone_hz(&top) - 1_700.0).abs() < 100.0);
+                    let under = top.under.as_ref().expect("the ground's take under it");
+                    assert!((tone_hz(under) - 500.0).abs() < 30.0);
+                    let (p, g) = (top.gain.powi(2), under.gain.powi(2));
+                    p / (p + g) / 40.0
+                })
+                .sum::<f32>()
+        };
+        let shares: Vec<f32> = [0.3, 0.4, 0.5, 0.6, 0.7].map(path_power).to_vec();
+        assert!(shares.windows(2).all(|w| w[1] > w[0]), "{shares:?}");
+        assert!((0.3..0.7).contains(&shares[2]), "{shares:?}");
         assert_eq!(share("grass", 1.0, &dry, 1_700.0), 1.0);
+        let mut s = FootstepSamples::from_bank(b.clone());
+        for wear in [0.0, 0.2, 1.0] {
+            let (_, r) = worn_step(&mut s, "grass", wear, &dry, 5);
+            assert!(r.unwrap().1.under.is_none(), "one take at wear {wear}");
+        }
         // Bare earth's takes are muffled and short, and the layers add its thud.
         let mut s = FootstepSamples::from_bank(b.clone());
         let (step, r) = worn_step(&mut s, "grass", 1.0, &dry, 7);
@@ -2510,6 +2645,74 @@ mod tests {
         assert!(worn_step(&mut none, "grass", 1.0, &dry, 7).1.is_none());
     }
 
+    /// The tone of a test take (from [`bank_of`]), from its upward zero crossings.
+    fn tone_hz(s: &StepSample) -> f32 {
+        let p = &s.take.pcm;
+        p.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count() as f32 / 0.3
+    }
+
+    /// The takes of a step as they play (both, on half-worn ground).
+    fn play_takes(s: &StepSample) -> Vec<f32> {
+        let mut v = SampleVoice::new(SR, s);
+        let mut out = Vec::new();
+        while v.active() {
+            out.push(v.next());
+        }
+        out
+    }
+
+    #[test]
+    fn half_worn_ground_is_one_ground_step_after_step() {
+        let b = bank_of(&[("grass", 500.0), ("path", 2_000.0)]);
+        let dry = SurfaceCell::default();
+        // Centroid of every step's takes, 30 steps per wear.
+        let centroids = |wear: f32| {
+            let mut s = FootstepSamples::from_bank(b.clone());
+            let mut c: Vec<f32> = (0..30u64)
+                .map(|k| {
+                    let (_, r) = worn_step(&mut s, "grass", wear, &dry, 300 + k * 29);
+                    centroid(&play_takes(&r.unwrap().1), SR)
+                })
+                .collect();
+            c.sort_by(f32::total_cmp);
+            c
+        };
+        let wears = [0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0];
+        let all: Vec<Vec<f32>> = wears.iter().map(|&w| centroids(w)).collect();
+        let median: Vec<f32> = all.iter().map(|c| c[c.len() / 2]).collect();
+        // Rising with the wear (the path's take is a little brighter on ground not quite
+        // worn through, as the blend is, hence the 2 % at the end).
+        assert!(median.windows(2).all(|w| w[1] > w[0] * 0.98), "{median:?}");
+        assert!(median[3] > median[1] && median[5] > median[3], "{median:?}");
+        let (lo, hi) = (median[0], median[6]);
+        // Every half-worn step is in between, none a turf step or an earth step, and the
+        // spread across steps is small next to how far the median moves.
+        for (w, c) in wears.iter().zip(&all) {
+            let (a, z) = (c[0], c[c.len() - 1]);
+            assert!(z - a < 0.2 * (hi - lo), "{w}: {a}..{z}");
+            if (0.4..=0.6).contains(w) {
+                assert!(
+                    a > lo + 0.1 * (hi - lo) && z < hi - 0.1 * (hi - lo),
+                    "{w}: {a}..{z}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_path_folder_of_its_own_replaces_the_borrowed_gravel() {
+        let b = bank_of(&[("grass", 500.0), ("gravel", 1_700.0), ("path", 1_100.0)]);
+        let mut s = FootstepSamples::from_bank(b);
+        let dry = SurfaceCell::default();
+        let (_, r) = worn_step(&mut s, "grass", 1.0, &dry, 9);
+        let take = r.unwrap().1;
+        let hz = tone_hz(&take);
+        assert!((hz - 1_100.0).abs() < 60.0, "{hz}");
+        // Played whole and open, not cut short and muffled like the borrowed takes.
+        assert_eq!(take.length_s, f32::INFINITY);
+        assert!(take.lowpass_hz > 10_000.0);
+    }
+
     #[test]
     fn a_take_cut_short_fades_out_where_it_is_cut() {
         let b = bank();
@@ -2522,6 +2725,7 @@ mod tests {
                 shelf_db: 0.0,
                 lowpass_hz: 20_000.0,
                 length_s,
+                under: None,
             };
             let mut v = SampleVoice::new(SR, &s);
             let mut out = Vec::new();

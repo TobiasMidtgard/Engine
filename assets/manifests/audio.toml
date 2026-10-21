@@ -527,3 +527,31 @@ sha256 = "a1559ea505ade723742ae3e38e1bfbd139d3f13cac8a2e36762943c11647738e"
 license = "CC0-1.0"
 source = "https://freesound.org/people/Ornery/sounds/233345/"
 author = "Ornery"
+
+# Bare earth (worn paths): boots walking on soil (a box of earth on a carpet in a basement, Zoom H2).
+[[file]]
+path = "audio/footsteps/path/sturmankin_278913.ogg"
+url = "https://cdn.freesound.org/previews/278/278913_4181170-hq.ogg"
+sha256 = "db7e3722f0b4301aa3775ba02381ee36645233e3d9d4d349be2a840a75a564d1"
+license = "CC0-1.0"
+source = "https://freesound.org/people/sturmankin/sounds/278913/"
+author = "sturmankin"
+
+# Boots running on soil (same session).
+[[file]]
+path = "audio/footsteps/path/sturmankin_278930.ogg"
+url = "https://cdn.freesound.org/previews/278/278930_4181170-hq.ogg"
+sha256 = "4695f6fc1cd12ec867e854cae457f297cdcb66e9883a03aaba12bd6ac75fa3f3"
+license = "CC0-1.0"
+source = "https://freesound.org/people/sturmankin/sounds/278930/"
+author = "sturmankin"
+
+# Running on a dirt path with leaves through a forest (Sony M10; its steps are cleaned of the
+# background at load time).
+[[file]]
+path = "audio/footsteps/path/trp_577313.ogg"
+url = "https://cdn.freesound.org/previews/577/577313_97550-hq.ogg"
+sha256 = "05fec80b6e7ded695de9a5fd7f40bf81d0984670558f8f10feb0d8a15bc30698"
+license = "CC0-1.0"
+source = "https://freesound.org/people/TRP/sounds/577313/"
+author = "TRP"

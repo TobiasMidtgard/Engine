@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use engine_core::prelude::*;
-use engine_world::{EngineKind, EngineState, Env, WheelContacts};
+use engine_world::{EngineKind, EngineState, Env, GroundWear, WheelContacts};
 
 use crate::dsp::{Biquad, Bubble, Noise, OnePole, Resonator};
 use crate::footstep::{FootstepSurfaces, SurfaceSound};
@@ -362,14 +362,23 @@ pub struct TyreGround {
     pub gravel: f32,
     /// Dirt, grass, sand.
     pub soft: f32,
+    /// Of `soft`, how much is turf: blades swishing past the tread (none on a path worn
+    /// bare, which rolls like dirt: a dull rumble and the crackle of fines).
+    pub grass: f32,
     pub mud: f32,
     pub snow: f32,
+    /// How packed the snow is (0 powder .. 1 a trodden or driven track): a tighter, higher,
+    /// faster crunch.
+    pub packed: f32,
+    /// Cold snow squeaking under the tyres (packed snow below 0 °C, any snow below -4 °C).
+    pub squeak: f32,
     /// Standing water or a wet road (hiss and spray).
     pub wet: f32,
 }
 
 /// Tyres rolling and sliding. Mono; params `"speed"` m/s, `"slip"` 0..1, `"load"` kg per
-/// tyre, and the ground shares `"hard"`, `"gravel"`, `"soft"`, `"mud"`, `"snow"`, `"wet"`.
+/// tyre, and the ground shares `"hard"`, `"gravel"`, `"soft"`, `"grass"`, `"mud"`, `"snow"`,
+/// `"packed"`, `"squeak"`, `"wet"` ([`TyreGround`]).
 pub struct TyreSound {
     fs: f32,
     rng: Noise,
@@ -384,6 +393,8 @@ pub struct TyreSound {
     grains: Vec<(Biquad, f32, f32)>,
     bubbles: Vec<Bubble>,
     spray: Biquad,
+    swish: Biquad,
+    swish_mod: OnePole,
     squeal_phase: f32,
     squeal_wobble: OnePole,
     squeal_level: f32,
@@ -409,6 +420,8 @@ impl TyreSound {
             grains: Vec::new(),
             bubbles: Vec::new(),
             spray: Biquad::highpass(fs, 1_800.0, 0.7),
+            swish: Biquad::bandpass(fs, 4_200.0, 0.6),
+            swish_mod: OnePole::new(fs, 20.0),
             squeal_phase: 0.0,
             squeal_wobble: OnePole::new(fs, 12.0),
             squeal_level: 0.0,
@@ -416,11 +429,15 @@ impl TyreSound {
     }
 
     fn grain(&mut self, amp: f32, lo: f32, hi: f32, ms: f32) {
+        self.grain_q(amp, lo, hi, ms, 1.2);
+    }
+
+    fn grain_q(&mut self, amp: f32, lo: f32, hi: f32, ms: f32, q: f32) {
         if self.grains.len() < 32 {
             let f = self.rng.range(lo, hi);
             let decay = (-1.0 / (ms * 0.001 * self.fs)).exp();
             self.grains
-                .push((Biquad::bandpass(self.fs, f, 1.2), amp, decay));
+                .push((Biquad::bandpass(self.fs, f, q), amp, decay));
         }
     }
 }
@@ -435,8 +452,11 @@ impl Sound for TyreSound {
             "hard" => g.hard = value.clamp(0.0, 1.0),
             "gravel" => g.gravel = value.clamp(0.0, 1.0),
             "soft" => g.soft = value.clamp(0.0, 1.0),
+            "grass" => g.grass = value.clamp(0.0, 1.0),
             "mud" => g.mud = value.clamp(0.0, 1.0),
             "snow" => g.snow = value.clamp(0.0, 1.0),
+            "packed" => g.packed = value.clamp(0.0, 1.0),
+            "squeak" => g.squeak = value.clamp(0.0, 1.0),
             "wet" => g.wet = value.clamp(0.0, 1.0),
             _ => {}
         }
@@ -454,8 +474,11 @@ impl Sound for TyreSound {
                 g.hard += (t.hard - g.hard) * a;
                 g.gravel += (t.gravel - g.gravel) * a;
                 g.soft += (t.soft - g.soft) * a;
+                g.grass += (t.grass - g.grass) * a;
                 g.mud += (t.mud - g.mud) * a;
                 g.snow += (t.snow - g.snow) * a;
+                g.packed += (t.packed - g.packed) * a;
+                g.squeak += (t.squeak - g.squeak) * a;
                 g.wet += (t.wet - g.wet) * a;
             }
             let v = self.speed;
@@ -474,12 +497,27 @@ impl Sound for TyreSound {
             // Gravel crunches and pings, snow packs and creaks: grains at a rate set by speed.
             let rate = (v * 40.0).min(900.0) / fs;
             if self.rng.chance(rate * g.gravel) {
-                let amp = self.rng.range(0.02, 0.12) * weight;
+                // A few small stones in dirt ping softer than a gravel bed's.
+                let amp = self.rng.range(0.02, 0.12) * weight * (0.4 + 0.6 * g.gravel);
                 self.grain(amp, 1_200.0, 5_000.0, 4.0);
             }
-            if self.rng.chance(rate * 0.5 * g.snow) {
-                let amp = self.rng.range(0.02, 0.08) * weight;
-                self.grain(amp, 500.0, 1_800.0, 9.0);
+            // Powder gives way slowly in big soft crunches; a packed track in quick, tight,
+            // higher ones.
+            let p = g.packed;
+            if self.rng.chance(rate * (0.5 + 0.5 * p) * g.snow) {
+                let amp = self.rng.range(0.02, 0.08) * weight * (1.0 - 0.3 * p);
+                self.grain(amp, 500.0 + 600.0 * p, 1_800.0 + 1_600.0 * p, 9.0 - 5.0 * p);
+            }
+            // Cold snow squeaks: short narrow chirps.
+            if self.rng.chance(rate * 0.12 * g.squeak) {
+                let amp = self.rng.range(0.01, 0.04) * weight;
+                self.grain_q(amp, 700.0, 1_400.0, 14.0, 6.0);
+            }
+            // Bare earth: the fines under the tread crackle faintly.
+            let fines = (g.soft - g.grass).max(0.0);
+            if self.rng.chance(rate * 0.25 * fines) {
+                let amp = self.rng.range(0.005, 0.025) * weight;
+                self.grain(amp, 700.0, 2_400.0, 3.0);
             }
             // Mud: squelch and sucking bubbles.
             if self.rng.chance((v * 6.0).min(60.0) / fs * g.mud) && self.bubbles.len() < 24 {
@@ -502,6 +540,9 @@ impl Sound for TyreSound {
             }
             // Wet: the hiss of water squeezed out of the tread, and spray.
             let spray = self.spray.process(self.rng.white()) * g.wet * roll.powf(1.5) * 0.08;
+            // Turf: blades swishing past the tread, in gusts.
+            let gust = (0.3 + 4.0 * self.swish_mod.process(self.rng.white()).abs()).min(1.5);
+            let swish = self.swish.process(self.rng.white()) * g.grass * roll.min(1.0) * gust * 0.1;
             // Squeal: sliding on dry hard ground makes the rubber sing.
             let squeal_on = smooth(0.12, 0.45, self.slip) * (g.hard - g.wet * 0.7).max(0.0);
             let target = squeal_on * (v / 8.0).min(1.0) * weight;
@@ -520,7 +561,7 @@ impl Sound for TyreSound {
                 let amp = self.rng.range(0.03, 0.1);
                 self.grain(amp, 800.0, 3_500.0, 6.0);
             }
-            *o = road + low + rumble + grains + bubbles + spray + squeal;
+            *o = road + low + rumble + grains + bubbles + spray + swish + squeal;
         }
         out.len()
     }
@@ -588,10 +629,17 @@ impl TyreGround {
         Self {
             hard: s.click.clamp(0.0, 1.0),
             gravel: s.grit.clamp(0.0, 1.0).powf(1.5),
-            soft: (s.thump * 0.5 * (1.0 - s.click.min(1.0)) + s.rustle * 0.6 + s.hiss * 0.8)
+            soft: (s.thump * 0.8 * (1.0 - s.click.min(1.0)) + s.rustle * 0.6 + s.hiss * 0.8)
                 .clamp(0.0, 1.0),
+            grass: (s.rustle * 0.6).clamp(0.0, 1.0),
             mud: s.squelch.clamp(0.0, 1.0),
             snow: (s.crunch - 0.3 * s.grit).clamp(0.0, 1.0),
+            packed: if s.crunch > 0.0 {
+                s.firmness.clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
+            squeak: (s.squeak * 2.5).clamp(0.0, 1.0),
             wet: s.splash.max(wetness * 0.8).clamp(0.0, 1.0),
         }
     }
@@ -600,8 +648,11 @@ impl TyreGround {
         self.hard += o.hard * k;
         self.gravel += o.gravel * k;
         self.soft += o.soft * k;
+        self.grass += o.grass * k;
         self.mud += o.mud * k;
         self.snow += o.snow * k;
+        self.packed += o.packed * k;
+        self.squeak += o.squeak * k;
         self.wet += o.wet * k;
     }
 }
@@ -634,6 +685,7 @@ pub(crate) fn vehicle_sounds(
     surfaces: Res<FootstepSurfaces>,
     settings: Res<AudioSettings>,
     scales: Query<&LocalTimeScale>,
+    wear: Option<Res<GroundWear>>,
     mut cues: MessageWriter<AudioCue>,
     mut playing: Local<HashMap<Entity, VehicleVoices>>,
 ) {
@@ -643,7 +695,6 @@ pub(crate) fn vehicle_sounds(
     if audio.is_running() && settings.vehicles {
         let listener = audio.listener_position();
         let fs = audio.sample_rate();
-        let snow = surfaces.snow();
         for (e, t, engine, wheels) in &vehicles {
             if engine.is_none() && wheels.is_none() {
                 continue;
@@ -728,12 +779,19 @@ pub(crate) fn vehicle_sounds(
                     .filter(|d| *d > 0.0)
                     .unwrap_or(0.0)
                     .min(1.5);
-                let sound = surfaces.get(material).with_state(
+                // A worn path rolls like bare earth (mud when wet), a trodden track in snow
+                // like packed snow, read the same way as footsteps.
+                let worn = surfaces.worn_path(
+                    material,
+                    wear.as_ref().map_or(0.0, |w| w.wear(c.position)),
                     &cell,
-                    material.absorbency,
+                );
+                let sound = worn.apply(&surfaces.get(material)).with_state(
+                    &cell,
+                    worn.absorbency(material.absorbency),
                     env.temperature(c.position),
                     wading,
-                    &snow,
+                    &worn.snow,
                 );
                 let share = c.load_kg.max(1.0) / total;
                 ground.add(&TyreGround::from_surface(&sound, cell.wetness), share);
@@ -765,8 +823,11 @@ pub(crate) fn vehicle_sounds(
                     ("hard", ground.hard),
                     ("gravel", ground.gravel),
                     ("soft", ground.soft),
+                    ("grass", ground.grass),
                     ("mud", ground.mud),
                     ("snow", ground.snow),
+                    ("packed", ground.packed),
+                    ("squeak", ground.squeak),
                     ("wet", ground.wet),
                 ] {
                     audio.set_param(v.tyres, name, value);
@@ -940,5 +1001,85 @@ mod tests {
         assert!(g("mud", 0.0).mud > 0.9);
         assert!(g("snow", 0.0).snow > 0.9);
         assert!(g("grass", 0.0).soft > 0.7);
+    }
+
+    /// The tyres' ground on `name` worn `wear` deep, as `vehicle_sounds` reads it.
+    fn worn_ground(name: &str, wear: f32, temperature_c: f32) -> TyreGround {
+        let mats = engine_world::SurfaceMaterials::default();
+        let m = mats.get(mats.id(name).unwrap());
+        let surfaces = FootstepSurfaces::default();
+        let cell = engine_world::SurfaceCell::default();
+        let w = surfaces.worn_path(m, wear, &cell);
+        let s = w.apply(&surfaces.get(m)).with_state(
+            &cell,
+            w.absorbency(m.absorbency),
+            temperature_c,
+            0.0,
+            &w.snow,
+        );
+        TyreGround::from_surface(&s, 0.0)
+    }
+
+    fn rolling_on(g: TyreGround) -> Vec<f32> {
+        let mut t = TyreSound::new(FS, 5);
+        t.set_param("speed", 12.0);
+        t.set_param("load", 400.0);
+        for (name, v) in [
+            ("hard", g.hard),
+            ("gravel", g.gravel),
+            ("soft", g.soft),
+            ("grass", g.grass),
+            ("mud", g.mud),
+            ("snow", g.snow),
+            ("packed", g.packed),
+            ("squeak", g.squeak),
+            ("wet", g.wet),
+        ] {
+            t.set_param(name, v);
+        }
+        render(&mut t, 2.0)
+    }
+
+    /// RMS above 3 kHz (after the first third).
+    fn high_rms(x: &[f32]) -> f32 {
+        let mut hp = Biquad::highpass(FS, 3_000.0, 0.707);
+        let y: Vec<f32> = x.iter().map(|&v| hp.process(v)).collect();
+        rms(&y)
+    }
+
+    #[test]
+    fn tyres_on_a_worn_path_roll_like_dirt_and_on_a_snow_track_like_packed_snow() {
+        let meadow = worn_ground("grass", 0.0, 12.0);
+        let path = worn_ground("grass", 1.0, 12.0);
+        let dirt = TyreGround::from_surface(&SurfaceSound::preset("path").unwrap(), 0.0);
+        assert!(meadow.grass > 0.5, "{meadow:?}");
+        assert_eq!(path, dirt);
+        assert!(path.grass < 0.01 && path.soft > 0.3, "{path:?}");
+        // The meadow swishes (blades past the tread, high up), the bare path doesn't.
+        let bare = TyreGround {
+            grass: 0.0,
+            ..meadow
+        };
+        let (m, b) = (high_rms(&rolling_on(meadow)), high_rms(&rolling_on(bare)));
+        assert!(m > b * 1.5, "meadow {m}, without blades {b}");
+        assert!(rms(&rolling_on(path)) > 0.003);
+        // Snow: a driven track is packed; its crunch is higher than powder's.
+        let powder = worn_ground("snow", 0.0, -2.0);
+        let track = worn_ground("snow", 1.0, -2.0);
+        assert!(
+            powder.packed < 0.01 && track.packed > 0.7,
+            "{powder:?} {track:?}"
+        );
+        // Mean frequency, from how fast the signal changes (√(Σ diff² / Σ x²) · fs / 2π).
+        let centroid = |x: &[f32]| {
+            let d: f32 = x.windows(2).map(|w| (w[1] - w[0]).powi(2)).sum();
+            let e: f32 = x.iter().map(|v| v * v).sum();
+            (d / e.max(1e-12)).sqrt() * FS / std::f32::consts::TAU
+        };
+        let (cp, ct) = (centroid(&rolling_on(powder)), centroid(&rolling_on(track)));
+        assert!(ct > cp * 1.2, "powder {cp} Hz, track {ct} Hz");
+        // It squeaks only in the cold.
+        assert_eq!(worn_ground("snow", 1.0, 3.0).squeak, 0.0);
+        assert!(worn_ground("snow", 1.0, -8.0).squeak > 0.3);
     }
 }
