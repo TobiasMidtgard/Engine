@@ -22,6 +22,10 @@ const SPEED_CLASSES: u32 = 3u;
 const BOLT_HALO: f32 = 6.0;
 // Share of the light behind a snowflake that it blocks (the rest passes through its lace).
 const FLAKE_COVER: f32 = 0.6;
+// Share of the light behind a raindrop that it blocks: a drop is a clear lens, so it shows the
+// lit air behind it about as much as its own light. When it blocked it all, rain in a
+// lightning flash drew as dark scratches across the glowing air.
+const DROP_COVER: f32 = 0.5;
 
 fn pcg3(v0: vec3<u32>) -> vec3<f32> {
     var v = v0 * 1664525u + vec3<u32>(1013904223u);
@@ -114,8 +118,9 @@ fn drop_light(rel: vec3<f32>, view: vec3<f32>) -> vec3<f32> {
         let d2 = dot(d, d);
         let range = l.position_range.w;
         if (d2 < range * range) {
-            // Drops glow strongly when looking toward the lamp through them.
-            let forward = 0.3 + 2.5 * pow(saturate(dot(view, d * inverseSqrt(d2))), 8.0);
+            // Drops glow strongly when looking toward the lamp through them, and scatter it
+            // sideways too: rain shows as bright streaks in a lamp's cone or a flash.
+            let forward = 2.0 + 2.5 * pow(saturate(dot(view, d * inverseSqrt(d2))), 8.0);
             let falloff = sq(saturate(1.0 - sq(d2 / (range * range))));
             c += l.color_radius.rgb * forward * falloff / max(d2, 0.25) * INV_PI * 0.15;
         }
@@ -177,7 +182,7 @@ fn fs_rain(in: PrecipOut) -> @location(0) vec4<f32> {
     let across = 1.0 - in.uv.x * in.uv.x;
     let along = smoothstep(0.0, 0.25, in.uv.y) * smoothstep(1.0, 0.6, in.uv.y);
     let a = saturate(in.color.a * across * along);
-    return vec4<f32>(min(in.color.rgb, vec3(60000.0)) * a, a);
+    return vec4<f32>(min(in.color.rgb, vec3(60000.0)) * a, a * DROP_COVER);
 }
 
 @vertex

@@ -14,7 +14,7 @@ use super::sdf::{Body, Paint, Shape};
 use super::{PoseBuilder, bone, bump, cycle, cycle_sin, keyed};
 use crate::clip::AnimationClip;
 use crate::graph::{
-    AnimGraph, Blend1dChild, Cmp, Condition, NodeDef, StateDef, TransitionDef, Weight,
+    AnimGraph, Blend1dChild, BoneMaskDef, Cmp, Condition, NodeDef, StateDef, TransitionDef, Weight,
 };
 use crate::ik::{FootIk, LegIk};
 use crate::muscle::{Muscle, MuscleDriver};
@@ -1108,6 +1108,9 @@ fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
         hip.x.abs() * 0.8
     };
     let reach = 0.985 * (thigh + shin);
+    // Walking sideways is an athlete's shuffle: knees bent, trunk a little forward, hands up
+    // and out, and the hips carried over whichever foot holds the weight.
+    let athletic = if stance > 0.5 { dir.x.abs() } else { 0.0 };
     // Where each foot is (model space, relative to the hips' rest place) at `q` phase since
     // it planted, and how far it is through its swing (0 while it stands).
     let foot = |side: usize, q: f32| {
@@ -1131,8 +1134,14 @@ fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
         // The hips sink until both feet are in reach (knees soft), and dip a little as each
         // foot takes the weight.
         let mut drop: f32 = 0.015;
+        let over: f32 = feet
+            .iter()
+            .enumerate()
+            .map(|(side, (_, swing))| -S[side] * (std::f32::consts::PI * swing).sin())
+            .sum();
+        let shift = Vec3::X * 0.035 * athletic * over;
         let joint_at = |side: usize, drop: f32| {
-            turn * Vec3::new(S[side] * hip.x.abs(), 0.0, hip.z) + Vec3::Y * (hip.y - drop)
+            turn * Vec3::new(S[side] * hip.x.abs(), 0.0, hip.z) + shift + Vec3::Y * (hip.y - drop)
         };
         for (side, (at, _)) in feet.iter().enumerate() {
             let joint = joint_at(side, 0.0);
@@ -1140,13 +1149,13 @@ fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
             let below = (reach * reach - flat * flat).max(0.0).sqrt();
             drop = drop.max(joint.y - at.y - below);
         }
-        drop += 0.012 * (1.0 - cycle(ph * 2.0)) * 0.5;
+        drop += 0.012 * (1.0 - cycle(ph * 2.0)) * 0.5 + 0.06 * athletic;
         // A stoop (more running), leaning into a sidestep with the head kept level; the
         // spine turns the shoulders back to face ahead over hips turned into a run.
         let roll = 3.0 * dir.x;
-        let lean = gait.lean;
+        let lean = gait.lean + 6.0 * athletic;
         let yaw_deg = yaw.to_degrees();
-        p.rot_move("hips", Vec3::new(0.0, -drop, 0.0), 0.0, yaw_deg, 0.0);
+        p.rot_move("hips", shift - Vec3::Y * drop, 0.0, yaw_deg, 0.0);
         spine(
             &mut p,
             [-lean * 0.6, -lean * 0.4, 1.5 + lean * 0.4, 0.5 + lean * 0.3],
@@ -1194,9 +1203,11 @@ fn step_cycle(s: &Skeleton, name: &str, gait: Gait) -> AnimationClip {
                 &mut p,
                 side,
                 Arm {
-                    flex: 2.0 + 12.0 * walk_swing * (1.0 - running) - 30.0 * swing_arm * running,
-                    elbow: 18.0 + 6.0 * walk_swing.abs() + 62.0 * running,
-                    abduct: -15.0 - 6.0 * dir.x.abs() * (1.0 - running),
+                    flex: 2.0 + 12.0 * walk_swing * (1.0 - running) - 30.0 * swing_arm * running
+                        + 14.0 * athletic,
+                    elbow: 18.0 + 6.0 * walk_swing.abs() + 62.0 * running + 30.0 * athletic,
+                    abduct: -15.0 - 6.0 * dir.x.abs() * (1.0 - running) + 12.0 * athletic,
+                    wrist: 6.0 * athletic,
                     ..Arm::HANG
                 },
             );
@@ -1321,6 +1332,31 @@ fn sprint(s: &Skeleton) -> AnimationClip {
     })
     .with_event(0.02, "footstep", Some("foot_r"))
     .with_event(0.52, "footstep", Some("foot_l"))
+}
+
+/// Arms folded across the chest, the left forearm over the right with each hand tucked by
+/// the other arm, rising a little with each breath. Laid over the arms by `arms_folded`.
+fn arms_folded(s: &Skeleton) -> AnimationClip {
+    AnimationClip::from_fn("arms_folded", 4.0, 17, true, |ph| {
+        let mut p = PoseBuilder::new(s);
+        let breath = cycle_sin(ph);
+        for (side, flex, elbow) in [(1, 30.0, 84.0), (0, 35.0, 95.0)] {
+            arm(
+                &mut p,
+                side,
+                Arm {
+                    flex: flex + 1.5 * breath,
+                    twist: 80.0,
+                    abduct: -30.0,
+                    elbow,
+                    wrist: 4.0,
+                    protract: 2.0,
+                    elevate: 1.0 + breath,
+                },
+            );
+        }
+        p.take()
+    })
 }
 
 /// Upper-body lean into a turn (additive). `dir`: +1 left, −1 right.
@@ -2766,6 +2802,7 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         walk(s),
         run(s),
         sprint(s),
+        arms_folded(s),
         sidestep_left(s),
         sidestep_right(s),
         backpedal(s),
@@ -2973,6 +3010,17 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
             match_speed: false,
         }),
         weight: Weight::default(),
+    };
+    // Arms folded while standing about or stepping round, by `arms_folded` (0..1; ease it).
+    let leaning = NodeDef::Layer {
+        base: Box::new(leaning),
+        overlay: Box::new(NodeDef::clip("arms_folded")),
+        mask: BoneMaskDef {
+            bones: UPPER_ARM.iter().map(|b| b.to_string()).collect(),
+            include_children: true,
+        },
+        weight: Weight::param("arms_folded"),
+        additive: false,
     };
     let state = |name: &str, node: NodeDef| StateDef {
         name: name.into(),
@@ -3199,6 +3247,58 @@ mod tests {
         assert!(heel > run_heel + 0.08, "heel {heel} vs run {run_heel}");
         // The body faces −Z: a forward lean tips the neck toward −Z.
         assert!(lean < run_lean - 0.05, "lean {lean} vs run {run_lean}");
+    }
+
+    #[test]
+    fn sidesteps_shuffle_low_with_the_hands_up() {
+        let s = skeleton();
+        let clips = clips(&s);
+        let clip = |n: &str| clips.iter().find(|c| c.name == n).unwrap();
+        // Lowest hips, and highest hand above the hips, over a cycle.
+        let stance = |c: &AnimationClip| {
+            let (mut hips, mut hand) = (f32::MAX, f32::MIN);
+            for i in 0..20 {
+                let m = model_at(&s, c, i as f32 / 20.0);
+                let y = m[s.bone("hips")].t.y;
+                hips = hips.min(y);
+                for h in HAND {
+                    hand = hand.max(m[s.bone(h)].t.y - y);
+                }
+            }
+            (hips, hand)
+        };
+        let (back_hips, back_hand) = stance(clip("backpedal"));
+        for name in ["sidestep_left", "sidestep_right"] {
+            let (hips, hand) = stance(clip(name));
+            assert!(
+                hips < back_hips - 0.03,
+                "{name}: hips {hips} vs {back_hips}"
+            );
+            assert!(
+                hand > back_hand + 0.08,
+                "{name}: hand {hand} vs {back_hand}"
+            );
+        }
+    }
+
+    #[test]
+    fn folded_arms_cross_in_front_of_the_chest() {
+        let s = skeleton();
+        let m = model_at(&s, &arms_folded(&s), 0.0);
+        let chest = m[s.bone("chest")].t;
+        let (left, right) = (m[s.bone(HAND[0])].t, m[s.bone(HAND[1])].t);
+        // Each hand crosses to the other side, in front of the chest (the body faces −Z), the
+        // left forearm over the right.
+        assert!(right.x < 0.0 && left.x > 0.0, "hands {left} {right}");
+        assert!(
+            right.z < chest.z - 0.12 && left.z < chest.z - 0.12,
+            "hands {left} {right}"
+        );
+        assert!(left.y > right.y + 0.03, "hands {left} {right}");
+        assert!(
+            (right.y - chest.y).abs() < 0.12,
+            "hands {left} {right} chest {chest}"
+        );
     }
 
     #[test]

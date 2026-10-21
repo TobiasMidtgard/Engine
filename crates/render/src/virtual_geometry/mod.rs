@@ -60,7 +60,7 @@ pub use displace::{
 };
 pub use gpu::{
     BuildJob, BuildStats, ClusterInstance, ClusterRenderer, ClusterStats, DisplacedJob,
-    FAR_SHADOW_CLUSTERS, SMALL_BUILD_TRIANGLES, shader_sources,
+    FAR_SHADOW_CLUSTERS, SMALL_BUILD_TRIANGLES, shader_sources, shader_sources_for,
 };
 
 use engine_core::math::Vec3;

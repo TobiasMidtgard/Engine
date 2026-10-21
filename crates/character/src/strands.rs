@@ -46,6 +46,29 @@ pub struct StrandSet {
     /// hairs and color variation), position along the hair (0 root .. 1 tip), and how fine
     /// the hair is (scalp hair: 0 full .. 1 the finest hairline hair).
     pub attrs: Vec<[f32; 4]>,
+    /// Hair that moves (long and medium scalp hair): the guides it grew from, `points_per`
+    /// model-space points each, root first. Handed to the hair simulation as
+    /// `engine_world::HairGuides`; empty for hair that holds its shape.
+    pub guides: Vec<Vec3>,
+    /// Per hair, the guides it moves with. Empty without guides.
+    pub follow: Vec<Follow>,
+}
+
+/// The guides one hair moves with: up to three, nearest root first, and how much of each
+/// guide's motion it takes (summing to 1). Blending neighbors keeps a lock from splitting
+/// into thin strips where two guides swing apart.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Follow {
+    /// Guide indices (`u32::MAX`: none).
+    pub guides: [u32; 3],
+    pub weights: [f32; 3],
+}
+
+impl Follow {
+    pub const NONE: Follow = Follow {
+        guides: [u32::MAX; 3],
+        weights: [0.0; 3],
+    };
 }
 
 impl StrandSet {
@@ -55,11 +78,18 @@ impl StrandSet {
             points_per,
             points: Vec::new(),
             attrs: Vec::new(),
+            guides: Vec::new(),
+            follow: Vec::new(),
         }
     }
 
     pub fn strand_count(&self) -> usize {
         self.points.len() / self.points_per.max(1) as usize
+    }
+
+    /// Guides of hair that moves (see [`Self::guides`]).
+    pub fn guide_count(&self) -> usize {
+        self.guides.len() / self.points_per.max(1) as usize
     }
 
     fn push(&mut self, pts: &[Vec3], root_radius: f32, tip_radius: f32, random: f32) {
@@ -539,6 +569,8 @@ fn grow_scalp(
         guides.push((sp, pts));
     }
     let guide_grid = GuideGrid::new(&guides);
+    // Long and medium hair moves: every hair with the guide nearest its root.
+    let moves = g.gravity > 0.5 && !guides.is_empty();
     for _ in 0..total {
         let Some(sp) = sampler.sample(&mut r) else {
             break;
@@ -651,6 +683,12 @@ fn grow_scalp(
                 attr[0] = 1.0 - 0.4 * lock_edge * lock_edge * attr[2].sqrt();
             }
         }
+        if moves {
+            set.follow.push(guide_grid.follow(sp.p, &guides));
+        }
+    }
+    if moves {
+        set.guides = guides.into_iter().flat_map(|(_, pts)| pts).collect();
     }
     Some(set)
 }
@@ -733,6 +771,19 @@ fn settle(
     if crumpled {
         pts.copy_from_slice(&grown);
     }
+}
+
+/// The guide whose root is nearest `p`, searching all of them.
+fn nearest_guide(p: Vec3, guides: &[(SkinPoint, Vec<Vec3>)]) -> Option<usize> {
+    guides
+        .iter()
+        .enumerate()
+        .min_by(|a, b| {
+            (a.1.0.p - p)
+                .length_squared()
+                .total_cmp(&(b.1.0.p - p).length_squared())
+        })
+        .map(|(i, _)| i)
 }
 
 /// The part of long hair: on the character's left, 2.5 cm off center.
@@ -918,6 +969,52 @@ impl GuideGrid {
         (p / Self::CELL).floor().as_ivec3().to_array()
     }
 
+    /// The three guides nearest a root, weighted by closeness: a hair at a guide's root
+    /// takes nearly all its motion, one between guides takes their average.
+    fn follow(&self, p: Vec3, guides: &[(SkinPoint, Vec<Vec3>)]) -> Follow {
+        /// Within this distance of a root (m), the root's guide dominates.
+        const NEAR: f32 = 0.004;
+        let k = Self::key(p);
+        let mut best = [(u32::MAX, f32::MAX); 3];
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let Some(list) = self.cells.get(&[k[0] + dx, k[1] + dy, k[2] + dz]) else {
+                        continue;
+                    };
+                    for &i in list {
+                        let d = (guides[i as usize].0.p - p).length_squared();
+                        if d < best[2].1 {
+                            best[2] = (i, d);
+                            best.sort_by(|a, b| a.1.total_cmp(&b.1));
+                        }
+                    }
+                }
+            }
+        }
+        if best[0].0 == u32::MAX {
+            return match nearest_guide(p, guides) {
+                Some(i) => Follow {
+                    guides: [i as u32, u32::MAX, u32::MAX],
+                    weights: [1.0, 0.0, 0.0],
+                },
+                None => Follow::NONE,
+            };
+        }
+        let w = best.map(|(i, d)| {
+            if i == u32::MAX {
+                0.0
+            } else {
+                1.0 / (d + NEAR * NEAR)
+            }
+        });
+        let sum: f32 = w.iter().sum();
+        Follow {
+            guides: best.map(|(i, _)| i),
+            weights: w.map(|w| w / sum),
+        }
+    }
+
     fn nearest(&self, p: Vec3, guides: &[(SkinPoint, Vec<Vec3>)]) -> Option<usize> {
         let k = Self::key(p);
         let mut best: Option<(usize, f32)> = None;
@@ -975,6 +1072,36 @@ fn occlude(set: &mut StrandSet, head: Vec3) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hairs_blend_their_nearest_guides() {
+        let guide = |x: f32| {
+            let p = Vec3::new(x, 0.7, 0.0);
+            (
+                SkinPoint {
+                    p,
+                    n: Vec3::Y,
+                    rest: p,
+                    mask: 1.0,
+                },
+                vec![p],
+            )
+        };
+        let guides = vec![guide(0.0), guide(0.01), guide(0.02), guide(0.2)];
+        let grid = GuideGrid::new(&guides);
+        // At a guide's root: nearly all of its motion.
+        let at = grid.follow(Vec3::new(0.0, 0.7, 0.0), &guides);
+        assert_eq!(at.guides[0], 0);
+        assert!(at.weights[0] > 0.7, "{at:?}");
+        // Halfway between two guides: an even share of both, and the weights sum to 1.
+        let mid = grid.follow(Vec3::new(0.005, 0.7, 0.0), &guides);
+        assert!((mid.weights[0] - mid.weights[1]).abs() < 1e-4, "{mid:?}");
+        assert!((mid.weights.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+        // Far from every guide but one: that one alone.
+        let far = grid.follow(Vec3::new(0.3, 0.7, 0.0), &guides);
+        assert_eq!(far.guides[0], 3);
+        assert!((far.weights[0] - 1.0).abs() < 1e-5, "{far:?}");
+    }
 
     #[test]
     fn sets_count_their_strands() {

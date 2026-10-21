@@ -520,7 +520,9 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             resprouts: true,
             bark_color: srgb(0x6a6055),
             leaf_color: srgb(0x465f27),
-            accent_color: srgb(0x68772b),
+            // The accent is the greener, sunnier end of a crown's range, not lime: most leaves
+            // blend toward it.
+            accent_color: srgb(0x596c31),
             wind_sway_m: 0.22,
             // Late to leaf, late to turn: russet and brown, holding on into November.
             seasons: Some(Seasons {
@@ -566,8 +568,8 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             min_spacing_m: 1.8,
             resprouts: true,
             bark_color: srgb(0xe2ddd2),
-            leaf_color: srgb(0x5c7a2d),
-            accent_color: srgb(0x838f33),
+            leaf_color: srgb(0x577834),
+            accent_color: srgb(0x6e8338),
             wind_sway_m: 0.35,
             // First to turn: clear yellow.
             seasons: Some(Seasons {
@@ -696,7 +698,7 @@ pub fn builtin_species() -> Vec<PlantSpecies> {
             resprouts: true,
             bark_color: srgb(0x7a6553),
             leaf_color: srgb(0x4a6a2a),
-            accent_color: srgb(0x6e7e32),
+            accent_color: srgb(0x5d7334),
             wind_sway_m: 0.25,
             // Early leaves, butter yellow in autumn.
             seasons: Some(Seasons {

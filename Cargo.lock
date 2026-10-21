@@ -534,6 +534,7 @@ dependencies = [
  "bevy_ecs",
  "engine",
  "engine_character",
+ "engine_softbody",
  "engine_ui",
  "serde_json",
  "tracing",
@@ -1155,6 +1156,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "bytemuck",
+ "crossbeam-channel",
  "engine_assets",
  "engine_core",
  "engine_world",
@@ -1165,6 +1167,7 @@ dependencies = [
  "raw-window-handle",
  "serde",
  "serde_json",
+ "sha2",
  "tracing",
  "wgpu",
 ]

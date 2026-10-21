@@ -10,7 +10,9 @@ use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
-use engine_terrain::{FlatPad, OverlayPaint, PlanetTerrain, TerrainPlugin, demo};
+use engine_terrain::{
+    FlatPad, OverlayPaint, PathWear, PlanetTerrain, TerrainPlugin, WornGround, demo,
+};
 use engine_world::{PrecipitationKind, SimulationFocus, SurfaceLayers, WeatherState};
 
 #[derive(Clone, Copy)]
@@ -57,7 +59,46 @@ struct View {
     /// Hand-made, painted ground around home (roads, a plaza, fields, woods, a beach).
     painted: bool,
     ground: Ground,
+    /// Paths worn into the ground before the picture (none with `NO_PATHS` set, for a
+    /// before picture).
+    paths: &'static [PathLine],
+    /// The eye and target the paths' points are measured from, when not this view's own.
+    paths_from: Option<(DVec3, DVec3)>,
 }
+
+/// A path walked `passes` times along a line of (meters ahead of the eye, meters to its
+/// right) points, each walker within `spread` meters of it.
+struct PathLine {
+    points: &'static [(f64, f64)],
+    passes: u32,
+    spread: f32,
+}
+
+/// A well-used path across the meadow, a fork off it walked less, and a faint shortcut.
+const MEADOW_PATHS: &[PathLine] = &[
+    PathLine {
+        points: &[
+            (2.0, 0.6),
+            (25.0, -1.0),
+            (60.0, 2.0),
+            (110.0, 8.0),
+            (180.0, 4.0),
+            (300.0, -10.0),
+        ],
+        passes: 600,
+        spread: 0.22,
+    },
+    PathLine {
+        points: &[(60.0, 2.0), (85.0, -18.0), (130.0, -45.0), (200.0, -70.0)],
+        passes: 140,
+        spread: 0.25,
+    },
+    PathLine {
+        points: &[(20.0, -0.5), (45.0, 14.0), (90.0, 36.0)],
+        passes: 35,
+        spread: 0.2,
+    },
+];
 
 const AUTO: Exposure = Exposure::Auto {
     min_ev100: -3.0,
@@ -83,6 +124,8 @@ const BASE: View = View {
     lab: false,
     painted: false,
     ground: Ground::Dry,
+    paths: &[],
+    paths_from: None,
 };
 
 fn views() -> Vec<View> {
@@ -235,6 +278,95 @@ fn views() -> Vec<View> {
             target: DVec3::new(1_300.0, 0.0, -400.0),
             above_ground: Some(1.7),
             sun: (230.0, 32.0),
+            ..BASE
+        },
+        View {
+            name: "paths_meadow",
+            eye: DVec3::new(900.0, 0.0, 300.0),
+            target: DVec3::new(1_300.0, 0.0, -400.0),
+            above_ground: Some(1.7),
+            sun: (230.0, 32.0),
+            paths: MEADOW_PATHS,
+            ..BASE
+        },
+        View {
+            name: "paths_meadow_high",
+            eye: DVec3::new(900.0, 0.0, 300.0),
+            target: DVec3::new(944.6, 0.0, 221.9),
+            above_ground: Some(22.0),
+            target_above_ground: Some(0.0),
+            sun: (230.0, 32.0),
+            paths: MEADOW_PATHS,
+            ..BASE
+        },
+        // The same paths from a hill a few hundred meters off, beyond the fine window.
+        View {
+            name: "paths_hill",
+            eye: DVec3::new(620.0, 0.0, 790.0),
+            target: DVec3::new(1_000.0, 0.0, 120.0),
+            above_ground: Some(160.0),
+            target_above_ground: Some(0.0),
+            sun: (230.0, 32.0),
+            paths: MEADOW_PATHS,
+            paths_from: Some((
+                DVec3::new(900.0, 0.0, 300.0),
+                DVec3::new(1_300.0, 0.0, -400.0),
+            )),
+            ..BASE
+        },
+        View {
+            name: "paths_rain",
+            eye: DVec3::new(900.0, 0.0, 300.0),
+            target: DVec3::new(1_300.0, 0.0, -400.0),
+            above_ground: Some(1.7),
+            sun: (230.0, 32.0),
+            exposure: Exposure::Manual { ev100: 13.5 },
+            ground: Ground::Rain,
+            paths: MEADOW_PATHS,
+            ..BASE
+        },
+        View {
+            name: "paths_snow",
+            eye: DVec3::new(25.0, 0.0, -12.0),
+            target: DVec3::new(-15.0, -1.5, 22.0),
+            above_ground: Some(1.7),
+            sun: (230.0, 22.0),
+            exposure: Exposure::Manual { ev100: 15.0 },
+            painted: true,
+            ground: Ground::Snow,
+            paths: &[
+                PathLine {
+                    points: &[
+                        (1.5, 0.5),
+                        (15.0, 0.8),
+                        (35.0, -2.0),
+                        (55.0, 1.5),
+                        (90.0, 0.0),
+                    ],
+                    passes: 260,
+                    spread: 0.25,
+                },
+                PathLine {
+                    points: &[(15.0, 0.8), (24.0, 9.0), (40.0, 20.0)],
+                    passes: 40,
+                    spread: 0.15,
+                },
+            ],
+            ..BASE
+        },
+        View {
+            name: "paths_beach",
+            eye: DVec3::new(-7_000.0, 0.0, 12_500.0),
+            target: DVec3::new(-17_000.0, 0.0, 20_000.0),
+            shore: Some(60.0),
+            above_ground: Some(4.0),
+            target_above_ground: Some(-40.0),
+            sun: (255.0, 25.0),
+            paths: &[PathLine {
+                points: &[(2.0, -3.0), (20.0, -1.0), (40.0, 2.0), (62.0, 4.0)],
+                passes: 220,
+                spread: 0.35,
+            }],
             ..BASE
         },
         View {
@@ -772,6 +904,12 @@ fn main() {
                 None => (tf.rotation.as_dquat() * DVec3::Y).as_vec3(),
             };
         }
+        if !view.paths.is_empty() && std::env::var_os("NO_PATHS").is_none() {
+            let (from, toward) = view.paths_from.map_or((eye, target), |(e, t)| {
+                (place(e, Some(1.7)), place(t, Some(0.0)))
+            });
+            wear_paths(&mut app, &view, from, toward, &place);
+        }
         app.world.spawn((
             Camera {
                 exposure: view.exposure,
@@ -834,6 +972,55 @@ fn main() {
             let mask = out.join(format!("{}_forest.pgm", view.name));
             forest_mask(&app, &ground, (eye, target, up), view.fov, size, &mask);
         }
+    }
+}
+
+/// Wears the view's paths into the ground (as if hundreds of people had walked them).
+fn wear_paths(
+    app: &mut App,
+    view: &View,
+    eye: DVec3,
+    target: DVec3,
+    place: &dyn Fn(DVec3, Option<f64>) -> DVec3,
+) {
+    let fwd = DVec3::new(target.x - eye.x, 0.0, target.z - eye.z).normalize();
+    let right = fwd.cross(DVec3::Y);
+    let world = &mut app.world;
+    let mats = world.resource::<engine_world::SurfaceMaterials>().clone();
+    let terrains = world.resource::<engine_terrain::Terrains>();
+    let Some((entity, t)) = terrains.nearest(eye) else {
+        return;
+    };
+    let mut lines = Vec::new();
+    for (k, line) in view.paths.iter().enumerate() {
+        let pts: Vec<DVec3> = line
+            .points
+            .iter()
+            .map(|&(a, r)| place(eye + fwd * a + right * r, Some(0.0)))
+            .collect();
+        for (i, pair) in pts.windows(2).enumerate() {
+            let kind = match view.ground {
+                Ground::Snow => WornGround::Snow,
+                _ => terrains
+                    .surface_at(pair[0], &mats)
+                    .map_or(WornGround::Turf, |(_, _, s, _)| WornGround::of(mats.get(s))),
+            };
+            let (a, b) = (t.to_local(pair[0]), t.to_local(pair[1]));
+            let up = t.local_up((a + b) * 0.5);
+            lines.push((
+                a,
+                b,
+                up,
+                line.passes,
+                line.spread,
+                kind,
+                (k * 31 + i) as u32,
+            ));
+        }
+    }
+    let mut wear = world.resource_mut::<PathWear>();
+    for (a, b, up, passes, spread, kind, seed) in lines {
+        wear.walk_line(entity, a, b, up, passes, 75.0, kind, spread, seed);
     }
 }
 

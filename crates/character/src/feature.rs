@@ -11,6 +11,10 @@
 //! matrix per bone (from [`Rig::palette`]) for this frame and the last, the expression channel
 //! weights from its `FaceControls`, and the gaze. Skin vertices carry four bones and weights;
 //! hairs ride the skin vertex they grow from; eyes ride the head and turn to the gaze.
+//!
+//! Hair that moves also follows its guide (see [`crate::hair_motion`]): its set has a motion
+//! buffer with every guide point's displacement this frame and the last, written each frame from
+//! the person's `HairGuidesPosed`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,6 +31,7 @@ use wgpu::util::DeviceExt;
 
 use engine_world::animation::SkeletonPose;
 use engine_world::character::FaceControls;
+use engine_world::{HairGuides, HairGuidesPosed};
 
 use crate::appearance::{Appearance, AppearanceExt, BeardStyle, HairStyle};
 use crate::build::CharacterMeshes;
@@ -94,6 +99,9 @@ pub struct GpuCharacter {
     pub top: [f32; 4],
     pub bottom: [f32; 4],
     pub accent: [f32; 4],
+    /// A skirt's left thigh capsule: hip joint and radius, knee joint and radius (zero without).
+    pub thigh: [f32; 4],
+    pub knee: [f32; 4],
 }
 
 impl GpuCharacter {
@@ -156,6 +164,8 @@ impl GpuCharacter {
                 cut[1],
             ],
             accent: [o.accent[0], o.accent[1], o.accent[2], cut[2]],
+            thigh: [0.0; 4],
+            knee: [0.0; 4],
         }
     }
 }
@@ -206,6 +216,14 @@ struct GpuStrands {
     group: wgpu::BindGroup,
     hairs: u32,
     vertices: u32,
+    /// Hair that moves: guide point displacements, this frame's then last frame's.
+    motion: Option<GuideMotion>,
+}
+
+struct GuideMotion {
+    buffer: wgpu::Buffer,
+    /// Last frame's displacements (the buffer's second half next frame).
+    last: Vec<[f32; 4]>,
 }
 
 /// What a character's pose buffer held last frame.
@@ -273,6 +291,7 @@ pub struct CharacterFeature {
     /// Scratch for this frame's bone matrices and pose buffer bytes.
     palette: Vec<Mat4>,
     pose_bytes: Vec<u8>,
+    motion: Vec<[f32; 4]>,
 }
 
 type CharacterItem = (
@@ -281,6 +300,8 @@ type CharacterItem = (
     &'static BuiltCharacter,
     Option<&'static SkeletonPose>,
     Option<&'static FaceControls>,
+    Option<&'static HairGuides>,
+    Option<&'static HairGuidesPosed>,
 );
 
 enum Pass {
@@ -470,7 +491,14 @@ impl CharacterFeature {
             if hairs == 0 || set.points_per < 2 {
                 continue;
             }
-            let params: [u32; 4] = [set.points_per, set.kind as u32, hairs, 0];
+            let guides = set.guide_count();
+            let moves = guides > 0 && set.follow.len() == hairs as usize;
+            let params: [u32; 4] = [
+                set.points_per,
+                set.kind as u32,
+                hairs,
+                if moves { guides as u32 } else { 0 },
+            ];
             let params = buffer(
                 "character strand params",
                 bytemuck::cast_slice(&params),
@@ -499,7 +527,11 @@ impl CharacterFeature {
                         v,
                         pack(m.skin.bones.get(at).copied().unwrap_or_default()),
                         pack(m.skin.weights.get(at).copied().unwrap_or([255, 0, 0, 0])),
-                        0,
+                        if moves {
+                            set.follow[h].guides[0]
+                        } else {
+                            u32::MAX
+                        },
                     ]
                 })
                 .collect();
@@ -508,6 +540,41 @@ impl CharacterFeature {
                 bytemuck::cast_slice(&roots),
                 wgpu::BufferUsages::STORAGE,
             );
+            // Per hair that moves: its three guides and their weights (bytes, 0..255).
+            let follow: Vec<[u32; 4]> = if moves {
+                set.follow
+                    .iter()
+                    .map(|f| {
+                        let w = f.weights.map(|w| (w.clamp(0.0, 1.0) * 255.0).round() as u8);
+                        let [a, b, c] = f.guides;
+                        [a, b, c, u32::from_le_bytes([w[0], w[1], w[2], 0])]
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let follow = buffer(
+                "character strand follow",
+                bytemuck::cast_slice(&follow),
+                wgpu::BufferUsages::STORAGE,
+            );
+            // Every guide point's displacement, this frame's then last frame's (none yet).
+            let guide_points = guides * set.points_per as usize;
+            let motion = moves.then(|| GuideMotion {
+                buffer: buffer(
+                    "character strand motion",
+                    &vec![0u8; 2 * guide_points * 16],
+                    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                ),
+                last: vec![[0.0; 4]; guide_points],
+            });
+            let still = motion
+                .is_none()
+                .then(|| buffer("character strand motion", &[], wgpu::BufferUsages::STORAGE));
+            let motion_binding = motion
+                .as_ref()
+                .map_or_else(|| still.as_ref().unwrap(), |m| &m.buffer)
+                .as_entire_binding();
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("character strands"),
                 layout: &p.strand_layout,
@@ -528,12 +595,21 @@ impl CharacterFeature {
                         binding: 3,
                         resource: roots.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: motion_binding,
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: follow.as_entire_binding(),
+                    },
                 ],
             });
             strands.push(GpuStrands {
                 group,
                 hairs,
                 vertices: (set.points_per - 1) * 6,
+                motion,
             });
         }
         GpuMeshes {
@@ -634,6 +710,8 @@ impl RenderFeature for CharacterFeature {
                 storage_entry(1),
                 storage_entry(2),
                 storage_entry(3),
+                storage_entry(4),
+                storage_entry(5),
             ],
         });
         let [
@@ -779,7 +857,7 @@ impl RenderFeature for CharacterFeature {
         for c in self.characters.values_mut() {
             c.seen = false;
         }
-        for (entity, transform, built, skeleton, face) in query.iter(world) {
+        for (entity, transform, built, skeleton, face, guides, posed) in query.iter(world) {
             let entry = self.characters.entry(entity);
             let c = match entry {
                 std::collections::hash_map::Entry::Occupied(o) => {
@@ -830,6 +908,7 @@ impl RenderFeature for CharacterFeature {
                 &mut self.palette,
                 &mut self.pose_bytes,
             );
+            write_motion(gpu, c, guides, posed, skeleton, &mut self.motion);
             self.stats.instances += 1;
             self.stats.triangles += c.triangles;
             self.stats.draw_calls += 2 + c.strands.len() as u32;
@@ -868,6 +947,34 @@ impl RenderFeature for CharacterFeature {
 
 /// The meshes a character feature draws, shared with the build system.
 pub type SharedMeshes = Arc<CharacterMeshes>;
+
+/// Fill the motion buffers of a character's hair that moves: this frame's guide displacements
+/// (from its `HairGuidesPosed`) and last frame's.
+fn write_motion(
+    gpu: &GpuShared,
+    c: &mut GpuMeshes,
+    guides: Option<&HairGuides>,
+    posed: Option<&HairGuidesPosed>,
+    skeleton: Option<&SkeletonPose>,
+    scratch: &mut Vec<[f32; 4]>,
+) {
+    // Only guides grown from this build match its hairs.
+    let guides = guides.filter(|g| g.version == c.version as u32);
+    for m in c.strands.iter_mut().filter_map(|s| s.motion.as_mut()) {
+        match guides {
+            Some(g) => crate::hair_motion::guide_motion(g, posed, skeleton, scratch),
+            None => scratch.clear(),
+        }
+        // Guides for another build (or none yet): the hair rides the head.
+        scratch.resize(m.last.len(), [0.0; 4]);
+        let mut bytes = Vec::with_capacity(scratch.len() * 32);
+        bytes.extend_from_slice(bytemuck::cast_slice(scratch.as_slice()));
+        bytes.extend_from_slice(bytemuck::cast_slice(m.last.as_slice()));
+        gpu.queue.write_buffer(&m.buffer, 0, &bytes);
+        m.last.clear();
+        m.last.extend_from_slice(scratch);
+    }
+}
 
 /// Fill a character's pose buffer: bone matrices from its `SkeletonPose` (identity without
 /// one), expression weights from its `FaceControls`, and last frame's of each.
@@ -955,7 +1062,7 @@ mod tests {
 
     #[test]
     fn gpu_structs_match_wgsl_sizes() {
-        assert_eq!(std::mem::size_of::<GpuCharacter>(), 2 * 64 + 15 * 16);
+        assert_eq!(std::mem::size_of::<GpuCharacter>(), 2 * 64 + 17 * 16);
         assert_eq!(std::mem::size_of::<SkinVertex>(), 104);
         assert_eq!(std::mem::size_of::<GpuPose>(), 4 * 16 + 2 * 16 * 16);
         assert_eq!(std::mem::size_of::<EyeVertex>(), 48);

@@ -7,9 +7,11 @@
 //! dash-attacking when skilled, shooting from cover, crouching behind low walls, kneeling over
 //! a downed mate, blocking and dodging.
 //!
-//! A flanker of a squad maneuver (see `squad`) bounds round to its spot along a path that
-//! keeps out of the target's sight, from hidden point to cover, holding at each while its mate
-//! moves; a suppressor keeps firing at the cover the target was last seen behind. A shooter
+//! A flanker of a squad maneuver (see `squad`) bounds round to its spot off the target's side
+//! (square to the way its cover faces, the same side as its mate) along a path that keeps out
+//! of the target's sight, from hidden point to cover, holding at each while its mate moves; a
+//! suppressor keeps firing at the cover the target was last seen behind, and lobs a grenade
+//! (or smoke, with a mate near) at a target that keeps still there too long (see `grenade`). A shooter
 //! too dull to plan (`RUSH_LOGIC`) rushes straight in. Openings the target shows (a recovery,
 //! a reload, spent stamina), seen through the reaction delay, are struck or fired into.
 
@@ -26,12 +28,13 @@ use crate::agent::{
 use crate::combat::{Downed, Lie, begin_attack};
 use crate::faction::{Faction, Squad};
 use crate::features::ExplosiveProp;
+use crate::grenade;
 use crate::learning::OpponentModels;
 use crate::nav::{NavAgent, NavGrid, PathStatus};
-use crate::perception::{Known, NpcMemory, Opening, Perceivables, Snapshot};
+use crate::perception::{Known, NpcMemory, Opening, Perceivables, Snapshot, segment_distance};
 use crate::skills::NpcSkills;
 use crate::smoke::SmokeClouds;
-use crate::squad::{AttackTokens, ReviveClaims, SquadSettings};
+use crate::squad::{AttackTokens, CLEAR_RADIUS, ReviveClaims, SquadSettings};
 use crate::tactics::{PositionQuery, PositionWeights, TacticsCtx, choose_position};
 use crate::world_model::{Sight, TacticalWorld, physics_backend};
 
@@ -54,6 +57,7 @@ pub(crate) struct BrainWorld<'w, 's> {
     focus: Res<'w, FocusPoints>,
     time: Res<'w, Time>,
     smoke: ResMut<'w, SmokeClouds>,
+    grenades: ResMut<'w, grenade::Grenades>,
     props: Query<'w, 's, (Entity, &'static Transform, &'static ExplosiveProp)>,
     attacks: MessageWriter<'w, AttackEvent>,
     triggers: MessageWriter<'w, AnimationTrigger>,
@@ -86,6 +90,10 @@ struct Claim {
     pos: DVec3,
     dest: Option<DVec3>,
     target: Option<Entity>,
+    /// Going round with the squad: where to (its flank spot, else its next stop).
+    flank: Option<DVec3>,
+    /// On its way to or kneeling over a downed mate.
+    reviving: bool,
 }
 
 /// A downed NPC of a squad, as its squad mates see it.
@@ -149,6 +157,13 @@ pub(crate) fn think_and_act(
                 pos: t.translation,
                 dest: brain.destination,
                 target: brain.target,
+                flank: (brain.role == "flank").then(|| {
+                    brain
+                        .flank_goal
+                        .or(brain.destination)
+                        .unwrap_or(t.translation)
+                }),
+                reviving: brain.action == NpcAction::Revive,
             });
         } else if let Some(&squad) = squad {
             let f = t.forward();
@@ -231,8 +246,16 @@ pub(crate) fn think_and_act(
                 (&s.claims, &s.fallen),
                 &mut revives,
             );
-            if let Some(at) = smoke {
-                w.smoke.throw(at, world_now);
+            match smoke {
+                Some(Throw::Smoke(at)) => {
+                    w.smoke.throw(at, world_now);
+                    w.grenades.thrown_at(brain.target, world_now);
+                }
+                Some(Throw::Frag { at, target }) => {
+                    let hand = pos + DVec3::Y * 1.7;
+                    w.grenades.throw(hand, at, world_now, me, Some(target));
+                }
+                None => {}
             }
         }
         // Pick a spot for actions that need one.
@@ -287,7 +310,7 @@ fn think(
     w: &BrainWorld,
     (claims, fallen): (&[Claim], &[Fallen]),
     revives: &mut ReviveClaims,
-) -> Option<DVec3> {
+) -> Option<Throw> {
     // Target.
     let ordered_target = match brain.order {
         Some(NpcOrder::Attack { target }) => Some(Entity::from_bits(target)),
@@ -398,9 +421,13 @@ fn think(
         } else {
             0.6 + 0.3 * skills.aggression
         };
-        if matches!(brain.role, "cover" | "screen") {
-            // A mate is reviving someone: hold here and keep the enemy busy (or stand between
-            // the medic and the enemy).
+        // A mate is reviving someone: hold here and keep the enemy busy (or stand between the
+        // reviver and the enemy); or an enemy stands over a downed mate: drive it off. (Not
+        // the one whose turn it is to revive: it goes.)
+        let my_revive = fallen
+            .iter()
+            .any(|f| revives.reviver(f.e, world_now) == Some(me));
+        if matches!(brain.role, "cover" | "screen" | "clear") && !my_revive {
             engage += 0.1 + 0.15 * skills.teamwork;
         }
         add(NpcAction::Engage, engage);
@@ -487,6 +514,20 @@ fn think(
     if smoke.is_some() {
         brain.smoke_ready = world_now + SMOKE_EVERY_SECS;
     }
+    let throw = smoke.map(Throw::Smoke).or_else(|| {
+        flush(
+            me,
+            pos,
+            skills,
+            weapon,
+            faction,
+            (now, world_now),
+            brain,
+            memory,
+            w,
+            claims,
+        )
+    });
     if brain.order.is_some() {
         add(NpcAction::Obey, 2.0);
     }
@@ -533,7 +574,93 @@ fn think(
             }
         }
     }
-    smoke
+    throw
+}
+
+/// Something thrown: a smoke canister to land at a spot, or a frag at an enemy.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Throw {
+    Smoke(DVec3),
+    Frag { at: DVec3, target: Entity },
+}
+
+/// Flushing a pinned enemy out: from this much logic a squad's suppressor throws a grenade
+/// at an enemy that has kept still behind cover for [`FLUSH_SECS`] plus up to
+/// [`FLUSH_SPREAD`] more the less logic it has, from [`THROW_MIN`] to [`THROW_RANGE`] m off;
+/// a frag unless a mate is within [`FRAG_CLEAR`] m of the spot (then smoke, which blinds the
+/// enemy while the flankers close in); one throw at an enemy every [`THROW_GAP`] s per
+/// squad, and each thrower every [`THROW_EVERY`] s. Keeping still is moving less than
+/// [`STILL_SLACK`] m.
+const FLUSH_LOGIC: f32 = 0.4;
+const FLUSH_SECS: f64 = 6.0;
+const FLUSH_SPREAD: f64 = 8.0;
+const THROW_MIN: f64 = 7.0;
+const THROW_RANGE: f64 = 32.0;
+const FRAG_CLEAR: f64 = grenade::FRAG_RADIUS as f64 + 2.0;
+const THROW_GAP: f64 = 8.0;
+const THROW_EVERY: f64 = 20.0;
+const STILL_SLACK: f64 = 1.5;
+
+/// A grenade or smoke at the enemy it is pinning, if it has sat still behind cover long
+/// enough (see [`FLUSH_LOGIC`]). Keeps track of how long it has.
+#[allow(clippy::too_many_arguments)]
+fn flush(
+    me: Entity,
+    pos: DVec3,
+    skills: &NpcSkills,
+    weapon: &NpcWeapon,
+    faction: &Faction,
+    (now, world_now): (f64, f64),
+    brain: &mut NpcBrain,
+    memory: &NpcMemory,
+    w: &BrainWorld,
+    claims: &[Claim],
+) -> Option<Throw> {
+    let target = brain.target?;
+    let k = memory.get(target).filter(|k| k.awareness >= 0.8)?;
+    let still = brain
+        .still
+        .filter(|&(e, at, _)| e == target && at.distance(k.last_position) < STILL_SLACK);
+    let (_, _, since) = *brain
+        .still
+        .insert(still.unwrap_or((target, k.last_position, now)));
+    if weapon.style != WeaponStyle::Ranged
+        || skills.logic < FLUSH_LOGIC
+        || brain.role != "suppress"
+        || world_now < brain.grenade_ready
+        || now - since < FLUSH_SECS + FLUSH_SPREAD * (1.0 - skills.logic) as f64
+        || now - k.last_seen > MANEUVER_SECS as f64
+        || w.grenades.lately(target, world_now, THROW_GAP)
+    {
+        return None;
+    }
+    let flat = DVec2::new(k.last_position.x - pos.x, k.last_position.z - pos.z).length();
+    if !(THROW_MIN..THROW_RANGE).contains(&flat) {
+        return None;
+    }
+    let sight = Sight {
+        world: &w.world,
+        physics: physics_backend(&w.backend, &w.physics),
+        ground: &w.ground,
+        obscurance: Some(&w.obscurance),
+    };
+    // Only at an enemy behind cover; it lands just behind it, off by as much as the thrower is
+    // a poor shot.
+    let front = cover_front(&sight, k.last_position, &[me, target])?;
+    let a = brain.random() * std::f32::consts::TAU;
+    let off = (1.0 - skills.accuracy) * 2.0 * brain.random();
+    let at = k.last_position - front.as_dvec3() * 0.6
+        + DVec3::new(a.cos() as f64, 0.0, a.sin() as f64) * off as f64;
+    brain.grenade_ready = world_now + THROW_EVERY;
+    brain.still = Some((target, k.last_position, now));
+    let mate_near = claims
+        .iter()
+        .any(|c| c.e != me && c.faction == *faction && c.pos.distance(at) < FRAG_CLEAR);
+    Some(if mate_near {
+        Throw::Smoke(at)
+    } else {
+        Throw::Frag { at, target }
+    })
 }
 
 /// How far a medic throws a smoke canister (m), and how often it has one ready (s).
@@ -700,7 +827,9 @@ fn weigh_revive(
             k.last_position.distance(pos),
             k.last_position.distance(chest),
         );
-        if ago < 1.5 && (to_me < strike_me || to_ally < strike_ally) {
+        // (A shooter that close is a matter of what it sees, below, not of its reach.)
+        let shooter = k.history.back().is_some_and(|o| o.shooter);
+        if ago < 1.5 && !shooter && (to_me < strike_me || to_ally < strike_ally) {
             melee_close = true;
         }
         if k.awareness < 0.8 {
@@ -791,9 +920,10 @@ fn revive_range(settings: &NpcSettings, medic: bool) -> f32 {
     settings.ally_revive_range * if medic { 1.5 } else { 1.0 }
 }
 
-/// The enemy that most threatens the squad's medic kneeling at `at`, for a mate covering it
-/// (`"cover"`: of those seen a moment ago, the one with the clearest view of it, nearer
-/// counting more) or screening it (`"screen"`: the nearest to it).
+/// The enemy that most threatens a squad mate kneeling (or about to) at `at`, for a mate
+/// covering it (`"cover"`: of those seen a moment ago, the one with the clearest view of it,
+/// nearer counting more) or screening it (`"screen"`: the nearest to it); or, for one driving
+/// an enemy off a downed mate lying at `at` (`"clear"`), the nearest within reach of it.
 fn guard_threat(
     me: Entity,
     role: &str,
@@ -805,6 +935,13 @@ fn guard_threat(
     let fresh = |k: &&Known| k.awareness >= 0.8 && now - k.last_seen < 2.0;
     let flat = |p: DVec3| DVec2::new(p.x - at.x, p.z - at.z).length();
     match role {
+        "clear" => memory
+            .known
+            .iter()
+            .filter(fresh)
+            .filter(|k| flat(k.last_position) < CLEAR_RADIUS + 1.0)
+            .min_by(|a, b| flat(a.last_position).total_cmp(&flat(b.last_position)))
+            .cloned(),
         "screen" => memory
             .known
             .iter()
@@ -1038,6 +1175,7 @@ fn pick_spot(
         brain.next_position = now + 1.0;
         return;
     }
+    let going_round = brain.action == NpcAction::Flank && brain.role == "flank";
     let ideal = match brain.action {
         NpcAction::Retreat => weapon.ideal_range().max(8.0) * 2.2,
         NpcAction::Flank => weapon.ideal_range().clamp(6.0, 14.0),
@@ -1045,6 +1183,7 @@ fn pick_spot(
     };
     let mut allies = Vec::new();
     let mut ally_angles = Vec::new();
+    let mut flank_angles = Vec::new();
     for c in &s.claims {
         if c.e == me || c.faction != *faction {
             continue;
@@ -1053,16 +1192,22 @@ fn pick_spot(
         if let Some(d) = c.dest {
             allies.push(d);
         }
-        if c.target == Some(target) {
-            let p = c.dest.unwrap_or(c.pos);
-            ally_angles.push(
-                Vec3::new(
-                    (p.x - target_pos.x) as f32,
-                    0.0,
-                    (p.z - target_pos.z) as f32,
-                )
-                .normalize_or_zero(),
-            );
+        if c.target != Some(target) {
+            continue;
+        }
+        let angle = |p: DVec3| {
+            Vec3::new(
+                (p.x - target_pos.x) as f32,
+                0.0,
+                (p.z - target_pos.z) as f32,
+            )
+            .normalize_or_zero()
+        };
+        ally_angles.push(angle(c.dest.unwrap_or(c.pos)));
+        // Going round a target in cover, a flanker weighs only its fellow flankers' ways
+        // round (to go the same way unless the other side is clearly better).
+        if let Some(p) = c.flank {
+            flank_angles.push(angle(p));
         }
     }
     let other_threats: Vec<DVec3> = memory
@@ -1078,7 +1223,7 @@ fn pick_spot(
         .filter(|(_, _, p)| !p.detonated)
         .map(|(_, t, p)| (t.translation, p.radius))
         .collect();
-    let q = PositionQuery {
+    let mut q = PositionQuery {
         me,
         from: pos,
         target,
@@ -1087,6 +1232,7 @@ fn pick_spot(
         other_threats,
         allies,
         ally_angles,
+        front: None,
         ideal_range: ideal,
         current_destination: brain.destination,
         logic: skills.logic,
@@ -1130,6 +1276,22 @@ fn pick_spot(
         nav: &mut navctx,
         heat,
     };
+    // A target behind cover is flanked from its side: off the side of its cover, on cover that
+    // sees past it, the same side as the other flanker unless the other side is clearly
+    // better, not round behind it. One in the open is simply gone round (pincer and flank).
+    if going_round && let Some(front) = cover_front(&ctx.sight, target_pos, &[me, target]) {
+        let w = q.weights;
+        q.front = Some(front);
+        q.ally_angles = flank_angles;
+        q.weights = PositionWeights {
+            flank: 0.0,
+            pincer: -1.0,
+            side: 3.0,
+            can_shoot: w.can_shoot * 1.6,
+            cover: w.cover + 0.3,
+            ..w
+        };
+    }
     let chosen = choose_position(&mut ctx, &q, &mut s.path, &mut s.spots);
     // Remember high ground for later (it shows up among the spots when the weights ask for it).
     if brain.action == NpcAction::SeekHighGround && chosen.is_none_or(|c| c.reason != "high_ground")
@@ -1144,7 +1306,6 @@ fn pick_spot(
         _ => 2.0,
     } * (0.8 + 0.4 * brain.random() as f64);
     brain.next_position = now + settle;
-    let going_round = brain.action == NpcAction::Flank && brain.role == "flank";
     if let Some(spot) = chosen.filter(|_| going_round) {
         // Round to the flank with the squad: a way out of the enemy's sight, taken from cover
         // to cover in turns (see `bound`).
@@ -1240,6 +1401,27 @@ fn pick_spot(
         }
     }
 }
+
+/// Which way the cover the enemy at `at` is behind faces (XZ, from it), if it is behind any:
+/// the mean of the ways round it that are blocked within [`COVER_PROBE`] m at chest height.
+fn cover_front(sight: &Sight, at: DVec3, ignore: &[Entity]) -> Option<Vec3> {
+    let chest = at + DVec3::Y * 1.0;
+    let mut sum = Vec3::ZERO;
+    let mut blocked = 0;
+    for k in 0..16 {
+        let a = k as f32 / 16.0 * std::f32::consts::TAU;
+        let d = Vec3::new(a.cos(), 0.0, a.sin());
+        if !sight.clear(chest, chest + d.as_dvec3() * COVER_PROBE, ignore) {
+            sum += d;
+            blocked += 1;
+        }
+    }
+    // Walled in all round (or nearly): no one way.
+    (blocked > 0 && sum.length() > 0.25 * blocked as f32).then(|| sum.normalize())
+}
+
+/// How far round an enemy [`cover_front`] looks for its cover (m).
+const COVER_PROBE: f64 = 2.5;
 
 /// How long a squad keeps pinning an enemy in cover or going round it without seeing it (s).
 const MANEUVER_SECS: f32 = 10.0;
@@ -1573,8 +1755,8 @@ fn drive(
             }
         }
         NpcAction::Engage if weapon.style == WeaponStyle::Melee => {
-            // Screening the squad's kneeling medic: it stands between the medic and the enemy,
-            // and takes on only one that comes close to the medic.
+            // Screening a kneeling mate (the squad's medic most of all): it stands between it
+            // and the enemy, and takes on only one that comes close to it.
             let screen = brain
                 .guard
                 .filter(|_| brain.role == "screen")
@@ -1718,6 +1900,7 @@ fn drive(
                         brain,
                         combat,
                         w,
+                        &s.claims,
                         &mut out,
                     );
                 }
@@ -1779,6 +1962,7 @@ fn drive(
                         brain,
                         combat,
                         w,
+                        &s.claims,
                         &mut out,
                     );
                 }
@@ -2032,6 +2216,9 @@ fn melee(
     let _ = fwd;
 }
 
+/// How close to its line of fire a fighter lets a mate reviving someone be (m).
+const REVIVER_CLEARANCE: f64 = 1.2;
+
 /// Shoot at the enemy when there's a shot (or suppress its last position for the squad).
 #[allow(clippy::too_many_arguments)]
 fn ranged_fire(
@@ -2046,6 +2233,7 @@ fn ranged_fire(
     brain: &mut NpcBrain,
     combat: &mut NpcCombat,
     w: &mut BrainWorld,
+    claims: &[Claim],
     out: &mut MoveIntent,
 ) {
     if !ready || weapon.style != WeaponStyle::Ranged {
@@ -2069,6 +2257,21 @@ fn ranged_fire(
     } else {
         return;
     };
+    // It doesn't fire past a mate reviving someone (if it has any teamwork): a stray shot
+    // would make it let go.
+    if skills.teamwork >= 0.3 {
+        let muzzle = pos + DVec3::Y * 1.4;
+        let mine = claims.iter().find(|c| c.e == me).map(|c| c.faction);
+        let in_line = claims.iter().any(|c| {
+            c.reviving
+                && c.e != me
+                && Some(c.faction) == mine
+                && segment_distance(c.pos + DVec3::Y * 0.8, muzzle, aim) < REVIVER_CLEARANCE
+        });
+        if in_line {
+            return;
+        }
+    }
     if k.visible && k.opening(now, skills.reaction_time).is_some() {
         combat.stats.punishes += 1;
     }

@@ -92,6 +92,7 @@ mod surface_weather;
 pub mod targets;
 pub mod texture;
 pub mod virtual_geometry;
+pub mod virtual_texture;
 pub mod volumetrics;
 
 use engine_assets::{AssetAppExt, AssetPlugin, AssetServer, Assets, Handle};
@@ -118,7 +119,7 @@ pub use gltf_loader::{
 };
 pub use grass::{GrassBender, GrassField, GrassStyle};
 pub use image_cache::{ImageMemoryStats, ImageTexture};
-pub use material::{AlphaMode, StandardMaterial, TextureMapping};
+pub use material::{AlphaMode, StandardMaterial, TextureMapping, TextureProjection};
 pub use material_library::{MaterialMaps, MaterialPreset, MaterialTextures};
 pub use mesh::{Mesh, Shape, Vertex};
 pub use motion_blur::MotionBlur;
@@ -137,6 +138,9 @@ pub use sprites::{
 pub use surface_weather::{SURFACE_PUDDLE_SCALE_M, SURFACE_SNOW_SCALE_M};
 pub use texture::{Image, ImageLoader, PixelFormat};
 pub use virtual_geometry::{Displacement, DisplacementSource};
+pub use virtual_texture::{
+    TileSource, VirtualTextureStats, VirtualTextureStatus, VirtualTextures, paint_tile_with,
+};
 pub use wgpu;
 
 pub mod prelude {
@@ -148,8 +152,8 @@ pub mod prelude {
         MotionBlur, NoVirtualGeometry, Parallax, PixelPerfect, PixelSnap, PointLight, Projection,
         RenderAppExt, RenderFeature, RenderPhase, RenderPlugin, RenderSettings, Screenshots, Shape,
         SkyLightVolume, Sprite, SpriteAlpha, SpriteAnimation, SpriteAnimationMode, SpriteAtlas,
-        SpriteFilter, StandardMaterial, StoneKind, TextureMapping, TileMap, Tonemapper,
-        VolumetricQuality, WallStone, spawn_gltf_scene, spawn_gltf_scene_deferred,
+        SpriteFilter, StandardMaterial, StoneKind, TextureMapping, TileMap, TileSource, Tonemapper,
+        VirtualTextures, VolumetricQuality, WallStone, spawn_gltf_scene, spawn_gltf_scene_deferred,
     };
 }
 
@@ -183,6 +187,8 @@ impl Plugin for RenderPlugin {
             .init_resource::<Screenshots>()
             .init_resource::<RenderStats>()
             .init_resource::<features::PendingRenderFeatures>()
+            .init_resource::<VirtualTextures>()
+            .init_resource::<VirtualTextureStats>()
             .register_component::<Camera>(
                 "Renders the scene. Perspective (fov_y_deg, near) or Orthographic (height). Exposure Auto or Manual{ev100}. Highest `order` among active cameras wins.",
             )
@@ -238,7 +244,7 @@ impl Plugin for RenderPlugin {
                 "On an orthographic Camera: pixel-perfect pixel art. pixels_per_unit (art texels per meter), scale (screen pixels per texel, 0 = largest that shows the camera's height), snap Texel/ScreenPixel (camera and sprites move in whole steps). Turns temporal anti-aliasing off for this camera.",
             )
             .register_resource::<RenderSettings>(
-                "Renderer quality and look: shadows (shadow_distance m, far_shadow_distance m: big casters such as mountains beyond the cascades, 0 = off; sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), screen_space_reflections, volumetric_fog (bool), volumetric_fog_range (m), volumetric_fog_quality (Low/Medium/High), anti_aliasing (Taa/None) and sharpness, taa_reactive (0..1: TAA keeps thin transparent things such as snowflakes, rain and sparks; found automatically), tonemapper (AgX/Aces/Reinhard/None), bloom (bloom_intensity, bloom_limit: the most a pixel brings into the bloom in multiples of white, 0 = no limit), grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion/Reflections/Clusters/ClusterLevels), virtual_geometry (dense opaque meshes as GPU-culled clusters: virtual_geometry_min_triangles, virtual_geometry_occlusion (two-pass occlusion culling), virtual_geometry_cache (+ _dir, _mb: builds kept on disk), cluster_error_px, cluster_shadow_error_texels), release_image_pixels (free each image's CPU pixels once uploaded and unchanged for 120 frames; Image keep_pixels opts one out).",
+                "Renderer quality and look: shadows (shadow_distance m, far_shadow_distance m: big casters such as mountains beyond the cascades, 0 = off; sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), screen_space_reflections, volumetric_fog (bool), volumetric_fog_range (m), volumetric_fog_quality (Low/Medium/High), anti_aliasing (Taa/None) and sharpness, taa_reactive (0..1: TAA keeps thin transparent things such as snowflakes, rain and sparks; found automatically), tonemapper (AgX/Aces/Reinhard/None), bloom (bloom_intensity, bloom_limit: the most a pixel brings into the bloom in multiples of white, 0 = no limit), grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion/Reflections/Clusters/ClusterLevels/VirtualTextures), virtual_geometry (dense opaque meshes as GPU-culled clusters: virtual_geometry_min_triangles, virtual_geometry_occlusion (two-pass occlusion culling), virtual_geometry_cache (+ _dir, _mb: builds kept on disk), cluster_error_px, cluster_shadow_error_texels), release_image_pixels (free each image's CPU pixels once uploaded and unchanged for 120 frames; Image keep_pixels opts one out), virtual_textures (stream big images and VirtualTextures handles through a tile cache: virtual_texture_threshold texels, virtual_texture_cache_tiles per cache texture, virtual_texture_upload_budget tiles per frame, virtual_texture_mip_bias, virtual_texture_compression for BC7).",
             )
             .register_resource::<FogSettings>("Height fog everywhere (volumetric within volumetric_fog_range, with light shafts): density (extinction 1/m at base_height, visibility about 3.9 / density: 0.00002 clear air, 0.0001 light haze, 0.0005 haze, 0.05 ground fog), height_falloff (1/m), base_height (m), max_opacity, color (albedo), sun_scattering (Henyey-Greenstein g, 0.6 = forward scattering, glow around the sun).")
             .register_resource::<Atmosphere>(
@@ -251,6 +257,7 @@ impl Plugin for RenderPlugin {
             )
             .add_systems(Update, sprites::animate_sprites)
             .add_systems(Extract, resolve_mesh_renderers)
+            .add_systems(Extract, virtual_texture::poll_virtual_textures)
             .add_systems(Render, renderer::render_system)
             .add_render_feature(sky_feature::SkyFeature::default())
             .add_render_feature(mesh_feature::MeshFeature::default())
@@ -429,10 +436,24 @@ mod tests {
     #[test]
     fn shaders_validate() {
         let mut shaders: Vec<(&str, std::borrow::Cow<str>, bool)> = vec![
-            ("mesh", include_str!("shaders/mesh.wgsl").into(), true),
+            (
+                "mesh",
+                virtual_texture::system::mesh_source(true).into(),
+                true,
+            ),
+            (
+                "mesh (no feedback)",
+                virtual_texture::system::mesh_source(false).into(),
+                true,
+            ),
             (
                 "mesh_shadow",
-                include_str!("shaders/mesh_shadow.wgsl").into(),
+                virtual_texture::system::mesh_shadow_source(true).into(),
+                false,
+            ),
+            (
+                "mesh_shadow (no feedback)",
+                virtual_texture::system::mesh_shadow_source(false).into(),
                 false,
             ),
             ("sky", include_str!("shaders/sky.wgsl").into(), true),
@@ -496,7 +517,10 @@ mod tests {
             }
         }
         // Virtual geometry shaders are made of several files.
-        for (name, src, frame) in virtual_geometry::shader_sources() {
+        for (name, src, frame) in virtual_geometry::shader_sources()
+            .into_iter()
+            .chain(virtual_geometry::shader_sources_for(false))
+        {
             if let Err(e) = validate_wgsl(name, &compose_shader(&src, frame)) {
                 errors.push(e);
             }

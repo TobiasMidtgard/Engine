@@ -16,6 +16,7 @@ pub mod palette;
 pub mod render;
 pub mod rivers;
 pub mod shape;
+pub mod wear;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,6 +39,7 @@ pub use shape::{
     Climate, FlatPad, HeightOverlay, OverlayPaintFn, PlanetShape, ShapeSample, dir_from_lat_lon,
     lat_lon_from_dir,
 };
+pub use wear::{PathWear, WearSettings, WornGround};
 
 /// A procedural terrain: a whole planet (or a flat square) with level of detail from orbit
 /// down to half a meter, oceans, mountains, craters, flat building pads, painted materials and
@@ -422,6 +424,15 @@ impl TerrainRuntime {
         self.rotation.inverse() * (p - self.position)
     }
 
+    /// Terrain-local up at a terrain-local point.
+    pub fn local_up(&self, local: DVec3) -> DVec3 {
+        if self.source.map.is_sphere() {
+            local.normalize_or(DVec3::Y)
+        } else {
+            DVec3::Y
+        }
+    }
+
     /// Distance from a world point to this terrain's sea-level surface (signed, meters).
     pub fn altitude_hint(&self, p: DVec3) -> f64 {
         let l = self.to_local(p);
@@ -501,6 +512,9 @@ impl Plugin for TerrainPlugin {
             .init_resource::<TerrainSettings>()
             .insert_resource(DeformationMap::new(settings.cell_m, settings.size))
             .insert_resource(settings)
+            .insert_resource(PathWear::new(WearSettings::default().cell_m))
+            .init_resource::<WearSettings>()
+            .init_resource::<WearProvider>()
             .init_resource::<collider::TerrainColliders>()
             .init_resource::<RecoverClock>()
             .register_component::<PlanetTerrain>(
@@ -517,6 +531,10 @@ impl Plugin for TerrainPlugin {
             .register_resource::<DeformationSettings>(
                 "Footprints and tracks: grid cell size (m), rim height, recovery rates.",
             )
+            .register_resource::<WearSettings>(
+                "Worn paths: cell size (m), how fast paths form (gain_scale) and heal \
+                 (heal_scale, multiplies the healing half-lives), drawn window (cells).",
+            )
             .add_systems(
                 PostUpdate,
                 (sync_terrains, apply_edits, collider::update_colliders)
@@ -525,8 +543,17 @@ impl Plugin for TerrainPlugin {
             )
             .add_systems(PostUpdate, follow_world_shift.in_set(WorldShiftSet::Apply))
             .add_systems(
+                PostUpdate,
+                shift_wear_provider.in_set(WorldShiftSet::Rebuild),
+            )
+            .add_systems(
                 FixedUpdate,
-                (demo::walk, demo::swing_limbs, deform_from_contacts)
+                (
+                    demo::walk,
+                    demo::swing_limbs,
+                    deform_from_contacts,
+                    wear_from_contacts,
+                )
                     .chain()
                     .in_set(SimSet::Environment),
             )
@@ -802,6 +829,121 @@ fn deform_from_contacts(
     }
 }
 
+/// Accumulates time for the low-rate path healing pass.
+#[derive(Default)]
+struct HealClock(f32);
+
+/// Wears paths where feet, hooves and wheels land, and lets unused ones heal.
+#[allow(clippy::too_many_arguments)]
+fn wear_from_contacts(
+    mut contacts: MessageReader<GroundContact>,
+    mut wear: ResMut<PathWear>,
+    settings: Res<WearSettings>,
+    env: Env,
+    terrains: Res<Terrains>,
+    time: Res<Time>,
+    weather: Res<WeatherState>,
+    surface_layers: Res<SurfaceLayers>,
+    mut clock: Local<HealClock>,
+    mut provider: ResMut<WearProvider>,
+    mut ground_wear: ResMut<engine_world::GroundWear>,
+) {
+    if !settings.enabled || terrains.entries.is_empty() {
+        contacts.clear();
+        return;
+    }
+    if (wear.cell_m - settings.cell_m).abs() > 1e-6 {
+        *wear = PathWear::new(settings.cell_m.clamp(0.1, 4.0));
+    }
+    let gone: Vec<Entity> = wear
+        .terrains
+        .keys()
+        .filter(|e| !terrains.entries.contains_key(e))
+        .copied()
+        .collect();
+    for e in gone {
+        wear.forget(e);
+    }
+    for c in contacts.read() {
+        let Some((entity, t)) = terrains.nearest(c.position) else {
+            continue;
+        };
+        let local = t.to_local(c.position);
+        if t.altitude_hint(c.position).abs() > 20_000.0 {
+            continue;
+        }
+        let layers = surface_layers.sample(c.position);
+        let ground = if layers.snow_m > 0.02 {
+            WornGround::Snow
+        } else {
+            let surface = c
+                .surface
+                .or(env.ground(c.position).map(|g| g.surface))
+                .unwrap_or_default();
+            WornGround::of(env.material(surface))
+        };
+        wear.tread(
+            entity,
+            local,
+            t.local_up(local),
+            c.size,
+            c.load_kg,
+            c.kind,
+            ground,
+            layers.wetness,
+            settings.gain_scale,
+        );
+    }
+    clock.0 += time.delta_secs();
+    if clock.0 >= 2.0 {
+        let dt = clock.0;
+        clock.0 = 0.0;
+        // Snowfall: precipitation in mm/h of water ≈ 10× that in fresh snow.
+        let snowfall = if weather.is_snowing() {
+            weather.precipitation_mm_h * 0.01 / 3600.0
+        } else {
+            0.0
+        };
+        wear.heal(dt, snowfall, settings.heal_scale);
+    }
+    // What other modules read (`GroundWear`): a fresh snapshot a few times a second while
+    // paths change.
+    provider.since += time.delta_secs();
+    if wear.revision != provider.revision && provider.since >= 0.5 {
+        provider.since = 0.0;
+        provider.revision = wear.revision;
+        let snap = Arc::new(wear::WearSnapshot::of(&wear, |e| {
+            terrains.entries.get(&e).map(|t| (t.position, t.rotation))
+        }));
+        *ground_wear = engine_world::GroundWear(snap.clone());
+        provider.snapshot = Some(snap);
+    }
+}
+
+/// The snapshot installed as `GroundWear`, and when it was taken.
+#[derive(Resource, Default)]
+struct WearProvider {
+    snapshot: Option<Arc<wear::WearSnapshot>>,
+    revision: u64,
+    since: f32,
+}
+
+/// After the world re-anchors, `GroundWear` answers in the new frame at once.
+fn shift_wear_provider(
+    mut shifts: MessageReader<WorldShift>,
+    mut provider: ResMut<WearProvider>,
+    mut ground_wear: ResMut<engine_world::GroundWear>,
+) {
+    let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) else {
+        return;
+    };
+    if let Some(snap) = &provider.snapshot {
+        let moved = Arc::new(snap.shifted(&s));
+        *ground_wear = engine_world::GroundWear(moved.clone());
+        provider.snapshot = Some(moved);
+    }
+}
+
 fn parse_vec3(v: Option<&serde_json::Value>) -> Option<DVec3> {
     let a = v?.as_array()?;
     Some(DVec3::new(
@@ -833,6 +975,61 @@ fn register_apis(app: &mut App) {
                 "above_sea_level_m": height,
                 "above_ground_m": (at - point).dot(up),
             }))
+        },
+    )
+    .register_api(
+        "terrain.wear",
+        "How worn the ground is at a world point: 0 untouched .. 1 a well-worn path (grass \
+         trodden to bare earth, snow packed to ice, a trough in sand).",
+        r#"{"at": [0, 0, 0]}"#,
+        |world, args| {
+            let at = parse_vec3(args.get("at")).ok_or("Pass \"at\": [x, y, z] in meters.")?;
+            let terrains = world.resource::<Terrains>();
+            let (entity, t) = terrains
+                .nearest(at)
+                .ok_or("There is no terrain here. Spawn an entity with PlanetTerrain first.")?;
+            let wear = world.resource::<PathWear>().wear_at(entity, t.to_local(at));
+            Ok(serde_json::json!({ "wear": wear }))
+        },
+    )
+    .register_api(
+        "terrain.walk_path",
+        "Wear a path at once, as if `passes` people of `load_kg` had walked from `from` to \
+         `to` (world points; snapped to the ground), each keeping within `spread_m` of the \
+         line. The ground under the line decides how it wears.",
+        r#"{"from": [0, 0, 0], "to": [30, 0, 0], "passes": 300, "load_kg": 80, "spread_m": 0.3}"#,
+        |world, args| {
+            let from = parse_vec3(args.get("from")).ok_or("Pass \"from\": [x, y, z].")?;
+            let to = parse_vec3(args.get("to")).ok_or("Pass \"to\": [x, y, z].")?;
+            let passes = args.get("passes").and_then(|v| v.as_u64()).unwrap_or(300) as u32;
+            let load = args.get("load_kg").and_then(|v| v.as_f64()).unwrap_or(80.0) as f32;
+            let spread = args.get("spread_m").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
+            let terrains = world.resource::<Terrains>();
+            let mats = world.resource::<SurfaceMaterials>();
+            let (entity, t) = terrains
+                .nearest(from)
+                .ok_or("There is no terrain here. Spawn an entity with PlanetTerrain first.")?;
+            let ground = t.ground_terrain();
+            let ids = palette::SurfaceIds::new(mats);
+            let snap = |p: DVec3| ground.surface(p, &ids);
+            let (a, _, surface, _) = snap(from).ok_or("No ground under \"from\".")?;
+            let (b, _, _, _) = snap(to).ok_or("No ground under \"to\".")?;
+            let kind = WornGround::of(mats.get(surface));
+            let (la, lb) = (t.to_local(a), t.to_local(b));
+            let up = t.local_up((la + lb) * 0.5);
+            let mut wear = world.resource_mut::<PathWear>();
+            wear.walk_line(
+                entity,
+                la,
+                lb,
+                up,
+                passes.min(100_000),
+                load,
+                kind,
+                spread,
+                1,
+            );
+            Ok(serde_json::json!({ "ground": format!("{kind:?}").to_lowercase() }))
         },
     )
     .register_api(
@@ -1324,12 +1521,62 @@ mod tests {
     }
 
     #[test]
+    fn a_crowd_wears_a_path_across_the_meadow() {
+        let mut app = app_with_planet();
+        app.update();
+        {
+            let mut commands = app.world.commands();
+            demo::spawn_path_crowd(
+                &mut commands,
+                DVec3::new(0.0, 0.0, 30.0),
+                20.0,
+                12,
+                600.0,
+                false,
+            );
+        }
+        app.world.flush();
+        app.update_n(12);
+        let wear_at = |app: &mut App, p: DVec3| {
+            let v = engine_core::registry::call_api(
+                &mut app.world,
+                "terrain.wear",
+                serde_json::json!({ "at": p.to_array() }),
+            )
+            .unwrap();
+            v["wear"].as_f64().unwrap()
+        };
+        let on = wear_at(&mut app, DVec3::new(0.0, 0.0, 30.0));
+        let off = wear_at(&mut app, DVec3::new(0.0, 0.0, 34.0));
+        assert!(on > 0.3, "the crowd's line wore only {on}");
+        assert!(off < 0.01, "4 m to the side wore {off}");
+        // Other modules see it through `GroundWear`.
+        app.update_n(40);
+        let shared = app.world.resource::<engine_world::GroundWear>().clone();
+        let seen = shared.wear(DVec3::new(0.0, 0.0, 30.0)) as f64;
+        assert!(
+            (seen - on).abs() < 0.1,
+            "GroundWear says {seen}, the map {on}"
+        );
+        assert!(shared.wear(DVec3::new(0.0, 0.0, 34.0)) < 0.01);
+        // After the world re-anchors it answers in the new frame.
+        app.world
+            .write_message(WorldShift::translate(DVec3::new(100.0, 0.0, 0.0)));
+        app.update();
+        let shared = app.world.resource::<engine_world::GroundWear>().clone();
+        let moved = shared.wear(DVec3::new(100.0, 0.0, 30.0)) as f64;
+        assert!(moved > 0.2, "after a shift GroundWear says {moved}");
+    }
+
+    #[test]
     fn apis_are_registered() {
         let app = app_with_planet();
         let apis = app.world.resource::<ApiRegistry>();
         for name in [
             "terrain.height",
             "terrain.edit",
+            "terrain.wear",
+            "terrain.walk_path",
             "terrain.footprint",
             "terrain.stats",
         ] {

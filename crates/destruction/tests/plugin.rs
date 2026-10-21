@@ -13,8 +13,8 @@ use engine_world::physics::{
     PhysicsQuery, QueryFilter, RigidBody,
 };
 use engine_world::{
-    DamageEvent, DamageKind, EditOp, EditShape, ProjectileTrace, SurfaceMaterials, TerrainEdit,
-    WorldPlugin, WorldShift,
+    DamageEvent, DamageKind, EditOp, EditShape, NoiseEvent, ProjectileTrace, SurfaceMaterials,
+    TerrainEdit, WorldPlugin, WorldShift,
 };
 use serde_json::json;
 
@@ -146,6 +146,30 @@ fn a_breach_charge_opens_drywall_but_only_scars_reinforced_concrete() {
         bars > 100,
         "the rebar mesh survives ({bars} cells with bars)"
     );
+}
+
+#[test]
+fn a_breach_charge_is_heard_far_off() {
+    let mut app = app();
+    let wall = spawn_wall(&mut app, DestructibleWall::soft(3.0, 3.0), DVec3::ZERO);
+    app.update();
+    let mut c = BreachCharge::explosive(wall, Vec2::new(0.0, 1.2), 1.0e6);
+    c.fuse_secs = 0.1;
+    let charge = app.world.spawn(c).id();
+    let mut heard = Vec::new();
+    for _ in 0..30 {
+        app.update();
+        let msgs = app.world.resource::<Messages<NoiseEvent>>();
+        heard.extend(
+            msgs.iter_current_update_messages()
+                .filter(|n| n.source == Some(charge))
+                .copied(),
+        );
+    }
+    assert_eq!(heard.len(), 1, "one bang");
+    let n = heard[0];
+    assert!(n.radius > 150.0, "a breach charge carries ({} m)", n.radius);
+    assert!(n.position.distance(DVec3::new(0.0, 1.2, 0.0)) < 0.5);
 }
 
 #[test]

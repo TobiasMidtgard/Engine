@@ -146,7 +146,8 @@ fn try_create(
     let wanted = wgpu::Features::DEPTH_CLIP_CONTROL
         | wgpu::Features::FLOAT32_FILTERABLE
         | wgpu::Features::RG11B10UFLOAT_RENDERABLE
-        | wgpu::Features::TIMESTAMP_QUERY;
+        | wgpu::Features::TIMESTAMP_QUERY
+        | wgpu::Features::TEXTURE_COMPRESSION_BC;
     let required_features = adapter.features() & wanted;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("engine device"),

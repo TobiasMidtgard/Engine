@@ -164,6 +164,21 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   tank tracks and bodies. Each surface responds differently: mud is plastic and pushes up a
   rim, snow compacts down to its depth, sand is granular and slowly fills back in, grass is
   flattened and springs back. Prints outside the grid are kept and re-stamped when it moves.
+- **Worn paths.** Ground that many feet cross wears into a path (`wear.rs`). Every
+  `GroundContact` adds a little wear to the half-meter cells it lands on (heavier contacts,
+  wheels and soaked ground more), and unused ground heals, each kind at its own pace: turf is
+  trodden flat and pale, thins to dusty beaten earth over hundreds of passes and regrows over
+  days (half-life 4 days); earth packs into a hollow; snow packs within a few dozen passes
+  (the busiest tracks to glossy ice) and new snow buries it; sand is churned into lumps and
+  the wind fills the trough within the hour; gravel is shoved aside into a firm track over
+  weeks; rock barely polishes. One walker leaves no lasting mark; a crowd on one line makes a
+  path with a bare middle, a trodden margin and ragged turf edges, sunk a few centimeters.
+  In rain the bare earth turns to mud. The map is sparse and persistent (64-cell tiles where
+  someone walked, kept per terrain in its own frame, one region per few kilometers walked);
+  the renderer draws a 512 m window of it around the camera, and beyond that, out to 2 km,
+  a four times coarser map of how much of each 2 m cell is bare path (paths show from hills
+  and the air). `WearSettings` sets the cell
+  size, a `gain_scale` (paths form quicker) and a `heal_scale` (they fade quicker).
 - **Weather on the ground.** Wetness, puddles, snow depth and scorch from `SurfaceLayers`
   (written by the weather module, and by the water module along shores) darken and gloss
   the ground (wet sand to about half its dry brightness, without turning to mud), turn soil
@@ -194,7 +209,8 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
 Reads: `GroundContact`, `TerrainEdit`, `SurfaceLayers`, `Weather`, `FocusPoints`,
 `SurfaceMaterials`, `RigidBody` (dynamic bodies, for their collider tiles).
 
-Writes: `Ground` and `ForestCover` (query providers), `TerrainChanged`, static `Collider` heightfield tiles
+Writes: `Ground`, `ForestCover` and `GroundWear` (query providers; `GroundWear` from a
+snapshot of the worn-path map refreshed twice a second while paths change), `TerrainChanged`, static `Collider` heightfield tiles
 (tagged `TerrainColliderTile`).
 
 Heightfield layout for physics: `heights[row * cols + col]`, rows along the tile's local +Z,
@@ -202,7 +218,8 @@ columns along local +X, both centered on the tile origin; local +Y is the planet
 tile center.
 
 API: `terrain.height {x, y, z}`, `terrain.edit {...}`, `terrain.footprint {...}`,
-`terrain.stats`.
+`terrain.wear {at}` (how worn the ground is, 0..1), `terrain.walk_path {from, to, passes,
+load_kg, spread_m}` (wear a path at once), `terrain.stats`.
 
 ## Use it
 
@@ -229,7 +246,8 @@ valley and a natural one at eye height, snow at eye height and over the valley, 
 (`range_dusk`: ridges casting long shadows), the coast, a beach at eye height (`earth_beach`), the painted patchwork after rain (`painted_wet`), the Moon
 underfoot, from low orbit, half lit and full, the Earth's climate belts from far out
 (`earth_globe`), a river at eye height (`earth_river`) and rivers from the air
-(`earth_rivers_air`), and Mars: from orbit (`mars_orbit`,
+(`earth_rivers_air`), worn paths (`paths_meadow`, `paths_meadow_high`, `paths_rain`,
+`paths_snow`, `paths_beach`, `paths_hill` from 600 m off; `NO_PATHS=1` for the ground before), and Mars: from orbit (`mars_orbit`,
 `mars_valles`), Olympus Mons (`mars_olympus`), the north pole (`mars_pole`), and the floor and
 rim of Valles Marineris (`mars_canyon`, `mars_rim`))
 with the game's auto exposure, and `examples/terrain_map.rs` draws a relief map with rivers and lakes around
@@ -245,7 +263,9 @@ each `DemoWalker` entity (its `Transform` moves along the path facing forward), 
 `LabOptions { stand_in_bodies: true }` to `spawn_demo_with` for simple figures built from
 shapes: a hiker with a backpack, a dog, a horse and a rover, whose legs and arms swing with
 their steps (`LabLimb`, trotting animals move diagonal legs together) and whose wheels roll
-with the distance driven. The strips and edits sit on the ground under each spot (sampled
+with the distance driven. `demo::spawn_path_crowd` sets a crowd walking to and fro along
+one line, so a path wears in (raise `WearSettings::gain_scale` to watch it form within
+minutes). The strips and edits sit on the ground under each spot (sampled
 from `Ground` when they apply), so the lab works on uneven ground too.
 
 ## Known limits (next rounds)

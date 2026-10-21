@@ -9,8 +9,8 @@ use engine_render::Camera;
 use engine_world::animation::AnimationParams;
 use engine_world::physics::{Collider, ContactEvent, ContactPhase, PhysicsQueries, QueryFilter};
 use engine_world::{
-    AttackEvent, AttackKind, Env, GroundContact, PrecipitationKind, ProjectileTrace, SurfaceCell,
-    WorldImpulse,
+    AttackEvent, AttackKind, Env, GroundContact, GroundWear, PrecipitationKind, ProjectileTrace,
+    SurfaceCell, WorldImpulse,
 };
 
 use crate::ambience::{RainSound, WindSound};
@@ -18,6 +18,7 @@ use crate::dsp::{Noise, to_db};
 use crate::effects::{ExplosionSound, WhizSound, WhooshSound};
 use crate::footstep::{FootstepSound, Step, SurfaceSound};
 use crate::mixer::{Bus, Clock, Command, VoiceId};
+use crate::samples::RecordedSteps;
 use crate::thunder;
 use crate::{
     Audio, AudioCue, AudioListener, AudioMix, AudioSettings, FootstepSamples, FootstepSurfaces,
@@ -184,6 +185,8 @@ pub(crate) fn play_footsteps(
     settings: Res<AudioSettings>,
     scales: Query<&LocalTimeScale>,
     animated: Query<&AnimationParams>,
+    switches: Query<&RecordedSteps>,
+    wear: Option<Res<GroundWear>>,
     mut cues: MessageWriter<AudioCue>,
 ) {
     if !audio.is_running() {
@@ -191,7 +194,6 @@ pub(crate) fn play_footsteps(
         return;
     }
     let max = settings.footstep_distance_m;
-    let snow = surfaces.snow();
     let mut played = 0;
     for c in contacts.read() {
         if played >= MAX_STEPS_PER_FRAME || c.position.distance(audio.listener) > max as f64 {
@@ -211,7 +213,20 @@ pub(crate) fn play_footsteps(
             .unwrap_or(0.0)
             .min(1.5);
         let dry = surfaces.get(material);
-        let sound = dry.with_state(&cell, material.absorbency, temperature, wading, &snow);
+        // A worn path turns the ground's sound toward bare earth (mud when wet) or packed
+        // snow; the ground's state then changes that as it would the ground's own.
+        let worn = surfaces.worn_path(
+            material,
+            wear.as_ref().map_or(0.0, |w| w.wear(c.position)),
+            &cell,
+        );
+        let sound = worn.apply(&dry).with_state(
+            &cell,
+            worn.absorbency(material.absorbency),
+            temperature,
+            wading,
+            &worn.snow,
+        );
         // A contact that leaves its speed out (an animation clip's footstep) goes at the pace
         // its walker's animation says, so a stride sounds like a stride.
         let speed = match c.entity.and_then(|e| animated.get(e).ok()) {
@@ -225,11 +240,17 @@ pub(crate) fn play_footsteps(
             .clock(clock_for(c.entity, &scales))
             .source(c.entity)
             .reverb(0.35);
-        let recorded = if settings.recorded_footsteps {
+        // Takes unless they are off, or off for this walker.
+        let takes = settings.recorded_footsteps
+            && c.entity
+                .and_then(|e| switches.get(e).ok())
+                .is_none_or(|s| s.enabled);
+        let recorded = if takes {
             let wait = audio.is_offline();
             samples.recorded(
                 &material.name,
                 &dry,
+                &worn,
                 &cell,
                 wading,
                 &surfaces,

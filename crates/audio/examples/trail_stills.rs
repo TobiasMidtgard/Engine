@@ -8,7 +8,7 @@
 //! cargo run -p engine_audio --release --example trail_stills -- [out_dir]
 //!     [--only grass,mud,mud-snow,wide] [--size 1280x720] [--walkers] [--panels]
 //!     [--wide eye_x,eye_y,eye_z,at_x,at_y,at_z] [--sun x,y,z] [--ev ev100]
-//!     [--follow dog --on mud[+meters] --secs 2 --frames 6 --every 0.25]
+//!     [--follow dog --on mud[+meters] --secs 2 --frames 6 --every 0.25] [--worn]
 //! cargo run -p engine_audio --example trail_stills -- --measure
 //! ```
 //!
@@ -20,22 +20,27 @@
 //! `--follow` (hiker, runner, dog or horse) instead puts that walker `meters` into the stretch
 //! named by `--on`, lets the clock run `--secs`, and films it from behind as the showcase's
 //! follow camera does (`follow_<walker>_<stretch>_<k>.png`, `--frames` of them `--every`
-//! seconds apart), sound rings and all.
+//! seconds apart), sound rings and all, and records what the camera hears from the start
+//! (`follow_<walker>_<stretch>.wav`): `--secs 0 --frames 360 --every 0.0333` is a 12 s clip.
+//! `--worn` wears the ground where the trail is drawn worn ([`TrailWear`]: the earth line down
+//! the grass, the trench through the snow), so footsteps there sound like the path; its
+//! files end in `_worn`.
 //! Headless rendering needs a GPU or lavapipe (`mesa-vulkan-drivers`).
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use engine_audio::demo::{
-    STRETCHES, SoundRings, TrailWalker, spawn_backdrop, spawn_demo, stretch_start, trail_point,
+    STRETCHES, SoundRings, TrailWalker, TrailWear, spawn_backdrop, spawn_demo, stretch_start,
+    trail_point,
 };
-use engine_audio::{AudioOutput, AudioPlugin, AudioSettings};
+use engine_audio::{Audio, AudioOutput, AudioPlugin, AudioSettings};
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
 use engine_render::{
     Atmosphere, Camera, DirectionalLight, Exposure, Mesh, RenderPlugin, ResolvedMesh, Screenshots,
 };
-use engine_world::WorldPlugin;
+use engine_world::{GroundWear, WorldPlugin};
 
 struct Options {
     out: PathBuf,
@@ -57,6 +62,8 @@ struct Options {
     secs: f32,
     frames: u32,
     every: f32,
+    /// `--worn`: the trail's drawn wear as the ground's ([`TrailWear`]).
+    worn: bool,
 }
 
 fn options() -> Options {
@@ -75,6 +82,7 @@ fn options() -> Options {
         secs: 2.0,
         frames: 6,
         every: 0.25,
+        worn: false,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -93,6 +101,7 @@ fn options() -> Options {
             "--walkers" => o.walkers = true,
             "--panels" => o.panels = true,
             "--measure" => o.measure = true,
+            "--worn" => o.worn = true,
             "--wide" => {
                 let v: Vec<f64> = next
                     .split(',')
@@ -158,6 +167,11 @@ fn main() {
     std::fs::create_dir_all(&o.out).expect("create output folder");
 
     let mut app = scene_app(o.size, true);
+    if o.worn {
+        app.insert_resource(GroundWear(std::sync::Arc::new(TrailWear {
+            origin: DVec3::ZERO,
+        })));
+    }
     app.update();
     let mut suns = app
         .world
@@ -327,6 +341,12 @@ fn film_walker(app: &mut App, o: &Options, who: &str, on: &str, meters: f64) {
         _ => 1.0,
     };
     let step = 1.0 / 30.0;
+    let tag = if o.worn { "_worn" } else { "" };
+    let wav = o.out.join(format!("follow_{who}_{on}{tag}.wav"));
+    app.world
+        .resource_mut::<Audio>()
+        .start_recording(&wav, o.secs + o.frames as f32 * o.every + 1.0)
+        .expect("start recording");
     let mut t = 0.0;
     let mut shot = 0;
     let mut next = o.secs;
@@ -359,7 +379,7 @@ fn film_walker(app: &mut App, o: &Options, who: &str, on: &str, meters: f64) {
             };
         }
         if t + 1e-4 >= next {
-            let file = o.out.join(format!("follow_{who}_{on}_{shot}.png"));
+            let file = o.out.join(format!("follow_{who}_{on}{tag}_{shot}.png"));
             app.world.resource_mut::<Screenshots>().request(&file);
             app.update();
             println!("{}", file.display());
@@ -370,6 +390,12 @@ fn film_walker(app: &mut App, o: &Options, who: &str, on: &str, meters: f64) {
         }
         t += step;
     }
+    let (path, secs) = app
+        .world
+        .resource_mut::<Audio>()
+        .stop_recording()
+        .expect("write the recording");
+    println!("sound: {} ({secs:.1} s)", path.display());
 }
 
 /// Stack images vertically into one file.

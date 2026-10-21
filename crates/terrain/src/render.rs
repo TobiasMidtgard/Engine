@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use bytemuck::{Pod, Zeroable};
 use engine_core::diagnostics::Diagnostics;
-use engine_core::math::{DQuat, DVec3, Mat3, Vec3};
+use engine_core::math::{DQuat, DVec3, IVec2, Mat3, Vec3};
 use engine_core::prelude::*;
 use engine_core::tasks::ComputeTaskPool;
 use engine_render::features::{
@@ -21,6 +21,7 @@ use crate::cube::NodeKey;
 use crate::deform::DeformationMap;
 use crate::lod::{Lod, SelectInput};
 use crate::materials::{self, BakedMaterials, MATERIAL_COUNT};
+use crate::wear::{PathWear, TILE, WearSettings};
 use crate::{TerrainRuntime, TerrainSettings, Terrains};
 
 const SHADER: &str = include_str!("terrain.wgsl");
@@ -142,6 +143,14 @@ struct MapsGpu {
     flags: [f32; 4],
     /// Wetness, puddle depth, snow depth and scorch beyond the surface layers' grid.
     far: [f32; 4],
+    /// Worn paths window: its corner relative to the camera, cell size.
+    wear_origin: [f32; 4],
+    /// The window's column axis (world), cells per side.
+    wear_u: [f32; 4],
+    /// The window's row axis (world), 1 when paths are drawn.
+    wear_v: [f32; 4],
+    /// The coarse window of paths: its corner relative to the camera, cell size.
+    wear_far: [f32; 4],
 }
 
 struct Gpu {
@@ -158,6 +167,8 @@ struct Gpu {
     sampler: wgpu::Sampler,
     deform_tex: Option<(wgpu::Texture, wgpu::TextureView, u32)>,
     surface_tex: Option<(wgpu::Texture, wgpu::TextureView, u32, u32)>,
+    /// Worn paths around the camera (R8, cells per side).
+    wear_tex: Option<(wgpu::Texture, wgpu::TextureView, u32)>,
     /// Ground material arrays: albedo + height, normal + roughness + occlusion.
     mat_albedo: wgpu::TextureView,
     mat_normal: wgpu::TextureView,
@@ -381,6 +392,9 @@ pub struct TerrainFeature {
     far_shadow_draws: Vec<Draw>,
     deform_generation: u64,
     surface_frame: u64,
+    /// The paths drawn: terrain, region, window corner (cells), generation.
+    wear_window: Option<(Entity, usize, IVec2, IVec2, u64)>,
+    wear_frame: u64,
     /// Wetness and snow depth beyond the surface layers' grid (see [`beyond_grid`]).
     surface_far: [f32; 2],
     frame: u64,
@@ -443,7 +457,9 @@ impl TerrainFeature {
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
-        let (Some(deform), Some(surface)) = (&gpu.deform_tex, &gpu.surface_tex) else {
+        let (Some(deform), Some(surface), Some(wear)) =
+            (&gpu.deform_tex, &gpu.surface_tex, &gpu.wear_tex)
+        else {
             return;
         };
         gpu.group = Some(
@@ -489,6 +505,10 @@ impl TerrainFeature {
                             binding: 8,
                             resource: wgpu::BindingResource::Sampler(&gpu.mat_sampler),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: wgpu::BindingResource::TextureView(&wear.1),
+                        },
                     ],
                 }),
         );
@@ -523,6 +543,211 @@ impl TerrainFeature {
             bytemuck::bytes_of(&MaterialsGpu::from_baked(Some(&baked))),
         );
         self.rebuild_group(gpu_shared);
+    }
+
+    /// Upload the worn paths around the camera: the window of the nearest region of paths,
+    /// moved in whole tiles as the camera goes, and the tiles in it that changed. Two layers:
+    /// the cells themselves near the camera, and four times coarser cells (how much of each is
+    /// bare path) over a window four times wider, so paths still show from hills and the air.
+    /// Returns whether the texture was recreated.
+    fn upload_wear(
+        &mut self,
+        world: &mut World,
+        gpu_shared: &GpuShared,
+        view: &ViewData,
+        maps: &mut MapsGpu,
+    ) -> bool {
+        let size = world
+            .get_resource::<WearSettings>()
+            .filter(|s| s.enabled)
+            .map(|s| s.window.clamp(64, 4096).next_multiple_of(TILE as u32));
+        let (Some(size), Some(terrains)) = (size, world.get_resource::<Terrains>()) else {
+            return false;
+        };
+        let Some((entity, t)) = terrains.nearest(view.origin) else {
+            return false;
+        };
+        let (position, rotation) = (t.position, t.rotation);
+        let local = t.to_local(view.origin);
+        let Some(mut wear) = world.get_resource_mut::<PathWear>() else {
+            return false;
+        };
+        let cell = wear.cell_m;
+        let Some((index, region)) = wear.region_near(entity, local) else {
+            wear.dirty.clear();
+            return false;
+        };
+        let (cu, cv) = region.cell_of(local, cell);
+        let (anchor, axis_u, axis_v) = (region.anchor, region.axis_u, region.axis_v);
+        // Window corners in fine cells, on whole tiles: the near one, and the far one (whose
+        // cells are FAR fine cells across, so a tile fills TILE / FAR of them).
+        const FAR: i32 = 4;
+        let half = size as i32 / 2;
+        let snap = |c: f64, span: i32| (c as i32 - span).div_euclid(TILE) * TILE;
+        let corner = IVec2::new(snap(cu, half), snap(cv, half));
+        let far_corner = IVec2::new(snap(cu, half * FAR), snap(cv, half * FAR));
+        let gpu = self.gpu.as_mut().expect("gpu");
+        let fresh = gpu.wear_tex.as_ref().is_none_or(|t| t.2 != size);
+        if fresh {
+            let tex = gpu_shared.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("terrain worn paths"),
+                size: wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 2,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let v = tex.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
+            gpu.wear_tex = Some((tex, v, size));
+        }
+        let key = (entity, index, corner, far_corner, wear.generation);
+        let tex = &gpu.wear_tex.as_ref().expect("texture").0;
+        let write = |layer: u32, x0: u32, y0: u32, w: u32, h: u32, data: &[u8]| {
+            gpu_shared.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: x0,
+                        y: y0,
+                        z: layer,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(w),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        };
+        let near_bytes = |tile: Option<&[f32]>| -> Vec<u8> {
+            match tile {
+                Some(t) => t
+                    .iter()
+                    .map(|w| (w.clamp(0.0, 1.0) * 255.0).round() as u8)
+                    .collect(),
+                None => vec![0; (TILE * TILE) as usize],
+            }
+        };
+        // A tile's share of bare path in each coarse cell (the shader's bare range of wear).
+        let far_bytes = |tile: Option<&[f32]>| -> Vec<u8> {
+            let n = TILE / FAR;
+            let mut out = vec![0u8; (n * n) as usize];
+            if let Some(t) = tile {
+                for y in 0..n {
+                    for x in 0..n {
+                        let mut sum = 0.0;
+                        for j in 0..FAR {
+                            for i in 0..FAR {
+                                let w = t[((y * FAR + j) * TILE + x * FAR + i) as usize];
+                                let k = ((w - 0.45) / 0.4).clamp(0.0, 1.0);
+                                sum += k * k * (3.0 - 2.0 * k);
+                            }
+                        }
+                        out[(y * n + x) as usize] =
+                            (sum / (FAR * FAR) as f32 * 255.0).round() as u8;
+                    }
+                }
+            }
+            out
+        };
+        // Where a tile lands in each layer, in texels, if it is inside the window.
+        let n = TILE / FAR;
+        let place = |k: IVec2| {
+            let o = k * TILE - corner;
+            let fo = (k * TILE - far_corner) / FAR;
+            let inside = |o: IVec2, w: i32| {
+                o.x >= 0 && o.y >= 0 && o.x + w <= size as i32 && o.y + w <= size as i32
+            };
+            (inside(o, TILE).then_some(o), inside(fo, n).then_some(fo))
+        };
+        if fresh || self.wear_window != Some(key) {
+            // The whole window.
+            let mut near = vec![0u8; (size * size) as usize];
+            let mut far = vec![0u8; (size * size) as usize];
+            let blit = |dst: &mut [u8], o: IVec2, w: i32, src: &[u8]| {
+                for row in 0..w {
+                    let at = ((o.y + row) * size as i32 + o.x) as usize;
+                    dst[at..at + w as usize]
+                        .copy_from_slice(&src[(row * w) as usize..((row + 1) * w) as usize]);
+                }
+            };
+            for k in region.tile_keys() {
+                let (o, fo) = place(k);
+                if let Some(o) = o {
+                    blit(&mut near, o, TILE, &near_bytes(region.tile(k)));
+                }
+                if let Some(fo) = fo {
+                    blit(&mut far, fo, n, &far_bytes(region.tile(k)));
+                }
+            }
+            write(0, 0, 0, size, size, &near);
+            write(1, 0, 0, size, size, &far);
+            self.wear_window = Some(key);
+            self.wear_frame = self.frame;
+            wear.dirty.clear();
+        } else if self.frame >= self.wear_frame + 4 && !wear.dirty.is_empty() {
+            // Tiles that changed (and empty ones that healed away).
+            self.wear_frame = self.frame;
+            let dirty: Vec<_> = wear.dirty.drain().collect();
+            let Some((_, region)) = wear.region_near(entity, local) else {
+                return fresh;
+            };
+            for (e, i, k) in dirty {
+                if e != entity || i != index {
+                    continue;
+                }
+                let (o, fo) = place(k);
+                if let Some(o) = o {
+                    let t = TILE as u32;
+                    write(0, o.x as u32, o.y as u32, t, t, &near_bytes(region.tile(k)));
+                }
+                if let Some(fo) = fo {
+                    let t = n as u32;
+                    write(
+                        1,
+                        fo.x as u32,
+                        fo.y as u32,
+                        t,
+                        t,
+                        &far_bytes(region.tile(k)),
+                    );
+                }
+            }
+        }
+        let rel_of = |c: IVec2| {
+            let l =
+                anchor + axis_u * (c.x as f64 * cell as f64) + axis_v * (c.y as f64 * cell as f64);
+            position + rotation * l - view.origin
+        };
+        let (rel, far_rel) = (rel_of(corner), rel_of(far_corner));
+        let (u, v) = (rotation * axis_u, rotation * axis_v);
+        maps.wear_origin = [rel.x as f32, rel.y as f32, rel.z as f32, cell];
+        maps.wear_u = [u.x as f32, u.y as f32, u.z as f32, size as f32];
+        maps.wear_v = [v.x as f32, v.y as f32, v.z as f32, 1.0];
+        maps.wear_far = [
+            far_rel.x as f32,
+            far_rel.y as f32,
+            far_rel.z as f32,
+            cell * FAR as f32,
+        ];
+        fresh
     }
 
     /// Upload changed parts of the footprint grid and the weather surface layers.
@@ -667,12 +892,14 @@ impl TerrainFeature {
             maps.flags[1] = 1.0;
             maps.far = [self.surface_far[0], 0.0, self.surface_far[1], 0.0];
         }
+        recreate |= self.upload_wear(world, gpu_shared, view, &mut maps);
+        let gpu = self.gpu.as_mut().expect("gpu");
         // Placeholders so the bind group is always complete.
-        for (label, slot) in [("deform", 0usize), ("surface", 1usize)] {
-            let missing = if slot == 0 {
-                gpu.deform_tex.is_none()
-            } else {
-                gpu.surface_tex.is_none()
+        for (label, slot) in [("deform", 0usize), ("surface", 1usize), ("wear", 2usize)] {
+            let missing = match slot {
+                0 => gpu.deform_tex.is_none(),
+                1 => gpu.surface_tex.is_none(),
+                _ => gpu.wear_tex.is_none(),
             };
             if missing {
                 let tex = gpu_shared.device.create_texture(&wgpu::TextureDescriptor {
@@ -685,19 +912,26 @@ impl TerrainFeature {
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: if slot == 0 {
-                        wgpu::TextureFormat::Rg16Float
-                    } else {
-                        wgpu::TextureFormat::Rgba16Float
+                    format: match slot {
+                        0 => wgpu::TextureFormat::Rg16Float,
+                        1 => wgpu::TextureFormat::Rgba16Float,
+                        _ => wgpu::TextureFormat::R8Unorm,
                     },
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[],
                 });
-                let v = tex.create_view(&Default::default());
-                if slot == 0 {
-                    gpu.deform_tex = Some((tex, v, 0));
-                } else {
-                    gpu.surface_tex = Some((tex, v, 0, 0));
+                let v = tex.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(if slot == 2 {
+                        wgpu::TextureViewDimension::D2Array
+                    } else {
+                        wgpu::TextureViewDimension::D2
+                    }),
+                    ..Default::default()
+                });
+                match slot {
+                    0 => gpu.deform_tex = Some((tex, v, 0)),
+                    1 => gpu.surface_tex = Some((tex, v, 0, 0)),
+                    _ => gpu.wear_tex = Some((tex, v, 0)),
                 }
                 recreate = true;
             }
@@ -803,6 +1037,16 @@ impl RenderFeature for TerrainFeature {
                     binding: 8,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
                     count: None,
                 },
             ],
@@ -962,6 +1206,7 @@ impl RenderFeature for TerrainFeature {
             sampler,
             deform_tex: None,
             surface_tex: None,
+            wear_tex: None,
             mat_albedo,
             mat_normal,
             mat_info,
@@ -1594,7 +1839,7 @@ mod tests {
             std::mem::size_of::<PlanetGpu>(),
             16 * (3 + 1 + 10 + 4 + MAX_RAYED + MAX_YOUNG)
         );
-        assert_eq!(std::mem::size_of::<MapsGpu>(), 64);
+        assert_eq!(std::mem::size_of::<MapsGpu>(), 16 * 8);
         assert_eq!(std::mem::size_of::<TerrainVertex>(), 48);
     }
 }

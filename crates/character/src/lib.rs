@@ -8,13 +8,16 @@ pub mod demo;
 pub mod eyes;
 pub mod face;
 pub mod feature;
+pub mod hair_motion;
 pub mod headgear;
+pub mod hood;
 pub mod mesh;
 pub mod morph;
 pub mod mouth;
 pub mod pack;
 pub mod rig;
 pub mod shoes;
+pub mod skirt;
 pub mod sliders;
 pub mod strands;
 pub mod subdiv;
@@ -217,7 +220,13 @@ impl Plugin for CharacterPlugin {
             .add_systems(Startup, load_pack)
             .add_systems(
                 Update,
-                (answer_requests, poll_pack, start_builds, finish_builds)
+                (
+                    answer_requests,
+                    poll_pack,
+                    start_builds,
+                    finish_builds,
+                    hair_motion::publish_hair_guides,
+                )
                     .chain()
                     .in_set(CharacterSet),
             )
@@ -361,6 +370,10 @@ fn finish_builds(
                     continue;
                 };
                 let version = built.map_or(1, |b| b.version + 1);
+                let mut uniform = GpuCharacter::new(&appearance, &rest, 0);
+                if let Some([thigh, knee]) = meshes.thigh {
+                    (uniform.thigh, uniform.knee) = (thigh, knee);
+                }
                 let mut e = commands.entity(entity);
                 // The person's own limb lengths, for posers that fit a skeleton to them.
                 match meshes.rig.as_ref().map(|r| r.body_fit()) {
@@ -375,7 +388,7 @@ fn finish_builds(
                 e.remove::<PendingBuild>().insert(BuiltCharacter {
                     meshes: Arc::new(meshes),
                     version,
-                    uniform: GpuCharacter::new(&appearance, &rest, 0),
+                    uniform,
                     appearance,
                     options,
                 });

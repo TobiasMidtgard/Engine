@@ -24,11 +24,19 @@ fn main() {
     let headless = app.world.resource::<EngineConfig>().headless;
     app.add_plugins(DefaultPlugins)
         .add_plugins(CharacterPlugin)
+        // Long hair swings and settles as the person moves.
+        .add_plugins(engine_softbody::SoftBodyPlugin)
         .add_systems(Startup, studio::setup)
         .add_systems(
             Update,
             (pose::drive, studio::face_camera, studio::orbit_camera).chain(),
         );
+    // Indoors: still air, so hair hangs and swings only as the person moves.
+    {
+        let mut weather = app.world.resource_mut::<engine::world::WeatherState>();
+        weather.wind = Vec3::ZERO;
+        weather.gustiness = 0.0;
+    }
     if let Some(plan) = shots {
         app.insert_resource(plan)
             .add_systems(Update, shots::run_shots.after(studio::orbit_camera));

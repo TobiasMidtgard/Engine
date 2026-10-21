@@ -1,0 +1,94 @@
+# Owner: Rendering and lighting. Scanned materials for streamed virtual texturing
+# (crates/render/src/virtual_texture, the virtual_texturing example). Format and rules:
+# AGENTS.md, "Art and large files". Fetch with `cargo run -p fetch-assets -- render`.
+# Code falls back to procedural textures when these are missing; the renderer bakes a
+# tiled copy next to each scan (`<file>.vtex`) the first time it streams it.
+
+# Rock face at 16k (16384 x 16384), its largest size: color, normal and ARM
+# (occlusion, roughness, metallic), streamed as virtual textures; the 2k set is the old way,
+# for the side-by-side comparison.
+[[file]]
+path = "render/rock_face/rock_face_diff_16k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/16k/rock_face/rock_face_diff_16k.jpg"
+sha256 = "97d59c3b0684030683ffd5299d125c7a6013e8f2935208042e72b5a42dba4b2d"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/rock_face"
+
+[[file]]
+path = "render/rock_face/rock_face_nor_gl_16k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/16k/rock_face/rock_face_nor_gl_16k.jpg"
+sha256 = "768c784d7b905837ea88428be3bef762a47dcb7fa8fb2ecb3e4700ce4de30634"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/rock_face"
+
+[[file]]
+path = "render/rock_face/rock_face_arm_16k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/16k/rock_face/rock_face_arm_16k.jpg"
+sha256 = "1c7d0b476ae10a0d0bc93e90930875ebbd6e189309d355cf21821de29d59ed84"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/rock_face"
+
+[[file]]
+path = "render/rock_face/rock_face_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_face/rock_face_diff_2k.jpg"
+sha256 = "b989c832327538a9e546cca359417acb9a657d041f300407e8398daaf743f5bc"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/rock_face"
+
+[[file]]
+path = "render/rock_face/rock_face_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_face/rock_face_nor_gl_2k.jpg"
+sha256 = "352b87db2502d54487b0ed8abdfb621fae2abf7d360a281b419f567346178cf0"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/rock_face"
+
+[[file]]
+path = "render/rock_face/rock_face_arm_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rock_face/rock_face_arm_2k.jpg"
+sha256 = "7cb37a227ba58b0048289a9032e386656d10190cdf89d90e57625b3ef75a8c7a"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/rock_face"
+
+# Pine bark for logs. Bark scans stop at 8k (8192 x 8192) on Poly Haven: no 16k exists.
+[[file]]
+path = "render/pine_bark/pine_bark_diff_8k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/8k/pine_bark/pine_bark_diff_8k.jpg"
+sha256 = "74e1ba75a654fc864f87280105a2c2f97be74bd6650a68d1ecd298b616c490c3"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/pine_bark"
+
+[[file]]
+path = "render/pine_bark/pine_bark_nor_gl_8k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/8k/pine_bark/pine_bark_nor_gl_8k.jpg"
+sha256 = "36be8ea966a05133dc5131964df507f938361bac848baae9fe1d40f95871de89"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/pine_bark"
+
+[[file]]
+path = "render/pine_bark/pine_bark_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/pine_bark/pine_bark_diff_2k.jpg"
+sha256 = "741f333ab9f8a0996d8a53905b5ac792fab77d7ccb8cac5fbaed8c99b9f6abd5"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/pine_bark"
+
+[[file]]
+path = "render/pine_bark/pine_bark_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/pine_bark/pine_bark_nor_gl_2k.jpg"
+sha256 = "e91d024441a698523472ef2001be2eade2f73005d798466c7acd3ec5d585667f"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/pine_bark"
+
+# Forest floor repeated across a clearing, with and without anti-tiling.
+[[file]]
+path = "render/forrest_ground_01/forrest_ground_01_diff_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forrest_ground_01/forrest_ground_01_diff_2k.jpg"
+sha256 = "e4d557ff61a0b42712a58e8a2e91c6010738977d4e172b7af47abd7d406ae735"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/forrest_ground_01"
+
+[[file]]
+path = "render/forrest_ground_01/forrest_ground_01_nor_gl_2k.jpg"
+url = "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/forrest_ground_01/forrest_ground_01_nor_gl_2k.jpg"
+sha256 = "aa23fa930c6303490f842f7c016c19d838263e8e4538d42508a9332e3fd76b69"
+license = "CC0-1.0"
+source = "https://polyhaven.com/a/forrest_ground_01"

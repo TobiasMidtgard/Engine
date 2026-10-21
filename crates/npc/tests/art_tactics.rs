@@ -1,15 +1,20 @@
-//! Captioned render strips of a squad suppressing and flanking a player in cover: whole NPCs
-//! with their AI, in the yard of `tactics.rs`. Needs a GPU or a software Vulkan driver
-//! (lavapipe) for the pictures (the behaviour is checked either way).
+//! Captioned render strips of a squad suppressing, flanking and flushing out a player in
+//! cover: whole NPCs with their AI, in the yard of `tactics.rs` dressed with the arena's art
+//! (its sand, and its cut sandstone for every wall and block). Needs a GPU or a software Vulkan
+//! driver (lavapipe) for the pictures (the behaviour is checked either way).
 //!
 //! * Eye level, from behind the player's wall: the suppressor's tracers coming in over it
-//!   while the squad's flankers slip away, then a flanker showing at the side.
+//!   while the squad's flankers slip away, then a flanker off the player's side, firing.
 //! * Top down at the same moments: the walls, the player (blue), the suppressor (red) and the
 //!   flankers' paths so far (yellow dots, a big dot at each cover they held at).
+//! * Over the player's shoulder: a grenade lobbed over its wall (its arc marked), the player
+//!   running from it, the blast, and the player in the open under fire.
 //!
-//! The strips land in the test's temp dir as `fighters-flank-eye-level.png` and
-//! `fighters-flank-top-down.png`; set `NPC_SCREENSHOT_DIR` to also copy them there. Without it
-//! nothing is drawn (drawing is costly without a GPU): the scene plays out the same and every
+//! Tracers, marks and the blast's flash are drawn by the test (no fire or smoke module is
+//! installed), unlit and without shadows. The strips land in the test's temp dir as
+//! `fighters-flank-eye-level.png`, `fighters-flank-top-down.png` and
+//! `fighters-flush-grenade.png`; set `NPC_SCREENSHOT_DIR` to also copy them there. Without it
+//! nothing is drawn (drawing is costly without a GPU): the scenes play out the same and every
 //! check runs.
 
 use engine_core::ecs::message::Messages;
@@ -20,7 +25,7 @@ use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
 use engine_world::locomotion::LocomotionState;
 use engine_world::physics::Collider;
-use engine_world::{ProjectileTrace, SimulationFocus, WorldPlugin};
+use engine_world::{ProjectileTrace, SimulationFocus, WorldImpulse, WorldPlugin};
 
 /// One picture of the strip, and the band over it for its caption.
 const TILE_W: u32 = 400;
@@ -53,16 +58,6 @@ fn app() -> App {
         },
         Transform::default().looking_at(DVec3::new(-0.6, -0.6, 0.55), Vec3::Y),
     ));
-    app.world.spawn((
-        Transform::default(),
-        MeshRenderer::new(
-            Shape::Plane {
-                size: [400.0, 400.0],
-                subdivisions: 1,
-            },
-            StandardMaterial::hex(0x8c7a5b).with_roughness(0.95),
-        ),
-    ));
     app
 }
 
@@ -76,45 +71,115 @@ fn hold_off_drawing(world: &mut World) {
     }
 }
 
-/// A wall or crate the squad and the player take cover behind (and the camera sees).
-fn wall(app: &mut App, center: DVec3, half: Vec3) {
-    app.world.spawn((
-        Transform::from_translation(center),
-        Collider::cuboid(half),
-        MeshRenderer::new(
-            Shape::Cuboid {
-                size: (half * 2.0).to_array(),
-            },
-            StandardMaterial::hex(0x4f5560).with_roughness(0.9),
-        ),
-    ));
+/// The yard of `tactics.rs`: the player's wall facing the squad 20 m off along +Z, and cover
+/// on both sides to bound between (center and half size of each wall and block).
+fn yard(app: &mut App) -> Vec<(DVec3, Vec3)> {
+    let mut walls = vec![(DVec3::new(0.0, 1.0, 1.4), Vec3::new(2.4, 1.0, 0.25))];
+    for sx in [-1.0, 1.0] {
+        walls.extend([
+            (DVec3::new(4.5 * sx, 1.0, 14.0), Vec3::new(1.2, 1.0, 0.3)),
+            (DVec3::new(8.0 * sx, 0.6, 11.0), Vec3::new(0.6, 0.6, 0.6)),
+            (DVec3::new(9.5 * sx, 1.0, 6.5), Vec3::new(0.3, 1.0, 1.4)),
+            (DVec3::new(11.5 * sx, 0.6, 2.5), Vec3::new(0.6, 0.6, 0.6)),
+        ]);
+    }
+    for &(c, h) in &walls {
+        app.world
+            .spawn((Transform::from_translation(c), Collider::cuboid(h)));
+    }
+    walls
 }
 
-/// The yard of `tactics.rs`: the player's wall facing the squad 20 m off along +Z, and cover
-/// on both sides to bound between.
-fn yard(app: &mut App) {
-    wall(app, DVec3::new(0.0, 1.0, 1.4), Vec3::new(2.4, 1.0, 0.25));
-    for sx in [-1.0, 1.0] {
-        wall(
-            app,
-            DVec3::new(4.5 * sx, 1.0, 14.0),
-            Vec3::new(1.2, 1.0, 0.3),
-        );
-        wall(
-            app,
-            DVec3::new(8.0 * sx, 0.6, 11.0),
-            Vec3::new(0.6, 0.6, 0.6),
-        );
-        wall(
-            app,
-            DVec3::new(9.5 * sx, 1.0, 6.5),
-            Vec3::new(0.3, 1.0, 1.4),
-        );
-        wall(
-            app,
-            DVec3::new(11.5 * sx, 0.6, 2.5),
-            Vec3::new(0.6, 0.6, 0.6),
-        );
+/// The yard's look, once the scene is set (so the AI's entities are numbered the same with
+/// pictures or without): the arena's art when drawing, its sand underfoot and its cut
+/// sandstone for the walls and blocks (each block chipped to its wall's size), else plain
+/// shapes.
+fn dress(app: &mut App, walls: &[(DVec3, Vec3)]) {
+    use bevy_ecs::system::SystemState;
+    use engine_npc::art::ArtAssets;
+    use engine_npc::art::arena::{Chip, chipped_block, sand_set, span, stone_set};
+    let drawing = std::env::var_os("NPC_SCREENSHOT_DIR").is_some();
+    let tiled = |meters: f32| {
+        StandardMaterial {
+            base_color: [1.0; 4],
+            ..Default::default()
+        }
+        .with_uv_scale(1.0 / meters, 1.0 / meters)
+    };
+    let mut state = SystemState::<ArtAssets>::new(&mut app.world);
+    let kit = match state.get_mut(&mut app.world) {
+        Ok(mut art) if drawing && art.available() => Some({
+            let sand = art.material("arena/sand", tiled(span::SAND), sand_set);
+            let stone = art.material("arena/stone", tiled(span::STONE), stone_set);
+            let blocks: Vec<_> = walls
+                .iter()
+                .enumerate()
+                .map(|(i, &(_, h))| {
+                    art.mesh(&format!("tactics/block{i}"), || {
+                        chipped_block(
+                            h,
+                            Chip {
+                                voxel: 0.04,
+                                depth: 0.06,
+                                breaks: 2,
+                                ..Chip::new(91 + i as u64)
+                            },
+                        )
+                    })
+                })
+                .collect();
+            (sand, stone, blocks)
+        }),
+        _ => None,
+    };
+    let plane = Shape::Plane {
+        size: [400.0, 400.0],
+        subdivisions: 1,
+    };
+    match kit {
+        Some((Some(sand), Some(stone), blocks)) => {
+            let floor = MeshRenderer::new(plane, StandardMaterial::default());
+            app.world.spawn((
+                Transform::default(),
+                MeshRenderer {
+                    material: sand,
+                    ..floor
+                },
+            ));
+            for (&(c, h), mesh) in walls.iter().zip(blocks) {
+                let plain = MeshRenderer::new(
+                    Shape::Cuboid {
+                        size: (h * 2.0).to_array(),
+                    },
+                    StandardMaterial::default(),
+                );
+                app.world.spawn((
+                    Transform::from_translation(c),
+                    MeshRenderer {
+                        mesh: mesh.unwrap_or(plain.mesh.clone()),
+                        material: stone.clone(),
+                        ..plain
+                    },
+                ));
+            }
+        }
+        _ => {
+            app.world.spawn((
+                Transform::default(),
+                MeshRenderer::new(plane, StandardMaterial::hex(0x8c7a5b).with_roughness(0.95)),
+            ));
+            for &(c, h) in walls {
+                app.world.spawn((
+                    Transform::from_translation(c),
+                    MeshRenderer::new(
+                        Shape::Cuboid {
+                            size: (h * 2.0).to_array(),
+                        },
+                        StandardMaterial::hex(0x4f5560).with_roughness(0.9),
+                    ),
+                ));
+            }
+        }
     }
 }
 
@@ -159,6 +224,83 @@ fn squad(app: &mut App) -> Vec<Entity> {
 
 const PLAYER: DVec3 = DVec3::ZERO;
 const EYE: DVec3 = DVec3::new(0.0, 1.6, 0.0);
+/// Where a player flushed out of its cover runs to: out past the end of its wall.
+const ESCAPE: DVec3 = DVec3::new(-6.5, 0.0, -2.5);
+
+/// The player, as in `tactics.rs`: seen beside its wall for a moment, then down behind it, up
+/// over it a moment to fire back now and then (at whoever pins it); if it `flees`, it runs out
+/// of cover from a grenade coming in.
+struct Player {
+    e: Entity,
+    next_shot: f64,
+    up_until: f64,
+    flees: bool,
+    fled_at: Option<f64>,
+}
+
+impl Player {
+    fn spawn(app: &mut App, flees: bool) -> Self {
+        let mut t = Transform::from_translation(DVec3::new(3.4, 0.0, 0.0));
+        t.look_to(Vec3::Z, Vec3::Y);
+        let e = app
+            .world
+            .spawn((
+                t,
+                Faction::PLAYER,
+                LocomotionState::default(),
+                SimulationFocus::default(),
+            ))
+            .id();
+        Player {
+            e,
+            next_shot: 3.0,
+            up_until: 0.0,
+            flees,
+            fled_at: None,
+        }
+    }
+
+    fn step(&mut self, app: &mut App, t: f64, squad: &[Entity]) {
+        if self.flees
+            && self.fled_at.is_none()
+            && app.world.resource::<Grenades>().incoming(PLAYER, 4.0)
+        {
+            self.fled_at = Some(t);
+        }
+        if self.fled_at.is_some() {
+            let p = at(app, self.e);
+            let to = ESCAPE - p;
+            let step = to.normalize_or_zero() * (5.0 * STEP).min(to.length());
+            app.world.get_mut::<Transform>(self.e).unwrap().translation = p + step;
+            app.world
+                .get_mut::<LocomotionState>(self.e)
+                .unwrap()
+                .velocity = (step / STEP).as_vec3();
+            return;
+        }
+        if t >= 1.5 {
+            let up = if t < self.up_until { 0.6 } else { 0.0 };
+            app.world.get_mut::<Transform>(self.e).unwrap().translation = PLAYER + DVec3::Y * up;
+        }
+        if t >= self.next_shot {
+            self.next_shot += 2.5;
+            self.up_until = t + 0.4;
+            let pinned_by = squad
+                .iter()
+                .copied()
+                .find(|&e| brain(app, e).role == "suppress")
+                .unwrap_or(squad[0]);
+            let to = at(app, pinned_by) + DVec3::new(0.8, 1.3, 0.0);
+            app.world.write_message(ProjectileTrace {
+                from: DVec3::new(0.0, 2.2, 0.6),
+                to,
+                radius: 0.05,
+                speed: 600.0,
+                shooter: Some(self.e),
+            });
+        }
+    }
+}
 
 fn at(app: &App, e: Entity) -> DVec3 {
     app.world.get::<Transform>(e).unwrap().translation
@@ -245,8 +387,12 @@ fn tracer(app: &mut App, from: DVec3, to: DVec3) -> Entity {
                 Shape::Cuboid {
                     size: [0.1, 0.1, len],
                 },
-                glow(0xffb050, 80_000.0),
-            ),
+                StandardMaterial {
+                    unlit: true,
+                    ..glow(0xffb050, 80_000.0)
+                },
+            )
+            .without_shadows(),
         ))
         .id()
 }
@@ -263,7 +409,28 @@ fn dot(app: &mut App, p: DVec3, radius: f32, hex: u32) -> Entity {
                     segments: 16,
                 },
                 glow(hex, 4_000.0),
-            ),
+            )
+            .without_shadows(),
+        ))
+        .id()
+}
+
+/// A small glowing ball at `p` (a mark along a grenade's arc).
+fn dot_at(app: &mut App, p: DVec3, radius: f32, hex: u32) -> Entity {
+    app.world
+        .spawn((
+            Transform::from_translation(p),
+            MeshRenderer::new(
+                Shape::Sphere {
+                    radius,
+                    segments: 8,
+                },
+                StandardMaterial {
+                    unlit: true,
+                    ..glow(hex, 20_000.0)
+                },
+            )
+            .without_shadows(),
         ))
         .id()
 }
@@ -277,19 +444,9 @@ const MOMENTS: usize = 5;
 #[test]
 fn fighters_flank_a_player_in_cover() {
     let mut app = app();
-    yard(&mut app);
+    let walls = yard(&mut app);
     let squad = squad(&mut app);
-    let mut t = Transform::from_translation(DVec3::new(3.4, 0.0, 0.0));
-    t.look_to(Vec3::Z, Vec3::Y);
-    let player = app
-        .world
-        .spawn((
-            t,
-            Faction::PLAYER,
-            LocomotionState::default(),
-            SimulationFocus::default(),
-        ))
-        .id();
+    let mut player = Player::spawn(&mut app, false);
     let away = camera(
         &mut app,
         DVec3::new(0.0, 2.0, -300.0),
@@ -298,10 +455,10 @@ fn fighters_flank_a_player_in_cover() {
         Vec3::Y,
     );
     // Over the player's wall (its top 2 m up), turned as the moment needs.
-    let eye_at = DVec3::new(0.0, 2.55, -0.6);
+    let eye_at = DVec3::new(0.9, 2.55, -0.8);
     let eye = camera(&mut app, eye_at, DVec3::new(0.0, 1.2, 16.0), 56.0, Vec3::Y);
     // Wider, once a flanker is round: it and the end of the wall it came past.
-    let eye_wide = camera(&mut app, eye_at, DVec3::new(0.0, 1.2, 16.0), 84.0, Vec3::Y);
+    let eye_wide = camera(&mut app, eye_at, DVec3::new(0.0, 1.2, 16.0), 70.0, Vec3::Y);
     // Straight down over the yard, the squad's side up.
     let map = camera(
         &mut app,
@@ -310,6 +467,7 @@ fn fighters_flank_a_player_in_cover() {
         54.0,
         Vec3::Z,
     );
+    dress(&mut app, &walls);
     use_camera(&mut app, away);
 
     let mut cursor = app
@@ -322,32 +480,12 @@ fn fighters_flank_a_player_in_cover() {
     let mut eye_shots: [Picture; MOMENTS] = Default::default();
     let mut map_shots: [Picture; MOMENTS] = Default::default();
     let (mut flanked_at, mut flanker) = (None::<f64>, None::<Entity>);
-    // The first flanker the player sees come round the end of its wall.
-    let mut past_wall = None::<Entity>;
-    let (mut suppressor_shots, mut next_return) = (0u32, 3.0f64);
+    // The first flanker to get to its spot off the player's side.
+    let mut placed = None::<Entity>;
+    let mut suppressor_shots = 0u32;
     let mut t = 0.0f64;
     while t < 30.0 && eye_shots.iter().any(Option::is_none) {
-        // The player: seen beside its wall for a moment, then down behind it, firing back over
-        // it now and then (as in `tactics.rs`).
-        if t >= 1.5 && at(&app, player) != PLAYER {
-            app.world.get_mut::<Transform>(player).unwrap().translation = PLAYER;
-        }
-        if t >= next_return {
-            next_return += 2.5;
-            let pinned_by = squad
-                .iter()
-                .copied()
-                .find(|&e| brain(&app, e).role == "suppress")
-                .unwrap_or(squad[0]);
-            let to = at(&app, pinned_by) + DVec3::new(0.8, 1.3, 0.0);
-            app.world.write_message(ProjectileTrace {
-                from: DVec3::new(0.0, 2.2, 0.6),
-                to,
-                radius: 0.05,
-                speed: 600.0,
-                shooter: Some(player),
-            });
-        }
+        player.step(&mut app, t, &squad);
         app.update();
         t += STEP;
         // The suppressor's shots as tracers, a fifth of a second each.
@@ -388,13 +526,8 @@ fn fighters_flank_a_player_in_cover() {
             if ((t / STEP).round() as u64).is_multiple_of(15) {
                 trails.push((p, 0.14, color));
             }
-            if past_wall.is_none()
-                && b.role == "flank"
-                && p.distance(PLAYER) < 7.0
-                && (40.0..120.0).contains(&bearing(p).abs())
-                && seen_by_player(&app, p)
-            {
-                past_wall = Some(e);
+            if placed.is_none() && b.role == "flank" && b.in_position {
+                placed = Some(e);
             }
             if flanked_at.is_none()
                 && b.role == "flank"
@@ -407,14 +540,14 @@ fn fighters_flank_a_player_in_cover() {
                 flanker = Some(e);
             }
         }
-        // The moments: pinned (at a suppressor's shot, so its tracer shows), once more on the
-        // way, a flanker coming round the end of the wall, in position off the player's side,
-        // and its shots from there.
+        // The moments: pinned (at a suppressor's shot while the player is down, so its tracer
+        // runs into the wall), once more on the way, the first flanker at its spot off the
+        // player's side, a flanker with a clear shot from there, and its shots.
         let suppressing = squad.iter().any(|&e| brain(&app, e).role == "suppress");
         let n = eye_shots.iter().position(Option::is_none).unwrap();
         let due = match n {
-            0 | 1 => suppressing && fresh && t >= [2.5, 5.0][n],
-            2 => past_wall.is_some() || flanked_at.is_some(),
+            0 | 1 => suppressing && fresh && t >= [2.5, 5.0][n] && t > player.up_until + 0.2,
+            2 => placed.is_some(),
             3 => flanked_at.is_some(),
             _ => from_flank || flanked_at.is_some_and(|f| t >= f + 3.0),
         };
@@ -425,7 +558,7 @@ fn fighters_flank_a_player_in_cover() {
         let caption = match n {
             0 => format!("{t:.1} S: PINNED BY FIRE"),
             1 => format!("{t:.1} S: STILL PINNED"),
-            2 => format!("{t:.1} S: ROUND THE END OF THE WALL"),
+            2 => format!("{t:.1} S: A FLANKER IN POSITION"),
             3 => format!("{t:.1} S: FLANKED, {} DEG ROUND", side(flanker.unwrap())),
             _ => format!("{t:.1} S: SHOT FROM THE FLANK"),
         };
@@ -435,7 +568,7 @@ fn fighters_flank_a_player_in_cover() {
             .iter()
             .copied()
             .find(|&e| brain(&app, e).role == "suppress");
-        let round = flanker.or(past_wall.filter(|_| n == 2)).or_else(|| {
+        let round = flanker.or(placed).or_else(|| {
             squad
                 .iter()
                 .copied()
@@ -448,15 +581,12 @@ fn fighters_flank_a_player_in_cover() {
         let look = match (suppressor, round) {
             (Some(s), Some(f)) => {
                 let (bs, bf) = (bearing(at(&app, s)), bearing(at(&app, f)));
-                if n == 2 {
-                    // The flanker and the end of the wall it comes round.
-                    bf - 25.0 * bf.signum()
-                } else if n >= 3 {
-                    // The flanker in the picture, the suppressor too if it fits.
-                    ((bs + bf) * 0.5).clamp(bf - 38.0, bf + 38.0)
+                if n >= 2 {
+                    // The flanker off the side and the end of the wall it looks past.
+                    bf - 15.0 * bf.signum()
                 } else {
-                    // At the suppressor, a little toward the side the flankers went.
-                    bs + 12.0 * bf.signum()
+                    // At the suppressor (its tracer runs from there to the wall).
+                    bs
                 }
             }
             _ => 0.0,
@@ -489,7 +619,6 @@ fn fighters_flank_a_player_in_cover() {
         }
         let caption = match n {
             0 => format!("{t:.1} S: RED PINS, YELLOW GO ROUND"),
-            2 => format!("{t:.1} S: ROUND THE WALL END"),
             _ => caption,
         };
         map_shots[n] = Some((caption, img));
@@ -506,30 +635,250 @@ fn fighters_flank_a_player_in_cover() {
         eprintln!("skipping the pictures: no GPU");
         return;
     }
-    let strip = |shots: &[Picture], name: &str| {
-        let mut img = image::RgbaImage::from_pixel(
-            TILE_W * shots.len() as u32,
-            TILE_H + BAND,
-            image::Rgba([24, 24, 28, 255]),
-        );
-        for (n, shot) in shots.iter().enumerate() {
-            let (caption, pic) = shot.as_ref().expect("a picture was never taken");
-            let x = TILE_W * n as u32;
-            if let Some(pic) = pic {
-                image::imageops::replace(&mut img, pic, i64::from(x), i64::from(BAND));
-            }
-            write(&mut img, x + 10, 8, caption);
-        }
-        let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
-        img.save(&path).expect("save the strip");
-        if let Ok(dir) = std::env::var("NPC_SCREENSHOT_DIR") {
-            let _ = std::fs::create_dir_all(&dir);
-            std::fs::copy(&path, std::path::Path::new(&dir).join(name)).expect("copy the strip");
-        }
-        eprintln!("wrote {}", path.display());
-    };
     strip(&eye_shots, "fighters-flank-eye-level.png");
     strip(&map_shots, "fighters-flank-top-down.png");
+}
+
+/// A stand-in for the player (it has no body of its own here): a blue capsule, crouched
+/// behind its wall and upright when it runs or pops up to fire.
+fn player_body(app: &mut App) -> Entity {
+    app.world
+        .spawn((
+            Transform::default(),
+            MeshRenderer::new(
+                Shape::Capsule {
+                    radius: 0.28,
+                    height: 1.75,
+                    segments: 16,
+                },
+                StandardMaterial::hex(0x2f5fb8).with_roughness(0.6),
+            ),
+        ))
+        .id()
+}
+
+fn pose_player_body(app: &mut App, body: Entity, player: &Player) {
+    let p = at(app, player.e);
+    let upright = player.fled_at.is_some() || p.y > 0.1;
+    let h = if upright { 1.75 } else { 1.15 };
+    let mut t = app.world.get_mut::<Transform>(body).unwrap();
+    t.translation = DVec3::new(p.x, 0.0, p.z) + DVec3::Y * (h as f64 * 0.5);
+    t.scale = Vec3::new(1.0, h / 1.75, 1.0);
+}
+
+/// A blast as the picture shows it (no fire or smoke module is installed here): a flash for a
+/// tenth of a second and a dust cloud that swells and settles over two seconds.
+struct Burst {
+    flash: Entity,
+    dust: Entity,
+    at: DVec3,
+    since: f64,
+}
+
+fn burst(app: &mut App, at: DVec3, now: f64) -> Burst {
+    let flash = app
+        .world
+        .spawn((
+            Transform::from_translation(at + DVec3::Y * 0.6),
+            MeshRenderer::new(
+                Shape::Sphere {
+                    radius: 1.3,
+                    segments: 20,
+                },
+                StandardMaterial {
+                    unlit: true,
+                    ..glow(0xffc46a, 120_000.0)
+                },
+            )
+            .without_shadows(),
+        ))
+        .id();
+    let dust = app
+        .world
+        .spawn((
+            Transform::from_translation(at + DVec3::Y * 0.8),
+            MeshRenderer::new(
+                Shape::Sphere {
+                    radius: 1.0,
+                    segments: 20,
+                },
+                StandardMaterial::hex(0x6b6152)
+                    .with_roughness(1.0)
+                    .with_alpha(0.75),
+            ),
+        ))
+        .id();
+    Burst {
+        flash,
+        dust,
+        at,
+        since: now,
+    }
+}
+
+/// Swell and settle the dust, put the flash out; false once it is gone.
+fn age_burst(app: &mut App, b: &Burst, now: f64) -> bool {
+    let age = now - b.since;
+    if age > 0.12
+        && let Some(mut r) = app.world.get_mut::<MeshRenderer>(b.flash)
+    {
+        r.visible = false;
+    }
+    if age > 2.0 {
+        app.world.despawn(b.flash);
+        app.world.despawn(b.dust);
+        return false;
+    }
+    let k = (age / 2.0) as f32;
+    let mut t = app.world.get_mut::<Transform>(b.dust).unwrap();
+    t.scale = Vec3::splat(1.0 + 1.6 * k.sqrt());
+    t.translation = b.at + DVec3::Y * (0.8 + 0.6 * k as f64);
+    true
+}
+
+#[test]
+fn fighters_flush_a_player_out_of_cover_with_a_grenade() {
+    let mut app = app();
+    let walls = yard(&mut app);
+    let squad = squad(&mut app);
+    let mut player = Player::spawn(&mut app, true);
+    let away = camera(
+        &mut app,
+        DVec3::new(0.0, 2.0, -300.0),
+        DVec3::new(0.0, 2.0, -600.0),
+        30.0,
+        Vec3::Y,
+    );
+    // Behind the player and off its right shoulder, over the yard toward the squad.
+    let cam_at = DVec3::new(3.2, 3.0, -6.5);
+    let cam = camera(&mut app, cam_at, DVec3::new(-1.0, 0.8, 5.0), 62.0, Vec3::Y);
+    dress(&mut app, &walls);
+    let body = player_body(&mut app);
+    use_camera(&mut app, away);
+
+    let mut traces = app
+        .world
+        .resource::<Messages<ProjectileTrace>>()
+        .get_cursor();
+    let mut blasts = app.world.resource::<Messages<WorldImpulse>>().get_cursor();
+    let mut tracers: Vec<(Entity, f64)> = Vec::new();
+    let mut bursts: Vec<Burst> = Vec::new();
+    let mut shots: [Picture; MOMENTS] = Default::default();
+    let (mut thrown, mut blast_at, mut landed) = (None::<f64>, None::<f64>, None::<DVec3>);
+    let mut t = 0.0f64;
+    while t < 30.0 && shots.iter().any(Option::is_none) {
+        player.step(&mut app, t, &squad);
+        app.update();
+        t += STEP;
+        pose_player_body(&mut app, body, &player);
+        let now = app.world.resource::<Time>().elapsed_secs_f64();
+        tracers.retain(|&(e, until)| {
+            let keep = t < until;
+            if !keep {
+                app.world.despawn(e);
+            }
+            keep
+        });
+        bursts.retain(|b| age_burst(&mut app, b, now));
+        let msgs = app.world.resource::<Messages<ProjectileTrace>>();
+        let fired: Vec<ProjectileTrace> = traces.read(msgs).copied().collect();
+        let (mut pinning, mut at_runner) = (false, false);
+        for tr in fired {
+            let Some(s) = tr.shooter else { continue };
+            if !squad.contains(&s) {
+                continue;
+            }
+            let e = tracer(&mut app, tr.from, tr.to);
+            tracers.push((e, t + 0.2));
+            pinning |= brain(&app, s).role == "suppress";
+            at_runner |= player.fled_at.is_some()
+                && engine_npc::perception::segment_distance(
+                    at(&app, player.e) + DVec3::Y,
+                    tr.from,
+                    tr.to,
+                ) < 2.0;
+        }
+        let msgs = app.world.resource::<Messages<WorldImpulse>>();
+        let went_off: Vec<WorldImpulse> = blasts.read(msgs).copied().collect();
+        for b in went_off {
+            blast_at.get_or_insert(t);
+            bursts.push(burst(&mut app, b.center - DVec3::Y * 0.3, now));
+        }
+        let flight = app.world.resource::<Grenades>().flights.first().copied();
+        if let Some(f) = flight {
+            thrown.get_or_insert(t);
+            landed = Some(f.at);
+            // Its arc marked as it flies (the grenade itself is a few centimeters across).
+            if now - f.thrown <= f.flight_secs {
+                dot_at(&mut app, f.position(now), 0.05, 0xfff0c0);
+            }
+        }
+        // The moments: pinned (at a suppressor's shot), the grenade over the wall, the player
+        // running from where it lands, the blast, and the player in the open under fire.
+        let n = shots.iter().position(Option::is_none).unwrap();
+        let due = match n {
+            0 => pinning && t >= 3.0,
+            1 => flight.is_some_and(|f| now - f.thrown >= f.flight_secs * 0.55),
+            2 => player.fled_at.is_some_and(|f| t >= f + 0.6),
+            3 => blast_at.is_some_and(|b| t - b < 0.05),
+            _ => blast_at.is_some_and(|b| (at_runner && t > b + 0.3) || t >= b + 2.5),
+        };
+        if !due {
+            continue;
+        }
+        let caption = match n {
+            0 => format!("{t:.1} S: PINNED BEHIND THE WALL"),
+            1 => format!("{t:.1} S: A GRENADE COMES OVER"),
+            2 => format!("{t:.1} S: IT LANDS, HE RUNS"),
+            3 => format!("{t:.1} S: THE BLAST"),
+            _ => format!("{t:.1} S: IN THE OPEN, UNDER FIRE"),
+        };
+        // On the player and the grenade (or where it went off).
+        let p = at(&app, player.e) + DVec3::Y * 0.9;
+        let look = match (n, flight, landed) {
+            (1, Some(f), _) => (p + f.position(now)) * 0.5,
+            (2..=4, _, Some(l)) => (p + l) * 0.5 + DVec3::new(0.0, 0.0, 2.0),
+            _ => DVec3::new(-1.0, 0.8, 5.0),
+        };
+        *app.world.get_mut::<Transform>(cam).unwrap() =
+            Transform::from_translation(cam_at).looking_at(look, Vec3::Y);
+        let img = shoot(&mut app, cam, away, &format!("flush_{n}.png"));
+        shots[n] = Some((caption, img));
+    }
+    let thrown = thrown.expect("no grenade was thrown");
+    let fled = player.fled_at.expect("the player never ran");
+    eprintln!("thrown at {thrown:.1} s, the player ran at {fled:.1} s, went off at {blast_at:?}");
+    assert!(thrown >= 7.5, "thrown at {thrown:.1} s");
+    assert!(shots.iter().all(Option::is_some), "a moment never came");
+    if app.world.get_resource::<RenderDisabled>().is_some() {
+        eprintln!("skipping the pictures: no GPU");
+        return;
+    }
+    strip(&shots, "fighters-flush-grenade.png");
+}
+
+/// Put the pictures side by side under their captions and save the strip as `name`.
+fn strip(shots: &[Picture], name: &str) {
+    let mut img = image::RgbaImage::from_pixel(
+        TILE_W * shots.len() as u32,
+        TILE_H + BAND,
+        image::Rgba([24, 24, 28, 255]),
+    );
+    for (n, shot) in shots.iter().enumerate() {
+        let (caption, pic) = shot.as_ref().expect("a picture was never taken");
+        let x = TILE_W * n as u32;
+        if let Some(pic) = pic {
+            image::imageops::replace(&mut img, pic, i64::from(x), i64::from(BAND));
+        }
+        write(&mut img, x + 10, 8, caption);
+    }
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    img.save(&path).expect("save the strip");
+    if let Ok(dir) = std::env::var("NPC_SCREENSHOT_DIR") {
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::copy(&path, std::path::Path::new(&dir).join(name)).expect("copy the strip");
+    }
+    eprintln!("wrote {}", path.display());
 }
 
 /// Write `text` (capitals, digits and a little punctuation) in a 5×7 pixel font at twice its

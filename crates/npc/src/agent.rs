@@ -427,14 +427,20 @@ pub struct NpcBrain {
     pub next_strafe_flip: f64,
     /// A direct order overrides utility scoring until done.
     pub order: Option<NpcOrder>,
-    /// Squad role this think (`"suppress"`, `"flank"`, `"cover"` a mate reviving, `"screen"` a
-    /// kneeling medic).
+    /// Squad role this think (`"suppress"`, `"flank"`, `"cover"` / `"screen"` a mate reviving,
+    /// `"clear"` an enemy off a downed mate).
     pub role: &'static str,
-    /// Where the squad's medic kneels over a downed mate, while this one covers or screens it
-    /// (`"cover"` / `"screen"`).
+    /// Where a squad mate kneels over a downed one (the medic, if it is one of those going),
+    /// while this one covers or screens it (`"cover"` / `"screen"`); or where the downed mate
+    /// lies that it drives an enemy off (`"clear"`).
     pub guard: Option<DVec3>,
     /// When a medic has its next smoke canister ready (world clock, s; see [`crate::smoke`]).
     pub smoke_ready: f64,
+    /// When it may next throw a grenade or smoke at an enemy pinned in cover (world clock, s;
+    /// see [`crate::grenade`]).
+    pub grenade_ready: f64,
+    /// Its enemy keeping still: who, where (as far as it knows), and since when (its clock, s).
+    pub still: Option<(Entity, DVec3, f64)>,
     /// Random stream for this NPC's decisions.
     pub rng_state: u64,
     /// Where it came from (patrol center when `Npc::home` is not set).

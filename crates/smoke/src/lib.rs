@@ -48,7 +48,7 @@ impl Plugin for SmokePlugin {
             .init_resource::<sim::SmokeClock>()
             .register_resource::<SmokeSettings>(
                 "Smoke tuning: sim_hz, buoyancy, weight, wind_coupling, vorticity (swirl), \
-                 iterations, dissipation_secs, cool_secs, extinction_m2_kg (how thick it \
+                 turbulence (eddies in the wind, share of its speed), iterations, dissipation_secs, cool_secs, extinction_m2_kg (how thick it \
                  looks), auto volumes (auto_cell_m, auto_size_m, max_volumes), bullets \
                  (bullet_clear, tunnel_radius_m, tunnel_secs), detail, max_steps.",
             )
@@ -266,7 +266,37 @@ fn register_apis(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_world::{ProjectileTrace, WorldImpulse};
+    use engine_world::{ProjectileTrace, WindField, WorldImpulse};
+
+    #[test]
+    fn the_wind_smoke_feels_has_eddies_about_the_steady_wind() {
+        let wind = WindField {
+            prevailing: Vec3::new(5.0, 0.0, 0.0),
+            gustiness: 0.0,
+            ..Default::default()
+        };
+        let at = |x: f64, z: f64| DVec3::new(x, 10.0, z);
+        // Without turbulence it is just the wind.
+        assert_eq!(
+            sim::turbulent_wind(&wind, at(3.0, 4.0), 0.0, 7.0),
+            wind.sample(at(3.0, 4.0))
+        );
+        // With it, the wind swings across and along by a share of its speed, and on average
+        // still blows the same way at the same speed.
+        let mut sum = Vec3::ZERO;
+        let mut across: f32 = 0.0;
+        let n = 400;
+        for i in 0..n {
+            let p = at((i % 20) as f64 * 9.0, (i / 20) as f64 * 9.0);
+            let d = sim::turbulent_wind(&wind, p, 0.3, 2.0) - wind.sample(p);
+            sum += d;
+            across += d.z * d.z;
+        }
+        let mean = sum / n as f32;
+        let spread = (across / n as f32).sqrt();
+        assert!(mean.length() < 0.5, "{mean}");
+        assert!((0.5..3.0).contains(&spread), "{spread}");
+    }
 
     #[test]
     fn a_fine_volume_inside_a_coarse_one_gets_the_smoke_released_in_it() {

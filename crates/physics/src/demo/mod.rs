@@ -23,6 +23,10 @@
 //!   and drop into the pockets,
 //! * a Galton board: five hundred steel balls pour through twelve rows of pins and pile up in
 //!   seventeen bins in the bell curve printed behind them,
+//! * a counterweight catapult: a tonne of stone swings its arm up into the crossbar and the
+//!   granite ball flies on, 7 m up and 11 m down range into a crate wall,
+//! * a giant Jenga tower: a test rig's rod pokes three loose blocks out, then one the tower
+//!   rests on, and the top half comes down,
 //! * along the front, three oil drums rolling down a ramp and 47 m along an asphalt runway
 //!   (one triangle mesh) into a sand pit: they stay flat and in their lanes.
 //!
@@ -30,8 +34,10 @@
 //! them play; `physics.proving_ground.replay` restarts one or all of them now.
 
 mod art;
+pub mod catapult;
 mod floaters;
 pub mod galton;
+pub mod jenga;
 pub mod pool;
 
 pub(crate) use floaters::replay_floaters;
@@ -190,6 +196,26 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 6.0,
     },
     DemoView {
+        key: "physics_catapult",
+        name: "A counterweight catapult throwing a granite ball through a crate wall",
+        eye: [0.0, 7.0, -11.0],
+        target: [2.0, 4.0, 3.0],
+        hour: 16.0,
+        station: Some(Station::Catapult),
+        // The ball leaves the cup at 1.0 s and tops its flight over the yard at 1.7 s.
+        warmup_secs: 1.3,
+    },
+    DemoView {
+        key: "physics_jenga",
+        name: "A giant Jenga tower toppling when a test rig pushes out a block it rests on",
+        eye: [-6.6, 2.3, -1.4],
+        target: [-10.0, 1.35, -5.5],
+        hour: 16.0,
+        station: Some(Station::Jenga),
+        // Three loose blocks are out by 17 s; the top half is tipping over at 22.4 s.
+        warmup_secs: 22.4,
+    },
+    DemoView {
         key: "physics_turntable",
         name: "A turntable carrying crates and a rider",
         eye: [37.0, 6.5, 20.0],
@@ -219,10 +245,12 @@ pub enum Station {
     Cradle,
     Pool,
     Galton,
+    Catapult,
+    Jenga,
 }
 
 impl Station {
-    pub const ALL: [Station; 16] = [
+    pub const ALL: [Station; 18] = [
         Station::Tower,
         Station::Pile,
         Station::Dominoes,
@@ -239,6 +267,8 @@ impl Station {
         Station::Cradle,
         Station::Pool,
         Station::Galton,
+        Station::Catapult,
+        Station::Jenga,
     ];
 
     /// The station's name in the `physics.proving_ground.replay` API.
@@ -260,6 +290,8 @@ impl Station {
             Station::Cradle => "cradle",
             Station::Pool => "pool",
             Station::Galton => "galton",
+            Station::Catapult => "catapult",
+            Station::Jenga => "jenga",
         }
     }
 
@@ -282,6 +314,8 @@ impl Station {
             Station::Cradle => (16.0, -4.5),
             Station::Pool => (9.0, -8.5),
             Station::Galton => (10.0, -18.0),
+            Station::Catapult => (-4.0, 3.0),
+            Station::Jenga => (-10.0, -5.5),
         };
         DVec3::new(x, 0.0, z)
     }
@@ -301,6 +335,9 @@ impl Station {
             Station::Cradle => Some(20.0),
             Station::Pool => Some(25.0),
             Station::Galton => Some(40.0),
+            Station::Catapult => Some(20.0),
+            // The last poke starts at 18 s; the top half is down and still by 30.
+            Station::Jenga => Some(32.0),
         }
     }
 
@@ -327,6 +364,8 @@ impl Station {
             Station::Cradle => newtons_cradle(y, base),
             Station::Pool => pool::pool_table(y, base),
             Station::Galton => galton::galton_board(y, base),
+            Station::Catapult => catapult::catapult(y, base),
+            Station::Jenga => jenga::jenga(y, base),
         }
     }
 }
@@ -344,7 +383,7 @@ pub struct ProvingGround {
 
 /// Marks everything a station spawned, so a replay clears it.
 #[derive(Component, Debug, Clone, Copy)]
-struct StationPart {
+pub(crate) struct StationPart {
     ground: Entity,
     station: Station,
 }
@@ -1751,13 +1790,30 @@ fn rockfall(y: &mut Yard, base: DVec3) {
             ..base
         })
     };
+    // The chute's plates are worn smooth by the rock (friction 0.35; with the rock's 1.0, 0.68
+    // between them: rock slides from 34 degrees). On plain steel (0.75 between them, 37
+    // degrees) a few rocks wedged against a side plate and stopped on the 40-degree chute.
+    let chute = {
+        let mut table = y.world.get_resource_or_init::<SurfaceMaterials>();
+        match table.id("worn_chute_steel") {
+            Some(id) => id,
+            None => {
+                let base = table.get(y.metal).clone();
+                table.add(SurfaceMaterial {
+                    name: "worn_chute_steel".into(),
+                    friction: 0.35,
+                    ..base
+                })
+            }
+        }
+    };
     let (plates, floor_at, top) = chute_plates();
     for &(at, rotation, half, _) in &plates {
         y.fixed(
             base + at.as_dvec3(),
             rotation,
             ColliderShape::Cuboid { half_extents: half },
-            y.metal,
+            chute,
         );
     }
     let art = y.parts(

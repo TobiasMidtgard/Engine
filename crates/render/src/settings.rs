@@ -83,6 +83,10 @@ pub enum DebugView {
     /// Virtual geometry: each cluster's level of detail, from blue (full detail) through cyan,
     /// green, yellow, orange, red and magenta to white (7 or more halvings).
     ClusterLevels,
+    /// Virtual textures: the level each surface's first virtual texture shows, in the colors of
+    /// `ClusterLevels`, with tile edges darkened; reddish where a coarser tile stands in for one
+    /// still loading. Surfaces without virtual textures are gray.
+    VirtualTextures,
 }
 
 /// Renderer-wide quality and look settings.
@@ -229,6 +233,25 @@ pub struct RenderSettings {
     /// changing are never released, and assigning new `data` uploads again. Images other code
     /// reads on the CPU or uploads itself need `Image::keep_pixels`. Off by default.
     pub release_image_pixels: bool,
+    /// Streamed virtual texturing (see `virtual_texture`): big images and the textures of
+    /// `VirtualTextures` are drawn through a fixed-size tile cache, streaming only the tiles the
+    /// screen needs. Off = big images are uploaded whole (as far as the GPU allows) and
+    /// `VirtualTextures` handles show their preview.
+    pub virtual_textures: bool,
+    /// RGBA8 images wider or taller than this many texels are tiled into the virtual texture
+    /// cache instead of being uploaded whole (when their size halves evenly down to one tile).
+    pub virtual_texture_threshold: u32,
+    /// Tiles (128² texels plus an 8-texel border) per cache texture; there is one for sRGB
+    /// color and one for linear data, each created on first use. 1024 is about 113 MB each as
+    /// RGBA8, 28 MB with BC7. Applied when changed (the cache starts over).
+    pub virtual_texture_cache_tiles: u32,
+    /// Most tiles uploaded to the cache per frame (texture roots don't count).
+    pub virtual_texture_upload_budget: u32,
+    /// Added to the level of detail virtual textures ask for (positive = coarser, fewer tiles).
+    pub virtual_texture_mip_bias: f32,
+    /// BC7-compress the cache where the GPU supports it (a quarter of the memory; encoded on the
+    /// tile loader threads). Applied when changed.
+    pub virtual_texture_compression: bool,
 }
 
 impl Default for RenderSettings {
@@ -286,6 +309,12 @@ impl Default for RenderSettings {
             cluster_shadow_error_texels: 2.0,
             material_texture_size: 1024,
             release_image_pixels: false,
+            virtual_textures: true,
+            virtual_texture_threshold: 4096,
+            virtual_texture_cache_tiles: 1024,
+            virtual_texture_upload_budget: 32,
+            virtual_texture_mip_bias: 0.0,
+            virtual_texture_compression: true,
         }
     }
 }
