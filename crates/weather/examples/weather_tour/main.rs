@@ -428,9 +428,21 @@ fn main() {
         *app.world.get_mut::<Transform>(camera).unwrap() =
             Transform::from_translation(shot.eye).looking_at(shot.target, Vec3::Y);
         if let Some(mut cam) = app.world.get_mut::<Camera>(camera)
-            && let Exposure::Auto { speed, .. } = &mut cam.exposure
+            && let Exposure::Auto {
+                speed,
+                compensation,
+                ..
+            } = &mut cam.exposure
         {
             *speed = 40.0;
+            // Metering a frame filled with sunlit cloud tops or snow pulls it to mid grey, as
+            // it does a camera; a photographer opens up 1½ stops for it, and so does the tour.
+            let bright = ["above_the_clouds", "flying_over", "snow"];
+            *compensation = if bright.iter().any(|b| shot.name.contains(b)) {
+                1.5
+            } else {
+                0.0
+            };
         }
         for (api, args) in &shot.setup {
             if let Err(e) = call_api(&mut app.world, api, args.clone()) {
