@@ -658,6 +658,7 @@ fn build(world: &mut World, origin: DVec3) {
         [m.slab, m.curb, m.hazard]
     });
     y.scenery(DVec3::ZERO, Quat::IDENTITY, slab);
+    site(&mut y, [hx - curb_t, hz - curb_t]);
     world.entity_mut(pad).insert(ProvingGround {
         origin,
         surfaces,
@@ -667,6 +668,59 @@ fn build(world: &mut World, origin: DVec3) {
     for station in Station::ALL {
         build_station(world, pad, station);
     }
+}
+
+/// Where the site office stands (yard-local, its floor's middle): on the yard's east side
+/// between the stairs and the turntable, long along Z, its door facing the stations (-X).
+const OFFICE_AT: DVec3 = DVec3::new(31.0, 0.0, -4.0);
+
+/// What makes the yard a working test site: the painted walkway inside the curb (`inner`, its
+/// inner face's half extents), a floodlight mast at each corner and the site office.
+fn site(y: &mut Yard, inner: [f32; 2]) {
+    let paint = y.parts("yard_walkway", [Mat::LinePaint], || {
+        [art::site::walkway(inner)]
+    });
+    y.scenery(DVec3::ZERO, Quat::IDENTITY, paint);
+    let mast = y.parts(
+        "yard_mast",
+        [Mat::Galvanized, Mat::Dark, Mat::Glass],
+        || {
+            let m = art::site::mast();
+            [m.steel, m.dark, m.glass]
+        },
+    );
+    let high = art::site::MAST_HIGH;
+    for (sx, sz) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        let foot = Vec3::new(sx * (inner[0] - 0.35), 0.0, sz * (inner[1] - 0.35)).as_dvec3();
+        y.fixed(
+            foot + DVec3::Y * (high * 0.5) as f64,
+            Quat::IDENTITY,
+            ColliderShape::Cylinder {
+                radius: art::site::MAST_FOOT,
+                half_height: high * 0.5,
+            },
+            y.metal,
+        );
+        // The lamps (+Z in the mast's frame) look in toward the yard's middle.
+        y.scenery(foot, Quat::from_rotation_y((-sx).atan2(-sz)), mast.clone());
+    }
+    let office = y.parts(
+        "yard_office",
+        [Mat::Drum(0x3d5a73), Mat::Dark, Mat::Glass],
+        || {
+            let o = art::site::office();
+            [o.paint, o.dark, o.glass]
+        },
+    );
+    let half = art::site::OFFICE;
+    let facing = Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+    y.fixed(
+        OFFICE_AT + DVec3::Y * half.y as f64,
+        facing,
+        ColliderShape::Cuboid { half_extents: half },
+        y.metal,
+    );
+    y.scenery(OFFICE_AT, facing, office);
 }
 
 impl<'w> Yard<'w> {

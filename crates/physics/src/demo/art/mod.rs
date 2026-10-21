@@ -14,6 +14,7 @@ pub(crate) mod kit;
 pub(crate) mod pendulums;
 pub(crate) mod pool;
 pub(crate) mod props;
+pub(crate) mod site;
 pub(crate) mod structures;
 pub(crate) mod textures;
 pub(crate) mod timber;
@@ -79,6 +80,8 @@ pub(crate) enum Mat {
     Glass,
     /// Sanded pale hardwood: the giant Jenga blocks.
     Oak,
+    /// Worn yellow floor paint: the yard's walkway.
+    LinePaint,
 }
 
 /// Texture sets, generated once per app.
@@ -226,6 +229,7 @@ pub(crate) fn material(world: &mut World, m: Mat) -> Handle<StandardMaterial> {
             .with_metallic(1.0)
             .with_roughness(0.25),
         Mat::Oak => textured(world, Tex::Oak, white),
+        Mat::LinePaint => StandardMaterial::hex(0xe3b22a).with_roughness(0.7),
         Mat::Glass => StandardMaterial::hex(0xe8f1f4)
             .with_roughness(0.04)
             .with_alpha(0.12),
