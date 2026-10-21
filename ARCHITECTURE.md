@@ -286,7 +286,10 @@ grass): each clump pulls its blades in, fans them out and gives them its own hei
 with gravity), are widened in view when seen edge-on, and have a glossy midrib (`style.gloss`)
 and tinted tips (`style.tip_tint`). `GrassStyle::meadow`, `savanna`, `tundra`, `marsh` and
 `alien` are starting points for biomes and other worlds. `GrassBender { radius }` on feet, bodies or vehicles
-pushes blades aside (16 nearest the camera). `RenderSettings::grass_density` scales every field
+pushes blades aside (16 nearest the camera). A `GrassWear` map on a field's entity (finer than
+its own maps, over the worn part of it) treads blades flat, dries and thins them, and clears
+them off bare paths; `engine_foliage` keeps one on every field from `GroundWear`.
+`RenderSettings::grass_density` scales every field
 (quality). Give the ground under a field `style.ground_color()` so it reads as grass past the
 draw distance. `engine_foliage` drives grass by spawning fields from its soil grid; game code
 can spawn them directly.

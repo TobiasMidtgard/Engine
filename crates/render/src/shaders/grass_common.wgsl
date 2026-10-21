@@ -9,7 +9,8 @@
 // is a cubic Bezier from the root (on the field's height map) rising straight, arching over
 // toward its tip and drooping under its own weight; it sways in the wind (gusts roll across the
 // field as scrolling noise, and a ripple runs up each blade) and is pushed aside by
-// `GrassBender`s. It is shaded as if rounded across its width, and widened in view when seen
+// `GrassBender`s. On worn ground (a field's `GrassWear` map) blades shorten, lie flat, dry
+// toward straw and thin out, gone where it is worn bare. It is shaded as if rounded across its width, and widened in view when seen
 // edge-on so a field stays full instead of breaking into slivers. Blades thin out with distance
 // by their rank: blade `i` of a tile is drawn while i / blades < density x lod(distance), and
 // shrinks into the ground just before it goes, so thinning has no visible steps; the survivors
@@ -38,6 +39,7 @@ struct GrassField {
     clump: vec4<f32>,   // clump size (m, 0 = none), pull to center, fan out, height spread
     look: vec4<f32>,    // clump color spread, droop, gloss, unused
     tip: vec4<f32>,     // tip tint (rgb, x the blade's color), unused
+    wear: vec4<f32>,    // worn-ground map: first point (field-local m, xz), points per m, 1 = present
 };
 
 struct GrassBenders {
@@ -49,6 +51,7 @@ struct GrassBenders {
 @group(1) @binding(1) var<storage, read> grass_fields: array<GrassField>;
 @group(1) @binding(2) var<uniform> grass_benders: GrassBenders;
 @group(2) @binding(0) var grass_map: texture_2d<f32>; // ground height (m), density, dryness, unused
+@group(2) @binding(1) var grass_wear: texture_2d<f32>; // how worn the ground is (r: 0 .. 1 bare)
 
 const GRASS_TILE: f32 = 8.0;
 const GRASS_BLADE_BITS: u32 = 16u;
@@ -122,6 +125,22 @@ fn grass_map_at(f: GrassField, p: vec2<f32>) -> vec4<f32> {
     return mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
 }
 
+// How worn the ground is at field-local `p` (meters), 0 untouched .. 1 bare, bilinear.
+fn grass_wear_at(f: GrassField, p: vec2<f32>) -> f32 {
+    if (f.wear.w < 0.5) { return 0.0; }
+    let res = vec2<i32>(textureDimensions(grass_wear));
+    let g = (p - f.wear.xy) * f.wear.z;
+    if (any(g < vec2<f32>(0.0)) || any(g > vec2<f32>(res - 1))) { return 0.0; }
+    let i = min(vec2<i32>(floor(g)), max(res - 2, vec2<i32>(0)));
+    let j = min(i + 1, res - 1);
+    let t = g - vec2<f32>(i);
+    let a = textureLoad(grass_wear, i, 0).r;
+    let b = textureLoad(grass_wear, vec2<i32>(j.x, i.y), 0).r;
+    let c = textureLoad(grass_wear, vec2<i32>(i.x, j.y), 0).r;
+    let d = textureLoad(grass_wear, j, 0).r;
+    return mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
+}
+
 // Fraction of blades drawn at distance `d` (must match `lod_factor` in grass.rs).
 fn grass_lod(f: GrassField, d: f32) -> f32 {
     let full = f.lod.x;
@@ -186,7 +205,10 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, wind: vec3<f32>, tiling: vec3
     let root = f.origin.xyz + f.axis_x.xyz * local.x + f.axis_z.xyz * local.y + up * m.x;
     let d = length(root);
     let lod = grass_lod(f, d);
-    let keep = m.y * lod;
+    // Worn ground: the blades trodden flat first, then fewer of them, none on a bare path.
+    let worn = grass_wear_at(f, local);
+    let trodden = smoothstep(0.03, 0.5, worn);
+    let keep = m.y * lod * (1.0 - smoothstep(0.2, 0.95, worn));
     let rank = (f32(index) + 0.5) / f32(tile.blades);
     if (rank >= keep) { return out; }
     // Shrink into the ground just before being thinned out, and at thin edges of the meadow.
@@ -195,7 +217,7 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, wind: vec3<f32>, tiling: vec3
     let clump_height = 1.0 + f.clump.w * (clump.hash.z * 2.0 - 1.0);
     let dome = mix(1.0, 1.12 - 0.4 * clump.dist, f.clump.y);
     let height = f.shape.x * (1.0 + f.shape.y * (r0.z * 2.0 - 1.0)) * mix(0.55, 1.0, saturate(m.y))
-        * mix(0.75, 1.2, meadow_patch) * clump_height * dome * fade;
+        * mix(0.75, 1.2, meadow_patch) * clump_height * dome * fade * (1.0 - 0.45 * trodden);
     if (height < 0.005) { return out; }
     let width = f.shape.z * (0.75 + 0.5 * r1.x) * clamp(inverseSqrt(max(lod, 1e-3)), 1.0, 3.0);
 
@@ -228,6 +250,8 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, wind: vec3<f32>, tiling: vec3
             tip_dir = normalize(mix(tip_dir, normalize(away + up * 0.15), push));
         }
     }
+    // Trodden blades lie down.
+    tip_dir = normalize(mix(tip_dir, normalize(facing + up * 0.2), trodden * 0.75));
     // Cubic Bezier: rising straight from the root, arching over toward the tip, which droops
     // under its weight the further the blade leans.
     let over = tip_dir - up * dot(tip_dir, up);
@@ -274,7 +298,8 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, wind: vec3<f32>, tiling: vec3
 
     // Color: fresh to dry by the map, the clump and per blade; tips tinted.
     let cc = f.look.x;
-    let dryness = saturate(m.z + (r1.w - 0.5) * 0.35 + (0.5 - meadow_patch) * 0.25 + (clump.hash.y - 0.5) * cc * 1.5);
+    var dryness = saturate(m.z + (r1.w - 0.5) * 0.35 + (0.5 - meadow_patch) * 0.25 + (clump.hash.y - 0.5) * cc * 1.5);
+    dryness = mix(dryness, 1.0, trodden * 0.6);
     var albedo = mix(f.lush.rgb, f.dry.rgb, dryness) * (0.8 + 0.4 * r0.z * r1.w);
     albedo *= 1.0 + cc * (clump.hash.x * 2.0 - 1.0);
     // A slight hue drift between patches and clumps, bluer in the lush hollows.

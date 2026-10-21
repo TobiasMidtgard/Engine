@@ -115,6 +115,23 @@ impl GrassField {
     }
 }
 
+/// Where a [`GrassField`]'s ground is worn, on its entity: blades there shorten, lie flat and
+/// dry toward straw, thin out, and are gone where it is worn bare, so a path reads as trodden
+/// earth. A map finer than the field's own over a rectangle of it, so it can follow a footpath
+/// that the field's map would blur. (`engine_foliage` keeps one up to date on every field from
+/// `engine_world::GroundWear`.)
+#[derive(Component, Debug, Clone, PartialEq, Default)]
+pub struct GrassWear {
+    /// The map's first point, meters from the field's -x -z corner along its x and z.
+    pub origin: [f32; 2],
+    /// Meters between map points.
+    pub cell: f32,
+    /// Map points along x and z.
+    pub resolution: [u32; 2],
+    /// 0 untouched .. 1 worn bare at each point, row by row along x.
+    pub wear: Vec<f32>,
+}
+
 /// How the blades of a [`GrassField`] look and behave.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -396,6 +413,7 @@ struct GpuField {
     clump: [f32; 4],
     look: [f32; 4],
     tip: [f32; 4],
+    wear: [f32; 4],
 }
 
 #[repr(C)]
@@ -412,11 +430,19 @@ struct FieldMap {
     tiles: [u32; 2],
     /// Per tile: lowest and highest ground, highest density.
     tile_bounds: Vec<[f32; 3]>,
+    view: wgpu::TextureView,
     _texture: wgpu::Texture,
+    /// The worn ground's map, if any, and its placement for `GpuField::wear`.
+    worn: Option<(wgpu::Texture, [f32; 4])>,
 }
 
 impl FieldMap {
-    fn new(gpu: &GpuShared, layout: &wgpu::BindGroupLayout, field: &GrassField) -> Self {
+    fn new(
+        gpu: &GpuShared,
+        layout: &wgpu::BindGroupLayout,
+        field: &GrassField,
+        no_wear: &wgpu::TextureView,
+    ) -> Self {
         let [mut rx, mut rz] = field.resolution;
         let n = (rx as usize) * (rz as usize);
         let usable = |v: &Vec<f32>| v.len() == n && n > 0;
@@ -469,14 +495,7 @@ impl FieldMap {
             },
         );
         let view = texture.create_view(&Default::default());
-        let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("grass map"),
-            layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
-            }],
-        });
+        let group = map_group(gpu, layout, &view, no_wear);
 
         // Tile bounds from the grid points that fall in or next to each tile.
         let size = [field.size[0].max(0.01), field.size[1].max(0.01)];
@@ -512,9 +531,96 @@ impl FieldMap {
             resolution: [rx, rz],
             tiles,
             tile_bounds,
+            view,
             _texture: texture,
+            worn: None,
         }
     }
+
+    /// Bind `wear` (or none) as this field's worn ground.
+    fn set_wear(
+        &mut self,
+        gpu: &GpuShared,
+        layout: &wgpu::BindGroupLayout,
+        wear: Option<&GrassWear>,
+        no_wear: &wgpu::TextureView,
+    ) {
+        self.worn = wear.and_then(|w| {
+            let [rx, rz] = w.resolution;
+            if rx == 0 || rz == 0 || w.wear.len() != (rx * rz) as usize || w.cell <= 0.0 {
+                return None;
+            }
+            let texels: Vec<u8> = w
+                .wear
+                .iter()
+                .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+                .collect();
+            let texture = wear_texture(gpu, [rx, rz], &texels);
+            Some((texture, [w.origin[0], w.origin[1], 1.0 / w.cell, 1.0]))
+        });
+        let view = self
+            .worn
+            .as_ref()
+            .map(|(t, _)| t.create_view(&Default::default()));
+        self.group = map_group(gpu, layout, &self.view, view.as_ref().unwrap_or(no_wear));
+    }
+
+    /// Placement of the worn ground's map for `GpuField::wear` (w = 0: none).
+    fn wear_params(&self) -> [f32; 4] {
+        self.worn.as_ref().map_or([0.0; 4], |(_, p)| *p)
+    }
+}
+
+fn map_group(
+    gpu: &GpuShared,
+    layout: &wgpu::BindGroupLayout,
+    map: &wgpu::TextureView,
+    wear: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("grass map"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(map),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(wear),
+            },
+        ],
+    })
+}
+
+/// A worn-ground map: one byte per point, 0 untouched .. 255 bare.
+fn wear_texture(gpu: &GpuShared, size: [u32; 2], texels: &[u8]) -> wgpu::Texture {
+    let extent = wgpu::Extent3d {
+        width: size[0],
+        height: size[1],
+        depth_or_array_layers: 1,
+    };
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("grass wear"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        texture.as_image_copy(),
+        texels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(size[0]),
+            rows_per_image: Some(size[1]),
+        },
+        extent,
+    );
+    texture
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -539,6 +645,8 @@ pub struct GrassFeature {
     benders_buffer: Option<wgpu::Buffer>,
     data_group: Option<wgpu::BindGroup>,
     maps: HashMap<Entity, FieldMap>,
+    /// Bound as the worn ground of fields that have none (one untouched point).
+    no_wear: Option<(wgpu::Texture, wgpu::TextureView)>,
     /// Fields drawn this frame, in `GpuField` order.
     order: Vec<Entity>,
     tiles: Vec<GpuTile>,
@@ -609,15 +717,17 @@ impl RenderFeature for GrassFeature {
         });
         let map_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("grass map"),
-            entries: &[layout_entry(
-                0,
-                S::VERTEX,
-                wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-            )],
+            entries: &[0, 1].map(|binding| {
+                layout_entry(
+                    binding,
+                    S::VERTEX,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                )
+            }),
         });
         let shader = gpu.shader("grass", &scene_source(), true);
         let shadow_shader = gpu.shader("grass shadow", &shadow_source(), false);
@@ -724,6 +834,9 @@ impl RenderFeature for GrassFeature {
         }));
         self.data_layout = Some(data_layout);
         self.map_layout = Some(map_layout);
+        let none = wear_texture(gpu, [1, 1], &[0]);
+        let view = none.create_view(&Default::default());
+        self.no_wear = Some((none, view));
     }
 
     fn prepare(
@@ -741,7 +854,7 @@ impl RenderFeature for GrassFeature {
             d.clear();
         }
         self.stats = FeatureStats::default();
-        let Some(map_layout) = &self.map_layout else {
+        let (Some(map_layout), Some((_, no_wear))) = (&self.map_layout, &self.no_wear) else {
             return;
         };
 
@@ -752,14 +865,28 @@ impl RenderFeature for GrassFeature {
             0
         };
         let mut seen = Vec::new();
-        let mut q = world.query::<(Entity, Ref<GrassField>, &GlobalTransform)>();
-        for (entity, field, gt) in q.iter(world) {
+        let mut q = world.query::<(
+            Entity,
+            Ref<GrassField>,
+            &GlobalTransform,
+            Option<Ref<GrassWear>>,
+        )>();
+        for (entity, field, gt, wear) in q.iter(world) {
             seen.push(entity);
-            if field.is_changed() || !self.maps.contains_key(&entity) {
+            let fresh = field.is_changed() || !self.maps.contains_key(&entity);
+            if fresh {
                 self.maps
-                    .insert(entity, FieldMap::new(gpu, map_layout, &field));
+                    .insert(entity, FieldMap::new(gpu, map_layout, &field, no_wear));
             }
-            let map = &self.maps[&entity];
+            let map = self.maps.get_mut(&entity).expect("inserted above");
+            let rewear = match &wear {
+                Some(w) => fresh || w.is_changed(),
+                None => map.worn.is_some(),
+            };
+            if rewear {
+                map.set_wear(gpu, map_layout, wear.as_deref(), no_wear);
+            }
+            let map = &*map;
             let style = &field.style;
             let per_m2 = (style.blades_per_m2 * scale).clamp(0.0, MAX_BLADES_PER_M2);
             let far = style.draw_distance.max(1.0);
@@ -904,6 +1031,7 @@ impl RenderFeature for GrassFeature {
                     style.tip_tint[2].max(0.0),
                     0.0,
                 ],
+                wear: map.wear_params(),
             });
         }
         self.maps.retain(|e, _| seen.contains(e));
@@ -1039,8 +1167,8 @@ mod tests {
 
     #[test]
     fn gpu_field_matches_the_shader_struct() {
-        // Twelve vec4s, as `GrassField` in grass_common.wgsl.
-        assert_eq!(std::mem::size_of::<GpuField>(), 12 * 16);
+        // Thirteen vec4s, as `GrassField` in grass_common.wgsl.
+        assert_eq!(std::mem::size_of::<GpuField>(), 13 * 16);
     }
 
     #[test]

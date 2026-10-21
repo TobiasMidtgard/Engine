@@ -117,7 +117,7 @@ pub use gltf_loader::{
     GltfLoader, GltfNode, GltfPrimitive, GltfScene, GltfSceneSpawner, spawn_gltf_scene,
     spawn_gltf_scene_deferred,
 };
-pub use grass::{GrassBender, GrassField, GrassStyle};
+pub use grass::{GrassBender, GrassField, GrassStyle, GrassWear};
 pub use image_cache::{ImageMemoryStats, ImageTexture};
 pub use material::{AlphaMode, StandardMaterial, TextureMapping, TextureProjection};
 pub use material_library::{MaterialMaps, MaterialPreset, MaterialTextures};
