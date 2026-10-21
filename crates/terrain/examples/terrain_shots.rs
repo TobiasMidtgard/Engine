@@ -569,6 +569,36 @@ fn views() -> Vec<View> {
             fov: 55.0,
             ..BASE
         },
+        // Night: towns and cities light the dark side.
+        View {
+            name: "earth_night_globe",
+            world: World3::Earth,
+            eye_ll: Some([32.0, 12.0, 9_000_000.0]),
+            sun_ll: Some([-15.0, 130.0]),
+            fov: 55.0,
+            exposure: Exposure::Manual { ev100: -1.0 },
+            ..BASE
+        },
+        View {
+            name: "earth_night_leo",
+            world: World3::Earth,
+            eye_ll: Some([36.0, 6.0, 420_000.0]),
+            target_ll: Some([42.0, 12.0, 0.0]),
+            sun_ll: Some([-15.0, 160.0]),
+            fov: 60.0,
+            exposure: Exposure::Manual { ev100: -1.0 },
+            ..BASE
+        },
+        View {
+            name: "earth_night_high",
+            world: World3::Earth,
+            eye_ll: Some([39.0, 3.0, 9_000.0]),
+            target_ll: Some([39.3, 3.5, 0.0]),
+            sun_ll: Some([-15.0, 180.0]),
+            fov: 60.0,
+            exposure: Exposure::Manual { ev100: -1.5 },
+            ..BASE
+        },
         View {
             name: "moon_surface",
             world: World3::Moon,
@@ -780,6 +810,11 @@ fn build(view: &View, size: (u32, u32)) -> App {
         World3::Mars => PlanetTerrain::mars(5),
     }
     .with_pad(pad);
+    // `NO_LIGHTS=1`: the night side without towns and cities, for a before picture.
+    let mut planet = planet;
+    if std::env::var_os("NO_LIGHTS").is_some() {
+        planet.palette.night_lights = 0.0;
+    }
     let planet = if view.painted {
         planet
             .with_overlay(400.0, 300.0, painted_height)
@@ -838,6 +873,9 @@ fn build(view: &View, size: (u32, u32)) -> App {
         // is no atmosphere: without one the haze measures height as world y, so it would pile
         // up on the far side of the globe.
         app.world.resource_mut::<FogSettings>().density = match view.world {
+            // (Night views from space without it: the haze takes its sunlight where the camera
+            // is, so from a sunlit orbit it glows over the night side too.)
+            World3::Earth if view.name.starts_with("earth_night") => 0.0,
             World3::Earth => 0.00002,
             World3::Moon | World3::Mars => 0.0,
         };

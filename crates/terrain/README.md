@@ -179,6 +179,17 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   a four times coarser map of how much of each 2 m cell is bare path (paths show from hills
   and the air). `WearSettings` sets the cell
   size, a `gain_scale` (paths form quicker) and a `heal_scale` (they fade quicker).
+- **City lights at night.** On inhabited worlds (`TerrainPalette::night_lights`, 1 on
+  Earth) towns and cities light the night side past twilight, seen from a few kilometers off
+  up to orbit. People live on mild, wet, low, gentle land, most by coasts and rivers, and
+  regions hundreds of kilometers wide are busy or nearly empty. Cities (some tens of
+  kilometers across, with bright middles, lit districts and dark parks, and lit roads
+  running out of them), towns and villages strung along the roads lie in cells per size,
+  at radiance as satellites measure it (a city's middle about 2 cd/m², so night views want
+  an exposure near EV100 −1). Up close a city breaks into winding main roads and clusters of
+  lamps, then single lamps; places smaller than a pixel spread over it at the same total
+  light, so nothing sparkles from orbit. Seen from far above, the night side reflects no
+  sky either.
 - **Trails people lay themselves.** `PathWear::walk_between` sends walkers between places
   (each weighted by how busy it is). Each takes the way that feels shortest on a coarse
   grid where a path that shows feels easier than open ground (`TrailWalk::attraction`, 0.5:
@@ -259,7 +270,9 @@ underfoot, from low orbit, half lit and full, the Earth's climate belts from far
 (`earth_rivers_air`), worn paths (`paths_meadow`, `paths_meadow_high`, `paths_rain`,
 `paths_snow`, `paths_beach`, `paths_hill` from 600 m off; `NO_PATHS=1` for the ground before;
 trails laid by walkers between a farm and four places, `paths_desire` from the air and
-`paths_desire_eye` at the fork, `STRAIGHT=1` for everyone on straight lines), and Mars: from orbit (`mars_orbit`,
+`paths_desire_eye` at the fork, `STRAIGHT=1` for everyone on straight lines), city lights at
+night (`earth_night_globe`, `earth_night_leo` from 420 km, `earth_night_high` from a plane at
+9 km; `NO_LIGHTS=1` for the dark side without them), and Mars: from orbit (`mars_orbit`,
 `mars_valles`), Olympus Mons (`mars_olympus`), the north pole (`mars_pole`), and the floor and
 rim of Valles Marineris (`mars_canyon`, `mars_rim`))
 with the game's auto exposure, and `examples/terrain_map.rs` draws a relief map with rivers and lakes around

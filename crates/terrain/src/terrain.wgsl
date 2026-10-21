@@ -20,6 +20,7 @@ struct PlanetGpu {
     params3: vec4<f32>,             // regolith scattering (0..1), rayed craters, young areas, smallest crater radius
     rays: array<vec4<f32>, 8>,      // rayed craters: center (planet-local unit direction), radius on the ground (m)
     young: array<vec4<f32>, 12>,    // young ground: middle (planet-local direction) × youth, angular radius
+    params4: vec4<f32>,             // night lights (0..1), unused ×3
 };
 
 // Must match `MapsGpu` in render.rs.
@@ -437,6 +438,159 @@ fn crater_hash(c: vec3<i32>, seed: u32, salt: u32) -> f32 {
     h *= 0x846ca68bu;
     h ^= h >> 16u;
     return f32(h >> 8u) / 16777216.0;
+}
+
+// ---- Night lights: towns and cities on inhabited worlds glow on the night side, seen from
+// a few kilometers off up to orbit (there are no buildings to see closer).
+const SODIUM: vec3<f32> = vec3<f32>(1.0, 0.5, 0.16);
+const LED: vec3<f32> = vec3<f32>(0.95, 0.88, 0.8);
+
+// Smooth value noise in 0..1 with features `cell` meters wide.
+fn light_noise(p: vec3<f32>, cell: f32, salt: u32) -> f32 {
+    let q = p / cell;
+    let i = vec3<i32>(floor(q));
+    var f = fract(q);
+    f = f * f * (3.0 - 2.0 * f);
+    let a = mix(crater_hash(i, 0x11u, salt), crater_hash(i + vec3<i32>(1, 0, 0), 0x11u, salt), f.x);
+    let b = mix(crater_hash(i + vec3<i32>(0, 1, 0), 0x11u, salt), crater_hash(i + vec3<i32>(1, 1, 0), 0x11u, salt), f.x);
+    let c = mix(crater_hash(i + vec3<i32>(0, 0, 1), 0x11u, salt), crater_hash(i + vec3<i32>(1, 0, 1), 0x11u, salt), f.x);
+    let d = mix(crater_hash(i + vec3<i32>(0, 1, 1), 0x11u, salt), crater_hash(i + vec3<i32>(1, 1, 1), 0x11u, salt), f.x);
+    return mix(mix(a, b, f.y), mix(c, d, f.y), f.z);
+}
+
+// Lamps scattered `spacing` apart (a few cells left dark), each blob at least most of a
+// pixel wide: 1 on average.
+fn lamp_field(uv: vec2<f32>, spacing: f32, pixel: f32, salt: u32) -> f32 {
+    let lw = max(spacing * 0.08, pixel * 0.6);
+    let base = floor(uv / spacing - 0.5);
+    var sum = 0.0;
+    for (var k = 0; k < 4; k++) {
+        let cell = base + vec2<f32>(f32(k & 1), f32(k >> 1));
+        let ci = vec3<i32>(i32(cell.x), i32(cell.y), i32(salt));
+        if (crater_hash(ci, 0x31u, 1u) < 0.4) {
+            continue;
+        }
+        let at = (cell + 0.1 + 0.8 * vec2<f32>(crater_hash(ci, 0x31u, 2u), crater_hash(ci, 0x31u, 3u))) * spacing;
+        let d = uv - at;
+        sum += exp(-dot(d, d) / (lw * lw)) * (0.5 + crater_hash(ci, 0x31u, 4u));
+    }
+    // (Each blob holds π·lw² of light; 60 % of the cells have one.)
+    return sum * spacing * spacing / (3.1416 * lw * lw * 0.6);
+}
+
+// A settlement's light seen from close enough to tell its parts apart (1 on average, so it
+// changes nothing from far off): winding main roads lit brighter, and the lamps of the
+// streets between them, in clusters from far and one by one up close.
+fn street_lights(local: vec3<f32>, dir: vec3<f32>, turn: f32, pixel: f32) -> f32 {
+    let wide = 1.0 - smoothstep(80.0, 400.0, pixel);
+    if (wide <= 0.0) {
+        return 1.0;
+    }
+    let e1 = normalize(cross(dir, select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(dir.y) > 0.9)));
+    let e2 = cross(dir, e1);
+    let a = turn * 6.2832;
+    let uv = vec2<f32>(dot(local, e1) * cos(a) + dot(local, e2) * sin(a), -dot(local, e1) * sin(a) + dot(local, e2) * cos(a));
+    // Main roads: where a smooth noise crosses its middle value, so they wind and fork.
+    let ridge = 1.0 - abs(light_noise(vec3<f32>(uv, 0.0), 2800.0, 63u) * 2.0 - 1.0);
+    let mw = max(10.0, pixel * 0.7);
+    let k = 2.0 * mw / 2800.0;
+    // (Broken into stretches, so they don't close into rings.)
+    let roads = smoothstep(1.0 - k, 1.0, ridge) / (k * 1.2) * smoothstep(0.3, 0.5, light_noise(vec3<f32>(uv, 0.0), 1800.0, 64u)) * 1.6;
+    let clusters = lamp_field(uv, 160.0, pixel, 6u);
+    let near = 1.0 - smoothstep(12.0, 50.0, pixel);
+    var lamps = clusters;
+    if (near > 0.0) {
+        lamps = mix(clusters, clusters * lamp_field(uv, 28.0, pixel, 7u), near);
+    }
+    return mix(1.0, roads * 0.3 + lamps * 0.7, wide);
+}
+
+// The light (radiance, cd/m²) of one size of settlement: places in cells `cell_m` wide,
+// `odds` of a cell holding one, `r_min`..`r_max` across (most small, few large), `bright`
+// in a large one's middle, `spokes` lit roads out of the bigger ones. `.a` is how near the
+// place is, for the roads between them.
+fn settlements(p: vec3<f32>, radius: f32, cell_m: f32, salt: u32, odds: f32, r_min: f32, r_max: f32, bright: f32, spokes: u32, pixel: f32) -> vec4<f32> {
+    var light = vec3<f32>(0.0);
+    var near = 0.0;
+    let base = vec3<i32>(floor(p / cell_m - 0.5));
+    for (var k = 0u; k < 8u; k++) {
+        let c = base + vec3<i32>(i32(k & 1u), i32((k >> 1u) & 1u), i32((k >> 2u) & 1u));
+        if (crater_hash(c, 0x5eu, salt) > odds) {
+            continue;
+        }
+        let jitter = vec3<f32>(crater_hash(c, 0x5eu, salt + 1u), crater_hash(c, 0x5eu, salt + 2u), crater_hash(c, 0x5eu, salt + 3u));
+        let center = normalize((vec3<f32>(c) + 0.15 + 0.7 * jitter) * cell_m) * radius;
+        let size = pow(crater_hash(c, 0x5eu, salt + 4u), 3.0);
+        // A place smaller than a pixel spreads over the pixel, as bright in all (no sparkle).
+        let r_own = mix(r_min, r_max, size);
+        let r = max(r_own, pixel * 0.8);
+        let spread = (r_own / r) * (r_own / r);
+        let local = p - center;
+        let d = length(local);
+        near = max(near, exp(-d / (r_own * 8.0)) * (0.3 + size));
+        if (d > r * select(3.0, 12.0, spokes > 0u && size > 0.15)) {
+            continue;
+        }
+        // Sprawl with ragged edges: suburbs reach out along a few directions.
+        let ragged = light_noise(local, r * 0.6, salt + 5u) * 0.65 + light_noise(local, r * 0.2, salt + 8u) * 0.35;
+        let x = d / r * (1.5 - 1.0 * ragged);
+        // A bright middle and suburbs trailing off, in lit districts with dark parks and
+        // fields between them (which a far pixel averages).
+        let quarter = light_noise(local, max(r * 0.08, 150.0), salt + 9u) * 0.7 + light_noise(local, max(r * 0.02, 60.0), salt + 10u) * 0.3;
+        let districts = mix(1.0, 0.25 + 1.5 * smoothstep(0.42, 0.56, quarter), 1.0 - smoothstep(r * 0.04, r * 0.15, pixel));
+        let fall = exp(-x * x * 5.0) * 1.4 + exp(-x * 2.2) * 0.55 * districts;
+        let tone = mix(SODIUM, LED, crater_hash(c, 0x5eu, salt + 6u) * 0.35 + 0.3 * smoothstep(0.3, 0.0, x));
+        let streets = street_lights(local, center / radius, crater_hash(c, 0x5eu, salt + 7u), pixel);
+        var glow = fall * streets;
+        // Big places send lit roads out into the country, straight at first.
+        if (spokes > 0u && size > 0.15) {
+            let up = center / radius;
+            let e1 = normalize(cross(up, select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(up.y) > 0.9)));
+            let e2 = cross(up, e1);
+            let w = max(80.0, pixel * 0.7);
+            for (var j = 0u; j < spokes; j++) {
+                let a = (f32(j) + crater_hash(c, 0x5eu, salt + 20u + j) * 0.8) * 6.2832 / f32(spokes);
+                let way = e1 * cos(a) + e2 * sin(a);
+                let side = cross(up, way);
+                let along = dot(local, way);
+                // Roads bend with the land.
+                let bend = (light_noise(vec3<f32>(along, f32(j) * 977.0, 0.0), r * 0.8, salt + 30u) - 0.5) * r * 0.5;
+                let off = dot(local, side) - bend;
+                if (along > r * 0.3) {
+                    glow += exp(-off * off / (w * w)) * (80.0 / w) * exp(-along / (r * 2.5)) * 0.25;
+                }
+            }
+        }
+        light += tone * glow * bright * spread * (0.35 + 0.65 * size);
+    }
+    return vec4<f32>(light, near);
+}
+
+// Every town's and city's light at a planet-local point `p` (meters from the center).
+fn night_lights(p: vec3<f32>, radius: f32, pixel: f32) -> vec3<f32> {
+    // Where people live in numbers: regions hundreds of kilometers wide are busy or nearly
+    // empty (big cities stand in both).
+    let region = light_noise(p, 1200000.0, 50u) * 0.6 + light_noise(p, 350000.0, 51u) * 0.4;
+    let busy = smoothstep(0.35, 0.72, region);
+    // Roads: thin strings of light, the main ones between cities, the rest across busy land.
+    let road = 1.0 - abs(light_noise(p, 9000.0, 40u) * 2.0 - 1.0);
+    let road2 = 1.0 - abs(light_noise(p, 3000.0, 41u) * 2.0 - 1.0);
+    let width = clamp(pixel / 600.0, 0.004, 0.2);
+    let on_road = smoothstep(1.0 - 0.015 - width, 1.0, road) + smoothstep(1.0 - 0.02 - width, 1.0, road2) * 0.6;
+    let by_road = max(smoothstep(0.9, 0.99, road), smoothstep(0.92, 0.99, road2) * 0.7);
+    // (Radiance as satellites measure it: a city's middle about 2 cd/m², its suburbs and
+    // small towns a fraction of that.)
+    let cities = settlements(p, radius, 120000.0, 10u, 0.6, 4000.0, 25000.0, 3.0, 5u, pixel);
+    var light = cities.rgb * (0.35 + 0.65 * busy);
+    if (busy > 0.0) {
+        let towns = settlements(p, radius, 25000.0, 20u, 0.75, 800.0, 4000.0, 1.6, 0u, pixel);
+        // Villages string out along the roads.
+        let villages = settlements(p, radius, 5000.0, 30u, 0.7, 250.0, 700.0, 1.0, 0u, pixel);
+        let near = saturate(cities.a + towns.a * 0.6);
+        light += (towns.rgb + villages.rgb * (0.15 + 0.85 * by_road)) * busy
+            + SODIUM * on_road * 0.2 / (1.0 + width * 20.0) * (0.2 + 0.8 * near) * busy;
+    }
+    return light;
 }
 
 // Derivative of smoothstep(e0, e1, x).
@@ -1957,6 +2111,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         albedo *= mix(1.0, lommel, share) * (1.0 + 0.3 * regolith * (1.0 - smoothstep(0.0, 0.2, phase)));
     }
 
+    // Seen from far above, the environment map's sky is the camera's: on the night side
+    // (past twilight) there is no sky to reflect.
+    let own_sky = atmosphere_sky_ambient_weight(in.rel);
+    if (own_sky > 0.0 && planet.params2.x > 0.5) {
+        occlusion *= mix(1.0, smoothstep(-0.25, 0.05, dot(up, frame.sun_dir.xyz)), own_sky);
+    }
     var s = default_surface();
     s.albedo = saturate3(albedo);
     s.roughness = clamp(roughness, 0.03, 1.0);
@@ -1998,6 +2158,22 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let level = in.lod.y;
         let tint = vec3<f32>(fract(level * 0.37), fract(level * 0.61 + 0.3), fract(level * 0.83 + 0.6));
         color *= mix(vec3(1.0), tint * 1.6 + 0.2, 0.6);
+    }
+    // Towns and cities light the night side (from a few kilometers off; up close there are no
+    // buildings to hold them). People live on mild, wet, low, gentle land, most by coasts and
+    // rivers; not on the sea, ice, deserts or mountains, nor on hand-made ground.
+    if (planet.params4.x > 0.0) {
+        let night = smoothstep(0.03, -0.1, dot(up, to_sun)) * smoothstep(1500.0, 6000.0, dist);
+        let hab = planet.params4.x * (1.0 - ocean) * (1.0 - smoothstep(0.0, 0.3, in.tint.a))
+            * smoothstep(-6.0, 4.0, temp_c) * (1.0 - smoothstep(27.0, 35.0, temp_c))
+            * mix(0.15, 1.0, smoothstep(0.05, 0.3, moisture + in.water.z))
+            * (1.0 - smoothstep(800.0, 2500.0, altitude)) * (1.0 - smoothstep(0.12, 0.3, slope))
+            * (0.55 + 0.45 * smoothstep(500.0, 0.0, altitude) + 0.8 * in.water.z);
+        if (night * hab > 0.001) {
+            let rot = planet_rot(planet);
+            let local = transpose(rot) * up;
+            color += pre_expose(night_lights(local * planet.center.w, planet.center.w, pixel) * night * hab);
+        }
     }
     color = apply_fog(color, in.rel);
     return vec4<f32>(color, 1.0);

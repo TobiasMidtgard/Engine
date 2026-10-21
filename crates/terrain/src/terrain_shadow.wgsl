@@ -19,6 +19,7 @@ struct PlanetGpu {
     params3: vec4<f32>,
     rays: array<vec4<f32>, 8>,
     young: array<vec4<f32>, 12>,
+    params4: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> shadow_view: ShadowView;

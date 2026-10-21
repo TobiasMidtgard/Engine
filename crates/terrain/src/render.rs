@@ -124,6 +124,8 @@ struct PlanetGpu {
     /// Young ground with few craters: planet-local direction of the middle times its youth
     /// (xyz), angular radius (w, radians).
     young: [[f32; 4]; MAX_YOUNG],
+    /// Night lights of towns and cities (0..1), unused ×3.
+    params4: [f32; 4],
 }
 
 /// Rayed craters per planet the shader draws.
@@ -1545,6 +1547,7 @@ impl RenderFeature for TerrainFeature {
                 ],
                 rays: state.rays,
                 young: state.young,
+                params4: [p.night_lights, 0.0, 0.0, 0.0],
             });
         }
         self.built_last_frame = built_total;
@@ -1837,7 +1840,7 @@ mod tests {
     fn gpu_structs_match_shader_sizes() {
         assert_eq!(
             std::mem::size_of::<PlanetGpu>(),
-            16 * (3 + 1 + 10 + 4 + MAX_RAYED + MAX_YOUNG)
+            16 * (3 + 1 + 10 + 5 + MAX_RAYED + MAX_YOUNG)
         );
         assert_eq!(std::mem::size_of::<MapsGpu>(), 16 * 8);
         assert_eq!(std::mem::size_of::<TerrainVertex>(), 48);
