@@ -1148,6 +1148,11 @@ pub struct VoxelLook {
     pub base: u8,
 }
 
+/// Grass on topsoil starts where the broad surface normal's Y passes the first value (about
+/// 72°) and covers it fully by the second (about 50°): turf holds on steep banks; only cuts,
+/// risers and near-vertical faces stay bare soil.
+const GRASS_SLOPE: (f32, f32) = (0.3, 0.65);
+
 /// Layer id of grassy topsoil in [`mesh_chunk_layers`] (other layers are material indices).
 pub const GRASS_LAYER: u8 = u8::MAX;
 
@@ -1549,9 +1554,10 @@ fn mesh_region_tagged(state: &VoxelState, look: &VoxelLook, lo: [i64; 3], hi: [i
         let mut cover = 0.0;
         if let (Some(grass), Some(top)) = (look.grass, look.topsoil)
             && mat == top
-            && slope > 0.45
+            && slope > GRASS_SLOPE.0
         {
-            cover = ((slope - 0.45) / 0.35).clamp(0.0, 1.0) * wear;
+            cover =
+                ((slope - GRASS_SLOPE.0) / (GRASS_SLOPE.1 - GRASS_SLOPE.0)).clamp(0.0, 1.0) * wear;
             let var = 0.85 + 0.3 * hash3(bc[0] as i64, 0, bc[2] as i64, look.seed + 5);
             color = mix(color, scale(grass, var), cover);
         }
