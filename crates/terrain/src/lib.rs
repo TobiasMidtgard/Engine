@@ -1611,7 +1611,11 @@ mod tests {
         let off = wear_at(&mut app, DVec3::new(0.0, 0.0, 34.0));
         assert!(on > 0.3, "the crowd's line wore only {on}");
         assert!(off < 0.01, "4 m to the side wore {off}");
-        // Other modules see it through `GroundWear`.
+        // Other modules see it through `GroundWear` (a snapshot at most every half second of
+        // game time: let time pass by the clock, not by how fast the machine runs).
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual { step_secs: 0.05 });
         app.update_n(40);
         let shared = app.world.resource::<engine_world::GroundWear>().clone();
         let seen = shared.wear(DVec3::new(0.0, 0.0, 30.0)) as f64;

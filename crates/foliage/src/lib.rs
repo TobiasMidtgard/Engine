@@ -8,6 +8,7 @@ pub mod ecology;
 pub mod far_woods;
 pub mod felling;
 pub mod grass;
+pub mod grass_wear;
 pub mod meshgen;
 pub mod near_woods;
 pub mod plant;
@@ -176,7 +177,7 @@ impl Plugin for FoliagePlugin {
             (
                 (felling::stream_tree_colliders, felling::sync_tree_colliders).chain(),
                 season::follow_weather_calendar,
-                grass::sync_region_grass,
+                (grass::sync_region_grass, grass_wear::wear_grass).chain(),
                 felling::remove_orphan_colliders,
                 cave::sync_chamber_colliders,
                 (
