@@ -49,6 +49,7 @@ enum M {
     Rubber,
     Hazard,
     Diamond,
+    Rope,
 }
 
 fn material(m: M) -> StandardMaterial {
@@ -66,6 +67,7 @@ fn material(m: M) -> StandardMaterial {
         M::Diamond => StandardMaterial::hex(0x9a9ea4)
             .with_metallic(1.0)
             .with_roughness(0.4),
+        M::Rope => StandardMaterial::hex(0xb39566).with_roughness(0.95),
     }
 }
 
@@ -431,7 +433,8 @@ fn build_scene(world: &mut World) {
         let pl = structures::bridge_plank(half, k);
         let rot = Quat::from_rotation_arc(Vec3::Z, dir);
         t += spawn(world, pl.timber, M::Timber, (a + b) * 0.5, rot)
-            + spawn(world, pl.steel, M::Steel, (a + b) * 0.5, rot);
+            + spawn(world, pl.steel, M::Steel, (a + b) * 0.5, rot)
+            + spawn(world, pl.rope, M::Rope, (a + b) * 0.5, rot);
     }
     report("bridge (towers, 15 planks)", t);
 
