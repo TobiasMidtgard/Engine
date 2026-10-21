@@ -130,8 +130,9 @@ fn drop_light(rel: vec3<f32>, view: vec3<f32>) -> vec3<f32> {
 
 // Light falling on a flake from lamps and lightning flashes: a thin white scrap lit from
 // either side, so it shows bright in a lamp's cone or a flash instead of a black speck
-// against the lit air behind it.
-fn flake_point_light(rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+// against the lit air behind it. Ice lace scatters forward too: a flake between the eye and
+// a flash glows instead of showing as a dark speck against the flash-lit air.
+fn flake_point_light(rel: vec3<f32>, n: vec3<f32>, view: vec3<f32>) -> vec3<f32> {
     var c = vec3<f32>(0.0);
     for (var i = 0u; i < min(frame.counts.x, 16u); i++) {
         let l = point_lights[i];
@@ -139,7 +140,8 @@ fn flake_point_light(rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         let d2 = dot(d, d);
         let range = l.position_range.w;
         if (d2 < range * range) {
-            let wrap = saturate(dot(n, d * inverseSqrt(d2))) * 0.5 + 0.5;
+            let l_dir = d * inverseSqrt(d2);
+            let wrap = saturate(dot(n, l_dir)) * 0.5 + 0.5 + 3.0 * pow(saturate(dot(view, l_dir)), 6.0);
             let falloff = sq(saturate(1.0 - sq(d2 / (range * range))));
             c += l.color_radius.rgb * wrap * falloff / max(d2, 0.25) * INV_PI;
         }
@@ -211,7 +213,7 @@ fn vs_snow(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> Pr
     // White, lit by sky, sun (with shadows), lamps and flashes like any rough surface.
     let n = normalize(to_eye + vec3<f32>(0.0, 0.6, 0.0));
     let sun = frame.sun_camera.rgb * saturate(dot(n, frame.sun_dir.xyz) * 0.5 + 0.5) * shadow_factor(rel, n) * INV_PI;
-    let light = (sky_ambient(n) + sun + flake_point_light(rel, n)) * 0.9 * 0.65;
+    let light = (sky_ambient(n) + sun + flake_point_light(rel, n, -to_eye)) * 0.9 * 0.65;
     out.color = vec4<f32>(pre_expose(light), precip.look.y * fade * coverage);
     return out;
 }
