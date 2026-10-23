@@ -4,7 +4,9 @@
 //! before plugins add their systems, so [`crate::log::init`] decides). Then every few seconds
 //! the engine logs, and writes to `engine-profile.txt` in the working directory, a table of
 //! the schedules and the slowest systems in milliseconds per frame, plus how many cores the
-//! frame kept busy. Timing comes from the ECS's own `system` and `schedule` tracing spans.
+//! frame kept busy. Timing comes from the ECS's own `system` and `schedule` tracing spans;
+//! modules can add their own spans inside a system (any `tracing` span whose target starts
+//! with `engine_`, e.g. `info_span!("shadow pass")` in `engine_render`), listed separately.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -55,10 +57,19 @@ fn totals() -> &'static Mutex<HashMap<String, Stat>> {
 
 /// Which spans the profiler times: the ECS's per-system and per-schedule spans.
 fn timed(meta: &tracing::Metadata<'_>) -> bool {
-    meta.is_span()
-        && meta.target().starts_with("bevy_ecs")
-        && matches!(meta.name(), "system" | "system_commands" | "schedule")
+    if !meta.is_span() {
+        return false;
+    }
+    if meta.target().starts_with("bevy_ecs") {
+        matches!(meta.name(), "system" | "system_commands" | "schedule")
+    } else {
+        // A module's own spans inside its systems (render passes, sim stages).
+        meta.target().starts_with("engine_")
+    }
 }
+
+/// Keys of module spans, which run inside systems and so are not added to the busy time.
+const INNER: &str = "  in ";
 
 /// Per-layer filter: only the timed spans, and only while profiling.
 pub(crate) struct ProfileFilter;
@@ -99,10 +110,16 @@ where
         let mut visitor = NameVisitor(None);
         attrs.record(&mut visitor);
         let name = visitor.0.unwrap_or_default();
-        let key = match attrs.metadata().name() {
-            "schedule" => format!("schedule {name}"),
-            "system_commands" => format!("{} (commands)", short_name(&name)),
-            _ => short_name(&name),
+        let meta = attrs.metadata();
+        let key = if !meta.target().starts_with("bevy_ecs") {
+            let module = meta.target().split("::").next().unwrap_or("");
+            format!("{INNER}{module}: {}", meta.name())
+        } else {
+            match meta.name() {
+                "schedule" => format!("schedule {name}"),
+                "system_commands" => format!("{} (commands)", short_name(&name)),
+                _ => short_name(&name),
+            }
         };
         if let Some(span) = ctx.span(id) {
             span.extensions_mut().insert(Key(key));
@@ -219,8 +236,10 @@ fn format_report(
     schedules.sort_by_key(|a| std::cmp::Reverse(a.1.total));
     let mut systems: Vec<_> = stats
         .iter()
-        .filter(|(k, _)| !k.starts_with("schedule "))
+        .filter(|(k, _)| !k.starts_with("schedule ") && !k.starts_with(INNER))
         .collect();
+    let mut inner: Vec<_> = stats.iter().filter(|(k, _)| k.starts_with(INNER)).collect();
+    inner.sort_by_key(|a| std::cmp::Reverse(a.1.total));
     systems.sort_by_key(|a| std::cmp::Reverse(a.1.total));
 
     let busy: Duration = systems.iter().map(|(_, s)| s.total).sum();
@@ -255,6 +274,22 @@ fn format_report(
             ms(s.max),
             s.calls as f64 / frames,
         );
+    }
+    if !inner.is_empty() {
+        let _ = writeln!(
+            out,
+            "\ninside systems                                                    ms/frame   max ms  runs/frame"
+        );
+        for (name, s) in inner.iter().take(TOP_SYSTEMS) {
+            let _ = writeln!(
+                out,
+                "{:<64} {:>9.2} {:>8.2} {:>11.1}",
+                truncate(name, 64),
+                ms(s.total) / frames,
+                ms(s.max),
+                s.calls as f64 / frames,
+            );
+        }
     }
     out
 }
@@ -304,6 +339,14 @@ mod tests {
                 max: Duration::from_millis(9),
             },
         );
+        stats.insert(
+            format!("{INNER}engine_render: shadow pass"),
+            Stat {
+                total: Duration::from_millis(50),
+                calls: 10,
+                max: Duration::from_millis(6),
+            },
+        );
         let report = format_report(
             &stats,
             10,
@@ -314,5 +357,7 @@ mod tests {
         assert!(report.contains("Update"), "{report}");
         assert!(report.contains("game::slow"), "{report}");
         assert!(report.contains("8.00"), "{report}");
+        assert!(report.contains("systems busy 8.0 ms"), "{report}");
+        assert!(report.contains("engine_render: shadow pass"), "{report}");
     }
 }

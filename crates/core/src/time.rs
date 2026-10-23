@@ -203,6 +203,7 @@ pub struct FixedTime {
     hz: f64,
     accumulator: f64,
     max_steps: u32,
+    budget_secs: f64,
     steps: u32,
     current_step: u32,
     world_step: f64,
@@ -216,6 +217,7 @@ impl Default for FixedTime {
             hz: 60.0,
             accumulator: 0.0,
             max_steps: 8,
+            budget_secs: 1.0 / 30.0,
             steps: 0,
             current_step: 0,
             world_step: 1.0 / 60.0,
@@ -268,6 +270,31 @@ impl FixedTime {
     /// Cap on steps per frame (protects against the "spiral of death" after a long hitch).
     pub fn set_max_steps(&mut self, max: u32) {
         self.max_steps = max.max(1);
+    }
+
+    /// Wall-clock seconds the fixed steps of one real-time frame may take (default 1/30 s).
+    /// When the steps cost more than that, the frame stops stepping and drops the backlog, so
+    /// the world runs slower than real time instead of the frame rate collapsing: each slow
+    /// frame would otherwise run more catch-up steps, making the next frame slower still.
+    /// At least one step always runs; [`TimeSource::Manual`] clocks ignore the budget so
+    /// tests and captures stay deterministic.
+    pub fn step_budget_secs(&self) -> f64 {
+        self.budget_secs
+    }
+
+    pub fn set_step_budget_secs(&mut self, secs: f64) {
+        self.budget_secs = secs.max(0.0);
+    }
+
+    /// The frame loop ran only `ran` of this frame's steps: drop the rest and the backlog.
+    pub(crate) fn stop_early(&mut self, ran: u32) {
+        if ran >= self.steps {
+            return;
+        }
+        self.steps = ran;
+        let step = self.step_real_secs();
+        self.accumulator = self.accumulator.min(step);
+        self.alpha = (self.accumulator / step).clamp(0.0, 1.0) as f32;
     }
 
     fn accumulate(&mut self, real_delta: f64, scale: f64) {
@@ -582,6 +609,41 @@ mod tests {
         app.update_n(10);
         // 10 frames at 30 fps = 1/3 s = 20 steps at 60 Hz.
         assert_eq!(app.world.resource::<Steps>().0, 20);
+    }
+
+    #[test]
+    fn slow_steps_stop_at_the_budget_in_real_time() {
+        #[derive(Resource, Default)]
+        struct Steps(u32);
+        let mut app = App::new();
+        app.world
+            .resource_mut::<FixedTime>()
+            .set_step_budget_secs(0.0);
+        app.init_resource::<Steps>()
+            .add_systems(FixedUpdate, |mut s: ResMut<Steps>| s.0 += 1);
+        app.update();
+        let before = app.world.resource::<Steps>().0;
+        // 200 ms behind: 12 steps are due, but the budget lets only the first one run.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.update();
+        assert_eq!(app.world.resource::<Steps>().0 - before, 1);
+        let fixed = app.world.resource::<FixedTime>();
+        assert_eq!(fixed.steps_this_frame(), 1);
+        assert!(fixed.alpha() <= 1.0);
+    }
+
+    #[test]
+    fn manual_clocks_ignore_the_step_budget() {
+        #[derive(Resource, Default)]
+        struct Steps(u32);
+        let mut app = manual_app(0.1);
+        app.world
+            .resource_mut::<FixedTime>()
+            .set_step_budget_secs(0.0);
+        app.init_resource::<Steps>()
+            .add_systems(FixedUpdate, |mut s: ResMut<Steps>| s.0 += 1);
+        app.update();
+        assert_eq!(app.world.resource::<Steps>().0, 6);
     }
 
     #[test]

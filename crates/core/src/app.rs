@@ -40,7 +40,7 @@ use crate::config::EngineConfig;
 use crate::diagnostics::{self, Diagnostics};
 use crate::registry::{ApiRegistry, TypeRegistry};
 use crate::schedule::*;
-use crate::time::{self, FixedTime, LocalTimeScale, Time, TimeDilation};
+use crate::time::{self, FixedTime, LocalTimeScale, Time, TimeDilation, TimeSource};
 use crate::transform::{self, Transform, TransformInterpolation};
 use crate::window::{Window, WindowCloseRequested, WindowResized};
 
@@ -414,12 +414,22 @@ pub fn run_frame(world: &mut World) {
     world.run_schedule(First);
     world.run_schedule(PreUpdate);
 
-    let steps = world.resource::<FixedTime>().steps_this_frame();
+    let (steps, budget) = {
+        let fixed = world.resource::<FixedTime>();
+        let realtime = matches!(world.resource::<Time>().source(), TimeSource::Realtime);
+        let budget = realtime.then(|| std::time::Duration::from_secs_f64(fixed.step_budget_secs()));
+        (fixed.steps_this_frame(), budget)
+    };
+    let started = std::time::Instant::now();
     for i in 0..steps {
         time::enter_fixed_step(world, i);
         world.run_schedule(FixedPreUpdate);
         world.run_schedule(FixedUpdate);
         world.run_schedule(FixedPostUpdate);
+        if i + 1 < steps && budget.is_some_and(|b| started.elapsed() >= b) {
+            world.resource_mut::<FixedTime>().stop_early(i + 1);
+            break;
+        }
     }
     time::exit_fixed_steps(world);
 
