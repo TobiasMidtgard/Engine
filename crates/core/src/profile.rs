@@ -6,7 +6,8 @@
 //! the schedules and the slowest systems in milliseconds per frame, plus how many cores the
 //! frame kept busy. Timing comes from the ECS's own `system` and `schedule` tracing spans;
 //! modules can add their own spans inside a system (any `tracing` span whose target starts
-//! with `engine_`, e.g. `info_span!("shadow pass")` in `engine_render`), listed separately.
+//! with `engine_`, e.g. `info_span!("shadow pass")` or `info_span!("render_step", name = "submit")`
+//! in `engine_render`; a `name` field, when there is one, names the row), listed separately.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -113,7 +114,12 @@ where
         let meta = attrs.metadata();
         let key = if !meta.target().starts_with("bevy_ecs") {
             let module = meta.target().split("::").next().unwrap_or("");
-            format!("{INNER}{module}: {}", meta.name())
+            // A `name` field tells apart spans that share one span name ("render_step").
+            if name.is_empty() {
+                format!("{INNER}{module}: {}", meta.name())
+            } else {
+                format!("{INNER}{module}: {name}")
+            }
         } else {
             match meta.name() {
                 "schedule" => format!("schedule {name}"),
