@@ -284,6 +284,8 @@ pub(crate) struct PerfLog {
     pub gpu_memory_mb: Option<f32>,
     cpu_steps: Vec<(Label, f32)>,
     gpu_passes: Vec<(Label, f32)>,
+    /// Each feature's draws and triangles in the latest frame, for the profile table.
+    features: Vec<(String, crate::FeatureStats)>,
 }
 
 impl PerfLog {
@@ -300,6 +302,7 @@ impl PerfLog {
             gpu_memory_mb: None,
             cpu_steps: Vec::new(),
             gpu_passes: Vec::new(),
+            features: Vec::new(),
         }
     }
 
@@ -436,7 +439,14 @@ impl PerfLog {
         self.window_start = now;
     }
 
-    /// The window's CPU steps and GPU passes, slowest first, milliseconds per frame.
+    /// Each feature's draws and triangles this frame (listed in the profile table).
+    pub fn set_features(&mut self, features: impl Iterator<Item = (String, crate::FeatureStats)>) {
+        self.features.clear();
+        self.features.extend(features);
+    }
+
+    /// The window's CPU steps and GPU passes, slowest first, milliseconds per frame, and the
+    /// latest frame's draws and triangles per feature.
     fn table(&self) -> String {
         let w = &self.window;
         let mut out = String::new();
@@ -455,6 +465,27 @@ impl PerfLog {
             section("GPU passes", &w.gpu_passes, w.gpu_frames);
         } else {
             out.push_str("GPU passes: no timestamps on this GPU\n");
+        }
+        let mut features: Vec<_> = self
+            .features
+            .iter()
+            .filter(|(_, s)| s.draw_calls > 0 || s.triangles > 0)
+            .collect();
+        features.sort_by_key(|(_, s)| std::cmp::Reverse(s.triangles));
+        let _ = writeln!(
+            out,
+            "{:<40} {:>8} {:>10} {:>8}",
+            "features (last frame)", "draws", "triangles", "culled"
+        );
+        for (name, s) in features {
+            let _ = writeln!(
+                out,
+                "  {:<38} {:>8} {:>10} {:>8}",
+                truncate(name, 38),
+                s.draw_calls,
+                s.triangles,
+                s.culled
+            );
         }
         out
     }
