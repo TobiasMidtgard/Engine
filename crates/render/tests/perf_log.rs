@@ -1,6 +1,6 @@
-//! The renderer's frame timing: frame time, GPU time (where the GPU has timestamps) and the
-//! wait for the window image reach `Diagnostics`. Needs a GPU or lavapipe; passes with a note
-//! when neither is available.
+//! The renderer's frame timing: frame time, GPU time (where the GPU has timestamps, also per
+//! pass), the render system's CPU steps and the wait for the window image reach `Diagnostics`.
+//! Needs a GPU or lavapipe; passes with a note when neither is available.
 
 use engine_core::prelude::*;
 use engine_render::RenderDisabled;
@@ -53,5 +53,30 @@ fn frame_and_gpu_times_reach_diagnostics() {
     );
     if let Some(ms) = get("render.gpu_ms") {
         assert!(ms > 0.0 && ms < 10_000.0, "GPU time {ms} ms");
+        // Every pass is timed, and the passes add up to the frame.
+        let passes: Vec<_> = d
+            .metrics
+            .iter()
+            .filter(|(k, _)| k.starts_with("render.gpu."))
+            .collect();
+        eprintln!("GPU passes {passes:?}");
+        for pass in ["scene", "prepass", "tonemap", "compute meshes"] {
+            assert!(
+                get(&format!("render.gpu.{pass}")).is_some_and(|ms| ms >= 0.0),
+                "no GPU time for {pass}"
+            );
+        }
+        let sum: f64 = passes.iter().map(|(_, ms)| **ms).sum();
+        assert!(
+            (sum - ms).abs() <= 0.05 * ms + 0.01,
+            "passes add up to {sum} ms of {ms}"
+        );
+    }
+    // The render system's CPU steps too.
+    for step in ["view", "prepare meshes", "scene", "submit"] {
+        assert!(
+            get(&format!("render.cpu.{step}")).is_some_and(|ms| ms >= 0.0),
+            "no CPU time for {step}"
+        );
     }
 }

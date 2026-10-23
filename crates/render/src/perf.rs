@@ -14,10 +14,21 @@
 //! a few frames late without waiting; GPU memory is wgpu's allocator report (left out where the
 //! backend has none). The same numbers go to `Diagnostics` as `render.frame_ms`,
 //! `render.acquire_ms`, `render.gpu_ms` and `render.gpu_memory_mb`.
+//!
+//! The frame is also split into steps: on the CPU each step of the render system (a
+//! `tracing` span, target `engine_render`, name `render_step`, field `name`), on the GPU each
+//! pass (a timestamp where it starts). Their latest times go to `Diagnostics` as
+//! `render.cpu.<step>` and `render.gpu.<pass>` (milliseconds), and with the frame profiler on
+//! (`--profile`) the log gets a table of both with every report.
 
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Instant;
+
+use engine_core::prelude::Diagnostics;
 
 const FREE: u8 = 0;
 const IN_FLIGHT: u8 = 1;
@@ -27,15 +38,23 @@ const FAILED: u8 = 4;
 
 /// Timestamp readbacks in flight at once.
 const SLOTS: usize = 4;
-/// Query resolves must start on this many bytes.
-const RESOLVE_STRIDE: u64 = wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
+/// Most timestamps in one frame (one where each pass starts, one at the end); passes past it
+/// count towards the one before.
+const MAX_MARKS: usize = 64;
+/// Bytes of one frame's timestamps (a multiple of the 256 query resolves must start on).
+const SLOT_BYTES: u64 = (MAX_MARKS * 8) as u64;
+const _: () = assert!(SLOT_BYTES.is_multiple_of(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT));
+
+type Label = Cow<'static, str>;
 
 struct Slot {
     buffer: wgpu::Buffer,
     state: Arc<AtomicU8>,
+    /// The pass each timestamp starts (the last one ends the frame).
+    labels: Vec<Label>,
 }
 
-/// GPU time of the frame's command buffer from two timestamps.
+/// GPU time of the frame's command buffer and of each pass in it, from timestamps.
 struct GpuTimer {
     queries: wgpu::QuerySet,
     resolve: wgpu::Buffer,
@@ -46,6 +65,12 @@ struct GpuTimer {
     period_ns: f32,
 }
 
+/// One finished frame's GPU times, milliseconds.
+struct GpuFrame {
+    total: f32,
+    passes: Vec<(Label, f32)>,
+}
+
 impl GpuTimer {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Self> {
         if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
@@ -54,11 +79,11 @@ impl GpuTimer {
         let queries = device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("frame timestamps"),
             ty: wgpu::QueryType::Timestamp,
-            count: 2 * SLOTS as u32,
+            count: (MAX_MARKS * SLOTS) as u32,
         });
         let resolve = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("frame timestamps resolve"),
-            size: RESOLVE_STRIDE * SLOTS as u64,
+            size: SLOT_BYTES * SLOTS as u64,
             usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -66,11 +91,12 @@ impl GpuTimer {
             .map(|_| Slot {
                 buffer: device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("frame timestamps readback"),
-                    size: 16,
+                    size: SLOT_BYTES,
                     usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }),
                 state: Arc::new(AtomicU8::new(FREE)),
+                labels: Vec::with_capacity(MAX_MARKS),
             })
             .collect();
         Some(Self {
@@ -82,39 +108,61 @@ impl GpuTimer {
         })
     }
 
-    /// An empty compute pass that writes timestamp `index` (one at the start of the frame's
-    /// commands, one at the end).
-    fn stamp(&self, encoder: &mut wgpu::CommandEncoder, index: u32, at_start: bool) {
+    /// An empty compute pass that writes a timestamp when the work before it is done.
+    fn stamp(&self, encoder: &mut wgpu::CommandEncoder, index: u32) {
         let writes = wgpu::ComputePassTimestampWrites {
             query_set: &self.queries,
-            beginning_of_pass_write_index: at_start.then_some(index),
-            end_of_pass_write_index: (!at_start).then_some(index),
+            beginning_of_pass_write_index: Some(index),
+            end_of_pass_write_index: None,
         };
         drop(encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some(if at_start { "frame start" } else { "frame end" }),
+            label: Some("timestamp"),
             timestamp_writes: Some(writes),
         }));
     }
 
-    fn begin(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    fn begin(&mut self, encoder: &mut wgpu::CommandEncoder, first: Label) {
         self.pending = self
             .slots
             .iter()
             .position(|s| s.state.load(Ordering::Acquire) == FREE);
         if let Some(i) = self.pending {
-            self.stamp(encoder, 2 * i as u32, true);
+            self.slots[i].labels.clear();
+            self.mark(encoder, first);
         }
+    }
+
+    /// Pass `label` starts here.
+    fn mark(&mut self, encoder: &mut wgpu::CommandEncoder, label: Label) {
+        let Some(i) = self.pending else {
+            return;
+        };
+        // Keep the last timestamp for the end of the frame.
+        let n = self.slots[i].labels.len();
+        if n + 1 >= MAX_MARKS {
+            return;
+        }
+        self.stamp(encoder, (i * MAX_MARKS + n) as u32);
+        self.slots[i].labels.push(label);
     }
 
     fn end(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let Some(i) = self.pending else {
             return;
         };
-        let first = 2 * i as u32;
-        self.stamp(encoder, first + 1, false);
-        let offset = RESOLVE_STRIDE * i as u64;
-        encoder.resolve_query_set(&self.queries, first..first + 2, &self.resolve, offset);
-        encoder.copy_buffer_to_buffer(&self.resolve, offset, &self.slots[i].buffer, 0, 16);
+        let first = (i * MAX_MARKS) as u32;
+        let n = self.slots[i].labels.len() as u32;
+        self.stamp(encoder, first + n);
+        let count = n + 1;
+        let offset = SLOT_BYTES * i as u64;
+        encoder.resolve_query_set(&self.queries, first..first + count, &self.resolve, offset);
+        encoder.copy_buffer_to_buffer(
+            &self.resolve,
+            offset,
+            &self.slots[i].buffer,
+            0,
+            count as u64 * 8,
+        );
         self.slots[i].state.store(IN_FLIGHT, Ordering::Release);
     }
 
@@ -135,24 +183,39 @@ impl GpuTimer {
             });
     }
 
-    /// Finished frames' GPU times in milliseconds (non-blocking; the renderer polls the device
-    /// each frame).
-    fn collect(&mut self, out: &mut Vec<f32>) {
-        for slot in &self.slots {
+    /// Finished frames' GPU times (non-blocking; the renderer polls the device each frame).
+    fn collect(&mut self, out: &mut Vec<GpuFrame>) {
+        let ms = self.period_ns * 1e-6;
+        for slot in &mut self.slots {
             match slot.state.load(Ordering::Acquire) {
                 MAPPED => {
-                    let ticks = match slot.buffer.slice(..).get_mapped_range() {
+                    let n = slot.labels.len();
+                    let ticks: Option<Vec<u64>> = match slot.buffer.slice(..).get_mapped_range() {
                         Ok(view) => {
                             let t: &[u64] = bytemuck::cast_slice(&view);
-                            t[1].checked_sub(t[0])
+                            Some(t[..=n].to_vec())
                         }
                         Err(_) => None,
                     };
                     slot.buffer.unmap();
                     slot.state.store(FREE, Ordering::Release);
-                    if let Some(ticks) = ticks {
-                        out.push(ticks as f32 * self.period_ns * 1e-6);
-                    }
+                    let Some(t) = ticks else {
+                        continue;
+                    };
+                    // Timestamps that go backwards (a reset GPU clock) spoil the frame.
+                    let Some(total) = t[n].checked_sub(t[0]) else {
+                        continue;
+                    };
+                    let passes = slot
+                        .labels
+                        .drain(..)
+                        .zip(t.windows(2))
+                        .map(|(label, w)| (label, w[1].saturating_sub(w[0]) as f32 * ms))
+                        .collect();
+                    out.push(GpuFrame {
+                        total: total as f32 * ms,
+                        passes,
+                    });
                 }
                 FAILED => {
                     slot.buffer.unmap();
@@ -160,6 +223,34 @@ impl GpuTimer {
                 }
                 _ => {}
             }
+        }
+    }
+}
+
+/// The render system's CPU steps this frame: each a `tracing` span (target `engine_render`,
+/// name `render_step`, field `name`) and a time for the profile. Local to a frame, as the
+/// entered span stays on its thread.
+#[derive(Default)]
+pub(crate) struct CpuSteps {
+    current: Option<(Label, Instant, tracing::span::EnteredSpan)>,
+    done: Vec<(Label, f32)>,
+}
+
+impl CpuSteps {
+    /// End the current step and start `name`.
+    pub fn step(&mut self, name: impl Into<Label>) {
+        self.finish();
+        let name = name.into();
+        let span = tracing::info_span!(target: "engine_render", "render_step", name = %name);
+        self.current = Some((name, Instant::now(), span.entered()));
+    }
+
+    /// End the current step.
+    pub fn finish(&mut self) {
+        if let Some((name, started, span)) = self.current.take() {
+            drop(span);
+            self.done
+                .push((name, started.elapsed().as_secs_f32() * 1000.0));
         }
     }
 }
@@ -174,6 +265,9 @@ struct Window {
     acquire_ms: f32,
     gpu_ms: f32,
     gpu_frames: u32,
+    /// Milliseconds per CPU step and per GPU pass, summed over the window.
+    cpu_steps: HashMap<Label, f32>,
+    gpu_passes: HashMap<Label, f32>,
 }
 
 /// The renderer's frame timing (see the module docs).
@@ -182,12 +276,14 @@ pub(crate) struct PerfLog {
     last_frame: Option<Instant>,
     window_start: Instant,
     window: Window,
-    gpu_samples: Vec<f32>,
+    gpu_samples: Vec<GpuFrame>,
     /// Latest values, for `Diagnostics`.
     pub frame_ms: f32,
     pub acquire_ms: f32,
     pub gpu_ms: Option<f32>,
     pub gpu_memory_mb: Option<f32>,
+    cpu_steps: Vec<(Label, f32)>,
+    gpu_passes: Vec<(Label, f32)>,
 }
 
 impl PerfLog {
@@ -202,14 +298,38 @@ impl PerfLog {
             acquire_ms: 0.0,
             gpu_ms: None,
             gpu_memory_mb: None,
+            cpu_steps: Vec::new(),
+            gpu_passes: Vec::new(),
         }
     }
 
-    /// Call with the frame's first commands: stamps the start of its GPU time.
-    pub fn begin(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    /// Call with the frame's first commands, naming the first pass: stamps the start of its
+    /// GPU time.
+    pub fn begin(
+        &mut self,
+        cpu: &mut CpuSteps,
+        encoder: &mut wgpu::CommandEncoder,
+        first: impl Into<Label>,
+    ) {
+        let first = first.into();
         if let Some(t) = &mut self.timer {
-            t.begin(encoder);
+            t.begin(encoder, first.clone());
         }
+        cpu.step(first);
+    }
+
+    /// Pass `name` starts here: a new CPU step and a GPU timestamp.
+    pub fn pass(
+        &mut self,
+        cpu: &mut CpuSteps,
+        encoder: &mut wgpu::CommandEncoder,
+        name: impl Into<Label>,
+    ) {
+        let name = name.into();
+        if let Some(t) = &mut self.timer {
+            t.mark(encoder, name.clone());
+        }
+        cpu.step(name);
     }
 
     /// Call with the frame's last commands, before `finish`.
@@ -227,15 +347,19 @@ impl PerfLog {
     }
 
     /// Account for a finished frame (`cpu_ms`: the render system's time, `acquire_ms`: the
-    /// part of it spent waiting for the window image) and log a report every `every_secs`
-    /// (0 = never). Polls nothing itself: the GPU times arrive as the renderer polls.
+    /// part of it spent waiting for the window image, `cpu`: its steps) and log a report every
+    /// `every_secs` (0 = never). Polls nothing itself: the GPU times arrive as the renderer
+    /// polls.
     pub fn frame(
         &mut self,
         device: &wgpu::Device,
         stats: &crate::RenderStats,
         acquire_ms: f32,
+        mut cpu: CpuSteps,
         every_secs: f32,
     ) {
+        cpu.finish();
+        self.cpu_steps = cpu.done;
         let now = Instant::now();
         self.frame_ms = self
             .last_frame
@@ -246,9 +370,6 @@ impl PerfLog {
         if let Some(t) = &mut self.timer {
             t.collect(&mut self.gpu_samples);
         }
-        if let Some(&ms) = self.gpu_samples.last() {
-            self.gpu_ms = Some(ms);
-        }
         let w = &mut self.window;
         if self.frame_ms > 0.0 {
             w.frames += 1;
@@ -256,9 +377,19 @@ impl PerfLog {
             w.worst_ms = w.worst_ms.max(self.frame_ms);
             w.cpu_ms += stats.cpu_ms;
             w.acquire_ms += acquire_ms;
+            for (name, ms) in &self.cpu_steps {
+                *w.cpu_steps.entry(name.clone()).or_default() += ms;
+            }
         }
-        w.gpu_ms += self.gpu_samples.iter().sum::<f32>();
-        w.gpu_frames += self.gpu_samples.len() as u32;
+        for frame in self.gpu_samples.drain(..) {
+            w.gpu_ms += frame.total;
+            w.gpu_frames += 1;
+            for (name, ms) in &frame.passes {
+                *w.gpu_passes.entry(name.clone()).or_default() += ms;
+            }
+            self.gpu_ms = Some(frame.total);
+            self.gpu_passes = frame.passes;
+        }
         if every_secs <= 0.0 || (now - self.window_start).as_secs_f32() < every_secs {
             return;
         }
@@ -266,6 +397,7 @@ impl PerfLog {
         let mb = |bytes: u64| bytes as f32 / (1024.0 * 1024.0);
         self.gpu_memory_mb = report.as_ref().map(|r| mb(r.total_allocated_bytes));
         let reserved_mb = report.as_ref().map(|r| mb(r.total_reserved_bytes));
+        let w = &self.window;
         if w.frames > 0 {
             let n = w.frames as f32;
             let frame = w.frame_ms / n;
@@ -296,8 +428,58 @@ impl PerfLog {
                 stats.draw_calls,
                 stats.triangles as f64 / 1e6,
             );
+            if engine_core::profile::enabled() {
+                tracing::info!("render profile\n{}", self.table());
+            }
         }
         self.window = Window::default();
         self.window_start = now;
+    }
+
+    /// The window's CPU steps and GPU passes, slowest first, milliseconds per frame.
+    fn table(&self) -> String {
+        let w = &self.window;
+        let mut out = String::new();
+        let mut section = |title: &str, sums: &HashMap<Label, f32>, frames: u32| {
+            let mut rows: Vec<_> = sums.iter().collect();
+            rows.sort_by(|a, b| b.1.total_cmp(a.1));
+            let total: f32 = sums.values().sum();
+            let frames = frames.max(1) as f32;
+            let _ = writeln!(out, "{title:<40} {:>8.2} ms/frame", total / frames);
+            for (name, ms) in rows {
+                let _ = writeln!(out, "  {:<38} {:>8.2}", truncate(name, 38), ms / frames);
+            }
+        };
+        section("render CPU steps", &w.cpu_steps, w.frames);
+        if w.gpu_frames > 0 {
+            section("GPU passes", &w.gpu_passes, w.gpu_frames);
+        } else {
+            out.push_str("GPU passes: no timestamps on this GPU\n");
+        }
+        out
+    }
+
+    /// The latest step and pass times into `Diagnostics` (`render.cpu.<step>`,
+    /// `render.gpu.<pass>`).
+    pub fn publish(&self, d: &mut Diagnostics) {
+        let mut key = String::new();
+        for (prefix, rows) in [
+            ("render.cpu.", &self.cpu_steps),
+            ("render.gpu.", &self.gpu_passes),
+        ] {
+            for (name, ms) in rows {
+                key.clear();
+                key.push_str(prefix);
+                key.push_str(name);
+                d.set(&key, *ms as f64);
+            }
+        }
+    }
+}
+
+fn truncate(s: &str, n: usize) -> &str {
+    match s.char_indices().nth(n) {
+        Some((i, _)) => &s[..i],
+        None => s,
     }
 }
