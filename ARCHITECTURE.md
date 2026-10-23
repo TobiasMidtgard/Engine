@@ -23,6 +23,9 @@ crates/<module>    one crate per system (below)
 1. **Large worlds first.** f64 world positions, camera-relative rendering, reverse-Z infinite
    projection. Physics and simulations run in local frames around the action
    (`SimulationFocus`), so a city, a planet and the space between planets all work.
+   Beyond `SimulationRange::active_m` (150 m by default) of every focus, modules let their
+   things rest (bodies sleep, NPCs stop thinking, cloth, fire, smoke and debris stop
+   stepping), so a world costs what the player is near, not everything in it.
 2. **Every module is replaceable.** Modules never depend on each other's crates; they read
    and write the shared types in `engine_world`. Fire listens for `IgniteRequest` and heat;
    smoke listens for `ProjectileTrace` and `WindField`; footprints listen for `GroundContact`;

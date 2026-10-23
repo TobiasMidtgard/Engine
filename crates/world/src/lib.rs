@@ -89,6 +89,48 @@ impl FocusPoints {
     }
 }
 
+/// How far from the nearest focus the world simulates in full. Beyond it, modules let their
+/// things rest: bodies sleep, NPCs stop thinking, cloth, fire, smoke and debris stop stepping
+/// (or step rarely), so a big world costs what the player can see, not everything in it.
+/// Each module decides what resting means for it; use [`SimulationRange::is_active`] to wake
+/// and [`SimulationRange::is_resting`] to put to sleep, so things near the edge don't flicker.
+#[derive(Resource, Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SimulationRange {
+    /// Full simulation within this distance (meters) of a focus.
+    pub active_m: f64,
+    /// Things rest only beyond `active_m × (1 + hysteresis)`.
+    pub hysteresis: f64,
+}
+
+impl Default for SimulationRange {
+    fn default() -> Self {
+        Self {
+            active_m: 150.0,
+            hysteresis: 0.25,
+        }
+    }
+}
+
+impl SimulationRange {
+    /// Within the active range of a focus (always true when there is no focus, so tests and
+    /// tools without a camera simulate everything).
+    pub fn is_active(&self, focus: &FocusPoints, p: DVec3) -> bool {
+        focus.points.is_empty() || focus.distance(p) <= self.active_m
+    }
+
+    /// Far enough from every focus to rest (never true when there is no focus).
+    pub fn is_resting(&self, focus: &FocusPoints, p: DVec3) -> bool {
+        !focus.points.is_empty() && focus.distance(p) > self.active_m * (1.0 + self.hysteresis)
+    }
+
+    /// Like [`is_active`](Self::is_active) for something `radius` meters across, such as a
+    /// demo area or a cloth: active while any part of it is in range.
+    pub fn is_active_sphere(&self, focus: &FocusPoints, center: DVec3, radius: f64) -> bool {
+        focus.points.is_empty() || focus.distance(center) - radius.max(0.0) <= self.active_m
+    }
+}
+
 /// Burn state of a [`Combustible`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BurnState {
@@ -223,6 +265,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<Obscurance>()
             .init_resource::<SurfaceMaterials>()
             .init_resource::<FocusPoints>()
+            .init_resource::<SimulationRange>()
             .add_message::<ProjectileTrace>()
             .add_message::<WorldImpulse>()
             .add_message::<GroundContact>()
@@ -245,6 +288,9 @@ impl Plugin for WorldPlugin {
                  time of day, sun direction.",
             )
             .register_resource::<Gravity>("Uniform gravity plus attracting bodies (planets).")
+            .register_resource::<SimulationRange>(
+                "Meters from the nearest focus that simulate in full; beyond, modules rest.",
+            )
             .register_resource::<Atmospheres>(
                 "Air per planet (matched by gravitational parameter μ): surface density, scale \
                  height, top, temperature. Unlisted bodies use the weather's standard atmosphere.",
@@ -373,6 +419,23 @@ mod tests {
     }
 
     #[test]
+    fn simulation_range_wakes_near_and_rests_far() {
+        let range = SimulationRange::default();
+        let none = FocusPoints::default();
+        assert!(range.is_active(&none, DVec3::splat(1e6)));
+        assert!(!range.is_resting(&none, DVec3::splat(1e6)));
+        let focus = FocusPoints {
+            points: vec![DVec3::ZERO],
+        };
+        assert!(range.is_active(&focus, DVec3::new(100.0, 0.0, 0.0)));
+        // Between the two edges: neither wakes nor rests, so it keeps its current state.
+        let edge = DVec3::new(170.0, 0.0, 0.0);
+        assert!(!range.is_active(&focus, edge) && !range.is_resting(&focus, edge));
+        assert!(range.is_resting(&focus, DVec3::new(400.0, 0.0, 0.0)));
+        assert!(range.is_active_sphere(&focus, DVec3::new(180.0, 0.0, 0.0), 40.0));
+    }
+
+    #[test]
     #[should_panic(expected = "Two physics backends")]
     fn two_physics_backends_are_rejected() {
         let mut app = App::new();
@@ -388,6 +451,7 @@ mod tests {
         assert_eq!(woods.sample(DVec3::new(10.0, 0.0, -20.0)), None);
         let wear = app.world.resource::<GroundWear>();
         assert_eq!(wear.wear(DVec3::new(10.0, 0.0, -20.0)), 0.0);
+        assert_eq!(app.world.resource::<SimulationRange>().active_m, 150.0);
         let registry = app.world.resource::<TypeRegistry>();
         for name in [
             "RigidBody",
