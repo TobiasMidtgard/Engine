@@ -400,8 +400,17 @@ impl Default for FogSettings {
 /// updates this to the nearest planet (or disables it in deep space).
 ///
 /// The air is the planet's own: what its gas (Rayleigh) and its haze or dust (Mie) do to light,
-/// per meter at the surface, in the renderer's three color channels (red 680 nm, green 550 nm,
-/// blue 440 nm), thinning with height over `rayleigh_scale_height` and `mie_scale_height`.
+/// per meter at the surface, in the renderer's three color channels (linear sRGB), thinning
+/// with height over `rayleigh_scale_height` and `mie_scale_height`.
+///
+/// A channel is a band of wavelengths, not one: coefficients taken at single wavelengths (the
+/// usual 680, 550 and 440 nm) make a twilight sky purple, because the red channel's band reaches
+/// down to the ozone's absorption peak near 600 nm and is scattered more than at 680 nm. Earth's
+/// are the effective values of the whole spectrum instead: fitted so the sky rendered in these
+/// three channels has the colors of the same sky rendered at 42 wavelengths from 380 to 790 nm
+/// and converted with the CIE 1931 color matching functions (Bruneton's solar spectrum and ozone
+/// cross-sections; within about 0.01 in chromaticity by day, at sunset and with the sun 4° and 8°
+/// below the horizon).
 /// The default is Earth ([`Atmosphere::earth`]); [`Atmosphere::mars`] is Mars. A planet module
 /// fills these in per body; the sky's look-up tables are recomputed whenever they change.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -427,7 +436,7 @@ pub struct Atmosphere {
     pub ground_color: [f32; 3],
     /// Rayleigh scattering by the gas at the surface, per meter, RGB. Molecules scatter blue
     /// most (as 1/λ⁴), which makes a sky blue and a low sun red; they absorb nothing. Earth:
-    /// 5.802e-6, 13.558e-6, 33.1e-6.
+    /// 6.88e-6, 14.56e-6, 33.2e-6 (at 680, 550 and 440 nm alone: 5.802e-6, 13.558e-6, 33.1e-6).
     pub rayleigh_scattering: [f32; 3],
     /// Mie scattering by haze, dust or droplets at the surface, per meter, RGB: mostly forward
     /// (`mie_g`), so the sky glows around the sun and pales toward the horizon. Earth's clear
@@ -438,8 +447,9 @@ pub struct Atmosphere {
     /// absorbs blue most, which turns the sky it lights butterscotch.
     pub mie_absorption: [f32; 3],
     /// Absorption by an ozone layer (10–40 km up, densest at 25 km) at its densest, per meter,
-    /// RGB. Ozone absorbs orange, which keeps a twilight sky blue overhead. Earth: 0.650e-6,
-    /// 1.881e-6, 0.085e-6; 0 for air without ozone.
+    /// RGB. Ozone absorbs orange, which keeps a twilight sky blue overhead. Earth: 2.67e-6,
+    /// 1.87e-6, 0.149e-6 (at 680, 550 and 440 nm alone: 0.650e-6, 1.881e-6, 0.085e-6); 0 for air
+    /// without ozone.
     pub ozone_absorption: [f32; 3],
     /// Added to `mie_g` per channel (R, G, B). Dust grains a little larger than the wavelength
     /// (Mars') scatter blue into a narrower, stronger forward peak than red: a larger blue
@@ -470,10 +480,10 @@ impl Default for Atmosphere {
             mie_scale_height: 1_200.0,
             mie_g: 0.8,
             ground_color: [0.12, 0.15, 0.09],
-            rayleigh_scattering: [5.802e-6, 13.558e-6, 33.1e-6],
+            rayleigh_scattering: [6.88e-6, 14.56e-6, 33.2e-6],
             mie_scattering: [3.996e-6; 3],
             mie_absorption: [0.404e-6; 3],
-            ozone_absorption: [0.650e-6, 1.881e-6, 0.085e-6],
+            ozone_absorption: [2.67e-6, 1.87e-6, 0.149e-6],
             mie_g_offset: [0.0; 3],
             density_scale: 1.0,
             mie_forward_peak: 0.0,
@@ -646,14 +656,13 @@ mod tests {
     }
 
     #[test]
-    fn earth_is_the_default_with_the_old_constants() {
+    fn earth_is_the_default() {
         assert_eq!(Atmosphere::earth(), Atmosphere::default());
-        // Exactly what the shaders and the CPU used before the air became data.
         let air = Atmosphere::earth().optics();
-        assert_eq!(air.rayleigh, Vec3::new(5.802e-6, 13.558e-6, 33.1e-6));
+        assert_eq!(air.rayleigh, Vec3::new(6.88e-6, 14.56e-6, 33.2e-6));
         assert_eq!(air.mie_scattering, Vec3::splat(3.996e-6));
         assert_eq!(air.mie_extinction, Vec3::splat(4.40e-6));
-        assert_eq!(air.ozone, Vec3::new(0.650e-6, 1.881e-6, 0.085e-6));
+        assert_eq!(air.ozone, Vec3::new(2.67e-6, 1.87e-6, 0.149e-6));
         assert_eq!(air.mie_g, Vec3::splat(0.8));
         assert_eq!(air.mie_forward_peak, 0.0);
     }
