@@ -12,10 +12,12 @@
 //!   ([`Floating`]): cheap floating props (buoys, crates, ducks, debris), and floating that
 //!   works without a physics module.
 
+use std::sync::Mutex;
+
 use engine_core::math::{DVec3, Mat3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_world::physics::RigidBody;
-use engine_world::{Gravity, WaterSample, WaterSplash, WorldImpulse};
+use engine_world::{FocusPoints, Gravity, SimulationRange, WaterSample, WaterSplash, WorldImpulse};
 
 use crate::interact::splash;
 use crate::state::{SharedWater, WaterState};
@@ -114,6 +116,10 @@ pub struct Floating {
     pub torque: Vec3,
     /// Fraction of the volume under water last step, 0..1.
     pub submerged: f32,
+    /// Out of the `SimulationRange` of every focus: it stays where it is until one comes near
+    /// (managed by the water module).
+    #[serde(skip)]
+    pub resting: bool,
 }
 
 /// Keeps a floating entity near an anchor (a moored buoy or boat). Only for entities the
@@ -211,18 +217,22 @@ pub fn compute_forces(
     submerged
 }
 
-/// Integrate [`Floating`] entities (physics bodies float in the physics module).
+/// Integrate [`Floating`] entities (physics bodies float in the physics module). Those out of
+/// the `SimulationRange` of every focus rest where they are; the rest step in parallel.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn buoyancy_system(
     time: Res<Time>,
     shared: Res<SharedWater>,
     gravity: Res<Gravity>,
+    focus: Res<FocusPoints>,
+    range: Res<SimulationRange>,
+    new: Query<Entity, (With<Buoyancy>, Without<Floating>, Without<RigidBody>)>,
     mut floats: Query<
         (
             Entity,
             &mut Transform,
             &Buoyancy,
-            Option<&mut Floating>,
+            &mut Floating,
             Option<&Tether>,
             Option<&LocalTimeScale>,
         ),
@@ -231,131 +241,52 @@ pub fn buoyancy_system(
     mut blasts: MessageReader<WorldImpulse>,
     mut splash_out: MessageWriter<WaterSplash>,
     mut commands: Commands,
-    mut scratch: Local<Vec<(Vec3, DVec3)>>,
 ) {
-    let blasts: Vec<WorldImpulse> = blasts.read().copied().collect();
-    let mut hits = Vec::new();
-    let state = shared.0.read();
-    for (entity, mut transform, b, floating, tether, local) in &mut floats {
-        let dt = time.delta_for(local);
-        if dt <= 0.0 {
-            continue;
-        }
-        let pos = transform.translation;
-        let gvec = gravity.at(pos);
-        let g = gvec.length();
-        let up = if g > 1e-6 { -gvec / g } else { Vec3::Y };
-
-        // Everything else: water floats it.
-        let Some(mut fl) = floating else {
-            commands.entity(entity).insert(Floating::default());
-            continue;
-        };
-        let he = b.half_extents.max(Vec3::splat(0.01));
-        let m = (b.density * b.volume()).max(0.01);
-        // Box inertia (fill scales mass, not shape).
-        let inertia = Vec3::new(
-            he.y * he.y + he.z * he.z,
-            he.x * he.x + he.z * he.z,
-            he.x * he.x + he.y * he.y,
-        ) * (m / 3.0);
-        let rot = transform.rotation;
-        let submerged = compute_forces(
-            &state,
-            b,
-            pos,
-            rot,
-            fl.velocity,
-            fl.angular_velocity,
-            up,
-            g,
-            &mut scratch,
-        );
-        let mut force = gvec * m + fl.force;
-        let mut torque = fl.torque;
-        for (f, at) in scratch.iter() {
-            force += *f;
-            torque += (*at - pos).as_vec3().cross(*f);
-        }
-        // Rotational drag in the water.
-        torque -= fl.angular_velocity
-            * (b.angular_drag * submerged * m * (he.x * he.x + he.z * he.z) * 4.0);
-        if let Some(t) = tether {
-            let d = (t.anchor - pos).as_vec3();
-            let horizontal = d - up * d.dot(up);
-            let stretch = horizontal.length() - t.length_m;
-            if stretch > 0.0 {
-                force += horizontal.normalize() * stretch * t.stiffness;
-            }
-        }
-        // Blasts throw floating things (physics bodies get them from the physics module).
-        for i in &blasts {
-            let d = (pos - i.center).as_vec3();
-            let dist = d.length();
-            if dist < i.radius {
-                let k = 1.0 - dist / i.radius.max(0.01);
-                let dir = (d / dist.max(0.1) + up * 1.5).normalize();
-                fl.velocity += dir * i.strength * k * k * 0.35;
-                fl.angular_velocity += Vec3::new(d.z, 0.0, -d.x).normalize_or_zero() * k * 2.0;
-            }
-        }
-        // Hitting the water: a splash.
-        let down = -fl.velocity.dot(up);
-        if fl.submerged < 0.02 && submerged > 0.0 && down > 2.0 {
-            let r = he.x.max(he.z);
-            hits.push((
-                WaterSplash {
-                    position: pos,
-                    velocity: fl.velocity,
-                    radius: r,
-                    mass_kg: (m * down * 0.02).min(5000.0),
-                    source: Some(entity),
-                },
-                splash(pos, r, down),
-            ));
-        }
-        fl.force = Vec3::ZERO;
-        fl.torque = Vec3::ZERO;
-        fl.submerged = submerged;
-
-        // Semi-implicit Euler.
-        fl.velocity += force / m * dt;
-        let r = Mat3::from_quat(rot);
-        let inv_world = r * Mat3::from_diagonal(inertia.recip()) * r.transpose();
-        fl.angular_velocity += inv_world * torque * dt;
-        // Air drag so things in the air don't spin forever.
-        fl.angular_velocity *= (1.0 - 0.05 * dt).max(0.0);
-        let mut p = pos + (fl.velocity * dt).as_dvec3();
-        let w = fl.angular_velocity;
-        let angle = w.length() * dt;
-        let mut q = if angle > 1e-7 {
-            Quat::from_axis_angle(w / w.length(), angle) * rot
-        } else {
-            rot
-        };
-        q = q.normalize();
-
-        // Sinkers come to rest on the bed.
-        if let Some(bed) = state.bed_height(p) {
-            let reach = (he * Vec3::new(1.0, 1.0, 1.0)).dot((q.inverse() * up).abs());
-            let floor = bed + reach as f64;
-            if p.y < floor {
-                p.y = floor;
-                let down = fl.velocity.dot(up);
-                if down < 0.0 {
-                    fl.velocity -= up * down;
-                }
-                fl.velocity *= (1.0 - 4.0 * dt).max(0.0);
-                fl.angular_velocity *= (1.0 - 4.0 * dt).max(0.0);
-                // Settle flat on the bottom.
-                let tilt = Quat::from_rotation_arc(q * Vec3::Y, up);
-                q = Quat::IDENTITY.slerp(tilt, (2.0 * dt).min(1.0)) * q;
-            }
-        }
-        transform.translation = p;
-        transform.rotation = q;
+    for entity in &new {
+        commands.entity(entity).insert(Floating::default());
     }
+    let blasts: Vec<WorldImpulse> = blasts.read().copied().collect();
+    let hits = Mutex::new(Vec::new());
+    // Held across the parallel step: everything that writes the water runs in
+    // `SimSet::Environment`, after this set, so no writer can be waiting on it meanwhile.
+    let state = shared.0.read();
+    floats
+        .par_iter_mut()
+        .for_each(|(entity, mut transform, b, mut fl, tether, local)| {
+            let dt = time.delta_for(local);
+            if dt <= 0.0 {
+                return;
+            }
+            let pos = transform.translation;
+            let reach = b.half_extents.length() as f64;
+            let mut resting = fl.resting;
+            let rests = crate::rests(&range, &focus, pos, reach, &mut resting);
+            if resting != fl.resting {
+                fl.resting = resting;
+            }
+            if rests {
+                return;
+            }
+            let (p, q, hit) = step_float(
+                &state,
+                &gravity,
+                &blasts,
+                entity,
+                b,
+                &mut fl,
+                tether,
+                pos,
+                transform.rotation,
+                dt,
+            );
+            transform.translation = p;
+            transform.rotation = q;
+            if let Some(hit) = hit {
+                hits.lock().unwrap().push(hit);
+            }
+        });
     drop(state);
+    let hits = hits.into_inner().unwrap();
     if !hits.is_empty() {
         let mut state = shared.0.write();
         for (s, d) in hits {
@@ -363,6 +294,132 @@ pub fn buoyancy_system(
             splash_out.write(s);
         }
     }
+}
+
+/// One step of one floating thing: its new place and turn, and the splash it makes if it
+/// just hit the water.
+#[allow(clippy::too_many_arguments)]
+fn step_float(
+    state: &WaterState,
+    gravity: &Gravity,
+    blasts: &[WorldImpulse],
+    entity: Entity,
+    b: &Buoyancy,
+    fl: &mut Floating,
+    tether: Option<&Tether>,
+    pos: DVec3,
+    rot: Quat,
+    dt: f32,
+) -> (
+    DVec3,
+    Quat,
+    Option<(WaterSplash, crate::ripples::Disturbance)>,
+) {
+    let gvec = gravity.at(pos);
+    let g = gvec.length();
+    let up = if g > 1e-6 { -gvec / g } else { Vec3::Y };
+    let he = b.half_extents.max(Vec3::splat(0.01));
+    let m = (b.density * b.volume()).max(0.01);
+    // Box inertia (fill scales mass, not shape).
+    let inertia = Vec3::new(
+        he.y * he.y + he.z * he.z,
+        he.x * he.x + he.z * he.z,
+        he.x * he.x + he.y * he.y,
+    ) * (m / 3.0);
+    let mut scratch = Vec::with_capacity((b.probes[0] * b.probes[1]) as usize);
+    let submerged = compute_forces(
+        state,
+        b,
+        pos,
+        rot,
+        fl.velocity,
+        fl.angular_velocity,
+        up,
+        g,
+        &mut scratch,
+    );
+    let mut force = gvec * m + fl.force;
+    let mut torque = fl.torque;
+    for (f, at) in scratch.iter() {
+        force += *f;
+        torque += (*at - pos).as_vec3().cross(*f);
+    }
+    // Rotational drag in the water.
+    torque -=
+        fl.angular_velocity * (b.angular_drag * submerged * m * (he.x * he.x + he.z * he.z) * 4.0);
+    if let Some(t) = tether {
+        let d = (t.anchor - pos).as_vec3();
+        let horizontal = d - up * d.dot(up);
+        let stretch = horizontal.length() - t.length_m;
+        if stretch > 0.0 {
+            force += horizontal.normalize() * stretch * t.stiffness;
+        }
+    }
+    // Blasts throw floating things (physics bodies get them from the physics module).
+    for i in blasts {
+        let d = (pos - i.center).as_vec3();
+        let dist = d.length();
+        if dist < i.radius {
+            let k = 1.0 - dist / i.radius.max(0.01);
+            let dir = (d / dist.max(0.1) + up * 1.5).normalize();
+            fl.velocity += dir * i.strength * k * k * 0.35;
+            fl.angular_velocity += Vec3::new(d.z, 0.0, -d.x).normalize_or_zero() * k * 2.0;
+        }
+    }
+    // Hitting the water: a splash.
+    let down = -fl.velocity.dot(up);
+    let hit = (fl.submerged < 0.02 && submerged > 0.0 && down > 2.0).then(|| {
+        let r = he.x.max(he.z);
+        (
+            WaterSplash {
+                position: pos,
+                velocity: fl.velocity,
+                radius: r,
+                mass_kg: (m * down * 0.02).min(5000.0),
+                source: Some(entity),
+            },
+            splash(pos, r, down),
+        )
+    });
+    fl.force = Vec3::ZERO;
+    fl.torque = Vec3::ZERO;
+    fl.submerged = submerged;
+
+    // Semi-implicit Euler.
+    fl.velocity += force / m * dt;
+    let r = Mat3::from_quat(rot);
+    let inv_world = r * Mat3::from_diagonal(inertia.recip()) * r.transpose();
+    fl.angular_velocity += inv_world * torque * dt;
+    // Air drag so things in the air don't spin forever.
+    fl.angular_velocity *= (1.0 - 0.05 * dt).max(0.0);
+    let mut p = pos + (fl.velocity * dt).as_dvec3();
+    let w = fl.angular_velocity;
+    let angle = w.length() * dt;
+    let mut q = if angle > 1e-7 {
+        Quat::from_axis_angle(w / w.length(), angle) * rot
+    } else {
+        rot
+    };
+    q = q.normalize();
+
+    // Sinkers come to rest on the bed.
+    if let Some(bed) = state.bed_height(p) {
+        let reach = (he * Vec3::new(1.0, 1.0, 1.0)).dot((q.inverse() * up).abs());
+        let floor = bed + reach as f64;
+        if p.y < floor {
+            p.y = floor;
+            let down = fl.velocity.dot(up);
+            if down < 0.0 {
+                fl.velocity -= up * down;
+            }
+            fl.velocity *= (1.0 - 4.0 * dt).max(0.0);
+            fl.angular_velocity *= (1.0 - 4.0 * dt).max(0.0);
+            // Settle flat on the bottom.
+            let tilt = Quat::from_rotation_arc(q * Vec3::Y, up);
+            q = Quat::IDENTITY.slerp(tilt, (2.0 * dt).min(1.0)) * q;
+        }
+    }
+    (p, q, hit)
 }
 
 #[cfg(test)]

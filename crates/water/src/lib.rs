@@ -27,9 +27,28 @@ pub use state::{SharedWater, WaterState};
 
 use std::sync::Arc;
 
+use engine_core::math::DVec3;
 use engine_core::prelude::*;
 use engine_render::RenderAppExt;
-use engine_world::{Water, WorldShiftSet};
+use engine_world::{FocusPoints, SimulationRange, Water, WorldShiftSet};
+
+/// Whether something `radius` meters across at `center` rests this step, by the shared
+/// [`SimulationRange`]: it wakes within the active range of a focus and goes to sleep only
+/// past the hysteresis band, so things near the edge don't flicker. Updates `resting`.
+pub(crate) fn rests(
+    range: &SimulationRange,
+    focus: &FocusPoints,
+    center: DVec3,
+    radius: f64,
+    resting: &mut bool,
+) -> bool {
+    if range.is_active_sphere(focus, center, radius) {
+        *resting = false;
+    } else if focus.distance(center) - radius.max(0.0) > range.active_m * (1.0 + range.hysteresis) {
+        *resting = true;
+    }
+    *resting
+}
 
 /// Water: bodies with wind waves, interactive ripples, flowing regions, buoyancy, puddles, and
 /// the water renderer. Installs itself as the `engine_world::Water` query provider.

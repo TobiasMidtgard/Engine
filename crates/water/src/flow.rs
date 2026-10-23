@@ -295,6 +295,11 @@ pub struct FlowSim {
     pub version: u64,
     /// Water that left through edges and into reservoirs, m³ (diagnostics).
     pub drained_m3: f64,
+    /// Out of the `SimulationRange` of every focus: it holds still, as it last ran, until one
+    /// comes near.
+    pub resting: bool,
+    /// Lowest and highest bed, meters above `origin.y` (the bed never changes).
+    bed_span: [f32; 2],
 }
 
 impl FlowSim {
@@ -307,6 +312,11 @@ impl FlowSim {
         let mut bed = bed;
         bed.resize(nx * nz, 0.0);
         let depth = flood(&bed, nx, nz, region.cell_m.max(0.05), &region.fills);
+        let bed_span = bed
+            .iter()
+            .fold([f32::INFINITY, f32::NEG_INFINITY], |[lo, hi], &h| {
+                [lo.min(h), hi.max(h)]
+            });
         Self {
             entity,
             origin,
@@ -328,6 +338,8 @@ impl FlowSim {
             visible: region.visible,
             version: 0,
             drained_m3: 0.0,
+            resting: false,
+            bed_span,
         }
     }
 
@@ -342,6 +354,16 @@ impl FlowSim {
     }
 
     /// World x/z of a cell center.
+    /// The middle of the grid and the distance from it to a corner, meters: a sphere round
+    /// the whole region.
+    pub fn bounds(&self) -> (DVec3, f64) {
+        let c = self.cell as f64;
+        let (w, d) = (self.nx as f64 * c, self.nz as f64 * c);
+        let [lo, hi] = self.bed_span.map(|h| h as f64);
+        let center = self.world(DVec2::new(w * 0.5, d * 0.5), (lo + hi) * 0.5);
+        (center, 0.5 * (w * w + d * d + (hi - lo).powi(2)).sqrt())
+    }
+
     pub fn cell_center(&self, i: usize, j: usize) -> DVec3 {
         let c = self.cell as f64;
         self.world(DVec2::new((i as f64 + 0.5) * c, (j as f64 + 0.5) * c), 0.0)

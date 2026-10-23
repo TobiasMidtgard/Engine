@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use engine_core::math::{DVec2, DVec3, EulerRot, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::Camera;
-use engine_world::{FocusPoints, Ground, WaterSplash, WindField};
+use engine_world::{FocusPoints, Ground, SimulationRange, WaterSplash, WindField};
 
 use crate::body::{WaterBed, WaterBody, WaterSettings};
 use crate::flow::{FlowBed, FlowRegion, FlowSim, grid_point};
@@ -303,10 +303,14 @@ fn set_reservoirs(sim: &mut FlowSim, state_bodies: &[BodyState], ground: &Ground
     }
 }
 
-/// Create, update and advance flowing-water regions.
+/// Create, update and advance flowing-water regions. Those out of the `SimulationRange` of
+/// every focus hold still, as they last ran, until one comes near.
+#[allow(clippy::too_many_arguments)]
 pub fn flow_system(
     time: Res<Time>,
     shared: Res<SharedWater>,
+    focus: Res<FocusPoints>,
+    range: Res<SimulationRange>,
     regions: Query<(
         Entity,
         &GlobalTransform,
@@ -380,6 +384,10 @@ pub fn flow_system(
         }
         if relayout {
             set_reservoirs(sim, &state.bodies, &state.ground);
+        }
+        let (center, radius) = sim.bounds();
+        if crate::rests(&range, &focus, center, radius, &mut sim.resting) {
+            continue;
         }
         sim.step(dt);
         if spray {
