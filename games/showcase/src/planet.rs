@@ -174,4 +174,31 @@ mod tests {
         assert!((p.tint_amount - TINT).abs() < 1e-6);
         assert!(p.tint.iter().all(|c| (0.0..=1.0).contains(c)));
     }
+
+    /// `cargo test --release -p showcase paint_cost -- --ignored --nocapture`: what the
+    /// terrain's patch builds pay per vertex for the overlay's height and paint.
+    #[test]
+    #[ignore]
+    fn paint_cost() {
+        let land = crate::landscape::shared();
+        let mut rng = Rng::new(7);
+        for (name, r0, r1) in [("valley", 0.0, 1500.0), ("hills", 1500.0, 15_000.0)] {
+            let points: Vec<(f64, f64)> = (0..20_000)
+                .map(|_| {
+                    let a = rng.range(0.0, std::f32::consts::TAU) as f64;
+                    let r = r0 + (r1 - r0) * (rng.f32() as f64).sqrt();
+                    (r * a.cos(), r * a.sin())
+                })
+                .collect();
+            let t = std::time::Instant::now();
+            let heights: f64 = points.iter().map(|&(x, z)| land.height(x, z)).sum();
+            let height_us = t.elapsed().as_secs_f64() * 1e6 / points.len() as f64;
+            let t = std::time::Instant::now();
+            let tints: f32 = points.iter().map(|&(x, z)| paint(land, x, z).tint[1]).sum();
+            let paint_us = t.elapsed().as_secs_f64() * 1e6 / points.len() as f64;
+            println!(
+                "{name}: height {height_us:.2} us, paint {paint_us:.2} us (sums {heights:.3}, {tints:.4})"
+            );
+        }
+    }
 }
