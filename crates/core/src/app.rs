@@ -130,6 +130,7 @@ impl App {
             .init_resource::<TypeRegistry>()
             .init_resource::<ApiRegistry>()
             .init_resource::<Diagnostics>()
+            .init_resource::<crate::profile::ProfileWindow>()
             .init_resource::<Window>()
             .insert_resource(crate::log::log_buffer())
             .add_message::<AppExit>()
@@ -163,6 +164,10 @@ impl App {
                 .chain(),
         )
         .add_systems(FixedPreUpdate, transform::snapshot_interpolation_system)
+        .add_systems(
+            Last,
+            crate::profile::profile_report_system.run_if(crate::profile::enabled),
+        )
         .add_systems(FixedPostUpdate, signal_message_update_system)
         .add_systems(
             PostUpdate,
