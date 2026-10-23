@@ -111,12 +111,23 @@ pub fn init(default_filter: &str) {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
         START.get_or_init(std::time::Instant::now);
-        let filter =
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
+        // The ECS's per-system spans are only for the profiler; keep them out of log lines.
+        let filter = || {
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new(default_filter))
+                .add_directive("bevy_ecs=warn".parse().expect("valid directive"))
+        };
+        if crate::profile::requested() {
+            crate::profile::enable();
+        }
         let _ = tracing_subscriber::registry()
-            .with(filter)
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-            .with(BufferLayer(log_buffer()))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_filter(filter()),
+            )
+            .with(BufferLayer(log_buffer()).with_filter(filter()))
+            .with(crate::profile::ProfileLayer.with_filter(crate::profile::ProfileFilter))
             .try_init();
     });
 }

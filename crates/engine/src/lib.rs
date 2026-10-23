@@ -51,6 +51,8 @@ impl PluginGroup for DefaultPlugins {
 /// - `--frames N`: stop after N frames (headless).
 /// - `--size WxH`: window / render size.
 /// - `--seed N`: world seed.
+/// - `--profile`: log where frame time goes (read by `engine_core::log::init`, see
+///   `engine_core::profile`).
 ///
 /// Call before adding plugins.
 pub fn apply_cli_args(app: &mut App) {
