@@ -1427,6 +1427,13 @@ impl Renderer {
         stats.images_released = image_stats.released;
         stats.image_bytes_released = image_stats.bytes_released;
 
+        if engine_core::profile::enabled() {
+            self.perf.set_features(
+                self.features
+                    .iter()
+                    .map(|f| (f.name().to_string(), f.stats())),
+            );
+        }
         self.perf.frame(
             &self.shared.device,
             &stats,
