@@ -6,8 +6,8 @@ use std::f32::consts::{FRAC_PI_2, PI};
 
 use engine_core::prelude::*;
 use engine_world::{
-    BurnState, Combustible, FocusPoints, Ground, HeatField, SurfaceLayers, SurfaceMaterials, Water,
-    WeatherState, WindField,
+    BurnState, Combustible, FocusPoints, Ground, HeatField, SimulationRange, SurfaceLayers,
+    SurfaceMaterials, Water, WeatherState, WindField,
 };
 
 use crate::plant::{
@@ -623,15 +623,38 @@ pub fn assign_regions(
 pub struct GrowthClock {
     years: f32,
     secs: f32,
+    /// Years gathered for regions out of the simulation range, which grow only every
+    /// [`RESTING_TICKS`]th tick.
+    resting_years: f32,
+    ticks: u32,
+}
+
+/// Regions beyond the simulation range grow once in this many growth ticks (every 4 s).
+const RESTING_TICKS: u32 = 16;
+
+/// Whether a region lies wholly beyond the simulation range of every focus.
+fn region_resting(
+    range: Option<&SimulationRange>,
+    focus: &FocusPoints,
+    region: &EcologyRegion,
+    center: DVec3,
+) -> bool {
+    let Some(range) = range else { return false };
+    let radius = region.half_extents[0].max(region.half_extents[1]) as f64;
+    !focus.points.is_empty()
+        && focus.distance(center) - radius > range.active_m * (1.0 + range.hysteresis)
 }
 
 /// Grow every living plant a little (a few times per second), at its current vigor.
+#[allow(clippy::too_many_arguments)]
 pub fn grow_plants(
     time: Res<Time>,
     settings: Res<EcologySettings>,
     library: Res<PlantLibrary>,
+    range: Option<Res<SimulationRange>>,
+    focus: Option<Res<FocusPoints>>,
     mut clock: ResMut<GrowthClock>,
-    regions: Query<&EcologyRegion>,
+    regions: Query<(&EcologyRegion, &RegionState)>,
     mut plants: Query<(&mut Plant, Option<&InRegion>)>,
 ) {
     if settings.paused {
@@ -647,18 +670,31 @@ pub fn grow_plants(
     if dt <= 0.0 {
         return;
     }
+    // Regions out of range rest: their plants grow rarely, by all the years gathered meanwhile.
+    clock.resting_years += dt;
+    clock.ticks = clock.ticks.wrapping_add(1);
+    let resting_turn = clock.ticks.is_multiple_of(RESTING_TICKS);
+    let resting_dt = if resting_turn {
+        std::mem::take(&mut clock.resting_years)
+    } else {
+        0.0
+    };
+    let focus = focus.as_deref().cloned().unwrap_or_default();
+    let range = range.as_deref();
     plants.par_iter_mut().for_each(|(mut plant, region)| {
         if !plant.stage.is_alive() {
             return;
         }
-        let scale = region
-            .and_then(|r| r.0)
-            .and_then(|r| regions.get(r).ok())
-            .map(|r| r.time_scale.max(0.0))
-            .unwrap_or(1.0);
+        let region = region.and_then(|r| r.0).and_then(|r| regions.get(r).ok());
+        let resting = region.is_some_and(|(r, s)| region_resting(range, &focus, r, s.center));
+        if resting && !resting_turn {
+            return;
+        }
+        let years = if resting { resting_dt } else { dt };
+        let scale = region.map(|(r, _)| r.time_scale.max(0.0)).unwrap_or(1.0);
         let sp = library.get(plant.species);
         let mut next = plant.clone();
-        grow_plant(&mut next, sp, dt * scale);
+        grow_plant(&mut next, sp, years * scale);
         // Only mark visible changes (the visuals re-scale changed plants).
         if (next.size - plant.size).abs() > 0.002 {
             *plant = next;
@@ -682,16 +718,18 @@ pub fn ecology_step(world: &mut World) {
         .get_resource::<FocusPoints>()
         .cloned()
         .unwrap_or_default();
+    let range = world.get_resource::<SimulationRange>().cloned();
     let years = dt * settings.years_per_second;
 
     // Which regions are due, and with how many years.
     let mut due: Vec<(Entity, f32)> = Vec::new();
     let mut q = world.query::<(Entity, &EcologyRegion, &mut RegionState)>();
     for (e, region, mut state) in q.iter_mut(world) {
-        let near = focus.points.is_empty()
+        let near = (focus.points.is_empty()
             || focus.distance(state.center)
                 < (region.active_radius_m + region.half_extents[0].max(region.half_extents[1]))
-                    as f64;
+                    as f64)
+            && !region_resting(range.as_ref(), &focus, region, state.center);
         if !near {
             state.pending_years = (state.pending_years + years * region.time_scale.max(0.0))
                 .min(settings.max_catch_up_years);

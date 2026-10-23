@@ -17,11 +17,16 @@ use engine_core::prelude::*;
 use engine_render::{GrassField, GrassStyle};
 use engine_world::Ground;
 
+use std::sync::{Arc, Mutex};
+
+use engine_core::tasks::AsyncComputeTaskPool;
+
 use crate::ecology::{InRegion, RegionState};
 use crate::felling::{LOG_BARE_YEARS, LogPlaced};
 use crate::plant::{EcologyRegion, EcologySettings, FelledLog, Plant};
 use crate::scenery::Rock;
 use crate::season::{FoliageSeason, grass_dryness};
+use crate::sim::Soil;
 use crate::species::{PlantForm, PlantLibrary};
 
 /// Spacing of the field's map grid, meters.
@@ -86,7 +91,8 @@ pub struct Cover {
 #[allow(clippy::too_many_arguments)]
 pub fn grass_maps(
     region: &EcologyRegion,
-    state: &RegionState,
+    soil: &Soil,
+    center: DVec3,
     resolution: [u32; 2],
     plants: &[(Vec2, f32, f32, f32)],
     covers: &[Cover],
@@ -127,7 +133,33 @@ pub fn grass_maps(
             }
         }
     }
-    let center = state.center;
+    // Keep-clear circles and covers, each marked over its own bounding box (not every point
+    // against every one: a region can hold hundreds of rocks).
+    let mut bare = vec![false; n];
+    let shapes = region
+        .keep_clear
+        .iter()
+        .map(|c| Cover {
+            a: Vec2::new(c[0], c[1]),
+            b: Vec2::new(c[0], c[1]),
+            radius: c[2],
+        })
+        .chain(covers.iter().copied());
+    for c in shapes {
+        let (lo, hi) = (c.a.min(c.b) - c.radius, c.a.max(c.b) + c.radius);
+        let (i0, j0) = index(lo);
+        let (i1, j1) = index(hi);
+        let ab = c.b - c.a;
+        for j in (j0 - 1).max(0)..=(j1 + 1).min(rz as i64 - 1) {
+            for i in (i0 - 1).max(0)..=(i1 + 1).min(rx as i64 - 1) {
+                let q = corner + Vec2::new(i as f32 * step.x, j as f32 * step.y);
+                let t = ((q - c.a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+                if q.distance(c.a + ab * t) < c.radius {
+                    bare[(j as u32 * rx + i as u32) as usize] = true;
+                }
+            }
+        }
+    }
     let mut density = Vec::with_capacity(n);
     let mut dryness = Vec::with_capacity(n);
     for j in 0..rz {
@@ -135,23 +167,13 @@ pub fn grass_maps(
             let k = (j * rx + i) as usize;
             let q = corner + Vec2::new(i as f32 * step.x, j as f32 * step.y);
             let world = center + DVec3::new(q.x as f64, 0.0, q.y as f64);
-            let soil = &state.sim.soil;
             let blocked = !soil.contains(world) || soil.blocked[soil.index(world)];
-            let clear = region
-                .keep_clear
-                .iter()
-                .any(|c| q.distance(Vec2::new(c[0], c[1])) < c[2]);
-            let covered = covers.iter().any(|c| {
-                let ab = c.b - c.a;
-                let t = ((q - c.a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
-                q.distance(c.a + ab * t) < c.radius
-            });
             // Meadows are patchy even where the tufts are thick: dense swards, thin rises and
             // bare gaps a few meters across, so the ground shows through here and there.
             let (x, z) = (q.x as f64, q.y as f64);
             let patch = fbm2(x * 0.15, z * 0.15, region.seed ^ 0x6a55, 3, 2.0, 0.5);
             let gaps = fbm2(x * 0.45, z * 0.45, region.seed ^ 0x9a9, 2, 2.0, 0.5);
-            let d = if blocked || clear || covered {
+            let d = if blocked || bare[k] {
                 0.0
             } else {
                 // Tufts overlap: 1.2 of cover is a closed sward.
@@ -181,27 +203,111 @@ pub fn grass_maps(
     (density, dryness)
 }
 
-/// Spawn, update and remove each region's grass field.
+/// A region's grass maps being built on the async pool; the result lands in `slot`.
+#[derive(Component)]
+pub struct GrassBuild {
+    slot: Arc<Mutex<Option<BuiltGrass>>>,
+}
+
+/// What a build produces, and what it was built for.
+struct BuiltGrass {
+    density: Vec<f32>,
+    dryness: Vec<f32>,
+    /// Rebuilt only on the first build and after the terrain changed.
+    heights: Option<Vec<f32>>,
+    resolution: [u32; 2],
+    size: [f32; 2],
+    center: DVec3,
+    style: GrassStyle,
+}
+
+/// Run `job` on the async pool (inline where there is none, as in some tests) and put its
+/// result in the returned slot.
+fn spawn_build(job: impl FnOnce() -> BuiltGrass + Send + 'static) -> GrassBuild {
+    let slot = Arc::new(Mutex::new(None));
+    let out = slot.clone();
+    let run = move || {
+        let built = job();
+        if let Ok(mut s) = out.lock() {
+            *s = Some(built);
+        }
+    };
+    match AsyncComputeTaskPool::try_get() {
+        Some(pool) => pool.spawn(async move { run() }).detach(),
+        None => run(),
+    }
+    GrassBuild { slot }
+}
+
+/// Spawn, update and remove each region's grass field. The maps are built off the frame (on
+/// the async pool) from what the region holds now, and swapped in when ready.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn sync_region_grass(
     mut commands: Commands,
     mut timer: Local<f32>,
+    mut relief_due: Local<bool>,
     time: Res<Time>,
     settings: Res<EcologySettings>,
     season: Res<FoliageSeason>,
     library: Res<PlantLibrary>,
     ground: Option<Res<Ground>>,
     mut terrain: MessageReader<engine_world::TerrainChanged>,
-    regions: Query<(Entity, &EcologyRegion, &RegionState, Option<&RegionGrass>)>,
+    regions: Query<(
+        Entity,
+        &EcologyRegion,
+        &RegionState,
+        Option<&RegionGrass>,
+        Option<&GrassBuild>,
+    )>,
     mut fields: Query<(&mut GrassField, &mut Transform, &GrassOf)>,
     plants: Query<(&Plant, &Transform, &InRegion), Without<GrassField>>,
     logs: Query<(&FelledLog, &Transform), (With<LogPlaced>, Without<GrassField>)>,
     rocks: Query<&Transform, (With<Rock>, Without<GrassField>)>,
     orphans: Query<(Entity, &GrassOf)>,
 ) {
-    let relief = terrain.read().count() > 0;
+    // Finished builds: swap them in.
+    for (region_e, _, _, linked, build) in &regions {
+        let Some(build) = build else { continue };
+        let Some(built) = build.slot.lock().ok().and_then(|mut s| s.take()) else {
+            continue;
+        };
+        commands.entity(region_e).remove::<GrassBuild>();
+        if !settings.gpu_grass {
+            continue;
+        }
+        let field_at = Transform::from_translation(built.center);
+        match linked.and_then(|g| fields.get_mut(g.0).ok()) {
+            Some((mut field, mut t, _)) => {
+                if let Some(h) = built.heights {
+                    field.heights = h;
+                }
+                field.size = built.size;
+                field.resolution = built.resolution;
+                field.density = built.density;
+                field.dryness = built.dryness;
+                field.style = built.style;
+                if t.translation != field_at.translation {
+                    *t = field_at;
+                }
+            }
+            None => {
+                let field = GrassField {
+                    size: built.size,
+                    resolution: built.resolution,
+                    heights: built.heights.unwrap_or_default(),
+                    density: built.density,
+                    dryness: built.dryness,
+                    style: built.style,
+                };
+                let e = commands.spawn((field_at, field, GrassOf(region_e))).id();
+                commands.entity(region_e).insert(RegionGrass(e));
+            }
+        }
+    }
+
+    *relief_due |= terrain.read().count() > 0;
     *timer -= time.real_delta_secs();
-    if *timer > 0.0 && !relief && !settings.is_changed() && !season.is_changed() {
+    if *timer > 0.0 && !*relief_due && !settings.is_changed() && !season.is_changed() {
         return;
     }
     *timer = REBUILD_SECS;
@@ -211,7 +317,9 @@ pub fn sync_region_grass(
             commands.entity(e).despawn();
         }
     }
-    for (region_e, region, state, linked) in &regions {
+    let relief = std::mem::take(&mut *relief_due);
+    let season_dry = grass_dryness(season.day_of_year);
+    for (region_e, region, state, linked, build) in &regions {
         let style = region_style(&library, region).filter(|_| settings.gpu_grass);
         let Some(style) = style else {
             if let Some(g) = linked {
@@ -220,6 +328,11 @@ pub fn sync_region_grass(
             }
             continue;
         };
+        if build.is_some() {
+            // Still building: the next round picks up what changed meanwhile.
+            *relief_due |= relief;
+            continue;
+        }
         let res = resolution(region.half_extents);
         let center = state.center;
         let local = |t: &Transform| {
@@ -275,40 +388,29 @@ pub fn sync_region_grass(
                 radius: r,
             })
         }));
-        let (density, mut dryness) = grass_maps(region, state, res, &grass, &covers);
-        // Autumn browns the meadow and winter leaves it straw, wherever it grows.
-        let season_dry = grass_dryness(season.day_of_year);
-        for d in &mut dryness {
-            *d += (1.0 - *d) * season_dry;
-        }
-        let field_at = Transform::from_translation(center);
-        match linked.and_then(|g| fields.get_mut(g.0).ok()) {
-            Some((mut field, mut t, _)) => {
-                if relief || field.heights.is_empty() || field.resolution != res {
-                    field.heights = heights(ground.as_deref(), center, region, res);
-                }
-                field.size = [region.half_extents[0] * 2.0, region.half_extents[1] * 2.0];
-                field.resolution = res;
-                field.density = density;
-                field.dryness = dryness;
-                field.style = style;
-                if t.translation != field_at.translation {
-                    *t = field_at;
-                }
+        let existing = linked.and_then(|g| fields.get(g.0).ok());
+        let need_heights =
+            relief || existing.is_none_or(|(f, _, _)| f.heights.is_empty() || f.resolution != res);
+        let ground = need_heights.then(|| ground.as_deref().cloned());
+        let region = region.clone();
+        let soil = state.sim.soil.clone();
+        let build = spawn_build(move || {
+            let (density, mut dryness) = grass_maps(&region, &soil, center, res, &grass, &covers);
+            // Autumn browns the meadow and winter leaves it straw, wherever it grows.
+            for d in &mut dryness {
+                *d += (1.0 - *d) * season_dry;
             }
-            None => {
-                let field = GrassField {
-                    size: [region.half_extents[0] * 2.0, region.half_extents[1] * 2.0],
-                    resolution: res,
-                    heights: heights(ground.as_deref(), center, region, res),
-                    density,
-                    dryness,
-                    style,
-                };
-                let e = commands.spawn((field_at, field, GrassOf(region_e))).id();
-                commands.entity(region_e).insert(RegionGrass(e));
+            BuiltGrass {
+                density,
+                dryness,
+                heights: ground.map(|g| heights(g.as_ref(), center, &region, res)),
+                resolution: res,
+                size: [region.half_extents[0] * 2.0, region.half_extents[1] * 2.0],
+                center,
+                style,
             }
-        }
+        });
+        commands.entity(region_e).insert(build);
     }
 }
 
@@ -354,6 +456,23 @@ mod tests {
         app
     }
 
+    /// Run until no region's maps are still building (they build on the async pool).
+    fn settle(app: &mut App) {
+        let start = std::time::Instant::now();
+        loop {
+            app.update();
+            let building = app
+                .world
+                .query_filtered::<(), With<GrassBuild>>()
+                .iter(&app.world)
+                .count();
+            if building == 0 || start.elapsed().as_secs() > 30 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
     #[test]
     fn grass_grows_where_the_ecology_puts_it() {
         let mut app = app();
@@ -388,6 +507,7 @@ mod tests {
         }
         // The maps are rebuilt every few seconds; give the plants time to join the region.
         app.update_n(200);
+        settle(&mut app);
         let field_e = app
             .world
             .get::<RegionGrass>(region)
@@ -428,6 +548,7 @@ mod tests {
             },
         ));
         app.update_n(200);
+        settle(&mut app);
         // It rests a little to the side of where it fell, its butt off the stump.
         let butt = app
             .world

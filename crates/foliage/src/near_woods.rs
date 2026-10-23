@@ -10,12 +10,16 @@
 //! the far woods don't rebuild while they stream.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use engine_core::prelude::*;
+use engine_core::tasks::AsyncComputeTaskPool;
 use engine_render::Camera;
-use engine_world::{ForestCover, Ground, WorldShift};
+use engine_world::{ForestCover, ForestQuery, Ground, WorldShift};
 
-use crate::far_woods::{COVER_SETTLE_FRAMES, FarWoods, FarWoodsState, cell_cards};
+use crate::far_woods::{
+    COVER_SETTLE_FRAMES, FarCard, FarWoods, FarWoodsState, KeepClear, Occupied, cell_cards,
+};
 use crate::plant::Genes;
 use crate::scenery_tree::SceneryTree;
 use crate::species::PlantLibrary;
@@ -30,8 +34,11 @@ pub struct NearWoods {
     pub cell_m: f32,
     /// Mean distance between trees in a closed wood, meters.
     pub spacing_m: f32,
-    /// Most cells planted per frame.
+    /// Most cells being laid out at once.
     pub cells_per_frame: u32,
+    /// Lay cells out on the async task pool (planted a frame or more later) rather than in the
+    /// frame.
+    pub background: bool,
 }
 
 impl Default for NearWoods {
@@ -41,6 +48,7 @@ impl Default for NearWoods {
             cell_m: 64.0,
             spacing_m: 7.0,
             cells_per_frame: 8,
+            background: true,
         }
     }
 }
@@ -60,11 +68,69 @@ pub struct NearWoodsCell {
 pub struct NearWoodsState {
     origin: DVec3,
     cells: HashMap<(i64, i64), Entity>,
+    /// Cells being laid out off the frame.
+    pending: HashMap<(i64, i64), Pending>,
+    /// What the last pass saw (camera cell, cover version, settled) and whether it left cells
+    /// to plant: while none of it changes there is nothing to do.
+    seen: Option<((i64, i64), u64, bool)>,
+    backlog: bool,
+}
+
+/// A cell being laid out: the cover's version, where its corner is now (moved by world
+/// shifts meanwhile) and the cards once they are ready.
+struct Pending {
+    epoch: u64,
+    corner: DVec3,
+    cards: Arc<Mutex<Option<Vec<FarCard>>>>,
+}
+
+/// Everything a cell's layout needs, owned, so it can run off the frame.
+struct CellJob {
+    corner: DVec3,
+    cell_m: f32,
+    spacing: f32,
+    seed: u64,
+    cam_y: f64,
+    cover: Arc<dyn ForestQuery>,
+    ground: Option<Ground>,
+    occupied: Arc<Occupied>,
+    occupied_origin: DVec3,
+    keep_clear: Vec<KeepClear>,
+}
+
+impl CellJob {
+    fn run(self) -> Vec<FarCard> {
+        let ground_y = |p: DVec3| match &self.ground {
+            Some(g) => g.height(DVec3::new(p.x, self.cam_y + 10_000.0, p.z)),
+            None => Some(0.0),
+        };
+        let cover_at = |p: DVec3| self.cover.sample(p).map(|s| (s.density, s.conifer));
+        let keep_out = |p: DVec3| {
+            self.occupied.holds(self.occupied_origin, p)
+                || self.keep_clear.iter().any(|k| {
+                    DVec2::new(p.x - k.center.x, p.z - k.center.z).length() < k.radius as f64
+                })
+        };
+        cell_cards(
+            self.corner,
+            self.cell_m,
+            self.spacing,
+            self.seed,
+            &cover_at,
+            &ground_y,
+            &keep_out,
+        )
+    }
+}
+
+fn seed_of(key: (i64, i64)) -> u64 {
+    (key.0 as u64).wrapping_mul(0x632b_e59b) ^ (key.1 as u64).wrapping_mul(0x8551_93a1)
 }
 
 /// Plant the cells within the far woods' start, nearest first, and drop those the camera has
 /// left (past the start and one more cell). Cells planted from an older cover or placed-tree
-/// ground replant once it has held still.
+/// ground replant once it has held still. A cell's trees are laid out off the frame and
+/// planted when ready.
 #[allow(clippy::too_many_arguments)]
 pub fn stream_near_woods(
     mut commands: Commands,
@@ -82,6 +148,8 @@ pub fn stream_near_woods(
         for (_, e) in std::mem::take(&mut state.cells) {
             commands.entity(e).despawn();
         }
+        state.pending.clear();
+        state.seen = None;
         if !settings.enabled {
             return;
         }
@@ -92,6 +160,18 @@ pub fn stream_near_woods(
     let cell_m = settings.cell_m.max(8.0);
     let reach = far.start_m;
     let origin = state.origin;
+    let settled = far_state.quiet_frames >= COVER_SETTLE_FRAMES;
+    let (ci, cj) = (
+        ((cam.x - origin.x) / cell_m as f64).floor() as i64,
+        ((cam.z - origin.z) / cell_m as f64).floor() as i64,
+    );
+    // The camera still in the same cell, the cover unchanged and everything planted: nothing
+    // to do this frame.
+    let seen = Some(((ci, cj), far_state.epoch, settled));
+    if state.seen == seen && !state.backlog && state.pending.is_empty() && !far.is_changed() {
+        return;
+    }
+    state.seen = seen;
     let corner = |key: (i64, i64)| {
         origin
             + DVec3::new(
@@ -104,7 +184,7 @@ pub fn stream_near_woods(
         let c = corner(key) + DVec3::new(cell_m as f64 * 0.5, 0.0, cell_m as f64 * 0.5);
         DVec2::new(c.x - cam.x, c.z - cam.z).length() as f32
     };
-    // Drop the cells left behind.
+    // Drop the cells left behind, and the layouts no longer wanted.
     let gone: Vec<_> = state
         .cells
         .keys()
@@ -116,11 +196,9 @@ pub fn stream_near_woods(
             commands.entity(e).despawn();
         }
     }
-    let settled = far_state.quiet_frames >= COVER_SETTLE_FRAMES;
-    let (ci, cj) = (
-        ((cam.x - origin.x) / cell_m as f64).floor() as i64,
-        ((cam.z - origin.z) / cell_m as f64).floor() as i64,
-    );
+    state
+        .pending
+        .retain(|&k, _| flat_distance(k) <= reach + cell_m);
     let r = (reach / cell_m).ceil() as i64;
     let mut todo = Vec::new();
     for j in cj - r..=cj + r {
@@ -129,9 +207,12 @@ pub fn stream_near_woods(
             if d > reach {
                 continue;
             }
-            let stale = match state.cells.get(&(i, j)).and_then(|&e| cells.get(e).ok()) {
-                None => !state.cells.contains_key(&(i, j)),
-                Some(c) => settled && c.epoch != far_state.epoch,
+            let stale = match state.pending.get(&(i, j)) {
+                Some(p) => settled && p.epoch != far_state.epoch,
+                None => match state.cells.get(&(i, j)).and_then(|&e| cells.get(e).ok()) {
+                    None => !state.cells.contains_key(&(i, j)),
+                    Some(c) => settled && c.epoch != far_state.epoch,
+                },
             };
             if stale {
                 todo.push((d, (i, j)));
@@ -139,40 +220,67 @@ pub fn stream_near_woods(
         }
     }
     todo.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let ground_y = |p: DVec3| match ground.as_deref() {
-        Some(g) => g.height(DVec3::new(p.x, cam.y + 10_000.0, p.z)),
-        None => Some(0.0),
-    };
-    let cover_at = |p: DVec3| cover.0.sample(p).map(|s| (s.density, s.conifer));
-    let keep_out = |p: DVec3| {
-        far_state.occupied.holds(far_state.origin, p)
-            || far
-                .keep_clear
-                .iter()
-                .any(|k| DVec2::new(p.x - k.center.x, p.z - k.center.z).length() < k.radius as f64)
-    };
-    for (_, key) in todo.into_iter().take(settings.cells_per_frame as usize) {
+    let room = (settings.cells_per_frame as usize).saturating_sub(state.pending.len());
+    let take = room.min(todo.len());
+    state.backlog = todo.len() > take;
+    let pool = AsyncComputeTaskPool::try_get().filter(|_| settings.background);
+    for (_, key) in todo.into_iter().take(take) {
+        let job = CellJob {
+            corner: corner(key),
+            cell_m,
+            spacing: settings.spacing_m,
+            seed: seed_of(key),
+            cam_y: cam.y,
+            cover: cover.0.clone(),
+            ground: ground.as_deref().cloned(),
+            occupied: far_state.occupied.clone(),
+            occupied_origin: far_state.origin,
+            keep_clear: far.keep_clear.clone(),
+        };
+        let cards = Arc::new(Mutex::new(None));
+        let out = cards.clone();
+        let run = move || {
+            let planned = job.run();
+            if let Ok(mut s) = out.lock() {
+                *s = Some(planned);
+            }
+        };
+        match pool {
+            Some(pool) => pool.spawn(async move { run() }).detach(),
+            None => run(),
+        }
+        state.pending.insert(
+            key,
+            Pending {
+                epoch: far_state.epoch,
+                corner: corner(key),
+                cards,
+            },
+        );
+    }
+    // Plant the cells whose layouts are ready.
+    let ready: Vec<_> = state
+        .pending
+        .iter()
+        .filter(|(_, p)| p.cards.lock().is_ok_and(|c| c.is_some()))
+        .map(|(&k, _)| k)
+        .collect();
+    for key in ready {
+        let p = state.pending.remove(&key).expect("pending cell");
+        let cards = p
+            .cards
+            .lock()
+            .ok()
+            .and_then(|mut c| c.take())
+            .unwrap_or_default();
         if let Some(e) = state.cells.remove(&key) {
             commands.entity(e).despawn();
         }
-        let at = corner(key);
-        let seed =
-            (key.0 as u64).wrapping_mul(0x632b_e59b) ^ (key.1 as u64).wrapping_mul(0x8551_93a1);
-        let cards = cell_cards(
-            at,
-            cell_m,
-            settings.spacing_m,
-            seed,
-            &cover_at,
-            &ground_y,
-            &keep_out,
-        );
+        let seed = seed_of(key);
         let e = commands
             .spawn((
-                Transform::from_translation(at),
-                NearWoodsCell {
-                    epoch: far_state.epoch,
-                },
+                Transform::from_translation(p.corner),
+                NearWoodsCell { epoch: p.epoch },
             ))
             .id();
         for (n, card) in cards.iter().enumerate() {
@@ -208,10 +316,15 @@ pub fn follow_world_shift(
     for s in shifts.read() {
         if s.is_translation_only() {
             state.origin = s.point(state.origin);
+            for p in state.pending.values_mut() {
+                p.corner = s.point(p.corner);
+            }
         } else {
             for (_, e) in std::mem::take(&mut state.cells) {
                 commands.entity(e).despawn();
             }
+            state.pending.clear();
+            state.seen = None;
         }
     }
 }
@@ -259,6 +372,7 @@ mod tests {
         });
         app.world.insert_resource(NearWoods {
             cells_per_frame: u32::MAX,
+            background: false,
             ..Default::default()
         });
         let cam = app
@@ -296,6 +410,21 @@ mod tests {
         let trees = planted(&mut app);
         assert!(trees.len() >= 300);
         assert!(trees.iter().all(|p| p.x > 2000.0 - 150.0));
+    }
+
+    #[test]
+    fn cells_laid_out_off_the_frame_are_planted_when_ready() {
+        let (mut app, _) = app();
+        app.world.resource_mut::<NearWoods>().background = true;
+        app.world
+            .insert_resource(ForestCover(std::sync::Arc::new(Everywhere)));
+        let start = std::time::Instant::now();
+        while planted(&mut app).len() < 300 && start.elapsed().as_secs() < 20 {
+            app.update();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(planted(&mut app).len() >= 300);
+        assert!(app.world.resource::<NearWoodsState>().pending.is_empty());
     }
 
     #[test]
