@@ -196,6 +196,8 @@ pub struct Renderer {
     volumetrics: crate::volumetrics::Volumetrics,
     /// Depth of field (before TAA) and motion blur (after it): camera components.
     lens: crate::lens::LensEffects,
+    /// Frame timing and the `perf:` log line.
+    perf: crate::perf::PerfLog,
     previous: Option<PreviousView>,
     /// How far the camera moved the frame before (camera cut detection).
     prev_step: f64,
@@ -546,6 +548,7 @@ impl Renderer {
         let effects = ScreenEffects::new(&shared, &targets);
         let mut meter = crate::exposure::ExposureMeter::new(&shared);
         meter.set_source(&device, &targets.hdr.view);
+        let perf = crate::perf::PerfLog::new(&shared.device, &shared.queue);
 
         Ok(Self {
             instance: gpu.instance,
@@ -576,6 +579,7 @@ impl Renderer {
             meter,
             volumetrics,
             lens: Default::default(),
+            perf,
             previous: None,
             prev_step: 0.0,
             prev_aa: settings.anti_aliasing,
@@ -870,6 +874,7 @@ impl Renderer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame"),
         });
+        self.perf.begin(&mut encoder);
         let ctx = FrameContext {
             gpu: &self.shared,
             frame_group: &self.frame_group,
@@ -1305,8 +1310,12 @@ impl Renderer {
         // Present.
         let mut surface_texture = None;
         let mut reconfigure = false;
+        let mut acquire_ms = 0.0;
         if let Some(surface) = &self.surface {
-            let acquired = match surface.surface.get_current_texture() {
+            let acquiring = Instant::now();
+            let current = surface.surface.get_current_texture();
+            acquire_ms = acquiring.elapsed().as_secs_f32() * 1000.0;
+            let acquired = match current {
                 wgpu::CurrentSurfaceTexture::Success(t) => Some(t),
                 wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
                     reconfigure = true;
@@ -1333,9 +1342,11 @@ impl Renderer {
             }
         }
 
+        self.perf.end(&mut encoder);
         let mut stats = self.collect_stats(&view, started);
         self.shared.queue.submit([encoder.finish()]);
         self.meter.after_submit();
+        self.perf.after_submit();
         self.lens.after_submit();
         if let Some(t) = surface_texture {
             self.shared.queue.present(t);
@@ -1377,8 +1388,22 @@ impl Renderer {
         stats.images_released = image_stats.released;
         stats.image_bytes_released = image_stats.bytes_released;
 
+        self.perf.frame(
+            &self.shared.device,
+            &stats,
+            acquire_ms,
+            settings.perf_log_secs,
+        );
         if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
             d.set("render.cpu_ms", stats.cpu_ms as f64);
+            d.set("render.frame_ms", self.perf.frame_ms as f64);
+            d.set("render.acquire_ms", self.perf.acquire_ms as f64);
+            if let Some(ms) = self.perf.gpu_ms {
+                d.set("render.gpu_ms", ms as f64);
+            }
+            if let Some(mb) = self.perf.gpu_memory_mb {
+                d.set("render.gpu_memory_mb", mb as f64);
+            }
             d.set("render.draw_calls", stats.draw_calls as f64);
             d.set("render.instances", stats.instances as f64);
             d.set("render.triangles", stats.triangles as f64);
