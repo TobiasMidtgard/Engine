@@ -159,6 +159,14 @@ fn setup(
     ),
 ) {
     let t0 = std::time::Instant::now();
+    // Each step's share of the build, for `--profile` runs chasing a slow start.
+    let mut laps: Vec<(&str, f32)> = Vec::new();
+    let mut last = t0;
+    let mut lap = |what: &'static str| {
+        let now = std::time::Instant::now();
+        laps.push((what, (now - last).as_secs_f32()));
+        last = now;
+    };
     // The planet beyond the terrain is grassland too, so the far edge blends into it.
     atmosphere.ground_color = [0.07, 0.13, 0.04];
     // Mountains a few km away should still be in the shadow maps' reach for the valley.
@@ -175,21 +183,30 @@ fn setup(
     // On the planet the terrain answers `Ground` (edits included) and asks this for surfaces.
     commands.insert_resource(engine::world::Ground(ground.clone()));
     let lib = scenery::build_library(&mut meshes, &mut materials, &mut images, &plants);
+    lap("library");
     let mut rng = Rng::new(config.seed);
     if use_planet.is_some() {
         planet::spawn(&mut commands, land.clone(), ground);
     } else {
         scenery::spawn_terrain(&mut commands, &mut meshes, &lib, &land);
     }
+    lap("terrain");
     scenery::spawn_woods(&mut commands, &lib, &land, &mut rng);
+    lap("woods");
     scenery::spawn_meadows(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_meadow_grass(&mut commands, &land);
+    lap("meadows");
     let hedged = scenery::spawn_farms(&mut commands, &lib, &land, &mut rng);
     scenery::spawn_walls(&mut commands, &lib, &land, &hedged);
+    lap("farms and walls");
     scenery::spawn_rocks(&mut commands, &lib, &land, &mut rng);
+    lap("rocks");
     scenery::spawn_village(&mut commands, &lib, &land, &mut rng);
+    lap("village");
     scenery::spawn_cliffs_and_stream(&mut commands, &mut meshes, &lib, &land, &mut rng);
+    lap("cliffs and stream");
     placeholders::cave_shell(&mut commands, &mut meshes, &lib, &land, &mut rng);
+    lap("cave");
     if let Some(only) = &demo_zones {
         engine::core::log::info!(
             "only the zone demos of {:?} (`--zones all` spawns every one)",
@@ -197,6 +214,7 @@ fn setup(
         );
     }
     zones::spawn_demos(&mut commands, &lib, &land, &mut rng, demo_zones.as_deref());
+    lap("zone demos");
     if use_planet.is_none() {
         zones::moon(&mut commands);
     }
@@ -205,9 +223,12 @@ fn setup(
     engine_weather::spawn_sky_lights(&mut commands);
     // The tower's textures baked on other threads while the world spawned.
     lib.tower.finish_textures(&mut images);
+    lap("tower textures");
+    let laps: Vec<String> = laps.iter().map(|(w, s)| format!("{w} {s:.2}")).collect();
     engine::core::log::info!(
-        "showcase world built in {:.1} s",
-        t0.elapsed().as_secs_f32()
+        "showcase world built in {:.1} s ({})",
+        t0.elapsed().as_secs_f32(),
+        laps.join(", ")
     );
 }
 
