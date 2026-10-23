@@ -81,6 +81,7 @@ pub mod material_library;
 pub mod mesh;
 pub mod mesh_feature;
 pub mod motion_blur;
+mod perf;
 pub mod renderer;
 pub mod rock;
 pub mod settings;

@@ -176,6 +176,10 @@ pub struct RenderSettings {
     /// Maximum point lights shaded per frame (nearest first).
     pub max_point_lights: u32,
     pub debug_view: DebugView,
+    /// Write a `perf:` line to the log every this many seconds: frames per second, the render
+    /// system's CPU time and its wait for the window image, everything else's CPU time, the
+    /// GPU's time and memory (see `perf.rs`). 0 = never.
+    pub perf_log_secs: f32,
     /// Re-render the sky environment map every N frames (1 = every frame).
     pub environment_interval: u32,
     /// The sky's own flat cloud layer (a 2D deck 1.5 km up whose cover follows
@@ -297,6 +301,7 @@ impl Default for RenderSettings {
             white_balance: 0.0,
             max_point_lights: 256,
             debug_view: DebugView::None,
+            perf_log_secs: 10.0,
             environment_interval: 1,
             sky_cloud_layer: true,
             sky_occlusion: true,

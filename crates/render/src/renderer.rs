@@ -196,6 +196,8 @@ pub struct Renderer {
     volumetrics: crate::volumetrics::Volumetrics,
     /// Depth of field (before TAA) and motion blur (after it): camera components.
     lens: crate::lens::LensEffects,
+    /// Frame timing and the `perf:` log line.
+    perf: crate::perf::PerfLog,
     previous: Option<PreviousView>,
     /// How far the camera moved the frame before (camera cut detection).
     prev_step: f64,
@@ -546,6 +548,7 @@ impl Renderer {
         let effects = ScreenEffects::new(&shared, &targets);
         let mut meter = crate::exposure::ExposureMeter::new(&shared);
         meter.set_source(&device, &targets.hdr.view);
+        let perf = crate::perf::PerfLog::new(&shared.device, &shared.queue);
 
         Ok(Self {
             instance: gpu.instance,
@@ -576,6 +579,7 @@ impl Renderer {
             meter,
             volumetrics,
             lens: Default::default(),
+            perf,
             previous: None,
             prev_step: 0.0,
             prev_aa: settings.anti_aliasing,
@@ -659,6 +663,8 @@ impl Renderer {
     /// Render one frame from the world's current state.
     pub fn render(&mut self, world: &mut World) {
         let started = Instant::now();
+        let mut cpu = crate::perf::CpuSteps::default();
+        cpu.step("frame setup");
 
         // Size & vsync.
         let (want_w, want_h) = world
@@ -692,6 +698,7 @@ impl Renderer {
         self.exposure.measured_ev100 = self.meter.measured_ev100;
 
         // View & uniforms.
+        cpu.step("view");
         // A pixel-perfect camera renders without temporal anti-aliasing: no jitter to blur its
         // texels, nothing between them to smooth.
         let anti_aliasing = if crate::frame::active_camera_is_pixel_perfect(world) {
@@ -743,11 +750,13 @@ impl Renderer {
                 world.get::<crate::MotionBlur>(e).copied(),
             )
         });
+        cpu.step("surface weather");
         let surface_resized = self.surface_weather.prepare(world, &self.shared, real_dt);
         (uniform.surface_map, uniform.surface_open) =
             self.surface_weather.frame_params(view.origin);
         // Screen-space reflections and bounce light need the previous frame's image of the same
         // view.
+        cpu.step("uniforms and lights");
         let previous =
             self.effects.has_previous() && view.history_valid && self.prev_exposure > 0.0;
         let ssr = settings.screen_space_reflections && previous;
@@ -785,9 +794,11 @@ impl Renderer {
                 .set_inputs(&self.shared, &self.frame_buffer, &self.shadow.occlusion);
         }
         let lights_moved = self.lights.write(&self.shared.device, queue, light_bytes);
+        cpu.step("volumetrics prepare");
         let fog_moved =
             self.volumetrics
                 .prepare(world, &self.shared, &view, &settings, uniform.volumetrics);
+        cpu.step("shadow views");
         if lights_moved || occlusion_resized || fog_moved || surface_resized {
             self.rebuild_frame_groups();
         }
@@ -833,8 +844,10 @@ impl Renderer {
 
         // Prepare features.
         for f in &mut self.features {
+            cpu.step(format!("prepare {}", f.name()));
             f.prepare(world, &self.shared, &view, &settings);
         }
+        cpu.step("cloud shadows");
 
         // Cloud shadows: the first feature that asks draws the map in `compute`. The frame
         // uniform written above has them off; turn them on now that the area is known.
@@ -870,6 +883,7 @@ impl Renderer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame"),
         });
+        self.perf.begin(&mut cpu, &mut encoder, "atmosphere");
         let ctx = FrameContext {
             gpu: &self.shared,
             frame_group: &self.frame_group,
@@ -903,6 +917,8 @@ impl Renderer {
                 },
                 _ => compute_ctx,
             };
+            self.perf
+                .pass(&mut cpu, &mut encoder, format!("compute {}", f.name()));
             f.compute(&mut encoder, &ctx);
         }
 
@@ -910,6 +926,7 @@ impl Renderer {
         // passes drawing it read last frame's filtered maps.
         let interval = settings.environment_interval.max(1) as u64;
         if !self.env_rendered || self.frame_index.is_multiple_of(interval) {
+            self.perf.pass(&mut cpu, &mut encoder, "environment");
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("environment"),
@@ -936,6 +953,7 @@ impl Renderer {
 
         // Shadows.
         if view.sun_shadows {
+            self.perf.pass(&mut cpu, &mut encoder, "shadows");
             for i in 0..(view.cascades.count as usize).min(MAX_CASCADES) {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("shadow cascade"),
@@ -979,6 +997,7 @@ impl Renderer {
 
         // Sky occlusion: the highest surface around the camera, seen from above. Cleared to
         // 1 (nothing) when disabled so stale data never darkens the sky light.
+        self.perf.pass(&mut cpu, &mut encoder, "sky occlusion");
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("sky occlusion"),
@@ -1003,6 +1022,7 @@ impl Renderer {
         self.sky_camera.encode(&mut encoder);
 
         // Depth prepass: depth, normals and motion of opaque geometry.
+        self.perf.pass(&mut cpu, &mut encoder, "prepass");
         {
             let clear = wgpu::Operations {
                 load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -1041,6 +1061,7 @@ impl Renderer {
             }
         }
         // Occlusion culling against that depth, then what it found visible after all.
+        self.perf.pass(&mut cpu, &mut encoder, "occlusion culling");
         let mut late = false;
         for f in self.features.iter_mut() {
             late |= f.after_prepass(&mut encoder, &self.targets.depth.view, &ctx);
@@ -1094,16 +1115,20 @@ impl Renderer {
         // Volumetric fog: needs the shadow cascades, the sky occlusion map, the sky light and
         // the prepass depth; shading reads it from frame binding 19 (a stand-in in the prepass
         // group).
+        self.perf.pass(&mut cpu, &mut encoder, "volumetric fog");
         self.volumetrics.encode(&mut encoder, &self.prepass_group);
         if settings.ambient_occlusion {
+            self.perf.pass(&mut cpu, &mut encoder, "ambient occlusion");
             self.effects
                 .encode_ao(&mut encoder, &self.targets, &self.prepass_group);
         }
         if ssr {
+            self.perf.pass(&mut cpu, &mut encoder, "reflections");
             self.effects
                 .encode_ssr(&mut encoder, &self.targets, &self.prepass_group);
         }
         if gi {
+            self.perf.pass(&mut cpu, &mut encoder, "bounce light");
             self.effects
                 .encode_gi(&mut encoder, &self.targets, &self.prepass_group);
         } else {
@@ -1111,6 +1136,7 @@ impl Renderer {
         }
 
         // Scene: opaque + sky (on the prepass depth).
+        self.perf.pass(&mut cpu, &mut encoder, "scene");
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
@@ -1156,6 +1182,7 @@ impl Renderer {
             depth_or_array_layers: 1,
         };
         if scene_copy || reactive > 0.0 {
+            self.perf.pass(&mut cpu, &mut encoder, "scene copies");
             encoder.copy_texture_to_texture(
                 self.targets.hdr.texture.as_image_copy(),
                 self.targets.color_copy.texture.as_image_copy(),
@@ -1171,6 +1198,7 @@ impl Renderer {
         }
 
         // Transparent.
+        self.perf.pass(&mut cpu, &mut encoder, "transparent");
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("transparent"),
@@ -1204,6 +1232,7 @@ impl Renderer {
         }
 
         // Depth of field, on the scene before TAA (see depth_of_field.rs).
+        self.perf.pass(&mut cpu, &mut encoder, "depth of field");
         self.lens.encode_depth_of_field(
             &self.shared,
             &self.targets,
@@ -1215,6 +1244,7 @@ impl Renderer {
 
         // Temporal anti-aliasing (writes the resolved image back into the HDR target). Either
         // way the finished image is kept for next frame's reflections and bounce light.
+        self.perf.pass(&mut cpu, &mut encoder, "anti-aliasing");
         if taa {
             self.effects.encode_taa(
                 &self.shared,
@@ -1230,6 +1260,7 @@ impl Renderer {
         self.prev_exposure = view.exposure;
 
         // Exposure metering of the finished HDR image.
+        self.perf.pass(&mut cpu, &mut encoder, "exposure meter");
         self.meter.encode(
             &self.shared.queue,
             &mut encoder,
@@ -1240,6 +1271,7 @@ impl Renderer {
 
         // Motion blur: on the anti-aliased, pre-exposed HDR image, before bloom and tonemapping
         // (see motion_blur.rs).
+        self.perf.pass(&mut cpu, &mut encoder, "motion blur");
         self.lens.encode_motion_blur(
             &self.shared,
             &self.targets,
@@ -1250,6 +1282,7 @@ impl Renderer {
         );
 
         // Bloom.
+        self.perf.pass(&mut cpu, &mut encoder, "bloom");
         let levels = self.targets.bloom.len();
         for i in 0..levels {
             let mut pass = fullscreen_pass(
@@ -1275,6 +1308,7 @@ impl Renderer {
         }
 
         // Tonemap.
+        self.perf.pass(&mut cpu, &mut encoder, "tonemap");
         {
             let mut pass = fullscreen_pass(&mut encoder, "tonemap", &self.targets.ldr.view, true);
             pass.set_pipeline(&self.post.tonemap_pipeline);
@@ -1288,10 +1322,13 @@ impl Renderer {
             ..ctx
         };
         for f in &mut self.features {
+            self.perf
+                .pass(&mut cpu, &mut encoder, format!("overlay {}", f.name()));
             f.overlay(&mut encoder, &ctx);
         }
 
         // Screenshot readback.
+        self.perf.pass(&mut cpu, &mut encoder, "screenshot copy");
         let pending: Vec<PathBuf> = world
             .get_resource_mut::<Screenshots>()
             .map(|mut s| std::mem::take(&mut s.pending))
@@ -1305,8 +1342,13 @@ impl Renderer {
         // Present.
         let mut surface_texture = None;
         let mut reconfigure = false;
+        let mut acquire_ms = 0.0;
         if let Some(surface) = &self.surface {
-            let acquired = match surface.surface.get_current_texture() {
+            cpu.step("acquire window image");
+            let acquiring = Instant::now();
+            let current = surface.surface.get_current_texture();
+            acquire_ms = acquiring.elapsed().as_secs_f32() * 1000.0;
+            let acquired = match current {
                 wgpu::CurrentSurfaceTexture::Success(t) => Some(t),
                 wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
                     reconfigure = true;
@@ -1319,6 +1361,7 @@ impl Renderer {
                 _ => None,
             };
             if let (Some(t), Some(pipeline)) = (acquired, &self.post.blit_pipeline) {
+                self.perf.pass(&mut cpu, &mut encoder, "window blit");
                 let view = t.texture.create_view(&wgpu::TextureViewDescriptor {
                     format: Some(surface.view_format),
                     ..Default::default()
@@ -1333,11 +1376,16 @@ impl Renderer {
             }
         }
 
+        self.perf.end(&mut encoder);
+        cpu.step("stats");
         let mut stats = self.collect_stats(&view, started);
+        cpu.step("submit");
         self.shared.queue.submit([encoder.finish()]);
         self.meter.after_submit();
+        self.perf.after_submit();
         self.lens.after_submit();
         if let Some(t) = surface_texture {
+            cpu.step("present");
             self.shared.queue.present(t);
         }
         if reconfigure && let Some(s) = &mut self.surface {
@@ -1346,6 +1394,7 @@ impl Renderer {
         }
 
         if let Some((buffer, padded_row)) = readback {
+            cpu.step("screenshot save");
             let results = save_readback(
                 &self.shared.device,
                 &buffer,
@@ -1364,6 +1413,7 @@ impl Renderer {
 
         // Free the CPU pixels of images that have been on the GPU unchanged for a while (when
         // `release_image_pixels` is on), and drop images nobody draws any more.
+        cpu.step("release images");
         if let Some(mut images) = world.get_resource_mut::<Assets<Image>>()
             && self
                 .shared
@@ -1377,8 +1427,24 @@ impl Renderer {
         stats.images_released = image_stats.released;
         stats.image_bytes_released = image_stats.bytes_released;
 
+        self.perf.frame(
+            &self.shared.device,
+            &stats,
+            acquire_ms,
+            cpu,
+            settings.perf_log_secs,
+        );
         if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+            self.perf.publish(&mut d);
             d.set("render.cpu_ms", stats.cpu_ms as f64);
+            d.set("render.frame_ms", self.perf.frame_ms as f64);
+            d.set("render.acquire_ms", self.perf.acquire_ms as f64);
+            if let Some(ms) = self.perf.gpu_ms {
+                d.set("render.gpu_ms", ms as f64);
+            }
+            if let Some(mb) = self.perf.gpu_memory_mb {
+                d.set("render.gpu_memory_mb", mb as f64);
+            }
             d.set("render.draw_calls", stats.draw_calls as f64);
             d.set("render.instances", stats.instances as f64);
             d.set("render.triangles", stats.triangles as f64);
