@@ -155,7 +155,13 @@ pub struct GroundCache {
     complete: bool,
     /// Where the slow re-check of known cells continues.
     sweep: usize,
-    accumulated_s: f32,
+    /// Seconds since each band of rows was last updated.
+    band_age: [f32; GROUND_BANDS],
+    /// The band updated next.
+    next_band: usize,
+    /// Bands and raycasts owed to the update rate, carried between ticks.
+    band_credit: f32,
+    ray_credit: f32,
     /// Cells covered by a [`WeatherShelter`] this update.
     sheltered: Vec<bool>,
 }
@@ -168,7 +174,10 @@ impl Default for GroundCache {
             cursor: 0,
             complete: false,
             sweep: 0,
-            accumulated_s: 0.0,
+            band_age: [0.0; GROUND_BANDS],
+            next_band: 0,
+            band_credit: 0.0,
+            ray_credit: 0.0,
             sheltered: Vec::new(),
         }
     }
@@ -297,6 +306,18 @@ pub fn update_cells(
     params: &GroundWeather,
     input: &GroundInputs,
 ) {
+    let rows = surface.grid.height as usize;
+    update_rows(surface, cache, params, input, 0..rows);
+}
+
+/// Update rows `rows` of `surface` for `dt` seconds of weather.
+pub fn update_rows(
+    surface: &mut SurfaceLayers,
+    cache: &GroundCache,
+    params: &GroundWeather,
+    input: &GroundInputs,
+    rows: std::ops::Range<usize>,
+) {
     let w = input.weather;
     let dt_h = input.dt * params.time_scale / 3600.0;
     if dt_h <= 0.0 {
@@ -329,9 +350,15 @@ pub fn update_cells(
     let infiltration = params.infiltration_mm_h;
     let share = params.puddle_share.max(0.05);
 
-    engine_core::tasks::par_chunks_mut(&mut grid.data, width * 16, |chunk_index, rows| {
-        for (i, cell) in rows.iter_mut().enumerate() {
-            let index = chunk_index * width * 16 + i;
+    let first = rows.start * width;
+    let end = (rows.end * width).min(grid.data.len());
+    if first >= end {
+        return;
+    }
+    let chunk = width * 4;
+    engine_core::tasks::par_chunks_mut(&mut grid.data[first..end], chunk, |chunk_index, cells| {
+        for (i, cell) in cells.iter_mut().enumerate() {
+            let index = first + chunk_index * chunk + i;
             let info = infos.get(index).copied().unwrap_or_default();
             let exposure = if sheltered.get(index).copied().unwrap_or(false) {
                 0.0
@@ -394,6 +421,9 @@ pub fn update_cells(
     });
 }
 
+/// Bands of rows the ground update takes in turn, one or a few per tick.
+const GROUND_BANDS: usize = 32;
+
 /// Roofs higher than this above the ground don't keep rain off it (m).
 const ROOF_SEARCH_M: f32 = 120.0;
 /// Colliders this close above the ground's height are the ground itself (m): the physics
@@ -443,7 +473,6 @@ pub fn refresh_cache(
             cache.cursor = (cache.cursor + 1) % n;
             scanned += 1;
             if !cache.cells.data[index].known {
-                look.cell(cache, index);
                 looked.push(index);
                 budget -= 1;
             }
@@ -451,14 +480,31 @@ pub fn refresh_cache(
         cache.complete = scanned == n;
     }
     for _ in 0..(rays / 32).max(1).min(budget) {
-        let index = cache.order[cache.sweep] as usize;
+        looked.push(cache.order[cache.sweep] as usize);
         cache.sweep = (cache.sweep + 1) % n;
-        look.cell(cache, index);
-        looked.push(index);
     }
-    for index in looked {
-        update_dips_around(cache, index, sim);
+    looked.sort_unstable();
+    looked.dedup();
+    look_at(cache, &look, &looked);
+}
+
+/// Look at cells `indices` on all cores (each is a raycast and a ground sample), then
+/// recompute the dips their new heights touch. Done one cell at a time, a ground update
+/// cost a quarter second of the frame while the player moved, mostly in recomputing the
+/// same neighbors' dips dozens of times over.
+fn look_at(cache: &mut GroundCache, look: &LookUp, indices: &[usize]) {
+    let mut found: Vec<(usize, CellInfo)> =
+        indices.iter().map(|&i| (i, CellInfo::default())).collect();
+    let cells = &cache.cells;
+    engine_core::tasks::par_chunks_mut(&mut found, 128, |_, chunk| {
+        for (index, info) in chunk {
+            *info = look.facts(cells, *index);
+        }
+    });
+    for &(index, info) in &found {
+        cache.cells.data[index] = info;
     }
+    update_dips(cache, indices, look.sim);
 }
 
 /// Look at the ground within `radius_m` of the player now, for changes that apply at once
@@ -504,18 +550,8 @@ pub(crate) fn prepare(world: &mut World, radius_m: f64) {
             }
         }
         // Tens of thousands of cells after a teleport: look at them on all cores.
-        let cells = &cache.cells;
-        engine_core::tasks::par_chunks_mut(&mut found, 512, |_, chunk| {
-            for (index, info) in chunk {
-                *info = look.facts(cells, *index);
-            }
-        });
-        for &(index, info) in &found {
-            cache.cells.data[index] = info;
-        }
-        for &(index, _) in &found {
-            update_dips_around(cache, index, sim);
-        }
+        let indices: Vec<usize> = found.iter().map(|&(index, _)| index).collect();
+        look_at(cache, &look, &indices);
         stamp(
             cache,
             shelters.iter().map(|(p, s)| (*p, s)),
@@ -535,10 +571,6 @@ struct LookUp<'a> {
 }
 
 impl LookUp<'_> {
-    fn cell(&self, cache: &mut GroundCache, index: usize) {
-        cache.cells.data[index] = self.facts(&cache.cells, index);
-    }
-
     /// What the ground at cell `index` of `cells` is like.
     fn facts(&self, cells: &Grid2<CellInfo>, index: usize) -> CellInfo {
         let w = cells.width;
@@ -584,22 +616,37 @@ impl LookUp<'_> {
     }
 }
 
-/// Recompute the dips of the cells whose hollow rings reach cell `index` (its height is new).
-fn update_dips_around(cache: &mut GroundCache, index: usize, sim: &WeatherSim) {
+/// Recompute the dips of the known cells whose hollow rings reach any of cells `changed`
+/// (their heights are new), each once, on all cores.
+fn update_dips(cache: &mut GroundCache, changed: &[usize], sim: &WeatherSim) {
     let (axis, diagonal) = hollow_rings(cache.cells.cell);
     let reach = axis.max(diagonal);
-    let w = cache.cells.width;
-    let c = IVec2::new((index as u32 % w) as i32, (index as u32 / w) as i32);
-    for y in -reach..=reach {
-        for x in -reach..=reach {
-            let n = c + IVec2::new(x, y);
-            if let Some(i) = cache.cells.index(n)
-                && cache.cells.data[i].known
-            {
-                let dip = hollow_dip(&cache.cells, n, sim);
-                cache.cells.data[i].dip = dip;
+    let cells = &cache.cells;
+    let w = cells.width;
+    let mut touched = vec![false; cells.data.len()];
+    let mut targets: Vec<(usize, f32)> = Vec::new();
+    for &index in changed {
+        let c = IVec2::new((index as u32 % w) as i32, (index as u32 / w) as i32);
+        for y in -reach..=reach {
+            for x in -reach..=reach {
+                if let Some(i) = cells.index(c + IVec2::new(x, y))
+                    && !touched[i]
+                    && cells.data[i].known
+                {
+                    touched[i] = true;
+                    targets.push((i, 0.0));
+                }
             }
         }
+    }
+    engine_core::tasks::par_chunks_mut(&mut targets, 256, |_, chunk| {
+        for (i, dip) in chunk {
+            let c = IVec2::new((*i as u32 % w) as i32, (*i as u32 / w) as i32);
+            *dip = hollow_dip(cells, c, sim);
+        }
+    });
+    for (i, dip) in targets {
+        cache.cells.data[i].dip = dip;
     }
 }
 
@@ -656,20 +703,33 @@ pub(crate) fn ground_system(
     mut cache: ResMut<GroundCache>,
     mut surface: ResMut<SurfaceLayers>,
 ) {
-    cache.accumulated_s += time.delta_secs();
-    let interval = 1.0 / params.rate_hz.max(0.1);
-    if cache.accumulated_s < interval {
+    // The work is spread over the ticks: each updates a band of rows (every band
+    // `rate_hz` times a second) and casts its share of the roof rays. Updating the whole
+    // grid at once took tens of milliseconds and, on a busy PC, a quarter second: a hitch
+    // every update, and a slide show once frames were slow enough for it to run every frame.
+    let tick = time.delta_secs();
+    let rate = params.rate_hz.max(0.1);
+    for age in &mut cache.band_age {
+        *age += tick;
+    }
+    cache.band_credit =
+        (cache.band_credit + GROUND_BANDS as f32 * rate * tick).min(GROUND_BANDS as f32);
+    cache.ray_credit = (cache.ray_credit + params.shelter_rays as f32 * rate * tick)
+        .min(params.shelter_rays as f32);
+    let bands = cache.band_credit.floor() as usize;
+    if bands == 0 {
         return;
     }
-    let dt = cache.accumulated_s;
-    cache.accumulated_s = 0.0;
+    cache.band_credit -= bands as f32;
+    let rays = cache.ray_credit.floor() as u32;
+    cache.ray_credit -= rays as f32;
 
     if let Some(old) = cache.align(&surface.grid) {
         seed_uncovered(&mut surface.grid, &cache, old);
     }
     refresh_cache(
         &mut cache,
-        params.shelter_rays,
+        rays,
         &ground,
         physics.as_deref(),
         &materials,
@@ -682,16 +742,24 @@ pub(crate) fn ground_system(
         patches.iter().map(|(gt, p)| (gt.translation(), p)),
         &sim,
     );
-    update_cells(
-        &mut surface,
-        &cache,
-        &params,
-        &GroundInputs {
-            weather: &weather,
-            heat: heat.as_deref(),
-            dt,
-        },
-    );
+    let height = surface.grid.height as usize;
+    let band_rows = height.div_ceil(GROUND_BANDS);
+    for _ in 0..bands {
+        let band = cache.next_band;
+        cache.next_band = (band + 1) % GROUND_BANDS;
+        let dt = std::mem::take(&mut cache.band_age[band]);
+        update_rows(
+            &mut surface,
+            &cache,
+            &params,
+            &GroundInputs {
+                weather: &weather,
+                heat: heat.as_deref(),
+                dt,
+            },
+            band * band_rows..((band + 1) * band_rows).min(height),
+        );
+    }
 }
 
 /// Mark the ground under shelters and stamp the ground patches into the cache.
