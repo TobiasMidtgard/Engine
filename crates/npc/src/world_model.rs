@@ -7,9 +7,11 @@
 //! query so hills block sight too. The model rebuilds itself when static colliders appear,
 //! change, move or disappear, and when terrain is edited.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use engine_core::prelude::*;
+use engine_core::tasks::AsyncComputeTaskPool;
 use engine_world::physics::{
     BodyKind, CharacterController, Collider, ColliderShape, PhysicsBackend, PhysicsQueries,
     QueryFilter, RigidBody,
@@ -20,6 +22,12 @@ use engine_world::{Ground, Obscurance, TerrainChanged, WorldShift};
 const HASH_CELL: f64 = 8.0;
 /// Obstacles wider than this go in a list that every query checks instead of the hash.
 const BIG_OBSTACLE: f64 = 256.0;
+/// How far an obstacle's cover reaches past its bounds: points stand up to 0.6 m out and are
+/// checked against obstacles within a body's radius of them. A change refreshes the cover of
+/// every obstacle this close to it.
+const COVER_REACH: f64 = 2.0;
+/// Regional changes kept for navigation, which drops only the chunks they touch.
+const CHANGE_LOG: usize = 64;
 
 /// Shape of an obstacle in its local frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -281,11 +289,17 @@ pub struct TacticalWorld {
     hash: HashMap<(i64, i64), Vec<u32>>,
     big: Vec<u32>,
     cover_hash: HashMap<(i64, i64), Vec<u32>>,
-    /// Bumped on every rebuild and world shift (navigation caches compare it).
+    /// Bumped on every rebuild, update and world shift (navigation caches compare it).
     pub generation: u64,
     fingerprint: u64,
     /// Rebuild from the colliders on the next step even if they look unchanged.
     rebuild: bool,
+    /// Fingerprint of each collider entity's obstacles, to tell which ones changed.
+    per_entity: HashMap<Entity, u64>,
+    /// What each recent generation changed: the XZ box it touched, or `None` for everything.
+    changes: VecDeque<(u64, Option<(DVec2, DVec2)>)>,
+    /// Bumped by every world shift, so a build started in an older frame is thrown away.
+    epoch: u64,
 }
 
 fn hash_key(x: f64, z: f64) -> (i64, i64) {
@@ -304,7 +318,107 @@ impl TacticalWorld {
         };
         world.index();
         world.generate_cover(ground);
+        world.per_entity = entity_fingerprints(&world.obstacles);
+        world.fingerprint = fingerprint(&world.obstacles);
         world
+    }
+
+    /// Replace the obstacles of the `replaced` entities with `fresh` (all of their obstacles
+    /// now; an entity with none is gone) and refresh cover only near what changed and inside
+    /// `regions` (XZ boxes where the ground changed). Much cheaper than a rebuild in a big
+    /// world, and the result is the same apart from the order of cover points.
+    pub fn update(
+        &mut self,
+        replaced: &HashSet<Entity>,
+        fresh: Vec<Obstacle>,
+        regions: &[(DVec2, DVec2)],
+        ground: &Ground,
+    ) {
+        let mut dirty: Vec<(DVec2, DVec2)> = regions.to_vec();
+        let footprint = |o: &Obstacle| (DVec2::new(o.min.x, o.min.z), DVec2::new(o.max.x, o.max.z));
+        let mut map = vec![u32::MAX; self.obstacles.len()];
+        let mut kept = Vec::with_capacity(self.obstacles.len() + fresh.len());
+        for (i, o) in self.obstacles.drain(..).enumerate() {
+            if replaced.contains(&o.entity) {
+                dirty.push(footprint(&o));
+            } else {
+                map[i] = kept.len() as u32;
+                kept.push(o);
+            }
+        }
+        dirty.extend(fresh.iter().map(footprint));
+        for e in replaced {
+            self.per_entity.remove(e);
+        }
+        self.per_entity.extend(entity_fingerprints(&fresh));
+        kept.extend(fresh);
+        self.obstacles = kept;
+        self.index();
+
+        // Cover: keep the points of obstacles far from every change, make the rest afresh.
+        let reach = DVec2::splat(COVER_REACH);
+        let dirty: Vec<(DVec2, DVec2)> = dirty
+            .into_iter()
+            .map(|(a, b)| (a - reach, b + reach))
+            .collect();
+        let mut affected = vec![false; self.obstacles.len()];
+        let mut near = Vec::new();
+        for &(min, max) in &dirty {
+            self.obstacles_near(min, max, &mut near);
+            for &i in &near {
+                let o = &self.obstacles[i as usize];
+                if o.max.x >= min.x && o.min.x <= max.x && o.max.z >= min.y && o.min.z <= max.y {
+                    affected[i as usize] = true;
+                }
+            }
+        }
+        let mut cover = std::mem::take(&mut self.cover);
+        cover.retain_mut(|c| {
+            let Some(&i) = map.get(c.obstacle as usize).filter(|&&i| i != u32::MAX) else {
+                return false;
+            };
+            c.obstacle = i;
+            !affected[i as usize]
+        });
+        let mut points = Vec::new();
+        for (oi, hit) in affected.iter().enumerate() {
+            if *hit {
+                self.cover_for(oi, ground, &mut points, &mut cover);
+            }
+        }
+        self.cover = cover;
+        self.index_cover();
+        self.fingerprint = fingerprint(&self.obstacles);
+        self.generation += 1;
+        let touched = dirty
+            .into_iter()
+            .reduce(|(a0, a1), (b0, b1)| (a0.min(b0), a1.max(b1)));
+        self.log_change(Some(touched.unwrap_or_default()));
+    }
+
+    fn log_change(&mut self, region: Option<(DVec2, DVec2)>) {
+        if self.changes.len() == CHANGE_LOG {
+            self.changes.pop_front();
+        }
+        self.changes.push_back((self.generation, region));
+    }
+
+    /// The XZ boxes changed since `generation`, or `None` if that isn't known (a rebuild, a
+    /// world shift, or too long ago): then everything may have changed.
+    pub fn changes_since(
+        &self,
+        generation: u64,
+    ) -> Option<impl Iterator<Item = (DVec2, DVec2)> + '_> {
+        let first = self.changes.front().map_or(self.generation + 1, |c| c.0);
+        if generation > self.generation || (generation < self.generation && first > generation + 1)
+        {
+            return None;
+        }
+        let recent = self.changes.iter().filter(move |c| c.0 > generation);
+        if recent.clone().any(|c| c.1.is_none()) {
+            return None;
+        }
+        Some(recent.filter_map(|c| c.1))
     }
 
     /// Move the model into a new reference frame (see `WorldShift`): obstacles, cover points
@@ -313,7 +427,8 @@ impl TacticalWorld {
     /// step, since cover and walkable tops depend on which way is up.
     pub(crate) fn shift(&mut self, s: &WorldShift) {
         if self.generation == 0 {
-            return; // not built yet: the first build happens in the new frame
+            self.epoch += 1; // not built yet: the first build happens in the new frame
+            return;
         }
         for o in &mut self.obstacles {
             *o = Obstacle::new(
@@ -330,6 +445,8 @@ impl TacticalWorld {
         self.index();
         self.index_cover();
         self.generation += 1;
+        self.epoch += 1;
+        self.log_change(None);
         self.fingerprint = fingerprint(&self.obstacles);
         self.rebuild |= !s.is_translation_only();
     }
@@ -509,80 +626,91 @@ impl TacticalWorld {
     }
 
     fn generate_cover(&mut self, ground: &Ground) {
-        self.cover.clear();
+        let mut cover = Vec::new();
+        let mut points = Vec::new();
+        for oi in 0..self.obstacles.len() {
+            self.cover_for(oi, ground, &mut points, &mut cover);
+        }
+        self.cover = cover;
+        self.index_cover();
+    }
+
+    /// Add the cover points along obstacle `oi` to `out` (`points` is scratch).
+    fn cover_for(
+        &self,
+        oi: usize,
+        ground: &Ground,
+        points: &mut Vec<(DVec3, Vec3, bool, u32)>,
+        out: &mut Vec<CoverPoint>,
+    ) {
         const AGENT: f32 = 0.45;
         const SPACING: f32 = 1.3;
-        let mut points = Vec::new();
-        for (oi, o) in self.obstacles.iter().enumerate() {
-            if !o.upright() || o.max.x - o.min.x > BIG_OBSTACLE {
-                continue;
-            }
-            let base = ground
-                .height(DVec3::new(o.center.x, o.max.y, o.center.z))
-                .unwrap_or(0.0);
-            if o.min.y > base + 0.6 {
-                continue; // floating: a roof or a bridge, not cover
-            }
-            let tall = (o.max.y - base) as f32;
-            if tall < 0.85 {
-                continue;
-            }
-            let height = if tall < 1.5 {
-                CoverHeight::Low
-            } else {
-                CoverHeight::High
-            };
-            match o.shape {
-                ObstacleShape::Box { half } => {
-                    for (axis, half_n, half_t) in [
-                        (Vec3::X, half.x, half.z),
-                        (Vec3::NEG_X, half.x, half.z),
-                        (Vec3::Z, half.z, half.x),
-                        (Vec3::NEG_Z, half.z, half.x),
-                    ] {
-                        let n = flatten(o.rotation * axis);
-                        let t = Vec3::new(-n.z, 0.0, n.x);
-                        let count = ((2.0 * half_t) / SPACING).floor().max(1.0) as i32;
-                        for k in 0..count {
-                            let s = if count == 1 {
-                                0.0
-                            } else {
-                                -half_t
-                                    + 0.35
-                                    + (2.0 * half_t - 0.7) * k as f32 / (count - 1) as f32
-                            };
-                            let edge = count > 1 && (k == 0 || k == count - 1);
-                            let p = o.center + (n * (half_n + AGENT + 0.15) + t * s).as_dvec3();
-                            points.push((p, n, edge, oi as u32));
-                        }
-                    }
-                }
-                ObstacleShape::Cylinder { radius, .. } | ObstacleShape::Sphere { radius } => {
-                    let count = ((TAU * radius) / SPACING).ceil().clamp(4.0, 16.0) as i32;
+        let o = &self.obstacles[oi];
+        if !o.upright() || o.max.x - o.min.x > BIG_OBSTACLE {
+            return;
+        }
+        let base = ground
+            .height(DVec3::new(o.center.x, o.max.y, o.center.z))
+            .unwrap_or(0.0);
+        if o.min.y > base + 0.6 {
+            return; // floating: a roof or a bridge, not cover
+        }
+        let tall = (o.max.y - base) as f32;
+        if tall < 0.85 {
+            return;
+        }
+        let height = if tall < 1.5 {
+            CoverHeight::Low
+        } else {
+            CoverHeight::High
+        };
+        match o.shape {
+            ObstacleShape::Box { half } => {
+                for (axis, half_n, half_t) in [
+                    (Vec3::X, half.x, half.z),
+                    (Vec3::NEG_X, half.x, half.z),
+                    (Vec3::Z, half.z, half.x),
+                    (Vec3::NEG_Z, half.z, half.x),
+                ] {
+                    let n = flatten(o.rotation * axis);
+                    let t = Vec3::new(-n.z, 0.0, n.x);
+                    let count = ((2.0 * half_t) / SPACING).floor().max(1.0) as i32;
                     for k in 0..count {
-                        let a = k as f32 / count as f32 * TAU;
-                        let n = Vec3::new(a.cos(), 0.0, a.sin());
-                        let p = o.center + (n * (radius + AGENT + 0.15)).as_dvec3();
-                        points.push((p, n, height == CoverHeight::High, oi as u32));
+                        let s = if count == 1 {
+                            0.0
+                        } else {
+                            -half_t + 0.35 + (2.0 * half_t - 0.7) * k as f32 / (count - 1) as f32
+                        };
+                        let edge = count > 1 && (k == 0 || k == count - 1);
+                        let p = o.center + (n * (half_n + AGENT + 0.15) + t * s).as_dvec3();
+                        points.push((p, n, edge, oi as u32));
                     }
                 }
             }
-            for (p, n, edge, oi) in points.drain(..) {
-                let feet = self.surface_height(p, base, 0.4, ground);
-                let at = DVec3::new(p.x, feet, p.z);
-                if self.blocked_at(at, AGENT, 1.6, Some(oi)) {
-                    continue;
+            ObstacleShape::Cylinder { radius, .. } | ObstacleShape::Sphere { radius } => {
+                let count = ((TAU * radius) / SPACING).ceil().clamp(4.0, 16.0) as i32;
+                for k in 0..count {
+                    let a = k as f32 / count as f32 * TAU;
+                    let n = Vec3::new(a.cos(), 0.0, a.sin());
+                    let p = o.center + (n * (radius + AGENT + 0.15)).as_dvec3();
+                    points.push((p, n, height == CoverHeight::High, oi as u32));
                 }
-                self.cover.push(CoverPoint {
-                    position: at,
-                    normal: n,
-                    height,
-                    edge,
-                    obstacle: oi,
-                });
             }
         }
-        self.index_cover();
+        for (p, n, edge, oi) in points.drain(..) {
+            let feet = self.surface_height(p, base, 0.4, ground);
+            let at = DVec3::new(p.x, feet, p.z);
+            if self.blocked_at(at, AGENT, 1.6, Some(oi)) {
+                continue;
+            }
+            out.push(CoverPoint {
+                position: at,
+                normal: n,
+                height,
+                edge,
+                obstacle: oi,
+            });
+        }
     }
 
     fn index_cover(&mut self) {
@@ -769,11 +897,17 @@ impl Sight<'_> {
 pub struct WorldModelSettings {
     /// Seconds between checks for moved static colliders.
     pub poll_secs: f32,
+    /// A rebuild of more obstacles than this runs on the async task pool, and the old model
+    /// stays in use until it is ready, so a big world never stalls a step.
+    pub async_above: usize,
 }
 
 impl Default for WorldModelSettings {
     fn default() -> Self {
-        Self { poll_secs: 1.0 }
+        Self {
+            poll_secs: 1.0,
+            async_above: 1500,
+        }
     }
 }
 
@@ -793,23 +927,42 @@ pub(crate) fn collect_obstacles(
     bodies: &Query<&RigidBody>,
 ) -> Vec<Obstacle> {
     let mut out = Vec::new();
-    for (entity, collider, local, global, body, parent, character) in colliders.iter() {
-        if collider.sensor || character {
-            continue;
-        }
-        let dynamic = |b: Option<&RigidBody>| b.is_some_and(|b| b.kind != BodyKind::Static);
-        if dynamic(body) || dynamic(parent.and_then(|p| bodies.get(p.parent()).ok())) {
-            continue;
-        }
-        // Root entities: use the local transform (valid before transforms propagate).
-        let (pos, rot, scale) = if parent.is_some() {
-            (global.translation(), global.rotation(), global.scale())
-        } else {
-            (local.translation, local.rotation, local.scale)
-        };
-        push_shape(&mut out, entity, pos, rot, scale, &collider.shape);
+    for item in colliders.iter() {
+        push_collider(&mut out, item, bodies);
     }
     out
+}
+
+/// The obstacles of one static collider (none for sensors, characters, moving bodies and
+/// terrain-sized shapes).
+fn push_collider(
+    out: &mut Vec<Obstacle>,
+    item: (
+        Entity,
+        &Collider,
+        &Transform,
+        &GlobalTransform,
+        Option<&RigidBody>,
+        Option<&ChildOf>,
+        bool,
+    ),
+    bodies: &Query<&RigidBody>,
+) {
+    let (entity, collider, local, global, body, parent, character) = item;
+    if collider.sensor || character {
+        return;
+    }
+    let dynamic = |b: Option<&RigidBody>| b.is_some_and(|b| b.kind != BodyKind::Static);
+    if dynamic(body) || dynamic(parent.and_then(|p| bodies.get(p.parent()).ok())) {
+        return;
+    }
+    // Root entities: use the local transform (valid before transforms propagate).
+    let (pos, rot, scale) = if parent.is_some() {
+        (global.translation(), global.rotation(), global.scale())
+    } else {
+        (local.translation, local.rotation, local.scale)
+    };
+    push_shape(out, entity, pos, rot, scale, &collider.shape);
 }
 
 fn push_shape(
@@ -916,27 +1069,58 @@ fn bounds(points: impl Iterator<Item = Vec3>) -> Option<(Vec3, Vec3)> {
     })
 }
 
+fn obstacle_bits(o: &Obstacle) -> u64 {
+    let q = |v: f64| (v * 64.0) as i64 as u64;
+    o.entity.to_bits()
+        ^ q(o.center.x)
+        ^ q(o.center.y).rotate_left(21)
+        ^ q(o.center.z).rotate_left(42)
+        ^ (o.rotation.x.to_bits() as u64).rotate_left(7)
+        ^ (o.rotation.y.to_bits() as u64).rotate_left(29)
+        ^ q(o.max.x - o.min.x).rotate_left(13)
+        ^ q(o.max.y - o.min.y).rotate_left(35)
+        ^ q(o.max.z - o.min.z).rotate_left(51)
+}
+
 fn fingerprint(obstacles: &[Obstacle]) -> u64 {
     let mut h = obstacles.len() as u64;
     for o in obstacles {
-        h = hash_u64(
-            h ^ o.entity.to_bits()
-                ^ (o.center.x * 64.0) as i64 as u64
-                ^ ((o.center.y * 64.0) as i64 as u64).rotate_left(21)
-                ^ ((o.center.z * 64.0) as i64 as u64).rotate_left(42)
-                ^ (o.rotation.x.to_bits() as u64).rotate_left(7)
-                ^ (o.rotation.y.to_bits() as u64).rotate_left(29),
-        );
+        h = hash_u64(h ^ obstacle_bits(o));
     }
     h
 }
 
-/// Rebuilds [`TacticalWorld`] when static colliders change.
+/// A fingerprint of each entity's obstacles, in the order they come.
+fn entity_fingerprints(obstacles: &[Obstacle]) -> HashMap<Entity, u64> {
+    let mut out: HashMap<Entity, u64> = HashMap::new();
+    for o in obstacles {
+        let h = out.entry(o.entity).or_insert(1);
+        *h = hash_u64(*h ^ obstacle_bits(o));
+    }
+    out
+}
+
+/// A rebuild of the whole model running on the async task pool.
+#[derive(Default)]
+pub(crate) struct PendingBuild {
+    slot: Option<Arc<Mutex<Option<TacticalWorld>>>>,
+    /// `TacticalWorld::epoch` when its obstacles were collected.
+    epoch: u64,
+    /// Ground edits made while it builds, applied once it is in.
+    regions: Vec<(DVec2, DVec2)>,
+}
+
+/// Keeps [`TacticalWorld`] in step with the static colliders and the ground.
+///
+/// Only colliders that changed are looked at, and only the cover near them is made again,
+/// so streaming terrain tiles (which make no obstacles) and a door swinging somewhere cost
+/// next to nothing. A whole rebuild (the first one, or after the world turned) of a big
+/// world runs on the async task pool while the old model stays in use.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rebuild_world_model(
     mut model: ResMut<TacticalWorld>,
     colliders: Query<ColliderItem>,
-    changed: Query<(), Changed<Collider>>,
+    changed: Query<Entity, Changed<Collider>>,
     bodies: Query<&RigidBody>,
     mut removed: RemovedComponents<Collider>,
     mut terrain: MessageReader<TerrainChanged>,
@@ -944,25 +1128,108 @@ pub(crate) fn rebuild_world_model(
     settings: Res<WorldModelSettings>,
     time: Res<Time>,
     mut since_poll: Local<f32>,
+    mut pending: Local<PendingBuild>,
 ) {
-    let mut dirty = !changed.is_empty() || removed.read().count() > 0 || model.rebuild;
-    dirty |= terrain.read().count() > 0;
+    let mut regions: Vec<(DVec2, DVec2)> = terrain
+        .read()
+        .map(|t| {
+            let r = DVec2::splat(t.radius as f64);
+            let c = DVec2::new(t.center.x, t.center.z);
+            (c - r, c + r)
+        })
+        .collect();
+    let mut touched: HashSet<Entity> = changed.iter().chain(removed.read()).collect();
     *since_poll += time.real_delta_secs().max(time.delta_secs());
-    if !dirty && *since_poll < settings.poll_secs && model.generation > 0 {
+    let mut poll = *since_poll >= settings.poll_secs;
+
+    if let Some(slot) = pending.slot.clone() {
+        pending.regions.append(&mut regions);
+        let Some(mut built) = slot.lock().ok().and_then(|mut s| s.take()) else {
+            return; // still building: the old model serves meanwhile
+        };
+        pending.slot = None;
+        if pending.epoch != model.epoch {
+            model.rebuild = true; // the world shifted while it built: start again
+        } else {
+            built.generation = model.generation + 1;
+            built.epoch = model.epoch;
+            *model = built;
+            regions = std::mem::take(&mut pending.regions);
+            poll = true; // catch up with colliders that changed while it built
+        }
+    }
+
+    if model.generation == 0 || model.rebuild {
+        *since_poll = 0.0;
+        let obstacles = collect_obstacles(&colliders, &bodies);
+        let generation = model.generation + 1;
+        let epoch = model.epoch;
+        if obstacles.len() > settings.async_above
+            && let Some(pool) = AsyncComputeTaskPool::try_get()
+        {
+            model.rebuild = false;
+            let slot = Arc::new(Mutex::new(None));
+            let out = slot.clone();
+            let ground = ground.clone();
+            pool.spawn(async move {
+                let built = TacticalWorld::from_obstacles(obstacles, &ground);
+                if let Ok(mut out) = out.lock() {
+                    *out = Some(built);
+                }
+            })
+            .detach();
+            *pending = PendingBuild {
+                slot: Some(slot),
+                epoch,
+                regions,
+            };
+            return;
+        }
+        *model = TacticalWorld::from_obstacles(obstacles, &ground);
+        model.generation = generation;
+        model.epoch = epoch;
         return;
     }
-    let poll = *since_poll >= settings.poll_secs;
-    *since_poll = 0.0;
-    let obstacles = collect_obstacles(&colliders, &bodies);
-    let fp = fingerprint(&obstacles);
-    if !dirty && fp == model.fingerprint && model.generation > 0 {
+
+    let fresh = if poll {
+        // Every so often look at all of them, for static colliders moved without a change to
+        // the collider itself (a parent moved, a transform set by hand).
+        *since_poll = 0.0;
+        let all = collect_obstacles(&colliders, &bodies);
+        let now = entity_fingerprints(&all);
+        touched = now
+            .iter()
+            .filter(|&(e, fp)| model.per_entity.get(e) != Some(fp))
+            .map(|(e, _)| *e)
+            .chain(
+                model
+                    .per_entity
+                    .keys()
+                    .filter(|e| !now.contains_key(e))
+                    .copied(),
+            )
+            .collect();
+        all.into_iter()
+            .filter(|o| touched.contains(&o.entity))
+            .collect()
+    } else {
+        let mut fresh = Vec::new();
+        for &e in &touched {
+            if let Ok(item) = colliders.get(e) {
+                push_collider(&mut fresh, item, &bodies);
+            }
+        }
+        // Colliders that make no obstacle (terrain tiles, sensors) or the same ones as before
+        // change nothing.
+        let now = entity_fingerprints(&fresh);
+        touched.retain(|e| now.get(e) != model.per_entity.get(e));
+        fresh.retain(|o| touched.contains(&o.entity));
+        fresh
+    };
+    if touched.is_empty() && regions.is_empty() {
         return;
     }
-    let _ = poll;
-    let generation = model.generation + 1;
-    *model = TacticalWorld::from_obstacles(obstacles, &ground);
-    model.generation = generation;
-    model.fingerprint = fp;
+    model.update(&touched, fresh, &regions, &ground);
 }
 
 /// The physics queries, if a real backend is installed.
@@ -983,6 +1250,107 @@ mod tests {
 
     fn wall(center: DVec3, half: Vec3) -> Obstacle {
         Obstacle::new(e(1), center, Quat::IDENTITY, ObstacleShape::Box { half })
+    }
+
+    fn walls(n: u32) -> Vec<Obstacle> {
+        (0..n)
+            .map(|i| {
+                let (x, z) = ((i % 10) as f64 * 6.0, (i / 10) as f64 * 6.0);
+                Obstacle::new(
+                    e(i + 1),
+                    DVec3::new(x, 1.0, z),
+                    Quat::from_rotation_y(i as f32 * 0.3),
+                    ObstacleShape::Box {
+                        half: Vec3::new(1.5, 1.0, 0.3),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Cover points as sortable keys (the order differs between an update and a rebuild).
+    fn cover_keys(w: &TacticalWorld) -> Vec<(i64, i64, i64, bool, u64)> {
+        let mut keys: Vec<_> = w
+            .cover
+            .iter()
+            .map(|c| {
+                let q = |v: f64| (v * 1000.0).round() as i64;
+                let o = &w.obstacles[c.obstacle as usize];
+                (
+                    q(c.position.x),
+                    q(c.position.y),
+                    q(c.position.z),
+                    c.edge,
+                    o.entity.to_bits(),
+                )
+            })
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn an_update_matches_a_rebuild() {
+        let ground = Ground::default();
+        let mut all = walls(60);
+        let mut w = TacticalWorld::from_obstacles(all.clone(), &ground);
+        // Move one wall next to another, drop one and add a new one.
+        let moved = Obstacle::new(
+            e(12),
+            DVec3::new(13.0, 1.0, 7.5),
+            Quat::IDENTITY,
+            ObstacleShape::Box {
+                half: Vec3::new(1.5, 1.0, 0.3),
+            },
+        );
+        let added = Obstacle::new(
+            e(500),
+            DVec3::new(30.5, 1.0, 30.5),
+            Quat::IDENTITY,
+            ObstacleShape::Cylinder {
+                radius: 0.6,
+                half_height: 1.2,
+            },
+        );
+        let replaced: HashSet<Entity> = [e(12), e(40), e(500)].into();
+        w.update(&replaced, vec![moved, added], &[], &ground);
+        all.retain(|o| !replaced.contains(&o.entity));
+        all.extend([moved, added]);
+        let rebuilt = TacticalWorld::from_obstacles(all, &ground);
+        let mut a: Vec<u64> = w.obstacles.iter().map(obstacle_bits).collect();
+        let mut b: Vec<u64> = rebuilt.obstacles.iter().map(obstacle_bits).collect();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
+        assert_eq!(cover_keys(&w), cover_keys(&rebuilt));
+        assert_eq!(w.per_entity, rebuilt.per_entity);
+        for i in 0..w.cover.len() {
+            let mut near = Vec::new();
+            let c = &w.cover[i];
+            w.cover_near(c.position, 0.01, &mut near);
+            assert!(near.contains(&(i as u32)), "cover point {i} is indexed");
+        }
+    }
+
+    #[test]
+    fn navigation_learns_where_an_update_changed() {
+        let ground = Ground::default();
+        let mut w = TacticalWorld::from_obstacles(walls(20), &ground);
+        let built = w.generation;
+        assert!(
+            w.changes_since(built)
+                .is_some_and(|mut c| c.next().is_none())
+        );
+        w.update(&[e(3)].into(), Vec::new(), &[], &ground);
+        let boxes: Vec<_> = w.changes_since(built).unwrap().collect();
+        assert_eq!(boxes.len(), 1);
+        let (min, max) = boxes[0];
+        assert!(min.x <= 12.0 - 1.5 && max.x >= 12.0 + 1.5, "{boxes:?}");
+        assert!(max.x < 40.0, "only near the removed wall: {boxes:?}");
+        // A world shift (or a rebuild) changes everything.
+        w.shift(&WorldShift::translate(DVec3::new(10.0, 0.0, 0.0)));
+        assert!(w.changes_since(built).is_none());
+        assert!(w.changes_since(w.generation).is_some());
     }
 
     #[test]

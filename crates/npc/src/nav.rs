@@ -147,7 +147,22 @@ impl NavGrid {
         water: &'a Water,
     ) -> NavCtx<'a> {
         if self.generation != world.generation {
-            self.chunks.clear();
+            // Drop only the chunks near what changed, when the world model knows.
+            match world.changes_since(self.generation) {
+                Some(changes) => {
+                    let s = self.settings;
+                    let pad = (s.agent_radius + 2.0 * s.cell) as f64;
+                    let side = CHUNK as f64 * s.cell as f64;
+                    for (min, max) in changes {
+                        let (min, max) = (min - DVec2::splat(pad), max + DVec2::splat(pad));
+                        self.chunks.retain(|&(kx, kz), _| {
+                            let (x0, z0) = (kx as f64 * side, kz as f64 * side);
+                            x0 > max.x || x0 + side < min.x || z0 > max.y || z0 + side < min.y
+                        });
+                    }
+                }
+                None => self.chunks.clear(),
+            }
             self.generation = world.generation;
         }
         NavCtx {

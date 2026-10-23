@@ -315,7 +315,7 @@ pub(crate) struct Sightings {
 /// only what it holds.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pose_stand_ins(
-    mut owners: Query<PoseItem, Without<StandInPart>>,
+    mut owners: Query<PoseItem, (Without<StandInPart>, Without<crate::rest::Resting>)>,
     foes: Query<FoeItem, Without<StandInPart>>,
     mut parts: Query<(&StandInPart, &mut Transform, &mut MeshRenderer)>,
     mut attacks: MessageReader<AttackEvent>,

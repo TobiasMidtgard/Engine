@@ -850,7 +850,7 @@ pub(crate) fn animal_senses(
     mut hurts: MessageReader<DamageEvent>,
     positions: Query<&Transform>,
     packs: Query<&Herd>,
-    mut q: Query<SenseItem>,
+    mut q: Query<SenseItem, Without<crate::rest::Resting>>,
     mut heard: Local<Heard>,
 ) {
     let heard = &mut *heard;
@@ -1027,7 +1027,7 @@ type AnimalItem<'a> = (
 
 pub(crate) fn animal_think(
     mut w: AnimalWorld,
-    mut q: Query<AnimalItem>,
+    mut q: Query<AnimalItem, Without<crate::rest::Resting>>,
     mut noise: MessageWriter<NoiseEvent>,
     mut scratch: Local<AnimalScratch>,
     seeds: Query<&crate::seed::Seed>,

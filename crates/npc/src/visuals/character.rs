@@ -226,12 +226,15 @@ type BodyItem<'a> = (
     Option<&'a mut FaceControls>,
 );
 
+type BodyFilter = (
+    Without<Animal>,
+    Without<BodyRequest>,
+    Without<crate::rest::Resting>,
+);
+
 /// Write each fighter's `SkeletonPose` and `FaceControls` from its stand-in's pose (not where
 /// a `BodyRequest` has the animation module write the pose).
-pub(crate) fn write_bodies(
-    mut commands: Commands,
-    mut q: Query<BodyItem, (Without<Animal>, Without<BodyRequest>)>,
-) {
+pub(crate) fn write_bodies(mut commands: Commands, mut q: Query<BodyItem, BodyFilter>) {
     for (e, st, pose, face) in &mut q {
         let Some((s, x)) = st.motion.body() else {
             continue;

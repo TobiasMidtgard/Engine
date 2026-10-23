@@ -378,7 +378,7 @@ pub(crate) struct Heard {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn perceive(
-    mut q: Query<PerceiverItem>,
+    mut q: Query<PerceiverItem, Without<crate::rest::Resting>>,
     seen: Res<Perceivables>,
     factions: Res<Factions>,
     world: Res<TacticalWorld>,

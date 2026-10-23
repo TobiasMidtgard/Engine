@@ -114,7 +114,7 @@ pub(crate) fn fallback_move(
     world: Res<TacticalWorld>,
     ground: Res<Ground>,
     water: Res<Water>,
-    mut q: Query<MoverItem, Without<SelfPropelled>>,
+    mut q: Query<MoverItem, (Without<SelfPropelled>, Without<crate::rest::Resting>)>,
     mut contacts: MessageWriter<GroundContact>,
     mut events: MessageWriter<AnimationEvent>,
 ) {

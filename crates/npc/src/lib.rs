@@ -13,6 +13,7 @@ pub mod learning;
 pub mod locomotion;
 pub mod nav;
 pub mod perception;
+pub mod rest;
 pub mod seed;
 mod shift;
 pub mod skills;
@@ -158,6 +159,7 @@ impl Plugin for NpcPlugin {
                         visuals::character::request_appearances,
                         world_model::rebuild_world_model,
                         wildlife::init_animals,
+                        rest::rest_far_agents,
                         perception::tick_clocks,
                         perception::collect_perceivables,
                     )

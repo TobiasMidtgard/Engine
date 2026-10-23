@@ -137,7 +137,7 @@ pub(crate) struct Scratch {
 
 /// Think (every few tenths of a second) and act (every tick) for every NPC.
 pub(crate) fn think_and_act(
-    mut q: Query<BrainItem>,
+    mut q: Query<BrainItem, Without<crate::rest::Resting>>,
     mut w: BrainWorld,
     mut revives: ResMut<ReviveClaims>,
     mut scratch: Local<Scratch>,
