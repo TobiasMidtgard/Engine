@@ -466,8 +466,11 @@ instances under `min_object_pixels` are left out. Meshes whose coarsest level st
 triangles or more (leaf-card trees, ragged props) are baked once, on the GPU, from 12×12
 directions into an atlas layer (color, coverage, normal, depth) and drawn as one quad each once
 smaller than `impostor_pixels`, with the baked depth written so they sit in the ground; in the
-shadow maps the quad faces the sun. No component is needed: every module's instanced meshes get
-both. The far shadow cascades keep their image for a few frames (`shadow_cascade_reuse`).
+shadow maps the quad faces the sun. The atlas grows 8 layers at a time up to
+`impostor_atlas_layers` (128); when full, a new mesh takes the layer drawn longest ago (unused
+for 300 frames). Where GPU texture compression is on, each layer is baked into a scratch target
+and encoded to BC7 on the GPU (1.5 MB a layer instead of 6 MB); RGBA8 atlases stop at 32
+layers. No component is needed: every module's instanced meshes get both. The far shadow cascades keep their image for a few frames (`shadow_cascade_reuse`).
 
 **Virtual geometry** (built: cluster LOD and GPU-driven drawing; `crates/render/src/virtual_geometry`):
 dense opaque meshes (`RenderSettings::virtual_geometry_min_triangles`, 50 000 by default) are

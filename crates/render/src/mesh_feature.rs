@@ -61,7 +61,7 @@ use crate::material::{
 };
 use crate::material_library::{MaterialPreset, MaterialTextures};
 use crate::mesh::{Mesh, Vertex};
-use crate::settings::RenderSettings;
+use crate::settings::{RenderSettings, TextureCompression};
 use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use crate::texture::Image;
 use crate::virtual_geometry::{
@@ -1955,7 +1955,16 @@ impl RenderFeature for MeshFeature {
         // This frame's impostor bake (recorded in `compute`).
         let meshes = &self.meshes;
         if let Some(impostors) = &mut self.impostors {
-            impostors.schedule(gpu, |m| {
+            // BC7 where material images are compressed (decided with the first bake).
+            let compress = settings.texture_compression != TextureCompression::Off
+                && gpu
+                    .features
+                    .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+                && gpu.adapter_info.backend != wgpu::Backend::Gl
+                && (gpu.adapter_info.device_type != wgpu::DeviceType::Cpu
+                    || settings.texture_compression_on_cpu);
+            let budget = (settings.impostor_atlas_layers, compress);
+            impostors.schedule(gpu, budget, |m| {
                 meshes.get(&m).map_or((0.0, 1.0), |g| (g.min_y, g.height))
             });
         }
@@ -2199,6 +2208,7 @@ impl RenderFeature for MeshFeature {
             "shadow_batches": self.shadow.iter().map(|s| s.len()).collect::<Vec<_>>(),
             "far_shadow_batches": self.far_shadow.len(),
             "impostors": self.impostors.as_ref().map_or(0, Impostors::count),
+            "impostor_atlas_bc7": self.impostors.as_ref().is_some_and(Impostors::compressed),
             "impostors_in_view": self.impostor_view.1,
             "virtual_geometry": self.clusters.as_ref().map(ClusterRenderer::describe),
             "virtual_textures": self.vt.as_ref().map(VirtualTextureSystem::describe),

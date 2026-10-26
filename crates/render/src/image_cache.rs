@@ -660,6 +660,36 @@ impl ImageCache {
         released
     }
 
+    /// Run `f` with the GPU block encoders (for other parts of the renderer that compress, such as
+    /// the impostor atlas): `None` while they are still being built (this starts building them).
+    /// Tasks `f` adds must be compressed (`GpuBlockCompressor::compress`) before it returns.
+    pub(crate) fn with_compressor<R>(
+        &self,
+        gpu: &GpuShared,
+        f: impl FnOnce(&mut GpuBlockCompressor) -> R,
+    ) -> Option<R> {
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        if let Compressor::Building(rx) = &inner.compressor {
+            match rx.try_recv() {
+                Ok(c) => inner.compressor = Compressor::Ready(Box::new(c)),
+                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Disconnected) => {
+                    inner.compressor = Compressor::Failed;
+                    return None;
+                }
+            }
+        }
+        match &mut inner.compressor {
+            Compressor::Ready(c) => Some(f(c)),
+            Compressor::None => {
+                inner.start_compressor(gpu);
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// Current counters.
     pub fn stats(&self) -> ImageMemoryStats {
         let inner = self.lock();
@@ -727,44 +757,20 @@ impl Compressed {
     fn copy(&self, encoder: &mut wgpu::CommandEncoder) {
         for (level, &offset) in self.offsets.iter().enumerate() {
             let level = level as u32;
-            let w = (self.texture.width() >> level).max(1).div_ceil(4);
-            let h = (self.texture.height() >> level).max(1).div_ceil(4);
-            let row = w * self.block_bytes;
-            // Buffer rows must be 256-byte aligned to copy more than one at a time; levels whose
-            // rows aren't (narrow ones) go a block row per copy.
-            let rows: Vec<(u32, u32)> =
-                if row.is_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) || h == 1 {
-                    vec![(0, h)]
-                } else {
-                    (0..h).map(|y| (y, 1)).collect()
-                };
-            for (y, count) in rows {
-                encoder.copy_buffer_to_texture(
-                    wgpu::TexelCopyBufferInfo {
-                        buffer: &self.buffer,
-                        layout: wgpu::TexelCopyBufferLayout {
-                            offset: offset + (y * row) as u64,
-                            bytes_per_row: (count > 1).then_some(row),
-                            rows_per_image: (count > 1).then_some(count),
-                        },
-                    },
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.texture,
-                        mip_level: level,
-                        origin: wgpu::Origin3d {
-                            x: 0,
-                            y: y * 4,
-                            z: 0,
-                        },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::Extent3d {
-                        width: w * 4,
-                        height: count * 4,
-                        depth_or_array_layers: 1,
-                    },
-                );
-            }
+            let size = (
+                (self.texture.width() >> level).max(1),
+                (self.texture.height() >> level).max(1),
+            );
+            let at = (level, 0);
+            copy_blocks(
+                encoder,
+                &self.buffer,
+                offset,
+                &self.texture,
+                at,
+                size,
+                self.block_bytes,
+            );
         }
     }
 
@@ -785,6 +791,55 @@ impl Compressed {
             },
             texture: self.texture,
         }
+    }
+}
+
+/// Copy compressed blocks (rows in a row, tightly packed, from `offset` in `buffer`) into level
+/// and array layer `at` of `texture`, which is `size` texels there. Buffer rows must be 256-byte
+/// aligned to copy more than one at a time, so narrow levels go a block row per copy.
+pub(crate) fn copy_blocks(
+    encoder: &mut wgpu::CommandEncoder,
+    buffer: &wgpu::Buffer,
+    offset: u64,
+    texture: &wgpu::Texture,
+    (mip_level, layer): (u32, u32),
+    (width, height): (u32, u32),
+    block_bytes: u32,
+) {
+    let (w, h) = (width.div_ceil(4), height.div_ceil(4));
+    let row = w * block_bytes;
+    let rows: Vec<(u32, u32)> = if row.is_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) || h == 1
+    {
+        vec![(0, h)]
+    } else {
+        (0..h).map(|y| (y, 1)).collect()
+    };
+    for (y, count) in rows {
+        encoder.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo {
+                buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: offset + (y * row) as u64,
+                    bytes_per_row: (count > 1).then_some(row),
+                    rows_per_image: (count > 1).then_some(count),
+                },
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: y * 4,
+                    z: layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: w * 4,
+                height: count * 4,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 }
 

@@ -270,6 +270,11 @@ pub struct RenderSettings {
     /// trees, ragged props) are drawn as impostors, one baked quad each, once smaller than this
     /// many pixels on screen (or texels in a shadow map); see `impostor.rs`. 0 = never.
     pub impostor_pixels: f32,
+    /// Most meshes baked into the impostor atlas at once. A full atlas reuses the layer of the
+    /// mesh drawn as an impostor longest ago (once unseen for 300 frames). Layers are BC7 (1.5 MB
+    /// each) where textures are compressed (`texture_compression`); otherwise RGBA8 (6 MB each)
+    /// and at most 32.
+    pub impostor_atlas_layers: u32,
     /// The same for shadow maps, in shadow map texels (cascade texels are much larger than
     /// screen pixels, so shadows use coarser clusters than the camera). The default of 2 halves
     /// the shadow triangles of 1 with no visible change under the shadow filter.
@@ -374,6 +379,7 @@ impl Default for RenderSettings {
             mesh_lod_pixels: 1.0,
             min_object_pixels: 1.0,
             impostor_pixels: 96.0,
+            impostor_atlas_layers: 128,
             cluster_shadow_error_texels: 2.0,
             material_texture_size: 1024,
             release_image_pixels: true,

@@ -59,9 +59,16 @@ fn card_tree(seed: u32) -> Mesh {
     Mesh::new(vertices, indices)
 }
 
-/// Render the valley with impostors on or off: the triangles drawn, the impostors in view and
-/// the image's pixels.
-fn render(impostors: bool, shot: &str) -> Option<(u64, u64, Vec<u8>)> {
+/// Render the valley with impostors off, on, or on with a BC7 atlas (`Bc7`): the triangles
+/// drawn, the impostors in view and the image's pixels.
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Meshes,
+    Impostors,
+    Bc7,
+}
+
+fn render(mode: Mode, shot: &str) -> Option<(u64, u64, Vec<u8>)> {
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -75,8 +82,11 @@ fn render(impostors: bool, shot: &str) -> Option<(u64, u64, Vec<u8>)> {
         let mut s = app.world.resource_mut::<RenderSettings>();
         // Temporal anti-aliasing blends the impostors' neighboring views, as in a game.
         s.film_grain = 0.0;
-        if !impostors {
-            s.impostor_pixels = 0.0;
+        match mode {
+            Mode::Meshes => s.impostor_pixels = 0.0,
+            Mode::Impostors => s.texture_compression = TextureCompression::Off,
+            // Compressed atlas layers, also under a software GPU.
+            Mode::Bc7 => s.texture_compression_on_cpu = true,
         }
     }
     let w = &mut app.world;
@@ -119,12 +129,35 @@ fn render(impostors: bool, shot: &str) -> Option<(u64, u64, Vec<u8>)> {
             MeshRenderer::new(trees[(i % 3) as usize], leaves),
         ));
     }
+    let describe = |app: &App| {
+        let describe = app.world.resource::<Renderer>().describe();
+        describe["features"]
+            .as_array()
+            .and_then(|f| f.iter().find(|f| f["name"] == "meshes"))
+            .map(|f| f["state"].clone())
+            .unwrap_or_default()
+    };
     let mut last = (u64::MAX, u64::MAX);
     let start = std::time::Instant::now();
+    let mut frames = 0u64;
+    // The compressed atlas waits for the GPU encoders, which take a while to build under a
+    // software GPU: until the three trees are baked.
+    if mode == Mode::Bc7 {
+        while start.elapsed().as_secs() < 120 {
+            app.update_n(5);
+            frames += 5;
+            if app.world.get_resource::<RenderDisabled>().is_some()
+                || describe(&app)["impostors"].as_u64() >= Some(3)
+            {
+                break;
+            }
+        }
+    }
     // Until the levels are tried and the impostors baked (the counts stop changing).
     let mut steady = 0;
     while steady < 5 && start.elapsed().as_secs() < 120 {
         app.update();
+        frames += 1;
         if app.world.get_resource::<RenderDisabled>().is_some() {
             break;
         }
@@ -137,6 +170,15 @@ fn render(impostors: bool, shot: &str) -> Option<(u64, u64, Vec<u8>)> {
         eprintln!("skipping: no GPU ({})", d.0);
         return None;
     }
+    // Every run captures at the same point of the TAA jitter cycle and of the impostors' 64-frame
+    // dither noise, so near leaves land on the same sub-pixels and far trees pick the same tiles
+    // however long the bakes took.
+    const PERIOD: u64 = 64;
+    const _: () = assert!(PERIOD.is_multiple_of(engine_render::effects::JITTER_SAMPLES));
+    while !frames.is_multiple_of(PERIOD) {
+        app.update();
+        frames += 1;
+    }
     let dir = std::env::temp_dir().join("engine-impostors");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join(shot);
@@ -145,29 +187,56 @@ fn render(impostors: bool, shot: &str) -> Option<(u64, u64, Vec<u8>)> {
         let _ = std::fs::copy(&path, std::path::Path::new(&out).join(shot));
     }
     let image = image::open(&path).expect("read the shot").to_rgb8();
-    let describe = app.world.resource::<Renderer>().describe();
-    let in_view = describe["features"]
-        .as_array()
-        .and_then(|f| f.iter().find(|f| f["name"] == "meshes"))
-        .and_then(|f| f["state"]["impostors_in_view"].as_u64())
-        .unwrap_or(0);
+    let state = describe(&app);
+    let in_view = state["impostors_in_view"].as_u64().unwrap_or(0);
+    assert_eq!(
+        state["impostor_atlas_bc7"].as_bool(),
+        Some(mode == Mode::Bc7),
+        "atlas format: {state}"
+    );
     let tris = app.world.resource::<RenderStats>().triangles;
     Some((tris, in_view, image.into_raw()))
 }
 
 #[test]
 fn far_card_trees_become_impostors_and_look_the_same() {
-    let Some((full, _, before)) = render(false, "trees_meshes.png") else {
+    let Some((full, _, before)) = render(Mode::Meshes, "trees_meshes.png") else {
         return;
     };
-    let Some((fewer, impostors, after)) = render(true, "trees_impostors.png") else {
+    let Some((fewer, impostors, after)) = render(Mode::Impostors, "trees_impostors.png") else {
         return;
     };
     eprintln!("triangles: {full} as meshes, {fewer} with {impostors} impostors in view");
     assert!(impostors > 100, "{impostors} impostors in view");
     assert!(fewer * 2 < full, "{fewer} of {full} triangles");
-    // Compared over 4x4 pixel blocks: single leaves land a pixel apart (the impostor's view is
-    // the nearest baked one), the trees' shapes, colors, light and shadows must match.
+    let diff = difference(&before, &after);
+    eprintln!("mean difference over 4x4 blocks {diff:.2} of 255");
+    assert!(
+        diff < 3.5,
+        "the images differ by {diff:.2} of 255 on average"
+    );
+}
+
+#[test]
+fn a_bc7_atlas_looks_like_the_rgba8_one() {
+    let Some((_, _, meshes)) = render(Mode::Meshes, "trees_meshes_bc7_test.png") else {
+        return;
+    };
+    let Some((_, impostors, bc7)) = render(Mode::Bc7, "trees_impostors_bc7.png") else {
+        return;
+    };
+    assert!(impostors > 100, "{impostors} impostors in view");
+    let diff = difference(&meshes, &bc7);
+    eprintln!("BC7 atlas: mean difference over 4x4 blocks {diff:.2} of 255");
+    assert!(
+        diff < 3.5,
+        "the images differ by {diff:.2} of 255 on average"
+    );
+}
+
+/// Compared over 4x4 pixel blocks: single leaves land a pixel apart (the impostor's view is the
+/// nearest baked one), the trees' shapes, colors, light and shadows must match.
+fn difference(before: &[u8], after: &[u8]) -> f32 {
     let blocks = |image: &[u8]| {
         let mut out = vec![0f32; (W / 4 * (H / 4) * 3) as usize];
         for y in 0..H {
@@ -180,11 +249,6 @@ fn far_card_trees_become_impostors_and_look_the_same() {
         }
         out
     };
-    let (a, b) = (blocks(&before), blocks(&after));
-    let diff = a.iter().zip(&b).map(|(a, b)| (a - b).abs()).sum::<f32>() / a.len() as f32;
-    eprintln!("mean difference over 4x4 blocks {diff:.2} of 255");
-    assert!(
-        diff < 3.5,
-        "the images differ by {diff:.2} of 255 on average"
-    );
+    let (a, b) = (blocks(before), blocks(after));
+    a.iter().zip(&b).map(|(a, b)| (a - b).abs()).sum::<f32>() / a.len() as f32
 }

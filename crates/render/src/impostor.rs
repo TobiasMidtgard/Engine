@@ -12,13 +12,24 @@
 //!
 //! Which meshes: those whose coarsest level still has [`MIN_TRIANGLES`], once an instance is
 //! smaller on screen than `RenderSettings::impostor_pixels`; the most-drawn are baked first, one
-//! per frame, up to [`MAX_LAYERS`].
+//! per frame, up to `RenderSettings::impostor_atlas_layers`. A full atlas reuses the layer of the
+//! mesh drawn as an impostor longest ago, once it has gone unseen for [`EVICT_AFTER_FRAMES`]
+//! (least recently used, as virtual texture caches and Unreal's HLOD streaming do).
+//!
+//! Where textures are compressed (`RenderSettings::texture_compression`), the atlas is BC7, as
+//! Unreal's impostor baker and Amplify Impostors ship theirs: each bake renders into an RGBA8
+//! scratch pair and is compressed on the GPU into its layer (a quarter of the memory and of the
+//! bandwidth the far forest's thousands of quads read). Otherwise it is RGBA8 and holds at most
+//! [`MAX_RGBA8_LAYERS`].
 
 use std::collections::HashMap;
 
 use engine_core::prelude::*;
 
+use block_compression::{BC7Settings, CompressionVariant};
+
 use crate::features::GpuShared;
+use crate::image_cache::copy_blocks;
 use crate::mesh::Vertex;
 use crate::mesh_feature::MeshInstance;
 
@@ -28,9 +39,14 @@ pub(crate) const GRID: u32 = 12;
 const TILE: u32 = 72;
 const SIZE: u32 = GRID * TILE;
 const TILES: u32 = GRID * GRID;
-/// The atlas grows by this many layers at a time, up to `MAX_LAYERS` (6 MB each).
-const GROW: u32 = 4;
-pub(crate) const MAX_LAYERS: u32 = 32;
+/// The atlas grows by this many layers at a time.
+const GROW: u32 = 8;
+/// Most layers of an uncompressed atlas (6 MB each; BC7 layers are 1.5 MB).
+pub(crate) const MAX_RGBA8_LAYERS: u32 = 32;
+/// Room in the bounding sphere buffer: the most layers any atlas has.
+const MAX_LAYERS: u32 = 1024;
+/// A full atlas reuses a layer whose mesh hasn't been drawn as an impostor for this many frames.
+pub(crate) const EVICT_AFTER_FRAMES: u64 = 300;
 /// Meshes whose coarsest level of detail keeps at least this many triangles get impostors.
 pub(crate) const MIN_TRIANGLES: u32 = 256;
 /// No impostor (`Item::impostor`).
@@ -38,6 +54,8 @@ pub(crate) const NONE: u32 = u32::MAX;
 
 const ALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// Bytes of one compressed layer of one texture (BC7: a byte a texel).
+const BC7_LAYER_BYTES: u64 = SIZE as u64 * SIZE as u64;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 /// A mesh with a material: its mesh index and its material asset's index.
@@ -71,7 +89,21 @@ struct Atlas {
 }
 
 impl Atlas {
-    fn new(device: &wgpu::Device, layers: u32) -> Self {
+    fn new(device: &wgpu::Device, layers: u32, compressed: bool) -> Self {
+        // Compressed layers are written by copies, not rendered to.
+        let target = if compressed {
+            wgpu::TextureUsages::empty()
+        } else {
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+        };
+        let (albedo, normal) = if compressed {
+            (
+                wgpu::TextureFormat::Bc7RgbaUnormSrgb,
+                wgpu::TextureFormat::Bc7RgbaUnorm,
+            )
+        } else {
+            (ALBEDO_FORMAT, NORMAL_FORMAT)
+        };
         let texture = |label, format| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
@@ -84,7 +116,7 @@ impl Atlas {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                usage: target
                     | wgpu::TextureUsages::TEXTURE_BINDING
                     | wgpu::TextureUsages::COPY_SRC
                     | wgpu::TextureUsages::COPY_DST,
@@ -92,8 +124,8 @@ impl Atlas {
             })
         };
         Self {
-            albedo: texture("impostor albedo", ALBEDO_FORMAT),
-            normal: texture("impostor normal", NORMAL_FORMAT),
+            albedo: texture("impostor albedo", albedo),
+            normal: texture("impostor normal", normal),
             layers,
         }
     }
@@ -115,9 +147,23 @@ impl Atlas {
     }
 }
 
+/// What a compressed atlas bakes into before compressing: an RGBA8 pair and the blocks.
+struct Scratch {
+    albedo: wgpu::Texture,
+    normal: wgpu::Texture,
+    blocks: wgpu::Buffer,
+}
+
 pub(crate) struct Impostors {
     /// Baked layers by mesh and material.
     layers: HashMap<Key, u32>,
+    /// Each layer's mesh and material, and the frame it was last drawn.
+    owners: Vec<(Key, u64)>,
+    /// Frames scheduled so far (the clock of `owners`).
+    frame: u64,
+    /// The atlas is BC7 (decided with the first bake).
+    compressed: Option<bool>,
+    scratch: Option<Scratch>,
     requests: HashMap<Key, Request>,
     /// Bounding spheres per layer (`ImpostorInfo`).
     info: wgpu::Buffer,
@@ -260,6 +306,10 @@ impl Impostors {
         );
         Self {
             layers: HashMap::new(),
+            owners: Vec::new(),
+            frame: 0,
+            compressed: None,
+            scratch: None,
             requests: HashMap::new(),
             info,
             atlas: None,
@@ -283,9 +333,13 @@ impl Impostors {
         }
     }
 
-    /// The baked layer of a mesh with a material.
-    pub(crate) fn layer(&self, key: Key) -> Option<u32> {
-        self.layers.get(&key).copied()
+    /// The baked layer of a mesh with a material, which counts as drawn this frame.
+    pub(crate) fn layer(&mut self, key: Key) -> Option<u32> {
+        let layer = self.layers.get(&key).copied()?;
+        if let Some(owner) = self.owners.get_mut(layer as usize) {
+            owner.1 = self.frame;
+        }
+        Some(layer)
     }
 
     /// Ask for a bake (the scores of a frame's instances add up).
@@ -301,9 +355,17 @@ impl Impostors {
         !self.layers.is_empty()
     }
 
-    /// Pick this frame's bake from the requests: the most wanted one, if the atlas has room.
-    pub(crate) fn schedule(&mut self, gpu: &GpuShared, min_y_height: impl Fn(u32) -> (f32, f32)) {
+    /// Pick this frame's bake from the requests: the most wanted one, if the atlas has room or
+    /// a layer that has gone unused. `max_layers` is `RenderSettings::impostor_atlas_layers`;
+    /// `compress` asks for a BC7 atlas (applies to the first bake).
+    pub(crate) fn schedule(
+        &mut self,
+        gpu: &GpuShared,
+        (max_layers, compress): (u32, bool),
+        min_y_height: impl Fn(u32) -> (f32, f32),
+    ) {
         self.pending = None;
+        self.frame += 1;
         let best = self
             .requests
             .drain()
@@ -311,19 +373,77 @@ impl Impostors {
         let Some((key, request)) = best else {
             return;
         };
-        let layer = self.layers.len() as u32;
-        if layer >= MAX_LAYERS {
-            if !self.warned_full {
-                self.warned_full = true;
-                tracing::info!("impostor atlas full ({MAX_LAYERS} meshes); no more are baked");
-            }
+        let device = &gpu.device;
+        let compressed = *self.compressed.get_or_insert(compress);
+        // The encoders build on a thread: bake once they are there.
+        if compressed && gpu.images.with_compressor(gpu, |_| ()).is_none() {
             return;
         }
-        let device = &gpu.device;
+        let cap = if compressed {
+            MAX_LAYERS
+        } else {
+            MAX_RGBA8_LAYERS
+        };
+        let max = max_layers
+            .min(cap)
+            .min(device.limits().max_texture_array_layers)
+            .max(1);
+        let Some(layer) = pick_layer(&self.owners, self.frame, max) else {
+            if !self.warned_full {
+                self.warned_full = true;
+                tracing::info!(
+                    "impostor atlas full ({max} meshes, all drawn in the last \
+                     {EVICT_AFTER_FRAMES} frames); no more are baked for now"
+                );
+            }
+            return;
+        };
+        match self.owners.get_mut(layer as usize) {
+            Some(owner) => {
+                // Reuse a layer nobody has drawn for a while.
+                self.layers.remove(&owner.0);
+                *owner = (key, self.frame);
+            }
+            None => self.owners.push((key, self.frame)),
+        }
         if self.atlas.as_ref().is_none_or(|a| layer >= a.layers) {
-            let layers = (layer + GROW).min(MAX_LAYERS);
-            self.grown_from = self.atlas.replace(Atlas::new(device, layers));
+            let layers = (layer + GROW).min(max);
+            self.grown_from = self.atlas.replace(Atlas::new(device, layers, compressed));
             self.draw_group = None;
+        }
+        if compressed && self.scratch.is_none() {
+            let texture = |label, format, view: &[wgpu::TextureFormat]| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: SIZE,
+                        height: SIZE,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: view,
+                })
+            };
+            self.scratch = Some(Scratch {
+                // The encoders read the bytes as they are: viewed as plain RGBA8.
+                albedo: texture(
+                    "impostor bake albedo",
+                    ALBEDO_FORMAT,
+                    &[wgpu::TextureFormat::Rgba8Unorm],
+                ),
+                normal: texture("impostor bake normal", NORMAL_FORMAT, &[]),
+                blocks: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("impostor blocks"),
+                    size: 2 * BC7_LAYER_BYTES,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                }),
+            });
         }
         if self.depth.is_none() {
             let depth = device.create_texture(&wgpu::TextureDescriptor {
@@ -358,6 +478,7 @@ impl Impostors {
         gpu.queue
             .write_buffer(&self.bake_instances, 0, bytemuck::cast_slice(&instances));
         self.layers.insert(key, layer);
+        self.warned_full = false;
         self.pending = Some(Bake {
             layer,
             mesh: request.mesh,
@@ -409,8 +530,16 @@ impl Impostors {
         let (Some(pipeline), Some(depth)) = (&self.bake, &self.depth) else {
             return;
         };
-        let albedo = Atlas::layer_view(&atlas.albedo, bake.layer);
-        let normal = Atlas::layer_view(&atlas.normal, bake.layer);
+        let (albedo, normal) = match &self.scratch {
+            Some(s) => (
+                s.albedo.create_view(&Default::default()),
+                s.normal.create_view(&Default::default()),
+            ),
+            None => (
+                Atlas::layer_view(&atlas.albedo, bake.layer),
+                Atlas::layer_view(&atlas.normal, bake.layer),
+            ),
+        };
         let target = |view| {
             Some(wgpu::RenderPassColorAttachment {
                 view,
@@ -447,6 +576,33 @@ impl Impostors {
             let (x, y) = ((tile % GRID) * TILE, (tile / GRID) * TILE);
             pass.set_viewport(x as f32, y as f32, TILE as f32, TILE as f32, 0.0, 1.0);
             pass.draw_indexed(0..index_count, 0, tile..tile + 1);
+        }
+        drop(pass);
+        // Compressed atlas: the scratch pair into BC7 blocks, then into the layer.
+        if let Some(scratch) = &self.scratch {
+            let albedo = scratch.albedo.create_view(&wgpu::TextureViewDescriptor {
+                format: Some(wgpu::TextureFormat::Rgba8Unorm),
+                ..Default::default()
+            });
+            let normal = scratch.normal.create_view(&Default::default());
+            let variant = CompressionVariant::BC7(BC7Settings::alpha_basic());
+            let blocks = &scratch.blocks;
+            let compressed = gpu.images.with_compressor(gpu, |c| {
+                c.add_compression_task(variant, &albedo, SIZE, SIZE, blocks, None, None);
+                let second = Some(BC7_LAYER_BYTES as u32);
+                c.add_compression_task(variant, &normal, SIZE, SIZE, blocks, None, second);
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("impostor compression"),
+                    timestamp_writes: None,
+                });
+                c.compress(&mut pass);
+            });
+            if compressed.is_some() {
+                let at = (0, bake.layer);
+                for (texture, offset) in [(&atlas.albedo, 0), (&atlas.normal, BC7_LAYER_BYTES)] {
+                    copy_blocks(encoder, blocks, offset, texture, at, (SIZE, SIZE), 16);
+                }
+            }
         }
     }
 
@@ -653,8 +809,47 @@ impl Impostors {
             })
     }
 
-    /// Layers baked so far.
+    /// Meshes baked now.
     pub(crate) fn count(&self) -> usize {
         self.layers.len()
+    }
+
+    /// Whether the atlas is BC7.
+    pub(crate) fn compressed(&self) -> bool {
+        self.compressed == Some(true)
+    }
+}
+
+/// The layer for the next bake: a new one while the atlas has fewer than `max`, else the one
+/// drawn longest ago if that was at least [`EVICT_AFTER_FRAMES`] before `frame`.
+fn pick_layer(owners: &[(Key, u64)], frame: u64, max: u32) -> Option<u32> {
+    if (owners.len() as u32) < max {
+        return Some(owners.len() as u32);
+    }
+    let (layer, (_, used)) = owners
+        .iter()
+        .take(max as usize)
+        .enumerate()
+        .min_by_key(|(_, (_, used))| *used)?;
+    (used + EVICT_AFTER_FRAMES <= frame).then_some(layer as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_atlas_reuses_the_layer_drawn_longest_ago() {
+        let key = |n| (n, 0u64);
+        // Room: a new layer.
+        assert_eq!(pick_layer(&[(key(0), 5)], 10, 2), Some(1));
+        // Full, everything drawn lately: nothing.
+        let owners = [(key(0), 900), (key(1), 950)];
+        assert_eq!(pick_layer(&owners, 1000, 2), None);
+        // Full, one unseen for long enough: that one.
+        let owners = [(key(0), 900), (key(1), 600), (key(2), 650)];
+        assert_eq!(pick_layer(&owners, 1000, 3), Some(1));
+        // A smaller budget than the atlas has: only its first layers are candidates.
+        assert_eq!(pick_layer(&owners, 1000, 1), None);
     }
 }
