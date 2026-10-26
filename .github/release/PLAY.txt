@@ -1,11 +1,12 @@
 Engine showcase
 ===============
 
-Start: double-click showcase.exe (Windows) or run ./showcase (Linux), with the `assets`
-folder kept next to it. The first start takes a while: the valley, planet and trees are
+Start: double-click showcase.exe (Windows) or run ./showcase (Linux, macOS), with the `assets`
+folder kept next to it. On macOS the build is unsigned: the first time, right-click showcase,
+choose Open and confirm (or run `xattr -dr com.apple.quarantine .` in the unzipped folder). The first start takes a while: the valley, planet and trees are
 generated on the way in. A console window shows the log; keep it open, it closes with the game.
 
-Needs a GPU with Vulkan or DirectX 12. All zones together use a lot of memory (16 GB of RAM
+Needs a GPU with Vulkan, DirectX 12 or Metal (Apple silicon or a recent Intel Mac). All zones together use a lot of memory (16 GB of RAM
 recommended); with less, load only some zones with --zones (below).
 
 Flying camera (on at start)

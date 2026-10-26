@@ -1,0 +1,5 @@
+# Fetched files the showcase never loads, left out of the download (paths under assets/,
+# bash globs). The 16k and 8k scans are only for the render crate's virtual_texturing example;
+# the showcase uses the 2k sets. Check `rg <file name> crates games` before adding a line.
+fetched/render/**/*_16k.*
+fetched/render/**/*_8k.*
