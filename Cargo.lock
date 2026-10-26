@@ -1028,8 +1028,10 @@ dependencies = [
  "bevy_ecs",
  "bytemuck",
  "engine_core",
+ "engine_input",
  "engine_render",
  "engine_world",
+ "font8x8",
  "image",
  "serde",
  "serde_json",
@@ -1460,6 +1462,12 @@ checksum = "6c92d9081c7ab3bd83ef1eecdfad090f3d966e3ce74106779664114cfe1a6274"
 dependencies = [
  "bytemuck",
 ]
+
+[[package]]
+name = "font8x8"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
 
 [[package]]
 name = "fontdb"

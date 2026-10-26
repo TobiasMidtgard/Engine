@@ -442,3 +442,25 @@ fn debug_lines_do_not_change_the_metered_exposure() {
         "metered EV100 without lines {plain}, with a dense debug grid {with_grid}"
     );
 }
+
+#[test]
+fn perf_overlay_draws_a_panel_in_the_top_left() {
+    let mut app = scene_app(DVec3::ZERO, 50_000.0);
+    app.world.resource_mut::<PerfOverlay>().enabled = true;
+    let Some(img) = render(&mut app, "perf_overlay.png") else {
+        return;
+    };
+    let lum = |p: &image::Rgba<u8>| (p[0] as u32 + p[1] as u32 + p[2] as u32) / 3;
+    // The panel darkens the top-left corner and its text is light on it.
+    let corner: Vec<u32> = (10..60)
+        .flat_map(|y| (10..200).map(move |x| (x, y)))
+        .map(|(x, y)| lum(img.get_pixel(x, y)))
+        .collect();
+    let dark = corner.iter().filter(|l| **l < 90).count();
+    let light = corner.iter().filter(|l| **l > 170).count();
+    assert!(dark > corner.len() / 3, "dark {dark} of {}", corner.len());
+    assert!(light > 50, "light text pixels: {light}");
+    // The far right is the scene, untouched.
+    let right = lum(img.get_pixel(W - 5, H / 2));
+    assert!(right > 20, "{right}");
+}

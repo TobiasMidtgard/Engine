@@ -10,6 +10,8 @@
 //!   cylinder, grid, frustum, polyline/polygon. Positions are `f64` world meters.
 //! * [`DebugViews`]: built-in views of the `engine_world` contracts (wind, ground wetness and
 //!   snow, focus points, gravity, world events). Off by default.
+//! * [`PerfOverlay`]: an on-screen performance panel (F3): fps, a frame-time graph, GPU time
+//!   per render pass, render CPU per step, VRAM and, with `--profile`, the slowest systems.
 //! * API: `debug.draw`, `debug.clear`, `debug.views` (JSON in/out), so AI agents can
 //!   annotate the world and then look at it with `render.screenshot`.
 //!
@@ -34,12 +36,14 @@ pub mod api;
 pub mod color;
 pub mod draw;
 pub mod feature;
+pub mod overlay;
 pub mod shapes;
 pub mod views;
 
 pub use color::Color;
 pub use draw::{DebugDraw, DebugLine, DepthMode, ShapeHandle};
 pub use feature::DebugLinesFeature;
+pub use overlay::{FrameHistory, PerfOverlay, PerfOverlayFeature};
 pub use shapes::{DebugShape, POINT_SIZE, ShapeStyle};
 pub use views::{DebugViews, EventViews, SurfaceView, WindView};
 
@@ -53,7 +57,9 @@ pub mod prelude {
         BLACK, BLUE, CYAN, Color, GRAY, GREEN, LIME, MAGENTA, ORANGE, PINK, PURPLE, RED, WHITE,
         YELLOW,
     };
-    pub use crate::{DebugDraw, DebugPlugin, DebugShape, DebugViews, DepthMode, ShapeStyle};
+    pub use crate::{
+        DebugDraw, DebugPlugin, DebugShape, DebugViews, DepthMode, PerfOverlay, ShapeStyle,
+    };
 }
 
 /// Adds [`DebugDraw`], [`DebugViews`], the line render feature and the `debug.*` API.
@@ -66,6 +72,11 @@ impl Plugin for DebugPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DebugDraw>()
             .init_resource::<DebugViews>()
+            .init_resource::<PerfOverlay>()
+            .init_resource::<FrameHistory>()
+            .register_resource::<PerfOverlay>(
+                "Performance panel (F3): enabled, scale (pixels per font pixel, 0 = auto).",
+            )
             .register_resource::<DebugViews>(
                 "Debug drawing switches: enabled (master switch for all debug lines), wind \
                  {enabled, radius, spacing, height, scale (m per m/s), max_speed}, surface \
@@ -79,7 +90,8 @@ impl Plugin for DebugPlugin {
             .add_message::<NoiseEvent>()
             .add_systems(
                 First,
-                begin_frame_system.after(engine_core::time::time_system),
+                (begin_frame_system, overlay::perf_overlay_system)
+                    .after(engine_core::time::time_system),
             )
             .add_systems(
                 Extract,
@@ -89,7 +101,8 @@ impl Plugin for DebugPlugin {
                 Render,
                 end_frame_system.after(engine_render::renderer::render_system),
             )
-            .add_render_feature(DebugLinesFeature::default());
+            .add_render_feature(DebugLinesFeature::default())
+            .add_render_feature(PerfOverlayFeature::default());
         api::register(app);
     }
 }

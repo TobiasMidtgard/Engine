@@ -37,8 +37,12 @@ Play mode
 
 A gamepad works too (A jump, B crouch, X interact, triggers attack and block).
 
+F3 shows a performance panel (fps, frame-time graph, GPU time per pass, memory) in either mode.
+
 Command-line options
   --size 2560x1440     window size
+  --profile            time every system: the F3 panel lists the slowest, and every 5 s the
+                       game writes engine-profile.txt next to where it was started
   --zones arena,lake   load only these zones' demos (faster start, less memory); `all` is the
                        default. Zones: plaza market paddock physics yard magic gallery2d forest
                        meadow lake water footsteps tracks cave arena parkour fortress voxel

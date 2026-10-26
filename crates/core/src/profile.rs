@@ -175,13 +175,36 @@ fn short_name(name: &str) -> String {
     }
 }
 
-/// Frames and wall time since the last report.
+/// The last second's profile, for live views such as the debug overlay. Updated about once a
+/// second while profiling; empty otherwise.
+#[derive(Resource, Debug, Clone, Default, serde::Serialize)]
+pub struct ProfileSnapshot {
+    /// Real milliseconds per frame over the window.
+    pub frame_ms: f64,
+    /// Milliseconds per frame of all systems together, across threads.
+    pub busy_ms: f64,
+    /// `(schedule, ms per frame)`, slowest first.
+    pub schedules: Vec<(String, f64)>,
+    /// `(system, ms per frame)`, slowest first (at most [`SNAPSHOT_SYSTEMS`]).
+    pub systems: Vec<(String, f64)>,
+}
+
+/// Systems kept in a [`ProfileSnapshot`].
+pub const SNAPSHOT_SYSTEMS: usize = 16;
+/// Seconds per [`ProfileSnapshot`].
+const SNAPSHOT_SECS: f64 = 1.0;
+
+/// Frames and wall time since the last report, and since the last snapshot.
 #[derive(Resource)]
 pub(crate) struct ProfileWindow {
     started: Instant,
     frames: u64,
     frame_max: Duration,
     last_frame: Instant,
+    /// Totals of the snapshots since the last report.
+    report: HashMap<String, Stat>,
+    snapshot_started: Instant,
+    snapshot_frames: u64,
 }
 
 impl Default for ProfileWindow {
@@ -192,28 +215,74 @@ impl Default for ProfileWindow {
             frames: 0,
             frame_max: Duration::ZERO,
             last_frame: now,
+            report: HashMap::new(),
+            snapshot_started: now,
+            snapshot_frames: 0,
         }
     }
 }
 
-/// Engine system (`Last`): count frames and write a report every few seconds.
-pub(crate) fn profile_report_system(mut window: ResMut<ProfileWindow>) {
+/// Engine system (`Last`): count frames, publish a [`ProfileSnapshot`] every second and write
+/// a report every few seconds.
+pub(crate) fn profile_report_system(
+    mut window: ResMut<ProfileWindow>,
+    mut snapshot: ResMut<ProfileSnapshot>,
+) {
     let now = Instant::now();
     let frame = now - window.last_frame;
     window.last_frame = now;
     window.frames += 1;
+    window.snapshot_frames += 1;
     window.frame_max = window.frame_max.max(frame);
+    let since_snapshot = now - window.snapshot_started;
+    if since_snapshot.as_secs_f64() >= SNAPSHOT_SECS {
+        let stats = std::mem::take(&mut *totals().lock());
+        *snapshot = make_snapshot(&stats, window.snapshot_frames, since_snapshot);
+        for (key, stat) in stats {
+            let total = window.report.entry(key).or_default();
+            total.total += stat.total;
+            total.calls += stat.calls;
+            total.max = total.max.max(stat.max);
+        }
+        window.snapshot_started = now;
+        window.snapshot_frames = 0;
+    }
     let wall = now - window.started;
     if wall.as_secs_f64() < REPORT_SECS {
         return;
     }
-    let stats = std::mem::take(&mut *totals().lock());
-    let report = format_report(&stats, window.frames, wall, window.frame_max);
+    let report = format_report(&window.report, window.frames, wall, window.frame_max);
     crate::log::info!("frame profile\n{report}");
     if let Err(e) = std::fs::write("engine-profile.txt", &report) {
         crate::log::warn!("could not write engine-profile.txt: {e}");
     }
     *window = ProfileWindow::default();
+}
+
+fn make_snapshot(stats: &HashMap<String, Stat>, frames: u64, wall: Duration) -> ProfileSnapshot {
+    let frames = frames.max(1) as f64;
+    let per_frame = |d: Duration| d.as_secs_f64() * 1000.0 / frames;
+    let mut schedules = Vec::new();
+    let mut systems = Vec::new();
+    let mut busy = Duration::ZERO;
+    for (key, stat) in stats {
+        if let Some(name) = key.strip_prefix("schedule ") {
+            schedules.push((name.to_string(), per_frame(stat.total)));
+        } else if !key.starts_with(INNER) {
+            busy += stat.total;
+            systems.push((key.clone(), per_frame(stat.total)));
+        }
+    }
+    let slowest_first = |a: &(String, f64), b: &(String, f64)| b.1.total_cmp(&a.1);
+    schedules.sort_by(slowest_first);
+    systems.sort_by(slowest_first);
+    systems.truncate(SNAPSHOT_SYSTEMS);
+    ProfileSnapshot {
+        frame_ms: per_frame(wall),
+        busy_ms: per_frame(busy),
+        schedules,
+        systems,
+    }
 }
 
 fn format_report(
@@ -324,6 +393,32 @@ mod tests {
             short_name("engine_core::time::tick<engine_core::time::Real>"),
             "engine_core::tick<engine_core::time::Real>"
         );
+    }
+
+    #[test]
+    fn snapshots_list_the_slowest_systems_per_frame() {
+        let mut stats = HashMap::new();
+        for (key, ms) in [
+            ("schedule Update", 30),
+            ("game::fast", 2),
+            ("game::slow", 20),
+            ("  in engine_render: submit", 9),
+        ] {
+            stats.insert(
+                key.to_string(),
+                Stat {
+                    total: Duration::from_millis(ms * 10),
+                    calls: 10,
+                    max: Duration::from_millis(ms),
+                },
+            );
+        }
+        let snap = make_snapshot(&stats, 10, Duration::from_millis(400));
+        assert!((snap.frame_ms - 40.0).abs() < 1e-9);
+        assert!((snap.busy_ms - 22.0).abs() < 1e-9);
+        assert_eq!(snap.schedules, vec![("Update".to_string(), 30.0)]);
+        assert_eq!(snap.systems[0], ("game::slow".to_string(), 20.0));
+        assert_eq!(snap.systems.len(), 2);
     }
 
     #[test]

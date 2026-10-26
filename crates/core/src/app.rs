@@ -131,6 +131,7 @@ impl App {
             .init_resource::<ApiRegistry>()
             .init_resource::<Diagnostics>()
             .init_resource::<crate::profile::ProfileWindow>()
+            .init_resource::<crate::profile::ProfileSnapshot>()
             .init_resource::<Window>()
             .insert_resource(crate::log::log_buffer())
             .add_message::<AppExit>()
