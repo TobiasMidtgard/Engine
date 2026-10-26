@@ -70,7 +70,7 @@ fn render(lods: bool, shot: &str) -> Option<(u64, Vec<u8>)> {
         let x = col * (1.0 + row * 0.25);
         w.spawn((
             Transform::from_xyz(x, 0.1, z),
-            MeshRenderer::new(stones[(i % 4) as usize], material.clone()),
+            MeshRenderer::new(stones[(i % 4) as usize], material),
         ));
     }
     let mut last = u64::MAX;
