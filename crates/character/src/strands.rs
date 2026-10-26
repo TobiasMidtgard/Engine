@@ -1085,8 +1085,10 @@ pub const BODY_TAU: f32 = 4.0;
 const HAIR_OPACITY: f32 = 1.5;
 
 /// How much hair and body fills the space around the hair: per 4 mm cell, the optical depth
-/// of crossing it, as a share of [`BODY_TAU`] in bytes (x fastest, then y, then z). Uploaded as
-/// a 3D texture; the strand shader marches each light through it.
+/// of crossing its hair and of crossing its body, each as a share of [`BODY_TAU`] in a byte
+/// (two bytes a cell, x fastest, then y, then z). Uploaded as a 3D texture; the strand shader
+/// marches each light through both, the skin shader through the hair only (the skin shades
+/// itself).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShadowGrid {
     /// The grid's low corner (model space, m).
@@ -1097,6 +1099,13 @@ pub struct ShadowGrid {
 }
 
 impl ShadowGrid {
+    /// Where the grid sits, for the shaders: low corner and cell size, then cells along x, y,
+    /// z (`GpuCharacter::hair_grid`).
+    pub fn placement(&self) -> [[f32; 4]; 2] {
+        let [x, y, z] = self.dims.map(|d| d as f32);
+        [[self.lo.x, self.lo.y, self.lo.z, self.cell], [x, y, z, 0.0]]
+    }
+
     /// Optical depth from `p` toward `dir` (unit), marched as the shader does (from a cell out,
     /// one cell a step, nearest cell).
     pub fn depth_toward(&self, p: Vec3, dir: Vec3) -> f32 {
@@ -1109,7 +1118,8 @@ impl ShadowGrid {
             }
             let [x, y, z] = [c.x as usize, c.y as usize, c.z as usize];
             let [nx, ny, _] = self.dims.map(|d| d as usize);
-            tau += self.density[x + nx * (y + ny * z)] as f32 / 255.0 * BODY_TAU;
+            let at = 2 * (x + nx * (y + ny * z));
+            tau += (self.density[at] as f32 + self.density[at + 1] as f32) / 255.0 * BODY_TAU;
         }
         tau
     }
@@ -1146,6 +1156,7 @@ pub fn shadow_grid(sets: &[StrandSet], skin: &SkinMesh) -> Option<ShadowGrid> {
         ])
     };
     let mut density = vec![0.0f32; nx * ny * nz];
+    let mut body = vec![false; nx * ny * nz];
     // Fibers: a hair of radius r crossing a cell along length l blocks about 2 r l of the
     // cell's face.
     let per_area = HAIR_OPACITY / (SHADOW_CELL * SHADOW_CELL);
@@ -1175,7 +1186,7 @@ pub fn shadow_grid(sets: &[StrandSet], skin: &SkinMesh) -> Option<ShadowGrid> {
         let mut depth = SHADOW_CELL;
         while depth <= 0.02 {
             if let Some(c) = cell(p - n * depth) {
-                density[at(c)] = BODY_TAU;
+                body[at(c)] = true;
             }
             depth += SHADOW_CELL * 0.5;
         }
@@ -1208,7 +1219,13 @@ pub fn shadow_grid(sets: &[StrandSet], skin: &SkinMesh) -> Option<ShadowGrid> {
         dims: dims.to_array(),
         density: density
             .into_iter()
-            .map(|t| ((t / BODY_TAU).clamp(0.0, 1.0) * 255.0).round() as u8)
+            .zip(body)
+            .flat_map(|(t, body)| {
+                [
+                    ((t / BODY_TAU).clamp(0.0, 1.0) * 255.0).round() as u8,
+                    if body { 255 } else { 0 },
+                ]
+            })
             .collect(),
     })
 }
@@ -1298,7 +1315,7 @@ mod tests {
         brows.push(&[Vec3::ZERO, Vec3::X, Vec3::Y], 1.0, 0.0, 0.5);
         assert!(shadow_grid(&[brows], &wall()).is_none());
         // The shader marches the same reach and scale.
-        let shader = include_str!("shaders/strands.wgsl");
+        let shader = include_str!("shaders/common.wgsl");
         assert!(shader.contains(&format!("const SHADOW_REACH: u32 = {SHADOW_REACH}u;")));
         assert!(shader.contains(&format!("const SHADOW_BODY_TAU: f32 = {BODY_TAU:?};")));
     }

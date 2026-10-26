@@ -9,10 +9,6 @@ struct StrandParams {
     // Detail by distance: hair width scale (fewer hairs drawn, each wider), points stepped
     // over per segment (1 every point).
     lod: vec4<f32>,
-    // The hair shadow grid: low corner (rest model space) and cell size, then cells along x, y,
-    // z (0: no grid).
-    grid_lo: vec4<f32>,
-    grid_size: vec4<f32>,
 };
 
 @group(2) @binding(0) var<uniform> strand_params: StrandParams;

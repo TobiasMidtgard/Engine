@@ -43,35 +43,11 @@ fn vs_strand(@builtin(vertex_index) vertex: u32, @builtin(instance_index) hair: 
     return out;
 }
 
-// The hair shadow grid (strands::shadow_grid): per cell, the optical depth of crossing it as a
-// share of SHADOW_BODY_TAU.
-@group(2) @binding(6) var hair_shadow: texture_3d<f32>;
-@group(2) @binding(7) var hair_shadow_sampler: sampler;
-
-const SHADOW_REACH: u32 = 16u;
-const SHADOW_BODY_TAU: f32 = 4.0;
-
-// Optical depth of the hair and body between the point and a light in direction `l` (world):
-// marched through the grid a cell a step, from a cell out (the point's own hair is not in its
-// way), with a per-pixel offset so the steps don't band.
+// Optical depth of the hair and body between the point and a light in direction `l` (world).
 fn strand_depth_toward(in: StrandOut, l: vec3<f32>) -> f32 {
-    let size = strand_params.grid_size.xyz;
-    if (size.x <= 0.0) {
-        return 0.0;
-    }
-    let cell = strand_params.grid_lo.w;
     let dir = vec3<f32>(dot(l, in.axis_x), dot(l, in.axis_y), dot(l, in.axis_z));
     let jitter = hash13(vec3<f32>(in.clip.xy, frame.time.w * 0.37));
-    let start = (in.rest - strand_params.grid_lo.xyz) / cell;
-    var tau = 0.0;
-    for (var i = 0u; i < SHADOW_REACH; i++) {
-        let q = start + dir * (f32(i) + 1.0 + jitter);
-        if (any(q < vec3<f32>(0.0)) || any(q > size)) {
-            break;
-        }
-        tau += textureSampleLevel(hair_shadow, hair_shadow_sampler, q / size, 0.0).r;
-    }
-    return tau * SHADOW_BODY_TAU;
+    return hair_shadow_depth(in.rest, dir, jitter, 1.0);
 }
 
 fn strand_keep(in: StrandOut) -> bool {
