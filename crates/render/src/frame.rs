@@ -13,7 +13,7 @@ use crate::cloud_shadows::GpuCloudShadow;
 use crate::components::{
     AmbientLight, Camera, DirectionalLight, Exposure, PointLight, Projection, SkyLightVolume,
 };
-use crate::settings::{Atmosphere, DebugView, FogSettings, RenderSettings};
+use crate::settings::{Atmosphere, DebugView, FogSettings};
 use crate::shadows::{Cascades, FarShadowView, SkyOcclusionView};
 
 /// GPU layout of `struct Frame` in `lib_types.wgsl`.
@@ -97,9 +97,11 @@ pub struct FrameUniform {
     pub air_ozone: [f32; 4],
     /// Mie anisotropy per channel RGB (of the whole lobe), w [`Atmosphere::mie_forward_peak`].
     pub air_mie_g: [f32; 4],
-    /// The scene's place in the output image ([`crate::Viewport`]): its top-left corner (x, y,
-    /// pixels) and the whole output's size (pixels). Overlays drawing over the scene subtract
-    /// the corner from a fragment's position before reading scene-sized targets.
+    /// The scene's place in the output image ([`crate::Viewport`]): its rectangle's top-left
+    /// corner and size (x, y, width, height; pixels). The scene renders at `viewport.xy`
+    /// pixels, smaller than the rectangle at a render scale under 1; an overlay over the scene
+    /// finds the scene pixel under a fragment as `(position.xy - window.xy) * viewport.xy /
+    /// window.zw`.
     pub window: [f32; 4],
 }
 
@@ -186,13 +188,16 @@ pub struct ViewData {
     /// Vertical field of view in radians (0 for orthographic).
     pub fov_y: f32,
     pub orthographic: bool,
-    /// The scene's size in pixels: its camera's [`crate::Viewport`], or the whole window.
+    /// The scene's size in pixels: its camera's [`crate::Viewport`] (or the whole window)
+    /// times `RenderSettings::render_scale`.
     pub width: u32,
     pub height: u32,
     /// The output image's size in pixels (the window), which overlays such as the UI cover.
     pub window: UVec2,
     /// Where the scene sits in the window: its top-left corner, pixels.
     pub viewport_origin: UVec2,
+    /// The scene's rectangle in the window, pixels (the scene's size before the render scale).
+    pub viewport_size: UVec2,
     /// Direction toward the sun (unit), if there is a sun.
     pub sun_dir: Vec3,
     /// Sun color × illuminance (lux).
@@ -243,13 +248,14 @@ impl ViewData {
 
     /// Draw into the scene's rectangle of the output image: for overlays that draw over the
     /// scene (lines, markers) in its projection. Their fragments' positions are then window
-    /// pixels: subtract `frame.window.xy` before reading scene-sized targets such as depth.
+    /// pixels: `(position.xy - frame.window.xy) * frame.viewport.xy / frame.window.zw` is the
+    /// scene pixel, for reading scene-sized targets such as depth.
     pub fn set_scene_viewport(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_viewport(
             self.viewport_origin.x as f32,
             self.viewport_origin.y as f32,
-            self.width as f32,
-            self.height as f32,
+            self.viewport_size.x as f32,
+            self.viewport_size.y as f32,
             0.0,
             1.0,
         );
@@ -422,7 +428,7 @@ pub fn build_view(
     exposure_state: &mut ExposureState,
     frame_index: u64,
 ) -> ViewData {
-    let settings = world.resource::<RenderSettings>().clone();
+    let settings = crate::settings::effective(world);
 
     let (camera_entity, camera, gt) = match active_camera(world) {
         Some((e, c, g)) => (Some(e), c, g),
@@ -649,6 +655,7 @@ pub fn build_view(
         height,
         window: UVec2::new(width, height),
         viewport_origin: UVec2::ZERO,
+        viewport_size: UVec2::new(width, height),
         sun_dir,
         sun_color,
         sun_shadows: sun_shadows && cascades.count > 0,
@@ -681,7 +688,7 @@ fn mat(m: Mat4) -> [[f32; 4]; 4] {
 
 /// Fill the GPU frame uniform.
 pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
-    let settings = world.resource::<RenderSettings>();
+    let settings = &crate::settings::effective(world);
     let atmosphere = world.resource::<Atmosphere>();
     let fog = world.resource::<FogSettings>();
     let ambient = world.resource::<AmbientLight>();
@@ -885,8 +892,8 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         window: [
             v.viewport_origin.x as f32,
             v.viewport_origin.y as f32,
-            v.window.x as f32,
-            v.window.y as f32,
+            v.viewport_size.x as f32,
+            v.viewport_size.y as f32,
         ],
     }
 }

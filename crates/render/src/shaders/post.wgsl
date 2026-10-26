@@ -9,6 +9,8 @@ struct PostParams {
     params2: vec4<f32>,
     // x: sharpening 0..1, y: white balance warm(+)/cool(-), z: pre-exposure, w: night desaturation
     params3: vec4<f32>,
+    // x: 1 when the scene is upscaled to the viewport (a render scale under 1), yzw unused
+    params4: vec4<f32>,
 };
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
@@ -82,6 +84,9 @@ fn vs_fullscreen(@builtin(vertex_index) i: u32) -> FullscreenOut {
 // neighborhood's range, so temporal anti-aliasing's softness goes without halos. Works on
 // compressed values (c / (1 + c)) so bright edges don't ring.
 fn sharpened(uv: vec2<f32>, amount: f32) -> vec3<f32> {
+    if (post.params4.x > 0.0) {
+        return sharpened_upscale(uv, amount);
+    }
     let px = vec2<i32>(uv * vec2<f32>(textureDimensions(hdr_tex)));
     let size = vec2<i32>(textureDimensions(hdr_tex)) - 1;
     let c = textureLoad(hdr_tex, px, 0).rgb;
@@ -90,6 +95,24 @@ fn sharpened(uv: vec2<f32>, amount: f32) -> vec3<f32> {
     let s = textureLoad(hdr_tex, clamp(px + vec2<i32>(0, 1), vec2<i32>(0), size), 0).rgb;
     let e = textureLoad(hdr_tex, clamp(px + vec2<i32>(1, 0), vec2<i32>(0), size), 0).rgb;
     let w = textureLoad(hdr_tex, clamp(px + vec2<i32>(-1, 0), vec2<i32>(0), size), 0).rgb;
+    return cas(c, n, s, e, w, amount);
+}
+
+// A scene rendered smaller than the viewport (render scale): filtered between its pixels, then
+// sharpened against its neighbors a scene pixel away, which restores the edges the filter
+// softened without the blockiness of picking the nearest pixel.
+fn sharpened_upscale(uv: vec2<f32>, amount: f32) -> vec3<f32> {
+    let texel = 1.0 / vec2<f32>(textureDimensions(hdr_tex));
+    let c = textureSampleLevel(hdr_tex, post_sampler, uv, 0.0).rgb;
+    if (amount <= 0.0) { return c; }
+    let n = textureSampleLevel(hdr_tex, post_sampler, uv - vec2<f32>(0.0, texel.y), 0.0).rgb;
+    let s = textureSampleLevel(hdr_tex, post_sampler, uv + vec2<f32>(0.0, texel.y), 0.0).rgb;
+    let e = textureSampleLevel(hdr_tex, post_sampler, uv + vec2<f32>(texel.x, 0.0), 0.0).rgb;
+    let w = textureSampleLevel(hdr_tex, post_sampler, uv - vec2<f32>(texel.x, 0.0), 0.0).rgb;
+    return cas(c, n, s, e, w, amount);
+}
+
+fn cas(c: vec3<f32>, n: vec3<f32>, s: vec3<f32>, e: vec3<f32>, w: vec3<f32>, amount: f32) -> vec3<f32> {
     let cc = c / (1.0 + c);
     let nc = n / (1.0 + n);
     let sc = s / (1.0 + s);

@@ -108,6 +108,7 @@ struct PostUniform {
     params: [f32; 4],
     params2: [f32; 4],
     params3: [f32; 4],
+    params4: [f32; 4],
 }
 
 #[repr(C)]
@@ -683,13 +684,18 @@ impl Renderer {
             .get_resource::<Window>()
             .map(|w| UVec2::new(w.width.max(1), w.height.max(1)))
             .unwrap_or(self.targets.window);
-        let (scene_origin, scene_size) = crate::frame::camera_viewport(world, window);
+        let settings = crate::settings::effective(world);
+        let (scene_origin, viewport_size) = crate::frame::camera_viewport(world, window);
+        // At a render scale under 1 the scene renders smaller and the tonemap upscales it.
+        let scene_size = (viewport_size.as_vec2() * settings.render_scale.clamp(0.25, 2.0))
+            .round()
+            .as_uvec2()
+            .max(UVec2::ONE);
         if scene_size != UVec2::new(self.targets.width, self.targets.height)
             || window != self.targets.window
         {
             self.resize(scene_size, window);
         }
-        let settings = world.resource::<RenderSettings>().clone();
         if let Some(s) = &mut self.surface {
             s.set_vsync(&self.shared.device, settings.vsync);
         }
@@ -742,6 +748,7 @@ impl Renderer {
         );
         view.window = window;
         view.viewport_origin = scene_origin;
+        view.viewport_size = viewport_size;
         if let Some(prev) = self.previous
             && crate::effects::is_camera_cut(
                 prev.origin,
@@ -1341,8 +1348,8 @@ impl Renderer {
             pass.set_viewport(
                 scene_origin.x as f32,
                 scene_origin.y as f32,
-                self.targets.width as f32,
-                self.targets.height as f32,
+                viewport_size.x as f32,
+                viewport_size.y as f32,
                 0.0,
                 1.0,
             );
@@ -1536,6 +1543,7 @@ impl Renderer {
             Tonemapper::Neutral => 5.0,
         };
         let levels = self.targets.bloom.len().max(1) as f32;
+        let upscaled = view.viewport_size != UVec2::new(view.width, view.height);
         let u = PostUniform {
             params: [
                 tonemapper,
@@ -1550,7 +1558,8 @@ impl Renderer {
                 1.0 / levels,
             ],
             params3: [
-                if taa {
+                // Temporal anti-aliasing's softness and an upscale's are sharpened back.
+                if taa || upscaled {
                     settings.sharpness.clamp(0.0, 1.0)
                 } else {
                     0.0
@@ -1559,6 +1568,7 @@ impl Renderer {
                 view.exposure,
                 settings.night_desaturation,
             ],
+            params4: [if upscaled { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         };
         self.shared
             .queue
@@ -2389,7 +2399,7 @@ pub fn ensure_renderer(world: &mut World) -> bool {
         .get_resource::<Window>()
         .map(|w| (w.width, w.height))
         .unwrap_or((1280, 720));
-    let settings = world.resource::<RenderSettings>().clone();
+    let settings = crate::settings::effective(world);
     match Renderer::new(
         if headless { None } else { handle },
         width,

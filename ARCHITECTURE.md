@@ -172,8 +172,18 @@ the scene's size, `ctx.view.window` the whole output's and `ctx.view.viewport_or
 scene's corner in it. Overlays draw onto the whole window, so screen-space overlays (UI,
 editor panels, debug text) size themselves from `view.window`. Overlays drawn in the scene's
 projection (debug lines, markers) call `ctx.view.set_scene_viewport(&mut pass)` and, in WGSL,
-subtract `frame.window.xy` (the scene's corner; `zw` is the window's size) from a fragment's
-position before reading scene-sized targets such as depth.
+find the scene pixel under a fragment as `(position.xy - frame.window.xy) * frame.viewport.xy /
+frame.window.zw` (`frame.window` is the scene's rectangle in the window, `frame.viewport.xy` the
+size the scene renders at) before reading scene-sized targets such as depth.
+
+**Quality presets** (built): the renderer draws with `RenderSettings::scaled(&Scalability)`,
+the game's settings at its `engine_world::Scalability` (`--quality low|medium|high|ultra`).
+The settings are the look at High; `render_scale` renders the scene smaller and the tonemap
+upscales it into the viewport (filtered, then sharpened); `shadows` scales shadow map size and
+shadow distances; `view_distance` the pixel thresholds of levels of detail, impostors and
+culling; `density` grass; `effects` turns off volumetric fog and screen-space reflections below
+0.75, screen-space GI below 1 and ambient occlusion below 0.5, and thins point lights. Nothing
+the game turned off comes back on. Features get the scaled settings in `prepare` and `ctx`.
 
 **Sun shadows** (built): four cascades out to `RenderSettings::shadow_distance` (rotation-
 invariant spheres snapped to texels, PCSS filtering), then a **far shadow map** out to
