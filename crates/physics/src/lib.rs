@@ -150,6 +150,7 @@ impl Plugin for PhysicsPlugin {
                     .after(demo::replay_stations),
             )
             .add_systems(FixedUpdate, demo::replay_floaters.in_set(SimSet::Gameplay))
+            .add_systems(Update, demo::finish_art)
             .add_systems(
                 PostUpdate,
                 shift::shift_simulation.in_set(engine_world::WorldShiftSet::Apply),

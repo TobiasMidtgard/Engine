@@ -1,6 +1,11 @@
 //! Procedural art for the proving ground: meshes with metric UVs and bevels, and PBR texture
 //! sets, built once per app and shared through keyed assets (`physics/…`), so a second proving
 //! ground (or a rebuilt one) reuses them.
+//!
+//! Texture sets and the dummies' meshes are made on worker threads, as engines stream assets:
+//! made on the frame, they held the yard's first frame for a second and a half. Until a set
+//! arrives its materials are reserved (drawn plain), and a dummy's meshes are reserved (not
+//! drawn). [`finish`] stores what the workers made; [`wait`] blocks until they are done.
 
 // The modules carry a few parts and options the proving ground does not use (yet).
 #![allow(dead_code)]
@@ -20,6 +25,9 @@ pub(crate) mod textures;
 pub(crate) mod timber;
 
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock, mpsc};
+
+use parking_lot::Mutex;
 
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
@@ -121,6 +129,86 @@ struct SetImages {
 struct ArtCache {
     sets: HashMap<Tex, SetImages>,
     materials: HashMap<Mat, Handle<StandardMaterial>>,
+    /// Texture sets being made on workers, and the materials reserved until they are.
+    making: Vec<(Tex, Job<TextureSet>)>,
+    waiting: Vec<(Mat, Handle<StandardMaterial>)>,
+    /// Meshes being made on workers, for the handles reserved under their keys.
+    meshing: Vec<Meshing>,
+}
+
+/// Mesh handles reserved under their keys, and the worker making their meshes.
+type Meshing = (Vec<Handle<Mesh>>, Job<Vec<Mesh>>);
+
+/// Something a worker makes: `None` until it is done; `Err` if it panicked.
+type Slot<T> = Arc<Mutex<Option<std::thread::Result<T>>>>;
+
+struct Job<T>(Slot<T>);
+
+impl<T> Job<T> {
+    fn done(&self) -> bool {
+        self.0.lock().is_some()
+    }
+
+    /// What it made (waiting for it); `None` if it panicked.
+    fn take(self) -> Option<T> {
+        loop {
+            if let Some(r) = self.0.lock().take() {
+                return r.ok();
+            }
+            std::thread::yield_now();
+        }
+    }
+}
+
+type Work = Box<dyn FnOnce() + Send>;
+
+/// The art workers: half the cores (at least one), so the frame and the rest of loading keep
+/// theirs. `None` where threads can't start (the web).
+fn workers() -> Option<&'static Mutex<mpsc::Sender<Work>>> {
+    static POOL: OnceLock<Option<Mutex<mpsc::Sender<Work>>>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<Work>();
+        let rx = Arc::new(Mutex::new(rx));
+        let n = std::thread::available_parallelism()
+            .map_or(2, |n| n.get() / 2)
+            .max(1);
+        let mut started = 0;
+        for i in 0..n {
+            let rx = rx.clone();
+            let spawned = std::thread::Builder::new()
+                .name(format!("proving ground art {i}"))
+                .spawn(move || {
+                    loop {
+                        let next = rx.lock().recv();
+                        match next {
+                            Ok(work) => work(),
+                            Err(_) => return,
+                        }
+                    }
+                });
+            started += spawned.is_ok() as usize;
+        }
+        (started > 0).then(|| Mutex::new(tx))
+    })
+    .as_ref()
+}
+
+/// Run `make` on a worker, or here (`Err`) where there are none.
+fn on_worker<T: Send + 'static>(make: impl FnOnce() -> T + Send + 'static) -> Result<Job<T>, T> {
+    let Some(pool) = workers() else {
+        return Err(make());
+    };
+    let slot: Slot<T> = Arc::new(Mutex::new(None));
+    let theirs = slot.clone();
+    let work: Work = Box::new(move || {
+        let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(make));
+        *theirs.lock() = Some(made);
+    });
+    match pool.lock().send(work) {
+        Ok(()) => Ok(Job(slot)),
+        // (The pool's threads are gone: nothing left to run it.)
+        Err(mpsc::SendError(_)) => unreachable!("art workers never stop"),
+    }
 }
 
 /// Texture resolution: full size in optimized builds; debug builds (tests) make them a
@@ -161,11 +249,8 @@ impl Tex {
     }
 }
 
-fn set_images(world: &mut World, tex: Tex) -> SetImages {
-    if let Some(s) = world.get_resource_or_init::<ArtCache>().sets.get(&tex) {
-        return *s;
-    }
-    let set = tex.make();
+/// Store a texture set's images.
+fn store_set(world: &mut World, tex: Tex, set: TextureSet) {
     let mut images = world.resource_mut::<Assets<Image>>();
     let s = SetImages {
         albedo: images.add(set.albedo),
@@ -174,13 +259,11 @@ fn set_images(world: &mut World, tex: Tex) -> SetImages {
         tile_m: set.tile_m,
     };
     world.resource_mut::<ArtCache>().sets.insert(tex, s);
-    s
 }
 
 /// A material whose texture set drives color, normals, roughness, metalness and occlusion;
 /// `tint` (sRGB hex) multiplies the color.
-fn textured(world: &mut World, tex: Tex, tint: u32) -> StandardMaterial {
-    let s = set_images(world, tex);
+fn textured(s: SetImages, tint: u32) -> StandardMaterial {
     let mut m = StandardMaterial::hex(tint)
         .with_roughness(1.0)
         .with_metallic(1.0)
@@ -192,54 +275,219 @@ fn textured(world: &mut World, tex: Tex, tint: u32) -> StandardMaterial {
     m
 }
 
-/// The material for `m`, made (with its textures) on first use.
+/// How `m` is made: plain, or from a texture set with a tint (sRGB hex) and subsurface.
+enum Recipe {
+    Plain(StandardMaterial),
+    Textured(Tex, u32, f32),
+}
+
+fn recipe(m: Mat) -> Recipe {
+    let white = 0xffffff;
+    let tex = |t: Tex| Recipe::Textured(t, white, 0.0);
+    match m {
+        Mat::Slab => tex(Tex::Slab),
+        Mat::Concrete => tex(Tex::Concrete),
+        Mat::Hazard => tex(Tex::Hazard),
+        Mat::Yellow => tex(Tex::Yellow),
+        Mat::Dark => tex(Tex::Dark),
+        Mat::Steel => tex(Tex::Steel),
+        Mat::Timber => tex(Tex::Timber),
+        Mat::Diamond => tex(Tex::Diamond),
+        // The second wood is a little darker and warmer.
+        Mat::CrateWood(k) => Recipe::Textured(
+            Tex::CrateWood(k % 2),
+            if k % 2 == 0 { white } else { 0xe8d2bc },
+            0.0,
+        ),
+        Mat::Drum(hex) => tex(Tex::Drum(hex)),
+        Mat::Rubber(hex) => Recipe::Textured(Tex::Rubber, hex, 0.0),
+        Mat::Domino => Recipe::Plain(StandardMaterial::hex(white).with_roughness(0.3)),
+        Mat::Vinyl => Recipe::Textured(Tex::Vinyl, white, 0.1),
+        Mat::Asphalt => tex(Tex::Asphalt),
+        Mat::Sand => tex(Tex::Sand),
+        Mat::Paint => Recipe::Plain(StandardMaterial::hex(0xe9e6dc).with_roughness(0.55)),
+        Mat::Galvanized => tex(Tex::Galvanized),
+        Mat::Granite => tex(Tex::Granite),
+        Mat::Chrome => Recipe::Plain(
+            StandardMaterial::hex(0xe4e6e9)
+                .with_metallic(1.0)
+                .with_roughness(0.07),
+        ),
+        Mat::Lacquer(hex) => Recipe::Plain(StandardMaterial::hex(hex).with_roughness(0.2)),
+        Mat::Felt(hex) => Recipe::Plain(StandardMaterial::hex(hex).with_roughness(0.93)),
+        Mat::Brass => Recipe::Plain(
+            StandardMaterial::hex(0xd6b25e)
+                .with_metallic(1.0)
+                .with_roughness(0.25),
+        ),
+        Mat::Oak => tex(Tex::Oak),
+        Mat::LinePaint => Recipe::Plain(StandardMaterial::hex(0xe3b22a).with_roughness(0.7)),
+        Mat::Rope => Recipe::Plain(StandardMaterial::hex(0xb39566).with_roughness(0.95)),
+        Mat::Glass => Recipe::Plain(
+            StandardMaterial::hex(0xe8f1f4)
+                .with_roughness(0.04)
+                .with_alpha(0.12),
+        ),
+    }
+}
+
+/// `m` made from its recipe, if its texture set (if any) is here.
+fn made(world: &World, m: Mat) -> Option<StandardMaterial> {
+    match recipe(m) {
+        Recipe::Plain(made) => Some(made),
+        Recipe::Textured(tex, tint, subsurface) => {
+            let s = *world.resource::<ArtCache>().sets.get(&tex)?;
+            let made = textured(s, tint);
+            Some(if subsurface > 0.0 {
+                made.with_subsurface(subsurface)
+            } else {
+                made
+            })
+        }
+    }
+}
+
+/// The material for `m`, made on first use. One whose texture set isn't made yet is reserved
+/// (drawn plain) while a worker makes the set.
 pub(crate) fn material(world: &mut World, m: Mat) -> Handle<StandardMaterial> {
     if let Some(h) = world.get_resource_or_init::<ArtCache>().materials.get(&m) {
         return *h;
     }
-    let white = 0xffffff;
-    let made = match m {
-        Mat::Slab => textured(world, Tex::Slab, white),
-        Mat::Concrete => textured(world, Tex::Concrete, white),
-        Mat::Hazard => textured(world, Tex::Hazard, white),
-        Mat::Yellow => textured(world, Tex::Yellow, white),
-        Mat::Dark => textured(world, Tex::Dark, white),
-        Mat::Steel => textured(world, Tex::Steel, white),
-        Mat::Timber => textured(world, Tex::Timber, white),
-        Mat::Diamond => textured(world, Tex::Diamond, white),
-        // The second wood is a little darker and warmer.
-        Mat::CrateWood(k) => textured(
-            world,
-            Tex::CrateWood(k % 2),
-            if k % 2 == 0 { white } else { 0xe8d2bc },
-        ),
-        Mat::Drum(hex) => textured(world, Tex::Drum(hex), white),
-        Mat::Rubber(hex) => textured(world, Tex::Rubber, hex),
-        Mat::Domino => StandardMaterial::hex(white).with_roughness(0.3),
-        Mat::Vinyl => textured(world, Tex::Vinyl, white).with_subsurface(0.1),
-        Mat::Asphalt => textured(world, Tex::Asphalt, white),
-        Mat::Sand => textured(world, Tex::Sand, white),
-        Mat::Paint => StandardMaterial::hex(0xe9e6dc).with_roughness(0.55),
-        Mat::Galvanized => textured(world, Tex::Galvanized, white),
-        Mat::Granite => textured(world, Tex::Granite, white),
-        Mat::Chrome => StandardMaterial::hex(0xe4e6e9)
-            .with_metallic(1.0)
-            .with_roughness(0.07),
-        Mat::Lacquer(hex) => StandardMaterial::hex(hex).with_roughness(0.2),
-        Mat::Felt(hex) => StandardMaterial::hex(hex).with_roughness(0.93),
-        Mat::Brass => StandardMaterial::hex(0xd6b25e)
-            .with_metallic(1.0)
-            .with_roughness(0.25),
-        Mat::Oak => textured(world, Tex::Oak, white),
-        Mat::LinePaint => StandardMaterial::hex(0xe3b22a).with_roughness(0.7),
-        Mat::Rope => StandardMaterial::hex(0xb39566).with_roughness(0.95),
-        Mat::Glass => StandardMaterial::hex(0xe8f1f4)
-            .with_roughness(0.04)
-            .with_alpha(0.12),
+    if let Some(made) = made(world, m) {
+        let h = world.resource_mut::<Assets<StandardMaterial>>().add(made);
+        world.resource_mut::<ArtCache>().materials.insert(m, h);
+        return h;
+    }
+    let Recipe::Textured(tex, ..) = recipe(m) else {
+        unreachable!("plain materials are always made")
     };
-    let h = world.resource_mut::<Assets<StandardMaterial>>().add(made);
-    world.resource_mut::<ArtCache>().materials.insert(m, h);
+    let h = world
+        .resource_mut::<Assets<StandardMaterial>>()
+        .reserve_keyed(&format!("physics/material/{m:?}"));
+    let mut cache = world.resource_mut::<ArtCache>();
+    cache.materials.insert(m, h);
+    cache.waiting.push((m, h));
+    if !cache.making.iter().any(|(t, _)| *t == tex) {
+        match on_worker(move || tex.make()) {
+            Ok(job) => cache.making.push((tex, job)),
+            Err(set) => {
+                store_set(world, tex, set);
+                finish(world);
+            }
+        }
+    }
     h
+}
+
+/// Wait for the workers and store everything they made (for screenshots and tools).
+pub fn wait(world: &mut World) {
+    let Some(mut cache) = world.get_resource_mut::<ArtCache>() else {
+        return;
+    };
+    let making = std::mem::take(&mut cache.making);
+    let meshing = std::mem::take(&mut cache.meshing);
+    store_made(world, making, meshing);
+    finish(world);
+}
+
+/// Store finished texture sets and meshes (a set whose worker panicked is made here).
+#[allow(clippy::type_complexity)]
+fn store_made(
+    world: &mut World,
+    sets: Vec<(Tex, Job<TextureSet>)>,
+    meshes: Vec<(Vec<Handle<Mesh>>, Job<Vec<Mesh>>)>,
+) {
+    for (tex, job) in sets {
+        let set = job.take().unwrap_or_else(|| tex.make());
+        store_set(world, tex, set);
+    }
+    for (handles, job) in meshes {
+        let made = job.take().unwrap_or_default();
+        let mut assets = world.resource_mut::<Assets<Mesh>>();
+        for (h, m) in handles.into_iter().zip(made) {
+            assets.set(h, m);
+        }
+    }
+}
+
+/// Store what the workers have made: texture sets (and fill the materials waiting for them)
+/// and meshes. Runs every frame.
+pub(crate) fn finish(world: &mut World) {
+    let Some(mut cache) = world.get_resource_mut::<ArtCache>() else {
+        return;
+    };
+    if cache.making.is_empty() && cache.waiting.is_empty() && cache.meshing.is_empty() {
+        return;
+    }
+    let (sets, making): (Vec<_>, Vec<_>) = std::mem::take(&mut cache.making)
+        .into_iter()
+        .partition(|(_, j)| j.done());
+    cache.making = making;
+    let (meshes, meshing): (Vec<_>, Vec<_>) = std::mem::take(&mut cache.meshing)
+        .into_iter()
+        .partition(|(_, j)| j.done());
+    cache.meshing = meshing;
+    store_made(world, sets, meshes);
+    let waiting = std::mem::take(&mut world.resource_mut::<ArtCache>().waiting);
+    let mut still = Vec::new();
+    for (m, h) in waiting {
+        match made(world, m) {
+            Some(made) => world
+                .resource_mut::<Assets<StandardMaterial>>()
+                .set(h, made),
+            None => still.push((m, h)),
+        }
+    }
+    world.resource_mut::<ArtCache>().waiting = still;
+}
+
+/// True while workers are still making the proving ground's art.
+pub fn pending(world: &World) -> bool {
+    world
+        .get_resource::<ArtCache>()
+        .is_some_and(|c| !c.making.is_empty() || !c.waiting.is_empty() || !c.meshing.is_empty())
+}
+
+/// `N` meshes made on a worker (cached under `key`), each drawn with its material from `mats`
+/// once they arrive. None of them may be empty.
+pub(crate) fn parts_later<const N: usize>(
+    world: &mut World,
+    key: &str,
+    mats: [Mat; N],
+    make: impl FnOnce() -> [Mesh; N] + Send + 'static,
+) -> Parts {
+    let keys: [String; N] = std::array::from_fn(|i| format!("physics/{key}#{i}"));
+    let cached: Option<Vec<_>> = {
+        let meshes = world.resource::<Assets<Mesh>>();
+        keys.iter().map(|k| meshes.by_key(k)).collect()
+    };
+    let handles = match cached {
+        Some(h) => h,
+        None => {
+            let handles: Vec<Handle<Mesh>> = {
+                let mut meshes = world.resource_mut::<Assets<Mesh>>();
+                keys.iter().map(|k| meshes.reserve_keyed(k)).collect()
+            };
+            match on_worker(move || Vec::from(make())) {
+                Ok(job) => world
+                    .get_resource_or_init::<ArtCache>()
+                    .meshing
+                    .push((handles.clone(), job)),
+                Err(made) => {
+                    let mut meshes = world.resource_mut::<Assets<Mesh>>();
+                    for (h, m) in handles.iter().zip(made) {
+                        meshes.set(*h, m);
+                    }
+                }
+            }
+            handles
+        }
+    };
+    handles
+        .into_iter()
+        .zip(mats)
+        .map(|(h, m)| (h, material(world, m)))
+        .collect()
 }
 
 /// `N` meshes cached under `key` (`make` builds them on first use), each drawn with its

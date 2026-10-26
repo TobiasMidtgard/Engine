@@ -327,7 +327,11 @@ fn main() {
         demo::spawn_demo(&mut commands, DVec3::ZERO);
     });
 
-    let mut t = 0.0f32;
+    // The yard builds its stations over its first steps: have them all at once here, so the
+    // shots' times stay where they were.
+    app.update();
+    demo::finish_building(&mut app.world);
+    let mut t = 1.0f32 / 60.0;
     for (at, name, eye, target) in SHOTS.iter().filter(|s| s.1.contains(only.as_str())) {
         // Simulate up to a few frames before the shot without drawing (fast on lavapipe),
         // then draw a few frames so auto exposure settles.
@@ -337,6 +341,8 @@ fn main() {
             t += 1.0 / 60.0;
         }
         simulate(&mut app, frames);
+        // Textures and dummies are made on workers: have them all before drawing.
+        demo::finish_building(&mut app.world);
         {
             let mut tr = app.world.get_mut::<Transform>(camera).unwrap();
             *tr = Transform::from_translation(DVec3::from_array(*eye))

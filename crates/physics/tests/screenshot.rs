@@ -39,6 +39,7 @@ fn proving_ground_renders_and_moves() {
         demo::spawn_demo(&mut commands, DVec3::ZERO);
     });
     app.update();
+    demo::finish_building(&mut app.world);
     let ball = {
         let mut q = app.world.query::<(Entity, &Name)>();
         q.iter(&app.world)
