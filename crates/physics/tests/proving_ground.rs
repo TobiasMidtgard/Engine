@@ -549,3 +549,63 @@ fn the_jenga_tower_stands_three_pokes_and_falls_at_the_fourth() {
         "a block ended up {spread:.1} m from the tower"
     );
 }
+
+/// Someone walks into the resting yard to the ragdoll stairs and back out, the camera with
+/// them: stations wake, regions split off and merge round the walker, and the stations rest
+/// again behind them. (The exe crashed in Rapier's island bookkeeping while zones woke; the
+/// cause, a region stepped with no time in it before its first real step, is pinned down in
+/// `sim.rs`'s tests.)
+#[test]
+fn a_walker_wakes_the_resting_yard_and_leaves_it_resting() {
+    use engine_world::physics::{CharacterController, CharacterMove};
+    let mut app = app();
+    // Ground round the yard, flush with its top.
+    app.world.spawn((
+        Transform::from_xyz(0.0, demo::SLAB_RISE - 0.5, 0.0),
+        RigidBody::fixed(),
+        Collider::cuboid(Vec3::new(300.0, 0.5, 300.0)),
+    ));
+    let start = DVec3::new(130.0, 1.0, -10.0);
+    let walker = app
+        .world
+        .spawn((
+            Transform::from_translation(start),
+            CharacterController::default(),
+            CharacterMove {
+                velocity: Vec3::ZERO,
+            },
+        ))
+        .id();
+    let focus = app
+        .world
+        .spawn((
+            Transform::from_translation(start),
+            SimulationFocus::default(),
+        ))
+        .id();
+    // Nobody near: the stations rest.
+    app.update_n(10 * 60);
+    let resting = *app.world.resource::<PhysicsStats>();
+    assert!(resting.awake < 100, "the yard didn't rest: {resting:?}");
+    // Walk in to the ragdoll stairs and back out, the camera following.
+    let mut woke = false;
+    for frame in 0..20 * 60 {
+        let x = if frame < 9 * 60 { -12.0 } else { 12.0 };
+        app.world.get_mut::<CharacterMove>(walker).unwrap().velocity = Vec3::new(x, 0.0, 0.0);
+        app.update();
+        let at = app.world.get::<Transform>(walker).unwrap().translation;
+        app.world.get_mut::<Transform>(focus).unwrap().translation = at;
+        woke |= app.world.resource::<PhysicsStats>().awake > 500;
+    }
+    assert!(woke, "the yard never woke round the walker");
+    let at = app.world.get::<Transform>(walker).unwrap().translation;
+    assert!(
+        at.x > 90.0,
+        "the walker didn't get back out of the yard: {at}"
+    );
+    // Gone again: the stations rest.
+    app.world.get_mut::<CharacterMove>(walker).unwrap().velocity = Vec3::ZERO;
+    app.update_n(10 * 60);
+    let again = *app.world.resource::<PhysicsStats>();
+    assert!(again.awake < 100, "the yard didn't rest again: {again:?}");
+}

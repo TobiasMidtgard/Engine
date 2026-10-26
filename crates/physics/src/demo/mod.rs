@@ -379,6 +379,8 @@ pub struct ProvingGround {
     running: [f64; Station::ALL.len()],
     /// Stations resting, nobody near: their bodies held asleep, no replays ([`replay_stations`]).
     resting: [bool; Station::ALL.len()],
+    /// Stations someone came near since they were built. One nobody has seen rests at once.
+    seen: [bool; Station::ALL.len()],
     /// Replay stations on their cycles (on by default).
     pub replay: bool,
 }
@@ -666,6 +668,7 @@ fn build(world: &mut World, origin: DVec3) {
         surfaces,
         running: [0.0; Station::ALL.len()],
         resting: [false; Station::ALL.len()],
+        seen: [false; Station::ALL.len()],
         replay: true,
     });
     for station in Station::ALL {
@@ -771,6 +774,7 @@ fn build_station(world: &mut World, ground: Entity, station: Station) {
     if let Some(mut g) = world.get_mut::<ProvingGround>(ground) {
         g.running[station as usize] = 0.0;
         g.resting[station as usize] = false;
+        g.seen[station as usize] = false;
     }
 }
 
@@ -780,9 +784,12 @@ fn build_station(world: &mut World, ground: Entity, station: Station) {
 const STATION_REST_M: f64 = 70.0;
 /// A resting station wakes, replaying from the start, once a focus comes this near, meters.
 const STATION_WAKE_M: f64 = 55.0;
-/// A station nobody is near rests this long after it was built (or at the end of its cycle,
-/// if sooner), seconds: long enough for what it drops to land, so nothing hangs in the air.
-/// The wheel and table never stop turning nor the pendulums swinging; they rest mid-motion.
+/// A station someone walked away from rests this long after it was built (or at the end of
+/// its cycle, if sooner), seconds: long enough for what it drops to land, so nothing hangs in
+/// the air. The wheel and table never stop turning nor the pendulums swinging; they rest
+/// mid-motion. One nobody has come near since it was built rests at once, asleep where it was
+/// built (Jolt's `EActivation::DontActivate`, Unreal's `bStartAwake = false`): it replays from
+/// the start when someone comes, and settling it first cost minutes at a few fps on load.
 const FAR_REST_SECS: f64 = 8.0;
 
 /// Replay each proving ground's stations whose cycle is up (world time, so slow motion slows
@@ -820,9 +827,11 @@ pub(crate) fn replay_stations(world: &mut World) {
                 continue;
             }
             g.running[i] += dt;
+            g.seen[i] |= !focus.is_empty() && d <= STATION_REST_M;
             let t = g.running[i];
             let cycle = station.cycle_secs();
-            if d > STATION_REST_M && t >= cycle.unwrap_or(f64::INFINITY).min(FAR_REST_SECS) {
+            let settle = if g.seen[i] { FAR_REST_SECS } else { 0.0 };
+            if d > STATION_REST_M && t >= cycle.unwrap_or(f64::INFINITY).min(settle) {
                 g.resting[i] = true;
                 rest.push((e, station));
             } else if cycle.is_some_and(|c| t >= c) {
