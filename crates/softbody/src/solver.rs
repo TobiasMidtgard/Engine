@@ -321,6 +321,10 @@ pub struct Sim {
     /// The particles each collider can reach this step: `near[near_starts[c]..near_starts[c + 1]]`.
     near_starts: Vec<u32>,
     near: Vec<u32>,
+    /// Each frame's pose at the end of this substep.
+    poses: Vec<(Vec3, Quat)>,
+    /// The air's force on each particle (N), sampled a few times a step.
+    aero_force: Vec<Vec3>,
     self_contacts: SelfContacts,
 }
 
@@ -637,19 +641,23 @@ impl Sim {
         self.find_near(colliders, dt);
         let n = self.substeps_for(dt);
         let h = dt / n as f32;
+        // The air's force changes slowly next to the substeps (Chaos Cloth applies it once a
+        // frame at 60 Hz), so it is sampled at least every 1/240 s, not every substep.
+        let aero_every = (n / 4).max(1);
         for k in 0..n {
             let t0 = k as f32 / n as f32;
             let t1 = (k + 1) as f32 / n as f32;
-            self.substep(h, t0, t1, dt, colliders);
+            self.substep(h, t0, t1, dt, colliders, k % aero_every == 0);
         }
         self.params.time += dt;
         self.finish_step();
     }
 
     /// Which particles each collider can reach this step: those within its bounding box
-    /// swept along its path, plus as far as a particle may travel in the step (twice its
-    /// fastest particle's speed, plus how far the anchor frames carry it), so the substeps
-    /// test each particle against a few colliders, not all of them.
+    /// swept along its path, plus as far as the particle may travel in the step (twice its
+    /// speed and half the body's fastest, for a strand whipped up to speed within the step,
+    /// plus how far the anchor frames carry it), so the substeps test each particle against
+    /// a few colliders, not all of them.
     fn find_near(&mut self, colliders: &[LocalCollider], dt: f32) {
         self.near_starts.clear();
         self.near.clear();
@@ -672,7 +680,7 @@ impl Sim {
             let arm = (center - f.from_pos).length() + extent;
             m.max((f.to_pos - f.from_pos).length() + angle.abs() * arm)
         });
-        let travel = 2.0 * fastest.sqrt() * dt + carried + self.params.radius + NEAR_SLACK;
+        let travel = 0.5 * fastest.sqrt() * dt + carried + self.params.radius + NEAR_SLACK;
         for c in colliders {
             self.near_starts.push(self.near.len() as u32);
             // In the collider's box, from the nearest point of its path; turning in the step
@@ -683,6 +691,7 @@ impl Sim {
             }
             let reach = travel + angle.abs() * c.shape.bounding_radius();
             let half = c.shape.half_extents() + reach;
+            let vel = &self.vel;
             let inv_rot = c.to_rot.conjugate();
             let (a, ab) = (c.from_pos, c.to_pos - c.from_pos);
             let l2 = ab.length_squared().max(1e-12);
@@ -691,7 +700,8 @@ impl Sim {
                     continue;
                 }
                 let t = ((*x - a).dot(ab) / l2).clamp(0.0, 1.0);
-                if (inv_rot * (*x - a - ab * t)).abs().cmple(half).all() {
+                let own = Vec3::splat(2.0 * dt) * vel[i].length();
+                if (inv_rot * (*x - a - ab * t)).abs().cmple(half + own).all() {
                     self.near.push(i as u32);
                 }
             }
@@ -707,7 +717,15 @@ impl Sim {
         self.loads.clear();
     }
 
-    fn substep(&mut self, h: f32, t0: f32, t1: f32, dt: f32, colliders: &[LocalCollider]) {
+    fn substep(
+        &mut self,
+        h: f32,
+        t0: f32,
+        t1: f32,
+        dt: f32,
+        colliders: &[LocalCollider],
+        sample_air: bool,
+    ) {
         let inv_h = 1.0 / h;
         let inv_h2 = inv_h * inv_h;
         let p = self.params;
@@ -729,6 +747,14 @@ impl Sim {
                 }
             }
         }
+
+        self.poses.clear();
+        self.poses.extend(self.frames.iter().map(|f| f.pose(t1)));
+        let poses = &self.poses;
+        let point = |frame: u16, local: Vec3| {
+            let (fp, fr) = poses[frame as usize];
+            fp + fr * local
+        };
 
         // External accelerations: gravity, water, air, loads.
         self.accel.clear();
@@ -762,7 +788,11 @@ impl Sim {
                 *a += (gust(i) - *v) * (p.drag * in_air(i));
             }
         }
-        if let Some(aero) = p.aero {
+        if let Some(aero) = p.aero
+            && (sample_air || self.aero_force.len() != self.pos.len())
+        {
+            self.aero_force.clear();
+            self.aero_force.resize(self.pos.len(), Vec3::ZERO);
             for tri in &self.aero_triangles {
                 let [a, b, c] = tri.map(|i| i as usize);
                 let exposed = (in_air(a) + in_air(b) + in_air(c)) * (1.0 / 3.0);
@@ -790,9 +820,21 @@ impl Sim {
                 }
                 let force = force * (0.5 * AIR_DENSITY * area / 3.0);
                 for i in [a, b, c] {
-                    self.accel[i] += force * self.inv_mass[i];
+                    self.aero_force[i] += force;
                 }
             }
+        }
+        if p.aero.is_some() {
+            for ((a, f), w) in self
+                .accel
+                .iter_mut()
+                .zip(&self.aero_force)
+                .zip(&self.inv_mass)
+            {
+                *a += *f * *w;
+            }
+        } else {
+            self.aero_force.clear();
         }
         for &(i, f) in &self.loads {
             let i = i as usize;
@@ -863,7 +905,7 @@ impl Sim {
             }
         }
         for pin in &self.pins {
-            self.pos[pin.p as usize] = self.frames[pin.frame as usize].point(pin.local, t1);
+            self.pos[pin.p as usize] = point(pin.frame, pin.local);
         }
 
         // Constraints.
@@ -905,7 +947,7 @@ impl Sim {
             if w[i] == 0.0 {
                 continue;
             }
-            let target = self.frames[g.frame as usize].point(g.local, t1);
+            let target = point(g.frame, g.local);
             let dx = (target - pos[i]) * (w[i] / (w[i] + g.compliance * inv_h2));
             pos[i] += dx;
             // Reaction on the frame: equal and opposite impulse.
@@ -919,7 +961,7 @@ impl Sim {
             if w[i] == 0.0 {
                 continue;
             }
-            let (fp, fr) = self.frames[c.frame as usize].pose(t1);
+            let (fp, fr) = poses[c.frame as usize];
             let n = fr * c.normal;
             let d = (pos[i] - fp - fr * c.point).dot(n) - c.margin;
             if d < 0.0 {
@@ -931,7 +973,7 @@ impl Sim {
             if w[i] == 0.0 {
                 continue;
             }
-            let (fp, fr) = self.frames[c.frame as usize].pose(t1);
+            let (fp, fr) = poses[c.frame as usize];
             let (a, ab) = (fp + fr * c.a, fr * (c.b - c.a));
             let t = ((pos[i] - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
             let off = pos[i] - a - ab * t;

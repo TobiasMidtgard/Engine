@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use engine_core::prelude::*;
+use engine_core::tasks::ComputeTaskPool;
 use engine_world::animation::SkeletonPose;
 use engine_world::physics::{
     ApplyImpulse, BodyKind, CharacterController, CharacterState, Collider, ColliderShape,
@@ -849,9 +850,28 @@ pub fn step_bodies(
         range: range.map_or_else(SimulationRange::default, |r| *r),
     };
     let start = Instant::now();
-    bodies.par_iter_mut().for_each(|(e, mut body)| {
-        step_one(e, &mut body, &ctx);
-    });
+    // Longest first, each body its own task (the pool takes them in order), so the costly
+    // bodies start at once and the cheap ones fill in around them: the step takes about as
+    // long as its slowest body, not two costly ones queued on one thread.
+    let mut order: Vec<(Entity, Mut<SoftBodySim>)> = bodies.iter_mut().collect();
+    order.sort_by(|(_, a), (_, b)| b.step_ms.total_cmp(&a.step_ms));
+    match ComputeTaskPool::try_get() {
+        Some(pool) if order.len() > 1 && pool.thread_num() > 1 => {
+            let ctx = &ctx;
+            pool.scope(|scope| {
+                for (e, body) in &mut order {
+                    let e = *e;
+                    scope.spawn(async move { step_one(e, body, ctx) });
+                }
+            });
+        }
+        _ => {
+            for (e, body) in &mut order {
+                step_one(*e, body, &ctx);
+            }
+        }
+    }
+    drop(order);
     let mut particles = 0;
     let mut count = 0;
     let mut frozen = 0;
