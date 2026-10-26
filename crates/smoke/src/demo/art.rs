@@ -94,10 +94,19 @@ pub fn register(
     group: &str,
     parts: impl FnOnce() -> Parts,
 ) -> Vec<(String, &'static str)> {
-    let index_key = format!("smoke/range/mesh/{group}/#index");
     let Some(mut meshes) = world.get_resource_mut::<Assets<Mesh>>() else {
         return Vec::new();
     };
+    register_in(&mut meshes, group, parts)
+}
+
+/// [`register`] into a store of its own (a worker's, see [`Baked`]).
+pub fn register_in(
+    meshes: &mut Assets<Mesh>,
+    group: &str,
+    parts: impl FnOnce() -> Parts,
+) -> Vec<(String, &'static str)> {
+    let index_key = format!("smoke/range/mesh/{group}/#index");
     if meshes.by_key(&index_key).is_some() {
         return ALL_MATERIALS
             .iter()
@@ -290,27 +299,86 @@ fn paint_colors() -> [(&'static str, Vec3); 6] {
 }
 
 /// Bake every texture and register every material (once; later calls return at once).
+/// Marks the range's materials as made.
+const DONE_KEY: &str = "smoke/range/mat/#done";
+
+/// Whether the range's art is in the world's stores (its first range has been built).
+pub fn made(world: &World) -> bool {
+    world
+        .get_resource::<Assets<StandardMaterial>>()
+        .is_some_and(|m| m.by_key(DONE_KEY).is_some())
+}
+
+/// The range's textures and meshes, made off the frame in stores of their own and then
+/// moved into the world's by key ([`land`]), so the frame only spawns entities.
+#[derive(Default)]
+pub struct Baked {
+    pub images: Assets<Image>,
+    pub meshes: Assets<Mesh>,
+}
+
+impl Baked {
+    /// Bake every texture, and register `groups`' meshes.
+    pub fn bake(groups: impl FnOnce(&mut Assets<Mesh>)) -> Self {
+        let mut b = Self::default();
+        let started = std::time::Instant::now();
+        // The materials are made again on the frame, from the moved images' new handles.
+        make_materials(&mut b.images);
+        groups(&mut b.meshes);
+        tracing::info!(
+            "smoke range: baked its art off the frame in {:.2} s",
+            started.elapsed().as_secs_f32()
+        );
+        b
+    }
+}
+
+/// Move what was baked into the world's stores, under the same keys.
+pub fn land(world: &mut World, baked: Baked) {
+    fn moved<T: engine_assets::Asset>(mut from: Assets<T>, to: &mut Assets<T>) {
+        let keyed: Vec<(String, Handle<T>)> =
+            from.keys().map(|(k, h)| (k.to_string(), h)).collect();
+        for (key, h) in keyed {
+            if let Some(v) = from.remove(h) {
+                to.insert_keyed(&key, v);
+            }
+        }
+    }
+    if let Some(mut images) = world.get_resource_mut::<Assets<Image>>() {
+        moved(baked.images, &mut images);
+    }
+    if let Some(mut meshes) = world.get_resource_mut::<Assets<Mesh>>() {
+        moved(baked.meshes, &mut meshes);
+    }
+}
+
 pub fn ensure_materials(world: &mut World) {
-    let done_key = "smoke/range/mat/#done";
     let (Some(_), Some(_)) = (
         world.get_resource::<Assets<Image>>(),
         world.get_resource::<Assets<StandardMaterial>>(),
     ) else {
         return;
     };
-    if world
-        .resource::<Assets<StandardMaterial>>()
-        .by_key(done_key)
-        .is_some()
-    {
+    if made(world) {
         return;
     }
     let started = std::time::Instant::now();
+    let mats = make_materials(&mut world.resource_mut::<Assets<Image>>());
+    let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+    for (key, m) in mats {
+        materials.insert_keyed(key, m);
+    }
+    materials.insert_keyed(DONE_KEY, StandardMaterial::default());
+    tracing::info!(
+        "smoke range: made materials in {:.2} s",
+        started.elapsed().as_secs_f32()
+    );
+}
+
+/// Every material, baking the textures it needs into `images` unless they are there already.
+fn make_materials(images: &mut Assets<Image>) -> Vec<(&'static str, StandardMaterial)> {
     let mut mats: Vec<(&'static str, StandardMaterial)> = Vec::new();
     {
-        let mut images = world.resource_mut::<Assets<Image>>();
-        let images = &mut *images;
-
         let concrete = bake_set(images, "concrete", 2048, 3.0, |u, v| tex::concrete(u, v, 7));
         mats.push((CONCRETE, material(&concrete, None, &Look::new(3.0))));
         mats.push((
@@ -481,13 +549,5 @@ pub fn ensure_materials(world: &mut World) {
             ),
         ));
     }
-    let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
-    for (key, m) in mats {
-        materials.insert_keyed(key, m);
-    }
-    materials.insert_keyed(done_key, StandardMaterial::default());
-    tracing::info!(
-        "smoke range: baked textures in {:.2} s",
-        started.elapsed().as_secs_f32()
-    );
+    mats
 }

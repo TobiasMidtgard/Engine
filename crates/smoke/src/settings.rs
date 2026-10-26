@@ -52,6 +52,10 @@ pub struct SmokeSettings {
     pub detail: f32,
     /// Most raymarch steps per pixel.
     pub max_steps: u32,
+    /// Step volumes on a background task (where there is one): the frame never waits for a
+    /// big plume's step; what you see is one step behind, and a step that isn't done in time
+    /// is owed to the next.
+    pub background: bool,
 }
 
 impl Default for SmokeSettings {
@@ -80,6 +84,7 @@ impl Default for SmokeSettings {
             tunnel_secs: 1.6,
             detail: 1.0,
             max_steps: 160,
+            background: true,
         }
     }
 }

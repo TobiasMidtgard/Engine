@@ -17,7 +17,7 @@ use engine_world::{SmokeEmission, WorldPlugin, WorldShiftSet};
 use serde_json::{Value, json};
 
 pub use demo::SmokeDemo;
-pub use domain::{Domain, FogRates, Voxel};
+pub use domain::{Change, Domain, FogRates, Voxel};
 pub use fog::FogBank;
 pub use obscurance::SmokeSnapshot;
 pub use settings::SmokeSettings;
@@ -92,7 +92,10 @@ impl Plugin for SmokePlugin {
                     .chain()
                     .in_set(SimSet::Environment),
             )
-            .add_systems(Update, (sim::age_tunnels, demo::run_demos))
+            .add_systems(
+                Update,
+                (sim::age_tunnels, demo::land_range_art, demo::run_demos).chain(),
+            )
             .add_systems(
                 PostUpdate,
                 (
@@ -321,6 +324,9 @@ mod tests {
                 step_secs: 1.0 / 30.0,
             });
         app.add_plugins(SmokePlugin);
+        // Steps on the spot: these tests count steps, and a background step lands when the
+        // worker is done, not after a set number of updates.
+        app.world.resource_mut::<SmokeSettings>().background = false;
         app
     }
 

@@ -4,8 +4,10 @@
 
 use std::f32::consts::FRAC_PI_2;
 
+use engine_assets::Assets;
 use engine_core::math::{DVec3, Quat, Vec2, Vec3};
 use engine_core::prelude::*;
+use engine_render::Mesh;
 
 use super::art::{self, Parts};
 use super::kit::at;
@@ -164,6 +166,60 @@ fn scenery() -> Parts {
     p
 }
 
+/// The prop groups the range registers, by name.
+fn groups() -> Vec<String> {
+    let mut g: Vec<String> = [
+        "range",
+        "gun",
+        "fan_body",
+        "fan_rotor",
+        "cart_body",
+        "cart_wheelset",
+    ]
+    .map(String::from)
+    .into();
+    g.extend((0..grenades().len()).map(|i| format!("grenade{i}")));
+    g
+}
+
+/// A prop group's meshes, in its own space.
+fn parts_of(group: &str) -> Parts {
+    match group {
+        "range" => scenery(),
+        "gun" => gun::gun(),
+        "fan_body" => fan::body(ground::PAD_TOP - FAN_Y as f32),
+        "fan_rotor" => fan::rotor(),
+        "cart_body" => {
+            let mut p = Parts::default();
+            let drop = track::RAIL_TOP - CART_Y as f32;
+            p.absorb(track::cart_body(), at(Vec3::new(0.0, drop, 0.0)));
+            p
+        }
+        "cart_wheelset" => track::wheelset(),
+        _ => {
+            let i: usize = group
+                .strip_prefix("grenade")
+                .and_then(|i| i.parse().ok())
+                .unwrap_or_else(|| panic!("no prop group {group}"));
+            let (p, source) = grenades()[i];
+            let floor = ground::PAD_TOP - p[1] as f32;
+            vent::grenade(Vec3::from(source.color), floor, 0x6E0 + i as u64)
+        }
+    }
+}
+
+/// Every texture and mesh of the range, made in stores of their own (on a worker, by
+/// `super::spawn_demo`).
+pub fn bake() -> art::Baked {
+    art::Baked::bake(bake_meshes)
+}
+
+fn bake_meshes(meshes: &mut Assets<Mesh>) {
+    for g in groups() {
+        art::register_in(meshes, &g, || parts_of(&g));
+    }
+}
+
 /// Spawn one entity per registered part of `group` at `transform`.
 fn spawn_group(
     world: &mut World,
@@ -211,16 +267,12 @@ pub fn build(world: &mut World, origin: DVec3) {
         "Smoke demo: range",
         "range",
         at_w(0.0, 0.0, 0.0),
-        scenery,
+        || parts_of("range"),
     );
     let [mx, my, mz] = MUZZLE;
-    spawn_group(
-        world,
-        "Smoke demo: turret",
-        "gun",
-        at_w(mx, my, mz),
-        gun::gun,
-    );
+    spawn_group(world, "Smoke demo: turret", "gun", at_w(mx, my, mz), || {
+        parts_of("gun")
+    });
 
     // Grenades: the white screen and the signal colors by the targets.
     for (i, (p, source)) in grenades().into_iter().enumerate() {
@@ -237,11 +289,8 @@ pub fn build(world: &mut World, origin: DVec3) {
                 },
             ))
             .id();
-        let color = Vec3::from(source.color);
-        let floor = ground::PAD_TOP - p[1] as f32;
-        let parts = art::register(world, &format!("grenade{i}"), || {
-            vent::grenade(color, floor, 0x6E0 + i as u64)
-        });
+        let group = format!("grenade{i}");
+        let parts = art::register(world, &group, || parts_of(&group));
         art::spawn_parts(world, g, &parts);
     }
 
@@ -260,9 +309,8 @@ pub fn build(world: &mut World, origin: DVec3) {
     ));
 
     // Fans along the west side, blowing east across the range.
-    let fan_ground = ground::PAD_TOP - FAN_Y as f32;
-    let body = art::register(world, "fan_body", || fan::body(fan_ground));
-    let rotor = art::register(world, "fan_rotor", fan::rotor);
+    let body = art::register(world, "fan_body", || parts_of("fan_body"));
+    let rotor = art::register(world, "fan_rotor", || parts_of("fan_rotor"));
     for z in FAN_Z {
         let f = world
             .spawn((
@@ -294,12 +342,8 @@ pub fn build(world: &mut World, origin: DVec3) {
 
     // The cart on its track.
     let drop = track::RAIL_TOP - CART_Y as f32;
-    let cart_body = art::register(world, "cart_body", || {
-        let mut p = Parts::default();
-        p.absorb(track::cart_body(), at(Vec3::new(0.0, drop, 0.0)));
-        p
-    });
-    let wheels = art::register(world, "cart_wheelset", track::wheelset);
+    let cart_body = art::register(world, "cart_body", || parts_of("cart_body"));
+    let wheels = art::register(world, "cart_wheelset", || parts_of("cart_wheelset"));
     let cart = world
         .spawn((
             Name::new("Smoke demo: cart"),
@@ -333,4 +377,37 @@ pub fn build(world: &mut World, origin: DVec3) {
         "smoke range built in {:.2} s",
         started.elapsed().as_secs_f32()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_render::MeshRenderer;
+
+    fn props(world: &mut World) -> usize {
+        world.query::<&MeshRenderer>().iter(world).count()
+    }
+
+    /// The meshes baked off the frame are every mesh the range draws: building on them makes
+    /// no mesh of its own and the same props.
+    #[test]
+    fn a_range_on_meshes_baked_off_the_frame_is_the_same_range() {
+        let mut on_the_spot = World::new();
+        on_the_spot.insert_resource(Assets::<Mesh>::default());
+        build(&mut on_the_spot, DVec3::ZERO);
+
+        let mut baked = art::Baked::default();
+        bake_meshes(&mut baked.meshes);
+        let mut later = World::new();
+        later.insert_resource(Assets::<Mesh>::default());
+        art::land(&mut later, baked);
+        let landed = later.resource::<Assets<Mesh>>().len();
+        build(&mut later, DVec3::ZERO);
+
+        assert_eq!(later.resource::<Assets<Mesh>>().len(), landed);
+        assert_eq!(landed, on_the_spot.resource::<Assets<Mesh>>().len());
+        let n = props(&mut later);
+        assert!(n > 20, "{n}");
+        assert_eq!(n, props(&mut on_the_spot));
+    }
 }

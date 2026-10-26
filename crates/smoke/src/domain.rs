@@ -547,6 +547,16 @@ impl Domain {
         if self.is_idle() {
             return;
         }
+        self.sample_wind(wind);
+        self.step_sampled(p);
+    }
+
+    /// [`step`](Self::step) in the wind last sampled with [`sample_wind`](Self::sample_wind):
+    /// it needs nothing from the world, so it can run on a background task.
+    pub fn step_sampled(&mut self, p: &StepParams) {
+        if self.is_idle() {
+            return;
+        }
         let dt = p.dt;
         self.time += dt;
         // Released gas expands over this step: the expansion rate falls off linearly to the
@@ -565,7 +575,6 @@ impl Domain {
         // Only the air around the smoke is worth solving; the rest just follows the wind.
         self.active = self.active_region();
         let (lo, hi) = self.active;
-        self.sample_wind(wind);
         self.apply_forces(p, lo, hi);
         if p.vorticity > 0.0 {
             self.confine_vorticity(p.vorticity, dt, lo, hi);
@@ -640,7 +649,10 @@ impl Domain {
         (lo, (hi + m).min(d))
     }
 
-    fn sample_wind(&mut self, wind: &(dyn Fn(DVec3) -> Vec3 + Sync)) {
+    /// Sample the wind the box feels (from the world, before a [`step_sampled`]).
+    ///
+    /// [`step_sampled`]: Self::step_sampled
+    pub fn sample_wind(&mut self, wind: &(dyn Fn(DVec3) -> Vec3 + Sync)) {
         let wd = self.wind_dims;
         for z in 0..wd.z {
             for y in 0..wd.y {
@@ -1243,6 +1255,67 @@ impl Domain {
         self.active = self.active_region();
     }
 
+    /// Make this a copy of `other`'s air (same box), reusing this one's memory: what a step
+    /// reads, not its scratch space.
+    pub fn copy_from(&mut self, other: &Domain) {
+        if self.dims != other.dims {
+            *self = other.clone();
+            return;
+        }
+        self.origin = other.origin;
+        self.cell = other.cell;
+        self.voxels.clone_from(&other.voxels);
+        self.pressure.clone_from(&other.pressure);
+        self.floor.clone_from(&other.floor);
+        self.floor_stale = other.floor_stale;
+        self.expansions.clone_from(&other.expansions);
+        self.inflow.clone_from(&other.inflow);
+        self.version = other.version;
+        self.resampled = other.resampled;
+        self.mass_kg = other.mass_kg;
+        self.max_density = other.max_density;
+        self.time = other.time;
+        self.active = other.active;
+        self.fog = other.fog;
+    }
+
+    /// Make a [`Change`].
+    pub fn apply(&mut self, c: &Change) {
+        match *c {
+            Change::Splat {
+                at,
+                radius,
+                mass_kg,
+                heat_c,
+                vel,
+                albedo,
+            } => self.splat(at, radius, mass_kg, heat_c, vel, albedo),
+            Change::Inflate { at, radius, gas_m3 } => self.inflate(at, radius, gas_m3),
+            Change::Carve {
+                from,
+                to,
+                radius,
+                clear,
+                speed,
+            } => self.carve(from, to, radius, clear, speed),
+            Change::Blast {
+                at,
+                radius,
+                strength,
+            } => self.blast(at, radius, strength),
+            Change::Obstacle { at, radius, vel } => self.obstacle(at, radius, vel),
+            Change::Jet {
+                from,
+                dir,
+                length,
+                radius,
+                speed,
+                dt,
+            } => self.jet(from, dir, length, radius, speed, dt),
+            Change::Clear => self.clear(),
+        }
+    }
+
     /// Remove all smoke and stop the air.
     pub fn clear(&mut self) {
         self.voxels.iter_mut().for_each(|v| *v = Voxel::default());
@@ -1254,6 +1327,51 @@ impl Domain {
         // The contents jumped: the renderer must not blend from the old smoke.
         self.resampled += 1;
     }
+}
+
+/// Something done to a volume's air from outside its step (released smoke, a bullet, a
+/// blast, a fan), kept so it can be done again to a step that was running meanwhile.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Change {
+    Splat {
+        at: DVec3,
+        radius: f32,
+        mass_kg: f32,
+        heat_c: f32,
+        vel: Vec3,
+        albedo: Vec3,
+    },
+    Inflate {
+        at: DVec3,
+        radius: f32,
+        gas_m3: f32,
+    },
+    Carve {
+        from: DVec3,
+        to: DVec3,
+        radius: f32,
+        clear: f32,
+        speed: f32,
+    },
+    Blast {
+        at: DVec3,
+        radius: f32,
+        strength: f32,
+    },
+    Obstacle {
+        at: DVec3,
+        radius: f32,
+        vel: Vec3,
+    },
+    Jet {
+        from: DVec3,
+        dir: Vec3,
+        length: f32,
+        radius: f32,
+        speed: f32,
+        dt: f32,
+    },
+    Clear,
 }
 
 /// Volume growth rate (1/s) of the expansion sources at voxel coordinates `c`.

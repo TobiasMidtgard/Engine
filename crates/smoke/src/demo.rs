@@ -18,10 +18,13 @@
 //! smoke is there straight away.
 
 use std::f32::consts::PI;
+use std::sync::{Arc, Mutex};
 
+use engine_assets::Assets;
 use engine_core::math::{DQuat, DVec3, Quat, Rng, Vec3};
 use engine_core::prelude::*;
-use engine_render::{MeshRenderer, Shape, StandardMaterial};
+use engine_core::tasks::AsyncComputeTaskPool;
+use engine_render::{Image, Mesh, MeshRenderer, Shape, StandardMaterial};
 use engine_world::{ProjectileTrace, SmokeEmission, WorldImpulse};
 
 use crate::sim::{self, SmokeFan, SmokeSource};
@@ -236,11 +239,79 @@ const BLAST: [f64; 3] = [0.0, 0.5, 1.0];
 /// Build the smoke range around `origin`. It needs about 45 × 52 m of flat ground (the pad is
 /// 38 × 44 m; the berm and its spill reach a little past the far end and the sides).
 ///
-/// The props are procedural meshes and textures registered once by key (`smoke/range/…`);
-/// building them takes a moment the first time. Without a renderer only the gameplay
-/// entities are made.
+/// The props are procedural meshes and textures registered once by key (`smoke/range/…`).
+/// The first time, they are baked on a worker (about a second of work) and the range is built
+/// a few frames later, when they are done; [`loading`] says whether that is still to come.
+/// Without a renderer only the gameplay entities are made, at once.
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
-    commands.queue(move |world: &mut World| build::build(world, origin));
+    commands.queue(move |world: &mut World| {
+        if let Some(mut waiting) = world.get_resource_mut::<RangeArt>() {
+            waiting.origins.push(origin);
+            return;
+        }
+        let renders =
+            world.contains_resource::<Assets<Image>>() && world.contains_resource::<Assets<Mesh>>();
+        match AsyncComputeTaskPool::try_get() {
+            Some(pool) if renders && !art::made(world) => {
+                let slot = Arc::new(Mutex::new(None));
+                let out = slot.clone();
+                pool.spawn(async move {
+                    let baked = build::bake();
+                    if let Ok(mut s) = out.lock() {
+                        *s = Some(baked);
+                    }
+                })
+                .detach();
+                world.insert_resource(RangeArt {
+                    baked: slot,
+                    origins: vec![origin],
+                });
+            }
+            _ => build::build(world, origin),
+        }
+    });
+}
+
+/// The range's art baking on a worker, and where to build a range once it is done.
+#[derive(Resource)]
+pub struct RangeArt {
+    baked: Arc<Mutex<Option<art::Baked>>>,
+    origins: Vec<DVec3>,
+}
+
+/// True while a range asked for with [`spawn_demo`] waits for its art: what a loading screen
+/// waits on.
+pub fn loading(world: &World) -> bool {
+    world.contains_resource::<RangeArt>()
+}
+
+/// Build the waiting ranges once their art is baked.
+pub fn land_range_art(world: &mut World) {
+    let Some(art) = world.get_resource::<RangeArt>() else {
+        return;
+    };
+    let baked = match art.baked.lock() {
+        Ok(mut b) => b.take(),
+        Err(_) => None,
+    };
+    // A worker that died leaves the slot empty for good: build on the spot instead.
+    if baked.is_none() && Arc::strong_count(&art.baked) > 1 {
+        return;
+    }
+    let Some(waiting) = world.remove_resource::<RangeArt>() else {
+        return;
+    };
+    let started = std::time::Instant::now();
+    if let Some(baked) = baked {
+        art::land(world, baked);
+    }
+    for origin in waiting.origins {
+        build::build(world, origin);
+    }
+    tracing::info!(
+        "smoke range: built in {:.0} ms on the frame",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
 }
 
 /// Signal smoke burns hotter (it rises and spreads more).
@@ -364,7 +435,7 @@ fn clear_demo(world: &mut World, middle: DVec3) {
     let mut cleared = Vec::new();
     for d in world.resource_mut::<sim::SmokeDomains>().list.iter_mut() {
         if d.owner.is_some() && d.domain.contains(middle) {
-            d.domain.clear();
+            d.change(crate::domain::Change::Clear);
             cleared.push((d.domain.origin, d.domain.origin + d.domain.size()));
         }
     }
@@ -514,8 +585,8 @@ fn spin_rotors(world: &mut World, dt: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SmokePlugin;
     use crate::sim::{SmokeDomains, SmokeTunnels, SmokeVolume};
+    use crate::{SmokePlugin, SmokeSettings};
     use serde_json::json;
 
     #[test]
@@ -528,6 +599,8 @@ mod tests {
                 step_secs: 1.0 / 20.0,
             });
         app.add_plugins(SmokePlugin);
+        // Steps on the spot, so the smoke is where the test counts on it being.
+        app.world.resource_mut::<SmokeSettings>().background = false;
         // No wind, so only the fans move the cloud sideways.
         app.world.resource_mut::<engine_world::WeatherState>().wind = Vec3::ZERO;
         let origin = DVec3::new(100.0, 0.0, 50.0);
