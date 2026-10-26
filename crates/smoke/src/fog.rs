@@ -114,6 +114,10 @@ pub fn settle_fog(
         let Some(d) = domains.list.iter_mut().find(|d| d.owner == Some(e)) else {
             continue;
         };
+        // A bank far from everyone rests as it is, with the volume it lies in.
+        if d.resting {
+            continue;
+        }
         let domain = &mut d.domain;
         domain.fog = true;
         let amount = bank.amount_for(weather.fog);

@@ -4,7 +4,8 @@ use engine_core::math::{DVec2, DVec3, UVec3, Vec3};
 use engine_core::prelude::*;
 use engine_render::Camera;
 use engine_world::{
-    FocusPoints, Ground, ProjectileTrace, SmokeEmission, WeatherState, WindField, WorldImpulse,
+    FocusPoints, Ground, ProjectileTrace, SimulationRange, SmokeEmission, WeatherState, WindField,
+    WorldImpulse,
 };
 
 use crate::domain::Domain;
@@ -151,6 +152,9 @@ pub struct SmokeDomain {
     pub domain: Domain,
     /// Seconds with no smoke in it.
     pub empty_secs: f32,
+    /// Far from every focus: it keeps its smoke as it was and doesn't step until someone
+    /// comes back.
+    pub resting: bool,
 }
 
 /// Every smoke volume.
@@ -184,6 +188,7 @@ impl SmokeDomains {
             owner,
             domain,
             empty_secs: 0.0,
+            resting: false,
         });
         self.list.len() - 1
     }
@@ -254,7 +259,7 @@ pub fn albedo_of(darkness: f32) -> Vec3 {
     Vec3::new(a, a * 0.985, a * 0.96)
 }
 
-fn ground_floor(ground: &Ground) -> impl Fn(f64, f64) -> Option<f64> + '_ {
+fn ground_floor(ground: &Ground) -> impl Fn(f64, f64) -> Option<f64> + Sync + '_ {
     move |x, z| ground.height(DVec3::new(x, 1.0e5, z))
 }
 
@@ -312,6 +317,7 @@ pub fn release(
     mut domains: ResMut<SmokeDomains>,
     weather: Res<WeatherState>,
     ground: Res<Ground>,
+    (focus, range): (Res<FocusPoints>, Option<Res<SimulationRange>>),
 ) {
     let mut list: Vec<Puff> = Vec::new();
     for e in emissions.read() {
@@ -332,6 +338,14 @@ pub fn release(
         if let Some(puff) = run_source(&mut s, gt.translation(), dt) {
             list.push(puff);
         }
+    }
+    // Smoke released where the world rests (far from every focus) is let go: a volume made
+    // for it there would never step, and making one costs a ground query per column.
+    if let Some(range) = range
+        && !focus.points.is_empty()
+    {
+        let far = range.active_m * (1.0 + range.hysteresis.max(0.0));
+        list.retain(|(e, ..)| focus.distance(e.position) <= far);
     }
     if settings.enabled {
         deposit(
@@ -598,6 +612,7 @@ pub fn step(
     focus: Res<FocusPoints>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     mut diagnostics: ResMut<Diagnostics>,
+    range: Option<Res<SimulationRange>>,
 ) {
     if !settings.enabled {
         return;
@@ -618,17 +633,29 @@ pub fn step(
                 .map(|(_, t)| t.translation()),
         );
     }
+    // Volumes step within the shared simulation range (or the smoke's own radius if that is
+    // smaller) and rest beyond it and its margin, so ones at the edge don't flicker.
+    let (active_m, hysteresis) =
+        range.map_or((f64::INFINITY, 0.25), |r| (r.active_m, r.hysteresis));
+    let active_m = active_m.min(settings.sim_radius_m as f64);
     let params = settings.step_params(dt, weather.temperature_c);
     let wind_fn = |p: DVec3| turbulent_wind(&wind, p, settings.turbulence, wind.time as f64);
     let started = std::time::Instant::now();
     let mut stepped = 0;
     for d in &mut domains.list {
         let c = d.domain.center();
-        let near = points.is_empty()
-            || points
-                .iter()
-                .any(|f| DVec2::new(f.x - c.x, f.z - c.z).length() < settings.sim_radius_m as f64);
-        if !near {
+        let size = d.domain.size();
+        let reach = 0.5 * DVec2::new(size.x, size.z).length();
+        let gap = points
+            .iter()
+            .map(|f| DVec2::new(f.x - c.x, f.z - c.z).length() - reach)
+            .fold(f64::INFINITY, f64::min);
+        if points.is_empty() || gap <= active_m {
+            d.resting = false;
+        } else if gap > active_m * (1.0 + hysteresis) {
+            d.resting = true;
+        }
+        if d.resting {
             continue;
         }
         if d.domain.is_idle() {

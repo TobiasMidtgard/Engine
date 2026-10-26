@@ -98,20 +98,38 @@ impl Frozen {
 pub struct SmokeSnapshot {
     /// m²/kg: how much one kilogram of smoke per cubic meter dims light, per meter.
     extinction_m2_kg: f32,
-    volumes: Vec<Frozen>,
+    volumes: Vec<Arc<Frozen>>,
 }
 
 impl SmokeSnapshot {
     /// A copy of every volume that has smoke in it.
     pub fn of(domains: &SmokeDomains, extinction_m2_kg: f32) -> Self {
+        Self::reusing(domains, extinction_m2_kg, &mut Vec::new())
+    }
+
+    /// Like [`of`](Self::of), copying only the volumes that changed since the copies in
+    /// `kept` (by id and version) were made; `kept` ends up holding this snapshot's copies.
+    fn reusing(
+        domains: &SmokeDomains,
+        extinction_m2_kg: f32,
+        kept: &mut Vec<(u32, u64, Arc<Frozen>)>,
+    ) -> Self {
+        let old = std::mem::take(kept);
+        for d in &domains.list {
+            if d.domain.mass_kg <= 1e-6 && d.domain.max_density <= 0.0 {
+                continue;
+            }
+            let version = d.domain.version;
+            let frozen = old
+                .iter()
+                .find(|(id, v, _)| *id == d.id && *v == version)
+                .map(|(.., f)| f.clone())
+                .unwrap_or_else(|| Arc::new(Frozen::of(&d.domain)));
+            kept.push((d.id, version, frozen));
+        }
         Self {
             extinction_m2_kg: extinction_m2_kg.max(0.0),
-            volumes: domains
-                .list
-                .iter()
-                .filter(|d| d.domain.mass_kg > 1e-6 || d.domain.max_density > 0.0)
-                .map(|d| Frozen::of(&d.domain))
-                .collect(),
+            volumes: kept.iter().map(|(.., f)| f.clone()).collect(),
         }
     }
 }
@@ -135,6 +153,10 @@ impl ObscuranceQuery for SmokeSnapshot {
     }
 }
 
+/// The last snapshot's copy of each volume, by id and version, for the next one to reuse.
+#[derive(Default)]
+pub struct Copies(Vec<(u32, u64, Arc<Frozen>)>);
+
 /// Each volume's id and version, and the thickness setting: what a snapshot was taken of.
 type Taken = (Vec<(u32, u64)>, f32);
 
@@ -145,6 +167,7 @@ pub fn publish(
     domains: Res<SmokeDomains>,
     mut obscurance: ResMut<Obscurance>,
     mut seen: Local<Option<Taken>>,
+    mut kept: Local<Copies>,
 ) {
     let now = (
         domains
@@ -160,7 +183,11 @@ pub fn publish(
     *seen = Some(now);
     obscurance.set(
         SOURCE,
-        Arc::new(SmokeSnapshot::of(&domains, settings.extinction_m2_kg)),
+        Arc::new(SmokeSnapshot::reusing(
+            &domains,
+            settings.extinction_m2_kg,
+            &mut kept.0,
+        )),
     );
 }
 

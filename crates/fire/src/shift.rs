@@ -14,6 +14,7 @@
 //! * Nothing else needs it: objects, the demo and the renderer read positions from transforms or
 //!   the field every time.
 
+use engine_core::math::DVec2;
 use engine_core::prelude::*;
 use engine_world::{SimulationFocus, WorldShift};
 
@@ -52,6 +53,9 @@ pub(crate) fn shift_fire(
     for e in &mut embers.list {
         e.position = s.point(e.position);
         e.velocity = s.velocity_at(e.position, e.velocity);
+        // The ground under it is looked up afresh in the new frame.
+        e.ground_y = f64::NEG_INFINITY;
+        e.ground_at = DVec2::INFINITY;
     }
     for (p, _) in &mut embers.landings {
         *p = s.point(*p);
@@ -152,6 +156,7 @@ mod tests {
             size: 0.01,
             life: 30.0,
             ignites: false,
+            ..Default::default()
         });
         assert!(app.world.resource::<FireField>().stats.burning_cells > 20);
         app

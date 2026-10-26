@@ -7,8 +7,8 @@ use engine_render::{Camera, PointLight};
 use engine_world::physics::CharacterController;
 use engine_world::{
     BurnState, Combustible, DamageEvent, DamageKind, FocusPoints, Gravity, Ground, HeatField,
-    IgniteRequest, SmokeEmission, SurfaceLayers, SurfaceMaterials, Water, WeatherState, WindField,
-    WorldImpulse,
+    IgniteRequest, SimulationRange, SmokeEmission, SurfaceLayers, SurfaceMaterials, Water,
+    WeatherState, WindField, WorldImpulse,
 };
 
 use crate::embers::{Ember, Embers};
@@ -74,6 +74,16 @@ pub struct FireClock {
     /// While fast-forwarding, only objects within this distance of this point are stepped (a
     /// demo's jump leaves fires elsewhere where they are).
     pub(crate) scope: Option<(DVec3, f64)>,
+    /// Where fire is awake this tick.
+    pub(crate) awake: Awake,
+}
+
+/// Where fire is awake: within `radius` of these points (across the ground). Fires and embers
+/// beyond it rest, as they were, until someone comes back.
+#[derive(Debug, Clone)]
+pub(crate) struct Awake {
+    at: Vec<DVec3>,
+    radius: f64,
 }
 
 impl FireClock {
@@ -96,7 +106,32 @@ impl Default for FireClock {
             gust_acc: 0.0,
             rng: Rng::new(0xF1BE),
             scope: None,
+            awake: Awake {
+                at: Vec::new(),
+                radius: f64::INFINITY,
+            },
         }
+    }
+}
+
+impl Awake {
+    /// Whether fire at `p` is awake (always, with no focus and no camera).
+    pub(crate) fn contains(&self, p: DVec3) -> bool {
+        self.within(p, self.radius)
+    }
+
+    /// Whether `p` is far enough out to rest: beyond the awake range and a margin, so things
+    /// at the edge don't flicker in and out.
+    fn resting(&self, p: DVec3, hysteresis: f64) -> bool {
+        !self.within(p, self.radius * (1.0 + hysteresis.max(0.0)))
+    }
+
+    fn within(&self, p: DVec3, radius: f64) -> bool {
+        self.at.is_empty()
+            || self
+                .at
+                .iter()
+                .any(|f| DVec2::new(f.x - p.x, f.z - p.z).length() < radius)
     }
 }
 
@@ -367,16 +402,6 @@ impl HeatGridExt for engine_world::Grid2<f32> {
     }
 }
 
-/// Is a point close enough to a focus (or the camera) to simulate?
-fn near_fn(points: Vec<DVec3>, radius: f64) -> impl Fn(DVec3) -> bool + Sync {
-    move |p: DVec3| {
-        points.is_empty()
-            || points
-                .iter()
-                .any(|f| DVec2::new(f.x - p.x, f.z - p.z).length() < radius)
-    }
-}
-
 /// Advance the fire field at `FireSettings::sim_hz` of world time.
 #[allow(clippy::too_many_arguments)]
 pub fn step_field(
@@ -393,11 +418,26 @@ pub fn step_field(
     ground: Res<Ground>,
     water: Res<Water>,
     materials: Res<SurfaceMaterials>,
+    range: Option<Res<SimulationRange>>,
 ) {
     clock.stepped = 0.0;
     if !settings.enabled {
         return;
     }
+    // Fire simulates near the foci (or the cameras) only: within the shared simulation range,
+    // or the fire's own radius if that is smaller.
+    let awake = &mut clock.awake;
+    awake.at.clear();
+    awake.at.extend(focus.points.iter().copied());
+    if awake.at.is_empty() {
+        let cams = cameras
+            .iter()
+            .filter(|(c, _)| c.active)
+            .map(|(_, t)| t.translation());
+        awake.at.extend(cams);
+    }
+    let range_m = range.map_or(f64::INFINITY, |r| r.active_m);
+    awake.radius = range_m.min(settings.sim_radius_m as f64);
     let step = 1.0 / settings.sim_hz.clamp(1.0, 240.0);
     if clock.fast_forward {
         clock.acc = step;
@@ -413,16 +453,8 @@ pub fn step_field(
     clock.stepped = dt;
     field.max_tiles = settings.max_tiles as usize;
 
-    let mut points = focus.points.clone();
-    if points.is_empty() {
-        points.extend(
-            cameras
-                .iter()
-                .filter(|(c, _)| c.active)
-                .map(|(_, t)| t.translation()),
-        );
-    }
-    let near = near_fn(points, settings.sim_radius_m as f64);
+    let awake = &clock.awake;
+    let near = move |p: DVec3| awake.contains(p);
     let wind_fn = |p: DVec3| wind.sample(p);
     let wet_fn = |p: DVec3| {
         let s = surface.sample(p);
@@ -491,7 +523,7 @@ pub fn step_objects(
         .iter()
         .filter_map(|(e, gt, c, b, shape, _)| {
             let b = b?;
-            (b.hrr_w > 0.0).then(|| {
+            (b.hrr_w > 0.0 && clock.awake.contains(gt.translation())).then(|| {
                 let shape = shape
                     .copied()
                     .unwrap_or_else(|| FlameShape::from_fuel(c.fuel_kg));
@@ -510,6 +542,10 @@ pub fn step_objects(
         if let Some((origin, radius)) = scope
             && gt.translation().distance(origin) > radius
         {
+            continue;
+        }
+        // Far from everyone it rests, burning or not, until someone comes back.
+        if !clock.awake.contains(gt.translation()) {
             continue;
         }
         let Some(mut b) = b else {
@@ -619,6 +655,7 @@ pub fn emit_outputs(
     let mut gusts: Vec<(DVec3, f32)> = Vec::new();
     let mut new_embers: Vec<Ember> = Vec::new();
     let ember_budget = settings.max_embers.saturating_sub(embers.list.len() as u32) as usize;
+    let clock = &mut *clock;
     let rng = &mut clock.rng;
     let mut emissions = 0u32;
 
@@ -627,6 +664,13 @@ pub fn emit_outputs(
             continue;
         }
         let origin = field.tile_origin(tile.key);
+        let half = TILE as f64 * cell as f64 * 0.5;
+        if !clock
+            .awake
+            .contains(DVec3::new(origin.x + half, 0.0, origin.y + half))
+        {
+            continue;
+        }
         // 4×4-cell blocks: smoke, light and updraft per block.
         const B: i32 = 4;
         let mut tile_hrr = 0.0f64;
@@ -696,6 +740,7 @@ pub fn emit_outputs(
                                     size: rng.range(0.004, 0.02),
                                     life: rng.range(2.0, 7.0),
                                     ignites: true,
+                                    ..Default::default()
                                 });
                             }
                         }
@@ -744,7 +789,7 @@ pub fn emit_outputs(
 
     // Burning objects: smoke from the top of the flames, embers, light, updraft.
     for (gt, c, b, shape, contained) in &objects {
-        if b.hrr_w <= 0.0 && b.glow <= 0.0 {
+        if b.hrr_w <= 0.0 && b.glow <= 0.0 || !clock.awake.contains(gt.translation()) {
             continue;
         }
         let shape = shape
@@ -800,6 +845,7 @@ pub fn emit_outputs(
                         size: rng.range(0.005, 0.03),
                         life: rng.range(3.0, 10.0),
                         ignites: contained.is_none(),
+                        ..Default::default()
                     });
                 }
             }
@@ -862,11 +908,17 @@ pub fn step_embers(
     gravity: Res<Gravity>,
     ground: Res<Ground>,
     mut field: ResMut<FireField>,
+    range: Option<Res<SimulationRange>>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 || embers.list.is_empty() && embers.landings.is_empty() {
         return;
     }
+    // Embers that drifted out to where fire rests go out.
+    let hysteresis = range.map_or(0.25, |r| r.hysteresis);
+    embers
+        .list
+        .retain(|e| !clock.awake.resting(e.position, hysteresis));
     let g = gravity.at(embers.list.first().map(|e| e.position).unwrap_or_default());
     embers.step(dt, g, |p| wind.sample(p), |p| ground.height(p));
     let landings = std::mem::take(&mut embers.landings);

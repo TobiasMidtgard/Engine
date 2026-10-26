@@ -137,7 +137,7 @@ impl Default for StepParams {
             wind_coupling: 0.6,
             vertical_coupling: 0.1,
             vorticity: 0.35,
-            iterations: 14,
+            iterations: 8,
             dissipation_secs: 120.0,
             cool_secs: 5.0,
             diffusion_m2_s: 0.2,
@@ -256,17 +256,18 @@ impl Domain {
 
     /// Set the ground under the box: `ground(x, z)` gives the ground height at a world
     /// position, or `None` for no ground.
-    pub fn set_floor(&mut self, ground: impl Fn(f64, f64) -> Option<f64>) {
-        for z in 0..self.dims.z {
-            for x in 0..self.dims.x {
-                let c = self.voxel_center(x, 0, z);
-                let layers = ground(c.x, c.z)
-                    .map(|h| ((h - self.origin.y) / self.cell as f64).round().max(0.0))
+    pub fn set_floor(&mut self, ground: impl Fn(f64, f64) -> Option<f64> + Sync) {
+        // Ground queries are dear (a planet's terrain): a row of columns per task.
+        let (origin, cell, dims) = (self.origin, self.cell as f64, self.dims);
+        par_chunks_mut(&mut self.floor, dims.x as usize, |z, row| {
+            for (x, layers) in row.iter_mut().enumerate() {
+                let c = origin + DVec3::new(x as f64 + 0.5, 0.5, z as f64 + 0.5) * cell;
+                *layers = ground(c.x, c.z)
+                    .map(|h| ((h - origin.y) / cell).round().max(0.0))
                     .unwrap_or(0.0)
-                    .min(self.dims.y as f64) as u16;
-                self.floor[(x + z * self.dims.x) as usize] = layers;
+                    .min(dims.y as f64) as u16;
             }
-        }
+        });
     }
 
     /// Trilinear sample at continuous voxel coordinates; outside the box, still air.
@@ -559,21 +560,28 @@ impl Domain {
                 life: dt * 0.999,
             });
         }
+        // Spans show each phase's share in the engine profile (`--profile`).
+        let span = tracing::info_span!("smoke forces").entered();
         // Only the air around the smoke is worth solving; the rest just follows the wind.
         self.active = self.active_region();
         let (lo, hi) = self.active;
         self.sample_wind(wind);
-        self.apply_forces(p);
+        self.apply_forces(p, lo, hi);
         if p.vorticity > 0.0 {
             self.confine_vorticity(p.vorticity, dt, lo, hi);
         }
+        drop(span);
+        let span = tracing::info_span!("smoke pressure").entered();
         self.project(p.iterations, lo, hi);
+        drop(span);
+        let span = tracing::info_span!("smoke advect").entered();
         self.advect(p, lo, hi);
         // Explicit diffusion is stable up to 1/6 per step.
         let mix = (p.diffusion_m2_s * dt / (self.cell * self.cell)).min(0.16);
         if mix > 1e-4 {
             self.diffuse(mix, lo, hi);
         }
+        drop(span);
         for e in &mut self.expansions {
             e.life -= dt;
         }
@@ -585,25 +593,33 @@ impl Domain {
     /// move and for the flow around it.
     fn active_region(&self) -> (UVec3, UVec3) {
         let d = self.dims;
-        let mut lo = d;
-        let mut hi = UVec3::ZERO;
-        for z in 0..d.z {
-            for y in 0..d.y {
-                let row = ((d.x * (y + d.y * z)) as usize)..((d.x * (y + 1 + d.y * z)) as usize);
-                let mut first = None;
-                let mut last = 0;
-                for (x, v) in self.voxels[row].iter().enumerate() {
-                    if v.density > 1e-7 || v.heat.abs() > 0.05 {
-                        first.get_or_insert(x as u32);
-                        last = x as u32;
+        // Each layer's bounds in parallel, then their union.
+        let mut layers = vec![(d, UVec3::ZERO); d.z as usize];
+        let voxels = &self.voxels;
+        par_chunks_mut(&mut layers, 4, |c, chunk| {
+            for (k, (lo, hi)) in chunk.iter_mut().enumerate() {
+                let z = (c * 4 + k) as u32;
+                for y in 0..d.y {
+                    let row =
+                        ((d.x * (y + d.y * z)) as usize)..((d.x * (y + 1 + d.y * z)) as usize);
+                    let mut first = None;
+                    let mut last = 0;
+                    for (x, v) in voxels[row].iter().enumerate() {
+                        if v.density > 1e-7 || v.heat.abs() > 0.05 {
+                            first.get_or_insert(x as u32);
+                            last = x as u32;
+                        }
+                    }
+                    if let Some(first) = first {
+                        *lo = lo.min(UVec3::new(first, y, z));
+                        *hi = hi.max(UVec3::new(last + 1, y + 1, z + 1));
                     }
                 }
-                if let Some(first) = first {
-                    lo = lo.min(UVec3::new(first, y, z));
-                    hi = hi.max(UVec3::new(last + 1, y + 1, z + 1));
-                }
             }
-        }
+        });
+        let (mut lo, mut hi) = layers
+            .into_iter()
+            .fold((d, UVec3::ZERO), |(a, b), (l, h)| (a.min(l), b.max(h)));
         for e in &self.expansions {
             let (a, b) = (self.local(e.from), self.local(e.to));
             let r = e.radius / self.cell;
@@ -637,7 +653,9 @@ impl Domain {
         }
     }
 
-    fn apply_forces(&mut self, p: &StepParams) {
+    /// Wind, buoyancy and weight, in the active region and a layer of voxels around it (all
+    /// the solve and the advection read; the still air beyond is left as it was).
+    fn apply_forces(&mut self, p: &StepParams, lo: UVec3, hi: UVec3) {
         let dims = self.dims;
         let slice = (dims.x * dims.y) as usize;
         let floor = &self.floor;
@@ -647,10 +665,15 @@ impl Domain {
         let vertical_coupling = p.vertical_coupling;
         let lift = 9.81 * p.buoyancy / (p.ambient_c + 273.15).max(50.0);
         let (dt, weight) = (p.dt, p.weight);
+        let lo = lo.saturating_sub(UVec3::ONE);
+        let hi = (hi + 1).min(dims);
         par_chunks_mut(&mut self.voxels, slice, |z, chunk| {
             let z = z as u32;
-            for y in 0..dims.y {
-                for x in 0..dims.x {
+            if z < lo.z || z >= hi.z {
+                return;
+            }
+            for y in lo.y..hi.y {
+                for x in lo.x..hi.x {
                     let v = &mut chunk[(x + y * dims.x) as usize];
                     if y < floor[(x + z * dims.x) as usize] as u32 {
                         *v = Voxel::default();
@@ -791,13 +814,50 @@ impl Domain {
             });
         }
         // Jacobi: open faces (and the air around the region) hold p = 0, the floor reflects.
-        self.pressure.iter_mut().for_each(|p| *p = 0.0);
-        self.pressure_next.iter_mut().for_each(|p| *p = 0.0);
+        // Inside the region the solve starts from the last step's pressure: the flow changes
+        // little from one step to the next, so a few iterations get close.
+        for buf in [&mut self.pressure, &mut self.pressure_next] {
+            par_chunks_mut(buf, slice, |z, chunk| {
+                let z = z as u32;
+                if z < lo.z || z >= hi.z {
+                    chunk.fill(0.0);
+                    return;
+                }
+                for y in 0..dims.y {
+                    let row = &mut chunk[(y * dims.x) as usize..((y + 1) * dims.x) as usize];
+                    if y < lo.y || y >= hi.y {
+                        row.fill(0.0);
+                    } else {
+                        row[..lo.x as usize].fill(0.0);
+                        row[hi.x as usize..].fill(0.0);
+                    }
+                }
+            });
+        }
+        // Above this layer a column and its four neighbors are all open air: there the six
+        // neighbors are read straight, without the edge and floor checks (most of the work).
+        let open_above: Vec<u32> = (0..dims.z)
+            .flat_map(|z| (0..dims.x).map(move |x| (x, z)))
+            .map(|(x, z)| {
+                let f = |x: u32, z: u32| self.floor[(x + z * dims.x) as usize] as u32;
+                if x == 0 || z == 0 || x + 1 >= dims.x || z + 1 >= dims.z {
+                    return u32::MAX;
+                }
+                f(x, z)
+                    .max(f(x - 1, z))
+                    .max(f(x + 1, z))
+                    .max(f(x, z - 1))
+                    .max(f(x, z + 1))
+                    + 1
+            })
+            .collect();
+        let row = dims.x as usize;
         for _ in 0..iterations {
             {
                 let p = &self.pressure;
                 let div = &self.divergence;
                 let floor = &self.floor;
+                let open_above = &open_above;
                 par_chunks_mut(&mut self.pressure_next, slice, |z, chunk| {
                     let z = z as u32;
                     if z < lo.z || z >= hi.z {
@@ -806,6 +866,16 @@ impl Domain {
                     for y in lo.y..hi.y {
                         for x in lo.x..hi.x {
                             let i = (x + dims.x * (y + dims.y * z)) as usize;
+                            if y >= open_above[(x + z * dims.x) as usize] && y + 1 < dims.y {
+                                let sum = p[i + 1]
+                                    + p[i - 1]
+                                    + p[i + row]
+                                    + p[i - row]
+                                    + p[i + slice]
+                                    + p[i - slice];
+                                chunk[(x + y * dims.x) as usize] = (sum - div[i] * h * h) / 6.0;
+                                continue;
+                            }
                             let fl = floor[(x + z * dims.x) as usize] as u32;
                             if y < fl {
                                 chunk[(x + y * dims.x) as usize] = 0.0;
@@ -911,7 +981,9 @@ impl Domain {
         let dims = self.dims;
         // Semi-Lagrangian advection doesn't conserve mass; measure what should be there after
         // the step (what's here minus what blows out of the open faces) and correct to it.
-        let before: f64 = self.voxels.iter().map(|v| v.density as f64).sum();
+        // Everything with smoke is inside the active region (it is drawn around it), so only
+        // the region is summed, advected and copied back.
+        let before = region_density(&self.voxels, dims, lo, hi);
         let outflow = self.outflow(p.dt);
         let slice = (dims.x * dims.y) as usize;
         let k = p.dt / self.cell;
@@ -927,18 +999,12 @@ impl Domain {
         };
         par_chunks_mut(&mut self.scratch, slice, |z, chunk| {
             let z = z as u32;
-            let base = (z * dims.x * dims.y) as usize;
             if z < lo.z || z >= hi.z {
-                chunk.copy_from_slice(&src[base..base + chunk.len()]);
                 return;
             }
-            for y in 0..dims.y {
-                for x in 0..dims.x {
+            for y in lo.y..hi.y {
+                for x in lo.x..hi.x {
                     let out = &mut chunk[(x + y * dims.x) as usize];
-                    if y < lo.y || y >= hi.y || x < lo.x || x >= hi.x {
-                        *out = src[base + (x + y * dims.x) as usize];
-                        continue;
-                    }
                     if y < floor[(x + z * dims.x) as usize] as u32 {
                         *out = Voxel::default();
                         continue;
@@ -971,23 +1037,41 @@ impl Domain {
                 }
             }
         });
-        std::mem::swap(&mut self.voxels, &mut self.scratch);
-        let mut after: f64 = self.voxels.iter().map(|v| v.density as f64).sum();
+        let scratch = &self.scratch;
+        par_chunks_mut(&mut self.voxels, slice, |z, chunk| {
+            let z = z as u32;
+            if z < lo.z || z >= hi.z {
+                return;
+            }
+            let base = (z * dims.x * dims.y) as usize;
+            for y in lo.y..hi.y {
+                let row = (lo.x + y * dims.x) as usize..(hi.x + y * dims.x) as usize;
+                chunk[row.clone()].copy_from_slice(&scratch[base + row.start..base + row.end]);
+            }
+        });
+        let mut after = region_density(&self.voxels, dims, lo, hi);
         if after > 1e-12 {
             let fade = (-p.dt / p.dissipation_secs.max(0.1)).exp() as f64;
             let expected = ((before - outflow).max(0.0)) * fade;
             let k = (expected / after).clamp(0.7, 1.4) as f32;
             if (k - 1.0).abs() > 1e-4 {
-                par_chunks_mut(&mut self.voxels, slice, |_, chunk| {
-                    for v in chunk {
-                        v.density *= k;
-                        v.tint *= k;
+                par_chunks_mut(&mut self.voxels, slice, |z, chunk| {
+                    let z = z as u32;
+                    if z < lo.z || z >= hi.z {
+                        return;
+                    }
+                    for y in lo.y..hi.y {
+                        let row = (lo.x + y * dims.x) as usize..(hi.x + y * dims.x) as usize;
+                        for v in &mut chunk[row] {
+                            v.density *= k;
+                            v.tint *= k;
+                        }
                     }
                 });
                 after *= k as f64;
             }
         }
-        self.max_density = self.voxels.iter().map(|v| v.density).fold(0.0, f32::max);
+        self.max_density = region_max_density(&self.voxels, dims, lo, hi);
         self.mass_kg = (after * (self.cell as f64).powi(3)) as f32;
     }
 
@@ -1259,9 +1343,85 @@ fn sample(data: &[Voxel], dims: UVec3, q: Vec3, outside: &dyn Fn(Vec3) -> Voxel)
     acc
 }
 
+/// Sum of the density over the voxels in `lo..hi`.
+fn region_density(voxels: &[Voxel], dims: UVec3, lo: UVec3, hi: UVec3) -> f64 {
+    let mut sum = 0.0;
+    for z in lo.z..hi.z {
+        for y in lo.y..hi.y {
+            let start = (lo.x + dims.x * (y + dims.y * z)) as usize;
+            let end = start + (hi.x - lo.x) as usize;
+            sum += voxels[start..end]
+                .iter()
+                .map(|v| v.density as f64)
+                .sum::<f64>();
+        }
+    }
+    sum
+}
+
+/// Thickest density in `lo..hi`.
+fn region_max_density(voxels: &[Voxel], dims: UVec3, lo: UVec3, hi: UVec3) -> f32 {
+    let mut max = 0.0f32;
+    for z in lo.z..hi.z {
+        for y in lo.y..hi.y {
+            let start = (lo.x + dims.x * (y + dims.y * z)) as usize;
+            let end = start + (hi.x - lo.x) as usize;
+            max = voxels[start..end]
+                .iter()
+                .map(|v| v.density)
+                .fold(max, f32::max);
+        }
+    }
+    max
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How long a step of the meadow's volume takes with a plume in it (run by hand:
+    /// `cargo test --release -p engine_smoke --lib -- --ignored --nocapture step_cost`).
+    #[test]
+    #[ignore]
+    fn step_cost() {
+        engine_core::tasks::init_task_pools();
+        let mut d = Domain::new(DVec3::new(-50.0, -1.0, -30.0), 1.25, UVec3::new(80, 32, 48));
+        d.set_floor(|x, _| Some(x * 0.05));
+        let p = StepParams {
+            dt: 0.05,
+            ..Default::default()
+        };
+        let calm = |_: DVec3| Vec3::new(3.0, 0.0, 1.0);
+        for i in 0..40 {
+            let x = -20.0 + (i % 8) as f64 * 3.0;
+            d.splat(
+                DVec3::new(x, 2.0, 0.0),
+                2.0,
+                0.3,
+                300.0,
+                Vec3::Y * 3.0,
+                Vec3::ONE,
+            );
+            d.step(&p, &calm);
+        }
+        let started = std::time::Instant::now();
+        for _ in 0..20 {
+            d.splat(
+                DVec3::new(-10.0, 2.0, 0.0),
+                2.0,
+                0.3,
+                300.0,
+                Vec3::Y * 3.0,
+                Vec3::ONE,
+            );
+            d.step(&p, &calm);
+        }
+        let ms = started.elapsed().as_secs_f64() * 1000.0 / 20.0;
+        println!(
+            "step: {ms:.2} ms, active {:?}, mass {:.2} kg",
+            d.active, d.mass_kg
+        );
+    }
 
     fn pools() {
         engine_core::tasks::init_task_pools();
