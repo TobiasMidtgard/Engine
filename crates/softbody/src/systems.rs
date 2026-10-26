@@ -11,8 +11,8 @@ use engine_world::physics::{
     MassProperties, RigidBody,
 };
 use engine_world::{
-    ContactKind, Env, GroundContact, IgniteRequest, NoiseEvent, ProjectileTrace, SmokeEmission,
-    SurfaceMaterials, WaterDisturbance, WorldImpulse, WorldShift,
+    ContactKind, Env, GroundContact, IgniteRequest, NoiseEvent, ProjectileTrace, SimulationRange,
+    SmokeEmission, SurfaceMaterials, WaterDisturbance, WorldImpulse, WorldShift,
 };
 
 use crate::body::{FrameSource, SoftBodySim, SoftKind};
@@ -218,6 +218,38 @@ fn convert_shape(
     }
 }
 
+/// How far a collider's shape reaches from its origin (unscaled), m.
+fn shape_reach(shape: &ColliderShape) -> f32 {
+    let farthest = |points: &mut dyn Iterator<Item = Vec3>| {
+        points
+            .map(|p| p.length_squared())
+            .fold(0.0f32, f32::max)
+            .sqrt()
+    };
+    match shape {
+        ColliderShape::Sphere { radius } => *radius,
+        ColliderShape::Cuboid { half_extents } => half_extents.length(),
+        ColliderShape::Capsule {
+            radius,
+            half_height,
+        }
+        | ColliderShape::Cylinder {
+            radius,
+            half_height,
+        } => radius + half_height,
+        ColliderShape::ConvexHull { points } => farthest(&mut points.iter().copied()),
+        ColliderShape::TriMesh { vertices, .. } => farthest(&mut vertices.iter().copied()),
+        ColliderShape::Heightfield { heights, size, .. } => {
+            let tall = heights.iter().fold(0.0f32, |m, h| m.max(h.abs()));
+            Vec3::new(size[0] * 0.5, tall, size[1] * 0.5).length()
+        }
+        ColliderShape::Compound(parts) => parts
+            .iter()
+            .map(|(o, _, part)| o.length() + shape_reach(part))
+            .fold(0.0, f32::max),
+    }
+}
+
 /// Collect physics colliders (meshes and height grids baked once a soft body comes near),
 /// character capsules and bone capsules.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -232,21 +264,40 @@ pub fn gather_colliders(
     bodies: Query<&SoftBodySim>,
     mut shapes: Local<Vec<(LocalShape, Vec3, Quat)>>,
     mut bone_shapes: Local<Vec<(LocalShape, DVec3, Quat)>>,
+    mut reaches: Local<HashMap<Entity, f32>>,
 ) {
     let world = &mut *world;
     world.list.clear();
     world.seen.clear();
+    // Only colliders that can reach a body that's awake: resting bodies don't collide, and
+    // the rest of the world's colliders aren't converted at all.
     let near_bodies: Vec<(DVec3, f64)> = bodies
         .iter()
+        .filter(|b| !b.frozen)
         .map(|b| (b.center, b.radius as f64 + BAKE_REACH))
         .collect();
     for (entity, collider, parent) in &colliders {
-        if collider.sensor {
+        if collider.sensor || near_bodies.is_empty() {
             continue;
         }
         let Some(t) = world_transform(entity, &transforms) else {
             continue;
         };
+        let reach = match reaches.get(&entity) {
+            Some(r) if !collider.is_changed() => *r,
+            _ => {
+                let r = shape_reach(&collider.shape);
+                reaches.insert(entity, r);
+                r
+            }
+        } as f64
+            * t.scale().max_element() as f64;
+        if !near_bodies
+            .iter()
+            .any(|(b, body_reach)| (t.translation() - *b).length() < reach + body_reach)
+        {
+            continue;
+        }
         // The rigid body this collider belongs to: itself or an ancestor.
         let mut body = None;
         let mut cursor = Some(entity);
@@ -742,6 +793,7 @@ struct StepContext<'a, 'w, 's> {
     poses: &'a Query<'w, 's, &'static SkeletonPose>,
     scales: &'a Query<'w, 's, &'static LocalTimeScale>,
     loads: &'a [(DVec3, f32, Option<Entity>)],
+    range: SimulationRange,
 }
 
 /// Step every soft body (in parallel).
@@ -761,6 +813,7 @@ pub fn step_bodies(
     scales: Query<&'static LocalTimeScale>,
     mut bodies: Query<(Entity, &mut SoftBodySim)>,
     mut diagnostics: ResMut<Diagnostics>,
+    range: Option<Res<SimulationRange>>,
 ) {
     if !config.enabled {
         // Hold still (drawing interpolates between the last two steps).
@@ -779,6 +832,7 @@ pub fn step_bodies(
         poses: &poses,
         scales: &scales,
         loads: &loads.0,
+        range: range.map_or_else(SimulationRange::default, |r| *r),
     };
     let start = Instant::now();
     bodies.par_iter_mut().for_each(|(e, mut body)| {
@@ -811,13 +865,24 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     };
     let owner = b.time_owner.unwrap_or(entity);
     let mut dt = ctx.time.delta_for(ctx.scales.get(owner).ok());
-    if dist > ctx.config.freeze_distance {
-        b.frozen = true;
-        b.sim.step_start.clone_from(&b.sim.pos);
+    // Beyond the simulation range a body rests in its last pose (waking again a little nearer
+    // than it fell asleep, so one at the edge doesn't flicker), and costs nothing.
+    let range = &ctx.range;
+    let resting = if b.frozen {
+        !range.is_active_sphere(focus, b.center, b.radius as f64)
+    } else {
+        !focus.points.is_empty() && dist as f64 > range.active_m * (1.0 + range.hysteresis)
+    };
+    if resting || dist > ctx.config.freeze_distance {
+        if !b.frozen {
+            b.frozen = true;
+            b.sim.step_start.clone_from(&b.sim.pos);
+        }
         return;
     }
     b.frozen = false;
-    if dist > ctx.config.lod_distance {
+    let far = dist > ctx.config.lod_distance;
+    if far {
         b.lod_debt += dt;
         if b.steps.is_multiple_of(2) {
             b.steps += 1;
@@ -884,7 +949,10 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     let s = b.settings;
     let env = ctx.env;
     let p = &mut b.sim.params;
-    p.substeps = ((s.substeps as f32 * ctx.config.quality).round() as u32).max(1);
+    // Far bodies step every other time over both steps' time, with the substeps of one: half
+    // the work, a little softer where it's hard to see.
+    let lod = if far { 0.5 } else { 1.0 };
+    p.substeps = ((s.substeps as f32 * ctx.config.quality * lod).round() as u32).max(1);
     p.gravity = env.gravity(b.center) * s.gravity_scale;
     b.wind = env.wind(b.center) * s.wind_scale;
     p.wind = b.wind;

@@ -227,7 +227,8 @@ impl SoftMaterial {
 pub struct SoftBodyConfig {
     /// Master switch for the simulation (drawing continues).
     pub enabled: bool,
-    /// Bodies farther than this from every `SimulationFocus` step every other fixed step, m.
+    /// Bodies farther than this from every `SimulationFocus` step every other fixed step, with
+    /// half the substeps per second, m.
     pub lod_distance: f32,
     /// Bodies farther than this stop simulating and hold their shape, m.
     pub freeze_distance: f32,
@@ -239,7 +240,7 @@ impl Default for SoftBodyConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            lod_distance: 80.0,
+            lod_distance: 30.0,
             freeze_distance: 400.0,
             quality: 1.0,
         }

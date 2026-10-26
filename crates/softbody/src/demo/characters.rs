@@ -541,12 +541,12 @@ pub(super) fn mannequin(
         });
     }
     let man = root.id();
-    // Thick enough to hide the scalp: 560 guides, 48 drawn strands around each.
+    // Thick enough to hide the scalp: 280 simulated guides, 96 drawn strands around each.
     let style = HairStyle {
         melanin: 0.8,
         redness: 0.2,
-        strands_per_guide: 48,
-        spread: 0.015,
+        strands_per_guide: 96,
+        spread: 0.02,
         ..HairStyle::long()
     };
     // The cranium of the sculpt, in the head bone's frame, with a hair's breadth to spare.
@@ -596,7 +596,7 @@ pub(super) fn mannequin(
                 bone: "head".into(),
                 center: cranium.to_array(),
                 radii: radii.to_array(),
-                guides: 560,
+                guides: 280,
                 hairline,
             }],
             ..HairGroom::long_hair("head", style)
