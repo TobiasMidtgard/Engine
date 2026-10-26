@@ -609,3 +609,55 @@ fn a_walker_wakes_the_resting_yard_and_leaves_it_resting() {
     let again = *app.world.resource::<PhysicsStats>();
     assert!(again.awake < 100, "the yard didn't rest again: {again:?}");
 }
+
+/// Heights of the bodies over the pile's bin: (mean, highest).
+fn pile_heights(app: &mut App) -> (f64, f64) {
+    let at = Station::Pile.base();
+    let ys: Vec<f64> = app
+        .world
+        .query::<(&Transform, &RigidBody)>()
+        .iter(&app.world)
+        .filter(|(t, rb)| {
+            rb.kind == BodyKind::Dynamic
+                && (t.translation.x - at.x).abs() < 5.0
+                && (t.translation.z - at.z).abs() < 5.0
+        })
+        .map(|(t, _)| t.translation.y)
+        .collect();
+    let mean = ys.iter().sum::<f64>() / ys.len().max(1) as f64;
+    (mean, ys.iter().copied().fold(f64::MIN, f64::max))
+}
+
+/// A yard built with nobody near rests at once, but what its stations drop doesn't hang in
+/// the air: the pile's crates, built in a grid above their bin, settle into it off the frame.
+#[test]
+fn a_yard_built_far_away_rests_with_its_crates_down() {
+    let mut app = app();
+    app.world.spawn((
+        Transform::from_xyz(2_000.0, 0.0, 0.0),
+        SimulationFocus::default(),
+    ));
+    app.update();
+    let (mean, top) = pile_heights(&mut app);
+    let started = std::time::Instant::now();
+    let (mut now_mean, mut now_top) = (mean, top);
+    while started.elapsed().as_secs() < 600 && now_mean > mean - 1.0 {
+        app.update();
+        (now_mean, now_top) = pile_heights(&mut app);
+    }
+    assert!(
+        now_mean < mean - 1.0 && now_top < top - 1.0,
+        "the pile's crates still hang in the air: mean {mean:.1} -> {now_mean:.1} m, top \
+         {top:.1} -> {now_top:.1} m"
+    );
+    eprintln!(
+        "pile settled in {:.1} s: mean {mean:.1} -> {now_mean:.1} m, top {top:.1} -> {now_top:.1} m",
+        started.elapsed().as_secs_f64()
+    );
+    // Down where they landed, held asleep.
+    app.update_n(60);
+    let after = pile_heights(&mut app);
+    assert!((after.0 - now_mean).abs() < 0.05, "{after:?} vs {now_mean}");
+    let stats = *app.world.resource::<PhysicsStats>();
+    assert!(stats.awake < 100, "{stats:?}");
+}

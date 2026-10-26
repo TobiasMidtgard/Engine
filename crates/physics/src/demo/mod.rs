@@ -39,6 +39,7 @@ mod floaters;
 pub mod galton;
 pub mod jenga;
 pub mod pool;
+mod settle;
 
 pub(crate) use floaters::replay_floaters;
 pub use floaters::{FLOAT_CYCLE_SECS, FloatTest, spawn_floaters};
@@ -809,7 +810,8 @@ pub(crate) fn replay_stations(world: &mut World) {
             .map(|p| p.distance(at))
             .fold(if focus.is_empty() { 0.0 } else { f64::INFINITY }, f64::min)
     };
-    let (mut due, mut rest) = (Vec::new(), Vec::new());
+    settle::finish(world);
+    let (mut due, mut rest, mut unseen) = (Vec::new(), Vec::new(), Vec::new());
     for (e, mut g) in world
         .query::<(Entity, &mut ProvingGround)>()
         .iter_mut(world)
@@ -834,6 +836,9 @@ pub(crate) fn replay_stations(world: &mut World) {
             if d > STATION_REST_M && t >= cycle.unwrap_or(f64::INFINITY).min(settle) {
                 g.resting[i] = true;
                 rest.push((e, station));
+                if !g.seen[i] {
+                    unseen.push((e, g.origin, station));
+                }
             } else if cycle.is_some_and(|c| t >= c) {
                 due.push((e, station));
             }
@@ -856,6 +861,23 @@ pub(crate) fn replay_stations(world: &mut World) {
                 names.join(", "),
                 bodies.len()
             );
+        }
+        // Stations built where nobody has been settle once, off the frame, so what they
+        // dropped doesn't hang in the air (`settle`).
+        let mut grounds: Vec<(Entity, DVec3)> = unseen.iter().map(|u| (u.0, u.1)).collect();
+        grounds.dedup();
+        for (ground, origin) in grounds {
+            let mine: Vec<Entity> = world
+                .query::<(Entity, &StationPart)>()
+                .iter(world)
+                .filter(|(e, p)| {
+                    p.ground == ground
+                        && unseen.iter().any(|u| u.0 == ground && u.2 == p.station)
+                        && bodies.contains(e)
+                })
+                .map(|(e, _)| e)
+                .collect();
+            settle::start(world, origin, &mine);
         }
         let shared = world.resource::<crate::SharedSimulation>().0.clone();
         shared.write().resting.extend(bodies);

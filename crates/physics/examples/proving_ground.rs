@@ -18,6 +18,9 @@ use engine_render::prelude::*;
 use engine_render::{RenderDisabled, Renderer, capture_now};
 use engine_world::{SimulationFocus, WorldPlugin};
 
+const PILE_EYE: [f64; 3] = [-8.0, 9.0, 4.0];
+const PILE_AT: [f64; 3] = [-18.0, 3.0, -15.0];
+
 /// (world seconds, file name, camera position, look-at target), yard-local.
 const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
     // The pool table: the cue ball rolling at the rack, the rack opening, and the balls at rest,
@@ -34,6 +37,9 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
         [0.0, 24.0, 44.0],
         [0.0, 2.0, -3.0],
     ),
+    // The pile as built, and (with `PHYSICS_FOCUS` far away, the yard resting) settled into
+    // its bin off the frame.
+    (0.26, "43_pile_as_built", PILE_EYE, PILE_AT),
     // The Newton's cradle: the first ball swinging in, the last flying out with the middle three
     // still, and the first flying out again.
     (
@@ -238,6 +244,7 @@ const SHOTS: &[(f32, &str, [f64; 3], [f64; 3])] = &[
     (55.0, "41_jenga_falling_b", JENGA_EYE, JENGA_AT),
     (55.6, "41_jenga_falling_c", JENGA_EYE, JENGA_AT),
     (59.5, "42_jenga_fallen", JENGA_EYE, JENGA_AT),
+    (60.0, "44_pile_settled", PILE_EYE, PILE_AT),
 ];
 
 /// The camera on the Jenga tower: off its +X, +Z corner, where blocks leave and the top falls.
