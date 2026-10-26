@@ -1177,6 +1177,7 @@ dependencies = [
  "bevy_ecs",
  "bevy_platform",
  "bevy_tasks",
+ "crossbeam-channel",
  "glam 0.33.12",
  "parking_lot",
  "raw-window-handle",
