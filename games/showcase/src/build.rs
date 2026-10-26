@@ -225,11 +225,15 @@ const STEPS: [Step; 12] = [
 const MODULE_WAIT_S: f32 = 60.0;
 
 /// Modules still baking art or settling their zones on other threads.
-const MODULES_LOADING: [fn(&World) -> bool; 2] = [engine_smoke::demo::loading, |world| {
-    world
-        .get_resource::<engine_water::WaterLoading>()
-        .is_some_and(|w| !w.is_ready())
-}];
+const MODULES_LOADING: [fn(&World) -> bool; 3] = [
+    engine_smoke::demo::loading,
+    |world| {
+        world
+            .get_resource::<engine_water::WaterLoading>()
+            .is_some_and(|w| !w.is_ready())
+    },
+    |world| !world.contains_resource::<engine_destruction::assets::DestructionAssets>(),
+];
 
 fn with_commands(world: &mut World, f: impl FnOnce(&mut Commands)) {
     let mut state = SystemState::<Commands>::new(world);
