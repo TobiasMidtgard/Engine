@@ -562,6 +562,29 @@ pub const CALM_SPEED: f32 = 1.0;
 /// Steps between two looks of the articulation budget (it also looks whenever joints are made).
 pub const BUDGET_EVERY: u32 = 6;
 
+/// The contact pair of colliders `h1` and `h2`. Rapier finds it by walking the first
+/// collider's pairs, and a fixed one (the ground under a yard) can have thousands, which made
+/// each lookup cost microseconds: walk from a moving side.
+pub(crate) fn pair_between(
+    world: &PhysicsWorld,
+    h1: ColliderHandle,
+    h2: ColliderHandle,
+) -> Option<&ContactPair> {
+    let moving = |h: ColliderHandle| {
+        world
+            .colliders
+            .get(h)
+            .and_then(|c| c.parent())
+            .and_then(|b| world.bodies.get(b))
+            .is_some_and(|b| !b.is_fixed())
+    };
+    if moving(h1) {
+        world.narrow_phase.contact_pair(h1, h2)
+    } else {
+        world.narrow_phase.contact_pair(h2, h1)
+    }
+}
+
 fn pair_key(a: Entity, b: Entity) -> (Entity, Entity) {
     if a < b { (a, b) } else { (b, a) }
 }
@@ -611,6 +634,11 @@ pub struct Simulation {
     pub water_clock: u32,
     /// Steps since far movers were last split off into coarse regions ([`crate::lod`]).
     pub lod_clock: u32,
+    /// The world's `SimulationRange`: regions past it rest ([`crate::lod::REST`]).
+    pub range: Option<engine_world::SimulationRange>,
+    /// Bodies told to rest (the proving ground's stations nobody is near): held asleep, and
+    /// kinematic ones still, every step.
+    pub resting: EntityHashSet,
 }
 
 /// Rapier hooks: drop the contacts listed in [`Simulation::no_contact`], and keep round bodies
@@ -903,6 +931,7 @@ impl Simulation {
 
     /// Remove a body; its colliders are left without a body (the caller re-resolves them).
     pub fn remove_body(&mut self, entity: Entity) -> Vec<Entity> {
+        self.resting.remove(&entity);
         let Some(entry) = self.bodies.remove(&entity) else {
             return Vec::new();
         };
@@ -2629,7 +2658,7 @@ impl Simulation {
                 continue;
             }
             let world = &self.region(region_id).world;
-            let Some(pair) = world.narrow_phase.contact_pair(h1, h2) else {
+            let Some(pair) = pair_between(world, h1, h2) else {
                 continue;
             };
             let Some((point, normal)) = deepest_point(world, pair) else {
@@ -2673,7 +2702,7 @@ impl Simulation {
             if still(h1) && still(h2) {
                 continue;
             }
-            let Some(pair) = region.world.narrow_phase.contact_pair(h1, h2) else {
+            let Some(pair) = pair_between(&region.world, h1, h2) else {
                 self.contacts.pending.remove(&key);
                 continue;
             };
@@ -2784,7 +2813,7 @@ impl Simulation {
                 for (r1, h1) in &c1.handles {
                     for (r2, h2) in &c2.handles {
                         if r1 == r2 {
-                            let pair = self.region(*r1).world.narrow_phase.contact_pair(*h1, *h2);
+                            let pair = pair_between(&self.region(*r1).world, *h1, *h2);
                             if pair.is_some_and(|p| p.has_any_active_contact())
                                 || self
                                     .region(*r1)

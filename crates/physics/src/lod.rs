@@ -11,6 +11,9 @@
 //! * **Half rate** (2, past [`PhysicsSettings::half_rate_beyond_m`]): one step every other
 //!   frame, with substeps four times as long; in between, its bodies are drawn moving on at their
 //!   velocity. A region with characters stays coarse (characters move every frame).
+//! * **Resting** ([`REST`], past the world's `SimulationRange`, characters or not): no steps at
+//!   all, so it costs nothing; its bodies stay where they are until a focus comes back within
+//!   the active range.
 //!
 //! A tier is a region's, and most of a scene shares one region, so every [`LOD_EVERY`] steps far
 //! movers split off ([`Simulation::split_far`]): a region's movers are clustered by how near
@@ -44,6 +47,9 @@ const KEEP: f64 = 0.9;
 /// in it.
 const SPLIT: f64 = 1.1;
 
+/// The tier of a region past the world's `SimulationRange`: it doesn't step.
+pub const REST: u8 = 3;
+
 /// Bodies reaching farther than this many grid cells are checked against every other mover
 /// instead of through the grid.
 const BIG_CELLS: f64 = 4.0;
@@ -57,13 +63,21 @@ fn threshold(settings: &PhysicsSettings, tier: u8) -> Option<f64> {
     }
 }
 
-/// The tier of a region whose nearest mover is `nearest` meters from a focus.
+/// The tier of a region whose nearest mover is `nearest` meters from a focus. `rest`: the
+/// distances past which a region rests and within which a resting one wakes.
 pub(crate) fn tier_for(
     nearest: f64,
     current: u8,
     settings: &PhysicsSettings,
     characters: bool,
+    rest: Option<(f64, f64)>,
 ) -> u8 {
+    if let Some((enter, wake)) = rest
+        && (nearest > enter || (current == REST && nearest > wake))
+    {
+        return REST;
+    }
+    let current = current.min(2);
     let past = |tier: u8| {
         threshold(settings, tier).is_some_and(|d| {
             let d = if current >= tier { d * KEEP } else { d };
@@ -78,7 +92,7 @@ impl Region {
     /// How this region steps a frame of `dt` seconds: the number of substeps and their length,
     /// or `None` when it sits this frame out (half rate).
     pub(crate) fn plan(&mut self, dt: f32, settings: &PhysicsSettings) -> Option<(u32, f32)> {
-        if dt <= 0.0 {
+        if dt <= 0.0 || self.tier >= REST {
             return None;
         }
         if self.tier >= 2 && self.owed_secs == 0.0 {
@@ -188,6 +202,9 @@ impl Simulation {
         let with_characters: HashSet<RegionId> =
             self.characters.values().map(|c| c.region).collect();
         let settings = self.settings.clone();
+        let rest = self
+            .range
+            .map(|r| (r.active_m * (1.0 + r.hysteresis), r.active_m));
         for (id, r) in self.regions.iter_mut().enumerate() {
             let Some(r) = r else {
                 continue;
@@ -196,7 +213,7 @@ impl Simulation {
                 0
             } else {
                 let characters = with_characters.contains(&(id as RegionId));
-                tier_for(r.nearest_mover(foci), r.tier, &settings, characters)
+                tier_for(r.nearest_mover(foci), r.tier, &settings, characters, rest)
             };
             r.tier = tier;
         }

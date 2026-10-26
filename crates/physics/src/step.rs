@@ -1,5 +1,6 @@
 //! The fixed-step system: read the ECS, step every region, write the results back.
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use engine_core::ecs::system::SystemState;
@@ -10,8 +11,8 @@ use engine_world::physics::{
     ContactEvent, ExternalForce, Joint, MassProperties, RigidBody, Velocity,
 };
 use engine_world::{
-    ContactKind, FocusPoints, Gravity, GroundContact, NoiseEvent, SurfaceMaterials, Water,
-    WorldImpulse,
+    ContactKind, FocusPoints, Gravity, GroundContact, NoiseEvent, SimulationRange,
+    SurfaceMaterials, Water, WorldImpulse,
 };
 use rapier3d::prelude::{ActiveHooks, PhysicsWorld, Pose, QueryFilter as RFilter, SharedShape};
 
@@ -155,6 +156,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
     let q = q.as_mut().unwrap();
     let shared = world.resource::<SharedSimulation>().0.clone();
     let mut sim = shared.write();
+    let sync = tracing::info_span!("sync from world").entered();
 
     // ---------------------------------------------------------------- settings & environment
     let settings = world.resource::<PhysicsSettings>().clone();
@@ -180,6 +182,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         );
         sim.refresh_materials();
     }
+    sim.range = world.get_resource::<SimulationRange>().copied();
     let gravity = world.resource::<Gravity>().clone();
     let foci = world
         .get_resource::<FocusPoints>()
@@ -496,7 +499,12 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
     }
 
+    if !sim.resting.is_empty() {
+        hold_resting(&mut sim);
+    }
+    drop(sync);
     // ---------------------------------------------------------------- regions
+    let upkeep = tracing::info_span!("region upkeep").entered();
     // Only awake bodies move (sleeping ones are held still).
     let max_step = sim
         .live_regions()
@@ -527,10 +535,17 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         sim.last_sub_dt = sub_dt;
     }
     let region_ids: Vec<RegionId> = sim.live_regions().map(|(id, _)| id).collect();
+    drop(upkeep);
+    let report = crate::report::wanted();
+    let busy = busy_regions(&sim);
     for rid in region_ids.iter().copied() {
+        let region_started = Instant::now();
         let (frozen, movers) = {
             let r = sim.region(rid);
-            (r.frozen, r.movers)
+            (
+                r.frozen || r.tier >= crate::lod::REST || (!busy.contains(&rid) && idle(r)),
+                r.movers,
+            )
         };
         // Far regions step coarser, or sit a frame out (`crate::lod`).
         let plan = if frozen || movers == 0 || substeps == 0 {
@@ -586,6 +601,8 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         for sub in 0..substeps {
             // Every substep: water pressure follows the pose (forces held over several
             // substeps lag behind it and pump energy into a floating body's rocking).
+            let ours = tracing::info_span!("substep upkeep").entered();
+            let t0 = Instant::now();
             prepare_forces(
                 &mut sim,
                 rid,
@@ -597,7 +614,10 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             drive_kinematics(&mut sim, rid, &special, sub_dt, substeps - sub);
             crate::cones::orient(&mut sim, rid);
             let scaled = scale_time(&mut sim, rid, &special, true);
+            drop(ours);
+            let t1 = Instant::now();
             {
+                let _rapier = tracing::info_span!("rapier step").entered();
                 let s = &mut *sim;
                 let filter = ContactFilter {
                     no_contact: &s.no_contact,
@@ -617,21 +637,35 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             if scaled {
                 scale_time(&mut sim, rid, &special, false);
             }
+            let t2 = Instant::now();
+            let _after = tracing::info_span!("contacts upkeep").entered();
             let min_speed = settings.contact_events.then_some(settings.impact_min_speed);
             let touches = sim.region_mut(rid).touches(sub_dt, min_speed);
+            let t3 = Instant::now();
             crate::rolling::resist_rolling(&mut sim, rid, &touches.spins);
             crate::cones::rub(&mut sim, rid);
+            let t4 = Instant::now();
             if settings.contact_events {
                 sim.process_contacts(rid, sub_dt, &touches.hits);
             } else {
                 sim.region(rid).collector.0.lock().clear();
             }
+            let t5 = Instant::now();
             break_joints(&mut sim, rid, sub_dt);
+            if report {
+                crate::report::substep_parts([t0, t1, t2, t3, t4, t5, Instant::now()]);
+                crate::report::count("spin pairs", touches.spins.len());
+                crate::report::count("hits", touches.hits.len());
+            }
         }
         sim.region_mut(rid).queries_refreshed();
         character::move_characters(&mut sim, rid, &gravity);
         sim.region_mut(rid).update_bounds();
+        if report {
+            crate::report::region_stepped(&sim, rid, substeps, region_started);
+        }
     }
+    let write_back = tracing::info_span!("write back").entered();
     sim.recheck_contacts();
     let _ = real_dt;
 
@@ -781,6 +815,10 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
     }
 
+    drop(write_back);
+    if report {
+        crate::report::step_done(world, &sim, &foci, started);
+    }
     // ---------------------------------------------------------------- stats
     let stats = PhysicsStats::from_sim(&sim, started.elapsed().as_secs_f64() * 1000.0, substeps);
     drop(sim);
@@ -1295,9 +1333,9 @@ fn drive_kinematics(
     // `Velocity` is in the body's own seconds: `time_factor` of it per world second.
     let moving: Vec<(rapier3d::prelude::RigidBodyHandle, Velocity)> = special
         .iter()
-        .filter_map(|e| sim.bodies.get(e))
-        .filter(|b| b.region == rid && b.kinematic_by_velocity)
-        .map(|b| {
+        .filter_map(|e| Some((e, sim.bodies.get(e)?)))
+        .filter(|(e, b)| b.region == rid && b.kinematic_by_velocity && !sim.resting.contains(*e))
+        .map(|(_, b)| {
             let v = b.written_velocity.unwrap_or_default();
             let k = b.time_factor;
             (
@@ -1345,6 +1383,57 @@ fn drive_kinematics(
                 )
             };
             rb.set_next_kinematic_position(next);
+        }
+    }
+}
+
+/// The regions with something to move though their bodies sleep: a character that isn't
+/// resting, or a kinematic body gliding to a goal.
+fn busy_regions(sim: &Simulation) -> HashSet<RegionId> {
+    let characters = sim
+        .characters
+        .iter()
+        .filter(|(e, _)| !sim.resting.contains(*e))
+        .map(|(_, c)| c.region);
+    let gliding = sim
+        .bodies
+        .values()
+        .filter(|b| b.kinematic_goal.is_some())
+        .map(|b| b.region);
+    characters.chain(gliding).collect()
+}
+
+/// A region (not [busy](busy_regions)) has nothing to step: every body asleep, no collider
+/// added or moved. Rapier's step would only walk its sleeping contacts (3 ms for a resting
+/// proving ground), so it sits the step out.
+fn idle(r: &crate::sim::Region) -> bool {
+    r.world.islands.active_bodies().next().is_none()
+        && !r.needs_refresh
+        && r.fresh.is_empty()
+        && !r.stale_all
+}
+
+/// Hold the bodies told to rest asleep ([`Simulation::resting`]): wake-ups from their
+/// neighbours, or bodies made since they were told, go back to sleep, still.
+fn hold_resting(sim: &mut Simulation) {
+    let resting = &sim.resting;
+    for r in sim.regions.iter_mut().flatten() {
+        let w = &mut r.world;
+        let awake: Vec<_> = w
+            .islands
+            .active_bodies()
+            .filter(|h| {
+                w.bodies
+                    .get(*h)
+                    .is_some_and(|rb| resting.contains(&convert::entity_of(rb.user_data)))
+            })
+            .collect();
+        for h in awake {
+            if let Some(rb) = w.bodies.get_mut(h) {
+                rb.set_linvel(Vec3::ZERO, false);
+                rb.set_angvel(Vec3::ZERO, false);
+                rb.sleep();
+            }
         }
     }
 }
@@ -1458,6 +1547,10 @@ fn collect_writes(sim: &mut Simulation) {
         }
         let sleeping = rb.is_sleeping();
         if sleeping && b.was_sleeping && b.written.is_some() {
+            continue;
+        }
+        // A resting region didn't step: its bodies are where they were written.
+        if region.tier >= crate::lod::REST && b.written.is_some() {
             continue;
         }
         b.was_sleeping = sleeping;

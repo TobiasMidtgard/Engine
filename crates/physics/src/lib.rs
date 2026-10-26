@@ -12,6 +12,7 @@ pub mod demo;
 mod fine;
 mod lod;
 mod queries;
+mod report;
 mod rolling;
 mod settings;
 mod shift;
