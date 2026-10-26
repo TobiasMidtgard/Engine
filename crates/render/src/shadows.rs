@@ -615,8 +615,8 @@ mod sky_occlusion_tests {
             let mut c = cascades_at(origin, sun);
             let computed = c;
             cache.apply(&mut c, origin, frame, 3, frame == 0);
-            for i in 0..MAX_CASCADES {
-                drawn[i] += c.drawn[i] as u32;
+            for (i, count) in drawn.iter_mut().enumerate() {
+                *count += c.drawn[i] as u32;
                 if c.drawn[i] {
                     assert_eq!(c.view_proj[i], computed.view_proj[i]);
                 }
