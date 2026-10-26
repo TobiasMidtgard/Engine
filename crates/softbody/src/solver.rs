@@ -1046,9 +1046,11 @@ struct SelfContacts {
     /// Farthest any particle has bent away from the turned search shape, m.
     bent: f32,
     skin: f32,
-    /// Particles bucketed by hashed cell: bucket starts, then particle ids.
+    /// Free particles bucketed by hashed cell: bucket starts, then the particles (position
+    /// and id), in bucket order so a bucket's are read together.
     starts: Vec<u32>,
-    ids: Vec<u32>,
+    bucketed: Vec<(Vec3, u32)>,
+    cells: Vec<u32>,
     patches: Patches,
 }
 
@@ -1342,7 +1344,9 @@ impl SelfContacts {
         if !self.patches.hot.contains(&true) {
             return;
         }
-        let inv = 1.0 / edge.max(reach).max(1e-3);
+        // Cells as wide as a triangle with its reach around it, so each triangle looks in at
+        // most two cells along each axis.
+        let inv = 1.0 / (1.5 * edge + 2.0 * reach).max(1e-3);
         // Dense hashing: cells hash into twice as many buckets as particles, filled by
         // counting.
         let mask = (2 * pos.len()).next_power_of_two() as u32 - 1;
@@ -1353,22 +1357,29 @@ impl SelfContacts {
             (h as u32 & mask) as usize
         };
         let cell_of = |p: Vec3| (p * inv).floor().as_ivec3();
-        let (starts, ids) = (&mut self.starts, &mut self.ids);
+        let (starts, bucketed, cells) = (&mut self.starts, &mut self.bucketed, &mut self.cells);
         starts.clear();
         starts.resize(mask as usize + 2, 0);
-        for p in pos {
-            starts[bucket(cell_of(*p)) + 1] += 1;
-        }
+        cells.clear();
+        cells.extend(pos.iter().zip(w).map(|(p, &w)| {
+            if w == 0.0 {
+                return u32::MAX;
+            }
+            let b = bucket(cell_of(*p)) as u32;
+            starts[b as usize + 1] += 1;
+            b
+        }));
         for b in 1..starts.len() {
             starts[b] += starts[b - 1];
         }
-        ids.clear();
-        ids.resize(pos.len(), 0);
+        bucketed.clear();
+        bucketed.resize(starts[starts.len() - 1] as usize, (Vec3::ZERO, 0));
         let mut fill = starts.clone();
-        for (i, p) in pos.iter().enumerate() {
-            let b = bucket(cell_of(*p));
-            ids[fill[b] as usize] = i as u32;
-            fill[b] += 1;
+        for (i, &b) in cells.iter().enumerate() {
+            if b != u32::MAX {
+                bucketed[fill[b as usize] as usize] = (pos[i], i as u32);
+                fill[b as usize] += 1;
+            }
         }
         let beside = -reach / edge.max(1e-3) - 0.05;
         for t in self.patches.hot_triangles() {
@@ -1386,13 +1397,8 @@ impl SelfContacts {
                 for y in clo.y..=chi.y {
                     for x in clo.x..=chi.x {
                         let slot = bucket(IVec3::new(x, y, z));
-                        for &i in &ids[starts[slot] as usize..starts[slot + 1] as usize] {
-                            let p = pos[i as usize];
-                            if w[i as usize] == 0.0
-                                || p.cmplt(lo).any()
-                                || p.cmpgt(hi).any()
-                                || tri.contains(&i)
-                            {
+                        for &(p, i) in &bucketed[starts[slot] as usize..starts[slot + 1] as usize] {
+                            if p.cmplt(lo).any() || p.cmpgt(hi).any() || tri.contains(&i) {
                                 continue;
                             }
                             let d = (p - a).dot(n);
@@ -1614,6 +1620,31 @@ mod tests {
             }
         }
         (pos, tris)
+    }
+
+    /// The search over a sheet crumpled everywhere (every patch hot). Run with
+    /// `cargo test --release -p engine_softbody --lib self_collision_search_speed -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn self_collision_search_speed() {
+        let (mut pos, tris) = sheet(0.0, 0.0);
+        for p in &mut pos {
+            p.y = 0.25 * (9.0 * p.x).sin() * (7.0 * p.z).sin();
+        }
+        let w = vec![1.0; pos.len()];
+        let mut c = SelfContacts::default();
+        c.search(&pos, &w, &tris, 0.026, 0.05);
+        let t = std::time::Instant::now();
+        for _ in 0..20 {
+            c.search(&pos, &w, &tris, 0.026, 0.05);
+        }
+        println!(
+            "search {:.3} ms, {} pairs, {} of {} hot",
+            t.elapsed().as_secs_f64() * 50.0,
+            c.pairs.len(),
+            c.patches.hot.iter().filter(|h| **h).count(),
+            c.patches.count()
+        );
     }
 
     #[test]
