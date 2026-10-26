@@ -75,6 +75,7 @@ pub mod gltf_loader;
 pub mod gpu;
 pub mod grass;
 pub mod image_cache;
+mod impostor;
 mod lens;
 pub mod material;
 pub mod material_library;

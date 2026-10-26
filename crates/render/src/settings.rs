@@ -243,6 +243,10 @@ pub struct RenderSettings {
     /// Instanced meshes narrower than this many pixels on screen (or texels in a shadow map)
     /// are left out of that view. 0 = draw everything.
     pub min_object_pixels: f32,
+    /// Instanced meshes whose levels of detail stay above a few hundred triangles (leaf-card
+    /// trees, ragged props) are drawn as impostors, one baked quad each, once smaller than this
+    /// many pixels on screen (or texels in a shadow map); see `impostor.rs`. 0 = never.
+    pub impostor_pixels: f32,
     /// The same for shadow maps, in shadow map texels (cascade texels are much larger than
     /// screen pixels, so shadows use coarser clusters than the camera). The default of 2 halves
     /// the shadow triangles of 1 with no visible change under the shadow filter.
@@ -335,6 +339,7 @@ impl Default for RenderSettings {
             cluster_error_px: 1.0,
             mesh_lod_pixels: 1.0,
             min_object_pixels: 1.0,
+            impostor_pixels: 96.0,
             cluster_shadow_error_texels: 2.0,
             material_texture_size: 1024,
             release_image_pixels: false,
