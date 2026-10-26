@@ -149,6 +149,10 @@ pub struct RenderSettings {
     pub screen_space_gi: bool,
     /// Strength of the bounced light (1 = physical).
     pub gi_intensity: f32,
+    /// How far light spreads under skin, meters at full strength (screen-space subsurface
+    /// scattering of the pixels a feature marks; see `RenderFeature::needs_subsurface`).
+    /// 0 = off.
+    pub subsurface_width: f32,
     /// Scales the number of blades in every `GrassField` (quality setting; 0 = no grass).
     pub grass_density: f32,
     /// Volumetric fog: the height fog ([`FogSettings`]) and every
@@ -309,6 +313,7 @@ impl Default for RenderSettings {
             ssr_max_roughness: 0.6,
             screen_space_gi: true,
             gi_intensity: 1.0,
+            subsurface_width: 0.012,
             grass_density: 1.0,
             volumetric_fog: true,
             volumetric_fog_range: 256.0,

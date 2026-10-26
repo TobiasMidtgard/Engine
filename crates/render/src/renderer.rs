@@ -197,6 +197,8 @@ pub struct Renderer {
     volumetrics: crate::volumetrics::Volumetrics,
     /// Depth of field (before TAA) and motion blur (after it): camera components.
     lens: crate::lens::LensEffects,
+    /// Skin's subsurface scattering (made the first time a feature asks for it).
+    subsurface: Option<crate::subsurface::SubsurfacePass>,
     /// Frame timing and the `perf:` log line.
     perf: crate::perf::PerfLog,
     /// Which far shadow cascades keep last frame's image.
@@ -582,6 +584,7 @@ impl Renderer {
             meter,
             volumetrics,
             lens: Default::default(),
+            subsurface: None,
             perf,
             cascade_cache: Default::default(),
             previous: None,
@@ -643,6 +646,9 @@ impl Renderer {
         );
         self.effects.resize(&self.shared, &self.targets);
         self.lens.resize();
+        if let Some(s) = &mut self.subsurface {
+            s.resize();
+        }
         self.volumetrics.resize(&self.shared, &self.targets);
         self.rebuild_frame_groups();
         self.previous = None;
@@ -1199,6 +1205,24 @@ impl Renderer {
                     pass.set_bind_group(0, frame_group, &[]);
                 }
             }
+        }
+
+        // Skin: its diffuse light spreads under the surface (subsurface.rs).
+        if settings.subsurface_width > 0.0
+            && !view.orthographic
+            && self.features.iter().any(|f| f.needs_subsurface())
+        {
+            self.perf
+                .pass(&mut cpu, &mut encoder, "subsurface scattering");
+            self.subsurface
+                .get_or_insert_with(|| crate::subsurface::SubsurfacePass::new(&self.shared))
+                .encode(
+                    &self.shared,
+                    &self.targets,
+                    &mut encoder,
+                    &view,
+                    settings.subsurface_width,
+                );
         }
 
         // Copies for refraction / soft particles, and the color for TAA's reactive mask (what the
