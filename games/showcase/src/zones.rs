@@ -346,9 +346,9 @@ pub struct DemoZones(pub Vec<String>);
 /// field's, the smoke stops (`smoke_range`) the range's, and the sunset and night views look
 /// across the plaza, so a tour of them shows its fountain and spheres. The overview and the
 /// tower look down on the whole valley, where only the lake's water reads from that height
-/// (without it the lake is a bare basin), so they load just the lake, as does the waterfall
-/// that feeds it.
-const ZONE_ALIASES: [(&str, &str); 7] = [
+/// (without it the lake is a bare basin), so they load just the lake, as do the waterfall
+/// that feeds it and the start screen's view. The walk's stops load where the pilot stands.
+const ZONE_ALIASES: [(&str, &str); 10] = [
     ("fire", "field"),
     ("smoke", "range"),
     ("sunset", "plaza"),
@@ -356,6 +356,10 @@ const ZONE_ALIASES: [(&str, &str); 7] = [
     ("overview", "lake"),
     ("tower", "lake"),
     ("falls", "lake"),
+    ("start_screen", "lake"),
+    // (Before `walk`, whose prefix it shares.)
+    ("walk_falls", "lake"),
+    ("walk", "plaza"),
 ];
 
 /// The zone a viewpoint belongs to: the zone with its key, or whose key and `_` start it
@@ -1523,6 +1527,8 @@ mod tests {
         assert_eq!(zone_of("firefly"), None);
         assert_eq!(zone_of("sunset"), Some("plaza"));
         assert_eq!(zone_of("night"), Some("plaza"));
+        assert_eq!(zone_of("walk"), Some("plaza"));
+        assert_eq!(zone_of("walk_falls"), Some("lake"));
         let only = |keys: &[&str]| Some(DemoZones(keys.iter().map(|k| k.to_string()).collect()));
         assert_eq!(
             demo_zones(None, Some("paddock_car,yard,paddock")),

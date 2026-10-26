@@ -37,6 +37,7 @@ mod texgen;
 mod tour;
 mod tower;
 mod village;
+mod walk;
 mod walls;
 mod zones;
 
@@ -116,6 +117,11 @@ fn main() {
     if let Some(zones) = zones::demo_zones(value("--zones"), stops) {
         app.insert_resource(zones);
     }
+    let headless = app.world.resource::<EngineConfig>().headless;
+    let scripted = ["--tour", "--film", "--fly"]
+        .iter()
+        .any(|f| args.iter().any(|a| a == f));
+    walk::install(&mut app, !headless && !scripted);
     if args.iter().any(|a| a == "--tour") {
         tour::install(&mut app, value("--tour"));
     } else if args.iter().any(|a| a == "--film") {

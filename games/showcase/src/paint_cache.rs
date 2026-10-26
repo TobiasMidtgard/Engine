@@ -87,7 +87,7 @@ impl PaintCache {
     /// The paint at (x, z) for a tap standing for `footprint` meters of ground.
     pub fn paint_for(&self, x: f64, z: f64, footprint: f64) -> OverlayPaint {
         // (NaN before the camera is known: exact.)
-        if !(footprint >= FINEST_M) {
+        if footprint.is_nan() || footprint < FINEST_M {
             return (self.exact)(&self.land, x, z);
         }
         let level = ((footprint / FINEST_M).log2() as u32).min(LEVELS - 1);

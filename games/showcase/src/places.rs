@@ -144,6 +144,14 @@ fn above_ground(p: DVec3, clearance: f64) -> DVec3 {
     DVec3::new(p.x, p.y.max(ground + clearance), p.z)
 }
 
+/// Behind the walk's start of leg `i`, looking at the stop it heads for (the pilot's camera
+/// takes over once the walk starts).
+fn walk_view(i: usize) -> (DVec3, DVec3) {
+    let (from, to) = crate::walk::leg(i);
+    let back = (from - to).with_y(0.0).normalize_or(DVec3::Z);
+    (from + back * 7.0 + DVec3::Y * 2.5, to)
+}
+
 /// Every viewpoint, in tour order.
 pub fn places() -> Vec<Place> {
     let place = |key, name, (position, target): (DVec3, DVec3), hour| Place {
@@ -247,6 +255,27 @@ pub fn places() -> Vec<Place> {
             16.5,
         ),
         place("falls", "Waterfall into the lake", falls_view(), 15.0),
+        place(
+            "start_screen",
+            "The exe's start screen over the valley",
+            crate::walk::start_view(0.0),
+            17.0,
+        )
+        .arriving("showcase.start_screen", "{}".into()),
+        place(
+            "walk",
+            "Walk the valley: the pilot on the plaza, the market's marker ahead",
+            walk_view(0),
+            10.5,
+        )
+        .arriving("showcase.walk", r#"{"stop": 1}"#.into()),
+        place(
+            "walk_falls",
+            "Walk the valley: on the lake shore, heading for the waterfall",
+            walk_view(4),
+            15.0,
+        )
+        .arriving("showcase.walk", r#"{"stop": 5}"#.into()),
         lake_trail(place(
             "lake_trail",
             "A footpath worn bare across the grass to the lake",
