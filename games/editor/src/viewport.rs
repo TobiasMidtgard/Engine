@@ -8,6 +8,7 @@ use transform_gizmo_egui::{
 };
 
 use crate::editor::{self, Editor, Mode, Tool};
+use crate::models::Dragged;
 use crate::picking;
 use crate::scene_ops::{EditorOnly, InScene};
 use crate::theme;
@@ -39,6 +40,7 @@ pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     };
 
     let gizmo_used = gizmo(ui, world, editor, &view);
+    drop_target(ui, world, editor, &view, &response);
 
     let alt = ui.input(|i| i.modifiers.alt);
     if editor.tool == Tool::Sculpt {
@@ -60,6 +62,49 @@ pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     box_select(ui, world, editor, &view, &response, alt || gizmo_used);
 
     overlays(ui, world, editor, rect);
+}
+
+/// Models and prefabs dragged from the Content panel land where the pointer meets a surface
+/// (or 8 m out in the air).
+fn drop_target(
+    ui: &egui::Ui,
+    world: &mut World,
+    editor: &mut Editor,
+    view: &ViewInfo,
+    response: &egui::Response,
+) {
+    // A drag from another panel leaves `hovered` false, so ask the pointer directly.
+    if !response.contains_pointer() {
+        return;
+    }
+    let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else {
+        return;
+    };
+    let (o, d) = view.ray(pos);
+    if let Some(dragged) = response.dnd_hover_payload::<Dragged>() {
+        let name = match &*dragged {
+            Dragged::Model(key) => crate::models::display_name(key),
+            Dragged::Prefab(path) => crate::prefab::display_name(path),
+        };
+        ui.painter().text(
+            pos + egui::vec2(16.0, -18.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("Drop to place {name}"),
+            egui::FontId::proportional(13.0),
+            theme::ACCENT,
+        );
+    }
+    let Some(dragged) = response.dnd_release_payload::<Dragged>() else {
+        return;
+    };
+    let at =
+        picking::pick_surface(world, o, d, 200.0, &|_| false).unwrap_or(o + d.as_dvec3() * 8.0);
+    match &*dragged {
+        Dragged::Model(key) => {
+            crate::models::place(world, editor, key, at);
+        }
+        Dragged::Prefab(path) => crate::prefab::place(world, editor, path, Some(at)),
+    }
 }
 
 /// Draw the editor camera into the scene tab only (physical pixels).
@@ -461,6 +506,7 @@ fn draw_icons(
             "light" => "💡",
             "camera" => "🎥",
             "demo" => "💠",
+            "model" => "🎲",
             _ => "○",
         };
         painter.text(
@@ -470,7 +516,7 @@ fn draw_icons(
             egui::FontId::proportional(12.0),
             egui::Color32::WHITE,
         );
-        if kind == "demo" {
+        if kind == "demo" || kind == "model" {
             painter.text(
                 pos + egui::vec2(ICON_RADIUS + 5.0, 0.0),
                 egui::Align2::LEFT_CENTER,

@@ -253,7 +253,7 @@ pub fn round2(dir: impl Into<PathBuf>) -> ShotScript {
                 crate::prefab::create(world, editor, post);
                 let path = crate::prefab::path_for("Lamp post");
                 for at in [DVec3::new(-3.0, 0.0, 2.5), DVec3::new(0.5, 0.0, 4.0)] {
-                    crate::prefab::place(world, editor, &path);
+                    crate::prefab::place(world, editor, &path, None);
                     move_selection_to(world, editor, at);
                 }
             }
@@ -391,6 +391,69 @@ pub fn round3(dir: impl Into<PathBuf>) -> ShotScript {
         Step::Do(Box::new(editor::undo)),
         Step::Wait(14),
         Step::Shot("18_undo_paint"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
+/// Round 4: models from the asset folder, placed by click and by drag, saved and reopened.
+pub fn round4(dir: impl Into<PathBuf>) -> ShotScript {
+    const HORSE: &str = "fetched/anim/animals/horse/Horse.gltf";
+    const CAR: &str = "fetched/anim/vehicles/car_concept.glb";
+    const WALKER: &str = "fetched/anim/characters/walker.glb";
+    const SCENE: &str = "scenes/round4_models.scene.json";
+    let steps = vec![
+        Step::Camera(DVec3::new(9.0, 3.2, 13.0), DVec3::new(2.0, 0.8, 2.0)),
+        Step::Select(""),
+        Step::Tab(Tab::Content),
+        Step::Do(Box::new(|world, editor| {
+            crate::models::place(world, editor, CAR, DVec3::new(5.0, 0.0, 0.0));
+            crate::models::place(world, editor, WALKER, DVec3::new(0.5, 0.0, 4.0));
+        })),
+        // Textures stream in over a few frames.
+        Step::Wait(12),
+        // Drag the horse in: a payload held over the scene view, then released.
+        Step::Do(Box::new(|world, _| {
+            let ctx = world.resource::<crate::egui_bridge::Egui>().ctx.clone();
+            egui::DragAndDrop::set_payload(&ctx, crate::models::Dragged::Model(HORSE.into()));
+            world
+                .resource_mut::<crate::egui_bridge::EguiInput>()
+                .injected
+                .push(egui::Event::PointerMoved(egui::pos2(560.0, 470.0)));
+        })),
+        Step::Wait(3),
+        Step::Shot("19_drag_model"),
+        Step::Do(Box::new(|world, _| {
+            let mut input = world.resource_mut::<crate::egui_bridge::EguiInput>();
+            input.injected.push(egui::Event::PointerButton {
+                pos: egui::pos2(560.0, 470.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+        })),
+        Step::Wait(14),
+        Step::Shot("20_models_placed"),
+        // Save, clear, and open the scene again: the models come back from their asset keys.
+        Step::Do(Box::new(|world, editor| {
+            editor::save_scene(world, editor, SCENE);
+            editor::new_scene(world, editor);
+        })),
+        Step::Wait(4),
+        Step::Do(Box::new(|world, editor| {
+            editor::load_scene(world, editor, SCENE);
+            let mut q = world.query_filtered::<(), (
+                With<crate::scene_ops::InScene>,
+                With<engine::render::MeshRenderer>,
+            )>();
+            let meshes = q.iter(world).count();
+            editor.info(
+                editor::now(world),
+                format!("reopened {SCENE}: {meshes} mesh entities"),
+            );
+        })),
+        Step::Tab(Tab::Console),
+        Step::Wait(14),
+        Step::Shot("22_reopened"),
     ];
     ShotScript::new(dir, steps)
 }

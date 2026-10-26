@@ -20,6 +20,7 @@ mod editor;
 mod egui_bridge;
 mod inspector;
 mod landscape;
+mod models;
 mod picking;
 mod prefab;
 mod sample;
@@ -84,6 +85,7 @@ fn main() {
         let script = match value("--script").as_deref() {
             Some("round2") => shots::round2(dir),
             Some("round3") => shots::round3(dir),
+            Some("round4") => shots::round4(dir),
             _ => shots::gallery(dir),
         };
         app.insert_resource(script);
@@ -113,6 +115,10 @@ impl Plugin for EditorPlugin {
             )
             .register_component::<landscape::Sculpt>(
                 "A landscape's brush dabs (raise, lower, restore, paint), replayed onto its terrain.",
+            )
+            .register_component::<models::Model>(
+                "Placed from the glTF file at `path` (relative to the asset root); its nodes are \
+                 this entity's children.",
             )
             .register_component::<prefab::PrefabInstance>(
                 "Placed from the prefab file at `path`; the editor can apply changes back to \

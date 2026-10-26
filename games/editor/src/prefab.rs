@@ -114,8 +114,8 @@ pub fn create(world: &mut World, editor: &mut Editor, entity: Entity) {
     editor.info(t, format!("Saved prefab {path}"));
 }
 
-/// Place the prefab at `path` where the view is looking, and select it.
-pub fn place(world: &mut World, editor: &mut Editor, path: &str) {
+/// Place the prefab at `path` at `at` (default: where the view is looking), and select it.
+pub fn place(world: &mut World, editor: &mut Editor, path: &str, at: Option<DVec3>) {
     let t = now(world);
     let doc = match SceneDoc::load(path) {
         Ok(doc) => doc,
@@ -124,7 +124,7 @@ pub fn place(world: &mut World, editor: &mut Editor, path: &str) {
             return;
         }
     };
-    let at = editor::placement_point(world, editor);
+    let at = at.unwrap_or_else(|| editor::placement_point(world, editor));
     let mut commands = Vec::new();
     let mut placed = Vec::new();
     for root in &doc.entities {

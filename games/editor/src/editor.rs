@@ -139,6 +139,10 @@ pub struct Editor {
     pub clipboard: Vec<(scene_ops::SavedEntity, Option<Entity>)>,
     /// The landscape brush.
     pub brush: crate::landscape::Brush,
+    /// Model files under the asset root (scanned when the Content panel first shows them).
+    pub models: Option<Vec<String>>,
+    /// Content panel model search.
+    pub model_filter: String,
 }
 
 impl Editor {
@@ -173,6 +177,8 @@ impl Editor {
             box_start: None,
             clipboard: Vec::new(),
             brush: Default::default(),
+            models: None,
+            model_filter: String::new(),
         }
     }
 
@@ -1012,7 +1018,12 @@ pub fn has_icon(world: &World, e: Entity) -> Option<&'static str> {
         Some("light")
     } else if world.get::<Camera>(e).is_some() {
         Some("camera")
-    } else if world.get::<MeshRenderer>(e).is_none() && world.get::<InScene>(e).is_some() {
+    } else if world.get::<crate::models::Model>(e).is_some() {
+        Some("model")
+    } else if world.get::<MeshRenderer>(e).is_none()
+        && world.get::<InScene>(e).is_some()
+        && !crate::models::inside_model(world, e)
+    {
         Some("empty")
     } else {
         None
