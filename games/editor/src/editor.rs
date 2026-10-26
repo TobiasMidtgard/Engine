@@ -143,6 +143,8 @@ pub struct Editor {
     pub models: Option<Vec<String>>,
     /// Content panel model search.
     pub model_filter: String,
+    /// When placed models' files last changed (for reimport).
+    pub model_watch: crate::models::Watch,
 }
 
 impl Editor {
@@ -179,6 +181,7 @@ impl Editor {
             brush: Default::default(),
             models: None,
             model_filter: String::new(),
+            model_watch: Default::default(),
         }
     }
 

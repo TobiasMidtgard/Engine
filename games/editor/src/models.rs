@@ -3,14 +3,17 @@
 //! meshes and materials by asset key, so scene files save it like anything else and load the
 //! file again when opened.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::time::SystemTime;
 
 use engine::assets::AssetServer;
 use engine::prelude::*;
 use engine::render::{GltfScene, Mesh};
+use engine::world::physics::ColliderShape;
 
 use crate::editor::{Editor, now};
-use crate::scene_ops::{self, InScene, SceneOrder};
+use crate::scene_ops::{self, InScene, Remap, SceneOrder};
 use crate::undo::Command;
 
 /// This entity's children were placed from the glTF file at `path` (an asset key).
@@ -146,6 +149,141 @@ pub fn place(world: &mut World, editor: &mut Editor, key: &str, at: DVec3) -> Op
     Some(entity)
 }
 
+/// Read `key` from disk again and rebuild every placed copy of it, keeping each one's place,
+/// parent, name and outliner position (edits inside the model are replaced). One undo step.
+pub fn reimport(world: &mut World, editor: &mut Editor, key: &str) {
+    let t = now(world);
+    let file = engine::assets::normalize_path(key);
+    if let Err(e) = engine::assets::load_now(world, &file) {
+        editor.error(t, format!("Could not reimport {key}: {e}"));
+        return;
+    }
+    let mut q = world.query_filtered::<(Entity, &Model), With<InScene>>();
+    let copies: Vec<Entity> = q
+        .iter(world)
+        .filter(|(_, m)| engine::assets::normalize_path(&m.path) == file)
+        .map(|(e, _)| e)
+        .collect();
+    let mut commands = Vec::new();
+    let mut remap = Remap::new();
+    for old in copies {
+        match rebuild(world, old) {
+            Ok((new, undo)) => {
+                remap.insert(old, new);
+                commands.extend(undo);
+            }
+            Err(e) => editor.error(t, format!("Could not reimport {key}: {e}")),
+        }
+    }
+    editor.history.remap_all(&remap);
+    editor.remap_selection(&remap);
+    let label = format!("Reimport {} ({} placed)", display_name(key), remap.len());
+    if !commands.is_empty() {
+        editor
+            .history
+            .record(world, Command::Group(label.clone(), commands), t);
+    }
+    editor.info(t, label);
+}
+
+/// Spawn `old`'s model again from the loaded file in its place. Returns the new root and the
+/// commands that undo it.
+fn rebuild(world: &mut World, old: Entity) -> Result<(Entity, [Command; 2]), String> {
+    let key = world
+        .get::<Model>(old)
+        .map(|m| m.path.clone())
+        .ok_or("not a model")?;
+    let scene = load(world, &key)?;
+    let saved_old = scene_ops::save_entity(world, old);
+    let parent = world.get::<ChildOf>(old).map(|p| p.parent());
+    let transform = world.get::<Transform>(old).copied().unwrap_or_default();
+    let order = world.get::<SceneOrder>(old).copied();
+    let name = world.get::<Name>(old).cloned();
+    world.entity_mut(old).despawn();
+    let new = engine::render::spawn_gltf_scene(world, scene, transform)?;
+    let mut e = world.entity_mut(new);
+    e.insert(Model { path: key });
+    if let Some(parent) = parent {
+        e.insert(ChildOf(parent));
+    }
+    if let Some(order) = order {
+        e.insert(order);
+    }
+    if let Some(name) = name {
+        e.insert(name);
+    }
+    tag_tree(world, new);
+    let commands = [
+        Command::Despawned {
+            saved: saved_old,
+            parent,
+        },
+        Command::Spawned {
+            saved: scene_ops::save_entity(world, new),
+            parent,
+        },
+    ];
+    Ok((new, commands))
+}
+
+/// Seconds between looks at the placed models' files.
+const WATCH_SECS: f64 = 1.0;
+
+/// Modification times of the model files in the scene, to reimport the ones that change.
+#[derive(Default)]
+pub struct Watch {
+    next: f64,
+    stamps: HashMap<String, SystemTime>,
+}
+
+/// Reimport placed models whose file changed on disk (Update, exclusive).
+pub fn watch_files(world: &mut World) {
+    let t = now(world);
+    let Some(root) = world.get_resource::<AssetServer>().map(|s| s.root()) else {
+        return;
+    };
+    world.resource_scope(|world, mut editor: Mut<Editor>| {
+        if t < editor.model_watch.next {
+            return;
+        }
+        editor.model_watch.next = t + WATCH_SECS;
+        let mut q = world.query_filtered::<&Model, With<InScene>>();
+        let mut keys: Vec<String> = q.iter(world).map(|m| m.path.clone()).collect();
+        keys.sort();
+        keys.dedup();
+        let mut changed = Vec::new();
+        for key in &keys {
+            let Ok(stamp) = std::fs::metadata(root.join(key)).and_then(|m| m.modified()) else {
+                continue;
+            };
+            if let Some(old) = editor.model_watch.stamps.insert(key.clone(), stamp)
+                && old != stamp
+            {
+                changed.push(key.clone());
+            }
+        }
+        editor.model_watch.stamps.retain(|k, _| keys.contains(k));
+        for key in changed {
+            reimport(world, &mut editor, &key);
+        }
+    });
+}
+
+/// A box collider shape around the model (in its root's space), offset to its middle.
+pub fn fitted_collider(world: &mut World, root: Entity) -> Option<ColliderShape> {
+    let key = world.get::<Model>(root)?.path.clone();
+    let scene = load(world, &key).ok()?;
+    let data = world.resource::<Assets<GltfScene>>().get(scene)?.clone();
+    let (low, high) = scene_bounds(world, &data)?;
+    let half = ((high - low) * 0.5).as_vec3().max(Vec3::splat(0.01));
+    let center = ((high + low) * 0.5).as_vec3();
+    Some(ColliderShape::Compound(vec![(
+        center,
+        Quat::IDENTITY,
+        ColliderShape::Cuboid { half_extents: half },
+    )]))
+}
+
 fn load(world: &mut World, key: &str) -> Result<Handle<GltfScene>, String> {
     let file = engine::assets::normalize_path(key);
     let loaded = world
@@ -228,6 +366,81 @@ mod tests {
         assert_eq!(display_name("car_concept.glb"), "car concept");
         assert_eq!(folder("fetched/anim/clips/m_run.glb"), "fetched/anim/clips");
         assert_eq!(folder("rock.glb"), "");
+    }
+
+    /// A one-triangle glTF (y from 1 to 2) whose node is called `node`.
+    fn write_model(dir: &Path, node: &str) {
+        let floats: [f32; 9] = [0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 2.0, 0.0];
+        let bytes: Vec<u8> = floats.iter().flat_map(|f| f.to_le_bytes()).collect();
+        std::fs::write(dir.join("tri.bin"), &bytes).unwrap();
+        let doc = serde_json::json!({
+            "asset": {"version": "2.0"},
+            "scene": 0,
+            "scenes": [{"nodes": [0]}],
+            "nodes": [{"name": node, "mesh": 0}],
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+            "accessors": [{
+                "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                "min": [0.0, 1.0, 0.0], "max": [1.0, 2.0, 0.0]
+            }],
+            "bufferViews": [{"buffer": 0, "byteLength": 36}],
+            "buffers": [{"uri": "tri.bin", "byteLength": 36}]
+        });
+        std::fs::write(dir.join("tri.gltf"), doc.to_string()).unwrap();
+    }
+
+    fn child_names(world: &mut World) -> Vec<String> {
+        let mut q = world.query_filtered::<(&Name, &ChildOf), With<InScene>>();
+        q.iter(world)
+            .filter(|(_, p)| world.get::<Model>(p.parent()).is_some())
+            .map(|(n, _)| n.as_str().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn place_and_reimport_keep_the_spot_and_undo() {
+        let dir = std::env::temp_dir().join(format!("editor-reimport-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_model(&dir, "Old node");
+        let mut app = App::new();
+        app.add_plugins(engine::assets::AssetPlugin {
+            hot_reload: false,
+            root: Some(dir.clone()),
+        });
+        app.init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .init_asset::<engine::render::Image>()
+            .init_asset::<GltfScene>()
+            .register_asset_loader(engine::render::GltfLoader)
+            .register_component::<Model>("test");
+        app.update();
+        let world = &mut app.world;
+        let camera = world.spawn(crate::scene_ops::EditorOnly).id();
+        let mut editor = Editor::new(camera);
+
+        let root = place(world, &mut editor, "tri.gltf", DVec3::new(3.0, 0.0, 0.0)).unwrap();
+        let t = world.get::<Transform>(root).unwrap().translation;
+        assert_eq!(
+            (t.x, t.y),
+            (3.0, -1.0),
+            "the triangle's bottom sits on the point"
+        );
+        assert_eq!(child_names(world), ["Old node"]);
+        world.get_mut::<Transform>(root).unwrap().translation.x = 5.0;
+
+        write_model(&dir, "New node");
+        reimport(world, &mut editor, "tri.gltf");
+        assert_eq!(child_names(world), ["New node"]);
+        let mut q = world.query_filtered::<&Transform, With<Model>>();
+        assert_eq!(
+            q.single(world).unwrap().translation.x,
+            5.0,
+            "kept where it was moved"
+        );
+
+        crate::editor::undo(world, &mut editor);
+        assert_eq!(child_names(world), ["Old node"]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

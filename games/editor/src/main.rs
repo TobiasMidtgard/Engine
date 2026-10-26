@@ -134,6 +134,7 @@ impl Plugin for EditorPlugin {
                     ui::editor_ui,
                     demos::sync_demos,
                     landscape::sync_sculpt,
+                    models::watch_files,
                     step_frames,
                     shots::run_script,
                 )

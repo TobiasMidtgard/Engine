@@ -433,6 +433,17 @@ pub fn round4(dir: impl Into<PathBuf>) -> ShotScript {
         })),
         Step::Wait(14),
         Step::Shot("20_models_placed"),
+        // The car's file changes on disk: the editor notices and rebuilds it in place.
+        Step::Do(Box::new(|world, _| {
+            let root = world
+                .resource::<engine::assets::AssetServer>()
+                .root()
+                .join(CAR);
+            if let Ok(file) = std::fs::File::options().append(true).open(root) {
+                let _ = file.set_modified(std::time::SystemTime::now());
+            }
+        })),
+        Step::Wait(40),
         // Save, clear, and open the scene again: the models come back from their asset keys.
         Step::Do(Box::new(|world, editor| {
             editor::save_scene(world, editor, SCENE);
