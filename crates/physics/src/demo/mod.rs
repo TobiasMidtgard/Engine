@@ -840,6 +840,14 @@ pub(crate) fn replay_stations(world: &mut World) {
             .filter(|(_, p)| rest.contains(&(p.ground, p.station)))
             .map(|(e, _)| e)
             .collect();
+        if crate::report::wanted() {
+            let names: Vec<_> = rest.iter().map(|(_, s)| s.key()).collect();
+            engine_core::log::info!(
+                "proving ground: {} rest, nobody near ({} bodies held asleep)",
+                names.join(", "),
+                bodies.len()
+            );
+        }
         let shared = world.resource::<crate::SharedSimulation>().0.clone();
         shared.write().resting.extend(bodies);
     }

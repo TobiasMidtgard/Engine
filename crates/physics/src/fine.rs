@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
 
-use crate::lod::find;
+use crate::lod::{Member, find};
 use crate::settings::PhysicsSettings;
 use crate::sim::{Region, RegionId, Simulation};
 
@@ -114,10 +114,11 @@ impl Simulation {
     pub(crate) fn update_fine(&mut self) -> bool {
         let mut fine: HashMap<RegionId, (f32, u32)> = HashMap::new();
         let mut reach: HashMap<RegionId, f64> = HashMap::new();
-        for b in self.bodies.values() {
+        for (e, b) in &self.bodies {
             let r = reach.entry(b.region).or_insert(0.0);
             *r = r.max(b.reach as f64);
-            if let Some(f) = b.fine {
+            // (A body told to rest is held asleep: it needs no steps, fine or not.)
+            if let Some(f) = b.fine.filter(|_| !self.resting.contains(e)) {
                 let e = fine.entry(b.region).or_insert((f, 0));
                 e.0 = e.0.min(f);
                 e.1 += 1;
@@ -138,8 +139,8 @@ impl Simulation {
         newly_mixed
     }
 
-    /// Does a mover of region `other` come within `margin` meters of one of region `fine`
-    /// (a small one)? Looked at every step, so every body of `other` gets a box test first.
+    /// Does a mover of region `other` (a body, not a character) come within `margin` meters of
+    /// one of region `fine` (a small one)? Looked at every step, so every body of `other` gets a box test first.
     pub(crate) fn movers_near(&self, fine: RegionId, other: RegionId, margin: f64) -> bool {
         let near = self.members(fine);
         let Some((lo, hi)) = near.iter().fold(None, |acc: Option<(DVec3, DVec3)>, m| {
@@ -167,10 +168,12 @@ impl Simulation {
             if p.cmplt(llo).any() || p.cmpgt(lhi).any() {
                 continue;
             }
-            let e = crate::convert::entity_of(rb.user_data);
-            // (A character's body has no entry: it reaches about a meter.)
-            let reach = self.bodies.get(&e).map_or(1.0, |b| b.reach as f64);
-            if close(region.global(p), reach) {
+            // Characters don't bring a fine region back (as they don't hold one in,
+            // `split_fine`): a walker among the stations would step the whole yard finely.
+            let Some(b) = self.bodies.get(&crate::convert::entity_of(rb.user_data)) else {
+                continue;
+            };
+            if close(region.global(p), b.reach as f64) {
                 return true;
             }
         }
@@ -189,28 +192,32 @@ impl Simulation {
             if frozen || !mixed {
                 continue;
             }
-            let members = self.members(id);
+            // Characters step with the rest and don't chain bodies together: walkers among the
+            // stations would hold the whole yard in one cluster, all of it stepping finely.
+            let members: Vec<Member> = self
+                .members(id)
+                .into_iter()
+                .filter(|m| m.body.is_some())
+                .collect();
             let mut parent = self.cluster(&members, gap);
-            // Per cluster: holds a body with fine steps, holds a character, its members.
-            let mut clusters: HashMap<usize, (bool, bool, Vec<usize>)> = HashMap::new();
+            // Per cluster: holds a body with fine steps, its members.
+            let mut clusters: HashMap<usize, (bool, Vec<usize>)> = HashMap::new();
             for (i, m) in members.iter().enumerate() {
                 let root = find(&mut parent, i);
-                let c = clusters.entry(root).or_insert((false, false, Vec::new()));
-                c.0 |= m
-                    .body
-                    .and_then(|e| self.bodies.get(&e))
-                    .is_some_and(|b| b.fine.is_some());
-                c.1 |= m.body.is_none();
-                c.2.push(i);
+                let c = clusters.entry(root).or_insert((false, Vec::new()));
+                c.0 |= m.body.is_some_and(|e| {
+                    self.bodies.get(&e).is_some_and(|b| b.fine.is_some())
+                        && !self.resting.contains(&e)
+                });
+                c.1.push(i);
             }
             if clusters.values().all(|c| c.0) {
                 continue;
             }
-            // (Characters step with the rest; a cluster holding one stays.)
             let mut leaving: Vec<(usize, Vec<usize>)> = clusters
                 .into_iter()
-                .filter(|(_, (fine, character, _))| *fine && !*character)
-                .map(|(root, (_, _, list))| (root, list))
+                .filter(|(_, (fine, _))| *fine)
+                .map(|(root, (_, list))| (root, list))
                 .collect();
             leaving.sort_by_key(|(root, _)| *root);
             for (_, list) in leaving {
