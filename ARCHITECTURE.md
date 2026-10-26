@@ -430,6 +430,16 @@ like diffuse light with a forward glow toward the light, and shadowed like the l
 backlit leaves glow green; at 0 (fences, grates, hair cards) nothing comes through. Opaque
 single-sided materials keep the ordinary `shade_surface` (`subsurface` wraps light around them).
 
+**Instanced levels of detail and impostors** (`mesh_lod.rs`, `impostor.rs`): meshes on the
+instanced path get a chain of simplified index lists (built on a worker thread), and each view
+draws the coarsest level whose error stays under `mesh_lod_pixels` (texels in shadow maps);
+instances under `min_object_pixels` are left out. Meshes whose coarsest level still has 256
+triangles or more (leaf-card trees, ragged props) are baked once, on the GPU, from 12×12
+directions into an atlas layer (color, coverage, normal, depth) and drawn as one quad each once
+smaller than `impostor_pixels`, with the baked depth written so they sit in the ground; in the
+shadow maps the quad faces the sun. No component is needed: every module's instanced meshes get
+both. The far shadow cascades keep their image for a few frames (`shadow_cascade_reuse`).
+
 **Virtual geometry** (built: cluster LOD and GPU-driven drawing; `crates/render/src/virtual_geometry`):
 dense opaque meshes (`RenderSettings::virtual_geometry_min_triangles`, 50 000 by default) are
 split into 128-triangle clusters with a level-of-detail DAG (groups simplified with locked

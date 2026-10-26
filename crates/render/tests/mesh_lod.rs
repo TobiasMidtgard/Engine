@@ -32,6 +32,7 @@ fn render(lods: bool, shot: &str) -> Option<(u64, Vec<u8>)> {
         if !lods {
             s.mesh_lod_pixels = 0.0;
             s.min_object_pixels = 0.0;
+            s.impostor_pixels = 0.0;
         }
     }
     let w = &mut app.world;
