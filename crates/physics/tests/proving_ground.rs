@@ -146,6 +146,22 @@ fn drums_roll_down_the_barrel_run_into_the_sand() {
         .map(|k| named(&mut app, &format!("Run drum {k}"))[0])
         .collect();
     let base = Station::BarrelRun.base();
+    // Only the run: what other stations throw can land in a lane (a crate of the wrecking
+    // ball's wall hops the ramp's low cheek some runs) and stop a drum where it should.
+    let others: Vec<Entity> = app
+        .world
+        .query::<(Entity, &Transform, &RigidBody)>()
+        .iter(&app.world)
+        .filter(|(e, t, rb)| {
+            rb.kind == BodyKind::Dynamic
+                && !drums.contains(e)
+                && (t.translation.z - base.z).abs() > 4.0
+        })
+        .map(|(e, ..)| e)
+        .collect();
+    for e in others {
+        app.world.despawn(e);
+    }
     let local = |app: &App, e: Entity| app.world.get::<Transform>(e).unwrap().translation - base;
     // The runway's flat part (station x), its top, and the pit.
     let (flat, deck_y, pit) = ((-19.0, 24.0), 0.04, (25.0, 31.4));

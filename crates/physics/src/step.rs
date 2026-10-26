@@ -15,7 +15,9 @@ use engine_world::{
     ContactKind, FocusPoints, Gravity, GroundContact, NoiseEvent, SimulationRange,
     SurfaceMaterials, Water, WorldImpulse,
 };
-use rapier3d::prelude::{ActiveHooks, PhysicsWorld, Pose, QueryFilter as RFilter, SharedShape};
+use rapier3d::prelude::{
+    ActiveHooks, PhysicsWorld, Pose, QueryFilter as RFilter, RigidBodyHandle, SharedShape,
+};
 
 use crate::buoyancy::{Surface, WATER_DENSITY};
 use crate::character;
@@ -632,6 +634,9 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                     crate::fine::iterations(&settings, r.fine, sub_dt);
                 let collector = std::mem::take(&mut r.collector);
                 crate::articulation::before_step(&mut r.world, &r.links);
+                if settings.contact_events {
+                    r.note_velocities();
+                }
                 r.world.step_with_events(&filter, &collector);
                 crate::articulation::after_step(&mut r.world, &mut r.links);
                 r.collector = collector;
@@ -640,6 +645,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             if scaled {
                 scale_time(&mut sim, rid, &special, false);
             }
+            carry_on_decks(&mut sim, rid, &special, sub_dt);
             let t2 = Instant::now();
             let _after = tracing::info_span!("contacts upkeep").entered();
             let min_speed = settings.contact_events.then_some(settings.impact_min_speed);
@@ -1319,6 +1325,79 @@ fn refresh_contact_hooks(world: &mut PhysicsWorld) {
             if let Some(col) = colliders.get_mut(h) {
                 col.set_active_hooks(hooks);
             }
+        }
+    }
+}
+
+/// Keep cargo riding a turning deck (a turntable, a carousel) on the circle it rides. The
+/// solver's friction carries it at the deck's speed, but along the tangent where the step began,
+/// so each step leaves it `r·(√(1+(ωΔt)²) − 1)` farther out: with one step a frame, a crate 3 m
+/// out on a deck turning 0.4 rad/s crept 8 cm in 20 s, and cargo slides off a deck that turns
+/// for minutes. PhysX's patch friction holds static contacts to anchors for the same reason;
+/// here a crate held by friction (moving with the deck) is put back on its circle.
+fn carry_on_decks(sim: &mut Simulation, rid: RegionId, special: &[Entity], dt: f32) {
+    let decks: Vec<RigidBodyHandle> = special
+        .iter()
+        .filter_map(|e| sim.bodies.get(e))
+        .filter(|b| b.region == rid && b.kind == BodyKind::Kinematic)
+        .map(|b| b.handle)
+        .collect();
+    if decks.is_empty() {
+        return;
+    }
+    let world = &mut sim.region_mut(rid).world;
+    let mut moves = Vec::new();
+    for deck in decks {
+        let Some(d) = world.bodies.get(deck) else {
+            continue;
+        };
+        let w = d.angvel();
+        let spin = w.length();
+        if spin < 1e-3 {
+            continue;
+        }
+        let axis = w / spin;
+        let (center, v0) = (d.center_of_mass(), d.linvel());
+        let out_per_m = (1.0 + (spin * dt).powi(2)).sqrt() - 1.0;
+        for &c in d.colliders() {
+            for pair in world.narrow_phase.contact_pairs_with(c) {
+                if !pair.has_any_active_contact() {
+                    continue;
+                }
+                let other = if pair.collider1 == c {
+                    pair.collider2
+                } else {
+                    pair.collider1
+                };
+                let Some(h) = world.colliders.get(other).and_then(|o| o.parent()) else {
+                    continue;
+                };
+                let Some(rb) = world
+                    .bodies
+                    .get(h)
+                    .filter(|rb| rb.is_dynamic() && !rb.is_sleeping())
+                else {
+                    continue;
+                };
+                let p = rb.center_of_mass();
+                let r = p - center;
+                let flat = r - axis * r.dot(axis);
+                // Held by friction: moving with the deck, not sliding across it.
+                let carried = v0 + w.cross(r);
+                if (rb.linvel() - carried).length() > 0.1 || flat.length() < 1e-3 {
+                    continue;
+                }
+                moves.push((h, -flat * out_per_m));
+            }
+        }
+    }
+    moves.sort_by_key(|m| m.0.into_raw_parts());
+    moves.dedup_by_key(|m| m.0);
+    for (h, by) in moves {
+        if let Some(rb) = world.bodies.get_mut(h) {
+            let mut pose = *rb.position();
+            pose.translation += by;
+            rb.set_position(pose, false);
         }
     }
 }
