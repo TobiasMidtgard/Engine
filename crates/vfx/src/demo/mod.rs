@@ -25,7 +25,9 @@ use engine_core::prelude::*;
 use engine_render::{
     Image, MaterialRef, Mesh, MeshRef, MeshRenderer, PointLight, StandardMaterial,
 };
-use engine_world::{ContactKind, GroundContact, SurfaceMaterials, WorldImpulse};
+use engine_world::{
+    ContactKind, FocusPoints, GroundContact, SimulationRange, SurfaceMaterials, WorldImpulse,
+};
 
 use self::art::props;
 
@@ -742,15 +744,33 @@ pub fn shift(q: &mut ShiftQueries, s: &engine_world::WorldShift) {
     }
 }
 
+/// Whether a spot is beyond the [`SimulationRange`] of every focus, where the demo's
+/// machines pause instead of firing effects no one is near enough to see.
+#[derive(SystemParam)]
+pub struct Reach<'w> {
+    range: Option<Res<'w, SimulationRange>>,
+    focus: Option<Res<'w, FocusPoints>>,
+}
+
+impl Reach<'_> {
+    fn far(&self, p: DVec3) -> bool {
+        match (self.range.as_deref(), self.focus.as_deref()) {
+            (Some(r), Some(f)) => r.is_resting(f, p),
+            _ => false,
+        }
+    }
+}
+
 /// Casts spells at the target in turn.
 pub fn run_casters(
     mut commands: Commands,
     time: Res<Time>,
     mut casters: Query<(&mut DemoCaster, &GlobalTransform)>,
+    reach: Reach,
 ) {
     let dt = time.delta_secs();
     for (mut caster, gt) in &mut casters {
-        if caster.spells.is_empty() {
+        if caster.spells.is_empty() || reach.far(gt.translation()) {
             continue;
         }
         caster.timer -= dt;
@@ -822,9 +842,13 @@ pub fn run_repeaters(
     mut commands: Commands,
     time: Res<Time>,
     mut repeaters: Query<(&mut DemoRepeater, &GlobalTransform)>,
+    reach: Reach,
 ) {
     let dt = time.delta_secs();
     for (mut r, gt) in &mut repeaters {
+        if reach.far(gt.translation()) {
+            continue;
+        }
         r.timer -= dt;
         if r.timer > 0.0 {
             continue;
@@ -897,9 +921,13 @@ pub fn run_lightning(
         &mut PointLight,
         &GlobalTransform,
     )>,
+    reach: Reach,
 ) {
     let dt = time.delta_secs();
     for (mut l, mut beam, mut light, gt) in &mut arcs {
+        if reach.far(gt.translation()) {
+            continue;
+        }
         let was = l.timer < l.on;
         l.timer = (l.timer + dt) % l.period.max(0.1);
         let on = l.timer < l.on;
@@ -1022,9 +1050,13 @@ pub fn run_droppers(
     time: Res<Time>,
     mut droppers: Query<(&mut DemoDropper, &GlobalTransform)>,
     mut stones: Query<(Entity, &mut DemoFalling, &mut Transform)>,
+    reach: Reach,
 ) {
     let dt = time.delta_secs();
     for (mut d, gt) in &mut droppers {
+        if reach.far(gt.translation()) {
+            continue;
+        }
         d.timer -= dt;
         if d.timer > 0.0 {
             continue;

@@ -184,6 +184,13 @@ and `VfxReactions`. Components: `ParticleEffect`, `Trail`, `Beam`.
 - **CPU** ([`emitter`]): each effect instance decides how many particles each emitter spawns
   this frame and where in the pool they go. Each emitter owns a ring of slots in one shared
   pool; new particles overwrite the oldest. Nothing is read back from the GPU.
+- **Resting** ([`engine_world::SimulationRange`]): beyond the range of every focus a looping
+  effect rests, its particles held still and drawn where they are, until a focus comes near;
+  a one-shot that would start there is dropped, as are footsteps, hits and splashes, and the
+  demo's machines pause. Gravity, air and the ground below an effect are looked up again only
+  once it has moved half a meter or every second or so, since asking a real terrain costs
+  tens of microseconds. `cargo run -p engine_vfx --release --example tick_cost` measures the
+  module's CPU cost with eight Spell courts, one near the camera.
 - **GPU** ([`feature`], `shaders/`): a compute pass moves, collides and relights every live
   particle, a second writes the new ones (spread along the emitter's path so fast spells leave
   a continuous stream). Particles that hit, die or fly on for a sub-emitter append events,
