@@ -80,6 +80,7 @@ pub mod material;
 pub mod material_library;
 pub mod mesh;
 pub mod mesh_feature;
+mod mesh_lod;
 pub mod motion_blur;
 mod perf;
 pub mod renderer;

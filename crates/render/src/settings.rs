@@ -229,6 +229,14 @@ pub struct RenderSettings {
     pub virtual_geometry_cache_mb: u32,
     /// Largest geometric error a cluster may show on screen, pixels (lower = more triangles).
     pub cluster_error_px: f32,
+    /// Levels of detail of instanced meshes (those not on the cluster path): each view draws
+    /// the coarsest level whose surface strays at most this many pixels (or shadow-map texels)
+    /// from the full mesh. Built on a worker thread for meshes of 512 triangles or more.
+    /// 0 = always the full mesh.
+    pub mesh_lod_pixels: f32,
+    /// Instanced meshes narrower than this many pixels on screen (or texels in a shadow map)
+    /// are left out of that view. 0 = draw everything.
+    pub min_object_pixels: f32,
     /// The same for shadow maps, in shadow map texels (cascade texels are much larger than
     /// screen pixels, so shadows use coarser clusters than the camera). The default of 2 halves
     /// the shadow triangles of 1 with no visible change under the shadow filter.
@@ -318,6 +326,8 @@ impl Default for RenderSettings {
             virtual_geometry_cache_dir: String::new(),
             virtual_geometry_cache_mb: 2048,
             cluster_error_px: 1.0,
+            mesh_lod_pixels: 1.0,
+            min_object_pixels: 1.0,
             cluster_shadow_error_texels: 2.0,
             material_texture_size: 1024,
             release_image_pixels: false,
