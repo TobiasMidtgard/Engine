@@ -60,7 +60,38 @@ pub struct LogLine {
 pub struct PlaySnapshot {
     roots: Vec<scene_ops::SavedEntity>,
     existing: HashSet<Entity>,
+    /// Registered resources as they were (weather, sky, time of day, settings).
+    resources: Vec<(String, Value)>,
     was_dirty: bool,
+}
+
+/// Resources Stop leaves alone: input, the window, measurements and debug views describe the
+/// editor session, not the world, and the space frame follows the camera.
+const LIVE_RESOURCES: &[&str] = &[
+    "Mouse",
+    "Window",
+    "InputMap",
+    "UiInputCapture",
+    "BridgeInfo",
+    "EngineConfig",
+    "PerfOverlay",
+    "DebugViews",
+    "PhysicsDebug",
+    "CharacterDebug",
+    "PhysicsStats",
+    "DestructionStats",
+    "PerceptionStatus",
+    "SpaceFrame",
+];
+
+/// The registered resources Stop puts back, with their values now.
+fn world_resources(world: &World) -> Vec<(String, Value)> {
+    world
+        .resource::<TypeRegistry>()
+        .resources()
+        .filter(|r| !LIVE_RESOURCES.contains(&r.name.as_str()))
+        .filter_map(|r| Some((r.name.clone(), (r.get)(world)?)))
+        .collect()
 }
 
 /// All editor state other than the dock layout.
@@ -722,6 +753,7 @@ pub fn play(world: &mut World, editor: &mut Editor) {
     editor.play = Some(PlaySnapshot {
         roots: saved,
         existing,
+        resources: world_resources(world),
         was_dirty: editor.history.dirty,
     });
     editor.mode = Mode::Play;
@@ -767,6 +799,16 @@ pub fn stop(world: &mut World, editor: &mut Editor) {
     editor.history.remap_all(&remap);
     editor.remap_selection(&remap);
     editor.selection.retain(|&e| world.get_entity(e).is_ok());
+    let now_values: HashMap<String, Value> = world_resources(world).into_iter().collect();
+    for (name, before) in snapshot.resources {
+        if now_values.get(&name) == Some(&before) {
+            continue;
+        }
+        let entry = world.resource::<TypeRegistry>().resource(&name).cloned();
+        if let Some(Err(e)) = entry.map(|entry| (entry.patch)(world, before)) {
+            editor.error(t, format!("Stop could not restore {name}: {e}"));
+        }
+    }
     editor.history.dirty = snapshot.was_dirty;
     editor.mode = Mode::Edit;
     editor.info(t, "Stopped: scene restored.");
@@ -818,5 +860,36 @@ mod tests {
         assert_eq!(next_name("Crate"), "Crate 2");
         assert_eq!(next_name("Crate 2"), "Crate 3");
         assert_eq!(next_name("Big crate"), "Big crate 2");
+    }
+
+    #[derive(Resource, Serialize, Deserialize, Default, Debug, PartialEq)]
+    struct Rain {
+        amount: f32,
+    }
+
+    #[test]
+    fn stop_puts_world_settings_back() {
+        let mut world = World::new();
+        world.insert_resource(Time::default());
+        let mut registry = TypeRegistry::default();
+        registry.register_resource::<Rain>("test");
+        registry.register_resource::<Mouse>("live input");
+        world.insert_resource(registry);
+        world.insert_resource(Rain { amount: 0.2 });
+        world.insert_resource(Mouse::default());
+        let camera = world.spawn(EditorOnly).id();
+        let mut editor = Editor::new(camera);
+
+        play(&mut world, &mut editor);
+        world.resource_mut::<Rain>().amount = 0.9;
+        world.resource_mut::<Mouse>().position = Some(Vec2::new(5.0, 6.0));
+        stop(&mut world, &mut editor);
+
+        assert_eq!(world.resource::<Rain>().amount, 0.2);
+        assert_eq!(
+            world.resource::<Mouse>().position,
+            Some(Vec2::new(5.0, 6.0))
+        );
+        assert_eq!(editor.mode, Mode::Edit);
     }
 }
