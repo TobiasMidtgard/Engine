@@ -1,7 +1,7 @@
 name: Showcase build
 
-# Builds the showcase for Windows and Linux with every fetched asset next to it, zipped so it
-# runs with a double-click. Pushing a `showcase-*` tag (or running this by hand) publishes the
+# Builds the showcase for Windows, Linux and macOS with the fetched assets it loads next to it
+# (`.github/release/exclude.txt` lists the ones left out), zipped so it runs with a double-click. Pushing a `showcase-*` tag (or running this by hand) publishes the
 # zips on that release; a pull request that changes this file only builds them, as artifacts.
 on:
   push:
@@ -41,6 +41,9 @@ jobs:
           - os: linux
             runner: ubuntu-latest
             exe: showcase
+          - os: macos
+            runner: macos-latest
+            exe: showcase
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux libraries
@@ -67,6 +70,13 @@ jobs:
           cp "target/release/${{ matrix.exe }}" "$dir/"
           cp -r assets "$dir/assets"
           rm -rf "$dir/assets/manifests"
+          shopt -s globstar nullglob
+          while IFS= read -r pattern; do
+            pattern="${pattern%$'\r'}"
+            case "$pattern" in ""|"#"*) continue ;; esac
+            for f in "$dir"/assets/$pattern; do rm -rf "$f"; done
+          done < .github/release/exclude.txt
+          du -sh "$dir/assets"
           cp .github/release/PLAY.txt "$dir/"
           cp assets/fetched/THIRD_PARTY_NOTICES.md "$dir/" 2>/dev/null || true
           cp LICENSE* "$dir/" 2>/dev/null || true
