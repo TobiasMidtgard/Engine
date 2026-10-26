@@ -294,6 +294,7 @@ impl Geometry {
     }
 
     fn interpolate(&mut self, body: &SoftBodySim, base: Vec3, alpha: f32) {
+        let alpha = body.draw_alpha(alpha);
         self.particles.clear();
         self.particles
             .extend((0..body.sim.len()).map(|i| base + body.sim.interpolated(i, alpha)));

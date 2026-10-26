@@ -82,3 +82,44 @@ fn quality_presets_set_substeps_and_the_half_rate_distance() {
     assert_eq!(config.quality, 0.5);
     assert_eq!(config.lod_distance, 15.0);
 }
+
+#[test]
+fn far_cloth_steps_every_fourth_fixed_step_and_is_drawn_moving_across_them() {
+    use engine_world::FocusPoints;
+    let mut app = App::new();
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual {
+            step_secs: 1.0 / 60.0,
+        });
+    app.add_plugins((engine_world::WorldPlugin, engine_softbody::SoftBodyPlugin));
+    app.add_systems(Startup, |mut commands: Commands| {
+        demo::spawn_demo(&mut commands, DVec3::ZERO);
+    });
+    app.add_systems(PreUpdate, |mut focus: ResMut<FocusPoints>| {
+        focus.points.clear();
+        focus.points.push(DVec3::new(100.0, 1.7, 0.0));
+    });
+    app.update_n(12);
+    let name = |n: &Name| n.as_str() == "Sun banner";
+    let mut q = app.world.query::<(&Name, &SoftBodySim)>();
+    let mut seen = Vec::new();
+    for _ in 0..8 {
+        app.update();
+        let (_, b) = q.iter(&app.world).find(|(n, _)| name(n)).unwrap();
+        seen.push((b.steps, b.lod_wait, b.draw_alpha(0.0)));
+    }
+    let (_, b) = q.iter(&app.world).find(|(n, _)| name(n)).unwrap();
+    assert_eq!(b.lod_every, 4, "{seen:?}");
+    let steps: Vec<u64> = seen.iter().map(|s| s.0).collect();
+    assert_eq!(
+        steps[7] - steps[0],
+        2,
+        "two steps in eight fixed steps: {seen:?}"
+    );
+    // Drawing moves on a quarter of the way each fixed step.
+    for pair in seen.windows(2) {
+        let (a, b) = (pair[0].2, pair[1].2);
+        assert!(b == 0.0 || (b - a - 0.25).abs() < 1e-6, "{seen:?}");
+    }
+}

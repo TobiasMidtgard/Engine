@@ -57,6 +57,23 @@ impl LocalShape {
         }
     }
 
+    /// Half extents of a box around the shape's center, in shape space.
+    pub fn half_extents(&self) -> Vec3 {
+        match *self {
+            LocalShape::Sphere { radius } => Vec3::splat(radius),
+            LocalShape::Capsule {
+                half_height,
+                radius,
+            } => Vec3::new(radius, half_height + radius, radius),
+            LocalShape::Cuboid { half } => half,
+            LocalShape::Cylinder {
+                half_height,
+                radius,
+            } => Vec3::new(radius, half_height, radius),
+            LocalShape::Field(_) | LocalShape::Height(_) => Vec3::splat(self.bounding_radius()),
+        }
+    }
+
     /// Signed distance from `p` (shape space) to the surface, and the outward normal there.
     /// Negative inside. Grids answer infinity where they know nothing (far from the surface).
     pub fn sdf(&self, p: Vec3) -> (f32, Vec3) {

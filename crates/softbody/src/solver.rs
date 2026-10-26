@@ -14,7 +14,7 @@
 //! colliders and wind each step and reads back positions and reaction impulses.
 
 use std::collections::HashMap;
-use std::f32::consts::PI;
+use std::f32::consts::{PI, TAU};
 use std::ops::Range;
 
 use engine_core::math::{DVec3, IVec3, Mat3, Quat, Vec2, Vec3};
@@ -318,6 +318,9 @@ pub struct Sim {
     /// Each particle's surface normal (area-weighted), for drag in water.
     normals: Vec<Vec3>,
     posed: Vec<PosedCollider>,
+    /// The particles each collider can reach this step: `near[near_starts[c]..near_starts[c + 1]]`.
+    near_starts: Vec<u32>,
+    near: Vec<u32>,
     self_contacts: SelfContacts,
 }
 
@@ -631,6 +634,7 @@ impl Sim {
                 p.wind * (1.0 + p.turbulence * f) + side * (0.5 * p.turbulence * g)
             }));
         }
+        self.find_near(colliders, dt);
         let n = self.substeps_for(dt);
         let h = dt / n as f32;
         for k in 0..n {
@@ -640,6 +644,59 @@ impl Sim {
         }
         self.params.time += dt;
         self.finish_step();
+    }
+
+    /// Which particles each collider can reach this step: those within its bounding box
+    /// swept along its path, plus as far as a particle may travel in the step (twice its
+    /// fastest particle's speed, plus how far the anchor frames carry it), so the substeps
+    /// test each particle against a few colliders, not all of them.
+    fn find_near(&mut self, colliders: &[LocalCollider], dt: f32) {
+        self.near_starts.clear();
+        self.near.clear();
+        if colliders.is_empty() {
+            return;
+        }
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        let mut fastest = 0.0f32;
+        for (x, v) in self.pos.iter().zip(&self.vel) {
+            lo = lo.min(*x);
+            hi = hi.max(*x);
+            fastest = fastest.max(v.length_squared());
+        }
+        let (center, extent) = ((lo + hi) * 0.5, (hi - lo).length() * 0.5);
+        let carried = self.frames.iter().fold(0.0f32, |m, f| {
+            let (_, mut angle) = (f.to_rot * f.from_rot.conjugate()).to_axis_angle();
+            if angle > PI {
+                angle -= TAU;
+            }
+            let arm = (center - f.from_pos).length() + extent;
+            m.max((f.to_pos - f.from_pos).length() + angle.abs() * arm)
+        });
+        let travel = 2.0 * fastest.sqrt() * dt + carried + self.params.radius + NEAR_SLACK;
+        for c in colliders {
+            self.near_starts.push(self.near.len() as u32);
+            // In the collider's box, from the nearest point of its path; turning in the step
+            // sweeps its far end by the angle times its size.
+            let (_, mut angle) = (c.to_rot * c.from_rot.conjugate()).to_axis_angle();
+            if angle > PI {
+                angle -= TAU;
+            }
+            let reach = travel + angle.abs() * c.shape.bounding_radius();
+            let half = c.shape.half_extents() + reach;
+            let inv_rot = c.to_rot.conjugate();
+            let (a, ab) = (c.from_pos, c.to_pos - c.from_pos);
+            let l2 = ab.length_squared().max(1e-12);
+            for (i, x) in self.pos.iter().enumerate() {
+                if self.inv_mass[i] == 0.0 {
+                    continue;
+                }
+                let t = ((*x - a).dot(ab) / l2).clamp(0.0, 1.0);
+                if (inv_rot * (*x - a - ab * t)).abs().cmple(half).all() {
+                    self.near.push(i as u32);
+                }
+            }
+        }
+        self.near_starts.push(self.near.len() as u32);
     }
 
     fn finish_step(&mut self) {
@@ -913,11 +970,9 @@ impl Sim {
             if w[i] == 0.0 {
                 continue;
             }
-            let x0 = pos[i];
-            let mut x = x0;
-            // Ground.
             let g = shared_ground.or_else(|| self.ground.get(i).copied());
             if let Some(g) = g {
+                let x = pos[i];
                 let n = Vec3::new(g[0], g[1], g[2]);
                 let d = n.dot(x) + g[3] - p.radius;
                 if d < 0.0 {
@@ -925,12 +980,18 @@ impl Sim {
                     if approach > self.ground_impact.0 {
                         self.ground_impact = (approach, x);
                     }
-                    x -= n * d;
-                    x = friction(x, self.prev[i], n, -d, Vec3::ZERO, h, p.friction);
+                    pos[i] = friction(x - n * d, self.prev[i], n, -d, Vec3::ZERO, h, p.friction);
                 }
             }
-            // Colliders.
-            for (ci, c) in self.posed.iter().enumerate() {
+        }
+        for (ci, c) in self.posed.iter().enumerate() {
+            let near = self.near_starts[ci] as usize..self.near_starts[ci + 1] as usize;
+            for &i in &self.near[near] {
+                let i = i as usize;
+                if w[i] == 0.0 {
+                    continue;
+                }
+                let mut x = pos[i];
                 let Some((d, n)) = c.query(&colliders[ci].shape, x) else {
                     continue;
                 };
@@ -949,8 +1010,8 @@ impl Sim {
                     imp.linear -= j;
                     imp.angular -= (x - colliders[ci].to_pos).cross(j);
                 }
+                pos[i] = x;
             }
-            pos[i] = x;
         }
         self.contacts = contacts;
 
@@ -990,6 +1051,9 @@ struct SelfContacts {
     ids: Vec<u32>,
     patches: Patches,
 }
+
+/// Extra reach when finding the particles near each collider, m.
+const NEAR_SLACK: f32 = 0.05;
 
 /// Normals of a patch further than this from its mean (radians) can fold it onto itself.
 const PATCH_CONE: f32 = 1.25;

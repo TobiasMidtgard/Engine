@@ -113,6 +113,13 @@ pub struct SoftBodySim {
     pub out: StepOutput,
     /// Simulated time owed by skipped level-of-detail steps, seconds.
     pub lod_debt: f32,
+    /// Steps once every this many fixed steps (level of detail); drawing spreads each step
+    /// over them.
+    pub lod_every: u32,
+    /// Fixed steps since its last step.
+    pub lod_wait: u32,
+    /// Its frames moved in the last step (it hangs on something moving).
+    pub carried: bool,
     /// How wet each particle is, 0 (dry) .. 1 (soaked through).
     pub wet: Vec<f32>,
     /// Simulated here but drawn by another module (hair from `HairGuides`).
@@ -121,6 +128,12 @@ pub struct SoftBodySim {
 }
 
 impl SoftBodySim {
+    /// Where drawing is between the last two steps, 0..1, at `alpha` of the fixed step: a
+    /// body stepping every few fixed steps is drawn moving across all of them.
+    pub fn draw_alpha(&self, alpha: f32) -> f32 {
+        ((self.lod_wait as f32 + alpha) / self.lod_every.max(1) as f32).min(1.0)
+    }
+
     /// The colliders the last step met (body-local).
     pub fn last_colliders(&self) -> &[LocalCollider] {
         &self.scratch_colliders
@@ -165,6 +178,9 @@ impl SoftBodySim {
             step_ms: 0.0,
             out: StepOutput::default(),
             lod_debt: 0.0,
+            lod_every: 1,
+            lod_wait: 0,
+            carried: false,
             wet: Vec::new(),
             drawn_elsewhere: false,
             scratch_colliders: Vec::new(),

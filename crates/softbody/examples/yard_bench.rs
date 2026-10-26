@@ -3,7 +3,8 @@
 //!
 //! ```sh
 //! cargo run -p engine_softbody --example yard_bench --release -- [frames] [distance]
-//! SOLO=1 cargo run ...   # also times each body's solver alone, with and without self-collision
+//! SOLO=1 cargo run ...   # also times each body's solver with its colliders, and alone with
+//!                        # and without self-collision
 //! ```
 
 use std::time::Instant;
@@ -55,26 +56,19 @@ fn main() {
     if std::env::var("SOLO").is_ok() {
         for (n, b) in q.iter(&app.world) {
             // The fastest of five runs, so other work on the machine doesn't count.
-            let time = |sim: engine_softbody::solver::Sim| {
+            let time = |sim: &engine_softbody::solver::Sim, colliders| {
                 (0..5)
                     .map(|_| {
                         let mut sim = sim.clone();
                         let t = Instant::now();
                         for _ in 0..10 {
-                            sim.step(1.0 / 60.0, &[]);
+                            sim.step(1.0 / 60.0, colliders);
                         }
                         t.elapsed().as_secs_f64() * 100.0
                     })
                     .fold(f64::MAX, f64::min)
             };
-            let met = {
-                let t = Instant::now();
-                let mut sim = b.sim.clone();
-                for _ in 0..10 {
-                    sim.step(1.0 / 60.0, b.last_colliders());
-                }
-                t.elapsed().as_secs_f64() * 100.0
-            };
+            let met = time(&b.sim, b.last_colliders());
             let kinds: Vec<&str> = b
                 .last_colliders()
                 .iter()
@@ -88,10 +82,10 @@ fn main() {
                 })
                 .collect();
             println!("  with colliders {met:6.2} ms: {kinds:?}");
-            let full = time(b.sim.clone());
+            let full = time(&b.sim, &[]);
             let mut plain = b.sim.clone();
             plain.params.self_collide = 0.0;
-            let plain = time(plain);
+            let plain = time(&plain, &[]);
             println!(
                 "  solo {full:6.2} ms, {plain:6.2} without self-collision, {} substeps: {}",
                 b.sim.params.substeps,
