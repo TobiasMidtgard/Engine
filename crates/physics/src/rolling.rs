@@ -12,10 +12,12 @@
 
 use engine_core::math::Vec3;
 use engine_world::{Deformation, SurfaceMaterial};
-use rapier3d::prelude::{Collider, ColliderHandle, RigidBody, RigidBodyHandle, ShapeType};
+use rapier3d::prelude::{
+    Collider, ColliderHandle, ContactPair, PhysicsWorld, RigidBody, RigidBodyHandle, ShapeType,
+};
 
 use crate::convert;
-use crate::sim::{RegionId, Simulation};
+use crate::sim::{MaterialCache, RegionId, Simulation};
 
 /// Extra rolling resistance coefficient from sinking into a soft surface.
 pub(crate) fn sinkage(m: &SurfaceMaterial) -> f32 {
@@ -91,7 +93,7 @@ const SPIN_LEVER: f32 = 0.01;
 const SPIN_SLACK: f32 = 0.05;
 
 /// One contact's pushback: body handles, the turn axis and the angular impulse it may take.
-struct Resist {
+pub(crate) struct Resist {
     pair: (ColliderHandle, ColliderHandle),
     a: Option<RigidBodyHandle>,
     b: Option<RigidBodyHandle>,
@@ -103,118 +105,123 @@ struct Resist {
     budget: f32,
 }
 
-/// Take rolling resistance and spin friction out of the contacts touched in the last substep:
-/// `spins`, the pairs with a round or articulated side ([`crate::sim::Region::touches`]).
-pub(crate) fn resist_rolling(
-    sim: &mut Simulation,
-    rid: RegionId,
-    spins: &[(ColliderHandle, ColliderHandle)],
+/// The pushback rolling resistance and spin friction owe a contact pair with a round or
+/// articulated side, touched in the last substep (found while [`crate::sim::Region::touches`]
+/// reads the pairs, so none is looked up twice). `base` is the hard-ground rolling resistance.
+pub(crate) fn resist(
+    world: &PhysicsWorld,
+    pair: &ContactPair,
+    base: f32,
+    materials: &MaterialCache,
+    pushes: &mut Vec<Resist>,
 ) {
-    let base = sim.settings.rolling_resistance.max(0.0);
-    let materials = &sim.materials;
-    let Some(region) = sim.regions[rid as usize].as_mut() else {
+    let (Some(c1), Some(c2)) = (
+        world.colliders.get(pair.collider1),
+        world.colliders.get(pair.collider2),
+    ) else {
         return;
     };
-    let world = &mut region.world;
-    let mut pushes = Vec::new();
-    // Spin friction where Rapier has none: round shapes touch at a point, links get none.
-    for &(h1, h2) in spins {
-        let Some(pair) = crate::sim::pair_between(world, h1, h2) else {
-            continue;
-        };
-        let (c1, c2) = (
-            &world.colliders[pair.collider1],
-            &world.colliders[pair.collider2],
-        );
-        let (round1, round2) = (
-            rolls(c1.shape().shape_type()),
-            rolls(c2.shape().shape_type()),
-        );
-        let (a, b) = (c1.parent(), c2.parent());
-        let dynamic = |h: Option<RigidBodyHandle>| {
-            h.and_then(|h| world.bodies.get(h))
-                .is_some_and(|rb| rb.is_dynamic() && !rb.is_sleeping())
-        };
-        if !(dynamic(a) || dynamic(b)) {
-            continue;
-        }
-        let crr = base
-            + materials
-                .rolling(convert::surface_of(c1.user_data))
-                .max(materials.rolling(convert::surface_of(c2.user_data)));
-        // Rapier's default rule for combining two colliders' friction.
-        let mu = (c1.friction() + c2.friction()) * 0.5;
-        // Normal impulse this substep, where it acted and along which normal. The impulses
-        // live in the manifolds the solver saw: on terrain, meshes and compounds (one manifold
-        // per triangle or part) those are merged clusters, and the plain ones hold none.
-        let (mut jn, mut point, mut normal) = (0.0f32, Vec3::ZERO, Vec3::ZERO);
-        for m in pair.solver_manifolds() {
-            for c in &m.points {
-                if c.data.impulse > 0.0 {
-                    jn += c.data.impulse;
-                    point += c1.position().transform_point(c.local_p1) * c.data.impulse;
-                    normal += m.data.normal * c.data.impulse;
-                }
+    let (a, b) = (c1.parent(), c2.parent());
+    let state = |h: Option<RigidBodyHandle>| {
+        h.and_then(|h| world.bodies.get(h))
+            .map(|rb| {
+                (
+                    rb.angvel(),
+                    Some(rb.center_of_mass()),
+                    rb.is_dynamic() && !rb.is_sleeping(),
+                )
+            })
+            .unwrap_or((Vec3::ZERO, None, false))
+    };
+    let ((w1, com1, live1), (w2, com2, live2)) = (state(a), state(b));
+    // Nothing turns against the other (a ball at rest in its cup): no pushback, and no need to
+    // read the contact points.
+    let rel = w1 - w2;
+    if !(live1 || live2) || rel.length_squared() < 1e-12 {
+        return;
+    }
+    let (round1, round2) = (
+        rolls(c1.shape().shape_type()),
+        rolls(c2.shape().shape_type()),
+    );
+    let crr = base
+        + materials
+            .rolling(convert::surface_of(c1.user_data))
+            .max(materials.rolling(convert::surface_of(c2.user_data)));
+    // Rapier's default rule for combining two colliders' friction.
+    let mu = (c1.friction() + c2.friction()) * 0.5;
+    // Normal impulse this substep, where it acted and along which normal. The impulses
+    // live in the manifolds the solver saw: on terrain, meshes and compounds (one manifold
+    // per triangle or part) those are merged clusters, and the plain ones hold none.
+    let (mut jn, mut point, mut normal) = (0.0f32, Vec3::ZERO, Vec3::ZERO);
+    for m in pair.solver_manifolds() {
+        for c in &m.points {
+            if c.data.impulse > 0.0 {
+                jn += c.data.impulse;
+                point += c1.position().transform_point(c.local_p1) * c.data.impulse;
+                normal += m.data.normal * c.data.impulse;
             }
         }
-        if jn <= 1e-9 {
-            continue;
-        }
-        point /= jn;
-        let normal = normal.normalize_or_zero();
-        let state = |h: Option<RigidBodyHandle>| {
-            h.and_then(|h| world.bodies.get(h))
-                .map(|rb| (rb.angvel(), Some(rb.center_of_mass())))
-                .unwrap_or((Vec3::ZERO, None))
-        };
-        let ((w1, com1), (w2, com2)) = (state(a), state(b));
-        let rel = w1 - w2;
-        let spin = rel.dot(normal);
-        let roll = rel - normal * spin;
-        let rate = roll.length();
-        // A normal a little off (an edge of the ground's triangles) shows some of a fast roll
-        // as spin: leave that much alone, or a rolling barrel gets steered.
-        let spinning = spin.abs() - rate * SPIN_SLACK;
-        if mu > 0.0 && spinning > 1e-6 {
-            pushes.push(Resist {
-                pair: (pair.collider1, pair.collider2),
-                a,
-                b,
-                axis: normal * spin.signum(),
-                rate: spinning,
-                budget: mu * jn * SPIN_LEVER,
-            });
-        }
-        if !(round1 || round2) || crr <= 0.0 || rate < 1e-6 {
-            continue;
-        }
-        let axis = roll / rate;
-        // How far the contact is from the axis the body rolls about: the radius, also when a
-        // barrel rocks onto one rim.
-        let radius = |com: Option<Vec3>| {
-            com.map(|c| {
-                let d = point - c;
-                (d - axis * d.dot(axis)).length()
-            })
-            .unwrap_or(f32::INFINITY)
-        };
-        let lever = match (round1, round2) {
-            (true, true) => radius(com1).min(radius(com2)),
-            (true, false) => radius(com1),
-            _ => radius(com2),
-        };
-        if !lever.is_finite() {
-            continue;
-        }
+    }
+    if jn <= 1e-9 {
+        return;
+    }
+    point /= jn;
+    let normal = normal.normalize_or_zero();
+    let spin = rel.dot(normal);
+    let roll = rel - normal * spin;
+    let rate = roll.length();
+    // A normal a little off (an edge of the ground's triangles) shows some of a fast roll
+    // as spin: leave that much alone, or a rolling barrel gets steered.
+    let spinning = spin.abs() - rate * SPIN_SLACK;
+    if mu > 0.0 && spinning > 1e-6 {
         pushes.push(Resist {
             pair: (pair.collider1, pair.collider2),
             a,
             b,
-            axis,
-            rate,
-            budget: crr * jn * lever,
+            axis: normal * spin.signum(),
+            rate: spinning,
+            budget: mu * jn * SPIN_LEVER,
         });
     }
+    if !(round1 || round2) || crr <= 0.0 || rate < 1e-6 {
+        return;
+    }
+    let axis = roll / rate;
+    // How far the contact is from the axis the body rolls about: the radius, also when a
+    // barrel rocks onto one rim.
+    let radius = |com: Option<Vec3>| {
+        com.map(|c| {
+            let d = point - c;
+            (d - axis * d.dot(axis)).length()
+        })
+        .unwrap_or(f32::INFINITY)
+    };
+    let lever = match (round1, round2) {
+        (true, true) => radius(com1).min(radius(com2)),
+        (true, false) => radius(com1),
+        _ => radius(com2),
+    };
+    if !lever.is_finite() {
+        return;
+    }
+    pushes.push(Resist {
+        pair: (pair.collider1, pair.collider2),
+        a,
+        b,
+        axis,
+        rate,
+        budget: crr * jn * lever,
+    });
+}
+
+/// Take rolling resistance and spin friction out of the contacts touched in the last substep
+/// ([`resist`]).
+pub(crate) fn resist_rolling(sim: &mut Simulation, rid: RegionId, mut pushes: Vec<Resist>) {
+    let Some(region) = sim.regions[rid as usize].as_mut() else {
+        return;
+    };
+    let world = &mut region.world;
     // A fixed order, so the sums come out bit-identical every run (a contact's spin push comes
     // before its roll push).
     pushes.sort_by_key(|p| (p.pair.0.into_raw_parts(), p.pair.1.into_raw_parts()));

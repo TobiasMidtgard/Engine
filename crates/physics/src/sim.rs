@@ -19,7 +19,7 @@
 //! * Regions far from every `SimulationFocus` can be frozen
 //!   ([`PhysicsSettings::freeze_distance_m`]).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use engine_core::ecs::entity::{EntityHashMap, EntityHashSet};
 use engine_core::math::{DVec3, Mat3, Quat, Vec3};
@@ -100,6 +100,9 @@ pub struct Region {
     /// stamp, the body's mass and whether the collider can spin ([`Touch::spins`]).
     touch_marks: Vec<(u64, f32, bool)>,
     touch_stamp: u64,
+    /// Per collider: the touch stamp when it was in a pending pair (a cheap look before the
+    /// pending set's).
+    pending_marks: Vec<u64>,
     /// Awake bodies' velocities as the last step began, by body index, stamped with
     /// `step_stamp` ([`Region::note_velocities`]).
     before_step: Vec<(u64, Vec3)>,
@@ -110,10 +113,32 @@ pub struct Region {
 /// collider handles.
 #[derive(Default)]
 pub(crate) struct Touches {
-    /// Pairs where a side is a round shape or an articulation link.
-    pub spins: Vec<(ColliderHandle, ColliderHandle)>,
+    /// Pairs where a side is a round shape or an articulation link, and the pushback they owe
+    /// ([`crate::rolling::resist`]).
+    pub spins: usize,
+    pub pushes: Vec<crate::rolling::Resist>,
+    /// The pairs waiting to be confirmed as touching ([`Contacts::pending`]) that Rapier has in
+    /// contact, with what confirming them needs.
+    pub touched: Vec<Touched>,
     /// Hard hits, with the pair's impulse.
     pub hits: Vec<(ColliderHandle, ColliderHandle, f32)>,
+}
+
+/// A close pair in contact this substep: Rapier's order of its colliders, its impulse and its
+/// deepest point ([`deepest`]).
+pub(crate) struct Touched {
+    pub pair: (ColliderHandle, ColliderHandle),
+    pub impulse: f32,
+    pub deepest: Option<(f32, Vec3, Vec3)>,
+}
+
+/// A pair of colliders in a fixed order, whichever way round they come.
+pub(crate) fn ordered(h1: ColliderHandle, h2: ColliderHandle) -> (ColliderHandle, ColliderHandle) {
+    if h1.into_raw_parts() <= h2.into_raw_parts() {
+        (h1, h2)
+    } else {
+        (h2, h1)
+    }
 }
 
 impl Region {
@@ -152,6 +177,7 @@ impl Region {
             hull_bounds: Vec::new(),
             touch_marks: Vec::new(),
             touch_stamp: 0,
+            pending_marks: Vec::new(),
             before_step: Vec::new(),
             step_stamp: 0,
         }
@@ -187,12 +213,33 @@ impl Region {
             .map(|v| v.1)
     }
 
-    pub(crate) fn touches(&mut self, sub_dt: f32, min_speed: Option<f32>) -> Touches {
+    /// `rolling`: the hard-ground rolling resistance and the surfaces' own. `pending`: the
+    /// pairs waiting to be confirmed as touching, [`ordered`].
+    pub(crate) fn touches(
+        &mut self,
+        sub_dt: f32,
+        min_speed: Option<f32>,
+        rolling: (f32, &MaterialCache),
+        pending: &HashSet<(ColliderHandle, ColliderHandle)>,
+    ) -> Touches {
         let world = &self.world;
         let g = world.gravity.length();
         self.touch_stamp += 1;
         let stamp = self.touch_stamp;
         let marks = &mut self.touch_marks;
+        let pending_marks = &mut self.pending_marks;
+        for &(a, b) in pending {
+            for h in [a, b] {
+                let i = h.into_raw_parts().0 as usize;
+                if pending_marks.len() <= i {
+                    pending_marks.resize(i + 1, 0);
+                }
+                pending_marks[i] = stamp;
+            }
+        }
+        let pending_marks = &*pending_marks;
+        let maybe_pending =
+            |h: ColliderHandle| pending_marks.get(h.into_raw_parts().0 as usize) == Some(&stamp);
         let link = |h: RigidBodyHandle| world.multibody_joints.rigid_body_link(h).is_some();
         let (mut awake, mut bodies) = (Vec::new(), 0usize);
         for h in world.islands.active_bodies() {
@@ -241,8 +288,19 @@ impl Region {
                 return;
             }
             let key = (pair.collider1, pair.collider2);
+            if maybe_pending(key.0)
+                && maybe_pending(key.1)
+                && pending.contains(&ordered(key.0, key.1))
+            {
+                out.touched.push(Touched {
+                    pair: key,
+                    impulse: pair.total_impulse_magnitude(),
+                    deepest: deepest(world, pair),
+                });
+            }
             if s1 || s2 {
-                out.spins.push(key);
+                out.spins += 1;
+                crate::rolling::resist(world, pair, rolling.0, rolling.1, &mut out.pushes);
             }
             // A hit: an impulse that changes the lighter dynamic side's speed (the one it
             // changes most) by `min_speed` beyond holding it up.
@@ -290,7 +348,6 @@ impl Region {
         }
         // The narrow phase runs on several threads: sort so results don't depend on timing.
         let raw = |h: ColliderHandle| h.into_raw_parts();
-        out.spins.sort_unstable_by_key(|&(a, b)| (raw(a), raw(b)));
         out.hits.sort_unstable_by_key(|&(a, b, _)| (raw(a), raw(b)));
         out
     }
@@ -582,6 +639,8 @@ pub struct Contacts {
     /// Touching pairs whose last substep pushed hard enough to count as a hit (see
     /// [`Simulation::rehits`]): a hit is reported when a pair starts pushing that hard.
     pub hitting: BTreeMap<(Entity, Entity), RegionId>,
+    /// Pairs gone pending this substep, before [`Region::touches`] could see them.
+    pub fresh: Vec<(Entity, Entity)>,
 }
 
 /// An articulated group counts as this much nearer when the articulation budget ranks groups
@@ -2613,8 +2672,8 @@ impl Simulation {
     pub(crate) fn process_contacts(
         &mut self,
         region_id: RegionId,
-        sub_dt: f32,
         hits: &[(ColliderHandle, ColliderHandle, f32)],
+        touched: &[Touched],
     ) {
         let mut events: Vec<CollisionEvent> =
             std::mem::take(&mut *self.region(region_id).collector.0.lock());
@@ -2663,6 +2722,7 @@ impl Simulation {
                     });
                 } else {
                     self.contacts.pending.insert(key, (region_id, h1, h2));
+                    self.contacts.fresh.push(key);
                 }
             } else {
                 self.contacts.pending.remove(&key);
@@ -2671,7 +2731,7 @@ impl Simulation {
                 }
             }
         }
-        self.confirm_pending(region_id, sub_dt);
+        self.confirm_pending(region_id, touched);
         self.rehits(region_id, hits);
     }
 
@@ -2734,8 +2794,12 @@ impl Simulation {
         }
     }
 
-    /// Promote close pairs that now actually touch (or were pushed apart) to `Started`.
-    fn confirm_pending(&mut self, region_id: RegionId, _sub_dt: f32) {
+    /// Promote close pairs that now actually touch (or were pushed apart) to `Started`. What
+    /// they need was read with every other pair in contact ([`Region::touches`]: `touched`);
+    /// only pairs gone pending this substep, and those moved by a kinematic side alone, are
+    /// looked up here. Pairs with an awake side that `touched` lacks have no contact now.
+    fn confirm_pending(&mut self, region_id: RegionId, touched: &[Touched]) {
+        let fresh: HashSet<(Entity, Entity)> = self.contacts.fresh.drain(..).collect();
         let keys: Vec<((Entity, Entity), ColliderHandle, ColliderHandle)> = self
             .contacts
             .pending
@@ -2743,33 +2807,56 @@ impl Simulation {
             .filter(|(_, (r, _, _))| *r == region_id)
             .map(|(k, (_, h1, h2))| (*k, *h1, *h2))
             .collect();
+        if keys.is_empty() {
+            return;
+        }
+        let seen: HashMap<(ColliderHandle, ColliderHandle), &Touched> = touched
+            .iter()
+            .map(|t| (ordered(t.pair.0, t.pair.1), t))
+            .collect();
         for (key, h1, h2) in keys {
             let region = self.region(region_id);
             // Neither side can move (asleep or fixed): the pair stays apart until one wakes.
             let world = &region.world;
-            let still = |h: ColliderHandle| {
-                world.colliders.get(h).is_some_and(|c| {
-                    c.parent()
-                        .and_then(|b| world.bodies.get(b))
-                        .is_none_or(|b| b.is_sleeping() || b.is_fixed())
-                })
+            let body = |h: ColliderHandle| {
+                world
+                    .colliders
+                    .get(h)
+                    .and_then(|c| c.parent())
+                    .and_then(|b| world.bodies.get(b))
             };
+            let still = |h: ColliderHandle| body(h).is_none_or(|b| b.is_sleeping() || b.is_fixed());
             if still(h1) && still(h2) {
                 continue;
             }
-            let Some(pair) = pair_between(&region.world, h1, h2) else {
-                self.contacts.pending.remove(&key);
-                continue;
+            let (pair, impulse, deepest) = match seen.get(&ordered(h1, h2)) {
+                Some(t) => (t.pair, t.impulse, t.deepest),
+                None => {
+                    let awake = |h: ColliderHandle| {
+                        body(h).is_some_and(|b| b.is_dynamic() && !b.is_sleeping())
+                    };
+                    if !fresh.contains(&key) && (awake(h1) || awake(h2)) {
+                        continue;
+                    }
+                    let Some(pair) = pair_between(&region.world, h1, h2) else {
+                        self.contacts.pending.remove(&key);
+                        continue;
+                    };
+                    (
+                        (pair.collider1, pair.collider2),
+                        pair.total_impulse_magnitude(),
+                        deepest(&region.world, pair),
+                    )
+                }
             };
-            let impulse = pair.total_impulse_magnitude();
-            let Some((dist, point, normal)) = deepest(&region.world, pair) else {
+            let Some((dist, point, normal)) = deepest else {
                 continue;
             };
             if impulse <= 1.0e-6 && dist > TOUCH_DISTANCE {
                 continue;
             }
-            let c1 = &region.world.colliders[pair.collider1];
-            let c2 = &region.world.colliders[pair.collider2];
+            let c1 = &region.world.colliders[pair.0];
+            let c2 = &region.world.colliders[pair.1];
             let (a, b) = (
                 convert::entity_of(c1.user_data),
                 convert::entity_of(c2.user_data),
@@ -2784,7 +2871,7 @@ impl Simulation {
                 sensor: false,
             };
             // Impact info for footsteps/dents/noise: the dynamic side that hit something.
-            let impact = self.impact_for(region_id, pair.collider1, pair.collider2, event);
+            let impact = self.impact_for(region_id, pair.0, pair.1, event);
             self.contacts.pending.remove(&key);
             self.contacts.touching.insert(key, (a, b, false));
             self.contacts.hitting.insert(key, region_id);

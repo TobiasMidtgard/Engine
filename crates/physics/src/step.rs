@@ -649,13 +649,29 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             let t2 = Instant::now();
             let _after = tracing::info_span!("contacts upkeep").entered();
             let min_speed = settings.contact_events.then_some(settings.impact_min_speed);
-            let touches = sim.region_mut(rid).touches(sub_dt, min_speed);
+            let touches = {
+                let s = &mut *sim;
+                let rolling = (s.settings.rolling_resistance.max(0.0), &s.materials);
+                // (The pending pairs' contacts are read with all the others.)
+                let pending: HashSet<_> = if settings.contact_events {
+                    s.contacts
+                        .pending
+                        .values()
+                        .filter(|p| p.0 == rid)
+                        .map(|p| crate::sim::ordered(p.1, p.2))
+                        .collect()
+                } else {
+                    HashSet::new()
+                };
+                let r = s.regions[rid as usize].as_mut().expect("live region");
+                r.touches(sub_dt, min_speed, rolling, &pending)
+            };
             let t3 = Instant::now();
-            crate::rolling::resist_rolling(&mut sim, rid, &touches.spins);
+            crate::rolling::resist_rolling(&mut sim, rid, touches.pushes);
             crate::cones::rub(&mut sim, rid);
             let t4 = Instant::now();
             if settings.contact_events {
-                sim.process_contacts(rid, sub_dt, &touches.hits);
+                sim.process_contacts(rid, &touches.hits, &touches.touched);
             } else {
                 sim.region(rid).collector.0.lock().clear();
             }
@@ -663,7 +679,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             break_joints(&mut sim, rid, sub_dt);
             if report {
                 crate::report::substep_parts([t0, t1, t2, t3, t4, t5, Instant::now()]);
-                crate::report::count("spin pairs", touches.spins.len());
+                crate::report::count("spin pairs", touches.spins);
                 crate::report::count("hits", touches.hits.len());
             }
         }
