@@ -70,11 +70,11 @@ jobs:
           cp "target/release/${{ matrix.exe }}" "$dir/"
           cp -r assets "$dir/assets"
           rm -rf "$dir/assets/manifests"
-          shopt -s globstar nullglob
+          # find -path, not globstar: macOS ships bash 3.2 (its `*` also crosses `/`, so `**` works).
           while IFS= read -r pattern; do
             pattern="${pattern%$'\r'}"
             case "$pattern" in ""|"#"*) continue ;; esac
-            for f in "$dir"/assets/$pattern; do rm -rf "$f"; done
+            find "$dir/assets" -path "$dir/assets/$pattern" -exec rm -rf {} +
           done < .github/release/exclude.txt
           du -sh "$dir/assets"
           cp .github/release/PLAY.txt "$dir/"
