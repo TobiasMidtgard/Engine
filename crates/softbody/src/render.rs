@@ -49,6 +49,10 @@ const TUBE_SIDES: usize = 8;
 const TUBE_SUBDIV: usize = 3;
 /// Projected radius (px) at which hair is drawn with every strand.
 const HAIR_FULL_DENSITY_PX: f32 = 120.0;
+/// Rings from pole to pole on a bead drawn in full.
+const BEAD_LAT: usize = 8;
+/// Bead radius on screen (pixels) from which beads are drawn in full.
+const BEAD_FULL_PX: f32 = 12.0;
 /// Cloth cells larger than this on screen (pixels) are drawn subdivided along curved edges.
 const REFINE_CELL_PX: f32 = 6.0;
 
@@ -186,6 +190,10 @@ pub struct Geometry {
     pub guides: Vec<GpuStrandGuide>,
     pub grooms: Vec<GpuGroom>,
     pub strands: u32,
+    /// Where this geometry's materials and bullet holes start in the buffers it is appended
+    /// to (see [`Geometry::append`]), so vertices name their final material from the start.
+    pub material_base: u32,
+    pub hole_base: u32,
     particles: Vec<Vec3>,
     positions: Vec<Vec3>,
     normals: Vec<Vec3>,
@@ -236,6 +244,55 @@ impl Geometry {
         self.strands = 0;
     }
 
+    /// The materials and bullet holes [`add_body`](Self::add_body) adds for `body`: what to
+    /// advance the next part's `material_base` and `hole_base` by.
+    pub fn slots(body: &SoftBodySim) -> (u32, u32) {
+        if !Self::has_mesh(body) {
+            return (0, 0);
+        }
+        (1, body.cloth.as_ref().map_or(0, |c| c.holes.len() as u32))
+    }
+
+    fn has_mesh(body: &SoftBodySim) -> bool {
+        body.surface.is_some() || !body.tubes.is_empty()
+    }
+
+    /// Append `other` (built on its own, e.g. on another thread, with its `material_base` and
+    /// `hole_base` set to where it lands here) after this geometry, moving its indices into
+    /// the joined buffers. Returns what to add to `other`'s index ranges and strand instances.
+    pub fn append(&mut self, other: &Geometry) -> (u32, u32) {
+        debug_assert_eq!(
+            other.material_base,
+            self.material_base + self.materials.len() as u32
+        );
+        debug_assert_eq!(other.hole_base, self.hole_base + self.holes.len() as u32);
+        let vertex = self.vertices.len() as u32;
+        let point = self.points.len() as u32;
+        let guide = self.guides.len() as u32;
+        let groom = self.grooms.len() as u32;
+        let offsets = (self.indices.len() as u32, self.strands);
+        self.vertices.extend_from_slice(&other.vertices);
+        self.indices
+            .extend(other.indices.iter().map(|i| i + vertex));
+        self.materials.extend_from_slice(&other.materials);
+        self.holes.extend_from_slice(&other.holes);
+        self.points.extend_from_slice(&other.points);
+        self.guides
+            .extend(other.guides.iter().map(|g| GpuStrandGuide {
+                first: g.first + point,
+                groom: g.groom + groom,
+                ..*g
+            }));
+        self.grooms.extend(other.grooms.iter().map(|g| {
+            let mut g = *g;
+            g.counts[0] += guide;
+            g.counts[2] += offsets.1;
+            g
+        }));
+        self.strands += other.strands;
+        offsets
+    }
+
     fn interpolate(&mut self, body: &SoftBodySim, base: Vec3, alpha: f32) {
         self.particles.clear();
         self.particles
@@ -243,30 +300,26 @@ impl Geometry {
     }
 
     /// Append a body's surface and rope tubes; `base` is the body origin relative to the
-    /// camera. `refine` splits each surface triangle in four along curved edges (for cloth
-    /// seen up close). Returns its index range (empty for bodies with nothing to draw).
-    pub fn add_body(
-        &mut self,
-        body: &SoftBodySim,
-        base: Vec3,
-        alpha: f32,
-        refine: bool,
-    ) -> Range<u32> {
+    /// camera and `px` its bounding radius on screen in pixels (`f32::INFINITY` for full
+    /// detail). Cloth whose cells cover more than a few pixels has each triangle split in four
+    /// along curved edges; beads get fewer facets as they shrink. Returns its index range
+    /// (empty for bodies with nothing to draw).
+    pub fn add_body(&mut self, body: &SoftBodySim, base: Vec3, alpha: f32, px: f32) -> Range<u32> {
         let start = self.indices.len() as u32;
-        if body.surface.is_none() && body.tubes.is_empty() {
+        if !Self::has_mesh(body) {
             return start..start;
         }
-        let material = self.materials.len() as u32;
+        let material = self.material_base + self.materials.len() as u32;
         // Wetness goes per vertex (a wet line where cloth meets the water); ropes take the
         // body's average.
         let wetness = 0.0;
         let mean_wet = body.wet.iter().sum::<f32>() / body.wet.len().max(1) as f32;
         let uv_scale = body.surface.as_ref().map_or(Vec2::ONE, |s| s.uv_scale);
-        let first_hole = self.holes.len() as u32;
+        let first_hole = self.hole_base + self.holes.len() as u32;
         if let Some(c) = &body.cloth {
             self.holes.extend_from_slice(&c.holes);
         }
-        let holes = first_hole..self.holes.len() as u32;
+        let holes = first_hole..self.hole_base + self.holes.len() as u32;
         let mut gpu_material = GpuSoftMaterial::new(&body.material, wetness, uv_scale, holes);
         if body.kind == SoftKind::Cloth {
             // Woven fabric: threads close up, yarn irregularity and hems further away.
@@ -274,11 +327,16 @@ impl Geometry {
         }
         self.materials.push(gpu_material);
         self.interpolate(body, base, alpha);
+        let px_per_m = px / body.radius.max(0.01);
         if let Some(surface) = &body.surface {
+            let refine = body
+                .cloth
+                .as_ref()
+                .is_some_and(|c| px_per_m * c.cell > REFINE_CELL_PX);
             self.add_surface(body, surface, material, refine);
         }
         for tube in &body.tubes {
-            self.add_tube(tube, material, mean_wet);
+            self.add_tube(tube, material, mean_wet, px_per_m);
         }
         start..self.indices.len() as u32
     }
@@ -438,7 +496,7 @@ impl Geometry {
         }
     }
 
-    fn add_tube(&mut self, tube: &Tube, material: u32, wet: f32) {
+    fn add_tube(&mut self, tube: &Tube, material: u32, wet: f32, px_per_m: f32) {
         let pts: Vec<Vec3> = tube
             .particles
             .iter()
@@ -539,21 +597,25 @@ impl Geometry {
             }
         }
         if let Some(beads) = &tube.beads {
-            self.add_beads(beads, material, wet);
+            self.add_beads(beads, material, wet, beads.radius * px_per_m);
         }
     }
 
     /// Beads threaded along the centerline in `self.ring`, evenly spaced by arc length.
-    fn add_beads(&mut self, beads: &Beads, material: u32, wet: f32) {
+    fn add_beads(&mut self, beads: &Beads, material: u32, wet: f32, bead_px: f32) {
         let total = self.ring.last().map_or(0.0, |r| r.3);
         let spacing = beads.spacing.max(beads.radius * 1.2).max(1e-3);
         let (r, half_len) = (beads.radius, beads.radius * beads.elongation.max(0.2));
-        const LAT: usize = 8;
-        let lon = if beads.facets > 0 {
+        let full_lon = if beads.facets > 0 {
             beads.facets.clamp(3, 24) as usize
         } else {
             14
         };
+        // Fewer rings and sides as the bead shrinks on screen: a bead a few pixels across
+        // looks the same with a dozen triangles as with a hundred.
+        let detail = (bead_px / BEAD_FULL_PX).clamp(0.0, 1.0);
+        let lat = ((BEAD_LAT as f32 * detail).round() as usize).clamp(3, BEAD_LAT);
+        let lon = ((full_lon as f32 * detail).round() as usize).clamp(full_lon.min(4), full_lon);
         let mut seg = 0;
         let mut s = spacing * 0.5;
         while s < total - half_len * 0.5 {
@@ -593,17 +655,17 @@ impl Geometry {
             };
             let first = self.vertices.len() as u32;
             if beads.facets == 0 {
-                for i in 0..=LAT {
-                    let theta = i as f32 / LAT as f32 * PI;
+                for i in 0..=lat {
+                    let theta = i as f32 / lat as f32 * PI;
                     for j in 0..=lon {
                         let phi = j as f32 / lon as f32 * TAU;
                         let (p, normal) = point(theta, phi);
-                        let uv = [j as f32 / lon as f32, i as f32 / LAT as f32];
+                        let uv = [j as f32 / lon as f32, i as f32 / lat as f32];
                         self.vertices.push(vertex(p, normal, uv));
                     }
                 }
                 let stride = (lon + 1) as u32;
-                for i in 0..LAT as u32 {
+                for i in 0..lat as u32 {
                     for j in 0..lon as u32 {
                         let a = first + i * stride + j;
                         self.indices.extend([
@@ -618,8 +680,8 @@ impl Geometry {
                 }
             } else {
                 // Cut glass: flat facets, each with its own vertices.
-                for i in 0..LAT {
-                    let (ta, tb) = (i as f32 / LAT as f32 * PI, (i + 1) as f32 / LAT as f32 * PI);
+                for i in 0..lat {
+                    let (ta, tb) = (i as f32 / lat as f32 * PI, (i + 1) as f32 / lat as f32 * PI);
                     for j in 0..lon {
                         let (pa, pb) = (
                             j as f32 / lon as f32 * TAU,
@@ -753,6 +815,12 @@ fn push_range(list: &mut Vec<Range<u32>>, r: Range<u32>) {
         Some(last) if last.end == r.start => last.end = r.end,
         _ => list.push(r),
     }
+}
+
+/// One body's geometry within its part.
+struct Built {
+    range: Range<u32>,
+    hair: Option<HairBatch>,
 }
 
 struct HairDraw {
@@ -907,6 +975,8 @@ pub struct SoftBodyFeature {
     cloths: Option<GpuCloths>,
     query: Option<QueryState<&'static SoftBodySim>>,
     geometry: Geometry,
+    /// Per task: the geometry of a run of bodies, and each body's draws within it.
+    parts: Vec<(Geometry, Vec<Built>)>,
     draws: Draws,
     stats: FeatureStats,
     bodies: u32,
@@ -1112,15 +1182,67 @@ impl RenderFeature for SoftBodyFeature {
             })
         });
 
+        // Build the bodies on the compute pool, a run of them per task, then join the runs
+        // in draw order.
+        let build = |seen: &[Seen], (geo, built): &mut (Geometry, Vec<Built>)| {
+            geo.clear();
+            built.clear();
+            for s in seen {
+                let range = geo.add_body(s.body, s.base, alpha, s.px);
+                let hair = s.body.strands.as_ref().and_then(|_| {
+                    let density = (s.px / HAIR_FULL_DENSITY_PX).clamp(0.06, 1.0);
+                    let detail = (s.px / (HAIR_FULL_DENSITY_PX * 0.5)).clamp(0.25, 1.0);
+                    geo.add_hair(s.body, s.base, alpha, density, detail)
+                });
+                built.push(Built { range, hair });
+            }
+        };
+        let pool = engine_core::tasks::ComputeTaskPool::try_get();
+        let tasks = pool.map_or(1, |p| p.thread_num().max(1));
+        let run = seen.len().div_ceil(tasks * 2).max(1);
+        let runs = seen.len().div_ceil(run);
+        if self.parts.len() < runs {
+            self.parts.resize_with(runs, Default::default);
+        }
+        let parts = &mut self.parts[..runs];
+        let (mut material, mut hole) = (0, 0);
+        for (chunk, (part, _)) in seen.chunks(run).zip(parts.iter_mut()) {
+            (part.material_base, part.hole_base) = (material, hole);
+            for s in chunk {
+                let (m, h) = Geometry::slots(s.body);
+                (material, hole) = (material + m, hole + h);
+            }
+        }
+        match pool {
+            Some(pool) if runs > 1 => {
+                pool.scope(|scope| {
+                    for (chunk, part) in seen.chunks(run).zip(parts.iter_mut()) {
+                        let build = &build;
+                        scope.spawn(async move { build(chunk, part) });
+                    }
+                });
+            }
+            _ => {
+                for (chunk, part) in seen.chunks(run).zip(parts.iter_mut()) {
+                    build(chunk, part);
+                }
+            }
+        }
+
         let geo = &mut self.geometry;
-        for s in &seen {
-            // Curved subdivision once cloth cells cover more than a few pixels.
-            let refine = s
-                .body
-                .cloth
-                .as_ref()
-                .is_some_and(|c| s.px / s.body.radius.max(0.01) * c.cell > REFINE_CELL_PX);
-            let range = geo.add_body(s.body, s.base, alpha, refine);
+        let mut built = Vec::with_capacity(seen.len());
+        for (part, bodies) in parts.iter() {
+            let (index, strand) = geo.append(part);
+            built.extend(bodies.iter().map(|b| {
+                let range = b.range.start + index..b.range.end + index;
+                let hair = b.hair.as_ref().map(|h| HairBatch {
+                    vertices: h.vertices,
+                    instances: h.instances.start + strand..h.instances.end + strand,
+                });
+                (range, hair)
+            }));
+        }
+        for (s, (range, hair)) in seen.iter().zip(built) {
             if !range.is_empty() {
                 if s.in_view {
                     let list = if transparent(s) {
@@ -1137,21 +1259,17 @@ impl RenderFeature for SoftBodyFeature {
                     }
                 }
             }
-            if s.body.strands.is_some() {
-                let density = (s.px / HAIR_FULL_DENSITY_PX).clamp(0.06, 1.0);
-                let detail = (s.px / (HAIR_FULL_DENSITY_PX * 0.5)).clamp(0.25, 1.0);
-                if let Some(batch) = geo.add_hair(s.body, s.base, alpha, density, detail) {
-                    if s.in_view {
-                        self.stats.instances += batch.instances.len() as u32;
-                        self.stats.triangles +=
-                            batch.instances.len() as u64 * (batch.vertices as u64 - 2);
-                    }
-                    self.draws.hair.push(HairDraw {
-                        batch,
-                        in_view: s.in_view,
-                        cascades: s.mask & !(1 << SKY_OCCLUSION_VIEW),
-                    });
+            if let Some(batch) = hair {
+                if s.in_view {
+                    self.stats.instances += batch.instances.len() as u32;
+                    self.stats.triangles +=
+                        batch.instances.len() as u64 * (batch.vertices as u64 - 2);
                 }
+                self.draws.hair.push(HairDraw {
+                    batch,
+                    in_view: s.in_view,
+                    cascades: s.mask & !(1 << SKY_OCCLUSION_VIEW),
+                });
             }
         }
         self.bodies = seen.len() as u32;
@@ -1393,7 +1511,7 @@ mod tests {
     fn cloth_vertices_follow_particles_and_report_compression() {
         let mut body = flat_cloth();
         let mut geo = Geometry::default();
-        let range = geo.add_body(&body, Vec3::ZERO, 1.0, false);
+        let range = geo.add_body(&body, Vec3::ZERO, 1.0, 0.0);
         assert_eq!(geo.vertices.len(), body.sim.len());
         assert_eq!(
             range.len(),
@@ -1410,7 +1528,7 @@ mod tests {
             body.sim.step_start[i] = body.sim.pos[i];
         }
         geo.clear();
-        geo.add_body(&body, Vec3::ZERO, 1.0, false);
+        geo.add_body(&body, Vec3::ZERO, 1.0, 0.0);
         for v in &geo.vertices {
             assert!((v.tension[0] + 0.3).abs() < 0.02, "{:?}", v.tension);
             assert!(v.tension[1].abs() < 0.02, "{:?}", v.tension);
@@ -1432,7 +1550,7 @@ mod tests {
         let n = body.sim.len();
         let triangles = body.surface.as_ref().unwrap().triangles.len();
         let mut geo = Geometry::default();
-        let range = geo.add_body(&body, Vec3::ZERO, 1.0, true);
+        let range = geo.add_body(&body, Vec3::ZERO, 1.0, f32::INFINITY);
         assert_eq!(range.len(), triangles * 4 * 3);
         // One shared midpoint per edge: a disc has V - E + F = 1.
         let edges = geo.vertices.len() - n;
@@ -1449,7 +1567,7 @@ mod tests {
         );
         // The same body far away draws its own triangles.
         geo.clear();
-        let range = geo.add_body(&body, Vec3::ZERO, 1.0, false);
+        let range = geo.add_body(&body, Vec3::ZERO, 1.0, 0.0);
         assert_eq!(range.len(), triangles * 3);
     }
 
@@ -1463,7 +1581,7 @@ mod tests {
             radius: 0.05,
         }];
         let mut geo = Geometry::default();
-        let range = geo.add_body(&body, Vec3::new(10.0, 0.0, 0.0), 1.0, false);
+        let range = geo.add_body(&body, Vec3::new(10.0, 0.0, 0.0), 1.0, 0.0);
         let rings = 8 * TUBE_SUBDIV + 1;
         assert_eq!(
             geo.vertices.len(),
@@ -1505,12 +1623,12 @@ mod tests {
             let mut b = std::mem::take(&mut body.tubes);
             b.iter_mut().for_each(|t| t.beads = None);
             body.tubes = b;
-            geo.add_body(&body, Vec3::ZERO, 1.0, false);
+            geo.add_body(&body, Vec3::ZERO, 1.0, f32::INFINITY);
             geo.vertices.len()
         };
         body.tubes = body.bridge.as_ref().unwrap().lines.tubes();
         let mut geo = Geometry::default();
-        geo.add_body(&body, Vec3::ZERO, 1.0, false);
+        geo.add_body(&body, Vec3::ZERO, 1.0, f32::INFINITY);
         // Ten beads over a meter, each a closed ellipsoid around the thread.
         let per_bead = 9 * 15;
         assert_eq!(geo.vertices.len() - plain, 10 * per_bead);
@@ -1519,6 +1637,10 @@ mod tests {
             .map(|v| v.position[1])
             .fold(f32::MIN, f32::max);
         assert!(top <= 0.02, "beads hang on the rope, top {top}");
+        // Beads a pixel across get a handful of facets.
+        let mut far = Geometry::default();
+        far.add_body(&body, Vec3::ZERO, 1.0, 1.0);
+        assert_eq!(far.vertices.len() - plain, 10 * 4 * 5);
     }
 
     #[test]

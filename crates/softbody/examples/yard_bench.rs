@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
+use engine_softbody::render::Geometry;
 use engine_world::FocusPoints;
 
 fn main() {
@@ -70,6 +71,91 @@ fn main() {
                 n.map_or("?", |n| n.as_str())
             );
         }
+    }
+    // What the render prepare builds each frame for every body seen from the focus, without
+    // a GPU.
+    let mut geo = Geometry::default();
+    // Each body's radius on screen from the focus, for a 1080p view 60 degrees high.
+    let eye = yard + DVec3::new(distance, 1.7, 0.0);
+    let px = |b: &engine_softbody::SoftBodySim| {
+        let d = (b.center.distance(eye) as f32).max(b.radius + 0.1);
+        b.radius / d * 540.0 / (30f32).to_radians().tan()
+    };
+    let bodies: Vec<_> = q.iter(&app.world).map(|(_, b)| b).collect();
+    let t = Instant::now();
+    for _ in 0..10 {
+        geo.clear();
+        for b in &bodies {
+            let base = (b.sim.origin - yard).as_vec3();
+            geo.add_body(b, base, 0.5, px(b));
+            geo.add_hair(b, base, 0.5, 1.0, 1.0);
+        }
+    }
+    println!(
+        "render geometry on one thread: {:.2} ms per frame, {} vertices, {} guide points",
+        t.elapsed().as_secs_f64() * 100.0,
+        geo.vertices.len(),
+        geo.points.len()
+    );
+    // The same split over the compute pool the way the render prepare does it.
+    let pool = engine_core::tasks::ComputeTaskPool::get();
+    let run = bodies.len().div_ceil(pool.thread_num().max(1) * 2).max(1);
+    let mut parts: Vec<Geometry> = (0..bodies.len().div_ceil(run))
+        .map(|_| Geometry::default())
+        .collect();
+    let mut joined = Geometry::default();
+    let mut join = 0.0;
+    let (mut material, mut hole) = (0, 0);
+    for (chunk, part) in bodies.chunks(run).zip(parts.iter_mut()) {
+        (part.material_base, part.hole_base) = (material, hole);
+        for b in chunk {
+            let (m, h) = Geometry::slots(b);
+            (material, hole) = (material + m, hole + h);
+        }
+    }
+    let t = Instant::now();
+    for _ in 0..10 {
+        pool.scope(|scope| {
+            for (chunk, part) in bodies.chunks(run).zip(parts.iter_mut()) {
+                scope.spawn(async move {
+                    part.clear();
+                    for b in chunk {
+                        let base = (b.sim.origin - yard).as_vec3();
+                        part.add_body(b, base, 0.5, px(b));
+                        part.add_hair(b, base, 0.5, 1.0, 1.0);
+                    }
+                });
+            }
+        });
+        let j = Instant::now();
+        joined.clear();
+        for part in &parts {
+            joined.append(part);
+        }
+        join += j.elapsed().as_secs_f64() * 100.0;
+    }
+    println!(
+        "render geometry on {} threads: {:.2} ms per frame, {join:.2} of it joining, {} vertices",
+        pool.thread_num(),
+        t.elapsed().as_secs_f64() * 100.0,
+        joined.vertices.len()
+    );
+    let mut each: Vec<(f64, String, usize)> = q
+        .iter(&app.world)
+        .map(|(n, b)| {
+            let base = (b.sim.origin - yard).as_vec3();
+            let t = Instant::now();
+            for _ in 0..10 {
+                geo.clear();
+                geo.add_body(b, base, 0.5, px(b));
+            }
+            let name = n.map_or("?".to_string(), |n| n.as_str().to_string());
+            (t.elapsed().as_secs_f64() * 100.0, name, geo.vertices.len())
+        })
+        .collect();
+    each.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (ms, name, v) in each.iter().take(6) {
+        println!("  geometry {ms:6.2} ms  {v:6} vertices  {name}");
     }
     for (ms, name, n) in costs.iter().take(12) {
         println!("  {ms:6.2} ms  {n:6} particles  {name}");
