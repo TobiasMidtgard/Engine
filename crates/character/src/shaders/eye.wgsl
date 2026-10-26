@@ -72,6 +72,24 @@ fn socket_light(h: vec3<f32>, sun: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(sky, 1.0 - 0.85 * shade);
 }
 
+// How much of the room's light reaches a point `h` of the eye (head frame, unit radius) past
+// the lids: the upper lid with its lashes shades a broad band below its edge, the lower lid a
+// narrow one, and the corners, where both meet, lie deep in shade. Without this the white of
+// the eye is lit as brightly as the open cheek and glows.
+fn lid_shade(h: vec3<f32>, side: f32) -> f32 {
+    let i = select(2u, 0u, side > 0.0);
+    let up = character.lids[i];
+    let lo = character.lids[i + 1u];
+    if (up.x == 0.0 && lo.x == 0.0) {
+        return 1.0;
+    }
+    let x = h.x;
+    let below_upper = up.x + up.y * x + up.z * x * x - h.y;
+    let above_lower = h.y - (lo.x + lo.y * x + lo.z * x * x);
+    return mix(0.3, 1.0, smoothstep(-0.02, 0.38, below_upper))
+        * mix(0.55, 1.0, smoothstep(-0.02, 0.16, above_lower));
+}
+
 @vertex
 fn vs_eye(in: EyeIn) -> EyeOut {
     var out: EyeOut;
@@ -203,7 +221,8 @@ fn fs_eye(in: EyeOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     s.reflectance = 0.0;
     s.occlusion = socket.x;
     s.subsurface = 0.25;
-    var color = shade_surface_shadowed(s, in.rel, socket.y);
+    let lids = lid_shade(h, in.side);
+    var color = shade_surface_shadowed(s, in.rel, socket.y) * lids;
     // The cornea and the tear film: a smooth coat over everything.
     var coat = default_surface();
     coat.albedo = vec3<f32>(0.0);
@@ -213,7 +232,7 @@ fn fs_eye(in: EyeOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     // any stronger and a bright sky veils the iris grey outdoors.
     coat.reflectance = mix(0.35, 0.4, in_cornea);
     coat.occlusion = socket.x;
-    color += shade_surface_shadowed(coat, in.rel, socket.y);
+    color += shade_surface_shadowed(coat, in.rel, socket.y) * mix(0.4, 1.0, lids);
     return vec4<f32>(apply_fog(color, in.rel), 1.0);
 }
 

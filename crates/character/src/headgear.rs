@@ -56,16 +56,18 @@ impl Headgear {
             return;
         }
         let hidden: Vec<bool> = skin.rest.iter().map(|r| self.hides(*r, head)).collect();
-        let kept: Vec<u32> = skin
-            .indices
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .filter(|t| t.iter().all(|v| !hidden[*v as usize]))
-            .flatten()
-            .copied()
-            .collect();
-        skin.indices = kept;
+        let keep = |indices: &[u32]| -> Vec<u32> {
+            indices
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .filter(|t| t.iter().all(|v| !hidden[*v as usize]))
+                .flatten()
+                .copied()
+                .collect()
+        };
+        skin.indices = keep(&skin.indices);
+        skin.coarse_indices = keep(&skin.coarse_indices);
     }
 
     /// Leave out the hair under the headgear.

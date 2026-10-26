@@ -92,9 +92,98 @@ pub fn build(centers: [Vec3; 2], radius: f32) -> EyeMesh {
     mesh
 }
 
+/// Where the lids cross each eye, for shading the eye under them: per eye (left, then right)
+/// its upper and lower lid edge as `y = a + b x + c x²` over the eye-local x (unit radius, head
+/// frame), from the lid margins (`margins[eye][upper, lower]`, model space). An eye without
+/// enough margin points gets a typical almond opening.
+pub fn lid_curves(centers: [Vec3; 2], margins: &[[Vec<Vec3>; 2]; 2]) -> [[f32; 4]; 4] {
+    const TYPICAL: [[f32; 4]; 2] = [[0.42, 0.0, -0.35, 0.0], [-0.38, 0.0, 0.3, 0.0]];
+    let mut out = [[0.0; 4]; 4];
+    for (eye, lids) in margins.iter().enumerate() {
+        for (k, lid) in lids.iter().enumerate() {
+            let pts: Vec<Vec3> = lid
+                .iter()
+                .map(|m| (*m - centers[eye]).normalize_or_zero())
+                .filter(|d| d.z > 0.2)
+                .collect();
+            out[eye * 2 + k] = fit_quadratic(&pts).unwrap_or(TYPICAL[k]);
+        }
+    }
+    out
+}
+
+/// Least-squares `y = a + b x + c x²` through the points' (x, y).
+fn fit_quadratic(pts: &[Vec3]) -> Option<[f32; 4]> {
+    if pts.len() < 3 {
+        return None;
+    }
+    // Normal equations, in f64.
+    let mut m = [[0.0f64; 4]; 3];
+    for p in pts {
+        let (x, y) = (p.x as f64, p.y as f64);
+        let row = [1.0, x, x * x];
+        for i in 0..3 {
+            for j in 0..3 {
+                m[i][j] += row[i] * row[j];
+            }
+            m[i][3] += row[i] * y;
+        }
+    }
+    // Gauss-Jordan elimination with partial pivoting.
+    for col in 0..3 {
+        let pivot = (col..3).max_by(|a, b| m[*a][col].abs().total_cmp(&m[*b][col].abs()))?;
+        m.swap(col, pivot);
+        if m[col][col].abs() < 1e-12 {
+            return None;
+        }
+        for r in 0..3 {
+            if r != col {
+                let f = m[r][col] / m[col][col];
+                let pivot_row = m[col];
+                for (cell, p) in m[r].iter_mut().zip(pivot_row).skip(col) {
+                    *cell -= f * p;
+                }
+            }
+        }
+    }
+    Some([
+        (m[0][3] / m[0][0]) as f32,
+        (m[1][3] / m[1][1]) as f32,
+        (m[2][3] / m[2][2]) as f32,
+        0.0,
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lids_are_fitted_as_curves_across_the_eye() {
+        // An upper lid along y = 0.4 - 0.3 x² on a unit eye at the origin, a lower one missing.
+        let upper: Vec<Vec3> = (-4..=4)
+            .map(|i| {
+                let x = i as f32 * 0.15;
+                let y = 0.4 - 0.3 * x * x;
+                Vec3::new(x, y, (1.0 - x * x - y * y).max(0.0).sqrt()) * 0.012
+            })
+            .collect();
+        let c = lid_curves(
+            [Vec3::ZERO; 2],
+            &[[upper.clone(), Vec::new()], [upper, Vec::new()]],
+        );
+        assert!(
+            (c[0][0] - 0.4).abs() < 1e-3 && c[0][1].abs() < 1e-3,
+            "{:?}",
+            c[0]
+        );
+        assert!((c[0][2] + 0.3).abs() < 1e-3, "{:?}", c[0]);
+        assert!(
+            c[1][0] < 0.0 && c[1][2] > 0.0,
+            "a typical lower lid: {:?}",
+            c[1]
+        );
+    }
 
     #[test]
     fn eyes_face_forward_with_a_cornea() {

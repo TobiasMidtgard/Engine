@@ -38,6 +38,8 @@ pub struct CharacterMeshes {
     pub thigh: Option<[[f32; 4]; 2]>,
     /// Each hand's frame for curling its fingers (left, right).
     pub hands: Option<[HandFrame; 2]>,
+    /// Where the lids cross each eye (`eyes::lid_curves`).
+    pub lids: [[f32; 4]; 4],
     /// Expression shapes (empty when built without a face).
     pub face: FaceShapes,
 }
@@ -114,10 +116,12 @@ pub fn build(
         mouth: shift(lm0.mouth),
     };
     let headgear = Headgear::from_id(&a.headgear);
+    let margins = regions
+        .lid_margins
+        .clone()
+        .map(|lids| lids.map(|lid| lid.iter().map(|v| morphed[*v as usize]).collect::<Vec<_>>()));
+    let lids = eyes::lid_curves([le, re], &margins);
     let mut strands = if opts.hair {
-        let margins = regions.lid_margins.clone().map(|lids| {
-            lids.map(|lid| lid.iter().map(|v| morphed[*v as usize]).collect::<Vec<_>>())
-        });
         strands::grow_all(a, &skin, &margins, &landmarks, &lm0)
     } else {
         Vec::new()
@@ -138,22 +142,23 @@ pub fn build(
         .map(|set| roots(&skin.positions, set.guides.iter().copied(), set.points_per))
         .collect();
     let cut = clothes::Cut::of(a);
-    clothes::dress(pack, regions, &morphed, &mut skin, cut);
+    let cloth = clothes::dress(pack, regions, &morphed, &mut skin, cut);
+    skin.build_coarse(&cloth);
     let face_shows = headgear.face_shows();
     if opts.face && face_shows {
         skin.add_mouth(pack, &mouth::build(pack, &morphed));
     }
-    skin.add_mouth(pack, &shoes::build(pack, &morphed));
+    skin.add_part(pack, &shoes::build(pack, &morphed));
     let thigh = (cut.bottom == clothes::Bottom::Skirt)
         .then(|| skirt::thigh(pack, &morphed))
         .flatten();
     if cut.bottom == clothes::Bottom::Skirt {
         let first = skin.positions.len();
-        skin.add_mouth(pack, &skirt::build(pack, &morphed));
+        skin.add_part(pack, &skirt::build(pack, &morphed));
         skirt::reweight(pack, &mut skin, first);
     }
     if headgear == Headgear::Hood {
-        skin.add_mouth(pack, &hood::build(pack, &morphed, lm0.head));
+        skin.add_part(pack, &hood::build(pack, &morphed, lm0.head));
     }
     headgear.cover_skin(&mut skin, lm0.head);
     let face = if opts.face {
@@ -164,6 +169,7 @@ pub fn build(
     CharacterMeshes {
         rig: Rig::new(pack, &morphed),
         hands: hands::frames(pack, &morphed),
+        lids,
         thigh,
         skin,
         eyes: if face_shows {

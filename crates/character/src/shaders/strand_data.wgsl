@@ -6,6 +6,9 @@
 
 struct StrandParams {
     info: vec4<u32>,   // points per hair, kind (0 scalp, 1 brows, 2 lashes, 3 beard), hairs, guides
+    // Detail by distance: hair width scale (fewer hairs drawn, each wider), points stepped
+    // over per segment (1 every point).
+    lod: vec4<f32>,
 };
 
 @group(2) @binding(0) var<uniform> strand_params: StrandParams;
@@ -47,7 +50,8 @@ fn ribbon_point(hair: u32, vertex: u32) -> RibbonPoint {
     let corner = vertex % 6u;
     // Two triangles per segment: (0,-) (0,+) (1,-) / (1,-) (0,+) (1,+).
     var end = array<u32, 6>(0u, 0u, 1u, 1u, 0u, 1u);
-    let k = min(segment + end[corner], n - 1u);
+    let stride = max(u32(strand_params.lod.y + 0.5), 1u);
+    let k = min((segment + end[corner]) * stride, n - 1u);
     let base = hair * n;
     let i = base + k;
     let p = strand_points[i];
@@ -94,7 +98,7 @@ fn ribbon_point(hair: u32, vertex: u32) -> RibbonPoint {
     }
     out.rel = model_point(out.model);
     out.tangent = model_dir(along);
-    out.radius = p.w;
+    out.radius = p.w * strand_params.lod.x;
     out.index = i;
     return out;
 }

@@ -12,6 +12,7 @@ pub mod hair_motion;
 pub mod hands;
 pub mod headgear;
 pub mod hood;
+pub mod lod;
 pub mod mesh;
 pub mod morph;
 pub mod mouth;
@@ -38,6 +39,7 @@ pub use appearance::{
 };
 pub use build::{BuildOptions, CharacterMeshes};
 pub use feature::{CharacterFeature, GpuCharacter};
+pub use lod::CharacterLod;
 pub use mesh::Region;
 pub use pack::HumanPack;
 
@@ -378,6 +380,7 @@ fn finish_builds(
                 if let Some(hands) = meshes.hands {
                     uniform.hands = hands.map(|h| h.gpu());
                 }
+                uniform.lids = meshes.lids;
                 let mut e = commands.entity(entity);
                 // The person's own limb lengths, for posers that fit a skeleton to them.
                 match meshes.rig.as_ref().map(|r| r.body_fit()) {

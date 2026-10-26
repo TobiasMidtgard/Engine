@@ -37,8 +37,10 @@ use crate::appearance::{Appearance, AppearanceExt, BeardStyle, HairStyle};
 use crate::build::CharacterMeshes;
 use crate::clothes::Cut;
 use crate::face::{self, MAX_CHANNELS};
+use crate::lod::{self, CharacterLod};
 use crate::mesh::Landmarks;
 use crate::rig::Rig;
+use crate::strands::StrandKind;
 use crate::{BuiltCharacter, CharacterDebug};
 
 pub const COMMON_WGSL: &str = include_str!("shaders/common.wgsl");
@@ -105,6 +107,9 @@ pub struct GpuCharacter {
     /// Each hand's frame for curling the fingers, left then right (`HandFrame::gpu`; zero
     /// without hands).
     pub hands: [[[f32; 4]; 5]; 2],
+    /// Where the lids cross each eye: left upper, left lower, right upper, right lower, each
+    /// `y = a + b x + c x²` in the eye's own units (`eyes::lid_curves`).
+    pub lids: [[f32; 4]; 4],
 }
 
 impl GpuCharacter {
@@ -170,6 +175,7 @@ impl GpuCharacter {
             thigh: [0.0; 4],
             knee: [0.0; 4],
             hands: [[[0.0; 4]; 5]; 2],
+            lids: [[0.0; 4]; 4],
         }
     }
 }
@@ -219,8 +225,16 @@ const EYE_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
 
 struct GpuStrands {
     group: wgpu::BindGroup,
+    params: wgpu::Buffer,
+    info: [u32; 4],
+    kind: StrandKind,
     hairs: u32,
+    points: u32,
+    /// This frame's detail (`lod::strands`): hairs and vertices per hair drawn, and the
+    /// stride and width written to `params`.
+    drawn: u32,
     vertices: u32,
+    lod: (u32, u32),
     /// Hair that moves: guide point displacements, this frame's then last frame's.
     motion: Option<GuideMotion>,
 }
@@ -268,11 +282,71 @@ struct GpuMeshes {
     eye_vertices: wgpu::Buffer,
     eye_indices: wgpu::Buffer,
     eye_count: u32,
+    /// The skin seen from afar (`SkinMesh::coarse_indices`); empty buffer when there is none.
+    coarse_indices: wgpu::Buffer,
+    coarse_count: u32,
+    /// Draw the coarse skin this frame.
+    coarse: bool,
     strands: Vec<GpuStrands>,
-    triangles: u64,
     /// Last frame's model matrix (camera-relative), for motion vectors.
     last_model: Option<(Mat4, DVec3)>,
     seen: bool,
+}
+
+impl GpuMeshes {
+    /// The skin, coarse from afar.
+    fn draw_skin(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_vertex_buffer(0, self.skin_vertices.slice(..));
+        let (indices, count) = if self.coarse {
+            (&self.coarse_indices, self.coarse_count)
+        } else {
+            (&self.skin_indices, self.skin_count)
+        };
+        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..count, 0, 0..1);
+    }
+
+    /// Pick this frame's detail for a person `distance` m from the camera.
+    fn choose_detail(&mut self, gpu: &GpuShared, distance: f32) {
+        self.coarse = self.coarse_count > 0 && distance > lod::COARSE_SKIN;
+        for s in &mut self.strands {
+            let (drawn, stride, width) = lod::strands(s.kind, s.hairs, s.points, distance);
+            s.drawn = drawn;
+            s.vertices = lod::strand_vertices(s.points, stride);
+            if s.lod != (drawn, stride) {
+                s.lod = (drawn, stride);
+                let params = GpuStrandParams {
+                    info: s.info,
+                    lod: [width, stride as f32, 0.0, 0.0],
+                };
+                gpu.queue
+                    .write_buffer(&s.params, 0, bytemuck::bytes_of(&params));
+            }
+        }
+    }
+
+    /// Triangles drawn this frame.
+    fn triangles(&self) -> u64 {
+        let skin = if self.coarse {
+            self.coarse_count
+        } else {
+            self.skin_count
+        };
+        let hair: u64 = self
+            .strands
+            .iter()
+            .map(|s| s.drawn as u64 * (s.vertices / 3) as u64)
+            .sum();
+        (skin / 3 + self.eye_count / 3) as u64 + hair
+    }
+}
+
+/// Strand set parameters; must match `StrandParams` in strand_data.wgsl.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct GpuStrandParams {
+    info: [u32; 4],
+    lod: [f32; 4],
 }
 
 struct Pipelines {
@@ -501,7 +575,7 @@ impl CharacterFeature {
             }
             let guides = set.guide_count();
             let moves = guides > 0 && set.follow.len() == hairs as usize;
-            let params: [u32; 4] = [
+            let info: [u32; 4] = [
                 set.points_per,
                 set.kind as u32,
                 hairs,
@@ -509,8 +583,11 @@ impl CharacterFeature {
             ];
             let params = buffer(
                 "character strand params",
-                bytemuck::cast_slice(&params),
-                wgpu::BufferUsages::UNIFORM,
+                bytemuck::bytes_of(&GpuStrandParams {
+                    info,
+                    lod: [1.0, 1.0, 0.0, 0.0],
+                }),
+                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             );
             let points = buffer(
                 "character strand points",
@@ -615,8 +692,14 @@ impl CharacterFeature {
             });
             strands.push(GpuStrands {
                 group,
+                params,
+                info,
+                kind: set.kind,
                 hairs,
-                vertices: (set.points_per - 1) * 6,
+                points: set.points_per,
+                drawn: hairs,
+                vertices: lod::strand_vertices(set.points_per, 1),
+                lod: (hairs, 1),
                 motion,
             });
         }
@@ -649,8 +732,14 @@ impl CharacterFeature {
                 wgpu::BufferUsages::INDEX,
             ),
             eye_count: m.eyes.indices.len() as u32,
+            coarse_indices: buffer(
+                "character coarse skin indices",
+                bytemuck::cast_slice(&m.skin.coarse_indices),
+                wgpu::BufferUsages::INDEX,
+            ),
+            coarse_count: m.skin.coarse_indices.len() as u32,
+            coarse: false,
             strands,
-            triangles: m.triangles() as u64,
             last_model: None,
             seen: true,
         }
@@ -666,9 +755,7 @@ impl CharacterFeature {
                 Pass::Scene | Pass::Prepass => {
                     let scene = matches!(which, Pass::Scene);
                     pass.set_pipeline(if scene { &p.skin } else { &p.skin_prepass });
-                    pass.set_vertex_buffer(0, c.skin_vertices.slice(..));
-                    pass.set_index_buffer(c.skin_indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..c.skin_count, 0, 0..1);
+                    c.draw_skin(pass);
                     pass.set_pipeline(if scene { &p.eye } else { &p.eye_prepass });
                     pass.set_vertex_buffer(0, c.eye_vertices.slice(..));
                     pass.set_index_buffer(c.eye_indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -681,15 +768,13 @@ impl CharacterFeature {
                 }
                 Pass::Shadow => {
                     pass.set_pipeline(&p.skin_shadow);
-                    pass.set_vertex_buffer(0, c.skin_vertices.slice(..));
-                    pass.set_index_buffer(c.skin_indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..c.skin_count, 0, 0..1);
+                    c.draw_skin(pass);
                     pass.set_pipeline(&p.strands_shadow);
                 }
             }
-            for s in &c.strands {
+            for s in c.strands.iter().filter(|s| s.drawn > 0) {
                 pass.set_bind_group(2, &s.group, &[]);
-                pass.draw(0..s.vertices, 0..s.hairs);
+                pass.draw(0..s.vertices, 0..s.drawn);
             }
         }
     }
@@ -861,6 +946,9 @@ impl RenderFeature for CharacterFeature {
         let debug = world
             .get_resource::<CharacterDebug>()
             .map_or(0, |d| d.view as u32);
+        let lod_scale = world
+            .get_resource::<CharacterLod>()
+            .map_or(1.0, |l| l.distance_scale);
         let query = self.query.get_or_insert_with(|| world.query());
         for c in self.characters.values_mut() {
             c.seen = false;
@@ -917,9 +1005,11 @@ impl RenderFeature for CharacterFeature {
                 &mut self.pose_bytes,
             );
             write_motion(gpu, c, guides, posed, skeleton, &mut self.motion);
+            let distance = rel.length() * lod_scale;
+            c.choose_detail(gpu, if lod_scale > 0.0 { distance } else { 0.0 });
             self.stats.instances += 1;
-            self.stats.triangles += c.triangles;
-            self.stats.draw_calls += 2 + c.strands.len() as u32;
+            self.stats.triangles += c.triangles();
+            self.stats.draw_calls += 2 + c.strands.iter().filter(|s| s.drawn > 0).count() as u32;
         }
         self.characters.retain(|_, c| c.seen);
     }
@@ -1074,7 +1164,7 @@ mod tests {
 
     #[test]
     fn gpu_structs_match_wgsl_sizes() {
-        assert_eq!(std::mem::size_of::<GpuCharacter>(), 2 * 64 + 27 * 16);
+        assert_eq!(std::mem::size_of::<GpuCharacter>(), 2 * 64 + 31 * 16);
         assert_eq!(std::mem::size_of::<SkinVertex>(), 104);
         assert_eq!(std::mem::size_of::<GpuPose>(), 5 * 16 + 2 * 16 * 16);
         assert_eq!(std::mem::size_of::<EyeVertex>(), 48);

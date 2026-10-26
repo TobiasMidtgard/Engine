@@ -177,10 +177,17 @@ fn covers(r: Vec3, cloth: f32, head_z: f32, cut: Cut) -> bool {
 }
 
 /// Put the clothes layer on a skin built from `morphed` (the pack's vertices after the
-/// morphs), before any extra vertices are added.
-pub fn dress(pack: &HumanPack, regions: &Regions, morphed: &[Vec3], skin: &mut SkinMesh, cut: Cut) {
+/// morphs), before any extra vertices are added. Returns, per skin vertex, the clothes vertex
+/// laid over it (`u32::MAX`: bare; empty: no clothes).
+pub fn dress(
+    pack: &HumanPack,
+    regions: &Regions,
+    morphed: &[Vec3],
+    skin: &mut SkinMesh,
+    cut: Cut,
+) -> Vec<u32> {
     if !skin.extra.is_empty() || skin.base.is_empty() {
-        return;
+        return Vec::new();
     }
     let head_z = regions.landmarks.head.z;
     let cloth = |v: u32| regions.masks[v as usize * MASKS + Mask::Cloth as usize];
@@ -195,7 +202,7 @@ pub fn dress(pack: &HumanPack, regions: &Regions, morphed: &[Vec3], skin: &mut S
         .map(|b| covers(rest[b], cloth(skin.base[b]), head_z, cut))
         .collect();
     if !cov.iter().any(|c| *c) {
-        return;
+        return Vec::new();
     }
     let mut near: Vec<Vec<u32>> = vec![Vec::new(); n];
     let mut tris = Vec::with_capacity(skin.base_quads.len() * 6);
@@ -348,6 +355,7 @@ pub fn dress(pack: &HumanPack, regions: &Regions, morphed: &[Vec3], skin: &mut S
     }
     skin_tris.extend(cloth_tris);
     skin.indices = skin_tris;
+    index
 }
 
 /// Cross-sections of part of the clothes, stacked up its height: each section's center and

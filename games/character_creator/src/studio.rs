@@ -109,16 +109,18 @@ pub fn setup(mut commands: Commands, mut settings: ResMut<RenderSettings>) {
             },
             Transform::from_xyz(0.9, 2.1, -0.9),
         ));
-        // Fill from the right, cool and soft.
+        // Fill on the other side of the camera from the key (the subject's left, +X), soft and
+        // a little cool, lifting the shadow side to about a third of the key, as a portrait
+        // photographer would.
         commands.spawn((
             Name::new("fill light"),
             PointLight {
-                color: [1.0, 0.97, 0.94],
-                intensity_lm: 220_000.0,
+                color: [0.94, 0.97, 1.0],
+                intensity_lm: 260_000.0,
                 range: 8.0,
                 radius: 0.6,
             },
-            Transform::from_xyz(-1.4, 1.7, 1.3).looking_at(DVec3::new(0.0, 1.7, 0.0), Vec3::Y),
+            Transform::from_xyz(1.3, 1.65, 1.4).looking_at(DVec3::new(0.0, 1.7, 0.0), Vec3::Y),
         ));
     }
     // A backdrop that stays behind the subject whichever way the camera turns (it casts no

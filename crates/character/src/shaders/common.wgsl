@@ -26,6 +26,9 @@ struct Character {
     // its bone; out of the palm, thumb side of along x palm (+-1); wrist; thumb tip. Length 0:
     // no hand.
     hands: array<vec4<f32>, 10>,
+    // Where the lids cross each eye: left upper, left lower, right upper, right lower, each
+    // y = a + b x + c x^2 over the eye's own x (unit radius).
+    lids: array<vec4<f32>, 4>,
 };
 
 @group(1) @binding(0) var<uniform> character: Character;

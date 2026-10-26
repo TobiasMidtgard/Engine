@@ -441,9 +441,43 @@ pub struct SkinMesh {
     pub extra: Vec<[(u32, f32); 3]>,
     /// Per extra vertex: what it is (see [`crate::mouth::MouthPart`]); skin vertices are 0.
     pub extra_parts: Vec<u8>,
+    /// Triangles for seeing the person from afar: the base mesh's own quads over the
+    /// subdivided vertices (Catmull-Clark keeps each base vertex at its index), clothed where
+    /// all three corners are, and the shoes, skirt and hood; no mouth. Empty when the skin
+    /// isn't subdivided.
+    pub coarse_indices: Vec<u32>,
 }
 
 impl SkinMesh {
+    /// Start [`Self::coarse_indices`] from the base quads; `cloth`: per skin vertex the
+    /// clothes vertex over it (`clothes::dress`).
+    pub fn build_coarse(&mut self, cloth: &[u32]) {
+        self.coarse_indices.clear();
+        if self.levels == 0 {
+            return;
+        }
+        let over = |v: u32| cloth.get(v as usize).copied().unwrap_or(u32::MAX);
+        for q in &self.base_quads {
+            for t in [[q[0], q[1], q[2]], [q[0], q[2], q[3]]] {
+                if t.iter().all(|v| over(*v) != u32::MAX) {
+                    self.coarse_indices.extend(t.map(over));
+                } else {
+                    self.coarse_indices.extend(t);
+                }
+            }
+        }
+    }
+
+    /// Append a part (shoes, a skirt, a hood) to the skin and to its far-away triangles.
+    pub fn add_part(&mut self, pack: &HumanPack, part: &crate::mouth::MouthMesh) {
+        let before = self.indices.len();
+        self.add_mouth(pack, part);
+        if !self.coarse_indices.is_empty() {
+            let added = self.indices[before..].to_vec();
+            self.coarse_indices.extend(added);
+        }
+    }
+
     /// Vertices of the subdivided skin (the rest are [`Self::extra`]).
     pub fn skin_vertices(&self) -> usize {
         self.positions.len() - self.extra.len()

@@ -31,6 +31,16 @@ fn main() {
             Update,
             (pose::drive, studio::face_camera, studio::orbit_camera).chain(),
         );
+    // Portraits keep full detail however far the camera pulls back; `--lod-scale s` shows the
+    // game's detail by distance instead, as if the camera stood s times farther away.
+    let lod_scale = std::env::args()
+        .skip_while(|a| a != "--lod-scale")
+        .nth(1)
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(0.0);
+    app.insert_resource(engine_character::CharacterLod {
+        distance_scale: lod_scale,
+    });
     // Indoors: still air, so hair hangs and swings only as the person moves.
     {
         let mut weather = app.world.resource_mut::<engine::world::WeatherState>();
