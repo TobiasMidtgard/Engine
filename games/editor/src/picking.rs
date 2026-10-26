@@ -9,11 +9,21 @@ use crate::scene_ops::EditorOnly;
 
 /// The nearest mesh the ray hits: entity and distance in meters.
 pub fn pick_mesh(world: &mut World, origin: DVec3, dir: Vec3) -> Option<(Entity, f64)> {
+    pick_mesh_except(world, origin, dir, &|_| false)
+}
+
+/// [`pick_mesh`], skipping entities `skip` names.
+pub fn pick_mesh_except(
+    world: &mut World,
+    origin: DVec3,
+    dir: Vec3,
+    skip: &dyn Fn(Entity) -> bool,
+) -> Option<(Entity, f64)> {
     let mut q = world.query_filtered::<(Entity, &GlobalTransform, &ResolvedMesh, &MeshRenderer), Without<EditorOnly>>();
     let meshes = world.get_resource::<Assets<Mesh>>()?;
     let mut best: Option<(Entity, f64)> = None;
     for (entity, global, resolved, renderer) in q.iter(world) {
-        if !renderer.visible {
+        if !renderer.visible || skip(entity) {
             continue;
         }
         let Some(mesh) = meshes.get(resolved.mesh) else {
@@ -26,6 +36,26 @@ pub fn pick_mesh(world: &mut World, origin: DVec3, dir: Vec3) -> Option<(Entity,
         }
     }
     best
+}
+
+/// The nearest surface the ray meets, mesh or ground, within `max` meters.
+pub fn pick_surface(
+    world: &mut World,
+    origin: DVec3,
+    dir: Vec3,
+    max: f64,
+    skip: &dyn Fn(Entity) -> bool,
+) -> Option<DVec3> {
+    let mesh = pick_mesh_except(world, origin, dir, skip).map(|(_, d)| d);
+    let ground = world
+        .get_resource::<engine::world::Ground>()
+        .and_then(|g| crate::landscape::ground_hit(g, origin, dir, max))
+        .map(|p| (p - origin).length());
+    let d = match (mesh, ground) {
+        (Some(a), Some(b)) => a.min(b),
+        (a, b) => a.or(b)?,
+    };
+    (d <= max).then(|| origin + dir.as_dvec3() * d)
 }
 
 /// Distance along a world ray to the first triangle of `mesh` placed at `global`.

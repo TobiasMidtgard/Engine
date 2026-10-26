@@ -224,6 +224,9 @@ fn menu_bar(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, dock: &mu
             {
                 editor::paste(world, editor);
             }
+            if ui.button("Drop to ground   End").clicked() {
+                editor::drop_to_ground(world, editor);
+            }
             if ui.button("Duplicate   Ctrl+D").clicked() {
                 editor::duplicate_selection(world, editor);
             }
@@ -835,6 +838,9 @@ fn shortcuts(ctx: &egui::Context, world: &mut World, editor: &mut Editor) {
     }
     if pressed(egui::Key::Delete, false) {
         editor::delete_selection(world, editor);
+    }
+    if pressed(egui::Key::End, false) {
+        editor::drop_to_ground(world, editor);
     }
     if pressed(egui::Key::F, false) {
         editor::focus_selection(world, editor);

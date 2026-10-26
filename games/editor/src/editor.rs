@@ -357,19 +357,97 @@ pub fn shape_presets() -> Vec<(&'static str, Shape)> {
 
 /// Where new things go: on the ground (y = 0 plane) under the middle of the view, at most
 /// 30 m away, else 8 m in front of the camera.
-pub fn placement_point(world: &World, editor: &Editor) -> DVec3 {
+pub fn placement_point(world: &mut World, editor: &Editor) -> DVec3 {
     let Some(view) = editor.view else {
         return DVec3::ZERO;
     };
+    // Where the view center meets a mesh or the ground, or 8 m ahead in the air.
     let (o, d) = view.ray(view.screen.center());
-    if d.y < -0.05 {
-        let t = -o.y / d.y as f64;
-        if t > 0.0 && t < 30.0 {
-            return o + d.as_dvec3() * t;
+    crate::picking::pick_surface(world, o, d, 60.0, &|_| false).unwrap_or(o + d.as_dvec3() * 8.0)
+}
+
+/// Put the selected scene entities down on whatever is below them (mesh or ground), bottoms
+/// touching, as one undo step.
+pub fn drop_to_ground(world: &mut World, editor: &mut Editor) {
+    let t = now(world);
+    let targets: Vec<Entity> = editor
+        .selection
+        .iter()
+        .copied()
+        .filter(|&e| world.get::<InScene>(e).is_some())
+        .collect();
+    let mut commands = Vec::new();
+    for e in targets {
+        let Some(global) = world.get::<GlobalTransform>(e).copied() else {
+            continue;
+        };
+        let Some(before) = world.get::<Transform>(e).copied() else {
+            continue;
+        };
+        // How far the entity reaches below its origin (mesh bounds, else nothing).
+        let below = world
+            .get::<engine::render::ResolvedMesh>(e)
+            .and_then(|r| world.resource::<Assets<engine::render::Mesh>>().get(r.mesh))
+            .map(|m| {
+                let aabb = m.aabb();
+                let mut low = f64::INFINITY;
+                for i in 0..8 {
+                    let corner = Vec3::new(
+                        if i & 1 == 0 { aabb.min.x } else { aabb.max.x },
+                        if i & 2 == 0 { aabb.min.y } else { aabb.max.y },
+                        if i & 4 == 0 { aabb.min.z } else { aabb.max.z },
+                    );
+                    low = low.min(global.transform_point(corner.as_dvec3()).y);
+                }
+                global.translation().y - low
+            })
+            .unwrap_or(0.0);
+        let start = global.translation() + DVec3::Y * 0.01;
+        let own: HashSet<Entity> = world
+            .iter_entities()
+            .map(|r| r.id())
+            .filter(|&k| scene_ops::is_ancestor(world, e, k))
+            .collect();
+        let skip = |hit: Entity| own.contains(&hit);
+        let Some(floor) =
+            crate::picking::pick_surface(world, start - DVec3::Y * below, -Vec3::Y, 500.0, &skip)
+        else {
+            continue;
+        };
+        let lift = floor.y + below - global.translation().y;
+        if lift.abs() < 1e-4 {
+            continue;
         }
+        let mut after = before;
+        // Moves along world up; for a child, through its parent's scale and rotation.
+        let parent_inv = world
+            .get::<ChildOf>(e)
+            .and_then(|p| world.get::<GlobalTransform>(p.parent()))
+            .map(|g| g.inverse());
+        let up = match parent_inv {
+            Some(inv) => inv.transform_vector3(DVec3::Y),
+            None => DVec3::Y,
+        };
+        after.translation += up * lift;
+        let (Ok(b), Ok(a)) = (serde_json::to_value(before), serde_json::to_value(after)) else {
+            continue;
+        };
+        commands.push(Command::Component {
+            entity: e,
+            name: "Transform".into(),
+            before: Some(b),
+            after: Some(a),
+        });
     }
-    let _ = world;
-    o + d.as_dvec3() * 8.0
+    match commands.len() {
+        0 => editor.info(t, "Nothing to drop: no surface below the selection."),
+        1 => apply(world, editor, commands.pop().expect("one")),
+        n => apply(
+            world,
+            editor,
+            Command::Group(format!("Drop {n} entities to the ground"), commands),
+        ),
+    }
 }
 
 /// Create something in the scene at `at`, select it, and record it for undo.
@@ -950,6 +1028,31 @@ mod tests {
         assert_eq!(next_name("Crate"), "Crate 2");
         assert_eq!(next_name("Crate 2"), "Crate 3");
         assert_eq!(next_name("Big crate"), "Big crate 2");
+    }
+
+    #[test]
+    fn drop_to_ground_lands_on_the_ground_and_undoes() {
+        let mut app = App::new();
+        app.update();
+        let world = &mut app.world;
+        world.init_resource::<engine::world::Ground>();
+        let e = world
+            .spawn((
+                InScene,
+                Name::new("Crate"),
+                Transform::from_xyz(1.0, 5.0, 2.0),
+            ))
+            .id();
+        app.update();
+        let world = &mut app.world;
+        let camera = world.spawn(EditorOnly).id();
+        let mut editor = Editor::new(camera);
+        editor.select(Some(e));
+        drop_to_ground(world, &mut editor);
+        let y = world.get::<Transform>(e).unwrap().translation.y;
+        assert!(y.abs() < 1e-3, "{y}");
+        undo(world, &mut editor);
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.y, 5.0);
     }
 
     #[derive(Resource, Serialize, Deserialize, Default, Debug, PartialEq)]
