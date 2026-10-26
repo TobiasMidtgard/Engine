@@ -10,6 +10,8 @@ engine_core.workspace = true
 engine_assets.workspace = true
 engine_world.workspace = true
 bevy_ecs.workspace = true
+# Fast hash maps for per-object work each frame.
+bevy_platform.workspace = true
 wgpu.workspace = true
 bytemuck.workspace = true
 pollster.workspace = true
