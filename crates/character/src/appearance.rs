@@ -222,10 +222,13 @@ impl AppearanceExt for Appearance {
 
     /// The brows' color (their own, or the hair's darkened slightly as brows usually are).
     fn brow_color(&self) -> HairColor {
+        // Brows are darker than the hair, fair people's most of all (a blonde's are light
+        // brown, not yellow).
         self.brows.color.unwrap_or(HairColor {
-            melanin: (self.hair.color.melanin + 0.08).min(1.0),
+            melanin: (self.hair.color.melanin + 0.05 + 0.12 * (1.0 - self.hair.color.melanin))
+                .min(1.0),
+            red: self.hair.color.red * 0.5,
             grey: self.hair.color.grey * 0.6,
-            ..self.hair.color
         })
     }
 

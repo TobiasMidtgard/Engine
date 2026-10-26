@@ -681,8 +681,10 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     // Brows: the skin between the brow hairs takes a little of their color.
     let brows = m0.w;
     if (brows > 0.0) {
-        let bc = hair_color(character.brows.x, character.brows.y, character.brows.z, 0.5);
-        albedo = mix(albedo, min(albedo, bc * 1.4 + albedo * 0.25), brows * 0.4);
+        // (Greyed: the skin shows the hairs' shade more than their hue.)
+        let bc0 = hair_color(character.brows.x, character.brows.y, character.brows.z, 0.5);
+        let bc = mix(vec3<f32>(luminance(bc0)), bc0, 0.5);
+        albedo = mix(albedo, min(albedo, bc * 1.4 + albedo * 0.25), brows * 0.3);
     }
     // Pores hold a little shadow.
     albedo *= 1.0 - 0.12 * d0.pore - 0.15 * d0.wrinkle;
