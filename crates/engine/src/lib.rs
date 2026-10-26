@@ -51,6 +51,7 @@ impl PluginGroup for DefaultPlugins {
 /// - `--frames N`: stop after N frames (headless).
 /// - `--size WxH`: window / render size.
 /// - `--seed N`: world seed.
+/// - `--quality low|medium|high|ultra`: the [`engine_world::Scalability`] preset.
 /// - `--profile`: log where frame time goes (read by `engine_core::log::init`, see
 ///   `engine_core::profile`).
 ///
@@ -75,6 +76,20 @@ pub fn apply_cli_args(app: &mut App) {
                 if let Some((w, h)) = args.get(i + 1).and_then(|v| v.split_once('x')) {
                     config.width = w.parse().unwrap_or(config.width);
                     config.height = h.parse().unwrap_or(config.height);
+                }
+                i += 1;
+            }
+            "--quality" => {
+                match args
+                    .get(i + 1)
+                    .and_then(|v| engine_world::QualityPreset::parse(v))
+                {
+                    Some(preset) => {
+                        app.insert_resource(engine_world::Scalability::preset(preset));
+                    }
+                    None => engine_core::log::warn!(
+                        "--quality takes low, medium, high or ultra; keeping the default"
+                    ),
                 }
                 i += 1;
             }

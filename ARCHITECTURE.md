@@ -26,6 +26,9 @@ crates/<module>    one crate per system (below)
    Beyond `SimulationRange::active_m` (150 m by default) of every focus, modules let their
    things rest (bodies sleep, NPCs stop thinking, cloth, fire, smoke and debris stop
    stepping), so a world costs what the player is near, not everything in it.
+   `Scalability` (engine_world; `--quality low|medium|high|ultra`) is the one quality setting:
+   each module maps its factors (render scale, shadows, view distance, density, effects,
+   simulation range) to its own knobs.
 2. **Every module is replaceable.** Modules never depend on each other's crates; they read
    and write the shared types in `engine_world`. Fire listens for `IgniteRequest` and heat;
    smoke listens for `ProjectileTrace` and `WindField`; footprints listen for `GroundContact`;
