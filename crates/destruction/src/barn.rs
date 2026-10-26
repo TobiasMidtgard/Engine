@@ -11,7 +11,7 @@ use std::f32::consts::{FRAC_PI_2, PI};
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_world::Combustible;
+use engine_world::{Combustible, FocusPoints, SimulationRange};
 
 use crate::burn::{Charring, WOOD_IGNITION_C};
 use crate::debris::Debris;
@@ -22,6 +22,10 @@ use crate::structure::StructuralPiece;
 
 /// Seconds per loop: built, lit, burnt down, left smoldering, rebuilt.
 pub const CYCLE_SECS: f32 = 120.0;
+
+/// How far the storehouse and its burning yard reach from its origin, meters.
+const BARN_RADIUS_M: f64 = 10.0;
+
 /// When the woodpile is lit.
 const IGNITE_AT: f32 = 2.0;
 /// When what is left starts sinking away.
@@ -274,12 +278,18 @@ pub fn barn_script_system(
     mut barns: Query<&mut BarnFire>,
     mut fires: Query<&mut Combustible>,
     mut debris: Query<&mut Debris, With<BarnPiece>>,
+    focus: Res<FocusPoints>,
+    range: Option<Res<SimulationRange>>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
+    let range = range.map_or_else(SimulationRange::default, |r| *r);
     for mut barn in &mut barns {
+        if crate::area_rests(&range, &focus, barn.origin, BARN_RADIUS_M) {
+            continue;
+        }
         barn.time += dt;
         if !barn.lit && barn.time >= IGNITE_AT {
             barn.lit = true;

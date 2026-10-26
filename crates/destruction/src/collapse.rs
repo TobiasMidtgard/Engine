@@ -19,6 +19,14 @@ use crate::structure::{
 };
 use crate::voxel::{VoxelLook, VoxelState, VoxelVolume, mesh_all, rock_below};
 
+/// What [`structure_system`] keeps between steps: the ground height under each piece's center
+/// (by its exact position), and the pieces counting down to fall.
+#[derive(Default)]
+pub struct SupportCache {
+    ground: std::collections::HashMap<[u64; 3], f64>,
+    counting: Vec<Entity>,
+}
+
 /// Keep the support graph of [`StructuralPiece`]s current, update every [`PieceState`], and
 /// drop pieces that lost support (after a short, slightly random delay so collapses cascade).
 #[allow(clippy::too_many_arguments)]
@@ -56,14 +64,19 @@ pub fn structure_system(
         Option<&Charring>,
     )>,
     mut rng: Local<Option<Rng>>,
+    mut cache: Local<SupportCache>,
 ) {
     let rng = rng.get_or_insert_with(|| Rng::new(0xC011_A95E));
     // Rock dug out from under a piece (or added under it) changes what stands on the ground.
+    if !rock_changed.is_empty() {
+        cache.ground.clear();
+    }
     if !changed.is_empty() || removed.read().count() > 0 || !rock_changed.is_empty() {
         graph.dirty = true;
     }
     let dt = time.delta_secs();
     if graph.dirty {
+        let _span = tracing::info_span!("support graph rebuild").entered();
         graph.dirty = false;
         let items: Vec<(Entity, Obb, bool)> = pieces
             .iter()
@@ -88,11 +101,24 @@ pub fn structure_system(
             .collect();
         // Pieces stand on the terrain or on voxel rock.
         let rock: Vec<(&GlobalTransform, &VoxelState)> = rock.iter().collect();
+        // The ground under a piece that hasn't moved is what it was at the last rebuild
+        // (sampling the terrain under thousands of pieces was most of a rebuild).
+        if cache.ground.len() > 4 * items.len() + 256 {
+            cache.ground.clear();
+        }
+        let heights = std::cell::RefCell::new(std::mem::take(&mut cache.ground));
         let ground = |p: DVec3| {
+            let key = [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+            if let Some(h) = heights.borrow().get(&key) {
+                return *h;
+            }
             let terrain = env.ground(p).map(|g| g.height).unwrap_or(f64::NEG_INFINITY);
-            rock_below(&rock, p).map_or(terrain, |r| r.max(terrain))
+            let h = rock_below(&rock, p).map_or(terrain, |r| r.max(terrain));
+            heights.borrow_mut().insert(key, h);
+            h
         };
         let mut g = build_graph(&items, ground);
+        cache.ground = heights.into_inner();
         let mut props: Vec<MaterialProps> = Vec::with_capacity(items.len());
         for (e, ..) in &items {
             let Ok((_, _, _, _, piece, _, fire, charring)) = pieces.get(*e) else {
@@ -105,6 +131,7 @@ pub fn structure_system(
             props.push(p);
         }
         let support = solve_support(&g, &props);
+        cache.counting.clear();
         for (i, (e, ..)) in items.iter().enumerate() {
             if let Ok((.., mut state, _, _)) = pieces.get_mut(*e) {
                 state.support = support[i];
@@ -115,16 +142,28 @@ pub fn structure_system(
                 } else if !failing {
                     state.collapse_in = None;
                 }
+                if state.collapse_in.is_some() {
+                    cache.counting.push(*e);
+                }
             }
         }
         g.dirty = false;
         *graph = g;
     }
 
-    // Count down and drop.
+    // Count down and drop: only the pieces the last rebuild found failing, not every piece.
     let mut fallen: Vec<(Entity, DVec3, f32)> = Vec::new();
     let mut dust_darkness = 0.0;
-    for (e, t, gt, parent, piece, mut state, fire, charring) in &mut pieces {
+    let mut counting = std::mem::take(&mut cache.counting);
+    counting.retain(|e| {
+        pieces
+            .get(*e)
+            .is_ok_and(|(.., state, _, _)| state.collapse_in.is_some())
+    });
+    for &e in &counting {
+        let Ok((e, t, gt, parent, piece, mut state, fire, charring)) = pieces.get_mut(e) else {
+            continue;
+        };
         let Some(left) = state.collapse_in.as_mut() else {
             continue;
         };
@@ -185,6 +224,7 @@ pub fn structure_system(
         fallen.push((e, translation, mass));
         dust_darkness = props.dust_darkness;
     }
+    cache.counting = counting;
     if !fallen.is_empty() {
         graph.dirty = true;
         out.stats.collapses += 1;
