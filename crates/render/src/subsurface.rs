@@ -13,6 +13,12 @@
 //! specular back. The reach follows `RenderSettings::subsurface_width` (meters at strength 1),
 //! so a face scatters the same at any distance; far away it covers less than a pixel and the
 //! pass leaves it be.
+//!
+//! Blurring lit, textured skin also blurs its texture (freckles, pores) and greys fair skin
+//! ("pre-scatter" texturing). A feature can instead light the skin untextured and draw its
+//! color with `RenderFeature::draw_subsurface_color` into an sRGB target (cleared to white) that
+//! the second pass multiplies into the scattered diffuse light ("post-scatter", Jimenez et al.
+//! 2015 section 4; Unity HDRP's texturing modes, Golubev 2018).
 
 use bytemuck::{Pod, Zeroable};
 
@@ -21,6 +27,9 @@ use crate::features::GpuShared;
 use crate::frame::ViewData;
 use crate::renderer::{fullscreen_pass, layout_entry};
 use crate::targets::{Targets, Tex};
+
+/// The post-scatter color target (`RenderFeature::draw_subsurface_color`).
+pub(crate) const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 /// Kernel samples per pass, the center included (`SSS_SAMPLES` in subsurface.wgsl).
 const SAMPLES: usize = 17;
@@ -122,6 +131,8 @@ pub(crate) struct SubsurfacePass {
 struct SubsurfaceTargets {
     size: (u32, u32),
     scratch: Tex,
+    /// Post-scatter color, multiplied in by the second pass.
+    color: Tex,
     groups: [wgpu::BindGroup; 2],
 }
 
@@ -173,6 +184,15 @@ impl SubsurfacePass {
                         multisampled: false,
                     },
                 ),
+                layout_entry(
+                    5,
+                    S::FRAGMENT,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
             ],
         });
         let module = shared.shader("subsurface", include_str!("shaders/subsurface.wgsl"), false);
@@ -207,16 +227,7 @@ impl SubsurfacePass {
         self.targets = None;
     }
 
-    /// Blur the marked pixels of `targets.hdr` in place (through the scratch target). Only for
-    /// perspective views.
-    pub fn encode(
-        &mut self,
-        shared: &GpuShared,
-        targets: &Targets,
-        encoder: &mut wgpu::CommandEncoder,
-        view: &ViewData,
-        width_m: f32,
-    ) {
+    fn targets(&mut self, shared: &GpuShared, targets: &Targets) -> &SubsurfaceTargets {
         let size = (targets.width, targets.height);
         if self.targets.as_ref().is_none_or(|t| t.size != size) {
             self.targets = Some(SubsurfaceTargets::new(
@@ -226,6 +237,52 @@ impl SubsurfacePass {
                 &self.params,
             ));
         }
+        self.targets.as_ref().expect("subsurface targets")
+    }
+
+    /// The pass the features draw their post-scatter color in: the color target cleared to
+    /// white, on the scene's depth (read only), group 0 the frame group.
+    pub fn color_pass<'e>(
+        &mut self,
+        shared: &GpuShared,
+        targets: &Targets,
+        encoder: &'e mut wgpu::CommandEncoder,
+        frame_group: &wgpu::BindGroup,
+    ) -> wgpu::RenderPass<'e> {
+        let t = self.targets(shared, targets);
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("subsurface color"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &t.color.view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &targets.depth.view,
+                depth_ops: None,
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+        pass.set_bind_group(0, frame_group, &[]);
+        pass
+    }
+
+    /// Blur the marked pixels of `targets.hdr` in place (through the scratch target), then
+    /// multiply in the post-scatter color. Only for perspective views.
+    pub fn encode(
+        &mut self,
+        shared: &GpuShared,
+        targets: &Targets,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &ViewData,
+        width_m: f32,
+    ) {
+        self.targets(shared, targets);
         // Pixels per meter at 1 m: the projection's vertical scale over half the height.
         let pixels_per_meter = view.unjittered_proj.y_axis.y * targets.height as f32 * 0.5;
         for (i, (dir, first)) in [([1.0, 0.0], 1.0), ([0.0, 1.0], 0.0)].iter().enumerate() {
@@ -272,6 +329,14 @@ impl SubsurfaceTargets {
             shared.formats.hdr,
             U::RENDER_ATTACHMENT | U::TEXTURE_BINDING,
         );
+        let post = Tex::new(
+            device,
+            "subsurface color",
+            targets.width,
+            targets.height,
+            COLOR_FORMAT,
+            U::RENDER_ATTACHMENT | U::TEXTURE_BINDING,
+        );
         let group = |label: &str, params: &wgpu::Buffer, color: &wgpu::TextureView| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(label),
@@ -297,6 +362,10 @@ impl SubsurfaceTargets {
                         binding: 4,
                         resource: wgpu::BindingResource::TextureView(&targets.prepass_normal.view),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&post.view),
+                    },
                 ],
             })
         };
@@ -307,6 +376,7 @@ impl SubsurfaceTargets {
         Self {
             size: (targets.width, targets.height),
             scratch,
+            color: post,
             groups,
         }
     }

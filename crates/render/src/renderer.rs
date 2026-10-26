@@ -1227,15 +1227,24 @@ impl Renderer {
         {
             self.perf
                 .pass(&mut cpu, &mut encoder, "subsurface scattering");
-            self.subsurface
-                .get_or_insert_with(|| crate::subsurface::SubsurfacePass::new(&self.shared))
-                .encode(
-                    &self.shared,
-                    &self.targets,
-                    &mut encoder,
-                    &view,
-                    settings.subsurface_width,
-                );
+            let sss = self
+                .subsurface
+                .get_or_insert_with(|| crate::subsurface::SubsurfacePass::new(&self.shared));
+            {
+                let mut pass =
+                    sss.color_pass(&self.shared, &self.targets, &mut encoder, frame_group);
+                for f in self.features.iter().filter(|f| f.needs_subsurface()) {
+                    f.draw_subsurface_color(&mut pass, &ctx);
+                    pass.set_bind_group(0, frame_group, &[]);
+                }
+            }
+            sss.encode(
+                &self.shared,
+                &self.targets,
+                &mut encoder,
+                &view,
+                settings.subsurface_width,
+            );
         }
 
         // Copies for refraction / soft particles, and the color for TAA's reactive mask (what the
