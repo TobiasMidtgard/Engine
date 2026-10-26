@@ -33,10 +33,12 @@ pub struct WorldBuild {
     zone: usize,
     /// What the loading screen names after the step's text (the zone waking).
     detail: Option<&'static str>,
-    /// What ran last frame, and the frames of the staged build that took long, so a slow
-    /// load says where its time went.
-    last: &'static str,
-    slow: Vec<(&'static str, f32)>,
+    /// What ran last frame and when that frame began (wall clock: the engine's frame time
+    /// is capped), and the frames of the staged build that took long, so a slow load says
+    /// where its time went.
+    ran: Vec<&'static str>,
+    frame_at: Option<std::time::Instant>,
+    slow: Vec<(String, f32)>,
 }
 
 const LIB: &str = "the library is the first step";
@@ -172,7 +174,7 @@ const STEPS: [Step; 11] = [
                 )
             });
             b.laps.push((z.key, t.elapsed().as_secs_f32()));
-            b.last = z.key;
+            b.ran.push(z.key);
             if staged {
                 b.detail = zones::ZONES.get(b.zone).map(|z| z.name);
                 return b.zone >= zones::ZONES.len();
@@ -251,7 +253,8 @@ pub fn start(world: &mut World) {
         laps: vec![("ground and sky", started.elapsed().as_secs_f32())],
         zone: 0,
         detail: None,
-        last: "ground and sky",
+        ran: Vec::new(),
+        frame_at: None,
         slow: Vec::new(),
     };
     if world.contains_resource::<Staged>() {
@@ -270,13 +273,32 @@ pub fn step(world: &mut World) {
     let Some(mut build) = world.remove_resource::<WorldBuild>() else {
         return;
     };
-    // The frame before this one: what it ran (the step, the systems answering what it
+    // The frame before this one: what it ran (the steps, the systems answering what they
     // spawned, and the drawing) and how long it took.
-    let dt = world.resource::<Time>().real_delta_secs();
-    if dt > SLOW_FRAME_S {
-        build.slow.push((build.last, dt));
+    let now = std::time::Instant::now();
+    if let Some(at) = build.frame_at.replace(now) {
+        let dt = now.duration_since(at).as_secs_f32();
+        if dt > SLOW_FRAME_S {
+            let ran = if build.ran.is_empty() {
+                "waiting".to_string()
+            } else {
+                build.ran.join("+")
+            };
+            build.slow.push((ran, dt));
+        }
     }
-    run_step(world, &mut build);
+    build.ran.clear();
+    // Steps run until this frame's budget is spent, as Unity's High background loading
+    // priority (50 ms a frame behind a loading screen) and Unreal's streaming time limits do:
+    // cheap steps share a frame, a heavy one has a frame to itself.
+    loop {
+        let at = (build.next, build.zone);
+        run_step(world, &mut build);
+        let moved = (build.next, build.zone) != at;
+        if !moved || build.next >= STEPS.len() || now.elapsed().as_secs_f32() > FRAME_BUDGET_S {
+            break;
+        }
+    }
     if build.next < STEPS.len() {
         show_loading(world, &build);
         world.insert_resource(build);
@@ -294,16 +316,18 @@ pub fn building(world: &World) -> bool {
 /// Loading frames longer than this (s) are listed when the build is done.
 const SLOW_FRAME_S: f32 = 0.1;
 
+/// How long (s) a loading frame keeps starting steps.
+const FRAME_BUDGET_S: f32 = 0.05;
+
 fn run_step(world: &mut World, build: &mut WorldBuild) {
     let (name, _, run) = STEPS[build.next];
     let t = std::time::Instant::now();
-    build.last = "waiting";
     let laps = build.laps.len();
     if run(world, build) {
         // The zone demos lap each zone themselves.
         if build.laps.len() == laps {
             build.laps.push((name, t.elapsed().as_secs_f32()));
-            build.last = name;
+            build.ran.push(name);
         }
         build.next += 1;
     }
@@ -413,19 +437,23 @@ fn show_loading(world: &mut World, build: &WorldBuild) {
 }
 
 /// A bookmark jump (keys 1-9, 0, O, M) the exe holds back until the cover is drawn:
-/// `camera::fly` leaves the eye and the point it looks at here instead of moving.
+/// `camera::fly` keeps the eye and the point it looks at here, and moves the view
+/// [`COVER_FRAMES`] frames later.
 #[derive(Resource, Default)]
-pub struct HeldJump(pub Option<(DVec3, DVec3)>);
+pub struct HeldJump {
+    pub to: Option<(DVec3, DVec3)>,
+    pub frames: u32,
+    /// Set by `camera::fly` the frame it moved the view.
+    pub moved: bool,
+}
 
-/// While the exe's view jumps across the map (a bookmark key, the walk's start): the jump
-/// held until the cover is up, and when it started, to cover the ground popping in until the
-/// terrain there has its patches.
+/// While the exe's view jumps across the map (a bookmark key, the walk's start): where it
+/// was last frame, when the cover went up and frames since the view moved, to cover the
+/// ground popping in until the terrain there has its patches.
 #[derive(Default)]
 pub struct Jump {
     last: Option<DVec3>,
     since: Option<std::time::Instant>,
-    held: Option<(DVec3, DVec3)>,
-    /// Frames since the cover went up (while held) or since the view moved.
     frames: u32,
 }
 
@@ -433,7 +461,7 @@ pub struct Jump {
 const JUMP_M: f64 = 150.0;
 
 /// Frames the cover is drawn before a held jump moves the view, and at least after it.
-const COVER_FRAMES: u32 = 2;
+pub const COVER_FRAMES: u32 = 2;
 
 /// Cover a jump of the view with a dark screen until the terrain around it is built (at most
 /// a few seconds), so the ground never pops in front of the player. Bookmark jumps wait for
@@ -442,32 +470,22 @@ pub fn cover_jumps(world: &mut World, mut jump: Local<Jump>) {
     if building(world) {
         return;
     }
-    if let Some(to) = world
+    let (holding, moved) = world
         .get_resource_mut::<HeldJump>()
-        .and_then(|mut h| h.0.take())
-    {
-        jump.held = Some(to);
-        jump.frames = 0;
+        .map(|mut h| (h.to.is_some(), std::mem::take(&mut h.moved)))
+        .unwrap_or_default();
+    if holding {
         if jump.since.is_none() {
             show_cover(world);
+            jump.since = Some(std::time::Instant::now());
         }
-        jump.since = Some(std::time::Instant::now());
-    }
-    jump.frames += 1;
-    if let Some((eye, target)) = jump.held {
-        if jump.frames <= COVER_FRAMES {
-            return;
-        }
-        let mut q = world.query::<(&mut Transform, &mut camera::ShowcaseCamera)>();
-        for (mut t, mut cam) in q.iter_mut(world) {
-            camera::look(&mut t, &mut cam, eye, target);
-        }
-        jump.held = None;
-        jump.last = Some(eye);
-        jump.frames = 0;
-        jump.since = Some(std::time::Instant::now());
         return;
     }
+    if moved {
+        jump.since = Some(std::time::Instant::now());
+        jump.frames = 0;
+    }
+    jump.frames += 1;
     let mut cameras = world.query::<(&Camera, &GlobalTransform)>();
     let Some(eye) = cameras
         .iter(world)

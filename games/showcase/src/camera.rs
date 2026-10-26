@@ -145,14 +145,32 @@ pub fn fly(
         };
     }
 
+    // The exe covers the view first and moves it a couple of frames later, once the cover
+    // has been drawn (`build::cover_jumps`).
+    let arrive = match held.as_mut() {
+        Some(h) if bookmark.is_some() => {
+            let place = bookmark.as_ref().expect("checked");
+            h.to = Some((place.position, place.target));
+            h.frames = 0;
+            None
+        }
+        Some(h) if h.to.is_some() => {
+            h.frames += 1;
+            if h.frames > crate::build::COVER_FRAMES {
+                h.moved = true;
+                h.to.take()
+            } else {
+                None
+            }
+        }
+        Some(_) => None,
+        None => bookmark.as_ref().map(|p| (p.position, p.target)),
+    };
+
     let dt = time.real_delta_secs();
     for (mut t, mut cam) in &mut q {
-        if let Some(place) = &bookmark {
-            // The exe covers the view first and moves it a couple of frames later.
-            match held.as_mut() {
-                Some(h) => h.0 = Some((place.position, place.target)),
-                None => look(&mut t, &mut cam, place.position, place.target),
-            }
+        if let Some((position, target)) = arrive {
+            look(&mut t, &mut cam, position, target);
             continue;
         }
         if mouse.scroll.y != 0.0 {
