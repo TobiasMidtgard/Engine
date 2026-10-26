@@ -12,7 +12,7 @@ struct Character {
     brows: vec4<f32>,         // eumelanin, red, grey, unused
     beard: vec4<f32>,         // eumelanin, red, grey, density
     eye: vec4<f32>,           // melanin, lipochrome, limbal ring, pupil (0..1)
-    eye2: vec4<f32>,          // redness, debug view, unused, unused
+    eye2: vec4<f32>,          // redness, debug view, subsurface pass on (1: the renderer blurs the skin's diffuse light), unused
     rest_eye_l: vec4<f32>,    // rest-space eye center, radius
     rest_eye_r: vec4<f32>,
     rest_head: vec4<f32>,

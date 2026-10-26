@@ -377,6 +377,9 @@ pub struct CharacterFeature {
     palette: Vec<Mat4>,
     pose_bytes: Vec<u8>,
     motion: Vec<[f32; 4]>,
+    /// Skin scatters light through the renderer's subsurface pass this frame (people drawn and
+    /// the pass on); otherwise the skin shader imitates it on its own.
+    subsurface: bool,
 }
 
 type CharacterItem = (
@@ -822,6 +825,10 @@ impl RenderFeature for CharacterFeature {
         "character"
     }
 
+    fn needs_subsurface(&self) -> bool {
+        self.subsurface
+    }
+
     fn init(&mut self, gpu: &GpuShared) {
         let device = &gpu.device;
         let char_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -996,11 +1003,17 @@ impl RenderFeature for CharacterFeature {
         world: &mut World,
         gpu: &GpuShared,
         view: &ViewData,
-        _settings: &RenderSettings,
+        settings: &RenderSettings,
     ) {
         let Some(p) = &self.pipelines else {
             return;
         };
+        // The renderer runs the pass for perspective views only.
+        let subsurface = settings.subsurface_width > 0.0
+            && !view.orthographic
+            && world
+                .get_resource::<crate::CharacterSubsurface>()
+                .is_some_and(|s| s.pass);
         self.stats = FeatureStats::default();
         let debug = world
             .get_resource::<CharacterDebug>()
@@ -1050,6 +1063,7 @@ impl RenderFeature for CharacterFeature {
             c.last_model = Some((model, world_pos));
             let mut u = built.uniform;
             u.eye2[1] = debug as f32;
+            u.eye2[2] = if subsurface { 1.0 } else { 0.0 };
             u.model = model.to_cols_array_2d();
             u.prev_model = prev_model.to_cols_array_2d();
             gpu.queue
@@ -1071,6 +1085,7 @@ impl RenderFeature for CharacterFeature {
             self.stats.draw_calls += 2 + c.strands.iter().filter(|s| s.drawn > 0).count() as u32;
         }
         self.characters.retain(|_, c| c.seen);
+        self.subsurface = subsurface && !self.characters.is_empty();
     }
 
     fn draw_prepass(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {

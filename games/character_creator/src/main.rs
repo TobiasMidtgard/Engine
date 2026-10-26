@@ -41,6 +41,11 @@ fn main() {
     app.insert_resource(engine_character::CharacterLod {
         distance_scale: lod_scale,
     });
+    // `--subsurface`: skin lit through the renderer's subsurface pass instead of the skin
+    // shader's imitation of it (to compare the two).
+    app.insert_resource(engine_character::CharacterSubsurface {
+        pass: std::env::args().any(|a| a == "--subsurface"),
+    });
     // Indoors: still air, so hair hangs and swings only as the person moves.
     {
         let mut weather = app.world.resource_mut::<engine::world::WeatherState>();

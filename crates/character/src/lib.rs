@@ -143,6 +143,16 @@ pub struct CharacterDebug {
     pub view: u8,
 }
 
+/// Whether skin uses the renderer's subsurface pass (when `RenderSettings::subsurface_width`
+/// is above 0) instead of the skin shader's own imitation. Off until the pass multiplies the
+/// albedo in after its blur: blurring lit, textured skin (pre-scatter texturing) washes out
+/// freckles and pores, which the imitation keeps.
+#[derive(Resource, Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CharacterSubsurface {
+    pub pass: bool,
+}
+
 /// Where the human pack stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackStatus {
@@ -214,11 +224,15 @@ pub struct CharacterPlugin;
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CharacterDebug>()
+            .init_resource::<CharacterSubsurface>()
             .register_component::<CharacterBuild>(
                 "How a character is built: region (body, bust or head), levels (skin subdivision 0..2), hair (grow strands).",
             )
             .register_resource::<CharacterDebug>(
                 "Character shader debug view: 0 off, 1 region masks, 2 normals, 3 curvature.",
+            )
+            .register_resource::<CharacterSubsurface>(
+                "Skin through the renderer's subsurface pass (pass: true) or the skin shader's imitation of it.",
             )
             .add_systems(Startup, load_pack)
             .add_systems(

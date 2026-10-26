@@ -11,11 +11,15 @@
 // vertical lines of the lips, and wrinkles that deepen with age (forehead lines, crow's feet,
 // lines under the eyes, neck rings). Its gradient tilts the normal.
 //
-// Lighting imitates light diffusing under the skin: red light, which travels furthest, is lit
-// with a smoothed normal and wraps further past the terminator than green and blue, more where
-// the surface curves tightly; shadow edges turn red; thin parts (ears, nostrils) glow when lit
-// from behind. Highlights are two GGX lobes (a sharp oily one and a broad one), weaker in the
-// pores.
+// Light diffuses under the skin. With the renderer's subsurface pass on (Jimenez et al.,
+// "Separable Subsurface Scattering", 2015; as Unreal's Subsurface Profile and Unity HDRP's
+// diffusion profiles do), the skin is lit plainly and marks itself in the prepass; the pass
+// blurs its diffuse light along the surface (red farthest) while the specular light, written
+// to alpha, stays sharp. Without the pass the shader imitates it: red light is lit with a
+// smoothed normal and wraps further past the terminator than green and blue, more where the
+// surface curves tightly, and shadow edges turn red. Either way thin parts (ears, nostrils)
+// glow when lit from behind. Highlights are two GGX lobes (a sharp oily one and a broad one),
+// weaker in the pores.
 
 struct SkinIn {
     @location(0) position_curvature: vec4<f32>,
@@ -394,17 +398,30 @@ fn skin_shadow(rel: vec3<f32>, n: vec3<f32>, scatter: f32) -> f32 {
     return sum / 6.0;
 }
 
-fn shade_skin(s: SkinLight, rel: vec3<f32>) -> vec3<f32> {
+// Shaded skin, pre-exposed: all of its light, and the specular part (which the subsurface
+// pass keeps sharp).
+struct SkinShade {
+    color: vec3<f32>,
+    specular: vec3<f32>,
+};
+
+fn shade_skin(s: SkinLight, rel: vec3<f32>) -> SkinShade {
     let v = normalize(-rel);
     let n_dot_v = max(dot(s.n, v), 1e-4);
+    // The imitation of scattering, in full where the subsurface pass doesn't run. With the
+    // pass two fifths of it stay: the pass's blur spreads light only as far as the screen shows
+    // the skin, so the warm terminator a few millimetres wide (light entering past the
+    // shadow's edge, which a blur of lit pixels can't create) still needs the wrap.
+    let imitate = s.scatter * (1.0 - 0.6 * character.eye2.z);
     // Per-channel normals: red from the smoothed normal, blue from the detailed one.
-    let nr = normalize(mix(s.n, s.n_soft, 0.85 * s.scatter));
-    let ng = normalize(mix(s.n, s.n_soft, 0.45 * s.scatter));
+    let nr = normalize(mix(s.n, s.n_soft, 0.85 * imitate));
+    let ng = normalize(mix(s.n, s.n_soft, 0.45 * imitate));
     let nb = s.n;
     // Tighter curves (nose, lips, ears) let light wrap further, relative to their size.
     let curve = saturate(abs(s.curvature) * 0.012);
-    let wrap = vec3<f32>(0.32, 0.13, 0.07) * s.scatter * (0.6 + 0.8 * curve);
+    let wrap = vec3<f32>(0.32, 0.13, 0.07) * imitate * (0.6 + 0.8 * curve);
     var color = vec3<f32>(0.0);
+    var specular = vec3<f32>(0.0);
 
     let l = frame.sun_dir.xyz;
     let sun = frame.sun_color.rgb * sun_transmittance(rel) * cloud_shadow(rel);
@@ -417,10 +434,11 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> vec3<f32> {
             shadow *= contact_shadow(rel, s.n_soft);
         }
         // Light diffusing under the skin reddens shadow edges.
-        let sh = vec3<f32>(pow(shadow, mix(1.0, 0.9, s.scatter)), shadow, pow(shadow, mix(1.0, 1.05, s.scatter)));
+        let sh = vec3<f32>(pow(shadow, mix(1.0, 0.9, imitate)), shadow, pow(shadow, mix(1.0, 1.05, imitate)));
         let diffuse = s.albedo * INV_PI * wrap3(nl, wrap);
         let spec = skin_spec(s.n, v, l, s.roughness) * s.specular;
-        color += (diffuse * sh + spec * shadow) * sun;
+        color += diffuse * sh * sun;
+        specular += spec * shadow * sun;
         // Thin parts glow red when the light is behind them.
         if (s.thin > 0.0) {
             let back = pow(saturate(dot(v, -l)), 3.0) * saturate(-dot(s.n_soft, l) + 0.3);
@@ -442,8 +460,9 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> vec3<f32> {
         let spec = skin_spec(s.n, v, pl, s.roughness) * s.specular;
         // Light diffusing under the skin reddens the hair's shadow edges too.
         let hair = hair_over_skin(s, pl);
-        let sh = vec3<f32>(pow(hair, mix(1.0, 0.9, s.scatter)), hair, pow(hair, mix(1.0, 1.05, s.scatter)));
-        var lit = diffuse * sh + spec * hair;
+        let sh = vec3<f32>(pow(hair, mix(1.0, 0.9, imitate)), hair, pow(hair, mix(1.0, 1.05, imitate)));
+        var lit = diffuse * sh;
+        specular += spec * hair * light.color_radius.rgb * falloff;
         if (s.thin > 0.0) {
             let back = pow(saturate(dot(v, -pl)), 3.0) * saturate(-dot(s.n_soft, pl) + 0.3);
             lit += s.albedo * vec3<f32>(1.0, 0.32, 0.18) * back * s.thin * 0.6 * INV_PI;
@@ -468,11 +487,11 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> vec3<f32> {
     let ssr = screen_reflection(rel);
     let env = mix(mouth_light(sample_env_rough(r, rough) * sky_vis + fill, s.inside), ssr.rgb, ssr.a);
     let brdf = env_brdf_approx(vec3<f32>(0.028), rough, n_dot_v);
-    color += env * brdf * s.specular * specular_occlusion(n_dot_v, visibility, rough * rough);
-    // Peach fuzz catches light at grazing angles.
+    specular += env * brdf * s.specular * specular_occlusion(n_dot_v, visibility, rough * rough);
+    // Peach fuzz catches light at grazing angles (on the surface: not blurred).
     let fuzz = pow(1.0 - n_dot_v, 4.0) * 0.05 * s.scatter;
-    color += fuzz * (sky_r * PI * INV_PI) * visibility;
-    return pre_expose(color);
+    specular += fuzz * (sky_r * PI * INV_PI) * visibility;
+    return SkinShade(pre_expose(color + specular), pre_expose(specular));
 }
 
 // ---------------------------------------------------------------- fragment
@@ -556,6 +575,13 @@ fn mouth_surface(in: SkinOut, front: bool) -> SkinLight {
     return s;
 }
 
+// How much cloth covers the skin here: the shirt's edge per pixel (the vertex mask is as soft
+// as the base mesh is coarse and reaches well past the hem); the vertex mask leaves the hands
+// bare.
+fn cloth_cover(r: vec3<f32>, vertex_mask: f32) -> f32 {
+    return smoothstep(-0.0008, 0.0008, cover_depth(r)) * smoothstep(0.25, 0.75, vertex_mask);
+}
+
 fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     if (in.part != 0u) {
         return mouth_surface(in, front);
@@ -564,12 +590,7 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     let footprint = max(length(dpdx(r)), length(dpdy(r)));
     let m0 = in.m0;
     let m1 = in.m1;
-    // The shirt's edge per pixel (the vertex mask is as soft as the base mesh is coarse); the
-    // vertex mask leaves the hands bare.
-    let m2 = vec4<f32>(
-        smoothstep(-0.0008, 0.0008, cover_depth(r)) * smoothstep(0.25, 0.75, in.m2.x),
-        in.m2.yzw,
-    );
+    let m2 = vec4<f32>(cloth_cover(r, in.m2.x), in.m2.yzw);
     let lip = lip_shape(r, footprint);
     let lips = lip.amount;
     let nose = m0.y;
@@ -770,14 +791,32 @@ fn fs_skin(in: SkinOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     if (character.eye2.y > 0.5) {
         return vec4<f32>(pre_expose(skin_debug(in, s) * 2000.0), 1.0);
     }
-    let color = shade_skin(s, in.rel);
-    return vec4<f32>(apply_fog(color, in.rel), 1.0);
+    let shade = shade_skin(s, in.rel);
+    let color = apply_fog(shade.color, in.rel);
+    // The subsurface pass blurs color minus alpha: alpha holds the specular light (fogged as
+    // the rest is).
+    var alpha = 1.0;
+    if (character.eye2.z > 0.5) {
+        alpha = luminance(shade.specular * surface_fog(in.rel).transmittance);
+    }
+    return vec4<f32>(color, alpha);
 }
 
 @fragment
 fn fs_skin_prepass(in: SkinOut, @builtin(front_facing) front: bool) -> PrepassOutput {
     var n = normalize(in.normal);
     if (!front) { n = -n; }
+    if (character.eye2.z > 0.5) {
+        // How far light spreads under it: skin in full, the gums and tongue less, cloth,
+        // shoes and teeth not at all.
+        var strength = 0.0;
+        switch in.part {
+            case 0u: { strength = 1.0 - cloth_cover(in.rest, in.m2.x); }
+            case 2u, 3u: { strength = 0.5; }
+            default: {}
+        }
+        return prepass_output_subsurface(n, 0.5, in.clip_now, in.clip_prev, strength);
+    }
     return prepass_output(n, 0.5, in.clip_now, in.clip_prev);
 }
 
