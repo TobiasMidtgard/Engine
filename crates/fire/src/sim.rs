@@ -740,7 +740,6 @@ pub fn emit_outputs(
                                     size: rng.range(0.004, 0.02),
                                     life: rng.range(2.0, 7.0),
                                     ignites: true,
-                                    ..Default::default()
                                 });
                             }
                         }
@@ -845,7 +844,6 @@ pub fn emit_outputs(
                         size: rng.range(0.005, 0.03),
                         life: rng.range(3.0, 10.0),
                         ignites: contained.is_none(),
-                        ..Default::default()
                     });
                 }
             }

@@ -298,11 +298,12 @@ fn move_selection(world: &mut World, editor: &mut Editor, by: DVec3) {
     }
 }
 
-/// Put the selected entities at `at`.
+/// Put the selected entities at `at` across the ground, keeping their height.
 fn move_selection_to(world: &mut World, editor: &mut Editor, at: DVec3) {
     for e in editor.selection.clone() {
         if let Some(mut t) = world.get_mut::<Transform>(e) {
-            t.translation = at;
+            t.translation.x = at.x;
+            t.translation.z = at.z;
         }
     }
 }

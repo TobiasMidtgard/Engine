@@ -21,6 +21,7 @@
 //! ships a `demo::spawn_demo` (see `zones.rs`); `TEST_CASES.md` lists every test case and its
 //! owner.
 
+mod build;
 mod camera;
 mod film;
 mod forest;
@@ -74,7 +75,8 @@ fn main() {
         // People with an Appearance are drawn by the character creator's module (faces that
         // blink, look around and wince); anim still poses them.
         .add_plugins(engine_character::CharacterPlugin)
-        .add_systems(Startup, setup)
+        .add_systems(Startup, build::start)
+        .add_systems(Update, build::step)
         .add_systems(
             Update,
             (camera::fly, places::run_pending, scenery::update_lods).chain(),
@@ -121,7 +123,18 @@ fn main() {
     let scripted = ["--tour", "--film", "--fly"]
         .iter()
         .any(|f| args.iter().any(|a| a == f));
-    walk::install(&mut app, !headless && !scripted);
+    let exe = !headless && !scripted;
+    walk::install(&mut app, exe);
+    if exe {
+        // The window draws a loading screen at once while the world builds a step a frame,
+        // and Movement's look bakes on its own thread meanwhile.
+        app.insert_resource(build::Staged)
+            .add_systems(Update, build::cover_jumps.after(camera::fly));
+        app.insert_resource(engine_movement::look::LookSettings {
+            background: true,
+            ..Default::default()
+        });
+    }
     if args.iter().any(|a| a == "--tour") {
         tour::install(&mut app, value("--tour"));
     } else if args.iter().any(|a| a == "--film") {
@@ -146,98 +159,6 @@ fn main() {
         );
     }
     app.run();
-}
-
-fn setup(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    (mut atmosphere, mut settings, mut fog, mut surfaces): (
-        ResMut<Atmosphere>,
-        ResMut<RenderSettings>,
-        ResMut<FogSettings>,
-        ResMut<engine::world::SurfaceMaterials>,
-    ),
-    config: Res<EngineConfig>,
-    (use_planet, demo_zones, plants): (
-        Option<Res<planet::UsePlanet>>,
-        Option<Res<zones::DemoZones>>,
-        Res<engine_foliage::PlantLibrary>,
-    ),
-) {
-    let t0 = std::time::Instant::now();
-    // Each step's share of the build, for `--profile` runs chasing a slow start.
-    let mut laps: Vec<(&str, f32)> = Vec::new();
-    let mut last = t0;
-    let mut lap = |what: &'static str| {
-        let now = std::time::Instant::now();
-        laps.push((what, (now - last).as_secs_f32()));
-        last = now;
-    };
-    // The planet beyond the terrain is grassland too, so the far edge blends into it.
-    atmosphere.ground_color = [0.07, 0.13, 0.04];
-    // Mountains a few km away should still be in the shadow maps' reach for the valley.
-    settings.shadow_distance = settings.shadow_distance.max(400.0);
-    // Every image in the showcase and its module demos is built once and only sampled on the
-    // GPU (audited for round 11), so the CPU copies can go once they are uploaded.
-    settings.release_image_pixels = true;
-    // Clear mountain air: a faint valley haze, about 130 km visibility (3.9 / density), so the
-    // atmosphere gives the distant ranges their blue and the far shadow map their shade.
-    fog.density = 0.00003;
-
-    let land = landscape::shared().clone();
-    let ground = std::sync::Arc::new(landscape::LandscapeGround::new(land.clone(), &mut surfaces));
-    // On the planet the terrain answers `Ground` (edits included) and asks this for surfaces.
-    commands.insert_resource(engine::world::Ground(ground.clone()));
-    let lib = scenery::build_library(&mut meshes, &mut materials, &mut images, &plants);
-    lap("library");
-    let mut rng = Rng::new(config.seed);
-    if use_planet.is_some() {
-        planet::spawn(&mut commands, land.clone(), ground);
-    } else {
-        scenery::spawn_terrain(&mut commands, &mut meshes, &lib, &land);
-    }
-    lap("terrain");
-    scenery::spawn_woods(&mut commands, &lib, &land, &mut rng);
-    lap("woods");
-    scenery::spawn_meadows(&mut commands, &lib, &land, &mut rng);
-    scenery::spawn_meadow_grass(&mut commands, &land);
-    lap("meadows");
-    let hedged = scenery::spawn_farms(&mut commands, &lib, &land, &mut rng);
-    scenery::spawn_walls(&mut commands, &lib, &land, &hedged);
-    lap("farms and walls");
-    scenery::spawn_rocks(&mut commands, &lib, &land, &mut rng);
-    lap("rocks");
-    scenery::spawn_village(&mut commands, &lib, &land, &mut rng);
-    lap("village");
-    scenery::spawn_cliffs_and_stream(&mut commands, &mut meshes, &lib, &land, &mut rng);
-    lap("cliffs and stream");
-    placeholders::cave_shell(&mut commands, &mut meshes, &lib, &land, &mut rng);
-    lap("cave");
-    if let Some(only) = &demo_zones {
-        engine::core::log::info!(
-            "only the zone demos of {:?} (`--zones all` spawns every one)",
-            only.0
-        );
-    }
-    zones::spawn_demos(&mut commands, &lib, &land, &mut rng, demo_zones.as_deref());
-    lap("zone demos");
-    if use_planet.is_none() {
-        zones::moon(&mut commands);
-    }
-    camera::spawn_camera(&mut commands);
-    // The weather module drives the sun, the moon and the clock (`engine_weather::Sky`).
-    engine_weather::spawn_sky_lights(&mut commands);
-    // The tower's textures baked on other threads while the world spawned.
-    lib.tower.finish_textures(&mut images);
-    lap("tower textures");
-    let laps: Vec<String> = laps.iter().map(|(w, s)| format!("{w} {s:.2}")).collect();
-    engine::core::log::info!(
-        "showcase world built in {:.1} s ({})",
-        t0.elapsed().as_secs_f32(),
-        laps.join(", ")
-    );
 }
 
 /// Log how much memory the meshes and images hold, by owner (the first part of each asset's

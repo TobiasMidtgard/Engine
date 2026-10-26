@@ -20,7 +20,7 @@ use engine_world::physics::{
     BodyKind, Collider, ColliderShape, PhysicsBackend, RigidBody, Velocity,
 };
 use engine_world::{
-    ContactKind, Env, GroundContact, NoiseEvent, SimulationRange, SurfaceMaterials,
+    ContactKind, Env, GroundContact, GroundSample, NoiseEvent, SimulationRange, SurfaceMaterials,
 };
 
 use crate::assets::DestructionAssets;
@@ -96,6 +96,12 @@ pub struct DebrisBody {
     pub rock: RockContact,
     /// The resting chunk it lies on, if any: it falls again when that one goes.
     pub on: Option<Entity>,
+    /// The last ground sample under it and where it was taken: reused, along the ground's
+    /// tangent plane, until it moves off that spot.
+    pub ground: Option<(DVec3, GroundSample)>,
+    /// Seconds in contact since it last woke: one that keeps rocking long after landing is put
+    /// to sleep anyway.
+    pub awake_secs: f32,
 }
 
 impl DebrisBody {
@@ -168,6 +174,8 @@ impl DebrisBody {
             last_impact: 0.0,
             rock: RockContact::Unknown,
             on: None,
+            ground: None,
+            awake_secs: 0.0,
         }
     }
 
@@ -177,6 +185,7 @@ impl DebrisBody {
         self.angular += angular;
         self.asleep = false;
         self.still = 0.0;
+        self.awake_secs = 0.0;
     }
 }
 
@@ -763,13 +772,36 @@ impl Rubble {
         self.supports.push(s);
     }
 
-    /// The highest resting top under `p` within [`SUPPORT_REACH_M`] above it, other than
-    /// `skip`'s, and whose it is.
-    fn top_under(&self, p: DVec3, skip: Entity) -> Option<(f64, Entity)> {
-        let ids = self.cells.get(&Self::cell(p))?;
+    /// The resting chunks in the buckets within `r` of `p`, each once, other than `skip`.
+    fn candidates(&self, p: DVec3, r: f64, skip: Entity) -> Vec<usize> {
+        let (lo, hi) = (
+            Self::cell(p - DVec3::splat(r)),
+            Self::cell(p + DVec3::splat(r)),
+        );
+        let mut ids: Vec<usize> = (lo.0..=hi.0)
+            .flat_map(|x| (lo.1..=hi.1).map(move |z| (x, z)))
+            .filter_map(|c| self.cells.get(&c))
+            .flatten()
+            .copied()
+            .filter(|&k| {
+                // Close enough across, and with its top no lower than the bottom of `p ± r`.
+                let s = &self.supports[k];
+                let size = s.half.length() as f64;
+                s.entity != skip
+                    && (s.center.x - p.x).hypot(s.center.z - p.z) <= r + size
+                    && s.center.y + size >= p.y - r
+            })
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// The highest resting top under `p` within [`SUPPORT_REACH_M`] above it among `ids` (from
+    /// [`candidates`](Self::candidates)), and whose it is.
+    fn top_among(&self, ids: &[usize], p: DVec3) -> Option<(f64, Entity)> {
         ids.iter()
             .map(|&k| &self.supports[k])
-            .filter(|s| s.entity != skip)
             .filter_map(|s| s.top_at(p).map(|h| (h, s.entity)))
             .filter(|(h, _)| *h - p.y <= SUPPORT_REACH_M as f64)
             .max_by(|a, b| a.0.total_cmp(&b.0))
@@ -849,6 +881,13 @@ impl<'a> Floor<'a> {
 /// 30 cm drywall flake at about 11 m/s.
 const AIR_DRAG: f32 = 0.9;
 
+/// How far a piece moves before the ground under it is sampled again, meters (farther while it
+/// is high above the ground).
+const GROUND_REUSE_M: f64 = 0.3;
+
+/// Seconds in contact after which a piece that is only rocking or creeping settles anyway.
+const SETTLE_SECS: f32 = 6.0;
+
 /// The built-in debris solver: gravity, ground and voxel rock contacts with friction and
 /// restitution, sleep. Runs in `FixedUpdate` (`SimSet::Physics`), so it slows down with time
 /// dilation.
@@ -873,7 +912,12 @@ pub fn simulate_debris_system(
     // and carries on when someone comes back.
     let range = range.map_or_else(SimulationRange::default, |r| *r);
     let rests = |p: DVec3| range.is_resting(&env.focus, p);
+    let setup = tracing::info_span!("debris setup").entered();
     let rock: Vec<(&GlobalTransform, &VoxelState)> = volumes.iter().collect();
+    let rock_bounds: Vec<(DVec3, DVec3)> = rock
+        .iter()
+        .map(|(gt, state)| state.world_bounds(gt, ROCK_REACH_M as f64 + 0.5))
+        .collect();
     // Rock dug or blasted: whatever rests on or by it looks again.
     let mut changed: Vec<(DVec3, DVec3)> = rock_changed
         .iter()
@@ -923,6 +967,8 @@ pub fn simulate_debris_system(
     // Pieces step in parallel (each reads only the rubble and rock as they were at the start of
     // the step); their landings are written afterwards.
     let hits = std::sync::Mutex::new((Vec::new(), Vec::new()));
+    drop(setup);
+    let _step = tracing::info_span!("debris step").entered();
     q.par_iter_mut()
         .for_each(|(entity, mut t, mut body, mut debris)| {
             if !body.sinking && rests(t.translation) {
@@ -949,6 +995,7 @@ pub fn simulate_debris_system(
             if body.asleep {
                 body.asleep = false;
                 body.still = 0.0;
+                body.awake_secs = 0.0;
                 body.on = None;
             }
             let g = env.gravity(t.translation);
@@ -971,13 +1018,45 @@ pub fn simulate_debris_system(
                 )
                 .normalize();
             }
-            let Some(ground) = env.ground(t.translation) else {
-                return;
+            // The ground under it, sampled again only once it has moved off the spot of the last
+            // sample (the higher above the ground, the farther): terrain samples were most of
+            // the solver's cost.
+            let p = t.translation;
+            let (ground_at, ground) = match body.ground {
+                Some((at, g))
+                    if (p.x - at.x).hypot(p.z - at.z)
+                        < GROUND_REUSE_M.max(0.5 * (p.y - g.height)) =>
+                {
+                    (at, g)
+                }
+                _ => {
+                    let Some(g) = env.ground(p) else {
+                        return;
+                    };
+                    body.ground = Some((p, g));
+                    (p, g)
+                }
             };
             let n = ground.normal.normalize_or(up);
             let scale = t.scale;
             let rot = t.rotation;
             let center = t.translation;
+            let reach = body
+                .points
+                .iter()
+                .map(|p| (*p * scale).length())
+                .fold(0.0f32, f32::max) as f64;
+            // Only the rock it could touch (rock queries were a large part of every piece's
+            // step, near rock or not).
+            let rock: Vec<(&GlobalTransform, &VoxelState)> = rock
+                .iter()
+                .zip(&rock_bounds)
+                .filter(|(_, (lo, hi))| {
+                    (center + DVec3::splat(reach)).cmpge(*lo).all()
+                        && (center - DVec3::splat(reach)).cmple(*hi).all()
+                })
+                .map(|(r, _)| *r)
+                .collect();
             // Out of its hole: past the rims and all of it clear of the rock (its hull's extremes,
             // its center and a lattice over its box no coarser than a thin shelf), it lands on rock
             // from now on.
@@ -1028,18 +1107,12 @@ pub fn simulate_debris_system(
                     count += 1;
                 }
             };
-            // The ground under each point from the one sample under its center, along the ground's
-            // tangent plane (a piece spans a meter or two; sampling the terrain at every point was
-            // most of the solver's cost).
+            // The ground under each point from that one sample, along the ground's tangent plane
+            // (a piece spans a meter or two).
             let (slope_x, slope_z) = {
                 let ny = n.y.max(0.3) as f64;
                 (-(n.x as f64) / ny, -(n.z as f64) / ny)
             };
-            let reach = body
-                .points
-                .iter()
-                .map(|p| (*p * scale).length())
-                .fold(0.0f32, f32::max) as f64;
             let near_floors: Vec<&Floor> = floors
                 .iter()
                 .filter(|(_, (lo, hi))| {
@@ -1048,14 +1121,29 @@ pub fn simulate_debris_system(
                 })
                 .map(|(f, _)| f)
                 .collect();
+            let plane = |q: DVec3| {
+                let d = q - ground_at;
+                ground.height + (slope_x * d.x + slope_z * d.z).clamp(-reach - 2.0, reach + 2.0)
+            };
+            // Clear of the ground, floors, rock and piles by more than its own size: it can't be
+            // touching anything, so it only flies on.
+            let steepest = slope_x.hypot(slope_z);
+            if near_floors.is_empty()
+                && !on_rock
+                && center.y - plane(center) > reach * (1.0 + steepest) + 0.05
+                && !rubble.near(center, reach)
+            {
+                body.still = 0.0;
+                body.on = None;
+                return;
+            }
             // The ground and rock, at its hull's extreme points: rock floors hold it up like the
             // ground, rock walls and ceilings push it out of their face, so it slides down a cliff
             // onto the ledge below instead of catching on the cliff's edge.
             for p in &body.points {
                 let r = rot * (*p * scale);
                 let wp = center + r.as_dvec3();
-                let d = wp - center;
-                let mut h = ground.height + (slope_x * d.x + slope_z * d.z).clamp(-reach, reach);
+                let mut h = plane(wp);
                 for f in &near_floors {
                     if let Some(top) = f.top_under(wp) {
                         h = h.max(top);
@@ -1076,7 +1164,12 @@ pub fn simulate_debris_system(
             // Resting chunks, box on box: a lattice over the lower half of its box, so it lies
             // across an edge below it instead of tipping through it.
             let mut on = None;
-            if !body.points.is_empty() && rubble.near(center, reach) {
+            let piles = if body.points.is_empty() {
+                Vec::new()
+            } else {
+                rubble.candidates(center, reach, entity)
+            };
+            if !piles.is_empty() {
                 let (lo, hi) = body.points.iter().fold(
                     (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
                     |(lo, hi), p| (lo.min(*p * scale), hi.max(*p * scale)),
@@ -1090,7 +1183,7 @@ pub fn simulate_debris_system(
                         continue;
                     }
                     let wp = center + r.as_dvec3();
-                    if let Some((top, s)) = rubble.top_under(wp, entity) {
+                    if let Some((top, s)) = rubble.top_among(&piles, wp) {
                         let depth = (top - wp.y) as f32;
                         if depth > best {
                             best = depth;
@@ -1182,15 +1275,23 @@ pub fn simulate_debris_system(
                 }
             }
             t.translation += (push * 0.8).as_dvec3();
-            if body.velocity.length_squared() < 0.12 * 0.12
-                && body.angular.length_squared() < 0.3 * 0.3
-            {
+            body.awake_secs += dt;
+            let (v2, w2) = (
+                body.velocity.length_squared(),
+                body.angular.length_squared(),
+            );
+            if v2 < 0.12 * 0.12 && w2 < 0.3 * 0.3 {
                 body.still += dt;
                 if body.still > 0.5 {
                     body.asleep = true;
                     body.velocity = Vec3::ZERO;
                     body.angular = Vec3::ZERO;
                 }
+            } else if body.awake_secs > SETTLE_SECS && v2 < 0.5 * 0.5 && w2 < 1.5 * 1.5 {
+                // Still rocking or creeping long after it landed: it settles where it is.
+                body.asleep = true;
+                body.velocity = Vec3::ZERO;
+                body.angular = Vec3::ZERO;
             } else {
                 body.still = 0.0;
             }

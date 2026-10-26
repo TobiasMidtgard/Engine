@@ -12,7 +12,10 @@
 // tilted scales), a colored one from light that crossed the fiber twice (TRT, shifted toward the
 // tip, with glints), light passing straight through when backlit (TT), and an approximation of
 // the light scattered between many fibers, which gives hair its depth and saturated color.
-// Each point's occlusion (how deep inside the hair it sits) darkens all of it.
+// Each point's occlusion (how deep inside the hair it sits) darkens its sky light, and each
+// light is dimmed by the hair and body between it and the point (its optical depth along six
+// directions, blended by the light's): a hairdo lit from one side falls into shade toward the
+// other, and light that crossed more hair picks up more of its color.
 
 @vertex
 fn vs_strand(@builtin(vertex_index) vertex: u32, @builtin(instance_index) hair: u32) -> StrandOut {
@@ -33,7 +36,42 @@ fn vs_strand(@builtin(vertex_index) vertex: u32, @builtin(instance_index) hair: 
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     out.clip_now = motion_clip(rel);
     out.clip_prev = prev_motion_clip(prev_model_point(rp.prev_model) + side * (half_width * ribbon_side(vertex % 6u)));
+    out.rest = rp.rest;
+    out.axis_x = rp.axes[0];
+    out.axis_y = rp.axes[1];
+    out.axis_z = rp.axes[2];
     return out;
+}
+
+// The hair shadow grid (strands::shadow_grid): per cell, the optical depth of crossing it as a
+// share of SHADOW_BODY_TAU.
+@group(2) @binding(6) var hair_shadow: texture_3d<f32>;
+@group(2) @binding(7) var hair_shadow_sampler: sampler;
+
+const SHADOW_REACH: u32 = 16u;
+const SHADOW_BODY_TAU: f32 = 4.0;
+
+// Optical depth of the hair and body between the point and a light in direction `l` (world):
+// marched through the grid a cell a step, from a cell out (the point's own hair is not in its
+// way), with a per-pixel offset so the steps don't band.
+fn strand_depth_toward(in: StrandOut, l: vec3<f32>) -> f32 {
+    let size = strand_params.grid_size.xyz;
+    if (size.x <= 0.0) {
+        return 0.0;
+    }
+    let cell = strand_params.grid_lo.w;
+    let dir = vec3<f32>(dot(l, in.axis_x), dot(l, in.axis_y), dot(l, in.axis_z));
+    let jitter = hash13(vec3<f32>(in.clip.xy, frame.time.w * 0.37));
+    let start = (in.rest - strand_params.grid_lo.xyz) / cell;
+    var tau = 0.0;
+    for (var i = 0u; i < SHADOW_REACH; i++) {
+        let q = start + dir * (f32(i) + 1.0 + jitter);
+        if (any(q < vec3<f32>(0.0)) || any(q > size)) {
+            break;
+        }
+        tau += textureSampleLevel(hair_shadow, hair_shadow_sampler, q / size, 0.0).r;
+    }
+    return tau * SHADOW_BODY_TAU;
 }
 
 fn strand_keep(in: StrandOut) -> bool {
@@ -114,8 +152,19 @@ fn hair_multiple(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, shad
     return base * diffuse * tint;
 }
 
-fn hair_light(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: f32, shadow: f32, scatter: f32) -> vec3<f32> {
-    return hair_bsdf(t, v, l, base, rough, glint) * shadow + hair_multiple(t, v, l, base, shadow, scatter);
+// `shadow` is the shadow map's, `depth` the optical depth of the hair in the way. Light scattered
+// between fibers gets through deeper (it goes around them), and takes on their color.
+fn hair_light(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: f32, shadow: f32, depth: f32, scatter: f32) -> vec3<f32> {
+    // Fair fibers let more light through than dark ones.
+    let fair = saturate(dot(base, vec3<f32>(0.3, 0.5, 0.2)) * 2.0);
+    let tau = depth * mix(1.0, 0.45, fair);
+    // The shadow map holds the hair too, so the darker of the two counts, not both.
+    let single = min(shadow, exp(-tau));
+    // Light that went around many fibers is deeper in their color (its brightest channel kept).
+    let tint = pow(base / max(max(base.r, base.g), max(base.b, 1e-4)), vec3<f32>(0.12 * tau));
+    let through = min(shadow, exp(-0.3 * tau)) * tint;
+    return hair_bsdf(t, v, l, base, rough, glint) * single
+        + hair_multiple(t, v, l, base, single, scatter) * through;
 }
 
 @fragment
@@ -137,14 +186,17 @@ fn fs_strand(in: StrandOut) -> @location(0) vec4<f32> {
     // fibers than dark.
     let rough = select(0.42, 0.3, kind == 0u);
     let scatter = mix(0.8, 1.3, saturate(dot(base, vec3<f32>(0.3, 0.5, 0.2)) * 2.5));
-    let lit = mix(occ, 1.0, 0.2);
+    // The hair in the way of each light shades it (below); occlusion keeps the gaps between
+    // locks and the roots darker.
+    let lit = mix(occ, 1.0, 0.6);
     var color = vec3<f32>(0.0);
 
     let l = frame.sun_dir.xyz;
     let sun = frame.sun_color.rgb * sun_transmittance(in.rel) * cloud_shadow(in.rel);
     if (dot(sun, sun) > 0.0) {
         let shadow = shadow_factor(in.rel, nc);
-        color += hair_light(t, v, l, base, rough, glint, shadow, scatter) * sun * lit;
+        let depth = strand_depth_toward(in, l);
+        color += hair_light(t, v, l, base, rough, glint, shadow, depth, scatter) * sun * lit;
     }
     let count = frame.counts.x;
     for (var i = 0u; i < count; i++) {
@@ -155,7 +207,8 @@ fn fs_strand(in: StrandOut) -> @location(0) vec4<f32> {
         if (dist2 > range * range) { continue; }
         let pl = to_light * inverseSqrt(max(dist2, 1e-8));
         let falloff = sq(saturate(1.0 - sq(dist2 / (range * range)))) / max(dist2, sq(light.color_radius.w));
-        color += hair_light(t, v, pl, base, rough, glint, 1.0, scatter) * light.color_radius.rgb * falloff * lit;
+        let depth = strand_depth_toward(in, pl);
+        color += hair_light(t, v, pl, base, rough, glint, 1.0, depth, scatter) * light.color_radius.rgb * falloff * lit;
     }
     let sky_vis = sky_visibility(in.rel, nc);
     let fill = frame.ambient.rgb;

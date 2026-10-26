@@ -2,17 +2,20 @@
 //! sometimes starting new fires where they land ("spotting"), which is how real fires jump
 //! roads and rivers.
 
-use engine_core::math::{DVec2, DVec3, Vec3};
+use std::collections::HashMap;
+
+use engine_core::math::{DVec3, IVec2, Vec3};
 use engine_core::prelude::*;
 use engine_core::tasks::par_chunks_mut;
 
 /// Embers flown per task.
 const CHUNK: usize = 256;
-/// The ground under an ember is looked up again once it has drifted this far (m) across, or
-/// when it comes this close (m) above the last height, to be sure where it lands. (A planet's
-/// ground is dear to ask, and most embers fly low over burning grass.)
-const GROUND_REUSE_M: f64 = 0.5;
-const GROUND_NEAR_M: f64 = 0.25;
+/// Embers look the ground up in a shared grid of this many meters a cell: hundreds of them
+/// fly over the same few square meters of burning grass, and a planet's ground is dear to
+/// ask, so each cell is asked once.
+const GROUND_CELL_M: f64 = 1.0;
+/// Seconds before the grid is asked afresh (the ground can be dug or blasted).
+const GROUND_KEEP_SECS: f32 = 10.0;
 
 /// One ember.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -31,10 +34,6 @@ pub struct Ember {
     pub life: f32,
     /// Can start a fire where it lands (sparks from a campfire ring can't).
     pub ignites: bool,
-    /// The ground height last looked up under it (−∞ for no ground) and where across: ground
-    /// queries are dear, and an ember high in the air needs one only now and then.
-    pub ground_y: f64,
-    pub ground_at: DVec2,
 }
 
 impl Default for Ember {
@@ -48,22 +47,13 @@ impl Default for Ember {
             size: 0.01,
             life: 5.0,
             ignites: true,
-            ground_y: f64::NEG_INFINITY,
-            ground_at: DVec2::INFINITY,
         }
     }
 }
 
 impl Ember {
     /// Fly for `dt`: rise with the plume, follow the air, fall slowly.
-    fn fly(
-        &mut self,
-        dt: f32,
-        up: Vec3,
-        g: f32,
-        wind: &(impl Fn(DVec3) -> Vec3 + Sync),
-        ground: &(impl Fn(DVec3) -> Option<f64> + Sync),
-    ) {
+    fn fly(&mut self, dt: f32, up: Vec3, g: f32, wind: &(impl Fn(DVec3) -> Vec3 + Sync)) {
         self.age += dt;
         self.heat -= dt / self.life.max(0.1);
         let mut air = wind(self.position);
@@ -77,18 +67,15 @@ impl Ember {
         self.velocity += (air - self.velocity) * k.clamp(0.0, 1.0);
         self.velocity -= up * g * 0.25 * dt;
         self.position += (self.velocity * dt).as_dvec3();
-        let across = DVec2::new(self.position.x, self.position.z);
-        if across.distance(self.ground_at) > GROUND_REUSE_M
-            || self.position.y - self.ground_y < GROUND_NEAR_M
-        {
-            self.ground_y = ground(self.position).unwrap_or(f64::NEG_INFINITY);
-            self.ground_at = across;
-        }
     }
+}
 
-    fn landed(&self) -> bool {
-        self.position.y <= self.ground_y
-    }
+/// The ground cell under a point.
+fn ground_cell(p: DVec3) -> IVec2 {
+    IVec2::new(
+        (p.x / GROUND_CELL_M).floor() as i32,
+        (p.z / GROUND_CELL_M).floor() as i32,
+    )
 }
 
 /// All embers in flight.
@@ -97,9 +84,18 @@ pub struct Embers {
     pub list: Vec<Ember>,
     /// Where embers landed hot enough to try lighting fuel (drained by the fire step).
     pub landings: Vec<(DVec3, f32)>,
+    /// Ground height at the center of each cell embers have flown over (−∞ for none).
+    ground: HashMap<IVec2, f64>,
+    ground_age: f32,
 }
 
 impl Embers {
+    /// Forget the ground heights looked up so far (the world moved or the ground changed).
+    pub fn forget_ground(&mut self) {
+        self.ground.clear();
+        self.ground_age = 0.0;
+    }
+
     /// Advance every ember by `dt`. `wind(p)` gives the air velocity, `ground(p)` the ground
     /// height under a point (or `None` for no ground).
     pub fn step(
@@ -111,16 +107,42 @@ impl Embers {
     ) {
         let up = (-gravity).normalize_or(Vec3::Y);
         let g = gravity.length();
-        let (wind, ground) = (&wind, &ground);
+        let wind = &wind;
         par_chunks_mut(&mut self.list, CHUNK, |_, chunk| {
             for e in chunk {
-                e.fly(dt, up, g, wind, ground);
+                e.fly(dt, up, g, wind);
             }
         });
+        self.ground_age += dt;
+        if self.ground_age > GROUND_KEEP_SECS {
+            self.forget_ground();
+        }
+        // Cells no ember has been over yet, looked up together.
+        let mut cells: Vec<IVec2> = self
+            .list
+            .iter()
+            .map(|e| ground_cell(e.position))
+            .filter(|c| !self.ground.contains_key(c))
+            .collect();
+        cells.sort_unstable_by_key(|c| (c.x, c.y));
+        cells.dedup();
+        let mut missing: Vec<(IVec2, f64)> =
+            cells.into_iter().map(|c| (c, f64::NEG_INFINITY)).collect();
+        let ground = &ground;
+        par_chunks_mut(&mut missing, 16, |_, chunk| {
+            for (c, h) in chunk {
+                let center = (c.as_dvec2() + 0.5) * GROUND_CELL_M;
+                *h = ground(DVec3::new(center.x, 0.0, center.y)).unwrap_or(f64::NEG_INFINITY);
+            }
+        });
+        self.ground.extend(missing);
         let mut i = 0;
         while i < self.list.len() {
             let e = &self.list[i];
-            let landed = e.landed();
+            let landed = self
+                .ground
+                .get(&ground_cell(e.position))
+                .is_some_and(|h| e.position.y <= *h);
             if landed && e.heat > 0.0 && e.ignites {
                 self.landings.push((e.position, e.heat));
             }
@@ -136,6 +158,35 @@ impl Embers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How long a step of a full load of embers takes in a real wind field (run by hand:
+    /// `cargo test --release -p engine_fire --lib -- --ignored --nocapture ember_cost`).
+    #[test]
+    #[ignore]
+    fn ember_cost() {
+        engine_core::tasks::init_task_pools();
+        let wind = engine_world::WindField::default();
+        let mut embers = Embers::default();
+        for i in 0..3000 {
+            embers.list.push(Ember {
+                position: DVec3::new((i % 60) as f64 * 0.5, 1.0 + (i % 7) as f64, (i / 60) as f64),
+                lift: 1.0,
+                life: 300.0,
+                ..Default::default()
+            });
+        }
+        let started = std::time::Instant::now();
+        for _ in 0..60 {
+            embers.step(
+                1.0 / 60.0,
+                Vec3::new(0.0, -9.81, 0.0),
+                |p| wind.sample(p),
+                |_| Some(-5.0),
+            );
+        }
+        let ms = started.elapsed().as_secs_f64() * 1000.0 / 60.0;
+        println!("{} embers: {ms:.3} ms per step", embers.list.len());
+    }
 
     #[test]
     fn embers_ask_the_ground_now_and_then_not_every_step() {
@@ -183,7 +234,6 @@ mod tests {
             size: 0.02,
             life: 30.0,
             ignites: true,
-            ..Default::default()
         });
         let mut max_y: f64 = 0.0;
         for _ in 0..2000 {

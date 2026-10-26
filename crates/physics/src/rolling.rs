@@ -119,7 +119,7 @@ pub(crate) fn resist_rolling(
     let mut pushes = Vec::new();
     // Spin friction where Rapier has none: round shapes touch at a point, links get none.
     for &(h1, h2) in spins {
-        let Some(pair) = world.narrow_phase.contact_pair(h1, h2) else {
+        let Some(pair) = crate::sim::pair_between(world, h1, h2) else {
             continue;
         };
         let (c1, c2) = (

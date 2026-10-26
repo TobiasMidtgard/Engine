@@ -9,6 +9,10 @@ struct StrandParams {
     // Detail by distance: hair width scale (fewer hairs drawn, each wider), points stepped
     // over per segment (1 every point).
     lod: vec4<f32>,
+    // The hair shadow grid: low corner (rest model space) and cell size, then cells along x, y,
+    // z (0: no grid).
+    grid_lo: vec4<f32>,
+    grid_size: vec4<f32>,
 };
 
 @group(2) @binding(0) var<uniform> strand_params: StrandParams;
@@ -32,6 +36,12 @@ struct StrandOut {
     @location(4) @interpolate(flat) hair: u32,
     @location(5) clip_now: vec4<f32>,
     @location(6) clip_prev: vec4<f32>,
+    // Where the point sits in the rest model space the hair shadow grid is in, and that space's
+    // axes in world space (they turn with the head).
+    @location(7) rest: vec3<f32>,
+    @location(8) axis_x: vec3<f32>,
+    @location(9) axis_y: vec3<f32>,
+    @location(10) axis_z: vec3<f32>,
 };
 
 struct RibbonPoint {
@@ -42,6 +52,8 @@ struct RibbonPoint {
     tangent: vec3<f32>,
     radius: f32,
     index: u32,
+    rest: vec3<f32>,
+    axes: mat3x3<f32>,
 };
 
 fn ribbon_point(hair: u32, vertex: u32) -> RibbonPoint {
@@ -65,6 +77,7 @@ fn ribbon_point(hair: u32, vertex: u32) -> RibbonPoint {
     let now = skin_matrix(bones, weights, false);
     var out: RibbonPoint;
     out.model = (now * vec4<f32>(p.xyz + m.dp, 1.0)).xyz;
+    out.rest = p.xyz + m.dp;
     out.prev_model = (skin_matrix(bones, weights, true) * vec4<f32>(p.xyz + m.dp_prev, 1.0)).xyz;
     var along = (now * vec4<f32>(next - prev + vec3<f32>(0.0, 1e-7, 0.0), 0.0)).xyz;
     // Hair that moves goes where its guide went.
@@ -93,6 +106,8 @@ fn ribbon_point(hair: u32, vertex: u32) -> RibbonPoint {
         }
         let inv = 1.0 / max(sum, 1e-4);
         out.model += now_d * inv;
+        // (Near enough: the swing is small next to the grid's reach.)
+        out.rest += now_d * inv;
         out.prev_model += prev_d * inv;
         along += slope * inv;
     }
@@ -100,6 +115,11 @@ fn ribbon_point(hair: u32, vertex: u32) -> RibbonPoint {
     out.tangent = model_dir(along);
     out.radius = p.w * strand_params.lod.x;
     out.index = i;
+    out.axes = mat3x3<f32>(
+        normalize(model_dir((now * vec4<f32>(1.0, 0.0, 0.0, 0.0)).xyz)),
+        normalize(model_dir((now * vec4<f32>(0.0, 1.0, 0.0, 0.0)).xyz)),
+        normalize(model_dir((now * vec4<f32>(0.0, 0.0, 1.0, 0.0)).xyz)),
+    );
     return out;
 }
 

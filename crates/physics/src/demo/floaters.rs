@@ -19,7 +19,7 @@ use engine_world::SurfaceId;
 use engine_world::physics::{Collider, ColliderShape};
 
 use super::art::{Mat, props, timber};
-use super::{REPLAY_RANGE_M, Yard};
+use super::{STATION_REST_M, Yard};
 
 /// World seconds between drops: the splash, the bobbing and the slow tips play out in about
 /// 20 s, then everything floats at rest.
@@ -92,7 +92,7 @@ pub(crate) fn replay_floaters(world: &mut World) {
         .map(|f| f.points.clone())
         .unwrap_or_default();
     let watched =
-        |at: DVec3| focus.is_empty() || focus.iter().any(|p| p.distance(at) < REPLAY_RANGE_M);
+        |at: DVec3| focus.is_empty() || focus.iter().any(|p| p.distance(at) < STATION_REST_M);
     let mut due = Vec::new();
     for (e, mut t) in world.query::<(Entity, &mut FloatTest)>().iter_mut(world) {
         if !t.replay || !watched(t.origin) {

@@ -1306,6 +1306,7 @@ dependencies = [
  "rapier3d",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

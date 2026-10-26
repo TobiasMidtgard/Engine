@@ -40,6 +40,9 @@ pub struct CharacterMeshes {
     pub hands: Option<[HandFrame; 2]>,
     /// Where the lids cross each eye (`eyes::lid_curves`).
     pub lids: [[f32; 4]; 4],
+    /// How much hair and body lies around the hair, for lights to be marched through
+    /// (`strands::shadow_grid`; `None` without scalp hair or beard).
+    pub hair_shadow: Option<strands::ShadowGrid>,
     /// Expression shapes (empty when built without a face).
     pub face: FaceShapes,
 }
@@ -161,6 +164,7 @@ pub fn build(
         skin.add_part(pack, &hood::build(pack, &morphed, lm0.head));
     }
     headgear.cover_skin(&mut skin, lm0.head);
+    let hair_shadow = strands::shadow_grid(&strands, &skin);
     let face = if opts.face {
         face::build(pack, &skin, a)
     } else {
@@ -170,6 +174,7 @@ pub fn build(
         rig: Rig::new(pack, &morphed),
         hands: hands::frames(pack, &morphed),
         lids,
+        hair_shadow,
         thigh,
         skin,
         eyes: if face_shows {

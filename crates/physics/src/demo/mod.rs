@@ -377,6 +377,8 @@ pub struct ProvingGround {
     origin: DVec3,
     surfaces: [SurfaceId; 4],
     running: [f64; Station::ALL.len()],
+    /// Stations resting, nobody near: their bodies held asleep, no replays ([`replay_stations`]).
+    resting: [bool; Station::ALL.len()],
     /// Replay stations on their cycles (on by default).
     pub replay: bool,
 }
@@ -663,6 +665,7 @@ fn build(world: &mut World, origin: DVec3) {
         origin,
         surfaces,
         running: [0.0; Station::ALL.len()],
+        resting: [false; Station::ALL.len()],
         replay: true,
     });
     for station in Station::ALL {
@@ -767,15 +770,23 @@ fn build_station(world: &mut World, ground: Entity, station: Station) {
     station.build(&mut Yard::new(world, g.origin, g.surfaces, Some(tag)));
     if let Some(mut g) = world.get_mut::<ProvingGround>(ground) {
         g.running[station as usize] = 0.0;
+        g.resting[station as usize] = false;
     }
 }
 
-/// Proving grounds farther than this from every focus point pause their replays (nobody sees
-/// them, and far bodies are frozen anyway), meters.
-const REPLAY_RANGE_M: f64 = 250.0;
+/// A station rests once every focus is farther than this from it (the whole yard is about
+/// 70 m across), meters: when its cycle is up it doesn't replay, and its bodies are held
+/// asleep, so a yard nobody stands in costs next to nothing.
+const STATION_REST_M: f64 = 70.0;
+/// A resting station wakes, replaying from the start, once a focus comes this near, meters.
+const STATION_WAKE_M: f64 = 55.0;
+/// A station nobody is near rests this long after it was built (or at the end of its cycle,
+/// if sooner), seconds: long enough for what it drops to land, so nothing hangs in the air.
+/// The wheel and table never stop turning nor the pendulums swinging; they rest mid-motion.
+const FAR_REST_SECS: f64 = 8.0;
 
 /// Replay each proving ground's stations whose cycle is up (world time, so slow motion slows
-/// the cycles too).
+/// the cycles too); rest the ones nobody is near and wake them when someone comes.
 pub(crate) fn replay_stations(world: &mut World) {
     let dt = world
         .get_resource::<FixedTime>()
@@ -784,26 +795,53 @@ pub(crate) fn replay_stations(world: &mut World) {
         .get_resource::<FocusPoints>()
         .map(|f| f.points.clone())
         .unwrap_or_default();
-    let watched =
-        |at: DVec3| focus.is_empty() || focus.iter().any(|p| p.distance(at) < REPLAY_RANGE_M);
-    let mut due = Vec::new();
+    // (No focus, as in tests and tools: everything runs.)
+    let nearest = |at: DVec3| {
+        focus
+            .iter()
+            .map(|p| p.distance(at))
+            .fold(if focus.is_empty() { 0.0 } else { f64::INFINITY }, f64::min)
+    };
+    let (mut due, mut rest) = (Vec::new(), Vec::new());
     for (e, mut g) in world
         .query::<(Entity, &mut ProvingGround)>()
         .iter_mut(world)
     {
-        if !g.replay || !watched(g.origin) {
+        if !g.replay {
             continue;
         }
         for station in Station::ALL {
-            let t = &mut g.running[station as usize];
-            *t += dt;
-            if station.cycle_secs().is_some_and(|c| *t >= c) {
+            let i = station as usize;
+            let d = nearest(g.origin + station.base());
+            if g.resting[i] {
+                if d < STATION_WAKE_M {
+                    due.push((e, station));
+                }
+                continue;
+            }
+            g.running[i] += dt;
+            let t = g.running[i];
+            let cycle = station.cycle_secs();
+            if d > STATION_REST_M && t >= cycle.unwrap_or(f64::INFINITY).min(FAR_REST_SECS) {
+                g.resting[i] = true;
+                rest.push((e, station));
+            } else if cycle.is_some_and(|c| t >= c) {
                 due.push((e, station));
             }
         }
     }
     for (e, station) in due {
         build_station(world, e, station);
+    }
+    if !rest.is_empty() {
+        let bodies: Vec<Entity> = world
+            .query_filtered::<(Entity, &StationPart), Or<(With<RigidBody>, With<CharacterController>)>>()
+            .iter(world)
+            .filter(|(_, p)| rest.contains(&(p.ground, p.station)))
+            .map(|(e, _)| e)
+            .collect();
+        let shared = world.resource::<crate::SharedSimulation>().0.clone();
+        shared.write().resting.extend(bodies);
     }
 }
 
@@ -1349,7 +1387,7 @@ fn paddle_wheel(y: &mut Yard, center: DVec3) {
 }
 
 /// Fifteen 0.82 m planks hinged together between two posts 12 m apart, so the deck sags about
-/// 1.2 m; three crates drop onto it.
+/// 1.2 m; three crates drop onto it, and its rope railings keep them aboard.
 fn bridge(y: &mut Yard, center: DVec3) {
     let (span, planks, plank, height) = (12.0f64, 15usize, 0.82f64, 4.5f64);
     let tower_half = Vec3::new(1.3, height as f32 * 0.5, 0.3);
@@ -1408,15 +1446,38 @@ fn bridge(y: &mut Yard, center: DVec3) {
         let (a, b) = (ends[k], ends[k + 1]);
         let dir = (b - a).normalize().as_vec3();
         let half = Vec3::new(1.0, 0.06, (a.distance(b) * 0.5) as f32);
-        let c = Collider::cuboid(half)
-            .with_surface(y.wood)
-            .with_density(500.0);
+        // The deck, and a thin wall in each railing's rope plane so crates stay aboard.
+        let (rail_y, rail_x) = (
+            (structures::BRIDGE_HAND + 0.05) * 0.5,
+            half.x + structures::BRIDGE_RAIL_OUT,
+        );
+        let wall = ColliderShape::Cuboid {
+            half_extents: Vec3::new(0.015, (structures::BRIDGE_HAND - 0.05) * 0.5, half.z),
+        };
+        let c = Collider {
+            shape: ColliderShape::Compound(vec![
+                (
+                    Vec3::ZERO,
+                    Quat::IDENTITY,
+                    ColliderShape::Cuboid { half_extents: half },
+                ),
+                (
+                    Vec3::new(-rail_x, rail_y, 0.0),
+                    Quat::IDENTITY,
+                    wall.clone(),
+                ),
+                (Vec3::new(rail_x, rail_y, 0.0), Quat::IDENTITY, wall),
+            ]),
+            ..Default::default()
+        }
+        .with_surface(y.wood)
+        .with_density(500.0);
         let parts = y.parts(
             &format!("bridge_plank/{k}"),
-            [Mat::Timber, Mat::Steel],
+            [Mat::Timber, Mat::Steel, Mat::Rope],
             || {
                 let p = structures::bridge_plank(half, k);
-                [p.timber, p.steel]
+                [p.timber, p.steel, p.rope]
             },
         );
         let plank = y.body(

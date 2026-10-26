@@ -29,7 +29,7 @@ fn characters_in(sim: &Simulation, region_id: RegionId) -> Vec<Entity> {
     let mut entities: Vec<Entity> = sim
         .characters
         .iter()
-        .filter(|(_, c)| c.region == region_id)
+        .filter(|(e, c)| c.region == region_id && !sim.resting.contains(*e))
         .map(|(e, _)| *e)
         .collect();
     entities.sort();
