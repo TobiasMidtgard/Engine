@@ -155,6 +155,24 @@ pub struct SmokeDomain {
     /// Far from every focus: it keeps its smoke as it was and doesn't step until someone
     /// comes back.
     pub resting: bool,
+    /// Steps of the simulation clock per step of this volume: 2 while its smoke fills more
+    /// than [`BIG_VOLUME_VOXELS`] (a meadow fire's plume), so it costs half as much. Its
+    /// steps are twice as long; semi-Lagrangian smoke takes that in its stride.
+    pub stride: u32,
+    /// Seconds of simulation clock since it last stepped.
+    pub owed_secs: f32,
+}
+
+/// Active voxels above which a volume steps every other tick.
+pub const BIG_VOLUME_VOXELS: u32 = 40_000;
+
+impl SmokeDomain {
+    /// How far it is toward its next step (0..1), for drawing smoothly between steps;
+    /// `clock` is the simulation clock's own progress.
+    pub fn progress(&self, clock: f32, settings: &SmokeSettings) -> f32 {
+        let step = 1.0 / settings.sim_hz.clamp(1.0, 120.0);
+        ((self.owed_secs + clock * step) / (self.stride.max(1) as f32 * step)).clamp(0.0, 1.0)
+    }
 }
 
 /// Every smoke volume.
@@ -189,6 +207,8 @@ impl SmokeDomains {
             domain,
             empty_secs: 0.0,
             resting: false,
+            stride: 1,
+            owed_secs: 0.0,
         });
         self.list.len() - 1
     }
@@ -638,7 +658,6 @@ pub fn step(
     let (active_m, hysteresis) =
         range.map_or((f64::INFINITY, 0.25), |r| (r.active_m, r.hysteresis));
     let active_m = active_m.min(settings.sim_radius_m as f64);
-    let params = settings.step_params(dt, weather.temperature_c);
     let wind_fn = |p: DVec3| turbulent_wind(&wind, p, settings.turbulence, wind.time as f64);
     let started = std::time::Instant::now();
     let mut stepped = 0;
@@ -663,6 +682,15 @@ pub fn step(
             continue;
         }
         d.empty_secs = 0.0;
+        let (lo, hi) = d.domain.active;
+        let voxels = (hi.saturating_sub(lo)).element_product();
+        d.stride = if voxels > BIG_VOLUME_VOXELS { 2 } else { 1 };
+        d.owed_secs += dt;
+        if d.owed_secs < dt * (d.stride as f32 - 0.5) {
+            continue;
+        }
+        let params = settings.step_params(d.owed_secs, weather.temperature_c);
+        d.owed_secs = 0.0;
         d.domain.step(&params, &wind_fn);
         stepped += 1;
     }

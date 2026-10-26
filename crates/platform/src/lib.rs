@@ -12,7 +12,7 @@ use std::sync::Arc;
 use bevy_ecs::prelude::*;
 use engine_core::prelude::*;
 use engine_core::window::{RawWindowHandle, WindowCloseRequested, WindowResized};
-use engine_input::{InputEvent, KeyCode, MouseButton, TextInput};
+use engine_input::{FileDrop, InputEvent, KeyCode, MouseButton, TextInput};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseScrollDelta, WindowEvent};
@@ -252,6 +252,15 @@ impl ApplicationHandler for Handler {
                     MouseScrollDelta::PixelDelta(p) => Vec2::new(p.x as f32, p.y as f32) / 40.0,
                 };
                 self.send(InputEvent::MouseWheel { delta });
+            }
+            WindowEvent::HoveredFile(path) => {
+                self.app.world.write_message(FileDrop::Hovered(path));
+            }
+            WindowEvent::DroppedFile(path) => {
+                self.app.world.write_message(FileDrop::Dropped(path));
+            }
+            WindowEvent::HoveredFileCancelled => {
+                self.app.world.write_message(FileDrop::Cancelled);
             }
             WindowEvent::RedrawRequested => {}
             _ => {}

@@ -263,18 +263,20 @@ pub fn update_grass(world: &mut World) {
                     // Ask from above the highest ground a meadow this size might cover (for
                     // terrain with caves, the first surface below is the meadow's).
                     let hint = c.y + 2.0 + half.max_element();
-                    let ground = (0..size[0] * size[1])
-                        .map(|i| {
-                            let p = min
-                                + (DVec2::new((i % size[0]) as f64, (i / size[0]) as f64) + 0.5)
-                                    * cell_m as f64;
-                            ground
+                    // The ground is dear to ask (a planet's), so a row per task.
+                    let mut heights = vec![0.0f32; (size[0] * size[1]) as usize];
+                    let row = size[0] as usize;
+                    engine_core::tasks::par_chunks_mut(&mut heights, row, |y, out| {
+                        for (x, h) in out.iter_mut().enumerate() {
+                            let p = min + (DVec2::new(x as f64, y as f64) + 0.5) * cell_m as f64;
+                            *h = ground
                                 .as_ref()
                                 .and_then(|g| g.height(DVec3::new(p.x, hint, p.y)))
                                 .filter(|h| h.is_finite())
-                                .map_or(0.0, |h| (h - c.y) as f32)
-                        })
-                        .collect();
+                                .map_or(0.0, |h| (h - c.y) as f32);
+                        }
+                    });
+                    let ground = heights;
                     fresh.push((
                         entity,
                         GrassBurn {

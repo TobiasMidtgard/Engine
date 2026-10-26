@@ -558,7 +558,7 @@ impl RenderFeature for SmokeFeature {
         if !settings.enabled || self.light_pipeline.is_none() {
             return;
         }
-        let blend = world
+        let clock = world
             .get_resource::<SmokeClock>()
             .map(|c| c.progress(&settings))
             .unwrap_or(1.0);
@@ -648,7 +648,7 @@ impl RenderFeature for SmokeFeature {
             }
             let p = SmokeParams {
                 min_rel: [rel_min.x, rel_min.y, rel_min.z, dom.cell],
-                size: [size.x, size.y, size.z, blend],
+                size: [size.x, size.y, size.z, blend(d, clock, &settings)],
                 dims: [
                     dom.dims.x as f32,
                     dom.dims.y as f32,
@@ -811,6 +811,15 @@ pub fn shadow_bounds(min: Vec3, size: Vec3, sun: Vec3) -> (Vec3, Vec3) {
 }
 
 /// Where a ray from the camera enters and leaves a box (camera-relative), if it hits it.
+/// How far to draw a volume between its last two states: a resting one shows its last.
+fn blend(d: &crate::sim::SmokeDomain, clock: f32, settings: &SmokeSettings) -> f32 {
+    if d.resting {
+        1.0
+    } else {
+        d.progress(clock, settings)
+    }
+}
+
 pub fn ray_box(dir: Vec3, min: Vec3, max: Vec3) -> Option<(f32, f32)> {
     let inv = Vec3::ONE / dir;
     let a = min * inv;

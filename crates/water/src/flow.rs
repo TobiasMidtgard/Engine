@@ -295,6 +295,11 @@ pub struct FlowSim {
     pub version: u64,
     /// Water that left through edges and into reservoirs, m³ (diagnostics).
     pub drained_m3: f64,
+    /// Out of the `SimulationRange` of every focus: it holds still, as it last ran, until one
+    /// comes near.
+    pub resting: bool,
+    /// Lowest and highest bed, meters above `origin.y` (the bed never changes).
+    bed_span: [f32; 2],
 }
 
 impl FlowSim {
@@ -307,6 +312,11 @@ impl FlowSim {
         let mut bed = bed;
         bed.resize(nx * nz, 0.0);
         let depth = flood(&bed, nx, nz, region.cell_m.max(0.05), &region.fills);
+        let bed_span = bed
+            .iter()
+            .fold([f32::INFINITY, f32::NEG_INFINITY], |[lo, hi], &h| {
+                [lo.min(h), hi.max(h)]
+            });
         Self {
             entity,
             origin,
@@ -328,6 +338,8 @@ impl FlowSim {
             visible: region.visible,
             version: 0,
             drained_m3: 0.0,
+            resting: false,
+            bed_span,
         }
     }
 
@@ -342,6 +354,16 @@ impl FlowSim {
     }
 
     /// World x/z of a cell center.
+    /// The middle of the grid and the distance from it to a corner, meters: a sphere round
+    /// the whole region.
+    pub fn bounds(&self) -> (DVec3, f64) {
+        let c = self.cell as f64;
+        let (w, d) = (self.nx as f64 * c, self.nz as f64 * c);
+        let [lo, hi] = self.bed_span.map(|h| h as f64);
+        let center = self.world(DVec2::new(w * 0.5, d * 0.5), (lo + hi) * 0.5);
+        (center, 0.5 * (w * w + d * d + (hi - lo).powi(2)).sqrt())
+    }
+
     pub fn cell_center(&self, i: usize, j: usize) -> DVec3 {
         let c = self.cell as f64;
         self.world(DVec2::new((i as f64 + 0.5) * c, (j as f64 + 0.5) * c), 0.0)
@@ -374,8 +396,10 @@ impl FlowSim {
     }
 
     /// Where water falls over a drop: (world position at the foot, horizontal velocity of the
-    /// falling water m/s, power ρgQΔh in watts), one entry per cluster of nearby
-    /// [`lips`](Self::lips). Drops under `min_drop` meters are ignored.
+    /// falling water m/s, power in watts), one entry per cluster of nearby
+    /// [`lips`](Self::lips). Drops under `min_drop` meters are ignored. The power is ρgQΔh for a
+    /// free fall; a sheet sliding down rock spends most of it on the way, so less of it
+    /// reaches the foot (less spray, mist and boil).
     pub fn plunges(&self, min_drop: f32) -> Vec<(DVec3, Vec2, f32)> {
         // Feet cluster into squares 8 cells wide, so a wide fall is one plunge, two falls two.
         let size = 8.0 * self.cell as f64;
@@ -383,9 +407,12 @@ impl FlowSim {
         for lip in self.lips(min_drop) {
             // Where it lands in the water or on ground below, down its arc and any rock it
             // slides over.
-            let end = *self.fall_path(&lip, 1).last().unwrap();
+            let path = self.fall_path(&lip, 6);
+            let end = *path.last().unwrap();
             let foot = end.pos;
-            let power = 1000.0 * 9.81 * lip.q * lip.width * lip.drop;
+            let free =
+                path.iter().filter(|p| p.rock == Vec3::ZERO).count() as f32 / path.len() as f32;
+            let power = 1000.0 * 9.81 * lip.q * lip.width * lip.drop * (0.25 + 0.75 * free);
             let v = Vec2::new(end.vel.x, end.vel.z);
             let key = (
                 (foot.x / size).floor() as i64,

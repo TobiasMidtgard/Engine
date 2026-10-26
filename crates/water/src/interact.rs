@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use engine_core::math::{DVec2, DVec3, Rng, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_world::{
-    GroundContact, NoiseEvent, ProjectileTrace, WaterDisturbance, WaterSplash, WeatherState,
-    WorldImpulse,
+    FocusPoints, GroundContact, NoiseEvent, ProjectileTrace, SimulationRange, WaterDisturbance,
+    WaterSplash, WeatherState, WorldImpulse,
 };
 
 use crate::body::{RainShower, WaterSettings};
@@ -59,6 +59,10 @@ pub struct WaterInteractor {
     /// off alternate sides.
     #[serde(skip)]
     pub shed: f32,
+    /// Out of the `SimulationRange` of every focus: it stirs nothing until one comes near
+    /// (managed).
+    #[serde(skip)]
+    pub resting: bool,
 }
 
 impl Default for WaterInteractor {
@@ -71,6 +75,7 @@ impl Default for WaterInteractor {
             spray: 0.0,
             trough_s: 0.0,
             shed: 0.0,
+            resting: false,
         }
     }
 }
@@ -107,12 +112,15 @@ fn surface_near(state: &WaterState, p: DVec3, band: f32) -> Option<f64> {
     ((s.surface_height - p.y).abs() <= band as f64).then_some(s.surface_height)
 }
 
-/// Turn interactors, world events and rain into ripple disturbances.
+/// Turn interactors, world events and rain into ripple disturbances. Interactors out of the
+/// `SimulationRange` of every focus rest.
 #[allow(clippy::too_many_arguments)]
 pub fn disturbance_system(
     time: Res<Time>,
     settings: Res<WaterSettings>,
     shared: Res<SharedWater>,
+    focus: Res<FocusPoints>,
+    range: Res<SimulationRange>,
     weather: Option<Res<WeatherState>>,
     mut interactors: Query<(
         Entity,
@@ -144,6 +152,16 @@ pub fn disturbance_system(
         // Swimmers, boats, wading animals.
         for (entity, gt, mut it, local) in &mut interactors {
             let p = gt.translation();
+            let mut resting = it.resting;
+            if crate::rests(&range, &focus, p, it.radius as f64, &mut resting) {
+                if !it.resting {
+                    it.resting = true;
+                    it.last = None;
+                    it.wet = false;
+                }
+                continue;
+            }
+            it.resting = false;
             let step = time.delta_for(local).max(1e-5);
             let last = it.last.replace(p);
             let Some(water) = state.sample(p) else {
