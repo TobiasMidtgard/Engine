@@ -50,7 +50,7 @@ mod build;
 mod cache;
 mod displace;
 mod gpu;
-mod simplify;
+pub(crate) mod simplify;
 
 pub use build::build;
 pub use cache::{BUILDER_VERSION, BuildCache, build_key, default_dir as default_cache_dir};

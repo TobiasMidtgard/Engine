@@ -175,6 +175,36 @@ struct GpuMesh {
     height: f32,
     /// Last frame the instanced path drew it.
     last_used: u64,
+    /// Coarser levels of detail, finest first (empty until built, or for small meshes).
+    lods: Vec<GpuLod>,
+}
+
+/// One level of detail of a [`GpuMesh`]: fewer triangles over the same vertices.
+struct GpuLod {
+    index: wgpu::Buffer,
+    index_count: u32,
+    /// How far its surface strays from the full mesh, meters in mesh space.
+    error: f32,
+}
+
+impl GpuMesh {
+    /// Index buffer and index count of level `lod` (0 = the full mesh).
+    fn level(&self, lod: u8) -> (&wgpu::Buffer, u32) {
+        match lod.checked_sub(1).and_then(|l| self.lods.get(l as usize)) {
+            Some(l) => (&l.index, l.index_count),
+            None => (&self.index, self.index_count),
+        }
+    }
+
+    fn errors(&self) -> impl Iterator<Item = f32> + '_ {
+        self.lods.iter().map(|l| l.error)
+    }
+}
+
+/// A mesh's levels of detail being built on a worker thread.
+struct LodJob {
+    version: u64,
+    job: std::thread::JoinHandle<Vec<crate::mesh_lod::LodIndices>>,
 }
 
 /// What a texture set binds in one slot.
@@ -247,6 +277,8 @@ struct BatchKey {
     pipeline: u8,
     textures: u32,
     mesh: u32,
+    /// Level of detail (0 = the full mesh).
+    lod: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -259,6 +291,10 @@ struct Batch {
 #[derive(Clone, Copy)]
 struct Item {
     mesh: u32,
+    /// Level of detail in the camera's view.
+    lod: u8,
+    /// Largest scale of the instance (level errors are in mesh space).
+    scale: f32,
     pipeline: u8,
     textures: u32,
     masked: bool,
@@ -415,6 +451,10 @@ pub struct MeshFeature {
     shadow_masked_layout: Option<wgpu::PipelineLayout>,
     /// Each entity's world transform last frame, and the frame it was seen (motion vectors).
     previous: HashMap<Entity, (GlobalTransform, u64)>,
+    /// Levels of detail being built, by mesh index.
+    lod_jobs: HashMap<u32, LodJob>,
+    /// Meshes waiting for a free worker to build their levels.
+    lod_waiting: Vec<(u32, Handle<Mesh>)>,
     /// Camera position last frame.
     prev_origin: Option<DVec3>,
     /// Depth-only shadow pipeline (opaque casters).
@@ -463,6 +503,8 @@ pub struct MeshFeature {
     /// Displaced entities whose material has no height to displace by (warned once).
     warned_no_height: HashSet<u32>,
     stats: FeatureStats,
+    /// When the profiler's mesh report was last logged (`--profile`).
+    last_report: Option<std::time::Instant>,
 }
 
 const PIPE_DOUBLE: u8 = 1;
@@ -473,6 +515,12 @@ const PIPELINE_VARIANTS: u8 = 8;
 /// Shadow pipelines: depth only / alpha masked.
 const SHADOW_DEPTH: u8 = 0;
 const SHADOW_MASKED: u8 = 1;
+/// The far shadow map, after the cascades and the sky occlusion map in the shadow loop.
+const FAR_SHADOW_MAP: usize = SKY_OCCLUSION_VIEW + 1;
+/// Mesh level-of-detail builds running at once.
+const MAX_LOD_JOBS: usize = 2;
+/// Seconds between the profiler's mesh reports.
+const PROFILE_REPORT_SECS: f32 = 10.0;
 
 impl MeshFeature {
     /// Creates the scene, prepass and masked shadow pipelines this frame's batches use and
@@ -655,8 +703,82 @@ impl MeshFeature {
                 min_y: aabb.min.y,
                 height: (aabb.max.y - aabb.min.y).max(1e-3),
                 last_used: self.frame,
+                lods: Vec::new(),
             },
         );
+    }
+
+    /// Start building the levels of detail of a mesh just uploaded (or queue it while the
+    /// workers are busy).
+    fn request_lods(&mut self, index: u32, handle: Handle<Mesh>, mesh: &Mesh, version: u64) {
+        if mesh.indices.len() / 3 < crate::mesh_lod::MIN_TRIANGLES {
+            return;
+        }
+        if self.lod_jobs.len() >= MAX_LOD_JOBS {
+            if !self.lod_waiting.iter().any(|(i, _)| *i == index) {
+                self.lod_waiting.push((index, handle));
+            }
+            return;
+        }
+        let mesh = mesh.clone();
+        let job = std::thread::Builder::new()
+            .name("mesh lods".into())
+            .spawn(move || crate::mesh_lod::build(&mesh));
+        match job {
+            Ok(job) => {
+                self.lod_jobs.insert(index, LodJob { version, job });
+            }
+            Err(e) => tracing::warn!("could not start building mesh levels of detail: {e}"),
+        }
+    }
+
+    /// Upload the levels of detail that finished building, and start queued builds.
+    fn collect_lods(&mut self, device: &wgpu::Device, meshes: &Assets<Mesh>) {
+        let done: Vec<u32> = self
+            .lod_jobs
+            .iter()
+            .filter(|(_, j)| j.job.is_finished())
+            .map(|(i, _)| *i)
+            .collect();
+        for index in done {
+            let Some(LodJob { version, job }) = self.lod_jobs.remove(&index) else {
+                continue;
+            };
+            let Ok(levels) = job.join() else {
+                tracing::warn!("building the levels of detail of mesh {index} failed");
+                continue;
+            };
+            // A mesh changed meanwhile has been queued again by its upload.
+            let Some(gpu_mesh) = self.meshes.get_mut(&index).filter(|m| m.version == version)
+            else {
+                continue;
+            };
+            gpu_mesh.lods = levels
+                .into_iter()
+                .map(|l| GpuLod {
+                    index: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("mesh lod indices"),
+                        contents: bytemuck::cast_slice(&l.indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    }),
+                    index_count: l.indices.len() as u32,
+                    error: l.error,
+                })
+                .collect();
+        }
+        while self.lod_jobs.len() < MAX_LOD_JOBS
+            && let Some((index, handle)) = self.lod_waiting.pop()
+        {
+            let version = meshes.version(handle);
+            if let Some(mesh) = meshes.get(handle)
+                && self
+                    .meshes
+                    .get(&index)
+                    .is_some_and(|m| m.version == version)
+            {
+                self.request_lods(index, handle, mesh, version);
+            }
+        }
     }
 
     /// Material buffer slot and texture set id of a material, added to this frame's materials
@@ -687,6 +809,74 @@ impl MeshFeature {
         self.material_data.push(gpu_material);
         self.material_index.insert(handle, (slot, textures));
         (slot, textures)
+    }
+
+    /// With `--profile`: where the instanced path's triangles go, per pass and per mesh (the
+    /// heaviest first), so a scene's costliest meshes can be found and simplified.
+    fn triangle_report(&self, shadows: bool) -> String {
+        use std::fmt::Write as _;
+        let tris = |b: &Batch| {
+            self.meshes
+                .get(&b.key.mesh)
+                .map_or(0, |m| (m.level(b.key.lod).1 / 3) as u64 * b.count as u64)
+        };
+        let sum = |batches: &[Batch]| batches.iter().map(tris).sum::<u64>();
+        let mut out = String::new();
+        let view = sum(&self.opaque) + sum(&self.transparent);
+        let _ = write!(out, "view {:.2} M", view as f64 / 1e6);
+        if shadows {
+            for (c, s) in self.shadow.iter().enumerate() {
+                let name = if c == SKY_OCCLUSION_VIEW {
+                    "sky occlusion".to_string()
+                } else {
+                    format!("cascade {c}")
+                };
+                let _ = write!(out, ", {name} {:.2} M", sum(s) as f64 / 1e6);
+            }
+            let _ = write!(
+                out,
+                ", far shadow {:.2} M",
+                sum(&self.far_shadow) as f64 / 1e6
+            );
+        }
+        if let Some(c) = &self.clusters {
+            let _ = write!(out, "; clusters {:.2} M", c.stats().triangles as f64 / 1e6);
+        }
+        out.push('\n');
+        // Per mesh: instances in the view and in all shadow passes.
+        let mut per_mesh: HashMap<u32, [u64; 2]> = HashMap::new();
+        for b in self.opaque.iter().chain(&self.transparent) {
+            per_mesh.entry(b.key.mesh).or_default()[0] += b.count as u64;
+        }
+        for b in self.shadow.iter().flatten().chain(&self.far_shadow) {
+            per_mesh.entry(b.key.mesh).or_default()[1] += b.count as u64;
+        }
+        let mut rows: Vec<_> = per_mesh
+            .iter()
+            .filter_map(|(m, n)| {
+                let g = self.meshes.get(m)?;
+                let t = (g.index_count / 3) as u64;
+                Some((*m, t, *n, g.half_extents * 2.0, t * (n[0] + n[1])))
+            })
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.4));
+        let _ = writeln!(
+            out,
+            "  mesh    tris each  in view  in shadows  total M  size m"
+        );
+        for (m, t, n, size, total) in rows.iter().take(15) {
+            let _ = writeln!(
+                out,
+                "  {m:<6} {t:>10} {:>8} {:>11} {:>8.2}  {:.1} x {:.1} x {:.1}",
+                n[0],
+                n[1],
+                *total as f64 / 1e6,
+                size.x,
+                size.y,
+                size.z
+            );
+        }
+        out
     }
 
     fn batch(keys: &[BatchKey], first: u32, out: &mut Vec<Batch>) {
@@ -914,9 +1104,10 @@ impl MeshFeature {
                 }
                 current_textures = b.key.textures;
             }
+            let (index, count) = mesh.level(b.key.lod);
             pass.set_vertex_buffer(0, mesh.vertex.slice(..));
-            pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..mesh.index_count, 0, b.first..b.first + b.count);
+            pass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..count, 0, b.first..b.first + b.count);
         }
     }
 }
@@ -1176,6 +1367,11 @@ impl RenderFeature for MeshFeature {
         self.material_index.clear();
         let mut culled = 0u32;
         let shadows = view.sun_shadows || view.sky_occlusion.enabled;
+        let lod_pixels = settings.mesh_lod_pixels.max(0.0);
+        let min_pixels = settings.min_object_pixels.max(0.0);
+        if let Some(meshes) = world.get_resource::<Assets<Mesh>>() {
+            self.collect_lods(&gpu.device, meshes);
+        }
 
         let frame = self.frame;
         let prev_origin = self.prev_origin.unwrap_or(view.origin);
@@ -1337,6 +1533,9 @@ impl RenderFeature for MeshFeature {
                 && let Some(mesh) = mesh_assets.get(mesh_handle)
             {
                 self.upload_mesh(&gpu.device, mesh_index, mesh, version);
+                if lod_pixels > 0.0 {
+                    self.request_lods(mesh_index, mesh_handle, mesh, version);
+                }
             }
             let Some(gpu_mesh) = self.meshes.get_mut(&mesh_index) else {
                 continue;
@@ -1352,7 +1551,20 @@ impl RenderFeature for MeshFeature {
                 culled += 1;
                 continue;
             }
-            let visible = view.frustum.intersects_sphere(center, radius);
+            // Too small to cover a pixel: left out of the view (it may still cast a shadow).
+            let meters_per_pixel = crate::mesh_lod::meters_per_pixel(
+                view.fov_y,
+                view.height,
+                (center.length() - radius).max(view.near),
+            );
+            let big_enough = meters_per_pixel.is_none_or(|m| 2.0 * radius >= min_pixels * m);
+            let visible = big_enough && view.frustum.intersects_sphere(center, radius);
+            let lod = match meters_per_pixel {
+                Some(m) if lod_pixels > 0.0 => {
+                    crate::mesh_lod::pick(gpu_mesh.errors(), scale, lod_pixels * m)
+                }
+                _ => 0,
+            };
             let blend = material.alpha_mode == AlphaMode::Blend;
             let masked = matches!(material.alpha_mode, AlphaMode::Mask(_));
             let casts = shadows && renderer.cast_shadows && !blend;
@@ -1378,6 +1590,8 @@ impl RenderFeature for MeshFeature {
                 | if mirrored { PIPE_MIRROR } else { 0 };
             self.items.push(Item {
                 mesh: mesh_index,
+                lod,
+                scale,
                 pipeline,
                 textures,
                 masked,
@@ -1416,7 +1630,8 @@ impl RenderFeature for MeshFeature {
                 if ab != 0 {
                     b.dist2.total_cmp(&a.dist2)
                 } else {
-                    (a.pipeline, a.textures, a.mesh).cmp(&(b.pipeline, b.textures, b.mesh))
+                    (a.pipeline, a.textures, a.mesh, a.lod)
+                        .cmp(&(b.pipeline, b.textures, b.mesh, b.lod))
                 }
             })
         });
@@ -1441,6 +1656,7 @@ impl RenderFeature for MeshFeature {
                 pipeline: item.pipeline,
                 textures: item.textures,
                 mesh: item.mesh,
+                lod: item.lod,
             });
         }
         Self::batch(&self.keys, 0, &mut self.opaque);
@@ -1457,13 +1673,15 @@ impl RenderFeature for MeshFeature {
                 pipeline: item.pipeline,
                 textures: item.textures,
                 mesh: item.mesh,
+                lod: item.lod,
             });
         }
         Self::batch(&self.keys, first as u32, &mut self.transparent);
         // Shadows: opaque casters batch by mesh (depth only); masked casters by texture set
-        // and mesh (alpha tested).
+        // and mesh (alpha tested). Each map draws casters at the level of detail its texels
+        // can show, and leaves out those smaller than a texel.
         if shadows {
-            let shadow_key = |item: &Item| BatchKey {
+            let shadow_key = |item: &Item, lod: u8| BatchKey {
                 pipeline: if item.masked {
                     SHADOW_MASKED
                 } else {
@@ -1471,6 +1689,7 @@ impl RenderFeature for MeshFeature {
                 },
                 textures: if item.masked { item.textures } else { 0 },
                 mesh: item.mesh,
+                lod,
             };
             self.casters.clear();
             self.casters.extend(
@@ -1480,42 +1699,57 @@ impl RenderFeature for MeshFeature {
                     .filter(|(_, i)| i.casts)
                     .map(|(n, _)| n as u32),
             );
+            // By mesh, then scale: a map's level grows with scale, so each mesh's levels stay
+            // together in its batches.
             let items = &self.items;
-            self.casters
-                .sort_unstable_by_key(|&n| shadow_key(&items[n as usize]));
+            self.casters.sort_unstable_by_key(|&n| {
+                let item = &items[n as usize];
+                (shadow_key(item, 0), item.scale.to_bits())
+            });
             let cascades = if view.sun_shadows {
                 (view.cascades.count as usize).min(MAX_CASCADES)
             } else {
                 0
             };
-            for c in (0..cascades).chain(view.sky_occlusion.enabled.then_some(SKY_OCCLUSION_VIEW)) {
+            let maps = (0..cascades)
+                .chain(view.sky_occlusion.enabled.then_some(SKY_OCCLUSION_VIEW))
+                .chain((view.sun_shadows && view.far_shadow.enabled).then_some(FAR_SHADOW_MAP));
+            for c in maps {
+                let texel = match c {
+                    SKY_OCCLUSION_VIEW => {
+                        view.sky_occlusion.extent / view.sky_occlusion.map_size.max(1) as f32
+                    }
+                    FAR_SHADOW_MAP => view.far_shadow.texel(),
+                    _ => 2.0 * view.cascades.half_extent[c] / view.cascades.map_size.max(1) as f32,
+                };
                 let first = self.instance_data.len();
                 self.keys.clear();
                 for &n in &self.casters {
                     let item = &self.items[n as usize];
-                    let inside = if c == SKY_OCCLUSION_VIEW {
-                        view.sky_occlusion.contains_sphere(item.center, item.radius)
-                    } else {
-                        view.cascades.sphere_in_cascade(c, item.center, item.radius)
+                    let inside = match c {
+                        SKY_OCCLUSION_VIEW => {
+                            view.sky_occlusion.contains_sphere(item.center, item.radius)
+                        }
+                        FAR_SHADOW_MAP => view.far_shadow.casts(item.center, item.radius),
+                        _ => view.cascades.sphere_in_cascade(c, item.center, item.radius),
                     };
-                    if inside {
-                        self.instance_data.push(item.instance);
-                        self.keys.push(shadow_key(item));
+                    if !inside || 2.0 * item.radius < min_pixels * texel {
+                        continue;
                     }
+                    let lod = match self.meshes.get(&item.mesh) {
+                        Some(m) if lod_pixels > 0.0 => {
+                            crate::mesh_lod::pick(m.errors(), item.scale, lod_pixels * texel)
+                        }
+                        _ => 0,
+                    };
+                    self.instance_data.push(item.instance);
+                    self.keys.push(shadow_key(item, lod));
                 }
-                Self::batch(&self.keys, first as u32, &mut self.shadow[c]);
-            }
-            if view.sun_shadows && view.far_shadow.enabled {
-                let first = self.instance_data.len();
-                self.keys.clear();
-                for &n in &self.casters {
-                    let item = &self.items[n as usize];
-                    if view.far_shadow.casts(item.center, item.radius) {
-                        self.instance_data.push(item.instance);
-                        self.keys.push(shadow_key(item));
-                    }
-                }
-                Self::batch(&self.keys, first as u32, &mut self.far_shadow);
+                let out = match c {
+                    FAR_SHADOW_MAP => &mut self.far_shadow,
+                    _ => &mut self.shadow[c],
+                };
+                Self::batch(&self.keys, first as u32, out);
             }
         }
 
@@ -1575,7 +1809,7 @@ impl RenderFeature for MeshFeature {
             stats.draw_calls += 1;
             stats.instances += b.count;
             if let Some(m) = self.meshes.get(&b.key.mesh) {
-                stats.triangles += (m.index_count / 3) as u64 * b.count as u64;
+                stats.triangles += (m.level(b.key.lod).1 / 3) as u64 * b.count as u64;
             }
         }
         stats.draw_calls += self.shadow.iter().map(|s| s.len() as u32).sum::<u32>();
@@ -1587,6 +1821,14 @@ impl RenderFeature for MeshFeature {
             stats.triangles += c.triangles;
         }
         self.stats = stats;
+        if engine_core::profile::enabled()
+            && self
+                .last_report
+                .is_none_or(|t| t.elapsed().as_secs_f32() >= PROFILE_REPORT_SECS)
+        {
+            self.last_report = Some(std::time::Instant::now());
+            tracing::info!("mesh triangles\n{}", self.triangle_report(shadows));
+        }
     }
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, _ctx: &FrameContext) {
