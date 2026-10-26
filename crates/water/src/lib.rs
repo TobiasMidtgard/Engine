@@ -23,6 +23,7 @@ pub use flow::{FlowBed, FlowFill, FlowRegion, FlowSource, Lip};
 pub use interact::WaterInteractor;
 pub use render::WaterFeature;
 pub use shore::ShoreCover;
+pub use sim::WaterLoading;
 pub use state::{SharedWater, WaterState};
 
 use std::sync::Arc;
@@ -62,6 +63,7 @@ impl Plugin for WaterPlugin {
         app.insert_resource(Water(Arc::new(state::WaterProvider(shared.0.clone()))))
             .insert_resource(shared)
             .init_resource::<sim::SimBook>()
+            .init_resource::<WaterLoading>()
             .register_resource::<WaterSettings>(
                 "Water quality and behavior: ripple grid size (cells, meters), ripple speed (m/s) \
                  and damping (1/s), foam life (s), raindrops per m² per mm/h, puddles on/off, \
