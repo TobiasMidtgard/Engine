@@ -25,6 +25,7 @@ fn a_thermite_doorway_shows_the_world_behind_the_wall() {
             step_secs: 1.0 / 30.0,
         });
     app.add_plugins((RenderPlugin, WorldPlugin, DestructionPlugin));
+    engine_destruction::assets::wait_for_assets(&mut app.world);
     // No haze: the hole is judged by the sky's full brightness through it, whatever the fog
     // does near the horizon.
     app.world.resource_mut::<FogSettings>().density = 0.0;

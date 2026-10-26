@@ -156,6 +156,8 @@ fn main() {
     app.add_plugins((RenderPlugin, WorldPlugin, DestructionPlugin))
         .add_systems(Startup, setup)
         .add_systems(FixedUpdate, stand_in_fire);
+    // Textures are made on worker threads; these shots need them from the first frame.
+    engine_destruction::assets::wait_for_assets(&mut app.world);
 
     let mut t = 0.0f32;
     for (at, name, eye, target) in shots() {

@@ -1296,9 +1296,18 @@ fn wall_world(world: &World, wall: Entity, local: Vec3) -> DVec3 {
     GlobalTransform::from(t).transform_point(local.as_dvec3())
 }
 
-/// Wreck the aftermath bays at once and lay their rubble on the ground.
+/// Aftermath bays waiting for [`crate::DestructionAssets`] to load (their rubble needs it).
+#[derive(Resource, Default)]
+struct PendingAftermath(Vec<Aftermath>);
+
+/// Wreck the aftermath bays at once and lay their rubble on the ground (once the assets have
+/// loaded, if they are loading).
 fn apply_aftermath(world: &mut World, ids: Aftermath) {
     crate::assets::ensure_assets(world);
+    if world.contains_resource::<crate::assets::AssetsLoading>() {
+        world.get_resource_or_init::<PendingAftermath>().0.push(ids);
+        return;
+    }
     let _ = world.run_system_once(crate::sync::init_walls_system);
     let mut rng = Rng::new(42);
     let mut hits = Vec::new();
@@ -1476,6 +1485,15 @@ pub fn demo_script_system(world: &mut World) {
     let dt = world.resource::<Time>().delta_secs();
     if dt <= 0.0 {
         return;
+    }
+    // The demos start once their assets have loaded, with the aftermath bays wrecked first.
+    if world.contains_resource::<crate::assets::AssetsLoading>() {
+        return;
+    }
+    if let Some(pending) = world.remove_resource::<PendingAftermath>() {
+        for ids in pending.0 {
+            apply_aftermath(world, ids);
+        }
     }
     let demos: Vec<Entity> = world
         .query_filtered::<Entity, With<DestructionDemo>>()

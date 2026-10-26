@@ -1,6 +1,9 @@
 //! Shared meshes and materials for walls, debris, chips, dust and charges, created once so
 //! everything the module draws batches into a few instanced draw calls.
 
+use std::collections::HashMap;
+
+use bevy_tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use engine_assets::{Assets, Handle};
 use engine_core::math::{Rng, Vec3};
 use engine_core::prelude::*;
@@ -9,7 +12,7 @@ use engine_render::{Image, Mesh, Shape, StandardMaterial};
 use crate::fracture::{ConvexPoly, impact_seeds, voronoi};
 use crate::material::{DestructibleMaterial, DestructionMaterials};
 use crate::meshing::MeshBuilder;
-use crate::textures::{self, SurfaceKind};
+use crate::textures::{self, SurfaceKind, TextureSet};
 
 /// Emission strength of embers glowing in the cracks of flaming char.
 pub const EMBER_GLOW: f32 = 40_000.0;
@@ -215,8 +218,19 @@ impl DestructionAssets {
         materials: &mut Assets<StandardMaterial>,
         images: &mut Assets<Image>,
     ) {
+        self.texture_from(materials, images, &mut MadeTextures::default());
+    }
+
+    /// [`Self::texture`] with textures made ahead ([`MadeTextures`]); any it lacks are made
+    /// on the spot.
+    pub fn texture_from(
+        &mut self,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+        made: &mut MadeTextures,
+    ) {
         for (i, m) in DestructibleMaterial::ALL.iter().enumerate() {
-            let mut mat = textured(surface_kind(*m), 0xDE57 + i as u64, images);
+            let mut mat = made.material(surface_kind(*m), SURFACE_SEED + i as u64, images);
             mat.receives_wetness = *m != DestructibleMaterial::Glass;
             if *m == DestructibleMaterial::Plaster {
                 // The texture is fresh interior paint (albedo about 0.8), which blows out in
@@ -243,16 +257,16 @@ impl DestructionAssets {
             self.ghost_surface.push(ghosts);
             materials.set(self.surface[i], mat);
         }
-        let mut grass = textured(SurfaceKind::Grass, 0xDE57_06A5, images);
+        let mut grass = made.material(SurfaceKind::Grass, GRASS_SEED, images);
         grass.receives_wetness = true;
         self.grass = materials.add(grass);
-        let mut gravel = textured(SurfaceKind::Gravel, 0xDE57_06A6, images);
+        let mut gravel = made.material(SurfaceKind::Gravel, GRAVEL_SEED, images);
         gravel.receives_wetness = true;
         materials.set(self.gravel, gravel);
-        self.texture_char(materials, images);
-        self.texture_broken(materials, images);
+        self.texture_char(materials, images, made);
+        self.texture_broken(materials, images, made);
         self.texture_chips(materials);
-        self.dust_sprite = Some(images.add(textures::dust_puffs(64, 0xD057)));
+        self.dust_sprite = Some(images.add(made.image(TextureJob::DustPuffs)));
         self.textured = true;
     }
 
@@ -287,12 +301,13 @@ impl DestructionAssets {
         &mut self,
         materials: &mut Assets<StandardMaterial>,
         images: &mut Assets<Image>,
+        made: &mut MadeTextures,
     ) {
         let table = DestructionMaterials::default();
         let rock = table.get(DestructibleMaterial::Rock).exterior;
         for m in [DestructibleMaterial::Stone, DestructibleMaterial::Brick] {
             let own = table.get(m).exterior;
-            let mut mat = textured(SurfaceKind::Rock, 0xB40C + m.index() as u64, images);
+            let mut mat = made.material(SurfaceKind::Rock, BROKEN_SEED + m.index() as u64, images);
             // Half as saturated as the ratio: the masonry textures average greyer than their
             // nominal colors, and a broken face beside them shouldn't look orange.
             let tint: [f32; 3] = std::array::from_fn(|k| own[k] / rock[k].max(1e-3));
@@ -313,6 +328,7 @@ impl DestructionAssets {
         &mut self,
         materials: &mut Assets<StandardMaterial>,
         images: &mut Assets<Image>,
+        made: &mut MadeTextures,
     ) {
         let wood = DestructibleMaterial::Wood.index();
         if let Some(mut scorched) = materials.get(self.surface[wood]).cloned() {
@@ -320,11 +336,8 @@ impl DestructionAssets {
             scorched.perceptual_roughness = 0.85;
             materials.set(self.char[0], scorched);
         }
-        let kind = SurfaceKind::Charcoal;
-        let size = texture_size(kind);
-        let seed = 0xC4A2;
-        let charcoal = textured(kind, seed, images);
-        let glow = images.add(textures::ember_glow(size, seed));
+        let charcoal = made.material(SurfaceKind::Charcoal, CHAR_SEED, images);
+        let glow = images.add(made.image(TextureJob::EmberGlow));
         let ember = |strength: f32| {
             let mut m = charcoal;
             m.emissive = [1.0; 3];
@@ -466,13 +479,155 @@ fn texture_size(kind: SurfaceKind) -> u32 {
     }
 }
 
-/// A textured material for `kind` (white base color: the texture carries the albedo and
-/// vertex colors only shade it relative to the surface's own color).
-fn textured(kind: SurfaceKind, seed: u64, images: &mut Assets<Image>) -> StandardMaterial {
-    textures::generate(kind, texture_size(kind), seed).into_material(images)
+// Seeds of the textures [`DestructionAssets::texture`] makes.
+const SURFACE_SEED: u64 = 0xDE57;
+const GRASS_SEED: u64 = 0xDE57_06A5;
+const GRAVEL_SEED: u64 = 0xDE57_06A6;
+const BROKEN_SEED: u64 = 0xB40C;
+const CHAR_SEED: u64 = 0xC4A2;
+const DUST_SEED: u64 = 0xD057;
+/// Size of the dust puff frames, pixels.
+const DUST_PUFF_SIZE: u32 = 64;
+
+/// One texture [`DestructionAssets::texture`] uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureJob {
+    /// A surface's texture set.
+    Set(SurfaceKind, u64),
+    /// The glow in charred wood's cracks.
+    EmberGlow,
+    /// The dust puff frames.
+    DustPuffs,
 }
 
-/// Create [`DestructionAssets`] the first time the asset stores exist.
+/// A made [`TextureJob`].
+pub enum MadeTexture {
+    Set(TextureSet),
+    Image(Image),
+}
+
+impl TextureJob {
+    /// Every texture [`DestructionAssets::texture`] takes.
+    pub fn all() -> Vec<TextureJob> {
+        let mut jobs: Vec<TextureJob> = DestructibleMaterial::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, m)| Self::Set(surface_kind(*m), SURFACE_SEED + i as u64))
+            .collect();
+        jobs.extend([
+            Self::Set(SurfaceKind::Grass, GRASS_SEED),
+            Self::Set(SurfaceKind::Gravel, GRAVEL_SEED),
+            Self::Set(
+                SurfaceKind::Rock,
+                BROKEN_SEED + DestructibleMaterial::Stone.index() as u64,
+            ),
+            Self::Set(
+                SurfaceKind::Rock,
+                BROKEN_SEED + DestructibleMaterial::Brick.index() as u64,
+            ),
+            Self::Set(SurfaceKind::Charcoal, CHAR_SEED),
+            Self::EmberGlow,
+            Self::DustPuffs,
+        ]);
+        jobs
+    }
+
+    /// Make it (pure CPU work, any thread).
+    pub fn make(self) -> MadeTexture {
+        match self {
+            Self::Set(kind, seed) => {
+                MadeTexture::Set(textures::generate(kind, texture_size(kind), seed))
+            }
+            Self::EmberGlow => MadeTexture::Image(textures::ember_glow(
+                texture_size(SurfaceKind::Charcoal),
+                CHAR_SEED,
+            )),
+            Self::DustPuffs => MadeTexture::Image(textures::dust_puffs(DUST_PUFF_SIZE, DUST_SEED)),
+        }
+    }
+}
+
+/// Textures made ahead for [`DestructionAssets::texture_from`], taken as it needs them.
+#[derive(Default)]
+pub struct MadeTextures(HashMap<TextureJob, MadeTexture>);
+
+impl MadeTextures {
+    /// Whether every texture made ahead has been taken.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// A textured material for `kind` (white base color: the texture carries the albedo and
+    /// vertex colors only shade it relative to the surface's own color).
+    fn material(
+        &mut self,
+        kind: SurfaceKind,
+        seed: u64,
+        images: &mut Assets<Image>,
+    ) -> StandardMaterial {
+        let job = TextureJob::Set(kind, seed);
+        let set = match self.0.remove(&job) {
+            Some(MadeTexture::Set(set)) => set,
+            _ => textures::generate(kind, texture_size(kind), seed),
+        };
+        set.into_material(images)
+    }
+
+    fn image(&mut self, job: TextureJob) -> Image {
+        match self.0.remove(&job).unwrap_or_else(|| job.make()) {
+            MadeTexture::Image(image) => image,
+            // Image jobs make images; a set here would be a mixed-up job, shown as its albedo.
+            MadeTexture::Set(set) => set.albedo,
+        }
+    }
+}
+
+/// [`DestructionAssets`]' textures being made on the async compute pool, one task per
+/// texture, while the game keeps drawing (the loading screen waits for the resource). The
+/// way Unity's async loading and Unreal's async loading thread work: the heavy work on
+/// worker threads, then a short hand-over on the frame thread once all of it is done.
+#[derive(Resource)]
+pub struct AssetsLoading {
+    pending: Vec<(TextureJob, Task<MadeTexture>)>,
+    made: MadeTextures,
+}
+
+impl AssetsLoading {
+    fn start() -> Self {
+        let pool = AsyncComputeTaskPool::get();
+        Self {
+            pending: TextureJob::all()
+                .into_iter()
+                .map(|job| (job, pool.spawn(async move { job.make() })))
+                .collect(),
+            made: MadeTextures::default(),
+        }
+    }
+
+    /// Collect the finished textures; true once all are in.
+    fn poll(&mut self) -> bool {
+        let mut i = 0;
+        while i < self.pending.len() {
+            match block_on(poll_once(&mut self.pending[i].1)) {
+                Some(made) => {
+                    let (job, _) = self.pending.swap_remove(i);
+                    self.made.0.insert(job, made);
+                }
+                None => i += 1,
+            }
+        }
+        self.pending.is_empty()
+    }
+
+    /// Textures still being made.
+    pub fn remaining(&self) -> usize {
+        self.pending.len()
+    }
+}
+
+/// Create [`DestructionAssets`] once the asset stores exist. With an image store its textures
+/// are made on worker threads first ([`AssetsLoading`]) and it appears a few frames later;
+/// without one (headless simulation) it is made at once.
 pub fn ensure_assets(world: &mut World) {
     if world.contains_resource::<DestructionAssets>() {
         return;
@@ -482,6 +637,40 @@ pub fn ensure_assets(world: &mut World) {
     {
         return;
     }
+    let made = if world.contains_resource::<Assets<Image>>() {
+        let Some(mut loading) = world.remove_resource::<AssetsLoading>() else {
+            if AsyncComputeTaskPool::try_get().is_some() {
+                world.insert_resource(AssetsLoading::start());
+                return;
+            }
+            finish_assets(world, Some(MadeTextures::default()));
+            return;
+        };
+        if !loading.poll() {
+            world.insert_resource(loading);
+            return;
+        }
+        Some(loading.made)
+    } else {
+        None
+    };
+    finish_assets(world, made);
+}
+
+/// Block until [`DestructionAssets`] exists (tools, examples and tests that draw at once).
+pub fn wait_for_assets(world: &mut World) {
+    ensure_assets(world);
+    if let Some(mut loading) = world.remove_resource::<AssetsLoading>() {
+        for (job, task) in loading.pending.drain(..) {
+            loading.made.0.insert(job, block_on(task));
+        }
+        finish_assets(world, Some(loading.made));
+    }
+}
+
+/// Make the materials and meshes, textured with `made` when there is an image store.
+fn finish_assets(world: &mut World, made: Option<MadeTextures>) {
+    let _span = tracing::info_span!("destruction assets hand-over").entered();
     let table = world
         .get_resource::<DestructionMaterials>()
         .cloned()
@@ -490,10 +679,10 @@ pub fn ensure_assets(world: &mut World) {
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
         DestructionAssets::new(&mut meshes, &mut materials, &table)
     });
-    if world.contains_resource::<Assets<Image>>() {
+    if let Some(mut made) = made {
         world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
             let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
-            assets.texture(&mut materials, &mut images);
+            assets.texture_from(&mut materials, &mut images, &mut made);
         });
     }
     world.insert_resource(assets);

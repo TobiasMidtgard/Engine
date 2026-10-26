@@ -1222,6 +1222,7 @@ name = "engine_destruction"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "bevy_tasks",
  "engine_assets",
  "engine_core",
  "engine_input",
