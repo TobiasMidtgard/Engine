@@ -20,8 +20,8 @@ const ICON_RADIUS: f32 = 11.0;
 pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     let rect = ui.max_rect();
     let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-    let screen = ui.ctx().viewport_rect();
-    let Some(view) = camera_view(world, editor, screen) else {
+    set_viewport(world, editor, rect, ui.ctx().pixels_per_point());
+    let Some(view) = camera_view(world, editor, rect) else {
         return;
     };
     editor.view = Some(view);
@@ -62,7 +62,20 @@ pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     overlays(ui, world, editor, rect);
 }
 
-/// The editor camera's view, mapped to the whole window (the scene renders full-window).
+/// Draw the editor camera into the scene tab only (physical pixels).
+fn set_viewport(world: &mut World, editor: &Editor, rect: egui::Rect, ppp: f32) {
+    let min = (rect.min.to_vec2() * ppp).round();
+    let size = (rect.size() * ppp).round();
+    let viewport = Viewport::new(
+        UVec2::new(min.x.max(0.0) as u32, min.y.max(0.0) as u32),
+        UVec2::new(size.x.max(1.0) as u32, size.y.max(1.0) as u32),
+    );
+    if world.get::<Viewport>(editor.camera) != Some(&viewport) {
+        world.entity_mut(editor.camera).insert(viewport);
+    }
+}
+
+/// The editor camera's view, mapped to the scene tab.
 fn camera_view(world: &World, editor: &Editor, screen: egui::Rect) -> Option<ViewInfo> {
     let t = world.get::<Transform>(editor.camera)?;
     let camera = world.get::<Camera>(editor.camera)?;
