@@ -201,28 +201,22 @@ fn material_images_compress_and_look_the_same() {
     let renderer = app.world.resource::<Renderer>();
     let images = app.world.resource::<Assets<Image>>();
     let handles: Vec<_> = images.iter().map(|(h, _)| h).collect();
-    let formats: Vec<_> = handles
-        .iter()
-        .filter_map(|&h| {
-            let color = renderer
-                .shared
-                .image_texture_for(images, h, TextureUse::Color)?;
-            let red = renderer
-                .shared
-                .image_texture_for(images, h, TextureUse::Red)?;
-            Some((color.format(), red.format()))
-        })
-        .collect();
-    assert!(
-        formats
+    // Each image only has the view it was drawn with (with released pixels no other view can
+    // be made).
+    let format = |usage| -> Vec<_> {
+        handles
             .iter()
-            .any(|f| f.0 == wgpu::TextureFormat::Bc7RgbaUnormSrgb),
+            .filter_map(|&h| renderer.shared.image_texture_for(images, h, usage))
+            .map(|t| t.format())
+            .collect()
+    };
+    let formats = (format(TextureUse::Color), format(TextureUse::Red));
+    assert!(
+        formats.0.contains(&wgpu::TextureFormat::Bc7RgbaUnormSrgb),
         "the color map is BC7 sRGB: {formats:?}"
     );
     assert!(
-        formats
-            .iter()
-            .any(|f| f.1 == wgpu::TextureFormat::Bc4RUnorm),
+        formats.1.contains(&wgpu::TextureFormat::Bc4RUnorm),
         "the occlusion map is BC4: {formats:?}"
     );
 
