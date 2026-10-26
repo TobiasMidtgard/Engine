@@ -39,6 +39,8 @@ pub struct WorldBuild {
     ran: Vec<&'static str>,
     frame_at: Option<std::time::Instant>,
     slow: Vec<(String, f32)>,
+    /// When the wait for the modules' art began.
+    waiting: Option<std::time::Instant>,
 }
 
 const LIB: &str = "the library is the first step";
@@ -53,7 +55,7 @@ type Step = (
 
 /// The steps, in order (the scenery draws from one random sequence, so the order is the
 /// layout).
-const STEPS: [Step; 11] = [
+const STEPS: [Step; 12] = [
     (
         "library",
         "Carving the stones and weaving the grass",
@@ -199,7 +201,35 @@ const STEPS: [Step; 11] = [
             .finish_textures(&mut images);
         true
     }),
+    (
+        "module art",
+        "Lighting the fires and filling the streams",
+        |world, b| {
+            // Modules that bake a zone's art on workers say so; the exe waits for them here, so
+            // the start screen opens on a finished valley. Builds all at once (tours) go on,
+            // and so does a wait that never ends.
+            if !world.contains_resource::<Staged>() || !MODULES_LOADING.iter().any(|f| f(world)) {
+                return true;
+            }
+            let since = *b.waiting.get_or_insert_with(std::time::Instant::now);
+            if since.elapsed().as_secs_f32() > MODULE_WAIT_S {
+                engine::core::log::warn!("modules still loading after {MODULE_WAIT_S} s; going on");
+                return true;
+            }
+            false
+        },
+    ),
 ];
+
+/// Longest wait (s) for the modules' art before the start screen opens anyway.
+const MODULE_WAIT_S: f32 = 60.0;
+
+/// Modules still baking art or settling their zones on other threads.
+const MODULES_LOADING: [fn(&World) -> bool; 2] = [engine_smoke::demo::loading, |world| {
+    world
+        .get_resource::<engine_water::WaterLoading>()
+        .is_some_and(|w| !w.is_ready())
+}];
 
 fn with_commands(world: &mut World, f: impl FnOnce(&mut Commands)) {
     let mut state = SystemState::<Commands>::new(world);
@@ -255,6 +285,7 @@ pub fn start(world: &mut World) {
         detail: None,
         ran: Vec::new(),
         frame_at: None,
+        waiting: None,
         slow: Vec::new(),
     };
     if world.contains_resource::<Staged>() {
