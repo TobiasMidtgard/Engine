@@ -345,6 +345,14 @@ pub trait RenderFeature: Send + Sync + 'static {
         false
     }
 
+    /// Whether this frame draws skin that scatters light under it: pixels its prepass marks
+    /// with `prepass_output_subsurface`, whose scene pass leaves specular light in alpha. The
+    /// subsurface pass runs after the opaque scene while any feature says so (see
+    /// `subsurface.rs`).
+    fn needs_subsurface(&self) -> bool {
+        false
+    }
+
     /// Draw onto the tonemapped LDR image.
     fn overlay(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {}
 

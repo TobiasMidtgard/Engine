@@ -18,7 +18,7 @@
 // Screen-space results of the depth prepass (see `RenderFeature::draw_prepass`). In the prepass
 // itself and in passes that write them, these hold neutral 1x1 stand-ins.
 @group(0) @binding(10) var ao_map: texture_2d<f32>;          // ambient occlusion (R, 1 = open)
-@group(0) @binding(11) var prepass_normal: texture_2d<f32>;  // octahedral world normal xy, perceptual roughness, 1 where written
+@group(0) @binding(11) var prepass_normal: texture_2d<f32>;  // octahedral world normal xy, perceptual roughness, 1 where written (1..2: subsurface strength + 1)
 @group(0) @binding(12) var prepass_depth: texture_depth_2d;  // depth after the prepass (reverse-Z, 0 = nothing)
 // Atmosphere look-up tables (see lib_atmosphere.wgsl).
 @group(0) @binding(13) var transmittance_lut: texture_2d<f32>; // sunlight transmittance to the top of the atmosphere
@@ -175,6 +175,22 @@ fn prepass_output(normal: vec3<f32>, roughness: f32, clip_now: vec4<f32>, clip_p
         motion = (clip_now.xy / clip_now.w - clip_prev.xy / clip_prev.w) * vec2<f32>(0.5, -0.5);
     }
     out.motion = motion;
+    return out;
+}
+
+// `prepass_output` for a surface whose diffuse light scatters under it (skin): the subsurface
+// pass (subsurface.rs) blurs its diffuse light with the skin's profile, `strength` (0..1) of
+// the profile's reach. Its scene pass must write its specular light (pre-exposed, in the same
+// units as the color) to alpha, so highlights stay sharp; the pass sets alpha back to 1.
+fn prepass_output_subsurface(
+    normal: vec3<f32>,
+    roughness: f32,
+    clip_now: vec4<f32>,
+    clip_prev: vec4<f32>,
+    strength: f32,
+) -> PrepassOutput {
+    var out = prepass_output(normal, roughness, clip_now, clip_prev);
+    out.normal.w = 1.0 + saturate(strength);
     return out;
 }
 

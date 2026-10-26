@@ -176,6 +176,15 @@ find the scene pixel under a fragment as `(position.xy - frame.window.xy) * fram
 frame.window.zw` (`frame.window` is the scene's rectangle in the window, `frame.viewport.xy` the
 size the scene renders at) before reading scene-sized targets such as depth.
 
+**Subsurface scattering for skin** (built): a feature whose prepass writes
+`prepass_output_subsurface(normal, roughness, clip_now, clip_prev, strength)` (lib_frame.wgsl)
+marks skin, writes that pixel's specular light (pre-exposed) to alpha in its scene pass, and
+answers `needs_subsurface()` with true. After the opaque scene a separable filter (Jimenez
+2015, skin's diffusion profile per channel, red reaching farthest) blurs the marked pixels'
+diffuse light within the marked surface and not across depth steps, then adds the specular
+back, so highlights stay sharp. Reach: `RenderSettings::subsurface_width` (1.2 cm at strength
+1; 0 = off). See `crates/render/src/subsurface.rs`.
+
 **Quality presets** (built): the renderer draws with `RenderSettings::scaled(&Scalability)`,
 the game's settings at its `engine_world::Scalability` (`--quality low|medium|high|ultra`).
 The settings are the look at High; `render_scale` renders the scene smaller and the tonemap

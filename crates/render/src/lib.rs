@@ -91,6 +91,7 @@ pub mod shadows;
 pub mod sky_feature;
 mod sky_occlusion;
 pub mod sprites;
+mod subsurface;
 mod surface_weather;
 pub mod targets;
 pub mod texture;
