@@ -27,6 +27,13 @@ pub struct Cascades {
     pub depth_range: [f32; MAX_CASCADES],
     /// Far view distance of each cascade.
     pub splits: [f32; 4],
+    /// Center of each cascade's square, absolute world position (snapped to its texels).
+    pub center: [DVec3; MAX_CASCADES],
+    /// The direction toward the sun each cascade was drawn with.
+    pub sun_dir: [Vec3; MAX_CASCADES],
+    /// Whether each cascade is drawn this frame. A cascade that isn't keeps last frame's image
+    /// (see [`CascadeCache`]), so features skip their caster lists for it.
+    pub drawn: [bool; MAX_CASCADES],
 }
 
 impl Default for Cascades {
@@ -39,6 +46,9 @@ impl Default for Cascades {
             half_extent: [0.0; MAX_CASCADES],
             depth_range: [0.0; MAX_CASCADES],
             splits: [0.0; 4],
+            center: [DVec3::ZERO; MAX_CASCADES],
+            sun_dir: [Vec3::Y; MAX_CASCADES],
+            drawn: [true; MAX_CASCADES],
         }
     }
 }
@@ -50,6 +60,106 @@ impl Cascades {
         let p = self.light_view[i].transform_point3(center);
         let e = self.half_extent[i] + radius;
         p.x.abs() <= e && p.y.abs() <= e && -p.z - radius <= self.depth_range[i]
+    }
+
+    /// Point cascade `i` at `center` (absolute, on its texel grid) for a camera at `origin`.
+    fn place(&mut self, i: usize, center: DVec3, origin: DVec3, sun_dir: Vec3, radius: f32) {
+        let light_rot = look_rotation_f64(-sun_dir.as_dvec3());
+        let center_rel = (center - origin).as_vec3();
+        // Eye sits behind the sphere toward the sun; depth covers the sphere plus extra room.
+        let back = radius * 2.0 + 50.0;
+        let eye = center_rel + sun_dir * back;
+        let light_view =
+            Mat4::from_quat(light_rot.as_quat().inverse()) * Mat4::from_translation(-eye);
+        let depth = back + radius;
+        let light_proj = crate::frame::orthographic_standard(radius, 0.0, depth);
+        self.light_view[i] = light_view;
+        self.view_proj[i] = light_proj * light_view;
+        self.half_extent[i] = radius;
+        self.depth_range[i] = depth;
+        self.center[i] = center;
+        self.sun_dir[i] = sun_dir;
+    }
+}
+
+/// Share of a far cascade's radius kept as margin when cascades are reused, so the camera can
+/// drift that far before the cascade must be redrawn.
+const REUSE_MARGIN: f64 = 0.06;
+/// The sun may move this far (radians) before reused cascades are redrawn.
+const REUSE_SUN_ANGLE: f32 = 0.001;
+
+/// Lets the far shadow cascades keep their image for a few frames
+/// (`RenderSettings::shadow_cascade_reuse`): the frame's cascades are pointed back at where
+/// they were last drawn, and only the ones due (or drifted out of their margin) are drawn.
+#[derive(Debug, Default)]
+pub struct CascadeCache {
+    last: Option<Cascades>,
+    age: [u32; MAX_CASCADES],
+}
+
+impl CascadeCache {
+    /// Frames between redraws of cascade `i` of `count`, at most `max_reuse + 1`: the last
+    /// cascade every 4th frame, the one before every 2nd, the rest every frame.
+    fn interval(i: usize, count: usize, max_reuse: u32) -> u32 {
+        let from_last = count.saturating_sub(1 + i);
+        let interval = match from_last {
+            0 => 4,
+            1 => 2,
+            _ => 1,
+        };
+        interval.min(max_reuse + 1)
+    }
+
+    /// Decide which of `cascades` (just computed for a camera at `origin`) to draw on frame
+    /// `frame`; the others are pointed at their last image. `fresh` forces every cascade to
+    /// redraw (a camera cut, the first frame).
+    pub fn apply(
+        &mut self,
+        cascades: &mut Cascades,
+        origin: DVec3,
+        frame: u64,
+        max_reuse: u32,
+        fresh: bool,
+    ) {
+        let count = (cascades.count as usize).min(MAX_CASCADES);
+        let last = self.last.as_ref().filter(|l| {
+            !fresh && max_reuse > 0 && l.count == cascades.count && l.map_size == cascades.map_size
+        });
+        for i in 0..count {
+            let interval = Self::interval(i, count, max_reuse);
+            let reuse = last.is_some_and(|l| {
+                let due = (frame + i as u64).is_multiple_of(interval as u64)
+                    || self.age[i] + 1 >= interval;
+                let margin = cascades.half_extent[i] as f64 * REUSE_MARGIN;
+                !due && l.half_extent[i] == cascades.half_extent[i]
+                    && l.center[i].distance(cascades.center[i]) <= margin
+                    && l.sun_dir[i].angle_between(cascades.sun_dir[i]) <= REUSE_SUN_ANGLE
+            });
+            if reuse {
+                let l = self.last.as_ref().expect("checked");
+                cascades.place(i, l.center[i], origin, l.sun_dir[i], l.half_extent[i]);
+                cascades.drawn[i] = false;
+                self.age[i] += 1;
+            } else {
+                cascades.drawn[i] = true;
+                self.age[i] = 0;
+            }
+        }
+        if count == 0 {
+            self.last = None;
+            return;
+        }
+        // Remember where each cascade's image was drawn.
+        let mut keep = *cascades;
+        if let Some(l) = &self.last {
+            for i in 0..count {
+                if !cascades.drawn[i] {
+                    keep.center[i] = l.center[i];
+                    keep.sun_dir[i] = l.sun_dir[i];
+                }
+            }
+        }
+        self.last = Some(keep);
     }
 }
 
@@ -337,6 +447,12 @@ pub fn compute_cascades(
             let r = (slice_far * slice_far * s + (slice_far - d) * (slice_far - d)).sqrt();
             (d, r)
         };
+        // A margin the camera can drift within while far cascades are reused.
+        let radius = if settings.shadow_cascade_reuse > 0 && i + 2 >= count {
+            radius * (1.0 + REUSE_MARGIN)
+        } else {
+            radius
+        };
         // Quantize the radius so the texel size is stable.
         let radius = (radius * 16.0).ceil() / 16.0;
         let texel = 2.0 * radius / map_size as f64;
@@ -346,19 +462,7 @@ pub fn compute_cascades(
         let mut ls = light_rot_inv * center_world;
         ls.x = (ls.x / texel).floor() * texel;
         ls.y = (ls.y / texel).floor() * texel;
-        let center_rel = (light_rot * ls - origin).as_vec3();
-
-        // Eye sits behind the sphere toward the sun; depth covers the sphere plus extra room.
-        let back = radius as f32 * 2.0 + 50.0;
-        let eye = center_rel + sun_dir * back;
-        let light_view =
-            Mat4::from_quat(light_rot.as_quat().inverse()) * Mat4::from_translation(-eye);
-        let depth = back + radius as f32;
-        let light_proj = crate::frame::orthographic_standard(radius as f32, 0.0, depth);
-        out.light_view[i] = light_view;
-        out.view_proj[i] = light_proj * light_view;
-        out.half_extent[i] = radius as f32;
-        out.depth_range[i] = depth;
+        out.place(i, light_rot * ls, origin, sun_dir, radius as f32);
         slice_near = slice_far;
     }
     out
@@ -482,5 +586,70 @@ mod sky_occlusion_tests {
         assert!(higher.z < clip.z);
         assert!(v.contains_sphere(Vec3::new(20.0, 3.0, -15.0), 1.0));
         assert!(!v.contains_sphere(Vec3::new(500.0, 3.0, 0.0), 1.0));
+    }
+
+    fn cascades_at(origin: DVec3, sun: Vec3) -> Cascades {
+        let proj = crate::frame::perspective_infinite_reverse(1.2, 1.6, 0.1);
+        compute_cascades(
+            &RenderSettings::default(),
+            origin,
+            Quat::IDENTITY,
+            0.1,
+            1.2,
+            1.6,
+            false,
+            sun,
+            &proj,
+        )
+    }
+
+    #[test]
+    fn far_cascades_are_redrawn_less_often_and_stay_put_when_reused() {
+        let sun = Vec3::new(0.3, 0.8, 0.2).normalize();
+        let mut cache = CascadeCache::default();
+        let mut drawn = [0; MAX_CASCADES];
+        let mut origin = DVec3::new(1000.0, 20.0, -5000.0);
+        for frame in 0..16u64 {
+            // A slow walk: the far cascades keep their images between redraws.
+            origin.x += 0.05;
+            let mut c = cascades_at(origin, sun);
+            let computed = c;
+            cache.apply(&mut c, origin, frame, 3, frame == 0);
+            for (i, count) in drawn.iter_mut().enumerate() {
+                *count += c.drawn[i] as u32;
+                if c.drawn[i] {
+                    assert_eq!(c.view_proj[i], computed.view_proj[i]);
+                }
+            }
+            // A reused cascade still maps the world where its image was drawn: its center lands
+            // in the middle of the map.
+            for i in 0..MAX_CASCADES {
+                let rel = (c.center[i] - origin).as_vec3();
+                let p = c.view_proj[i] * rel.extend(1.0);
+                assert!(p.x.abs() < 1e-3 && p.y.abs() < 1e-3, "cascade {i}: {p}");
+            }
+        }
+        // The first frame draws all; then the third cascade every 2nd frame, the fourth every 4th.
+        assert_eq!(drawn, [16, 16, 8, 5]);
+
+        // A camera cut, or reuse turned off, redraws everything.
+        let mut c = cascades_at(origin, sun);
+        cache.apply(&mut c, origin, 17, 3, true);
+        assert_eq!(c.drawn, [true; MAX_CASCADES]);
+        let mut c = cascades_at(origin, sun);
+        cache.apply(&mut c, origin, 18, 0, false);
+        assert_eq!(c.drawn, [true; MAX_CASCADES]);
+
+        // Drifting past the margin, or the sun moving, redraws a cascade before it is due.
+        let mut c = cascades_at(origin, sun);
+        cache.apply(&mut c, origin, 20, 3, false);
+        let jump = origin + DVec3::new(c.half_extent[3] as f64 * 0.2, 0.0, 0.0);
+        let mut c = cascades_at(jump, sun);
+        cache.apply(&mut c, jump, 21, 3, false);
+        assert!(c.drawn[3] && c.drawn[2]);
+        let turned = Vec3::new(0.32, 0.8, 0.2).normalize();
+        let mut c = cascades_at(jump, turned);
+        cache.apply(&mut c, jump, 22, 3, false);
+        assert!(c.drawn[3] && c.drawn[2]);
     }
 }

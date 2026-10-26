@@ -107,6 +107,12 @@ pub struct RenderSettings {
     pub far_shadow_distance: f32,
     /// 0 = uniform cascade splits, 1 = logarithmic.
     pub shadow_split_lambda: f32,
+    /// Most frames a far shadow cascade may keep its last image instead of being redrawn: the
+    /// third cascade redraws every second frame and the fourth every fourth, staggered, never
+    /// older than this. A cascade redraws early when the camera has drifted out of its margin,
+    /// the sun has moved or the camera cut. Far shadows of moving objects lag by up to this many
+    /// frames. 0 redraws every cascade every frame.
+    pub shadow_cascade_reuse: u32,
     pub shadow_depth_bias: f32,
     /// Normal offset in shadow texels.
     pub shadow_normal_bias: f32,
@@ -280,6 +286,7 @@ impl Default for RenderSettings {
             shadow_map_size: 2048,
             far_shadow_distance: 8000.0,
             shadow_split_lambda: 0.8,
+            shadow_cascade_reuse: 3,
             shadow_depth_bias: 0.0,
             shadow_normal_bias: 1.5,
             shadow_softness: 1.0,
