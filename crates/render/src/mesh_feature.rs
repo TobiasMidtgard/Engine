@@ -54,7 +54,7 @@ use crate::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase,
 };
 use crate::frame::ViewData;
-use crate::image_cache::{ImageTexture, upload_image};
+use crate::image_cache::{ImageTexture, TextureUse, upload_image};
 use crate::impostor::Impostors;
 use crate::material::{
     ANTI_TILING_FLAG, AlphaMode, GpuMaterial, StandardMaterial, TEXTURE_FLAG_BASE, TEXTURE_FLAGS,
@@ -156,6 +156,15 @@ impl MeshInstance {
 pub const TEXTURE_SLOTS: usize = 6;
 /// Slots holding color (decoded as sRGB when the image is sRGB): base color and emissive.
 const COLOR_SLOT: [bool; TEXTURE_SLOTS] = [true, false, false, true, false, false];
+/// How each slot reads its image (decides its compression): occlusion and height read red only.
+const SLOT_USE: [TextureUse; TEXTURE_SLOTS] = [
+    TextureUse::Color,
+    TextureUse::Linear,
+    TextureUse::Linear,
+    TextureUse::Color,
+    TextureUse::Red,
+    TextureUse::Red,
+];
 /// Default 1×1 textures: white base color, flat normal, neutral metallic/roughness (factors
 /// pass through), black emissive, white (unoccluded) AO, height at the top (no parallax).
 const DEFAULT_TEXELS: [[u8; 4]; TEXTURE_SLOTS] = [
@@ -1013,7 +1022,7 @@ impl MeshFeature {
                     continue;
                 }
             }
-            if let Some(texture) = gpu.image_texture(images, *handle, COLOR_SLOT[slot]) {
+            if let Some(texture) = gpu.image_texture_for(images, *handle, SLOT_USE[slot]) {
                 bound[slot] = Some(Bound::Image(texture.id));
                 textures[slot] = Some(texture);
             }

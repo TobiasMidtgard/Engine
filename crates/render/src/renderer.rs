@@ -100,6 +100,13 @@ pub struct RenderStats {
     /// CPU bytes (level 0 and stored mips) those releases freed.
     #[serde(default)]
     pub image_bytes_released: u64,
+    /// Image views block-compressed on the GPU since startup
+    /// (`RenderSettings::texture_compression`).
+    #[serde(default)]
+    pub images_compressed: u64,
+    /// GPU bytes those compressions saved.
+    #[serde(default)]
+    pub image_bytes_compressed_away: u64,
 }
 
 #[repr(C)]
@@ -705,9 +712,15 @@ impl Renderer {
         if let Some(s) = &mut self.surface {
             s.set_vsync(&self.shared.device, settings.vsync);
         }
-        self.shared
-            .images
-            .begin_frame(self.frame_index, settings.release_image_pixels);
+        self.shared.images.begin_frame(
+            self.frame_index,
+            settings.release_image_pixels,
+            (
+                settings.texture_compression,
+                settings.texture_compression_on_cpu,
+            ),
+        );
+        self.shared.images.compress(&self.shared);
 
         // New features.
         if let Some(mut pending) = world.get_resource_mut::<PendingRenderFeatures>()
@@ -1492,6 +1505,8 @@ impl Renderer {
         let image_stats = self.shared.images.stats();
         stats.images_released = image_stats.released;
         stats.image_bytes_released = image_stats.bytes_released;
+        stats.images_compressed = image_stats.compressed;
+        stats.image_bytes_compressed_away = image_stats.bytes_compressed_away;
 
         if engine_core::profile::enabled() {
             self.perf.set_features(
@@ -1528,6 +1543,11 @@ impl Renderer {
                 self.surface_weather.uploads as f64,
             );
             d.set("render.gpu_images", image_stats.gpu_images as f64);
+            d.set("render.images_compressed", image_stats.compressed as f64);
+            d.set(
+                "render.image_mb_compressed_away",
+                image_stats.bytes_compressed_away as f64 / (1024.0 * 1024.0),
+            );
             d.set("render.image_uploads", image_stats.uploads as f64);
             d.set("render.images_released", image_stats.released as f64);
             d.set(
@@ -1641,6 +1661,8 @@ impl Renderer {
             features: self.feature_names(),
             images_released: 0,
             image_bytes_released: 0,
+            images_compressed: 0,
+            image_bytes_compressed_away: 0,
         }
     }
 

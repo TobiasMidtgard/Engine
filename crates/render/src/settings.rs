@@ -36,6 +36,20 @@ pub enum AntiAliasing {
     None,
 }
 
+/// Block compression of material images on the GPU (`RenderSettings::texture_compression`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+pub enum TextureCompression {
+    /// Images stay RGBA8 (4 bytes a texel).
+    Off,
+    /// BC1 for opaque color (half a byte a texel; some banding in smooth gradients), BC7 for
+    /// the rest, BC4 for one-channel slots.
+    Compact,
+    /// BC7 for color and data (1 byte a texel, close to the original), BC4 for one-channel
+    /// slots such as height and occlusion (half a byte). Default.
+    #[default]
+    Quality,
+}
+
 /// Resolution of the volumetric fog grid (`RenderSettings::volumetric_fog_quality`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum VolumetricQuality {
@@ -289,6 +303,15 @@ pub struct RenderSettings {
     /// BC7-compress the cache where the GPU supports it (a quarter of the memory; encoded on the
     /// tile loader threads). Applied when changed.
     pub virtual_texture_compression: bool,
+    /// Block-compress material images on the GPU once they have been drawn unchanged for a
+    /// moment (`image_cache`): a quarter of the memory and texture bandwidth of RGBA8 (an
+    /// eighth for BC1 and BC4). Needs a GPU with BC formats; images whose levels don't halve to
+    /// multiples of 4 texels, and slots that ask for exact pixels, stay RGBA8.
+    pub texture_compression: TextureCompression,
+    /// Also compress under a software GPU (lavapipe), where building the encoders takes seconds
+    /// and every texture sample decodes a block in software; saves system memory there. Off by
+    /// default.
+    pub texture_compression_on_cpu: bool,
 }
 
 impl Default for RenderSettings {
@@ -360,6 +383,8 @@ impl Default for RenderSettings {
             virtual_texture_upload_budget: 32,
             virtual_texture_mip_bias: 0.0,
             virtual_texture_compression: true,
+            texture_compression: TextureCompression::Quality,
+            texture_compression_on_cpu: false,
         }
     }
 }
