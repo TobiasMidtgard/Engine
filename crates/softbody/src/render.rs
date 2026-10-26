@@ -1123,6 +1123,10 @@ impl RenderFeature for SoftBodyFeature {
         self.draws.clear();
         self.stats = FeatureStats::default();
         let alpha = world.get_resource::<FixedTime>().map_or(1.0, |f| f.alpha());
+        // Fewer strands at lower quality, like grass and other small detail.
+        let thin = world
+            .get_resource::<engine_world::Scalability>()
+            .map_or(1.0, |s| s.density.clamp(0.1, 2.0));
         let query = self
             .query
             .get_or_insert_with(|| world.query::<&SoftBodySim>());
@@ -1190,7 +1194,7 @@ impl RenderFeature for SoftBodyFeature {
             for s in seen {
                 let range = geo.add_body(s.body, s.base, alpha, s.px);
                 let hair = s.body.strands.as_ref().and_then(|_| {
-                    let density = (s.px / HAIR_FULL_DENSITY_PX).clamp(0.06, 1.0);
+                    let density = (s.px / HAIR_FULL_DENSITY_PX * thin).clamp(0.06, 1.0);
                     let detail = (s.px / (HAIR_FULL_DENSITY_PX * 0.5)).clamp(0.25, 1.0);
                     geo.add_hair(s.body, s.base, alpha, density, detail)
                 });

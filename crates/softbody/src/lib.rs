@@ -99,6 +99,7 @@ impl Plugin for SoftBodyPlugin {
                         .in_set(SoftBodySet::Output),
                 ),
             )
+            .add_systems(PreUpdate, systems::follow_scalability)
             .add_systems(
                 PostUpdate,
                 (systems::follow_world_shift, gpu_cloth::follow_world_shift)

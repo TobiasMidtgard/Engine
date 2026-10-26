@@ -11,8 +11,8 @@ use engine_world::physics::{
     MassProperties, RigidBody,
 };
 use engine_world::{
-    ContactKind, Env, GroundContact, IgniteRequest, NoiseEvent, ProjectileTrace, SimulationRange,
-    SmokeEmission, SurfaceMaterials, WaterDisturbance, WorldImpulse, WorldShift,
+    ContactKind, Env, GroundContact, IgniteRequest, NoiseEvent, ProjectileTrace, Scalability,
+    SimulationRange, SmokeEmission, SurfaceMaterials, WaterDisturbance, WorldImpulse, WorldShift,
 };
 
 use crate::body::{FrameSource, SoftBodySim, SoftKind};
@@ -408,6 +408,20 @@ pub fn gather_colliders(
     }
     world.fields.sweep();
     std::mem::swap(&mut world.prev, &mut world.seen);
+}
+
+/// `PreUpdate`: when the game's [`Scalability`] changes, substeps follow its effects quality
+/// and the half-rate distance its view distance (how far `SimulationRange` reaches follows
+/// it already).
+pub fn follow_scalability(
+    scalability: Option<Res<Scalability>>,
+    mut config: ResMut<SoftBodyConfig>,
+) {
+    let Some(s) = scalability.filter(|s| s.is_changed()) else {
+        return;
+    };
+    config.quality = s.effects.clamp(0.5, 1.5);
+    config.lod_distance = SoftBodyConfig::default().lod_distance * s.view_distance.max(0.25);
 }
 
 /// Move every body, the collider history (for sweeps) and the gathered loads into the new

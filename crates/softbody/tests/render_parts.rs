@@ -1,5 +1,5 @@
 //! Draw geometry built in parts (as the render prepare does, one run of bodies per task) and
-//! joined matches geometry built in one go.
+//! joined matches geometry built in one go; quality presets scale the soft bodies' cost.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -63,4 +63,22 @@ fn geometry_built_in_parts_joins_into_the_same_buffers() {
     assert_eq!(joined.guides, whole.guides);
     assert_eq!(joined.grooms, whole.grooms);
     assert_eq!(joined.strands, whole.strands);
+}
+
+#[test]
+fn quality_presets_set_substeps_and_the_half_rate_distance() {
+    use engine_softbody::SoftBodyConfig;
+    use engine_world::{QualityPreset, Scalability};
+    let mut app = App::new();
+    app.add_plugins((engine_world::WorldPlugin, engine_softbody::SoftBodyPlugin));
+    app.update();
+    assert_eq!(
+        *app.world.resource::<SoftBodyConfig>(),
+        SoftBodyConfig::default()
+    );
+    app.insert_resource(Scalability::preset(QualityPreset::Low));
+    app.update();
+    let config = *app.world.resource::<SoftBodyConfig>();
+    assert_eq!(config.quality, 0.5);
+    assert_eq!(config.lod_distance, 15.0);
 }
