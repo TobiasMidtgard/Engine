@@ -265,6 +265,7 @@ impl RenderFeature for DebugLinesFeature {
             })],
             ..Default::default()
         });
+        ctx.view.set_scene_viewport(&mut pass);
         pass.set_bind_group(0, ctx.frame_group, &[]);
         pass.set_vertex_buffer(0, buffer.buffer.slice(..));
         let [tested, on_top] = self.counts;
