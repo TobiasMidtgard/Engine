@@ -128,7 +128,13 @@ compresses and stretches.
   hanging jaw. It runs after retargeting, on the imported skeleton.
 - **Time.** Every animator uses `Time::delta_for(LocalTimeScale)`, so `TimeDilation` slows
   animation and a hero who ignores world dilation keeps moving at full speed. Animators
-  beyond `lod_distance` from the simulation focus update at a quarter rate.
+  beyond `lod_distance` from the simulation focus update at a quarter rate. Beyond the
+  `SimulationRange` they rest: the last pose stays, with a fresh one every 2 s
+  (`REST_POSE_SECS`), and procedural layers, IK, skinning and demo walkers skip them
+  (`Animator::posed`); on waking, gaits, springs, muscles and car rigs start their motion
+  history over (`Animator::fresh`). Car wheels probe the ground again only once they move.
+  `cargo run -p engine_anim --release --example paddock_bench -- 20 150 --profile` times the
+  paddock without a renderer.
 - **World shifts.** On a `WorldShift` (floating origin, a new planet's frame) planted feet,
   spring chains, muscle jiggle, wheel contacts, look and reach targets and demo paths move
   with the world, so nothing pops, whips or slides.

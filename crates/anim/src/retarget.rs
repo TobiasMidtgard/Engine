@@ -479,6 +479,9 @@ pub struct HandGrip {
 
 pub(crate) fn retarget_poses(mut q: Query<(&Animator, &mut Retarget, Option<&HandGrip>)>) {
     q.par_iter_mut().for_each(|(animator, mut retarget, grip)| {
+        if !animator.posed() {
+            return;
+        }
         let r = &mut *retarget;
         let closure = r.retargeter.hand_closure(animator, grip);
         r.retargeter.apply(&animator.model, &closure, &mut r.model);

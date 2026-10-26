@@ -121,13 +121,18 @@ impl BoneAttachment {
 }
 
 pub(crate) fn attachment_system(
-    characters: Query<(&Animator, &GlobalTransform), Without<BoneAttachment>>,
+    characters: Query<(&Animator, Ref<GlobalTransform>), Without<BoneAttachment>>,
     mut q: Query<(&BoneAttachment, &mut Transform, &mut GlobalTransform)>,
 ) {
     for (attach, mut t, mut gt) in &mut q {
         let Some((animator, owner)) = attach.target.and_then(|e| characters.get(e).ok()) else {
             continue;
         };
+        // A resting owner that stands still keeps its props where they are.
+        if !animator.posed() && !owner.is_changed() {
+            continue;
+        }
+        let owner = &*owner;
         let Some(socket) = attach.socket(animator) else {
             continue;
         };

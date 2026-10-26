@@ -246,8 +246,12 @@ pub(crate) fn muscle_system(
 ) {
     q.par_iter_mut()
         .for_each(|(animator, mut rig, mut morphs, params, gt)| {
-            if !rig.enabled {
+            if !rig.enabled || !animator.posed() {
                 return;
+            }
+            if animator.fresh() {
+                // The body moved while it rested: that isn't a shove to jiggle from.
+                rig.last_origin = None;
             }
             let dt = animator.dt;
             let origin = gt.translation();

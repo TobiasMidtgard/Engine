@@ -322,6 +322,10 @@ pub(crate) fn update_skin_poses(
     };
     q.par_iter_mut()
         .for_each(|(animator, renderer, mut pose, morphs, retarget)| {
+            // A resting character keeps the skin it has.
+            if !animator.posed() {
+                return;
+            }
             let Some(handle) = renderer.mesh else {
                 return;
             };

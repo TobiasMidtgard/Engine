@@ -295,7 +295,7 @@ pub(crate) fn hand_controls_system(
     mut q: Query<(&Body, &Animator, Option<&HandGrip>, &mut HandControls)>,
 ) {
     for (body, animator, held, mut out) in &mut q {
-        if body.kind != BodyKind::Human {
+        if body.kind != BodyKind::Human || !animator.posed() {
             continue;
         }
         let closed = GRIP_CURVES

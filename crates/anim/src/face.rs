@@ -507,7 +507,7 @@ type FaceQuery<'a> = (
 
 pub(crate) fn face_system(targets: Query<&GlobalTransform>, mut q: Query<FaceQuery>) {
     for (animator, mut retarget, mut face, gt, ragdoll, look, params, out) in &mut q {
-        if !face.enabled {
+        if !face.enabled || !animator.posed() {
             continue;
         }
         let retarget = &mut *retarget;
@@ -677,7 +677,7 @@ pub(crate) fn appearance_face_system(
     mut q: Query<AppearanceFaceQuery, (With<Appearance>, Without<Retarget>)>,
 ) {
     for (animator, mut face, mut out, gt, ragdoll, look, params) in &mut q {
-        if !face.enabled {
+        if !face.enabled || !animator.posed() {
             continue;
         }
         let Some(head) = animator.skeleton.index_of("head") else {

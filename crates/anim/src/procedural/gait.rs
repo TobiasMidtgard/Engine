@@ -250,6 +250,17 @@ pub(crate) struct GaitRuntime {
 }
 
 impl GaitRuntime {
+    /// Start over: plant the feet again and forget the motion history (after frames without
+    /// a pose, such as resting beyond the simulation range).
+    pub(crate) fn restart(&mut self) {
+        *self = Self {
+            footfalls: std::mem::take(&mut self.footfalls),
+            legs: std::mem::take(&mut self.legs),
+            legs_skeleton: std::mem::take(&mut self.legs_skeleton),
+            ..Default::default()
+        };
+    }
+
     /// Carry planted feet and motion history into a shifted world frame.
     pub(crate) fn follow_shift(&mut self, s: &WorldShift) {
         for f in &mut self.feet {
@@ -319,8 +330,11 @@ pub(crate) fn gait_system(
 ) {
     q.par_iter_mut()
         .for_each(|(entity, mut animator, mut gait, mut params, gt)| {
-            if !gait.enabled || gait.legs.is_empty() {
+            if !gait.enabled || gait.legs.is_empty() || !animator.posed() {
                 return;
+            }
+            if animator.fresh() {
+                gait.rt.restart();
             }
             let probe = GroundProbe {
                 ground: &ground,
