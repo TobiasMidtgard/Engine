@@ -427,6 +427,31 @@ pub(crate) fn blast(world: &mut World, impulse: WorldImpulse) {
     }
 }
 
+/// Whether a demo area `radius` meters around `center` rests: all of it lies beyond the
+/// simulation range (and its hysteresis) of every focus. Its script then waits where it is, so
+/// nothing breaks where nobody is looking, and carries on when someone comes back.
+pub(crate) fn area_rests(
+    range: &engine_world::SimulationRange,
+    focus: &engine_world::FocusPoints,
+    center: DVec3,
+    radius: f64,
+) -> bool {
+    !focus.points.is_empty()
+        && focus.distance(center) - radius > range.active_m * (1.0 + range.hysteresis)
+}
+
+/// [`area_rests`] read from the world's resources (no range resource: the default range).
+pub(crate) fn area_rests_in(world: &World, center: DVec3, radius: f64) -> bool {
+    let Some(focus) = world.get_resource::<engine_world::FocusPoints>() else {
+        return false;
+    };
+    let range = world
+        .get_resource::<engine_world::SimulationRange>()
+        .copied()
+        .unwrap_or_default();
+    area_rests(&range, focus, center, radius)
+}
+
 fn register_api(app: &mut App) {
     build_api(app);
     const BLAST: &str = r#"{"at": [0, 1, 0], "energy_j": 1000000}"#;

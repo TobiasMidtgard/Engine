@@ -1,14 +1,15 @@
 //! Drawing terrains: quadtree selection, parallel patch building, a pool of GPU vertex
 //! slots, shadows, and the ground maps (footprints, wetness, puddles, snow) the shader reads.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 
 use bytemuck::{Pod, Zeroable};
 use engine_core::diagnostics::Diagnostics;
 use engine_core::math::{DQuat, DVec3, IVec2, Mat3, Vec3};
 use engine_core::prelude::*;
-use engine_core::tasks::ComputeTaskPool;
 use engine_render::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase,
 };
@@ -35,6 +36,12 @@ const STALE_FRAMES: u64 = 300;
 const FAR_SHADOW_DETAIL: f64 = 0.5;
 /// Most [`TerrainSettings::patch_budget`] may raise the detail.
 const MAX_BOOST: f64 = 4.0;
+/// Most finished patches uploaded to the GPU in one frame (the rest wait for the next).
+const MAX_UPLOADS_PER_FRAME: usize = 64;
+/// A drawn patch's children replace it at `split_factor` patch sizes; it takes over from
+/// them again only past this many times that, so the detail doesn't flicker back and forth
+/// at the boundary (or a patch budget easing up and down).
+const MERGE_HYSTERESIS: f64 = 1.15;
 
 /// Per-draw data (instance vertex buffer).
 #[repr(C)]
@@ -274,6 +281,8 @@ struct PlanetState {
     chunks: HashMap<NodeKey, ChunkGpu>,
     /// Built patches to rebuild in place (edited), nearest first when drained.
     rebuild: Vec<NodeKey>,
+    /// Patches being built on the workers (see [`PatchWorkers`]).
+    building: HashSet<NodeKey>,
     /// World position last frame (motion vectors for moving planets).
     last_position: Option<DVec3>,
     /// The shape's rayed craters, packed for the shader.
@@ -312,6 +321,7 @@ impl PlanetState {
             edits_seen: 0,
             chunks: HashMap::new(),
             rebuild: Vec::new(),
+            building: HashSet::new(),
             last_position: None,
             rays,
             rayed,
@@ -402,6 +412,10 @@ pub struct TerrainFeature {
     frame: u64,
     stats: FeatureStats,
     built_last_frame: usize,
+    /// Patch builds run on these threads, never in the frame.
+    workers: Option<PatchWorkers>,
+    /// Patches built and waiting for an upload slot in a later frame.
+    finished: Vec<FinishedPatch>,
 }
 
 /// How wet and snowy the ground is beyond the weather's grid around the player: like the open
@@ -1280,8 +1294,34 @@ impl RenderFeature for TerrainFeature {
         let mut planet_gpu = Vec::with_capacity(entities.len());
         let mut instances: Vec<ChunkInstance> = Vec::new();
         let mut built_total = 0usize;
+        // Patches the view lacks, and those on their way.
+        let mut missing_total = 0usize;
+        let mut building_total = 0usize;
         let mut max_boost = 1.0f64;
         let max_slots = settings.max_patches as u32;
+        // Put the patches the workers finished into vertex slots, a few a frame.
+        let workers = self.workers.get_or_insert_with(PatchWorkers::new);
+        self.finished.extend(workers.take_done());
+        let mut uploads = 0;
+        let mut waiting = Vec::new();
+        for f in std::mem::take(&mut self.finished) {
+            let Some(state) = self.planets.get_mut(&f.planet) else {
+                continue;
+            };
+            if state.version != f.version {
+                continue;
+            }
+            if uploads >= MAX_UPLOADS_PER_FRAME {
+                waiting.push(f);
+                continue;
+            }
+            let key = f.mesh.key;
+            upload(&mut self.pool, state, f.mesh, gpu_shared, max_slots);
+            state.building.remove(&key);
+            uploads += 1;
+        }
+        self.finished = waiting;
+        built_total += uploads;
 
         for (pi, e) in entities.iter().enumerate() {
             let t = &terrains.entries[e];
@@ -1323,51 +1363,44 @@ impl RenderFeature for TerrainFeature {
             };
             let split = settings.split_factor * t.config.detail.max(0.05) as f64 * state.boost;
 
-            // Select; after a jump (many patches missing) build until the view is complete.
-            let mut sel;
-            let mut rounds = 0;
-            loop {
-                sel = state.lod.select(&SelectInput {
-                    camera: cam_local,
-                    split_factor: split,
-                    visible: &visible,
-                    min_size: 0.0,
-                });
-                let catch_up =
-                    sel.missing.len() > settings.catch_up_threshold || state.chunks.is_empty();
-                let mut batch: Vec<NodeKey> = if catch_up {
-                    sel.missing.iter().map(|m| m.1).collect()
-                } else {
-                    sel.missing
-                        .iter()
-                        .take(settings.builds_per_frame)
-                        .map(|m| m.1)
-                        .collect()
-                };
-                // Edited patches (a few per frame).
-                if !catch_up && batch.len() < settings.builds_per_frame {
-                    let room = settings.builds_per_frame - batch.len();
-                    let n = room.min(state.rebuild.len());
-                    batch.extend(state.rebuild.drain(..n));
-                }
-                if batch.is_empty() {
+            // Select, and ask the workers for what the view lacks, nearest first. Until the
+            // patches are built their parents are drawn. After a jump (many patches missing),
+            // everything missing is queued at once.
+            let sel = state.lod.select(&SelectInput {
+                camera: cam_local,
+                split_factor: split,
+                merge_factor: Some(split * MERGE_HYSTERESIS),
+                visible: &visible,
+                min_size: 0.0,
+            });
+            let catch_up =
+                sel.missing.len() > settings.catch_up_threshold || state.chunks.is_empty();
+            let in_flight = if catch_up {
+                usize::MAX
+            } else {
+                workers.threads() * 2
+            };
+            for &(_, k) in &sel.missing {
+                if state.building.len() >= in_flight {
                     break;
                 }
-                built_total +=
-                    build_into(&mut self.pool, state, &src, &batch, gpu_shared, max_slots);
-                rounds += 1;
-                if !catch_up || rounds > 40 {
-                    // One more pass picks up what was just built.
-                    sel = state.lod.select(&SelectInput {
-                        camera: cam_local,
-                        split_factor: split,
-                        visible: &visible,
-                        min_size: 0.0,
-                    });
-                    break;
+                if state.building.insert(k) {
+                    workers.build(*e, state.version, &src, k);
                 }
             }
-
+            missing_total += sel.missing.len();
+            // Then edited patches, kept drawn meanwhile (one being built waits for that build
+            // before the next: the edit may have come after it started).
+            let mut i = 0;
+            while i < state.rebuild.len() && state.building.len() < in_flight {
+                let k = state.rebuild[i];
+                if state.building.insert(k) {
+                    state.rebuild.remove(i);
+                    workers.build(*e, state.version, &src, k);
+                } else {
+                    i += 1;
+                }
+            }
             // Few patches for the planet's share of the view (seen from orbit): split finer,
             // easing toward the detail that fills the budget. The patch count grows with the
             // square of the split factor.
@@ -1409,23 +1442,25 @@ impl RenderFeature for TerrainFeature {
                 let input = SelectInput {
                     camera: cam_local,
                     split_factor: split * FAR_SHADOW_DETAIL,
+                    merge_factor: None,
                     visible: &far_visible,
                     min_size: far.texel() as f64 * 0.5 * crate::chunk::QUADS as f64,
                 };
-                let mut far_sel = state.lod.walk(&input);
-                let batch: Vec<NodeKey> = far_sel
+                let far_sel = state.lod.walk(&input);
+                let room = (workers.threads() * 3).saturating_sub(state.building.len());
+                for &(_, k) in far_sel
                     .missing
                     .iter()
-                    .take((settings.builds_per_frame / 2).max(1))
-                    .map(|m| m.1)
-                    .collect();
-                if !batch.is_empty() {
-                    built_total +=
-                        build_into(&mut self.pool, state, &src, &batch, gpu_shared, max_slots);
-                    far_sel = state.lod.walk(&input);
+                    .take(room.min((settings.builds_per_frame / 2).max(1)))
+                {
+                    if state.building.insert(k) {
+                        workers.build(*e, state.version, &src, k);
+                    }
                 }
                 far_sel
             });
+
+            building_total += state.building.len();
 
             // Recycle patches nobody has looked at for a while.
             if self.frame.is_multiple_of(60) {
@@ -1602,6 +1637,8 @@ impl RenderFeature for TerrainFeature {
             );
             d.set("terrain.patches_resident", self.pool.used() as f64);
             d.set("terrain.patches_built", built_total as f64);
+            d.set("terrain.patches_missing", missing_total as f64);
+            d.set("terrain.patches_building", building_total as f64);
             d.set("terrain.detail_boost", max_boost);
         }
     }
@@ -1677,6 +1714,7 @@ impl RenderFeature for TerrainFeature {
             "far_shadow_patches": self.far_shadow_draws.len(),
             "patches_resident": self.pool.used(),
             "patches_built_last_frame": self.built_last_frame,
+            "patches_building": self.planets.values().map(|p| p.building.len()).sum::<usize>(),
             "gpu_pages": self.pool.pages.len(),
         })
     }
@@ -1699,17 +1737,104 @@ impl TerrainFeature {
     }
 }
 
-/// Build `batch` into vertex slots, first freeing patches unused for a while if the pool is
-/// filling up. Returns how many were built.
-fn build_into(
+/// A patch built on a worker, for a terrain at a version (patches of an older version, or of
+/// a terrain that is gone, are dropped).
+struct FinishedPatch {
+    planet: Entity,
+    version: u64,
+    mesh: crate::chunk::ChunkMesh,
+}
+
+/// Threads that build terrain patches, so neither the frame nor the render step ever waits
+/// for one. Patches come back through a channel; the render step uploads a few each frame.
+struct PatchWorkers {
+    jobs: Sender<PatchJob>,
+    done: Mutex<Receiver<FinishedPatch>>,
+    threads: usize,
+}
+
+struct PatchJob {
+    planet: Entity,
+    version: u64,
+    src: ChunkSource,
+    key: NodeKey,
+}
+
+impl PatchWorkers {
+    /// Half the cores (the frame's own systems and the GPU driver keep the rest).
+    fn new() -> Self {
+        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let threads = (cores / 2).clamp(2, 12);
+        let (jobs, job_rx) = channel::<PatchJob>();
+        let (done_tx, done) = channel();
+        let job_rx = Arc::new(Mutex::new(job_rx));
+        for i in 0..threads {
+            let job_rx = job_rx.clone();
+            let done_tx = done_tx.clone();
+            std::thread::Builder::new()
+                .name(format!("terrain-patches-{i}"))
+                .spawn(move || {
+                    loop {
+                        // (The lock is held only while taking a job.)
+                        let job = match job_rx.lock() {
+                            Ok(rx) => rx.recv(),
+                            Err(_) => return,
+                        };
+                        let Ok(job) = job else {
+                            return;
+                        };
+                        let mesh = build_chunk(&job.src, job.key);
+                        let done = FinishedPatch {
+                            planet: job.planet,
+                            version: job.version,
+                            mesh,
+                        };
+                        if done_tx.send(done).is_err() {
+                            return;
+                        }
+                    }
+                })
+                .expect("spawn a terrain patch thread");
+        }
+        Self {
+            jobs,
+            done: Mutex::new(done),
+            threads,
+        }
+    }
+
+    fn threads(&self) -> usize {
+        self.threads
+    }
+
+    fn build(&self, planet: Entity, version: u64, src: &ChunkSource, key: NodeKey) {
+        let _ = self.jobs.send(PatchJob {
+            planet,
+            version,
+            src: src.clone(),
+            key,
+        });
+    }
+
+    /// Patches finished since the last call.
+    fn take_done(&self) -> Vec<FinishedPatch> {
+        self.done
+            .lock()
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// Upload a finished patch into a vertex slot, first freeing patches unused for a while if
+/// the pool is filling up. False when there is no room.
+fn upload(
     pool: &mut SlotPool,
     state: &mut PlanetState,
-    src: &ChunkSource,
-    batch: &[NodeKey],
+    m: crate::chunk::ChunkMesh,
     gpu_shared: &GpuShared,
     max_slots: u32,
-) -> usize {
-    if pool.used() + batch.len() as u32 + SLOTS_PER_PAGE > max_slots {
+) -> bool {
+    if pool.used() + SLOTS_PER_PAGE > max_slots {
         for k in state.lod.stale(30) {
             if let Some(c) = state.chunks.remove(&k) {
                 pool.release(c.slot);
@@ -1717,47 +1842,28 @@ fn build_into(
             state.lod.unbuild(k);
         }
     }
-    let meshes = build_parallel(src, batch);
-    let built = meshes.len();
-    for m in meshes {
-        let slot = match state.chunks.get(&m.key) {
-            Some(c) => Some(c.slot),
-            None => pool.alloc(&gpu_shared.device, max_slots),
-        };
-        let Some(slot) = slot else {
-            break;
-        };
-        pool.write(&gpu_shared.queue, slot, &m.vertices);
-        state
-            .lod
-            .set_built(m.key, m.min_height, m.max_height, m.center, m.radius);
-        state.chunks.insert(
-            m.key,
-            ChunkGpu {
-                slot,
-                origin: m.origin,
-                center: m.center,
-                radius: m.radius,
-                spacing: m.spacing,
-            },
-        );
-    }
-    built
-}
-
-/// Build patches on the compute pool.
-fn build_parallel(src: &ChunkSource, keys: &[NodeKey]) -> Vec<crate::chunk::ChunkMesh> {
-    if keys.len() <= 1 {
-        return keys.iter().map(|k| build_chunk(src, *k)).collect();
-    }
-    engine_core::tasks::init_task_pools();
-    ComputeTaskPool::get().scope(|s| {
-        for k in keys {
-            let src = src.clone();
-            let k = *k;
-            s.spawn(async move { build_chunk(&src, k) });
-        }
-    })
+    let slot = match state.chunks.get(&m.key) {
+        Some(c) => Some(c.slot),
+        None => pool.alloc(&gpu_shared.device, max_slots),
+    };
+    let Some(slot) = slot else {
+        return false;
+    };
+    pool.write(&gpu_shared.queue, slot, &m.vertices);
+    state
+        .lod
+        .set_built(m.key, m.min_height, m.max_height, m.center, m.radius);
+    state.chunks.insert(
+        m.key,
+        ChunkGpu {
+            slot,
+            origin: m.origin,
+            center: m.center,
+            radius: m.radius,
+            spacing: m.spacing,
+        },
+    );
+    true
 }
 
 #[cfg(test)]

@@ -58,6 +58,7 @@ wgpu = "30"
 winit = "0.30"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
+font8x8 = { version = "0.3", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "hdr"] }
 gltf = "1.4"
 notify = "8"

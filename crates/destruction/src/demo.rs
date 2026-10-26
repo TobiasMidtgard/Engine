@@ -56,6 +56,10 @@ use crate::wall::{DestructibleWall, WallAnchors, WallState};
 /// rebuild. Looping faster piled up dust: the smoke module keeps a cloud for minutes, and
 /// six shows' worth hung over the range like fog.
 pub const CYCLE_SECS: f32 = 60.0;
+
+/// How far the fortress demo's ranges and buildings reach from its origin, meters (its script
+/// waits while all of it is out of every focus's simulation range).
+pub const DEMO_RADIUS_M: f64 = 60.0;
 /// Lifetime given to aftermath rubble (it never sinks).
 const FOREVER: f32 = 1.0e9;
 
@@ -1482,6 +1486,9 @@ pub fn demo_script_system(world: &mut World) {
         let Some(mut demo) = world.get::<DestructionDemo>(e).cloned() else {
             continue;
         };
+        if crate::area_rests_in(world, demo.origin, DEMO_RADIUS_M) {
+            continue;
+        }
         demo.time += dt;
         while demo.next < steps.len() && steps[demo.next].0 <= demo.time {
             let step = steps[demo.next].1;

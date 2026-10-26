@@ -1051,8 +1051,11 @@ pub fn build_system(
     mut shown: Query<(&BuiltPiece, &mut ShowSupport)>,
     queries: Option<Res<PhysicsQueries>>,
     characters: Query<(), With<CharacterController>>,
+    focus: Res<engine_world::FocusPoints>,
+    range: Option<Res<engine_world::SimulationRange>>,
 ) {
     let requests: Vec<BuildRequest> = requests.read().copied().collect();
+    let range = range.map_or_else(engine_world::SimulationRange::default, |r| *r);
     // A piece can't go where a player or a creature stands: it would trap them in its collider.
     let occupied = |p: &Placement| {
         let Some(q) = queries.as_deref() else {
@@ -1083,6 +1086,28 @@ pub fn build_system(
     let mut show_any = false;
     let mut showing: Vec<Entity> = Vec::new();
     for (e, mut b, mut preview, gt) in &mut builders {
+        // A builder nothing is asked of that is idle (build mode off) or out of everyone's
+        // range aims at nothing new: no scan of the pieces around it. An idle one shows no ghost.
+        if !requests.iter().any(|r| r.builder == e) {
+            if !b.active {
+                if preview.placement.is_some() || preview.target.is_some() {
+                    preview.placement = None;
+                    preview.target = None;
+                }
+                if let Some(g) = preview.ghost {
+                    commands.entity(g).despawn();
+                    preview.ghost = None;
+                }
+                continue;
+            }
+            if range.is_resting(&focus, gt.translation()) {
+                if b.show_support {
+                    show_any = true;
+                    showing.push(e);
+                }
+                continue;
+            }
+        }
         let (origin, dir) = aim_ray(&b, gt);
         let mut scene = scene_near(pieces.iter(), origin, b.reach_m as f64 + 6.0);
         scene.retain(|p| !removed.contains(&p.entity));

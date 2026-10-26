@@ -117,43 +117,177 @@ pub struct NoGhost;
 pub struct LookSettings {
     /// Size of baked textures, pixels per side.
     pub texture_size: u32,
+    /// Bake the library on a background thread instead of inside the first frame. Movement's
+    /// meshes and materials are then registered a few seconds in, when [`LookReady`] appears:
+    /// spawn the demo (or anything drawn with the look's asset keys) once it exists.
+    pub background: bool,
 }
 
 impl Default for LookSettings {
     fn default() -> Self {
-        Self { texture_size: 1024 }
+        Self {
+            texture_size: 1024,
+            background: false,
+        }
     }
 }
 
-/// Runs the generators once, as soon as the render asset stores exist (before meshes are
-/// resolved, so spawned entities find their keys).
+/// Present once every generator's meshes, textures and materials are registered.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct LookReady;
+
+/// What the generators made, waiting to be registered with the render asset stores.
+#[derive(Default)]
+struct Baked {
+    meshes: Assets<Mesh>,
+    images: Assets<Image>,
+    materials: Assets<StandardMaterial>,
+}
+
+/// Runs every generator, each on a thread of its own (their texture bakes share the cores).
+fn bake_library(texture_size: u32) -> Vec<Baked> {
+    std::thread::scope(|s| {
+        let jobs: Vec<_> = LIBRARY
+            .iter()
+            .map(|generate| {
+                s.spawn(move || {
+                    let mut b = Baked::default();
+                    generate(&mut Library {
+                        meshes: &mut b.meshes,
+                        images: &mut b.images,
+                        materials: &mut b.materials,
+                        texture_size,
+                    });
+                    b
+                })
+            })
+            .collect();
+        jobs.into_iter()
+            .map(|j| j.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    })
+}
+
+/// Moves baked assets into the world's stores under their keys, pointing the materials at
+/// the images' new handles.
+fn insert_baked(
+    baked: Vec<Baked>,
+    meshes: &mut Assets<Mesh>,
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    for mut b in baked {
+        let added: Vec<_> = b.images.iter().map(|(h, _)| h).collect();
+        let mut moved = std::collections::HashMap::with_capacity(added.len());
+        for h in added {
+            if let Some(image) = b.images.remove(h) {
+                moved.insert(h, images.add(image));
+            }
+        }
+        let keyed: Vec<_> = b.meshes.keys().map(|(k, h)| (k.to_string(), h)).collect();
+        for (key, h) in keyed {
+            if let Some(mesh) = b.meshes.remove(h) {
+                meshes.insert_keyed(&key, mesh);
+            }
+        }
+        let keyed: Vec<_> = b
+            .materials
+            .keys()
+            .map(|(k, h)| (k.to_string(), h))
+            .collect();
+        for (key, h) in keyed {
+            let Some(mut m) = b.materials.remove(h) else {
+                continue;
+            };
+            for tex in [
+                &mut m.base_color_texture,
+                &mut m.normal_texture,
+                &mut m.metallic_roughness_texture,
+                &mut m.emissive_texture,
+                &mut m.occlusion_texture,
+                &mut m.height_texture,
+            ] {
+                *tex = tex.and_then(|t| moved.get(&t).copied());
+            }
+            materials.insert_keyed(&key, m);
+        }
+    }
+}
+
+/// The library being baked in the background ([`LookSettings::background`]).
+#[derive(Resource)]
+struct Baking(Option<std::thread::JoinHandle<Vec<Baked>>>);
+
+/// Bakes the library once the render asset stores exist (before meshes are resolved, so
+/// spawned entities find their keys), or starts baking it in the background.
 fn build_library(
-    mut built: Local<bool>,
+    mut commands: Commands,
+    mut started: Local<bool>,
     settings: Res<LookSettings>,
+    baking: Option<ResMut<Baking>>,
     meshes: Option<ResMut<Assets<Mesh>>>,
     images: Option<ResMut<Assets<Image>>>,
     materials: Option<ResMut<Assets<StandardMaterial>>>,
 ) {
-    if *built {
-        return;
-    }
     let (Some(mut meshes), Some(mut images), Some(mut materials)) = (meshes, images, materials)
     else {
         return;
     };
-    *built = true;
-    let mut lib = Library {
-        meshes: &mut meshes,
-        images: &mut images,
-        materials: &mut materials,
-        texture_size: settings.texture_size,
+    let baked = if let Some(mut baking) = baking {
+        if !baking.0.as_ref().is_some_and(|j| j.is_finished()) {
+            return;
+        }
+        commands.remove_resource::<Baking>();
+        let job = baking.0.take().expect("checked above");
+        job.join().unwrap_or_else(|e| std::panic::resume_unwind(e))
+    } else if *started {
+        return;
+    } else {
+        *started = true;
+        let size = settings.texture_size;
+        if settings.background {
+            let job = std::thread::Builder::new()
+                .name("movement look".into())
+                .spawn(move || bake_library(size))
+                .expect("could not start the look library's thread");
+            commands.insert_resource(Baking(Some(job)));
+            return;
+        }
+        bake_library(size)
     };
-    for generate in LIBRARY {
-        generate(&mut lib);
-    }
+    insert_baked(baked, &mut meshes, &mut images, &mut materials);
+    commands.insert_resource(LookReady);
 }
 
 pub(crate) fn register(app: &mut App) {
     app.init_resource::<LookSettings>()
         .add_systems(First, build_library);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn baked_materials_point_at_their_own_images_after_the_move() {
+        let (mut meshes, mut images, mut materials) = (
+            Assets::<Mesh>::default(),
+            Assets::<Image>::default(),
+            Assets::<StandardMaterial>::default(),
+        );
+        // Images already in the store shift the handles the baked ones get.
+        let other = images.add(Image::new(1, 1, vec![0; 4], false));
+        insert_baked(bake_library(16), &mut meshes, &mut images, &mut materials);
+        let mut textured = 0;
+        for (key, h) in materials.keys() {
+            assert!(key.starts_with("movement/"), "{key}");
+            let m = materials.get(h).unwrap();
+            for t in m.textures().into_iter().flatten() {
+                assert!(images.get(t).is_some() && t != other, "{key}");
+                textured += 1;
+            }
+        }
+        assert!(textured > 100, "{textured}");
+        assert!(meshes.len() > 500, "{}", meshes.len());
+    }
 }

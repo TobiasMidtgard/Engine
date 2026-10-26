@@ -24,6 +24,9 @@ pub struct NodeBounds {
     pub built: bool,
     /// Frame this patch was last visited.
     pub last_seen: u64,
+    /// Whether the view's last walk split it into its children (see
+    /// [`SelectInput::merge_factor`]).
+    pub split: bool,
 }
 
 /// Inputs to one selection walk.
@@ -32,6 +35,10 @@ pub struct SelectInput<'a> {
     pub camera: DVec3,
     /// Split when closer than this many patch sizes (higher = more detail).
     pub split_factor: f64,
+    /// A patch split on the last walk merges back only beyond this many patch sizes (at
+    /// least `split_factor`), so the detail doesn't flicker at the boundary. `None` walks
+    /// without that memory (another view of the same tree, such as a shadow map).
+    pub merge_factor: Option<f64>,
     /// Frustum test for a terrain-local bounding sphere.
     pub visible: &'a dyn Fn(DVec3, f64) -> bool,
     /// Patches never split into children smaller than this (m across; 0 = down to the finest
@@ -111,6 +118,7 @@ impl Lod {
             radius: r,
             built: false,
             last_seen: 0,
+            split: false,
         }
     }
 
@@ -126,6 +134,7 @@ impl Lod {
                 radius,
                 built: true,
                 last_seen: frame,
+                split: false,
             },
         );
     }
@@ -220,9 +229,12 @@ impl Lod {
                 continue;
             }
             let size = self.map.node_size(key.level);
-            let split = key.level < self.max_level
-                && dist < input.split_factor * size
-                && size * 0.5 >= input.min_size;
+            let factor = match input.merge_factor {
+                Some(m) if b.split => m.max(input.split_factor),
+                _ => input.split_factor,
+            };
+            let split =
+                key.level < self.max_level && dist < factor * size && size * 0.5 >= input.min_size;
             if split {
                 let children = key.children();
                 let mut ready = true;
@@ -245,8 +257,18 @@ impl Lod {
                 }
                 if ready {
                     stack.extend(children);
+                    if input.merge_factor.is_some()
+                        && let Some(n) = self.nodes.get_mut(&key)
+                    {
+                        n.split = true;
+                    }
                     continue;
                 }
+            }
+            if input.merge_factor.is_some()
+                && let Some(n) = self.nodes.get_mut(&key)
+            {
+                n.split = false;
             }
             out.draw.push(key);
         }
@@ -293,6 +315,7 @@ mod tests {
             let sel = lod.select(&SelectInput {
                 camera: cam,
                 split_factor: 3.0,
+                merge_factor: Some(3.0),
                 visible: &visible,
                 min_size: 0.0,
             });
@@ -349,6 +372,7 @@ mod tests {
         let sel = lod.walk(&SelectInput {
             camera: cam,
             split_factor: 3.0,
+            merge_factor: None,
             visible: &visible,
             min_size: 200.0,
         });
@@ -381,5 +405,30 @@ mod tests {
             DVec3::new(30.0, 100.0, 0.0),
             100.0
         ));
+    }
+
+    #[test]
+    fn split_patches_merge_back_only_past_the_hysteresis() {
+        let r = 1_000_000.0;
+        let map = SurfaceMap::new(TerrainDomain::Sphere, r);
+        let mut lod = Lod::new(map, (-100.0, 100.0), 1.0);
+        let cam = DVec3::new(0.0, r + 2.0, 0.0);
+        let near = settle(&mut lod, cam);
+        let visible = |_: DVec3, _: f64| true;
+        let walk = |lod: &mut Lod, split: f64| {
+            lod.select(&SelectInput {
+                camera: cam,
+                split_factor: split,
+                merge_factor: Some(split * 1.15),
+                visible: &visible,
+                min_size: 0.0,
+            })
+        };
+        // A little less detail asked for: what is split stays split.
+        let same = walk(&mut lod, 3.0 / 1.1);
+        assert_eq!(same.draw.len(), near.draw.len());
+        // Much less: it merges.
+        let coarser = walk(&mut lod, 3.0 / 1.5);
+        assert!(coarser.draw.len() < near.draw.len());
     }
 }

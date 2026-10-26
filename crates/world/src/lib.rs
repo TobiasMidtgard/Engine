@@ -37,6 +37,7 @@ pub mod grid;
 pub mod locomotion;
 pub mod physical;
 pub mod physics;
+pub mod scalability;
 pub mod shift;
 pub mod terrain;
 
@@ -53,6 +54,7 @@ pub use locomotion::{
     LocomotionMode, LocomotionState, MoveIntent, VehicleControls, WheelContact, WheelContacts,
 };
 pub use physical::*;
+pub use scalability::{QualityPreset, Scalability};
 pub use shift::{FollowsWorldShift, WorldShift, WorldShiftAppExt, WorldShiftSet};
 pub use terrain::{EditOp, EditShape, TerrainChanged, TerrainEdit};
 
@@ -266,6 +268,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<SurfaceMaterials>()
             .init_resource::<FocusPoints>()
             .init_resource::<SimulationRange>()
+            .init_resource::<Scalability>()
             .add_message::<ProjectileTrace>()
             .add_message::<WorldImpulse>()
             .add_message::<GroundContact>()
@@ -288,6 +291,10 @@ impl Plugin for WorldPlugin {
                  time of day, sun direction.",
             )
             .register_resource::<Gravity>("Uniform gravity plus attracting bodies (planets).")
+            .register_resource::<Scalability>(
+                "Quality: preset (Low, Medium, High, Ultra) and factors relative to High: \
+                 render_scale, shadows, view_distance, density, effects, simulation_m.",
+            )
             .register_resource::<SimulationRange>(
                 "Meters from the nearest focus that simulate in full; beyond, modules rest.",
             )
@@ -298,6 +305,7 @@ impl Plugin for WorldPlugin {
             .register_resource::<SurfaceMaterials>(
                 "Surface material table: friction, fuel, deformation, sounds.",
             )
+            .add_systems(PreUpdate, scalability::apply_scalability)
             .add_systems(
                 PostUpdate,
                 (update_focus_system, recenter_fields_system)
@@ -452,6 +460,9 @@ mod tests {
         let wear = app.world.resource::<GroundWear>();
         assert_eq!(wear.wear(DVec3::new(10.0, 0.0, -20.0)), 0.0);
         assert_eq!(app.world.resource::<SimulationRange>().active_m, 150.0);
+        app.insert_resource(Scalability::preset(QualityPreset::Low));
+        app.update();
+        assert_eq!(app.world.resource::<SimulationRange>().active_m, 80.0);
         let registry = app.world.resource::<TypeRegistry>();
         for name in [
             "RigidBody",

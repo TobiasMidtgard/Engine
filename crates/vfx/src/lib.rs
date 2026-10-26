@@ -456,6 +456,60 @@ mod tests {
     }
 
     #[test]
+    fn effects_far_from_every_focus_rest_and_far_one_shots_are_dropped() {
+        let mut app = App::new();
+        app.add_plugins((engine_world::WorldPlugin, VfxPlugin));
+        let camera = app
+            .world
+            .spawn((
+                Transform::from_xyz(0.0, 1.0, 0.0),
+                engine_world::SimulationFocus::default(),
+            ))
+            .id();
+        app.update();
+        let near = DVec3::new(10.0, 1.0, 0.0);
+        let far = DVec3::new(1000.0, 1.0, 0.0);
+        app.world.spawn((
+            Transform::from_translation(near),
+            ParticleEffect::new("ambient.fireflies"),
+        ));
+        app.world.spawn((
+            Transform::from_translation(far),
+            ParticleEffect::new("ambient.fireflies"),
+        ));
+        let shot = app
+            .world
+            .spawn((
+                Transform::from_translation(far),
+                ParticleEffect::once("impact.rock"),
+            ))
+            .id();
+        app.update_n(3);
+        let stats = app.world.resource::<VfxRuntime>().stats;
+        assert_eq!((stats.effects, stats.resting), (1, 1), "{stats:?}");
+        assert!(
+            app.world.get_entity(shot).is_err(),
+            "a one-shot no one is near is dropped"
+        );
+        // Walk over: the far one wakes and the near one, now far, rests.
+        app.world.get_mut::<Transform>(camera).unwrap().translation = far;
+        app.update_n(3);
+        let stats = app.world.resource::<VfxRuntime>().stats;
+        assert_eq!((stats.effects, stats.resting), (1, 1), "{stats:?}");
+        // A one-shot near the focus plays.
+        let shot = app
+            .world
+            .spawn((
+                Transform::from_translation(far),
+                ParticleEffect::once("impact.rock"),
+            ))
+            .id();
+        app.update();
+        assert!(app.world.get_entity(shot).is_ok());
+        assert_eq!(app.world.resource::<VfxRuntime>().stats.effects, 2);
+    }
+
+    #[test]
     fn marks_api_leaves_and_clears_marks() {
         let mut app = app();
         let r = call_api(

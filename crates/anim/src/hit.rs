@@ -187,7 +187,7 @@ pub(crate) fn flinch_system(
     mut q: Query<(&mut Animator, &mut HitReaction, Option<&LocalTimeScale>)>,
 ) {
     for (mut animator, mut reaction, local) in &mut q {
-        if reaction.state.is_empty() {
+        if reaction.state.is_empty() || !animator.posed() {
             continue;
         }
         let dt = time.delta_for(local);

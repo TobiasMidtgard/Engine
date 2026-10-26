@@ -34,7 +34,7 @@ use engine_render::{
 use engine_world::animation::{AnimationParams, BodyRequest};
 use engine_world::character::{Ancestry, AppearanceRequest};
 use engine_world::physics::PhysicsQueries;
-use engine_world::{DamageEvent, DamageKind, Ground};
+use engine_world::{DamageEvent, DamageKind, FocusPoints, Ground, SimulationRange};
 use serde_json::{Value, json};
 
 use crate::animator::{AnimationLibrary, Animator, AnimatorSettings};
@@ -132,9 +132,11 @@ pub struct DemoPath {
     velocity: Vec2,
     #[serde(skip)]
     accel: f32,
-    /// Rise per meter of the ground along the way (smoothed).
+    /// Rise per meter of the ground along the way (smoothed), and as last measured.
     #[serde(skip)]
     grade: f32,
+    #[serde(skip)]
+    rise: f32,
     #[serde(skip)]
     started: bool,
     /// Stops along the way.
@@ -177,6 +179,7 @@ impl Default for DemoPath {
             velocity: Vec2::ZERO,
             accel: 0.0,
             grade: 0.0,
+            rise: 0.0,
             started: false,
             pauses: Vec::new(),
             pause: None,
@@ -1914,6 +1917,8 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
 #[allow(clippy::type_complexity)]
 fn demo_path_system(
     time: Res<Time>,
+    focus: Res<FocusPoints>,
+    range: Res<SimulationRange>,
     ground: Res<Ground>,
     physics: Option<Res<PhysicsQueries>>,
     surfaces: Res<IkSurfaces>,
@@ -1925,7 +1930,12 @@ fn demo_path_system(
         Option<&LocalTimeScale>,
     )>,
 ) {
+    let frame = time.frame_count();
     for (entity, mut path, mut t, params, local) in &mut q {
+        // Beyond the simulation range a walker waits where it is (its body rests too).
+        if path.started && range.is_resting(&focus, t.translation) {
+            continue;
+        }
         let dt = time.delta_for(local);
         path.build();
         if path.samples.len() < 2 {
@@ -1953,10 +1963,15 @@ fn demo_path_system(
                 .probe(DVec3::new(q.x, pos.y + 0.3, q.z), 0.7, 3.0)
                 .map(|h| h.height)
         };
-        let rise = match (ground_at(0.5), ground_at(-0.5)) {
-            (Some(ahead), Some(behind)) if speed > 0.1 => (ahead - behind) as f32,
-            _ => 0.0,
-        };
+        // The grade is smoothed over a fifth of a second: measuring it every fourth frame
+        // (staggered across walkers) is plenty.
+        if !path.started || (frame + entity.to_bits()).is_multiple_of(4) {
+            path.rise = match (ground_at(0.5), ground_at(-0.5)) {
+                (Some(ahead), Some(behind)) if speed > 0.1 => (ahead - behind) as f32,
+                _ => 0.0,
+            };
+        }
+        let rise = path.rise;
         if path.started {
             pos.y += (target_y - pos.y) * smoothing(dt, 0.12) as f64;
         } else {

@@ -9,8 +9,11 @@ use engine_world::physics::PhysicsQueries;
 use engine_world::{ContactKind, Ground, GroundContact, SurfaceId, WorldShift};
 
 use crate::animator::Animator;
-use crate::ik::{GroundProbe, IkSurfaces, to_world};
+use crate::ik::{GroundHit, GroundProbe, IkSurfaces, to_world};
 use crate::xform::smoothing;
+
+/// A wheel probes the ground again once its center moved this far, meters.
+const REPROBE_M: f64 = 0.01;
 
 /// One wheel of a [`VehicleRig`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -30,6 +33,10 @@ pub struct WheelRig {
     pub(crate) velocity: f32,
     #[serde(skip)]
     pub(crate) distance: f32,
+    /// Where the wheel's center was when the ground under it was last probed, and what the
+    /// probe found (a parked car probes nothing).
+    #[serde(skip)]
+    pub(crate) probed: Option<(DVec3, Option<GroundHit>)>,
 }
 
 impl Default for WheelRig {
@@ -43,6 +50,7 @@ impl Default for WheelRig {
             compression: 0.0,
             velocity: 0.0,
             distance: 0.0,
+            probed: None,
         }
     }
 }
@@ -151,6 +159,21 @@ impl VehicleRig {
     pub fn take_contacts(&mut self) -> Vec<WheelContact> {
         std::mem::take(&mut self.rt.contacts)
     }
+
+    /// Forget the motion history and the suspension's state (after frames without a pose,
+    /// such as resting beyond the simulation range).
+    pub fn restart(&mut self) {
+        let contacts = std::mem::take(&mut self.rt.contacts);
+        self.rt = VehicleRuntime {
+            contacts,
+            ..Default::default()
+        };
+        for w in &mut self.wheels {
+            w.compression = 0.0;
+            w.velocity = 0.0;
+            w.probed = None;
+        }
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -166,19 +189,23 @@ pub(crate) fn vehicle_rig_system(
         Option<&VehicleControls>,
     )>,
 ) {
-    q.par_iter_mut()
-        .for_each(|(entity, mut animator, mut rig, gt, controls)| {
-            if !rig.enabled {
-                return;
-            }
-            let probe = GroundProbe {
-                ground: &ground,
-                physics: physics.as_deref(),
-                surfaces: &surfaces.0,
-                exclude: Some(entity),
-            };
-            step_vehicle(&mut animator, &mut rig, gt, controls, &probe);
-        });
+    // A scene has a handful of vehicles: a parallel loop would cost more than it saves, and
+    // while it waited the thread could pick up other systems' work.
+    for (entity, mut animator, mut rig, gt, controls) in &mut q {
+        if !rig.enabled || !animator.posed() {
+            continue;
+        }
+        if animator.fresh() {
+            rig.restart();
+        }
+        let probe = GroundProbe {
+            ground: &ground,
+            physics: physics.as_deref(),
+            surfaces: &surfaces.0,
+            exclude: Some(entity),
+        };
+        step_vehicle(&mut animator, &mut rig, gt, controls, &probe);
+    }
 }
 
 /// Animate one vehicle for this frame.
@@ -267,11 +294,20 @@ pub fn step_vehicle(
         let rest = skeleton.rest_model[bone].t;
         // Suspension: where would the wheel sit on the ground under it?
         let center_world = to_world(gt, rest);
-        let target = match probe.probe(
-            center_world,
-            rig.travel + w.radius,
-            rig.travel + w.radius + 0.5,
-        ) {
+        // The ground under a wheel that hasn't moved is where it was.
+        let hit = match w.probed {
+            Some((at, hit)) if at.distance_squared(center_world) < REPROBE_M * REPROBE_M => hit,
+            _ => {
+                let hit = probe.probe(
+                    center_world,
+                    rig.travel + w.radius,
+                    rig.travel + w.radius + 0.5,
+                );
+                w.probed = Some((center_world, hit));
+                hit
+            }
+        };
+        let target = match hit {
             Some(h) => {
                 let want = h.height + w.radius as f64;
                 if w.distance >= rig.track_spacing && rig.track_spacing > 0.0 {

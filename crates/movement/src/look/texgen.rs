@@ -84,35 +84,53 @@ pub fn bake(
             1.055 * c.powf(1.0 / 2.4) - 0.055
         }
     };
-    let mut base = Vec::with_capacity(n * n * 4);
-    let mut normal = Vec::with_capacity(n * n * 4);
-    let mut mr = Vec::with_capacity(n * n * 4);
-    let mut ao = Vec::with_capacity(n * n * 4);
-    for y in 0..n {
-        for x in 0..n {
-            let s = samples[y * n + x];
-            base.extend_from_slice(&[
-                to8(srgb(s.albedo.x)),
-                to8(srgb(s.albedo.y)),
-                to8(srgb(s.albedo.z)),
-                255,
-            ]);
-            // Central differences with wrap-around (tiling). Rows run top to bottom (+v);
-            // tangent-space +Y points up the image (glTF/OpenGL).
-            let dhdu = (h(x + 1, y) - h(x + n - 1, y)) / (2.0 * texel);
-            let dhdv = (h(x, y + 1) - h(x, y + n - 1)) / (2.0 * texel);
-            let nrm = Vec3::new(-dhdu * normal_strength, dhdv * normal_strength, 1.0).normalize();
-            normal.extend_from_slice(&[
-                to8(nrm.x * 0.5 + 0.5),
-                to8(nrm.y * 0.5 + 0.5),
-                to8(nrm.z * 0.5 + 0.5),
-                255,
-            ]);
-            mr.extend_from_slice(&[255, to8(s.roughness), to8(s.metallic), 255]);
-            let a = to8(s.ao);
-            ao.extend_from_slice(&[a, a, a, 255]);
+    let (mut base, mut normal, mut mr, mut ao) = (
+        vec![0u8; n * n * 4],
+        vec![0u8; n * n * 4],
+        vec![0u8; n * n * 4],
+        vec![0u8; n * n * 4],
+    );
+    // Encoding runs on the same row bands as the sampling.
+    let band = rows_per * n * 4;
+    std::thread::scope(|s| {
+        let bands = base
+            .chunks_mut(band)
+            .zip(normal.chunks_mut(band))
+            .zip(mr.chunks_mut(band))
+            .zip(ao.chunks_mut(band));
+        for (band_i, (((base, normal), mr), ao)) in bands.enumerate() {
+            let (h, samples) = (&h, &samples);
+            s.spawn(move || {
+                for i in 0..base.len() / 4 {
+                    let idx = band_i * rows_per * n + i;
+                    let (x, y) = (idx % n, idx / n);
+                    let s = samples[idx];
+                    let px = i * 4..i * 4 + 4;
+                    base[px.clone()].copy_from_slice(&[
+                        to8(srgb(s.albedo.x)),
+                        to8(srgb(s.albedo.y)),
+                        to8(srgb(s.albedo.z)),
+                        255,
+                    ]);
+                    // Central differences with wrap-around (tiling). Rows run top to bottom
+                    // (+v); tangent-space +Y points up the image (glTF/OpenGL).
+                    let dhdu = (h(x + 1, y) - h(x + n - 1, y)) / (2.0 * texel);
+                    let dhdv = (h(x, y + 1) - h(x, y + n - 1)) / (2.0 * texel);
+                    let nrm =
+                        Vec3::new(-dhdu * normal_strength, dhdv * normal_strength, 1.0).normalize();
+                    normal[px.clone()].copy_from_slice(&[
+                        to8(nrm.x * 0.5 + 0.5),
+                        to8(nrm.y * 0.5 + 0.5),
+                        to8(nrm.z * 0.5 + 0.5),
+                        255,
+                    ]);
+                    mr[px.clone()].copy_from_slice(&[255, to8(s.roughness), to8(s.metallic), 255]);
+                    let a = to8(s.ao);
+                    ao[px].copy_from_slice(&[a, a, a, 255]);
+                }
+            });
         }
-    }
+    });
     let size = n as u32;
     TextureSet {
         base_color: Image::new(size, size, base, true),

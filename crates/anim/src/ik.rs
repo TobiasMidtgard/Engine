@@ -593,8 +593,13 @@ pub(crate) fn foot_ik_system(
 ) {
     q.par_iter_mut()
         .for_each(|(entity, mut animator, mut ik, gt)| {
-            if !ik.enabled || ik.weight <= 0.0 || ik.legs.is_empty() {
+            if !ik.enabled || ik.weight <= 0.0 || ik.legs.is_empty() || !animator.posed() {
                 return;
+            }
+            if animator.fresh() {
+                // Planted feet were left where the body stood when it came to rest.
+                ik.locks.clear();
+                ik.last_body = None;
             }
             let probe = GroundProbe {
                 ground: &ground,
@@ -789,8 +794,11 @@ pub(crate) fn look_at_system(
     mut q: Query<(&mut Animator, &mut LookAt, &GlobalTransform)>,
 ) {
     for (mut animator, mut look, gt) in &mut q {
-        if !look.enabled || look.weight <= 0.0 {
+        if !look.enabled || look.weight <= 0.0 || !animator.posed() {
             continue;
+        }
+        if animator.fresh() {
+            look.current = None;
         }
         let target_world = look
             .entity
@@ -828,6 +836,9 @@ pub(crate) fn look_at_system(
 
 pub(crate) fn reach_ik_system(mut q: Query<(&mut Animator, &ReachIk, &GlobalTransform)>) {
     for (mut animator, reach, gt) in &mut q {
+        if !animator.posed() {
+            continue;
+        }
         for chain in &reach.chains {
             let mut weight = chain.weight;
             if !chain.weight_curve.is_empty() {

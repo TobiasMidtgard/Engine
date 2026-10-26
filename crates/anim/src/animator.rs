@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use engine_core::prelude::*;
-use engine_world::FocusPoints;
-use engine_world::animation::{AnimationParams, AnimationTrigger, SkeletonPose};
+use engine_world::animation::{AnimationParams, AnimationTrigger, Ragdoll, SkeletonPose};
+use engine_world::{FocusPoints, SimulationRange};
 
 use crate::clip::AnimationClip;
 use crate::graph::{AnimGraph, EvalCtx, FiredEvent, GraphInstance};
@@ -15,6 +15,14 @@ use crate::xform::Xf;
 
 /// How long an `AnimationTrigger` waits for a transition that can use it, seconds.
 pub const TRIGGER_LIFETIME: f32 = 0.35;
+
+/// A character resting beyond the [`SimulationRange`] takes a fresh pose this often, seconds,
+/// so a far crowd isn't frozen in place.
+pub const REST_POSE_SECS: f32 = 2.0;
+
+/// Largest step procedural layers see on the first frame after a rest (the graph itself
+/// catches up the whole time).
+const WAKE_DT: f32 = 1.0 / 30.0;
 
 /// Skeletons, clips and graphs by name, shared by every character. Builders register their
 /// rigs here; AI agents add clips and graphs through `anim.add_clip` / `anim.add_graph`.
@@ -144,6 +152,14 @@ pub struct Animator {
     /// procedural layers and IK don't stack on their own previous result).
     base: Vec<Xf>,
     lod_skipped: f32,
+    /// Beyond the simulation range (with its hysteresis).
+    resting: bool,
+    /// Seconds since the last pose while resting.
+    rest_secs: f32,
+    /// False on frames that keep the last pose: every pose system skips this animator.
+    posed: bool,
+    /// The first pose after frames without one: systems with motion history restart it.
+    fresh: bool,
 }
 
 impl Animator {
@@ -167,6 +183,10 @@ impl Animator {
             dt: 0.0,
             base: Vec::new(),
             lod_skipped: 0.0,
+            resting: false,
+            rest_secs: 0.0,
+            posed: true,
+            fresh: false,
         }
     }
 
@@ -206,6 +226,24 @@ impl Animator {
 
     pub fn skeleton_name(&self) -> &str {
         &self.skeleton_name
+    }
+
+    /// Whether this frame poses the character. False while it rests beyond the
+    /// [`SimulationRange`] between its occasional poses: the last pose stays, and procedural
+    /// layers, IK and the pose output skip it.
+    pub fn posed(&self) -> bool {
+        self.posed
+    }
+
+    /// The first pose after frames without one: procedural layers that
+    /// keep motion history (velocities, planted feet, spring particles) start it over.
+    pub fn fresh(&self) -> bool {
+        self.fresh
+    }
+
+    /// Resting beyond the [`SimulationRange`].
+    pub fn resting(&self) -> bool {
+        self.resting
     }
 
     /// Edit the pose in model space (IK, procedural motion).
@@ -267,6 +305,13 @@ impl Animator {
             self.curves.clear();
             self.root_delta = Vec3::ZERO;
         }
+    }
+
+    /// Keep last frame's final pose without advancing the graph.
+    fn keep(&mut self) {
+        self.dt = 0.0;
+        self.events.clear();
+        self.root_delta = Vec3::ZERO;
     }
 
     /// Start this frame from the last evaluated pose without advancing the graph.
@@ -375,13 +420,19 @@ type EvalQuery<'w, 's> = Query<
         Option<&'static LocalTimeScale>,
         Option<&'static mut Transform>,
         Option<&'static GlobalTransform>,
+        Option<&'static Ragdoll>,
     ),
 >;
 
-pub(crate) fn evaluate_animators(time: Res<Time>, focus: Res<FocusPoints>, mut q: EvalQuery) {
+pub(crate) fn evaluate_animators(
+    time: Res<Time>,
+    focus: Res<FocusPoints>,
+    range: Res<SimulationRange>,
+    mut q: EvalQuery,
+) {
     let frame = time.frame_count();
     q.par_iter_mut().for_each(
-        |(entity, mut animator, settings, params, local, transform, gt)| {
+        |(entity, mut animator, settings, params, local, transform, gt, ragdoll)| {
             let defaults = AnimatorSettings::default();
             let settings = settings.unwrap_or(&defaults);
             let mut dt = if settings.paused {
@@ -389,8 +440,40 @@ pub(crate) fn evaluate_animators(time: Res<Time>, focus: Res<FocusPoints>, mut q
             } else {
                 time.delta_for(local) * settings.speed
             };
+            // Beyond the simulation range: keep the last pose and take a fresh one every few
+            // seconds. A body in its ragdoll follows physics, so it never rests.
+            let was_resting = animator.resting;
+            if let Some(gt) = gt {
+                let p = gt.translation();
+                let limp = ragdoll.is_some_and(|r| r.weight > 0.0);
+                animator.resting = !limp
+                    && if was_resting {
+                        !range.is_active(&focus, p)
+                    } else {
+                        range.is_resting(&focus, p)
+                    };
+            }
+            if animator.resting {
+                if !was_resting {
+                    // Spread the poses of a crowd that comes to rest together over the cycle.
+                    animator.rest_secs = (entity.to_bits() % 97) as f32 / 97.0 * REST_POSE_SECS;
+                }
+                animator.rest_secs += dt;
+                if animator.rest_secs < REST_POSE_SECS {
+                    animator.posed = false;
+                    animator.fresh = false;
+                    animator.keep();
+                    return;
+                }
+                dt = std::mem::take(&mut animator.rest_secs);
+            } else {
+                dt += std::mem::take(&mut animator.rest_secs);
+            }
+            animator.fresh = !animator.posed;
+            animator.posed = true;
             // Far away: update at a quarter rate (accumulating time so speed is unchanged).
-            if settings.lod_distance > 0.0
+            if !animator.fresh
+                && settings.lod_distance > 0.0
                 && let Some(gt) = gt
                 && !focus.points.is_empty()
                 && focus.distance(gt.translation()) > settings.lod_distance as f64
@@ -405,6 +488,9 @@ pub(crate) fn evaluate_animators(time: Res<Time>, focus: Res<FocusPoints>, mut q
                 dt += std::mem::take(&mut animator.lod_skipped);
             }
             animator.evaluate(params, dt);
+            if animator.fresh {
+                animator.dt = animator.dt.min(WAKE_DT);
+            }
             if settings.root_motion
                 && let Some(mut t) = transform
             {
@@ -428,6 +514,9 @@ pub(crate) fn evaluate_animators(time: Res<Time>, focus: Res<FocusPoints>, mut q
 /// Publish the final pose: model space, the `SkeletonPose` contract component.
 pub(crate) fn publish_pose(mut q: Query<(&mut Animator, &mut SkeletonPose)>) {
     q.par_iter_mut().for_each(|(mut animator, mut pose)| {
+        if !animator.posed {
+            return;
+        }
         animator.refresh_model();
         if pose.names.len() != animator.skeleton.len() {
             pose.names = animator.skeleton.names.clone();

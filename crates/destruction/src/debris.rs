@@ -19,7 +19,9 @@ use engine_render::{
 use engine_world::physics::{
     BodyKind, Collider, ColliderShape, PhysicsBackend, RigidBody, Velocity,
 };
-use engine_world::{ContactKind, Env, GroundContact, NoiseEvent, SurfaceMaterials};
+use engine_world::{
+    ContactKind, Env, GroundContact, NoiseEvent, SimulationRange, SurfaceMaterials,
+};
 
 use crate::assets::DestructionAssets;
 use crate::material::{DestructibleMaterial, DestructionMaterials};
@@ -861,11 +863,16 @@ pub fn simulate_debris_system(
     walls_changed: Query<(&GlobalTransform, &WallState), Changed<WallState>>,
     mut contacts: MessageWriter<GroundContact>,
     mut noise: MessageWriter<NoiseEvent>,
+    range: Option<Res<SimulationRange>>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
+    // Beyond the simulation range of every focus, debris rests where it is: it stops stepping
+    // and carries on when someone comes back.
+    let range = range.map_or_else(SimulationRange::default, |r| *r);
+    let rests = |p: DVec3| range.is_resting(&env.focus, p);
     let rock: Vec<(&GlobalTransform, &VoxelState)> = volumes.iter().collect();
     // Rock dug or blasted: whatever rests on or by it looks again.
     let mut changed: Vec<(DVec3, DVec3)> = rock_changed
@@ -874,9 +881,13 @@ pub fn simulate_debris_system(
         .collect();
     // Floors and roof decks (walls laid flat, front face up) hold debris up on their solid
     // cells; whatever rests on one that was shot or blasted looks again.
-    let floors: Vec<Floor> = walls
+    let floors: Vec<(Floor, (DVec3, DVec3))> = walls
         .iter()
         .filter_map(|(gt, s)| Floor::of(gt, s))
+        .map(|f| {
+            let b = f.bounds(FLOOR_REACH_M + 0.05);
+            (f, b)
+        })
         .collect();
     changed.extend(
         walls_changed
@@ -887,7 +898,12 @@ pub fn simulate_debris_system(
     // Chunks at rest are what the rest land on.
     let mut rubble = Rubble::default();
     for (entity, t, body, debris) in &q {
-        if !body.asleep || body.sinking || debris.chip || debris.mass_kg < SUPPORT_MIN_KG {
+        if !body.asleep
+            || body.sinking
+            || debris.chip
+            || debris.mass_kg < SUPPORT_MIN_KG
+            || rests(t.translation)
+        {
             continue;
         }
         // Its box: the bounds of its contact points (its hull's extremes).
@@ -904,251 +920,288 @@ pub fn simulate_debris_system(
             half: (hi - lo) * 0.5,
         });
     }
-    for (entity, mut t, mut body, mut debris) in &mut q {
-        let (t, body) = (&mut *t, &mut *body);
-        if body.sinking {
-            t.translation -= env.up(t.translation).as_dvec3() * (0.35 * dt) as f64;
-            continue;
-        }
-        // What it lay on was dug, blasted, woken, or sank away: it falls again.
-        let lost = body.on.is_some_and(|s| !rubble.contains(s));
-        if body.asleep
-            && (lost
-                || changed.iter().any(|(lo, hi)| {
-                    t.translation.cmpge(*lo).all() && t.translation.cmple(*hi).all()
-                }))
-        {
-            body.asleep = false;
-            body.still = 0.0;
-            body.on = None;
-        }
-        if body.asleep {
-            continue;
-        }
-        let g = env.gravity(t.translation);
-        let up = env.up(t.translation);
-        body.velocity += g * dt;
-        // Air drag on its broadest face: light flakes and chips slow down hard and land near
-        // where they broke off instead of sailing across the yard.
-        let drag = AIR_DRAG * body.broad_area() * body.inv_mass;
-        body.velocity /= 1.0 + 0.02 * dt + drag * body.velocity.length() * dt;
-        body.angular *= 1.0 / (1.0 + 0.15 * dt);
-        t.translation += (body.velocity * dt).as_dvec3();
-        let w = body.angular;
-        if w.length_squared() > 1e-12 {
-            let dq = Quat::from_xyzw(w.x, w.y, w.z, 0.0) * t.rotation;
-            t.rotation = Quat::from_xyzw(
-                t.rotation.x + 0.5 * dt * dq.x,
-                t.rotation.y + 0.5 * dt * dq.y,
-                t.rotation.z + 0.5 * dt * dq.z,
-                t.rotation.w + 0.5 * dt * dq.w,
-            )
-            .normalize();
-        }
-        let Some(ground) = env.ground(t.translation) else {
-            continue;
-        };
-        let n = ground.normal.normalize_or(up);
-        let scale = t.scale;
-        let rot = t.rotation;
-        let center = t.translation;
-        // Out of its hole: past the rims and all of it clear of the rock (its hull's extremes,
-        // its center and a lattice over its box no coarser than a thin shelf), it lands on rock
-        // from now on.
-        if let RockContact::Leaving(from) = body.rock
-            && center.distance(from) >= LEAVE_M as f64
-        {
-            let inside = |local: Vec3| in_rock(&rock, center + (rot * local).as_dvec3());
-            let (lo, hi) = body.points.iter().fold(
-                (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
-                |(lo, hi), p| (lo.min(*p * scale), hi.max(*p * scale)),
-            );
-            let steps = (((hi - lo).max_element() / LEAVE_LATTICE_M).ceil() as usize).clamp(1, 8);
-            let clear = !body.points.is_empty()
-                && !body.points.iter().any(|p| inside(*p * scale))
-                && !inside(Vec3::ZERO)
-                && !box_lattice(steps)
-                    .any(|(i, j, k)| inside(lo + (hi - lo) * Vec3::new(i, j, k) / steps as f32));
-            if clear {
-                body.rock = RockContact::Lands;
+    // Pieces step in parallel (each reads only the rubble and rock as they were at the start of
+    // the step); their landings are written afterwards.
+    let hits = std::sync::Mutex::new((Vec::new(), Vec::new()));
+    q.par_iter_mut()
+        .for_each(|(entity, mut t, mut body, mut debris)| {
+            if !body.sinking && rests(t.translation) {
+                return;
             }
-        }
-        if !rock.is_empty() && matches!(body.rock, RockContact::Unknown | RockContact::Buried) {
-            let buried = body
-                .points
-                .iter()
-                .map(|p| rock_depth(&rock, center + (rot * (*p * scale)).as_dvec3()))
-                .fold(0.0, f32::max);
-            let limit = if body.rock == RockContact::Unknown {
-                BURIED_M
-            } else {
-                0.0
-            };
-            body.rock = if buried <= limit {
-                RockContact::Lands
-            } else {
-                RockContact::Buried
-            };
-        }
-        let on_rock = body.rock == RockContact::Lands && !rock.is_empty();
-        // Collect penetrating points.
-        let mut touching = [(Vec3::ZERO, 0.0f32, Vec3::ZERO); MAX_CONTACTS];
-        let mut count = 0;
-        let mut touch = |r: Vec3, depth: f32, normal: Vec3| {
-            if depth > 0.0 && count < MAX_CONTACTS {
-                touching[count] = (r, depth, normal);
-                count += 1;
-            }
-        };
-        // The ground and rock, at its hull's extreme points: rock floors hold it up like the
-        // ground, rock walls and ceilings push it out of their face, so it slides down a cliff
-        // onto the ledge below instead of catching on the cliff's edge.
-        for p in &body.points {
-            let r = rot * (*p * scale);
-            let wp = center + r.as_dvec3();
-            let mut h = env.ground_query.height(wp).unwrap_or(ground.height);
-            for f in &floors {
-                if let Some(top) = f.top_under(wp) {
-                    h = h.max(top);
+            // What it lay on was dug, blasted, woken, or sank away: it falls again. Asleep and
+            // undisturbed, it is only looked at (not written, so nothing redraws or re-propagates it).
+            if body.asleep && !body.sinking {
+                let lost = body.on.is_some_and(|s| !rubble.contains(s));
+                let p = t.translation;
+                if !lost
+                    && !changed
+                        .iter()
+                        .any(|(lo, hi)| p.cmpge(*lo).all() && p.cmple(*hi).all())
+                {
+                    return;
                 }
             }
-            if on_rock {
-                match rock_side(&rock, wp, ROCK_REACH_M) {
-                    Some((normal, depth)) => touch(r, depth, normal),
-                    None => {
-                        if let Some(r) = rock_contact(&rock, wp, ROCK_REACH_M) {
-                            h = h.max(r);
+            let (t, body) = (&mut *t, &mut *body);
+            if body.sinking {
+                t.translation -= env.up(t.translation).as_dvec3() * (0.35 * dt) as f64;
+                return;
+            }
+            if body.asleep {
+                body.asleep = false;
+                body.still = 0.0;
+                body.on = None;
+            }
+            let g = env.gravity(t.translation);
+            let up = env.up(t.translation);
+            body.velocity += g * dt;
+            // Air drag on its broadest face: light flakes and chips slow down hard and land near
+            // where they broke off instead of sailing across the yard.
+            let drag = AIR_DRAG * body.broad_area() * body.inv_mass;
+            body.velocity /= 1.0 + 0.02 * dt + drag * body.velocity.length() * dt;
+            body.angular *= 1.0 / (1.0 + 0.15 * dt);
+            t.translation += (body.velocity * dt).as_dvec3();
+            let w = body.angular;
+            if w.length_squared() > 1e-12 {
+                let dq = Quat::from_xyzw(w.x, w.y, w.z, 0.0) * t.rotation;
+                t.rotation = Quat::from_xyzw(
+                    t.rotation.x + 0.5 * dt * dq.x,
+                    t.rotation.y + 0.5 * dt * dq.y,
+                    t.rotation.z + 0.5 * dt * dq.z,
+                    t.rotation.w + 0.5 * dt * dq.w,
+                )
+                .normalize();
+            }
+            let Some(ground) = env.ground(t.translation) else {
+                return;
+            };
+            let n = ground.normal.normalize_or(up);
+            let scale = t.scale;
+            let rot = t.rotation;
+            let center = t.translation;
+            // Out of its hole: past the rims and all of it clear of the rock (its hull's extremes,
+            // its center and a lattice over its box no coarser than a thin shelf), it lands on rock
+            // from now on.
+            if let RockContact::Leaving(from) = body.rock
+                && center.distance(from) >= LEAVE_M as f64
+            {
+                let inside = |local: Vec3| in_rock(&rock, center + (rot * local).as_dvec3());
+                let (lo, hi) = body.points.iter().fold(
+                    (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                    |(lo, hi), p| (lo.min(*p * scale), hi.max(*p * scale)),
+                );
+                let steps =
+                    (((hi - lo).max_element() / LEAVE_LATTICE_M).ceil() as usize).clamp(1, 8);
+                let clear = !body.points.is_empty()
+                    && !body.points.iter().any(|p| inside(*p * scale))
+                    && !inside(Vec3::ZERO)
+                    && !box_lattice(steps).any(|(i, j, k)| {
+                        inside(lo + (hi - lo) * Vec3::new(i, j, k) / steps as f32)
+                    });
+                if clear {
+                    body.rock = RockContact::Lands;
+                }
+            }
+            if !rock.is_empty() && matches!(body.rock, RockContact::Unknown | RockContact::Buried) {
+                let buried = body
+                    .points
+                    .iter()
+                    .map(|p| rock_depth(&rock, center + (rot * (*p * scale)).as_dvec3()))
+                    .fold(0.0, f32::max);
+                let limit = if body.rock == RockContact::Unknown {
+                    BURIED_M
+                } else {
+                    0.0
+                };
+                body.rock = if buried <= limit {
+                    RockContact::Lands
+                } else {
+                    RockContact::Buried
+                };
+            }
+            let on_rock = body.rock == RockContact::Lands && !rock.is_empty();
+            // Collect penetrating points.
+            let mut touching = [(Vec3::ZERO, 0.0f32, Vec3::ZERO); MAX_CONTACTS];
+            let mut count = 0;
+            let mut touch = |r: Vec3, depth: f32, normal: Vec3| {
+                if depth > 0.0 && count < MAX_CONTACTS {
+                    touching[count] = (r, depth, normal);
+                    count += 1;
+                }
+            };
+            // The ground under each point from the one sample under its center, along the ground's
+            // tangent plane (a piece spans a meter or two; sampling the terrain at every point was
+            // most of the solver's cost).
+            let (slope_x, slope_z) = {
+                let ny = n.y.max(0.3) as f64;
+                (-(n.x as f64) / ny, -(n.z as f64) / ny)
+            };
+            let reach = body
+                .points
+                .iter()
+                .map(|p| (*p * scale).length())
+                .fold(0.0f32, f32::max) as f64;
+            let near_floors: Vec<&Floor> = floors
+                .iter()
+                .filter(|(_, (lo, hi))| {
+                    (center + DVec3::splat(reach)).cmpge(*lo).all()
+                        && (center - DVec3::splat(reach)).cmple(*hi).all()
+                })
+                .map(|(f, _)| f)
+                .collect();
+            // The ground and rock, at its hull's extreme points: rock floors hold it up like the
+            // ground, rock walls and ceilings push it out of their face, so it slides down a cliff
+            // onto the ledge below instead of catching on the cliff's edge.
+            for p in &body.points {
+                let r = rot * (*p * scale);
+                let wp = center + r.as_dvec3();
+                let d = wp - center;
+                let mut h = ground.height + (slope_x * d.x + slope_z * d.z).clamp(-reach, reach);
+                for f in &near_floors {
+                    if let Some(top) = f.top_under(wp) {
+                        h = h.max(top);
+                    }
+                }
+                if on_rock {
+                    match rock_side(&rock, wp, ROCK_REACH_M) {
+                        Some((normal, depth)) => touch(r, depth, normal),
+                        None => {
+                            if let Some(r) = rock_contact(&rock, wp, ROCK_REACH_M) {
+                                h = h.max(r);
+                            }
                         }
                     }
                 }
+                touch(r, ((h - wp.y) as f32) * n.y.max(0.2), n);
             }
-            touch(r, ((h - wp.y) as f32) * n.y.max(0.2), n);
-        }
-        // Resting chunks, box on box: a lattice over the lower half of its box, so it lies
-        // across an edge below it instead of tipping through it.
-        let mut on = None;
-        let reach = body
-            .points
-            .iter()
-            .map(|p| (*p * scale).length())
-            .fold(0.0f32, f32::max);
-        if !body.points.is_empty() && rubble.near(center, reach as f64) {
-            let (lo, hi) = body.points.iter().fold(
-                (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
-                |(lo, hi), p| (lo.min(*p * scale), hi.max(*p * scale)),
-            );
-            let mut best = 0.0f32;
-            let steps = if debris.chip { 1 } else { LATTICE };
-            for (i, j, k) in box_lattice(steps) {
-                let local = lo + (hi - lo) * Vec3::new(i, j, k) / steps as f32;
-                let r = rot * local;
-                if r.dot(up) > 0.0 {
-                    continue;
-                }
-                let wp = center + r.as_dvec3();
-                if let Some((top, s)) = rubble.top_under(wp, entity) {
-                    let depth = (top - wp.y) as f32;
-                    if depth > best {
-                        best = depth;
-                        on = Some(s);
+            // Resting chunks, box on box: a lattice over the lower half of its box, so it lies
+            // across an edge below it instead of tipping through it.
+            let mut on = None;
+            if !body.points.is_empty() && rubble.near(center, reach) {
+                let (lo, hi) = body.points.iter().fold(
+                    (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                    |(lo, hi), p| (lo.min(*p * scale), hi.max(*p * scale)),
+                );
+                let mut best = 0.0f32;
+                let steps = if debris.chip { 1 } else { LATTICE };
+                for (i, j, k) in box_lattice(steps) {
+                    let local = lo + (hi - lo) * Vec3::new(i, j, k) / steps as f32;
+                    let r = rot * local;
+                    if r.dot(up) > 0.0 {
+                        continue;
                     }
-                    touch(r, depth, n);
+                    let wp = center + r.as_dvec3();
+                    if let Some((top, s)) = rubble.top_under(wp, entity) {
+                        let depth = (top - wp.y) as f32;
+                        if depth > best {
+                            best = depth;
+                            on = Some(s);
+                        }
+                        touch(r, depth, n);
+                    }
                 }
             }
-        }
-        if count == 0 {
-            body.still = 0.0;
-            body.on = None;
-            continue;
-        }
-        body.on = on;
-        let inv_i_world = |v: Vec3, b: &DebrisBody| rot * (b.inv_inertia * (rot.inverse() * v));
-        let impact = -(body.velocity.dot(n)).min(0.0);
-        body.last_impact = impact;
-        debris.max_impact_speed = debris.max_impact_speed.max(impact);
-        if impact > 2.5 && debris.mass_kg > 30.0 {
-            contacts.write(GroundContact {
-                position: center,
-                normal: n,
-                size: [0.5, 0.5],
-                yaw: 0.0,
-                load_kg: debris.mass_kg,
-                speed: body.velocity.length(),
-                kind: ContactKind::Body,
-                surface: Some(ground.surface),
-                entity: Some(entity),
-            });
-            noise.write(NoiseEvent {
-                position: center,
-                radius: (debris.mass_kg.sqrt() * impact).clamp(5.0, 80.0),
-                source: Some(entity),
-            });
-        }
-        // Each contact pushes along its own normal: the ground's, or a rock face's.
-        let bounce = body.restitution;
-        let targets: [f32; MAX_CONTACTS] = std::array::from_fn(|k| {
-            let speed = -(body.velocity.dot(touching[k].2)).min(0.0);
-            if speed > 1.5 {
-                -bounce * speed.min(8.0)
-            } else {
-                0.0
+            if count == 0 {
+                body.still = 0.0;
+                body.on = None;
+                return;
             }
-        });
-        let mut normal_impulse = [0.0f32; MAX_CONTACTS];
-        for _ in 0..4 {
-            for k in 0..count {
-                let (r, _, nk) = touching[k];
-                let v = body.velocity + body.angular.cross(r);
-                let vn = v.dot(nk);
-                let rn = r.cross(nk);
-                let kn = body.inv_mass + inv_i_world(rn, body).cross(r).dot(nk);
-                let mut j = (targets[k] - vn) / kn.max(1e-6);
-                let old = normal_impulse[k];
-                normal_impulse[k] = (old + j).max(0.0);
-                j = normal_impulse[k] - old;
-                let imp = nk * j;
-                body.velocity += imp * body.inv_mass;
-                let dw = inv_i_world(r.cross(imp), body);
-                body.angular += dw;
-                // Friction.
-                let v = body.velocity + body.angular.cross(r);
-                let vt = v - nk * v.dot(nk);
-                let speed_t = vt.length();
-                if speed_t > 1e-5 {
-                    let tdir = vt / speed_t;
-                    let rt = r.cross(tdir);
-                    let kt = body.inv_mass + inv_i_world(rt, body).cross(r).dot(tdir);
-                    let jt = (-speed_t / kt.max(1e-6)).max(-body.friction * normal_impulse[k]);
-                    let imp = tdir * jt;
+            body.on = on;
+            let inv_i_world = |v: Vec3, b: &DebrisBody| rot * (b.inv_inertia * (rot.inverse() * v));
+            let impact = -(body.velocity.dot(n)).min(0.0);
+            body.last_impact = impact;
+            debris.max_impact_speed = debris.max_impact_speed.max(impact);
+            if impact > 2.5 && debris.mass_kg > 30.0 {
+                let mut hits = hits.lock().unwrap_or_else(|e| e.into_inner());
+                hits.0.push(GroundContact {
+                    position: center,
+                    normal: n,
+                    size: [0.5, 0.5],
+                    yaw: 0.0,
+                    load_kg: debris.mass_kg,
+                    speed: body.velocity.length(),
+                    kind: ContactKind::Body,
+                    surface: Some(ground.surface),
+                    entity: Some(entity),
+                });
+                hits.1.push(NoiseEvent {
+                    position: center,
+                    radius: (debris.mass_kg.sqrt() * impact).clamp(5.0, 80.0),
+                    source: Some(entity),
+                });
+            }
+            // Each contact pushes along its own normal: the ground's, or a rock face's.
+            let bounce = body.restitution;
+            let targets: [f32; MAX_CONTACTS] = std::array::from_fn(|k| {
+                let speed = -(body.velocity.dot(touching[k].2)).min(0.0);
+                if speed > 1.5 {
+                    -bounce * speed.min(8.0)
+                } else {
+                    0.0
+                }
+            });
+            let mut normal_impulse = [0.0f32; MAX_CONTACTS];
+            for _ in 0..4 {
+                for k in 0..count {
+                    let (r, _, nk) = touching[k];
+                    let v = body.velocity + body.angular.cross(r);
+                    let vn = v.dot(nk);
+                    let rn = r.cross(nk);
+                    let kn = body.inv_mass + inv_i_world(rn, body).cross(r).dot(nk);
+                    let mut j = (targets[k] - vn) / kn.max(1e-6);
+                    let old = normal_impulse[k];
+                    normal_impulse[k] = (old + j).max(0.0);
+                    j = normal_impulse[k] - old;
+                    let imp = nk * j;
                     body.velocity += imp * body.inv_mass;
                     let dw = inv_i_world(r.cross(imp), body);
                     body.angular += dw;
+                    // Friction.
+                    let v = body.velocity + body.angular.cross(r);
+                    let vt = v - nk * v.dot(nk);
+                    let speed_t = vt.length();
+                    if speed_t > 1e-5 {
+                        let tdir = vt / speed_t;
+                        let rt = r.cross(tdir);
+                        let kt = body.inv_mass + inv_i_world(rt, body).cross(r).dot(tdir);
+                        let jt = (-speed_t / kt.max(1e-6)).max(-body.friction * normal_impulse[k]);
+                        let imp = tdir * jt;
+                        body.velocity += imp * body.inv_mass;
+                        let dw = inv_i_world(r.cross(imp), body);
+                        body.angular += dw;
+                    }
                 }
             }
-        }
-        // Rolling resistance so pieces settle instead of rocking forever.
-        body.angular *= 1.0 / (1.0 + 2.5 * dt);
-        // Out of whatever it sank into: enough along each normal for its deepest point there.
-        let mut push = Vec3::ZERO;
-        for &(_, depth, normal) in &touching[..count] {
-            let need = depth - 0.002 - push.dot(normal);
-            if need > 0.0 {
-                push += normal * need;
+            // Rolling resistance so pieces settle instead of rocking forever.
+            body.angular *= 1.0 / (1.0 + 2.5 * dt);
+            // Out of whatever it sank into: enough along each normal for its deepest point there.
+            let mut push = Vec3::ZERO;
+            for &(_, depth, normal) in &touching[..count] {
+                let need = depth - 0.002 - push.dot(normal);
+                if need > 0.0 {
+                    push += normal * need;
+                }
             }
-        }
-        t.translation += (push * 0.8).as_dvec3();
-        if body.velocity.length_squared() < 0.12 * 0.12 && body.angular.length_squared() < 0.3 * 0.3
-        {
-            body.still += dt;
-            if body.still > 0.5 {
-                body.asleep = true;
-                body.velocity = Vec3::ZERO;
-                body.angular = Vec3::ZERO;
+            t.translation += (push * 0.8).as_dvec3();
+            if body.velocity.length_squared() < 0.12 * 0.12
+                && body.angular.length_squared() < 0.3 * 0.3
+            {
+                body.still += dt;
+                if body.still > 0.5 {
+                    body.asleep = true;
+                    body.velocity = Vec3::ZERO;
+                    body.angular = Vec3::ZERO;
+                }
+            } else {
+                body.still = 0.0;
             }
-        } else {
-            body.still = 0.0;
-        }
-    }
+        });
+    // In entity order, whichever thread found them.
+    let (mut ground_contacts, mut noises): (Vec<GroundContact>, Vec<NoiseEvent>) =
+        hits.into_inner().unwrap_or_else(|e| e.into_inner());
+    ground_contacts.sort_by_key(|c| c.entity);
+    noises.sort_by_key(|n| n.source);
+    contacts.write_batch(ground_contacts);
+    noise.write_batch(noises);
 }
 
 /// Age debris, enforce the budget, sink and remove expired pieces, and animate dust.

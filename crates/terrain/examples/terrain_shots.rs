@@ -1027,10 +1027,17 @@ fn main() {
                 .resource::<engine_core::diagnostics::Diagnostics>();
             let built = d.get("terrain.patches_built").unwrap_or(0.0);
             let boost = d.get("terrain.detail_boost").unwrap_or(1.0);
-            if built == 0.0 && (boost - last_boost).abs() < 0.005 {
+            // (Patches build on worker threads: wait for those on their way, too.)
+            let pending = d.get("terrain.patches_building").unwrap_or(0.0)
+                + d.get("terrain.patches_missing").unwrap_or(0.0);
+            if built == 0.0 && pending == 0.0 && (boost - last_boost).abs() < 0.005 {
                 break;
             }
             last_boost = boost;
+            // Let the workers finish what they have before drawing another frame.
+            if d.get("terrain.patches_building").unwrap_or(0.0) > 0.0 {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
             app.update();
         }
         let path = out.join(format!("{}.png", view.name));

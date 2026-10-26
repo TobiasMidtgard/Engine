@@ -16,7 +16,7 @@ use std::sync::Arc;
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::PointLight;
-use engine_world::Env;
+use engine_world::{Env, SimulationRange};
 
 use crate::effect::{EffectDesc, EmitterDesc};
 use crate::gpu::GpuEmitter;
@@ -318,6 +318,10 @@ pub struct VfxStats {
     pub pool_high_water: u32,
     /// Emitters that could not get room in the pool (raise `VfxSettings::max_particles`).
     pub starved: u32,
+    /// Looping effects resting beyond the simulation range of every focus.
+    pub resting: u32,
+    /// One-shots dropped this frame because they started beyond it.
+    pub dropped: u32,
 }
 
 struct EmitterRun {
@@ -365,6 +369,12 @@ struct Instance {
     air_density: f32,
     /// This frame's time step for the effect, seconds.
     frame_dt: f32,
+    /// Beyond the [`SimulationRange`] of every focus: not stepped, its particles held still.
+    resting: bool,
+    /// Where gravity, air and the ground below were last looked up, and seconds until they
+    /// are looked up again even if it stays put (asking the terrain is not cheap).
+    env_at: Option<DVec3>,
+    env_timer: f32,
 }
 
 /// Runtime state of every playing effect (managed by the plugin).
@@ -406,6 +416,10 @@ impl VfxRuntime {
 
 /// Prewarm step, seconds.
 const PREWARM_STEP: f32 = 1.0 / 20.0;
+/// How often an effect that stays put looks up gravity, air and the ground below again,
+/// seconds, and how far (meters at scale 1) it may move before it does so at once.
+const ENV_REFRESH_SECS: f32 = 1.0;
+const ENV_REFRESH_M: f64 = 0.5;
 /// Particles that would outlive a stopped effect by more than this (magic circles, mist)
 /// fade out over this many seconds instead.
 const STOP_FADE_SECS: f32 = 1.0;
@@ -446,6 +460,9 @@ impl Instance {
             wind: Vec3::ZERO,
             air_density: crate::gpu::SEA_LEVEL_AIR,
             frame_dt: 0.0,
+            resting: false,
+            env_at: None,
+            env_timer: 0.0,
         };
         inst.rebake();
         inst
@@ -710,6 +727,7 @@ pub fn tick_effects(
     mut lights: Query<(&mut Transform, &mut GlobalTransform, &mut PointLight), With<VfxLight>>,
     mut marks: Option<ResMut<Marks>>,
     mut diagnostics: Option<ResMut<Diagnostics>>,
+    range: Option<Res<SimulationRange>>,
 ) {
     let runtime = &mut *runtime;
     let limit = settings.max_particles.max(1024);
@@ -787,10 +805,46 @@ pub fn tick_effects(
         if dt > 0.0 {
             inst.vel = ((inst.pos - inst.prev_pos) / dt as f64).as_vec3();
         }
-        inst.gravity = env.gravity(pos);
+        // Far from everyone: a one-shot that has not started yet is dropped (no one would see
+        // it), one already playing runs to its end, and anything that loops rests, its
+        // particles held where they are, until a focus comes near again.
+        let far = range.as_deref().is_some_and(|r| {
+            if inst.resting {
+                !r.is_active(&env.focus, pos)
+            } else {
+                r.is_resting(&env.focus, pos)
+            }
+        });
+        if inst.despawn_when_done && inst.desc.is_one_shot() {
+            if far && !inst.started {
+                runtime.instances.remove(&entity);
+                commands.entity(entity).try_despawn();
+                stats.dropped += 1;
+                continue;
+            }
+            inst.resting = false;
+        } else {
+            inst.resting = far;
+        }
+        if inst.resting {
+            for run in &mut inst.emitters {
+                run.runs.clear();
+            }
+            inst.frame_dt = 0.0;
+            stats.resting += 1;
+            continue;
+        }
         inst.wind = env.wind(pos);
-        inst.air_density = env.air(pos).density;
-        inst.plane = collision_plane(&env, pos);
+        inst.env_timer -= dt;
+        let moved = inst.env_at.map_or(f64::INFINITY, |p| p.distance(pos));
+        if inst.env_timer <= 0.0 || moved > ENV_REFRESH_M * inst.scale.max(0.1) as f64 {
+            inst.env_at = Some(pos);
+            // Spread over frames so effects started together don't all look up at once.
+            inst.env_timer = ENV_REFRESH_SECS * (0.75 + 0.5 * (inst.seed % 1024) as f32 / 1024.0);
+            inst.gravity = env.gravity(pos);
+            inst.air_density = env.air(pos).density;
+            inst.plane = collision_plane(&env, pos);
+        }
         tick_instance(
             inst,
             dt,
@@ -854,10 +908,11 @@ pub fn tick_effects(
             }
             continue;
         }
-        if inst.entity.is_some() {
-            stats.effects += 1;
-        } else {
-            stats.fading += 1;
+        // Resting effects were counted as they were skipped.
+        match (inst.resting, inst.entity.is_some()) {
+            (true, _) => {}
+            (false, true) => stats.effects += 1,
+            (false, false) => stats.fading += 1,
         }
         push_frame_emitters(inst, &mut frame.emitters);
     }
@@ -879,6 +934,7 @@ pub fn tick_effects(
         d.set("vfx.spawned", stats.spawned_this_frame as f64);
         d.set("vfx.pool_used", stats.pool_used as f64);
         d.set("vfx.starved", stats.starved as f64);
+        d.set("vfx.resting", stats.resting as f64);
     }
 }
 

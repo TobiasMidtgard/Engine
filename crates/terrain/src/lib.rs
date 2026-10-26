@@ -548,14 +548,16 @@ impl Plugin for TerrainPlugin {
             )
             .add_systems(
                 FixedUpdate,
-                (
-                    demo::walk,
-                    demo::swing_limbs,
-                    deform_from_contacts,
-                    wear_from_contacts,
-                )
+                (demo::walk, demo::swing_limbs)
                     .chain()
                     .in_set(SimSet::Environment),
+            )
+            // Prints and paths take the contacts of all of a frame's fixed steps at once.
+            .add_systems(
+                PostUpdate,
+                (deform_from_contacts, wear_from_contacts)
+                    .chain()
+                    .before(UpdateSet::AfterPropagate),
             )
             .add_render_feature(render::TerrainFeature::default());
         register_apis(app);
@@ -775,11 +777,13 @@ fn deform_from_contacts(
     mut clock: ResMut<RecoverClock>,
     weather: Res<WeatherState>,
     surface_layers: Res<SurfaceLayers>,
+    range: Option<Res<engine_world::SimulationRange>>,
 ) {
     if !settings.enabled || terrains.entries.is_empty() {
         contacts.clear();
         return;
     }
+    let range = range.map(|r| *r).unwrap_or_default();
     if (map.cell - settings.cell_m).abs() > 1e-6 || map.size != settings.size {
         *map = DeformationMap::new(settings.cell_m, settings.size.clamp(64, 4096));
     }
@@ -800,7 +804,11 @@ fn deform_from_contacts(
             settings.sand_half_life_s,
         );
     }
-    for c in contacts.read() {
+    // (Prints beyond the simulated range would never be seen up close.)
+    for c in contacts
+        .read()
+        .filter(|c| range.is_active(&env.focus, c.position))
+    {
         let ground = env.ground(c.position);
         let surface = c.surface.or(ground.map(|g| g.surface)).unwrap_or_default();
         let mat = env.material(surface);
@@ -847,11 +855,13 @@ fn wear_from_contacts(
     mut clock: Local<HealClock>,
     mut provider: ResMut<WearProvider>,
     mut ground_wear: ResMut<engine_world::GroundWear>,
+    range: Option<Res<engine_world::SimulationRange>>,
 ) {
     if !settings.enabled || terrains.entries.is_empty() {
         contacts.clear();
         return;
     }
+    let range = range.map(|r| *r).unwrap_or_default();
     if (wear.cell_m - settings.cell_m).abs() > 1e-6 {
         *wear = PathWear::new(settings.cell_m.clamp(0.1, 4.0));
     }
@@ -864,7 +874,12 @@ fn wear_from_contacts(
     for e in gone {
         wear.forget(e);
     }
-    for c in contacts.read() {
+    // (Paths are worn where people walk while the player is about; far off, footfalls rest
+    // with everything else.)
+    for c in contacts
+        .read()
+        .filter(|c| range.is_active(&env.focus, c.position))
+    {
         let Some((entity, t)) = terrains.nearest(c.position) else {
             continue;
         };
@@ -1584,6 +1599,11 @@ mod tests {
     #[test]
     fn a_crowd_wears_a_path_across_the_meadow() {
         let mut app = app_with_planet();
+        // Game time passes by the clock, not by how fast the machine runs (fixed steps, and
+        // `GroundWear`'s snapshot at most every half second).
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual { step_secs: 0.05 });
         app.update();
         {
             let mut commands = app.world.commands();
@@ -1611,11 +1631,7 @@ mod tests {
         let off = wear_at(&mut app, DVec3::new(0.0, 0.0, 34.0));
         assert!(on > 0.3, "the crowd's line wore only {on}");
         assert!(off < 0.01, "4 m to the side wore {off}");
-        // Other modules see it through `GroundWear` (a snapshot at most every half second of
-        // game time: let time pass by the clock, not by how fast the machine runs).
-        app.world
-            .resource_mut::<Time>()
-            .set_source(engine_core::time::TimeSource::Manual { step_secs: 0.05 });
+        // Other modules see it through `GroundWear`.
         app.update_n(40);
         let shared = app.world.resource::<engine_world::GroundWear>().clone();
         let seen = shared.wear(DVec3::new(0.0, 0.0, 30.0)) as f64;

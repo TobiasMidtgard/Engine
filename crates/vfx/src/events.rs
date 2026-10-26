@@ -19,7 +19,8 @@ use std::collections::HashMap;
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_world::{
-    ContactKind, Env, GroundContact, LightningStrike, ProjectileTrace, WaterSplash, WorldImpulse,
+    ContactKind, Env, FocusPoints, GroundContact, LightningStrike, ProjectileTrace,
+    SimulationRange, WaterSplash, WorldImpulse,
 };
 
 use crate::emitter::ParticleEffect;
@@ -150,12 +151,20 @@ pub fn react_to_world(
     mut traces: MessageReader<ProjectileTrace>,
     mut impulses: MessageReader<WorldImpulse>,
     mut last_step: Local<HashMap<Entity, f32>>,
+    range: Option<Res<SimulationRange>>,
 ) {
     let now = time.elapsed_secs();
     let mut budget = reactions.max_per_frame;
+    // Nothing plays beyond the simulation range of every focus: no one is there to see it,
+    // and looking up the ground for it is not free.
+    let far = |p: DVec3| {
+        range
+            .as_deref()
+            .is_some_and(|r| r.is_resting(&env.focus, p))
+    };
 
     for impulse in impulses.read() {
-        if !reactions.impulses || budget == 0 || impulse.strength < 2.0 {
+        if !reactions.impulses || budget == 0 || impulse.strength < 2.0 || far(impulse.center) {
             continue;
         }
         let c = impulse.center;
@@ -177,7 +186,7 @@ pub fn react_to_world(
     }
 
     for trace in traces.read() {
-        if !reactions.projectiles || budget == 0 {
+        if !reactions.projectiles || budget == 0 || far(trace.to) {
             continue;
         }
         // Into water: the water module reports the splash (see `react_to_splashes`).
@@ -200,7 +209,7 @@ pub fn react_to_world(
     }
 
     for contact in contacts.read() {
-        if !reactions.footsteps || budget == 0 {
+        if !reactions.footsteps || budget == 0 || far(contact.position) {
             continue;
         }
         if let Some(e) = contact.entity {
@@ -306,10 +315,15 @@ pub fn react_to_splashes(
     library: Res<EffectLibrary>,
     reactions: Res<VfxReactions>,
     mut splashes: MessageReader<WaterSplash>,
+    (range, focus): (Option<Res<SimulationRange>>, Option<Res<FocusPoints>>),
 ) {
     let mut budget = reactions.max_per_frame / 2;
     for s in splashes.read() {
-        if !reactions.splashes || budget == 0 || s.mass_kg <= 0.0 {
+        let far = match (range.as_deref(), focus.as_deref()) {
+            (Some(r), Some(f)) => r.is_resting(f, s.position),
+            _ => false,
+        };
+        if !reactions.splashes || budget == 0 || s.mass_kg <= 0.0 || far {
             continue;
         }
         let (names, scale, up) = splash_look(s);

@@ -44,6 +44,9 @@ use crate::voxel::VoxelVolume;
 /// Seconds per loop.
 pub const HILL_CYCLE_SECS: f32 = 28.0;
 
+/// How far the voxel hill, its yard and terrace reach from its origin, meters.
+const HILL_RADIUS_M: f64 = 45.0;
+
 /// Hill size (width × height × depth, m) and voxel size.
 pub const HILL_SIZE: [f32; 3] = [34.0, 8.0, 30.0];
 const HILL_VOXEL: f32 = 0.3;
@@ -744,6 +747,9 @@ pub fn hill_script_system(world: &mut World) {
         let Some(mut demo) = world.get::<HillDemo>(e).cloned() else {
             continue;
         };
+        if crate::area_rests_in(world, demo.origin, HILL_RADIUS_M) {
+            continue;
+        }
         demo.time += dt;
         while demo.next < steps.len() && steps[demo.next].0 <= demo.time {
             let step = steps[demo.next].1;

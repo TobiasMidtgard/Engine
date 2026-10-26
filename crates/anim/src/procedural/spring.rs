@@ -52,6 +52,12 @@ pub struct SpringChains {
 }
 
 impl SpringChains {
+    /// Let the particles settle from the pose again (after frames without a pose).
+    pub(crate) fn restart(&mut self) {
+        self.state.clear();
+        self.last_origin = None;
+    }
+
     /// Carry the particles into a shifted world frame (floating origin, a planet's frame).
     pub(crate) fn follow_shift(&mut self, s: &WorldShift) {
         self.last_origin = self.last_origin.map(|o| s.point(o));
@@ -86,8 +92,11 @@ pub(crate) fn spring_chain_system(
 ) {
     q.par_iter_mut()
         .for_each(|(mut animator, mut springs, gt)| {
-            if !springs.enabled || springs.chains.is_empty() {
+            if !springs.enabled || springs.chains.is_empty() || !animator.posed() {
                 return;
+            }
+            if animator.fresh() {
+                springs.restart();
             }
             let dt = animator.dt;
             let origin = gt.translation();
