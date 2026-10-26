@@ -13,7 +13,8 @@
 //!   velocity. A region with characters stays coarse (characters move every frame).
 //! * **Resting** ([`REST`], past the world's `SimulationRange`, characters or not): no steps at
 //!   all, so it costs nothing; its bodies stay where they are until a focus comes back within
-//!   the active range.
+//!   the active range. A region with something travelling faster than [`REST_SPEED`] keeps
+//!   stepping coarsely instead, so a far plane doesn't hang in the air.
 //!
 //! A tier is a region's, and most of a scene shares one region, so every [`LOD_EVERY`] steps far
 //! movers split off ([`Simulation::split_far`]): a region's movers are clustered by how near
@@ -49,6 +50,9 @@ const SPLIT: f64 = 1.1;
 
 /// The tier of a region past the world's `SimulationRange`: it doesn't step.
 pub const REST: u8 = 3;
+
+/// A region with a body faster than this (m/s) doesn't rest: it is travelling, not settling.
+const REST_SPEED: f32 = 3.0;
 
 /// Bodies reaching farther than this many grid cells are checked against every other mover
 /// instead of through the grid.
@@ -213,6 +217,15 @@ impl Simulation {
                 0
             } else {
                 let characters = with_characters.contains(&(id as RegionId));
+                // Something travelling (a plane on its circuit, a car on the track, a shot
+                // flying in) keeps going, coarsely; only what is settling rests.
+                let w = &r.world;
+                let travelling = w.islands.active_bodies().any(|h| {
+                    w.bodies
+                        .get(h)
+                        .is_some_and(|rb| rb.linvel().length_squared() > REST_SPEED * REST_SPEED)
+                });
+                let rest = rest.filter(|_| !travelling);
                 tier_for(r.nearest_mover(foci), r.tier, &settings, characters, rest)
             };
             r.tier = tier;

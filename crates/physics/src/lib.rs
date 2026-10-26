@@ -67,11 +67,14 @@ pub struct PhysicsStats {
     pub half_rate_awake: usize,
     /// Awake bodies in regions stepping in fine substeps (see [`FineSteps`]).
     pub fine_awake: usize,
+    /// Bodies not asleep in regions resting past the world's `SimulationRange`: held where
+    /// they are, not stepping, until a focus comes back within range.
+    pub resting_awake: usize,
 }
 
 impl PhysicsStats {
     fn from_sim(sim: &sim::Simulation, step_ms: f64, substeps: u32) -> Self {
-        let (mut by_tier, mut fine_awake) = ([0usize; 3], 0);
+        let (mut by_tier, mut fine_awake) = ([0usize; 4], 0);
         for (_, r) in sim.live_regions() {
             let awake = r
                 .world
@@ -79,7 +82,7 @@ impl PhysicsStats {
                 .iter()
                 .filter(|(_, b)| !b.is_fixed() && !b.is_sleeping())
                 .count();
-            by_tier[r.tier.min(2) as usize] += awake;
+            by_tier[r.tier.min(lod::REST) as usize] += awake;
             if r.fine.is_some() {
                 fine_awake += awake;
             }
@@ -101,6 +104,7 @@ impl PhysicsStats {
             coarse_awake: by_tier[1],
             half_rate_awake: by_tier[2],
             fine_awake,
+            resting_awake: by_tier[3],
         }
     }
 }

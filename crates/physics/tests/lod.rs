@@ -8,7 +8,7 @@ use engine_physics::{PhysicsPlugin, PhysicsStats};
 use engine_world::physics::{
     CharacterController, CharacterMove, Collider, ColliderShape, RigidBody, Velocity,
 };
-use engine_world::{Gravity, SimulationFocus, WorldPlugin};
+use engine_world::{Gravity, Scalability, SimulationFocus, WorldPlugin};
 
 fn app() -> App {
     let mut app = App::new();
@@ -22,6 +22,8 @@ fn app() -> App {
     app.world.resource_mut::<FixedTime>().set_hz(60.0);
     app.world
         .spawn((Transform::default(), SimulationFocus::default()));
+    // Simulate far out, so the coarse and half rate tiers are seen instead of resting.
+    app.world.resource_mut::<Scalability>().simulation_m = 10_000.0;
     app
 }
 
@@ -272,4 +274,54 @@ fn far_characters_keep_walking_every_frame() {
         last = p;
     }
     assert_eq!(stats(&app).half_rate_awake, 0, "{:?}", stats(&app));
+}
+
+#[test]
+fn piles_past_the_simulation_range_rest_until_someone_comes_near() {
+    let mut app = app();
+    *app.world.resource_mut::<Scalability>() = Scalability::default();
+    floor(&mut app);
+    let mut rnd = seeded(5);
+    // Rocks in the air 300 m out: past the range they stay there, not stepped.
+    let rocks: Vec<Entity> = (0..20)
+        .map(|i| {
+            let at = DVec3::new(300.0 + (i % 5) as f64 * 0.6, 3.0, (i / 5) as f64 * 0.6);
+            rock(&mut app, at, &mut rnd)
+        })
+        .collect();
+    app.update_n(120);
+    let s = stats(&app);
+    assert_eq!(s.resting_awake, 20, "{s:?}");
+    for r in &rocks {
+        assert!(position(&app, *r).y > 2.9, "a resting rock fell");
+    }
+    // A shot flying in from as far keeps flying: travelling things don't rest.
+    let ball = app
+        .world
+        .spawn((
+            Transform::from_xyz(-300.0, 1.0, 0.0),
+            RigidBody::dynamic(),
+            Collider::sphere(0.3).with_density(2000.0),
+            Velocity {
+                linear: Vec3::new(30.0, 0.0, 0.0),
+                angular: Vec3::ZERO,
+            },
+        ))
+        .id();
+    app.update_n(60);
+    assert!(
+        position(&app, ball).x > -290.0,
+        "the far shot hung in the air"
+    );
+    // Walk the focus over: the rocks wake and fall.
+    let focus = app
+        .world
+        .query_filtered::<Entity, With<SimulationFocus>>()
+        .single(&app.world)
+        .unwrap();
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(290.0, 2.0, 0.0);
+    app.update_n(240);
+    for r in &rocks {
+        assert!(position(&app, *r).y < 1.0, "a rock never fell");
+    }
 }

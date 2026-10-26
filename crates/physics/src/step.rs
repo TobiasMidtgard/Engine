@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
+use engine_core::ecs::entity::EntityHashSet;
 use engine_core::ecs::system::SystemState;
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
@@ -543,7 +544,9 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         let (frozen, movers) = {
             let r = sim.region(rid);
             (
-                r.frozen || r.tier >= crate::lod::REST || (!busy.contains(&rid) && idle(r)),
+                r.frozen
+                    || r.tier >= crate::lod::REST
+                    || (!busy.contains(&rid) && idle(r, &sim.resting)),
                 r.movers,
             )
         };
@@ -1403,14 +1406,22 @@ fn busy_regions(sim: &Simulation) -> HashSet<RegionId> {
     characters.chain(gliding).collect()
 }
 
-/// A region (not [busy](busy_regions)) has nothing to step: every body asleep, no collider
+/// A region (not [busy](busy_regions)) has nothing to step: every body in it told to rest
+/// ([`Simulation::resting`], so held asleep whatever is written to it) and asleep, no collider
 /// added or moved. Rapier's step would only walk its sleeping contacts (3 ms for a resting
-/// proving ground), so it sits the step out.
-fn idle(r: &crate::sim::Region) -> bool {
-    r.world.islands.active_bodies().next().is_none()
+/// proving ground), so it sits the step out. (Bodies not told to rest may have been woken
+/// since the last step, which Rapier's islands only learn as it steps.)
+fn idle(r: &crate::sim::Region, resting: &EntityHashSet) -> bool {
+    !resting.is_empty()
+        && r.world.islands.active_bodies().next().is_none()
         && !r.needs_refresh
         && r.fresh.is_empty()
         && !r.stale_all
+        && r.world
+            .bodies
+            .iter()
+            .filter(|(_, rb)| !rb.is_fixed())
+            .all(|(_, rb)| resting.contains(&convert::entity_of(rb.user_data)))
 }
 
 /// Hold the bodies told to rest asleep ([`Simulation::resting`]): wake-ups from their
