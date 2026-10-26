@@ -168,7 +168,7 @@ fn run(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) {
     }
     match walk.stage {
         Stage::Menu => {
-            if !walk.shown {
+            if !walk.shown && !crate::build::building(world) {
                 walk.shown = true;
                 if let Err(e) = show_menu(world) {
                     engine::core::log::warn!("start screen: {e}");
