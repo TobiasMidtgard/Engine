@@ -186,6 +186,17 @@ impl GpuShared {
         })
     }
 
+    /// The target of `RenderFeature::draw_subsurface_color`: sRGB color, no blending. Such a
+    /// pipeline uses `depth_state(false)` (the pass tests against the opaque scene's depth and
+    /// can't write it).
+    pub fn subsurface_color_target(&self) -> wgpu::ColorTargetState {
+        wgpu::ColorTargetState {
+            format: crate::subsurface::COLOR_FORMAT,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        }
+    }
+
     /// Depth state for shadow passes (standard Z, hardware slope bias).
     pub fn shadow_depth_state(&self) -> wgpu::DepthStencilState {
         wgpu::DepthStencilState {
@@ -365,6 +376,17 @@ pub trait RenderFeature: Send + Sync + 'static {
     fn needs_subsurface(&self) -> bool {
         false
     }
+
+    /// Post-scatter color (Jimenez et al. 2015, HDRP's "post-scatter" texturing): the color
+    /// the subsurface pass multiplies into its pixels' diffuse light after the blur, so
+    /// freckles and pores stay sharp and fair skin keeps its tint. Called right before the
+    /// blur, only while `needs_subsurface()` and the pass runs (`subsurface_width` above 0, a
+    /// perspective view); group 0 is the frame group, as in the scene pass. Draw with
+    /// `GpuShared::subsurface_color_target()` and `depth_state(false)`, returning the color
+    /// (rgb, alpha 1) where the scene pass lit the skin without it (albedo 1, or the square root
+    /// of the albedo here and in the lighting, HDRP's pre-and-post mode). The color applies to
+    /// marked pixels only (scatter strength above 0); pixels nobody draws keep 1.
+    fn draw_subsurface_color(&self, pass: &mut wgpu::RenderPass<'_>, ctx: &FrameContext) {}
 
     /// Draw onto the tonemapped LDR image.
     fn overlay(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {}

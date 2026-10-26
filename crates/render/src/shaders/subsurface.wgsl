@@ -1,8 +1,9 @@
 // Screen-space subsurface scattering (subsurface.rs): Jimenez et al.'s separable filter. Two
 // passes, along x then y, blur the diffuse light of the pixels the prepass marked
 // (`prepass_output_subsurface`) with the skin's diffusion profile, red reaching farthest. The
-// scene pass leaves those pixels' specular light in alpha, so highlights stay sharp. Requires
-// lib_types.
+// scene pass leaves those pixels' specular light in alpha, so highlights stay sharp. The second
+// pass multiplies the blurred light by the post-scatter color the features drew (white where
+// none did). Requires lib_types.
 
 const SSS_SAMPLES: u32 = 17u;
 
@@ -22,6 +23,7 @@ struct SssParams {
 @group(0) @binding(2) var sss_color: texture_2d<f32>;
 @group(0) @binding(3) var sss_depth: texture_depth_2d;
 @group(0) @binding(4) var sss_normal: texture_2d<f32>;
+@group(0) @binding(5) var sss_post_color: texture_2d<f32>;
 
 @vertex
 fn vs_subsurface(@builtin(vertex_index) i: u32) -> FullscreenOut {
@@ -81,5 +83,6 @@ fn fs_subsurface(in: FullscreenOut) -> @location(0) vec4<f32> {
     if (first) {
         return vec4<f32>(color, specular);
     }
-    return vec4<f32>(color + vec3<f32>(specular), 1.0);
+    let post = textureLoad(sss_post_color, px, 0).rgb;
+    return vec4<f32>(color * post + vec3<f32>(specular), 1.0);
 }

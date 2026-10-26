@@ -183,7 +183,11 @@ answers `needs_subsurface()` with true. After the opaque scene a separable filte
 2015, skin's diffusion profile per channel, red reaching farthest) blurs the marked pixels'
 diffuse light within the marked surface and not across depth steps, then adds the specular
 back, so highlights stay sharp. Reach: `RenderSettings::subsurface_width` (1.2 cm at strength
-1; 0 = off). See `crates/render/src/subsurface.rs`.
+1; 0 = off). Post-scatter color: a feature that lights its skin untextured draws the skin's
+color in `draw_subsurface_color` (target `GpuShared::subsurface_color_target()`, depth tested,
+not written), and the filter multiplies it into the scattered light of marked pixels, so
+freckles and pores stay sharp (Jimenez 2015; HDRP's post-scatter mode). See
+`crates/render/src/subsurface.rs`.
 
 **Quality presets** (built): the renderer draws with `RenderSettings::scaled(&Scalability)`,
 the game's settings at its `engine_world::Scalability` (`--quality low|medium|high|ultra`).
