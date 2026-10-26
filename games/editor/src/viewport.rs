@@ -50,6 +50,7 @@ pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     if response.double_clicked() && editor.primary().is_some() {
         editor::focus_selection(world, editor);
     }
+    box_select(ui, world, editor, &view, &response, alt || gizmo_used);
 
     overlays(ui, world, editor, rect);
 }
@@ -237,6 +238,85 @@ fn click_select(
         (None, false) => editor.select(None),
         (None, true) => {}
     }
+}
+
+/// Drag with the left button on empty space to select everything whose center falls inside the
+/// box (Ctrl or Shift adds to the selection). Children of something already in the box are left
+/// out, so a group selects as one.
+fn box_select(
+    ui: &egui::Ui,
+    world: &mut World,
+    editor: &mut Editor,
+    view: &ViewInfo,
+    response: &egui::Response,
+    blocked: bool,
+) {
+    if response.drag_started_by(egui::PointerButton::Primary)
+        && !blocked
+        && !editor.gizmo.is_focused()
+    {
+        editor.box_start = response.interact_pointer_pos();
+    }
+    let Some(start) = editor.box_start else {
+        return;
+    };
+    let Some(end) = ui.input(|i| i.pointer.latest_pos()) else {
+        return;
+    };
+    let area = egui::Rect::from_two_pos(start, end);
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("box select"),
+    ));
+    painter.rect(
+        area,
+        0,
+        theme::ACCENT.gamma_multiply(0.12),
+        egui::Stroke::new(1.0, theme::ACCENT),
+        egui::StrokeKind::Inside,
+    );
+    if !response.drag_stopped() {
+        return;
+    }
+    editor.box_start = None;
+    if area.width() < 4.0 && area.height() < 4.0 {
+        return;
+    }
+    let found = entities_in_box(world, view, area);
+    let additive = ui.input(|i| i.modifiers.ctrl || i.modifiers.shift);
+    if !additive {
+        editor.selection.clear();
+    }
+    for e in found {
+        if !editor.is_selected(e) {
+            editor.selection.push(e);
+        }
+    }
+}
+
+/// Scene entities whose center projects inside `area`, topmost ones only.
+pub fn entities_in_box(world: &mut World, view: &ViewInfo, area: egui::Rect) -> Vec<Entity> {
+    let mut q = world.query_filtered::<Entity, (With<InScene>, With<GlobalTransform>)>();
+    let candidates: Vec<Entity> = q.iter(world).collect();
+    let inside: Vec<Entity> = candidates
+        .into_iter()
+        .filter(|&e| {
+            editor::bounds(world, e)
+                .and_then(|(center, _)| view.project(center))
+                .is_some_and(|p| area.contains(p))
+        })
+        .collect();
+    let mut found: Vec<Entity> = inside
+        .iter()
+        .copied()
+        .filter(|&e| {
+            !inside
+                .iter()
+                .any(|&other| other != e && crate::scene_ops::is_ancestor(world, other, e))
+        })
+        .collect();
+    found.sort_by_key(|e| e.index());
+    found
 }
 
 /// Outline the selection with its bounds (on top, in the accent color).

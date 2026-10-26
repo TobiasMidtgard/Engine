@@ -20,6 +20,7 @@ mod editor;
 mod egui_bridge;
 mod inspector;
 mod picking;
+mod prefab;
 mod sample;
 mod scene_ops;
 mod shots;
@@ -79,7 +80,11 @@ fn main() {
         app.insert_resource(StartScene(path));
     }
     if let Some(dir) = value("--shots") {
-        app.insert_resource(shots::gallery(dir));
+        let script = match value("--script").as_deref() {
+            Some("round2") => shots::round2(dir),
+            _ => shots::gallery(dir),
+        };
+        app.insert_resource(script);
     }
     app.run();
 }
@@ -103,6 +108,10 @@ impl Plugin for EditorPlugin {
                 "Places one module's showcase demo here (module: physics, destruction, \
                  softbody, vehicles, fire, smoke, vfx, water, weather, foliage, terrain, anim, \
                  npc, movement, audio). The editor spawns it; the scene stores only this.",
+            )
+            .register_component::<prefab::PrefabInstance>(
+                "Placed from the prefab file at `path`; the editor can apply changes back to \
+                 the file or revert to it.",
             )
             .add_render_feature(egui_bridge::EguiFeature::default())
             .add_systems(Startup, setup)

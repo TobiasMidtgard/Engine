@@ -160,7 +160,10 @@ fn quick_actions(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, enti
             .component("RigidBody")
             .is_some();
     let is_demo = has(world, "ModuleDemo");
-    if !can_body && !is_demo {
+    let prefab = world
+        .get::<crate::prefab::PrefabInstance>(entity)
+        .map(|p| p.path.clone());
+    if !can_body && !is_demo && prefab.is_none() {
         return;
     }
     ui.horizontal_wrapped(|ui| {
@@ -178,6 +181,24 @@ fn quick_actions(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, enti
                 .clicked()
             {
                 add_physics(world, editor, entity, false);
+            }
+        }
+        if let Some(path) = &prefab {
+            if ui
+                .button("📦 Apply to prefab")
+                .on_hover_text(format!(
+                    "Save this to {path} and update every other instance"
+                ))
+                .clicked()
+            {
+                crate::prefab::apply_changes(world, editor, entity);
+            }
+            if ui
+                .button("↻ Revert")
+                .on_hover_text(format!("Rebuild this from {path}"))
+                .clicked()
+            {
+                crate::prefab::revert(world, editor, entity);
             }
         }
         if is_demo && ui.button("↻ Respawn demo").clicked() {

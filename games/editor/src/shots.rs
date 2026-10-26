@@ -209,3 +209,100 @@ pub fn gallery(dir: impl Into<PathBuf>) -> ShotScript {
     ];
     ShotScript::new(dir, steps)
 }
+
+/// Round 2's features: box select, copy and paste, prefabs.
+pub fn round2(dir: impl Into<PathBuf>) -> ShotScript {
+    let overview_cam = (DVec3::new(9.5, 6.0, 9.0), DVec3::new(-0.5, 0.6, -2.0));
+    let (from, to) = (egui::pos2(690.0, 290.0), egui::pos2(1000.0, 480.0));
+    let steps = vec![
+        Step::Camera(overview_cam.0, overview_cam.1),
+        Step::Wait(6),
+        // Box select: the box as it is dragged, then what it selected.
+        Step::Do(Box::new(move |world, editor| {
+            editor.box_start = Some(from);
+            world
+                .resource_mut::<crate::egui_bridge::EguiInput>()
+                .injected
+                .push(egui::Event::PointerMoved(to));
+        })),
+        Step::Wait(2),
+        Step::Shot("11_box_select_drag"),
+        Step::Do(Box::new(move |world, editor| {
+            editor.box_start = None;
+            if let Some(view) = editor.view {
+                let area = egui::Rect::from_two_pos(from, to);
+                editor.selection = crate::viewport::entities_in_box(world, &view, area);
+            }
+        })),
+        Step::Wait(3),
+        Step::Shot("12_box_selected"),
+        // Copy and paste the barrel, then move the copy aside.
+        Step::Select("Barrel"),
+        Step::Do(Box::new(|world, editor| {
+            editor::copy_selection(world, editor);
+            editor::paste(world, editor);
+            move_selection(world, editor, DVec3::new(-1.3, 0.0, 1.0));
+        })),
+        Step::Tab(Tab::History),
+        Step::Wait(3),
+        Step::Shot("13_copy_paste"),
+        // Prefabs: save the lamp post, place two more, change one, apply to all.
+        Step::Do(Box::new(|world, editor| {
+            if let Some(post) = find(world, "Lamp post") {
+                crate::prefab::create(world, editor, post);
+                let path = crate::prefab::path_for("Lamp post");
+                for at in [DVec3::new(-3.0, 0.0, 2.5), DVec3::new(0.5, 0.0, 4.0)] {
+                    crate::prefab::place(world, editor, &path);
+                    move_selection_to(world, editor, at);
+                }
+            }
+        })),
+        Step::Select(""),
+        Step::Tab(Tab::Content),
+        Step::Wait(4),
+        Step::Shot("14_prefab_instances"),
+        Step::Do(Box::new(|world, editor| {
+            // The original post (still where the starter scene put it): a blue, bigger lamp.
+            let mut q = world.query::<(Entity, &Name, &Transform, &Children)>();
+            let original = q
+                .iter(world)
+                .find(|(_, n, t, _)| {
+                    n.as_str() == "Lamp post" && (t.translation.x - 2.5).abs() < 0.01
+                })
+                .map(|(e, _, _, c)| (e, c.iter().next()));
+            let Some((post, Some(lamp))) = original else {
+                return;
+            };
+            if let Some(mut light) = world.get_mut::<PointLight>(lamp) {
+                light.color = [0.35, 0.6, 1.0];
+            }
+            if let Some(mut t) = world.get_mut::<Transform>(lamp) {
+                t.scale = Vec3::splat(1.8);
+            }
+            editor.select(Some(post));
+            crate::prefab::apply_changes(world, editor, post);
+        })),
+        Step::Tab(Tab::History),
+        Step::Wait(4),
+        Step::Shot("15_prefab_applied"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
+/// Move every selected entity by `by` (one undo step per entity is fine for scripts).
+fn move_selection(world: &mut World, editor: &mut Editor, by: DVec3) {
+    for e in editor.selection.clone() {
+        if let Some(mut t) = world.get_mut::<Transform>(e) {
+            t.translation += by;
+        }
+    }
+}
+
+/// Put the selected entities at `at`.
+fn move_selection_to(world: &mut World, editor: &mut Editor, at: DVec3) {
+    for e in editor.selection.clone() {
+        if let Some(mut t) = world.get_mut::<Transform>(e) {
+            t.translation = at;
+        }
+    }
+}

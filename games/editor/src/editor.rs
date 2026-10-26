@@ -131,6 +131,10 @@ pub struct Editor {
     pub icons: bool,
     /// Pending "frame the selection" for the camera.
     pub focus: Option<(DVec3, f64)>,
+    /// Where a box selection drag started in the scene view (points).
+    pub box_start: Option<egui::Pos2>,
+    /// Copied scene entities, as saved documents with the parent they had.
+    pub clipboard: Vec<(scene_ops::SavedEntity, Option<Entity>)>,
 }
 
 impl Editor {
@@ -162,6 +166,8 @@ impl Editor {
             grid: true,
             icons: true,
             focus: None,
+            box_start: None,
+            clipboard: Vec::new(),
         }
     }
 
@@ -538,12 +544,80 @@ pub fn duplicate_selection(world: &mut World, editor: &mut Editor) {
     if copies.is_empty() {
         return;
     }
-    let label = format!("Duplicate {} entities", copies.len());
+    let label = count_label(world, "Duplicate", &copies);
     editor
         .history
         .record(world, Command::Group(label.clone(), commands), t);
     editor.selection = copies;
     editor.info(t, label);
+}
+
+/// Copy the selection (topmost entities, with their children) to the editor's clipboard.
+pub fn copy_selection(world: &mut World, editor: &mut Editor) {
+    let t = now(world);
+    let selected: Vec<Entity> = editor
+        .selection
+        .iter()
+        .copied()
+        .filter(|&e| world.get::<InScene>(e).is_some())
+        .collect();
+    let topmost: Vec<Entity> = selected
+        .iter()
+        .copied()
+        .filter(|&e| {
+            !selected
+                .iter()
+                .any(|&o| o != e && scene_ops::is_ancestor(world, o, e))
+        })
+        .collect();
+    if topmost.is_empty() {
+        return;
+    }
+    editor.clipboard = topmost
+        .iter()
+        .map(|&e| {
+            let mut saved = scene_ops::save_entity(world, e);
+            saved.order = None;
+            (saved, world.get::<ChildOf>(e).map(|p| p.parent()))
+        })
+        .collect();
+    editor.info(t, format!("Copied {} entities", topmost.len()));
+}
+
+/// Paste the clipboard in place (under the same parent while it exists) and select the copies.
+pub fn paste(world: &mut World, editor: &mut Editor) {
+    let t = now(world);
+    if editor.clipboard.is_empty() {
+        return;
+    }
+    let mut copies = Vec::new();
+    let mut commands = Vec::new();
+    for (saved, parent) in editor.clipboard.clone() {
+        let parent = parent.filter(|&p| world.get::<InScene>(p).is_some());
+        let copy = scene_ops::restore_entity(world, &saved, parent, &mut Remap::new());
+        if let Some(name) = world.get::<Name>(copy).map(|n| n.as_str().to_string()) {
+            world.entity_mut(copy).insert(Name::new(next_name(&name)));
+        }
+        commands.push(Command::Spawned {
+            saved: scene_ops::save_entity(world, copy),
+            parent,
+        });
+        copies.push(copy);
+    }
+    let label = count_label(world, "Paste", &copies);
+    editor
+        .history
+        .record(world, Command::Group(label.clone(), commands), t);
+    editor.selection = copies;
+    editor.info(t, label);
+}
+
+/// "Paste Barrel 2" for one entity, "Paste 3 entities" for more.
+fn count_label(world: &World, verb: &str, entities: &[Entity]) -> String {
+    match entities {
+        [one] => format!("{verb} {}", scene_ops::label(world, *one)),
+        many => format!("{verb} {} entities", many.len()),
+    }
 }
 
 /// "Crate" → "Crate 2", "Crate 2" → "Crate 3".

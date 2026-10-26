@@ -10,6 +10,7 @@ use crate::demos::DEMOS;
 use crate::editor::{self, Create, Editor, Mode, Tab, Tool};
 use crate::egui_bridge::{Egui, EguiFrame, EguiInput};
 use crate::inspector;
+use crate::prefab;
 use crate::scene_ops::{self, EditorOnly, InScene};
 use crate::theme;
 
@@ -213,6 +214,16 @@ fn menu_bar(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, dock: &mu
                 editor::redo(world, editor);
             }
             ui.separator();
+            if ui.button("Copy        Ctrl+C").clicked() {
+                editor::copy_selection(world, editor);
+            }
+            let can_paste = !editor.clipboard.is_empty();
+            if ui
+                .add_enabled(can_paste, egui::Button::new("Paste       Ctrl+V"))
+                .clicked()
+            {
+                editor::paste(world, editor);
+            }
             if ui.button("Duplicate   Ctrl+D").clicked() {
                 editor::duplicate_selection(world, editor);
             }
@@ -493,7 +504,7 @@ fn outliner_row(
             text
         };
         let row = ui.dnd_drag_source(egui::Id::new(("drag", entity)), entity, |ui| {
-            ui.add(egui::Button::selectable(selected, text).frame_when_inactive(false))
+            ui.add(egui::Button::selectable(selected, text).frame_when_inactive(selected))
         });
         let r = row.inner;
         if r.clicked() {
@@ -525,6 +536,12 @@ fn outliner_row(
             editor.select(Some(entity));
             if ui.button("Frame").clicked() {
                 editor::focus_selection(world, editor);
+            }
+            if ui.button("Copy").clicked() {
+                editor::copy_selection(world, editor);
+            }
+            if ui.button("Save as prefab").clicked() {
+                prefab::create(world, editor, entity);
             }
             if ui.button("Duplicate").clicked() {
                 editor::duplicate_selection(world, editor);
@@ -585,7 +602,7 @@ fn runtime_list(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, filte
         let text = egui::RichText::new(format!("{}  {name}", theme::entity_icon(world, e)))
             .color(theme::TEXT_DIM);
         if ui
-            .add(egui::Button::selectable(selected, text).frame_when_inactive(false))
+            .add(egui::Button::selectable(selected, text).frame_when_inactive(selected))
             .clicked()
         {
             editor.select(Some(e));
@@ -685,6 +702,25 @@ fn content(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
                 if ui.button("New scene").clicked() {
                     editor::new_scene(world, editor);
                 }
+
+                // Prefabs.
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("Prefabs").strong());
+                let files = prefab::prefab_files();
+                if files.is_empty() {
+                    ui.label(theme::dim(
+                        "Right-click an entity in the outliner: Save as prefab",
+                    ));
+                }
+                for f in files {
+                    if ui
+                        .button(format!("📦 {}", prefab::display_name(&f)))
+                        .on_hover_text(format!("Place {f} where the view is looking"))
+                        .clicked()
+                    {
+                        prefab::place(world, editor, &f);
+                    }
+                }
             });
         });
 }
@@ -773,6 +809,12 @@ fn shortcuts(ctx: &egui::Context, world: &mut World, editor: &mut Editor) {
     if pressed(egui::Key::S, true) {
         let path = editor.scene_path.clone();
         editor::save_scene(world, editor, &path);
+    }
+    if pressed(egui::Key::C, true) {
+        editor::copy_selection(world, editor);
+    }
+    if pressed(egui::Key::V, true) {
+        editor::paste(world, editor);
     }
     if pressed(egui::Key::D, true) {
         editor::duplicate_selection(world, editor);

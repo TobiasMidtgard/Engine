@@ -10,5 +10,6 @@ screenshots/
 # Third-party art downloaded by `cargo run -p fetch-assets` (assets/manifests)
 /assets/fetched/
 
-# Scenes the editor saves when run from the repo root (games/editor)
+# Scenes and prefabs the editor saves when run from the repo root (games/editor)
 /scenes/
+/prefabs/
