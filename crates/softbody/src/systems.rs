@@ -891,21 +891,27 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
         if !b.frozen {
             b.frozen = true;
             b.sim.step_start.clone_from(&b.sim.pos);
+            (b.lod_every, b.lod_wait, b.lod_debt) = (1, 0, 0.0);
         }
         return;
     }
     b.frozen = false;
-    let far = dist > ctx.config.lod_distance;
-    if far {
-        b.lod_debt += dt;
-        if b.steps.is_multiple_of(2) {
-            b.steps += 1;
-            b.sim.step_start.clone_from(&b.sim.pos);
-            return;
-        }
-        dt = b.lod_debt;
+    // Farther bodies step less often, each step covering the time skipped: every 2nd fixed
+    // step past lod_distance, every 4th past twice that. One hanging on something moving
+    // steps at least every other, to keep up with it.
+    let mut every = 1;
+    let mut far = ctx.config.lod_distance;
+    while dist > far && every < if b.carried { 2 } else { 4 } {
+        every *= 2;
+        far *= 2.0;
     }
-    b.lod_debt = 0.0;
+    if b.steps > 0 && b.lod_wait + 1 < b.lod_every.min(every) {
+        b.lod_debt += dt;
+        b.lod_wait += 1;
+        return;
+    }
+    dt += b.lod_debt;
+    (b.lod_every, b.lod_wait, b.lod_debt) = (every, 0, 0.0);
 
     // Keep coordinates small.
     if (b.center - b.sim.origin).length() > 50.0 {
@@ -958,14 +964,17 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
             }
         }
     }
+    b.carried = b.sim.frames.iter().any(|f| {
+        f.to_pos.distance_squared(f.from_pos) > 1e-6 || f.to_rot.angle_between(f.from_rot) > 1e-3
+    });
 
     // Environment.
     let s = b.settings;
     let env = ctx.env;
     let p = &mut b.sim.params;
-    // Far bodies step every other time over both steps' time, with the substeps of one: half
-    // the work, a little softer where it's hard to see.
-    let lod = if far { 0.5 } else { 1.0 };
+    // A far body's step covers the steps it skipped with the substeps of one: less work, a
+    // little softer where it's hard to see.
+    let lod = 1.0 / b.lod_every as f32;
     p.substeps = ((s.substeps as f32 * ctx.config.quality * lod).round() as u32).max(1);
     p.gravity = env.gravity(b.center) * s.gravity_scale;
     b.wind = env.wind(b.center) * s.wind_scale;

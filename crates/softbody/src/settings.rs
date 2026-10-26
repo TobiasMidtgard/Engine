@@ -228,7 +228,7 @@ pub struct SoftBodyConfig {
     /// Master switch for the simulation (drawing continues).
     pub enabled: bool,
     /// Bodies farther than this from every `SimulationFocus` step every other fixed step, with
-    /// half the substeps per second, m.
+    /// half the substeps per second, and past twice this every 4th, m.
     pub lod_distance: f32,
     /// Bodies farther than this stop simulating and hold their shape, m.
     pub freeze_distance: f32,

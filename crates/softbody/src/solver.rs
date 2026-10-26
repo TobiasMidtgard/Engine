@@ -14,7 +14,7 @@
 //! colliders and wind each step and reads back positions and reaction impulses.
 
 use std::collections::HashMap;
-use std::f32::consts::PI;
+use std::f32::consts::{PI, TAU};
 use std::ops::Range;
 
 use engine_core::math::{DVec3, IVec3, Mat3, Quat, Vec2, Vec3};
@@ -318,6 +318,9 @@ pub struct Sim {
     /// Each particle's surface normal (area-weighted), for drag in water.
     normals: Vec<Vec3>,
     posed: Vec<PosedCollider>,
+    /// The particles each collider can reach this step: `near[near_starts[c]..near_starts[c + 1]]`.
+    near_starts: Vec<u32>,
+    near: Vec<u32>,
     self_contacts: SelfContacts,
 }
 
@@ -631,6 +634,7 @@ impl Sim {
                 p.wind * (1.0 + p.turbulence * f) + side * (0.5 * p.turbulence * g)
             }));
         }
+        self.find_near(colliders, dt);
         let n = self.substeps_for(dt);
         let h = dt / n as f32;
         for k in 0..n {
@@ -640,6 +644,59 @@ impl Sim {
         }
         self.params.time += dt;
         self.finish_step();
+    }
+
+    /// Which particles each collider can reach this step: those within its bounding box
+    /// swept along its path, plus as far as a particle may travel in the step (twice its
+    /// fastest particle's speed, plus how far the anchor frames carry it), so the substeps
+    /// test each particle against a few colliders, not all of them.
+    fn find_near(&mut self, colliders: &[LocalCollider], dt: f32) {
+        self.near_starts.clear();
+        self.near.clear();
+        if colliders.is_empty() {
+            return;
+        }
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        let mut fastest = 0.0f32;
+        for (x, v) in self.pos.iter().zip(&self.vel) {
+            lo = lo.min(*x);
+            hi = hi.max(*x);
+            fastest = fastest.max(v.length_squared());
+        }
+        let (center, extent) = ((lo + hi) * 0.5, (hi - lo).length() * 0.5);
+        let carried = self.frames.iter().fold(0.0f32, |m, f| {
+            let (_, mut angle) = (f.to_rot * f.from_rot.conjugate()).to_axis_angle();
+            if angle > PI {
+                angle -= TAU;
+            }
+            let arm = (center - f.from_pos).length() + extent;
+            m.max((f.to_pos - f.from_pos).length() + angle.abs() * arm)
+        });
+        let travel = 2.0 * fastest.sqrt() * dt + carried + self.params.radius + NEAR_SLACK;
+        for c in colliders {
+            self.near_starts.push(self.near.len() as u32);
+            // In the collider's box, from the nearest point of its path; turning in the step
+            // sweeps its far end by the angle times its size.
+            let (_, mut angle) = (c.to_rot * c.from_rot.conjugate()).to_axis_angle();
+            if angle > PI {
+                angle -= TAU;
+            }
+            let reach = travel + angle.abs() * c.shape.bounding_radius();
+            let half = c.shape.half_extents() + reach;
+            let inv_rot = c.to_rot.conjugate();
+            let (a, ab) = (c.from_pos, c.to_pos - c.from_pos);
+            let l2 = ab.length_squared().max(1e-12);
+            for (i, x) in self.pos.iter().enumerate() {
+                if self.inv_mass[i] == 0.0 {
+                    continue;
+                }
+                let t = ((*x - a).dot(ab) / l2).clamp(0.0, 1.0);
+                if (inv_rot * (*x - a - ab * t)).abs().cmple(half).all() {
+                    self.near.push(i as u32);
+                }
+            }
+        }
+        self.near_starts.push(self.near.len() as u32);
     }
 
     fn finish_step(&mut self) {
@@ -913,11 +970,9 @@ impl Sim {
             if w[i] == 0.0 {
                 continue;
             }
-            let x0 = pos[i];
-            let mut x = x0;
-            // Ground.
             let g = shared_ground.or_else(|| self.ground.get(i).copied());
             if let Some(g) = g {
+                let x = pos[i];
                 let n = Vec3::new(g[0], g[1], g[2]);
                 let d = n.dot(x) + g[3] - p.radius;
                 if d < 0.0 {
@@ -925,12 +980,18 @@ impl Sim {
                     if approach > self.ground_impact.0 {
                         self.ground_impact = (approach, x);
                     }
-                    x -= n * d;
-                    x = friction(x, self.prev[i], n, -d, Vec3::ZERO, h, p.friction);
+                    pos[i] = friction(x - n * d, self.prev[i], n, -d, Vec3::ZERO, h, p.friction);
                 }
             }
-            // Colliders.
-            for (ci, c) in self.posed.iter().enumerate() {
+        }
+        for (ci, c) in self.posed.iter().enumerate() {
+            let near = self.near_starts[ci] as usize..self.near_starts[ci + 1] as usize;
+            for &i in &self.near[near] {
+                let i = i as usize;
+                if w[i] == 0.0 {
+                    continue;
+                }
+                let mut x = pos[i];
                 let Some((d, n)) = c.query(&colliders[ci].shape, x) else {
                     continue;
                 };
@@ -949,8 +1010,8 @@ impl Sim {
                     imp.linear -= j;
                     imp.angular -= (x - colliders[ci].to_pos).cross(j);
                 }
+                pos[i] = x;
             }
-            pos[i] = x;
         }
         self.contacts = contacts;
 
@@ -985,11 +1046,16 @@ struct SelfContacts {
     /// Farthest any particle has bent away from the turned search shape, m.
     bent: f32,
     skin: f32,
-    /// Particles bucketed by hashed cell: bucket starts, then particle ids.
+    /// Free particles bucketed by hashed cell: bucket starts, then the particles (position
+    /// and id), in bucket order so a bucket's are read together.
     starts: Vec<u32>,
-    ids: Vec<u32>,
+    bucketed: Vec<(Vec3, u32)>,
+    cells: Vec<u32>,
     patches: Patches,
 }
+
+/// Extra reach when finding the particles near each collider, m.
+const NEAR_SLACK: f32 = 0.05;
 
 /// Normals of a patch further than this from its mean (radians) can fold it onto itself.
 const PATCH_CONE: f32 = 1.25;
@@ -1278,7 +1344,9 @@ impl SelfContacts {
         if !self.patches.hot.contains(&true) {
             return;
         }
-        let inv = 1.0 / edge.max(reach).max(1e-3);
+        // Cells as wide as a triangle with its reach around it, so each triangle looks in at
+        // most two cells along each axis.
+        let inv = 1.0 / (1.5 * edge + 2.0 * reach).max(1e-3);
         // Dense hashing: cells hash into twice as many buckets as particles, filled by
         // counting.
         let mask = (2 * pos.len()).next_power_of_two() as u32 - 1;
@@ -1289,22 +1357,29 @@ impl SelfContacts {
             (h as u32 & mask) as usize
         };
         let cell_of = |p: Vec3| (p * inv).floor().as_ivec3();
-        let (starts, ids) = (&mut self.starts, &mut self.ids);
+        let (starts, bucketed, cells) = (&mut self.starts, &mut self.bucketed, &mut self.cells);
         starts.clear();
         starts.resize(mask as usize + 2, 0);
-        for p in pos {
-            starts[bucket(cell_of(*p)) + 1] += 1;
-        }
+        cells.clear();
+        cells.extend(pos.iter().zip(w).map(|(p, &w)| {
+            if w == 0.0 {
+                return u32::MAX;
+            }
+            let b = bucket(cell_of(*p)) as u32;
+            starts[b as usize + 1] += 1;
+            b
+        }));
         for b in 1..starts.len() {
             starts[b] += starts[b - 1];
         }
-        ids.clear();
-        ids.resize(pos.len(), 0);
+        bucketed.clear();
+        bucketed.resize(starts[starts.len() - 1] as usize, (Vec3::ZERO, 0));
         let mut fill = starts.clone();
-        for (i, p) in pos.iter().enumerate() {
-            let b = bucket(cell_of(*p));
-            ids[fill[b] as usize] = i as u32;
-            fill[b] += 1;
+        for (i, &b) in cells.iter().enumerate() {
+            if b != u32::MAX {
+                bucketed[fill[b as usize] as usize] = (pos[i], i as u32);
+                fill[b as usize] += 1;
+            }
         }
         let beside = -reach / edge.max(1e-3) - 0.05;
         for t in self.patches.hot_triangles() {
@@ -1322,13 +1397,8 @@ impl SelfContacts {
                 for y in clo.y..=chi.y {
                     for x in clo.x..=chi.x {
                         let slot = bucket(IVec3::new(x, y, z));
-                        for &i in &ids[starts[slot] as usize..starts[slot + 1] as usize] {
-                            let p = pos[i as usize];
-                            if w[i as usize] == 0.0
-                                || p.cmplt(lo).any()
-                                || p.cmpgt(hi).any()
-                                || tri.contains(&i)
-                            {
+                        for &(p, i) in &bucketed[starts[slot] as usize..starts[slot + 1] as usize] {
+                            if p.cmplt(lo).any() || p.cmpgt(hi).any() || tri.contains(&i) {
                                 continue;
                             }
                             let d = (p - a).dot(n);
@@ -1550,6 +1620,31 @@ mod tests {
             }
         }
         (pos, tris)
+    }
+
+    /// The search over a sheet crumpled everywhere (every patch hot). Run with
+    /// `cargo test --release -p engine_softbody --lib self_collision_search_speed -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn self_collision_search_speed() {
+        let (mut pos, tris) = sheet(0.0, 0.0);
+        for p in &mut pos {
+            p.y = 0.25 * (9.0 * p.x).sin() * (7.0 * p.z).sin();
+        }
+        let w = vec![1.0; pos.len()];
+        let mut c = SelfContacts::default();
+        c.search(&pos, &w, &tris, 0.026, 0.05);
+        let t = std::time::Instant::now();
+        for _ in 0..20 {
+            c.search(&pos, &w, &tris, 0.026, 0.05);
+        }
+        println!(
+            "search {:.3} ms, {} pairs, {} of {} hot",
+            t.elapsed().as_secs_f64() * 50.0,
+            c.pairs.len(),
+            c.patches.hot.iter().filter(|h| **h).count(),
+            c.patches.count()
+        );
     }
 
     #[test]
