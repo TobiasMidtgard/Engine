@@ -66,7 +66,10 @@ pub fn spawn(commands: &mut Commands, land: Arc<Landscape>, surfaces: Arc<Landsc
         .with_overlay(OVERLAY_RADIUS, OVERLAY_BLEND, move |x, z| {
             height.height(x, z)
         })
-        .with_overlay_paint(move |x, z| Some(paint(&land, x, z)))
+        .with_overlay_paint({
+            let cache = crate::paint_cache::PaintCache::new(land, paint);
+            move |x, z| Some(cache.paint(x, z))
+        })
         .with_ground_surface(surfaces);
     commands
         .entity(bodies["Earth"])
@@ -148,11 +151,18 @@ fn layer(cover: Cover) -> &'static str {
 
 /// The landscape's ground at (x, z) as terrain paint: its cover's layer, tinted toward the
 /// color the landscape gives it.
-fn paint(land: &Landscape, x: f64, z: f64) -> OverlayPaint {
+pub fn paint(land: &Landscape, x: f64, z: f64) -> OverlayPaint {
     let h = land.height(x, z);
-    let n = land.normal(x, z, 0.5);
-    let color = land.color(x, z, h, n);
-    OverlayPaint::layer(layer(land.cover(x, z, h, n)), 1.0).tinted(color.to_array(), TINT)
+    // Forward differences over the metre `land.normal(x, z, 0.5)` spans: two more heights
+    // instead of four, as this runs for every vertex of every terrain patch near the valley.
+    let n = Vec3::new(
+        (h - land.height(x + 1.0, z)) as f32,
+        1.0,
+        (h - land.height(x, z + 1.0)) as f32,
+    )
+    .normalize();
+    let (cover, color) = land.cover_and_color(x, z, h, n);
+    OverlayPaint::layer(layer(cover), 1.0).tinted(color.to_array(), TINT)
 }
 
 #[cfg(test)]
@@ -193,9 +203,35 @@ mod tests {
             let t = std::time::Instant::now();
             let heights: f64 = points.iter().map(|&(x, z)| land.height(x, z)).sum();
             let height_us = t.elapsed().as_secs_f64() * 1e6 / points.len() as f64;
+            let time = |what: &str, f: &dyn Fn(f64, f64) -> f64| {
+                let t = std::time::Instant::now();
+                let sum: f64 = points.iter().map(|&(x, z)| f(x, z)).sum();
+                let us = t.elapsed().as_secs_f64() * 1e6 / points.len() as f64;
+                println!("  {what} {us:.2} us ({sum:.1})");
+            };
+            time("natural", &|x, z| land.natural(x, z));
+            time("woodland", &|x, z| land.woodland(x, z));
+            let up = Vec3::Y;
+            time("cover", &|x, z| land.cover(x, z, 10.0, up) as u8 as f64);
+            time("color", &|x, z| land.color(x, z, 10.0, up).x as f64);
             let t = std::time::Instant::now();
             let tints: f32 = points.iter().map(|&(x, z)| paint(land, x, z).tint[1]).sum();
             let paint_us = t.elapsed().as_secs_f64() * 1e6 / points.len() as f64;
+            // As a far patch asks: a 2 km square, a tap every 16 m.
+            let cache = crate::paint_cache::PaintCache::new(land.clone(), paint);
+            let (cx, cz) = points[0];
+            let patch: Vec<(f64, f64)> = (0..125 * 125)
+                .map(|k| (cx + (k % 125) as f64 * 16.0, cz + (k / 125) as f64 * 16.0))
+                .collect();
+            for (what, footprint) in [("exact", 0.0), ("baked cold", 16.0), ("baked warm", 16.0)] {
+                let t = std::time::Instant::now();
+                let sum: f32 = patch
+                    .iter()
+                    .map(|&(x, z)| cache.paint_for(x, z, footprint).tint[1])
+                    .sum();
+                let us = t.elapsed().as_secs_f64() * 1e6 / patch.len() as f64;
+                println!("  patch taps, {what}: {us:.2} us ({sum:.2})");
+            }
             println!(
                 "{name}: height {height_us:.2} us, paint {paint_us:.2} us (sums {heights:.3}, {tints:.4})"
             );

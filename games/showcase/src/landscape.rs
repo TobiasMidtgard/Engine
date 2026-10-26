@@ -68,6 +68,7 @@ pub struct Road {
     /// Paved (cobblestone) instead of dirt.
     pub paved: bool,
     bounds: (DVec2, DVec2),
+    near: SegmentGrid,
 }
 
 impl Road {
@@ -92,6 +93,7 @@ impl Road {
         let min = points.iter().fold(DVec2::splat(f64::MAX), |m, p| m.min(*p)) - margin;
         let max = points.iter().fold(DVec2::splat(f64::MIN), |m, p| m.max(*p)) + margin;
         Self {
+            near: SegmentGrid::new(&points, (min, max), margin),
             points,
             width,
             paved,
@@ -109,7 +111,8 @@ impl Road {
             return None;
         }
         let mut best: Option<(f64, DVec2)> = None;
-        for w in self.points.windows(2) {
+        for &i in self.near.at(p) {
+            let w = &self.points[i as usize..i as usize + 2];
             let q = closest_on_segment(p, w[0], w[1]);
             let d = (p - q).length();
             if best.is_none_or(|(bd, _)| d < bd) {
@@ -117,6 +120,59 @@ impl Road {
             }
         }
         best
+    }
+}
+
+/// The segments of a line that pass within `reach` of each cell of a grid over its bounds, so
+/// finding the closest point checks the few nearby instead of the whole line (the terrain's
+/// patch builds ask the roads and streams this several times per vertex). Exact whenever the
+/// closest point is within `reach`; past it the answer may be a farther segment or none.
+#[derive(Debug, Clone)]
+struct SegmentGrid {
+    min: DVec2,
+    cols: usize,
+    rows: usize,
+    cells: Vec<Vec<u32>>,
+}
+
+impl SegmentGrid {
+    const CELL: f64 = 16.0;
+
+    fn new(points: &[DVec2], (min, max): (DVec2, DVec2), reach: f64) -> Self {
+        let size = ((max - min) / Self::CELL).ceil().max(DVec2::ONE);
+        let (cols, rows) = (size.x as usize, size.y as usize);
+        let mut cells = vec![Vec::new(); cols * rows];
+        // Any point of a cell within `reach` of a segment puts its center within this.
+        let within = reach + Self::CELL * std::f64::consts::FRAC_1_SQRT_2;
+        let cell_of = |v: f64, lo: f64, n: usize| {
+            ((v - lo) / Self::CELL).floor().clamp(0.0, n as f64 - 1.0) as usize
+        };
+        for (i, w) in points.windows(2).enumerate() {
+            let (lo, hi) = (w[0].min(w[1]) - within, w[0].max(w[1]) + within);
+            for row in cell_of(lo.y, min.y, rows)..=cell_of(hi.y, min.y, rows) {
+                for col in cell_of(lo.x, min.x, cols)..=cell_of(hi.x, min.x, cols) {
+                    let center = min + (DVec2::new(col as f64, row as f64) + 0.5) * Self::CELL;
+                    if distance_to_segment(center, w[0], w[1]) <= within {
+                        cells[row * cols + col].push(i as u32);
+                    }
+                }
+            }
+        }
+        Self {
+            min,
+            cols,
+            rows,
+            cells,
+        }
+    }
+
+    /// The segments (index of their first point) near `p`, in order along the line.
+    fn at(&self, p: DVec2) -> &[u32] {
+        let c = ((p - self.min) / Self::CELL).floor();
+        if c.x < 0.0 || c.y < 0.0 || c.x >= self.cols as f64 || c.y >= self.rows as f64 {
+            return &[];
+        }
+        &self.cells[c.y as usize * self.cols + c.x as usize]
     }
 }
 
@@ -309,6 +365,7 @@ pub struct Stream {
     /// The plunge pool under the falls: center and bed height.
     pub pool: Option<(DVec2, f64)>,
     bounds: (DVec2, DVec2),
+    near: SegmentGrid,
 }
 
 impl Stream {
@@ -325,6 +382,7 @@ impl Stream {
         let min = path.iter().fold(DVec2::splat(f64::MAX), |m, p| m.min(*p)) - margin;
         let max = path.iter().fold(DVec2::splat(f64::MIN), |m, p| m.max(*p)) + margin;
         Self {
+            near: SegmentGrid::new(&path, (min, max), margin),
             bed: vec![0.0; path.len()],
             path,
             width,
@@ -344,7 +402,9 @@ impl Stream {
             return None;
         }
         let mut best: Option<(f64, f64)> = None;
-        for (i, w) in self.path.windows(2).enumerate() {
+        for &i in self.near.at(p) {
+            let i = i as usize;
+            let w = &self.path[i..i + 2];
             let q = closest_on_segment(p, w[0], w[1]);
             let d = (p - q).length();
             if best.is_none_or(|(bd, _)| d < bd) {
@@ -384,7 +444,8 @@ pub struct Landscape {
     /// Ground laid out by module demos (the footstep trail): the cover at (x, z), or `None`
     /// to leave the landscape's own. Checked before `patches`.
     pub painters: Vec<fn(f64, f64) -> Option<Cover>>,
-    /// Farm fields on the valley floor: grid cell and crop (see [`Landscape::plant_fields`]).
+    /// Farm fields on the valley floor: grid cell and crop, in cell order (see
+    /// [`Landscape::plant_fields`]).
     pub fields: Vec<((i32, i32), Crop)>,
     /// Rock steps (the cliff the waterfall drops over).
     pub scarps: Vec<Scarp>,
@@ -479,22 +540,34 @@ impl Landscape {
     pub fn natural(&self, x: f64, z: f64) -> f64 {
         let s = self.seed;
         let r = (x * x + z * z).sqrt();
+        // Flatten toward the edge of the mesh so it meets the planet's ground color. (Each
+        // layer's noise is only worked out where it counts: this runs for every terrain vertex.)
+        let edge = 1.0 - smooth(TERRAIN_RADIUS * 0.7, TERRAIN_RADIUS * 0.98, r);
+        if edge <= 0.0 {
+            return 0.0;
+        }
         // Valley floor: gentle near the plaza, hillier toward the edges.
         let hills = fbm2(x / 420.0, z / 420.0, s, 5, 2.0, 0.5) as f64 * 16.0 + 4.0;
         let valley = smooth(200.0, 1300.0, r);
         let mut h = hills * (0.4 + 0.9 * valley);
         // Foothills.
-        let foot = (fbm2(x / 1100.0, z / 1100.0, s + 1, 5, 2.0, 0.5) as f64 * 0.5 + 0.5).powf(1.4);
-        h += foot * 260.0 * smooth(900.0, 2600.0, r);
+        let foothills = smooth(900.0, 2600.0, r);
+        if foothills > 0.0 {
+            let foot =
+                (fbm2(x / 1100.0, z / 1100.0, s + 1, 5, 2.0, 0.5) as f64 * 0.5 + 0.5).powf(1.4);
+            h += foot * 260.0 * foothills;
+        }
         // Mountains: ridged noise, stronger in some directions so the skyline varies.
-        let angle = z.atan2(x);
-        let dir_bias =
-            0.55 + 0.45 * perlin2(angle.cos() * 1.3 + 7.0, angle.sin() * 1.3 + 3.0, s + 5) as f64;
-        let ridge = ridged2(x / 3800.0, z / 3800.0, s + 2, 7) as f64;
-        let mountains = ridge.powf(1.6) * 3200.0 * dir_bias.max(0.15);
-        h += mountains * smooth(1700.0, 5200.0, r);
-        // Flatten toward the edge of the mesh so it meets the planet's ground color.
-        h * (1.0 - smooth(TERRAIN_RADIUS * 0.7, TERRAIN_RADIUS * 0.98, r))
+        let range = smooth(1700.0, 5200.0, r);
+        if range > 0.0 {
+            let angle = z.atan2(x);
+            let dir_bias = 0.55
+                + 0.45 * perlin2(angle.cos() * 1.3 + 7.0, angle.sin() * 1.3 + 3.0, s + 5) as f64;
+            let ridge = ridged2(x / 3800.0, z / 3800.0, s + 2, 7) as f64;
+            let mountains = ridge.powf(1.6) * 3200.0 * dir_bias.max(0.15);
+            h += mountains * range;
+        }
+        h * edge
     }
 
     /// Ground height without roads (roads sample this at their centerline).
@@ -735,10 +808,11 @@ impl Landscape {
     /// The farm field at this spot, if any.
     pub fn field_at(&self, x: f64, z: f64) -> Option<(Crop, f64)> {
         let (cell, edge) = field_cell(x, z);
+        // `plant_fields` lists them in cell order.
         self.fields
-            .iter()
-            .find(|f| f.0 == cell)
-            .map(|f| (f.1, edge))
+            .binary_search_by_key(&cell, |f| f.0)
+            .ok()
+            .map(|i| (self.fields[i].1, edge))
     }
 
     /// Water depth below the lake surface (≤ 0 means dry ground).
@@ -748,6 +822,27 @@ impl Landscape {
 
     /// What covers the ground here.
     pub fn cover(&self, x: f64, z: f64, h: f64, normal: Vec3) -> Cover {
+        self.cover_with(x, z, h, normal, &std::cell::OnceCell::new())
+    }
+
+    /// [`cover`](Self::cover) and [`color`](Self::color) together, working out the woods once.
+    pub fn cover_and_color(&self, x: f64, z: f64, h: f64, normal: Vec3) -> (Cover, Vec3) {
+        let wood = std::cell::OnceCell::new();
+        (
+            self.cover_with(x, z, h, normal, &wood),
+            self.paint(x, z, h, normal, false, &wood),
+        )
+    }
+
+    /// `cover`, with the woodland at (x, z) kept in `wood` once worked out.
+    fn cover_with(
+        &self,
+        x: f64,
+        z: f64,
+        h: f64,
+        normal: Vec3,
+        wood: &std::cell::OnceCell<f64>,
+    ) -> Cover {
         if let Some(c) = self.patch_at(x, z) {
             return c;
         }
@@ -795,7 +890,7 @@ impl Landscape {
                 Cover::Grass
             };
         }
-        if self.woodland(x, z) > 0.55 {
+        if *wood.get_or_init(|| self.woodland(x, z)) > 0.55 {
             return Cover::Forest;
         }
         Cover::Grass
@@ -879,12 +974,12 @@ impl Landscape {
 
     /// Linear albedo of the ground here (vertex color of the terrain mesh).
     pub fn color(&self, x: f64, z: f64, h: f64, normal: Vec3) -> Vec3 {
-        self.paint(x, z, h, normal, false)
+        self.paint(x, z, h, normal, false, &std::cell::OnceCell::new())
     }
 
     /// Color of the cave roof's top: the hillside, as if there were no cave below.
     pub fn roof_color(&self, x: f64, z: f64, h: f64, normal: Vec3) -> Vec3 {
-        self.paint(x, z, h, normal, true)
+        self.paint(x, z, h, normal, true, &std::cell::OnceCell::new())
     }
 
     /// 0 = fresh .. 1 = dry, of the meadow grass at (x, z): where the ground paint yellows
@@ -904,7 +999,15 @@ impl Landscape {
         t * (1.0 - by_stream.max(by_lake) * 0.8)
     }
 
-    fn paint(&self, x: f64, z: f64, h: f64, normal: Vec3, roofed: bool) -> Vec3 {
+    fn paint(
+        &self,
+        x: f64,
+        z: f64,
+        h: f64,
+        normal: Vec3,
+        roofed: bool,
+        wood: &std::cell::OnceCell<f64>,
+    ) -> Vec3 {
         let s = self.seed;
         let n1 = fbm2(x / 55.0, z / 55.0, s + 20, 4, 2.0, 0.5) * 0.5 + 0.5;
         let n2 = fbm2(x / 9.0, z / 9.0, s + 21, 3, 2.0, 0.5) * 0.5 + 0.5;
@@ -945,7 +1048,7 @@ impl Landscape {
         let altitude = smooth(250.0, 800.0, h) as f32;
         let mut c = grass.lerp(alpine, altitude);
         // Darker under the woods (the canopy above is instanced trees nearby, painted far away).
-        let wood = self.woodland(x, z) as f32;
+        let wood = *wood.get_or_init(|| self.woodland(x, z)) as f32;
         c = c.lerp(forest, smoothstep(0.35, 0.8, wood) * (1.0 - altitude));
         // Rock on steep slopes.
         let rocky = smoothstep(0.18, 0.4, slope);
@@ -1200,6 +1303,45 @@ mod tests {
 
     fn test_land() -> Landscape {
         crate::zones::landscape(7)
+    }
+
+    #[test]
+    fn nearby_lookups_match_a_search_of_everything() {
+        let land = shared();
+        let brute = |line: &[DVec2], p: DVec2| {
+            line.windows(2)
+                .map(|w| distance_to_segment(p, w[0], w[1]))
+                .fold(f64::INFINITY, f64::min)
+        };
+        let mut rng = Rng::new(3);
+        for _ in 0..20_000 {
+            let p = DVec2::new(
+                rng.range(-1500.0, 1500.0) as f64,
+                rng.range(-1500.0, 1500.0) as f64,
+            );
+            for road in &land.roads {
+                let d = brute(&road.points, p);
+                if d <= road.width + 20.0 {
+                    let got = road.closest(p).map(|c| c.0);
+                    assert!(
+                        got.is_some_and(|g| (g - d).abs() < 1e-9),
+                        "road at {p}: {got:?} vs {d}"
+                    );
+                }
+            }
+            for st in &land.streams {
+                let d = brute(&st.path, p);
+                if d <= st.width + 25.0 {
+                    let got = st.closest(p).map(|c| c.0);
+                    assert!(
+                        got.is_some_and(|g| (g - d).abs() < 1e-9),
+                        "stream at {p}: {got:?} vs {d}"
+                    );
+                }
+            }
+        }
+        // `field_at` searches them by cell.
+        assert!(land.fields.windows(2).all(|w| w[0].0 < w[1].0));
     }
 
     #[test]
