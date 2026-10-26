@@ -548,14 +548,16 @@ impl Plugin for TerrainPlugin {
             )
             .add_systems(
                 FixedUpdate,
-                (
-                    demo::walk,
-                    demo::swing_limbs,
-                    deform_from_contacts,
-                    wear_from_contacts,
-                )
+                (demo::walk, demo::swing_limbs)
                     .chain()
                     .in_set(SimSet::Environment),
+            )
+            // Prints and paths take the contacts of all of a frame's fixed steps at once.
+            .add_systems(
+                PostUpdate,
+                (deform_from_contacts, wear_from_contacts)
+                    .chain()
+                    .before(UpdateSet::AfterPropagate),
             )
             .add_render_feature(render::TerrainFeature::default());
         register_apis(app);
@@ -775,11 +777,13 @@ fn deform_from_contacts(
     mut clock: ResMut<RecoverClock>,
     weather: Res<WeatherState>,
     surface_layers: Res<SurfaceLayers>,
+    range: Option<Res<engine_world::SimulationRange>>,
 ) {
     if !settings.enabled || terrains.entries.is_empty() {
         contacts.clear();
         return;
     }
+    let range = range.map(|r| *r).unwrap_or_default();
     if (map.cell - settings.cell_m).abs() > 1e-6 || map.size != settings.size {
         *map = DeformationMap::new(settings.cell_m, settings.size.clamp(64, 4096));
     }
@@ -800,7 +804,11 @@ fn deform_from_contacts(
             settings.sand_half_life_s,
         );
     }
-    for c in contacts.read() {
+    // (Prints beyond the simulated range would never be seen up close.)
+    for c in contacts
+        .read()
+        .filter(|c| range.is_active(&env.focus, c.position))
+    {
         let ground = env.ground(c.position);
         let surface = c.surface.or(ground.map(|g| g.surface)).unwrap_or_default();
         let mat = env.material(surface);
@@ -847,11 +855,13 @@ fn wear_from_contacts(
     mut clock: Local<HealClock>,
     mut provider: ResMut<WearProvider>,
     mut ground_wear: ResMut<engine_world::GroundWear>,
+    range: Option<Res<engine_world::SimulationRange>>,
 ) {
     if !settings.enabled || terrains.entries.is_empty() {
         contacts.clear();
         return;
     }
+    let range = range.map(|r| *r).unwrap_or_default();
     if (wear.cell_m - settings.cell_m).abs() > 1e-6 {
         *wear = PathWear::new(settings.cell_m.clamp(0.1, 4.0));
     }
@@ -864,7 +874,12 @@ fn wear_from_contacts(
     for e in gone {
         wear.forget(e);
     }
-    for c in contacts.read() {
+    // (Paths are worn where people walk while the player is about; far off, footfalls rest
+    // with everything else.)
+    for c in contacts
+        .read()
+        .filter(|c| range.is_active(&env.focus, c.position))
+    {
         let Some((entity, t)) = terrains.nearest(c.position) else {
             continue;
         };
