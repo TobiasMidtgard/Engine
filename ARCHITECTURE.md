@@ -170,7 +170,10 @@ from the window's top-left) makes the scene render at the rectangle's size and a
 and land there in the window; the rest of the window is black. `ctx.view.width`/`height` are
 the scene's size, `ctx.view.window` the whole output's and `ctx.view.viewport_origin` the
 scene's corner in it. Overlays draw onto the whole window, so screen-space overlays (UI,
-editor panels, debug text) size themselves from `view.window`.
+editor panels, debug text) size themselves from `view.window`. Overlays drawn in the scene's
+projection (debug lines, markers) call `ctx.view.set_scene_viewport(&mut pass)` and, in WGSL,
+subtract `frame.window.xy` (the scene's corner; `zw` is the window's size) from a fragment's
+position before reading scene-sized targets such as depth.
 
 **Sun shadows** (built): four cascades out to `RenderSettings::shadow_distance` (rotation-
 invariant spheres snapped to texels, PCSS filtering), then a **far shadow map** out to
