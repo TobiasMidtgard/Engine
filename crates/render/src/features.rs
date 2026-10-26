@@ -139,6 +139,19 @@ impl GpuShared {
         self.images.get(self, images, handle, color)
     }
 
+    /// Like [`image_texture`](Self::image_texture) for a slot that reads the image as `usage`,
+    /// which decides how the renderer may block-compress it (`RenderSettings::texture_compression`):
+    /// [`TextureUse::Red`] for one-channel slots, [`TextureUse::Exact`] for data that must stay
+    /// exact.
+    pub fn image_texture_for(
+        &self,
+        images: &Assets<Image>,
+        handle: Handle<Image>,
+        usage: crate::image_cache::TextureUse,
+    ) -> Option<Arc<ImageTexture>> {
+        self.images.get_for(self, images, handle, usage)
+    }
+
     /// Copy a preset's maps back to the CPU (mip 0), generating them first if needed. Blocks
     /// until the GPU is done. For tests and exporting.
     pub fn read_material_maps(

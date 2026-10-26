@@ -537,7 +537,7 @@ that changes only when new pixels are uploaded, so bind groups are rebuilt only 
 it with its mip chain on first use and again when the asset gets new pixels; images nobody asks
 for in 600 frames leave the GPU. The mesh feature (and with it the cluster path) binds its
 material textures this way; features that upload `Image::data` themselves (the skinning feature,
-today) should switch to it. With `RenderSettings::release_image_pixels` (off by default) the
+today) should switch to it. With `RenderSettings::release_image_pixels` (on by default since 2026-10-26) the
 renderer frees an uploaded image's CPU pixels (`data` and `mips`; size, format and flags stay,
 and `Image::is_released()` turns true) once its asset version has stayed the same for
 `RELEASE_AFTER_FRAMES` (120) frames, counted in frames so that a texture written every frame or
@@ -549,6 +549,23 @@ place less often than every two seconds, or uploads itself (an image that both t
 and a skin use, until the skinning feature uses `image_texture`). `Diagnostics` reports
 `render.images_released` and `render.image_bytes_released` (since startup),
 `render.image_uploads` and `render.gpu_images`; `render.stats` includes them.
+
+**Texture compression** (built; `image_cache.rs`): with `RenderSettings::texture_compression`
+(`Quality` by default) and a GPU with BC formats, an RGBA8 image drawn unchanged for
+`COMPRESS_AFTER_FRAMES` (30) frames is block-compressed on the GPU from its GPU copy (so it also
+works after its pixels were released) and swapped in under a new `ImageTexture::id`. The format
+follows what the slot reads, as in Unreal's texture compression settings and Godot's importer:
+`GpuShared::image_texture_for(&images, handle, TextureUse)` takes `Color` (BC7, sRGB when the
+image is), `Linear` (BC7: normal maps keep z, so the length of a filtered normal still drives
+the specular anti-aliasing), `Red` (BC4: height and occlusion), `RedGreen` (BC5, for normal maps
+whose shader rebuilds z) or `Exact` (never compressed); `image_texture(.., color)` is `Color` or
+`Linear`. `TextureCompression::Compact` uses BC1 for opaque color (half of BC7, some banding in
+smooth gradients). The encoders are a WGSL port of Intel's ISPC texture compressor (the
+`block_compression` crate, "basic" BC7 profiles), built on a thread at the first upload and run
+for at most `COMPRESS_TEXELS_PER_FRAME` texels a frame. Images whose mip levels don't halve to
+whole 4×4 blocks stay RGBA8, as do float images. Under a software GPU nothing is compressed
+unless `texture_compression_on_cpu` is set. `Diagnostics`: `render.images_compressed` and
+`render.image_mb_compressed_away`.
 
 **Sky light** (built): every time the sky environment map is redrawn
 (`RenderSettings::environment_interval`), the GPU filters it twice: prefiltered for GGX

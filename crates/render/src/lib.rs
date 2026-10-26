@@ -122,7 +122,7 @@ pub use gltf_loader::{
     spawn_gltf_scene_deferred,
 };
 pub use grass::{GrassBender, GrassField, GrassStyle, GrassWear};
-pub use image_cache::{ImageMemoryStats, ImageTexture};
+pub use image_cache::{ImageMemoryStats, ImageTexture, TextureUse};
 pub use material::{AlphaMode, StandardMaterial, TextureMapping, TextureProjection};
 pub use material_library::{MaterialMaps, MaterialPreset, MaterialTextures};
 pub use mesh::{Mesh, Shape, Vertex};
@@ -132,7 +132,8 @@ pub use renderer::{
 };
 pub use rock::{StoneFinish, StoneKind, WallStone, wall_stone};
 pub use settings::{
-    AntiAliasing, Atmosphere, DebugView, FogSettings, RenderSettings, Tonemapper, VolumetricQuality,
+    AntiAliasing, Atmosphere, DebugView, FogSettings, RenderSettings, TextureCompression,
+    Tonemapper, VolumetricQuality,
 };
 pub use sprites::{
     Billboard, Parallax, PixelGrid, PixelPerfect, PixelSnap, Sprite, SpriteAlpha, SpriteAnimation,
@@ -156,9 +157,9 @@ pub mod prelude {
         MotionBlur, NoVirtualGeometry, Parallax, PixelPerfect, PixelSnap, PointLight, Projection,
         RenderAppExt, RenderFeature, RenderPhase, RenderPlugin, RenderSettings, Screenshots, Shape,
         SkyLightVolume, Sprite, SpriteAlpha, SpriteAnimation, SpriteAnimationMode, SpriteAtlas,
-        SpriteFilter, StandardMaterial, StoneKind, TextureMapping, TileMap, TileSource, Tonemapper,
-        Viewport, VirtualTextures, VolumetricQuality, WallStone, spawn_gltf_scene,
-        spawn_gltf_scene_deferred,
+        SpriteFilter, StandardMaterial, StoneKind, TextureCompression, TextureMapping, TileMap,
+        TileSource, Tonemapper, Viewport, VirtualTextures, VolumetricQuality, WallStone,
+        spawn_gltf_scene, spawn_gltf_scene_deferred,
     };
 }
 
@@ -249,7 +250,7 @@ impl Plugin for RenderPlugin {
                 "On an orthographic Camera: pixel-perfect pixel art. pixels_per_unit (art texels per meter), scale (screen pixels per texel, 0 = largest that shows the camera's height), snap Texel/ScreenPixel (camera and sprites move in whole steps). Turns temporal anti-aliasing off for this camera.",
             )
             .register_resource::<RenderSettings>(
-                "Renderer quality and look: shadows (shadow_distance m, far_shadow_distance m: big casters such as mountains beyond the cascades, 0 = off; sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), screen_space_reflections, volumetric_fog (bool), volumetric_fog_range (m), volumetric_fog_quality (Low/Medium/High), anti_aliasing (Taa/None) and sharpness, taa_reactive (0..1: TAA keeps thin transparent things such as snowflakes, rain and sparks; found automatically), tonemapper (AgX/Aces/Reinhard/None), bloom (bloom_intensity, bloom_limit: the most a pixel brings into the bloom in multiples of white, 0 = no limit), grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion/Reflections/Clusters/ClusterLevels/VirtualTextures), virtual_geometry (dense opaque meshes as GPU-culled clusters: virtual_geometry_min_triangles, virtual_geometry_occlusion (two-pass occlusion culling), virtual_geometry_cache (+ _dir, _mb: builds kept on disk), cluster_error_px, cluster_shadow_error_texels), release_image_pixels (free each image's CPU pixels once uploaded and unchanged for 120 frames; Image keep_pixels opts one out), virtual_textures (stream big images and VirtualTextures handles through a tile cache: virtual_texture_threshold texels, virtual_texture_cache_tiles per cache texture, virtual_texture_upload_budget tiles per frame, virtual_texture_mip_bias, virtual_texture_compression for BC7).",
+                "Renderer quality and look: shadows (shadow_distance m, far_shadow_distance m: big casters such as mountains beyond the cascades, 0 = off; sun_penumbra_scale, contact_shadow_length m), ambient_occlusion (ao_radius m, ao_intensity), screen_space_reflections, volumetric_fog (bool), volumetric_fog_range (m), volumetric_fog_quality (Low/Medium/High), anti_aliasing (Taa/None) and sharpness, taa_reactive (0..1: TAA keeps thin transparent things such as snowflakes, rain and sparks; found automatically), tonemapper (AgX/Aces/Reinhard/None), bloom (bloom_intensity, bloom_limit: the most a pixel brings into the bloom in multiples of white, 0 = no limit), grading, debug_view (None/Normals/Cascades/SkyVisibility/AmbientOcclusion/Reflections/Clusters/ClusterLevels/VirtualTextures), virtual_geometry (dense opaque meshes as GPU-culled clusters: virtual_geometry_min_triangles, virtual_geometry_occlusion (two-pass occlusion culling), virtual_geometry_cache (+ _dir, _mb: builds kept on disk), cluster_error_px, cluster_shadow_error_texels), release_image_pixels (free each image's CPU pixels once uploaded and unchanged for 120 frames; Image keep_pixels opts one out), virtual_textures (stream big images and VirtualTextures handles through a tile cache: virtual_texture_threshold texels, virtual_texture_cache_tiles per cache texture, virtual_texture_upload_budget tiles per frame, virtual_texture_mip_bias, virtual_texture_compression for BC7), texture_compression (Off/Compact/Quality: material images block-compressed on the GPU once drawn unchanged for 30 frames; BC7 color and data, BC4 one-channel slots, BC1 opaque color in Compact; texture_compression_on_cpu also under a software GPU).",
             )
             .register_resource::<FogSettings>("Height fog everywhere (volumetric within volumetric_fog_range, with light shafts): density (extinction 1/m at base_height, visibility about 3.9 / density: 0.00002 clear air, 0.0001 light haze, 0.0005 haze, 0.05 ground fog), height_falloff (1/m), base_height (m), max_opacity, color (albedo), sun_scattering (Henyey-Greenstein g, 0.6 = forward scattering, glow around the sun).")
             .register_resource::<Atmosphere>(
