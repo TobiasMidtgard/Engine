@@ -2,6 +2,10 @@
 
 use std::hash::{Hash, Hasher};
 
+use bevy_tasks::Task;
+use bevy_tasks::futures::check_ready;
+use engine_core::tasks::AsyncComputeTaskPool;
+
 use engine_core::math::{DVec2, DVec3, EulerRot, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::Camera;
@@ -320,9 +324,13 @@ pub fn flow_system(
     )>,
     book: Res<SimBook>,
     mut splashes: MessageWriter<WaterSplash>,
+    config: Res<EngineConfig>,
+    mut status: ResMut<WaterLoading>,
+    mut loading: Local<Vec<(Entity, Task<FlowSim>)>>,
     mut last_layout: Local<u64>,
     mut since_spray: Local<f32>,
 ) {
+    engine_core::tasks::init_task_pools();
     let dt = time.delta_secs();
     // Falls send their spray out as `WaterSplash` puffs (particles show it, audio plays it).
     *since_spray += dt;
@@ -348,29 +356,36 @@ pub fn flow_system(
         let idx = match state.flows.iter().position(|f| f.entity == entity) {
             Some(i) => i,
             None => {
-                let bed = flow_bed(region, origin, yaw, &state.ground);
-                let mut sim = FlowSim::new(entity, origin, region, bed);
-                sim.yaw = yaw;
-                set_reservoirs(&mut sim, &state.bodies, &state.ground);
-                // Let the stream establish itself before anyone looks: its priming springs
-                // run alongside its own for the first half, so a long course fills along its
-                // whole length, then its own alone so the stream settles to them.
-                let steps = (region.prewarm_s.max(0.0) * 30.0) as u32;
-                sim.sources = region
-                    .sources
-                    .iter()
-                    .chain(&region.priming)
-                    .copied()
-                    .collect();
-                for k in 0..steps {
-                    if k == steps / 2 {
-                        sim.sources = region.sources.clone();
+                // A new region's bed, its lakes and the stream settling along it take seconds
+                // for a long course: that runs on a worker, as Unreal's async loading thread
+                // and Unity's async loads do, and the frame thread only picks the region up
+                // once it is ready (`WaterLoading` says how many are still settling). Headless
+                // runs (tests, tours) wait for it there and then, so they see the same water.
+                if !loading.iter().any(|(e, _)| *e == entity) {
+                    let job = FlowJob {
+                        entity,
+                        region: region.clone(),
+                        origin,
+                        yaw,
+                        ground: state.ground.clone(),
+                        bodies: state.bodies.clone(),
+                    };
+                    if config.headless {
+                        state.flows.push(job.build());
+                    } else {
+                        let task = AsyncComputeTaskPool::get().spawn(async move { job.build() });
+                        loading.push((entity, task));
                     }
-                    sim.step(1.0 / 30.0);
                 }
-                sim.sources = region.sources.clone();
-                sim.drained_m3 = 0.0;
-                state.flows.push(sim);
+                // Picked up where it is now (a world shift meanwhile moves it below).
+                if let Some(k) = loading.iter().position(|(e, _)| *e == entity) {
+                    let Some(sim) = check_ready(&mut loading[k].1) else {
+                        continue;
+                    };
+                    // Finished: dropping its handle cancels nothing.
+                    drop(loading.swap_remove(k));
+                    state.flows.push(sim);
+                }
                 state.flows.len() - 1
             }
         };
@@ -412,6 +427,66 @@ pub fn flow_system(
         }
     }
     state.flows.retain(|f| seen.contains(&f.entity));
+    // A region removed while it was settling: drop its work (that cancels it).
+    loading.retain(|(e, _)| seen.contains(e));
+    if status.settling != loading.len() {
+        status.settling = loading.len();
+    }
+}
+
+/// Flowing water still being made ready: a loading screen waits until [`is_ready`].
+///
+/// [`is_ready`]: WaterLoading::is_ready
+#[derive(Resource, Debug, Clone, Default)]
+pub struct WaterLoading {
+    /// Flow regions whose bed and settling stream are still being worked out.
+    pub settling: usize,
+}
+
+impl WaterLoading {
+    pub fn is_ready(&self) -> bool {
+        self.settling == 0
+    }
+}
+
+/// Everything a new flow region needs to be made ready off the frame thread.
+struct FlowJob {
+    entity: Entity,
+    region: FlowRegion,
+    origin: DVec3,
+    yaw: f32,
+    ground: Ground,
+    bodies: Vec<BodyState>,
+}
+
+impl FlowJob {
+    /// The region's bed from the ground, its lakes, and its stream run until it has settled.
+    fn build(self) -> FlowSim {
+        let region = &self.region;
+        let bed = flow_bed(region, self.origin, self.yaw, &self.ground);
+        let mut sim = FlowSim::new(self.entity, self.origin, region, bed);
+        sim.yaw = self.yaw;
+        set_reservoirs(&mut sim, &self.bodies, &self.ground);
+        // Let the stream establish itself before anyone looks: its priming springs run
+        // alongside its own for the first half, so a long course fills along its whole
+        // length, then its own alone so the stream settles to them.
+        let steps = (region.prewarm_s.max(0.0) * 30.0) as u32;
+        sim.sources = region
+            .sources
+            .iter()
+            .chain(&region.priming)
+            .copied()
+            .collect();
+        for k in 0..steps {
+            if k == steps / 2 {
+                sim.sources = region.sources.clone();
+            }
+            sim.step(1.0 / 30.0);
+        }
+        sim.sources = region.sources.clone();
+        sim.drained_m3 = 0.0;
+        sim
+    }
 }
 
 /// Seconds between spray puffs from each waterfall.

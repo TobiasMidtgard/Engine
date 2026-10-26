@@ -47,6 +47,7 @@ pub(crate) fn shift_smoke(
         return;
     };
     for d in &mut domains.list {
+        d.drop_running();
         let size = d.domain.size();
         // A `SmokeVolume`'s box hangs from its entity at the middle of its floor; one made
         // around released smoke turns about its middle.
@@ -139,6 +140,8 @@ mod tests {
                 step_secs: 1.0 / 30.0,
             });
         app.add_plugins(SmokePlugin);
+        // Steps on the spot, so the smoke is where the test counts on it being.
+        app.world.resource_mut::<SmokeSettings>().background = false;
         app.init_resource::<Plan>();
         app.add_systems(PostUpdate, write_planned.in_set(WorldShiftSet::Write));
         app.world.resource_mut::<engine_world::WeatherState>().wind = Vec3::ZERO;

@@ -67,6 +67,23 @@ pub fn headless_runner(mut app: App) -> AppExit {
     }
 }
 
+/// Keep Windows from swapping the window for a frozen "Not responding" ghost when a frame (a
+/// loading frame building a zone) runs longer than 5 s without pumping messages. Unreal keeps
+/// its loading screen alive on a thread of its own for the same reason; until every module's
+/// first-use build runs off the frame thread, this keeps the real window on screen.
+#[cfg(windows)]
+fn disable_ghosting() {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn DisableProcessWindowsGhosting();
+    }
+    // SAFETY: takes no arguments and only sets a flag for this process.
+    unsafe { DisableProcessWindowsGhosting() }
+}
+
+#[cfg(not(windows))]
+fn disable_ghosting() {}
+
 /// Runs the app inside the winit event loop.
 pub fn winit_runner(app: App) -> AppExit {
     let event_loop = match EventLoop::new() {
@@ -79,6 +96,7 @@ pub fn winit_runner(app: App) -> AppExit {
         }
     };
     event_loop.set_control_flow(ControlFlow::Poll);
+    disable_ghosting();
     let mut handler = Handler {
         app,
         window: None,

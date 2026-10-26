@@ -118,6 +118,8 @@ pub fn settle_fog(
         if d.resting {
             continue;
         }
+        // Fog steps on the spot; a step started before the volume held fog is skipped.
+        d.drop_running();
         let domain = &mut d.domain;
         domain.fog = true;
         let amount = bank.amount_for(weather.fog);

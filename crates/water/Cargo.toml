@@ -11,6 +11,7 @@ engine_world.workspace = true
 engine_render.workspace = true
 engine_assets.workspace = true
 bevy_ecs.workspace = true
+bevy_tasks.workspace = true
 wgpu.workspace = true
 bytemuck.workspace = true
 parking_lot.workspace = true

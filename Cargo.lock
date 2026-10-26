@@ -1474,6 +1474,7 @@ name = "engine_water"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "bevy_tasks",
  "bytemuck",
  "engine_assets",
  "engine_core",

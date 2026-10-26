@@ -290,12 +290,20 @@ pub fn step(world: &mut World) {
     build.ran.clear();
     // Steps run until this frame's budget is spent, as Unity's High background loading
     // priority (50 ms a frame behind a loading screen) and Unreal's streaming time limits do:
-    // cheap steps share a frame, a heavy one has a frame to itself.
+    // cheap steps share a frame, a heavy one has a frame to itself. A zone's demo always
+    // ends the frame: its module's systems build what it needs later in the frame (the PC
+    // showed seconds of that behind a spawn of a few milliseconds), and two of those in one
+    // frame add up.
     loop {
         let at = (build.next, build.zone);
         run_step(world, &mut build);
         let moved = (build.next, build.zone) != at;
-        if !moved || build.next >= STEPS.len() || now.elapsed().as_secs_f32() > FRAME_BUDGET_S {
+        let zone = build.zone != at.1;
+        if !moved
+            || zone
+            || build.next >= STEPS.len()
+            || now.elapsed().as_secs_f32() > FRAME_BUDGET_S
+        {
             break;
         }
     }

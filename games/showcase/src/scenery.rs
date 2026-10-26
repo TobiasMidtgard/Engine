@@ -1776,6 +1776,9 @@ const HERO_SPAWN: f32 = 38.0;
 /// ...and despawned beyond this, m.
 const HERO_OUT: f32 = 46.0;
 
+/// Time (s) a frame may spend spawning hero stones.
+const HERO_BUDGET_S: f32 = 0.003;
+
 /// Hidden closer than this to the camera, m (where something finer stands in).
 #[derive(Component, Debug, Clone, Copy)]
 pub struct HideWithin(pub f32);
@@ -1850,11 +1853,18 @@ pub fn stream_wall_heroes(
     if restream {
         *timer = 0.25;
     }
+    // Walls spawn their stones until this run's budget is spent; the rest go next frame, so
+    // arriving among many walls (the first frame, a jump) never stalls a frame for long.
+    let started = std::time::Instant::now();
     for (e, t, mut w) in &mut walls {
         let d2 = (t.translation() - eye).length_squared();
         // As `update_lods` decides the merged rocks' `HideWithin`.
         let show = d2 < (HERO_IN as f64).powi(2);
         if restream && w.stones.is_empty() && d2 < (HERO_SPAWN as f64).powi(2) {
+            if started.elapsed().as_secs_f32() > HERO_BUDGET_S {
+                *timer = 0.0;
+                continue;
+            }
             let mut spawned = Vec::with_capacity(w.placed.len());
             for p in w.placed.iter() {
                 let (mesh, displacement) = &palette.stones

@@ -8,7 +8,11 @@ use engine_world::{
     WorldImpulse,
 };
 
-use crate::domain::Domain;
+use std::sync::{Mutex, mpsc};
+
+use engine_core::tasks::AsyncComputeTaskPool;
+
+use crate::domain::{Change, Domain, StepParams};
 use crate::settings::SmokeSettings;
 
 /// A box where smoke is simulated, its `Transform` at the center of its floor. Smoke released
@@ -161,6 +165,41 @@ pub struct SmokeDomain {
     pub stride: u32,
     /// Seconds of simulation clock since it last stepped.
     pub owed_secs: f32,
+    /// Its step running on a background task, if one is.
+    pub background: Background,
+}
+
+/// A volume's step running on a background task: it steps a copy of the air, and the copy
+/// replaces the air when it is done, with what was done to the air meanwhile done to it again.
+#[derive(Default)]
+pub struct Background {
+    job: Option<Mutex<mpsc::Receiver<Domain>>>,
+    /// Changes made to the air since the job started.
+    pending: Vec<Change>,
+    /// The air before the last step landed: memory for the next job's copy.
+    spare: Option<Domain>,
+}
+
+impl Background {
+    pub fn running(&self) -> bool {
+        self.job.is_some()
+    }
+}
+
+/// A copy of a volume doesn't take its running step with it.
+impl Clone for Background {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for Background {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Background")
+            .field("running", &self.running())
+            .field("pending", &self.pending.len())
+            .finish()
+    }
 }
 
 /// Active voxels above which a volume steps every other tick.
@@ -172,6 +211,79 @@ impl SmokeDomain {
     pub fn progress(&self, clock: f32, settings: &SmokeSettings) -> f32 {
         let step = 1.0 / settings.sim_hz.clamp(1.0, 120.0);
         ((self.owed_secs + clock * step) / (self.stride.max(1) as f32 * step)).clamp(0.0, 1.0)
+    }
+
+    /// Do `c` to the air, and again to the step running in the background when it lands.
+    pub fn change(&mut self, c: Change) {
+        self.domain.apply(&c);
+        if self.background.running() {
+            self.background.pending.push(c);
+        }
+    }
+
+    /// Forget the step running in the background, if one is: the air stays as it shows and
+    /// that step is skipped. Anything that changes the air other than by
+    /// [`change`](Self::change) (a world shift, a new floor, fog, a step on the spot) does this
+    /// first. It never waits: a system waiting on a worker that waits on the compute threads
+    /// can hold them all up.
+    pub fn drop_running(&mut self) {
+        self.background.job = None;
+        self.background.pending.clear();
+    }
+
+    /// Put the background step in place if it is done (or `wait` for it); true when none
+    /// runs any more.
+    fn land(&mut self, wait: bool) -> bool {
+        let Some(job) = self.background.job.as_mut() else {
+            return true;
+        };
+        let rx = job.get_mut().unwrap_or_else(|e| e.into_inner());
+        let stepped = if wait {
+            rx.recv().ok()
+        } else {
+            match rx.try_recv() {
+                Ok(d) => Some(d),
+                Err(mpsc::TryRecvError::Empty) => return false,
+                Err(mpsc::TryRecvError::Disconnected) => None,
+            }
+        };
+        self.background.job = None;
+        let pending = std::mem::take(&mut self.background.pending);
+        // A step that died leaves the air as it is.
+        if let Some(mut stepped) = stepped {
+            for c in &pending {
+                stepped.apply(c);
+            }
+            stepped.version = stepped.version.max(self.domain.version) + 1;
+            stepped.resampled = self.domain.resampled;
+            self.background.spare = Some(std::mem::replace(&mut self.domain, stepped));
+        }
+        true
+    }
+
+    /// Step a copy of the air in the wind sampled now, on `pool`; it lands at a later
+    /// [`land`](Self::land).
+    fn start(
+        &mut self,
+        pool: &AsyncComputeTaskPool,
+        params: StepParams,
+        wind: &(dyn Fn(DVec3) -> Vec3 + Sync),
+    ) {
+        let mut work = match self.background.spare.take() {
+            Some(mut w) => {
+                w.copy_from(&self.domain);
+                w
+            }
+            None => self.domain.clone(),
+        };
+        work.sample_wind(wind);
+        let (tx, rx) = mpsc::channel();
+        pool.spawn(async move {
+            work.step_sampled(&params);
+            let _ = tx.send(work);
+        })
+        .detach();
+        self.background.job = Some(Mutex::new(rx));
     }
 }
 
@@ -209,6 +321,7 @@ impl SmokeDomains {
             resting: false,
             stride: 1,
             owed_secs: 0.0,
+            background: Background::default(),
         });
         self.list.len() - 1
     }
@@ -297,6 +410,7 @@ pub fn sync_volumes(
     }
     for d in &mut domains.list {
         if d.domain.floor_stale {
+            d.drop_running();
             d.domain.set_floor(ground_floor(&ground));
             d.domain.floor_stale = false;
         }
@@ -348,7 +462,7 @@ pub fn release(
             SmokeCommand::Emit(e, albedo) => list.push((e, albedo, 0.0)),
             SmokeCommand::Clear => {
                 for d in &mut domains.list {
-                    d.domain.clear();
+                    d.change(Change::Clear);
                 }
             }
         }
@@ -432,16 +546,20 @@ fn deposit(
                 domains.add(None, auto_domain(settings, e.position, ground))
             }
         };
-        let domain = &mut domains.list[i].domain;
-        domain.splat(
-            e.position,
-            e.radius,
-            e.mass_kg,
-            (e.temperature_c - ambient_c).max(0.0),
-            e.velocity,
+        let d = &mut domains.list[i];
+        d.change(Change::Splat {
+            at: e.position,
+            radius: e.radius,
+            mass_kg: e.mass_kg,
+            heat_c: (e.temperature_c - ambient_c).max(0.0),
+            vel: e.velocity,
             albedo,
-        );
-        domain.inflate(e.position, e.radius, gas);
+        });
+        d.change(Change::Inflate {
+            at: e.position,
+            radius: e.radius,
+            gas_m3: gas,
+        });
     }
 }
 
@@ -485,6 +603,9 @@ pub fn fast_forward(world: &mut World, secs: f32) {
     let dt = 1.0 / settings.sim_hz.clamp(1.0, 120.0);
     let ambient = world.resource::<WeatherState>().temperature_c;
     let params = settings.step_params(dt, ambient);
+    for d in &mut world.resource_mut::<SmokeDomains>().list {
+        d.drop_running();
+    }
     let mut q = world.query::<(&GlobalTransform, &mut SmokeSource)>();
     let start = world.resource::<WindField>().time as f64;
     for i in 0..(secs / dt).ceil() as u32 {
@@ -540,13 +661,13 @@ pub fn disturb(
         let mut hit = false;
         for d in &mut domains.list {
             if d.domain.clip(b.from, b.to).is_some() && d.domain.mass_kg > 0.0 {
-                d.domain.carve(
-                    b.from,
-                    b.to,
-                    settings.tunnel_radius_m.max(b.radius),
-                    settings.bullet_clear,
-                    b.speed,
-                );
+                d.change(Change::Carve {
+                    from: b.from,
+                    to: b.to,
+                    radius: settings.tunnel_radius_m.max(b.radius),
+                    clear: settings.bullet_clear,
+                    speed: b.speed,
+                });
                 hit = true;
             }
         }
@@ -568,7 +689,11 @@ pub fn disturb(
             let half = d.domain.size() * 0.5 + DVec3::splat(i.radius as f64);
             let o = (i.center - c).abs();
             if o.x < half.x && o.y < half.y && o.z < half.z {
-                d.domain.blast(i.center, i.radius, i.strength);
+                d.change(Change::Blast {
+                    at: i.center,
+                    radius: i.radius,
+                    strength: i.strength,
+                });
             }
         }
     }
@@ -588,7 +713,14 @@ pub fn disturb(
             let half = d.domain.size() * 0.5 + DVec3::splat(reach as f64);
             let o = (mid - c).abs();
             if o.x < half.x && o.y < half.y && o.z < half.z {
-                d.domain.jet(from, dir, reach, fan.radius, fan.speed, dt);
+                d.change(Change::Jet {
+                    from,
+                    dir,
+                    length: reach,
+                    radius: fan.radius,
+                    speed: fan.speed,
+                    dt,
+                });
             }
         }
     }
@@ -604,7 +736,11 @@ pub fn disturb(
         }
         for d in &mut domains.list {
             if d.domain.contains(p) && d.domain.mass_kg > 0.0 {
-                d.domain.obstacle(p, o.radius, vel);
+                d.change(Change::Obstacle {
+                    at: p,
+                    radius: o.radius,
+                    vel,
+                });
             }
         }
     }
@@ -659,9 +795,13 @@ pub fn step(
         range.map_or((f64::INFINITY, 0.25), |r| (r.active_m, r.hysteresis));
     let active_m = active_m.min(settings.sim_radius_m as f64);
     let wind_fn = |p: DVec3| turbulent_wind(&wind, p, settings.turbulence, wind.time as f64);
+    let pool = AsyncComputeTaskPool::try_get().filter(|_| settings.background);
     let started = std::time::Instant::now();
     let mut stepped = 0;
+    let mut waiting = 0;
     for d in &mut domains.list {
+        // A step done in the background since the last tick shows now.
+        let ready = d.land(false);
         let c = d.domain.center();
         let size = d.domain.size();
         let reach = 0.5 * DVec2::new(size.x, size.z).length();
@@ -689,9 +829,19 @@ pub fn step(
         if d.owed_secs < dt * (d.stride as f32 - 0.5) {
             continue;
         }
+        if !ready {
+            // Its last step is still running: this one is owed, up to a few ticks' worth.
+            d.owed_secs = d.owed_secs.min(step * 3.0 * d.stride as f32);
+            waiting += 1;
+            continue;
+        }
         let params = settings.step_params(d.owed_secs, weather.temperature_c);
         d.owed_secs = 0.0;
-        d.domain.step(&params, &wind_fn);
+        match pool {
+            // Fog settles every frame, so it steps on the spot.
+            Some(pool) if !d.domain.fog => d.start(pool, params, &wind_fn),
+            _ => d.domain.step(&params, &wind_fn),
+        }
         stepped += 1;
     }
     // Volumes made around released smoke go away once their smoke has gone.
@@ -700,6 +850,7 @@ pub fn step(
         .retain(|d| d.owner.is_some() || d.empty_secs < 10.0);
     diagnostics.set("smoke.volumes", domains.list.len() as f64);
     diagnostics.set("smoke.stepped", stepped as f64);
+    diagnostics.set("smoke.waiting", waiting as f64);
     diagnostics.set("smoke.mass_kg", domains.mass_kg() as f64);
     diagnostics.set("smoke.step_ms", started.elapsed().as_secs_f64() * 1000.0);
 }
@@ -719,5 +870,54 @@ pub fn age_tunnels(
     if tunnels.list.len() > 32 {
         let n = tunnels.list.len() - 32;
         tunnels.list.drain(..n);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A step in the background lands as the same step on the spot would have, with what was
+    /// done to the air while it ran done again on top.
+    #[test]
+    fn a_background_step_lands_with_what_was_done_meanwhile() {
+        engine_core::tasks::init_task_pools();
+        let pool = AsyncComputeTaskPool::get();
+        let mut domain = Domain::new(DVec3::new(-8.0, 0.0, -8.0), 0.5, UVec3::new(32, 32, 32));
+        domain.set_floor(|_, _| Some(0.0));
+        let mut domains = SmokeDomains::default();
+        let i = domains.add(None, domain);
+        let d = &mut domains.list[i];
+        let puff = |x: f64| Change::Splat {
+            at: DVec3::new(x, 2.0, 0.0),
+            radius: 1.0,
+            mass_kg: 0.2,
+            heat_c: 300.0,
+            vel: Vec3::Y,
+            albedo: Vec3::splat(0.5),
+        };
+        d.change(puff(-2.0));
+        let mut on_the_spot = d.domain.clone();
+        let params = SmokeSettings::default().step_params(0.05, 15.0);
+        let wind = |_: DVec3| Vec3::new(2.0, 0.0, 0.0);
+        d.start(pool, params, &wind);
+        // The air shows as it was until the step lands, plus what is done to it.
+        d.change(puff(3.0));
+        assert!(d.background.running());
+        let before = d.domain.version;
+        d.land(true);
+        assert!(!d.background.running());
+        assert!(d.domain.version > before);
+        on_the_spot.step(&params, &wind);
+        on_the_spot.apply(&puff(3.0));
+        assert!((d.domain.mass_kg - on_the_spot.mass_kg).abs() < 1e-4);
+        let worst = d
+            .domain
+            .voxels
+            .iter()
+            .zip(&on_the_spot.voxels)
+            .map(|(a, b)| (a.density - b.density).abs())
+            .fold(0.0, f32::max);
+        assert!(worst < 1e-5, "{worst}");
     }
 }

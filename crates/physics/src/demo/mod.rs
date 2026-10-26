@@ -65,6 +65,28 @@ pub const YARD_SIZE: [f64; 2] = [70.0, 50.0];
 /// ground fights it for depth, and the planet terrain's grass shows through in streaks.
 pub const SLAB_RISE: f64 = 0.1;
 
+/// True while a proving ground is still building: stations waiting their turn, or textures
+/// and dummies being made on workers (drawn plain or not at all until then).
+pub fn building(world: &mut World) -> bool {
+    art::pending(world)
+        || world
+            .query::<&ProvingGround>()
+            .iter(world)
+            .any(|g| g.unbuilt.contains(&true))
+}
+
+/// Build the stations still waiting their turn and wait for the textures and dummies being
+/// made on workers (before a screenshot, or to start the yard all at once).
+pub fn finish_building(world: &mut World) {
+    build_unbuilt(world, usize::MAX);
+    art::wait(world);
+}
+
+/// Store the textures and meshes the workers made (every frame).
+pub(crate) fn finish_art(world: &mut World) {
+    art::finish(world);
+}
+
 /// Build the proving ground on the ground at `origin` (the center of the yard's footprint);
 /// its top surface is [`SLAB_RISE`] above it.
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
@@ -382,6 +404,9 @@ pub struct ProvingGround {
     resting: [bool; Station::ALL.len()],
     /// Stations someone came near since they were built. One nobody has seen rests at once.
     seen: [bool; Station::ALL.len()],
+    /// Stations not built yet: with a renderer they are built one a step, so the yard's first
+    /// frame doesn't make every station's art at once ([`finish_building`]).
+    unbuilt: [bool; Station::ALL.len()],
     /// Replay stations on their cycles (on by default).
     pub replay: bool,
 }
@@ -435,6 +460,19 @@ impl Yard<'_> {
             return Parts::new();
         }
         art::parts(self.world, key, mats, make)
+    }
+
+    /// [`Yard::parts`] made on a worker, drawn once they arrive (`art::parts_later`).
+    fn parts_later<const N: usize>(
+        &mut self,
+        key: &str,
+        mats: [Mat; N],
+        make: impl FnOnce() -> [Mesh; N] + Send + 'static,
+    ) -> Parts {
+        if !self.render {
+            return Parts::new();
+        }
+        art::parts_later(self.world, key, mats, make)
     }
 
     /// Draw `parts` on `e` (as children when there are several materials).
@@ -579,10 +617,10 @@ impl Yard<'_> {
             Name::new(name.to_string()),
         ));
         let height = desc.height;
-        let parts = self.parts(
+        let parts = self.parts_later(
             &format!("dummy/standing/{height:.2}/{shirt:06x}"),
             [Mat::Vinyl, Mat::Steel],
-            || {
+            move || {
                 let d = dummy::standing_dummy(height, art::kit::srgb(shirt));
                 [d.vinyl, d.steel]
             },
@@ -670,10 +708,30 @@ fn build(world: &mut World, origin: DVec3) {
         running: [0.0; Station::ALL.len()],
         resting: [false; Station::ALL.len()],
         seen: [false; Station::ALL.len()],
+        unbuilt: [true; Station::ALL.len()],
         replay: true,
     });
-    for station in Station::ALL {
-        build_station(world, pad, station);
+    // Without a renderer (tests, tools) everything is built at once: there is no art.
+    if !world.contains_resource::<Assets<Mesh>>() {
+        build_unbuilt(world, usize::MAX);
+    }
+}
+
+/// Build up to `n` stations not built yet, on every proving ground.
+fn build_unbuilt(world: &mut World, n: usize) {
+    let todo: Vec<(Entity, Station)> = world
+        .query::<(Entity, &ProvingGround)>()
+        .iter(world)
+        .flat_map(|(e, g)| {
+            Station::ALL
+                .into_iter()
+                .filter(|s| g.unbuilt[*s as usize])
+                .take(n)
+                .map(move |s| (e, s))
+        })
+        .collect();
+    for (ground, station) in todo {
+        build_station(world, ground, station);
     }
 }
 
@@ -776,6 +834,7 @@ fn build_station(world: &mut World, ground: Entity, station: Station) {
         g.running[station as usize] = 0.0;
         g.resting[station as usize] = false;
         g.seen[station as usize] = false;
+        g.unbuilt[station as usize] = false;
     }
 }
 
@@ -811,6 +870,7 @@ pub(crate) fn replay_stations(world: &mut World) {
             .fold(if focus.is_empty() { 0.0 } else { f64::INFINITY }, f64::min)
     };
     settle::finish(world);
+    build_unbuilt(world, 1);
     let (mut due, mut rest, mut unseen) = (Vec::new(), Vec::new(), Vec::new());
     for (e, mut g) in world
         .query::<(Entity, &mut ProvingGround)>()
@@ -821,6 +881,9 @@ pub(crate) fn replay_stations(world: &mut World) {
         }
         for station in Station::ALL {
             let i = station as usize;
+            if g.unbuilt[i] {
+                continue;
+            }
             let d = nearest(g.origin + station.base());
             if g.resting[i] {
                 if d < STATION_WAKE_M {
@@ -1065,10 +1128,10 @@ fn dominoes(y: &mut Yard, start: DVec3) {
 fn ragdoll(y: &mut Yard, feet: DVec3, shirt: u32, push: Vec3) -> Entity {
     let l = dummy::RagdollLayout::HYBRID_III_50TH;
     // Each part's vinyl and steel meshes, in `RagdollMeshes::all` order.
-    let meshes = y.parts::<22>(
+    let meshes = y.parts_later::<22>(
         &format!("dummy/ragdoll/{shirt:06x}"),
         [[Mat::Vinyl, Mat::Steel]; 11].concat().try_into().unwrap(),
-        || {
+        move || {
             let m = dummy::ragdoll_parts(&l, art::kit::srgb(shirt));
             let all: Vec<Mesh> = m
                 .all()
