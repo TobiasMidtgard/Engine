@@ -210,8 +210,8 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
     }
     let mut dirty_colliders: Vec<Entity> = Vec::new();
     for e in gone {
-        if world.get::<RigidBody>(e).is_none() && sim.bodies.contains_key(&e) {
-            dirty_colliders.extend(sim.remove_body(e));
+        if world.get::<RigidBody>(e).is_none() {
+            dirty_colliders.extend(sim.forget_body(e));
         }
         if world.get::<Collider>(e).is_none() && sim.colliders.contains_key(&e) {
             sim.remove_collider(e, true);
@@ -1504,27 +1504,41 @@ fn idle(r: &crate::sim::Region, resting: &EntityHashSet) -> bool {
 }
 
 /// Hold the bodies told to rest asleep ([`Simulation::resting`]): wake-ups from their
-/// neighbours, or bodies made since they were told, go back to sleep, still.
+/// neighbours, from gameplay writing to them, or bodies made since they were told, go back to
+/// sleep, still. Every one is looked at, not only Rapier's active ones: a body woken since the
+/// last step joins them only as the next one starts, and wakes all it touches.
 fn hold_resting(sim: &mut Simulation) {
-    let resting = &sim.resting;
-    for r in sim.regions.iter_mut().flatten() {
-        let w = &mut r.world;
-        let awake: Vec<_> = w
-            .islands
-            .active_bodies()
-            .filter(|h| {
-                w.bodies
-                    .get(*h)
-                    .is_some_and(|rb| resting.contains(&convert::entity_of(rb.user_data)))
-            })
-            .collect();
-        for h in awake {
-            if let Some(rb) = w.bodies.get_mut(h) {
-                rb.set_linvel(Vec3::ZERO, false);
-                rb.set_angvel(Vec3::ZERO, false);
-                rb.sleep();
-            }
+    let Simulation {
+        resting,
+        bodies,
+        regions,
+        ..
+    } = sim;
+    let mut held = 0;
+    for e in resting.iter() {
+        let Some(b) = bodies.get(e) else {
+            continue;
+        };
+        let Some(r) = regions.get_mut(b.region as usize).and_then(|r| r.as_mut()) else {
+            continue;
+        };
+        // `get`, not `get_mut`: Rapier re-checks every body taken mutably.
+        if r.world
+            .bodies
+            .get(b.handle)
+            .is_none_or(|rb| rb.is_sleeping())
+        {
+            continue;
         }
+        if let Some(rb) = r.world.bodies.get_mut(b.handle) {
+            rb.set_linvel(Vec3::ZERO, false);
+            rb.set_angvel(Vec3::ZERO, false);
+            rb.sleep();
+            held += 1;
+        }
+    }
+    if held > 0 && crate::report::wanted() {
+        crate::report::count("resting bodies put back to sleep", held);
     }
 }
 

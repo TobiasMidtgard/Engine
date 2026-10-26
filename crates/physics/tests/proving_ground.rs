@@ -677,3 +677,34 @@ fn a_yard_built_far_away_rests_with_its_crates_down() {
     let stats = *app.world.resource::<PhysicsStats>();
     assert!(stats.awake < 100, "{stats:?}");
 }
+
+/// A yard built while somebody is far away already (the showcase's camera is there before its
+/// zones are): its stations rest as they are built, before their bodies are made, and those
+/// bodies start asleep and stay so. Making them used to forget they were told to rest, so the
+/// whole yard ran live, 150 m from the camera, at full cost.
+#[test]
+fn a_yard_built_after_the_camera_rests_at_once() {
+    let mut app = App::new();
+    app.add_plugins(WorldPlugin);
+    app.add_plugins(PhysicsPlugin);
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual {
+            step_secs: 1.0 / 60.0,
+        });
+    app.world.resource_mut::<FixedTime>().set_hz(60.0);
+    app.world.spawn((
+        Transform::from_xyz(150.0, 1.7, 0.0),
+        SimulationFocus::default(),
+    ));
+    app.update_n(3);
+    let mut commands = app.world.commands();
+    demo::spawn_demo(&mut commands, DVec3::ZERO);
+    app.world.flush();
+    app.update_n(60);
+    for _ in 0..120 {
+        app.update();
+        let stats = *app.world.resource::<PhysicsStats>();
+        assert!(stats.bodies > 1000 && stats.awake == 0, "{stats:?}");
+    }
+}

@@ -912,6 +912,9 @@ impl Simulation {
         parent: Option<Entity>,
     ) {
         self.remove_body(entity);
+        // A body told to rest before it was made (a station resting as it is built) starts
+        // asleep.
+        let resting = self.resting.contains(&entity);
         let region_id = self.region_for_mover(pose.0);
         let region = self.region_mut(region_id);
         let local = region.local(pose.0);
@@ -923,6 +926,7 @@ impl Simulation {
             .pose(Pose::from_parts(local, pose.1))
             .linvel(velocity.linear)
             .angvel(velocity.angular)
+            .sleeping(resting)
             .user_data(entity.to_bits() as u128);
         let handle = region.world.bodies.insert(body_params(builder, desc));
         region.movers += 1;
@@ -968,8 +972,9 @@ impl Simulation {
     }
 
     /// Remove a body; its colliders are left without a body (the caller re-resolves them).
+    /// Whether it is told to rest stays: it is remade the same way (recreated as another kind,
+    /// or made after it was told). The entity's removal forgets it ([`Self::forget_body`]).
     pub fn remove_body(&mut self, entity: Entity) -> Vec<Entity> {
-        self.resting.remove(&entity);
         let Some(entry) = self.bodies.remove(&entity) else {
             return Vec::new();
         };
@@ -1001,6 +1006,13 @@ impl Simulation {
         region.world.remove_body(entry.handle);
         region.movers = region.movers.saturating_sub(1);
         attached
+    }
+
+    /// The entity has no `RigidBody` any more: remove its body, and forget that it was told
+    /// to rest.
+    pub fn forget_body(&mut self, entity: Entity) -> Vec<Entity> {
+        self.resting.remove(&entity);
+        self.remove_body(entity)
     }
 
     /// Give a body the mass properties its `RigidBody` asks for: `mass_kg` alone scales the
@@ -2551,8 +2563,13 @@ impl Simulation {
             let shift = (from_anchor - dst.anchor).as_vec3();
             let mut pose = *rb.position();
             pose.translation += shift;
+            let sleeping = rb.is_sleeping();
             rb.set_position(pose, false);
             let nb = dst.world.bodies.insert(rb);
+            // (Rapier wakes what it inserts: a sleeping body sleeps on in its new region.)
+            if sleeping {
+                dst.world.bodies[nb].sleep();
+            }
             let mut new_handles: HashMap<ColliderHandle, ColliderHandle> = HashMap::new();
             for (old, col) in cols {
                 let world = &mut dst.world;
