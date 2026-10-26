@@ -59,7 +59,7 @@ struct Frame {
     air_mie_extinction: vec4<f32>, // Mie extinction (scattering + absorption) at the surface (1/m) RGB, less the forward peak, w unused
     air_ozone: vec4<f32>,          // ozone absorption at the layer's peak (1/m) RGB, w unused
     air_mie_g: vec4<f32>,          // Mie anisotropy per channel RGB (the whole lobe), w the share of g² passing as unscattered (`Atmosphere::mie_forward_peak`)
-    window: vec4<f32>,             // the scene's top-left corner in the output image (px), the output's size (px)
+    window: vec4<f32>,             // the scene's rectangle in the output image: corner xy, size zw (px); the scene renders at viewport.xy
 };
 
 // An indoor space (`SkyLightVolume`): sky light comes in only through its open faces.

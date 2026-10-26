@@ -9,6 +9,20 @@ use engine_render::{RenderDisabled, capture_now};
 /// Render a ball on a floor into a `window`-sized window, the camera drawing into `viewport`
 /// (all of the window without one): the shot's pixels.
 fn render(window: UVec2, viewport: Option<Viewport>, shot: &str) -> Option<image::RgbImage> {
+    shoot(window, viewport, 1.0, shot)
+}
+
+/// The same scene filling the window at a render scale.
+fn render_scaled(window: UVec2, scale: f32, shot: &str) -> Option<image::RgbImage> {
+    shoot(window, None, scale, shot)
+}
+
+fn shoot(
+    window: UVec2,
+    viewport: Option<Viewport>,
+    scale: f32,
+    shot: &str,
+) -> Option<image::RgbImage> {
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -22,6 +36,7 @@ fn render(window: UVec2, viewport: Option<Viewport>, shot: &str) -> Option<image
         let mut s = app.world.resource_mut::<RenderSettings>();
         s.anti_aliasing = AntiAliasing::None;
         s.film_grain = 0.0;
+        s.render_scale = scale;
     }
     let w = &mut app.world;
     let camera = w
@@ -136,4 +151,27 @@ fn a_viewport_is_kept_inside_the_window() {
         off.within(UVec2::new(400, 300)),
         (UVec2::new(399, 299), UVec2::ONE)
     );
+}
+
+/// A render scale under 1 draws the scene smaller and upscales it into the viewport: the
+/// output keeps the window's size and looks like the full-resolution image, softer.
+#[test]
+fn a_lower_render_scale_upscales_to_the_viewport() {
+    let window = UVec2::new(320, 180);
+    let Some(full) = render(window, None, "render_scale_full.png") else {
+        return;
+    };
+    let Some(half) = render_scaled(window, 0.5, "render_scale_half.png") else {
+        return;
+    };
+    assert_eq!(half.dimensions(), (320, 180), "the shot covers the window");
+    let diff = full
+        .as_raw()
+        .iter()
+        .zip(half.as_raw())
+        .map(|(a, b)| a.abs_diff(*b) as u64)
+        .sum::<u64>() as f64
+        / full.as_raw().len() as f64;
+    eprintln!("half resolution vs. full: mean difference {diff:.2} of 255");
+    assert!(diff < 4.0, "the upscaled image differs by {diff:.2} of 255");
 }

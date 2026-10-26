@@ -2,6 +2,7 @@
 //! and scripts can read and patch them by name (`resource.set RenderSettings {...}`).
 
 use engine_core::prelude::*;
+use engine_world::Scalability;
 
 /// Tonemapping curve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -36,7 +37,7 @@ pub enum AntiAliasing {
 }
 
 /// Resolution of the volumetric fog grid (`RenderSettings::volumetric_fog_quality`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum VolumetricQuality {
     /// 16-pixel tiles, 64 depth slices: soft shafts, cheapest.
     Low,
@@ -95,6 +96,10 @@ pub enum DebugView {
 pub struct RenderSettings {
     /// Present with vsync.
     pub vsync: bool,
+    /// Internal resolution relative to the camera's viewport (the window without a
+    /// [`Viewport`](crate::Viewport)), upscaled to it with sharpening: 0.5 renders a quarter of
+    /// the pixels. 0.25..2; the game's [`Scalability::render_scale`] multiplies it.
+    pub render_scale: f32,
     /// Shadows are drawn up to this distance from the camera, meters.
     pub shadow_distance: f32,
     /// Shadow map resolution per cascade and of the far shadow map (applied at startup).
@@ -286,6 +291,7 @@ impl Default for RenderSettings {
     fn default() -> Self {
         Self {
             vsync: true,
+            render_scale: 1.0,
             shadow_distance: 350.0,
             shadow_map_size: 2048,
             far_shadow_distance: 8000.0,
@@ -350,6 +356,61 @@ impl Default for RenderSettings {
             virtual_texture_mip_bias: 0.0,
             virtual_texture_compression: true,
         }
+    }
+}
+
+/// The settings the renderer draws with: [`RenderSettings`] at the game's [`Scalability`]
+/// (unscaled without one).
+pub(crate) fn effective(world: &World) -> RenderSettings {
+    let settings = world.resource::<RenderSettings>();
+    match world.get_resource::<Scalability>() {
+        Some(quality) => settings.scaled(quality),
+        None => settings.clone(),
+    }
+}
+
+impl RenderSettings {
+    /// These settings at the game's quality ([`Scalability`]): the settings are the look at
+    /// `High` (every factor 1), and the factors scale the costly parts. Resolution follows
+    /// `render_scale`; shadow map size and shadow distances follow `shadows`; how much detail
+    /// far things keep (levels of detail, impostors, culling of tiny objects) follows
+    /// `view_distance`; grass follows `density`; and `effects` turns off what costs most
+    /// (volumetric fog below 0.75, screen-space reflections below 0.75, screen-space GI below
+    /// 1, ambient occlusion below 0.5) and thins point lights and sky updates. Nothing the game
+    /// turned off is turned on.
+    pub fn scaled(&self, quality: &Scalability) -> Self {
+        let mut s = self.clone();
+        let positive = |f: f32| if f.is_finite() { f.max(0.01) } else { 1.0 };
+        s.render_scale = (self.render_scale * positive(quality.render_scale)).clamp(0.25, 2.0);
+
+        let shadows = positive(quality.shadows);
+        let size = self.shadow_map_size.max(1) as f32 * shadows;
+        s.shadow_map_size = (2f32.powf(size.log2().round()) as u32).clamp(512, 8192);
+        s.shadow_distance = self.shadow_distance * shadows;
+        s.far_shadow_distance = self.far_shadow_distance * shadows;
+
+        // Farther detail at a higher view distance: a pixel threshold shrinks as it grows.
+        let reach = positive(quality.view_distance);
+        s.mesh_lod_pixels = self.mesh_lod_pixels / reach;
+        s.cluster_error_px = self.cluster_error_px / reach;
+        s.cluster_shadow_error_texels = self.cluster_shadow_error_texels / reach;
+        s.min_object_pixels = self.min_object_pixels / reach;
+        s.impostor_pixels = self.impostor_pixels / reach;
+
+        s.grass_density = self.grass_density * quality.density.max(0.0);
+
+        let effects = quality.effects;
+        s.volumetric_fog &= quality.allows(0.75);
+        if effects < 1.0 {
+            s.volumetric_fog_quality = self.volumetric_fog_quality.min(VolumetricQuality::Medium);
+            s.environment_interval = self.environment_interval.max(1) * 2;
+        }
+        s.screen_space_reflections &= quality.allows(0.75);
+        s.screen_space_gi &= quality.allows(1.0);
+        s.ambient_occlusion &= quality.allows(0.5);
+        s.max_point_lights =
+            ((self.max_point_lights as f32 * effects.clamp(0.25, 1.0)) as u32).max(8);
+        s
     }
 }
 
@@ -752,5 +813,39 @@ mod tests {
             ..mars
         };
         assert_eq!(sun_at_surface(&none, 20.0), Vec3::ONE);
+    }
+
+    #[test]
+    fn high_quality_keeps_the_settings_and_low_cuts_the_costly_parts() {
+        use engine_world::QualityPreset;
+        let base = RenderSettings {
+            shadow_map_size: 4096,
+            ..RenderSettings::default()
+        };
+        assert_eq!(base.scaled(&Scalability::preset(QualityPreset::High)), base);
+
+        let low = base.scaled(&Scalability::preset(QualityPreset::Low));
+        assert!((low.render_scale - 0.67).abs() < 1e-6);
+        assert_eq!(low.shadow_map_size, 2048);
+        assert!(low.shadow_distance < base.shadow_distance);
+        assert!(low.mesh_lod_pixels > base.mesh_lod_pixels);
+        assert!(low.impostor_pixels > base.impostor_pixels);
+        assert!(low.grass_density < base.grass_density);
+        assert!(!low.volumetric_fog && !low.screen_space_gi && !low.screen_space_reflections);
+        assert!(low.ambient_occlusion, "kept at effects 0.5");
+        assert!(low.max_point_lights < base.max_point_lights);
+
+        let ultra = base.scaled(&Scalability::preset(QualityPreset::Ultra));
+        assert_eq!(ultra.shadow_map_size, 8192);
+        assert!(ultra.impostor_pixels < base.impostor_pixels);
+        // Nothing the game turned off comes back on.
+        let off = RenderSettings {
+            volumetric_fog: false,
+            ..base.clone()
+        };
+        assert!(
+            !off.scaled(&Scalability::preset(QualityPreset::Ultra))
+                .volumetric_fog
+        );
     }
 }
