@@ -1740,7 +1740,9 @@ impl RenderFeature for MeshFeature {
             } else {
                 0
             };
+            // Cascades keeping last frame's image need no casters.
             let maps = (0..cascades)
+                .filter(|&c| view.cascades.drawn[c])
                 .chain(view.sky_occlusion.enabled.then_some(SKY_OCCLUSION_VIEW))
                 .chain((view.sun_shadows && view.far_shadow.enabled).then_some(FAR_SHADOW_MAP));
             // Each map's casters on its own thread, then their instances in map order.

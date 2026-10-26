@@ -198,6 +198,8 @@ pub struct Renderer {
     lens: crate::lens::LensEffects,
     /// Frame timing and the `perf:` log line.
     perf: crate::perf::PerfLog,
+    /// Which far shadow cascades keep last frame's image.
+    cascade_cache: crate::shadows::CascadeCache,
     previous: Option<PreviousView>,
     /// How far the camera moved the frame before (camera cut detection).
     prev_step: f64,
@@ -580,6 +582,7 @@ impl Renderer {
             volumetrics,
             lens: Default::default(),
             perf,
+            cascade_cache: Default::default(),
             previous: None,
             prev_step: 0.0,
             prev_aa: settings.anti_aliasing,
@@ -738,6 +741,13 @@ impl Renderer {
             self.meter.restart();
             self.exposure.snap = true;
         }
+        self.cascade_cache.apply(
+            &mut view.cascades,
+            view.origin,
+            self.frame_index,
+            settings.shadow_cascade_reuse,
+            !view.history_valid,
+        );
         let mut uniform = frame_uniform(world, &view);
         uniform.shadow_params[3] = self.shadow.size as f32;
         let real_dt = world
@@ -955,6 +965,10 @@ impl Renderer {
         if view.sun_shadows {
             self.perf.pass(&mut cpu, &mut encoder, "shadows");
             for i in 0..(view.cascades.count as usize).min(MAX_CASCADES) {
+                // A reused cascade keeps last frame's image.
+                if !view.cascades.drawn[i] {
+                    continue;
+                }
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("shadow cascade"),
                     color_attachments: &[],
