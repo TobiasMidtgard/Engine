@@ -59,8 +59,9 @@ fn fs_line(in: LineOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_line_tested(in: LineOut) -> @location(0) vec4<f32> {
     let size = vec2<i32>(textureDimensions(scene_depth));
-    // Window pixels to scene pixels (a camera `Viewport` puts the scene inside the window).
-    let p = vec2<i32>(in.clip.xy - frame.window.xy);
+    // Window pixels to scene pixels (a camera `Viewport` puts the scene inside the window, and
+    // a render scale under 1 renders it smaller than its rectangle).
+    let p = vec2<i32>((in.clip.xy - frame.window.xy) * frame.viewport.xy / frame.window.zw);
     let depth = in.depth_zw.x / in.depth_zw.y;
     if (depth * DEPTH_NUDGE < textureLoad(scene_depth, clamp(p, vec2<i32>(0), size - 1), 0)) {
         discard;
