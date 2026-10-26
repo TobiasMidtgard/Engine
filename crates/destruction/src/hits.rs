@@ -1254,6 +1254,7 @@ fn blast(
         body.angular += Vec3::new(dir.z, 0.0, -dir.x) * dv;
         body.asleep = false;
         body.still = 0.0;
+        body.awake_secs = 0.0;
     }
 }
 
