@@ -131,6 +131,7 @@ impl Plugin for EditorPlugin {
                 Update,
                 (
                     egui_bridge::gather_input,
+                    import::file_drops,
                     camera::editor_camera,
                     ui::editor_ui,
                     demos::sync_demos,

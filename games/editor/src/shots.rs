@@ -444,25 +444,25 @@ pub fn round4(dir: impl Into<PathBuf>) -> ShotScript {
             }
         })),
         Step::Wait(40),
-        // Import a file from outside the asset folder: it is copied in and placed.
-        Step::Do(Box::new(|world, editor| {
+        // A file dragged from the desktop onto the scene view: copied in and placed where it
+        // lands.
+        Step::Do(Box::new(|world, _| {
             let root = world.resource::<engine::assets::AssetServer>().root();
             let downloads = std::env::temp_dir().join("Downloads");
             let _ = std::fs::create_dir_all(&downloads);
             let source = downloads.join("Lifter.glb");
             let _ = std::fs::copy(root.join("fetched/anim/characters/lifter.glb"), &source);
-            editor.import_path = source.to_string_lossy().into_owned();
+            world.write_message(engine::input::FileDrop::Hovered(source));
+            world
+                .resource_mut::<crate::egui_bridge::EguiInput>()
+                .injected
+                .push(egui::Event::PointerMoved(egui::pos2(900.0, 520.0)));
         })),
-        Step::Wait(4),
-        Step::Shot("21_import_path"),
-        Step::Do(Box::new(|world, editor| {
-            let source = std::path::PathBuf::from(std::mem::take(&mut editor.import_path));
-            crate::import::import_and_place(
-                world,
-                editor,
-                &source,
-                Some(DVec3::new(5.5, 0.0, 7.0)),
-            );
+        Step::Wait(3),
+        Step::Shot("21_drop_file"),
+        Step::Do(Box::new(|world, _| {
+            let source = std::env::temp_dir().join("Downloads/Lifter.glb");
+            world.write_message(engine::input::FileDrop::Dropped(source));
         })),
         Step::Wait(30),
         Step::Shot("21_imported"),

@@ -143,6 +143,10 @@ pub struct Editor {
     pub models: Option<Vec<String>>,
     /// Content panel model search.
     pub model_filter: String,
+    /// A file from the desktop being dragged over the window.
+    pub file_hover: Option<std::path::PathBuf>,
+    /// Files dropped on the window, imported by the next UI pass.
+    pub file_drops: Vec<std::path::PathBuf>,
     /// The Content panel's import path.
     pub import_path: String,
     /// When placed models' files last changed (for reimport).
@@ -185,6 +189,8 @@ impl Editor {
             model_filter: String::new(),
             model_watch: Default::default(),
             import_path: String::new(),
+            file_hover: None,
+            file_drops: Vec::new(),
         }
     }
 

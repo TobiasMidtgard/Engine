@@ -7,6 +7,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use engine::assets::AssetServer;
+use engine::input::FileDrop;
 use engine::prelude::*;
 
 use crate::editor::{Editor, now};
@@ -178,6 +179,29 @@ pub fn refresh_from_source(root: &Path, key: &str) -> Result<bool, String> {
             Ok(true)
         }
         _ => Ok(false),
+    }
+}
+
+/// Files dragged from the desktop onto the window (Update, before the UI).
+pub fn file_drops(mut drops: MessageReader<FileDrop>, mut editor: ResMut<Editor>) {
+    for drop in drops.read() {
+        match drop {
+            FileDrop::Hovered(path) => editor.file_hover = Some(path.clone()),
+            FileDrop::Dropped(path) => {
+                editor.file_hover = None;
+                editor.file_drops.push(path.clone());
+            }
+            FileDrop::Cancelled => editor.file_hover = None,
+        }
+    }
+}
+
+/// Import files dropped anywhere but the scene view where the view is looking, side by side.
+pub fn import_dropped(world: &mut World, editor: &mut Editor, at: Option<DVec3>) {
+    let drops = std::mem::take(&mut editor.file_drops);
+    let base = at.unwrap_or_else(|| crate::editor::placement_point(world, editor));
+    for (i, path) in drops.iter().enumerate() {
+        import_and_place(world, editor, path, Some(base + DVec3::X * 2.0 * i as f64));
     }
 }
 

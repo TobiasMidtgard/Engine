@@ -90,6 +90,9 @@ fn draw(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, dock: &mut Do
                 .show_leaf_collapse_buttons(false)
                 .show_inside(ui, &mut Viewer { world, editor });
         });
+    if !editor.file_drops.is_empty() {
+        crate::import::import_dropped(world, editor, None);
+    }
     shortcuts(ui.ctx(), world, editor);
 }
 

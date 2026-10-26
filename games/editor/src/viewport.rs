@@ -81,6 +81,22 @@ fn drop_target(
         return;
     };
     let (o, d) = view.ray(pos);
+    // Files from the desktop.
+    if let Some(path) = &editor.file_hover {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        ui.painter().text(
+            pos + egui::vec2(16.0, -18.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("Drop to import {name}"),
+            egui::FontId::proportional(13.0),
+            theme::ACCENT,
+        );
+    }
+    if !editor.file_drops.is_empty() {
+        let at =
+            picking::pick_surface(world, o, d, 200.0, &|_| false).unwrap_or(o + d.as_dvec3() * 8.0);
+        crate::import::import_dropped(world, editor, Some(at));
+    }
     if let Some(dragged) = response.dnd_hover_payload::<Dragged>() {
         let name = match &*dragged {
             Dragged::Model(key) => crate::models::display_name(key),
