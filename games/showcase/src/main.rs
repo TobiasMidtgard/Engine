@@ -129,6 +129,7 @@ fn main() {
         // The window draws a loading screen at once while the world builds a step a frame,
         // and Movement's look bakes on its own thread meanwhile.
         app.insert_resource(build::Staged)
+            .init_resource::<build::HeldJump>()
             .add_systems(Update, build::cover_jumps.after(camera::fly));
         app.insert_resource(engine_movement::look::LookSettings {
             background: true,

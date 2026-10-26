@@ -69,6 +69,7 @@ impl Command {
             } => match (before, after) {
                 (None, Some(_)) => format!("Add {name} to {}", who(entity)),
                 (Some(_), None) => format!("Remove {name} from {}", who(entity)),
+                _ if name == "Sculpt" => format!("Sculpt {}", who(entity)),
                 _ => format!("Edit {name} of {}", who(entity)),
             },
             Command::Resource { name, .. } => format!("Edit {name}"),

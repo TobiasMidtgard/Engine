@@ -649,7 +649,9 @@ fn edit_array(
             .default_open(items.len() <= 3)
             .show(ui, |ui| {
                 let mut remove = None;
-                for (i, item) in items.iter_mut().enumerate() {
+                // Long lists (a landscape's brush strokes) show their first entries only.
+                let shown = items.len().min(MAX_ARRAY_ROWS);
+                for (i, item) in items.iter_mut().enumerate().take(shown) {
                     ui.horizontal(|ui| {
                         ui.label(theme::dim(format!("{i}")));
                         if ui.small_button("−").on_hover_text("Remove").clicked() {
@@ -657,6 +659,9 @@ fn edit_array(
                         }
                         changed |= edit_value(ui, ctx, &format!("{path}/{i}"), key, item);
                     });
+                }
+                if items.len() > shown {
+                    ui.label(theme::dim(format!("…and {} more", items.len() - shown)));
                 }
                 if let Some(i) = remove {
                     items.remove(i);
@@ -672,6 +677,9 @@ fn edit_array(
     });
     changed
 }
+
+/// Rows an array shows before "…and N more".
+const MAX_ARRAY_ROWS: usize = 40;
 
 fn is_color_key(key: &str) -> bool {
     let k = key.to_lowercase();

@@ -19,6 +19,7 @@ mod demos;
 mod editor;
 mod egui_bridge;
 mod inspector;
+mod landscape;
 mod picking;
 mod prefab;
 mod sample;
@@ -82,6 +83,7 @@ fn main() {
     if let Some(dir) = value("--shots") {
         let script = match value("--script").as_deref() {
             Some("round2") => shots::round2(dir),
+            Some("round3") => shots::round3(dir),
             _ => shots::gallery(dir),
         };
         app.insert_resource(script);
@@ -109,6 +111,9 @@ impl Plugin for EditorPlugin {
                  softbody, vehicles, fire, smoke, vfx, water, weather, foliage, terrain, anim, \
                  npc, movement, audio). The editor spawns it; the scene stores only this.",
             )
+            .register_component::<landscape::Sculpt>(
+                "A landscape's brush dabs (raise, lower, restore, paint), replayed onto its terrain.",
+            )
             .register_component::<prefab::PrefabInstance>(
                 "Placed from the prefab file at `path`; the editor can apply changes back to \
                  the file or revert to it.",
@@ -122,6 +127,7 @@ impl Plugin for EditorPlugin {
                     camera::editor_camera,
                     ui::editor_ui,
                     demos::sync_demos,
+                    landscape::sync_sculpt,
                     step_frames,
                     shots::run_script,
                 )

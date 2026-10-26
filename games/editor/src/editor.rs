@@ -34,6 +34,8 @@ pub enum Tool {
     Move,
     Rotate,
     Scale,
+    /// Landscape brush (see `landscape`).
+    Sculpt,
 }
 
 /// A panel in the dock.
@@ -135,6 +137,8 @@ pub struct Editor {
     pub box_start: Option<egui::Pos2>,
     /// Copied scene entities, as saved documents with the parent they had.
     pub clipboard: Vec<(scene_ops::SavedEntity, Option<Entity>)>,
+    /// The landscape brush.
+    pub brush: crate::landscape::Brush,
 }
 
 impl Editor {
@@ -168,6 +172,7 @@ impl Editor {
             focus: None,
             box_start: None,
             clipboard: Vec::new(),
+            brush: Default::default(),
         }
     }
 
@@ -438,11 +443,22 @@ fn finish_create(
     components: Vec<(&str, Value)>,
     at: DVec3,
 ) -> Entity {
-    let t = now(world);
     let mut transform = Transform::from_translation(at);
     if components.iter().any(|(c, _)| *c == "DirectionalLight") {
         transform = transform.looking_at(at + DVec3::new(-0.5, -0.7, -0.4), Vec3::Y);
     }
+    spawn_with(world, editor, name, components, transform)
+}
+
+/// Spawn a scene entity with registered components, record it for undo and select it.
+pub fn spawn_with(
+    world: &mut World,
+    editor: &mut Editor,
+    name: String,
+    components: Vec<(&str, Value)>,
+    transform: Transform,
+) -> Entity {
+    let t = now(world);
     let entity = world
         .spawn((
             InScene,

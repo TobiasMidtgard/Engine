@@ -251,6 +251,26 @@ fn menu_item(icon: &str, label: &str, action: &str, id: &str) -> El {
         )
 }
 
+/// A band of the start screen's dark wash: `left` and `width` in percent of the view, its
+/// opacity going from `from` to `to` left to right.
+fn wash(left: f32, width: f32, from: f32, to: f32) -> El {
+    let shade = |a| Color::linear(0.01, 0.015, 0.025, a);
+    El::new()
+        .with_style(|s| {
+            s.position(Position::Absolute)
+                .left(pct(left))
+                .top(0.0)
+                .bottom(0.0)
+                .width(pct(width))
+                .background(Fill::Linear {
+                    from: shade(from),
+                    to: shade(to),
+                    angle_deg: 0.0,
+                })
+        })
+        .pick_ignore()
+}
+
 fn show_menu(world: &mut World) -> Result<(), String> {
     let p = world.resource::<Theme>().palette.clone();
     let menu = El::new()
@@ -301,23 +321,10 @@ fn show_menu(world: &mut World) -> Result<(), String> {
                 .top(0.0)
                 .bottom(0.0)
         })
-        // A dark wash from the left edge so the title and menu read over a bright valley.
-        .child(
-            El::new()
-                .with_style(|s| {
-                    s.position(Position::Absolute)
-                        .left(0.0)
-                        .top(0.0)
-                        .bottom(0.0)
-                        .width(pct(62.0))
-                        .background(Fill::Linear {
-                            from: Color::linear(0.01, 0.015, 0.025, 0.82),
-                            to: Color::TRANSPARENT,
-                            angle_deg: 0.0,
-                        })
-                })
-                .pick_ignore(),
-        )
+        // A dark wash from the left edge so the title and menu read over a bright valley:
+        // deep behind them, fading out across the middle of the view.
+        .child(wash(0.0, 42.0, 0.9, 0.72))
+        .child(wash(42.0, 38.0, 0.72, 0.0))
         .child(
             El::new()
                 .class("col")

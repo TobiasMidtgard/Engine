@@ -546,12 +546,14 @@ impl RenderFeature for PerfOverlayFeature {
         if !overlay.enabled {
             return;
         }
+        // The panel covers the window, not the camera's viewport.
+        let (width, height) = (view.window.x.max(1), view.window.y.max(1));
         let scale = match overlay.scale {
-            0 => auto_scale(view.height),
+            0 => auto_scale(height),
             s => s,
         };
         let data = PanelData::gather(world);
-        self.scratch = build_panel(&data, view.width, view.height, scale);
+        self.scratch = build_panel(&data, width, height, scale);
         if let Some(buffer) = &mut self.vertices {
             buffer.write(&gpu.device, &gpu.queue, bytemuck::cast_slice(&self.scratch));
             self.count = self.scratch.len() as u32;

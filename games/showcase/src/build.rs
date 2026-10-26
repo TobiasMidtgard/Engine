@@ -11,7 +11,7 @@ use engine_ui::color::Color;
 use engine_ui::el::El;
 use engine_ui::node::Screen;
 use engine_ui::screens;
-use engine_ui::style::{Corners, Justify, Position, pct};
+use engine_ui::style::{Align, Corners, Justify, Position, pct};
 use engine_ui::theme::Theme;
 use std::sync::Arc;
 
@@ -29,6 +29,14 @@ pub struct WorldBuild {
     hedged: Vec<(DVec2, DVec2)>,
     started: std::time::Instant,
     laps: Vec<(&'static str, f32)>,
+    /// The next zone whose demo wakes (the exe wakes one a frame).
+    zone: usize,
+    /// What the loading screen names after the step's text (the zone waking).
+    detail: Option<&'static str>,
+    /// What ran last frame, and the frames of the staged build that took long, so a slow
+    /// load says where its time went.
+    last: &'static str,
+    slow: Vec<(&'static str, f32)>,
 }
 
 const LIB: &str = "the library is the first step";
@@ -132,27 +140,45 @@ const STEPS: [Step; 11] = [
     ),
     ("zone demos", "Waking the zones", |world, b| {
         // Movement's look bakes in the background in the exe; its fighters need it.
-        if world.contains_resource::<Staged>()
-            && !world.contains_resource::<engine_movement::look::LookReady>()
-        {
+        let staged = world.contains_resource::<Staged>();
+        if staged && !world.contains_resource::<engine_movement::look::LookReady>() {
             return false;
         }
         let only = world.get_resource::<zones::DemoZones>().cloned();
-        if let Some(only) = &only {
+        if let Some(only) = only.as_ref().filter(|_| b.zone == 0) {
             engine::core::log::info!(
                 "only the zone demos of {:?} (`--zones all` spawns every one)",
                 only.0
             );
         }
-        with_commands(world, |c| {
-            zones::spawn_demos(
-                c,
-                b.lib.as_ref().expect(LIB),
-                &b.land,
-                &mut b.rng,
-                only.as_ref(),
-            )
-        });
+        // Zone by zone in order (they draw from one random sequence), one a frame in the exe.
+        while let Some(z) = zones::ZONES.get(b.zone) {
+            b.zone += 1;
+            if only
+                .as_ref()
+                .is_some_and(|o| !o.0.iter().any(|k| k == z.key))
+            {
+                continue;
+            }
+            let t = std::time::Instant::now();
+            let one = zones::DemoZones(vec![z.key.to_string()]);
+            with_commands(world, |c| {
+                zones::spawn_demos(
+                    c,
+                    b.lib.as_ref().expect(LIB),
+                    &b.land,
+                    &mut b.rng,
+                    Some(&one),
+                )
+            });
+            b.laps.push((z.key, t.elapsed().as_secs_f32()));
+            b.last = z.key;
+            if staged {
+                b.detail = zones::ZONES.get(b.zone).map(|z| z.name);
+                return b.zone >= zones::ZONES.len();
+            }
+        }
+        b.detail = None;
         true
     }),
     ("moon", "Hanging the Moon", |world, _| {
@@ -223,6 +249,10 @@ pub fn start(world: &mut World) {
         hedged: Vec::new(),
         started,
         laps: vec![("ground and sky", started.elapsed().as_secs_f32())],
+        zone: 0,
+        detail: None,
+        last: "ground and sky",
+        slow: Vec::new(),
     };
     if world.contains_resource::<Staged>() {
         show_loading(world, &build);
@@ -240,6 +270,12 @@ pub fn step(world: &mut World) {
     let Some(mut build) = world.remove_resource::<WorldBuild>() else {
         return;
     };
+    // The frame before this one: what it ran (the step, the systems answering what it
+    // spawned, and the drawing) and how long it took.
+    let dt = world.resource::<Time>().real_delta_secs();
+    if dt > SLOW_FRAME_S {
+        build.slow.push((build.last, dt));
+    }
     run_step(world, &mut build);
     if build.next < STEPS.len() {
         show_loading(world, &build);
@@ -255,11 +291,20 @@ pub fn building(world: &World) -> bool {
     world.contains_resource::<WorldBuild>()
 }
 
+/// Loading frames longer than this (s) are listed when the build is done.
+const SLOW_FRAME_S: f32 = 0.1;
+
 fn run_step(world: &mut World, build: &mut WorldBuild) {
     let (name, _, run) = STEPS[build.next];
     let t = std::time::Instant::now();
+    build.last = "waiting";
+    let laps = build.laps.len();
     if run(world, build) {
-        build.laps.push((name, t.elapsed().as_secs_f32()));
+        // The zone demos lap each zone themselves.
+        if build.laps.len() == laps {
+            build.laps.push((name, t.elapsed().as_secs_f32()));
+            build.last = name;
+        }
         build.next += 1;
     }
 }
@@ -275,14 +320,34 @@ fn finish(_world: &mut World, build: &WorldBuild) {
         build.started.elapsed().as_secs_f32(),
         laps.join(", ")
     );
+    if !build.slow.is_empty() {
+        let slow: Vec<String> = build
+            .slow
+            .iter()
+            .map(|(w, s)| format!("after {w} {s:.2}"))
+            .collect();
+        engine::core::log::info!("slow loading frames (s): {}", slow.join(", "));
+    }
 }
 
 /// The loading screen: the name, what is being built and a bar.
 fn show_loading(world: &mut World, build: &WorldBuild) {
     screens::hide(world, "world_loading", true);
     let p = world.resource::<Theme>().palette.clone();
-    let done = build.next as f32 / STEPS.len() as f32;
-    let what = STEPS.get(build.next).map_or("", |s| s.1);
+    // The zone demos' share of the bar fills zone by zone.
+    let waking = STEPS.get(build.next).is_some_and(|s| s.0 == "zone demos");
+    let part = if waking {
+        build.zone as f32 / zones::ZONES.len() as f32
+    } else {
+        0.0
+    };
+    let done = (build.next as f32 + part) / STEPS.len() as f32;
+    let what = STEPS
+        .get(build.next)
+        .map_or(String::new(), |s| match build.detail {
+            Some(d) => format!("{}: {d}", s.1),
+            None => s.1.to_string(),
+        });
     let el = El::new()
         .with_style(|s| {
             s.position(Position::Absolute)
@@ -347,21 +412,60 @@ fn show_loading(world: &mut World, build: &WorldBuild) {
     }
 }
 
-/// While the exe's view jumps across the map (a bookmark key, the walk's start): when it
-/// started, to cover the ground popping in until the terrain there has its patches.
+/// A bookmark jump (keys 1-9, 0, O, M) the exe holds back until the cover is drawn:
+/// `camera::fly` leaves the eye and the point it looks at here instead of moving.
+#[derive(Resource, Default)]
+pub struct HeldJump(pub Option<(DVec3, DVec3)>);
+
+/// While the exe's view jumps across the map (a bookmark key, the walk's start): the jump
+/// held until the cover is up, and when it started, to cover the ground popping in until the
+/// terrain there has its patches.
 #[derive(Default)]
 pub struct Jump {
     last: Option<DVec3>,
     since: Option<std::time::Instant>,
+    held: Option<(DVec3, DVec3)>,
+    /// Frames since the cover went up (while held) or since the view moved.
+    frames: u32,
 }
 
-/// Jumps this far (m) in a frame are covered.
-const JUMP_M: f64 = 300.0;
+/// Other moves this far (m) in a frame are covered once they happen.
+const JUMP_M: f64 = 150.0;
+
+/// Frames the cover is drawn before a held jump moves the view, and at least after it.
+const COVER_FRAMES: u32 = 2;
 
 /// Cover a jump of the view with a dark screen until the terrain around it is built (at most
-/// a few seconds), so the ground never pops in front of the player.
+/// a few seconds), so the ground never pops in front of the player. Bookmark jumps wait for
+/// the cover, so the frames that build the new place are covered too.
 pub fn cover_jumps(world: &mut World, mut jump: Local<Jump>) {
     if building(world) {
+        return;
+    }
+    if let Some(to) = world
+        .get_resource_mut::<HeldJump>()
+        .and_then(|mut h| h.0.take())
+    {
+        jump.held = Some(to);
+        jump.frames = 0;
+        if jump.since.is_none() {
+            show_cover(world);
+        }
+        jump.since = Some(std::time::Instant::now());
+    }
+    jump.frames += 1;
+    if let Some((eye, target)) = jump.held {
+        if jump.frames <= COVER_FRAMES {
+            return;
+        }
+        let mut q = world.query::<(&mut Transform, &mut camera::ShowcaseCamera)>();
+        for (mut t, mut cam) in q.iter_mut(world) {
+            camera::look(&mut t, &mut cam, eye, target);
+        }
+        jump.held = None;
+        jump.last = Some(eye);
+        jump.frames = 0;
+        jump.since = Some(std::time::Instant::now());
         return;
     }
     let mut cameras = world.query::<(&Camera, &GlobalTransform)>();
@@ -377,6 +481,7 @@ pub fn cover_jumps(world: &mut World, mut jump: Local<Jump>) {
     jump.last = Some(eye);
     if jumped && jump.since.is_none() {
         jump.since = Some(std::time::Instant::now());
+        jump.frames = 0;
         show_cover(world);
     }
     let Some(since) = jump.since else {
@@ -389,7 +494,7 @@ pub fn cover_jumps(world: &mut World, mut jump: Local<Jump>) {
                 + d.get("terrain.patches_missing").unwrap_or(0.0)
         });
     let waited = since.elapsed().as_secs_f32();
-    if (pending == 0.0 && waited > 0.3) || waited > 4.0 {
+    if (pending == 0.0 && waited > 0.3 && jump.frames > COVER_FRAMES) || waited > 4.0 {
         screens::hide(world, "jump_cover", false);
         jump.since = None;
     }
@@ -406,11 +511,12 @@ fn show_cover(world: &mut World) {
                 .bottom(0.0)
                 .background(Color::hex(0x0b0f0d))
                 .justify(Justify::Center)
+                .align_items(Align::Center)
         })
         .child(
             El::text("Arriving…")
                 .text_style(|t| t.nowrap())
-                .with_style(|s| s.font_size(18.0).color(p.text_dim).margin([0.0, 140.0])),
+                .with_style(|s| s.font_size(18.0).color(p.text_dim)),
         );
     if let Err(e) = screens::spawn_screen(
         world,
