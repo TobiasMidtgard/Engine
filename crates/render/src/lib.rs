@@ -108,7 +108,7 @@ pub use cloud_shadows::{
 pub use components::{
     AmbientLight, BoxFace, Camera, DirectionalLight, Exposure, FogShape, FogVolume, MaterialRef,
     MaxDrawDistance, MeshRef, MeshRenderer, NoVirtualGeometry, PointLight, Projection,
-    ResolvedMesh, SkyLightVolume,
+    ResolvedMesh, SkyLightVolume, Viewport,
 };
 pub use depth_of_field::DepthOfField;
 pub use features::{
@@ -156,7 +156,8 @@ pub mod prelude {
         RenderAppExt, RenderFeature, RenderPhase, RenderPlugin, RenderSettings, Screenshots, Shape,
         SkyLightVolume, Sprite, SpriteAlpha, SpriteAnimation, SpriteAnimationMode, SpriteAtlas,
         SpriteFilter, StandardMaterial, StoneKind, TextureMapping, TileMap, TileSource, Tonemapper,
-        VirtualTextures, VolumetricQuality, WallStone, spawn_gltf_scene, spawn_gltf_scene_deferred,
+        Viewport, VirtualTextures, VolumetricQuality, WallStone, spawn_gltf_scene,
+        spawn_gltf_scene_deferred,
     };
 }
 

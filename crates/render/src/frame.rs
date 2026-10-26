@@ -182,8 +182,13 @@ pub struct ViewData {
     /// Vertical field of view in radians (0 for orthographic).
     pub fov_y: f32,
     pub orthographic: bool,
+    /// The scene's size in pixels: its camera's [`crate::Viewport`], or the whole window.
     pub width: u32,
     pub height: u32,
+    /// The output image's size in pixels (the window), which overlays such as the UI cover.
+    pub window: UVec2,
+    /// Where the scene sits in the window: its top-left corner, pixels.
+    pub viewport_origin: UVec2,
     /// Direction toward the sun (unit), if there is a sun.
     pub sun_dir: Vec3,
     /// Sun color × illuminance (lux).
@@ -368,6 +373,15 @@ pub fn active_camera(world: &mut World) -> Option<(Entity, Camera, GlobalTransfo
         }
     }
     best
+}
+
+/// Where the active camera draws in a window of `window` pixels (top-left corner, size): its
+/// [`crate::Viewport`], or the whole window.
+pub fn camera_viewport(world: &mut World, window: UVec2) -> (UVec2, UVec2) {
+    let viewport = active_camera(world)
+        .and_then(|(e, _, _)| world.get::<crate::components::Viewport>(e).copied())
+        .unwrap_or_default();
+    viewport.within(window)
 }
 
 /// Whether the camera that renders is a pixel-perfect one ([`crate::PixelPerfect`] on an
@@ -615,6 +629,8 @@ pub fn build_view(
         orthographic,
         width,
         height,
+        window: UVec2::new(width, height),
+        viewport_origin: UVec2::ZERO,
         sun_dir,
         sun_color,
         sun_shadows: sun_shadows && cascades.count > 0,

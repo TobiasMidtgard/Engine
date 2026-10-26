@@ -113,6 +113,40 @@ impl Camera {
     }
 }
 
+/// The part of the window a camera draws into, in physical pixels from the window's top-left
+/// corner (put it on the camera's entity). Without one the camera fills the window. The
+/// camera's aspect ratio follows the rectangle; the rest of the window is black under the
+/// overlays (UI, editor panels), which still cover the whole window.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Viewport {
+    pub position: UVec2,
+    pub size: UVec2,
+}
+
+impl Default for Viewport {
+    fn default() -> Self {
+        Self {
+            position: UVec2::ZERO,
+            size: UVec2::splat(u32::MAX),
+        }
+    }
+}
+
+impl Viewport {
+    pub fn new(position: UVec2, size: UVec2) -> Self {
+        Self { position, size }
+    }
+
+    /// The rectangle inside a window of `window` pixels (position, size), at least 1×1.
+    pub fn within(&self, window: UVec2) -> (UVec2, UVec2) {
+        let window = window.max(UVec2::ONE);
+        let position = self.position.min(window - UVec2::ONE);
+        let size = self.size.min(window - position).max(UVec2::ONE);
+        (position, size)
+    }
+}
+
 /// Which mesh to draw: a handle, a procedural shape, or an asset path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
