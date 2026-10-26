@@ -1654,12 +1654,16 @@ impl RenderFeature for MeshFeature {
             let (material_slot, textures) =
                 self.material_slot(gpu, material_handle.index() as u64, material, &sources);
             // Far away, meshes whose levels of detail can't get cheap are drawn as impostors,
-            // baked the first time one is that small.
+            // baked the first time one is that small. The bake keeps no emission, so glowing
+            // materials stay meshes.
             let impostor_size = |m: f32| 2.0 * radius < impostor_pixels * m;
+            let glows =
+                material.emissive_strength > 0.0 && material.emissive.iter().any(|&c| c > 0.0);
             let impostor = match &mut self.impostors {
                 Some(impostors)
                     if impostor_pixels > 0.0
                         && !blend
+                        && !glows
                         && coarsest >= crate::impostor::MIN_TRIANGLES
                         && !self.lod_jobs.contains_key(&mesh_index) =>
                 {
