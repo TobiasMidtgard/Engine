@@ -22,8 +22,10 @@ use engine_world::{
     WeatherState,
 };
 
+use std::sync::{Arc, Mutex};
+
 use crate::climate;
-use crate::sim::WeatherSim;
+use crate::sim::{WeatherFrame, WeatherSim};
 
 /// Tuning for how rain and snow change the ground.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -162,6 +164,10 @@ pub struct GroundCache {
     /// Bands and raycasts owed to the update rate, carried between ticks.
     band_credit: f32,
     ray_credit: f32,
+    /// Counts the grid's moves: lookups started before a move are dropped.
+    epoch: u64,
+    /// Lookups running off the frame.
+    job: Option<LookupJob>,
     /// Cells covered by a [`WeatherShelter`] this update.
     sheltered: Vec<bool>,
 }
@@ -178,6 +184,8 @@ impl Default for GroundCache {
             next_band: 0,
             band_credit: 0.0,
             ray_credit: 0.0,
+            epoch: 0,
+            job: None,
             sheltered: Vec::new(),
         }
     }
@@ -211,6 +219,7 @@ impl GroundCache {
             self.order = near_first_order(surface.width, surface.height);
             self.cursor = 0;
             self.complete = false;
+            self.epoch += 1;
         } else if self.cells.origin != surface.origin {
             let old = self.cells.origin;
             let half =
@@ -219,6 +228,7 @@ impl GroundCache {
             self.cells.origin = surface.origin;
             self.cursor = 0;
             self.complete = false;
+            self.epoch += 1;
             self.sheltered.resize(self.cells.len(), false);
             return Some(old);
         }
@@ -452,18 +462,17 @@ pub fn refresh_cache(
     share: f32,
     sim: &WeatherSim,
 ) {
+    let look = LookUp::new(ground, physics, materials, share, sim);
+    let looked = pick(cache, rays);
+    look_at(cache, &look, &looked, sim);
+}
+
+/// The cells to look at next, up to `rays` (see [`refresh_cache`]), in index order.
+fn pick(cache: &mut GroundCache, rays: u32) -> Vec<usize> {
     let n = cache.order.len();
     if n == 0 {
-        return;
+        return Vec::new();
     }
-    let look = LookUp {
-        ground,
-        physics,
-        materials,
-        share,
-        sim,
-        filter: QueryFilter::default(),
-    };
     let mut budget = rays.min(n as u32);
     let mut looked = Vec::new();
     if !cache.complete {
@@ -485,26 +494,80 @@ pub fn refresh_cache(
     }
     looked.sort_unstable();
     looked.dedup();
-    look_at(cache, &look, &looked);
+    looked
 }
 
 /// Look at cells `indices` on all cores (each is a raycast and a ground sample), then
 /// recompute the dips their new heights touch. Done one cell at a time, a ground update
 /// cost a quarter second of the frame while the player moved, mostly in recomputing the
 /// same neighbors' dips dozens of times over.
-fn look_at(cache: &mut GroundCache, look: &LookUp, indices: &[usize]) {
+fn look_at(cache: &mut GroundCache, look: &LookUp, indices: &[usize], sim: &WeatherSim) {
     let mut found: Vec<(usize, CellInfo)> =
         indices.iter().map(|&i| (i, CellInfo::default())).collect();
-    let cells = &cache.cells;
+    let at = Layout::of(&cache.cells);
     engine_core::tasks::par_chunks_mut(&mut found, 128, |_, chunk| {
         for (index, info) in chunk {
-            *info = look.facts(cells, *index);
+            *info = look.facts(at, *index);
         }
     });
-    for &(index, info) in &found {
+    write_facts(cache, &found, sim);
+}
+
+/// Store looked-up facts and recompute the dips their new heights touch.
+fn write_facts(cache: &mut GroundCache, found: &[(usize, CellInfo)], sim: &WeatherSim) {
+    for &(index, info) in found {
         cache.cells.data[index] = info;
     }
-    update_dips(cache, indices, look.sim);
+    let indices: Vec<usize> = found.iter().map(|&(index, _)| index).collect();
+    update_dips(cache, &indices, sim);
+}
+
+/// Looked-up cells: index and facts.
+type Facts = Vec<(usize, CellInfo)>;
+
+/// Lookups running on the async pool: each is a raycast that waits on the physics world's
+/// lock, so on a busy frame a batch could take several milliseconds of it.
+#[derive(Debug, Clone)]
+struct LookupJob {
+    /// The grid's epoch when the job started.
+    epoch: u64,
+    slot: Arc<Mutex<Option<Facts>>>,
+}
+
+/// Start looking at cells `indices` off the frame.
+fn spawn_lookups(cache: &mut GroundCache, look: LookUp, indices: Vec<usize>) {
+    let slot = Arc::new(Mutex::new(None));
+    let out = slot.clone();
+    let at = Layout::of(&cache.cells);
+    let run = move || {
+        let found: Vec<(usize, CellInfo)> =
+            indices.iter().map(|&i| (i, look.facts(at, i))).collect();
+        if let Ok(mut s) = out.lock() {
+            *s = Some(found);
+        }
+    };
+    match engine_core::tasks::AsyncComputeTaskPool::try_get() {
+        Some(pool) => pool.spawn(async move { run() }).detach(),
+        None => run(),
+    }
+    cache.job = Some(LookupJob {
+        epoch: cache.epoch,
+        slot,
+    });
+}
+
+/// Take the finished lookups in, unless the grid moved since they started (their cells
+/// stay unknown and are picked again).
+fn finish_lookups(cache: &mut GroundCache, sim: &WeatherSim) {
+    let Some(job) = &cache.job else { return };
+    let Some(found) = job.slot.lock().ok().and_then(|mut s| s.take()) else {
+        return;
+    };
+    let epoch = job.epoch;
+    cache.job = None;
+    if epoch == cache.epoch {
+        write_facts(cache, &found, sim);
+    }
 }
 
 /// Look at the ground within `radius_m` of the player now, for changes that apply at once
@@ -527,14 +590,13 @@ pub(crate) fn prepare(world: &mut World, radius_m: f64) {
             seed_uncovered(&mut world.resource_mut::<SurfaceLayers>().grid, cache, old);
         }
         let sim = world.resource::<WeatherSim>();
-        let look = LookUp {
-            ground: world.resource::<Ground>(),
-            physics: world.get_resource::<PhysicsQueries>(),
-            materials: world.resource::<SurfaceMaterials>(),
-            share: world.resource::<GroundWeather>().puddle_share,
+        let look = LookUp::new(
+            world.resource::<Ground>(),
+            world.get_resource::<PhysicsQueries>(),
+            world.resource::<SurfaceMaterials>(),
+            world.resource::<GroundWeather>().puddle_share,
             sim,
-            filter: QueryFilter::default(),
-        };
+        );
         let (w, h) = (cache.cells.width, cache.cells.height);
         let reach = radius_m / cache.cells.cell as f64;
         let mut found: Vec<(usize, CellInfo)> = Vec::new();
@@ -551,7 +613,7 @@ pub(crate) fn prepare(world: &mut World, radius_m: f64) {
         }
         // Tens of thousands of cells after a teleport: look at them on all cores.
         let indices: Vec<usize> = found.iter().map(|&(index, _)| index).collect();
-        look_at(cache, &look, &indices);
+        look_at(cache, &look, &indices, sim);
         stamp(
             cache,
             shelters.iter().map(|(p, s)| (*p, s)),
@@ -561,21 +623,65 @@ pub(crate) fn prepare(world: &mut World, radius_m: f64) {
     });
 }
 
-struct LookUp<'a> {
-    ground: &'a Ground,
-    physics: Option<&'a PhysicsQueries>,
-    materials: &'a SurfaceMaterials,
+/// Where a grid's cells lie, without its data.
+#[derive(Clone, Copy)]
+struct Layout {
+    origin: DVec2,
+    cell: f32,
+    width: u32,
+}
+
+impl Layout {
+    fn of<T>(grid: &Grid2<T>) -> Self {
+        Self {
+            origin: grid.origin,
+            cell: grid.cell,
+            width: grid.width,
+        }
+    }
+
+    fn center(&self, index: usize) -> DVec2 {
+        let c = DVec2::new(
+            (index as u32 % self.width) as f64,
+            (index as u32 / self.width) as f64,
+        );
+        self.origin + (c + DVec2::splat(0.5)) * self.cell as f64
+    }
+}
+
+/// What looking at the ground needs; owned, so lookups can run off the frame.
+struct LookUp {
+    ground: Ground,
+    physics: Option<PhysicsQueries>,
+    materials: SurfaceMaterials,
     share: f32,
-    sim: &'a WeatherSim,
+    frame: WeatherFrame,
+    seed: u64,
     filter: QueryFilter,
 }
 
-impl LookUp<'_> {
-    /// What the ground at cell `index` of `cells` is like.
-    fn facts(&self, cells: &Grid2<CellInfo>, index: usize) -> CellInfo {
-        let w = cells.width;
-        let c = IVec2::new((index as u32 % w) as i32, (index as u32 / w) as i32);
-        let xz = cells.cell_center(c);
+impl LookUp {
+    fn new(
+        ground: &Ground,
+        physics: Option<&PhysicsQueries>,
+        materials: &SurfaceMaterials,
+        share: f32,
+        sim: &WeatherSim,
+    ) -> Self {
+        Self {
+            ground: ground.clone(),
+            physics: physics.cloned(),
+            materials: materials.clone(),
+            share,
+            frame: sim.frame,
+            seed: sim.seed,
+            filter: QueryFilter::default(),
+        }
+    }
+
+    /// What the ground at cell `index` of a grid laid out `at` is like.
+    fn facts(&self, at: Layout, index: usize) -> CellInfo {
+        let xz = at.center(index);
         let sample = self.ground.sample(DVec3::new(xz.x, 0.0, xz.y));
         let height = sample.map(|s| s.height).unwrap_or(0.0);
         // Unknown ground soaks like the world's default material.
@@ -587,7 +693,7 @@ impl LookUp<'_> {
         // Look down from the sky for the first thing above the ground. Looking up from the
         // ground instead started under the physics terrain wherever it sits a little above
         // the height the ground reports, and took the terrain for a roof.
-        let exposure = match self.physics {
+        let exposure = match &self.physics {
             Some(q) => {
                 let from = DVec3::new(xz.x, height + ROOF_SEARCH_M as f64, xz.y);
                 let reach = ROOF_SEARCH_M - GROUND_SLACK_M;
@@ -603,7 +709,7 @@ impl LookUp<'_> {
         // keeps its place when the world shifts). Soft ground (a grass meadow, soil) drains:
         // water stands only where the ground itself dips (see `hollow_dip`).
         let share_here = self.share * (1.0 - smoothstep(0.2, 0.65, absorbency));
-        let spots = puddle_dip(self.sim.frame.to_pattern(xz), share_here, self.sim.seed)
+        let spots = puddle_dip(self.frame.to_pattern(xz), share_here, self.seed)
             * smoothstep(0.88, 0.97, flat);
         CellInfo {
             exposure,
@@ -704,7 +810,7 @@ pub(crate) fn ground_system(
     mut surface: ResMut<SurfaceLayers>,
 ) {
     // The work is spread over the ticks: each updates a band of rows (every band
-    // `rate_hz` times a second) and casts its share of the roof rays. Updating the whole
+    // `rate_hz` times a second), and the roof rays run off the frame. Updating the whole
     // grid at once took tens of milliseconds and, on a busy PC, a quarter second: a hitch
     // every update, and a slide show once frames were slow enough for it to run every frame.
     let tick = time.delta_secs();
@@ -721,21 +827,27 @@ pub(crate) fn ground_system(
         return;
     }
     cache.band_credit -= bands as f32;
-    let rays = cache.ray_credit.floor() as u32;
-    cache.ray_credit -= rays as f32;
 
     if let Some(old) = cache.align(&surface.grid) {
         seed_uncovered(&mut surface.grid, &cache, old);
     }
-    refresh_cache(
-        &mut cache,
-        rays,
-        &ground,
-        physics.as_deref(),
-        &materials,
-        params.puddle_share,
-        &sim,
-    );
+    // Roof raycasts run off the frame, a batch at a time.
+    finish_lookups(&mut cache, &sim);
+    if cache.job.is_none() {
+        let rays = cache.ray_credit.floor() as u32;
+        cache.ray_credit -= rays as f32;
+        let picked = pick(&mut cache, rays);
+        if !picked.is_empty() {
+            let look = LookUp::new(
+                &ground,
+                physics.as_deref(),
+                &materials,
+                params.puddle_share,
+                &sim,
+            );
+            spawn_lookups(&mut cache, look, picked);
+        }
+    }
     stamp(
         &mut cache,
         shelters.iter().map(|(gt, s)| (gt.translation(), s)),
