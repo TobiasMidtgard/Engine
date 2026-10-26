@@ -13,11 +13,13 @@
 //!
 //! Shading needs to know how deep in the hair each point sits (light reaching the inside of a
 //! hairdo is dimmed by the hair around it): after growing, every point's occlusion is estimated
-//! from a density grid of all points, marched outward from the head.
+//! from a density grid of all points, marched outward from the head. A finer grid of the hair
+//! and body ([`shadow_grid`]) goes to the GPU, where each light is marched through it, so the
+//! hair a light reaches through the rest of the hairdo (or past the head) is dimmed.
 
 use std::collections::HashMap;
 
-use engine_core::math::Vec3;
+use engine_core::math::{UVec3, Vec3};
 
 use crate::appearance::{Appearance, AppearanceExt, BeardStyle, HairStyle, Rng};
 use crate::mesh::{Landmarks, MASKS, Mask, SkinMesh};
@@ -1071,6 +1073,146 @@ fn occlude(set: &mut StrandSet, head: Vec3) {
     }
 }
 
+/// Grid cell of the hair shadow density (m).
+const SHADOW_CELL: f32 = 0.004;
+/// How far the shader marches toward a light (cells); the grid keeps this margin around the
+/// hair.
+pub const SHADOW_REACH: usize = 16;
+/// Optical depth of one cell inside the skin (the body is opaque); the most a cell holds.
+pub const BODY_TAU: f32 = 4.0;
+/// Hair is more opaque than its fibers' bare cross-section: drawn hairs stand for a few real
+/// ones (see `HAIR_WIDTH`), and light crossing a fiber is mostly turned away.
+const HAIR_OPACITY: f32 = 1.5;
+
+/// How much hair and body fills the space around the hair: per 4 mm cell, the optical depth
+/// of crossing it, as a share of [`BODY_TAU`] in bytes (x fastest, then y, then z). Uploaded as
+/// a 3D texture; the strand shader marches each light through it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShadowGrid {
+    /// The grid's low corner (model space, m).
+    pub lo: Vec3,
+    pub cell: f32,
+    pub dims: [u32; 3],
+    pub density: Vec<u8>,
+}
+
+impl ShadowGrid {
+    /// Optical depth from `p` toward `dir` (unit), marched as the shader does (from a cell out,
+    /// one cell a step, nearest cell).
+    pub fn depth_toward(&self, p: Vec3, dir: Vec3) -> f32 {
+        let mut tau = 0.0;
+        for step in 1..=SHADOW_REACH {
+            let q = (p + dir * (self.cell * step as f32) - self.lo) / self.cell;
+            let c = q.floor();
+            if c.cmplt(Vec3::ZERO).any() || c.cmpge(UVec3::from(self.dims).as_vec3()).any() {
+                break;
+            }
+            let [x, y, z] = [c.x as usize, c.y as usize, c.z as usize];
+            let [nx, ny, _] = self.dims.map(|d| d as usize);
+            tau += self.density[x + nx * (y + ny * z)] as f32 / 255.0 * BODY_TAU;
+        }
+        tau
+    }
+}
+
+/// The density of the scalp hair and beard (their fibers splatted into 4 mm cells) and of the
+/// body (the skin as a 2 cm opaque shell), around the hair with a margin of the shader's reach.
+/// `None` without hair that shades itself. Like the deep opacity maps of Unreal's grooms, but
+/// one grid serves every light, in any direction.
+pub fn shadow_grid(sets: &[StrandSet], skin: &SkinMesh) -> Option<ShadowGrid> {
+    let casts = |s: &&StrandSet| matches!(s.kind, StrandKind::Scalp | StrandKind::Beard);
+    let mut lo = Vec3::splat(f32::MAX);
+    let mut hi = Vec3::splat(f32::MIN);
+    for p in sets.iter().filter(casts).flat_map(|s| &s.points) {
+        let p = Vec3::new(p[0], p[1], p[2]);
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    if lo.x > hi.x {
+        return None;
+    }
+    let margin = SHADOW_CELL * (SHADOW_REACH + 1) as f32;
+    lo -= Vec3::splat(margin);
+    hi += Vec3::splat(margin);
+    let dims = ((hi - lo) / SHADOW_CELL).ceil().as_uvec3().max(UVec3::ONE);
+    let [nx, ny, nz] = dims.to_array().map(|d| d as usize);
+    let at = |c: [usize; 3]| c[0] + nx * (c[1] + ny * c[2]);
+    let cell = |p: Vec3| -> Option<[usize; 3]> {
+        let c = ((p - lo) / SHADOW_CELL).floor();
+        (c.cmpge(Vec3::ZERO).all() && c.cmplt(dims.as_vec3()).all()).then_some([
+            c.x as usize,
+            c.y as usize,
+            c.z as usize,
+        ])
+    };
+    let mut density = vec![0.0f32; nx * ny * nz];
+    // Fibers: a hair of radius r crossing a cell along length l blocks about 2 r l of the
+    // cell's face.
+    let per_area = HAIR_OPACITY / (SHADOW_CELL * SHADOW_CELL);
+    for set in sets.iter().filter(casts) {
+        let n = set.points_per.max(1) as usize;
+        for hair in set.points.chunks_exact(n) {
+            for w in hair.windows(2) {
+                let a = Vec3::new(w[0][0], w[0][1], w[0][2]);
+                let b = Vec3::new(w[1][0], w[1][1], w[1][2]);
+                let len = a.distance(b);
+                let steps = (len / (SHADOW_CELL * 0.5)).ceil().max(1.0) as usize;
+                let r = (w[0][3] + w[1][3]) * 0.5;
+                let tau = 2.0 * r * (len / steps as f32) * per_area;
+                for k in 0..steps {
+                    let q = a.lerp(b, (k as f32 + 0.5) / steps as f32);
+                    if let Some(c) = cell(q) {
+                        density[at(c)] += tau;
+                    }
+                }
+            }
+        }
+    }
+    // The body: a shell under the skin, from a cell below it (roots sit just above) to 2 cm in,
+    // over every triangle near the hair, sampled finer than the cells so it has no holes.
+    let near = |p: Vec3| p.cmpge(lo).all() && p.cmple(hi).all();
+    let mut shell = |p: Vec3, n: Vec3| {
+        let mut depth = SHADOW_CELL;
+        while depth <= 0.02 {
+            if let Some(c) = cell(p - n * depth) {
+                density[at(c)] = BODY_TAU;
+            }
+            depth += SHADOW_CELL * 0.5;
+        }
+    };
+    for t in skin.indices.as_chunks::<3>().0 {
+        let [a, b, c] = t.map(|i| i as usize);
+        let (Some(pa), Some(pb), Some(pc)) = (
+            skin.positions.get(a),
+            skin.positions.get(b),
+            skin.positions.get(c),
+        ) else {
+            continue;
+        };
+        if !(near(*pa) || near(*pb) || near(*pc)) {
+            continue;
+        }
+        let n = (skin.normals[a] + skin.normals[b] + skin.normals[c]).normalize_or_zero();
+        let edge = pa.distance(*pb).max(pb.distance(*pc)).max(pc.distance(*pa));
+        let k = (edge / (SHADOW_CELL * 0.5)).ceil().max(1.0) as usize;
+        for i in 0..=k {
+            for j in 0..=k - i {
+                let (u, v) = (i as f32 / k as f32, j as f32 / k as f32);
+                shell(*pa + (*pb - *pa) * u + (*pc - *pa) * v, n);
+            }
+        }
+    }
+    Some(ShadowGrid {
+        lo,
+        cell: SHADOW_CELL,
+        dims: dims.to_array(),
+        density: density
+            .into_iter()
+            .map(|t| ((t / BODY_TAU).clamp(0.0, 1.0) * 255.0).round() as u8)
+            .collect(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1103,6 +1245,78 @@ mod tests {
         let far = grid.follow(Vec3::new(0.3, 0.7, 0.0), &guides);
         assert_eq!(far.guides[0], 3);
         assert!((far.weights[0] - 1.0).abs() < 1e-5, "{far:?}");
+    }
+
+    /// Triangles over an n × n grid of vertices (row-major).
+    fn grid_triangles(n: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        for y in 0..n - 1 {
+            for z in 0..n - 1 {
+                let i = y * n + z;
+                out.extend([i, i + 1, i + n, i + 1, i + n + 1, i + n]);
+            }
+        }
+        out
+    }
+
+    fn wall() -> SkinMesh {
+        // A patch of skin at x = 10 cm facing -X (toward the hair).
+        SkinMesh {
+            positions: (0..20)
+                .flat_map(|y| {
+                    (0..20).map(move |z| Vec3::new(0.1, y as f32 * 0.005, z as f32 * 0.005))
+                })
+                .collect(),
+            normals: vec![-Vec3::X; 400],
+            indices: grid_triangles(20),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn hair_shades_the_hair_behind_it_and_the_body_shades_all() {
+        // A 4 cm slab of vertical hairs (x 0..4 cm, z 0..4 cm), 1 mm apart, 10 cm long.
+        let mut s = StrandSet::new(StrandKind::Scalp, 3);
+        for i in 0..40 {
+            for j in 0..40 {
+                let (x, z) = (i as f32 * 0.001, j as f32 * 0.001);
+                let pts = [0.0, 0.05, 0.1].map(|y| Vec3::new(x, y, z));
+                s.push(&pts, 0.00005, 0.00005, 0.5);
+            }
+        }
+        let grid = shadow_grid(&[s], &wall()).unwrap();
+        let at = |x: f32| Vec3::new(x, 0.05, 0.02);
+        // On the -X face, light from -X is barely dimmed; from +X it crosses the slab.
+        let open = grid.depth_toward(at(0.0), -Vec3::X);
+        let through = grid.depth_toward(at(0.0), Vec3::X);
+        assert!(open < 0.1 && through > 2.0, "{open} {through}");
+        // Deeper in, more hair lies toward -X; from above, little.
+        assert!(grid.depth_toward(at(0.03), -Vec3::X) > grid.depth_toward(at(0.01), -Vec3::X));
+        assert!(grid.depth_toward(Vec3::new(0.02, 0.098, 0.02), Vec3::Y) < 0.5);
+        // Brows alone cast nothing.
+        let mut brows = StrandSet::new(StrandKind::Brows, 3);
+        brows.push(&[Vec3::ZERO, Vec3::X, Vec3::Y], 1.0, 0.0, 0.5);
+        assert!(shadow_grid(&[brows], &wall()).is_none());
+        // The shader marches the same reach and scale.
+        let shader = include_str!("shaders/strands.wgsl");
+        assert!(shader.contains(&format!("const SHADOW_REACH: u32 = {SHADOW_REACH}u;")));
+        assert!(shader.contains(&format!("const SHADOW_BODY_TAU: f32 = {BODY_TAU:?};")));
+    }
+
+    #[test]
+    fn hair_near_the_body_is_shaded_by_it() {
+        let mut s = StrandSet::new(StrandKind::Scalp, 2);
+        s.push(
+            &[Vec3::new(0.09, 0.05, 0.05), Vec3::new(0.09, 0.06, 0.05)],
+            0.00005,
+            0.00005,
+            0.5,
+        );
+        let grid = shadow_grid(&[s], &wall()).unwrap();
+        let p = Vec3::new(0.09, 0.055, 0.05);
+        // Light from +X is behind the skin; from -X open.
+        assert!(grid.depth_toward(p, Vec3::X) > 4.0);
+        assert!(grid.depth_toward(p, -Vec3::X) < 0.1);
     }
 
     #[test]

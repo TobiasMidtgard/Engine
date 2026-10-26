@@ -235,6 +235,8 @@ struct GpuStrands {
     drawn: u32,
     vertices: u32,
     lod: (u32, u32),
+    /// The hair shadow grid's placement (`GpuStrandParams::grid`).
+    grid: [[f32; 4]; 2],
     /// Hair that moves: guide point displacements, this frame's then last frame's.
     motion: Option<GuideMotion>,
 }
@@ -318,6 +320,7 @@ impl GpuMeshes {
                 let params = GpuStrandParams {
                     info: s.info,
                     lod: [width, stride as f32, 0.0, 0.0],
+                    grid: s.grid,
                 };
                 gpu.queue
                     .write_buffer(&s.params, 0, bytemuck::bytes_of(&params));
@@ -347,11 +350,15 @@ impl GpuMeshes {
 struct GpuStrandParams {
     info: [u32; 4],
     lod: [f32; 4],
+    /// The hair shadow grid: low corner (rest model space) and cell size, then cells along
+    /// x, y, z (0: no grid).
+    grid: [[f32; 4]; 2],
 }
 
 struct Pipelines {
     char_layout: wgpu::BindGroupLayout,
     strand_layout: wgpu::BindGroupLayout,
+    shadow_sampler: wgpu::Sampler,
     skin: wgpu::RenderPipeline,
     skin_prepass: wgpu::RenderPipeline,
     skin_shadow: wgpu::RenderPipeline,
@@ -567,6 +574,38 @@ impl CharacterFeature {
             ],
         });
         let pack = |b: [u8; 4]| u32::from_le_bytes(b);
+        // The hair shadow grid, shared by every strand set (a single empty cell without one).
+        let (grid, shadow_dims, shadow_cells) = match &m.hair_shadow {
+            Some(g) => (
+                [
+                    [g.lo.x, g.lo.y, g.lo.z, g.cell],
+                    [g.dims[0] as f32, g.dims[1] as f32, g.dims[2] as f32, 0.0],
+                ],
+                g.dims,
+                g.density.as_slice(),
+            ),
+            None => ([[0.0; 4]; 2], [1, 1, 1], &[0u8][..]),
+        };
+        let shadow_texture = device.create_texture_with_data(
+            &gpu.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("character hair shadow"),
+                size: wgpu::Extent3d {
+                    width: shadow_dims[0],
+                    height: shadow_dims[1],
+                    depth_or_array_layers: shadow_dims[2],
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D3,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            shadow_cells,
+        );
+        let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut strands = Vec::new();
         for (si, set) in m.strands.iter().enumerate() {
             let hairs = set.strand_count() as u32;
@@ -586,6 +625,7 @@ impl CharacterFeature {
                 bytemuck::bytes_of(&GpuStrandParams {
                     info,
                     lod: [1.0, 1.0, 0.0, 0.0],
+                    grid,
                 }),
                 wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             );
@@ -688,6 +728,14 @@ impl CharacterFeature {
                         binding: 5,
                         resource: follow.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(&shadow_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::Sampler(&p.shadow_sampler),
+                    },
                 ],
             });
             strands.push(GpuStrands {
@@ -700,6 +748,7 @@ impl CharacterFeature {
                 drawn: hairs,
                 vertices: lod::strand_vertices(set.points_per, 1),
                 lod: (hairs, 1),
+                grid,
                 motion,
             });
         }
@@ -805,6 +854,22 @@ impl RenderFeature for CharacterFeature {
                 storage_entry(3),
                 storage_entry(4),
                 storage_entry(5),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let [
@@ -929,6 +994,12 @@ impl RenderFeature for CharacterFeature {
             ),
             char_layout,
             strand_layout,
+            shadow_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("character hair shadow"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
         });
     }
 
