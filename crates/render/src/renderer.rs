@@ -1163,31 +1163,29 @@ impl Renderer {
             self.effects.skip_gi();
         }
 
-        // Scene: opaque + sky (on the prepass depth).
-        self.perf.pass(&mut cpu, &mut encoder, "scene");
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("scene"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.targets.hdr.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.targets.depth.view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                ..Default::default()
-            });
-            pass.set_bind_group(0, frame_group, &[]);
+        // Scene: opaque + sky (on the prepass depth). With the frame profiler on, each feature's
+        // opaque draws get a pass of their own (`render.gpu.scene: <feature>`), then the sky.
+        if engine_core::profile::enabled() {
+            for (i, f) in self.features.iter().enumerate() {
+                self.perf
+                    .pass(&mut cpu, &mut encoder, format!("scene: {}", f.name()));
+                let mut pass = scene_pass(&mut encoder, &self.targets, frame_group, i == 0);
+                f.draw(RenderPhase::Opaque, &mut pass, &ctx);
+            }
+            self.perf.pass(&mut cpu, &mut encoder, "scene: sky phase");
+            let mut pass = scene_pass(
+                &mut encoder,
+                &self.targets,
+                frame_group,
+                self.features.is_empty(),
+            );
+            for f in &self.features {
+                f.draw(RenderPhase::Sky, &mut pass, &ctx);
+                pass.set_bind_group(0, frame_group, &[]);
+            }
+        } else {
+            self.perf.pass(&mut cpu, &mut encoder, "scene");
+            let mut pass = scene_pass(&mut encoder, &self.targets, frame_group, true);
             for phase in [RenderPhase::Opaque, RenderPhase::Sky] {
                 for f in &self.features {
                     f.draw(phase, &mut pass, &ctx);
@@ -1662,6 +1660,42 @@ pub(crate) fn layout_entry(
         ty,
         count: None,
     }
+}
+
+/// The scene pass over the HDR target and the prepass depth, cleared or continued.
+fn scene_pass<'e>(
+    encoder: &'e mut wgpu::CommandEncoder,
+    targets: &Targets,
+    frame_group: &wgpu::BindGroup,
+    clear: bool,
+) -> wgpu::RenderPass<'e> {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("scene"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &targets.hdr.view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: if clear {
+                    wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                } else {
+                    wgpu::LoadOp::Load
+                },
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &targets.depth.view,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    });
+    pass.set_bind_group(0, frame_group, &[]);
+    pass
 }
 
 pub(crate) fn fullscreen_pass<'e>(

@@ -19,7 +19,9 @@
 //! `tracing` span, target `engine_render`, name `render_step`, field `name`), on the GPU each
 //! pass (a timestamp where it starts). Their latest times go to `Diagnostics` as
 //! `render.cpu.<step>` and `render.gpu.<pass>` (milliseconds), and with the frame profiler on
-//! (`--profile`) the log gets a table of both with every report.
+//! (`--profile`) the log gets a table of both with every report. The profiler also splits the
+//! scene pass by feature (`render.gpu.scene: <feature>`, then `render.gpu.scene: sky phase`),
+//! so its cost can be put on what draws it; `render.gpu.scene` stays their sum.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -40,7 +42,7 @@ const FAILED: u8 = 4;
 const SLOTS: usize = 4;
 /// Most timestamps in one frame (one where each pass starts, one at the end); passes past it
 /// count towards the one before.
-const MAX_MARKS: usize = 64;
+const MAX_MARKS: usize = 128;
 /// Bytes of one frame's timestamps (a multiple of the 256 query resolves must start on).
 const SLOT_BYTES: u64 = (MAX_MARKS * 8) as u64;
 const _: () = assert!(SLOT_BYTES.is_multiple_of(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT));
@@ -206,12 +208,21 @@ impl GpuTimer {
                     let Some(total) = t[n].checked_sub(t[0]) else {
                         continue;
                     };
-                    let passes = slot
+                    let mut passes: Vec<(Label, f32)> = slot
                         .labels
                         .drain(..)
                         .zip(t.windows(2))
                         .map(|(label, w)| (label, w[1].saturating_sub(w[0]) as f32 * ms))
                         .collect();
+                    // A scene split by feature (profiler) still reports the whole scene.
+                    let split: Vec<f32> = passes
+                        .iter()
+                        .filter(|(label, _)| label.starts_with("scene: "))
+                        .map(|&(_, ms)| ms)
+                        .collect();
+                    if !split.is_empty() {
+                        passes.push(("scene".into(), split.iter().sum()));
+                    }
                     out.push(GpuFrame {
                         total: total as f32 * ms,
                         passes,
