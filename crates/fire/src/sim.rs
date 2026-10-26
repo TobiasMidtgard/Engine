@@ -168,6 +168,23 @@ pub struct WorldFuel<'a> {
 
 impl FuelSource for WorldFuel<'_> {
     fn fuel_at(&mut self, p: DVec3) -> (CellFuel, f64) {
+        self.fuel_of(p)
+    }
+
+    fn fuel_many(&mut self, points: &[DVec3], out: &mut Vec<(CellFuel, f64)>) {
+        let start = out.len();
+        out.resize(start + points.len(), (CellFuel::NONE, 0.0));
+        let this = &*self;
+        engine_core::tasks::par_chunks_mut(&mut out[start..], 64, |chunk, found| {
+            for (k, f) in found.iter_mut().enumerate() {
+                *f = this.fuel_of(points[chunk * 64 + k]);
+            }
+        });
+    }
+}
+
+impl WorldFuel<'_> {
+    fn fuel_of(&self, p: DVec3) -> (CellFuel, f64) {
         let Some(g) = self.ground.sample(p) else {
             return (CellFuel::NONE, p.y);
         };

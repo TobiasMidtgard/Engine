@@ -680,7 +680,11 @@ pub fn run_demos(world: &mut World) {
             }
             state.since = demo.warmup_secs;
         } else {
-            state.since += dt;
+            // A demo far from everyone rests with its fire: its cycle waits too, so no one
+            // pays for relighting a meadow they can't see.
+            if world.resource::<FireClock>().awake.contains(place.origin) {
+                state.since += dt;
+            }
             if state.since >= demo.cycle_secs {
                 reset(world, entity, place, &demo);
                 light(world, place, &demo);

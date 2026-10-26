@@ -192,17 +192,20 @@ struct GroundGpu {
 fn ground_heights(ground: Option<&Ground>, at: DVec3, half: [f32; 2]) -> Vec<f32> {
     let n = GRID + 1;
     let hint = at.y + 2.0 + half[0].max(half[1]) as f64;
-    (0..n * n)
-        .map(|i| {
-            let f = DVec2::new((i % n) as f64, (i / n) as f64) / GRID as f64 * 2.0 - 1.0;
+    // The ground is dear to ask (a planet's), so a row per task.
+    let mut heights = vec![0.0f32; (n * n) as usize];
+    engine_core::tasks::par_chunks_mut(&mut heights, n as usize, |row, out| {
+        for (col, h) in out.iter_mut().enumerate() {
+            let f = DVec2::new(col as f64, row as f64) / GRID as f64 * 2.0 - 1.0;
             let x = at.x + f.x * half[0] as f64;
             let z = at.z + f.y * half[1] as f64;
-            ground
+            *h = ground
                 .and_then(|g| g.height(DVec3::new(x, hint, z)))
                 .filter(|h| h.is_finite())
-                .map_or(0.0, |h| (h - at.y) as f32)
-        })
-        .collect()
+                .map_or(0.0, |h| (h - at.y) as f32);
+        }
+    });
+    heights
 }
 
 /// The scorch map of a ground: one texel per fire cell over its rectangle (`min`, `size`

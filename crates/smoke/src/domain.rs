@@ -1013,7 +1013,7 @@ impl Domain {
                     let c = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
                     // Midpoint (RK2) backtrace: follows curved flow better than one step.
                     let mid = c - src[i].vel * (k * 0.5);
-                    let v_mid = sample(src, dims, mid, &outside).vel;
+                    let v_mid = sample_vel(src, dims, mid, &outside);
                     let back = c - v_mid * k;
                     let mut v = sample(src, dims, back, &outside);
                     // Expanding air thins the smoke in it (mass is conserved, volume grows).
@@ -1310,6 +1310,36 @@ pub(crate) fn clip_box(lo: DVec3, hi: DVec3, a: DVec3, b: DVec3) -> Option<(f64,
         t1 = t1.min(ta.max(tb));
     }
     (t0 < t1).then_some((t0, t1))
+}
+
+/// [`sample`]'s velocity alone (the advection's midpoint needs only that).
+fn sample_vel(data: &[Voxel], dims: UVec3, q: Vec3, outside: &dyn Fn(Vec3) -> Voxel) -> Vec3 {
+    let g = q - 0.5;
+    let i = g.floor();
+    let f = g - i;
+    let i = i.as_ivec3();
+    let mut acc = Vec3::ZERO;
+    for corner in 0..8 {
+        let (dx, dy, dz) = (corner & 1, (corner >> 1) & 1, (corner >> 2) & 1);
+        let w = (if dx == 1 { f.x } else { 1.0 - f.x })
+            * (if dy == 1 { f.y } else { 1.0 - f.y })
+            * (if dz == 1 { f.z } else { 1.0 - f.z });
+        if w <= 0.0 {
+            continue;
+        }
+        let (x, y, z) = (i.x + dx, i.y + dy, i.z + dz);
+        let v = if x < 0 || z < 0 || x >= dims.x as i32 || y >= dims.y as i32 || z >= dims.z as i32
+        {
+            outside(q).vel
+        } else if y < 0 {
+            let v = data[clamped_index(dims, x, 0, z)].vel;
+            Vec3::new(v.x, 0.0, v.z)
+        } else {
+            data[(x as u32 + dims.x * (y as u32 + dims.y * z as u32)) as usize].vel
+        };
+        acc += v * w;
+    }
+    acc
 }
 
 fn sample(data: &[Voxel], dims: UVec3, q: Vec3, outside: &dyn Fn(Vec3) -> Voxel) -> Voxel {

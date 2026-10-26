@@ -365,6 +365,13 @@ pub struct FireField {
 /// of the point is a height hint).
 pub trait FuelSource {
     fn fuel_at(&mut self, p: DVec3) -> (CellFuel, f64);
+
+    /// [`fuel_at`](Self::fuel_at) at many points (a tile's worth), into `out` in order. The
+    /// world's source asks in parallel: its ground is dear to ask and a tile has a thousand
+    /// cells.
+    fn fuel_many(&mut self, points: &[DVec3], out: &mut Vec<(CellFuel, f64)>) {
+        out.extend(points.iter().map(|p| self.fuel_at(*p)));
+    }
 }
 
 impl<F: FnMut(DVec3) -> (CellFuel, f64)> FuelSource for F {
@@ -457,26 +464,24 @@ impl FireField {
         }
         let origin = self.tile_origin(key);
         let cell = self.cell_m as f64;
-        let mut cells = Vec::with_capacity(TILE_CELLS);
-        let mut heights = Vec::with_capacity(TILE_CELLS);
-        let mut fuels = Vec::with_capacity(TILE_CELLS);
+        let mut points = Vec::with_capacity(TILE_CELLS);
         for y in 0..TILE {
             for x in 0..TILE {
-                let p = DVec3::new(
+                points.push(DVec3::new(
                     origin.x + (x as f64 + 0.5) * cell,
                     hint_y,
                     origin.y + (y as f64 + 0.5) * cell,
-                );
-                let (f, h) = fuel.fuel_at(p);
-                fuels.push(f);
-                heights.push(h);
+                ));
             }
         }
-        let base_y = heights.iter().copied().fold(f64::INFINITY, f64::min);
+        let mut found = Vec::with_capacity(TILE_CELLS);
+        fuel.fuel_many(&points, &mut found);
+        let base_y = found.iter().map(|(_, h)| *h).fold(f64::INFINITY, f64::min);
         let base_y = if base_y.is_finite() { base_y } else { 0.0 };
-        for (f, h) in fuels.into_iter().zip(heights) {
-            cells.push(Cell::from_fuel(f, (h - base_y) as f32));
-        }
+        let cells = found
+            .into_iter()
+            .map(|(f, h)| Cell::from_fuel(f, (h - base_y) as f32))
+            .collect();
         let i = self.tiles.len();
         self.tiles.push(Tile {
             key,
@@ -537,7 +542,9 @@ impl FireField {
             {
                 continue;
             }
-            let mut touched = false;
+            // The cells to refill, then their fuel asked all at once.
+            let mut which = Vec::new();
+            let mut points = Vec::new();
             for y in 0..TILE {
                 for x in 0..TILE {
                     let p = DVec3::new(
@@ -548,20 +555,26 @@ impl FireField {
                     if !contains(p) {
                         continue;
                     }
-                    let c = &mut tile.cells[(y * TILE + x) as usize];
+                    let c = &tile.cells[(y * TILE + x) as usize];
                     if !reset && (c.burn > 0.0 || c.glow > 0.0) {
                         continue;
                     }
-                    let (f, h) = fuel.fuel_at(p);
-                    let mut next = Cell::from_fuel(f, (h - tile.base_y) as f32);
-                    next.wet = c.wet;
-                    if !reset {
-                        next.scorch = c.scorch;
-                    }
-                    *c = next;
-                    changed += 1;
-                    touched = true;
+                    which.push((y * TILE + x) as usize);
+                    points.push(p);
                 }
+            }
+            let mut found = Vec::with_capacity(points.len());
+            fuel.fuel_many(&points, &mut found);
+            let touched = !which.is_empty();
+            for (i, (f, h)) in which.into_iter().zip(found) {
+                let c = &mut tile.cells[i];
+                let mut next = Cell::from_fuel(f, (h - tile.base_y) as f32);
+                next.wet = c.wet;
+                if !reset {
+                    next.scorch = c.scorch;
+                }
+                *c = next;
+                changed += 1;
             }
             if touched {
                 tile.version += 1;
