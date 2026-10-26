@@ -319,6 +319,19 @@ pub enum InputEvent {
 #[derive(Message, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextInput(pub String);
 
+/// A file dragged onto the window from the OS (one message per file). The pointer position
+/// comes from the usual cursor events, so a drop can land where the pointer is.
+#[derive(Message, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileDrop {
+    /// A file is being dragged over the window.
+    Hovered(std::path::PathBuf),
+    /// A file was dropped on the window.
+    Dropped(std::path::PathBuf),
+    /// The drag left the window or was cancelled.
+    Cancelled,
+}
+
 /// One input that can trigger an action.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -754,6 +767,7 @@ impl Plugin for InputPlugin {
             .init_resource::<ActionState>()
             .add_message::<InputEvent>()
             .add_message::<TextInput>()
+            .add_message::<FileDrop>()
             .register_resource::<InputMap>(
                 "Action bindings: {actions: {name: {buttons: [{key: \"Space\"}], up/down/left/right: [...], stick: [\"LeftStickX\",\"LeftStickY\"]}}}",
             )
@@ -861,6 +875,22 @@ mod tests {
         });
         app.update();
         assert!(app.world.resource::<ActionState>().just_released("jump"));
+    }
+
+    #[test]
+    fn file_drops_reach_readers() {
+        let mut app = app();
+        let path = std::path::PathBuf::from("models/crate.glb");
+        app.world.write_message(FileDrop::Hovered(path.clone()));
+        app.world.write_message(FileDrop::Dropped(path.clone()));
+        let messages = app.world.resource::<Messages<FileDrop>>();
+        let drops: Vec<_> = messages.get_cursor().read(messages).cloned().collect();
+        assert_eq!(
+            drops,
+            [FileDrop::Hovered(path.clone()), FileDrop::Dropped(path)]
+        );
+        let json = serde_json::to_string(&FileDrop::Cancelled).unwrap();
+        assert_eq!(json, "\"cancelled\"");
     }
 
     #[test]
