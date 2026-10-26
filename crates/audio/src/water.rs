@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
-use engine_world::{Env, WaterSplash};
+use engine_world::{Env, WaterSplash, WorldShift};
 
 use crate::ambience::WaterSound;
 use crate::footstep::{FootstepSound, FootstepSurfaces, Step, SurfaceSound};
@@ -152,10 +152,20 @@ pub(crate) fn play_splashes(
 
 /// How far out the ground is searched for water, meters.
 pub const WATER_SEARCH_M: f64 = 24.0;
-/// Grid spacing of the search, meters.
+/// Grid spacing of the search, meters. The grid is fixed to the world, so moving keeps the
+/// cells already sampled.
 const STEP_M: f64 = 2.0;
-/// How often the search runs, seconds.
+/// How often the voices follow what the search found, seconds.
 const SCAN_INTERVAL: f64 = 0.5;
+/// Time the search may take per frame, seconds. Each sample asks the ground and the water,
+/// which can cost a tenth of a millisecond on a planet, so the search is spread over frames:
+/// the nearest unknown cells first, then the oldest ones again. At least one cell is sampled
+/// per frame.
+const BUDGET_S: f64 = 0.0005;
+/// Cells sampled per frame in an offline render, which must not depend on the wall clock.
+const OFFLINE_SAMPLES: usize = 8;
+/// A sampled cell is sampled again after this long (rain fills, tides move), seconds.
+const RESAMPLE_S: f64 = 8.0;
 /// Water slower than this is still (lapping only), m/s.
 const FLOWING: f32 = 0.25;
 
@@ -164,12 +174,22 @@ pub(crate) struct WaterAmbience {
     /// Two shores (the nearest, and the nearest one well away from it) and the nearest stream.
     voices: [Slot; 3],
     next_scan: f64,
+    /// Sampled grid cells around the listener.
+    cells: HashMap<(i64, i64), Cell>,
 }
 
 #[derive(Default, Clone, Copy)]
 struct Slot {
     id: VoiceId,
     position: DVec3,
+}
+
+/// One sampled grid cell: the water surface there (if any is above the ground) and its
+/// current, and when it was sampled.
+#[derive(Clone, Copy)]
+struct Cell {
+    wet: Option<(f64, Vec3)>,
+    sampled: f64,
 }
 
 /// What the search found: shore points and flowing water points with their speed.
@@ -184,13 +204,22 @@ pub(crate) fn water_ambience(
     settings: Res<AudioSettings>,
     env: Env,
     time: Res<Time>,
+    mut shifts: MessageReader<WorldShift>,
     mut state: Local<WaterAmbience>,
 ) {
     let now = time.real_elapsed_secs_f64();
-    if now < state.next_scan {
-        return;
+    let state = &mut *state;
+    // The world moved under the grid: forget it, and keep the voices where the water is.
+    let mut shift: Option<WorldShift> = None;
+    for s in shifts.read() {
+        shift = Some(shift.map_or(*s, |t| t.then(s)));
     }
-    state.next_scan = now + SCAN_INTERVAL;
+    if let Some(shift) = shift {
+        state.cells.clear();
+        for slot in &mut state.voices {
+            slot.position = shift.point(slot.position);
+        }
+    }
     if !audio.is_running() || !settings.water {
         for slot in &mut state.voices {
             if !slot.id.is_none() {
@@ -198,10 +227,21 @@ pub(crate) fn water_ambience(
             }
             *slot = Slot::default();
         }
+        state.cells.clear();
         return;
     }
     let listener = audio.listener_position();
-    let found = search(&env, listener);
+    let budget = if audio.is_offline() {
+        Budget::Samples(OFFLINE_SAMPLES)
+    } else {
+        Budget::Time(BUDGET_S)
+    };
+    sample_cells(&env, listener, now, budget, &mut state.cells);
+    if now < state.next_scan {
+        return;
+    }
+    state.next_scan = now + SCAN_INTERVAL;
+    let found = search(&state.cells, listener);
     let wind = env.wind(listener).length();
     // Small lake waves even on a calm day; more with wind.
     let waves = (0.18 + wind / 12.0).clamp(0.0, 1.0);
@@ -261,47 +301,107 @@ pub(crate) fn water_ambience(
     }
 }
 
-/// Sample the ground around `listener` for shores and flowing water.
-fn search(env: &Env, listener: DVec3) -> Found {
-    let n = (WATER_SEARCH_M / STEP_M) as i32;
-    let size = (2 * n + 1) as usize;
-    // Per grid point: the water surface there (if any is above the ground) and its current.
-    let mut wet: Vec<Option<(f64, Vec3)>> = Vec::with_capacity(size * size);
+/// Cells searched each way from the listener's cell.
+fn reach() -> i64 {
+    (WATER_SEARCH_M / STEP_M) as i64
+}
+
+fn cell_of(p: DVec3) -> (i64, i64) {
+    ((p.x / STEP_M).round() as i64, (p.z / STEP_M).round() as i64)
+}
+
+fn cell_point(c: (i64, i64), y: f64) -> DVec3 {
+    DVec3::new(c.0 as f64 * STEP_M, y, c.1 as f64 * STEP_M)
+}
+
+/// How much of the search one frame may do.
+#[derive(Clone, Copy)]
+enum Budget {
+    Time(f64),
+    Samples(usize),
+}
+
+/// Sample cells around `listener` within `budget`: unknown ones nearest first, then ones
+/// sampled longest ago. Cells far outside the search are dropped.
+fn sample_cells(
+    env: &Env,
+    listener: DVec3,
+    now: f64,
+    budget: Budget,
+    cells: &mut HashMap<(i64, i64), Cell>,
+) {
+    let n = reach();
+    let c = cell_of(listener);
+    cells.retain(|k, _| (k.0 - c.0).abs() <= n + 4 && (k.1 - c.1).abs() <= n + 4);
+    let mut unknown = Vec::new();
+    let mut oldest: Vec<((i64, i64), f64)> = Vec::new();
     for z in -n..=n {
         for x in -n..=n {
-            let q = listener + DVec3::new(x as f64 * STEP_M, 0.0, z as f64 * STEP_M);
-            let ground = env.ground(q).map(|g| g.height);
-            let water = env
-                .water(q)
-                .filter(|w| w.depth > 0.02 && ground.is_none_or(|g| w.surface_height > g + 0.01));
-            wet.push(water.map(|w| (w.surface_height, w.velocity)));
+            let k = (c.0 + x, c.1 + z);
+            match cells.get(&k) {
+                None => unknown.push((x * x + z * z, k)),
+                Some(cell) if now - cell.sampled > RESAMPLE_S => oldest.push((k, cell.sampled)),
+                Some(_) => {}
+            }
         }
     }
-    let at = |x: i32, z: i32| -> Option<(f64, Vec3)> {
-        if x < -n || x > n || z < -n || z > n {
-            return None;
+    unknown.sort_unstable();
+    oldest.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+    let todo = unknown
+        .into_iter()
+        .map(|(_, k)| k)
+        .chain(oldest.into_iter().map(|(k, _)| k));
+    let start = std::time::Instant::now();
+    for (i, k) in todo.enumerate() {
+        let spent = match budget {
+            Budget::Time(s) => i > 0 && start.elapsed().as_secs_f64() > s,
+            Budget::Samples(n) => i >= n,
+        };
+        if spent {
+            break;
         }
-        wet[((z + n) as usize) * size + (x + n) as usize]
-    };
+        let q = cell_point(k, listener.y);
+        let ground = env.ground(q).map(|g| g.height);
+        let water = env
+            .water(q)
+            .filter(|w| w.depth > 0.02 && ground.is_none_or(|g| w.surface_height > g + 0.01));
+        cells.insert(
+            k,
+            Cell {
+                wet: water.map(|w| (w.surface_height, w.velocity)),
+                sampled: now,
+            },
+        );
+    }
+}
+
+/// Shores and flowing water among the sampled cells around `listener`. Cells not sampled
+/// yet count as neither wet nor dry.
+fn search(cells: &HashMap<(i64, i64), Cell>, listener: DVec3) -> Found {
+    let n = reach();
+    let c = cell_of(listener);
+    let inside = |k: (i64, i64)| (k.0 - c.0).abs() <= n && (k.1 - c.1).abs() <= n;
     let mut found = Found::default();
-    let any_dry = (0..size * size).any(|i| wet[i].is_none());
     for z in -n..=n {
         for x in -n..=n {
-            let Some((height, velocity)) = at(x, z) else {
+            let k = (c.0 + x, c.1 + z);
+            let Some(Cell {
+                wet: Some((height, velocity)),
+                ..
+            }) = cells.get(&k).copied()
+            else {
                 continue;
             };
-            let p = listener + DVec3::new(x as f64 * STEP_M, 0.0, z as f64 * STEP_M);
-            let p = DVec3::new(p.x, height, p.z);
+            let p = cell_point(k, height);
             let speed = velocity.length();
             if speed > FLOWING {
                 found.streams.push((p, speed));
             }
             // Water next to dry ground (inside the searched area) is a shore.
-            let edge = any_dry
-                && [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dz)| {
-                    let (xx, zz) = (x + dx, z + dz);
-                    xx >= -n && xx <= n && zz >= -n && zz <= n && at(xx, zz).is_none()
-                });
+            let edge = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dz)| {
+                let kk = (k.0 + dx, k.1 + dz);
+                inside(kk) && cells.get(&kk).is_some_and(|cell| cell.wet.is_none())
+            });
             if edge {
                 found.shores.push(p);
             }
