@@ -54,13 +54,40 @@ fn main() {
     // Each body's solver alone, with no colliders, with and without self-collision.
     if std::env::var("SOLO").is_ok() {
         for (n, b) in q.iter(&app.world) {
-            let time = |mut sim: engine_softbody::solver::Sim| {
+            // The fastest of five runs, so other work on the machine doesn't count.
+            let time = |sim: engine_softbody::solver::Sim| {
+                (0..5)
+                    .map(|_| {
+                        let mut sim = sim.clone();
+                        let t = Instant::now();
+                        for _ in 0..10 {
+                            sim.step(1.0 / 60.0, &[]);
+                        }
+                        t.elapsed().as_secs_f64() * 100.0
+                    })
+                    .fold(f64::MAX, f64::min)
+            };
+            let met = {
                 let t = Instant::now();
+                let mut sim = b.sim.clone();
                 for _ in 0..10 {
-                    sim.step(1.0 / 60.0, &[]);
+                    sim.step(1.0 / 60.0, b.last_colliders());
                 }
                 t.elapsed().as_secs_f64() * 100.0
             };
+            let kinds: Vec<&str> = b
+                .last_colliders()
+                .iter()
+                .map(|c| match c.shape {
+                    engine_softbody::collide::LocalShape::Sphere { .. } => "sphere",
+                    engine_softbody::collide::LocalShape::Capsule { .. } => "capsule",
+                    engine_softbody::collide::LocalShape::Cuboid { .. } => "box",
+                    engine_softbody::collide::LocalShape::Cylinder { .. } => "cylinder",
+                    engine_softbody::collide::LocalShape::Field(_) => "field",
+                    engine_softbody::collide::LocalShape::Height(_) => "height",
+                })
+                .collect();
+            println!("  with colliders {met:6.2} ms: {kinds:?}");
             let full = time(b.sim.clone());
             let mut plain = b.sim.clone();
             plain.params.self_collide = 0.0;

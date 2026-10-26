@@ -121,6 +121,11 @@ pub struct SoftBodySim {
 }
 
 impl SoftBodySim {
+    /// The colliders the last step met (body-local).
+    pub fn last_colliders(&self) -> &[LocalCollider] {
+        &self.scratch_colliders
+    }
+
     pub fn new(
         kind: SoftKind,
         mut sim: Sim,

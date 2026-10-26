@@ -13,6 +13,10 @@
 //! The solver knows nothing about the ECS. The plugin feeds it frames (bones, entities),
 //! colliders and wind each step and reads back positions and reaction impulses.
 
+use std::collections::HashMap;
+use std::f32::consts::PI;
+use std::ops::Range;
+
 use engine_core::math::{DVec3, IVec3, Mat3, Quat, Vec2, Vec3};
 use engine_world::WorldShift;
 
@@ -307,6 +311,8 @@ pub struct Sim {
     /// The water around the body this step, if it is near any.
     pub water: Option<WaterSurface>,
     accel: Vec<Vec3>,
+    /// The gusty wind at each particle this step (empty in steady wind).
+    gusts: Vec<Vec3>,
     /// How far each particle is in the water this substep (0..1).
     submerged: Vec<f32>,
     /// Each particle's surface normal (area-weighted), for drag in water.
@@ -614,6 +620,17 @@ impl Sim {
         } else {
             self.self_contacts = SelfContacts::default();
         }
+        // The gusts change little within a step, so sample them once per step rather than in
+        // every substep.
+        let p = self.params;
+        self.gusts.clear();
+        if p.turbulence > 0.0 && (p.drag > 0.0 || p.aero.is_some()) {
+            let side = p.wind.cross(Vec3::Y);
+            self.gusts.extend(self.pos.iter().map(|x| {
+                let (f, g) = flutter(*x, p.time);
+                p.wind * (1.0 + p.turbulence * f) + side * (0.5 * p.turbulence * g)
+            }));
+        }
         let n = self.substeps_for(dt);
         let h = dt / n as f32;
         for k in 0..n {
@@ -681,23 +698,11 @@ impl Sim {
         let submerged = &self.submerged;
         let in_air = |i: usize| 1.0 - submerged.get(i).copied().unwrap_or(0.0);
         let time = p.time + t0 * dt;
-        let side = p.wind.cross(Vec3::Y);
-        let gust = |x: Vec3| -> Vec3 {
-            if p.turbulence <= 0.0 {
-                return p.wind;
-            }
-            let (f, g) = flutter(x, time);
-            p.wind * (1.0 + p.turbulence * f) + side * (0.5 * p.turbulence * g)
-        };
+        let gusts = &self.gusts;
+        let gust = |i: usize| gusts.get(i).copied().unwrap_or(p.wind);
         if p.drag > 0.0 {
-            for (i, ((a, v), x)) in self
-                .accel
-                .iter_mut()
-                .zip(&self.vel)
-                .zip(&self.pos)
-                .enumerate()
-            {
-                *a += (gust(*x) - *v) * (p.drag * in_air(i));
+            for (i, (a, v)) in self.accel.iter_mut().zip(&self.vel).enumerate() {
+                *a += (gust(i) - *v) * (p.drag * in_air(i));
             }
         }
         if let Some(aero) = p.aero {
@@ -711,8 +716,8 @@ impl Sim {
                 }
                 let area = 0.5 * len * exposed;
                 let n = n2 / len;
-                let center = (self.pos[a] + self.pos[b] + self.pos[c]) * (1.0 / 3.0);
-                let v_rel = gust(center) - (self.vel[a] + self.vel[b] + self.vel[c]) * (1.0 / 3.0);
+                let wind = (gust(a) + gust(b) + gust(c)) * (1.0 / 3.0);
+                let v_rel = wind - (self.vel[a] + self.vel[b] + self.vel[c]) * (1.0 / 3.0);
                 let vn = v_rel.dot(n);
                 let vt = v_rel - n * vn;
                 let mut force =
@@ -983,6 +988,244 @@ struct SelfContacts {
     /// Particles bucketed by hashed cell: bucket starts, then particle ids.
     starts: Vec<u32>,
     ids: Vec<u32>,
+    patches: Patches,
+}
+
+/// Normals of a patch further than this from its mean (radians) can fold it onto itself.
+const PATCH_CONE: f32 = 1.25;
+/// Triangles per patch.
+const PATCH_SIZE: usize = 48;
+
+/// The cloth's triangles grown into small connected patches, to skip most of the
+/// self-collision search. Each search joins neighbouring patches into regions whose normals
+/// all lie within a cone narrower than [`PATCH_CONE`]: such a region is a gentle height field
+/// over the plane across its axis, so it can't fold onto itself, and only where two regions'
+/// bounds meet can cloth touch cloth. A hanging curtain is one region and costs nothing; only
+/// triangles in "hot" patches (folded sharply, or near another region) are searched.
+#[derive(Debug, Clone, Default)]
+struct Patches {
+    /// Fingerprint of the triangles the patches were grown for (cloth tears change them).
+    key: u64,
+    /// Patch `k` holds `tris[starts[k]..starts[k + 1]]`.
+    starts: Vec<u32>,
+    tris: Vec<u32>,
+    /// Patches sharing a vertex with each patch.
+    neighbours: Vec<Vec<u32>>,
+    // Per search.
+    bounds: Vec<(Vec3, Vec3)>,
+    cones: Vec<(Vec3, f32)>,
+    hot: Vec<bool>,
+    region_of: Vec<u32>,
+    /// Each region's bounds and patches (`members[first..]`, contiguous).
+    regions: Vec<(Vec3, Vec3, Range<u32>)>,
+    members: Vec<u32>,
+    queue: Vec<u32>,
+}
+
+/// The narrowest cone (axis, half-angle) holding both cones.
+fn merge_cones((na, ha): (Vec3, f32), (nb, hb): (Vec3, f32)) -> (Vec3, f32) {
+    let theta = na.dot(nb).clamp(-1.0, 1.0).acos();
+    if theta + hb <= ha {
+        return (na, ha);
+    }
+    if theta + ha <= hb {
+        return (nb, hb);
+    }
+    let half = (theta + ha + hb) * 0.5;
+    if theta < 1e-4 || theta > PI - 1e-4 {
+        return (na, half);
+    }
+    // Turn the first axis toward the second by the half-angle it grows.
+    let phi = half - ha;
+    let axis = (na * (theta - phi).sin() + nb * phi.sin()) / theta.sin();
+    (axis.normalize_or(na), half)
+}
+
+fn overlap((la, ha): (Vec3, Vec3), (lb, hb): (Vec3, Vec3)) -> bool {
+    la.cmple(hb).all() && lb.cmple(ha).all()
+}
+
+impl Patches {
+    fn count(&self) -> usize {
+        self.starts.len().saturating_sub(1)
+    }
+
+    fn fingerprint(triangles: &[[u32; 3]]) -> u64 {
+        triangles.iter().fold(triangles.len() as u64, |h, t| {
+            let v = (t[0] as u64) | (t[1] as u64) << 21 | (t[2] as u64) << 42;
+            (h ^ v).wrapping_mul(0x100_0000_01b3)
+        })
+    }
+
+    /// Grow patches breadth-first across shared edges.
+    fn grow(&mut self, triangles: &[[u32; 3]], particles: usize) {
+        let mut by_edge: HashMap<(u32, u32), [u32; 2]> = HashMap::new();
+        for (t, tri) in triangles.iter().enumerate() {
+            for k in 0..3 {
+                let (a, b) = (tri[k], tri[(k + 1) % 3]);
+                let e = by_edge.entry((a.min(b), a.max(b))).or_insert([u32::MAX; 2]);
+                e[usize::from(e[0] != u32::MAX)] = t as u32;
+            }
+        }
+        let mut patch_of = vec![u32::MAX; triangles.len()];
+        self.starts.clear();
+        self.tris.clear();
+        let mut queue = std::collections::VecDeque::new();
+        for seed in 0..triangles.len() {
+            if patch_of[seed] != u32::MAX {
+                continue;
+            }
+            let patch = self.starts.len() as u32;
+            self.starts.push(self.tris.len() as u32);
+            let first = self.tris.len();
+            queue.clear();
+            queue.push_back(seed as u32);
+            patch_of[seed] = patch;
+            while let Some(t) = queue.pop_front() {
+                self.tris.push(t);
+                if self.tris.len() - first + queue.len() >= PATCH_SIZE {
+                    continue;
+                }
+                let tri = triangles[t as usize];
+                for k in 0..3 {
+                    let (a, b) = (tri[k], tri[(k + 1) % 3]);
+                    for n in by_edge[&(a.min(b), a.max(b))] {
+                        if n != u32::MAX && patch_of[n as usize] == u32::MAX {
+                            patch_of[n as usize] = patch;
+                            queue.push_back(n);
+                        }
+                    }
+                }
+            }
+        }
+        self.starts.push(self.tris.len() as u32);
+        let count = self.count();
+        let mut patches_of: Vec<Vec<u32>> = vec![Vec::new(); particles];
+        for (t, tri) in triangles.iter().enumerate() {
+            for &v in tri {
+                let list = &mut patches_of[v as usize];
+                if !list.contains(&patch_of[t]) {
+                    list.push(patch_of[t]);
+                }
+            }
+        }
+        self.neighbours.clear();
+        self.neighbours.resize(count, Vec::new());
+        for list in &patches_of {
+            for &a in list {
+                for &b in list {
+                    let n = &mut self.neighbours[a as usize];
+                    if a != b && !n.contains(&b) {
+                        n.push(b);
+                    }
+                }
+            }
+        }
+        self.key = Self::fingerprint(triangles);
+    }
+
+    /// Mark the patches that may touch themselves or each other within `reach`.
+    fn heat(&mut self, pos: &[Vec3], triangles: &[[u32; 3]], reach: f32) {
+        let key = Self::fingerprint(triangles);
+        if key != self.key || self.starts.is_empty() {
+            self.grow(triangles, pos.len());
+        }
+        let count = self.count();
+        self.bounds.clear();
+        self.cones.clear();
+        self.hot.clear();
+        self.hot.resize(count, false);
+        for k in 0..count {
+            let tris = &self.tris[self.starts[k] as usize..self.starts[k + 1] as usize];
+            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            let mut sum = Vec3::ZERO;
+            for &t in tris {
+                let [a, b, c] = triangles[t as usize].map(|i| pos[i as usize]);
+                lo = lo.min(a).min(b).min(c);
+                hi = hi.max(a).max(b).max(c);
+                sum += (b - a).cross(c - a);
+            }
+            let axis = sum.normalize_or_zero();
+            let mut cos = 1.0f32;
+            for &t in tris {
+                let [a, b, c] = triangles[t as usize].map(|i| pos[i as usize]);
+                if let Some(n) = (b - a).cross(c - a).try_normalize() {
+                    cos = cos.min(n.dot(axis));
+                }
+            }
+            let half = cos.clamp(-1.0, 1.0).acos();
+            self.hot[k] = axis == Vec3::ZERO || half > PATCH_CONE;
+            self.bounds.push((lo - reach, hi + reach));
+            self.cones.push((axis, half));
+        }
+        // Regions: neighbouring patches joined while their normals stay within the cone.
+        self.region_of.clear();
+        self.region_of.resize(count, u32::MAX);
+        self.regions.clear();
+        self.members.clear();
+        for seed in 0..count {
+            if self.region_of[seed] != u32::MAX {
+                continue;
+            }
+            let region = self.regions.len() as u32;
+            let first = self.members.len() as u32;
+            let (mut cone, mut bounds) = (self.cones[seed], self.bounds[seed]);
+            self.region_of[seed] = region;
+            self.queue.clear();
+            self.queue.push(seed as u32);
+            // A patch folded on its own stays alone.
+            let grows = !self.hot[seed];
+            while let Some(k) = self.queue.pop() {
+                self.members.push(k);
+                let (lo, hi) = self.bounds[k as usize];
+                bounds = (bounds.0.min(lo), bounds.1.max(hi));
+                if !grows {
+                    continue;
+                }
+                for &m in &self.neighbours[k as usize] {
+                    let m = m as usize;
+                    if self.region_of[m] != u32::MAX || self.hot[m] {
+                        continue;
+                    }
+                    let merged = merge_cones(cone, self.cones[m]);
+                    if merged.1 <= PATCH_CONE {
+                        cone = merged;
+                        self.region_of[m] = region;
+                        self.queue.push(m as u32);
+                    }
+                }
+            }
+            self.regions
+                .push((bounds.0, bounds.1, first..self.members.len() as u32));
+        }
+        // Where two regions' bounds meet, the patches of each inside the other's bounds.
+        for a in 0..self.regions.len() {
+            for b in a + 1..self.regions.len() {
+                let (la, ha, ra) = self.regions[a].clone();
+                let (lb, hb, rb) = self.regions[b].clone();
+                if !overlap((la, ha), (lb, hb)) {
+                    continue;
+                }
+                for &pa in &self.members[ra.start as usize..ra.end as usize] {
+                    for &pb in &self.members[rb.start as usize..rb.end as usize] {
+                        let (pa, pb) = (pa as usize, pb as usize);
+                        if overlap(self.bounds[pa], self.bounds[pb]) {
+                            self.hot[pa] = true;
+                            self.hot[pb] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The triangles of hot patches.
+    fn hot_triangles(&self) -> impl Iterator<Item = u32> + '_ {
+        (0..self.count())
+            .filter(|&k| self.hot[k])
+            .flat_map(|k| &self.tris[self.starts[k] as usize..self.starts[k + 1] as usize])
+            .copied()
+    }
 }
 
 impl SelfContacts {
@@ -1031,6 +1274,10 @@ impl SelfContacts {
     /// Every free particle within `reach` of a triangle (not its own), over or beside it.
     fn search(&mut self, pos: &[Vec3], w: &[f32], triangles: &[[u32; 3]], reach: f32, edge: f32) {
         self.pairs.clear();
+        self.patches.heat(pos, triangles, reach);
+        if !self.patches.hot.contains(&true) {
+            return;
+        }
         let inv = 1.0 / edge.max(reach).max(1e-3);
         // Dense hashing: cells hash into twice as many buckets as particles, filled by
         // counting.
@@ -1060,7 +1307,8 @@ impl SelfContacts {
             fill[b] += 1;
         }
         let beside = -reach / edge.max(1e-3) - 0.05;
-        for (t, tri) in triangles.iter().enumerate() {
+        for t in self.patches.hot_triangles() {
+            let tri = &triangles[t as usize];
             let [a, b, c] = tri.map(|i| pos[i as usize]);
             let Some(n) = (b - a).cross(c - a).try_normalize() else {
                 continue;
@@ -1087,7 +1335,7 @@ impl SelfContacts {
                             if d.abs() < reach
                                 && barycentric(p - n * d, a, b, c).iter().all(|&u| u > beside)
                             {
-                                self.pairs.push((i, t as u32));
+                                self.pairs.push((i, t));
                             }
                         }
                     }
@@ -1278,6 +1526,55 @@ pub fn extract_rotation(a: &Mat3, q: &mut Quat, iterations: u32) {
 mod tests {
     use super::*;
     use crate::collide::LocalShape;
+
+    /// A 40 x 40 sheet of 5 cm cells in the XZ plane, folded across x = 1 m by `fold`
+    /// (radians, 0 flat, PI flat on itself) with the halves `gap` m apart.
+    fn sheet(fold: f32, gap: f32) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+        let n = 41;
+        let pos = (0..n * n)
+            .map(|k| {
+                let (x, z) = ((k % n) as f32 * 0.05, (k / n) as f32 * 0.05);
+                if x <= 1.0 {
+                    return Vec3::new(x, 0.0, z);
+                }
+                let r = Quat::from_rotation_z(fold);
+                Vec3::new(1.0, gap * fold / PI, z) + r * Vec3::new(x - 1.0, 0.0, 0.0)
+            })
+            .collect();
+        let mut tris = Vec::new();
+        for j in 0..n as u32 - 1 {
+            for i in 0..n as u32 - 1 {
+                let a = j * n as u32 + i;
+                tris.push([a, a + 1, a + n as u32]);
+                tris.push([a + 1, a + n as u32 + 1, a + n as u32]);
+            }
+        }
+        (pos, tris)
+    }
+
+    #[test]
+    fn self_collision_searches_only_where_cloth_folds() {
+        let mut patches = Patches::default();
+        let (flat, tris) = sheet(0.0, 0.0);
+        patches.heat(&flat, &tris, 0.03);
+        assert!(patches.count() > 30);
+        assert!(
+            !patches.hot.contains(&true),
+            "a flat sheet can't touch itself"
+        );
+        let (bent, _) = sheet(0.6, 0.0);
+        patches.heat(&bent, &tris, 0.03);
+        assert!(!patches.hot.contains(&true), "nor a gently bent one");
+        // Folded over onto itself: the patches along both layers are searched.
+        let (folded, _) = sheet(PI, 0.02);
+        patches.heat(&folded, &tris, 0.03);
+        let hot = patches.hot_triangles().count();
+        assert!(
+            hot > tris.len() / 2,
+            "{hot} of {} triangles searched",
+            tris.len()
+        );
+    }
 
     fn chain(n: usize, spacing: f32, mass: f32) -> Sim {
         let mut sim = Sim::new(DVec3::ZERO);
