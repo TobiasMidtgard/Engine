@@ -381,6 +381,9 @@ fn finish_builds(
                     uniform.hands = hands.map(|h| h.gpu());
                 }
                 uniform.lids = meshes.lids;
+                if let Some(g) = &meshes.hair_shadow {
+                    uniform.hair_grid = g.placement();
+                }
                 let mut e = commands.entity(entity);
                 // The person's own limb lengths, for posers that fit a skeleton to them.
                 match meshes.rig.as_ref().map(|r| r.body_fit()) {

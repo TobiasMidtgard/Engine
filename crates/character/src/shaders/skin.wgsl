@@ -41,6 +41,11 @@ struct SkinOut {
     @location(8) clip_prev: vec4<f32>,
     // 0 skin, 1 teeth, 2 gums, 3 tongue, 4 shoes, 5 skirt, 6 hood.
     @location(9) @interpolate(flat) part: u32,
+    // Where the point sits before the pose (the hair shadow grid's space), and that space's x
+    // and y axes in world space.
+    @location(10) bind: vec3<f32>,
+    @location(11) axis_x: vec3<f32>,
+    @location(12) axis_y: vec3<f32>,
 };
 
 @vertex
@@ -75,6 +80,9 @@ fn vs_skin(in: SkinIn, @builtin(vertex_index) vertex: u32) -> SkinOut {
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     out.clip_now = motion_clip(rel);
     out.clip_prev = prev_motion_clip(prev_model_point(p_prev));
+    out.bind = hand.p + lift;
+    out.axis_x = model_dir((now * vec4<f32>(1.0, 0.0, 0.0, 0.0)).xyz);
+    out.axis_y = model_dir((now * vec4<f32>(0.0, 1.0, 0.0, 0.0)).xyz);
     return out;
 }
 
@@ -328,7 +336,24 @@ struct SkinLight {
     thin: f32,           // ears, nostrils: light shines through from behind
     occlusion: f32,
     inside: f32,         // 1 inside the mouth: the light there has bounced off lips and cheeks
+    // Hair shadow: the point before the pose and that space's x and y axes in world space (zero:
+    // no hair shadow), and a per-pixel offset for the march.
+    bind: vec3<f32>,
+    axis_x: vec3<f32>,
+    axis_y: vec3<f32>,
+    jitter: f32,
 };
+
+// How much light from direction `l` (world) gets through the hair over the skin. Fibers
+// scatter much of what they stop forward, so hair shades skin more softly than it does itself.
+fn hair_over_skin(s: SkinLight, l: vec3<f32>) -> f32 {
+    if (dot(s.axis_x, s.axis_x) < 0.5) {
+        return 1.0;
+    }
+    let axis_z = cross(s.axis_x, s.axis_y);
+    let dir = vec3<f32>(dot(l, s.axis_x), dot(l, s.axis_y), dot(l, axis_z));
+    return exp(-0.6 * hair_shadow_depth(s.bind, dir, s.jitter, 0.0));
+}
 
 // What reaches the inside of the mouth: as bright, but warmed by the lips and cheeks it bounced
 // off on the way in (sky blue straight on the teeth reads as blue teeth).
@@ -386,7 +411,8 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> vec3<f32> {
     if (dot(sun, sun) > 0.0) {
         let nl = vec3<f32>(dot(nr, l), dot(ng, l), dot(nb, l));
         // Shadow test from the smooth surface, so pores don't self-shadow at grazing light.
-        var shadow = skin_shadow(rel, s.n_soft, s.scatter);
+        // The shadow map holds the hair too; the darker of the two counts.
+        var shadow = min(skin_shadow(rel, s.n_soft, s.scatter), hair_over_skin(s, l));
         if (nl.z > 0.0) {
             shadow *= contact_shadow(rel, s.n_soft);
         }
@@ -414,7 +440,10 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> vec3<f32> {
         let nl = vec3<f32>(dot(nr, pl), dot(ng, pl), dot(nb, pl));
         let diffuse = s.albedo * INV_PI * wrap3(nl, wrap);
         let spec = skin_spec(s.n, v, pl, s.roughness) * s.specular;
-        var lit = diffuse + spec;
+        // Light diffusing under the skin reddens the hair's shadow edges too.
+        let hair = hair_over_skin(s, pl);
+        let sh = vec3<f32>(pow(hair, mix(1.0, 0.9, s.scatter)), hair, pow(hair, mix(1.0, 1.05, s.scatter)));
+        var lit = diffuse * sh + spec * hair;
         if (s.thin > 0.0) {
             let back = pow(saturate(dot(v, -pl)), 3.0) * saturate(-dot(s.n_soft, pl) + 0.3);
             lit += s.albedo * vec3<f32>(1.0, 0.32, 0.18) * back * s.thin * 0.6 * INV_PI;
@@ -729,7 +758,13 @@ fn skin_debug(in: SkinOut, s: SkinLight) -> vec3<f32> {
 
 @fragment
 fn fs_skin(in: SkinOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    let s = skin_surface(in, front);
+    var s = skin_surface(in, front);
+    if (in.part == 0u) {
+        s.bind = in.bind;
+        s.axis_x = normalize(in.axis_x);
+        s.axis_y = normalize(in.axis_y);
+        s.jitter = hash13(vec3<f32>(in.clip.xy, frame.time.w * 0.37));
+    }
     if (character.eye2.y > 0.5) {
         return vec4<f32>(pre_expose(skin_debug(in, s) * 2000.0), 1.0);
     }

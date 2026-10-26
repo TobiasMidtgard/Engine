@@ -29,6 +29,9 @@ struct Character {
     // Where the lids cross each eye: left upper, left lower, right upper, right lower, each
     // y = a + b x + c x^2 over the eye's own x (unit radius).
     lids: array<vec4<f32>, 4>,
+    // The hair shadow grid: low corner (model space before the pose) and cell size, then cells
+    // along x, y, z (0: no grid).
+    hair_grid: array<vec4<f32>, 2>,
 };
 
 @group(1) @binding(0) var<uniform> character: Character;
@@ -422,6 +425,38 @@ fn cloth_folds(r: vec3<f32>, g: u32) -> vec2<f32> {
         }
     }
     return vec2<f32>(amp * (f.x - 0.5) * f.y, (1.0 - f.x) * (1.0 - f.x) * f.y * saturate(amp / 0.005));
+}
+
+// ---------------------------------------------------------------- hair shadow
+// The hair shadow grid (strands::shadow_grid): per cell, the optical depth of crossing its hair
+// (r) and its body (g), each as a share of SHADOW_BODY_TAU.
+@group(1) @binding(4) var hair_shadow: texture_3d<f32>;
+@group(1) @binding(5) var hair_shadow_sampler: sampler;
+
+const SHADOW_REACH: u32 = 16u;
+const SHADOW_BODY_TAU: f32 = 4.0;
+
+// Optical depth of the hair (and with `body` 1, the body) between `p` and the outside toward
+// `dir` (both in model space before the pose), marched through the grid a cell a step from a
+// cell out (what is at `p` itself is not in its way). `jitter` (0..1, per pixel) offsets the
+// steps so they don't band.
+fn hair_shadow_depth(p: vec3<f32>, dir: vec3<f32>, jitter: f32, body: f32) -> f32 {
+    let size = character.hair_grid[1].xyz;
+    if (size.x <= 0.0) {
+        return 0.0;
+    }
+    let cell = character.hair_grid[0].w;
+    let start = (p - character.hair_grid[0].xyz) / cell;
+    var tau = 0.0;
+    for (var i = 0u; i < SHADOW_REACH; i++) {
+        let q = start + dir * (f32(i) + 1.0 + jitter);
+        if (any(q < vec3<f32>(0.0)) || any(q > size)) {
+            break;
+        }
+        let d = textureSampleLevel(hair_shadow, hair_shadow_sampler, q / size, 0.0).rg;
+        tau += d.r + d.g * body;
+    }
+    return tau * SHADOW_BODY_TAU;
 }
 
 fn unpack_bytes(v: u32) -> vec4<u32> {
