@@ -133,7 +133,13 @@ pub(crate) struct Scratch {
     path: Vec<DVec3>,
     spots: Vec<crate::tactics::Spot>,
     replans: u32,
+    /// Spots picked this step (each weighs dozens of sight lines and a route or two).
+    picks: u32,
 }
+
+/// Spot picks a step: the rest wait a step or two (a few hundredths of a second), so a squad
+/// told to move at once doesn't weigh all its spots in a single step.
+const PICKS_PER_STEP: u32 = 1;
 
 /// Think (every few tenths of a second) and act (every tick) for every NPC.
 pub(crate) fn think_and_act(
@@ -147,6 +153,7 @@ pub(crate) fn think_and_act(
     s.claims.clear();
     s.fallen.clear();
     s.replans = 0;
+    s.picks = 0;
     let world_now = w.time.elapsed_secs_f64();
     revives.expire(world_now);
     for (e, npc, t, _, _, vitals, _, clock, (faction, squad, downed), brain, ..) in q.iter() {
@@ -269,8 +276,8 @@ pub(crate) fn think_and_act(
                 | NpcAction::Retreat
         ) || (brain.action == NpcAction::Engage
             && weapon.style == WeaponStyle::Ranged);
-        if positional && now >= brain.next_position && s.replans < 4 {
-            s.replans += 1;
+        if positional && now >= brain.next_position && s.picks < PICKS_PER_STEP {
+            s.picks += 1;
             pick_spot(
                 me, pos, skills, weapon, faction, now, &mut brain, &memory, &mut nav, &mut w, s,
             );
@@ -1386,19 +1393,22 @@ fn pick_spot(
         brain.next_high_ground_check = now + 4.0;
         let mut nctx = grid.ctx(world, ground, water);
         let step = 2.0f64;
-        'scan: for i in -8..=8 {
-            for j in -8..=8 {
-                let p = target_pos + DVec3::new(i as f64 * step, 0.0, j as f64 * step);
-                let (h, ok) = nctx.sample(DVec3::new(p.x, p.y + 50.0, p.z));
-                if ok && h > target_pos.y + 0.9 && h < target_pos.y + 6.0 {
-                    let spot = DVec3::new(p.x, h, p.z);
-                    // Reachable?
-                    let status = nctx.find_path(pos, spot, &mut |_| 0.0, &mut s.path);
-                    if status == PathStatus::Complete {
-                        brain.high_ground = Some(spot);
-                        break 'scan;
-                    }
+        // One route check a look (a hilltop of unreachable cells would otherwise search its
+        // way round each one in a single step): each look starts the scan somewhere else.
+        let start = (now * 37.0) as usize;
+        for k in 0..17 * 17 {
+            let c = (start + k) % (17 * 17);
+            let (i, j) = ((c / 17) as f64 - 8.0, (c % 17) as f64 - 8.0);
+            let p = target_pos + DVec3::new(i * step, 0.0, j * step);
+            let (h, ok) = nctx.sample(DVec3::new(p.x, p.y + 50.0, p.z));
+            if ok && h > target_pos.y + 0.9 && h < target_pos.y + 6.0 {
+                let spot = DVec3::new(p.x, h, p.z);
+                // Reachable?
+                let status = nctx.find_path(pos, spot, &mut |_| 0.0, &mut s.path);
+                if status == PathStatus::Complete {
+                    brain.high_ground = Some(spot);
                 }
+                break;
             }
         }
     }

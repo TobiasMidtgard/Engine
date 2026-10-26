@@ -228,10 +228,21 @@ pub fn choose_position(
         let r = (q.ideal_range as f64 + 6.0).min(28.0);
         let n = (r / step) as i32;
         let mut found = 0;
+        // Ground not worked out yet is worked out a piece per look, not all at once (a spot on
+        // it is weighed on a later look; `warm_nav` works it out ahead in any case).
+        let mut built = false;
         for i in -n..=n {
             for j in -n..=n {
                 let p = q.target_pos + DVec3::new(i as f64 * step, 0.0, j as f64 * step);
-                let (h, ok) = ctx.nav.sample(DVec3::new(p.x, p.y + 50.0, p.z));
+                let probe = DVec3::new(p.x, p.y + 50.0, p.z);
+                let (h, ok) = match ctx.nav.peek(probe) {
+                    Some(c) => c,
+                    None if !built => {
+                        built = true;
+                        ctx.nav.sample(probe)
+                    }
+                    None => continue,
+                };
                 if ok && h > q.target_pos.y + 0.9 && h < q.target_pos.y + 8.0 {
                     raw.push((DVec3::new(p.x, h, p.z), "high_ground", None));
                     found += 1;

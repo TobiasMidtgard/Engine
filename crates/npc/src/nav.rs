@@ -16,8 +16,10 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::hash::{BuildHasherDefault, Hasher};
+use std::sync::{Arc, Mutex};
 
 use engine_core::prelude::*;
+use engine_core::tasks::AsyncComputeTaskPool;
 use engine_world::{Ground, GroundWear, Water};
 
 use crate::world_model::TacticalWorld;
@@ -106,7 +108,14 @@ pub struct NavGrid {
     /// Chunks built since startup (diagnostics).
     pub chunks_built: u64,
     scratch: Vec<u32>,
+    /// Ground heights of chunks being worked out off the main thread (`warm_nav`).
+    ground_jobs: HashMap<(i32, i32), GroundJob>,
+    /// Ground heights worked out off the main thread, waiting for their chunk to be built.
+    ground_ready: HashMap<(i32, i32), Vec<f64>>,
 }
+
+/// A chunk's ground heights (its cells and margin, row by row), once worked out.
+type GroundJob = Arc<Mutex<Option<Vec<f64>>>>;
 
 impl std::fmt::Debug for NavGrid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -161,7 +170,12 @@ impl NavGrid {
                         });
                     }
                 }
-                None => self.chunks.clear(),
+                None => {
+                    // Everything may have moved (a world shift): ground worked out ahead too.
+                    self.chunks.clear();
+                    self.ground_jobs.clear();
+                    self.ground_ready.clear();
+                }
             }
             self.generation = world.generation;
         }
@@ -276,17 +290,18 @@ impl<'a> NavCtx<'a> {
         let mut heights = vec![0.0f64; (side * side) as usize];
         let mut wet = vec![false; (side * side) as usize];
         let mut scratch = std::mem::take(&mut self.grid.scratch);
+        let below = self.grid.ground_ready.remove(&key);
         for lz in 0..side {
             for lx in 0..side {
                 let (x, z) = self.cell_center(cx0 + lx, cz0 + lz);
-                let (h, _) = self.world.stacked_height_scratch(
-                    x,
-                    z,
-                    s.agent_height,
-                    self.ground,
-                    &mut scratch,
-                );
                 let i = (lz * side + lx) as usize;
+                let g = match &below {
+                    Some(g) => g[i],
+                    None => ground_height(self.ground, x, z),
+                };
+                let h = self
+                    .world
+                    .stacked_height_over(x, z, g, s.agent_height, &mut scratch);
                 heights[i] = h;
                 if let Some(w) = self.water.sample(DVec3::new(x, h, z)) {
                     wet[i] = w.surface_height - h > s.max_water_depth as f64;
@@ -377,6 +392,16 @@ impl<'a> NavCtx<'a> {
     }
 
     /// Height of the walkable surface at `p` and whether it is walkable.
+    /// Like `sample`, but only from what is already built: `None` where the grid hasn't been
+    /// worked out yet (so a wide scan doesn't stall a step building it all at once).
+    pub fn peek(&self, p: DVec3) -> Option<(f64, bool)> {
+        let (x, z) = self.cell_of(p);
+        let key = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
+        let i = (z.rem_euclid(CHUNK) * CHUNK + x.rem_euclid(CHUNK)) as usize;
+        let chunk = self.grid.chunks.get(&key)?;
+        Some((chunk.base + chunk.h[i] as f64, chunk.walk[i]))
+    }
+
     pub fn sample(&mut self, p: DVec3) -> (f64, bool) {
         let (x, z) = self.cell_of(p);
         self.cell(x, z)
@@ -839,7 +864,19 @@ impl TacticalWorld {
         ground: &Ground,
         scratch: &mut Vec<u32>,
     ) -> (f64, f64) {
-        let g = ground.height(DVec3::new(x, 1.0e6, z)).unwrap_or(0.0);
+        let g = ground_height(ground, x, z);
+        (self.stacked_height_over(x, z, g, body_height, scratch), g)
+    }
+
+    /// [`Self::stacked_height_scratch`] over a ground height already sampled.
+    pub fn stacked_height_over(
+        &self,
+        x: f64,
+        z: f64,
+        g: f64,
+        body_height: f32,
+        scratch: &mut Vec<u32>,
+    ) -> f64 {
         let mut h = g;
         self.obstacles_near(DVec2::new(x, z), DVec2::new(x, z), scratch);
         for _ in 0..4 {
@@ -857,8 +894,13 @@ impl TacticalWorld {
                 break;
             }
         }
-        (h, g)
+        h
     }
+}
+
+/// The ground's height at X/Z, from above (0 where there is no ground).
+fn ground_height(ground: &Ground, x: f64, z: f64) -> f64 {
+    ground.height(DVec3::new(x, 1.0e6, z)).unwrap_or(0.0)
 }
 
 /// Path following state for one agent (managed by the NPC systems).
@@ -892,6 +934,116 @@ impl NavAgent {
         self.path.clear();
         self.goal = None;
         self.status = None;
+    }
+}
+
+/// How far round an awake NPC the grid is worked out ahead of need, in chunks (a chunk is
+/// 16 m at the default cell): its own search for spots and the ring round its enemy.
+const WARM_CHUNKS: i32 = 3;
+/// Chunks whose ground is worked out off the main thread at once.
+const WARM_JOBS: usize = 4;
+
+/// Works out the walkable grid round awake NPCs ahead of need, nearest first, so their first
+/// look round a new place (spots, high ground, a route) doesn't build a dozen chunks in a
+/// single step. The ground under a chunk (the slow part on real terrain) is sampled on the
+/// async pool and the chunk finished here a step or more later; without a pool, one chunk is
+/// built a step.
+pub(crate) fn warm_nav(
+    mut grid: ResMut<NavGrid>,
+    world: Res<TacticalWorld>,
+    ground: Res<Ground>,
+    water: Res<Water>,
+    agents: Query<&Transform, (With<crate::agent::Npc>, Without<crate::rest::Resting>)>,
+) {
+    if ground.is_changed() {
+        grid.ground_jobs.clear();
+        grid.ground_ready.clear();
+    }
+    // Collect what the pool has finished.
+    let done: Vec<(i32, i32)> = grid
+        .ground_jobs
+        .iter()
+        .filter(|(_, job)| job.lock().is_ok_and(|j| j.is_some()))
+        .map(|(&k, _)| k)
+        .collect();
+    for key in done {
+        if let Some(job) = grid.ground_jobs.remove(&key)
+            && let Some(g) = job.lock().ok().and_then(|mut j| j.take())
+        {
+            grid.ground_ready.insert(key, g);
+        }
+    }
+    let pool = AsyncComputeTaskPool::try_get();
+    let mut ctx = grid.ctx(&world, &ground, &water);
+    // Finish one chunk whose ground is ready (its obstacles and clearance are quick).
+    if let Some(&key) = ctx.grid.ground_ready.keys().next() {
+        if ctx.grid.chunks.contains_key(&key) {
+            ctx.grid.ground_ready.remove(&key);
+        } else {
+            ctx.ensure_chunk(key);
+        }
+    }
+    let room = if pool.is_some() {
+        WARM_JOBS.saturating_sub(ctx.grid.ground_jobs.len())
+    } else {
+        1
+    };
+    if room == 0 {
+        return;
+    }
+    let mut wanted: Vec<(i32, (i32, i32))> = Vec::new();
+    for t in &agents {
+        let (x, z) = ctx.cell_of(t.translation);
+        let (kx, kz) = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
+        for dz in -WARM_CHUNKS..=WARM_CHUNKS {
+            for dx in -WARM_CHUNKS..=WARM_CHUNKS {
+                let d2 = dx * dx + dz * dz;
+                let key = (kx + dx, kz + dz);
+                if d2 > WARM_CHUNKS * WARM_CHUNKS
+                    || ctx.grid.chunks.contains_key(&key)
+                    || ctx.grid.ground_jobs.contains_key(&key)
+                    || ctx.grid.ground_ready.contains_key(&key)
+                {
+                    continue;
+                }
+                match wanted.iter_mut().find(|w| w.1 == key) {
+                    Some(w) => w.0 = w.0.min(d2),
+                    None => wanted.push((d2, key)),
+                }
+            }
+        }
+    }
+    wanted.sort_unstable();
+    let Some(pool) = pool else {
+        if let Some(&(_, key)) = wanted.first() {
+            ctx.ensure_chunk(key);
+        }
+        return;
+    };
+    let s = ctx.grid.settings;
+    let margin = (s.agent_radius / s.cell).ceil() as i32;
+    let side = CHUNK + 2 * margin;
+    for &(_, key) in wanted.iter().take(room) {
+        let job: GroundJob = Arc::new(Mutex::new(None));
+        let out = job.clone();
+        let ground = ground.clone();
+        let (cx0, cz0) = (key.0 * CHUNK - margin, key.1 * CHUNK - margin);
+        let cell = s.cell as f64;
+        pool.spawn(async move {
+            let mut g = Vec::with_capacity((side * side) as usize);
+            for lz in 0..side {
+                for lx in 0..side {
+                    let x = ((cx0 + lx) as f64 + 0.5) * cell;
+                    let z = ((cz0 + lz) as f64 + 0.5) * cell;
+                    g.push(ground_height(&ground, x, z));
+                }
+            }
+            if let Ok(mut out) = out.lock() {
+                *out = Some(g);
+            }
+        })
+        .detach();
+        ctx.grid.ground_jobs.insert(key, job);
     }
 }
 

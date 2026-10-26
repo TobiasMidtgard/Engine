@@ -160,6 +160,7 @@ impl Plugin for NpcPlugin {
                         world_model::rebuild_world_model,
                         wildlife::init_animals,
                         rest::rest_far_agents,
+                        nav::warm_nav,
                         perception::tick_clocks,
                         perception::collect_perceivables,
                     )

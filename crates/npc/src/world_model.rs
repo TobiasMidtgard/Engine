@@ -28,6 +28,8 @@ const BIG_OBSTACLE: f64 = 256.0;
 const COVER_REACH: f64 = 2.0;
 /// Regional changes kept for navigation, which drops only the chunks they touch.
 const CHANGE_LOG: usize = 64;
+/// Grid spacing of the cached ground heights used by line-of-sight checks, meters.
+const GROUND_CELL: f64 = 0.5;
 
 /// Shape of an obstacle in its local frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -300,6 +302,10 @@ pub struct TacticalWorld {
     changes: VecDeque<(u64, Option<(DVec2, DVec2)>)>,
     /// Bumped by every world shift, so a build started in an older frame is thrown away.
     epoch: u64,
+    /// Ground heights on a [`GROUND_CELL`] grid for the coarse terrain check in line of sight:
+    /// a fight asks thousands per step, and a planet's ground is slow to ask. Emptied when
+    /// the ground or the frame changes.
+    ground_heights: Mutex<HashMap<(i64, i64, i64), Option<f64>>>,
 }
 
 fn hash_key(x: f64, z: f64) -> (i64, i64) {
@@ -334,6 +340,9 @@ impl TacticalWorld {
         regions: &[(DVec2, DVec2)],
         ground: &Ground,
     ) {
+        if !regions.is_empty() {
+            self.forget_ground();
+        }
         let mut dirty: Vec<(DVec2, DVec2)> = regions.to_vec();
         let footprint = |o: &Obstacle| (DVec2::new(o.min.x, o.min.z), DVec2::new(o.max.x, o.max.z));
         let mut map = vec![u32::MAX; self.obstacles.len()];
@@ -396,6 +405,40 @@ impl TacticalWorld {
         self.log_change(Some(touched.unwrap_or_default()));
     }
 
+    /// The ground's height at `p` (see [`GroundQuery::sample`](engine_world::GroundQuery)),
+    /// taken at the nearest point of a half-metre grid and remembered. For coarse checks.
+    pub fn cached_ground_height(&self, ground: &Ground, p: DVec3) -> Option<f64> {
+        let key = (
+            (p.x / GROUND_CELL).round() as i64,
+            (p.z / GROUND_CELL).round() as i64,
+            (p.y / 32.0).floor() as i64,
+        );
+        let Ok(mut cache) = self.ground_heights.lock() else {
+            return ground.height(p);
+        };
+        if let Some(&h) = cache.get(&key) {
+            return h;
+        }
+        if cache.len() > 1 << 20 {
+            cache.clear();
+        }
+        let at = DVec3::new(
+            key.0 as f64 * GROUND_CELL,
+            key.2 as f64 * 32.0 + 16.0,
+            key.1 as f64 * GROUND_CELL,
+        );
+        let h = ground.height(at);
+        cache.insert(key, h);
+        h
+    }
+
+    /// Forget the cached ground heights (the ground changed).
+    pub fn forget_ground(&mut self) {
+        if let Ok(cache) = self.ground_heights.get_mut() {
+            cache.clear();
+        }
+    }
+
     fn log_change(&mut self, region: Option<(DVec2, DVec2)>) {
         if self.changes.len() == CHANGE_LOG {
             self.changes.pop_front();
@@ -447,6 +490,7 @@ impl TacticalWorld {
         self.generation += 1;
         self.epoch += 1;
         self.log_change(None);
+        self.forget_ground();
         self.fingerprint = fingerprint(&self.obstacles);
         self.rebuild |= !s.is_translation_only();
     }
@@ -880,7 +924,9 @@ impl Sight<'_> {
             let steps = ((len / 3.0) as usize).clamp(2, 48);
             for k in 1..steps {
                 let p = from.lerp(to, k as f64 / steps as f64);
-                if let Some(h) = self.ground.height(DVec3::new(p.x, p.y + 50.0, p.z))
+                if let Some(h) = self
+                    .world
+                    .cached_ground_height(self.ground, DVec3::new(p.x, p.y + 50.0, p.z))
                     && h > p.y + 0.05
                 {
                     return false;
@@ -1139,6 +1185,9 @@ pub(crate) fn rebuild_world_model(
         })
         .collect();
     let mut touched: HashSet<Entity> = changed.iter().chain(removed.read()).collect();
+    if ground.is_changed() {
+        model.forget_ground();
+    }
     *since_poll += time.real_delta_secs().max(time.delta_secs());
     let mut poll = *since_poll >= settings.poll_secs;
 

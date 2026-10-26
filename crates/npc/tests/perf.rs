@@ -16,6 +16,14 @@ use engine_world::{Ground, GroundQuery, GroundSample, SimulationFocus, SurfaceId
 const ARENA: DVec3 = DVec3::new(-70.0, 0.0, 170.0);
 const MEADOW: DVec3 = DVec3::new(90.0, 0.0, 60.0);
 
+/// When each NPC phase of the current step ended (to find where a slow step went).
+#[derive(Resource, Default)]
+struct Marks(Vec<(&'static str, Instant)>);
+
+fn mark(name: &'static str) -> impl FnMut(ResMut<Marks>) {
+    move |mut m: ResMut<Marks>| m.0.push((name, Instant::now()))
+}
+
 /// Flat ground that takes about as long to ask as a planet's terrain does, and counts how
 /// often it is asked.
 struct SlowGround(Arc<AtomicU64>);
@@ -44,6 +52,26 @@ fn app(samples: &Arc<AtomicU64>) -> App {
         });
     app.add_plugins((WorldPlugin, NpcPlugin));
     app.insert_resource(Ground(Arc::new(SlowGround(samples.clone()))));
+    app.init_resource::<Marks>();
+    app.add_systems(
+        FixedUpdate,
+        (
+            mark("start").before(NpcSet::Prepare),
+            mark("prepare")
+                .after(NpcSet::Prepare)
+                .before(NpcSet::Perceive),
+            mark("perceive")
+                .after(NpcSet::Perceive)
+                .before(NpcSet::Decide),
+            mark("decide").after(NpcSet::Decide).before(NpcSet::Act),
+            mark("act").after(NpcSet::Act).in_set(SimSet::Gameplay),
+            mark("physics")
+                .in_set(SimSet::PostPhysics)
+                .before(NpcSet::Show),
+            mark("show").after(NpcSet::Show),
+        )
+            .chain(),
+    );
     {
         let mut commands = app.world.commands();
         demo::spawn_demo(&mut commands, ARENA);
@@ -100,24 +128,65 @@ fn stream_tile(app: &mut App, i: u32) {
     ));
 }
 
-/// Mean and worst step, ms, and ground samples per step, over `steps` steps after a warm-up.
-fn measure(app: &mut App, samples: &AtomicU64, steps: u32) -> (f64, f64, f64) {
+/// Mean and worst step, ms, ground samples per step, and the NPC systems' share of the mean
+/// step by phase, over `steps` steps after a warm-up.
+fn measure(app: &mut App, samples: &AtomicU64, steps: u32) -> (f64, f64, f64, String) {
     for i in 0..120 {
         stream_tile(app, i);
         app.update();
     }
     let (mut sum, mut worst) = (0.0f64, 0.0f64);
+    let mut phases: Vec<(&str, f64)> = Vec::new();
     let asked = samples.load(Ordering::Relaxed);
     for i in 0..steps {
         stream_tile(app, 1000 + i);
+        let before = samples.load(Ordering::Relaxed);
+        let chunks = app.world.resource::<nav::NavGrid>().chunks_built;
+        let generation = app
+            .world
+            .resource::<world_model::TacticalWorld>()
+            .generation;
+        app.world.resource_mut::<Marks>().0.clear();
         let t = Instant::now();
         app.update();
         let ms = t.elapsed().as_secs_f64() * 1e3;
+        for w in app.world.resource::<Marks>().0.windows(2) {
+            let d = (w[1].1 - w[0].1).as_secs_f64() * 1e3;
+            match phases.iter_mut().find(|p| p.0 == w[1].0) {
+                Some(p) => p.1 += d,
+                None => phases.push((w[1].0, d)),
+            }
+        }
         sum += ms;
         worst = worst.max(ms);
+        if std::env::var("NPC_PERF_SPIKES").is_ok() && ms > 8.0 {
+            let n = samples.load(Ordering::Relaxed) - before;
+            let chunks = app.world.resource::<nav::NavGrid>().chunks_built - chunks;
+            let generation = app
+                .world
+                .resource::<world_model::TacticalWorld>()
+                .generation
+                - generation;
+            let marks = &app.world.resource::<Marks>().0;
+            let phases: Vec<String> = marks
+                .windows(2)
+                .map(|w| format!("{} {:.1}", w[1].0, (w[1].1 - w[0].1).as_secs_f64() * 1e3))
+                .collect();
+            println!(
+                "  step {i}: {ms:.1} ms, {n} ground samples, {chunks} chunks built, \
+                 {generation} model updates; {}",
+                phases.join(", ")
+            );
+        }
     }
     let asked = samples.load(Ordering::Relaxed) - asked;
-    (sum / steps as f64, worst, asked as f64 / steps as f64)
+    let npc: f64 = phases.iter().map(|p| p.1).sum::<f64>() / steps as f64;
+    let split: Vec<String> = phases
+        .iter()
+        .map(|(n, t)| format!("{n} {:.2}", t / steps as f64))
+        .collect();
+    let npc = format!("{npc:.2} ms in NPC systems ({})", split.join(", "));
+    (sum / steps as f64, worst, asked as f64 / steps as f64, npc)
 }
 
 #[test]
@@ -126,18 +195,18 @@ fn npc_step_cost_near_and_far() {
     let samples = Arc::new(AtomicU64::new(0));
     let mut near = app(&samples);
     focus(&mut near, ARENA + DVec3::new(0.0, 2.0, -30.0));
-    let (mean, worst, asked) = measure(&mut near, &samples, 600);
+    let (mean, worst, asked, npc) = measure(&mut near, &samples, 600);
     println!(
         "camera at the arena: {mean:.2} ms per step on average, worst {worst:.2} ms, \
-         {asked:.0} ground samples per step"
+         {asked:.0} ground samples per step; {npc}"
     );
 
     let samples = Arc::new(AtomicU64::new(0));
     let mut far = app(&samples);
     focus(&mut far, DVec3::new(2000.0, 2.0, 2000.0));
-    let (mean, worst, asked) = measure(&mut far, &samples, 600);
+    let (mean, worst, asked, npc) = measure(&mut far, &samples, 600);
     println!(
         "camera 2 km away: {mean:.2} ms per step on average, worst {worst:.2} ms, \
-         {asked:.0} ground samples per step"
+         {asked:.0} ground samples per step; {npc}"
     );
 }
