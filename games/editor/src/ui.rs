@@ -297,6 +297,9 @@ fn create_menu(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
             }
         }
     });
+    if ui.button("🌄 Landscape").clicked() {
+        crate::landscape::create(world, editor);
+    }
 }
 
 fn tool_bar(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
@@ -406,6 +409,7 @@ fn status_bar(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
                 Tool::Move => "Move",
                 Tool::Rotate => "Rotate",
                 Tool::Scale => "Scale",
+                Tool::Sculpt => "Sculpt",
             };
             ui.label(theme::dim(format!(
                 "{tool} · {}",
@@ -847,6 +851,7 @@ fn shortcuts(ctx: &egui::Context, world: &mut World, editor: &mut Editor) {
         (egui::Key::W, Tool::Move),
         (egui::Key::E, Tool::Rotate),
         (egui::Key::R, Tool::Scale),
+        (egui::Key::T, Tool::Sculpt),
     ] {
         if pressed(key, false) {
             editor.tool = tool;

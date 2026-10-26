@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use engine::prelude::*;
 
 use crate::editor::{self, Create, Editor, Tab, Tool};
+use crate::landscape::SculptOp;
 use crate::ui::EditorDock;
 
 /// One step of a script.
@@ -306,4 +307,113 @@ fn move_selection_to(world: &mut World, editor: &mut Editor, at: DVec3) {
             t.translation.z = at.z;
         }
     }
+}
+
+/// Round 3: a landscape, sculpted and painted.
+pub fn round3(dir: impl Into<PathBuf>) -> ShotScript {
+    let cam = (DVec3::new(42.0, 16.0, -46.0), DVec3::new(-8.0, 2.0, -6.0));
+    let steps = vec![
+        Step::Camera(cam.0, cam.1),
+        Step::Do(Box::new(crate::landscape::create)),
+        Step::Select(""),
+        Step::Wait(14),
+        Step::Shot("16_landscape_created"),
+        // A hill behind the courtyard.
+        Step::Do(Box::new(|world, editor| {
+            // Dabs in one frame all see the ground as it was, so each one starts where the
+            // last one left off (the live brush gets that from the ground itself).
+            for k in 0..14 {
+                let at = DVec3::new(-22.0, 0.8 * k as f64, -24.0);
+                sculpt(world, editor, at, 14.0, 0.8, SculptOp::Raise);
+            }
+        })),
+        // Far enough apart in time to be separate undo steps.
+        Step::Wait(16),
+        // A trench down the right side.
+        Step::Do(Box::new(|world, editor| {
+            for pass in 0..4 {
+                for i in 0..=24 {
+                    let t = i as f64 / 24.0;
+                    let at = DVec3::new(16.0 + 6.0 * t, -0.6 * pass as f64, -24.0 + 40.0 * t);
+                    sculpt(world, editor, at, 3.5, 0.6, SculptOp::Lower);
+                }
+            }
+        })),
+        Step::Wait(16),
+        // A dirt path from the courtyard to the hill, and sand around the trench.
+        Step::Do(Box::new(|world, editor| {
+            for i in 0..=30 {
+                let t = i as f64 / 30.0;
+                let at = DVec3::new(
+                    -6.0 - 14.0 * t,
+                    0.0,
+                    -2.0 - 18.0 * t + 6.0 * (t * 3.0).sin(),
+                );
+                sculpt(world, editor, at, 2.2, 1.0, SculptOp::Paint("dirt".into()));
+            }
+            for i in 0..=12 {
+                let t = i as f64 / 12.0;
+                let at = DVec3::new(16.0 + 6.0 * t, 0.0, -24.0 + 40.0 * t);
+                sculpt(world, editor, at, 7.0, 1.0, SculptOp::Paint("sand".into()));
+            }
+        })),
+        Step::Tool(Tool::Sculpt),
+        Step::Do(Box::new(|world, _| {
+            world
+                .resource_mut::<crate::egui_bridge::EguiInput>()
+                .injected
+                .push(egui::Event::PointerMoved(egui::pos2(640.0, 520.0)));
+        })),
+        Step::Tab(Tab::History),
+        Step::Wait(14),
+        Step::Do(Box::new(|world, editor| {
+            let fog = world.resource::<FogSettings>();
+            editor.info(
+                editor::now(world),
+                format!("fog density {} at {} m", fog.density, fog.base_height),
+            );
+            let ground = world.resource::<engine::world::Ground>().0.clone();
+            for (what, x, z) in [
+                ("hill", -22.0, -24.0),
+                ("trench", 19.0, -4.0),
+                ("pad", 5.0, 10.0),
+            ] {
+                let h = ground
+                    .sample(DVec3::new(x, 0.0, z))
+                    .map_or(f64::NAN, |s| s.height);
+                editor.info(
+                    editor::now(world),
+                    format!("ground at the {what}: {h:.2} m"),
+                );
+            }
+        })),
+        Step::Shot("17_sculpted_and_painted"),
+        Step::Do(Box::new(editor::undo)),
+        Step::Wait(14),
+        Step::Shot("18_undo_paint"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
+/// One brush dab at ground level under `at` (x, z).
+fn sculpt(
+    world: &mut World,
+    editor: &mut Editor,
+    at: DVec3,
+    radius: f32,
+    amount: f32,
+    op: SculptOp,
+) {
+    let Some(landscape) = crate::landscape::find(world) else {
+        return;
+    };
+    let ground = world.resource::<engine::world::Ground>().0.clone();
+    let y = ground.sample(at).map_or(0.0, |s| s.height) + at.y;
+    let dab = crate::landscape::Dab {
+        at: [at.x, y, at.z],
+        radius,
+        amount,
+        op,
+    };
+    crate::landscape::dab(world, editor, landscape, dab);
 }
