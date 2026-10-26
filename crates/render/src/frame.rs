@@ -97,6 +97,10 @@ pub struct FrameUniform {
     pub air_ozone: [f32; 4],
     /// Mie anisotropy per channel RGB (of the whole lobe), w [`Atmosphere::mie_forward_peak`].
     pub air_mie_g: [f32; 4],
+    /// The scene's place in the output image ([`crate::Viewport`]): its top-left corner (x, y,
+    /// pixels) and the whole output's size (pixels). Overlays drawing over the scene subtract
+    /// the corner from a fragment's position before reading scene-sized targets.
+    pub window: [f32; 4],
 }
 
 /// Most [`SkyLightVolume`]s shaded per frame (nearest the camera first).
@@ -235,6 +239,20 @@ impl ViewData {
     /// Camera forward (−Z) direction.
     pub fn forward(&self) -> Vec3 {
         self.rotation * Vec3::NEG_Z
+    }
+
+    /// Draw into the scene's rectangle of the output image: for overlays that draw over the
+    /// scene (lines, markers) in its projection. Their fragments' positions are then window
+    /// pixels: subtract `frame.window.xy` before reading scene-sized targets such as depth.
+    pub fn set_scene_viewport(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_viewport(
+            self.viewport_origin.x as f32,
+            self.viewport_origin.y as f32,
+            self.width as f32,
+            self.height as f32,
+            0.0,
+            1.0,
+        );
     }
 
     /// Screen-space size heuristic: projected radius in pixels of a sphere at distance `dist`.
@@ -864,6 +882,12 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
         air_mie_extinction: rgb0(air.mie_extinction),
         air_ozone: rgb0(air.ozone),
         air_mie_g: [air.mie_g.x, air.mie_g.y, air.mie_g.z, air.mie_forward_peak],
+        window: [
+            v.viewport_origin.x as f32,
+            v.viewport_origin.y as f32,
+            v.window.x as f32,
+            v.window.y as f32,
+        ],
     }
 }
 
@@ -875,7 +899,8 @@ mod tests {
     fn frame_uniform_matches_wgsl_size() {
         // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4 + ground, sky occlusion, volumes, then the
         // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4),
-        // sky (vec4), surface weather (2 vec4), cloud shadows (mat4 + 2 vec4), the air (5 vec4).
+        // sky (vec4), surface weather (2 vec4), cloud shadows (mat4 + 2 vec4), the air (5 vec4),
+        // the window (vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
             7 * 64
@@ -895,6 +920,7 @@ mod tests {
                 + 64
                 + 2 * 16
                 + 5 * 16
+                + 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);
