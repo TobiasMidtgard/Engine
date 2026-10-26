@@ -491,6 +491,70 @@ pub fn round4(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Round 5: FBX import beside the glTF original, import settings, Blender-style scale fix.
+pub fn round5(dir: impl Into<PathBuf>) -> ShotScript {
+    const CAR: &str = "fetched/anim/vehicles/car_concept.glb";
+    fn drop_file(at: egui::Pos2, path: &'static str) -> Vec<Step> {
+        vec![
+            Step::Do(Box::new(move |world, _| {
+                world
+                    .resource_mut::<crate::egui_bridge::EguiInput>()
+                    .injected
+                    .push(egui::Event::PointerMoved(at));
+            })),
+            Step::Wait(2),
+            Step::Do(Box::new(move |world, _| {
+                let source = std::env::var("ROUND5_FILES").unwrap_or_default();
+                world.write_message(engine::input::FileDrop::Dropped(
+                    PathBuf::from(source).join(path),
+                ));
+            })),
+            Step::Wait(2),
+        ]
+    }
+    let mut steps = vec![
+        Step::Camera(DVec3::new(10.0, 4.0, 14.0), DVec3::new(1.0, 0.6, 3.0)),
+        Step::Select(""),
+        Step::Tab(Tab::Console),
+        Step::Do(Box::new(|world, editor| {
+            crate::models::place(world, editor, CAR, DVec3::new(-1.0, 0.0, 6.0));
+        })),
+    ];
+    steps.extend(drop_file(egui::pos2(900.0, 470.0), "car/Sports Car.fbx"));
+    steps.extend(drop_file(egui::pos2(470.0, 560.0), "horse/Horse.fbx"));
+    steps.extend([
+        Step::Do(Box::new(|world, editor| {
+            let mut q = world.query_filtered::<(Entity, &crate::models::Model), ()>();
+            let car = q
+                .iter(world)
+                .find(|(_, m)| m.path.ends_with("Sports Car.glb"))
+                .map(|(e, _)| e);
+            editor.selection = car.into_iter().collect();
+        })),
+        Step::Wait(40),
+        Step::Shot("23_fbx_imported"),
+        // The settings panel: scale the imported horse up, apply, reimport.
+        Step::Do(Box::new(|world, editor| {
+            let root = world.resource::<engine::assets::AssetServer>().root();
+            let key = "imported/horse/Horse.glb";
+            if let Some(mut settings) = crate::import::settings_for(&root, key) {
+                settings.scale = 1.4;
+                let _ = crate::import::save_settings(&root, key, &settings);
+            }
+            crate::models::reimport(world, editor, key);
+            let mut q = world.query_filtered::<(Entity, &crate::models::Model), ()>();
+            editor.selection = q
+                .iter(world)
+                .filter(|(_, m)| m.path == key)
+                .map(|(e, _)| e)
+                .collect();
+        })),
+        Step::Wait(30),
+        Step::Shot("24_import_settings"),
+    ]);
+    ShotScript::new(dir, steps)
+}
+
 /// One brush dab at ground level under `at` (x, z).
 fn sculpt(
     world: &mut World,

@@ -15,6 +15,7 @@
 //! the world only through the type registry and the engine's contracts, like the AI bridge.
 
 mod camera;
+mod convert;
 mod demos;
 mod editor;
 mod egui_bridge;
@@ -37,6 +38,22 @@ use engine::prelude::*;
 use engine::render::RenderAppExt;
 
 fn main() {
+    // `editor --convert <model.fbx|.obj> <out.glb>`: the import converter on its own.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--convert") {
+        let (Some(src), Some(out)) = (args.get(i + 1), args.get(i + 2)) else {
+            eprintln!("usage: editor --convert <model.fbx|model.obj> <out.glb>");
+            std::process::exit(2);
+        };
+        match convert::to_glb(std::path::Path::new(src), std::path::Path::new(out)) {
+            Ok(summary) => println!("{out}: {}", summary.describe()),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let mut app = App::new();
     engine::core::log::init("info,wgpu=warn,naga=warn");
     {
@@ -87,6 +104,7 @@ fn main() {
             Some("round2") => shots::round2(dir),
             Some("round3") => shots::round3(dir),
             Some("round4") => shots::round4(dir),
+            Some("round5") => shots::round5(dir),
             _ => shots::gallery(dir),
         };
         app.insert_resource(script);

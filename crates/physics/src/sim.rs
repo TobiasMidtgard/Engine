@@ -118,6 +118,13 @@ impl Region {
         world.gravity = Vec3::ZERO;
         settings.apply_to(&mut world.integration_parameters);
         let ground = world.insert_body(RigidBodyBuilder::fixed());
+        // Step the empty world once. Rapier builds its persistent islands at a world's first
+        // step with time in it, and a zero-length step (`needs_refresh` below) doesn't: island
+        // ids handed out before that build, of bodies migrated out meanwhile, outlived it
+        // and indexed past its tables ("index out of bounds" in rapier's `persistent.rs`,
+        // a crash in the exe while zones woke).
+        world.integration_parameters.dt = 1.0 / 60.0;
+        world.step();
         Self {
             anchor,
             world,
@@ -2915,4 +2922,33 @@ pub struct LoadLine {
     pub joint: ImpulseJointHandle,
     /// The heavy body.
     pub body: RigidBodyHandle,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A region's world takes bodies, refreshes without time passing, loses some (migrated
+    /// out) and only then steps: the order a region sees when zones wake one a frame.
+    #[test]
+    fn a_region_steps_after_refreshes_and_departures() {
+        let mut r = Region::new(DVec3::ZERO, &PhysicsSettings::default());
+        let w = &mut r.world;
+        let bodies: Vec<RigidBodyHandle> = (0..20)
+            .map(|i| {
+                let at = Vec3::new(i as f32 * 3.0, 0.0, 0.0);
+                let rb = w.insert_body(RigidBodyBuilder::dynamic().translation(at));
+                w.insert_collider(ColliderBuilder::cuboid(0.5, 0.5, 0.5), Some(rb));
+                rb
+            })
+            .collect();
+        w.integration_parameters.dt = 0.0;
+        w.step();
+        for h in &bodies[..6] {
+            w.remove_body(*h);
+        }
+        w.integration_parameters.dt = 1.0 / 60.0;
+        w.step();
+        assert_eq!(w.bodies.len(), 15);
+    }
 }

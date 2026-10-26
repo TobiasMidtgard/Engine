@@ -147,6 +147,10 @@ pub struct Editor {
     pub file_hover: Option<std::path::PathBuf>,
     /// Files dropped on the window, imported by the next UI pass.
     pub file_drops: Vec<std::path::PathBuf>,
+    /// The selected model's import settings while they're edited (asset key, settings).
+    pub import_edit: Option<(String, crate::import::ImportSettings)>,
+    /// What each model file holds (the Content panel's hover preview), by asset key.
+    pub model_info: HashMap<String, String>,
     /// The Content panel's import path.
     pub import_path: String,
     /// When placed models' files last changed (for reimport).
@@ -190,6 +194,8 @@ impl Editor {
             model_watch: Default::default(),
             import_path: String::new(),
             file_hover: None,
+            import_edit: None,
+            model_info: HashMap::new(),
             file_drops: Vec::new(),
         }
     }
