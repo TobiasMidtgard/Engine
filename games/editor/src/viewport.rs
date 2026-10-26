@@ -1,0 +1,530 @@
+//! The scene view tab: the 3D scene shows through it, with the transform gizmo, click
+//! selection, icons for lights, cameras and demos, the tool bar and a stats overlay on top.
+
+use engine::debug::DebugDraw;
+use engine::prelude::*;
+use transform_gizmo_egui::{
+    EnumSet, GizmoConfig, GizmoExt, GizmoMode, GizmoOrientation, GizmoVisuals,
+};
+
+use crate::editor::{self, Editor, Mode, Tool};
+use crate::picking;
+use crate::scene_ops::{EditorOnly, InScene};
+use crate::theme;
+use crate::undo::Command;
+use crate::view::{ViewInfo, mint_rows};
+
+/// Screen radius of an icon, points.
+const ICON_RADIUS: f32 = 11.0;
+
+pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
+    let rect = ui.max_rect();
+    let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+    let screen = ui.ctx().viewport_rect();
+    let Some(view) = camera_view(world, editor, screen) else {
+        return;
+    };
+    editor.view = Some(view);
+    editor.viewport_hovered = response.contains_pointer();
+
+    let painter = ui.painter_at(rect);
+    draw_selection(world, editor);
+    if editor.grid {
+        draw_grid(world, &view);
+    }
+    let icons = if editor.icons {
+        draw_icons(&painter, world, editor, &view)
+    } else {
+        Vec::new()
+    };
+
+    let gizmo_used = gizmo(ui, world, editor, &view);
+
+    let alt = ui.input(|i| i.modifiers.alt);
+    if response.clicked() && !gizmo_used && !alt && !editor.gizmo.is_focused() {
+        let additive = ui.input(|i| i.modifiers.ctrl || i.modifiers.shift);
+        if let Some(pos) = response.interact_pointer_pos() {
+            click_select(world, editor, &view, &icons, pos, additive);
+        }
+    }
+    if response.double_clicked() && editor.primary().is_some() {
+        editor::focus_selection(world, editor);
+    }
+
+    overlays(ui, world, editor, rect);
+}
+
+/// The editor camera's view, mapped to the whole window (the scene renders full-window).
+fn camera_view(world: &World, editor: &Editor, screen: egui::Rect) -> Option<ViewInfo> {
+    let t = world.get::<Transform>(editor.camera)?;
+    let camera = world.get::<Camera>(editor.camera)?;
+    let (fov_y, near) = match camera.projection {
+        Projection::Perspective { fov_y_deg, near } => (fov_y_deg.to_radians(), near),
+        Projection::Orthographic { .. } => (60f32.to_radians(), 0.05),
+    };
+    Some(ViewInfo {
+        origin: t.translation,
+        rotation: t.rotation,
+        fov_y,
+        near,
+        screen,
+    })
+}
+
+/// Selected entities as camera-relative gizmo targets, plus what's needed to write them back.
+struct GizmoTarget {
+    entity: Entity,
+    before: Transform,
+    parent_inv: glam::DAffine3,
+}
+
+/// Run the transform gizmo; true while it is being used.
+fn gizmo(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, view: &ViewInfo) -> bool {
+    let modes: EnumSet<GizmoMode> = match editor.tool {
+        Tool::Select => return false,
+        Tool::Move => GizmoMode::all_translate(),
+        Tool::Rotate => GizmoMode::all_rotate(),
+        Tool::Scale => GizmoMode::all_scale(),
+    };
+    let mut targets = Vec::new();
+    let mut gizmo_transforms = Vec::new();
+    for &e in &editor.selection {
+        if world.get::<EditorOnly>(e).is_some() {
+            continue;
+        }
+        let (Some(local), Some(global)) =
+            (world.get::<Transform>(e), world.get::<GlobalTransform>(e))
+        else {
+            continue;
+        };
+        let parent_inv = world
+            .get::<ChildOf>(e)
+            .and_then(|p| world.get::<GlobalTransform>(p.parent()))
+            .map(|g| g.inverse())
+            .unwrap_or(glam::DAffine3::IDENTITY);
+        let (scale, rotation, translation) = global.affine().to_scale_rotation_translation();
+        gizmo_transforms.push(
+            transform_gizmo_egui::math::Transform::from_scale_rotation_translation(
+                to_mint3(scale),
+                to_mint_quat(rotation),
+                to_mint3(translation - view.origin),
+            ),
+        );
+        targets.push(GizmoTarget {
+            entity: e,
+            before: *local,
+            parent_inv,
+        });
+    }
+    if targets.is_empty() {
+        return false;
+    }
+    let ppp = ui.ctx().pixels_per_point();
+    editor.gizmo.update_config(GizmoConfig {
+        view_matrix: mint_rows(view.gizmo_view()),
+        projection_matrix: mint_rows(view.gizmo_proj()),
+        viewport: view.screen,
+        modes,
+        orientation: if editor.local_space {
+            GizmoOrientation::Local
+        } else {
+            GizmoOrientation::Global
+        },
+        snapping: editor.snap,
+        snap_angle: editor.snap_angle_deg.to_radians(),
+        snap_distance: editor.snap_move,
+        snap_scale: editor.snap_scale,
+        visuals: GizmoVisuals {
+            x_color: gizmo_color(theme::AXIS_COLORS[0]),
+            y_color: gizmo_color(theme::AXIS_COLORS[1]),
+            z_color: gizmo_color(theme::AXIS_COLORS[2]),
+            s_color: gizmo_color(egui::Color32::WHITE),
+            highlight_color: Some(gizmo_color(egui::Color32::from_rgb(0xff, 0xd8, 0x40))),
+            inactive_alpha: 0.85,
+            stroke_width: 3.5,
+            gizmo_size: 90.0,
+            ..Default::default()
+        },
+        pixels_per_point: ppp,
+        ..Default::default()
+    });
+    let Some((_, results)) = editor.gizmo.interact(ui, &gizmo_transforms) else {
+        return editor.gizmo.is_focused();
+    };
+    let mut commands = Vec::new();
+    for (target, new) in targets.iter().zip(results) {
+        let scale = from_mint3(new.scale);
+        let rotation = from_mint_quat(new.rotation);
+        let translation = from_mint3(new.translation) + view.origin;
+        let world_affine =
+            glam::DAffine3::from_scale_rotation_translation(scale, rotation, translation);
+        let local = editor::transform_from_affine(target.parent_inv * world_affine);
+        let (Ok(before), Ok(after)) = (
+            serde_json::to_value(target.before),
+            serde_json::to_value(local),
+        ) else {
+            continue;
+        };
+        commands.push(Command::Component {
+            entity: target.entity,
+            name: "Transform".into(),
+            before: Some(before),
+            after: Some(after),
+        });
+    }
+    let command = if commands.len() == 1 {
+        commands.pop().expect("one command")
+    } else {
+        let label = match editor.tool {
+            Tool::Rotate => "Move: rotate",
+            Tool::Scale => "Move: scale",
+            _ => "Move",
+        };
+        Command::Group(format!("{label} {} entities", commands.len()), commands)
+    };
+    editor::apply(world, editor, command);
+    true
+}
+
+fn gizmo_color(c: egui::Color32) -> transform_gizmo_egui::Color32 {
+    transform_gizmo_egui::Color32::from_rgb(c.r(), c.g(), c.b())
+}
+
+fn to_mint3(v: DVec3) -> transform_gizmo_egui::mint::Vector3<f64> {
+    transform_gizmo_egui::mint::Vector3 {
+        x: v.x,
+        y: v.y,
+        z: v.z,
+    }
+}
+
+fn from_mint3(v: transform_gizmo_egui::mint::Vector3<f64>) -> DVec3 {
+    DVec3::new(v.x, v.y, v.z)
+}
+
+fn to_mint_quat(q: glam::DQuat) -> transform_gizmo_egui::mint::Quaternion<f64> {
+    transform_gizmo_egui::mint::Quaternion {
+        v: to_mint3(DVec3::new(q.x, q.y, q.z)),
+        s: q.w,
+    }
+}
+
+fn from_mint_quat(q: transform_gizmo_egui::mint::Quaternion<f64>) -> glam::DQuat {
+    glam::DQuat::from_xyzw(q.v.x, q.v.y, q.v.z, q.s).normalize()
+}
+
+/// Select what is under the cursor: icons first, then meshes.
+fn click_select(
+    world: &mut World,
+    editor: &mut Editor,
+    view: &ViewInfo,
+    icons: &[(Entity, egui::Pos2)],
+    pos: egui::Pos2,
+    additive: bool,
+) {
+    let icon_hit = icons
+        .iter()
+        .filter(|(_, p)| p.distance(pos) < ICON_RADIUS + 3.0)
+        .min_by(|a, b| a.1.distance(pos).total_cmp(&b.1.distance(pos)))
+        .map(|(e, _)| *e);
+    let hit = icon_hit.or_else(|| {
+        let (o, d) = view.ray(pos);
+        picking::pick_mesh(world, o, d).map(|(e, _)| editor::selectable(world, e))
+    });
+    match (hit, additive) {
+        (Some(e), true) => editor.toggle(e),
+        (Some(e), false) => editor.select(Some(e)),
+        (None, false) => editor.select(None),
+        (None, true) => {}
+    }
+}
+
+/// Outline the selection with its bounds (on top, in the accent color).
+fn draw_selection(world: &mut World, editor: &Editor) {
+    let mut boxes = Vec::new();
+    for (i, &e) in editor.selection.iter().enumerate() {
+        let primary = i + 1 == editor.selection.len();
+        let Some(&global) = world.get::<GlobalTransform>(e) else {
+            continue;
+        };
+        let mesh = world
+            .get::<engine::render::ResolvedMesh>(e)
+            .and_then(|r| world.resource::<Assets<engine::render::Mesh>>().get(r.mesh))
+            .map(|m| m.aabb());
+        let color = if primary {
+            [1.0, 0.62, 0.1, 1.0]
+        } else {
+            [0.25, 0.55, 1.0, 1.0]
+        };
+        if let Some(aabb) = mesh {
+            let scale = global.scale();
+            let center = global.transform_point(((aabb.min + aabb.max) * 0.5).as_dvec3());
+            let half = (aabb.max - aabb.min) * 0.5 * scale.abs() + Vec3::splat(0.01);
+            boxes.push((center, half, global.rotation(), color));
+        }
+        if let Some(&light) = world.get::<PointLight>(e) {
+            let mut debug = world.resource_mut::<DebugDraw>();
+            debug.sphere(global.translation(), light.range, [1.0, 0.85, 0.4, 0.35]);
+        }
+        if world.get::<DirectionalLight>(e).is_some() {
+            let p = global.translation();
+            let f = global.forward().as_dvec3();
+            world
+                .resource_mut::<DebugDraw>()
+                .arrow(p, p + f * 3.0, [1.0, 0.9, 0.4, 1.0])
+                .on_top();
+        }
+    }
+    let mut debug = world.resource_mut::<DebugDraw>();
+    for (center, half, rotation, color) in boxes {
+        debug.oriented_box(center, half, rotation, color).on_top();
+    }
+}
+
+/// A ground grid around the camera that fades out with distance (1 m cells, brighter every
+/// 10 m; 10 m and 100 m when the camera is high), so it never draws a hard edge on the horizon.
+fn draw_grid(world: &mut World, view: &ViewInfo) {
+    let height = view.origin.y.abs();
+    let cell = if height > 60.0 { 10.0 } else { 1.0 };
+    let radius = cell * 30.0;
+    let center = DVec3::new(
+        (view.origin.x / cell).round() * cell,
+        0.004,
+        (view.origin.z / cell).round() * cell,
+    );
+    let eye = DVec3::new(view.origin.x, 0.0, view.origin.z);
+    let fade = |p: DVec3| {
+        let d = ((p - eye).length() / radius).min(1.0) as f32;
+        (1.0 - d) * (1.0 - d)
+    };
+    let mut debug = world.resource_mut::<DebugDraw>();
+    let n = 30i32;
+    for i in -n..=n {
+        for axis in 0..2 {
+            let line = |t: f64| {
+                let (u, v) = (i as f64 * cell, t * cell);
+                if axis == 0 {
+                    center + DVec3::new(u, 0.0, v)
+                } else {
+                    center + DVec3::new(v, 0.0, u)
+                }
+            };
+            let base = if axis == 0 { center.x } else { center.z };
+            let index = (base / cell).round() as i64 + i as i64;
+            let alpha = if index % 10 == 0 { 0.34 } else { 0.14 };
+            for j in -n..n {
+                let (a, b) = (line(j as f64), line(j as f64 + 1.0));
+                let k = fade((a + b) * 0.5);
+                if k > 0.01 {
+                    debug.line(a, b, [0.6, 0.62, 0.7, alpha * k]);
+                }
+            }
+        }
+    }
+}
+
+/// Icons for scene things without a mesh; returns their screen positions for clicking.
+fn draw_icons(
+    painter: &egui::Painter,
+    world: &mut World,
+    editor: &Editor,
+    view: &ViewInfo,
+) -> Vec<(Entity, egui::Pos2)> {
+    let mut q = world.query_filtered::<(Entity, &GlobalTransform), With<InScene>>();
+    let candidates: Vec<(Entity, DVec3)> =
+        q.iter(world).map(|(e, g)| (e, g.translation())).collect();
+    let mut out = Vec::new();
+    for (e, at) in candidates {
+        let Some(kind) = editor::has_icon(world, e) else {
+            continue;
+        };
+        let Some(pos) = view.project(at) else {
+            continue;
+        };
+        if !painter.clip_rect().contains(pos) {
+            continue;
+        }
+        let selected = editor.is_selected(e);
+        let fill = if selected {
+            theme::ACCENT
+        } else {
+            egui::Color32::from_rgba_unmultiplied(20, 22, 26, 210)
+        };
+        painter.circle(
+            pos,
+            ICON_RADIUS,
+            fill,
+            egui::Stroke::new(1.5, egui::Color32::from_white_alpha(200)),
+        );
+        let glyph = match kind {
+            "sun" => "☀",
+            "light" => "💡",
+            "camera" => "🎥",
+            "demo" => "💠",
+            _ => "○",
+        };
+        painter.text(
+            pos,
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            egui::FontId::proportional(12.0),
+            egui::Color32::WHITE,
+        );
+        if kind == "demo" {
+            painter.text(
+                pos + egui::vec2(ICON_RADIUS + 5.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                crate::scene_ops::label(world, e),
+                egui::FontId::proportional(12.0),
+                egui::Color32::from_white_alpha(230),
+            );
+        }
+        out.push((e, pos));
+    }
+    out
+}
+
+/// Tool bar (top left), stats (top right) and the play-mode frame.
+fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, rect: egui::Rect) {
+    let ctx = ui.ctx().clone();
+    egui::Area::new(egui::Id::new("viewport tools"))
+        .fixed_pos(rect.min + egui::vec2(8.0, 8.0))
+        .order(egui::Order::Middle)
+        .show(&ctx, |ui| {
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgba_unmultiplied(22, 23, 26, 225))
+                .corner_radius(5)
+                .inner_margin(egui::Margin::symmetric(5, 4))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        for (tool, icon, tip) in [
+                            (Tool::Select, "⬉", "Select (Q)"),
+                            (Tool::Move, "✚", "Move (W)"),
+                            (Tool::Rotate, "🔄", "Rotate (E)"),
+                            (Tool::Scale, "⛶", "Scale (R)"),
+                        ] {
+                            let on = editor.tool == tool;
+                            if ui
+                                .add(
+                                    egui::Button::new(egui::RichText::new(icon).size(15.0))
+                                        .selected(on)
+                                        .min_size(egui::vec2(26.0, 24.0)),
+                                )
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                editor.tool = tool;
+                            }
+                        }
+                        ui.separator();
+                        let space = if editor.local_space { "Local" } else { "World" };
+                        if ui
+                            .add(
+                                egui::Button::new(format!("🌐 {space}"))
+                                    .min_size(egui::vec2(0.0, 24.0)),
+                            )
+                            .on_hover_text("Gizmo axes in world or local space")
+                            .clicked()
+                        {
+                            editor.local_space = !editor.local_space;
+                        }
+                        ui.add(
+                            egui::Button::new("📏 Snap")
+                                .selected(editor.snap)
+                                .min_size(egui::vec2(0.0, 24.0)),
+                        )
+                        .on_hover_text("Snap moves, rotations and scales")
+                        .clicked()
+                        .then(|| editor.snap = !editor.snap);
+                        if editor.snap {
+                            ui.add(
+                                egui::DragValue::new(&mut editor.snap_move)
+                                    .speed(0.05)
+                                    .range(0.01..=100.0)
+                                    .suffix(" m"),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut editor.snap_angle_deg)
+                                    .speed(1.0)
+                                    .range(1.0..=90.0)
+                                    .suffix("°"),
+                            );
+                        }
+                        ui.separator();
+                        ui.toggle_value(&mut editor.grid, "⊞")
+                            .on_hover_text("Ground grid");
+                        ui.toggle_value(&mut editor.icons, "💡")
+                            .on_hover_text("Icons for lights, cameras and demos");
+                        let speed = world
+                            .get::<crate::camera::EditorCamera>(editor.camera)
+                            .map(|c| c.speed)
+                            .unwrap_or(0.0);
+                        ui.label(theme::dim(format!("🎥 {speed:.1} m/s")))
+                            .on_hover_text(
+                                "Hold right mouse: look and fly with WASD, Q/E; wheel sets speed.\n\
+                                 Middle drag: pan. Alt + left drag: orbit. F: frame selection.",
+                            );
+                    });
+                });
+        });
+
+    // Stats.
+    let entities = world.entities().count_spawned();
+    let mut scene_q = world.query_filtered::<(), With<InScene>>();
+    let in_scene = scene_q.iter(world).count();
+    let fps = 1.0 / editor.frame_secs.max(1e-4);
+    let stats = format!(
+        "{fps:.0} fps  ·  {:.1} ms\n{in_scene} scene / {entities} world entities",
+        editor.frame_secs * 1000.0
+    );
+    let painter = ui.painter_at(rect);
+    let pos = rect.right_top() + egui::vec2(-10.0, 10.0);
+    let galley = painter.layout(
+        stats,
+        egui::FontId::monospace(11.5),
+        egui::Color32::from_white_alpha(220),
+        300.0,
+    );
+    let bg = egui::Rect::from_min_size(
+        pos - egui::vec2(galley.size().x + 8.0, -0.0),
+        galley.size() + egui::vec2(16.0, 8.0),
+    );
+    let bg = bg.translate(egui::vec2(-8.0, 0.0));
+    painter.rect_filled(
+        bg,
+        4,
+        egui::Color32::from_rgba_unmultiplied(22, 23, 26, 200),
+    );
+    painter.galley(bg.min + egui::vec2(8.0, 4.0), galley, egui::Color32::WHITE);
+
+    // Play mode frame.
+    if editor.mode != Mode::Edit {
+        let (color, text) = if editor.mode == Mode::Play {
+            (theme::PLAY, "▶  PLAYING  ·  Esc or Stop restores the scene")
+        } else {
+            (theme::WARN, "⏸  PAUSED")
+        };
+        painter.rect_stroke(
+            rect.shrink(1.5),
+            0,
+            egui::Stroke::new(3.0, color),
+            egui::StrokeKind::Inside,
+        );
+        let galley = painter.layout_no_wrap(
+            text.into(),
+            egui::FontId::proportional(13.0),
+            egui::Color32::BLACK,
+        );
+        let pill = egui::Rect::from_center_size(
+            egui::pos2(rect.center().x, rect.bottom() - 22.0),
+            galley.size() + egui::vec2(24.0, 8.0),
+        );
+        painter.rect_filled(pill, 12, color);
+        painter.galley(
+            pill.min + egui::vec2(12.0, 4.0),
+            galley,
+            egui::Color32::BLACK,
+        );
+    }
+}

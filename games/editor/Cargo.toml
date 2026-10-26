@@ -1,0 +1,39 @@
+[package]
+name = "editor"
+description = "The engine's editor: scene view with a fly camera, outliner, inspector over the type registry, move/rotate/scale gizmos, undo, scenes saved as data and play in editor with every module's demo."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+engine.workspace = true
+bevy_ecs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+glam.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui_dock = "0.21"
+transform-gizmo-egui = "0.11"
+engine_physics.workspace = true
+engine_vehicles.workspace = true
+engine_space.workspace = true
+engine_terrain.workspace = true
+engine_water.workspace = true
+engine_weather.workspace = true
+engine_fire.workspace = true
+engine_smoke.workspace = true
+engine_vfx.workspace = true
+engine_foliage.workspace = true
+engine_anim.workspace = true
+engine_npc.workspace = true
+engine_destruction.workspace = true
+engine_movement.workspace = true
+engine_audio.workspace = true
+engine_softbody.workspace = true
+
+[dev-dependencies]
+# The glyph test reads egui's built-in fonts directly.
+epaint_default_fonts = "0.36"
+ttf-parser = "0.25"
