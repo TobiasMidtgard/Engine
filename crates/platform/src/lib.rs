@@ -84,6 +84,7 @@ pub fn winit_runner(app: App) -> AppExit {
         window: None,
         exit: None,
         applied: AppliedWindow::default(),
+        shown: false,
     };
     if let Err(e) = event_loop.run_app(&mut handler) {
         tracing::error!("event loop error: {e}");
@@ -104,6 +105,9 @@ struct Handler {
     window: Option<Arc<winit::window::Window>>,
     exit: Option<AppExit>,
     applied: AppliedWindow,
+    /// The window opens hidden and shows once the first frame has run (and presented), so
+    /// the player never sees the OS's blank white client area while the GPU starts up.
+    shown: bool,
 }
 
 impl Handler {
@@ -153,7 +157,8 @@ impl ApplicationHandler for Handler {
         let w = self.app.world.resource::<Window>().clone();
         let attributes = winit::window::Window::default_attributes()
             .with_title(w.title.clone())
-            .with_inner_size(PhysicalSize::new(w.width.max(64), w.height.max(64)));
+            .with_inner_size(PhysicalSize::new(w.width.max(64), w.height.max(64)))
+            .with_visible(false);
         match event_loop.create_window(attributes) {
             Ok(window) => {
                 let window = Arc::new(window);
@@ -266,6 +271,12 @@ impl ApplicationHandler for Handler {
             return;
         }
         self.app.update();
+        if !self.shown
+            && let Some(window) = &self.window
+        {
+            window.set_visible(true);
+            self.shown = true;
+        }
         self.apply_window_changes();
         if let Some(exit) = self.app.should_exit() {
             self.exit = Some(exit);
