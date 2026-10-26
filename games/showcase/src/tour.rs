@@ -32,9 +32,9 @@ pub struct Tour {
     pub index: usize,
     pub frames: u32,
     pub out_dir: String,
-    /// While a stop waits for background builds: when it started, the meshes ready and when
-    /// that last changed.
-    waiting: Option<(std::time::Instant, u64, std::time::Instant)>,
+    /// While a stop waits for background builds: when it started, the meshes ready and terrain
+    /// patches pending, and when those last changed.
+    waiting: Option<(std::time::Instant, (u64, u64), std::time::Instant)>,
 }
 
 impl Tour {
@@ -184,8 +184,9 @@ fn run(world: &mut World) {
     }
 }
 
-/// Hold the stop (true) while virtual geometry is still building meshes in view, so the
-/// picture shows their finished relief, not the smooth shapes drawn until it is ready.
+/// Hold the stop (true) while virtual geometry is still building meshes in view, or the
+/// terrain its patches (on worker threads; it draws their parents meanwhile), so the picture
+/// shows the finished relief, not the smooth shapes drawn until it is ready.
 fn wait_for_builds(world: &mut World, stall_secs: f32) -> bool {
     let Some(state) = world.get_resource::<Renderer>().map(|r| {
         let describe = r.describe();
@@ -197,8 +198,22 @@ fn wait_for_builds(world: &mut World, stall_secs: f32) -> bool {
     }) else {
         return false;
     };
-    let building = state["meshes_building"].as_u64().unwrap_or(0);
-    let ready = state["meshes_ready"].as_u64().unwrap_or(0);
+    let (patches_building, patches_missing) = world
+        .get_resource::<engine::core::diagnostics::Diagnostics>()
+        .map_or((0.0, 0.0), |d| {
+            (
+                d.get("terrain.patches_building").unwrap_or(0.0),
+                d.get("terrain.patches_missing").unwrap_or(0.0),
+            )
+        });
+    let patches = (patches_building + patches_missing) as u64;
+    if patches_building > 0.0 {
+        // Let the workers get on with them before drawing another frame.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    let building = state["meshes_building"].as_u64().unwrap_or(0) + patches;
+    // Progress on either keeps the wait from counting as stalled.
+    let ready = (state["meshes_ready"].as_u64().unwrap_or(0), patches);
     let now = std::time::Instant::now();
     let mut tour = world.resource_mut::<Tour>();
     let Some((since, last_ready, changed)) = tour.waiting else {
@@ -213,7 +228,7 @@ fn wait_for_builds(world: &mut World, stall_secs: f32) -> bool {
     if building == 0 || waited > BUILD_WAIT_SECS || stalled > stall_secs {
         if waited > 1.0 {
             engine::core::log::info!(
-                "  waited {waited:.0} s for {ready} meshes' clusters ({building} not ready)"
+                "  waited {waited:.0} s for meshes' clusters and terrain patches ({building} not ready)"
             );
         }
         tour.waiting = None;

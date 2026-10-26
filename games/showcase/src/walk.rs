@@ -18,7 +18,7 @@ use engine_ui::hud::{Marker, spawn_marker};
 use engine_ui::input::UiEvent;
 use engine_ui::node::{Screen, WorldAnchor};
 use engine_ui::screens;
-use engine_ui::style::{Align, Justify, Position};
+use engine_ui::style::{Align, Fill, Justify, Position, pct};
 use engine_ui::theme::Theme;
 use engine_ui::toast::{self, ToastKind};
 use serde_json::json;
@@ -168,7 +168,7 @@ fn run(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) {
     }
     match walk.stage {
         Stage::Menu => {
-            if !walk.shown {
+            if !walk.shown && !crate::build::building(world) {
                 walk.shown = true;
                 if let Err(e) = show_menu(world) {
                     engine::core::log::warn!("start screen: {e}");
@@ -301,6 +301,23 @@ fn show_menu(world: &mut World) -> Result<(), String> {
                 .top(0.0)
                 .bottom(0.0)
         })
+        // A dark wash from the left edge so the title and menu read over a bright valley.
+        .child(
+            El::new()
+                .with_style(|s| {
+                    s.position(Position::Absolute)
+                        .left(0.0)
+                        .top(0.0)
+                        .bottom(0.0)
+                        .width(pct(62.0))
+                        .background(Fill::Linear {
+                            from: Color::linear(0.01, 0.015, 0.025, 0.82),
+                            to: Color::TRANSPARENT,
+                            angle_deg: 0.0,
+                        })
+                })
+                .pick_ignore(),
+        )
         .child(
             El::new()
                 .class("col")
