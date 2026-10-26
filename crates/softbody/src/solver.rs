@@ -21,6 +21,7 @@ use engine_core::math::{DVec3, IVec3, Mat3, Quat, Vec2, Vec3};
 use engine_world::WorldShift;
 
 use crate::collide::{LocalCollider, PosedCollider};
+use engine_core::tasks::ComputeTaskPool;
 
 /// Air density at sea level, kg/m³.
 pub const AIR_DENSITY: f32 = 1.225;
@@ -325,6 +326,7 @@ pub struct Sim {
     poses: Vec<(Vec3, Quat)>,
     /// The air's force on each particle (N), sampled a few times a step.
     aero_force: Vec<Vec3>,
+    split: Split,
     self_contacts: SelfContacts,
 }
 
@@ -639,18 +641,184 @@ impl Sim {
             }));
         }
         self.find_near(colliders, dt);
+        let mut split = std::mem::take(&mut self.split);
+        split.update(self);
+        self.split = split;
         let n = self.substeps_for(dt);
         let h = dt / n as f32;
         // The air's force changes slowly next to the substeps (Chaos Cloth applies it once a
         // frame at 60 Hz), so it is sampled at least every 1/240 s, not every substep.
         let aero_every = (n / 4).max(1);
-        for k in 0..n {
-            let t0 = k as f32 / n as f32;
-            let t1 = (k + 1) as f32 / n as f32;
-            self.substep(h, t0, t1, dt, colliders, k % aero_every == 0);
+        if self.split.starts.len() > 2
+            && self.shapes.is_empty()
+            && self.aero_triangles.is_empty()
+            && self.water.is_none()
+        {
+            self.step_runs(n, dt, colliders);
+        } else {
+            for k in 0..n {
+                let t0 = k as f32 / n as f32;
+                let t1 = (k + 1) as f32 / n as f32;
+                self.substep(h, t0, t1, dt, colliders, k % aero_every == 0);
+            }
         }
         self.params.time += dt;
         self.finish_step();
+    }
+
+    /// Step each run on its own thread through every substep: a body of separate pieces
+    /// (hair's strands) whose pieces feel only gravity, the wind and the colliders, so they
+    /// share nothing but what they read.
+    fn step_runs(&mut self, n: u32, dt: f32, colliders: &[LocalCollider]) {
+        let p = self.params;
+        let h = dt / n as f32;
+        let frames = self.frames.len();
+        self.poses.clear();
+        for k in 0..=n {
+            let t = k as f32 / n as f32;
+            self.poses.extend(self.frames.iter().map(|f| f.pose(t)));
+        }
+        let margin = p.radius + p.max_speed * h;
+        self.posed.clear();
+        for k in 1..=n {
+            let t = k as f32 / n as f32;
+            self.posed.extend(
+                colliders
+                    .iter()
+                    .map(|c| PosedCollider::at(c, t, dt, margin)),
+            );
+        }
+        let still = Flow {
+            flow: Vec3::ZERO,
+            world: Vec3::ZERO,
+            time: 0.0,
+        };
+        let (poses, posed, gusts) = (&self.poses, &self.posed, &self.gusts);
+        let (w, loads, split) = (&self.inv_mass, &self.loads, &self.split);
+        let shared = |k: usize| Shared {
+            p,
+            h,
+            inv_h: 1.0 / h,
+            inv_h2: 1.0 / (h * h),
+            w,
+            submerged: &[],
+            normals: &[],
+            flow: &still,
+            frames: &self.frames,
+            poses: &poses[(k + 1) * frames..(k + 2) * frames],
+            distances: &self.distances,
+            tethers: &self.tethers,
+            goals: &self.goals,
+            skin_planes: &self.skin_planes,
+            skin_capsules: &self.skin_capsules,
+            pins: &self.pins,
+        };
+        let touch = |k: usize| Touch {
+            p,
+            h,
+            inv_h: 1.0 / h,
+            w,
+            ground: &self.ground,
+            colliders,
+            posed: &posed[k * colliders.len()..(k + 1) * colliders.len()],
+            near_starts: &self.near_starts,
+            near: &self.near,
+        };
+        let results = for_runs(
+            &split.starts,
+            true,
+            (&mut self.pos, &mut self.vel, &mut self.prev),
+            |r, run| {
+                let Run {
+                    base,
+                    pos,
+                    vel,
+                    prev,
+                } = run;
+                let mut accel = vec![Vec3::ZERO; pos.len()];
+                let mut frame_impulses = vec![ColliderImpulse::default(); frames];
+                let mut touched = Touched {
+                    contacts: 0,
+                    ground_impact: (0.0, Vec3::ZERO),
+                    impulses: vec![ColliderImpulse::default(); colliders.len()],
+                };
+                let end = base + pos.len();
+                for k in 0..n as usize {
+                    // Follow part of the anchor frame's motion rigidly.
+                    if let Some((frame, amount)) = p.follow
+                        && amount > 0.0
+                        && (frame as usize) < frames
+                    {
+                        let (p0, r0) = poses[k * frames + frame as usize];
+                        let (p1, r1) = poses[(k + 1) * frames + frame as usize];
+                        let rot = Quat::IDENTITY.slerp(r1 * r0.conjugate(), amount);
+                        let shift = (p1 - p0) * amount;
+                        for (j, (x, v)) in pos.iter_mut().zip(vel.iter_mut()).enumerate() {
+                            if w[base + j] > 0.0 {
+                                *x = p0 + rot * (*x - p0) + shift;
+                                *v = rot * *v;
+                            }
+                        }
+                    }
+                    // Gravity, the wind's drag and loads.
+                    for (j, (a, v)) in accel.iter_mut().zip(vel.iter()).enumerate() {
+                        *a = p.gravity;
+                        if p.drag > 0.0 {
+                            let gust = gusts.get(base + j).copied().unwrap_or(p.wind);
+                            *a += (gust - *v) * p.drag;
+                        }
+                    }
+                    for &(i, f) in loads {
+                        let i = i as usize;
+                        if (base..end).contains(&i) {
+                            accel[i - base] += f * w[i];
+                        }
+                    }
+                    let run = Run {
+                        base,
+                        pos: &mut *pos,
+                        vel: &mut *vel,
+                        prev: &mut *prev,
+                    };
+                    let fi = constrain_run(&shared(k), &split.lists[r], &accel, run);
+                    for (sum, add) in frame_impulses.iter_mut().zip(fi) {
+                        sum.linear += add.linear;
+                        sum.angular += add.angular;
+                    }
+                    let run = Run {
+                        base,
+                        pos: &mut *pos,
+                        vel: &mut *vel,
+                        prev: &mut *prev,
+                    };
+                    let t = collide_run(&touch(k), run);
+                    touched.contacts = t.contacts;
+                    if t.ground_impact.0 > touched.ground_impact.0 {
+                        touched.ground_impact = t.ground_impact;
+                    }
+                    for (sum, add) in touched.impulses.iter_mut().zip(t.impulses) {
+                        sum.linear += add.linear;
+                        sum.angular += add.angular;
+                    }
+                }
+                (frame_impulses, touched)
+            },
+        );
+        self.contacts = 0;
+        for (fi, t) in results {
+            for (sum, add) in self.frame_impulses.iter_mut().zip(fi) {
+                sum.linear += add.linear;
+                sum.angular += add.angular;
+            }
+            self.contacts += t.contacts;
+            if t.ground_impact.0 > self.ground_impact.0 {
+                self.ground_impact = t.ground_impact;
+            }
+            for (sum, add) in self.collider_impulses.iter_mut().zip(t.impulses) {
+                sum.linear += add.linear;
+                sum.angular += add.angular;
+            }
+        }
     }
 
     /// Which particles each collider can reach this step: those within its bounding box
@@ -750,11 +918,6 @@ impl Sim {
 
         self.poses.clear();
         self.poses.extend(self.frames.iter().map(|f| f.pose(t1)));
-        let poses = &self.poses;
-        let point = |frame: u16, local: Vec3| {
-            let (fp, fr) = poses[frame as usize];
-            fp + fr * local
-        };
 
         // External accelerations: gravity, water, air, loads.
         self.accel.clear();
@@ -858,131 +1021,54 @@ impl Sim {
                 }
             }
         }
-        let flow = self.water.map_or(Vec3::ZERO, |w| w.current);
-        let across = flow.cross(Vec3::Y);
-        // Eddies in moving water, like gusts in the wind, turning it every way and carried
-        // along by the current, so what streams in it undulates (none in still water).
-        // In world space (wrapped), so bodies side by side feel the same eddies.
-        // The wrap's seams sit 2 km out, not at the origin (the lake's surface is at y = 0).
-        let world = (self.origin + DVec3::splat(2048.0))
-            .rem_euclid(DVec3::splat(4096.0))
-            .as_vec3();
-        let current = |x: Vec3| -> Vec3 {
-            if across == Vec3::ZERO {
-                return flow;
-            }
-            let drift = x + world - flow * time;
-            let (f, g) = flutter(drift * 0.6, time * 0.35);
-            let (e, _) = flutter(Vec3::new(drift.z, drift.x, drift.y) * 0.8, time * 0.5 + 3.0);
-            let speed = flow.length();
-            flow * (1.0 + 0.5 * WATER_EDDIES * f)
-                + across * (0.8 * WATER_EDDIES * g)
-                + Vec3::Y * (WATER_EDDIES * speed * e)
+        let flow = Flow {
+            flow: self.water.map_or(Vec3::ZERO, |w| w.current),
+            // The wrap's seams sit 2 km out, not at the origin (the lake's surface is at y = 0).
+            world: (self.origin + DVec3::splat(2048.0))
+                .rem_euclid(DVec3::splat(4096.0))
+                .as_vec3(),
+            time,
         };
 
-        // Predict. Water drag pulls the velocity toward the current, implicitly (stable
-        // however strong).
-        for i in 0..self.pos.len() {
-            self.prev[i] = self.pos[i];
-            if self.inv_mass[i] > 0.0 {
-                self.vel[i] += self.accel[i] * h;
-                if let Some(&s) = self.submerged.get(i)
-                    && s > 0.0
-                {
-                    let k = p.water_drag * s * h;
-                    let c = current(self.pos[i]);
-                    let rel = self.vel[i] - c;
-                    self.vel[i] = match self.normals.get(i).and_then(|n| n.try_normalize()) {
-                        Some(n) => {
-                            let along = rel.dot(n);
-                            let slide = rel - n * along;
-                            c + n * (along / (1.0 + k)) + slide / (1.0 + k * SLIDE_DRAG)
-                        }
-                        None => c + rel / (1.0 + k),
-                    };
-                }
-                self.pos[i] += self.vel[i] * h;
+        // Each run of particles predicts and solves the constraints inside it, side by side
+        // with the others; then the constraints across runs; then each run collides.
+        let shared = Shared {
+            p,
+            h,
+            inv_h,
+            inv_h2,
+            w: &self.inv_mass,
+            submerged: &self.submerged,
+            normals: &self.normals,
+            flow: &flow,
+            frames: &self.frames,
+            poses: &self.poses,
+            distances: &self.distances,
+            tethers: &self.tethers,
+            goals: &self.goals,
+            skin_planes: &self.skin_planes,
+            skin_capsules: &self.skin_capsules,
+            pins: &self.pins,
+        };
+        let split = &self.split;
+        let accel = &self.accel;
+        let frame_impulses = for_runs(
+            &split.starts,
+            false,
+            (&mut self.pos, &mut self.vel, &mut self.prev),
+            |k, run| {
+                let span = run.base..run.base + run.pos.len();
+                constrain_run(&shared, &split.lists[k], &accel[span], run)
+            },
+        );
+        for fi in frame_impulses {
+            for (sum, add) in self.frame_impulses.iter_mut().zip(fi) {
+                sum.linear += add.linear;
+                sum.angular += add.angular;
             }
         }
-        for pin in &self.pins {
-            self.pos[pin.p as usize] = point(pin.frame, pin.local);
-        }
-
-        // Constraints.
         let pos = &mut self.pos;
         let w = &self.inv_mass;
-        for c in &self.distances {
-            let (a, b) = (c.a as usize, c.b as usize);
-            let wsum = w[a] + w[b];
-            if wsum == 0.0 {
-                continue;
-            }
-            let d = pos[a] - pos[b];
-            let len = d.length();
-            if len < 1e-9 {
-                continue;
-            }
-            let dl = -(len - c.rest) / (wsum + c.compliance * inv_h2);
-            let corr = d * (dl / len);
-            pos[a] += corr * w[a];
-            pos[b] -= corr * w[b];
-        }
-        for c in &self.tethers {
-            let (i, a) = (c.p as usize, c.anchor as usize);
-            if w[i] == 0.0 {
-                continue;
-            }
-            let d = pos[i] - pos[a];
-            let len = d.length();
-            if len > c.max {
-                // A pinned anchor doesn't move; one held by a goal (cloth on a moving body)
-                // takes its share, so the goal passes the pull on to the body.
-                let corr = d * ((len - c.max) / (len * (w[i] + w[a])));
-                pos[i] -= corr * w[i];
-                pos[a] += corr * w[a];
-            }
-        }
-        for g in &self.goals {
-            let i = g.p as usize;
-            if w[i] == 0.0 {
-                continue;
-            }
-            let target = point(g.frame, g.local);
-            let dx = (target - pos[i]) * (w[i] / (w[i] + g.compliance * inv_h2));
-            pos[i] += dx;
-            // Reaction on the frame: equal and opposite impulse.
-            let j = dx * (inv_h / w[i]);
-            let fi = &mut self.frame_impulses[g.frame as usize];
-            fi.linear -= j;
-            fi.angular -= (pos[i] - self.frames[g.frame as usize].to_pos).cross(j);
-        }
-        for c in &self.skin_planes {
-            let i = c.p as usize;
-            if w[i] == 0.0 {
-                continue;
-            }
-            let (fp, fr) = poses[c.frame as usize];
-            let n = fr * c.normal;
-            let d = (pos[i] - fp - fr * c.point).dot(n) - c.margin;
-            if d < 0.0 {
-                pos[i] -= n * d;
-            }
-        }
-        for c in &self.skin_capsules {
-            let i = c.p as usize;
-            if w[i] == 0.0 {
-                continue;
-            }
-            let (fp, fr) = poses[c.frame as usize];
-            let (a, ab) = (fp + fr * c.a, fr * (c.b - c.a));
-            let t = ((pos[i] - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
-            let off = pos[i] - a - ab * t;
-            let dist = off.length();
-            let d = dist - c.radius;
-            if d < 0.0 && d > -c.reach && dist > 1e-6 {
-                pos[i] -= off * (d / dist);
-            }
-        }
         for s in &mut self.shapes {
             solve_shape(s, pos, w, h, inv_h2);
         }
@@ -998,7 +1084,7 @@ impl Sim {
             );
         }
 
-        // Collisions.
+        // Collisions, then velocities.
         self.posed.clear();
         let margin = p.radius + p.max_speed * h;
         self.posed.extend(
@@ -1006,72 +1092,479 @@ impl Sim {
                 .iter()
                 .map(|c| PosedCollider::at(c, t1, dt, margin)),
         );
-        let mut contacts = 0;
-        let shared_ground = (self.ground.len() == 1).then(|| self.ground[0]);
-        for i in 0..pos.len() {
+        let touch = Touch {
+            p,
+            h,
+            inv_h,
+            w: &self.inv_mass,
+            ground: &self.ground,
+            colliders,
+            posed: &self.posed,
+            near_starts: &self.near_starts,
+            near: &self.near,
+        };
+        let touched = for_runs(
+            &split.starts,
+            false,
+            (&mut self.pos, &mut self.vel, &mut self.prev),
+            |_, run| collide_run(&touch, run),
+        );
+        self.contacts = 0;
+        for t in touched {
+            self.contacts += t.contacts;
+            if t.ground_impact.0 > self.ground_impact.0 {
+                self.ground_impact = t.ground_impact;
+            }
+            for (sum, add) in self.collider_impulses.iter_mut().zip(t.impulses) {
+                sum.linear += add.linear;
+                sum.angular += add.angular;
+            }
+        }
+    }
+}
+
+/// Moving water's velocity at a point, with eddies that, like gusts in the wind, turn it
+/// every way and are carried along by the current, so what streams in it undulates (none in
+/// still water). In world space (wrapped), so bodies side by side feel the same eddies.
+struct Flow {
+    flow: Vec3,
+    world: Vec3,
+    time: f32,
+}
+
+impl Flow {
+    fn at(&self, x: Vec3) -> Vec3 {
+        let (flow, time) = (self.flow, self.time);
+        let across = flow.cross(Vec3::Y);
+        if across == Vec3::ZERO {
+            return flow;
+        }
+        let drift = x + self.world - flow * time;
+        let (f, g) = flutter(drift * 0.6, time * 0.35);
+        let (e, _) = flutter(Vec3::new(drift.z, drift.x, drift.y) * 0.8, time * 0.5 + 3.0);
+        let speed = flow.length();
+        flow * (1.0 + 0.5 * WATER_EDDIES * f)
+            + across * (0.8 * WATER_EDDIES * g)
+            + Vec3::Y * (WATER_EDDIES * speed * e)
+    }
+}
+
+/// Bodies with this many particles or more split into runs solved side by side.
+const SPLIT_MIN: usize = 1024;
+/// Fewest particles in a run: smaller ones cost more to hand out than they save.
+const RUN_MIN: usize = 512;
+
+/// How a big body of separate pieces (hair's strands, each a chain of consecutive ids)
+/// splits into runs of whole pieces, each stepped on its own thread (Jolt groups a soft
+/// body's vertices the same way; a cut never splits a piece, so no constraint joins two
+/// runs, and a body all of one piece, like a cloth, stays one run). Each run's constraints.
+#[derive(Debug, Clone, Default)]
+struct Split {
+    key: u64,
+    /// Run `k` holds particles `starts[k]..starts[k + 1]`.
+    starts: Vec<usize>,
+    lists: Vec<RunLists>,
+}
+
+/// The constraints whose particles all lie in one run, by index.
+#[derive(Debug, Clone, Default)]
+struct RunLists {
+    distances: Vec<u32>,
+    tethers: Vec<u32>,
+    goals: Vec<u32>,
+    skin_planes: Vec<u32>,
+    skin_capsules: Vec<u32>,
+    pins: Vec<u32>,
+}
+
+impl Split {
+    fn update(&mut self, sim: &Sim) {
+        let n = sim.pos.len();
+        let threads = ComputeTaskPool::try_get().map_or(1, |p| p.thread_num());
+        let runs = if n >= SPLIT_MIN && threads > 1 {
+            (n / RUN_MIN).clamp(1, threads)
+        } else {
+            1
+        };
+        let mix = |h: u64, v: u64| (h ^ v).wrapping_mul(0x100_0000_01b3);
+        let pairs = sim.distances.iter().map(|c| (c.a, c.b));
+        let pairs = pairs.chain(sim.tethers.iter().map(|c| (c.p, c.anchor)));
+        let mut key = pairs.clone().fold(mix(n as u64, runs as u64), |h, (a, b)| {
+            mix(h, a as u64 | (b as u64) << 32)
+        });
+        let singles = sim.goals.iter().map(|g| g.p);
+        let singles = singles.chain(sim.skin_planes.iter().map(|c| c.p));
+        let singles = singles.chain(sim.skin_capsules.iter().map(|c| c.p));
+        let singles = singles.chain(sim.pins.iter().map(|c| c.p));
+        key = singles.clone().fold(key, |h, p| mix(h, p as u64));
+        if key == self.key && !self.lists.is_empty() {
+            return;
+        }
+        self.key = key;
+        // Where a cut can go: before particle `i` when nothing before it is joined to
+        // anything from `i` on.
+        let mut reach: Vec<u32> = (0..n as u32).collect();
+        for (a, b) in pairs {
+            let (lo, hi) = (a.min(b) as usize, a.max(b));
+            if lo < n {
+                reach[lo] = reach[lo].max(hi);
+            }
+        }
+        self.starts.clear();
+        self.starts.push(0);
+        let size = n.div_ceil(runs);
+        let mut far = 0;
+        for (i, &r) in reach.iter().enumerate() {
+            if i > 0 && far < i && i - self.starts[self.starts.len() - 1] >= size {
+                self.starts.push(i);
+            }
+            far = far.max(r as usize);
+        }
+        self.starts.push(n);
+        let runs = self.starts.len() - 1;
+        self.lists.clear();
+        self.lists.resize(runs, RunLists::default());
+        let starts = &self.starts;
+        let of = |i: u32| starts.partition_point(|&s| s <= i as usize) - 1;
+        for (k, c) in sim.distances.iter().enumerate() {
+            self.lists[of(c.a)].distances.push(k as u32);
+        }
+        for (k, c) in sim.tethers.iter().enumerate() {
+            self.lists[of(c.p)].tethers.push(k as u32);
+        }
+        for (k, g) in sim.goals.iter().enumerate() {
+            self.lists[of(g.p)].goals.push(k as u32);
+        }
+        for (k, c) in sim.skin_planes.iter().enumerate() {
+            self.lists[of(c.p)].skin_planes.push(k as u32);
+        }
+        for (k, c) in sim.skin_capsules.iter().enumerate() {
+            self.lists[of(c.p)].skin_capsules.push(k as u32);
+        }
+        for (k, c) in sim.pins.iter().enumerate() {
+            self.lists[of(c.p)].pins.push(k as u32);
+        }
+    }
+}
+
+/// A run's share of the body: particles `base..base + pos.len()`.
+struct Run<'a> {
+    base: usize,
+    pos: &'a mut [Vec3],
+    vel: &'a mut [Vec3],
+    prev: &'a mut [Vec3],
+}
+
+/// Run `f` on each run (`starts` as in [`Split`]), side by side on the compute pool when
+/// `parallel` and there are several, and return what each gives in order.
+fn for_runs<R: Send + 'static>(
+    starts: &[usize],
+    parallel: bool,
+    (mut pos, mut vel, mut prev): (&mut [Vec3], &mut [Vec3], &mut [Vec3]),
+    f: impl Fn(usize, Run) -> R + Sync,
+) -> Vec<R> {
+    let mut runs = Vec::with_capacity(starts.len().saturating_sub(1));
+    for (k, span) in starts.windows(2).enumerate() {
+        let len = span[1] - span[0];
+        let (p, rest_p) = std::mem::take(&mut pos).split_at_mut(len);
+        let (v, rest_v) = std::mem::take(&mut vel).split_at_mut(len);
+        let (q, rest_q) = std::mem::take(&mut prev).split_at_mut(len);
+        (pos, vel, prev) = (rest_p, rest_v, rest_q);
+        runs.push((
+            k,
+            Run {
+                base: span[0],
+                pos: p,
+                vel: v,
+                prev: q,
+            },
+        ));
+    }
+    match ComputeTaskPool::try_get() {
+        Some(pool) if parallel && runs.len() > 1 => {
+            let f = &f;
+            pool.scope(|scope| {
+                for (k, r) in runs {
+                    scope.spawn(async move { f(k, r) });
+                }
+            })
+        }
+        _ => runs.into_iter().map(|(k, r)| f(k, r)).collect(),
+    }
+}
+
+/// What every run reads while it predicts and solves its constraints.
+struct Shared<'a> {
+    p: SimParams,
+    h: f32,
+    inv_h: f32,
+    inv_h2: f32,
+    w: &'a [f32],
+    submerged: &'a [f32],
+    normals: &'a [Vec3],
+    flow: &'a Flow,
+    frames: &'a [Frame],
+    poses: &'a [(Vec3, Quat)],
+    distances: &'a [Distance],
+    tethers: &'a [Tether],
+    goals: &'a [Goal],
+    skin_planes: &'a [SkinPlane],
+    skin_capsules: &'a [SkinCapsule],
+    pins: &'a [Pin],
+}
+
+/// Predict a run's particles and solve the constraints inside it; gives the goals'
+/// reaction impulses on the frames.
+/// `accel` holds the run's particles' accelerations.
+fn constrain_run(s: &Shared, lists: &RunLists, accel: &[Vec3], run: Run) -> Vec<ColliderImpulse> {
+    let Run {
+        base,
+        pos,
+        vel,
+        prev,
+    } = run;
+    let (p, h, w) = (s.p, s.h, s.w);
+    // Predict. Water drag pulls the velocity toward the current, implicitly (stable
+    // however strong).
+    for (k, ((x, v), before)) in pos.iter_mut().zip(vel.iter_mut()).zip(prev).enumerate() {
+        let i = base + k;
+        *before = *x;
+        if w[i] > 0.0 {
+            *v += accel[k] * h;
+            if let Some(&sub) = s.submerged.get(i)
+                && sub > 0.0
+            {
+                let k = p.water_drag * sub * h;
+                let c = s.flow.at(*x);
+                let rel = *v - c;
+                *v = match s.normals.get(i).and_then(|n| n.try_normalize()) {
+                    Some(n) => {
+                        let along = rel.dot(n);
+                        let slide = rel - n * along;
+                        c + n * (along / (1.0 + k)) + slide / (1.0 + k * SLIDE_DRAG)
+                    }
+                    None => c + rel / (1.0 + k),
+                };
+            }
+            *x += *v * h;
+        }
+    }
+    let point = |frame: u16, local: Vec3| {
+        let (fp, fr) = s.poses[frame as usize];
+        fp + fr * local
+    };
+    for &k in &lists.pins {
+        let pin = &s.pins[k as usize];
+        pos[pin.p as usize - base] = point(pin.frame, pin.local);
+    }
+
+    // Constraints.
+    solve_distances(pos, base, w, s.inv_h2, s.distances, &lists.distances);
+    solve_tethers(pos, base, w, s.tethers, &lists.tethers);
+    let mut impulses = vec![ColliderImpulse::default(); s.frames.len()];
+    for &k in &lists.goals {
+        let g = &s.goals[k as usize];
+        let i = g.p as usize;
+        if w[i] == 0.0 {
+            continue;
+        }
+        let x = &mut pos[i - base];
+        let target = point(g.frame, g.local);
+        let dx = (target - *x) * (w[i] / (w[i] + g.compliance * s.inv_h2));
+        *x += dx;
+        // Reaction on the frame: equal and opposite impulse.
+        let j = dx * (s.inv_h / w[i]);
+        let fi = &mut impulses[g.frame as usize];
+        fi.linear -= j;
+        fi.angular -= (*x - s.frames[g.frame as usize].to_pos).cross(j);
+    }
+    for &k in &lists.skin_planes {
+        let c = &s.skin_planes[k as usize];
+        let i = c.p as usize;
+        if w[i] == 0.0 {
+            continue;
+        }
+        let x = &mut pos[i - base];
+        let (fp, fr) = s.poses[c.frame as usize];
+        let n = fr * c.normal;
+        let d = (*x - fp - fr * c.point).dot(n) - c.margin;
+        if d < 0.0 {
+            *x -= n * d;
+        }
+    }
+    for &k in &lists.skin_capsules {
+        let c = &s.skin_capsules[k as usize];
+        let i = c.p as usize;
+        if w[i] == 0.0 {
+            continue;
+        }
+        let x = &mut pos[i - base];
+        let (fp, fr) = s.poses[c.frame as usize];
+        let (a, ab) = (fp + fr * c.a, fr * (c.b - c.a));
+        let t = ((*x - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+        let off = *x - a - ab * t;
+        let dist = off.length();
+        let d = dist - c.radius;
+        if d < 0.0 && d > -c.reach && dist > 1e-6 {
+            *x -= off * (d / dist);
+        }
+    }
+    impulses
+}
+
+/// Distance constraints `list` (indices into `distances`) on particles `base..`.
+fn solve_distances(
+    pos: &mut [Vec3],
+    base: usize,
+    w: &[f32],
+    inv_h2: f32,
+    distances: &[Distance],
+    list: &[u32],
+) {
+    for &k in list {
+        let c = &distances[k as usize];
+        let (a, b) = (c.a as usize, c.b as usize);
+        let wsum = w[a] + w[b];
+        if wsum == 0.0 {
+            continue;
+        }
+        let d = pos[a - base] - pos[b - base];
+        let len = d.length();
+        if len < 1e-9 {
+            continue;
+        }
+        let dl = -(len - c.rest) / (wsum + c.compliance * inv_h2);
+        let corr = d * (dl / len);
+        pos[a - base] += corr * w[a];
+        pos[b - base] -= corr * w[b];
+    }
+}
+
+/// Tethers `list` (indices into `tethers`) on particles `base..`.
+fn solve_tethers(pos: &mut [Vec3], base: usize, w: &[f32], tethers: &[Tether], list: &[u32]) {
+    for &k in list {
+        let c = &tethers[k as usize];
+        let (i, a) = (c.p as usize, c.anchor as usize);
+        if w[i] == 0.0 {
+            continue;
+        }
+        let d = pos[i - base] - pos[a - base];
+        let len = d.length();
+        if len > c.max {
+            // A pinned anchor doesn't move; one held by a goal (cloth on a moving body)
+            // takes its share, so the goal passes the pull on to the body.
+            let corr = d * ((len - c.max) / (len * (w[i] + w[a])));
+            pos[i - base] -= corr * w[i];
+            pos[a - base] += corr * w[a];
+        }
+    }
+}
+
+/// What every run reads while it collides.
+struct Touch<'a> {
+    p: SimParams,
+    h: f32,
+    inv_h: f32,
+    w: &'a [f32],
+    ground: &'a [[f32; 4]],
+    colliders: &'a [LocalCollider],
+    posed: &'a [PosedCollider],
+    near_starts: &'a [u32],
+    near: &'a [u32],
+}
+
+/// What a run's collisions gave.
+struct Touched {
+    contacts: u32,
+    ground_impact: (f32, Vec3),
+    impulses: Vec<ColliderImpulse>,
+}
+
+/// Collide a run's particles with the ground and the colliders, then update their
+/// velocities.
+fn collide_run(t: &Touch, run: Run) -> Touched {
+    let Run {
+        base,
+        pos,
+        vel,
+        prev,
+    } = run;
+    let (p, h, w) = (t.p, t.h, t.w);
+    let end = base + pos.len();
+    let mut out = Touched {
+        contacts: 0,
+        ground_impact: (0.0, Vec3::ZERO),
+        impulses: vec![ColliderImpulse::default(); t.colliders.len()],
+    };
+    let shared_ground = (t.ground.len() == 1).then(|| t.ground[0]);
+    for k in 0..pos.len() {
+        let i = base + k;
+        if w[i] == 0.0 {
+            continue;
+        }
+        let g = shared_ground.or_else(|| t.ground.get(i).copied());
+        if let Some(g) = g {
+            let x = pos[k];
+            let n = Vec3::new(g[0], g[1], g[2]);
+            let d = n.dot(x) + g[3] - p.radius;
+            if d < 0.0 {
+                let approach = -n.dot(vel[k]);
+                if approach > out.ground_impact.0 {
+                    out.ground_impact = (approach, x);
+                }
+                pos[k] = friction(x - n * d, prev[k], n, -d, Vec3::ZERO, h, p.friction);
+            }
+        }
+    }
+    for (ci, c) in t.posed.iter().enumerate() {
+        let near = &t.near[t.near_starts[ci] as usize..t.near_starts[ci + 1] as usize];
+        // Each collider's particles are in id order.
+        let from = near.partition_point(|&i| (i as usize) < base);
+        let to = near.partition_point(|&i| (i as usize) < end);
+        for &i in &near[from..to] {
+            let i = i as usize;
             if w[i] == 0.0 {
                 continue;
             }
-            let g = shared_ground.or_else(|| self.ground.get(i).copied());
-            if let Some(g) = g {
-                let x = pos[i];
-                let n = Vec3::new(g[0], g[1], g[2]);
-                let d = n.dot(x) + g[3] - p.radius;
-                if d < 0.0 {
-                    let approach = -n.dot(self.vel[i]);
-                    if approach > self.ground_impact.0 {
-                        self.ground_impact = (approach, x);
-                    }
-                    pos[i] = friction(x - n * d, self.prev[i], n, -d, Vec3::ZERO, h, p.friction);
-                }
+            let k = i - base;
+            let mut x = pos[k];
+            let Some((d, n)) = c.query(&t.colliders[ci].shape, x) else {
+                continue;
+            };
+            if d >= p.radius {
+                continue;
             }
-        }
-        for (ci, c) in self.posed.iter().enumerate() {
-            let near = self.near_starts[ci] as usize..self.near_starts[ci + 1] as usize;
-            for &i in &self.near[near] {
-                let i = i as usize;
-                if w[i] == 0.0 {
-                    continue;
-                }
-                let mut x = pos[i];
-                let Some((d, n)) = c.query(&colliders[ci].shape, x) else {
-                    continue;
-                };
-                if d >= p.radius {
-                    continue;
-                }
-                contacts += 1;
-                let push = p.radius - d;
-                let before = x;
-                x += n * push;
-                let mu = (p.friction * c.friction).sqrt();
-                x = friction(x, self.prev[i], n, push, c.velocity_at(x), h, mu);
-                if colliders[ci].dynamic {
-                    let j = (x - before) * (inv_h / w[i]);
-                    let imp = &mut self.collider_impulses[ci];
-                    imp.linear -= j;
-                    imp.angular -= (x - colliders[ci].to_pos).cross(j);
-                }
-                pos[i] = x;
+            out.contacts += 1;
+            let push = p.radius - d;
+            let before = x;
+            x += n * push;
+            let mu = (p.friction * c.friction).sqrt();
+            x = friction(x, prev[k], n, push, c.velocity_at(x), h, mu);
+            if t.colliders[ci].dynamic {
+                let j = (x - before) * (t.inv_h / w[i]);
+                let imp = &mut out.impulses[ci];
+                imp.linear -= j;
+                imp.angular -= (x - t.colliders[ci].to_pos).cross(j);
             }
-        }
-        self.contacts = contacts;
-
-        // Velocities.
-        let damp = (1.0 - p.damping * h).max(0.0);
-        let max2 = p.max_speed * p.max_speed;
-        for i in 0..pos.len() {
-            let mut v = (pos[i] - self.prev[i]) * inv_h;
-            if w[i] > 0.0 {
-                v *= damp;
-                let s2 = v.length_squared();
-                if s2 > max2 {
-                    v *= p.max_speed / s2.sqrt();
-                }
-            }
-            self.vel[i] = v;
+            pos[k] = x;
         }
     }
+
+    // Velocities.
+    let damp = (1.0 - p.damping * h).max(0.0);
+    let max2 = p.max_speed * p.max_speed;
+    for k in 0..pos.len() {
+        let mut v = (pos[k] - prev[k]) * t.inv_h;
+        if w[base + k] > 0.0 {
+            v *= damp;
+            let s2 = v.length_squared();
+            if s2 > max2 {
+                v *= p.max_speed / s2.sqrt();
+            }
+        }
+        vel[k] = v;
+    }
+    out
 }
 
 /// Candidate pairs for cloth self-collision (a Verlet list): each particle with the
@@ -1093,6 +1586,8 @@ struct SelfContacts {
     starts: Vec<u32>,
     bucketed: Vec<(Vec3, u32)>,
     cells: Vec<u32>,
+    /// The hot patches' triangles, this search.
+    hot: Vec<u32>,
     patches: Patches,
 }
 
@@ -1103,6 +1598,8 @@ const NEAR_SLACK: f32 = 0.05;
 const PATCH_CONE: f32 = 1.25;
 /// Triangles per patch.
 const PATCH_SIZE: usize = 48;
+/// Fewest triangles a thread searches when the self-collision search splits.
+const SEARCH_CHUNK: usize = 256;
 
 /// The cloth's triangles grown into small connected patches, to skip most of the
 /// self-collision search. Each search joins neighbouring patches into regions whose normals
@@ -1424,16 +1921,17 @@ impl SelfContacts {
             }
         }
         let beside = -reach / edge.max(1e-3) - 0.05;
-        for t in self.patches.hot_triangles() {
+        let (starts, bucketed) = (&*starts, &*bucketed);
+        let near = |t: u32, pairs: &mut Vec<(u32, u32)>| {
             let tri = &triangles[t as usize];
             let [a, b, c] = tri.map(|i| pos[i as usize]);
             let Some(n) = (b - a).cross(c - a).try_normalize() else {
-                continue;
+                return;
             };
             let (lo, hi) = (a.min(b).min(c) - reach, a.max(b).max(c) + reach);
             let (clo, chi) = (cell_of(lo), cell_of(hi));
             if (chi - clo).max_element() > 4 {
-                continue; // torn loose and stretched across the scene
+                return; // torn loose and stretched across the scene
             }
             for z in clo.z..=chi.z {
                 for y in clo.y..=chi.y {
@@ -1447,10 +1945,39 @@ impl SelfContacts {
                             if d.abs() < reach
                                 && barycentric(p - n * d, a, b, c).iter().all(|&u| u > beside)
                             {
-                                self.pairs.push((i, t));
+                                pairs.push((i, t));
                             }
                         }
                     }
+                }
+            }
+        };
+        // A big search splits over the compute pool, by triangles.
+        self.hot.clear();
+        self.hot.extend(self.patches.hot_triangles());
+        let threads = ComputeTaskPool::try_get().map_or(1, |p| p.thread_num());
+        let tasks = (self.hot.len() / SEARCH_CHUNK).clamp(1, threads);
+        match ComputeTaskPool::try_get() {
+            Some(pool) if tasks > 1 => {
+                let near = &near;
+                let found = pool.scope(|scope| {
+                    for chunk in self.hot.chunks(self.hot.len().div_ceil(tasks)) {
+                        scope.spawn(async move {
+                            let mut pairs = Vec::new();
+                            for &t in chunk {
+                                near(t, &mut pairs);
+                            }
+                            pairs
+                        });
+                    }
+                });
+                for f in found {
+                    self.pairs.extend(f);
+                }
+            }
+            _ => {
+                for &t in &self.hot {
+                    near(t, &mut self.pairs);
                 }
             }
         }
@@ -1724,6 +2251,68 @@ mod tests {
         }
         sim.pin_here(0, world);
         sim
+    }
+
+    #[test]
+    fn strands_stepped_side_by_side_match_strands_stepped_alone() {
+        ComputeTaskPool::get_or_init(|| {
+            engine_core::tasks::TaskPoolBuilder::new()
+                .num_threads(4)
+                .build()
+        });
+        // 64 hanging strands of 20 in one body (split into runs on the pool), and each in a
+        // body of its own (too small to split), in gusty wind over a sphere.
+        let strand = |k: usize, sim: &mut Sim, frame: u16| {
+            let first = sim.len() as u32;
+            let root = Vec3::new(
+                (k % 8) as f32 * 0.1 - 0.35,
+                1.2,
+                (k / 8) as f32 * 0.1 - 0.35,
+            );
+            for i in 0..20 {
+                sim.add_particle(root + Vec3::new(0.03 * i as f32, 0.0, 0.0), 0.001);
+            }
+            for i in 1..20 {
+                sim.add_distance(first + i - 1, first + i, 0.0, u32::MAX);
+            }
+            sim.pin_here(first, frame);
+        };
+        let setup = |sim: &mut Sim| {
+            sim.params.drag = 2.5;
+            sim.params.turbulence = 0.6;
+            sim.params.wind = Vec3::new(2.0, 0.0, 1.0);
+            sim.params.radius = 0.005;
+        };
+        let mut all = Sim::new(DVec3::ZERO);
+        let frame = all.add_frame(Vec3::ZERO, Quat::IDENTITY);
+        setup(&mut all);
+        let mut alone: Vec<Sim> = (0..64)
+            .map(|k| {
+                let mut sim = Sim::new(DVec3::ZERO);
+                let frame = sim.add_frame(Vec3::ZERO, Quat::IDENTITY);
+                strand(k, &mut sim, frame);
+                setup(&mut sim);
+                sim
+            })
+            .collect();
+        for k in 0..64 {
+            strand(k, &mut all, frame);
+        }
+        let colliders = [LocalCollider::fixed(
+            LocalShape::Sphere { radius: 0.4 },
+            Vec3::new(0.0, 0.5, 0.0),
+            Quat::IDENTITY,
+        )];
+        for _ in 0..60 {
+            all.step(1.0 / 60.0, &colliders);
+            for sim in &mut alone {
+                sim.step(1.0 / 60.0, &colliders);
+            }
+        }
+        assert!(all.split.starts.len() > 2, "the body split into runs");
+        for (k, sim) in alone.iter().enumerate() {
+            assert_eq!(sim.pos, all.pos[k * 20..(k + 1) * 20], "strand {k}");
+        }
     }
 
     #[test]
