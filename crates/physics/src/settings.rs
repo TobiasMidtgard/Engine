@@ -7,12 +7,16 @@ use rapier3d::prelude::IntegrationParameters;
 #[derive(Resource, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PhysicsSettings {
-    /// Solver iterations per substep. More = stiffer stacks and joints, slower. 4 is plenty for
-    /// most scenes; tall towers and long chains like 6–8.
+    /// Solver iterations per substep. Rapier's iterations are themselves small steps (it
+    /// divides the substep among them, finding contacts once), so these are where precision
+    /// comes from: 8 at 60 Hz solves as finely as 4 at 120 Hz for about half the cost, as in
+    /// Box2D's "soft step" and Jolt (`engine-design/physics-perf-research.md`). More = stiffer
+    /// stacks and joints, slower.
     pub solver_iterations: u32,
     /// Longest world-time substep, seconds. Each fixed step is split into substeps no longer
-    /// than this (two per 60 Hz step by default), so joints stay tight and fast-forward
-    /// (time scale > 1) is as stable as 1×.
+    /// than this (one per 60 Hz step by default), so fast-forward (time scale > 1) is as stable
+    /// as 1×. Each substep finds contacts anew and pays for every contact's bookkeeping, so
+    /// prefer more `solver_iterations` to shorter substeps.
     pub max_substep_secs: f32,
     /// Upper bound on substeps per fixed step (protects the frame rate at extreme speed-ups).
     pub max_substeps: u32,
@@ -83,8 +87,8 @@ pub struct PhysicsSettings {
 impl Default for PhysicsSettings {
     fn default() -> Self {
         Self {
-            solver_iterations: 4,
-            max_substep_secs: 1.0 / 120.0,
+            solver_iterations: 8,
+            max_substep_secs: 1.0 / 60.0,
             max_substeps: 24,
             allowed_penetration_m: 0.001,
             contact_stiffness_hz: 60.0,

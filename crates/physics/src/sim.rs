@@ -100,6 +100,10 @@ pub struct Region {
     /// stamp, the body's mass and whether the collider can spin ([`Touch::spins`]).
     touch_marks: Vec<(u64, f32, bool)>,
     touch_stamp: u64,
+    /// Awake bodies' velocities as the last step began, by body index, stamped with
+    /// `step_stamp` ([`Region::note_velocities`]).
+    before_step: Vec<(u64, Vec3)>,
+    step_stamp: u64,
 }
 
 /// The contact pairs a substep left for a closer look ([`Region::touches`]), each sorted by
@@ -148,6 +152,8 @@ impl Region {
             hull_bounds: Vec::new(),
             touch_marks: Vec::new(),
             touch_stamp: 0,
+            before_step: Vec::new(),
+            step_stamp: 0,
         }
     }
 
@@ -156,6 +162,31 @@ impl Region {
     /// hard hits ([`Simulation::process_contacts`]). A heap of rocks has thousands of resting
     /// pairs and few of either, and each pair's contact data is scattered in memory, so every
     /// pair is read once: the awake colliders' masses and shapes are noted first.
+    /// Note the awake bodies' velocities before a step: a landing faces the way its body was
+    /// travelling, before the solver stopped it ([`Simulation::impact_for`]).
+    pub(crate) fn note_velocities(&mut self) {
+        self.step_stamp += 1;
+        let (stamp, world, seen) = (self.step_stamp, &self.world, &mut self.before_step);
+        for h in world.islands.active_bodies() {
+            let Some(rb) = world.bodies.get(h).filter(|rb| rb.is_dynamic()) else {
+                continue;
+            };
+            let i = h.into_raw_parts().0 as usize;
+            if seen.len() <= i {
+                seen.resize(i + 1, (0, Vec3::ZERO));
+            }
+            seen[i] = (stamp, rb.linvel());
+        }
+    }
+
+    /// A body's velocity as the last step began, if it was awake then.
+    fn velocity_before(&self, h: RigidBodyHandle) -> Option<Vec3> {
+        self.before_step
+            .get(h.into_raw_parts().0 as usize)
+            .filter(|v| v.0 == self.step_stamp)
+            .map(|v| v.1)
+    }
+
     pub(crate) fn touches(&mut self, sub_dt: f32, min_speed: Option<f32>) -> Touches {
         let world = &self.world;
         let g = world.gravity.length();
@@ -2754,11 +2785,15 @@ impl Simulation {
         h2: ColliderHandle,
         event: ContactEvent,
     ) -> Option<Impact> {
-        let world = &self.region(region_id).world;
+        let region = self.region(region_id);
+        let world = &region.world;
         let side = |h: ColliderHandle| {
             let c = &world.colliders[h];
-            let body = c.parent().and_then(|p| world.bodies.get(p));
-            (c, body.filter(|b| b.is_dynamic()))
+            let body = c
+                .parent()
+                .and_then(|p| Some((p, world.bodies.get(p)?)))
+                .filter(|(_, b)| b.is_dynamic());
+            (c, body)
         };
         let (c1, b1) = side(h1);
         let (c2, b2) = side(h2);
@@ -2766,13 +2801,17 @@ impl Simulation {
         let (mover_c, mover_b, other_c, other_dynamic, normal_sign) = match (b1, b2) {
             (Some(b), None) => (c1, b, c2, false, -1.0),
             (None, Some(b)) => (c2, b, c1, false, 1.0),
-            (Some(x), Some(y)) if x.mass() <= y.mass() => (c1, x, c2, true, -1.0),
+            (Some(x), Some(y)) if x.1.mass() <= y.1.mass() => (c1, x, c2, true, -1.0),
             (Some(_), Some(y)) => (c2, y, c1, true, 1.0),
             _ => return None,
         };
+        let (mover_h, mover_b) = mover_b;
         let mass = mover_b.mass();
         let n = event.normal * normal_sign; // from the other side toward the mover
-        let v = mover_b.linvel();
+        // Travelling the way it went into the step: the solver may have stopped it since.
+        let v = region
+            .velocity_before(mover_h)
+            .unwrap_or_else(|| mover_b.linvel());
         let tangent = v - n * v.dot(n);
         let ext = mover_c.compute_aabb().half_extents() * 2.0;
         // Along the travel when sliding; else along the shape's longest axis lying flat.

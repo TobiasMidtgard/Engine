@@ -120,7 +120,7 @@ fn a_travelling_region_drops_the_statics_it_leaves_behind() {
         diagnostics.get("physics.static_copies"),
         Some(stats(&app).static_copies as f64)
     );
-    assert_eq!(diagnostics.get("physics.substeps"), Some(2.0));
+    assert_eq!(diagnostics.get("physics.substeps"), Some(1.0));
 }
 
 fn zero_g(app: &mut App) {
