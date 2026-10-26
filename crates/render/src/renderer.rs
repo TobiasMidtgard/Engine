@@ -503,7 +503,7 @@ impl Renderer {
             images: Default::default(),
         };
 
-        let targets = Targets::new(&device, &formats, width, height);
+        let targets = Targets::new(&device, &formats, width, height, UVec2::new(width, height));
         let frame_uniform_buffer = |label: &str| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -620,12 +620,21 @@ impl Renderer {
         self.features.sort_by_key(|f| f.order());
     }
 
-    fn resize(&mut self, width: u32, height: u32) {
-        let (width, height) = (width.max(1), height.max(1));
-        if let Some(s) = &mut self.surface {
-            s.resize(&self.shared.device, width, height);
+    /// Size the targets for a scene of `scene` pixels in a window of `window` pixels.
+    fn resize(&mut self, scene: UVec2, window: UVec2) {
+        let (width, height) = (scene.x.max(1), scene.y.max(1));
+        if let Some(s) = &mut self.surface
+            && window != self.targets.window
+        {
+            s.resize(&self.shared.device, window.x.max(1), window.y.max(1));
         }
-        self.targets = Targets::new(&self.shared.device, &self.shared.formats, width, height);
+        self.targets = Targets::new(
+            &self.shared.device,
+            &self.shared.formats,
+            width,
+            height,
+            window,
+        );
         self.post = create_post(
             &self.shared,
             &self.targets,
@@ -669,13 +678,16 @@ impl Renderer {
         let mut cpu = crate::perf::CpuSteps::default();
         cpu.step("frame setup");
 
-        // Size & vsync.
-        let (want_w, want_h) = world
+        // Size & vsync: the scene fills the active camera's viewport, the output the window.
+        let window = world
             .get_resource::<Window>()
-            .map(|w| (w.width.max(1), w.height.max(1)))
-            .unwrap_or((self.targets.width, self.targets.height));
-        if (want_w, want_h) != (self.targets.width, self.targets.height) {
-            self.resize(want_w, want_h);
+            .map(|w| UVec2::new(w.width.max(1), w.height.max(1)))
+            .unwrap_or(self.targets.window);
+        let (scene_origin, scene_size) = crate::frame::camera_viewport(world, window);
+        if scene_size != UVec2::new(self.targets.width, self.targets.height)
+            || window != self.targets.window
+        {
+            self.resize(scene_size, window);
         }
         let settings = world.resource::<RenderSettings>().clone();
         if let Some(s) = &mut self.surface {
@@ -728,6 +740,8 @@ impl Renderer {
             &mut self.exposure,
             self.frame_index,
         );
+        view.window = window;
+        view.viewport_origin = scene_origin;
         if let Some(prev) = self.previous
             && crate::effects::is_camera_cut(
                 prev.origin,
@@ -1324,7 +1338,16 @@ impl Renderer {
         // Tonemap.
         self.perf.pass(&mut cpu, &mut encoder, "tonemap");
         {
+            // Cleared to black around the scene's viewport.
             let mut pass = fullscreen_pass(&mut encoder, "tonemap", &self.targets.ldr.view, true);
+            pass.set_viewport(
+                scene_origin.x as f32,
+                scene_origin.y as f32,
+                self.targets.width as f32,
+                self.targets.height as f32,
+                0.0,
+                1.0,
+            );
             pass.set_pipeline(&self.post.tonemap_pipeline);
             pass.set_bind_group(0, &self.post.tonemap_bind_group, &[]);
             pass.draw(0..3, 0..1);
@@ -1413,8 +1436,8 @@ impl Renderer {
                 &self.shared.device,
                 &buffer,
                 padded_row,
-                self.targets.width,
-                self.targets.height,
+                self.targets.window.x,
+                self.targets.window.y,
                 &pending,
             );
             if let Some(mut s) = world.get_resource_mut::<Screenshots>() {
@@ -1612,6 +1635,7 @@ impl Renderer {
             "adapter": self.shared.adapter_info.name,
             "backend": format!("{:?}", self.shared.adapter_info.backend),
             "size": [self.targets.width, self.targets.height],
+            "window": [self.targets.window.x, self.targets.window.y],
             "windowed": self.surface.is_some(),
             "frame": self.frame_index,
             "ev100": self.last_view.as_ref().map(|v| v.ev100),

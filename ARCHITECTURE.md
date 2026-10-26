@@ -165,6 +165,13 @@ Writes: `HeatField`, `WorldImpulse`, `IgniteRequest`, `DamageEvent`, `NoiseEvent
 | `draw(Opaque/Sky/Transparent)` | draw into the HDR scene; transparent can read scene color/depth copies |
 | `overlay` | draw onto the final LDR image (UI, debug) |
 
+**Viewports** (built): a `Viewport { position, size }` on the active camera (physical pixels
+from the window's top-left) makes the scene render at the rectangle's size and aspect ratio
+and land there in the window; the rest of the window is black. `ctx.view.width`/`height` are
+the scene's size, `ctx.view.window` the whole output's and `ctx.view.viewport_origin` the
+scene's corner in it. Overlays draw onto the whole window, so screen-space overlays (UI,
+editor panels, debug text) size themselves from `view.window`.
+
 **Sun shadows** (built): four cascades out to `RenderSettings::shadow_distance` (rotation-
 invariant spheres snapped to texels, PCSS filtering), then a **far shadow map** out to
 `far_shadow_distance` (8 km by default; 0 = off): one `shadow_map_size`² map around the camera

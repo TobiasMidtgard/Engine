@@ -1,6 +1,7 @@
 //! Render targets that depend on the output size.
 
 use crate::features::Formats;
+use engine_core::math::UVec2;
 
 /// A texture with its default view.
 pub struct Tex {
@@ -45,8 +46,11 @@ impl Tex {
 
 /// Size-dependent targets.
 pub struct Targets {
+    /// The scene's size (every target but `ldr`).
     pub width: u32,
     pub height: u32,
+    /// The output image's size (`ldr`): the window, which the scene may cover only part of.
+    pub window: UVec2,
     /// Scene color, pre-exposed linear HDR.
     pub hdr: Tex,
     /// Reverse-Z depth.
@@ -81,10 +85,17 @@ pub struct Targets {
 }
 
 impl Targets {
-    pub fn new(device: &wgpu::Device, formats: &Formats, width: u32, height: u32) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        formats: &Formats,
+        width: u32,
+        height: u32,
+        window: UVec2,
+    ) -> Self {
         use wgpu::TextureUsages as U;
         let width = width.max(1);
         let height = height.max(1);
+        let window = window.max(UVec2::ONE);
         let hdr = Tex::new(
             device,
             "hdr",
@@ -158,8 +169,8 @@ impl Targets {
         let ldr = Tex::new(
             device,
             "ldr",
-            width,
-            height,
+            window.x,
+            window.y,
             formats.ldr,
             U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC,
         );
@@ -181,6 +192,7 @@ impl Targets {
         Self {
             width,
             height,
+            window,
             hdr,
             depth,
             prepass_normal,
