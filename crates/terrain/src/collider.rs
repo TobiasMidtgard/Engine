@@ -7,19 +7,27 @@
 //! edits. Tiles are rebuilt when an edit touches them. Tiles cover the 3 × 3 block around
 //! every focus point and the tile under every dynamic body.
 //!
+//! A tile takes thousands of full terrain samples (over 100 ms on a showcase planet), so
+//! tiles are built on worker threads, a few at a time, and put in place when done: the frame
+//! never waits for them. Only the tiles right under a focus point or a body in the simulated
+//! range ([`SimulationRange`]), when they have none (at the start, or after a jump), are built
+//! on the spot, side by side on all cores, so nothing stands on thin air.
+//!
 //! Heightfield layout: `heights[row * cols + col]`, rows along local Z from −size/2 to
 //! +size/2, columns along local X from −size/2 to +size/2, heights in meters above the tile
 //! origin.
 
 use std::collections::{HashMap, HashSet};
+use std::thread::JoinHandle;
 
 use engine_core::math::{DMat3, DQuat, DVec3};
 use engine_core::prelude::*;
 use engine_world::physics::{BodyKind, Collider, ColliderShape, RigidBody};
-use engine_world::{FocusPoints, SurfaceMaterials};
+use engine_world::{FocusPoints, SimulationRange, SurfaceMaterials};
 
+use crate::chunk::ChunkSource;
 use crate::cube::NodeKey;
-use crate::palette::SurfaceIds;
+use crate::palette::{SurfaceIds, TerrainPalette};
 use crate::{TerrainRuntime, TerrainSettings, Terrains};
 
 /// Marks a terrain collider tile entity.
@@ -37,6 +45,11 @@ pub struct TerrainColliders {
     seen_edits: HashMap<Entity, usize>,
     /// Tiles waiting to be (re)built.
     queue: Vec<(Entity, NodeKey)>,
+    /// Tiles being built on worker threads.
+    building: HashMap<(Entity, NodeKey), JoinHandle<TileShape>>,
+    /// Tiles built so far (diagnostics: a count that keeps climbing while nothing moves is
+    /// tiles being thrown away and built again).
+    built: u64,
 }
 
 impl TerrainColliders {
@@ -47,12 +60,34 @@ impl TerrainColliders {
     pub fn is_empty(&self) -> bool {
         self.tiles.is_empty()
     }
+
+    /// No tile waiting or being built.
+    pub fn is_settled(&self) -> bool {
+        self.queue.is_empty() && self.building.is_empty()
+    }
 }
 
 /// Level whose patches are closest to `tile_m` across.
 fn tile_level(t: &TerrainRuntime, tile_m: f64) -> u8 {
     let root = t.source.map.root_size();
     (root / tile_m.max(1.0)).log2().round().clamp(0.0, 24.0) as u8
+}
+
+/// A tile's heightfield and where it lies in its terrain's own frame (so a tile built while
+/// the world shifted or the terrain moved is put in the right place).
+pub struct TileShape {
+    /// Terrain-local origin (on the ground at the tile's center) and axes.
+    origin: DVec3,
+    rotation: DQuat,
+    collider: Collider,
+}
+
+impl TileShape {
+    /// World transform of the tile on `t`.
+    fn transform(&self, t: &TerrainRuntime) -> Transform {
+        Transform::from_translation(t.position + t.rotation * self.origin)
+            .with_rotation((t.rotation * self.rotation).as_quat())
+    }
 }
 
 /// Build the heightfield for one tile: (world transform, collider).
@@ -62,11 +97,23 @@ pub fn build_tile(
     samples: u32,
     ids: &SurfaceIds,
 ) -> (Transform, Collider) {
-    let map = &t.source.map;
+    let shape = tile_shape(&t.source, &t.config.palette, key, samples, ids);
+    (shape.transform(t), shape.collider)
+}
+
+/// The heightfield for one tile, in the terrain's frame.
+fn tile_shape(
+    source: &ChunkSource,
+    palette: &TerrainPalette,
+    key: NodeKey,
+    samples: u32,
+    ids: &SurfaceIds,
+) -> TileShape {
+    let map = &source.map;
     let (lo, size) = key.face_rect();
     let center_ab = lo + size * 0.5;
     let (base_c, up, dir_c) = map.base(key.face, center_ab.x, center_ab.y);
-    let center = t.source.sample(base_c, up, dir_c, 0.0);
+    let center = source.sample(base_c, up, dir_c, 0.0);
     // The tile origin sits on the ground at the tile center, so heights stay small.
     let origin = base_c + up * center.height;
     // Tangent axes along the face's a and b directions.
@@ -96,23 +143,14 @@ pub fn build_tile(
                 lo.y + size - row as f64 * step
             };
             let (base, u, dir) = map.base(key.face, a, b);
-            let s = t.source.sample(base, u, dir, 0.0);
+            let s = source.sample(base, u, dir, 0.0);
             let p = base + u * s.height - origin;
             heights[(row * n + col) as usize] = p.dot(up) as f32;
             extent_x = extent_x.max(p.dot(x_axis).abs());
             extent_z = extent_z.max(p.dot(z_axis).abs());
         }
     }
-    let surface = t.config.palette.classify(
-        &center,
-        0.0,
-        center.height < 0.0 && t.source.shape.ocean,
-        ids,
-    );
-    let rot_local = DQuat::from_mat3(&DMat3::from_cols(x_axis, up, z_axis));
-    let world_rot = t.rotation * rot_local;
-    let transform = Transform::from_translation(t.position + t.rotation * origin)
-        .with_rotation(world_rot.as_quat());
+    let surface = palette.classify(&center, 0.0, center.height < 0.0 && source.shape.ocean, ids);
     let collider = Collider {
         shape: ColliderShape::Heightfield {
             heights,
@@ -123,19 +161,22 @@ pub fn build_tile(
         surface,
         ..Default::default()
     };
-    (transform, collider)
+    TileShape {
+        origin,
+        rotation: DQuat::from_mat3(&DMat3::from_cols(x_axis, up, z_axis)),
+        collider,
+    }
 }
 
 /// Most tiles kept under dynamic bodies away from every focus point, nearest first.
 pub const MAX_BODY_TILES: usize = 64;
-/// Most tiles built in one frame; the first is always built, the rest while the frame's
-/// building stays under [`BUILD_BUDGET_MS`].
-const MAX_BUILDS_PER_FRAME: usize = 8;
-const BUILD_BUDGET_MS: f64 = 2.0;
+/// Most tiles built at once on worker threads.
+const MAX_BUILDING: usize = 3;
 
 /// Keep collider tiles on every terrain that wants colliders: the 3 × 3 block around every
 /// focus point, and the tile under every dynamic body (awake or asleep, so a crate left
 /// behind still has ground when something wakes it), up to [`MAX_BODY_TILES`] of those.
+#[allow(clippy::too_many_arguments)]
 pub fn update_colliders(
     mut commands: Commands,
     terrains: Res<Terrains>,
@@ -143,8 +184,11 @@ pub fn update_colliders(
     focus: Res<FocusPoints>,
     materials: Res<SurfaceMaterials>,
     bodies: Query<(&Transform, &RigidBody)>,
+    range: Option<Res<SimulationRange>>,
     mut state: ResMut<TerrainColliders>,
+    diagnostics: Option<ResMut<engine_core::diagnostics::Diagnostics>>,
 ) {
+    let range = range.map(|r| *r).unwrap_or_default();
     let body_points: Vec<DVec3> = bodies
         .iter()
         .filter(|(_, b)| b.kind == BodyKind::Dynamic)
@@ -157,6 +201,9 @@ pub fn update_colliders(
     let mut wanted: Vec<(Entity, NodeKey)> = Vec::new();
     let mut wanted_set: HashSet<(Entity, NodeKey)> = HashSet::new();
     let mut body_tiles: Vec<(f64, (Entity, NodeKey))> = Vec::new();
+    // The tiles right under the focus points and under bodies in the simulated range: built on
+    // the spot when missing, so nothing falls through.
+    let mut underfoot: Vec<(Entity, NodeKey)> = Vec::new();
     for (&e, t) in &terrains.entries {
         if !t.config.colliders {
             continue;
@@ -172,6 +219,9 @@ pub fn update_colliders(
             };
             let side = up.any_orthonormal_vector();
             let fwd = up.cross(side);
+            if let Some(k) = t.source.map.node_at(local, level) {
+                underfoot.push((e, k));
+            }
             for dz in -1..=1 {
                 for dx in -1..=1 {
                     let q = local + (side * dx as f64 + fwd * dz as f64) * size;
@@ -186,6 +236,9 @@ pub fn update_colliders(
         for &p in body_points.iter().filter(|&&p| near(p)) {
             if let Some(k) = t.source.map.node_at(t.to_local(p), level) {
                 body_tiles.push((focus.distance(p), (e, k)));
+                if range.is_active(&focus, p) {
+                    underfoot.push((e, k));
+                }
             }
         }
         // Rebuild tiles touched by new edits.
@@ -241,29 +294,119 @@ pub fn update_colliders(
             state.queue.push(*k);
         }
     }
-    // Build a few queued tiles (one at least, more while the frame's budget lasts).
-    let started = std::time::Instant::now();
     let ids = SurfaceIds::new(&materials);
-    for built in 0..MAX_BUILDS_PER_FRAME {
-        if built > 0 && started.elapsed().as_secs_f64() * 1000.0 > BUILD_BUDGET_MS {
-            break;
-        }
-        if state.queue.is_empty() {
-            break;
-        }
-        let (e, key) = state.queue.remove(0);
-        let Some(t) = terrains.entries.get(&e) else {
+    // Put finished tiles in place (or drop them, if no longer wanted).
+    let done: Vec<_> = state
+        .building
+        .iter()
+        .filter(|(_, h)| h.is_finished())
+        .map(|(&k, _)| k)
+        .collect();
+    for k in done {
+        let handle = state.building.remove(&k).expect("tile being built");
+        let Ok(shape) = handle.join() else {
             continue;
         };
-        let (transform, collider) = build_tile(t, key, settings.collider_samples, &ids);
-        if let Some(old) = state.tiles.get(&(e, key)) {
-            commands.entity(*old).insert((transform, collider));
-        } else {
-            let id = commands
-                .spawn((transform, collider, TerrainColliderTile { terrain: e, key }))
-                .id();
-            state.tiles.insert((e, key), id);
+        place(&mut commands, &terrains, &mut state, &wanted_set, k, shape);
+    }
+    // Missing ground underfoot: build it now (waiting for tiles already on their way), all
+    // at once across the cores.
+    let mut missing: Vec<(Entity, NodeKey)> = Vec::new();
+    for k in underfoot {
+        if state.tiles.contains_key(&k) || missing.contains(&k) || !wanted_set.contains(&k) {
+            continue;
         }
+        if let Some(handle) = state.building.remove(&k)
+            && let Ok(shape) = handle.join()
+        {
+            place(&mut commands, &terrains, &mut state, &wanted_set, k, shape);
+            continue;
+        }
+        missing.push(k);
+    }
+    if !missing.is_empty() {
+        let samples = settings.collider_samples;
+        let shapes: Vec<_> = std::thread::scope(|scope| {
+            let jobs: Vec<_> = missing
+                .iter()
+                .filter_map(|&k| {
+                    let t = terrains.entries.get(&k.0)?;
+                    let ids = &ids;
+                    Some((
+                        k,
+                        scope.spawn(move || {
+                            tile_shape(&t.source, &t.config.palette, k.1, samples, ids)
+                        }),
+                    ))
+                })
+                .collect();
+            jobs.into_iter()
+                .filter_map(|(k, job)| job.join().ok().map(|shape| (k, shape)))
+                .collect()
+        });
+        for (k, shape) in shapes {
+            state.queue.retain(|q| *q != k);
+            place(&mut commands, &terrains, &mut state, &wanted_set, k, shape);
+        }
+    }
+    // Start the queued tiles on worker threads, a few at a time. (A tile already on its way
+    // waits in the queue: an edit since it started needs a fresh build after it.)
+    let mut i = 0;
+    while state.building.len() < MAX_BUILDING && i < state.queue.len() {
+        let k = state.queue[i];
+        if state.building.contains_key(&k) {
+            i += 1;
+            continue;
+        }
+        state.queue.remove(i);
+        let Some(t) = terrains.entries.get(&k.0) else {
+            continue;
+        };
+        let (source, palette, ids) = (t.source.clone(), t.config.palette.clone(), ids.clone());
+        let samples = settings.collider_samples;
+        let handle = std::thread::Builder::new()
+            .name("terrain-collider".into())
+            .spawn(move || tile_shape(&source, &palette, k.1, samples, &ids))
+            .expect("spawn a terrain collider thread");
+        state.building.insert(k, handle);
+    }
+    if let Some(mut d) = diagnostics {
+        d.set("terrain.collider_tiles", state.tiles.len() as f64);
+        d.set("terrain.collider_builds", state.built as f64);
+    }
+}
+
+/// Put a built tile in place: a new tile entity, or the new shape on the tile it replaces.
+fn place(
+    commands: &mut Commands,
+    terrains: &Terrains,
+    state: &mut TerrainColliders,
+    wanted: &HashSet<(Entity, NodeKey)>,
+    k: (Entity, NodeKey),
+    shape: TileShape,
+) {
+    let Some(t) = terrains.entries.get(&k.0) else {
+        return;
+    };
+    if !wanted.contains(&k) {
+        return;
+    }
+    state.built += 1;
+    let transform = shape.transform(t);
+    if let Some(old) = state.tiles.get(&k) {
+        commands.entity(*old).insert((transform, shape.collider));
+    } else {
+        let id = commands
+            .spawn((
+                transform,
+                shape.collider,
+                TerrainColliderTile {
+                    terrain: k.0,
+                    key: k.1,
+                },
+            ))
+            .id();
+        state.tiles.insert(k, id);
     }
 }
 
@@ -316,6 +459,22 @@ mod tests {
         (app, focus)
     }
 
+    /// Run frames until every wanted tile is built (the builds run on worker threads).
+    fn settle(app: &mut App) {
+        let start = std::time::Instant::now();
+        app.update();
+        while !app.world.resource::<TerrainColliders>().is_settled() {
+            assert!(
+                start.elapsed().as_secs() < 60,
+                "collider tiles never settled"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            app.update();
+        }
+        // (The last tiles' entities spawn with that frame's commands.)
+        app.update();
+    }
+
     /// Whether a collider tile lies under the point (x, z).
     fn tile_under(app: &mut App, x: f64, z: f64) -> bool {
         let mut q = app
@@ -345,8 +504,10 @@ mod tests {
                 ..Default::default()
             },
         ));
-        app.update_n(20);
+        // Ground under the focus from the first frame.
+        app.update();
         assert!(tile_under(&mut app, 0.0, 0.0), "no ground at the focus");
+        settle(&mut app);
         assert!(
             tile_under(&mut app, 1_000.0, 0.0),
             "no ground under the crate"
@@ -355,7 +516,7 @@ mod tests {
         assert!(!tile_under(&mut app, 0.0, -1_500.0));
         // The focus flies 2 km off: the crate keeps its ground, the old block goes.
         app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(-2_000.0, 2.0, 0.0);
-        app.update_n(20);
+        settle(&mut app);
         assert!(
             tile_under(&mut app, 1_000.0, 0.0),
             "the crate lost its ground"
@@ -380,8 +541,7 @@ mod tests {
             app.world
                 .spawn((Transform::from_xyz(x, 10.0, z), RigidBody::default()));
         }
-        // At least one tile a frame (more while each frame's budget lasts).
-        app.update_n(2 * 9 + MAX_BODY_TILES + 5);
+        settle(&mut app);
         assert!(
             tile_under(&mut app, 3_000.0, 0.0),
             "no ground at the second focus"
@@ -390,5 +550,30 @@ mod tests {
         assert_eq!(tiles, 2 * 9 + MAX_BODY_TILES, "{tiles} tiles");
         // The nearest crates got theirs first.
         assert!(tile_under(&mut app, 0.0, 500.0));
+        // While nothing moves, nothing is built again.
+        let built = app.world.resource::<TerrainColliders>().built;
+        app.update_n(30);
+        let state = app.world.resource::<TerrainColliders>();
+        assert!(state.is_settled());
+        assert_eq!(state.built, built, "tiles were rebuilt while nothing moved");
+    }
+
+    #[test]
+    fn tiles_build_off_the_frame() {
+        let (mut app, _) = app_with_planet();
+        // The first frame builds only the tile under the focus; the rest of the block is
+        // still on its way.
+        let t = std::time::Instant::now();
+        app.update();
+        let first = t.elapsed();
+        let state = app.world.resource::<TerrainColliders>();
+        assert_eq!(state.built, 1);
+        assert!(!state.is_settled());
+        // Frames go on while the others build: three of them take less than building one tile.
+        let t = std::time::Instant::now();
+        app.update_n(3);
+        assert!(t.elapsed() < first, "frames waited for tiles");
+        settle(&mut app);
+        assert_eq!(app.world.resource::<TerrainColliders>().len(), 9);
     }
 }
