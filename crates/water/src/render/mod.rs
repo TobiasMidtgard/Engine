@@ -281,15 +281,16 @@ struct PuddleWindow {
     /// World x/z of the corner of texel (0, 0).
     origin: DVec2,
     cell: f32,
-    /// Ground height under each texel, world y.
+    /// Ground height under each texel, world y, for the window `ground_at` names.
     ground: Vec<f64>,
+    /// Where `ground` was read: (origin, cell, `WaterState::shifts`; a vertical shift keeps
+    /// the origin). Read only while there are puddles to draw.
+    ground_at: Option<(DVec2, f32, u64)>,
     /// The ground heights in the texture are relative to this world y.
     base: f64,
     /// Any standing water in the window.
     wet: bool,
     since_upload: f32,
-    /// `WaterState::shifts` when the ground was read (a vertical shift keeps `origin`).
-    shifts: u64,
 }
 
 /// The water [`RenderFeature`]. Added by [`crate::WaterPlugin`].
@@ -1045,32 +1046,10 @@ impl WaterFeature {
                 / cell as f64)
                 .round();
         let origin = grid.origin + corner * cell as f64;
-        let shifts = world
-            .get_resource::<SharedWater>()
-            .map_or(0, |s| s.0.read().shifts);
-        let moved =
-            origin != w.origin || cell != w.cell || w.ground.len() != n * n || shifts != w.shifts;
+        let moved = origin != w.origin || cell != w.cell;
+        w.origin = origin;
+        w.cell = cell;
         w.since_upload += view.delta.max(0.0);
-        if moved {
-            w.origin = origin;
-            w.cell = cell;
-            w.shifts = shifts;
-            let ground = world.get_resource::<Ground>();
-            let probe_y = view.origin.y + 200.0;
-            w.ground = (0..n * n)
-                .map(|idx| {
-                    let p = origin
-                        + DVec2::new((idx % n) as f64 + 0.5, (idx / n) as f64 + 0.5) * cell as f64;
-                    ground
-                        .and_then(|g| g.height(DVec3::new(p.x, probe_y, p.y)))
-                        .unwrap_or(0.0)
-                })
-                .collect();
-            w.base = w.ground.iter().copied().fold(f64::INFINITY, f64::min);
-            if !w.base.is_finite() {
-                w.base = 0.0;
-            }
-        }
         if moved || w.since_upload >= 0.2 {
             w.since_upload = 0.0;
             let mut data = vec![0f32; n * n * 2];
@@ -1087,10 +1066,19 @@ impl WaterFeature {
                 };
                 wet |= depth > 0.0005;
                 px[0] = depth;
-                px[1] = (w.ground[idx] - w.base) as f32;
             }
             w.wet = wet;
-            if wet || moved {
+            // Dry ground draws no puddles, so it needs no heights (reading them is the costly
+            // part: thousands of terrain samples).
+            if wet {
+                let shifts = world
+                    .get_resource::<SharedWater>()
+                    .map_or(0, |s| s.0.read().shifts);
+                let ground = world.get_resource::<Ground>();
+                w.read_ground(ground, (origin, cell, shifts), view.origin.y + 200.0);
+                for (px, g) in data.as_chunks_mut::<2>().0.iter_mut().zip(&w.ground) {
+                    px[1] = (g - w.base) as f32;
+                }
                 write_texture(
                     &shared.queue,
                     &gpu.puddle_tex,
@@ -1107,6 +1095,65 @@ impl WaterFeature {
             [(w.base - view.origin.y) as f32, 0.0, 0.0, 0.0],
             w.wet,
         )
+    }
+}
+
+impl PuddleWindow {
+    /// Make `ground` the heights under the window `at`, probing from `probe_y` down. Most
+    /// moves are a cell or two as the camera walks: the heights the old window shares with
+    /// the new one are kept and only the cells it newly covers are read. A jump reads all of
+    /// them, across the cores.
+    fn read_ground(&mut self, ground: Option<&Ground>, at: (DVec2, f32, u64), probe_y: f64) {
+        if self.ground_at == Some(at) {
+            return;
+        }
+        let n = PUDDLE_N as usize;
+        let (origin, cell, _) = at;
+        let mut heights = vec![f64::NAN; n * n];
+        if let Some((old, old_cell, old_shifts)) = self.ground_at
+            && old_cell == cell
+            && old_shifts == at.2
+            && self.ground.len() == n * n
+        {
+            let step = ((origin - old) / cell as f64).round();
+            if step.x.abs() < n as f64 && step.y.abs() < n as f64 {
+                let (di, dj) = (step.x as i64, step.y as i64);
+                for (idx, h) in heights.iter_mut().enumerate() {
+                    let (i, j) = ((idx % n) as i64 + di, (idx / n) as i64 + dj);
+                    if i >= 0 && j >= 0 && i < n as i64 && j < n as i64 {
+                        *h = self.ground[j as usize * n + i as usize];
+                    }
+                }
+            }
+        }
+        let sample = |idx: usize, h: &mut f64| {
+            if h.is_nan() {
+                let p = origin
+                    + DVec2::new((idx % n) as f64 + 0.5, (idx / n) as f64 + 0.5) * cell as f64;
+                *h = ground
+                    .and_then(|g| g.height(DVec3::new(p.x, probe_y, p.y)))
+                    .unwrap_or(0.0);
+            }
+        };
+        if heights.iter().filter(|h| h.is_nan()).count() > 4 * n {
+            let rows = 8;
+            engine_core::tasks::init_task_pools();
+            engine_core::tasks::par_chunks_mut(&mut heights, n * rows, |k, chunk| {
+                for (o, h) in chunk.iter_mut().enumerate() {
+                    sample(k * n * rows + o, h);
+                }
+            });
+        } else {
+            for (idx, h) in heights.iter_mut().enumerate() {
+                sample(idx, h);
+            }
+        }
+        self.base = heights.iter().copied().fold(f64::INFINITY, f64::min);
+        if !self.base.is_finite() {
+            self.base = 0.0;
+        }
+        self.ground = heights;
+        self.ground_at = Some(at);
     }
 }
 
@@ -1289,7 +1336,11 @@ impl RenderFeature for WaterFeature {
         let Some(gpu) = &mut self.gpu else {
             return;
         };
-        // The scene copies are recreated on resize; rebuilding one bind group is cheap.
+        // Built again only when what it binds is made anew: the scene copies on resize, the
+        // ripple textures when the grid changes size (both clear it).
+        if gpu.group1.is_some() {
+            return;
+        }
         let ripple = gpu.ripple.create_view(&Default::default());
         let currents = gpu.currents.create_view(&Default::default());
         let puddle = gpu.puddle_tex.create_view(&Default::default());
