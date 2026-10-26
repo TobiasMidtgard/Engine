@@ -80,6 +80,7 @@ pub fn fly(
     mut play_view: Local<Option<(DVec3, Vec3)>>,
     bodies: Query<(&engine_space::CelestialBody, &Transform), Without<ShowcaseCamera>>,
     ui: Option<Res<engine_ui::UiInputCapture>>,
+    mut held: Option<ResMut<crate::build::HeldJump>>,
 ) {
     // While someone plays (P), the pilot's camera renders and owns the keys, mouse and cursor.
     // This one waits, then carries on from where the pilot's camera was when play ends.
@@ -147,7 +148,11 @@ pub fn fly(
     let dt = time.real_delta_secs();
     for (mut t, mut cam) in &mut q {
         if let Some(place) = &bookmark {
-            look(&mut t, &mut cam, place.position, place.target);
+            // The exe covers the view first and moves it a couple of frames later.
+            match held.as_mut() {
+                Some(h) => h.0 = Some((place.position, place.target)),
+                None => look(&mut t, &mut cam, place.position, place.target),
+            }
             continue;
         }
         if mouse.scroll.y != 0.0 {

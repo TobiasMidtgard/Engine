@@ -222,6 +222,9 @@ fn wait_for_builds(world: &mut World, stall_secs: f32) -> bool {
         tour.waiting = Some((now, ready, now));
         return true;
     };
+    // Fewer patches pending than ever before is progress; a count going up and down (the
+    // terrain trading patches as the view settles) is not, or the wait would never stall.
+    let ready = (ready.0, ready.1.min(last_ready.1));
     let changed = if ready != last_ready { now } else { changed };
     let waited = now.duration_since(since).as_secs_f32();
     let stalled = now.duration_since(changed).as_secs_f32();
