@@ -97,11 +97,12 @@ fn fall_strip(
                 .cross(point.vel.normalize_or(Vec3::NEG_Y))
                 .normalize_or(Vec3::Y)
         };
-        // The sheet spreads and frays as it falls, and fans out over the rock it runs down.
+        // The sheet spreads and frays as it falls, and fans out a little over the rock it runs
+        // down (neighboring lips' sheets overlap there, see `fs_falls`).
         if on_rock {
-            spread += 0.12;
+            spread += 0.06;
         }
-        let half = lip.width * (0.66 + 0.3 * frac + spread.min(0.8));
+        let half = lip.width * (0.66 + 0.3 * frac + spread.min(0.35));
         let p = rel(point.pos);
         let ring = [-1.0f32, 1.0].map(|side| FallVertex {
             rel_q: (p + across * (half * side)).extend(lip.q).to_array(),

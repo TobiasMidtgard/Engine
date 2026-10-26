@@ -396,8 +396,10 @@ impl FlowSim {
     }
 
     /// Where water falls over a drop: (world position at the foot, horizontal velocity of the
-    /// falling water m/s, power ρgQΔh in watts), one entry per cluster of nearby
-    /// [`lips`](Self::lips). Drops under `min_drop` meters are ignored.
+    /// falling water m/s, power in watts), one entry per cluster of nearby
+    /// [`lips`](Self::lips). Drops under `min_drop` meters are ignored. The power is ρgQΔh for a
+    /// free fall; a sheet sliding down rock spends most of it on the way, so less of it
+    /// reaches the foot (less spray, mist and boil).
     pub fn plunges(&self, min_drop: f32) -> Vec<(DVec3, Vec2, f32)> {
         // Feet cluster into squares 8 cells wide, so a wide fall is one plunge, two falls two.
         let size = 8.0 * self.cell as f64;
@@ -405,9 +407,12 @@ impl FlowSim {
         for lip in self.lips(min_drop) {
             // Where it lands in the water or on ground below, down its arc and any rock it
             // slides over.
-            let end = *self.fall_path(&lip, 1).last().unwrap();
+            let path = self.fall_path(&lip, 6);
+            let end = *path.last().unwrap();
             let foot = end.pos;
-            let power = 1000.0 * 9.81 * lip.q * lip.width * lip.drop;
+            let free =
+                path.iter().filter(|p| p.rock == Vec3::ZERO).count() as f32 / path.len() as f32;
+            let power = 1000.0 * 9.81 * lip.q * lip.width * lip.drop * (0.25 + 0.75 * free);
             let v = Vec2::new(end.vel.x, end.vel.z);
             let key = (
                 (foot.x / size).floor() as i64,

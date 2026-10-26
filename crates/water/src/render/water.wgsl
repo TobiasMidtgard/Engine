@@ -466,8 +466,8 @@ fn streak_foam(wp: vec2<f32>, vel: vec2<f32>) -> f32 {
 // Full water surface shading seen from above. `n` world normal, `foam` 0..1, `crest` 0..1 how
 // high on a wave this point is, `wind` m/s. Returns pre-exposed radiance with fog applied.
 // `edge` is how deep the water gets before the waterline is fully drawn, meters.
-// `shore_depth`: water shallower than this laps at the shore (a lake's beach; only the very
-// edge of a stream, which is shallow all over). `vel`: the current (m/s), which carries the
+// `shore_depth`: water shallower than this laps at the shore (a lake's beach; 0 for none,
+// as for streams, which lap by their own depth). `vel`: the current (m/s), which carries the
 // foam downstream.
 fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, crest: f32,
                frag: vec4<f32>, wind: f32, edge: f32, shore_depth: f32, vel: vec2<f32>) -> vec3<f32> {
@@ -562,8 +562,8 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
 
     // ---- foam: whitecaps, wakes, splashes, shoreline
     var foam = foam_in;
-    let shore = 1.0 - smoothstep(0.0, shore_depth, depth_below);
-    if (thick < 1e5) {
+    let shore = 1.0 - smoothstep(0.0, max(shore_depth, 1e-4), depth_below);
+    if (thick < 1e5 && shore_depth > 0.0) {
         let wp = tiling_pos(rel).xz;
         let lap = 0.5 + 0.5 * sin(time_s() * 1.3 + value_noise2(wp * 0.7) * 6.0);
         foam += shore * lap * 0.6;
@@ -825,17 +825,21 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     let l0 = fbm2((wp - shift * phase0) * 1.3, 3);
     let l1 = fbm2((wp - shift * phase1) * 1.3 + vec2<f32>(2.9, 6.1), 3);
     let lumps = smoothstep(0.3, 0.65, mix(l0, l1, wgt) / 0.875);
-    // (`shade_water` covers nearly everything in foam from about 0.4: the white water stays
+    // (`shade_water` covers nearly everything in foam from about 0.6: the white water stays
     // under that, so the dark glassy water between its lumps shows.)
-    var foam = min(min(churn, 1.0) * mix(0.0, 0.38, lumps) + crests * 0.15 * (1.0 - lumps), 0.38);
+    var foam = min(min(churn, 1.0) * mix(0.0, 0.55, lumps) + crests * 0.25 * (1.0 - lumps), 0.55);
     foam *= saturate(in.depth * 30.0);
     // Only a pool boils where a fall lands: on running water the current sweeps the froth
     // downstream in the lumps above.
     foam += rp.y * 1.2 + boil.x * (1.0 - smoothstep(0.3, 0.8, speed));
+    let lap = 0.5 + 0.5 * sin(t * 1.3 + value_noise2(wp * 0.7) * 6.0);
+    foam += (1.0 - smoothstep(0.002, 0.01, in.depth)) * lap * 0.5;
     var color: vec3<f32>;
     if (front) {
-        // Streams run shallow over riffles: only the last centimeter fades.
-        color = shade_water(in.rel, n, look, foam, saturate(steep * 2.0), in.clip, 3.0 + speed, 0.01, 0.04, in.vel);
+        // Streams run shallow over riffles: only the last centimeter fades. Their banks lap
+        // white by the stream's own depth (above), not the depth seen through it: a sheet a
+        // centimeter or two deep over a slab looks like shoreline all over from here.
+        color = shade_water(in.rel, n, look, foam, saturate(steep * 2.0), in.clip, 3.0 + speed, 0.01, 0.0, in.vel);
     } else {
         color = shade_underside(in.rel, n, look, in.clip);
     }
@@ -943,14 +947,17 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     // behind or below, the churned water under the tongue shows.
     let front = dot(in.normal, v) >= 0.0;
     var aerated = max(smoothstep(0.03, 0.22, tau + (s - 0.5) * 0.1), select(0.6, 0.0, front));
-    // Sliding down rock (`ROCK_KIND`), the sheet tumbles over every bump: white all over.
+    // Sliding down rock (`ROCK_KIND`), the sheet tumbles over every bump: white in its
+    // streaks, glassier between them.
     let rock = saturate(in.kind / 0.45);
-    aerated = max(aerated, rock * 0.85);
+    aerated = max(aerated, rock * mix(0.45, 0.9, s));
 
     // Coverage: a thick flow stays a closed sheet; lower down and at its edges it frays into
     // fingers with the rock showing between them, and thin threads are see-through.
     let body = saturate(q * 8.0 + 0.15);
-    let gaps = smoothstep(0.1, 1.0, frac) * 0.45 * (1.2 - body * 0.4);
+    // Over rock the sheet thins into a lace of rivulets from the start, the wet rock showing
+    // dark between them.
+    let gaps = max(smoothstep(0.1, 1.0, frac) * 0.45 * (1.2 - body * 0.4), rock * (0.3 + 0.15 * frac));
     // Falling free, the fingers tear into packets of water lower down (the pattern rides with
     // the water, so they stretch as it speeds up), each fraying at its edges into spray, and a
     // thin haze of drops hangs between them. A thick flow and a sheet sliding down rock stay
@@ -966,6 +973,9 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     // From afar those drops blur into a veil across the gaps.
     alpha = max(alpha, (1.0 - fine) * body * 0.4 * smoothstep(0.15, 0.9, frac) * smoothstep(0.0, 0.35, s));
     alpha *= 1.0 - smoothstep(0.6, 1.0, abs(side) + (s - 0.5) * 0.4);
+    // Sheets from neighboring lips overlap where they spread over rock: each is a thin film
+    // there, so together they still read as one lacy veil and not an opaque white slab.
+    alpha *= mix(1.0, 0.55, rock);
     // Between the tongues only the strongest streaks pour, as threads.
     alpha *= mix(smoothstep(0.55, 0.85, s) * 0.85, 1.0, tongue);
     // Soft where it meets the rock behind it and the pool it lands in.
