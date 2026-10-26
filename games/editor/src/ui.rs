@@ -832,7 +832,15 @@ fn models(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, at: DVec3) 
                                 .min_size(egui::vec2(ui.available_width(), 22.0)),
                         )
                     });
-                    if r.inner.on_hover_text(key.as_str()).clicked() {
+                    let r = r.inner.on_hover_ui(|ui| {
+                        ui.label(egui::RichText::new(key.as_str()).strong());
+                        let info = editor.model_info.entry(key.clone()).or_insert_with(|| {
+                            crate::convert::inspect(&root.join(key))
+                                .map_or_else(|e| e, |s| s.describe())
+                        });
+                        ui.label(info.as_str());
+                    });
+                    if r.clicked() {
                         place = Some(key.clone());
                     }
                 }

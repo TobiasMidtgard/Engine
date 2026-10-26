@@ -15,14 +15,47 @@ use crate::editor::{Editor, now};
 /// Folder under the asset root that imports go to.
 pub const IMPORTED_DIR: &str = "imported";
 
-/// Saved beside an imported file as `<file>.import.json`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// Saved beside an imported file as `<file>.import.json` (like Godot's `.import` and Unity's
+/// `.meta`): where it came from and how to bring it in. Edited in the Details panel of a
+/// placed model; changes apply on Reimport.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ImportSettings {
     /// The file it was imported from (absolute).
     pub source: String,
     /// "model" or "texture".
     pub kind: String,
+    /// Uniform scale applied to the model's nodes (0.01 for a file authored in centimetres
+    /// that says it's in metres).
+    pub scale: f64,
+    /// What Make solid / Make physical fit around it: "box" (default) or "none".
+    pub collider: String,
+    /// What the last import found (nodes, meshes, materials, what was left out).
+    pub summary: String,
+}
+
+impl Default for ImportSettings {
+    fn default() -> Self {
+        Self {
+            source: String::new(),
+            kind: String::new(),
+            scale: 1.0,
+            collider: "box".into(),
+            summary: String::new(),
+        }
+    }
+}
+
+/// The import settings saved beside asset `key`, if it was imported.
+pub fn settings_for(root: &Path, key: &str) -> Option<ImportSettings> {
+    let text = std::fs::read_to_string(settings_path(&root.join(key))).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Save changed settings beside asset `key`.
+pub fn save_settings(root: &Path, key: &str, settings: &ImportSettings) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
+    std::fs::write(settings_path(&root.join(key)), json).map_err(|e| e.to_string())
 }
 
 /// What a file imports as, from its extension.
@@ -32,15 +65,15 @@ fn kind_of(path: &Path) -> Result<&'static str, String> {
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
     match ext.as_str() {
-        "glb" | "gltf" => Ok("model"),
+        "glb" | "gltf" | "fbx" | "obj" | "blend" => Ok("model"),
         "png" | "jpg" | "jpeg" | "hdr" => Ok("texture"),
-        "fbx" | "obj" | "blend" | "dae" | "3ds" | "max" | "ma" | "mb" => Err(format!(
-            ".{ext} files can't be imported yet: export the model as glTF (.glb) from your \
-             3D tool (Blender: File > Export > glTF 2.0)"
+        "dae" | "3ds" | "max" | "ma" | "mb" | "c4d" | "usd" | "usdz" => Err(format!(
+            ".{ext} files can't be imported yet: export the model as glTF (.glb) or FBX from \
+             your 3D tool"
         )),
         _ => Err(format!(
-            "don't know how to import .{ext} files (models: .glb, .gltf; textures: .png, \
-             .jpg, .hdr)"
+            "don't know how to import .{ext} files (models: .glb, .gltf, .fbx, .obj, .blend; \
+             textures: .png, .jpg, .hdr)"
         )),
     }
 }
@@ -121,8 +154,36 @@ pub fn import_file(root: &Path, source: &Path) -> Result<String, String> {
         "model" => slug(&source.file_stem().unwrap_or_default().to_string_lossy()),
         _ => "textures".into(),
     };
+    let ext = source
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    // Other formats become a .glb beside where the copy would go (Godot converts on import too).
+    let converted = crate::convert::converts(&ext);
+    let file = if converted {
+        format!(
+            "{}.glb",
+            source.file_stem().unwrap_or_default().to_string_lossy()
+        )
+    } else {
+        file
+    };
     let key = format!("{IMPORTED_DIR}/{folder}/{file}");
     let dest = root.join(&key);
+    let mut settings = settings_for(root, &key).unwrap_or_default();
+    settings.source = std::path::absolute(source)
+        .unwrap_or_else(|_| source.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    settings.kind = kind.into();
+    if converted {
+        if !source.is_file() {
+            return Err(format!("{} is missing", source.display()));
+        }
+        settings.summary = crate::convert::to_glb(source, &dest)?.describe();
+        save_settings(root, &key, &settings)?;
+        return Ok(key);
+    }
     let mut copies = vec![(source.to_path_buf(), dest.clone())];
     if file.to_ascii_lowercase().ends_with(".gltf") {
         let from = source.parent().unwrap_or(Path::new("."));
@@ -142,15 +203,8 @@ pub fn import_file(root: &Path, source: &Path) -> Result<String, String> {
         }
         std::fs::copy(from, to).map_err(|e| format!("{}: {e}", from.display()))?;
     }
-    let settings = ImportSettings {
-        source: std::path::absolute(source)
-            .unwrap_or_else(|_| source.to_path_buf())
-            .to_string_lossy()
-            .into_owned(),
-        kind: kind.into(),
-    };
-    let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    std::fs::write(settings_path(&dest), json).map_err(|e| e.to_string())?;
+    settings.summary.clear();
+    save_settings(root, &key, &settings)?;
     Ok(key)
 }
 
@@ -179,6 +233,86 @@ pub fn refresh_from_source(root: &Path, key: &str) -> Result<bool, String> {
             Ok(true)
         }
         _ => Ok(false),
+    }
+}
+
+/// The Details panel's import settings for a placed model that was imported (Godot's Import
+/// dock, Unity's importer Inspector): where it came from, its scale and collider, what the
+/// import found, and Apply and reimport.
+pub fn settings_panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, entity: Entity) {
+    let Some(key) = world
+        .get::<crate::models::Model>(entity)
+        .map(|m| m.path.clone())
+    else {
+        return;
+    };
+    let Some(root) = world.get_resource::<AssetServer>().map(|s| s.root()) else {
+        return;
+    };
+    if editor.import_edit.as_ref().is_none_or(|(k, _)| *k != key) {
+        editor.import_edit = settings_for(&root, &key).map(|s| (key.clone(), s));
+    }
+    let Some((_, settings)) = editor.import_edit.as_mut() else {
+        return;
+    };
+    let mut apply = false;
+    egui::CollapsingHeader::new(egui::RichText::new("📥 Import settings").strong())
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::Grid::new("import settings")
+                .num_columns(2)
+                .spacing([10.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Source");
+                    let file = Path::new(&settings.source)
+                        .file_name()
+                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                    ui.label(file).on_hover_text(&settings.source);
+                    ui.end_row();
+                    ui.label("Scale");
+                    ui.add(
+                        egui::DragValue::new(&mut settings.scale)
+                            .speed(0.01)
+                            .range(0.0001..=1000.0),
+                    )
+                    .on_hover_text("0.01 for a file in centimetres that says metres");
+                    ui.end_row();
+                    ui.label("Collider");
+                    egui::ComboBox::from_id_salt("import collider")
+                        .selected_text(settings.collider.as_str())
+                        .show_ui(ui, |ui| {
+                            for c in ["box", "none"] {
+                                ui.selectable_value(&mut settings.collider, c.to_string(), c);
+                            }
+                        });
+                    ui.end_row();
+                });
+            if !settings.summary.is_empty() {
+                ui.label(crate::theme::dim(&settings.summary));
+            }
+            apply = ui
+                .button("🔄 Apply and reimport")
+                .on_hover_text(
+                    "Save these settings, import the source again and rebuild every copy",
+                )
+                .clicked();
+        });
+    if apply {
+        let t = now(world);
+        let edited = settings.clone();
+        if let Err(e) = save_settings(&root, &key, &edited) {
+            editor.error(t, format!("Could not save import settings: {e}"));
+            return;
+        }
+        let source = Path::new(&edited.source);
+        if source.is_file()
+            && let Err(e) = import_file(&root, source)
+        {
+            editor.error(t, format!("Could not import {}: {e}", source.display()));
+        }
+        editor.model_info.remove(&key);
+        editor.import_edit = None;
+        crate::models::reimport(world, editor, &key);
     }
 }
 
@@ -214,7 +348,14 @@ pub fn import_and_place(world: &mut World, editor: &mut Editor, source: &Path, a
     match import_file(&root, source) {
         Ok(key) => {
             editor.models = None;
-            editor.info(t, format!("Imported {} as {key}", source.display()));
+            let summary = settings_for(&root, &key)
+                .map(|s| s.summary)
+                .filter(|s| !s.is_empty())
+                .map_or(String::new(), |s| format!(": {s}"));
+            editor.info(
+                t,
+                format!("Imported {} as {key}{summary}", source.display()),
+            );
             if key.ends_with(".glb") || key.ends_with(".gltf") {
                 let at = at.unwrap_or_else(|| crate::editor::placement_point(world, editor));
                 crate::models::place(world, editor, &key, at);
@@ -251,7 +392,8 @@ mod tests {
             relative_uri("data:application/octet-stream;base64,AAAA"),
             None
         );
-        assert!(kind_of(Path::new("a.FBX")).unwrap_err().contains("glTF"));
+        assert!(kind_of(Path::new("a.c4d")).unwrap_err().contains("glTF"));
+        assert_eq!(kind_of(Path::new("a.FBX")), Ok("model"));
         assert_eq!(kind_of(Path::new("a.GLB")), Ok("model"));
     }
 
@@ -291,6 +433,25 @@ mod tests {
             .set_modified(later)
             .unwrap();
         assert_eq!(refresh_from_source(&root, &key), Ok(true));
+
+        // An OBJ converts to a .glb; edited settings survive importing it again.
+        std::fs::write(
+            src.join("crate.obj"),
+            "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
+        )
+        .unwrap();
+        let key = import_file(&root, &src.join("crate.obj")).unwrap();
+        assert_eq!(key, "imported/crate/crate.glb");
+        let mut settings = settings_for(&root, &key).unwrap();
+        assert!(
+            settings.summary.contains("1 triangles"),
+            "{}",
+            settings.summary
+        );
+        settings.scale = 0.01;
+        save_settings(&root, &key, &settings).unwrap();
+        import_file(&root, &src.join("crate.obj")).unwrap();
+        assert_eq!(settings_for(&root, &key).unwrap().scale, 0.01);
 
         // A buffer outside the folder is refused.
         let doc = serde_json::json!({"buffers": [{"uri": "../x.bin"}]});

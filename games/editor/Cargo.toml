@@ -16,6 +16,12 @@ egui.workspace = true
 egui-wgpu.workspace = true
 egui_dock = "0.21"
 transform-gizmo-egui = "0.11"
+# FBX and OBJ import (MIT or Unlicense), the same library Godot 4.3+ uses.
+ufbx = "0.11.5"
+# Converting FBX textures (TGA, BMP, TIFF, DDS) to PNG at import.
+image = { workspace = true, features = ["tga", "bmp", "tiff", "dds"] }
+# The import preview reads glTF files' contents.
+gltf.workspace = true
 engine_physics.workspace = true
 engine_vehicles.workspace = true
 engine_space.workspace = true

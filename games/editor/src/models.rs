@@ -113,7 +113,8 @@ pub fn place(world: &mut World, editor: &mut Editor, key: &str, at: DVec3) -> Op
         }
     };
     let data = world.resource::<Assets<GltfScene>>().get(scene)?.clone();
-    let Some((low, _)) = scene_bounds(world, &data) else {
+    let scale = import_scale(world, key);
+    let Some((low, _)) = scene_bounds(world, &data).map(|(l, h)| (l * scale, h * scale)) else {
         editor.info(
             t,
             format!("{key} has nothing to draw (an animation clip or an empty file)"),
@@ -128,6 +129,7 @@ pub fn place(world: &mut World, editor: &mut Editor, key: &str, at: DVec3) -> Op
             return None;
         }
     };
+    scale_nodes(world, entity, scale);
     let name = display_name(key);
     world.entity_mut(entity).insert((
         SceneOrder::next(),
@@ -201,6 +203,8 @@ fn rebuild(world: &mut World, old: Entity) -> Result<(Entity, [Command; 2]), Str
     let name = world.get::<Name>(old).cloned();
     world.entity_mut(old).despawn();
     let new = engine::render::spawn_gltf_scene(world, scene, transform)?;
+    let scale = import_scale(world, &key);
+    scale_nodes(world, new, scale);
     let mut e = world.entity_mut(new);
     e.insert(Model { path: key });
     if let Some(parent) = parent {
@@ -280,7 +284,11 @@ pub fn fitted_collider(world: &mut World, root: Entity) -> Option<ColliderShape>
     let key = world.get::<Model>(root)?.path.clone();
     let scene = load(world, &key).ok()?;
     let data = world.resource::<Assets<GltfScene>>().get(scene)?.clone();
-    let (low, high) = scene_bounds(world, &data)?;
+    if crate::import::settings_for(&asset_root(world), &key).is_some_and(|s| s.collider == "none") {
+        return None;
+    }
+    let scale = import_scale(world, &key);
+    let (low, high) = scene_bounds(world, &data).map(|(l, h)| (l * scale, h * scale))?;
     let half = ((high - low) * 0.5).as_vec3().max(Vec3::splat(0.01));
     let center = ((high + low) * 0.5).as_vec3();
     Some(ColliderShape::Compound(vec![(
@@ -288,6 +296,38 @@ pub fn fitted_collider(world: &mut World, root: Entity) -> Option<ColliderShape>
         Quat::IDENTITY,
         ColliderShape::Cuboid { half_extents: half },
     )]))
+}
+
+fn asset_root(world: &World) -> std::path::PathBuf {
+    world
+        .get_resource::<AssetServer>()
+        .map(|s| s.root())
+        .unwrap_or_default()
+}
+
+/// The scale an imported file's settings ask for (1 for files that weren't imported).
+fn import_scale(world: &World, key: &str) -> f64 {
+    crate::import::settings_for(&asset_root(world), key)
+        .map(|s| s.scale)
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .unwrap_or(1.0)
+}
+
+/// Scale a placed model's top nodes (the root keeps the copy's own transform).
+fn scale_nodes(world: &mut World, root: Entity, scale: f64) {
+    if (scale - 1.0).abs() < 1e-9 {
+        return;
+    }
+    let children: Vec<Entity> = world
+        .get::<Children>(root)
+        .map(|c| c.iter().collect())
+        .unwrap_or_default();
+    for child in children {
+        if let Some(mut t) = world.get_mut::<Transform>(child) {
+            t.translation *= scale;
+            t.scale *= scale as f32;
+        }
+    }
 }
 
 fn load(world: &mut World, key: &str) -> Result<Handle<GltfScene>, String> {

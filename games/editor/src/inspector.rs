@@ -83,6 +83,7 @@ pub fn entity_details(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor)
     ui.add_space(4.0);
 
     quick_actions(ui, world, editor, entity);
+    crate::import::settings_panel(ui, world, editor, entity);
 
     let registry = world.resource::<TypeRegistry>().clone();
     let mut entries: Vec<&ComponentEntry> = registry
