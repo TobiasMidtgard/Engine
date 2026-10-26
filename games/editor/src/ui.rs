@@ -10,6 +10,7 @@ use crate::demos::DEMOS;
 use crate::editor::{self, Create, Editor, Mode, Tab, Tool};
 use crate::egui_bridge::{Egui, EguiFrame, EguiInput};
 use crate::inspector;
+use crate::models::Dragged;
 use crate::prefab;
 use crate::scene_ops::{self, EditorOnly, InScene};
 use crate::theme;
@@ -89,6 +90,9 @@ fn draw(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, dock: &mut Do
                 .show_leaf_collapse_buttons(false)
                 .show_inside(ui, &mut Viewer { world, editor });
         });
+    if !editor.file_drops.is_empty() {
+        crate::import::import_dropped(world, editor, None);
+    }
     shortcuts(ui.ctx(), world, editor);
 }
 
@@ -223,6 +227,9 @@ fn menu_bar(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, dock: &mu
                 .clicked()
             {
                 editor::paste(world, editor);
+            }
+            if ui.button("Drop to ground   End").clicked() {
+                editor::drop_to_ground(world, editor);
             }
             if ui.button("Duplicate   Ctrl+D").clicked() {
                 editor::duplicate_selection(world, editor);
@@ -626,12 +633,13 @@ fn content(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.columns(3, |cols| {
+            ui.columns(4, |cols| {
                 // Place.
                 let ui = &mut cols[0];
                 ui.label(egui::RichText::new("Place").strong());
                 ui.label(theme::dim("Click to drop it where the view is looking"));
                 let at = editor::placement_point(world, editor);
+                let width = ((ui.available_width() - 8.0) / 3.0).max(60.0);
                 egui::Grid::new("place grid")
                     .num_columns(3)
                     .spacing([4.0, 4.0])
@@ -646,7 +654,7 @@ fn content(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
                         items.push(("○ Empty".into(), Create::Empty));
                         for (i, (label, what)) in items.into_iter().enumerate() {
                             if ui
-                                .add_sized([96.0, 26.0], egui::Button::new(label))
+                                .add_sized([width, 26.0], egui::Button::new(label))
                                 .clicked()
                             {
                                 editor::create(world, editor, what, at);
@@ -657,8 +665,11 @@ fn content(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
                         }
                     });
 
+                // Models.
+                models(&mut cols[1], world, editor, at);
+
                 // Module demos.
-                let ui = &mut cols[1];
+                let ui = &mut cols[2];
                 ui.label(egui::RichText::new("Module demos").strong());
                 ui.label(theme::dim("Each module's showcase, placed as one object"));
                 for (key, label, about, _) in DEMOS {
@@ -672,7 +683,7 @@ fn content(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
                 }
 
                 // Scenes.
-                let ui = &mut cols[2];
+                let ui = &mut cols[3];
                 ui.label(egui::RichText::new("Scenes").strong());
                 ui.label(theme::dim(format!("JSON files in {}/", editor::SCENES_DIR)));
                 for f in editor::scene_files() {
@@ -717,16 +728,119 @@ fn content(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
                     ));
                 }
                 for f in files {
-                    if ui
-                        .button(format!("📦 {}", prefab::display_name(&f)))
-                        .on_hover_text(format!("Place {f} where the view is looking"))
+                    let id = egui::Id::new(("drag prefab", &f));
+                    let drag = Dragged::Prefab(f.clone());
+                    let r = ui.dnd_drag_source(id, drag, |ui| {
+                        ui.button(format!("📦 {}", prefab::display_name(&f)))
+                    });
+                    if r.inner
+                        .on_hover_text(format!(
+                            "Place {f} where the view is looking, or drag it into the scene"
+                        ))
                         .clicked()
                     {
-                        prefab::place(world, editor, &f);
+                        prefab::place(world, editor, &f, None);
                     }
                 }
             });
         });
+}
+
+/// The Content panel's model list: glTF files under the asset root, by folder.
+fn models(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, at: DVec3) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Models").strong());
+        if ui
+            .small_button("🔄")
+            .on_hover_text("Look for new model files")
+            .clicked()
+        {
+            editor.models = None;
+        }
+    });
+    let root = world
+        .get_resource::<engine::assets::AssetServer>()
+        .map(|s| s.root())
+        .unwrap_or_default();
+    let root_name = root
+        .file_name()
+        .map_or_else(|| "assets".into(), |n| n.to_string_lossy().into_owned());
+    ui.label(theme::dim(format!(
+        "glTF in {root_name}/. Click to place, or drag into the scene"
+    )));
+    ui.add(
+        egui::TextEdit::singleline(&mut editor.model_filter)
+            .hint_text("🔍 search")
+            .desired_width(f32::INFINITY),
+    );
+    ui.horizontal(|ui| {
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut editor.import_path)
+                .hint_text("path to a .glb, .gltf or image")
+                .desired_width(ui.available_width() - 70.0),
+        );
+        let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let path = editor.import_path.trim().trim_matches('"').to_string();
+        if (ui
+            .button("📥 Import")
+            .on_hover_text("Copy the file into the asset folder and place it")
+            .clicked()
+            || enter)
+            && !path.is_empty()
+        {
+            crate::import::import_and_place(world, editor, std::path::Path::new(&path), None);
+            editor.import_path.clear();
+        }
+    });
+    let filter = editor.model_filter.trim().to_lowercase();
+    let files: Vec<String> = crate::models::cached(world, editor)
+        .iter()
+        .filter(|k| filter.is_empty() || k.to_lowercase().contains(&filter))
+        .cloned()
+        .collect();
+    if files.is_empty() {
+        ui.label(theme::dim(if filter.is_empty() {
+            "No .glb or .gltf files yet (cargo run -p fetch-assets fetches the art)"
+        } else {
+            "Nothing matches"
+        }));
+    }
+    let mut folders: Vec<(&str, Vec<&String>)> = Vec::new();
+    for key in &files {
+        let dir = crate::models::folder(key);
+        match folders.last_mut() {
+            Some((d, list)) if *d == dir => list.push(key),
+            _ => folders.push((dir, vec![key])),
+        }
+    }
+    let mut place = None;
+    for (dir, keys) in folders {
+        let title = format!(
+            "📁 {} ({})",
+            if dir.is_empty() { "/" } else { dir },
+            keys.len()
+        );
+        egui::CollapsingHeader::new(title)
+            .id_salt(("model folder", dir))
+            .default_open(true)
+            .show(ui, |ui| {
+                for key in keys {
+                    let id = egui::Id::new(("drag model", key));
+                    let r = ui.dnd_drag_source(id, Dragged::Model(key.clone()), |ui| {
+                        ui.add(
+                            egui::Button::new(format!("🎲 {}", crate::models::display_name(key)))
+                                .min_size(egui::vec2(ui.available_width(), 22.0)),
+                        )
+                    });
+                    if r.inner.on_hover_text(key.as_str()).clicked() {
+                        place = Some(key.clone());
+                    }
+                }
+            });
+    }
+    if let Some(key) = place {
+        crate::models::place(world, editor, &key, at);
+    }
 }
 
 fn console(ui: &mut egui::Ui, editor: &mut Editor) {
@@ -835,6 +949,9 @@ fn shortcuts(ctx: &egui::Context, world: &mut World, editor: &mut Editor) {
     }
     if pressed(egui::Key::Delete, false) {
         editor::delete_selection(world, editor);
+    }
+    if pressed(egui::Key::End, false) {
+        editor::drop_to_ground(world, editor);
     }
     if pressed(egui::Key::F, false) {
         editor::focus_selection(world, editor);

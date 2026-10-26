@@ -381,12 +381,15 @@ fn grow_lashes(a: &Appearance, margins: &[[Vec<Vec3>; 2]; 2], lm: &Landmarks) ->
 fn grow_beard(a: &Appearance, skin: &SkinMesh, collider: &SkinCollider) -> Option<StrandSet> {
     let (len, per_cm2, n) = match a.beard_style() {
         BeardStyle::None => return None,
-        BeardStyle::Stubble => (0.0016, 55.0, 3u32),
+        // Stubble is many fine hairs (a few hundred per cm² on a man's cheek): at a few
+        // dozen thick ones it reads as dirt.
+        BeardStyle::Stubble => (0.0014, 140.0, 3u32),
         BeardStyle::Short => (0.009, 60.0, 6),
         BeardStyle::Full => (0.03, 60.0, 9),
         BeardStyle::Goatee => (0.014, 60.0, 7),
     };
     let goatee = a.beard_style() == BeardStyle::Goatee;
+    let stubble = a.beard_style() == BeardStyle::Stubble;
     let sampler = Sampler::new(skin, Mask::Beard, |rest, m| {
         if goatee && rest.x.abs() > 0.024 {
             0.0
@@ -403,8 +406,14 @@ fn grow_beard(a: &Appearance, skin: &SkinMesh, collider: &SkinCollider) -> Optio
         let Some(sp) = sampler.sample(&mut r) else {
             break;
         };
-        // Patchy where the mask fades (cheek line, neck).
-        if r.f32() > sp.mask.powf(0.7) {
+        // Patchy where the mask fades (cheek line, neck); stubble fades out sooner, without
+        // stray hairs beyond.
+        let edge = if stubble {
+            (sp.mask - 0.3) / 0.7
+        } else {
+            sp.mask.powf(0.7)
+        };
+        if r.f32() > edge {
             continue;
         }
         // Moustache hairs fan down and out from the middle; the rest grow down the face and
@@ -431,7 +440,8 @@ fn grow_beard(a: &Appearance, skin: &SkinMesh, collider: &SkinCollider) -> Optio
             let p = pts[k - 1] + dir * seg;
             pts[k] = collider.push_out(p, 0.0006 + l * 0.15 * t);
         }
-        set.push(&pts, 0.00009 * HAIR_WIDTH, 0.00004 * HAIR_WIDTH, r.f32());
+        let root = if stubble { 0.00005 } else { 0.00009 };
+        set.push(&pts, root * HAIR_WIDTH, 0.00004 * HAIR_WIDTH, r.f32());
     }
     Some(set)
 }
@@ -666,7 +676,12 @@ fn grow_scalp(
         for (k, p) in pts.iter_mut().enumerate().skip(1) {
             let t = k as f32 / last as f32;
             if g.gravity > 0.5 {
-                *p = keep_off_face(*p, &mut face_side, jitter, lm);
+                *p = keep_off_face(
+                    keep_off_forehead(*p, jitter, lm),
+                    &mut face_side,
+                    jitter,
+                    lm,
+                );
             }
             *p = collider.push_out(*p, 0.0008 + g.loft * t.min(0.4) / 0.4 * 0.6);
         }
@@ -798,6 +813,19 @@ const PART_X: f32 = 0.025;
 /// into the side curtain rather than in front of the face. A hair goes aside on one side
 /// (`side`, kept from point to point, picked where it first needs moving if not given), so it
 /// never jumps across; `jitter` (0..1) spreads the hairs that were moved so they don't line up.
+/// Over the forehead hair stays up at the hairline (swept to the side along it, then down past
+/// the temple): a lock lying across the brow reads as a band, not a fringe. For hair already
+/// grown (lifting while growing would send it out sideways).
+fn keep_off_forehead(p: Vec3, jitter: f32, lm: &Landmarks) -> Vec3 {
+    let d = p - lm.head;
+    let floor = 0.05 + 0.006 * jitter;
+    if d.z > 0.06 && d.x.abs() < 0.06 && d.y > -0.01 && d.y < floor {
+        let t = 1.0 - ((d.x.abs() - 0.045) / 0.015).clamp(0.0, 1.0);
+        return Vec3::new(p.x, lm.head.y + d.y + (floor - d.y) * t, p.z);
+    }
+    p
+}
+
 fn keep_off_face(p: Vec3, side: &mut Option<f32>, jitter: f32, lm: &Landmarks) -> Vec3 {
     let d = p - lm.head;
     // In front of the ears, from the forehead down to the shoulders.

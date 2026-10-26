@@ -8,6 +8,7 @@ use transform_gizmo_egui::{
 };
 
 use crate::editor::{self, Editor, Mode, Tool};
+use crate::models::Dragged;
 use crate::picking;
 use crate::scene_ops::{EditorOnly, InScene};
 use crate::theme;
@@ -20,8 +21,8 @@ const ICON_RADIUS: f32 = 11.0;
 pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     let rect = ui.max_rect();
     let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-    let screen = ui.ctx().viewport_rect();
-    let Some(view) = camera_view(world, editor, screen) else {
+    set_viewport(world, editor, rect, ui.ctx().pixels_per_point());
+    let Some(view) = camera_view(world, editor, rect) else {
         return;
     };
     editor.view = Some(view);
@@ -39,6 +40,7 @@ pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     };
 
     let gizmo_used = gizmo(ui, world, editor, &view);
+    drop_target(ui, world, editor, &view, &response);
 
     let alt = ui.input(|i| i.modifiers.alt);
     if editor.tool == Tool::Sculpt {
@@ -62,7 +64,79 @@ pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     overlays(ui, world, editor, rect);
 }
 
-/// The editor camera's view, mapped to the whole window (the scene renders full-window).
+/// Models and prefabs dragged from the Content panel land where the pointer meets a surface
+/// (or 8 m out in the air).
+fn drop_target(
+    ui: &egui::Ui,
+    world: &mut World,
+    editor: &mut Editor,
+    view: &ViewInfo,
+    response: &egui::Response,
+) {
+    // A drag from another panel leaves `hovered` false, so ask the pointer directly.
+    if !response.contains_pointer() {
+        return;
+    }
+    let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else {
+        return;
+    };
+    let (o, d) = view.ray(pos);
+    // Files from the desktop.
+    if let Some(path) = &editor.file_hover {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        ui.painter().text(
+            pos + egui::vec2(16.0, -18.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("Drop to import {name}"),
+            egui::FontId::proportional(13.0),
+            theme::ACCENT,
+        );
+    }
+    if !editor.file_drops.is_empty() {
+        let at =
+            picking::pick_surface(world, o, d, 200.0, &|_| false).unwrap_or(o + d.as_dvec3() * 8.0);
+        crate::import::import_dropped(world, editor, Some(at));
+    }
+    if let Some(dragged) = response.dnd_hover_payload::<Dragged>() {
+        let name = match &*dragged {
+            Dragged::Model(key) => crate::models::display_name(key),
+            Dragged::Prefab(path) => crate::prefab::display_name(path),
+        };
+        ui.painter().text(
+            pos + egui::vec2(16.0, -18.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("Drop to place {name}"),
+            egui::FontId::proportional(13.0),
+            theme::ACCENT,
+        );
+    }
+    let Some(dragged) = response.dnd_release_payload::<Dragged>() else {
+        return;
+    };
+    let at =
+        picking::pick_surface(world, o, d, 200.0, &|_| false).unwrap_or(o + d.as_dvec3() * 8.0);
+    match &*dragged {
+        Dragged::Model(key) => {
+            crate::models::place(world, editor, key, at);
+        }
+        Dragged::Prefab(path) => crate::prefab::place(world, editor, path, Some(at)),
+    }
+}
+
+/// Draw the editor camera into the scene tab only (physical pixels).
+fn set_viewport(world: &mut World, editor: &Editor, rect: egui::Rect, ppp: f32) {
+    let min = (rect.min.to_vec2() * ppp).round();
+    let size = (rect.size() * ppp).round();
+    let viewport = Viewport::new(
+        UVec2::new(min.x.max(0.0) as u32, min.y.max(0.0) as u32),
+        UVec2::new(size.x.max(1.0) as u32, size.y.max(1.0) as u32),
+    );
+    if world.get::<Viewport>(editor.camera) != Some(&viewport) {
+        world.entity_mut(editor.camera).insert(viewport);
+    }
+}
+
+/// The editor camera's view, mapped to the scene tab.
 fn camera_view(world: &World, editor: &Editor, screen: egui::Rect) -> Option<ViewInfo> {
     let t = world.get::<Transform>(editor.camera)?;
     let camera = world.get::<Camera>(editor.camera)?;
@@ -448,6 +522,7 @@ fn draw_icons(
             "light" => "💡",
             "camera" => "🎥",
             "demo" => "💠",
+            "model" => "🎲",
             _ => "○",
         };
         painter.text(
@@ -457,7 +532,7 @@ fn draw_icons(
             egui::FontId::proportional(12.0),
             egui::Color32::WHITE,
         );
-        if kind == "demo" {
+        if kind == "demo" || kind == "model" {
             painter.text(
                 pos + egui::vec2(ICON_RADIUS + 5.0, 0.0),
                 egui::Align2::LEFT_CENTER,

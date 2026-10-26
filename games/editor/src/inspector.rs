@@ -152,7 +152,10 @@ fn quick_actions(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, enti
             .component(name)
             .is_some_and(|c| (c.has)(world, entity))
     };
-    let has_mesh = world.get::<MeshRenderer>(entity).is_some();
+    let model = world
+        .get::<crate::models::Model>(entity)
+        .map(|m| m.path.clone());
+    let has_mesh = world.get::<MeshRenderer>(entity).is_some() || model.is_some();
     let can_body = has_mesh
         && !has(world, "RigidBody")
         && world
@@ -163,7 +166,7 @@ fn quick_actions(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, enti
     let prefab = world
         .get::<crate::prefab::PrefabInstance>(entity)
         .map(|p| p.path.clone());
-    if !can_body && !is_demo && prefab.is_none() {
+    if !can_body && !is_demo && prefab.is_none() && model.is_none() {
         return;
     }
     ui.horizontal_wrapped(|ui| {
@@ -201,6 +204,17 @@ fn quick_actions(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, enti
                 crate::prefab::revert(world, editor, entity);
             }
         }
+        if let Some(path) = &model
+            && ui
+                .button("🔄 Reimport")
+                .on_hover_text(format!(
+                    "Read {path} again and rebuild every placed copy (this happens on its own \
+                     when the file changes)"
+                ))
+                .clicked()
+        {
+            crate::models::reimport(world, editor, path);
+        }
         if is_demo && ui.button("↻ Respawn demo").clicked() {
             world
                 .entity_mut(entity)
@@ -219,12 +233,16 @@ fn add_physics(world: &mut World, editor: &mut Editor, entity: Entity, dynamic: 
     let half = mesh
         .map(|a| (a.max - a.min) * 0.5)
         .unwrap_or(Vec3::splat(0.5));
+    let mut collider = engine::world::physics::Collider::cuboid(half);
+    // A placed model: a box around all of its meshes.
+    if let Some(shape) = crate::models::fitted_collider(world, entity) {
+        collider.shape = shape;
+    }
     let body = if dynamic {
         engine::world::physics::RigidBody::dynamic()
     } else {
         engine::world::physics::RigidBody::fixed()
     };
-    let collider = engine::world::physics::Collider::cuboid(half);
     let commands = vec![
         Command::Component {
             entity,

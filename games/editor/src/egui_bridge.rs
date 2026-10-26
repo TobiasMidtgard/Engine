@@ -302,7 +302,7 @@ impl RenderFeature for EguiFeature {
             renderer.update_texture(&gpu.device, &gpu.queue, *id, delta);
         }
         let screen = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [ctx.view.width.max(1), ctx.view.height.max(1)],
+            size_in_pixels: [ctx.view.window.x.max(1), ctx.view.window.y.max(1)],
             pixels_per_point: self.pixels_per_point,
         };
         if !self.primitives.is_empty() {
