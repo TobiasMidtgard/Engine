@@ -537,7 +537,7 @@ that changes only when new pixels are uploaded, so bind groups are rebuilt only 
 it with its mip chain on first use and again when the asset gets new pixels; images nobody asks
 for in 600 frames leave the GPU. The mesh feature (and with it the cluster path) binds its
 material textures this way; features that upload `Image::data` themselves (the skinning feature,
-today) should switch to it. With `RenderSettings::release_image_pixels` (off by default) the
+today) should switch to it. With `RenderSettings::release_image_pixels` (on by default since 2026-10-26) the
 renderer frees an uploaded image's CPU pixels (`data` and `mips`; size, format and flags stay,
 and `Image::is_released()` turns true) once its asset version has stayed the same for
 `RELEASE_AFTER_FRAMES` (120) frames, counted in frames so that a texture written every frame or

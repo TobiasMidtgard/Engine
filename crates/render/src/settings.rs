@@ -282,7 +282,7 @@ pub struct RenderSettings {
     /// and flags stay; see `image_cache`). Saves the CPU copy of every texture (gigabytes in
     /// big worlds; under a software GPU the GPU copy is system memory too). Images that keep
     /// changing are never released, and assigning new `data` uploads again. Images other code
-    /// reads on the CPU or uploads itself need `Image::keep_pixels`. Off by default.
+    /// reads on the CPU or uploads itself need `Image::keep_pixels`. On by default.
     pub release_image_pixels: bool,
     /// Streamed virtual texturing (see `virtual_texture`): big images and the textures of
     /// `VirtualTextures` are drawn through a fixed-size tile cache, streaming only the tiles the
@@ -376,7 +376,7 @@ impl Default for RenderSettings {
             impostor_pixels: 96.0,
             cluster_shadow_error_texels: 2.0,
             material_texture_size: 1024,
-            release_image_pixels: false,
+            release_image_pixels: true,
             virtual_textures: true,
             virtual_texture_threshold: 4096,
             virtual_texture_cache_tiles: 1024,

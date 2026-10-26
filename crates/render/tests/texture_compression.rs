@@ -285,7 +285,9 @@ fn compact_mode_uses_bc1_for_opaque_color_and_two_channel_slots_get_bc5() {
     let mut cutout = photo(64);
     cutout
         .data
-        .chunks_exact_mut(4)
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
         .step_by(3)
         .for_each(|p| p[3] = 0);
     cutout.generate_mips();
