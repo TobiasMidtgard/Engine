@@ -253,6 +253,12 @@ pub fn watch_files(world: &mut World) {
         keys.dedup();
         let mut changed = Vec::new();
         for key in &keys {
+            // An imported file whose source changed is copied in again first.
+            match crate::import::refresh_from_source(&root, key) {
+                Ok(true) => editor.info(t, format!("{key}: its source changed, copied it again")),
+                Ok(false) => {}
+                Err(e) => editor.error(t, format!("{key}: {e}")),
+            }
             let Ok(stamp) = std::fs::metadata(root.join(key)).and_then(|m| m.modified()) else {
                 continue;
             };

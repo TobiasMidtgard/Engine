@@ -18,6 +18,7 @@ mod camera;
 mod demos;
 mod editor;
 mod egui_bridge;
+mod import;
 mod inspector;
 mod landscape;
 mod models;

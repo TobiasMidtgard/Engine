@@ -770,6 +770,25 @@ fn models(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, at: DVec3) 
             .hint_text("🔍 search")
             .desired_width(f32::INFINITY),
     );
+    ui.horizontal(|ui| {
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut editor.import_path)
+                .hint_text("path to a .glb, .gltf or image")
+                .desired_width(ui.available_width() - 70.0),
+        );
+        let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let path = editor.import_path.trim().trim_matches('"').to_string();
+        if (ui
+            .button("📥 Import")
+            .on_hover_text("Copy the file into the asset folder and place it")
+            .clicked()
+            || enter)
+            && !path.is_empty()
+        {
+            crate::import::import_and_place(world, editor, std::path::Path::new(&path), None);
+            editor.import_path.clear();
+        }
+    });
     let filter = editor.model_filter.trim().to_lowercase();
     let files: Vec<String> = crate::models::cached(world, editor)
         .iter()

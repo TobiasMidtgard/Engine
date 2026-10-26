@@ -143,6 +143,8 @@ pub struct Editor {
     pub models: Option<Vec<String>>,
     /// Content panel model search.
     pub model_filter: String,
+    /// The Content panel's import path.
+    pub import_path: String,
     /// When placed models' files last changed (for reimport).
     pub model_watch: crate::models::Watch,
 }
@@ -182,6 +184,7 @@ impl Editor {
             models: None,
             model_filter: String::new(),
             model_watch: Default::default(),
+            import_path: String::new(),
         }
     }
 
