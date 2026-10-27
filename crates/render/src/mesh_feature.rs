@@ -463,6 +463,10 @@ fn set_bit(bits: &mut Vec<u64>, index: u32) {
 
 /// Run jobs on the engine's compute pool (`engine_core::tasks`), the calling thread taking
 /// part; in turn for a single job or without a pool.
+///
+/// The calling thread runs the first job itself, before it waits: a scope's thread otherwise
+/// starts by ticking the pool's queue, where it may pick up another system's long task while
+/// the render waits.
 fn run_jobs<'env, F: FnOnce() + Send + 'env>(jobs: impl Iterator<Item = F>) {
     let mut jobs = jobs.peekable();
     let Some(first) = jobs.next() else {
@@ -471,10 +475,10 @@ fn run_jobs<'env, F: FnOnce() + Send + 'env>(jobs: impl Iterator<Item = F>) {
     match engine_core::tasks::ComputeTaskPool::try_get() {
         Some(pool) if jobs.peek().is_some() => {
             pool.scope(|scope| {
-                scope.spawn(async move { first() });
                 for job in jobs {
                     scope.spawn(async move { job() });
                 }
+                first();
             });
         }
         _ => {
@@ -779,7 +783,7 @@ impl PrepareSteps {
 }
 
 /// Upload budget keys of meshes (images use the low ones; see `UploadBudget::take`).
-const MESH_UPLOAD_KEY: u64 = 1 << 63;
+pub(crate) const MESH_UPLOAD_KEY: u64 = 1 << 63;
 
 /// Draws [`MeshRenderer`](crate::components::MeshRenderer) entities. Added by `RenderPlugin`.
 #[derive(Default)]
@@ -2085,6 +2089,7 @@ impl RenderFeature for MeshFeature {
             };
         }
 
+        steps.step("meshes: cull");
         // 1. The cull, over the scene's slots in parallel chunks. Slots that may take the
         //    cluster path, and meshes not uploaded yet, wait for the serial pass.
         let params = CullParams {
@@ -2166,6 +2171,7 @@ impl RenderFeature for MeshFeature {
             }
         }
 
+        steps.step("meshes: clusters");
         // 2. In turn: the cluster path (dense opaque meshes and displaced ones, culled and
         //    picked on the GPU once built; until then drawn as instances) and first uploads.
         for &slot in &deferred {
@@ -2748,6 +2754,8 @@ impl RenderFeature for MeshFeature {
         if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
             d.set("render.meshes.slots", self.scene.hot.len() as f64);
             d.set("render.meshes.dirty_slots", self.scene.dirty as f64);
+            // Slots the serial pass took (cluster path and first uploads).
+            d.set("render.meshes.serial_slots", self.deferred.len() as f64);
             // Sun cascade casters drawn this frame (reused cascades draw none).
             let (mut instances, mut triangles) = (0u64, 0u64);
             for b in self.shadow[..SKY_OCCLUSION_VIEW].iter().flatten() {

@@ -28,6 +28,7 @@
 //! Register a feature with [`RenderAppExt::add_render_feature`]. Water, terrain, particles,
 //! volumetric clouds, foliage and UI are all built this way.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
@@ -138,7 +139,32 @@ struct BudgetState {
     refused_keys: std::collections::HashSet<u64>,
     /// Uploads stop at this time (while loading).
     deadline: Option<std::time::Instant>,
+    /// Bytes of updates (new versions of what is on the GPU) this frame.
+    updated: u64,
+    /// What went over the current report window, by item: (uploads, bytes).
+    window: HashMap<u64, (u32, u64)>,
+    window_frames: u32,
+    window_bytes: u64,
+    window_started: Option<std::time::Instant>,
 }
+
+/// A window of frames that uploaded a lot in play (see [`UploadBudget::report`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UploadReport {
+    pub frames: u32,
+    /// Bytes a frame, averaged over the window.
+    pub bytes_per_frame: u64,
+    /// The items that uploaded most: (key, uploads, bytes), most bytes first.
+    pub top: Vec<(u64, u32, u64)>,
+    /// Items uploaded in the window.
+    pub items: usize,
+}
+
+/// A report window ends after this many frames or [`REPORT_SECS`], whichever comes first.
+const REPORT_FRAMES: u32 = 120;
+const REPORT_SECS: f32 = 5.0;
+/// Windows that uploaded less than this a frame on average aren't reported.
+const REPORT_BYTES_PER_FRAME: u64 = 1 << 20;
 
 impl UploadBudget {
     fn state(&self) -> std::sync::MutexGuard<'_, BudgetState> {
@@ -159,6 +185,7 @@ impl UploadBudget {
         }
         s.took_new = false;
         s.uploaded = 0;
+        s.updated = 0;
         s.refused = 0;
         s.refused_keys.clear();
         s.deadline = deadline;
@@ -175,6 +202,8 @@ impl UploadBudget {
                 s.left = s.left.saturating_sub(bytes);
             }
             s.uploaded += bytes;
+            s.updated += bytes;
+            s.record(key, bytes);
             return true;
         }
         let late = s.deadline.is_some_and(|d| std::time::Instant::now() >= d);
@@ -186,6 +215,7 @@ impl UploadBudget {
             }
             s.took_new = true;
             s.uploaded += bytes;
+            s.record(key, bytes);
             true
         } else {
             if s.refused_keys.insert(key) {
@@ -203,6 +233,54 @@ impl UploadBudget {
     /// Bytes refused this frame: waiting for a later one.
     pub fn pending(&self) -> u64 {
         self.state().refused
+    }
+
+    /// Bytes of new versions of items already on the GPU this frame (edited meshes, repainted
+    /// images).
+    pub fn updated(&self) -> u64 {
+        self.state().updated
+    }
+
+    /// After a frame: once a window of frames is over ([`REPORT_FRAMES`] or [`REPORT_SECS`]),
+    /// what it uploaded, when that was more than [`REPORT_BYTES_PER_FRAME`] a frame in play (no
+    /// loading deadline). An item among the top uploading in most of the window's frames is
+    /// re-uploaded every frame: its asset changes every frame.
+    pub fn report(&self) -> Option<UploadReport> {
+        let mut s = self.state();
+        let now = std::time::Instant::now();
+        let started = *s.window_started.get_or_insert(now);
+        s.window_frames += 1;
+        if s.window_frames < REPORT_FRAMES && (now - started).as_secs_f32() < REPORT_SECS {
+            return None;
+        }
+        let frames = std::mem::take(&mut s.window_frames);
+        let bytes = std::mem::take(&mut s.window_bytes);
+        let window = std::mem::take(&mut s.window);
+        s.window_started = Some(now);
+        let bytes_per_frame = bytes / frames as u64;
+        if s.deadline.is_some() || bytes_per_frame < REPORT_BYTES_PER_FRAME {
+            return None;
+        }
+        let items = window.len();
+        let mut top: Vec<(u64, u32, u64)> =
+            window.into_iter().map(|(k, (n, b))| (k, n, b)).collect();
+        top.sort_by_key(|&(k, _, b)| (std::cmp::Reverse(b), k));
+        top.truncate(6);
+        Some(UploadReport {
+            frames,
+            bytes_per_frame,
+            top,
+            items,
+        })
+    }
+}
+
+impl BudgetState {
+    fn record(&mut self, key: u64, bytes: u64) {
+        let e = self.window.entry(key).or_insert((0, 0));
+        e.0 += 1;
+        e.1 += bytes;
+        self.window_bytes += bytes;
     }
 }
 
@@ -632,5 +710,45 @@ mod upload_budget_tests {
         // A new version of a resident mesh goes even with the budget spent.
         assert!(b.take(3, 8 * MB, true));
         assert_eq!(b.uploaded(), 10 * MB);
+    }
+
+    #[test]
+    fn a_window_of_heavy_uploads_names_what_uploads_every_frame() {
+        let b = UploadBudget::default();
+        let mut report = None;
+        for frame in 0..super::REPORT_FRAMES as u64 {
+            b.begin_frame(16 * MB, None);
+            // An edited mesh every frame, and some new images now and then.
+            assert!(b.take(7, 2 * MB, true));
+            if frame % 10 == 0 {
+                assert!(b.take(100 + frame, MB, false));
+            }
+            report = b.report();
+            assert_eq!(b.updated(), 2 * MB);
+        }
+        let report = report.expect("a report after the window");
+        assert_eq!(report.frames, super::REPORT_FRAMES);
+        assert_eq!(report.items, 13);
+        assert_eq!(
+            report.top[0],
+            (
+                7,
+                super::REPORT_FRAMES,
+                2 * MB * super::REPORT_FRAMES as u64
+            )
+        );
+        assert!(report.top.len() <= 6);
+        // Light windows, and loading ones, aren't reported.
+        for _ in 0..super::REPORT_FRAMES {
+            b.begin_frame(16 * MB, None);
+            b.take(8, MB / 4, true);
+            assert_eq!(b.report(), None);
+        }
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        for _ in 0..super::REPORT_FRAMES {
+            b.begin_frame(16 * MB, Some(later));
+            b.take(9, 4 * MB, true);
+            assert_eq!(b.report(), None);
+        }
     }
 }

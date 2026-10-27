@@ -1329,6 +1329,9 @@ impl Renderer {
             self.shared
                 .side_work
                 .uploaded(self.shared.uploads.uploaded());
+            if let Some(report) = self.shared.uploads.report() {
+                log_uploads(world, &report);
+            }
         }
         FrameWork {
             extra: is_extra,
@@ -2075,6 +2078,10 @@ impl Renderer {
             );
             let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
             d.set("render.upload_mb", mb(self.shared.uploads.uploaded()));
+            d.set(
+                "render.upload_updates_mb",
+                mb(self.shared.uploads.updated()),
+            );
             d.set(
                 "render.pending_upload_mb",
                 mb(self.shared.uploads.pending()),
@@ -3186,4 +3193,50 @@ pub fn capture_now(world: &mut World, path: impl Into<PathBuf>) -> Result<Screen
 fn _assert_send_sync() {
     fn check<T: Send + Sync>() {}
     check::<Renderer>();
+}
+
+/// Log a window of frames that uploaded a lot in play, naming what uploaded most: a mesh by
+/// the components of an entity drawing it (which module owns it), an image by its size.
+fn log_uploads(world: &mut World, report: &crate::features::UploadReport) {
+    let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+    let mut parts = Vec::new();
+    for &(key, uploads, bytes) in &report.top {
+        let what = if key & crate::mesh_feature::MESH_UPLOAD_KEY != 0 {
+            let index = (key & !crate::mesh_feature::MESH_UPLOAD_KEY) as u32;
+            let mut users = world.query::<(Entity, &crate::ResolvedMesh)>();
+            let user = users
+                .iter(world)
+                .find(|(_, r)| r.mesh.index() == index)
+                .map(|(e, _)| e);
+            let components = user
+                .and_then(|e| world.inspect_entity(e).ok())
+                .map(|c| {
+                    c.map(|(_, info)| {
+                        engine_core::registry::short_type_name(&info.name().to_string())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+                })
+                .unwrap_or_else(|| "no entity draws it".into());
+            format!("mesh {index} [{components}]")
+        } else {
+            let index = (key / crate::image_cache::VIEW_SLOTS as u64) as u32;
+            let size = world
+                .get_resource::<engine_assets::Assets<crate::Image>>()
+                .and_then(|a| a.get(engine_assets::Handle::from_index(index)))
+                .map_or_else(|| "gone".into(), |i| format!("{}x{}", i.width, i.height));
+            format!("image {index} ({size})")
+        };
+        parts.push(format!(
+            "{what}: {uploads} uploads, {:.2} MB a frame",
+            mb(bytes) / report.frames as f64
+        ));
+    }
+    tracing::info!(
+        "uploads in play: {:.1} MB a frame over {} frames, {} items; most: {}",
+        mb(report.bytes_per_frame),
+        report.frames,
+        report.items,
+        parts.join("; ")
+    );
 }
