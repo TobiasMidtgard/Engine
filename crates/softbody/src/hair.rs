@@ -169,8 +169,9 @@ pub enum HairEmitter {
         comb: [f32; 3],
     },
     /// Fur over a body mesh: `mesh` is the key of a mesh asset in the skeleton's model space,
-    /// posed like the skeleton when the groom is built (a CPU-skinned body's live mesh; the
-    /// groom waits until it exists). About `guides` roots are spread evenly over its area, each
+    /// in the bind pose its [`MeshSkin`] gives (a GPU-skinned body), or else posed like the
+    /// skeleton when the groom is built (a CPU-skinned body's live mesh; the groom waits
+    /// until it exists). About `guides` roots are spread evenly over its area, each
     /// riding the bone that carries the skin under it (a [`BoneBlend`] of two where two do)
     /// when the mesh's skin weights are in [`MeshSkins`], else its nearest bone, and combed
     /// along the skeleton away from the bone `flow_from` (from a head: back along the body,
@@ -233,6 +234,9 @@ pub struct MeshSkins(pub std::collections::HashMap<String, std::sync::Arc<MeshSk
 pub struct MeshSkin {
     pub joints: Vec<[u16; 4]>,
     pub weights: Vec<[f32; 4]>,
+    /// The bind pose (model space) the mesh asset stays in, when it is skinned on the GPU;
+    /// empty when the asset is posed like the skeleton (skinned on the CPU).
+    pub bind: Vec<engine_world::animation::BonePose>,
 }
 
 impl MeshSkin {
@@ -972,14 +976,30 @@ pub fn build(
     let thickness = spec.sim.thickness.max(style.spread * 0.5 + 0.003);
     let (omega_root, omega_tip) = strand_omegas(style.stiffness);
     for emitter in &spec.emitters {
-        for root in emit_roots(emitter, pose, meshes, skins)? {
+        // Roots on a mesh kept in its bind pose are placed in that pose, then carried to now.
+        let bind = match emitter {
+            HairEmitter::Surface { mesh, .. } => skins
+                .and_then(|s| s.0.get(mesh))
+                .filter(|s| s.bind.len() == pose.bones.len())
+                .map(|s| SkeletonPose {
+                    names: pose.names.clone(),
+                    parents: pose.parents.clone(),
+                    bones: s.bind.clone(),
+                }),
+            _ => None,
+        };
+        let rest_pose = bind.as_ref().unwrap_or(pose);
+        for root in emit_roots(emitter, rest_pose, meshes, skins)? {
             let source = match root.blend {
                 None => FrameSource::Bone {
                     owner,
                     bone: root.bone,
                 },
                 Some((b, t)) => {
-                    let rest = |i: usize| (pose.bones[i].translation, pose.bones[i].rotation);
+                    let rest = |i: usize| {
+                        let r = rest_pose.bones[i];
+                        (r.translation, r.rotation)
+                    };
                     FrameSource::Blend(BoneBlend {
                         owner,
                         a: root.bone,
@@ -1333,6 +1353,7 @@ mod tests {
         let skin = MeshSkin {
             joints: template.joints.clone(),
             weights: template.weights.clone(),
+            bind: Vec::new(),
         };
         skins.0.insert("Dog body".into(), Arc::new(skin));
         let mut pose = crate::demo::skeleton(&crate::demo::DOG, crate::demo::Rig::Dog);
@@ -1427,6 +1448,43 @@ mod tests {
             muzzle < 0.6 && chest > 1.15,
             "muzzle {muzzle}, chest {chest}"
         );
+    }
+
+    #[test]
+    fn fur_grown_on_a_mesh_kept_in_its_bind_pose_starts_on_the_posed_skin() {
+        // A GPU-skinned body: the asset stays in the bind pose and the dog is mid-trot.
+        let (template, meshes, mut skins, rest) = dog_body();
+        let mut skin = (*skins.0["Dog body"]).clone();
+        skin.bind = template.bind.clone();
+        skins.0.insert("Dog body".into(), Arc::new(skin));
+        let mut pose = rest.clone();
+        crate::demo::pose_rig(crate::demo::Rig::Dog, 0.35 * TAU, &mut pose);
+        let mut skinned = template.mesh().vertices;
+        crate::demo::skin::skin(&template, &pose.bones, &mut skinned, &mut Vec::new());
+        let skin: Vec<Vec3> = skinned.iter().map(|v| Vec3::from(v.position)).collect();
+        let groom = HairGroom {
+            emitters: vec![dog_coat(2000, Vec::new(), &[], &[])],
+            style: HairStyle::fur(),
+            sim: HairGroom::hair_settings(),
+        };
+        let owner = GlobalTransform::default();
+        let body = build(
+            &groom,
+            Some((Entity::PLACEHOLDER, &owner, &pose)),
+            Some(&meshes),
+            Some(&skins),
+        )
+        .unwrap();
+        let grid = PointGrid::new(&skin);
+        let roots: Vec<Vec3> = (0..body.sim.pos.len())
+            .filter(|i| body.sim.inv_mass[*i] == 0.0)
+            .map(|i| body.sim.pos[i])
+            .collect();
+        assert!(roots.len() > 1000, "{} roots", roots.len());
+        for p in roots {
+            let d = grid.nearest(p).1;
+            assert!(d < 0.025, "root {p} is {d} m off the posed skin");
+        }
     }
 
     #[test]

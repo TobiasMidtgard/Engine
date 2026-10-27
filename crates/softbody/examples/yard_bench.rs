@@ -64,6 +64,9 @@ fn main() {
     // Skinned meshes uploaded (changed) each frame, bytes.
     let mut versions = std::collections::HashMap::new();
     let mut uploaded = 0usize;
+    // And bones for the GPU skinning.
+    let mut last_bones = std::collections::HashMap::new();
+    let mut bone_bytes = 0usize;
     for f in 0..frames {
         let t = Instant::now();
         app.update();
@@ -88,6 +91,13 @@ fn main() {
                 if versions.insert((e, h), v).is_some_and(|old| old != v) {
                     let n = meshes.get(h).map_or(0, |m| m.vertices.len());
                     uploaded += n * std::mem::size_of::<engine_render::Vertex>();
+                }
+            }
+            let mut q = app.world.query::<(Entity, &engine_render::GpuSkin)>();
+            for (e, skin) in q.iter(&app.world) {
+                if last_bones.get(&e) != Some(&skin.bones) {
+                    bone_bytes += std::mem::size_of_val(&skin.bones[..]);
+                    last_bones.insert(e, skin.bones.clone());
                 }
             }
         }
@@ -149,8 +159,9 @@ fn main() {
         .collect();
     println!("asleep: {asleep:?}");
     println!(
-        "skinned meshes uploaded: {:.2} MB a frame",
-        uploaded as f64 / frames as f64 / 1e6
+        "skinned meshes uploaded: {:.2} MB a frame, GPU skinning bones {:.1} KB a frame",
+        uploaded as f64 / frames as f64 / 1e6,
+        bone_bytes as f64 / frames as f64 / 1e3
     );
     // Each body's solver alone, with no colliders, with and without self-collision.
     if std::env::var("SOLO").is_ok() {
