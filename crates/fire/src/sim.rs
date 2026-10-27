@@ -1091,7 +1091,7 @@ pub fn apply_charring(
     }
     for (b, charring, base, mut renderer, mut t) in &mut q {
         // Quantized so a burning forest shares a handful of materials.
-        let level = (b.char * 8.0).round() / 8.0;
+        let level = (charring.surface(b) * 8.0).round() / 8.0;
         let glow = (b.glow.max(b.intensity) * 4.0).round() / 4.0;
         let mut m = base.material;
         for i in 0..3 {

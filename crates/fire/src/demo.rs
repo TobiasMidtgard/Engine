@@ -379,6 +379,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
                 Charring {
                     shrink: 0.3,
                     char_color: [0.03, 0.025, 0.02],
+                    ..Default::default()
                 },
                 Foliage,
             ))
@@ -474,6 +475,8 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
                 },
                 Charring {
                     shrink: 0.6,
+                    // Loose straw: its outer layer is black within seconds of catching.
+                    char_secs: 5.0,
                     ..Default::default()
                 },
             ))

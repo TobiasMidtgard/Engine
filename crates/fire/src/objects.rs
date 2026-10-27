@@ -93,6 +93,10 @@ pub struct Charring {
     pub shrink: f32,
     /// Char color (linear RGB).
     pub char_color: [f32; 3],
+    /// Seconds in flames for its surface to char (to 1/e of its color left). The surface
+    /// blackens long before much of the fuel is gone: a few seconds for straw and leaves, tens
+    /// of seconds for wood.
+    pub char_secs: f32,
 }
 
 impl Default for Charring {
@@ -100,7 +104,17 @@ impl Default for Charring {
         Self {
             shrink: 0.0,
             char_color: [0.025, 0.022, 0.02],
+            char_secs: 20.0,
         }
+    }
+}
+
+impl Charring {
+    /// How charred its surface looks (0..1): from the time in flames, and never less than the
+    /// share of its fuel burnt.
+    pub fn surface(&self, b: &Burning) -> f32 {
+        let flamed = 1.0 - (-b.burning_secs / self.char_secs.max(0.1)).exp();
+        b.char.max(flamed)
     }
 }
 
@@ -314,6 +328,25 @@ mod tests {
             assert!(t < 4000.0, "smoldered forever: {c:?} {b:?}");
         }
         assert_eq!(c.state, BurnState::Burnt);
+    }
+
+    #[test]
+    fn the_surface_chars_long_before_the_fuel_is_gone() {
+        let straw = Charring {
+            char_secs: 5.0,
+            ..Default::default()
+        };
+        let mut b = Burning {
+            burning_secs: 15.0,
+            char: 0.05,
+            ..Default::default()
+        };
+        // Fifteen seconds in flames: straw is black outside, though most of it is left.
+        assert!(straw.surface(&b) > 0.9, "{}", straw.surface(&b));
+        // Wood takes longer, and never looks less burnt than the fuel it has lost.
+        assert!(Charring::default().surface(&b) < 0.6);
+        b.burning_secs = 0.0;
+        assert_eq!(straw.surface(&b), 0.05);
     }
 
     #[test]
