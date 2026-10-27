@@ -22,6 +22,10 @@
 //! (`--profile`) the log gets a table of both with every report. The profiler also splits the
 //! scene pass by feature (`render.gpu.scene: <feature>`, then `render.gpu.scene: sky phase`),
 //! so its cost can be put on what draws it; `render.gpu.scene` stays their sum.
+//!
+//! A frame whose steps take over 50 ms and three times the usual logs its slowest steps
+//! (`slow render frame: 271 ms of render steps (usually 9.7): meshes: pipelines 180.0, ..`),
+//! so a hitch names its cause without the profiler.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -281,6 +285,27 @@ impl CpuSteps {
     }
 }
 
+/// A frame whose render steps take longer than this is logged (see `PerfLog::log_if_slow`).
+const SLOW_FRAME_MS: f32 = 50.0;
+
+/// `steps` summed by name, the `n` slowest first, as "name 12.3, other 4.5".
+fn slowest_steps(steps: &[(Label, f32)], n: usize) -> String {
+    let mut by_name: Vec<(&str, f32)> = Vec::new();
+    for (name, ms) in steps {
+        match by_name.iter_mut().find(|(n, _)| *n == name.as_ref()) {
+            Some((_, sum)) => *sum += ms,
+            None => by_name.push((name.as_ref(), *ms)),
+        }
+    }
+    by_name.sort_by(|a, b| b.1.total_cmp(&a.1));
+    by_name
+        .iter()
+        .take(n)
+        .map(|(name, ms)| format!("{name} {ms:.1}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// [`CpuSteps`]' finished steps, between threads.
 pub(crate) struct ParkedSteps(Vec<(Label, f32)>);
 
@@ -352,6 +377,8 @@ pub(crate) struct PerfLog {
     gpu_passes: Vec<(Label, f32)>,
     /// Each feature's draws and triangles in the latest frame, for the profile table.
     features: Vec<(String, crate::FeatureStats)>,
+    /// When a slow frame was last logged.
+    last_slow: Option<Instant>,
 }
 
 impl PerfLog {
@@ -370,6 +397,7 @@ impl PerfLog {
             cpu_steps: Vec::new(),
             gpu_passes: Vec::new(),
             features: Vec::new(),
+            last_slow: None,
         }
     }
 
@@ -431,6 +459,9 @@ impl PerfLog {
         cpu.finish();
         self.cpu_steps = cpu.done;
         let now = Instant::now();
+        if every_secs > 0.0 {
+            self.log_if_slow(now);
+        }
         self.frame_ms = self
             .last_frame
             .map_or(0.0, |t| (now - t).as_secs_f32() * 1000.0);
@@ -508,6 +539,32 @@ impl PerfLog {
         }
         self.window = Window::default();
         self.window_start = now;
+    }
+
+    /// A frame whose render steps took over [`SLOW_FRAME_MS`] and several times the window's
+    /// average (a first sight's pipelines or uploads, a loading frame) gets a log line with
+    /// its slowest steps, at most once a second, so one run names a hitch's cause.
+    fn log_if_slow(&mut self, now: Instant) {
+        let total: f32 = self.cpu_steps.iter().map(|(_, ms)| ms).sum();
+        let w = &self.window;
+        let usual = if w.frames >= 10 {
+            w.cpu_steps.values().sum::<f32>() / w.frames as f32
+        } else {
+            0.0
+        };
+        if total < SLOW_FRAME_MS
+            || total < 3.0 * usual
+            || self
+                .last_slow
+                .is_some_and(|t| (now - t).as_secs_f32() < 1.0)
+        {
+            return;
+        }
+        self.last_slow = Some(now);
+        tracing::info!(
+            "slow render frame: {total:.0} ms of render steps (usually {usual:.1}): {}",
+            slowest_steps(&self.cpu_steps, 6)
+        );
     }
 
     /// Each feature's draws and triangles this frame (listed in the profile table).
@@ -690,6 +747,17 @@ fn truncate(s: &str, n: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_frames_name_their_slowest_steps() {
+        let steps: Vec<(Label, f32)> = vec![
+            ("meshes: pipelines".into(), 180.0),
+            ("water".into(), 3.0),
+            ("meshes: pipelines".into(), 20.0),
+            ("sky".into(), 9.5),
+        ];
+        assert_eq!(slowest_steps(&steps, 2), "meshes: pipelines 200.0, sky 9.5");
+    }
 
     #[test]
     fn thread_cpu_averages_whole_ticks_over_frames() {
