@@ -11,8 +11,9 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bevy_ecs::prelude::*;
@@ -51,6 +52,104 @@ pub(crate) fn requested() -> bool {
 
 pub(crate) fn enable() {
     ENABLED.store(true, Ordering::Relaxed);
+    start_watchdog();
+}
+
+/// Frames finished so far (bumped at the end of every `run_frame`), for the hang watchdog.
+static FRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// A frame finished.
+pub(crate) fn frame_done() {
+    FRAMES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// A frame stuck this long is reported as a hang.
+const HANG_SECS: u64 = 20;
+/// While it stays stuck, the report repeats this often.
+const HANG_REPEAT_SECS: u64 = 60;
+
+/// One thread's open (entered, not yet exited) timed spans, innermost last.
+type OpenSpans = Arc<Mutex<Vec<(String, Instant)>>>;
+
+/// Every thread that has entered a timed span, with its open spans.
+fn threads() -> &'static Mutex<Vec<(String, OpenSpans)>> {
+    static THREADS: OnceLock<Mutex<Vec<(String, OpenSpans)>>> = OnceLock::new();
+    THREADS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+thread_local! {
+    static OPEN: OpenSpans = {
+        let open = OpenSpans::default();
+        let thread = std::thread::current();
+        let name = thread.name().map_or_else(|| format!("{:?}", thread.id()), str::to_string);
+        threads().lock().push((name, open.clone()));
+        open
+    };
+}
+
+/// Watch for frames that never finish (a deadlock or an endless loop) and log what every
+/// thread was inside when it happened, so a hang on a player's machine names its system
+/// without a debugger. Profiling only: open spans are tracked only while it records.
+fn start_watchdog() {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("engine hang watchdog".into())
+        .spawn(|| {
+            let mut last = (FRAMES.load(Ordering::Relaxed), Instant::now());
+            let mut reported: Option<Instant> = None;
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                let frames = FRAMES.load(Ordering::Relaxed);
+                if frames != last.0 {
+                    last = (frames, Instant::now());
+                    reported = None;
+                    continue;
+                }
+                let stuck = last.1.elapsed();
+                let due = match reported {
+                    None => stuck.as_secs() >= HANG_SECS,
+                    Some(at) => at.elapsed().as_secs() >= HANG_REPEAT_SECS,
+                };
+                if due {
+                    tracing::error!("{}", hang_report(frames, stuck));
+                    reported = Some(Instant::now());
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!("no hang watchdog ({e})");
+    }
+}
+
+/// "Frame N has not finished for S s" and each busy thread's open spans, outermost first.
+fn hang_report(frames: u64, stuck: Duration) -> String {
+    let mut out = format!(
+        "frame {} has not finished for {:.0} s (a hang); open spans per thread:",
+        frames + 1,
+        stuck.as_secs_f64()
+    );
+    let now = Instant::now();
+    for (name, open) in threads().lock().iter() {
+        let open = open.lock();
+        if open.is_empty() {
+            continue;
+        }
+        let spans: Vec<String> = open
+            .iter()
+            .map(|(key, at)| {
+                format!(
+                    "{} ({:.1} s)",
+                    key.trim_start_matches(INNER),
+                    (now - *at).as_secs_f64()
+                )
+            })
+            .collect();
+        let _ = write!(out, "\n  {name}: {}", spans.join(" > "));
+    }
+    out
 }
 
 fn totals() -> &'static Mutex<HashMap<String, Stat>> {
@@ -142,7 +241,13 @@ where
 
     fn on_enter(&self, id: &Id, ctx: Context<'_, S>) {
         if let Some(span) = ctx.span(id) {
-            span.extensions_mut().replace(Entered(Instant::now()));
+            let now = Instant::now();
+            let mut ext = span.extensions_mut();
+            if let Some(Key(key)) = ext.get_mut::<Key>() {
+                let key = key.clone();
+                OPEN.with(|open| open.lock().push((key, now)));
+            }
+            ext.replace(Entered(now));
         }
     }
 
@@ -158,6 +263,12 @@ where
         let Some(Key(key)) = ext.get_mut::<Key>() else {
             return;
         };
+        OPEN.with(|open| {
+            let mut open = open.lock();
+            if let Some(i) = open.iter().rposition(|(k, _)| k == key) {
+                open.remove(i);
+            }
+        });
         let mut totals = totals().lock();
         let stat = match totals.get_mut(key.as_str()) {
             Some(stat) => stat,
@@ -389,6 +500,44 @@ fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hang_reports_name_each_threads_open_spans() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let (entered, wait) = std::sync::mpsc::channel();
+        let (release, done) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::Builder::new()
+            .name("stuck worker".into())
+            .spawn(move || {
+                let subscriber = tracing_subscriber::registry().with(ProfileLayer);
+                tracing::subscriber::with_default(subscriber, || {
+                    let _outer = tracing::info_span!("render_step", name = "upload").entered();
+                    let _inner = tracing::info_span!("wait for slot").entered();
+                    entered.send(()).unwrap();
+                    done.recv().unwrap();
+                });
+            })
+            .unwrap();
+        wait.recv().unwrap();
+        let report = hang_report(41, Duration::from_secs(25));
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(
+            report.starts_with("frame 42 has not finished for 25 s"),
+            "{report}"
+        );
+        let line = report
+            .lines()
+            .find(|l| l.trim_start().starts_with("stuck worker:"))
+            .unwrap_or_else(|| panic!("no worker line in {report}"));
+        assert!(
+            line.contains("engine_core: upload (")
+                && line.contains(" > engine_core: wait for slot ("),
+            "{line}"
+        );
+        // Exited spans leave the thread's list.
+        assert!(!hang_report(0, Duration::ZERO).contains("wait for slot"));
+    }
 
     #[test]
     fn short_names_keep_crate_and_function() {

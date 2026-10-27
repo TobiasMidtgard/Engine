@@ -439,6 +439,7 @@ pub fn run_frame(world: &mut World) {
     world.run_schedule(Extract);
     world.run_schedule(Render);
     world.run_schedule(Last);
+    crate::profile::frame_done();
 }
 
 /// Runs frames as fast as possible until an [`AppExit`] is sent. Used when no platform
