@@ -105,6 +105,13 @@ const MAIN_SCHEDULES: &[fn() -> Schedule] = &[
 impl App {
     /// A new app with the engine's core resources, schedules and systems installed.
     pub fn new() -> Self {
+        // The profiler times systems through spans made when a system is added, so a game that
+        // installs its logger after `App::new` would leave the core's own systems (transform
+        // propagation, time) out of every report. Install it first when profiling; a later
+        // `log::init` call is then a no-op.
+        if crate::profile::requested() {
+            crate::log::init("info,wgpu=warn,naga=warn");
+        }
         crate::tasks::init_task_pools();
         let mut world = World::new();
         let mut schedules = Schedules::new();
