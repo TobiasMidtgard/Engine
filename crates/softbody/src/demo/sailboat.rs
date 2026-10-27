@@ -162,23 +162,30 @@ fn sailcloth() -> SoftMaterial {
     }
 }
 
-/// The hull as the physics module floats it: a box from the keel up, sized so it floats on
-/// its designed waterline (the module lifts a body by the fraction of its box under water,
-/// and drags it in proportion too, so a tall box drags less).
+/// The hull as physics floats it and as everything else bumps into it: the hull's shape
+/// above the water, with a slab under it that floats the boat on its boot-top (see
+/// [`super::floating_hull_points`]), and the mast.
 fn hull_collider() -> engine_world::physics::Collider {
-    // Draft 0.20 of a 1.4 m tall box: lift = ρ g V (0.20 / 1.4) = m g.
-    let depth = 1.4f32;
-    let volume = dims::MASS_KG / (1000.0 * 0.20 / depth);
-    let length = 3.0f32;
-    let width = volume / (length * depth);
+    let (foot, top) = (super::boat_dims::MAST_FOOT_Y, super::boat_dims::MAST_TOP_Y);
+    let radius = super::boat_dims::MAST_DIA_DECK * 0.5;
     engine_world::physics::Collider {
-        shape: ColliderShape::Compound(vec![(
-            Vec3::new(0.0, depth * 0.5 - 0.20, 0.0),
-            Quat::IDENTITY,
-            ColliderShape::Cuboid {
-                half_extents: Vec3::new(width * 0.5, depth * 0.5, length * 0.5),
-            },
-        )]),
+        shape: ColliderShape::Compound(vec![
+            (
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                ColliderShape::ConvexHull {
+                    points: super::floating_hull_points(dims::MASS_KG / 1000.0),
+                },
+            ),
+            (
+                Vec3::new(0.0, 0.5 * (foot + top), dims::MAST_Z),
+                Quat::IDENTITY,
+                ColliderShape::Capsule {
+                    radius,
+                    half_height: 0.5 * (top - foot) - radius,
+                },
+            ),
+        ]),
         ..Default::default()
     }
 }

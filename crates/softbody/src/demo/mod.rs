@@ -80,7 +80,9 @@ pub use kit::Model;
 use kit::{Mat, register_mesh};
 use props::*;
 pub use props_anim::{AimAxis, DemoAim, DemoRoll, DemoScrewWheel};
-pub use props_boat::{BoatModels, boat_models, boat_stand, dims as boat_dims, hull_points};
+pub use props_boat::{
+    BoatModels, boat_models, boat_stand, dims as boat_dims, floating_hull_points, hull_points,
+};
 use props_bridge::{bridge_plank, plank_size, stone_pier, timber_tower};
 use props_machines::{
     GANTRY_PIVOT, PRESS_SCREW, gantry, plank_crate, press_frame, press_ram, press_wheel,

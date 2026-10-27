@@ -253,6 +253,45 @@ pub fn hull_points() -> Vec<Vec3> {
     pts
 }
 
+/// Points for a convex-hull collider that floats on the designed waterline with
+/// `displacement` m³ under it, and that a character or a crate can't pass through anywhere
+/// above the water. Above the waterline it is the hull as [`hull_points`] has it; below, a
+/// slab with the waterplane's outline as deep as that displacement needs. A backend that
+/// floats a body by the pressure on its shape then floats it on its boot-top with the
+/// waterplane's real form stability (a beamy dinghy is stiff), where the full hull's hull
+/// would float a light boat high. Boat frame.
+pub fn floating_hull_points(displacement: f32) -> Vec<Vec3> {
+    let (line, area) = waterplane();
+    let depth = (displacement / area).clamp(0.01, -KEEL_Y);
+    let mut pts: Vec<Vec3> = hull_points().into_iter().filter(|p| p.y > 0.0).collect();
+    for (z, half) in line {
+        for y in [0.0, -depth] {
+            pts.push(Vec3::new(half, y, z));
+            pts.push(Vec3::new(-half, y, z));
+        }
+    }
+    pts
+}
+
+/// The waterline's outline as (station z, half-breadth over the planking), stem to transom,
+/// and the waterplane's area, m².
+fn waterplane() -> (Vec<(f32, f32)>, f32) {
+    let hull = Hull::get();
+    let bow = STEM_Z + STEM_TOP_Y * STEM_RAKE;
+    const N: usize = 24;
+    let line: Vec<(f32, f32)> = (0..=N)
+        .map(|k| {
+            let z = bow + (TRANSOM_Z - bow) * k as f32 / N as f32;
+            (z, hull.side(z, 0.0, -T).0.x.max(0.0))
+        })
+        .collect();
+    let area = line
+        .windows(2)
+        .map(|w| (w[1].0 - w[0].0) * (w[0].1 + w[1].1))
+        .sum();
+    (line, area)
+}
+
 /// Cribbing and shores to stand the hull on, in their own frame: ground at y = 0, the boat's
 /// origin goes at `(0, STAND_DWL_Y, 0)` (high enough that the centerboard, down, and the
 /// rudder clear the ground).
@@ -3128,6 +3167,25 @@ mod tests {
             "stemhead {}",
             max.y
         );
+    }
+
+    /// The floating collider keeps the hull's beam and ends above water and has just the
+    /// slab under it that floats the dinghy's weight.
+    #[test]
+    fn floating_hull_floats_on_the_waterline() {
+        let (line, area) = waterplane();
+        // About 4.1 m on the waterline and a metre across it under flared topsides (1.62 m
+        // of beam at the sheer): a waterplane near 2.9 m².
+        assert!((2.4..3.6).contains(&area), "waterplane {area} m²");
+        let widest = line.iter().map(|l| l.1).fold(0.0, f32::max);
+        assert!(widest > 0.4 && widest < BEAM * 0.5, "half-breadth {widest}");
+        let pts = floating_hull_points(0.17);
+        let min = pts.iter().fold(Vec3::splat(f32::MAX), |a, p| a.min(*p));
+        let max = pts.iter().fold(Vec3::splat(f32::MIN), |a, p| a.max(*p));
+        assert!((min.y + 0.17 / area).abs() < 1e-4, "slab {}", min.y);
+        assert!((max.x - BEAM * 0.5).abs() < 0.015, "beam {}", max.x);
+        assert!((min.z - STEM_Z).abs() < 0.05, "stem {}", min.z);
+        assert!((max.z - TRANSOM_Z).abs() < 0.02, "transom {}", max.z);
     }
 
     /// The boom, gaff and their fittings stay clear of the sail's quad (side view).

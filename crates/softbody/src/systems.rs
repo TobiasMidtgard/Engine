@@ -641,7 +641,6 @@ pub fn build_bodies(
                     RigidBody::kinematic(),
                     Collider::cuboid(half).with_density(600.0),
                     BridgePlank { bridge: e, index },
-                    ChildOf(e),
                 ))
                 .id();
             match &spec.plank_mesh {
@@ -669,6 +668,23 @@ pub fn build_bodies(
             }
             plank
         });
+        // Planks are root entities posed in the world, not children of the bridge: movement
+        // and physics read a deck's motion from its own `Transform`, which on a child is
+        // relative to its parent (a plank tilting a little under a walker then read as metres
+        // per step far from the parent's origin, and flung the player).
+        if let Ok(body) = &result
+            && let Some(bridge) = &body.bridge
+        {
+            for ((plank, _, _), &(translation, rotation)) in
+                bridge.planks.iter().zip(&bridge.plank_poses)
+            {
+                commands.entity(*plank).insert(Transform {
+                    translation,
+                    rotation,
+                    scale: Vec3::ONE,
+                });
+            }
+        }
         report(&mut commands, e, "RopeBridge", result);
     }
     for (e, spec, t) in &volumes {
@@ -1929,23 +1945,28 @@ pub fn emit_outputs(
     }
 }
 
-/// Move bridge planks to where the deck is.
+/// Move bridge planks to where the deck is, and take away the planks of bridges that are
+/// gone (planks aren't children of their bridge, see [`build_bodies`]).
 pub fn drive_planks(
-    bodies: Query<(&SoftBodySim, &GlobalTransform)>,
-    mut planks: Query<&mut Transform, With<BridgePlank>>,
+    mut commands: Commands,
+    bodies: Query<&SoftBodySim>,
+    bridges: Query<(), With<RopeBridge>>,
+    mut planks: Query<(Entity, &mut Transform, &BridgePlank)>,
 ) {
-    for (body, bridge_t) in &bodies {
+    for body in &bodies {
         let Some(bridge) = body.bridge.as_ref() else {
             continue;
         };
-        let inv_rot = bridge_t.rotation().conjugate();
-        let inv_scale = bridge_t.scale().recip();
-        for ((plank, _, _), (pos, rot)) in bridge.planks.iter().zip(&bridge.plank_poses) {
-            if let Ok(mut t) = planks.get_mut(*plank) {
-                let local = inv_rot * (*pos - bridge_t.translation()).as_vec3() * inv_scale;
-                t.translation = local.as_dvec3();
-                t.rotation = inv_rot * *rot;
+        for ((plank, _, _), &(pos, rot)) in bridge.planks.iter().zip(&bridge.plank_poses) {
+            if let Ok((_, mut t, _)) = planks.get_mut(*plank) {
+                t.translation = pos;
+                t.rotation = rot;
             }
+        }
+    }
+    for (e, _, plank) in &planks {
+        if bridges.get(plank.bridge).is_err() {
+            commands.entity(e).despawn();
         }
     }
 }
