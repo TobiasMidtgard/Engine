@@ -186,6 +186,11 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
   `Local` or the feature struct and `clear()` them.
 - Cache `QueryState` in render features; use `par_iter_mut` for large ECS loops and
   `engine_core::tasks::par_chunks_mut` for grids.
+- Never open a task pool `scope` inside a task already running on that pool. The waiting
+  thread ticks the pool and runs unrelated tasks, so the outer task stretches by theirs
+  (Softbody measured an 806 ms stall). Turning that ticking off can deadlock when every worker
+  waits. Flatten the work into one scope opened from a system, or give leaf work that never
+  waits a small pool of its own. Slow one-off builds go on `AsyncComputeTaskPool`.
 - GPU: instance everything; one storage buffer per kind of data; avoid per-object bind
   groups; compute shaders for anything with more than ~10k elements (particles, fluids).
 - Measure: `Diagnostics::set("module.metric", v)` shows up in `engine.describe`.
