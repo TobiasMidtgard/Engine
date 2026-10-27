@@ -208,7 +208,12 @@ invariant spheres snapped to texels, PCSS filtering), then a **far shadow map** 
 (`draw_far_shadow`; the mesh feature, instanced and clustered, does), so it costs little, and
 mountains shade the valley at low sun and ridges shade themselves kilometers away.
 `shadow_factor` blends from the cascades into it over their last tenth; `DebugView::Cascades`
-shows its region in magenta.
+shows its region in magenta. Casters are culled against what each cascade shades
+(`Cascades::casters`, a `CasterVolume`): the cascade's slice of the view swept toward the sun,
+widened by the filter's reach, so `sphere_in_cascade` drops casters inside the square whose
+shadows fall outside the view. Reused cascades take a slightly wider view and redraw once the
+camera turns or moves out of it. A feature that needs a cascade's whole square uses
+`light_view` and `half_extent` directly.
 
 **Cloud shadows** (built; `cloud_shadows.rs`): a top-down map of the sunlight the clouds let
 through, frame binding 22 (`cloud_shadow_map`), anchored to the world. The module that draws
