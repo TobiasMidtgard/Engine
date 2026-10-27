@@ -12,8 +12,9 @@ use engine_world::physics::{
     MassProperties, RigidBody,
 };
 use engine_world::{
-    ContactKind, Env, GroundContact, IgniteRequest, NoiseEvent, ProjectileTrace, Scalability,
-    SimulationRange, SmokeEmission, SurfaceMaterials, WaterDisturbance, WorldImpulse, WorldShift,
+    ContactKind, Env, FocusPoints, GroundContact, IgniteRequest, NoiseEvent, ProjectileTrace,
+    Scalability, SimulationRange, SmokeEmission, SurfaceMaterials, WaterDisturbance, WorldImpulse,
+    WorldShift,
 };
 
 use crate::body::{FrameSource, SoftBodySim, SoftKind};
@@ -23,7 +24,7 @@ use crate::field::{BAKE_REACH, FieldCache};
 use crate::rope::{BridgePlank, SoftLoad};
 use crate::settings::SoftBodyConfig;
 use crate::solver::{ColliderImpulse, Sim, WaterSurface};
-use crate::{Cloth, HairGroom, Rope, RopeBridge, SoftVolume, cloth, hair, rope, volume};
+use crate::{Cloth, HairGroom, Rope, RopeBridge, SoftVolume, cloth, hair, rope, sway, volume};
 
 /// A frame turning further than this in one step (radians) has been teleported, not turned.
 const TELEPORT_TURN: f32 = 0.8;
@@ -266,6 +267,11 @@ pub fn gather_colliders(
     skinned: Query<(Entity, &BoneColliders, &SkeletonPose)>,
     materials: Res<SurfaceMaterials>,
     bodies: Query<&SoftBodySim>,
+    (focus, range, config): (
+        Res<FocusPoints>,
+        Option<Res<SimulationRange>>,
+        Res<SoftBodyConfig>,
+    ),
     mut shapes: Local<Vec<(LocalShape, Vec3, Quat)>>,
     mut bone_shapes: Local<Vec<(LocalShape, DVec3, Quat)>>,
     mut reaches: Local<HashMap<Entity, f32>>,
@@ -274,11 +280,12 @@ pub fn gather_colliders(
     world.list.clear();
     world.seen.clear();
     world.baking.clear();
-    // Only colliders that can reach a body that's awake: resting bodies don't collide, and
-    // the rest of the world's colliders aren't converted at all.
+    // Only colliders that can reach a body that's awake (or wakes this step): resting
+    // bodies don't collide, and the rest of the world's colliders aren't converted at all.
+    let range = range.map_or_else(SimulationRange::default, |r| *r);
     let near_bodies: Vec<(DVec3, f64)> = bodies
         .iter()
-        .filter(|b| !b.frozen)
+        .filter(|b| !b.frozen || !rests(b, &focus, &range, &config))
         .map(|b| (b.center, b.radius as f64 + BAKE_REACH))
         .collect();
     for (entity, collider, parent) in &colliders {
@@ -830,6 +837,8 @@ pub(crate) const SLEEP_STEPS: u32 = 60;
 const SLEEP_WIND: f32 = 0.5;
 /// How far a particle of a big body moves before the ground under it is asked again, m.
 const GROUND_MOVE: f64 = 0.3;
+/// Side of the patch of ground its particles share a question about, m.
+const GROUND_CELL: f64 = 0.5;
 /// A big body asks the ground under one particle in this many each step anyway.
 const GROUND_REFRESH: usize = 64;
 /// Longest a body waits for a mesh near it to bake, s (real time: baking is). A statue
@@ -925,9 +934,15 @@ pub fn step_bodies(
         let name = names
             .get(e)
             .map_or_else(|_| format!("{e}"), |n| n.as_str().to_string());
+        let parts = bodies.get(e).map(|(_, b)| b.parts).unwrap_or_default();
         engine_core::log::warn!(
-            "softbody step took {wall:.0} ms ({busy:.0} ms of work over {} bodies); slowest: {name} {ms:.0} ms",
-            took.len()
+            "softbody step took {wall:.0} ms ({busy:.0} ms of work over {} bodies); slowest: {name} {ms:.0} ms (asking the world {:.1}, water {:.1}, solving {:.1} with {} settling steps, fire and tearing {:.1})",
+            took.len(),
+            parts.env_ms,
+            parts.water_ms,
+            parts.solve_ms,
+            parts.prewarm_steps,
+            parts.fire_ms,
         );
     }
     let mut particles = 0;
@@ -987,23 +1002,25 @@ fn frame_poses(b: &SoftBodySim, ctx: &StepContext) -> Vec<Option<(Vec3, Quat)>> 
         .collect()
 }
 
-fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
-    let started = Instant::now();
-    let b = body;
-    b.out = StepOutput::default();
-    b.env_ms = 0.0;
-    // Level of detail.
-    let focus = &ctx.env.focus;
-    let dist = if focus.points.is_empty() {
+/// How far a body's surface is from the nearest focus point, m (0 with none).
+fn focus_distance(b: &SoftBodySim, focus: &FocusPoints) -> f32 {
+    if focus.points.is_empty() {
         0.0
     } else {
         (focus.distance(b.center) - b.radius as f64).max(0.0) as f32
-    };
-    let owner = b.time_owner.unwrap_or(entity);
-    let mut dt = ctx.time.delta_for(ctx.scales.get(owner).ok());
+    }
+}
+
+/// Whether a body rests (isn't stepped) this step, for how far it is from the focus.
+fn rests(
+    b: &SoftBodySim,
+    focus: &FocusPoints,
+    range: &SimulationRange,
+    config: &SoftBodyConfig,
+) -> bool {
+    let dist = focus_distance(b, focus);
     // Beyond the simulation range a body rests in its last pose (waking again a little nearer
     // than it fell asleep, so one at the edge doesn't flicker), and costs nothing.
-    let range = &ctx.range;
     let resting = if b.frozen {
         !range.is_active_sphere(focus, b.center, b.radius as f64)
     } else {
@@ -1015,12 +1032,27 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     // Hair and fur rest from there too, riding their bones: a few pixels across that far,
     // their sway can't be seen, but stepped they cost as much as near (the dog's fur, the
     // paddock people's hair seen from the plaza).
-    let self_colliding = b.sim.params.self_collide > 0.0;
-    let far = 2.0 * ctx.config.lod_distance * if b.frozen { 0.9 } else { 1.0 };
-    let resting = resting || ((self_colliding || b.strands.is_some()) && dist > far);
+    let far = 2.0 * config.lod_distance * if b.frozen { 0.9 } else { 1.0 };
+    let resting =
+        resting || ((b.sim.params.self_collide > 0.0 || b.strands.is_some()) && dist > far);
     // One still settling keeps going wherever it is, a budget a frame, so it is ready when
     // it is first seen up close.
-    if (resting || dist > ctx.config.freeze_distance) && b.pending_prewarm == 0 {
+    (resting || dist > config.freeze_distance) && b.pending_prewarm == 0
+}
+
+fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
+    let started = Instant::now();
+    let b = body;
+    b.out = StepOutput::default();
+    b.env_ms = 0.0;
+    b.parts = Default::default();
+    // Level of detail.
+    let focus = &ctx.env.focus;
+    let dist = focus_distance(b, focus);
+    let owner = b.time_owner.unwrap_or(entity);
+    let mut dt = ctx.time.delta_for(ctx.scales.get(owner).ok());
+    let self_colliding = b.sim.params.self_collide > 0.0;
+    if rests(b, focus, &ctx.range, ctx.config) {
         if !b.frozen {
             b.frozen = true;
             b.sim.step_start.clone_from(&b.sim.pos);
@@ -1054,6 +1086,25 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
             b.sim.step_start.clone_from(&b.sim.pos);
             return;
         }
+    }
+    // A far flag in the wind sways instead of being stepped: frozen it would read as broken,
+    // stepped it costs as much as near. It learns how while still stepped (see `sway`).
+    let sway_from = 2.0 * ctx.config.lod_distance * if b.far.is_some() { 0.9 } else { 1.0 };
+    if dist > sway_from && b.steps > 0 {
+        let wind = ctx.env.wind(b.center) * b.settings.wind_scale;
+        if !sway::can_sway(b, wind) {
+            sway::stop(b);
+        } else if matches!(b.far, Some(sway::FarSway::Swaying(_))) {
+            if sway::sway(b, wind, dt) {
+                (b.lod_every, b.lod_wait, b.lod_debt) = (1, 0, 0.0);
+                b.step_ms = started.elapsed().as_secs_f32() * 1000.0;
+                return;
+            }
+        } else {
+            sway::learn(b, wind, dt);
+        }
+    } else if b.far.is_some() {
+        sway::stop(b);
     }
     // Farther bodies step less often, each step covering the time skipped: every 2nd fixed
     // step past lod_distance, every 4th past twice that. One hanging on something moving
@@ -1165,6 +1216,9 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
             *asked_origin = origin;
         }
         b.sim.ground.resize(b.sim.len(), [0.0; 4]);
+        // Particles over the same patch of ground share one question: asked all at once
+        // (on arrival, after a world shift), 2576 of a curtain's were an 86 ms step.
+        let mut asked: HashMap<(i64, i64), [f32; 4]> = HashMap::new();
         for i in 0..b.sim.len() {
             let wp = origin + b.sim.pos[i].as_dvec3();
             if fresh {
@@ -1176,7 +1230,13 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
                 continue;
             }
             at[i] = wp;
-            b.sim.ground[i] = ground_plane(env, wp, origin);
+            let cell = (
+                (wp.x / GROUND_CELL).floor() as i64,
+                (wp.z / GROUND_CELL).floor() as i64,
+            );
+            b.sim.ground[i] = *asked
+                .entry(cell)
+                .or_insert_with(|| ground_plane(env, wp, origin));
         }
     } else {
         // One plane under its middle, asked again as it moves (or now and then).
@@ -1235,7 +1295,9 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     }
 
     // Water around the body, and how wet it gets.
+    let watered = Instant::now();
     b.sim.water = water_surface(env, b.center, b.radius, origin);
+    b.parts.water_ms = watered.elapsed().as_secs_f32() * 1000.0;
     let rain = if env.weather.is_raining() {
         env.weather.precipitation_mm_h
     } else {
@@ -1244,6 +1306,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     let warmth = drying_warmth(env.temperature(b.center));
     soak(b, dt, rain, warmth);
     b.env_ms = asked.elapsed().as_secs_f32() * 1000.0;
+    b.parts.env_ms = b.env_ms;
 
     // Step, plus prewarm on the first updates: as much as fits in PREWARM_WORK a frame, the
     // rest on later frames, so a big new body (or one built far away and only now woken)
@@ -1252,6 +1315,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     // built far away is settled when it's reached; near, a body too big for the budget
     // settles only as it steps (settling there shows as a fast-forward).
     let loaded = !b.sim.loads.is_empty();
+    let solving = Instant::now();
     b.sim.step(dt, &local);
     let impulses = b.sim.collider_impulses.clone();
     let pulls = b.sim.frame_impulses.clone();
@@ -1264,6 +1328,8 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
         b.sim.step(1.0 / 60.0, &local);
     }
     b.pending_prewarm -= runs;
+    b.parts.solve_ms = solving.elapsed().as_secs_f32() * 1000.0;
+    b.parts.prewarm_steps = runs;
     if runs > 0 {
         b.sim.step_start.clone_from(&b.sim.pos);
     }
@@ -1294,6 +1360,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     }
 
     // Cloth: tearing and fire.
+    let burning = Instant::now();
     let mut changed = false;
     if let (Some(c), Some(surface)) = (b.cloth.as_mut(), b.surface.as_mut()) {
         changed |= c.tear_overstretched(&mut b.sim, surface);
@@ -1318,6 +1385,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
         changed |= c.lost != lost_before;
         b.out.smoke = smoke.into_iter().map(|p| origin + p.as_dvec3()).collect();
     }
+    b.parts.fire_ms = burning.elapsed().as_secs_f32() * 1000.0;
     if changed {
         b.topology_version += 1;
     }

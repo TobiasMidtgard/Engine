@@ -589,6 +589,13 @@ impl Sim {
         true
     }
 
+    /// Hold every particle where it is now, at rest (after it was posed by hand).
+    pub fn rest_here(&mut self) {
+        self.prev.clone_from(&self.pos);
+        self.step_start.clone_from(&self.pos);
+        self.vel.fill(Vec3::ZERO);
+    }
+
     /// Translate every particle (and its history) by `delta`, keeping velocities.
     pub fn translate(&mut self, delta: Vec3) {
         for v in self

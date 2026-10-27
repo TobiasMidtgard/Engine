@@ -75,6 +75,18 @@ pub struct Tube {
     pub beads: Option<crate::rope::Beads>,
 }
 
+/// Where a body's last step's time went, ms.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StepParts {
+    /// Asking the world (ground, water, wind, colliders near it); includes `water_ms`.
+    pub env_ms: f32,
+    pub water_ms: f32,
+    /// The solver, with the settling (prewarm) steps run alongside.
+    pub solve_ms: f32,
+    pub prewarm_steps: u32,
+    pub fire_ms: f32,
+}
+
 /// Runtime state of one soft body. Added by the plugin; read it for positions
 /// ([`SoftBodySim::world_position`]) and stats.
 #[derive(Component, Clone)]
@@ -132,6 +144,10 @@ pub struct SoftBodySim {
     /// Steps in a row it has been still (see `systems::SLEEP_SPEED`); asleep past
     /// `systems::SLEEP_STEPS`, with the wind and topology it fell asleep in.
     pub(crate) calm: u32,
+    /// Where its last step's time went, for the slow-step warning.
+    pub(crate) parts: StepParts,
+    /// Far from the camera, a flag learning its sway or swaying instead of being simulated.
+    pub(crate) far: Option<crate::sway::FarSway>,
     /// Time its last step spent asking the world (ground, water, wind, colliders near it), ms.
     pub env_ms: f32,
     pub(crate) sleep_wind: Vec3,
@@ -143,6 +159,7 @@ pub struct SoftBodySim {
 impl SoftBodySim {
     /// Move the body with the world when it is re-anchored ([`WorldShift`]).
     pub fn follow_shift(&mut self, s: &engine_world::WorldShift) {
+        crate::sway::stop(self);
         self.sim.shift(s);
         self.center = s.point(self.center);
         self.wind = s.direction(self.wind);
@@ -162,6 +179,11 @@ impl SoftBodySim {
     /// Resting, unstepped until something moves it (PhysX's and Unity's cloth sleep).
     pub fn asleep(&self) -> bool {
         self.calm >= crate::systems::SLEEP_STEPS
+    }
+
+    /// Far off and swaying in the wind instead of being simulated (see [`crate::sway`]).
+    pub fn swaying(&self) -> bool {
+        matches!(self.far, Some(crate::sway::FarSway::Swaying(_)))
     }
 
     /// Held this step for a mesh near it that is still baking.
@@ -221,6 +243,8 @@ impl SoftBodySim {
             scratch_colliders: Vec::new(),
             held: (None, false),
             calm: 0,
+            parts: StepParts::default(),
+            far: None,
             env_ms: 0.0,
             sleep_wind: Vec3::ZERO,
             sleep_topology: 0,
@@ -274,12 +298,18 @@ impl SoftBodySim {
             "center": self.center.to_array(),
             "radius": self.radius,
             "frozen": self.frozen,
+            "swaying": self.swaying(),
             "step_ms": self.step_ms,
+            // Its last step covers lod_every fixed steps; per fixed step it costs this.
+            "ms_per_step": self.step_ms / self.lod_every.max(1) as f32,
             "substeps": self.sim.params.substeps,
             "lod_every": self.lod_every,
             "pending_prewarm": self.pending_prewarm,
             "asleep": self.asleep(),
             "env_ms": self.env_ms,
+            "water_ms": self.parts.water_ms,
+            "solve_ms": self.parts.solve_ms,
+            "fire_ms": self.parts.fire_ms,
             "colliders": self.scratch_colliders.len(),
             "self_pairs": self.sim.self_pairs(),
             "self_pairs_solved": self.sim.self_pairs_solved(),

@@ -55,6 +55,9 @@ pub struct FireSettings {
     pub smoke_yield: f32,
     /// Most fire tiles (16 m squares) kept in memory.
     pub max_tiles: u32,
+    /// Most new fire tiles a step makes (each asks the ground a thousand times); a fire that
+    /// needs more grows into them over the next steps instead of in one long frame.
+    pub new_tiles_per_step: u32,
     /// Flames and scorch are drawn within this distance of the camera, meters.
     pub view_distance_m: f32,
 }
@@ -85,6 +88,7 @@ impl Default for FireSettings {
             light_lm_per_kw: 30.0,
             smoke_yield: 0.06,
             max_tiles: 4096,
+            new_tiles_per_step: 2,
             view_distance_m: 1500.0,
         }
     }
