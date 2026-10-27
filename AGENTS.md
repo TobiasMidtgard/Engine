@@ -211,10 +211,13 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
   exclusive systems and the data most systems fight over. So:
   - No `&mut World` system that runs every frame. Gate it with `run_if`, or turn it into a
     normal system with the queries it needs.
-  - Write `Transform` (and `GlobalTransform`, `MeshRenderer`) only for your own entities:
-    `Query<&mut Transform, With<MyMarker>>` or `Without<...>`. A bare `&mut Transform` query
-    clashes with every other module's (79 systems in `FixedUpdate`, 42 in `Update`). Read
-    with `&Transform` when you only read.
+  - Keep `&mut Transform` (and `GlobalTransform`, `MeshRenderer`, `Assets<Mesh>`) out of
+    your heavy systems: 79 systems write `Transform` in `FixedUpdate` and 42 in `Update`,
+    and any two of them clash. A marker doesn't help: `With<A>` and `With<B>` still clash in
+    bevy_ecs 0.20; only `With<A>` against `Without<A>` is disjoint. Do the work in a system
+    that reads (`&Transform`) and writes your own component, then copy the result into
+    `Transform` in a small system after it, as Unity's DOTS jobs do. Read with `&Transform`
+    whenever you only read.
   - Every `Commands` user adds an `apply_deferred` sync point that stops the schedule. Spawn
     and despawn in batches, not every frame, and prefer mutating existing components.
   - `.chain()` only systems that truly need an order; a chain of 10 is 10 serial steps.
