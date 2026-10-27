@@ -136,3 +136,81 @@ fn a_lock_moves_on_when_its_target_falls() {
     run(&mut app, 0.1);
     assert_eq!(app.world.get::<LockOn>(pilot).unwrap().target, None);
 }
+
+/// Playtest 2026-10-27 #25 ("way too fast ... allow me to hold in shift and scroll to run
+/// faster for that sprint only"): the player runs unless sprint is held, the wheel with sprint
+/// held speeds that sprint up, and letting go gives the normal sprint back.
+#[test]
+fn the_player_runs_sprints_on_shift_and_scrolls_its_sprint_faster() {
+    use engine_core::math::Vec2;
+    use engine_input::{ActionState, InputEvent, InputPlugin};
+    let mut app = app();
+    app.add_plugins(InputPlugin);
+    let p = app
+        .world
+        .spawn((
+            Transform::from_translation(DVec3::new(0.0, 0.9, 0.0)),
+            MovementProfile::pilot(),
+            PlayerControlled::default(),
+        ))
+        .id();
+    let speed = |app: &App| app.world.get::<Mover>(p).unwrap().horizontal_speed();
+    app.world
+        .resource_mut::<ActionState>()
+        .set_axis("move", Vec2::Y, None);
+    run(&mut app, 1.5);
+    assert!((speed(&app) - 5.5).abs() < 0.1, "runs: {}", speed(&app));
+
+    app.world.resource_mut::<ActionState>().press("sprint");
+    run(&mut app, 1.5);
+    assert!((speed(&app) - 8.5).abs() < 0.1, "sprints: {}", speed(&app));
+
+    // Three notches up: 1.15³ times the sprint.
+    app.world.write_message(InputEvent::MouseWheel {
+        delta: Vec2::new(0.0, 3.0),
+    });
+    run(&mut app, 2.0);
+    let fast = 8.5 * 1.15f32.powi(3);
+    assert!(
+        (speed(&app) - fast).abs() < 0.2,
+        "{} vs {fast}",
+        speed(&app)
+    );
+
+    // Let go: back to running, and the next sprint is a normal one.
+    app.world.resource_mut::<ActionState>().release("sprint");
+    run(&mut app, 3.0);
+    assert!(
+        (speed(&app) - 5.5).abs() < 0.1,
+        "runs again: {}",
+        speed(&app)
+    );
+    app.world.resource_mut::<ActionState>().press("sprint");
+    run(&mut app, 1.5);
+    assert!(
+        (speed(&app) - 8.5).abs() < 0.1,
+        "normal sprint: {}",
+        speed(&app)
+    );
+}
+
+/// Play mode's pilot keeps a trained fighter's reflexes but moves on a normal clock (#25:
+/// level 10's 1.45 clock made everything it did 45% fast).
+#[test]
+fn play_mode_pilot_moves_at_normal_speed() {
+    let mut app = app();
+    app.world
+        .spawn((Camera::default(), Transform::from_xyz(0.0, 2.0, 10.0)));
+    app.update();
+    api(&mut app, "movement.play", json!({"on": true})).unwrap();
+    let pilot = app.world.resource::<Play>().pilot.unwrap();
+    let tempo = *app.world.get::<Tempo>(pilot).unwrap();
+    assert_eq!(tempo.speed, 1.0);
+    assert!(tempo.reflexes > 5.0);
+    assert!(
+        app.world
+            .get::<PlayerControlled>(pilot)
+            .unwrap()
+            .hold_to_sprint
+    );
+}

@@ -77,7 +77,13 @@ pub fn start(world: &mut World, at: Option<DVec3>) -> Result<Entity, String> {
             (
                 PlayerControlled::default(),
                 Fighter::new(1, 100.0),
-                Tempo::level(10),
+                // A trained fighter's reflexes (the world slows when it fights), but its own
+                // clock at normal speed: at level 10's 1.45 everything it did ran 45% fast,
+                // which played as running far too fast (playtest 2026-10-27 #25).
+                Tempo {
+                    speed: 1.0,
+                    ..Tempo::level(10)
+                },
                 Perceiver,
                 LockOn::default(),
             ),

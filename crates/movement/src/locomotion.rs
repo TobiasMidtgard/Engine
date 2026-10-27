@@ -1175,7 +1175,7 @@ fn ground_move(
     let base = if crouching {
         p.crouch_speed
     } else if intent.sprint {
-        p.sprint_speed
+        p.sprint_speed * m.sprint_boost.max(0.1)
     } else {
         p.run_speed
     };

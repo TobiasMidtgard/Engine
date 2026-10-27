@@ -119,7 +119,8 @@ impl Plugin for MovementPlugin {
             )
             .register_component::<PlayerControlled>(
                 "Drive this character from input actions (move, jump, sprint, crouch, dash, \
-                 attack, block), relative to the active camera.",
+                 attack, block), relative to the active camera; the wheel with sprint held \
+                 speeds that sprint up or down.",
             )
             .register_component::<Zipline>(
                 "A zip line from this entity (near anchor) to `to` (far anchor, m, in its frame), \
@@ -177,6 +178,7 @@ impl Plugin for MovementPlugin {
                 Update,
                 (
                     fx::update_slow_motion_fx,
+                    player::sprint_boost,
                     play::toggle.before(UpdateSet::Camera),
                     camera::follow_pilots.in_set(UpdateSet::Camera),
                     fx::camera_fx.after(UpdateSet::Camera),

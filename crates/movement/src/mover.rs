@@ -310,6 +310,9 @@ pub struct Mover {
     /// Fire the grapple hook at this point (players aim with the camera, brains at a target),
     /// consumed next step. Firing while the hook is out lets go instead.
     pub pending_grapple: Option<DVec3>,
+    /// Multiplies the sprint speed for this sprint (the player scrolls with sprint held);
+    /// 1 = the profile's.
+    pub sprint_boost: f32,
     /// The moving body under the character, if any (see [`crate::platform`]).
     #[serde(skip)]
     pub platform: Option<Platform>,
@@ -383,6 +386,7 @@ impl Default for Mover {
             knockback: Vec3::ZERO,
             pending_dash: None,
             pending_grapple: None,
+            sprint_boost: 1.0,
             platform: None,
             coyote: 0.0,
             jump_buffer: 0.0,
