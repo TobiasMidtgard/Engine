@@ -107,6 +107,11 @@ pub struct DestructionSettings {
     pub debris_mode: DebrisMode,
     /// Most chunks alive at once; the oldest sink away first.
     pub max_debris: usize,
+    /// Lightest chunk that becomes a physics body, kg; lighter ones use the built-in solver.
+    pub physics_min_kg: f32,
+    /// Most chunks that are physics bodies at once; past it, the built-in solver takes the
+    /// lighter newcomers.
+    pub max_physics_debris: usize,
     /// Most small chips alive at once.
     pub max_chips: usize,
     /// Seconds a chunk stays before sinking into the ground.
@@ -149,6 +154,8 @@ impl Default for DestructionSettings {
         Self {
             debris_mode: DebrisMode::Auto,
             max_debris: 400,
+            physics_min_kg: 50.0,
+            max_physics_debris: 120,
             max_chips: 700,
             debris_lifetime_secs: 60.0,
             chip_lifetime_secs: 8.0,

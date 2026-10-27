@@ -42,6 +42,8 @@ engine_script = { path = "crates/script" }
 # --- ECS / core ---
 bevy_ecs = { version = "0.20", default-features = false, features = ["std", "multi_threaded", "async_executor", "serialize", "debug", "trace"] }
 bevy_platform = { version = "0.20", default-features = false, features = ["std", "serialize"] }
+# bevy_ecs's ScheduleBuildPass names its IndexSet type; same version bevy_ecs uses.
+indexmap = { version = "2", default-features = false, features = ["std"] }
 bevy_tasks = { version = "0.20", features = ["multi_threaded"] }
 glam = { version = "0.33", features = ["serde", "bytemuck"] }
 serde = { version = "1", features = ["derive"] }

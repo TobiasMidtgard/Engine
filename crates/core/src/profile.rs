@@ -178,6 +178,20 @@ const INNER: &str = "  in ";
 const ALONE: &str = "  alone ";
 /// Key of the time no system ran at all (executor hand-offs, frame pacing, work outside systems).
 const IDLE: &str = "  idle";
+/// Keys of the system time each thread ran (`"  thread compute (3)"`), to see whether the
+/// executor really spreads systems over the pool.
+const THREAD: &str = "  thread ";
+
+/// This thread's key under [`THREAD`], made once per thread.
+fn thread_key() -> String {
+    thread_local! {
+        static KEY: String = format!(
+            "{THREAD}{}",
+            std::thread::current().name().unwrap_or("unnamed")
+        );
+    }
+    KEY.with(Clone::clone)
+}
 
 /// Systems running right now, across threads, to file the time each one ran alone.
 struct Running {
@@ -198,7 +212,7 @@ fn running() -> &'static Mutex<Running> {
 
 /// A system span's key (not a schedule's or a module's span inside a system).
 fn is_system(key: &str) -> bool {
-    !key.starts_with(INNER) && !key.starts_with("schedule ")
+    !key.starts_with(INNER) && !key.starts_with("schedule ") && !key.starts_with(THREAD)
 }
 
 /// A system span `key` starts (`enter`) or ends: file the time since the running set last
@@ -323,10 +337,14 @@ where
                 open.remove(i);
             }
         });
-        if is_system(key) {
+        let mut totals = if is_system(key) {
             system_moved(key, false, start + elapsed);
-        }
-        let mut totals = totals().lock();
+            let mut totals = totals().lock();
+            totals.entry(thread_key()).or_default().total += elapsed;
+            totals
+        } else {
+            totals().lock()
+        };
         let stat = match totals.get_mut(key.as_str()) {
             Some(stat) => stat,
             None => totals.entry(key.clone()).or_default(),
@@ -403,6 +421,7 @@ impl Default for ProfileWindow {
 pub(crate) fn profile_report_system(
     mut window: ResMut<ProfileWindow>,
     mut snapshot: ResMut<ProfileSnapshot>,
+    order: Option<Res<ScheduleOrder>>,
 ) {
     let now = Instant::now();
     let frame = now - window.last_frame;
@@ -427,7 +446,14 @@ pub(crate) fn profile_report_system(
     if wall.as_secs_f64() < REPORT_SECS {
         return;
     }
-    let report = format_report(&window.report, window.frames, wall, window.frame_max);
+    let mut report = format_report(&window.report, window.frames, wall, window.frame_max);
+    if let Some(order) = order {
+        report.push_str(&format_floors(&ordering_floors(
+            &order,
+            &window.report,
+            window.frames.max(1) as f64,
+        )));
+    }
     crate::log::info!("frame profile\n{report}");
     if let Err(e) = std::fs::write("engine-profile.txt", &report) {
         crate::log::warn!("could not write engine-profile.txt: {e}");
@@ -514,6 +540,37 @@ fn format_report(
         (frame_ms - alone_ms - idle_ms).max(0.0),
     );
 
+    // Pool threads are named "compute (3)": group them, counting the threads that ran systems.
+    let mut by_thread: Vec<(String, f64, usize)> = Vec::new();
+    for (key, stat) in stats {
+        let Some(name) = key.strip_prefix(THREAD) else {
+            continue;
+        };
+        let group = name.split(" (").next().unwrap_or(name).to_string();
+        let ms_frame = ms(stat.total) / frames;
+        match by_thread.iter_mut().find(|(g, _, _)| *g == group) {
+            Some((_, t, n)) => {
+                *t += ms_frame;
+                *n += 1;
+            }
+            None => by_thread.push((group, ms_frame, 1)),
+        }
+    }
+    by_thread.sort_by(|a, b| b.1.total_cmp(&a.1));
+    if !by_thread.is_empty() {
+        let parts: Vec<String> = by_thread
+            .iter()
+            .map(|(g, t, n)| {
+                if *n > 1 {
+                    format!("{g} {t:.1} ms on {n} threads")
+                } else {
+                    format!("{g} {t:.1} ms")
+                }
+            })
+            .collect();
+        let _ = writeln!(out, "systems ran on: {}", parts.join(", "));
+    }
+
     let _ = writeln!(out, "\nschedule                       ms/frame  runs/frame");
     for (name, s) in &schedules {
         let _ = writeln!(
@@ -580,6 +637,157 @@ const PARALLELISM_REPORT_FRAME: u32 = 30;
 /// components and resources most system pairs both touch with one of them writing, which the
 /// executor must run one after the other (Bevy's access-conflict rule, as in its ambiguity
 /// checker). Ordering constraints serialize too and are not counted.
+/// Each schedule's systems in run order with the systems ordered after each one (indices into
+/// the list), recorded when the schedule is built, so a report can find the chain of
+/// `before`/`after`/`chain` edges that no number of cores can shorten.
+#[derive(Resource, Default)]
+pub(crate) struct ScheduleOrder(HashMap<String, Vec<(String, Vec<usize>)>>);
+
+/// Build pass that records a schedule's flattened ordering into [`ScheduleOrder`]. Added after
+/// the ECS's own sync point pass, so the `apply_deferred` points it inserts are included.
+#[derive(Debug)]
+pub(crate) struct OrderPass {
+    pub(crate) label: String,
+}
+
+impl bevy_ecs::schedule::ScheduleBuildPass for OrderPass {
+    type EdgeOptions = ();
+
+    fn add_dependency(
+        &mut self,
+        _from: bevy_ecs::schedule::NodeId,
+        _to: bevy_ecs::schedule::NodeId,
+        _options: Option<&()>,
+    ) {
+    }
+
+    fn collapse_set(
+        &mut self,
+        _set: bevy_ecs::schedule::SystemSetKey,
+        _systems: &indexmap::IndexSet<
+            bevy_ecs::schedule::SystemKey,
+            bevy_platform::hash::FixedHasher,
+        >,
+        _dependency_flattening: &bevy_ecs::schedule::graph::DiGraph<bevy_ecs::schedule::NodeId>,
+    ) -> impl Iterator<Item = (bevy_ecs::schedule::NodeId, bevy_ecs::schedule::NodeId)> {
+        std::iter::empty()
+    }
+
+    fn build(
+        &mut self,
+        world: &mut World,
+        graph: &mut bevy_ecs::schedule::ScheduleGraph,
+        mut dependency_flattened: bevy_ecs::schedule::FlattenedDependencies<'_>,
+    ) -> Result<(), bevy_ecs::schedule::ScheduleBuildError> {
+        // A cycle is reported by the schedule's own build right after; record nothing then.
+        let Ok((order, edges)) = dependency_flattened.toposort_and_graph() else {
+            return Ok(());
+        };
+        let index: HashMap<_, _> = order.iter().enumerate().map(|(i, &k)| (k, i)).collect();
+        let list = order
+            .iter()
+            .map(|&key| {
+                let name = graph
+                    .systems
+                    .get(key)
+                    .map_or_else(String::new, |s| short_name(&s.system().name().to_string()));
+                let after = edges
+                    .neighbors(key)
+                    .filter_map(|k| index.get(&k).copied())
+                    .collect();
+                (name, after)
+            })
+            .collect();
+        world
+            .get_resource_or_init::<ScheduleOrder>()
+            .0
+            .insert(self.label.clone(), list);
+        Ok(())
+    }
+}
+
+/// A schedule's ordering floor: (schedule, chain ms, schedule ms, the chain's systems and ms).
+type Floor = (String, f64, f64, Vec<(String, f64)>);
+
+/// The longest chain of ordered systems in each schedule, weighted by each system's time in
+/// `stats` (ms per frame): the part of the schedule that runs one after another even on
+/// unlimited cores. Returns (schedule, chain ms, schedule ms, chain) slowest chain first.
+fn ordering_floors(
+    order: &ScheduleOrder,
+    stats: &HashMap<String, Stat>,
+    frames: f64,
+) -> Vec<Floor> {
+    let ms = |key: &str| {
+        stats
+            .get(key)
+            .map_or(0.0, |s| s.total.as_secs_f64() * 1000.0 / frames)
+    };
+    let mut floors = Vec::new();
+    for (label, systems) in &order.0 {
+        let wall = ms(&format!("schedule {label}"));
+        if systems.is_empty() || wall <= 0.0 {
+            continue;
+        }
+        // Systems come in run order, so one pass forward finds each one's longest lead-in.
+        let mut best: Vec<(f64, Option<usize>)> = vec![(0.0, None); systems.len()];
+        for i in 0..systems.len() {
+            best[i].0 += ms(&systems[i].0);
+            let (through, _) = best[i];
+            for &j in &systems[i].1 {
+                if through > best[j].0 {
+                    best[j] = (through, Some(i));
+                }
+            }
+        }
+        let Some((mut at, &(floor, _))) = best
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.0.total_cmp(&b.1.0))
+        else {
+            continue;
+        };
+        let mut chain = Vec::new();
+        loop {
+            chain.push((systems[at].0.clone(), ms(&systems[at].0)));
+            match best[at].1 {
+                Some(prev) => at = prev,
+                None => break,
+            }
+        }
+        chain.reverse();
+        floors.push((label.clone(), floor, wall, chain));
+    }
+    floors.sort_by(|a, b| b.1.total_cmp(&a.1));
+    floors
+}
+
+/// Rows of the ordering chain shown per schedule.
+const CHAIN_ROWS: usize = 8;
+
+fn format_floors(floors: &[Floor]) -> String {
+    let mut out = String::new();
+    if floors.is_empty() {
+        return out;
+    }
+    let _ = writeln!(
+        out,
+        "\nordering floor (longest before/after chain, ms per frame, of the schedule's ms)"
+    );
+    for (label, floor, wall, chain) in floors.iter().filter(|f| f.1 >= 0.05) {
+        let mut steps: Vec<&(String, f64)> = chain.iter().filter(|(_, t)| *t >= 0.05).collect();
+        steps.sort_by(|a, b| b.1.total_cmp(&a.1));
+        steps.truncate(CHAIN_ROWS);
+        let steps: Vec<String> = steps.iter().map(|(n, t)| format!("{n} {t:.2}")).collect();
+        let _ = writeln!(
+            out,
+            "{label:<16} {floor:>6.2} of {wall:>6.2} ({} systems; heaviest: {})",
+            chain.len(),
+            steps.join(", "),
+        );
+    }
+    out
+}
+
 pub(crate) fn parallelism_report_system(world: &mut World, mut frames: Local<u32>) {
     *frames += 1;
     if *frames != PARALLELISM_REPORT_FRAME {
@@ -929,5 +1137,54 @@ mod tests {
         assert!(report.contains("ran alone"), "{report}");
         // Alone and idle time is not counted again as busy.
         assert!(report.contains("systems busy 8.0 ms"), "{report}");
+    }
+
+    #[test]
+    fn ordering_floor_follows_the_heaviest_chain() {
+        use bevy_ecs::schedule::{Schedule, ScheduleLabel};
+        #[derive(ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
+        struct Probe;
+        fn a() {}
+        fn b() {}
+        fn c() {}
+        fn d() {}
+        let mut world = World::new();
+        let mut schedule = Schedule::new(Probe);
+        schedule.add_build_pass(OrderPass {
+            label: "Probe".into(),
+        });
+        schedule.add_systems(((a, b, c).chain(), d));
+        schedule.initialize(&mut world).unwrap();
+        let order = world.remove_resource::<ScheduleOrder>().unwrap();
+        assert_eq!(order.0["Probe"].len(), 4);
+
+        let mut stats = HashMap::new();
+        for (key, ms) in [
+            ("schedule Probe", 100),
+            ("engine_core::a", 20),
+            ("engine_core::b", 30),
+            ("engine_core::c", 10),
+            ("engine_core::d", 50),
+        ] {
+            stats.insert(
+                key.to_string(),
+                Stat {
+                    total: Duration::from_millis(ms),
+                    calls: 1,
+                    max: Duration::ZERO,
+                },
+            );
+        }
+        let floors = ordering_floors(&order, &stats, 1.0);
+        let (label, floor, wall, chain) = &floors[0];
+        assert_eq!(label, "Probe");
+        assert!((floor - 60.0).abs() < 1e-6, "{floor}");
+        assert!((wall - 100.0).abs() < 1e-6);
+        let names: Vec<&str> = chain.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["engine_core::a", "engine_core::b", "engine_core::c"]
+        );
+        assert!(format_floors(&floors).contains("Probe"));
     }
 }

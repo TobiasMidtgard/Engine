@@ -1,8 +1,9 @@
 //! Debris: chunks, chips and dust thrown off by destruction.
 //!
-//! Large chunks become physics-contract bodies (`RigidBody` + `Collider` + `Velocity`) when a
-//! physics backend is installed, so they stack and collide with everything. Without one, and
-//! always for small chips, a built-in lightweight solver tumbles them onto the ground (the
+//! Heavy chunks become physics-contract bodies (`RigidBody` + `Collider` + `Velocity`) when a
+//! physics backend is installed, so they stack and collide with everything (up to a budget, see
+//! `DestructionSettings::max_physics_debris`). Without one, and always for light chunks and
+//! chips, a built-in lightweight solver tumbles them onto the ground (the
 //! `Ground` query), lets them settle and sleep, and piles them up: chunks at rest are boxes
 //! that later debris lands on, so a collapse leaves a heap rather than pieces sunk into each
 //! other. Everything sinks out of sight after its lifetime and a budget caps how much debris
@@ -490,6 +491,7 @@ pub fn spawn_debris_system(
     table: Res<DestructionMaterials>,
     surfaces: Res<SurfaceMaterials>,
     mut stats: ResMut<DestructionStats>,
+    physics_debris: Query<(), (With<Debris>, With<RigidBody>)>,
 ) {
     if !pending.later.0.is_empty() {
         pending.collect_later();
@@ -507,7 +509,33 @@ pub fn spawn_debris_system(
         DebrisMode::Physics => true,
         DebrisMode::Auto => backend.is_some(),
     };
-    for item in pending.items.drain(..) {
+    // Which chunks get physics bodies. A collapse breaks off hundreds at once, and each awake
+    // body costs the physics step: like Chaos's size-specific data and Frostbite's debris
+    // particles, light fragments go to the built-in solver (they land on the ground, rock,
+    // floors and resting rubble), and past the body budget only the heaviest get bodies. A
+    // building piece that gives way stays solid whatever it weighs (budget allowing).
+    let mut bodies = vec![false; pending.items.len()];
+    if use_physics {
+        let mut wanted: Vec<usize> = (0..pending.items.len())
+            .filter(|&k| {
+                let i = &pending.items[k];
+                !matches!(i.look, DebrisLook::Chip { .. } | DebrisLook::Spark { .. })
+                    && (i.mass_kg >= settings.physics_min_kg || i.reuse.is_some())
+            })
+            .collect();
+        let room = settings
+            .max_physics_debris
+            .saturating_sub(physics_debris.iter().count());
+        if wanted.len() > room {
+            let items = &pending.items;
+            wanted.sort_by(|a, b| items[*b].mass_kg.total_cmp(&items[*a].mass_kg));
+            wanted.truncate(room);
+        }
+        for k in wanted {
+            bodies[k] = true;
+        }
+    }
+    for (item, solid) in pending.items.drain(..).zip(bodies) {
         let props = table.get(item.material);
         let surface = surfaces.id_or_default(&props.surface);
         let friction = surfaces.get(surface).friction;
@@ -632,7 +660,7 @@ pub fn spawn_debris_system(
                 half_extents: item.half_extents,
             });
         }
-        if use_physics && !chip {
+        if !chip && solid {
             e.insert((
                 RigidBody {
                     kind: BodyKind::Dynamic,

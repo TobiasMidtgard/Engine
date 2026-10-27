@@ -96,7 +96,9 @@ fracture and debris.
   column) until they break, and set dressing (`ArchModel` masonry, a `PropModel` on nothing
   that breaks) is solid as drawn, a static triangle mesh of its model: the fortress's walls
   stop you and you can walk along their wall walks.
-- **Debris** uses the physics module when one is installed (physics-contract bodies) and a
+- **Debris** uses the physics module when one is installed (physics-contract bodies for building
+  pieces that give way and chunks of `physics_min_kg` and up, at most `max_physics_debris` at
+  once, heaviest first) and a
   built-in solver otherwise: oriented boxes with friction, bounce and sleep that land on the
   ground, on voxel rock and on each other, and wake when the rock or the chunk under them
   goes. A chunk at rest is a box the rest land on (sampled box on box, so a slab lies across
