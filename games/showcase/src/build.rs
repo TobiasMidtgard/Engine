@@ -41,6 +41,37 @@ pub struct WorldBuild {
     slow: Vec<(String, f32)>,
     /// When the wait for the modules' art began.
     waiting: Option<std::time::Instant>,
+    /// The last slow frame (what ran, its length, and the profile window before it) until
+    /// the profile (`--profile`) has a window that names its systems.
+    slow_label: Option<(String, f32, f64)>,
+}
+
+/// With `--profile`, the systems of each slow loading frame: the profiler's window that
+/// takes in the frame is mostly that frame, so its slowest systems are the frame's.
+fn log_slow_systems(world: &World, build: &mut WorldBuild) {
+    let Some((label, dt, before)) = build.slow_label.as_ref() else {
+        return;
+    };
+    let Some(snap) = world.get_resource::<engine::core::profile::ProfileSnapshot>() else {
+        build.slow_label = None;
+        return;
+    };
+    // A new window that the slow frame fills at least half of.
+    if snap.busy_ms == *before || snap.frame_ms < 500.0 * *dt as f64 {
+        return;
+    }
+    let top: Vec<String> = snap
+        .systems
+        .iter()
+        .take(8)
+        .map(|(name, ms)| format!("{name} {ms:.0}"))
+        .collect();
+    engine::core::log::info!(
+        "loading frame after {label}: {:.0} ms a frame in the profile window; slowest (ms a frame): {}",
+        snap.frame_ms,
+        top.join(", ")
+    );
+    build.slow_label = None;
 }
 
 const LIB: &str = "the library is the first step";
@@ -295,6 +326,7 @@ pub fn start(world: &mut World) {
         ran: Vec::new(),
         frame_at: None,
         waiting: None,
+        slow_label: None,
         slow: Vec::new(),
     };
     if world.contains_resource::<Staged>() {
@@ -326,9 +358,15 @@ pub fn step(world: &mut World) {
             } else {
                 build.ran.join("+")
             };
-            build.slow.push((ran, dt));
+            build.slow.push((ran.clone(), dt));
+            // The profile's window as it is now came before that frame.
+            let before = world
+                .get_resource::<engine::core::profile::ProfileSnapshot>()
+                .map_or(0.0, |p| p.busy_ms);
+            build.slow_label = Some((ran, dt, before));
         }
     }
+    log_slow_systems(world, &mut build);
     build.ran.clear();
     // Steps run until this frame's budget is spent, as Unity's High background loading
     // priority (50 ms a frame behind a loading screen) and Unreal's streaming time limits do:
@@ -506,7 +544,20 @@ pub struct Jump {
     last: Option<DVec3>,
     since: Option<std::time::Instant>,
     frames: u32,
+    /// When this system last ran (wall clock), and frames in a row since the move that took
+    /// less than [`CALM_FRAME_S`].
+    tick: Option<std::time::Instant>,
+    calm: u32,
 }
+
+/// A frame this short (s) counts as settled; the cover lifts after [`CALM_FRAMES`] of them,
+/// so the hitch of drawing a new place for the first time (uploads, first-sight builds)
+/// stays behind it.
+const CALM_FRAME_S: f32 = 0.25;
+const CALM_FRAMES: u32 = 3;
+
+/// Longest a jump stays covered (s).
+const COVER_MAX_S: f32 = 6.0;
 
 /// Other moves this far (m) in a frame are covered once they happen.
 const JUMP_M: f64 = 150.0;
@@ -514,13 +565,20 @@ const JUMP_M: f64 = 150.0;
 /// Frames the cover is drawn before a held jump moves the view, and at least after it.
 pub const COVER_FRAMES: u32 = 2;
 
-/// Cover a jump of the view with a dark screen until the terrain around it is built (at most
-/// a few seconds), so the ground never pops in front of the player. Bookmark jumps wait for
+/// Cover a jump of the view with a dark screen until the terrain around it is built and the
+/// frames have settled (at most a few seconds), so neither the ground popping in nor the
+/// hitch of a place's first frames shows. Bookmark jumps wait for
 /// the cover, so the frames that build the new place are covered too.
 pub fn cover_jumps(world: &mut World, mut jump: Local<Jump>) {
     if building(world) {
         return;
     }
+    let now = std::time::Instant::now();
+    let dt = jump
+        .tick
+        .replace(now)
+        .map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+    jump.calm = if dt < CALM_FRAME_S { jump.calm + 1 } else { 0 };
     let (holding, moved) = world
         .get_resource_mut::<HeldJump>()
         .map(|mut h| (h.to.is_some(), std::mem::take(&mut h.moved)))
@@ -535,6 +593,7 @@ pub fn cover_jumps(world: &mut World, mut jump: Local<Jump>) {
     if moved {
         jump.since = Some(std::time::Instant::now());
         jump.frames = 0;
+        jump.calm = 0;
     }
     jump.frames += 1;
     let mut cameras = world.query::<(&Camera, &GlobalTransform)>();
@@ -551,6 +610,7 @@ pub fn cover_jumps(world: &mut World, mut jump: Local<Jump>) {
     if jumped && jump.since.is_none() {
         jump.since = Some(std::time::Instant::now());
         jump.frames = 0;
+        jump.calm = 0;
         show_cover(world);
     }
     let Some(since) = jump.since else {
@@ -563,7 +623,8 @@ pub fn cover_jumps(world: &mut World, mut jump: Local<Jump>) {
                 + d.get("terrain.patches_missing").unwrap_or(0.0)
         });
     let waited = since.elapsed().as_secs_f32();
-    if (pending == 0.0 && waited > 0.3 && jump.frames > COVER_FRAMES) || waited > 4.0 {
+    let settled = pending == 0.0 && jump.frames > COVER_FRAMES && jump.calm >= CALM_FRAMES;
+    if (settled && waited > 0.3) || waited > COVER_MAX_S {
         screens::hide(world, "jump_cover", false);
         world.remove_resource::<engine::world::LoadingBudget>();
         jump.since = None;
