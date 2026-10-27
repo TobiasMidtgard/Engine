@@ -10,6 +10,7 @@ mod convert;
 mod debug;
 pub mod demo;
 mod fine;
+pub mod fit;
 mod grounding;
 mod lod;
 mod queries;
@@ -29,6 +30,7 @@ use parking_lot::RwLock;
 
 pub use debug::PhysicsDebug;
 pub use fine::FineSteps;
+pub use fit::{Fit, FitCollider};
 pub use settings::PhysicsSettings;
 
 /// Rigid-body physics on Rapier: bodies, colliders, joints, characters and scene queries,
@@ -199,6 +201,7 @@ impl Plugin for PhysicsPlugin {
                     .in_set(SimSet::Gameplay),
             )
             .add_systems(Update, demo::finish_art.run_if(demo::art_busy))
+            .add_systems(Update, fit::fit_colliders.run_if(fit::fits_waiting))
             .add_systems(
                 PostUpdate,
                 shift::shift_simulation.in_set(engine_world::WorldShiftSet::Apply),
