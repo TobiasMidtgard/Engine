@@ -511,6 +511,7 @@ impl Renderer {
             features: device.features(),
             materials: Default::default(),
             images: Default::default(),
+            uploads: Default::default(),
         };
 
         let targets = Targets::new(&device, &formats, width, height, UVec2::new(width, height));
@@ -721,6 +722,15 @@ impl Renderer {
             ),
         );
         self.shared.images.compress(&self.shared);
+        // Uploads: a byte budget in play, a time budget behind a loading screen.
+        let loading = world.get_resource::<engine_world::LoadingBudget>().copied();
+        self.shared.uploads.begin_frame(
+            match (loading, settings.upload_mb_per_frame) {
+                (None, mb) if mb > 0.0 => (mb as f64 * 1024.0 * 1024.0) as u64,
+                _ => u64::MAX,
+            },
+            loading.map(|l| started + std::time::Duration::from_secs_f64(l.budget_ms / 1000.0)),
+        );
 
         // New features.
         if let Some(mut pending) = world.get_resource_mut::<PendingRenderFeatures>()
@@ -1558,6 +1568,12 @@ impl Renderer {
                 image_stats.bytes_compressed_away as f64 / (1024.0 * 1024.0),
             );
             d.set("render.image_uploads", image_stats.uploads as f64);
+            let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+            d.set("render.upload_mb", mb(self.shared.uploads.uploaded()));
+            d.set(
+                "render.pending_upload_mb",
+                mb(self.shared.uploads.pending()),
+            );
             d.set("render.images_released", image_stats.released as f64);
             d.set(
                 "render.image_bytes_released",

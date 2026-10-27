@@ -2021,6 +2021,13 @@ impl RenderFeature for MeshFeature {
                     .get(&mesh.index)
                     .is_none_or(|m| m.version != mesh.version)
                     && let Some(asset) = mesh_assets.get(handle)
+                    // Within this frame's upload budget (asked once per mesh a frame), else
+                    // drawn from a later frame.
+                    && gpu.uploads.take(
+                        (std::mem::size_of_val(asset.vertices.as_slice())
+                            + std::mem::size_of_val(asset.indices.as_slice()))
+                            as u64,
+                    )
                 {
                     self.upload_mesh(&gpu.device, mesh.index, asset, mesh.version);
                     if lod_pixels > 0.0 {

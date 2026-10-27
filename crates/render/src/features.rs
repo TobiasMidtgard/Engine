@@ -98,6 +98,77 @@ pub struct GpuShared {
     /// The renderer's uploaded [`Image`]s, shared by every feature (see
     /// [`GpuShared::image_texture`] and [`crate::image_cache`]).
     pub images: ImageCache,
+    /// This frame's upload allowance, shared by every feature (see [`UploadBudget`]).
+    pub uploads: UploadBudget,
+}
+
+/// How many bytes the features may upload this frame (`RenderSettings::upload_mb_per_frame`
+/// in play; while a `LoadingBudget` is present, as much as fits in its `budget_ms`), so a
+/// burst of new meshes and textures spreads over frames instead of stalling one. After Unity's
+/// Async Upload Pipeline (a time slice per frame) and Unreal's streaming, which spreads its
+/// requests over frames.
+///
+/// A feature asks [`take`](Self::take) before uploading a new mesh or image: on `false` it
+/// draws without it this frame and asks again next frame. The first upload of a frame always
+/// goes, however large. What was refused shows as `render.pending_upload_mb`: zero once
+/// everything asked for is on the GPU (a loading screen can wait for that).
+#[derive(Debug, Default)]
+pub struct UploadBudget {
+    /// Bytes left this frame (`u64::MAX`: no limit).
+    left: std::sync::atomic::AtomicU64,
+    /// Bytes uploaded and refused this frame.
+    uploaded: std::sync::atomic::AtomicU64,
+    refused: std::sync::atomic::AtomicU64,
+    /// Uploads stop at this time (while loading).
+    deadline: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl UploadBudget {
+    /// Start a frame with `bytes` to spend (`u64::MAX`: no limit) and maybe a deadline.
+    pub fn begin_frame(&self, bytes: u64, deadline: Option<std::time::Instant>) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.left.store(bytes, Relaxed);
+        self.uploaded.store(0, Relaxed);
+        self.refused.store(0, Relaxed);
+        *self.deadline.lock().unwrap_or_else(|e| e.into_inner()) = deadline;
+    }
+
+    /// Whether an upload of `bytes` may go this frame (counted when it may; recorded as
+    /// pending when not).
+    pub fn take(&self, bytes: u64) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let first = self.uploaded.load(Relaxed) == 0;
+        let late = self
+            .deadline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some_and(|d| std::time::Instant::now() >= d);
+        let fits = !late
+            && self
+                .left
+                .try_update(Relaxed, Relaxed, |left| left.checked_sub(bytes))
+                .is_ok();
+        if fits || first {
+            if !fits {
+                self.left.store(0, Relaxed);
+            }
+            self.uploaded.fetch_add(bytes.max(1), Relaxed);
+            true
+        } else {
+            self.refused.fetch_add(bytes, Relaxed);
+            false
+        }
+    }
+
+    /// Bytes uploaded through [`take`](Self::take) this frame.
+    pub fn uploaded(&self) -> u64 {
+        self.uploaded.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Bytes refused this frame: waiting for a later one.
+    pub fn pending(&self) -> u64 {
+        self.refused.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 impl GpuShared {

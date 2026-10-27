@@ -303,6 +303,10 @@ pub struct RenderSettings {
     pub virtual_texture_cache_tiles: u32,
     /// Most tiles uploaded to the cache per frame (texture roots don't count).
     pub virtual_texture_upload_budget: u32,
+    /// Megabytes of new meshes and images uploaded per frame in play (0: no limit); the rest
+    /// waits for the next frames (`render.pending_upload_mb`). Behind a loading screen
+    /// (`LoadingBudget`) uploads run for its `budget_ms` instead. See `UploadBudget`.
+    pub upload_mb_per_frame: f32,
     /// Added to the level of detail virtual textures ask for (positive = coarser, fewer tiles).
     pub virtual_texture_mip_bias: f32,
     /// BC7-compress the cache where the GPU supports it (a quarter of the memory; encoded on the
@@ -387,6 +391,7 @@ impl Default for RenderSettings {
             virtual_texture_threshold: 4096,
             virtual_texture_cache_tiles: 1024,
             virtual_texture_upload_budget: 32,
+            upload_mb_per_frame: 16.0,
             virtual_texture_mip_bias: 0.0,
             virtual_texture_compression: true,
             texture_compression: TextureCompression::Quality,

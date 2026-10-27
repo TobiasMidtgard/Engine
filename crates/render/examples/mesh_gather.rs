@@ -127,6 +127,19 @@ fn main() {
     let start = std::time::Instant::now();
     app.update();
     let first = start.elapsed();
+    // The first frame's slowest steps (uploads, pipeline compiles).
+    let mut steps: Vec<(String, f64)> = app
+        .world
+        .resource::<Diagnostics>()
+        .metrics
+        .iter()
+        .filter_map(|(name, v)| Some((name.strip_prefix("render.cpu.")?.to_string(), *v)))
+        .collect();
+    steps.sort_by(|a, b| b.1.total_cmp(&a.1));
+    println!("first frame:");
+    for (step, ms) in steps.iter().take(8) {
+        println!("  {ms:>8.1} ms  {step}");
+    }
     app.update_n(settle);
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
         eprintln!("no GPU ({}), nothing measured", d.0);
