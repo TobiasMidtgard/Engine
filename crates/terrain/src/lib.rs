@@ -1268,6 +1268,35 @@ mod tests {
     }
 
     #[test]
+    fn height_alone_matches_the_full_sample() {
+        let mut app = app_with_planet();
+        app.update_n(2);
+        let g = app.world.resource::<engine_world::Ground>().clone();
+        let points: Vec<DVec3> = (0..400)
+            .map(|i| {
+                let (a, r) = (i as f64 * 0.7, 30.0 + i as f64 * 40.0);
+                DVec3::new(a.cos() * r, 50.0 + (i % 7) as f64 * 30.0, a.sin() * r)
+            })
+            .collect();
+        let t = std::time::Instant::now();
+        let full: Vec<_> = points
+            .iter()
+            .map(|&p| g.sample(p).map(|s| s.height))
+            .collect();
+        let full_secs = t.elapsed().as_secs_f64();
+        let t = std::time::Instant::now();
+        let alone: Vec<_> = points.iter().map(|&p| g.height(p)).collect();
+        let alone_secs = t.elapsed().as_secs_f64();
+        assert_eq!(full, alone);
+        assert!(alone.iter().all(Option::is_some));
+        eprintln!(
+            "ground per point: sample {:.1} us, height {:.1} us",
+            full_secs * 1e6 / points.len() as f64,
+            alone_secs * 1e6 / points.len() as f64
+        );
+    }
+
+    #[test]
     fn the_ground_is_installed_once_while_the_terrain_stays_put() {
         let mut app = app_with_planet();
         app.update_n(10);

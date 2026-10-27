@@ -71,6 +71,15 @@ impl GroundTerrain {
         Some((world_point, world_normal, surface, s.height))
     }
 
+    /// World point of the surface along the local vertical through `p`: what [`Self::surface`]
+    /// finds, without the normal's two extra samples or the surface material.
+    pub fn surface_point(&self, p: DVec3) -> Option<DVec3> {
+        let local = self.rotation.inverse() * (p - self.position);
+        let (dir, up, base) = self.source.map.locate(local)?;
+        let s = self.source.sample(base, up, dir, 0.0);
+        Some(self.position + self.rotation * (base + up * s.height))
+    }
+
     /// Terrain-local ground normal at `point_local` (the surface over `base`), from two
     /// samples `e` meters away with detail down to `min_wavelength`.
     pub(crate) fn local_normal(
@@ -143,6 +152,12 @@ impl GroundQuery for TerrainGround {
             normal,
             surface,
         })
+    }
+
+    /// Sight lines, footing and soft bodies ask only the height, often thousands of times a
+    /// frame: one terrain sample instead of three plus the surface override's own query.
+    fn height(&self, p: DVec3) -> Option<f64> {
+        Some(self.nearest(p)?.surface_point(p)?.y)
     }
 }
 

@@ -266,6 +266,13 @@ pub trait GroundQuery: Send + Sync + 'static {
     /// Ground directly below/above world X/Z (`p.y` is a hint for multi-level terrain such as
     /// caves: return the first surface at or below it).
     fn sample(&self, p: DVec3) -> Option<GroundSample>;
+
+    /// Only [`GroundSample::height`] of [`GroundQuery::sample`], which many callers (sight
+    /// lines, footing, spawning) need on their own. Providers whose normal and surface cost
+    /// extra lookups should answer it without them; it must equal `sample(p)?.height`.
+    fn height(&self, p: DVec3) -> Option<f64> {
+        self.sample(p).map(|s| s.height)
+    }
 }
 
 /// The active ground provider. Defaults to a flat grass plane at y = 0.
@@ -295,7 +302,7 @@ impl Ground {
     }
 
     pub fn height(&self, p: DVec3) -> Option<f64> {
-        self.0.sample(p).map(|s| s.height)
+        self.0.height(p)
     }
 }
 
