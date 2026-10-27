@@ -1157,6 +1157,13 @@ fn remember(commands: &mut Commands, e: Entity, body: &SoftBodySim, kept: bool) 
     }
 }
 
+/// Not yet remembered, and still settling: its demo waits (lit or cut before it is
+/// remembered settled, every lap rebuilt it and settled it again: the burning curtain's 90
+/// steps of 10 ms on the PC every 24 s).
+fn unsettled(body: &SoftBodySim, settled: Option<&DemoSettled>) -> bool {
+    settled.is_none() && (body.steps == 0 || body.pending_prewarm > 0)
+}
+
 /// Put a demo body back as it was remembered, or (not yet remembered) rebuild it.
 fn restore(body: Option<&mut SoftBodySim>, settled: Option<&DemoSettled>, rebuild: impl FnOnce()) {
     match (body, settled) {
@@ -1194,6 +1201,10 @@ pub fn burn_and_restore(
             && before < b.delay
         {
             remember(&mut commands, b.cloth, body, settled.is_some());
+            if unsettled(body, settled) {
+                clock.0 = before;
+                continue;
+            }
         }
         if before < b.delay && clock.0 >= b.delay {
             ignite.write(IgniteRequest {
@@ -1234,6 +1245,10 @@ pub fn cut_and_restore(
             && before < c.delay
         {
             remember(&mut commands, c.bridge, body, settled.is_some());
+            if unsettled(body, settled) {
+                clock.0 = before;
+                continue;
+            }
         }
         let mut body = body.map(|b| b.into_inner());
         if before < c.delay

@@ -33,6 +33,9 @@ fn main() {
     if std::env::var("SLOW_GROUND").is_ok() {
         app.insert_resource(engine_world::Ground(std::sync::Arc::new(SlowGround)));
     }
+    // The demo's people and the dog are skinned into meshes here (as in the showcase).
+    app.world
+        .insert_resource(engine_assets::Assets::<engine_render::Mesh>::default());
     let yard = DVec3::new(125.0, 0.0, -35.0);
     app.add_systems(Startup, move |mut commands: Commands| {
         engine_softbody::demo::spawn_demo(&mut commands, yard);
@@ -58,10 +61,36 @@ fn main() {
     println!("warm-up: {:.0} ms", warm.elapsed().as_secs_f64() * 1000.0);
     let start = Instant::now();
     let mut worst = (0.0, 0);
+    // Skinned meshes uploaded (changed) each frame, bytes.
+    let mut versions = std::collections::HashMap::new();
+    let mut uploaded = 0usize;
     for f in 0..frames {
         let t = Instant::now();
         app.update();
         let ms = t.elapsed().as_secs_f64() * 1000.0;
+        {
+            let mut q = app.world.query_filtered::<
+                (Entity, &engine_render::MeshRenderer),
+                With<engine_softbody::demo::skin::SkinnedPart>,
+            >();
+            let shown: Vec<_> = q
+                .iter(&app.world)
+                .filter_map(|(e, r)| match &r.mesh {
+                    engine_render::MeshRef::Handle(h) => Some((e, *h)),
+                    _ => None,
+                })
+                .collect();
+            let meshes = app
+                .world
+                .resource::<engine_assets::Assets<engine_render::Mesh>>();
+            for (e, h) in shown {
+                let v = meshes.version(h);
+                if versions.insert((e, h), v).is_some_and(|old| old != v) {
+                    let n = meshes.get(h).map_or(0, |m| m.vertices.len());
+                    uploaded += n * std::mem::size_of::<engine_render::Vertex>();
+                }
+            }
+        }
         // TRACE=<body name>: that body's step each frame.
         if let Ok(name) = std::env::var("TRACE") {
             let mut q = app.world.query::<(&Name, &engine_softbody::SoftBodySim)>();
@@ -113,6 +142,10 @@ fn main() {
         .map(|(n, _)| n.map_or("?".to_string(), |n| n.as_str().to_string()))
         .collect();
     println!("asleep: {asleep:?}");
+    println!(
+        "skinned meshes uploaded: {:.2} MB a frame",
+        uploaded as f64 / frames as f64 / 1e6
+    );
     // Each body's solver alone, with no colliders, with and without self-collision.
     if std::env::var("SOLO").is_ok() {
         for (n, b) in q.iter(&app.world) {

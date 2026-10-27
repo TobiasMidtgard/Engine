@@ -19,9 +19,11 @@ use engine_core::tasks::ComputeTaskPool;
 use engine_core::time::FixedTime;
 use engine_render::{MaterialRef, Mesh, MeshRenderer, Vertex};
 use engine_world::animation::{BonePose, SkeletonPose};
+use engine_world::{FocusPoints, SimulationRange};
 
 use super::body::{self, BodyPart, BodyQuality, SkinTemplate};
 use crate::hair::{MeshSkin, MeshSkins};
+use crate::settings::SoftBodyConfig;
 
 /// A skinned body part drawn on the skeleton of `owner`.
 #[derive(Component, Debug, Clone)]
@@ -37,6 +39,16 @@ pub struct SkinnedPart {
     pub scalp: Option<ScalpPaint>,
     /// The owner's pose at the start of the latest fixed step.
     previous: Vec<BonePose>,
+    /// The coarse mesh drawn far off (see [`FAR_MESH`]), once built, and whether it is
+    /// the one drawn now.
+    far: Option<Handle<Mesh>>,
+    showing_far: bool,
+    /// Far enough off to want the coarse mesh.
+    wants_far: bool,
+    /// The pose the drawn mesh was last skinned in.
+    skinned: Vec<BonePose>,
+    /// Which frame of every few it is skinned on, far off (its owner's).
+    phase: u32,
 }
 
 /// Hair color painted on the scalp under a groom, as games paint the scalp under their hair,
@@ -62,6 +74,11 @@ impl SkinnedPart {
             mesh: None,
             scalp: None,
             previous: Vec::new(),
+            far: None,
+            showing_far: false,
+            wants_far: false,
+            skinned: Vec::new(),
+            phase: 0,
         }
     }
 
@@ -97,9 +114,10 @@ fn paint_scalp(template: &SkinTemplate, paint: &ScalpPaint, vertices: &mut [Vert
 /// Built body templates, shared by every character that uses them.
 #[derive(Resource, Default)]
 pub struct BodyLibrary {
-    ready: HashMap<BodyPart, Arc<SkinTemplate>>,
+    /// By part and whether it's the coarse far mesh.
+    ready: HashMap<(BodyPart, bool), Arc<SkinTemplate>>,
     skins: HashMap<BodyPart, Arc<MeshSkin>>,
-    pending: Vec<(BodyPart, JoinHandle<SkinTemplate>)>,
+    pending: Vec<((BodyPart, bool), JoinHandle<SkinTemplate>)>,
     /// Mesh resolution (1 = full).
     pub quality: BodyQuality,
     /// Build on the calling thread instead of in the background (tests, screenshots).
@@ -109,7 +127,12 @@ pub struct BodyLibrary {
 impl BodyLibrary {
     /// The template for `part`, once it's built.
     pub fn get(&self, part: BodyPart) -> Option<Arc<SkinTemplate>> {
-        self.ready.get(&part).cloned()
+        self.ready.get(&(part, false)).cloned()
+    }
+
+    /// The coarse template drawn far off, once it's built.
+    pub fn get_far(&self, part: BodyPart) -> Option<Arc<SkinTemplate>> {
+        self.ready.get(&(part, true)).cloned()
     }
 
     /// The skin weights of `part`, once it's built.
@@ -117,31 +140,44 @@ impl BodyLibrary {
         self.skins.get(&part).cloned()
     }
 
-    fn finish(&mut self, part: BodyPart, template: SkinTemplate) {
-        let skin = MeshSkin {
-            joints: template.joints.clone(),
-            weights: template.weights.clone(),
-        };
-        self.skins.insert(part, Arc::new(skin));
-        self.ready.insert(part, Arc::new(template));
+    fn finish(&mut self, (part, far): (BodyPart, bool), template: SkinTemplate) {
+        // Hair grows on the full mesh, by its vertices' weights.
+        if !far {
+            let skin = MeshSkin {
+                joints: template.joints.clone(),
+                weights: template.weights.clone(),
+            };
+            self.skins.insert(part, Arc::new(skin));
+        }
+        self.ready.insert((part, far), Arc::new(template));
     }
 
     /// Start building `part` unless it's built or underway.
     pub fn request(&mut self, part: BodyPart) {
-        if self.ready.contains_key(&part) || self.pending.iter().any(|(p, _)| *p == part) {
+        self.request_mesh((part, false));
+    }
+
+    /// Start building the coarse far mesh of `part` unless it's built or underway.
+    pub fn request_far(&mut self, part: BodyPart) {
+        self.request_mesh((part, true));
+    }
+
+    fn request_mesh(&mut self, key: (BodyPart, bool)) {
+        if self.ready.contains_key(&key) || self.pending.iter().any(|(k, _)| *k == key) {
             return;
         }
-        let quality = self.quality;
+        let (part, far) = key;
+        let quality = BodyQuality(self.quality.0 * if far { FAR_MESH } else { 1.0 });
         if self.blocking {
-            self.finish(part, body::build(part, quality));
+            self.finish(key, body::build(part, quality));
             return;
         }
         let spawned = std::thread::Builder::new()
             .name(format!("{part:?} body"))
             .spawn(move || body::build(part, quality));
         match spawned {
-            Ok(handle) => self.pending.push((part, handle)),
-            Err(_) => self.finish(part, body::build(part, quality)),
+            Ok(handle) => self.pending.push((key, handle)),
+            Err(_) => self.finish(key, body::build(part, quality)),
         }
     }
 
@@ -150,10 +186,10 @@ impl BodyLibrary {
         let mut k = 0;
         while k < self.pending.len() {
             if self.pending[k].1.is_finished() {
-                let (part, handle) = self.pending.swap_remove(k);
+                let (key, handle) = self.pending.swap_remove(k);
                 match handle.join() {
-                    Ok(t) => self.finish(part, t),
-                    Err(_) => engine_core::log::warn!("building the {part:?} body failed"),
+                    Ok(t) => self.finish(key, t),
+                    Err(_) => engine_core::log::warn!("building the {:?} body failed", key.0),
                 }
             } else {
                 k += 1;
@@ -166,6 +202,9 @@ impl BodyLibrary {
 pub fn prepare_bodies(mut library: ResMut<BodyLibrary>, parts: Query<&SkinnedPart>) {
     for p in &parts {
         library.request(p.part);
+        if p.wants_far {
+            library.request_far(p.part);
+        }
     }
     library.poll();
 }
@@ -180,9 +219,26 @@ pub fn snapshot_poses(mut parts: Query<&mut SkinnedPart>, poses: Query<&Skeleton
     }
 }
 
-/// Give new parts their mesh and deform every part to its skeleton's pose, interpolated
-/// within the fixed step like `TransformInterpolation`.
-#[allow(clippy::too_many_arguments)]
+/// How much coarser the far mesh is (a sixteenth of the vertices), and from how many LOD
+/// distances off it is drawn (back to the full mesh a little nearer).
+pub const FAR_MESH: f32 = 4.0;
+const FAR_FROM: f32 = 2.0;
+/// How far a bone may move on the drawn mesh before it is skinned again, per metre of
+/// distance past the LOD distance (about a pixel on a 1080p screen): a far body is
+/// re-skinned only as often as its pose visibly changes (Unreal's update rate optimization
+/// for far skeletal meshes), a near one whenever it changes at all. Each re-skin is an
+/// upload of the whole mesh: every part every frame was 19 MB a frame.
+const SKIN_ERROR_PER_M: f32 = 0.0015;
+/// Far parts are also skinned at most every `n`-th frame, `n` their distance in multiples of
+/// [`FAR_FROM`] × the LOD distance (up to this), each on its own phase so the uploads of a
+/// crowd spread over the frames instead of landing together (Unreal's URO frame skipping).
+const MAX_SKIN_EVERY: u32 = 4;
+
+/// Give new parts their mesh and deform each to its skeleton's pose, interpolated within
+/// the fixed step like `TransformInterpolation`, as often as it shows: far off a coarse
+/// mesh, skinned again only when its pose moved visibly, and not at all past the
+/// simulation range.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn skin_bodies(
     mut commands: Commands,
     library: Res<BodyLibrary>,
@@ -190,47 +246,121 @@ pub fn skin_bodies(
     meshes: Option<ResMut<Assets<Mesh>>>,
     mut skins: ResMut<MeshSkins>,
     mut parts: Query<(Entity, &mut SkinnedPart)>,
-    poses: Query<&SkeletonPose>,
+    poses: Query<(&SkeletonPose, Option<&GlobalTransform>)>,
+    (focus, range, config): (
+        Option<Res<FocusPoints>>,
+        Option<Res<SimulationRange>>,
+        Option<Res<SoftBodyConfig>>,
+    ),
     mut scratch: Local<(Vec<BonePose>, Vec<BoneTransform>)>,
+    mut frames: Local<(u32, HashMap<Entity, u32>)>,
 ) {
     let Some(mut meshes) = meshes else {
         return;
     };
     let alpha = fixed.map_or(1.0, |f| f.alpha());
+    let lod = config.map_or(SoftBodyConfig::default().lod_distance, |c| c.lod_distance);
+    let active = range.map_or(SimulationRange::default().active_m, |r| r.active_m) as f32;
     let (posed, bones) = &mut *scratch;
+    let (frame, phases) = &mut *frames;
+    *frame = frame.wrapping_add(1);
     for (e, mut part) in &mut parts {
         let Some(template) = library.get(part.part) else {
             continue;
         };
-        let Ok(pose) = poses.get(part.owner) else {
+        let Ok((pose, at)) = poses.get(part.owner) else {
             continue;
+        };
+        let dist = match (&focus, at) {
+            (Some(f), Some(t)) if !f.points.is_empty() => f.distance(t.translation()) as f32,
+            _ => 0.0,
         };
         // A new mesh starts at the current pose (hair grown on it this frame binds to that
         // pose); after that, between the last two simulated poses.
         let t = if part.mesh.is_some() { alpha } else { 1.0 };
         interpolate_pose(&part.previous, &pose.bones, t, posed);
-        let handle = match part.mesh {
+        let full = match part.mesh {
             Some(h) => h,
             None => {
                 let mut mesh = template.mesh();
                 if let Some(paint) = &part.scalp {
                     paint_scalp(&template, paint, &mut mesh.vertices);
                 }
+                skin(&template, posed, &mut mesh.vertices, bones);
                 let h = meshes.insert_keyed(&part.key, mesh);
                 if let Some(skin) = library.skin(part.part) {
                     skins.0.insert(part.key.clone(), skin);
                 }
                 part.mesh = Some(h);
+                part.skinned.clone_from(posed);
+                // One phase for all of a body's parts, so they never part at the seams.
+                let next = phases.len() as u32;
+                part.phase = *phases.entry(part.owner).or_insert(next);
                 commands
                     .entity(e)
                     .insert(MeshRenderer::new(h, part.material.clone()));
-                h
+                continue;
             }
+        };
+        // Which mesh to draw: the coarse one far off, once it's built.
+        part.wants_far = dist > FAR_FROM * lod * if part.showing_far { 0.9 } else { 1.0 };
+        let far = match (part.wants_far, part.far, library.get_far(part.part)) {
+            (true, Some(h), Some(t)) => Some((h, t)),
+            (true, None, Some(t)) => {
+                let mut mesh = t.mesh();
+                if let Some(paint) = &part.scalp {
+                    paint_scalp(&t, paint, &mut mesh.vertices);
+                }
+                let h = meshes.insert_keyed(&format!("{} (far)", part.key), mesh);
+                part.far = Some(h);
+                Some((h, t))
+            }
+            _ => None,
+        };
+        let switched = far.is_some() != part.showing_far;
+        if switched {
+            part.showing_far = far.is_some();
+            let shown = far.as_ref().map_or(full, |(h, _)| *h);
+            commands
+                .entity(e)
+                .insert(MeshRenderer::new(shown, part.material.clone()));
+        }
+        // Skinned again only when the pose moved more than shows from here.
+        let tolerance = if dist > active {
+            f32::INFINITY
+        } else {
+            (dist - lod).max(0.0) * SKIN_ERROR_PER_M
+        };
+        let every = ((dist / (FAR_FROM * lod)) as u32).clamp(1, MAX_SKIN_EVERY);
+        if !switched && frame.wrapping_add(part.phase) % every != 0 {
+            continue;
+        }
+        let moved = pose_change(&part.skinned, posed);
+        if !switched && (moved <= tolerance || moved == 0.0) {
+            continue;
+        }
+        let (handle, template) = match far {
+            Some((h, t)) => (h, t),
+            None => (full, template),
         };
         if let Some(mesh) = meshes.get_mut(handle) {
             skin(&template, posed, &mut mesh.vertices, bones);
+            part.skinned.clone_from(posed);
         }
     }
+}
+
+/// How far the pose moved, about: the most any bone moved, its turn counted at half a metre.
+fn pose_change(from: &[BonePose], to: &[BonePose]) -> f32 {
+    if from.len() != to.len() {
+        return f32::INFINITY;
+    }
+    from.iter()
+        .zip(to)
+        .map(|(a, b)| {
+            a.translation.distance(b.translation) + 0.5 * a.rotation.angle_between(b.rotation)
+        })
+        .fold(0.0, f32::max)
 }
 
 /// `previous` blended toward `current` by `t` (all of `current` where `previous` lacks a
@@ -428,6 +558,102 @@ mod tests {
         assert_eq!(out[0], b);
         interpolate_pose(&[], &[b], 0.3, &mut out);
         assert_eq!(out[0], b);
+    }
+
+    #[test]
+    fn far_bodies_draw_a_coarse_mesh_skinned_only_when_their_pose_visibly_changes() {
+        use engine_core::time::TimeSource;
+        #[derive(Resource)]
+        struct Camera(DVec3);
+        let mut app = App::new();
+        app.add_plugins((engine_world::WorldPlugin, crate::SoftBodyPlugin));
+        app.world
+            .resource_mut::<Time>()
+            .set_source(TimeSource::Manual {
+                step_secs: 1.0 / 60.0,
+            });
+        app.world.insert_resource(Assets::<Mesh>::default());
+        {
+            let mut library = app.world.resource_mut::<BodyLibrary>();
+            library.blocking = true;
+            library.quality = BodyQuality(3.0);
+        }
+        app.insert_resource(Camera(DVec3::new(0.0, 1.7, 5.0)));
+        app.add_systems(
+            PreUpdate,
+            |cam: Res<Camera>, mut focus: ResMut<FocusPoints>| {
+                focus.points.clear();
+                focus.points.push(cam.0);
+            },
+        );
+        let bind = body::build(BodyPart::Mannequin, BodyQuality(3.0)).bind;
+        let owner = app.world.spawn((Transform::default(), posed(&bind))).id();
+        let e = app
+            .world
+            .spawn((
+                Transform::default(),
+                SkinnedPart::new(
+                    BodyPart::Mannequin,
+                    owner,
+                    "test body",
+                    MaterialRef::default(),
+                ),
+                ChildOf(owner),
+            ))
+            .id();
+        app.update_n(3);
+        let shown = |app: &App| match &app.world.get::<MeshRenderer>(e).unwrap().mesh {
+            engine_render::MeshRef::Handle(h) => *h,
+            other => panic!("{other:?}"),
+        };
+        let version = |app: &App| app.world.resource::<Assets<Mesh>>().version(shown(app));
+        let bend = |app: &mut App, angle: f32| {
+            let mut pose = app.world.get_mut::<SkeletonPose>(owner).unwrap();
+            let b = &mut pose.bones[Human::HEAD_I];
+            b.rotation = Quat::from_rotation_x(angle) * bind[Human::HEAD_I].rotation;
+        };
+        let full = shown(&app);
+
+        // Near: still, it isn't skinned (or uploaded) again; moved, it is.
+        let v = version(&app);
+        app.update_n(5);
+        assert_eq!(version(&app), v, "a still body was skinned again");
+        bend(&mut app, 0.05);
+        app.update_n(3);
+        assert!(version(&app) > v, "a moving near body wasn't skinned");
+
+        // 100 m off: the coarse mesh, skinned again only for a change that shows.
+        app.insert_resource(Camera(DVec3::new(0.0, 1.7, 100.0)));
+        app.update_n(3);
+        let far = shown(&app);
+        assert_ne!(far, full);
+        let n = |h| {
+            app.world
+                .resource::<Assets<Mesh>>()
+                .get(h)
+                .unwrap()
+                .vertices
+                .len()
+        };
+        assert!(n(far) * 8 < n(full), "{} vs {} vertices", n(far), n(full));
+        let v = version(&app);
+        bend(&mut app, 0.07);
+        app.update_n(3);
+        assert_eq!(version(&app), v, "a 1 cm nod at 100 m was skinned");
+        bend(&mut app, 1.0);
+        app.update_n(3);
+        assert!(version(&app) > v, "a big turn at 100 m wasn't skinned");
+
+        // Past the simulation range: not skinned at all; near again, the full mesh.
+        app.insert_resource(Camera(DVec3::new(0.0, 1.7, 400.0)));
+        app.update_n(2);
+        let v = version(&app);
+        bend(&mut app, -1.0);
+        app.update_n(3);
+        assert_eq!(version(&app), v);
+        app.insert_resource(Camera(DVec3::new(0.0, 1.7, 5.0)));
+        app.update_n(2);
+        assert_eq!(shown(&app), full);
     }
 
     #[test]
