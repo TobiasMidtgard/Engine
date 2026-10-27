@@ -2243,3 +2243,49 @@ fn a_burning_shed_chars_and_comes_down() {
     assert_eq!(app.world.get::<BarnFire>(barn).unwrap().cycle, cycle + 1);
     assert_eq!(standing(&mut app), total);
 }
+
+#[test]
+fn light_chunks_use_the_built_in_solver_and_physics_bodies_are_budgeted() {
+    let mut app = app();
+    app.insert_resource(PhysicsBackend {
+        name: "test".into(),
+    });
+    app.world
+        .resource_mut::<DestructionSettings>()
+        .max_physics_debris = 2;
+    app.update();
+    let chunk = |mass_kg: f32, x: f64| debris::DebrisSpawn {
+        position: DVec3::new(x, 3.0, 0.0),
+        look: debris::DebrisLook::Keep,
+        half_extents: Vec3::splat(0.4),
+        mass_kg,
+        ..Default::default()
+    };
+    app.world
+        .resource_mut::<debris::PendingDebris>()
+        .items
+        .extend(
+            [10.0, 100.0, 600.0, 300.0]
+                .into_iter()
+                .zip([0.0, 2.0, 4.0, 6.0])
+                .map(|(m, x)| chunk(m, x)),
+        );
+    app.update();
+    let mut kinds: Vec<(f32, bool, bool)> = app
+        .world
+        .query::<(&Debris, Option<&RigidBody>, Option<&debris::DebrisBody>)>()
+        .iter(&app.world)
+        .map(|(d, r, b)| (d.mass_kg, r.is_some(), b.is_some()))
+        .collect();
+    kinds.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // The light one never needs a body; of the heavy ones, the two heaviest fill the budget.
+    assert_eq!(
+        kinds,
+        vec![
+            (10.0, false, true),
+            (100.0, false, true),
+            (300.0, true, false),
+            (600.0, true, false)
+        ]
+    );
+}
