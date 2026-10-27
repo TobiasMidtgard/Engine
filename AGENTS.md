@@ -204,13 +204,15 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
   (Softbody measured an 806 ms stall). Turning that ticking off can deadlock when every worker
   waits. Flatten the work into one scope opened from a system, or give leaf work that never
   waits a small pool of its own. Slow one-off builds go on `AsyncComputeTaskPool`.
-- Let systems run side by side. Round 19 on the PC (32 threads) ran ~90% of the frame one
-  system at a time: the executor can only overlap systems whose data doesn't clash, and
-  most did. `ENGINE_PROFILE=1` prints "one system at a time / no system / several at once"
-  every report and, once at frame 30, a "schedule parallelism" list of each schedule's
-  exclusive systems and the data most systems fight over. So:
-  - No `&mut World` system that runs every frame. Gate it with `run_if`, or turn it into a
-    normal system with the queries it needs.
+- Let systems run side by side. A profile in round 19 had ~90% of the frame running one
+  system at a time: the executor only overlaps systems whose data doesn't clash, and most
+  clash. `ENGINE_PROFILE=1` prints "one system at a time / no system / several at once"
+  and a "ran alone" list every report, and once, at frame 30, a "schedule parallelism" list
+  of each schedule's exclusive systems and the data most systems fight over. Fix what is
+  heavy in "ran alone" first; a cheap system that runs alone costs little. So:
+  - A `&mut World` system runs with nothing beside it, and the executor can only start it
+    (or skip it on its `run_if`) once nothing else is running. Keep heavy work out of them:
+    take the queries you need in a normal system.
   - Keep `&mut Transform` (and `GlobalTransform`, `MeshRenderer`, `Assets<Mesh>`) out of
     your heavy systems: 79 systems write `Transform` in `FixedUpdate` and 42 in `Update`,
     and any two of them clash. A marker doesn't help: `With<A>` and `With<B>` still clash in
@@ -218,8 +220,9 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
     that reads (`&Transform`) and writes your own component, then copy the result into
     `Transform` in a small system after it, as Unity's DOTS jobs do. Read with `&Transform`
     whenever you only read.
-  - Every `Commands` user adds an `apply_deferred` sync point that stops the schedule. Spawn
-    and despawn in batches, not every frame, and prefer mutating existing components.
+  - A `Commands` user ordered before another system gets an `apply_deferred` sync point
+    after it, which waits for everything running. Spawn and despawn in batches, not every
+    frame, and prefer mutating existing components.
   - `.chain()` only systems that truly need an order; a chain of 10 is 10 serial steps.
   - Split one system that writes several unrelated resources into one per resource.
 - GPU: instance everything; one storage buffer per kind of data; avoid per-object bind
