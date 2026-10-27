@@ -92,6 +92,7 @@ pub mod renderer;
 pub mod rock;
 pub mod settings;
 pub mod shadows;
+pub mod skinning;
 pub mod sky_feature;
 mod sky_occlusion;
 pub mod sprites;
@@ -143,6 +144,7 @@ pub use settings::{
     AntiAliasing, Atmosphere, DebugView, FogSettings, PipelineWarmup, Pipelining, RenderSettings,
     TextureCompression, Tonemapper, VolumetricQuality,
 };
+pub use skinning::{GpuSkin, SkinBlend, SkinBone, SkinWeights};
 pub use sprites::{
     Billboard, Parallax, PixelGrid, PixelPerfect, PixelSnap, Sprite, SpriteAlpha, SpriteAnimation,
     SpriteAnimationMode, SpriteAtlas, SpriteFeature, SpriteFilter, TILE_FLIP_DIAGONAL, TILE_FLIP_X,

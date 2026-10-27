@@ -443,8 +443,11 @@ impl ProbeGi {
             (rel_origin + (dims - 1).as_dvec3() * spacing).as_vec3() + margin,
         );
         let mut found: Vec<(GpuInstance, (Vec3, Vec3))> = Vec::new();
-        let mut query =
-            world.query::<(&crate::ResolvedMesh, &GlobalTransform, &crate::MeshRenderer)>();
+        // Skinned meshes are left out: the rays would see their bind pose.
+        let mut query = world.query_filtered::<
+            (&crate::ResolvedMesh, &GlobalTransform, &crate::MeshRenderer),
+            Without<crate::GpuSkin>,
+        >();
         let world: &World = world;
         let meshes = world.get_resource::<Assets<Mesh>>();
         let materials = world.get_resource::<Assets<StandardMaterial>>();

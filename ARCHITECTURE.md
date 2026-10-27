@@ -213,6 +213,18 @@ the probes' irradiance where the grid covers it, so other modules' shaders that 
 skinned meshes are not in the rays' scene yet, extra views go without, and rays that miss see
 the environment map.
 
+**GPU skinning** (built; `skinning.rs`): a module that poses a mesh puts `GpuSkin` (per-vertex
+bones and weights in an `Arc<SkinWeights>`, each bone's `SkinBone` dual quaternion from the
+bind pose to now, `SkinBlend::DualQuaternion` or `Linear`) on the entity with its
+`MeshRenderer`, whose mesh must be its own and stays in the bind pose. Each frame the pose
+changed, the mesh feature writes the bones and a compute pass (before every draw) skins the
+pool's copy of the vertices from a GPU copy of the bind pose, so the view, shadows and
+everything else that draws the mesh see it posed and only the bones are uploaded; the bounds
+follow the pose. Skinned meshes get no levels of detail, clusters or impostors (`GpuSkin`
+requires `NoMeshLod` and `NoVirtualGeometry`), are left out of probe GI's rays, and their
+motion vectors follow the entity. CPU users of the posed surface (hair roots) skin their own
+points from the same bones. `render.meshes.skinned` counts the meshes skinned in a frame.
+
 **Subsurface scattering for skin** (built): a feature whose prepass writes
 `prepass_output_subsurface(normal, roughness, clip_now, clip_prev, strength)` (lib_frame.wgsl)
 marks skin, writes that pixel's specular light (pre-exposed) to alpha in its scene pass, and

@@ -261,7 +261,10 @@ impl MeshPool {
             vertex: buffer(
                 "mesh pool vertices",
                 vertex_size,
-                wgpu::BufferUsages::VERTEX,
+                // Skinned on the GPU in place (`skinning`), from a copy of the bind pose.
+                wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC,
             ),
             index: buffer("mesh pool indices", index_size, wgpu::BufferUsages::INDEX),
             vertices: Ranges::new((vertex_size / VERTEX_BYTES) as u32),

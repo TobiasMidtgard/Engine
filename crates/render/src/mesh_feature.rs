@@ -40,6 +40,9 @@ use std::collections::{HashMap, HashSet};
 
 /// The per-object maps of `prepare`, with a fast hash (the standard one dominated it).
 type FastMap<K, V> = bevy_platform::collections::HashMap<K, V>;
+
+/// A skinned mesh's GPU state is dropped after this many frames without its entity.
+const SKIN_EVICT_FRAMES: u64 = 600;
 use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
@@ -410,7 +413,7 @@ struct MeshFrame {
 
 impl MeshFrame {
     /// Take bounds and levels from its upload.
-    fn set_uploaded(&mut self, gpu_mesh: &GpuMesh, building_levels: bool) {
+    fn set_uploaded(&mut self, gpu_mesh: &GpuMesh, building_levels: bool, skinned: bool) {
         let coarsest = gpu_mesh.coarsest_triangles();
         *self = MeshFrame {
             ready: true,
@@ -420,7 +423,8 @@ impl MeshFrame {
             min_y: gpu_mesh.min_y,
             height: gpu_mesh.height,
             coarsest,
-            impostor: coarsest >= crate::impostor::MIN_TRIANGLES && !building_levels,
+            // A skinned mesh's pose changes: no bake can show it.
+            impostor: coarsest >= crate::impostor::MIN_TRIANGLES && !building_levels && !skinned,
             ..*self
         };
     }
@@ -798,6 +802,14 @@ pub(crate) const MESH_UPLOAD_KEY: u64 = 1 << 63;
 /// Draws [`MeshRenderer`](crate::components::MeshRenderer) entities. Added by `RenderPlugin`.
 #[derive(Default)]
 pub struct MeshFeature {
+    /// Meshes skinned on the GPU (`GpuSkin`), and the entities asking.
+    skins: crate::skinning::Skins,
+    skin_query: Option<
+        QueryState<(
+            &'static crate::skinning::GpuSkin,
+            &'static crate::components::ResolvedMesh,
+        )>,
+    >,
     /// Indexed by `PIPE_*` bits: double-sided, blend, mirrored (clockwise front faces).
     /// Made on first use (`ensure_pipelines`).
     pipelines: Vec<Option<wgpu::RenderPipeline>>,
@@ -1993,9 +2005,11 @@ impl RenderFeature for MeshFeature {
         let frame = self.frame;
         let mut scene = std::mem::take(&mut self.scene);
         scene.sync(world, frame);
+        let mut skin_query = self.skin_query.take().unwrap_or_else(|| world.query());
         let world_ref: &World = world;
         let Some(mesh_assets) = world_ref.get_resource::<Assets<Mesh>>() else {
             self.scene = scene;
+            self.skin_query = Some(skin_query);
             return;
         };
         let material_assets = world_ref.get_resource::<Assets<StandardMaterial>>();
@@ -2050,6 +2064,27 @@ impl RenderFeature for MeshFeature {
             self.cache_settings = Some(cache_settings);
         }
 
+        steps.step("meshes: skins");
+        // Skinned meshes: changed poses' bones written, bounds posed (before the tables below
+        // take the bounds).
+        for (skin, resolved) in skin_query.iter(world_ref) {
+            let handle = mesh_assets.canonical(resolved.mesh);
+            let Some(asset) = mesh_assets.get(handle) else {
+                continue;
+            };
+            if let Some((center, half)) =
+                self.skins.prepare(gpu, handle.index(), asset, skin, frame)
+                && let Some(g) = self.meshes.get_mut(&handle.index())
+            {
+                g.center = center;
+                g.half_extents = half;
+                g.min_y = center.y - half.y;
+                g.height = (2.0 * half.y).max(1e-3);
+            }
+        }
+        self.skin_query = Some(skin_query);
+        self.skins.evict(frame, SKIN_EVICT_FRAMES);
+
         steps.step("meshes: gather");
         // This frame's tables of the meshes and materials the scene uses.
         let min_triangles = (settings.virtual_geometry_min_triangles as usize).max(1);
@@ -2069,7 +2104,11 @@ impl RenderFeature for MeshFeature {
             if let Some(gpu_mesh) = self.meshes.get(&handle.index())
                 && gpu_mesh.version == version
             {
-                entry.set_uploaded(gpu_mesh, self.lod_jobs.contains_key(&handle.index()));
+                entry.set_uploaded(
+                    gpu_mesh,
+                    self.lod_jobs.contains_key(&handle.index()),
+                    self.skins.skins.contains_key(&handle.index()),
+                );
             }
             let i = raw as usize;
             if i >= self.mesh_frames.len() {
@@ -2331,15 +2370,17 @@ impl RenderFeature for MeshFeature {
                 {
                     self.uploads += 1;
                     self.upload_mesh(gpu, mesh.index, asset, mesh.version);
-                    if lod_pixels > 0.0 {
+                    // Skinned meshes are drawn whole (`GpuSkin` requires `NoMeshLod`).
+                    if lod_pixels > 0.0 && !self.skins.skins.contains_key(&mesh.index) {
                         self.request_lods(mesh.index, handle, asset, mesh.version);
                     }
                 }
                 let building = self.lod_jobs.contains_key(&mesh.index);
+                let skinned = self.skins.skins.contains_key(&mesh.index);
                 let entry = &mut self.mesh_frames[raw];
                 entry.checked = true;
                 if let Some(gpu_mesh) = self.meshes.get(&mesh.index) {
-                    entry.set_uploaded(gpu_mesh, building);
+                    entry.set_uploaded(gpu_mesh, building, skinned);
                 }
             }
             let mesh = self.mesh_frames[raw];
@@ -2812,6 +2853,9 @@ impl RenderFeature for MeshFeature {
                 .map(Vec::len)
                 .sum::<usize>();
             d.set("render.meshes.batches", batches as f64);
+            // Meshes skinned on the GPU in the last frame (a pose that didn't change isn't).
+            d.set("render.meshes.skinned", self.skins.skinned as f64);
+            d.set("render.meshes.skins", self.skins.skins.len() as f64);
             d.set("render.meshes.pool_mb", reserved as f64 / (1 << 20) as f64);
             d.set("render.meshes.pool_used_mb", used as f64 / (1 << 20) as f64);
         }
@@ -2819,6 +2863,12 @@ impl RenderFeature for MeshFeature {
     }
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
+        // First: every pass after it (shadows, prepass, the view, bakes) draws the posed
+        // vertices.
+        let meshes = &self.meshes;
+        self.skins.encode(ctx.gpu, encoder, &self.pool, |index| {
+            meshes.get(&index).map(|m| (m.pool, m.version))
+        });
         if let Some(impostors) = &mut self.impostors
             && let Some(bake) = impostors.pending()
             && let Some(mesh) = self.meshes.get(&bake.mesh)
