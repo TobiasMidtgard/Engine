@@ -14,6 +14,8 @@
 //! * **Materials** ([`SurfaceMaterials`]): one table of friction, fuel, deformation, sounds.
 //! * **Events** ([`events`]): projectiles, impulses, ground contacts, ignition, damage, noise.
 //! * **Focus** ([`SimulationFocus`]): where detailed simulation happens (the player, the camera).
+//! * **Using things** ([`interact`]): [`Interactable`] on what the player can use (E), and the
+//!   [`Interact`] message its owner acts on.
 //! * **World shifts** ([`shift`]): when the world is re-anchored (floating origin, a new
 //!   planet's frame), [`WorldShift`] says how; this crate moves everything the contracts hold
 //!   and modules move their own caches.
@@ -34,6 +36,7 @@ pub mod character;
 pub mod environment;
 pub mod events;
 pub mod grid;
+pub mod interact;
 pub mod locomotion;
 pub mod physical;
 pub mod physics;
@@ -49,6 +52,7 @@ pub use character::{
 pub use environment::*;
 pub use events::*;
 pub use grid::{Blend, Grid2, Grid3};
+pub use interact::{Interact, InteractTarget, Interactable, Interactor, Using};
 pub use locomotion::{
     ClimbLine, Climbable, EngineKind, EngineState, Exhaust, ExhaustEffects, ExhaustKind, Exhausts,
     LocomotionMode, LocomotionState, MoveIntent, VehicleControls, WheelContact, WheelContacts,
@@ -271,8 +275,10 @@ impl Plugin for WorldPlugin {
         locomotion::register(app);
         terrain::register(app);
         shift::register(app);
+        interact::register(app);
         app.init_resource::<WeatherState>()
             .init_resource::<WindField>()
+            .init_resource::<WindOverride>()
             .init_resource::<SurfaceLayers>()
             .init_resource::<HeatField>()
             .init_resource::<Gravity>()
@@ -306,6 +312,10 @@ impl Plugin for WorldPlugin {
             .register_resource::<WeatherState>(
                 "Regional weather: temperature, humidity, clouds, precipitation, wind, fog, \
                  time of day, sun direction.",
+            )
+            .register_resource::<WindOverride>(
+                "Tester's wind: speed_m_s (m/s at 10 m, null = the weather's) sets the \
+                 prevailing wind that sway, smoke, fire and cloth feel. F3 panel: PageUp/PageDown.",
             )
             .register_resource::<Gravity>("Uniform gravity plus attracting bodies (planets).")
             .register_resource::<Scalability>(
@@ -388,8 +398,13 @@ fn recenter_fields_system(
     }
 }
 
-fn sync_wind_system(time: Res<Time>, weather: Res<WeatherState>, mut wind: ResMut<WindField>) {
-    wind.prevailing = weather.wind;
+fn sync_wind_system(
+    time: Res<Time>,
+    weather: Res<WeatherState>,
+    test: Option<Res<WindOverride>>,
+    mut wind: ResMut<WindField>,
+) {
+    wind.prevailing = test.map_or(weather.wind, |t| t.apply(weather.wind));
     wind.gustiness = weather.gustiness;
     wind.time += time.delta_secs();
     wind.decay(time.delta_secs(), 1.5);

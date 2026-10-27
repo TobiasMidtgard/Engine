@@ -115,11 +115,52 @@ impl WeatherState {
     }
 }
 
+/// A tester's wind: when `speed_m_s` is set, [`WindField::prevailing`] blows at that speed
+/// (m/s at 10 m) in the weather's direction, whatever the weather says, so sway, smoke and
+/// cloth can be tried in a gale. The weather itself (sky, fronts, wind sounds) is unchanged.
+/// The F3 panel sets it with PageUp / PageDown and clears it with Home.
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindOverride {
+    pub speed_m_s: Option<f32>,
+}
+
+impl WindOverride {
+    /// Speeds the panel steps through, m/s: calm to violent storm, roughly one Beaufort step
+    /// each.
+    pub const STEPS: [f32; 12] = [
+        0.0, 1.0, 2.5, 4.5, 7.0, 9.5, 12.5, 15.5, 19.0, 22.5, 26.5, 31.0,
+    ];
+
+    /// The next step above (`up`) or below the speed now (`from`, the wind blowing).
+    pub fn step(from: f32, up: bool) -> f32 {
+        let s = Self::STEPS;
+        if up {
+            s.into_iter()
+                .find(|&v| v > from + 0.25)
+                .unwrap_or(s[s.len() - 1])
+        } else {
+            s.into_iter()
+                .rev()
+                .find(|&v| v < from - 0.25)
+                .unwrap_or(0.0)
+        }
+    }
+
+    /// The prevailing wind for this weather wind.
+    pub fn apply(&self, weather: Vec3) -> Vec3 {
+        match self.speed_m_s {
+            Some(speed) => weather.normalize_or(Vec3::X) * speed.max(0.0),
+            None => weather,
+        }
+    }
+}
+
 /// Wind everywhere: prevailing wind with a height profile, gusts, and a local 3D grid of
 /// disturbances (explosions, rotor wash, fire updrafts).
 #[derive(Resource, Debug, Clone)]
 pub struct WindField {
-    /// Prevailing wind at 10 m, m/s. Mirrors [`WeatherState::wind`].
+    /// Prevailing wind at 10 m, m/s. Mirrors [`WeatherState::wind`] (or a [`WindOverride`]).
     pub prevailing: Vec3,
     pub gustiness: f32,
     /// World time, for gust animation.
@@ -327,5 +368,26 @@ mod far_cloud_tests {
             ..layer
         };
         assert_eq!(none.near_share(90_000.0), 1.0);
+    }
+}
+
+#[cfg(test)]
+mod wind_override_tests {
+    use super::*;
+
+    #[test]
+    fn override_sets_the_speed_in_the_weathers_direction() {
+        let weather = Vec3::new(3.0, 0.0, 4.0);
+        assert_eq!(WindOverride::default().apply(weather), weather);
+        let gale = WindOverride {
+            speed_m_s: Some(19.0),
+        }
+        .apply(weather);
+        assert!((gale.length() - 19.0).abs() < 1e-4);
+        assert!(gale.normalize().dot(weather.normalize()) > 0.9999);
+        assert_eq!(WindOverride::step(5.0, true), 7.0);
+        assert_eq!(WindOverride::step(7.0, false), 4.5);
+        assert_eq!(WindOverride::step(0.0, false), 0.0);
+        assert_eq!(WindOverride::step(31.0, true), 31.0);
     }
 }

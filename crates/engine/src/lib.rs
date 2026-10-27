@@ -28,6 +28,8 @@ pub use engine_world as world;
 
 use engine_core::{App, PluginGroup, PluginGroupBuilder};
 
+pub mod interact;
+
 /// Everything a typical game needs: world simulation contracts, input, rendering, the window,
 /// debug drawing and the AI bridge (off unless `ENGINE_BRIDGE` is set, see `engine_ai_bridge`).
 /// Disable or replace parts with `.set(...)` / `.disable::<T>()`.
@@ -41,6 +43,7 @@ impl PluginGroup for DefaultPlugins {
             .add(engine_render::RenderPlugin)
             .add(engine_platform::PlatformPlugin)
             .add(engine_debug::DebugPlugin)
+            .add(interact::InteractPlugin)
             .add(engine_ai_bridge::AiBridgePlugin::default())
     }
 }

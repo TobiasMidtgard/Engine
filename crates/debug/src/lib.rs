@@ -38,6 +38,7 @@ pub mod draw;
 pub mod feature;
 pub mod overlay;
 pub mod shapes;
+mod shift_audit;
 pub mod views;
 
 pub use color::Color;
@@ -104,6 +105,7 @@ impl Plugin for DebugPlugin {
             .add_render_feature(DebugLinesFeature::default())
             .add_render_feature(PerfOverlayFeature::default());
         api::register(app);
+        shift_audit::install(app);
     }
 }
 

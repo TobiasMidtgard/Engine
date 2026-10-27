@@ -16,10 +16,11 @@ use bytemuck::{Pod, Zeroable};
 use engine_core::diagnostics::Diagnostics;
 use engine_core::profile::ProfileSnapshot;
 use engine_core::time::Time;
-use engine_input::{ButtonInput, KeyCode};
+use engine_input::{Binding, ButtonInput, InputMap, KeyCode};
 use engine_render::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderSettings, ViewData,
 };
+use engine_world::{InteractTarget, WindField, WindOverride};
 use serde::{Deserialize, Serialize};
 
 /// Shader source (standalone, no frame bindings).
@@ -63,15 +64,36 @@ impl FrameHistory {
     }
 }
 
-/// `First`: F3 toggles the panel; every frame's real time goes into [`FrameHistory`].
+/// `First`: F3 toggles the panel; every frame's real time goes into [`FrameHistory`]. While
+/// the panel is open, PageUp / PageDown raise and lower the wind a step ([`WindOverride`]) and
+/// Home gives it back to the weather.
 pub fn perf_overlay_system(
     time: Res<Time>,
     keys: Option<Res<ButtonInput<KeyCode>>>,
+    wind: Option<Res<WindField>>,
+    test_wind: Option<ResMut<WindOverride>>,
     mut overlay: ResMut<PerfOverlay>,
     mut history: ResMut<FrameHistory>,
 ) {
-    if keys.is_some_and(|k| k.just_pressed(KeyCode::F3)) {
-        overlay.enabled = !overlay.enabled;
+    if let Some(keys) = keys {
+        if keys.just_pressed(KeyCode::F3) {
+            overlay.enabled = !overlay.enabled;
+        }
+        if overlay.enabled
+            && let Some(mut test_wind) = test_wind
+        {
+            let now = test_wind
+                .speed_m_s
+                .or(wind.map(|w| w.prevailing.length()))
+                .unwrap_or(0.0);
+            if keys.just_pressed(KeyCode::PageUp) {
+                test_wind.speed_m_s = Some(WindOverride::step(now, true));
+            } else if keys.just_pressed(KeyCode::PageDown) {
+                test_wind.speed_m_s = Some(WindOverride::step(now, false));
+            } else if keys.just_pressed(KeyCode::Home) && test_wind.speed_m_s.is_some() {
+                test_wind.speed_m_s = None;
+            }
+        }
     }
     let dt = time.real_delta_secs();
     if dt > 0.0 {
@@ -94,6 +116,8 @@ pub struct PanelData {
     /// Average cores kept busy by systems (profiling only).
     pub cores: Option<f64>,
     pub profiling: bool,
+    /// Prevailing wind, m/s, and whether a [`WindOverride`] sets it.
+    pub wind: Option<(f32, bool)>,
 }
 
 impl PanelData {
@@ -104,6 +128,12 @@ impl PanelData {
                 .map(|h| h.frames_ms.iter().copied().collect())
                 .unwrap_or_default(),
             profiling: engine_core::profile::enabled(),
+            wind: world.get_resource::<WindField>().map(|w| {
+                let set = world
+                    .get_resource::<WindOverride>()
+                    .is_some_and(|t| t.speed_m_s.is_some());
+                (w.prevailing.length(), set)
+            }),
             ..Default::default()
         };
         if let Some(diag) = world.get_resource::<Diagnostics>() {
@@ -255,6 +285,50 @@ impl Painter {
     }
 }
 
+/// The prompt for what the player would use ([`InteractTarget`]): `E  Drive`, with the key
+/// bound to `interact`. Until a UI draws prompts, the panel's font does (windowed runs only).
+fn interact_prompt(world: &World) -> Option<String> {
+    // Not in headless runs: tours and gallery stills stay clean.
+    if world
+        .get_resource::<engine_core::config::EngineConfig>()
+        .is_some_and(|c| c.headless)
+    {
+        return None;
+    }
+    let target = world.get_resource::<InteractTarget>()?;
+    target.target?;
+    let key = world
+        .get_resource::<InputMap>()
+        .and_then(|m| m.actions.get("interact"))
+        .and_then(|a| {
+            a.buttons.iter().find_map(|b| match b {
+                Binding::Key(k) => Some(format!("{k:?}")),
+                _ => None,
+            })
+        })
+        .unwrap_or_else(|| "E".into());
+    Some(format!("{key}  {}", target.verb))
+}
+
+/// A one-line prompt in a dark box, centered a little below the middle of the screen.
+pub fn build_prompt(text: &str, width: u32, height: u32, scale: u32) -> Vec<OverlayVertex> {
+    let mut p = Painter {
+        out: Vec::new(),
+        width: width.max(1) as f32,
+        height: height.max(1) as f32,
+        scale: scale.max(1) as f32,
+    };
+    let s = p.scale;
+    let pad = 4.0 * s;
+    let w = text.chars().count() as f32 * 8.0 * s + 2.0 * pad;
+    let h = 8.0 * s + 2.0 * pad;
+    let x = ((p.width - w) * 0.5).max(0.0);
+    let y = (p.height * 0.62).min(p.height - h);
+    p.rect(x, y, w, h, PANEL);
+    p.text(x + pad, y + pad, text, TEXT);
+    p.out
+}
+
 fn clip(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
@@ -308,6 +382,17 @@ pub fn build_panel(data: &PanelData, width: u32, height: u32, scale: u32) -> Vec
     }
     if !second.is_empty() {
         lines.push((second, DIM));
+    }
+    if let Some((speed, set)) = data.wind {
+        let source = if set {
+            "set, Home: weather's"
+        } else {
+            "weather's"
+        };
+        lines.push((
+            format!("wind {speed:4.1} m/s ({source})  PgUp/PgDn change"),
+            DIM,
+        ));
     }
 
     // Lines above the graph, then the graph, then the tables.
@@ -540,10 +625,12 @@ impl RenderFeature for PerfOverlayFeature {
         _settings: &RenderSettings,
     ) {
         self.count = 0;
-        let Some(overlay) = world.get_resource::<PerfOverlay>().copied() else {
-            return;
-        };
-        if !overlay.enabled {
+        let overlay = world
+            .get_resource::<PerfOverlay>()
+            .copied()
+            .unwrap_or_default();
+        let prompt = interact_prompt(world);
+        if !overlay.enabled && prompt.is_none() {
             return;
         }
         // The panel covers the window, not the camera's viewport.
@@ -552,8 +639,18 @@ impl RenderFeature for PerfOverlayFeature {
             0 => auto_scale(height),
             s => s,
         };
-        let data = PanelData::gather(world);
-        self.scratch = build_panel(&data, width, height, scale);
+        self.scratch.clear();
+        if overlay.enabled {
+            let data = PanelData::gather(world);
+            self.scratch = build_panel(&data, width, height, scale);
+        }
+        if let Some(text) = prompt {
+            self.scratch
+                .extend(build_prompt(&text, width, height, scale + 1));
+        }
+        if self.scratch.is_empty() {
+            return;
+        }
         if let Some(buffer) = &mut self.vertices {
             buffer.write(&gpu.device, &gpu.queue, bytemuck::cast_slice(&self.scratch));
             self.count = self.scratch.len() as u32;
@@ -648,6 +745,7 @@ mod tests {
             systems: vec![("engine_physics::physics_step".into(), 3.2)],
             cores: Some(1.4),
             profiling: true,
+            wind: Some((19.0, true)),
         };
         let verts = build_panel(&data, 2560, 1440, auto_scale(1440));
         assert!(!verts.is_empty());
@@ -668,6 +766,21 @@ mod tests {
     }
 
     #[test]
+    fn prompt_sits_centered_below_the_middle() {
+        let verts = build_prompt("E  Drive", 1920, 1080, 3);
+        // A box and six letters (spaces draw nothing).
+        assert_eq!(verts.len(), 6 * 7);
+        let xs = verts.iter().map(|v| v.position[0]);
+        let (min_x, max_x) = xs.fold((1.0f32, -1.0f32), |(a, b), x| (a.min(x), b.max(x)));
+        assert!((min_x + max_x).abs() < 1e-3, "{min_x} {max_x}");
+        assert!(
+            verts
+                .iter()
+                .all(|v| v.position[1] < 0.0 && v.position[1] > -1.0)
+        );
+    }
+
+    #[test]
     fn overlay_toggles_with_f3() {
         use engine_core::prelude::*;
         let mut app = App::new();
@@ -680,5 +793,38 @@ mod tests {
             .press(KeyCode::F3);
         app.update();
         assert!(app.world.resource::<PerfOverlay>().enabled);
+    }
+
+    #[test]
+    fn page_keys_step_the_wind_while_the_panel_is_open() {
+        use engine_core::prelude::*;
+        let mut app = App::new();
+        app.add_plugins(engine_input::InputPlugin);
+        app.init_resource::<PerfOverlay>()
+            .init_resource::<FrameHistory>()
+            .init_resource::<WindField>()
+            .init_resource::<WindOverride>()
+            .add_systems(First, perf_overlay_system);
+        let press = |app: &mut App, key: KeyCode| {
+            app.world.resource_mut::<ButtonInput<KeyCode>>().press(key);
+            app.update();
+            app.world
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .release(key);
+            app.update();
+        };
+        // Closed panel: the page keys are someone else's.
+        press(&mut app, KeyCode::PageUp);
+        assert_eq!(app.world.resource::<WindOverride>().speed_m_s, None);
+        press(&mut app, KeyCode::F3);
+        // The default wind is ~3.2 m/s; one step up is 4.5.
+        press(&mut app, KeyCode::PageUp);
+        assert_eq!(app.world.resource::<WindOverride>().speed_m_s, Some(4.5));
+        press(&mut app, KeyCode::PageUp);
+        assert_eq!(app.world.resource::<WindOverride>().speed_m_s, Some(7.0));
+        press(&mut app, KeyCode::PageDown);
+        assert_eq!(app.world.resource::<WindOverride>().speed_m_s, Some(4.5));
+        press(&mut app, KeyCode::Home);
+        assert_eq!(app.world.resource::<WindOverride>().speed_m_s, None);
     }
 }
