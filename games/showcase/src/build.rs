@@ -171,8 +171,12 @@ const STEPS: [Step; 12] = [
         true
     }),
     ("woods", "Planting the woods", |world, b| {
+        let reach = world
+            .get_resource::<scenery::TreeReach>()
+            .copied()
+            .unwrap_or_default();
         with_commands(world, |c| {
-            scenery::spawn_woods(c, b.lib.as_ref().expect(LIB), &b.land, &mut b.rng)
+            scenery::spawn_woods(c, b.lib.as_ref().expect(LIB), &b.land, &mut b.rng, reach)
         });
         true
     }),
