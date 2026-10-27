@@ -243,6 +243,7 @@ fn push_bodies(
 fn move_one(sim: &mut Simulation, region_id: RegionId, e: Entity, gravity: &Gravity) {
     let entry = &sim.characters[&e];
     let (body, collider, desc, platform) = (entry.body, entry.collider, entry.desc, entry.platform);
+    let stood = entry.state.grounded;
     // The character's own move runs on its own clock (`dt`); bodies it pushes run on world
     // time (`world_dt`).
     let (dt, world_dt) = (entry.dt, entry.world_dt.max(1e-6));
@@ -323,14 +324,31 @@ fn move_one(sim: &mut Simulation, region_id: RegionId, e: Entity, gravity: &Grav
             // under gravity would undo the step, so the vertical move just stops there.
             let kcc = KinematicCharacterController {
                 slide: !climbed,
+                // No nudge off the floor for gravity's move on it (see below).
+                normal_nudge_factor: if i == 1 && stood && part.dot(up) <= 0.0 {
+                    0.0
+                } else {
+                    kcc.normal_nudge_factor
+                },
                 ..kcc
             };
             // A zero time step turns off the controller's own platform friction: the carry
             // above already moved the character with its platform.
             let m = kcc.move_shape(0.0, &qp, &*shape, &pose, part, |c| collisions.push(c));
             climbed = i == 0 && m.translation.dot(up) > 1.0e-4;
-            pose.translation += m.translation;
-            moved += m.translation;
+            // Gravity against a floor it can stand on moves the character only up or down.
+            // The controller nudges it off every surface it stops on along that surface's
+            // normal (`normal_nudge_factor`): on a slope that is partly downhill, and on a
+            // steep one partly up, so a character standing still crept 0.1 mm a step (6 mm/s
+            // at 45°), down most slopes and up the steepest. Unreal's walking mode likewise
+            // only lifts or lowers a pawn onto its floor.
+            let step = if i == 1 && m.grounded && !m.is_sliding_down_slope {
+                up * m.translation.dot(up)
+            } else {
+                m.translation
+            };
+            pose.translation += step;
+            moved += step;
             grounded = m.grounded;
         }
     }

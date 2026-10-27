@@ -490,6 +490,43 @@ fn characters_climb_steps_and_stop_at_steep_slopes() {
     );
 }
 
+/// A character standing still stays put on any slope it can walk, gravity pushing it into
+/// the ground every step. The controller nudged it off the floor along the floor's normal,
+/// which crept it downhill (6 mm/s on 45°) and up the steepest slopes: players slid while
+/// standing still, and in knee-deep water on a lake's bank it read as the water pushing.
+#[test]
+fn characters_stand_still_on_slopes() {
+    for slope in [10.0f32, 20.0, 30.0, 45.0] {
+        let mut app = app();
+        // Rises toward -x.
+        app.world.spawn((
+            Transform::from_xyz(0.0, -0.5, 0.0)
+                .with_rotation(Quat::from_rotation_z(-slope.to_radians())),
+            RigidBody::fixed(),
+            Collider::cuboid(Vec3::new(30.0, 0.5, 30.0)),
+        ));
+        let c = app
+            .world
+            .spawn((
+                Transform::from_xyz(0.0, 1.2, 0.0),
+                CharacterController::default(),
+                CharacterMove {
+                    velocity: Vec3::new(0.0, -9.81, 0.0),
+                },
+            ))
+            .id();
+        app.update_n(60);
+        let settled = pos(&app, c);
+        app.update_n(600);
+        let drift = pos(&app, c) - settled;
+        assert!(
+            drift.length() < 1e-3,
+            "a character standing on a {slope}° slope moved {drift:?} in 10 s"
+        );
+        assert!(app.world.get::<CharacterState>(c).unwrap().grounded);
+    }
+}
+
 #[test]
 fn dashing_characters_stop_at_thin_walls() {
     let mut app = app();
