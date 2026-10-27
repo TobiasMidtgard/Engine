@@ -325,3 +325,34 @@ fn piles_past_the_simulation_range_rest_until_someone_comes_near() {
         assert!(position(&app, *r).y < 1.0, "a rock never fell");
     }
 }
+
+/// A rock fallen through the ground far away (out there the terrain's colliders may not be
+/// loaded) rests like the rest past the range, though it falls fast: it isn't travelling
+/// anywhere, and kept its region stepping for good, falling ever deeper.
+#[test]
+fn a_rock_fallen_through_the_ground_far_away_rests() {
+    let mut app = app();
+    *app.world.resource_mut::<Scalability>() = Scalability::default();
+    let rock = app
+        .world
+        .spawn((
+            Transform::from_xyz(400.0, -120.0, 0.0),
+            RigidBody::dynamic(),
+            Collider::sphere(0.3).with_density(2000.0),
+            Velocity {
+                linear: Vec3::new(0.0, -40.0, 0.0),
+                angular: Vec3::ZERO,
+            },
+        ))
+        .id();
+    app.update_n(30);
+    let y = position(&app, rock).y;
+    app.update_n(60);
+    let s = stats(&app);
+    assert_eq!(s.resting_awake, 1, "{s:?}");
+    assert!(
+        (position(&app, rock).y - y).abs() < 0.01,
+        "the lost rock kept falling: {y} -> {}",
+        position(&app, rock).y
+    );
+}

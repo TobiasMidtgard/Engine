@@ -75,6 +75,12 @@ pub struct Region {
     pub fine: Option<f32>,
     /// Holds bodies that ask for fine steps and others too (as of the last step).
     pub mixed: bool,
+    /// Holds only sleeping bodies, moved out of a region that keeps stepping
+    /// ([`Simulation::split_dormant`]): it sits steps out until something here wakes.
+    pub dormant: bool,
+    /// Every fast body here fell through the ground, as of the last look ([`crate::lod`]):
+    /// they don't keep it stepping past the simulation range.
+    pub lost: bool,
     /// How far the farthest-reaching body here reaches from its origin, meters (as of the
     /// last step).
     pub reach: f64,
@@ -166,6 +172,8 @@ impl Region {
             owed_secs: 0.0,
             fine: None,
             mixed: false,
+            dormant: false,
+            lost: false,
             reach: 0.0,
             needs_refresh: true,
             collector: Collector::default(),
@@ -733,6 +741,9 @@ pub struct Simulation {
     pub lod_clock: u32,
     /// The world's `SimulationRange`: regions past it rest ([`crate::lod::REST`]).
     pub range: Option<engine_world::SimulationRange>,
+    /// The world's ground as of the last step (to tell a body fallen through it from one
+    /// travelling, [`crate::lod`]).
+    pub ground: Option<engine_world::Ground>,
     /// Bodies told to rest (the proving ground's stations nobody is near): held asleep, and
     /// kinematic ones still, every step.
     pub resting: EntityHashSet,
@@ -2238,15 +2249,19 @@ impl Simulation {
         self.lod_clock += 1;
         // Bodies asking for fine steps keep to regions of their own (`crate::fine`).
         let fine_margin = crate::fine::MARGIN + max_speed_step * 3.0;
+        let splits = tracing::info_span!("region splits").entered();
         let newly_mixed = self.update_fine();
+        self.wake_dormant();
         if self.lod_clock.is_multiple_of(crate::lod::LOD_EVERY) {
             self.split_far(foci, margin * 1.25);
+            self.split_dormant(margin * 2.0);
         }
         if newly_mixed || self.lod_clock.is_multiple_of(crate::lod::LOD_EVERY) {
             self.split_fine(fine_margin * 1.25);
         }
         self.update_fine();
         self.update_tiers(foci);
+        drop(splits);
 
         let mut bounds: Vec<(RegionId, DVec3, DVec3)> = Vec::new();
         for id in self.live_region_ids() {
@@ -2295,6 +2310,7 @@ impl Simulation {
         // Merge regions whose movers could touch (if the result still fits). Regions of
         // different tiers lie inside each other's boxes (one holds the movers around the focus,
         // the other the far ones), so for them the movers themselves are compared.
+        let _merges = tracing::info_span!("region merges").entered();
         let look_closer = self.lod_clock.is_multiple_of(crate::lod::CLOSE_EVERY);
         for i in 0..bounds.len() {
             for j in (i + 1)..bounds.len() {
@@ -2313,10 +2329,13 @@ impl Simulation {
                     // before the tiers: far from every focus, a yard holding a character keeps
                     // the coarse tier while its cradle drops to half rate, and merging them at
                     // the tiers' wide margin stepped the whole yard finely.
+                    let (da, db) = (self.region(a).dormant, self.region(b).dormant);
                     let apart = if fa.is_some() != fb.is_some() {
                         let (fine, other) = if fa.is_some() { (a, b) } else { (b, a) };
                         !self.movers_near(fine, other, fine_margin)
-                    } else if ta != tb {
+                    } else if ta != tb || da != db {
+                        // (A dormant region lies among the movers it was split from, so it
+                        // merges only when they come close, as one of another tier does.)
                         !(look_closer && self.movers_close(a, b, margin))
                     } else {
                         false
@@ -2331,6 +2350,7 @@ impl Simulation {
                     };
                     self.merge_regions(big, small);
                     let merged = self.region_mut(big);
+                    merged.dormant = da && db;
                     merged.tier = ta.min(tb);
                     merged.fine = crate::fine::finest(fa, fb);
                 }
@@ -2518,7 +2538,7 @@ impl Simulation {
         }
     }
 
-    fn migrate_character(&mut self, e: Entity, target: RegionId) {
+    pub(crate) fn migrate_character(&mut self, e: Entity, target: RegionId) {
         let Some(c) = self.characters.get(&e) else {
             return;
         };

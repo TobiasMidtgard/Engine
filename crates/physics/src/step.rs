@@ -3,7 +3,6 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use engine_core::ecs::entity::EntityHashSet;
 use engine_core::ecs::system::SystemState;
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
@@ -159,7 +158,10 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
     }
     let q = q.as_mut().unwrap();
     let shared = world.resource::<SharedSimulation>().0.clone();
+    // (Queries from other threads hold it for reading.)
+    let lock = tracing::info_span!("simulation lock").entered();
     let mut sim = shared.write();
+    drop(lock);
     let sync = tracing::info_span!("sync from world").entered();
 
     // ---------------------------------------------------------------- settings & environment
@@ -187,6 +189,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         sim.refresh_materials();
     }
     sim.range = world.get_resource::<SimulationRange>().copied();
+    sim.ground = world.get_resource::<engine_world::Ground>().cloned();
     let gravity = world.resource::<Gravity>().clone();
     let foci = world
         .get_resource::<FocusPoints>()
@@ -541,6 +544,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
     let region_ids: Vec<RegionId> = sim.live_regions().map(|(id, _)| id).collect();
     drop(upkeep);
     let report = crate::report::wanted();
+    let planning = tracing::info_span!("region plans").entered();
     let busy = busy_regions(&sim);
     // Regions step side by side (Jolt and PhysX solve islands as parallel jobs; regions are
     // islands that share nothing): each substep's own work runs as one job per region on the
@@ -553,9 +557,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         let (frozen, movers) = {
             let r = sim.region(rid);
             (
-                r.frozen
-                    || r.tier >= crate::lod::REST
-                    || (!busy.contains(&rid) && idle(r, &sim.resting)),
+                r.frozen || r.tier >= crate::lod::REST || (!busy.contains(&rid) && idle(r)),
                 r.movers,
             )
         };
@@ -621,6 +623,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             ms: region_started.elapsed().as_secs_f64() * 1000.0,
         });
     }
+    drop(planning);
     let rounds = plans.iter().map(|p| p.substeps).max().unwrap_or(0);
     let min_speed = settings.contact_events.then_some(settings.impact_min_speed);
     for sub in 0..rounds {
@@ -706,6 +709,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 .collect()
         };
         // Contact events and joints, region by region (the shared books again).
+        let _events = tracing::info_span!("contacts and joints").entered();
         for ((&i, out), (forces, kinematics)) in here.iter().zip(outs).zip(marks) {
             let p = &mut plans[i];
             let t4 = Instant::now();
@@ -735,6 +739,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             }
         }
     }
+    let finish = tracing::info_span!("characters and bounds").entered();
     for p in &plans {
         let t = Instant::now();
         sim.region_mut(p.rid).queries_refreshed();
@@ -745,6 +750,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             crate::report::region_ms(p.rid, ms);
         }
     }
+    drop(finish);
     let write_back = tracing::info_span!("write back").entered();
     sim.recheck_contacts();
     let _ = real_dt;
@@ -896,6 +902,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
     }
 
     drop(write_back);
+    let _stats = tracing::info_span!("stats").entered();
     if report {
         crate::report::step_done(world, &sim, &foci, started);
     }
@@ -1160,6 +1167,12 @@ fn prepare_forces(
         let region = sim.regions[rid as usize].as_mut().unwrap();
         let hulls = &mut sim.hulls;
         let anchor = region.anchor;
+        // Far away the water is looked at on a coarser grid.
+        let cells = if region.tier >= 1 {
+            crate::buoyancy::FAR_CELLS
+        } else {
+            crate::buoyancy::MAX_CELLS
+        };
         // Read only: Rapier's `get_mut` flags the body as changed, which costs a sleeping one
         // its place in Rapier's bookkeeping every substep.
         let Some(rb) = region.world.bodies.get(h) else {
@@ -1214,7 +1227,8 @@ fn prepare_forces(
                     let hull = hulls.get(c.shared_shape());
                     let meshed = hull.is_some();
                     let (frac, current) = if let Some(hull) = hull {
-                        let Some(surface) = Surface::sample(w, anchor, aabb.mins, aabb.maxs) else {
+                        let Some(surface) = Surface::sample(w, anchor, aabb.mins, aabb.maxs, cells)
+                        else {
                             continue;
                         };
                         if aabb.mins.y >= surface.top {
@@ -1574,22 +1588,21 @@ fn busy_regions(sim: &Simulation) -> HashSet<RegionId> {
     characters.chain(gliding).collect()
 }
 
-/// A region (not [busy](busy_regions)) has nothing to step: every body in it told to rest
-/// ([`Simulation::resting`], so held asleep whatever is written to it) and asleep, no collider
-/// added or moved. Rapier's step would only walk its sleeping contacts (3 ms for a resting
-/// proving ground), so it sits the step out. (Bodies not told to rest may have been woken
-/// since the last step, which Rapier's islands only learn as it steps.)
-fn idle(r: &crate::sim::Region, resting: &EntityHashSet) -> bool {
-    !resting.is_empty()
-        && r.world.islands.active_bodies().next().is_none()
+/// A region (not [busy](busy_regions)) has nothing to step: every body in it asleep, none woken
+/// since the last step (a wake-up shows on the body at once, though Rapier's islands learn of it
+/// only as they step), no collider added or moved. Rapier's step would only walk its sleeping
+/// contacts and pairs (3 ms for a resting proving ground), so it sits the step out, as Box2D and
+/// PhysX leave sleeping islands out of the solver and the narrow phase. Bodies told to rest
+/// ([`Simulation::resting`]) were put back to sleep before this.
+fn idle(r: &crate::sim::Region) -> bool {
+    r.world.islands.active_bodies().next().is_none()
         && !r.needs_refresh
         && r.fresh.is_empty()
         && !r.stale_all
         && r.world
             .bodies
             .iter()
-            .filter(|(_, rb)| !rb.is_fixed())
-            .all(|(_, rb)| resting.contains(&convert::entity_of(rb.user_data)))
+            .all(|(_, rb)| rb.is_fixed() || rb.is_sleeping())
 }
 
 /// Hold the bodies told to rest asleep ([`Simulation::resting`]): wake-ups from their
@@ -1600,26 +1613,28 @@ fn hold_resting(sim: &mut Simulation) {
     let Simulation {
         resting,
         bodies,
+        characters,
         regions,
         ..
     } = sim;
     let mut held = 0;
     for e in resting.iter() {
-        let Some(b) = bodies.get(e) else {
+        // (A character told to rest stands still: its body sleeps too.)
+        let Some((region, handle)) = bodies
+            .get(e)
+            .map(|b| (b.region, b.handle))
+            .or_else(|| characters.get(e).map(|c| (c.region, c.body)))
+        else {
             continue;
         };
-        let Some(r) = regions.get_mut(b.region as usize).and_then(|r| r.as_mut()) else {
+        let Some(r) = regions.get_mut(region as usize).and_then(|r| r.as_mut()) else {
             continue;
         };
         // `get`, not `get_mut`: Rapier re-checks every body taken mutably.
-        if r.world
-            .bodies
-            .get(b.handle)
-            .is_none_or(|rb| rb.is_sleeping())
-        {
+        if r.world.bodies.get(handle).is_none_or(|rb| rb.is_sleeping()) {
             continue;
         }
-        if let Some(rb) = r.world.bodies.get_mut(b.handle) {
+        if let Some(rb) = r.world.bodies.get_mut(handle) {
             rb.set_linvel(Vec3::ZERO, false);
             rb.set_angvel(Vec3::ZERO, false);
             rb.sleep();

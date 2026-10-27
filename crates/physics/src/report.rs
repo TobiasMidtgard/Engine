@@ -1,6 +1,7 @@
 //! Where the physics step's time goes, region by region: with `PHYSICS_REPORT=1` the step logs
-//! every [`EVERY`] steps the regions that cost the most, with their bodies, level of detail and
-//! distance from the nearest focus. For finding what keeps a scene slow; off by default.
+//! every [`EVERY`] steps (or every N with `PHYSICS_REPORT=N`, for slow headless runs) the regions
+//! that cost the most, with their bodies, level of detail, distance from the nearest focus and
+//! what keeps them awake. For finding what keeps a scene slow; off by default.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -12,7 +13,7 @@ use parking_lot::Mutex;
 
 use crate::sim::{RegionId, Simulation};
 
-/// Steps between reports.
+/// Steps between reports, unless `PHYSICS_REPORT` names another number.
 const EVERY: u32 = 120;
 /// Regions listed per report.
 const TOP: usize = 10;
@@ -78,12 +79,24 @@ pub(crate) fn count(name: &'static str, n: usize) {
     }
 }
 
+/// Steps between reports: `PHYSICS_REPORT=N` for N of 2 or more, else [`EVERY`].
+fn every() -> u32 {
+    static E: OnceLock<u32> = OnceLock::new();
+    *E.get_or_init(|| {
+        std::env::var("PHYSICS_REPORT")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|n| *n >= 2)
+            .unwrap_or(EVERY)
+    })
+}
+
 /// The whole step is done: count it, and log the report every [`EVERY`] steps.
 pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started: Instant) {
     let mut t = totals().lock();
     t.steps += 1;
     t.step_ms += started.elapsed().as_secs_f64() * 1000.0;
-    if t.steps < EVERY {
+    if t.steps < every() {
         return;
     }
     let steps = t.steps as f64;
@@ -94,10 +107,13 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
         .collect();
     rows.sort_by(|a, b| b.1.total_cmp(&a.1));
     let mut out = format!(
-        "physics report: {:.2} ms per step over {} steps, {} regions",
+        "physics report: {:.2} ms per step over {} steps, {} regions, foci{}",
         t.step_ms / steps,
         t.steps,
-        sim.live_regions().count()
+        sim.live_regions().count(),
+        foci.iter()
+            .map(|f| format!(" ({:.0} {:.0} {:.0})", f.x, f.y, f.z))
+            .collect::<String>()
     );
     let in_regions: f64 = rows.iter().map(|r| r.1).sum();
     let parts: Vec<String> = PARTS
@@ -159,6 +175,35 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
         for (e, reach, kind) in wide.into_iter().take(4) {
             let name = world.get::<Name>(e).map_or("?", |n| n.as_str());
             out += &format!(" {name} ({kind:?}, {reach:.1} m)");
+        }
+        // What keeps it stepping: its fastest awake bodies.
+        let mut moving: Vec<(f32, Entity, bool, DVec3)> = w
+            .islands
+            .active_bodies()
+            .filter_map(|h| w.bodies.get(h))
+            .map(|rb| {
+                let e = crate::convert::entity_of(rb.user_data);
+                let at = r.global(rb.translation());
+                (rb.linvel().length(), e, rb.is_kinematic(), at)
+            })
+            .collect();
+        if !moving.is_empty() {
+            moving.sort_by(|a, b| b.0.total_cmp(&a.0));
+            out += "; awake:";
+            for (speed, e, kinematic, at) in moving.into_iter().take(4) {
+                let name = world
+                    .get::<Name>(e)
+                    .or_else(|| {
+                        let parent = world.get::<ChildOf>(e)?.parent();
+                        world.get::<Name>(parent)
+                    })
+                    .map_or("?", |n| n.as_str());
+                let kind = if kinematic { ", kinematic" } else { "" };
+                out += &format!(
+                    " {name} ({speed:.1} m/s{kind}, at {:.0} {:.0} {:.0})",
+                    at.x, at.y, at.z
+                );
+            }
         }
     }
     engine_core::log::info!("{out}");

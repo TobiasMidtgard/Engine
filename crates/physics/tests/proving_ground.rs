@@ -708,3 +708,55 @@ fn a_yard_built_after_the_camera_rests_at_once() {
         assert!(stats.bodies > 1000 && stats.awake == 0, "{stats:?}");
     }
 }
+
+/// A resting yard beside something that keeps moving (a turntable by the camera, 130 m off,
+/// within the simulation range) leaves the turntable's region for a dormant one that sits
+/// steps out, so the turntable no longer steps a thousand sleeping bodies with it. Rapier walks a region's sleeping pairs
+/// every step; Box2D keeps sleeping islands in solver sets no step touches.
+#[test]
+fn a_resting_yard_leaves_the_region_of_a_turntable() {
+    let mut app = App::new();
+    app.add_plugins(WorldPlugin);
+    app.add_plugins(PhysicsPlugin);
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual {
+            step_secs: 1.0 / 60.0,
+        });
+    app.world.resource_mut::<FixedTime>().set_hz(60.0);
+    app.world.spawn((
+        Transform::from_xyz(130.0, 1.7, 0.0),
+        SimulationFocus::default(),
+    ));
+    let turntable = app
+        .world
+        .spawn((
+            Transform::from_xyz(130.0, 0.5, 5.0),
+            RigidBody {
+                kind: BodyKind::Kinematic,
+                ..Default::default()
+            },
+            Collider::cuboid(Vec3::new(2.0, 0.1, 2.0)),
+            Velocity {
+                linear: Vec3::ZERO,
+                angular: Vec3::Y,
+            },
+        ))
+        .id();
+    app.update_n(3);
+    let mut commands = app.world.commands();
+    demo::spawn_demo(&mut commands, DVec3::ZERO);
+    app.world.flush();
+    app.update_n(120);
+    let stats = *app.world.resource::<PhysicsStats>();
+    assert!(
+        stats.bodies > 1000 && stats.dormant + 1 >= stats.bodies && stats.resting_awake == 0,
+        "the yard should be dormant: {stats:?}"
+    );
+    let turned = app.world.get::<Transform>(turntable).unwrap().rotation;
+    app.update_n(30);
+    let now = app.world.get::<Transform>(turntable).unwrap().rotation;
+    assert!(turned.angle_between(now) > 0.2, "the turntable stopped");
+    let stats = *app.world.resource::<PhysicsStats>();
+    assert!(stats.dormant + 1 >= stats.bodies, "{stats:?}");
+}
