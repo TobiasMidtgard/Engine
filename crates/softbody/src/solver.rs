@@ -600,6 +600,11 @@ impl Sim {
     }
 
     /// Number of substeps for a step of `dt` seconds.
+    /// Particle-triangle pairs the self-collision is watching this step.
+    pub fn self_pairs(&self) -> usize {
+        self.self_contacts.pairs.len()
+    }
+
     pub fn substeps_for(&self, dt: f32) -> u32 {
         let n = (self.params.substeps.max(1) as f32 * dt * 60.0).ceil() as u32;
         n.clamp(1, self.params.substeps.max(1) * 4)
