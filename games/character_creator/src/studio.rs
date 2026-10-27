@@ -57,6 +57,18 @@ pub fn setup(mut commands: Commands, mut settings: ResMut<RenderSettings>) {
     settings.volumetric_fog = false;
     settings.vignette = 0.25;
     settings.sharpness = 0.25;
+    // Khronos PBR Neutral keeps skin and hair the colors they are, where the game's punchy
+    // curve saturates dark warm tones (shaded blond hair turns olive, brown skin orange-red).
+    // `--tonemap punchy|agx|neutral` picks another to compare.
+    settings.tonemapper = match std::env::args()
+        .skip_while(|a| a != "--tonemap")
+        .nth(1)
+        .as_deref()
+    {
+        Some("punchy") => Tonemapper::AgXPunchy,
+        Some("agx") => Tonemapper::AgX,
+        _ => Tonemapper::Neutral,
+    };
 
     let mut camera = Camera::perspective(Orbit::CLOSE_UP.fov_deg);
     // Outdoors the camera adapts like the game's.
