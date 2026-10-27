@@ -554,16 +554,18 @@ fn in_hard_zone(x: f64, z: f64, reach: f64) -> bool {
 
 /// Woods on the hills and lone trees in the meadows.
 /// Valley trees are planted within this of the walk and the tour's viewpoints (m, across the
-/// ground); beyond it Foliage's far woods (from 500 m off the camera) draw the slopes, and its
-/// near woods grow trees round a free camera that goes there. Per-tree instances near and
-/// clustered cards far, as Unreal's foliage does: 36k trees with their parts were about 110k
-/// drawn meshes. `--trees-within <m>` (or `all`) changes it.
+/// ground). Round the camera Foliage's near woods grow trees on the valley's wooded ground that
+/// holds none, out to 500 m, and its far woods draw the slopes beyond, so a hand-placed ring
+/// this wide looks the same from the stops as planting every tree (round 24's pictures) while
+/// the world holds a quarter of them: per-tree instances near and clustered cards far, as
+/// Unreal's foliage does. 36k trees with their parts were about 110k drawn meshes.
+/// `--trees-within <m>` (or `all`) changes it.
 #[derive(Resource, Clone, Copy)]
 pub struct TreeReach(pub f64);
 
 impl Default for TreeReach {
     fn default() -> Self {
-        Self(600.0)
+        Self(250.0)
     }
 }
 
