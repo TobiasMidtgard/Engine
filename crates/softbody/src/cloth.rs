@@ -1146,6 +1146,30 @@ mod tests {
     }
 
     #[test]
+    fn a_towel_balled_up_lets_go_of_itself() {
+        let mut body = settled_towel(true);
+        let sim = &mut body.sim;
+        let c = sim.pos[0];
+        for i in 0..sim.pos.len() {
+            let h = (i as u32).wrapping_mul(2_654_435_761);
+            let d = Vec3::new(
+                (h % 97) as f32 / 97.0,
+                (h / 97 % 89) as f32 / 89.0,
+                (h / 8633 % 83) as f32 / 83.0,
+            );
+            sim.place(i as u32, c + d * 0.06);
+        }
+        sim.step(1.0 / 60.0, &[]);
+        // Hundreds of pairs a particle: it stops colliding with itself instead of paying for
+        // them, and falls open.
+        assert_eq!(sim.self_pairs(), 0);
+        for _ in 0..60 {
+            sim.step(1.0 / 60.0, &[]);
+        }
+        assert!(sim.pos.iter().all(|p| p.is_finite()));
+    }
+
+    #[test]
     fn hangs_without_stretching() {
         let mut body = flag();
         body.sim.params.aero = None;
