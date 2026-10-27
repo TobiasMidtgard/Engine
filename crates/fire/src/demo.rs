@@ -27,7 +27,8 @@ use engine_core::math::{DQuat, DVec2, DVec3, Mat4, Quat, Rng, Vec2, Vec3};
 use engine_core::prelude::*;
 use engine_render::{Image, Mesh, MeshRenderer};
 use engine_world::{
-    Combustible, FocusPoints, Ground, SurfaceMaterials, Water, WeatherState, WindField,
+    Combustible, FocusPoints, Ground, LoadingBudget, SurfaceMaterials, Water, WeatherState,
+    WindField,
 };
 
 use crate::embers::Embers;
@@ -169,6 +170,25 @@ pub struct FireDemoState {
     pub cycles: u32,
     /// Start a fresh fire this many seconds along at the next update (`fire.demo`).
     pub jump_to: Option<f32>,
+    /// The fire's jump ahead still to run (spread over a loading screen's frames).
+    ahead: Option<Ahead>,
+}
+
+/// A jump ahead under way: steps left, and how far the wind it burns in has got.
+#[derive(Debug, Clone, Copy)]
+struct Ahead {
+    steps: u32,
+    wind_secs: f32,
+}
+
+/// Present while a demo is starting: until its fire has been lit and jumped ahead.
+#[derive(Resource)]
+struct Starting;
+
+/// Whether a fire demo is still starting (its jump ahead runs over a loading screen's frames,
+/// under `LoadingBudget`). Hold the loading screen until this is false.
+pub fn loading(world: &World) -> bool {
+    world.contains_resource::<Starting>()
 }
 
 /// An object the demo puts back as it was when the meadow resets.
@@ -189,6 +209,7 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             FireDemoState::default(),
         ))
         .id();
+    commands.insert_resource(Starting);
     let at = |x: f64, y: f64, z: f64| origin + DVec3::new(x, y, z);
     let place = |x: f64, z: f64| Transform::from_translation(origin + DVec3::new(x, 0.0, z));
 
@@ -664,24 +685,18 @@ pub fn run_demos(world: &mut World) {
             state.cycles += 1;
             world.resource_mut::<FireClock>().reset_for_demo();
             light(world, place, &demo);
-            if at > 0.0 {
-                fast_forward(world, place.origin, reach(&demo), at);
-            }
+            state.ahead = ahead_of(world, at);
             state.since = at;
-            let field = world.resource::<FireField>();
-            let wind = world.get_resource::<WeatherState>().map(|w| w.wind);
-            tracing::info!(
-                "fire demo: a fresh fire {at:.0} s along, {:.0} m² burning, wind {wind:?}",
-                field.stats.burning_m2
-            );
+            run_ahead(world, place, &demo, &mut state);
         } else if !state.started {
             state.started = true;
             state.cycles = 1;
             light(world, place, &demo);
-            if demo.warmup_secs > 0.0 {
-                fast_forward(world, place.origin, reach(&demo), demo.warmup_secs);
-            }
+            state.ahead = ahead_of(world, demo.warmup_secs);
             state.since = demo.warmup_secs;
+            run_ahead(world, place, &demo, &mut state);
+        } else if state.ahead.is_some() {
+            run_ahead(world, place, &demo, &mut state);
         } else {
             // A demo far from everyone rests with its fire: its cycle waits too, so no one
             // pays for relighting a meadow they can't see.
@@ -698,6 +713,47 @@ pub fn run_demos(world: &mut World) {
         contain(world, place, &demo);
         world.entity_mut(entity).insert(state);
     }
+    let mut q = world.query::<&FireDemoState>();
+    let starting = q.iter(world).any(|s| !s.started || s.ahead.is_some());
+    if starting != world.contains_resource::<Starting>() {
+        if starting {
+            world.insert_resource(Starting);
+        } else {
+            world.remove_resource::<Starting>();
+        }
+    }
+}
+
+/// A jump `secs` ahead, in fire steps (none for no time).
+fn ahead_of(world: &World, secs: f32) -> Option<Ahead> {
+    let hz = world.resource::<FireSettings>().sim_hz.clamp(1.0, 240.0);
+    let steps = (secs.max(0.0) * hz).round() as u32;
+    (steps > 0).then_some(Ahead {
+        steps,
+        wind_secs: 0.0,
+    })
+}
+
+/// Run a demo's jump ahead: all at once in play, or behind a loading screen as many steps as
+/// fit in its frame budget (`LoadingBudget`), the rest on the next frames. A whole warm-up is
+/// a few hundred steps of the meadow's fire: over half a second in one frame on a fast PC.
+fn run_ahead(world: &mut World, place: Place, demo: &FireDemo, state: &mut FireDemoState) {
+    let Some(mut ahead) = state.ahead.take() else {
+        return;
+    };
+    let budget = world.get_resource::<LoadingBudget>().map(|b| b.budget_ms);
+    fast_forward(world, place.origin, reach(demo), &mut ahead, budget);
+    if ahead.steps > 0 {
+        state.ahead = Some(ahead);
+        return;
+    }
+    let field = world.resource::<FireField>();
+    let wind = world.get_resource::<WeatherState>().map(|w| w.wind);
+    tracing::info!(
+        "fire demo: a fresh fire {:.0} s along, {:.0} m² burning, wind {wind:?}",
+        state.since,
+        field.stats.burning_m2
+    );
 }
 
 /// Where a fire starts (demo-relative X/Z): `demo.line`, or with `demo.upwind` the edge of the
@@ -754,11 +810,18 @@ fn reach(demo: &FireDemo) -> f64 {
     Vec2::from(demo.bounds).length() as f64 + CONTAIN_MARGIN_M
 }
 
-/// Run the fire within `radius` of `origin` alone for `secs` of simulated time, right now
-/// (fires elsewhere, such as a burning building across the valley, are left where they are).
-fn fast_forward(world: &mut World, origin: DVec3, radius: f64, secs: f32) {
+/// Run the fire within `radius` of `origin` alone for `ahead`'s steps, right now (fires
+/// elsewhere, such as a burning building across the valley, are left where they are): all of
+/// them, or with a `budget_ms` as many as fit in it (at least one).
+fn fast_forward(
+    world: &mut World,
+    origin: DVec3,
+    radius: f64,
+    ahead: &mut Ahead,
+    budget_ms: Option<f64>,
+) {
     let hz = world.resource::<FireSettings>().sim_hz.clamp(1.0, 240.0);
-    let steps = (secs * hz).round() as usize;
+    let started = std::time::Instant::now();
     let mut schedule = Schedule::default();
     schedule.add_systems(
         (
@@ -787,13 +850,18 @@ fn fast_forward(world: &mut World, origin: DVec3, radius: f64, secs: f32) {
     // it is made. The world's own wind is put back afterwards.
     let wind = world.get_resource::<WindField>().cloned();
     if let Some(mut w) = world.get_resource_mut::<WindField>() {
-        w.time = 0.0;
+        w.time = ahead.wind_secs;
         w.local.data.fill(Vec3::ZERO);
     }
-    for _ in 0..steps {
+    while ahead.steps > 0 {
         schedule.run(world);
+        ahead.steps -= 1;
+        ahead.wind_secs += 1.0 / hz;
         if let Some(mut w) = world.get_resource_mut::<WindField>() {
-            w.time += 1.0 / hz;
+            w.time = ahead.wind_secs;
+        }
+        if budget_ms.is_some_and(|b| started.elapsed().as_secs_f64() * 1000.0 >= b) {
+            break;
         }
     }
     if let Some(wind) = wind {
@@ -1057,6 +1125,50 @@ mod tests {
                 "wind {wind}: mid-meadow {mid:?}"
             );
         }
+    }
+
+    /// Behind a loading screen the fire's warm-up runs a budget's worth a frame (here one step),
+    /// not all in its first frame, and `loading` holds until it is done.
+    #[test]
+    fn behind_a_loading_screen_the_warm_up_is_spread_over_frames() {
+        let mut app = App::new();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual {
+                step_secs: 1.0 / 30.0,
+            });
+        app.add_plugins(FirePlugin);
+        app.world
+            .insert_resource(engine_world::LoadingBudget { budget_ms: 0.0 });
+        {
+            let mut commands = app.world.commands();
+            spawn_demo(&mut commands, DVec3::ZERO);
+        }
+        app.world.flush();
+        assert!(loading(&app.world));
+        // A short warm-up, to keep the test quick.
+        let warmup = 5.0;
+        let mut demos = app.world.query::<&mut FireDemo>();
+        demos.single_mut(&mut app.world).unwrap().warmup_secs = warmup;
+        let state = |app: &mut App| {
+            let mut q = app.world.query::<&FireDemoState>();
+            *q.single(&app.world).unwrap()
+        };
+        app.update_n(4);
+        let s = state(&mut app);
+        assert!(s.started && s.ahead.is_some(), "{s:?}");
+        assert_eq!(s.since, warmup);
+        let mut frames = 0;
+        while loading(&app.world) {
+            app.update();
+            frames += 1;
+            assert!(frames < 5000);
+        }
+        let hz = app.world.resource::<FireSettings>().sim_hz;
+        assert!(frames as f32 > warmup * hz * 0.5, "{frames}");
+        let s = state(&mut app);
+        assert!(s.ahead.is_none() && s.since > warmup - 0.1, "{s:?}");
+        assert!(app.world.resource::<FireField>().stats.burning_m2 > 0.0);
     }
 
     #[test]
