@@ -82,6 +82,29 @@ impl Pipelining {
     }
 }
 
+/// When the mesh pipelines' variants are compiled ahead on worker threads
+/// (`RenderSettings::pipeline_warmup`), rather than on the frame that first draws with each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PipelineWarmup {
+    /// Each on first use.
+    Off,
+    /// All of them with a window; headless apps (tests, tools) compile only what they draw.
+    #[default]
+    Windowed,
+    /// All of them everywhere.
+    Always,
+}
+
+impl PipelineWarmup {
+    pub fn on(self, headless: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Windowed => !headless,
+            Self::Always => true,
+        }
+    }
+}
+
 /// Block compression of material images on the GPU (`RenderSettings::texture_compression`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum TextureCompression {
@@ -363,6 +386,10 @@ pub struct RenderSettings {
     /// one `multi_draw_indexed_indirect` each (where the GPU supports a first instance in
     /// indirect draws), instead of a draw call per mesh and level of detail.
     pub multi_draw_indirect: bool,
+    /// Compile every mesh pipeline variant on worker threads once the shaders exist (after
+    /// Unreal's PSO precaching), so neither the first frame nor the first sight of a new kind
+    /// of material waits for a shader compile.
+    pub pipeline_warmup: PipelineWarmup,
     /// Added to the level of detail virtual textures ask for (positive = coarser, fewer tiles).
     pub virtual_texture_mip_bias: f32,
     /// BC7-compress the cache where the GPU supports it (a quarter of the memory; encoded on the
@@ -451,6 +478,7 @@ impl Default for RenderSettings {
             upload_mb_per_frame: 16.0,
             upload_budget_headless: false,
             multi_draw_indirect: true,
+            pipeline_warmup: PipelineWarmup::Windowed,
             virtual_texture_mip_bias: 0.0,
             virtual_texture_compression: true,
             texture_compression: TextureCompression::Quality,
