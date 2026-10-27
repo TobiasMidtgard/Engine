@@ -32,11 +32,15 @@
 //! compressor (the `block_compression` crate).
 //!
 //! The work is spread over frames in slices of rows, as Unreal's runtime virtual textures
-//! compress a few pages a frame: at most [`COMPRESS_TEXELS_IN_PLAY`] texels a frame with ISPC's
-//! "fast" BC7 profile in play, so a burst of new 4K textures costs about a millisecond of GPU a
-//! frame instead of stalling one for hundreds; [`COMPRESS_TEXELS_LOADING`] a frame with the
-//! "basic" profile while a `LoadingBudget` is present. A view goes on showing its RGBA8 texture
-//! until its last slice is done.
+//! compress a few pages a frame, within a GPU time budget: `RenderSettings::texture_compression_ms`
+//! a frame in play (1 ms), `texture_compression_loading_ms` while a `LoadingBudget` is present
+//! (4 ms: the picture still updates when arriving somewhere). Timestamps around the compression
+//! pass measure its time per texel (a moving average, [`DEFAULT_MS_PER_MTEXEL`] until measured
+//! or without `TIMESTAMP_QUERY`), and a frame takes the slices that fit. So a burst of new 4K
+//! textures costs a millisecond or so of GPU a frame instead of stalling one for hundreds. BC7
+//! uses ISPC's "fast" profiles. A view goes on showing its RGBA8 texture until its last slice is
+//! done. The commands go with the frame's own submit (`GpuShared::submit_with_frame`), not a
+//! submit of their own on the main thread, which would wait for the render thread's.
 //!
 //! Images whose levels don't halve to multiples of 4 texels stay RGBA8, as do
 //! [`TextureUse::Exact`] slots and 16-bit float images. Under a software GPU (lavapipe) nothing
@@ -76,15 +80,31 @@ pub const EVICT_AFTER_FRAMES: u64 = 600;
 /// being compressed over and over.
 pub const COMPRESS_AFTER_FRAMES: u64 = 30;
 
-/// Most texels compressed per frame in play (all mip levels counted): a 2048² texture with its
-/// mips takes 11 frames. About a millisecond of GPU time on the lead's PC with the "fast" BC7
-/// profile: "basic" took it 4.5 ms per million texels, and "fast" is 2.5 times as fast for
-/// opaque images and 1.8 times for ones with alpha (measured under lavapipe).
-pub const COMPRESS_TEXELS_IN_PLAY: u64 = 512 << 10;
+/// GPU milliseconds per million BC7 texels assumed until timestamps measure it. The lead's PC
+/// took 4.5 with ISPC's "basic" profile; "fast" is 2.5 times as fast for opaque images and 1.8
+/// times for ones with alpha (measured under lavapipe).
+pub const DEFAULT_MS_PER_MTEXEL: f32 = 2.0;
 
-/// Most texels compressed per frame while a `LoadingBudget` is present (nobody watches frame
-/// times behind a loading screen): about four 2048² textures.
-pub const COMPRESS_TEXELS_LOADING: u64 = 24 << 20;
+/// The cost of a BC1, BC4 or BC5 texel against a BC7 one (their encoders search far less).
+const SIMPLE_TEXEL_COST: f32 = 0.25;
+
+/// Frames that queued less than this (texels of BC7 cost) don't update the measured rate: too
+/// little work to time well.
+const MIN_TIMED_COST: u64 = 64 << 10;
+
+/// Texels of BC7 cost that fit in `ms` at `ms_per_mtexel`.
+fn cost_budget(ms: f32, ms_per_mtexel: f32) -> u64 {
+    (ms.max(0.0) / ms_per_mtexel.max(1e-3) * 1e6) as u64
+}
+
+/// The measured rate after a frame that took `ms` for `cost` texels of BC7 cost.
+fn next_rate(rate: f32, ms: f32, cost: u64) -> f32 {
+    let sample = ms / (cost as f32 / 1e6);
+    if cost < MIN_TIMED_COST || !sample.is_finite() || sample <= 0.0 {
+        return rate;
+    }
+    rate * 0.7 + sample.clamp(0.01, 10_000.0) * 0.3
+}
 
 /// Images smaller than this on either side are left uncompressed (too small to matter).
 const COMPRESS_MIN_SIZE: u32 = 16;
@@ -173,6 +193,14 @@ impl Encoding {
             (Encoding::Bc7 { alpha: true }, true) => {
                 CompressionVariant::BC7(BC7Settings::alpha_fast())
             }
+        }
+    }
+
+    /// What a texel costs to encode, against a BC7 one.
+    fn cost(self) -> f32 {
+        match self {
+            Encoding::Bc7 { .. } => 1.0,
+            _ => SIMPLE_TEXEL_COST,
         }
     }
 
@@ -323,16 +351,42 @@ struct Inner {
     compression: TextureCompression,
     /// `RenderSettings::texture_compression_on_cpu` this frame.
     compress_on_cpu: bool,
-    /// A `LoadingBudget` is present this frame (compress more, more carefully).
-    loading: bool,
+    /// GPU milliseconds compression may take this frame.
+    compress_ms: f32,
+    /// Measured GPU milliseconds per million texels of BC7 cost (0 until first used).
+    ms_per_mtexel: f32,
+    /// Timestamps around the compression pass.
+    timer: Option<crate::perf::GpuTimer>,
+    timed: Vec<crate::perf::GpuFrame>,
     /// The view being compressed, a slice at a time.
     encoding: Option<Encode>,
     /// The GPU encoders, built on a thread the first time an image is due (BC7's pipeline
     /// takes a while to compile on some backends).
     compressor: Compressor,
+    /// Another set for the rest of the renderer ([`ImageCache::with_compressor`]): an encoder
+    /// set writes its uniforms with `queue.write_buffer`, so two users of one set between two
+    /// submits would read each other's.
+    side_compressor: Compressor,
     /// Images an extra view renders into (`ViewTarget::Image`), by canonical handle index: their
     /// texture is the view's picture.
     targets: HashMap<u32, Arc<ImageTexture>>,
+}
+
+impl Compressor {
+    /// Encoders building on a thread.
+    fn build(gpu: &GpuShared) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (device, queue) = (gpu.device.clone(), gpu.queue.clone());
+        let spawned = std::thread::Builder::new()
+            .name("texture compressor".into())
+            .spawn(move || {
+                let _ = tx.send(GpuBlockCompressor::new(device, queue));
+            });
+        match spawned {
+            Ok(_) => Compressor::Building(rx),
+            Err(_) => Compressor::Failed,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -547,19 +601,19 @@ impl ImageCache {
         self.lock().targets.remove(&index);
     }
 
-    /// Start frame `frame`; `release` is `RenderSettings::release_image_pixels`; `loading`: a
-    /// `LoadingBudget` is present.
+    /// Start frame `frame`; `release` is `RenderSettings::release_image_pixels`; `compress_ms`
+    /// the GPU time compression may take this frame.
     pub(crate) fn begin_frame(
         &self,
         frame: u64,
         release: bool,
-        (compression, on_cpu, loading): (TextureCompression, bool, bool),
+        (compression, on_cpu, compress_ms): (TextureCompression, bool, f32),
     ) {
         let mut inner = self.lock();
         inner.frame = frame;
         inner.release = release;
         inner.compress_on_cpu = on_cpu;
-        inner.loading = loading;
+        inner.compress_ms = compress_ms;
         if compression != inner.compression {
             // Views already compressed stay; pending ones follow the new setting when they are
             // next uploaded.
@@ -575,13 +629,21 @@ impl ImageCache {
     }
 
     /// Compress the views that have been unchanged for [`COMPRESS_AFTER_FRAMES`], a slice of
-    /// rows at a time up to this frame's texel budget ([`COMPRESS_TEXELS_IN_PLAY`] or
-    /// [`COMPRESS_TEXELS_LOADING`]), and swap in the ones finished. Records and submits its own
-    /// commands.
+    /// rows at a time up to this frame's GPU time budget, and swap in the ones finished. The
+    /// commands go with the frame's submit.
     pub(crate) fn compress(&self, gpu: &GpuShared) {
         let mut guard = self.lock();
         let inner = &mut *guard;
         let frame = inner.frame;
+        if inner.ms_per_mtexel <= 0.0 {
+            inner.ms_per_mtexel = DEFAULT_MS_PER_MTEXEL;
+        }
+        if let Some(timer) = &mut inner.timer {
+            timer.collect(&mut inner.timed);
+            for f in inner.timed.drain(..) {
+                inner.ms_per_mtexel = next_rate(inner.ms_per_mtexel, f.total, f.tag);
+            }
+        }
         let due = |c: &CachedImage| {
             frame >= c.since + COMPRESS_AFTER_FRAMES && c.pending.iter().any(Option::is_some)
         };
@@ -617,13 +679,8 @@ impl ImageCache {
             Compressor::Failed => return,
         };
 
-        let loading = inner.loading;
-        let mut budget = if loading {
-            COMPRESS_TEXELS_LOADING
-        } else {
-            COMPRESS_TEXELS_IN_PLAY
-        };
-        let mut queued = 0;
+        let mut budget = cost_budget(inner.compress_ms, inner.ms_per_mtexel);
+        let (mut queued, mut cost) = (0, 0);
         let mut finished = Vec::new();
         while budget > 0 {
             if inner.encoding.is_none() {
@@ -642,7 +699,7 @@ impl ImageCache {
                 let Some((index, slot, encoding, source)) = next else {
                     break;
                 };
-                inner.encoding = Some(Encode::new(gpu, index, slot, encoding, !loading, source));
+                inner.encoding = Some(Encode::new(gpu, index, slot, encoding, true, source));
             }
             let Some(job) = &mut inner.encoding else {
                 break;
@@ -657,9 +714,10 @@ impl ImageCache {
                 inner.encoding = None;
                 continue;
             }
-            let texels = job.queue(compressor, budget);
+            let (texels, spent) = job.queue(compressor, budget);
             queued += texels;
-            budget = budget.saturating_sub(texels);
+            cost += spent;
+            budget = budget.saturating_sub(spent);
             if job.done() {
                 finished.extend(inner.encoding.take());
             }
@@ -673,8 +731,14 @@ impl ImageCache {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("texture compression"),
             });
-        // One compute pass for every slice queued above; the copies of the finished views into
-        // their compressed textures follow it.
+        // One compute pass for every slice queued above, timed; the copies of the finished views
+        // into their compressed textures follow it.
+        if inner.timer.is_none() {
+            inner.timer = crate::perf::GpuTimer::new(&gpu.device, &gpu.queue);
+        }
+        if let Some(timer) = &mut inner.timer {
+            timer.begin_tagged(&mut encoder, "texture compression".into(), cost);
+        }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("texture compression"),
@@ -682,10 +746,14 @@ impl ImageCache {
             });
             compressor.compress(&mut pass);
         }
+        let after = inner
+            .timer
+            .as_mut()
+            .and_then(|t| t.end_deferred(&mut encoder));
         for job in &finished {
             job.out.copy(&mut encoder);
         }
-        gpu.queue.submit([encoder.finish()]);
+        gpu.submit_with_frame(encoder.finish(), after);
         gpu.side_work.compressed(queued);
         inner.stats.texels_compressed += queued;
 
@@ -794,23 +862,32 @@ impl ImageCache {
     ) -> Option<R> {
         let mut guard = self.lock();
         let inner = &mut *guard;
-        if let Compressor::Building(rx) = &inner.compressor {
+        if let Compressor::Building(rx) = &inner.side_compressor {
             match rx.try_recv() {
-                Ok(c) => inner.compressor = Compressor::Ready(Box::new(c)),
+                Ok(c) => inner.side_compressor = Compressor::Ready(Box::new(c)),
                 Err(TryRecvError::Empty) => return None,
                 Err(TryRecvError::Disconnected) => {
-                    inner.compressor = Compressor::Failed;
+                    inner.side_compressor = Compressor::Failed;
                     return None;
                 }
             }
         }
-        match &mut inner.compressor {
+        match &mut inner.side_compressor {
             Compressor::Ready(c) => Some(f(c)),
             Compressor::None => {
-                inner.start_compressor(gpu);
+                inner.side_compressor = Compressor::build(gpu);
                 None
             }
             _ => None,
+        }
+    }
+
+    /// Measured GPU milliseconds per million BC7 texels compressed ([`DEFAULT_MS_PER_MTEXEL`]
+    /// until timestamps tell).
+    pub fn compress_ms_per_mtexel(&self) -> f32 {
+        match self.lock().ms_per_mtexel {
+            r if r > 0.0 => r,
+            _ => DEFAULT_MS_PER_MTEXEL,
         }
     }
 
@@ -828,20 +905,9 @@ impl ImageCache {
 impl Inner {
     /// Start building the encoders on a thread (when they aren't built or building yet).
     fn start_compressor(&mut self, gpu: &GpuShared) {
-        if !matches!(self.compressor, Compressor::None) {
-            return;
+        if matches!(self.compressor, Compressor::None) {
+            self.compressor = Compressor::build(gpu);
         }
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (device, queue) = (gpu.device.clone(), gpu.queue.clone());
-        let spawned = std::thread::Builder::new()
-            .name("texture compressor".into())
-            .spawn(move || {
-                let _ = tx.send(GpuBlockCompressor::new(device, queue));
-            });
-        self.compressor = match spawned {
-            Ok(_) => Compressor::Building(rx),
-            Err(_) => Compressor::Failed,
-        };
     }
 
     /// Whether the encoders exist or may still be built.
@@ -1048,17 +1114,19 @@ impl Encode {
         }
     }
 
-    /// Queue the next slices (read as plain RGBA8), about `budget` texels' worth (at least one
-    /// block row). Returns the texels queued.
-    fn queue(&mut self, compressor: &mut GpuBlockCompressor, budget: u64) -> u64 {
+    /// Queue the next slices (read as plain RGBA8), about `budget` texels of BC7 cost (at least
+    /// one block row). Returns the texels queued and their cost.
+    fn queue(&mut self, compressor: &mut GpuBlockCompressor, budget: u64) -> (u64, u64) {
         let source = &self.source;
-        let mut queued = 0;
-        while self.level < source.mip_levels && queued < budget {
+        let weight = self.encoding.cost();
+        let (mut queued, mut cost) = (0, 0);
+        while self.level < source.mip_levels && cost < budget {
             let l = self.level;
             // Levels under a block across are padded by the encoder's clamped reads.
             let w = (source.width >> l).max(1).next_multiple_of(4);
             let h = (source.height >> l).max(1).next_multiple_of(4);
-            let fit = ((budget - queued) / w as u64).min(h as u64) as u32 / 4 * 4;
+            let row_cost = (w as f32 * weight).max(1.0);
+            let fit = (((budget - cost) as f32 / row_cost) as u64).min(h as u64) as u32 / 4 * 4;
             let rows = fit.clamp(4, h - self.row);
             let view = source.texture.create_view(&wgpu::TextureViewDescriptor {
                 label: Some("compression source"),
@@ -1079,13 +1147,14 @@ impl Encode {
                 Some(offset as u32),
             );
             queued += (w * rows) as u64;
+            cost += (row_cost * rows as f32) as u64;
             self.row += rows;
             if self.row >= h {
                 self.level += 1;
                 self.row = 0;
             }
         }
-        queued
+        (queued, cost)
     }
 
     /// Every level is queued.
@@ -1215,4 +1284,27 @@ pub(crate) fn upload_image(
     }
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     Some((texture, view))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_budget_follows_the_measured_rate() {
+        // 1 ms at 2 ms per million texels: half a million.
+        assert_eq!(cost_budget(1.0, 2.0), 500_000);
+        assert_eq!(cost_budget(0.0, 2.0), 0);
+        // A frame that took 4 ms for a million texels moves the rate towards 4.
+        let rate = next_rate(2.0, 4.0, 1 << 20);
+        assert!(rate > 2.0 && rate < 4.0, "{rate}");
+        let mut rate = 2.0;
+        for _ in 0..30 {
+            rate = next_rate(rate, 4.0, 1_000_000);
+        }
+        assert!((rate - 4.0).abs() < 0.01, "{rate}");
+        // Too little work, or no time, says nothing.
+        assert_eq!(next_rate(2.0, 9.0, 1000), 2.0);
+        assert_eq!(next_rate(2.0, 0.0, 1 << 20), 2.0);
+    }
 }

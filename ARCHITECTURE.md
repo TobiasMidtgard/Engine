@@ -674,12 +674,15 @@ the specular anti-aliasing), `Red` (BC4: height and occlusion), `RedGreen` (BC5,
 whose shader rebuilds z) or `Exact` (never compressed); `image_texture(.., color)` is `Color` or
 `Linear`. `TextureCompression::Compact` uses BC1 for opaque color (half of BC7, some banding in
 smooth gradients). The encoders are a WGSL port of Intel's ISPC texture compressor (the
-`block_compression` crate), built on a thread at the first upload. They run in slices of rows
-spread over frames, as Unreal's runtime virtual textures compress a few pages a frame: in play
-at most `COMPRESS_TEXELS_IN_PLAY` (512 K) texels a frame with the "fast" BC7 profiles, behind a
-`LoadingBudget` `COMPRESS_TEXELS_LOADING` (24 M) with "basic"; a view shows its RGBA8 texture
-until its last slice is done. Impostor bakes go one every `BAKE_EVERY_IN_PLAY` (4) frames in
-play, every frame while loading. Images whose mip levels don't halve to
+`block_compression` crate, "fast" BC7 profiles), built on a thread at the first upload. They
+run in slices of rows spread over frames within a GPU time budget, as Unreal's runtime virtual
+textures compress a few pages a frame: `texture_compression_ms` (1 ms) in play,
+`texture_compression_loading_ms` (4 ms) behind a `LoadingBudget`. Timestamps around the pass
+measure its time per texel, and a frame takes the slices that fit. A view shows its RGBA8
+texture until its last slice is done. The commands go with the frame's own submit
+(`GpuShared::submit_with_frame`); a submit of their own on the main thread waited for the render
+thread's. Impostor bakes go one every `BAKE_EVERY_IN_PLAY` (4) frames in play, every frame
+while loading, with their own encoder set. Images whose mip levels don't halve to
 whole 4×4 blocks stay RGBA8, as do float images. Under a software GPU nothing is compressed
 unless `texture_compression_on_cpu` is set. `Diagnostics`: `render.images_compressed` and
 `render.image_mb_compressed_away`.

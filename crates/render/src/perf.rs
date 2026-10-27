@@ -65,10 +65,13 @@ struct Slot {
     state: Arc<AtomicU8>,
     /// The pass each timestamp starts (the last one ends the frame).
     labels: Vec<Label>,
+    /// What the caller measured (see [`GpuTimer::begin_tagged`]).
+    tag: u64,
 }
 
-/// GPU time of the frame's command buffer and of each pass in it, from timestamps.
-struct GpuTimer {
+/// GPU time of the frame's command buffer and of each pass in it, from timestamps. Also used
+/// for other GPU work that wants its time (texture compression).
+pub(crate) struct GpuTimer {
     queries: wgpu::QuerySet,
     resolve: wgpu::Buffer,
     slots: Vec<Slot>,
@@ -79,13 +82,15 @@ struct GpuTimer {
 }
 
 /// One finished frame's GPU times, milliseconds.
-struct GpuFrame {
-    total: f32,
+pub(crate) struct GpuFrame {
+    pub total: f32,
     passes: Vec<(Label, f32)>,
+    /// The tag it began with.
+    pub tag: u64,
 }
 
 impl GpuTimer {
-    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Self> {
+    pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Self> {
         if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
             return None;
         }
@@ -110,6 +115,7 @@ impl GpuTimer {
                 }),
                 state: Arc::new(AtomicU8::new(FREE)),
                 labels: Vec::with_capacity(MAX_MARKS),
+                tag: 0,
             })
             .collect();
         Some(Self {
@@ -135,12 +141,23 @@ impl GpuTimer {
     }
 
     fn begin(&mut self, encoder: &mut wgpu::CommandEncoder, first: Label) {
+        self.begin_tagged(encoder, first, 0);
+    }
+
+    /// Start timing (when a readback slot is free), with `tag` to tell the result apart.
+    pub(crate) fn begin_tagged(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        first: Label,
+        tag: u64,
+    ) {
         self.pending = self
             .slots
             .iter()
             .position(|s| s.state.load(Ordering::Acquire) == FREE);
         if let Some(i) = self.pending {
             self.slots[i].labels.clear();
+            self.slots[i].tag = tag;
             self.mark(encoder, first);
         }
     }
@@ -157,6 +174,27 @@ impl GpuTimer {
         }
         self.stamp(encoder, (i * MAX_MARKS + n) as u32);
         self.slots[i].labels.push(label);
+    }
+
+    /// End timing for commands submitted later, by someone else: returns what to run right
+    /// after their submit (starts the readback).
+    pub(crate) fn end_deferred(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Option<Box<dyn FnOnce() + Send>> {
+        self.end(encoder);
+        let i = self.pending.take()?;
+        let slot = &self.slots[i];
+        if slot.state.load(Ordering::Acquire) != IN_FLIGHT {
+            return None;
+        }
+        let (buffer, state) = (slot.buffer.clone(), slot.state.clone());
+        Some(Box::new(move || {
+            state.store(MAPPING, Ordering::Release);
+            buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                state.store(if r.is_ok() { MAPPED } else { FAILED }, Ordering::Release);
+            });
+        }))
     }
 
     fn end(&mut self, encoder: &mut wgpu::CommandEncoder) {
@@ -197,7 +235,7 @@ impl GpuTimer {
     }
 
     /// Finished frames' GPU times (non-blocking; the renderer polls the device each frame).
-    fn collect(&mut self, out: &mut Vec<GpuFrame>) {
+    pub(crate) fn collect(&mut self, out: &mut Vec<GpuFrame>) {
         let ms = self.period_ns * 1e-6;
         for slot in &mut self.slots {
             match slot.state.load(Ordering::Acquire) {
@@ -237,6 +275,7 @@ impl GpuTimer {
                     out.push(GpuFrame {
                         total: total as f32 * ms,
                         passes,
+                        tag: slot.tag,
                     });
                 }
                 FAILED => {

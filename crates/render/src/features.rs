@@ -104,6 +104,17 @@ pub struct GpuShared {
     /// GPU work queued besides the frame's passes, for the slow-frame log (see
     /// [`crate::perf`]).
     pub(crate) side_work: crate::perf::SideWork,
+    /// Command buffers recorded besides the frame (texture compression), submitted with the
+    /// next frame's own commands, before them (see [`GpuShared::submit_with_frame`]).
+    pub(crate) side_commands: std::sync::Mutex<SideCommands>,
+}
+
+/// See [`GpuShared::side_commands`].
+#[derive(Default)]
+pub(crate) struct SideCommands {
+    pub commands: Vec<wgpu::CommandBuffer>,
+    /// Run right after their submit (readbacks).
+    pub after: Vec<Box<dyn FnOnce() + Send>>,
 }
 
 /// How many bytes the features may upload this frame (`RenderSettings::upload_mb_per_frame`
@@ -285,6 +296,25 @@ impl BudgetState {
 }
 
 impl GpuShared {
+    /// Submit `commands` with the next frame's, before them, instead of on their own: a
+    /// `queue.submit` on the main thread waits for the render thread's submit and present.
+    /// Writes they depend on (`queue.write_buffer`) go with the next submit anyway, so they
+    /// stay ahead of them. `after` runs right after that submit.
+    pub(crate) fn submit_with_frame(
+        &self,
+        commands: wgpu::CommandBuffer,
+        after: Option<Box<dyn FnOnce() + Send>>,
+    ) {
+        let mut side = self.side_commands.lock().unwrap_or_else(|e| e.into_inner());
+        side.commands.push(commands);
+        side.after.extend(after);
+    }
+
+    /// The commands queued by [`submit_with_frame`](Self::submit_with_frame).
+    pub(crate) fn take_side_commands(&self) -> SideCommands {
+        std::mem::take(&mut *self.side_commands.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
     /// Compile WGSL composed as `lib_types` (+ `lib_frame` when `with_frame`) + `source`.
     pub fn shader(&self, label: &str, source: &str, with_frame: bool) -> wgpu::ShaderModule {
         let code = compose_shader(source, with_frame);
