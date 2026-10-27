@@ -107,6 +107,10 @@ pub struct GpuShared {
     /// Command buffers recorded besides the frame (texture compression), submitted with the
     /// next frame's own commands, before them (see [`GpuShared::submit_with_frame`]).
     pub(crate) side_commands: std::sync::Mutex<SideCommands>,
+    /// Compile pipelines ahead (`RenderSettings::pipeline_warmup` for this run): a feature
+    /// whose pipelines wait for their first use builds them in `init` instead, which runs
+    /// beside the other features' at start, rather than on the frame that first needs them.
+    pub warm_pipelines: bool,
 }
 
 /// See [`GpuShared::side_commands`].
