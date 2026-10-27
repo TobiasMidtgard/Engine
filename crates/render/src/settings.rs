@@ -36,6 +36,52 @@ pub enum AntiAliasing {
     None,
 }
 
+/// Whether the renderer records and submits on its own thread (`RenderSettings::pipelining`),
+/// overlapping a frame's passes with the next frame's simulation. The image shows the world one
+/// simulation step late; screenshots (`capture_now`) still render inline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Pipelining {
+    /// Always inline.
+    Off,
+    /// On with a window, inline headless (tests and tools get each frame's picture at once).
+    #[default]
+    Windowed,
+    /// On everywhere, also headless (for tests of the pipelined path).
+    Always,
+}
+
+impl Pipelining {
+    /// Whether frames are pipelined for a headless or windowed app.
+    pub fn on(self, headless: bool) -> bool {
+        match Self::from_env().unwrap_or(self) {
+            Self::Off => false,
+            Self::Windowed => !headless,
+            Self::Always => true,
+        }
+    }
+
+    /// `ENGINE_PIPELINING=off|windowed|always`, when set, overrides the setting (to compare the
+    /// two on one build).
+    fn from_env() -> Option<Self> {
+        static MODE: std::sync::OnceLock<Option<Pipelining>> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| {
+            match std::env::var("ENGINE_PIPELINING")
+                .ok()?
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "off" | "0" => Some(Self::Off),
+                "windowed" => Some(Self::Windowed),
+                "always" | "on" | "1" => Some(Self::Always),
+                other => {
+                    tracing::warn!("ENGINE_PIPELINING={other} is not off, windowed or always");
+                    None
+                }
+            }
+        })
+    }
+}
+
 /// Block compression of material images on the GPU (`RenderSettings::texture_compression`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum TextureCompression {
@@ -132,6 +178,8 @@ pub struct RenderSettings {
     /// the sun has moved or the camera cut. Far shadows of moving objects lag by up to this many
     /// frames. 0 redraws every cascade every frame.
     pub shadow_cascade_reuse: u32,
+    /// Record and submit on a render thread (see [`Pipelining`]).
+    pub pipelining: Pipelining,
     pub shadow_depth_bias: f32,
     /// Normal offset in shadow texels.
     pub shadow_normal_bias: f32,
@@ -337,6 +385,7 @@ impl Default for RenderSettings {
             far_shadow_distance: 8000.0,
             shadow_split_lambda: 0.8,
             shadow_cascade_reuse: 3,
+            pipelining: Pipelining::Windowed,
             shadow_depth_bias: 0.0,
             shadow_normal_bias: 1.5,
             shadow_softness: 1.0,

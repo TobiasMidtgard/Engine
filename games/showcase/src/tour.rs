@@ -5,7 +5,7 @@
 use crate::camera;
 use crate::places::{Place, places};
 use engine::prelude::*;
-use engine::render::{RenderDisabled, Renderer};
+use engine::render::{RenderPaused, with_renderer};
 
 /// Frames to wait at each place before capturing (metered auto-exposure reads back a frame or
 /// two late, then adapts).
@@ -21,10 +21,6 @@ const BUILD_STALL_SECS: f32 = 90.0;
 const ARRIVAL_STALL_SECS: f32 = 600.0;
 /// ...but never longer than this, wall-clock seconds.
 const BUILD_WAIT_SECS: f32 = 900.0;
-
-/// The renderer, parked while a stop with [`Place::quick_warmup`] warms up.
-#[derive(Resource)]
-struct Parked(Renderer);
 
 #[derive(Resource, Debug)]
 pub struct Tour {
@@ -188,7 +184,7 @@ fn run(world: &mut World) {
 /// terrain its patches (on worker threads; it draws their parents meanwhile), so the picture
 /// shows the finished relief, not the smooth shapes drawn until it is ready.
 fn wait_for_builds(world: &mut World, stall_secs: f32) -> bool {
-    let Some(state) = world.get_resource::<Renderer>().map(|r| {
+    let Some(state) = with_renderer(world, |r, _| {
         let describe = r.describe();
         describe["features"]
             .as_array()
@@ -248,18 +244,12 @@ fn wait_for_builds(world: &mut World, stall_secs: f32) -> bool {
     true
 }
 
-/// Take the renderer out of the world, so frames run the simulation only (as the module
-/// galleries do between pictures).
+/// Pause drawing, so frames run the simulation only (as the module galleries do between
+/// pictures).
 fn park(world: &mut World) {
-    if let Some(renderer) = world.remove_resource::<Renderer>() {
-        world.insert_resource(Parked(renderer));
-        world.insert_resource(RenderDisabled("parked through a quick warm-up".into()));
-    }
+    world.insert_resource(RenderPaused);
 }
 
 fn unpark(world: &mut World) {
-    if let Some(Parked(renderer)) = world.remove_resource::<Parked>() {
-        world.remove_resource::<RenderDisabled>();
-        world.insert_resource(renderer);
-    }
+    world.remove_resource::<RenderPaused>();
 }
