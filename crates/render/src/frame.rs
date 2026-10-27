@@ -286,6 +286,20 @@ pub fn perspective_infinite_reverse(fov_y: f32, aspect: f32, near: f32) -> Mat4 
     )
 }
 
+/// Reverse-Z infinite off-axis perspective projection through a window (Kooima's generalized
+/// perspective projection): `tangents` = left, right, bottom, top edges as tangents of the view
+/// direction (x / -z, y / -z), depth 1 at `near`, 0 at infinity.
+pub fn off_axis_infinite_reverse(tangents: Vec4, near: f32) -> Mat4 {
+    let (l, r, b, t) = (tangents.x, tangents.y, tangents.z, tangents.w);
+    let (w, h) = ((r - l).max(1e-6), (t - b).max(1e-6));
+    Mat4::from_cols(
+        Vec4::new(2.0 / w, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, 2.0 / h, 0.0, 0.0),
+        Vec4::new((r + l) / w, (t + b) / h, 0.0, -1.0),
+        Vec4::new(0.0, 0.0, near.max(1e-4), 0.0),
+    )
+}
+
 /// Reverse-Z orthographic projection (depth 1 at `near`, 0 at `far`).
 pub fn orthographic_reverse(width: f32, height: f32, near: f32, far: f32) -> Mat4 {
     let d = far - near;
@@ -488,6 +502,24 @@ pub fn build_view(
             )
         }
     };
+    // A portal's view looks through the portal's rectangle: an off-axis frustum through its
+    // corners whose near plane lies in the exit's plane (portal.rs). Shadow cascades fit a
+    // symmetric frustum around it.
+    let portal = camera_entity.and_then(|e| world.get::<crate::portal::PortalCamera>(e).copied());
+    let (proj, near, fov_y, cascade_fov_aspect) = match portal {
+        Some(p) => {
+            let t = p.tangents;
+            let half = Vec2::new(t.x.abs().max(t.y.abs()), t.z.abs().max(t.w.abs()))
+                .max(Vec2::splat(1e-4));
+            (
+                off_axis_infinite_reverse(t, p.near),
+                p.near,
+                2.0 * ((t.w - t.z) * 0.5).atan(),
+                (2.0 * half.y.atan(), half.x / half.y),
+            )
+        }
+        None => (proj, near, fov_y, (fov_y, aspect)),
+    };
     let unjittered_proj = proj;
     let unjittered_view_proj = proj * view;
     // Sub-pixel jitter in NDC (pixel y points down, NDC y up).
@@ -627,8 +659,8 @@ pub fn build_view(
             origin,
             rotation,
             near,
-            fov_y,
-            aspect,
+            cascade_fov_aspect.0,
+            cascade_fov_aspect.1,
             orthographic,
             sun_dir,
             &unjittered_proj,

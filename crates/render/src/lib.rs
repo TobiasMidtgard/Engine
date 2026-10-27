@@ -86,6 +86,7 @@ mod mesh_pool;
 mod mesh_scene;
 pub mod motion_blur;
 mod perf;
+pub mod portal;
 pub mod renderer;
 pub mod rock;
 pub mod settings;
@@ -131,6 +132,7 @@ pub use material::{AlphaMode, StandardMaterial, TextureMapping, TextureProjectio
 pub use material_library::{MaterialMaps, MaterialPreset, MaterialTextures};
 pub use mesh::{Mesh, Shape, Vertex};
 pub use motion_blur::MotionBlur;
+pub use portal::Portal;
 pub use renderer::{
     RenderDisabled, RenderPaused, RenderStats, RenderThread, Renderer, ScreenshotInfo, Screenshots,
     capture_now, with_renderer,
@@ -160,7 +162,7 @@ pub mod prelude {
         FogSettings, FogShape, FogVolume, GltfScene, GltfSceneSpawner, GrassBender, GrassField,
         GrassStyle, Image, MaterialPreset, MaterialRef, MaxDrawDistance, Mesh, MeshRef,
         MeshRenderer, MotionBlur, NoMeshLod, NoVirtualGeometry, Parallax, PixelPerfect, PixelSnap,
-        PointLight, Projection, RenderAppExt, RenderFeature, RenderPhase, RenderPlugin,
+        PointLight, Portal, Projection, RenderAppExt, RenderFeature, RenderPhase, RenderPlugin,
         RenderSettings, Screenshots, Shape, SkyLightVolume, Sprite, SpriteAlpha, SpriteAnimation,
         SpriteAnimationMode, SpriteAtlas, SpriteFilter, StandardMaterial, StoneKind,
         TextureCompression, TextureMapping, TileMap, TileSource, Tonemapper, ViewTarget, Viewport,
@@ -217,6 +219,9 @@ impl Plugin for RenderPlugin {
             )
             .register_component::<ExtraView>(
                 "Renders this camera too, besides the main one: target \"Window\" (at the camera's Viewport, over the main view: split screen, picture-in-picture) or {\"Image\": {image, size: [w, h]}} (into an image materials and UI show; make it with Image::render_target); quality: a Scalability for this view instead of the game's.",
+            )
+            .register_component::<Portal>(
+                "A door to another place: a rectangle size [w, h] (m) in this entity's XY plane, seen from its +Z side, showing what lies beyond exit (an entity; the view comes out of its +Z side, as if walked through), seamlessly (HDR, the main view's exposure, motion through it). resolution: picture pixels per screen pixel it covers (0.05..2); quality: a Scalability for the view through it. Costs an extra view while the camera sees it from the front. Portal::carry(entry, exit) maps what goes through.",
             )
             .register_component::<NoMeshLod>(
                 "Marker: keeps this entity's instanced MeshRenderer at full detail at every distance (no automatic levels of detail), for meshes simplifying would spoil, such as many small separate stones in one mesh.",
@@ -279,7 +284,8 @@ impl Plugin for RenderPlugin {
             .add_render_feature(sky_feature::SkyFeature::default())
             .add_render_feature(mesh_feature::MeshFeature::default())
             .add_render_feature(grass::GrassFeature::default())
-            .add_render_feature(sprites::SpriteFeature::default());
+            .add_render_feature(sprites::SpriteFeature::default())
+            .add_render_feature(portal::PortalFeature::default());
 
         app.register_api(
             "render.screenshot",
