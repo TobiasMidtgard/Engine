@@ -329,6 +329,16 @@ pub struct SpaceSettings {
     /// this distance (meters along the ground) of the camera, where the weather draws its own
     /// clouds (0: everywhere).
     pub cloud_hole_m: f64,
+    /// With [`SpaceFrame::auto_switch`], low over the turning anchor (below
+    /// [`rehome_altitude_m`](Self::rehome_altitude_m)) and farther than this along the ground
+    /// from the home spot, the home spot moves under the focus: the world origin follows it
+    /// across the planet and +Y stays up, as KSP re-centres its floating origin.
+    pub rehome_distance_m: f64,
+    pub rehome_altitude_m: f64,
+    /// With [`SpaceFrame::auto_switch`], coming back within this distance along the ground of
+    /// the [`HomeFrame`]'s spot (turning with its anchor) puts the world back in that frame
+    /// exactly, so places laid out in home coordinates are where they were.
+    pub home_return_m: f64,
 }
 
 impl Default for SpaceSettings {
@@ -346,6 +356,9 @@ impl Default for SpaceSettings {
             follow_world_clock: false,
             rails_above_warp: 1.5,
             cloud_hole_m: 60_000.0,
+            rehome_distance_m: 40_000.0,
+            rehome_altitude_m: 30_000.0,
+            home_return_m: 30_000.0,
         }
     }
 }
@@ -415,6 +428,11 @@ pub struct SpaceState {
     pub world_from_inertial: (DQuat, DVec3),
     /// Anchor switches since startup.
     pub switches: u64,
+    /// home = rotation · inertial + offset: the [`HomeFrame`] (the frame the world started
+    /// in) right now, for places laid out in home coordinates.
+    pub home_from_inertial: Option<(DQuat, DVec3)>,
+    /// The world is in its [`HomeFrame`] (same anchor, home spot, turning).
+    pub at_home: bool,
 }
 
 impl SpaceState {
@@ -432,6 +450,34 @@ impl SpaceState {
     pub fn to_inertial(&self, world: DVec3) -> DVec3 {
         let (r, o) = self.world_from_inertial;
         r.inverse() * (world - o)
+    }
+
+    /// A world point in home coordinates (where it is in the [`HomeFrame`]).
+    pub fn to_home(&self, world: DVec3) -> DVec3 {
+        match self.home_from_inertial {
+            Some((r, o)) if !self.at_home => r * self.to_inertial(world) + o,
+            _ => world,
+        }
+    }
+
+    /// Where a point given in home coordinates (see [`Self::to_home`]) is in the world now.
+    pub fn from_home(&self, home: DVec3) -> DVec3 {
+        match self.home_from_inertial {
+            Some((r, o)) if !self.at_home => self.to_world(r.inverse() * (home - o)),
+            _ => home,
+        }
+    }
+
+    /// Latitude and longitude on a body right under its star (noon there), degrees.
+    pub fn subsolar(&self, name: &str) -> Option<(f64, f64)> {
+        let b = self.body(name)?;
+        let star = self.bodies.iter().find(|s| s.kind == BodyKind::Star)?;
+        let d = (b.orientation.inverse() * (star.inertial_position - b.inertial_position))
+            .normalize_or(DVec3::Z);
+        Some((
+            d.y.clamp(-1.0, 1.0).asin().to_degrees(),
+            d.x.atan2(d.z).to_degrees(),
+        ))
     }
 
     /// The body whose sphere of influence most tightly holds an inertial point.
@@ -747,6 +793,11 @@ fn collect_bodies(world: &mut World) -> Vec<(Entity, CelestialBody)> {
     q.iter(world).map(|(e, b)| (e, b.clone())).collect()
 }
 
+/// The frame the space module last put the world in: a different [`SpaceFrame`] was set by
+/// the game, and becomes the [`HomeFrame`].
+#[derive(Resource, Debug, Clone)]
+struct WrittenFrame(SpaceFrame);
+
 /// A trip asked for with [`travel_to`], made at the next re-anchoring step.
 #[derive(Resource, Debug, Clone, Default)]
 struct PendingTravel {
@@ -772,12 +823,17 @@ pub fn reanchor(world: &mut World) {
     let settings = world.resource::<SpaceSettings>().clone();
     let anchor = anchor_index(&states, &frame);
     let current = frame_for(&states[anchor], &frame);
-    if !world.contains_resource::<HomeFrame>() {
+    // The home frame is the one the world starts in, or the one a game last set itself.
+    let edited = world
+        .get_resource::<WrittenFrame>()
+        .is_none_or(|w| w.0 != frame);
+    if edited || !world.contains_resource::<HomeFrame>() {
         world.insert_resource(HomeFrame(SpaceFrame {
             anchor: states[anchor].name.clone(),
             rotating: true,
             ..frame.clone()
         }));
+        world.insert_resource(WrittenFrame(frame.clone()));
     }
     let find = |name: &str| {
         states
@@ -842,6 +898,42 @@ pub fn reanchor(world: &mut World) {
                 next.frozen_orientation = states[target].orientation.to_array();
             }
             next_frame = Some(next);
+        } else if rotating && altitude < settings.rehome_altitude_m {
+            // Low over the anchor far from the home spot: home moves under the focus, so the
+            // world origin stays near it and +Y stays up.
+            let local = states[target].orientation.inverse()
+                * (inertial - states[target].inertial_position);
+            let dir = local.normalize_or(DVec3::Y);
+            let home = dir_from_lat_lon(frame.home_lat_deg, frame.home_lon_deg);
+            if dir.angle_between(home) * states[target].radius_m > settings.rehome_distance_m {
+                next_frame = Some(SpaceFrame {
+                    home_lat_deg: dir.y.clamp(-1.0, 1.0).asin().to_degrees(),
+                    home_lon_deg: dir.x.atan2(dir.z).to_degrees(),
+                    home_height_m: 0.0,
+                    ..frame.clone()
+                });
+            }
+        }
+        // Back near where the world started, turning with that body: its home frame exactly,
+        // so whatever is laid out in home coordinates is where it was.
+        let home = world.get_resource::<HomeFrame>().map(|h| h.0.clone());
+        let next = next_frame.as_ref().unwrap_or(&frame);
+        if let Some(home) = home
+            && next.rotating
+            && !same_frame(&states, next, &home)
+            && anchor_index(&states, next) == anchor_index(&states, &home)
+        {
+            let h = anchor_index(&states, &home);
+            let local = states[h].orientation.inverse() * (inertial - states[h].inertial_position);
+            let spot = dir_from_lat_lon(home.home_lat_deg, home.home_lon_deg);
+            if local.normalize_or(DVec3::Y).angle_between(spot) * states[h].radius_m
+                < settings.home_return_m
+            {
+                next_frame = Some(SpaceFrame {
+                    auto_switch: frame.auto_switch,
+                    ..home
+                });
+            }
         }
     }
 
@@ -872,8 +964,20 @@ pub fn reanchor(world: &mut World) {
         },
     );
     world.write_message(shift);
+    world.insert_resource(WrittenFrame(next_frame.clone()));
     *world.resource_mut::<SpaceFrame>() = next_frame;
     world.resource_mut::<SpaceState>().switches += 1;
+}
+
+/// Two frames put the world in the same place: same anchor, home spot and heading, both
+/// turning or both fixed.
+fn same_frame(states: &[BodyState], a: &SpaceFrame, b: &SpaceFrame) -> bool {
+    anchor_index(states, a) == anchor_index(states, b)
+        && a.rotating == b.rotating
+        && a.home_lat_deg == b.home_lat_deg
+        && a.home_lon_deg == b.home_lon_deg
+        && a.home_height_m == b.home_height_m
+        && a.home_heading_deg == b.home_heading_deg
 }
 
 /// Altitude below which the world turns with a body.
@@ -1003,15 +1107,24 @@ pub fn update_space(world: &mut World) {
     }
 
     // Gravity: the anchor, plus every non-star body whose reach (1.5× its sphere of
-    // influence) holds the focus. Stars are left out: the anchor falls around them with us.
+    // influence) holds the focus. Stars and whatever the anchor orbits are left out: the
+    // anchor falls around them with us (on the Moon, Earth's pull is only a tide).
     if settings.drive_gravity {
         let f = focus.unwrap_or(DVec3::ZERO);
+        let mut around = Vec::new();
+        let mut up = states[anchor].parent;
+        while let Some(p) = up.filter(|p| !around.contains(p)) {
+            around.push(p);
+            up = states[p].parent;
+        }
         let list: Vec<GravityBody> = states
             .iter()
             .enumerate()
             .filter(|(i, s)| {
                 *i == anchor
-                    || (s.kind != BodyKind::Star && (s.world_position - f).length() < s.soi_m * 1.5)
+                    || (s.kind != BodyKind::Star
+                        && !around.contains(i)
+                        && (s.world_position - f).length() < s.soi_m * 1.5)
             })
             .map(|(_, s)| GravityBody {
                 center: s.world_position,
@@ -1114,10 +1227,18 @@ pub fn update_space(world: &mut World) {
         }
     }
 
+    let home_frame = world.get_resource::<HomeFrame>().map(|h| h.0.clone());
     let mut state = world.resource_mut::<SpaceState>();
     state.bodies = states;
     state.anchor = Some(anchor);
     state.world_from_inertial = current;
+    state.home_from_inertial = home_frame.as_ref().map(|h| {
+        let i = anchor_index(&state.bodies, h);
+        frame_for(&state.bodies[i], h)
+    });
+    state.at_home = home_frame
+        .as_ref()
+        .is_none_or(|h| same_frame(&state.bodies, &frame, h));
 }
 
 /// The primary focus right now (current `Transform` for top-level entities, so a focus moved
@@ -1188,8 +1309,30 @@ pub fn travel_home(world: &mut World, altitude_m: f64) -> DVec3 {
     travel(world, trip, altitude_m)
 }
 
+/// Go back to the frame the world started in, with the focus at `at` in home coordinates
+/// (e.g. a place laid out there), if the world is not in it already: `false` then, and
+/// nothing changes. Like [`travel_home`].
+pub fn travel_home_to(world: &mut World, at: DVec3) -> bool {
+    if world.resource::<SpaceState>().at_home {
+        return false;
+    }
+    let home = world
+        .get_resource::<HomeFrame>()
+        .map(|h| h.0.clone())
+        .unwrap_or_else(|| world.resource::<SpaceFrame>().clone());
+    let trip = SpaceFrame {
+        auto_switch: world.resource::<SpaceFrame>().auto_switch,
+        ..home
+    };
+    travel_landing(world, trip, at);
+    true
+}
+
 fn travel(world: &mut World, trip: SpaceFrame, altitude_m: f64) -> DVec3 {
-    let spot = DVec3::new(0.0, altitude_m, 0.0);
+    travel_landing(world, trip, DVec3::new(0.0, altitude_m, 0.0))
+}
+
+fn travel_landing(world: &mut World, trip: SpaceFrame, spot: DVec3) -> DVec3 {
     let mut pending = world.get_resource_or_insert_with(PendingTravel::default);
     pending.trip = Some(trip);
     pending.land = Some(spot);

@@ -31,6 +31,14 @@ world re-anchors on the next body.
   anchor's), the anchor switches to the body that holds it, with the home spot right under
   the focus. Every free entity keeps its true position, orientation and velocity across the
   switch (velocities include the change of frame motion and spin).
+- **Landing anywhere.** Low over the turning anchor (below `SpaceSettings::rehome_altitude_m`,
+  30 km) and more than `rehome_distance_m` (40 km) along the ground from the home spot, the
+  home spot moves under the focus, like KSP's floating origin: the world origin stays near
+  the player, +Y stays up and f32 physics keeps its precision wherever you land. Coming back
+  within `home_return_m` (30 km) of the `HomeFrame`'s spot puts the world back in that frame
+  exactly. `SpaceState::to_home` / `from_home` map points between the world and home
+  coordinates, `at_home` says whether they are the same, and
+  `travel_home_to(world, at)` jumps home with the focus at a place laid out there.
 - **What you leave stays put.** When the world stops turning with a body (climbing out, or a
   trip elsewhere), everything on or near it (below half that height: the valley, its
   houses, props, parked cars and NPCs) is noted in `Parked` with its pose and motion on the
@@ -57,7 +65,8 @@ world re-anchors on the next body.
   points, period). Orient a chase camera after `rails::fly` (`PostUpdate`), or it trails a
   frame behind a ship moving thousands of kilometers per frame.
 - **Gravity, air and light.** Writes `Gravity::bodies` (the anchor and any body whose reach
-  holds the focus), sets the renderer's `Atmosphere` to the nearest body with air (off when
+  holds the focus; never what the anchor orbits, which it falls around with us, so on the
+  Moon only the Moon pulls), sets the renderer's `Atmosphere` to the nearest body with air (off when
   none), and points every `DirectionalLight` marked `StarLight` at its star with the right
   illuminance for the distance (≈127 000 lux at 1 AU). Each body's air carries its own
   scattering (`BodyAtmosphere`, with the renderer's presets `earth()` and `mars()`): Earth's

@@ -18,7 +18,7 @@ pub mod rivers;
 pub mod shape;
 pub mod wear;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use engine_core::math::{DQuat, DVec3};
@@ -574,6 +574,7 @@ type PlanetPlacement = (
     Has<ChildOf>,
 );
 
+#[allow(clippy::too_many_arguments)]
 fn sync_terrains(
     mut terrains: ResMut<Terrains>,
     q: Query<PlanetPlacement>,
@@ -581,12 +582,16 @@ fn sync_terrains(
     mut ground: ResMut<engine_world::Ground>,
     mut forest: ResMut<engine_world::ForestCover>,
     diagnostics: Option<ResMut<Diagnostics>>,
+    focus: Option<Res<engine_world::FocusPoints>>,
     // Whether a provider is installed, and how many times one was (a diagnostic: the ground
     // is rebuilt only when a terrain is added, removed or moved).
     mut installed: Local<(bool, u32)>,
+    // The terrains that answer the ground now: those near the focus.
+    mut answering: Local<HashSet<Entity>>,
 ) {
     let mut changed = false;
     let mut seen = Vec::with_capacity(terrains.entries.len());
+    let points: &[DVec3] = focus.as_ref().map_or(&[], |f| &f.points);
     for (e, config, gt, tf, child) in &q {
         seen.push(e);
         let reset = match terrains.entries.get(&e) {
@@ -616,14 +621,30 @@ fn sync_terrains(
         } else {
             (tf.translation, tf.rotation.as_dquat().normalize())
         };
-        if t.position != pos || t.rotation != rot {
-            t.position = pos;
-            t.rotation = rot;
-            // Only a terrain that answers the ground moves the providers (other planets in a
-            // solar system move every frame).
-            changed |= t.config.ground;
+        let moved = t.position != pos || t.rotation != rot;
+        t.position = pos;
+        t.rotation = rot;
+        // A planet answers the ground while the focus is within about its radius of it (a
+        // little farther to stop answering), so the world's ground is the one underfoot and
+        // far planets, which move every frame, leave the providers alone.
+        let reach = if answering.contains(&e) { 1.25 } else { 1.0 };
+        let near = points.is_empty()
+            || !t.source.map.is_sphere()
+            || points
+                .iter()
+                .any(|&p| t.altitude_hint(p) < t.source.map.radius * reach);
+        let answers = t.config.ground && near;
+        if answers != answering.contains(&e) {
+            if answers {
+                answering.insert(e);
+            } else {
+                answering.remove(&e);
+            }
+            changed = true;
         }
+        changed |= answers && (moved || reset);
     }
+    answering.retain(|e| seen.contains(e));
     let before = terrains.entries.len();
     terrains.entries.retain(|e, _| seen.contains(e));
     changed |= terrains.entries.len() != before;
@@ -632,9 +653,9 @@ fn sync_terrains(
     }
     let list: Vec<_> = terrains
         .entries
-        .values()
-        .filter(|t| t.config.ground)
-        .map(TerrainRuntime::ground_terrain)
+        .iter()
+        .filter(|(e, _)| answering.contains(e))
+        .map(|(_, t)| t.ground_terrain())
         .collect();
     if list.is_empty() {
         if installed.0 {
@@ -1262,6 +1283,39 @@ mod tests {
             .world
             .resource::<engine_core::diagnostics::Diagnostics>();
         assert_eq!(d.get("terrain.ground_installs"), Some(1.0));
+    }
+
+    #[test]
+    fn the_ground_underfoot_is_the_planet_you_are_on() {
+        let mut app = app_with_planet();
+        // A moon with ground of its own, far off and moving: Earth answers alone.
+        let moon = PlanetTerrain::moon(3).with_radius(1_737_400.0);
+        let moon = app
+            .world
+            .spawn((Transform::from_xyz(0.0, 0.0, 384_400_000.0), moon))
+            .id();
+        app.update_n(3);
+        for i in 0..5 {
+            app.world.get_mut::<Transform>(moon).unwrap().translation.x += 1_000.0 * (i + 1) as f64;
+            app.update();
+        }
+        let installs = |app: &App| {
+            app.world
+                .resource::<engine_core::diagnostics::Diagnostics>()
+                .get("terrain.ground_installs")
+        };
+        assert_eq!(installs(&app), Some(1.0));
+        // Fly down to the Moon: its ground answers there.
+        let at = app.world.get::<Transform>(moon).unwrap().translation;
+        let mut q = app
+            .world
+            .query_filtered::<&mut Transform, With<engine_world::SimulationFocus>>();
+        q.single_mut(&mut app.world).unwrap().translation = at + DVec3::Y * 1_740_000.0;
+        app.update_n(2);
+        assert_eq!(installs(&app), Some(2.0));
+        let g = app.world.resource::<engine_world::Ground>().clone();
+        let s = g.sample(at + DVec3::Y * 1_739_000.0).expect("moon ground");
+        assert!(s.normal.y > 0.5, "{:?}", s.normal);
     }
 
     #[test]

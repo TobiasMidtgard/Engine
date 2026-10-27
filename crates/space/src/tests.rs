@@ -1003,3 +1003,95 @@ fn the_world_follows_a_coasting_ship_into_the_moons_frame() {
             || app.world.resource::<RailsLog>().warp_drops == 1
     );
 }
+
+fn put_focus(app: &mut App, p: DVec3) {
+    let mut q = app
+        .world
+        .query_filtered::<&mut Transform, With<SimulationFocus>>();
+    q.single_mut(&mut app.world).unwrap().translation = p;
+}
+
+#[test]
+fn landing_far_from_home_brings_the_origin_and_up_along() {
+    let mut app = app();
+    let house = app
+        .world
+        .spawn(Transform::from_xyz(120.0, 0.0, -340.0))
+        .id();
+    let spot = |app: &App, p: DVec3| state(app).lat_lon_height("Earth", p).unwrap();
+    let house_at = spot(&app, app.world.get::<Transform>(house).unwrap().translation);
+    // 30 km away along the ground (still within the home's reach): nothing moves.
+    let near = state(&app)
+        .surface_point("Earth", 40.27, 0.0, 300.0)
+        .unwrap();
+    put_focus(&mut app, near);
+    app.update();
+    assert_eq!(state(&app).switches, 0);
+    assert!(state(&app).at_home);
+    // 300 km east, 300 m up: home moves under the focus, the world turns so +Y is up there.
+    let far = state(&app)
+        .surface_point("Earth", 40.0, 3.5, 300.0)
+        .unwrap();
+    let up_before = app.world.resource::<Gravity>().up_at(far);
+    assert!(up_before.y < 0.999, "{up_before:?}");
+    put_focus(&mut app, far);
+    app.update();
+    let s = state(&app);
+    assert_eq!(s.switches, 1);
+    assert!(!s.at_home);
+    let p = focus(&mut app);
+    assert!(p.x.hypot(p.z) < 1.0 && (p.y - 300.0).abs() < 1.0, "{p:?}");
+    let up = app.world.resource::<Gravity>().up_at(p);
+    assert!(up.y > 0.999_999, "{up:?}");
+    // The house stayed where it was on Earth, and home coordinates still find it.
+    let house_now = app.world.get::<Transform>(house).unwrap().translation;
+    let after = spot(&app, house_now);
+    assert!((after.0 - house_at.0).abs() < 1e-7 && (after.1 - house_at.1).abs() < 1e-7);
+    let home = state(&app).to_home(house_now);
+    assert!(
+        home.distance(DVec3::new(120.0, 0.0, -340.0)) < 0.01,
+        "{home:?}"
+    );
+    assert!(state(&app).from_home(home).distance(house_now) < 0.01);
+    // Flying back over the valley puts the world in its home frame exactly.
+    let back = state(&app).from_home(DVec3::new(500.0, 200.0, 0.0));
+    put_focus(&mut app, back);
+    app.update();
+    let s = state(&app);
+    assert!(s.at_home);
+    assert_eq!(s.switches, 2);
+    let p = focus(&mut app);
+    assert!(p.distance(DVec3::new(500.0, 200.0, 0.0)) < 0.01, "{p:?}");
+    let house_now = app.world.get::<Transform>(house).unwrap().translation;
+    assert!(house_now.distance(DVec3::new(120.0, 0.0, -340.0)) < 0.01);
+}
+
+#[test]
+fn on_the_moon_only_the_moon_pulls() {
+    let mut app = app();
+    travel_to(&mut app.world, "Moon", 0.0, 0.0, 2.0).unwrap();
+    app.update();
+    let g = app.world.resource::<Gravity>();
+    // Earth is left out: the Moon falls around it with us.
+    assert_eq!(g.bodies.len(), 1);
+    let up = g.up_at(DVec3::new(0.0, 2.0, 0.0));
+    assert!(up.y > 0.999_999, "{up:?}");
+}
+
+#[test]
+fn going_home_from_the_moon_lands_on_a_home_place() {
+    let mut app = app();
+    assert!(!travel_home_to(&mut app.world, DVec3::new(1.0, 2.0, 3.0)));
+    travel_to(&mut app.world, "Moon", 0.0, 0.0, 2.0).unwrap();
+    app.update();
+    assert!(!state(&app).at_home);
+    let place = DVec3::new(-30.0, 8.0, 6.0);
+    assert!(travel_home_to(&mut app.world, place));
+    app.update();
+    let s = state(&app);
+    assert!(s.at_home);
+    assert_eq!(s.anchor.map(|a| s.bodies[a].name.as_str()), Some("Earth"));
+    let home = s.surface_point("Earth", 40.0, 0.0, 60.0).unwrap();
+    assert!(focus(&mut app).distance(place) < 1e-6);
+    assert!(home.length() < 1e-3, "{home:?}");
+}

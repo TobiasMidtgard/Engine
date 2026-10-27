@@ -215,7 +215,9 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
 - **Ocean.** Optional sea surface at sea level (`PlanetTerrain::ocean_surface`) with depth
   tint and waves; turn it off when a water module draws the sea.
 - **Ground query and colliders.** Installs the `Ground` provider (height, normal, surface
-  material) for every terrain, and keeps heightfield collider tiles around every focus
+  material) for every terrain with `ground` on that the focus is within about its radius of
+  (far planets, which move every frame, are left out, so the provider is not rebuilt each
+  frame and the ground is the one underfoot on the Moon or Mars too), and keeps heightfield collider tiles around every focus
   point and under every dynamic body (awake or asleep, the nearest 64 away from a focus),
   so a crate dropped far off or a car driven by AI never falls through the ground.
 - **Where the woods are.** Installs the `ForestCover` provider: canopy cover (0..1) and needle
