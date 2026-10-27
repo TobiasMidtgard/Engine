@@ -760,6 +760,13 @@ impl Renderer {
             .map(|w| UVec2::new(w.width.max(1), w.height.max(1)))
             .unwrap_or(self.targets.window);
         let settings = crate::settings::effective(world);
+        let headless = world
+            .get_resource::<EngineConfig>()
+            .is_none_or(|c| c.headless);
+        // Every material preset's pipelines compile in the background from the first frame.
+        if settings.pipeline_warmup.on(headless) {
+            self.shared.materials.warm(&self.shared);
+        }
         let (scene_origin, viewport_size) = crate::frame::camera_viewport(world, window);
         // At a render scale under 1 the scene renders smaller and the tonemap upscales it.
         let scene_size = (viewport_size.as_vec2() * settings.render_scale.clamp(0.25, 2.0))
@@ -1768,6 +1775,12 @@ impl Renderer {
                 image_stats.bytes_compressed_away as f64 / (1024.0 * 1024.0),
             );
             d.set("render.image_uploads", image_stats.uploads as f64);
+            let (warming, built_inline) = self.shared.materials.warming();
+            d.set("render.materials.pipelines_warming", warming as f64);
+            d.set(
+                "render.materials.pipelines_built_inline",
+                built_inline as f64,
+            );
             d.set("render.images_released", image_stats.released as f64);
             d.set(
                 "render.image_bytes_released",

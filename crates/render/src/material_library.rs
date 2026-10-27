@@ -46,6 +46,8 @@ use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 use wgpu::util::DeviceExt;
 
+use crate::warmup::{Build, Taken, Warmup};
+
 use crate::features::GpuShared;
 use crate::renderer::layout_entry;
 use crate::texture::Image;
@@ -355,6 +357,10 @@ struct Inner {
     sets: HashMap<(MaterialPreset, u32), Arc<MaterialTextures>>,
     pipelines: HashMap<MaterialPreset, Arc<PresetPipelines>>,
     common: Option<Arc<Common>>,
+    /// Every preset's pipelines compiling on worker threads (see [`MaterialLibrary::warm`]).
+    warmup: Option<Warmup<MaterialPreset, Arc<PresetPipelines>>>,
+    /// Presets whose pipelines were compiled when first used rather than warmed.
+    built_inline: u32,
     next_id: u64,
 }
 
@@ -387,16 +393,55 @@ impl MaterialLibrary {
         let started = std::time::Instant::now();
         let common = inner.common(gpu);
         let pipelines = inner.pipelines(gpu, &common, preset);
+        let compiled_ms = started.elapsed().as_secs_f64() * 1000.0;
         inner.next_id += 1;
         let id = inner.next_id;
         let set = Arc::new(generate(gpu, &common, &pipelines, preset, size, id));
         tracing::info!(
-            "generated material preset '{}' at {size}x{size} in {:.0} ms (GPU work queued)",
+            "generated material preset '{}' at {size}x{size} in {:.0} ms ({compiled_ms:.0} ms \
+             of it for its pipelines; GPU work queued)",
             preset.name(),
             started.elapsed().as_secs_f64() * 1000.0
         );
         inner.sets.insert((preset, size), set.clone());
         set
+    }
+
+    /// Compile every preset's generator pipelines on worker threads (after Unreal's PSO
+    /// precaching): a preset's first use then only queues its GPU work, where compiling its
+    /// shader took 70-600 ms on lavapipe (`RenderSettings::pipeline_warmup`).
+    pub fn warm(&self, gpu: &GpuShared) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.warmup.is_some() {
+            return;
+        }
+        let common = inner.common(gpu);
+        let jobs: Vec<(MaterialPreset, Build<Arc<PresetPipelines>>)> = MaterialPreset::ALL
+            .into_iter()
+            .filter(|preset| !inner.pipelines.contains_key(preset))
+            .map(|preset| {
+                let (device, common) = (gpu.device.clone(), common.clone());
+                let build: Build<Arc<PresetPipelines>> =
+                    Box::new(move || Some(Arc::new(preset_pipelines(&device, &common, preset))));
+                (preset, build)
+            })
+            .collect();
+        let threads = std::thread::available_parallelism().map_or(2, |n| n.get() / 4);
+        inner.warmup = Some(Warmup::start(
+            "material pipelines",
+            jobs,
+            threads.clamp(1, 4),
+        ));
+    }
+
+    /// Presets whose pipelines are still compiling, and presets whose pipelines a first use
+    /// had to compile itself.
+    pub fn warming(&self) -> (usize, u32) {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            inner.warmup.as_ref().map_or(0, Warmup::pending),
+            inner.built_inline,
+        )
     }
 
     /// Presets generated so far, with their sizes.
@@ -537,30 +582,45 @@ impl Inner {
         if let Some(p) = self.pipelines.get(&preset) {
             return p.clone();
         }
-        let module = gpu.shader(
-            &format!("material generator: {}", preset.name()),
-            &preset.generator_source(),
-            false,
-        );
-        let pipeline = |layout: &wgpu::PipelineLayout, entry: &str| {
-            gpu.device
-                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(entry),
-                    layout: Some(layout),
-                    module: &module,
-                    entry_point: Some(entry),
-                    compilation_options: Default::default(),
-                    cache: None,
-                })
+        let p = match self.warmup.as_mut().map(|w| w.take(preset)) {
+            Some(Taken::Ready(Some(p))) => p,
+            _ => {
+                self.built_inline += 1;
+                Arc::new(preset_pipelines(&gpu.device, common, preset))
+            }
         };
-        let p = Arc::new(PresetPipelines {
-            layers: pipeline(&common.layers_pipeline_layout, "cs_layers"),
-            refine: pipeline(&common.refine_pipeline_layout, "cs_refine"),
-            derive: pipeline(&common.derive_pipeline_layout, "cs_derive"),
-            surface: pipeline(&common.surface_pipeline_layout, "cs_surface"),
-        });
         self.pipelines.insert(preset, p.clone());
         p
+    }
+}
+
+/// Compile `preset`'s generator shader and its pipelines (on any thread).
+fn preset_pipelines(
+    device: &wgpu::Device,
+    common: &Common,
+    preset: MaterialPreset,
+) -> PresetPipelines {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(&format!("material generator: {}", preset.name())),
+        source: wgpu::ShaderSource::Wgsl(
+            crate::features::compose_shader(&preset.generator_source(), false).into(),
+        ),
+    });
+    let pipeline = |layout: &wgpu::PipelineLayout, entry: &str| {
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(entry),
+            layout: Some(layout),
+            module: &module,
+            entry_point: Some(entry),
+            compilation_options: Default::default(),
+            cache: None,
+        })
+    };
+    PresetPipelines {
+        layers: pipeline(&common.layers_pipeline_layout, "cs_layers"),
+        refine: pipeline(&common.refine_pipeline_layout, "cs_refine"),
+        derive: pipeline(&common.derive_pipeline_layout, "cs_derive"),
+        surface: pipeline(&common.surface_pipeline_layout, "cs_surface"),
     }
 }
 

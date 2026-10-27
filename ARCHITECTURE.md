@@ -490,8 +490,12 @@ variants (single- and double-sided, blended, mirrored; scene, prepass and masked
 worker threads as soon as its shaders exist, commonest first. A frame that needs one takes it when
 built, waits for it while a worker compiles it, and builds it itself when no worker has started
 it. The first frame that draws a new kind of material then takes no compile (1.2 s under
-lavapipe before). `render.meshes.pipelines_warming` counts those still compiling; a loading
-screen can wait for 0. Features with their own pipelines can use `Warmup` the same way.
+lavapipe before). The impostors' pipelines (bake, scene, prepass, shadow), first needed when
+something far is baked, warm the same way, as do every material preset's generator pipelines
+(70-600 ms each under lavapipe on first use). `render.meshes.pipelines_warming` and
+`render.materials.pipelines_warming` count those still compiling, so a loading screen can wait
+for 0; `render.materials.pipelines_built_inline` counts presets a first use still had to
+compile. Features with their own pipelines can use `Warmup` the same way.
 
 **Mesh pool and multi-draw** (`mesh_pool.rs`, after Aaltonen and Haar, "GPU-Driven Rendering
 Pipelines", SIGGRAPH 2015, and Unreal's and Unity's global vertex and index buffers): the

@@ -32,6 +32,7 @@ use crate::features::GpuShared;
 use crate::image_cache::copy_blocks;
 use crate::mesh::Vertex;
 use crate::mesh_feature::MeshInstance;
+use crate::warmup::{Build, Taken, Warmup};
 
 /// Directions per side of the octahedral grid (`IMPOSTOR_GRID` in the shaders).
 pub(crate) const GRID: u32 = 12;
@@ -185,6 +186,8 @@ pub(crate) struct Impostors {
     prepass: Option<wgpu::RenderPipeline>,
     bake: Option<wgpu::RenderPipeline>,
     shadow: Option<wgpu::RenderPipeline>,
+    /// Pipelines compiling on a worker thread (`RenderSettings::pipeline_warmup`).
+    warmup: Option<Warmup<PipelineKey>>,
     warned_full: bool,
 }
 
@@ -329,6 +332,7 @@ impl Impostors {
             prepass: None,
             bake: None,
             shadow: None,
+            warmup: None,
             warned_full: false,
         }
     }
@@ -500,7 +504,7 @@ impl Impostors {
         &mut self,
         gpu: &GpuShared,
         encoder: &mut wgpu::CommandEncoder,
-        constants: &[(&str, f64)],
+        constants: &[(&'static str, f64)],
         frame_group: &wgpu::BindGroup,
         material_group: &wgpu::BindGroup,
         texture_group: &wgpu::BindGroup,
@@ -511,6 +515,9 @@ impl Impostors {
         let Some(bake) = self.pending.take() else {
             return;
         };
+        if self.atlas.is_some() && self.bake.is_none() {
+            self.bake = Some(self.pipeline(gpu, constants, PipelineKey::Bake));
+        }
         let Some(atlas) = &self.atlas else {
             return;
         };
@@ -526,9 +533,6 @@ impl Impostors {
                     },
                 );
             }
-        }
-        if self.bake.is_none() {
-            self.bake = Some(self.bake_pipeline(gpu, constants));
         }
         let (Some(pipeline), Some(depth)) = (&self.bake, &self.depth) else {
             return;
@@ -615,25 +619,91 @@ impl Impostors {
 
     /// Drops the pipelines built with other shader features; they are made again on use.
     pub(crate) fn clear_pipelines(&mut self) {
+        self.warmup = None;
         self.main = None;
         self.prepass = None;
         self.bake = None;
     }
 
+    /// Compile the pipelines not built yet on a warm-up thread, so the first bake and the first
+    /// impostors drawn don't wait for them.
+    pub(crate) fn start_warmup(&mut self, gpu: &GpuShared, constants: &[(&'static str, f64)]) {
+        if self.warmup.is_some() {
+            return;
+        }
+        let inputs = self.pipeline_inputs(gpu, constants);
+        let jobs: Vec<(PipelineKey, Build)> = [
+            (PipelineKey::Bake, self.bake.is_none()),
+            (PipelineKey::Main, self.main.is_none()),
+            (PipelineKey::Prepass, self.prepass.is_none()),
+            (PipelineKey::Shadow, self.shadow.is_none()),
+        ]
+        .into_iter()
+        .filter(|&(_, missing)| missing)
+        .map(|(key, _)| {
+            let inputs = inputs.clone();
+            let build: Build = Box::new(move || Some(build_pipeline(&inputs, key)));
+            (key, build)
+        })
+        .collect();
+        self.warmup = Some(Warmup::start("impostor pipelines", jobs, 1));
+    }
+
+    /// Pipelines still compiling on the warm-up thread.
+    pub(crate) fn warming(&self) -> usize {
+        self.warmup.as_ref().map_or(0, Warmup::pending)
+    }
+
+    fn pipeline_inputs(
+        &self,
+        gpu: &GpuShared,
+        constants: &[(&'static str, f64)],
+    ) -> PipelineInputs {
+        PipelineInputs {
+            device: gpu.device.clone(),
+            shader: self.shader.clone(),
+            shadow_shader: self.shadow_shader.clone(),
+            draw_layout: self.draw_pipeline_layout.clone(),
+            bake_layout: self.bake_pipeline_layout.clone(),
+            shadow_layout: self.shadow_pipeline_layout.clone(),
+            hdr: gpu.formats.hdr,
+            prepass_targets: gpu.prepass_targets(),
+            depth: gpu.depth_state(true),
+            shadow_depth: gpu.shadow_depth_state(),
+            unclipped: gpu.features.contains(wgpu::Features::DEPTH_CLIP_CONTROL),
+            constants: constants.to_vec(),
+        }
+    }
+
+    /// The pipeline for `key`: from the warm-up when it built it, else built now.
+    fn pipeline(
+        &mut self,
+        gpu: &GpuShared,
+        constants: &[(&'static str, f64)],
+        key: PipelineKey,
+    ) -> wgpu::RenderPipeline {
+        if let Some(warmup) = &mut self.warmup
+            && let Taken::Ready(Some(pipeline)) = warmup.take(key)
+        {
+            return pipeline;
+        }
+        build_pipeline(&self.pipeline_inputs(gpu, constants), key)
+    }
+
     /// Makes the scene, prepass and shadow pipelines and the atlas bind group, once something
     /// is baked.
-    pub(crate) fn ensure_pipelines(&mut self, gpu: &GpuShared, constants: &[(&str, f64)]) {
+    pub(crate) fn ensure_pipelines(&mut self, gpu: &GpuShared, constants: &[(&'static str, f64)]) {
         if !self.any() {
             return;
         }
         if self.main.is_none() {
-            self.main = Some(self.draw_pipeline(gpu, constants, false));
+            self.main = Some(self.pipeline(gpu, constants, PipelineKey::Main));
         }
         if self.prepass.is_none() {
-            self.prepass = Some(self.draw_pipeline(gpu, constants, true));
+            self.prepass = Some(self.pipeline(gpu, constants, PipelineKey::Prepass));
         }
         if self.shadow.is_none() {
-            self.shadow = Some(self.shadow_pipeline(gpu));
+            self.shadow = Some(self.pipeline(gpu, constants, PipelineKey::Shadow));
         }
         if self.draw_group.is_none()
             && let Some(atlas) = &self.atlas
@@ -691,131 +761,6 @@ impl Impostors {
         }
     }
 
-    fn draw_pipeline(
-        &self,
-        gpu: &GpuShared,
-        constants: &[(&str, f64)],
-        prepass: bool,
-    ) -> wgpu::RenderPipeline {
-        let compilation = wgpu::PipelineCompilationOptions {
-            constants,
-            ..Default::default()
-        };
-        let main_targets = [Some(wgpu::ColorTargetState {
-            format: gpu.formats.hdr,
-            blend: None,
-            write_mask: wgpu::ColorWrites::ALL,
-        })];
-        let prepass_targets = gpu.prepass_targets();
-        let (label, fs, targets): (_, _, &[Option<wgpu::ColorTargetState>]) = if prepass {
-            ("impostor prepass", "fs_impostor_prepass", &prepass_targets)
-        } else {
-            ("impostor", "fs_impostor", &main_targets)
-        };
-        gpu.device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&self.draw_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &self.shader,
-                    entry_point: Some("vs_impostor"),
-                    compilation_options: compilation.clone(),
-                    buffers: &[None, Some(MeshInstance::layout_with_motion())],
-                },
-                primitive: wgpu::PrimitiveState {
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(gpu.depth_state(true)),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &self.shader,
-                    entry_point: Some(fs),
-                    compilation_options: compilation,
-                    targets,
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
-    }
-
-    fn bake_pipeline(&self, gpu: &GpuShared, constants: &[(&str, f64)]) -> wgpu::RenderPipeline {
-        let compilation = wgpu::PipelineCompilationOptions {
-            constants,
-            ..Default::default()
-        };
-        let target = |format| {
-            Some(wgpu::ColorTargetState {
-                format,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })
-        };
-        gpu.device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("impostor bake"),
-                layout: Some(&self.bake_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &self.shader,
-                    entry_point: Some("vs_impostor_bake"),
-                    compilation_options: compilation.clone(),
-                    buffers: &[
-                        Some(Vertex::layout()),
-                        Some(MeshInstance::layout_with_motion()),
-                    ],
-                },
-                primitive: wgpu::PrimitiveState {
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &self.shader,
-                    entry_point: Some("fs_impostor_bake"),
-                    compilation_options: compilation,
-                    targets: &[target(ALBEDO_FORMAT), target(NORMAL_FORMAT)],
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
-    }
-
-    fn shadow_pipeline(&self, gpu: &GpuShared) -> wgpu::RenderPipeline {
-        gpu.device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("impostor shadow"),
-                layout: Some(&self.shadow_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &self.shadow_shader,
-                    entry_point: Some("vs_impostor_shadow"),
-                    compilation_options: Default::default(),
-                    buffers: &[None, Some(MeshInstance::layout())],
-                },
-                primitive: wgpu::PrimitiveState {
-                    cull_mode: None,
-                    unclipped_depth: gpu.features.contains(wgpu::Features::DEPTH_CLIP_CONTROL),
-                    ..Default::default()
-                },
-                depth_stencil: Some(gpu.shadow_depth_state()),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &self.shadow_shader,
-                    entry_point: Some("fs_impostor_shadow"),
-                    compilation_options: Default::default(),
-                    targets: &[],
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
-    }
-
     /// Meshes baked now.
     pub(crate) fn count(&self) -> usize {
         self.layers.len()
@@ -825,6 +770,168 @@ impl Impostors {
     pub(crate) fn compressed(&self) -> bool {
         self.compressed == Some(true)
     }
+}
+
+/// The impostors' pipelines, keyed for the warm-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PipelineKey {
+    Main,
+    Prepass,
+    Bake,
+    Shadow,
+}
+
+/// What building the impostor pipelines needs, owned (for the warm-up threads).
+#[derive(Clone)]
+struct PipelineInputs {
+    device: wgpu::Device,
+    shader: wgpu::ShaderModule,
+    shadow_shader: wgpu::ShaderModule,
+    draw_layout: wgpu::PipelineLayout,
+    bake_layout: wgpu::PipelineLayout,
+    shadow_layout: wgpu::PipelineLayout,
+    hdr: wgpu::TextureFormat,
+    prepass_targets: [Option<wgpu::ColorTargetState>; 2],
+    depth: wgpu::DepthStencilState,
+    shadow_depth: wgpu::DepthStencilState,
+    unclipped: bool,
+    /// The mesh shader's override constants (its shader features).
+    constants: Vec<(&'static str, f64)>,
+}
+
+fn build_pipeline(inputs: &PipelineInputs, key: PipelineKey) -> wgpu::RenderPipeline {
+    match key {
+        PipelineKey::Main => draw_pipeline(inputs, false),
+        PipelineKey::Prepass => draw_pipeline(inputs, true),
+        PipelineKey::Bake => bake_pipeline(inputs),
+        PipelineKey::Shadow => shadow_pipeline(inputs),
+    }
+}
+
+fn draw_pipeline(inputs: &PipelineInputs, prepass: bool) -> wgpu::RenderPipeline {
+    let compilation = wgpu::PipelineCompilationOptions {
+        constants: &inputs.constants,
+        ..Default::default()
+    };
+    let main_targets = [Some(wgpu::ColorTargetState {
+        format: inputs.hdr,
+        blend: None,
+        write_mask: wgpu::ColorWrites::ALL,
+    })];
+    let (label, fs, targets): (_, _, &[Option<wgpu::ColorTargetState>]) = if prepass {
+        (
+            "impostor prepass",
+            "fs_impostor_prepass",
+            &inputs.prepass_targets,
+        )
+    } else {
+        ("impostor", "fs_impostor", &main_targets)
+    };
+    inputs
+        .device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&inputs.draw_layout),
+            vertex: wgpu::VertexState {
+                module: &inputs.shader,
+                entry_point: Some("vs_impostor"),
+                compilation_options: compilation.clone(),
+                buffers: &[None, Some(MeshInstance::layout_with_motion())],
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(inputs.depth.clone()),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &inputs.shader,
+                entry_point: Some(fs),
+                compilation_options: compilation,
+                targets,
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
+}
+
+fn bake_pipeline(inputs: &PipelineInputs) -> wgpu::RenderPipeline {
+    let compilation = wgpu::PipelineCompilationOptions {
+        constants: &inputs.constants,
+        ..Default::default()
+    };
+    let target = |format| {
+        Some(wgpu::ColorTargetState {
+            format,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })
+    };
+    inputs
+        .device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("impostor bake"),
+            layout: Some(&inputs.bake_layout),
+            vertex: wgpu::VertexState {
+                module: &inputs.shader,
+                entry_point: Some("vs_impostor_bake"),
+                compilation_options: compilation.clone(),
+                buffers: &[
+                    Some(Vertex::layout()),
+                    Some(MeshInstance::layout_with_motion()),
+                ],
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &inputs.shader,
+                entry_point: Some("fs_impostor_bake"),
+                compilation_options: compilation,
+                targets: &[target(ALBEDO_FORMAT), target(NORMAL_FORMAT)],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
+}
+
+fn shadow_pipeline(inputs: &PipelineInputs) -> wgpu::RenderPipeline {
+    inputs
+        .device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("impostor shadow"),
+            layout: Some(&inputs.shadow_layout),
+            vertex: wgpu::VertexState {
+                module: &inputs.shadow_shader,
+                entry_point: Some("vs_impostor_shadow"),
+                compilation_options: Default::default(),
+                buffers: &[None, Some(MeshInstance::layout())],
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: None,
+                unclipped_depth: inputs.unclipped,
+                ..Default::default()
+            },
+            depth_stencil: Some(inputs.shadow_depth.clone()),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &inputs.shadow_shader,
+                entry_point: Some("fs_impostor_shadow"),
+                compilation_options: Default::default(),
+                targets: &[],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
 }
 
 /// The layer for the next bake: a new one while the atlas has fewer than `max`, else the one
