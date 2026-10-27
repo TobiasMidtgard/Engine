@@ -295,9 +295,20 @@ impl GpuTimer {
 pub(crate) struct CpuSteps {
     current: Option<(Label, Instant, tracing::span::EnteredSpan)>,
     done: Vec<(Label, f32)>,
+    /// Steps inside them (a feature's own, `GpuShared::prepare_steps`).
+    inner: Vec<(&'static str, f32)>,
 }
 
 impl CpuSteps {
+    /// Steps a feature timed inside the current step.
+    pub fn inner(&mut self, steps: Vec<(&'static str, f32)>) {
+        if self.inner.is_empty() {
+            self.inner = steps;
+        } else {
+            self.inner.extend(steps);
+        }
+    }
+
     /// End the current step and start `name`.
     pub fn step(&mut self, name: impl Into<Label>) {
         self.finish();
@@ -319,7 +330,7 @@ impl CpuSteps {
     /// span can't go along).
     pub fn park(mut self) -> ParkedSteps {
         self.finish();
-        ParkedSteps(self.done)
+        ParkedSteps(self.done, self.inner)
     }
 
     /// Go on with steps parked on another thread.
@@ -327,6 +338,7 @@ impl CpuSteps {
         Self {
             current: None,
             done: parked.0,
+            inner: parked.1,
         }
     }
 }
@@ -486,7 +498,7 @@ impl SideCounts {
 }
 
 /// [`CpuSteps`]' finished steps, between threads.
-pub(crate) struct ParkedSteps(Vec<(Label, f32)>);
+pub(crate) struct ParkedSteps(Vec<(Label, f32)>, Vec<(&'static str, f32)>);
 
 /// The CPU time a frame's recording took, averaged over about a second: Windows counts a
 /// thread's time in scheduler ticks (15.6 ms by default), so one frame's own reading is mostly
@@ -553,6 +565,8 @@ pub(crate) struct PerfLog {
     /// What the GPU allocator holds from the driver, in use or not (MB; same source).
     pub gpu_reserved_mb: Option<f32>,
     cpu_steps: Vec<(Label, f32)>,
+    /// This frame's steps inside them ([`CpuSteps::inner`]).
+    inner_steps: Vec<(&'static str, f32)>,
     gpu_passes: Vec<(Label, f32)>,
     /// Each feature's draws and triangles in the latest frame, for the profile table.
     features: Vec<(String, crate::FeatureStats)>,
@@ -579,6 +593,7 @@ impl PerfLog {
             gpu_memory_mb: None,
             gpu_reserved_mb: None,
             cpu_steps: Vec::new(),
+            inner_steps: Vec::new(),
             gpu_passes: Vec::new(),
             features: Vec::new(),
             last_slow: None,
@@ -646,6 +661,7 @@ impl PerfLog {
     ) {
         cpu.finish();
         self.cpu_steps = cpu.done;
+        self.inner_steps = cpu.inner;
         let now = Instant::now();
         if every_secs > 0.0 {
             self.log_if_slow(now);
@@ -761,9 +777,21 @@ impl PerfLog {
         let gpu = self
             .gpu_ms
             .map_or_else(|| "n/a".to_string(), |ms| format!("{ms:.1} ms"));
+        // The slowest steps inside them too, when one stands out (the meshes' upload or
+        // materials inside "prepare meshes").
+        let inner: Vec<(Label, f32)> = self
+            .inner_steps
+            .iter()
+            .map(|&(name, ms)| (Label::from(name), ms))
+            .collect();
+        let inside = if inner.iter().any(|(_, ms)| *ms >= SLOW_FRAME_MS * 0.2) {
+            format!(" (inside: {})", slowest_steps(&inner, 4))
+        } else {
+            String::new()
+        };
         tracing::info!(
-            "slow render frame: {total:.0} ms of render steps (usually {usual:.1}): {}; GPU work \
-             queued in the {} frames before: {}; latest GPU frame {gpu}",
+            "slow render frame: {total:.0} ms of render steps (usually {usual:.1}): {}{inside}; \
+             GPU work queued in the {} frames before: {}; latest GPU frame {gpu}",
             slowest_steps(&self.cpu_steps, 6),
             self.side.len(),
             side.describe()

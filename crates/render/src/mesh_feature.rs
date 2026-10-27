@@ -778,8 +778,12 @@ impl PrepareSteps {
         }
     }
 
-    fn publish(mut self, world: &mut World) {
+    fn publish(mut self, world: &mut World, gpu: &GpuShared) {
         self.finish();
+        gpu.prepare_steps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(&self.done);
         if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
             for (name, ms) in self.done {
                 d.set(&format!("render.cpu.{name}"), ms as f64);
@@ -2811,7 +2815,7 @@ impl RenderFeature for MeshFeature {
             d.set("render.meshes.pool_mb", reserved as f64 / (1 << 20) as f64);
             d.set("render.meshes.pool_used_mb", used as f64 / (1 << 20) as f64);
         }
-        steps.publish(world);
+        steps.publish(world, gpu);
     }
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
