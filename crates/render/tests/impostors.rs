@@ -59,6 +59,56 @@ fn card_tree(seed: u32) -> Mesh {
     Mesh::new(vertices, indices)
 }
 
+/// The valley: a camera on a hill, the sun, the ground and 360 trees of three card meshes with
+/// the material `leaves`.
+fn valley(w: &mut World, leaves: MaterialRef) {
+    w.spawn((
+        Camera::perspective(60.0),
+        // From a hill: rows of trees from near to far.
+        Transform::from_xyz(0.0, 30.0, 0.0).looking_at(DVec3::new(0.0, 0.0, -160.0), Vec3::Y),
+    ));
+    let e = 40f64.to_radians();
+    w.spawn((
+        DirectionalLight::default(),
+        Transform::default()
+            .looking_at(DVec3::new(0.6 * e.cos(), -e.sin(), -0.8 * e.cos()), Vec3::Y),
+    ));
+    w.spawn((
+        Transform::default(),
+        MeshRenderer::new(
+            Shape::Plane {
+                size: [2000.0, 2000.0],
+                subdivisions: 1,
+            },
+            StandardMaterial::color(0.3, 0.32, 0.22),
+        ),
+    ));
+    let trees: Vec<_> = (0..3)
+        .map(|seed| w.resource_mut::<Assets<Mesh>>().add(card_tree(seed)))
+        .collect();
+    // Rows of trees from 15 m to about 700 m away, on both sides of the view.
+    for i in 0..360u32 {
+        let row = (i / 12) as f64;
+        let col = (i % 12) as f64 - 5.5;
+        let z = -15.0 - row * row * 0.7 - row * 2.0;
+        let x = col * (6.0 + row * 1.2);
+        w.spawn((
+            Transform::from_xyz(x, 0.0, z).with_rotation(Quat::from_rotation_y(i as f32 * 2.4)),
+            MeshRenderer::new(trees[(i % 3) as usize], leaves.clone()),
+        ));
+    }
+}
+
+/// The meshes feature's state in `Renderer::describe`.
+fn describe(app: &App) -> serde_json::Value {
+    let describe = app.world.resource::<Renderer>().describe();
+    describe["features"]
+        .as_array()
+        .and_then(|f| f.iter().find(|f| f["name"] == "meshes"))
+        .map(|f| f["state"].clone())
+        .unwrap_or_default()
+}
+
 /// Render the valley with impostors off, on, or on with a BC7 atlas (`Bc7`): the triangles
 /// drawn, the impostors in view and the image's pixels.
 #[derive(Clone, Copy, PartialEq)]
@@ -89,54 +139,11 @@ fn render(mode: Mode, shot: &str) -> Option<(u64, u64, Vec<u8>)> {
             Mode::Bc7 => s.texture_compression_on_cpu = true,
         }
     }
-    let w = &mut app.world;
-    w.spawn((
-        Camera::perspective(60.0),
-        // From a hill: rows of trees from near to far.
-        Transform::from_xyz(0.0, 30.0, 0.0).looking_at(DVec3::new(0.0, 0.0, -160.0), Vec3::Y),
-    ));
-    let e = 40f64.to_radians();
-    w.spawn((
-        DirectionalLight::default(),
-        Transform::default()
-            .looking_at(DVec3::new(0.6 * e.cos(), -e.sin(), -0.8 * e.cos()), Vec3::Y),
-    ));
-    w.spawn((
-        Transform::default(),
-        MeshRenderer::new(
-            Shape::Plane {
-                size: [2000.0, 2000.0],
-                subdivisions: 1,
-            },
-            StandardMaterial::color(0.3, 0.32, 0.22),
-        ),
-    ));
-    let trees: Vec<_> = (0..3)
-        .map(|seed| w.resource_mut::<Assets<Mesh>>().add(card_tree(seed)))
-        .collect();
     let leaves = StandardMaterial {
         double_sided: true,
         ..StandardMaterial::color(0.22, 0.4, 0.15)
     };
-    // Rows of trees from 15 m to about 700 m away, on both sides of the view.
-    for i in 0..360u32 {
-        let row = (i / 12) as f64;
-        let col = (i % 12) as f64 - 5.5;
-        let z = -15.0 - row * row * 0.7 - row * 2.0;
-        let x = col * (6.0 + row * 1.2);
-        w.spawn((
-            Transform::from_xyz(x, 0.0, z).with_rotation(Quat::from_rotation_y(i as f32 * 2.4)),
-            MeshRenderer::new(trees[(i % 3) as usize], leaves),
-        ));
-    }
-    let describe = |app: &App| {
-        let describe = app.world.resource::<Renderer>().describe();
-        describe["features"]
-            .as_array()
-            .and_then(|f| f.iter().find(|f| f["name"] == "meshes"))
-            .map(|f| f["state"].clone())
-            .unwrap_or_default()
-    };
+    valley(&mut app.world, leaves.into());
     let mut last = (u64::MAX, u64::MAX);
     let start = std::time::Instant::now();
     let mut frames = 0u64;
@@ -251,4 +258,98 @@ fn difference(before: &[u8], after: &[u8]) -> f32 {
     };
     let (a, b) = (blocks(before), blocks(after));
     a.iter().zip(&b).map(|(a, b)| (a - b).abs()).sum::<f32>() / a.len() as f32
+}
+
+/// Run until the impostors baked reach `baked` and the counts stop changing; false without a
+/// GPU.
+fn settle(app: &mut App, baked: u64) -> bool {
+    let start = std::time::Instant::now();
+    let (mut last, mut steady) = ((u64::MAX, u64::MAX), 0);
+    while steady < 5 && start.elapsed().as_secs() < 180 {
+        app.update();
+        if app.world.get_resource::<RenderDisabled>().is_some() {
+            return false;
+        }
+        let stats = app.world.resource::<RenderStats>();
+        let now = (stats.triangles, stats.instances as u64);
+        let ready = describe(app)["impostors"].as_u64() >= Some(baked);
+        steady = if ready && now == last { steady + 1 } else { 0 };
+        last = now;
+    }
+    true
+}
+
+/// How much redder than green the far trees are: the mean of red minus green (0..255) over the
+/// band of the image the trees past about 150 m fill.
+fn far_redness(app: &mut App, shot: &str) -> f32 {
+    let path = std::env::temp_dir().join("engine-impostors").join(shot);
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    capture_now(&mut app.world, &path).expect("screenshot");
+    if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+        let _ = std::fs::copy(&path, std::path::Path::new(&out).join(shot));
+    }
+    let image = image::open(&path).expect("read the shot").to_rgb8();
+    let rows = (H * 35 / 100)..(H * 45 / 100);
+    let count = (rows.len() as u32 * W) as f32;
+    rows.flat_map(|y| (0..W).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            let p = image.get_pixel(x, y);
+            p[0] as f32 - p[1] as f32
+        })
+        .sum::<f32>()
+        / count
+}
+
+/// Regression: an impostor baked while its material still showed something else (images still
+/// loading, or a color since changed) is baked again, so far trees don't keep the old look.
+#[test]
+fn far_trees_follow_a_material_that_changes() {
+    engine_core::log::init("error");
+    let mut app = App::new();
+    app.world.resource_mut::<EngineConfig>().headless = true;
+    {
+        let mut w = app.world.resource_mut::<Window>();
+        w.width = W;
+        w.height = H;
+    }
+    app.add_plugins(RenderPlugin);
+    {
+        let mut s = app.world.resource_mut::<RenderSettings>();
+        s.film_grain = 0.0;
+        s.texture_compression = TextureCompression::Off;
+    }
+    let leaves = app
+        .world
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
+            double_sided: true,
+            ..StandardMaterial::color(0.12, 0.45, 0.08)
+        });
+    valley(&mut app.world, leaves.into());
+    if !settle(&mut app, 3) {
+        eprintln!("skipping: no GPU");
+        return;
+    }
+    let green = far_redness(&mut app, "trees_green.png");
+    let baked = describe(&app)["impostors"].as_u64().unwrap_or(0);
+
+    app.world
+        .resource_mut::<Assets<StandardMaterial>>()
+        .get_mut(leaves)
+        .expect("the leaves")
+        .base_color = [0.6, 0.08, 0.06, 1.0];
+    assert!(settle(&mut app, baked + 3), "GPU lost");
+    let rebaked = describe(&app)["impostors"].as_u64().unwrap_or(0);
+    let red = far_redness(&mut app, "trees_red.png");
+    eprintln!(
+        "far trees: red - green {green:.1} before, {red:.1} after; {baked} then {rebaked} impostors"
+    );
+    assert!(
+        rebaked >= baked + 3,
+        "{rebaked} impostors after the change, {baked} before"
+    );
+    assert!(
+        red > green + 10.0,
+        "far trees: red - green {green:.1} before, {red:.1} after"
+    );
 }
