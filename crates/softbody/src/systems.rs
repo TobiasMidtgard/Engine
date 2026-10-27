@@ -895,6 +895,23 @@ pub fn step_bodies(
     diagnostics.set("softbody.busy_ms", busy);
     diagnostics.set("softbody.slowest_ms", slowest.map_or(0.0, |s| s.1));
     slowest_body.0 = slowest;
+    if std::env::var("SHEET_DEBUG").is_ok() {
+        for (e, b) in &bodies {
+            if names.get(e).is_ok_and(|n| n.as_str() == "Unveiling sheet") && b.steps % 30 == 0 {
+                eprintln!(
+                    "SHEET_DEBUG steps {} pairs {} c {:?} r {:.2} lod {} col {} ms {:.1} pend {}",
+                    b.steps,
+                    b.sim.self_pairs(),
+                    b.center,
+                    b.radius,
+                    b.lod_every,
+                    b.last_colliders().len(),
+                    b.step_ms,
+                    b.pending_prewarm
+                );
+            }
+        }
+    }
     if wall > SLOW_STEP_MS
         && let Some((e, ms)) = slowest
     {
@@ -946,6 +963,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     if (resting || dist > ctx.config.freeze_distance) && b.pending_prewarm == 0 {
         if !b.frozen {
             b.frozen = true;
+            b.step_ms = 0.0;
             b.sim.step_start.clone_from(&b.sim.pos);
             (b.lod_every, b.lod_wait, b.lod_debt) = (1, 0, 0.0);
         }
@@ -1126,7 +1144,13 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
             pulls.clone_from(&b.sim.frame_impulses);
         }
         runs += 1;
-        if b.pending_prewarm == 0 || budget.elapsed().as_secs_f64() * 1000.0 >= PREWARM_BUDGET_MS {
+        // Out of sight, at least one settling step a frame even when the step alone is over
+        // the budget, so a big body built far away is settled when it's reached; near, the
+        // budget alone (settling there shows as a fast-forward).
+        let least = if dist > ctx.config.lod_distance { 1 } else { 0 };
+        if b.pending_prewarm == 0
+            || (runs > least && budget.elapsed().as_secs_f64() * 1000.0 >= PREWARM_BUDGET_MS)
+        {
             break;
         }
         b.pending_prewarm -= 1;

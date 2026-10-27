@@ -239,6 +239,7 @@ impl SoftBodySim {
             "pending_prewarm": self.pending_prewarm,
             "colliders": self.scratch_colliders.len(),
             "self_pairs": self.sim.self_pairs(),
+            "self_pairs_solved": self.sim.self_pairs_solved(),
             "contacts": self.sim.contacts,
             "triangles": self.surface.as_ref().map(|s| s.triangles.len()).unwrap_or(0),
             "guides": self.strands.as_ref().map(|s| s.guides.len()).unwrap_or(0),

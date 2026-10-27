@@ -107,3 +107,47 @@ fn cloth_and_ropes_follow_a_world_shift() {
         }
     }
 }
+
+#[test]
+fn the_unveiling_hoist_follows_a_world_shift() {
+    let mut app = App::new();
+    app.add_plugins((engine_world::WorldPlugin, SoftBodyPlugin));
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual {
+            step_secs: 1.0 / 60.0,
+        });
+    app.world.resource_mut::<FixedTime>().set_hz(60.0);
+    app.init_resource::<PendingShift>()
+        .add_systems(PostUpdate, write_pending_shift.in_set(WorldShiftSet::Write));
+    app.add_systems(Startup, |mut commands: Commands| {
+        engine_softbody::demo::statue::spawn_unveiling(
+            &mut commands,
+            DVec3::ZERO,
+            Vec3::new(0.5, 0.0, -0.87),
+        );
+    });
+    let hook = |app: &mut App| {
+        let mut q = app.world.query::<(&Name, &Transform)>();
+        q.iter(&app.world)
+            .find(|(n, _)| n.as_str() == "Unveiling sheet")
+            .map(|(_, t)| t.translation)
+            .expect("the sheet")
+    };
+    app.update_n(30);
+    let before = hook(&mut app);
+    let shift = WorldShift {
+        rotation: DQuat::from_rotation_y(0.9),
+        translation: DVec3::new(4.0e4, 0.0, -1.5e4),
+        ..WorldShift::IDENTITY
+    };
+    app.world.resource_mut::<PendingShift>().0 = Some(shift);
+    app.update_n(2);
+    // The hook rides the crane's cord at a few centimeters a frame at most.
+    let after = hook(&mut app);
+    let want = shift.point(before);
+    assert!(
+        (after - want).length() < 0.05,
+        "the sheet hangs at {after} after the shift, expected about {want}"
+    );
+}

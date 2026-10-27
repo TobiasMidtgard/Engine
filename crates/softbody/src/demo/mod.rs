@@ -40,7 +40,7 @@ use engine_core::prelude::*;
 use engine_render::{Shape, StandardMaterial};
 use engine_world::animation::{BonePose, SkeletonPose};
 use engine_world::physics::{Collider, ColliderShape, RigidBody};
-use engine_world::{IgniteRequest, ProjectileTrace};
+use engine_world::{IgniteRequest, ProjectileTrace, WorldShift};
 
 use crate::body::SoftBodySim;
 use crate::character::{BoneCapsule, BoneColliders};
@@ -174,6 +174,67 @@ pub struct DemoCutter {
     pub period: f32,
 }
 
+/// Move the props' world-space paths and targets (the hoist, pendulum pivots, turret targets,
+/// the boat's home) with the world when it is re-anchored, as the bodies and transforms move.
+/// Without it a jump that re-anchors the world (`showcase.goto`) left the unveiling sheet
+/// hoisted where the statue used to be. The motions keep +Y as up, which a re-anchoring turns
+/// only negligibly within a zone. Runs in `WorldShiftSet::Apply`.
+#[allow(clippy::type_complexity)]
+pub fn follow_world_shift(
+    mut shifts: MessageReader<WorldShift>,
+    mut motions: Query<&mut DemoMotion>,
+    mut aims: Query<(
+        Option<&mut DemoTurret>,
+        Option<&mut DemoBurner>,
+        Option<&mut DemoCutter>,
+        Option<&mut DemoRoll>,
+    )>,
+    mut cords: Query<&mut statue::DemoCord>,
+    mut helms: Query<&mut sailboat::Helm>,
+) {
+    let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) else {
+        return;
+    };
+    for mut m in &mut motions {
+        match &mut *m {
+            DemoMotion::Pendulum { pivot, swing, .. } => {
+                *pivot = s.point(*pivot);
+                *swing = s.direction(*swing);
+            }
+            DemoMotion::Shuttle { from, to, .. } => {
+                (*from, *to) = (s.point(*from), s.point(*to));
+            }
+            DemoMotion::Press { top, .. } => *top = s.point(*top),
+            DemoMotion::Circle { center, .. } => *center = s.point(*center),
+            DemoMotion::Hoist { low, high, .. } => {
+                (*low, *high) = (s.point(*low), s.point(*high));
+            }
+        }
+    }
+    for (turret, burner, cutter, roll) in &mut aims {
+        if let Some(mut t) = turret {
+            t.target = s.point(t.target);
+        }
+        if let Some(mut b) = burner {
+            b.at = s.point(b.at);
+        }
+        if let Some(mut c) = cutter {
+            c.at = s.point(c.at);
+        }
+        if let Some(mut r) = roll
+            && let Some(last) = r.last
+        {
+            r.last = Some(s.point(last));
+        }
+    }
+    for mut c in &mut cords {
+        c.top = s.point(c.top);
+    }
+    for mut h in &mut helms {
+        h.home = s.point(h.home);
+    }
+}
+
 /// Rebuilds a soft volume (jelly knocked off its crate, dented clay) or a cloth (the
 /// dropped blanket) every `period` seconds.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
@@ -197,7 +258,11 @@ pub fn register(app: &mut App) {
                 .after(skin::skin_bodies)
                 .before(UpdateSet::Propagate),
         )
-        .add_systems(FixedPreUpdate, skin::snapshot_poses);
+        .add_systems(FixedPreUpdate, skin::snapshot_poses)
+        .add_systems(
+            PostUpdate,
+            follow_world_shift.in_set(engine_world::WorldShiftSet::Apply),
+        );
     app.add_systems(
         FixedUpdate,
         (

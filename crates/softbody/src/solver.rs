@@ -605,6 +605,11 @@ impl Sim {
         self.self_contacts.pairs.len()
     }
 
+    /// Of those, the ones close enough to be solved every substep.
+    pub fn self_pairs_solved(&self) -> usize {
+        self.self_contacts.close.len()
+    }
+
     pub fn substeps_for(&self, dt: f32) -> u32 {
         let n = (self.params.substeps.max(1) as f32 * dt * 60.0).ceil() as u32;
         n.clamp(1, self.params.substeps.max(1) * 4)
@@ -1077,7 +1082,7 @@ impl Sim {
         for s in &mut self.shapes {
             solve_shape(s, pos, w, h, inv_h2);
         }
-        if !self.self_contacts.pairs.is_empty() {
+        if !self.self_contacts.close.is_empty() {
             collide_self(
                 pos,
                 &self.prev,
@@ -1085,7 +1090,7 @@ impl Sim {
                 &self.aero_triangles,
                 p.self_collide,
                 p.friction,
-                &self.self_contacts.pairs,
+                &self.self_contacts.close,
             );
         }
 
@@ -1594,18 +1599,28 @@ fn collide_run(t: &Touch, run: Run) -> Touched {
 #[derive(Debug, Clone, Default)]
 struct SelfContacts {
     pairs: Vec<(u32, u32)>,
+    /// The pairs that can touch during this step (within the gap plus how far they can
+    /// close at the speed the cloth last moved), solved every substep.
+    close: Vec<(u32, u32)>,
+    /// Positions at the start of the last step, and how far each particle moved in it
+    /// (besides the whole cloth's drift), m.
+    last: Vec<Vec3>,
+    motion: Vec<f32>,
+    /// Particles that bent too far from where the pairs were last found, this step.
+    moved: Vec<bool>,
     /// Positions at the last search, about their center.
     at_search: Vec<Vec3>,
     /// How the cloth has turned since the last search.
     turned: Quat,
-    /// Farthest any particle has bent away from the turned search shape, m.
-    bent: f32,
     skin: f32,
     /// Free particles bucketed by hashed cell: bucket starts, then the particles (position
     /// and id), in bucket order so a bucket's are read together.
     starts: Vec<u32>,
     bucketed: Vec<(Vec3, u32)>,
     cells: Vec<u32>,
+    /// The same for just the moved particles, when only they are searched again.
+    moved_starts: Vec<u32>,
+    moved_bucketed: Vec<(Vec3, u32)>,
     /// The hot patches' triangles, this search.
     hot: Vec<u32>,
     patches: Patches,
@@ -1645,6 +1660,9 @@ struct Patches {
     regions: Vec<(Vec3, Vec3, Range<u32>)>,
     members: Vec<u32>,
     queue: Vec<u32>,
+    /// The particles sharing a triangle with each particle (`ring[ring_starts[i]..]`).
+    ring_starts: Vec<u32>,
+    ring: Vec<u32>,
 }
 
 /// The narrowest cone (axis, half-angle) holding both cones.
@@ -1724,6 +1742,23 @@ impl Patches {
             }
         }
         self.starts.push(self.tris.len() as u32);
+        let mut ring: Vec<Vec<u32>> = vec![Vec::new(); particles];
+        for tri in triangles {
+            for &v in tri {
+                for &u in tri {
+                    if u != v && !ring[v as usize].contains(&u) {
+                        ring[v as usize].push(u);
+                    }
+                }
+            }
+        }
+        self.ring_starts.clear();
+        self.ring.clear();
+        for list in &ring {
+            self.ring_starts.push(self.ring.len() as u32);
+            self.ring.extend_from_slice(list);
+        }
+        self.ring_starts.push(self.ring.len() as u32);
         let count = self.count();
         let mut patches_of: Vec<Vec<u32>> = vec![Vec::new(); particles];
         for (t, tri) in triangles.iter().enumerate() {
@@ -1856,7 +1891,58 @@ impl Patches {
 impl SelfContacts {
     fn update(&mut self, pos: &[Vec3], w: &[f32], triangles: &[[u32; 3]], gap: f32) {
         let center = pos.iter().sum::<Vec3>() / pos.len().max(1) as f32;
-        let mut growth = 0.5 * gap;
+        // How far each particle moved last step; it moves about as far in this one.
+        self.motion.clear();
+        if self.last.len() == pos.len() {
+            let shift = center - self.last.iter().sum::<Vec3>() / pos.len() as f32;
+            self.motion.extend(
+                pos.iter()
+                    .zip(&self.last)
+                    .map(|(p, l)| (*p - *l - shift).length()),
+            );
+        } else {
+            self.motion.resize(pos.len(), f32::INFINITY);
+        }
+        self.last.clear();
+        self.last.extend_from_slice(pos);
+        self.refresh(pos, w, triangles, gap, center);
+        // Of those, the ones that can touch this step: a pair closes by at most what its
+        // particle and its triangle's corners move, twice that for headroom. Cloth at rest
+        // keeps only the layers lying on each other.
+        self.close.clear();
+        let motion = &self.motion;
+        // Pairs come mostly grouped by triangle, so each triangle's normal is found once.
+        let mut group = (u32::MAX, Vec3::ZERO, Vec3::ZERO, 0.0);
+        for &(i, t) in &self.pairs {
+            if group.0 != t {
+                let tri = triangles[t as usize];
+                let [a, b, c] = tri.map(|j| pos[j as usize]);
+                let moves = tri.map(|j| motion[j as usize]);
+                group = (
+                    t,
+                    a,
+                    (b - a).cross(c - a).normalize_or_zero(),
+                    moves[0].max(moves[1]).max(moves[2]),
+                );
+            }
+            let reach = gap + 2.0 * (motion[i as usize] + group.3);
+            if (pos[i as usize] - group.1).dot(group.2).abs() < reach {
+                self.close.push((i, t));
+            }
+        }
+    }
+
+    /// Find the candidate pairs again where the cloth has bent by half the skin since they
+    /// were found (a Verlet list kept per particle). Swinging and turning as a whole (a
+    /// curtain swaying, a cape on a running character) doesn't count, since it changes no
+    /// distances.
+    fn refresh(&mut self, pos: &[Vec3], w: &[f32], triangles: &[[u32; 3]], gap: f32, center: Vec3) {
+        let sample = triangles.len().min(64);
+        let edge = triangles[..sample]
+            .iter()
+            .map(|t| (pos[t[1] as usize] - pos[t[0] as usize]).length())
+            .sum::<f32>()
+            / sample as f32;
         if self.at_search.len() == pos.len() {
             let mut a = Mat3::ZERO;
             for (p, s) in pos.iter().zip(&self.at_search) {
@@ -1865,40 +1951,60 @@ impl SelfContacts {
             }
             extract_rotation(&a, &mut self.turned, 3);
             let rot = Mat3::from_quat(self.turned);
-            let bent = pos
-                .iter()
-                .zip(&self.at_search)
-                .map(|(p, s)| (*p - center - rot * *s).length_squared())
-                .fold(0.0, f32::max)
-                .sqrt();
-            growth = (bent - self.bent).max(0.0);
-            self.bent = bent;
-            // Safe for one more step at this rate: no pair can have closed the skin.
-            if 2.0 * (bent + growth) <= self.skin {
+            // Safe for one more step at each particle's last pace: no pair between particles
+            // that stay under half the skin can have closed it.
+            let half = 0.5 * self.skin;
+            self.moved.clear();
+            self.moved.extend(
+                pos.iter()
+                    .zip(&self.at_search)
+                    .zip(&self.motion)
+                    .map(|((p, s), m)| (*p - center - rot * *s).length() + m > half),
+            );
+            let count = self.moved.iter().filter(|&&m| m).count();
+            if count == 0 {
+                return;
+            }
+            if 3 * count < pos.len() {
+                // Keep the pairs between particles that stayed, and search again only for
+                // the moved ones.
+                let moved = &self.moved;
+                self.pairs.retain(|&(i, t)| {
+                    !moved[i as usize] && !triangles[t as usize].iter().any(|&v| moved[v as usize])
+                });
+                self.search(pos, w, triangles, gap + self.skin, edge, true);
+                let back = rot.transpose();
+                for (i, p) in pos.iter().enumerate() {
+                    if self.moved[i] {
+                        self.at_search[i] = back * (*p - center);
+                    }
+                }
                 return;
             }
         }
-        let sample = triangles.len().min(64);
-        let edge = triangles[..sample]
-            .iter()
-            .map(|t| (pos[t[1] as usize] - pos[t[0] as usize]).length())
-            .sum::<f32>()
-            / sample as f32;
-        // A few steps of bending at the current rate, but under half a triangle, so
-        // neighbours in the same sheet (a triangle away) never become candidates.
-        self.skin = (4.0 * growth)
-            .max(2.0 * gap)
-            .min((0.5 * edge - gap).max(gap));
+        // Under half a triangle, so neighbours in the same sheet (a triangle away) never
+        // become candidates; only the pairs that can touch each step are solved, so a wide
+        // skin costs little.
+        self.skin = (0.5 * edge - gap).max(gap);
         self.at_search.clear();
         self.at_search.extend(pos.iter().map(|p| *p - center));
         self.turned = Quat::IDENTITY;
-        self.bent = 0.0;
-        self.search(pos, w, triangles, gap + self.skin, edge);
+        self.pairs.clear();
+        self.search(pos, w, triangles, gap + self.skin, edge, false);
     }
 
     /// Every free particle within `reach` of a triangle (not its own), over or beside it.
-    fn search(&mut self, pos: &[Vec3], w: &[f32], triangles: &[[u32; 3]], reach: f32, edge: f32) {
-        self.pairs.clear();
+    /// With `moved_only`, only pairs with a moved particle (as the point, or a corner of the
+    /// triangle) are added.
+    fn search(
+        &mut self,
+        pos: &[Vec3],
+        w: &[f32],
+        triangles: &[[u32; 3]],
+        reach: f32,
+        edge: f32,
+        moved_only: bool,
+    ) {
         self.patches.heat(pos, triangles, reach);
         if !self.patches.hot.contains(&true) {
             return;
@@ -1916,34 +2022,67 @@ impl SelfContacts {
             (h as u32 & mask) as usize
         };
         let cell_of = |p: Vec3| (p * inv).floor().as_ivec3();
-        let (starts, bucketed, cells) = (&mut self.starts, &mut self.bucketed, &mut self.cells);
-        starts.clear();
-        starts.resize(mask as usize + 2, 0);
-        cells.clear();
-        cells.extend(pos.iter().zip(w).map(|(p, &w)| {
-            if w == 0.0 {
-                return u32::MAX;
+        let moved = &self.moved;
+        let fill_grid = |starts: &mut Vec<u32>,
+                         bucketed: &mut Vec<(Vec3, u32)>,
+                         cells: &mut Vec<u32>,
+                         only_moved: bool| {
+            starts.clear();
+            starts.resize(mask as usize + 2, 0);
+            cells.clear();
+            cells.extend(pos.iter().zip(w).enumerate().map(|(i, (p, &w))| {
+                if w == 0.0 || (only_moved && !moved[i]) {
+                    return u32::MAX;
+                }
+                let b = bucket(cell_of(*p)) as u32;
+                starts[b as usize + 1] += 1;
+                b
+            }));
+            for b in 1..starts.len() {
+                starts[b] += starts[b - 1];
             }
-            let b = bucket(cell_of(*p)) as u32;
-            starts[b as usize + 1] += 1;
-            b
-        }));
-        for b in 1..starts.len() {
-            starts[b] += starts[b - 1];
-        }
-        bucketed.clear();
-        bucketed.resize(starts[starts.len() - 1] as usize, (Vec3::ZERO, 0));
-        let mut fill = starts.clone();
-        for (i, &b) in cells.iter().enumerate() {
-            if b != u32::MAX {
-                bucketed[fill[b as usize] as usize] = (pos[i], i as u32);
-                fill[b as usize] += 1;
+            bucketed.clear();
+            bucketed.resize(starts[starts.len() - 1] as usize, (Vec3::ZERO, 0));
+            let mut fill = starts.clone();
+            for (i, &b) in cells.iter().enumerate() {
+                if b != u32::MAX {
+                    bucketed[fill[b as usize] as usize] = (pos[i], i as u32);
+                    fill[b as usize] += 1;
+                }
             }
+        };
+        fill_grid(&mut self.starts, &mut self.bucketed, &mut self.cells, false);
+        if moved_only {
+            fill_grid(
+                &mut self.moved_starts,
+                &mut self.moved_bucketed,
+                &mut self.cells,
+                true,
+            );
         }
         let beside = -reach / edge.max(1e-3) - 0.05;
-        let (starts, bucketed) = (&*starts, &*bucketed);
+        let (all, few) = (
+            (&*self.starts, &*self.bucketed),
+            (&*self.moved_starts, &*self.moved_bucketed),
+        );
+        let (ring_starts, ring) = (&self.patches.ring_starts, &self.patches.ring);
+        // Particles sharing a triangle with a corner: the two triangles share an edge or a
+        // corner, so only a fold flat across it could bring them together, and the bending
+        // stops that (Chaos and PhysX skip near neighbours the same way).
+        let neighbour = |i: u32, tri: &[u32; 3]| {
+            tri.iter().any(|&v| {
+                ring[ring_starts[v as usize] as usize..ring_starts[v as usize + 1] as usize]
+                    .contains(&i)
+            })
+        };
         let near = |t: u32, pairs: &mut Vec<(u32, u32)>| {
             let tri = &triangles[t as usize];
+            // Only the moved particles over a triangle that stayed.
+            let (starts, bucketed) = if moved_only && !tri.iter().any(|&v| moved[v as usize]) {
+                few
+            } else {
+                all
+            };
             let [a, b, c] = tri.map(|i| pos[i as usize]);
             let Some(n) = (b - a).cross(c - a).try_normalize() else {
                 return;
@@ -1958,7 +2097,11 @@ impl SelfContacts {
                     for x in clo.x..=chi.x {
                         let slot = bucket(IVec3::new(x, y, z));
                         for &(p, i) in &bucketed[starts[slot] as usize..starts[slot + 1] as usize] {
-                            if p.cmplt(lo).any() || p.cmpgt(hi).any() || tri.contains(&i) {
+                            if p.cmplt(lo).any()
+                                || p.cmpgt(hi).any()
+                                || tri.contains(&i)
+                                || neighbour(i, tri)
+                            {
                                 continue;
                             }
                             let d = (p - a).dot(n);
@@ -2219,10 +2362,11 @@ mod tests {
         }
         let w = vec![1.0; pos.len()];
         let mut c = SelfContacts::default();
-        c.search(&pos, &w, &tris, 0.026, 0.05);
+        c.search(&pos, &w, &tris, 0.026, 0.05, false);
         let t = std::time::Instant::now();
         for _ in 0..20 {
-            c.search(&pos, &w, &tris, 0.026, 0.05);
+            c.pairs.clear();
+            c.search(&pos, &w, &tris, 0.026, 0.05, false);
         }
         println!(
             "search {:.3} ms, {} pairs, {} of {} hot",
