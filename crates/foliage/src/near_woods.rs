@@ -413,6 +413,35 @@ mod tests {
     }
 
     #[test]
+    fn revisits_replant_without_leaving_cells_behind() {
+        for background in [false, true] {
+            let (mut app, cam) = app();
+            app.world.resource_mut::<NearWoods>().background = background;
+            app.world
+                .insert_resource(ForestCover(std::sync::Arc::new(Everywhere)));
+            let mut counts = Vec::new();
+            for visit in 0..4 {
+                let x = if visit % 2 == 0 { 0.0 } else { 2000.0 };
+                app.world.get_mut::<Transform>(cam).unwrap().translation = DVec3::new(x, 0.0, 0.0);
+                for _ in 0..(COVER_SETTLE_FRAMES as usize + 40) {
+                    app.update();
+                    if background {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                }
+                let cells = app
+                    .world
+                    .query_filtered::<Entity, With<NearWoodsCell>>()
+                    .iter(&app.world)
+                    .count();
+                counts.push((cells, planted(&mut app).len()));
+            }
+            assert_eq!(counts[0], counts[2], "background {background}: {counts:?}");
+            assert_eq!(counts[1], counts[3], "background {background}: {counts:?}");
+        }
+    }
+
+    #[test]
     fn cells_laid_out_off_the_frame_are_planted_when_ready() {
         let (mut app, _) = app();
         app.world.resource_mut::<NearWoods>().background = true;
