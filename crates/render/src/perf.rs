@@ -293,6 +293,8 @@ pub(crate) struct PerfLog {
     pub acquire_ms: f32,
     pub gpu_ms: Option<f32>,
     pub gpu_memory_mb: Option<f32>,
+    /// What the GPU allocator holds from the driver, in use or not (MB; same source).
+    pub gpu_reserved_mb: Option<f32>,
     cpu_steps: Vec<(Label, f32)>,
     gpu_passes: Vec<(Label, f32)>,
     /// Each feature's draws and triangles in the latest frame, for the profile table.
@@ -311,6 +313,7 @@ impl PerfLog {
             acquire_ms: 0.0,
             gpu_ms: None,
             gpu_memory_mb: None,
+            gpu_reserved_mb: None,
             cpu_steps: Vec::new(),
             gpu_passes: Vec::new(),
             features: Vec::new(),
@@ -411,6 +414,7 @@ impl PerfLog {
         let mb = |bytes: u64| bytes as f32 / (1024.0 * 1024.0);
         self.gpu_memory_mb = report.as_ref().map(|r| mb(r.total_allocated_bytes));
         let reserved_mb = report.as_ref().map(|r| mb(r.total_reserved_bytes));
+        self.gpu_reserved_mb = reserved_mb;
         let w = &self.window;
         if w.frames > 0 {
             let n = w.frames as f32;
@@ -444,6 +448,9 @@ impl PerfLog {
             );
             if engine_core::profile::enabled() {
                 tracing::info!("render profile\n{}", self.table());
+                if let Some(report) = &report {
+                    tracing::info!("gpu memory\n{}", memory_table(report));
+                }
             }
         }
         self.window = Window::default();
@@ -519,9 +526,155 @@ impl PerfLog {
     }
 }
 
+/// One allocator block for [`memory_table`]: its size and its allocations (label, bytes).
+struct Block<'a> {
+    size: u64,
+    allocations: Vec<(&'a str, u64)>,
+}
+
+impl Block<'_> {
+    fn used(&self) -> u64 {
+        self.allocations.iter().map(|a| a.1).sum()
+    }
+}
+
+/// Where the allocator's memory goes (`--profile`): blocks by how full they are, the blocks with
+/// the most free space and what sits in them, and the largest users by resource label. Reserved
+/// but unused memory is free space inside blocks that still hold something.
+pub(crate) fn memory_table(report: &wgpu::AllocatorReport) -> String {
+    let blocks: Vec<Block> = report
+        .blocks
+        .iter()
+        .map(|b| Block {
+            size: b.size,
+            allocations: report.allocations[b.allocations.clone()]
+                .iter()
+                .map(|a| (a.name.as_str(), a.size))
+                .collect(),
+        })
+        .collect();
+    blocks_table(&blocks)
+}
+
+fn blocks_table(blocks: &[Block]) -> String {
+    use std::fmt::Write;
+    let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+    let mut out = String::new();
+    let reserved: u64 = blocks.iter().map(|b| b.size).sum();
+    let in_use: u64 = blocks.iter().map(Block::used).sum();
+    let fill = |b: &Block| b.used() as f64 / b.size.max(1) as f64;
+    let quarter = blocks.iter().filter(|b| fill(b) < 0.25).count();
+    let half = blocks.iter().filter(|b| fill(b) < 0.5).count();
+    let _ = writeln!(
+        out,
+        "{} blocks, {:.0} MB reserved, {:.0} MB in use, {:.0} MB free inside blocks; {quarter} \
+         blocks under 25% full, {half} under 50%",
+        blocks.len(),
+        mb(reserved),
+        mb(in_use),
+        mb(reserved.saturating_sub(in_use)),
+    );
+    // Block sizes.
+    let mut sizes: std::collections::BTreeMap<u64, (u32, u64)> = Default::default();
+    for b in blocks {
+        let e = sizes.entry(b.size).or_default();
+        e.0 += 1;
+        e.1 += b.used();
+    }
+    let _ = writeln!(out, "blocks by size:");
+    for (size, (count, used)) in sizes.iter().rev().take(8) {
+        let _ = writeln!(
+            out,
+            "  {:>9.1} MB x {count:<4} {:>5.1}% full",
+            mb(*size),
+            100.0 * *used as f64 / (*size * *count as u64).max(1) as f64
+        );
+    }
+    // The emptiest space, with each block's largest tenant.
+    let mut emptiest: Vec<&Block> = blocks.iter().collect();
+    emptiest.sort_by_key(|b| std::cmp::Reverse(b.size.saturating_sub(b.used())));
+    let _ = writeln!(out, "most free space:");
+    for b in emptiest.iter().take(10) {
+        let largest = b.allocations.iter().max_by_key(|a| a.1);
+        let _ = writeln!(
+            out,
+            "  {:>7.1} MB free of {:>6.1} MB, {:>4} allocations, largest {}",
+            mb(b.size.saturating_sub(b.used())),
+            mb(b.size),
+            b.allocations.len(),
+            largest.map_or("-".to_string(), |a| format!("{:?} {:.1} MB", a.0, mb(a.1))),
+        );
+    }
+    // Users by label.
+    let mut labels: HashMap<&str, (u32, u64)> = HashMap::new();
+    for &(name, bytes) in blocks.iter().flat_map(|b| &b.allocations) {
+        let e = labels.entry(name).or_default();
+        e.0 += 1;
+        e.1 += bytes;
+    }
+    let mut labels: Vec<_> = labels.into_iter().collect();
+    labels.sort_by_key(|(_, (_, bytes))| std::cmp::Reverse(*bytes));
+    let _ = writeln!(out, "largest users:");
+    for (name, (count, bytes)) in labels.iter().take(20) {
+        let name = if name.is_empty() { "(no label)" } else { name };
+        let _ = writeln!(
+            out,
+            "  {:>8.1} MB  {count:>5} x {}",
+            mb(*bytes),
+            truncate(name, 48)
+        );
+    }
+    out
+}
+
 fn truncate(s: &str, n: usize) -> &str {
     match s.char_indices().nth(n) {
         Some((i, _)) => &s[..i],
         None => s,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_table_shows_free_space_and_its_tenants() {
+        const MB: u64 = 1024 * 1024;
+        // A full 64 MB block and a 256 MB block holding one 16 MB atlas.
+        let blocks = [
+            Block {
+                size: 64 * MB,
+                allocations: vec![("mesh vertices", 40 * MB), ("mesh indices", 24 * MB)],
+            },
+            Block {
+                size: 256 * MB,
+                allocations: vec![("impostor atlas", 16 * MB)],
+            },
+        ];
+        let table = blocks_table(&blocks);
+        eprintln!("{table}");
+        assert!(table.contains("2 blocks, 320 MB reserved, 80 MB in use, 240 MB free"));
+        assert!(table.contains("1 blocks under 25% full"));
+        let free = table
+            .lines()
+            .skip_while(|l| !l.starts_with("most free"))
+            .nth(1);
+        assert!(
+            free.unwrap().contains("240.0 MB free of  256.0 MB"),
+            "{free:?}"
+        );
+        assert!(
+            free.unwrap().contains("\"impostor atlas\" 16.0 MB"),
+            "{free:?}"
+        );
+        let users = table
+            .lines()
+            .skip_while(|l| !l.starts_with("largest users"))
+            .nth(1);
+        assert!(
+            users.unwrap().contains("40.0 MB      1 x mesh vertices"),
+            "{users:?}"
+        );
     }
 }
