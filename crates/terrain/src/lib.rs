@@ -15,6 +15,7 @@ pub mod noise;
 pub mod palette;
 pub mod render;
 pub mod rivers;
+pub mod rocks;
 pub mod shape;
 pub mod wear;
 
@@ -72,6 +73,8 @@ pub struct PlanetTerrain {
     pub ground_surface: Option<GroundSurface>,
     /// Keep physics heightfield colliders around the simulation focus.
     pub colliders: bool,
+    /// Stones and boulders strewn over the ground near the focus (none by default).
+    pub rocks: rocks::RockField,
 }
 
 impl Default for PlanetTerrain {
@@ -94,6 +97,7 @@ impl PlanetTerrain {
             ground: true,
             ground_surface: None,
             colliders: true,
+            rocks: rocks::RockField::default(),
         }
     }
 
@@ -103,6 +107,7 @@ impl PlanetTerrain {
             shape: PlanetShape::moon(seed),
             palette: TerrainPalette::moon(),
             ocean_surface: false,
+            rocks: rocks::RockField::moon(),
             ..Self::earthlike(seed)
         }
     }
@@ -113,6 +118,7 @@ impl PlanetTerrain {
             shape: PlanetShape::mars(seed),
             palette: TerrainPalette::mars(),
             ocean_surface: false,
+            rocks: rocks::RockField::mars(),
             ..Self::earthlike(seed)
         }
     }
@@ -516,6 +522,7 @@ impl Plugin for TerrainPlugin {
             .init_resource::<WearSettings>()
             .init_resource::<WearProvider>()
             .init_resource::<collider::TerrainColliders>()
+            .init_resource::<rocks::RockCells>()
             .init_resource::<RecoverClock>()
             .register_component::<PlanetTerrain>(
                 "Procedural planet or flat terrain on this entity (shape, palette, level of \
@@ -537,7 +544,12 @@ impl Plugin for TerrainPlugin {
             )
             .add_systems(
                 PostUpdate,
-                (sync_terrains, apply_edits, collider::update_colliders)
+                (
+                    sync_terrains,
+                    apply_edits,
+                    collider::update_colliders,
+                    rocks::update_rocks,
+                )
                     .chain()
                     .in_set(UpdateSet::AfterPropagate),
             )
