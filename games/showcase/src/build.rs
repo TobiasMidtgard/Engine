@@ -337,12 +337,19 @@ const MODULES_LOADING: [fn(&World) -> bool; 8] = [
             .is_some_and(|f| !f.is_ready())
     },
     uploading,
-    // Mesh pipelines compiling on workers, so the walk doesn't hitch on first sight.
+    // Mesh, impostor and material pipelines compiling on workers, so the walk doesn't hitch
+    // on first sight.
     |world| {
         world
             .get_resource::<engine::core::diagnostics::Diagnostics>()
-            .and_then(|d| d.get("render.meshes.pipelines_warming"))
-            .is_some_and(|n| n > 0.0)
+            .is_some_and(|d| {
+                [
+                    "render.meshes.pipelines_warming",
+                    "render.materials.pipelines_warming",
+                ]
+                .iter()
+                .any(|k| d.get(k).is_some_and(|n| n > 0.0))
+            })
     },
 ];
 
