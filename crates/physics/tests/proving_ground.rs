@@ -760,3 +760,62 @@ fn a_resting_yard_leaves_the_region_of_a_turntable() {
     let stats = *app.world.resource::<PhysicsStats>();
     assert!(stats.dormant + 1 >= stats.bodies, "{stats:?}");
 }
+
+/// A Galton board nobody has come near rests poured (`galton::poured`): every ball still, in
+/// the bins on the printed curve, rather than held in the hopper and the pins, ready to pour
+/// on whenever something woke them (the lead's PC loops found 400 pouring 150 m away).
+#[test]
+fn a_galton_board_nobody_has_seen_rests_poured() {
+    use demo::galton;
+    let mut app = App::new();
+    app.add_plugins(WorldPlugin);
+    app.add_plugins(PhysicsPlugin);
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual {
+            step_secs: 1.0 / 60.0,
+        });
+    app.world.resource_mut::<FixedTime>().set_hz(60.0);
+    app.world.spawn((
+        Transform::from_xyz(300.0, 1.7, 0.0),
+        SimulationFocus::default(),
+    ));
+    let mut commands = app.world.commands();
+    demo::spawn_demo(&mut commands, DVec3::ZERO);
+    app.world.flush();
+    app.update_n(30);
+    let origin = Station::Galton.base() + DVec3::Y * demo::SLAB_RISE;
+    let balls = named(&mut app, "Galton ball");
+    assert_eq!(balls.len(), galton::BALLS);
+    let at = |app: &App| -> Vec<DVec3> {
+        balls
+            .iter()
+            .map(|&b| app.world.get::<Transform>(b).unwrap().translation - origin)
+            .collect()
+    };
+    let before = at(&app);
+    let mut bins = [0usize; galton::BINS];
+    for p in &before {
+        assert!(
+            p.x.abs() < galton::HALF_WIDTH as f64
+                && p.z.abs() < galton::SLOT as f64
+                && p.y > galton::FLOOR as f64
+                && p.y < galton::BIN_TOP as f64,
+            "a ball isn't in a bin: at {p}"
+        );
+        bins[galton::bin_of(p.x as f32)] += 1;
+    }
+    for (j, (&n, want)) in bins.iter().zip(galton::expected()).enumerate() {
+        assert!(
+            (n as f32 - want).abs() <= 1.0,
+            "bin {j} holds {n}, the curve {want:.1}: {bins:?}"
+        );
+    }
+    app.update_n(60);
+    let moved = before
+        .iter()
+        .zip(at(&app))
+        .map(|(a, b)| a.distance(b))
+        .fold(0.0, f64::max);
+    assert!(moved < 0.001, "a resting ball moved {moved} m");
+}

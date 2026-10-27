@@ -64,7 +64,9 @@ gltf = "1.4"
 notify = "8"
 
 # --- subsystems ---
-rapier3d = { version = "0.36", features = ["parallel"] }
+# Without "parallel": physics steps its regions as parallel jobs already, and Rapier's hand-offs
+# to its rayon pool stalled single steps 5-15 ms on a busy machine (engine_physics).
+rapier3d = { version = "0.36" }
 kira = "0.12"
 egui = "0.36"
 egui-wgpu = { version = "0.36", default-features = false }

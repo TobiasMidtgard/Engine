@@ -506,7 +506,8 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
     }
 
-    if !sim.resting.is_empty() {
+    crate::grounding::hold_ungrounded(&mut sim, &foci);
+    if !sim.resting.is_empty() || !sim.ungrounded.is_empty() {
         hold_resting(&mut sim);
     }
     drop(sync);
@@ -580,13 +581,34 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 dt: 0.0,
             };
             let r = s.regions[rid as usize].as_mut().expect("live region");
-            if r.needs_refresh {
+            if r.needs_refresh && r.dormant {
+                // A dormant region's contacts wait for its first real step (all of it asleep,
+                // nothing here needs them): only the query tree learns of its new colliders.
+                // Finding a yard's 10,000 pairs afresh, a split cost 30-85 ms in one step.
+                if r.stale_all || !r.fresh.is_empty() {
+                    r.refresh_queries();
+                    r.update_bounds();
+                }
+            } else if r.needs_refresh {
+                let _refresh = tracing::info_span!("refresh resting region").entered();
                 // A zero-length step: Rapier applies the removals and updates the contacts and
                 // its islands together (its collision-only pass leaves the islands a link
                 // behind the contact graph, and a later contact gets mislinked).
+                let t0 = Instant::now();
+                let fresh = r.fresh.len();
                 r.world.integration_parameters.dt = 0.0;
                 r.world.step_with_events(&filter, &());
                 r.needs_refresh = false;
+                let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                if ms > 5.0 && report {
+                    engine_core::log::info!(
+                        "physics regions: refreshing resting region {rid} ({} bodies, {} \
+                         colliders, {fresh} fresh, {} pairs) took {ms:.1} ms",
+                        r.world.bodies.len(),
+                        r.world.colliders.len(),
+                        r.world.narrow_phase.contact_pairs().count(),
+                    );
+                }
                 r.queries_refreshed();
                 r.update_bounds();
             }
@@ -1595,6 +1617,11 @@ fn busy_regions(sim: &Simulation) -> HashSet<RegionId> {
 /// PhysX leave sleeping islands out of the solver and the narrow phase. Bodies told to rest
 /// ([`Simulation::resting`]) were put back to sleep before this.
 fn idle(r: &crate::sim::Region) -> bool {
+    // A dormant one is all asleep or held (`wake_dormant` saw to it this step), though Rapier's
+    // active set may not know yet, and its changes wait for its first real step.
+    if r.dormant {
+        return true;
+    }
     r.world.islands.active_bodies().next().is_none()
         && !r.needs_refresh
         && r.fresh.is_empty()
@@ -1605,20 +1632,22 @@ fn idle(r: &crate::sim::Region) -> bool {
             .all(|(_, rb)| rb.is_fixed() || rb.is_sleeping())
 }
 
-/// Hold the bodies told to rest asleep ([`Simulation::resting`]): wake-ups from their
+/// Hold the bodies told to rest asleep ([`Simulation::resting`]), and those waiting for their
+/// ground to load ([`Simulation::ungrounded`]): wake-ups from their
 /// neighbours, from gameplay writing to them, or bodies made since they were told, go back to
 /// sleep, still. Every one is looked at, not only Rapier's active ones: a body woken since the
 /// last step joins them only as the next one starts, and wakes all it touches.
 fn hold_resting(sim: &mut Simulation) {
     let Simulation {
         resting,
+        ungrounded,
         bodies,
         characters,
         regions,
         ..
     } = sim;
     let mut held = 0;
-    for e in resting.iter() {
+    for e in resting.iter().chain(ungrounded.iter()) {
         // (A character told to rest stands still: its body sleeps too.)
         let Some((region, handle)) = bodies
             .get(e)

@@ -747,6 +747,8 @@ pub struct Simulation {
     /// Bodies told to rest (the proving ground's stations nobody is near): held asleep, and
     /// kinematic ones still, every step.
     pub resting: EntityHashSet,
+    /// Bodies held asleep until the ground under them loads ([`crate::grounding`]).
+    pub ungrounded: EntityHashSet,
 }
 
 /// Rapier hooks: drop the contacts listed in [`Simulation::no_contact`], and keep round bodies
@@ -895,8 +897,11 @@ impl Simulation {
     }
 
     /// Nearest region whose anchor is within `max` meters of `p`.
+    /// The nearest region within `max` of `p` for a mover: not a dormant one, which a mover
+    /// joining would wake whole (the fortress's fresh debris joined the dormant yard 200 m off).
     fn nearest_region(&self, p: DVec3, max: f64) -> Option<RegionId> {
         self.live_regions()
+            .filter(|(_, r)| !r.dormant)
             .map(|(id, r)| (id, r.anchor.distance(p)))
             .filter(|(_, d)| *d <= max)
             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -910,7 +915,7 @@ impl Simulation {
         let join = self.settings.region_radius_m * 0.5;
         let full = self
             .live_regions()
-            .filter(|(_, r)| r.tier == 0 && r.fine.is_none())
+            .filter(|(_, r)| r.tier == 0 && r.fine.is_none() && !r.dormant)
             .map(|(id, r)| (id, r.anchor.distance(p)))
             .filter(|(_, d)| *d <= join)
             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -1082,6 +1087,7 @@ impl Simulation {
     /// to rest.
     pub fn forget_body(&mut self, entity: Entity) -> Vec<Entity> {
         self.resting.remove(&entity);
+        self.ungrounded.remove(&entity);
         self.remove_body(entity)
     }
 
@@ -1314,7 +1320,14 @@ impl Simulation {
             .home
             .is_some_and(|h| self.regions.get(h as usize).is_some_and(|r| r.is_some()));
         if !home_ok {
-            let home = match self.nearest_region(center, self.settings.region_radius_m) {
+            // (Any region may hold a static: it wakes nothing.)
+            let home = self
+                .live_regions()
+                .map(|(id, r)| (id, r.anchor.distance(center)))
+                .filter(|(_, d)| *d <= self.settings.region_radius_m)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(id, _)| id);
+            let home = match home {
                 Some(id) => id,
                 None => self.create_region(center),
             };
@@ -2253,14 +2266,20 @@ impl Simulation {
         let newly_mixed = self.update_fine();
         self.wake_dormant();
         if self.lod_clock.is_multiple_of(crate::lod::LOD_EVERY) {
+            let _far = tracing::info_span!("split far").entered();
             self.split_far(foci, margin * 1.25);
+            drop(_far);
+            let _dormant = tracing::info_span!("split dormant").entered();
             self.split_dormant(margin * 2.0);
         }
         if newly_mixed || self.lod_clock.is_multiple_of(crate::lod::LOD_EVERY) {
+            let _fine = tracing::info_span!("split fine").entered();
             self.split_fine(fine_margin * 1.25);
         }
         self.update_fine();
+        let tiers = tracing::info_span!("region tiers").entered();
         self.update_tiers(foci);
+        drop(tiers);
         drop(splits);
 
         let mut bounds: Vec<(RegionId, DVec3, DVec3)> = Vec::new();
@@ -2348,6 +2367,16 @@ impl Simulation {
                     } else {
                         (b, a)
                     };
+                    if crate::report::wanted() && self.region(small).movers >= 100 {
+                        engine_core::log::info!(
+                            "physics regions: merging region {small} ({} movers, dormant {}) into \
+                             {big} ({} movers, dormant {})",
+                            self.region(small).movers,
+                            self.region(small).dormant,
+                            self.region(big).movers,
+                            self.region(big).dormant
+                        );
+                    }
                     self.merge_regions(big, small);
                     let merged = self.region_mut(big);
                     merged.dormant = da && db;
@@ -2592,6 +2621,20 @@ impl Simulation {
                 h.remove(&mut r.world, false);
             }
         }
+        let started = std::time::Instant::now();
+        let from = entities
+            .first()
+            .and_then(|e| self.bodies.get(e))
+            .map(|b| b.region);
+        // Each body's colliders, found in one pass (a pass per body made moving a yard of
+        // 1400 bodies take 30 ms on the lead's PC).
+        let mut owned: HashMap<Entity, Vec<Entity>> = HashMap::new();
+        for (ce, c) in &self.colliders {
+            if let Some(b) = c.body.filter(|b| set.contains(b)) {
+                owned.entry(b).or_default().push(*ce);
+            }
+        }
+        let mut moved: EntityHashSet = EntityHashSet::default();
         for &e in entities {
             let Some(b) = self.bodies.get(&e) else {
                 continue;
@@ -2600,20 +2643,11 @@ impl Simulation {
             if from == target {
                 continue;
             }
-            let collider_entities: Vec<Entity> = self
-                .colliders
-                .iter()
-                .filter(|(_, c)| c.body == Some(e))
-                .map(|(ce, _)| *ce)
-                .collect();
+            let collider_entities = owned.remove(&e).unwrap_or_default();
             // Take the Rapier objects out of the old region.
             let (rb, cols, from_anchor) = {
                 let src = self.region_mut(from);
                 let mut cols = Vec::new();
-                for ce in &collider_entities {
-                    // (handled below via the entry handles)
-                    let _ = ce;
-                }
                 let rb_cols: Vec<ColliderHandle> = src
                     .world
                     .bodies
@@ -2673,16 +2707,30 @@ impl Simulation {
                         }
                     }
                 }
-                let pairs: Vec<(Entity, Entity)> = self
-                    .contacts
-                    .touching
-                    .keys()
-                    .filter(|k| k.0 == ce || k.1 == ce)
-                    .copied()
-                    .collect();
-                self.contacts.recheck.extend(pairs);
-                self.contacts.pending.retain(|k, _| k.0 != ce && k.1 != ce);
+                moved.insert(ce);
             }
+        }
+        if moved.is_empty() {
+            return;
+        }
+        // Their contacts are looked at again after the next step.
+        let pairs: Vec<(Entity, Entity)> = self
+            .contacts
+            .touching
+            .keys()
+            .filter(|k| moved.contains(&k.0) || moved.contains(&k.1))
+            .copied()
+            .collect();
+        self.contacts.recheck.extend(pairs);
+        self.contacts
+            .pending
+            .retain(|k, _| !moved.contains(&k.0) && !moved.contains(&k.1));
+        if entities.len() >= 100 && crate::report::wanted() {
+            engine_core::log::info!(
+                "physics regions: moved {} bodies from region {from:?} to {target} in {:.1} ms",
+                entities.len(),
+                started.elapsed().as_secs_f64() * 1000.0
+            );
         }
     }
 

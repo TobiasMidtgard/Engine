@@ -10,6 +10,7 @@ mod convert;
 mod debug;
 pub mod demo;
 mod fine;
+mod grounding;
 mod lod;
 mod queries;
 mod report;
@@ -73,6 +74,9 @@ pub struct PhysicsStats {
     /// Bodies in dormant regions: asleep and apart from everything awake, so they sit steps
     /// out though a region near them keeps stepping.
     pub dormant: usize,
+    /// Bodies held asleep until the ground under them loads (past the simulation range, with
+    /// no collider under them yet).
+    pub ungrounded: usize,
 }
 
 impl PhysicsStats {
@@ -112,6 +116,7 @@ impl PhysicsStats {
             fine_awake,
             resting_awake: by_tier[3],
             dormant,
+            ungrounded: sim.ungrounded.len(),
         }
     }
 }

@@ -107,10 +107,12 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
         .collect();
     rows.sort_by(|a, b| b.1.total_cmp(&a.1));
     let mut out = format!(
-        "physics report: {:.2} ms per step over {} steps, {} regions, foci{}",
+        "physics report: {:.2} ms per step over {} steps, {} regions, {} bodies waiting for \
+         their ground, foci{}",
         t.step_ms / steps,
         t.steps,
         sim.live_regions().count(),
+        sim.ungrounded.len(),
         foci.iter()
             .map(|f| format!(" ({:.0} {:.0} {:.0})", f.x, f.y, f.z))
             .collect::<String>()
@@ -140,6 +142,14 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
         let w = &r.world;
         let bodies = w.bodies.iter().filter(|(_, b)| !b.is_fixed()).count();
         let awake = w.islands.active_bodies().count();
+        // Held bodies (resting stations', or waiting for their ground) something woke.
+        let held = w
+            .islands
+            .active_bodies()
+            .filter_map(|h| w.bodies.get(h))
+            .map(|rb| crate::convert::entity_of(rb.user_data))
+            .filter(|e| sim.resting.contains(e) || sim.ungrounded.contains(e))
+            .count();
         let pairs = w.narrow_phase.contact_pairs().count();
         let touching = w
             .narrow_phase
@@ -151,13 +161,14 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
             .map(|f| f.distance(r.anchor))
             .fold(f64::INFINITY, f64::min);
         out += &format!(
-            "\n  region {id}: {:.2} ms per step ({:.2} per run, {n} runs), tier {}{}, \
-             {bodies} bodies ({awake} awake), {} colliders, {pairs} pairs ({touching} touching), \
+            "\n  region {id}: {:.2} ms per step ({:.2} per run, {n} runs), tier {}{}{}, \
+             {bodies} bodies ({awake} awake, {held} of them held), {} colliders, {pairs} pairs ({touching} touching), \
              {} joints, anchor {near:.0} m from focus",
             ms / steps,
             ms / n.max(1) as f64,
             r.tier,
             if r.fine.is_some() { " fine" } else { "" },
+            if r.dormant { ", dormant" } else { "" },
             w.colliders.len(),
             w.impulse_joints.iter().count() + w.multibody_joints.iter().count(),
         );
@@ -173,8 +184,7 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
             r.mixed
         );
         for (e, reach, kind) in wide.into_iter().take(4) {
-            let name = world.get::<Name>(e).map_or("?", |n| n.as_str());
-            out += &format!(" {name} ({kind:?}, {reach:.1} m)");
+            out += &format!(" {} ({kind:?}, {reach:.1} m)", label(world, e));
         }
         // What keeps it stepping: its fastest awake bodies.
         let mut moving: Vec<(f32, Entity, bool, DVec3)> = w
@@ -191,13 +201,7 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
             moving.sort_by(|a, b| b.0.total_cmp(&a.0));
             out += "; awake:";
             for (speed, e, kinematic, at) in moving.into_iter().take(4) {
-                let name = world
-                    .get::<Name>(e)
-                    .or_else(|| {
-                        let parent = world.get::<ChildOf>(e)?.parent();
-                        world.get::<Name>(parent)
-                    })
-                    .map_or("?", |n| n.as_str());
+                let name = label(world, e);
                 let kind = if kinematic { ", kinematic" } else { "" };
                 out += &format!(
                     " {name} ({speed:.1} m/s{kind}, at {:.0} {:.0} {:.0})",
@@ -208,4 +212,49 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
     }
     engine_core::log::info!("{out}");
     *t = Totals::default();
+}
+
+/// What to call a body in the report: its name or its nearest named ancestor's, or else its
+/// id and the components that say who made it (those outside the core, the world contracts
+/// and physics), as `crate::Type`.
+fn label(world: &World, e: Entity) -> String {
+    let mut cur = e;
+    loop {
+        if let Some(name) = world.get::<Name>(cur) {
+            return name.as_str().to_string();
+        }
+        match world.get::<ChildOf>(cur) {
+            Some(parent) => cur = parent.parent(),
+            None => break,
+        }
+    }
+    let Ok(components) = world.inspect_entity(e) else {
+        return format!("{e}");
+    };
+    let mine: Vec<String> = components
+        .map(|(_, info)| info.name().to_string())
+        .filter(|n| {
+            ![
+                "bevy",
+                "engine_core",
+                "engine_world",
+                "engine_physics",
+                "engine_render",
+            ]
+            .iter()
+            .any(|core| n.starts_with(core))
+        })
+        .map(|n| {
+            let path = n.split('<').next().unwrap_or(&n);
+            let krate = path.split("::").next().unwrap_or(path);
+            let ty = path.rsplit("::").next().unwrap_or(path);
+            format!("{krate}::{ty}")
+        })
+        .take(2)
+        .collect();
+    if mine.is_empty() {
+        format!("{e}")
+    } else {
+        format!("{e} {}", mine.join(" "))
+    }
 }

@@ -178,6 +178,33 @@ pub fn hopper() -> Vec<(f32, f32)> {
     out
 }
 
+/// Where the balls lie once they have all poured: each bin holds its share on the printed
+/// curve ([`expected`], rounded so they add up to [`BALLS`]), stacked three across from the
+/// floor up, as `(x, y)` in the board's plane. A board nobody has come near rests like this
+/// (`replay_stations`): finished, rather than held mid-pour with half its balls in the pins.
+pub fn poured() -> Vec<(f32, f32)> {
+    let want = expected();
+    let mut counts: [usize; BINS] = std::array::from_fn(|j| want[j].floor() as usize);
+    // The balls the rounding left over go to the bins it shorted most (the tails' too).
+    let mut short: Vec<usize> = (0..BINS).collect();
+    short.sort_by(|&a, &b| (want[b] - want[b].floor()).total_cmp(&(want[a] - want[a].floor())));
+    let mut k = 0;
+    while counts.iter().sum::<usize>() < BALLS {
+        counts[short[k % BINS]] += 1;
+        k += 1;
+    }
+    let step = 2.0 * BALL + 0.0005;
+    let mut out = Vec::with_capacity(BALLS);
+    for (j, &n) in counts.iter().enumerate() {
+        let mid = -HALF_WIDTH + (j as f32 + 0.5) * PITCH;
+        for i in 0..n {
+            let x = mid + ((i % 3) as f32 - 1.0) * step;
+            out.push((x, FLOOR + BALL + 0.0005 + (i / 3) as f32 * step));
+        }
+    }
+    out
+}
+
 /// The fixed boxes: (center, half extents) in the board's frame (x across, y up, z out of
 /// the glass), without the funnel's slanted walls and the pins.
 pub fn walls() -> Vec<(Vec3, Vec3)> {
