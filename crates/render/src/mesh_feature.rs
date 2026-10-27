@@ -2458,6 +2458,18 @@ impl RenderFeature for MeshFeature {
         if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
             d.set("render.meshes.slots", self.scene.hot.len() as f64);
             d.set("render.meshes.dirty_slots", self.scene.dirty as f64);
+            // Sun cascade casters drawn this frame (reused cascades draw none).
+            let (mut instances, mut triangles) = (0u64, 0u64);
+            for b in self.shadow[..SKY_OCCLUSION_VIEW].iter().flatten() {
+                let level = self
+                    .meshes
+                    .get(&b.key.mesh)
+                    .map_or(0, |m| m.level(b.key.lod).1);
+                instances += b.count as u64;
+                triangles += (level / 3) as u64 * b.count as u64;
+            }
+            d.set("render.meshes.cascade_instances", instances as f64);
+            d.set("render.meshes.cascade_triangles", triangles as f64);
         }
         steps.publish(world);
     }
