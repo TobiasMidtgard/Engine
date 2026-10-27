@@ -662,7 +662,7 @@ pub fn spawn_meadows(commands: &mut Commands, lib: &Library, land: &Landscape, r
             let tf = Transform::from_translation(DVec3::new(x, h - 0.03, z))
                 .with_rotation(tilt * Quat::from_rotation_y(rng.range(0.0, TAU)))
                 .with_scale(Vec3::new(1.0, rng.range(0.8, 1.3), 1.0));
-            // The grass itself is the GPU meadow ([`spawn_meadow_grass`]); these draws stay so
+            // The grass itself is the GPU meadow ([`meadow_grass`]); these draws stay so
             // the scenery spawned after the meadows keeps its layout.
             let _ = (
                 rng.range_i32(0, lib.grass.len() as i32),
@@ -737,7 +737,9 @@ fn meadow_cover(land: &Landscape, x: f64, z: f64) -> (f32, f32) {
 /// The valley's meadows as GPU grass: one field of blades over the whole valley floor, thick
 /// on the pastures, thin under the trees and along the field margins, none on roads, water,
 /// fields and paved zones; yellowing where the ground paint shows hay and dry grass.
-pub fn spawn_meadow_grass(commands: &mut Commands, land: &Landscape) {
+/// The GPU meadow's field: heights, density and dryness on a grid over the valley (a million
+/// points, so the exe maps it on a worker while the world builds).
+pub fn meadow_grass(land: &Landscape) -> GrassField {
     let t0 = std::time::Instant::now();
     // A million grid points: sampled a band of rows per core.
     let n = MEADOW_GRID as usize;
@@ -789,7 +791,7 @@ pub fn spawn_meadow_grass(commands: &mut Commands, land: &Landscape) {
         100.0 * covered as f32 / field.density.len() as f32,
         t0.elapsed().as_secs_f32()
     );
-    commands.spawn((Transform::default(), field));
+    field
 }
 
 /// Near a scarp, where the cliff builds its own rock face and talus.

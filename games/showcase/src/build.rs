@@ -43,6 +43,8 @@ pub struct WorldBuild {
     waiting: Option<std::time::Instant>,
     /// The library's mesh and texture work, on worker threads from the start.
     lib_job: Option<scenery::LibraryJob>,
+    /// The GPU meadow's field, mapped on a worker from the start.
+    meadow_job: Option<std::thread::JoinHandle<GrassField>>,
 }
 
 /// With `--profile`, the systems of a slow loading frame. The profiler publishes its window
@@ -126,9 +128,18 @@ const STEPS: [Step; 12] = [
         true
     }),
     ("meadows", "Growing the meadows", |world, b| {
+        let field = match b.meadow_job.take() {
+            // The exe keeps drawing its loading screen while the worker maps it.
+            Some(job) if world.contains_resource::<Staged>() && !job.is_finished() => {
+                b.meadow_job = Some(job);
+                return false;
+            }
+            Some(job) => job.join().expect("meadow thread"),
+            None => scenery::meadow_grass(&b.land),
+        };
         with_commands(world, |c| {
             scenery::spawn_meadows(c, b.lib.as_ref().expect(LIB), &b.land, &mut b.rng);
-            scenery::spawn_meadow_grass(c, &b.land);
+            c.spawn((Transform::default(), field));
         });
         true
     }),
@@ -350,6 +361,10 @@ pub fn start(world: &mut World) {
         engine_weather::spawn_sky_lights(c);
     });
     let seed = world.resource::<EngineConfig>().seed;
+    let meadow_job = {
+        let land = land.clone();
+        std::thread::spawn(move || scenery::meadow_grass(&land))
+    };
     let mut build = WorldBuild {
         next: 0,
         land,
@@ -365,6 +380,7 @@ pub fn start(world: &mut World) {
         waiting: None,
         // Started before anything else, so the workers overlap the rest of startup.
         lib_job: Some(scenery::LibraryJob::start()),
+        meadow_job: Some(meadow_job),
         slow: Vec::new(),
     };
     if world.contains_resource::<Staged>() {
