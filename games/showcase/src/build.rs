@@ -299,6 +299,8 @@ pub fn start(world: &mut World) {
     };
     if world.contains_resource::<Staged>() {
         show_loading(world, &build);
+        // Modules may spend more of each frame on their loading work while this is up.
+        world.insert_resource(engine::world::LoadingBudget::default());
         world.insert_resource(build);
         return;
     }
@@ -352,6 +354,7 @@ pub fn step(world: &mut World) {
         world.insert_resource(build);
     } else {
         screens::hide(world, "world_loading", false);
+        world.remove_resource::<engine::world::LoadingBudget>();
         finish(world, &build);
     }
 }
@@ -562,11 +565,14 @@ pub fn cover_jumps(world: &mut World, mut jump: Local<Jump>) {
     let waited = since.elapsed().as_secs_f32();
     if (pending == 0.0 && waited > 0.3 && jump.frames > COVER_FRAMES) || waited > 4.0 {
         screens::hide(world, "jump_cover", false);
+        world.remove_resource::<engine::world::LoadingBudget>();
         jump.since = None;
     }
 }
 
 fn show_cover(world: &mut World) {
+    // Behind the cover, as behind the loading screen, modules may load faster.
+    world.insert_resource(engine::world::LoadingBudget::default());
     let p = world.resource::<Theme>().palette.clone();
     let el = El::new()
         .with_style(|s| {
