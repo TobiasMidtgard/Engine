@@ -608,6 +608,14 @@ impl Renderer {
         &self.shared.device
     }
 
+    /// Where the GPU allocator's memory goes, as the `--profile` log shows it (blocks by fill,
+    /// the most free space and its tenants, the largest users by label); `None` where the
+    /// backend doesn't report its allocations.
+    pub fn gpu_memory_table(&self) -> Option<String> {
+        let report = self.shared.device.generate_allocator_report()?;
+        Some(crate::perf::memory_table(&report))
+    }
+
     pub fn queue(&self) -> &wgpu::Queue {
         &self.shared.queue
     }
@@ -1551,6 +1559,9 @@ impl Renderer {
             }
             if let Some(mb) = self.perf.gpu_memory_mb {
                 d.set("render.gpu_memory_mb", mb as f64);
+            }
+            if let Some(mb) = self.perf.gpu_reserved_mb {
+                d.set("render.gpu_reserved_mb", mb as f64);
             }
             d.set("render.draw_calls", stats.draw_calls as f64);
             d.set("render.instances", stats.instances as f64);
