@@ -25,8 +25,9 @@ use engine_core::math::{DQuat, DVec3, Quat, Rng, Vec3};
 use engine_core::prelude::*;
 use engine_core::tasks::AsyncComputeTaskPool;
 use engine_render::{Image, Mesh, MeshRenderer, Shape, StandardMaterial};
-use engine_world::{ProjectileTrace, SmokeEmission, WorldImpulse};
+use engine_world::{LoadingBudget, ProjectileTrace, SmokeEmission, WorldImpulse};
 
+use crate::settings::SmokeSettings;
 use crate::sim::{self, SmokeFan, SmokeSource};
 
 mod art;
@@ -139,6 +140,8 @@ pub struct SmokeDemoState {
     shots: u32,
     blasted: bool,
     restart: bool,
+    /// Seconds of the round's warm-up still to run (spread over a loading screen's frames).
+    warming: f32,
 }
 
 impl SmokeDemoState {
@@ -382,11 +385,15 @@ pub fn run_demos(world: &mut World) {
                 state.started = true;
                 state.rounds = 1;
                 pop_grenades(world, entity);
-                if demo.warmup_secs > 0.0 {
-                    sim::fast_forward(world, demo.warmup_secs);
-                }
+                state.warming = demo.warmup_secs.max(0.0);
                 state.since = demo.warmup_secs;
+                warm_up(world, &mut state.warming);
             }
+            world.entity_mut(entity).insert(state);
+            continue;
+        }
+        if state.warming > 0.0 {
+            warm_up(world, &mut state.warming);
             world.entity_mut(entity).insert(state);
             continue;
         }
@@ -427,6 +434,31 @@ pub fn run_demos(world: &mut World) {
             }
         }
         world.entity_mut(entity).insert(state);
+    }
+}
+
+/// Run a round's warm-up: all at once in play, or behind a loading screen as many steps as fit
+/// in its frame budget (`LoadingBudget`), the rest on the next frames. A whole warm-up is a few
+/// hundred steps of the range's air: about 0.3 s in one frame on a fast PC.
+fn warm_up(world: &mut World, warming: &mut f32) {
+    let Some(budget) = world.get_resource::<LoadingBudget>().map(|b| b.budget_ms) else {
+        sim::fast_forward(world, *warming);
+        *warming = 0.0;
+        return;
+    };
+    let step = 1.0 / world.resource::<SmokeSettings>().sim_hz.clamp(1.0, 120.0);
+    let started = std::time::Instant::now();
+    // At least one step a frame, so a tiny budget still gets there.
+    loop {
+        let secs = step.min(*warming);
+        sim::fast_forward(world, secs);
+        *warming -= secs;
+        if *warming <= 1e-4 || started.elapsed().as_secs_f64() * 1000.0 >= budget {
+            break;
+        }
+    }
+    if *warming <= 1e-4 {
+        *warming = 0.0;
     }
 }
 
@@ -683,5 +715,48 @@ mod tests {
         assert!(s.since < 10.0 && s.rounds == 1, "{s:?}");
         let mut q = app.world.query::<&SmokeFan>();
         assert!(q.iter(&app.world).all(|f| !f.on));
+    }
+
+    /// Behind a loading screen the round's warm-up runs a budget's worth a frame (here one
+    /// step), not all in the first frame, and play starts where it would have.
+    #[test]
+    fn behind_a_loading_screen_the_warm_up_is_spread_over_frames() {
+        engine_core::tasks::init_task_pools();
+        let mut app = App::new();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual {
+                step_secs: 1.0 / 20.0,
+            });
+        app.add_plugins(SmokePlugin);
+        app.world.resource_mut::<SmokeSettings>().background = false;
+        app.world.insert_resource(LoadingBudget { budget_ms: 0.0 });
+        {
+            let mut commands = app.world.commands();
+            spawn_demo(&mut commands, DVec3::ZERO);
+        }
+        app.world.flush();
+        let mut volumes = app.world.query::<&mut SmokeVolume>();
+        for mut v in volumes.iter_mut(&mut app.world) {
+            v.cell_m = 1.0;
+        }
+        let state = |app: &mut App| {
+            let mut q = app.world.query::<&SmokeDemoState>();
+            *q.single(&app.world).unwrap()
+        };
+        app.update_n(4);
+        let warmup = SmokeDemo::default().warmup_secs;
+        let s = state(&mut app);
+        assert!(s.started && s.warming > 0.0 && s.warming < warmup, "{s:?}");
+        assert_eq!(s.since, warmup);
+        let mut frames = 0;
+        while state(&mut app).warming > 0.0 {
+            app.update();
+            frames += 1;
+            assert!(frames < 1000);
+        }
+        assert!(frames > 100, "{frames}");
+        assert_eq!(state(&mut app).since, warmup);
+        assert!(app.world.resource::<SmokeDomains>().mass_kg() > 1.0);
     }
 }
