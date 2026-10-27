@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use bevy_ecs::prelude::*;
 use parking_lot::Mutex;
 use tracing::field::{Field, Visit};
+use tracing::level_filters::LevelFilter;
 use tracing::span::{Attributes, Id};
 use tracing_subscriber::layer::{Context, Filter, Layer};
 use tracing_subscriber::registry::LookupSpan;
@@ -78,6 +79,13 @@ pub(crate) struct ProfileFilter;
 impl<S> Filter<S> for ProfileFilter {
     fn enabled(&self, meta: &tracing::Metadata<'_>, _: &Context<'_, S>) -> bool {
         enabled() && timed(meta)
+    }
+
+    /// Every timed span is info level (bevy's system and schedule spans, the engine's own), so
+    /// say so: without a hint the global max level stays TRACE and every `log::trace!` (wgpu logs
+    /// each render pass command) goes through the dispatcher before a filter drops it.
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        Some(LevelFilter::INFO)
     }
 }
 
