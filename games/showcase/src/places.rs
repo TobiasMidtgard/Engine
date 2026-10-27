@@ -41,6 +41,12 @@ impl Place {
         self.on_arrive.push((name.to_string(), args));
         self
     }
+
+    /// Make an API call on leaving.
+    fn leaving(mut self, name: &str, args: String) -> Self {
+        self.on_leave.push((name.to_string(), args));
+        self
+    }
 }
 
 /// The footpath villagers have worn from the end of the east road across the grass to the
@@ -268,14 +274,48 @@ pub fn places() -> Vec<Place> {
             walk_view(0),
             10.5,
         )
-        .arriving("showcase.walk", r#"{"stop": 1}"#.into()),
+        .arriving("showcase.walk", r#"{"stop": 1}"#.into())
+        .leaving("showcase.walk", r#"{"stop": 0}"#.into()),
+        place(
+            "walk_yard",
+            "Walk the valley: from the market, heading for the cloth yard",
+            walk_view(1),
+            11.5,
+        )
+        .arriving("showcase.walk", r#"{"stop": 2}"#.into())
+        .leaving("showcase.walk", r#"{"stop": 0}"#.into()),
+        place(
+            "walk_path",
+            "Walk the valley: from the cloth yard, heading down the footpath",
+            walk_view(2),
+            12.5,
+        )
+        .arriving("showcase.walk", r#"{"stop": 3}"#.into())
+        .leaving("showcase.walk", r#"{"stop": 0}"#.into()),
+        place(
+            "walk_shore",
+            "Walk the valley: down the footpath, heading for the lake shore",
+            walk_view(3),
+            14.0,
+        )
+        .arriving("showcase.walk", r#"{"stop": 4}"#.into())
+        .leaving("showcase.walk", r#"{"stop": 0}"#.into()),
         place(
             "walk_falls",
             "Walk the valley: on the lake shore, heading for the waterfall",
             walk_view(4),
             15.0,
         )
-        .arriving("showcase.walk", r#"{"stop": 5}"#.into()),
+        .arriving("showcase.walk", r#"{"stop": 5}"#.into())
+        .leaving("showcase.walk", r#"{"stop": 0}"#.into()),
+        place(
+            "walk_meadow",
+            "Walk the valley: from the waterfall, heading for the meadow",
+            walk_view(5),
+            16.0,
+        )
+        .arriving("showcase.walk", r#"{"stop": 6}"#.into())
+        .leaving("showcase.walk", r#"{"stop": 0}"#.into()),
         lake_trail(place(
             "lake_trail",
             "A footpath worn bare across the grass to the lake",

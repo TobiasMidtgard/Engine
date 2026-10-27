@@ -553,11 +553,62 @@ fn in_hard_zone(x: f64, z: f64, reach: f64) -> bool {
 }
 
 /// Woods on the hills and lone trees in the meadows.
-pub fn spawn_woods(commands: &mut Commands, lib: &Library, land: &Landscape, rng: &mut Rng) {
+/// Valley trees are planted within this of the walk and the tour's viewpoints (m, across the
+/// ground). Round the camera Foliage's near woods grow trees on the valley's wooded ground that
+/// holds none, out to 500 m, and its far woods draw the slopes beyond, so a hand-placed ring
+/// this wide looks the same from the stops as planting every tree (round 24's pictures) while
+/// the world holds a quarter of them: per-tree instances near and clustered cards far, as
+/// Unreal's foliage does. 36k trees with their parts were about 110k drawn meshes.
+/// `--trees-within <m>` (or `all`) changes it.
+#[derive(Resource, Clone, Copy)]
+pub struct TreeReach(pub f64);
+
+impl Default for TreeReach {
+    fn default() -> Self {
+        Self(250.0)
+    }
+}
+
+/// Where trees are kept (see [`TreeReach`]): along the walk and round the tour's viewpoints
+/// over the valley. Not round what they look at: past 500 m the far woods draw it anyway.
+fn tree_anchors() -> Vec<DVec2> {
+    let mut out = Vec::new();
+    for i in 0..crate::walk::STOPS.len() {
+        let (from, to) = crate::walk::leg(i);
+        let steps = ((to - from).length() / 25.0).ceil().max(1.0) as usize;
+        for k in 0..=steps {
+            let p = from.lerp(to, k as f64 / steps as f64);
+            out.push(DVec2::new(p.x, p.z));
+        }
+    }
+    for p in crate::places::places() {
+        let at = DVec2::new(p.position.x, p.position.z);
+        if at.length() < 1400.0 {
+            out.push(at);
+        }
+    }
+    out
+}
+
+pub fn spawn_woods(
+    commands: &mut Commands,
+    lib: &Library,
+    land: &Landscape,
+    rng: &mut Rng,
+    reach: TreeReach,
+) {
     let spacing = 7.5;
     let extent = 1300.0;
     let n = (extent * 2.0 / spacing) as i32;
     let mut count = 0;
+    let mut left = 0;
+    let anchors = tree_anchors();
+    let kept = |x: f64, z: f64| {
+        let p = DVec2::new(x, z);
+        anchors
+            .iter()
+            .any(|a| a.distance_squared(p) < reach.0 * reach.0)
+    };
     for i in 0..n {
         for j in 0..n {
             let x = -extent + (i as f64 + rng.range(0.1, 0.9) as f64) * spacing;
@@ -595,32 +646,39 @@ pub fn spawn_woods(commands: &mut Commands, lib: &Library, land: &Landscape, rng
             } else {
                 TreeKind::Birch
             };
+            // The random draws are made either way, so what is planted keeps its layout.
+            let keep = kept(x, z);
             let t = pick_tree(lib, kind, rng);
             let scale = rng.range(0.75, 1.25);
             let at = place(land, x, z, 0.1);
-            spawn_tree(commands, t, at, rng.range(0.0, TAU), scale);
-            if near_wildlife(x, z) {
-                solid(commands, at, 0.35 * scale, 5.0 * scale);
+            let yaw = rng.range(0.0, TAU);
+            if !keep {
+                left += 1;
+            } else {
+                spawn_tree(commands, t, at, yaw, scale);
+                if near_wildlife(x, z) {
+                    solid(commands, at, 0.35 * scale, 5.0 * scale);
+                }
+                count += 1;
             }
-            count += 1;
             // Bushes along the wood edges.
             if wood < 0.6 && rng.chance(0.35) {
                 let a = rng.range(0.0, TAU) as f64;
                 let (bx, bz) = (x + a.cos() * 3.5, z + a.sin() * 3.5);
                 if land.road_weight(bx, bz) == 0.0 && !in_zone(bx, bz, 4.0) {
                     let b = pick_tree(lib, TreeKind::Bush, rng);
-                    spawn_tree(
-                        commands,
-                        b,
-                        place(land, bx, bz, 0.2),
-                        rng.range(0.0, TAU),
-                        rng.range(0.7, 1.3),
-                    );
+                    let (yaw, scale) = (rng.range(0.0, TAU), rng.range(0.7, 1.3));
+                    if keep {
+                        spawn_tree(commands, b, place(land, bx, bz, 0.2), yaw, scale);
+                    }
                 }
             }
         }
     }
-    engine::core::log::info!("scenery: {count} trees");
+    engine::core::log::info!(
+        "scenery: {count} trees within {:.0} m of the walk and the viewpoints, {left} beyond left to the near and far woods",
+        reach.0
+    );
 }
 
 /// Grass and wildflower patches near the middle of the valley (hidden beyond ~90 m).

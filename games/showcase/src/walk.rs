@@ -127,14 +127,19 @@ pub fn install(app: &mut App, start_screen: bool) {
     .register_api(
         "showcase.walk",
         "Start the valley walk: the play-mode pilot on the plaza, heading for \"stop\" (1-6, \
-         default 1) with its marker and card.",
+         default 1) with its marker and card. \"stop\": 0 ends it (back to the free camera).",
         r#"{"stop": 1}"#,
         |world, args| {
             let stop = args.get("stop").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
-            if !(1..=STOPS.len()).contains(&stop) {
-                return Err(format!("\"stop\" is 1 to {}", STOPS.len()));
+            if stop > STOPS.len() {
+                return Err(format!("\"stop\" is 0 to {}", STOPS.len()));
             }
             let mut walk = world.remove_resource::<Walk>().ok_or("no walk")?;
+            if stop == 0 {
+                end_walk(world, &mut walk);
+                world.insert_resource(walk);
+                return Ok(json!({"walking": false}));
+            }
             start_walk(world, &mut walk, stop - 1);
             let walking = matches!(walk.stage, Stage::Walking(_));
             world.insert_resource(walk);
@@ -458,6 +463,21 @@ fn arrive(world: &mut World, walk: &mut Walk, i: usize) {
         "Carry on exploring",
         "P switches to the free camera. Then 1-9 jump to the zones, 0 to the overview, O to orbit and M to the Moon.",
     );
+}
+
+/// Leave the walk: the marker and the card go and the free camera is back.
+fn end_walk(world: &mut World, walk: &mut Walk) {
+    if let Some(old) = walk.marker.take()
+        && let Ok(e) = world.get_entity_mut(old)
+    {
+        e.despawn();
+    }
+    screens::hide(world, "walk_card", true);
+    // Also once the last stop is reached: the pilot is still out until play mode ends.
+    if walk.stage != Stage::Menu {
+        let _ = engine::core::registry::call_api(world, "movement.play", json!({"on": false}));
+    }
+    walk.stage = Stage::Free;
 }
 
 /// The card in the top right: where the walk is and what to look at.

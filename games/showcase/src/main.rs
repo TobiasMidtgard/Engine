@@ -143,6 +143,14 @@ fn main() {
             ..Default::default()
         });
     }
+    if let Some(m) = value("--trees-within") {
+        let m = if m == "all" {
+            f64::INFINITY
+        } else {
+            m.parse().expect("--trees-within <m>|all")
+        };
+        app.insert_resource(scenery::TreeReach(m));
+    }
     if let Some(spec) = value("--loops") {
         loops::install(&mut app, spec);
     }
