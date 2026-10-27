@@ -138,7 +138,14 @@ pub struct AttackState {
     pub target: Option<Entity>,
     /// Swing direction (horizontal, unit).
     pub dir: Vec3,
+    /// Ground speed carried into the swing, skidding out at [`SWING_SKID`] (m/s).
+    #[serde(default)]
+    pub carry: Vec3,
 }
+
+/// How fast momentum carried into a swing bleeds off, m/s². A sprinter's swing skids about
+/// 2.5 m instead of stopping dead (playtest 2026-10-27 #8).
+pub const SWING_SKID: f32 = 14.0;
 
 /// How a strike ended for one target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -490,6 +497,12 @@ pub(crate) fn begin_attacks(
                 secs: 0.0,
                 target: target.map(|s| s.entity),
                 dir,
+                // A dash strike arrives on the dash's own terms.
+                carry: if phase == AttackPhase::DashIn {
+                    Vec3::ZERO
+                } else {
+                    flat(m.velocity, up)
+                },
             });
             attacks.write(AttackEvent {
                 attacker: entity,
@@ -514,27 +527,35 @@ pub(crate) fn begin_attacks(
             let d = flat((p - t.translation).as_vec3(), up);
             (d.normalize_or_zero(), d.length() - r)
         });
+        let carry = match cs.attack.as_mut() {
+            Some(a) => {
+                let speed = (a.carry.length() - SWING_SKID * dt).max(0.0);
+                a.carry = a.carry.normalize_or_zero() * speed;
+                a.carry
+            }
+            None => Vec3::ZERO,
+        };
         m.influence = match cs.attack.map(|a| a.phase) {
             Some(AttackPhase::DashIn) => Influence {
                 move_scale: 0.0,
                 lunge: None,
                 face: to_target.map(|(d, _)| d),
             },
-            Some(AttackPhase::Windup) => {
-                let lunge = match to_target {
-                    Some((d, gap)) if gap > f.reach * 0.7 => d * f.lunge_speed,
-                    _ => Vec3::ZERO,
-                };
-                Influence {
-                    move_scale: f.attack_move_scale,
-                    lunge: Some(lunge),
-                    face: to_target.map(|(d, _)| d).or(cs.attack.map(|a| a.dir)),
-                }
-            }
+            Some(AttackPhase::Windup) => Influence {
+                move_scale: f.attack_move_scale,
+                lunge: Some(swing_lunge(carry, to_target, f, true)),
+                face: to_target.map(|(d, _)| d).or(cs.attack.map(|a| a.dir)),
+            },
             Some(AttackPhase::Strike) => Influence {
                 move_scale: 0.0,
-                lunge: Some(Vec3::ZERO),
+                lunge: Some(swing_lunge(carry, to_target, f, false)),
                 face: cs.attack.map(|a| a.dir),
+            },
+            // Still skidding: finish the skid before the stick steers again.
+            Some(AttackPhase::Recovery) if carry.length() > 0.5 => Influence {
+                move_scale: f.attack_move_scale,
+                lunge: Some(swing_lunge(carry, to_target, f, false)),
+                face: None,
             },
             Some(AttackPhase::Recovery) => Influence {
                 move_scale: f.attack_move_scale,
@@ -558,6 +579,27 @@ pub(crate) fn begin_attacks(
             },
         };
     }
+}
+
+/// Ground velocity during a swing: the momentum carried into it (as a running attack in Souls
+/// games or Assassin's Creed keeps the run's speed), closing on a target out of reach at least
+/// at lunge speed while `close_in`, and never skidding past striking distance.
+fn swing_lunge(carry: Vec3, to_target: Option<(Vec3, f32)>, f: &Fighter, close_in: bool) -> Vec3 {
+    let Some((d, gap)) = to_target else {
+        return carry;
+    };
+    let along = carry.dot(d);
+    let side = carry - d * along;
+    let along = if gap > f.reach * 0.7 {
+        if close_in {
+            along.max(f.lunge_speed)
+        } else {
+            along
+        }
+    } else {
+        along.min((gap - f.reach * 0.5).max(0.0) * 6.0)
+    };
+    side + d * along
 }
 
 /// Advance attacks and land strikes. Runs after the locomotion step.
@@ -775,6 +817,14 @@ fn strike(
 
 /// Apply `DamageEvent`s to fighters: health, knockback, stagger, defeat (ragdoll).
 #[allow(clippy::type_complexity)]
+/// Whether damage is a hit that staggers (and can be blocked), not just hurt. Burning,
+/// freezing and falling hurt every frame they last, so staggering on each would hold a player
+/// in the fire it is trying to leave (playtest 2026-10-27 #28). As damage over time never breaks
+/// poise in Souls games, it only staggers when it also shoves (`push` m/s, e.g. a fireball).
+fn is_hit(kind: DamageKind, push: Vec3) -> bool {
+    !matches!(kind, DamageKind::Fire | DamageKind::Cold | DamageKind::Fall) || push.length() > 1.0
+}
+
 pub(crate) fn apply_damage(
     mut commands: Commands,
     mut events: MessageReader<DamageEvent>,
@@ -794,9 +844,13 @@ pub(crate) fn apply_damage(
         if cs.defeated {
             continue;
         }
-        cs.hits_taken += 1;
-        cs.last_attacker = ev.source;
-        m.knockback += ev.impulse / p.mass_kg.max(1.0);
+        let push = ev.impulse / p.mass_kg.max(1.0);
+        let hit = is_hit(ev.kind, push);
+        if hit {
+            cs.hits_taken += 1;
+            cs.last_attacker = ev.source;
+        }
+        m.knockback += push;
         if f.track_health {
             f.health -= ev.amount;
         }
@@ -817,6 +871,10 @@ pub(crate) fn apply_damage(
                 entity: ev.target,
                 name: "death".into(),
             });
+            continue;
+        }
+        // Burning, freezing and falls hurt without a flinch: the character keeps moving.
+        if !hit {
             continue;
         }
         if cs.blocking {

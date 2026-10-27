@@ -4,6 +4,7 @@ mod support;
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
+use engine_movement::combat::CombatState;
 use engine_movement::prelude::*;
 use engine_movement::{AttackPhase, Play};
 use engine_render::Camera;
@@ -213,4 +214,88 @@ fn play_mode_pilot_moves_at_normal_speed() {
             .unwrap()
             .hold_to_sprint
     );
+}
+
+/// Playtest #28 ("taking damage forces the player to stand still ... fire damage ... holding
+/// them hostage in the fire"): burning hurts every frame without a flinch, so a fighter keeps
+/// running out of the fire; a blow still staggers.
+#[test]
+fn burning_hurts_without_stopping_a_fighter_but_a_blow_staggers() {
+    use engine_world::{DamageEvent, DamageKind};
+    let mut app = app();
+    let f = app
+        .world
+        .spawn((
+            Transform::from_translation(DVec3::new(0.0, 0.9, 0.0)),
+            MovementProfile::pilot(),
+            Fighter::new(1, 100.0),
+        ))
+        .id();
+    app.world.get_mut::<MoveIntent>(f).unwrap().direction = Vec3::X;
+    run(&mut app, 1.0);
+    let burn = |app: &mut App, kind| {
+        app.world.write_message(DamageEvent {
+            target: f,
+            amount: 0.2,
+            kind,
+            point: pos(app, f),
+            impulse: Vec3::ZERO,
+            source: None,
+        });
+        app.update();
+    };
+    for _ in 0..60 {
+        burn(&mut app, DamageKind::Fire);
+    }
+    let m = app.world.get::<Mover>(f).unwrap();
+    assert!(
+        (m.horizontal_speed() - 5.5).abs() < 0.2,
+        "{}",
+        m.horizontal_speed()
+    );
+    let health = app.world.get::<Fighter>(f).unwrap().health;
+    assert!((health - 88.0).abs() < 0.1, "burned to {health}");
+    assert_eq!(app.world.get::<CombatState>(f).unwrap().hits_taken, 0);
+
+    burn(&mut app, DamageKind::Blunt);
+    let cs = app.world.get::<CombatState>(f).unwrap();
+    assert!(cs.stagger_secs > 0.0 && cs.hits_taken == 1);
+}
+
+/// Playtest #8 ("running then hitting stops all momentum"): a swing out of a sprint carries
+/// the run's speed and skids out over a couple of meters instead of stopping dead.
+#[test]
+fn a_swing_out_of_a_sprint_keeps_its_momentum() {
+    use engine_world::AttackKind;
+    let mut app = app();
+    let f = app
+        .world
+        .spawn((
+            Transform::from_translation(DVec3::new(0.0, 0.9, 0.0)),
+            MovementProfile::pilot(),
+            Fighter::new(1, 100.0),
+        ))
+        .id();
+    let intent = |app: &mut App, change: &dyn Fn(&mut MoveIntent)| {
+        change(&mut app.world.get_mut::<MoveIntent>(f).unwrap());
+    };
+    intent(&mut app, &|i| {
+        i.direction = Vec3::X;
+        i.sprint = true;
+    });
+    run(&mut app, 1.5);
+    let start = pos(&app, f);
+    intent(&mut app, &|i| i.attack = Some(AttackKind::Melee));
+    app.update();
+    intent(&mut app, &|i| i.attack = None);
+    run(&mut app, 0.1);
+    let speed = app.world.get::<Mover>(f).unwrap().horizontal_speed();
+    assert!(
+        speed > 6.0,
+        "stopped dead: {speed} m/s 0.1 s into the swing"
+    );
+    run(&mut app, 0.25);
+    assert!(app.world.get::<CombatState>(f).unwrap().attack.is_some());
+    let skid = (pos(&app, f) - start).x;
+    assert!((1.8..3.5).contains(&skid), "skidded {skid:.2} m");
 }
