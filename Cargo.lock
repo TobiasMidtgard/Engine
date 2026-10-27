@@ -1184,6 +1184,7 @@ dependencies = [
  "bevy_tasks",
  "crossbeam-channel",
  "glam 0.33.12",
+ "indexmap",
  "parking_lot",
  "raw-window-handle",
  "serde",

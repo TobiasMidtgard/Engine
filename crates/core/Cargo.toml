@@ -9,6 +9,7 @@ license.workspace = true
 bevy_ecs.workspace = true
 bevy_tasks.workspace = true
 bevy_platform.workspace = true
+indexmap.workspace = true
 glam.workspace = true
 serde.workspace = true
 serde_json.workspace = true

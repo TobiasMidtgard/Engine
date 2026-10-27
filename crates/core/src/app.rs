@@ -116,7 +116,12 @@ impl App {
         let mut world = World::new();
         let mut schedules = Schedules::new();
         for make in MAIN_SCHEDULES {
-            schedules.insert(make());
+            let mut schedule = make();
+            if crate::profile::requested() {
+                let label = format!("{:?}", schedule.label());
+                schedule.add_build_pass(crate::profile::OrderPass { label });
+            }
+            schedules.insert(schedule);
         }
         world.insert_resource(schedules);
 
