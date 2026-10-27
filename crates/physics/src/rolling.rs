@@ -17,7 +17,7 @@ use rapier3d::prelude::{
 };
 
 use crate::convert;
-use crate::sim::{MaterialCache, RegionId, Simulation};
+use crate::sim::MaterialCache;
 
 /// Extra rolling resistance coefficient from sinking into a soft surface.
 pub(crate) fn sinkage(m: &SurfaceMaterial) -> f32 {
@@ -217,11 +217,7 @@ pub(crate) fn resist(
 
 /// Take rolling resistance and spin friction out of the contacts touched in the last substep
 /// ([`resist`]).
-pub(crate) fn resist_rolling(sim: &mut Simulation, rid: RegionId, mut pushes: Vec<Resist>) {
-    let Some(region) = sim.regions[rid as usize].as_mut() else {
-        return;
-    };
-    let world = &mut region.world;
+pub(crate) fn resist_rolling(world: &mut PhysicsWorld, mut pushes: Vec<Resist>) {
     // A fixed order, so the sums come out bit-identical every run (a contact's spin push comes
     // before its roll push).
     pushes.sort_by_key(|p| (p.pair.0.into_raw_parts(), p.pair.1.into_raw_parts()));

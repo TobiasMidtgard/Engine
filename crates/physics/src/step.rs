@@ -1,7 +1,7 @@
 //! The fixed-step system: read the ECS, step every region, write the results back.
 
-use std::collections::HashSet;
-use std::time::Instant;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use engine_core::ecs::entity::EntityHashSet;
 use engine_core::ecs::system::SystemState;
@@ -16,7 +16,8 @@ use engine_world::{
     SurfaceMaterials, Water, WorldImpulse,
 };
 use rapier3d::prelude::{
-    ActiveHooks, PhysicsWorld, Pose, QueryFilter as RFilter, RigidBodyHandle, SharedShape,
+    ActiveHooks, ColliderHandle, PhysicsWorld, Pose, QueryFilter as RFilter, RigidBodyHandle,
+    SharedShape,
 };
 
 use crate::buoyancy::{Surface, WATER_DENSITY};
@@ -541,6 +542,12 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
     drop(upkeep);
     let report = crate::report::wanted();
     let busy = busy_regions(&sim);
+    // Regions step side by side (Jolt and PhysX solve islands as parallel jobs; regions are
+    // islands that share nothing): each substep's own work runs as one job per region on the
+    // compute pool, between passes that touch the shared books (forces, kinematics, contact
+    // events, joints) one region at a time. A region's substeps run in order as before, so it
+    // steps exactly as it would alone.
+    let mut plans: Vec<Plan> = Vec::new();
     for rid in region_ids.iter().copied() {
         let region_started = Instant::now();
         let (frozen, movers) = {
@@ -603,92 +610,139 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             })
             .map(|(e, _)| *e)
             .collect();
-        for sub in 0..substeps {
-            // Every substep: water pressure follows the pose (forces held over several
-            // substeps lag behind it and pump energy into a floating body's rocking).
+        plans.push(Plan {
+            rid,
+            substeps,
+            sub_dt,
+            scaled: time_scaled(&sim, rid, &special),
+            decks: decks(&sim, rid, &special),
+            cones: crate::cones::cones(&sim, rid),
+            special,
+            ms: region_started.elapsed().as_secs_f64() * 1000.0,
+        });
+    }
+    let rounds = plans.iter().map(|p| p.substeps).max().unwrap_or(0);
+    let min_speed = settings.contact_events.then_some(settings.impact_min_speed);
+    for sub in 0..rounds {
+        let here: Vec<usize> = (0..plans.len())
+            .filter(|&i| plans[i].substeps > sub)
+            .collect();
+        // Forces and kinematics, region by region (they read and write the body books).
+        let mut marks = Vec::with_capacity(here.len());
+        for &i in &here {
+            let p = &plans[i];
             let ours = tracing::info_span!("substep upkeep").entered();
             let t0 = Instant::now();
+            // Every substep: water pressure follows the pose (forces held over several
+            // substeps lag behind it and pump energy into a floating body's rocking).
+            let g = sim.region(p.rid).world.gravity;
             prepare_forces(
                 &mut sim,
-                rid,
+                p.rid,
                 &gravity,
                 g,
                 water.as_ref(),
                 settings.buoyancy,
             );
             let t0b = Instant::now();
-            drive_kinematics(&mut sim, rid, &special, sub_dt, substeps - sub);
-            crate::cones::orient(&mut sim, rid);
-            let scaled = scale_time(&mut sim, rid, &special, true);
+            drive_kinematics(&mut sim, p.rid, &p.special, p.sub_dt, p.substeps - sub);
             drop(ours);
-            let t1 = Instant::now();
-            {
-                let _rapier = tracing::info_span!("rapier step").entered();
-                let s = &mut *sim;
-                let filter = ContactFilter {
-                    no_contact: &s.no_contact,
-                    dt: sub_dt,
-                };
-                let r = s.regions[rid as usize].as_mut().expect("live region");
-                r.world.integration_parameters.dt = sub_dt;
-                r.world.integration_parameters.num_solver_iterations =
-                    crate::fine::iterations(&settings, r.fine, sub_dt);
-                let collector = std::mem::take(&mut r.collector);
-                crate::articulation::before_step(&mut r.world, &r.links);
-                if settings.contact_events {
-                    r.note_velocities();
+            marks.push((t0b - t0, t0b.elapsed()));
+        }
+        // Each region's substep on its own: cones, Rapier, rolling, the pairs to look at.
+        let pending: Vec<HashSet<(ColliderHandle, ColliderHandle)>> = here
+            .iter()
+            .map(|&i| {
+                if !settings.contact_events {
+                    return HashSet::new();
                 }
-                r.world.step_with_events(&filter, &collector);
-                crate::articulation::after_step(&mut r.world, &mut r.links);
-                r.collector = collector;
-                r.needs_refresh = false;
-            }
-            if scaled {
-                scale_time(&mut sim, rid, &special, false);
-            }
-            carry_on_decks(&mut sim, rid, &special, sub_dt);
-            let t2 = Instant::now();
-            let _after = tracing::info_span!("contacts upkeep").entered();
-            let min_speed = settings.contact_events.then_some(settings.impact_min_speed);
-            let touches = {
-                let s = &mut *sim;
-                let rolling = (s.settings.rolling_resistance.max(0.0), &s.materials);
                 // (The pending pairs' contacts are read with all the others.)
-                let pending: HashSet<_> = if settings.contact_events {
-                    s.contacts
-                        .pending
-                        .values()
-                        .filter(|p| p.0 == rid)
-                        .map(|p| crate::sim::ordered(p.1, p.2))
-                        .collect()
-                } else {
-                    HashSet::new()
-                };
-                let r = s.regions[rid as usize].as_mut().expect("live region");
-                r.touches(sub_dt, min_speed, rolling, &pending)
+                sim.contacts
+                    .pending
+                    .values()
+                    .filter(|v| v.0 == plans[i].rid)
+                    .map(|v| crate::sim::ordered(v.1, v.2))
+                    .collect()
+            })
+            .collect();
+        let outs: Vec<SubstepOut> = {
+            let s = &mut *sim;
+            let shared = SubstepShared {
+                no_contact: &s.no_contact,
+                materials: &s.materials,
+                rolling: s.settings.rolling_resistance.max(0.0),
+                settings: &settings,
+                min_speed,
             };
-            let t3 = Instant::now();
-            crate::rolling::resist_rolling(&mut sim, rid, touches.pushes);
-            crate::cones::rub(&mut sim, rid);
+            let mut jobs: Vec<Job> = Vec::new();
+            let mut wanted: Vec<(RegionId, usize)> = here
+                .iter()
+                .enumerate()
+                .map(|(k, &i)| (plans[i].rid, k))
+                .collect();
+            wanted.sort_unstable();
+            let mut want = wanted.iter().peekable();
+            for (id, r) in s.regions.iter_mut().enumerate() {
+                let Some(&&(rid, k)) = want.peek() else {
+                    break;
+                };
+                if id as RegionId != rid {
+                    continue;
+                }
+                want.next();
+                let i = here[k];
+                jobs.push((r.as_mut().expect("live region"), &plans[i], &pending[k]));
+            }
+            // Back in the order of `here`.
+            let mut order: Vec<usize> = wanted.iter().map(|w| w.1).collect();
+            let mut outs = run_substeps(jobs, &shared);
+            let mut sorted: Vec<Option<SubstepOut>> = (0..outs.len()).map(|_| None).collect();
+            for (out, k) in outs.drain(..).zip(order.drain(..)) {
+                sorted[k] = Some(out);
+            }
+            sorted
+                .into_iter()
+                .map(|o| o.expect("every job ran"))
+                .collect()
+        };
+        // Contact events and joints, region by region (the shared books again).
+        for ((&i, out), (forces, kinematics)) in here.iter().zip(outs).zip(marks) {
+            let p = &mut plans[i];
             let t4 = Instant::now();
             if settings.contact_events {
-                sim.process_contacts(rid, &touches.hits, &touches.touched);
+                sim.process_contacts(p.rid, &out.hits, &out.touched);
             } else {
-                sim.region(rid).collector.0.lock().clear();
+                sim.region(p.rid).collector.0.lock().clear();
             }
             let t5 = Instant::now();
-            break_joints(&mut sim, rid, sub_dt);
+            break_joints(&mut sim, p.rid, p.sub_dt);
+            let (events, joints) = (t5 - t4, t5.elapsed());
+            let [cones, rapier, touches, rolling] = out.parts;
+            let parts = [
+                forces,
+                kinematics + cones,
+                rapier,
+                touches,
+                rolling,
+                events,
+                joints,
+            ];
+            p.ms += parts.iter().map(|d| d.as_secs_f64()).sum::<f64>() * 1000.0;
             if report {
-                crate::report::substep_parts([t0, t0b, t1, t2, t3, t4, t5, Instant::now()]);
-                crate::report::count("spin pairs", touches.spins);
-                crate::report::count("hits", touches.hits.len());
+                crate::report::substep_parts(parts);
+                crate::report::count("spin pairs", out.spins);
+                crate::report::count("hits", out.hits.len());
             }
         }
-        sim.region_mut(rid).queries_refreshed();
-        character::move_characters(&mut sim, rid, &gravity);
-        sim.region_mut(rid).update_bounds();
+    }
+    for p in &plans {
+        let t = Instant::now();
+        sim.region_mut(p.rid).queries_refreshed();
+        character::move_characters(&mut sim, p.rid, &gravity);
+        sim.region_mut(p.rid).update_bounds();
         if report {
-            crate::report::region_stepped(&sim, rid, substeps, region_started);
+            let ms = p.ms + t.elapsed().as_secs_f64() * 1000.0;
+            crate::report::region_ms(p.rid, ms);
         }
     }
     let write_back = tracing::info_span!("write back").entered();
@@ -1367,19 +1421,22 @@ fn refresh_contact_hooks(world: &mut PhysicsWorld) {
 /// out on a deck turning 0.4 rad/s crept 8 cm in 20 s, and cargo slides off a deck that turns
 /// for minutes. PhysX's patch friction holds static contacts to anchors for the same reason;
 /// here a crate held by friction (moving with the deck) is put back on its circle.
-fn carry_on_decks(sim: &mut Simulation, rid: RegionId, special: &[Entity], dt: f32) {
-    let decks: Vec<RigidBodyHandle> = special
+/// The kinematic bodies among `special` in region `rid`, for [`carry_on_decks`].
+fn decks(sim: &Simulation, rid: RegionId, special: &[Entity]) -> Vec<RigidBodyHandle> {
+    special
         .iter()
         .filter_map(|e| sim.bodies.get(e))
         .filter(|b| b.region == rid && b.kind == BodyKind::Kinematic)
         .map(|b| b.handle)
-        .collect();
+        .collect()
+}
+
+fn carry_on_decks(world: &mut PhysicsWorld, decks: &[RigidBodyHandle], dt: f32) {
     if decks.is_empty() {
         return;
     }
-    let world = &mut sim.region_mut(rid).world;
     let mut moves = Vec::new();
-    for deck in decks {
+    for &deck in decks {
         let Some(d) = world.bodies.get(deck) else {
             continue;
         };
@@ -1597,8 +1654,12 @@ fn place_kinematics(sim: &mut Simulation, rid: RegionId) {
 
 /// Bodies with their own time rate (`LocalTimeScale`): scale velocity and gravity so they move
 /// `factor`× as fast as the world for one substep (`apply = true`), then undo it.
-fn scale_time(sim: &mut Simulation, rid: RegionId, special: &[Entity], apply: bool) -> bool {
-    let scaled: Vec<(rapier3d::prelude::RigidBodyHandle, f32, f32, [f32; 2])> = special
+/// A body with its own time rate: its handle, rate, gravity scale and damping.
+type Scaled = (RigidBodyHandle, f32, f32, [f32; 2]);
+
+/// The bodies among `special` in region `rid` with their own time rate, for [`scale_time`].
+fn time_scaled(sim: &Simulation, rid: RegionId, special: &[Entity]) -> Vec<Scaled> {
+    special
         .iter()
         .filter_map(|e| sim.bodies.get(e))
         .filter(|b| {
@@ -1611,13 +1672,12 @@ fn scale_time(sim: &mut Simulation, rid: RegionId, special: &[Entity], apply: bo
             ];
             (b.handle, b.time_factor, b.desc.gravity_scale, damping)
         })
-        .collect();
-    if scaled.is_empty() {
-        return false;
-    }
-    let region = sim.region_mut(rid);
-    for (h, k, gs, [lin, ang]) in scaled {
-        let Some(rb) = region.world.bodies.get_mut(h) else {
+        .collect()
+}
+
+fn scale_time(world: &mut PhysicsWorld, scaled: &[Scaled], apply: bool) {
+    for &(h, k, gs, [lin, ang]) in scaled {
+        let Some(rb) = world.bodies.get_mut(h) else {
             continue;
         };
         let k = k.max(1e-3);
@@ -1634,7 +1694,113 @@ fn scale_time(sim: &mut Simulation, rid: RegionId, special: &[Entity], apply: bo
         rb.set_linear_damping(lin * d);
         rb.set_angular_damping(ang * d);
     }
-    true
+}
+
+/// A region stepping this frame: its substeps and what they need, found once.
+struct Plan {
+    rid: RegionId,
+    substeps: u32,
+    sub_dt: f32,
+    /// Kinematic and time-scaled bodies.
+    special: Vec<Entity>,
+    scaled: Vec<Scaled>,
+    decks: Vec<RigidBodyHandle>,
+    cones: Vec<crate::cones::Cone>,
+    /// Time its step took so far, ms.
+    ms: f64,
+}
+
+/// What every region's substep job reads.
+struct SubstepShared<'a> {
+    no_contact: &'a HashMap<(Entity, Entity), u32>,
+    materials: &'a crate::sim::MaterialCache,
+    rolling: f32,
+    settings: &'a crate::PhysicsSettings,
+    min_speed: Option<f32>,
+}
+
+/// What a region's substep job leaves for the passes after it.
+struct SubstepOut {
+    hits: Vec<(ColliderHandle, ColliderHandle, f32)>,
+    touched: Vec<crate::sim::Touched>,
+    spins: usize,
+    /// Cones and time rates, Rapier, touches, rolling (and cone friction).
+    parts: [Duration; 4],
+}
+
+/// One substep of one region, touching nothing but the region.
+fn substep(
+    r: &mut crate::sim::Region,
+    p: &Plan,
+    pending: &HashSet<(ColliderHandle, ColliderHandle)>,
+    shared: &SubstepShared,
+) -> SubstepOut {
+    let t0 = Instant::now();
+    crate::cones::orient(&mut r.world, &p.cones);
+    scale_time(&mut r.world, &p.scaled, true);
+    let t1 = Instant::now();
+    {
+        let _rapier = tracing::info_span!("rapier step").entered();
+        let filter = ContactFilter {
+            no_contact: shared.no_contact,
+            dt: p.sub_dt,
+        };
+        r.world.integration_parameters.dt = p.sub_dt;
+        r.world.integration_parameters.num_solver_iterations =
+            crate::fine::iterations(shared.settings, r.fine, p.sub_dt);
+        let collector = std::mem::take(&mut r.collector);
+        crate::articulation::before_step(&mut r.world, &r.links);
+        if shared.settings.contact_events {
+            r.note_velocities();
+        }
+        r.world.step_with_events(&filter, &collector);
+        crate::articulation::after_step(&mut r.world, &mut r.links);
+        r.collector = collector;
+        r.needs_refresh = false;
+    }
+    scale_time(&mut r.world, &p.scaled, false);
+    carry_on_decks(&mut r.world, &p.decks, p.sub_dt);
+    let t2 = Instant::now();
+    let touches = r.touches(
+        p.sub_dt,
+        shared.min_speed,
+        (shared.rolling, shared.materials),
+        pending,
+    );
+    let t3 = Instant::now();
+    crate::rolling::resist_rolling(&mut r.world, touches.pushes);
+    crate::cones::rub(&mut r.world, &p.cones);
+    let t4 = Instant::now();
+    SubstepOut {
+        hits: touches.hits,
+        touched: touches.touched,
+        spins: touches.spins,
+        parts: [t1 - t0, t2 - t1, t3 - t2, t4 - t3],
+    }
+}
+
+/// A region's substep job: the region, its plan and its pairs waiting to be confirmed.
+type Job<'a> = (
+    &'a mut crate::sim::Region,
+    &'a Plan,
+    &'a HashSet<(ColliderHandle, ColliderHandle)>,
+);
+
+/// Run the regions' substep `jobs` side by side on the compute pool (in place when there is
+/// one, or no pool); the results come back in the jobs' order.
+fn run_substeps(jobs: Vec<Job>, shared: &SubstepShared) -> Vec<SubstepOut> {
+    let pool = engine_core::tasks::ComputeTaskPool::try_get();
+    match pool {
+        Some(pool) if jobs.len() > 1 => pool.scope(|scope| {
+            for (r, p, pending) in jobs {
+                scope.spawn(async move { substep(r, p, pending, shared) });
+            }
+        }),
+        _ => jobs
+            .into_iter()
+            .map(|(r, p, pending)| substep(r, p, pending, shared))
+            .collect(),
+    }
 }
 
 /// Remove joints whose constraint force went over their `break_force`.

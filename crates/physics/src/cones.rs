@@ -17,15 +17,19 @@
 
 use engine_core::math::{Mat3, Quat, Vec3};
 use engine_world::physics::JointKind;
-use rapier3d::prelude::{ImpulseJointHandle, Pose};
+use rapier3d::prelude::{ImpulseJointHandle, PhysicsWorld, Pose};
 
 use crate::sim::{JointHandle, RegionId, Simulation};
 
 /// Friction coefficient of a limb sliding along its cone's rim while pressed against it.
 const STOP_FRICTION: f32 = 0.5;
 
-/// The cone-limited joints in region `rid`: their Rapier joint and rest pose.
-fn cones(sim: &Simulation, rid: RegionId) -> Vec<(ImpulseJointHandle, Quat)> {
+/// A cone-limited joint: its Rapier joint and rest pose.
+pub(crate) type Cone = (ImpulseJointHandle, Quat);
+
+/// The cone-limited joints in region `rid` (found once a step: joints are made and dropped
+/// between steps; one broken meanwhile is no longer found in the world).
+pub(crate) fn cones(sim: &Simulation, rid: RegionId) -> Vec<Cone> {
     sim.joints
         .values()
         .filter(|j| {
@@ -47,14 +51,9 @@ fn cones(sim: &Simulation, rid: RegionId) -> Vec<(ImpulseJointHandle, Quat)> {
         .collect()
 }
 
-/// Turn the frames of every cone-limited joint in region `rid` to the limb's swing plane.
-pub(crate) fn orient(sim: &mut Simulation, rid: RegionId) {
-    let cones = cones(sim, rid);
-    if cones.is_empty() {
-        return;
-    }
-    let world = &mut sim.region_mut(rid).world;
-    for (h, rest) in cones {
+/// Turn the frames of every cone-limited joint `cones` to the limb's swing plane.
+pub(crate) fn orient(world: &mut PhysicsWorld, cones: &[Cone]) {
+    for &(h, rest) in cones {
         let Some(joint) = world.impulse_joints.get(h) else {
             continue;
         };
@@ -103,13 +102,8 @@ pub(crate) fn orient(sim: &mut Simulation, rid: RegionId) {
 
 /// After a substep: friction for every limb that slid along its cone's rim while the limit
 /// pushed back (the limit's impulse is the rim's normal force).
-pub(crate) fn rub(sim: &mut Simulation, rid: RegionId) {
-    let cones = cones(sim, rid);
-    if cones.is_empty() {
-        return;
-    }
-    let world = &mut sim.region_mut(rid).world;
-    for (h, _) in cones {
+pub(crate) fn rub(world: &mut PhysicsWorld, cones: &[Cone]) {
+    for &(h, _) in cones {
         let Some(joint) = world.impulse_joints.get(h) else {
             continue;
         };

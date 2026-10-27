@@ -39,9 +39,8 @@ pub(crate) fn wanted() -> bool {
     *W.get_or_init(|| std::env::var("PHYSICS_REPORT").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
-/// Region `rid` stepped (`substeps` at the world's rate), starting at `started`.
-pub(crate) fn region_stepped(_sim: &Simulation, rid: RegionId, _substeps: u32, started: Instant) {
-    let ms = started.elapsed().as_secs_f64() * 1000.0;
+/// Region `rid` stepped, taking `ms` (its jobs' time, whether or not they ran beside others).
+pub(crate) fn region_ms(rid: RegionId, ms: f64) {
     let mut t = totals().lock();
     let e = t.regions.entry(rid).or_default();
     e.0 += ms;
@@ -59,11 +58,11 @@ const PARTS: [&str; 7] = [
     "breaking joints",
 ];
 
-/// One substep's parts: the times between `marks` ([`PARTS`]).
-pub(crate) fn substep_parts(marks: [Instant; PARTS.len() + 1]) {
+/// One substep's parts ([`PARTS`]).
+pub(crate) fn substep_parts(parts: [std::time::Duration; PARTS.len()]) {
     let mut t = totals().lock();
-    for (i, w) in marks.windows(2).enumerate() {
-        t.parts[i] += (w[1] - w[0]).as_secs_f64() * 1000.0;
+    for (i, d) in parts.iter().enumerate() {
+        t.parts[i] += d.as_secs_f64() * 1000.0;
     }
 }
 
