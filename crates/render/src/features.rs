@@ -111,6 +111,9 @@ pub struct GpuShared {
     /// whose pipelines wait for their first use builds them in `init` instead, which runs
     /// beside the other features' at start, rather than on the frame that first needs them.
     pub warm_pipelines: bool,
+    /// A feature's own steps inside its `prepare` this frame (the meshes'), named in the
+    /// slow-frame log line under the renderer's steps.
+    pub(crate) prepare_steps: std::sync::Mutex<Vec<(&'static str, f32)>>,
 }
 
 /// See [`GpuShared::side_commands`].

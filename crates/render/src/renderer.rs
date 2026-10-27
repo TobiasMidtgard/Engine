@@ -764,6 +764,7 @@ impl Renderer {
             side_work: Default::default(),
             side_commands: Default::default(),
             warm_pipelines: settings.pipeline_warmup.on(headless),
+            prepare_steps: Default::default(),
         };
 
         let probe_gi = crate::probe_gi::ProbeGi::new(&shared.device);
@@ -1416,6 +1417,13 @@ impl Renderer {
         for f in &mut self.features {
             cpu.step(format!("prepare {}", f.name()));
             f.prepare(world, &self.shared, &view, &settings);
+            cpu.inner(std::mem::take(
+                &mut *self
+                    .shared
+                    .prepare_steps
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            ));
         }
         cpu.step("cloud shadows");
 
