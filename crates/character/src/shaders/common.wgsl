@@ -9,7 +9,7 @@ struct Character {
     skin2: vec4<f32>,         // freckles, moles, wrinkles (0..1, age included), pore size (0..1)
     look: vec4<f32>,          // age (years), sex (0 female .. 1 male), beard shadow (0..1), seed (0..1)
     hair: vec4<f32>,          // scalp hair: eumelanin (0..1), red (0..1), grey (0..1), scalp tint (0..1)
-    brows: vec4<f32>,         // eumelanin, red, grey, unused
+    brows: vec4<f32>,         // eumelanin, red, grey, the hair's part (rest x off the head's center, m; 0 none)
     beard: vec4<f32>,         // eumelanin, red, grey, density
     eye: vec4<f32>,           // melanin, lipochrome, limbal ring, pupil (0..1)
     eye2: vec4<f32>,          // redness, debug view, subsurface pass on (1: the renderer blurs the skin's diffuse light), unused

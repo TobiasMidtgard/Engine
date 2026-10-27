@@ -575,6 +575,16 @@ fn mouth_surface(in: SkinOut, front: bool) -> SkinLight {
     return s;
 }
 
+// How bare the scalp is at rest point `r` along the part of long hair (1 on its line).
+fn part_gap(r: vec3<f32>) -> f32 {
+    if (character.brows.w == 0.0) {
+        return 0.0;
+    }
+    let d = r - character.rest_head.xyz;
+    let on_top = smoothstep(0.02, 0.045, d.y) * smoothstep(-0.03, 0.0, d.z);
+    return (1.0 - smoothstep(0.0015, 0.004, abs(d.x - character.brows.w))) * on_top;
+}
+
 // How much cloth covers the skin here: the shirt's edge per pixel (the vertex mask is as soft
 // as the base mesh is coarse and reaches well past the hem); the vertex mask leaves the hands
 // bare.
@@ -689,8 +699,9 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
         albedo = mix(albedo, albedo * tint * 0.72, beard_shadow * 0.55);
         albedo = mix(albedo, bc, dots * beard_shadow * 0.5 * saturate((0.0011 / max(footprint, 1e-7) - 1.0)));
     }
-    // Scalp under short hair: the color of the roots.
-    let scalp_tint = character.hair.w * scalp;
+    // Scalp under short hair: the color of the roots. Along a part the hair grows away on
+    // both sides and the scalp shows pale between (a dark line there reads as a crack).
+    let scalp_tint = character.hair.w * scalp * (1.0 - 0.9 * part_gap(r));
     if (scalp_tint > 0.0) {
         let hc = hair_color(character.hair.x, character.hair.y, character.hair.z, 0.5);
         let dots = 1.0 - smoothstep(0.1, 0.4, cells3(r / 0.0005 + seed).f1);
@@ -782,7 +793,9 @@ fn skin_debug(in: SkinOut, s: SkinLight) -> vec3<f32> {
 @fragment
 fn fs_skin(in: SkinOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     var s = skin_surface(in, front);
-    if (in.part == 0u) {
+    // The hair shadow grid (4 mm cells) can't resolve a part a few millimetres wide, where
+    // nothing but the hair beside it stands over the scalp: leave the part in the open.
+    if (in.part == 0u && part_gap(in.rest) < 0.5) {
         s.bind = in.bind;
         s.axis_x = normalize(in.axis_x);
         s.axis_y = normalize(in.axis_y);

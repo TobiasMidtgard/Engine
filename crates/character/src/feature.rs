@@ -135,6 +135,12 @@ impl GpuCharacter {
             // Long hair lies flat over its roots: what shows between them reads as hair.
             _ => 0.85,
         } * (1.0 - a.hair.color.grey * 0.5);
+        // Where long hair parts (rest x over the head's center; 0: no part).
+        let part = if matches!(a.hair_style(), HairStyle::Medium | HairStyle::Long) {
+            crate::strands::PART_X
+        } else {
+            0.0
+        };
         let hc = a.hair_color();
         let bc = a.brow_color();
         let dc = a.beard_color();
@@ -153,7 +159,7 @@ impl GpuCharacter {
             skin2: [a.skin.freckles, a.skin.moles, wrinkles, a.skin.pores],
             look: [a.age, male, shadow, (a.seed % 1000) as f32 / 1000.0],
             hair: [hc.melanin, hc.red, hc.grey, scalp_tint],
-            brows: [bc.melanin, bc.red, bc.grey, 0.0],
+            brows: [bc.melanin, bc.red, bc.grey, part],
             beard: [dc.melanin, dc.red, dc.grey, a.beard.density],
             eye: [
                 a.eyes.melanin,

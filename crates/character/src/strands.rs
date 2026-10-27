@@ -895,7 +895,7 @@ fn nearest_guide(p: Vec3, guides: &[(SkinPoint, Vec<Vec3>)]) -> Option<usize> {
 }
 
 /// The part of long hair: on the character's left, 2.5 cm off center.
-const PART_X: f32 = 0.025;
+pub(crate) const PART_X: f32 = 0.025;
 
 /// Hair that would hang in front of the face is moved aside to frame it: easing out over the
 /// forehead (so a hair bends aside instead of jumping), then beside the eyes and cheeks and back
