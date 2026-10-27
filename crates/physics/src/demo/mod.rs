@@ -53,8 +53,8 @@ use engine_core::time::FixedTime;
 use engine_render::Mesh;
 use engine_render::prelude::MeshRenderer;
 use engine_world::physics::{
-    CharacterController, CharacterMove, Collider, ColliderShape, Joint, JointKind, JointMotor,
-    RigidBody, Velocity,
+    BodyKind, CharacterController, CharacterMove, Collider, ColliderShape, Joint, JointKind,
+    JointMotor, RigidBody, Velocity,
 };
 use engine_world::{FocusPoints, SurfaceId, SurfaceMaterial, SurfaceMaterials};
 
@@ -905,6 +905,12 @@ pub(crate) fn replay_stations(world: &mut World) {
             } else if cycle.is_some_and(|c| t >= c) {
                 due.push((e, station));
             }
+            if crate::report::wanted() && due.last() == Some(&(e, station)) {
+                engine_core::log::info!(
+                    "proving ground: {} replays, nearest focus {d:.0} m",
+                    station.key()
+                );
+            }
         }
     }
     for (e, station) in due {
@@ -930,11 +936,18 @@ pub(crate) fn replay_stations(world: &mut World) {
         let mut grounds: Vec<(Entity, DVec3)> = unseen.iter().map(|u| (u.0, u.1)).collect();
         grounds.dedup();
         for (ground, origin) in grounds {
+            if unseen
+                .iter()
+                .any(|u| u.0 == ground && u.2 == Station::Galton)
+            {
+                pour_galton(world, ground, origin);
+            }
             let mine: Vec<Entity> = world
                 .query::<(Entity, &StationPart)>()
                 .iter(world)
                 .filter(|(e, p)| {
                     p.ground == ground
+                        && p.station != Station::Galton
                         && unseen.iter().any(|u| u.0 == ground && u.2 == p.station)
                         && bodies.contains(e)
                 })
@@ -944,6 +957,26 @@ pub(crate) fn replay_stations(world: &mut World) {
         }
         let shared = world.resource::<crate::SharedSimulation>().0.clone();
         shared.write().resting.extend(bodies);
+    }
+}
+
+/// Lay the Galton board's balls in its bins, poured ([`galton::poured`]): settling it instead
+/// took 13 s of work on a worker for 6 s of drop, and left most of the five hundred in the
+/// hopper and the pins, ready to pour on whenever something woke them.
+fn pour_galton(world: &mut World, ground: Entity, origin: DVec3) {
+    let base = origin + Station::Galton.base();
+    let spots = galton::poured();
+    let mut balls =
+        world.query_filtered::<(&StationPart, &RigidBody, &mut Transform), Without<ChildOf>>();
+    let mut spots = spots.into_iter();
+    for (p, rb, mut t) in balls.iter_mut(world) {
+        if p.ground != ground || p.station != Station::Galton || rb.kind != BodyKind::Dynamic {
+            continue;
+        }
+        let Some((x, y)) = spots.next() else {
+            break;
+        };
+        t.translation = base + DVec3::new(x as f64, y as f64, 0.0);
     }
 }
 

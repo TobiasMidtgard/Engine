@@ -348,11 +348,68 @@ fn a_rock_fallen_through_the_ground_far_away_rests() {
     app.update_n(30);
     let y = position(&app, rock).y;
     app.update_n(60);
+    // Held as resting, or as out of the world (`grounding`): either way it stops.
     let s = stats(&app);
-    assert_eq!(s.resting_awake, 1, "{s:?}");
+    assert_eq!(s.resting_awake + s.ungrounded, 1, "{s:?}");
     assert!(
         (position(&app, rock).y - y).abs() < 0.01,
         "the lost rock kept falling: {y} -> {}",
         position(&app, rock).y
     );
+}
+
+/// Out past the range, where the ground's colliders may not be loaded yet, a crate that starts
+/// falling with nothing under it (the default ground is at y = 0, no collider there) is held
+/// where it is, though a shot flying by keeps its region stepping; once the focus comes near
+/// it is let go (there the terrain builds the ground under bodies at once).
+#[test]
+fn a_crate_with_no_ground_loaded_under_it_waits_for_it() {
+    let mut app = app();
+    *app.world.resource_mut::<Scalability>() = Scalability::default();
+    let crate_ = app
+        .world
+        .spawn((
+            Transform::from_xyz(305.0, 2.0, 5.0),
+            RigidBody::dynamic(),
+            Collider::cuboid(Vec3::splat(0.4)),
+        ))
+        .id();
+    app.world.spawn((
+        Transform::from_xyz(300.0, 100.0, 0.0),
+        RigidBody::dynamic(),
+        Collider::sphere(0.3).with_density(2000.0),
+        Velocity {
+            linear: Vec3::new(40.0, 0.0, 0.0),
+            angular: Vec3::ZERO,
+        },
+    ));
+    app.update_n(60);
+    let s = stats(&app);
+    assert_eq!(s.ungrounded, 1, "{s:?}");
+    let y = position(&app, crate_).y;
+    assert!(y > 1.8, "the crate fell to {y}");
+    app.update_n(60);
+    assert!(
+        (position(&app, crate_).y - y).abs() < 1e-3,
+        "the held crate moved"
+    );
+    // The focus comes near: it is let go, and falls (there is nothing under it at all).
+    let focus = app
+        .world
+        .query_filtered::<Entity, With<SimulationFocus>>()
+        .single(&app.world)
+        .unwrap();
+    app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(300.0, 2.0, 0.0);
+    app.update_n(90);
+    assert_eq!(stats(&app).ungrounded, 0);
+    assert!(position(&app, crate_).y < 0.0, "the crate was never let go");
+    // Under the ground, out of the world, it is held again, though the focus is near (as
+    // Unreal's kill height stops what falls out of the level).
+    app.update_n(120);
+    // (The shot, fallen as far by now, with it.)
+    assert_eq!(stats(&app).ungrounded, 2, "{:?}", stats(&app));
+    let y = position(&app, crate_).y;
+    assert!((-45.0..-20.0).contains(&y), "the crate fell to {y}");
+    app.update_n(30);
+    assert!((position(&app, crate_).y - y).abs() < 1e-3, "it fell on");
 }

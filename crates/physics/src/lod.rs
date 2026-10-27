@@ -206,7 +206,10 @@ impl Simulation {
                     character: None,
                     at: region.global(rb.translation()),
                     reach: b.reach as f64,
-                    awake: !rb.is_sleeping(),
+                    // (Held ones are put back to sleep before the step.)
+                    awake: !rb.is_sleeping()
+                        && !self.resting.contains(e)
+                        && !self.ungrounded.contains(e),
                 })
             })
             .collect();
@@ -418,13 +421,17 @@ impl Simulation {
                 .map(|(root, (_, _, list))| (root, list))
                 .collect();
             leaving.sort_by_key(|(root, _)| *root);
-            for (_, list) in leaving {
+            if let Some((_, list)) = leaving.into_iter().next() {
                 let at = list.iter().map(|i| members[*i].at).sum::<DVec3>() / list.len() as f64;
                 let bodies: Vec<Entity> = list.iter().filter_map(|i| members[*i].body).collect();
                 let target = self
                     .live_regions()
                     .filter(|(r, region)| {
-                        *r != id && !region.frozen && region.tier > tier && region.fine.is_none()
+                        *r != id
+                            && !region.frozen
+                            && region.tier > tier
+                            && region.fine.is_none()
+                            && !region.dormant
                     })
                     .map(|(r, region)| (r, region.anchor.distance(at)))
                     .filter(|(_, d)| *d <= join)
@@ -440,6 +447,9 @@ impl Simulation {
                     }
                 };
                 self.migrate_bodies(&bodies, target);
+                // One cluster a pass, like Box2D v3's one island split a step: the rest leave
+                // on the next passes, so no one step pays for them all.
+                return;
             }
         }
     }
@@ -456,16 +466,54 @@ impl Simulation {
             let Some(r) = r.as_mut().filter(|r| r.dormant) else {
                 continue;
             };
+            let big = r.world.bodies.len() >= 100 && crate::report::wanted();
             if walking.contains(&(id as RegionId)) {
+                if big {
+                    let who: Vec<String> = self
+                        .characters
+                        .iter()
+                        .filter(|(e, c)| c.region == id as RegionId && !self.resting.contains(*e))
+                        .map(|(e, c)| {
+                            let at = r
+                                .world
+                                .bodies
+                                .get(c.body)
+                                .map(|rb| r.global(rb.translation()));
+                            format!("{e} at {at:?}")
+                        })
+                        .collect();
+                    engine_core::log::info!(
+                        "physics regions: dormant region {id} wakes, characters walking: {}",
+                        who.join(", ")
+                    );
+                }
                 r.dormant = false;
                 continue;
             }
             // (The flags, not Rapier's active set: bodies just moved in join that as it steps.)
-            r.dormant = r
+            // Held bodies a teleport or a neighbour woke are put back to sleep before the step
+            // (`hold_resting`), so they don't wake it: a settle landing in a dormant yard
+            // moved its 1500 bodies out and back in, 10-30 ms a move.
+            let held = |rb: &rapier3d::prelude::RigidBody| {
+                let e = crate::convert::entity_of(rb.user_data);
+                self.resting.contains(&e) || self.ungrounded.contains(&e)
+            };
+            let woke = r
                 .world
                 .bodies
                 .iter()
-                .all(|(_, rb)| rb.is_fixed() || rb.is_sleeping());
+                .find(|(_, rb)| !(rb.is_fixed() || rb.is_sleeping() || held(rb)));
+            if let Some((_, rb)) = woke {
+                if big {
+                    engine_core::log::info!(
+                        "physics regions: dormant region {id} wakes, {} awake at {:.0} m/s at {:.0?}",
+                        crate::convert::entity_of(rb.user_data),
+                        rb.linvel().length(),
+                        r.global(rb.translation())
+                    );
+                }
+                r.dormant = false;
+            }
         }
     }
 
@@ -500,14 +548,17 @@ impl Simulation {
                 c.0 &= !m.awake && !fine;
                 c.1.push(i);
             }
-            let leaving: Vec<usize> = clusters
+            // The biggest sleeping cluster leaves, alone: lumped together, the sleepers of the
+            // whole valley made one dormant region 500 m across that a dinghy bobbing on the
+            // lake woke, yard and all. The others go on later passes.
+            let Some(leaving) = clusters
                 .into_values()
-                .filter(|(asleep, _)| *asleep)
-                .flat_map(|(_, list)| list)
-                .collect();
-            if leaving.len() < DORMANT_MIN {
+                .filter(|(asleep, list)| *asleep && list.len() >= DORMANT_MIN)
+                .map(|(_, list)| list)
+                .max_by_key(|list| (list.len(), std::cmp::Reverse(list[0])))
+            else {
                 continue;
-            }
+            };
             let at = leaving.iter().map(|i| members[*i].at).sum::<DVec3>() / leaving.len() as f64;
             let bodies: Vec<Entity> = leaving.iter().filter_map(|i| members[*i].body).collect();
             let characters: Vec<Entity> = leaving
@@ -529,6 +580,8 @@ impl Simulation {
             for e in characters {
                 self.migrate_character(e, target);
             }
+            // One cluster a pass (see `split_far`).
+            return;
         }
     }
 }
