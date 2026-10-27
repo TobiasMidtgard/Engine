@@ -354,6 +354,8 @@ struct Item {
     lod: u8,
     /// Largest scale of the instance (level errors are in mesh space).
     scale: f32,
+    /// Always its full mesh (`NoMeshLod`).
+    full_detail: bool,
     /// Its impostor's atlas layer (`impostor::NONE` without one).
     impostor: u32,
     pipeline: u8,
@@ -541,8 +543,9 @@ impl Cull<'_> {
         if !visible && !casts {
             return None;
         }
+        let full_detail = hot.flags & mesh_scene::FULL_DETAIL != 0;
         let lod = match (meters_per_pixel, self.meshes.get(&mesh.index)) {
-            (Some(m), Some(g)) if self.p.lod_pixels > 0.0 => {
+            (Some(m), Some(g)) if self.p.lod_pixels > 0.0 && !full_detail => {
                 crate::mesh_lod::pick(g.errors(), hot.scale, self.p.lod_pixels * m)
             }
             _ => 0,
@@ -580,6 +583,7 @@ impl Cull<'_> {
             page: mesh.page,
             lod,
             scale: hot.scale,
+            full_detail,
             impostor,
             pipeline,
             // Set after the cull, with the material slot.
@@ -2560,7 +2564,7 @@ impl RenderFeature for MeshFeature {
                             continue;
                         }
                         let lod = match meshes.get(&item.mesh) {
-                            Some(m) if lod_pixels > 0.0 => {
+                            Some(m) if lod_pixels > 0.0 && !item.full_detail => {
                                 crate::mesh_lod::pick(m.errors(), item.scale, lod_pixels * texel)
                             }
                             _ => 0,

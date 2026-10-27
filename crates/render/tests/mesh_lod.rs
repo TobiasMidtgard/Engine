@@ -1,19 +1,27 @@
 //! Levels of detail of instanced meshes: a field of dense stones reaching into the distance is
 //! drawn with far fewer triangles once their levels are built, in the view and in the shadow
-//! maps, and looks the same. Needs a GPU or lavapipe; passes with a note when neither is
+//! maps, and looks the same; stones marked `NoMeshLod` keep every triangle. Needs a GPU or lavapipe; passes with a note when neither is
 //! available.
 
 use engine_assets::Assets;
 use engine_core::prelude::*;
 use engine_render::prelude::*;
 use engine_render::rock::rock;
-use engine_render::{Mesh, RenderDisabled, RenderStats, capture_now};
+use engine_render::{Mesh, NoMeshLod, RenderDisabled, RenderStats, capture_now};
 
 const W: u32 = 320;
 const H: u32 = 180;
 
-/// Render the stone field with `lods` on or off: the triangles drawn and the image's pixels.
-fn render(lods: bool, shot: &str) -> Option<(u64, Vec<u8>)> {
+#[derive(Clone, Copy, PartialEq)]
+enum Lods {
+    Off,
+    On,
+    /// On, with every stone marked `NoMeshLod` (and nothing culled or drawn as an impostor).
+    Marked,
+}
+
+/// Render the stone field: the triangles drawn and the image's pixels.
+fn render(lods: Lods, shot: &str) -> Option<(u64, Vec<u8>)> {
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -29,8 +37,10 @@ fn render(lods: bool, shot: &str) -> Option<(u64, Vec<u8>)> {
         s.film_grain = 0.0;
         // Stones under the virtual geometry threshold stay on the instanced path anyway.
         s.virtual_geometry = false;
-        if !lods {
+        if lods == Lods::Off {
             s.mesh_lod_pixels = 0.0;
+        }
+        if lods != Lods::On {
             s.min_object_pixels = 0.0;
             s.impostor_pixels = 0.0;
         }
@@ -69,10 +79,15 @@ fn render(lods: bool, shot: &str) -> Option<(u64, Vec<u8>)> {
         let col = (i % 20) as f64 - 9.5;
         let z = -3.0 - row * row * 0.13 - row;
         let x = col * (1.0 + row * 0.25);
-        w.spawn((
-            Transform::from_xyz(x, 0.1, z),
-            MeshRenderer::new(stones[(i % 4) as usize], material),
-        ));
+        let stone = w
+            .spawn((
+                Transform::from_xyz(x, 0.1, z),
+                MeshRenderer::new(stones[(i % 4) as usize], material),
+            ))
+            .id();
+        if lods == Lods::Marked {
+            w.entity_mut(stone).insert(NoMeshLod);
+        }
     }
     let mut last = u64::MAX;
     let start = std::time::Instant::now();
@@ -108,10 +123,10 @@ fn render(lods: bool, shot: &str) -> Option<(u64, Vec<u8>)> {
 
 #[test]
 fn far_stones_draw_coarser_levels_and_look_the_same() {
-    let Some((full, before)) = render(false, "stones_full.png") else {
+    let Some((full, before)) = render(Lods::Off, "stones_full.png") else {
         return;
     };
-    let Some((lod, after)) = render(true, "stones_lod.png") else {
+    let Some((lod, after)) = render(Lods::On, "stones_lod.png") else {
         return;
     };
     eprintln!("triangles in view: {full} full, {lod} with levels of detail");
@@ -128,4 +143,16 @@ fn far_stones_draw_coarser_levels_and_look_the_same() {
         diff < 3.0,
         "the images differ by {diff:.2} of 255 on average"
     );
+}
+
+#[test]
+fn stones_marked_no_mesh_lod_keep_every_triangle() {
+    let Some((full, before)) = render(Lods::Off, "stones_full_again.png") else {
+        return;
+    };
+    let Some((marked, after)) = render(Lods::Marked, "stones_marked.png") else {
+        return;
+    };
+    assert_eq!(marked, full, "triangles drawn");
+    assert_eq!(before, after, "the pictures differ");
 }
