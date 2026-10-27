@@ -226,6 +226,10 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
     frame, and prefer mutating existing components.
   - `.chain()` only systems that truly need an order; a chain of 10 is 10 serial steps.
   - Split one system that writes several unrelated resources into one per resource.
+  - `FixedUpdate`'s `SimSet`s run one after another, so nothing overlaps the physics step.
+    A system that doesn't need this step's bodies (no raycasts, overlaps or body poses; a
+    wind, cloud, smoke or water-flow step on last step's state) goes in
+    `SimSet::DuringPhysics`, which runs beside `Physics`, like Unreal's `TG_DuringPhysics`.
 - GPU: instance everything; one storage buffer per kind of data; avoid per-object bind
   groups; compute shaders for anything with more than ~10k elements (particles, fluids).
 - Measure: `Diagnostics::set("module.metric", v)` shows up in `engine.describe`.

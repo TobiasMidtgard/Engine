@@ -161,6 +161,14 @@ impl App {
             )
                 .chain(),
         )
+        // Beside the physics step, like Unreal's TG_DuringPhysics: after Gameplay, done before
+        // PostPhysics, and unordered against Physics so the executor can overlap the two.
+        .configure_sets(
+            FixedUpdate,
+            SimSet::DuringPhysics
+                .after(SimSet::Gameplay)
+                .before(SimSet::PostPhysics),
+        )
         .configure_sets(Update, (UpdateSet::Logic, UpdateSet::Camera).chain())
         .configure_sets(
             PostUpdate,
@@ -696,6 +704,60 @@ mod tests {
             app.init_resource::<Counter>()
                 .add_systems(Update, |mut c: ResMut<Counter>| c.0 += 1);
         }
+    }
+
+    #[test]
+    fn during_physics_overlaps_the_physics_step_in_order() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        static GAMEPLAY: AtomicBool = AtomicBool::new(false);
+        static PHYSICS: AtomicBool = AtomicBool::new(false);
+        static DURING: AtomicBool = AtomicBool::new(false);
+        static SEEN: AtomicU32 = AtomicU32::new(0);
+        fn wait_for(flag: &AtomicBool) -> bool {
+            let start = std::time::Instant::now();
+            while !flag.load(Ordering::SeqCst) {
+                if start.elapsed() > std::time::Duration::from_secs(2) {
+                    return false;
+                }
+                std::hint::spin_loop();
+            }
+            true
+        }
+        fn gameplay() {
+            GAMEPLAY.store(true, Ordering::SeqCst);
+        }
+        // Each waits to see the other running: only possible if they overlap.
+        fn physics() {
+            PHYSICS.store(true, Ordering::SeqCst);
+            if wait_for(&DURING) {
+                SEEN.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        fn during() {
+            assert!(GAMEPLAY.load(Ordering::SeqCst), "ran before Gameplay");
+            DURING.store(true, Ordering::SeqCst);
+            if wait_for(&PHYSICS) {
+                SEEN.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        fn post_physics() {
+            assert_eq!(
+                SEEN.load(Ordering::SeqCst),
+                2,
+                "PostPhysics ran before both"
+            );
+        }
+        let mut app = App::new();
+        app.add_systems(FixedUpdate, gameplay.in_set(SimSet::Gameplay))
+            .add_systems(FixedUpdate, physics.in_set(SimSet::Physics))
+            .add_systems(FixedUpdate, during.in_set(SimSet::DuringPhysics))
+            .add_systems(FixedUpdate, post_physics.in_set(SimSet::PostPhysics));
+        app.world.run_schedule(FixedUpdate);
+        assert_eq!(
+            SEEN.load(Ordering::SeqCst),
+            2,
+            "DuringPhysics didn't overlap Physics"
+        );
     }
 
     #[test]

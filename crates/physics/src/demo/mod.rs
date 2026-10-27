@@ -41,8 +41,9 @@ pub mod jenga;
 pub mod pool;
 mod settle;
 
-pub(crate) use floaters::replay_floaters;
+pub(crate) use art::busy as art_busy;
 pub use floaters::{FLOAT_CYCLE_SECS, FloatTest, spawn_floaters};
+pub(crate) use floaters::{FloatWork, floaters_have_work, replay_floaters, tick_floaters};
 
 use art::kit::MeshBuilder;
 use art::{Mat, Parts, dummy, props, structures};
@@ -844,24 +845,51 @@ fn build_station(world: &mut World, ground: Entity, station: Station) {
 const STATION_REST_M: f64 = 70.0;
 /// A resting station wakes, replaying from the start, once a focus comes this near, meters.
 const STATION_WAKE_M: f64 = 55.0;
-/// A station someone walked away from rests this long after it was built (or at the end of
-/// its cycle, if sooner), seconds: long enough for what it drops to land, so nothing hangs in
-/// the air. The wheel and table never stop turning nor the pendulums swinging; they rest
-/// mid-motion. One nobody has come near since it was built rests at once, asleep where it was
-/// built (Jolt's `EActivation::DontActivate`, Unreal's `bStartAwake = false`): it replays from
-/// the start when someone comes, and settling it first cost minutes at a few fps on load.
+/// How long a station takes to drop what it builds, seconds: one that rests sooner after it
+/// was built (nobody near) has its loose bodies dropped once off the frame (`settle`), so
+/// nothing hangs in the air. A station rests as soon as nobody is near, the wheel and table
+/// mid-turn, the pendulums mid-swing; it replays from the start when someone comes. Playing
+/// out the drop instead (the whole yard, woken by someone passing the fortress) stepped
+/// 1,500 bodies for 8 s of world time at 60 ms a step, and slow motion stretched that
+/// further. One nobody has come near since it was built rests at once (Jolt's
+/// `EActivation::DontActivate`, Unreal's `bStartAwake = false`).
 const FAR_REST_SECS: f64 = 8.0;
 
-/// Replay each proving ground's stations whose cycle is up (world time, so slow motion slows
-/// the cycles too); rest the ones nobody is near and wake them when someone comes.
-pub(crate) fn replay_stations(world: &mut World) {
-    let dt = world
-        .get_resource::<FixedTime>()
-        .map_or(0.0, |t| t.world_step_secs());
-    let focus = world
-        .get_resource::<FocusPoints>()
-        .map(|f| f.points.clone())
-        .unwrap_or_default();
+/// Stations due to replay, stations to rest and the ones of those nobody has seen, found by
+/// [`tick_stations`] for [`replay_stations`].
+#[derive(Resource, Default)]
+pub(crate) struct StationWork {
+    due: Vec<(Entity, Station)>,
+    rest: Vec<(Entity, Station)>,
+    /// Resting before their drop played out: settled off the frame.
+    unsettled: Vec<(Entity, DVec3, Station)>,
+}
+
+/// Is there anything for [`replay_stations`] to do this step: a station to replay, rest or
+/// build, or a settle finished? (It takes the whole world, so it runs only then: an exclusive
+/// system stops every other system of the step.)
+pub(crate) fn stations_have_work(
+    work: Res<StationWork>,
+    grounds: Query<&ProvingGround>,
+    settling: Option<Res<settle::Settling>>,
+) -> bool {
+    !work.due.is_empty()
+        || !work.rest.is_empty()
+        || grounds.iter().any(|g| g.unbuilt.contains(&true))
+        || settling.is_some_and(|s| s.any_done())
+}
+
+/// Run each proving ground's station cycles (world time, so slow motion slows the cycles
+/// too): which replay, which rest because nobody is near, and which wake because someone
+/// came. A plain system, so it runs beside the others; [`replay_stations`] does the work.
+pub(crate) fn tick_stations(
+    time: Option<Res<FixedTime>>,
+    focus: Option<Res<FocusPoints>>,
+    mut grounds: Query<(Entity, &mut ProvingGround)>,
+    mut work: ResMut<StationWork>,
+) {
+    let dt = time.map_or(0.0, |t| t.world_step_secs());
+    let focus = focus.map(|f| f.points.clone()).unwrap_or_default();
     // (No focus, as in tests and tools: everything runs.)
     let nearest = |at: DVec3| {
         focus
@@ -869,13 +897,8 @@ pub(crate) fn replay_stations(world: &mut World) {
             .map(|p| p.distance(at))
             .fold(if focus.is_empty() { 0.0 } else { f64::INFINITY }, f64::min)
     };
-    settle::finish(world);
-    build_unbuilt(world, 1);
-    let (mut due, mut rest, mut unseen) = (Vec::new(), Vec::new(), Vec::new());
-    for (e, mut g) in world
-        .query::<(Entity, &mut ProvingGround)>()
-        .iter_mut(world)
-    {
+    let work = &mut *work;
+    for (e, mut g) in &mut grounds {
         if !g.replay {
             continue;
         }
@@ -887,7 +910,7 @@ pub(crate) fn replay_stations(world: &mut World) {
             let d = nearest(g.origin + station.base());
             if g.resting[i] {
                 if d < STATION_WAKE_M {
-                    due.push((e, station));
+                    work.due.push((e, station));
                 }
                 continue;
             }
@@ -895,24 +918,38 @@ pub(crate) fn replay_stations(world: &mut World) {
             g.seen[i] |= !focus.is_empty() && d <= STATION_REST_M;
             let t = g.running[i];
             let cycle = station.cycle_secs();
-            let settle = if g.seen[i] { FAR_REST_SECS } else { 0.0 };
-            if d > STATION_REST_M && t >= cycle.unwrap_or(f64::INFINITY).min(settle) {
+            if d > STATION_REST_M {
                 g.resting[i] = true;
-                rest.push((e, station));
-                if !g.seen[i] {
-                    unseen.push((e, g.origin, station));
+                work.rest.push((e, station));
+                if !g.seen[i] || t < cycle.unwrap_or(f64::INFINITY).min(FAR_REST_SECS) {
+                    work.unsettled.push((e, g.origin, station));
                 }
             } else if cycle.is_some_and(|c| t >= c) {
-                due.push((e, station));
-            }
-            if crate::report::wanted() && due.last() == Some(&(e, station)) {
-                engine_core::log::info!(
-                    "proving ground: {} replays, nearest focus {d:.0} m",
-                    station.key()
-                );
+                work.due.push((e, station));
+                if crate::report::wanted() {
+                    engine_core::log::info!(
+                        "proving ground: {} replays, nearest focus {d:.0} m",
+                        station.key()
+                    );
+                }
             }
         }
     }
+}
+
+/// Replay the stations [`tick_stations`] found due and hold the resting ones asleep; build
+/// the next station waiting its turn and apply finished settles.
+pub(crate) fn replay_stations(world: &mut World) {
+    settle::finish(world);
+    build_unbuilt(world, 1);
+    let (due, rest, unsettled) = {
+        let mut work = world.resource_mut::<StationWork>();
+        (
+            std::mem::take(&mut work.due),
+            std::mem::take(&mut work.rest),
+            std::mem::take(&mut work.unsettled),
+        )
+    };
     for (e, station) in due {
         build_station(world, e, station);
     }
@@ -931,12 +968,13 @@ pub(crate) fn replay_stations(world: &mut World) {
                 bodies.len()
             );
         }
-        // Stations built where nobody has been settle once, off the frame, so what they
-        // dropped doesn't hang in the air (`settle`).
-        let mut grounds: Vec<(Entity, DVec3)> = unseen.iter().map(|u| (u.0, u.1)).collect();
+        // Stations resting before their drop played out (nobody has been near since they
+        // were built, or everyone left) settle once, off the frame, so what they dropped
+        // doesn't hang in the air (`settle`).
+        let mut grounds: Vec<(Entity, DVec3)> = unsettled.iter().map(|u| (u.0, u.1)).collect();
         grounds.dedup();
         for (ground, origin) in grounds {
-            if unseen
+            if unsettled
                 .iter()
                 .any(|u| u.0 == ground && u.2 == Station::Galton)
             {
@@ -948,7 +986,7 @@ pub(crate) fn replay_stations(world: &mut World) {
                 .filter(|(e, p)| {
                     p.ground == ground
                         && p.station != Station::Galton
-                        && unseen.iter().any(|u| u.0 == ground && u.2 == p.station)
+                        && unsettled.iter().any(|u| u.0 == ground && u.2 == p.station)
                         && bodies.contains(e)
                 })
                 .map(|(e, _)| e)

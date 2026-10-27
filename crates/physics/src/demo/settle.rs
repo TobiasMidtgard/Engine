@@ -29,6 +29,13 @@ type Settled = Vec<(Entity, DVec3, Quat)>;
 #[derive(Resource, Default)]
 pub(crate) struct Settling(Vec<JoinHandle<Settled>>);
 
+impl Settling {
+    /// Has a settle finished, for [`finish`] to apply?
+    pub(crate) fn any_done(&self) -> bool {
+        self.0.iter().any(|h| h.is_finished())
+    }
+}
+
 /// The nearest entity at or above `e` (including `e`) with a `RigidBody`.
 fn owner(world: &World, e: Entity) -> Option<Entity> {
     let mut cur = e;

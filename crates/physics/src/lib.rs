@@ -154,15 +154,36 @@ impl Plugin for PhysicsPlugin {
                  step time (ms), substeps.",
             )
             .add_systems(FixedUpdate, step::physics_step.in_set(SimSet::Physics))
-            .add_systems(FixedUpdate, demo::replay_stations.in_set(SimSet::Gameplay))
+            .init_resource::<demo::StationWork>()
+            .init_resource::<demo::FloatWork>()
+            // The replays take the whole world (they spawn and despawn stations), so they
+            // run only on the steps that have work: an exclusive system stops every other
+            // system of the step. The cycles tick in plain systems beside the others.
+            .add_systems(
+                FixedUpdate,
+                (
+                    demo::tick_stations,
+                    demo::replay_stations.run_if(demo::stations_have_work),
+                )
+                    .chain()
+                    .in_set(SimSet::Gameplay),
+            )
             .add_systems(
                 FixedUpdate,
                 demo::jenga::drive_rods
                     .in_set(SimSet::Gameplay)
                     .after(demo::replay_stations),
             )
-            .add_systems(FixedUpdate, demo::replay_floaters.in_set(SimSet::Gameplay))
-            .add_systems(Update, demo::finish_art)
+            .add_systems(
+                FixedUpdate,
+                (
+                    demo::tick_floaters,
+                    demo::replay_floaters.run_if(demo::floaters_have_work),
+                )
+                    .chain()
+                    .in_set(SimSet::Gameplay),
+            )
+            .add_systems(Update, demo::finish_art.run_if(demo::art_busy))
             .add_systems(
                 PostUpdate,
                 shift::shift_simulation.in_set(engine_world::WorldShiftSet::Apply),

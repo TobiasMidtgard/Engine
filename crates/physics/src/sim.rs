@@ -154,7 +154,7 @@ impl Region {
         settings.apply_to(&mut world.integration_parameters);
         let ground = world.insert_body(RigidBodyBuilder::fixed());
         // Step the empty world once. Rapier builds its persistent islands at a world's first
-        // step with time in it, and a zero-length step (`needs_refresh` below) doesn't: island
+        // step with time in it (zero-length steps, as resting regions once took, don't): island
         // ids handed out before that build, of bodies migrated out meanwhile, outlived it
         // and indexed past its tables ("index out of bounds" in rapier's `persistent.rs`,
         // a crash in the exe while zones woke).
@@ -399,6 +399,20 @@ impl Region {
     pub fn queries_refreshed(&mut self) {
         self.fresh.clear();
         self.stale_all = false;
+    }
+
+    /// Grow [`Self::bounds`] by the colliders `added` (a region that doesn't step: what left
+    /// it leaves the bounds a little wide, which culling only errs safe on).
+    pub fn extend_bounds(&mut self, added: &[ColliderHandle]) {
+        for h in added {
+            if let Some(c) = self.world.colliders.get(*h) {
+                let a = c.compute_aabb();
+                self.bounds = Some(match self.bounds {
+                    None => (a.mins, a.maxs),
+                    Some((lo, hi)) => (lo.min(a.mins), hi.max(a.maxs)),
+                });
+            }
+        }
     }
 
     /// Recompute [`Self::bounds`] from the colliders.

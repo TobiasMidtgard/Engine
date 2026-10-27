@@ -126,7 +126,7 @@ struct SetImages {
 }
 
 #[derive(Resource, Default)]
-struct ArtCache {
+pub(crate) struct ArtCache {
     sets: HashMap<Tex, SetImages>,
     materials: HashMap<Mat, Handle<StandardMaterial>>,
     /// Texture sets being made on workers, and the materials reserved until they are.
@@ -439,6 +439,12 @@ pub(crate) fn finish(world: &mut World) {
         }
     }
     world.resource_mut::<ArtCache>().waiting = still;
+}
+
+/// Is there art for [`finish`] to store or materials waiting for it? (`finish` takes the
+/// whole world, so it runs only then.)
+pub(crate) fn busy(cache: Option<Res<ArtCache>>) -> bool {
+    cache.is_some_and(|c| !c.making.is_empty() || !c.waiting.is_empty() || !c.meshing.is_empty())
 }
 
 /// True while workers are still making the proving ground's art.
