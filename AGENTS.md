@@ -46,6 +46,13 @@ Share one target directory between checkouts to avoid rebuilding dependencies:
 - **World positions are f64** (`Transform::translation: DVec3`, `GlobalTransform`), rotations
   and local offsets are f32. Convert near the point of use:
   `(world_pos - origin).as_vec3()`. Worlds span light-minutes; f32 world positions are a bug.
+- **The world re-anchors** (`WorldShift`: floating origin, planet frames, `showcase.goto`).
+  Root `Transform`s and the contracts move by themselves; any world point you keep yourself
+  (a demo's path points, pivots, targets, homes; a cached goal; a grid origin) must follow:
+  `impl FollowsWorldShift` and `app.shift_components::<C>()` / `shift_resource::<R>()`, or
+  read `WorldShift` in `WorldShiftSet::Apply`. Test it with one shifted update. A hoist that
+  didn't follow lowered the yard's cloth into its statue after a jump (16 ms of
+  self-collision on the crushed sheet).
 - The renderer draws everything relative to the camera (`ViewData::origin`). Shaders only
   ever see camera-relative positions (`rel`), plus `tiling_pos(rel)` for world-stable noise.
 

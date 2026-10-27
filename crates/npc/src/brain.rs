@@ -135,7 +135,13 @@ pub(crate) struct Scratch {
     replans: u32,
     /// Spots picked this step (each weighs dozens of sight lines and a route or two).
     picks: u32,
+    /// NPCs that woke this step (see [`CROWD_WAKE`]).
+    woke: u32,
 }
+
+/// NPCs that may take their first thought in the step they wake: past this many (a crowd
+/// spawned or woken at once), near ones spread their first thought over one pace as well.
+const CROWD_WAKE: u32 = 8;
 
 /// Spot picks a step: the rest wait a step or two (a few hundredths of a second), so a squad
 /// told to move at once doesn't weigh all its spots in a single step.
@@ -154,6 +160,7 @@ pub(crate) fn think_and_act(
     s.fallen.clear();
     s.replans = 0;
     s.picks = 0;
+    s.woke = 0;
     let world_now = w.time.elapsed_secs_f64();
     revives.expire(world_now);
     for (e, npc, t, _, _, vitals, _, clock, (faction, squad, downed), brain, ..) in q.iter() {
@@ -236,11 +243,16 @@ pub(crate) fn think_and_act(
         }
         let far =
             w.focus.points.is_empty() || w.focus.distance(pos) > w.settings.far_distance as f64;
-        if fresh && far && !w.focus.points.is_empty() {
-            // Spread a far crowd's first thoughts over one far pace, so NPCs that wake together
-            // (a zone finishing loading) don't all think in one frame: 958 ms on the showcase.
-            // Near ones still think at once, as a fight in view needs.
-            let pace = w.settings.think_secs * 6.0;
+        if fresh {
+            s.woke += 1;
+        }
+        let far_crowd = far && !w.focus.points.is_empty();
+        if fresh && (far_crowd || s.woke > CROWD_WAKE) {
+            // Spread a crowd's first thoughts over one pace, so NPCs that wake together (a zone
+            // finishing loading) don't all think in one frame: 958 ms, then 409 ms near the
+            // start on the showcase. The first few near ones still think at once, as a fight in
+            // view needs.
+            let pace = w.settings.think_secs * if far { 6.0 } else { 1.0 };
             brain.next_think = brain.next_think.max(now + (pace * brain.random()) as f64);
         }
         if now >= brain.next_think {

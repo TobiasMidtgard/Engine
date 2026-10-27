@@ -483,6 +483,16 @@ yet, wait for a serial pass. Draw order is sorted as 12-byte keys, and each inst
 once, in draw order, straight into the upload's staging memory (`render.cpu.meshes: *` steps;
 `cargo run -p engine_render --release --example mesh_gather` measures them).
 
+**Pipeline warm-up** (`warmup.rs`, after Unreal's PSO precaching and Unity's
+`ShaderVariantCollection.WarmUp`): with a window (`RenderSettings::pipeline_warmup`, default
+`Windowed`; headless apps compile only what they draw), the mesh feature queues all its pipeline
+variants (single- and double-sided, blended, mirrored; scene, prepass and masked shadow) on a few
+worker threads as soon as its shaders exist, commonest first. A frame that needs one takes it when
+built, waits for it while a worker compiles it, and builds it itself when no worker has started
+it. The first frame that draws a new kind of material then takes no compile (1.2 s under
+lavapipe before). `render.meshes.pipelines_warming` counts those still compiling; a loading
+screen can wait for 0. Features with their own pipelines can use `Warmup` the same way.
+
 **Mesh pool and multi-draw** (`mesh_pool.rs`, after Aaltonen and Haar, "GPU-Driven Rendering
 Pipelines", SIGGRAPH 2015, and Unreal's and Unity's global vertex and index buffers): the
 instanced meshes and their levels of detail live in shared vertex and index buffers, in pages

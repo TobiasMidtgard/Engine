@@ -266,6 +266,60 @@ pub fn register(app: &mut App) {
         },
     )
     .register_api(
+        "softbody.unveil_report",
+        "Where each unveiling sheet's hook is against the statue it should cover: the hook, its lowered point, the statue's top, how far the lowered point is beside the top (m), and whether the statue's mesh collider is cast and baked for the sheet.",
+        "{}",
+        |world, _| {
+            use crate::collide::LocalShape;
+            use crate::demo::{DemoClock, DemoMotion};
+            use engine_world::physics::{Collider, ColliderShape};
+            let mut statues = Vec::new();
+            let mut q = world.query::<(&Name, &GlobalTransform, Option<&Collider>)>();
+            for (name, t, collider) in q.iter(world) {
+                if name.as_str() != "Marble statue body" {
+                    continue;
+                }
+                let top = match collider.map(|c| &c.shape) {
+                    Some(ColliderShape::TriMesh { vertices, .. }) => vertices
+                        .iter()
+                        .map(|v| t.transform_point(v.as_dvec3()))
+                        .max_by(|a, b| a.y.total_cmp(&b.y)),
+                    _ => None,
+                };
+                statues.push((t.translation(), top));
+            }
+            let mut sheets = Vec::new();
+            let mut q = world.query::<(&Transform, &DemoMotion, &DemoClock, Option<&SoftBodySim>)>();
+            for (t, motion, clock, body) in q.iter(world) {
+                let DemoMotion::Hoist { low, .. } = motion else {
+                    continue;
+                };
+                let statue = statues
+                    .iter()
+                    .min_by(|a, b| a.0.distance(*low).total_cmp(&b.0.distance(*low)));
+                let top = statue.and_then(|s| s.1);
+                let baked = body.map(|b| {
+                    b.last_colliders()
+                        .iter()
+                        .filter(|c| matches!(c.shape, LocalShape::Field(_)))
+                        .count()
+                });
+                sheets.push(json!({
+                    "hook": t.translation.to_array(),
+                    "low": low.to_array(),
+                    "clock": clock.0,
+                    "statue": statue.map(|s| s.0.to_array()),
+                    "statue_top": top.map(|p| p.to_array()),
+                    "beside_m": top.map(|p| (p - *low).with_y(0.0).length()),
+                    "above_m": top.map(|p| low.y - p.y),
+                    "cast": top.is_some(),
+                    "baked_fields": baked,
+                }));
+            }
+            Ok(json!({ "sheets": sheets }))
+        },
+    )
+    .register_api(
         "softbody.stats",
         "Soft-body totals: bodies, particles, frozen bodies, last step time (ms), the work in it summed over bodies (busy_ms), and the slowest body.",
         "{}",

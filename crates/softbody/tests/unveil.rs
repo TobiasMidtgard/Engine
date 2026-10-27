@@ -87,6 +87,22 @@ fn the_crane_drapes_the_statue_then_lifts_the_sheet_clear() {
         deepest < 0.03,
         "the sheet sank {deepest:.3} m into the statue"
     );
+    // The report the PC is asked for: the hook comes down onto the statue's crown, and the
+    // statue is a baked mesh collider for the sheet.
+    let report = engine_core::registry::call_api(
+        &mut app.world,
+        "softbody.unveil_report",
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let sheet_report = &report["sheets"][0];
+    assert_eq!(sheet_report["cast"], true, "{report}");
+    assert!(sheet_report["beside_m"].as_f64().unwrap() < 0.1, "{report}");
+    assert!(
+        sheet_report["baked_fields"].as_u64().unwrap() >= 1,
+        "{report}"
+    );
+    let b = app.world.get::<SoftBodySim>(sheet).unwrap();
     let covered = low as f32 / b.particle_count() as f32;
     assert!(
         covered > 0.4,

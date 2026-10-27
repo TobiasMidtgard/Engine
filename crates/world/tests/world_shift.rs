@@ -305,6 +305,67 @@ fn messages_waiting_to_be_read_move_with_the_world() {
     assert_eq!(noises[0].position, fresh);
 }
 
+/// A demo's own world points (a hoist's path, a pivot, a home), registered to follow.
+#[derive(Component, Default, Clone, PartialEq, Debug)]
+struct DemoPath {
+    points: Vec<DVec3>,
+    home: Option<DVec3>,
+    pivots: [DVec3; 2],
+}
+
+impl FollowsWorldShift for DemoPath {
+    fn follow(&mut self, s: &WorldShift) {
+        self.points.follow(s);
+        self.home.follow(s);
+        self.pivots.follow(s);
+    }
+}
+
+/// The same, kept in a resource.
+#[derive(Resource, Clone, PartialEq, Debug)]
+struct DemoPaths(DemoPath);
+
+impl FollowsWorldShift for DemoPaths {
+    fn follow(&mut self, s: &WorldShift) {
+        self.0.follow(s);
+    }
+}
+
+#[test]
+fn registered_components_and_resources_move_with_the_world() {
+    let mut app = app();
+    app.shift_components::<DemoPath>()
+        .shift_resource::<DemoPaths>();
+    let path = DemoPath {
+        points: vec![DVec3::new(1.0, 2.0, 3.0), DVec3::new(-4.0, 0.5, 9.0)],
+        home: Some(DVec3::new(100.0, 0.0, -50.0)),
+        pivots: [DVec3::new(0.0, 6.0, 0.0), DVec3::new(2.0, 6.0, 0.0)],
+    };
+    let demo = app.world.spawn(path.clone()).id();
+    app.world.insert_resource(DemoPaths(path.clone()));
+    app.update();
+    let s = turned();
+    app.world.write_message(s);
+    app.update();
+    let moved = |p: &DemoPath| {
+        p.points
+            .iter()
+            .zip(&path.points)
+            .all(|(a, b)| (*a - s.point(*b)).length() < 1e-6)
+            && (p.home.unwrap() - s.point(path.home.unwrap())).length() < 1e-6
+            && p.pivots
+                .iter()
+                .zip(&path.pivots)
+                .all(|(a, b)| (*a - s.point(*b)).length() < 1e-6)
+    };
+    assert!(moved(app.world.get::<DemoPath>(demo).unwrap()));
+    assert!(moved(&app.world.resource::<DemoPaths>().0));
+    // Frames without a shift leave them alone.
+    let after = app.world.resource::<DemoPaths>().clone();
+    app.update();
+    assert_eq!(*app.world.resource::<DemoPaths>(), after);
+}
+
 #[test]
 fn the_wind_and_sun_stay_turned() {
     let mut app = app();

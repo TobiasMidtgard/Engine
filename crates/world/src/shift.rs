@@ -157,20 +157,69 @@ pub enum WorldShiftSet {
     Rebuild,
 }
 
-/// A message with world positions or directions in it. Messages written before a shift and
-/// read after it would land in the wrong place (an impulse applied 50 km from its body), so
-/// registered message types still waiting to be read are moved into the new frame in
-/// [`WorldShiftSet::Apply`].
+/// Something holding world positions or directions: a message, a component or a resource.
+///
+/// Messages written before a shift and read after it would land in the wrong place (an
+/// impulse applied 50 km from its body), so registered message types still waiting to be read
+/// are moved into the new frame in [`WorldShiftSet::Apply`]. Components and resources that keep
+/// world points of their own (a demo's path points, pivots, targets and homes; a cached goal)
+/// register the same way, or a jump that re-anchors the world (`showcase.goto`) leaves them at
+/// the old coordinates: a hoist then lowered the yard's cloth sheet into its statue and
+/// crushed it into a ball.
+///
+/// Positions take [`WorldShift::point`]; implemented here for `DVec3` (a point), and for
+/// `Vec`, `Option` and arrays of anything that follows. Write the impl by hand for types with
+/// directions (`WorldShift::direction`) or velocities (`WorldShift::velocity_at`).
 pub trait FollowsWorldShift {
-    /// Move this message's positions, directions and velocities into the new frame.
+    /// Move this value's positions, directions and velocities into the new frame.
     fn follow(&mut self, s: &WorldShift);
 }
 
-/// Registers message types that follow world shifts.
+/// A `DVec3` follows as a point. Store directions in `Vec3` and turn them by hand.
+impl FollowsWorldShift for DVec3 {
+    fn follow(&mut self, s: &WorldShift) {
+        *self = s.point(*self);
+    }
+}
+
+impl<T: FollowsWorldShift> FollowsWorldShift for Vec<T> {
+    fn follow(&mut self, s: &WorldShift) {
+        for v in self {
+            v.follow(s);
+        }
+    }
+}
+
+impl<T: FollowsWorldShift> FollowsWorldShift for Option<T> {
+    fn follow(&mut self, s: &WorldShift) {
+        if let Some(v) = self {
+            v.follow(s);
+        }
+    }
+}
+
+impl<T: FollowsWorldShift, const N: usize> FollowsWorldShift for [T; N] {
+    fn follow(&mut self, s: &WorldShift) {
+        for v in self {
+            v.follow(s);
+        }
+    }
+}
+
+/// Registers messages, components and resources that follow world shifts. Each runs in
+/// [`WorldShiftSet::Apply`].
 pub trait WorldShiftAppExt {
     /// Move messages of type `M` that are still waiting to be read into the new frame when
     /// the world shifts. Call it after `add_message::<M>()`.
     fn shift_messages<M: Message + FollowsWorldShift>(&mut self) -> &mut Self;
+    /// Move every component `C` into the new frame when the world shifts.
+    fn shift_components<C>(&mut self) -> &mut Self
+    where
+        C: Component<Mutability = bevy_ecs::component::Mutable> + FollowsWorldShift;
+    /// Move resource `R` (when present) into the new frame when the world shifts.
+    fn shift_resource<R>(&mut self) -> &mut Self
+    where
+        R: Resource + Component<Mutability = bevy_ecs::component::Mutable> + FollowsWorldShift;
 }
 
 impl WorldShiftAppExt for App {
@@ -179,6 +228,47 @@ impl WorldShiftAppExt for App {
             PostUpdate,
             shift_pending_messages::<M>.in_set(WorldShiftSet::Apply),
         )
+    }
+
+    fn shift_components<C>(&mut self) -> &mut Self
+    where
+        C: Component<Mutability = bevy_ecs::component::Mutable> + FollowsWorldShift,
+    {
+        self.add_systems(
+            PostUpdate,
+            shift_components::<C>.in_set(WorldShiftSet::Apply),
+        )
+    }
+
+    fn shift_resource<R>(&mut self) -> &mut Self
+    where
+        R: Resource + Component<Mutability = bevy_ecs::component::Mutable> + FollowsWorldShift,
+    {
+        self.add_systems(PostUpdate, shift_resource::<R>.in_set(WorldShiftSet::Apply))
+    }
+}
+
+fn shift_components<C>(mut shifts: MessageReader<WorldShift>, mut all: Query<&mut C>)
+where
+    C: Component<Mutability = bevy_ecs::component::Mutable> + FollowsWorldShift,
+{
+    let Some(s) = combined(&mut shifts) else {
+        return;
+    };
+    for mut c in &mut all {
+        c.follow(&s);
+    }
+}
+
+fn shift_resource<R>(mut shifts: MessageReader<WorldShift>, resource: Option<ResMut<R>>)
+where
+    R: Resource + Component<Mutability = bevy_ecs::component::Mutable> + FollowsWorldShift,
+{
+    let Some(s) = combined(&mut shifts) else {
+        return;
+    };
+    if let Some(mut r) = resource {
+        r.follow(&s);
     }
 }
 

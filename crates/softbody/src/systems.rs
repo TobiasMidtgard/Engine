@@ -813,8 +813,9 @@ struct StepContext<'a, 'w, 's> {
 
 /// A step slower than this logs which body held it up, ms.
 const SLOW_STEP_MS: f64 = 50.0;
-/// Most time a body spends a frame settling before it's seen (its prewarm), ms.
-const PREWARM_BUDGET_MS: f64 = 3.0;
+/// Most settling (prewarm) a body does a frame, in particle substeps: about 3 ms on the PC.
+/// Counted rather than timed, so a body settles the same way on every machine.
+const PREWARM_WORK: usize = 30_000;
 
 /// The body that took longest in the last step, and how long (ms), for `softbody.stats`.
 #[derive(Resource, Default, Debug, Clone, Copy)]
@@ -1129,33 +1130,25 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     let warmth = drying_warmth(env.temperature(b.center));
     soak(b, dt, rain, warmth);
 
-    // Step, plus prewarm on the first updates: as much as fits in PREWARM_BUDGET_MS a frame,
-    // the rest on later frames, so a new body (or one built far away and only now woken)
-    // settles over a few frames instead of stalling one step for hundreds of ms.
-    let budget = Instant::now();
-    let mut impulses: Vec<ColliderImpulse> = Vec::new();
-    let mut pulls: Vec<ColliderImpulse> = vec![ColliderImpulse::default(); b.frames.len()];
-    let mut runs = 0;
-    loop {
-        let step_dt = if runs == 0 { dt } else { 1.0 / 60.0 };
-        b.sim.step(step_dt, &local);
-        if runs == 0 {
-            impulses.clone_from(&b.sim.collider_impulses);
-            pulls.clone_from(&b.sim.frame_impulses);
-        }
-        runs += 1;
-        // Out of sight, at least one settling step a frame even when the step alone is over
-        // the budget, so a big body built far away is settled when it's reached; near, the
-        // budget alone (settling there shows as a fast-forward).
-        let least = if dist > ctx.config.lod_distance { 1 } else { 0 };
-        if b.pending_prewarm == 0
-            || (runs > least && budget.elapsed().as_secs_f64() * 1000.0 >= PREWARM_BUDGET_MS)
-        {
-            break;
-        }
-        b.pending_prewarm -= 1;
+    // Step, plus prewarm on the first updates: as much as fits in PREWARM_WORK a frame, the
+    // rest on later frames, so a big new body (or one built far away and only now woken)
+    // settles over a few frames instead of stalling one step for hundreds of ms, and a small
+    // one settles at once. Out of sight, at least one settling step a frame, so a big body
+    // built far away is settled when it's reached; near, a body too big for the budget
+    // settles only as it steps (settling there shows as a fast-forward).
+    b.sim.step(dt, &local);
+    let impulses = b.sim.collider_impulses.clone();
+    let pulls = b.sim.frame_impulses.clone();
+    let work = b.sim.len() * b.sim.substeps_for(1.0 / 60.0) as usize;
+    let least = u32::from(dist > ctx.config.lod_distance);
+    let runs = ((PREWARM_WORK / work.max(1)) as u32)
+        .max(least)
+        .min(b.pending_prewarm);
+    for _ in 0..runs {
+        b.sim.step(1.0 / 60.0, &local);
     }
-    if runs > 1 {
+    b.pending_prewarm -= runs;
+    if runs > 0 {
         b.sim.step_start.clone_from(&b.sim.pos);
     }
     b.steps += 1;

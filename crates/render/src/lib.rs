@@ -100,6 +100,7 @@ pub mod texture;
 pub mod virtual_geometry;
 pub mod virtual_texture;
 pub mod volumetrics;
+mod warmup;
 
 use engine_assets::{AssetAppExt, AssetPlugin, AssetServer, Assets, Handle};
 use engine_core::prelude::*;
@@ -136,7 +137,7 @@ pub use renderer::{
 };
 pub use rock::{StoneFinish, StoneKind, WallStone, wall_stone};
 pub use settings::{
-    AntiAliasing, Atmosphere, DebugView, FogSettings, Pipelining, RenderSettings,
+    AntiAliasing, Atmosphere, DebugView, FogSettings, PipelineWarmup, Pipelining, RenderSettings,
     TextureCompression, Tonemapper, VolumetricQuality,
 };
 pub use sprites::{
