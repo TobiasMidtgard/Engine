@@ -397,6 +397,7 @@ impl MaterialLibrary {
         inner.next_id += 1;
         let id = inner.next_id;
         let set = Arc::new(generate(gpu, &common, &pipelines, preset, size, id));
+        gpu.side_work.preset(size);
         tracing::info!(
             "generated material preset '{}' at {size}x{size} in {:.0} ms ({compiled_ms:.0} ms \
              of it for its pipelines; GPU work queued)",

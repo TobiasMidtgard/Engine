@@ -100,6 +100,9 @@ pub struct GpuShared {
     pub images: ImageCache,
     /// This frame's upload allowance, shared by every feature (see [`UploadBudget`]).
     pub uploads: UploadBudget,
+    /// GPU work queued besides the frame's passes, for the slow-frame log (see
+    /// [`crate::perf`]).
+    pub(crate) side_work: crate::perf::SideWork,
 }
 
 /// How many bytes the features may upload this frame (`RenderSettings::upload_mb_per_frame`

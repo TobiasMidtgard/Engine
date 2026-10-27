@@ -558,6 +558,7 @@ impl Impostors {
                 },
             })
         };
+        gpu.side_work.bake();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("impostor bake"),
             color_attachments: &[target(&albedo), target(&normal)],

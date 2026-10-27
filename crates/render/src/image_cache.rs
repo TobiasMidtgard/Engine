@@ -594,8 +594,13 @@ impl ImageCache {
             });
             compressor.compress(&mut pass);
         }
-        for (_, _, _, _, compressed) in &done {
+        for (_, _, _, source, compressed) in &done {
             compressed.copy(&mut encoder);
+            gpu.side_work.compressed(texels_with_mips(
+                source.width,
+                source.height,
+                source.mip_levels,
+            ));
         }
         gpu.queue.submit([encoder.finish()]);
 
