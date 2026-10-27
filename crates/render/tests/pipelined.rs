@@ -71,7 +71,13 @@ fn pipelined_frames_return_a_frame_late_and_capture_matches_inline() {
     piped.update();
     assert!(piped.world.resource::<RenderStats>().instances > 0);
     let metrics = &piped.world.resource::<Diagnostics>().metrics;
-    for name in ["render.extract_ms", "render.record_ms", "render.cpu_ms"] {
+    for name in [
+        "render.extract_ms",
+        "render.record_ms",
+        "render.submit_ms",
+        "render.record_total_ms",
+        "render.cpu_ms",
+    ] {
         assert!(metrics.contains_key(name), "{name} missing");
     }
     let described = with_renderer(&mut piped.world, |r, _| r.describe()).expect("renderer");
@@ -90,6 +96,9 @@ fn pipelined_frames_return_a_frame_late_and_capture_matches_inline() {
         piped.update();
         inline.update();
     }
+    // The same scene counts the same draws either way (nothing counted twice).
+    let draws = |app: &App| app.world.resource::<RenderStats>().draw_calls;
+    assert_eq!(draws(&piped), draws(&inline));
     let a = dir.join("pipelined.png");
     let b = dir.join("inline.png");
     capture_now(&mut piped.world, &a).expect("pipelined capture");

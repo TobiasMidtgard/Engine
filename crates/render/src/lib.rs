@@ -82,6 +82,7 @@ pub mod material_library;
 pub mod mesh;
 pub mod mesh_feature;
 mod mesh_lod;
+mod mesh_pool;
 mod mesh_scene;
 pub mod motion_blur;
 mod perf;

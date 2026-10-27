@@ -28,6 +28,8 @@ miniz_oxide = "0.8"
 # BC1/BC4/BC5/BC7 compression of material images on the GPU (a WGSL port of Intel's ISPC
 # texture compressor kernels; MIT).
 block_compression = { version = "0.11", default-features = false, features = ["bc15", "bc7", "wgpu"] }
+# CPU time of the render thread (`render.record_cpu_ms`), to tell its work from its waits.
+cpu-time = "1"
 
 [dev-dependencies]
 image.workspace = true

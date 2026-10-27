@@ -359,6 +359,10 @@ pub struct RenderSettings {
     pub upload_mb_per_frame: f32,
     /// Apply `upload_mb_per_frame` headless too (for tests of the budget).
     pub upload_budget_headless: bool,
+    /// Draw runs of mesh batches that share a pipeline, texture set and vertex pool page with
+    /// one `multi_draw_indexed_indirect` each (where the GPU supports a first instance in
+    /// indirect draws), instead of a draw call per mesh and level of detail.
+    pub multi_draw_indirect: bool,
     /// Added to the level of detail virtual textures ask for (positive = coarser, fewer tiles).
     pub virtual_texture_mip_bias: f32,
     /// BC7-compress the cache where the GPU supports it (a quarter of the memory; encoded on the
@@ -446,6 +450,7 @@ impl Default for RenderSettings {
             virtual_texture_upload_budget: 32,
             upload_mb_per_frame: 16.0,
             upload_budget_headless: false,
+            multi_draw_indirect: true,
             virtual_texture_mip_bias: 0.0,
             virtual_texture_compression: true,
             texture_compression: TextureCompression::Quality,

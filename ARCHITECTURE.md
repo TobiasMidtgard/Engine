@@ -483,6 +483,20 @@ yet, wait for a serial pass. Draw order is sorted as 12-byte keys, and each inst
 once, in draw order, straight into the upload's staging memory (`render.cpu.meshes: *` steps;
 `cargo run -p engine_render --release --example mesh_gather` measures them).
 
+**Mesh pool and multi-draw** (`mesh_pool.rs`, after Aaltonen and Haar, "GPU-Driven Rendering
+Pipelines", SIGGRAPH 2015, and Unreal's and Unity's global vertex and index buffers): the
+instanced meshes and their levels of detail live in shared vertex and index buffers, in pages
+that start at 8 MB and double up to 128 MB (never resized: a mesh that fits no page gets a new
+one; empty pages are released). A batch (one mesh at one level, a run of instances) is then
+just its first index, base vertex and instances, so each frame writes every batch's indirect
+arguments into one buffer, and consecutive batches with the same pipeline, texture set and page
+go out as one `multi_draw_indexed_indirect` (`RenderSettings::multi_draw_indirect`, on where the
+GPU has `INDIRECT_FIRST_INSTANCE`; otherwise a draw per batch without rebinding buffers).
+`RenderStats::draw_calls` counts the commands, `render.meshes.batches` the batches, and
+`render.meshes.pool_pages`, `pool_mb` and `pool_used_mb` the pool. Keep wgpu's indirect call
+validation on (its default): without it, on D3D12, `@builtin(instance_index)` and
+`@builtin(vertex_index)` ignore the first instance and base vertex of indirect draws.
+
 **Instanced levels of detail and impostors** (`mesh_lod.rs`, `impostor.rs`): meshes on the
 instanced path get a chain of simplified index lists (built on a worker thread), and each view
 draws the coarsest level whose error stays under `mesh_lod_pixels` (texels in shadow maps);
@@ -581,7 +595,10 @@ records the passes and submits them on the renderer's own thread (`engine_core::
 while the next frame simulates; the next `render_system` waits for it first, so only one
 thread uses the renderer and its queue at a time. The picture shows the world one simulation
 step late, and `RenderStats`, `render.*` diagnostics and finished screenshots arrive a frame
-late (`render.extract_ms`, `render.record_ms`). The `Renderer` resource is absent from the
+late. Timings: `render.extract_ms` (main thread); on the render thread `render.record_ms`
+(encoding the passes), `acquire_ms`, `submit_ms` and `present_ms`, all of it as
+`record_total_ms`, and the thread's CPU time over it as `record_cpu_ms` (well under
+`record_total_ms` means waiting: for the GPU, the window, a lock or a free core). The `Renderer` resource is absent from the
 world while pipelined: reach it with `with_renderer(world, |renderer, world| ..)`, which waits
 for the frame in flight and works inline too. Skip drawing for a while with the `RenderPaused`
 resource rather than taking the renderer out. `capture_now` renders inline either way, so its

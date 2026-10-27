@@ -46,7 +46,6 @@ use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
-use wgpu::util::DeviceExt;
 
 use crate::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase,
@@ -59,6 +58,7 @@ use crate::material::{
 };
 use crate::material_library::{MaterialPreset, MaterialTextures};
 use crate::mesh::{Mesh, Vertex};
+use crate::mesh_pool::{MeshPool, PoolMesh};
 use crate::mesh_scene::{self, Cold, Hot, MeshScene};
 use crate::settings::{RenderSettings, TextureCompression};
 use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
@@ -178,9 +178,8 @@ const DEFAULT_TEXELS: [[u8; 4]; TEXTURE_SLOTS] = [
 const EVICT_AFTER_FRAMES: u64 = 600;
 
 struct GpuMesh {
-    vertex: wgpu::Buffer,
-    index: wgpu::Buffer,
-    index_count: u32,
+    /// Its vertices and full index list in the shared buffers.
+    pool: PoolMesh,
     version: u64,
     center: Vec3,
     half_extents: Vec3,
@@ -192,21 +191,30 @@ struct GpuMesh {
     lods: Vec<GpuLod>,
 }
 
-/// One level of detail of a [`GpuMesh`]: fewer triangles over the same vertices.
+/// One level of detail of a [`GpuMesh`]: fewer triangles over the same vertices (indices in
+/// the same pool page).
 struct GpuLod {
-    index: wgpu::Buffer,
+    first_index: u32,
     index_count: u32,
     /// How far its surface strays from the full mesh, meters in mesh space.
     error: f32,
 }
 
 impl GpuMesh {
-    /// Index buffer and index count of level `lod` (0 = the full mesh).
-    fn level(&self, lod: u8) -> (&wgpu::Buffer, u32) {
+    /// First index (in its pool page) and index count of level `lod` (0 = the full mesh).
+    fn level(&self, lod: u8) -> (u32, u32) {
         match lod.checked_sub(1).and_then(|l| self.lods.get(l as usize)) {
-            Some(l) => (&l.index, l.index_count),
-            None => (&self.index, self.index_count),
+            Some(l) => (l.first_index, l.index_count),
+            None => (self.pool.first_index, self.pool.index_count),
         }
+    }
+
+    /// Give its ranges back to the pool.
+    fn free(&self, pool: &mut MeshPool) {
+        for l in &self.lods {
+            pool.free_indices(self.pool.page, l.first_index, l.index_count);
+        }
+        pool.free(&self.pool);
     }
 
     fn errors(&self) -> impl Iterator<Item = f32> + '_ {
@@ -215,7 +223,10 @@ impl GpuMesh {
 
     /// Triangles of its coarsest level.
     fn coarsest_triangles(&self) -> u32 {
-        self.lods.last().map_or(self.index_count, |l| l.index_count) / 3
+        self.lods
+            .last()
+            .map_or(self.pool.index_count, |l| l.index_count)
+            / 3
     }
 }
 
@@ -313,6 +324,21 @@ struct Batch {
     key: BatchKey,
     first: u32,
     count: u32,
+    /// Its indirect draw arguments in `MeshFeature::indirect` ([`NO_ARGS`] without).
+    args: u32,
+}
+
+const NO_ARGS: u32 = u32::MAX;
+
+/// `wgpu::util::DrawIndexedIndirectArgs`, as plain data for one upload of a frame's batches.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct DrawArgs {
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    base_vertex: i32,
+    first_instance: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -321,6 +347,8 @@ struct Item {
     slot: u32,
     /// The mesh's GPU cache index (its canonical handle index).
     mesh: u32,
+    /// Its mesh pool page (sorted before the mesh, so multi-draw runs aren't split by pages).
+    page: u16,
     /// Level of detail in the camera's view.
     lod: u8,
     /// Largest scale of the instance (level errors are in mesh space).
@@ -363,6 +391,8 @@ struct MeshFrame {
     checked: bool,
     /// Uploaded for the instanced path.
     ready: bool,
+    /// Its mesh pool page, once uploaded.
+    page: u16,
     center: Vec3,
     /// Bounding sphere radius, mesh space.
     radius: f32,
@@ -381,6 +411,7 @@ impl MeshFrame {
         let coarsest = gpu_mesh.coarsest_triangles();
         *self = MeshFrame {
             ready: true,
+            page: gpu_mesh.pool.page,
             center: gpu_mesh.center,
             radius: gpu_mesh.half_extents.length(),
             min_y: gpu_mesh.min_y,
@@ -545,6 +576,7 @@ impl Cull<'_> {
         Some(Item {
             slot,
             mesh: mesh.index,
+            page: mesh.page,
             lod,
             scale: hot.scale,
             impostor,
@@ -566,18 +598,19 @@ impl Cull<'_> {
 }
 
 impl Item {
-    /// Opaque first, by pipeline, texture set, mesh and level; then transparent, farthest
-    /// first.
+    /// Opaque first, by pipeline, texture set, pool page, mesh and level; then transparent,
+    /// farthest first.
     ///
-    /// Texture set ids and mesh indices beyond 20 and 24 bits share keys: such items may
-    /// interleave and split batches, never draw wrong (batches compare whole keys).
+    /// Texture set ids, pages and mesh indices beyond 18, 6 and 24 bits share keys: such items
+    /// may interleave and split batches, never draw wrong (batches compare whole keys).
     fn sort_key(&self) -> u64 {
         if self.pipeline & PIPE_BLEND != 0 {
             1 << 63 | (!self.dist2.to_bits()) as u64
         } else {
             (self.pipeline as u64) << 60
-                | (self.textures as u64 & 0xf_ffff) << 40
-                | (self.mesh as u64 & 0xff_ffff) << 16
+                | (self.textures as u64 & 0x3_ffff) << 42
+                | (self.page as u64 & 0x3f) << 36
+                | (self.mesh as u64 & 0xff_ffff) << 12
                 | self.lod as u64
         }
     }
@@ -779,6 +812,13 @@ pub struct MeshFeature {
     material_group: Option<wgpu::BindGroup>,
     instances: Option<GrowBuffer>,
     meshes: FastMap<u32, GpuMesh>,
+    /// The instanced meshes' vertices and indices.
+    pool: MeshPool,
+    /// This frame's batches' draw arguments (all lists, in list order), when drawn with
+    /// multi-draw (`RenderSettings::multi_draw_indirect`).
+    args: Vec<DrawArgs>,
+    indirect: Option<GrowBuffer>,
+    multi_draw: bool,
     /// Texture sets by id; id 0 is the shared default (untextured) set.
     texture_sets: Vec<Option<TextureSet>>,
     texture_set_ids: HashMap<TextureSetKey, u32>,
@@ -1019,28 +1059,28 @@ impl MeshFeature {
         )
     }
 
-    fn upload_mesh(&mut self, device: &wgpu::Device, index: u32, mesh: &Mesh, version: u64) {
+    fn upload_mesh(&mut self, gpu: &GpuShared, index: u32, mesh: &Mesh, version: u64) {
+        if let Some(old) = self.meshes.remove(&index) {
+            old.free(&mut self.pool);
+        }
         if mesh.indices.is_empty() || mesh.vertices.is_empty() {
-            self.meshes.remove(&index);
             return;
         }
         let aabb = mesh.aabb();
-        let vertex = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh vertices"),
-            contents: bytemuck::cast_slice(&mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh indices"),
-            contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let Some(pool) = self
+            .pool
+            .add(&gpu.device, &gpu.queue, &mesh.vertices, &mesh.indices)
+        else {
+            tracing::warn!(
+                "mesh {index} ({} vertices) is larger than a GPU buffer may be",
+                mesh.vertices.len()
+            );
+            return;
+        };
         self.meshes.insert(
             index,
             GpuMesh {
-                vertex,
-                index: index_buffer,
-                index_count: mesh.indices.len() as u32,
+                pool,
                 version,
                 center: aabb.center(),
                 half_extents: aabb.half_extents(),
@@ -1077,7 +1117,7 @@ impl MeshFeature {
     }
 
     /// Upload the levels of detail that finished building, and start queued builds.
-    fn collect_lods(&mut self, device: &wgpu::Device, meshes: &Assets<Mesh>) {
+    fn collect_lods(&mut self, queue: &wgpu::Queue, meshes: &Assets<Mesh>) {
         let done: Vec<u32> = self
             .lod_jobs
             .iter()
@@ -1097,16 +1137,20 @@ impl MeshFeature {
             else {
                 continue;
             };
+            // Finest first, as many as its page has room for.
+            let page = gpu_mesh.pool.page;
+            let pool = &mut self.pool;
+            for l in gpu_mesh.lods.drain(..) {
+                pool.free_indices(page, l.first_index, l.index_count);
+            }
             gpu_mesh.lods = levels
                 .into_iter()
-                .map(|l| GpuLod {
-                    index: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("mesh lod indices"),
-                        contents: bytemuck::cast_slice(&l.indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    }),
-                    index_count: l.indices.len() as u32,
-                    error: l.error,
+                .map_while(|l| {
+                    Some(GpuLod {
+                        first_index: pool.add_indices(queue, page, &l.indices)?,
+                        index_count: l.indices.len() as u32,
+                        error: l.error,
+                    })
                 })
                 .collect();
         }
@@ -1204,7 +1248,7 @@ impl MeshFeature {
             .iter()
             .filter_map(|(m, n)| {
                 let g = self.meshes.get(m)?;
-                let t = (g.index_count / 3) as u64;
+                let t = (g.pool.index_count / 3) as u64;
                 Some((*m, t, *n, g.half_extents * 2.0, t * (n[0] + n[1])))
             })
             .collect();
@@ -1240,6 +1284,7 @@ impl MeshFeature {
                 key,
                 first: first + start as u32,
                 count: (i - start) as u32,
+                args: NO_ARGS,
             });
         }
     }
@@ -1444,7 +1489,13 @@ impl MeshFeature {
     ) {
         let mut current_pipeline = u8::MAX;
         let mut current_textures = u32::MAX;
-        for b in batches {
+        let mut current_page = u16::MAX;
+        let indirect = self.indirect.as_ref().filter(|_| self.multi_draw);
+        let mut i = 0;
+        while i < batches.len() {
+            let b = &batches[i];
+            let run = self.run_len(batches, i, &bind_textures);
+            i += run;
             let Some(mesh) = self.meshes.get(&b.key.mesh) else {
                 continue;
             };
@@ -1462,11 +1513,107 @@ impl MeshFeature {
                 }
                 current_textures = b.key.textures;
             }
-            let (index, count) = mesh.level(b.key.lod);
-            pass.set_vertex_buffer(0, mesh.vertex.slice(..));
-            pass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..count, 0, b.first..b.first + b.count);
+            if mesh.pool.page != current_page {
+                let Some((vertex, index)) = self.pool.buffers(mesh.pool.page) else {
+                    continue;
+                };
+                pass.set_vertex_buffer(0, vertex.slice(..));
+                pass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
+                current_page = mesh.pool.page;
+            }
+            if let Some(indirect) = indirect {
+                pass.multi_draw_indexed_indirect(
+                    &indirect.buffer,
+                    b.args as u64 * std::mem::size_of::<DrawArgs>() as u64,
+                    run as u32,
+                );
+                continue;
+            }
+            let (first, count) = mesh.level(b.key.lod);
+            pass.draw_indexed(
+                first..first + count,
+                mesh.pool.base_vertex as i32,
+                b.first..b.first + b.count,
+            );
         }
+    }
+
+    /// How many batches from `i` on go out as one multi-draw: the same pipeline, texture set
+    /// (where the pass binds them) and pool page, with their arguments one after another (1
+    /// without multi-draw).
+    fn run_len(&self, batches: &[Batch], i: usize, bind_textures: impl Fn(u8) -> bool) -> usize {
+        let b = &batches[i];
+        let page = |b: &Batch| self.meshes.get(&b.key.mesh).map(|m| m.pool.page);
+        if !self.multi_draw || b.args == NO_ARGS {
+            return 1;
+        }
+        let textures = bind_textures(b.key.pipeline);
+        let first_page = page(b);
+        batches[i + 1..]
+            .iter()
+            .zip(1..)
+            .take_while(|(c, n)| {
+                c.key.pipeline == b.key.pipeline
+                    && (!textures || c.key.textures == b.key.textures)
+                    && c.args == b.args.wrapping_add(*n)
+                    && page(c) == first_page
+            })
+            .count()
+            + 1
+    }
+
+    /// Indirect arguments for every batch list, in list order, so batches drawn one after
+    /// another can share a multi-draw.
+    fn write_draw_args(&mut self, gpu: &GpuShared, settings: &RenderSettings) {
+        self.multi_draw = settings.multi_draw_indirect
+            && gpu
+                .device
+                .features()
+                .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE);
+        self.args.clear();
+        let (meshes, args) = (&self.meshes, &mut self.args);
+        let lists = [&mut self.opaque, &mut self.transparent]
+            .into_iter()
+            .chain(self.shadow.iter_mut())
+            .chain(std::iter::once(&mut self.far_shadow));
+        for b in lists.flatten() {
+            b.args = match meshes.get(&b.key.mesh).filter(|_| self.multi_draw) {
+                Some(m) => {
+                    let (first_index, index_count) = m.level(b.key.lod);
+                    args.push(DrawArgs {
+                        index_count,
+                        instance_count: b.count,
+                        first_index,
+                        base_vertex: m.pool.base_vertex as i32,
+                        first_instance: b.first,
+                    });
+                    (args.len() - 1) as u32
+                }
+                None => NO_ARGS,
+            };
+        }
+        if self.multi_draw && !self.args.is_empty() {
+            self.indirect
+                .get_or_insert_with(|| {
+                    GrowBuffer::new(
+                        &gpu.device,
+                        "mesh draw arguments",
+                        wgpu::BufferUsages::INDIRECT,
+                        1 << 16,
+                    )
+                })
+                .write(&gpu.device, &gpu.queue, bytemuck::cast_slice(&self.args));
+        }
+    }
+
+    /// Draw commands a batch list goes out as.
+    fn commands(&self, batches: &[Batch], bind_textures: impl Fn(u8) -> bool) -> u32 {
+        let (mut i, mut n) = (0, 0);
+        while i < batches.len() {
+            i += self.run_len(batches, i, &bind_textures);
+            n += 1;
+        }
+        n
     }
 }
 
@@ -1739,7 +1886,7 @@ impl RenderFeature for MeshFeature {
         // Meters a pixel spans per meter of distance (none for orthographic views).
         let pixel_meters = crate::mesh_lod::meters_per_pixel(view.fov_y, view.height, 1.0);
         if let Some(meshes) = world.get_resource::<Assets<Mesh>>() {
-            self.collect_lods(&gpu.device, meshes);
+            self.collect_lods(&gpu.queue, meshes);
         }
 
         let prev_origin = self.prev_origin.unwrap_or(view.origin);
@@ -2035,7 +2182,7 @@ impl RenderFeature for MeshFeature {
                     )
                 {
                     self.uploads += 1;
-                    self.upload_mesh(&gpu.device, mesh.index, asset, mesh.version);
+                    self.upload_mesh(gpu, mesh.index, asset, mesh.version);
                     if lod_pixels > 0.0 {
                         self.request_lods(mesh.index, handle, asset, mesh.version);
                     }
@@ -2135,8 +2282,14 @@ impl RenderFeature for MeshFeature {
         // Meshes now drawn only as clusters don't need their instanced copy.
         if !self.clustered.is_empty() {
             let clustered = &self.clustered;
-            self.meshes
-                .retain(|m, g| g.last_used == frame || !clustered.contains(m));
+            let pool = &mut self.pool;
+            self.meshes.retain(|m, g| {
+                let keep = g.last_used == frame || !clustered.contains(m);
+                if !keep {
+                    g.free(pool);
+                }
+                keep
+            });
         }
         if let Some(clusters) = &mut self.clusters {
             clusters.end_prepare(gpu, view, settings);
@@ -2228,10 +2381,12 @@ impl RenderFeature for MeshFeature {
                         .map(|(n, item)| {
                             let k = shadow_key(item, 0);
                             // Scale to 19 bits (positive: exponent and 11 bits of
-                            // mantissa), enough to keep each mesh's levels together.
+                            // mantissa), enough to keep each mesh's levels together; the
+                            // pool page before the mesh, for longer multi-draw runs.
                             let key = (k.pipeline as u64) << 63
-                                | (k.textures as u64 & 0xf_ffff) << 43
-                                | (k.mesh as u64 & 0xff_ffff) << 19
+                                | (k.textures as u64 & 0x3_ffff) << 45
+                                | (item.page as u64 & 0x3f) << 39
+                                | (k.mesh as u64 & 0xf_ffff) << 19
                                 | (item.scale.to_bits() >> 12) as u64 & 0x7_ffff;
                             (key, n as u32)
                         }),
@@ -2386,6 +2541,7 @@ impl RenderFeature for MeshFeature {
         if self.material_data.is_empty() {
             self.material_data.push(default_material.to_gpu());
         }
+        self.write_draw_args(gpu, settings);
         steps.step("meshes: pipelines");
         // Pipelines with the shader parts this frame's materials need, from now on.
         let needed = self
@@ -2432,15 +2588,20 @@ impl RenderFeature for MeshFeature {
             culled,
             ..Default::default()
         };
+        // Draw commands (a multi-draw counts once), the prepass's not counted.
+        let all = |_: u8| true;
+        stats.draw_calls +=
+            self.commands(&self.opaque, all) + self.commands(&self.transparent, all);
+        let masked = |p: u8| p == SHADOW_MASKED;
+        for list in self.shadow.iter().chain(std::iter::once(&self.far_shadow)) {
+            stats.draw_calls += self.commands(list, masked);
+        }
         for b in self.opaque.iter().chain(self.transparent.iter()) {
-            stats.draw_calls += 1;
             stats.instances += b.count;
             if let Some(m) = self.meshes.get(&b.key.mesh) {
                 stats.triangles += (m.level(b.key.lod).1 / 3) as u64 * b.count as u64;
             }
         }
-        stats.draw_calls += self.shadow.iter().map(|s| s.len() as u32).sum::<u32>();
-        stats.draw_calls += self.far_shadow.len() as u32;
         for (_, count) in std::iter::once(self.impostor_view).chain(self.impostor_shadow) {
             stats.draw_calls += (count > 0) as u32;
         }
@@ -2481,6 +2642,19 @@ impl RenderFeature for MeshFeature {
                 "render.meshes.uploads",
                 std::mem::take(&mut self.uploads) as f64,
             );
+            // The shared vertex and index buffers: pages, MB reserved and MB in use.
+            let (pages, reserved, used) = self.pool.usage();
+            d.set("render.meshes.pool_pages", pages as f64);
+            // Batches (mesh and level runs of instances), before multi-draw joins them.
+            let batches = [&self.opaque, &self.transparent]
+                .into_iter()
+                .chain(self.shadow.iter())
+                .chain(std::iter::once(&self.far_shadow))
+                .map(Vec::len)
+                .sum::<usize>();
+            d.set("render.meshes.batches", batches as f64);
+            d.set("render.meshes.pool_mb", reserved as f64 / (1 << 20) as f64);
+            d.set("render.meshes.pool_used_mb", used as f64 / (1 << 20) as f64);
         }
         steps.publish(world);
     }
@@ -2489,6 +2663,7 @@ impl RenderFeature for MeshFeature {
         if let Some(impostors) = &mut self.impostors
             && let Some(bake) = impostors.pending()
             && let Some(mesh) = self.meshes.get(&bake.mesh)
+            && let Some((vertex, index)) = self.pool.buffers(mesh.pool.page)
             && let Some(materials) = &self.material_group
             && let Some(textures) = self
                 .texture_sets
@@ -2503,9 +2678,9 @@ impl RenderFeature for MeshFeature {
                 ctx.frame_group,
                 materials,
                 &textures.group,
-                &mesh.vertex,
-                &mesh.index,
-                mesh.index_count,
+                vertex,
+                index,
+                &mesh.pool,
             );
         }
         if let Some(clusters) = &mut self.clusters {
@@ -2631,6 +2806,7 @@ impl RenderFeature for MeshFeature {
     fn describe(&self) -> serde_json::Value {
         serde_json::json!({
             "gpu_meshes": self.meshes.len(),
+            "mesh_pool": self.pool.describe(),
             "texture_sets": self.texture_sets.iter().filter(|s| s.is_some()).count(),
             "materials": self.material_data.len(),
             "opaque_batches": self.opaque.len(),

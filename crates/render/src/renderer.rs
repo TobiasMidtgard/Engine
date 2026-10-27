@@ -1048,6 +1048,9 @@ impl Renderer {
             screenshots,
         } = frame;
         let recording = Instant::now();
+        // CPU time this thread spends, against the wall time: what is left is waiting
+        // (for the GPU, the window, a lock, or a core).
+        let thread_cpu = cpu_time::ThreadTime::try_now().ok();
         let mut cpu = crate::perf::CpuSteps::resume(cpu);
         let device = &self.shared.device;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1544,6 +1547,7 @@ impl Renderer {
             Some(copy_to_readback(device, &mut encoder, &self.targets.ldr))
         };
 
+        let encode_ms = recording.elapsed().as_secs_f64() * 1000.0;
         // Present.
         let mut surface_texture = None;
         let mut reconfigure = false;
@@ -1586,13 +1590,18 @@ impl Renderer {
         let stats = self.collect_stats(&view, started);
         let mut back = RenderReturn::default();
         cpu.step("submit");
+        let submitting = Instant::now();
         self.shared.queue.submit([encoder.finish()]);
+        let submit_ms = submitting.elapsed().as_secs_f64() * 1000.0;
         self.meter.after_submit();
         self.perf.after_submit();
         self.lens.after_submit();
+        let mut present_ms = 0.0;
         if let Some(t) = surface_texture {
             cpu.step("present");
+            let presenting = Instant::now();
             self.shared.queue.present(t);
+            present_ms = presenting.elapsed().as_secs_f64() * 1000.0;
         }
         if reconfigure && let Some(s) = &mut self.surface {
             let (w, h) = (s.config.width, s.config.height);
@@ -1629,11 +1638,20 @@ impl Renderer {
         {
             let d = &mut back.diagnostics;
             self.perf.publish(d);
+            // Main thread: extract. Render thread (or inline): record (encoding the passes),
+            // acquire, submit and present, all of it as record_total, and the CPU time it took
+            // as record_cpu (less than record_total = waiting).
             d.set("render.extract_ms", extract_ms as f64);
+            d.set("render.record_ms", encode_ms);
+            d.set("render.submit_ms", submit_ms);
+            d.set("render.present_ms", present_ms);
             d.set(
-                "render.record_ms",
+                "render.record_total_ms",
                 recording.elapsed().as_secs_f64() * 1000.0,
             );
+            if let Some(t) = thread_cpu.and_then(|t| t.try_elapsed().ok()) {
+                d.set("render.record_cpu_ms", t.as_secs_f64() * 1000.0);
+            }
             d.set("render.cpu_ms", stats.cpu_ms as f64);
             d.set("render.frame_ms", self.perf.frame_ms as f64);
             d.set("render.acquire_ms", self.perf.acquire_ms as f64);

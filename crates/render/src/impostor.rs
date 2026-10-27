@@ -506,7 +506,7 @@ impl Impostors {
         texture_group: &wgpu::BindGroup,
         vertex: &wgpu::Buffer,
         index: &wgpu::Buffer,
-        index_count: u32,
+        mesh: &crate::mesh_pool::PoolMesh,
     ) {
         let Some(bake) = self.pending.take() else {
             return;
@@ -578,7 +578,11 @@ impl Impostors {
         for tile in 0..TILES {
             let (x, y) = ((tile % GRID) * TILE, (tile / GRID) * TILE);
             pass.set_viewport(x as f32, y as f32, TILE as f32, TILE as f32, 0.0, 1.0);
-            pass.draw_indexed(0..index_count, 0, tile..tile + 1);
+            pass.draw_indexed(
+                mesh.first_index..mesh.first_index + mesh.index_count,
+                mesh.base_vertex as i32,
+                tile..tile + 1,
+            );
         }
         drop(pass);
         // Compressed atlas: the scratch pair into BC7 blocks, then into the layer.
