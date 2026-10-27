@@ -8,6 +8,7 @@
 //! WORST=1 cargo run ...  # also prints the worst frame (hitches: restores, catch-up steps)
 //! TRACE="Unveiling sheet" cargo run ...  # that body's step, prewarm and pairs each frame
 //! SLOW_GROUND=1 cargo run ...  # ground that costs about what a planet's terrain does
+//! ARRIVE=600 cargo run ...  # wait far off for 600 frames, then arrive (WORST shows the spike)
 //! ```
 
 use std::time::Instant;
@@ -36,10 +37,21 @@ fn main() {
     app.add_systems(Startup, move |mut commands: Commands| {
         engine_softbody::demo::spawn_demo(&mut commands, yard);
     });
-    app.add_systems(PreUpdate, move |mut focus: ResMut<FocusPoints>| {
-        focus.points.clear();
-        focus.points.push(yard + DVec3::new(distance, 1.7, 0.0));
-    });
+    // ARRIVE=<frames>: the focus waits 400 m off for that many frames, then comes in (an
+    // arrival: everything wakes from rest at once).
+    let arrive: u32 = std::env::var("ARRIVE")
+        .ok()
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(0);
+    app.add_systems(
+        PreUpdate,
+        move |mut focus: ResMut<FocusPoints>, mut frame: Local<u32>| {
+            *frame += 1;
+            let d = if *frame <= arrive { 400.0 } else { distance };
+            focus.points.clear();
+            focus.points.push(yard + DVec3::new(d, 1.7, 0.0));
+        },
+    );
     // Build the bodies (and their first steps) before timing.
     let warm = Instant::now();
     app.update_n(30);
@@ -63,13 +75,15 @@ fn main() {
                         })
                         .count();
                     println!(
-                        "{f:5} frame {ms:6.1} ms  step {:6.2} ms  prewarm {:4}  pairs {:6} solved {:6}  colliders {} fields {fields} asleep {}",
+                        "{f:5} frame {ms:6.1} ms  step {:6.2} ms  prewarm {:4}  pairs {:6} solved {:6}  colliders {} fields {fields} asleep {} radius {:.1} env {:.2} ms",
                         b.step_ms,
                         b.pending_prewarm,
                         b.sim.self_pairs(),
                         b.sim.self_pairs_solved(),
                         b.last_colliders().len(),
                         b.asleep(),
+                        b.radius,
+                        b.env_ms,
                     );
                 }
             }

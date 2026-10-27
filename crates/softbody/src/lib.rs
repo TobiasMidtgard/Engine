@@ -14,6 +14,7 @@ pub mod render;
 pub mod rope;
 pub mod settings;
 pub mod solver;
+pub mod sway;
 pub mod systems;
 pub mod volume;
 
