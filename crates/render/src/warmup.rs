@@ -14,33 +14,33 @@ use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 
-/// A job: builds one pipeline on a warm-up thread.
-pub(crate) type Build = Box<dyn FnOnce() -> Option<wgpu::RenderPipeline> + Send>;
+/// A job: builds one pipeline (or a preset's set of them) on a warm-up thread.
+pub(crate) type Build<T = wgpu::RenderPipeline> = Box<dyn FnOnce() -> Option<T> + Send>;
 
-struct Job<K> {
+struct Job<K, T> {
     key: K,
-    build: Build,
-    done: Sender<Option<wgpu::RenderPipeline>>,
+    build: Build<T>,
+    done: Sender<Option<T>>,
 }
 
 /// What [`Warmup::take`] found.
-pub(crate) enum Taken {
+pub(crate) enum Taken<T = wgpu::RenderPipeline> {
     /// Compiled (`None` if the job could not build it).
-    Ready(Option<wgpu::RenderPipeline>),
+    Ready(Option<T>),
     /// Never queued, or no worker had started it: build it now.
     Build,
 }
 
-pub(crate) struct Warmup<K> {
-    queue: Arc<Mutex<VecDeque<Job<K>>>>,
-    results: HashMap<K, Receiver<Option<wgpu::RenderPipeline>>>,
+pub(crate) struct Warmup<K, T = wgpu::RenderPipeline> {
+    queue: Arc<Mutex<VecDeque<Job<K, T>>>>,
+    results: HashMap<K, Receiver<Option<T>>>,
 }
 
-impl<K: Copy + Eq + Hash + Send + 'static> Warmup<K> {
+impl<K: Copy + Eq + Hash + Send + 'static, T: Send + 'static> Warmup<K, T> {
     /// Start compiling `jobs`, in order, on `threads` workers named `name`.
-    pub fn start(name: &str, jobs: Vec<(K, Build)>, threads: usize) -> Self {
+    pub fn start(name: &str, jobs: Vec<(K, Build<T>)>, threads: usize) -> Self {
         let mut results = HashMap::new();
-        let queue: VecDeque<Job<K>> = jobs
+        let queue: VecDeque<Job<K, T>> = jobs
             .into_iter()
             .map(|(key, build)| {
                 let (done, rx) = bounded(1);
@@ -70,7 +70,7 @@ impl<K: Copy + Eq + Hash + Send + 'static> Warmup<K> {
     }
 
     /// The pipeline for `key`, waiting for it if a worker is compiling it.
-    pub fn take(&mut self, key: K) -> Taken {
+    pub fn take(&mut self, key: K) -> Taken<T> {
         let Some(rx) = self.results.remove(&key) else {
             return Taken::Build;
         };
@@ -93,7 +93,7 @@ impl<K: Copy + Eq + Hash + Send + 'static> Warmup<K> {
     }
 }
 
-impl<K> Drop for Warmup<K> {
+impl<K, T> Drop for Warmup<K, T> {
     /// Unstarted jobs are dropped; ones being compiled finish and are thrown away.
     fn drop(&mut self) {
         if let Ok(mut queue) = self.queue.lock() {

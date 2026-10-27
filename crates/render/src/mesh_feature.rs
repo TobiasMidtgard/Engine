@@ -939,7 +939,13 @@ impl MeshFeature {
             self.shadow_masked_pipeline = self.pipeline(gpu, PipelineKey::ShadowMasked);
         }
         if let Some(impostors) = &mut self.impostors {
-            impostors.ensure_pipelines(gpu, &self.shader_features.mesh_constants());
+            let constants = self.shader_features.mesh_constants();
+            // The impostors' pipelines too: they are first needed when something far away is
+            // baked, which is a first sight in play.
+            if warm {
+                impostors.start_warmup(gpu, &constants);
+            }
+            impostors.ensure_pipelines(gpu, &constants);
         }
     }
 
@@ -2762,7 +2768,8 @@ impl RenderFeature for MeshFeature {
             // Pipeline variants still compiling on the warm-up threads.
             d.set(
                 "render.meshes.pipelines_warming",
-                self.warmup.as_ref().map_or(0, Warmup::pending) as f64,
+                (self.warmup.as_ref().map_or(0, Warmup::pending)
+                    + self.impostors.as_ref().map_or(0, Impostors::warming)) as f64,
             );
             // Batches (mesh and level runs of instances), before multi-draw joins them.
             let batches = [&self.opaque, &self.transparent]
