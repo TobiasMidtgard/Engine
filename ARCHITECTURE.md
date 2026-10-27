@@ -178,6 +178,20 @@ find the scene pixel under a fragment as `(position.xy - frame.window.xy) * fram
 frame.window.zw` (`frame.window` is the scene's rectangle in the window, `frame.viewport.xy` the
 size the scene renders at) before reading scene-sized targets such as depth.
 
+**Extra views** (built; engine-design/multi-view.md): an `ExtraView` on a camera renders it
+too, besides the main view (the active camera with the highest order that has none). It goes
+either into its `Viewport` of the window (`ViewTarget::Window`: split screen,
+picture-in-picture, composited over the scene and under the overlays) or into an image made
+with `Image::render_target` (`ViewTarget::Image`), which materials and UI show from that frame
+on. Its `quality` is an optional `Scalability` for that view. Each view keeps its own
+`ViewState`: targets, history, shadows, environment, fog, exposure and the previous view.
+Extra views render before the main view, each one extracted, recorded and submitted on the
+main thread, so a feature's `prepare` runs once per view per frame. While one renders,
+`active_camera()` returns its camera and `ViewData::extra_view` is set. A feature that keeps
+history around the camera (previous positions, temporal passes, streaming) keys it by
+`view.camera`, or takes it from `ViewData` (`prev_origin`, `prev_view_proj`), never from its
+last `prepare`. Overlays draw in the main view only.
+
 **Subsurface scattering for skin** (built): a feature whose prepass writes
 `prepass_output_subsurface(normal, roughness, clip_now, clip_prev, strength)` (lib_frame.wgsl)
 marks skin, writes that pixel's specular light (pre-exposed) to alpha in its scene pass, and

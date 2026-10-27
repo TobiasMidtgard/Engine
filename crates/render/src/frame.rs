@@ -161,6 +161,10 @@ pub struct PreviousView {
 #[derive(Debug, Clone)]
 pub struct ViewData {
     pub camera: Option<Entity>,
+    /// This is an [`crate::ExtraView`], not the main view. Features that keep history around
+    /// the camera (temporal accumulation, streaming) key it by `camera`, or leave it as the
+    /// main view left it.
+    pub extra_view: bool,
     /// Camera world position: the rendering origin.
     pub origin: DVec3,
     pub rotation: Quat,
@@ -384,12 +388,22 @@ const MOON_LUX: f32 = 0.5;
 /// … and from which on for a sun, however dim (a sun under a storm deck gives about 10).
 const SUN_LUX: f32 = 2.0;
 
-/// The camera that renders: the active [`Camera`] with the highest `order`.
+/// The extra view being rendered (see [`crate::ExtraView`]): [`active_camera`] returns its
+/// camera meanwhile, so everything that asks for the camera sees this view's.
+#[derive(Resource, Debug, Clone, Copy)]
+pub(crate) struct RenderingExtraView(pub Entity);
+
+/// The camera that renders: the active [`Camera`] with the highest `order` that is no
+/// [`crate::ExtraView`] (while an extra view renders, its camera).
 pub fn active_camera(world: &mut World) -> Option<(Entity, Camera, GlobalTransform)> {
+    if let Some(RenderingExtraView(e)) = world.get_resource::<RenderingExtraView>().copied() {
+        let mut q = world.query::<(&Camera, &GlobalTransform)>();
+        return q.get(world, e).ok().map(|(cam, gt)| (e, *cam, *gt));
+    }
     let mut best: Option<(Entity, Camera, GlobalTransform)> = None;
-    let mut q = world.query::<(Entity, &Camera, &GlobalTransform)>();
-    for (e, cam, gt) in q.iter(world) {
-        if !cam.active {
+    let mut q = world.query::<(Entity, &Camera, &GlobalTransform, Has<crate::ExtraView>)>();
+    for (e, cam, gt, extra) in q.iter(world) {
+        if !cam.active || extra {
             continue;
         }
         if best.as_ref().is_none_or(|(_, b, _)| cam.order > b.order) {
@@ -636,6 +650,7 @@ pub fn build_view(
 
     ViewData {
         camera: camera_entity,
+        extra_view: world.contains_resource::<RenderingExtraView>(),
         origin,
         rotation,
         view,

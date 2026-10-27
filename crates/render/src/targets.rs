@@ -172,7 +172,8 @@ impl Targets {
             window.x,
             window.y,
             formats.ldr,
-            U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC,
+            // Extra views' pictures are copied in (`ViewTarget::Window`).
+            U::RENDER_ATTACHMENT | U::TEXTURE_BINDING | U::COPY_SRC | U::COPY_DST,
         );
         let levels = bloom_levels(width, height);
         let mut bloom = Vec::with_capacity(levels);

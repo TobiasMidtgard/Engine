@@ -157,6 +157,21 @@ impl Image {
         image
     }
 
+    /// The image an [`crate::ExtraView`] renders into (`ViewTarget::Image`), `size` pixels: no
+    /// CPU pixels, its texture is the view's picture.
+    pub fn render_target(size: engine_core::prelude::UVec2) -> Self {
+        Self {
+            width: size.x.max(1),
+            height: size.y.max(1),
+            format: PixelFormat::Rgba8,
+            data: Vec::new(),
+            srgb: true,
+            mipmaps: false,
+            mips: Vec::new(),
+            keep_pixels: false,
+        }
+    }
+
     /// An RGBA8 image computed per pixel: `f(x, y) -> [r, g, b, a]`.
     pub fn from_fn(
         width: u32,

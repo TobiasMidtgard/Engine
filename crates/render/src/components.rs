@@ -147,6 +147,61 @@ impl Viewport {
     }
 }
 
+/// Renders this camera as an extra view, besides the main one (the active [`Camera`] with the
+/// highest `order` that has no `ExtraView`): split screen, picture-in-picture, a scope or a kill
+/// cam in a corner, a monitor, mirror or preview showing what another camera sees. Each extra
+/// view keeps its own history (anti-aliasing, exposure, shadows, fog), as Unreal's view states
+/// and Bevy's per-camera targets do, and renders at its own quality.
+///
+/// Extra views render before the main view, lowest `Camera::order` first, while their camera
+/// is `active`. They cost about what the main view costs at their size (the scene is culled and
+/// drawn again), so keep them small or give them a lower `quality`.
+#[derive(Component, Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtraView {
+    /// Where the view goes.
+    pub target: ViewTarget,
+    /// Quality for this view instead of the game's (`Scalability`), e.g.
+    /// `Scalability::preset(QualityPreset::Low)` for an inset.
+    pub quality: Option<engine_world::Scalability>,
+}
+
+impl ExtraView {
+    /// Into the window, at the camera's [`Viewport`].
+    pub fn window() -> Self {
+        Self::default()
+    }
+
+    /// Into `image`, `size` pixels.
+    pub fn image(image: Handle<crate::Image>, size: UVec2) -> Self {
+        Self {
+            target: ViewTarget::Image { image, size },
+            quality: None,
+        }
+    }
+
+    pub fn with_quality(mut self, quality: engine_world::Scalability) -> Self {
+        self.quality = Some(quality);
+        self
+    }
+}
+
+/// Where an [`ExtraView`] goes.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub enum ViewTarget {
+    /// Into the window at the camera's [`Viewport`] (the whole window without one), over the
+    /// main view and under the overlays (UI): split screen, picture-in-picture.
+    #[default]
+    Window,
+    /// Into an image `size` pixels large, which materials (`base_color_texture`, emissive) and
+    /// UI images show from the same frame on. Its pixels live on the GPU only: make the image
+    /// with [`crate::Image::render_target`].
+    Image {
+        image: Handle<crate::Image>,
+        size: UVec2,
+    },
+}
+
 /// Which mesh to draw: a handle, a procedural shape, or an asset path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -298,6 +298,9 @@ struct Inner {
     /// The GPU encoders, built on a thread the first time an image is due (BC7's pipeline
     /// takes a while to compile on some backends).
     compressor: Compressor,
+    /// Images an extra view renders into (`ViewTarget::Image`), by canonical handle index: their
+    /// texture is the view's picture.
+    targets: HashMap<u32, Arc<ImageTexture>>,
 }
 
 #[derive(Default)]
@@ -350,6 +353,9 @@ impl ImageCache {
     ) -> Option<Arc<ImageTexture>> {
         let handle = images.canonical(handle);
         let index = handle.index();
+        if let Some(target) = self.lock().targets.get(&index) {
+            return Some(target.clone());
+        }
         let version = images.version(handle);
         let image = images.get(handle)?;
         let srgb = usage == TextureUse::Color && image.srgb && image.format == PixelFormat::Rgba8;
@@ -484,6 +490,29 @@ impl ImageCache {
             inner.start_compressor(gpu);
         }
         Some(uploaded)
+    }
+
+    /// From now on image `index` (a canonical handle index) shows `texture`, an extra view's
+    /// picture (`ViewTarget::Image`).
+    pub(crate) fn set_target(&self, index: u32, texture: &wgpu::Texture) {
+        let mut inner = self.lock();
+        inner.next_id += 1;
+        let target = Arc::new(ImageTexture {
+            view: texture.create_view(&Default::default()),
+            srgb: texture.format().is_srgb(),
+            width: texture.width(),
+            height: texture.height(),
+            mip_levels: texture.mip_level_count(),
+            id: inner.next_id,
+            texture: texture.clone(),
+            aliasable: false,
+        });
+        inner.targets.insert(index, target);
+    }
+
+    /// Image `index` is no extra view's target any more.
+    pub(crate) fn remove_target(&self, index: u32) {
+        self.lock().targets.remove(&index);
     }
 
     /// Start frame `frame`; `release` is `RenderSettings::release_image_pixels`.
