@@ -17,11 +17,12 @@ use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
 use engine_core::tasks::ComputeTaskPool;
 use engine_core::time::FixedTime;
-use engine_render::{MaterialRef, Mesh, MeshRenderer, Vertex};
+use engine_render::{GpuSkin, MaterialRef, Mesh, MeshRenderer, SkinBone, SkinWeights, Vertex};
 use engine_world::animation::{BonePose, SkeletonPose};
 use engine_world::{FocusPoints, SimulationRange};
 
 use super::body::{self, BodyPart, BodyQuality, SkinTemplate};
+use super::statue::DemoStatue;
 use crate::hair::{MeshSkin, MeshSkins};
 use crate::settings::SoftBodyConfig;
 
@@ -116,6 +117,8 @@ fn paint_scalp(template: &SkinTemplate, paint: &ScalpPaint, vertices: &mut [Vert
 pub struct BodyLibrary {
     /// By part and whether it's the coarse far mesh.
     ready: HashMap<(BodyPart, bool), Arc<SkinTemplate>>,
+    /// Their weights for the GPU skinning.
+    weights: HashMap<(BodyPart, bool), Arc<SkinWeights>>,
     skins: HashMap<BodyPart, Arc<MeshSkin>>,
     pending: Vec<((BodyPart, bool), JoinHandle<SkinTemplate>)>,
     /// Mesh resolution (1 = full).
@@ -146,9 +149,15 @@ impl BodyLibrary {
             let skin = MeshSkin {
                 joints: template.joints.clone(),
                 weights: template.weights.clone(),
+                bind: template.bind.clone(),
             };
             self.skins.insert(part, Arc::new(skin));
         }
+        let weights = SkinWeights {
+            joints: template.joints.clone(),
+            weights: template.weights.clone(),
+        };
+        self.weights.insert((part, far), Arc::new(weights));
         self.ready.insert((part, far), Arc::new(template));
     }
 
@@ -223,21 +232,22 @@ pub fn snapshot_poses(mut parts: Query<&mut SkinnedPart>, poses: Query<&Skeleton
 /// distances off it is drawn (back to the full mesh a little nearer).
 pub const FAR_MESH: f32 = 4.0;
 const FAR_FROM: f32 = 2.0;
-/// How far a bone may move on the drawn mesh before it is skinned again, per metre of
-/// distance past the LOD distance (about a pixel on a 1080p screen): a far body is
-/// re-skinned only as often as its pose visibly changes (Unreal's update rate optimization
-/// for far skeletal meshes), a near one whenever it changes at all. Each re-skin is an
-/// upload of the whole mesh: every part every frame was 19 MB a frame.
+/// How far a bone may move on the drawn mesh before it is posed again, per metre of
+/// distance past the LOD distance (about a pixel on a 1080p screen): a far body is posed
+/// only as often as its pose visibly changes (Unreal's update rate optimization for far
+/// skeletal meshes), a near one whenever it changes at all. Each new pose is a skinning
+/// dispatch on the GPU (on the CPU it was an upload of the whole mesh: 19 MB a frame).
 const SKIN_ERROR_PER_M: f32 = 0.0015;
 /// Far parts are also skinned at most every `n`-th frame, `n` their distance in multiples of
 /// [`FAR_FROM`] × the LOD distance (up to this), each on its own phase so the uploads of a
 /// crowd spread over the frames instead of landing together (Unreal's URO frame skipping).
 const MAX_SKIN_EVERY: u32 = 4;
 
-/// Give new parts their mesh and deform each to its skeleton's pose, interpolated within
-/// the fixed step like `TransformInterpolation`, as often as it shows: far off a coarse
-/// mesh, skinned again only when its pose moved visibly, and not at all past the
-/// simulation range.
+/// Give new parts their mesh, in its bind pose, and pose each on the GPU ([`GpuSkin`]) like
+/// its skeleton, interpolated within the fixed step like `TransformInterpolation`, as often
+/// as it shows: far off a coarse mesh, posed again only when its pose moved visibly, and not
+/// at all past the simulation range. Only the bones go to the GPU, and only when they move.
+/// A statue is skinned once on the CPU into its pose, which becomes its collider.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn skin_bodies(
     mut commands: Commands,
@@ -245,7 +255,12 @@ pub fn skin_bodies(
     fixed: Option<Res<FixedTime>>,
     meshes: Option<ResMut<Assets<Mesh>>>,
     mut skins: ResMut<MeshSkins>,
-    mut parts: Query<(Entity, &mut SkinnedPart)>,
+    mut parts: Query<(
+        Entity,
+        &mut SkinnedPart,
+        Option<&mut GpuSkin>,
+        Has<DemoStatue>,
+    )>,
     poses: Query<(&SkeletonPose, Option<&GlobalTransform>)>,
     (focus, range, config): (
         Option<Res<FocusPoints>>,
@@ -264,8 +279,11 @@ pub fn skin_bodies(
     let (posed, bones) = &mut *scratch;
     let (frame, phases) = &mut *frames;
     *frame = frame.wrapping_add(1);
-    for (e, mut part) in &mut parts {
+    for (e, mut part, gpu, statue) in &mut parts {
         let Some(template) = library.get(part.part) else {
+            continue;
+        };
+        let Some(weights) = library.weights.get(&(part.part, false)).cloned() else {
             continue;
         };
         let Ok((pose, at)) = poses.get(part.owner) else {
@@ -275,8 +293,8 @@ pub fn skin_bodies(
             (Some(f), Some(t)) if !f.points.is_empty() => f.distance(t.translation()) as f32,
             _ => 0.0,
         };
-        // A new mesh starts at the current pose (hair grown on it this frame binds to that
-        // pose); after that, between the last two simulated poses.
+        // A new mesh starts at the current pose; after that, between the last two simulated
+        // poses.
         let t = if part.mesh.is_some() { alpha } else { 1.0 };
         interpolate_pose(&part.previous, &pose.bones, t, posed);
         let full = match part.mesh {
@@ -286,22 +304,32 @@ pub fn skin_bodies(
                 if let Some(paint) = &part.scalp {
                     paint_scalp(&template, paint, &mut mesh.vertices);
                 }
-                skin(&template, posed, &mut mesh.vertices, bones);
+                let renderer = |h| MeshRenderer::new(h, part.material.clone());
+                if statue {
+                    skin(&template, posed, &mut mesh.vertices, bones);
+                    let h = meshes.insert_keyed(&part.key, mesh);
+                    commands.entity(e).insert(renderer(h));
+                    part.mesh = Some(h);
+                    continue;
+                }
                 let h = meshes.insert_keyed(&part.key, mesh);
                 if let Some(skin) = library.skin(part.part) {
                     skins.0.insert(part.key.clone(), skin);
                 }
+                commands
+                    .entity(e)
+                    .insert((renderer(h), gpu_skin(weights, &template.bind, posed)));
                 part.mesh = Some(h);
                 part.skinned.clone_from(posed);
                 // One phase for all of a body's parts, so they never part at the seams.
                 let next = phases.len() as u32;
                 part.phase = *phases.entry(part.owner).or_insert(next);
-                commands
-                    .entity(e)
-                    .insert(MeshRenderer::new(h, part.material.clone()));
                 continue;
             }
         };
+        if statue {
+            continue;
+        }
         // Which mesh to draw: the coarse one far off, once it's built.
         part.wants_far = dist > FAR_FROM * lod * if part.showing_far { 0.9 } else { 1.0 };
         let far = match (part.wants_far, part.far, library.get_far(part.part)) {
@@ -317,37 +345,57 @@ pub fn skin_bodies(
             }
             _ => None,
         };
-        let switched = far.is_some() != part.showing_far;
-        if switched {
+        let far = far.and_then(|(h, t)| {
+            let w = library.weights.get(&(part.part, true)).cloned()?;
+            Some((h, t, w))
+        });
+        if far.is_some() != part.showing_far {
             part.showing_far = far.is_some();
-            let shown = far.as_ref().map_or(full, |(h, _)| *h);
-            commands
-                .entity(e)
-                .insert(MeshRenderer::new(shown, part.material.clone()));
+            let (shown, template, weights) = far.unwrap_or((full, template, weights));
+            commands.entity(e).insert((
+                MeshRenderer::new(shown, part.material.clone()),
+                gpu_skin(weights, &template.bind, posed),
+            ));
+            part.skinned.clone_from(posed);
+            continue;
         }
-        // Skinned again only when the pose moved more than shows from here.
+        let Some(mut gpu) = gpu else {
+            continue;
+        };
+        // Posed again only when the pose moved more than shows from here.
         let tolerance = if dist > active {
             f32::INFINITY
         } else {
             (dist - lod).max(0.0) * SKIN_ERROR_PER_M
         };
         let every = ((dist / (FAR_FROM * lod)) as u32).clamp(1, MAX_SKIN_EVERY);
-        if !switched && frame.wrapping_add(part.phase) % every != 0 {
+        if frame.wrapping_add(part.phase) % every != 0 {
             continue;
         }
         let moved = pose_change(&part.skinned, posed);
-        if !switched && (moved <= tolerance || moved == 0.0) {
+        if moved <= tolerance || moved == 0.0 {
             continue;
         }
-        let (handle, template) = match far {
-            Some((h, t)) => (h, t),
-            None => (full, template),
-        };
-        if let Some(mesh) = meshes.get_mut(handle) {
-            skin(&template, posed, &mut mesh.vertices, bones);
-            part.skinned.clone_from(posed);
-        }
+        let bind = far.as_ref().map_or(&template.bind, |(_, t, _)| &t.bind);
+        set_bones(&mut gpu.bones, bind, posed);
+        part.skinned.clone_from(posed);
     }
+}
+
+/// A GPU skin with `weights`, posed in `pose` from `bind`.
+fn gpu_skin(weights: Arc<SkinWeights>, bind: &[BonePose], pose: &[BonePose]) -> GpuSkin {
+    let mut skin = GpuSkin::new(weights);
+    set_bones(&mut skin.bones, bind, pose);
+    skin
+}
+
+/// Each bone's move from `bind` to `pose` (bones the pose lacks stay put).
+fn set_bones(out: &mut Vec<SkinBone>, bind: &[BonePose], pose: &[BonePose]) {
+    out.clear();
+    out.extend(bind.iter().enumerate().map(|(i, b)| {
+        let p = pose.get(i).unwrap_or(b);
+        SkinBone::from_poses((b.rotation, b.translation), (p.rotation, p.translation))
+    }));
 }
 
 /// How far the pose moved, about: the most any bone moved, its turn counted at half a metre.
@@ -561,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn far_bodies_draw_a_coarse_mesh_skinned_only_when_their_pose_visibly_changes() {
+    fn bodies_pose_on_the_gpu_and_far_ones_draw_a_coarse_mesh_posed_only_when_it_shows() {
         use engine_core::time::TimeSource;
         #[derive(Resource)]
         struct Camera(DVec3);
@@ -606,23 +654,37 @@ mod tests {
             engine_render::MeshRef::Handle(h) => *h,
             other => panic!("{other:?}"),
         };
-        let version = |app: &App| app.world.resource::<Assets<Mesh>>().version(shown(app));
+        let version = |app: &App, h| app.world.resource::<Assets<Mesh>>().version(h);
+        let bones = |app: &App| app.world.get::<GpuSkin>(e).unwrap().bones.clone();
         let bend = |app: &mut App, angle: f32| {
             let mut pose = app.world.get_mut::<SkeletonPose>(owner).unwrap();
             let b = &mut pose.bones[Human::HEAD_I];
             b.rotation = Quat::from_rotation_x(angle) * bind[Human::HEAD_I].rotation;
         };
         let full = shown(&app);
+        let uploaded = version(&app, full);
 
-        // Near: still, it isn't skinned (or uploaded) again; moved, it is.
-        let v = version(&app);
+        // Near: still, it isn't posed again; moved, it is, the head's bone carrying the
+        // head as the CPU skinning does.
+        let b = bones(&app);
         app.update_n(5);
-        assert_eq!(version(&app), v, "a still body was skinned again");
+        assert_eq!(bones(&app), b, "a still body was posed again");
         bend(&mut app, 0.05);
         app.update_n(3);
-        assert!(version(&app) > v, "a moving near body wasn't skinned");
+        let b = bones(&app);
+        let head = bind[Human::HEAD_I].translation + Vec3::Y * 0.1;
+        let expected = {
+            let r = Quat::from_rotation_x(0.05) * bind[Human::HEAD_I].rotation;
+            let local =
+                bind[Human::HEAD_I].rotation.inverse() * (head - bind[Human::HEAD_I].translation);
+            r * local + bind[Human::HEAD_I].translation
+        };
+        assert!(
+            b[Human::HEAD_I].apply(head).distance(expected) < 1e-4,
+            "a moving near body wasn't posed"
+        );
 
-        // 100 m off: the coarse mesh, skinned again only for a change that shows.
+        // 100 m off: the coarse mesh, posed again only for a change that shows.
         app.insert_resource(Camera(DVec3::new(0.0, 1.7, 100.0)));
         app.update_n(3);
         let far = shown(&app);
@@ -636,24 +698,27 @@ mod tests {
                 .len()
         };
         assert!(n(far) * 8 < n(full), "{} vs {} vertices", n(far), n(full));
-        let v = version(&app);
+        assert_eq!(bones(&app).len(), bind.len());
+        let b = bones(&app);
         bend(&mut app, 0.07);
         app.update_n(3);
-        assert_eq!(version(&app), v, "a 1 cm nod at 100 m was skinned");
+        assert_eq!(bones(&app), b, "a 1 cm nod at 100 m was posed");
         bend(&mut app, 1.0);
-        app.update_n(3);
-        assert!(version(&app) > v, "a big turn at 100 m wasn't skinned");
+        app.update_n(8);
+        assert_ne!(bones(&app), b, "a big turn at 100 m wasn't posed");
 
-        // Past the simulation range: not skinned at all; near again, the full mesh.
+        // Past the simulation range: not posed at all; near again, the full mesh.
         app.insert_resource(Camera(DVec3::new(0.0, 1.7, 400.0)));
         app.update_n(2);
-        let v = version(&app);
+        let b = bones(&app);
         bend(&mut app, -1.0);
         app.update_n(3);
-        assert_eq!(version(&app), v);
+        assert_eq!(bones(&app), b);
         app.insert_resource(Camera(DVec3::new(0.0, 1.7, 5.0)));
         app.update_n(2);
         assert_eq!(shown(&app), full);
+        // The meshes stay in their bind pose: only bones go to the GPU.
+        assert_eq!(version(&app, full), uploaded, "the mesh was rewritten");
     }
 
     #[test]

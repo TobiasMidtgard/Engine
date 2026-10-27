@@ -1298,7 +1298,7 @@ fn wall_world(world: &World, wall: Entity, local: Vec3) -> DVec3 {
 
 /// Aftermath bays waiting for [`crate::DestructionAssets`] to load (their rubble needs it).
 #[derive(Resource, Default)]
-struct PendingAftermath(Vec<Aftermath>);
+pub struct PendingAftermath(Vec<Aftermath>);
 
 /// Wreck the aftermath bays at once and lay their rubble on the ground (once the assets have
 /// loaded, if they are loading).
@@ -1481,47 +1481,77 @@ fn run_commands(world: &mut World, f: impl FnOnce(&mut Commands)) {
     queue.apply(world);
 }
 
-/// Advance every [`DestructionDemo`]'s live script (FixedUpdate, `SimSet::Gameplay`).
-pub fn demo_script_system(world: &mut World) {
-    let dt = world.resource::<Time>().delta_secs();
-    if dt <= 0.0 {
-        return;
-    }
+/// Advance every [`DestructionDemo`]'s live script (FixedUpdate, `SimSet::Gameplay`). The clock
+/// runs in this normal system, beside other modules' systems; only a step that is due takes the
+/// whole world, as a queued command, so a demo between steps is no barrier in the fixed step.
+#[allow(clippy::too_many_arguments)]
+pub fn demo_script_system(
+    mut commands: Commands,
+    time: Res<Time>,
+    loading: Option<Res<crate::assets::AssetsLoading>>,
+    pending: Option<Res<PendingAftermath>>,
+    focus: Option<Res<engine_world::FocusPoints>>,
+    range: Option<Res<engine_world::SimulationRange>>,
+    mut demos: Query<(Entity, &mut DestructionDemo)>,
+) {
+    let dt = time.delta_secs();
     // The demos start once their assets have loaded, with the aftermath bays wrecked first.
-    if world.contains_resource::<crate::assets::AssetsLoading>() {
+    if dt <= 0.0 || loading.is_some() {
         return;
     }
-    if let Some(pending) = world.remove_resource::<PendingAftermath>() {
-        for ids in pending.0 {
-            apply_aftermath(world, ids);
-        }
+    if pending.is_some() {
+        commands.queue(|world: &mut World| {
+            if let Some(pending) = world.remove_resource::<PendingAftermath>() {
+                for ids in pending.0 {
+                    apply_aftermath(world, ids);
+                }
+            }
+        });
     }
-    let demos: Vec<Entity> = world
-        .query_filtered::<Entity, With<DestructionDemo>>()
-        .iter(world)
-        .collect();
-    let steps = timeline();
-    for e in demos {
-        let Some(mut demo) = world.get::<DestructionDemo>(e).cloned() else {
-            continue;
-        };
-        if crate::area_rests_in(world, demo.origin, DEMO_RADIUS_M) {
+    let range = range.map_or_else(engine_world::SimulationRange::default, |r| *r);
+    for (e, mut demo) in &mut demos {
+        if focus
+            .as_ref()
+            .is_some_and(|f| crate::area_rests(&range, f, demo.origin, DEMO_RADIUS_M))
+        {
             continue;
         }
-        demo.time += dt;
-        while demo.next < steps.len() && steps[demo.next].0 <= demo.time {
-            let step = steps[demo.next].1;
-            demo.next += 1;
-            run_step(world, &mut demo, step);
+        let time = demo.time + dt;
+        if TIMELINE.get(demo.next).is_some_and(|s| s.0 <= time) {
+            commands.queue(move |world: &mut World| run_due(world, e, dt));
+            continue;
         }
+        demo.time = time;
         if demo.time >= CYCLE_SECS {
             demo.time -= CYCLE_SECS;
             demo.next = 0;
             demo.cycle += 1;
         }
-        if let Some(mut d) = world.get_mut::<DestructionDemo>(e) {
-            *d = demo;
-        }
+    }
+}
+
+/// The script's steps, in order: (seconds into the cycle, step).
+static TIMELINE: std::sync::LazyLock<Vec<(f32, Step)>> = std::sync::LazyLock::new(timeline);
+
+/// One demo's clock moved on by `dt` with the steps now due run.
+fn run_due(world: &mut World, e: Entity, dt: f32) {
+    let Some(mut demo) = world.get::<DestructionDemo>(e).cloned() else {
+        return;
+    };
+    let steps = &*TIMELINE;
+    demo.time += dt;
+    while demo.next < steps.len() && steps[demo.next].0 <= demo.time {
+        let step = steps[demo.next].1;
+        demo.next += 1;
+        run_step(world, &mut demo, step);
+    }
+    if demo.time >= CYCLE_SECS {
+        demo.time -= CYCLE_SECS;
+        demo.next = 0;
+        demo.cycle += 1;
+    }
+    if let Some(mut d) = world.get_mut::<DestructionDemo>(e) {
+        *d = demo;
     }
 }
 

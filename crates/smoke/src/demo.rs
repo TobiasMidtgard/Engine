@@ -349,34 +349,121 @@ impl Place {
     }
 }
 
-/// Drive every smoke demo: rounds of grenades, shooting, a blast and fans; the cart; tracers.
+/// Where a demo is, from its transform.
+fn place_of(t: &GlobalTransform) -> Place {
+    Place {
+        origin: t.translation(),
+        rotation: t.rotation().as_dquat(),
+    }
+}
+
+/// Seconds into the round, whether the turret is in a burst at `t`.
+fn in_burst(demo: &SmokeDemo, t: f32) -> bool {
+    t >= demo.shooting[0]
+        && t < demo.shooting[1]
+        && demo.fire_rate > 0.0
+        && (t - demo.shooting[0]) % 1.6 < 1.0
+}
+
+/// Whether the fans should run at `t` seconds into the round.
+fn fans_on(demo: &SmokeDemo, t: f32) -> bool {
+    t >= demo.fans[0] && t < demo.fans[1]
+}
+
+/// Whether a range's air is there to run in (transforms settled, its volume made) and awake.
+fn volume_at(domains: &sim::SmokeDomains, middle: DVec3) -> Option<&sim::SmokeDomain> {
+    domains
+        .list
+        .iter()
+        .find(|d| d.owner.is_some() && d.domain.contains(middle))
+}
+
+/// Every frame, as a normal system: count each [`SmokeDemo`]'s frames and time its round. A
+/// range whose air rests (no one near) waits with it. [`run_demos`] runs only when one has
+/// something to do this frame ([`demos_due`]).
+pub fn tick_demos(
+    time: Res<Time>,
+    domains: Res<sim::SmokeDomains>,
+    mut q: Query<(&GlobalTransform, &SmokeDemo, &mut SmokeDemoState)>,
+) {
+    let dt = time.delta_secs();
+    for (t, demo, mut state) in &mut q {
+        // A restart counts its own frames.
+        if state.restart {
+            continue;
+        }
+        state.frames += 1;
+        if !state.started || state.warming > 0.0 {
+            continue;
+        }
+        let middle = place_of(t).world(DVec3::Y);
+        if volume_at(&domains, middle).is_some_and(|d| d.resting) {
+            continue;
+        }
+        state.since += dt;
+        if !in_burst(demo, state.since) {
+            state.shot_clock = 0.0;
+        }
+    }
+}
+
+/// Run condition for [`run_demos`]: a demo restarts, starts, warms up, starts its next
+/// round, shoots, blasts or switches its fans this frame.
+pub fn demos_due(
+    domains: Res<sim::SmokeDomains>,
+    demos: Query<(Entity, &GlobalTransform, &SmokeDemo, &SmokeDemoState)>,
+    fans: Query<(&DemoFan, &SmokeFan)>,
+) -> bool {
+    demos.iter().any(|(e, t, demo, s)| {
+        let middle = place_of(t).world(DVec3::Y);
+        if s.restart || s.warming > 0.0 {
+            return true;
+        }
+        if !s.started {
+            return s.frames >= 3 && volume_at(&domains, middle).is_some();
+        }
+        let at = s.since;
+        let fans_wrong = fans
+            .iter()
+            .any(|(f, fan)| f.demo == e && fan.on != fans_on(demo, at));
+        at >= demo.cycle_secs
+            || in_burst(demo, at)
+            || (at >= demo.blast_at && !s.blasted)
+            || fans_wrong
+    })
+}
+
+/// Lose spent tracer lines.
+pub fn age_tracers(time: Res<Time>, mut commands: Commands, mut q: Query<(Entity, &mut Tracer)>) {
+    let dt = time.delta_secs();
+    for (e, mut t) in &mut q {
+        t.life -= dt;
+        if t.life <= 0.0 {
+            commands.entity(e).despawn();
+        }
+    }
+}
+
+/// Run each [`SmokeDemo`] that has something to do this frame ([`demos_due`]): restarts,
+/// first rounds and warm-ups, grenades, the turret's shots, the blast and the fans;
+/// [`tick_demos`] times them. It needs the whole world, so it is gated: a `&mut World` system
+/// that runs every frame stops every other system while it runs.
 pub fn run_demos(world: &mut World) {
     let dt = world.resource::<Time>().delta_secs();
-    age_tracers(world, dt);
-    drive_carts(world, dt);
-    turn_wheels(world);
-    spin_rotors(world, dt);
     let mut q = world.query::<(Entity, &GlobalTransform, &SmokeDemo, &SmokeDemoState)>();
     let demos: Vec<(Entity, Place, SmokeDemo, SmokeDemoState)> = q
         .iter(world)
-        .map(|(e, t, d, s)| {
-            let place = Place {
-                origin: t.translation(),
-                rotation: t.rotation().as_dquat(),
-            };
-            (e, place, d.clone(), *s)
-        })
+        .map(|(e, t, d, s)| (e, place_of(t), d.clone(), *s))
         .collect();
     for (entity, place, demo, mut state) in demos {
         let middle = place.world(DVec3::Y);
         if state.restart {
             clear_demo(world, middle);
             state = SmokeDemoState {
-                frames: 2,
+                frames: 3,
                 ..Default::default()
             };
         }
-        state.frames += 1;
         // Wait until transforms have settled and the volume exists.
         let ready = state.frames >= 3
             && world
@@ -401,7 +488,6 @@ pub fn run_demos(world: &mut World) {
             world.entity_mut(entity).insert(state);
             continue;
         }
-        state.since += dt;
         if state.since >= demo.cycle_secs {
             state.since = 0.0;
             state.rounds += 1;
@@ -410,27 +496,22 @@ pub fn run_demos(world: &mut World) {
         }
         let t = state.since;
         // Shooting: one-second bursts with short pauses, sweeping across the targets.
-        if t >= demo.shooting[0] && t < demo.shooting[1] && demo.fire_rate > 0.0 {
+        if in_burst(&demo, t) {
             let burst = ((t - demo.shooting[0]) / 1.6) as usize;
-            let in_burst = (t - demo.shooting[0]) % 1.6 < 1.0;
-            if in_burst {
-                state.shot_clock += dt;
-                let gap = 1.0 / demo.fire_rate;
-                while state.shot_clock >= gap {
-                    state.shot_clock -= gap;
-                    state.shots += 1;
-                    let target = AIM_X[(burst + state.rounds as usize) % AIM_X.len()];
-                    shoot(world, place, target, state.shots);
-                }
-            } else {
-                state.shot_clock = 0.0;
+            state.shot_clock += dt;
+            let gap = 1.0 / demo.fire_rate;
+            while state.shot_clock >= gap {
+                state.shot_clock -= gap;
+                state.shots += 1;
+                let target = AIM_X[(burst + state.rounds as usize) % AIM_X.len()];
+                shoot(world, place, target, state.shots);
             }
         }
         if t >= demo.blast_at && !state.blasted {
             state.blasted = true;
             blast(world, place);
         }
-        let fans_on = t >= demo.fans[0] && t < demo.fans[1];
+        let fans_on = fans_on(&demo, t);
         let mut fans = world.query::<(&DemoFan, &mut SmokeFan)>();
         for (f, mut fan) in fans.iter_mut(world) {
             if f.demo == entity && fan.on != fans_on {
@@ -558,23 +639,10 @@ fn blast(world: &mut World, place: Place) {
     });
 }
 
-fn age_tracers(world: &mut World, dt: f32) {
-    let mut q = world.query::<(Entity, &mut Tracer)>();
-    let mut dead = Vec::new();
-    for (e, mut t) in q.iter_mut(world) {
-        t.life -= dt;
-        if t.life <= 0.0 {
-            dead.push(e);
-        }
-    }
-    for e in dead {
-        world.despawn(e);
-    }
-}
-
-fn drive_carts(world: &mut World, dt: f32) {
-    let mut q = world.query::<(&mut DemoCart, &mut Transform)>();
-    for (mut cart, mut t) in q.iter_mut(world) {
+/// Drive the carts back and forth along their tracks.
+pub fn drive_carts(time: Res<Time>, mut q: Query<(&mut DemoCart, &mut Transform)>) {
+    let dt = time.delta_secs();
+    for (mut cart, mut t) in &mut q {
         let span = cart.to.distance(cart.from).max(0.1);
         cart.phase = (cart.phase + dt * cart.speed / span as f32) % 2.0;
         // There and back, easing at the ends.
@@ -583,14 +651,12 @@ fn drive_carts(world: &mut World, dt: f32) {
 }
 
 /// Turn the cart's wheelsets by how far the cart moved.
-fn turn_wheels(world: &mut World) {
-    let mut carts = world.query::<(Entity, &DemoCart)>();
-    let along: Vec<(Entity, f64)> = carts.iter(world).map(|(e, c)| (e, cart_along(c))).collect();
-    let mut q = world.query::<(&mut DemoWheel, &mut Transform)>();
-    for (mut w, mut t) in q.iter_mut(world) {
-        let Some(&(_, s)) = along.iter().find(|(e, _)| *e == w.cart) else {
+pub fn turn_wheels(carts: Query<&DemoCart>, mut q: Query<(&mut DemoWheel, &mut Transform)>) {
+    for (mut w, mut t) in &mut q {
+        let Ok(cart) = carts.get(w.cart) else {
             continue;
         };
+        let s = cart_along(cart);
         let ds = s - w.last_along.unwrap_or(s);
         w.last_along = Some(s);
         // Rolling toward `to` (+x on the range) turns the wheel clockwise seen from +z.
@@ -607,12 +673,14 @@ fn cart_along(cart: &DemoCart) -> f64 {
 }
 
 /// Spin fan rotors up while their fan is on and let them coast down when it is off.
-fn spin_rotors(world: &mut World, dt: f32) {
-    let mut fans = world.query::<(Entity, &SmokeFan)>();
-    let on: Vec<(Entity, bool)> = fans.iter(world).map(|(e, f)| (e, f.on)).collect();
-    let mut q = world.query::<(&mut DemoRotor, &mut Transform)>();
-    for (mut r, mut t) in q.iter_mut(world) {
-        let running = on.iter().any(|(e, o)| *e == r.fan && *o);
+pub fn spin_rotors(
+    time: Res<Time>,
+    fans: Query<&SmokeFan>,
+    mut q: Query<(&mut DemoRotor, &mut Transform)>,
+) {
+    let dt = time.delta_secs();
+    for (mut r, mut t) in &mut q {
+        let running = fans.get(r.fan).is_ok_and(|f| f.on);
         let (target, secs) = if running {
             (ROTOR_SPEED, 1.6)
         } else {

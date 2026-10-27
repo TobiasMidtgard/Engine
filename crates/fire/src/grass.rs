@@ -207,23 +207,28 @@ impl GrassBurn {
 
 /// Read the fire field into every meadow's [`GrassBurn`] (Update). Replaces the old
 /// per-entity grass: collapse while burning, stubble, regrowth.
-pub fn update_grass(world: &mut World) {
-    if !world.contains_resource::<FireField>() {
+/// A normal system (not `&mut World`), so it runs beside other modules' systems.
+pub fn update_grass(
+    mut commands: Commands,
+    field: Option<Res<FireField>>,
+    ground: Option<Res<Ground>>,
+    time: Res<Time>,
+    mut q: Query<(
+        Entity,
+        &GrassMeadow,
+        &GlobalTransform,
+        Option<&mut GrassBurn>,
+    )>,
+) {
+    let Some(field) = field else {
         return;
-    }
+    };
     static GROUND_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let ground = world.get_resource::<Ground>().cloned();
-    let dt = world.resource::<Time>().delta_secs();
-    let mut fresh: Vec<(Entity, GrassBurn)> = Vec::new();
-    world.resource_scope(|world, field: Mut<FireField>| {
+    let ground: Option<&Ground> = ground.as_deref();
+    let dt = time.delta_secs();
+    {
         let cell_m = field.cell_m;
-        let mut q = world.query::<(
-            Entity,
-            &GrassMeadow,
-            &GlobalTransform,
-            Option<&mut GrassBurn>,
-        )>();
-        for (entity, meadow, gt, burn) in q.iter_mut(world) {
+        for (entity, meadow, gt, burn) in &mut q {
             let c = gt.translation();
             let half = Vec2::from(meadow.half_extents).as_dvec2();
             let min = DVec2::new(c.x, c.z) - half;
@@ -270,33 +275,25 @@ pub fn update_grass(world: &mut World) {
                         for (x, h) in out.iter_mut().enumerate() {
                             let p = min + (DVec2::new(x as f64, y as f64) + 0.5) * cell_m as f64;
                             *h = ground
-                                .as_ref()
                                 .and_then(|g| g.height(DVec3::new(p.x, hint, p.y)))
                                 .filter(|h| h.is_finite())
                                 .map_or(0.0, |h| (h - c.y) as f32);
                         }
                     });
                     let ground = heights;
-                    fresh.push((
-                        entity,
-                        GrassBurn {
-                            min,
-                            cell_m,
-                            size,
-                            cells,
-                            version: 1,
-                            base_y: c.y,
-                            ground,
-                            ground_id: GROUND_IDS
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                        },
-                    ));
+                    commands.entity(entity).insert(GrassBurn {
+                        min,
+                        cell_m,
+                        size,
+                        cells,
+                        version: 1,
+                        base_y: c.y,
+                        ground,
+                        ground_id: GROUND_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    });
                 }
             }
         }
-    });
-    for (e, b) in fresh {
-        world.entity_mut(e).insert(b);
     }
 }
 
