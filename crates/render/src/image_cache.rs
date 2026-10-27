@@ -285,6 +285,11 @@ impl ImageTexture {
             f.remove_srgb_suffix()
         }
     }
+
+    /// The GPU texture (to copy from, or read back in tests).
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
 }
 
 /// Counters of the shared image cache (`render.images_released` and friends in `Diagnostics`).
@@ -1218,9 +1223,19 @@ pub(crate) fn upload_image(
         &[]
     };
     let generated;
-    let mips: &[Vec<u8>] = if !image.mipmaps {
+    let max = gpu.device.limits().max_texture_dimension_2d;
+    let stored =
+        !image.mips.is_empty() && (image.format != PixelFormat::Rgba8 || srgb == image.srgb);
+    // A large image without a fitting chain gets it drawn on the GPU (`mipmaps`) rather than
+    // made on this thread.
+    let gpu_mips = image.mipmaps
+        && !stored
+        && image.width as u64 * image.height as u64 >= crate::mipmaps::GPU_MIPS_MIN_TEXELS
+        && image.width.max(image.height) <= max
+        && crate::mipmaps::MipGenerator::supports(format);
+    let mips: &[Vec<u8>] = if !image.mipmaps || gpu_mips {
         &[]
-    } else if !image.mips.is_empty() && (image.format != PixelFormat::Rgba8 || srgb == image.srgb) {
+    } else if stored {
         &image.mips
     } else {
         generated = image.mip_chain(srgb);
@@ -1232,7 +1247,6 @@ pub(crate) fn upload_image(
         let (w, h) = image.level_size(i as u32 + 1);
         levels.push((w, h, m));
     }
-    let max = gpu.device.limits().max_texture_dimension_2d;
     let skip = levels
         .iter()
         .take_while(|(w, h, _)| *w > max || *h > max)
@@ -1253,11 +1267,22 @@ pub(crate) fn upload_image(
             height,
             depth_or_array_layers: 1,
         },
-        mip_level_count: levels.len() as u32,
+        mip_level_count: if gpu_mips {
+            image.full_mip_count()
+        } else {
+            levels.len() as u32
+        },
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | if gpu_mips {
+                // Drawn into; copied from to check the chain (tests/gpu_mips.rs).
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+            } else {
+                wgpu::TextureUsages::empty()
+            },
         view_formats,
     });
     let bpp = image.format.bytes_per_pixel() as u32;
@@ -1281,6 +1306,9 @@ pub(crate) fn upload_image(
                 depth_or_array_layers: 1,
             },
         );
+    }
+    if gpu_mips {
+        gpu.mips.generate(gpu, &texture, format);
     }
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     Some((texture, view))

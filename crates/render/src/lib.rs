@@ -84,6 +84,7 @@ pub mod mesh_feature;
 mod mesh_lod;
 mod mesh_pool;
 mod mesh_scene;
+mod mipmaps;
 pub mod motion_blur;
 mod perf;
 pub mod portal;

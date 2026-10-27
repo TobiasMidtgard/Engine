@@ -114,6 +114,8 @@ pub struct GpuShared {
     /// A feature's own steps inside its `prepare` this frame (the meshes'), named in the
     /// slow-frame log line under the renderer's steps.
     pub(crate) prepare_steps: std::sync::Mutex<Vec<(&'static str, f32)>>,
+    /// Mip chains drawn on the GPU for large images (`mipmaps`).
+    pub(crate) mips: crate::mipmaps::MipGenerator,
 }
 
 /// See [`GpuShared::side_commands`].

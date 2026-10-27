@@ -765,8 +765,12 @@ impl Renderer {
             side_commands: Default::default(),
             warm_pipelines: settings.pipeline_warmup.on(headless),
             prepare_steps: Default::default(),
+            mips: Default::default(),
         };
 
+        if shared.warm_pipelines {
+            shared.mips.warm(&shared.device);
+        }
         let probe_gi = crate::probe_gi::ProbeGi::new(&shared.device);
         let viewing = Instant::now();
         let view = {
