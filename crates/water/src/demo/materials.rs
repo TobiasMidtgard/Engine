@@ -165,38 +165,11 @@ impl DemoMaterials {
     /// Like [`DemoMaterials::build`], with `size` texels for a standard tile instead of 512
     /// (the large surfaces get proportionally more). Small sizes (64) are for tests.
     pub fn build_with_size(images: &mut Assets<Image>, size: u32) -> Self {
-        let size = size.clamp(8, 4096);
-        let mut order: Vec<Surface> = Surface::ALL
-            .iter()
-            .copied()
-            .filter(|s| s.source() == *s)
-            .collect();
-        // Longest jobs first so the threads finish together.
-        order.sort_by_key(|s| std::cmp::Reverse(cost(*s)));
-        let next = AtomicUsize::new(0);
-        let done = Mutex::new(Vec::new());
-        let threads = cores().min(order.len());
-        // Cores left over when there are fewer surfaces left than workers: the remaining
-        // surfaces split their texel loops across them.
-        let idle = Arc::new(AtomicUsize::new(cores() - threads));
-        std::thread::scope(|scope| {
-            for _ in 0..threads {
-                let idle = Arc::clone(&idle);
-                let (next, done, order) = (&next, &done, &order);
-                scope.spawn(move || {
-                    SPARE_CORES.set(Some(Arc::clone(&idle)));
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(&surface) = order.get(i) else { break };
-                        let built = synthesize(surface, size);
-                        done.lock().unwrap_or_else(|e| e.into_inner()).push(built);
-                    }
-                    idle.fetch_add(1, Ordering::Relaxed);
-                    SPARE_CORES.set(None);
-                });
-            }
-        });
-        let mut done = done.into_inner().unwrap_or_else(|e| e.into_inner());
+        Self::from_built(images, synthesize_all(size, 0))
+    }
+
+    /// Put textures made by [`synthesize_all`] into `images`.
+    pub(crate) fn from_built(images: &mut Assets<Image>, mut done: Vec<Built>) -> Self {
         done.sort_by_key(|b| b.surface as usize);
         let mut sets = Vec::new();
         for b in done {
@@ -227,6 +200,45 @@ impl DemoMaterials {
             .map(|(_, m)| *m)
             .unwrap_or_else(|| plain(surface))
     }
+}
+
+/// Generate every surface's textures with `size` texels for a standard tile (see
+/// [`DemoMaterials::build_with_size`]), on as many threads as there are cores. Needs no world,
+/// so it can run on a worker while the game loads, leaving `spare` cores to the frame.
+pub(crate) fn synthesize_all(size: u32, spare: usize) -> Vec<Built> {
+    let size = size.clamp(8, 4096);
+    let cores = cores().saturating_sub(spare).max(1);
+    let mut order: Vec<Surface> = Surface::ALL
+        .iter()
+        .copied()
+        .filter(|s| s.source() == *s)
+        .collect();
+    // Longest jobs first so the threads finish together.
+    order.sort_by_key(|s| std::cmp::Reverse(cost(*s)));
+    let next = AtomicUsize::new(0);
+    let done = Mutex::new(Vec::new());
+    let threads = cores.min(order.len());
+    // Cores left over when there are fewer surfaces left than workers: the remaining
+    // surfaces split their texel loops across them.
+    let idle = Arc::new(AtomicUsize::new(cores - threads));
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            let idle = Arc::clone(&idle);
+            let (next, done, order) = (&next, &done, &order);
+            scope.spawn(move || {
+                SPARE_CORES.set(Some(Arc::clone(&idle)));
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&surface) = order.get(i) else { break };
+                    let built = synthesize(surface, size);
+                    done.lock().unwrap_or_else(|e| e.into_inner()).push(built);
+                }
+                idle.fetch_add(1, Ordering::Relaxed);
+                SPARE_CORES.set(None);
+            });
+        }
+    });
+    done.into_inner().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Size in meters (u, v) of one texture tile of `surface`. Textured materials use
@@ -545,7 +557,7 @@ impl Default for Px {
 }
 
 /// The generated images of one surface (plus paint color variants sharing its maps).
-struct Built {
+pub(crate) struct Built {
     surface: Surface,
     albedo: Image,
     normal: Image,

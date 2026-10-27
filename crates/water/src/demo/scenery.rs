@@ -5,9 +5,8 @@
 use engine_assets::Assets;
 use engine_core::math::{DVec2, Mat4};
 use engine_core::prelude::*;
-use engine_render::{Image, Mesh, MeshRenderer, StandardMaterial};
+use engine_render::{Mesh, MeshRenderer, StandardMaterial};
 
-use super::materials::DemoMaterials;
 use super::props::{self, Part};
 use crate::buoyancy::{Buoyancy, Floating, Tether};
 use crate::interact::WaterInteractor;
@@ -20,15 +19,8 @@ pub fn add_parts(commands: &mut Commands, entity: Entity, parts: Vec<Part>) {
         if !world.contains_resource::<Assets<Mesh>>() {
             return;
         }
-        if !world.contains_resource::<DemoMaterials>() {
-            let built = match world.get_resource_mut::<Assets<Image>>() {
-                Some(mut images) => DemoMaterials::build(&mut images),
-                None => DemoMaterials::default(),
-            };
-            world.insert_resource(built);
-        }
         let materials: Vec<StandardMaterial> = {
-            let library = world.resource::<DemoMaterials>();
+            let library = super::art::materials(world);
             parts
                 .iter()
                 .map(|p| {

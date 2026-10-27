@@ -15,6 +15,7 @@ use engine_render::{Mesh, Vertex};
 use super::materials::Surface;
 
 /// One piece of a prop drawn with one material.
+#[derive(Clone)]
 pub struct Part {
     pub mesh: Mesh,
     pub surface: Surface,

@@ -121,6 +121,8 @@ impl Plugin for WaterPlugin {
                     .in_set(SimSet::Environment),
             )
             .add_systems(FixedUpdate, demo::demo_system.in_set(SimSet::Gameplay))
+            .add_systems(Startup, demo::art::start_demo_art_system)
+            .add_systems(PreUpdate, demo::art::finish_demo_art_system)
             .add_systems(
                 PostUpdate,
                 shift::shift_system.in_set(WorldShiftSet::Apply),

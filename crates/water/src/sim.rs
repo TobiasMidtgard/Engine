@@ -567,11 +567,15 @@ pub fn flow_system(
 pub struct WaterLoading {
     /// Flow regions whose bed and settling stream are still being worked out.
     pub settling: usize,
+    /// Pieces of the demos' art (textures, ground, rocks, people) still being made on
+    /// workers ([`crate::demo::art`]).
+    pub art: usize,
 }
 
 impl WaterLoading {
+    /// Nothing left to make: the demo art is in and every stream has settled.
     pub fn is_ready(&self) -> bool {
-        self.settling == 0
+        self.settling == 0 && self.art == 0
     }
 }
 

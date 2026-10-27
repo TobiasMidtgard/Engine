@@ -19,6 +19,7 @@
 //! [`spawn_demo`] builds it around a point on the ground and [`demo_system`] (added by
 //! [`crate::WaterPlugin`]) drives it.
 
+pub mod art;
 pub mod crag;
 pub mod materials;
 pub mod props;
@@ -692,14 +693,15 @@ const ROCKS: [(u64, f32); 8] = [
 ];
 const SMALL_ROCKS: usize = 5;
 
-/// Build [`ROCKS`] (a few seconds of work on one core), on the compute pool when there is one.
-fn rock_shapes() -> Vec<Vec<Part>> {
+/// Build [`ROCKS`] (a few seconds of work on one core), on the compute pool when there is one
+/// and `wide` (not from a worker of another pool: that would take the frame's threads).
+fn rock_shapes(wide: bool) -> Vec<Vec<Part>> {
     let mut built: Vec<Option<Vec<Part>>> = ROCKS.iter().map(|_| None).collect();
     let build = |i: usize, slot: &mut [Option<Vec<Part>>]| {
         let (seed, size) = ROCKS[i];
         slot[0] = Some(props::boulder(seed, size));
     };
-    if ComputeTaskPool::try_get().is_some() {
+    if wide && ComputeTaskPool::try_get().is_some() {
         par_chunks_mut(&mut built, 1, build);
     } else {
         for (i, slot) in built.chunks_mut(1).enumerate() {
@@ -720,14 +722,14 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
             commands,
             "Tarn hill",
             Transform::from_translation(origin),
-            vec![Part::new(tarn_mesh(0.5), Surface::Ground)],
+            vec![Part::new(art::tarn(), Surface::Ground)],
         );
         spawn_prop(
             commands,
             "Crag crevice",
             Transform::from_translation(origin),
             {
-                let (turf, bare) = crag_mesh(0.5);
+                let (turf, bare) = art::crag();
                 vec![
                     Part::new(turf, Surface::Ground),
                     Part::new(bare, Surface::Cliff),
@@ -799,7 +801,7 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
     );
 
     // Boulders: by the falls and down the ravine, on the rim, and in the shallows.
-    let rocks = rock_shapes();
+    let rocks = art::rocks();
     let mut rng = Rng::new(0xB01D);
     let side_of = Vec2::new(OUTLET.y, -OUTLET.x);
     let mut boulders = 0;
@@ -941,7 +943,7 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
         "Swimmer",
         Transform::from_translation(at(10.0, LAKE_LEVEL, 12.0)),
         // The water line runs along the swimmer's back, 0.15 m above the model's middle.
-        merged([(props::swimmer(), Mat4::from_translation(Vec3::Y * -0.09))]),
+        merged([(art::swimmer(), Mat4::from_translation(Vec3::Y * -0.09))]),
     );
     commands.entity(e).insert((
         WaterInteractor::new(0.35).with_wake(1.2),
@@ -964,7 +966,7 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
         Transform::from_translation(wade(a) + DVec3::Y * WADER_HIP),
         // The entity rides at the hips (where it meets the water); the soles are below.
         merged([(
-            props::wader(),
+            art::wader(),
             Mat4::from_translation(Vec3::Y * -WADER_HIP as f32),
         )]),
     );
@@ -990,7 +992,7 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
         "Stream wader",
         Transform::from_translation(ford_at(-1.0) + DVec3::Y * WADER_HIP),
         merged([(
-            props::wader(),
+            art::wader(),
             Mat4::from_translation(Vec3::Y * -WADER_HIP as f32),
         )]),
     );
