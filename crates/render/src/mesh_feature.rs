@@ -782,13 +782,13 @@ impl PrepareSteps {
         }
     }
 
-    fn publish(mut self, world: &mut World, gpu: &GpuShared) {
+    fn publish(mut self, diagnostics: Option<&mut Diagnostics>, gpu: &GpuShared) {
         self.finish();
         gpu.prepare_steps
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .extend_from_slice(&self.done);
-        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+        if let Some(d) = diagnostics {
             for (name, ms) in self.done {
                 d.set(&format!("render.cpu.{name}"), ms as f64);
             }
@@ -802,6 +802,12 @@ pub(crate) const MESH_UPLOAD_KEY: u64 = 1 << 63;
 /// Draws [`MeshRenderer`](crate::components::MeshRenderer) entities. Added by `RenderPlugin`.
 #[derive(Default)]
 pub struct MeshFeature {
+    /// What `prepare` hands `prepare_frame`: a frame was gathered, the slots it culled, a
+    /// `LoadingBudget` present, a headless app.
+    prepared: bool,
+    culled: u32,
+    loading: bool,
+    headless: bool,
     /// Meshes skinned on the GPU (`GpuSkin`), and the entities asking.
     skins: crate::skinning::Skins,
     skin_query: Option<
@@ -2482,7 +2488,40 @@ impl RenderFeature for MeshFeature {
         if let Some(clusters) = &mut self.clusters {
             clusters.end_prepare(gpu, view, settings);
         }
+        // The rest reads no world: `prepare_frame`, on the render thread when pipelined.
+        self.culled = culled;
+        self.loading = world.contains_resource::<engine_world::LoadingBudget>();
+        self.headless = world
+            .get_resource::<EngineConfig>()
+            .is_none_or(|c| c.headless);
+        self.prepared = true;
+        let mut diagnostics = world.get_resource_mut::<Diagnostics>();
+        steps.publish(diagnostics.as_deref_mut(), gpu);
+    }
 
+    fn prepare_frame(
+        &mut self,
+        gpu: &GpuShared,
+        view: &ViewData,
+        settings: &RenderSettings,
+        diagnostics: &mut Diagnostics,
+    ) {
+        if !std::mem::take(&mut self.prepared) {
+            return;
+        }
+        let frame = self.frame;
+        let culled = self.culled;
+        let shadows = view.sun_shadows || view.sky_occlusion.enabled;
+        let prev_origin = view.prev_origin;
+        let lod_pixels = settings.mesh_lod_pixels.max(0.0);
+        let min_pixels = settings.min_object_pixels.max(0.0);
+        let impostor_pixels = settings.impostor_pixels.max(0.0);
+        let threads = if self.scene.hot.len() >= PARALLEL_GATHER {
+            std::thread::available_parallelism().map_or(1, |n| n.get().min(8))
+        } else {
+            1
+        };
+        let mut steps = PrepareSteps::default();
         steps.step("meshes: sort and batch");
         // Order: opaque (by pipeline, texture set, mesh), transparent (back to front). The
         // visible items' keys are sorted, not the items themselves.
@@ -2674,8 +2713,7 @@ impl RenderFeature for MeshFeature {
                 && gpu.adapter_info.backend != wgpu::Backend::Gl
                 && (gpu.adapter_info.device_type != wgpu::DeviceType::Cpu
                     || settings.texture_compression_on_cpu);
-            let loading = world.contains_resource::<engine_world::LoadingBudget>();
-            let budget = (settings.impostor_atlas_layers, compress, loading);
+            let budget = (settings.impostor_atlas_layers, compress, self.loading);
             impostors.schedule(gpu, budget, |m| {
                 meshes.get(&m).map_or((0.0, 1.0), |g| (g.min_y, g.height))
             });
@@ -2728,7 +2766,8 @@ impl RenderFeature for MeshFeature {
             run_jobs(jobs.collect::<Vec<_>>().into_iter());
         }
         if self.material_data.is_empty() {
-            self.material_data.push(default_material.to_gpu());
+            self.material_data
+                .push(StandardMaterial::default().to_gpu());
         }
         self.write_draw_args(gpu, settings);
         steps.step("meshes: pipelines");
@@ -2749,10 +2788,7 @@ impl RenderFeature for MeshFeature {
                 clusters.set_shader_features(needed);
             }
         }
-        let headless = world
-            .get_resource::<EngineConfig>()
-            .is_none_or(|c| c.headless);
-        self.ensure_pipelines(gpu, settings.pipeline_warmup.on(headless));
+        self.ensure_pipelines(gpu, settings.pipeline_warmup.on(self.headless));
         steps.step("meshes: upload materials");
         let grown = self
             .materials
@@ -2814,7 +2850,8 @@ impl RenderFeature for MeshFeature {
             self.last_report = Some(std::time::Instant::now());
             tracing::info!("mesh triangles\n{}", self.triangle_report(shadows));
         }
-        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+        {
+            let d = &mut *diagnostics;
             d.set("render.meshes.slots", self.scene.hot.len() as f64);
             d.set("render.meshes.dirty_slots", self.scene.dirty as f64);
             // Slots the serial pass took (cluster path and first uploads).
@@ -2859,7 +2896,7 @@ impl RenderFeature for MeshFeature {
             d.set("render.meshes.pool_mb", reserved as f64 / (1 << 20) as f64);
             d.set("render.meshes.pool_used_mb", used as f64 / (1 << 20) as f64);
         }
-        steps.publish(world, gpu);
+        steps.publish(Some(diagnostics), gpu);
     }
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {

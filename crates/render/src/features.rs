@@ -34,6 +34,7 @@ use std::sync::Arc;
 use bevy_ecs::prelude::*;
 use engine_assets::{Assets, Handle};
 use engine_core::App;
+use engine_core::diagnostics::Diagnostics;
 
 use crate::cloud_shadows::{CloudShadowRequest, CloudShadowTarget};
 use crate::frame::ViewData;
@@ -529,6 +530,21 @@ pub trait RenderFeature: Send + Sync + 'static {
         gpu: &GpuShared,
         view: &ViewData,
         settings: &RenderSettings,
+    ) {
+    }
+
+    /// The part of the frame's preparation that reads no world: cull, sort, build draw lists
+    /// and write buffers from what `prepare` copied out of the world. Runs after every
+    /// feature's `prepare` and before `compute`, on the render thread when the renderer is
+    /// pipelined, so the simulation of the next frame overlaps it (pipelined-rendering.md, as
+    /// Unreal's scene proxies and Bevy's prepare after extract). `diagnostics` reach the
+    /// world's `Diagnostics` with the frame's other `render.*` metrics.
+    fn prepare_frame(
+        &mut self,
+        gpu: &GpuShared,
+        view: &ViewData,
+        settings: &RenderSettings,
+        diagnostics: &mut Diagnostics,
     ) {
     }
 
