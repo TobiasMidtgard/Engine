@@ -874,6 +874,92 @@ pub fn round10(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Round 11: four texture sets from different tools (a folder dropped on the editor) become
+/// materials, then go onto the courtyard. `ROUND11_SETS` is the folder.
+pub fn round11(dir: impl Into<PathBuf>) -> ShotScript {
+    let steps = vec![
+        Step::Camera(DVec3::new(7.5, 3.2, 8.5), DVec3::new(-1.0, 0.8, -1.5)),
+        Step::Select(""),
+        Step::Do(Box::new(|world, editor| {
+            let sphere = editor::shape_presets()
+                .into_iter()
+                .find(|(name, _)| *name == "Sphere")
+                .map(|(name, shape)| editor::Create::Shape(name, shape));
+            if let Some(what) = sphere {
+                let e = editor::create(world, editor, what, DVec3::new(0.5, 0.0, 1.5));
+                if let Some(mut t) = world.get_mut::<Transform>(e) {
+                    t.translation.y = 0.8;
+                    t.scale = Vec3::splat(1.6);
+                }
+            }
+            let cube = editor::shape_presets()
+                .into_iter()
+                .find(|(name, _)| *name == "Cube")
+                .map(|(name, shape)| editor::Create::Shape(name, shape));
+            if let Some(what) = cube {
+                let e = editor::create(world, editor, what, DVec3::new(-1.2, 0.0, 1.0));
+                if let Some(mut t) = world.get_mut::<Transform>(e) {
+                    t.translation.y = 0.5;
+                }
+            }
+            editor.select(None);
+        })),
+        Step::Wait(30),
+        Step::Shot("47_before_materials"),
+        // The folder of texture sets, dropped on the editor.
+        Step::Do(Box::new(|world, editor| {
+            let source = PathBuf::from(std::env::var("ROUND11_SETS").unwrap_or_default());
+            crate::import::import_paths(world, editor, &[source], None, None);
+            editor.model_filter = "materials/".into();
+            world.insert_resource(crate::ui::EditorDock(crate::ui::layout(0.5)));
+        })),
+        Step::Tab(Tab::Content),
+        Step::Wait(80),
+        Step::Shot("48_texture_sets_to_materials"),
+        Step::Tab(Tab::Console),
+        Step::Wait(4),
+        Step::Shot("49_what_each_set_became"),
+        // Onto the courtyard: one each, and one on all six crates from the selection.
+        Step::Do(Box::new(|world, editor| {
+            world.insert_resource(crate::ui::EditorDock(crate::ui::default_layout()));
+            for (material, object) in [
+                ("ground054", "Courtyard floor"),
+                ("cliff_rock", "Back wall"),
+                ("cliff_rock", "Side wall"),
+                ("mud_wet_ukmkdc2", "Ramp"),
+                ("rock_face", "Sphere"),
+                ("rock_face", "Cube"),
+                ("rock_face", "Barrel"),
+            ] {
+                let key = format!("imported/materials/{material}/{material}.material.gltf");
+                if let Some(e) = find(world, object) {
+                    crate::materials::apply(world, editor, &key, &[e]);
+                }
+            }
+            editor.selection = find(world, "Crate stack").into_iter().collect();
+            let crates = crate::materials::selected_meshes(world, editor);
+            crate::materials::apply(
+                world,
+                editor,
+                "imported/materials/rock_face/rock_face.material.gltf",
+                &crates,
+            );
+        })),
+        Step::Tab(Tab::History),
+        Step::Wait(60),
+        Step::Shot("50_materials_on_the_courtyard"),
+        Step::Camera(DVec3::new(-1.2, 1.3, -1.6), DVec3::new(-2.5, 0.9, -3.5)),
+        Step::Wait(20),
+        Step::Shot("52_crates_close"),
+        Step::Select("Sphere"),
+        Step::Camera(DVec3::new(3.0, 1.6, 3.6), DVec3::new(0.3, 0.8, 1.2)),
+        Step::Tab(Tab::Content),
+        Step::Wait(30),
+        Step::Shot("51_close_up"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {

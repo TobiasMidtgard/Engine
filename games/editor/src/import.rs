@@ -79,7 +79,7 @@ fn kind_of(path: &Path) -> Result<&'static str, String> {
 }
 
 /// "My Tree (v2)" → "my_tree_v2".
-fn slug(name: &str) -> String {
+pub fn slug(name: &str) -> String {
     let mut out = String::new();
     for c in name.trim().to_lowercase().chars() {
         if c.is_alphanumeric() {
@@ -330,17 +330,122 @@ pub fn file_drops(mut drops: MessageReader<FileDrop>, mut editor: ResMut<Editor>
     }
 }
 
-/// Import files dropped anywhere but the scene view where the view is looking, side by side.
-pub fn import_dropped(world: &mut World, editor: &mut Editor, at: Option<DVec3>) {
+/// Import files dropped anywhere but the scene view where the view is looking, side by side;
+/// a texture set dropped on a mesh (`onto`) goes onto it.
+pub fn import_dropped(
+    world: &mut World,
+    editor: &mut Editor,
+    at: Option<DVec3>,
+    onto: Option<Entity>,
+) {
     let drops = std::mem::take(&mut editor.file_drops);
+    import_paths(world, editor, &drops, at, onto);
+}
+
+/// Every file under `path` (itself when it is a file), a few folders deep, sorted.
+fn files_under(path: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        paths.sort();
+        for p in paths {
+            if p.is_dir() {
+                if depth < 4 {
+                    walk(&p, depth + 1, out);
+                }
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    if path.is_dir() {
+        let mut out = Vec::new();
+        walk(path, 0, &mut out);
+        out
+    } else {
+        vec![path.to_path_buf()]
+    }
+}
+
+/// Import files and folders: images that make texture sets become materials (put on `onto`
+/// when there is one material), models are placed side by side from `at`, other images are
+/// copied as textures. Unknown files in a folder are skipped quietly.
+pub fn import_paths(
+    world: &mut World,
+    editor: &mut Editor,
+    paths: &[PathBuf],
+    at: Option<DVec3>,
+    onto: Option<Entity>,
+) {
+    let t = now(world);
+    let Some(root) = world.get_resource::<AssetServer>().map(|s| s.root()) else {
+        return;
+    };
+    let mut images = Vec::new();
+    let mut others = Vec::new();
+    for path in paths {
+        let from_folder = path.is_dir();
+        for file in files_under(path) {
+            if crate::materials::is_image(&file) {
+                images.push(file);
+            } else if !from_folder || kind_of(&file).is_ok() {
+                others.push(file);
+            }
+        }
+    }
+    let (sets, loose) = crate::materials::texture_sets(&images);
+    let mut built = Vec::new();
+    for set in &sets {
+        match crate::materials::build(&root, set) {
+            Ok(b) => {
+                let source = set
+                    .maps
+                    .values()
+                    .next()
+                    .and_then(|p| p.parent())
+                    .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()))
+                    .unwrap_or_default();
+                let settings = ImportSettings {
+                    source: source.to_string_lossy().into_owned(),
+                    kind: "material".into(),
+                    summary: b.summary.clone(),
+                    ..Default::default()
+                };
+                save_settings(&root, &b.key, &settings).ok();
+                editor.info(
+                    t,
+                    format!(
+                        "Material {} from {} maps: {}",
+                        crate::materials::display_name(&b.key),
+                        set.maps.len(),
+                        b.summary
+                    ),
+                );
+                built.push(b.key);
+            }
+            Err(e) => editor.error(t, format!("Could not make material {}: {e}", set.name)),
+        }
+    }
+    if !built.is_empty() {
+        editor.models = None;
+    }
+    if let ([key], Some(target)) = (built.as_slice(), onto) {
+        crate::materials::apply(world, editor, key, &[target]);
+    }
     let base = at.unwrap_or_else(|| crate::editor::placement_point(world, editor));
-    for (i, path) in drops.iter().enumerate() {
+    for (i, path) in loose.iter().chain(&others).enumerate() {
         import_and_place(world, editor, path, Some(base + DVec3::X * 2.0 * i as f64));
     }
 }
 
 /// Import `source` and, for a model, place it at `at` (default: where the view is looking).
 pub fn import_and_place(world: &mut World, editor: &mut Editor, source: &Path, at: Option<DVec3>) {
+    if source.is_dir() {
+        import_paths(world, editor, &[source.to_path_buf()], at, None);
+        return;
+    }
     let t = now(world);
     let Some(root) = world.get_resource::<AssetServer>().map(|s| s.root()) else {
         return;

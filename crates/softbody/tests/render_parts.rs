@@ -100,6 +100,13 @@ fn far_cloth_steps_every_fourth_fixed_step_and_is_drawn_moving_across_them() {
         focus.points.clear();
         focus.points.push(DVec3::new(100.0, 1.7, 0.0));
     });
+    // A light breeze: enough to keep the banner moving (awake), too little for a far flag to
+    // record and loop its flapping instead of stepping (`sway::MIN_WIND`).
+    {
+        let mut weather = app.world.resource_mut::<engine_world::WeatherState>();
+        weather.wind = Vec3::new(0.4, 0.0, 0.0);
+        weather.gustiness = 0.0;
+    }
     app.update_n(12);
     let name = |n: &Name| n.as_str() == "Sun banner";
     let mut q = app.world.query::<(&Name, &SoftBodySim)>();

@@ -31,6 +31,8 @@ static TOTALS: OnceLock<Mutex<HashMap<String, Stat>>> = OnceLock::new();
 const REPORT_SECS: f64 = 5.0;
 /// Systems listed per report.
 const TOP_SYSTEMS: usize = 40;
+/// Rows of the "ran alone" list per report.
+const ALONE_ROWS: usize = 20;
 
 #[derive(Clone, Copy, Default)]
 struct Stat {
@@ -171,6 +173,55 @@ fn timed(meta: &tracing::Metadata<'_>) -> bool {
 
 /// Keys of module spans, which run inside systems and so are not added to the busy time.
 const INNER: &str = "  in ";
+/// Keys of the time a system ran with no other system running at the same moment: the serial
+/// part of the frame, where the other cores waited (Amdahl's law).
+const ALONE: &str = "  alone ";
+/// Key of the time no system ran at all (executor hand-offs, frame pacing, work outside systems).
+const IDLE: &str = "  idle";
+
+/// Systems running right now, across threads, to file the time each one ran alone.
+struct Running {
+    keys: Vec<String>,
+    /// When the set last changed.
+    since: Instant,
+}
+
+fn running() -> &'static Mutex<Running> {
+    static RUNNING: OnceLock<Mutex<Running>> = OnceLock::new();
+    RUNNING.get_or_init(|| {
+        Mutex::new(Running {
+            keys: Vec::new(),
+            since: Instant::now(),
+        })
+    })
+}
+
+/// A system span's key (not a schedule's or a module's span inside a system).
+fn is_system(key: &str) -> bool {
+    !key.starts_with(INNER) && !key.starts_with("schedule ")
+}
+
+/// A system span `key` starts (`enter`) or ends: file the time since the running set last
+/// changed as one system's time alone, or as idle, then update the set.
+fn system_moved(key: &str, enter: bool, now: Instant) {
+    let mut run = running().lock();
+    let span = now.saturating_duration_since(run.since);
+    let credit = match run.keys.as_slice() {
+        [] => Some(IDLE.to_string()),
+        [only] => Some(format!("{ALONE}{only}")),
+        _ => None,
+    };
+    if let Some(credit) = credit {
+        let mut totals = totals().lock();
+        totals.entry(credit).or_default().total += span;
+    }
+    if enter {
+        run.keys.push(key.to_string());
+    } else if let Some(i) = run.keys.iter().rposition(|k| k == key) {
+        run.keys.swap_remove(i);
+    }
+    run.since = now;
+}
 
 /// Per-layer filter: only the timed spans, and only while profiling.
 pub(crate) struct ProfileFilter;
@@ -245,6 +296,9 @@ where
             let mut ext = span.extensions_mut();
             if let Some(Key(key)) = ext.get_mut::<Key>() {
                 let key = key.clone();
+                if is_system(&key) {
+                    system_moved(&key, true, now);
+                }
                 OPEN.with(|open| open.lock().push((key, now)));
             }
             ext.replace(Entered(now));
@@ -269,6 +323,9 @@ where
                 open.remove(i);
             }
         });
+        if is_system(key) {
+            system_moved(key, false, start + elapsed);
+        }
         let mut totals = totals().lock();
         let stat = match totals.get_mut(key.as_str()) {
             Some(stat) => stat,
@@ -387,7 +444,7 @@ fn make_snapshot(stats: &HashMap<String, Stat>, frames: u64, wall: Duration) -> 
     for (key, stat) in stats {
         if let Some(name) = key.strip_prefix("schedule ") {
             schedules.push((name.to_string(), per_frame(stat.total)));
-        } else if !key.starts_with(INNER) {
+        } else if is_system(key) && !key.starts_with(ALONE) && key != IDLE {
             busy += stat.total;
             systems.push((key.clone(), per_frame(stat.total)));
         }
@@ -430,8 +487,15 @@ fn format_report(
     schedules.sort_by_key(|a| std::cmp::Reverse(a.1.total));
     let mut systems: Vec<_> = stats
         .iter()
-        .filter(|(k, _)| !k.starts_with("schedule ") && !k.starts_with(INNER))
+        .filter(|(k, _)| is_system(k) && !k.starts_with(ALONE) && k.as_str() != IDLE)
         .collect();
+    let mut alone: Vec<_> = stats
+        .iter()
+        .filter_map(|(k, s)| k.strip_prefix(ALONE).map(|name| (name, s.total)))
+        .collect();
+    alone.sort_by_key(|a| std::cmp::Reverse(a.1));
+    let alone_ms = ms(alone.iter().map(|(_, d)| *d).sum()) / frames;
+    let idle_ms = stats.get(IDLE).map_or(0.0, |s| ms(s.total) / frames);
     let mut inner: Vec<_> = stats.iter().filter(|(k, _)| k.starts_with(INNER)).collect();
     inner.sort_by_key(|a| std::cmp::Reverse(a.1.total));
     systems.sort_by_key(|a| std::cmp::Reverse(a.1.total));
@@ -442,6 +506,12 @@ fn format_report(
         out,
         "systems busy {busy_ms:.1} ms per frame: {:.2} of {threads} cores on average",
         busy_ms / frame_ms.max(1e-6),
+    );
+    let _ = writeln!(
+        out,
+        "one system at a time {alone_ms:.1} ms per frame, no system {idle_ms:.1} ms, \
+         several at once {:.1} ms",
+        (frame_ms - alone_ms - idle_ms).max(0.0),
     );
 
     let _ = writeln!(out, "\nschedule                       ms/frame  runs/frame");
@@ -468,6 +538,20 @@ fn format_report(
             ms(s.max),
             s.calls as f64 / frames,
         );
+    }
+    if !alone.is_empty() {
+        let _ = writeln!(
+            out,
+            "\nran alone (nothing else running)                                  ms/frame"
+        );
+        for (name, total) in alone.iter().take(ALONE_ROWS) {
+            let _ = writeln!(
+                out,
+                "{:<64} {:>9.2}",
+                truncate(name, 64),
+                ms(*total) / frames
+            );
+        }
     }
     if !inner.is_empty() {
         let _ = writeln!(
@@ -537,6 +621,58 @@ mod tests {
         );
         // Exited spans leave the thread's list.
         assert!(!hang_report(0, Duration::ZERO).contains("wait for slot"));
+    }
+
+    #[test]
+    fn systems_running_alone_are_told_apart_from_systems_running_together() {
+        use std::sync::Barrier;
+        use tracing_subscriber::layer::SubscriberExt;
+        fn system(name: &str, hold: impl FnOnce()) {
+            let subscriber = tracing_subscriber::registry().with(ProfileLayer);
+            tracing::subscriber::with_default(subscriber, || {
+                let _span =
+                    tracing::info_span!(target: "bevy_ecs::system", "system", name).entered();
+                hold();
+            });
+        }
+        let pause = Duration::from_millis(60);
+        system("alone_test::serial", || std::thread::sleep(pause));
+        let both_in = Arc::new(Barrier::new(2));
+        let both_done = Arc::new(Barrier::new(2));
+        let workers: Vec<_> = ["alone_test::left", "alone_test::right"]
+            .into_iter()
+            .map(|name| {
+                let (both_in, both_done) = (both_in.clone(), both_done.clone());
+                std::thread::spawn(move || {
+                    system(name, || {
+                        both_in.wait();
+                        std::thread::sleep(pause);
+                        both_done.wait();
+                    })
+                })
+            })
+            .collect();
+        for w in workers {
+            w.join().unwrap();
+        }
+        let totals = totals().lock();
+        let alone = |name: &str| {
+            totals
+                .get(&format!("{ALONE}{name}"))
+                .map_or(Duration::ZERO, |s| s.total)
+        };
+        assert!(
+            alone("alone_test::serial") >= pause,
+            "{:?}",
+            alone("alone_test::serial")
+        );
+        let together = alone("alone_test::left") + alone("alone_test::right");
+        assert!(
+            together < pause / 2,
+            "left and right ran alone {together:?}"
+        );
+        // Both still count as busy systems.
+        assert!(totals["alone_test::left"].total >= pause);
     }
 
     #[test]
@@ -617,5 +753,34 @@ mod tests {
         assert!(report.contains("8.00"), "{report}");
         assert!(report.contains("systems busy 8.0 ms"), "{report}");
         assert!(report.contains("engine_render: shadow pass"), "{report}");
+    }
+
+    #[test]
+    fn report_splits_the_frame_into_serial_idle_and_parallel_time() {
+        let mut stats = HashMap::new();
+        for (key, ms) in [
+            ("game::slow".to_string(), 80),
+            (format!("{ALONE}game::slow"), 50),
+            (IDLE.to_string(), 10),
+        ] {
+            stats.insert(
+                key,
+                Stat {
+                    total: Duration::from_millis(ms),
+                    calls: 10,
+                    max: Duration::from_millis(9),
+                },
+            );
+        }
+        let report = format_report(&stats, 10, Duration::from_secs(1), Duration::ZERO);
+        assert!(
+            report.contains(
+                "one system at a time 5.0 ms per frame, no system 1.0 ms, several at once 94.0 ms"
+            ),
+            "{report}"
+        );
+        assert!(report.contains("ran alone"), "{report}");
+        // Alone and idle time is not counted again as busy.
+        assert!(report.contains("systems busy 8.0 ms"), "{report}");
     }
 }
