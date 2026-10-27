@@ -812,7 +812,7 @@ impl PerfLog {
         let mut section = |title: &str, sums: &HashMap<Label, f32>, frames: u32| {
             let mut rows: Vec<_> = sums.iter().collect();
             rows.sort_by(|a, b| b.1.total_cmp(a.1));
-            let total: f32 = sums.values().sum();
+            let total = total_of_parts(sums);
             let frames = frames.max(1) as f32;
             let _ = writeln!(out, "{title:<40} {:>8.2} ms/frame", total / frames);
             for (name, ms) in rows {
@@ -975,9 +975,36 @@ fn truncate(s: &str, n: usize) -> &str {
     }
 }
 
+/// The sum of the times, a pass with parts ("scene" and its "scene: meshes", …) counted once,
+/// as its parts.
+fn total_of_parts(sums: &HashMap<Label, f32>) -> f32 {
+    sums.iter()
+        .filter(|(name, _)| {
+            let parent = format!("{name}: ");
+            !sums.keys().any(|other| other.starts_with(parent.as_str()))
+        })
+        .map(|(_, ms)| ms)
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pass_and_its_parts_count_once_in_the_total() {
+        let sums: HashMap<Label, f32> = [
+            ("scene", 27.0),
+            ("scene: meshes", 24.0),
+            ("scene: terrain", 2.5),
+            ("prepass", 2.6),
+            ("scenery", 0.5),
+        ]
+        .into_iter()
+        .map(|(n, ms)| (Label::from(n), ms))
+        .collect();
+        assert!((total_of_parts(&sums) - 29.6).abs() < 1e-4);
+    }
 
     #[test]
     fn slow_frames_name_their_slowest_steps() {
