@@ -164,6 +164,9 @@ pub fn reimport(world: &mut World, editor: &mut Editor, key: &str) {
     if let Some(mut thumbs) = world.get_resource_mut::<crate::thumbs::Thumbs>() {
         thumbs.forget(key);
     }
+    if let Some(mut fitted) = world.get_resource_mut::<crate::collision::Fitted>() {
+        fitted.forget(key);
+    }
     let mut q = world.query_filtered::<(Entity, &Model), With<InScene>>();
     let copies: Vec<Entity> = q
         .iter(world)
@@ -283,11 +286,23 @@ pub fn watch_files(world: &mut World) {
     });
 }
 
-/// A box collider shape around the model (in its root's space), offset to its middle.
-pub fn fitted_collider(world: &mut World, root: Entity) -> Option<ColliderShape> {
+/// A collider shape fitted to a placed model (in its root's space), the way its import
+/// settings ask ([`crate::collision`]): collision meshes in the file, a convex hull, convex
+/// parts or its triangles, else a box around it. A `dynamic` body gets convex parts instead
+/// of triangles.
+pub fn fitted_collider(world: &mut World, root: Entity, dynamic: bool) -> Option<ColliderShape> {
     let key = world.get::<Model>(root)?.path.clone();
-    if crate::import::settings_for(&asset_root(world), &key).is_some_and(|s| s.collider == "none") {
+    let mut kind = crate::import::settings_for(&asset_root(world), &key)
+        .map(|s| s.collider)
+        .unwrap_or_else(|| "box".into());
+    if kind == "none" {
         return None;
+    }
+    if dynamic && kind == "mesh" {
+        kind = "convex parts".into();
+    }
+    if let Some(shape) = crate::collision::fit(world, root, &key, &kind) {
+        return Some(shape);
     }
     let (low, high) = bounds(world, &key).ok()??;
     let half = ((high - low) * 0.5).as_vec3().max(Vec3::splat(0.01));
@@ -333,6 +348,7 @@ fn spawn(
         let scene = load(world, key)?;
         let entity = engine::render::spawn_gltf_scene(world, scene, transform)?;
         scale_nodes(world, entity, scale);
+        crate::collision::hide_collision_meshes(world, entity);
         entity
     };
     crate::remap::apply(world, key, rigged);

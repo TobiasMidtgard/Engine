@@ -994,6 +994,7 @@ dependencies = [
  "glam 0.33.12",
  "gltf",
  "image",
+ "rapier3d",
  "serde",
  "serde_json",
  "transform-gizmo-egui",

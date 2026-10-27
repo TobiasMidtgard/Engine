@@ -227,7 +227,7 @@ fn quick_actions(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, enti
 }
 
 /// Add a body and a box collider fitted to the entity's mesh bounds.
-fn add_physics(world: &mut World, editor: &mut Editor, entity: Entity, dynamic: bool) {
+pub fn add_physics(world: &mut World, editor: &mut Editor, entity: Entity, dynamic: bool) {
     let mesh = world
         .get::<engine::render::ResolvedMesh>(entity)
         .and_then(|r| world.resource::<Assets<engine::render::Mesh>>().get(r.mesh))
@@ -236,8 +236,13 @@ fn add_physics(world: &mut World, editor: &mut Editor, entity: Entity, dynamic: 
         .map(|a| (a.max - a.min) * 0.5)
         .unwrap_or(Vec3::splat(0.5));
     let mut collider = engine::world::physics::Collider::cuboid(half);
-    // A placed model: a box around all of its meshes.
-    if let Some(shape) = crate::models::fitted_collider(world, entity) {
+    // A placed model: the shape its import settings ask for.
+    if let Some(shape) = crate::models::fitted_collider(world, entity, dynamic) {
+        let t = editor::now(world);
+        editor.info(
+            t,
+            format!("Collider: {}", crate::collision::describe(&shape)),
+        );
         collider.shape = shape;
     }
     let body = if dynamic {

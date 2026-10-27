@@ -1028,6 +1028,95 @@ pub fn round12(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Where round 13's wells stand: a box collider, convex parts.
+const BOX_WELL: DVec3 = DVec3::new(2.4, 0.0, 2.2);
+const PARTS_WELL: DVec3 = DVec3::new(-1.2, 0.0, 2.6);
+
+/// Round 13: colliders that fit a model. Two copies of round 12's well (`ROUND12_MODEL`),
+/// one made solid with a box, one with convex parts; balls dropped into each in play.
+pub fn round13(dir: impl Into<PathBuf>) -> ShotScript {
+    fn well(world: &mut World, editor: &mut Editor, kind: &str, at: DVec3, name: &'static str) {
+        let mut settings = well_settings(world);
+        settings.collider = kind.into();
+        let root = world
+            .get_resource::<engine::assets::AssetServer>()
+            .map(|s| s.root())
+            .unwrap_or_default();
+        crate::import::save_settings(&root, WELL, &settings).ok();
+        if let Some(e) = crate::models::place(world, editor, WELL, at) {
+            world.entity_mut(e).insert(Name::new(name));
+            crate::inspector::add_physics(world, editor, e, false);
+        }
+    }
+    fn balls(world: &mut World, editor: &mut Editor, at: DVec3) {
+        let sphere = editor::shape_presets()
+            .into_iter()
+            .find(|(name, _)| *name == "Sphere");
+        for (i, (dx, dz)) in [(-0.3, -0.15), (0.25, 0.2), (0.0, 0.35), (-0.2, 0.3)]
+            .into_iter()
+            .enumerate()
+        {
+            let Some((name, shape)) = sphere else {
+                return;
+            };
+            let p = at + DVec3::new(dx, 1.35 + 0.25 * i as f64, dz);
+            let e = editor::create(world, editor, Create::Shape(name, shape), p);
+            if let Some(mut t) = world.get_mut::<Transform>(e) {
+                t.translation = p;
+                t.scale = Vec3::splat(0.26);
+            }
+            world.entity_mut(e).insert((
+                engine::world::physics::RigidBody::dynamic(),
+                engine::world::physics::Collider::sphere(0.5),
+            ));
+        }
+    }
+    let steps = vec![
+        Step::Camera(DVec3::new(0.7, 4.2, 8.6), DVec3::new(0.6, 0.9, 2.3)),
+        Step::Select(""),
+        Step::Do(Box::new(|world, editor| {
+            let folder = PathBuf::from(std::env::var("ROUND12_MODEL").unwrap_or_default());
+            crate::import::import_file(
+                &world
+                    .get_resource::<engine::assets::AssetServer>()
+                    .map(|s| s.root())
+                    .unwrap_or_default(),
+                &folder.join("StoneWell.fbx"),
+            )
+            .ok();
+            well(world, editor, "box", BOX_WELL, "Well (box)");
+            well(
+                world,
+                editor,
+                "convex parts",
+                PARTS_WELL,
+                "Well (convex parts)",
+            );
+            balls(world, editor, BOX_WELL);
+            balls(world, editor, PARTS_WELL);
+            editor.selection = ["Well (box)", "Well (convex parts)"]
+                .into_iter()
+                .filter_map(|n| find(world, n))
+                .collect();
+        })),
+        Step::Tab(Tab::Console),
+        Step::Wait(60),
+        Step::Shot("57_box_and_convex_parts"),
+        Step::Do(Box::new(editor::play)),
+        Step::Wait(120),
+        Step::Shot("58_balls_dropped_in"),
+        Step::Do(Box::new(editor::stop)),
+        Step::Select("Well (convex parts)"),
+        Step::Camera(
+            DVec3::new(-0.6, 2.6, 4.9),
+            PARTS_WELL + DVec3::new(0.0, 0.7, 0.0),
+        ),
+        Step::Wait(40),
+        Step::Shot("59_convex_parts_close"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {

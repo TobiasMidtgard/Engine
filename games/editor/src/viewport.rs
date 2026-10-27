@@ -435,10 +435,11 @@ pub fn entities_in_box(world: &mut World, view: &ViewInfo, area: egui::Rect) -> 
     found
 }
 
-/// Light helpers for the selection: a point light's range, a sun's direction. Meshes get their
+/// Helpers for the selection: colliders, a point light's range, a sun's direction. Meshes get their
 /// silhouette outlined by [`crate::outline`].
 fn draw_selection(world: &mut World, editor: &Editor) {
     for &e in &editor.selection {
+        crate::collision::draw(world, e);
         let Some(&global) = world.get::<GlobalTransform>(e) else {
             continue;
         };
