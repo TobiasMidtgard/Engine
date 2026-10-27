@@ -52,6 +52,7 @@ impl Plugin for SoftBodyPlugin {
             .init_resource::<systems::ColliderWorld>()
             .init_resource::<systems::LoadList>()
             .init_resource::<systems::SlowestBody>()
+            .init_resource::<systems::BesidePhysics>()
             .init_resource::<gpu_cloth::GpuClothShift>()
             .register_resource::<SoftBodyConfig>(
                 "Soft-body quality: enabled, lod_distance and freeze_distance (m from the focus), quality (substep multiplier).",
@@ -93,6 +94,11 @@ impl Plugin for SoftBodyPlugin {
                     )
                         .in_set(SoftBodySet::Prepare),
                     systems::step_bodies.in_set(SoftBodySet::Step),
+                    systems::snapshot_frames
+                        .after(SimSet::Gameplay)
+                        .before(SimSet::Physics)
+                        .before(SimSet::DuringPhysics),
+                    systems::step_beside_physics.in_set(SimSet::DuringPhysics),
                     (
                         systems::emit_outputs,
                         systems::drive_planks,

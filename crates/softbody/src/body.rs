@@ -148,6 +148,10 @@ pub struct SoftBodySim {
     pub(crate) parts: StepParts,
     /// Far from the camera, a flag learning its sway or swaying instead of being simulated.
     pub(crate) far: Option<crate::sway::FarSway>,
+    /// Steps beside the physics step (none of its frames ride it), from `snapshot`: where
+    /// its frames were before it (see `systems::snapshot_frames`).
+    pub(crate) overlaps: bool,
+    pub(crate) snapshot: Vec<Option<(DVec3, Quat)>>,
     /// Time its last step spent asking the world (ground, water, wind, colliders near it), ms.
     pub env_ms: f32,
     pub(crate) sleep_wind: Vec3,
@@ -179,6 +183,12 @@ impl SoftBodySim {
     /// Resting, unstepped until something moves it (PhysX's and Unity's cloth sleep).
     pub fn asleep(&self) -> bool {
         self.calm >= crate::systems::SLEEP_STEPS
+    }
+
+    /// Whether it steps beside the physics step (`SimSet::DuringPhysics`) rather than after
+    /// it: none of its frames ride a moving rigid body or a character controller.
+    pub fn steps_beside_physics(&self) -> bool {
+        self.overlaps
     }
 
     /// Far off and swaying in the wind instead of being simulated (see [`crate::sway`]).
@@ -245,6 +255,8 @@ impl SoftBodySim {
             calm: 0,
             parts: StepParts::default(),
             far: None,
+            overlaps: false,
+            snapshot: Vec::new(),
             env_ms: 0.0,
             sleep_wind: Vec3::ZERO,
             sleep_topology: 0,

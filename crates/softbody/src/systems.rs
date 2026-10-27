@@ -37,8 +37,10 @@ pub struct SoftBodyFailed(pub String);
 /// Results of the last step, sent to the world by [`emit_outputs`].
 #[derive(Debug, Clone, Default)]
 pub struct StepOutput {
-    /// Reaction impulses per world collider index.
-    pub impulses: Vec<(u32, ColliderImpulse)>,
+    /// Reaction impulses on the rigid bodies of the colliders it touched (body, linear and
+    /// angular about its center of mass), worked out against the colliders it stepped
+    /// with: a body stepped beside the physics step used the last step's.
+    pub impulses: Vec<(Entity, Vec3, Vec3)>,
     /// Reaction impulses on entities that rope ends are tied to (entity, impulse, frame
     /// position).
     pub pulls: Vec<(Entity, ColliderImpulse, DVec3)>,
@@ -255,6 +257,10 @@ fn shape_reach(shape: &ColliderShape) -> f32 {
     }
 }
 
+/// Colliders are gathered for bodies that may wake within this many meters of the focus
+/// moving: a body stepped beside the physics step uses the colliders gathered the step
+/// before, so it has them on the step it wakes.
+const WAKE_MARGIN: f64 = 5.0;
 /// How far a collider can have moved since last frame's transform, m (a car at 300 km/h
 /// moves 1.4 m a frame at 60 Hz).
 const STALE_SLACK: f64 = 2.0;
@@ -295,7 +301,7 @@ pub fn gather_colliders(
     let range = range.map_or_else(SimulationRange::default, |r| *r);
     let near_bodies: Vec<(DVec3, f64)> = bodies
         .iter()
-        .filter(|b| !b.frozen || !rests(b, &focus, &range, &config))
+        .filter(|b| !b.frozen || !rests(b, &focus, &range, &config, WAKE_MARGIN))
         .map(|b| (b.center, b.radius as f64 + BAKE_REACH))
         .collect();
     // Their bounds, to pass over the world's far colliders at a glance.
@@ -842,19 +848,29 @@ struct StepContext<'a, 'w, 's> {
     config: &'a SoftBodyConfig,
     colliders: &'a ColliderWorld,
     env: &'a Env<'w>,
-    transforms: &'a Query<
-        'w,
-        's,
-        (
-            &'static GlobalTransform,
-            Option<&'static Transform>,
-            Option<&'static ChildOf>,
-        ),
-    >,
-    poses: &'a Query<'w, 's, &'static SkeletonPose>,
+    /// Where frames are now; `None` beside the physics step, which reads each body's
+    /// `snapshot` instead.
+    live: Option<LiveFrames<'a, 'w, 's>>,
     scales: &'a Query<'w, 's, &'static LocalTimeScale>,
     loads: &'a [(DVec3, f32, Option<Entity>)],
     range: SimulationRange,
+}
+
+type TransformQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static GlobalTransform,
+        Option<&'static Transform>,
+        Option<&'static ChildOf>,
+    ),
+>;
+
+/// The transforms and skeletons frames follow.
+#[derive(Clone, Copy)]
+struct LiveFrames<'a, 'w, 's> {
+    transforms: &'a TransformQuery<'w, 's>,
+    poses: &'a Query<'w, 's, &'static SkeletonPose>,
 }
 
 /// A step slower than this logs which body held it up, ms.
@@ -886,7 +902,144 @@ const HOLD_FOR_BAKE_SECS: f32 = 5.0;
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct SlowestBody(pub Option<(Entity, f64)>);
 
-/// Step every soft body (in parallel).
+/// How the bodies stepped beside the physics step went: wall and busy time (ms) and the
+/// slowest, for the diagnostics [`step_bodies`] writes.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct BesidePhysics {
+    wall: f64,
+    busy: f64,
+    slowest: Option<(Entity, f64)>,
+}
+
+/// `FixedUpdate`, after `Gameplay` and before `Physics`: which bodies step beside the
+/// physics step ([`step_beside_physics`], in `SimSet::DuringPhysics`), and where their frames
+/// are for it. A body rides the physics step when a frame follows a moving rigid body or a
+/// character controller (or something on one): a sail on its boat, a cape on the player.
+/// Those step after it, in [`step_bodies`]; the rest (curtains, flags, the statue's sheet,
+/// hair on animated skeletons) take their frames from here and last step's colliders, as
+/// Chaos Cloth steps on the previous frame's transforms beside the physics.
+#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
+pub fn snapshot_frames(
+    config: Res<SoftBodyConfig>,
+    focus: Res<FocusPoints>,
+    range: Option<Res<SimulationRange>>,
+    mut bodies: Query<&mut SoftBodySim>,
+    transforms: TransformQuery,
+    poses: Query<&'static SkeletonPose>,
+    movers: Query<(Option<&RigidBody>, Has<CharacterController>)>,
+    mut physical: Local<HashMap<Entity, bool>>,
+) {
+    let range = range.map_or_else(SimulationRange::default, |r| *r);
+    let live = LiveFrames {
+        transforms: &transforms,
+        poses: &poses,
+    };
+    physical.clear();
+    let mut rides = |e: Entity| {
+        *physical.entry(e).or_insert_with(|| {
+            let mut cursor = Some(e);
+            for _ in 0..8 {
+                let Some(c) = cursor else { break };
+                if let Ok((rigid, controller)) = movers.get(c)
+                    && (controller || rigid.is_some_and(|r| r.kind != BodyKind::Static))
+                {
+                    return true;
+                }
+                cursor = transforms.get(c).ok().and_then(|(_, _, p)| p.map(|p| p.0));
+            }
+            false
+        })
+    };
+    for mut b in &mut bodies {
+        let b = &mut *b;
+        b.overlaps = config.enabled
+            && b.bridge.is_none()
+            && !b.frames.iter().any(|f| match *f {
+                FrameSource::World => false,
+                FrameSource::Entity(e) => rides(e),
+                FrameSource::Bone { owner, .. } => rides(owner),
+                FrameSource::Blend(blend) => rides(blend.owner),
+            });
+        b.snapshot.clear();
+        // Only what its step reads: frames a body at rest doesn't follow (hair rides them).
+        if b.overlaps && (b.strands.is_some() || !rests(b, &focus, &range, &config, 0.0)) {
+            b.snapshot
+                .extend(b.frames.iter().map(|f| frame_world(f, live)));
+        }
+    }
+}
+
+/// `SimSet::DuringPhysics`: step the bodies [`snapshot_frames`] found don't ride the physics
+/// step, at the same time as it. Reads no transforms, poses or physics: their frames from the
+/// snapshot, last step's colliders and loads.
+#[allow(clippy::too_many_arguments)]
+pub fn step_beside_physics(
+    time: Res<Time>,
+    config: Res<SoftBodyConfig>,
+    colliders: Res<ColliderWorld>,
+    loads: Res<LoadList>,
+    env: Env,
+    scales: Query<&'static LocalTimeScale>,
+    mut bodies: Query<(Entity, &mut SoftBodySim)>,
+    mut stats: ResMut<BesidePhysics>,
+    range: Option<Res<SimulationRange>>,
+) {
+    *stats = BesidePhysics::default();
+    if !config.enabled {
+        return;
+    }
+    let ctx = StepContext {
+        time: &time,
+        config: &config,
+        colliders: &colliders,
+        env: &env,
+        live: None,
+        scales: &scales,
+        loads: &loads.0,
+        range: range.map_or_else(SimulationRange::default, |r| *r),
+    };
+    let start = Instant::now();
+    let took = step_all(bodies.iter_mut().filter(|(_, b)| b.overlaps), &ctx);
+    stats.wall = start.elapsed().as_secs_f64() * 1000.0;
+    stats.busy = took.iter().map(|(_, ms)| ms).sum();
+    stats.slowest = took.into_iter().max_by(|a, b| a.1.total_cmp(&b.1));
+}
+
+/// Step `bodies`, longest first, each its own task (the pool takes them in order), so the
+/// costly bodies start at once and the cheap ones fill in around them: the step takes about
+/// as long as its slowest body, not two costly ones queued on one thread. How long each took,
+/// ms.
+fn step_all<'b>(
+    bodies: impl Iterator<Item = (Entity, Mut<'b, SoftBodySim>)>,
+    ctx: &StepContext,
+) -> Vec<(Entity, f64)> {
+    let mut order: Vec<(Entity, Mut<SoftBodySim>)> = bodies.collect();
+    order.sort_by(|(_, a), (_, b)| b.step_ms.total_cmp(&a.step_ms));
+    let timed = |e: Entity, body: &mut SoftBodySim, ctx: &StepContext| {
+        let t = Instant::now();
+        step_one(e, body, ctx);
+        (e, t.elapsed().as_secs_f64() * 1000.0)
+    };
+    match ComputeTaskPool::try_get() {
+        Some(pool) if order.len() > 1 && pool.thread_num() > 1 => {
+            let timed = &timed;
+            pool.scope(|scope| {
+                for (e, body) in &mut order {
+                    let e = *e;
+                    scope.spawn(async move { timed(e, body, ctx) });
+                }
+            })
+        }
+        _ => order
+            .iter_mut()
+            .map(|(e, body)| timed(*e, body, ctx))
+            .collect(),
+    }
+}
+
+/// Step the soft bodies that ride the physics step (in parallel), after it, and write the
+/// diagnostics of all of them.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn step_bodies(
     time: Res<Time>,
@@ -894,17 +1047,16 @@ pub fn step_bodies(
     colliders: Res<ColliderWorld>,
     loads: Res<LoadList>,
     env: Env,
-    transforms: Query<(
-        &'static GlobalTransform,
-        Option<&'static Transform>,
-        Option<&'static ChildOf>,
-    )>,
+    transforms: TransformQuery,
     poses: Query<&'static SkeletonPose>,
     scales: Query<&'static LocalTimeScale>,
     mut bodies: Query<(Entity, &mut SoftBodySim)>,
     names: Query<&Name>,
-    mut diagnostics: ResMut<Diagnostics>,
-    mut slowest_body: ResMut<SlowestBody>,
+    (mut diagnostics, mut slowest_body, beside): (
+        ResMut<Diagnostics>,
+        ResMut<SlowestBody>,
+        Res<BesidePhysics>,
+    ),
     range: Option<Res<SimulationRange>>,
 ) {
     if !config.enabled {
@@ -920,44 +1072,25 @@ pub fn step_bodies(
         config: &config,
         colliders: &colliders,
         env: &env,
-        transforms: &transforms,
-        poses: &poses,
+        live: Some(LiveFrames {
+            transforms: &transforms,
+            poses: &poses,
+        }),
         scales: &scales,
         loads: &loads.0,
         range: range.map_or_else(SimulationRange::default, |r| *r),
     };
     let start = Instant::now();
-    // Longest first, each body its own task (the pool takes them in order), so the costly
-    // bodies start at once and the cheap ones fill in around them: the step takes about as
-    // long as its slowest body, not two costly ones queued on one thread.
-    let mut order: Vec<(Entity, Mut<SoftBodySim>)> = bodies.iter_mut().collect();
-    order.sort_by(|(_, a), (_, b)| b.step_ms.total_cmp(&a.step_ms));
-    let timed = |e: Entity, body: &mut SoftBodySim, ctx: &StepContext| {
-        let t = Instant::now();
-        step_one(e, body, ctx);
-        (e, t.elapsed().as_secs_f64() * 1000.0)
-    };
-    let took: Vec<(Entity, f64)> = match ComputeTaskPool::try_get() {
-        Some(pool) if order.len() > 1 && pool.thread_num() > 1 => {
-            let (ctx, timed) = (&ctx, &timed);
-            pool.scope(|scope| {
-                for (e, body) in &mut order {
-                    let e = *e;
-                    scope.spawn(async move { timed(e, body, ctx) });
-                }
-            })
-        }
-        _ => order
-            .iter_mut()
-            .map(|(e, body)| timed(*e, body, &ctx))
-            .collect(),
-    };
-    drop(order);
+    let took = step_all(bodies.iter_mut().filter(|(_, b)| !b.overlaps), &ctx);
     // How much work the step was against how long it took (their ratio is how many threads
-    // it kept busy), and the body that held it up longest.
-    let wall = start.elapsed().as_secs_f64() * 1000.0;
-    let busy: f64 = took.iter().map(|(_, ms)| ms).sum();
-    let slowest = took.iter().copied().max_by(|a, b| a.1.total_cmp(&b.1));
+    // it kept busy), and the body that held it up longest, beside the physics step or after.
+    let wall = start.elapsed().as_secs_f64() * 1000.0 + beside.wall;
+    let busy: f64 = took.iter().map(|(_, ms)| ms).sum::<f64>() + beside.busy;
+    let slowest = took
+        .iter()
+        .copied()
+        .chain(beside.slowest)
+        .max_by(|a, b| a.1.total_cmp(&b.1));
     diagnostics.set("softbody.busy_ms", busy);
     diagnostics.set("softbody.slowest_ms", slowest.map_or(0.0, |s| s.1));
     slowest_body.0 = slowest;
@@ -974,7 +1107,7 @@ pub fn step_bodies(
         let parts = bodies.get(e).map(|(_, b)| b.parts).unwrap_or_default();
         engine_core::log::warn!(
             "softbody step took {wall:.0} ms ({busy:.0} ms of work over {} bodies); slowest: {name} {ms:.0} ms (asking the world {:.1}, water {:.1}, solving {:.1} with {} settling steps, fire and tearing {:.1})",
-            took.len(),
+            bodies.iter().filter(|(_, b)| b.steps > 0).count(),
             parts.env_ms,
             parts.water_ms,
             parts.solve_ms,
@@ -1021,22 +1154,31 @@ fn frame_poses(b: &SoftBodySim, ctx: &StepContext) -> Vec<Option<(Vec3, Quat)>> 
     let origin = b.sim.origin;
     b.frames
         .iter()
-        .map(|src| {
-            let pose = match *src {
-                FrameSource::World => None,
-                FrameSource::Entity(e) => {
-                    world_transform(e, ctx.transforms).map(|t| (t.translation(), t.rotation()))
-                }
-                FrameSource::Bone { owner, bone } => world_transform(owner, ctx.transforms)
-                    .zip(ctx.poses.get(owner).ok())
-                    .and_then(|(t, p)| p.bone_world(&t, bone)),
-                FrameSource::Blend(blend) => world_transform(blend.owner, ctx.transforms)
-                    .zip(ctx.poses.get(blend.owner).ok())
-                    .and_then(|(t, p)| blend.world(&t, p)),
+        .enumerate()
+        .map(|(k, src)| {
+            let pose = match ctx.live {
+                Some(live) => frame_world(src, live),
+                None => b.snapshot.get(k).copied().flatten(),
             };
             pose.map(|(p, r)| ((p - origin).as_vec3(), r))
         })
         .collect()
+}
+
+/// Where a frame is in the world now, `None` for the world frame or one whose owner is gone.
+fn frame_world(src: &FrameSource, live: LiveFrames) -> Option<(DVec3, Quat)> {
+    match *src {
+        FrameSource::World => None,
+        FrameSource::Entity(e) => {
+            world_transform(e, live.transforms).map(|t| (t.translation(), t.rotation()))
+        }
+        FrameSource::Bone { owner, bone } => world_transform(owner, live.transforms)
+            .zip(live.poses.get(owner).ok())
+            .and_then(|(t, p)| p.bone_world(&t, bone)),
+        FrameSource::Blend(blend) => world_transform(blend.owner, live.transforms)
+            .zip(live.poses.get(blend.owner).ok())
+            .and_then(|(t, p)| blend.world(&t, p)),
+    }
 }
 
 /// How far a body's surface is from the nearest focus point, m (0 with none).
@@ -1048,18 +1190,20 @@ fn focus_distance(b: &SoftBodySim, focus: &FocusPoints) -> f32 {
     }
 }
 
-/// Whether a body rests (isn't stepped) this step, for how far it is from the focus.
+/// Whether a body rests (isn't stepped) this step, for how far it is from the focus (less
+/// `margin` m: whether it may wake soon).
 fn rests(
     b: &SoftBodySim,
     focus: &FocusPoints,
     range: &SimulationRange,
     config: &SoftBodyConfig,
+    margin: f64,
 ) -> bool {
-    let dist = focus_distance(b, focus);
+    let dist = (focus_distance(b, focus) as f64 - margin).max(0.0) as f32;
     // Beyond the simulation range a body rests in its last pose (waking again a little nearer
     // than it fell asleep, so one at the edge doesn't flicker), and costs nothing.
     let resting = if b.frozen {
-        !range.is_active_sphere(focus, b.center, b.radius as f64)
+        !range.is_active_sphere(focus, b.center, b.radius as f64 + margin)
     } else {
         !focus.points.is_empty() && dist as f64 > range.active_m * (1.0 + range.hysteresis)
     };
@@ -1089,7 +1233,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     let owner = b.time_owner.unwrap_or(entity);
     let mut dt = ctx.time.delta_for(ctx.scales.get(owner).ok());
     let self_colliding = b.sim.params.self_collide > 0.0;
-    if rests(b, focus, &ctx.range, ctx.config) {
+    if rests(b, focus, &ctx.range, ctx.config, 0.0) {
         if !b.frozen {
             b.frozen = true;
             b.sim.step_start.clone_from(&b.sim.pos);
@@ -1451,8 +1595,15 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
 
     // Outputs.
     for (k, imp) in impulses.iter().enumerate() {
-        if imp.linear != Vec3::ZERO {
-            b.out.impulses.push((local[k].id, *imp));
+        if imp.linear == Vec3::ZERO {
+            continue;
+        }
+        let Some(c) = ctx.colliders.list.get(local[k].id as usize) else {
+            continue;
+        };
+        if let Some(target) = c.body {
+            let angular = imp.angular + (c.pos - c.com).as_vec3().cross(imp.linear);
+            b.out.impulses.push((target, imp.linear, angular));
         }
     }
     for (k, imp) in pulls.iter().enumerate() {
@@ -1687,7 +1838,6 @@ fn ground_plane(env: &Env, at: DVec3, origin: DVec3) -> [f32; 4] {
 #[allow(clippy::too_many_arguments)]
 pub fn emit_outputs(
     bodies: Query<(Entity, &SoftBodySim)>,
-    colliders: Res<ColliderWorld>,
     rigid: Query<&RigidBody>,
     parents: Query<&ChildOf>,
     poses: Query<(&GlobalTransform, Option<&Transform>, Option<&ChildOf>)>,
@@ -1710,14 +1860,9 @@ pub fn emit_outputs(
                 source: Some(entity),
             });
         }
-        for (id, imp) in &body.out.impulses {
-            let Some(c) = colliders.list.get(*id as usize) else {
-                continue;
-            };
-            let Some(target) = c.body else { continue };
-            let angular = imp.angular + (c.pos - c.com).as_vec3().cross(imp.linear);
+        for &(target, linear, angular) in &body.out.impulses {
             let s = sums.entry(target).or_default();
-            s.0 += imp.linear;
+            s.0 += linear;
             s.1 += angular;
         }
         for (e, imp, frame_pos) in &body.out.pulls {
