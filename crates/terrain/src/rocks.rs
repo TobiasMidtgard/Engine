@@ -23,8 +23,8 @@ use engine_assets::{Assets, Handle};
 use engine_core::math::{DQuat, DVec3};
 use engine_core::prelude::*;
 use engine_render::{
-    MaterialPreset, MaterialRef, Mesh, MeshRef, MeshRenderer, NoVirtualGeometry, StandardMaterial,
-    Vertex,
+    MaterialPreset, MaterialRef, Mesh, MeshRef, MeshRenderer, NoMeshLod, NoVirtualGeometry,
+    StandardMaterial, Vertex,
 };
 use engine_world::FocusPoints;
 use serde::{Deserialize, Serialize};
@@ -344,6 +344,9 @@ pub fn update_rocks(
                             visible: true,
                         },
                         NoVirtualGeometry,
+                        // The tiers choose stones by distance; the renderer's own
+                        // simplification would drop whole stones near the camera.
+                        NoMeshLod,
                     ))
                     .id(),
             );
@@ -581,25 +584,7 @@ fn rock_shape(variant: u64, detail: u32) -> Mesh {
             Vertex::new(p, n, Vec2::new(p.x + 0.5, p.z + 0.5))
         })
         .collect();
-    let mut indices: Vec<u32> = tris.iter().flatten().map(|&i| i as u32).collect();
-    // The fields choose their stones by distance themselves (the tiers' reach), so the
-    // renderer's own simplification must leave a cell whole: over a cell it collapses small
-    // stones first and drops whole ones near the camera within its pixel of error. It keeps
-    // vertices on edges not shared by exactly two triangles, so every vertex gets one more,
-    // empty, triangle on an edge (nothing is drawn for it).
-    let mut kept = vec![false; positions.len()];
-    for t in &tris {
-        let (a, b) = (t[0], t[1]);
-        if !kept[a] || !kept[b] {
-            indices.extend([a as u32, b as u32, a as u32]);
-            kept[a] = true;
-            kept[b] = true;
-        }
-        if !kept[t[2]] {
-            indices.extend([t[2] as u32, a as u32, t[2] as u32]);
-            kept[t[2]] = true;
-        }
-    }
+    let indices: Vec<u32> = tris.iter().flatten().map(|&i| i as u32).collect();
     Mesh::new(vertices, indices)
 }
 
@@ -684,22 +669,6 @@ mod tests {
                 let p = |i: u32| Vec3::from(m.vertices[i as usize].position);
                 let n = (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0]));
                 assert!(n.dot(p(t[0]) + p(t[1]) + p(t[2])) > -1e-6);
-            }
-            // Every vertex sits on an edge the renderer's simplification leaves alone.
-            let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
-            for t in m.indices.chunks(3) {
-                for k in 0..3 {
-                    let (a, b) = (t[k], t[(k + 1) % 3]);
-                    *edges.entry((a.min(b), a.max(b))).or_default() += 1;
-                }
-            }
-            for v in 0..m.vertices.len() as u32 {
-                assert!(
-                    edges
-                        .iter()
-                        .any(|(&(a, b), &n)| (a == v || b == v) && n != 2),
-                    "vertex {v} can be collapsed"
-                );
             }
         }
     }
