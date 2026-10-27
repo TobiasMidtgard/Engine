@@ -966,6 +966,12 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     } else {
         !focus.points.is_empty() && dist as f64 > range.active_m * (1.0 + range.hysteresis)
     };
+    // A cloth that collides with itself rests from twice the LOD distance (a little nearer
+    // waking): stepped coarsely there it folds through itself and comes back tangled, and
+    // self-collision is most of its cost (the unveiling sheet balled up at the plaza).
+    let self_colliding = b.sim.params.self_collide > 0.0;
+    let far = 2.0 * ctx.config.lod_distance * if b.frozen { 0.9 } else { 1.0 };
+    let resting = resting || (self_colliding && dist > far);
     // One still settling keeps going wherever it is, a budget a frame, so it is ready when
     // it is first seen up close.
     if (resting || dist > ctx.config.freeze_distance) && b.pending_prewarm == 0 {
@@ -977,7 +983,9 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
         }
         return;
     }
-    b.frozen = false;
+    // Waking from rest, it comes along with whatever its pins were carried to meanwhile (a
+    // hoist that kept cycling), as in a teleport, instead of being dragged there in a step.
+    let woke = std::mem::replace(&mut b.frozen, false);
     // A mesh it can reach is still baking (just come near, or changed): wait for it, up to
     // HOLD_FOR_BAKE_SECS. Stepped meanwhile, cloth would fall through it, and hang tangled in it
     // once it is solid.
@@ -1058,7 +1066,9 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
             poses.iter().enumerate().find_map(|(i, pose)| {
                 let (p, r) = (*pose)?;
                 let f = &b.sim.frames[i];
-                ((p - f.to_pos).length() > jump || r.angle_between(f.to_rot) > TELEPORT_TURN)
+                (woke
+                    || (p - f.to_pos).length() > jump
+                    || r.angle_between(f.to_rot) > TELEPORT_TURN)
                     .then_some((i as u16, p, r))
             })
         })
@@ -1098,7 +1108,13 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     let p = &mut b.sim.params;
     // A far body's step covers the steps it skipped with the substeps of one: less work, a
     // little softer where it's hard to see.
-    let lod = 1.0 / b.lod_every as f32;
+    // A cloth colliding with itself keeps its substeps (each twice as long), so its folds
+    // stay apart.
+    let lod = if self_colliding {
+        1.0
+    } else {
+        1.0 / b.lod_every as f32
+    };
     p.substeps = ((s.substeps as f32 * ctx.config.quality * lod).round() as u32).max(1);
     p.gravity = env.gravity(b.center) * s.gravity_scale;
     b.wind = wind_here;

@@ -328,7 +328,17 @@ pub struct Sim {
     aero_force: Vec<Vec3>,
     split: Split,
     self_contacts: SelfContacts,
+    /// Steps left without self-collision for a cloth found bunched into a ball.
+    tangled: u32,
 }
+
+/// Self-collision candidate pairs per particle past which a cloth counts as bunched into a
+/// ball (a sheet lying or hanging in a few folds has 2–5; one wound into a ball, 100+):
+/// it lets go of itself for TANGLED_WAIT steps, so its cost stays bounded and it can fall
+/// open, its folds no longer held on the wrong side of each other (cf. letting tangles go
+/// in Baraff, Witkin and Kass, "Untangling cloth", 2003).
+const TANGLED_PAIRS: usize = 5;
+const TANGLED_WAIT: u32 = 30;
 
 impl Sim {
     pub fn new(origin: DVec3) -> Self {
@@ -636,12 +646,21 @@ impl Sim {
             return;
         }
         if self.params.self_collide > 0.0 && !self.aero_triangles.is_empty() {
-            self.self_contacts.update(
-                &self.pos,
-                &self.inv_mass,
-                &self.aero_triangles,
-                self.params.self_collide,
-            );
+            if self.tangled > 0 {
+                // Bunched up: let go of itself a while (see TANGLED_PAIRS), then look again.
+                self.tangled -= 1;
+            } else {
+                self.self_contacts.update(
+                    &self.pos,
+                    &self.inv_mass,
+                    &self.aero_triangles,
+                    self.params.self_collide,
+                );
+                if self.self_contacts.pairs.len() > TANGLED_PAIRS * self.pos.len() {
+                    self.tangled = TANGLED_WAIT;
+                    self.self_contacts = SelfContacts::default();
+                }
+            }
         } else {
             self.self_contacts = SelfContacts::default();
         }

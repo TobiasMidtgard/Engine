@@ -56,6 +56,18 @@ pub struct StrandSet {
     pub follow: Vec<Follow>,
 }
 
+/// A [`StrandSet`] packed for the GPU ([`StrandSet::packed`]).
+#[derive(Debug, Clone, Default)]
+pub struct PackedStrands {
+    /// Per point: x and y, then z and radius, 16-bit unorms.
+    pub points: Vec<[u32; 2]>,
+    /// Per point: occlusion and the hair's random value, 16-bit unorms.
+    pub attrs: Vec<u32>,
+    /// The box the positions are in (corner; w: the largest radius) and its size.
+    pub box_min: [f32; 4],
+    pub box_size: [f32; 4],
+}
+
 /// The guides one hair moves with: up to three, nearest root first, and how much of each
 /// guide's motion it takes (summing to 1). Blending neighbors keeps a lock from splitting
 /// into thin strips where two guides swing apart.
@@ -92,6 +104,46 @@ impl StrandSet {
     /// Guides of hair that moves (see [`Self::guides`]).
     pub fn guide_count(&self) -> usize {
         self.guides.len() / self.points_per.max(1) as usize
+    }
+
+    /// The set as the GPU reads it, a third of the bytes: each point's position as 16-bit
+    /// unorms in the set's box (under 0.02 mm steps for a head of hair) and its radius as one of
+    /// the largest; occlusion and the hair's random value as 16-bit unorms (all the shader reads
+    /// of `attrs`). WGSL unpacks them with `unpack2x16unorm` (strand_data.wgsl).
+    pub fn packed(&self) -> PackedStrands {
+        let unorm = |v: f32| (v.clamp(0.0, 1.0) * 65535.0).round() as u32;
+        let mut lo = Vec3::splat(f32::MAX);
+        let mut hi = Vec3::splat(f32::MIN);
+        let mut radius = 0.0f32;
+        for p in &self.points {
+            lo = lo.min(Vec3::new(p[0], p[1], p[2]));
+            hi = hi.max(Vec3::new(p[0], p[1], p[2]));
+            radius = radius.max(p[3]);
+        }
+        if self.points.is_empty() {
+            (lo, hi) = (Vec3::ZERO, Vec3::ZERO);
+        }
+        let size = (hi - lo).max(Vec3::splat(1e-6));
+        let points = self
+            .points
+            .iter()
+            .map(|p| {
+                let t = (Vec3::new(p[0], p[1], p[2]) - lo) / size;
+                let r = if radius > 0.0 { p[3] / radius } else { 0.0 };
+                [unorm(t.x) | unorm(t.y) << 16, unorm(t.z) | unorm(r) << 16]
+            })
+            .collect();
+        let attrs = self
+            .attrs
+            .iter()
+            .map(|a| unorm(a[0]) | unorm(a[1]) << 16)
+            .collect();
+        PackedStrands {
+            points,
+            attrs,
+            box_min: [lo.x, lo.y, lo.z, radius],
+            box_size: [size.x, size.y, size.z, 0.0],
+        }
     }
 
     fn push(&mut self, pts: &[Vec3], root_radius: f32, tip_radius: f32, random: f32) {
@@ -1460,6 +1512,32 @@ mod tests {
         assert_eq!(s.strand_count(), 1);
         assert_eq!(s.points[2][3], 0.0);
         assert_eq!(s.attrs[1][2], 0.5);
+    }
+
+    #[test]
+    fn packing_keeps_points_and_attributes() {
+        let mut s = StrandSet::new(StrandKind::Scalp, 2);
+        s.push(
+            &[Vec3::new(-0.1, 0.2, 0.05), Vec3::new(0.15, 0.4, -0.1)],
+            1e-4,
+            4e-5,
+            0.25,
+        );
+        s.attrs[1][0] = 0.5;
+        let p = s.packed();
+        let unpack = |v: u32| [(v & 0xffff) as f32 / 65535.0, (v >> 16) as f32 / 65535.0];
+        for (i, q) in p.points.iter().enumerate() {
+            let [x, y] = unpack(q[0]);
+            let [z, r] = unpack(q[1]);
+            let at =
+                Vec3::from_slice(&p.box_min) + Vec3::new(x, y, z) * Vec3::from_slice(&p.box_size);
+            let want = Vec3::new(s.points[i][0], s.points[i][1], s.points[i][2]);
+            assert!(at.distance(want) < 1e-5, "{at} {want}");
+            assert!((r * p.box_min[3] - s.points[i][3]).abs() < 1e-8);
+        }
+        let [occ, random] = unpack(p.attrs[1]);
+        assert!((occ - 0.5).abs() < 1e-4 && (random - 0.25).abs() < 1e-4);
+        assert_eq!(unpack(p.attrs[0])[0], 1.0);
     }
 
     #[test]

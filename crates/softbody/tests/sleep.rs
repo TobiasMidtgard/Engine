@@ -100,3 +100,38 @@ fn a_collider_moving_past_wakes_a_sleeping_curtain() {
     }
     assert!(!asleep(&app, e), "a ball pushing through should wake it");
 }
+
+#[test]
+fn a_far_cloth_that_collides_with_itself_rests() {
+    let mut app = app();
+    let plain = curtain(&mut app);
+    let folded = app
+        .world
+        .spawn((
+            Transform::from_xyz(2.0, 3.0, 0.0),
+            Cloth {
+                size: [1.0, 1.5],
+                resolution: [12, 18],
+                pins: ClothPins::TopEdge { every: 1 },
+                sim: engine_softbody::SimSettings {
+                    self_collide: true,
+                    ..Default::default()
+                },
+                ..Cloth::default()
+            },
+        ))
+        .id();
+    // Light wind, so neither sleeps; the focus 80 m off (past twice the LOD distance).
+    app.world.resource_mut::<WeatherState>().wind = Vec3::new(3.0, 0.0, 0.0);
+    app.add_systems(PreUpdate, |mut focus: ResMut<engine_world::FocusPoints>| {
+        focus.points.clear();
+        focus.points.push(DVec3::new(80.0, 1.7, 0.0));
+    });
+    app.update_n(240);
+    let body = |e| app.world.get::<SoftBodySim>(e).unwrap();
+    assert!(body(folded).frozen, "far self-colliding cloth should rest");
+    assert!(
+        !body(plain).frozen,
+        "far plain cloth keeps stepping (coarsely)"
+    );
+}

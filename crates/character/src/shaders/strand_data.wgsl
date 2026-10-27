@@ -9,11 +9,14 @@ struct StrandParams {
     // Detail by distance: hair width scale (fewer hairs drawn, each wider), points stepped
     // over per segment (1 every point).
     lod: vec4<f32>,
+    // The box the points are packed in: corner (w: the largest radius) and size.
+    box_min: vec4<f32>,
+    box_size: vec4<f32>,
 };
 
 @group(2) @binding(0) var<uniform> strand_params: StrandParams;
-@group(2) @binding(1) var<storage, read> strand_points: array<vec4<f32>>;  // xyz model space, radius
-@group(2) @binding(2) var<storage, read> strand_attrs: array<vec4<f32>>;   // occlusion, random, t, unused
+@group(2) @binding(1) var<storage, read> strand_points: array<vec2<u32>>;  // xy, z radius (unorm16, strand_point)
+@group(2) @binding(2) var<storage, read> strand_attrs: array<u32>;   // occlusion, random (unorm16 each)
 // Per hair: the skin vertex it grows from (its expressions move the hair), that vertex's four
 // bones and their weights (bytes), the guide it moves with (0xffffffff: none).
 @group(2) @binding(3) var<storage, read> strand_roots: array<vec4<u32>>;
@@ -27,7 +30,7 @@ struct StrandOut {
     @invariant @builtin(position) clip: vec4<f32>,
     @location(0) rel: vec3<f32>,
     @location(1) tangent: vec3<f32>,
-    @location(2) attrs: vec4<f32>,
+    @location(2) attrs: vec2<f32>,  // occlusion, random
     @location(3) coverage: f32,
     @location(4) @interpolate(flat) hair: u32,
     @location(5) clip_now: vec4<f32>,
@@ -52,6 +55,15 @@ struct RibbonPoint {
     axes: mat3x3<f32>,
 };
 
+// Point i: model-space position (m) and radius (m).
+fn strand_point(i: u32) -> vec4<f32> {
+    let q = strand_points[i];
+    let xy = unpack2x16unorm(q.x);
+    let zr = unpack2x16unorm(q.y);
+    let at = strand_params.box_min.xyz + vec3<f32>(xy, zr.x) * strand_params.box_size.xyz;
+    return vec4<f32>(at, zr.y * strand_params.box_min.w);
+}
+
 fn ribbon_point(hair: u32, vertex: u32) -> RibbonPoint {
     let n = strand_params.info.x;
     let segment = vertex / 6u;
@@ -62,9 +74,9 @@ fn ribbon_point(hair: u32, vertex: u32) -> RibbonPoint {
     let k = min((segment + end[corner]) * stride, n - 1u);
     let base = hair * n;
     let i = base + k;
-    let p = strand_points[i];
-    let prev = strand_points[base + select(k - 1u, 0u, k == 0u)].xyz;
-    let next = strand_points[base + min(k + 1u, n - 1u)].xyz;
+    let p = strand_point(i);
+    let prev = strand_point(base + select(k - 1u, 0u, k == 0u)).xyz;
+    let next = strand_point(base + min(k + 1u, n - 1u)).xyz;
     // The hair rides its root: the root's expressions, then its bones.
     let root = strand_roots[hair];
     let m = morph_at(root.x);
