@@ -70,12 +70,18 @@ pub struct PhysicsStats {
     /// Bodies not asleep in regions resting past the world's `SimulationRange`: held where
     /// they are, not stepping, until a focus comes back within range.
     pub resting_awake: usize,
+    /// Bodies in dormant regions: asleep and apart from everything awake, so they sit steps
+    /// out though a region near them keeps stepping.
+    pub dormant: usize,
 }
 
 impl PhysicsStats {
     fn from_sim(sim: &sim::Simulation, step_ms: f64, substeps: u32) -> Self {
-        let (mut by_tier, mut fine_awake) = ([0usize; 4], 0);
+        let (mut by_tier, mut fine_awake, mut dormant) = ([0usize; 4], 0, 0);
         for (_, r) in sim.live_regions() {
+            if r.dormant {
+                dormant += r.world.bodies.iter().filter(|(_, b)| !b.is_fixed()).count();
+            }
             let awake = r
                 .world
                 .bodies
@@ -105,6 +111,7 @@ impl PhysicsStats {
             half_rate_awake: by_tier[2],
             fine_awake,
             resting_awake: by_tier[3],
+            dormant,
         }
     }
 }

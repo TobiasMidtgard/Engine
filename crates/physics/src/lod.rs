@@ -20,9 +20,19 @@
 //! movers split off ([`Simulation::split_far`]): a region's movers are clustered by how near
 //! they are to each other (and by joints), and a cluster wholly past the next tier's distance,
 //! with an awake body in it and no character, moves into a region of that tier. Sleeping
-//! clusters stay where they are: they cost almost nothing. Regions of different tiers merge
-//! as soon as their movers come close ([`Simulation::movers_close`]), so a rock thrown in from
-//! afar lands on the near ones at full detail.
+//! clusters stay where they are unless the region keeps stepping for something else (see
+//! below). Regions of different tiers merge as soon as their movers come close
+//! ([`Simulation::movers_close`]), so a rock thrown in from afar lands on the near ones at full
+//! detail.
+//!
+//! **Dormant regions.** Rapier walks every contact pair of a region each step, asleep or not,
+//! so a settled yard of a thousand bodies costs milliseconds a step while a walker or a swing
+//! twenty meters away keeps its region stepping. Box2D v3 keeps sleeping islands in solver sets
+//! of their own that no step touches, and PhysX and Jolt leave sleeping islands out of the
+//! narrow phase; here, every [`LOD_EVERY`] steps, sleeping clusters well apart from everything
+//! awake ([`Simulation::split_dormant`]) leave for a dormant region, which sits steps out
+//! while all of it sleeps. It merges back as soon as a mover comes close, and stops being
+//! dormant when something in it wakes.
 
 use std::collections::{HashMap, HashSet};
 
@@ -53,6 +63,18 @@ pub const REST: u8 = 3;
 
 /// A region with a body faster than this (m/s) doesn't rest: it is travelling, not settling.
 const REST_SPEED: f32 = 3.0;
+
+/// A body this far below the ground's surface (meters) fell through it, and doesn't count as
+/// travelling.
+const LOST_BELOW_M: f64 = 50.0;
+
+/// The ground is asked for from this high above a body (its height is a hint for caves: the
+/// first surface at or below it is returned).
+const GROUND_PROBE_M: f64 = 2000.0;
+
+/// A region keeping at least this many sleeping bodies apart from its awake ones moves them to
+/// a dormant region (fewer cost Rapier little).
+const DORMANT_MIN: usize = 32;
 
 /// Bodies reaching farther than this many grid cells are checked against every other mover
 /// instead of through the grid.
@@ -133,10 +155,13 @@ impl Region {
 
 /// A mover as the level of detail sees it.
 pub(crate) struct Member {
-    /// `None` for a character (they never split off).
+    /// `None` for a character (they split off only into dormant regions, resting).
     pub body: Option<Entity>,
+    /// The character, for one.
+    pub character: Option<Entity>,
     pub at: DVec3,
     pub reach: f64,
+    /// Awake, or a character not told to rest.
     pub awake: bool,
 }
 
@@ -178,6 +203,7 @@ impl Simulation {
                 let rb = region.world.bodies.get(b.handle)?;
                 Some(Member {
                     body: Some(*e),
+                    character: None,
                     at: region.global(rb.translation()),
                     reach: b.reach as f64,
                     awake: !rb.is_sleeping(),
@@ -186,15 +212,16 @@ impl Simulation {
             .collect();
         out.extend(
             self.characters
-                .values()
-                .filter(|c| c.region == id)
-                .filter_map(|c| {
+                .iter()
+                .filter(|(_, c)| c.region == id)
+                .filter_map(|(e, c)| {
                     let rb = region.world.bodies.get(c.body)?;
                     Some(Member {
                         body: None,
+                        character: Some(*e),
                         at: region.global(rb.translation()),
                         reach: 1.0,
-                        awake: true,
+                        awake: !self.resting.contains(e),
                     })
                 }),
         );
@@ -209,6 +236,7 @@ impl Simulation {
         let rest = self
             .range
             .map(|r| (r.active_m * (1.0 + r.hysteresis), r.active_m));
+        let look = self.lod_clock.is_multiple_of(LOD_EVERY);
         for (id, r) in self.regions.iter_mut().enumerate() {
             let Some(r) = r else {
                 continue;
@@ -220,13 +248,33 @@ impl Simulation {
                 // Something travelling (a plane on its circuit, a car on the track, a shot
                 // flying in) keeps going, coarsely; only what is settling rests.
                 let w = &r.world;
-                let travelling = w.islands.active_bodies().any(|h| {
-                    w.bodies
-                        .get(h)
-                        .is_some_and(|rb| rb.linvel().length_squared() > REST_SPEED * REST_SPEED)
-                });
-                let rest = rest.filter(|_| !travelling);
-                tier_for(r.nearest_mover(foci), r.tier, &settings, characters, rest)
+                let fast = |rb: &&rapier3d::prelude::RigidBody| {
+                    rb.linvel().length_squared() > REST_SPEED * REST_SPEED
+                };
+                let mut moving = w.islands.active_bodies().filter_map(|h| w.bodies.get(h));
+                let travelling = moving.any(|rb| fast(&rb));
+                // A body far below the ground fell through it (out there its colliders may
+                // not be loaded): it isn't going anywhere, so it doesn't keep its region up.
+                // (The ground is asked every few steps, and only out there: it isn't cheap.)
+                let nearest = r.nearest_mover(foci);
+                if look {
+                    let out_there = rest.is_some_and(|(enter, _)| nearest > enter * KEEP);
+                    let ground = self.ground.as_ref();
+                    let lost = |p: DVec3| {
+                        ground
+                            .and_then(|g| g.height(p + DVec3::Y * GROUND_PROBE_M))
+                            .is_some_and(|h| p.y < h - LOST_BELOW_M)
+                    };
+                    r.lost = out_there
+                        && travelling
+                        && w.islands
+                            .active_bodies()
+                            .filter_map(|h| w.bodies.get(h))
+                            .filter(fast)
+                            .all(|rb| lost(r.global(rb.translation())));
+                }
+                let rest = rest.filter(|_| !travelling || r.lost);
+                tier_for(nearest, r.tier, &settings, characters, rest)
             };
             r.tier = tier;
         }
@@ -238,6 +286,24 @@ impl Simulation {
         let (mut ma, mut mb) = (self.members(a), self.members(b));
         if ma.len() < mb.len() {
             std::mem::swap(&mut ma, &mut mb);
+        }
+        // Only the larger side's movers near the box around the smaller side's can be close (a
+        // dormant yard of a thousand bodies beside a few movers keeps a few).
+        let Some((lo, hi)) = mb.iter().fold(None, |acc: Option<(DVec3, DVec3)>, m| {
+            let r = DVec3::splat(m.reach + margin);
+            Some(match acc {
+                None => (m.at - r, m.at + r),
+                Some((lo, hi)) => (lo.min(m.at - r), hi.max(m.at + r)),
+            })
+        }) else {
+            return false;
+        };
+        ma.retain(|m| {
+            let r = DVec3::splat(m.reach);
+            (m.at + r).cmpge(lo).all() && (m.at - r).cmple(hi).all()
+        });
+        if ma.is_empty() {
+            return false;
         }
         let size = margin.max(1.0);
         let big = |m: &Member| m.reach > size * BIG_CELLS;
@@ -374,6 +440,94 @@ impl Simulation {
                     }
                 };
                 self.migrate_bodies(&bodies, target);
+            }
+        }
+    }
+    /// A dormant region whose body woke (or gained an awake one), or whose character was let
+    /// go, is an ordinary region again.
+    pub(crate) fn wake_dormant(&mut self) {
+        let walking: HashSet<RegionId> = self
+            .characters
+            .iter()
+            .filter(|(e, _)| !self.resting.contains(*e))
+            .map(|(_, c)| c.region)
+            .collect();
+        for (id, r) in self.regions.iter_mut().enumerate() {
+            let Some(r) = r.as_mut().filter(|r| r.dormant) else {
+                continue;
+            };
+            if walking.contains(&(id as RegionId)) {
+                r.dormant = false;
+                continue;
+            }
+            // (The flags, not Rapier's active set: bodies just moved in join that as it steps.)
+            r.dormant = r
+                .world
+                .bodies
+                .iter()
+                .all(|(_, rb)| rb.is_fixed() || rb.is_sleeping());
+        }
+    }
+
+    /// Move the sleeping clusters of a region that keeps stepping into a dormant region
+    /// ([module docs](self)): clusters all asleep (characters in them told to rest), none
+    /// asking for fine steps, at least `gap` meters from every awake body and character.
+    pub(crate) fn split_dormant(&mut self, gap: f64) {
+        let join = self.settings.region_radius_m * 0.5;
+        for id in self.live_region_ids() {
+            let (frozen, dormant, movers, tier) = {
+                let r = self.region(id);
+                (r.frozen, r.dormant, r.movers, r.tier)
+            };
+            if frozen || dormant || (movers as usize) < DORMANT_MIN {
+                continue;
+            }
+            let members = self.members(id);
+            let asleep = members.iter().filter(|m| !m.awake).count();
+            if asleep < DORMANT_MIN || asleep == members.len() {
+                continue;
+            }
+            let mut parent = self.cluster(&members, gap);
+            // Per cluster: whether all of it sleeps (characters count as awake), and its bodies.
+            let mut clusters: HashMap<usize, (bool, Vec<usize>)> = HashMap::new();
+            for (i, m) in members.iter().enumerate() {
+                let root = find(&mut parent, i);
+                let c = clusters.entry(root).or_insert((true, Vec::new()));
+                let fine = m.body.is_some_and(|e| {
+                    !self.resting.contains(&e)
+                        && self.bodies.get(&e).is_some_and(|b| b.fine.is_some())
+                });
+                c.0 &= !m.awake && !fine;
+                c.1.push(i);
+            }
+            let leaving: Vec<usize> = clusters
+                .into_values()
+                .filter(|(asleep, _)| *asleep)
+                .flat_map(|(_, list)| list)
+                .collect();
+            if leaving.len() < DORMANT_MIN {
+                continue;
+            }
+            let at = leaving.iter().map(|i| members[*i].at).sum::<DVec3>() / leaving.len() as f64;
+            let bodies: Vec<Entity> = leaving.iter().filter_map(|i| members[*i].body).collect();
+            let characters: Vec<Entity> = leaving
+                .iter()
+                .filter_map(|i| members[*i].character)
+                .collect();
+            let target = self
+                .live_regions()
+                .filter(|(r, region)| *r != id && region.dormant && !region.frozen)
+                .map(|(r, region)| (r, region.anchor.distance(at)))
+                .filter(|(_, d)| *d <= join)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(r, _)| r);
+            let target = target.unwrap_or_else(|| self.create_region(at));
+            let r = self.region_mut(target);
+            r.dormant = true;
+            r.tier = tier;
+            self.migrate_bodies(&bodies, target);
+            for e in characters {
+                self.migrate_character(e, target);
             }
         }
     }

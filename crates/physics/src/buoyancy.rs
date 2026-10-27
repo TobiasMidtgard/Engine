@@ -256,14 +256,24 @@ pub(crate) struct Surface {
 
 /// Grid spacing over a collider: one sample every 2 m, at most a 5 × 5 grid.
 const SAMPLE_SPACING: f32 = 2.0;
-const MAX_CELLS: usize = 4;
+pub(crate) const MAX_CELLS: usize = 4;
+/// The grid's cells across past the full level of detail ([`crate::lod`]): its corners only,
+/// a plane through the water there. Each sample asks the water module for its waves and
+/// ripples, and a pixel there spans 15 cm or more.
+pub(crate) const FAR_CELLS: usize = 1;
 
 impl Surface {
-    /// The water over the box `mins`..`maxs` (region-local, region at `anchor`), or `None`
-    /// where there is no water under it.
-    pub fn sample(water: &Water, anchor: DVec3, mins: Vec3, maxs: Vec3) -> Option<Surface> {
+    /// The water over the box `mins`..`maxs` (region-local, region at `anchor`), sampled on a
+    /// grid of at most `max_cells` across, or `None` where there is no water under it.
+    pub fn sample(
+        water: &Water,
+        anchor: DVec3,
+        mins: Vec3,
+        maxs: Vec3,
+        max_cells: usize,
+    ) -> Option<Surface> {
         let span = (maxs.x - mins.x).max(maxs.z - mins.z);
-        let cells = ((span / SAMPLE_SPACING).ceil() as usize).clamp(1, MAX_CELLS);
+        let cells = ((span / SAMPLE_SPACING).ceil() as usize).clamp(1, max_cells.max(1));
         let nodes = cells + 1;
         let (step_x, step_z) = (
             (maxs.x - mins.x) / cells as f32,
