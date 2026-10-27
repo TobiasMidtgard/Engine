@@ -354,6 +354,15 @@ pub struct FireField {
     pub stats: FieldStats,
     /// Most tiles kept; when full, new tiles are not created (fire stops at the edge).
     pub max_tiles: usize,
+    /// Most tiles a step makes as the fire walks or objects heat new ground (each asks the
+    /// world for a thousand cells' ground and fuel). The rest wait for the next steps, so a
+    /// fire that suddenly needs many tiles grows into them over a few frames instead of in one
+    /// long one. A fire front crosses a tile in many steps, so it never outruns the budget.
+    pub new_tiles_per_step: usize,
+    /// What is left of `new_tiles_per_step` this step.
+    new_tiles_left: usize,
+    /// Tiles objects wanted heated that the budget couldn't make yet: made first next step.
+    wanted: Vec<(IVec2, f64)>,
     incoming: Vec<Vec<f32>>,
     /// Cells a rotating shift created where the old field had none: (tile key, cell indices).
     /// They get their fuel from the world at the next step, once the world answers in the new
@@ -391,6 +400,9 @@ impl FireField {
             steps: 0,
             stats: FieldStats::default(),
             max_tiles: 4096,
+            new_tiles_per_step: 2,
+            new_tiles_left: 2,
+            wanted: Vec::new(),
             incoming: Vec::new(),
             unfueled: Vec::new(),
         }
@@ -633,7 +645,7 @@ impl FireField {
         fuel: &mut dyn FuelSource,
         mut f: impl FnMut(&mut Cell, f32),
     ) {
-        self.visit_disc(p, radius, Some(fuel), &mut f);
+        self.visit_disc(p, radius, Reach::Make(fuel), &mut f);
     }
 
     fn for_cells_in_disc_existing(
@@ -643,14 +655,14 @@ impl FireField {
         _fuel: &mut dyn FuelSource,
         mut f: impl FnMut(&mut Cell, f32),
     ) {
-        self.visit_disc(p, radius, None, &mut f);
+        self.visit_disc(p, radius, Reach::Existing, &mut f);
     }
 
     fn visit_disc(
         &mut self,
         p: DVec3,
         radius: f32,
-        mut fuel: Option<&mut dyn FuelSource>,
+        mut reach: Reach,
         f: &mut dyn FnMut(&mut Cell, f32),
     ) {
         let lo = self.cell_coord(p - DVec3::splat(radius as f64));
@@ -664,9 +676,10 @@ impl FireField {
                     continue;
                 }
                 let (key, local) = Self::split(c);
-                let index = match fuel.as_deref_mut() {
-                    Some(src) => self.ensure_tile(key, p.y + 2.0, src),
-                    None => self.tile_index(key),
+                let index = match &mut reach {
+                    Reach::Make(src) => self.ensure_tile(key, p.y + 2.0, *src),
+                    Reach::Budgeted(src) => self.budgeted_tile(key, p.y + 2.0, *src),
+                    Reach::Existing => self.tile_index(key),
                 };
                 let Some(i) = index else { continue };
                 let tile = &mut self.tiles[i];
@@ -709,7 +722,10 @@ impl FireField {
         watts_m2: f32,
         fuel: &mut dyn FuelSource,
     ) {
-        self.for_cells_in_disc(p, radius.max(self.cell_m * 0.5), fuel, |c, _| {
+        // Within the step's tile budget: a tile it can't make yet is made at the next step and
+        // heated from then on.
+        let r = radius.max(self.cell_m * 0.5);
+        self.visit_disc(p, r, Reach::Budgeted(fuel), &mut |c, _| {
             c.external += watts_m2;
         });
     }
@@ -722,9 +738,15 @@ impl FireField {
         }
         self.time += dt as f64;
         self.steps += 1;
-        self.fuel_unfueled(fuel);
+        self.new_tiles_left = self.new_tiles_per_step;
+        {
+            let _span = tracing::info_span!("fire refuel").entered();
+            self.fuel_unfueled(fuel);
+        }
 
-        // Burning tiles bring their neighbors into existence so the fire can walk into them.
+        // Burning tiles bring their neighbors into existence so the fire can walk into them,
+        // a few a step (`new_tiles_per_step`); those left out are asked for again next step.
+        let grow_span = tracing::info_span!("fire grow").entered();
         let mut grow = Vec::new();
         for t in &self.tiles {
             if t.burning == 0 && !t.cells.iter().any(|c| c.external > 0.0) {
@@ -741,17 +763,31 @@ impl FireField {
         }
         grow.sort_by_key(|(k, _)| (k.x, k.y));
         grow.dedup_by_key(|(k, _)| *k);
-        for (k, hint_y) in grow {
+        // Start somewhere new each step so no side of a big fire waits on the others.
+        if !grow.is_empty() {
+            let start = (self.steps % grow.len() as u64) as usize;
+            grow.rotate_left(start);
+        }
+        // Tiles objects asked to heat come first: they were waiting already.
+        let wanted = std::mem::take(&mut self.wanted);
+        for (k, hint_y) in wanted.into_iter().chain(grow) {
+            if self.map.contains_key(&k) {
+                continue;
+            }
             let center = self.tile_origin(k) + DVec2::splat(self.tile_size() * 0.5);
             if let Some(near) = input.near
                 && !near(DVec3::new(center.x, 0.0, center.y))
             {
                 continue;
             }
-            if let Some(i) = self.ensure_tile(k, hint_y, fuel) {
+            if self.new_tiles_left == 0 {
+                break;
+            }
+            if let Some(i) = self.budgeted_tile(k, hint_y, fuel) {
                 self.tiles[i].active = true;
             }
         }
+        drop(grow_span);
 
         // Which tiles run: active ones, and every neighbor of a burning tile.
         let n = self.tiles.len();
@@ -779,6 +815,7 @@ impl FireField {
         }
 
         // Kernels from the local wind (2 m above the ground at the tile center).
+        let kernel_span = tracing::info_span!("fire kernels").entered();
         let cell = self.cell_m;
         let field_origin = self.origin;
         for (i, t) in self.tiles.iter_mut().enumerate() {
@@ -798,7 +835,10 @@ impl FireField {
             );
         }
 
+        drop(kernel_span);
+
         // Gather incoming heat for every processed tile (reads neighbors, writes scratch).
+        let spread_span = tracing::info_span!("fire spread").entered();
         self.incoming.resize_with(n, Vec::new);
         {
             let tiles = &self.tiles;
@@ -833,6 +873,8 @@ impl FireField {
                 }
             });
         }
+
+        drop(spread_span);
 
         // Stats.
         let mut stats = FieldStats {
@@ -935,6 +977,7 @@ impl FireField {
         let budget = self.max_tiles.max(self.tiles.len());
         let mut old = std::mem::replace(self, FireField::new(self.cell_m));
         self.max_tiles = old.max_tiles;
+        self.new_tiles_per_step = old.new_tiles_per_step;
         self.time = old.time;
         self.steps = old.steps;
         self.stats = old.stats;
@@ -1065,32 +1108,79 @@ impl FireField {
         }
     }
 
-    /// Give cells a rotating shift created their fuel and ground height from the world.
+    /// Give cells a rotating shift created their fuel and ground height from the world: a
+    /// tile's worth of cells per tile of the step's budget, asked all at once; the rest at the
+    /// next steps.
     fn fuel_unfueled(&mut self, fuel: &mut dyn FuelSource) {
-        if self.unfueled.is_empty() {
-            return;
-        }
+        let mut cells_left = self.new_tiles_per_step.max(1) * TILE_CELLS;
         let cell = self.cell_m as f64;
-        for (key, list) in std::mem::take(&mut self.unfueled) {
+        let mut points = Vec::new();
+        let mut found = Vec::new();
+        let mut owed = std::mem::take(&mut self.unfueled).into_iter();
+        for (key, mut list) in owed.by_ref() {
             let Some(i) = self.tile_index(key) else {
                 continue;
             };
+            let rest = list.split_off(list.len().min(cells_left));
+            cells_left -= list.len();
             let o = self.tile_origin(key);
             let tile = &mut self.tiles[i];
-            for idx in list {
+            points.clear();
+            points.extend(list.iter().map(|&idx| {
                 let (x, y) = ((idx as i32 % TILE) as f64, (idx as i32 / TILE) as f64);
-                let p = DVec3::new(
+                DVec3::new(
                     o.x + (x + 0.5) * cell,
                     tile.base_y + 20.0,
                     o.y + (y + 0.5) * cell,
-                );
-                let (f, h) = fuel.fuel_at(p);
+                )
+            }));
+            found.clear();
+            fuel.fuel_many(&points, &mut found);
+            for (&idx, &(f, h)) in list.iter().zip(&found) {
                 tile.cells[idx as usize] = Cell::from_fuel(f, (h - tile.base_y) as f32);
             }
             tile.active = true;
             tile.version += 1;
+            if !rest.is_empty() {
+                self.unfueled.push((key, rest));
+            }
+            if cells_left == 0 {
+                break;
+            }
         }
+        self.unfueled.extend(owed);
     }
+
+    /// [`ensure_tile`](Self::ensure_tile) within the step's tile budget: a tile the budget
+    /// can't make now is remembered and made first at the next step.
+    fn budgeted_tile(
+        &mut self,
+        key: IVec2,
+        hint_y: f64,
+        fuel: &mut dyn FuelSource,
+    ) -> Option<usize> {
+        if let Some(&i) = self.map.get(&key) {
+            return Some(i);
+        }
+        if self.new_tiles_left == 0 {
+            if !self.wanted.iter().any(|(k, _)| *k == key) {
+                self.wanted.push((key, hint_y));
+            }
+            return None;
+        }
+        self.new_tiles_left -= 1;
+        self.ensure_tile(key, hint_y, fuel)
+    }
+}
+
+/// Which tiles a disc visit may reach.
+enum Reach<'a> {
+    /// Makes the tiles it needs.
+    Make(&'a mut dyn FuelSource),
+    /// Makes them within the step's tile budget.
+    Budgeted(&'a mut dyn FuelSource),
+    /// Only tiles that exist.
+    Existing,
 }
 
 /// World X/Z of the minimum corner of tile `key` in a field with origin `field_origin`.
@@ -1731,6 +1821,66 @@ mod tests {
             .filter(|(p, c)| p.z > 7.0 && c.state() == CellState::Burnt)
             .count();
         assert_eq!(wet_burnt, 0, "soaked grass burned");
+    }
+
+    #[test]
+    fn a_big_fire_grows_its_new_tiles_a_few_a_step() {
+        pools();
+        let mut field = FireField::new(0.5);
+        field.new_tiles_per_step = 3;
+        let asked = std::cell::Cell::new(0usize);
+        let mut fuel = |p: DVec3| {
+            asked.set(asked.get() + 1);
+            grass(p)
+        };
+        let wind = |_p: DVec3| Vec3::ZERO;
+        let wet = |_p: DVec3| 0.0;
+        let step = StepInput {
+            dt: 0.05,
+            ambient_c: 20.0,
+            rain_mm_h: 0.0,
+            humidity: 0.3,
+            wind: &wind,
+            wetness: &wet,
+            params: SpreadParams::default(),
+            near: None,
+        };
+        // A 3×3-tile blaze lit at once (lighting makes its tiles straight away): its ring of
+        // 16 neighbors comes a few tiles a step, each step asking the ground for at most three
+        // tiles' cells.
+        let size = field.tile_size();
+        for ty in 0..3 {
+            for tx in 0..3 {
+                let c = DVec3::new((tx as f64 + 0.5) * size, 0.0, (ty as f64 + 0.5) * size);
+                field.ignite(c, 1.0, &mut fuel);
+            }
+        }
+        assert_eq!(field.tiles.len(), 9);
+        let mut steps = 0;
+        while field.tiles.len() < 25 {
+            asked.set(0);
+            field.step(&step, &mut fuel);
+            assert!(
+                asked.get() <= 3 * TILE_CELLS,
+                "{} cells in one step",
+                asked.get()
+            );
+            steps += 1;
+            assert!(steps < 10, "the ring should be made within a few steps");
+        }
+        // One step to count the burning cells, then 16 tiles at 3 a step.
+        assert_eq!(steps, 7);
+
+        // An object heating ground with no tile yet heats it once the budget allows.
+        let far = DVec3::new(10.5 * size, 0.0, 10.5 * size);
+        field.new_tiles_left = 0;
+        field.add_external(far, 1.0, 5e4, &mut fuel);
+        assert!(field.cell_at(far).is_none(), "made past the budget");
+        field.step(&step, &mut fuel);
+        assert!(
+            field.cell_at(far).is_some(),
+            "the wanted tile comes first next step"
+        );
     }
 
     #[test]

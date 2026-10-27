@@ -158,6 +158,7 @@ pub struct FireLight {
 }
 
 /// Fuel for new cells: ground material, water, and fuel patches.
+#[derive(Clone, Copy)]
 pub struct WorldFuel<'a> {
     pub ground: &'a Ground,
     pub water: &'a Water,
@@ -174,7 +175,26 @@ impl FuelSource for WorldFuel<'_> {
     fn fuel_many(&mut self, points: &[DVec3], out: &mut Vec<(CellFuel, f64)>) {
         let start = out.len();
         out.resize(start + points.len(), (CellFuel::NONE, 0.0));
-        let this = &*self;
+        // Only the patches that reach these points (a tile's square) are tested per point.
+        let (lo, hi) = points.iter().fold(
+            (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
+            |(lo, hi), p| (lo.min(DVec2::new(p.x, p.z)), hi.max(DVec2::new(p.x, p.z))),
+        );
+        let near: Vec<PlacedPatch> = self
+            .patches
+            .iter()
+            .filter(|pp| {
+                let c = DVec2::new(pp.center.x, pp.center.z);
+                let r = pp.radius() as f64;
+                c.x + r >= lo.x && c.x - r <= hi.x && c.y + r >= lo.y && c.y - r <= hi.y
+            })
+            .copied()
+            .collect();
+        let this = WorldFuel {
+            patches: &near,
+            ..*self
+        };
+        let this = &this;
         engine_core::tasks::par_chunks_mut(&mut out[start..], 64, |chunk, found| {
             for (k, f) in found.iter_mut().enumerate() {
                 *f = this.fuel_of(points[chunk * 64 + k]);
@@ -469,6 +489,7 @@ pub fn step_field(
     clock.acc = 0.0;
     clock.stepped = dt;
     field.max_tiles = settings.max_tiles as usize;
+    field.new_tiles_per_step = settings.new_tiles_per_step.max(1) as usize;
 
     let awake = &clock.awake;
     let near = move |p: DVec3| awake.contains(p);
