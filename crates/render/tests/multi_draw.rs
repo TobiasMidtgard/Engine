@@ -52,7 +52,11 @@ fn app(multi_draw: bool) -> App {
         }
     }
     app.world.spawn((
-        Camera::perspective(60.0),
+        // Auto exposure adapts over real time, which differs between the runs compared.
+        Camera {
+            exposure: Exposure::Manual { ev100: 14.0 },
+            ..Camera::perspective(60.0)
+        },
         Transform::from_xyz(0.0, 3.0, 6.0).looking_at(DVec3::new(0.0, 0.3, -1.2), Vec3::Y),
     ));
     app.world.spawn((

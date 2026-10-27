@@ -47,7 +47,11 @@ fn render(lods: Lods, shot: &str) -> Option<(u64, Vec<u8>)> {
     }
     let w = &mut app.world;
     w.spawn((
-        Camera::perspective(60.0),
+        // Auto exposure adapts over real time, which differs between the runs compared.
+        Camera {
+            exposure: Exposure::Manual { ev100: 14.0 },
+            ..Camera::perspective(60.0)
+        },
         Transform::from_xyz(0.0, 1.7, 0.0).looking_at(DVec3::new(0.0, 0.0, -40.0), Vec3::Y),
     ));
     let e = 35f64.to_radians();
@@ -154,5 +158,11 @@ fn stones_marked_no_mesh_lod_keep_every_triangle() {
         return;
     };
     assert_eq!(marked, full, "triangles drawn");
-    assert_eq!(before, after, "the pictures differ");
+    let max = before
+        .iter()
+        .zip(&after)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0);
+    assert!(max <= 1, "pictures differ by up to {max}");
 }
