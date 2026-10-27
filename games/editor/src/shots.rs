@@ -751,6 +751,59 @@ pub fn round8(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Round 9: selection outlines. A rig, a model behind a wall, a parent with children and a
+/// multiple selection.
+pub fn round9(dir: impl Into<PathBuf>) -> ShotScript {
+    let steps = vec![
+        Step::Camera(DVec3::new(5.5, 2.6, 7.5), DVec3::new(-0.5, 0.9, 0.0)),
+        Step::Tab(Tab::Inspector),
+        Step::Do(Box::new(|world, editor| {
+            crate::models::place(
+                world,
+                editor,
+                "fetched/anim/animals/horse/Horse.gltf",
+                DVec3::new(-1.0, 0.0, 1.0),
+            );
+            crate::models::place(
+                world,
+                editor,
+                "fetched/anim/characters/walker.glb",
+                DVec3::new(-1.5, 0.0, -8.0),
+            );
+        })),
+        Step::Select("Horse"),
+        Step::Wait(30),
+        Step::Shot("36_outline_rig"),
+        // The walker stands behind the back wall: a faint line shows where.
+        Step::Camera(DVec3::new(0.8, 1.7, -1.5), DVec3::new(-1.5, 1.0, -8.0)),
+        Step::Select("walker"),
+        Step::Wait(30),
+        Step::Shot("37_outline_behind_wall"),
+        // A parent outlines its children with it.
+        Step::Camera(DVec3::new(3.5, 3.0, 4.5), DVec3::new(-2.5, 0.8, -3.5)),
+        Step::Select("Crate stack"),
+        Step::Wait(30),
+        Step::Shot("38_outline_children"),
+        // Several selected: the active one (picked last) is lighter.
+        Step::Camera(DVec3::new(6.0, 4.0, 8.0), DVec3::new(-0.5, 0.6, -1.0)),
+        Step::Do(Box::new(|world, editor| {
+            editor.selection = ["Barrel", "Boulder", "Lamp post", "Horse"]
+                .into_iter()
+                .filter_map(|name| find(world, name))
+                .collect();
+        })),
+        Step::Wait(30),
+        Step::Shot("39_outline_multiple"),
+        Step::Select("Horse"),
+        Step::Camera(DVec3::new(4.0, 2.2, 5.5), DVec3::new(-1.0, 0.9, 0.5)),
+        Step::Do(Box::new(editor::play)),
+        Step::Wait(60),
+        Step::Shot("40_outline_playing"),
+        Step::Do(Box::new(editor::stop)),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {

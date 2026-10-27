@@ -988,6 +988,7 @@ name = "editor"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "bytemuck",
  "egui",
  "egui-wgpu",
  "egui_dock",

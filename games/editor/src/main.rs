@@ -23,6 +23,7 @@ mod import;
 mod inspector;
 mod landscape;
 mod models;
+mod outline;
 mod picking;
 mod prefab;
 mod rigs;
@@ -110,6 +111,7 @@ fn main() {
             Some("round6") => shots::round6(dir),
             Some("round7") => shots::round7(dir),
             Some("round8") => shots::round8(dir),
+            Some("round9") => shots::round9(dir),
             Some("play") => shots::play_in_editor(dir),
             _ => shots::gallery(dir),
         };
@@ -154,6 +156,7 @@ impl Plugin for EditorPlugin {
                  the file or revert to it.",
             )
             .add_render_feature(egui_bridge::EguiFeature::default())
+            .add_render_feature(outline::OutlineFeature::default())
             .add_systems(Startup, setup)
             .add_systems(
                 Update,

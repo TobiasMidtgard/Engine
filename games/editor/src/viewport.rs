@@ -415,29 +415,13 @@ pub fn entities_in_box(world: &mut World, view: &ViewInfo, area: egui::Rect) -> 
     found
 }
 
-/// Outline the selection with its bounds (on top, in the accent color).
+/// Light helpers for the selection: a point light's range, a sun's direction. Meshes get their
+/// silhouette outlined by [`crate::outline`].
 fn draw_selection(world: &mut World, editor: &Editor) {
-    let mut boxes = Vec::new();
-    for (i, &e) in editor.selection.iter().enumerate() {
-        let primary = i + 1 == editor.selection.len();
+    for &e in &editor.selection {
         let Some(&global) = world.get::<GlobalTransform>(e) else {
             continue;
         };
-        let mesh = world
-            .get::<engine::render::ResolvedMesh>(e)
-            .and_then(|r| world.resource::<Assets<engine::render::Mesh>>().get(r.mesh))
-            .map(|m| m.aabb());
-        let color = if primary {
-            [1.0, 0.62, 0.1, 1.0]
-        } else {
-            [0.25, 0.55, 1.0, 1.0]
-        };
-        if let Some(aabb) = mesh {
-            let scale = global.scale();
-            let center = global.transform_point(((aabb.min + aabb.max) * 0.5).as_dvec3());
-            let half = (aabb.max - aabb.min) * 0.5 * scale.abs() + Vec3::splat(0.01);
-            boxes.push((center, half, global.rotation(), color));
-        }
         if let Some(&light) = world.get::<PointLight>(e) {
             let mut debug = world.resource_mut::<DebugDraw>();
             debug.sphere(global.translation(), light.range, [1.0, 0.85, 0.4, 0.35]);
@@ -450,10 +434,6 @@ fn draw_selection(world: &mut World, editor: &Editor) {
                 .arrow(p, p + f * 3.0, [1.0, 0.9, 0.4, 1.0])
                 .on_top();
         }
-    }
-    let mut debug = world.resource_mut::<DebugDraw>();
-    for (center, half, rotation, color) in boxes {
-        debug.oriented_box(center, half, rotation, color).on_top();
     }
 }
 
