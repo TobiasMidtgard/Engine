@@ -234,7 +234,7 @@ const STEPS: [Step; 12] = [
     }),
     (
         "module art",
-        "Planting the woods, lighting the fires, filling the streams",
+        "Planting the woods, filling the streams, sending it all to the GPU",
         |world, b| {
             // Modules that bake a zone's art on workers say so; the exe waits for them here, so
             // the start screen opens on a finished valley. Builds all at once (tours) go on,
@@ -256,7 +256,7 @@ const STEPS: [Step; 12] = [
 const MODULE_WAIT_S: f32 = 60.0;
 
 /// Modules still baking art or settling their zones on other threads.
-const MODULES_LOADING: [fn(&World) -> bool; 4] = [
+const MODULES_LOADING: [fn(&World) -> bool; 5] = [
     engine_smoke::demo::loading,
     |world| {
         world
@@ -269,7 +269,17 @@ const MODULES_LOADING: [fn(&World) -> bool; 4] = [
             .get_resource::<engine_foliage::FoliageLoading>()
             .is_some_and(|f| !f.is_ready())
     },
+    uploading,
 ];
+
+/// The renderer still has meshes or images to put on the GPU (it uploads within the
+/// [`engine::world::LoadingBudget`] while one is up).
+fn uploading(world: &World) -> bool {
+    world
+        .get_resource::<engine::core::diagnostics::Diagnostics>()
+        .and_then(|d| d.get("render.pending_upload_mb"))
+        .is_some_and(|mb| mb > 0.0)
+}
 
 fn with_commands(world: &mut World, f: impl FnOnce(&mut Commands)) {
     let mut state = SystemState::<Commands>::new(world);
@@ -623,7 +633,10 @@ pub fn cover_jumps(world: &mut World, mut jump: Local<Jump>) {
                 + d.get("terrain.patches_missing").unwrap_or(0.0)
         });
     let waited = since.elapsed().as_secs_f32();
-    let settled = pending == 0.0 && jump.frames > COVER_FRAMES && jump.calm >= CALM_FRAMES;
+    let settled = pending == 0.0
+        && !uploading(world)
+        && jump.frames > COVER_FRAMES
+        && jump.calm >= CALM_FRAMES;
     if (settled && waited > 0.3) || waited > COVER_MAX_S {
         screens::hide(world, "jump_cover", false);
         world.remove_resource::<engine::world::LoadingBudget>();
