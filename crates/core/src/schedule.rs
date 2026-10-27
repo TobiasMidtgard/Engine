@@ -64,6 +64,12 @@ pub struct Last;
 /// * `PostPhysics`: reactions to contacts, damage, triggers.
 /// * `Environment`: world simulations (weather, fire, smoke, water, ecology) that read the
 ///   settled state of the step.
+/// * `DuringPhysics`: work that may run at the same time as `Physics`, as Unreal's
+///   `TG_DuringPhysics` tick group does. It runs after `Gameplay` and finishes before
+///   `PostPhysics`, but is not ordered against `Physics`. Put a system here only if it doesn't
+///   need this step's bodies: it must not query physics (raycasts, overlaps, body poses) or
+///   write anything physics reads. A field step that uses last step's state (wind, clouds,
+///   smoke, water flow) fits; reactions to contacts belong in `PostPhysics`.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SimSet {
     Input,
@@ -71,6 +77,7 @@ pub enum SimSet {
     Physics,
     PostPhysics,
     Environment,
+    DuringPhysics,
 }
 
 /// Ordering inside [`Update`] and [`PostUpdate`].
