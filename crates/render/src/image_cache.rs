@@ -108,7 +108,7 @@ pub enum TextureUse {
 }
 
 /// Views per image: linear, sRGB, red, red-green, exact.
-const VIEW_SLOTS: usize = 5;
+pub(crate) const VIEW_SLOTS: usize = 5;
 
 /// Per slot, the other slots whose view can stand in for a released image's (closest first).
 const FALLBACK: [[usize; 4]; VIEW_SLOTS] = [

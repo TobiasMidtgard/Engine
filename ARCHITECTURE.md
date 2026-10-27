@@ -612,8 +612,12 @@ versions of meshes and images already on the GPU (edits) always go. A feature as
 `uploads.take(key, bytes, update)` before uploading and, on `false`, draws without it and asks
 again next frame. Refused bytes show as `render.pending_upload_mb`, each item (`key`) once
 however often it is asked (zero once everything asked for is on the GPU: a loading screen can
-wait for it) and uploaded ones as `render.upload_mb`. Other crates' features may use it the same
-way. On lavapipe the first frame's cost is pipeline compiles (`render.cpu.meshes: pipelines`,
+wait for it) and uploaded ones as `render.upload_mb` (edits alone: `render.upload_updates_mb`).
+When a window of frames (120, or 5 s) uploads over 1 MB a frame in play, the log names what
+uploaded most: `uploads in play: 19.2 MB a frame over 120 frames, ...; most: mesh 812
+[components of an entity drawing it]: 120 uploads, ...`. An item with as many uploads as frames
+is re-uploaded every frame, because its asset changes every frame. Other crates' features may
+use it the same way. On lavapipe the first frame's cost is pipeline compiles (`render.cpu.meshes: pipelines`,
 ~1.4 s for the mesh shader's first two variants), not bytes.
 
 **Render thread** (built; `renderer.rs` `RenderThread`, after Unreal's render thread and

@@ -783,7 +783,7 @@ impl PrepareSteps {
 }
 
 /// Upload budget keys of meshes (images use the low ones; see `UploadBudget::take`).
-const MESH_UPLOAD_KEY: u64 = 1 << 63;
+pub(crate) const MESH_UPLOAD_KEY: u64 = 1 << 63;
 
 /// Draws [`MeshRenderer`](crate::components::MeshRenderer) entities. Added by `RenderPlugin`.
 #[derive(Default)]
