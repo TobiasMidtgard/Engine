@@ -26,6 +26,7 @@ mod camera;
 mod film;
 mod forest;
 mod landscape;
+mod loops;
 mod meshgen;
 mod paint_cache;
 mod placeholders;
@@ -121,7 +122,7 @@ fn main() {
         app.insert_resource(zones);
     }
     let headless = app.world.resource::<EngineConfig>().headless;
-    let scripted = ["--tour", "--film", "--fly"]
+    let scripted = ["--tour", "--film", "--fly", "--loops"]
         .iter()
         .any(|f| args.iter().any(|a| a == f));
     let exe = !headless && !scripted;
@@ -141,6 +142,9 @@ fn main() {
             background: true,
             ..Default::default()
         });
+    }
+    if let Some(spec) = value("--loops") {
+        loops::install(&mut app, spec);
     }
     if args.iter().any(|a| a == "--tour") {
         tour::install(&mut app, value("--tour"));

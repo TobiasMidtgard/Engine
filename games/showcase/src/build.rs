@@ -301,7 +301,7 @@ const STEPS: [Step; 12] = [
 const MODULE_WAIT_S: f32 = 60.0;
 
 /// Modules still baking art or settling their zones on other threads.
-const MODULES_LOADING: [fn(&World) -> bool; 6] = [
+const MODULES_LOADING: [fn(&World) -> bool; 7] = [
     engine_smoke::demo::loading,
     |world| {
         world
@@ -317,6 +317,13 @@ const MODULES_LOADING: [fn(&World) -> bool; 6] = [
             .is_some_and(|f| !f.is_ready())
     },
     uploading,
+    // Mesh pipelines compiling on workers, so the walk doesn't hitch on first sight.
+    |world| {
+        world
+            .get_resource::<engine::core::diagnostics::Diagnostics>()
+            .and_then(|d| d.get("render.meshes.pipelines_warming"))
+            .is_some_and(|n| n > 0.0)
+    },
 ];
 
 /// The renderer still has meshes or images to put on the GPU (it uploads within the
