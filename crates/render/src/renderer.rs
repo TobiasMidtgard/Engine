@@ -732,9 +732,13 @@ impl Renderer {
         self.shared.images.compress(&self.shared);
         // Uploads: a byte budget in play, a time budget behind a loading screen.
         let loading = world.get_resource::<engine_world::LoadingBudget>().copied();
+        let budgeted = settings.upload_budget_headless
+            || !world
+                .get_resource::<EngineConfig>()
+                .is_some_and(|c| c.headless);
         self.shared.uploads.begin_frame(
             match (loading, settings.upload_mb_per_frame) {
-                (None, mb) if mb > 0.0 => (mb as f64 * 1024.0 * 1024.0) as u64,
+                (None, mb) if mb > 0.0 && budgeted => (mb as f64 * 1024.0 * 1024.0) as u64,
                 _ => u64::MAX,
             },
             loading.map(|l| started + std::time::Duration::from_secs_f64(l.budget_ms / 1000.0)),
