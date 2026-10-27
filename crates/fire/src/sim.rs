@@ -439,30 +439,16 @@ impl HeatGridExt for engine_world::Grid2<f32> {
     }
 }
 
-/// Advance the fire field at `FireSettings::sim_hz` of world time.
-#[allow(clippy::too_many_arguments)]
-pub fn step_field(
-    time: Res<Time>,
+/// Where fire is awake ([`FireClock`]): near the foci (or the cameras) only, within the
+/// shared simulation range, or the fire's own radius if that is smaller. Its own small system,
+/// so [`step_field`] reads no transforms and can run beside the physics step.
+pub fn wake_fire(
     settings: Res<FireSettings>,
     mut clock: ResMut<FireClock>,
-    mut field: ResMut<FireField>,
-    weather: Res<WeatherState>,
-    wind: Res<WindField>,
-    surface: Res<SurfaceLayers>,
     focus: Res<FocusPoints>,
     cameras: Query<(&Camera, &GlobalTransform)>,
-    patches: Res<FirePatches>,
-    ground: Res<Ground>,
-    water: Res<Water>,
-    materials: Res<SurfaceMaterials>,
     range: Option<Res<SimulationRange>>,
 ) {
-    clock.stepped = 0.0;
-    if !settings.enabled {
-        return;
-    }
-    // Fire simulates near the foci (or the cameras) only: within the shared simulation range,
-    // or the fire's own radius if that is smaller.
     let awake = &mut clock.awake;
     awake.at.clear();
     awake.at.extend(focus.points.iter().copied());
@@ -475,6 +461,29 @@ pub fn step_field(
     }
     let range_m = range.map_or(f64::INFINITY, |r| r.active_m);
     awake.radius = range_m.min(settings.sim_radius_m as f64);
+}
+
+/// Advance the fire field at `FireSettings::sim_hz` of world time, where [`wake_fire`] last
+/// found it awake. It needs nothing from this physics step (only last step's world: wind,
+/// weather, ground, wetness), so it runs in `SimSet::DuringPhysics`, beside physics.
+#[allow(clippy::too_many_arguments)]
+pub fn step_field(
+    time: Res<Time>,
+    settings: Res<FireSettings>,
+    mut clock: ResMut<FireClock>,
+    mut field: ResMut<FireField>,
+    weather: Res<WeatherState>,
+    wind: Res<WindField>,
+    surface: Res<SurfaceLayers>,
+    patches: Res<FirePatches>,
+    ground: Res<Ground>,
+    water: Res<Water>,
+    materials: Res<SurfaceMaterials>,
+) {
+    clock.stepped = 0.0;
+    if !settings.enabled {
+        return;
+    }
     let step = 1.0 / settings.sim_hz.clamp(1.0, 240.0);
     if clock.fast_forward {
         clock.acc = step;

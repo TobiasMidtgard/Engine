@@ -100,12 +100,16 @@ impl Plugin for FirePlugin {
                 "Takes Fire damage (DamageEvent) in flames; `scale` multiplies \
                  FireSettings.damage_per_second.",
             )
+            // The field steps beside physics (it needs nothing from this physics step); the
+            // rest reacts after it, with ignitions and patch changes reaching the field at
+            // the next step.
+            .add_systems(FixedUpdate, sim::step_field.in_set(SimSet::DuringPhysics))
             .add_systems(
                 FixedUpdate,
                 (
                     sim::index_patches,
                     sim::handle_ignition,
-                    sim::step_field,
+                    sim::wake_fire,
                     sim::step_objects,
                     sim::emit_outputs,
                     sim::step_embers,

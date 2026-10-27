@@ -859,6 +859,7 @@ fn fast_forward(
         (
             sim::index_patches,
             sim::handle_ignition,
+            sim::wake_fire,
             sim::step_field,
             sim::step_objects,
         )

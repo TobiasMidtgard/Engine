@@ -78,6 +78,9 @@ impl Plugin for SmokePlugin {
                 "The smoke-range demo: cycle_secs, warmup_secs, fire_rate, shooting [from, to], \
                  blast_at, fans [from, to] (seconds into each round).",
             )
+            // The air steps beside physics (it needs nothing from this physics step); what is
+            // released or disturbed after it is stepped at the next step.
+            .add_systems(FixedUpdate, sim::step.in_set(SimSet::DuringPhysics))
             .add_systems(
                 FixedUpdate,
                 (
@@ -86,8 +89,8 @@ impl Plugin for SmokePlugin {
                     sim::release,
                     fog::settle_fog,
                     sim::disturb,
-                    sim::step,
                     obscurance::publish,
+                    sim::watch,
                 )
                     .chain()
                     .in_set(SimSet::Environment),

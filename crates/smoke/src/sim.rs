@@ -399,6 +399,13 @@ pub struct SmokeCommands(pub Vec<SmokeCommand>);
 #[derive(Resource, Debug, Clone, Default)]
 pub struct SmokeClock {
     acc: f32,
+    /// Where smoke is awake: the foci, or the active cameras when there are none ([`watch`]).
+    points: Vec<DVec3>,
+    /// The last step's volumes stepped, volumes still waiting on their last step, and its time
+    /// on the frame, ms (published by [`watch`]).
+    stepped: u32,
+    waiting: u32,
+    step_ms: f64,
 }
 
 impl SmokeClock {
@@ -780,8 +787,37 @@ pub fn track_obstacles(
     }
 }
 
-/// Advance every volume with smoke in it near a focus at `sim_hz` of world time.
-#[allow(clippy::too_many_arguments)]
+/// Where smoke is awake for the next step (the foci, or the active cameras when there are
+/// none), and the smoke's numbers for `engine.describe`. Its own small system, so [`step`]
+/// reads no transforms and shares nothing with physics.
+pub fn watch(
+    mut clock: ResMut<SmokeClock>,
+    domains: Res<SmokeDomains>,
+    focus: Res<FocusPoints>,
+    cameras: Query<(&Camera, &GlobalTransform)>,
+    mut diagnostics: ResMut<Diagnostics>,
+) {
+    let clock = &mut *clock;
+    clock.points.clear();
+    clock.points.extend(focus.points.iter().copied());
+    if clock.points.is_empty() {
+        clock.points.extend(
+            cameras
+                .iter()
+                .filter(|(c, _)| c.active)
+                .map(|(_, t)| t.translation()),
+        );
+    }
+    diagnostics.set("smoke.volumes", domains.list.len() as f64);
+    diagnostics.set("smoke.stepped", clock.stepped as f64);
+    diagnostics.set("smoke.waiting", clock.waiting as f64);
+    diagnostics.set("smoke.mass_kg", domains.mass_kg() as f64);
+    diagnostics.set("smoke.step_ms", clock.step_ms);
+}
+
+/// Advance every volume with smoke in it near where [`watch`] last found smoke awake, at
+/// `sim_hz` of world time. It needs nothing from this physics step (last step's wind and
+/// weather), so it runs in `SimSet::DuringPhysics`, beside physics.
 pub fn step(
     time: Res<Time>,
     settings: Res<SmokeSettings>,
@@ -789,9 +825,6 @@ pub fn step(
     mut domains: ResMut<SmokeDomains>,
     wind: Res<WindField>,
     weather: Res<WeatherState>,
-    focus: Res<FocusPoints>,
-    cameras: Query<(&Camera, &GlobalTransform)>,
-    mut diagnostics: ResMut<Diagnostics>,
     range: Option<Res<SimulationRange>>,
 ) {
     if !settings.enabled {
@@ -804,15 +837,7 @@ pub fn step(
     }
     let dt = clock.acc.min(step * 3.0);
     clock.acc = 0.0;
-    let mut points = focus.points.clone();
-    if points.is_empty() {
-        points.extend(
-            cameras
-                .iter()
-                .filter(|(c, _)| c.active)
-                .map(|(_, t)| t.translation()),
-        );
-    }
+    let points = std::mem::take(&mut clock.points);
     // Volumes step within the shared simulation range (or the smoke's own radius if that is
     // smaller) and rest beyond it and its margin, so ones at the edge don't flicker.
     let (active_m, hysteresis) =
@@ -871,11 +896,10 @@ pub fn step(
     domains
         .list
         .retain(|d| d.owner.is_some() || d.empty_secs < 10.0);
-    diagnostics.set("smoke.volumes", domains.list.len() as f64);
-    diagnostics.set("smoke.stepped", stepped as f64);
-    diagnostics.set("smoke.waiting", waiting as f64);
-    diagnostics.set("smoke.mass_kg", domains.mass_kg() as f64);
-    diagnostics.set("smoke.step_ms", started.elapsed().as_secs_f64() * 1000.0);
+    clock.points = points;
+    clock.stepped = stepped;
+    clock.waiting = waiting;
+    clock.step_ms = started.elapsed().as_secs_f64() * 1000.0;
 }
 
 /// Age bullet tunnels (every frame, world time).
