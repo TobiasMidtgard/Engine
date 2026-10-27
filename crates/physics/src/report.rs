@@ -49,8 +49,9 @@ pub(crate) fn region_stepped(_sim: &Simulation, rid: RegionId, _substeps: u32, s
 }
 
 /// What a substep's time goes to, in order.
-const PARTS: [&str; 6] = [
-    "forces and kinematics",
+const PARTS: [&str; 7] = [
+    "forces and buoyancy",
+    "kinematics and cones",
     "Rapier",
     "touches",
     "rolling and cones",

@@ -616,6 +616,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
                 water.as_ref(),
                 settings.buoyancy,
             );
+            let t0b = Instant::now();
             drive_kinematics(&mut sim, rid, &special, sub_dt, substeps - sub);
             crate::cones::orient(&mut sim, rid);
             let scaled = scale_time(&mut sim, rid, &special, true);
@@ -678,7 +679,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             let t5 = Instant::now();
             break_joints(&mut sim, rid, sub_dt);
             if report {
-                crate::report::substep_parts([t0, t1, t2, t3, t4, t5, Instant::now()]);
+                crate::report::substep_parts([t0, t0b, t1, t2, t3, t4, t5, Instant::now()]);
                 crate::report::count("spin pairs", touches.spins);
                 crate::report::count("hits", touches.hits.len());
             }
@@ -958,10 +959,14 @@ const WATER_REACH: f64 = 0.05;
 ///   slower than Rapier's sleep threshold: it is kept awake while it rests on nothing fixed.
 fn wake_for_water(sim: &mut Simulation, water: &Water) {
     let Simulation {
-        bodies, regions, ..
+        bodies,
+        regions,
+        resting,
+        ..
     } = sim;
-    for entry in bodies.values_mut() {
-        if entry.kind != BodyKind::Dynamic {
+    for (e, entry) in bodies.iter_mut() {
+        // (Held asleep whatever the water does.)
+        if entry.kind != BodyKind::Dynamic || resting.contains(e) {
             continue;
         }
         let Some(region) = regions[entry.region as usize].as_mut() else {
@@ -1081,6 +1086,8 @@ fn prepare_forces(
     };
     entities.sort_unstable();
     entities.dedup();
+    // Colliders whose water was looked at (each looks at up to 26 points).
+    let mut wetted = 0;
     for e in entities {
         let Some(entry) = sim.bodies.get_mut(&e) else {
             sim.forced.remove(&e);
@@ -1104,7 +1111,12 @@ fn prepare_forces(
         let Some(rb) = region.world.bodies.get(h) else {
             continue;
         };
-        if rb.is_sleeping() && !had_forces {
+        // A sleeping body moves with no force: one only for gravity's change across the region
+        // (planets), or left from before it slept, waits until it wakes (gameplay's own forces
+        // wake it, and stay here). Taking it mutably every substep isn't free.
+        let pushed = external.0 != Vec3::ZERO || external.1 != Vec3::ZERO;
+        if rb.is_sleeping() && !(had_forces && pushed) {
+            sim.forced.remove(&e);
             continue;
         }
         let com = rb.center_of_mass();
@@ -1140,6 +1152,7 @@ fn prepare_forces(
                     if c.is_sensor() {
                         continue;
                     }
+                    wetted += 1;
                     let aabb = c.compute_aabb();
                     let height = (aabb.maxs.y - aabb.mins.y).max(1e-3);
                     // Lift (and its torque) from the pressure on the real shape where there
@@ -1220,6 +1233,9 @@ fn prepare_forces(
         if !forced {
             sim.forced.remove(&e);
         }
+    }
+    if wetted > 0 && crate::report::wanted() {
+        crate::report::count("buoyant colliders", wetted);
     }
 }
 

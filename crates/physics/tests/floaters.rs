@@ -152,3 +152,26 @@ fn floaters_drop_again_on_their_cycle() {
     );
     assert_eq!(bodies(&mut app), total, "replays changed the body count");
 }
+
+/// With nobody near, the float test rests where it floats (floating bodies never fall asleep
+/// by themselves), and it drops again when somebody comes back.
+#[test]
+fn floaters_rest_while_nobody_is_near() {
+    let mut app = app();
+    let focus = app
+        .world
+        .spawn((
+            Transform::from_xyz(300.0, 1.7, 0.0),
+            engine_world::SimulationFocus::default(),
+        ))
+        .id();
+    app.update_n(12 * 60);
+    let stats = *app.world.resource::<engine_physics::PhysicsStats>();
+    assert!(stats.bodies >= 8 && stats.awake == 0, "{stats:?}");
+    let ball = named(&mut app, "Float test: ball");
+    app.world.get_mut::<Transform>(focus).unwrap().translation.x = 20.0;
+    app.update_n(10);
+    assert!(app.world.get_entity(ball).is_err(), "it didn't drop again");
+    let stats = *app.world.resource::<engine_physics::PhysicsStats>();
+    assert!(stats.awake >= 8, "{stats:?}");
+}

@@ -9,17 +9,20 @@
 //! edge (it lands flat), a light playground ball (it rides high), a sealed empty oil drum and
 //! a steel ball (it sinks).
 //!
-//! It replays every [`FLOAT_CYCLE_SECS`] of world time while a focus point is within 250 m.
+//! It replays every [`FLOAT_CYCLE_SECS`] of world time while a focus point is near. With
+//! nobody near for a few seconds it rests, held asleep where it floats (floating bodies never
+//! fall asleep by themselves, and their buoyancy samples the water every substep), and it drops
+//! again when somebody comes back, like the proving ground's stations.
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_core::time::FixedTime;
 use engine_world::FocusPoints;
 use engine_world::SurfaceId;
-use engine_world::physics::{Collider, ColliderShape};
+use engine_world::physics::{Collider, ColliderShape, RigidBody};
 
 use super::art::{Mat, props, timber};
-use super::{STATION_REST_M, Yard};
+use super::{FAR_REST_SECS, STATION_REST_M, STATION_WAKE_M, Yard};
 
 /// World seconds between drops: the splash, the bobbing and the slow tips play out in about
 /// 20 s, then everything floats at rest.
@@ -35,6 +38,10 @@ pub struct FloatTest {
     running: f64,
     /// What the last drop spawned.
     parts: Vec<Entity>,
+    /// World seconds with nobody near.
+    away: f64,
+    /// Held asleep until somebody comes near.
+    resting: bool,
     /// Drop again on the cycle (on by default).
     pub replay: bool,
 }
@@ -54,6 +61,8 @@ pub fn spawn_floaters(commands: &mut Commands, at: DVec3) {
                     surfaces,
                     running: 0.0,
                     parts: Vec::new(),
+                    away: 0.0,
+                    resting: false,
                     replay: true,
                 },
             ))
@@ -79,6 +88,8 @@ fn drop_floaters(world: &mut World, anchor: Entity) {
     if let Some(mut t) = world.get_mut::<FloatTest>(anchor) {
         t.parts = parts;
         t.running = 0.0;
+        t.away = 0.0;
+        t.resting = false;
     }
 }
 
@@ -91,11 +102,32 @@ pub(crate) fn replay_floaters(world: &mut World) {
         .get_resource::<FocusPoints>()
         .map(|f| f.points.clone())
         .unwrap_or_default();
-    let watched =
-        |at: DVec3| focus.is_empty() || focus.iter().any(|p| p.distance(at) < STATION_REST_M);
-    let mut due = Vec::new();
+    // (No focus, as in tests and tools: it always runs.)
+    let nearest = |at: DVec3| {
+        focus
+            .iter()
+            .map(|p| p.distance(at))
+            .fold(if focus.is_empty() { 0.0 } else { f64::INFINITY }, f64::min)
+    };
+    let (mut due, mut rest) = (Vec::new(), Vec::new());
     for (e, mut t) in world.query::<(Entity, &mut FloatTest)>().iter_mut(world) {
-        if !t.replay || !watched(t.origin) {
+        let d = nearest(t.origin);
+        if t.resting {
+            if d < STATION_WAKE_M {
+                due.push(e);
+            }
+            continue;
+        }
+        if d >= STATION_REST_M {
+            t.away += dt;
+            if t.away >= FAR_REST_SECS {
+                t.resting = true;
+                rest.extend(t.parts.iter().copied());
+            }
+            continue;
+        }
+        t.away = 0.0;
+        if !t.replay {
             continue;
         }
         t.running += dt;
@@ -105,6 +137,14 @@ pub(crate) fn replay_floaters(world: &mut World) {
     }
     for e in due {
         drop_floaters(world, e);
+    }
+    if !rest.is_empty() {
+        let bodies: Vec<Entity> = rest
+            .into_iter()
+            .filter(|e| world.get::<RigidBody>(*e).is_some())
+            .collect();
+        let shared = world.resource::<crate::SharedSimulation>().0.clone();
+        shared.write().resting.extend(bodies);
     }
 }
 
