@@ -255,6 +255,13 @@ fn shape_reach(shape: &ColliderShape) -> f32 {
     }
 }
 
+/// How far a collider can have moved since last frame's transform, m (a car at 300 km/h
+/// moves 1.4 m a frame at 60 Hz).
+const STALE_SLACK: f64 = 2.0;
+/// How far a skeleton's bone colliders reach from its origin, m (a horse with a rider, a
+/// raised arm).
+const SKELETON_REACH: f64 = 4.0;
+
 /// Collect physics colliders (meshes and height grids baked once a soft body comes near),
 /// character capsules and bone capsules.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -275,7 +282,10 @@ pub fn gather_colliders(
     mut shapes: Local<Vec<(LocalShape, Vec3, Quat)>>,
     mut bone_shapes: Local<Vec<(LocalShape, DVec3, Quat)>>,
     mut reaches: Local<HashMap<Entity, f32>>,
+    mut shifts: MessageReader<WorldShift>,
 ) {
+    // Re-anchored this frame: last frame's transforms are far off.
+    let shifted = shifts.read().count() > 0;
     let world = &mut *world;
     world.list.clear();
     world.seen.clear();
@@ -288,13 +298,22 @@ pub fn gather_colliders(
         .filter(|b| !b.frozen || !rests(b, &focus, &range, &config))
         .map(|b| (b.center, b.radius as f64 + BAKE_REACH))
         .collect();
+    // Their bounds, to pass over the world's far colliders at a glance.
+    let (lo, hi) = near_bodies.iter().fold(
+        (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
+        |(lo, hi), (c, r)| (lo.min(*c - *r), hi.max(*c + *r)),
+    );
+    let near = |p: DVec3, reach: f64| {
+        p.cmpge(lo - reach).all()
+            && p.cmple(hi + reach).all()
+            && near_bodies
+                .iter()
+                .any(|(b, body_reach)| (p - *b).length() < reach + body_reach)
+    };
     for (entity, collider, parent) in &colliders {
         if collider.sensor || near_bodies.is_empty() {
             continue;
         }
-        let Some(t) = world_transform(entity, &transforms) else {
-            continue;
-        };
         let reach = match reaches.get(&entity) {
             Some(r) if !collider.is_changed() => *r,
             _ => {
@@ -302,12 +321,24 @@ pub fn gather_colliders(
                 reaches.insert(entity, r);
                 r
             }
-        } as f64
-            * t.scale().max_element() as f64;
-        if !near_bodies
-            .iter()
-            .any(|(b, body_reach)| (t.translation() - *b).length() < reach + body_reach)
+        } as f64;
+        // Far by last frame's transform (with room for a frame's motion): skipped before
+        // working out where its parents are now.
+        let Ok((last, ..)) = transforms.get(entity) else {
+            continue;
+        };
+        if !shifted
+            && !near(
+                last.translation(),
+                reach * last.scale().max_element() as f64 + STALE_SLACK,
+            )
         {
+            continue;
+        }
+        let Some(t) = world_transform(entity, &transforms) else {
+            continue;
+        };
+        if !near(t.translation(), reach * t.scale().max_element() as f64) {
             continue;
         }
         // The rigid body this collider belongs to: itself or an ancestor.
@@ -383,6 +414,9 @@ pub fn gather_colliders(
         let Some(t) = world_transform(entity, &transforms) else {
             continue;
         };
+        if !near(t.translation(), cc.height as f64) {
+            continue;
+        }
         world.push(
             (entity, 10_000),
             WorldCollider {
@@ -405,6 +439,9 @@ pub fn gather_colliders(
         let Some(t) = world_transform(entity, &transforms) else {
             continue;
         };
+        if !near(t.translation(), SKELETON_REACH) {
+            continue;
+        }
         bone_shapes.clear();
         bones.resolve(&t, pose, &mut bone_shapes);
         for (k, (shape, pos, rot)) in bone_shapes.drain(..).enumerate() {
