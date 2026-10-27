@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use engine_core::ecs::system::SystemState;
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
+use engine_core::tasks::{TaskPool, TaskPoolBuilder};
 use engine_world::physics::{
     ApplyImpulse, BodyKind, CharacterController, CharacterMove, CharacterState, Collider,
     ContactEvent, ExternalForce, Joint, MassProperties, RigidBody, Velocity,
@@ -150,8 +151,26 @@ impl FromWorld for StepQueries {
     }
 }
 
-/// The physics step (`FixedUpdate`, `SimSet::Physics`).
-pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>) {
+/// What the three parts of the physics step hand each other: [`physics_sync`] reads the
+/// world, [`physics_simulate`] steps Rapier, [`physics_write_back`] writes the results.
+#[derive(Resource, Default)]
+pub(crate) struct StepCarry {
+    started: Option<Instant>,
+    settings: PhysicsSettings,
+    gravity: Gravity,
+    foci: Vec<DVec3>,
+    water: Option<Water>,
+    dt: f32,
+    /// New bodies, to get their companion components.
+    inserts: Vec<Entity>,
+    substeps: u32,
+    report: bool,
+}
+
+/// The physics step, first part (`FixedUpdate`, `SimSet::Physics`, exclusive): read what
+/// gameplay changed (bodies, colliders, joints, characters, poses, velocities, forces,
+/// impulses) into the simulation.
+pub(crate) fn physics_sync(world: &mut World, mut q: Local<Option<StepQueries>>) {
     let started = Instant::now();
     if q.is_none() {
         *q = Some(StepQueries::from_world(world));
@@ -196,12 +215,10 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         .map(|f| f.points.clone())
         .unwrap_or_default();
     let water = world.get_resource::<Water>().cloned();
-    let (dt, real_dt) = {
-        let t = world.resource::<Time>();
-        (t.delta_secs(), t.real_delta_secs())
-    };
+    let dt = world.resource::<Time>().delta_secs();
 
     // ---------------------------------------------------------------- removals
+    let _part = tracing::info_span!("sync removals").entered();
     let mut gone: Vec<Entity> = std::mem::take(&mut world.resource_mut::<PendingRemovals>().0);
     {
         let Ok((mut rb, mut co, mut jo, mut ch)) = q.removed.get_mut(world) else {
@@ -228,7 +245,9 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
     }
 
+    drop(_part);
     // ---------------------------------------------------------------- bodies
+    let _part = tracing::info_span!("sync bodies").entered();
     let changed: Vec<Entity> = q.changed_bodies.iter(world).collect();
     let mut inserts: Vec<Entity> = Vec::new();
     for e in changed {
@@ -262,7 +281,9 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         inserts.push(e);
     }
 
+    drop(_part);
     // ---------------------------------------------------------------- colliders
+    let _part = tracing::info_span!("sync colliders").entered();
     dirty_colliders.extend(q.changed_colliders.iter(world));
     for e in q.moved_colliders.iter(world) {
         match sim.colliders.get(&e) {
@@ -319,7 +340,9 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
     }
 
+    drop(_part);
     // ---------------------------------------------------------------- joints
+    let _part = tracing::info_span!("sync joints and characters").entered();
     for e in q.changed_joints.iter(world).collect::<Vec<_>>() {
         let desc = world.get::<Joint>(e).unwrap().clone();
         // A world shift moves world anchors in the cache too.
@@ -402,7 +425,9 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
     }
 
+    drop(_part);
     // ---------------------------------------------------------------- gameplay inputs
+    let _part = tracing::info_span!("sync inputs").entered();
     let inputs: Vec<(Entity, Transform, Option<Velocity>, Option<ExternalForce>)> = q
         .body_inputs
         .iter(world)
@@ -496,6 +521,8 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
             }
         }
     }
+    drop(_part);
+    let _part = tracing::info_span!("sync water and holds").entered();
     sim.water_clock += 1;
     if sim.water_clock >= WATER_LOOK_EVERY {
         sim.water_clock = 0;
@@ -510,7 +537,51 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
     if !sim.resting.is_empty() || !sim.ungrounded.is_empty() {
         hold_resting(&mut sim);
     }
+    drop(_part);
     drop(sync);
+    drop(sim);
+    let mut carry = world.resource_mut::<StepCarry>();
+    *carry = StepCarry {
+        started: Some(started),
+        settings,
+        gravity,
+        foci,
+        water,
+        dt,
+        inserts,
+        substeps: 0,
+        report: false,
+    };
+}
+
+/// The physics step, second part (`FixedUpdate`, `SimSet::Physics`, after [`physics_sync`]):
+/// region upkeep and Rapier. It touches only the simulation, so it is a plain system and
+/// `SimSet::DuringPhysics` runs beside it (nothing there may query physics: the simulation
+/// is locked for writing throughout). Regions step side by side on their own pool
+/// ([`region_pool`]).
+pub(crate) fn physics_simulate(
+    shared: Res<SharedSimulation>,
+    mut carry: ResMut<StepCarry>,
+    #[cfg(test)] probe: Option<Res<tests::Beside>>,
+) {
+    #[cfg(test)]
+    if let Some(p) = probe {
+        p.meet(&p.simulating, &p.during);
+    }
+    let lock = tracing::info_span!("simulation lock").entered();
+    let mut sim = shared.0.write();
+    drop(lock);
+    if carry.started.is_none() {
+        return;
+    }
+    let (settings, gravity, foci, dt) = (
+        carry.settings.clone(),
+        carry.gravity.clone(),
+        carry.foci.clone(),
+        carry.dt,
+    );
+    // (The water is a handle on shared samples: cheap to take.)
+    let water = carry.water.take();
     // ---------------------------------------------------------------- regions
     let upkeep = tracing::info_span!("region upkeep").entered();
     // Only awake bodies move (sleeping ones are held still).
@@ -549,7 +620,7 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
     let busy = busy_regions(&sim);
     // Regions step side by side (Jolt and PhysX solve islands as parallel jobs; regions are
     // islands that share nothing): each substep's own work runs as one job per region on the
-    // compute pool, between passes that touch the shared books (forces, kinematics, contact
+    // region pool, between passes that touch the shared books (forces, kinematics, contact
     // events, joints) one region at a time. A region's substeps run in order as before, so it
     // steps exactly as it would alone.
     let mut plans: Vec<Plan> = Vec::new();
@@ -790,9 +861,32 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         }
     }
     drop(finish);
-    let write_back = tracing::info_span!("write back").entered();
     sim.recheck_contacts();
-    let _ = real_dt;
+    drop(sim);
+    carry.substeps = substeps;
+    carry.report = report;
+}
+
+/// The physics step, last part (`FixedUpdate`, `SimSet::Physics`, after
+/// [`physics_simulate`], exclusive): write poses, velocities, masses and character states
+/// back, send contact messages and stats.
+pub(crate) fn physics_write_back(world: &mut World) {
+    let write_back = tracing::info_span!("write back").entered();
+    let carry = std::mem::take(&mut *world.resource_mut::<StepCarry>());
+    let Some(started) = carry.started else {
+        return;
+    };
+    let StepCarry {
+        settings,
+        gravity,
+        foci,
+        inserts,
+        substeps,
+        report,
+        ..
+    } = carry;
+    let shared = world.resource::<SharedSimulation>().0.clone();
+    let mut sim = shared.write();
 
     // ---------------------------------------------------------------- write back
     collect_writes(&mut sim);
@@ -1847,11 +1941,28 @@ type Job<'a> = (
     &'a HashSet<(ColliderHandle, ColliderHandle)>,
 );
 
-/// Run the regions' substep `jobs` side by side on the compute pool (in place when there is
-/// one, or no pool); the results come back in the jobs' order.
+/// Threads that step regions side by side, a pool of their own: [`physics_simulate`] is a
+/// plain system, so it runs on a compute-pool thread, and a scope opened there would run
+/// other systems' tasks while it waits (one that asks the locked simulation anything would
+/// never return). Region substeps never wait on anything, so this pool can't deadlock.
+fn region_pool() -> Option<&'static TaskPool> {
+    static POOL: std::sync::OnceLock<Option<TaskPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        (threads > 1).then(|| {
+            TaskPoolBuilder::new()
+                .num_threads((threads / 2).max(2))
+                .thread_name("physics regions".into())
+                .build()
+        })
+    })
+    .as_ref()
+}
+
+/// Run the regions' substep `jobs` side by side on [`region_pool`] (in place when there is
+/// one, or a single thread); the results come back in the jobs' order.
 fn run_substeps(jobs: Vec<Job>, shared: &SubstepShared) -> Vec<SubstepOut> {
-    let pool = engine_core::tasks::ComputeTaskPool::try_get();
-    match pool {
+    match region_pool() {
         Some(pool) if jobs.len() > 1 => pool.scope(|scope| {
             for (r, p, pending) in jobs {
                 scope.spawn(async move { substep(r, p, pending, shared) });
@@ -1946,4 +2057,58 @@ fn collect_writes(sim: &mut Simulation) {
         });
     }
     sim.writes = writes;
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    use engine_core::prelude::*;
+    use engine_core::time::TimeSource;
+
+    /// Two systems that each wait to see the other running: they meet only if they overlap.
+    #[derive(Resource, Default)]
+    pub(crate) struct Beside {
+        pub simulating: AtomicBool,
+        pub during: AtomicBool,
+        met: AtomicUsize,
+    }
+
+    impl Beside {
+        pub(crate) fn meet(&self, mine: &AtomicBool, theirs: &AtomicBool) {
+            mine.store(true, Ordering::SeqCst);
+            let until = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < until {
+                if theirs.load(Ordering::SeqCst) {
+                    self.met.fetch_add(1, Ordering::SeqCst);
+                    return;
+                }
+                std::hint::spin_loop();
+            }
+        }
+    }
+
+    /// Rapier's part of the step runs beside `SimSet::DuringPhysics` (fire, smoke and cloth
+    /// fields step there), not alone.
+    #[test]
+    fn the_simulation_steps_beside_during_physics() {
+        fn during(probe: Res<Beside>) {
+            probe.meet(&probe.during, &probe.simulating);
+        }
+        let mut app = App::new();
+        app.add_plugins(engine_world::WorldPlugin);
+        app.add_plugins(crate::PhysicsPlugin);
+        app.world
+            .resource_mut::<Time>()
+            .set_source(TimeSource::Manual {
+                step_secs: 1.0 / 60.0,
+            });
+        app.world.resource_mut::<FixedTime>().set_hz(60.0);
+        app.init_resource::<Beside>();
+        app.add_systems(FixedUpdate, during.in_set(SimSet::DuringPhysics));
+        app.world.run_schedule(FixedUpdate);
+        let met = app.world.resource::<Beside>().met.load(Ordering::SeqCst);
+        assert_eq!(met, 2, "the simulation ran alone");
+    }
 }

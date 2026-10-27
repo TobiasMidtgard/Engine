@@ -153,7 +153,22 @@ impl Plugin for PhysicsPlugin {
                 "Last physics step (read-only): bodies, awake bodies, regions, touching pairs, \
                  step time (ms), substeps.",
             )
-            .add_systems(FixedUpdate, step::physics_step.in_set(SimSet::Physics))
+            .init_resource::<step::StepCarry>()
+            // Reading the world and writing it back take the whole world; Rapier's part
+            // between them touches only the simulation, so `SimSet::DuringPhysics` runs
+            // beside it. It starts once the world is read (as Unreal's TG_DuringPhysics
+            // starts once the physics step is kicked off): begun first, it would hold the
+            // read back, and Rapier would run after it, alone.
+            .add_systems(
+                FixedUpdate,
+                (
+                    step::physics_sync.before(SimSet::DuringPhysics),
+                    step::physics_simulate,
+                    step::physics_write_back,
+                )
+                    .chain()
+                    .in_set(SimSet::Physics),
+            )
             .init_resource::<demo::StationWork>()
             .init_resource::<demo::FloatWork>()
             // The replays take the whole world (they spawn and despawn stations), so they
