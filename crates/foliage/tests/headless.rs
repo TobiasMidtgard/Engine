@@ -3,7 +3,7 @@
 //! with a note when neither is available.
 
 use engine_core::prelude::*;
-use engine_foliage::{FoliagePlugin, Genes, spawn_plant};
+use engine_foliage::{FoliageLoading, FoliagePlugin, Genes, spawn_plant};
 use engine_render::prelude::*;
 use engine_render::{RenderDisabled, capture_now};
 
@@ -44,6 +44,17 @@ fn app(width: u32, height: u32, sun_lux: f32) -> App {
 }
 
 fn capture(app: &mut App, name: &str) -> Option<image::RgbaImage> {
+    // The species' visuals build in the background, as behind a loading screen.
+    let start = std::time::Instant::now();
+    app.update_n(2);
+    while !app.world.resource::<FoliageLoading>().is_ready() && start.elapsed().as_secs() < 120 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        app.update();
+    }
+    assert!(
+        app.world.resource::<FoliageLoading>().is_ready(),
+        "foliage still loading"
+    );
     app.update_n(4);
     if let Some(d) = app.world.get_resource::<RenderDisabled>() {
         eprintln!("skipping: no GPU ({})", d.0);

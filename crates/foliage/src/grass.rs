@@ -453,6 +453,7 @@ mod tests {
             });
         app.add_plugins(engine_world::WorldPlugin);
         app.add_plugins(crate::FoliagePlugin);
+        app.world.insert_resource(crate::FoliageLoading::in_frame());
         app
     }
 

@@ -87,6 +87,7 @@ const SHADOW_MARGIN_M: f32 = 40.0;
 pub fn sync_scenery_trees(
     mut commands: Commands,
     mut frame: Local<u32>,
+    mut loading: ResMut<crate::loading::FoliageLoading>,
     library: Res<PlantLibrary>,
     visuals: Res<FoliageVisuals>,
     settings: Res<EcologySettings>,
@@ -110,8 +111,20 @@ pub fn sync_scenery_trees(
         return;
     };
     let shadow_reach = render.as_ref().map_or(350.0, |r| r.shadow_distance) + SHADOW_MARGIN_M;
+    // While loading, new ones get their parts a few ms a frame (their spawns cost about as
+    // much again when the commands apply).
+    let started = std::time::Instant::now();
+    let fresh_budget = loading.fresh_budget();
+    let (mut fresh_seen, mut out_of_time) = (0u32, false);
     for (entity, tree, global, visual) in &mut trees {
         let fresh = visual.is_none();
+        if fresh {
+            if out_of_time {
+                continue;
+            }
+            fresh_seen += 1;
+            out_of_time = fresh_seen.is_multiple_of(16) && started.elapsed() > fresh_budget;
+        }
         // Not propagated yet: its world transform still says the origin.
         if fresh && global.is_added() {
             continue;
@@ -174,6 +187,7 @@ pub fn sync_scenery_trees(
             }
         }
     }
+    loading.bypass_change_detection().trees_waiting = out_of_time;
 }
 
 #[cfg(test)]
@@ -196,6 +210,7 @@ mod tests {
             .init_resource::<Assets<engine_render::StandardMaterial>>()
             .init_resource::<Assets<engine_render::Image>>()
             .add_plugins(FoliagePlugin);
+        app.world.insert_resource(crate::FoliageLoading::in_frame());
         let all = PlantLibrary::default();
         let pine = all.get(all.id("pine").unwrap()).clone();
         app.world.insert_resource(PlantLibrary {

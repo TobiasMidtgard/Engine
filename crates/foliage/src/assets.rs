@@ -3,14 +3,21 @@
 //! shares, so a whole forest draws in a handful of instanced batches.
 //!
 //! Built once per species the first time it is needed, and rebuilt when a species' data
-//! changes (a designer or AI agent editing `PlantLibrary`).
+//! changes (a designer or AI agent editing `PlantLibrary`). The meshes and textures are made
+//! on worker threads, a species per thread, and uploaded a few ms a frame
+//! ([`crate::loading`]); plants of a species draw once its visuals are in.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
+use engine_core::tasks::AsyncComputeTaskPool;
 use engine_render::{AlphaMode, Image, Mesh, StandardMaterial};
 
+use crate::loading::FoliageLoading;
 use crate::meshgen::bark::{BarkKind, bark_textures};
 use crate::meshgen::small::small;
 use crate::meshgen::small_textures::{
@@ -117,7 +124,7 @@ pub struct FoliageVisuals {
     /// Bark texture sets, one per kind of bark, shared by every species with that bark.
     bark_textures: HashMap<BarkKind, BarkImages>,
     small_textures: HashMap<SmallKind, SmallMaps>,
-    /// The moss cushions on old logs ([`deadwood_moss`]), shared by every species.
+    /// The moss cushions on old logs ([`moss_material`]), shared by every species.
     moss: Option<Handle<StandardMaterial>>,
 }
 
@@ -191,15 +198,37 @@ struct LeafImages {
 /// leaf with the single-leaf atlas instead).
 const LEAF_ATLAS_SIZE: u32 = 1024;
 
+/// The painted images of a leaf style, not yet uploaded.
+struct PaintedLeaves {
+    color: Image,
+    normal: Option<Image>,
+    hero: Option<(Image, Image)>,
+    mass: Option<(Image, Image)>,
+}
+
+impl PaintedLeaves {
+    fn upload(self, images: &mut Assets<Image>) -> LeafImages {
+        let mut pair = |(c, n): (Image, Image)| (images.add(c), images.add(n));
+        let hero = self.hero.map(&mut pair);
+        let mass = self.mass.map(&mut pair);
+        LeafImages {
+            color: images.add(self.color),
+            normal: self.normal.map(|n| images.add(n)),
+            hero,
+            mass,
+        }
+    }
+}
+
 /// Paint the leaf images of a style: a [`LEAF_ATLAS_SIZE`]² atlas of sprays with a normal map
 /// for trees and shrubs, a single 256² image for fern fronds.
-fn paint_leaves(style: LeafStyle, images: &mut Assets<Image>) -> LeafImages {
+fn paint_leaves(style: LeafStyle) -> PaintedLeaves {
     let kind = kind_of(style);
     let seed = atlas_seed(style);
     if kind == LeafKind::Frond {
         let t = leaf_textures(kind, 256, seed);
-        return LeafImages {
-            color: images.add(t.color),
+        return PaintedLeaves {
+            color: t.color,
             normal: None,
             hero: None,
             mass: None,
@@ -208,14 +237,14 @@ fn paint_leaves(style: LeafStyle, images: &mut Assets<Image>) -> LeafImages {
     let t = leaf_textures(kind, LEAF_ATLAS_SIZE, seed);
     let hero = (!kind.is_needles()).then(|| {
         let h = hero_leaf_textures(kind, HERO_ATLAS_SIZE, seed);
-        (images.add(h.color), images.add(h.normal))
+        (h.color, h.normal)
     });
     let m = mass_textures(kind, MASS_ATLAS_SIZE, seed);
-    LeafImages {
-        color: images.add(t.color),
-        normal: Some(images.add(t.normal)),
+    PaintedLeaves {
+        color: t.color,
+        normal: Some(t.normal),
         hero,
-        mass: Some((images.add(m.color), images.add(m.normal))),
+        mass: Some((m.color, m.normal)),
     }
 }
 
@@ -235,78 +264,333 @@ fn name_seed(name: &str) -> u64 {
     })
 }
 
-/// Build (or rebuild) the visuals of every species that is missing or out of date.
+/// One piece of the slow, CPU-only part of building species visuals.
+#[derive(Clone)]
+enum Job {
+    Leaves(LeafStyle),
+    /// Paints the bark kind into its shared cache ([`bark_textures`]) and copies it out.
+    Bark(BarkKind),
+    Small(SmallKind),
+    Moss,
+    Meshes(usize, Box<PlantSpecies>),
+}
+
+/// What a [`Job`] made.
+enum Baked {
+    Leaves(LeafStyle, PaintedLeaves),
+    Bark(BarkKind, [Image; 3]),
+    Small(SmallKind, TextureSet),
+    Moss([Image; 3]),
+    Meshes(usize, PlantSpecies, Vec<(PlantMeshes, Option<PlantMeshes>)>),
+}
+
+impl Job {
+    fn run(self) -> Baked {
+        match self {
+            Job::Leaves(style) => Baked::Leaves(style, paint_leaves(style)),
+            Job::Bark(kind) => {
+                let t = bark_textures(kind);
+                Baked::Bark(kind, [t.albedo.clone(), t.normal.clone(), t.orm.clone()])
+            }
+            Job::Small(kind) => Baked::Small(kind, kind.paint()),
+            Job::Moss => Baked::Moss(paint_moss()),
+            Job::Meshes(i, sp) => {
+                let sp = *sp;
+                let seed = name_seed(&sp.name);
+                let parts = (0..VARIANTS as u64)
+                    .map(|v| build_meshes(&sp, seed ^ (v * 0x9e37_79b9)))
+                    .collect();
+                Baked::Meshes(i, sp, parts)
+            }
+        }
+    }
+}
+
+/// Run the jobs on every core, each thread taking the next job when it is done, and return
+/// what they made in the jobs' order.
+fn bake(jobs: Vec<Job>) -> Vec<Baked> {
+    let next = AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |c| c.get())
+        .min(jobs.len())
+        .max(1);
+    let jobs = &jobs;
+    let mut done: Vec<(usize, Baked)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut out = Vec::new();
+                    loop {
+                        let k = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(job) = jobs.get(k) else {
+                            break out;
+                        };
+                        out.push((k, job.clone().run()));
+                    }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|w| w.join().unwrap_or_default())
+            .collect()
+    });
+    done.sort_by_key(|(k, _)| *k);
+    done.into_iter().map(|(_, b)| b).collect()
+}
+
+/// The species visuals build in flight and what is waiting to be uploaded.
+#[derive(Default)]
+pub struct SpeciesLoad {
+    bake: Option<Arc<Mutex<Option<Vec<Baked>>>>>,
+    ready: VecDeque<Baked>,
+}
+
+fn is_built(visuals: &FoliageVisuals, i: usize, sp: &PlantSpecies) -> bool {
+    visuals
+        .species
+        .get(i)
+        .and_then(|v| v.as_ref())
+        .is_some_and(|v| &v.built_from == sp)
+}
+
+/// Build (or rebuild) the visuals of every species that is missing or out of date: meshes and
+/// textures on worker threads, then uploaded within [`FoliageLoading::budget_ms`] a frame.
 pub fn ensure_species_visuals(
     library: Res<PlantLibrary>,
     mut visuals: ResMut<FoliageVisuals>,
+    mut loading: ResMut<FoliageLoading>,
+    mut state: Local<SpeciesLoad>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    if visuals.species.len() == library.len() && !library.is_changed() {
+    if let Some(done) = state
+        .bake
+        .as_ref()
+        .and_then(|slot| slot.lock().ok().and_then(|mut s| s.take()))
+    {
+        state.bake = None;
+        state.ready.extend(done);
+    }
+    // Start building what is missing or out of date, one build at a time.
+    let look = !loading.species_checked
+        || loading.species_building > 0
+        || library.is_changed()
+        || visuals.species.len() != library.len();
+    if look && state.bake.is_none() && state.ready.is_empty() {
+        loading.species_checked = true;
+        let todo: Vec<(usize, PlantSpecies)> = library
+            .species
+            .iter()
+            .enumerate()
+            .filter(|(i, sp)| !is_built(&visuals, *i, sp))
+            .map(|(i, sp)| (i, sp.clone()))
+            .collect();
+        loading.species_building = todo.len();
+        if todo.is_empty() {
+            if visuals.species.len() != library.len() {
+                visuals.species.truncate(library.len());
+            }
+        } else {
+            // Shared textures first: the species need them when they are uploaded.
+            let (mut leaves, mut barks, mut smalls) =
+                (HashSet::new(), HashSet::new(), HashSet::new());
+            let mut jobs = Vec::new();
+            for (_, sp) in &todo {
+                let style = sp.shape.leaf;
+                if matches!(
+                    sp.form,
+                    PlantForm::Broadleaf | PlantForm::Conifer | PlantForm::Shrub
+                ) && !visuals.textures.contains_key(&style)
+                    && leaves.insert(style)
+                {
+                    jobs.push(Job::Leaves(style));
+                }
+                if let Some(kind) = BarkKind::for_species(sp)
+                    && !visuals.bark_textures.contains_key(&kind)
+                    && barks.insert(kind)
+                {
+                    jobs.push(Job::Bark(kind));
+                }
+                if let Some(kind) = SmallKind::of(sp)
+                    && !visuals.small_textures.contains_key(&kind)
+                    && smalls.insert(kind)
+                {
+                    jobs.push(Job::Small(kind));
+                }
+            }
+            if visuals.moss.is_none() {
+                jobs.push(Job::Moss);
+            }
+            jobs.extend(todo.into_iter().map(|(i, sp)| Job::Meshes(i, Box::new(sp))));
+            match AsyncComputeTaskPool::try_get().filter(|_| loading.background) {
+                Some(pool) => {
+                    let slot = Arc::new(Mutex::new(None));
+                    let out = slot.clone();
+                    pool.spawn(async move {
+                        let baked = bake(jobs);
+                        if let Ok(mut s) = out.lock() {
+                            *s = Some(baked);
+                        }
+                    })
+                    .detach();
+                    state.bake = Some(slot);
+                }
+                None => state.ready.extend(bake(jobs)),
+            }
+        }
+    }
+    if state.ready.is_empty() {
         return;
     }
+    // Upload, within the frame's budget when loading in the background.
+    let started = Instant::now();
+    let budget = if loading.background {
+        loading.budget_ms
+    } else {
+        f32::INFINITY
+    };
+    let visuals = &mut *visuals;
     visuals.species.resize(library.len(), None);
-    for (i, sp) in library.species.iter().enumerate() {
-        if visuals.species[i]
-            .as_ref()
-            .is_some_and(|v| &v.built_from == sp)
-        {
-            continue;
-        }
-        let texture = match sp.form {
-            PlantForm::Broadleaf | PlantForm::Conifer | PlantForm::Shrub => {
-                // Ferns paint their own pinna maps (`SmallKind::Fern`).
-                let style = sp.shape.leaf;
-                Some(
-                    *visuals
-                        .textures
-                        .entry(style)
-                        .or_insert_with(|| paint_leaves(style, &mut images)),
-                )
-            }
-            _ => None,
+    while let Some(baked) = state.ready.pop_front() {
+        let item = Instant::now();
+        let what = match &baked {
+            Baked::Leaves(style, _) => format!("{style:?} leaves"),
+            Baked::Bark(kind, _) => format!("{kind:?} bark"),
+            Baked::Small(kind, _) => format!("{kind:?} maps"),
+            Baked::Moss(_) => "moss".to_string(),
+            Baked::Meshes(_, sp, _) => sp.name.clone(),
         };
-        let bark = BarkKind::for_species(sp).map(|kind| {
-            *visuals.bark_textures.entry(kind).or_insert_with(|| {
-                let painted = bark_textures(kind);
-                BarkImages {
-                    kind,
-                    albedo: images.add(painted.albedo.clone()),
-                    normal: images.add(painted.normal.clone()),
-                    orm: images.add(painted.orm.clone()),
+        match baked {
+            Baked::Leaves(style, painted) => {
+                visuals
+                    .textures
+                    .entry(style)
+                    .or_insert_with(|| painted.upload(&mut images));
+            }
+            Baked::Bark(kind, [albedo, normal, orm]) => {
+                visuals
+                    .bark_textures
+                    .entry(kind)
+                    .or_insert_with(|| BarkImages {
+                        kind,
+                        albedo: images.add(albedo),
+                        normal: images.add(normal),
+                        orm: images.add(orm),
+                    });
+            }
+            Baked::Small(kind, set) => {
+                visuals
+                    .small_textures
+                    .entry(kind)
+                    .or_insert_with(|| upload_small(set, &mut images));
+            }
+            Baked::Moss(painted) => {
+                if visuals.moss.is_none() {
+                    visuals.moss = Some(moss_material(painted, &mut images, &mut materials));
                 }
-            })
-        });
-        let small_maps = SmallKind::of(sp).map(|kind| {
-            *visuals.small_textures.entry(kind).or_insert_with(|| {
-                let set = kind.paint();
-                SmallMaps {
-                    albedo: images.add(set.albedo),
-                    normal: images.add(set.normal),
-                    emissive: set.emissive.map(|e| images.add(e)),
+            }
+            Baked::Meshes(i, sp, parts) => {
+                // A species edited meanwhile is built again from its new data.
+                if library.species.get(i) == Some(&sp) {
+                    let visual = upload_species(
+                        &sp,
+                        parts,
+                        visuals,
+                        &mut meshes,
+                        &mut materials,
+                        &mut images,
+                    );
+                    visuals.species[i] = Some(visual);
+                    loading.species_building = loading.species_building.saturating_sub(1);
+                    tracing::debug!("foliage: built visuals for {}", sp.name);
                 }
-            })
-        });
-        let moss = *visuals
-            .moss
-            .get_or_insert_with(|| deadwood_moss(&mut images, &mut materials));
-        let visual = build_species(
-            sp,
-            texture,
-            bark,
-            small_maps,
-            moss,
-            &mut meshes,
-            &mut materials,
-        );
-        visuals.species[i] = Some(visual);
-        tracing::debug!("foliage: built visuals for {}", sp.name);
+            }
+        }
+        let ms = item.elapsed().as_secs_f32() * 1000.0;
+        if ms > 4.0 {
+            tracing::info!("foliage: uploading {what} took {ms:.0} ms");
+        }
+        if started.elapsed().as_secs_f32() * 1000.0 >= budget {
+            break;
+        }
+    }
+    if state.ready.is_empty() && state.bake.is_none() {
+        loading.species_building = library
+            .species
+            .iter()
+            .enumerate()
+            .filter(|(i, sp)| !is_built(visuals, *i, sp))
+            .count();
     }
 }
 
+fn upload_bark(kind: BarkKind, images: &mut Assets<Image>) -> BarkImages {
+    let painted = bark_textures(kind);
+    BarkImages {
+        kind,
+        albedo: images.add(painted.albedo.clone()),
+        normal: images.add(painted.normal.clone()),
+        orm: images.add(painted.orm.clone()),
+    }
+}
+
+fn upload_small(set: TextureSet, images: &mut Assets<Image>) -> SmallMaps {
+    SmallMaps {
+        albedo: images.add(set.albedo),
+        normal: images.add(set.normal),
+        emissive: set.emissive.map(|e| images.add(e)),
+    }
+}
+
+/// A species' visuals from its baked meshes, with the shared textures (painted in the frame
+/// if a build somehow left one out).
+fn upload_species(
+    sp: &PlantSpecies,
+    parts: Vec<(PlantMeshes, Option<PlantMeshes>)>,
+    visuals: &mut FoliageVisuals,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+) -> SpeciesVisual {
+    let texture = match sp.form {
+        PlantForm::Broadleaf | PlantForm::Conifer | PlantForm::Shrub => {
+            // Ferns paint their own pinna maps (`SmallKind::Fern`).
+            let style = sp.shape.leaf;
+            Some(
+                *visuals
+                    .textures
+                    .entry(style)
+                    .or_insert_with(|| paint_leaves(style).upload(images)),
+            )
+        }
+        _ => None,
+    };
+    let bark = BarkKind::for_species(sp).map(|kind| {
+        *visuals
+            .bark_textures
+            .entry(kind)
+            .or_insert_with(|| upload_bark(kind, images))
+    });
+    let small_maps = SmallKind::of(sp).map(|kind| {
+        *visuals
+            .small_textures
+            .entry(kind)
+            .or_insert_with(|| upload_small(kind.paint(), images))
+    });
+    let moss = *visuals
+        .moss
+        .get_or_insert_with(|| moss_material(paint_moss(), images, materials));
+    build_species(
+        sp, parts, texture, bark, small_maps, moss, meshes, materials,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_species(
     sp: &PlantSpecies,
+    parts: Vec<(PlantMeshes, Option<PlantMeshes>)>,
     texture: Option<LeafImages>,
     bark_images: Option<BarkImages>,
     small_maps: Option<SmallMaps>,
@@ -314,10 +598,8 @@ fn build_species(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) -> SpeciesVisual {
-    let seed = name_seed(&sp.name);
-    let mut variants = Vec::with_capacity(VARIANTS);
-    for v in 0..VARIANTS as u64 {
-        let (full, sapling) = build_meshes(sp, seed ^ (v * 0x9e37_79b9));
+    let mut variants = Vec::with_capacity(parts.len());
+    for (full, sapling) in parts {
         let mut add = |m: Option<Mesh>| m.map(|m| meshes.add(m));
         let (sapling_wood, sapling_foliage, sapling_thin) = match sapling {
             Some(s) => (add(s.wood), add(s.foliage), s.foliage_thin),
@@ -542,11 +824,8 @@ fn build_species(
 /// The moss cushions on old logs: the forest floor's moss layer
 /// ([`crate::scenery::GroundLayer::Moss`]) as an alpha-masked material. The texture's alpha
 /// is the cushions' height and the mesh's vertex alpha the cover, so thin cover keeps only the
-/// tallest cushions.
-fn deadwood_moss(
-    images: &mut Assets<Image>,
-    materials: &mut Assets<StandardMaterial>,
-) -> Handle<StandardMaterial> {
+/// tallest cushions. Painted: albedo and height, normal, occlusion (R) / roughness (G).
+fn paint_moss() -> [Image; 3] {
     use crate::scenery::{GroundLayer, paint_layer};
     let n = 256;
     let layer = paint_layer(GroundLayer::Moss, n);
@@ -562,9 +841,21 @@ fn deadwood_moss(
         orm.extend_from_slice(&[px[3], px[2], 0, 255]);
     }
     let size = n as u32;
-    let albedo = images.add(Image::new(size, size, layer.albedo_height, true));
-    let normal = images.add(Image::new(size, size, normal, false));
-    let orm = images.add(Image::new(size, size, orm, false));
+    [
+        Image::new(size, size, layer.albedo_height, true),
+        Image::new(size, size, normal, false),
+        Image::new(size, size, orm, false),
+    ]
+}
+
+fn moss_material(
+    [albedo, normal, orm]: [Image; 3],
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+) -> Handle<StandardMaterial> {
+    let albedo = images.add(albedo);
+    let normal = images.add(normal);
+    let orm = images.add(orm);
     let mut m = StandardMaterial::color(1.0, 1.0, 1.0)
         .with_base_color_texture(albedo)
         .with_normal_texture(normal)

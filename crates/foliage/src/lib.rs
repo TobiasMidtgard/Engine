@@ -9,6 +9,7 @@ pub mod far_woods;
 pub mod felling;
 pub mod grass;
 pub mod grass_wear;
+pub mod loading;
 pub mod meshgen;
 pub mod near_woods;
 pub mod plant;
@@ -28,6 +29,7 @@ pub use api::spawn_plant;
 pub use ecology::{InRegion, RegionState, RegionStats};
 pub use far_woods::{FarWoods, KeepClear};
 pub use felling::{ChopResult, FallingTree, FoliageCollider, LogPose, chop, fell_tree};
+pub use loading::FoliageLoading;
 pub use near_woods::{NearWoods, NearWoodsTree};
 pub use plant::{
     Disturbance, EcologyRegion, EcologySettings, FelledLog, Genes, Plant, PlantStage,
@@ -49,6 +51,7 @@ impl Plugin for FoliagePlugin {
             .init_resource::<FoliageSeason>()
             .init_resource::<ecology::GrowthClock>()
             .init_resource::<assets::FoliageVisuals>()
+            .init_resource::<loading::FoliageLoading>()
             .init_resource::<visuals::GlowLights>()
             .init_resource::<FarWoods>()
             .init_resource::<far_woods::FarWoodsState>()

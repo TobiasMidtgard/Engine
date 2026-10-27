@@ -857,6 +857,7 @@ mod tests {
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<engine_render::Image>>()
             .add_plugins(crate::FoliagePlugin);
+        app.world.insert_resource(crate::FoliageLoading::in_frame());
         // Conifers only (building every species' visuals would take a while).
         let all = PlantLibrary::default();
         let keep = ["pine", "spruce"].map(|n| all.get(all.id(n).unwrap()).clone());

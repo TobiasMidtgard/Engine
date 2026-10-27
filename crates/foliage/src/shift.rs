@@ -9,6 +9,7 @@
 //!   translation moves the grids' origins, so every cell keeps its water, nutrients, minerals,
 //!   ash and trampling. A rotation resamples the soil into the new frame (each new cell takes
 //!   the old cell under it); regions stay rectangles along the new frame's X and Z.
+//! * regions still being built: what they will plant, once it is worked out.
 //! * falling trees: the stump, the hinge and the pose they settle from.
 //! * which way logs and falling trees lie (`LogPose::yaw`, turned by the shift's yaw).
 //! * what plants are posed on ([`PlantBase`]), turned with the world, so a plant's pose keeps
@@ -18,7 +19,7 @@
 use engine_core::prelude::*;
 use engine_world::WorldShift;
 
-use crate::ecology::RegionState;
+use crate::ecology::{RegionBuild, RegionState};
 use crate::felling::{FallingTree, LogPose};
 use crate::plant::Plant;
 use crate::visuals::{GlowLights, PlantBase};
@@ -31,10 +32,12 @@ fn combined(shifts: &mut MessageReader<WorldShift>) -> Option<WorldShift> {
 }
 
 /// Move foliage's own world-space state into the new frame.
+#[allow(clippy::too_many_arguments)]
 pub fn follow_world_shift(
     mut commands: Commands,
     mut shifts: MessageReader<WorldShift>,
     mut regions: Query<&mut RegionState>,
+    mut builds: Query<&mut RegionBuild>,
     mut plants: Query<(Entity, Option<&mut PlantBase>), With<Plant>>,
     mut falling: Query<&mut FallingTree>,
     mut poses: Query<&mut LogPose>,
@@ -47,6 +50,9 @@ pub fn follow_world_shift(
         let center = state.center;
         state.sim.shift(&s, center);
         state.center = s.point(center);
+    }
+    for mut b in &mut builds {
+        b.follow(&s);
     }
     for mut f in &mut falling {
         f.stump = s.point(f.stump);
@@ -97,6 +103,7 @@ mod tests {
             });
         app.add_plugins(engine_world::WorldPlugin);
         app.add_plugins(crate::FoliagePlugin);
+        app.world.insert_resource(crate::FoliageLoading::in_frame());
         app
     }
 
@@ -117,6 +124,60 @@ mod tests {
     fn with_shifts(app: &mut App) {
         app.init_resource::<Shifts>()
             .add_systems(PostUpdate, write_shifts.in_set(WorldShiftSet::Write));
+    }
+
+    #[test]
+    fn a_region_still_building_lands_where_the_world_moved_it() {
+        let grow = |shift_while_building: Option<WorldShift>| {
+            let mut app = app();
+            app.world.insert_resource(crate::FoliageLoading {
+                budget_ms: 0.0,
+                ..Default::default()
+            });
+            with_shifts(&mut app);
+            let region = app
+                .world
+                .spawn((
+                    Transform::from_xyz(100.0, 0.0, 50.0),
+                    EcologyRegion {
+                        half_extents: [20.0, 20.0],
+                        species: vec!["oak".into(), "fern".into()],
+                        history: crate::plant::RegionHistory {
+                            initial_plants: [30, 30, 30],
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                ))
+                .id();
+            app.update();
+            if let Some(s) = shift_while_building {
+                shift(&mut app, s);
+            }
+            let start = std::time::Instant::now();
+            while app.world.get::<RegionState>(region).is_none() && start.elapsed().as_secs() < 60 {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                app.update();
+            }
+            let center = app.world.get::<RegionState>(region).unwrap().center;
+            let mut q = app.world.query_filtered::<&Transform, With<Plant>>();
+            let mut at: Vec<[i64; 3]> = q
+                .iter(&app.world)
+                .map(|t| {
+                    (t.translation - center)
+                        .to_array()
+                        .map(|v| (v * 1e3) as i64)
+                })
+                .collect();
+            at.sort();
+            (center, at)
+        };
+        let s = WorldShift::translate(DVec3::new(-10_000.0, -3.0, 2_500.0));
+        let (home, still) = grow(None);
+        let (moved, shifted) = grow(Some(s));
+        assert!(!still.is_empty());
+        assert_eq!(moved, s.point(home));
+        assert_eq!(still, shifted, "the plants keep their places in the region");
     }
 
     #[test]

@@ -277,6 +277,7 @@ pub fn camera_position(world_cams: &Query<(&Camera, &GlobalTransform)>) -> Optio
 pub fn sync_plant_visuals(
     mut commands: Commands,
     mut frame: Local<u32>,
+    mut loading: ResMut<crate::loading::FoliageLoading>,
     library: Res<PlantLibrary>,
     visuals: Res<FoliageVisuals>,
     settings: Res<EcologySettings>,
@@ -299,8 +300,20 @@ pub fn sync_plant_visuals(
     let full_pass =
         *frame % 8 == 1 || visuals.is_changed() || settings.is_changed() || season.is_changed();
     let cam = camera_position(&cams);
+    // While loading, new ones get their parts a few ms a frame (their spawns cost about as
+    // much again when the commands apply).
+    let started = std::time::Instant::now();
+    let fresh_budget = loading.fresh_budget();
+    let (mut fresh_seen, mut out_of_time) = (0u32, false);
     for (entity, plant, mut transform, visual, fungi, base, region) in &mut plants {
         let fresh = visual.is_none();
+        if fresh {
+            if out_of_time {
+                continue;
+            }
+            fresh_seen += 1;
+            out_of_time = fresh_seen.is_multiple_of(16) && started.elapsed() > fresh_budget;
+        }
         if !full_pass && !fresh && !plant.is_changed() {
             continue;
         }
@@ -389,6 +402,7 @@ pub fn sync_plant_visuals(
             }
         }
     }
+    loading.bypass_change_detection().plants_waiting = out_of_time;
 }
 
 /// A child entity of `parent` drawing `part`.

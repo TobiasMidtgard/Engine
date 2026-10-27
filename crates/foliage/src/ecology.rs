@@ -2,14 +2,17 @@
 //! when they first run, then step every few simulated weeks; plants grow smoothly in between.
 
 use std::collections::HashMap;
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
+use std::sync::{Arc, Mutex};
 
 use engine_core::prelude::*;
+use engine_core::tasks::AsyncComputeTaskPool;
 use engine_world::{
     BurnState, Combustible, FocusPoints, Ground, HeatField, SimulationRange, SurfaceLayers,
-    SurfaceMaterials, Water, WeatherState, WindField,
+    SurfaceMaterials, Water, WeatherState, WindField, WorldShift,
 };
 
+use crate::loading::FoliageLoading;
 use crate::plant::{
     Disturbance, EcologyRegion, EcologySettings, FelledLog, Genes, Plant, PlantStage,
     ResourceSource,
@@ -135,18 +138,150 @@ fn rain_species(region: &EcologyRegion, library: &PlantLibrary) -> Vec<SpeciesId
     ids
 }
 
+/// The environment as owned copies, for building regions on worker threads.
+#[derive(Default)]
+struct EnvSnapshot {
+    weather: Option<WeatherState>,
+    surface: Option<SurfaceLayers>,
+    heat: Option<HeatField>,
+    wind: Option<WindField>,
+    ground: Option<Ground>,
+    water: Option<Water>,
+    materials: Option<SurfaceMaterials>,
+}
+
+impl EnvSnapshot {
+    fn of(world: &World) -> Self {
+        Self {
+            weather: world.get_resource().cloned(),
+            surface: world.get_resource().cloned(),
+            heat: world.get_resource().cloned(),
+            wind: world.get_resource().cloned(),
+            ground: world.get_resource().cloned(),
+            water: world.get_resource().cloned(),
+            materials: world.get_resource().cloned(),
+        }
+    }
+
+    fn view(&self) -> EnvView<'_> {
+        EnvView {
+            weather: self.weather.as_ref(),
+            surface: self.surface.as_ref(),
+            heat: self.heat.as_ref(),
+            wind: self.wind.as_ref(),
+            ground: self.ground.as_ref(),
+            water: self.water.as_ref(),
+            materials: self.materials.as_ref(),
+        }
+    }
+}
+
+/// A region's soil and history, worked out.
+struct BuiltRegion {
+    state: RegionState,
+    plants: Vec<SimPlant>,
+    logs: Vec<SimLog>,
+    /// How many plants and logs it grew.
+    grew: (usize, usize),
+    /// How long working it out took.
+    ms: f32,
+}
+
+/// On a region whose soil and history are being worked out off the frame, then planted a
+/// slice a frame.
+#[derive(Component)]
+pub struct RegionBuild {
+    slot: Arc<Mutex<Option<BuiltRegion>>>,
+    planting: Option<BuiltRegion>,
+    /// World shifts since the build began, applied when it is done.
+    shift: Option<WorldShift>,
+}
+
+impl RegionBuild {
+    /// Follow a world shift: what is being planted moves now, a build still running when it
+    /// is done.
+    pub(crate) fn follow(&mut self, s: &WorldShift) {
+        match &mut self.planting {
+            Some(built) => built.follow(s),
+            None => self.shift = Some(self.shift.map_or(*s, |a| a.then(s))),
+        }
+    }
+}
+
+impl BuiltRegion {
+    fn follow(&mut self, s: &WorldShift) {
+        let center = self.state.center;
+        self.state.sim.shift(s, center);
+        self.state.center = s.point(center);
+        for p in &mut self.plants {
+            p.pos = s.point(p.pos);
+        }
+        // Yaw is measured from +X toward +Z, the opposite sense to a turn about +Y.
+        let yaw = s.yaw();
+        for l in &mut self.logs {
+            l.pos = s.point(l.pos);
+            l.yaw = (l.yaw - yaw).rem_euclid(TAU);
+        }
+    }
+}
+
+/// Work out a region's soil and history.
+fn build_region(
+    region: &EcologyRegion,
+    center: DVec3,
+    sources: &[SimSource],
+    library: &PlantLibrary,
+    env: &EnvView,
+) -> BuiltRegion {
+    let start = std::time::Instant::now();
+    let soil = Soil::build(region, center, sources, env);
+    let mut sim = RegionSim::new(soil, region.seed);
+    let rain = rain_species(region, library);
+    let (plants, logs) = play_history(&mut sim, region, center, library, &rain, env);
+    BuiltRegion {
+        state: RegionState {
+            sim,
+            accum_years: 0.0,
+            pending_years: 0.0,
+            rain_species: rain,
+            center,
+            stats: RegionStats::default(),
+        },
+        grew: (plants.len(), logs.len()),
+        plants,
+        logs,
+        ms: start.elapsed().as_secs_f32() * 1000.0,
+    }
+}
+
 /// Build regions that haven't run yet: soil, then their history (prewarm), then spawn the
-/// plants and logs that history left behind.
+/// plants and logs that history left behind. With [`FoliageLoading::background`] the soil and
+/// history are worked out on the async task pool and the plants spawned within
+/// [`FoliageLoading::budget_ms`] a frame; the region gets its `RegionState` once all are in.
 pub fn init_regions(world: &mut World) {
-    let mut q =
-        world.query_filtered::<(Entity, &EcologyRegion, &Transform), Without<RegionState>>();
+    let loading = world
+        .get_resource::<FoliageLoading>()
+        .cloned()
+        .unwrap_or_else(FoliageLoading::in_frame);
+    let mut q = world.query_filtered::<(Entity, &EcologyRegion, &Transform), (
+        Without<RegionState>,
+        Without<RegionBuild>,
+    )>();
     let todo: Vec<(Entity, EcologyRegion, DVec3)> = q
         .iter(world)
         .map(|(e, r, t)| (e, r.clone(), t.translation))
         .collect();
-    if todo.is_empty() {
-        return;
+    if !todo.is_empty() {
+        start_regions(world, todo, &loading);
     }
+    plant_regions(world, &loading);
+}
+
+fn start_regions(
+    world: &mut World,
+    todo: Vec<(Entity, EcologyRegion, DVec3)>,
+    loading: &FoliageLoading,
+) {
     let mut sq = world.query::<(Entity, &ResourceSource, &Transform)>();
     let source_ids: Vec<Entity> = sq.iter(world).map(|(e, _, _)| e).collect();
     for e in source_ids {
@@ -162,52 +297,132 @@ pub fn init_regions(world: &mut World) {
             minerals: s.minerals,
         })
         .collect();
-    for (entity, region, center) in todo {
-        let start = std::time::Instant::now();
-        let library = world
+    let library = Arc::new(
+        world
             .get_resource::<PlantLibrary>()
             .cloned()
-            .unwrap_or_default();
-        let (state, plants, logs) = {
-            let env = EnvView::from_world(world);
-            let sources: Vec<SimSource> = all_sources
-                .iter()
-                .copied()
-                .filter(|s| {
-                    (s.pos.x - center.x).abs() <= (region.half_extents[0] + s.radius) as f64
-                        && (s.pos.z - center.z).abs() <= (region.half_extents[1] + s.radius) as f64
+            .unwrap_or_default(),
+    );
+    let pool = AsyncComputeTaskPool::try_get().filter(|_| loading.background);
+    let env = Arc::new(match pool {
+        Some(_) => EnvSnapshot::of(world),
+        None => EnvSnapshot::default(),
+    });
+    for (entity, region, center) in todo {
+        let sources: Vec<SimSource> = all_sources
+            .iter()
+            .copied()
+            .filter(|s| {
+                (s.pos.x - center.x).abs() <= (region.half_extents[0] + s.radius) as f64
+                    && (s.pos.z - center.z).abs() <= (region.half_extents[1] + s.radius) as f64
+            })
+            .collect();
+        let slot = Arc::new(Mutex::new(None));
+        match pool {
+            Some(pool) => {
+                let (out, library, env) = (slot.clone(), library.clone(), env.clone());
+                pool.spawn(async move {
+                    let built = build_region(&region, center, &sources, &library, &env.view());
+                    if let Ok(mut s) = out.lock() {
+                        *s = Some(built);
+                    }
                 })
-                .collect();
-            let soil = Soil::build(&region, center, &sources, &env);
-            let mut sim = RegionSim::new(soil, region.seed);
-            let rain = rain_species(&region, &library);
-            let (plants, logs) = play_history(&mut sim, &region, center, &library, &rain, &env);
-            (
-                RegionState {
-                    sim,
-                    accum_years: 0.0,
-                    pending_years: 0.0,
-                    rain_species: rain,
+                .detach();
+            }
+            None => {
+                let built = build_region(
+                    &region,
                     center,
-                    stats: RegionStats::default(),
-                },
-                plants,
-                logs,
-            )
+                    &sources,
+                    &library,
+                    &EnvView::from_world(world),
+                );
+                if let Ok(mut s) = slot.lock() {
+                    *s = Some(built);
+                }
+            }
+        }
+        world.entity_mut(entity).insert(RegionBuild {
+            slot,
+            planting: None,
+            shift: None,
+        });
+    }
+}
+
+/// Spawn the plants and logs of the regions worked out, within the frame's budget.
+fn plant_regions(world: &mut World, loading: &FoliageLoading) {
+    let mut q = world.query::<(Entity, &mut RegionBuild)>();
+    let building: Vec<Entity> = q.iter(world).map(|(e, _)| e).collect();
+    let started = std::time::Instant::now();
+    let budget = if loading.background {
+        loading.budget_ms
+    } else {
+        f32::INFINITY
+    };
+    let over = || started.elapsed().as_secs_f32() * 1000.0 >= budget;
+    for entity in building {
+        let Ok((_, mut build)) = q.get_mut(world, entity) else {
+            continue;
         };
-        let n = plants.len();
-        for p in plants {
-            spawn_sim_plant(world, p, Some(entity));
+        if build.planting.is_none() {
+            let shift = build.shift.take();
+            // Reversed, so planting pops them in their order.
+            build.planting = build
+                .slot
+                .lock()
+                .ok()
+                .and_then(|mut s| s.take())
+                .map(|mut b| {
+                    if let Some(s) = &shift {
+                        b.follow(s);
+                    }
+                    b.plants.reverse();
+                    b.logs.reverse();
+                    b
+                });
+            if build.planting.is_none() {
+                build.shift = shift;
+            }
         }
-        for log in &logs {
-            spawn_log(world, log);
+        let Some(mut built) = build.planting.take() else {
+            continue;
+        };
+        loop {
+            if !built.plants.is_empty() {
+                for _ in 0..64 {
+                    let Some(p) = built.plants.pop() else { break };
+                    spawn_sim_plant(world, p, Some(entity));
+                }
+            } else if let Some(log) = built.logs.pop() {
+                spawn_log(world, &log);
+            } else {
+                break;
+            }
+            if over() {
+                break;
+            }
         }
-        world.entity_mut(entity).insert(state);
+        if !built.plants.is_empty() || !built.logs.is_empty() {
+            if let Ok((_, mut build)) = q.get_mut(world, entity) {
+                build.planting = Some(built);
+            }
+            continue;
+        }
         tracing::info!(
-            "foliage: region {entity} grew {n} plants and {} logs in {:.0} ms",
-            logs.len(),
-            start.elapsed().as_secs_f32() * 1000.0
+            "foliage: region {entity} grew {} plants and {} logs in {:.0} ms",
+            built.grew.0,
+            built.grew.1,
+            built.ms
         );
+        world
+            .entity_mut(entity)
+            .remove::<RegionBuild>()
+            .insert(built.state);
+    }
+    let left = q.iter(world).count();
+    if let Some(mut l) = world.get_resource_mut::<FoliageLoading>() {
+        l.bypass_change_detection().regions_building = left;
     }
 }
 
@@ -523,18 +738,11 @@ fn disturb(
 
 /// Spawn a plant from simulation data.
 pub fn spawn_sim_plant(world: &mut World, p: SimPlant, region: Option<Entity>) -> Entity {
-    let sp_fuel;
-    let ignition;
-    let woody;
-    {
-        let library = world.get_resource::<PlantLibrary>();
-        let sp = library
-            .map(|l| l.get(p.plant.species).clone())
-            .unwrap_or_default();
-        sp_fuel = sp.fuel_kg;
-        ignition = sp.ignition_c;
-        woody = sp.is_woody();
-    }
+    let of = |sp: &PlantSpecies| (sp.fuel_kg, sp.ignition_c, sp.is_woody());
+    let (sp_fuel, ignition, woody) = match world.get_resource::<PlantLibrary>() {
+        Some(l) => of(l.get(p.plant.species)),
+        None => of(&PlantSpecies::default()),
+    };
     let combustible = Combustible {
         fuel_kg: sp_fuel * p.plant.size * p.plant.size,
         moisture: 0.3,
@@ -1078,6 +1286,51 @@ mod tests {
             LogSpan::of(DVec3::ZERO, &lying[0], &lib),
         );
         assert!(a.distance_to_span(&b) >= a.radius + b.radius);
+    }
+
+    #[test]
+    fn a_region_built_off_the_frame_grows_what_one_built_in_the_frame_does() {
+        let grow = |loading: crate::FoliageLoading| {
+            let mut app = App::new();
+            app.add_plugins(engine_world::WorldPlugin);
+            app.add_plugins(crate::FoliagePlugin);
+            app.world.insert_resource(loading);
+            app.world.resource_mut::<EcologySettings>().paused = true;
+            let region = app.world.spawn((Transform::default(), forest())).id();
+            let start = std::time::Instant::now();
+            app.update();
+            while app.world.get::<RegionState>(region).is_none() && start.elapsed().as_secs() < 60 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                app.update();
+            }
+            assert_eq!(
+                app.world
+                    .resource::<crate::FoliageLoading>()
+                    .regions_building(),
+                0
+            );
+            let mut q = app.world.query::<(&Plant, &Transform, &InRegion)>();
+            let mut plants: Vec<(u16, [i64; 3])> = q
+                .iter(&app.world)
+                .filter(|(_, _, r)| r.0 == Some(region))
+                .map(|(p, t, _)| {
+                    (
+                        p.species.0,
+                        t.translation.to_array().map(|v| (v * 1e3) as i64),
+                    )
+                })
+                .collect();
+            plants.sort();
+            plants
+        };
+        let in_frame = grow(crate::FoliageLoading::in_frame());
+        // A tiny budget: the plants go in a slice a frame.
+        let background = grow(crate::FoliageLoading {
+            budget_ms: 0.0,
+            ..Default::default()
+        });
+        assert!(in_frame.len() > 100, "{} plants", in_frame.len());
+        assert_eq!(in_frame, background);
     }
 
     #[test]
