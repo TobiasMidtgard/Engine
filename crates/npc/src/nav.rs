@@ -283,6 +283,7 @@ impl<'a> NavCtx<'a> {
         if self.grid.chunks.contains_key(&key) {
             return;
         }
+        let _span = tracing::info_span!("nav chunk").entered();
         let s = self.grid.settings;
         let margin = (s.agent_radius / s.cell).ceil() as i32;
         let side = CHUNK + 2 * margin;
@@ -485,6 +486,7 @@ impl<'a> NavCtx<'a> {
         extra_cost: &mut dyn FnMut(DVec3) -> f32,
         out: &mut Vec<DVec3>,
     ) -> PathStatus {
+        let _span = tracing::info_span!("find path").entered();
         out.clear();
         let s = self.grid.settings;
         let start = self.cell_of(from);

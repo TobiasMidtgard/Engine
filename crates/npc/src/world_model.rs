@@ -29,7 +29,11 @@ const COVER_REACH: f64 = 2.0;
 /// Regional changes kept for navigation, which drops only the chunks they touch.
 const CHANGE_LOG: usize = 64;
 /// Grid spacing of the cached ground heights used by line-of-sight checks, meters.
-const GROUND_CELL: f64 = 0.5;
+/// Ground height grid of the coarse terrain check in line of sight, meters. Lines sample the
+/// grid between its points, so rays that cross nearby share them: at half a metre nearly every
+/// sample of a new line was a fresh ask of the planet's ground (one tactics pick took 98 ms
+/// here and a second on Tobias's PC); at 2 m with bilinear blending the corners are shared.
+const GROUND_CELL: f64 = 2.0;
 
 /// Shape of an obstacle in its local frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -406,30 +410,33 @@ impl TacticalWorld {
     }
 
     /// The ground's height at `p` (see [`GroundQuery::sample`](engine_world::GroundQuery)),
-    /// taken at the nearest point of a half-metre grid and remembered. For coarse checks.
+    /// blended from the heights at the corners of its [`GROUND_CELL`] grid cell, which are
+    /// asked once and remembered. For coarse checks; `None` when a corner has no ground.
     pub fn cached_ground_height(&self, ground: &Ground, p: DVec3) -> Option<f64> {
-        let key = (
-            (p.x / GROUND_CELL).round() as i64,
-            (p.z / GROUND_CELL).round() as i64,
-            (p.y / 32.0).floor() as i64,
-        );
+        let (gx, gz) = (p.x / GROUND_CELL, p.z / GROUND_CELL);
+        let (x0, z0) = (gx.floor(), gz.floor());
+        let (fx, fz) = (gx - x0, gz - z0);
+        let band = (p.y / 32.0).floor() as i64;
         let Ok(mut cache) = self.ground_heights.lock() else {
             return ground.height(p);
         };
-        if let Some(&h) = cache.get(&key) {
-            return h;
-        }
         if cache.len() > 1 << 20 {
             cache.clear();
         }
-        let at = DVec3::new(
-            key.0 as f64 * GROUND_CELL,
-            key.2 as f64 * 32.0 + 16.0,
-            key.1 as f64 * GROUND_CELL,
-        );
-        let h = ground.height(at);
-        cache.insert(key, h);
-        h
+        let mut corner = |dx: i64, dz: i64| -> Option<f64> {
+            let key = (x0 as i64 + dx, z0 as i64 + dz, band);
+            *cache.entry(key).or_insert_with(|| {
+                ground.height(DVec3::new(
+                    key.0 as f64 * GROUND_CELL,
+                    band as f64 * 32.0 + 16.0,
+                    key.1 as f64 * GROUND_CELL,
+                ))
+            })
+        };
+        let (h00, h10, h01, h11) = (corner(0, 0)?, corner(1, 0)?, corner(0, 1)?, corner(1, 1)?);
+        let near = h00 + (h10 - h00) * fx;
+        let far = h01 + (h11 - h01) * fx;
+        Some(near + (far - near) * fz)
     }
 
     /// Forget the cached ground heights (the ground changed).

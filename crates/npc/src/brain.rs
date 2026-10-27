@@ -259,6 +259,7 @@ pub(crate) fn think_and_act(
             let jitter = 0.8 + 0.4 * brain.random();
             let pace = w.settings.think_secs * (1.3 - 0.5 * skills.logic) * jitter;
             brain.next_think = now + (pace * if far { 6.0 } else { 1.0 }) as f64;
+            let _span = tracing::info_span!("think").entered();
             let smoke = think(
                 me,
                 npc,

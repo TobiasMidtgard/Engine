@@ -13,6 +13,7 @@ engine_assets.workspace = true
 bevy_ecs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 image.workspace = true

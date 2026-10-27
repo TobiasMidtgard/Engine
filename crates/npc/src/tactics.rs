@@ -177,6 +177,7 @@ pub fn choose_position(
     path: &mut Vec<DVec3>,
     scored: &mut Vec<Spot>,
 ) -> Option<Spot> {
+    let _span = tracing::info_span!("choose position").entered();
     scored.clear();
     let w = q.weights;
     let budget = (12.0 + 44.0 * q.logic.clamp(0.0, 1.0)) as usize;
