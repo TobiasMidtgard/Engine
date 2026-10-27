@@ -924,6 +924,7 @@ fn hoist_drop(f: f32) -> f32 {
 }
 
 /// Move kinematic props and walkers.
+#[allow(clippy::type_complexity)]
 pub fn drive_motion(
     time: Res<Time>,
     mut movers: Query<(
@@ -931,9 +932,15 @@ pub fn drive_motion(
         &DemoMotion,
         &mut DemoClock,
         Option<&LocalTimeScale>,
+        Option<&SoftBodySim>,
     )>,
 ) {
-    for (mut t, motion, mut clock, scale) in &mut movers {
+    for (mut t, motion, mut clock, scale, body) in &mut movers {
+        // A body waiting for a mesh near it to bake waits where it is, or it would be dragged
+        // the whole way in one step when it starts.
+        if body.is_some_and(|b| b.waiting_for_bake()) {
+            continue;
+        }
         clock.0 += time.delta_for(scale);
         let s = clock.0;
         match *motion {

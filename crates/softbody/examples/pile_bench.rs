@@ -4,6 +4,8 @@
 //!
 //! ```sh
 //! cargo run -p engine_softbody --example pile_bench --release -- [seconds]
+//! NOSELF=1 ...      # without self-collision
+//! FRICTION=0 ...    # another friction (default 0.55); THICK=0.04 another thickness (m)
 //! ```
 
 use std::time::Instant;
@@ -25,9 +27,15 @@ fn main() {
         shear_compliance: 1e-2,
         bend_compliance: 2e-2,
         sim: SimSettings {
-            self_collide: true,
-            thickness: 0.012,
-            friction: 0.55,
+            self_collide: std::env::var_os("NOSELF").is_none(),
+            thickness: std::env::var("THICK")
+                .ok()
+                .and_then(|f| f.parse().ok())
+                .unwrap_or(0.012),
+            friction: std::env::var("FRICTION")
+                .ok()
+                .and_then(|f| f.parse().ok())
+                .unwrap_or(0.55),
             damping: 0.12,
             ..SimSettings::default()
         },
@@ -55,6 +63,21 @@ fn main() {
             .unwrap_or(5)] += 1;
     }
     println!("particles under 1 mm/s, 1 cm/s, 5 cm/s, 20 cm/s, 1 m/s, faster: {speeds:?}");
+    // How far they really go in the next second (speeds can swing back and forth in place).
+    let before = sim.pos.clone();
+    let mut s = sim.clone();
+    for _ in 0..60 {
+        s.step(1.0 / 60.0, &[]);
+    }
+    let mut drift = [0usize; 6];
+    for (a, b) in before.iter().zip(&s.pos) {
+        drift[[0.001, 0.01, 0.05, 0.2, 1.0]
+            .iter()
+            .position(|&l| a.distance(*b) < l)
+            .unwrap_or(5)] += 1;
+    }
+    let height = sim.pos.iter().map(|p| p.y).fold(f32::MIN, f32::max);
+    println!("moved in the next second, same bins (m): {drift:?}; pile {height:.2} m high");
     // The fastest of five runs, so other work on the machine doesn't count.
     let best = (0..5)
         .map(|_| {

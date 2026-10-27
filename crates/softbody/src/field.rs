@@ -37,9 +37,12 @@ const BAKE_INLINE: usize = 4096;
 /// A mesh bakes once a soft body comes this close to it (m), so it's ready on arrival.
 pub const BAKE_REACH: f64 = 10.0;
 
+/// Sweeps (fixed steps) a baked mesh is kept unused: a minute at 60 Hz.
+pub const KEEP_SWEEPS: u32 = 3600;
+
 /// Baked grids of the mesh and height-grid colliders near soft bodies, per collider part.
 /// Meshes far from every soft body are never baked; a changed or rescaled collider bakes
-/// again, and parts not seen in a step are dropped.
+/// again, and parts not seen for [`KEEP_SWEEPS`] steps are dropped.
 #[derive(Default)]
 pub struct FieldCache {
     slots: HashMap<(Entity, u32), Slot>,
@@ -48,6 +51,8 @@ pub struct FieldCache {
 struct Slot {
     scale: Vec3,
     used: bool,
+    /// Sweeps since it was last asked for.
+    idle: u32,
     /// Mesh center (collider space) and radius around it.
     bounds: (Vec3, f32),
     state: SlotState,
@@ -76,6 +81,7 @@ impl FieldCache {
         let slot = self.slots.entry(key).or_insert_with(|| Slot {
             scale,
             used: true,
+            idle: 0,
             bounds: (Vec3::ZERO, -1.0),
             state: SlotState::Idle,
         });
@@ -84,6 +90,7 @@ impl FieldCache {
             *slot = Slot {
                 scale,
                 used: true,
+                idle: 0,
                 bounds: (Vec3::ZERO, -1.0),
                 state: SlotState::Idle,
             };
@@ -142,9 +149,27 @@ impl FieldCache {
         slot.ready()
     }
 
-    /// Drop the parts not asked for since the last sweep.
+    /// Drop the parts not asked for in the last [`KEEP_SWEEPS`] sweeps. Kept a while, so a
+    /// body that rests or swings out of reach for a moment (the unveiling sheet lifted off
+    /// its statue) finds the mesh still baked when it comes back, instead of passing through
+    /// it while it bakes again.
     pub fn sweep(&mut self) {
-        self.slots.retain(|_, s| std::mem::take(&mut s.used));
+        self.slots.retain(|_, s| {
+            s.idle = if std::mem::take(&mut s.used) {
+                0
+            } else {
+                s.idle + 1
+            };
+            s.idle < KEEP_SWEEPS
+        });
+    }
+
+    /// Where part `key` is, if it is being baked: its center (collider space) and radius.
+    pub fn baking(&self, key: (Entity, u32)) -> Option<(Vec3, f32)> {
+        self.slots
+            .get(&key)
+            .filter(|s| matches!(s.state, SlotState::Baking(_)))
+            .map(|s| s.bounds)
     }
 
     /// Meshes baked and waiting to be baked.

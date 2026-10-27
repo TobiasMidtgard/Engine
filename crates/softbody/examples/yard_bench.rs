@@ -6,6 +6,7 @@
 //! SOLO=1 cargo run ...   # also times each body's solver with its colliders, and alone with
 //!                        # and without self-collision
 //! WORST=1 cargo run ...  # also prints the worst frame (hitches: restores, catch-up steps)
+//! TRACE="Unveiling sheet" cargo run ...  # that body's step, prewarm and pairs each frame
 //! ```
 
 use std::time::Instant;
@@ -45,6 +46,29 @@ fn main() {
         let t = Instant::now();
         app.update();
         let ms = t.elapsed().as_secs_f64() * 1000.0;
+        // TRACE=<body name>: that body's step each frame.
+        if let Ok(name) = std::env::var("TRACE") {
+            let mut q = app.world.query::<(&Name, &engine_softbody::SoftBodySim)>();
+            for (n, b) in q.iter(&app.world) {
+                if n.as_str() == name {
+                    let fields = b
+                        .last_colliders()
+                        .iter()
+                        .filter(|c| {
+                            matches!(c.shape, engine_softbody::collide::LocalShape::Field(_))
+                        })
+                        .count();
+                    println!(
+                        "{f:5} frame {ms:6.1} ms  step {:6.2} ms  prewarm {:4}  pairs {:6} solved {:6}  colliders {} fields {fields}",
+                        b.step_ms,
+                        b.pending_prewarm,
+                        b.sim.self_pairs(),
+                        b.sim.self_pairs_solved(),
+                        b.last_colliders().len(),
+                    );
+                }
+            }
+        }
         if ms > worst.0 {
             worst = (ms, f);
         }

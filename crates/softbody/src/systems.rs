@@ -80,6 +80,9 @@ pub struct ColliderWorld {
     seen: HashMap<(Entity, u32), (DVec3, Quat)>,
     /// Mesh and height-grid colliders baked for the solver.
     pub fields: FieldCache,
+    /// Meshes near a soft body still being baked (world center, radius): a body they can
+    /// reach waits for them rather than fall through them meanwhile.
+    pub baking: Vec<(DVec3, f64)>,
 }
 
 impl ColliderWorld {
@@ -270,6 +273,7 @@ pub fn gather_colliders(
     let world = &mut *world;
     world.list.clear();
     world.seen.clear();
+    world.baking.clear();
     // Only colliders that can reach a body that's awake: resting bodies don't collide, and
     // the rest of the world's colliders aren't converted at all.
     let near_bodies: Vec<(DVec3, f64)> = bodies
@@ -327,6 +331,7 @@ pub fn gather_colliders(
         let rot = t.rotation();
         let changed = collider.is_changed();
         let fields = &mut world.fields;
+        let baking = &mut world.baking;
         let mut part = 0;
         shapes.clear();
         convert_shape(
@@ -337,12 +342,17 @@ pub fn gather_colliders(
             &mut shapes,
             &mut |shape, scale, offset, r| {
                 part += 1;
-                fields.shape((entity, part - 1), shape, scale, changed, |c, radius| {
-                    let at = t.translation() + (rot * (offset + r * c)).as_dvec3();
+                let key = (entity, part - 1);
+                let at = |c: Vec3| t.translation() + (rot * (offset + r * c)).as_dvec3();
+                let grid = fields.shape(key, shape, scale, changed, |c, radius| {
                     near_bodies
                         .iter()
-                        .any(|(b, reach)| (at - *b).length() < radius as f64 + reach)
-                })
+                        .any(|(b, reach)| (at(c) - *b).length() < radius as f64 + reach)
+                });
+                if let Some((c, radius)) = fields.baking(key) {
+                    baking.push((at(c), radius as f64));
+                }
+                grid
             },
         );
         for (k, (shape, offset, r)) in shapes.drain(..).enumerate() {
@@ -808,6 +818,9 @@ const SLOW_STEP_MS: f64 = 50.0;
 /// Most settling (prewarm) a body does a frame, in particle substeps: about 3 ms on the PC.
 /// Counted rather than timed, so a body settles the same way on every machine.
 const PREWARM_WORK: usize = 30_000;
+/// Longest a body waits for a mesh near it to bake, s (real time: baking is). A statue
+/// bakes in about a second.
+const HOLD_FOR_BAKE_SECS: f32 = 5.0;
 
 /// The body that took longest in the last step, and how long (ms), for `softbody.stats`.
 #[derive(Resource, Default, Debug, Clone, Copy)]
@@ -963,6 +976,25 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
         return;
     }
     b.frozen = false;
+    // A mesh it can reach is still baking (just come near, or changed): wait for it, up to
+    // HOLD_FOR_BAKE_SECS. Stepped meanwhile, cloth would fall through it, and hang tangled in it
+    // once it is solid.
+    let waiting = ctx
+        .colliders
+        .baking
+        .iter()
+        .any(|(at, radius)| (*at - b.center).length() < radius + b.radius as f64);
+    if !waiting {
+        b.held = (None, false);
+    } else if !b.held.1 {
+        let since = *b.held.0.get_or_insert_with(Instant::now);
+        b.held.1 = since.elapsed().as_secs_f32() > HOLD_FOR_BAKE_SECS;
+        if !b.held.1 {
+            b.step_ms = 0.0;
+            b.sim.step_start.clone_from(&b.sim.pos);
+            return;
+        }
+    }
     // Farther bodies step less often, each step covering the time skipped: every 2nd fixed
     // step past lod_distance, every 4th past twice that. One hanging on something moving
     // steps at least every other, to keep up with it.

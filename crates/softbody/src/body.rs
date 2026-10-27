@@ -125,6 +125,8 @@ pub struct SoftBodySim {
     /// Simulated here but drawn by another module (hair from `HairGuides`).
     pub drawn_elsewhere: bool,
     pub(crate) scratch_colliders: Vec<LocalCollider>,
+    /// Since when it has waited for a mesh near it to bake, and whether it gave up waiting.
+    pub(crate) held: (Option<std::time::Instant>, bool),
 }
 
 impl SoftBodySim {
@@ -144,6 +146,11 @@ impl SoftBodySim {
     /// body stepping every few fixed steps is drawn moving across all of them.
     pub fn draw_alpha(&self, alpha: f32) -> f32 {
         ((self.lod_wait as f32 + alpha) / self.lod_every.max(1) as f32).min(1.0)
+    }
+
+    /// Held this step for a mesh near it that is still baking.
+    pub fn waiting_for_bake(&self) -> bool {
+        self.held.0.is_some() && !self.held.1
     }
 
     /// The colliders the last step met (body-local).
@@ -196,6 +203,7 @@ impl SoftBodySim {
             wet: Vec::new(),
             drawn_elsewhere: false,
             scratch_colliders: Vec::new(),
+            held: (None, false),
         };
         body.update_bounds();
         body
