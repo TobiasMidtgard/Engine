@@ -925,6 +925,7 @@ impl Renderer {
             (
                 settings.texture_compression,
                 settings.texture_compression_on_cpu,
+                world.contains_resource::<engine_world::LoadingBudget>(),
             ),
         );
         self.shared.images.compress(&self.shared);

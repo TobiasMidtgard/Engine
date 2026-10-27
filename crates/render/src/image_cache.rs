@@ -29,8 +29,16 @@
 //! the texels disagree), BC4 for one-channel slots (height, occlusion), BC5 for two-channel
 //! normal maps whose shader rebuilds z, and BC1 for opaque color in
 //! `TextureCompression::Compact`. The encoders are a WGSL port of Intel's ISPC texture
-//! compressor (the `block_compression` crate), at most [`COMPRESS_TEXELS_PER_FRAME`] texels a
-//! frame. Images whose levels don't halve to multiples of 4 texels stay RGBA8, as do
+//! compressor (the `block_compression` crate).
+//!
+//! The work is spread over frames in slices of rows, as Unreal's runtime virtual textures
+//! compress a few pages a frame: at most [`COMPRESS_TEXELS_IN_PLAY`] texels a frame with ISPC's
+//! "fast" BC7 profile in play, so a burst of new 4K textures costs about a millisecond of GPU a
+//! frame instead of stalling one for hundreds; [`COMPRESS_TEXELS_LOADING`] a frame with the
+//! "basic" profile while a `LoadingBudget` is present. A view goes on showing its RGBA8 texture
+//! until its last slice is done.
+//!
+//! Images whose levels don't halve to multiples of 4 texels stay RGBA8, as do
 //! [`TextureUse::Exact`] slots and 16-bit float images. Under a software GPU (lavapipe) nothing
 //! is compressed unless `RenderSettings::texture_compression_on_cpu` says so: building the
 //! encoders takes seconds there and every sample of a compressed texture is decoded in software.
@@ -68,8 +76,15 @@ pub const EVICT_AFTER_FRAMES: u64 = 600;
 /// being compressed over and over.
 pub const COMPRESS_AFTER_FRAMES: u64 = 30;
 
-/// Most texels compressed per frame (all mip levels counted): about four 2048² textures.
-pub const COMPRESS_TEXELS_PER_FRAME: u64 = 24 << 20;
+/// Most texels compressed per frame in play (all mip levels counted): a 2048² texture with its
+/// mips takes 11 frames. About a millisecond of GPU time on the lead's PC with the "fast" BC7
+/// profile: "basic" took it 4.5 ms per million texels, and "fast" is 2.5 times as fast for
+/// opaque images and 1.8 times for ones with alpha (measured under lavapipe).
+pub const COMPRESS_TEXELS_IN_PLAY: u64 = 512 << 10;
+
+/// Most texels compressed per frame while a `LoadingBudget` is present (nobody watches frame
+/// times behind a loading screen): about four 2048² textures.
+pub const COMPRESS_TEXELS_LOADING: u64 = 24 << 20;
 
 /// Images smaller than this on either side are left uncompressed (too small to matter).
 const COMPRESS_MIN_SIZE: u32 = 16;
@@ -139,14 +154,25 @@ impl Encoding {
         }
     }
 
-    fn variant(self) -> CompressionVariant {
-        match self {
-            Encoding::Bc1 => CompressionVariant::BC1,
-            Encoding::Bc4 => CompressionVariant::BC4,
-            Encoding::Bc5 => CompressionVariant::BC5,
-            // ISPC's "basic" profiles: all BC7 modes searched with two refinement passes.
-            Encoding::Bc7 { alpha: false } => CompressionVariant::BC7(BC7Settings::opaque_basic()),
-            Encoding::Bc7 { alpha: true } => CompressionVariant::BC7(BC7Settings::alpha_basic()),
+    /// `fast`: ISPC's "fast" BC7 profiles (the partitioned modes with the most candidates
+    /// skipped) instead of "basic" (every mode searched, two refinement passes).
+    fn variant(self, fast: bool) -> CompressionVariant {
+        match (self, fast) {
+            (Encoding::Bc1, _) => CompressionVariant::BC1,
+            (Encoding::Bc4, _) => CompressionVariant::BC4,
+            (Encoding::Bc5, _) => CompressionVariant::BC5,
+            (Encoding::Bc7 { alpha: false }, false) => {
+                CompressionVariant::BC7(BC7Settings::opaque_basic())
+            }
+            (Encoding::Bc7 { alpha: true }, false) => {
+                CompressionVariant::BC7(BC7Settings::alpha_basic())
+            }
+            (Encoding::Bc7 { alpha: false }, true) => {
+                CompressionVariant::BC7(BC7Settings::opaque_fast())
+            }
+            (Encoding::Bc7 { alpha: true }, true) => {
+                CompressionVariant::BC7(BC7Settings::alpha_fast())
+            }
         }
     }
 
@@ -250,6 +276,8 @@ pub struct ImageMemoryStats {
     pub compressed: u64,
     /// GPU bytes those compressions saved (RGBA8 size minus compressed size, all levels).
     pub bytes_compressed_away: u64,
+    /// Texels compressed since startup (all levels; whole slices, finished views or not).
+    pub texels_compressed: u64,
 }
 
 /// One image's GPU copies.
@@ -295,6 +323,10 @@ struct Inner {
     compression: TextureCompression,
     /// `RenderSettings::texture_compression_on_cpu` this frame.
     compress_on_cpu: bool,
+    /// A `LoadingBudget` is present this frame (compress more, more carefully).
+    loading: bool,
+    /// The view being compressed, a slice at a time.
+    encoding: Option<Encode>,
     /// The GPU encoders, built on a thread the first time an image is due (BC7's pipeline
     /// takes a while to compile on some backends).
     compressor: Compressor,
@@ -515,17 +547,19 @@ impl ImageCache {
         self.lock().targets.remove(&index);
     }
 
-    /// Start frame `frame`; `release` is `RenderSettings::release_image_pixels`.
+    /// Start frame `frame`; `release` is `RenderSettings::release_image_pixels`; `loading`: a
+    /// `LoadingBudget` is present.
     pub(crate) fn begin_frame(
         &self,
         frame: u64,
         release: bool,
-        (compression, on_cpu): (TextureCompression, bool),
+        (compression, on_cpu, loading): (TextureCompression, bool, bool),
     ) {
         let mut inner = self.lock();
         inner.frame = frame;
         inner.release = release;
         inner.compress_on_cpu = on_cpu;
+        inner.loading = loading;
         if compression != inner.compression {
             // Views already compressed stay; pending ones follow the new setting when they are
             // next uploaded.
@@ -534,13 +568,16 @@ impl ImageCache {
                     .images
                     .values_mut()
                     .for_each(|c| c.pending = [None; VIEW_SLOTS]);
+                inner.encoding = None;
             }
             inner.compression = compression;
         }
     }
 
-    /// Compress the views that have been unchanged for [`COMPRESS_AFTER_FRAMES`] (up to
-    /// [`COMPRESS_TEXELS_PER_FRAME`]) and swap them in. Records and submits its own commands.
+    /// Compress the views that have been unchanged for [`COMPRESS_AFTER_FRAMES`], a slice of
+    /// rows at a time up to this frame's texel budget ([`COMPRESS_TEXELS_IN_PLAY`] or
+    /// [`COMPRESS_TEXELS_LOADING`]), and swap in the ones finished. Records and submits its own
+    /// commands.
     pub(crate) fn compress(&self, gpu: &GpuShared) {
         let mut guard = self.lock();
         let inner = &mut *guard;
@@ -548,7 +585,11 @@ impl ImageCache {
         let due = |c: &CachedImage| {
             frame >= c.since + COMPRESS_AFTER_FRAMES && c.pending.iter().any(Option::is_some)
         };
-        if inner.compression == TextureCompression::Off || !inner.images.values().any(&due) {
+        if inner.compression == TextureCompression::Off {
+            inner.encoding = None;
+            return;
+        }
+        if inner.encoding.is_none() && !inner.images.values().any(&due) {
             return;
         }
         let compressor = match &mut inner.compressor {
@@ -576,31 +617,54 @@ impl ImageCache {
             Compressor::Failed => return,
         };
 
-        let mut budget = COMPRESS_TEXELS_PER_FRAME;
-        let mut jobs = Vec::new();
-        for (&index, cached) in inner.images.iter_mut() {
-            if budget == 0 {
-                break;
+        let loading = inner.loading;
+        let mut budget = if loading {
+            COMPRESS_TEXELS_LOADING
+        } else {
+            COMPRESS_TEXELS_IN_PLAY
+        };
+        let mut queued = 0;
+        let mut finished = Vec::new();
+        while budget > 0 {
+            if inner.encoding.is_none() {
+                let next =
+                    inner
+                        .images
+                        .iter_mut()
+                        .filter(|(_, c)| due(c))
+                        .find_map(|(&index, cached)| {
+                            (0..VIEW_SLOTS).find_map(|slot| {
+                                let encoding = cached.pending[slot].take()?;
+                                let source = cached.views[slot].clone()?;
+                                Some((index, slot, encoding, source))
+                            })
+                        });
+                let Some((index, slot, encoding, source)) = next else {
+                    break;
+                };
+                inner.encoding = Some(Encode::new(gpu, index, slot, encoding, !loading, source));
             }
-            if !due(cached) {
+            let Some(job) = &mut inner.encoding else {
+                break;
+            };
+            // Re-uploaded (new pixels) or dropped since it started: give it up.
+            let current = inner
+                .images
+                .get(&job.index)
+                .and_then(|c| c.views[job.slot].as_ref())
+                .is_some_and(|v| Arc::ptr_eq(v, &job.source));
+            if !current {
+                inner.encoding = None;
                 continue;
             }
-            for slot in 0..VIEW_SLOTS {
-                let (Some(encoding), Some(source)) = (cached.pending[slot], &cached.views[slot])
-                else {
-                    continue;
-                };
-                let texels = texels_with_mips(source.width, source.height, source.mip_levels);
-                if texels > budget && !jobs.is_empty() {
-                    budget = 0;
-                    break;
-                }
-                budget = budget.saturating_sub(texels);
-                cached.pending[slot] = None;
-                jobs.push((index, slot, encoding, source.clone()));
+            let texels = job.queue(compressor, budget);
+            queued += texels;
+            budget = budget.saturating_sub(texels);
+            if job.done() {
+                finished.extend(inner.encoding.take());
             }
         }
-        if jobs.is_empty() {
+        if queued == 0 && finished.is_empty() {
             return;
         }
 
@@ -609,13 +673,8 @@ impl ImageCache {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("texture compression"),
             });
-        let mut done = Vec::with_capacity(jobs.len());
-        for (index, slot, encoding, source) in jobs {
-            let compressed = encode_view(gpu, compressor, encoding, &source);
-            done.push((index, slot, encoding, source, compressed));
-        }
-        // One compute pass for every task recorded above; the copies into the compressed
-        // textures follow it.
+        // One compute pass for every slice queued above; the copies of the finished views into
+        // their compressed textures follow it.
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("texture compression"),
@@ -623,29 +682,27 @@ impl ImageCache {
             });
             compressor.compress(&mut pass);
         }
-        for (_, _, _, source, compressed) in &done {
-            compressed.copy(&mut encoder);
-            gpu.side_work.compressed(texels_with_mips(
-                source.width,
-                source.height,
-                source.mip_levels,
-            ));
+        for job in &finished {
+            job.out.copy(&mut encoder);
         }
         gpu.queue.submit([encoder.finish()]);
+        gpu.side_work.compressed(queued);
+        inner.stats.texels_compressed += queued;
 
-        for (index, slot, encoding, source, compressed) in done {
+        for Encode {
+            index,
+            slot,
+            encoding,
+            source,
+            out,
+            ..
+        } in finished
+        {
             let Some(cached) = inner.images.get_mut(&index) else {
                 continue;
             };
-            // Re-uploaded (new pixels) while this was recorded: drop it.
-            if !cached.views[slot]
-                .as_ref()
-                .is_some_and(|v| Arc::ptr_eq(v, &source))
-            {
-                continue;
-            }
             inner.next_id += 1;
-            let view = Arc::new(compressed.into_texture(&source, inner.next_id));
+            let view = Arc::new(out.into_texture(&source, inner.next_id));
             // A view of the same texture in the other color space follows it.
             if slot < 2
                 && let Some(other) = &cached.views[1 - slot]
@@ -910,78 +967,130 @@ pub(crate) fn copy_blocks(
     }
 }
 
-/// Queue the compression of every level of `source` (read as plain RGBA8) and create the
-/// texture it lands in.
-fn encode_view(
-    gpu: &GpuShared,
-    compressor: &mut GpuBlockCompressor,
+/// A view being compressed over one or more frames.
+struct Encode {
+    /// Its image (canonical handle index) and view slot.
+    index: u32,
+    slot: usize,
     encoding: Encoding,
-    source: &ImageTexture,
-) -> Compressed {
-    let (width, height, levels) = (source.width, source.height, source.mip_levels);
-    let format = encoding.format(source.srgb);
-    let alias = [if source.srgb {
-        format.remove_srgb_suffix()
-    } else {
-        format.add_srgb_suffix()
-    }];
-    let view_formats: &[wgpu::TextureFormat] = if source.aliasable && alias[0] != format {
-        &alias
-    } else {
-        &[]
-    };
-    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("compressed material image"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: levels,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats,
-    });
-    let mut offsets = Vec::with_capacity(levels as usize);
-    let mut total = 0u64;
-    for l in 0..levels {
-        offsets.push(total);
-        total += compressed_bytes(encoding, (width >> l).max(1), (height >> l).max(1), 1);
-    }
-    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("compressed blocks"),
-        size: total,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-    for (l, &offset) in offsets.iter().enumerate() {
-        let l = l as u32;
-        let view = source.texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("compression source"),
-            format: Some(source.texture.format().remove_srgb_suffix()),
-            base_mip_level: l,
-            mip_level_count: Some(1),
-            ..Default::default()
+    /// ISPC's "fast" BC7 profile (in play) rather than "basic".
+    fast: bool,
+    /// The RGBA8 view it compresses (still bound until this is done).
+    source: Arc<ImageTexture>,
+    out: Compressed,
+    /// The next slice: level, and first row (a multiple of 4).
+    level: u32,
+    row: u32,
+}
+
+impl Encode {
+    /// Create the texture and block buffer the compressed `source` lands in.
+    fn new(
+        gpu: &GpuShared,
+        index: u32,
+        slot: usize,
+        encoding: Encoding,
+        fast: bool,
+        source: Arc<ImageTexture>,
+    ) -> Self {
+        let (width, height, levels) = (source.width, source.height, source.mip_levels);
+        let format = encoding.format(source.srgb);
+        let alias = [if source.srgb {
+            format.remove_srgb_suffix()
+        } else {
+            format.add_srgb_suffix()
+        }];
+        let view_formats: &[wgpu::TextureFormat] = if source.aliasable && alias[0] != format {
+            &alias
+        } else {
+            &[]
+        };
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("compressed material image"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: levels,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats,
         });
-        let w = (width >> l).max(1).next_multiple_of(4);
-        let h = (height >> l).max(1).next_multiple_of(4);
-        compressor.add_compression_task(
-            encoding.variant(),
-            &view,
-            w,
-            h,
-            &buffer,
-            None,
-            Some(offset as u32),
-        );
+        let mut offsets = Vec::with_capacity(levels as usize);
+        let mut total = 0u64;
+        for l in 0..levels {
+            offsets.push(total);
+            total += compressed_bytes(encoding, (width >> l).max(1), (height >> l).max(1), 1);
+        }
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("compressed blocks"),
+            size: total,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        Self {
+            index,
+            slot,
+            encoding,
+            fast,
+            source,
+            out: Compressed {
+                texture,
+                buffer,
+                offsets,
+                block_bytes: encoding.block_bytes(),
+            },
+            level: 0,
+            row: 0,
+        }
     }
-    Compressed {
-        texture,
-        buffer,
-        offsets,
-        block_bytes: encoding.block_bytes(),
+
+    /// Queue the next slices (read as plain RGBA8), about `budget` texels' worth (at least one
+    /// block row). Returns the texels queued.
+    fn queue(&mut self, compressor: &mut GpuBlockCompressor, budget: u64) -> u64 {
+        let source = &self.source;
+        let mut queued = 0;
+        while self.level < source.mip_levels && queued < budget {
+            let l = self.level;
+            // Levels under a block across are padded by the encoder's clamped reads.
+            let w = (source.width >> l).max(1).next_multiple_of(4);
+            let h = (source.height >> l).max(1).next_multiple_of(4);
+            let fit = ((budget - queued) / w as u64).min(h as u64) as u32 / 4 * 4;
+            let rows = fit.clamp(4, h - self.row);
+            let view = source.texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("compression source"),
+                format: Some(source.texture.format().remove_srgb_suffix()),
+                base_mip_level: l,
+                mip_level_count: Some(1),
+                ..Default::default()
+            });
+            let offset = self.out.offsets[l as usize]
+                + (self.row / 4) as u64 * (w / 4) as u64 * self.out.block_bytes as u64;
+            compressor.add_compression_task(
+                self.encoding.variant(self.fast),
+                &view,
+                w,
+                rows,
+                &self.out.buffer,
+                Some(self.row),
+                Some(offset as u32),
+            );
+            queued += (w * rows) as u64;
+            self.row += rows;
+            if self.row >= h {
+                self.level += 1;
+                self.row = 0;
+            }
+        }
+        queued
+    }
+
+    /// Every level is queued.
+    fn done(&self) -> bool {
+        self.level >= self.source.mip_levels
     }
 }
 
