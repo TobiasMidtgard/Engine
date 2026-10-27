@@ -1900,6 +1900,7 @@ fn prop_models_and_voxel_volumes_are_built_off_the_frame_thread() {
     let mut frames = 0;
     while app.world.get::<dress::PropBuilt>(a).is_none()
         || app.world.get::<VoxelState>(hill).is_none()
+        || engine_destruction::is_loading(&app.world)
     {
         assert!(frames < 600, "the look never came in");
         app.update();
@@ -1909,7 +1910,13 @@ fn prop_models_and_voxel_volumes_are_built_off_the_frame_thread() {
         app.world.get::<dress::PropBuilt>(b).is_some(),
         "one build dresses both"
     );
-    assert!(!engine_destruction::is_loading(&app.world));
+    assert!(
+        app.world
+            .query::<&sync::VoxelChunk>()
+            .iter(&app.world)
+            .any(|c| c.volume == hill),
+        "the hill is meshed"
+    );
     // A look already built dresses at once.
     let c = spawn(&mut app, 1);
     app.update();

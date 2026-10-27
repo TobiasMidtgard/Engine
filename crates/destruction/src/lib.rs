@@ -45,7 +45,7 @@ use serde_json::{Value, json};
 pub struct LoadAtOnce;
 
 /// The module is still building first-use work on its bake threads (textures, prop looks,
-/// voxel volumes): for a loading screen to wait on.
+/// voxel volumes and their meshes): for a loading screen to wait on.
 pub fn is_loading(world: &World) -> bool {
     world.contains_resource::<assets::AssetsLoading>()
         || world
@@ -54,6 +54,9 @@ pub fn is_loading(world: &World) -> bool {
         || world
             .get_resource::<sync::VoxelBuilds>()
             .is_some_and(|b| b.remaining() > 0)
+        || world
+            .get_resource::<sync::VoxelMeshJobs>()
+            .is_some_and(|j| j.remaining() > 0)
 }
 
 pub use build::{BuildAction, BuildKind, BuildRequest, Builder, BuiltPiece};
@@ -213,6 +216,7 @@ impl Plugin for DestructionPlugin {
             .init_resource::<dress::PropMeshes>()
             .init_resource::<dress::PropBuilds>()
             .init_resource::<sync::VoxelBuilds>()
+            .init_resource::<sync::VoxelMeshJobs>()
             .init_resource::<collapse::VoxelSupportJobs>()
             .insert_resource(hits::DestructionSource(source))
             .register_component::<DestructibleWall>(

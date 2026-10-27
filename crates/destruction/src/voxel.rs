@@ -957,6 +957,22 @@ impl VoxelState {
         self.remove_groups(groups)
     }
 
+    /// What meshing needs of this volume ([`mesh_chunk_layers`]), to mesh on another thread
+    /// while this one keeps being dug.
+    pub fn mesh_snapshot(&self) -> VoxelState {
+        VoxelState {
+            dims: self.dims,
+            size: self.size,
+            origin: self.origin,
+            density: self.density.clone(),
+            material: self.material.clone(),
+            wear: self.wear.clone(),
+            anchored: self.anchored,
+            chunks: self.chunks,
+            ..VoxelState::default()
+        }
+    }
+
     /// What [`unsupported_groups`](Self::unsupported_groups) needs of this volume, to solve on
     /// another thread while this one keeps being dug.
     pub fn support_snapshot(&self) -> VoxelState {

@@ -2,7 +2,7 @@
 //! their components: (re)builds state when a component is added or changed, and remeshes only
 //! the tiles and chunks that damage touched. Standing building pieces get colliders too.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -381,23 +381,79 @@ pub fn rebuild_walls_system(
     }
 }
 
-/// A volume with more dirty chunks than this is being built or reset, not dug: its chunks are
-/// remeshed over frames, within [`VOXEL_FRAME_MS`] (a loading screen's
-/// [`engine_world::LoadingBudget`] while one is up), the way Unity's `asyncUploadTimeSlice` and
-/// Unreal's streaming time limits spread loading work. A dig's few chunks all remesh at once,
-/// so a hole never shows a seam.
+/// Most chunks one meshing job takes: a dig's few chunks go in one job, so its hole shows in
+/// every chunk in the same frame (no seams); a volume being built or reset goes in several,
+/// each swapped in when done, so no frame takes all of their meshes and colliders at once.
 pub const VOXEL_BULK_CHUNKS: usize = 8;
 
-/// Frame-thread time a bulk remesh may take a frame in play, ms.
-pub const VOXEL_FRAME_MS: f64 = 4.0;
+/// A dirty chunk's new meshes (one per surface layer) and collider.
+struct ChunkMesh {
+    chunk: usize,
+    layers: Vec<(u8, MeshBuilder)>,
+    collider: Option<Collider>,
+}
 
-/// Remesh dirty voxel chunks (and their triangle-mesh colliders when physics is installed).
+fn mesh_chunk(state: &VoxelState, look: &VoxelLook, ci: usize, physics: bool) -> ChunkMesh {
+    let [cx_n, cy_n, _] = state.chunks;
+    let (cx, cy, cz) = (ci % cx_n, (ci / cx_n) % cy_n, ci / (cx_n * cy_n));
+    let layers = mesh_chunk_layers(state, look, [cx, cy, cz]);
+    let empty = layers.iter().all(|(_, m)| m.is_empty());
+    let collider = (physics && !empty).then(|| {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        for (_, m) in &layers {
+            let base = vertices.len() as u32;
+            vertices.extend(m.vertices.iter().map(|v| Vec3::from(v.position)));
+            indices.extend(
+                m.indices
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|t| [base + t[0], base + t[1], base + t[2]]),
+            );
+        }
+        Collider {
+            shape: ColliderShape::TriMesh { vertices, indices },
+            ..Collider::default()
+        }
+    });
+    ChunkMesh {
+        chunk: ci,
+        layers,
+        collider,
+    }
+}
+
+/// Voxel chunks being meshed on the bake threads ([`crate::assets::bake_pool`]), by volume:
+/// Teardown and Minecraft-style engines mesh changed chunks on worker threads from a copy of
+/// the voxels and swap the meshes in when they are done. Each job keeps the chunk layout it
+/// was made for, so a volume rebuilt in another shape drops it.
+#[derive(Resource, Default)]
+pub struct VoxelMeshJobs {
+    pending: HashMap<Entity, Vec<MeshJob>>,
+}
+
+impl VoxelMeshJobs {
+    /// Meshing jobs still running.
+    pub fn remaining(&self) -> usize {
+        self.pending.values().map(Vec::len).sum()
+    }
+}
+
+struct MeshJob {
+    layout: [usize; 3],
+    chunks: Vec<usize>,
+    task: Task<Vec<ChunkMesh>>,
+}
+
+/// Remesh dirty voxel chunks (and their triangle-mesh colliders when physics is installed), on
+/// the bake threads unless [`crate::LoadAtOnce`] is present.
 #[allow(clippy::too_many_arguments)]
 pub fn rebuild_voxels_system(
     mut commands: Commands,
     table: Res<DestructionMaterials>,
-    screen: Option<Res<engine_world::LoadingBudget>>,
     at_once: Option<Res<crate::LoadAtOnce>>,
+    mut jobs: ResMut<VoxelMeshJobs>,
     assets: Option<Res<DestructionAssets>>,
     meshes: Option<ResMut<Assets<Mesh>>>,
     backend: Option<Res<PhysicsBackend>>,
@@ -411,120 +467,79 @@ pub fn rebuild_voxels_system(
         return;
     };
     let start = Instant::now();
-    let budget_ms = screen.map_or(VOXEL_FRAME_MS, |b| b.budget_ms);
+    let physics = backend.is_some();
     let mut rebuilt = 0;
     let mut count = 0;
+    jobs.pending.retain(|e, _| volumes.contains(*e));
     for (e, volume, mut state) in &mut volumes {
         count += 1;
-        if !state.chunk_dirty.iter().any(|d| *d) {
-            continue;
-        }
-        let look = VoxelLook::new(volume, &table).with_layers(assets.textured);
-        let [cx_n, cy_n, _] = state.chunks;
-        let bulk = at_once.is_none()
-            && state.chunk_dirty.iter().filter(|d| **d).count() > VOXEL_BULK_CHUNKS;
-        for ci in 0..state.chunk_dirty.len() {
-            if !state.chunk_dirty[ci] {
-                continue;
-            }
-            if bulk && rebuilt > 0 && start.elapsed().as_secs_f64() * 1000.0 > budget_ms {
-                break;
-            }
-            state.chunk_dirty[ci] = false;
-            rebuilt += 1;
-            let cx = ci % cx_n;
-            let cy = (ci / cx_n) % cy_n;
-            let cz = ci / (cx_n * cy_n);
-            let layers = mesh_chunk_layers(&state, &look, [cx, cy, cz]);
-            let empty = layers.iter().all(|(_, m)| m.is_empty());
-            let collider = (backend.is_some() && !empty).then(|| {
-                let mut all = MeshBuilder::new();
-                for (_, m) in &layers {
-                    all.append(m);
+        // Meshes made on the bake threads, swapped in as they come.
+        let mut done = Vec::new();
+        if let Some(list) = jobs.pending.get_mut(&e) {
+            list.retain_mut(|job| match block_on(poll_once(&mut job.task)) {
+                Some(made) => {
+                    if job.layout == state.chunks {
+                        done.extend(made);
+                    }
+                    false
                 }
-                Collider {
-                    shape: ColliderShape::TriMesh {
-                        vertices: all
-                            .vertices
-                            .iter()
-                            .map(|v| Vec3::from(v.position))
-                            .collect(),
-                        indices: all
-                            .indices
-                            .as_chunks::<3>()
-                            .0
-                            .iter()
-                            .map(|t| [t[0], t[1], t[2]])
-                            .collect(),
-                    },
-                    ..Collider::default()
-                }
+                None => true,
             });
-            let existing =
-                state.chunk_entities[ci].and_then(|c| chunks.get(c).ok().map(|v| (c, v)));
-            let (ce, mut chunk) = match existing {
-                Some((ce, vc)) => (ce, vc.clone()),
-                None => {
-                    if empty {
-                        continue;
-                    }
-                    let chunk = VoxelChunk {
-                        volume: e,
-                        chunk: ci,
-                        layers: Vec::new(),
-                    };
-                    let ce = commands
-                        .spawn((Transform::default(), chunk.clone(), ChildOf(e)))
-                        .id();
-                    state.chunk_entities[ci] = Some(ce);
-                    (ce, chunk)
-                }
-            };
-            // Each layer's drawing child: shown while the layer has triangles, spawned the
-            // first time it does.
-            for &(tag, le, _) in &chunk.layers {
-                let present = layers.iter().any(|(t, m)| *t == tag && !m.is_empty());
-                if let Ok(mut r) = renderers.get_mut(le)
-                    && r.visible != present
-                {
-                    r.visible = present;
+        }
+        let busy: HashSet<usize> = jobs
+            .pending
+            .get(&e)
+            .into_iter()
+            .flatten()
+            .flat_map(|j| j.chunks.iter().copied())
+            .collect();
+        let dirty: Vec<usize> = (0..state.chunk_dirty.len())
+            .filter(|ci| state.chunk_dirty[*ci] && !busy.contains(ci))
+            .collect();
+        if !dirty.is_empty() {
+            let look = VoxelLook::new(volume, &table).with_layers(assets.textured);
+            for ci in &dirty {
+                state.chunk_dirty[*ci] = false;
+            }
+            if at_once.is_some() {
+                done.extend(
+                    dirty
+                        .iter()
+                        .map(|ci| mesh_chunk(&state, &look, *ci, physics)),
+                );
+            } else {
+                // One copy of the voxels for all of this frame's jobs (a hill's is about 1 MB).
+                let snapshot = Arc::new(state.mesh_snapshot());
+                let look = Arc::new(look);
+                let list = jobs.pending.entry(e).or_default();
+                for group in dirty.chunks(VOXEL_BULK_CHUNKS) {
+                    let (snapshot, look, group) = (snapshot.clone(), look.clone(), group.to_vec());
+                    let chunks = group.clone();
+                    list.push(MeshJob {
+                        layout: state.chunks,
+                        chunks,
+                        task: bake_pool().spawn(async move {
+                            group
+                                .iter()
+                                .map(|ci| mesh_chunk(&snapshot, &look, *ci, physics))
+                                .collect()
+                        }),
+                    });
                 }
             }
-            for (tag, mb) in layers {
-                if mb.is_empty() {
-                    continue;
-                }
-                match chunk.layers.iter().find(|l| l.0 == tag) {
-                    Some(&(_, _, h)) => {
-                        meshes.set(h, mb.build());
-                    }
-                    None => {
-                        let h = meshes.add(mb.build());
-                        let le = commands
-                            .spawn((
-                                Transform::default(),
-                                MeshRenderer::new(
-                                    MeshRef::Handle(h),
-                                    MaterialRef::Handle(assets.layer_material(tag)),
-                                ),
-                                VoxelLayer,
-                                ChildOf(ce),
-                            ))
-                            .id();
-                        chunk.layers.push((tag, le, h));
-                    }
-                }
-            }
-            let mut ec = commands.entity(ce);
-            ec.insert(chunk);
-            match collider {
-                Some(c) => {
-                    ec.insert(c);
-                }
-                None => {
-                    ec.remove::<Collider>();
-                }
-            }
+        }
+        for made in done {
+            rebuilt += 1;
+            apply_chunk(
+                &mut commands,
+                &mut meshes,
+                &assets,
+                &chunks,
+                &mut renderers,
+                e,
+                &mut state,
+                made,
+            );
         }
     }
     stats.voxel_volumes = count;
@@ -533,5 +548,90 @@ pub fn rebuild_voxels_system(
             "destruction.voxel_remesh_ms",
             start.elapsed().as_secs_f64() * 1000.0,
         );
+    }
+}
+
+/// Swap a chunk's new meshes and collider in, spawning its entity and layer children the first
+/// time it has any triangles.
+#[allow(clippy::too_many_arguments)]
+fn apply_chunk(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    assets: &DestructionAssets,
+    chunks: &Query<&VoxelChunk>,
+    renderers: &mut Query<&mut MeshRenderer, With<VoxelLayer>>,
+    e: Entity,
+    state: &mut VoxelState,
+    made: ChunkMesh,
+) {
+    let ChunkMesh {
+        chunk: ci,
+        layers,
+        collider,
+    } = made;
+    let empty = layers.iter().all(|(_, m)| m.is_empty());
+    let existing = state.chunk_entities[ci].and_then(|c| chunks.get(c).ok().map(|v| (c, v)));
+    let (ce, mut chunk) = match existing {
+        Some((ce, vc)) => (ce, vc.clone()),
+        None => {
+            if empty {
+                return;
+            }
+            let chunk = VoxelChunk {
+                volume: e,
+                chunk: ci,
+                layers: Vec::new(),
+            };
+            let ce = commands
+                .spawn((Transform::default(), chunk.clone(), ChildOf(e)))
+                .id();
+            state.chunk_entities[ci] = Some(ce);
+            (ce, chunk)
+        }
+    };
+    // Each layer's drawing child: shown while the layer has triangles, spawned the first time
+    // it does.
+    for &(tag, le, _) in &chunk.layers {
+        let present = layers.iter().any(|(t, m)| *t == tag && !m.is_empty());
+        if let Ok(mut r) = renderers.get_mut(le)
+            && r.visible != present
+        {
+            r.visible = present;
+        }
+    }
+    for (tag, mb) in layers {
+        if mb.is_empty() {
+            continue;
+        }
+        match chunk.layers.iter().find(|l| l.0 == tag) {
+            Some(&(_, _, h)) => {
+                meshes.set(h, mb.build());
+            }
+            None => {
+                let h = meshes.add(mb.build());
+                let le = commands
+                    .spawn((
+                        Transform::default(),
+                        MeshRenderer::new(
+                            MeshRef::Handle(h),
+                            MaterialRef::Handle(assets.layer_material(tag)),
+                        ),
+                        VoxelLayer,
+                        ChildOf(ce),
+                    ))
+                    .id();
+                chunk.layers.push((tag, le, h));
+            }
+        }
+    }
+    let mut ec = commands.entity(ce);
+    ec.insert(chunk);
+    match collider {
+        Some(c) => {
+            ec.insert(c);
+        }
+        None => {
+            ec.remove::<Collider>();
+        }
     }
 }
