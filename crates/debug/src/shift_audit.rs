@@ -7,15 +7,21 @@
 //! origin), so the old valley tilts and sinks. Every entity with a [`GlobalTransform`] should
 //! end up where the shift maps it. With `<frame>:trip:<body>` (e.g. `600:trip:Moon`) it makes
 //! the trip a player makes instead: `space.travel` to that body, and home again 60 frames
-//! later, after which everything should be back where it was. Some time later the audit logs
+//! later, after which everything should be back where it was. With `<frame>:walk:<meters>`
+//! (e.g. `600:walk:45000`) it moves the focus that far north and audits the shift the space
+//! module makes for it, the re-home a long flight makes.
+//!
+//! A plain or `rehome` test shift doesn't tell the space module, so its planet, its ground
+//! and what stands on that ground stay put: a walker snapped to the ground shows as "stayed"
+//! there without being wrong. Confirm a culprit with `walk` or `trip`. Some time later the audit logs
 //! the ones that didn't, grouped by their module's components:
 //!
 //! * "stayed": still near its old coordinates, so something re-places it from a world point
 //!   that wasn't shifted (a demo path, a pivot, a home, a cached target);
 //! * "went elsewhere": far from both, usually a world point shifted twice, or one that was
 //!   moved but not turned;
-//! * "floating" / "buried": now more than 20 m higher or lower above the ground than before,
-//!   wherever they are (things hanging in the sky after a trip);
+//! * "floating" / "buried" (walks and trips): now more than 20 m higher or lower above the
+//!   ground than before (things hanging in the sky after a trip);
 //! * "appeared": entities spawned after the shift, by kind, a duplicate when a streamer still
 //!   thinks the camera is where it was.
 //!
@@ -30,7 +36,7 @@ use std::collections::HashMap;
 use engine_core::math::{DQuat, DVec3};
 use engine_core::prelude::*;
 use engine_core::registry::call_api;
-use engine_world::{Ground, WorldShift, WorldShiftSet};
+use engine_world::{Ground, SimulationFocus, WorldShift, WorldShiftSet};
 
 /// Frames between the shift and each report.
 const REPORT_AFTER: [u32; 2] = [60, 600];
@@ -46,6 +52,9 @@ enum Plan {
     Shift(WorldShift),
     /// To this body and home again.
     Trip(String),
+    /// Move the focus (camera, player) this far north, meters, and audit the shift the space
+    /// module makes for it (a re-home past `rehome_distance_m`, 40 km by default).
+    Walk(f64),
 }
 
 #[derive(Resource)]
@@ -59,12 +68,17 @@ struct ShiftAudit {
     /// Height above the ground just before the shift, meters, where there is ground.
     heights_before: HashMap<Entity, f64>,
     frames: u32,
+    /// The frame the world shifted and how (everything shifted that frame), once it has.
+    applied: Option<(u32, WorldShift)>,
 }
 
 /// Parse `"<frame>:<x>,<y>,<z>"`, `"<frame>:rehome:<meters>"` or `"<frame>:trip:<body>"`.
 fn parse(spec: &str) -> Option<(u32, Plan)> {
     let (frame, v) = spec.split_once(':')?;
     let frame = frame.trim().parse().ok()?;
+    if let Some(d) = v.trim().strip_prefix("walk:") {
+        return Some((frame, Plan::Walk(d.trim().parse().ok()?)));
+    }
     if let Some(body) = v.trim().strip_prefix("trip:") {
         return Some((frame, Plan::Trip(body.trim().to_string())));
     }
@@ -100,8 +114,9 @@ pub(crate) fn install(app: &mut App) {
     let Some((frame, plan)) = parse(&spec) else {
         engine_core::log::warn!(
             "ENGINE_SHIFT_AUDIT={spec:?} not understood; use <frame>:<x>,<y>,<z> (e.g. \
-             600:0,2000,0), <frame>:rehome:<meters> (e.g. 600:rehome:40000) or \
-             <frame>:trip:<body> (e.g. 600:trip:Moon)"
+             600:0,2000,0), <frame>:rehome:<meters> (e.g. 600:rehome:40000), \
+             <frame>:walk:<meters> (e.g. 600:walk:45000) or <frame>:trip:<body> (e.g. \
+             600:trip:Moon)"
         );
         return;
     };
@@ -112,8 +127,10 @@ pub(crate) fn install(app: &mut App) {
         kinds_before: HashMap::new(),
         heights_before: HashMap::new(),
         frames: 0,
+        applied: None,
     })
     .add_systems(PostUpdate, write_shift.in_set(WorldShiftSet::Write))
+    .add_systems(PostUpdate, catch_shift.in_set(WorldShiftSet::Apply))
     .add_systems(Last, report);
 }
 
@@ -156,6 +173,8 @@ fn write_shift(world: &mut World) {
     {
         let back = call_api(world, "space.travel", serde_json::json!({ "home": true }));
         engine_core::log::info!("shift audit: coming home: {back:?}");
+        // Back home, everything should be where it was.
+        world.resource_mut::<ShiftAudit>().applied = Some((frames, WorldShift::IDENTITY));
         return;
     }
     if frames != frame {
@@ -182,6 +201,18 @@ fn write_shift(world: &mut World) {
             );
             world.write_message(shift);
         }
+        Plan::Walk(d) => {
+            let mut foci =
+                world.query_filtered::<&mut Transform, (With<SimulationFocus>, Without<ChildOf>)>();
+            for mut t in foci.iter_mut(world) {
+                t.translation.z += d;
+            }
+            engine_core::log::info!(
+                "shift audit: moving the focus {d:.0} m north at frame {frame} ({} placed \
+                 entities)",
+                before.len()
+            );
+        }
         Plan::Trip(body) => {
             let went = call_api(world, "space.travel", serde_json::json!({ "body": body }));
             engine_core::log::info!(
@@ -196,6 +227,25 @@ fn write_shift(world: &mut World) {
     audit.heights_before = heights_before;
 }
 
+/// `WorldShiftSet::Apply`: remember the first shift after the audit's frame (not for trips,
+/// which come back to where they started).
+fn catch_shift(mut shifts: MessageReader<WorldShift>, mut audit: ResMut<ShiftAudit>) {
+    let all = shifts.read().copied().reduce(|a, b| a.then(&b));
+    if audit.applied.is_some() || audit.frames < audit.frame || matches!(audit.plan, Plan::Trip(_))
+    {
+        return;
+    }
+    if let Some(shift) = all {
+        let frame = audit.frames;
+        engine_core::log::info!(
+            "shift audit: the world shifted at frame {frame} by {:?}, turning {:.3}°",
+            shift.translation,
+            shift.rotation.angle_between(DQuat::IDENTITY).to_degrees(),
+        );
+        audit.applied = Some((frame, shift));
+    }
+}
+
 /// Height above the ground (along +Y) of each placed entity over ground.
 fn heights(world: &World, placed: &HashMap<Entity, DVec3>) -> HashMap<Entity, f64> {
     let Some(ground) = world.get_resource::<Ground>() else {
@@ -208,13 +258,12 @@ fn heights(world: &World, placed: &HashMap<Entity, DVec3>) -> HashMap<Entity, f6
 }
 
 fn report(world: &mut World) {
-    let (shifted_at, frames, shift) = {
+    let (frames, (shifted_at, shift)) = {
         let a = world.resource::<ShiftAudit>();
-        match &a.plan {
-            Plan::Shift(s) => (a.frame, a.frames, *s),
-            // Back home, everything should be where it was.
-            Plan::Trip(_) => (a.frame + TRIP_FRAMES, a.frames, WorldShift::IDENTITY),
-        }
+        let Some(applied) = a.applied else {
+            return;
+        };
+        (a.frames, applied)
     };
     let Some(after) = frames.checked_sub(shifted_at) else {
         return;
@@ -227,7 +276,13 @@ fn report(world: &mut World) {
         .iter(world)
         .map(|(e, g)| (e, g.0.translation))
         .collect();
-    let heights_now = heights(world, &now.iter().copied().collect());
+    // A test shift doesn't move the planet's ground; a trip or a walk does.
+    let real = !matches!(world.resource::<ShiftAudit>().plan, Plan::Shift(_));
+    let heights_now = if real {
+        heights(world, &now.iter().copied().collect())
+    } else {
+        HashMap::new()
+    };
     let audit = world.resource::<ShiftAudit>();
     let mut floating: HashMap<String, (usize, DVec3)> = HashMap::new();
     let mut buried: HashMap<String, (usize, DVec3)> = HashMap::new();
@@ -334,6 +389,7 @@ mod tests {
             Some((5, DVec3::new(1.5, -2.0, 3.0)))
         );
         assert_eq!(parse("9:trip: Moon"), Some((9, Plan::Trip("Moon".into()))));
+        assert_eq!(parse("9:walk:45000"), Some((9, Plan::Walk(45_000.0))));
         assert_eq!(parse("600"), None);
         assert_eq!(parse("x:1,2,3"), None);
     }
