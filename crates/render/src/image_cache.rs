@@ -95,6 +95,15 @@ pub enum TextureUse {
 /// Views per image: linear, sRGB, red, red-green, exact.
 const VIEW_SLOTS: usize = 5;
 
+/// Per slot, the other slots whose view can stand in for a released image's (closest first).
+const FALLBACK: [[usize; 4]; VIEW_SLOTS] = [
+    [4, 1, 3, 2],
+    [0, 4, 3, 2],
+    [3, 0, 4, 1],
+    [0, 4, 1, 2],
+    [0, 1, 3, 2],
+];
+
 impl TextureUse {
     /// Which of an image's views this use binds (`srgb`: an sRGB view of an RGBA8 image).
     fn slot(self, srgb: bool) -> usize {
@@ -348,6 +357,8 @@ impl ImageCache {
         let mut guard = self.lock();
         let inner = &mut *guard;
         let frame = inner.frame;
+        // A new version of an image already on the GPU uploads at once (see `UploadBudget`).
+        let mut update = false;
         if let Some(cached) = inner.images.get_mut(&index)
             && cached.version != version
         {
@@ -358,6 +369,7 @@ impl ImageCache {
                 cached.released = true;
             } else {
                 // New pixels.
+                update = cached.views[slot].is_some();
                 inner.images.remove(&index);
             }
         }
@@ -379,6 +391,17 @@ impl ImageCache {
         }
         if inner.failed.get(&(index, slot)) == Some(&version) {
             return None;
+        }
+        if image.is_released()
+            && let Some(cached) = inner.images.get_mut(&index)
+            && let Some(other) = FALLBACK[slot].iter().find_map(|&o| cached.views[o].clone())
+        {
+            // Asked for in a use it was never uploaded for, after its pixels went: the copy on
+            // the GPU holds the same texels (maybe another color space or block format), which
+            // beats drawing without it.
+            tracing::debug!("image {index}: released, viewed through its slot {slot} stand-in");
+            cached.views[slot] = Some(other.clone());
+            return Some(other);
         }
         if image.is_released() {
             tracing::warn!(
@@ -413,7 +436,11 @@ impl ImageCache {
         // When this frame's upload budget is spent the caller draws without the image and
         // asks again next frame (mips add a third).
         let bytes = image.data.len() as u64 * if image.mipmaps { 4 } else { 3 } / 3;
-        if !gpu.uploads.take(bytes) {
+        if !gpu.uploads.take(
+            index as u64 * VIEW_SLOTS as u64 + slot as u64,
+            bytes,
+            update,
+        ) {
             return None;
         }
         let Some((texture, view)) = upload_image(gpu, image, srgb, aliasable) else {

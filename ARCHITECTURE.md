@@ -557,9 +557,12 @@ time slice and Unreal's streaming, which spreads requests over frames): new mesh
 upload through `GpuShared::uploads`. In play a frame uploads up to
 `RenderSettings::upload_mb_per_frame` (16 MB; 0 = no limit); behind a loading screen (a
 `LoadingBudget` resource) uploads run until its `budget_ms` has passed since the frame began.
-The first upload of a frame always goes. A feature asks `uploads.take(bytes)` before uploading
-and, on `false`, draws without it and asks again next frame. Refused bytes show as
-`render.pending_upload_mb` (zero once everything asked for is on the GPU: a loading screen can
+The first new upload of a frame always goes, and so does anything asked while budget is left
+(its overshoot comes off the next frames), so big items never starve behind small ones. New
+versions of meshes and images already on the GPU (edits) always go. A feature asks
+`uploads.take(key, bytes, update)` before uploading and, on `false`, draws without it and asks
+again next frame. Refused bytes show as `render.pending_upload_mb`, each item (`key`) once
+however often it is asked (zero once everything asked for is on the GPU: a loading screen can
 wait for it) and uploaded ones as `render.upload_mb`. Other crates' features may use it the same
 way. On lavapipe the first frame's cost is pipeline compiles (`render.cpu.meshes: pipelines`,
 ~1.4 s for the mesh shader's first two variants), not bytes.

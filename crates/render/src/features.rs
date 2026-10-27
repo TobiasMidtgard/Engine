@@ -109,65 +109,97 @@ pub struct GpuShared {
 /// requests over frames.
 ///
 /// A feature asks [`take`](Self::take) before uploading a new mesh or image: on `false` it
-/// draws without it this frame and asks again next frame. The first upload of a frame always
-/// goes, however large. What was refused shows as `render.pending_upload_mb`: zero once
+/// draws without it this frame and asks again next frame. Anything asked while budget is left
+/// goes, however large (the overshoot comes off the next frames), so big items can't starve
+/// behind small ones. New versions of what is already on the GPU (edited meshes, repainted
+/// images) always go, so edits show at once. What was refused shows as
+/// `render.pending_upload_mb`, each item counted once however often it is asked: zero once
 /// everything asked for is on the GPU (a loading screen can wait for that).
 #[derive(Debug, Default)]
 pub struct UploadBudget {
+    state: std::sync::Mutex<BudgetState>,
+}
+
+#[derive(Debug, Default)]
+struct BudgetState {
     /// Bytes left this frame (`u64::MAX`: no limit).
-    left: std::sync::atomic::AtomicU64,
+    left: u64,
+    /// What the last frame went over its budget by, taken off this one.
+    debt: u64,
+    /// A new item went this frame (the first always goes, so the queue always moves).
+    took_new: bool,
     /// Bytes uploaded and refused this frame.
-    uploaded: std::sync::atomic::AtomicU64,
-    refused: std::sync::atomic::AtomicU64,
+    uploaded: u64,
+    refused: u64,
+    /// Items refused this frame (each counts once in `refused`).
+    refused_keys: std::collections::HashSet<u64>,
     /// Uploads stop at this time (while loading).
-    deadline: std::sync::Mutex<Option<std::time::Instant>>,
+    deadline: Option<std::time::Instant>,
 }
 
 impl UploadBudget {
-    /// Start a frame with `bytes` to spend (`u64::MAX`: no limit) and maybe a deadline.
-    pub fn begin_frame(&self, bytes: u64, deadline: Option<std::time::Instant>) {
-        use std::sync::atomic::Ordering::Relaxed;
-        self.left.store(bytes, Relaxed);
-        self.uploaded.store(0, Relaxed);
-        self.refused.store(0, Relaxed);
-        *self.deadline.lock().unwrap_or_else(|e| e.into_inner()) = deadline;
+    fn state(&self) -> std::sync::MutexGuard<'_, BudgetState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Whether an upload of `bytes` may go this frame (counted when it may; recorded as
-    /// pending when not).
-    pub fn take(&self, bytes: u64) -> bool {
-        use std::sync::atomic::Ordering::Relaxed;
-        let first = self.uploaded.load(Relaxed) == 0;
-        let late = self
-            .deadline
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some_and(|d| std::time::Instant::now() >= d);
-        let fits = !late
-            && self
-                .left
-                .try_update(Relaxed, Relaxed, |left| left.checked_sub(bytes))
-                .is_ok();
-        if fits || first {
-            if !fits {
-                self.left.store(0, Relaxed);
+    /// Start a frame with `bytes` to spend (`u64::MAX`: no limit) and maybe a deadline.
+    pub fn begin_frame(&self, bytes: u64, deadline: Option<std::time::Instant>) {
+        let mut s = self.state();
+        if bytes == u64::MAX {
+            s.left = u64::MAX;
+            s.debt = 0;
+        } else {
+            // At most a few frames' worth carries over.
+            let debt = s.debt.min(bytes);
+            s.left = bytes - debt;
+            s.debt = (s.debt - debt).min(bytes.saturating_mul(3));
+        }
+        s.took_new = false;
+        s.uploaded = 0;
+        s.refused = 0;
+        s.refused_keys.clear();
+        s.deadline = deadline;
+    }
+
+    /// Whether the item `key` (unique per mesh or image and use) may upload `bytes` this frame;
+    /// `update`: a new version of something already on the GPU, which always goes. Counted
+    /// when it may; recorded once as pending when not.
+    pub fn take(&self, key: u64, bytes: u64, update: bool) -> bool {
+        let mut s = self.state();
+        if update {
+            // Shares the frame's bandwidth, but never waits.
+            if s.left != u64::MAX {
+                s.left = s.left.saturating_sub(bytes);
             }
-            self.uploaded.fetch_add(bytes.max(1), Relaxed);
+            s.uploaded += bytes;
+            return true;
+        }
+        let late = s.deadline.is_some_and(|d| std::time::Instant::now() >= d);
+        if !s.took_new || (!late && s.left > 0) {
+            if s.left != u64::MAX {
+                let over = bytes.saturating_sub(s.left);
+                s.left -= bytes - over;
+                s.debt += over;
+            }
+            s.took_new = true;
+            s.uploaded += bytes;
             true
         } else {
-            self.refused.fetch_add(bytes, Relaxed);
+            if s.refused_keys.insert(key) {
+                s.refused += bytes;
+            }
             false
         }
     }
 
     /// Bytes uploaded through [`take`](Self::take) this frame.
     pub fn uploaded(&self) -> u64 {
-        self.uploaded.load(std::sync::atomic::Ordering::Relaxed)
+        self.state().uploaded
     }
 
     /// Bytes refused this frame: waiting for a later one.
     pub fn pending(&self) -> u64 {
-        self.refused.load(std::sync::atomic::Ordering::Relaxed)
+        self.state().refused
     }
 }
 
@@ -555,5 +587,47 @@ impl GrowBuffer {
 
     pub fn capacity(&self) -> u64 {
         self.capacity
+    }
+}
+
+#[cfg(test)]
+mod upload_budget_tests {
+    use super::UploadBudget;
+
+    const MB: u64 = 1 << 20;
+
+    #[test]
+    fn big_items_are_not_starved_by_small_ones() {
+        // 16 MB a frame; every frame a small image asks first, then a 64 MB texture.
+        let b = UploadBudget::default();
+        let mut big_went = None;
+        for frame in 0..8 {
+            b.begin_frame(16 * MB, None);
+            assert!(b.take(1000 + frame, MB, false));
+            if b.take(7, 64 * MB, false) {
+                big_went = Some(frame);
+                break;
+            }
+        }
+        assert_eq!(big_went, Some(0), "the big texture waited");
+        // Its overshoot comes off the next frames, but the first new upload still goes.
+        b.begin_frame(16 * MB, None);
+        assert!(b.take(1, MB, false));
+        assert!(!b.take(2, MB, false));
+    }
+
+    #[test]
+    fn pending_counts_each_item_once_and_edits_always_go() {
+        let b = UploadBudget::default();
+        b.begin_frame(MB, None);
+        assert!(b.take(1, 2 * MB, false));
+        // The same image asked by three materials: counted once.
+        for _ in 0..3 {
+            assert!(!b.take(2, 4 * MB, false));
+        }
+        assert_eq!(b.pending(), 4 * MB);
+        // A new version of a resident mesh goes even with the budget spent.
+        assert!(b.take(3, 8 * MB, true));
+        assert_eq!(b.uploaded(), 10 * MB);
     }
 }
