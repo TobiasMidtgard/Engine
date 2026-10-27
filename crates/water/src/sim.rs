@@ -175,7 +175,78 @@ fn ripple_center(state: &WaterState, focus: DVec3, half: f64) -> DVec2 {
     best.map_or(p, |(_, c)| c)
 }
 
+/// Still-water depth of the interactive bodies under each ripple cell, kept between
+/// rebuilds: reading it means a terrain sample per cell under a lake on the ground, seconds
+/// for the whole grid on a real landscape, and it only changes when the grid moves (then
+/// only the cells it newly covers are read) or the bodies do.
+#[derive(Default)]
+pub struct StillDepths {
+    /// (grid corner, cells, cell size, `SimBook::layout`) the depths were read for.
+    at: Option<(DVec2, usize, f32, u64)>,
+    /// Per cell: the deepest interactive body there, NaN for none.
+    depth: Vec<f32>,
+}
+
+impl StillDepths {
+    /// Make `depth` the bodies' depths under a grid of `n`² cells of `cell` m from `origin`.
+    /// Runs with the water unlocked: it goes wide when much is new.
+    fn read(
+        &mut self,
+        at: (DVec2, usize, f32, u64),
+        bodies: &[BodyState],
+        ground: &Ground,
+        level_y: f64,
+    ) {
+        if self.at == Some(at) {
+            return;
+        }
+        let (origin, n, cell, layout) = at;
+        let mut depth = vec![f32::INFINITY; n * n];
+        if let Some((old, old_n, old_cell, old_layout)) = self.at
+            && (old_n, old_cell, old_layout) == (n, cell, layout)
+            && self.depth.len() == n * n
+        {
+            let step = ((origin - old) / cell as f64).round();
+            if step.x.abs() < n as f64 && step.y.abs() < n as f64 {
+                let (di, dj) = (step.x as i64, step.y as i64);
+                for (idx, d) in depth.iter_mut().enumerate() {
+                    let (i, j) = ((idx % n) as i64 + di, (idx / n) as i64 + dj);
+                    if i >= 0 && j >= 0 && i < n as i64 && j < n as i64 {
+                        *d = self.depth[j as usize * n + i as usize];
+                    }
+                }
+            }
+        }
+        let read = |idx: usize, d: &mut f32| {
+            if *d == f32::INFINITY {
+                let p = origin
+                    + DVec2::new((idx % n) as f64 + 0.5, (idx / n) as f64 + 0.5) * cell as f64;
+                let p3 = DVec3::new(p.x, level_y, p.y);
+                *d = bodies
+                    .iter()
+                    .filter_map(|b| b.depth_at(p3, ground))
+                    .fold(f32::NAN, f32::max);
+            }
+        };
+        if depth.iter().filter(|d| **d == f32::INFINITY).count() > 4 * n {
+            let rows = 8;
+            engine_core::tasks::par_chunks_mut(&mut depth, n * rows, |k, chunk| {
+                for (o, d) in chunk.iter_mut().enumerate() {
+                    read(k * n * rows + o, d);
+                }
+            });
+        } else {
+            for (idx, d) in depth.iter_mut().enumerate() {
+                read(idx, d);
+            }
+        }
+        self.depth = depth;
+        self.at = Some(at);
+    }
+}
+
 /// Follow the focus and advance the interactive ripples.
+#[allow(clippy::too_many_arguments)]
 pub fn ripple_system(
     time: Res<Time>,
     settings: Res<WaterSettings>,
@@ -184,6 +255,7 @@ pub fn ripple_system(
     cameras: Query<(&GlobalTransform, &Camera)>,
     mut book: ResMut<SimBook>,
     mut spare: Local<Option<crate::ripples::RippleField>>,
+    mut still: Local<StillDepths>,
 ) {
     let dt = time.delta_secs();
     let mut state = shared.0.write();
@@ -202,35 +274,64 @@ pub fn ripple_system(
     book.since_rebuild += dt;
     if moved || book.since_rebuild > 2.0 {
         book.since_rebuild = 0.0;
+        // The lakes under the grid, read with the water unlocked (AGENTS.md, "Performance
+        // rules"): only cells the grid newly covers, or all of them when the lakes change.
+        let r = &state.ripples;
+        let at = (r.origin, r.n, r.cell, book.layout);
+        let bodies: Vec<BodyState> = state
+            .bodies
+            .iter()
+            .filter(|b| b.body.interactive)
+            .cloned()
+            .collect();
+        let ground = state.ground.clone();
+        drop(state);
+        still.read(at, &bodies, &ground, f.y);
+        state = shared.0.write();
         let state = &mut *state;
-        let (bodies, flows, ground) = (&state.bodies, &state.flows, &state.ground);
+        let r = &state.ripples;
+        let (origin, n, cell) = (r.origin, r.n, r.cell);
+        // Streams, cell by cell only where each one lies (cheap: a grid lookup).
+        let mut stream = vec![(f32::NAN, None::<Vec2>); n * n];
+        for sim in state.flows.iter().filter(|f| f.visible) {
+            let (c, radius) = sim.bounds();
+            let lo = ((DVec2::new(c.x, c.z) - DVec2::splat(radius) - origin) / cell as f64)
+                .floor()
+                .max(DVec2::ZERO);
+            let hi = ((DVec2::new(c.x, c.z) + DVec2::splat(radius) - origin) / cell as f64)
+                .ceil()
+                .min(DVec2::splat(n as f64));
+            for j in lo.y as usize..hi.y as usize {
+                for i in lo.x as usize..hi.x as usize {
+                    let p = origin + DVec2::new(i as f64 + 0.5, j as f64 + 0.5) * cell as f64;
+                    if let Some((_, depth, v)) = sim.sample(DVec3::new(p.x, sim.origin.y, p.y)) {
+                        let s = &mut stream[j * n + i];
+                        s.0 = s.0.max(depth);
+                        s.1 = s.1.or(Some(v));
+                    }
+                }
+            }
+        }
+        let index = |p: DVec2| {
+            let g = ((p - origin) / cell as f64 - DVec2::splat(0.5)).round();
+            (g.y as usize * n + g.x as usize).min(n * n - 1)
+        };
         let speed = settings.ripple_speed;
-        let level_y = f.y;
         // Lakes and streams: footsteps, cloth and swimmers ring both.
+        let depths = &still.depth;
         state.ripples.rebuild_speeds(speed, |p| {
-            let p3 = DVec3::new(p.x, level_y, p.y);
-            bodies
-                .iter()
-                .filter(|b| b.body.interactive)
-                .filter_map(|b| b.depth_at(p3, ground))
-                .chain(flows.iter().filter(|f| f.visible).filter_map(|f| {
-                    f.sample(DVec3::new(p.x, f.origin.y, p.y))
-                        .map(|(_, depth, _)| depth)
-                }))
-                .fold(None, |acc: Option<f32>, d| {
-                    Some(acc.map_or(d, |a| a.max(d)))
-                })
+            let k = index(p);
+            let d = depths[k].max(stream[k].0);
+            (!d.is_nan()).then_some(d)
         });
         // Streams carry their rings and foam downstream.
-        state.ripples.rebuild_drift(|p| {
-            flows.iter().filter(|f| f.visible).find_map(|f| {
-                f.sample(DVec3::new(p.x, f.origin.y, p.y))
-                    .map(|(_, _, v)| v)
-            })
-        });
-    }
-    if !state.ripples.needs_step() {
-        // Calm water: nothing to step, copy or upload.
+        state.ripples.rebuild_drift(|p| stream[index(p)].1);
+        if !state.ripples.needs_step() {
+            // Calm water: nothing to step, copy or upload.
+            state.ripples.pending.clear();
+            return;
+        }
+    } else if !state.ripples.needs_step() {
         state.ripples.pending.clear();
         return;
     }
