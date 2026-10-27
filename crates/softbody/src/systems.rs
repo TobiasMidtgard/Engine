@@ -818,6 +818,16 @@ const SLOW_STEP_MS: f64 = 50.0;
 /// Most settling (prewarm) a body does a frame, in particle substeps: about 3 ms on the PC.
 /// Counted rather than timed, so a body settles the same way on every machine.
 const PREWARM_WORK: usize = 30_000;
+/// A body whose particles all move slower than this (m/s) ...
+pub(crate) const SLEEP_SPEED: f32 = 0.01;
+/// ... for this many steps in a row, with nothing near it moving, goes to sleep: it isn't
+/// stepped until something near it moves, it is loaded, its pins move, the wind changes by
+/// SLEEP_WIND, or it is hit (PhysX's `setSleepLinearVelocity` and wake counter, Unity's
+/// `Cloth.sleepThreshold`). An idle rope bridge or a hanging curtain on a still day costs
+/// nothing.
+pub(crate) const SLEEP_STEPS: u32 = 60;
+/// Change of wind (m/s) that wakes a sleeping body.
+const SLEEP_WIND: f32 = 0.5;
 /// How far a particle of a big body moves before the ground under it is asked again, m.
 const GROUND_MOVE: f64 = 0.3;
 /// A big body asks the ground under one particle in this many each step anyway.
@@ -905,23 +915,10 @@ pub fn step_bodies(
     diagnostics.set("softbody.busy_ms", busy);
     diagnostics.set("softbody.slowest_ms", slowest.map_or(0.0, |s| s.1));
     slowest_body.0 = slowest;
-    if std::env::var("SHEET_DEBUG").is_ok() {
-        for (e, b) in &bodies {
-            if names.get(e).is_ok_and(|n| n.as_str() == "Unveiling sheet") && b.steps % 30 == 0 {
-                eprintln!(
-                    "SHEET_DEBUG steps {} pairs {} c {:?} r {:.2} lod {} col {} ms {:.1} pend {}",
-                    b.steps,
-                    b.sim.self_pairs(),
-                    b.center,
-                    b.radius,
-                    b.lod_every,
-                    b.last_colliders().len(),
-                    b.step_ms,
-                    b.pending_prewarm
-                );
-            }
-        }
-    }
+    let env_ms: f64 = bodies.iter().map(|(_, b)| f64::from(b.env_ms)).sum();
+    diagnostics.set("softbody.env_ms", env_ms);
+    let asleep = bodies.iter().filter(|(_, b)| b.asleep()).count();
+    diagnostics.set("softbody.asleep", asleep as f64);
     if wall > SLOW_STEP_MS
         && let Some((e, ms)) = slowest
     {
@@ -951,6 +948,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     let started = Instant::now();
     let b = body;
     b.out = StepOutput::default();
+    b.env_ms = 0.0;
     // Level of detail.
     let focus = &ctx.env.focus;
     let dist = if focus.points.is_empty() {
@@ -1081,7 +1079,20 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
         f.to_pos.distance_squared(f.from_pos) > 1e-6 || f.to_rot.angle_between(f.from_rot) > 1e-3
     });
 
+    // Asleep: stays so while nothing about it changes.
+    let wind_here = ctx.env.wind(b.center) * b.settings.wind_scale;
+    if b.asleep() {
+        if disturbed(b, ctx, wind_here) {
+            b.calm = 0;
+        } else {
+            b.step_ms = 0.0;
+            b.sim.step_start.clone_from(&b.sim.pos);
+            return;
+        }
+    }
+
     // Environment.
+    let asked = Instant::now();
     let s = b.settings;
     let env = ctx.env;
     let p = &mut b.sim.params;
@@ -1090,7 +1101,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     let lod = 1.0 / b.lod_every as f32;
     p.substeps = ((s.substeps as f32 * ctx.config.quality * lod).round() as u32).max(1);
     p.gravity = env.gravity(b.center) * s.gravity_scale;
-    b.wind = env.wind(b.center) * s.wind_scale;
+    b.wind = wind_here;
     p.wind = b.wind;
     p.damping = s.damping;
     p.friction = s.friction;
@@ -1120,8 +1131,19 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
             b.sim.ground[i] = ground_plane(env, wp, origin);
         }
     } else {
-        b.sim.ground.clear();
-        b.sim.ground.push(ground_plane(env, b.center, origin));
+        // One plane under its middle, asked again as it moves (or now and then).
+        let (at, asked_origin) = &mut b.ground_at;
+        if at.len() != 1
+            || *asked_origin != origin
+            || (b.center - at[0]).length() > GROUND_MOVE
+            || b.steps.is_multiple_of(GROUND_REFRESH as u64)
+            || b.sim.ground.len() != 1
+        {
+            *at = vec![b.center];
+            *asked_origin = origin;
+            b.sim.ground.clear();
+            b.sim.ground.push(ground_plane(env, b.center, origin));
+        }
     }
 
     // Colliders near the body.
@@ -1173,6 +1195,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     };
     let warmth = drying_warmth(env.temperature(b.center));
     soak(b, dt, rain, warmth);
+    b.env_ms = asked.elapsed().as_secs_f32() * 1000.0;
 
     // Step, plus prewarm on the first updates: as much as fits in PREWARM_WORK a frame, the
     // rest on later frames, so a big new body (or one built far away and only now woken)
@@ -1180,6 +1203,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     // one settles at once. Out of sight, at least one settling step a frame, so a big body
     // built far away is settled when it's reached; near, a body too big for the budget
     // settles only as it steps (settling there shows as a fast-forward).
+    let loaded = !b.sim.loads.is_empty();
     b.sim.step(dt, &local);
     let impulses = b.sim.collider_impulses.clone();
     let pulls = b.sim.frame_impulses.clone();
@@ -1196,6 +1220,30 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
         b.sim.step_start.clone_from(&b.sim.pos);
     }
     b.steps += 1;
+    // Still enough to sleep?
+    let fastest = b
+        .sim
+        .vel
+        .iter()
+        .zip(&b.sim.inv_mass)
+        .filter(|(_, w)| **w > 0.0)
+        .fold(0.0f32, |m, (v, _)| m.max(v.length_squared()));
+    let quiet = fastest < SLEEP_SPEED * SLEEP_SPEED
+        && !b.carried
+        && b.pending_prewarm == 0
+        && !loaded
+        && b.cloth.as_ref().is_none_or(|c| c.burning == 0)
+        // Soaking and drying go on while it rests, and water moves it.
+        && rain == 0.0
+        && b.sim.water.is_none()
+        && b.wet.iter().all(|w| *w == 0.0)
+        && local
+            .iter()
+            .all(|c| c.from_pos == c.to_pos && c.from_rot == c.to_rot);
+    b.calm = if quiet { b.calm + 1 } else { 0 };
+    if b.asleep() {
+        (b.sleep_wind, b.sleep_topology) = (wind_here, b.topology_version);
+    }
 
     // Cloth: tearing and fire.
     let mut changed = false;
@@ -1429,6 +1477,36 @@ fn soak(b: &mut SoftBodySim, dt: f32, rain_mm_h: f32, warmth: f32) {
     if let Some(c) = b.cloth.as_mut() {
         c.wetness = wet.iter().sum::<f32>() / n.max(1) as f32;
     }
+}
+
+/// Whether something has changed for a sleeping body: it was hit or pushed (moving
+/// particles), torn, loaded, carried, rained on or reached by water, the wind changed, or
+/// a collider near it moves.
+fn disturbed(b: &SoftBodySim, ctx: &StepContext, wind: Vec3) -> bool {
+    if b.carried
+        || b.topology_version != b.sleep_topology
+        || (wind - b.sleep_wind).length() > SLEEP_WIND
+        || b.cloth.as_ref().is_some_and(|c| c.burning > 0)
+        || ctx.env.weather.is_raining()
+        || ctx.env.water(b.center).is_some()
+        || b.sim
+            .vel
+            .iter()
+            .zip(&b.sim.inv_mass)
+            .any(|(v, w)| *w > 0.0 && v.length_squared() > SLEEP_SPEED * SLEEP_SPEED)
+    {
+        return true;
+    }
+    let reach = b.radius as f64 + 0.5;
+    ctx.loads
+        .iter()
+        .any(|(feet, _, _)| (*feet - b.center).length() < reach)
+        || ctx.colliders.list.iter().any(|c| {
+            (c.pos - b.center).length() < reach + c.bound()
+                && !b.ignore.contains(&c.entity)
+                && ((c.pos - c.prev_pos).length_squared() > 1e-8
+                    || c.rot.angle_between(c.prev_rot) > 1e-4)
+        })
 }
 
 fn ground_plane(env: &Env, at: DVec3, origin: DVec3) -> [f32; 4] {

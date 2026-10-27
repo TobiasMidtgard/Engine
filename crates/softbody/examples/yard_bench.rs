@@ -63,12 +63,13 @@ fn main() {
                         })
                         .count();
                     println!(
-                        "{f:5} frame {ms:6.1} ms  step {:6.2} ms  prewarm {:4}  pairs {:6} solved {:6}  colliders {} fields {fields}",
+                        "{f:5} frame {ms:6.1} ms  step {:6.2} ms  prewarm {:4}  pairs {:6} solved {:6}  colliders {} fields {fields} asleep {}",
                         b.step_ms,
                         b.pending_prewarm,
                         b.sim.self_pairs(),
                         b.sim.self_pairs_solved(),
                         b.last_colliders().len(),
+                        b.asleep(),
                     );
                 }
             }
@@ -92,6 +93,12 @@ fn main() {
         })
         .collect();
     costs.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let asleep: Vec<String> = q
+        .iter(&app.world)
+        .filter(|(_, b)| b.asleep())
+        .map(|(n, _)| n.map_or("?".to_string(), |n| n.as_str().to_string()))
+        .collect();
+    println!("asleep: {asleep:?}");
     // Each body's solver alone, with no colliders, with and without self-collision.
     if std::env::var("SOLO").is_ok() {
         for (n, b) in q.iter(&app.world) {

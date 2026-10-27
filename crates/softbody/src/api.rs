@@ -321,7 +321,7 @@ pub fn register(app: &mut App) {
     )
     .register_api(
         "softbody.stats",
-        "Soft-body totals: bodies, particles, frozen bodies, last step time (ms), the work in it summed over bodies (busy_ms), and the slowest body.",
+        "Soft-body totals: bodies, particles, frozen and asleep bodies, last step time (ms), the work in it summed over bodies (busy_ms) and the part of that spent asking the world (env_ms: ground, water, wind, colliders near it), and the slowest body.",
         "{}",
         |world, _| {
             let slowest = world.resource::<crate::systems::SlowestBody>().0;
@@ -340,6 +340,8 @@ pub fn register(app: &mut App) {
                 "frozen": d.get("softbody.frozen"),
                 "step_ms": d.get("softbody.step_ms"),
                 "busy_ms": d.get("softbody.busy_ms"),
+                "env_ms": d.get("softbody.env_ms"),
+                "asleep": d.get("softbody.asleep"),
                 "slowest": slowest,
             }))
         },

@@ -129,6 +129,13 @@ pub struct SoftBodySim {
     /// at: a big body asks the ground again only under particles that moved (a planet's
     /// ground is costly to ask: 96 questions a step were the rope bridge's 3.8 ms).
     pub(crate) ground_at: (Vec<DVec3>, DVec3),
+    /// Steps in a row it has been still (see `systems::SLEEP_SPEED`); asleep past
+    /// `systems::SLEEP_STEPS`, with the wind and topology it fell asleep in.
+    pub(crate) calm: u32,
+    /// Time its last step spent asking the world (ground, water, wind, colliders near it), ms.
+    pub env_ms: f32,
+    pub(crate) sleep_wind: Vec3,
+    pub(crate) sleep_topology: u64,
     /// Since when it has waited for a mesh near it to bake, and whether it gave up waiting.
     pub(crate) held: (Option<std::time::Instant>, bool),
 }
@@ -150,6 +157,11 @@ impl SoftBodySim {
     /// body stepping every few fixed steps is drawn moving across all of them.
     pub fn draw_alpha(&self, alpha: f32) -> f32 {
         ((self.lod_wait as f32 + alpha) / self.lod_every.max(1) as f32).min(1.0)
+    }
+
+    /// Resting, unstepped until something moves it (PhysX's and Unity's cloth sleep).
+    pub fn asleep(&self) -> bool {
+        self.calm >= crate::systems::SLEEP_STEPS
     }
 
     /// Held this step for a mesh near it that is still baking.
@@ -208,6 +220,10 @@ impl SoftBodySim {
             drawn_elsewhere: false,
             scratch_colliders: Vec::new(),
             held: (None, false),
+            calm: 0,
+            env_ms: 0.0,
+            sleep_wind: Vec3::ZERO,
+            sleep_topology: 0,
             ground_at: (Vec::new(), DVec3::ZERO),
         };
         body.update_bounds();
@@ -262,6 +278,8 @@ impl SoftBodySim {
             "substeps": self.sim.params.substeps,
             "lod_every": self.lod_every,
             "pending_prewarm": self.pending_prewarm,
+            "asleep": self.asleep(),
+            "env_ms": self.env_ms,
             "colliders": self.scratch_colliders.len(),
             "self_pairs": self.sim.self_pairs(),
             "self_pairs_solved": self.sim.self_pairs_solved(),
