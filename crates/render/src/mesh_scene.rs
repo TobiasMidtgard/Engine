@@ -167,8 +167,13 @@ impl MeshScene {
             self.cold.swap_remove(s);
             self.seen.swap_remove(s);
             if s < self.hot.len() {
+                // The moved slot may be another gone entity's whose index a new one holds now.
                 let moved = self.cold[s].entity;
-                self.slot_of[moved.index_u32() as usize].1 = s as u32;
+                if let Some(e) = self.slot_of.get_mut(moved.index_u32() as usize)
+                    && e.0 == moved
+                {
+                    e.1 = s as u32;
+                }
             }
         }
     }
@@ -341,6 +346,41 @@ mod tests {
             .iter()
             .position(|c| c.entity == entity)
             .expect("has a slot")
+    }
+
+    #[test]
+    fn a_reused_index_keeps_its_own_slot() {
+        // Three go, and a new entity takes the last one's index: removing the first two moves
+        // the third's (stale) slot into a gap, which must not touch the new entity's slot.
+        let mut world = World::new();
+        let gone: Vec<Entity> = (0..3).map(|i| spawn(&mut world, i as f64, i, 0)).collect();
+        let mut scene = MeshScene::default();
+        scene.sync(&mut world, 1);
+        world.despawn(gone[0]);
+        world.despawn(gone[1]);
+        // The next generation of the last one's index, as the allocator hands it out later.
+        let reused = world.despawn_no_free(gone[2]).expect("despawned");
+        let new = world
+            .spawn_at(
+                reused,
+                (
+                    GlobalTransform::from(Transform::from_xyz(9.0, 0.0, 0.0)),
+                    MeshRenderer::default(),
+                    ResolvedMesh {
+                        mesh: Handle::from_index(7),
+                        material: Handle::from_index(0),
+                    },
+                ),
+            )
+            .expect("spawned")
+            .id();
+        assert_eq!(new.index(), gone[2].index());
+        assert_ne!(new, gone[2]);
+        scene.sync(&mut world, 2);
+        scene.sync(&mut world, 3);
+        assert_eq!(scene.hot.len(), 1);
+        assert_eq!(scene.cold[0].entity, new);
+        assert_eq!(scene.slot_of[new.index_u32() as usize], (new, 0));
     }
 
     #[test]
