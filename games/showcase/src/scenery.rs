@@ -674,7 +674,7 @@ pub fn spawn_woods(
         }
     }
     engine::core::log::info!(
-        "scenery: {count} trees within {:.0} m of the walk and the viewpoints, {left} beyond left to the far woods",
+        "scenery: {count} trees within {:.0} m of the walk and the viewpoints, {left} beyond left to the near and far woods",
         reach.0
     );
 }

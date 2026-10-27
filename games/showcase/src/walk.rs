@@ -473,7 +473,8 @@ fn end_walk(world: &mut World, walk: &mut Walk) {
         e.despawn();
     }
     screens::hide(world, "walk_card", true);
-    if matches!(walk.stage, Stage::Walking(_)) {
+    // Also once the last stop is reached: the pilot is still out until play mode ends.
+    if walk.stage != Stage::Menu {
         let _ = engine::core::registry::call_api(world, "movement.play", json!({"on": false}));
     }
     walk.stage = Stage::Free;
