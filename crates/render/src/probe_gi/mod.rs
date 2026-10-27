@@ -22,7 +22,6 @@ use engine_core::prelude::*;
 use crate::features::{GpuShared, GrowBuffer};
 use crate::frame::{FrameUniform, ViewData};
 use crate::material::{AlphaMode, StandardMaterial};
-use crate::material_library::MaterialPreset;
 use crate::mesh::Mesh;
 use crate::settings::RenderSettings;
 use engine_assets::Assets;
