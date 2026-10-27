@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 
-use engine_core::math::{UVec3, Vec3};
+use engine_core::math::{Quat, UVec3, Vec3};
 
 use crate::appearance::{Appearance, AppearanceExt, BeardStyle, HairStyle, Rng};
 use crate::mesh::{Landmarks, MASKS, Mask, SkinMesh};
@@ -506,6 +506,34 @@ struct Groom {
     root_radius: f32,
 }
 
+/// The hairline, irregular as a real one is: hair-restoration surgeons rebuild a slow wander of
+/// a few millimetres and a finer zigzag, slightly different on each side, because a smooth,
+/// even line reads as a wig (Bernstein and Rassman, "Follicular Unit Hair Transplantation").
+struct RaggedHairline {
+    recession: f32,
+    phases: [f32; 4],
+}
+
+impl RaggedHairline {
+    fn new(seed: u64, recession: f32) -> Self {
+        let mut r = Rng::new(seed ^ 0x4A1E);
+        Self {
+            recession,
+            phases: std::array::from_fn(|_| r.f32() * std::f32::consts::TAU),
+        }
+    }
+
+    /// Height of the hairline over the head's center (m) at `theta` around it (0 in front).
+    fn at(&self, theta: f32) -> f32 {
+        let p = self.phases;
+        crate::mesh::hairline(theta, self.recession)
+            + 0.002 * (theta * 4.0 + p[0]).sin()
+            + 0.0012 * (theta * 9.0 + p[1]).sin()
+            + 0.0007 * (theta * 37.0 + p[2]).sin()
+            + 0.0004 * (theta * 71.0 + p[3]).sin()
+    }
+}
+
 fn grow_scalp(
     a: &Appearance,
     skin: &SkinMesh,
@@ -564,13 +592,15 @@ fn grow_scalp(
     };
     let head = rest.head;
     let recession = a.hair.recession.clamp(0.0, 1.0);
+    let ragged = RaggedHairline::new(a.seed, recession);
     let sampler = Sampler::new(skin, Mask::Scalp, |rest, m| {
         // A receded hairline: thinner front and temples (and the crown at the far end).
         let d = rest - head;
         let theta = d.x.atan2(d.z);
-        let line = crate::mesh::hairline(theta, recession);
-        // A soft hairline: hairs thin out over a centimetre (and grow finer, below).
-        let edge = ((d.y - line) / 0.012).clamp(0.0, 1.0).powf(0.7);
+        let line = ragged.at(theta);
+        // A soft hairline: single hairs thin out over most of a centimetre (and grow finer,
+        // below) before the full density.
+        let edge = ((d.y - line) / 0.008).clamp(0.0, 1.0).powf(0.7);
         let crown = 1.0
             - recession
                 * recession
@@ -635,8 +665,8 @@ fn grow_scalp(
         };
         // Hairs at the hairline are short and fine (vellus), as on a real forehead.
         let d = sp.rest - head;
-        let line = crate::mesh::hairline(d.x.atan2(d.z), recession);
-        let fine = ((d.y - line) / 0.015).clamp(0.0, 1.0);
+        let line = ragged.at(d.x.atan2(d.z));
+        let fine = ((d.y - line) / 0.01).clamp(0.0, 1.0);
         let scale = r.range(0.85, 1.1) * (0.3 + 0.7 * fine);
         let thin = 0.55 + 0.45 * fine;
         // A few hairs stray from the groom: flyaways.
@@ -644,6 +674,16 @@ fn grow_scalp(
         let at_front = fine < 1.0 || (d.z > 0.03 && d.y < 0.07);
         let flyaway = g.points > 5 && !at_front && r.f32() < 0.015;
         let mut pts = grow_hair(a, &g, sp, collider, lm, rest, &mut r, scale);
+        // No two hairs grow quite the same way (groomers' "crossover"): turned a little about
+        // the scalp's normal, most at the hairline, where combed-back hair otherwise lines up
+        // like the teeth of a comb.
+        if g.points > 5 {
+            let turn = Quat::from_axis_angle(sp.n, r.normal() * (0.06 + 0.16 * (1.0 - fine)));
+            let root = pts[0];
+            for p in pts.iter_mut().skip(1) {
+                *p = root + turn * (*p - root);
+            }
+        }
         let mut lock_tone = None;
         // How far out in its lock the hair is (0 on the guide .. 1 at the lock's edge).
         let mut lock_edge = 0.0;
@@ -734,7 +774,12 @@ fn grow_scalp(
             &pts,
             g.root_radius * HAIR_WIDTH * thin,
             g.root_radius * HAIR_WIDTH * thin * 0.35,
-            lock_tone.map_or(r.f32(), |l| 0.6 * l + 0.4 * r.f32()),
+            // Hanging locks show their own tone; short or slicked hair mixes across its clumps,
+            // and tones shared by whole clumps read as stripes.
+            lock_tone.map_or(r.f32(), |l| {
+                let w = if g.gravity > 0.5 { 0.6 } else { 0.25 };
+                w * l + (1.0 - w) * r.f32()
+            }),
         );
         // Fine hairline hairs are short, so they don't sit in their own root shadow.
         let n = set.attrs.len();
