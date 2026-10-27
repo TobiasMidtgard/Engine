@@ -156,6 +156,7 @@ pub(crate) fn step_characters(
             continue;
         }
         let h = DVec3::new(cc.radius as f64, cc.height as f64 * 0.5, cc.radius as f64);
+        let max_slope_cos = cc.max_slope_deg.to_radians().cos();
         // Carried by the box it stood on, if that moved.
         let carried = state
             .ground_entity
@@ -194,6 +195,17 @@ pub(crate) fn step_characters(
                     out.ceiling = true;
                 } else {
                     out.wall_normal = Some(axis.as_vec3());
+                }
+            }
+            // Ground too steep to stand on blocks like a wall: no walking up it sideways.
+            if let Some(g) = ground.sample(pos)
+                && pos.y - h.y < g.height - 1e-4
+                && g.normal.y < max_slope_cos
+            {
+                let back = pos - DVec3::new(travel.x, 0.0, travel.z) / steps as f64;
+                if ground.sample(back).is_some_and(|b| b.height < g.height) {
+                    pos = back;
+                    out.wall_normal = Some(g.normal);
                 }
             }
             if let Some(g) = ground.sample(pos)

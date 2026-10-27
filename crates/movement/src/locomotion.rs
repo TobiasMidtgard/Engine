@@ -40,6 +40,10 @@ const WALL_MAX_UP: f32 = 0.35;
 const GROUND_STICK: f32 = 0.5;
 /// Velocity into a wall while wall-running, m/s.
 const WALL_STICK: f32 = 1.5;
+/// On foot, ground within this far below the feet is stepped down onto, m.
+const STEP_DOWN: f32 = 0.5;
+/// On foot, keep sliding along a wall run into this long after contact with it lapses, s.
+const BLOCKED_SECS: f32 = 0.1;
 /// Safety limit on a mantle, s.
 const MANTLE_MAX_SECS: f32 = 1.2;
 /// Hanging, the ledge's top is this far above the top of the capsule (arms stretched), m.
@@ -423,7 +427,7 @@ pub(crate) fn step_movers(
             .filter(|d| !d.carried)
             .map_or(Vec3::ZERO, |d| d.velocity);
         // Back up onto the ground surface if the step sank into it.
-        mv.velocity = v + carry + up * (lift / dt);
+        mv.velocity = v + carry + up * (lift / dt) - up * std::mem::take(&mut m.step_down);
         loco.mode = m.mode;
         // The world's frame: the deck's motion plus the character's own on it.
         loco.velocity = (v + deck) * rate;
@@ -554,31 +558,89 @@ fn step_one(
 
     // ---- what physics reported last step
     let max_slope_cos = 0.64; // ≈ 50°; the controller decides walkability, this filters walls
-    let leaving = m.velocity.dot(state.ground_normal) > 1.0;
-    let grounded = state.grounded && state.ground_normal.dot(up) >= max_slope_cos && !leaving;
+    // Only a launch (a jump, a knock, a wall-jump) leaves the ground by its speed: walking and
+    // running follow the ground over crests (Unreal's walking mode leaves the floor only when
+    // it loses it), instead of taking off from every bump at the speed they climbed it.
+    let on_foot = matches!(
+        m.mode,
+        LocomotionMode::Idle
+            | LocomotionMode::Walk
+            | LocomotionMode::Run
+            | LocomotionMode::Sprint
+            | LocomotionMode::Crouch
+            | LocomotionMode::Slide
+    );
+    let floor_below = |reach: f32| {
+        probe
+            .ray(b.feet() + (up * 0.1).as_dvec3(), -up, 0.1 + reach)
+            .filter(|h| h.normal.dot(up) >= max_slope_cos)
+    };
+    // Feet on walkable ground with the capsule's side against a steep slope: physics may
+    // report the slope as the ground. Look under the feet, like Unreal's floor check.
+    let floor = if state.grounded && state.ground_normal.dot(up) < max_slope_cos {
+        floor_below(0.15).map(|h| (h.normal, 0.0))
+    } else if !state.grounded && on_foot && m.grounded {
+        // Over a crest or down a step on foot: the ground is still within a step below, so
+        // step down onto it (Unreal's step-down) rather than fly off.
+        floor_below(STEP_DOWN).map(|h| (h.normal, (h.distance - 0.1).max(0.0)))
+    } else {
+        None
+    };
+    let ground_normal = floor.map_or(state.ground_normal, |(n, _)| n);
+    let leaving = (!on_foot && m.velocity.dot(ground_normal) > 1.0) || m.knockback.dot(up) > 1.0;
+    let grounded =
+        (state.grounded || floor.is_some()) && ground_normal.dot(up) >= max_slope_cos && !leaving;
     let landed = grounded && !m.grounded && m.air_secs > 0.05;
     if landed {
         land(m, p, b, out);
     }
     m.grounded = grounded;
-    m.ground_normal = if grounded { state.ground_normal } else { up };
+    m.ground_normal = if grounded { ground_normal } else { up };
 
     let knocked = m.knockback.length() > ladder::KNOCKED_OFF;
     let mut v = m.velocity + m.knockback;
     m.knockback = Vec3::ZERO;
     if grounded {
-        let n = state.ground_normal;
+        let n = ground_normal;
         let into = v.dot(n);
         if into < 0.0 {
             v -= n * into;
         }
     }
-    if let Some(n) = state.wall_normal
-        && n.dot(up).abs() < 0.7
-    {
+    // Running into a slope too steep to walk (or a wall) stops the run into it but never
+    // turns it into a climb (Unreal's SlideAlongSurface while walking): sliding off it may not
+    // raise the character faster than it was already rising (HandleSlopeBoosting), so a run
+    // into a hillside doesn't launch it up the hill.
+    let touching = state
+        .wall_normal
+        .filter(|n| n.dot(up).abs() < 0.7)
+        .or((state.grounded && !grounded).then_some(state.ground_normal));
+    m.blocked_by = match touching {
+        Some(n) if grounded => Some((n, BLOCKED_SECS)),
+        Some(_) => None,
+        None => m
+            .blocked_by
+            .filter(|_| grounded)
+            .map(|(n, secs)| (n, secs - dt))
+            .filter(|(_, secs)| *secs > 0.0),
+    };
+    let steep = touching.or(m.blocked_by.map(|(n, _)| n));
+    if let Some(n) = steep {
+        let rising = v.dot(up).max(0.0);
+        // Neither rising nor falling: the slope stops the run into it like an upright wall
+        // would. Falling onto it, it slides down it.
+        let n = if rising < 0.1 && v.dot(up) > -2.0 && n.dot(up) > 0.0 {
+            flat(n, up).normalize_or(n)
+        } else {
+            n
+        };
         let into = v.dot(n);
         if into < 0.0 {
             v -= n * into;
+        }
+        let boost = v.dot(up) - rising;
+        if n.dot(up) > 0.0 && boost > 0.0 {
+            v -= up * boost;
         }
     }
     if state.ceiling {
@@ -610,6 +672,9 @@ fn step_one(
         (m.dash_charges + dt / p.dash_recharge_secs.max(0.01)).min(p.dash_charges as f32);
     if grounded {
         settle(m, state, up, landed);
+        if let Some((_, gap)) = floor.filter(|_| !state.grounded) {
+            m.step_down = gap / dt.max(1e-4);
+        }
         m.coyote = p.coyote_secs;
         m.air_secs = 0.0;
         m.fall_speed = 0.0;
@@ -896,7 +961,7 @@ fn step_one(
         let speed = flat(v, up).length();
         if m.mode == LocomotionMode::Slide {
             if intent.crouch && speed >= p.slide_end_speed {
-                return slide(m, p, b, v, wish, state.ground_normal, dt);
+                return slide(m, p, b, v, wish, ground_normal, dt);
             }
             m.set_mode(if intent.crouch {
                 LocomotionMode::Crouch
@@ -915,9 +980,9 @@ fn step_one(
             m.set_mode(LocomotionMode::Slide);
             out.trigger(b.entity, "slide");
             out.noise(b.entity, b.feet(), 6.0);
-            return on_ground(v, up, state.ground_normal);
+            return on_ground(v, up, ground_normal);
         }
-        return ground_move(m, p, intent, b, v, wish, state.ground_normal, dt);
+        return ground_move(m, p, intent, b, v, wish, ground_normal, dt);
     }
 
     // ---- airborne
@@ -1086,10 +1151,12 @@ fn land(m: &mut Mover, p: &MovementProfile, b: &Body, out: &mut Outputs) {
 }
 
 fn on_ground(v: Vec3, up: Vec3, n: Vec3) -> Vec3 {
-    // Keep the horizontal velocity and add the vertical part that follows the slope.
+    // Keep the horizontal velocity and add the vertical part that follows the slope. The
+    // stick presses straight down: pressed along the slope's normal instead, its sideways
+    // part walks a character standing on a slope slowly uphill (the controller slides it).
     let vh = flat(v, up);
     let ndu = n.dot(up).max(0.2);
-    vh - up * (vh.dot(n) / ndu) - n * GROUND_STICK
+    vh - up * (vh.dot(n) / ndu + GROUND_STICK)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1130,13 +1197,16 @@ fn ground_move(
         vh = move_towards(vh, target, accel * dt);
     }
     let speed = vh.length();
+    // A little hysteresis, so a speed wavering at a threshold (running along a wall that
+    // takes some of it) doesn't flip the gait every step.
+    let was = |mode| if m.mode == mode { 0.5 } else { 0.0 };
     m.set_mode(if crouching {
         LocomotionMode::Crouch
     } else if speed < 0.3 {
         LocomotionMode::Idle
-    } else if speed > p.run_speed + 0.3 {
+    } else if speed > p.run_speed + 0.3 - was(LocomotionMode::Sprint) {
         LocomotionMode::Sprint
-    } else if speed > p.run_speed * 0.55 {
+    } else if speed > p.run_speed * 0.55 - was(LocomotionMode::Run) {
         LocomotionMode::Run
     } else {
         LocomotionMode::Walk
@@ -1957,6 +2027,12 @@ mod tests {
         let v = on_ground(Vec3::new(5.0, 0.0, 0.0), Vec3::Y, n);
         // Uphill: the velocity climbs, parallel to the slope apart from the small stick.
         assert!(v.y > 2.0, "{v:?}");
-        assert!((v + n * GROUND_STICK).dot(n).abs() < 1e-4);
+        assert!((v + Vec3::Y * GROUND_STICK).dot(n).abs() < 1e-4);
+        // Standing still: the stick presses straight down, never along the slope.
+        let still = on_ground(Vec3::ZERO, Vec3::Y, n);
+        assert!(
+            still.x.abs() < 1e-6 && still.z.abs() < 1e-6 && still.y < 0.0,
+            "{still:?}"
+        );
     }
 }

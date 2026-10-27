@@ -1767,3 +1767,124 @@ fn deep_or_tall_obstacles_or_a_drop_beyond_are_not_vaulted() {
     let p = pos(&app, c);
     assert!(p.x < 6.0 && p.y > 6.5, "{p:?}");
 }
+
+/// Terrain from a height function, with normals from its slope (as the terrain module gives).
+struct Terrain(fn(f64, f64) -> f64);
+
+impl engine_world::GroundQuery for Terrain {
+    fn sample(&self, p: DVec3) -> Option<engine_world::GroundSample> {
+        let (h, e) = (self.0, 0.01);
+        let dx = (h(p.x + e, p.z) - h(p.x - e, p.z)) / (2.0 * e);
+        let dz = (h(p.x, p.z + e) - h(p.x, p.z - e)) / (2.0 * e);
+        Some(engine_world::GroundSample {
+            height: h(p.x, p.z),
+            normal: Vec3::new(-dx as f32, 1.0, -dz as f32).normalize(),
+            surface: engine_world::SurfaceId(0),
+        })
+    }
+}
+
+/// Play mode's pilot (level 10 reflexes, so its clock runs fast) on terrain `h`, feet at x, z.
+fn pilot_on(h: fn(f64, f64) -> f64, x: f64, z: f64) -> (App, Entity) {
+    let mut app = app();
+    app.world
+        .insert_resource(engine_world::Ground(std::sync::Arc::new(Terrain(h))));
+    let c = app
+        .world
+        .spawn((
+            Transform::from_translation(DVec3::new(x, h(x, z) + 0.95, z)),
+            MovementProfile::pilot(),
+            Tempo::level(10),
+        ))
+        .id();
+    (app, c)
+}
+
+/// Playtest 2026-10-27 #23: a player standing still on a slope crept uphill (0.6 m every 5 s
+/// on 10°, 1.5 m on 30°), because the stick-to-ground push pressed along the slope's normal.
+#[test]
+fn standing_still_on_a_slope_stays_put() {
+    fn ten(x: f64, _: f64) -> f64 {
+        x * 10f64.to_radians().tan()
+    }
+    fn thirty(x: f64, _: f64) -> f64 {
+        x * 30f64.to_radians().tan()
+    }
+    for h in [ten as fn(f64, f64) -> f64, thirty] {
+        let (mut app, c) = pilot_on(h, 0.0, 0.0);
+        // Walk a little and stop, as a player does.
+        intent(&mut app, c, |i| i.direction = Vec3::X);
+        run(&mut app, 0.5);
+        intent(&mut app, c, |i| i.direction = Vec3::ZERO);
+        run(&mut app, 1.0);
+        let stopped = pos(&app, c);
+        run(&mut app, 5.0);
+        let drift = pos(&app, c) - stopped;
+        assert!(drift.length() < 0.05, "standing drifted {drift:?}");
+        assert!(mover(&app, c).grounded);
+    }
+}
+
+/// Rolling hills (bumps up to about 1 m), like the showcase valley.
+fn rolling(x: f64, z: f64) -> f64 {
+    (x * 0.31).sin() * 0.9
+        + (z * 0.23).cos() * 0.8
+        + (x * 1.7 + z * 0.9).sin() * 0.18
+        + (x * 0.8 - z * 2.1).cos() * 0.12
+}
+
+/// Playtest #18 ("forces the player to jump every third step"): sprinting over rolling
+/// ground left it every crest and fell back, 25 times in 6 s. Walking keeps to a floor it can
+/// step down onto, as Unreal's walking mode does, so only real drops become falls.
+#[test]
+fn sprinting_over_rolling_ground_keeps_its_feet() {
+    let (mut app, c) = pilot_on(rolling, -40.0, 0.0);
+    run(&mut app, 0.5);
+    let dir = Vec3::new(1.0, 0.0, 0.6).normalize();
+    intent(&mut app, c, |i| {
+        i.direction = dir;
+        i.sprint = true;
+    });
+    let (mut falls, mut was_air) = (0, false);
+    for _ in 0..(6.0 / DT) as usize {
+        app.update();
+        let air = mover(&app, c).mode == LocomotionMode::Air;
+        falls += (air && !was_air) as u32;
+        was_air = air;
+    }
+    assert!(falls <= 1, "left the ground {falls} times");
+    assert!(pos(&app, c).x > -10.0, "barely moved: {:?}", pos(&app, c));
+}
+
+/// Playtest #30 ("walking into terrain ... wall run multiple times a second ... sending them
+/// flying"): ground too steep to stand on was walked on as if it were a floor, turning a
+/// sprint into it into a climb up the slope. Too-steep ground blocks like a wall instead, and
+/// running into it never adds upward speed (Unreal's SlideAlongSurface and
+/// HandleSlopeBoosting do the same).
+#[test]
+fn sprinting_into_a_too_steep_slope_does_not_climb_it() {
+    fn cliff(x: f64, _: f64) -> f64 {
+        (x - 4.0).max(0.0) * 70f64.to_radians().tan()
+    }
+    let (mut app, c) = pilot_on(cliff, 0.0, 0.0);
+    run(&mut app, 0.5);
+    // Head-on and at a glancing angle.
+    for dir in [Vec3::X, Vec3::new(1.0, 0.0, 1.0).normalize()] {
+        intent(&mut app, c, |i| {
+            i.direction = dir;
+            i.sprint = true;
+        });
+        let (mut top, mut fastest, mut rise) = (0.0f64, 0.0f32, 0.0f32);
+        for _ in 0..(4.0 / DT) as usize {
+            app.update();
+            let m = mover(&app, c);
+            top = top.max(pos(&app, c).y - 0.95);
+            fastest = fastest.max(m.velocity.length());
+            rise = rise.max(m.velocity.y);
+        }
+        assert!(top < 1.0, "climbed the slope to {top:.2} m");
+        assert!(rise < 1.5, "launched upward at {rise:.1} m/s");
+        assert!(fastest < 9.5, "sped up to {fastest:.1} m/s");
+        assert_eq!(triggered(&app, c, "wallrun"), 0);
+    }
+}

@@ -339,6 +339,13 @@ pub struct Mover {
     /// Just landed and still coming down onto the ground at this speed, m/s (see
     /// `locomotion::settle`).
     pub(crate) settle: f32,
+    /// Down onto ground a step below this step only, m/s (`locomotion::step_one`'s step-down).
+    #[serde(skip)]
+    pub(crate) step_down: f32,
+    /// A wall or too-steep slope touched lately on foot, and seconds left to keep sliding along
+    /// it (contact with something run into comes and goes step by step).
+    #[serde(skip)]
+    pub(crate) blocked_by: Option<(Vec3, f32)>,
     pub(crate) prev_jump: bool,
     pub(crate) prev_crouch: bool,
     pub(crate) prev_dash: bool,
@@ -392,6 +399,8 @@ impl Default for Mover {
             left_foot: false,
             fall_speed: 0.0,
             settle: 0.0,
+            step_down: 0.0,
+            blocked_by: None,
             prev_jump: false,
             prev_crouch: false,
             prev_dash: false,
