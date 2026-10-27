@@ -727,6 +727,30 @@ pub fn round7(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Round 8: the Content panel's model grid with thumbnails drawn on a worker thread.
+pub fn round8(dir: impl Into<PathBuf>) -> ShotScript {
+    let steps = vec![
+        Step::Camera(DVec3::new(9.0, 3.2, 13.0), DVec3::new(2.0, 0.8, 2.0)),
+        Step::Select(""),
+        // A taller Content panel, as one would drag it while browsing assets.
+        Step::Do(Box::new(|world, _| {
+            world.insert_resource(crate::ui::EditorDock(crate::ui::layout(0.45)));
+        })),
+        Step::Tab(Tab::Content),
+        // Every model in the asset folder is drawn once; later sessions read the cache.
+        Step::Wait(60),
+        Step::Shot("34_content_thumbnails"),
+        Step::Do(Box::new(|world, _| {
+            if let Some(mut thumbs) = world.get_resource_mut::<crate::thumbs::Thumbs>() {
+                thumbs.tile = 120.0;
+            }
+        })),
+        Step::Wait(4),
+        Step::Shot("35_large_thumbnails"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// One brush dab at ground level under `at` (x, z).
 fn sculpt(
     world: &mut World,

@@ -161,6 +161,9 @@ pub fn reimport(world: &mut World, editor: &mut Editor, key: &str) {
     world
         .get_resource_or_init::<crate::rigs::Rigs>()
         .forget(key);
+    if let Some(mut thumbs) = world.get_resource_mut::<crate::thumbs::Thumbs>() {
+        thumbs.forget(key);
+    }
     let mut q = world.query_filtered::<(Entity, &Model), With<InScene>>();
     let copies: Vec<Entity> = q
         .iter(world)

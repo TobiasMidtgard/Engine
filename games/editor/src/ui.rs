@@ -27,13 +27,21 @@ impl Default for EditorDock {
 
 /// Scene view in the middle, outliner left, details right, content below.
 pub fn default_layout() -> DockState<Tab> {
+    layout(0.71)
+}
+
+/// The default layout with the scene view taking `scene` of the middle column's height.
+pub fn layout(scene: f32) -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Viewport]);
     let surface = dock.main_surface_mut();
     let [center, _right] =
         surface.split_right(NodeIndex::root(), 0.77, vec![Tab::Inspector, Tab::World]);
     let [center, _left] = surface.split_left(center, 0.21, vec![Tab::Outliner]);
-    let [_center, _bottom] =
-        surface.split_below(center, 0.71, vec![Tab::Content, Tab::Console, Tab::History]);
+    let [_center, _bottom] = surface.split_below(
+        center,
+        scene,
+        vec![Tab::Content, Tab::Console, Tab::History],
+    );
     dock
 }
 
@@ -629,11 +637,53 @@ fn runtime_list(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, filte
 
 // ------------------------------------------------------------------------- content
 
+/// Like `Ui::columns`, with each column's share of the width.
+fn weighted_columns<R>(
+    ui: &mut egui::Ui,
+    weights: &[f32],
+    add: impl FnOnce(&mut [egui::Ui]) -> R,
+) -> R {
+    let gap = ui.spacing().item_spacing.x;
+    let top = ui.cursor().min;
+    let total = ui.available_width() - gap * (weights.len() as f32 - 1.0);
+    let sum: f32 = weights.iter().sum();
+    let mut x = top.x;
+    let mut cols: Vec<egui::Ui> = weights
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            let width = total * w / sum;
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(x, top.y),
+                egui::vec2(width, ui.available_height()),
+            );
+            x += width + gap;
+            ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("column", i))
+                    .max_rect(rect)
+                    .layout(egui::Layout::top_down_justified(egui::Align::LEFT)),
+            )
+        })
+        .collect();
+    let result = add(&mut cols);
+    let bottom = cols
+        .iter()
+        .map(|c| c.min_rect().bottom())
+        .fold(top.y, f32::max);
+    ui.advance_cursor_after_rect(egui::Rect::from_min_max(
+        top,
+        egui::pos2(top.x + total, bottom),
+    ));
+    result
+}
+
 fn content(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.columns(4, |cols| {
+            // The model grid gets the most room, as a content browser's asset view does.
+            weighted_columns(ui, &[0.25, 0.37, 0.19, 0.19], |cols| {
                 // Place.
                 let ui = &mut cols[0];
                 ui.label(egui::RichText::new("Place").strong());
@@ -748,6 +798,10 @@ fn content(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
 
 /// The Content panel's model list: glTF files under the asset root, by folder.
 fn models(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, at: DVec3) {
+    let mut thumbs = world
+        .remove_resource::<crate::thumbs::Thumbs>()
+        .unwrap_or_default();
+    thumbs.receive(ui.ctx());
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Models").strong());
         if ui
@@ -756,6 +810,15 @@ fn models(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, at: DVec3) 
             .clicked()
         {
             editor.models = None;
+        }
+        ui.add(
+            egui::Slider::new(&mut thumbs.tile, 40.0..=160.0)
+                .show_value(false)
+                .trailing_fill(true),
+        )
+        .on_hover_text("Thumbnail size");
+        if thumbs.busy() {
+            ui.spinner().on_hover_text("Drawing thumbnails");
         }
     });
     let root = world
@@ -824,28 +887,65 @@ fn models(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, at: DVec3) 
             .id_salt(("model folder", dir))
             .default_open(true)
             .show(ui, |ui| {
-                for key in keys {
-                    let id = egui::Id::new(("drag model", key));
-                    let r = ui.dnd_drag_source(id, Dragged::Model(key.clone()), |ui| {
-                        ui.add(
-                            egui::Button::new(format!("🎲 {}", crate::models::display_name(key)))
-                                .min_size(egui::vec2(ui.available_width(), 22.0)),
-                        )
+                // A grid of thumbnails, as in Unity's Project window and Unreal's Content Browser.
+                let tile = thumbs.tile;
+                // Rows by hand: a drag source doesn't wrap in a wrapped layout.
+                let gap = 6.0;
+                let per_row = ((ui.available_width() + gap) / (tile + 8.0 + gap)).max(1.0) as usize;
+                for row in keys.chunks(per_row) {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+                        for &key in row {
+                            let id = egui::Id::new(("drag model", key));
+                            let name = crate::models::display_name(key);
+                            let picture = thumbs.get(key, &root.join(key)).cloned();
+                            let r = ui.dnd_drag_source(id, Dragged::Model(key.clone()), |ui| {
+                                ui.allocate_ui(egui::vec2(tile + 8.0, tile + 26.0), |ui| {
+                                    ui.vertical_centered(|ui| {
+                                        let button = match &picture {
+                                            Some(t) => egui::Button::image(
+                                                egui::Image::new(t)
+                                                    .fit_to_exact_size(egui::vec2(tile, tile)),
+                                            ),
+                                            None => egui::Button::new(
+                                                egui::RichText::new(if thumbs.is_clip(key) {
+                                                    "🎬"
+                                                } else {
+                                                    "🎲"
+                                                })
+                                                .size(tile * 0.4),
+                                            )
+                                            .min_size(egui::vec2(tile, tile)),
+                                        };
+                                        let r = ui.add(button.frame(true));
+                                        ui.add(
+                                            egui::Label::new(egui::RichText::new(&name).small())
+                                                .truncate(),
+                                        );
+                                        r
+                                    })
+                                    .inner
+                                })
+                                .inner
+                            });
+                            let r = r.inner.on_hover_ui(|ui| {
+                                ui.label(egui::RichText::new(key.as_str()).strong());
+                                let info =
+                                    editor.model_info.entry(key.clone()).or_insert_with(|| {
+                                        crate::convert::inspect(&root.join(key))
+                                            .map_or_else(|e| e, |s| s.describe())
+                                    });
+                                ui.label(info.as_str());
+                            });
+                            if r.clicked() {
+                                place = Some(key.clone());
+                            }
+                        }
                     });
-                    let r = r.inner.on_hover_ui(|ui| {
-                        ui.label(egui::RichText::new(key.as_str()).strong());
-                        let info = editor.model_info.entry(key.clone()).or_insert_with(|| {
-                            crate::convert::inspect(&root.join(key))
-                                .map_or_else(|e| e, |s| s.describe())
-                        });
-                        ui.label(info.as_str());
-                    });
-                    if r.clicked() {
-                        place = Some(key.clone());
-                    }
                 }
             });
     }
+    world.insert_resource(thumbs);
     if let Some(key) = place {
         crate::models::place(world, editor, &key, at);
     }

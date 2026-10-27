@@ -30,6 +30,7 @@ mod sample;
 mod scene_ops;
 mod shots;
 mod theme;
+mod thumbs;
 mod ui;
 mod undo;
 mod view;
@@ -108,6 +109,7 @@ fn main() {
             Some("round5") => shots::round5(dir),
             Some("round6") => shots::round6(dir),
             Some("round7") => shots::round7(dir),
+            Some("round8") => shots::round8(dir),
             _ => shots::gallery(dir),
         };
         app.insert_resource(script);
