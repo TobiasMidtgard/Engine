@@ -464,11 +464,14 @@ fn onion(b: &mut Builder, rng: &mut Rng, at: Vec3, size: f32) {
     }
 }
 
-/// Runner beans: four poles leaning into a wigwam, the vines climbing them in leaves.
+/// Runner beans up a wigwam of four poles, as cottage gardens grew them: each pole carries a
+/// twining vine thick with three-leaflet leaves, and scarlet flower sprays among them.
 fn beans(b: &mut Builder, rng: &mut Rng, at: Vec3, size: f32) {
     let top = at + Vec3::Y * 1.9 * size;
     let pole = Vec3::new(0.3, 0.22, 0.14);
-    let leaf_col = Vec3::new(0.05, 0.12, 0.03);
+    let vine = Vec3::new(0.12, 0.2, 0.06);
+    let leaf_col = Vec3::new(0.06, 0.14, 0.035);
+    let scarlet = Vec3::new(0.62, 0.05, 0.03);
     for i in 0..4 {
         let a = i as f32 / 4.0 * TAU + std::f32::consts::FRAC_PI_4;
         let foot = at + Vec3::new(a.cos(), 0.0, a.sin()) * 0.42;
@@ -482,38 +485,50 @@ fn beans(b: &mut Builder, rng: &mut Rng, at: Vec3, size: f32) {
             pole * 1.1,
             true,
         );
-        // Leaves up the pole, thinning toward the top.
-        let n = 9;
+        // The vine winds round the pole, about three turns from the ground to near the top.
+        let reach = rng.range(0.78, 0.92);
+        let phase = rng.range(0.0, TAU);
+        let wind = |t: f32| {
+            let w = phase + t * 3.0 * TAU;
+            foot.lerp(top, t * reach) + Vec3::new(w.cos(), 0.0, w.sin()) * 0.03
+        };
+        let segs = 12;
+        for k in 0..segs {
+            let (t0, t1) = (k as f32 / segs as f32, (k + 1) as f32 / segs as f32);
+            b.tube(wind(t0), wind(t1), 0.006, 0.005, 3, vine, vine, false);
+        }
+        // Leaves at the vine's nodes, a little sparser toward the top.
+        let n = 14;
         for k in 0..n {
-            let t = (k as f32 + rng.range(0.1, 0.9)) / n as f32 * 0.88;
-            let p = foot.lerp(top, t);
-            if rng.chance(0.15 + 0.5 * t) {
+            let t = (k as f32 + rng.range(0.2, 0.8)) / n as f32;
+            if rng.chance(0.05 + 0.3 * t) {
                 continue;
             }
-            let h = rng.range(0.0, TAU);
-            leaf(
-                b,
-                p,
-                h,
-                0.11,
-                0.09,
-                0.02,
-                0.05,
-                leaf_col * rng.range(0.85, 1.2),
-            );
-            // Scarlet flowers here and there.
-            if rng.chance(0.25) {
-                let f = p + Vec3::new(h.cos(), 0.0, h.sin()) * 0.05;
-                b.tube(
-                    f,
-                    f + Vec3::Y * 0.025,
-                    0.012,
-                    0.004,
-                    4,
-                    Vec3::new(0.6, 0.06, 0.03),
-                    Vec3::new(0.7, 0.1, 0.04),
-                    true,
-                );
+            let p = wind(t);
+            // Face outward from the wigwam, give or take.
+            let out = (p - at) * Vec3::new(1.0, 0.0, 1.0);
+            let h = out.z.atan2(out.x) + rng.range(-1.2, 1.2);
+            let col = leaf_col * rng.range(0.85, 1.2);
+            let l = rng.range(0.09, 0.12) * size;
+            for (dh, scale) in [(0.0, 1.0), (-0.95, 0.8), (0.95, 0.8)] {
+                leaf(b, p, h + dh, l * scale, l * 0.75 * scale, 0.02, 0.05, col);
+            }
+            // A spray of scarlet flowers on a short stalk now and then.
+            if rng.chance(0.22) {
+                let dir = Vec3::new((h + 0.5).cos(), 0.0, (h + 0.5).sin());
+                for f in 0..4 {
+                    let q = p + dir * (0.05 + 0.025 * f as f32) + Vec3::Y * (0.02 * f as f32);
+                    b.tube(
+                        q,
+                        q + Vec3::Y * 0.02,
+                        0.011,
+                        0.004,
+                        4,
+                        scarlet,
+                        scarlet * 1.15,
+                        true,
+                    );
+                }
             }
         }
     }
