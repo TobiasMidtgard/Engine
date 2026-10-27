@@ -17,12 +17,14 @@
 //! the person's `HairGuidesPosed`.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
 use engine_core::prelude::*;
-use engine_render::features::{FeatureStats, FrameContext, GpuShared, RenderFeature, RenderPhase};
+use engine_render::features::{
+    FeatureStats, FrameContext, GpuShared, RenderFeature, RenderPhase, compose_shader,
+};
 use engine_render::frame::ViewData;
 use engine_render::settings::RenderSettings;
 use engine_render::shadows::SKY_OCCLUSION_VIEW;
@@ -382,10 +384,14 @@ struct GpuStrandParams {
     box_size: [f32; 4],
 }
 
-struct Pipelines {
+/// Bind group layouts and the sampler (made at once in `init`; uploads only need these).
+struct Layouts {
     char_layout: wgpu::BindGroupLayout,
     strand_layout: wgpu::BindGroupLayout,
     shadow_sampler: wgpu::Sampler,
+}
+
+struct Pipelines {
     skin: wgpu::RenderPipeline,
     skin_prepass: wgpu::RenderPipeline,
     skin_color: wgpu::RenderPipeline,
@@ -398,10 +404,246 @@ struct Pipelines {
     strands_shadow: wgpu::RenderPipeline,
 }
 
+/// Set (by [`CharacterFeature`]) once its pipelines are compiled; people are not drawn before.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct CharacterPipelinesReady;
+
+/// What the pipeline builds take from the renderer, owned so they can run on other threads.
+struct PipelineEnv {
+    device: wgpu::Device,
+    hdr: wgpu::TextureFormat,
+    prepass_targets: [Option<wgpu::ColorTargetState>; 2],
+    color_target: wgpu::ColorTargetState,
+    depth_write: wgpu::DepthStencilState,
+    depth_test: wgpu::DepthStencilState,
+    shadow_depth: wgpu::DepthStencilState,
+    unclipped_depth: bool,
+    frame_layout: wgpu::BindGroupLayout,
+    shadow_view_layout: wgpu::BindGroupLayout,
+    char_layout: wgpu::BindGroupLayout,
+    strand_layout: wgpu::BindGroupLayout,
+}
+
+impl PipelineEnv {
+    fn new(gpu: &GpuShared, layouts: &Layouts) -> Self {
+        Self {
+            device: gpu.device.clone(),
+            hdr: gpu.formats.hdr,
+            prepass_targets: gpu.prepass_targets(),
+            color_target: gpu.subsurface_color_target(),
+            depth_write: gpu.depth_state(true),
+            depth_test: gpu.depth_state(false),
+            shadow_depth: gpu.shadow_depth_state(),
+            unclipped_depth: gpu.features.contains(wgpu::Features::DEPTH_CLIP_CONTROL),
+            frame_layout: gpu.frame_layout.clone(),
+            shadow_view_layout: gpu.shadow_view_layout.clone(),
+            char_layout: layouts.char_layout.clone(),
+            strand_layout: layouts.strand_layout.clone(),
+        }
+    }
+}
+
+/// Compile every character pipeline, each on its own thread (the shader modules first).
+fn build_pipelines(env: &PipelineEnv) -> Pipelines {
+    let started = std::time::Instant::now();
+    let [
+        skin_mod,
+        eye_mod,
+        strand_mod,
+        skin_shadow_mod,
+        strand_shadow_mod,
+    ] = std::thread::scope(|s| {
+        shader_sources()
+            .map(|(label, source, with_frame)| {
+                s.spawn(move || {
+                    env.device
+                        .create_shader_module(wgpu::ShaderModuleDescriptor {
+                            label: Some(label),
+                            source: wgpu::ShaderSource::Wgsl(
+                                compose_shader(&source, with_frame).into(),
+                            ),
+                        })
+                })
+            })
+            .map(join)
+    });
+    let skin_buffers = [Some(wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<SkinVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &SKIN_ATTRIBUTES,
+    })];
+    let eye_buffers = [Some(wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<EyeVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &EYE_ATTRIBUTES,
+    })];
+    let scene = [Some(&env.frame_layout), Some(&env.char_layout)];
+    let scene_strands = [
+        Some(&env.frame_layout),
+        Some(&env.char_layout),
+        Some(&env.strand_layout),
+    ];
+    let shadow = [Some(&env.shadow_view_layout), Some(&env.char_layout)];
+    let shadow_strands = [
+        Some(&env.shadow_view_layout),
+        Some(&env.char_layout),
+        Some(&env.strand_layout),
+    ];
+    let back = Some(wgpu::Face::Back);
+    let pipelines = std::thread::scope(|s| {
+        let skin = s.spawn(|| {
+            pipeline(
+                env,
+                "character skin",
+                &skin_mod,
+                ("vs_skin", Some("fs_skin")),
+                &scene,
+                &skin_buffers,
+                Pass::Scene,
+                back,
+            )
+        });
+        let skin_prepass = s.spawn(|| {
+            pipeline(
+                env,
+                "character skin prepass",
+                &skin_mod,
+                ("vs_skin", Some("fs_skin_prepass")),
+                &scene,
+                &skin_buffers,
+                Pass::Prepass,
+                back,
+            )
+        });
+        let skin_color = s.spawn(|| {
+            pipeline(
+                env,
+                "character skin subsurface color",
+                &skin_mod,
+                ("vs_skin", Some("fs_skin_color")),
+                &scene,
+                &skin_buffers,
+                Pass::SubsurfaceColor,
+                back,
+            )
+        });
+        let skin_shadow = s.spawn(|| {
+            pipeline(
+                env,
+                "character skin shadow",
+                &skin_shadow_mod,
+                ("vs_skin_shadow", None),
+                &shadow,
+                &skin_buffers,
+                Pass::Shadow,
+                None,
+            )
+        });
+        let eye = s.spawn(|| {
+            pipeline(
+                env,
+                "character eyes",
+                &eye_mod,
+                ("vs_eye", Some("fs_eye")),
+                &scene,
+                &eye_buffers,
+                Pass::Scene,
+                back,
+            )
+        });
+        let eye_prepass = s.spawn(|| {
+            pipeline(
+                env,
+                "character eyes prepass",
+                &eye_mod,
+                ("vs_eye", Some("fs_eye_prepass")),
+                &scene,
+                &eye_buffers,
+                Pass::Prepass,
+                back,
+            )
+        });
+        let strands = s.spawn(|| {
+            pipeline(
+                env,
+                "character strands",
+                &strand_mod,
+                ("vs_strand", Some("fs_strand")),
+                &scene_strands,
+                &[],
+                Pass::Scene,
+                None,
+            )
+        });
+        let strands_prepass = s.spawn(|| {
+            pipeline(
+                env,
+                "character strands prepass",
+                &strand_mod,
+                ("vs_strand", Some("fs_strand_prepass")),
+                &scene_strands,
+                &[],
+                Pass::Prepass,
+                None,
+            )
+        });
+        let strands_fringe = s.spawn(|| {
+            pipeline(
+                env,
+                "character strands fringe",
+                &strand_mod,
+                ("vs_strand", Some("fs_strand_fringe")),
+                &scene_strands,
+                &[],
+                Pass::Fringe,
+                None,
+            )
+        });
+        let strands_shadow = s.spawn(|| {
+            pipeline(
+                env,
+                "character strands shadow",
+                &strand_shadow_mod,
+                ("vs_strand_shadow", Some("fs_strand_shadow")),
+                &shadow_strands,
+                &[],
+                Pass::Shadow,
+                None,
+            )
+        });
+        Pipelines {
+            skin: join(skin),
+            skin_prepass: join(skin_prepass),
+            skin_color: join(skin_color),
+            skin_shadow: join(skin_shadow),
+            eye: join(eye),
+            eye_prepass: join(eye_prepass),
+            strands: join(strands),
+            strands_prepass: join(strands_prepass),
+            strands_fringe: join(strands_fringe),
+            strands_shadow: join(strands_shadow),
+        }
+    });
+    tracing::info!(
+        "character pipelines compiled in {:.0} ms",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    pipelines
+}
+
+fn join<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    handle
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
 /// Draws every entity with a [`BuiltCharacter`].
 #[derive(Default)]
 pub struct CharacterFeature {
+    layouts: Option<Layouts>,
     pipelines: Option<Pipelines>,
+    /// Filled by the thread compiling [`Pipelines`] (started in `init`).
+    compiling: Option<Arc<Mutex<Option<Pipelines>>>>,
     characters: HashMap<Entity, GpuMeshes>,
     query: Option<QueryState<CharacterItem>>,
     stats: FeatureStats,
@@ -437,7 +679,7 @@ enum Pass {
 
 #[allow(clippy::too_many_arguments)]
 fn pipeline(
-    gpu: &GpuShared,
+    env: &PipelineEnv,
     label: &str,
     module: &wgpu::ShaderModule,
     (vs, fs): (&str, Option<&str>),
@@ -446,21 +688,21 @@ fn pipeline(
     pass: Pass,
     cull: Option<wgpu::Face>,
 ) -> wgpu::RenderPipeline {
-    let device = &gpu.device;
+    let device = &env.device;
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),
         bind_group_layouts: layouts,
         immediate_size: 0,
     });
     let scene_targets = [Some(wgpu::ColorTargetState {
-        format: gpu.formats.hdr,
+        format: env.hdr,
         blend: None,
         write_mask: wgpu::ColorWrites::ALL,
     })];
-    let prepass_targets = gpu.prepass_targets();
-    let color_targets = [Some(gpu.subsurface_color_target())];
+    let prepass_targets = env.prepass_targets.clone();
+    let color_targets = [Some(env.color_target.clone())];
     let fringe_targets = [Some(wgpu::ColorTargetState {
-        format: gpu.formats.hdr,
+        format: env.hdr,
         blend: Some(wgpu::BlendState {
             color: wgpu::BlendComponent {
                 src_factor: wgpu::BlendFactor::SrcAlpha,
@@ -476,18 +718,18 @@ fn pipeline(
         write_mask: wgpu::ColorWrites::ALL,
     })];
     let (targets, depth): (&[Option<wgpu::ColorTargetState>], _) = match pass {
-        Pass::Scene => (&scene_targets, gpu.depth_state(true)),
+        Pass::Scene => (&scene_targets, env.depth_write.clone()),
         // Strictly in front: not over the hairs the opaque pass kept.
         Pass::Fringe => (
             &fringe_targets,
             wgpu::DepthStencilState {
                 depth_compare: Some(wgpu::CompareFunction::Greater),
-                ..gpu.depth_state(false)
+                ..env.depth_test.clone()
             },
         ),
-        Pass::Prepass => (&prepass_targets, gpu.depth_state(true)),
-        Pass::Shadow => (&[], gpu.shadow_depth_state()),
-        Pass::SubsurfaceColor => (&color_targets, gpu.depth_state(false)),
+        Pass::Prepass => (&prepass_targets, env.depth_write.clone()),
+        Pass::Shadow => (&[], env.shadow_depth.clone()),
+        Pass::SubsurfaceColor => (&color_targets, env.depth_test.clone()),
     };
     let shadow = matches!(pass, Pass::Shadow);
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -502,7 +744,7 @@ fn pipeline(
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             cull_mode: if shadow { None } else { cull },
-            unclipped_depth: shadow && gpu.features.contains(wgpu::Features::DEPTH_CLIP_CONTROL),
+            unclipped_depth: shadow && env.unclipped_depth,
             ..Default::default()
         },
         depth_stencil: Some(depth),
@@ -545,7 +787,7 @@ fn storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 }
 
 impl CharacterFeature {
-    fn upload(p: &Pipelines, gpu: &GpuShared, m: &CharacterMeshes, version: u64) -> GpuMeshes {
+    fn upload(p: &Layouts, gpu: &GpuShared, m: &CharacterMeshes, version: u64) -> GpuMeshes {
         let device = &gpu.device;
         let n_skin = m.skin.skin_vertices();
         let part = |i: usize| {
@@ -959,146 +1201,7 @@ impl RenderFeature for CharacterFeature {
                 storage_entry(5),
             ],
         });
-        let [
-            skin_src,
-            eye_src,
-            strand_src,
-            skin_shadow_src,
-            strand_shadow_src,
-        ] = shader_sources();
-        let skin_mod = gpu.shader(skin_src.0, &skin_src.1, skin_src.2);
-        let eye_mod = gpu.shader(eye_src.0, &eye_src.1, eye_src.2);
-        let strand_mod = gpu.shader(strand_src.0, &strand_src.1, strand_src.2);
-        let skin_shadow_mod = gpu.shader(skin_shadow_src.0, &skin_shadow_src.1, skin_shadow_src.2);
-        let strand_shadow_mod = gpu.shader(
-            strand_shadow_src.0,
-            &strand_shadow_src.1,
-            strand_shadow_src.2,
-        );
-        let skin_buffers = [Some(wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<SkinVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &SKIN_ATTRIBUTES,
-        })];
-        let eye_buffers = [Some(wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<EyeVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &EYE_ATTRIBUTES,
-        })];
-        let scene = [Some(&gpu.frame_layout), Some(&char_layout)];
-        let scene_strands = [
-            Some(&gpu.frame_layout),
-            Some(&char_layout),
-            Some(&strand_layout),
-        ];
-        let shadow = [Some(&gpu.shadow_view_layout), Some(&char_layout)];
-        let shadow_strands = [
-            Some(&gpu.shadow_view_layout),
-            Some(&char_layout),
-            Some(&strand_layout),
-        ];
-        let back = Some(wgpu::Face::Back);
-        self.pipelines = Some(Pipelines {
-            skin: pipeline(
-                gpu,
-                "character skin",
-                &skin_mod,
-                ("vs_skin", Some("fs_skin")),
-                &scene,
-                &skin_buffers,
-                Pass::Scene,
-                back,
-            ),
-            skin_prepass: pipeline(
-                gpu,
-                "character skin prepass",
-                &skin_mod,
-                ("vs_skin", Some("fs_skin_prepass")),
-                &scene,
-                &skin_buffers,
-                Pass::Prepass,
-                back,
-            ),
-            skin_color: pipeline(
-                gpu,
-                "character skin subsurface color",
-                &skin_mod,
-                ("vs_skin", Some("fs_skin_color")),
-                &scene,
-                &skin_buffers,
-                Pass::SubsurfaceColor,
-                back,
-            ),
-            skin_shadow: pipeline(
-                gpu,
-                "character skin shadow",
-                &skin_shadow_mod,
-                ("vs_skin_shadow", None),
-                &shadow,
-                &skin_buffers,
-                Pass::Shadow,
-                None,
-            ),
-            eye: pipeline(
-                gpu,
-                "character eyes",
-                &eye_mod,
-                ("vs_eye", Some("fs_eye")),
-                &scene,
-                &eye_buffers,
-                Pass::Scene,
-                back,
-            ),
-            eye_prepass: pipeline(
-                gpu,
-                "character eyes prepass",
-                &eye_mod,
-                ("vs_eye", Some("fs_eye_prepass")),
-                &scene,
-                &eye_buffers,
-                Pass::Prepass,
-                back,
-            ),
-            strands: pipeline(
-                gpu,
-                "character strands",
-                &strand_mod,
-                ("vs_strand", Some("fs_strand")),
-                &scene_strands,
-                &[],
-                Pass::Scene,
-                None,
-            ),
-            strands_prepass: pipeline(
-                gpu,
-                "character strands prepass",
-                &strand_mod,
-                ("vs_strand", Some("fs_strand_prepass")),
-                &scene_strands,
-                &[],
-                Pass::Prepass,
-                None,
-            ),
-            strands_fringe: pipeline(
-                gpu,
-                "character strands fringe",
-                &strand_mod,
-                ("vs_strand", Some("fs_strand_fringe")),
-                &scene_strands,
-                &[],
-                Pass::Fringe,
-                None,
-            ),
-            strands_shadow: pipeline(
-                gpu,
-                "character strands shadow",
-                &strand_shadow_mod,
-                ("vs_strand_shadow", Some("fs_strand_shadow")),
-                &shadow_strands,
-                &[],
-                Pass::Shadow,
-                None,
-            ),
+        let layouts = Layouts {
             char_layout,
             strand_layout,
             shadow_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1107,7 +1210,27 @@ impl RenderFeature for CharacterFeature {
                 min_filter: wgpu::FilterMode::Linear,
                 ..Default::default()
             }),
-        });
+        };
+        // Compiling the pipelines takes seconds on D3D12 and Vulkan (each one is a shader
+        // compile), so it runs off the frame's thread, as Unreal's PSO precaching does, and
+        // people are drawn from the first frame after it is done.
+        let env = PipelineEnv::new(gpu, &layouts);
+        let slot = Arc::new(Mutex::new(None));
+        let out = slot.clone();
+        let spawned = std::thread::Builder::new()
+            .name("character pipelines".into())
+            .spawn(move || {
+                let built = build_pipelines(&env);
+                *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(built);
+            });
+        match spawned {
+            Ok(_) => self.compiling = Some(slot),
+            Err(e) => {
+                tracing::warn!("could not start the character pipeline thread: {e}");
+                self.pipelines = Some(build_pipelines(&PipelineEnv::new(gpu, &layouts)));
+            }
+        }
+        self.layouts = Some(layouts);
     }
 
     fn prepare(
@@ -1117,7 +1240,19 @@ impl RenderFeature for CharacterFeature {
         view: &ViewData,
         settings: &RenderSettings,
     ) {
-        let Some(p) = &self.pipelines else {
+        if self.pipelines.is_none()
+            && let Some(slot) = &self.compiling
+        {
+            self.pipelines = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+        }
+        if self.pipelines.is_some() {
+            self.compiling = None;
+        }
+        if self.pipelines.is_some() && !world.contains_resource::<CharacterPipelinesReady>() {
+            world.insert_resource(CharacterPipelinesReady);
+        }
+        // Uploads go ahead while the pipelines compile, so people show the frame they are done.
+        let Some(p) = &self.layouts else {
             return;
         };
         // The renderer runs the pass for perspective views only.

@@ -38,7 +38,7 @@ pub use appearance::{
     Eyes, Hair, HairColor, HairStyle, Skin,
 };
 pub use build::{BuildOptions, CharacterMeshes};
-pub use feature::{CharacterFeature, GpuCharacter};
+pub use feature::{CharacterFeature, CharacterPipelinesReady, GpuCharacter};
 pub use lod::CharacterLod;
 pub use mesh::Region;
 pub use pack::HumanPack;

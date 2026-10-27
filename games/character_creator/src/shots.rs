@@ -5,7 +5,10 @@ use std::path::PathBuf;
 
 use engine::prelude::*;
 use engine::world::character::{FaceControls, HandControls};
-use engine_character::{Appearance, AppearanceExt, BuiltCharacter, CharacterBuild, CharacterDebug};
+use engine_character::{
+    Appearance, AppearanceExt, BuiltCharacter, CharacterBuild, CharacterDebug,
+    CharacterPipelinesReady,
+};
 
 use crate::Subject;
 use crate::pose::{self, PoseName};
@@ -304,6 +307,7 @@ pub fn run_shots(
     mut debug: ResMut<CharacterDebug>,
     mut subject: ShotSubject,
     mut cams: Query<&mut Orbit>,
+    ready: Option<Res<CharacterPipelinesReady>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let Some(shot) = plan.shots.get(plan.next).cloned() else {
@@ -359,7 +363,9 @@ pub fn run_shots(
         plan.settled = 0;
         return;
     }
-    if !built.is_some_and(|b| b.appearance == shot.appearance && b.options == want_build.options())
+    if ready.is_none()
+        || !built
+            .is_some_and(|b| b.appearance == shot.appearance && b.options == want_build.options())
     {
         plan.settled = 0;
         return;
