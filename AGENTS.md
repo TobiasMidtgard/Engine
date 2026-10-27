@@ -211,8 +211,9 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
   of each schedule's exclusive systems and the data most systems fight over. Fix what is
   heavy in "ran alone" first; a cheap system that runs alone costs little. So:
   - A `&mut World` system runs with nothing beside it, and the executor can only start it
-    (or skip it on its `run_if`) once nothing else is running. Keep heavy work out of them:
-    take the queries you need in a normal system.
+    (or skip it on its `run_if`) once nothing else is running, and systems ordered after it
+    wait for that too. Keep heavy work out of them (take the queries you need in a normal
+    system), and order nothing after one you gate.
   - Keep `&mut Transform` (and `GlobalTransform`, `MeshRenderer`, `Assets<Mesh>`) out of
     your heavy systems: 79 systems write `Transform` in `FixedUpdate` and 42 in `Update`,
     and any two of them clash. A marker doesn't help: `With<A>` and `With<B>` still clash in
