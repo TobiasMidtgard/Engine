@@ -2479,6 +2479,11 @@ pub fn start() -> TowerJob {
 }
 
 impl TowerJob {
+    /// True once the meshes are built ([`TowerJob::finish`] won't wait).
+    pub fn is_ready(&self) -> bool {
+        self.meshes.is_finished()
+    }
+
     /// Wait for the meshes and add them as assets, with the materials. The textures keep
     /// baking; [`TowerKit::finish_textures`] collects them.
     pub fn finish(

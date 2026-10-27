@@ -709,13 +709,13 @@ pub struct VillageMats {
     pub plants: Handle<StandardMaterial>,
 }
 
-/// Generate every village texture in parallel and make the materials.
-pub fn village_materials(
-    materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
-) -> VillageMats {
+/// Every village texture set (plain data: built off the frame thread).
+pub struct VillageTextures([TexSet; 8]);
+
+/// Generate every village texture in parallel.
+pub fn village_textures() -> VillageTextures {
     let t0 = std::time::Instant::now();
-    let (pl, tb, st, br, clay, slate, gl, ir) = std::thread::scope(|sc| {
+    let sets = std::thread::scope(|sc| {
         let pl = sc.spawn(|| plaster(1024));
         let tb = sc.spawn(|| timber(1024));
         let st = sc.spawn(|| stone(512));
@@ -725,12 +725,22 @@ pub fn village_materials(
         let gl = sc.spawn(|| glass(256));
         let ir = sc.spawn(|| iron(256));
         let j = |h: std::thread::ScopedJoinHandle<'_, TexSet>| h.join().expect("texture thread");
-        (j(pl), j(tb), j(st), j(br), j(clay), j(slate), j(gl), j(ir))
+        [j(pl), j(tb), j(st), j(br), j(clay), j(slate), j(gl), j(ir)]
     });
     engine::core::log::info!(
         "village textures generated in {:.2} s",
         t0.elapsed().as_secs_f32()
     );
+    VillageTextures(sets)
+}
+
+/// Add the village textures as images and make the materials.
+pub fn village_materials(
+    textures: VillageTextures,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+) -> VillageMats {
+    let [pl, tb, st, br, clay, slate, gl, ir] = textures.0;
     // Keyed, so the memory report names the showcase as their owner.
     let mut add = |name: &str, set: TexSet| {
         let key = |map: &str| format!("showcase/village/{name}/{map}");

@@ -41,23 +41,18 @@ pub struct WorldBuild {
     slow: Vec<(String, f32)>,
     /// When the wait for the modules' art began.
     waiting: Option<std::time::Instant>,
-    /// The last slow frame (what ran, its length, and the profile window before it) until
-    /// the profile (`--profile`) has a window that names its systems.
-    slow_label: Option<(String, f32, f64)>,
+    /// The library's mesh and texture work, on worker threads from the start.
+    lib_job: Option<scenery::LibraryJob>,
 }
 
-/// With `--profile`, the systems of each slow loading frame: the profiler's window that
-/// takes in the frame is mostly that frame, so its slowest systems are the frame's.
-fn log_slow_systems(world: &World, build: &mut WorldBuild) {
-    let Some((label, dt, before)) = build.slow_label.as_ref() else {
-        return;
-    };
+/// With `--profile`, the systems of a slow loading frame. The profiler publishes its window
+/// at the end of a frame once a second has passed, so a frame over a second always ends one,
+/// and the window as it is when the next frame begins is mostly that frame.
+fn log_slow_systems(world: &World, label: &str, dt: f32) {
     let Some(snap) = world.get_resource::<engine::core::profile::ProfileSnapshot>() else {
-        build.slow_label = None;
         return;
     };
-    // The first window that takes the slow frame in.
-    if snap.busy_ms == *before {
+    if snap.systems.is_empty() {
         return;
     }
     let top: Vec<String> = snap
@@ -67,11 +62,11 @@ fn log_slow_systems(world: &World, build: &mut WorldBuild) {
         .map(|(name, ms)| format!("{name} {ms:.0}"))
         .collect();
     engine::core::log::info!(
-        "loading frame after {label} took {dt:.2} s; its profile window: {:.0} ms a frame, slowest (ms a frame): {}",
+        "loading frame after {label} took {dt:.2} s; its profile window: {:.0} ms a frame, systems {:.0} ms, slowest (ms a frame): {}",
         snap.frame_ms,
+        snap.busy_ms,
         top.join(", ")
     );
-    build.slow_label = None;
 }
 
 const LIB: &str = "the library is the first step";
@@ -91,6 +86,12 @@ const STEPS: [Step; 12] = [
         "library",
         "Carving the stones and weaving the grass",
         |world, b| {
+            let job = b.lib_job.take().unwrap_or_else(scenery::LibraryJob::start);
+            // The exe keeps drawing its loading screen while the workers build.
+            if world.contains_resource::<Staged>() && !job.is_ready() {
+                b.lib_job = Some(job);
+                return false;
+            }
             let mut state = SystemState::<(
                 ResMut<Assets<Mesh>>,
                 ResMut<Assets<StandardMaterial>>,
@@ -99,12 +100,7 @@ const STEPS: [Step; 12] = [
             )>::new(world);
             let (mut meshes, mut materials, mut images, plants) =
                 state.get_mut(world).expect("resources the showcase adds");
-            b.lib = Some(scenery::build_library(
-                &mut meshes,
-                &mut materials,
-                &mut images,
-                &plants,
-            ));
+            b.lib = Some(job.finish(&mut meshes, &mut materials, &mut images, &plants));
             true
         },
     ),
@@ -367,7 +363,8 @@ pub fn start(world: &mut World) {
         ran: Vec::new(),
         frame_at: None,
         waiting: None,
-        slow_label: None,
+        // Started before anything else, so the workers overlap the rest of startup.
+        lib_job: Some(scenery::LibraryJob::start()),
         slow: Vec::new(),
     };
     if world.contains_resource::<Staged>() {
@@ -399,17 +396,12 @@ pub fn step(world: &mut World) {
             } else {
                 build.ran.join("+")
             };
-            build.slow.push((ran.clone(), dt));
             if dt > PROFILE_FRAME_S {
-                // The profile's window as it is now came before that frame.
-                let before = world
-                    .get_resource::<engine::core::profile::ProfileSnapshot>()
-                    .map_or(0.0, |p| p.busy_ms);
-                build.slow_label = Some((ran, dt, before));
+                log_slow_systems(world, &ran, dt);
             }
+            build.slow.push((ran, dt));
         }
     }
-    log_slow_systems(world, &mut build);
     build.ran.clear();
     // Steps run until this frame's budget is spent, as Unity's High background loading
     // priority (50 ms a frame behind a loading screen) and Unreal's streaming time limits do:
