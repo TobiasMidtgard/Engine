@@ -43,20 +43,45 @@ pub struct WorldBuild {
     waiting: Option<std::time::Instant>,
     /// The library's mesh and texture work, on worker threads from the start.
     lib_job: Option<scenery::LibraryJob>,
+    /// The profiler's window when the last frame began, and the slow frames whose window
+    /// hasn't been published yet (with the window before each).
+    window: Option<Window>,
+    unprofiled: Vec<(String, f32, Option<Window>)>,
     /// The GPU meadow's field, mapped on a worker from the start.
     meadow_job: Option<std::thread::JoinHandle<GrassField>>,
 }
 
-/// With `--profile`, the systems of a slow loading frame. The profiler publishes its window
-/// at the end of a frame once a second has passed, so a frame over a second always ends one,
-/// and the window as it is when the next frame begins is mostly that frame.
-fn log_slow_systems(world: &World, label: &str, dt: f32) {
-    let Some(snap) = world.get_resource::<engine::core::profile::ProfileSnapshot>() else {
+/// A published profile window, told apart by its frame and system times.
+type Window = (u64, u64);
+
+/// The profiler's window as published ([`engine::core::profile::ProfileSnapshot`]): it
+/// changes about once a second, at the end of a frame.
+fn profile_window(world: &World) -> Option<Window> {
+    world
+        .get_resource::<engine::core::profile::ProfileSnapshot>()
+        .filter(|p| !p.systems.is_empty())
+        .map(|p| (p.frame_ms.to_bits(), p.busy_ms.to_bits()))
+}
+
+/// With `--profile`, the systems of each slow loading frame: the first window published
+/// after the frame began is mostly that frame (it ends one when it runs a second or more,
+/// and a slow frame that didn't is in the next one, with the frames it shares it with).
+fn log_slow_systems(world: &World, build: &mut WorldBuild) {
+    let Some(now) = profile_window(world) else {
         return;
     };
-    if snap.systems.is_empty() {
+    let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut build.unprofiled)
+        .into_iter()
+        .partition(|(_, _, before)| *before != Some(now));
+    build.unprofiled = waiting;
+    if ready.is_empty() {
         return;
     }
+    let snap = world.resource::<engine::core::profile::ProfileSnapshot>();
+    let frames: Vec<String> = ready
+        .iter()
+        .map(|(label, dt, _)| format!("after {label} took {dt:.2} s"))
+        .collect();
     let top: Vec<String> = snap
         .systems
         .iter()
@@ -64,12 +89,16 @@ fn log_slow_systems(world: &World, label: &str, dt: f32) {
         .map(|(name, ms)| format!("{name} {ms:.0}"))
         .collect();
     engine::core::log::info!(
-        "loading frame after {label} took {dt:.2} s; its profile window: {:.0} ms a frame, systems {:.0} ms, slowest (ms a frame): {}",
+        "loading frame {}; its profile window: {:.0} ms a frame, systems {:.0} ms, slowest (ms a frame): {}",
+        frames.join(", "),
         snap.frame_ms,
         snap.busy_ms,
         top.join(", ")
     );
 }
+
+/// Zones whose demos use Water's demo art ([`engine_water::demo::art::WaterDemoArt`]).
+const WATER_ZONES: [&str; 2] = ["water", "lake"];
 
 const LIB: &str = "the library is the first step";
 
@@ -195,13 +224,22 @@ const STEPS: [Step; 12] = [
         }
         // Zone by zone in order (they draw from one random sequence), one a frame in the exe.
         while let Some(z) = zones::ZONES.get(b.zone) {
-            b.zone += 1;
             if only
                 .as_ref()
                 .is_some_and(|o| !o.0.iter().any(|k| k == z.key))
             {
+                b.zone += 1;
                 continue;
             }
+            // Water's demo art is made on workers (prefetched at the start); its zones wake
+            // once it is in, or their spawn would make what is left on the frame.
+            if staged
+                && WATER_ZONES.contains(&z.key)
+                && !world.resource::<engine_water::WaterLoading>().is_ready()
+            {
+                return false;
+            }
+            b.zone += 1;
             let t = std::time::Instant::now();
             let one = zones::DemoZones(vec![z.key.to_string()]);
             with_commands(world, |c| {
@@ -263,7 +301,7 @@ const STEPS: [Step; 12] = [
 const MODULE_WAIT_S: f32 = 60.0;
 
 /// Modules still baking art or settling their zones on other threads.
-const MODULES_LOADING: [fn(&World) -> bool; 5] = [
+const MODULES_LOADING: [fn(&World) -> bool; 6] = [
     engine_smoke::demo::loading,
     |world| {
         world
@@ -271,6 +309,8 @@ const MODULES_LOADING: [fn(&World) -> bool; 5] = [
             .is_some_and(|w| !w.is_ready())
     },
     |world| !world.contains_resource::<engine_destruction::assets::DestructionAssets>(),
+    // Its prop looks and voxel volumes follow on bake threads a few frames later.
+    engine_destruction::is_loading,
     |world| {
         world
             .get_resource::<engine_foliage::FoliageLoading>()
@@ -361,6 +401,14 @@ pub fn start(world: &mut World) {
         engine_weather::spawn_sky_lights(c);
     });
     let seed = world.resource::<EngineConfig>().seed;
+    // Water's demo art starts on workers now if a zone of the build needs it.
+    let only = world.get_resource::<zones::DemoZones>();
+    if WATER_ZONES
+        .iter()
+        .any(|w| only.is_none_or(|o| o.0.iter().any(|k| k == w)))
+    {
+        engine_water::demo::art::WaterDemoArt::prefetch(world);
+    }
     let meadow_job = {
         let land = land.clone();
         std::thread::spawn(move || scenery::meadow_grass(&land))
@@ -381,6 +429,8 @@ pub fn start(world: &mut World) {
         // Started before anything else, so the workers overlap the rest of startup.
         lib_job: Some(scenery::LibraryJob::start()),
         meadow_job: Some(meadow_job),
+        window: None,
+        unprofiled: Vec::new(),
         slow: Vec::new(),
     };
     if world.contains_resource::<Staged>() {
@@ -413,11 +463,13 @@ pub fn step(world: &mut World) {
                 build.ran.join("+")
             };
             if dt > PROFILE_FRAME_S {
-                log_slow_systems(world, &ran, dt);
+                build.unprofiled.push((ran.clone(), dt, build.window));
             }
             build.slow.push((ran, dt));
         }
     }
+    log_slow_systems(world, &mut build);
+    build.window = profile_window(world);
     build.ran.clear();
     // Steps run until this frame's budget is spent, as Unity's High background loading
     // priority (50 ms a frame behind a loading screen) and Unreal's streaming time limits do:
