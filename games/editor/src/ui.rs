@@ -1065,7 +1065,9 @@ fn shortcuts(ctx: &egui::Context, world: &mut World, editor: &mut Editor) {
         editor::focus_selection(world, editor);
     }
     if pressed(egui::Key::Escape, false) {
-        if editor.is_playing() {
+        if crate::camera_preview::stop_pilot(world, editor) {
+            // Esc ejects a pilot first.
+        } else if editor.is_playing() {
             editor::stop(world, editor);
         } else {
             editor.select(None);

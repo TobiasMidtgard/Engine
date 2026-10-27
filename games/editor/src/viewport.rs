@@ -189,6 +189,10 @@ fn gizmo(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, view: &ViewI
         if world.get::<EditorOnly>(e).is_some() {
             continue;
         }
+        // A piloted camera moves with the view, not the gizmo.
+        if crate::camera_preview::piloting(world) == Some(e) {
+            continue;
+        }
         let (Some(local), Some(global)) =
             (world.get::<Transform>(e), world.get::<GlobalTransform>(e))
         else {
@@ -671,6 +675,8 @@ fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, rect: egu
         egui::Color32::from_rgba_unmultiplied(22, 23, 26, 200),
     );
     painter.galley(bg.min + egui::vec2(8.0, 4.0), galley, egui::Color32::WHITE);
+
+    crate::camera_preview::ui(ui, world, editor, rect);
 
     // Play mode frame.
     if editor.mode != Mode::Edit {

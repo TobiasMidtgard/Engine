@@ -281,9 +281,13 @@ impl RenderFeature for EguiFeature {
         &mut self,
         world: &mut World,
         _gpu: &GpuShared,
-        _view: &ViewData,
+        view: &ViewData,
         _settings: &RenderSettings,
     ) {
+        // Overlays draw in the main view only; extra views (camera previews) prepare first.
+        if view.extra_view {
+            return;
+        }
         let Some(mut frame) = world.get_resource_mut::<EguiFrame>() else {
             return;
         };

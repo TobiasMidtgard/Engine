@@ -15,6 +15,7 @@
 //! the world only through the type registry and the engine's contracts, like the AI bridge.
 
 mod camera;
+mod camera_preview;
 mod convert;
 mod demos;
 mod editor;
@@ -112,6 +113,7 @@ fn main() {
             Some("round7") => shots::round7(dir),
             Some("round8") => shots::round8(dir),
             Some("round9") => shots::round9(dir),
+            Some("round10") => shots::round10(dir),
             Some("play") => shots::play_in_editor(dir),
             _ => shots::gallery(dir),
         };
@@ -135,6 +137,7 @@ impl Plugin for EditorPlugin {
             .init_resource::<egui_bridge::EguiInput>()
             .init_resource::<egui_bridge::EguiFrame>()
             .init_resource::<ui::EditorDock>()
+            .init_resource::<camera_preview::CameraPreview>()
             .register_component::<demos::ModuleDemo>(
                 "Places one module's showcase demo here (module: physics, destruction, \
                  softbody, vehicles, fire, smoke, vfx, water, weather, foliage, terrain, anim, \
@@ -165,6 +168,7 @@ impl Plugin for EditorPlugin {
                     import::file_drops,
                     camera::editor_camera,
                     ui::editor_ui,
+                    camera_preview::sync,
                     rigs::sync,
                     rigs::preview,
                     demos::sync_demos,

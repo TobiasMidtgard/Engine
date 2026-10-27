@@ -804,6 +804,76 @@ pub fn round9(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Round 10: a camera's preview, pinned while the horse is selected, then piloted.
+pub fn round10(dir: impl Into<PathBuf>) -> ShotScript {
+    let shot_from =
+        Transform::from_xyz(5.5, 1.6, 5.0).looking_at(DVec3::new(-1.0, 0.9, 0.5), Vec3::Y);
+    let steps = vec![
+        Step::Camera(DVec3::new(-7.0, 4.5, 9.0), DVec3::new(1.5, 0.8, 0.5)),
+        Step::Tab(Tab::Inspector),
+        Step::Do(Box::new(move |world, editor| {
+            crate::models::place(
+                world,
+                editor,
+                "fetched/anim/animals/horse/Horse.gltf",
+                DVec3::new(-1.0, 0.0, 1.0),
+            );
+            let camera = editor::create(world, editor, editor::Create::Camera, DVec3::ZERO);
+            if let Some(mut t) = world.get_mut::<Transform>(camera) {
+                *t = shot_from;
+            }
+            editor.select(Some(camera));
+        })),
+        Step::Wait(40),
+        Step::Shot("41_camera_preview"),
+        // A longer lens shows at once.
+        Step::Do(Box::new(|world, editor| {
+            if let Some(e) = editor.primary()
+                && let Some(mut c) = world.get_mut::<Camera>(e)
+            {
+                c.projection = Projection::Perspective {
+                    fov_y_deg: 28.0,
+                    near: 0.05,
+                };
+            }
+        })),
+        Step::Wait(20),
+        Step::Shot("42_camera_preview_long_lens"),
+        // Pinned, it stays while the horse is selected.
+        Step::Do(Box::new(|world, editor| {
+            let camera = editor.primary();
+            world
+                .resource_mut::<crate::camera_preview::CameraPreview>()
+                .pinned = camera;
+        })),
+        Step::Select("Horse"),
+        Step::Wait(20),
+        Step::Shot("43_camera_preview_pinned"),
+        // Pilot: the view looks through the camera, and flying moves it.
+        Step::Select("Camera"),
+        Step::Do(Box::new(|world, editor| {
+            world
+                .resource_mut::<crate::camera_preview::CameraPreview>()
+                .pinned = None;
+            if let Some(camera) = editor.primary() {
+                crate::camera_preview::start_pilot(world, editor, camera);
+            }
+        })),
+        Step::Wait(20),
+        Step::Shot("44_pilot_through_camera"),
+        Step::Camera(DVec3::new(2.5, 1.2, 3.5), DVec3::new(-1.0, 1.0, 0.5)),
+        Step::Wait(20),
+        Step::Shot("45_pilot_moved_in"),
+        Step::Do(Box::new(|world, editor| {
+            crate::camera_preview::stop_pilot(world, editor);
+        })),
+        Step::Camera(DVec3::new(-7.0, 4.5, 9.0), DVec3::new(1.5, 0.8, 0.5)),
+        Step::Wait(30),
+        Step::Shot("46_after_eject"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {

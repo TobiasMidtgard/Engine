@@ -411,6 +411,10 @@ impl RenderFeature for OutlineFeature {
         view: &ViewData,
         _settings: &RenderSettings,
     ) {
+        // Overlays draw in the main view only; extra views (camera previews) prepare first.
+        if view.extra_view {
+            return;
+        }
         self.draws.clear();
         self.rect = None;
         self.triangles = 0;
