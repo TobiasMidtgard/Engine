@@ -67,6 +67,8 @@ struct MeshEntry {
     root: u32,
     first_triangle: u32,
     last_used: u64,
+    /// In this frame's hierarchy upload (false: left out for the GPU's binding limit).
+    uploaded: bool,
 }
 
 /// The probes' placement: `dims` probes `spacing` apart from world probe `origin` (probe `i` of
@@ -129,6 +131,10 @@ pub(crate) struct ProbeGi {
     atlas_view: wgpu::TextureView,
     active: Option<Active>,
     meshes: HashMap<u32, MeshEntry>,
+    /// Each mesh's local bounds by version, to leave meshes away from the grid unbuilt.
+    bounds: HashMap<u32, (u64, (Vec3, Vec3))>,
+    /// Triangles left out of the last upload for the binding limit (warned once).
+    left_out_warned: bool,
     /// The meshes' hierarchies changed: upload them again.
     blas_dirty: bool,
     grid: Option<Grid>,
@@ -239,6 +245,8 @@ impl ProbeGi {
             atlas_view,
             active: None,
             meshes: HashMap::new(),
+            bounds: HashMap::new(),
+            left_out_warned: false,
             blas_dirty: true,
             grid: None,
             epoch: 1,
@@ -466,6 +474,26 @@ impl ProbeGi {
                 let handle = meshes.canonical(resolved.mesh);
                 let key = handle.index();
                 let version = meshes.version(handle);
+                // Only meshes near the grid are built and uploaded.
+                let local = match self.bounds.get(&key) {
+                    Some(&(v, b)) if v == version => b,
+                    _ => {
+                        let Some(mesh) = meshes.get(handle) else {
+                            continue;
+                        };
+                        let aabb = mesh.aabb();
+                        let b = (aabb.min, aabb.max);
+                        self.bounds.insert(key, (version, b));
+                        b
+                    }
+                };
+                if local.0.cmpgt(local.1).any() {
+                    continue;
+                }
+                let bounds = world_box(local, &transform.0, view.origin);
+                if bounds.1.cmplt(region.0).any() || bounds.0.cmpgt(region.1).any() {
+                    continue;
+                }
                 let entry = match self.meshes.get_mut(&key) {
                     Some(e) if e.version == version => e,
                     _ => {
@@ -489,6 +517,7 @@ impl ProbeGi {
                                 root: 0,
                                 first_triangle: 0,
                                 last_used: self.frame,
+                                uploaded: false,
                             },
                         );
                         self.meshes.get_mut(&key).expect("just inserted")
@@ -497,11 +526,6 @@ impl ProbeGi {
                 entry.last_used = self.frame;
                 let root = entry.bvh.nodes[0];
                 if root.count == 0 && root.min[0] > root.max[0] {
-                    continue;
-                }
-                let local = (Vec3::from(root.min), Vec3::from(root.max));
-                let bounds = world_box(local, &transform.0, view.origin);
-                if bounds.1.cmplt(region.0).any() || bounds.0.cmpgt(region.1).any() {
                     continue;
                 }
                 // Camera-relative -> mesh.
@@ -532,6 +556,10 @@ impl ProbeGi {
         self.meshes
             .retain(|_, e| frame - e.last_used < KEEP_UNUSED_FRAMES);
         self.blas_dirty |= self.meshes.len() != before;
+        if self.bounds.len() > 4 * self.meshes.len() + 1024 {
+            let meshes = &self.meshes;
+            self.bounds.retain(|k, _| meshes.contains_key(k));
+        }
         let build_ms = build_started.elapsed().as_secs_f32() * 1000.0;
 
         let active = self.active.as_mut().expect("activated above");
@@ -539,13 +567,35 @@ impl ProbeGi {
         let queue = &shared.queue;
         let mut regroup = recreated || active.group.is_none();
         if self.blas_dirty {
+            // What one storage binding holds: meshes past it are left out (most recently
+            // used first in).
+            let limit = device.limits().max_storage_buffer_binding_size;
+            let mut order: Vec<_> = self.meshes.iter_mut().collect();
+            order.sort_unstable_by_key(|(k, e)| (std::cmp::Reverse(e.last_used), **k));
             let mut nodes: Vec<bvh::Node> = Vec::new();
             let mut triangles: Vec<[f32; 4]> = Vec::new();
-            for e in self.meshes.values_mut() {
+            let mut left_out = 0usize;
+            for (_, e) in order {
+                let node_bytes = (nodes.len() + e.bvh.nodes.len()) * size_of::<bvh::Node>();
+                let triangle_bytes = (triangles.len() + e.bvh.triangles.len()) * 16;
+                e.uploaded = node_bytes as u64 <= limit && triangle_bytes as u64 <= limit;
+                if !e.uploaded {
+                    left_out += e.bvh.triangles.len() / 3;
+                    continue;
+                }
                 e.root = nodes.len() as u32;
                 e.first_triangle = (triangles.len() / 3) as u32;
                 nodes.extend_from_slice(&e.bvh.nodes);
                 triangles.extend_from_slice(&e.bvh.triangles);
+            }
+            if left_out > 0 && !self.left_out_warned {
+                self.left_out_warned = true;
+                tracing::warn!(
+                    "probe GI: {:.1} M triangles near the grid don't fit one GPU binding \
+                     ({} MB); the rays miss them",
+                    left_out as f64 / 1e6,
+                    limit >> 20
+                );
             }
             if triangles.is_empty() {
                 triangles.resize(3, [0.0; 4]);
@@ -558,6 +608,7 @@ impl ProbeGi {
                 .write(device, queue, bytemuck::cast_slice(&triangles));
             self.blas_dirty = false;
         }
+        found.retain(|(inst, _)| self.meshes[&inst.mesh[3]].uploaded);
         for (inst, _) in &mut found {
             let e = &self.meshes[&inst.mesh[3]];
             inst.mesh[0] = e.root;
