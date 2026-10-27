@@ -97,8 +97,28 @@ fn log_slow_systems(world: &World, build: &mut WorldBuild) {
     );
 }
 
-/// Zones whose demos use Water's demo art ([`engine_water::demo::art::WaterDemoArt`]).
-const WATER_ZONES: [&str; 2] = ["water", "lake"];
+/// Module art made on workers ahead of a zone's demo: the zone, how to start it (at the
+/// start of the build) and whether it is in (the exe wakes the zone then; sooner, its spawn
+/// would make what is left on the frame).
+type Prefetch = (&'static str, fn(&mut World), fn(&World) -> bool);
+
+const PREFETCH: [Prefetch; 3] = [
+    ("water", water_prefetch, water_ready),
+    ("lake", water_prefetch, water_ready),
+    (
+        "field",
+        |_| engine_fire::props::prefetch_textures(),
+        |_| engine_fire::props::textures_ready(),
+    ),
+];
+
+fn water_prefetch(world: &mut World) {
+    engine_water::demo::art::WaterDemoArt::prefetch(world);
+}
+
+fn water_ready(world: &World) -> bool {
+    world.resource::<engine_water::WaterLoading>().is_ready()
+}
 
 const LIB: &str = "the library is the first step";
 
@@ -231,11 +251,10 @@ const STEPS: [Step; 12] = [
                 b.zone += 1;
                 continue;
             }
-            // Water's demo art is made on workers (prefetched at the start); its zones wake
-            // once it is in, or their spawn would make what is left on the frame.
             if staged
-                && WATER_ZONES.contains(&z.key)
-                && !world.resource::<engine_water::WaterLoading>().is_ready()
+                && PREFETCH
+                    .iter()
+                    .any(|(key, _, ready)| *key == z.key && !ready(world))
             {
                 return false;
             }
@@ -301,8 +320,9 @@ const STEPS: [Step; 12] = [
 const MODULE_WAIT_S: f32 = 60.0;
 
 /// Modules still baking art or settling their zones on other threads.
-const MODULES_LOADING: [fn(&World) -> bool; 7] = [
+const MODULES_LOADING: [fn(&World) -> bool; 8] = [
     engine_smoke::demo::loading,
+    engine_fire::demo::loading,
     |world| {
         world
             .get_resource::<engine_water::WaterLoading>()
@@ -408,13 +428,12 @@ pub fn start(world: &mut World) {
         engine_weather::spawn_sky_lights(c);
     });
     let seed = world.resource::<EngineConfig>().seed;
-    // Water's demo art starts on workers now if a zone of the build needs it.
-    let only = world.get_resource::<zones::DemoZones>();
-    if WATER_ZONES
-        .iter()
-        .any(|w| only.is_none_or(|o| o.0.iter().any(|k| k == w)))
-    {
-        engine_water::demo::art::WaterDemoArt::prefetch(world);
+    // Module art for the build's zones starts on workers now.
+    let only = world.get_resource::<zones::DemoZones>().cloned();
+    for (key, prefetch, _) in PREFETCH {
+        if only.as_ref().is_none_or(|o| o.0.iter().any(|k| k == key)) {
+            prefetch(world);
+        }
     }
     let meadow_job = {
         let land = land.clone();
