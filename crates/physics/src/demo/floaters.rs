@@ -93,15 +93,30 @@ fn drop_floaters(world: &mut World, anchor: Entity) {
     }
 }
 
-/// Drop each float test again when its cycle is up (world time).
-pub(crate) fn replay_floaters(world: &mut World) {
-    let dt = world
-        .get_resource::<FixedTime>()
-        .map_or(0.0, |t| t.world_step_secs());
-    let focus = world
-        .get_resource::<FocusPoints>()
-        .map(|f| f.points.clone())
-        .unwrap_or_default();
+/// Float tests due to drop again and parts to hold asleep, found by [`tick_floaters`] for
+/// [`replay_floaters`].
+#[derive(Resource, Default)]
+pub(crate) struct FloatWork {
+    due: Vec<Entity>,
+    rest: Vec<Entity>,
+}
+
+/// Is there anything for [`replay_floaters`] to do this step? (It takes the whole world, so
+/// it runs only then: an exclusive system stops every other system of the step.)
+pub(crate) fn floaters_have_work(work: Res<FloatWork>) -> bool {
+    !work.due.is_empty() || !work.rest.is_empty()
+}
+
+/// Run each float test's cycle (world time): which drop again, and which rest because nobody
+/// is near. A plain system, so it runs beside the others.
+pub(crate) fn tick_floaters(
+    time: Option<Res<FixedTime>>,
+    focus: Option<Res<FocusPoints>>,
+    mut tests: Query<(Entity, &mut FloatTest)>,
+    mut work: ResMut<FloatWork>,
+) {
+    let dt = time.map_or(0.0, |t| t.world_step_secs());
+    let focus = focus.map(|f| f.points.clone()).unwrap_or_default();
     // (No focus, as in tests and tools: it always runs.)
     let nearest = |at: DVec3| {
         focus
@@ -109,12 +124,11 @@ pub(crate) fn replay_floaters(world: &mut World) {
             .map(|p| p.distance(at))
             .fold(if focus.is_empty() { 0.0 } else { f64::INFINITY }, f64::min)
     };
-    let (mut due, mut rest) = (Vec::new(), Vec::new());
-    for (e, mut t) in world.query::<(Entity, &mut FloatTest)>().iter_mut(world) {
+    for (e, mut t) in &mut tests {
         let d = nearest(t.origin);
         if t.resting {
             if d < STATION_WAKE_M {
-                due.push(e);
+                work.due.push(e);
             }
             continue;
         }
@@ -122,7 +136,7 @@ pub(crate) fn replay_floaters(world: &mut World) {
             t.away += dt;
             if t.away >= FAR_REST_SECS {
                 t.resting = true;
-                rest.extend(t.parts.iter().copied());
+                work.rest.extend(t.parts.iter().copied());
             }
             continue;
         }
@@ -132,9 +146,20 @@ pub(crate) fn replay_floaters(world: &mut World) {
         }
         t.running += dt;
         if t.running >= FLOAT_CYCLE_SECS {
-            due.push(e);
+            work.due.push(e);
         }
     }
+}
+
+/// Drop the float tests [`tick_floaters`] found due, and hold the resting ones' parts asleep.
+pub(crate) fn replay_floaters(world: &mut World) {
+    let (due, rest) = {
+        let mut work = world.resource_mut::<FloatWork>();
+        (
+            std::mem::take(&mut work.due),
+            std::mem::take(&mut work.rest),
+        )
+    };
     for e in due {
         drop_floaters(world, e);
     }

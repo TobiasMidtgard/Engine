@@ -576,41 +576,58 @@ pub(crate) fn physics_step(world: &mut World, mut q: Local<Option<StepQueries>>)
         let Some((substeps, sub_dt)) = plan else {
             place_kinematics(&mut sim, rid);
             let s = &mut *sim;
-            let filter = ContactFilter {
-                no_contact: &s.no_contact,
-                dt: 0.0,
-            };
+            let no_contact = &s.no_contact;
             let r = s.regions[rid as usize].as_mut().expect("live region");
-            if r.needs_refresh && r.dormant {
-                // A dormant region's contacts wait for its first real step (all of it asleep,
-                // nothing here needs them): only the query tree learns of its new colliders.
-                // Finding a yard's 10,000 pairs afresh, a split cost 30-85 ms in one step.
-                if r.stale_all || !r.fresh.is_empty() {
-                    r.refresh_queries();
-                    r.update_bounds();
-                }
-            } else if r.needs_refresh {
+            if r.needs_refresh {
                 let _refresh = tracing::info_span!("refresh resting region").entered();
-                // A zero-length step: Rapier applies the removals and updates the contacts and
-                // its islands together (its collision-only pass leaves the islands a link
-                // behind the contact graph, and a later contact gets mislinked).
+                // Only the query tree learns of the changes now (rays and overlaps see the new
+                // colliders, and skip removed ones); Rapier takes them in at the region's next
+                // real step, as it does any change made between steps. What doesn't step
+                // needs no contacts: a zero-length step here walked all of a resting yard's
+                // 40,000 pairs for one fresh collider, 9-19 ms four times a second.
+                // (A dynamic body woken here, one just made or moved in, joins Rapier's active
+                // set only in a step, and the tiers look there for what is travelling: take one
+                // of no length for it, once.)
                 let t0 = Instant::now();
-                let fresh = r.fresh.len();
-                r.world.integration_parameters.dt = 0.0;
-                r.world.step_with_events(&filter, &());
+                let (fresh, stale) = (r.fresh.len(), r.stale_all);
+                let added = r.fresh.clone();
+                let active: HashSet<_> = r.world.islands.active_bodies().collect();
+                let woke = r
+                    .world
+                    .bodies
+                    .iter()
+                    .find(|(h, rb)| rb.is_dynamic() && !rb.is_sleeping() && !active.contains(h))
+                    .map(|(_, rb)| crate::convert::entity_of(rb.user_data));
+                let awake = woke.is_some();
+                if awake {
+                    r.world.integration_parameters.dt = 0.0;
+                    let filter = ContactFilter {
+                        no_contact,
+                        dt: 0.0,
+                    };
+                    r.world.step_with_events(&filter, &());
+                    r.queries_refreshed();
+                } else if r.stale_all || !r.fresh.is_empty() {
+                    r.refresh_queries();
+                }
+                let t1 = Instant::now();
+                if stale {
+                    r.update_bounds();
+                } else {
+                    r.extend_bounds(&added);
+                }
                 r.needs_refresh = false;
                 let ms = t0.elapsed().as_secs_f64() * 1000.0;
-                if ms > 5.0 && report {
+                if ms > 2.0 && report {
                     engine_core::log::info!(
                         "physics regions: refreshing resting region {rid} ({} bodies, {} \
-                         colliders, {fresh} fresh, {} pairs) took {ms:.1} ms",
+                         colliders, {fresh} fresh, stale {stale}, awake {woke:?}) took {ms:.1} \
+                         ms, bounds {:.1}",
                         r.world.bodies.len(),
                         r.world.colliders.len(),
-                        r.world.narrow_phase.contact_pairs().count(),
+                        t1.elapsed().as_secs_f64() * 1000.0
                     );
                 }
-                r.queries_refreshed();
-                r.update_bounds();
             }
             continue;
         };

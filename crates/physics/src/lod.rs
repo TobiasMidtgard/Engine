@@ -283,8 +283,7 @@ impl Simulation {
         }
     }
 
-    /// Does any mover of region `a` come within `margin` meters of one of region `b`? Counts
-    /// some pairs up to twice as far apart (it compares grid cells).
+    /// Does any mover of region `a` come within `margin` meters of one of region `b`?
     pub(crate) fn movers_close(&self, a: RegionId, b: RegionId, margin: f64) -> bool {
         let (mut ma, mut mb) = (self.members(a), self.members(b));
         if ma.len() < mb.len() {
@@ -322,14 +321,21 @@ impl Simulation {
                 return true;
             }
         }
-        let grid: HashSet<Cell> = ma
-            .iter()
-            .filter(|m| !big(m))
-            .flat_map(|m| cells(m.at, m.reach, size))
-            .collect();
-        mb.iter()
-            .filter(|m| !big(m))
-            .any(|m| cells(m.at, m.reach + margin, size).any(|c| grid.contains(&c)))
+        // Movers sharing a cell are then measured: by the cells alone, ones up to twice the
+        // margin apart counted as close, and a cluster split off at 1.25 margins merged back
+        // at the next look (100-odd fortress debris moved out and in every half second).
+        let mut grid: HashMap<Cell, Vec<usize>> = HashMap::new();
+        for (i, m) in ma.iter().enumerate().filter(|(_, m)| !big(m)) {
+            for c in cells(m.at, m.reach, size) {
+                grid.entry(c).or_default().push(i);
+            }
+        }
+        mb.iter().filter(|m| !big(m)).any(|y| {
+            cells(y.at, y.reach + margin, size).any(|c| {
+                grid.get(&c)
+                    .is_some_and(|xs| xs.iter().any(|&x| near(&ma[x], y)))
+            })
+        })
     }
 
     /// Cluster `members`: those whose boxes, grown by half of `gap`, share a grid cell, and
