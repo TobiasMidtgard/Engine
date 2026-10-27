@@ -227,9 +227,12 @@ pub fn leg(i: usize) -> (DVec3, DVec3) {
 }
 
 fn put_camera(world: &mut World, eye: DVec3, target: DVec3) {
-    let mut q = world.query::<(&mut Transform, &mut ShowcaseCamera)>();
-    for (mut tr, mut cam) in q.iter_mut(world) {
+    let mut q = world.query::<(&mut Transform, &mut GlobalTransform, &mut ShowcaseCamera)>();
+    for (mut tr, mut global, mut cam) in q.iter_mut(world) {
         camera::look(&mut tr, &mut cam, eye, target);
+        // Now, not after this frame's transform pass: Movement's pilot takes its facing from
+        // the camera's view the moment play starts (the camera has no parent).
+        *global = GlobalTransform::from(*tr);
     }
 }
 
