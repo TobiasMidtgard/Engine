@@ -186,9 +186,10 @@ struct Ahead {
 struct Starting;
 
 /// Whether a fire demo is still starting (its jump ahead runs over a loading screen's frames,
-/// under `LoadingBudget`). Hold the loading screen until this is false.
+/// under `LoadingBudget`), or textures `props::prefetch_textures` started are still being
+/// made. Hold the loading screen until this is false.
 pub fn loading(world: &World) -> bool {
-    world.contains_resource::<Starting>()
+    world.contains_resource::<Starting>() || crate::props::textures_pending()
 }
 
 /// An object the demo puts back as it was when the meadow resets.
@@ -1158,8 +1159,9 @@ mod tests {
         let s = state(&mut app);
         assert!(s.started && s.ahead.is_some(), "{s:?}");
         assert_eq!(s.since, warmup);
+        // (Not `loading`: another test may be making the prop textures meanwhile.)
         let mut frames = 0;
-        while loading(&app.world) {
+        while app.world.contains_resource::<Starting>() {
             app.update();
             frames += 1;
             assert!(frames < 5000);

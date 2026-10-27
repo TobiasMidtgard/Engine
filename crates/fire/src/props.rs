@@ -646,10 +646,12 @@ struct Prefetch {
 
 static PREFETCH: OnceLock<Prefetch> = OnceLock::new();
 
-/// Start making the fire demo's prop textures on a thread of their own, so the demo's props
-/// (`prop_materials`) find them made instead of making them on the frame. Call it once,
-/// early in loading; [`textures_ready`] says when they are done. Later calls do nothing.
+/// Start making the fire demo's prop textures and its painted ground's layers on threads of
+/// their own, so the demo's props (`prop_materials`) and the ground's first frame find them
+/// made instead of making them on the frame. Call it once, early in loading;
+/// [`textures_ready`] says when they are done. Later calls do nothing.
 pub fn prefetch_textures() {
+    crate::ground::prefetch_layers();
     if PREFETCH.set(Prefetch::default()).is_err() {
         return;
     }
@@ -674,6 +676,15 @@ pub fn textures_ready() -> bool {
     PREFETCH
         .get()
         .is_some_and(|p| p.done.load(Ordering::Acquire))
+        && crate::ground::layers_ready()
+}
+
+/// Whether textures [`prefetch_textures`] started are still being made.
+pub(crate) fn textures_pending() -> bool {
+    PREFETCH
+        .get()
+        .is_some_and(|p| !p.done.load(Ordering::Acquire))
+        || crate::ground::layers_pending()
 }
 
 /// A set [`prefetch_textures`] has made, taken out of its store.

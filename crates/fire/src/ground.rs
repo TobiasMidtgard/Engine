@@ -10,6 +10,9 @@
 //! litter and dirt turn to black char flecked with ash where the fire has been, fading as the
 //! field forgets the fire.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+
 use bytemuck::{Pod, Zeroable};
 use engine_core::math::{DVec2, DVec3, Vec2};
 use engine_core::prelude::*;
@@ -251,16 +254,93 @@ pub struct GroundFeature {
     stats: FeatureStats,
 }
 
-/// Upload `images` (all the same size, with mips) as one 2D array texture.
-fn layer_array(gpu: &GpuShared, label: &str, images: &[Image], srgb: bool) -> wgpu::TextureView {
-    let (w, h) = (images[0].width, images[0].height);
-    let levels = images[0].full_mip_count();
+/// One ground layer image and its smaller mip levels.
+struct Layer {
+    image: Image,
+    mips: Vec<Vec<u8>>,
+}
+
+/// Every [`GroundKind`]'s albedo (sRGB) and detail layers.
+struct Layers {
+    albedo: Vec<Layer>,
+    detail: Vec<Layer>,
+}
+
+/// Make the ground layers (a second or so on the CPU: kept off the render frame).
+fn make_layers() -> Layers {
+    let (albedo, detail) = GroundKind::ALL
+        .iter()
+        .map(|k| {
+            let (a, d) = k.generate(LAYER_SIZE, 0x6a0d + k.layer() * 977);
+            let layer = |image: Image, srgb: bool| Layer {
+                mips: image.mip_chain(srgb),
+                image,
+            };
+            (layer(a, true), layer(d, false))
+        })
+        .unzip();
+    Layers { albedo, detail }
+}
+
+/// Ground layers made ahead of time ([`prefetch_layers`]).
+#[derive(Default)]
+struct Prefetch {
+    layers: Mutex<Option<Layers>>,
+    done: AtomicBool,
+}
+
+static PREFETCH: OnceLock<Prefetch> = OnceLock::new();
+
+/// Start making the ground layers on a thread of their own, so the painted ground's first
+/// frame finds them made. Later calls do nothing.
+pub(crate) fn prefetch_layers() {
+    if PREFETCH.set(Prefetch::default()).is_err() {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("fire ground layers".into())
+        .spawn(|| {
+            let p = PREFETCH.get().expect("set before the thread starts");
+            let layers = make_layers();
+            *p.layers.lock().unwrap_or_else(|e| e.into_inner()) = Some(layers);
+            p.done.store(true, Ordering::Release);
+        })
+        .expect("spawn the ground layer thread");
+}
+
+/// Whether the layers [`prefetch_layers`] started are made (false if it wasn't called).
+pub(crate) fn layers_ready() -> bool {
+    PREFETCH
+        .get()
+        .is_some_and(|p| p.done.load(Ordering::Acquire))
+}
+
+/// Whether a prefetch of the layers is still under way.
+pub(crate) fn layers_pending() -> bool {
+    PREFETCH
+        .get()
+        .is_some_and(|p| !p.done.load(Ordering::Acquire))
+}
+
+/// The layers made ahead of time, if they are done (taken out of the store).
+fn take_prefetched() -> Option<Layers> {
+    let p = PREFETCH.get()?;
+    if !p.done.load(Ordering::Acquire) {
+        return None;
+    }
+    p.layers.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+/// Upload `layers` (all the same size, with mips) as one 2D array texture.
+fn layer_array(gpu: &GpuShared, label: &str, layers: &[Layer], srgb: bool) -> wgpu::TextureView {
+    let (w, h) = (layers[0].image.width, layers[0].image.height);
+    let levels = layers[0].image.full_mip_count();
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
             width: w,
             height: h,
-            depth_or_array_layers: images.len() as u32,
+            depth_or_array_layers: layers.len() as u32,
         },
         mip_level_count: levels,
         sample_count: 1,
@@ -273,8 +353,7 @@ fn layer_array(gpu: &GpuShared, label: &str, images: &[Image], srgb: bool) -> wg
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    for (layer, image) in images.iter().enumerate() {
-        let mips = image.mip_chain(srgb);
+    for (layer, Layer { image, mips }) in layers.iter().enumerate() {
         for level in 0..levels {
             let data: &[u8] = if level == 0 {
                 &image.data
@@ -319,10 +398,7 @@ impl GroundFeature {
             return;
         }
         let started = std::time::Instant::now();
-        let (albedo, detail): (Vec<Image>, Vec<Image>) = GroundKind::ALL
-            .iter()
-            .map(|k| k.generate(LAYER_SIZE, 0x6a0d + k.layer() * 977))
-            .unzip();
+        let Layers { albedo, detail } = take_prefetched().unwrap_or_else(make_layers);
         self.layers = Some((
             layer_array(gpu, "ground albedo layers", &albedo, true),
             layer_array(gpu, "ground detail layers", &detail, false),
