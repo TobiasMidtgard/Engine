@@ -5,10 +5,11 @@
 //! without simulating it: SpeedTree and Unreal's foliage wind in the vertex stage, Chaos
 //! Cloth's LOD handing far cloth to an animated pose, and baked cloth caches (Alembic, the
 //! "vertex animation textures" of Houdini → Unreal) looped for background flags. Here a far
-//! flag records a few seconds of its own simulated flapping, finds a stretch that comes back
-//! to where it began, and loops it with a short crossfade over the seam, at a blend of two
-//! poses a particle. Gusts play it faster or slower. It is simulated again when it comes
-//! near, tears, or when the wind it recorded in turns or changes strength.
+//! flag records a few seconds of its own simulated flapping (stepping every fixed step
+//! meanwhile, so the folds stay sharp), finds a stretch that comes back to where it began,
+//! and loops it with a short crossfade over the seam, at a blend of two poses a particle.
+//! Gusts play it faster or slower. It is simulated again when it comes near, tears, or when
+//! the wind it recorded in turns or changes strength.
 
 use engine_core::prelude::*;
 
@@ -24,7 +25,7 @@ pub const MIN_WIND: f32 = 1.5;
 const WIND_TURN: f32 = 0.45;
 const WIND_CHANGE: f32 = 1.6;
 /// Crossfade over the loop's seam, and the shortest loop, seconds.
-const FADE: f32 = 0.5;
+const FADE: f32 = 0.3;
 const MIN_LOOP: f32 = 1.2;
 
 #[derive(Debug, Clone)]

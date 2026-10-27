@@ -1109,9 +1109,18 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     // Farther bodies step less often, each step covering the time skipped: every 2nd fixed
     // step past lod_distance, every 4th past twice that. One hanging on something moving
     // steps at least every other, to keep up with it.
+    // A flag recording its flapping to loop (see `sway`) steps every fixed step meanwhile,
+    // so the loop keeps the folds a coarse step would blur.
+    let cap = if matches!(b.far, Some(sway::FarSway::Learning(_))) {
+        1
+    } else if b.carried {
+        2
+    } else {
+        4
+    };
     let mut every = 1;
     let mut far = ctx.config.lod_distance;
-    while dist > far && every < if b.carried { 2 } else { 4 } {
+    while dist > far && every < cap {
         every *= 2;
         far *= 2.0;
     }

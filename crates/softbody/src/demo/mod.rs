@@ -396,6 +396,8 @@ fn flag_field(commands: &mut Commands, corner: DVec3) {
             spec.resolution = [20, 12];
             spec.sim.wind_scale = 2.4;
             spec.sim.gpu = true;
+            // The kernel's substeps are cheap: keep it at the default rate.
+            spec.sim.substeps = SimSettings::default().substeps;
             commands.spawn((
                 Name::new(format!("Pennant {}", row * 7 + col + 1)),
                 at(base + DVec3::new(0.03, 2.35, 0.0)),
