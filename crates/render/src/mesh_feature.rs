@@ -1,4 +1,4 @@
-//! The standard mesh feature: draws every entity with a [`MeshRenderer`].
+//! The standard mesh feature: draws every entity with a [`MeshRenderer`](crate::components::MeshRenderer).
 //!
 //! Per frame it culls against the camera frustum and each shadow cascade, groups instances
 //! by (pipeline, texture set, mesh), and draws each group with one instanced call. Material
@@ -38,7 +38,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bevy_ecs::entity::EntityHashMap;
 /// The per-object maps of `prepare`, with a fast hash (the standard one dominated it).
 type FastMap<K, V> = bevy_platform::collections::HashMap<K, V>;
 use std::sync::Arc;
@@ -49,7 +48,6 @@ use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
 use wgpu::util::DeviceExt;
 
-use crate::components::{MaxDrawDistance, MeshRenderer, NoVirtualGeometry, ResolvedMesh};
 use crate::features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderPhase,
 };
@@ -61,6 +59,7 @@ use crate::material::{
 };
 use crate::material_library::{MaterialPreset, MaterialTextures};
 use crate::mesh::{Mesh, Vertex};
+use crate::mesh_scene::{self, Cold, Hot, MeshScene};
 use crate::settings::{RenderSettings, TextureCompression};
 use crate::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use crate::texture::Image;
@@ -318,6 +317,9 @@ struct Batch {
 
 #[derive(Clone, Copy)]
 struct Item {
+    /// Its slot in the mesh scene.
+    slot: u32,
+    /// The mesh's GPU cache index (its canonical handle index).
     mesh: u32,
     /// Level of detail in the camera's view.
     lod: u8,
@@ -333,23 +335,252 @@ struct Item {
     center: Vec3,
     radius: f32,
     dist2: f32,
-    instance: MeshInstance,
+    /// Its material's handle index as the entity names it (into `material_frames`).
+    material: u32,
+    /// Its material buffer slot (set after the cull).
+    material_slot: u32,
+    /// Its mesh and material may be drawn as an impostor.
+    impostor_ok: bool,
+    /// Small enough on screen to be drawn as one.
+    impostor_size: bool,
 }
 
-type MeshQuery = (
-    Entity,
-    &'static GlobalTransform,
-    &'static MeshRenderer,
-    &'static ResolvedMesh,
-    Has<NoVirtualGeometry>,
-    Option<&'static MaxDrawDistance>,
-    Option<&'static Displacement>,
-);
+/// What the gather needs of a mesh, looked up once a frame for the meshes the scene uses (by
+/// the handle index the entities name).
+#[derive(Clone, Copy, Default)]
+struct MeshFrame {
+    /// The handle index holding the mesh (`Assets::canonical`): the GPU caches' key.
+    index: u32,
+    /// Its asset version (0: not loaded).
+    version: u64,
+    /// Loaded, and enough triangles for the cluster path.
+    dense: bool,
+    /// Few enough for a quick cluster build.
+    small: bool,
+    /// Loaded at all.
+    exists: bool,
+    /// Its upload for the instanced path was checked this frame (by a deferred slot).
+    checked: bool,
+    /// Uploaded for the instanced path.
+    ready: bool,
+    center: Vec3,
+    /// Bounding sphere radius, mesh space.
+    radius: f32,
+    min_y: f32,
+    height: f32,
+    coarsest: u32,
+    /// Can be drawn as an impostor (enough triangles, levels built).
+    impostor: bool,
+    /// Whether its clusters are ready, once asked this frame (undisplaced instances).
+    clusters: Option<bool>,
+}
 
-/// Whether a bounding sphere at camera-relative `center` lies wholly beyond the entity's
-/// [`MaxDrawDistance`].
-fn beyond_draw_distance(max: Option<&MaxDrawDistance>, center: Vec3, radius: f32) -> bool {
-    max.is_some_and(|m| center.length() - radius > m.0)
+impl MeshFrame {
+    /// Take bounds and levels from its upload.
+    fn set_uploaded(&mut self, gpu_mesh: &GpuMesh, building_levels: bool) {
+        let coarsest = gpu_mesh.coarsest_triangles();
+        *self = MeshFrame {
+            ready: true,
+            center: gpu_mesh.center,
+            radius: gpu_mesh.half_extents.length(),
+            min_y: gpu_mesh.min_y,
+            height: gpu_mesh.height,
+            coarsest,
+            impostor: coarsest >= crate::impostor::MIN_TRIANGLES && !building_levels,
+            ..*self
+        };
+    }
+}
+
+/// What the gather needs of a material, looked up once a frame for the materials the scene
+/// uses (by the handle index the entities name).
+#[derive(Clone, Copy, Default)]
+struct MaterialFrame {
+    /// The handle index holding the material (`Assets::canonical`).
+    index: u32,
+    blend: bool,
+    masked: bool,
+    double_sided: bool,
+    glows: bool,
+    /// Opaque and without wind sway: may take the cluster path.
+    still_opaque: bool,
+    /// Its material slot and texture set this frame, once something drawn uses it.
+    slot: Option<(u32, u32)>,
+}
+
+/// One thread's share of the cull.
+#[derive(Default)]
+struct GatherChunk {
+    items: Vec<Item>,
+    /// Slots for the serial pass: cluster candidates and meshes not uploaded yet.
+    deferred: Vec<u32>,
+    culled: u32,
+    /// Bits by mesh handle index: meshes drawn on the instanced path.
+    instanced: Vec<u64>,
+}
+
+fn set_bit(bits: &mut Vec<u64>, index: u32) {
+    let word = index as usize / 64;
+    if word >= bits.len() {
+        bits.resize(word + 1, 0);
+    }
+    bits[word] |= 1 << (index % 64);
+}
+
+/// Run jobs on the engine's compute pool (`engine_core::tasks`), the calling thread taking
+/// part; in turn for a single job or without a pool.
+fn run_jobs<'env, F: FnOnce() + Send + 'env>(jobs: impl Iterator<Item = F>) {
+    let mut jobs = jobs.peekable();
+    let Some(first) = jobs.next() else {
+        return;
+    };
+    match engine_core::tasks::ComputeTaskPool::try_get() {
+        Some(pool) if jobs.peek().is_some() => {
+            pool.scope(|scope| {
+                scope.spawn(async move { first() });
+                for job in jobs {
+                    scope.spawn(async move { job() });
+                }
+            });
+        }
+        _ => {
+            first();
+            jobs.for_each(|job| job());
+        }
+    }
+}
+
+/// Whether a slot may take the cluster path (virtual geometry).
+fn cluster_candidate(hot: &Hot, mesh: &MeshFrame, mat: &MaterialFrame) -> bool {
+    hot.flags & mesh_scene::INSTANCED_ONLY == 0
+        && mat.still_opaque
+        && mesh.exists
+        && (mesh.dense || hot.flags & mesh_scene::DISPLACED != 0)
+}
+
+/// The view and settings as the cull sees them.
+#[derive(Clone, Copy)]
+struct CullParams<'a> {
+    view: &'a ViewData,
+    /// Meters a pixel spans per meter of distance (none for orthographic views).
+    pixel_meters: Option<f32>,
+    lod_pixels: f32,
+    min_pixels: f32,
+    impostor_pixels: f32,
+    shadows: bool,
+}
+
+struct Cull<'a> {
+    p: CullParams<'a>,
+    meshes: &'a FastMap<u32, GpuMesh>,
+    impostors: Option<&'a Impostors>,
+}
+
+impl Cull<'_> {
+    /// An instance on the instanced path: left out (`None`) or an item to draw. Its world
+    /// bounds are recomputed first when its transform or mesh changed.
+    fn item(
+        &self,
+        slot: u32,
+        hot: &mut Hot,
+        cold: &Cold,
+        mesh: &MeshFrame,
+        mat: &MaterialFrame,
+    ) -> Option<Item> {
+        if hot.mesh_version != mesh.version {
+            hot.center = cold.transform.transform_point(mesh.center.as_dvec3());
+            hot.radius = mesh.radius * hot.scale;
+            hot.mesh_version = mesh.version;
+        }
+        let center = (hot.center - self.p.view.origin).as_vec3();
+        let radius = hot.radius;
+        let distance = center.length();
+        if distance - radius > hot.max_distance {
+            return None;
+        }
+        // Too small to cover a pixel: left out of the view (it may still cast a shadow).
+        let meters_per_pixel = self
+            .p
+            .pixel_meters
+            .map(|k| k * (distance - radius).max(self.p.view.near));
+        let big_enough = meters_per_pixel.is_none_or(|m| 2.0 * radius >= self.p.min_pixels * m);
+        let visible = big_enough && self.p.view.frustum.intersects_sphere(center, radius);
+        let casts = self.p.shadows && hot.flags & mesh_scene::CASTS != 0 && !mat.blend;
+        if !visible && !casts {
+            return None;
+        }
+        let lod = match (meters_per_pixel, self.meshes.get(&mesh.index)) {
+            (Some(m), Some(g)) if self.p.lod_pixels > 0.0 => {
+                crate::mesh_lod::pick(g.errors(), hot.scale, self.p.lod_pixels * m)
+            }
+            _ => 0,
+        };
+        // Far away, meshes whose levels of detail can't get cheap are drawn as impostors,
+        // baked the first time one is that small. The bake keeps no emission, so glowing
+        // materials stay meshes.
+        let impostor_ok = self.p.impostor_pixels > 0.0
+            && self.impostors.is_some()
+            && !mat.blend
+            && !mat.glows
+            && mesh.impostor;
+        let impostor_size =
+            meters_per_pixel.is_some_and(|m| 2.0 * radius < self.p.impostor_pixels * m);
+        let impostor = self
+            .impostors
+            .filter(|_| impostor_ok)
+            .and_then(|i| i.layer((mesh.index, mat.index as u64)))
+            .unwrap_or(crate::impostor::NONE);
+        let lod = if impostor != crate::impostor::NONE && impostor_size {
+            IMPOSTOR_LOD
+        } else {
+            lod
+        };
+        let pipeline = if mat.blend { PIPE_BLEND } else { 0 }
+            | if mat.double_sided { PIPE_DOUBLE } else { 0 }
+            | if hot.flags & mesh_scene::MIRRORED != 0 {
+                PIPE_MIRROR
+            } else {
+                0
+            };
+        Some(Item {
+            slot,
+            mesh: mesh.index,
+            lod,
+            scale: hot.scale,
+            impostor,
+            pipeline,
+            // Set after the cull, with the material slot.
+            textures: 0,
+            masked: mat.masked,
+            visible,
+            casts,
+            center,
+            radius,
+            dist2: center.length_squared(),
+            material: hot.material,
+            material_slot: 0,
+            impostor_ok,
+            impostor_size,
+        })
+    }
+}
+
+impl Item {
+    /// Opaque first, by pipeline, texture set, mesh and level; then transparent, farthest
+    /// first.
+    ///
+    /// Texture set ids and mesh indices beyond 20 and 24 bits share keys: such items may
+    /// interleave and split batches, never draw wrong (batches compare whole keys).
+    fn sort_key(&self) -> u64 {
+        if self.pipeline & PIPE_BLEND != 0 {
+            1 << 63 | (!self.dist2.to_bits()) as u64
+        } else {
+            (self.pipeline as u64) << 60
+                | (self.textures as u64 & 0xf_ffff) << 40
+                | (self.mesh as u64 & 0xff_ffff) << 16
+                | self.lod as u64
+        }
+    }
 }
 
 /// Where a [`Displacement`]'s height comes from, before it is read (cheap to find every
@@ -466,7 +697,7 @@ fn resolve_displacement(
 }
 
 /// Largest scale along any axis (the longest basis vector; cheaper than decomposing).
-fn max_scale(gt: &GlobalTransform) -> f32 {
+pub(crate) fn max_scale(gt: &GlobalTransform) -> f32 {
     let m = gt.0.matrix3;
     m.x_axis
         .length_squared()
@@ -475,12 +706,41 @@ fn max_scale(gt: &GlobalTransform) -> f32 {
         .sqrt() as f32
 }
 
-/// A step of the mesh feature's `prepare`, for the frame profiler (`--profile`).
-fn prepare_step(name: &'static str) -> tracing::span::EnteredSpan {
-    tracing::info_span!(target: "engine_render", "render_step", name).entered()
+/// The steps of the mesh feature's `prepare`: each a span for the frame profiler (`--profile`)
+/// and a time for `Diagnostics` (`render.cpu.meshes: <step>`).
+#[derive(Default)]
+struct PrepareSteps {
+    current: Option<(&'static str, std::time::Instant, tracing::span::EnteredSpan)>,
+    done: Vec<(&'static str, f32)>,
 }
 
-/// Draws [`MeshRenderer`] entities. Added by `RenderPlugin`.
+impl PrepareSteps {
+    /// End the current step and start `name`.
+    fn step(&mut self, name: &'static str) {
+        self.finish();
+        let span = tracing::info_span!(target: "engine_render", "render_step", name).entered();
+        self.current = Some((name, std::time::Instant::now(), span));
+    }
+
+    fn finish(&mut self) {
+        if let Some((name, started, span)) = self.current.take() {
+            drop(span);
+            self.done
+                .push((name, started.elapsed().as_secs_f32() * 1000.0));
+        }
+    }
+
+    fn publish(mut self, world: &mut World) {
+        self.finish();
+        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+            for (name, ms) in self.done {
+                d.set(&format!("render.cpu.{name}"), ms as f64);
+            }
+        }
+    }
+}
+
+/// Draws [`MeshRenderer`](crate::components::MeshRenderer) entities. Added by `RenderPlugin`.
 #[derive(Default)]
 pub struct MeshFeature {
     /// Indexed by `PIPE_*` bits: double-sided, blend, mirrored (clockwise front faces).
@@ -494,8 +754,8 @@ pub struct MeshFeature {
     pipeline_layout: Option<wgpu::PipelineLayout>,
     shadow_shader: Option<wgpu::ShaderModule>,
     shadow_masked_layout: Option<wgpu::PipelineLayout>,
-    /// Each entity's world transform last frame, and the frame it was seen (motion vectors).
-    previous: EntityHashMap<(GlobalTransform, u64)>,
+    /// What each drawn entity keeps between frames (bounds, transforms, normal matrix).
+    scene: MeshScene,
     /// Levels of detail being built, by mesh index.
     lod_jobs: HashMap<u32, LodJob>,
     /// Meshes waiting for a free worker to build their levels.
@@ -527,11 +787,14 @@ pub struct MeshFeature {
     shadow: [Vec<Batch>; MAX_CASCADES + 1],
     /// Big casters in the far shadow map.
     far_shadow: Vec<Batch>,
-    query: Option<QueryState<MeshQuery>>,
     items: Vec<Item>,
+    /// This frame's draw order: a sort key and an index into `items`.
+    order: Vec<(u64, u32)>,
     keys: Vec<BatchKey>,
     casters: Vec<u32>,
-    instance_data: Vec<MeshInstance>,
+    /// Where each instance comes from, in draw order: an `items` index (`| AS_IMPOSTOR`
+    /// when drawn as its impostor).
+    layout: Vec<u32>,
     material_data: Vec<GpuMaterial>,
     /// Material handle index → (material buffer slot, texture set id), rebuilt every frame.
     /// Material slot key (the handle index, or a displaced variant: see `displaced_material`)
@@ -541,6 +804,15 @@ pub struct MeshFeature {
     clusters: Option<ClusterRenderer>,
     /// Meshes drawn as clusters this frame.
     clustered: HashSet<u32>,
+    /// This frame's mesh and material lookups, by the handle indices entities name.
+    mesh_frames: Vec<MeshFrame>,
+    material_frames: Vec<MaterialFrame>,
+    /// Slots the cull left for the serial pass (kept for the allocation).
+    deferred: Vec<u32>,
+    /// Bits by mesh handle index: meshes drawn on the instanced path this frame.
+    instanced_meshes: Vec<u64>,
+    /// Per-thread results of the parallel cull.
+    gather_scratch: Vec<GatherChunk>,
     /// Streamed virtual textures.
     vt: Option<VirtualTextureSystem>,
     /// Generated preset height maps read back for displacement, by preset and size.
@@ -551,7 +823,7 @@ pub struct MeshFeature {
     warned_no_height: HashSet<u32>,
     /// Far instances drawn as impostors (made in `init`).
     impostors: Option<Impostors>,
-    /// The impostors' range of `instance_data` in the view (first, count).
+    /// The impostors' range of the instance buffer in the view (first, count).
     impostor_view: (u32, u32),
     /// Their ranges per shadow map: the cascades, the sky occlusion map, the far shadow map.
     impostor_shadow: [(u32, u32); FAR_SHADOW_MAP + 1],
@@ -572,10 +844,14 @@ const SHADOW_MASKED: u8 = 1;
 const FAR_SHADOW_MAP: usize = SKY_OCCLUSION_VIEW + 1;
 /// Mesh level-of-detail builds running at once.
 const MAX_LOD_JOBS: usize = 2;
+/// `MeshFeature::layout`: drawn as its impostor.
+const AS_IMPOSTOR: u32 = 1 << 31;
 /// `Item::lod` of an instance drawn as its impostor.
 const IMPOSTOR_LOD: u8 = u8::MAX;
 /// From this many shadow casters on, each shadow map's list is made on its own thread.
 const PARALLEL_CASTERS: usize = 2000;
+/// Slots (and instances) from which the gather's loops run on the worker threads.
+const PARALLEL_GATHER: usize = 4096;
 /// Seconds between the profiler's mesh reports.
 const PROFILE_REPORT_SECS: f32 = 10.0;
 
@@ -1405,7 +1681,8 @@ impl RenderFeature for MeshFeature {
             return;
         }
         self.frame += 1;
-        let step = prepare_step("meshes: begin frame");
+        let mut steps = PrepareSteps::default();
+        steps.step("meshes: begin frame");
         if let Some(clusters) = &mut self.clusters {
             clusters.begin_frame(gpu);
         }
@@ -1426,16 +1703,14 @@ impl RenderFeature for MeshFeature {
                 self.build_default_set(&gpu.device);
             }
         }
-        drop(step);
-        let step = prepare_step("meshes: gather");
+        steps.step("meshes: sync");
         self.clustered.clear();
-        let mut query = self
-            .query
-            .take()
-            .unwrap_or_else(|| world.query::<MeshQuery>());
+        let frame = self.frame;
+        let mut scene = std::mem::take(&mut self.scene);
+        scene.sync(world, frame);
         let world_ref: &World = world;
         let Some(mesh_assets) = world_ref.get_resource::<Assets<Mesh>>() else {
-            self.query = Some(query);
+            self.scene = scene;
             return;
         };
         let material_assets = world_ref.get_resource::<Assets<StandardMaterial>>();
@@ -1462,7 +1737,6 @@ impl RenderFeature for MeshFeature {
             self.collect_lods(&gpu.device, meshes);
         }
 
-        let frame = self.frame;
         let prev_origin = self.prev_origin.unwrap_or(view.origin);
         // The disk cache of cluster builds.
         let cache_settings = (
@@ -1490,267 +1764,361 @@ impl RenderFeature for MeshFeature {
             self.cache_settings = Some(cache_settings);
         }
 
-        for (entity, gt, renderer, resolved, instanced_only, max_distance, displacement) in
-            query.iter(world_ref)
-        {
-            if !renderer.visible {
-                continue;
-            }
+        steps.step("meshes: gather");
+        // This frame's tables of the meshes and materials the scene uses.
+        let min_triangles = (settings.virtual_geometry_min_triangles as usize).max(1);
+        for raw in scene.meshes_used() {
             // Key GPU caches by the slot that holds the value, so aliases share uploads.
-            let mesh_handle = mesh_assets.canonical(resolved.mesh);
-            let mesh_index = mesh_handle.index();
-            let version = mesh_assets.version(mesh_handle);
-            if version == 0 {
-                continue;
-            }
-            let material_handle =
-                material_assets.map_or(resolved.material, |m| m.canonical(resolved.material));
-            let material = material_assets
-                .and_then(|m| m.get(material_handle))
-                .unwrap_or(&default_material);
-
-            // Dense opaque meshes and displaced ones: clusters, culled and picked on the GPU,
-            // once built (until then they are drawn below as usual).
-            let min_triangles = settings.virtual_geometry_min_triangles as usize;
-            let cluster_path = if settings.virtual_geometry
-                && !instanced_only
-                && material.alpha_mode == AlphaMode::Opaque
-                && material.wind_sway <= 0.0
-                && let Some(mesh) = mesh_assets.get(mesh_handle)
+            let handle = mesh_assets.canonical(Handle::from_index(raw));
+            let version = mesh_assets.version(handle);
+            let triangles = mesh_assets.get(handle).map(|m| m.indices.len() / 3);
+            let mut entry = MeshFrame {
+                index: handle.index(),
+                version,
+                exists: triangles.is_some(),
+                dense: triangles.is_some_and(|t| t >= min_triangles),
+                small: triangles.unwrap_or(0) < SMALL_BUILD_TRIANGLES,
+                ..Default::default()
+            };
+            if let Some(gpu_mesh) = self.meshes.get(&handle.index())
+                && gpu_mesh.version == version
             {
-                match displacement {
-                    None => (mesh.indices.len() / 3 >= min_triangles.max(1))
-                        .then(|| (mesh_index as u64, None)),
+                entry.set_uploaded(gpu_mesh, self.lod_jobs.contains_key(&handle.index()));
+            }
+            let i = raw as usize;
+            if i >= self.mesh_frames.len() {
+                self.mesh_frames.resize(i + 1, MeshFrame::default());
+            }
+            self.mesh_frames[i] = entry;
+        }
+        for raw in scene.materials_used() {
+            let handle = Handle::from_index(raw);
+            let handle = material_assets.map_or(handle, |m| m.canonical(handle));
+            let material = material_assets
+                .and_then(|m| m.get(handle))
+                .unwrap_or(&default_material);
+            let i = raw as usize;
+            if i >= self.material_frames.len() {
+                self.material_frames.resize(i + 1, MaterialFrame::default());
+            }
+            self.material_frames[i] = MaterialFrame {
+                index: handle.index(),
+                blend: material.alpha_mode == AlphaMode::Blend,
+                masked: matches!(material.alpha_mode, AlphaMode::Mask(_)),
+                double_sided: material.double_sided,
+                glows: material.emissive_strength > 0.0
+                    && material.emissive.iter().any(|&c| c > 0.0),
+                still_opaque: material.alpha_mode == AlphaMode::Opaque && material.wind_sway <= 0.0,
+                slot: None,
+            };
+        }
+
+        // 1. The cull, over the scene's slots in parallel chunks. Slots that may take the
+        //    cluster path, and meshes not uploaded yet, wait for the serial pass.
+        let params = CullParams {
+            view,
+            pixel_meters,
+            lod_pixels,
+            min_pixels,
+            impostor_pixels,
+            shadows,
+        };
+        let clusters_on = settings.virtual_geometry && self.clusters.is_some();
+        let threads = if scene.hot.len() >= PARALLEL_GATHER {
+            std::thread::available_parallelism().map_or(1, |n| n.get().min(8))
+        } else {
+            1
+        };
+        let mut chunks = std::mem::take(&mut self.gather_scratch);
+        chunks.resize_with(threads, Default::default);
+        // Cleared here: a chunk gets no job when there are fewer slots than threads.
+        for out in &mut chunks {
+            out.items.clear();
+            out.deferred.clear();
+            out.culled = 0;
+            out.instanced.fill(0);
+        }
+        {
+            let (mesh_frames, material_frames) = (&self.mesh_frames, &self.material_frames);
+            let cull = Cull {
+                p: params,
+                meshes: &self.meshes,
+                impostors: self.impostors.as_ref(),
+            };
+            let gather = |base: usize, hot: &mut [Hot], cold: &[Cold], out: &mut GatherChunk| {
+                for (k, (h, c)) in hot.iter_mut().zip(cold).enumerate() {
+                    if h.flags & mesh_scene::VISIBLE == 0 {
+                        continue;
+                    }
+                    let mesh = &mesh_frames[h.mesh as usize];
+                    if mesh.version == 0 {
+                        continue;
+                    }
+                    let mat = &material_frames[h.material as usize];
+                    let slot = (base + k) as u32;
+                    if !mesh.ready || (clusters_on && cluster_candidate(h, mesh, mat)) {
+                        out.deferred.push(slot);
+                        continue;
+                    }
+                    set_bit(&mut out.instanced, h.mesh);
+                    match cull.item(slot, h, c, mesh, mat) {
+                        Some(item) => out.items.push(item),
+                        None => out.culled += 1,
+                    }
+                }
+            };
+            let per = scene.hot.len().div_ceil(threads).max(1);
+            let gather = &gather;
+            let parts = scene.hot.chunks_mut(per).zip(scene.cold.chunks(per));
+            run_jobs(
+                parts
+                    .zip(chunks.iter_mut())
+                    .enumerate()
+                    .map(|(k, ((hot, cold), out))| move || gather(k * per, hot, cold, out)),
+            );
+        }
+        let mut items = std::mem::take(&mut self.items);
+        let mut deferred = std::mem::take(&mut self.deferred);
+        let mut instanced = std::mem::take(&mut self.instanced_meshes);
+        deferred.clear();
+        instanced.clear();
+        for chunk in &mut chunks {
+            items.append(&mut chunk.items);
+            deferred.extend_from_slice(&chunk.deferred);
+            culled += chunk.culled;
+            if instanced.len() < chunk.instanced.len() {
+                instanced.resize(chunk.instanced.len(), 0);
+            }
+            for (a, b) in instanced.iter_mut().zip(&chunk.instanced) {
+                *a |= b;
+            }
+        }
+
+        // 2. In turn: the cluster path (dense opaque meshes and displaced ones, culled and
+        //    picked on the GPU once built; until then drawn as instances) and first uploads.
+        for &slot in &deferred {
+            let s = slot as usize;
+            let hot = scene.hot[s];
+            let raw = hot.mesh as usize;
+            let mat = self.material_frames[hot.material as usize];
+            let mesh = self.mesh_frames[raw];
+            if clusters_on && cluster_candidate(&hot, &mesh, &mat) {
+                let cold = &scene.cold[s];
+                let mesh_handle = Handle::<Mesh>::from_index(mesh.index);
+                let material = material_assets
+                    .and_then(|m| m.get(Handle::from_index(mat.index)))
+                    .unwrap_or(&default_material);
+                let displacement = if hot.flags & mesh_scene::DISPLACED != 0 {
+                    world_ref.get::<Displacement>(cold.entity)
+                } else {
+                    None
+                };
+                let cluster_path = match displacement {
+                    None => Some((mesh.index as u64, None)),
                     Some(d) => match height_source(d, material, image_assets, preset_size) {
                         Some(source) => {
-                            let key = displaced_key(mesh_index, d, material, &source);
+                            let key = displaced_key(mesh.index, d, material, &source);
                             Some((key, Some((d, source))))
                         }
                         None => {
-                            if self.warned_no_height.insert(mesh_index) {
+                            if self.warned_no_height.insert(mesh.index) {
                                 tracing::warn!(
                                     "a Displacement takes its height from the material, which \
                                      has no height_texture or preset (or its pixels were \
-                                     released): drawing mesh {mesh_index} without displacement"
+                                     released): drawing mesh {} without displacement",
+                                    mesh.index
                                 );
                             }
                             None
                         }
                     },
-                }
-            } else {
-                None
-            };
-            let small = match &cluster_path {
-                Some((_, Some((d, _)))) => (d.max_triangles as usize) < SMALL_BUILD_TRIANGLES,
-                _ => mesh_assets
-                    .get(mesh_handle)
-                    .is_some_and(|m| m.indices.len() / 3 < SMALL_BUILD_TRIANGLES),
-            };
-            let preset_heights = &mut self.preset_heights;
-            if let Some((cluster_key, displaced)) = &cluster_path
-                && let Some(clusters) = &mut self.clusters
-                && clusters.ready(*cluster_key, version, small, || {
-                    let mesh = mesh_assets.get(mesh_handle)?.clone();
-                    let displacement = match displaced {
-                        None => None,
-                        Some((d, source)) => Some(resolve_displacement(
-                            d,
-                            material,
-                            source,
-                            image_assets,
-                            preset_heights,
-                            gpu,
-                        )?),
-                    };
-                    Some(BuildJob { mesh, displacement })
-                })
-            {
-                let cluster_key = *cluster_key;
-                self.clustered.insert(mesh_index);
-                if let Some(bounds) = clusters.bounds(cluster_key)
-                    && max_distance.is_some()
-                {
-                    let center =
-                        (gt.transform_point(bounds.center.as_dvec3()) - view.origin).as_vec3();
-                    let radius = bounds.radius * max_scale(gt);
-                    if beyond_draw_distance(max_distance, center, radius) {
-                        culled += 1;
-                        continue;
-                    }
-                }
-                // Displaced: the relief is geometry now, so parallax is off and the normal map
-                // only adds what is finer than the triangles.
-                let (material_slot, textures) = match displacement {
-                    Some(d) => {
-                        let strength = d.normal_map_strength.clamp(0.0, 1.0);
-                        self.material_slot(
-                            gpu,
-                            material_handle.index() as u64
-                                | (strength.to_bits() as u64) << 32
-                                | 1 << 63,
-                            &d.adjust_material(material),
-                            &sources,
-                        )
-                    }
+                };
+                let small = match &cluster_path {
+                    Some((_, Some((d, _)))) => (d.max_triangles as usize) < SMALL_BUILD_TRIANGLES,
+                    _ => mesh.small,
+                };
+                // Undisplaced meshes ask once a frame.
+                let shared = matches!(cluster_path, Some((_, None)));
+                let ready = match mesh.clusters.filter(|_| shared) {
+                    Some(ready) => ready,
                     None => {
-                        self.material_slot(gpu, material_handle.index() as u64, material, &sources)
+                        let preset_heights = &mut self.preset_heights;
+                        let ready = match (&cluster_path, &mut self.clusters) {
+                            (Some((cluster_key, displaced)), Some(clusters)) => {
+                                clusters.ready(*cluster_key, mesh.version, small, || {
+                                    let mesh = mesh_assets.get(mesh_handle)?.clone();
+                                    let displacement = match displaced {
+                                        None => None,
+                                        Some((d, source)) => Some(resolve_displacement(
+                                            d,
+                                            material,
+                                            source,
+                                            image_assets,
+                                            preset_heights,
+                                            gpu,
+                                        )?),
+                                    };
+                                    Some(BuildJob { mesh, displacement })
+                                })
+                            }
+                            _ => false,
+                        };
+                        if shared {
+                            self.mesh_frames[raw].clusters = Some(ready);
+                        }
+                        ready
                     }
                 };
-                let prev_gt = match self.previous.insert(entity, (*gt, frame)) {
-                    Some((prev, seen)) if seen + 1 == frame => prev,
-                    _ => *gt,
-                };
-                if let Some(clusters) = &mut self.clusters {
-                    clusters.push_instance(ClusterInstance {
-                        mesh: cluster_key,
-                        model: gt.matrix_relative_to(view.origin),
-                        prev_model: prev_gt.matrix_relative_to(prev_origin),
-                        material: material_slot,
-                        textures,
-                        double_sided: material.double_sided,
-                        casts_shadows: shadows && renderer.cast_shadows,
-                    });
+                if ready && let Some((cluster_key, _)) = cluster_path {
+                    self.clustered.insert(mesh.index);
+                    if hot.max_distance < f32::MAX
+                        && let Some(bounds) =
+                            self.clusters.as_ref().and_then(|c| c.bounds(cluster_key))
+                    {
+                        let center = (cold.transform.transform_point(bounds.center.as_dvec3())
+                            - view.origin)
+                            .as_vec3();
+                        if center.length() - bounds.radius * hot.scale > hot.max_distance {
+                            culled += 1;
+                            continue;
+                        }
+                    }
+                    // Displaced: the relief is geometry now, so parallax is off and the normal
+                    // map only adds what is finer than the triangles.
+                    let (material_slot, textures) = match displacement {
+                        Some(d) => {
+                            let strength = d.normal_map_strength.clamp(0.0, 1.0);
+                            self.material_slot(
+                                gpu,
+                                mat.index as u64 | (strength.to_bits() as u64) << 32 | 1 << 63,
+                                &d.adjust_material(material),
+                                &sources,
+                            )
+                        }
+                        None => self.material_slot(gpu, mat.index as u64, material, &sources),
+                    };
+                    if let Some(clusters) = &mut self.clusters {
+                        clusters.push_instance(ClusterInstance {
+                            mesh: cluster_key,
+                            model: cold.transform.matrix_relative_to(view.origin),
+                            prev_model: cold.previous_at(frame).matrix_relative_to(prev_origin),
+                            material: material_slot,
+                            textures,
+                            double_sided: material.double_sided,
+                            casts_shadows: shadows && hot.flags & mesh_scene::CASTS != 0,
+                        });
+                    }
+                    continue;
                 }
-                continue;
             }
 
-            if self
-                .meshes
-                .get(&mesh_index)
-                .is_none_or(|m| m.version != version)
-                && let Some(mesh) = mesh_assets.get(mesh_handle)
-            {
-                self.upload_mesh(&gpu.device, mesh_index, mesh, version);
-                if lod_pixels > 0.0 {
-                    self.request_lods(mesh_index, mesh_handle, mesh, version);
-                }
-            }
-            let Some(gpu_mesh) = self.meshes.get_mut(&mesh_index) else {
-                continue;
-            };
-            gpu_mesh.last_used = frame;
-
-            let scale = max_scale(gt);
-            let center_world = gt.transform_point(gpu_mesh.center.as_dvec3());
-            let center = (center_world - view.origin).as_vec3();
-            let radius = gpu_mesh.half_extents.length() * scale;
-            let (min_y, height) = (gpu_mesh.min_y, gpu_mesh.height);
-            let (mesh_center, mesh_radius) = (gpu_mesh.center, gpu_mesh.half_extents.length());
-            let coarsest = gpu_mesh.coarsest_triangles();
-            if beyond_draw_distance(max_distance, center, radius) {
-                culled += 1;
-                continue;
-            }
-            // Too small to cover a pixel: left out of the view (it may still cast a shadow).
-            let meters_per_pixel =
-                pixel_meters.map(|k| k * (center.length() - radius).max(view.near));
-            let big_enough = meters_per_pixel.is_none_or(|m| 2.0 * radius >= min_pixels * m);
-            let visible = big_enough && view.frustum.intersects_sphere(center, radius);
-            let lod = match meters_per_pixel {
-                Some(m) if lod_pixels > 0.0 => {
-                    crate::mesh_lod::pick(gpu_mesh.errors(), scale, lod_pixels * m)
-                }
-                _ => 0,
-            };
-            let blend = material.alpha_mode == AlphaMode::Blend;
-            let masked = matches!(material.alpha_mode, AlphaMode::Mask(_));
-            let casts = shadows && renderer.cast_shadows && !blend;
-            if !visible && !casts {
-                culled += 1;
-                continue;
-            }
-            let (material_slot, textures) =
-                self.material_slot(gpu, material_handle.index() as u64, material, &sources);
-            // Far away, meshes whose levels of detail can't get cheap are drawn as impostors,
-            // baked the first time one is that small. The bake keeps no emission, so glowing
-            // materials stay meshes.
-            let impostor_size = |m: f32| 2.0 * radius < impostor_pixels * m;
-            let glows =
-                material.emissive_strength > 0.0 && material.emissive.iter().any(|&c| c > 0.0);
-            let impostor = match &mut self.impostors {
-                Some(impostors)
-                    if impostor_pixels > 0.0
-                        && !blend
-                        && !glows
-                        && coarsest >= crate::impostor::MIN_TRIANGLES
-                        && !self.lod_jobs.contains_key(&mesh_index) =>
+            // The instanced path: uploaded (and its levels asked for) the first time this
+            // frame.
+            if !self.mesh_frames[raw].checked {
+                let handle = Handle::<Mesh>::from_index(mesh.index);
+                if self
+                    .meshes
+                    .get(&mesh.index)
+                    .is_none_or(|m| m.version != mesh.version)
+                    && let Some(asset) = mesh_assets.get(handle)
                 {
-                    let key = (mesh_index, material_handle.index() as u64);
-                    let layer = impostors.layer(key);
+                    self.upload_mesh(&gpu.device, mesh.index, asset, mesh.version);
+                    if lod_pixels > 0.0 {
+                        self.request_lods(mesh.index, handle, asset, mesh.version);
+                    }
+                }
+                let building = self.lod_jobs.contains_key(&mesh.index);
+                let entry = &mut self.mesh_frames[raw];
+                entry.checked = true;
+                if let Some(gpu_mesh) = self.meshes.get(&mesh.index) {
+                    entry.set_uploaded(gpu_mesh, building);
+                }
+            }
+            let mesh = self.mesh_frames[raw];
+            if !mesh.ready {
+                continue;
+            }
+            set_bit(&mut instanced, hot.mesh);
+            let cull = Cull {
+                p: params,
+                meshes: &self.meshes,
+                impostors: self.impostors.as_ref(),
+            };
+            match cull.item(slot, &mut scene.hot[s], &scene.cold[s], &mesh, &mat) {
+                Some(item) => items.push(item),
+                None => culled += 1,
+            }
+        }
+        // Meshes drawn as instances stay uploaded.
+        for (word, &bits) in instanced.iter().enumerate() {
+            let mut bits = bits;
+            while bits != 0 {
+                let raw = word * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if let Some(gpu_mesh) = self.meshes.get_mut(&self.mesh_frames[raw].index) {
+                    gpu_mesh.last_used = frame;
+                }
+            }
+        }
+
+        // 3. In turn again: material slots (and texture sets) for what is drawn, impostor
+        //    layers in use and bakes asked for.
+        steps.step("meshes: materials");
+        for item in &mut items {
+            let index = item.material as usize;
+            let (material_slot, textures) = match self.material_frames[index].slot {
+                Some(slot) => slot,
+                None => {
+                    let handle = Handle::from_index(self.material_frames[index].index);
+                    let material = material_assets
+                        .and_then(|m| m.get(handle))
+                        .unwrap_or(&default_material);
+                    let slot = self.material_slot(gpu, handle.index() as u64, material, &sources);
+                    self.material_frames[index].slot = Some(slot);
+                    slot
+                }
+            };
+            item.material_slot = material_slot;
+            item.textures = textures;
+            if item.impostor_ok
+                && let Some(impostors) = &mut self.impostors
+            {
+                if item.impostor != crate::impostor::NONE {
+                    impostors.mark_drawn(item.impostor);
+                } else if item.visible && item.impostor_size {
                     // Baked with the material's images, once they have all loaded.
                     let loaded = self
                         .texture_sets
                         .get(textures as usize)
                         .and_then(Option::as_ref)
                         .is_some_and(TextureSet::complete);
-                    if layer.is_none()
-                        && loaded
-                        && visible
-                        && meters_per_pixel.is_some_and(impostor_size)
-                    {
+                    if loaded {
+                        let mesh = &self.mesh_frames[scene.hot[item.slot as usize].mesh as usize];
                         impostors.request(
-                            key,
+                            (item.mesh, self.material_frames[index].index as u64),
                             crate::impostor::Request {
-                                mesh: mesh_index,
+                                mesh: item.mesh,
                                 material_slot,
                                 textures,
-                                center: mesh_center,
-                                radius: mesh_radius,
-                                score: coarsest as u64,
+                                center: mesh.center,
+                                radius: mesh.radius,
+                                score: mesh.coarsest as u64,
                             },
                         );
                     }
-                    layer.unwrap_or(crate::impostor::NONE)
                 }
-                _ => crate::impostor::NONE,
-            };
-            let lod = if impostor != crate::impostor::NONE
-                && meters_per_pixel.is_some_and(impostor_size)
-            {
-                IMPOSTOR_LOD
-            } else {
-                lod
-            };
-            let model = gt.matrix_relative_to(view.origin);
-            let prev_gt = match self.previous.insert(entity, (*gt, frame)) {
-                Some((prev, seen)) if seen + 1 == frame => prev,
-                _ => *gt,
-            };
-            // A negative determinant mirrors the mesh and turns its front faces clockwise.
-            let mirrored = Mat3::from_mat4(model).determinant() < 0.0;
-            let pipeline = if blend { PIPE_BLEND } else { 0 }
-                | if material.double_sided {
-                    PIPE_DOUBLE
-                } else {
-                    0
-                }
-                | if mirrored { PIPE_MIRROR } else { 0 };
-            self.items.push(Item {
-                mesh: mesh_index,
-                lod,
-                scale,
-                impostor,
-                pipeline,
-                textures,
-                masked,
-                visible,
-                casts,
-                center,
-                radius,
-                dist2: center.length_squared(),
-                instance: MeshInstance::new(model, material_slot, min_y, height)
-                    .with_previous(prev_gt.matrix_relative_to(prev_origin)),
-            });
-            if !visible {
+            }
+            if !item.visible {
                 culled += 1;
             }
         }
-        self.query = Some(query);
+
+        self.items = items;
+        self.deferred = deferred;
+        self.instanced_meshes = instanced;
+        self.gather_scratch = chunks;
+        self.scene = scene;
         self.prev_origin = Some(view.origin);
-        if frame.is_multiple_of(60) {
-            self.previous.retain(|_, (_, seen)| *seen + 1 >= frame);
-        }
         // Meshes now drawn only as clusters don't need their instanced copy.
         if !self.clustered.is_empty() {
             let clustered = &self.clustered;
@@ -1761,23 +2129,20 @@ impl RenderFeature for MeshFeature {
             clusters.end_prepare(gpu, view, settings);
         }
 
-        drop(step);
-        let step = prepare_step("meshes: sort and batch");
-        // Order: opaque (by pipeline, texture set, mesh), transparent (back to front).
-        self.items.sort_unstable_by(|a, b| {
-            let ab = a.pipeline & PIPE_BLEND;
-            let bb = b.pipeline & PIPE_BLEND;
-            ab.cmp(&bb).then_with(|| {
-                if ab != 0 {
-                    b.dist2.total_cmp(&a.dist2)
-                } else {
-                    (a.pipeline, a.textures, a.mesh, a.lod)
-                        .cmp(&(b.pipeline, b.textures, b.mesh, b.lod))
-                }
-            })
-        });
+        steps.step("meshes: sort and batch");
+        // Order: opaque (by pipeline, texture set, mesh), transparent (back to front). The
+        // visible items' keys are sorted, not the items themselves.
+        self.order.clear();
+        self.order.extend(
+            self.items
+                .iter()
+                .enumerate()
+                .filter(|(_, i)| i.visible)
+                .map(|(n, i)| (Item::sort_key(i), n as u32)),
+        );
+        self.order.sort_unstable_by_key(|&(key, _)| key);
 
-        self.instance_data.clear();
+        self.layout.clear();
         self.opaque.clear();
         self.transparent.clear();
         for s in &mut self.shadow {
@@ -1787,12 +2152,12 @@ impl RenderFeature for MeshFeature {
         self.keys.clear();
 
         // Opaque.
-        for item in self
-            .items
-            .iter()
-            .filter(|i| i.visible && i.pipeline & PIPE_BLEND == 0 && i.lod != IMPOSTOR_LOD)
+        let items = &self.items;
+        let ordered = || self.order.iter().map(|&(_, n)| (n, &items[n as usize]));
+        for (n, item) in
+            ordered().filter(|(_, i)| i.pipeline & PIPE_BLEND == 0 && i.lod != IMPOSTOR_LOD)
         {
-            self.instance_data.push(item.instance);
+            self.layout.push(n);
             self.keys.push(BatchKey {
                 pipeline: item.pipeline,
                 textures: item.textures,
@@ -1802,27 +2167,19 @@ impl RenderFeature for MeshFeature {
         }
         Self::batch(&self.keys, 0, &mut self.opaque);
         // Impostors: one draw for all of them.
-        let first = self.instance_data.len();
-        for item in self
-            .items
-            .iter()
-            .filter(|i| i.visible && i.lod == IMPOSTOR_LOD)
-        {
-            let mut instance = item.instance;
-            instance.extra[1] = item.impostor;
-            self.instance_data.push(instance);
-        }
-        self.impostor_view = (first as u32, (self.instance_data.len() - first) as u32);
+        let first = self.layout.len();
+        self.layout.extend(
+            ordered()
+                .filter(|(_, i)| i.lod == IMPOSTOR_LOD)
+                .map(|(n, _)| n | AS_IMPOSTOR),
+        );
+        self.impostor_view = (first as u32, (self.layout.len() - first) as u32);
         self.impostor_shadow = Default::default();
         // Transparent.
-        let first = self.instance_data.len();
+        let first = self.layout.len();
         self.keys.clear();
-        for item in self
-            .items
-            .iter()
-            .filter(|i| i.visible && i.pipeline & PIPE_BLEND != 0)
-        {
-            self.instance_data.push(item.instance);
+        for (n, item) in ordered().filter(|(_, i)| i.pipeline & PIPE_BLEND != 0) {
+            self.layout.push(n);
             self.keys.push(BatchKey {
                 pipeline: item.pipeline,
                 textures: item.textures,
@@ -1831,8 +2188,7 @@ impl RenderFeature for MeshFeature {
             });
         }
         Self::batch(&self.keys, first as u32, &mut self.transparent);
-        drop(step);
-        let step = prepare_step("meshes: shadow lists");
+        steps.step("meshes: shadow lists");
         // Shadows: opaque casters batch by mesh (depth only); masked casters by texture set
         // and mesh (alpha tested). Each map draws casters at the level of detail its texels
         // can show, and leaves out those smaller than a texel.
@@ -1847,21 +2203,29 @@ impl RenderFeature for MeshFeature {
                 mesh: item.mesh,
                 lod,
             };
-            self.casters.clear();
-            self.casters.extend(
-                self.items
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, i)| i.casts)
-                    .map(|(n, _)| n as u32),
-            );
             // By mesh, then scale: a map's level grows with scale, so each mesh's levels stay
-            // together in its batches.
-            let items = &self.items;
-            self.casters.sort_unstable_by_key(|&n| {
-                let item = &items[n as usize];
-                (shadow_key(item, 0), item.scale.to_bits())
-            });
+            // together in its batches. (Keys sorted, not items; `order` is free again.)
+            self.order.clear();
+            self.order
+                .extend(
+                    self.items
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, i)| i.casts)
+                        .map(|(n, item)| {
+                            let k = shadow_key(item, 0);
+                            // Scale to 19 bits (positive: exponent and 11 bits of
+                            // mantissa), enough to keep each mesh's levels together.
+                            let key = (k.pipeline as u64) << 63
+                                | (k.textures as u64 & 0xf_ffff) << 43
+                                | (k.mesh as u64 & 0xff_ffff) << 19
+                                | (item.scale.to_bits() >> 12) as u64 & 0x7_ffff;
+                            (key, n as u32)
+                        }),
+                );
+            self.order.sort_unstable_by_key(|&(key, _)| key);
+            self.casters.clear();
+            self.casters.extend(self.order.iter().map(|&(_, n)| n));
             let cascades = if view.sun_shadows {
                 (view.cascades.count as usize).min(MAX_CASCADES)
             } else {
@@ -1920,33 +2284,24 @@ impl RenderFeature for MeshFeature {
                         keys.push(shadow_key(item, lod));
                     }
                 };
+            let fill = &fill;
+            let jobs = maps.iter().zip(lists.iter_mut());
             if casters.len() >= PARALLEL_CASTERS {
-                std::thread::scope(|scope| {
-                    for (&c, list) in maps.iter().zip(lists.iter_mut()) {
-                        scope.spawn(move || fill(c, list));
-                    }
-                });
+                run_jobs(jobs.map(|(&c, list)| move || fill(c, list)));
             } else {
-                for (&c, list) in maps.iter().zip(lists.iter_mut()) {
-                    fill(c, list);
-                }
+                jobs.for_each(|(&c, list)| fill(c, list));
             }
             for (&c, (picked, keys, impostors)) in maps.iter().zip(&lists) {
-                let first = self.instance_data.len();
-                self.instance_data
-                    .extend(picked.iter().map(|&n| self.items[n as usize].instance));
+                let first = self.layout.len();
+                self.layout.extend_from_slice(picked);
                 let out = match c {
                     FAR_SHADOW_MAP => &mut self.far_shadow,
                     _ => &mut self.shadow[c],
                 };
                 Self::batch(keys, first as u32, out);
-                let first = self.instance_data.len();
-                self.instance_data.extend(impostors.iter().map(|&n| {
-                    let item = &self.items[n as usize];
-                    let mut instance = item.instance;
-                    instance.extra[1] = item.impostor;
-                    instance
-                }));
+                let first = self.layout.len();
+                self.layout
+                    .extend(impostors.iter().map(|&n| n | AS_IMPOSTOR));
                 self.impostor_shadow[c] = (first as u32, impostors.len() as u32);
             }
             self.shadow_scratch = lists;
@@ -1969,17 +2324,56 @@ impl RenderFeature for MeshFeature {
             });
         }
 
-        drop(step);
-        let step = prepare_step("meshes: upload");
-        // Upload.
+        steps.step("meshes: upload");
+        // The instance data in draw order, written by parallel chunks straight into the
+        // upload's staging memory.
         let device = &gpu.device;
         let queue = &gpu.queue;
         if let Some(instances) = &mut self.instances {
-            instances.write(device, queue, bytemuck::cast_slice(&self.instance_data));
+            const SIZE: usize = std::mem::size_of::<MeshInstance>();
+            let (items, scene, mesh_frames) = (&self.items, &self.scene, &self.mesh_frames);
+            let instance = |n: u32| {
+                let item = &items[(n & !AS_IMPOSTOR) as usize];
+                let s = item.slot as usize;
+                let cold = &scene.cold[s];
+                let mesh = &mesh_frames[scene.hot[s].mesh as usize];
+                let impostor = if n & AS_IMPOSTOR != 0 {
+                    item.impostor
+                } else {
+                    0
+                };
+                bytemuck::cast::<MeshInstance, [u8; SIZE]>(MeshInstance {
+                    m: cold.rows(view.origin),
+                    n: cold.normal,
+                    extra: [
+                        item.material_slot,
+                        impostor,
+                        mesh.min_y.to_bits(),
+                        mesh.height.to_bits(),
+                    ],
+                    prev: cold.previous_rows(frame, prev_origin),
+                })
+            };
+            // One staging write per chunk, each filled on its own worker.
+            let layout = &self.layout;
+            let per = layout.len().div_ceil(threads).max(PARALLEL_GATHER);
+            instances.reserve(device, (layout.len() * SIZE) as u64);
+            let buffer = &instances.buffer;
+            let jobs = layout.chunks(per).enumerate().filter_map(|(k, part)| {
+                let size = wgpu::BufferSize::new((part.len() * SIZE) as u64)?;
+                let mut view = queue.write_buffer_with(buffer, (k * per * SIZE) as u64, size)?;
+                let instance = &instance;
+                Some(move || {
+                    let (out, _) = view.slice(..).into_chunks::<SIZE>();
+                    out.write_iter(part.iter().map(|&n| instance(n)));
+                })
+            });
+            run_jobs(jobs.collect::<Vec<_>>().into_iter());
         }
         if self.material_data.is_empty() {
             self.material_data.push(default_material.to_gpu());
         }
+        steps.step("meshes: pipelines");
         // Pipelines with the shader parts this frame's materials need, from now on.
         let needed = self
             .material_data
@@ -1998,6 +2392,7 @@ impl RenderFeature for MeshFeature {
             }
         }
         self.ensure_pipelines(gpu);
+        steps.step("meshes: upload materials");
         let grown = self
             .materials
             .as_mut()
@@ -2018,7 +2413,7 @@ impl RenderFeature for MeshFeature {
             self.evict();
         }
 
-        drop(step);
+        steps.finish();
         // Stats.
         let mut stats = FeatureStats {
             culled,
@@ -2053,6 +2448,11 @@ impl RenderFeature for MeshFeature {
             self.last_report = Some(std::time::Instant::now());
             tracing::info!("mesh triangles\n{}", self.triangle_report(shadows));
         }
+        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+            d.set("render.meshes.slots", self.scene.hot.len() as f64);
+            d.set("render.meshes.dirty_slots", self.scene.dirty as f64);
+        }
+        steps.publish(world);
     }
 
     fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {

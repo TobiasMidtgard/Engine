@@ -471,6 +471,17 @@ impl GrowBuffer {
         grown
     }
 
+    /// Make room for `size` bytes (contents are lost when it grows); returns true when the
+    /// buffer was recreated (rebuild bind groups). For writes through
+    /// `Queue::write_buffer_with`, straight into staging memory.
+    pub fn reserve(&mut self, device: &wgpu::Device, size: u64) -> bool {
+        let grown = size > self.capacity;
+        if grown {
+            *self = Self::new(device, self.label, self.usage, size);
+        }
+        grown
+    }
+
     pub fn capacity(&self) -> u64 {
         self.capacity
     }
