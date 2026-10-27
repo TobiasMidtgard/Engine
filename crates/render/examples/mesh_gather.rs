@@ -8,7 +8,9 @@
 //! cargo run -p engine_render --release --example mesh_gather -- 50000 300
 //! ```
 //!
-//! A third number sets the frames run before timing (60).
+//! A third number sets the frames run before timing (60), a fourth the number of distinct meshes
+//! (200; thousands make a draw-heavy scene like the showcase fortress). `--single-draws` turns multi-draw
+//! off (`RenderSettings::multi_draw_indirect`), for a before and after.
 
 use std::collections::BTreeMap;
 
@@ -38,10 +40,14 @@ fn main() {
     let mut args = std::env::args()
         .skip(1)
         .filter(|a| !a.starts_with("--"))
-        .map(|a| a.parse::<usize>().expect("numbers: count frames settle"));
+        .map(|a| {
+            a.parse::<usize>()
+                .expect("numbers: count frames settle meshes")
+        });
     let count = args.next().unwrap_or(50_000);
     let frames = args.next().unwrap_or(300);
     let settle = args.next().unwrap_or(60);
+    let mesh_count = args.next().unwrap_or(MESHES).max(1);
     engine_core::log::init("warn");
 
     let mut app = App::new();
@@ -57,11 +63,14 @@ fn main() {
             step_secs: 1.0 / 60.0,
         });
     app.add_plugins(RenderPlugin);
+    app.world
+        .resource_mut::<RenderSettings>()
+        .multi_draw_indirect = !std::env::args().any(|a| a == "--single-draws");
     app.add_systems(Update, spin);
 
     let meshes: Vec<Handle<Mesh>> = {
         let mut assets = app.world.resource_mut::<Assets<Mesh>>();
-        (0..MESHES)
+        (0..mesh_count)
             .map(|i| {
                 let size = 0.5 + (i % 7) as f32 * 0.4;
                 assets.add(if i % 2 == 0 {
@@ -95,7 +104,7 @@ fn main() {
         let transform = Transform::from_xyz(x, 1.0, z).with_rotation(Quat::from_rotation_y(
             hash(i, 3) as f32 * std::f32::consts::TAU,
         ));
-        let mesh = meshes[(hash(i, 4) * MESHES as f64) as usize % MESHES];
+        let mesh = meshes[(hash(i, 4) * mesh_count as f64) as usize % mesh_count];
         let material = materials[(hash(i, 5) * MATERIALS as f64) as usize % MATERIALS];
         let mut e = app
             .world
@@ -155,7 +164,11 @@ fn main() {
         for (name, v) in &diagnostics.metrics {
             if let Some(step) = name.strip_prefix("render.cpu.") {
                 *sums.entry(step.to_string()).or_default() += v;
-            } else if name.starts_with("render.meshes.") {
+            } else if name.starts_with("render.meshes.")
+                || name.starts_with("render.record")
+                || name == "render.submit_ms"
+                || name == "render.extract_ms"
+            {
                 *counts.entry(name.clone()).or_default() += v;
             }
         }
@@ -170,7 +183,7 @@ fn main() {
         stats.instances
     );
     for (name, total) in &counts {
-        println!("  {name}: {:.0} (average)", total / frames as f64);
+        println!("  {name}: {:.2} (average)", total / frames as f64);
     }
     let mut rows: Vec<_> = sums.into_iter().collect();
     rows.sort_by(|a, b| b.1.total_cmp(&a.1));
