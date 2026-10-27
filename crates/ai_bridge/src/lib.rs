@@ -508,7 +508,31 @@ fn register_api(app: &mut App) {
         "Frame number, fps, paused, time scale, entity count, stepping progress, bridge clients.",
         "{}",
         |world, _| Ok(status(world)),
+    )
+    .register_api(
+        "engine.stats",
+        "Frame timing and every module metric in Diagnostics (render.gpu_memory_mb, \
+         render.cpu.submit, physics.bodies, ...). `prefix` keeps only metrics starting with it.",
+        r#"{"prefix": "render."}"#,
+        |world, args| Ok(stats(world, args.get("prefix").and_then(Value::as_str))),
     );
+}
+
+fn stats(world: &World, prefix: Option<&str>) -> Value {
+    let diagnostics = world.resource::<Diagnostics>();
+    let metrics: serde_json::Map<String, Value> = diagnostics
+        .metrics
+        .iter()
+        .filter(|(name, _)| prefix.is_none_or(|p| name.starts_with(p)))
+        .map(|(name, value)| (name.clone(), json!(value)))
+        .collect();
+    json!({
+        "frame": diagnostics.frame,
+        "fps": diagnostics.fps,
+        "frame_ms": diagnostics.frame_ms,
+        "entities": diagnostics.entities,
+        "metrics": metrics,
+    })
 }
 
 #[cfg(test)]
@@ -675,6 +699,16 @@ mod tests {
         let mut app = app();
         app.world.spawn(Name::new("A"));
         app.update();
+        app.world
+            .resource_mut::<Diagnostics>()
+            .set("render.gpu_memory_mb", 3740.0);
+        app.world
+            .resource_mut::<Diagnostics>()
+            .set("physics.bodies", 9.0);
+        let stats = call_api(&mut app.world, "engine.stats", json!({"prefix": "render."})).unwrap();
+        assert_eq!(stats["metrics"], json!({"render.gpu_memory_mb": 3740.0}));
+        let all = call_api(&mut app.world, "engine.stats", json!({})).unwrap();
+        assert_eq!(all["metrics"]["physics.bodies"], json!(9.0));
         let status = call_api(&mut app.world, "engine.status", json!({})).unwrap();
         assert_eq!(status["frame"], json!(1));
         assert_eq!(status["paused"], json!(false));
@@ -690,6 +724,7 @@ mod tests {
             "bridge.ping",
             "engine.step",
             "engine.status",
+            "engine.stats",
             "entity.spawn",
         ] {
             assert!(
