@@ -10,28 +10,43 @@ pub use bevy_tasks::{
 };
 
 /// Create the compute / async / IO pools once per process.
+///
+/// Sized so the frame's own threads always have a core, as Unreal does (task graph workers =
+/// logical cores − 2, leaving the game and render threads theirs): the compute pool gets
+/// cores − 2, because the main thread works through every scope it opens and the render
+/// thread ([`Pipelined`]) needs a core while the next frame simulates. Async and IO get a
+/// quarter of the cores each, 1 to 4 threads (Bevy's `TaskPoolOptions` defaults); they sleep
+/// unless loading. A compute pool of every core beside them oversubscribed the cores ~1.5×,
+/// leaving the render thread to compete for one in busy frames.
 pub fn init_task_pools() {
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
+    let (compute, side) = pool_sizes(threads);
     ComputeTaskPool::get_or_init(|| {
         TaskPoolBuilder::new()
-            .num_threads(threads)
+            .num_threads(compute)
             .thread_name("compute".into())
             .build()
     });
     AsyncComputeTaskPool::get_or_init(|| {
         TaskPoolBuilder::new()
-            .num_threads((threads / 4).max(1))
+            .num_threads(side)
             .thread_name("async".into())
             .build()
     });
     IoTaskPool::get_or_init(|| {
         TaskPoolBuilder::new()
-            .num_threads((threads / 4).max(1))
+            .num_threads(side)
             .thread_name("io".into())
             .build()
     });
+}
+
+/// Threads for the compute pool and for each of the async and IO pools, given the logical
+/// cores: see [`init_task_pools`].
+fn pool_sizes(cores: usize) -> (usize, usize) {
+    (cores.saturating_sub(2).max(1), (cores / 4).clamp(1, 4))
 }
 
 /// Run `f(chunk_index, chunk)` over `data` split into `chunk_size` pieces on the compute pool.
@@ -52,6 +67,26 @@ pub fn par_chunks_mut<T: Send>(
         }
     });
 }
+
+/// Run the calling thread above normal priority, so a pipeline thread (the renderer) isn't
+/// starved by the worker pools during a busy frame, as Unreal runs its render thread. Only on
+/// Windows: elsewhere raising a priority needs privileges, and the pool sizing leaves it a core.
+#[cfg(windows)]
+fn raise_priority() {
+    const THREAD_PRIORITY_ABOVE_NORMAL: i32 = 1;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThread() -> *mut std::ffi::c_void;
+        fn SetThreadPriority(thread: *mut std::ffi::c_void, priority: i32) -> i32;
+    }
+    // SAFETY: GetCurrentThread returns a pseudo handle for this thread that needs no closing,
+    // and SetThreadPriority only changes this thread's scheduling.
+    if unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) } == 0 {
+        tracing::debug!("could not raise the pipeline thread's priority");
+    }
+}
+#[cfg(not(windows))]
+fn raise_priority() {}
 
 type Job<T> = Box<dyn FnOnce(&mut T) + Send>;
 type Done<T> = Result<T, Box<dyn std::any::Any + Send>>;
@@ -83,6 +118,7 @@ impl<T: Send + 'static> Pipelined<T> {
         let worker = std::thread::Builder::new()
             .name(name.into())
             .spawn(move || {
+                raise_priority();
                 for (mut value, job) in job_rx {
                     let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         job(&mut value);
@@ -171,6 +207,15 @@ impl<T: Send + 'static> Drop for Pipelined<T> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn pools_leave_the_main_and_render_threads_a_core() {
+        assert_eq!(pool_sizes(1), (1, 1));
+        assert_eq!(pool_sizes(2), (1, 1));
+        assert_eq!(pool_sizes(4), (2, 1));
+        assert_eq!(pool_sizes(8), (6, 2));
+        assert_eq!(pool_sizes(32), (30, 4));
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
