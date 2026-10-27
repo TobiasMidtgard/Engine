@@ -114,16 +114,22 @@ impl Plugin for FirePlugin {
                     .chain()
                     .in_set(SimSet::Environment),
             )
+            // Unordered where nothing needs an order, so each runs beside other modules'
+            // systems (AGENTS.md "Let systems run side by side").
+            .add_systems(FixedUpdate, sim::add_burning.in_set(SimSet::Environment))
             .add_systems(
                 Update,
                 (
                     sim::sync_lights,
                     sim::apply_charring,
                     props::burn_foliage,
-                    demo::run_demos,
+                    // Nothing waits on the whole-world demo runner, and it runs only when a
+                    // demo has work: a `&mut World` system waits for every other one to
+                    // finish, even when its run condition then says no.
+                    (demo::tick_demos, demo::run_demos.run_if(demo::demos_due)).chain(),
+                    demo::contain_demos,
                     grass::update_grass,
-                )
-                    .chain(),
+                ),
             )
             .add_systems(PostUpdate, shift::shift_fire.in_set(WorldShiftSet::Apply))
             .add_render_feature(fire)

@@ -538,10 +538,21 @@ type ObjectQuery<'w, 's> = Query<
     ),
 >;
 
+/// Give each new [`Combustible`] fire's bookkeeping. On its own, unordered, so its
+/// `Commands` apply at the end of the schedule instead of adding a sync point inside the fire
+/// chain (`step_objects` then needs no `Commands`).
+pub fn add_burning(
+    mut commands: Commands,
+    q: Query<Entity, (With<Combustible>, Without<Burning>)>,
+) {
+    for e in &q {
+        commands.entity(e).insert(Burning::default());
+    }
+}
+
 /// Heat, ignite and burn [`Combustible`] objects; let burning objects heat the ground.
 #[allow(clippy::too_many_arguments)]
 pub fn step_objects(
-    mut commands: Commands,
     clock: Res<FireClock>,
     settings: Res<FireSettings>,
     weather: Res<WeatherState>,
@@ -586,11 +597,8 @@ pub fn step_objects(
         if !clock.awake.contains(gt.translation()) {
             continue;
         }
+        // `add_burning` gives it one at the end of the step it appears in.
         let Some(mut b) = b else {
-            commands.entity(entity).insert(Burning {
-                fuel0_kg: c.fuel_kg,
-                ..Default::default()
-            });
             continue;
         };
         let shape = shape

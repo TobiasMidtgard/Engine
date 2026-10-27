@@ -658,26 +658,64 @@ impl Place {
     }
 }
 
-/// Run every [`FireDemo`]: first fire (fast-forwarded by `warmup_secs`), containment and the
-/// reset-and-relight loop. (The grass burns down and grows back with the field on its own:
+/// Whether a demo has world-wide work this frame: its first fire, a jump, a jump ahead under
+/// way or its next fire. The rest of the time [`run_demos`] doesn't run at all.
+fn due(demo: &FireDemo, state: &FireDemoState) -> bool {
+    state.frames >= 3
+        && (state.jump_to.is_some()
+            || !state.started
+            || state.ahead.is_some()
+            || state.since >= demo.cycle_secs)
+}
+
+/// Every frame, as a normal system: count each [`FireDemo`]'s frames and time its fire (a
+/// demo far from everyone rests with its fire: its cycle waits too, so no one pays for
+/// relighting a meadow they can't see). [`run_demos`] runs only when one is [`due`].
+pub fn tick_demos(
+    time: Res<Time>,
+    clock: Res<FireClock>,
+    mut q: Query<(&GlobalTransform, &mut FireDemoState), With<FireDemo>>,
+) {
+    let dt = time.delta_secs();
+    for (t, mut state) in &mut q {
+        state.frames += 1;
+        if state.frames >= 3
+            && state.started
+            && state.jump_to.is_none()
+            && state.ahead.is_none()
+            && clock.awake.contains(t.translation())
+        {
+            state.since += dt;
+        }
+    }
+}
+
+/// Run condition for [`run_demos`].
+pub fn demos_due(q: Query<(&FireDemo, &FireDemoState)>) -> bool {
+    q.iter().any(|(d, s)| due(d, s))
+}
+
+/// Keep each demo's fire inside its bounds (every frame, as a normal system).
+pub fn contain_demos(mut field: ResMut<FireField>, q: Query<(&GlobalTransform, &FireDemo)>) {
+    for (t, demo) in &q {
+        contain(&mut field, Place::of(t), demo);
+    }
+}
+
+/// Run every [`FireDemo`] that is [`due`]: first fire (fast-forwarded by `warmup_secs`),
+/// jumps and the reset-and-relight loop; [`tick_demos`] times them and [`contain_demos`]
+/// keeps them in bounds. It needs the whole world, so it is gated with [`demos_due`]: a
+/// `&mut World` system that runs every frame stops every other system while it runs. (The
+/// grass burns down and grows back with the field on its own:
 /// [`crate::grass::update_grass`].)
 pub fn run_demos(world: &mut World) {
     let mut q = world.query::<(Entity, &GlobalTransform, &FireDemo, &FireDemoState)>();
     let demos: Vec<(Entity, Place, FireDemo, FireDemoState)> = q
         .iter(world)
         .map(|(e, t, d, s)| (e, Place::of(t), d.clone(), *s))
+        .filter(|(_, _, d, s)| due(d, s))
         .collect();
-    if demos.is_empty() {
-        return;
-    }
-    let dt = world.resource::<Time>().delta_secs();
     for (entity, place, demo, mut state) in demos {
-        state.frames += 1;
-        // Wait for transforms to settle so objects are where they belong.
-        if state.frames < 3 {
-            world.entity_mut(entity).insert(state);
-            continue;
-        }
         if let Some(at) = state.jump_to.take() {
             if state.started {
                 reset(world, entity, place, &demo);
@@ -698,20 +736,13 @@ pub fn run_demos(world: &mut World) {
             run_ahead(world, place, &demo, &mut state);
         } else if state.ahead.is_some() {
             run_ahead(world, place, &demo, &mut state);
-        } else {
-            // A demo far from everyone rests with its fire: its cycle waits too, so no one
-            // pays for relighting a meadow they can't see.
-            if world.resource::<FireClock>().awake.contains(place.origin) {
-                state.since += dt;
-            }
-            if state.since >= demo.cycle_secs {
-                reset(world, entity, place, &demo);
-                light(world, place, &demo);
-                state.since = 0.0;
-                state.cycles += 1;
-            }
+        } else if state.since >= demo.cycle_secs {
+            reset(world, entity, place, &demo);
+            light(world, place, &demo);
+            state.since = 0.0;
+            state.cycles += 1;
         }
-        contain(world, place, &demo);
+        contain(&mut world.resource_mut::<FireField>(), place, &demo);
         world.entity_mut(entity).insert(state);
     }
     let mut q = world.query::<&FireDemoState>();
@@ -888,7 +919,8 @@ fn reset(world: &mut World, demo_entity: Entity, place: Place, demo: &FireDemo) 
     for (e, initial) in objects {
         let mut entity = world.entity_mut(e);
         entity.insert(initial);
-        entity.remove::<Burning>();
+        // Fresh bookkeeping (kept, so `add_burning` needn't add it back).
+        entity.insert(Burning::default());
         if let Some(base) = entity.get::<CharBase>().copied() {
             if let Some(mut r) = entity.get_mut::<MeshRenderer>() {
                 r.material = engine_render::MaterialRef::Inline(base.material);
@@ -945,11 +977,9 @@ fn reset(world: &mut World, demo_entity: Entity, place: Place, demo: &FireDemo) 
 const CONTAIN_MARGIN_M: f64 = 40.0;
 
 /// Put out anything burning just outside the demo (embers that jumped the border).
-fn contain(world: &mut World, place: Place, demo: &FireDemo) {
+fn contain(field: &mut FireField, place: Place, demo: &FireDemo) {
     let half = Vec2::from(demo.bounds).as_dvec2();
     let margin = CONTAIN_MARGIN_M;
-    let mut field = world.resource_mut::<FireField>();
-    let field = &mut *field;
     let cell = field.cell_m as f64;
     let tile_size = crate::field::TILE as f64 * cell;
     // Half a tile's diagonal: a tile is entirely within this of its center, however turned.
@@ -1171,6 +1201,12 @@ mod tests {
         let s = state(&mut app);
         assert!(s.ahead.is_none() && s.since > warmup - 0.1, "{s:?}");
         assert!(app.world.resource::<FireField>().stats.burning_m2 > 0.0);
+        // From then on, until its next fire, the whole-world runner has nothing to do: the
+        // fire is timed and kept in bounds by normal systems.
+        app.update_n(3);
+        let mut due_now = app.world.query::<(&FireDemo, &FireDemoState)>();
+        assert!(!due_now.iter(&app.world).any(|(d, s)| due(d, s)));
+        assert!(state(&mut app).since > s.since, "the fire is still timed");
     }
 
     #[test]

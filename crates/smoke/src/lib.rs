@@ -92,9 +92,20 @@ impl Plugin for SmokePlugin {
                     .chain()
                     .in_set(SimSet::Environment),
             )
+            // Unordered where nothing needs an order, so each runs beside other modules'
+            // systems; the two whole-world demo systems run only when they have work (a
+            // `&mut World` system waits for every other one to finish, even when its run
+            // condition then says no) and nothing waits on them.
             .add_systems(
                 Update,
-                (sim::age_tunnels, demo::land_range_art, demo::run_demos).chain(),
+                (
+                    sim::age_tunnels,
+                    demo::land_range_art.run_if(resource_exists::<demo::RangeArt>),
+                    (demo::tick_demos, demo::run_demos.run_if(demo::demos_due)).chain(),
+                    demo::age_tracers,
+                    (demo::drive_carts, demo::turn_wheels).chain(),
+                    demo::spin_rotors,
+                ),
             )
             .add_systems(
                 PostUpdate,
