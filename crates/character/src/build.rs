@@ -45,6 +45,9 @@ pub struct CharacterMeshes {
     pub hair_shadow: Option<strands::ShadowGrid>,
     /// Expression shapes (empty when built without a face).
     pub face: FaceShapes,
+    /// Per strand set, the set as the GPU reads it (`StrandSet::packed`), packed here off the
+    /// frame thread.
+    pub packed_strands: Vec<strands::PackedStrands>,
 }
 
 impl CharacterMeshes {
@@ -182,6 +185,7 @@ pub fn build(
         } else {
             EyeMesh::default()
         },
+        packed_strands: strands.iter().map(StrandSet::packed).collect(),
         strands,
         strand_roots,
         guide_roots,

@@ -205,6 +205,12 @@ struct SkinVertex {
 /// strength) imitate the scattering in the shader instead of going through the pass.
 const SUBSURFACE_MIN_PIXELS: f32 = 1.5;
 
+/// Frame time spent uploading people's meshes in play (ms).
+const UPLOAD_BUDGET_MS: f64 = 3.0;
+/// The same under a loading screen (`LoadingBudget`, at most): the render frame's own share,
+/// the budget being the whole frame's.
+const LOADING_UPLOAD_BUDGET_MS: f64 = 10.0;
+
 /// The hair's fringe pass is drawn for heads at least this tall on screen (25 cm), close-ups
 /// where single hairs show.
 const FRINGE_HEAD_PIXELS: f32 = 120.0;
@@ -244,6 +250,8 @@ struct GpuStrands {
     group: wgpu::BindGroup,
     params: wgpu::Buffer,
     info: [u32; 4],
+    /// The box its points are packed in (`PackedStrands`): corner and size.
+    bounds: [[f32; 4]; 2],
     kind: StrandKind,
     hairs: u32,
     points: u32,
@@ -339,6 +347,8 @@ impl GpuMeshes {
                 let params = GpuStrandParams {
                     info: s.info,
                     lod: [width, stride as f32, 0.0, 0.0],
+                    box_min: s.bounds[0],
+                    box_size: s.bounds[1],
                 };
                 gpu.queue
                     .write_buffer(&s.params, 0, bytemuck::bytes_of(&params));
@@ -368,6 +378,8 @@ impl GpuMeshes {
 struct GpuStrandParams {
     info: [u32; 4],
     lod: [f32; 4],
+    box_min: [f32; 4],
+    box_size: [f32; 4],
 }
 
 struct Pipelines {
@@ -671,22 +683,33 @@ impl CharacterFeature {
                 hairs,
                 if moves { guides as u32 } else { 0 },
             ];
+            let unpacked;
+            let packed = match m.packed_strands.get(si) {
+                Some(p) => p,
+                None => {
+                    unpacked = set.packed();
+                    &unpacked
+                }
+            };
+            let bounds = [packed.box_min, packed.box_size];
             let params = buffer(
                 "character strand params",
                 bytemuck::bytes_of(&GpuStrandParams {
                     info,
                     lod: [1.0, 1.0, 0.0, 0.0],
+                    box_min: bounds[0],
+                    box_size: bounds[1],
                 }),
                 wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             );
             let points = buffer(
                 "character strand points",
-                bytemuck::cast_slice(&set.points),
+                bytemuck::cast_slice(&packed.points),
                 wgpu::BufferUsages::STORAGE,
             );
             let attrs = buffer(
                 "character strand attributes",
-                bytemuck::cast_slice(&set.attrs),
+                bytemuck::cast_slice(&packed.attrs),
                 wgpu::BufferUsages::STORAGE,
             );
             let roots: Vec<[u32; 4]> = (0..hairs as usize)
@@ -784,6 +807,7 @@ impl CharacterFeature {
                 group,
                 params,
                 info,
+                bounds,
                 kind: set.kind,
                 hairs,
                 points: set.points_per,
@@ -1114,23 +1138,43 @@ impl RenderFeature for CharacterFeature {
         let lod_scale = world
             .get_resource::<CharacterLod>()
             .map_or(1.0, |l| l.distance_scale);
+        // Uploads are spread over frames: once this frame's have taken the budget, the rest wait
+        // (new people appear a frame or more later, rebuilt ones keep their old look and pose a
+        // frame longer). At least one goes each frame.
+        let upload_budget = world
+            .get_resource::<engine_world::LoadingBudget>()
+            .map_or(UPLOAD_BUDGET_MS, |b| {
+                b.budget_ms.min(LOADING_UPLOAD_BUDGET_MS)
+            });
+        let started = std::time::Instant::now();
+        let mut uploaded = false;
         let query = self.query.get_or_insert_with(|| world.query());
         for c in self.characters.values_mut() {
             c.seen = false;
         }
         for (entity, transform, built, skeleton, face, hands, guides, posed) in query.iter(world) {
             let entry = self.characters.entry(entity);
+            let full = uploaded && started.elapsed().as_secs_f64() * 1000.0 >= upload_budget;
             let c = match entry {
                 std::collections::hash_map::Entry::Occupied(o) => {
                     let c = o.into_mut();
                     if c.version != built.version {
+                        if full {
+                            c.seen = true;
+                            continue;
+                        }
                         let last = c.last_model;
                         *c = Self::upload(p, gpu, &built.meshes, built.version);
                         c.last_model = last;
+                        uploaded = true;
                     }
                     c
                 }
                 std::collections::hash_map::Entry::Vacant(v) => {
+                    if full {
+                        continue;
+                    }
+                    uploaded = true;
                     v.insert(Self::upload(p, gpu, &built.meshes, built.version))
                 }
             };

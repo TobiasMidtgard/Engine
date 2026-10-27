@@ -30,7 +30,7 @@ fn vs_strand(@builtin(vertex_index) vertex: u32, @builtin(instance_index) hair: 
     var out: StrandOut;
     out.rel = rel;
     out.tangent = rp.tangent;
-    out.attrs = strand_attrs[rp.index];
+    out.attrs = unpack2x16unorm(strand_attrs[rp.index]);
     out.coverage = saturate(rp.radius / half_width);
     out.hair = hair;
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
