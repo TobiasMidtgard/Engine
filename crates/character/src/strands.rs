@@ -556,6 +556,8 @@ struct Groom {
     /// How closely hairs follow their clump toward the tip.
     clump: f32,
     root_radius: f32,
+    /// Where a bun sits, from the head's center (m; zero without one).
+    bun: Vec3,
 }
 
 /// The hairline, irregular as a real one is: hair-restoration surgeons rebuild a slow wander of
@@ -604,6 +606,7 @@ fn grow_scalp(
             loft: 0.0015,
             clump: 0.0,
             root_radius: 0.00009,
+            bun: Vec3::ZERO,
         },
         HairStyle::Short => Groom {
             length: 0.055 * k,
@@ -613,6 +616,7 @@ fn grow_scalp(
             loft: 0.009,
             clump: 0.55,
             root_radius: 0.00011,
+            bun: Vec3::ZERO,
         },
         HairStyle::Medium => Groom {
             length: 0.2 * k,
@@ -622,6 +626,7 @@ fn grow_scalp(
             loft: 0.016,
             clump: 0.6,
             root_radius: 0.00012,
+            bun: Vec3::ZERO,
         },
         HairStyle::Long => Groom {
             length: 0.42 * k,
@@ -631,6 +636,7 @@ fn grow_scalp(
             loft: 0.012,
             clump: 0.75,
             root_radius: 0.00012,
+            bun: Vec3::ZERO,
         },
         HairStyle::Bun => Groom {
             length: 0.3,
@@ -640,9 +646,14 @@ fn grow_scalp(
             loft: 0.004,
             clump: 0.6,
             root_radius: 0.00012,
+            bun: Vec3::ZERO,
         },
     };
     let head = rest.head;
+    let mut g = g;
+    if a.hair_style() == HairStyle::Bun {
+        g.bun = bun_seat(skin, head);
+    }
     let recession = a.hair.recession.clamp(0.0, 1.0);
     let ragged = RaggedHairline::new(a.seed, recession);
     let sampler = Sampler::new(skin, Mask::Scalp, |rest, m| {
@@ -719,7 +730,16 @@ fn grow_scalp(
         let d = sp.rest - head;
         let line = ragged.at(d.x.atan2(d.z));
         let fine = ((d.y - line) / 0.01).clamp(0.0, 1.0);
-        let scale = r.range(0.85, 1.1) * (0.3 + 0.7 * fine);
+        let mut scale = r.range(0.85, 1.1) * (0.3 + 0.7 * fine);
+        // Hanging hair from the sideburn in front of the ear would fall across the cheek: there
+        // it stays short, as a real sideburn's fine hairs do under the long hair over them.
+        if g.gravity > 0.5 {
+            let t = d.x.atan2(d.z).abs();
+            let ramp = |a: f32, b: f32, x: f32| ((x - a) / (b - a)).clamp(0.0, 1.0);
+            let sideburn =
+                ramp(0.85, 0.95, t) * (1.0 - ramp(1.2, 1.3, t)) * (1.0 - ramp(0.02, 0.035, d.y));
+            scale *= 1.0 - 0.9 * sideburn;
+        }
         let thin = 0.55 + 0.45 * fine;
         // A few hairs stray from the groom: flyaways.
         // (Not from the front hairline, where they would cross the forehead.)
@@ -820,6 +840,15 @@ fn grow_scalp(
                 );
             }
             *p = collider.push_out(*p, 0.0008 + g.loft * t.min(0.4) / 0.4 * 0.6);
+        }
+        // A point pushed out of the thin ear one way while its neighbours went the other way
+        // spikes the hair out by centimetres: take it back to between them (inside the ear's
+        // edge, it doesn't show).
+        for k in 1..last {
+            let mid = (pts[k - 1] + pts[k + 1]) * 0.5;
+            if (pts[k] - mid).length() > 0.012 {
+                pts[k] = mid;
+            }
         }
         // Hairs taper to a fine tip.
         set.push(
@@ -978,13 +1007,21 @@ fn keep_off_face(p: Vec3, side: &mut Option<f32>, jitter: f32, lm: &Landmarks) -
     let fade = t * t * (3.0 - 2.0 * t) * below;
     let half = (0.083 + 0.014 * jitter) * fade;
     let s = *side.get_or_insert(if d.x < 0.0 { -1.0 } else { 1.0 });
-    if d.x * s >= half {
+    // Fading out over a centimetre beside the face: a point pulled back while its neighbours
+    // just outside weren't kinked the hair into a spike (rungs of a ladder down the cheek).
+    let near = ((half + 0.012 - d.x * s) / 0.012).clamp(0.0, 1.0);
+    if near <= 0.0 {
         return p;
     }
     // From the eyes down, also back toward the ears.
-    let back = ((0.01 - d.y) / 0.03).clamp(0.0, 1.0);
+    let back = ((0.01 - d.y) / 0.03).clamp(0.0, 1.0) * near;
     let z = p.z.min(lm.head.z + 0.035 + 0.03 * jitter);
-    Vec3::new(lm.head.x + s * half, p.y, p.z + (z - p.z) * back)
+    let x = if d.x * s < half {
+        lm.head.x + s * half
+    } else {
+        p.x
+    };
+    Vec3::new(x, p.y, p.z + (z - p.z) * back)
 }
 
 /// A stable 0..1 value from a position (so a hair's guide pass and final pass agree).
@@ -1037,12 +1074,13 @@ fn grow_hair(
             let swept =
                 Vec3::new(side * 0.9, -0.2, -0.65).lerp(Vec3::new(side, -0.3, -0.3), hairline);
             let down = Vec3::new(d.x * 3.0, -1.0, -0.35);
-            swept * front + down * (1.0 - front)
+            // Sideburn hair, low in front of the ear, grows down, not back toward the ear.
+            let sideburn = ((0.035 - d.y) / 0.03).clamp(0.0, 1.0);
+            (swept * front + down * (1.0 - front)).lerp(Vec3::new(0.0, -1.0, -0.25), sideburn)
         }
         HairStyle::Bun => {
             // Pulled toward the bun at the back of the head.
-            let bun = Vec3::new(0.0, 0.055, -0.115);
-            (bun - d).normalize_or(Vec3::NEG_Z)
+            (g.bun - d).normalize_or(Vec3::NEG_Z)
         }
         HairStyle::Bald => Vec3::NEG_Y,
     };
@@ -1073,7 +1111,7 @@ fn grow_hair(
         rise += 0.5 * curl;
     }
     let mut dir = (along + sp.n * rise).normalize();
-    let bun_center = lm.head + Vec3::new(0.0, 0.06, -0.125);
+    let bun_center = lm.head + g.bun;
     // Hair is moved off the face toward the side it is combed to.
     let mut face_side = Some(side);
     let jitter = hash01(sp.rest);
@@ -1120,6 +1158,21 @@ fn grow_hair(
         pts.push(p);
     }
     pts
+}
+
+/// Where a bun sits (from the head's center, rest space): on the back of the skull, high on
+/// the occiput, pinned against it as a real one is, not floating behind the head.
+fn bun_seat(skin: &SkinMesh, head: Vec3) -> Vec3 {
+    const HEIGHT: f32 = 0.05;
+    let back = skin
+        .rest
+        .iter()
+        .map(|r| *r - head)
+        .filter(|d| d.x.abs() < 0.012 && (d.y - HEIGHT).abs() < 0.012 && d.z < 0.0)
+        .map(|d| d.z)
+        .fold(f32::MAX, f32::min);
+    let back = if back == f32::MAX { -0.1 } else { back };
+    Vec3::new(0.0, HEIGHT, back - 0.018)
 }
 
 /// A coarse grid of guide roots for nearest-guide lookups.

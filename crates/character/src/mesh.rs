@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use engine_core::math::Vec3;
+use engine_core::math::{Vec2, Vec3};
 
 use crate::appearance::Appearance;
 use crate::morph;
@@ -119,19 +119,33 @@ fn lerp_table(table: &[(f32, f32)], x: f32) -> f32 {
     table[table.len() - 1].1
 }
 
+/// The ear's outline from the side, rest space from the head's center: center (height, depth)
+/// and half its height and depth, m.
+const EAR_CENTER: Vec2 = Vec2::new(-0.016, 0.03);
+const EAR_HALF: Vec2 = Vec2::new(0.034, 0.022);
+
 /// Height of the scalp hairline above the head center at azimuth `theta` (0 straight ahead,
 /// π behind; symmetric), m, for a full hairline (`recession` 0) or a receded one (1).
 pub fn hairline(theta: f32, recession: f32) -> f32 {
     let t = theta.abs();
+    // Around the side: the temple point (where the line from the front hairline to the tragus
+    // crosses the one from the nose tip over the pupil), the sideburn down the front of the ear
+    // (the ear, about 1.17..1.68 here, is left out by the scalp mask), half a centimetre over
+    // the ear's rim, and behind it down to about the earlobe before the nape.
     let full = [
         (0.0, 0.054),
         (0.45, 0.048),
-        (0.85, 0.034),
-        (1.05, 0.004),
-        (1.18, 0.0),
-        (1.3, 0.032),
-        (1.75, 0.034),
-        (2.2, -0.022),
+        (0.62, 0.046),
+        (0.78, 0.026),
+        (0.95, 0.012),
+        (1.1, 0.0),
+        (1.18, -0.006),
+        (1.3, 0.018),
+        (1.45, 0.022),
+        (1.62, 0.018),
+        (1.8, -0.015),
+        (2.05, -0.045),
+        (2.4, -0.06),
         (std::f32::consts::PI, -0.082),
     ];
     let receded = [
@@ -140,9 +154,12 @@ pub fn hairline(theta: f32, recession: f32) -> f32 {
         (0.85, 0.07),
         (1.05, 0.02),
         (1.18, 0.012),
-        (1.3, 0.034),
-        (1.75, 0.034),
-        (2.2, -0.022),
+        (1.3, 0.022),
+        (1.45, 0.024),
+        (1.62, 0.02),
+        (1.8, -0.015),
+        (2.05, -0.045),
+        (2.4, -0.06),
         (std::f32::consts::PI, -0.082),
     ];
     let a = lerp_table(&full, t);
@@ -202,6 +219,7 @@ impl Regions {
             for (v, b) in best.iter().enumerate() {
                 masks[v * MASKS + channel as usize] = smoothstep(lo, hi, *b);
             }
+            best
         };
         from_targets(
             Mask::Lips,
@@ -240,7 +258,8 @@ impl Regions {
             0.05,
             0.6,
         );
-        from_targets(
+        // How far the ear target moves each vertex (it moves the skin around the ear too).
+        let ear_moves = from_targets(
             Mask::Ears,
             &["ears/l-ear-scale-incr", "ears/r-ear-scale-incr"],
             0.05,
@@ -277,9 +296,18 @@ impl Regions {
             m[Mask::Brows as usize] = brow;
             // Scalp: above the hairline, on the head.
             let line = hairline(theta, 0.0);
+            // Hair grows up to the ear, not just near it: only the ear itself is left out (the
+            // ear target moves the skin around it too, over the temple and the sideburn): what
+            // moves and lies within the ear's outline (rest space, from its vertices).
+            let outline = Vec2::new(
+                (d.y - EAR_CENTER.x) / EAR_HALF.x,
+                (d.z - EAR_CENTER.y) / EAR_HALF.y,
+            );
+            let ear = smoothstep(0.3, 0.45, ear_moves[v])
+                * (1.0 - smoothstep(0.9, 1.1, outline.length()));
             m[Mask::Scalp as usize] = smoothstep(line - 0.004, line + 0.006, d.y)
                 * smoothstep(0.55, 0.6, p.y)
-                * (1.0 - m[Mask::Ears as usize]);
+                * (1.0 - ear);
             // Beard: jaw, chin, upper lip and the throat below the jaw; not the cheekbones.
             let ax = p.x.abs();
             let top = lerp_table(
