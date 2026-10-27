@@ -572,6 +572,22 @@ wait for it) and uploaded ones as `render.upload_mb`. Other crates' features may
 way. On lavapipe the first frame's cost is pipeline compiles (`render.cpu.meshes: pipelines`,
 ~1.4 s for the mesh shader's first two variants), not bytes.
 
+**Render thread** (built; `renderer.rs` `RenderThread`, after Unreal's render thread and
+Unity's graphics jobs): with a window (`RenderSettings::pipelining`, default `Windowed`; the
+environment variable `ENGINE_PIPELINING=off|windowed|always` overrides it) a frame is split in
+two. `extract_frame` runs in `render_system` on the main thread: features' `prepare` read the
+world and the frame's view, uniforms and screenshot requests are gathered. `record_submit` then
+records the passes and submits them on the renderer's own thread (`engine_core::tasks::Pipelined`)
+while the next frame simulates; the next `render_system` waits for it first, so only one
+thread uses the renderer and its queue at a time. The picture shows the world one simulation
+step late, and `RenderStats`, `render.*` diagnostics and finished screenshots arrive a frame
+late (`render.extract_ms`, `render.record_ms`). The `Renderer` resource is absent from the
+world while pipelined: reach it with `with_renderer(world, |renderer, world| ..)`, which waits
+for the frame in flight and works inline too. Skip drawing for a while with the `RenderPaused`
+resource rather than taking the renderer out. `capture_now` renders inline either way, so its
+picture is that call's. Headless apps (tests, tools, galleries) stay inline unless set to
+`Always`.
+
 **Shared images and image memory** (built; `image_cache.rs`): the renderer keeps one GPU copy
 of each `Image` asset that is drawn, shared by every feature. `GpuShared::image_texture(&images,
 handle, color)` returns it (`Arc<ImageTexture>`: `view`, `srgb`, size, mip levels, and an `id`

@@ -46,6 +46,13 @@ use crate::targets::{Targets, Tex};
 #[derive(Resource, Debug, Clone)]
 pub struct RenderDisabled(pub String);
 
+/// While present, frames run the simulation only: nothing is drawn and no renderer is started,
+/// whether the renderer is inline or on its own thread ([`Pipelining`]). The way to skip
+/// drawing for a while (a warm-up between pictures); taking the `Renderer` resource out of the
+/// world does nothing while it is pipelined. `capture_now` still renders.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct RenderPaused;
+
 /// A screenshot that was written.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenshotInfo {
@@ -158,7 +165,8 @@ struct PostResources {
     blit_bind_group: wgpu::BindGroup,
 }
 
-/// The renderer. Lives in the world as a resource once the GPU is ready.
+/// The renderer. Lives in the world as a resource once the GPU is ready, except while it is
+/// pipelined ([`RenderThread`]): reach it with [`with_renderer`], which works either way.
 #[derive(Resource)]
 pub struct Renderer {
     #[allow(dead_code)]
@@ -220,6 +228,39 @@ pub struct Renderer {
     prev_exposure: f32,
     frame_index: u64,
     last_view: Option<ViewData>,
+    /// The last recorded frame's results, until `apply_return` hands them to the world.
+    returned: Option<RenderReturn>,
+}
+
+/// What [`Renderer::extract_frame`] takes from the world for [`Renderer::record_submit`]: the
+/// frame's view, settings and uniforms (features keep their own extracted state).
+struct FrameWork {
+    started: Instant,
+    cpu: crate::perf::ParkedSteps,
+    extract_ms: f32,
+    settings: RenderSettings,
+    view: ViewData,
+    uniform: crate::frame::FrameUniform,
+    taa: bool,
+    ssr: bool,
+    gi: bool,
+    lens_settings: (Option<crate::DepthOfField>, Option<crate::MotionBlur>),
+    real_dt: f32,
+    scene_origin: UVec2,
+    viewport_size: UVec2,
+    cloud_writer: Option<(usize, crate::cloud_shadows::CloudShadowRequest)>,
+    cloud_area: Option<CloudShadowArea>,
+    screenshots: Vec<PathBuf>,
+}
+
+/// What a recorded frame hands back to the world, applied by [`Renderer::apply_return`] on the
+/// main thread (a frame later when pipelined, Bevy's and Unreal's one-frame lag).
+#[derive(Default)]
+struct RenderReturn {
+    stats: RenderStats,
+    /// `render.*` metrics, merged into the world's `Diagnostics`.
+    diagnostics: Diagnostics,
+    screenshots: Vec<Result<ScreenshotInfo, String>>,
 }
 
 /// Views of the maps computed each frame that the frame group binds (bindings 10–12 and
@@ -601,6 +642,7 @@ impl Renderer {
             prev_exposure: 0.0,
             frame_index: 0,
             last_view: None,
+            returned: None,
         })
     }
 
@@ -695,8 +737,16 @@ impl Renderer {
         self.overlay_group = groups.overlay;
     }
 
-    /// Render one frame from the world's current state.
+    /// Render a frame inline: extract, record and submit, then hand the results to the world.
     pub fn render(&mut self, world: &mut World) {
+        let frame = self.extract_frame(world);
+        self.record_submit(frame);
+        self.apply_return(world);
+    }
+
+    /// The main-thread half of a frame: everything that reads the world, up to and including
+    /// the features' `prepare`.
+    fn extract_frame(&mut self, world: &mut World) -> FrameWork {
         let started = Instant::now();
         let mut cpu = crate::perf::CpuSteps::default();
         cpu.step("frame setup");
@@ -951,6 +1001,54 @@ impl Renderer {
                 .write_buffer(&self.overlay_frame_buffer, offset, bytes);
         }
 
+        // Screenshots wanted from this frame.
+        let screenshots = world
+            .get_resource_mut::<Screenshots>()
+            .map(|mut s| std::mem::take(&mut s.pending))
+            .unwrap_or_default();
+        FrameWork {
+            started,
+            extract_ms: started.elapsed().as_secs_f32() * 1000.0,
+            cpu: cpu.park(),
+            settings,
+            view,
+            uniform,
+            taa,
+            ssr,
+            gi,
+            lens_settings,
+            real_dt,
+            scene_origin,
+            viewport_size,
+            cloud_writer,
+            cloud_area,
+            screenshots,
+        }
+    }
+
+    /// The world-free half of a frame: record the passes, submit and present (on the render
+    /// thread when pipelined). Results wait in `returned` for [`Self::apply_return`].
+    fn record_submit(&mut self, frame: FrameWork) {
+        let FrameWork {
+            started,
+            cpu,
+            extract_ms,
+            settings,
+            view,
+            uniform,
+            taa,
+            ssr,
+            gi,
+            lens_settings,
+            real_dt,
+            scene_origin,
+            viewport_size,
+            cloud_writer,
+            cloud_area,
+            screenshots,
+        } = frame;
+        let recording = Instant::now();
+        let mut cpu = crate::perf::CpuSteps::resume(cpu);
         let device = &self.shared.device;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame"),
@@ -1439,10 +1537,7 @@ impl Renderer {
 
         // Screenshot readback.
         self.perf.pass(&mut cpu, &mut encoder, "screenshot copy");
-        let pending: Vec<PathBuf> = world
-            .get_resource_mut::<Screenshots>()
-            .map(|mut s| std::mem::take(&mut s.pending))
-            .unwrap_or_default();
+        let pending = screenshots;
         let readback = if pending.is_empty() {
             None
         } else {
@@ -1488,7 +1583,8 @@ impl Renderer {
 
         self.perf.end(&mut encoder);
         cpu.step("stats");
-        let mut stats = self.collect_stats(&view, started);
+        let stats = self.collect_stats(&view, started);
+        let mut back = RenderReturn::default();
         cpu.step("submit");
         self.shared.queue.submit([encoder.finish()]);
         self.meter.after_submit();
@@ -1513,31 +1609,8 @@ impl Renderer {
                 self.targets.window.y,
                 &pending,
             );
-            if let Some(mut s) = world.get_resource_mut::<Screenshots>() {
-                s.completed += results.len() as u64;
-                s.done.extend(results);
-                let excess = s.done.len().saturating_sub(16);
-                s.done.drain(..excess);
-            }
+            back.screenshots = results;
         }
-
-        // Free the CPU pixels of images that have been on the GPU unchanged for a while (when
-        // `release_image_pixels` is on), and drop images nobody draws any more.
-        cpu.step("release images");
-        if let Some(mut images) = world.get_resource_mut::<Assets<Image>>()
-            && self
-                .shared
-                .images
-                .end_frame(images.bypass_change_detection())
-                > 0
-        {
-            images.set_changed();
-        }
-        let image_stats = self.shared.images.stats();
-        stats.images_released = image_stats.released;
-        stats.image_bytes_released = image_stats.bytes_released;
-        stats.images_compressed = image_stats.compressed;
-        stats.image_bytes_compressed_away = image_stats.bytes_compressed_away;
 
         if engine_core::profile::enabled() {
             self.perf.set_features(
@@ -1553,8 +1626,14 @@ impl Renderer {
             cpu,
             settings.perf_log_secs,
         );
-        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
-            self.perf.publish(&mut d);
+        {
+            let d = &mut back.diagnostics;
+            self.perf.publish(d);
+            d.set("render.extract_ms", extract_ms as f64);
+            d.set(
+                "render.record_ms",
+                recording.elapsed().as_secs_f64() * 1000.0,
+            );
             d.set("render.cpu_ms", stats.cpu_ms as f64);
             d.set("render.frame_ms", self.perf.frame_ms as f64);
             d.set("render.acquire_ms", self.perf.acquire_ms as f64);
@@ -1576,23 +1655,11 @@ impl Renderer {
                 "render.surface_weather_uploads",
                 self.surface_weather.uploads as f64,
             );
-            d.set("render.gpu_images", image_stats.gpu_images as f64);
-            d.set("render.images_compressed", image_stats.compressed as f64);
-            d.set(
-                "render.image_mb_compressed_away",
-                image_stats.bytes_compressed_away as f64 / (1024.0 * 1024.0),
-            );
-            d.set("render.image_uploads", image_stats.uploads as f64);
             let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
             d.set("render.upload_mb", mb(self.shared.uploads.uploaded()));
             d.set(
                 "render.pending_upload_mb",
                 mb(self.shared.uploads.pending()),
-            );
-            d.set("render.images_released", image_stats.released as f64);
-            d.set(
-                "render.image_bytes_released",
-                image_stats.bytes_released as f64,
             );
             if let Some(ev) = self.meter.measured_ev100 {
                 d.set("render.ev100_metered", ev as f64);
@@ -1604,7 +1671,8 @@ impl Renderer {
                 }
             }
         }
-        world.insert_resource(stats);
+        back.stats = stats;
+        self.returned = Some(back);
 
         self.prev_step = (view.origin - view.prev_origin).length();
         self.previous = Some(PreviousView {
@@ -1614,6 +1682,57 @@ impl Renderer {
         });
         self.last_view = Some(view);
         self.frame_index += 1;
+    }
+
+    /// Hand the last recorded frame's results to the world (main thread): screenshots,
+    /// `RenderStats`, `render.*` diagnostics, and the CPU pixels of images that have been on the
+    /// GPU unchanged for a while (when `release_image_pixels` is on).
+    fn apply_return(&mut self, world: &mut World) {
+        let Some(mut back) = self.returned.take() else {
+            return;
+        };
+        if !back.screenshots.is_empty()
+            && let Some(mut s) = world.get_resource_mut::<Screenshots>()
+        {
+            s.completed += back.screenshots.len() as u64;
+            s.done.append(&mut back.screenshots);
+            let excess = s.done.len().saturating_sub(16);
+            s.done.drain(..excess);
+        }
+        // Drop images nobody draws any more, and release pixels.
+        if let Some(mut images) = world.get_resource_mut::<Assets<Image>>()
+            && self
+                .shared
+                .images
+                .end_frame(images.bypass_change_detection())
+                > 0
+        {
+            images.set_changed();
+        }
+        let image_stats = self.shared.images.stats();
+        let stats = &mut back.stats;
+        stats.images_released = image_stats.released;
+        stats.image_bytes_released = image_stats.bytes_released;
+        stats.images_compressed = image_stats.compressed;
+        stats.image_bytes_compressed_away = image_stats.bytes_compressed_away;
+        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+            for (name, value) in &back.diagnostics.metrics {
+                d.set(name, *value);
+            }
+            d.set("render.gpu_images", image_stats.gpu_images as f64);
+            d.set("render.images_compressed", image_stats.compressed as f64);
+            d.set(
+                "render.image_mb_compressed_away",
+                image_stats.bytes_compressed_away as f64 / (1024.0 * 1024.0),
+            );
+            d.set("render.image_uploads", image_stats.uploads as f64);
+            d.set("render.images_released", image_stats.released as f64);
+            d.set(
+                "render.image_bytes_released",
+                image_stats.bytes_released as f64,
+            );
+        }
+        world.insert_resource(back.stats);
     }
 
     /// `taa`: temporal anti-aliasing runs this frame (its softness is sharpened back).
@@ -2469,7 +2588,7 @@ fn save_png(path: &Path, rgba: &[u8], width: u32, height: u32) -> Result<Screens
 
 /// Create the renderer if possible. Returns whether a renderer exists.
 pub fn ensure_renderer(world: &mut World) -> bool {
-    if world.contains_resource::<Renderer>() {
+    if world.contains_resource::<Renderer>() || world.contains_resource::<RenderThread>() {
         return true;
     }
     if world.contains_resource::<RenderDisabled>() {
@@ -2512,12 +2631,79 @@ pub fn ensure_renderer(world: &mut World) -> bool {
     }
 }
 
+/// The renderer on its own thread ([`Pipelining`]): absent from the world as a `Renderer`
+/// resource while it is pipelined. Reach it with [`with_renderer`], which waits for the frame
+/// in flight first.
+#[derive(Resource)]
+pub struct RenderThread(engine_core::tasks::Pipelined<Renderer>);
+
 /// The exclusive system that renders a frame.
+///
+/// Pipelined (`RenderSettings::pipelining`), it waits for the previous frame's recording to
+/// finish (the one sync point), applies its results, extracts this frame from the world and
+/// hands recording, submit and present to the render thread, so the next frame's simulation
+/// overlaps them (pipelined-rendering.md, as Bevy's pipelined rendering and Unreal's
+/// render thread). Otherwise it renders inline.
 pub fn render_system(world: &mut World) {
-    if !ensure_renderer(world) {
+    if world.contains_resource::<RenderPaused>() || !ensure_renderer(world) {
         return;
     }
-    world.resource_scope(|world, mut renderer: Mut<Renderer>| renderer.render(world));
+    let headless = world.resource::<EngineConfig>().headless;
+    let pipelined = world
+        .get_resource::<RenderSettings>()
+        .is_some_and(|s| s.pipelining.on(headless));
+    if pipelined {
+        let mut thread = match world.remove_resource::<RenderThread>() {
+            Some(thread) => thread,
+            None => {
+                let renderer = world.remove_resource::<Renderer>().expect("ensured");
+                RenderThread(engine_core::tasks::Pipelined::new("render", renderer))
+            }
+        };
+        if world.remove_resource::<Renderer>().is_some() {
+            // Someone took the renderer out before it moved to its thread and put it back since.
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "a Renderer resource came back while the renderer is pipelined; dropped it \
+                     (pause with RenderPaused, reach the renderer with with_renderer)"
+                )
+            });
+        }
+        let renderer = thread.0.get();
+        renderer.apply_return(world);
+        let frame = renderer.extract_frame(world);
+        thread
+            .0
+            .dispatch(move |renderer| renderer.record_submit(frame));
+        world.insert_resource(thread);
+    } else {
+        if let Some(thread) = world.remove_resource::<RenderThread>() {
+            let mut renderer = thread.0.into_inner();
+            renderer.apply_return(world);
+            world.insert_resource(renderer);
+        }
+        world.resource_scope(|world, mut renderer: Mut<Renderer>| renderer.render(world));
+    }
+}
+
+/// Run `f` with the renderer, inline or pipelined; when pipelined, first wait for the frame in
+/// flight and apply its results (Unreal's `FlushRenderingCommands`). `None` without a renderer.
+pub fn with_renderer<R>(
+    world: &mut World,
+    f: impl FnOnce(&mut Renderer, &mut World) -> R,
+) -> Option<R> {
+    if let Some(mut thread) = world.remove_resource::<RenderThread>() {
+        let renderer = thread.0.get();
+        renderer.apply_return(world);
+        let out = f(renderer, world);
+        world.insert_resource(thread);
+        return Some(out);
+    }
+    let mut renderer = world.remove_resource::<Renderer>()?;
+    let out = f(&mut renderer, world);
+    world.insert_resource(renderer);
+    Some(out)
 }
 
 /// Render immediately and capture the image (used by the `render.screenshot` API so tools get
@@ -2531,7 +2717,8 @@ pub fn capture_now(world: &mut World, path: impl Into<PathBuf>) -> Result<Screen
     }
     world.get_resource_or_init::<Screenshots>().request(path);
     let before = world.resource::<Screenshots>().completed;
-    render_system(world);
+    // Inline even when pipelined, so the picture is this call's.
+    with_renderer(world, |renderer, world| renderer.render(world));
     let mut s = world.resource_mut::<Screenshots>();
     if s.completed > before {
         s.done

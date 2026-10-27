@@ -264,7 +264,25 @@ impl CpuSteps {
                 .push((name, started.elapsed().as_secs_f32() * 1000.0));
         }
     }
+
+    /// End the current step and keep the times, to carry them to another thread (the entered
+    /// span can't go along).
+    pub fn park(mut self) -> ParkedSteps {
+        self.finish();
+        ParkedSteps(self.done)
+    }
+
+    /// Go on with steps parked on another thread.
+    pub fn resume(parked: ParkedSteps) -> Self {
+        Self {
+            current: None,
+            done: parked.0,
+        }
+    }
 }
+
+/// [`CpuSteps`]' finished steps, between threads.
+pub(crate) struct ParkedSteps(Vec<(Label, f32)>);
 
 /// Sums over the current report window.
 #[derive(Default)]

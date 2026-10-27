@@ -130,12 +130,13 @@ pub use material_library::{MaterialMaps, MaterialPreset, MaterialTextures};
 pub use mesh::{Mesh, Shape, Vertex};
 pub use motion_blur::MotionBlur;
 pub use renderer::{
-    RenderDisabled, RenderStats, Renderer, ScreenshotInfo, Screenshots, capture_now,
+    RenderDisabled, RenderPaused, RenderStats, RenderThread, Renderer, ScreenshotInfo, Screenshots,
+    capture_now, with_renderer,
 };
 pub use rock::{StoneFinish, StoneKind, WallStone, wall_stone};
 pub use settings::{
-    AntiAliasing, Atmosphere, DebugView, FogSettings, RenderSettings, TextureCompression,
-    Tonemapper, VolumetricQuality,
+    AntiAliasing, Atmosphere, DebugView, FogSettings, Pipelining, RenderSettings,
+    TextureCompression, Tonemapper, VolumetricQuality,
 };
 pub use sprites::{
     Billboard, Parallax, PixelGrid, PixelPerfect, PixelSnap, Sprite, SpriteAlpha, SpriteAnimation,
@@ -295,9 +296,7 @@ impl Plugin for RenderPlugin {
                     .get_resource::<RenderStats>()
                     .map(|s| serde_json::to_value(s).unwrap_or_default())
                     .unwrap_or_default();
-                let details = world
-                    .get_resource::<Renderer>()
-                    .map(|r| r.describe())
+                let details = crate::renderer::with_renderer(world, |r, _| r.describe())
                     .unwrap_or_else(|| {
                         json!({"running": false, "reason": world.get_resource::<RenderDisabled>().map(|d| d.0.clone())})
                     });
