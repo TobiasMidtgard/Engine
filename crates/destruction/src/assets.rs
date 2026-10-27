@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use bevy_tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
+use bevy_tasks::{Task, TaskPool, TaskPoolBuilder, block_on, poll_once};
 use engine_assets::{Assets, Handle};
 use engine_core::math::{Rng, Vec3};
 use engine_core::prelude::*;
@@ -582,7 +582,22 @@ impl MadeTextures {
     }
 }
 
-/// [`DestructionAssets`]' textures being made on the async compute pool, one task per
+/// Threads for first-use builds (textures, prop looks with their baked occlusion), a pool of
+/// their own: the async compute pool has a quarter of the cores and is shared with every other
+/// module's loading, and the compute pool runs the frame's parallel systems, whose waits could
+/// pick up a look that takes most of a second. Idle (parked) once everything is built.
+pub fn bake_pool() -> &'static TaskPool {
+    static POOL: std::sync::OnceLock<TaskPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
+        TaskPoolBuilder::new()
+            .num_threads(threads.saturating_sub(1).max(1))
+            .thread_name("destruction bake".into())
+            .build()
+    })
+}
+
+/// [`DestructionAssets`]' textures being made on the bake threads ([`bake_pool`]), one task per
 /// texture, while the game keeps drawing (the loading screen waits for the resource). The
 /// way Unity's async loading and Unreal's async loading thread work: the heavy work on
 /// worker threads, then a short hand-over on the frame thread once all of it is done.
@@ -594,7 +609,7 @@ pub struct AssetsLoading {
 
 impl AssetsLoading {
     fn start() -> Self {
-        let pool = AsyncComputeTaskPool::get();
+        let pool = bake_pool();
         Self {
             pending: TextureJob::all()
                 .into_iter()
@@ -639,11 +654,7 @@ pub fn ensure_assets(world: &mut World) {
     }
     let made = if world.contains_resource::<Assets<Image>>() {
         let Some(mut loading) = world.remove_resource::<AssetsLoading>() else {
-            if AsyncComputeTaskPool::try_get().is_some() {
-                world.insert_resource(AssetsLoading::start());
-                return;
-            }
-            finish_assets(world, Some(MadeTextures::default()));
+            world.insert_resource(AssetsLoading::start());
             return;
         };
         if !loading.poll() {

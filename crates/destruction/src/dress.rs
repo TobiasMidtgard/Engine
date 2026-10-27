@@ -6,16 +6,19 @@
 //! reuses them.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use bevy_tasks::{Task, block_on, poll_once};
 
 use engine_assets::{Assets, Handle};
 use engine_core::math::noise::perlin2;
 use engine_core::prelude::*;
-use engine_render::{MaterialRef, Mesh, MeshRef, MeshRenderer};
+use engine_render::{Image, MaterialRef, Mesh, MeshRef, MeshRenderer};
 use engine_world::physics::{Collider, ColliderShape, PhysicsBackend};
 use engine_world::{Climbable, SurfaceMaterials};
 
 use crate::architecture::{self, TowerTop};
-use crate::assets::DestructionAssets;
+use crate::assets::{DestructionAssets, bake_pool};
 use crate::debris::Debris;
 use crate::material::{DestructibleMaterial, DestructionMaterials};
 use crate::meshing::MeshBuilder;
@@ -167,10 +170,113 @@ fn solid_of(
     (ColliderShape::TriMesh { vertices, indices }, material)
 }
 
+/// Prop models being built on the bake threads ([`crate::assets::bake_pool`]), by the
+/// [`PropMeshes`] key they go in under. Each look is built once on a worker thread (Unreal's async cooking of procedural
+/// meshes, Unity's async mesh loading), its entities wait without children meanwhile, and the
+/// frame thread only adds the finished meshes and spawns the children.
+#[derive(Resource, Default)]
+pub struct PropBuilds {
+    pending: HashMap<String, Task<BuiltModel>>,
+}
+
+impl PropBuilds {
+    /// Looks still being built.
+    pub fn remaining(&self) -> usize {
+        self.pending.len()
+    }
+}
+
+/// What a dressed entity is drawn as.
+#[derive(Debug, Clone, Copy)]
+enum Source {
+    Prop(PropModel),
+    Arch(ArchModel),
+}
+
+impl Source {
+    /// Its [`PropMeshes`] key: one per kind, seed and tint.
+    fn key(&self) -> String {
+        match self {
+            Source::Prop(m) if m.tint == [1.0; 3] => format!("{:?}#{}", m.kind, m.seed),
+            Source::Prop(m) => format!("{:?}#{}~{:?}", m.kind, m.seed, m.tint),
+            Source::Arch(m) => format!("{:?}#{}", m.kind, m.seed),
+        }
+    }
+
+    fn parts(&self) -> Vec<(DestructibleMaterial, MeshBuilder)> {
+        match self {
+            Source::Prop(model) => model
+                .kind
+                .build(model.seed)
+                .into_iter()
+                .map(|mut p| {
+                    for v in &mut p.mesh.vertices {
+                        for (c, t) in v.color.iter_mut().zip(model.tint) {
+                            *c *= t;
+                        }
+                    }
+                    (p.material, p.mesh)
+                })
+                .collect(),
+            Source::Arch(model) => model
+                .kind
+                .build(model.seed)
+                .into_iter()
+                .map(|p| (p.material, p.mesh))
+                .collect(),
+        }
+    }
+}
+
+/// A look's meshes and (when asked for) collision mesh, not yet in the asset store.
+struct BuiltModel {
+    meshes: Vec<(DestructibleMaterial, Mesh)>,
+    solid: Option<(ColliderShape, DestructibleMaterial)>,
+}
+
+/// Build `source`'s meshes. Vertex colors are near white (the texture brings the color);
+/// without textures (`colors`) they take the material's own color.
+fn build_model(source: Source, colors: Option<&DestructionMaterials>, solid: bool) -> BuiltModel {
+    let parts = source.parts();
+    let solid = solid.then(|| solid_of(&parts));
+    let meshes = parts
+        .into_iter()
+        .map(|(material, mut mb)| {
+            if let Some(table) = colors {
+                let c = table.get(material).exterior;
+                for v in &mut mb.vertices {
+                    for (k, ch) in c.iter().enumerate() {
+                        v.color[k] *= ch;
+                    }
+                }
+            }
+            (material, mb.build())
+        })
+        .collect();
+    BuiltModel { meshes, solid }
+}
+
+/// Put a built look in the cache (meshes already there stay, so handles stay shared).
+fn store(cache: &mut PropMeshes, meshes: &mut Assets<Mesh>, key: String, built: BuiltModel) {
+    if !cache.meshes.contains_key(&key) {
+        let handles = built
+            .meshes
+            .into_iter()
+            .map(|(material, mesh)| (meshes.add(mesh), material))
+            .collect();
+        cache.meshes.insert(key.clone(), handles);
+    }
+    if let Some(solid) = built.solid {
+        cache.solids.entry(key).or_insert(solid);
+    }
+}
+
 /// Give each new [`PropModel`], [`ArchModel`] and [`GravelPad`] its mesh children (Update).
 /// With a physics module, fortress masonry and set-dressing props (a [`PropModel`] on nothing
 /// that breaks or has a collider of its own) are solid too: a static triangle mesh of the
-/// model, so the walls stop players and they can walk along the wall walks.
+/// model, so the walls stop players and they can walk along the wall walks. Looks not built
+/// yet are built on worker threads ([`PropBuilds`]) and their entities dressed once they are
+/// in, unless [`crate::LoadAtOnce`] is present.
 #[allow(clippy::too_many_arguments)]
 pub fn build_prop_models_system(
     mut commands: Commands,
@@ -179,7 +285,10 @@ pub fn build_prop_models_system(
     surfaces: Res<SurfaceMaterials>,
     backend: Option<Res<PhysicsBackend>>,
     meshes: Option<ResMut<Assets<Mesh>>>,
+    images: Option<Res<Assets<Image>>>,
     mut cache: ResMut<PropMeshes>,
+    mut builds: ResMut<PropBuilds>,
+    at_once: Option<Res<crate::LoadAtOnce>>,
     props: Query<(Entity, &PropModel), Without<PropBuilt>>,
     arches: Query<(Entity, &ArchModel), Without<PropBuilt>>,
     pads: Query<(Entity, &GravelPad), Without<PropBuilt>>,
@@ -195,108 +304,81 @@ pub fn build_prop_models_system(
     >,
     climbables: Query<(), With<Climbable>>,
 ) {
-    let (Some(assets), Some(mut meshes)) = (assets, meshes) else {
+    let Some(mut meshes) = meshes else {
         return;
     };
+    // Textured once there is an image store: the looks can be built before the textures are
+    // in, and dressed once both are.
+    let textured = assets.as_ref().map_or(images.is_some(), |a| a.textured);
     let physics = backend.is_some();
-    let mut dress =
-        |e: Entity,
-         key: String,
-         solid: bool,
-         grit: bool,
-         parts: &dyn Fn() -> Vec<(DestructibleMaterial, MeshBuilder)>| {
-            // A ladder is climbed through its own box: a solid one pushes the climber off the
-            // climb line. As a sensor it keeps its surface, so the rungs still ring as steel.
-            let sensor = climbables.contains(e);
-            let solid = solid && physics;
-            let need_meshes = !cache.meshes.contains_key(&key);
-            if need_meshes || (solid && !cache.solids.contains_key(&key)) {
-                let fresh = parts();
-                if solid {
-                    cache.solids.insert(key.clone(), solid_of(&fresh));
+    let at_once = at_once.is_some();
+    if !builds.pending.is_empty() {
+        let _span = tracing::info_span!("prop models hand-over").entered();
+        builds
+            .pending
+            .retain(|key, task| match block_on(poll_once(task)) {
+                Some(built) => {
+                    store(&mut cache, &mut meshes, key.clone(), built);
+                    false
                 }
-                if need_meshes {
-                    let built = fresh
-                        .into_iter()
-                        .map(|(material, mut mb)| {
-                            // Vertex colors are near white (the texture brings the color); without
-                            // textures they take the material's own color.
-                            if !assets.textured {
-                                let c = table.get(material).exterior;
-                                for v in &mut mb.vertices {
-                                    for (k, ch) in c.iter().enumerate() {
-                                        v.color[k] *= ch;
-                                    }
-                                }
-                            }
-                            (meshes.add(mb.build()), material)
-                        })
-                        .collect();
-                    cache.meshes.insert(key.clone(), built);
-                }
-            }
-            for (mesh, material) in &cache.meshes[&key] {
-                let surface = if grit && *material == DestructibleMaterial::Dirt {
-                    assets.gravel
-                } else {
-                    assets.surface(*material)
-                };
-                spawn_part(&mut commands, e, *mesh, surface);
-            }
-            let mut ec = commands.entity(e);
-            if solid && let Some((shape, material)) = cache.solids.get(&key) {
-                let props = table.get(*material);
-                ec.insert(Collider {
-                    shape: shape.clone(),
-                    surface: surfaces.id_or_default(&props.surface),
-                    density: props.density,
-                    sensor,
-                    ..Collider::default()
+                None => true,
+            });
+    }
+    // The material table for untextured vertex colors, shared by this frame's builds.
+    let mut shared: Option<Arc<DestructionMaterials>> = None;
+    let mut dress = |e: Entity, source: Source, solid: bool, grit: bool| {
+        // A ladder is climbed through its own box: a solid one pushes the climber off the
+        // climb line. As a sensor it keeps its surface, so the rungs still ring as steel.
+        let sensor = climbables.contains(e);
+        let solid = solid && physics;
+        let key = source.key();
+        if !cache.meshes.contains_key(&key) || (solid && !cache.solids.contains_key(&key)) {
+            let colors = (!textured).then(|| {
+                shared
+                    .get_or_insert_with(|| Arc::new(table.clone()))
+                    .clone()
+            });
+            if !at_once {
+                // With a physics module every look gets its collision mesh, whoever asks
+                // first.
+                builds.pending.entry(key).or_insert_with(|| {
+                    bake_pool()
+                        .spawn(async move { build_model(source, colors.as_deref(), physics) })
                 });
+                return;
             }
-            ec.insert(PropBuilt);
+            if assets.is_none() {
+                return;
+            }
+            let built = build_model(source, colors.as_deref(), solid);
+            store(&mut cache, &mut meshes, key.clone(), built);
+        }
+        let Some(assets) = assets.as_deref() else {
+            return;
         };
+        dress_with(
+            &mut commands,
+            &cache,
+            &key,
+            e,
+            grit,
+            assets,
+            solid,
+            sensor,
+            &table,
+            &surfaces,
+        );
+    };
     for (e, model) in &props {
-        let solid = !gameplay.contains(e);
-        let key = if model.tint == [1.0; 3] {
-            format!("{:?}#{}", model.kind, model.seed)
-        } else {
-            format!("{:?}#{}~{:?}", model.kind, model.seed, model.tint)
-        };
-        dress(e, key, solid, false, &|| {
-            model
-                .kind
-                .build(model.seed)
-                .into_iter()
-                .map(|mut p| {
-                    for v in &mut p.mesh.vertices {
-                        for (c, t) in v.color.iter_mut().zip(model.tint) {
-                            *c *= t;
-                        }
-                    }
-                    (p.material, p.mesh)
-                })
-                .collect()
-        });
+        dress(e, Source::Prop(*model), !gameplay.contains(e), false);
     }
     // The masonry's earth is the spoil of a breach: stone grit and rubble, drawn as gravel.
     for (e, model) in &arches {
-        let solid = !gameplay.contains(e);
-        dress(
-            e,
-            format!("{:?}#{}", model.kind, model.seed),
-            solid,
-            true,
-            &|| {
-                model
-                    .kind
-                    .build(model.seed)
-                    .into_iter()
-                    .map(|p| (p.material, p.mesh))
-                    .collect()
-            },
-        );
+        dress(e, Source::Arch(*model), !gameplay.contains(e), true);
     }
+    let Some(assets) = assets else {
+        return;
+    };
     for (e, pad) in &pads {
         let key = format!("{pad:?}");
         let mesh = match cache.meshes.get(&key) {
@@ -312,6 +394,42 @@ pub fn build_prop_models_system(
         spawn_part(&mut commands, e, mesh, assets.gravel);
         commands.entity(e).insert(PropBuilt);
     }
+}
+
+/// Spawn `e`'s mesh children from the cached look `key`, and its collider when `solid`.
+#[allow(clippy::too_many_arguments)]
+fn dress_with(
+    commands: &mut Commands,
+    cache: &PropMeshes,
+    key: &str,
+    e: Entity,
+    grit: bool,
+    assets: &DestructionAssets,
+    solid: bool,
+    sensor: bool,
+    table: &DestructionMaterials,
+    surfaces: &SurfaceMaterials,
+) {
+    for (mesh, material) in &cache.meshes[key] {
+        let surface = if grit && *material == DestructibleMaterial::Dirt {
+            assets.gravel
+        } else {
+            assets.surface(*material)
+        };
+        spawn_part(commands, e, *mesh, surface);
+    }
+    let mut ec = commands.entity(e);
+    if solid && let Some((shape, material)) = cache.solids.get(key) {
+        let props = table.get(*material);
+        ec.insert(Collider {
+            shape: shape.clone(),
+            surface: surfaces.id_or_default(&props.surface),
+            density: props.density,
+            sensor,
+            ..Collider::default()
+        });
+    }
+    ec.insert(PropBuilt);
 }
 
 fn spawn_part(

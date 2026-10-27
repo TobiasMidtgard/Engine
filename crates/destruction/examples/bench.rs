@@ -63,9 +63,20 @@ fn main() {
     }
     let mut seen = None;
     let mut t = 0.0;
+    let started = std::time::Instant::now();
+    let (mut building, mut dressed) = (false, false);
     while t < secs {
         app.update();
         t += step as f32;
+        let loading = engine_destruction::is_loading(&app.world);
+        building |= loading;
+        if building && !dressed && !loading {
+            dressed = true;
+            println!(
+                "loaded {:.2} s after the first frame",
+                started.elapsed().as_secs_f32()
+            );
+        }
         let m = std::fs::metadata("engine-profile.txt")
             .and_then(|m| m.modified())
             .ok();

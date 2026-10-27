@@ -27,6 +27,7 @@ fn app() -> App {
         .set_source(TimeSource::Manual { step_secs: STEP });
     app.init_asset::<Mesh>().init_asset::<StandardMaterial>();
     app.add_plugins((WorldPlugin, DestructionPlugin));
+    app.insert_resource(LoadAtOnce);
     app
 }
 
@@ -1216,6 +1217,7 @@ fn the_hill_demo_tunnels_caves_in_builds_and_rebuilds() {
         });
     app.init_asset::<Mesh>().init_asset::<StandardMaterial>();
     app.add_plugins((WorldPlugin, DestructionPlugin));
+    app.insert_resource(LoadAtOnce);
     app.add_systems(Startup, |mut commands: Commands| {
         hill::spawn_voxel_hill(&mut commands, DVec3::new(-50.0, 0.0, 30.0));
     });
@@ -1860,6 +1862,44 @@ fn standing_pieces_are_solid_with_a_physics_module() {
     };
     let top = vertices.iter().map(|v| v.y).fold(f32::MIN, f32::max);
     assert!(!indices.is_empty() && (top - 1.9).abs() < 0.1, "top {top}");
+}
+
+#[test]
+fn prop_models_and_voxel_volumes_are_built_off_the_frame_thread() {
+    let mut app = app();
+    app.world.remove_resource::<LoadAtOnce>();
+    let spawn = |app: &mut App, seed| {
+        app.world
+            .spawn((
+                Transform::default(),
+                dress::PropModel::new(
+                    props::PropKind::ConcretePillar {
+                        size: [0.7, 3.8, 0.7],
+                    },
+                    seed,
+                ),
+            ))
+            .id()
+    };
+    let (a, b) = (spawn(&mut app, 1), spawn(&mut app, 1));
+    let hill = app.world.spawn(VoxelVolume::default()).id();
+    let mut frames = 0;
+    while app.world.get::<dress::PropBuilt>(a).is_none()
+        || app.world.get::<VoxelState>(hill).is_none()
+    {
+        assert!(frames < 600, "the look never came in");
+        app.update();
+        frames += 1;
+    }
+    assert!(
+        app.world.get::<dress::PropBuilt>(b).is_some(),
+        "one build dresses both"
+    );
+    assert!(!engine_destruction::is_loading(&app.world));
+    // A look already built dresses at once.
+    let c = spawn(&mut app, 1);
+    app.update();
+    assert!(app.world.get::<dress::PropBuilt>(c).is_some());
 }
 
 #[test]

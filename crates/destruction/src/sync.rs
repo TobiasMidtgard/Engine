@@ -2,7 +2,11 @@
 //! their components: (re)builds state when a component is added or changed, and remeshes only
 //! the tiles and chunks that damage touched. Standing building pieces get colliders too.
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
+
+use bevy_tasks::{Task, block_on, poll_once};
 
 use bevy_ecs::change_detection::Tick;
 use engine_assets::{Assets, Handle};
@@ -13,7 +17,7 @@ use engine_world::SurfaceMaterials;
 use engine_world::physics::{Collider, ColliderShape, PhysicsBackend};
 
 use crate::DestructionStats;
-use crate::assets::DestructionAssets;
+use crate::assets::{DestructionAssets, bake_pool};
 use crate::build::BuiltPiece;
 use crate::debris::Debris;
 use crate::material::DestructionMaterials;
@@ -90,46 +94,97 @@ pub fn init_walls_system(
     }
 }
 
-/// (Re)create [`VoxelState`] for new or edited volumes.
+/// Voxel volumes' states being built on the bake threads ([`crate::assets::bake_pool`]), by
+/// volume entity. A volume is drawn (and dug) once its state is in; one rebuilt after an edit
+/// keeps its old state until then.
+#[derive(Resource, Default)]
+pub struct VoxelBuilds {
+    pending: HashMap<Entity, Task<VoxelState>>,
+}
+
+impl VoxelBuilds {
+    /// Volumes still being built.
+    pub fn remaining(&self) -> usize {
+        self.pending.len()
+    }
+}
+
+/// (Re)create [`VoxelState`] for new or edited voxel volumes, on the bake threads unless
+/// [`crate::LoadAtOnce`] is present (filling a hill's voxels from its shape takes a few hundred
+/// milliseconds).
+#[allow(clippy::too_many_arguments)]
 pub fn init_voxels_system(
     mut commands: Commands,
     table: Res<DestructionMaterials>,
-    mut q: Query<
-        (
-            Entity,
-            Ref<VoxelVolume>,
-            Option<&mut VoxelState>,
-            Option<&BuiltAt>,
-        ),
-        Changed<VoxelVolume>,
-    >,
+    at_once: Option<Res<crate::LoadAtOnce>>,
+    mut builds: ResMut<VoxelBuilds>,
+    q: Query<(Entity, Ref<VoxelVolume>, Option<&BuiltAt>), Changed<VoxelVolume>>,
+    volumes: Query<(), With<VoxelVolume>>,
+    mut states: Query<&mut VoxelState>,
     chunks: Query<&VoxelChunk>,
     mut meshes: Option<ResMut<Assets<Mesh>>>,
 ) {
-    for (e, volume, state, built) in &mut q {
+    let mut swap_in =
+        |commands: &mut Commands, e: Entity, fresh: VoxelState| match states.get_mut(e) {
+            Ok(mut s) => {
+                let mut fresh = fresh;
+                if fresh.chunks == s.chunks {
+                    // Same chunks: they are remeshed in place (every chunk of the fresh state
+                    // is dirty), so a reset hill never shows holes while it is remeshed.
+                    fresh.chunk_entities = std::mem::take(&mut s.chunk_entities);
+                } else {
+                    for c in s.chunk_entities.iter().flatten() {
+                        if let Ok(chunk) = chunks.get(*c)
+                            && let Some(m) = meshes.as_deref_mut()
+                        {
+                            for (_, _, mesh) in &chunk.layers {
+                                m.remove(*mesh);
+                            }
+                        }
+                        commands.entity(*c).despawn();
+                    }
+                }
+                *s = fresh;
+            }
+            Err(_) => {
+                commands.entity(e).insert(fresh);
+            }
+        };
+    if !builds.pending.is_empty() {
+        let _span = tracing::info_span!("voxel volumes hand-over").entered();
+        builds.pending.retain(|e, task| {
+            if !volumes.contains(*e) {
+                return false;
+            }
+            match block_on(poll_once(task)) {
+                Some(fresh) => {
+                    swap_in(&mut commands, *e, fresh);
+                    false
+                }
+                None => true,
+            }
+        });
+    }
+    let mut shared: Option<Arc<DestructionMaterials>> = None;
+    for (e, volume, built) in &q {
         if built.is_some_and(|b| b.0 == volume.last_changed()) {
             continue;
         }
         commands.entity(e).insert(BuiltAt(volume.last_changed()));
-        let fresh = VoxelState::new(&volume, &table);
-        match state {
-            Some(mut s) => {
-                for c in s.chunk_entities.iter().flatten() {
-                    if let Ok(chunk) = chunks.get(*c)
-                        && let Some(m) = meshes.as_deref_mut()
-                    {
-                        for (_, _, mesh) in &chunk.layers {
-                            m.remove(*mesh);
-                        }
-                    }
-                    commands.entity(*c).despawn();
-                }
-                *s = fresh;
-            }
-            None => {
-                commands.entity(e).insert(fresh);
-            }
+        if at_once.is_some() {
+            builds.pending.remove(&e);
+            swap_in(&mut commands, e, VoxelState::new(&volume, &table));
+            continue;
         }
+        let table = shared
+            .get_or_insert_with(|| Arc::new(table.clone()))
+            .clone();
+        let volume = VoxelVolume::clone(&volume);
+        // A newer edit replaces (and so cancels) a build still running.
+        builds.pending.insert(
+            e,
+            bake_pool().spawn(async move { VoxelState::new(&volume, &table) }),
+        );
     }
 }
 
@@ -322,11 +377,23 @@ pub fn rebuild_walls_system(
     }
 }
 
+/// A volume with more dirty chunks than this is being built or reset, not dug: its chunks are
+/// remeshed over frames, within [`VOXEL_FRAME_MS`] (a loading screen's
+/// [`engine_world::LoadingBudget`] while one is up), the way Unity's `asyncUploadTimeSlice` and
+/// Unreal's streaming time limits spread loading work. A dig's few chunks all remesh at once,
+/// so a hole never shows a seam.
+pub const VOXEL_BULK_CHUNKS: usize = 8;
+
+/// Frame-thread time a bulk remesh may take a frame in play, ms.
+pub const VOXEL_FRAME_MS: f64 = 4.0;
+
 /// Remesh dirty voxel chunks (and their triangle-mesh colliders when physics is installed).
 #[allow(clippy::too_many_arguments)]
 pub fn rebuild_voxels_system(
     mut commands: Commands,
     table: Res<DestructionMaterials>,
+    screen: Option<Res<engine_world::LoadingBudget>>,
+    at_once: Option<Res<crate::LoadAtOnce>>,
     assets: Option<Res<DestructionAssets>>,
     meshes: Option<ResMut<Assets<Mesh>>>,
     backend: Option<Res<PhysicsBackend>>,
@@ -340,6 +407,7 @@ pub fn rebuild_voxels_system(
         return;
     };
     let start = Instant::now();
+    let budget_ms = screen.map_or(VOXEL_FRAME_MS, |b| b.budget_ms);
     let mut rebuilt = 0;
     let mut count = 0;
     for (e, volume, mut state) in &mut volumes {
@@ -349,9 +417,14 @@ pub fn rebuild_voxels_system(
         }
         let look = VoxelLook::new(volume, &table).with_layers(assets.textured);
         let [cx_n, cy_n, _] = state.chunks;
+        let bulk = at_once.is_none()
+            && state.chunk_dirty.iter().filter(|d| **d).count() > VOXEL_BULK_CHUNKS;
         for ci in 0..state.chunk_dirty.len() {
             if !state.chunk_dirty[ci] {
                 continue;
+            }
+            if bulk && rebuilt > 0 && start.elapsed().as_secs_f64() * 1000.0 > budget_ms {
+                break;
             }
             state.chunk_dirty[ci] = false;
             rebuilt += 1;

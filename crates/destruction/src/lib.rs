@@ -38,6 +38,24 @@ use engine_world::{
 };
 use serde_json::{Value, json};
 
+/// Build first-use work (prop looks, voxel volumes' states) on the frame thread as it appears
+/// instead of on the bake threads ([`assets::bake_pool`]): for tools, examples and tests that
+/// look at the result in the next frame.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct LoadAtOnce;
+
+/// The module is still building first-use work on its bake threads (textures, prop looks,
+/// voxel volumes): for a loading screen to wait on.
+pub fn is_loading(world: &World) -> bool {
+    world.contains_resource::<assets::AssetsLoading>()
+        || world
+            .get_resource::<dress::PropBuilds>()
+            .is_some_and(|b| b.remaining() > 0)
+        || world
+            .get_resource::<sync::VoxelBuilds>()
+            .is_some_and(|b| b.remaining() > 0)
+}
+
 pub use build::{BuildAction, BuildKind, BuildRequest, Builder, BuiltPiece};
 pub use charges::{BreachCharge, ChargeKind};
 pub use debris::Debris;
@@ -193,6 +211,8 @@ impl Plugin for DestructionPlugin {
             .init_resource::<debris::PendingDebris>()
             .init_resource::<structure::StructureGraph>()
             .init_resource::<dress::PropMeshes>()
+            .init_resource::<dress::PropBuilds>()
+            .init_resource::<sync::VoxelBuilds>()
             .insert_resource(hits::DestructionSource(source))
             .register_component::<DestructibleWall>(
                 "Siege-style destructible wall or barricade: size [w,h] m, thickness m, cell_size m, \
