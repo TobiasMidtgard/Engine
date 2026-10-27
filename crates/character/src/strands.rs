@@ -326,6 +326,12 @@ fn grow_brows(a: &Appearance, skin: &SkinMesh, rest: &Landmarks) -> StrandSet {
     set
 }
 
+// Lashes as anatomy and groomers have them (Aumond and Bitton, "The eyelash follicle features
+// and anomalies: A review", J. Optometry 2018): 90-160 on the upper lid in 5-6 rows and 75-80
+// on the lower in 3-4, up to about 12 mm long, every one curved, and each at its own point of
+// a growth cycle of months, so lengths vary. They gather into clumps whose tips meet, as
+// MetaHuman's groomed lashes and XGen's clump modifier have them; a single row of evenly
+// spaced, equal hairs reads as a comb.
 fn grow_lashes(a: &Appearance, margins: &[[Vec<Vec3>; 2]; 2], lm: &Landmarks) -> StrandSet {
     const N: u32 = 6;
     let mut set = StrandSet::new(StrandKind::Lashes, N);
@@ -340,36 +346,74 @@ fn grow_lashes(a: &Appearance, margins: &[[Vec<Vec3>; 2]; 2], lm: &Landmarks) ->
             let upper = li == 0;
             let lengths: Vec<f32> = lid.windows(2).map(|w| (w[1] - w[0]).length()).collect();
             let total: f32 = lengths.iter().sum();
-            let count = if upper { 130 } else { 60 };
-            for _ in 0..count {
-                // A point along the margin, inner corner (u 0) to outer (u 1).
-                let mut s = r.f32() * total;
-                let mut root = lid[lid.len() - 1];
+            // A point along the margin `s` meters from its first point.
+            let at = |mut s: f32| {
                 for (k, l) in lengths.iter().enumerate() {
                     if s <= *l {
-                        root = lid[k] + (lid[k + 1] - lid[k]) * (s / l.max(1e-6));
-                        break;
+                        return lid[k] + (lid[k + 1] - lid[k]) * (s / l.max(1e-6));
                     }
                     s -= l;
                 }
-                let u = ((root.x - lid[0].x) * sx
-                    / ((lid[lid.len() - 1].x - lid[0].x) * sx).max(1e-4))
-                .clamp(0.0, 1.0);
-                // Out from the eye, forward, and curling up (upper) or down (lower), fanning
-                // outward toward the outer corner.
+                lid[lid.len() - 1]
+            };
+            let across = |p: Vec3| {
+                ((p.x - lid[0].x) * sx / ((lid[lid.len() - 1].x - lid[0].x) * sx).max(1e-4))
+                    .clamp(0.0, 1.0)
+            };
+            // The lash from `root`, `len` long: out from the eye and forward, fanning outward
+            // toward the outer corner, curling away from the eye (up on the upper lid, down on
+            // the lower), most near the tip, so seen from the front they spread like rays.
+            let lash = |root: Vec3, u: f32, len: f32| {
                 let out = (root - eye).normalize_or(Vec3::Z);
                 let up = if upper { 1.0 } else { -1.0 };
                 let fan = Vec3::new(sx * (u - 0.35) * 0.6, 0.0, 0.0);
                 let d = (out * 0.5 + Vec3::Z * 0.9 + fan).normalize();
-                let peak = if upper { 0.0088 } else { 0.0042 };
-                // Longest a little outside the middle, short at the corners.
-                let shape = (1.0 - ((u - 0.6) / 0.62).powi(2)).max(0.12);
-                let len = peak * shape * r.range(0.75, 1.1);
-                let curl = if upper { 0.4 } else { 0.2 };
+                let away = (Vec3::new(out.x, 0.0, 0.0) + fan + Vec3::Y * up * 0.8).normalize();
+                let curl = if upper { 0.55 } else { 0.25 };
                 let mut pts = [Vec3::ZERO; N as usize];
                 for (k, p) in pts.iter_mut().enumerate() {
                     let t = k as f32 / (N - 1) as f32;
-                    *p = root + out * 0.0003 + d * (len * t) + Vec3::Y * (up * len * curl * t * t);
+                    *p = root + d * (len * t) + away * (len * curl * t * t);
+                }
+                pts
+            };
+            let peak = if upper { 0.0092 } else { 0.0048 };
+            // Longest a little outside the middle, short at the corners.
+            let shape = |u: f32| (1.0 - ((u - 0.6) / 0.62).powi(2)).max(0.12);
+            let count = if upper { 130 } else { 60 };
+            // Clumps of about five; fewer, looser ones on the lower lid.
+            let clumps = if upper { 26 } else { 15 };
+            let pull = if upper { 0.45 } else { 0.3 };
+            let guides: Vec<[Vec3; N as usize]> = (0..clumps)
+                .map(|k| {
+                    let s = (k as f32 + 0.5 + r.range(-0.25, 0.25)) / clumps as f32 * total;
+                    let root = at(s);
+                    let u = across(root);
+                    lash(root, u, peak * shape(u) * r.range(0.85, 1.05))
+                })
+                .collect();
+            for _ in 0..count {
+                let s = r.f32() * total;
+                let mut root = at(s);
+                let u = across(root);
+                // Some lashes are still growing.
+                let grown = if r.f32() < 0.15 {
+                    r.range(0.35, 0.7)
+                } else {
+                    r.range(0.75, 1.1)
+                };
+                // Rows across the lid margin, from its front edge back (about a millimetre).
+                let out = (root - eye).normalize_or(Vec3::Z);
+                root += out * 0.0002 - Vec3::Z * (r.f32() * if upper { 0.0008 } else { 0.0005 });
+                let mut pts = lash(root, u, peak * shape(u) * grown);
+                // Toward its clump's tip, more toward the tip and less for short ones.
+                let k = ((s / total * clumps as f32) as usize).min(clumps - 1);
+                let guide = &guides[k];
+                let w = pull * grown.min(1.0) * r.range(0.6, 1.0);
+                for (i, p) in pts.iter_mut().enumerate().skip(1) {
+                    let t = i as f32 / (N - 1) as f32;
+                    let target = root + (guide[i] - guide[0]) * grown;
+                    *p = p.lerp(target, w * t * t);
                 }
                 set.push(&pts, 0.00008, 0.000025, r.f32());
             }

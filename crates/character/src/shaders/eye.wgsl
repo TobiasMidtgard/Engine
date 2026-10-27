@@ -168,6 +168,16 @@ fn sclera_color(local: vec3<f32>, seed: f32) -> vec3<f32> {
         + pow(1.0 - abs(value_noise2(local.xy * vec2<f32>(30.0, 70.0) + seed * 3.0) * 2.0 - 1.0), 26.0) * 0.6;
     let redness = character.eye2.x;
     let where_ = smoothstep(0.45, 0.85, side);
+    // Darker skin brings flat, patchy brown pigment to the white of the eye (complexion-
+    // associated melanosis, in most Black people's eyes), here around the iris and toward the
+    // corners, and a slightly duskier white.
+    let melanin = smoothstep(0.35, 0.9, character.skin.x);
+    let theta = acos(clamp(local.z, -1.0, 1.0));
+    let limbus = smoothstep(CORNEA_ANGLE + 0.45, CORNEA_ANGLE + 0.05, theta);
+    let patches = smoothstep(0.42, 0.72, value_noise2(local.xy * 7.0 + seed * 5.0));
+    let pigment = melanin * saturate(limbus * 0.6 + where_ * 0.5) * (0.3 + 0.7 * patches);
+    c *= mix(1.0, 0.85, melanin);
+    c = mix(c, c * vec3<f32>(0.6, 0.44, 0.3), saturate(pigment) * 0.85);
     c = mix(c, vec3<f32>(0.55, 0.12, 0.10), saturate(vessels * where_ * (0.25 + redness)));
     c = mix(c, c * vec3<f32>(1.0, 0.82, 0.8), redness * where_ * 0.5);
     return c;
