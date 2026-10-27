@@ -25,13 +25,20 @@
 //!
 //! A frame whose steps take over 50 ms and three times the usual logs its slowest steps
 //! (`slow render frame: 271 ms of render steps (usually 9.7): meshes: pipelines 180.0, ..`),
-//! so a hitch names its cause without the profiler.
+//! so a hitch names its cause without the profiler. When the wait for the window image is what
+//! took long, the GPU was still busy with earlier work, so the line goes on with the GPU work
+//! queued besides the frames' passes in the three frames before ([`SideWork`]: uploads,
+//! generated material presets, texture compression, impostor bakes, grown buffers) and the
+//! latest GPU frame time: `..; GPU work queued in the 3 frames before: 96.0 MB uploaded,
+//! 2 material presets generated (8.4 M texels); latest GPU frame 23.1 ms`. "Usually" is a
+//! moving average over about the last 20 frames.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use engine_core::prelude::Diagnostics;
@@ -306,6 +313,139 @@ fn slowest_steps(steps: &[(Label, f32)], n: usize) -> String {
         .join(", ")
 }
 
+/// Frames of [`SideWork`] a slow frame's line lists: the GPU work that can still be running
+/// when it waits for the window image.
+const SIDE_FRAMES: usize = 3;
+
+/// Weight of the latest frame in the usual render step time (about the last 20 frames).
+const USUAL_WEIGHT: f32 = 0.05;
+
+/// The usual render step time after a frame that took `total` ms: a moving average, which a
+/// hitch moves at most as far as a frame of twice the usual (or of [`SLOW_FRAME_MS`]) would,
+/// starting from the first frame (no slower than `SLOW_FRAME_MS`).
+fn next_usual(usual: Option<f32>, total: f32) -> f32 {
+    match usual {
+        None => total.min(SLOW_FRAME_MS),
+        Some(u) => u + USUAL_WEIGHT * (total.min((2.0 * u).max(SLOW_FRAME_MS)) - u),
+    }
+}
+
+/// GPU work queued besides the frame's passes, counted as it is queued (on any thread) and
+/// taken once a frame, so a later frame that waits for the window image can name what the GPU
+/// may still be busy with. Every feature reaches it as `GpuShared::side_work`.
+#[derive(Default)]
+pub(crate) struct SideWork {
+    uploaded: AtomicU64,
+    presets: AtomicU64,
+    preset_texels: AtomicU64,
+    compressed_texels: AtomicU64,
+    bakes: AtomicU64,
+    copied: AtomicU64,
+}
+
+impl SideWork {
+    /// Bytes of meshes and images written to the GPU.
+    pub fn uploaded(&self, bytes: u64) {
+        self.uploaded.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// A material preset generated at `size`² texels.
+    pub fn preset(&self, size: u32) {
+        self.presets.fetch_add(1, Ordering::Relaxed);
+        self.preset_texels
+            .fetch_add(size as u64 * size as u64, Ordering::Relaxed);
+    }
+
+    /// Texels (every mip level) compressed to block formats.
+    pub fn compressed(&self, texels: u64) {
+        self.compressed_texels.fetch_add(texels, Ordering::Relaxed);
+    }
+
+    /// An impostor baked.
+    pub fn bake(&self) {
+        self.bakes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Bytes copied from a buffer into a larger one that replaces it.
+    pub fn copied(&self, bytes: u64) {
+        self.copied.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// What was counted since the last call.
+    pub fn take(&self) -> SideCounts {
+        let take = |c: &AtomicU64| c.swap(0, Ordering::Relaxed);
+        SideCounts {
+            uploaded: take(&self.uploaded),
+            presets: take(&self.presets),
+            preset_texels: take(&self.preset_texels),
+            compressed_texels: take(&self.compressed_texels),
+            bakes: take(&self.bakes),
+            copied: take(&self.copied),
+        }
+    }
+}
+
+/// One frame's [`SideWork`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct SideCounts {
+    pub uploaded: u64,
+    pub presets: u64,
+    pub preset_texels: u64,
+    pub compressed_texels: u64,
+    pub bakes: u64,
+    pub copied: u64,
+}
+
+impl SideCounts {
+    fn add(&mut self, other: &SideCounts) {
+        self.uploaded += other.uploaded;
+        self.presets += other.presets;
+        self.preset_texels += other.preset_texels;
+        self.compressed_texels += other.compressed_texels;
+        self.bakes += other.bakes;
+        self.copied += other.copied;
+    }
+
+    /// "96.0 MB uploaded, 1 material preset generated (4.2 M texels), ..", or "none".
+    fn describe(&self) -> String {
+        let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+        let m = |n: u64| n as f64 / 1e6;
+        let s = |n: u64| if n == 1 { "" } else { "s" };
+        let mut parts = Vec::new();
+        if self.uploaded > 0 {
+            parts.push(format!("{:.1} MB uploaded", mb(self.uploaded)));
+        }
+        if self.presets > 0 {
+            parts.push(format!(
+                "{} material preset{} generated ({:.1} M texels)",
+                self.presets,
+                s(self.presets),
+                m(self.preset_texels)
+            ));
+        }
+        if self.compressed_texels > 0 {
+            parts.push(format!(
+                "{:.1} M texels compressed",
+                m(self.compressed_texels)
+            ));
+        }
+        if self.bakes > 0 {
+            parts.push(format!("{} impostor bake{}", self.bakes, s(self.bakes)));
+        }
+        if self.copied > 0 {
+            parts.push(format!(
+                "{:.1} MB copied into grown buffers",
+                mb(self.copied)
+            ));
+        }
+        if parts.is_empty() {
+            "none".to_string()
+        } else {
+            parts.join(", ")
+        }
+    }
+}
+
 /// [`CpuSteps`]' finished steps, between threads.
 pub(crate) struct ParkedSteps(Vec<(Label, f32)>);
 
@@ -379,6 +519,11 @@ pub(crate) struct PerfLog {
     features: Vec<(String, crate::FeatureStats)>,
     /// When a slow frame was last logged.
     last_slow: Option<Instant>,
+    /// The usual render step time (see [`next_usual`]) and the frames it has seen.
+    usual: Option<f32>,
+    usual_frames: u32,
+    /// The latest frames' [`SideWork`], oldest first.
+    side: VecDeque<SideCounts>,
 }
 
 impl PerfLog {
@@ -398,6 +543,9 @@ impl PerfLog {
             gpu_passes: Vec::new(),
             features: Vec::new(),
             last_slow: None,
+            usual: None,
+            usual_frames: 0,
+            side: VecDeque::new(),
         }
     }
 
@@ -445,15 +593,16 @@ impl PerfLog {
     }
 
     /// Account for a finished frame (`cpu_ms`: the render system's time, `acquire_ms`: the
-    /// part of it spent waiting for the window image, `cpu`: its steps) and log a report every
-    /// `every_secs` (0 = never). Polls nothing itself: the GPU times arrive as the renderer
-    /// polls.
+    /// part of it spent waiting for the window image, `cpu`: its steps, `side`: the
+    /// [`SideWork`] queued with it) and log a report every `every_secs` (0 = never). Polls
+    /// nothing itself: the GPU times arrive as the renderer polls.
     pub fn frame(
         &mut self,
         device: &wgpu::Device,
         stats: &crate::RenderStats,
         acquire_ms: f32,
         mut cpu: CpuSteps,
+        side: SideCounts,
         every_secs: f32,
     ) {
         cpu.finish();
@@ -462,6 +611,10 @@ impl PerfLog {
         if every_secs > 0.0 {
             self.log_if_slow(now);
         }
+        if self.side.len() == SIDE_FRAMES {
+            self.side.pop_front();
+        }
+        self.side.push_back(side);
         self.frame_ms = self
             .last_frame
             .map_or(0.0, |t| (now - t).as_secs_f32() * 1000.0);
@@ -541,17 +694,18 @@ impl PerfLog {
         self.window_start = now;
     }
 
-    /// A frame whose render steps took over [`SLOW_FRAME_MS`] and several times the window's
-    /// average (a first sight's pipelines or uploads, a loading frame) gets a log line with
-    /// its slowest steps, at most once a second, so one run names a hitch's cause.
+    /// A frame whose render steps took over [`SLOW_FRAME_MS`] and several times the usual (a
+    /// first sight's pipelines or uploads, a loading frame, a wait for a busy GPU) gets a log
+    /// line with its slowest steps and the GPU work queued in the frames before, at most once
+    /// a second, so one run names a hitch's cause.
     fn log_if_slow(&mut self, now: Instant) {
         let total: f32 = self.cpu_steps.iter().map(|(_, ms)| ms).sum();
-        let w = &self.window;
-        let usual = if w.frames >= 10 {
-            w.cpu_steps.values().sum::<f32>() / w.frames as f32
-        } else {
-            0.0
+        let usual = match self.usual {
+            Some(u) if self.usual_frames >= 10 => u,
+            _ => 0.0,
         };
+        self.usual = Some(next_usual(self.usual, total));
+        self.usual_frames = self.usual_frames.saturating_add(1);
         if total < SLOW_FRAME_MS
             || total < 3.0 * usual
             || self
@@ -561,9 +715,19 @@ impl PerfLog {
             return;
         }
         self.last_slow = Some(now);
+        let mut side = SideCounts::default();
+        for frame in &self.side {
+            side.add(frame);
+        }
+        let gpu = self
+            .gpu_ms
+            .map_or_else(|| "n/a".to_string(), |ms| format!("{ms:.1} ms"));
         tracing::info!(
-            "slow render frame: {total:.0} ms of render steps (usually {usual:.1}): {}",
-            slowest_steps(&self.cpu_steps, 6)
+            "slow render frame: {total:.0} ms of render steps (usually {usual:.1}): {}; GPU work \
+             queued in the {} frames before: {}; latest GPU frame {gpu}",
+            slowest_steps(&self.cpu_steps, 6),
+            self.side.len(),
+            side.describe()
         );
     }
 
@@ -757,6 +921,58 @@ mod tests {
             ("sky".into(), 9.5),
         ];
         assert_eq!(slowest_steps(&steps, 2), "meshes: pipelines 200.0, sky 9.5");
+    }
+
+    #[test]
+    fn slow_frames_list_the_gpu_work_queued_before_them() {
+        let mut frames = SideCounts::default();
+        frames.add(&SideCounts {
+            uploaded: 64 * 1024 * 1024,
+            presets: 1,
+            preset_texels: 2048 * 2048,
+            ..Default::default()
+        });
+        frames.add(&SideCounts {
+            uploaded: 32 * 1024 * 1024,
+            compressed_texels: 1_500_000,
+            bakes: 2,
+            ..Default::default()
+        });
+        assert_eq!(
+            frames.describe(),
+            "96.0 MB uploaded, 1 material preset generated (4.2 M texels), 1.5 M texels \
+             compressed, 2 impostor bakes"
+        );
+        assert_eq!(SideCounts::default().describe(), "none");
+
+        let work = SideWork::default();
+        work.uploaded(10);
+        work.preset(4);
+        work.bake();
+        work.copied(7);
+        let taken = work.take();
+        assert_eq!((taken.uploaded, taken.preset_texels), (10, 16));
+        assert_eq!((taken.presets, taken.bakes, taken.copied), (1, 1, 7));
+        assert_eq!(work.take(), SideCounts::default(), "taken once");
+    }
+
+    #[test]
+    fn the_usual_step_time_shrugs_off_hitches() {
+        // A 2 s first frame starts it at 50 ms; steady 10 ms frames bring it down.
+        let mut usual = next_usual(None, 2000.0);
+        assert_eq!(usual, SLOW_FRAME_MS);
+        for _ in 0..100 {
+            usual = next_usual(Some(usual), 10.0);
+        }
+        assert!((usual - 10.0).abs() < 0.3, "{usual}");
+        // A 400 ms hitch moves it as far as a 50 ms frame would, not more.
+        let after = next_usual(Some(usual), 400.0);
+        assert!(after < usual + 2.1, "{usual} -> {after}");
+        // A long run of 100 ms loading frames becomes the usual.
+        for _ in 0..200 {
+            usual = next_usual(Some(usual), 100.0);
+        }
+        assert!((usual - 100.0).abs() < 1.0, "{usual}");
     }
 
     #[test]

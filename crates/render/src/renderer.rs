@@ -555,6 +555,7 @@ impl Renderer {
             materials: Default::default(),
             images: Default::default(),
             uploads: Default::default(),
+            side_work: Default::default(),
         };
 
         let targets = Targets::new(&device, &formats, width, height, UVec2::new(width, height));
@@ -1016,6 +1017,9 @@ impl Renderer {
             .get_resource_mut::<Screenshots>()
             .map(|mut s| std::mem::take(&mut s.pending))
             .unwrap_or_default();
+        self.shared
+            .side_work
+            .uploaded(self.shared.uploads.uploaded());
         FrameWork {
             started,
             extract_ms: started.elapsed().as_secs_f32() * 1000.0,
@@ -1608,6 +1612,7 @@ impl Renderer {
         cpu.step("submit");
         let submitting = Instant::now();
         self.shared.queue.submit([commands]);
+        let side_work = self.shared.side_work.take();
         let submit_ms = submitting.elapsed().as_secs_f64() * 1000.0;
         self.meter.after_submit();
         self.perf.after_submit();
@@ -1652,6 +1657,7 @@ impl Renderer {
             &stats,
             acquire_ms,
             cpu,
+            side_work,
             settings.perf_log_secs,
         );
         {

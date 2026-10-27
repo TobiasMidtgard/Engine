@@ -422,6 +422,7 @@ impl Pool {
             });
         encoder.copy_buffer_to_buffer(&self.buffer, 0, &buffer, 0, self.capacity * self.stride);
         gpu.queue.submit([encoder.finish()]);
+        gpu.side_work.copied(self.capacity * self.stride);
         self.buffer = buffer;
         let old = self.capacity;
         self.capacity = capacity;
