@@ -198,8 +198,8 @@ pub fn places() -> Vec<Place> {
             "village_garden",
             "A kitchen garden behind a house on the village's south side",
             (
-                above_ground(DVec3::new(-35.0, 0.0, -93.6), 1.7),
-                DVec3::new(-30.4, 0.2, -86.0),
+                above_ground(DVec3::new(-35.0, 0.0, -93.0), 2.9),
+                DVec3::new(-30.6, -0.4, -85.4),
             ),
             10.0,
         ),
