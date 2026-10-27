@@ -944,6 +944,49 @@ pub fn step_bodies(
     diagnostics.set("softbody.frozen", frozen as f64);
 }
 
+/// A resting groom moves rigidly with its bones, each strand with the one its root grows
+/// from, so far hair stays on a head that walks and turns, at a transform a particle.
+fn ride(b: &mut SoftBodySim, ctx: &StepContext) {
+    if (b.center - b.sim.origin).length() > 50.0 {
+        b.sim.rebase(b.center);
+    }
+    let poses = frame_poses(b, ctx);
+    let Some(strands) = &b.strands else {
+        return;
+    };
+    let runs = strands
+        .guides
+        .iter()
+        .map(|g| (g.first as usize..(g.first + g.count) as usize, g.frame));
+    if b.sim.ride(runs, &poses) {
+        b.update_bounds();
+    }
+}
+
+/// Where each of a body's frames is now (body-local), `None` for the world frame or one whose
+/// owner is gone.
+fn frame_poses(b: &SoftBodySim, ctx: &StepContext) -> Vec<Option<(Vec3, Quat)>> {
+    let origin = b.sim.origin;
+    b.frames
+        .iter()
+        .map(|src| {
+            let pose = match *src {
+                FrameSource::World => None,
+                FrameSource::Entity(e) => {
+                    world_transform(e, ctx.transforms).map(|t| (t.translation(), t.rotation()))
+                }
+                FrameSource::Bone { owner, bone } => world_transform(owner, ctx.transforms)
+                    .zip(ctx.poses.get(owner).ok())
+                    .and_then(|(t, p)| p.bone_world(&t, bone)),
+                FrameSource::Blend(blend) => world_transform(blend.owner, ctx.transforms)
+                    .zip(ctx.poses.get(blend.owner).ok())
+                    .and_then(|(t, p)| blend.world(&t, p)),
+            };
+            pose.map(|(p, r)| ((p - origin).as_vec3(), r))
+        })
+        .collect()
+}
+
 fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     let started = Instant::now();
     let b = body;
@@ -969,17 +1012,24 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     // A cloth that collides with itself rests from twice the LOD distance (a little nearer
     // waking): stepped coarsely there it folds through itself and comes back tangled, and
     // self-collision is most of its cost (the unveiling sheet balled up at the plaza).
+    // Hair and fur rest from there too, riding their bones: a few pixels across that far,
+    // their sway can't be seen, but stepped they cost as much as near (the dog's fur, the
+    // paddock people's hair seen from the plaza).
     let self_colliding = b.sim.params.self_collide > 0.0;
     let far = 2.0 * ctx.config.lod_distance * if b.frozen { 0.9 } else { 1.0 };
-    let resting = resting || (self_colliding && dist > far);
+    let resting = resting || ((self_colliding || b.strands.is_some()) && dist > far);
     // One still settling keeps going wherever it is, a budget a frame, so it is ready when
     // it is first seen up close.
     if (resting || dist > ctx.config.freeze_distance) && b.pending_prewarm == 0 {
         if !b.frozen {
             b.frozen = true;
-            b.step_ms = 0.0;
             b.sim.step_start.clone_from(&b.sim.pos);
             (b.lod_every, b.lod_wait, b.lod_debt) = (1, 0, 0.0);
+        }
+        b.step_ms = 0.0;
+        if b.strands.is_some() {
+            ride(b, ctx);
+            b.step_ms = started.elapsed().as_secs_f32() * 1000.0;
         }
         return;
     }
@@ -1039,25 +1089,7 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     let origin = b.sim.origin;
 
     // Frames.
-    let poses: Vec<Option<(Vec3, Quat)>> = b
-        .frames
-        .iter()
-        .map(|src| {
-            let pose = match *src {
-                FrameSource::World => None,
-                FrameSource::Entity(e) => {
-                    world_transform(e, ctx.transforms).map(|t| (t.translation(), t.rotation()))
-                }
-                FrameSource::Bone { owner, bone } => world_transform(owner, ctx.transforms)
-                    .zip(ctx.poses.get(owner).ok())
-                    .and_then(|(t, p)| p.bone_world(&t, bone)),
-                FrameSource::Blend(blend) => world_transform(blend.owner, ctx.transforms)
-                    .zip(ctx.poses.get(blend.owner).ok())
-                    .and_then(|(t, p)| blend.world(&t, p)),
-            };
-            pose.map(|(p, r)| ((p - origin).as_vec3(), r))
-        })
-        .collect();
+    let poses = frame_poses(b, ctx);
     // A frame that jumps further in one step than anything moves (a respawn, a boat sent
     // back to its mooring) carries the whole body with it instead of dragging it across.
     let jump = (5.0f32).max(2.0 * b.radius);

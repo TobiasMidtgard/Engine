@@ -547,6 +547,48 @@ impl Sim {
         self.snap_frame(frame, pos, rot);
     }
 
+    /// Move runs of particles rigidly with their frames, from where each frame was to its
+    /// pose in `poses`, and snap the frames there: a resting body kept on what carries it,
+    /// without stepping. The last positions become the step's start, so drawing moves them
+    /// smoothly. Whether anything moved.
+    pub fn ride(
+        &mut self,
+        runs: impl Iterator<Item = (Range<usize>, u16)>,
+        poses: &[Option<(Vec3, Quat)>],
+    ) -> bool {
+        let moves: Vec<Option<(Vec3, Quat, Vec3)>> = self
+            .frames
+            .iter()
+            .zip(poses)
+            .map(|(f, pose)| {
+                let (p, r) = (*pose)?;
+                (p.distance_squared(f.to_pos) > 1e-10 || r.angle_between(f.to_rot) > 1e-4)
+                    .then(|| (f.to_pos, (r * f.to_rot.conjugate()).normalize(), p))
+            })
+            .collect();
+        self.step_start.clone_from(&self.pos);
+        if moves.iter().all(Option::is_none) {
+            return false;
+        }
+        for (run, frame) in runs {
+            let Some(Some((from, turn, to))) = moves.get(frame as usize) else {
+                continue;
+            };
+            for i in run {
+                let x = *to + *turn * (self.pos[i] - *from);
+                self.pos[i] = x;
+                self.prev[i] = x;
+                self.vel[i] = *turn * self.vel[i];
+            }
+        }
+        for (i, pose) in poses.iter().enumerate() {
+            if let Some((p, r)) = *pose {
+                self.snap_frame(i as u16, p, r);
+            }
+        }
+        true
+    }
+
     /// Translate every particle (and its history) by `delta`, keeping velocities.
     pub fn translate(&mut self, delta: Vec3) {
         for v in self

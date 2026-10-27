@@ -358,3 +358,67 @@ fn hair_grown_lying_on_an_arm_slides_off_it_without_sinking_in_or_being_flung() 
         last = Some(posed.points.clone());
     }
 }
+
+#[test]
+fn far_hair_rests_and_rides_the_head_until_it_is_near_again() {
+    let mut app = app();
+    let person = app
+        .world
+        .spawn((Transform::default(), pose(), guides(1, 24)))
+        .id();
+    // The camera 80 m off: past twice the LOD distance, inside the simulation range.
+    #[derive(Resource)]
+    struct Camera(DVec3);
+    app.insert_resource(Camera(DVec3::new(80.0, 1.7, 0.0)));
+    app.add_systems(
+        PreUpdate,
+        |cam: Res<Camera>, mut focus: ResMut<engine_world::FocusPoints>| {
+            focus.points.clear();
+            focus.points.push(cam.0);
+        },
+    );
+    steps(&mut app, 30);
+    let hair = |app: &mut App| {
+        let mut q = app.world.query::<(&GuideHair, &SoftBodySim)>();
+        let (_, b) = q.single(&app.world).unwrap();
+        (b.frozen, b.center)
+    };
+    assert!(hair(&mut app).0, "hair 80 m off should rest");
+    let posed = |app: &App| {
+        app.world
+            .get::<HairGuidesPosed>(person)
+            .unwrap()
+            .points
+            .clone()
+    };
+    let before = posed(&app);
+
+    // The person walks 3 m and turns a quarter: the hair goes along without being stepped.
+    for k in 1..=30 {
+        let s = k as f64 / 30.0;
+        *app.world.get_mut::<Transform>(person).unwrap() = Transform::from_xyz(0.0, 0.0, 3.0 * s)
+            .with_rotation(Quat::from_rotation_y(FRAC_PI_2 * s as f32));
+        steps(&mut app, 1);
+        assert!(hair(&mut app).0, "step {k}: it woke up");
+    }
+    steps(&mut app, 2);
+    let after = posed(&app);
+    let worst = before
+        .iter()
+        .zip(&after)
+        .map(|(a, b)| a.distance(*b))
+        .fold(0.0, f32::max);
+    assert!(worst < 1e-3, "the resting hair slid {worst} m on the head");
+    assert!((hair(&mut app).1 - DVec3::new(0.0, 1.6, 3.0)).length() < 0.5);
+
+    // Back near, it is simulated again, still on the head.
+    app.insert_resource(Camera(DVec3::new(0.0, 1.7, 5.0)));
+    steps(&mut app, 30);
+    assert!(!hair(&mut app).0, "near hair should be simulated");
+    let roots = guides(1, 24);
+    let p = app.world.get::<HairGuidesPosed>(person).unwrap();
+    for i in 0..roots.guides.len() {
+        let g = p.guide(&roots, i).unwrap();
+        assert!(g[0].distance(roots.guides[i].points[0]) < 1e-3);
+    }
+}
