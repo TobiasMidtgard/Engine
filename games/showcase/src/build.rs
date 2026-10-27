@@ -49,6 +49,8 @@ pub struct WorldBuild {
     unprofiled: Vec<(String, f32, Option<Window>)>,
     /// The GPU meadow's field, mapped on a worker from the start.
     meadow_job: Option<std::thread::JoinHandle<GrassField>>,
+    /// The meadow's grass, mapped, waiting for the village's gardens to clear theirs.
+    meadow_field: Option<GrassField>,
 }
 
 /// A published profile window, told apart by its frame and system times.
@@ -192,8 +194,9 @@ const STEPS: [Step; 12] = [
         };
         with_commands(world, |c| {
             scenery::spawn_meadows(c, b.lib.as_ref().expect(LIB), &b.land, &mut b.rng);
-            c.spawn((Transform::default(), field));
         });
+        // Spawned with the village, once the gardens have cleared their grass.
+        b.meadow_field = Some(field);
         true
     }),
     (
@@ -214,9 +217,22 @@ const STEPS: [Step; 12] = [
         true
     }),
     ("village", "Raising the village", |world, b| {
-        with_commands(world, |c| {
-            scenery::spawn_village(c, b.lib.as_ref().expect(LIB), &b.land, &mut b.rng)
-        });
+        let gardens = !world.contains_resource::<crate::garden::NoGardens>();
+        let seed = world.resource::<EngineConfig>().seed;
+        let mut state = SystemState::<(Commands, ResMut<Assets<Mesh>>)>::new(world);
+        let (mut commands, mut meshes) = state.get_mut(world).expect("resources the showcase adds");
+        let lib = b.lib.as_ref().expect(LIB);
+        let plan = scenery::spawn_village(&mut commands, lib, &b.land, &mut b.rng);
+        let gardens = if gardens {
+            scenery::spawn_gardens(&mut commands, &mut meshes, lib, &b.land, &plan, seed)
+        } else {
+            Vec::new()
+        };
+        if let Some(mut field) = b.meadow_field.take() {
+            scenery::clear_gardens(&mut field, &gardens);
+            commands.spawn((Transform::default(), field));
+        }
+        state.apply(world);
         true
     }),
     (
@@ -362,7 +378,7 @@ const MODULES_LOADING: [fn(&World) -> bool; 8] = [
 fn uploading(world: &World) -> bool {
     world
         .get_resource::<Uploads>()
-        .is_some_and(|u| u.pending > 0.0 && u.low_at.elapsed().as_secs_f32() < UPLOAD_STALL_S)
+        .is_some_and(Uploads::loading)
 }
 
 /// What the renderer still has to upload, and when that last reached a new low: a count that
@@ -374,26 +390,39 @@ pub struct Uploads {
     low_at: std::time::Instant,
 }
 
+impl Default for Uploads {
+    fn default() -> Self {
+        Self {
+            pending: 0.0,
+            low: 0.0,
+            low_at: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Uploads {
+    /// Uploads are pending and still going down.
+    fn loading(&self) -> bool {
+        self.pending > 0.0 && self.low_at.elapsed().as_secs_f32() < UPLOAD_STALL_S
+    }
+}
+
 /// Seconds without the pending uploads going down before the wait for them ends.
 const UPLOAD_STALL_S: f32 = 2.0;
 
 /// Follow `render.pending_upload_mb` for [`uploading`].
-pub fn watch_uploads(world: &mut World) {
-    let mb = world
-        .get_resource::<engine::core::diagnostics::Diagnostics>()
+pub fn watch_uploads(
+    diagnostics: Option<Res<engine::core::diagnostics::Diagnostics>>,
+    mut u: ResMut<Uploads>,
+) {
+    let mb = diagnostics
         .and_then(|d| d.get("render.pending_upload_mb"))
         .unwrap_or(0.0);
-    let now = std::time::Instant::now();
-    let mut u = world.get_resource_or_insert_with(|| Uploads {
-        pending: mb,
-        low: mb,
-        low_at: now,
-    });
     u.pending = mb;
     // Rising (new work asked for) or falling by a megabyte counts as movement.
     if mb < u.low - 1.0 || mb > u.low + 1.0 {
         u.low = mb;
-        u.low_at = now;
+        u.low_at = std::time::Instant::now();
     }
 }
 
@@ -466,6 +495,7 @@ pub fn start(world: &mut World) {
         // Started before anything else, so the workers overlap the rest of startup.
         lib_job: Some(scenery::LibraryJob::start()),
         meadow_job: Some(meadow_job),
+        meadow_field: None,
         window: None,
         unprofiled: Vec::new(),
         slow: Vec::new(),
@@ -708,12 +738,31 @@ const JUMP_M: f64 = 150.0;
 /// Frames the cover is drawn before a held jump moves the view, and at least after it.
 pub const COVER_FRAMES: u32 = 2;
 
+/// What the jump cover does this frame: show (true) or lift (false). [`track_jumps`] decides
+/// and [`apply_cover`] does it, so only a frame that changes the cover holds the whole world.
+#[derive(Resource, Default)]
+pub struct CoverOrder(Option<bool>);
+
+/// Whether [`apply_cover`] has something to do.
+pub fn cover_ordered(order: Res<CoverOrder>) -> bool {
+    order.0.is_some()
+}
+
 /// Cover a jump of the view with a dark screen until the terrain around it is built and the
 /// frames have settled (at most a few seconds), so neither the ground popping in nor the
 /// hitch of a place's first frames shows. Bookmark jumps wait for
 /// the cover, so the frames that build the new place are covered too.
-pub fn cover_jumps(world: &mut World, mut jump: Local<Jump>) {
-    if building(world) {
+#[allow(clippy::too_many_arguments)]
+pub fn track_jumps(
+    mut jump: Local<Jump>,
+    mut held: ResMut<HeldJump>,
+    mut order: ResMut<CoverOrder>,
+    build: Option<Res<WorldBuild>>,
+    uploads: Res<Uploads>,
+    diagnostics: Option<Res<engine::core::diagnostics::Diagnostics>>,
+    cameras: Query<(&Camera, &GlobalTransform)>,
+) {
+    if build.is_some() {
         return;
     }
     let now = std::time::Instant::now();
@@ -722,26 +771,22 @@ pub fn cover_jumps(world: &mut World, mut jump: Local<Jump>) {
         .replace(now)
         .map_or(0.0, |t| now.duration_since(t).as_secs_f32());
     jump.calm = if dt < CALM_FRAME_S { jump.calm + 1 } else { 0 };
-    let (holding, moved) = world
-        .get_resource_mut::<HeldJump>()
-        .map(|mut h| (h.to.is_some(), std::mem::take(&mut h.moved)))
-        .unwrap_or_default();
+    let (holding, moved) = (held.to.is_some(), std::mem::take(&mut held.moved));
     if holding {
         if jump.since.is_none() {
-            show_cover(world);
-            jump.since = Some(std::time::Instant::now());
+            order.0 = Some(true);
+            jump.since = Some(now);
         }
         return;
     }
     if moved {
-        jump.since = Some(std::time::Instant::now());
+        jump.since = Some(now);
         jump.frames = 0;
         jump.calm = 0;
     }
     jump.frames += 1;
-    let mut cameras = world.query::<(&Camera, &GlobalTransform)>();
     let Some(eye) = cameras
-        .iter(world)
+        .iter()
         .filter(|(c, _)| c.active)
         .max_by_key(|(c, _)| c.order)
         .map(|(_, t)| t.translation())
@@ -751,29 +796,38 @@ pub fn cover_jumps(world: &mut World, mut jump: Local<Jump>) {
     let jumped = jump.last.is_some_and(|l| l.distance(eye) > JUMP_M);
     jump.last = Some(eye);
     if jumped && jump.since.is_none() {
-        jump.since = Some(std::time::Instant::now());
+        jump.since = Some(now);
         jump.frames = 0;
         jump.calm = 0;
-        show_cover(world);
+        order.0 = Some(true);
     }
     let Some(since) = jump.since else {
         return;
     };
-    let pending = world
-        .get_resource::<engine::core::diagnostics::Diagnostics>()
-        .map_or(0.0, |d| {
-            d.get("terrain.patches_building").unwrap_or(0.0)
-                + d.get("terrain.patches_missing").unwrap_or(0.0)
-        });
+    let pending = diagnostics.map_or(0.0, |d| {
+        d.get("terrain.patches_building").unwrap_or(0.0)
+            + d.get("terrain.patches_missing").unwrap_or(0.0)
+    });
     let waited = since.elapsed().as_secs_f32();
     let settled = pending == 0.0
-        && !uploading(world)
+        && !uploads.loading()
         && jump.frames > COVER_FRAMES
         && jump.calm >= CALM_FRAMES;
     if (settled && waited > 0.3) || waited > COVER_MAX_S {
-        screens::hide(world, "jump_cover", false);
-        world.remove_resource::<engine::world::LoadingBudget>();
+        order.0 = Some(false);
         jump.since = None;
+    }
+}
+
+/// Put the jump cover up or take it down, as [`track_jumps`] ordered.
+pub fn apply_cover(world: &mut World) {
+    match world.resource_mut::<CoverOrder>().0.take() {
+        Some(true) => show_cover(world),
+        Some(false) => {
+            screens::hide(world, "jump_cover", false);
+            world.remove_resource::<engine::world::LoadingBudget>();
+        }
+        None => {}
     }
 }
 

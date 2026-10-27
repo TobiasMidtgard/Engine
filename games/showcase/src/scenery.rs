@@ -5,6 +5,7 @@
 //! Far things switch to cheaper meshes or hide (see [`Lod`]), so the whole valley (tens of
 //! thousands of plants) stays fast.
 
+use crate::garden::Garden;
 use crate::landscape::{Cover, Crop, Landscape, field_corners};
 use crate::meshgen::{self, TreeKind};
 use crate::rocks::{RockKit, RockLook, RockSize};
@@ -1440,12 +1441,25 @@ impl Footprint {
     }
 }
 
+/// Where the village's houses and the props by their walls stand, for what goes round them
+/// later (the kitchen gardens).
+pub struct VillagePlan {
+    houses: Vec<Footprint>,
+    props: Vec<DVec2>,
+}
+
 /// The village: rows of houses around the plaza (doors toward it) with benches, barrels and
 /// wood piles by their walls, carts at the plaza's edge, and street lamps.
-pub fn spawn_village(commands: &mut Commands, lib: &Library, land: &Landscape, rng: &mut Rng) {
+pub fn spawn_village(
+    commands: &mut Commands,
+    lib: &Library,
+    land: &Landscape,
+    rng: &mut Rng,
+) -> VillagePlan {
     let plaza = zone("plaza").center;
     let center = DVec2::new(plaza.x, plaza.z);
     let mut placed: Vec<Footprint> = Vec::new();
+    let mut props: Vec<DVec2> = Vec::new();
     let mut count = 0;
     let mut try_house =
         |commands: &mut Commands, rng: &mut Rng, k: usize, at: DVec2, facing: f32| {
@@ -1510,6 +1524,7 @@ pub fn spawn_village(commands: &mut Commands, lib: &Library, land: &Landscape, r
                     f.x.atan2(f.z),
                     timber,
                 );
+                props.push(DVec2::new(p.x, p.z));
             }
             placed.push(fp);
             count += 1;
@@ -1584,6 +1599,158 @@ pub fn spawn_village(commands: &mut Commands, lib: &Library, land: &Landscape, r
                 2,
             );
             carts += 1;
+        }
+    }
+    VillagePlan {
+        houses: placed,
+        props,
+    }
+}
+
+/// Kitchen gardens behind about three houses in four ([`crate::garden`]), where there is
+/// room: off the roads, the zones, the lake and its trail, the walk's route, other houses,
+/// their props and each other, on ground that doesn't fall more than a meter across. Their
+/// own random sequence (`seed`), so the rest of the valley keeps its layout.
+pub fn spawn_gardens(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    lib: &Library,
+    land: &Landscape,
+    plan: &VillagePlan,
+    seed: u64,
+) -> Vec<Garden> {
+    let mut rng = Rng::new(seed ^ 0x6a7d_e11e);
+    let walk: Vec<(DVec2, DVec2)> = (0..crate::walk::STOPS.len())
+        .map(|i| {
+            let (a, b) = crate::walk::leg(i);
+            (DVec2::new(a.x, a.z), DVec2::new(b.x, b.z))
+        })
+        .collect();
+    let to_segment = |p: DVec2, (a, b): (DVec2, DVec2)| {
+        let t = ((p - a).dot(b - a) / (b - a).length_squared().max(1e-9)).clamp(0.0, 1.0);
+        p.distance(a + (b - a) * t)
+    };
+    let mut gardens: Vec<Garden> = Vec::new();
+    let mut fences: Vec<Footprint> = Vec::new();
+    for (k, house) in plan.houses.iter().enumerate() {
+        if !rng.chance(0.75) {
+            continue;
+        }
+        let out = -house.ax[1];
+        let half_x = (house.half.x - 0.6).clamp(2.0, 4.6);
+        let seed = rng.next_u64();
+        // The deepest plot that fits.
+        let fits = |half_z: f64| {
+            let g = Garden {
+                center: house.c + out * (house.half.y + 0.7 + half_z),
+                out,
+                half: DVec2::new(half_x, half_z),
+                seed,
+            };
+            let fp = Footprint::new(g.center, g.yaw(), (g.half + DVec2::splat(0.15)).as_vec2());
+            let samples: Vec<DVec2> = (0..=6)
+                .flat_map(|i| (0..=6).map(move |j| (i, j)))
+                .map(|(i, j)| {
+                    let c = g.corners(0.3);
+                    let (u, v) = (i as f64 / 6.0, j as f64 / 6.0);
+                    c[2].lerp(c[3], u).lerp(c[1].lerp(c[0], u), v)
+                })
+                .collect();
+            let heights: Vec<f64> = samples.iter().map(|q| land.height(q.x, q.y)).collect();
+            let (lo, hi) = heights
+                .iter()
+                .fold((f64::MAX, f64::MIN), |(lo, hi), &h| (lo.min(h), hi.max(h)));
+            let clear = hi - lo < 1.0
+                && samples.iter().all(|q| {
+                    land.road_weight(q.x, q.y) == 0.0
+                        && land.lake_depth(q.x, q.y) < -0.5
+                        && !crate::places::near_lake_trail(q.x, q.y, 1.0)
+                        && land.field_at(q.x, q.y).is_none()
+                })
+                && !ZONES
+                    .iter()
+                    .any(|zn| g.distance(DVec2::new(zn.center.x, zn.center.z)) < zn.radius + 2.0)
+                && walk.iter().all(|&leg| {
+                    g.corners(0.0).iter().all(|&c| to_segment(c, leg) > 2.5)
+                        && to_segment(g.center, leg) > 2.5 + g.half.length()
+                })
+                && plan
+                    .houses
+                    .iter()
+                    .enumerate()
+                    .all(|(j, o)| j == k || !fp.overlaps(o, 1.0))
+                && fences.iter().all(|o| !fp.overlaps(o, 1.2))
+                && plan.props.iter().all(|&q| g.distance(q) > 0.8);
+            clear.then_some((g, fp))
+        };
+        let Some((g, fp)) = [4.0, 3.3, 2.6].into_iter().find_map(fits) else {
+            continue;
+        };
+        let m = crate::garden::meshes(&g, land);
+        let base = crate::garden::base_height(&g, land);
+        let tf = Transform::from_translation(DVec3::new(g.center.x, base, g.center.y))
+            .with_rotation(Quat::from_rotation_y(g.yaw()));
+        let vm = &lib.mats.village;
+        // Weathered gray wood for the fence and the bed boards.
+        let wood = vm.timber[2 % vm.timber.len()];
+        for (mesh, material, hide) in [
+            (m.earth, vm.soil, GARDEN_HIDE * 2.5),
+            (m.beds, wood, GARDEN_HIDE * 2.5),
+            (m.fence, wood, GARDEN_HIDE),
+            (m.plants, vm.plants, GARDEN_HIDE),
+        ] {
+            let mesh = meshes.add(mesh);
+            commands.spawn((
+                Name::new("Kitchen garden"),
+                tf,
+                MeshRenderer::new(mesh, material),
+                Lod::hide_beyond(mesh, hide),
+            ));
+        }
+        gardens.push(g);
+        fences.push(fp);
+    }
+    engine::core::log::info!(
+        "village: {} kitchen gardens behind {} houses",
+        gardens.len(),
+        plan.houses.len()
+    );
+    gardens
+}
+
+/// Gardens' fences and plants hide beyond this (m); their earth and beds go on further.
+const GARDEN_HIDE: f32 = 160.0;
+
+/// Clear the GPU meadow's grass off the gardens (their earth is bare), a little past the
+/// fences so no blades poke through the boards.
+pub fn clear_gardens(field: &mut GrassField, gardens: &[Garden]) {
+    let n = MEADOW_GRID as usize;
+    let cell = MEADOW_SIZE as f64 / (n - 1) as f64;
+    for g in gardens {
+        let corners = g.corners(0.0);
+        let (lo, hi) = corners.iter().fold(
+            (DVec2::splat(f64::MAX), DVec2::splat(f64::MIN)),
+            |(lo, hi), &c| (lo.min(c), hi.max(c)),
+        );
+        let index = |w: f64| ((w / MEADOW_SIZE as f64 + 0.5) * (n - 1) as f64).round() as i64;
+        for j in index(lo.y - cell)..=index(hi.y + cell) {
+            for i in index(lo.x - cell)..=index(hi.x + cell) {
+                if !(0..n as i64).contains(&i) || !(0..n as i64).contains(&j) {
+                    continue;
+                }
+                let p = DVec2::new(
+                    (i as f64 / (n - 1) as f64 - 0.5) * MEADOW_SIZE as f64,
+                    (j as f64 / (n - 1) as f64 - 0.5) * MEADOW_SIZE as f64,
+                );
+                // Inside the fence the earth is bare; just outside it the blades thin out.
+                let d = g.distance(p);
+                let k = j as usize * n + i as usize;
+                if d < 0.05 {
+                    field.density[k] = 0.0;
+                } else if d < cell {
+                    field.density[k] *= (d / cell) as f32;
+                }
+            }
         }
     }
 }

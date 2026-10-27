@@ -42,13 +42,19 @@ pub fn install(app: &mut App, spec: &str) {
         arrived: None,
         seen: HashMap::new(),
     });
-    app.add_systems(Update, run.after(camera::fly));
+    app.add_systems(Update, run.after(camera::fly).run_if(due));
+}
+
+/// Whether [`run`] has anything to do this frame: the world is built and the camera is due to
+/// move on (or hasn't gone to the first place yet).
+fn due(loops: Res<Loops>, build: Option<Res<crate::build::WorldBuild>>) -> bool {
+    build.is_none()
+        && loops
+            .arrived
+            .is_none_or(|at| at.elapsed().as_secs_f32() >= DWELL_S)
 }
 
 fn run(world: &mut World) {
-    if crate::build::building(world) {
-        return;
-    }
     let (place, arrived) = {
         let l = world.resource::<Loops>();
         (l.places[l.at].clone(), l.arrived)

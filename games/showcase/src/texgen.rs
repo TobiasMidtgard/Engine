@@ -658,6 +658,44 @@ fn iron(size: u32) -> TexSet {
     })
 }
 
+/// Dug garden earth: crumbly clods, fine tilth between them, small stones, bits of old straw
+/// and damper, darker patches. Covers [`SOIL_SPAN`].
+fn soil(size: u32) -> TexSet {
+    let s = 900;
+    bake(size, size, Vec2::splat(SOIL_SPAN), 0.7, |u, v| {
+        let clods = worley(u, v, 9, 9, 0.9, s);
+        let clod = smooth(0.55, 0.05, clods.f1);
+        let crumbs = worley(u, v, 40, 40, 1.0, s + 1);
+        let crumb = smooth(0.5, 0.1, crumbs.f1);
+        let fine = noise(u * 220.0, v * 220.0, 220, 220, s + 2);
+        let broad = fbm(u, v, 3, 3, 3, 0.5, s + 3);
+        let pebbles = worley(u, v, 14, 14, 1.0, s + 4);
+        let pebble = if pebbles.id.is_multiple_of(7) {
+            smooth(0.22, 0.12, pebbles.f1)
+        } else {
+            0.0
+        };
+        // Straw: thin pale streaks, a few cells' worth.
+        let st = worley(u, v, 12, 12, 1.0, s + 5);
+        let dir = (st.id % 628) as f32 / 100.0;
+        let along = (st.d.x * dir.cos() + st.d.y * dir.sin()).abs();
+        let across = (st.d.x * -dir.sin() + st.d.y * dir.cos()).abs();
+        let straw = if st.id.is_multiple_of(5) {
+            smooth(0.03, 0.01, across) * smooth(0.45, 0.2, along)
+        } else {
+            0.0
+        };
+        let damp = smooth(-0.1, 0.5, broad);
+        let h = clod * 0.012 + crumb * 0.004 + fine * 0.0008 + pebble * 0.006 + straw * 0.002;
+        let earth = Vec3::new(0.16, 0.11, 0.075).lerp(Vec3::new(0.09, 0.065, 0.045), damp * 0.7);
+        let albedo = (earth * (0.85 + 0.25 * clod + 0.1 * fine))
+            .lerp(Vec3::new(0.32, 0.3, 0.27), pebble)
+            .lerp(Vec3::new(0.5, 0.42, 0.25), straw * 0.8);
+        let ao = 0.55 + 0.45 * (0.5 * clod + 0.5 * crumb).max(pebble);
+        Px::new(albedo, h, 0.9 - 0.15 * damp - 0.3 * pebble, ao)
+    })
+}
+
 // ------------------------------------------------------------------------------------ the set
 
 /// Meters covered by one repeat of the plaster texture.
@@ -670,6 +708,8 @@ pub const STONE_SPAN: f32 = 0.8;
 pub const BRICK_SPAN: f32 = 1.0;
 /// Meters covered by one repeat of the iron texture.
 pub const IRON_SPAN: f32 = 0.5;
+/// Meters covered by one repeat of the garden soil texture.
+pub const SOIL_SPAN: f32 = 1.0;
 /// Width of one roof tile, meters.
 pub const TILE_WIDTH: f32 = 0.18;
 /// Visible length of one course of tiles along the slope, meters.
@@ -707,10 +747,12 @@ pub struct VillageMats {
     pub lantern: Handle<StandardMaterial>,
     /// Potted plants and flowers (vertex colored).
     pub plants: Handle<StandardMaterial>,
+    /// Dug garden earth.
+    pub soil: Handle<StandardMaterial>,
 }
 
 /// Every village texture set (plain data: built off the frame thread).
-pub struct VillageTextures([TexSet; 8]);
+pub struct VillageTextures([TexSet; 9]);
 
 /// Generate every village texture in parallel.
 pub fn village_textures() -> VillageTextures {
@@ -724,8 +766,19 @@ pub fn village_textures() -> VillageTextures {
         let slate = sc.spawn(|| roof_tiles(1024, TileStyle::Slate));
         let gl = sc.spawn(|| glass(256));
         let ir = sc.spawn(|| iron(256));
+        let so = sc.spawn(|| soil(512));
         let j = |h: std::thread::ScopedJoinHandle<'_, TexSet>| h.join().expect("texture thread");
-        [j(pl), j(tb), j(st), j(br), j(clay), j(slate), j(gl), j(ir)]
+        [
+            j(pl),
+            j(tb),
+            j(st),
+            j(br),
+            j(clay),
+            j(slate),
+            j(gl),
+            j(ir),
+            j(so),
+        ]
     });
     engine::core::log::info!(
         "village textures generated in {:.2} s",
@@ -740,7 +793,7 @@ pub fn village_materials(
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
 ) -> VillageMats {
-    let [pl, tb, st, br, clay, slate, gl, ir] = textures.0;
+    let [pl, tb, st, br, clay, slate, gl, ir, so] = textures.0;
     // Keyed, so the memory report names the showcase as their owner.
     let mut add = |name: &str, set: TexSet| {
         let key = |map: &str| format!("showcase/village/{name}/{map}");
@@ -760,6 +813,7 @@ pub fn village_materials(
     let slate = add("slate_roof", slate);
     let gl = add("glass", gl);
     let ir = add("iron", ir);
+    let so = add("soil", so);
     type Set = (
         Handle<Image>,
         Handle<Image>,
@@ -843,6 +897,7 @@ pub fn village_materials(
                 .with_roughness(0.7)
                 .with_subsurface(0.5),
         ),
+        soil: materials.add(textured(&so, Vec2::splat(SOIL_SPAN), 1.0, [1.0, 1.0, 1.0])),
     }
 }
 

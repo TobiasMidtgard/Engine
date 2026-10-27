@@ -108,7 +108,7 @@ pub fn install(app: &mut App, start_screen: bool) {
         drift: start_screen,
         ..Default::default()
     })
-    .add_systems(Update, run.after(camera::fly))
+    .add_systems(Update, run.after(camera::fly).run_if(due))
     .register_api(
         "showcase.start_screen",
         "Open the exe's start screen (Walk the valley, Fly freely, Quit) over the current view.",
@@ -150,6 +150,26 @@ pub fn install(app: &mut App, start_screen: bool) {
 
 fn ground(x: f64, z: f64) -> DVec3 {
     DVec3::new(x, landscape::shared().height(x, z), z)
+}
+
+/// Whether [`run`] has anything to do: the start screen is up, or the pilot has reached the
+/// stop it heads for (so the walk doesn't hold up every frame's other systems).
+fn due(
+    walk: Res<Walk>,
+    play: Option<Res<engine_movement::Play>>,
+    bodies: Query<&GlobalTransform>,
+) -> bool {
+    match walk.stage {
+        Stage::Menu => true,
+        Stage::Free => false,
+        Stage::Walking(i) => play
+            .and_then(|p| p.pilot)
+            .and_then(|p| bodies.get(p).ok())
+            .is_some_and(|t| {
+                let feet = t.translation();
+                DVec2::new(feet.x - STOPS[i].at[0], feet.z - STOPS[i].at[1]).length() < REACH_M
+            }),
+    }
 }
 
 fn run(world: &mut World, mut seen: Local<MessageCursor<UiEvent>>) {

@@ -25,6 +25,7 @@ mod build;
 mod camera;
 mod film;
 mod forest;
+mod garden;
 mod landscape;
 mod loops;
 mod meshgen;
@@ -77,10 +78,25 @@ fn main() {
         // blink, look around and wince); anim still poses them.
         .add_plugins(engine_character::CharacterPlugin)
         .add_systems(Startup, build::start)
-        .add_systems(Update, (build::watch_uploads, build::step).chain())
+        // The showcase's `&mut World` systems run only while they have work, so the rest of
+        // the frame isn't held up behind them (AGENTS.md "Let systems run side by side").
+        .init_resource::<build::Uploads>()
         .add_systems(
             Update,
-            (camera::fly, places::run_pending, scenery::update_lods).chain(),
+            (
+                build::watch_uploads,
+                build::step.run_if(resource_exists::<build::WorldBuild>),
+            )
+                .chain(),
+        )
+        .add_systems(
+            Update,
+            (
+                camera::fly,
+                places::run_pending.run_if(resource_exists::<places::PendingVisit>),
+                scenery::update_lods,
+            )
+                .chain(),
         )
         .add_systems(Update, forest::install)
         .add_systems(Update, paint_cache::track_eye.after(camera::fly))
@@ -132,9 +148,14 @@ fn main() {
         // and Movement's look bakes on its own thread meanwhile.
         app.insert_resource(build::Staged)
             .init_resource::<build::HeldJump>()
+            .init_resource::<build::CoverOrder>()
             .add_systems(
                 Update,
-                build::cover_jumps
+                (
+                    build::track_jumps,
+                    build::apply_cover.run_if(build::cover_ordered),
+                )
+                    .chain()
                     .after(camera::fly)
                     .after(build::watch_uploads),
             );
@@ -150,6 +171,13 @@ fn main() {
             m.parse().expect("--trees-within <m>|all")
         };
         app.insert_resource(scenery::TreeReach(m));
+    }
+    match value("--gardens") {
+        Some("off") => {
+            app.insert_resource(garden::NoGardens);
+        }
+        Some("on") | None => {}
+        Some(other) => panic!("--gardens on|off, not {other}"),
     }
     if let Some(spec) = value("--loops") {
         loops::install(&mut app, spec);

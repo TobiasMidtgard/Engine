@@ -276,7 +276,7 @@ pub fn fly(
     }
 
     // The exe covers the view first and moves it a couple of frames later, once the cover
-    // has been drawn (`build::cover_jumps`).
+    // has been drawn (`build::track_jumps`).
     let arrive = match held.as_mut() {
         Some(h) if bookmark.is_some() => {
             let place = bookmark.as_ref().expect("checked");

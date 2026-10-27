@@ -344,12 +344,14 @@ pub struct DemoZones(pub Vec<String>);
 
 /// Viewpoint names that belong to a zone of another name: the fire stops (`fire_front`) are the
 /// field's, the smoke stops (`smoke_range`) the range's, and the sunset and night views look
-/// across the plaza, so a tour of them shows its fountain and spheres. The overview and the
-/// tower look down on the whole valley, where only the lake's water reads from that height
-/// (without it the lake is a bare basin), so they load just the lake, as do the waterfall
-/// that feeds it and the start screen's view. The walk's stops load where the pilot stands.
-const ZONE_ALIASES: [(&str, &str); 14] = [
+/// across the plaza, so a tour of them shows its fountain and spheres (the village views load
+/// it too). The overview and the tower look down on the whole valley, where only the lake's
+/// water reads from that height (without it the lake is a bare basin), so they load just the
+/// lake, as do the waterfall that feeds it and the start screen's view. The walk's stops load
+/// where the pilot stands.
+const ZONE_ALIASES: [(&str, &str); 15] = [
     ("fire", "field"),
+    ("village", "plaza"),
     ("smoke", "range"),
     ("sunset", "plaza"),
     ("night", "plaza"),
