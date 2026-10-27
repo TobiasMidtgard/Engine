@@ -822,9 +822,11 @@ pub fn step(
             continue;
         }
         d.empty_secs = 0.0;
-        let (lo, hi) = d.domain.active;
-        let voxels = (hi.saturating_sub(lo)).element_product();
-        d.stride = if voxels > BIG_VOLUME_VOXELS { 2 } else { 1 };
+        d.stride = if d.domain.active_voxels > BIG_VOLUME_VOXELS {
+            2
+        } else {
+            1
+        };
         d.owed_secs += dt;
         if d.owed_secs < dt * (d.stride as f32 - 0.5) {
             continue;

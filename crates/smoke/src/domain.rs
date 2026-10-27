@@ -185,6 +185,9 @@ pub struct Domain {
     pub time: f32,
     /// Voxels simulated last step (min, max exclusive): where there is smoke, plus a margin.
     pub active: (UVec3, UVec3),
+    /// How many voxels were simulated last step: within `active`, only the stretch of each
+    /// row near the smoke (a slanted plume fills little of its box).
+    pub active_voxels: u32,
     /// Holds a fog bank: drawn as soft, wide fog rather than billowing smoke.
     pub fog: bool,
 }
@@ -216,6 +219,7 @@ impl Domain {
             max_density: 0.0,
             time: 0.0,
             active: (UVec3::ZERO, UVec3::ZERO),
+            active_voxels: 0,
             fog: false,
         }
     }
@@ -573,22 +577,21 @@ impl Domain {
         // Spans show each phase's share in the engine profile (`--profile`).
         let span = tracing::info_span!("smoke forces").entered();
         // Only the air around the smoke is worth solving; the rest just follows the wind.
-        self.active = self.active_region();
-        let (lo, hi) = self.active;
-        self.apply_forces(p, lo, hi);
+        let r = self.measure();
+        self.apply_forces(p, &r);
         if p.vorticity > 0.0 {
-            self.confine_vorticity(p.vorticity, dt, lo, hi);
+            self.confine_vorticity(p.vorticity, dt, &r);
         }
         drop(span);
         let span = tracing::info_span!("smoke pressure").entered();
-        self.project(p.iterations, lo, hi);
+        self.project(p.iterations, &r);
         drop(span);
         let span = tracing::info_span!("smoke advect").entered();
-        self.advect(p, lo, hi);
+        self.advect(p, &r);
         // Explicit diffusion is stable up to 1/6 per step.
         let mix = (p.diffusion_m2_s * dt / (self.cell * self.cell)).min(0.16);
         if mix > 1e-4 {
-            self.diffuse(mix, lo, hi);
+            self.diffuse(mix, &r);
         }
         drop(span);
         for e in &mut self.expansions {
@@ -598,55 +601,64 @@ impl Domain {
         self.version += 1;
     }
 
-    /// The box around everything with smoke, heat or expanding air, plus room for it to
-    /// move and for the flow around it.
-    fn active_region(&self) -> (UVec3, UVec3) {
+    /// Where the next step works ([`Region`]); it also sets `active` and `active_voxels`.
+    fn measure(&mut self) -> Region {
+        let r = self.region();
+        self.active = (r.lo, r.hi);
+        self.active_voxels = r.voxels(self.dims);
+        r
+    }
+
+    /// Each row's stretch of voxels with smoke, heat or expanding air in it, widened by room
+    /// for it to move and for the flow around it (the sparse-brick idea of NVIDIA's GDC 2015
+    /// sparse fluid talk, along rows: a plume the wind lays over fills little of its box).
+    fn region(&self) -> Region {
         let d = self.dims;
-        // Each layer's bounds in parallel, then their union.
-        let mut layers = vec![(d, UVec3::ZERO); d.z as usize];
+        let (nx, ny) = (d.x as usize, d.y as usize);
+        let mut raw = vec![(0u32, 0u32); (d.y * d.z) as usize];
         let voxels = &self.voxels;
-        par_chunks_mut(&mut layers, 4, |c, chunk| {
-            for (k, (lo, hi)) in chunk.iter_mut().enumerate() {
-                let z = (c * 4 + k) as u32;
-                for y in 0..d.y {
-                    let row =
-                        ((d.x * (y + d.y * z)) as usize)..((d.x * (y + 1 + d.y * z)) as usize);
-                    let mut first = None;
-                    let mut last = 0;
-                    for (x, v) in voxels[row].iter().enumerate() {
-                        if v.density > 1e-7 || v.heat.abs() > 0.05 {
-                            first.get_or_insert(x as u32);
-                            last = x as u32;
-                        }
-                    }
-                    if let Some(first) = first {
-                        *lo = lo.min(UVec3::new(first, y, z));
-                        *hi = hi.max(UVec3::new(last + 1, y + 1, z + 1));
-                    }
+        // Rows are `y + z * dims.y`, so row r's voxels start at r * dims.x.
+        par_chunks_mut(&mut raw, ny * 4, |c, chunk| {
+            for (k, span) in chunk.iter_mut().enumerate() {
+                let start = (c * ny * 4 + k) * nx;
+                let row = &voxels[start..start + nx];
+                let busy = |v: &Voxel| v.density > 1e-7 || v.heat.abs() > 0.05;
+                if let (Some(first), Some(last)) =
+                    (row.iter().position(busy), row.iter().rposition(busy))
+                {
+                    *span = (first as u32, last as u32 + 1);
                 }
             }
         });
-        let (mut lo, mut hi) = layers
-            .into_iter()
-            .fold((d, UVec3::ZERO), |(a, b), (l, h)| (a.min(l), b.max(h)));
         for e in &self.expansions {
             let (a, b) = (self.local(e.from), self.local(e.to));
             let r = e.radius / self.cell;
-            let emin = (a.min(b) - r).floor().max(Vec3::ZERO).as_uvec3();
-            let emax = (a.max(b) + r).ceil().max(Vec3::ZERO).as_uvec3();
-            lo = lo.min(emin);
-            hi = hi.max(emax);
+            let emin = (a.min(b) - r).floor().max(Vec3::ZERO).as_uvec3().min(d);
+            let emax = (a.max(b) + r).ceil().max(Vec3::ZERO).as_uvec3().min(d);
+            for z in emin.z..emax.z {
+                for y in emin.y..emax.y {
+                    let i = (y + z * d.y) as usize;
+                    raw[i] = join(raw[i], (emin.x, emax.x));
+                }
+            }
+        }
+        let m = ((2.0 / self.cell).ceil() as u32).max(3);
+        let act = dilate(&raw, d, m);
+        let wide = dilate(&raw, d, m + 1);
+        let (mut lo, mut hi) = (d, UVec3::ZERO);
+        for z in 0..d.z {
+            for y in 0..d.y {
+                let (a, b) = wide[(y + z * d.y) as usize];
+                if a < b {
+                    lo = lo.min(UVec3::new(a, y, z));
+                    hi = hi.max(UVec3::new(b, y + 1, z + 1));
+                }
+            }
         }
         if hi.x <= lo.x {
-            return (UVec3::ZERO, UVec3::ZERO);
+            (lo, hi) = (UVec3::ZERO, UVec3::ZERO);
         }
-        let m = ((3.0 / self.cell).ceil() as u32).max(4);
-        let lo = UVec3::new(
-            lo.x.saturating_sub(m),
-            lo.y.saturating_sub(m),
-            lo.z.saturating_sub(m),
-        );
-        (lo, (hi + m).min(d))
+        Region { act, wide, lo, hi }
     }
 
     /// Sample the wind the box feels (from the world, before a [`step_sampled`]).
@@ -667,7 +679,7 @@ impl Domain {
 
     /// Wind, buoyancy and weight, in the active region and a layer of voxels around it (all
     /// the solve and the advection read; the still air beyond is left as it was).
-    fn apply_forces(&mut self, p: &StepParams, lo: UVec3, hi: UVec3) {
+    fn apply_forces(&mut self, p: &StepParams, r: &Region) {
         let dims = self.dims;
         let slice = (dims.x * dims.y) as usize;
         let floor = &self.floor;
@@ -677,15 +689,13 @@ impl Domain {
         let vertical_coupling = p.vertical_coupling;
         let lift = 9.81 * p.buoyancy / (p.ambient_c + 273.15).max(50.0);
         let (dt, weight) = (p.dt, p.weight);
-        let lo = lo.saturating_sub(UVec3::ONE);
-        let hi = (hi + 1).min(dims);
         par_chunks_mut(&mut self.voxels, slice, |z, chunk| {
             let z = z as u32;
-            if z < lo.z || z >= hi.z {
+            if z < r.lo.z || z >= r.hi.z {
                 return;
             }
-            for y in lo.y..hi.y {
-                for x in lo.x..hi.x {
+            for y in r.lo.y..r.hi.y {
+                for x in r.wide(dims, y, z) {
                     let v = &mut chunk[(x + y * dims.x) as usize];
                     if y < floor[(x + z * dims.x) as usize] as u32 {
                         *v = Voxel::default();
@@ -701,26 +711,21 @@ impl Domain {
         });
     }
 
-    fn confine_vorticity(&mut self, strength: f32, dt: f32, lo: UVec3, hi: UVec3) {
+    fn confine_vorticity(&mut self, strength: f32, dt: f32, r: &Region) {
         let dims = self.dims;
         let slice = (dims.x * dims.y) as usize;
         let h = self.cell;
-        // Curl one voxel beyond the region, so the confinement inside it has neighbors.
-        let clo = UVec3::new(
-            lo.x.saturating_sub(1),
-            lo.y.saturating_sub(1),
-            lo.z.saturating_sub(1),
-        );
-        let chi = (hi + 1).min(dims);
+        // Curl one voxel beyond the region (its wide spans), so the confinement inside it has
+        // neighbors.
         {
             let voxels = &self.voxels;
             par_chunks_mut(&mut self.curl, slice, |z, chunk| {
                 let z = z as u32;
-                if z < clo.z || z >= chi.z {
+                if z < r.lo.z || z >= r.hi.z {
                     return;
                 }
-                for y in clo.y..chi.y {
-                    for x in clo.x..chi.x {
+                for y in r.lo.y..r.hi.y {
+                    for x in r.wide(dims, y, z) {
                         let g = |dx: i32, dy: i32, dz: i32| {
                             voxels[clamped_index(dims, x as i32 + dx, y as i32 + dy, z as i32 + dz)]
                                 .vel
@@ -741,24 +746,17 @@ impl Domain {
         let floor = &self.floor;
         par_chunks_mut(&mut self.voxels, slice, |z, chunk| {
             let z = z as u32;
-            if z < lo.z || z >= hi.z {
+            if z < r.lo.z || z >= r.hi.z {
                 return;
             }
-            let inside = |x: i32, y: i32, z: i32| {
-                let c = UVec3::new(
-                    x.clamp(clo.x as i32, chi.x as i32 - 1) as u32,
-                    y.clamp(clo.y as i32, chi.y as i32 - 1) as u32,
-                    z.clamp(clo.z as i32, chi.z as i32 - 1) as u32,
-                );
-                (c.x + dims.x * (c.y + dims.y * c.z)) as usize
-            };
-            for y in lo.y..hi.y {
-                for x in lo.x..hi.x {
+            for y in r.lo.y..r.hi.y {
+                for x in r.act(dims, y, z) {
                     if y < floor[(x + z * dims.x) as usize] as u32 {
                         continue;
                     }
                     let m = |dx: i32, dy: i32, dz: i32| {
-                        curl[inside(x as i32 + dx, y as i32 + dy, z as i32 + dz)].length()
+                        curl[clamped_index(dims, x as i32 + dx, y as i32 + dy, z as i32 + dz)]
+                            .length()
                     };
                     let grad = Vec3::new(
                         m(1, 0, 0) - m(-1, 0, 0),
@@ -777,7 +775,7 @@ impl Domain {
         });
     }
 
-    fn project(&mut self, iterations: u32, lo: UVec3, hi: UVec3) {
+    fn project(&mut self, iterations: u32, r: &Region) {
         let dims = self.dims;
         let slice = (dims.x * dims.y) as usize;
         let h = self.cell;
@@ -788,11 +786,11 @@ impl Domain {
             let floor = &self.floor;
             par_chunks_mut(&mut self.divergence, slice, |z, chunk| {
                 let z = z as u32;
-                if z < lo.z || z >= hi.z {
+                if z < r.lo.z || z >= r.hi.z {
                     return;
                 }
-                for y in lo.y..hi.y {
-                    for x in lo.x..hi.x {
+                for y in r.lo.y..r.hi.y {
+                    for x in r.act(dims, y, z) {
                         let out = &mut chunk[(x + y * dims.x) as usize];
                         if y < floor[(x + z * dims.x) as usize] as u32 {
                             *out = 0.0;
@@ -831,17 +829,14 @@ impl Domain {
         for buf in [&mut self.pressure, &mut self.pressure_next] {
             par_chunks_mut(buf, slice, |z, chunk| {
                 let z = z as u32;
-                if z < lo.z || z >= hi.z {
-                    chunk.fill(0.0);
-                    return;
-                }
                 for y in 0..dims.y {
                     let row = &mut chunk[(y * dims.x) as usize..((y + 1) * dims.x) as usize];
-                    if y < lo.y || y >= hi.y {
+                    let span = r.act(dims, y, z);
+                    if span.is_empty() {
                         row.fill(0.0);
                     } else {
-                        row[..lo.x as usize].fill(0.0);
-                        row[hi.x as usize..].fill(0.0);
+                        row[..span.start as usize].fill(0.0);
+                        row[span.end as usize..].fill(0.0);
                     }
                 }
             });
@@ -872,11 +867,11 @@ impl Domain {
                 let open_above = &open_above;
                 par_chunks_mut(&mut self.pressure_next, slice, |z, chunk| {
                     let z = z as u32;
-                    if z < lo.z || z >= hi.z {
+                    if z < r.lo.z || z >= r.hi.z {
                         return;
                     }
-                    for y in lo.y..hi.y {
-                        for x in lo.x..hi.x {
+                    for y in r.lo.y..r.hi.y {
+                        for x in r.act(dims, y, z) {
                             let i = (x + dims.x * (y + dims.y * z)) as usize;
                             if y >= open_above[(x + z * dims.x) as usize] && y + 1 < dims.y {
                                 let sum = p[i + 1]
@@ -930,11 +925,11 @@ impl Domain {
         let floor = &self.floor;
         par_chunks_mut(&mut self.voxels, slice, |z, chunk| {
             let z = z as u32;
-            if z < lo.z || z >= hi.z {
+            if z < r.lo.z || z >= r.hi.z {
                 return;
             }
-            for y in lo.y..hi.y {
-                for x in lo.x..hi.x {
+            for y in r.lo.y..r.hi.y {
+                for x in r.act(dims, y, z) {
                     let fl = floor[(x + z * dims.x) as usize] as u32;
                     if y < fl {
                         continue;
@@ -988,14 +983,14 @@ impl Domain {
             .collect()
     }
 
-    fn advect(&mut self, p: &StepParams, lo: UVec3, hi: UVec3) {
+    fn advect(&mut self, p: &StepParams, r: &Region) {
         let sources = self.sources();
         let dims = self.dims;
         // Semi-Lagrangian advection doesn't conserve mass; measure what should be there after
         // the step (what's here minus what blows out of the open faces) and correct to it.
         // Everything with smoke is inside the active region (it is drawn around it), so only
         // the region is summed, advected and copied back.
-        let before = region_density(&self.voxels, dims, lo, hi);
+        let before = region_density(&self.voxels, dims, r);
         let outflow = self.outflow(p.dt);
         let slice = (dims.x * dims.y) as usize;
         let k = p.dt / self.cell;
@@ -1011,11 +1006,11 @@ impl Domain {
         };
         par_chunks_mut(&mut self.scratch, slice, |z, chunk| {
             let z = z as u32;
-            if z < lo.z || z >= hi.z {
+            if z < r.lo.z || z >= r.hi.z {
                 return;
             }
-            for y in lo.y..hi.y {
-                for x in lo.x..hi.x {
+            for y in r.lo.y..r.hi.y {
+                for x in r.act(dims, y, z) {
                     let out = &mut chunk[(x + y * dims.x) as usize];
                     if y < floor[(x + z * dims.x) as usize] as u32 {
                         *out = Voxel::default();
@@ -1049,19 +1044,8 @@ impl Domain {
                 }
             }
         });
-        let scratch = &self.scratch;
-        par_chunks_mut(&mut self.voxels, slice, |z, chunk| {
-            let z = z as u32;
-            if z < lo.z || z >= hi.z {
-                return;
-            }
-            let base = (z * dims.x * dims.y) as usize;
-            for y in lo.y..hi.y {
-                let row = (lo.x + y * dims.x) as usize..(hi.x + y * dims.x) as usize;
-                chunk[row.clone()].copy_from_slice(&scratch[base + row.start..base + row.end]);
-            }
-        });
-        let mut after = region_density(&self.voxels, dims, lo, hi);
+        copy_back(&mut self.voxels, &self.scratch, dims, r);
+        let mut after = region_density(&self.voxels, dims, r);
         if after > 1e-12 {
             let fade = (-p.dt / p.dissipation_secs.max(0.1)).exp() as f64;
             let expected = ((before - outflow).max(0.0)) * fade;
@@ -1069,11 +1053,13 @@ impl Domain {
             if (k - 1.0).abs() > 1e-4 {
                 par_chunks_mut(&mut self.voxels, slice, |z, chunk| {
                     let z = z as u32;
-                    if z < lo.z || z >= hi.z {
+                    if z < r.lo.z || z >= r.hi.z {
                         return;
                     }
-                    for y in lo.y..hi.y {
-                        let row = (lo.x + y * dims.x) as usize..(hi.x + y * dims.x) as usize;
+                    for y in r.lo.y..r.hi.y {
+                        let span = r.act(dims, y, z);
+                        let row =
+                            (span.start + y * dims.x) as usize..(span.end + y * dims.x) as usize;
                         for v in &mut chunk[row] {
                             v.density *= k;
                             v.tint *= k;
@@ -1083,31 +1069,27 @@ impl Domain {
                 after *= k as f64;
             }
         }
-        self.max_density = region_max_density(&self.voxels, dims, lo, hi);
+        self.max_density = region_max_density(&self.voxels, dims, r);
         self.mass_kg = (after * (self.cell as f64).powi(3)) as f32;
     }
 
     /// Mix smoke and heat with the neighboring voxels (`k` of the difference per step).
-    fn diffuse(&mut self, k: f32, lo: UVec3, hi: UVec3) {
+    fn diffuse(&mut self, k: f32, r: &Region) {
         let dims = self.dims;
         let slice = (dims.x * dims.y) as usize;
         let src = &self.voxels;
         let floor = &self.floor;
         par_chunks_mut(&mut self.scratch, slice, |z, chunk| {
             let z = z as u32;
-            let base = (z * dims.x * dims.y) as usize;
-            if z < lo.z || z >= hi.z {
-                chunk.copy_from_slice(&src[base..base + chunk.len()]);
+            if z < r.lo.z || z >= r.hi.z {
                 return;
             }
-            for y in 0..dims.y {
-                for x in 0..dims.x {
+            let base = (z * dims.x * dims.y) as usize;
+            for y in r.lo.y..r.hi.y {
+                for x in r.act(dims, y, z) {
                     let i = base + (x + y * dims.x) as usize;
                     let out = &mut chunk[(x + y * dims.x) as usize];
                     *out = src[i];
-                    if y < lo.y || y >= hi.y || x < lo.x || x >= hi.x {
-                        continue;
-                    }
                     if y < floor[(x + z * dims.x) as usize] as u32 {
                         continue;
                     }
@@ -1159,7 +1141,7 @@ impl Domain {
                 }
             }
         });
-        std::mem::swap(&mut self.voxels, &mut self.scratch);
+        copy_back(&mut self.voxels, &self.scratch, dims, r);
     }
 
     /// Smoke (in voxel-density units) leaving through the open faces in `dt`.
@@ -1252,7 +1234,7 @@ impl Domain {
         self.max_density = self.voxels.iter().map(|v| v.density).fold(0.0, f32::max);
         let total: f64 = self.voxels.iter().map(|v| v.density as f64).sum();
         self.mass_kg = (total * cell.powi(3)) as f32;
-        self.active = self.active_region();
+        self.measure();
     }
 
     /// Make this a copy of `other`'s air (same box), reusing this one's memory: what a step
@@ -1276,6 +1258,7 @@ impl Domain {
         self.max_density = other.max_density;
         self.time = other.time;
         self.active = other.active;
+        self.active_voxels = other.active_voxels;
         self.fog = other.fog;
     }
 
@@ -1491,13 +1474,93 @@ fn sample(data: &[Voxel], dims: UVec3, q: Vec3, outside: &dyn Fn(Vec3) -> Voxel)
     acc
 }
 
-/// Sum of the density over the voxels in `lo..hi`.
-fn region_density(voxels: &[Voxel], dims: UVec3, lo: UVec3, hi: UVec3) -> f64 {
+/// Where a step works: each row's stretch of x (rows by `y + z * dims.y`; an empty row holds
+/// (0, 0)) and the box around the wide stretches.
+struct Region {
+    /// Room for the smoke to move and for the flow around it.
+    act: Vec<(u32, u32)>,
+    /// `act` and a voxel more each way: forces and curl, which the rest reads around it.
+    wide: Vec<(u32, u32)>,
+    lo: UVec3,
+    hi: UVec3,
+}
+
+impl Region {
+    fn act(&self, dims: UVec3, y: u32, z: u32) -> std::ops::Range<u32> {
+        let (a, b) = self.act[(y + z * dims.y) as usize];
+        a..b
+    }
+
+    fn wide(&self, dims: UVec3, y: u32, z: u32) -> std::ops::Range<u32> {
+        let (a, b) = self.wide[(y + z * dims.y) as usize];
+        a..b
+    }
+
+    fn voxels(&self, dims: UVec3) -> u32 {
+        (self.act.iter().map(|(a, b)| b - a).sum::<u32>()) * (dims.x > 0) as u32
+    }
+}
+
+/// Both stretches as one (empty ones don't count).
+fn join(a: (u32, u32), b: (u32, u32)) -> (u32, u32) {
+    if a.0 >= a.1 {
+        b
+    } else if b.0 >= b.1 {
+        a
+    } else {
+        (a.0.min(b.0), a.1.max(b.1))
+    }
+}
+
+/// Each row's stretch, grown by `m` voxels every way: over the rows within `m` (up and down,
+/// then along z), then out along the row.
+fn dilate(raw: &[(u32, u32)], d: UVec3, m: u32) -> Vec<(u32, u32)> {
+    let (ny, nz, m) = (d.y as usize, d.z as usize, m as usize);
+    let mut along_y = vec![(0, 0); raw.len()];
+    for z in 0..nz {
+        for y in 0..ny {
+            along_y[y + z * ny] = (y.saturating_sub(m)..(y + m + 1).min(ny))
+                .fold((0, 0), |s, yy| join(s, raw[yy + z * ny]));
+        }
+    }
+    let mut out = vec![(0, 0); raw.len()];
+    for z in 0..nz {
+        for y in 0..ny {
+            let (a, b) = (z.saturating_sub(m)..(z + m + 1).min(nz))
+                .fold((0, 0), |s, zz| join(s, along_y[y + zz * ny]));
+            if a < b {
+                out[y + z * ny] = (a.saturating_sub(m as u32), (b + m as u32).min(d.x));
+            }
+        }
+    }
+    out
+}
+
+/// Copy the region's stretches from `from` to `to`.
+fn copy_back(to: &mut [Voxel], from: &[Voxel], dims: UVec3, r: &Region) {
+    let slice = (dims.x * dims.y) as usize;
+    par_chunks_mut(to, slice, |z, chunk| {
+        let z = z as u32;
+        if z < r.lo.z || z >= r.hi.z {
+            return;
+        }
+        let base = (z * dims.x * dims.y) as usize;
+        for y in r.lo.y..r.hi.y {
+            let span = r.act(dims, y, z);
+            let row = (span.start + y * dims.x) as usize..(span.end + y * dims.x) as usize;
+            chunk[row.clone()].copy_from_slice(&from[base + row.start..base + row.end]);
+        }
+    });
+}
+
+/// Smoke (voxel-density units) in the region.
+fn region_density(voxels: &[Voxel], dims: UVec3, r: &Region) -> f64 {
     let mut sum = 0.0;
-    for z in lo.z..hi.z {
-        for y in lo.y..hi.y {
-            let start = (lo.x + dims.x * (y + dims.y * z)) as usize;
-            let end = start + (hi.x - lo.x) as usize;
+    for z in r.lo.z..r.hi.z {
+        for y in r.lo.y..r.hi.y {
+            let span = r.act(dims, y, z);
+            let start = (span.start + dims.x * (y + dims.y * z)) as usize;
+            let end = start + span.len();
             sum += voxels[start..end]
                 .iter()
                 .map(|v| v.density as f64)
@@ -1507,13 +1570,14 @@ fn region_density(voxels: &[Voxel], dims: UVec3, lo: UVec3, hi: UVec3) -> f64 {
     sum
 }
 
-/// Thickest density in `lo..hi`.
-fn region_max_density(voxels: &[Voxel], dims: UVec3, lo: UVec3, hi: UVec3) -> f32 {
+/// Thickest density in the region.
+fn region_max_density(voxels: &[Voxel], dims: UVec3, r: &Region) -> f32 {
     let mut max = 0.0f32;
-    for z in lo.z..hi.z {
-        for y in lo.y..hi.y {
-            let start = (lo.x + dims.x * (y + dims.y * z)) as usize;
-            let end = start + (hi.x - lo.x) as usize;
+    for z in r.lo.z..r.hi.z {
+        for y in r.lo.y..r.hi.y {
+            let span = r.act(dims, y, z);
+            let start = (span.start + dims.x * (y + dims.y * z)) as usize;
+            let end = start + span.len();
             max = voxels[start..end]
                 .iter()
                 .map(|v| v.density)
@@ -1539,8 +1603,10 @@ mod tests {
             dt: 0.05,
             ..Default::default()
         };
-        let calm = |_: DVec3| Vec3::new(3.0, 0.0, 1.0);
-        for i in 0..40 {
+        // A breeze across the box's diagonal draws the plume out long and slanted, as the
+        // meadow's wind does.
+        let calm = |_: DVec3| Vec3::new(4.0, 0.0, 2.5);
+        for i in 0..150 {
             let x = -20.0 + (i % 8) as f64 * 3.0;
             d.splat(
                 DVec3::new(x, 2.0, 0.0),
@@ -1552,6 +1618,30 @@ mod tests {
             );
             d.step(&p, &calm);
         }
+        // Each phase's share, then whole steps.
+        let mut t = [0.0f64; 5];
+        for _ in 0..20 {
+            let c = std::time::Instant::now();
+            let r2 = d.measure();
+            t[0] += c.elapsed().as_secs_f64();
+            let c = std::time::Instant::now();
+            d.apply_forces(&p, &r2);
+            d.confine_vorticity(p.vorticity, 0.05, &r2);
+            t[1] += c.elapsed().as_secs_f64();
+            let c = std::time::Instant::now();
+            d.project(p.iterations, &r2);
+            t[2] += c.elapsed().as_secs_f64();
+            let c = std::time::Instant::now();
+            d.advect(&p, &r2);
+            t[3] += c.elapsed().as_secs_f64();
+            let c = std::time::Instant::now();
+            d.diffuse(0.05, &r2);
+            t[4] += c.elapsed().as_secs_f64();
+        }
+        println!(
+            "phases ms (region, forces, pressure, advect, diffuse): {:?}",
+            t.map(|x| (x * 50.0 * 100.0).round() / 100.0)
+        );
         let started = std::time::Instant::now();
         for _ in 0..20 {
             d.splat(
@@ -1565,9 +1655,13 @@ mod tests {
             d.step(&p, &calm);
         }
         let ms = started.elapsed().as_secs_f64() * 1000.0 / 20.0;
+        let (lo, hi) = d.active;
         println!(
-            "step: {ms:.2} ms, active {:?}, mass {:.2} kg",
-            d.active, d.mass_kg
+            "step: {ms:.2} ms, active {:?} ({} voxels, {} in the box), mass {:.2} kg",
+            d.active,
+            d.active_voxels,
+            (hi - lo).element_product(),
+            d.mass_kg
         );
     }
 
