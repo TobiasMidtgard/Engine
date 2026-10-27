@@ -98,14 +98,26 @@ fn drop_target(
         crate::import::import_dropped(world, editor, Some(at));
     }
     if let Some(dragged) = response.dnd_hover_payload::<Dragged>() {
-        let name = match &*dragged {
-            Dragged::Model(key) => crate::models::display_name(key),
-            Dragged::Prefab(path) => crate::prefab::display_name(path),
+        let label = match &*dragged {
+            Dragged::Model(key) => {
+                let name = crate::models::display_name(key);
+                match crate::rigs::clip_target(world, key, o, d) {
+                    Some(rig) => {
+                        let on = world.get::<Name>(rig).map_or("it", |n| n.as_str());
+                        format!("Drop to play {name} on {on}")
+                    }
+                    None if crate::rigs::is_clip_file(world, key) => {
+                        format!("{name} is an animation: drop it on a character")
+                    }
+                    None => format!("Drop to place {name}"),
+                }
+            }
+            Dragged::Prefab(path) => format!("Drop to place {}", crate::prefab::display_name(path)),
         };
         ui.painter().text(
             pos + egui::vec2(16.0, -18.0),
             egui::Align2::LEFT_BOTTOM,
-            format!("Drop to place {name}"),
+            label,
             egui::FontId::proportional(13.0),
             theme::ACCENT,
         );
@@ -116,9 +128,12 @@ fn drop_target(
     let at =
         picking::pick_surface(world, o, d, 200.0, &|_| false).unwrap_or(o + d.as_dvec3() * 8.0);
     match &*dragged {
-        Dragged::Model(key) => {
-            crate::models::place(world, editor, key, at);
-        }
+        Dragged::Model(key) => match crate::rigs::clip_target(world, key, o, d) {
+            Some(rig) => crate::rigs::add_clip_file(world, editor, rig, key),
+            None => {
+                crate::models::place(world, editor, key, at);
+            }
+        },
         Dragged::Prefab(path) => crate::prefab::place(world, editor, path, Some(at)),
     }
 }

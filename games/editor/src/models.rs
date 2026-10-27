@@ -1,7 +1,8 @@
 //! Models: glTF files under the asset root, listed in the Content panel and placed into the
 //! scene by a click or by dragging one into the scene view. The placed tree draws the file's
 //! meshes and materials by asset key, so scene files save it like anything else and load the
-//! file again when opened.
+//! file again when opened. A file with a skin is placed as an animated rig instead
+//! ([`crate::rigs`]).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -105,31 +106,28 @@ pub fn folder(key: &str) -> &str {
 /// Load `key` if needed and place it with its lowest point on `at`, as one undo step.
 pub fn place(world: &mut World, editor: &mut Editor, key: &str, at: DVec3) -> Option<Entity> {
     let t = now(world);
-    let scene = match load(world, key) {
-        Ok(scene) => scene,
+    let (low, _) = match bounds(world, key) {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            editor.info(
+                t,
+                format!("{key} has nothing to draw (an animation clip or an empty file)"),
+            );
+            return None;
+        }
         Err(e) => {
             editor.error(t, format!("Could not load {key}: {e}"));
             return None;
         }
     };
-    let data = world.resource::<Assets<GltfScene>>().get(scene)?.clone();
-    let scale = import_scale(world, key);
-    let Some((low, _)) = scene_bounds(world, &data).map(|(l, h)| (l * scale, h * scale)) else {
-        editor.info(
-            t,
-            format!("{key} has nothing to draw (an animation clip or an empty file)"),
-        );
-        return None;
-    };
     let root = Transform::from_translation(at - DVec3::Y * low.y);
-    let entity = match engine::render::spawn_gltf_scene(world, scene, root) {
+    let entity = match spawn(world, key, root, (None, None)) {
         Ok(e) => e,
         Err(e) => {
             editor.error(t, format!("Could not place {key}: {e}"));
             return None;
         }
     };
-    scale_nodes(world, entity, scale);
     let name = display_name(key);
     world.entity_mut(entity).insert((
         SceneOrder::next(),
@@ -160,6 +158,9 @@ pub fn reimport(world: &mut World, editor: &mut Editor, key: &str) {
         editor.error(t, format!("Could not reimport {key}: {e}"));
         return;
     }
+    world
+        .get_resource_or_init::<crate::rigs::Rigs>()
+        .forget(key);
     let mut q = world.query_filtered::<(Entity, &Model), With<InScene>>();
     let copies: Vec<Entity> = q
         .iter(world)
@@ -195,16 +196,16 @@ fn rebuild(world: &mut World, old: Entity) -> Result<(Entity, [Command; 2]), Str
         .get::<Model>(old)
         .map(|m| m.path.clone())
         .ok_or("not a model")?;
-    let scene = load(world, &key)?;
     let saved_old = scene_ops::save_entity(world, old);
     let parent = world.get::<ChildOf>(old).map(|p| p.parent());
     let transform = world.get::<Transform>(old).copied().unwrap_or_default();
     let order = world.get::<SceneOrder>(old).copied();
     let name = world.get::<Name>(old).cloned();
+    let settings = world.get::<engine_anim::AnimatorSettings>(old).cloned();
+    let clips = world.get::<crate::rigs::ModelClips>(old).cloned();
+    let carried = (settings, clips);
     world.entity_mut(old).despawn();
-    let new = engine::render::spawn_gltf_scene(world, scene, transform)?;
-    let scale = import_scale(world, &key);
-    scale_nodes(world, new, scale);
+    let new = spawn(world, &key, transform, carried)?;
     let mut e = world.entity_mut(new);
     e.insert(Model { path: key });
     if let Some(parent) = parent {
@@ -282,13 +283,10 @@ pub fn watch_files(world: &mut World) {
 /// A box collider shape around the model (in its root's space), offset to its middle.
 pub fn fitted_collider(world: &mut World, root: Entity) -> Option<ColliderShape> {
     let key = world.get::<Model>(root)?.path.clone();
-    let scene = load(world, &key).ok()?;
-    let data = world.resource::<Assets<GltfScene>>().get(scene)?.clone();
     if crate::import::settings_for(&asset_root(world), &key).is_some_and(|s| s.collider == "none") {
         return None;
     }
-    let scale = import_scale(world, &key);
-    let (low, high) = scene_bounds(world, &data).map(|(l, h)| (l * scale, h * scale))?;
+    let (low, high) = bounds(world, &key).ok()??;
     let half = ((high - low) * 0.5).as_vec3().max(Vec3::splat(0.01));
     let center = ((high + low) * 0.5).as_vec3();
     Some(ColliderShape::Compound(vec![(
@@ -305,8 +303,58 @@ fn asset_root(world: &World) -> std::path::PathBuf {
         .unwrap_or_default()
 }
 
+/// Spawn `key` at `transform`: as a rig when the file has a skin (keeping the clip choice and
+/// clip files carried over from a copy being rebuilt), otherwise as its node tree.
+fn spawn(
+    world: &mut World,
+    key: &str,
+    transform: Transform,
+    carried: (
+        Option<engine_anim::AnimatorSettings>,
+        Option<crate::rigs::ModelClips>,
+    ),
+) -> Result<Entity, String> {
+    let scale = import_scale(world, key);
+    let rigged = if let Some(rig) = crate::rigs::rig(world, key, scale)? {
+        let mut e = world.spawn(transform);
+        if let Some(settings) = carried.0 {
+            e.insert(settings);
+        }
+        if let Some(clips) = carried.1 {
+            e.insert(clips);
+        }
+        let entity = e.id();
+        crate::rigs::dress(world, &rig, entity);
+        entity
+    } else {
+        let scene = load(world, key)?;
+        let entity = engine::render::spawn_gltf_scene(world, scene, transform)?;
+        scale_nodes(world, entity, scale);
+        entity
+    };
+    let animated = world.get::<engine_anim::AnimatorSettings>(rigged).is_some();
+    world.entity_mut(rigged).insert(crate::rigs::Rigged {
+        animated,
+        preview: true,
+    });
+    Ok(rigged)
+}
+
+/// A model's bounds in its root's space, import scale applied (`None`: nothing to draw).
+fn bounds(world: &mut World, key: &str) -> Result<Option<(DVec3, DVec3)>, String> {
+    let scale = import_scale(world, key);
+    if let Some(rig) = crate::rigs::rig(world, key, scale)? {
+        return Ok(Some((rig.bounds.0.as_dvec3(), rig.bounds.1.as_dvec3())));
+    }
+    let scene = load(world, key)?;
+    let Some(data) = world.resource::<Assets<GltfScene>>().get(scene).cloned() else {
+        return Ok(None);
+    };
+    Ok(scene_bounds(world, &data).map(|(l, h)| (l * scale, h * scale)))
+}
+
 /// The scale an imported file's settings ask for (1 for files that weren't imported).
-fn import_scale(world: &World, key: &str) -> f64 {
+pub fn import_scale(world: &World, key: &str) -> f64 {
     crate::import::settings_for(&asset_root(world), key)
         .map(|s| s.scale)
         .filter(|s| s.is_finite() && *s > 0.0)

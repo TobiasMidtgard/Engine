@@ -555,6 +555,128 @@ pub fn round5(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Round 6: rigs. The glTF horse and the same horse converted from FBX (skin and takes) play
+/// in edit mode; a clip file dragged onto a Rocketbox character makes it walk; the clip picker
+/// switches the FBX horse to its trot; the scene saves and reopens with its rigs playing.
+pub fn round6(dir: impl Into<PathBuf>) -> ShotScript {
+    const HORSE: &str = "fetched/anim/animals/horse/Horse.gltf";
+    const WALKER: &str = "fetched/anim/characters/walker.glb";
+    const CLIP: &str = "fetched/anim/clips/m_walk_neutral_01.glb";
+    const FBX_HORSE: &str = "imported/horse/Horse.glb";
+    const SCENE: &str = "scenes/round6_rigs.scene.json";
+    fn find(world: &mut World, key: &str) -> Option<Entity> {
+        let mut q = world.query::<(Entity, &crate::models::Model)>();
+        q.iter(world).find(|(_, m)| m.path == key).map(|(e, _)| e)
+    }
+    /// Switch the rig `key` to its clip `clip`, through the history like the clip picker.
+    fn play(world: &mut World, editor: &mut Editor, key: &str, clip: &str) {
+        let Some(rig) = find(world, key) else {
+            return;
+        };
+        let Some(before) = world.get::<engine_anim::AnimatorSettings>(rig).cloned() else {
+            return;
+        };
+        let mut after = before.clone();
+        if let Some((id, _)) = before.graph.split_once('#') {
+            after.graph = format!("{id}#{clip}");
+        }
+        editor::apply(
+            world,
+            editor,
+            crate::undo::Command::Component {
+                entity: rig,
+                name: "AnimatorSettings".into(),
+                before: serde_json::to_value(&before).ok(),
+                after: serde_json::to_value(&after).ok(),
+            },
+        );
+    }
+    /// Where the walker's chest is on screen.
+    fn walker_on_screen(world: &mut World, editor: &Editor) -> egui::Pos2 {
+        let at = find(world, WALKER)
+            .and_then(|e| world.get::<GlobalTransform>(e))
+            .map_or(DVec3::ZERO, |g| g.translation());
+        editor
+            .view
+            .and_then(|v| v.project(at + DVec3::Y * 1.1))
+            .unwrap_or(egui::pos2(640.0, 400.0))
+    }
+    let steps = vec![
+        Step::Camera(DVec3::new(0.3, 1.9, 6.2), DVec3::new(0.0, 0.8, 0.0)),
+        Step::Select(""),
+        Step::Tab(Tab::Console),
+        Step::Do(Box::new(|world, editor| {
+            crate::models::place(world, editor, HORSE, DVec3::new(-2.0, 0.0, 0.0));
+            crate::models::place(world, editor, WALKER, DVec3::new(0.0, 0.0, 1.2));
+            // The FBX horse comes in as a file dropped from the desktop.
+            let source = std::env::var("ROUND6_FILES").unwrap_or_default();
+            crate::import::import_and_place(
+                world,
+                editor,
+                &PathBuf::from(source).join("horse/Horse.fbx"),
+                Some(DVec3::new(2.0, 0.0, 0.0)),
+            );
+            // Both horses walk, in step: the converted one should move like the original.
+            play(world, editor, FBX_HORSE, "Armature|Walk");
+            editor.selection = find(world, FBX_HORSE).into_iter().collect();
+        })),
+        Step::Wait(40),
+        Step::Shot("25_rigs_playing"),
+        Step::Tab(Tab::Content),
+        // Drag the walk clip from Content onto the standing character.
+        Step::Do(Box::new(|world, editor| {
+            let at = walker_on_screen(world, editor);
+            let ctx = world.resource::<crate::egui_bridge::Egui>().ctx.clone();
+            egui::DragAndDrop::set_payload(&ctx, crate::models::Dragged::Model(CLIP.into()));
+            world
+                .resource_mut::<crate::egui_bridge::EguiInput>()
+                .injected
+                .push(egui::Event::PointerMoved(at));
+        })),
+        Step::Wait(3),
+        Step::Shot("26_drag_clip"),
+        Step::Do(Box::new(|world, editor| {
+            let at = walker_on_screen(world, editor);
+            world
+                .resource_mut::<crate::egui_bridge::EguiInput>()
+                .injected
+                .push(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+        })),
+        Step::Wait(2),
+        Step::Do(Box::new(|world, editor| {
+            editor.selection = find(world, WALKER).into_iter().collect();
+        })),
+        Step::Tab(Tab::Console),
+        Step::Wait(30),
+        Step::Shot("27_clip_dropped"),
+        // The clip picker: the FBX horse trots.
+        Step::Do(Box::new(|world, editor| {
+            play(world, editor, FBX_HORSE, "Armature|Trot");
+            editor.selection = find(world, FBX_HORSE).into_iter().collect();
+        })),
+        Step::Wait(17),
+        Step::Shot("28_trot"),
+        // Save, clear, reopen: the rigs come back from their files, still playing their clips.
+        Step::Do(Box::new(|world, editor| {
+            editor::save_scene(world, editor, SCENE);
+            editor::new_scene(world, editor);
+        })),
+        Step::Wait(4),
+        Step::Do(Box::new(|world, editor| {
+            editor::load_scene(world, editor, SCENE);
+            editor.selection = find(world, WALKER).into_iter().collect();
+        })),
+        Step::Wait(30),
+        Step::Shot("29_reopened"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// One brush dab at ground level under `at` (x, z).
 fn sculpt(
     world: &mut World,

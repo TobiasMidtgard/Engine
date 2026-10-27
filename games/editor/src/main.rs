@@ -25,6 +25,7 @@ mod landscape;
 mod models;
 mod picking;
 mod prefab;
+mod rigs;
 mod sample;
 mod scene_ops;
 mod shots;
@@ -105,6 +106,7 @@ fn main() {
             Some("round3") => shots::round3(dir),
             Some("round4") => shots::round4(dir),
             Some("round5") => shots::round5(dir),
+            Some("round6") => shots::round6(dir),
             _ => shots::gallery(dir),
         };
         app.insert_resource(script);
@@ -137,7 +139,11 @@ impl Plugin for EditorPlugin {
             )
             .register_component::<models::Model>(
                 "Placed from the glTF file at `path` (relative to the asset root); its nodes are \
-                 this entity's children.",
+                 this entity's children, or a file with a skin plays here as a rig.",
+            )
+            .register_component::<rigs::ModelClips>(
+                "Animation files (asset keys) whose clips this rigged model plays too, bones \
+                 matched by name.",
             )
             .register_component::<prefab::PrefabInstance>(
                 "Placed from the prefab file at `path`; the editor can apply changes back to \
@@ -152,6 +158,8 @@ impl Plugin for EditorPlugin {
                     import::file_drops,
                     camera::editor_camera,
                     ui::editor_ui,
+                    rigs::sync,
+                    rigs::preview,
                     demos::sync_demos,
                     landscape::sync_sculpt,
                     models::watch_files,
