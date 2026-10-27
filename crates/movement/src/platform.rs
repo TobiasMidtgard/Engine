@@ -49,9 +49,10 @@ impl Platform {
 /// What the character stands on (or holds on to) this step: the body, its pose now, its
 /// velocity at the character if the body reports one (m/s, own seconds), and whether physics
 /// carries the character with it.
-pub(crate) struct Deck<'a> {
+pub(crate) struct Deck {
     pub entity: Entity,
-    pub transform: &'a Transform,
+    /// Where the deck is in the world.
+    pub transform: Transform,
     pub velocity: Option<Vec3>,
     pub carried: bool,
 }
@@ -160,10 +161,10 @@ mod tests {
 
     const DT: f32 = 1.0 / 60.0;
 
-    fn deck(e: Entity, t: &Transform) -> Option<Deck<'_>> {
+    fn deck(e: Entity, t: &Transform) -> Option<Deck> {
         Some(Deck {
             entity: e,
-            transform: t,
+            transform: *t,
             velocity: None,
             carried: true,
         })
@@ -243,7 +244,7 @@ mod tests {
         };
         let d = Deck {
             entity: e,
-            transform: &t,
+            transform: t,
             velocity: Some(Vec3::new(8.0, 0.0, 0.0)),
             carried: true,
         };

@@ -92,16 +92,30 @@ fn aabb(entity: Entity, t: &Transform, c: &Collider) -> Aabb {
 }
 
 /// Install the stand-in's queries and refresh what they see (FixedUpdate, before gameplay).
+#[allow(clippy::type_complexity)]
 pub(crate) fn publish(
     mut commands: Commands,
     fallback: Option<Res<Fallback>>,
     ground: Res<Ground>,
-    colliders: Query<(Entity, &Transform, &Collider), Without<CharacterController>>,
+    colliders: Query<
+        (
+            Entity,
+            &Transform,
+            &GlobalTransform,
+            Has<ChildOf>,
+            &Collider,
+        ),
+        Without<CharacterController>,
+    >,
 ) {
+    // A child's `Transform` is relative to its parent: it is where its `GlobalTransform` says.
     let boxes: Vec<Aabb> = colliders
         .iter()
-        .filter(|(_, _, c)| !c.sensor)
-        .map(|(e, t, c)| aabb(e, t, c))
+        .filter(|(.., c)| !c.sensor)
+        .map(|(e, t, g, parented, c)| {
+            let t = if parented { g.to_transform() } else { *t };
+            aabb(e, &t, c)
+        })
         .collect();
     match fallback {
         Some(f) => {

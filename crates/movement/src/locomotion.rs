@@ -89,8 +89,30 @@ impl Outputs<'_> {
 
 /// Everything but characters that a character can stand on, hold on to or hook: where it is
 /// and how fast it moves, if it says.
-pub(crate) type Bodies<'w, 's> =
-    Query<'w, 's, (&'static Transform, Option<&'static Velocity>), Without<Mover>>;
+pub(crate) type Bodies<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Transform,
+        Option<&'static Velocity>,
+        &'static GlobalTransform,
+        Has<ChildOf>,
+    ),
+    Without<Mover>,
+>;
+
+/// Where the body `entity` is in the world, and how fast it moves if it says. A body without a
+/// parent goes by its own `Transform` (up to date within the fixed steps of a frame), a child by
+/// its `GlobalTransform`: a child's `Transform` is relative to its parent, so read as a world
+/// pose, a plank tilting under a walker far from its bridge's origin looked like a deck moving
+/// at tens of m/s and flung the walker (playtest 2026-10-27 #18).
+pub(crate) fn body_pose<'a>(
+    bodies: &'a Bodies,
+    entity: Entity,
+) -> Option<(Transform, Option<&'a Velocity>)> {
+    let (t, v, g, parented) = bodies.get(entity).ok()?;
+    Some((if parented { g.to_transform() } else { *t }, v))
+}
 
 /// Zip lines.
 pub(crate) type Lines<'w, 's> = Query<'w, 's, (Entity, &'static Zipline)>;
@@ -130,7 +152,7 @@ impl Probe<'_> {
     /// How fast the point `at` of `entity` moves, if the body says (m/s in the character's
     /// own seconds).
     pub(crate) fn velocity_at(&self, entity: Entity, at: DVec3) -> Option<Vec3> {
-        let (t, v) = self.bodies.get(entity).ok()?;
+        let (t, v) = body_pose(self.bodies, entity)?;
         let v = v?;
         Some((v.linear + v.angular.cross((at - t.translation).as_vec3())) / self.rate)
     }
@@ -159,15 +181,15 @@ impl Probe<'_> {
     /// The cable of the zip line `line`, sagging against `up`.
     pub(crate) fn cable(&self, line: Entity, up: Vec3) -> Option<Cable> {
         let (_, z) = self.lines.get(line).ok()?;
-        let (t, _) = self.bodies.get(line).ok()?;
-        Some(Cable::new(t, z, up))
+        let (t, _) = body_pose(self.bodies, line)?;
+        Some(Cable::new(&t, z, up))
     }
 
     /// Every zip line's cable.
     pub(crate) fn cables(&self, up: Vec3) -> impl Iterator<Item = (Entity, Cable)> + '_ {
         self.lines.iter().filter_map(move |(e, z)| {
-            let (t, _) = self.bodies.get(e).ok()?;
-            Some((e, Cable::new(t, z, up)))
+            let (t, _) = body_pose(self.bodies, e)?;
+            Some((e, Cable::new(&t, z, up)))
         })
     }
 
@@ -205,8 +227,8 @@ impl Probe<'_> {
 
     /// Pins `point` and `dir` to the body `entity`, so they move with it.
     pub(crate) fn pin(&self, entity: Entity, point: DVec3, dir: Vec3) -> Option<Pin> {
-        let (t, _) = self.bodies.get(entity).ok()?;
-        Some(Pin::new(entity, t, point, dir))
+        let (t, _) = body_pose(self.bodies, entity)?;
+        Some(Pin::new(entity, &t, point, dir))
     }
 }
 
@@ -358,7 +380,7 @@ pub(crate) fn step_movers(
             .filter(|_| state.grounded)
             .map(|g| (g, true))
             .or_else(|| held(&m).map(|e| (e, false)))
-            .and_then(|(g, carried)| decks.get(g).ok().map(|(t, vel)| (g, t, vel, carried)))
+            .and_then(|(g, carried)| body_pose(&decks, g).map(|(t, vel)| (g, t, vel, carried)))
             .map(|(g, t, vel, carried)| Deck {
                 entity: g,
                 transform: t,
@@ -476,7 +498,7 @@ fn follow_pins(
     let up = m.up;
     let at = |pin: Option<Pin>| {
         let pin = pin?;
-        bodies.get(pin.entity).ok().map(|(t, _)| pin.place(t))
+        body_pose(bodies, pin.entity).map(|(t, _)| pin.place(&t))
     };
     if let Some(h) = &mut m.hang
         && let Some((top, normal)) = at(h.on)

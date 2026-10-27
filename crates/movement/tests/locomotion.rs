@@ -1993,3 +1993,51 @@ fn wading_slows_deep_water_swims_and_going_in_splashes() {
     assert!(plunge.is_some_and(|d| d.mass_kg >= 30.0), "{pushes:?}");
     assert_eq!(mover(&app, c).mode, LocomotionMode::Swim);
 }
+
+/// Playtest #18 ("walking on the bridge sends the player at an absurd speed in a seeming
+/// random direction"): decks that are children (bridge planks) were read by their
+/// parent-relative `Transform` as if it were a world pose, so a plank tilting a little under
+/// the walker, 30 m from its bridge's origin, looked like a deck moving at metres per step,
+/// and stepping onto the next plank kept that speed.
+#[test]
+fn walking_over_wobbling_child_planks_keeps_a_walking_speed() {
+    let mut app = app();
+    let bridge = app
+        .world
+        .spawn(Transform::from_translation(DVec3::new(-30.0, 0.0, 0.0)))
+        .id();
+    let planks: Vec<Entity> = (0..8)
+        .map(|i| {
+            let x = 28.0 + i as f64 * 0.8;
+            let plank = block(
+                &mut app,
+                DVec3::new(x, 0.25, 0.0),
+                Vec3::new(0.78, 0.5, 2.0),
+            );
+            app.world.entity_mut(plank).insert(ChildOf(bridge));
+            plank
+        })
+        .collect();
+    let c = character(
+        &mut app,
+        DVec3::new(-1.6, 1.45, 0.0),
+        MovementProfile::pilot(),
+    );
+    run(&mut app, 0.5);
+    intent(&mut app, c, |i| i.direction = Vec3::X);
+    let (mut fastest, mut deck) = (0.0f32, 0.0f32);
+    for step in 0..60 {
+        for (i, &p) in planks.iter().enumerate() {
+            let tilt = (step as f32 * 0.4 + i as f32).sin() * 0.6f32.to_radians();
+            app.world.get_mut::<Transform>(p).unwrap().rotation =
+                engine_core::math::Quat::from_rotation_z(tilt);
+        }
+        app.update();
+        let m = mover(&app, c);
+        fastest = fastest.max(m.velocity.length());
+        deck = deck.max(m.platform.map_or(0.0, |p| p.velocity.length()));
+    }
+    assert!(pos(&app, c).x > 2.0, "didn't cross: {:?}", pos(&app, c));
+    assert!(deck < 0.5, "the planks read as moving at {deck:.1} m/s");
+    assert!(fastest < 6.5, "flung at {fastest:.1} m/s");
+}
