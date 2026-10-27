@@ -677,6 +677,56 @@ pub fn round6(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Round 7: the animation timeline. A Rocketbox walker plays a walk clip in place; the clip
+/// is scrubbed to four moments of one stride (a filmstrip); the horse behind keeps walking.
+pub fn round7(dir: impl Into<PathBuf>) -> ShotScript {
+    const WALKER: &str = "fetched/anim/characters/walker.glb";
+    const CLIP: &str = "fetched/anim/clips/m_walk_neutral_01.glb";
+    const HORSE: &str = "fetched/anim/animals/horse/Horse.gltf";
+    fn find(world: &mut World, key: &str) -> Option<Entity> {
+        let mut q = world.query::<(Entity, &crate::models::Model)>();
+        q.iter(world).find(|(_, m)| m.path == key).map(|(e, _)| e)
+    }
+    fn scrub_to(secs: f32) -> Step {
+        Step::Do(Box::new(move |world, _| {
+            if let Some(walker) = find(world, WALKER) {
+                crate::rigs::scrub(world, walker, secs);
+            }
+        }))
+    }
+    let mut steps = vec![
+        // From the side, so the stride reads.
+        Step::Camera(DVec3::new(3.4, 1.2, 0.3), DVec3::new(0.0, 0.9, 0.3)),
+        Step::Select(""),
+        Step::Tab(Tab::Console),
+        Step::Do(Box::new(|world, editor| {
+            crate::models::place(world, editor, WALKER, DVec3::ZERO);
+            crate::models::place(world, editor, HORSE, DVec3::new(0.0, 0.0, -3.0));
+            if let Some(walker) = find(world, WALKER) {
+                crate::rigs::add_clip_file(world, editor, walker, CLIP);
+            }
+        })),
+        Step::Wait(4),
+        Step::Do(Box::new(|world, editor| {
+            if let Some(walker) = find(world, WALKER) {
+                crate::rigs::play_in_place(world, editor, walker, true);
+                editor.selection = vec![walker];
+            }
+        })),
+        Step::Wait(30),
+        Step::Shot("30_in_place_playing"),
+    ];
+    for (secs, name) in [
+        (0.0, "31_scrub_a"),
+        (0.25, "31_scrub_b"),
+        (0.5, "31_scrub_c"),
+        (0.75, "31_scrub_d"),
+    ] {
+        steps.extend([scrub_to(secs), Step::Wait(6), Step::Shot(name)]);
+    }
+    ShotScript::new(dir, steps)
+}
+
 /// One brush dab at ground level under `at` (x, z).
 fn sculpt(
     world: &mut World,

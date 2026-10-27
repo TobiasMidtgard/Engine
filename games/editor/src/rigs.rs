@@ -23,7 +23,9 @@ use engine::prelude::*;
 use engine::render::{Image, StandardMaterial};
 use engine_anim::import::{ImportOptions, import_clips, import_gltf};
 use engine_anim::skin::{SkinnedMesh, SkinnedMeshRenderer};
-use engine_anim::{AnimGraph, AnimationLibrary, Animator, AnimatorSettings, NodeDef};
+use engine_anim::{
+    AnimGraph, AnimationClip, AnimationLibrary, Animator, AnimatorSettings, NodeDef,
+};
 
 use crate::editor::{self, Editor, Mode};
 use crate::models::Model;
@@ -53,6 +55,8 @@ pub struct Rigs {
     clip_files: HashMap<String, Vec<(String, String)>>,
     /// Whether a file holds animations and nothing to draw.
     clip_only: HashMap<String, bool>,
+    /// Travel speed (m/s) a clip's in-place copy lost, by graph name.
+    travel: HashMap<String, f32>,
 }
 
 impl Rigs {
@@ -68,11 +72,14 @@ impl Rigs {
     }
 }
 
-/// Clips from other files this model plays too (asset keys): animation files dropped on it.
+/// How a placed rig plays its clips: clips from other files (asset keys: animation files
+/// dropped on it), and whether walks play in place.
 #[derive(Component, Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelClips {
     pub files: Vec<String>,
+    /// Play every clip with its root's travel taken out (Unity's "Bake Into Pose").
+    pub in_place: bool,
 }
 
 /// This placed model's root shows its file as a rig (`animated`) or as a still node tree. Not
@@ -156,17 +163,14 @@ fn register(
     let mut library = world.get_resource_or_init::<AnimationLibrary>();
     library.add_skeleton(model.skeleton);
     let mut clips = Vec::new();
-    for mut clip in model.clips {
+    let mut speeds = Vec::new();
+    for clip in model.clips {
         let shown = clip.name.clone();
         let graph = format!("{id}#{shown}");
-        clip.name = graph.clone();
-        library.add_clip(clip);
-        library.add_graph(AnimGraph {
-            name: graph.clone(),
-            root: NodeDef::clip(&graph),
-        });
+        speeds.push((graph.clone(), add_clip(&mut library, clip, &graph)));
         clips.push((shown, graph));
     }
+    world.get_resource_or_init::<Rigs>().travel.extend(speeds);
     Ok(Rig {
         skeleton: id.into(),
         mesh,
@@ -230,7 +234,8 @@ fn clip_file(world: &mut World, rig: &Rig, key: &str) -> Result<Vec<(String, Str
     let many = found.len() > 1;
     let mut library = world.get_resource_or_init::<AnimationLibrary>();
     let mut clips = Vec::new();
-    for mut clip in found {
+    let mut speeds = Vec::new();
+    for clip in found {
         // Exporters name takes "Take 001" or "mixamo.com"; the file name says more.
         let shown = if many {
             format!("{stem}: {}", clip.name)
@@ -238,35 +243,62 @@ fn clip_file(world: &mut World, rig: &Rig, key: &str) -> Result<Vec<(String, Str
             stem.clone()
         };
         let graph = format!("{id}#{}", clip.name);
-        clip.name = graph.clone();
-        library.add_clip(clip);
-        library.add_graph(AnimGraph {
-            name: graph.clone(),
-            root: NodeDef::clip(&graph),
-        });
+        speeds.push((graph.clone(), add_clip(&mut library, clip, &graph)));
         clips.push((shown, graph));
     }
-    world
-        .get_resource_or_init::<Rigs>()
-        .clip_files
-        .insert(id, clips.clone());
+    let mut rigs = world.get_resource_or_init::<Rigs>();
+    rigs.travel.extend(speeds);
+    rigs.clip_files.insert(id, clips.clone());
     Ok(clips)
 }
 
-/// Every clip `entity`'s rig can play: its file's own, then those of its clip files.
+/// Every clip `entity`'s rig can play: its file's own, then those of its clip files (their
+/// in-place copies when it plays in place).
 pub fn clips(world: &mut World, rig: &Rig, entity: Entity) -> Vec<(String, String)> {
     let mut all = rig.clips.clone();
-    let files = world
-        .get::<ModelClips>(entity)
-        .map(|c| c.files.clone())
-        .unwrap_or_default();
-    for file in files {
-        match clip_file(world, rig, &file) {
+    let options = world.get::<ModelClips>(entity).cloned().unwrap_or_default();
+    for file in &options.files {
+        match clip_file(world, rig, file) {
             Ok(found) => all.extend(found),
             Err(e) => engine::core::log::warn!("{file}: {e}"),
         }
     }
+    if options.in_place {
+        for (_, graph) in &mut all {
+            graph.push_str(IN_PLACE);
+        }
+    }
     all
+}
+
+/// Where `entity`'s clip is and how long it is, seconds.
+fn playhead(world: &World, entity: Entity) -> Option<(f32, f32)> {
+    let settings = world.get::<AnimatorSettings>(entity)?;
+    let duration = world
+        .get_resource::<AnimationLibrary>()?
+        .clip(&settings.graph)?
+        .duration;
+    let time = world
+        .get::<Animator>(entity)
+        .and_then(|a| a.graph())
+        .and_then(|g| g.describe()["clips"][0]["time"].as_f64())
+        .unwrap_or(0.0) as f32;
+    Some((time, duration))
+}
+
+/// Put `entity`'s clip at `secs` (a fresh animator run up to that time).
+fn seek(world: &mut World, entity: Entity, secs: f32) {
+    let Some(settings) = world.get::<AnimatorSettings>(entity).cloned() else {
+        return;
+    };
+    let Some(library) = world.get_resource::<AnimationLibrary>() else {
+        return;
+    };
+    if let Ok(mut animator) = library.instantiate(&settings.skeleton, &settings.graph) {
+        // A zero run would leave the pose unevaluated.
+        animator.preroll(secs.max(1e-4));
+        world.entity_mut(entity).insert(animator);
+    }
 }
 
 /// Add the clips of the animation file `key` to the rig at `entity` and play the first, as
@@ -375,7 +407,6 @@ fn components(
     )
 }
 
-/// A clip graph's name without its rig's import scale, so a rescaled rig finds the same clip:
 /// Give `entity` the rig's mesh and an animator, keeping its clip choice (and its
 /// [`ModelClips`]' clips) where it can.
 pub fn dress(world: &mut World, rig: &Rig, entity: Entity) {
@@ -394,12 +425,77 @@ pub fn dress(world: &mut World, rig: &Rig, entity: Entity) {
     e.insert(parts);
 }
 
-/// "imported/horse/Horse.glb@1.4#Armature|Walk" → "#Armature|Walk", and a clip file's
-/// "…@1|fetched/anim/clips/m_walk.glb#m_walk" → "|fetched/anim/clips/m_walk.glb#m_walk".
+/// A clip graph's name without its rig's import scale or in-place suffix, so a rescaled rig
+/// or a switch to in place finds the same clip: "imported/horse/Horse.glb@1.4#Armature|Walk"
+/// → "#Armature|Walk", and a clip file's "…@1|fetched/anim/clips/m_walk.glb#m_walk" →
+/// "|fetched/anim/clips/m_walk.glb#m_walk".
 fn clip_name(graph: &str) -> Option<&str> {
     let (_, scaled) = graph.split_once('@')?;
     let start = scaled.find(['#', '|'])?;
-    Some(&scaled[start..])
+    let clip = &scaled[start..];
+    Some(clip.strip_suffix(IN_PLACE).unwrap_or(clip))
+}
+
+/// Graph name suffix of a clip's in-place copy.
+const IN_PLACE: &str = "~in place";
+
+/// Put a clip in the library as authored under `graph`, and a copy with its root's travel taken
+/// out under `graph` + [`IN_PLACE`] (Unity's "Bake Into Pose" for root position: the
+/// character walks on the spot, its sway kept), each with a one-clip graph. Returns the
+/// travel speed the copy lost, m/s.
+fn add_clip(library: &mut AnimationLibrary, mut clip: AnimationClip, graph: &str) -> f32 {
+    let mut still = clip.clone();
+    let speed = take_out_travel(&mut still);
+    clip.name = graph.into();
+    still.name = format!("{graph}{IN_PLACE}");
+    for c in [clip, still] {
+        let name = c.name.clone();
+        library.add_clip(c);
+        library.add_graph(AnimGraph {
+            name: name.clone(),
+            root: NodeDef::clip(&name),
+        });
+    }
+    speed
+}
+
+/// Take the net travel of the clip's moving root out of it, spread evenly over the clip (the
+/// track whose bone ends farthest from where it starts: the hips of a walk, whatever the
+/// rig calls them). Returns the speed removed, m/s.
+fn take_out_travel(clip: &mut AnimationClip) -> f32 {
+    let travel = |t: &engine_anim::clip::BoneTrack| match (
+        t.translation.values.first(),
+        t.translation.values.last(),
+    ) {
+        (Some(a), Some(b)) => *b - *a,
+        _ => Vec3::ZERO,
+    };
+    let Some(track) = clip
+        .tracks
+        .iter_mut()
+        .max_by(|a, b| travel(a).length().total_cmp(&travel(b).length()))
+    else {
+        return 0.0;
+    };
+    let moved = travel(track);
+    // Under a centimetre: an idle's drift, not a walk.
+    if moved.length() < 0.01 || clip.duration <= 0.0 {
+        return 0.0;
+    }
+    let (first, last) = (
+        track.translation.times.first().copied().unwrap_or(0.0),
+        track.translation.times.last().copied().unwrap_or(0.0),
+    );
+    let span = (last - first).max(1e-6);
+    for (t, v) in track
+        .translation
+        .times
+        .iter()
+        .zip(track.translation.values.iter_mut())
+    {
+        *v -= moved * ((t - first) / span);
+    }
+    moved.length() / clip.duration
 }
 
 /// Give placed models that came from a scene file or an undo their rig again (Update,
@@ -454,7 +550,8 @@ pub fn preview(
     }
 }
 
-/// The Details section of a rigged model: clip, speed, pause and the edit-mode preview.
+/// The Details section of a rigged model: clip, speed, pause, in place, and a timeline to play,
+/// pause and scrub the clip while editing (Unity's preview and Unreal Persona's transport).
 pub fn animation_panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, entity: Entity) {
     let Some(key) = world.get::<Model>(entity).map(|m| m.path.clone()) else {
         return;
@@ -504,14 +601,11 @@ pub fn animation_panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor
                         .speed(0.01)
                         .range(0.0..=4.0),
                 );
-                ui.checkbox(&mut after.paused, "Paused");
+                ui.checkbox(&mut after.paused, "Paused")
+                    .on_hover_text("Hold the pose in Play too.");
             });
-            if let Some(mut rigged) = world.get_mut::<Rigged>(entity) {
-                ui.checkbox(&mut rigged.preview, "Preview in edit mode")
-                    .on_hover_text(
-                        "Play the clip while editing; the rest of the world waits for Play.",
-                    );
-            }
+            in_place_toggle(ui, world, editor, entity, &clips, &settings);
+            timeline(ui, world, entity, editor.mode == Mode::Edit);
             if after != settings {
                 editor::apply(
                     world,
@@ -525,6 +619,168 @@ pub fn animation_panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor
                 );
             }
         });
+}
+
+/// "In place" for every clip, switching the playing clip to its in-place copy (or back) in the
+/// same undo step.
+fn in_place_toggle(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    editor: &mut Editor,
+    entity: Entity,
+    clips: &[(String, String)],
+    settings: &AnimatorSettings,
+) {
+    let mut options = world.get::<ModelClips>(entity).cloned().unwrap_or_default();
+    let speed = world
+        .get_resource::<Rigs>()
+        .and_then(|r| r.travel.get(settings.graph.trim_end_matches(IN_PLACE)))
+        .copied()
+        .unwrap_or(0.0);
+    let hint = if speed > 0.0 {
+        format!("in place ({speed:.2} m/s of travel taken out)")
+    } else {
+        "in place".to_string()
+    };
+    if ui
+        .checkbox(&mut options.in_place, hint)
+        .on_hover_text(
+            "Take each clip's root travel out so walks and runs play on the spot, sway kept \
+             (Unity: Root Transform Position, Bake Into Pose). Games then move the character.",
+        )
+        .changed()
+    {
+        set_in_place(world, editor, entity, clips, settings, options);
+    }
+}
+
+/// Apply `options` (with a changed `in_place`) and move the playing clip to its in-place copy
+/// or back, as one undo step.
+fn set_in_place(
+    world: &mut World,
+    editor: &mut Editor,
+    entity: Entity,
+    clips: &[(String, String)],
+    settings: &AnimatorSettings,
+    options: ModelClips,
+) {
+    let before = world.get::<ModelClips>(entity).cloned();
+    let mut after = settings.clone();
+    if let Some((_, graph)) = clips.iter().find(|(_, g)| *g == settings.graph) {
+        let base = graph.trim_end_matches(IN_PLACE).to_string();
+        after.graph = if options.in_place {
+            format!("{base}{IN_PLACE}")
+        } else {
+            base
+        };
+    }
+    editor::apply(
+        world,
+        editor,
+        Command::Group(
+            if options.in_place {
+                "Play in place".into()
+            } else {
+                "Play with travel".into()
+            },
+            vec![
+                Command::Component {
+                    entity,
+                    name: "ModelClips".into(),
+                    before: before.and_then(|c| serde_json::to_value(c).ok()),
+                    after: serde_json::to_value(&options).ok(),
+                },
+                Command::Component {
+                    entity,
+                    name: "AnimatorSettings".into(),
+                    before: serde_json::to_value(settings).ok(),
+                    after: serde_json::to_value(&after).ok(),
+                },
+            ],
+        ),
+    );
+}
+
+/// Play/pause, back to the start, one frame on, and a scrub bar with the time and frame.
+fn timeline(ui: &mut egui::Ui, world: &mut World, entity: Entity, editing: bool) {
+    const FPS: f32 = 30.0;
+    let Some((time, duration)) = playhead(world, entity) else {
+        return;
+    };
+    let playing = world.get::<Rigged>(entity).is_some_and(|r| r.preview);
+    let mut seek_to = None;
+    let mut play = None;
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(editing, |ui| {
+            let (icon, tip) = if playing {
+                ("⏸", "Pause the preview")
+            } else {
+                ("▶", "Play the clip while editing")
+            };
+            if ui.button(icon).on_hover_text(tip).clicked() {
+                play = Some(!playing);
+            }
+            if ui.button("⏮").on_hover_text("Back to the start").clicked() {
+                seek_to = Some(0.0);
+            }
+            if ui.button("⏭").on_hover_text("One frame on").clicked() {
+                seek_to = Some((time + 1.0 / FPS).min(duration));
+            }
+            let mut t = time;
+            ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(40.0);
+            if ui
+                .add(egui::Slider::new(&mut t, 0.0..=duration.max(1e-3)).show_value(false))
+                .on_hover_text("Drag to any moment of the clip")
+                .changed()
+            {
+                seek_to = Some(t);
+            }
+        });
+    });
+    ui.label(
+        egui::RichText::new(format!(
+            "{time:.2} / {duration:.2} s   frame {} / {}",
+            (time * FPS).round() as i32,
+            (duration * FPS).round() as i32
+        ))
+        .monospace()
+        .small(),
+    );
+    if let Some(on) = play
+        && let Some(mut rigged) = world.get_mut::<Rigged>(entity)
+    {
+        rigged.preview = on;
+    }
+    if let Some(t) = seek_to {
+        scrub(world, entity, t);
+    }
+}
+
+/// Play `entity`'s clips in place or with their travel (scripts and tests; Details has the
+/// checkbox).
+pub fn play_in_place(world: &mut World, editor: &mut Editor, entity: Entity, on: bool) {
+    let Some(key) = world.get::<Model>(entity).map(|m| m.path.clone()) else {
+        return;
+    };
+    let scale = crate::models::import_scale(world, &key);
+    let (Ok(Some(rig)), Some(settings)) = (
+        rig(world, &key, scale),
+        world.get::<AnimatorSettings>(entity).cloned(),
+    ) else {
+        return;
+    };
+    let clips = clips(world, &rig, entity);
+    let mut options = world.get::<ModelClips>(entity).cloned().unwrap_or_default();
+    options.in_place = on;
+    set_in_place(world, editor, entity, &clips, &settings, options);
+}
+
+/// Hold `entity`'s clip at `secs` (stops the edit-mode preview there).
+pub fn scrub(world: &mut World, entity: Entity, secs: f32) {
+    if let Some(mut rigged) = world.get_mut::<Rigged>(entity) {
+        rigged.preview = false;
+    }
+    seek(world, entity, secs);
 }
 
 #[cfg(test)]
@@ -542,6 +798,39 @@ mod tests {
             Some("|fetched/anim/clips/m_walk.glb#m_walk")
         );
         assert_eq!(clip_name(""), None);
+    }
+
+    #[test]
+    fn in_place_takes_the_walk_out_and_keeps_the_sway() {
+        use engine_anim::clip::{BoneTrack, Track};
+        let mut clip = AnimationClip::new("walk", 2.0);
+        let mut hips = BoneTrack {
+            bone: "Hips".into(),
+            ..Default::default()
+        };
+        hips.translation = Track {
+            times: vec![0.0, 1.0, 2.0],
+            values: vec![
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.1, 1.05, 1.5),
+                Vec3::new(0.0, 1.0, 3.0),
+            ],
+            step: false,
+        };
+        clip.tracks.push(hips);
+        let speed = take_out_travel(&mut clip);
+        assert!((speed - 1.5).abs() < 1e-5, "3 m in 2 s: {speed}");
+        let v = &clip.tracks[0].translation.values;
+        assert_eq!(v[0], v[2], "loops on the spot");
+        assert!(
+            (v[1] - Vec3::new(0.1, 1.05, 0.0)).length() < 1e-5,
+            "sway kept: {}",
+            v[1]
+        );
+
+        let mut idle = AnimationClip::new("idle", 2.0);
+        assert_eq!(take_out_travel(&mut idle), 0.0);
+        assert_eq!(clip_name("a.glb@1#walk~in place"), Some("#walk"));
     }
 
     #[test]
