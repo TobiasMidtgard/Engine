@@ -46,6 +46,13 @@ pub struct FloatTest {
     pub replay: bool,
 }
 
+impl FloatTest {
+    /// Move into the frame `s` leads to ([`super::follow_world_shift`]).
+    pub(super) fn follow(&mut self, s: &engine_world::WorldShift) {
+        self.origin = s.point(self.origin);
+    }
+}
+
 /// Put a float test on the water: `at` is the middle of its two rows, on the water surface.
 /// The rows are 10.5 m long (X) and 4 m apart (Z); give it about 14 × 8 m of open water at
 /// least 2 m deep (the steel ball sinks to the bottom).

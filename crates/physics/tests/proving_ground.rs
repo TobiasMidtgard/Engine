@@ -8,7 +8,7 @@ use engine_core::time::TimeSource;
 use engine_physics::demo::{self, Station};
 use engine_physics::{PhysicsPlugin, PhysicsStats};
 use engine_world::physics::{BodyKind, Collider, ColliderShape, RigidBody, Velocity};
-use engine_world::{SimulationFocus, WorldPlugin};
+use engine_world::{SimulationFocus, WorldPlugin, WorldShift};
 use serde_json::json;
 
 fn app() -> App {
@@ -818,4 +818,49 @@ fn a_galton_board_nobody_has_seen_rests_poured() {
         .map(|(a, b)| a.distance(b))
         .fold(0.0, f64::max);
     assert!(moved < 0.001, "a resting ball moved {moved} m");
+}
+
+/// After the world shifts (a re-homing moved the yard 3 km and 125 m down), the yard plays on
+/// where it now is: the Jenga rod keeps to its tower (it was driven back to the old frame
+/// every step and hung 125 m up), and a replayed station is built on the moved slab.
+#[test]
+fn the_yard_follows_a_world_shift() {
+    let mut app = app();
+    app.update();
+    // The corner of the Galton hopper's heap of balls, as built.
+    let hopper = |app: &mut App| {
+        named(app, "Galton ball")
+            .into_iter()
+            .map(|e| app.world.get::<Transform>(e).unwrap().translation)
+            .fold(DVec3::splat(f64::INFINITY), |a, b| a.min(b))
+    };
+    let built = hopper(&mut app);
+    app.update_n(60);
+    let at = |app: &mut App, name: &str| {
+        let e = named(app, name)[0];
+        app.world.get::<Transform>(e).unwrap().translation
+    };
+    let rod_from_tower = at(&mut app, "Jenga rod") - at(&mut app, "Jenga block 0 0");
+    let s = WorldShift::translate(DVec3::new(3000.0, -125.0, 40.0));
+    app.world.write_message(s);
+    app.update();
+    app.update_n(120);
+    let now = at(&mut app, "Jenga rod") - at(&mut app, "Jenga block 0 0");
+    assert!(
+        (now - rod_from_tower).length() < 5.0,
+        "the Jenga rod is {:?} from its tower, was {rod_from_tower:?}",
+        now
+    );
+    let r = call_api(
+        &mut app.world,
+        "physics.proving_ground.replay",
+        json!({ "station": "galton" }),
+    );
+    assert!(r.is_ok(), "{r:?}");
+    app.update();
+    let off = hopper(&mut app) - s.point(built);
+    assert!(
+        off.length() < 0.05,
+        "the replayed Galton board is {off:?} off the moved yard"
+    );
 }

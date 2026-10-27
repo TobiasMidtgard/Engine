@@ -57,7 +57,7 @@ use engine_world::physics::{
     BodyKind, CharacterController, CharacterMove, Collider, ColliderShape, Joint, JointKind,
     JointMotor, RigidBody, Velocity,
 };
-use engine_world::{FocusPoints, SurfaceId, SurfaceMaterial, SurfaceMaterials};
+use engine_world::{FocusPoints, SurfaceId, SurfaceMaterial, SurfaceMaterials, WorldShift};
 
 /// Size of the concrete yard (x, z), meters.
 pub const YARD_SIZE: [f64; 2] = [70.0, 50.0];
@@ -863,6 +863,36 @@ pub(crate) struct StationWork {
     rest: Vec<(Entity, Station)>,
     /// Resting before their drop played out: settled off the frame.
     unsettled: Vec<(Entity, DVec3, Station)>,
+}
+
+/// Follow a [`WorldShift`] (a floating-origin move, a re-homing, a trip to another body):
+/// the yards' and float tests' origins, and settles still running on workers, move into the
+/// new frame with everything else, so the Jenga rod is driven, stations rest and wake, and
+/// replays build where the yard now is. (Before, the rod was dragged back to the old frame
+/// every step, 125 m up after a re-homing.) Stations build along the frame's axes: whenever
+/// anyone is near a yard the frame is its home's, level there.
+pub(crate) fn follow_world_shift(
+    mut shifts: MessageReader<WorldShift>,
+    mut grounds: Query<&mut ProvingGround>,
+    mut floats: Query<&mut floaters::FloatTest>,
+    mut work: ResMut<StationWork>,
+    settling: Option<ResMut<settle::Settling>>,
+) {
+    let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) else {
+        return;
+    };
+    for mut g in &mut grounds {
+        g.origin = s.point(g.origin);
+    }
+    for mut f in &mut floats {
+        f.follow(&s);
+    }
+    for u in &mut work.unsettled {
+        u.1 = s.point(u.1);
+    }
+    if let Some(mut settling) = settling {
+        settling.follow(&s);
+    }
 }
 
 /// Is there anything for [`replay_stations`] to do this step: a station to replay, rest or

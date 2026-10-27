@@ -13,8 +13,8 @@ use std::thread::JoinHandle;
 use engine_core::ecs::entity::EntityHashSet;
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_world::Gravity;
 use engine_world::physics::{BodyKind, Collider, Joint, RigidBody};
+use engine_world::{Gravity, WorldShift};
 use rapier3d::prelude::{ColliderBuilder, PhysicsWorld, Pose, RigidBodyBuilder};
 
 use super::YARD_SIZE;
@@ -25,14 +25,22 @@ const SETTLE_SECS: f32 = 6.0;
 /// A settled body: its entity, how far it moved and its new rotation.
 type Settled = Vec<(Entity, DVec3, Quat)>;
 
-/// Settles running on workers.
+/// Settles running on workers, each with the world shifts since it started (it works in the
+/// frame it started in).
 #[derive(Resource, Default)]
-pub(crate) struct Settling(Vec<JoinHandle<Settled>>);
+pub(crate) struct Settling(Vec<(JoinHandle<Settled>, WorldShift)>);
 
 impl Settling {
     /// Has a settle finished, for [`finish`] to apply?
     pub(crate) fn any_done(&self) -> bool {
-        self.0.iter().any(|h| h.is_finished())
+        self.0.iter().any(|(h, _)| h.is_finished())
+    }
+
+    /// The world moved into the frame `s` leads to while these ran.
+    pub(crate) fn follow(&mut self, s: &WorldShift) {
+        for (_, since) in &mut self.0 {
+            *since = since.then(s);
+        }
     }
 }
 
@@ -110,9 +118,9 @@ pub(crate) fn start(world: &mut World, origin: DVec3, bodies: &[Entity]) {
         Ok(handle) => world
             .get_resource_or_insert_with(Settling::default)
             .0
-            .push(handle),
+            .push((handle, WorldShift::IDENTITY)),
         // No threads (or none left): settle here, behind the loading screen.
-        Err(_) => apply(world, job()),
+        Err(_) => apply(world, job(), &WorldShift::IDENTITY),
     }
 }
 
@@ -203,21 +211,22 @@ pub(crate) fn finish(world: &mut World) {
     }
     let (done, running): (Vec<_>, Vec<_>) = std::mem::take(&mut s.0)
         .into_iter()
-        .partition(|h| h.is_finished());
+        .partition(|(h, _)| h.is_finished());
     s.0 = running;
-    for h in done {
+    for (h, since) in done {
         if let Ok(settled) = h.join() {
-            apply(world, settled);
+            apply(world, settled, &since);
         }
     }
 }
 
-fn apply(world: &mut World, settled: Settled) {
+/// Move the settled bodies, the settle's frame turned into the world's by `since`.
+fn apply(world: &mut World, settled: Settled, since: &WorldShift) {
     // (A station rebuilt meanwhile despawned these.)
     for (e, moved, rotation) in settled {
         if let Some(mut t) = world.get_mut::<Transform>(e) {
-            t.translation += moved;
-            t.rotation = rotation;
+            t.translation += since.rotation * moved;
+            t.rotation = since.orientation(rotation);
         }
     }
 }

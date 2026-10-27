@@ -204,7 +204,8 @@ impl Plugin for PhysicsPlugin {
             .add_systems(Update, fit::fit_colliders.run_if(fit::fits_waiting))
             .add_systems(
                 PostUpdate,
-                shift::shift_simulation.in_set(engine_world::WorldShiftSet::Apply),
+                (shift::shift_simulation, demo::follow_world_shift)
+                    .in_set(engine_world::WorldShiftSet::Apply),
             )
             .add_systems(PostUpdate, debug::draw_physics_debug)
             .add_systems(Last, step::note_removals);
