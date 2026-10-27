@@ -328,6 +328,11 @@ pub struct Sim {
     aero_force: Vec<Vec3>,
     split: Split,
     self_contacts: SelfContacts,
+    /// Where the particles were before the substeps since self-collision last pushed them
+    /// apart (which side of each other they are on).
+    self_ref: Vec<Vec3>,
+    /// Self-collision ran last substep (or none has this step): `self_ref` is taken anew.
+    self_fresh: bool,
     /// Steps left without self-collision for a cloth found bunched into a ball.
     tangled: u32,
 }
@@ -733,6 +738,11 @@ impl Sim {
         // The air's force changes slowly next to the substeps (Chaos Cloth applies it once a
         // frame at 60 Hz), so it is sampled at least every 1/240 s, not every substep.
         let aero_every = (n / 4).max(1);
+        // Self-collision likewise every 1/300 s or so, not every substep, always on the last
+        // (Chaos Cloth's `NumSelfCollisionSubsteps`): the pairs it keeps apart close by little
+        // within a substep, and finding which side each was on uses where it last pushed.
+        let self_every = (n / 5).max(1);
+        self.self_fresh = true;
         if self.split.starts.len() > 2
             && self.shapes.is_empty()
             && self.aero_triangles.is_empty()
@@ -743,7 +753,9 @@ impl Sim {
             for k in 0..n {
                 let t0 = k as f32 / n as f32;
                 let t1 = (k + 1) as f32 / n as f32;
-                self.substep(h, t0, t1, dt, colliders, k % aero_every == 0);
+                let air = k % aero_every == 0;
+                let solve_self = (n - 1 - k).is_multiple_of(self_every);
+                self.substep(h, t0, t1, dt, colliders, (air, solve_self));
             }
         }
         self.params.time += dt;
@@ -976,7 +988,7 @@ impl Sim {
         t1: f32,
         dt: f32,
         colliders: &[LocalCollider],
-        sample_air: bool,
+        (sample_air, solve_self): (bool, bool),
     ) {
         let inv_h = 1.0 / h;
         let inv_h2 = inv_h * inv_h;
@@ -1134,6 +1146,10 @@ impl Sim {
             skin_capsules: &self.skin_capsules,
             pins: &self.pins,
         };
+        if self.self_fresh {
+            self.self_ref.clone_from(&self.pos);
+            self.self_fresh = false;
+        }
         let split = &self.split;
         let accel = &self.accel;
         let frame_impulses = for_runs(
@@ -1156,16 +1172,17 @@ impl Sim {
         for s in &mut self.shapes {
             solve_shape(s, pos, w, h, inv_h2);
         }
-        if !self.self_contacts.close.is_empty() {
+        if solve_self && !self.self_contacts.close.is_empty() {
             collide_self(
                 pos,
-                &self.prev,
+                &self.self_ref,
                 w,
                 &self.aero_triangles,
                 p.self_collide,
                 p.friction,
                 &self.self_contacts.close,
             );
+            self.self_fresh = true;
         }
 
         // Collisions, then velocities.
@@ -1674,7 +1691,7 @@ fn collide_run(t: &Touch, run: Run) -> Touched {
 struct SelfContacts {
     pairs: Vec<(u32, u32)>,
     /// The pairs that can touch during this step (within the gap plus how far they can
-    /// close at the speed the cloth last moved), solved every substep.
+    /// close at the speed the cloth last moved), solved every substep or few.
     close: Vec<(u32, u32)>,
     /// Positions at the start of the last step, and how far each particle moved in it
     /// (besides the whole cloth's drift), m.
@@ -1965,14 +1982,23 @@ impl Patches {
 impl SelfContacts {
     fn update(&mut self, pos: &[Vec3], w: &[f32], triangles: &[[u32; 3]], gap: f32) {
         let center = pos.iter().sum::<Vec3>() / pos.len().max(1) as f32;
-        // How far each particle moved last step; it moves about as far in this one.
+        // How far each particle moved last step besides the whole cloth's drift and turn (a
+        // sheet swinging on its hook closes no pairs by it); it moves about as far in this one.
         self.motion.clear();
         if self.last.len() == pos.len() {
-            let shift = center - self.last.iter().sum::<Vec3>() / pos.len() as f32;
+            let was = self.last.iter().sum::<Vec3>() / pos.len() as f32;
+            let mut a = Mat3::ZERO;
+            for (p, l) in pos.iter().zip(&self.last) {
+                let (r, s) = (*p - center, *l - was);
+                a += Mat3::from_cols(r * s.x, r * s.y, r * s.z);
+            }
+            let mut turn = Quat::IDENTITY;
+            extract_rotation(&a, &mut turn, 3);
+            let rot = Mat3::from_quat(turn);
             self.motion.extend(
                 pos.iter()
                     .zip(&self.last)
-                    .map(|(p, l)| (*p - *l - shift).length()),
+                    .map(|(p, l)| (*p - center - rot * (*l - was)).length()),
             );
         } else {
             self.motion.resize(pos.len(), f32::INFINITY);
@@ -2189,9 +2215,39 @@ impl SelfContacts {
                 }
             }
         };
-        // A big search splits over the compute pool, by triangles.
+        // A big search splits over the compute pool, by triangles. Searching again for a few
+        // moved particles, only the patches they reach or bend.
         self.hot.clear();
-        self.hot.extend(self.patches.hot_triangles());
+        if moved_only {
+            let movers: Vec<Vec3> = (0..pos.len())
+                .filter(|&i| moved[i] && w[i] > 0.0)
+                .map(|i| pos[i])
+                .collect();
+            let (lo, hi) = movers.iter().fold(
+                (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+            );
+            let patches = &self.patches;
+            for k in (0..patches.count()).filter(|&k| patches.hot[k]) {
+                let tris =
+                    &patches.tris[patches.starts[k] as usize..patches.starts[k + 1] as usize];
+                let (blo, bhi) = patches.bounds[k];
+                let reached = blo.cmple(hi).all()
+                    && bhi.cmpge(lo).all()
+                    && movers
+                        .iter()
+                        .any(|p| p.cmpge(blo).all() && p.cmple(bhi).all());
+                let bent = || {
+                    tris.iter()
+                        .any(|&t| triangles[t as usize].iter().any(|&v| moved[v as usize]))
+                };
+                if reached || bent() {
+                    self.hot.extend_from_slice(tris);
+                }
+            }
+        } else {
+            self.hot.extend(self.patches.hot_triangles());
+        }
         let threads = leaf_pool().thread_num();
         let tasks = (self.hot.len() / SEARCH_CHUNK).clamp(1, threads);
         if tasks > 1 {
