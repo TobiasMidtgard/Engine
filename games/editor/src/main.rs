@@ -110,6 +110,7 @@ fn main() {
             Some("round6") => shots::round6(dir),
             Some("round7") => shots::round7(dir),
             Some("round8") => shots::round8(dir),
+            Some("play") => shots::play_in_editor(dir),
             _ => shots::gallery(dir),
         };
         app.insert_resource(script);

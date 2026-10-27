@@ -751,6 +751,39 @@ pub fn round8(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
+/// back. For checking the windowed renderer (run under a real or virtual display).
+pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {
+    let steps = vec![
+        Step::Camera(DVec3::new(6.5, 3.0, 9.5), DVec3::new(0.5, 0.8, 0.0)),
+        Step::Select(""),
+        Step::Tab(Tab::Console),
+        Step::Do(Box::new(|world, editor| {
+            crate::models::place(
+                world,
+                editor,
+                "fetched/anim/animals/horse/Horse.gltf",
+                DVec3::new(-2.0, 0.0, 1.0),
+            );
+            crate::models::place(
+                world,
+                editor,
+                "fetched/anim/characters/walker.glb",
+                DVec3::new(1.0, 0.0, 2.0),
+            );
+        })),
+        Step::Wait(20),
+        Step::Shot("pie_1_edit"),
+        Step::Do(Box::new(editor::play)),
+        Step::Wait(90),
+        Step::Shot("pie_2_playing"),
+        Step::Do(Box::new(editor::stop)),
+        Step::Wait(20),
+        Step::Shot("pie_3_stopped"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// One brush dab at ground level under `at` (x, z).
 fn sculpt(
     world: &mut World,
