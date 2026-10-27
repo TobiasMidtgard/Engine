@@ -1293,11 +1293,7 @@ pub fn hay_bale(seed: u32) -> Mesh {
         for k in 0..rows.len() as u32 - 1 {
             for i in 0..sides as u32 {
                 let a = base + k * row + i;
-                if region == 0 {
-                    b.quad(a, a + row, a + row + 1, a + 1);
-                } else {
-                    b.quad(a, a + 1, a + row + 1, a + row);
-                }
+                b.quad(a, a + 1, a + row + 1, a + row);
             }
         }
     }
@@ -1319,7 +1315,7 @@ pub fn hay_bale(seed: u32) -> Mesh {
         for k in 0..side_rows.len() as u32 - 1 {
             for i in 0..half as u32 {
                 let a = base + k * row + i;
-                b.quad(a, a + row, a + row + 1, a + 1);
+                b.quad(a, a + 1, a + row + 1, a + row);
             }
         }
     }
@@ -1563,7 +1559,7 @@ fn split_log(b: &mut MeshBuilder, length: f32, radius: f32, wedge: f32, seed: u3
             for j in 0..rings as u32 {
                 for i in 0..face_n as u32 {
                     let q = base + j * row + i;
-                    if side == 0 {
+                    if side == 1 {
                         log.quad(q, q + row, q + row + 1, q + 1);
                     } else {
                         log.quad(q, q + 1, q + row + 1, q + row);
@@ -1754,6 +1750,50 @@ mod tests {
         let b = roof.aabb();
         assert!(b.max.y < 0.06 && b.min.y > -0.06, "{b:?}");
         assert!(b.max.x <= 1.76 && b.max.z <= 1.81, "{b:?}");
+    }
+
+    /// Share of a mesh's triangles whose winding faces the way their normals do (front faces
+    /// outward; the rest are culled and show what's behind them).
+    fn wound_out(m: &Mesh) -> f32 {
+        let (mut out, mut total) = (0, 0);
+        for t in m.indices.chunks(3) {
+            let p = |i: u32| Vec3::from(m.vertices[i as usize].position);
+            let face = (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0]));
+            let n: Vec3 = t
+                .iter()
+                .map(|&i| Vec3::from(m.vertices[i as usize].normal))
+                .sum();
+            if face.length_squared() > 1e-14 {
+                total += 1;
+                out += (face.dot(n) > 0.0) as u32;
+            }
+        }
+        out as f32 / total.max(1) as f32
+    }
+
+    #[test]
+    fn props_face_outward() {
+        // The bale's sides and one end, and one split face of each log, were wound inside
+        // out: from outside they were culled, and a bale showed the fire behind it through
+        // its sides like a glass lantern.
+        let tree = grow_tree(&TreeParams {
+            height: 8.0,
+            crown_base: 2.6,
+            crown_radius: 2.8,
+            trunk_radius: 0.28,
+            seed: 7,
+        });
+        for (name, m) in [
+            ("bale", hay_bale(3)),
+            ("stones", campfire_stones(0.8, 13, 1)),
+            ("firewood", campfire_wood(2)),
+            ("shed wall", shed_wall(0)),
+            ("shed roof", shed_roof()),
+            ("trunk", tree.wood),
+        ] {
+            let share = wound_out(&m);
+            assert!(share > 0.99, "{name}: {share}");
+        }
     }
 
     #[test]
