@@ -28,6 +28,7 @@ mod models;
 mod outline;
 mod picking;
 mod prefab;
+mod remap;
 mod rigs;
 mod sample;
 mod scene_ops;
@@ -116,6 +117,7 @@ fn main() {
             Some("round9") => shots::round9(dir),
             Some("round10") => shots::round10(dir),
             Some("round11") => shots::round11(dir),
+            Some("round12") => shots::round12(dir),
             Some("play") => shots::play_in_editor(dir),
             _ => shots::gallery(dir),
         };

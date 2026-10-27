@@ -335,6 +335,7 @@ fn spawn(
         scale_nodes(world, entity, scale);
         entity
     };
+    crate::remap::apply(world, key, rigged);
     let animated = world.get::<engine_anim::AnimatorSettings>(rigged).is_some();
     world.entity_mut(rigged).insert(crate::rigs::Rigged {
         animated,

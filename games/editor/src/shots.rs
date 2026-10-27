@@ -960,6 +960,74 @@ pub fn round11(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// The well model round 12 imports.
+const WELL: &str = "imported/stonewell/StoneWell.glb";
+
+/// The well's import settings as saved.
+fn well_settings(world: &World) -> crate::import::ImportSettings {
+    let root = world
+        .get_resource::<engine::assets::AssetServer>()
+        .map(|s| s.root())
+        .unwrap_or_default();
+    crate::import::settings_for(&root, WELL).unwrap_or_default()
+}
+
+/// Round 12: a model's materials find their textures by name. `ROUND12_MODEL` is a folder
+/// holding `StoneWell.fbx` (named materials, no textures, as Blender exports for Substance
+/// Painter) and `Textures/StoneWell_<material>_<map>` texture sets.
+pub fn round12(dir: impl Into<PathBuf>) -> ShotScript {
+    let steps = vec![
+        Step::Camera(DVec3::new(5.2, 2.9, 6.4), DVec3::new(1.6, 1.0, 1.8)),
+        Step::Select(""),
+        // The folder dropped on the editor; then the well the way the file alone draws it.
+        Step::Do(Box::new(|world, editor| {
+            let folder = PathBuf::from(std::env::var("ROUND12_MODEL").unwrap_or_default());
+            crate::import::import_paths(
+                world,
+                editor,
+                &[folder],
+                Some(DVec3::new(1.6, 0.0, 1.8)),
+                None,
+            );
+            let mut settings = well_settings(world);
+            settings.materials.clear();
+            settings.summary = settings
+                .summary
+                .split("; ")
+                .next()
+                .unwrap_or_default()
+                .into();
+            editor.model_filter = "stonewell".into();
+            crate::import::save_remaps(world, editor, WELL, &settings);
+        })),
+        Step::Tab(Tab::Console),
+        Step::Wait(60),
+        Step::Shot("53_as_the_file_has_it"),
+        // Search and remap: the Painter texture sets beside it, by material name.
+        Step::Do(Box::new(|world, editor| {
+            let settings = well_settings(world);
+            crate::import::search_textures(world, editor, WELL, settings);
+        })),
+        Step::Wait(80),
+        Step::Shot("54_textures_found_by_name"),
+        // A remap by hand in the Details list: the cobbles get round 11's ground.
+        Step::Do(Box::new(|world, editor| {
+            let ground = "imported/materials/ground054/ground054.material.gltf";
+            let mut settings = well_settings(world);
+            settings.materials.insert("Cobbles".into(), ground.into());
+            crate::import::save_remaps(world, editor, WELL, &settings);
+        })),
+        Step::Tab(Tab::History),
+        Step::Wait(60),
+        Step::Shot("55_remapped_by_hand"),
+        Step::Camera(DVec3::new(3.2, 1.9, 3.9), DVec3::new(1.6, 1.0, 1.8)),
+        Step::Tab(Tab::Content),
+        Step::Wait(30),
+        Step::Shot("56_close_up"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {

@@ -149,6 +149,8 @@ pub struct Editor {
     pub file_drops: Vec<std::path::PathBuf>,
     /// The selected model's import settings while they're edited (asset key, settings).
     pub import_edit: Option<(String, crate::import::ImportSettings)>,
+    /// The materials of the file `import_edit` is for, for its remap list.
+    pub import_materials: Vec<crate::remap::FileMaterial>,
     /// What each model file holds (the Content panel's hover preview), by asset key.
     pub model_info: HashMap<String, String>,
     /// The Content panel's import path.
@@ -195,6 +197,7 @@ impl Editor {
             import_path: String::new(),
             file_hover: None,
             import_edit: None,
+            import_materials: Vec::new(),
             model_info: HashMap::new(),
             file_drops: Vec::new(),
         }

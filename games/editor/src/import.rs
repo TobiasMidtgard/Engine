@@ -4,6 +4,7 @@
 //! `<file>.import.json`. While a placed model's source file changes, the editor copies it
 //! again and the placed copies rebuild (see [`crate::models::watch_files`]).
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use engine::assets::AssetServer;
@@ -32,6 +33,10 @@ pub struct ImportSettings {
     pub collider: String,
     /// What the last import found (nodes, meshes, materials, what was left out).
     pub summary: String,
+    /// The model's materials by name, and the material file each is drawn with instead
+    /// (Unity's Remapped Materials): texture sets found by name on import, or picked in the
+    /// Details panel. An empty value draws the file's own.
+    pub materials: BTreeMap<String, String>,
 }
 
 impl Default for ImportSettings {
@@ -42,6 +47,7 @@ impl Default for ImportSettings {
             scale: 1.0,
             collider: "box".into(),
             summary: String::new(),
+            materials: BTreeMap::new(),
         }
     }
 }
@@ -181,6 +187,7 @@ pub fn import_file(root: &Path, source: &Path) -> Result<String, String> {
             return Err(format!("{} is missing", source.display()));
         }
         settings.summary = crate::convert::to_glb(source, &dest)?.describe();
+        find_textures(root, &key, source, &mut settings);
         save_settings(root, &key, &settings)?;
         return Ok(key);
     }
@@ -204,8 +211,25 @@ pub fn import_file(root: &Path, source: &Path) -> Result<String, String> {
         std::fs::copy(from, to).map_err(|e| format!("{}: {e}", from.display()))?;
     }
     settings.summary.clear();
+    find_textures(root, &key, source, &mut settings);
     save_settings(root, &key, &settings)?;
     Ok(key)
+}
+
+/// Texture sets near `source` for the imported model's untextured materials, noted in the
+/// summary ([`crate::remap`]).
+fn find_textures(root: &Path, key: &str, source: &Path, settings: &mut ImportSettings) {
+    let near = std::path::absolute(source)
+        .unwrap_or_else(|_| source.to_path_buf())
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    if let Some(found) = crate::remap::search_and_remap(root, key, &near, settings) {
+        if !settings.summary.is_empty() {
+            settings.summary.push_str("; ");
+        }
+        settings.summary.push_str(&found);
+    }
 }
 
 fn settings_path(asset: &Path) -> PathBuf {
@@ -251,11 +275,20 @@ pub fn settings_panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor,
     };
     if editor.import_edit.as_ref().is_none_or(|(k, _)| *k != key) {
         editor.import_edit = settings_for(&root, &key).map(|s| (key.clone(), s));
+        editor.import_materials = crate::remap::file_materials(&root.join(&key));
     }
+    let library: Vec<String> = crate::models::cached(world, editor)
+        .iter()
+        .filter(|k| crate::materials::is_material(k))
+        .cloned()
+        .collect();
+    let file_materials = std::mem::take(&mut editor.import_materials);
     let Some((_, settings)) = editor.import_edit.as_mut() else {
         return;
     };
     let mut apply = false;
+    let mut remap = false;
+    let mut search = false;
     egui::CollapsingHeader::new(egui::RichText::new("📥 Import settings").strong())
         .default_open(true)
         .show(ui, |ui| {
@@ -290,6 +323,16 @@ pub fn settings_panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor,
             if !settings.summary.is_empty() {
                 ui.label(crate::theme::dim(&settings.summary));
             }
+            if !file_materials.is_empty() {
+                remap = materials_list(ui, settings, &file_materials, &library);
+                search = ui
+                    .button("🔍 Search and remap")
+                    .on_hover_text(
+                        "Look beside the source file for texture sets named after the \
+                         materials that have none (Substance Painter's mesh_material_BaseColor)",
+                    )
+                    .clicked();
+            }
             apply = ui
                 .button("🔄 Apply and reimport")
                 .on_hover_text(
@@ -297,9 +340,18 @@ pub fn settings_panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor,
                 )
                 .clicked();
         });
+    editor.import_materials = file_materials;
+    let edited = settings.clone();
+    if search {
+        search_textures(world, editor, &key, edited);
+        return;
+    }
+    if remap {
+        save_remaps(world, editor, &key, &edited);
+        return;
+    }
     if apply {
         let t = now(world);
-        let edited = settings.clone();
         if let Err(e) = save_settings(&root, &key, &edited) {
             editor.error(t, format!("Could not save import settings: {e}"));
             return;
@@ -314,6 +366,118 @@ pub fn settings_panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor,
         editor.import_edit = None;
         crate::models::reimport(world, editor, &key);
     }
+}
+
+/// Look beside model `key`'s source for texture sets named after its untextured materials
+/// (the Details panel's Search and remap), starting from `settings`, and rebuild its copies.
+pub fn search_textures(
+    world: &mut World,
+    editor: &mut Editor,
+    key: &str,
+    mut settings: ImportSettings,
+) {
+    let t = now(world);
+    let Some(root) = world.get_resource::<AssetServer>().map(|s| s.root()) else {
+        return;
+    };
+    // Beside the source file, or beside the copy when the source is gone.
+    let near = Path::new(&settings.source)
+        .parent()
+        .filter(|p| p.is_dir())
+        .map(Path::to_path_buf)
+        .or_else(|| root.join(key).parent().map(Path::to_path_buf))
+        .unwrap_or_default();
+    match crate::remap::search_and_remap(&root, key, &near, &mut settings) {
+        Some(found) => {
+            editor.info(t, format!("{}: {found}", crate::models::display_name(key)));
+            editor.models = None;
+            save_remaps(world, editor, key, &settings);
+        }
+        None => editor.info(
+            t,
+            "No texture sets named after its untextured materials were found",
+        ),
+    }
+}
+
+/// Save model `key`'s `settings` with changed material remaps and rebuild its copies.
+pub fn save_remaps(world: &mut World, editor: &mut Editor, key: &str, settings: &ImportSettings) {
+    let t = now(world);
+    let Some(root) = world.get_resource::<AssetServer>().map(|s| s.root()) else {
+        return;
+    };
+    if let Err(e) = save_settings(&root, key, settings) {
+        editor.error(t, format!("Could not save import settings: {e}"));
+        return;
+    }
+    editor.import_edit = None;
+    crate::models::reimport(world, editor, key);
+}
+
+/// The model's materials and what each is drawn with (Unity's Remapped Materials). True when
+/// one was changed.
+fn materials_list(
+    ui: &mut egui::Ui,
+    settings: &mut ImportSettings,
+    file_materials: &[crate::remap::FileMaterial],
+    library: &[String],
+) -> bool {
+    let mut changed = false;
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("Materials").strong());
+    egui::Grid::new("import materials")
+        .num_columns(2)
+        .spacing([10.0, 4.0])
+        .show(ui, |ui| {
+            for (i, m) in file_materials.iter().enumerate() {
+                let name = if m.name.is_empty() {
+                    format!("Material {i}")
+                } else {
+                    m.name.clone()
+                };
+                ui.label(&name);
+                let current = settings.materials.get(&m.name).cloned().unwrap_or_default();
+                let shown = if current.is_empty() {
+                    crate::theme::dim(if m.textured {
+                        "From file"
+                    } else {
+                        "From file (untextured)"
+                    })
+                } else {
+                    egui::RichText::new(crate::materials::display_name(&current))
+                };
+                let mut picked = current.clone();
+                egui::ComboBox::from_id_salt(("remap", i))
+                    .selected_text(shown)
+                    .width(170.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut picked, String::new(), "From file");
+                        for key in library {
+                            ui.selectable_value(
+                                &mut picked,
+                                key.clone(),
+                                crate::materials::display_name(key),
+                            );
+                        }
+                    })
+                    .response
+                    .on_hover_text(if current.is_empty() {
+                        "The file's own material".to_string()
+                    } else {
+                        current.clone()
+                    });
+                if picked != current && !m.name.is_empty() {
+                    if picked.is_empty() {
+                        settings.materials.remove(&m.name);
+                    } else {
+                        settings.materials.insert(m.name.clone(), picked);
+                    }
+                    changed = true;
+                }
+                ui.end_row();
+            }
+        });
+    changed
 }
 
 /// Files dragged from the desktop onto the window (Update, before the UI).
