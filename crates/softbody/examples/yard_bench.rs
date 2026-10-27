@@ -104,13 +104,19 @@ fn main() {
                         })
                         .count();
                     println!(
-                        "{f:5} frame {ms:6.1} ms  step {:6.2} ms  prewarm {:4}  pairs {:6} solved {:6}  colliders {} fields {fields} asleep {} radius {:.1} env {:.2} ms",
+                        "{f:5} frame {ms:6.1} ms  step {:6.2} ms  prewarm {:4}  pairs {:6} solved {:6}  colliders {} fields {fields} asleep {} fastest {:.3} m/s radius {:.1} env {:.2} ms",
                         b.step_ms,
                         b.pending_prewarm,
                         b.sim.self_pairs(),
                         b.sim.self_pairs_solved(),
                         b.last_colliders().len(),
                         b.asleep(),
+                        b.sim
+                            .vel
+                            .iter()
+                            .zip(&b.sim.inv_mass)
+                            .filter(|(_, w)| **w > 0.0)
+                            .fold(0.0f32, |m, (v, _)| m.max(v.length())),
                         b.radius,
                         b.env_ms,
                     );

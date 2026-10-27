@@ -172,7 +172,10 @@ impl Cloth {
             mass_per_m2: 0.3,
             bend_compliance: 5e-3,
             material,
+            // 240 Hz, as the flag: side by side with 600 Hz (examples/curtain_substeps.rs) its
+            // folds and sway look the same and its hem hangs 8 cm lower, at half the cost.
             sim: SimSettings {
+                substeps: 4,
                 wind_scale: 0.3,
                 damping: 0.2,
                 prewarm_secs: 2.0,
