@@ -128,6 +128,18 @@ pub struct SoftBodySim {
 }
 
 impl SoftBodySim {
+    /// Move the body with the world when it is re-anchored ([`WorldShift`]).
+    pub fn follow_shift(&mut self, s: &engine_world::WorldShift) {
+        self.sim.shift(s);
+        self.center = s.point(self.center);
+        self.wind = s.direction(self.wind);
+        if let Some(bridge) = self.bridge.as_mut() {
+            for (p, r) in &mut bridge.plank_poses {
+                (*p, *r) = (s.point(*p), s.orientation(*r));
+            }
+        }
+    }
+
     /// Where drawing is between the last two steps, 0..1, at `alpha` of the fixed step: a
     /// body stepping every few fixed steps is drawn moving across all of them.
     pub fn draw_alpha(&self, alpha: f32) -> f32 {

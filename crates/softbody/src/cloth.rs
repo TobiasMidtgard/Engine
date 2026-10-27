@@ -327,6 +327,7 @@ impl ClothState {
         });
         // Tethers assume the cloth is in one piece.
         sim.tethers.clear();
+        sim.triangles_changed();
         sim.aero_triangles.clear();
         surface.triangles.clear();
         surface.rest_inv.clear();
@@ -1053,7 +1054,8 @@ mod tests {
 
     /// A limp sheet folded in half and dropped onto the floor: how far each folded-over particle
     /// ends up above the one it was folded onto.
-    fn folded_towel(self_collide: bool) -> Vec<f32> {
+    /// A towel folded in half and settled on the floor.
+    fn settled_towel(self_collide: bool) -> SoftBodySim {
         let spec = Cloth {
             size: [1.0, 0.6],
             resolution: [21, 13],
@@ -1086,6 +1088,12 @@ mod tests {
         for _ in 0..120 {
             sim.step(1.0 / 60.0, &[]);
         }
+        body
+    }
+
+    fn folded_towel(self_collide: bool) -> Vec<f32> {
+        let body = settled_towel(self_collide);
+        let sim = &body.sim;
         let mut gaps = Vec::new();
         for j in 1..12 {
             for i in 12..20 {
@@ -1107,6 +1115,34 @@ mod tests {
             merged < 0.5,
             "without self-collision {merged} stayed on top anyway"
         );
+    }
+
+    #[test]
+    fn a_resting_towel_torn_open_keeps_colliding_with_itself() {
+        let mut body = settled_towel(true);
+        let SoftBodySim {
+            sim,
+            surface,
+            cloth,
+            ..
+        } = &mut body;
+        let (surface, cloth) = (surface.as_mut().unwrap(), cloth.as_mut().unwrap());
+        let before = surface.triangles.len();
+        // Through both layers near the towel's last triangles: the pairs kept from the
+        // resting towel name triangles that are gone or renumbered.
+        cloth.pierce(
+            sim,
+            surface,
+            Vec3::new(0.45, 1.0, 0.25),
+            Vec3::new(0.45, -1.0, 0.25),
+            0.15,
+            400.0,
+        );
+        assert!(surface.triangles.len() < before);
+        for _ in 0..60 {
+            sim.step(1.0 / 60.0, &[]);
+        }
+        assert!(sim.pos.iter().all(|p| p.is_finite()));
     }
 
     #[test]

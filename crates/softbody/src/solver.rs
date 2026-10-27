@@ -610,6 +610,12 @@ impl Sim {
         self.self_contacts.close.len()
     }
 
+    /// The triangles changed (torn or burnt away): find self-collision pairs anew, since the
+    /// kept ones name triangles by index.
+    pub fn triangles_changed(&mut self) {
+        self.self_contacts = SelfContacts::default();
+    }
+
     pub fn substeps_for(&self, dt: f32) -> u32 {
         let n = (self.params.substeps.max(1) as f32 * dt * 60.0).ceil() as u32;
         n.clamp(1, self.params.substeps.max(1) * 4)

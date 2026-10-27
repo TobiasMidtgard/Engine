@@ -191,10 +191,15 @@ pub fn follow_world_shift(
     )>,
     mut cords: Query<&mut statue::DemoCord>,
     mut helms: Query<&mut sailboat::Helm>,
+    mut settled: Query<&mut DemoSettled>,
 ) {
     let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) else {
         return;
     };
+    // A remembered body is put back where the world has moved it to.
+    for mut kept in &mut settled {
+        kept.0.follow_shift(&s);
+    }
     for mut m in &mut motions {
         match &mut *m {
             DemoMotion::Pendulum { pivot, swing, .. } => {
@@ -1149,8 +1154,15 @@ fn restore(body: Option<&mut SoftBodySim>, settled: Option<&DemoSettled>, rebuil
         (Some(body), Some(settled)) => {
             // Drawn anew from the restored triangles.
             let version = body.topology_version.max(settled.0.topology_version) + 1;
+            // A bridge keeps the plank entities it has now (a rebuild spawns new ones).
+            let planks = body.bridge.as_mut().map(|b| std::mem::take(&mut b.planks));
             *body = (*settled.0).clone();
             body.topology_version = version;
+            if let (Some(planks), Some(bridge)) = (planks, body.bridge.as_mut())
+                && planks.len() == bridge.planks.len()
+            {
+                bridge.planks = planks;
+            }
         }
         _ => rebuild(),
     }
@@ -1192,25 +1204,38 @@ pub fn burn_and_restore(
 }
 
 pub fn cut_and_restore(
+    mut commands: Commands,
     time: Res<Time>,
     mut cutters: Query<(&DemoCutter, &mut DemoClock)>,
-    mut bridges: Query<(&mut RopeBridge, Option<&mut SoftBodySim>)>,
+    mut bridges: Query<(
+        &mut RopeBridge,
+        Option<&mut SoftBodySim>,
+        Option<&DemoSettled>,
+    )>,
 ) {
     for (c, mut clock) in &mut cutters {
         let before = clock.0;
         clock.0 += time.delta_for(None);
-        let Ok((mut spec, body)) = bridges.get_mut(c.bridge) else {
+        let Ok((mut spec, body, settled)) = bridges.get_mut(c.bridge) else {
             continue;
         };
+        // Put back as it was before the cut: a rebuilt bridge settles for 2 s again, ~19
+        // steps a frame of the 16-substep deck (the bridge's 4 ms on the PC).
+        if let Some(body) = &body
+            && before < c.delay
+        {
+            remember(&mut commands, c.bridge, body, settled.is_some());
+        }
+        let mut body = body.map(|b| b.into_inner());
         if before < c.delay
             && clock.0 >= c.delay
-            && let Some(mut body) = body
+            && let Some(body) = body.as_deref_mut()
         {
-            crate::api::cut(&mut body, c.at, 0.9);
+            crate::api::cut(body, c.at, 0.9);
         }
         if clock.0 >= c.period {
             clock.0 = 0.0;
-            spec.set_changed();
+            restore(body, settled, || spec.set_changed());
         }
     }
 }

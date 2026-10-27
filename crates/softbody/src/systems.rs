@@ -448,15 +448,7 @@ pub fn follow_world_shift(
         }
     }
     for mut b in &mut bodies {
-        let b = &mut *b;
-        b.sim.shift(&s);
-        b.center = s.point(b.center);
-        b.wind = s.direction(b.wind);
-        if let Some(bridge) = b.bridge.as_mut() {
-            for (p, r) in &mut bridge.plank_poses {
-                (*p, *r) = (s.point(*p), s.orientation(*r));
-            }
-        }
+        b.follow_shift(&s);
     }
     let colliders = &mut *colliders;
     for (p, r) in colliders
