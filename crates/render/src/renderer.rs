@@ -216,6 +216,8 @@ pub struct Renderer {
     subsurface: Option<crate::subsurface::SubsurfacePass>,
     /// Frame timing and the `perf:` log line.
     perf: crate::perf::PerfLog,
+    /// `render.record_cpu_ms`, averaged.
+    thread_cpu: crate::perf::ThreadCpu,
     /// Which far shadow cascades keep last frame's image.
     cascade_cache: crate::shadows::CascadeCache,
     previous: Option<PreviousView>,
@@ -635,6 +637,7 @@ impl Renderer {
             lens: Default::default(),
             subsurface: None,
             perf,
+            thread_cpu: Default::default(),
             cascade_cache: Default::default(),
             previous: None,
             prev_step: 0.0,
@@ -1589,9 +1592,15 @@ impl Renderer {
         cpu.step("stats");
         let stats = self.collect_stats(&view, started);
         let mut back = RenderReturn::default();
+        // wgpu validates and encodes every recorded pass into the backend's command buffer
+        // here, not as the passes are recorded.
+        cpu.step("finish commands");
+        let finishing = Instant::now();
+        let commands = encoder.finish();
+        let finish_ms = finishing.elapsed().as_secs_f64() * 1000.0;
         cpu.step("submit");
         let submitting = Instant::now();
-        self.shared.queue.submit([encoder.finish()]);
+        self.shared.queue.submit([commands]);
         let submit_ms = submitting.elapsed().as_secs_f64() * 1000.0;
         self.meter.after_submit();
         self.perf.after_submit();
@@ -1608,8 +1617,10 @@ impl Renderer {
             s.resize(&self.shared.device, w, h);
         }
 
+        let mut screenshot_ms = 0.0;
         if let Some((buffer, padded_row)) = readback {
             cpu.step("screenshot save");
+            let saving = Instant::now();
             let results = save_readback(
                 &self.shared.device,
                 &buffer,
@@ -1619,6 +1630,7 @@ impl Renderer {
                 &pending,
             );
             back.screenshots = results;
+            screenshot_ms = saving.elapsed().as_secs_f64() * 1000.0;
         }
 
         if engine_core::profile::enabled() {
@@ -1638,20 +1650,32 @@ impl Renderer {
         {
             let d = &mut back.diagnostics;
             self.perf.publish(d);
-            // Main thread: extract. Render thread (or inline): record (encoding the passes),
-            // acquire, submit and present, all of it as record_total, and the CPU time it took
-            // as record_cpu (less than record_total = waiting).
+            // Main thread: wait (for the frame in flight, set by render_system) and extract.
+            // Render thread (or inline), all of it as record_total: record (recording the
+            // passes), acquire, finish (wgpu encoding the recorded passes), submit, present,
+            // screenshot (the GPU readback and the PNGs) and other (stats and bookkeeping, the
+            // rest of the total); record_cpu is the CPU time it took, averaged over a second
+            // (less than record_total = waiting).
+            let total_ms = recording.elapsed().as_secs_f64() * 1000.0;
+            let parts =
+                encode_ms + acquire_ms as f64 + finish_ms + submit_ms + present_ms + screenshot_ms;
             d.set("render.extract_ms", extract_ms as f64);
             d.set("render.record_ms", encode_ms);
+            d.set("render.finish_ms", finish_ms);
             d.set("render.submit_ms", submit_ms);
             d.set("render.present_ms", present_ms);
-            d.set(
-                "render.record_total_ms",
-                recording.elapsed().as_secs_f64() * 1000.0,
-            );
+            d.set("render.screenshot_ms", screenshot_ms);
+            d.set("render.record_other_ms", (total_ms - parts).max(0.0));
+            d.set("render.record_total_ms", total_ms);
             if let Some(t) = thread_cpu.and_then(|t| t.try_elapsed().ok()) {
-                d.set("render.record_cpu_ms", t.as_secs_f64() * 1000.0);
+                self.thread_cpu.add(t);
+                d.set("render.record_cpu_ms", self.thread_cpu.ms());
             }
+            // wgpu's backend numbering: 0 none, 1 Vulkan, 2 Metal, 3 DX12, 4 OpenGL, 5 WebGPU.
+            d.set(
+                "render.backend",
+                self.shared.adapter_info.backend as u8 as f64,
+            );
             d.set("render.cpu_ms", stats.cpu_ms as f64);
             d.set("render.frame_ms", self.perf.frame_ms as f64);
             d.set("render.acquire_ms", self.perf.acquire_ms as f64);
@@ -2688,8 +2712,14 @@ pub fn render_system(world: &mut World) {
                 )
             });
         }
+        let waiting = Instant::now();
         let renderer = thread.0.get();
+        let wait_ms = waiting.elapsed().as_secs_f64() * 1000.0;
         renderer.apply_return(world);
+        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+            // The main thread held up by the render thread still recording the last frame.
+            d.set("render.wait_ms", wait_ms);
+        }
         let frame = renderer.extract_frame(world);
         thread
             .0

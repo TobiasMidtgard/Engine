@@ -167,6 +167,8 @@ fn main() {
             } else if name.starts_with("render.meshes.")
                 || name.starts_with("render.record")
                 || name == "render.submit_ms"
+                || name == "render.finish_ms"
+                || name == "render.wait_ms"
                 || name == "render.extract_ms"
             {
                 *counts.entry(name.clone()).or_default() += v;

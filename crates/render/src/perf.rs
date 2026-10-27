@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use engine_core::prelude::Diagnostics;
 
@@ -283,6 +283,41 @@ impl CpuSteps {
 
 /// [`CpuSteps`]' finished steps, between threads.
 pub(crate) struct ParkedSteps(Vec<(Label, f32)>);
+
+/// The CPU time a frame's recording took, averaged over about a second: Windows counts a
+/// thread's time in scheduler ticks (15.6 ms by default), so one frame's own reading is mostly
+/// 0 or a whole tick, while the sum over many frames is right.
+#[derive(Default)]
+pub(crate) struct ThreadCpu {
+    sum: Duration,
+    frames: u32,
+    since: Option<Instant>,
+    average_ms: Option<f64>,
+}
+
+impl ThreadCpu {
+    pub fn add(&mut self, cpu: Duration) {
+        let now = Instant::now();
+        let since = *self.since.get_or_insert(now);
+        self.sum += cpu;
+        self.frames += 1;
+        if now - since >= Duration::from_secs(1) {
+            self.average_ms = Some(self.ms_so_far());
+            self.sum = Duration::ZERO;
+            self.frames = 0;
+            self.since = Some(now);
+        }
+    }
+
+    /// Milliseconds per frame: the last full window's average, or this one's until one ends.
+    pub fn ms(&self) -> f64 {
+        self.average_ms.unwrap_or_else(|| self.ms_so_far())
+    }
+
+    fn ms_so_far(&self) -> f64 {
+        self.sum.as_secs_f64() * 1000.0 / self.frames.max(1) as f64
+    }
+}
 
 /// Sums over the current report window.
 #[derive(Default)]
@@ -655,6 +690,17 @@ fn truncate(s: &str, n: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thread_cpu_averages_whole_ticks_over_frames() {
+        // Windows' readings: one frame gets the 15.6 ms tick, the next three none.
+        let mut t = ThreadCpu::default();
+        t.add(Duration::from_micros(15_600));
+        for _ in 0..3 {
+            t.add(Duration::ZERO);
+        }
+        assert!((t.ms() - 3.9).abs() < 1e-9, "{}", t.ms());
+    }
 
     #[test]
     fn memory_table_shows_free_space_and_its_tenants() {
