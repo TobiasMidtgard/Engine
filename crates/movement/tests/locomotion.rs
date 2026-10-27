@@ -1888,3 +1888,108 @@ fn sprinting_into_a_too_steep_slope_does_not_climb_it() {
         assert_eq!(triggered(&app, c, "wallrun"), 0);
     }
 }
+
+/// A lake: still water up to y = 0 from x = 0 on.
+struct Lake;
+
+impl engine_world::WaterQuery for Lake {
+    fn sample(&self, p: DVec3) -> Option<engine_world::WaterSample> {
+        (p.x > 0.0).then_some(engine_world::WaterSample {
+            surface_height: 0.0,
+            depth: 10.0,
+            velocity: Vec3::ZERO,
+            normal: Vec3::Y,
+        })
+    }
+}
+
+/// What characters did to the water.
+#[derive(Resource, Default)]
+struct Pushed(Vec<engine_world::WaterDisturbance>);
+
+fn collect_pushes(
+    mut seen: ResMut<Pushed>,
+    mut pushes: MessageReader<engine_world::WaterDisturbance>,
+) {
+    seen.0.extend(pushes.read().copied());
+}
+
+/// Playtest #6 ("wading into water ... no waves, no splash, and you can't swim"): a lake shore
+/// sloping down 1 m every 4 m. Wading slows the character and pushes the water, deep water
+/// floats it into swimming with its head out, and running off a jetty splashes.
+#[test]
+fn wading_slows_deep_water_swims_and_going_in_splashes() {
+    fn shore(x: f64, _: f64) -> f64 {
+        0.3 - x.max(0.0) * 0.25
+    }
+    let (mut app, c) = pilot_on(shore, -3.0, 0.0);
+    app.world
+        .insert_resource(engine_world::Water(std::sync::Arc::new(Lake)));
+    app.init_resource::<Pushed>();
+    app.add_systems(Last, collect_pushes);
+    run(&mut app, 0.5);
+    intent(&mut app, c, |i| i.direction = Vec3::X);
+    // Knee to waist deep (0.45-0.7 m over the feet at x = 3-4): slower than on land.
+    run_until(&mut app, 5.0, |w| {
+        w.get::<Transform>(c).unwrap().translation.x > 3.3
+    });
+    let m = mover(&app, c);
+    assert!(m.grounded && m.mode != LocomotionMode::Swim, "{:?}", m.mode);
+    assert!(
+        m.horizontal_speed() < 4.8 && m.horizontal_speed() > 2.5,
+        "wading at {}",
+        m.horizontal_speed()
+    );
+    assert!(!app.world.resource::<Pushed>().0.is_empty(), "no rings");
+
+    // On into deep water: it swims, floating with its head out.
+    run_until(&mut app, 8.0, |w| {
+        w.get::<Mover>(c).unwrap().mode == LocomotionMode::Swim
+    });
+    run(&mut app, 3.0);
+    let m = mover(&app, c);
+    assert_eq!(m.mode, LocomotionMode::Swim);
+    assert!(
+        (m.horizontal_speed() - 1.8).abs() < 0.2,
+        "{}",
+        m.horizontal_speed()
+    );
+    let head = pos(&app, c).y + 0.9;
+    assert!(head > 0.2 && head < 1.0, "head at {head:.2}");
+
+    // Turn back: walking out where the feet find ground again.
+    intent(&mut app, c, |i| i.direction = -Vec3::X);
+    run_until(&mut app, 15.0, |w| {
+        w.get::<Transform>(c).unwrap().translation.x < 1.0
+    });
+    let m = mover(&app, c);
+    assert!(m.grounded && m.mode != LocomotionMode::Swim, "{:?}", m.mode);
+
+    // Running off a jetty 2 m up into deep water: one splash the size of a body going in fast.
+    let (mut app, c) = pilot_on(|_, _| -6.0, -3.0, 0.0);
+    block(
+        &mut app,
+        DVec3::new(-3.0, 1.5, 0.0),
+        Vec3::new(6.0, 3.0, 4.0),
+    );
+    app.world
+        .entity_mut(c)
+        .get_mut::<Transform>()
+        .unwrap()
+        .translation
+        .y = 3.95;
+    app.world
+        .insert_resource(engine_world::Water(std::sync::Arc::new(Lake)));
+    app.init_resource::<Pushed>();
+    app.add_systems(Last, collect_pushes);
+    run(&mut app, 0.3);
+    intent(&mut app, c, |i| {
+        i.direction = Vec3::X;
+        i.sprint = true;
+    });
+    run(&mut app, 2.0);
+    let pushes = &app.world.resource::<Pushed>().0;
+    let plunge = pushes.iter().find(|d| d.velocity.y < -4.0);
+    assert!(plunge.is_some_and(|d| d.mass_kg >= 30.0), "{pushes:?}");
+    assert_eq!(mover(&app, c).mode, LocomotionMode::Swim);
+}

@@ -161,6 +161,17 @@ pub struct MovementProfile {
     /// Climbing speed, m/s (half as fast again sprinting).
     pub ladder_speed: f32,
 
+    // ------------------------------------------------------------ water
+    /// Swim in deep water (and wade, slowed, in shallow water). Off, water is just ground.
+    pub swim: bool,
+    /// Water this deep over the feet floats the character into swimming, m; shallower water is
+    /// waded through, slower the deeper it is.
+    pub swim_depth: f32,
+    /// Swimming speed, m/s.
+    pub swim_speed: f32,
+    /// Swimming speed with sprint held, m/s.
+    pub swim_sprint_speed: f32,
+
     // ------------------------------------------------------------ feedback
     /// Body mass for footsteps and landings, kg.
     pub mass_kg: f32,
@@ -241,6 +252,10 @@ impl MovementProfile {
             zip_speed: 12.0,
             ladder: true,
             ladder_speed: 2.6,
+            swim: true,
+            swim_depth: 1.2,
+            swim_speed: 1.8,
+            swim_sprint_speed: 3.0,
             mass_kg: 80.0,
             stride_footsteps: true,
         }

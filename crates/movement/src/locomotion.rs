@@ -21,7 +21,8 @@ use engine_world::physics::{
     Velocity,
 };
 use engine_world::{
-    ContactKind, Gravity, Ground, GroundContact, NoiseEvent, SurfaceId, SurfaceMaterials,
+    ContactKind, Gravity, Ground, GroundContact, NoiseEvent, SurfaceId, SurfaceMaterials, Water,
+    WaterDisturbance,
 };
 
 use crate::grapple;
@@ -31,6 +32,7 @@ use crate::mover::{
 };
 use crate::platform::{self, Deck, Pin};
 use crate::profile::MovementProfile;
+use crate::swim::{self, InWater};
 use crate::vault;
 use crate::zipline::{self, Cable, Zipline};
 
@@ -61,6 +63,7 @@ pub(crate) struct Outputs<'w> {
     triggers: MessageWriter<'w, AnimationTrigger>,
     contacts: MessageWriter<'w, GroundContact>,
     noise: MessageWriter<'w, NoiseEvent>,
+    water: MessageWriter<'w, WaterDisturbance>,
 }
 
 impl Outputs<'_> {
@@ -232,6 +235,8 @@ pub(crate) struct Body {
     pub(crate) g: f32,
     pub(crate) radius: f32,
     pub(crate) height: f32,
+    /// The water over the feet, if any.
+    pub(crate) water: Option<InWater>,
 }
 
 impl Body {
@@ -260,6 +265,7 @@ pub(crate) fn step_movers(
     time: Res<Time>,
     gravity: Res<Gravity>,
     ground: Res<Ground>,
+    water: Res<Water>,
     queries: Res<PhysicsQueries>,
     mut out: Outputs,
     mut filter: Local<QueryFilter>,
@@ -314,6 +320,11 @@ pub(crate) fn step_movers(
             g: gravity.at(pos).length(),
             radius: cc.radius,
             height: cc.height,
+            water: None,
+        };
+        let body = Body {
+            water: InWater::at(water.sample(body.feet()), body.feet()),
+            ..body
         };
         m.up = up;
         if !m.initialized {
@@ -944,6 +955,44 @@ fn step_one(
         vault::TakeOff::No => false,
     };
 
+    // ---- in water: jump out over a bank, swim, or wade (slower) and move as on land
+    if m.mode == LocomotionMode::Swim
+        && jump_pressed
+        && p.mantle
+        && let Some(mt) = find_ledge(
+            p,
+            b,
+            probe,
+            v,
+            if wish.length() > 0.3 { wish } else { m.facing },
+        )
+    {
+        m.mantle = Some(mt);
+        m.set_mode(LocomotionMode::Mantle);
+        out.trigger(b.entity, "mantle");
+        return up * p.mantle_speed;
+    }
+    let swum = swim::step(
+        m,
+        p,
+        intent,
+        b.water,
+        b.pos,
+        b.radius,
+        b.height,
+        v,
+        wish,
+        grounded,
+        dt,
+        &mut |d| {
+            out.water.write(d);
+        },
+        b.entity,
+    );
+    if let Some(v) = swum {
+        return v;
+    }
+
     if grounded {
         if m.mode == LocomotionMode::WallRun {
             m.wall = None;
@@ -1178,7 +1227,7 @@ fn ground_move(
         p.sprint_speed * m.sprint_boost.max(0.1)
     } else {
         p.run_speed
-    };
+    } * m.wade;
     let target = wish * base;
     let mut vh = flat(v, up);
     if let Some(lunge) = m.influence.lunge {
@@ -1990,6 +2039,7 @@ mod tests {
             g: 9.81,
             radius: 0.35,
             height: 1.8,
+            water: None,
         };
         let air = CharacterState::default();
         // Sank 0.3 m in: standing, and lifted back out.

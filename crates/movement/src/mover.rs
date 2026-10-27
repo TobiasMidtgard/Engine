@@ -349,6 +349,12 @@ pub struct Mover {
     /// it (contact with something run into comes and goes step by step).
     #[serde(skip)]
     pub(crate) blocked_by: Option<(Vec3, f32)>,
+    /// Wading slows the character to this fraction of its speed (1 on dry ground).
+    #[serde(skip)]
+    pub(crate) wade: f32,
+    /// In water last step (going in splashes).
+    #[serde(skip)]
+    pub(crate) wet: bool,
     pub(crate) prev_jump: bool,
     pub(crate) prev_crouch: bool,
     pub(crate) prev_dash: bool,
@@ -404,6 +410,8 @@ impl Default for Mover {
             fall_speed: 0.0,
             settle: 0.0,
             step_down: 0.0,
+            wade: 1.0,
+            wet: false,
             blocked_by: None,
             prev_jump: false,
             prev_crouch: false,

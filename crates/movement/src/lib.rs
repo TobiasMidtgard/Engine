@@ -18,6 +18,7 @@ pub mod play;
 pub mod player;
 pub mod profile;
 mod shift;
+mod swim;
 pub mod tempo;
 pub mod vault;
 pub mod zipline;
