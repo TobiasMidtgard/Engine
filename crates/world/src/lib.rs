@@ -133,6 +133,23 @@ impl SimulationRange {
     }
 }
 
+/// Present while a loading screen covers the game (the game inserts it, and removes it when play
+/// can start). Nobody watches frame times then, so modules that spread first-use work over frames
+/// (planting, mesh and texture builds, uploads) may spend up to `budget_ms` a frame instead of
+/// their in-play budget: `world.get_resource::<LoadingBudget>()`.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoadingBudget {
+    /// Frame-thread time a module may spend per frame on its loading work (ms).
+    pub budget_ms: f64,
+}
+
+impl Default for LoadingBudget {
+    fn default() -> Self {
+        Self { budget_ms: 100.0 }
+    }
+}
+
 /// Burn state of a [`Combustible`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BurnState {
