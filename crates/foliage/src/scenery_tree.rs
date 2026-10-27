@@ -88,6 +88,7 @@ pub fn sync_scenery_trees(
     mut commands: Commands,
     mut frame: Local<u32>,
     mut loading: ResMut<crate::loading::FoliageLoading>,
+    screen: Option<Res<engine_world::LoadingBudget>>,
     library: Res<PlantLibrary>,
     visuals: Res<FoliageVisuals>,
     settings: Res<EcologySettings>,
@@ -114,7 +115,7 @@ pub fn sync_scenery_trees(
     // While loading, new ones get their parts a few ms a frame (their spawns cost about as
     // much again when the commands apply).
     let started = std::time::Instant::now();
-    let fresh_budget = loading.fresh_budget();
+    let fresh_budget = loading.fresh_budget(screen.as_deref());
     let (mut fresh_seen, mut out_of_time) = (0u32, false);
     for (entity, tree, global, visual) in &mut trees {
         let fresh = visual.is_none();

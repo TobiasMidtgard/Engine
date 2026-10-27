@@ -6,6 +6,7 @@
 //! [`FoliageLoading::is_ready`].
 
 use engine_core::prelude::*;
+use engine_world::LoadingBudget;
 
 /// How foliage loads, and how far along it is.
 #[derive(Resource, Debug, Clone)]
@@ -13,7 +14,9 @@ pub struct FoliageLoading {
     /// Build on worker threads and put the results in place over frames (true), or build
     /// everything in the frame that needs it (tests, tools that want it at once).
     pub background: bool,
-    /// Most milliseconds a frame spends putting finished builds into the world.
+    /// Most milliseconds a frame spends putting finished builds into the world during play.
+    /// While a loading screen is up (`engine_world::LoadingBudget` present) its budget
+    /// applies instead, as Unity's High background loading priority does.
     pub budget_ms: f32,
     /// The species visuals have been looked at once (before that, nothing is known to build).
     pub(crate) species_checked: bool,
@@ -22,6 +25,8 @@ pub struct FoliageLoading {
     /// New plants or scenery trees left without their parts last frame (out of time).
     pub(crate) plants_waiting: bool,
     pub(crate) trees_waiting: bool,
+    /// Ground covers being rebuilt or waiting for their regions.
+    pub(crate) scenery_building: usize,
 }
 
 impl Default for FoliageLoading {
@@ -34,6 +39,7 @@ impl Default for FoliageLoading {
             regions_building: 0,
             plants_waiting: false,
             trees_waiting: false,
+            scenery_building: 0,
         }
     }
 }
@@ -56,13 +62,25 @@ impl FoliageLoading {
             && self.regions_building == 0
             && !self.plants_waiting
             && !self.trees_waiting
+            && self.scenery_building == 0
+    }
+
+    /// Milliseconds this frame may spend putting finished builds in place: the play budget,
+    /// the loading screen's while one is up, unlimited when loading in the frame.
+    pub(crate) fn frame_budget_ms(&self, screen: Option<&LoadingBudget>) -> f32 {
+        match (self.background, screen) {
+            (false, _) => f32::INFINITY,
+            (true, Some(screen)) => (screen.budget_ms as f32).max(self.budget_ms),
+            (true, None) => self.budget_ms,
+        }
     }
 
     /// How long a frame spends giving new plants and trees their parts: a third of the
-    /// budget (their spawns apply as commands after), unlimited when loading in the frame.
-    pub(crate) fn fresh_budget(&self) -> std::time::Duration {
-        if self.background {
-            std::time::Duration::from_secs_f32(self.budget_ms.max(0.0) / 3000.0)
+    /// budget (their spawns apply as commands after).
+    pub(crate) fn fresh_budget(&self, screen: Option<&LoadingBudget>) -> std::time::Duration {
+        let ms = self.frame_budget_ms(screen);
+        if ms.is_finite() {
+            std::time::Duration::from_secs_f32(ms.max(0.0) / 3000.0)
         } else {
             std::time::Duration::MAX
         }

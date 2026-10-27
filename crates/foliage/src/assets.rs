@@ -356,10 +356,12 @@ fn is_built(visuals: &FoliageVisuals, i: usize, sp: &PlantSpecies) -> bool {
 
 /// Build (or rebuild) the visuals of every species that is missing or out of date: meshes and
 /// textures on worker threads, then uploaded within [`FoliageLoading::budget_ms`] a frame.
+#[allow(clippy::too_many_arguments)]
 pub fn ensure_species_visuals(
     library: Res<PlantLibrary>,
     mut visuals: ResMut<FoliageVisuals>,
     mut loading: ResMut<FoliageLoading>,
+    screen: Option<Res<engine_world::LoadingBudget>>,
     mut state: Local<SpeciesLoad>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -446,11 +448,7 @@ pub fn ensure_species_visuals(
     }
     // Upload, within the frame's budget when loading in the background.
     let started = Instant::now();
-    let budget = if loading.background {
-        loading.budget_ms
-    } else {
-        f32::INFINITY
-    };
+    let budget = loading.frame_budget_ms(screen.as_deref());
     let visuals = &mut *visuals;
     visuals.species.resize(library.len(), None);
     while let Some(baked) = state.ready.pop_front() {

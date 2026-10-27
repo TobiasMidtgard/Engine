@@ -355,11 +355,7 @@ fn plant_regions(world: &mut World, loading: &FoliageLoading) {
     let mut q = world.query::<(Entity, &mut RegionBuild)>();
     let building: Vec<Entity> = q.iter(world).map(|(e, _)| e).collect();
     let started = std::time::Instant::now();
-    let budget = if loading.background {
-        loading.budget_ms
-    } else {
-        f32::INFINITY
-    };
+    let budget = loading.frame_budget_ms(world.get_resource::<engine_world::LoadingBudget>());
     let over = || started.elapsed().as_secs_f32() * 1000.0 >= budget;
     for entity in building {
         let Ok((_, mut build)) = q.get_mut(world, entity) else {

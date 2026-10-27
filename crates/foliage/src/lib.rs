@@ -131,6 +131,13 @@ impl Plugin for FoliagePlugin {
                 "Showcase: fells the nearest mature tree in a ring around it every every_secs seconds.",
             );
         engine_render::RenderAppExt::add_render_feature(app, scenery::SceneryFeature::default());
+        // Unless rendering is off, the renderer wants the ground layers on its first frame.
+        if !app
+            .world
+            .contains_resource::<engine_render::RenderDisabled>()
+        {
+            scenery::start_painting_ground_layers();
+        }
         api::register(app);
 
         app.add_systems(

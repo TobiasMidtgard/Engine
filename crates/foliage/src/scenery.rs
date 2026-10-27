@@ -19,14 +19,15 @@
 //!
 //! All of it is procedural: no files are loaded.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::f32::consts::{PI, TAU};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use engine_assets::{Assets, Handle};
 use engine_core::math::hash_u64;
 use engine_core::math::noise::{fbm2, fbm3, perlin2};
 use engine_core::prelude::*;
+use engine_core::tasks::AsyncComputeTaskPool;
 use engine_render::shadows::{MAX_CASCADES, SKY_OCCLUSION_VIEW};
 use engine_render::wgpu;
 use engine_render::{
@@ -37,7 +38,9 @@ use engine_world::Ground;
 
 use crate::demo::{CoverStyle, GroundCover, polyline_distance};
 use crate::ecology::RegionState;
+use crate::loading::FoliageLoading;
 use crate::meshgen::MeshBuilder;
+use crate::plant::EcologyRegion;
 use crate::plant::{Plant, PlantStage};
 use crate::sim::Soil;
 use crate::species::{PlantForm, PlantLibrary, srgb};
@@ -3194,18 +3197,147 @@ fn tree_spots(world: &mut World, cover: &GroundCover, center: DVec3) -> Vec<Tree
     out
 }
 
+/// A cover's rebuild worked out: the rocks it settled, its surface and where debris goes.
+struct CoverBuilt {
+    job: CoverJob,
+    inputs: CoverInputs,
+    moved: Vec<(Entity, Rock, Transform)>,
+    surface: GroundSurface,
+    debris: PlacedDebris,
+    ms: f32,
+}
+
+/// Cover rebuilds running off the frame, by cover entity.
+#[derive(Resource, Default)]
+pub struct SceneryBuilds {
+    pending: HashMap<Entity, Arc<Mutex<Option<CoverBuilt>>>>,
+}
+
+/// Settle `rocks` on the job's cover, then build its surface and (for a new cover) place its
+/// debris: the slow part of a rebuild, needing nothing from the world.
+fn build_cover(
+    job: CoverJob,
+    mut inputs: CoverInputs,
+    mut rocks: Vec<(Entity, Rock, Transform)>,
+    ground: Option<Ground>,
+) -> CoverBuilt {
+    let start = std::time::Instant::now();
+    inputs.prepare(&job.cover);
+    let ground_y = |p: DVec3| {
+        ground
+            .as_ref()
+            .and_then(|g| g.height(p + DVec3::Y * 4.0))
+            .unwrap_or(job.center.y)
+    };
+    let mut moved = Vec::new();
+    for (e, rock, t) in &mut rocks {
+        if rock.settled {
+            continue;
+        }
+        let radius = 0.5 * t.scale.x.max(t.scale.z) * 0.85;
+        let mut local = cover_local(&job.cover, job.center, t.translation).unwrap_or_default();
+        for _ in 0..3 {
+            for tree in &inputs.trees {
+                let d = local - tree.pos;
+                let need = radius + tree.trunk + 0.15;
+                if d.length() < need {
+                    local = tree.pos + d.normalize_or(Vec2::X) * need;
+                }
+            }
+        }
+        let s = sample_cover(&job.cover, &inputs, local);
+        let world_p = job.center + DVec3::new(local.x as f64, 0.0, local.y as f64);
+        let y = ground_y(world_p) + s.height as f64 - rock.bury_m as f64;
+        t.translation = DVec3::new(world_p.x, y, world_p.z);
+        rock.water_m = job
+            .cover
+            .pools
+            .iter()
+            .filter(|p| (local - Vec2::from(p.center)).length() < p.radius + 1.5)
+            .map(|p| (p.water_m - s.height).max(0.0))
+            .fold(rock.water_m, f32::max);
+        rock.settled = true;
+        moved.push((*e, rock.clone(), *t));
+    }
+    inputs.rocks = rocks
+        .iter()
+        .filter_map(|(_, r, t)| {
+            Some(RockSpot {
+                pos: cover_local(&job.cover, job.center, t.translation)?,
+                radius: 0.5 * t.scale.x.max(t.scale.z) * 0.85,
+                moss: r.moss,
+            })
+        })
+        .collect();
+    inputs.prepare(&job.cover);
+    let surface = build_surface(&job.cover, &inputs, ground.as_ref(), job.version + 1);
+    let debris = if job.new {
+        place_debris(
+            &job.cover,
+            &inputs,
+            &scatter_debris(&job.cover, &inputs),
+            &ground_y,
+        )
+    } else {
+        PlacedDebris::default()
+    };
+    CoverBuilt {
+        job,
+        inputs,
+        moved,
+        surface,
+        debris,
+        ms: start.elapsed().as_secs_f32() * 1000.0,
+    }
+}
+
 /// Builds and keeps up the scenery: settles new [`Rock`]s on their ground cover (away from
 /// trunks, at the right depth, wet where they stand in a pool), builds the [`GroundSurface`]
 /// of every new or edited [`GroundCover`] (and rebuilds it when rocks settle on it), and
-/// scatters debris and reeds over a new cover from the plants that grew there.
+/// scatters debris and reeds over a new cover from the plants that grew there. Covers wait
+/// for the ecology regions to be planted (their trees shape the floor); the rebuilds run on
+/// the async task pool with [`FoliageLoading::background`] and land when done.
 pub fn build_scenery(world: &mut World) {
+    world.init_resource::<SceneryBuilds>();
+    let background = world
+        .get_resource::<FoliageLoading>()
+        .is_none_or(|l| l.background);
+    // Put the finished rebuilds in place.
+    let done: Vec<CoverBuilt> = {
+        let mut builds = world.resource_mut::<SceneryBuilds>();
+        let ready: Vec<Entity> = builds
+            .pending
+            .iter()
+            .filter(|(_, slot)| slot.lock().is_ok_and(|s| s.is_some()))
+            .map(|(&e, _)| e)
+            .collect();
+        ready
+            .into_iter()
+            .filter_map(|e| builds.pending.remove(&e))
+            .filter_map(|slot| slot.lock().ok().and_then(|mut s| s.take()))
+            .collect()
+    };
+    for built in done {
+        place_cover(world, built);
+    }
+    let regions_growing = world
+        .query_filtered::<(), (With<EcologyRegion>, Without<RegionState>)>()
+        .iter(world)
+        .next()
+        .is_some();
+    let pending: HashSet<Entity> = world
+        .resource::<SceneryBuilds>()
+        .pending
+        .keys()
+        .copied()
+        .collect();
     let mut covers = world.query::<(Entity, &GroundCover, &Transform, Option<&GroundSurface>)>();
     let mut jobs: Vec<CoverJob> = Vec::new();
     let mut all_covers: Vec<(Entity, GroundCover, DVec3, u64)> = Vec::new();
     for (e, c, t, s) in covers.iter(world) {
         let version = s.map_or(0, |s| s.version);
         all_covers.push((e, c.clone(), t.translation, version));
-        if s.is_none_or(|s| &s.built_from != c) {
+        if s.is_none_or(|s| &s.built_from != c) && !pending.contains(&e) {
             jobs.push(CoverJob {
                 entity: e,
                 cover: c.clone(),
@@ -3221,11 +3353,15 @@ pub fn build_scenery(world: &mut World) {
         .filter(|(_, r, _)| !r.settled)
         .map(|(e, r, t)| (e, r.clone(), *t))
         .collect();
-    for (_, _, t) in &unsettled {
+    let mut outside = Vec::new();
+    for (re, rock, t) in unsettled {
+        let mut on_one = false;
         for (e, c, center, version) in &all_covers {
-            if cover_local(c, *center, t.translation).is_some()
-                && !jobs.iter().any(|j| j.entity == *e)
-            {
+            if cover_local(c, *center, t.translation).is_none() {
+                continue;
+            }
+            on_one = true;
+            if !pending.contains(e) && !jobs.iter().any(|j| j.entity == *e) {
                 jobs.push(CoverJob {
                     entity: *e,
                     cover: c.clone(),
@@ -3235,115 +3371,110 @@ pub fn build_scenery(world: &mut World) {
                 });
             }
         }
-    }
-    if jobs.is_empty() {
-        // Rocks outside every cover keep their place.
-        for (e, mut rock, _) in unsettled {
-            rock.settled = true;
-            world.entity_mut(e).insert(rock);
+        if !on_one {
+            outside.push((re, rock));
         }
+    }
+    // Rocks outside every cover keep their place.
+    for (e, mut rock) in outside {
+        rock.settled = true;
+        world.entity_mut(e).insert(rock);
+    }
+    let waiting = jobs.len();
+    let set_building = |world: &mut World, n: usize| {
+        if let Some(mut l) = world.get_resource_mut::<FoliageLoading>() {
+            l.bypass_change_detection().scenery_building = n;
+        }
+    };
+    if jobs.is_empty() || regions_growing {
+        set_building(world, pending.len() + waiting);
         return;
     }
     let ground = world.get_resource::<Ground>().cloned();
+    let soils: Vec<Soil> = world
+        .query::<&RegionState>()
+        .iter(world)
+        .map(|r| r.sim.soil.clone())
+        .collect();
+    let pool = AsyncComputeTaskPool::try_get().filter(|_| background);
     for job in jobs {
-        let start = std::time::Instant::now();
-        let soils: Vec<Soil> = world
-            .query::<&RegionState>()
-            .iter(world)
-            .map(|r| r.sim.soil.clone())
-            .collect();
         let trees = tree_spots(world, &job.cover, job.center);
-        let mut inputs = CoverInputs::new(job.center, soils, trees, Vec::new());
-        inputs.prepare(&job.cover);
-        let ground_y = |p: DVec3| {
-            ground
-                .as_ref()
-                .and_then(|g| g.height(p + DVec3::Y * 4.0))
-                .unwrap_or(job.center.y)
-        };
-
-        // Settle the rocks on this cover.
-        let mut rocks: Vec<(Entity, Rock, Transform)> = rq
+        let inputs = CoverInputs::new(job.center, soils.clone(), trees, Vec::new());
+        let rocks: Vec<(Entity, Rock, Transform)> = rq
             .iter(world)
             .filter(|(_, _, t)| cover_local(&job.cover, job.center, t.translation).is_some())
             .map(|(e, r, t)| (e, r.clone(), *t))
             .collect();
-        let mut moved = Vec::new();
-        for (e, rock, t) in &mut rocks {
-            if rock.settled {
-                continue;
-            }
-            let radius = 0.5 * t.scale.x.max(t.scale.z) * 0.85;
-            let mut local = cover_local(&job.cover, job.center, t.translation).unwrap_or_default();
-            for _ in 0..3 {
-                for tree in &inputs.trees {
-                    let d = local - tree.pos;
-                    let need = radius + tree.trunk + 0.15;
-                    if d.length() < need {
-                        local = tree.pos + d.normalize_or(Vec2::X) * need;
+        let ground = ground.clone();
+        match pool {
+            Some(pool) => {
+                let slot = Arc::new(Mutex::new(None));
+                let out = slot.clone();
+                let entity = job.entity;
+                pool.spawn(async move {
+                    let built = build_cover(job, inputs, rocks, ground);
+                    if let Ok(mut s) = out.lock() {
+                        *s = Some(built);
                     }
-                }
-            }
-            let s = sample_cover(&job.cover, &inputs, local);
-            let world_p = job.center + DVec3::new(local.x as f64, 0.0, local.y as f64);
-            let y = ground_y(world_p) + s.height as f64 - rock.bury_m as f64;
-            t.translation = DVec3::new(world_p.x, y, world_p.z);
-            rock.water_m = job
-                .cover
-                .pools
-                .iter()
-                .filter(|p| (local - Vec2::from(p.center)).length() < p.radius + 1.5)
-                .map(|p| (p.water_m - s.height).max(0.0))
-                .fold(rock.water_m, f32::max);
-            rock.settled = true;
-            moved.push((*e, rock.clone(), *t));
-        }
-        inputs.rocks = rocks
-            .iter()
-            .filter_map(|(_, r, t)| {
-                Some(RockSpot {
-                    pos: cover_local(&job.cover, job.center, t.translation)?,
-                    radius: 0.5 * t.scale.x.max(t.scale.z) * 0.85,
-                    moss: r.moss,
                 })
-            })
-            .collect();
-        inputs.prepare(&job.cover);
-        for (e, rock, t) in moved {
-            world.entity_mut(e).insert((rock, t));
+                .detach();
+                world
+                    .resource_mut::<SceneryBuilds>()
+                    .pending
+                    .insert(entity, slot);
+            }
+            None => place_cover(world, build_cover(job, inputs, rocks, ground)),
         }
-
-        let surface = build_surface(&job.cover, &inputs, ground.as_ref(), job.version + 1);
-        let triangles = surface.triangle_count();
-        world.entity_mut(job.entity).insert(surface);
-
-        let mut scattered = 0;
-        if job.new
-            && let Some(assets) = scenery_assets(world)
-        {
-            let spots = scatter_debris(&job.cover, &inputs);
-            scattered = spots.len();
-            spawn_debris(world, &job.cover, &inputs, &assets, &spots, &ground_y);
-        }
-        tracing::info!(
-            "foliage: ground cover {} built ({} triangles, {} rocks, {} debris) in {:.0} ms",
-            job.entity,
-            triangles,
-            inputs.rocks.len(),
-            scattered,
-            start.elapsed().as_secs_f32() * 1000.0
-        );
     }
+    let pending = world.resource::<SceneryBuilds>().pending.len();
+    set_building(world, pending);
 }
 
-fn spawn_debris(
-    world: &mut World,
+/// Put a cover's rebuild into the world: its settled rocks (those still there and still
+/// unsettled), its surface and, for a new cover, its debris.
+fn place_cover(world: &mut World, built: CoverBuilt) {
+    let CoverBuilt {
+        job,
+        inputs,
+        moved,
+        surface,
+        debris,
+        ms,
+    } = built;
+    if world.get_entity(job.entity).is_err() {
+        return;
+    }
+    for (e, rock, t) in moved {
+        if world.get::<Rock>(e).is_some_and(|r| !r.settled) {
+            world.entity_mut(e).insert((rock, t));
+        }
+    }
+    let triangles = surface.triangle_count();
+    world.entity_mut(job.entity).insert(surface);
+    let scattered = debris.len();
+    if scattered > 0
+        && let Some(assets) = scenery_assets(world)
+    {
+        debris.spawn(world, &assets);
+    }
+    tracing::info!(
+        "foliage: ground cover {} built ({} triangles, {} rocks, {} debris) in {:.0} ms",
+        job.entity,
+        triangles,
+        inputs.rocks.len(),
+        scattered,
+        ms
+    );
+}
+
+/// Where each piece of debris and each pebble goes: the slow part of scattering (a cover
+/// sample per piece), needing nothing from the world.
+fn place_debris(
     cover: &GroundCover,
     inputs: &CoverInputs,
-    assets: &SceneryAssets,
     spots: &[DebrisSpot],
     ground_y: &dyn Fn(DVec3) -> f64,
-) {
+) -> PlacedDebris {
     let mut batch = Vec::new();
     let mut rocks = Vec::new();
     for s in spots {
@@ -3351,59 +3482,48 @@ fn spawn_debris(
         let p = inputs.center + DVec3::new(s.pos.x as f64, 0.0, s.pos.y as f64);
         let y = ground_y(p) + sample.height as f64;
         let rotation = Quat::from_rotation_y(s.yaw);
-        let v = s.variant as usize;
-        let (mesh, material, shadows, distance) = match s.kind {
-            DebrisKind::Twig => (assets.twigs[v], assets.bark, true, 30.0),
-            DebrisKind::Branch => (assets.branches[v], assets.bark, true, 70.0),
-            DebrisKind::PineCone => (assets.pine_cones[v], assets.cones, true, 22.0),
-            DebrisKind::SpruceCone => (assets.spruce_cones[v], assets.cones, true, 22.0),
-            DebrisKind::Leaves => (assets.leaf_clumps[v], assets.leaves, false, 30.0),
-            DebrisKind::Reeds => (assets.reeds[v], assets.reed, true, 90.0),
-            DebrisKind::Pebble => {
-                let mut rng = Rng::new(hash_u64(
-                    s.pos.x.to_bits() as u64 ^ (s.pos.y.to_bits() as u64) << 32,
-                ));
-                let shore = cover
-                    .pools
-                    .iter()
-                    .any(|p| (s.pos - Vec2::from(p.center)).length() < p.radius + 1.5);
-                let big = rng.chance(0.08);
-                let w = if big {
-                    rng.range(0.14, 0.3)
-                } else {
-                    rng.range(0.035, 0.11)
-                } * s.scale;
-                let size = Vec3::new(w, w * rng.range(0.45, 0.8), w * rng.range(0.6, 1.0));
-                let shape = if shore || cover.style == CoverStyle::CaveFloor {
-                    ROCK_SHAPES - 1 - s.variant % ROUNDED_SHAPES
-                } else {
-                    s.variant % ROCK_SHAPES
-                };
-                let water_m = cover
-                    .pools
-                    .iter()
-                    .map(|p| (p.water_m - sample.height).max(0.0))
-                    .fold(0.0, f32::max);
-                let bury = size.y * rng.range(0.2, 0.45);
-                rocks.push((
-                    Transform::from_translation(DVec3::new(p.x, y - bury as f64, p.z))
-                        .with_rotation(rotation)
-                        .with_scale(size),
-                    Rock {
-                        shape,
-                        bury_m: bury,
-                        moss: if shore { 0.0 } else { 0.25 },
-                        lichen: 0.2,
-                        water_m,
-                        tint: [rng.range(0.85, 1.1); 3],
-                        settled: true,
-                    },
-                ));
-                continue;
-            }
-        };
-        let mut renderer = MeshRenderer::new(mesh, material);
-        renderer.cast_shadows = shadows;
+        if s.kind == DebrisKind::Pebble {
+            let mut rng = Rng::new(hash_u64(
+                s.pos.x.to_bits() as u64 ^ (s.pos.y.to_bits() as u64) << 32,
+            ));
+            let shore = cover
+                .pools
+                .iter()
+                .any(|p| (s.pos - Vec2::from(p.center)).length() < p.radius + 1.5);
+            let big = rng.chance(0.08);
+            let w = if big {
+                rng.range(0.14, 0.3)
+            } else {
+                rng.range(0.035, 0.11)
+            } * s.scale;
+            let size = Vec3::new(w, w * rng.range(0.45, 0.8), w * rng.range(0.6, 1.0));
+            let shape = if shore || cover.style == CoverStyle::CaveFloor {
+                ROCK_SHAPES - 1 - s.variant % ROUNDED_SHAPES
+            } else {
+                s.variant % ROCK_SHAPES
+            };
+            let water_m = cover
+                .pools
+                .iter()
+                .map(|p| (p.water_m - sample.height).max(0.0))
+                .fold(0.0, f32::max);
+            let bury = size.y * rng.range(0.2, 0.45);
+            rocks.push((
+                Transform::from_translation(DVec3::new(p.x, y - bury as f64, p.z))
+                    .with_rotation(rotation)
+                    .with_scale(size),
+                Rock {
+                    shape,
+                    bury_m: bury,
+                    moss: if shore { 0.0 } else { 0.25 },
+                    lichen: 0.2,
+                    water_m,
+                    tint: [rng.range(0.85, 1.1); 3],
+                    settled: true,
+                },
+            ));
+            continue;
+        }
         // Reeds stand in the water: their base a little below the surface.
         let y = if s.kind == DebrisKind::Reeds {
             y.min(ground_y(p) + cover.pools.first().map_or(0.0, |p| p.water_m) as f64)
@@ -3414,14 +3534,57 @@ fn spawn_debris(
             Transform::from_translation(DVec3::new(p.x, y, p.z))
                 .with_rotation(rotation)
                 .with_scale(Vec3::splat(s.scale)),
-            renderer,
-            Debris {
-                draw_distance_m: distance,
-            },
+            s.kind,
+            s.variant as usize,
         ));
     }
-    world.spawn_batch(batch);
-    world.spawn_batch(rocks);
+    PlacedDebris {
+        pieces: batch,
+        pebbles: rocks,
+    }
+}
+
+/// Debris placed by [`place_debris`]: pieces by kind and variant, and pebbles as rocks.
+#[derive(Default)]
+struct PlacedDebris {
+    pieces: Vec<(Transform, DebrisKind, usize)>,
+    pebbles: Vec<(Transform, Rock)>,
+}
+
+impl PlacedDebris {
+    fn len(&self) -> usize {
+        self.pieces.len() + self.pebbles.len()
+    }
+
+    fn spawn(self, world: &mut World, assets: &SceneryAssets) {
+        let batch: Vec<_> = self
+            .pieces
+            .into_iter()
+            .map(|(t, kind, v)| {
+                let (mesh, material, shadows, distance) = match kind {
+                    DebrisKind::Twig => (assets.twigs[v], assets.bark, true, 30.0),
+                    DebrisKind::Branch => (assets.branches[v], assets.bark, true, 70.0),
+                    DebrisKind::PineCone => (assets.pine_cones[v], assets.cones, true, 22.0),
+                    DebrisKind::SpruceCone => (assets.spruce_cones[v], assets.cones, true, 22.0),
+                    DebrisKind::Leaves | DebrisKind::Pebble => {
+                        (assets.leaf_clumps[v], assets.leaves, false, 30.0)
+                    }
+                    DebrisKind::Reeds => (assets.reeds[v], assets.reed, true, 90.0),
+                };
+                let mut renderer = MeshRenderer::new(mesh, material);
+                renderer.cast_shadows = shadows;
+                (
+                    t,
+                    renderer,
+                    Debris {
+                        draw_distance_m: distance,
+                    },
+                )
+            })
+            .collect();
+        world.spawn_batch(batch);
+        world.spawn_batch(self.pebbles);
+    }
 }
 
 // ---------------------------------------------------------------- rendering
@@ -3952,6 +4115,22 @@ struct RockBatch {
     count: u32,
 }
 
+/// The ground layers at [`LAYER_SIZE`], painted once per process.
+static GROUND_LAYERS: std::sync::OnceLock<Vec<LayerTexture>> = std::sync::OnceLock::new();
+
+/// Start painting the ground layers on a thread of their own, so the renderer finds them
+/// ready when it first draws a cover instead of painting them in that frame.
+pub fn start_painting_ground_layers() {
+    if GROUND_LAYERS.get().is_none() {
+        std::thread::spawn(ground_layers);
+    }
+}
+
+/// The painted ground layers (waiting for the painting if it is still under way).
+fn ground_layers() -> &'static [LayerTexture] {
+    GROUND_LAYERS.get_or_init(|| paint_layers(LAYER_SIZE))
+}
+
 /// Draws [`GroundSurface`]s and [`Rock`]s (added by `FoliagePlugin`).
 #[derive(Default)]
 pub struct SceneryFeature {
@@ -4056,7 +4235,7 @@ impl SceneryFeature {
             return;
         };
         let start = std::time::Instant::now();
-        let layers = paint_layers(LAYER_SIZE);
+        let layers = ground_layers();
         let albedo: Vec<Vec<u8>> = layers.iter().map(|l| l.albedo_height.clone()).collect();
         let normal: Vec<Vec<u8>> = layers.iter().map(|l| l.normal_rough_ao.clone()).collect();
         let n = LAYER_SIZE as u32;
@@ -5039,6 +5218,80 @@ mod tests {
         let mut bytes = Vec::new();
         surface.vertices[0].write(&mut bytes);
         assert_eq!(bytes.len(), GROUND_VERTEX_BYTES);
+    }
+
+    #[test]
+    fn a_cover_built_off_the_frame_matches_one_built_in_it() {
+        use crate::plant::{EcologyRegion, RegionHistory};
+        let build = |loading: FoliageLoading| {
+            let mut app = App::new();
+            app.add_plugins(engine_world::WorldPlugin);
+            app.init_resource::<Assets<Mesh>>()
+                .init_resource::<Assets<StandardMaterial>>()
+                .init_resource::<Assets<Image>>()
+                .add_plugins(crate::FoliagePlugin);
+            app.world.insert_resource(loading);
+            let all = PlantLibrary::default();
+            let keep = ["pine", "fern"].map(|n| all.get(all.id(n).unwrap()).clone());
+            app.world.insert_resource(PlantLibrary {
+                species: keep.to_vec(),
+            });
+            app.world
+                .resource_mut::<crate::plant::EcologySettings>()
+                .paused = true;
+            app.world.spawn((
+                Transform::default(),
+                EcologyRegion {
+                    half_extents: [25.0, 25.0],
+                    species: vec!["pine".into(), "fern".into()],
+                    history: RegionHistory {
+                        initial_plants: [20, 0, 40],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            ));
+            let (cover, _) = test_cover();
+            let ground = app.world.spawn((Transform::default(), cover)).id();
+            let rock = app
+                .world
+                .spawn((
+                    Transform::from_xyz(3.0, 5.0, -4.0).with_scale(Vec3::splat(1.2)),
+                    Rock::default(),
+                ))
+                .id();
+            let start = std::time::Instant::now();
+            app.update();
+            while (app.world.get::<GroundSurface>(ground).is_none()
+                || app.world.resource::<FoliageLoading>().scenery_building > 0)
+                && start.elapsed().as_secs() < 120
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                app.update();
+            }
+            let surface = app
+                .world
+                .get::<GroundSurface>(ground)
+                .expect("built")
+                .clone();
+            let settled = *app.world.get::<Transform>(rock).unwrap();
+            assert!(app.world.get::<Rock>(rock).unwrap().settled);
+            let debris = app
+                .world
+                .query_filtered::<(), With<Debris>>()
+                .iter(&app.world)
+                .count();
+            (
+                surface.vertices.len(),
+                surface.indices.clone(),
+                settled.translation,
+                debris,
+            )
+        };
+        let in_frame = build(FoliageLoading::in_frame());
+        let background = build(FoliageLoading::default());
+        assert!(in_frame.3 > 0, "no debris");
+        assert_eq!(in_frame, background);
     }
 
     #[test]
