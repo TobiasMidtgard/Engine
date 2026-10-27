@@ -465,6 +465,19 @@ like diffuse light with a forward glow toward the light, and shadowed like the l
 backlit leaves glow green; at 0 (fences, grates, hair cards) nothing comes through. Opaque
 single-sided materials keep the ordinary `shade_surface` (`subsurface` wraps light around them).
 
+**Mesh instance store** (`mesh_scene.rs`, after Unreal's GPUScene and Unity's GPU Resident
+Drawer): every `MeshRenderer` entity keeps a slot in dense arrays from frame to frame: a hot part
+the cull reads (world bounds in `f64`, scale, draw distance, mesh, material, flags) and a cold
+part read only for drawn instances (transforms now and before the latest change, normal matrix).
+Each frame a sync reads only change ticks and rewrites the slots of entities whose transform,
+renderer, resolved mesh or markers changed (`render.meshes.dirty_slots`; a moving parent or the
+planet frame shows up there), and drops despawned ones. Positions stay `f64` and the view origin
+is subtracted per frame, so a rebase dirties nothing. The cull runs over the slots in parallel
+chunks on the compute pool; slots that may take the cluster path, or whose mesh is not uploaded
+yet, wait for a serial pass. Draw order is sorted as 12-byte keys, and each instance is written
+once, in draw order, straight into the upload's staging memory (`render.cpu.meshes: *` steps;
+`cargo run -p engine_render --release --example mesh_gather` measures them).
+
 **Instanced levels of detail and impostors** (`mesh_lod.rs`, `impostor.rs`): meshes on the
 instanced path get a chain of simplified index lists (built on a worker thread), and each view
 draws the coarsest level whose error stays under `mesh_lod_pixels` (texels in shadow maps);

@@ -333,13 +333,16 @@ impl Impostors {
         }
     }
 
-    /// The baked layer of a mesh with a material, which counts as drawn this frame.
-    pub(crate) fn layer(&mut self, key: Key) -> Option<u32> {
-        let layer = self.layers.get(&key).copied()?;
+    /// The baked layer of a mesh with a material.
+    pub(crate) fn layer(&self, key: Key) -> Option<u32> {
+        self.layers.get(&key).copied()
+    }
+
+    /// A layer counts as drawn this frame (a full atlas reuses the one drawn longest ago).
+    pub(crate) fn mark_drawn(&mut self, layer: u32) {
         if let Some(owner) = self.owners.get_mut(layer as usize) {
             owner.1 = self.frame;
         }
-        Some(layer)
     }
 
     /// Ask for a bake (the scores of a frame's instances add up).
