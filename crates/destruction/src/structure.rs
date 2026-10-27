@@ -10,6 +10,8 @@
 //! **Fracturable** props (pillars, crates, statues, panes) take damage and, when it is enough,
 //! split into Voronoi pieces around the impact point.
 
+use std::collections::HashMap;
+
 use engine_core::math::{DVec3, Quat, Rng, Vec3};
 use engine_core::prelude::*;
 
@@ -168,11 +170,7 @@ pub fn support_tint_system(
         if original.is_none() || saved.len() != before {
             commands.entity(e).insert(SupportOriginal(saved.clone()));
         }
-        let grounded = graph
-            .pieces
-            .iter()
-            .position(|p| *p == e)
-            .is_some_and(|i| graph.grounded[i]);
+        let grounded = graph.is_grounded(e);
         let fraction = state.map(|s| s.support_fraction()).unwrap_or(0.0);
         for t in targets {
             let tint = match saved.iter().find(|(s, _)| *s == t) {
@@ -302,14 +300,58 @@ impl Fracturable {
     }
 }
 
-/// Neighbor graph of structural pieces and their support values.
+/// Neighbor graph of structural pieces and their support values. Like Chaos Destruction's
+/// connection graph it is built once and then only changed where something changed: a moved,
+/// added, removed or weakened piece, or dug rock, re-solves the islands (pieces joined by
+/// edges) around it, and every other structure keeps its support as it was.
 #[derive(Resource, Debug, Default)]
 pub struct StructureGraph {
     pub pieces: Vec<Entity>,
     /// For each piece: (neighbor index, vertical meters, horizontal meters).
     pub edges: Vec<Vec<(usize, f32, f32)>>,
     pub grounded: Vec<bool>,
+    /// Each piece's box when the graph was built.
+    pub boxes: Vec<Obb>,
+    /// Each piece's island: pieces joined by edges share one, and support never crosses
+    /// between islands.
+    pub island: Vec<u32>,
+    /// Where each piece is in `pieces`.
+    pub index: HashMap<Entity, usize>,
+    /// Pieces whose islands are re-solved at the next step (a burning piece that weakened).
+    pub touched: Vec<Entity>,
+    /// Rebuild the whole graph at the next step.
     pub dirty: bool,
+}
+
+impl StructureGraph {
+    /// Whether piece `e` stands on the ground (or a foundation).
+    pub fn is_grounded(&self, e: Entity) -> bool {
+        self.index.get(&e).is_some_and(|i| self.grounded[*i])
+    }
+}
+
+/// Island of every piece: the connected parts of `edges`, numbered from 0.
+pub fn islands(edges: &[Vec<(usize, f32, f32)>]) -> Vec<u32> {
+    let mut island = vec![u32::MAX; edges.len()];
+    let mut next = 0;
+    let mut stack = Vec::new();
+    for start in 0..edges.len() {
+        if island[start] != u32::MAX {
+            continue;
+        }
+        island[start] = next;
+        stack.push(start);
+        while let Some(i) = stack.pop() {
+            for &(j, ..) in &edges[i] {
+                if island[j] == u32::MAX {
+                    island[j] = next;
+                    stack.push(j);
+                }
+            }
+        }
+        next += 1;
+    }
+    island
 }
 
 /// An oriented box in world space.
@@ -327,6 +369,23 @@ impl Obb {
             self.rotation * Vec3::Y,
             self.rotation * Vec3::Z,
         ]
+    }
+
+    /// Half size of the box's world-axis bounds.
+    pub fn bound(&self) -> Vec3 {
+        let a = self.axes();
+        let h = self.half;
+        Vec3::new(
+            (a[0] * h.x).x.abs() + (a[1] * h.y).x.abs() + (a[2] * h.z).x.abs(),
+            (a[0] * h.x).y.abs() + (a[1] * h.y).y.abs() + (a[2] * h.z).y.abs(),
+            (a[0] * h.x).z.abs() + (a[1] * h.y).z.abs() + (a[2] * h.z).z.abs(),
+        )
+    }
+
+    /// World-axis bounds (min, max), grown by `margin` on every side.
+    pub fn aabb(&self, margin: f32) -> (DVec3, DVec3) {
+        let b = (self.bound() + Vec3::splat(margin)).as_dvec3();
+        (self.center - b, self.center + b)
     }
 
     /// Lowest world Y of any corner.
@@ -402,15 +461,7 @@ pub fn build_graph(
     let mut edges = vec![Vec::new(); n];
     // Broad phase: sort by min x.
     let mut order: Vec<usize> = (0..n).collect();
-    let bound = |o: &Obb| {
-        let a = o.axes();
-        Vec3::new(
-            (a[0] * o.half.x).x.abs() + (a[1] * o.half.y).x.abs() + (a[2] * o.half.z).x.abs(),
-            (a[0] * o.half.x).y.abs() + (a[1] * o.half.y).y.abs() + (a[2] * o.half.z).y.abs(),
-            (a[0] * o.half.x).z.abs() + (a[1] * o.half.y).z.abs() + (a[2] * o.half.z).z.abs(),
-        )
-    };
-    let bounds: Vec<Vec3> = items.iter().map(|(_, o, _)| bound(o)).collect();
+    let bounds: Vec<Vec3> = items.iter().map(|(_, o, _)| o.bound()).collect();
     order.sort_by(|&a, &b| {
         (items[a].1.center.x - bounds[a].x as f64)
             .total_cmp(&(items[b].1.center.x - bounds[b].x as f64))
@@ -442,8 +493,16 @@ pub fn build_graph(
         .collect();
     StructureGraph {
         pieces: items.iter().map(|(e, ..)| *e).collect(),
+        island: islands(&edges),
         edges,
         grounded,
+        boxes: items.iter().map(|(_, o, _)| *o).collect(),
+        index: items
+            .iter()
+            .enumerate()
+            .map(|(i, (e, ..))| (*e, i))
+            .collect(),
+        touched: Vec::new(),
         dirty: false,
     }
 }

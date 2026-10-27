@@ -934,11 +934,25 @@ fn a_tower_falls_when_its_post_is_smashed() {
 
 #[test]
 fn digging_under_an_overhang_drops_it() {
+    // On the frame thread, and with the volume built and its support solved on the bake
+    // threads.
+    for at_once in [true, false] {
+        digging_under_an_overhang_drops_it_with(at_once);
+    }
+}
+
+fn digging_under_an_overhang_drops_it_with(at_once: bool) {
     let mut app = app();
+    if !at_once {
+        app.world.remove_resource::<LoadAtOnce>();
+    }
     let mut cliff = VoxelVolume::cliff(8.0, 6.0, 5.0, 0.25);
     cliff.overhang = 1.5;
     let e = app.world.spawn((Transform::default(), cliff)).id();
     app.update();
+    while engine_destruction::is_loading(&app.world) {
+        app.update();
+    }
     let before = app.world.get::<VoxelState>(e).unwrap().volume();
     // Mine a wide cave into the face.
     for x in [-2.4, -1.2, 0.0, 1.2, 2.4] {
@@ -1900,6 +1914,44 @@ fn prop_models_and_voxel_volumes_are_built_off_the_frame_thread() {
     let c = spawn(&mut app, 1);
     app.update();
     assert!(app.world.get::<dress::PropBuilt>(c).is_some());
+}
+
+#[test]
+fn a_blasted_crate_shatters_on_the_bake_threads() {
+    let mut app = app();
+    app.world.remove_resource::<LoadAtOnce>();
+    app.update();
+    let crate_e = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 0.4, 0.0),
+            Fracturable {
+                shape: FractureShape::Box {
+                    half_extents: Vec3::splat(0.4),
+                },
+                material: DestructibleMaterial::Wood,
+                ..Fracturable::default()
+            },
+        ))
+        .id();
+    app.update();
+    app.world.resource_mut::<HitQueue>().hits.push(Hit::Blast {
+        center: DVec3::new(0.5, 0.4, 0.0),
+        energy_j: 2.0e5,
+    });
+    let debris = |app: &mut App| {
+        app.world
+            .query_filtered::<Entity, With<Debris>>()
+            .iter(&app.world)
+            .count()
+    };
+    let mut frames = 0;
+    while debris(&mut app) == 0 {
+        assert!(frames < 120, "the crate's pieces never came");
+        app.update();
+        frames += 1;
+    }
+    assert!(app.world.get_entity(crate_e).is_err(), "the crate is gone");
 }
 
 #[test]

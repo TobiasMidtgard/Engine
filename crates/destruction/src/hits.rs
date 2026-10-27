@@ -264,9 +264,15 @@ pub struct Outputs<'w> {
     pub noise: MessageWriter<'w, NoiseEvent>,
     pub terrain: MessageWriter<'w, TerrainEdit>,
     pub assets: Option<Res<'w, DestructionAssets>>,
+    pub at_once: Option<Res<'w, crate::LoadAtOnce>>,
 }
 
 impl Outputs<'_> {
+    /// Whether debris may be shattered on the bake threads ([`Ctx::defer`]).
+    pub fn defer(&self) -> bool {
+        self.at_once.is_none()
+    }
+
     /// Surfaces carry textures (see [`DestructionAssets::textured`]).
     pub fn textured(&self) -> bool {
         self.assets.as_ref().is_some_and(|a| a.textured)
@@ -285,9 +291,26 @@ pub struct Ctx<'a> {
     /// Clouds for the smoke module: position, size (m), darkness, temperature (°C).
     pub dust_events: Vec<(DVec3, f32, f32, f32)>,
     pub noise_events: Vec<(DVec3, f32)>,
+    /// Shatter debris on the bake threads ([`Ctx::later`]); false with [`crate::LoadAtOnce`].
+    pub defer: bool,
 }
 
 impl Ctx<'_> {
+    /// Make debris pieces with `make`: on the bake threads (they spawn a frame or so later),
+    /// or at once without [`Ctx::defer`]. Shattering a crate or a crater's rubble into
+    /// fractured meshes was most of a big hit (Chaos fractures its geometry collections ahead
+    /// of time for the same reason).
+    pub(crate) fn later(&mut self, make: impl FnOnce() -> Vec<DebrisSpawn> + Send + 'static) {
+        if self.defer {
+            self.pending
+                .later
+                .0
+                .push(crate::assets::bake_pool().spawn(async move { make() }));
+        } else {
+            self.pending.items.extend(make());
+        }
+    }
+
     pub(crate) fn dust(&mut self, at: DVec3, size: f32, darkness: f32, count: u32, velocity: Vec3) {
         self.puffs(at, size, darkness, count, velocity);
         self.dust_events.push((at, size, darkness, 25.0));
@@ -375,6 +398,7 @@ pub fn apply_hits_system(
     let mut smoke = Vec::new();
     {
         let textured = out.textured();
+        let defer = out.defer();
         let mut ctx = Ctx {
             settings: &settings,
             table: &table,
@@ -384,6 +408,7 @@ pub fn apply_hits_system(
             stats: &mut out.stats,
             dust_events: Vec::new(),
             noise_events: Vec::new(),
+            defer,
         };
         for hit in hits {
             ctx.stats.hits += 1;
@@ -1140,38 +1165,45 @@ fn blast(
         let pieces = ((removed / 0.03) as u32).clamp(2, ctx.settings.max_chunks_per_hit as u32);
         let half = Vec3::splat((removed / pieces as f32).cbrt() * 0.9).max(Vec3::splat(0.08));
         let (ext_c, int_c) = piece_colors(None, volume.material, ctx.table, ctx.textured);
-        let shape = ConvexPoly::cuboid(half * 2.0);
-        let parts = shatter(&shape, Vec3::ZERO, pieces, ctx.rng);
         let look = BreakLook::of(volume.material, ext_c, int_c);
-        for (poly, c, vol) in parts {
-            let dir = (c.normalize_or(Vec3::Y) + Vec3::Y * 0.6).normalize();
-            let at = gt.transform_point((local + c * 0.5).as_dvec3());
-            let out_dir = ((at - center).as_vec3()).normalize_or(dir);
-            let speed = (energy / 1.0e5).sqrt().clamp(2.0, 18.0) * ctx.rng.range(0.5, 1.2);
-            let (outside, inside) = poly.broken_meshes(c, &look, ctx.rng.next_u64());
-            let pts: Vec<Vec3> = poly.vertices().iter().map(|p| *p - c).collect();
-            ctx.pending.items.push(DebrisSpawn {
-                position: at,
-                rotation: Quat::IDENTITY,
-                velocity: (out_dir + Vec3::Y * 0.5).normalize() * speed,
-                angular: ctx.rng.unit_vector() * 8.0,
-                look: DebrisLook::Broken {
-                    outside: outside.map(MeshBuilder::build),
-                    inside: inside.build(),
-                },
-                half_extents: half,
-                hull: reduce_points(&pts, 16),
-                mass_kg: vol * props.density,
-                material: volume.material,
-                shatter_speed: 0.0,
-                lifetime: None,
-                reuse: None,
-                scale: None,
-                resting: false,
-                // Out of the crater: clear of the rock before it lands on it.
-                from_rock: true,
-            });
-        }
+        let (material, density) = (volume.material, props.density);
+        let mut rng = Rng::new(ctx.rng.next_u64());
+        ctx.later(move || {
+            let shape = ConvexPoly::cuboid(half * 2.0);
+            let parts = shatter(&shape, Vec3::ZERO, pieces, &mut rng);
+            parts
+                .into_iter()
+                .map(|(poly, c, vol)| {
+                    let dir = (c.normalize_or(Vec3::Y) + Vec3::Y * 0.6).normalize();
+                    let at = gt.transform_point((local + c * 0.5).as_dvec3());
+                    let out_dir = ((at - center).as_vec3()).normalize_or(dir);
+                    let speed = (energy / 1.0e5).sqrt().clamp(2.0, 18.0) * rng.range(0.5, 1.2);
+                    let (outside, inside) = poly.broken_meshes(c, &look, rng.next_u64());
+                    let pts: Vec<Vec3> = poly.vertices().iter().map(|p| *p - c).collect();
+                    DebrisSpawn {
+                        position: at,
+                        rotation: Quat::IDENTITY,
+                        velocity: (out_dir + Vec3::Y * 0.5).normalize() * speed,
+                        angular: rng.unit_vector() * 8.0,
+                        look: DebrisLook::Broken {
+                            outside: outside.map(MeshBuilder::build),
+                            inside: inside.build(),
+                        },
+                        half_extents: half,
+                        hull: reduce_points(&pts, 16),
+                        mass_kg: vol * density,
+                        material,
+                        shatter_speed: 0.0,
+                        lifetime: None,
+                        reuse: None,
+                        scale: None,
+                        resting: false,
+                        // Out of the crater: clear of the rock before it lands on it.
+                        from_rock: true,
+                    }
+                })
+                .collect()
+        });
         ctx.dust(
             center,
             (r * 2.0).clamp(0.5, 4.0),
@@ -1480,57 +1512,65 @@ pub(crate) fn break_fracturable(
     let props = ctx.table.get(f.material);
     let (ext, int) = piece_colors(f.color, f.material, ctx.table, ctx.textured);
     let half = f.shape.half_extents();
-    // Long timber (posts, beams, planks) splits along its grain into splinters.
-    let parts = if let crate::structure::FractureShape::Crate { half_extents, wall } = f.shape {
-        crate_boards(half_extents, wall, ctx.rng)
-    } else if f.material == DestructibleMaterial::Wood
-        && half.max_element() >= GRAIN_ASPECT * half.min_element()
-    {
-        let grain = Vec3::AXES[half.max_position()];
-        shatter_along_grain(
-            &f.shape.poly(),
-            impact,
-            f.pieces,
-            grain,
-            SPLINTER_STRETCH,
-            ctx.rng,
-        )
-    } else {
-        shatter(&f.shape.poly(), impact, f.pieces, ctx.rng)
-    };
-    let rot = gt.rotation();
     let size = half.max_element() * 2.0;
     let look = BreakLook::of(f.material, ext, int);
-    for (poly, c, vol) in parts {
-        let (outside, inside) = poly.broken_meshes(c, &look, ctx.rng.next_u64());
-        let pts: Vec<Vec3> = poly.vertices().iter().map(|p| *p - c).collect();
-        let (lo, hi) = poly.bounds();
-        let dist = c.distance(impact);
-        let falloff = 1.0 / (1.0 + 2.0 * dist / size.max(0.1));
-        let outward = rot * (c - impact).normalize_or(Vec3::Y);
-        let velocity =
-            base_velocity + (dir * 0.6 + outward * 0.4) * speed * falloff * ctx.rng.range(0.6, 1.3);
-        ctx.pending.items.push(DebrisSpawn {
-            position: gt.transform_point(c.as_dvec3()),
-            rotation: rot,
-            velocity,
-            angular: ctx.rng.unit_vector() * (speed * falloff * 2.0).min(12.0),
-            look: DebrisLook::Broken {
-                outside: outside.map(MeshBuilder::build),
-                inside: inside.build(),
-            },
-            half_extents: (hi - lo) * 0.5,
-            hull: reduce_points(&pts, 16),
-            mass_kg: vol * props.density,
-            material: f.material,
-            shatter_speed: 0.0,
-            lifetime: None,
-            reuse: None,
-            scale: None,
-            resting: false,
-            from_rock: false,
-        });
-    }
+    let (shape, pieces, material, density) = (f.shape, f.pieces, f.material, props.density);
+    let gt = *gt;
+    let mut rng = Rng::new(ctx.rng.next_u64());
+    ctx.later(move || {
+        // Long timber (posts, beams, planks) splits along its grain into splinters.
+        let parts = if let crate::structure::FractureShape::Crate { half_extents, wall } = shape {
+            crate_boards(half_extents, wall, &mut rng)
+        } else if material == DestructibleMaterial::Wood
+            && half.max_element() >= GRAIN_ASPECT * half.min_element()
+        {
+            let grain = Vec3::AXES[half.max_position()];
+            shatter_along_grain(
+                &shape.poly(),
+                impact,
+                pieces,
+                grain,
+                SPLINTER_STRETCH,
+                &mut rng,
+            )
+        } else {
+            shatter(&shape.poly(), impact, pieces, &mut rng)
+        };
+        let rot = gt.rotation();
+        parts
+            .into_iter()
+            .map(|(poly, c, vol)| {
+                let (outside, inside) = poly.broken_meshes(c, &look, rng.next_u64());
+                let pts: Vec<Vec3> = poly.vertices().iter().map(|p| *p - c).collect();
+                let (lo, hi) = poly.bounds();
+                let dist = c.distance(impact);
+                let falloff = 1.0 / (1.0 + 2.0 * dist / size.max(0.1));
+                let outward = rot * (c - impact).normalize_or(Vec3::Y);
+                let velocity = base_velocity
+                    + (dir * 0.6 + outward * 0.4) * speed * falloff * rng.range(0.6, 1.3);
+                DebrisSpawn {
+                    position: gt.transform_point(c.as_dvec3()),
+                    rotation: rot,
+                    velocity,
+                    angular: rng.unit_vector() * (speed * falloff * 2.0).min(12.0),
+                    look: DebrisLook::Broken {
+                        outside: outside.map(MeshBuilder::build),
+                        inside: inside.build(),
+                    },
+                    half_extents: (hi - lo) * 0.5,
+                    hull: reduce_points(&pts, 16),
+                    mass_kg: vol * density,
+                    material,
+                    shatter_speed: 0.0,
+                    lifetime: None,
+                    reuse: None,
+                    scale: None,
+                    resting: false,
+                    from_rock: false,
+                }
+            })
+            .collect()
+    });
     let at = gt.translation();
     ctx.dust(
         at,

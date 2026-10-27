@@ -45,6 +45,8 @@ pub fn shift_system(
         let p = at(g);
         d.velocity = s.velocity_at(p, d.velocity);
     }
+    // Pieces still being made were placed before the shift: shift them with the rest.
+    pending.finish_later();
     for item in &mut pending.items {
         item.position = s.point(item.position);
         item.rotation = s.orientation(item.rotation);
