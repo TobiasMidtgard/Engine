@@ -211,9 +211,16 @@ fn wait_for_builds(world: &mut World, stall_secs: f32) -> bool {
         // Let the workers get on with them before drawing another frame.
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
-    let building = state["meshes_building"].as_u64().unwrap_or(0) + patches;
+    // Foliage plants its regions and uploads its trees on workers, over frames.
+    let foliage = world
+        .get_resource::<engine_foliage::FoliageLoading>()
+        .is_some_and(|f| !f.is_ready()) as u64;
+    let building = state["meshes_building"].as_u64().unwrap_or(0) + patches + foliage;
     // Progress on either keeps the wait from counting as stalled.
-    let ready = (state["meshes_ready"].as_u64().unwrap_or(0), patches);
+    let ready = (
+        state["meshes_ready"].as_u64().unwrap_or(0),
+        patches + foliage,
+    );
     let now = std::time::Instant::now();
     let mut tour = world.resource_mut::<Tour>();
     let Some((since, last_ready, changed)) = tour.waiting else {
@@ -231,7 +238,7 @@ fn wait_for_builds(world: &mut World, stall_secs: f32) -> bool {
     if building == 0 || waited > BUILD_WAIT_SECS || stalled > stall_secs {
         if waited > 1.0 {
             engine::core::log::info!(
-                "  waited {waited:.0} s for meshes' clusters and terrain patches ({building} not ready)"
+                "  waited {waited:.0} s for meshes' clusters, terrain patches and foliage ({building} not ready)"
             );
         }
         tour.waiting = None;
