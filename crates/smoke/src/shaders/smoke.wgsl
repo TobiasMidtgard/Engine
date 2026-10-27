@@ -237,12 +237,23 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
                 let d = s.x / (s.x + half_sigma);
                 // Thin smoke breaks up at the coarse octaves only, into streaks: the fine
                 // octaves' peaks left a spray of single specks where a plume had thinned out.
-                // Thick smoke keeps its round billows.
+                // Thick smoke keeps its round billows. The streaks are a second lookup,
+                // stretched along the wind, blended in by thinness: blending the lookup's
+                // position instead jumped it by meters wherever the thinness changed, far
+                // from the box's corner (orange speckle all over a thin haze).
                 let thin = 1.0 - smoothstep(0.05, 0.3, d);
-                let along = wind_dir * (dot(local, wind_dir) * streak * thin);
-                let bn = textureSampleLevel(detail_tex, linear_repeat, (tiling_pos(p) - along - drift * 1.3) / (BILLOW_TILE * grain), 0.0);
-                let gaps = 1.0 - mix(bn.g * 0.5 + bn.b * 0.3 + bn.a * 0.2, bn.g * 0.8 + bn.b * 0.2, thin);
-                let e = saturate(gaps * 1.6 - 0.35) * mix(1.25, 0.7, lumps) * min(detail, 1.0) * mix(0.9, 0.55, fog) * sqrt(fine);
+                let billow_uv = (tiling_pos(p) - drift * 1.3) / (BILLOW_TILE * grain);
+                let bn = textureSampleLevel(detail_tex, linear_repeat, billow_uv, 0.0);
+                var torn = bn.g * 0.8 + bn.b * 0.2;
+                if (thin > 0.0 && streak > 0.0) {
+                    let along = wind_dir * (dot(local, wind_dir) * streak) / (BILLOW_TILE * grain);
+                    let st = textureSampleLevel(detail_tex, linear_repeat, billow_uv - along, 0.0);
+                    torn = st.g * 0.8 + st.b * 0.2;
+                }
+                let gaps = 1.0 - mix(bn.g * 0.5 + bn.b * 0.3 + bn.a * 0.2, torn, thin);
+                // Thin smoke is eroded half as much: eaten down to the noise's peaks it was left
+                // as loose round puffs hanging in the air, where a thinning plume is a veil.
+                let e = saturate(gaps * 1.6 - 0.35) * mix(1.25, 0.7, lumps) * min(detail, 1.0) * mix(0.9, 0.55, fog) * sqrt(fine) * (1.0 - 0.5 * thin);
                 k *= saturate((d - e) / max(1.0 - e, 1e-3)) / max(d, 1e-4);
                 crease = mix(1.0, mix(0.5, 1.15, 1.0 - gaps), min(detail, 1.0));
             }
