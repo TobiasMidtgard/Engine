@@ -205,6 +205,10 @@ struct SkinVertex {
 /// strength) imitate the scattering in the shader instead of going through the pass.
 const SUBSURFACE_MIN_PIXELS: f32 = 1.5;
 
+/// The hair's fringe pass is drawn for heads at least this tall on screen (25 cm), close-ups
+/// where single hairs show.
+const FRINGE_HEAD_PIXELS: f32 = 120.0;
+
 const SKIN_ATTRIBUTES: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
     0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
     6 => Uint8x4, 7 => Unorm8x4
@@ -302,6 +306,8 @@ struct GpuMeshes {
     coarse: bool,
     /// Lit through the renderer's subsurface pass this frame (near enough for it to show).
     scatter: bool,
+    /// Its hair's fringe pass is drawn (close enough for single hairs to show).
+    fringe: bool,
     strands: Vec<GpuStrands>,
     /// Last frame's model matrix (camera-relative), for motion vectors.
     last_model: Option<(Mat4, DVec3)>,
@@ -376,6 +382,7 @@ struct Pipelines {
     eye_prepass: wgpu::RenderPipeline,
     strands: wgpu::RenderPipeline,
     strands_prepass: wgpu::RenderPipeline,
+    strands_fringe: wgpu::RenderPipeline,
     strands_shadow: wgpu::RenderPipeline,
 }
 
@@ -412,6 +419,8 @@ enum Pass {
     Shadow,
     /// The skin's color for the renderer's subsurface pass to multiply in after its blur.
     SubsurfaceColor,
+    /// The hair again, blended by coverage (transparent phase).
+    Fringe,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -438,8 +447,32 @@ fn pipeline(
     })];
     let prepass_targets = gpu.prepass_targets();
     let color_targets = [Some(gpu.subsurface_color_target())];
+    let fringe_targets = [Some(wgpu::ColorTargetState {
+        format: gpu.formats.hdr,
+        blend: Some(wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::SrcAlpha,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        }),
+        write_mask: wgpu::ColorWrites::ALL,
+    })];
     let (targets, depth): (&[Option<wgpu::ColorTargetState>], _) = match pass {
         Pass::Scene => (&scene_targets, gpu.depth_state(true)),
+        // Strictly in front: not over the hairs the opaque pass kept.
+        Pass::Fringe => (
+            &fringe_targets,
+            wgpu::DepthStencilState {
+                depth_compare: Some(wgpu::CompareFunction::Greater),
+                ..gpu.depth_state(false)
+            },
+        ),
         Pass::Prepass => (&prepass_targets, gpu.depth_state(true)),
         Pass::Shadow => (&[], gpu.shadow_depth_state()),
         Pass::SubsurfaceColor => (&color_targets, gpu.depth_state(false)),
@@ -800,6 +833,7 @@ impl CharacterFeature {
             last_model: None,
             seen: true,
             scatter: false,
+            fringe: false,
         }
     }
 
@@ -828,6 +862,12 @@ impl CharacterFeature {
                     pass.set_pipeline(&p.skin_shadow);
                     c.draw_skin(pass);
                     pass.set_pipeline(&p.strands_shadow);
+                }
+                Pass::Fringe => {
+                    if !c.fringe {
+                        continue;
+                    }
+                    pass.set_pipeline(&p.strands_fringe);
                 }
                 // Only the skin scatters.
                 Pass::SubsurfaceColor => {
@@ -1015,6 +1055,16 @@ impl RenderFeature for CharacterFeature {
                 Pass::Prepass,
                 None,
             ),
+            strands_fringe: pipeline(
+                gpu,
+                "character strands fringe",
+                &strand_mod,
+                ("vs_strand", Some("fs_strand_fringe")),
+                &scene_strands,
+                &[],
+                Pass::Fringe,
+                None,
+            ),
             strands_shadow: pipeline(
                 gpu,
                 "character strands shadow",
@@ -1112,6 +1162,8 @@ impl RenderFeature for CharacterFeature {
             let mut u = built.uniform;
             u.eye2[1] = debug as f32;
             u.eye2[2] = if c.scatter { 1.0 } else { 0.0 };
+            c.fringe = !view.orthographic
+                && FRINGE_HEAD_PIXELS * view.view_depth(rel).max(1e-3) <= 0.25 * pixels_per_meter;
             u.model = model.to_cols_array_2d();
             u.prev_model = prev_model.to_cols_array_2d();
             gpu.queue
@@ -1141,8 +1193,10 @@ impl RenderFeature for CharacterFeature {
     }
 
     fn draw(&self, phase: RenderPhase, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
-        if phase == RenderPhase::Opaque {
-            self.draw_meshes(pass, Pass::Scene);
+        match phase {
+            RenderPhase::Opaque => self.draw_meshes(pass, Pass::Scene),
+            RenderPhase::Transparent => self.draw_meshes(pass, Pass::Fringe),
+            _ => {}
         }
     }
 

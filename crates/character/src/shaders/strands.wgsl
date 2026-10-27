@@ -148,6 +148,23 @@ fn fs_strand(in: StrandOut) -> @location(0) vec4<f32> {
     if (!strand_keep(in)) {
         discard;
     }
+    return vec4<f32>(strand_shade(in), 1.0);
+}
+
+// The fringe pass (transparent phase, close-ups): every hair again, blended by its coverage
+// where nothing opaque is in front (the hairs the opaque pass kept are, so they don't count
+// twice). Over the background a stray hair is in only a few of its pixels each frame, and
+// temporal anti-aliasing clips the history of those to the background around them, which leaves
+// thin hairs dotted; blended, it covers each of its pixels by its share every frame ("phone-wire
+// anti-aliasing", Persson 2011; the two-pass hair of Scheuermann 2004).
+@fragment
+fn fs_strand_fringe(in: StrandOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(strand_shade(in), in.coverage * FRINGE_ALPHA);
+}
+
+const FRINGE_ALPHA: f32 = 0.7;
+
+fn strand_shade(in: StrandOut) -> vec3<f32> {
     let kind = strand_params.info.y;
     let t = normalize(in.tangent);
     let v = normalize(-in.rel);
@@ -194,7 +211,7 @@ fn fs_strand(in: StrandOut) -> @location(0) vec4<f32> {
     // The sky's sheen along the fibers.
     let env = sample_env_rough(reflect(-v, nc), 0.35) * sky_vis + fill;
     color += env * 0.04 * ao;
-    return vec4<f32>(apply_fog(pre_expose(color), in.rel), 1.0);
+    return apply_fog(pre_expose(color), in.rel);
 }
 
 @fragment

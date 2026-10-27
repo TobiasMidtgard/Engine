@@ -45,8 +45,20 @@ fn daylight() -> bool {
     std::env::args().any(|a| a == "--daylight")
 }
 
-pub fn setup(mut commands: Commands, mut settings: ResMut<RenderSettings>) {
+pub fn setup(
+    mut commands: Commands,
+    mut settings: ResMut<RenderSettings>,
+    atmosphere: Option<ResMut<Atmosphere>>,
+) {
     let daylight = daylight();
+    // Light bounced off the ground takes the floor's color (the atmosphere's default ground
+    // is grass, which tinted chins and the undersides of hair green; shaded blond hair went
+    // olive).
+    let floor = if daylight { 0xb08850 } else { 0x2e2d2b };
+    if let Some(mut atmosphere) = atmosphere {
+        let c = StandardMaterial::hex(floor).base_color;
+        atmosphere.ground_color = [c[0], c[1], c[2]];
+    }
     // Close-up quality: tight, sharp shadow cascades and short-range occlusion.
     settings.shadow_distance = 6.0;
     settings.far_shadow_distance = 0.0;
@@ -160,7 +172,7 @@ pub fn setup(mut commands: Commands, mut settings: ResMut<RenderSettings>) {
                 size: [20.0, 20.0],
                 subdivisions: 1,
             },
-            StandardMaterial::hex(if daylight { 0xb08850 } else { 0x2e2d2b }).with_roughness(0.9),
+            StandardMaterial::hex(floor).with_roughness(0.9),
         ),
     ));
     commands.spawn((
