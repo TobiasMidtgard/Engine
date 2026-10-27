@@ -2611,7 +2611,8 @@ impl RenderFeature for MeshFeature {
                 && gpu.adapter_info.backend != wgpu::Backend::Gl
                 && (gpu.adapter_info.device_type != wgpu::DeviceType::Cpu
                     || settings.texture_compression_on_cpu);
-            let budget = (settings.impostor_atlas_layers, compress);
+            let loading = world.contains_resource::<engine_world::LoadingBudget>();
+            let budget = (settings.impostor_atlas_layers, compress, loading);
             impostors.schedule(gpu, budget, |m| {
                 meshes.get(&m).map_or((0.0, 1.0), |g| (g.min_y, g.height))
             });

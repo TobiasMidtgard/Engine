@@ -670,8 +670,12 @@ the specular anti-aliasing), `Red` (BC4: height and occlusion), `RedGreen` (BC5,
 whose shader rebuilds z) or `Exact` (never compressed); `image_texture(.., color)` is `Color` or
 `Linear`. `TextureCompression::Compact` uses BC1 for opaque color (half of BC7, some banding in
 smooth gradients). The encoders are a WGSL port of Intel's ISPC texture compressor (the
-`block_compression` crate, "basic" BC7 profiles), built on a thread at the first upload and run
-for at most `COMPRESS_TEXELS_PER_FRAME` texels a frame. Images whose mip levels don't halve to
+`block_compression` crate), built on a thread at the first upload. They run in slices of rows
+spread over frames, as Unreal's runtime virtual textures compress a few pages a frame: in play
+at most `COMPRESS_TEXELS_IN_PLAY` (512 K) texels a frame with the "fast" BC7 profiles, behind a
+`LoadingBudget` `COMPRESS_TEXELS_LOADING` (24 M) with "basic"; a view shows its RGBA8 texture
+until its last slice is done. Impostor bakes go one every `BAKE_EVERY_IN_PLAY` (4) frames in
+play, every frame while loading. Images whose mip levels don't halve to
 whole 4×4 blocks stay RGBA8, as do float images. Under a software GPU nothing is compressed
 unless `texture_compression_on_cpu` is set. `Diagnostics`: `render.images_compressed` and
 `render.image_mb_compressed_away`.
