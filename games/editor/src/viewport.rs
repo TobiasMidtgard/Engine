@@ -95,10 +95,21 @@ fn drop_target(
     if !editor.file_drops.is_empty() {
         let at =
             picking::pick_surface(world, o, d, 200.0, &|_| false).unwrap_or(o + d.as_dvec3() * 8.0);
-        crate::import::import_dropped(world, editor, Some(at));
+        let onto = crate::materials::target(world, o, d);
+        crate::import::import_dropped(world, editor, Some(at), onto);
     }
     if let Some(dragged) = response.dnd_hover_payload::<Dragged>() {
         let label = match &*dragged {
+            Dragged::Model(key) if crate::materials::is_material(key) => {
+                let name = crate::materials::display_name(key);
+                match crate::materials::target(world, o, d) {
+                    Some(e) => format!(
+                        "Drop to put {name} on {}",
+                        crate::scene_ops::label(world, e)
+                    ),
+                    None => format!("{name} is a material: drop it on an object"),
+                }
+            }
             Dragged::Model(key) => {
                 let name = crate::models::display_name(key);
                 match crate::rigs::clip_target(world, key, o, d) {
@@ -128,6 +139,11 @@ fn drop_target(
     let at =
         picking::pick_surface(world, o, d, 200.0, &|_| false).unwrap_or(o + d.as_dvec3() * 8.0);
     match &*dragged {
+        Dragged::Model(key) if crate::materials::is_material(key) => {
+            if let Some(e) = crate::materials::target(world, o, d) {
+                crate::materials::apply(world, editor, key, &[e]);
+            }
+        }
         Dragged::Model(key) => match crate::rigs::clip_target(world, key, o, d) {
             Some(rig) => crate::rigs::add_clip_file(world, editor, rig, key),
             None => {

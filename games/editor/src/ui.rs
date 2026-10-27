@@ -99,7 +99,7 @@ fn draw(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, dock: &mut Do
                 .show_inside(ui, &mut Viewer { world, editor });
         });
     if !editor.file_drops.is_empty() {
-        crate::import::import_dropped(world, editor, None);
+        crate::import::import_dropped(world, editor, None, None);
     }
     shortcuts(ui.ctx(), world, editor);
 }
@@ -829,7 +829,7 @@ fn models(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, at: DVec3) 
         .file_name()
         .map_or_else(|| "assets".into(), |n| n.to_string_lossy().into_owned());
     ui.label(theme::dim(format!(
-        "glTF in {root_name}/. Click to place, or drag into the scene"
+        "glTF and materials in {root_name}/. Click to place, or drag into the scene"
     )));
     ui.add(
         egui::TextEdit::singleline(&mut editor.model_filter)
@@ -839,7 +839,7 @@ fn models(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, at: DVec3) 
     ui.horizontal(|ui| {
         let field = ui.add(
             egui::TextEdit::singleline(&mut editor.import_path)
-                .hint_text("path to a .glb, .gltf or image")
+                .hint_text("path to a model, image or texture folder")
                 .desired_width(ui.available_width() - 70.0),
         );
         let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -897,7 +897,11 @@ fn models(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, at: DVec3) 
                         ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
                         for &key in row {
                             let id = egui::Id::new(("drag model", key));
-                            let name = crate::models::display_name(key);
+                            let name = if crate::materials::is_material(key) {
+                                crate::materials::display_name(key)
+                            } else {
+                                crate::models::display_name(key)
+                            };
                             let picture = thumbs.get(key, &root.join(key)).cloned();
                             let r = ui.dnd_drag_source(id, Dragged::Model(key.clone()), |ui| {
                                 ui.allocate_ui(egui::vec2(tile + 8.0, tile + 26.0), |ui| {
@@ -930,6 +934,18 @@ fn models(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, at: DVec3) 
                             });
                             let r = r.inner.on_hover_ui(|ui| {
                                 ui.label(egui::RichText::new(key.as_str()).strong());
+                                if crate::materials::is_material(key) {
+                                    ui.label(
+                                        "A material: drag it onto an object, or click to put it \
+                                         on the selection",
+                                    );
+                                    if let Some(s) = crate::import::settings_for(&root, key)
+                                        && !s.summary.is_empty()
+                                    {
+                                        ui.label(theme::dim(s.summary));
+                                    }
+                                    return;
+                                }
                                 let info =
                                     editor.model_info.entry(key.clone()).or_insert_with(|| {
                                         crate::convert::inspect(&root.join(key))
@@ -947,7 +963,12 @@ fn models(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, at: DVec3) 
     }
     world.insert_resource(thumbs);
     if let Some(key) = place {
-        crate::models::place(world, editor, &key, at);
+        if crate::materials::is_material(&key) {
+            let targets = crate::materials::selected_meshes(world, editor);
+            crate::materials::apply(world, editor, &key, &targets);
+        } else {
+            crate::models::place(world, editor, &key, at);
+        }
     }
 }
 

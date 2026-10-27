@@ -271,6 +271,11 @@ pub fn render(path: &Path, size: u32) -> Result<RgbaImage, String> {
         cutoff: None,
     });
 
+    // A material file (no meshes): its material on a ball, as Unreal and Unity show them.
+    if doc.meshes().len() == 0 && doc.materials().len() > 0 {
+        return Ok(rasterize(&ball(0), &surfaces, &textures, size));
+    }
+
     // Every triangle of the default scene, in world space.
     let mut tris = Vec::new();
     let scene = doc
@@ -339,6 +344,42 @@ pub fn render(path: &Path, size: u32) -> Result<RgbaImage, String> {
         return Err(NOTHING_TO_DRAW.into());
     }
     Ok(rasterize(&tris, &surfaces, &textures, size))
+}
+
+/// A unit ball of triangles with `surface`, its texture wrapped twice around.
+fn ball(surface: usize) -> Vec<Tri> {
+    let (rings, segments) = (24, 48);
+    let point = |i: usize, j: usize| {
+        let v = i as f32 / rings as f32;
+        let u = j as f32 / segments as f32;
+        let (theta, phi) = (v * std::f32::consts::PI, u * std::f32::consts::TAU);
+        let n = Vec3::new(
+            theta.sin() * phi.cos(),
+            theta.cos(),
+            -theta.sin() * phi.sin(),
+        );
+        (n, n, Vec2::new(u * 2.0, v))
+    };
+    let mut tris = Vec::new();
+    for i in 0..rings {
+        for j in 0..segments {
+            let [a, b, c, d] = [
+                point(i, j),
+                point(i + 1, j),
+                point(i + 1, j + 1),
+                point(i, j + 1),
+            ];
+            for [x, y, z] in [[a, b, c], [a, c, d]] {
+                tris.push(Tri {
+                    p: [x.0, y.0, z.0],
+                    n: [x.1, y.1, z.1],
+                    uv: [x.2, y.2, z.2],
+                    surface,
+                });
+            }
+        }
+    }
+    tris
 }
 
 /// Draw the triangles from the front three-quarter view, fitted to the picture.

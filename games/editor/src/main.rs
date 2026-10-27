@@ -23,6 +23,7 @@ mod egui_bridge;
 mod import;
 mod inspector;
 mod landscape;
+mod materials;
 mod models;
 mod outline;
 mod picking;
@@ -114,6 +115,7 @@ fn main() {
             Some("round8") => shots::round8(dir),
             Some("round9") => shots::round9(dir),
             Some("round10") => shots::round10(dir),
+            Some("round11") => shots::round11(dir),
             Some("play") => shots::play_in_editor(dir),
             _ => shots::gallery(dir),
         };
