@@ -220,6 +220,15 @@ everything else (streaming, LOD, colliders, ground queries, prints) follows the 
   frame and the ground is the one underfoot on the Moon or Mars too), and keeps heightfield collider tiles around every focus
   point and under every dynamic body (awake or asleep, the nearest 64 away from a focus),
   so a crate dropped far off or a car driven by AI never falls through the ground.
+- **Rock fields** (`rocks.rs`). Stones and boulders strewn over the Moon and Mars near every
+  focus point, as Apollo and Curiosity photos show them (`PlanetTerrain::rocks`, a
+  `RockField`; off on Earth-like terrains, where foliage and the game place rocks). Sizes
+  follow the power law of rock counts (Golombek & Rapp 1997), rocky ground comes in patches a
+  few hundred meters across and on slopes, and each rock is a fractured-stone shape tilted to
+  the ground and sunk into it. Rocks lie in quadtree cells of the terrain's own tiling (stones
+  in 24 m cells out to 110 m, boulders in 96 m cells out to 450 m), one mesh per cell, built on
+  worker threads from the cell's hash, so the same rocks are there when you come back; edits
+  rebuild the cells they touch. Diagnostics `terrain.rock_cells` and `terrain.rock_builds`.
 - **Where the woods are.** Installs the `ForestCover` provider: canopy cover (0..1) and needle
   share at any point, by the same rules the shader paints its woods with (`forest.rs`; a
   test fails when the shader's rules change without it), so the foliage module plants trees

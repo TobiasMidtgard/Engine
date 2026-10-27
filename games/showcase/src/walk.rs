@@ -227,12 +227,9 @@ pub fn leg(i: usize) -> (DVec3, DVec3) {
 }
 
 fn put_camera(world: &mut World, eye: DVec3, target: DVec3) {
-    let mut q = world.query::<(&mut Transform, &mut GlobalTransform, &mut ShowcaseCamera)>();
-    for (mut tr, mut global, mut cam) in q.iter_mut(world) {
+    let mut q = world.query::<(&mut Transform, &mut ShowcaseCamera)>();
+    for (mut tr, mut cam) in q.iter_mut(world) {
         camera::look(&mut tr, &mut cam, eye, target);
-        // Now, not after this frame's transform pass: Movement's pilot takes its facing from
-        // the camera's view the moment play starts (the camera has no parent).
-        *global = GlobalTransform::from(*tr);
     }
 }
 
@@ -392,6 +389,17 @@ fn start_walk(world: &mut World, walk: &mut Walk, i: usize) {
         engine::core::log::warn!("walk: no pilot ({e}); free camera instead");
         walk.stage = Stage::Free;
         return;
+    }
+    // The pilot's body turns to the view, but its mover (and so its camera) starts facing
+    // -Z: face it down the leg.
+    let facing = (next - feet)
+        .with_y(0.0)
+        .normalize_or(DVec3::NEG_Z)
+        .as_vec3();
+    if let Some(pilot) = world.resource::<engine_movement::Play>().pilot
+        && let Some(mut m) = world.get_mut::<engine_movement::mover::Mover>(pilot)
+    {
+        m.facing = facing;
     }
     walk.stage = Stage::Walking(i);
     point_at(world, walk, i);

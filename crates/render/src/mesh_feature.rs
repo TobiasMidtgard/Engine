@@ -740,6 +740,9 @@ impl PrepareSteps {
     }
 }
 
+/// Upload budget keys of meshes (images use the low ones; see `UploadBudget::take`).
+const MESH_UPLOAD_KEY: u64 = 1 << 63;
+
 /// Draws [`MeshRenderer`](crate::components::MeshRenderer) entities. Added by `RenderPlugin`.
 #[derive(Default)]
 pub struct MeshFeature {
@@ -804,6 +807,8 @@ pub struct MeshFeature {
     clusters: Option<ClusterRenderer>,
     /// Meshes drawn as clusters this frame.
     clustered: HashSet<u32>,
+    /// Meshes uploaded since the diagnostics were last published.
+    uploads: u32,
     /// This frame's mesh and material lookups, by the handle indices entities name.
     mesh_frames: Vec<MeshFrame>,
     material_frames: Vec<MaterialFrame>,
@@ -2016,19 +2021,20 @@ impl RenderFeature for MeshFeature {
             // frame.
             if !self.mesh_frames[raw].checked {
                 let handle = Handle::<Mesh>::from_index(mesh.index);
-                if self
-                    .meshes
-                    .get(&mesh.index)
-                    .is_none_or(|m| m.version != mesh.version)
+                let resident = self.meshes.get(&mesh.index).map(|m| m.version);
+                if resident != Some(mesh.version)
                     && let Some(asset) = mesh_assets.get(handle)
                     // Within this frame's upload budget (asked once per mesh a frame), else
-                    // drawn from a later frame.
+                    // drawn from a later frame; an edit of a resident mesh goes at once.
                     && gpu.uploads.take(
+                        MESH_UPLOAD_KEY | mesh.index as u64,
                         (std::mem::size_of_val(asset.vertices.as_slice())
                             + std::mem::size_of_val(asset.indices.as_slice()))
                             as u64,
+                        resident.is_some(),
                     )
                 {
+                    self.uploads += 1;
                     self.upload_mesh(&gpu.device, mesh.index, asset, mesh.version);
                     if lod_pixels > 0.0 {
                         self.request_lods(mesh.index, handle, asset, mesh.version);
@@ -2470,6 +2476,11 @@ impl RenderFeature for MeshFeature {
             }
             d.set("render.meshes.cascade_instances", instances as f64);
             d.set("render.meshes.cascade_triangles", triangles as f64);
+            // Meshes (re)uploaded this frame: new ones, and edits of resident ones.
+            d.set(
+                "render.meshes.uploads",
+                std::mem::take(&mut self.uploads) as f64,
+            );
         }
         steps.publish(world);
     }

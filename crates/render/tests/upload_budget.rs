@@ -23,9 +23,11 @@ fn app(mb: f32) -> App {
         w.height = 90;
     }
     app.add_plugins(RenderPlugin);
-    app.world
-        .resource_mut::<RenderSettings>()
-        .upload_mb_per_frame = mb;
+    {
+        let mut s = app.world.resource_mut::<RenderSettings>();
+        s.upload_mb_per_frame = mb;
+        s.upload_budget_headless = true;
+    }
     for i in 0..BALLS {
         let mesh = app
             .world

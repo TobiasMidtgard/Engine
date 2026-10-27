@@ -813,6 +813,12 @@ struct StepContext<'a, 'w, 's> {
 
 /// A step slower than this logs which body held it up, ms.
 const SLOW_STEP_MS: f64 = 50.0;
+/// Most time a body spends a frame settling before it's seen (its prewarm), ms.
+const PREWARM_BUDGET_MS: f64 = 3.0;
+
+/// The body that took longest in the last step, and how long (ms), for `softbody.stats`.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct SlowestBody(pub Option<(Entity, f64)>);
 
 /// Step every soft body (in parallel).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -832,6 +838,7 @@ pub fn step_bodies(
     mut bodies: Query<(Entity, &mut SoftBodySim)>,
     names: Query<&Name>,
     mut diagnostics: ResMut<Diagnostics>,
+    mut slowest_body: ResMut<SlowestBody>,
     range: Option<Res<SimulationRange>>,
 ) {
     if !config.enabled {
@@ -887,6 +894,7 @@ pub fn step_bodies(
     let slowest = took.iter().copied().max_by(|a, b| a.1.total_cmp(&b.1));
     diagnostics.set("softbody.busy_ms", busy);
     diagnostics.set("softbody.slowest_ms", slowest.map_or(0.0, |s| s.1));
+    slowest_body.0 = slowest;
     if wall > SLOW_STEP_MS
         && let Some((e, ms)) = slowest
     {
@@ -933,7 +941,9 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     } else {
         !focus.points.is_empty() && dist as f64 > range.active_m * (1.0 + range.hysteresis)
     };
-    if resting || dist > ctx.config.freeze_distance {
+    // One still settling keeps going wherever it is, a budget a frame, so it is ready when
+    // it is first seen up close.
+    if (resting || dist > ctx.config.freeze_distance) && b.pending_prewarm == 0 {
         if !b.frozen {
             b.frozen = true;
             b.sim.step_start.clone_from(&b.sim.pos);
@@ -1101,17 +1111,25 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     let warmth = drying_warmth(env.temperature(b.center));
     soak(b, dt, rain, warmth);
 
-    // Step (plus prewarm on the first update).
-    let runs = 1 + std::mem::take(&mut b.pending_prewarm);
+    // Step, plus prewarm on the first updates: as much as fits in PREWARM_BUDGET_MS a frame,
+    // the rest on later frames, so a new body (or one built far away and only now woken)
+    // settles over a few frames instead of stalling one step for hundreds of ms.
+    let budget = Instant::now();
     let mut impulses: Vec<ColliderImpulse> = Vec::new();
     let mut pulls: Vec<ColliderImpulse> = vec![ColliderImpulse::default(); b.frames.len()];
-    for run in 0..runs {
-        let step_dt = if run == 0 { dt } else { 1.0 / 60.0 };
+    let mut runs = 0;
+    loop {
+        let step_dt = if runs == 0 { dt } else { 1.0 / 60.0 };
         b.sim.step(step_dt, &local);
-        if run == 0 {
+        if runs == 0 {
             impulses.clone_from(&b.sim.collider_impulses);
             pulls.clone_from(&b.sim.frame_impulses);
         }
+        runs += 1;
+        if b.pending_prewarm == 0 || budget.elapsed().as_secs_f64() * 1000.0 >= PREWARM_BUDGET_MS {
+            break;
+        }
+        b.pending_prewarm -= 1;
     }
     if runs > 1 {
         b.sim.step_start.clone_from(&b.sim.pos);

@@ -327,6 +327,7 @@ pub fn flow_system(
     config: Res<EngineConfig>,
     mut status: ResMut<WaterLoading>,
     mut loading: Local<Vec<(Entity, Task<FlowSim>)>>,
+    mut views: Local<Vec<FlowSim>>,
     mut last_layout: Local<u64>,
     mut since_spray: Local<f32>,
 ) {
@@ -338,11 +339,13 @@ pub fn flow_system(
     if spray {
         *since_spray = 0.0;
     }
-    let mut state = shared.0.write();
-    let state = &mut *state;
+    let mut guard = shared.0.write();
+    let state = &mut *guard;
     let relayout = *last_layout != book.layout;
     *last_layout = book.layout;
     let mut seen = Vec::new();
+    // Regions headless runs make in place, after the lock is let go.
+    let mut builds = Vec::new();
     for (entity, gt, local, parent, region) in &regions {
         seen.push(entity);
         // A root's own transform is its place even on the first step, before transforms have
@@ -371,11 +374,11 @@ pub fn flow_system(
                         bodies: state.bodies.clone(),
                     };
                     if config.headless {
-                        state.flows.push(job.build());
-                    } else {
-                        let task = AsyncComputeTaskPool::get().spawn(async move { job.build() });
-                        loading.push((entity, task));
+                        builds.push(job);
+                        continue;
                     }
+                    let task = AsyncComputeTaskPool::get().spawn(async move { job.build() });
+                    loading.push((entity, task));
                 }
                 // Picked up where it is now (a world shift meanwhile moves it below).
                 if let Some(k) = loading.iter().position(|(e, _)| *e == entity) {
@@ -401,9 +404,33 @@ pub fn flow_system(
             set_reservoirs(sim, &state.bodies, &state.ground);
         }
         let (center, radius) = sim.bounds();
-        if crate::rests(&range, &focus, center, radius, &mut sim.resting) {
-            continue;
+        crate::rests(&range, &focus, center, radius, &mut sim.resting);
+    }
+    state.flows.retain(|f| seen.contains(&f.entity));
+    // A region removed while it was settling: drop its work (that cancels it).
+    loading.retain(|(e, _)| seen.contains(e));
+    if status.settling != loading.len() {
+        status.settling = loading.len();
+    }
+
+    // Step with the water unlocked (AGENTS.md, "Performance rules"): the step goes wide on
+    // the compute pool, and a thread waiting there runs other modules' tasks, such as fire
+    // sampling `Water`, which would wait for this lock forever. The flows step aside and
+    // readers see a copy of them as they were, until they are put back.
+    let mut flows = std::mem::take(&mut state.flows);
+    let mut view = std::mem::take(&mut *views);
+    view.truncate(flows.len());
+    for (i, sim) in flows.iter().enumerate() {
+        match view.get_mut(i) {
+            Some(v) if v.entity == sim.entity && v.version == sim.version && sim.resting => {}
+            Some(v) => v.copy_from(sim),
+            None => view.push(sim.clone()),
         }
+    }
+    state.flows = view;
+    drop(guard);
+
+    for sim in flows.iter_mut().filter(|sim| !sim.resting) {
         sim.step(dt);
         if spray {
             for (foot, v, power) in sim.plunges(0.5) {
@@ -426,12 +453,10 @@ pub fn flow_system(
             }
         }
     }
-    state.flows.retain(|f| seen.contains(&f.entity));
-    // A region removed while it was settling: drop its work (that cancels it).
-    loading.retain(|(e, _)| seen.contains(e));
-    if status.settling != loading.len() {
-        status.settling = loading.len();
-    }
+    flows.extend(builds.into_iter().map(FlowJob::build));
+
+    let mut state = shared.0.write();
+    *views = std::mem::replace(&mut state.flows, flows);
 }
 
 /// Flowing water still being made ready: a loading screen waits until [`is_ready`].

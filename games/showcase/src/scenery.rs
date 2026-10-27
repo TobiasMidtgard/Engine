@@ -114,40 +114,165 @@ impl Library {
     }
 }
 
-pub fn build_library(
+/// The library's CPU work as plain data (meshes, textures, the hero stones), built on a
+/// worker so the frame thread only adds the results as assets (the split Unreal's async
+/// loading thread and Unity's background loading make: load and build off the main thread,
+/// integrate on it).
+pub struct LibraryParts {
+    detail: (Image, Image),
+    textures: crate::texgen::VillageTextures,
+    village: village::VillageMeshes,
+    grass: Vec<(Mesh, Mesh)>,
+    dry_grass: Vec<(Mesh, Mesh)>,
+    flowers: Vec<Mesh>,
+    segments: Vec<crate::walls::WallSegment>,
+    heads: Vec<crate::walls::WallHead>,
+    palette: Vec<(Mesh, Displacement)>,
+}
+
+/// The library being built: its parts on a worker, the rocks and the tower on theirs.
+pub struct LibraryJob {
+    parts: std::thread::JoinHandle<LibraryParts>,
+    rocks: crate::rocks::KitJob,
+    tower: crate::tower::TowerJob,
+    started: std::time::Instant,
+}
+
+impl LibraryJob {
+    /// Start every part of the library on worker threads.
+    pub fn start() -> Self {
+        Self {
+            // Rock textures, boulders and the cliffs build on threads of their own...
+            rocks: crate::rocks::start_kit(),
+            // ...and so does the tower.
+            tower: crate::tower::start(),
+            parts: std::thread::spawn(build_parts),
+            started: std::time::Instant::now(),
+        }
+    }
+
+    /// True once every worker is done ([`LibraryJob::finish`] won't wait).
+    pub fn is_ready(&self) -> bool {
+        self.parts.is_finished() && self.rocks.is_ready() && self.tower.is_ready()
+    }
+
+    /// Add the parts as assets (waiting for any still building: tours and headless runs
+    /// build the world at once).
+    pub fn finish(
+        self,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+        plants: &engine_foliage::PlantLibrary,
+    ) -> Library {
+        let parts = self.parts.join().expect("library thread");
+        let t0 = std::time::Instant::now();
+        let rocks = self.rocks.finish(meshes, materials, images);
+        let tower = self.tower.finish(meshes, materials, images);
+        let lib = add_parts(parts, rocks, tower, meshes, materials, images, plants);
+        engine::core::log::info!(
+            "library: built in {:.2} s, added as assets in {:.3} s",
+            self.started.elapsed().as_secs_f32(),
+            t0.elapsed().as_secs_f32()
+        );
+        lib
+    }
+}
+
+/// Every mesh and texture of the library, side by side on worker threads.
+fn build_parts() -> LibraryParts {
+    let t0 = std::time::Instant::now();
+    let grass_set = |seed: u64, dry: f32| {
+        (
+            meshgen::grass_patch(seed, 4.0, 1300, dry, 3),
+            meshgen::grass_patch(seed, 4.0, 420, dry, 1),
+        )
+    };
+    let flower_colors = [
+        Vec3::new(0.9, 0.75, 0.1),
+        Vec3::new(0.85, 0.85, 0.85),
+        Vec3::new(0.45, 0.2, 0.7),
+        Vec3::new(0.8, 0.1, 0.06),
+    ];
+    let parts = std::thread::scope(|scope| {
+        // The village's meshes, its textures and the ground's detail map...
+        let village = scope.spawn(village::build_meshes);
+        let textures = scope.spawn(crate::texgen::village_textures);
+        let detail = scope.spawn(|| meshgen::ground_detail(512));
+        // ...hundreds of sculpted stones a wall variant...
+        let segments: Vec<_> = (0..4)
+            .map(|i| scope.spawn(move || crate::walls::segment(900 + i)))
+            .collect();
+        let heads: Vec<_> = (0..3)
+            .map(|i| scope.spawn(move || crate::walls::head(950 + i)))
+            .collect();
+        let palette = scope.spawn(palette_stones);
+        // ...and the grass and flowers here meanwhile.
+        let grass = (0..6)
+            .map(|i| grass_set(700 + i, 0.15 + i as f32 * 0.05))
+            .collect();
+        let dry_grass = (0..4).map(|i| grass_set(750 + i, 0.75)).collect();
+        let flowers = flower_colors
+            .iter()
+            .enumerate()
+            .map(|(i, c)| meshgen::flower_patch(800 + i as u64, 4.0, 24, *c))
+            .collect();
+        fn join<T>(h: std::thread::ScopedJoinHandle<'_, T>) -> T {
+            h.join().expect("library worker")
+        }
+        LibraryParts {
+            detail: join(detail),
+            textures: join(textures),
+            village: join(village),
+            grass,
+            dry_grass,
+            flowers,
+            segments: segments.into_iter().map(join).collect(),
+            heads: heads.into_iter().map(join).collect(),
+            palette: join(palette),
+        }
+    });
+    engine::core::log::info!("library parts built in {:.2} s", t0.elapsed().as_secs_f32());
+    parts
+}
+
+/// Add the parts as assets and make the materials (the frame thread's share).
+fn add_parts(
+    parts: LibraryParts,
+    rocks: RockKit,
+    tower: crate::tower::TowerKit,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     plants: &engine_foliage::PlantLibrary,
 ) -> Library {
-    // Rock textures, boulders and the cliffs build on other threads meanwhile.
-    let rock_job = crate::rocks::start_kit();
-    // So does the tower.
-    let tower_job = crate::tower::start();
+    let LibraryParts {
+        detail: (detail, detail_normal),
+        textures,
+        village: village_meshes,
+        grass,
+        dry_grass,
+        flowers,
+        segments,
+        heads,
+        palette,
+    } = parts;
     let white = |r: f32| StandardMaterial::hex(0xffffff).with_roughness(r);
-    let (detail, detail_normal) = meshgen::ground_detail(512);
     let mut terrain = white(0.95)
         .with_base_color_texture(images.insert_keyed("showcase/ground/detail", detail))
         .with_normal_texture(images.insert_keyed("showcase/ground/detail_normal", detail_normal));
     // The detail map averages about 0.85; lift the base so the vertex colors keep their value.
     terrain.base_color = [1.18, 1.18, 1.18, 1.0];
     terrain.normal_scale = 0.7;
-    let mut grass = white(0.8).with_subsurface(0.6).with_wind_sway(0.18);
-    grass.double_sided = true;
-    let mut flowers = white(0.6).with_subsurface(0.4).with_wind_sway(0.15);
-    flowers.double_sided = true;
-    // The village's meshes build on a worker while its textures generate.
-    let t0 = std::time::Instant::now();
-    let (village_meshes, village_mats) = std::thread::scope(|s| {
-        let job = s.spawn(village::build_meshes);
-        let mats = crate::texgen::village_materials(materials, images);
-        (job.join().expect("village mesh thread"), mats)
-    });
+    let mut grass_mat = white(0.8).with_subsurface(0.6).with_wind_sway(0.18);
+    grass_mat.double_sided = true;
+    let mut flowers_mat = white(0.6).with_subsurface(0.4).with_wind_sway(0.15);
+    flowers_mat.double_sided = true;
     let mats = Mats {
         terrain: materials.add(terrain),
-        grass: materials.add(grass),
-        flowers: materials.add(flowers),
-        village: village_mats,
+        grass: materials.add(grass_mat),
+        flowers: materials.add(flowers_mat),
+        village: crate::texgen::village_materials(textures, materials, images),
     };
 
     let mut trees = Vec::new();
@@ -177,28 +302,14 @@ pub fn build_library(
             });
         }
     }
-    let mut grass_set = |seed: u64, dry: f32| {
-        (
-            meshes.add(meshgen::grass_patch(seed, 4.0, 1300, dry, 3)),
-            meshes.add(meshgen::grass_patch(seed, 4.0, 420, dry, 1)),
-        )
+    let mut add_pairs = |set: Vec<(Mesh, Mesh)>| -> (Vec<_>, Vec<_>) {
+        set.into_iter()
+            .map(|(near, mid)| (meshes.add(near), meshes.add(mid)))
+            .unzip()
     };
-    let (grass, grass_mid): (Vec<_>, Vec<_>) = (0..6)
-        .map(|i| grass_set(700 + i, 0.15 + i as f32 * 0.05))
-        .unzip();
-    let (dry_grass, dry_grass_mid): (Vec<_>, Vec<_>) =
-        (0..4).map(|i| grass_set(750 + i, 0.75)).unzip();
-    let flower_colors = [
-        Vec3::new(0.9, 0.75, 0.1),
-        Vec3::new(0.85, 0.85, 0.85),
-        Vec3::new(0.45, 0.2, 0.7),
-        Vec3::new(0.8, 0.1, 0.06),
-    ];
-    let flowers = flower_colors
-        .iter()
-        .enumerate()
-        .map(|(i, c)| meshes.add(meshgen::flower_patch(800 + i as u64, 4.0, 24, *c)))
-        .collect();
+    let (grass, grass_mid) = add_pairs(grass);
+    let (dry_grass, dry_grass_mid) = add_pairs(dry_grass);
+    let flowers = flowers.into_iter().map(|m| meshes.add(m)).collect();
     let village::VillageMeshes {
         houses,
         lamp,
@@ -237,25 +348,6 @@ pub fn build_library(
         near: (meshes.add(lamp.0.0), meshes.add(lamp.0.1)),
         far: (meshes.add(lamp.1.0), meshes.add(lamp.1.1)),
     };
-    // Hundreds of sculpted stones a variant: built side by side.
-    let (segments, heads) = std::thread::scope(|scope| {
-        let segments: Vec<_> = (0..4)
-            .map(|i| scope.spawn(move || crate::walls::segment(900 + i)))
-            .collect();
-        let heads: Vec<_> = (0..3)
-            .map(|i| scope.spawn(move || crate::walls::head(950 + i)))
-            .collect();
-        (
-            segments
-                .into_iter()
-                .map(|h| h.join().expect("wall builder"))
-                .collect::<Vec<_>>(),
-            heads
-                .into_iter()
-                .map(|h| h.join().expect("wall builder"))
-                .collect::<Vec<_>>(),
-        )
-    });
     let walls = segments
         .into_iter()
         .map(|w| WallHandles {
@@ -272,18 +364,17 @@ pub fn build_library(
         .into_iter()
         .map(|h| (meshes.add(h.near), Arc::from(h.placed)))
         .unzip();
-    let wall_palette = wall_palette(meshes, materials);
+    let wall_palette = wall_palette(palette, meshes, materials);
     engine::core::log::info!(
-        "village: {} house types ({} triangles near, {} far), built in {:.2} s",
+        "village: {} house types ({} triangles near, {} far)",
         houses.len(),
         near_tris,
         far_tris,
-        t0.elapsed().as_secs_f32()
     );
     Library {
         mats,
         trees,
-        rocks: rock_job.finish(meshes, materials, images),
+        rocks,
         grass,
         grass_mid,
         dry_grass,
@@ -296,7 +387,7 @@ pub fn build_library(
         wall_heads,
         wall_head_placed,
         wall_palette,
-        tower: tower_job.finish(meshes, materials, images),
+        tower,
     }
 }
 
@@ -1725,10 +1816,8 @@ pub fn plan_walls(
 
 /// The hero stones' palette: Rendering's dressed wall stones, a few of each class, their
 /// relief built (and cached on disk) by virtual geometry the first time one is drawn.
-fn wall_palette(
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-) -> WallPalette {
+/// The hero stones' base meshes and displacements (built on a worker).
+fn palette_stones() -> Vec<(Mesh, Displacement)> {
     use crate::walls::{HERO_CLASSES, HERO_VARIANTS};
     use engine::render::rock::{StoneKind, WallStone};
     let mut stones = Vec::with_capacity(HERO_CLASSES.len() * HERO_VARIANTS);
@@ -1745,9 +1834,21 @@ fn wall_palette(
             let stone = WallStone::new(kind, size, 7000 + (c * HERO_VARIANTS + v) as u32)
                 .with_lichen(lichen)
                 .with_grime(0.7);
-            stones.push((meshes.add(stone.base_mesh()), stone.displacement()));
+            stones.push((stone.base_mesh(), stone.displacement()));
         }
     }
+    stones
+}
+
+fn wall_palette(
+    stones: Vec<(Mesh, Displacement)>,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) -> WallPalette {
+    let stones = stones
+        .into_iter()
+        .map(|(mesh, displacement)| (meshes.add(mesh), displacement))
+        .collect();
     // Each stone a little lighter or darker, warmer or cooler than its palette mesh.
     let shades = [
         [0.94, 0.94, 0.93],

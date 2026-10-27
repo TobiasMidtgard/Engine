@@ -699,6 +699,17 @@ fn views() -> Vec<View> {
             exposure: Exposure::Manual { ev100: 14.6 },
             ..BASE
         },
+        // On the plains of Gale crater, where Curiosity drives, at a rover's mast height.
+        View {
+            name: "mars_ground",
+            world: World3::Mars,
+            eye_ll: Some([-4.6, 137.4, 2.0]),
+            target_ll: Some([-4.57, 137.43, 0.0]),
+            sun_ll: Some([-10.0, 165.0]),
+            fov: 65.0,
+            exposure: Exposure::Manual { ev100: 14.6 },
+            ..BASE
+        },
         View {
             name: "mars_pole",
             world: World3::Mars,
@@ -814,6 +825,10 @@ fn build(view: &View, size: (u32, u32)) -> App {
     let mut planet = planet;
     if std::env::var_os("NO_LIGHTS").is_some() {
         planet.palette.night_lights = 0.0;
+    }
+    // `NO_ROCKS=1`: bare ground without stones and boulders, for a before picture.
+    if std::env::var_os("NO_ROCKS").is_some() {
+        planet.rocks.per_100m2 = 0.0;
     }
     let planet = if view.painted {
         planet
@@ -994,6 +1009,13 @@ fn main() {
             });
             wear_paths(&mut app, &view, from, toward, &place);
         }
+        // Rocks and colliders gather around the focus: put it at the eye.
+        let mut focus = app
+            .world
+            .query_filtered::<&mut Transform, With<SimulationFocus>>();
+        if let Ok(mut f) = focus.single_mut(&mut app.world) {
+            f.translation = eye;
+        }
         app.world.spawn((
             Camera {
                 exposure: view.exposure,
@@ -1029,7 +1051,8 @@ fn main() {
             let boost = d.get("terrain.detail_boost").unwrap_or(1.0);
             // (Patches build on worker threads: wait for those on their way, too.)
             let pending = d.get("terrain.patches_building").unwrap_or(0.0)
-                + d.get("terrain.patches_missing").unwrap_or(0.0);
+                + d.get("terrain.patches_missing").unwrap_or(0.0)
+                + d.get("terrain.rock_builds").unwrap_or(0.0);
             if built == 0.0 && pending == 0.0 && (boost - last_boost).abs() < 0.005 {
                 break;
             }

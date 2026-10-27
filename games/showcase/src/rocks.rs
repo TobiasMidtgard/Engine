@@ -649,6 +649,11 @@ pub fn start_kit() -> KitJob {
 }
 
 impl KitJob {
+    /// True once the textures and boulders are built ([`KitJob::finish`] won't wait).
+    pub fn is_ready(&self) -> bool {
+        self.0.is_finished()
+    }
+
     /// Wait for the textures and boulders and add them as assets (the cliffs may still be
     /// building; [`RockKit::take_cliff`] waits for them).
     pub fn finish(

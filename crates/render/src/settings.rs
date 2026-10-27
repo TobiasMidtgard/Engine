@@ -305,8 +305,12 @@ pub struct RenderSettings {
     pub virtual_texture_upload_budget: u32,
     /// Megabytes of new meshes and images uploaded per frame in play (0: no limit); the rest
     /// waits for the next frames (`render.pending_upload_mb`). Behind a loading screen
-    /// (`LoadingBudget`) uploads run for its `budget_ms` instead. See `UploadBudget`.
+    /// (`LoadingBudget`) uploads run for its `budget_ms` instead. See `UploadBudget`. Headless
+    /// apps (tests, tools, tours) upload without a limit unless `upload_budget_headless` is set,
+    /// so each frame they draw has everything.
     pub upload_mb_per_frame: f32,
+    /// Apply `upload_mb_per_frame` headless too (for tests of the budget).
+    pub upload_budget_headless: bool,
     /// Added to the level of detail virtual textures ask for (positive = coarser, fewer tiles).
     pub virtual_texture_mip_bias: f32,
     /// BC7-compress the cache where the GPU supports it (a quarter of the memory; encoded on the
@@ -392,6 +396,7 @@ impl Default for RenderSettings {
             virtual_texture_cache_tiles: 1024,
             virtual_texture_upload_budget: 32,
             upload_mb_per_frame: 16.0,
+            upload_budget_headless: false,
             virtual_texture_mip_bias: 0.0,
             virtual_texture_compression: true,
             texture_compression: TextureCompression::Quality,

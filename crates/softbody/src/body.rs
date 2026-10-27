@@ -234,6 +234,12 @@ impl SoftBodySim {
             "radius": self.radius,
             "frozen": self.frozen,
             "step_ms": self.step_ms,
+            "substeps": self.sim.params.substeps,
+            "lod_every": self.lod_every,
+            "pending_prewarm": self.pending_prewarm,
+            "colliders": self.scratch_colliders.len(),
+            "self_pairs": self.sim.self_pairs(),
+            "contacts": self.sim.contacts,
             "triangles": self.surface.as_ref().map(|s| s.triangles.len()).unwrap_or(0),
             "guides": self.strands.as_ref().map(|s| s.guides.len()).unwrap_or(0),
         })

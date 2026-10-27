@@ -41,23 +41,18 @@ pub struct WorldBuild {
     slow: Vec<(String, f32)>,
     /// When the wait for the modules' art began.
     waiting: Option<std::time::Instant>,
-    /// The last slow frame (what ran, its length, and the profile window before it) until
-    /// the profile (`--profile`) has a window that names its systems.
-    slow_label: Option<(String, f32, f64)>,
+    /// The library's mesh and texture work, on worker threads from the start.
+    lib_job: Option<scenery::LibraryJob>,
 }
 
-/// With `--profile`, the systems of each slow loading frame: the profiler's window that
-/// takes in the frame is mostly that frame, so its slowest systems are the frame's.
-fn log_slow_systems(world: &World, build: &mut WorldBuild) {
-    let Some((label, dt, before)) = build.slow_label.as_ref() else {
-        return;
-    };
+/// With `--profile`, the systems of a slow loading frame. The profiler publishes its window
+/// at the end of a frame once a second has passed, so a frame over a second always ends one,
+/// and the window as it is when the next frame begins is mostly that frame.
+fn log_slow_systems(world: &World, label: &str, dt: f32) {
     let Some(snap) = world.get_resource::<engine::core::profile::ProfileSnapshot>() else {
-        build.slow_label = None;
         return;
     };
-    // A new window that the slow frame fills at least half of.
-    if snap.busy_ms == *before || snap.frame_ms < 500.0 * *dt as f64 {
+    if snap.systems.is_empty() {
         return;
     }
     let top: Vec<String> = snap
@@ -67,11 +62,11 @@ fn log_slow_systems(world: &World, build: &mut WorldBuild) {
         .map(|(name, ms)| format!("{name} {ms:.0}"))
         .collect();
     engine::core::log::info!(
-        "loading frame after {label}: {:.0} ms a frame in the profile window; slowest (ms a frame): {}",
+        "loading frame after {label} took {dt:.2} s; its profile window: {:.0} ms a frame, systems {:.0} ms, slowest (ms a frame): {}",
         snap.frame_ms,
+        snap.busy_ms,
         top.join(", ")
     );
-    build.slow_label = None;
 }
 
 const LIB: &str = "the library is the first step";
@@ -91,6 +86,12 @@ const STEPS: [Step; 12] = [
         "library",
         "Carving the stones and weaving the grass",
         |world, b| {
+            let job = b.lib_job.take().unwrap_or_else(scenery::LibraryJob::start);
+            // The exe keeps drawing its loading screen while the workers build.
+            if world.contains_resource::<Staged>() && !job.is_ready() {
+                b.lib_job = Some(job);
+                return false;
+            }
             let mut state = SystemState::<(
                 ResMut<Assets<Mesh>>,
                 ResMut<Assets<StandardMaterial>>,
@@ -99,12 +100,7 @@ const STEPS: [Step; 12] = [
             )>::new(world);
             let (mut meshes, mut materials, mut images, plants) =
                 state.get_mut(world).expect("resources the showcase adds");
-            b.lib = Some(scenery::build_library(
-                &mut meshes,
-                &mut materials,
-                &mut images,
-                &plants,
-            ));
+            b.lib = Some(job.finish(&mut meshes, &mut materials, &mut images, &plants));
             true
         },
     ),
@@ -234,7 +230,7 @@ const STEPS: [Step; 12] = [
     }),
     (
         "module art",
-        "Planting the woods, lighting the fires, filling the streams",
+        "Planting the woods, filling the streams, sending it all to the GPU",
         |world, b| {
             // Modules that bake a zone's art on workers say so; the exe waits for them here, so
             // the start screen opens on a finished valley. Builds all at once (tours) go on,
@@ -256,7 +252,7 @@ const STEPS: [Step; 12] = [
 const MODULE_WAIT_S: f32 = 60.0;
 
 /// Modules still baking art or settling their zones on other threads.
-const MODULES_LOADING: [fn(&World) -> bool; 4] = [
+const MODULES_LOADING: [fn(&World) -> bool; 5] = [
     engine_smoke::demo::loading,
     |world| {
         world
@@ -269,7 +265,48 @@ const MODULES_LOADING: [fn(&World) -> bool; 4] = [
             .get_resource::<engine_foliage::FoliageLoading>()
             .is_some_and(|f| !f.is_ready())
     },
+    uploading,
 ];
+
+/// The renderer still has meshes or images to put on the GPU (it uploads within the
+/// [`engine::world::LoadingBudget`] while one is up).
+fn uploading(world: &World) -> bool {
+    world
+        .get_resource::<Uploads>()
+        .is_some_and(|u| u.pending > 0.0 && u.low_at.elapsed().as_secs_f32() < UPLOAD_STALL_S)
+}
+
+/// What the renderer still has to upload, and when that last reached a new low: a count that
+/// stops going down (some of it may never be asked for) stops counting as loading.
+#[derive(Resource)]
+pub struct Uploads {
+    pending: f64,
+    low: f64,
+    low_at: std::time::Instant,
+}
+
+/// Seconds without the pending uploads going down before the wait for them ends.
+const UPLOAD_STALL_S: f32 = 2.0;
+
+/// Follow `render.pending_upload_mb` for [`uploading`].
+pub fn watch_uploads(world: &mut World) {
+    let mb = world
+        .get_resource::<engine::core::diagnostics::Diagnostics>()
+        .and_then(|d| d.get("render.pending_upload_mb"))
+        .unwrap_or(0.0);
+    let now = std::time::Instant::now();
+    let mut u = world.get_resource_or_insert_with(|| Uploads {
+        pending: mb,
+        low: mb,
+        low_at: now,
+    });
+    u.pending = mb;
+    // Rising (new work asked for) or falling by a megabyte counts as movement.
+    if mb < u.low - 1.0 || mb > u.low + 1.0 {
+        u.low = mb;
+        u.low_at = now;
+    }
+}
 
 fn with_commands(world: &mut World, f: impl FnOnce(&mut Commands)) {
     let mut state = SystemState::<Commands>::new(world);
@@ -326,7 +363,8 @@ pub fn start(world: &mut World) {
         ran: Vec::new(),
         frame_at: None,
         waiting: None,
-        slow_label: None,
+        // Started before anything else, so the workers overlap the rest of startup.
+        lib_job: Some(scenery::LibraryJob::start()),
         slow: Vec::new(),
     };
     if world.contains_resource::<Staged>() {
@@ -358,15 +396,12 @@ pub fn step(world: &mut World) {
             } else {
                 build.ran.join("+")
             };
-            build.slow.push((ran.clone(), dt));
-            // The profile's window as it is now came before that frame.
-            let before = world
-                .get_resource::<engine::core::profile::ProfileSnapshot>()
-                .map_or(0.0, |p| p.busy_ms);
-            build.slow_label = Some((ran, dt, before));
+            if dt > PROFILE_FRAME_S {
+                log_slow_systems(world, &ran, dt);
+            }
+            build.slow.push((ran, dt));
         }
     }
-    log_slow_systems(world, &mut build);
     build.ran.clear();
     // Steps run until this frame's budget is spent, as Unity's High background loading
     // priority (50 ms a frame behind a loading screen) and Unreal's streaming time limits do:
@@ -404,6 +439,9 @@ pub fn building(world: &World) -> bool {
 
 /// Loading frames longer than this (s) are listed when the build is done.
 const SLOW_FRAME_S: f32 = 0.1;
+
+/// Loading frames longer than this (s) get the profile's slowest systems logged.
+const PROFILE_FRAME_S: f32 = 1.0;
 
 /// How long (s) a loading frame keeps starting steps.
 const FRAME_BUDGET_S: f32 = 0.05;
@@ -623,7 +661,10 @@ pub fn cover_jumps(world: &mut World, mut jump: Local<Jump>) {
                 + d.get("terrain.patches_missing").unwrap_or(0.0)
         });
     let waited = since.elapsed().as_secs_f32();
-    let settled = pending == 0.0 && jump.frames > COVER_FRAMES && jump.calm >= CALM_FRAMES;
+    let settled = pending == 0.0
+        && !uploading(world)
+        && jump.frames > COVER_FRAMES
+        && jump.calm >= CALM_FRAMES;
     if (settled && waited > 0.3) || waited > COVER_MAX_S {
         screens::hide(world, "jump_cover", false);
         world.remove_resource::<engine::world::LoadingBudget>();

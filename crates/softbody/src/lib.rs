@@ -50,6 +50,7 @@ impl Plugin for SoftBodyPlugin {
         app.init_resource::<SoftBodyConfig>()
             .init_resource::<systems::ColliderWorld>()
             .init_resource::<systems::LoadList>()
+            .init_resource::<systems::SlowestBody>()
             .init_resource::<gpu_cloth::GpuClothShift>()
             .register_resource::<SoftBodyConfig>(
                 "Soft-body quality: enabled, lod_distance and freeze_distance (m from the focus), quality (substep multiplier).",

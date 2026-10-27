@@ -354,6 +354,59 @@ impl FlowSim {
     }
 
     /// World x/z of a cell center.
+    /// Become a copy of `other`, reusing this one's buffers: no allocation once the shapes
+    /// match. The bed never changes, so a copy of the same region keeps its own.
+    pub fn copy_from(&mut self, other: &FlowSim) {
+        let FlowSim {
+            entity,
+            origin,
+            yaw,
+            nx,
+            nz,
+            cell,
+            bed,
+            depth,
+            flux,
+            steady,
+            vel,
+            reservoir,
+            open_edges,
+            friction,
+            loss,
+            sources,
+            optics,
+            visible,
+            version,
+            drained_m3,
+            resting,
+            bed_span,
+        } = other;
+        if self.entity != *entity || self.bed.len() != bed.len() {
+            self.bed.clone_from(bed);
+        }
+        self.entity = *entity;
+        self.origin = *origin;
+        self.yaw = *yaw;
+        self.nx = *nx;
+        self.nz = *nz;
+        self.cell = *cell;
+        self.depth.clone_from(depth);
+        self.flux.clone_from(flux);
+        self.steady.clone_from(steady);
+        self.vel.clone_from(vel);
+        self.reservoir.clone_from(reservoir);
+        self.open_edges = *open_edges;
+        self.friction = *friction;
+        self.loss = *loss;
+        self.sources.clone_from(sources);
+        self.optics = *optics;
+        self.visible = *visible;
+        self.version = *version;
+        self.drained_m3 = *drained_m3;
+        self.resting = *resting;
+        self.bed_span = *bed_span;
+    }
+
     /// The middle of the grid and the distance from it to a corner, meters: a sphere round
     /// the whole region.
     pub fn bounds(&self) -> (DVec3, f64) {
