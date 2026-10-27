@@ -22,7 +22,10 @@ use std::collections::HashMap;
 use engine_core::math::{Quat, UVec3, Vec3};
 
 use crate::appearance::{Appearance, AppearanceExt, BeardStyle, HairStyle, Rng};
-use crate::mesh::{Landmarks, MASKS, Mask, SkinMesh};
+use crate::mesh::{
+    BROW_CENTER, BROW_HALF, BROW_INNER, BROW_LENGTH, Landmarks, MASKS, Mask, SkinMesh, lerp_table,
+    smoothstep,
+};
 
 /// Drawn hairs are fewer than real ones (tens per cm² where a scalp has ~150), so each stands
 /// for a few and is drawn that much wider; this scales every hair's width.
@@ -336,42 +339,65 @@ fn tangent(d: Vec3, n: Vec3) -> Vec3 {
         .unwrap_or_else(|| n.any_orthonormal_vector())
 }
 
+// Brows as transplant surgeons and groomers map them: the head's hairs stand nearly upright and
+// short, the body's lie almost flat along the brow in a herringbone (lower rows rising, upper
+// rows falling, meeting in a ridge), and the tail's turn down toward the temple, the edges
+// feathered. Every hair curves over into the brow's flow as it grows rather than standing
+// straight: straight hairs at their own random angles read as scratches.
 fn grow_brows(a: &Appearance, skin: &SkinMesh, rest: &Landmarks) -> StrandSet {
     const N: u32 = 5;
     let mut set = StrandSet::new(StrandKind::Brows, N);
     let sampler = Sampler::new(skin, Mask::Brows, |_, m| m * m);
     let thick = a.brows.thickness.clamp(0.0, 1.0);
     // Real brows hold ~250 hairs per cm²; a fraction reads as full once drawn.
-    let count = ((sampler.total() * 1e4) * (90.0 + 130.0 * thick)) as usize;
+    let count = ((sampler.total() * 1e4) * (130.0 + 180.0 * thick)) as usize;
     let mut r = Rng::new(a.seed ^ 0xB120);
+    let center = |u: f32| lerp_table(&BROW_CENTER, u);
     for _ in 0..count {
         let Some(sp) = sampler.sample(&mut r) else {
             break;
         };
+        // None under the brow ridge, facing down into the eye socket: laid along the skin
+        // there they head back into the socket, a dark line under the brow.
+        if r.f32() < smoothstep(-0.15, -0.4, sp.n.y) {
+            continue;
+        }
         let side = sp.rest.x.signum();
         let eye = if side > 0.0 {
             rest.eyes[0]
         } else {
             rest.eyes[1]
         };
-        let u = ((sp.rest.x * side - (eye.x * side - 0.017)) / 0.041).clamp(0.0, 1.0);
-        let center = eye.y + 0.0165 + 0.004 * (1.0 - ((u - 0.6) / 0.6).powi(2)).max(0.0);
-        let v = ((sp.rest.y - center) / 0.005).clamp(-1.5, 1.5);
-        // Angle of the hair above the lateral direction: inner hairs stand up, the rest lie
-        // along the brow, lower hairs rising and upper ones falling into a ridge.
-        let inner = 1.0 - (u / 0.22).clamp(0.0, 1.0);
-        let along = 0.35 - 0.45 * v - 0.25 * u;
-        let angle = inner * 1.25 + (1.0 - inner) * along + r.normal() * 0.12;
-        let lateral = Vec3::X * side;
-        let d = tangent(lateral * angle.cos() + Vec3::Y * angle.sin(), sp.n);
-        let len = (0.0072 - 0.0026 * u) * r.range(0.7, 1.1) * (0.85 + 0.3 * thick);
+        let u = ((sp.rest.x * side - (eye.x * side - BROW_INNER)) / BROW_LENGTH).clamp(0.0, 1.0);
+        let v = ((sp.rest.y - eye.y - center(u)) / lerp_table(&BROW_HALF, u)).clamp(-1.3, 1.3);
+        // The arch's own slope, rising to its peak and falling after.
+        let slope = ((center(u + 0.02) - center(u - 0.02)) / (0.04 * BROW_LENGTH)).atan();
+        let head = 1.0 - smoothstep(0.08, 0.3, u);
+        let tail = smoothstep(0.65, 1.0, u);
+        // Angles above the lateral direction.
+        let herringbone = (0.12 - 0.4 * (v - 0.2)) * (1.0 - 0.6 * u);
+        let body = slope + herringbone - 0.15 * tail;
+        let start = head * (1.2 - 0.1 * v) + (1.0 - head) * body + r.normal() * 0.08;
+        let flow = slope - 0.05 - 0.15 * tail;
+        let bend = 0.35 - 0.1 * head;
+        let len = lerp_table(
+            &[(0.0, 0.0045), (0.3, 0.0075), (0.6, 0.007), (1.0, 0.0045)],
+            u,
+        ) * r.range(0.75, 1.1)
+            * (0.85 + 0.3 * thick)
+            * (1.0 - 0.35 * head * v.max(0.0));
         let lift = r.range(0.05, 0.14);
+        let lateral = Vec3::X * side;
+        let step = len / (N - 1) as f32;
         let mut pts = [Vec3::ZERO; N as usize];
+        let mut along = sp.p;
         for (i, p) in pts.iter_mut().enumerate() {
             let t = i as f32 / (N - 1) as f32;
             // Out of the skin at the root, then lying down along it.
             let h = len * lift * (t * 2.0).min(1.0) * (1.0 - 0.6 * t) + 0.0002;
-            *p = sp.p + d * (len * t) + sp.n * h;
+            *p = along + sp.n * h;
+            let angle = start + (flow - start) * bend * (t + 0.5 / (N - 1) as f32);
+            along += tangent(lateral * angle.cos() + Vec3::Y * angle.sin(), sp.n) * step;
         }
         set.push(&pts, 0.00008 * HAIR_WIDTH, 0.00003 * HAIR_WIDTH, r.f32());
     }
