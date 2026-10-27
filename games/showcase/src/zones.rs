@@ -348,7 +348,7 @@ pub struct DemoZones(pub Vec<String>);
 /// tower look down on the whole valley, where only the lake's water reads from that height
 /// (without it the lake is a bare basin), so they load just the lake, as do the waterfall
 /// that feeds it and the start screen's view. The walk's stops load where the pilot stands.
-const ZONE_ALIASES: [(&str, &str); 10] = [
+const ZONE_ALIASES: [(&str, &str); 14] = [
     ("fire", "field"),
     ("smoke", "range"),
     ("sunset", "plaza"),
@@ -357,8 +357,12 @@ const ZONE_ALIASES: [(&str, &str); 10] = [
     ("tower", "lake"),
     ("falls", "lake"),
     ("start_screen", "lake"),
-    // (Before `walk`, whose prefix it shares.)
+    // (Before `walk`, whose prefix they share.)
+    ("walk_yard", "market"),
+    ("walk_path", "yard"),
+    ("walk_shore", "lake"),
     ("walk_falls", "lake"),
+    ("walk_meadow", "lake"),
     ("walk", "plaza"),
 ];
 

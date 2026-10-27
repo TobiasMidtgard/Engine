@@ -24,6 +24,9 @@ pub struct ShowcaseCamera {
     pub level: Quat,
     /// A trip this camera asked for: its world shift is already in the new pose.
     pub tripping: bool,
+    /// Sent somewhere ([`go_to`]) while play mode had the view: when play ends it stays there
+    /// instead of carrying on from the pilot's camera.
+    pub placed: bool,
 }
 
 pub fn spawn_camera(commands: &mut Commands) {
@@ -33,6 +36,7 @@ pub fn spawn_camera(commands: &mut Commands) {
         speed_scale: 1.0,
         level: Quat::IDENTITY,
         tripping: false,
+        placed: false,
     };
     let mut t = Transform::default();
     let start = places::find("plaza").expect("plaza");
@@ -83,6 +87,7 @@ pub fn go_to(world: &mut World, place: &Place) {
     for (mut t, mut cam) in q.iter_mut(world) {
         look(&mut t, &mut cam, place.position, place.target);
         cam.tripping |= tripping;
+        cam.placed = true;
     }
 }
 
@@ -178,6 +183,9 @@ pub fn fly(
     if let Some((position, forward)) = play_view.take() {
         let level = level_at(&gravity, position);
         for (mut t, mut cam) in &mut q {
+            if cam.placed {
+                continue;
+            }
             look_level(
                 &mut t,
                 &mut cam,
@@ -185,6 +193,11 @@ pub fn fly(
                 position + forward.as_dvec3(),
                 level,
             );
+        }
+    }
+    for (_, mut cam) in &mut q {
+        if cam.placed {
+            cam.placed = false;
         }
     }
     if mouse_buttons.just_pressed(MouseButton::Right) {
