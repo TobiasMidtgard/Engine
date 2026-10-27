@@ -410,6 +410,12 @@ impl ImageCache {
             || compression != TextureCompression::Off)
             && image.format == PixelFormat::Rgba8
             && gpu.adapter_info.backend != wgpu::Backend::Gl;
+        // When this frame's upload budget is spent the caller draws without the image and
+        // asks again next frame (mips add a third).
+        let bytes = image.data.len() as u64 * if image.mipmaps { 4 } else { 3 } / 3;
+        if !gpu.uploads.take(bytes) {
+            return None;
+        }
         let Some((texture, view)) = upload_image(gpu, image, srgb, aliasable) else {
             inner.failed.insert((index, slot), version);
             return None;

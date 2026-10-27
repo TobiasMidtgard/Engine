@@ -115,7 +115,8 @@ pub use components::{
 pub use depth_of_field::DepthOfField;
 pub use features::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderAppExt, RenderFeature, RenderPhase,
-    SHADER_LIB_ATMOSPHERE, SHADER_LIB_FRAME, SHADER_LIB_TYPES, compose_shader, validate_wgsl,
+    SHADER_LIB_ATMOSPHERE, SHADER_LIB_FRAME, SHADER_LIB_TYPES, UploadBudget, compose_shader,
+    validate_wgsl,
 };
 pub use frame::ViewData;
 pub use gltf_loader::{

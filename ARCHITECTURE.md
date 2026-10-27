@@ -552,6 +552,18 @@ blending, for rocks, spheres and terrain without UVs. The prepass evaluates the 
 (parallax, triplanar, normal maps), so ambient occlusion, reflections and TAA see the detailed
 normals.
 
+**Upload budget** (built; `features.rs` `UploadBudget`, after Unity's Async Upload Pipeline
+time slice and Unreal's streaming, which spreads requests over frames): new meshes and images
+upload through `GpuShared::uploads`. In play a frame uploads up to
+`RenderSettings::upload_mb_per_frame` (16 MB; 0 = no limit); behind a loading screen (a
+`LoadingBudget` resource) uploads run until its `budget_ms` has passed since the frame began.
+The first upload of a frame always goes. A feature asks `uploads.take(bytes)` before uploading
+and, on `false`, draws without it and asks again next frame. Refused bytes show as
+`render.pending_upload_mb` (zero once everything asked for is on the GPU: a loading screen can
+wait for it) and uploaded ones as `render.upload_mb`. Other crates' features may use it the same
+way. On lavapipe the first frame's cost is pipeline compiles (`render.cpu.meshes: pipelines`,
+~1.4 s for the mesh shader's first two variants), not bytes.
+
 **Shared images and image memory** (built; `image_cache.rs`): the renderer keeps one GPU copy
 of each `Image` asset that is drawn, shared by every feature. `GpuShared::image_texture(&images,
 handle, color)` returns it (`Arc<ImageTexture>`: `view`, `srgb`, size, mip levels, and an `id`
