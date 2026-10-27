@@ -1004,6 +1004,10 @@ impl MeshFeature {
             hdr: gpu.formats.hdr,
             prepass_targets: gpu.prepass_targets(),
             depth: [gpu.depth_state(false), gpu.depth_state(true)],
+            depth_equal: wgpu::DepthStencilState {
+                depth_compare: Some(wgpu::CompareFunction::Equal),
+                ..gpu.depth_state(false)
+            },
             constants: self.shader_features.mesh_constants(),
         })
     }
@@ -1650,6 +1654,8 @@ struct MeshPipelineInputs {
     prepass_targets: [Option<wgpu::ColorTargetState>; 2],
     /// Depth state without and with depth writes.
     depth: [wgpu::DepthStencilState; 2],
+    /// The opaque scene pass: no writes, equal to the prepass's depth.
+    depth_equal: wgpu::DepthStencilState,
     constants: [(&'static str, f64); 2],
 }
 
@@ -1669,15 +1675,20 @@ fn build_mesh_pipeline(
     variant: u8,
     prepass: bool,
 ) -> wgpu::RenderPipeline {
+    let blend = !prepass && variant & PIPE_BLEND != 0;
+    // The opaque scene pass draws what the prepass drew, at the same depth (`depth_equal`).
+    let mut constants = inputs.constants.to_vec();
+    if !prepass {
+        constants.push(("SCENE_ALPHA_TEST", f64::from(u8::from(blend))));
+    }
     let compilation = wgpu::PipelineCompilationOptions {
-        constants: &inputs.constants,
+        constants: &constants,
         ..Default::default()
     };
     let buffers = [
         Some(Vertex::layout()),
         Some(MeshInstance::layout_with_motion()),
     ];
-    let blend = !prepass && variant & PIPE_BLEND != 0;
     let double = variant & PIPE_DOUBLE != 0;
     let mirror = variant & PIPE_MIRROR != 0;
     let main_targets = [Some(wgpu::ColorTargetState {
@@ -1716,7 +1727,13 @@ fn build_mesh_pipeline(
                 },
                 ..Default::default()
             },
-            depth_stencil: Some(inputs.depth[usize::from(!blend)].clone()),
+            depth_stencil: Some(if prepass {
+                inputs.depth[1].clone()
+            } else if blend {
+                inputs.depth[0].clone()
+            } else {
+                inputs.depth_equal.clone()
+            }),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &inputs.shader,

@@ -31,6 +31,10 @@ const ANTI_TILING_ROTATE: u32 = 262144u;
 // Whether the pipeline hex-tiles anti-tiled materials (`ShaderFeatures`): off until a scene has
 // one.
 override ANTI_TILING_ENABLED: bool = true;
+// Whether the scene pass alpha-tests masked materials. Off in the opaque pipelines: the depth
+// prepass did the test, and the scene pass draws only where its depth equals the prepass's, so
+// without a discard the GPU rejects hidden fragments before shading them (early depth test).
+override SCENE_ALPHA_TEST: bool = true;
 const SLOT_BASE_COLOR: u32 = 0u;
 const SLOT_NORMAL: u32 = 1u;
 const SLOT_METALLIC_ROUGHNESS: u32 = 2u;
@@ -932,7 +936,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     // Blended materials have no prepass: they ask for their virtual texture tiles here.
     vt_feedback_on = (flags & 15u) == 2u && vt_feedback_pixel(in.clip.xy);
     let m = evaluate_material(surface_in(in, front), true);
-    if ((flags & 15u) == 1u && m.base.a < mat.params.w) {
+    if (SCENE_ALPHA_TEST && (flags & 15u) == 1u && m.base.a < mat.params.w) {
         discard;
     }
 
