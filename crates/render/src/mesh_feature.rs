@@ -440,6 +440,11 @@ struct MaterialFrame {
     still_opaque: bool,
     /// Its material slot and texture set this frame, once something drawn uses it.
     slot: Option<(u32, u32)>,
+    /// Which impostors show it: the handle index, the material's GPU values and its images'
+    /// versions, so a material whose images finish loading or that changes is baked again (an impostor
+    /// baked before would show the white stand-in for good). `None` while the material
+    /// itself is still loading: nothing is baked of it.
+    impostor_key: Option<u64>,
 }
 
 /// One thread's share of the cull.
@@ -567,7 +572,8 @@ impl Cull<'_> {
         let impostor = self
             .impostors
             .filter(|_| impostor_ok)
-            .and_then(|i| i.layer((mesh.index, mat.index as u64)))
+            .zip(mat.impostor_key)
+            .and_then(|(i, key)| i.layer((mesh.index, key)))
             .unwrap_or(crate::impostor::NONE);
         let lod = if impostor != crate::impostor::NONE && impostor_size {
             IMPOSTOR_LOD
@@ -2070,9 +2076,20 @@ impl RenderFeature for MeshFeature {
         for raw in scene.materials_used() {
             let handle = Handle::from_index(raw);
             let handle = material_assets.map_or(handle, |m| m.canonical(handle));
-            let material = material_assets
-                .and_then(|m| m.get(handle))
-                .unwrap_or(&default_material);
+            let loaded = material_assets.and_then(|m| m.get(handle));
+            let material = loaded.unwrap_or(&default_material);
+            let impostor_key = loaded.map(|m| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                // What it looks like, not its version: a material written to every frame
+                // with the same values keeps its impostors.
+                bytemuck::bytes_of(&m.to_gpu()).hash(&mut h);
+                for image in m.textures().into_iter().flatten() {
+                    image.index().hash(&mut h);
+                    image_assets.map(|a| a.version(image)).hash(&mut h);
+                }
+                (h.finish() << 32) | handle.index() as u64
+            });
             let i = raw as usize;
             if i >= self.material_frames.len() {
                 self.material_frames.resize(i + 1, MaterialFrame::default());
@@ -2086,6 +2103,7 @@ impl RenderFeature for MeshFeature {
                     && material.emissive.iter().any(|&c| c > 0.0),
                 still_opaque: material.alpha_mode == AlphaMode::Opaque && material.wind_sway <= 0.0,
                 slot: None,
+                impostor_key,
             };
         }
 
@@ -2378,10 +2396,10 @@ impl RenderFeature for MeshFeature {
                         .get(textures as usize)
                         .and_then(Option::as_ref)
                         .is_some_and(TextureSet::complete);
-                    if loaded {
+                    if loaded && let Some(key) = self.material_frames[index].impostor_key {
                         let mesh = &self.mesh_frames[scene.hot[item.slot as usize].mesh as usize];
                         impostors.request(
-                            (item.mesh, self.material_frames[index].index as u64),
+                            (item.mesh, key),
                             crate::impostor::Request {
                                 mesh: item.mesh,
                                 material_slot,

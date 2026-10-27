@@ -63,7 +63,8 @@ const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const BC7_LAYER_BYTES: u64 = SIZE as u64 * SIZE as u64;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-/// A mesh with a material: its mesh index and its material asset's index.
+/// A mesh with a material: its mesh index and its material (`MaterialFrame::impostor_key`:
+/// the handle index, its values and its images' versions).
 pub(crate) type Key = (u32, u64);
 
 /// A mesh drawn small enough to want an impostor this frame.
