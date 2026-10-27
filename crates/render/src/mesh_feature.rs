@@ -72,6 +72,7 @@ use crate::virtual_texture::system::{
     ShaderFeatures, VirtualTextureSystem, feedback_writes, mesh_shadow_source, mesh_source,
 };
 use crate::virtual_texture::{VirtualTextureStats, VirtualTextures};
+use crate::warmup::{Build, Taken, Warmup};
 
 /// Per-instance vertex data (locations 4–10 in `mesh.wgsl`, plus 11–13 for the previous
 /// matrix in the mesh feature's own pipelines).
@@ -790,6 +791,8 @@ pub struct MeshFeature {
     pipeline_layout: Option<wgpu::PipelineLayout>,
     shadow_shader: Option<wgpu::ShaderModule>,
     shadow_masked_layout: Option<wgpu::PipelineLayout>,
+    /// Pipeline variants compiling on worker threads (`ensure_pipelines` takes them).
+    warmup: Option<Warmup<PipelineKey>>,
     /// What each drawn entity keeps between frames (bounds, transforms, normal matrix).
     scene: MeshScene,
     /// Levels of detail being built, by mesh index.
@@ -904,7 +907,7 @@ impl MeshFeature {
     /// Creates the scene, prepass and masked shadow pipelines this frame's batches use and
     /// that don't exist yet. Each costs a compile of the large mesh shader, so only the ones
     /// a scene draws with are made (a test app uses two or three of the 17).
-    fn ensure_pipelines(&mut self, gpu: &GpuShared) {
+    fn ensure_pipelines(&mut self, gpu: &GpuShared, warm: bool) {
         let mut main = [false; PIPELINE_VARIANTS as usize];
         let mut prepass = [false; PIPELINE_VARIANTS as usize];
         for b in self.opaque.iter() {
@@ -920,17 +923,20 @@ impl MeshFeature {
             .chain(std::iter::once(&self.far_shadow))
             .flatten()
             .any(|b| b.key.pipeline == SHADOW_MASKED);
+        if warm && self.warmup.is_none() {
+            self.start_warmup(gpu);
+        }
         for variant in 0..PIPELINE_VARIANTS {
             let i = variant as usize;
             if main[i] && self.pipelines[i].is_none() {
-                self.pipelines[i] = self.mesh_pipeline(gpu, variant, false);
+                self.pipelines[i] = self.pipeline(gpu, PipelineKey::Main(variant));
             }
             if prepass[i] && self.prepass_pipelines[i].is_none() {
-                self.prepass_pipelines[i] = self.mesh_pipeline(gpu, variant, true);
+                self.prepass_pipelines[i] = self.pipeline(gpu, PipelineKey::Prepass(variant));
             }
         }
         if masked && self.shadow_masked_pipeline.is_none() {
-            self.shadow_masked_pipeline = self.shadow_masked_pipeline(gpu);
+            self.shadow_masked_pipeline = self.pipeline(gpu, PipelineKey::ShadowMasked);
         }
         if let Some(impostors) = &mut self.impostors {
             impostors.ensure_pipelines(gpu, &self.shader_features.mesh_constants());
@@ -939,6 +945,8 @@ impl MeshFeature {
 
     /// Drops the pipelines built with other shader features; they are made again on use.
     fn clear_pipelines(&mut self) {
+        // Built with the old features: unstarted ones are dropped, started ones thrown away.
+        self.warmup = None;
         self.pipelines = (0..PIPELINE_VARIANTS).map(|_| None).collect();
         self.prepass_pipelines = (0..PIPELINE_VARIANTS).map(|_| None).collect();
         self.shadow_masked_pipeline = None;
@@ -947,116 +955,84 @@ impl MeshFeature {
         }
     }
 
-    /// A scene (or, with `prepass`, depth prepass) pipeline for `variant`'s `PIPE_*` bits.
-    fn mesh_pipeline(
-        &self,
-        gpu: &GpuShared,
-        variant: u8,
-        prepass: bool,
-    ) -> Option<wgpu::RenderPipeline> {
-        let (Some(shader), Some(layout)) = (&self.shader, &self.pipeline_layout) else {
-            return None;
-        };
-        let constants = self.shader_features.mesh_constants();
-        let compilation = wgpu::PipelineCompilationOptions {
-            constants: &constants,
-            ..Default::default()
-        };
-        let buffers = [
-            Some(Vertex::layout()),
-            Some(MeshInstance::layout_with_motion()),
-        ];
-        let blend = !prepass && variant & PIPE_BLEND != 0;
-        let double = variant & PIPE_DOUBLE != 0;
-        let mirror = variant & PIPE_MIRROR != 0;
-        let main_targets = [Some(wgpu::ColorTargetState {
-            format: gpu.formats.hdr,
-            // Premultiplied: a blended surface's reflections keep their strength (`fs_main`).
-            blend: blend.then_some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-            write_mask: wgpu::ColorWrites::ALL,
-        })];
-        let prepass_targets = gpu.prepass_targets();
-        let (label, vs, fs, targets): (_, _, _, &[Option<wgpu::ColorTargetState>]) = if prepass {
-            ("mesh prepass", "vs_prepass", "fs_prepass", &prepass_targets)
-        } else {
-            ("mesh", "vs_main", "fs_main", &main_targets)
-        };
-        Some(
-            gpu.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(layout),
-                    vertex: wgpu::VertexState {
-                        module: shader,
-                        entry_point: Some(vs),
-                        compilation_options: compilation.clone(),
-                        buffers: &buffers,
-                    },
-                    primitive: wgpu::PrimitiveState {
-                        cull_mode: if double { None } else { Some(wgpu::Face::Back) },
-                        front_face: if mirror {
-                            wgpu::FrontFace::Cw
-                        } else {
-                            wgpu::FrontFace::Ccw
-                        },
-                        ..Default::default()
-                    },
-                    depth_stencil: Some(gpu.depth_state(!blend)),
-                    multisample: Default::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: shader,
-                        entry_point: Some(fs),
-                        compilation_options: compilation,
-                        targets,
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                }),
-        )
+    /// What building the scene and prepass pipelines needs, owned (for the warm-up threads).
+    fn mesh_inputs(&self, gpu: &GpuShared) -> Option<MeshPipelineInputs> {
+        Some(MeshPipelineInputs {
+            device: gpu.device.clone(),
+            shader: self.shader.clone()?,
+            layout: self.pipeline_layout.clone()?,
+            hdr: gpu.formats.hdr,
+            prepass_targets: gpu.prepass_targets(),
+            depth: [gpu.depth_state(false), gpu.depth_state(true)],
+            constants: self.shader_features.mesh_constants(),
+        })
     }
 
-    /// The alpha-tested shadow pipeline (masked casters).
-    fn shadow_masked_pipeline(&self, gpu: &GpuShared) -> Option<wgpu::RenderPipeline> {
-        let (Some(shader), Some(layout)) = (&self.shadow_shader, &self.shadow_masked_layout) else {
-            return None;
+    /// What building the alpha-tested shadow pipeline (masked casters) needs, owned.
+    fn shadow_inputs(&self, gpu: &GpuShared) -> Option<ShadowPipelineInputs> {
+        Some(ShadowPipelineInputs {
+            device: gpu.device.clone(),
+            shader: self.shadow_shader.clone()?,
+            layout: self.shadow_masked_layout.clone()?,
+            unclipped: gpu.features.contains(wgpu::Features::DEPTH_CLIP_CONTROL),
+            depth: gpu.shadow_depth_state(),
+            constants: self.shader_features.shadow_constants(),
+        })
+    }
+
+    /// Queue every pipeline variant not built yet on the warm-up threads, the commonest
+    /// first, so a frame finds them compiled.
+    fn start_warmup(&mut self, gpu: &GpuShared) {
+        let (Some(mesh), Some(shadow)) = (self.mesh_inputs(gpu), self.shadow_inputs(gpu)) else {
+            return;
         };
-        let constants = self.shader_features.shadow_constants();
-        let compilation = wgpu::PipelineCompilationOptions {
-            constants: &constants,
-            ..Default::default()
-        };
-        let buffers = [
-            Some(Vertex::layout()),
-            Some(MeshInstance::layout_with_motion()),
-        ];
-        Some(
-            gpu.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("mesh shadow masked"),
-                    layout: Some(layout),
-                    vertex: wgpu::VertexState {
-                        module: shader,
-                        entry_point: Some("vs_shadow_masked"),
-                        compilation_options: compilation.clone(),
-                        buffers: &buffers,
-                    },
-                    primitive: wgpu::PrimitiveState {
-                        cull_mode: None,
-                        unclipped_depth: gpu.features.contains(wgpu::Features::DEPTH_CLIP_CONTROL),
-                        ..Default::default()
-                    },
-                    depth_stencil: Some(gpu.shadow_depth_state()),
-                    multisample: Default::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: shader,
-                        entry_point: Some("fs_shadow_masked"),
-                        compilation_options: compilation,
-                        targets: &[],
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                }),
-        )
+        let mut jobs: Vec<(PipelineKey, Build)> = Vec::new();
+        // Single-sided, double-sided, blended, then mirrored.
+        for variant in [0, PIPE_DOUBLE, PIPE_BLEND, PIPE_BLEND | PIPE_DOUBLE]
+            .into_iter()
+            .flat_map(|v| [v, v | PIPE_MIRROR])
+        {
+            if self.pipelines[variant as usize].is_none() {
+                let inputs = mesh.clone();
+                jobs.push((
+                    PipelineKey::Main(variant),
+                    Box::new(move || Some(build_mesh_pipeline(&inputs, variant, false))),
+                ));
+            }
+            // Blended surfaces have no prepass.
+            if variant & PIPE_BLEND == 0 && self.prepass_pipelines[variant as usize].is_none() {
+                let inputs = mesh.clone();
+                jobs.push((
+                    PipelineKey::Prepass(variant),
+                    Box::new(move || Some(build_mesh_pipeline(&inputs, variant, true))),
+                ));
+            }
+            if variant == PIPE_DOUBLE && self.shadow_masked_pipeline.is_none() {
+                let inputs = shadow.clone();
+                jobs.push((
+                    PipelineKey::ShadowMasked,
+                    Box::new(move || Some(build_shadow_masked_pipeline(&inputs))),
+                ));
+            }
+        }
+        let threads = std::thread::available_parallelism().map_or(2, |n| n.get() / 4);
+        self.warmup = Some(Warmup::start("mesh pipelines", jobs, threads.clamp(1, 4)));
+    }
+
+    /// The pipeline for `key`: from the warm-up when it built it, else built now.
+    fn pipeline(&mut self, gpu: &GpuShared, key: PipelineKey) -> Option<wgpu::RenderPipeline> {
+        if let Some(warmup) = &mut self.warmup
+            && let Taken::Ready(pipeline) = warmup.take(key)
+        {
+            return pipeline;
+        }
+        match key {
+            PipelineKey::Main(v) => Some(build_mesh_pipeline(&self.mesh_inputs(gpu)?, v, false)),
+            PipelineKey::Prepass(v) => Some(build_mesh_pipeline(&self.mesh_inputs(gpu)?, v, true)),
+            PipelineKey::ShadowMasked => {
+                Some(build_shadow_masked_pipeline(&self.shadow_inputs(gpu)?))
+            }
+        }
     }
 
     fn upload_mesh(&mut self, gpu: &GpuShared, index: u32, mesh: &Mesh, version: u64) {
@@ -1615,6 +1591,141 @@ impl MeshFeature {
         }
         n
     }
+}
+
+/// A pipeline variant of the mesh feature (for the warm-up).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PipelineKey {
+    Main(u8),
+    Prepass(u8),
+    ShadowMasked,
+}
+
+#[derive(Clone)]
+struct MeshPipelineInputs {
+    device: wgpu::Device,
+    shader: wgpu::ShaderModule,
+    layout: wgpu::PipelineLayout,
+    hdr: wgpu::TextureFormat,
+    prepass_targets: [Option<wgpu::ColorTargetState>; 2],
+    /// Depth state without and with depth writes.
+    depth: [wgpu::DepthStencilState; 2],
+    constants: [(&'static str, f64); 2],
+}
+
+#[derive(Clone)]
+struct ShadowPipelineInputs {
+    device: wgpu::Device,
+    shader: wgpu::ShaderModule,
+    layout: wgpu::PipelineLayout,
+    unclipped: bool,
+    depth: wgpu::DepthStencilState,
+    constants: [(&'static str, f64); 1],
+}
+
+/// A scene (or, with `prepass`, depth prepass) pipeline for `variant`'s `PIPE_*` bits.
+fn build_mesh_pipeline(
+    inputs: &MeshPipelineInputs,
+    variant: u8,
+    prepass: bool,
+) -> wgpu::RenderPipeline {
+    let compilation = wgpu::PipelineCompilationOptions {
+        constants: &inputs.constants,
+        ..Default::default()
+    };
+    let buffers = [
+        Some(Vertex::layout()),
+        Some(MeshInstance::layout_with_motion()),
+    ];
+    let blend = !prepass && variant & PIPE_BLEND != 0;
+    let double = variant & PIPE_DOUBLE != 0;
+    let mirror = variant & PIPE_MIRROR != 0;
+    let main_targets = [Some(wgpu::ColorTargetState {
+        format: inputs.hdr,
+        // Premultiplied: a blended surface's reflections keep their strength (`fs_main`).
+        blend: blend.then_some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+        write_mask: wgpu::ColorWrites::ALL,
+    })];
+    let (label, vs, fs, targets): (_, _, _, &[Option<wgpu::ColorTargetState>]) = if prepass {
+        (
+            "mesh prepass",
+            "vs_prepass",
+            "fs_prepass",
+            &inputs.prepass_targets,
+        )
+    } else {
+        ("mesh", "vs_main", "fs_main", &main_targets)
+    };
+    inputs
+        .device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&inputs.layout),
+            vertex: wgpu::VertexState {
+                module: &inputs.shader,
+                entry_point: Some(vs),
+                compilation_options: compilation.clone(),
+                buffers: &buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: if double { None } else { Some(wgpu::Face::Back) },
+                front_face: if mirror {
+                    wgpu::FrontFace::Cw
+                } else {
+                    wgpu::FrontFace::Ccw
+                },
+                ..Default::default()
+            },
+            depth_stencil: Some(inputs.depth[usize::from(!blend)].clone()),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &inputs.shader,
+                entry_point: Some(fs),
+                compilation_options: compilation,
+                targets,
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
+}
+
+/// The alpha-tested shadow pipeline (masked casters).
+fn build_shadow_masked_pipeline(inputs: &ShadowPipelineInputs) -> wgpu::RenderPipeline {
+    let compilation = wgpu::PipelineCompilationOptions {
+        constants: &inputs.constants,
+        ..Default::default()
+    };
+    let buffers = [
+        Some(Vertex::layout()),
+        Some(MeshInstance::layout_with_motion()),
+    ];
+    inputs
+        .device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mesh shadow masked"),
+            layout: Some(&inputs.layout),
+            vertex: wgpu::VertexState {
+                module: &inputs.shader,
+                entry_point: Some("vs_shadow_masked"),
+                compilation_options: compilation.clone(),
+                buffers: &buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: None,
+                unclipped_depth: inputs.unclipped,
+                ..Default::default()
+            },
+            depth_stencil: Some(inputs.depth.clone()),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &inputs.shader,
+                entry_point: Some("fs_shadow_masked"),
+                compilation_options: compilation,
+                targets: &[],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
 }
 
 fn texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -2560,7 +2671,10 @@ impl RenderFeature for MeshFeature {
                 clusters.set_shader_features(needed);
             }
         }
-        self.ensure_pipelines(gpu);
+        let headless = world
+            .get_resource::<EngineConfig>()
+            .is_none_or(|c| c.headless);
+        self.ensure_pipelines(gpu, settings.pipeline_warmup.on(headless));
         steps.step("meshes: upload materials");
         let grown = self
             .materials
@@ -2645,6 +2759,11 @@ impl RenderFeature for MeshFeature {
             // The shared vertex and index buffers: pages, MB reserved and MB in use.
             let (pages, reserved, used) = self.pool.usage();
             d.set("render.meshes.pool_pages", pages as f64);
+            // Pipeline variants still compiling on the warm-up threads.
+            d.set(
+                "render.meshes.pipelines_warming",
+                self.warmup.as_ref().map_or(0, Warmup::pending) as f64,
+            );
             // Batches (mesh and level runs of instances), before multi-draw joins them.
             let batches = [&self.opaque, &self.transparent]
                 .into_iter()
