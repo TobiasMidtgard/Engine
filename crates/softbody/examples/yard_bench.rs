@@ -7,6 +7,7 @@
 //!                        # and without self-collision
 //! WORST=1 cargo run ...  # also prints the worst frame (hitches: restores, catch-up steps)
 //! TRACE="Unveiling sheet" cargo run ...  # that body's step, prewarm and pairs each frame
+//! SLOW_GROUND=1 cargo run ...  # ground that costs about what a planet's terrain does
 //! ```
 
 use std::time::Instant;
@@ -28,6 +29,9 @@ fn main() {
             step_secs: 1.0 / 60.0,
         });
     app.add_plugins((engine_world::WorldPlugin, engine_softbody::SoftBodyPlugin));
+    if std::env::var("SLOW_GROUND").is_ok() {
+        app.insert_resource(engine_world::Ground(std::sync::Arc::new(SlowGround)));
+    }
     let yard = DVec3::new(125.0, 0.0, -35.0);
     app.add_systems(Startup, move |mut commands: Commands| {
         engine_softbody::demo::spawn_demo(&mut commands, yard);
@@ -226,4 +230,21 @@ fn main() {
         d.get("softbody.frozen").unwrap_or(0.0),
         d.get("softbody.particles").unwrap_or(0.0),
     );
+}
+
+/// Flat ground that takes about as long to ask as a planet's terrain (as NPC's perf test).
+struct SlowGround;
+
+impl engine_world::GroundQuery for SlowGround {
+    fn sample(&self, p: DVec3) -> Option<engine_world::GroundSample> {
+        let mut h = 0.0;
+        for i in 0..64 {
+            h += (p.x * 0.01 * i as f64).sin() * (p.z * 0.013 * i as f64).cos();
+        }
+        Some(engine_world::GroundSample {
+            height: h * 1e-12,
+            normal: Vec3::Y,
+            surface: engine_world::SurfaceId(3),
+        })
+    }
 }
