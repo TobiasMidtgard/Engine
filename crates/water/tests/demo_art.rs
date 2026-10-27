@@ -1,6 +1,7 @@
 //! The demos' art (textures, the tarn's ground, the crag, boulders, people) is made on workers
-//! from the app's start: `WaterLoading` counts it down to ready, and the water test area
-//! spawned after that takes it as it is instead of making it on the frame.
+//! once a game asks for it (`WaterDemoArt::prefetch`): `WaterLoading` counts it down to ready,
+//! and the water test area spawned after that takes it as it is instead of making it on the
+//! frame.
 
 use std::time::Instant;
 
@@ -25,6 +26,10 @@ fn demo_art_is_made_on_workers_before_the_demo_spawns() {
     app.add_plugins((WorldPlugin, WaterPlugin));
     app.insert_resource(Assets::<Mesh>::default());
     app.insert_resource(Assets::<Image>::default());
+    // Nothing is made until a game asks for it.
+    app.update();
+    assert!(app.world.resource::<WaterLoading>().is_ready());
+    engine_water::demo::art::WaterDemoArt::prefetch(&mut app.world);
 
     // The first frame starts the art; the frames meanwhile stay short.
     let started = Instant::now();

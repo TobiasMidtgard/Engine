@@ -2,8 +2,9 @@
 //!
 //! As Unreal's async loading thread and Unity's background loading do, the costly, world-free
 //! part (procedural textures, the tarn's ground, the crag, boulders, the swimmer and waders:
-//! a few seconds of one core) starts on the async compute pool when the app starts, and the
-//! frame thread only puts the finished pieces in. [`WaterLoading`](crate::WaterLoading) counts
+//! a few seconds of one core) starts on the async compute pool once a game says it will
+//! spawn a water demo ([`WaterDemoArt::prefetch`]), and the frame thread only puts the
+//! finished pieces in. [`WaterLoading`](crate::WaterLoading) counts
 //! the pieces still being made, so a loading screen can wait for them before it wakes the
 //! water zones. A demo spawned sooner takes each piece as soon as it is done (waiting for the
 //! rest), or makes it there and then when nothing started it (tests, tools).
@@ -64,13 +65,41 @@ impl DemoArtLoading {
     }
 }
 
-/// Start the demo art on the async compute pool (once per app with a mesh and image store).
+/// Asks for the water demos' art ahead of time: a game that will spawn [`spawn_demo`] or
+/// [`spawn_valley`] (a showcase with its water or lake zone) inserts it while it loads, and
+/// the art is made on workers from the next frame, without seconds of worker time and memory
+/// in apps that never show it. [`WaterLoading::is_ready`](crate::WaterLoading::is_ready)
+/// then waits for it.
+///
+/// [`spawn_demo`]: super::spawn_demo
+/// [`spawn_valley`]: super::valley::spawn_valley
+#[derive(Resource, Debug, Default)]
+pub struct WaterDemoArt {
+    started: bool,
+}
+
+impl WaterDemoArt {
+    /// Start making the demo art on workers (once; later calls do nothing).
+    pub fn prefetch(world: &mut World) {
+        if !world.contains_resource::<WaterDemoArt>() {
+            world.insert_resource(WaterDemoArt::default());
+        }
+    }
+}
+
+/// Start the demo art on the async compute pool once [`WaterDemoArt::prefetch`] asked for it
+/// (in an app with a mesh and an image store).
 pub fn start_demo_art_system(world: &mut World) {
-    if !world.contains_resource::<Assets<Mesh>>()
+    if !world
+        .get_resource::<WaterDemoArt>()
+        .is_some_and(|a| !a.started)
+        || !world.contains_resource::<Assets<Mesh>>()
         || !world.contains_resource::<Assets<Image>>()
-        || world.contains_resource::<DemoArtLoading>()
-        || world.contains_resource::<DemoMaterials>()
     {
+        return;
+    }
+    world.resource_mut::<WaterDemoArt>().started = true;
+    if world.contains_resource::<DemoMaterials>() {
         return;
     }
     engine_core::tasks::init_task_pools();
