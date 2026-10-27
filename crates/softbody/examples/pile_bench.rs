@@ -6,6 +6,7 @@
 //! cargo run -p engine_softbody --example pile_bench --release -- [seconds]
 //! NOSELF=1 ...      # without self-collision
 //! FRICTION=0 ...    # another friction (default 0.55); THICK=0.04 another thickness (m)
+//! RES=89 ...        # another resolution (particles along a side, default 45)
 //! ```
 
 use std::time::Instant;
@@ -19,9 +20,13 @@ fn main() {
         .nth(1)
         .and_then(|a| a.parse().ok())
         .unwrap_or(15);
+    let res = std::env::var("RES")
+        .ok()
+        .and_then(|r| r.parse().ok())
+        .unwrap_or(45);
     let spec = Cloth {
         size: [4.0, 4.0],
-        resolution: [45, 45],
+        resolution: [res, res],
         pins: ClothPins::None,
         mass_per_m2: 0.16,
         shear_compliance: 1e-2,
