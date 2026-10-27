@@ -1528,6 +1528,19 @@ impl Renderer {
         // (for the GPU, the window, a lock, or a core).
         let thread_cpu = cpu_time::ThreadTime::try_now().ok();
         let mut cpu = crate::perf::CpuSteps::resume(cpu);
+        // The features' world-free preparation.
+        cpu.step("prepare on the render thread");
+        let mut feature_diagnostics = Diagnostics::default();
+        for f in &mut self.features {
+            f.prepare_frame(&self.shared, &view, &settings, &mut feature_diagnostics);
+        }
+        cpu.inner(std::mem::take(
+            &mut *self
+                .shared
+                .prepare_steps
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        ));
         let device = &self.shared.device;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame"),
@@ -2103,7 +2116,10 @@ impl Renderer {
         self.perf.end(&mut encoder);
         cpu.step("stats");
         let stats = self.collect_stats(&view, started);
-        let mut back = RenderReturn::default();
+        let mut back = RenderReturn {
+            diagnostics: feature_diagnostics,
+            ..Default::default()
+        };
         // wgpu validates and encodes every recorded pass into the backend's command buffer
         // here, not as the passes are recorded.
         cpu.step("finish commands");
