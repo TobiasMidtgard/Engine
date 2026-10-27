@@ -404,6 +404,12 @@ pub struct RenderSettings {
     /// and every texture sample decodes a block in software; saves system memory there. Off by
     /// default.
     pub texture_compression_on_cpu: bool,
+    /// GPU time texture compression may take a frame in play (ms). Images are compressed a slice
+    /// of rows at a time; the slices a frame takes follow the measured time per texel.
+    pub texture_compression_ms: f32,
+    /// The same while a `LoadingBudget` is present (arriving somewhere, a loading screen): the
+    /// picture still updates then, so this stays a few milliseconds.
+    pub texture_compression_loading_ms: f32,
 }
 
 impl Default for RenderSettings {
@@ -483,6 +489,8 @@ impl Default for RenderSettings {
             virtual_texture_compression: true,
             texture_compression: TextureCompression::Quality,
             texture_compression_on_cpu: false,
+            texture_compression_ms: 1.0,
+            texture_compression_loading_ms: 4.0,
         }
     }
 }

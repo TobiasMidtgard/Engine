@@ -9,9 +9,7 @@ use std::time::Instant;
 
 use engine_assets::{AssetPlugin, Assets, Handle};
 use engine_core::prelude::*;
-use engine_render::image_cache::{
-    COMPRESS_AFTER_FRAMES, COMPRESS_TEXELS_IN_PLAY, COMPRESS_TEXELS_LOADING, ImageMemoryStats,
-};
+use engine_render::image_cache::{COMPRESS_AFTER_FRAMES, DEFAULT_MS_PER_MTEXEL, ImageMemoryStats};
 use engine_render::prelude::*;
 use engine_render::{Exposure, RenderDisabled, Renderer, TextureUse, capture_now, wgpu};
 use image::RgbaImage;
@@ -328,15 +326,21 @@ fn compact_mode_uses_bc1_for_opaque_color_and_two_channel_slots_get_bc5() {
     let _ = shot(&mut app, "compact");
 }
 
-/// A 1024² color map drawn until compressed, in play or behind a loading screen. Returns the
-/// shot and the texels compressed in each frame that compressed any.
-fn big_image(loading: bool, name: &str) -> Option<(RgbaImage, Vec<u64>)> {
+/// A 512² color map drawn until compressed, in play (with `play_ms` of GPU a frame) or behind
+/// a loading screen (with all the time it wants). Returns the shot and, for each frame that
+/// compressed any, the texels it compressed and the GPU time per million texels it budgeted with.
+fn big_image(loading: bool, play_ms: f32, name: &str) -> Option<(RgbaImage, Vec<(u64, f32)>)> {
     let mut app = still_app(TextureCompression::Quality);
+    {
+        let mut s = app.world.resource_mut::<RenderSettings>();
+        s.texture_compression_ms = play_ms;
+        s.texture_compression_loading_ms = 1e9;
+    }
     if loading {
         app.world
             .insert_resource(engine_world::LoadingBudget::default());
     }
-    let color = add(&mut app, photo(1024));
+    let color = add(&mut app, photo(512));
     app.world.spawn((
         Transform::default(),
         MeshRenderer::new(
@@ -357,7 +361,15 @@ fn big_image(loading: bool, name: &str) -> Option<(RgbaImage, Vec<u64>)> {
         frames += 1;
         let now = cache(&app).texels_compressed;
         if now > before {
-            slices.push(now - before);
+            // The rate is updated before the frame budgets, so after the frame it is the one
+            // the frame used.
+            let rate = app
+                .world
+                .resource::<Renderer>()
+                .shared
+                .images
+                .compress_ms_per_mtexel();
+            slices.push((now - before, rate));
         }
         before = now;
     }
@@ -370,35 +382,64 @@ fn big_image(loading: bool, name: &str) -> Option<(RgbaImage, Vec<u64>)> {
 }
 
 #[test]
-fn big_images_compress_a_slice_a_frame_in_play_and_at_once_while_loading() {
-    let Some((play, slices)) = big_image(false, "big_play") else {
+fn big_images_compress_within_a_gpu_time_budget_in_play_and_at_once_while_loading() {
+    const PLAY_MS: f32 = 0.2;
+    let Some((play, slices)) = big_image(false, PLAY_MS, "big_play") else {
         return;
     };
-    let Some((loading, at_once)) = big_image(true, "big_loading") else {
+    let Some((loading, at_once)) = big_image(true, PLAY_MS, "big_loading") else {
         return;
     };
     // Levels under a block across are padded to one.
-    let texels: u64 = (0..11)
-        .map(|l| (1024u64 >> l).next_multiple_of(4).pow(2))
+    let texels: u64 = (0..10)
+        .map(|l| (512u64 >> l).next_multiple_of(4).pow(2))
         .sum();
-    eprintln!("in play: {slices:?}; loading: {at_once:?}");
-    // Every level, once, spread over frames of at most the budget (plus a part of a block row).
-    assert_eq!(slices.iter().sum::<u64>(), texels);
+    let rates: Vec<f32> = slices.iter().map(|s| s.1).collect();
+    eprintln!(
+        "in play: {} frames, {:?} texels, rates {:?}; loading: {at_once:?}",
+        slices.len(),
+        slices.iter().map(|s| s.0).collect::<Vec<_>>(),
+        rates
+    );
+    // Every level, once, spread over frames that each fit the budget at the rate measured so
+    // far (or take one block row, at least; a slice may go over by part of one).
+    assert_eq!(slices.iter().map(|s| s.0).sum::<u64>(), texels);
     assert!(slices.len() >= 3, "spread over {} frames", slices.len());
-    assert!(
-        slices
-            .iter()
-            .all(|&t| t <= COMPRESS_TEXELS_IN_PLAY + 4 * 1024),
-        "a frame went over the budget: {slices:?}"
-    );
-    assert!(texels <= COMPRESS_TEXELS_LOADING);
+    for &(t, rate) in &slices {
+        let budget = (PLAY_MS / rate * 1e6) as u64;
+        assert!(
+            t <= budget.max(4 * 512) + 4 * 512,
+            "{t} texels in a frame, over {budget} at {rate} ms per million"
+        );
+    }
+    let timestamps = app_features_have_timestamps();
+    if timestamps {
+        assert!(
+            rates.iter().any(|&r| r != DEFAULT_MS_PER_MTEXEL),
+            "the rate was never measured: {rates:?}"
+        );
+    }
     assert_eq!(
-        at_once,
+        at_once.iter().map(|s| s.0).collect::<Vec<_>>(),
         vec![texels],
-        "behind a loading screen it goes at once"
+        "behind a loading screen with time to spare it goes at once"
     );
-    // The fast profile in play looks like the careful one.
+    // The same profile either way: the same picture.
     let (mean, max) = difference(&play, &loading);
-    eprintln!("fast vs basic BC7: mean {mean:.3}, max {max}");
-    assert!(mean < 1.0, "fast BC7 changed the picture: mean {mean}");
+    eprintln!("sliced vs at once: mean {mean:.3}, max {max}");
+    assert!(mean < 0.5, "slicing changed the picture: mean {mean}");
+}
+
+/// Whether the device can write timestamps (the renderer asks for them where there are).
+fn app_features_have_timestamps() -> bool {
+    let app = still_app(TextureCompression::Off);
+    let mut app = app;
+    if !run(&mut app, 1, "timestamps") {
+        return false;
+    }
+    app.world
+        .resource::<Renderer>()
+        .shared
+        .features
+        .contains(wgpu::Features::TIMESTAMP_QUERY)
 }

@@ -235,6 +235,9 @@ pub struct Renderer {
     returned: Option<RenderReturn>,
     /// Each `ExtraView` camera's own resources and history, by camera.
     extra_views: HashMap<Entity, ExtraViewState>,
+    /// Main-thread time this frame in `queue.submit` (extra views submit there), for
+    /// `render.extract_wait_ms`.
+    main_thread_submit_ms: f64,
 }
 
 /// Declares [`ViewState`] with the [`Renderer`] fields that belong to one view, and
@@ -738,6 +741,7 @@ impl Renderer {
             images: Default::default(),
             uploads: Default::default(),
             side_work: Default::default(),
+            side_commands: Default::default(),
         };
 
         let view = ViewState::new(
@@ -789,6 +793,7 @@ impl Renderer {
             last_view: view.last_view,
             returned: None,
             extra_views: HashMap::new(),
+            main_thread_submit_ms: 0.0,
         })
     }
 
@@ -925,7 +930,11 @@ impl Renderer {
             (
                 settings.texture_compression,
                 settings.texture_compression_on_cpu,
-                world.contains_resource::<engine_world::LoadingBudget>(),
+                if world.contains_resource::<engine_world::LoadingBudget>() {
+                    settings.texture_compression_loading_ms
+                } else {
+                    settings.texture_compression_ms
+                },
             ),
         );
         self.shared.images.compress(&self.shared);
@@ -960,6 +969,7 @@ impl Renderer {
     /// shows in the window; images get their view's picture. Drops the state of cameras that
     /// are no extra views any more.
     fn render_extra_views(&mut self, world: &mut World) -> Vec<Composite> {
+        self.main_thread_submit_ms = 0.0;
         let mut views: Vec<_> = world
             .query::<(
                 Entity,
@@ -1072,6 +1082,9 @@ impl Renderer {
                 started.elapsed().as_secs_f64() * 1000.0,
             );
             d.set("render.extra_views_gpu_ms", gpu_ms as f64);
+            // Main-thread time waiting in submits (the queue's lock is shared with the render
+            // thread's submit and present); the frame's side work submits with the frame.
+            d.set("render.extract_wait_ms", self.main_thread_submit_ms);
         }
         composites
     }
@@ -1963,13 +1976,20 @@ impl Renderer {
         let finish_ms = finishing.elapsed().as_secs_f64() * 1000.0;
         cpu.step("submit");
         let submitting = Instant::now();
-        self.shared.queue.submit([commands]);
+        let side = self.shared.take_side_commands();
+        self.shared
+            .queue
+            .submit(side.commands.into_iter().chain([commands]));
+        side.after.into_iter().for_each(|f| f());
         let side_work = if extra {
             Default::default()
         } else {
             self.shared.side_work.take()
         };
         let submit_ms = submitting.elapsed().as_secs_f64() * 1000.0;
+        if extra {
+            self.main_thread_submit_ms += submit_ms;
+        }
         self.meter.after_submit();
         self.perf.after_submit();
         self.lens.after_submit();
