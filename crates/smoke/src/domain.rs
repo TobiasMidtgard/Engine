@@ -188,6 +188,9 @@ pub struct Domain {
     /// How many voxels were simulated last step: within `active`, only the stretch of each
     /// row near the smoke (a slanted plume fills little of its box).
     pub active_voxels: u32,
+    /// Fastest air where there is smoke at the last step, m/s: how far the smoke can move in
+    /// a step decides how long its steps may be ([`Domain::steady_secs`]).
+    pub max_speed: f32,
     /// Holds a fog bank: drawn as soft, wide fog rather than billowing smoke.
     pub fog: bool,
 }
@@ -220,6 +223,7 @@ impl Domain {
             time: 0.0,
             active: (UVec3::ZERO, UVec3::ZERO),
             active_voxels: 0,
+            max_speed: 0.0,
             fog: false,
         }
     }
@@ -603,23 +607,37 @@ impl Domain {
 
     /// Where the next step works ([`Region`]); it also sets `active` and `active_voxels`.
     fn measure(&mut self) -> Region {
-        let r = self.region();
+        let (r, max_speed) = self.region();
         self.active = (r.lo, r.hi);
         self.active_voxels = r.voxels(self.dims);
+        self.max_speed = max_speed;
         r
+    }
+
+    /// The longest step that moves the smoke at most `cells` voxels, seconds (infinite in
+    /// still air): semi-Lagrangian smoke is stable at any step, so this is about looks. Bridson
+    /// ("Fluid Simulation", SIGGRAPH 2006 notes, 3.2) traces at most five cells a step; drawn
+    /// as a cross-fade between steps, smoke wants about one, or it shows twice. Gas still
+    /// expanding (a blast) wants every step.
+    pub fn steady_secs(&self, cells: f32) -> f32 {
+        if !self.expansions.is_empty() || !self.inflow.is_empty() {
+            return 0.0;
+        }
+        cells * self.cell / self.max_speed.max(1e-3)
     }
 
     /// Each row's stretch of voxels with smoke, heat or expanding air in it, widened by room
     /// for it to move and for the flow around it (the sparse-brick idea of NVIDIA's GDC 2015
     /// sparse fluid talk, along rows: a plume the wind lays over fills little of its box).
-    fn region(&self) -> Region {
+    /// Also the fastest air in the stretches with smoke, m/s.
+    fn region(&self) -> (Region, f32) {
         let d = self.dims;
         let (nx, ny) = (d.x as usize, d.y as usize);
-        let mut raw = vec![(0u32, 0u32); (d.y * d.z) as usize];
+        let mut rows = vec![((0u32, 0u32), 0.0f32); (d.y * d.z) as usize];
         let voxels = &self.voxels;
         // Rows are `y + z * dims.y`, so row r's voxels start at r * dims.x.
-        par_chunks_mut(&mut raw, ny * 4, |c, chunk| {
-            for (k, span) in chunk.iter_mut().enumerate() {
+        par_chunks_mut(&mut rows, ny * 4, |c, chunk| {
+            for (k, (span, speed)) in chunk.iter_mut().enumerate() {
                 let start = (c * ny * 4 + k) * nx;
                 let row = &voxels[start..start + nx];
                 let busy = |v: &Voxel| v.density > 1e-7 || v.heat.abs() > 0.05;
@@ -627,9 +645,16 @@ impl Domain {
                     (row.iter().position(busy), row.iter().rposition(busy))
                 {
                     *span = (first as u32, last as u32 + 1);
+                    *speed = row[first..=last]
+                        .iter()
+                        .map(|v| v.vel.length_squared())
+                        .fold(0.0, f32::max)
+                        .sqrt();
                 }
             }
         });
+        let max_speed = rows.iter().map(|r| r.1).fold(0.0, f32::max);
+        let mut raw: Vec<(u32, u32)> = rows.into_iter().map(|r| r.0).collect();
         for e in &self.expansions {
             let (a, b) = (self.local(e.from), self.local(e.to));
             let r = e.radius / self.cell;
@@ -658,7 +683,7 @@ impl Domain {
         if hi.x <= lo.x {
             (lo, hi) = (UVec3::ZERO, UVec3::ZERO);
         }
-        Region { act, wide, lo, hi }
+        (Region { act, wide, lo, hi }, max_speed)
     }
 
     /// Sample the wind the box feels (from the world, before a [`step_sampled`]).
@@ -1259,6 +1284,7 @@ impl Domain {
         self.time = other.time;
         self.active = other.active;
         self.active_voxels = other.active_voxels;
+        self.max_speed = other.max_speed;
         self.fog = other.fog;
     }
 

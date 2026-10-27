@@ -202,10 +202,34 @@ impl std::fmt::Debug for Background {
     }
 }
 
-/// Active voxels above which a volume steps every other tick.
+/// Active voxels above which a volume steps at most every other tick.
 pub const BIG_VOLUME_VOXELS: u32 = 40_000;
 
+/// Most ticks of the simulation clock one step of a volume may cover.
+pub const MAX_STRIDE: u32 = 4;
+
+/// How far smoke may move in one step, voxels (see [`Domain::steady_secs`]).
+pub const STEP_CELLS: f32 = 1.0;
+
 impl SmokeDomain {
+    /// Ticks (of `tick` seconds) until this volume's next step: as many as its smoke takes to
+    /// move a voxel, up to [`MAX_STRIDE`], so slow smoke, drifting dust and fog step a few
+    /// times a second and a fast plume or a blast every tick (the renderer cross-fades between
+    /// steps); a big volume at least every other tick, so it costs half as much. Steps grow
+    /// longer one tick at a time, so fresh smoke that is about to speed up (a hot puff that
+    /// has not risen yet) gets a few short steps first.
+    pub fn next_stride(&self, tick: f32) -> u32 {
+        let fit = (self.domain.steady_secs(STEP_CELLS) / tick.max(1e-4)).floor();
+        let least = if self.domain.active_voxels > BIG_VOLUME_VOXELS {
+            2
+        } else {
+            1
+        };
+        (fit.min(MAX_STRIDE as f32) as u32)
+            .min(self.stride + 1)
+            .max(least)
+    }
+
     /// How far it is toward its next step (0..1), for drawing smoothly between steps;
     /// `clock` is the simulation clock's own progress.
     pub fn progress(&self, clock: f32, settings: &SmokeSettings) -> f32 {
@@ -819,14 +843,10 @@ pub fn step(
         }
         if d.domain.is_idle() {
             d.empty_secs += dt;
+            d.stride = 1;
             continue;
         }
         d.empty_secs = 0.0;
-        d.stride = if d.domain.active_voxels > BIG_VOLUME_VOXELS {
-            2
-        } else {
-            1
-        };
         d.owed_secs += dt;
         if d.owed_secs < dt * (d.stride as f32 - 0.5) {
             continue;
@@ -839,6 +859,7 @@ pub fn step(
         }
         let params = settings.step_params(d.owed_secs, weather.temperature_c);
         d.owed_secs = 0.0;
+        d.stride = d.next_stride(step);
         match pool {
             // Fog settles every frame, so it steps on the spot.
             Some(pool) if !d.domain.fog => d.start(pool, params, &wind_fn),
@@ -881,6 +902,58 @@ mod tests {
 
     /// A step in the background lands as the same step on the spot would have, with what was
     /// done to the air while it ran done again on top.
+    /// Smoke drifting slowly steps a few times a second, working up to it; a fast plume and
+    /// a blast step every tick.
+    #[test]
+    fn slow_smoke_takes_longer_steps() {
+        engine_core::tasks::init_task_pools();
+        let mut domain = Domain::new(DVec3::new(-8.0, 0.0, -8.0), 0.5, UVec3::new(32, 32, 32));
+        domain.set_floor(|_, _| Some(0.0));
+        let mut domains = SmokeDomains::default();
+        let i = domains.add(None, domain);
+        let d = &mut domains.list[i];
+        let puff = |speed: f32, heat_c: f32| Change::Splat {
+            at: DVec3::new(0.0, 4.0, 0.0),
+            radius: 1.0,
+            mass_kg: 0.2,
+            heat_c,
+            vel: Vec3::new(speed, 0.0, 0.0),
+            albedo: Vec3::splat(0.5),
+        };
+        let mut params = SmokeSettings::default().step_params(0.05, 15.0);
+        params.buoyancy = 0.0;
+        let tick = 0.05;
+        // Cool dust drifting at 1.5 m/s in a calm: half a meter a step takes a tick of 1/3.
+        d.change(puff(1.5, 0.0));
+        let calm = |_: DVec3| Vec3::new(1.5, 0.0, 0.0);
+        let mut strides = Vec::new();
+        for _ in 0..5 {
+            d.domain.step(&params, &calm);
+            d.stride = d.next_stride(tick);
+            strides.push(d.stride);
+        }
+        assert_eq!(
+            strides,
+            [2, 3, 4, 4, 4],
+            "steps grow a tick at a time to the most"
+        );
+
+        // A fast plume steps every tick.
+        let gale = |_: DVec3| Vec3::new(12.0, 0.0, 0.0);
+        d.change(puff(12.0, 0.0));
+        d.domain.step(&params, &gale);
+        d.domain.step(&params, &gale);
+        assert_eq!(d.next_stride(tick), 1);
+
+        // So does air a blast is pushing out.
+        d.change(Change::Inflate {
+            at: DVec3::new(0.0, 4.0, 0.0),
+            radius: 1.0,
+            gas_m3: 2.0,
+        });
+        assert_eq!(d.next_stride(tick), 1);
+    }
+
     #[test]
     fn a_background_step_lands_with_what_was_done_meanwhile() {
         engine_core::tasks::init_task_pools();
