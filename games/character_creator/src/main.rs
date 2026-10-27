@@ -41,10 +41,10 @@ fn main() {
     app.insert_resource(engine_character::CharacterLod {
         distance_scale: lod_scale,
     });
-    // `--subsurface`: skin lit through the renderer's subsurface pass instead of the skin
-    // shader's imitation of it (to compare the two).
+    // `--no-subsurface`: the skin shader's imitation of light under the skin instead of the
+    // renderer's subsurface pass (to compare the two).
     app.insert_resource(engine_character::CharacterSubsurface {
-        pass: std::env::args().any(|a| a == "--subsurface"),
+        pass: !std::env::args().any(|a| a == "--no-subsurface"),
     });
     // Indoors: still air, so hair hangs and swings only as the person moves.
     {

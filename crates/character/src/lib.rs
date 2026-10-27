@@ -144,13 +144,17 @@ pub struct CharacterDebug {
 }
 
 /// Whether skin uses the renderer's subsurface pass (when `RenderSettings::subsurface_width`
-/// is above 0) instead of the skin shader's own imitation. Off until the pass multiplies the
-/// albedo in after its blur: blurring lit, textured skin (pre-scatter texturing) washes out
-/// freckles and pores, which the imitation keeps.
-#[derive(Resource, Debug, Clone, Copy, Default, Serialize, Deserialize)]
+/// is above 0; on by default) instead of the skin shader's own imitation of it.
+#[derive(Resource, Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CharacterSubsurface {
     pub pass: bool,
+}
+
+impl Default for CharacterSubsurface {
+    fn default() -> Self {
+        Self { pass: true }
+    }
 }
 
 /// Where the human pack stands.

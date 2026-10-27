@@ -13,9 +13,9 @@
 //
 // Light diffuses under the skin. With the renderer's subsurface pass on (Jimenez et al.,
 // "Separable Subsurface Scattering", 2015; as Unreal's Subsurface Profile and Unity HDRP's
-// diffusion profiles do), the skin is lit plainly and marks itself in the prepass; the pass
+// diffusion profiles do), the skin is lit white and marks itself in the prepass; the pass
 // blurs its diffuse light along the surface (red farthest) while the specular light, written
-// to alpha, stays sharp. Without the pass the shader imitates it: red light is lit with a
+// to alpha, stays sharp, and then multiplies in the skin's color (fs_skin_color). Without the pass the shader imitates it: red light is lit with a
 // smoothed normal and wraps further past the terminator than green and blue, more where the
 // surface curves tightly, and shadow edges turn red. Either way thin parts (ears, nostrils)
 // glow when lit from behind. Highlights are two GGX lobes (a sharp oily one and a broad one),
@@ -791,6 +791,11 @@ fn fs_skin(in: SkinOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     if (character.eye2.y > 0.5) {
         return vec4<f32>(pre_expose(skin_debug(in, s) * 2000.0), 1.0);
     }
+    // Under the subsurface pass the skin's color goes on after the blur (fs_skin_color), so
+    // freckles and pores stay sharp: light it white here.
+    if (character.eye2.z > 0.5 && scatter_strength(in) > 0.0) {
+        s.albedo = vec3<f32>(1.0);
+    }
     let shade = shade_skin(s, in.rel);
     let color = apply_fog(shade.color, in.rel);
     // The subsurface pass blurs color minus alpha: alpha holds the specular light (fogged as
@@ -802,22 +807,32 @@ fn fs_skin(in: SkinOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     return vec4<f32>(color, alpha);
 }
 
+// How far light spreads under the surface with the subsurface pass on: skin in full, the gums
+// and tongue less, cloth, shoes and teeth not at all.
+fn scatter_strength(in: SkinOut) -> f32 {
+    switch in.part {
+        case 0u: { return 1.0 - cloth_cover(in.rest, in.m2.x); }
+        case 2u, 3u: { return 0.5; }
+        default: { return 0.0; }
+    }
+}
+
 @fragment
 fn fs_skin_prepass(in: SkinOut, @builtin(front_facing) front: bool) -> PrepassOutput {
     var n = normalize(in.normal);
     if (!front) { n = -n; }
     if (character.eye2.z > 0.5) {
-        // How far light spreads under it: skin in full, the gums and tongue less, cloth,
-        // shoes and teeth not at all.
-        var strength = 0.0;
-        switch in.part {
-            case 0u: { strength = 1.0 - cloth_cover(in.rest, in.m2.x); }
-            case 2u, 3u: { strength = 0.5; }
-            default: {}
-        }
-        return prepass_output_subsurface(n, 0.5, in.clip_now, in.clip_prev, strength);
+        return prepass_output_subsurface(n, 0.5, in.clip_now, in.clip_prev, scatter_strength(in));
     }
     return prepass_output(n, 0.5, in.clip_now, in.clip_prev);
+}
+
+// The skin's color, which the subsurface pass multiplies into its blurred light ("post-scatter"
+// texturing: Jimenez et al. 2015 section 4, Unreal's Subsurface Profile, HDRP's texturing
+// modes).
+@fragment
+fn fs_skin_color(in: SkinOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    return vec4<f32>(skin_surface(in, front).albedo, 1.0);
 }
 
 

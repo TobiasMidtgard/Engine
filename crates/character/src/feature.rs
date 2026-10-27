@@ -195,6 +195,10 @@ struct SkinVertex {
     weights: [u8; 4],
 }
 
+/// Faces whose skin reaches fewer pixels than this (the subsurface profile's reach at full
+/// strength) imitate the scattering in the shader instead of going through the pass.
+const SUBSURFACE_MIN_PIXELS: f32 = 1.5;
+
 const SKIN_ATTRIBUTES: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
     0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
     6 => Uint8x4, 7 => Unorm8x4
@@ -290,6 +294,8 @@ struct GpuMeshes {
     coarse_count: u32,
     /// Draw the coarse skin this frame.
     coarse: bool,
+    /// Lit through the renderer's subsurface pass this frame (near enough for it to show).
+    scatter: bool,
     strands: Vec<GpuStrands>,
     /// Last frame's model matrix (camera-relative), for motion vectors.
     last_model: Option<(Mat4, DVec3)>,
@@ -358,6 +364,7 @@ struct Pipelines {
     shadow_sampler: wgpu::Sampler,
     skin: wgpu::RenderPipeline,
     skin_prepass: wgpu::RenderPipeline,
+    skin_color: wgpu::RenderPipeline,
     skin_shadow: wgpu::RenderPipeline,
     eye: wgpu::RenderPipeline,
     eye_prepass: wgpu::RenderPipeline,
@@ -397,6 +404,8 @@ enum Pass {
     Scene,
     Prepass,
     Shadow,
+    /// The skin's color for the renderer's subsurface pass to multiply in after its blur.
+    SubsurfaceColor,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -422,10 +431,12 @@ fn pipeline(
         write_mask: wgpu::ColorWrites::ALL,
     })];
     let prepass_targets = gpu.prepass_targets();
+    let color_targets = [Some(gpu.subsurface_color_target())];
     let (targets, depth): (&[Option<wgpu::ColorTargetState>], _) = match pass {
         Pass::Scene => (&scene_targets, gpu.depth_state(true)),
         Pass::Prepass => (&prepass_targets, gpu.depth_state(true)),
         Pass::Shadow => (&[], gpu.shadow_depth_state()),
+        Pass::SubsurfaceColor => (&color_targets, gpu.depth_state(false)),
     };
     let shadow = matches!(pass, Pass::Shadow);
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -782,6 +793,7 @@ impl CharacterFeature {
             strands,
             last_model: None,
             seen: true,
+            scatter: false,
         }
     }
 
@@ -811,6 +823,12 @@ impl CharacterFeature {
                     c.draw_skin(pass);
                     pass.set_pipeline(&p.strands_shadow);
                 }
+                // Only the skin scatters.
+                Pass::SubsurfaceColor => {
+                    pass.set_pipeline(&p.skin_color);
+                    c.draw_skin(pass);
+                    continue;
+                }
             }
             for s in c.strands.iter().filter(|s| s.drawn > 0) {
                 pass.set_bind_group(2, &s.group, &[]);
@@ -827,6 +845,10 @@ impl RenderFeature for CharacterFeature {
 
     fn needs_subsurface(&self) -> bool {
         self.subsurface
+    }
+
+    fn draw_subsurface_color(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
+        self.draw_meshes(pass, Pass::SubsurfaceColor);
     }
 
     fn init(&mut self, gpu: &GpuShared) {
@@ -927,6 +949,16 @@ impl RenderFeature for CharacterFeature {
                 Pass::Prepass,
                 back,
             ),
+            skin_color: pipeline(
+                gpu,
+                "character skin subsurface color",
+                &skin_mod,
+                ("vs_skin", Some("fs_skin_color")),
+                &scene,
+                &skin_buffers,
+                Pass::SubsurfaceColor,
+                back,
+            ),
             skin_shadow: pipeline(
                 gpu,
                 "character skin shadow",
@@ -1014,6 +1046,11 @@ impl RenderFeature for CharacterFeature {
             && world
                 .get_resource::<crate::CharacterSubsurface>()
                 .is_some_and(|s| s.pass);
+        // As the renderer measures the skin's reach on screen (subsurface.rs).
+        let pixels_per_meter = view.unjittered_proj.y_axis.y
+            * view.viewport_size.y as f32
+            * settings.render_scale.clamp(0.25, 2.0)
+            * 0.5;
         self.stats = FeatureStats::default();
         let debug = world
             .get_resource::<CharacterDebug>()
@@ -1061,9 +1098,14 @@ impl RenderFeature for CharacterFeature {
                 ),
             };
             c.last_model = Some((model, world_pos));
+            // The pass blurs a face only where the skin's reach covers pixels; farther away the
+            // shader's imitation costs less than drawing the skin's color for it.
+            c.scatter = subsurface
+                && settings.subsurface_width * pixels_per_meter
+                    >= SUBSURFACE_MIN_PIXELS * view.view_depth(rel).max(1e-3);
             let mut u = built.uniform;
             u.eye2[1] = debug as f32;
-            u.eye2[2] = if subsurface { 1.0 } else { 0.0 };
+            u.eye2[2] = if c.scatter { 1.0 } else { 0.0 };
             u.model = model.to_cols_array_2d();
             u.prev_model = prev_model.to_cols_array_2d();
             gpu.queue
@@ -1085,7 +1127,7 @@ impl RenderFeature for CharacterFeature {
             self.stats.draw_calls += 2 + c.strands.iter().filter(|s| s.drawn > 0).count() as u32;
         }
         self.characters.retain(|_, c| c.seen);
-        self.subsurface = subsurface && !self.characters.is_empty();
+        self.subsurface = self.characters.values().any(|c| c.scatter);
     }
 
     fn draw_prepass(&self, pass: &mut wgpu::RenderPass<'_>, _ctx: &FrameContext) {
