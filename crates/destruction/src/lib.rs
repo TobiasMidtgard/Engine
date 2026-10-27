@@ -212,6 +212,7 @@ impl Plugin for DestructionPlugin {
             .init_resource::<DestructionMaterials>()
             .init_resource::<HitQueue>()
             .init_resource::<debris::PendingDebris>()
+            .init_resource::<debris::DebrisLandings>()
             .init_resource::<structure::StructureGraph>()
             .init_resource::<dress::PropMeshes>()
             .init_resource::<dress::PropBuilds>()
@@ -276,9 +277,17 @@ impl Plugin for DestructionPlugin {
                     (demo::demo_script_system,
                 hill::hill_script_system, barn::barn_script_system,
                 reinforce::reinforce_system, charges::charges_system)
-                        .chain()
+                        // Their commands land at the sync point after the gameplay set: none of
+                        // them needs another's spawns within the same step.
+                        .chain_ignore_deferred()
                         .in_set(SimSet::Gameplay),
-                    debris::simulate_debris_system.in_set(SimSet::Physics),
+                    (
+                        debris::pose_debris_system,
+                        debris::simulate_debris_system,
+                        debris::place_debris_system,
+                    )
+                        .chain()
+                        .in_set(SimSet::Physics),
                     (
                         hits::collect_hits_system,
                         hits::apply_hits_system,
@@ -463,18 +472,6 @@ pub(crate) fn area_rests(
 ) -> bool {
     !focus.points.is_empty()
         && focus.distance(center) - radius > range.active_m * (1.0 + range.hysteresis)
-}
-
-/// [`area_rests`] read from the world's resources (no range resource: the default range).
-pub(crate) fn area_rests_in(world: &World, center: DVec3, radius: f64) -> bool {
-    let Some(focus) = world.get_resource::<engine_world::FocusPoints>() else {
-        return false;
-    };
-    let range = world
-        .get_resource::<engine_world::SimulationRange>()
-        .copied()
-        .unwrap_or_default();
-    area_rests(&range, focus, center, radius)
 }
 
 fn register_api(app: &mut App) {

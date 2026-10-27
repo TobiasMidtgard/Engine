@@ -732,38 +732,63 @@ fn idle_builder(at: DVec3) -> Builder {
     b
 }
 
-/// Advance every [`HillDemo`] (FixedUpdate, `SimSet::Gameplay`).
-pub fn hill_script_system(world: &mut World) {
-    let dt = world.resource::<Time>().delta_secs();
+/// Advance every [`HillDemo`] (FixedUpdate, `SimSet::Gameplay`). The clock runs in this normal
+/// system; only a step that is due takes the whole world, as a queued command.
+pub fn hill_script_system(
+    mut commands: Commands,
+    time: Res<Time>,
+    focus: Option<Res<engine_world::FocusPoints>>,
+    range: Option<Res<engine_world::SimulationRange>>,
+    mut demos: Query<(Entity, &mut HillDemo)>,
+) {
+    let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
-    let demos: Vec<Entity> = world
-        .query_filtered::<Entity, With<HillDemo>>()
-        .iter(world)
-        .collect();
-    let steps = timeline();
-    for e in demos {
-        let Some(mut demo) = world.get::<HillDemo>(e).cloned() else {
-            continue;
-        };
-        if crate::area_rests_in(world, demo.origin, HILL_RADIUS_M) {
+    let range = range.map_or_else(engine_world::SimulationRange::default, |r| *r);
+    for (e, mut demo) in &mut demos {
+        if focus
+            .as_ref()
+            .is_some_and(|f| crate::area_rests(&range, f, demo.origin, HILL_RADIUS_M))
+        {
             continue;
         }
-        demo.time += dt;
-        while demo.next < steps.len() && steps[demo.next].0 <= demo.time {
-            let step = steps[demo.next].1;
-            demo.next += 1;
-            run_step(world, &mut demo, step);
+        let time = demo.time + dt;
+        if TIMELINE.get(demo.next).is_some_and(|s| s.0 <= time) {
+            commands.queue(move |world: &mut World| run_due(world, e, dt));
+            continue;
         }
+        demo.time = time;
         if demo.time >= HILL_CYCLE_SECS {
             demo.time -= HILL_CYCLE_SECS;
             demo.next = 0;
             demo.cycle += 1;
         }
-        if let Some(mut d) = world.get_mut::<HillDemo>(e) {
-            *d = demo;
-        }
+    }
+}
+
+/// The loop's steps, in order: (seconds into the loop, step).
+static TIMELINE: std::sync::LazyLock<Vec<(f32, Step)>> = std::sync::LazyLock::new(timeline);
+
+/// One hill's clock moved on by `dt` with the steps now due run.
+fn run_due(world: &mut World, e: Entity, dt: f32) {
+    let Some(mut demo) = world.get::<HillDemo>(e).cloned() else {
+        return;
+    };
+    let steps = &*TIMELINE;
+    demo.time += dt;
+    while demo.next < steps.len() && steps[demo.next].0 <= demo.time {
+        let step = steps[demo.next].1;
+        demo.next += 1;
+        run_step(world, &mut demo, step);
+    }
+    if demo.time >= HILL_CYCLE_SECS {
+        demo.time -= HILL_CYCLE_SECS;
+        demo.next = 0;
+        demo.cycle += 1;
+    }
+    if let Some(mut d) = world.get_mut::<HillDemo>(e) {
+        *d = demo;
     }
 }
 

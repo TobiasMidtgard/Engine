@@ -77,6 +77,7 @@ impl DebrisMesh {
 
 /// State of a body moved by the built-in debris solver.
 #[derive(Component, Debug, Clone)]
+#[require(DebrisPose)]
 pub struct DebrisBody {
     pub velocity: Vec3,
     pub angular: Vec3,
@@ -104,6 +105,67 @@ pub struct DebrisBody {
     /// Seconds in contact since it last woke: one that keeps rocking long after landing is put
     /// to sleep anyway.
     pub awake_secs: f32,
+}
+
+/// Where the built-in solver holds a [`DebrisBody`]: its own copy of the pose, stepped without
+/// touching `Transform` (which dozens of other modules' systems read or write, so a step that
+/// borrowed it would run alone), then copied into `Transform` by a small system after the step,
+/// as Avian keeps `Position` and `Rotation` and writes `Transform` back in its sync set.
+#[derive(Component, Debug, Clone, Default)]
+pub struct DebrisPose {
+    /// The pose the solver steps.
+    pub now: Transform,
+    /// The pose it last wrote into `Transform`: a `Transform` that differs was moved by
+    /// something else (a world shift, a reset, a test), and the solver carries on from there.
+    written: Option<Transform>,
+}
+
+/// Landings found by the debris step, written out as messages after it (see [`DebrisPose`]).
+#[derive(Resource, Default)]
+pub struct DebrisLandings {
+    contacts: Vec<GroundContact>,
+    noises: Vec<NoiseEvent>,
+}
+
+/// Take in debris `Transform`s moved by something other than the solver (before its step).
+#[allow(clippy::type_complexity)]
+pub fn pose_debris_system(
+    mut q: Query<
+        (&Transform, &mut DebrisPose),
+        (
+            With<DebrisBody>,
+            Or<(Changed<Transform>, Added<DebrisPose>)>,
+        ),
+    >,
+) {
+    for (t, mut pose) in &mut q {
+        if pose.written != Some(*t) {
+            // Taken in quietly: nothing moved that the step has to write back.
+            let pose = pose.bypass_change_detection();
+            pose.now = *t;
+            pose.written = Some(*t);
+        }
+    }
+}
+
+/// Copy the poses the debris step moved into `Transform`, and send its landings.
+pub fn place_debris_system(
+    mut q: Query<(&mut Transform, &mut DebrisPose), Changed<DebrisPose>>,
+    mut landings: ResMut<DebrisLandings>,
+    mut contacts: MessageWriter<GroundContact>,
+    mut noise: MessageWriter<NoiseEvent>,
+) {
+    for (mut t, mut pose) in &mut q {
+        let pose = pose.bypass_change_detection();
+        *t = pose.now;
+        pose.written = Some(pose.now);
+    }
+    if !landings.contacts.is_empty() {
+        contacts.write_batch(std::mem::take(&mut landings.contacts));
+    }
+    if !landings.noises.is_empty() {
+        noise.write_batch(std::mem::take(&mut landings.noises));
+    }
 }
 
 impl DebrisBody {
@@ -938,13 +1000,12 @@ const SETTLE_SECS: f32 = 6.0;
 pub fn simulate_debris_system(
     time: Res<Time>,
     env: Env,
-    mut q: Query<(Entity, &mut Transform, &mut DebrisBody, &mut Debris)>,
+    mut q: Query<(Entity, &mut DebrisPose, &mut DebrisBody, &mut Debris)>,
     volumes: Query<(&GlobalTransform, &VoxelState)>,
     rock_changed: Query<(&GlobalTransform, &VoxelState), Changed<VoxelState>>,
     walls: Query<(&GlobalTransform, &WallState)>,
     walls_changed: Query<(&GlobalTransform, &WallState), Changed<WallState>>,
-    mut contacts: MessageWriter<GroundContact>,
-    mut noise: MessageWriter<NoiseEvent>,
+    mut landings: ResMut<DebrisLandings>,
     range: Option<Res<SimulationRange>>,
 ) {
     let dt = time.delta_secs();
@@ -984,7 +1045,8 @@ pub fn simulate_debris_system(
     );
     // Chunks at rest are what the rest land on.
     let mut rubble = Rubble::default();
-    for (entity, t, body, debris) in &q {
+    for (entity, pose, body, debris) in &q {
+        let t = &pose.now;
         if !body.asleep
             || body.sinking
             || debris.chip
@@ -1013,7 +1075,8 @@ pub fn simulate_debris_system(
     drop(setup);
     let _step = tracing::info_span!("debris step").entered();
     q.par_iter_mut()
-        .for_each(|(entity, mut t, mut body, mut debris)| {
+        .for_each(|(entity, mut pose, mut body, mut debris)| {
+            let t = &pose.now;
             if !body.sinking && rests(t.translation) {
                 return;
             }
@@ -1030,7 +1093,7 @@ pub fn simulate_debris_system(
                     return;
                 }
             }
-            let (t, body) = (&mut *t, &mut *body);
+            let (t, body) = (&mut pose.now, &mut *body);
             if body.sinking {
                 t.translation -= env.up(t.translation).as_dvec3() * (0.35 * dt) as f64;
                 return;
@@ -1344,8 +1407,8 @@ pub fn simulate_debris_system(
         hits.into_inner().unwrap_or_else(|e| e.into_inner());
     ground_contacts.sort_by_key(|c| c.entity);
     noises.sort_by_key(|n| n.source);
-    contacts.write_batch(ground_contacts);
-    noise.write_batch(noises);
+    landings.contacts.extend(ground_contacts);
+    landings.noises.extend(noises);
 }
 
 /// Age debris, enforce the budget, sink and remove expired pieces, and animate dust.
