@@ -818,6 +818,10 @@ const SLOW_STEP_MS: f64 = 50.0;
 /// Most settling (prewarm) a body does a frame, in particle substeps: about 3 ms on the PC.
 /// Counted rather than timed, so a body settles the same way on every machine.
 const PREWARM_WORK: usize = 30_000;
+/// How far a particle of a big body moves before the ground under it is asked again, m.
+const GROUND_MOVE: f64 = 0.3;
+/// A big body asks the ground under one particle in this many each step anyway.
+const GROUND_REFRESH: usize = 64;
 /// Longest a body waits for a mesh near it to bake, s (real time: baking is). A statue
 /// bakes in about a second.
 const HOLD_FOR_BAKE_SECS: f32 = 5.0;
@@ -1094,13 +1098,29 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
     p.buoyancy = s.buoyancy;
     p.water_drag = s.water_drag;
     let up = env.up(b.center);
-    b.sim.ground.clear();
     if b.radius > 6.0 {
+        let (at, asked_origin) = &mut b.ground_at;
+        let fresh = at.len() != b.sim.len() || *asked_origin != origin;
+        if fresh {
+            at.clear();
+            *asked_origin = origin;
+        }
+        b.sim.ground.resize(b.sim.len(), [0.0; 4]);
         for i in 0..b.sim.len() {
             let wp = origin + b.sim.pos[i].as_dvec3();
-            b.sim.ground.push(ground_plane(env, wp, origin));
+            if fresh {
+                at.push(wp);
+            } else if (wp - at[i]).length() < GROUND_MOVE
+                // A few each step all the same, so ground that changes (a crater) is seen.
+                && !(i + b.steps as usize).is_multiple_of(GROUND_REFRESH)
+            {
+                continue;
+            }
+            at[i] = wp;
+            b.sim.ground[i] = ground_plane(env, wp, origin);
         }
     } else {
+        b.sim.ground.clear();
         b.sim.ground.push(ground_plane(env, b.center, origin));
     }
 

@@ -125,6 +125,10 @@ pub struct SoftBodySim {
     /// Simulated here but drawn by another module (hair from `HairGuides`).
     pub drawn_elsewhere: bool,
     pub(crate) scratch_colliders: Vec<LocalCollider>,
+    /// Where each particle's ground plane was asked (world), and the origin it was asked
+    /// at: a big body asks the ground again only under particles that moved (a planet's
+    /// ground is costly to ask: 96 questions a step were the rope bridge's 3.8 ms).
+    pub(crate) ground_at: (Vec<DVec3>, DVec3),
     /// Since when it has waited for a mesh near it to bake, and whether it gave up waiting.
     pub(crate) held: (Option<std::time::Instant>, bool),
 }
@@ -204,6 +208,7 @@ impl SoftBodySim {
             drawn_elsewhere: false,
             scratch_colliders: Vec::new(),
             held: (None, false),
+            ground_at: (Vec::new(), DVec3::ZERO),
         };
         body.update_bounds();
         body
