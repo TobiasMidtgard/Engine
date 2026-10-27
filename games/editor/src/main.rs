@@ -16,6 +16,7 @@
 
 mod camera;
 mod camera_preview;
+mod collision;
 mod convert;
 mod demos;
 mod editor;
@@ -118,6 +119,7 @@ fn main() {
             Some("round10") => shots::round10(dir),
             Some("round11") => shots::round11(dir),
             Some("round12") => shots::round12(dir),
+            Some("round13") => shots::round13(dir),
             Some("play") => shots::play_in_editor(dir),
             _ => shots::gallery(dir),
         };

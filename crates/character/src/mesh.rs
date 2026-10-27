@@ -100,13 +100,13 @@ fn centroid(pack: &HumanPack, verts: &[u32]) -> Option<Vec3> {
     Some(sum / verts.len() as f32)
 }
 
-fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+pub(crate) fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
 /// Piecewise-linear lookup in `(x, y)` pairs sorted by x.
-fn lerp_table(table: &[(f32, f32)], x: f32) -> f32 {
+pub(crate) fn lerp_table(table: &[(f32, f32)], x: f32) -> f32 {
     if x <= table[0].0 {
         return table[0].1;
     }
@@ -118,6 +118,14 @@ fn lerp_table(table: &[(f32, f32)], x: f32) -> f32 {
     }
     table[table.len() - 1].1
 }
+
+/// The brow arch over each eye, by `u` along it (0 at its inner end, 0.017 m inward of the eye's
+/// center, to 1 at the tail, [`BROW_LENGTH`] further out): its middle's height over the eye and
+/// half its height, m.
+pub(crate) const BROW_CENTER: [(f32, f32); 3] = [(0.0, 0.0165), (0.6, 0.0205), (1.0, 0.0165)];
+pub(crate) const BROW_HALF: [(f32, f32); 3] = [(0.0, 0.0058), (0.35, 0.0050), (1.0, 0.0022)];
+pub(crate) const BROW_INNER: f32 = 0.017;
+pub(crate) const BROW_LENGTH: f32 = 0.041;
 
 /// The ear's outline from the side, rest space from the head's center: center (height, depth)
 /// and half its height and depth, m.
@@ -283,11 +291,10 @@ impl Regions {
             let mut brow = 0.0f32;
             for e in [le, re] {
                 let side = e.x.signum();
-                let u = (p.x * side - (e.x * side - 0.017)) / 0.041;
+                let u = (p.x * side - (e.x * side - BROW_INNER)) / BROW_LENGTH;
                 if (-0.1..1.1).contains(&u) && p.z > e.z - 0.01 {
-                    let center =
-                        e.y + lerp_table(&[(0.0, 0.0165), (0.6, 0.0205), (1.0, 0.0165)], u);
-                    let half = lerp_table(&[(0.0, 0.0058), (0.35, 0.0050), (1.0, 0.0022)], u);
+                    let center = e.y + lerp_table(&BROW_CENTER, u);
+                    let half = lerp_table(&BROW_HALF, u);
                     let across = 1.0 - smoothstep(half * 0.6, half * 1.25, (p.y - center).abs());
                     let along = smoothstep(-0.1, 0.05, u) * (1.0 - smoothstep(0.95, 1.1, u));
                     brow = brow.max(across * along);

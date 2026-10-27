@@ -12,6 +12,9 @@ bevy_ecs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
+# Offline geometry for fitted colliders (convex hulls, V-HACD); the simulation stays behind
+# engine_world's physics contracts.
+rapier3d.workspace = true
 glam.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true

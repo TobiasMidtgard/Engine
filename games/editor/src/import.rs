@@ -29,7 +29,8 @@ pub struct ImportSettings {
     /// Uniform scale applied to the model's nodes (0.01 for a file authored in centimetres
     /// that says it's in metres).
     pub scale: f64,
-    /// What Make solid / Make physical fit around it: "box" (default) or "none".
+    /// What Make solid / Make physical fit around it: "box" (default), "convex", "convex
+    /// parts", "mesh" or "none" ([`crate::collision::KINDS`]).
     pub collider: String,
     /// What the last import found (nodes, meshes, materials, what was left out).
     pub summary: String,
@@ -314,10 +315,16 @@ pub fn settings_panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor,
                     egui::ComboBox::from_id_salt("import collider")
                         .selected_text(settings.collider.as_str())
                         .show_ui(ui, |ui| {
-                            for c in ["box", "none"] {
-                                ui.selectable_value(&mut settings.collider, c.to_string(), c);
+                            for (c, what) in crate::collision::KINDS {
+                                ui.selectable_value(&mut settings.collider, c.to_string(), *c)
+                                    .on_hover_text(*what);
                             }
-                        });
+                        })
+                        .response
+                        .on_hover_text(
+                            "What Make solid and Make physical fit around it. Collision meshes \
+                             in the file (UCX_, UBX_, USP_, UCP_, -colonly) win",
+                        );
                     ui.end_row();
                 });
             if !settings.summary.is_empty() {
