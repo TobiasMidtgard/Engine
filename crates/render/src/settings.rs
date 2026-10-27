@@ -234,6 +234,27 @@ pub struct RenderSettings {
     pub screen_space_gi: bool,
     /// Strength of the bounced light (1 = physical).
     pub gi_intensity: f32,
+    /// Probe GI (DDGI): a grid of light probes around the camera traces rays against the
+    /// meshes around it, so rooms, caves and streets at night get light bounced off everything
+    /// near, on screen or not: a sunlit patch on the floor lights the ceiling, a torch the walls
+    /// around it, and closed rooms keep the sky out without a `SkyLightVolume`. Where the grid
+    /// covers, it replaces the sky visibility guess for diffuse ambient light. Off by default
+    /// for now (`ENGINE_PROBE_GI=on` turns it on in any game); `render.gi.*` diagnostics.
+    pub probe_gi: bool,
+    /// Meters between probes (smaller: finer light, a smaller grid).
+    pub gi_probe_spacing: f32,
+    /// Probes along x, y and z (at most 16 384 in all).
+    pub gi_probe_grid: [u32; 3],
+    /// Probes traced per frame (probes the camera's move brings in first, then the rest in
+    /// turn).
+    pub gi_probes_per_frame: u32,
+    /// Rays per traced probe, 16..256.
+    pub gi_rays_per_probe: u32,
+    /// How much of a probe's light carries over to its next update, 0..0.995 (higher: smoother,
+    /// slower to follow changing light).
+    pub gi_hysteresis: f32,
+    /// Point lights (the nearest first) the probes' rays see, through shadow rays.
+    pub gi_shadowed_lights: u32,
     /// How far light spreads under skin, meters at full strength (screen-space subsurface
     /// scattering of the pixels a feature marks; see `RenderFeature::needs_subsurface`).
     /// 0 = off.
@@ -435,6 +456,13 @@ impl Default for RenderSettings {
             ssr_max_roughness: 0.6,
             screen_space_gi: true,
             gi_intensity: 1.0,
+            probe_gi: false,
+            gi_probe_spacing: 1.5,
+            gi_probe_grid: [32, 16, 32],
+            gi_probes_per_frame: 2048,
+            gi_rays_per_probe: 64,
+            gi_hysteresis: 0.9,
+            gi_shadowed_lights: 8,
             subsurface_width: 0.012,
             grass_density: 1.0,
             volumetric_fog: true,
@@ -499,10 +527,34 @@ impl Default for RenderSettings {
 /// (unscaled without one).
 pub(crate) fn effective(world: &World) -> RenderSettings {
     let settings = world.resource::<RenderSettings>();
-    match world.get_resource::<Scalability>() {
+    let mut s = match world.get_resource::<Scalability>() {
         Some(quality) => settings.scaled(quality),
         None => settings.clone(),
+    };
+    if let Some(on) = probe_gi_from_env() {
+        s.probe_gi = on;
     }
+    s
+}
+
+/// `ENGINE_PROBE_GI=on|off`, when set, overrides `RenderSettings::probe_gi` (to compare the
+/// two on one build, in any game).
+fn probe_gi_from_env() -> Option<bool> {
+    static ON: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        match std::env::var("ENGINE_PROBE_GI")
+            .ok()?
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "off" | "0" => Some(false),
+            "on" | "1" => Some(true),
+            other => {
+                tracing::warn!("ENGINE_PROBE_GI={other} is not on or off");
+                None
+            }
+        }
+    })
 }
 
 impl RenderSettings {
@@ -511,9 +563,9 @@ impl RenderSettings {
     /// `render_scale`; shadow map size and shadow distances follow `shadows`; how much detail
     /// far things keep (levels of detail, impostors, culling of tiny objects) follows
     /// `view_distance`; grass follows `density`; and `effects` turns off what costs most
-    /// (volumetric fog below 0.75, screen-space reflections below 0.75, screen-space GI below
-    /// 1, ambient occlusion below 0.5) and thins point lights and sky updates. Nothing the game
-    /// turned off is turned on.
+    /// (volumetric fog below 0.75, screen-space reflections below 0.75, screen-space and probe
+    /// GI below 1, ambient occlusion below 0.5) and thins point lights and sky updates. Nothing
+    /// the game turned off is turned on.
     pub fn scaled(&self, quality: &Scalability) -> Self {
         let mut s = self.clone();
         let positive = |f: f32| if f.is_finite() { f.max(0.01) } else { 1.0 };
@@ -543,6 +595,7 @@ impl RenderSettings {
         }
         s.screen_space_reflections &= quality.allows(0.75);
         s.screen_space_gi &= quality.allows(1.0);
+        s.probe_gi &= quality.allows(1.0);
         s.ambient_occlusion &= quality.allows(0.5);
         s.max_point_lights =
             ((self.max_point_lights as f32 * effects.clamp(0.25, 1.0)) as u32).max(8);

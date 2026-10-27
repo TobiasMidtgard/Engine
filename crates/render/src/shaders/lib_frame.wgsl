@@ -44,6 +44,10 @@
 // top-down around the camera (see `cloud_shadow`); g, b, a are free for the module that draws
 // it. 1 where nobody draws it, and a white stand-in during `RenderFeature::compute`.
 @group(0) @binding(22) var cloud_shadow_map: texture_2d<f32>;
+// Probe GI (probe_gi/mod.rs): each probe's 8x8 octahedral tile, layer 0 its irradiance (mean
+// radiance times PROBE_GI_SCALE), layer 1 the mean distance and squared distance to what it sees,
+// whether it is active and the epoch it was written in. The 16th sampled texture in group 0.
+@group(0) @binding(23) var gi_atlas: texture_2d_array<f32>;
 
 // Multiply final radiance by this before writing to the HDR target.
 fn pre_expose(c: vec3<f32>) -> vec3<f32> { return c * frame.exposure.x; }
@@ -437,6 +441,82 @@ fn cloud_shadow_plane_point(uv: vec2<f32>) -> vec3<f32> {
 // ---------------------------------------------------------------- atmosphere
 // The sky, sunlight through the air and aerial perspective live in lib_atmosphere.wgsl
 // (`atmosphere`, `sun_transmittance`, `sky_view_radiance`, `planet_height`, `ray_shell`).
+
+// ---------------------------------------------------------------- probe GI
+// Dynamic diffuse GI (DDGI, Majercik et al. 2019): a grid of probes around the camera, each
+// tracing rays into the scene (probe_gi.wgsl). Irradiance is read from the probes around a
+// point, weighted so that probes behind it, or ones that can't see it, don't light it.
+
+const PROBE_GI_TEXELS: u32 = 8u;
+const PROBE_GI_TILES_X: u32 = 128u;
+// Stored radiance is scaled into half-float range: sunlit snow to moonlight.
+const PROBE_GI_SCALE: f32 = 0.0625;
+
+// Camera-relative position of the probe at grid coordinate `g`.
+fn probe_gi_position(g: vec3<f32>) -> vec3<f32> {
+    return frame.gi_volume.xyz + g * frame.gi_volume.w;
+}
+
+// Texel coordinates (in the atlas) of direction `dir` in the tile of the probe at grid `g`.
+fn probe_gi_texel(g: vec3<u32>, dir: vec3<f32>) -> vec2<f32> {
+    let size = vec3<u32>(frame.gi_size.xyz);
+    let c = (g + vec3<u32>(frame.gi_grid.xyz)) % size;
+    let slot = c.x + size.x * (c.y + size.y * c.z);
+    let tile = vec2<f32>(vec2<u32>(slot % PROBE_GI_TILES_X, slot / PROBE_GI_TILES_X) * PROBE_GI_TEXELS);
+    let n = f32(PROBE_GI_TEXELS);
+    return tile + clamp((oct_encode(dir) * 0.5 + 0.5) * n, vec2<f32>(0.5), vec2<f32>(n - 0.5));
+}
+
+// Irradiance (rgb, lux-like: diffuse light is albedo / PI times it) at camera-relative `rel`
+// with normal `n`, seen along `v` (toward the viewer), and in alpha how much the probes cover
+// the point (0 outside the grid or with probe GI off, fading in over the outermost probes).
+fn probe_gi(rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec4<f32> {
+    if (frame.gi_grid.w < 0.5) { return vec4<f32>(0.0); }
+    let spacing = frame.gi_volume.w;
+    let size = frame.gi_size.xyz;
+    // Off the surface toward the viewer and along the normal, so the surface's own probes
+    // don't shadow it.
+    let p = rel + (n * 0.2 + v * 0.8) * (0.3 * spacing);
+    let local = (p - frame.gi_volume.xyz) / spacing;
+    let base = floor(local);
+    if (any(base < vec3<f32>(0.0)) || any(base + 1.0 >= size)) { return vec4<f32>(0.0); }
+    let edge = min(min(local, size - 1.0 - local), vec3<f32>(1.0));
+    let cover = saturate(min(edge.x, min(edge.y, edge.z)));
+    let alpha = local - base;
+    let atlas = vec2<f32>(textureDimensions(gi_atlas));
+    var sum = vec3<f32>(0.0);
+    var weights = 0.0;
+    for (var i = 0u; i < 8u; i++) {
+        let offset = vec3<f32>(f32(i & 1u), f32((i >> 1u) & 1u), f32((i >> 2u) & 1u));
+        let g = base + offset;
+        let gu = vec3<u32>(g);
+        let probe = probe_gi_position(g);
+        let to_probe = probe - p;
+        let dist = max(length(to_probe), 1e-4);
+        let dir = to_probe / dist;
+        let tri = mix(1.0 - alpha, alpha, offset);
+        var w = sq((dot(dir, n) + 1.0) * 0.5) + 0.2;
+        // Chebyshev: how likely the probe sees this point, from the distances it sees.
+        let m = textureSampleLevel(gi_atlas, linear_clamp, probe_gi_texel(gu, -dir) / atlas, 1, 0.0);
+        // Inactive (stuck in something), or not written since every probe started over.
+        if (m.z < 0.5 || abs(m.w - frame.gi_grid.w) > 0.5) { continue; }
+        if (dist > m.x) {
+            let variance = abs(m.y - m.x * m.x);
+            let d = dist - m.x;
+            let chebyshev = variance / (variance + d * d);
+            w *= max(chebyshev * chebyshev * chebyshev, 0.0);
+        }
+        w = max(w, 1e-6);
+        // Crush tiny weights (light leaks) further.
+        if (w < 0.2) { w *= w * w * 25.0; }
+        w *= tri.x * tri.y * tri.z;
+        let e = textureSampleLevel(gi_atlas, linear_clamp, probe_gi_texel(gu, n) / atlas, 0, 0.0).rgb;
+        sum += e * w;
+        weights += w;
+    }
+    if (weights <= 1e-9) { return vec4<f32>(0.0); }
+    return vec4<f32>(sum / weights * (PI / PROBE_GI_SCALE), cover);
+}
 
 // ---------------------------------------------------------------- environment lighting
 // The sky (and, without a planet, the ground below the horizon) as seen from the camera,
@@ -911,7 +991,20 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     if (in_fog.y > 0.0) {
         sky_light += sun_above * (in_fog.y * INV_PI * (0.5 + 0.5 * dot(n, fog_up(rel))));
     }
-    let irradiance = ((sky_light - fill) * sky_vis + fill) * PI;
+    var irradiance = ((sky_light - fill) * sky_vis + fill) * PI;
+    // Where the probes cover, their light instead: the sky through whatever openings their rays
+    // find, and light bounced off everything around, on screen or not.
+    let probes = probe_gi(rel, smooth_n, v);
+    let probe_share = probes.a * frame.gi_size.w;
+    // The reflected sky follows them too: dimmed as far as the probes find the point darker than
+    // the guess (reflection normalization, Lagarde and Zanuttini 2012).
+    var reflection_scale = 1.0;
+    if (probe_share > 0.0) {
+        let guess = irradiance;
+        let lit = probes.rgb + fill * PI;
+        irradiance = mix(guess, lit, probe_share);
+        reflection_scale = mix(1.0, saturate(luminance(lit) / max(luminance(guess), 1e-4)), probe_share);
+    }
     // Rough surfaces reflect around a direction between the mirror direction and the normal
     // (Lagarde and de Rousiers 2014).
     let r = reflect(-v, n);
@@ -925,7 +1018,7 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
         let around = specular_sky_visibility(rel, dominant, smooth_n, roughness);
         spec_sky = min(spec_sky, mix(around, 1.0, lobe_wide));
     }
-    spec_sky *= specular_horizon_fade(r, smooth_n);
+    spec_sky *= specular_horizon_fade(r, smooth_n) * reflection_scale;
     let ssr = screen_reflection(rel);
     let spec_env = mix(sample_env_rough(dominant, s.roughness) * spec_sky + fill, ssr.rgb, ssr.a);
     let env_brdf = env_brdf_approx(f0, s.roughness, n_dot_v);
@@ -936,7 +1029,9 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
         color += through_color * ((sky_ambient_covered(-n, sky_vis) - fill) * sky_vis + fill) * visibility;
     }
     // Light bounced from nearby surfaces (its rays already stop at whatever occludes them).
-    color += diffuse_color * screen_gi(rel);
+    // The probes carry the larger part of it where they cover: screen-space GI keeps the
+    // contact detail they are too coarse for.
+    color += diffuse_color * screen_gi(rel) * (1.0 - 0.5 * probe_share);
     let reflected_sky = spec_env * env_brdf * specular_occlusion(n_dot_v, visibility, roughness);
     color += reflected_sky;
     specular += reflected_sky;

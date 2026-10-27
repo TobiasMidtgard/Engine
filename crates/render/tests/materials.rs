@@ -548,3 +548,43 @@ fn a_preset_draws_through_the_mesh_pipeline() {
     );
     assert!(red / n > 15.0, "brick is red (red - blue {:.1})", red / n);
 }
+
+#[test]
+fn preset_mean_albedos_match_their_maps() {
+    let mut app = headless_app(64, 64, |_| {});
+    app.update();
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return;
+    }
+    let renderer = app.world.resource::<Renderer>();
+    let mut failures = Vec::new();
+    for preset in MaterialPreset::ALL {
+        let maps = renderer
+            .shared
+            .read_material_maps(preset, MAP_SIZE)
+            .expect("generate");
+        let n = maps.base_color.width;
+        let mut sum = [0.0f64; 3];
+        for y in 0..n {
+            for x in 0..n {
+                let c = maps.base_color.pixel(x, y);
+                let orm = maps.orm.pixel(x, y);
+                let diffuse = (1.0 - orm[2] as f32 / 255.0) * orm[0] as f32 / 255.0;
+                for (i, s) in sum.iter_mut().enumerate() {
+                    *s += (srgb_to_linear(c[i]) * diffuse) as f64;
+                }
+            }
+        }
+        let mean = sum.map(|s| (s / (n * n) as f64) as f32);
+        let table = preset.mean_albedo();
+        eprintln!("{}: measured {mean:.3?}, table {table:.3?}", preset.name());
+        if (0..3).any(|i| (mean[i] - table[i]).abs() > 0.03 + 0.1 * mean[i]) {
+            failures.push(format!(
+                "{}: maps {mean:.3?}, table {table:.3?}",
+                preset.name()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}

@@ -87,6 +87,7 @@ mod mesh_scene;
 pub mod motion_blur;
 mod perf;
 pub mod portal;
+mod probe_gi;
 pub mod renderer;
 pub mod rock;
 pub mod settings;

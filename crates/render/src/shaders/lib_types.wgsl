@@ -60,6 +60,9 @@ struct Frame {
     air_ozone: vec4<f32>,          // ozone absorption at the layer's peak (1/m) RGB, w unused
     air_mie_g: vec4<f32>,          // Mie anisotropy per channel RGB (the whole lobe), w the share of g² passing as unscattered (`Atmosphere::mie_forward_peak`)
     window: vec4<f32>,             // the scene's rectangle in the output image: corner xy, size zw (px); the scene renders at viewport.xy
+    gi_volume: vec4<f32>,          // probe GI (probe_gi/mod.rs): the grid's first probe relative to the camera xyz, spacing (m)
+    gi_size: vec4<f32>,            // probes along x, y, z; w = indirect light's share where probes cover (0 = off)
+    gi_grid: vec4<f32>,            // storage slot of the grid's first probe along x, y, z (scrolling); w = the probes' epoch (0 = off)
 };
 
 // An indoor space (`SkyLightVolume`): sky light comes in only through its open faces.

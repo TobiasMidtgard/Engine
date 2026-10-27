@@ -103,6 +103,13 @@ pub struct FrameUniform {
     /// finds the scene pixel under a fragment as `(position.xy - window.xy) * viewport.xy /
     /// window.zw`.
     pub window: [f32; 4],
+    /// Probe GI (probe_gi/mod.rs): the grid's first probe relative to the camera, spacing (m).
+    pub gi_volume: [f32; 4],
+    /// Probes along x, y and z; indirect light's share where probes cover (0 = off).
+    pub gi_size: [f32; 4],
+    /// Storage slot of the grid's first probe along x, y and z (it scrolls); the probes' epoch
+    /// (0 = off: probes written in another epoch are ignored).
+    pub gi_grid: [f32; 4],
 }
 
 /// Most [`SkyLightVolume`]s shaded per frame (nearest the camera first).
@@ -942,6 +949,10 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
             v.viewport_size.x as f32,
             v.viewport_size.y as f32,
         ],
+        // Filled by the renderer's probe GI when it is on.
+        gi_volume: [0.0, 0.0, 0.0, 1.0],
+        gi_size: [1.0, 1.0, 1.0, 0.0],
+        gi_grid: [0.0; 4],
     }
 }
 
@@ -954,7 +965,7 @@ mod tests {
         // 7 mat4 + 15 vec4 + 4 mat4 + 3 vec4 + ground, sky occlusion, volumes, then the
         // screen-space block (mat4 + 4 vec4), volumetric fog (vec4), far shadow (mat4 + vec4),
         // sky (vec4), surface weather (2 vec4), cloud shadows (mat4 + 2 vec4), the air (5 vec4),
-        // the window (vec4).
+        // the window (vec4), probe GI (3 vec4).
         assert_eq!(
             std::mem::size_of::<FrameUniform>(),
             7 * 64
@@ -975,6 +986,7 @@ mod tests {
                 + 2 * 16
                 + 5 * 16
                 + 16
+                + 3 * 16
         );
         assert_eq!(std::mem::size_of::<GpuSkyVolume>(), 80);
         assert_eq!(std::mem::size_of::<GpuPointLight>(), 32);
