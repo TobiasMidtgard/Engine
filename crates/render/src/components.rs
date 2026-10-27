@@ -226,6 +226,14 @@ pub struct MeshRenderer {
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct NoVirtualGeometry;
 
+/// Keeps an instanced [`MeshRenderer`] at full detail at every distance, in the view and in
+/// shadow maps: for meshes the automatic levels of detail would spoil, such as one mesh of many
+/// small separate stones (simplifying drops whole stones). Without it, meshes of at least
+/// `mesh_lod::MIN_TRIANGLES` get simplified levels picked by their error on screen
+/// (`RenderSettings::mesh_lod_pixels`).
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct NoMeshLod;
+
 /// Farthest distance from the camera, in meters, at which this entity's [`MeshRenderer`] is
 /// drawn (with its shadow): small props, clutter and details nobody sees from afar. Measured to
 /// the mesh's bounding sphere, so a large mesh disappears when all of it is farther. The default

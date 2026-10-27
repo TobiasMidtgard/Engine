@@ -15,7 +15,9 @@
 use bevy_ecs::change_detection::Tick;
 use engine_core::prelude::*;
 
-use crate::components::{MaxDrawDistance, MeshRenderer, NoVirtualGeometry, ResolvedMesh};
+use crate::components::{
+    MaxDrawDistance, MeshRenderer, NoMeshLod, NoVirtualGeometry, ResolvedMesh,
+};
 use crate::mesh_feature::max_scale;
 use crate::virtual_geometry::Displacement;
 
@@ -29,6 +31,8 @@ pub(crate) const MIRRORED: u8 = 4;
 pub(crate) const INSTANCED_ONLY: u8 = 8;
 /// Has a `Displacement`.
 pub(crate) const DISPLACED: u8 = 16;
+/// Has `NoMeshLod`: always drawn at full detail.
+pub(crate) const FULL_DETAIL: u8 = 32;
 
 /// What the cull reads of a slot.
 #[derive(Clone, Copy, Debug)]
@@ -107,6 +111,7 @@ type SceneQuery = (
     Option<Ref<'static, MaxDrawDistance>>,
     Has<NoVirtualGeometry>,
     Has<Displacement>,
+    Has<NoMeshLod>,
 );
 
 /// Entities' slots, by entity index (an array lookup instead of a hash).
@@ -179,8 +184,16 @@ impl MeshScene {
     }
 
     fn sweep(&mut self, query: &mut QueryState<SceneQuery>, world: &World, frame: u64, all: bool) {
-        for (entity, transform, renderer, resolved, max_distance, instanced_only, displaced) in
-            query.iter(world)
+        for (
+            entity,
+            transform,
+            renderer,
+            resolved,
+            max_distance,
+            instanced_only,
+            displaced,
+            full_detail,
+        ) in query.iter(world)
         {
             let index = entity.index_u32() as usize;
             if index >= self.slot_of.len() {
@@ -193,7 +206,8 @@ impl MeshScene {
             };
             // Archetype flags: no per-entity reads.
             let kind = if instanced_only { INSTANCED_ONLY } else { 0 }
-                | if displaced { DISPLACED } else { 0 };
+                | if displaced { DISPLACED } else { 0 }
+                | if full_detail { FULL_DETAIL } else { 0 };
             let s = match existing {
                 Some(s) => {
                     self.seen[s] = frame;
@@ -203,7 +217,7 @@ impl MeshScene {
                         || transform.is_changed()
                         || renderer.is_changed()
                         || resolved.is_changed()
-                        || hot.flags & (INSTANCED_ONLY | DISPLACED) != kind
+                        || hot.flags & (INSTANCED_ONLY | DISPLACED | FULL_DETAIL) != kind
                         || match &max_distance {
                             Some(m) => m.is_changed(),
                             None => hot.max_distance != f32::MAX,
@@ -411,11 +425,12 @@ mod tests {
         assert_eq!(scene.hot[slot(&scene, b)].flags & VISIBLE, 0);
         world
             .entity_mut(a)
-            .insert((NoVirtualGeometry, MaxDrawDistance(50.0)));
+            .insert((NoVirtualGeometry, NoMeshLod, MaxDrawDistance(50.0)));
         scene.sync(&mut world, 5);
         let hot = scene.hot[slot(&scene, a)];
         assert_eq!((scene.dirty, hot.max_distance), (1, 50.0));
         assert_ne!(hot.flags & INSTANCED_ONLY, 0);
+        assert_ne!(hot.flags & FULL_DETAIL, 0);
         world.entity_mut(a).remove::<MaxDrawDistance>();
         scene.sync(&mut world, 6);
         assert_eq!(scene.dirty, 1);

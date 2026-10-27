@@ -111,7 +111,7 @@ pub use cloud_shadows::{
 };
 pub use components::{
     AmbientLight, BoxFace, Camera, DirectionalLight, Exposure, FogShape, FogVolume, MaterialRef,
-    MaxDrawDistance, MeshRef, MeshRenderer, NoVirtualGeometry, PointLight, Projection,
+    MaxDrawDistance, MeshRef, MeshRenderer, NoMeshLod, NoVirtualGeometry, PointLight, Projection,
     ResolvedMesh, SkyLightVolume, Viewport,
 };
 pub use depth_of_field::DepthOfField;
@@ -159,12 +159,12 @@ pub mod prelude {
         DepthOfField, DirectionalLight, Displacement, DisplacementSource, Exposure, FogSettings,
         FogShape, FogVolume, GltfScene, GltfSceneSpawner, GrassBender, GrassField, GrassStyle,
         Image, MaterialPreset, MaterialRef, MaxDrawDistance, Mesh, MeshRef, MeshRenderer,
-        MotionBlur, NoVirtualGeometry, Parallax, PixelPerfect, PixelSnap, PointLight, Projection,
-        RenderAppExt, RenderFeature, RenderPhase, RenderPlugin, RenderSettings, Screenshots, Shape,
-        SkyLightVolume, Sprite, SpriteAlpha, SpriteAnimation, SpriteAnimationMode, SpriteAtlas,
-        SpriteFilter, StandardMaterial, StoneKind, TextureCompression, TextureMapping, TileMap,
-        TileSource, Tonemapper, Viewport, VirtualTextures, VolumetricQuality, WallStone,
-        spawn_gltf_scene, spawn_gltf_scene_deferred,
+        MotionBlur, NoMeshLod, NoVirtualGeometry, Parallax, PixelPerfect, PixelSnap, PointLight,
+        Projection, RenderAppExt, RenderFeature, RenderPhase, RenderPlugin, RenderSettings,
+        Screenshots, Shape, SkyLightVolume, Sprite, SpriteAlpha, SpriteAnimation,
+        SpriteAnimationMode, SpriteAtlas, SpriteFilter, StandardMaterial, StoneKind,
+        TextureCompression, TextureMapping, TileMap, TileSource, Tonemapper, Viewport,
+        VirtualTextures, VolumetricQuality, WallStone, spawn_gltf_scene, spawn_gltf_scene_deferred,
     };
 }
 
@@ -214,6 +214,9 @@ impl Plugin for RenderPlugin {
             )
             .register_component::<NoVirtualGeometry>(
                 "Marker: keeps this entity's dense MeshRenderer off the virtual geometry cluster path (debris, fragments, meshes that change often).",
+            )
+            .register_component::<NoMeshLod>(
+                "Marker: keeps this entity's instanced MeshRenderer at full detail at every distance (no automatic levels of detail), for meshes simplifying would spoil, such as many small separate stones in one mesh.",
             )
             .register_component::<Displacement>(
                 "Real displaced geometry for this entity's MeshRenderer, made when its virtual geometry clusters are built (background, cached on disk): amplitude_m (m; 0 = the material's parallax_depth), midlevel (height left on the surface), edge_m / max_edge_m (finest / coarsest triangle edges, m), tolerance_m, max_triangles, cavity_darkening, normal_map_strength, source: \"MaterialHeight\" (the material's height map or preset) | {\"Stone\": {kind: SplitFace|RoughHewn|Slab, seed, scale, lichen, grime}}.",

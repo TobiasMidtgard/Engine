@@ -522,7 +522,9 @@ shadow maps the quad faces the sun. The atlas grows 8 layers at a time up to
 `impostor_atlas_layers` (128); when full, a new mesh takes the layer drawn longest ago (unused
 for 300 frames). Where GPU texture compression is on, each layer is baked into a scratch target
 and encoded to BC7 on the GPU (1.5 MB a layer instead of 6 MB); RGBA8 atlases stop at 32
-layers. No component is needed: every module's instanced meshes get both. The far shadow cascades keep their image for a few frames (`shadow_cascade_reuse`).
+layers. No component is needed: every module's instanced meshes get both. The `NoMeshLod`
+marker keeps a mesh at full detail everywhere, for meshes simplifying would spoil (one mesh of
+many small separate stones loses whole stones). The far shadow cascades keep their image for a few frames (`shadow_cascade_reuse`).
 
 **Virtual geometry** (built: cluster LOD and GPU-driven drawing; `crates/render/src/virtual_geometry`):
 dense opaque meshes (`RenderSettings::virtual_geometry_min_triangles`, 50 000 by default) are
