@@ -285,8 +285,12 @@ pub struct RangeArt {
 /// True while a range asked for with [`spawn_demo`] waits for its art: what a loading screen
 /// waits on.
 pub fn loading(world: &World) -> bool {
-    world.contains_resource::<RangeArt>()
+    world.contains_resource::<RangeArt>() || world.contains_resource::<Warming>()
 }
+
+/// Present while a range's warm-up is still being spread over loading-screen frames.
+#[derive(Resource)]
+struct Warming;
 
 /// Build the waiting ranges once their art is baked.
 pub fn land_range_art(world: &mut World) {
@@ -434,6 +438,15 @@ pub fn run_demos(world: &mut World) {
             }
         }
         world.entity_mut(entity).insert(state);
+    }
+    let mut q = world.query::<&SmokeDemoState>();
+    let warming = q.iter(world).any(|s| s.warming > 0.0);
+    if warming != world.contains_resource::<Warming>() {
+        if warming {
+            world.insert_resource(Warming);
+        } else {
+            world.remove_resource::<Warming>();
+        }
     }
 }
 
@@ -749,6 +762,7 @@ mod tests {
         let s = state(&mut app);
         assert!(s.started && s.warming > 0.0 && s.warming < warmup, "{s:?}");
         assert_eq!(s.since, warmup);
+        assert!(loading(&app.world));
         let mut frames = 0;
         while state(&mut app).warming > 0.0 {
             app.update();
@@ -756,6 +770,7 @@ mod tests {
             assert!(frames < 1000);
         }
         assert!(frames > 100, "{frames}");
+        assert!(!loading(&app.world));
         assert_eq!(state(&mut app).since, warmup);
         assert!(app.world.resource::<SmokeDomains>().mass_kg() > 1.0);
     }
