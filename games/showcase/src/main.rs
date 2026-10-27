@@ -76,7 +76,7 @@ fn main() {
         // blink, look around and wince); anim still poses them.
         .add_plugins(engine_character::CharacterPlugin)
         .add_systems(Startup, build::start)
-        .add_systems(Update, build::step)
+        .add_systems(Update, (build::watch_uploads, build::step).chain())
         .add_systems(
             Update,
             (camera::fly, places::run_pending, scenery::update_lods).chain(),
@@ -131,7 +131,12 @@ fn main() {
         // and Movement's look bakes on its own thread meanwhile.
         app.insert_resource(build::Staged)
             .init_resource::<build::HeldJump>()
-            .add_systems(Update, build::cover_jumps.after(camera::fly));
+            .add_systems(
+                Update,
+                build::cover_jumps
+                    .after(camera::fly)
+                    .after(build::watch_uploads),
+            );
         app.insert_resource(engine_movement::look::LookSettings {
             background: true,
             ..Default::default()

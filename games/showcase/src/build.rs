@@ -56,8 +56,8 @@ fn log_slow_systems(world: &World, build: &mut WorldBuild) {
         build.slow_label = None;
         return;
     };
-    // A new window that the slow frame fills at least half of.
-    if snap.busy_ms == *before || snap.frame_ms < 500.0 * *dt as f64 {
+    // The first window that takes the slow frame in.
+    if snap.busy_ms == *before {
         return;
     }
     let top: Vec<String> = snap
@@ -67,7 +67,7 @@ fn log_slow_systems(world: &World, build: &mut WorldBuild) {
         .map(|(name, ms)| format!("{name} {ms:.0}"))
         .collect();
     engine::core::log::info!(
-        "loading frame after {label}: {:.0} ms a frame in the profile window; slowest (ms a frame): {}",
+        "loading frame after {label} took {dt:.2} s; its profile window: {:.0} ms a frame, slowest (ms a frame): {}",
         snap.frame_ms,
         top.join(", ")
     );
@@ -276,9 +276,40 @@ const MODULES_LOADING: [fn(&World) -> bool; 5] = [
 /// [`engine::world::LoadingBudget`] while one is up).
 fn uploading(world: &World) -> bool {
     world
+        .get_resource::<Uploads>()
+        .is_some_and(|u| u.pending > 0.0 && u.low_at.elapsed().as_secs_f32() < UPLOAD_STALL_S)
+}
+
+/// What the renderer still has to upload, and when that last reached a new low: a count that
+/// stops going down (some of it may never be asked for) stops counting as loading.
+#[derive(Resource)]
+pub struct Uploads {
+    pending: f64,
+    low: f64,
+    low_at: std::time::Instant,
+}
+
+/// Seconds without the pending uploads going down before the wait for them ends.
+const UPLOAD_STALL_S: f32 = 2.0;
+
+/// Follow `render.pending_upload_mb` for [`uploading`].
+pub fn watch_uploads(world: &mut World) {
+    let mb = world
         .get_resource::<engine::core::diagnostics::Diagnostics>()
         .and_then(|d| d.get("render.pending_upload_mb"))
-        .is_some_and(|mb| mb > 0.0)
+        .unwrap_or(0.0);
+    let now = std::time::Instant::now();
+    let mut u = world.get_resource_or_insert_with(|| Uploads {
+        pending: mb,
+        low: mb,
+        low_at: now,
+    });
+    u.pending = mb;
+    // Rising (new work asked for) or falling by a megabyte counts as movement.
+    if mb < u.low - 1.0 || mb > u.low + 1.0 {
+        u.low = mb;
+        u.low_at = now;
+    }
 }
 
 fn with_commands(world: &mut World, f: impl FnOnce(&mut Commands)) {
@@ -369,11 +400,13 @@ pub fn step(world: &mut World) {
                 build.ran.join("+")
             };
             build.slow.push((ran.clone(), dt));
-            // The profile's window as it is now came before that frame.
-            let before = world
-                .get_resource::<engine::core::profile::ProfileSnapshot>()
-                .map_or(0.0, |p| p.busy_ms);
-            build.slow_label = Some((ran, dt, before));
+            if dt > PROFILE_FRAME_S {
+                // The profile's window as it is now came before that frame.
+                let before = world
+                    .get_resource::<engine::core::profile::ProfileSnapshot>()
+                    .map_or(0.0, |p| p.busy_ms);
+                build.slow_label = Some((ran, dt, before));
+            }
         }
     }
     log_slow_systems(world, &mut build);
@@ -414,6 +447,9 @@ pub fn building(world: &World) -> bool {
 
 /// Loading frames longer than this (s) are listed when the build is done.
 const SLOW_FRAME_S: f32 = 0.1;
+
+/// Loading frames longer than this (s) get the profile's slowest systems logged.
+const PROFILE_FRAME_S: f32 = 1.0;
 
 /// How long (s) a loading frame keeps starting steps.
 const FRAME_BUDGET_S: f32 = 0.05;
