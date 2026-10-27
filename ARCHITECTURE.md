@@ -605,10 +605,14 @@ records the passes and submits them on the renderer's own thread (`engine_core::
 while the next frame simulates; the next `render_system` waits for it first, so only one
 thread uses the renderer and its queue at a time. The picture shows the world one simulation
 step late, and `RenderStats`, `render.*` diagnostics and finished screenshots arrive a frame
-late. Timings: `render.extract_ms` (main thread); on the render thread `render.record_ms`
-(encoding the passes), `acquire_ms`, `submit_ms` and `present_ms`, all of it as
-`record_total_ms`, and the thread's CPU time over it as `record_cpu_ms` (well under
-`record_total_ms` means waiting: for the GPU, the window, a lock or a free core). The `Renderer` resource is absent from the
+late. Timings: on the main thread `render.wait_ms` (waiting for the frame in flight) and
+`extract_ms`; on the render thread `render.record_ms` (recording the passes), `acquire_ms`,
+`finish_ms` (wgpu validates and encodes the recorded passes in `CommandEncoder::finish`),
+`submit_ms`, `present_ms`, `screenshot_ms` (the blocking GPU readback and the PNGs) and
+`record_other_ms` (the rest), which add up to `record_total_ms`. `record_cpu_ms` is the
+thread's CPU time per frame averaged over a second (Windows counts thread time in 15.6 ms
+ticks), and well under `record_total_ms` means waiting: for the GPU, the window, a lock or a
+free core. `render.backend` is wgpu's backend number (1 Vulkan, 2 Metal, 3 DX12, 4 OpenGL). The `Renderer` resource is absent from the
 world while pipelined: reach it with `with_renderer(world, |renderer, world| ..)`, which waits
 for the frame in flight and works inline too. Skip drawing for a while with the `RenderPaused`
 resource rather than taking the renderer out. `capture_now` renders inline either way, so its

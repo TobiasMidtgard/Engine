@@ -74,12 +74,36 @@ fn pipelined_frames_return_a_frame_late_and_capture_matches_inline() {
     for name in [
         "render.extract_ms",
         "render.record_ms",
+        "render.wait_ms",
+        "render.finish_ms",
         "render.submit_ms",
+        "render.screenshot_ms",
+        "render.record_other_ms",
         "render.record_total_ms",
+        "render.record_cpu_ms",
+        "render.backend",
         "render.cpu_ms",
     ] {
         assert!(metrics.contains_key(name), "{name} missing");
     }
+    // The render thread's parts add up to its total.
+    let parts: f64 = [
+        "render.record_ms",
+        "render.acquire_ms",
+        "render.finish_ms",
+        "render.submit_ms",
+        "render.present_ms",
+        "render.screenshot_ms",
+        "render.record_other_ms",
+    ]
+    .iter()
+    .map(|n| metrics.get(*n).copied().unwrap_or(0.0))
+    .sum();
+    let total = metrics["render.record_total_ms"];
+    assert!(
+        (parts - total).abs() < 0.01,
+        "parts {parts} ms, total {total} ms"
+    );
     let described = with_renderer(&mut piped.world, |r, _| r.describe()).expect("renderer");
     assert!(described.is_object());
 
