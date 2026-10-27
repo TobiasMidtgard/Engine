@@ -214,6 +214,12 @@ fn play_mode_pilot_moves_at_normal_speed() {
             .unwrap()
             .hold_to_sprint
     );
+    // Its body reaches what it can use (playtest #1).
+    assert!(
+        app.world
+            .get::<engine_world::interact::Interactor>(pilot)
+            .is_some()
+    );
 }
 
 /// Playtest #28 ("taking damage forces the player to stand still ... fire damage ... holding

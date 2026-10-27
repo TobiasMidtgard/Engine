@@ -16,6 +16,7 @@ use engine_core::prelude::*;
 use engine_core::window::{CursorMode, Window};
 use engine_input::{ActionState, ButtonInput, MouseButton};
 use engine_render::{Camera, Projection};
+use engine_world::interact::Interactor;
 use engine_world::physics::{PhysicsQueries, QueryFilter};
 use engine_world::{Gravity, Ground, SimulationFocus};
 
@@ -86,6 +87,8 @@ pub fn start(world: &mut World, at: Option<DVec3>) -> Result<Entity, String> {
                 },
                 Perceiver,
                 LockOn::default(),
+                // Its body, not the camera, reaches what it can use (E).
+                Interactor,
             ),
         )
     };
