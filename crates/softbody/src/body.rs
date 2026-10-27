@@ -77,7 +77,7 @@ pub struct Tube {
 
 /// Runtime state of one soft body. Added by the plugin; read it for positions
 /// ([`SoftBodySim::world_position`]) and stats.
-#[derive(Component)]
+#[derive(Component, Clone)]
 pub struct SoftBodySim {
     pub kind: SoftKind,
     pub sim: Sim,

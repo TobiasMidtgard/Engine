@@ -1063,15 +1063,52 @@ pub fn fire_turrets(
     }
 }
 
+/// A demo body as it was once built and settled, put back when the demo restores it instead
+/// of building and settling it again: a curtain's 2 s prewarm is 120 steps in one, a step of
+/// 100+ ms (the hitch every 24 s on the burning curtain).
+#[derive(Component)]
+pub struct DemoSettled(Box<SoftBodySim>);
+
+/// Keep `body` as it is now, once it is built and settled, for [`restore`].
+fn remember(commands: &mut Commands, e: Entity, body: &SoftBodySim, kept: bool) {
+    if !kept && body.steps > 0 && body.pending_prewarm == 0 {
+        commands
+            .entity(e)
+            .insert(DemoSettled(Box::new(body.clone())));
+    }
+}
+
+/// Put a demo body back as it was remembered, or (not yet remembered) rebuild it.
+fn restore(body: Option<&mut SoftBodySim>, settled: Option<&DemoSettled>, rebuild: impl FnOnce()) {
+    match (body, settled) {
+        (Some(body), Some(settled)) => {
+            // Drawn anew from the restored triangles.
+            let version = body.topology_version.max(settled.0.topology_version) + 1;
+            *body = (*settled.0).clone();
+            body.topology_version = version;
+        }
+        _ => rebuild(),
+    }
+}
+
 pub fn burn_and_restore(
+    mut commands: Commands,
     time: Res<Time>,
     mut burners: Query<(&DemoBurner, &mut DemoClock)>,
-    mut cloths: Query<&mut Cloth>,
+    mut cloths: Query<(&mut Cloth, Option<&mut SoftBodySim>, Option<&DemoSettled>)>,
     mut ignite: MessageWriter<IgniteRequest>,
 ) {
     for (b, mut clock) in &mut burners {
         let before = clock.0;
         clock.0 += time.delta_for(None);
+        let Ok((mut cloth, body, settled)) = cloths.get_mut(b.cloth) else {
+            continue;
+        };
+        if let Some(body) = &body
+            && before < b.delay
+        {
+            remember(&mut commands, b.cloth, body, settled.is_some());
+        }
         if before < b.delay && clock.0 >= b.delay {
             ignite.write(IgniteRequest {
                 position: b.at,
@@ -1082,9 +1119,9 @@ pub fn burn_and_restore(
         }
         if clock.0 >= b.period {
             clock.0 = 0.0;
-            if let Ok(mut c) = cloths.get_mut(b.cloth) {
-                c.set_changed();
-            }
+            restore(body.map(|b| b.into_inner()), settled, || {
+                cloth.set_changed()
+            });
         }
     }
 }
@@ -1113,24 +1150,49 @@ pub fn cut_and_restore(
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub fn respawn_volumes(
+    mut commands: Commands,
     time: Res<Time>,
-    mut volumes: Query<(&mut SoftVolume, &DemoRespawn, &mut DemoClock)>,
-    mut cloths: Query<(&mut Cloth, &DemoRespawn, &mut DemoClock), Without<SoftVolume>>,
+    mut volumes: Query<(
+        Entity,
+        &mut SoftVolume,
+        &DemoRespawn,
+        &mut DemoClock,
+        Option<&mut SoftBodySim>,
+        Option<&DemoSettled>,
+    )>,
+    mut cloths: Query<
+        (
+            Entity,
+            &mut Cloth,
+            &DemoRespawn,
+            &mut DemoClock,
+            Option<&mut SoftBodySim>,
+            Option<&DemoSettled>,
+        ),
+        Without<SoftVolume>,
+    >,
 ) {
     let dt = time.delta_for(None);
-    for (mut spec, r, mut clock) in &mut volumes {
+    for (e, mut spec, r, mut clock, body, settled) in &mut volumes {
+        if let Some(body) = &body {
+            remember(&mut commands, e, body, settled.is_some());
+        }
         clock.0 += dt;
         if clock.0 >= r.period {
             clock.0 = 0.0;
-            spec.set_changed();
+            restore(body.map(|b| b.into_inner()), settled, || spec.set_changed());
         }
     }
-    for (mut spec, r, mut clock) in &mut cloths {
+    for (e, mut spec, r, mut clock, body, settled) in &mut cloths {
+        if let Some(body) = &body {
+            remember(&mut commands, e, body, settled.is_some());
+        }
         clock.0 += dt;
         if clock.0 >= r.period {
             clock.0 = 0.0;
-            spec.set_changed();
+            restore(body.map(|b| b.into_inner()), settled, || spec.set_changed());
         }
     }
 }

@@ -104,7 +104,7 @@ fn far_cloth_steps_every_fourth_fixed_step_and_is_drawn_moving_across_them() {
     let name = |n: &Name| n.as_str() == "Sun banner";
     let mut q = app.world.query::<(&Name, &SoftBodySim)>();
     let mut seen = Vec::new();
-    for _ in 0..8 {
+    for _ in 0..9 {
         app.update();
         let (_, b) = q.iter(&app.world).find(|(n, _)| name(n)).unwrap();
         seen.push((b.steps, b.lod_wait, b.draw_alpha(0.0)));
@@ -113,9 +113,9 @@ fn far_cloth_steps_every_fourth_fixed_step_and_is_drawn_moving_across_them() {
     assert_eq!(b.lod_every, 4, "{seen:?}");
     let steps: Vec<u64> = seen.iter().map(|s| s.0).collect();
     assert_eq!(
-        steps[7] - steps[0],
+        steps[8] - steps[0],
         2,
-        "two steps in eight fixed steps: {seen:?}"
+        "two steps in eight fixed steps (at whatever phase it starts): {seen:?}"
     );
     // Drawing moves on a quarter of the way each fixed step.
     for pair in seen.windows(2) {

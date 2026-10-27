@@ -21,7 +21,7 @@ use engine_core::math::{DVec3, IVec3, Mat3, Quat, Vec2, Vec3};
 use engine_world::WorldShift;
 
 use crate::collide::{LocalCollider, PosedCollider};
-use engine_core::tasks::ComputeTaskPool;
+use engine_core::tasks::{TaskPool, TaskPoolBuilder};
 
 /// Air density at sea level, kg/m³.
 pub const AIR_DENSITY: f32 = 1.225;
@@ -1149,6 +1149,22 @@ impl Flow {
     }
 }
 
+/// Threads for the work one body splits off (hair's runs, a big self-collision search), a
+/// pool of their own. A thread waiting in a scope runs other tasks of that pool meanwhile:
+/// on the compute pool that could be a whole other body, holding this body's step up until
+/// that one's step ends too (steps of 200 ms on 32 threads); here it is only another piece.
+/// Pieces never wait on anything, so the pool can't deadlock.
+fn leaf_pool() -> &'static TaskPool {
+    static POOL: std::sync::OnceLock<TaskPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
+        TaskPoolBuilder::new()
+            .num_threads((threads / 2).max(2))
+            .thread_name("softbody".into())
+            .build()
+    })
+}
+
 /// Bodies with this many particles or more split into runs solved side by side.
 const SPLIT_MIN: usize = 1024;
 /// Fewest particles in a run: smaller ones cost more to hand out than they save.
@@ -1180,7 +1196,7 @@ struct RunLists {
 impl Split {
     fn update(&mut self, sim: &Sim) {
         let n = sim.pos.len();
-        let threads = ComputeTaskPool::try_get().map_or(1, |p| p.thread_num());
+        let threads = leaf_pool().thread_num();
         let runs = if n >= SPLIT_MIN && threads > 1 {
             (n / RUN_MIN).clamp(1, threads)
         } else {
@@ -1280,16 +1296,15 @@ fn for_runs<R: Send + 'static>(
             },
         ));
     }
-    match ComputeTaskPool::try_get() {
-        Some(pool) if parallel && runs.len() > 1 => {
-            let f = &f;
-            pool.scope(|scope| {
-                for (k, r) in runs {
-                    scope.spawn(async move { f(k, r) });
-                }
-            })
-        }
-        _ => runs.into_iter().map(|(k, r)| f(k, r)).collect(),
+    if parallel && runs.len() > 1 {
+        let f = &f;
+        leaf_pool().scope(|scope| {
+            for (k, r) in runs {
+                scope.spawn(async move { f(k, r) });
+            }
+        })
+    } else {
+        runs.into_iter().map(|(k, r)| f(k, r)).collect()
     }
 }
 
@@ -1955,30 +1970,27 @@ impl SelfContacts {
         // A big search splits over the compute pool, by triangles.
         self.hot.clear();
         self.hot.extend(self.patches.hot_triangles());
-        let threads = ComputeTaskPool::try_get().map_or(1, |p| p.thread_num());
+        let threads = leaf_pool().thread_num();
         let tasks = (self.hot.len() / SEARCH_CHUNK).clamp(1, threads);
-        match ComputeTaskPool::try_get() {
-            Some(pool) if tasks > 1 => {
-                let near = &near;
-                let found = pool.scope(|scope| {
-                    for chunk in self.hot.chunks(self.hot.len().div_ceil(tasks)) {
-                        scope.spawn(async move {
-                            let mut pairs = Vec::new();
-                            for &t in chunk {
-                                near(t, &mut pairs);
-                            }
-                            pairs
-                        });
-                    }
-                });
-                for f in found {
-                    self.pairs.extend(f);
+        if tasks > 1 {
+            let near = &near;
+            let found = leaf_pool().scope(|scope| {
+                for chunk in self.hot.chunks(self.hot.len().div_ceil(tasks)) {
+                    scope.spawn(async move {
+                        let mut pairs = Vec::new();
+                        for &t in chunk {
+                            near(t, &mut pairs);
+                        }
+                        pairs
+                    });
                 }
+            });
+            for f in found {
+                self.pairs.extend(f);
             }
-            _ => {
-                for &t in &self.hot {
-                    near(t, &mut self.pairs);
-                }
+        } else {
+            for &t in &self.hot {
+                near(t, &mut self.pairs);
             }
         }
     }
@@ -2255,11 +2267,6 @@ mod tests {
 
     #[test]
     fn strands_stepped_side_by_side_match_strands_stepped_alone() {
-        ComputeTaskPool::get_or_init(|| {
-            engine_core::tasks::TaskPoolBuilder::new()
-                .num_threads(4)
-                .build()
-        });
         // 64 hanging strands of 20 in one body (split into runs on the pool), and each in a
         // body of its own (too small to split), in gusty wind over a sphere.
         let strand = |k: usize, sim: &mut Sim, frame: u16| {

@@ -811,6 +811,9 @@ struct StepContext<'a, 'w, 's> {
     range: SimulationRange,
 }
 
+/// A step slower than this logs which body held it up, ms.
+const SLOW_STEP_MS: f64 = 50.0;
+
 /// Step every soft body (in parallel).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn step_bodies(
@@ -827,6 +830,7 @@ pub fn step_bodies(
     poses: Query<&'static SkeletonPose>,
     scales: Query<&'static LocalTimeScale>,
     mut bodies: Query<(Entity, &mut SoftBodySim)>,
+    names: Query<&Name>,
     mut diagnostics: ResMut<Diagnostics>,
     range: Option<Res<SimulationRange>>,
 ) {
@@ -855,23 +859,45 @@ pub fn step_bodies(
     // long as its slowest body, not two costly ones queued on one thread.
     let mut order: Vec<(Entity, Mut<SoftBodySim>)> = bodies.iter_mut().collect();
     order.sort_by(|(_, a), (_, b)| b.step_ms.total_cmp(&a.step_ms));
-    match ComputeTaskPool::try_get() {
+    let timed = |e: Entity, body: &mut SoftBodySim, ctx: &StepContext| {
+        let t = Instant::now();
+        step_one(e, body, ctx);
+        (e, t.elapsed().as_secs_f64() * 1000.0)
+    };
+    let took: Vec<(Entity, f64)> = match ComputeTaskPool::try_get() {
         Some(pool) if order.len() > 1 && pool.thread_num() > 1 => {
-            let ctx = &ctx;
+            let (ctx, timed) = (&ctx, &timed);
             pool.scope(|scope| {
                 for (e, body) in &mut order {
                     let e = *e;
-                    scope.spawn(async move { step_one(e, body, ctx) });
+                    scope.spawn(async move { timed(e, body, ctx) });
                 }
-            });
+            })
         }
-        _ => {
-            for (e, body) in &mut order {
-                step_one(*e, body, &ctx);
-            }
-        }
-    }
+        _ => order
+            .iter_mut()
+            .map(|(e, body)| timed(*e, body, &ctx))
+            .collect(),
+    };
     drop(order);
+    // How much work the step was against how long it took (their ratio is how many threads
+    // it kept busy), and the body that held it up longest.
+    let wall = start.elapsed().as_secs_f64() * 1000.0;
+    let busy: f64 = took.iter().map(|(_, ms)| ms).sum();
+    let slowest = took.iter().copied().max_by(|a, b| a.1.total_cmp(&b.1));
+    diagnostics.set("softbody.busy_ms", busy);
+    diagnostics.set("softbody.slowest_ms", slowest.map_or(0.0, |s| s.1));
+    if wall > SLOW_STEP_MS
+        && let Some((e, ms)) = slowest
+    {
+        let name = names
+            .get(e)
+            .map_or_else(|_| format!("{e}"), |n| n.as_str().to_string());
+        engine_core::log::warn!(
+            "softbody step took {wall:.0} ms ({busy:.0} ms of work over {} bodies); slowest: {name} {ms:.0} ms",
+            took.len()
+        );
+    }
     let mut particles = 0;
     let mut count = 0;
     let mut frozen = 0;
@@ -880,7 +906,7 @@ pub fn step_bodies(
         count += 1;
         frozen += b.frozen as usize;
     }
-    diagnostics.set("softbody.step_ms", start.elapsed().as_secs_f64() * 1000.0);
+    diagnostics.set("softbody.step_ms", wall);
     diagnostics.set("softbody.bodies", count as f64);
     diagnostics.set("softbody.particles", particles as f64);
     diagnostics.set("softbody.frozen", frozen as f64);
@@ -931,7 +957,17 @@ fn step_one(entity: Entity, body: &mut SoftBodySim, ctx: &StepContext) {
         return;
     }
     dt += b.lod_debt;
-    (b.lod_every, b.lod_wait, b.lod_debt) = (every, 0, 0.0);
+    // Entering a tier, each body starts its cycle at its own phase (from where it is, so the
+    // same every run), so the far bodies' catch-up steps spread over the frames instead of
+    // all landing on every 4th.
+    let phase = if every > 1 && every != b.lod_every {
+        let cell = (b.center / 2.0).floor().as_ivec3();
+        let h = (cell.x.wrapping_mul(73_856_093) ^ cell.z.wrapping_mul(19_349_663)) as u32;
+        h % every
+    } else {
+        0
+    };
+    (b.lod_every, b.lod_wait, b.lod_debt) = (every, phase, 0.0);
 
     // Keep coordinates small.
     if (b.center - b.sim.origin).length() > 50.0 {

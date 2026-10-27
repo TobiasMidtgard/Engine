@@ -5,6 +5,7 @@
 //! cargo run -p engine_softbody --example yard_bench --release -- [frames] [distance]
 //! SOLO=1 cargo run ...   # also times each body's solver with its colliders, and alone with
 //!                        # and without self-collision
+//! WORST=1 cargo run ...  # also prints the worst frame (hitches: restores, catch-up steps)
 //! ```
 
 use std::time::Instant;
@@ -39,7 +40,18 @@ fn main() {
     app.update_n(30);
     println!("warm-up: {:.0} ms", warm.elapsed().as_secs_f64() * 1000.0);
     let start = Instant::now();
-    app.update_n(frames);
+    let mut worst = (0.0, 0);
+    for f in 0..frames {
+        let t = Instant::now();
+        app.update();
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        if ms > worst.0 {
+            worst = (ms, f);
+        }
+    }
+    if std::env::var("WORST").is_ok() {
+        println!("worst frame {:.1} ms (frame {})", worst.0, worst.1);
+    }
     let ms = start.elapsed().as_secs_f64() * 1000.0 / frames as f64;
     let mut q = app
         .world
