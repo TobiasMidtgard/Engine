@@ -12,7 +12,8 @@
 //!
 //! Which meshes: those whose coarsest level still has [`MIN_TRIANGLES`], once an instance is
 //! smaller on screen than `RenderSettings::impostor_pixels`; the most-drawn are baked first, one
-//! per frame, up to `RenderSettings::impostor_atlas_layers`. A full atlas reuses the layer of the
+//! every [`BAKE_EVERY_IN_PLAY`] frames in play (every frame behind a loading screen), up to
+//! `RenderSettings::impostor_atlas_layers`. A full atlas reuses the layer of the
 //! mesh drawn as an impostor longest ago, once it has gone unseen for [`EVICT_AFTER_FRAMES`]
 //! (least recently used, as virtual texture caches and Unreal's HLOD streaming do).
 //!
@@ -34,6 +35,9 @@ use crate::mesh::Vertex;
 use crate::mesh_feature::MeshInstance;
 use crate::warmup::{Build, Taken, Warmup};
 
+/// In play (no `LoadingBudget`), at most one bake in this many frames, so a burst of new meshes
+/// doesn't pile up GPU work in the frames the player sees.
+pub(crate) const BAKE_EVERY_IN_PLAY: u64 = 4;
 /// Directions per side of the octahedral grid (`IMPOSTOR_GRID` in the shaders).
 pub(crate) const GRID: u32 = 12;
 /// Texels per side of one direction's tile.
@@ -81,6 +85,8 @@ pub(crate) struct Bake {
     pub layer: u32,
     pub mesh: u32,
     pub textures: u32,
+    /// Compress with ISPC's "fast" BC7 profile (in play) rather than "basic".
+    pub fast: bool,
 }
 
 struct Atlas {
@@ -189,6 +195,8 @@ pub(crate) struct Impostors {
     /// Pipelines compiling on a worker thread (`RenderSettings::pipeline_warmup`).
     warmup: Option<Warmup<PipelineKey>>,
     warned_full: bool,
+    /// The frame of the last bake.
+    last_bake: u64,
 }
 
 impl Impostors {
@@ -334,6 +342,7 @@ impl Impostors {
             shadow: None,
             warmup: None,
             warned_full: false,
+            last_bake: 0,
         }
     }
 
@@ -364,15 +373,20 @@ impl Impostors {
 
     /// Pick this frame's bake from the requests: the most wanted one, if the atlas has room or
     /// a layer that has gone unused. `max_layers` is `RenderSettings::impostor_atlas_layers`;
-    /// `compress` asks for a BC7 atlas (applies to the first bake).
+    /// `compress` asks for a BC7 atlas (applies to the first bake); `loading`: a `LoadingBudget`
+    /// is present, so bakes may go every frame.
     pub(crate) fn schedule(
         &mut self,
         gpu: &GpuShared,
-        (max_layers, compress): (u32, bool),
+        (max_layers, compress, loading): (u32, bool, bool),
         min_y_height: impl Fn(u32) -> (f32, f32),
     ) {
         self.pending = None;
         self.frame += 1;
+        if !loading && self.last_bake > 0 && self.frame < self.last_bake + BAKE_EVERY_IN_PLAY {
+            self.requests.clear();
+            return;
+        }
         let best = self
             .requests
             .drain()
@@ -486,10 +500,12 @@ impl Impostors {
             .write_buffer(&self.bake_instances, 0, bytemuck::cast_slice(&instances));
         self.layers.insert(key, layer);
         self.warned_full = false;
+        self.last_bake = self.frame;
         self.pending = Some(Bake {
             layer,
             mesh: request.mesh,
             textures: request.textures,
+            fast: !loading,
         });
     }
 
@@ -597,7 +613,11 @@ impl Impostors {
                 ..Default::default()
             });
             let normal = scratch.normal.create_view(&Default::default());
-            let variant = CompressionVariant::BC7(BC7Settings::alpha_basic());
+            let variant = CompressionVariant::BC7(if bake.fast {
+                BC7Settings::alpha_fast()
+            } else {
+                BC7Settings::alpha_basic()
+            });
             let blocks = &scratch.blocks;
             let compressed = gpu.images.with_compressor(gpu, |c| {
                 c.add_compression_task(variant, &albedo, SIZE, SIZE, blocks, None, None);

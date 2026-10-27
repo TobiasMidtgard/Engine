@@ -9,7 +9,9 @@ use std::time::Instant;
 
 use engine_assets::{AssetPlugin, Assets, Handle};
 use engine_core::prelude::*;
-use engine_render::image_cache::{COMPRESS_AFTER_FRAMES, ImageMemoryStats};
+use engine_render::image_cache::{
+    COMPRESS_AFTER_FRAMES, COMPRESS_TEXELS_IN_PLAY, COMPRESS_TEXELS_LOADING, ImageMemoryStats,
+};
 use engine_render::prelude::*;
 use engine_render::{Exposure, RenderDisabled, Renderer, TextureUse, capture_now, wgpu};
 use image::RgbaImage;
@@ -324,4 +326,79 @@ fn compact_mode_uses_bc1_for_opaque_color_and_two_channel_slots_get_bc5() {
         (first.width, first.height, first.mip_levels)
     );
     let _ = shot(&mut app, "compact");
+}
+
+/// A 1024² color map drawn until compressed, in play or behind a loading screen. Returns the
+/// shot and the texels compressed in each frame that compressed any.
+fn big_image(loading: bool, name: &str) -> Option<(RgbaImage, Vec<u64>)> {
+    let mut app = still_app(TextureCompression::Quality);
+    if loading {
+        app.world
+            .insert_resource(engine_world::LoadingBudget::default());
+    }
+    let color = add(&mut app, photo(1024));
+    app.world.spawn((
+        Transform::default(),
+        MeshRenderer::new(
+            Shape::Quad { size: [2.0, 2.0] },
+            StandardMaterial::color(1.0, 1.0, 1.0)
+                .with_roughness(0.9)
+                .with_base_color_texture(color),
+        ),
+    ));
+    if !run(&mut app, 2, name) || !bc_supported(&app) {
+        return None;
+    }
+    let mut slices = Vec::new();
+    let mut before = cache(&app).texels_compressed;
+    let mut frames = 0;
+    while cache(&app).compressed < 1 && frames < 2000 {
+        app.update();
+        frames += 1;
+        let now = cache(&app).texels_compressed;
+        if now > before {
+            slices.push(now - before);
+        }
+        before = now;
+    }
+    assert_eq!(
+        cache(&app).compressed,
+        1,
+        "{name}: not compressed in {frames} frames"
+    );
+    Some((shot(&mut app, name), slices))
+}
+
+#[test]
+fn big_images_compress_a_slice_a_frame_in_play_and_at_once_while_loading() {
+    let Some((play, slices)) = big_image(false, "big_play") else {
+        return;
+    };
+    let Some((loading, at_once)) = big_image(true, "big_loading") else {
+        return;
+    };
+    // Levels under a block across are padded to one.
+    let texels: u64 = (0..11)
+        .map(|l| (1024u64 >> l).next_multiple_of(4).pow(2))
+        .sum();
+    eprintln!("in play: {slices:?}; loading: {at_once:?}");
+    // Every level, once, spread over frames of at most the budget (plus a part of a block row).
+    assert_eq!(slices.iter().sum::<u64>(), texels);
+    assert!(slices.len() >= 3, "spread over {} frames", slices.len());
+    assert!(
+        slices
+            .iter()
+            .all(|&t| t <= COMPRESS_TEXELS_IN_PLAY + 4 * 1024),
+        "a frame went over the budget: {slices:?}"
+    );
+    assert!(texels <= COMPRESS_TEXELS_LOADING);
+    assert_eq!(
+        at_once,
+        vec![texels],
+        "behind a loading screen it goes at once"
+    );
+    // The fast profile in play looks like the careful one.
+    let (mean, max) = difference(&play, &loading);
+    eprintln!("fast vs basic BC7: mean {mean:.3}, max {max}");
+    assert!(mean < 1.0, "fast BC7 changed the picture: mean {mean}");
 }
