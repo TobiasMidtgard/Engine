@@ -572,6 +572,117 @@ fn format_report(
     out
 }
 
+/// Frames before [`parallelism_report_system`] reads the schedules (they are built on first run).
+const PARALLELISM_REPORT_FRAME: u32 = 30;
+
+/// Engine system (`Last`, profiling only): once, log why systems of each schedule can't run
+/// side by side: the exclusive (`&mut World`) systems, which run alone by construction, and the
+/// components and resources most system pairs both touch with one of them writing, which the
+/// executor must run one after the other (Bevy's access-conflict rule, as in its ambiguity
+/// checker). Ordering constraints serialize too and are not counted.
+pub(crate) fn parallelism_report_system(world: &mut World, mut frames: Local<u32>) {
+    *frames += 1;
+    if *frames != PARALLELISM_REPORT_FRAME {
+        return;
+    }
+    let report = parallelism_report(world);
+    crate::log::info!("schedule parallelism\n{report}");
+}
+
+/// Rows of the conflict list per schedule.
+const CONFLICT_ROWS: usize = 8;
+
+pub(crate) fn parallelism_report(world: &World) -> String {
+    use bevy_ecs::query::AccessConflicts;
+    use bevy_ecs::schedule::Schedules;
+    let mut out = String::new();
+    let Some(schedules) = world.get_resource::<Schedules>() else {
+        return out;
+    };
+    let mut labels: Vec<_> = schedules.iter().collect();
+    labels.sort_by_key(|(label, _)| format!("{label:?}"));
+    for (label, schedule) in labels {
+        let Ok(systems) = schedule.systems_with_access() else {
+            continue;
+        };
+        let systems: Vec<_> = systems
+            .map(|(_, s)| (short_name(&s.system().name().to_string()), s.access()))
+            .collect();
+        if systems.len() < 2 {
+            continue;
+        }
+        let exclusive: Vec<&str> = systems
+            .iter()
+            .filter(|(_, a)| a.is_exclusive())
+            .map(|(n, _)| n.as_str())
+            .collect();
+        // Per contested component or resource: the pairs it serializes and the systems in them.
+        let mut contested: HashMap<bevy_ecs::component::ComponentId, (usize, Vec<usize>)> =
+            HashMap::new();
+        let (mut pairs, mut conflicting) = (0usize, 0usize);
+        for i in 0..systems.len() {
+            for j in i + 1..systems.len() {
+                let (a, b) = (systems[i].1, systems[j].1);
+                if a.is_exclusive() || b.is_exclusive() {
+                    continue;
+                }
+                pairs += 1;
+                match a.get_conflicts(b) {
+                    AccessConflicts::All => conflicting += 1,
+                    AccessConflicts::Individual(ids) => {
+                        if ids.is_clear() {
+                            continue;
+                        }
+                        conflicting += 1;
+                        for id in ids.iter() {
+                            let entry = contested.entry(id).or_default();
+                            entry.0 += 1;
+                            for k in [i, j] {
+                                if !entry.1.contains(&k) {
+                                    entry.1.push(k);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let _ = writeln!(
+            out,
+            "{label:?}: {} systems, {} exclusive; {conflicting} of {pairs} other pairs can't run together",
+            systems.len(),
+            exclusive.len(),
+        );
+        if !exclusive.is_empty() {
+            let _ = writeln!(out, "  exclusive: {}", exclusive.join(", "));
+        }
+        let mut contested: Vec<_> = contested.into_iter().collect();
+        contested.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
+        for (id, (n, users)) in contested.into_iter().take(CONFLICT_ROWS) {
+            let name = world
+                .components()
+                .get_name(id)
+                .map_or_else(|| format!("{id:?}"), |n| n.shortname().to_string());
+            let mut names: Vec<&str> = users.iter().map(|&k| systems[k].0.as_str()).collect();
+            names.sort_unstable();
+            let shown = names.len().min(6);
+            let more = names.len() - shown;
+            let _ = writeln!(
+                out,
+                "  {name}: {n} pairs, {} systems ({}{})",
+                names.len(),
+                names[..shown].join(", "),
+                if more > 0 {
+                    format!(", +{more}")
+                } else {
+                    String::new()
+                },
+            );
+        }
+    }
+    out
+}
+
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
@@ -673,6 +784,42 @@ mod tests {
         );
         // Both still count as busy systems.
         assert!(totals["alone_test::left"].total >= pause);
+    }
+
+    #[test]
+    fn parallelism_report_names_exclusive_systems_and_contested_data() {
+        use bevy_ecs::schedule::{Schedule, ScheduleLabel, Schedules};
+        #[derive(Resource, Default)]
+        struct Shared(u32);
+        #[derive(ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
+        struct Probe;
+        fn writer_a(mut s: ResMut<Shared>) {
+            s.0 += 1;
+        }
+        fn writer_b(mut s: ResMut<Shared>) {
+            s.0 += 2;
+        }
+        fn reader(_s: Res<Shared>) {}
+        fn alone(_world: &mut World) {}
+        let mut world = World::new();
+        world.init_resource::<Shared>();
+        let mut schedule = Schedule::new(Probe);
+        schedule.add_systems((writer_a, writer_b, reader, alone));
+        schedule.run(&mut world);
+        let mut schedules = Schedules::default();
+        schedules.insert(schedule);
+        world.insert_resource(schedules);
+        let report = parallelism_report(&world);
+        assert!(
+            report.contains("Probe: 4 systems, 1 exclusive; 3 of 3 other pairs"),
+            "{report}"
+        );
+        assert!(report.contains("exclusive: engine_core::alone"), "{report}");
+        assert!(
+            report
+                .contains("Shared: 3 pairs, 3 systems (engine_core::reader, engine_core::writer_a"),
+            "{report}"
+        );
     }
 
     #[test]

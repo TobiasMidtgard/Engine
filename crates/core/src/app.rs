@@ -174,7 +174,11 @@ impl App {
         .add_systems(FixedPreUpdate, transform::snapshot_interpolation_system)
         .add_systems(
             Last,
-            crate::profile::profile_report_system.run_if(crate::profile::enabled),
+            (
+                crate::profile::profile_report_system,
+                crate::profile::parallelism_report_system,
+            )
+                .run_if(crate::profile::enabled),
         )
         .add_systems(FixedPostUpdate, signal_message_update_system)
         .add_systems(
@@ -687,6 +691,33 @@ mod tests {
             app.init_resource::<Counter>()
                 .add_systems(Update, |mut c: ResMut<Counter>| c.0 += 1);
         }
+    }
+
+    #[test]
+    fn independent_systems_run_side_by_side() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static RUNNING: AtomicUsize = AtomicUsize::new(0);
+        static MOST: AtomicUsize = AtomicUsize::new(0);
+        // Each system waits (up to a while, so a busy test machine can't fail it) to see
+        // another one running beside it.
+        fn busy() {
+            let now = RUNNING.fetch_add(1, Ordering::SeqCst) + 1;
+            MOST.fetch_max(now, Ordering::SeqCst);
+            let start = std::time::Instant::now();
+            while MOST.load(Ordering::SeqCst) < 2
+                && start.elapsed() < std::time::Duration::from_secs(2)
+            {
+                std::hint::spin_loop();
+            }
+            RUNNING.fetch_sub(1, Ordering::SeqCst);
+        }
+        let mut app = App::new();
+        app.add_systems(Update, (|| busy(), || busy(), || busy(), || busy()));
+        app.update();
+        assert!(
+            MOST.load(Ordering::SeqCst) >= 2,
+            "independent systems ran one at a time"
+        );
     }
 
     #[test]

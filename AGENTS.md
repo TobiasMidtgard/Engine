@@ -204,6 +204,21 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
   (Softbody measured an 806 ms stall). Turning that ticking off can deadlock when every worker
   waits. Flatten the work into one scope opened from a system, or give leaf work that never
   waits a small pool of its own. Slow one-off builds go on `AsyncComputeTaskPool`.
+- Let systems run side by side. Round 19 on the PC (32 threads) ran ~90% of the frame one
+  system at a time: the executor can only overlap systems whose data doesn't clash, and
+  most did. `ENGINE_PROFILE=1` prints "one system at a time / no system / several at once"
+  every report and, once at frame 30, a "schedule parallelism" list of each schedule's
+  exclusive systems and the data most systems fight over. So:
+  - No `&mut World` system that runs every frame. Gate it with `run_if`, or turn it into a
+    normal system with the queries it needs.
+  - Write `Transform` (and `GlobalTransform`, `MeshRenderer`) only for your own entities:
+    `Query<&mut Transform, With<MyMarker>>` or `Without<...>`. A bare `&mut Transform` query
+    clashes with every other module's (79 systems in `FixedUpdate`, 42 in `Update`). Read
+    with `&Transform` when you only read.
+  - Every `Commands` user adds an `apply_deferred` sync point that stops the schedule. Spawn
+    and despawn in batches, not every frame, and prefer mutating existing components.
+  - `.chain()` only systems that truly need an order; a chain of 10 is 10 serial steps.
+  - Split one system that writes several unrelated resources into one per resource.
 - GPU: instance everything; one storage buffer per kind of data; avoid per-object bind
   groups; compute shaders for anything with more than ~10k elements (particles, fluids).
 - Measure: `Diagnostics::set("module.metric", v)` shows up in `engine.describe`.
