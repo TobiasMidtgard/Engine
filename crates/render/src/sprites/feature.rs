@@ -1348,6 +1348,14 @@ impl RenderFeature for SpriteFeature {
         10
     }
 
+    /// With warm pipelines, built now, beside the other features' (the first frame with a
+    /// sprite took 1.5 s on the lead's PC); otherwise at the first sprite.
+    fn init(&mut self, gpu: &GpuShared) {
+        if gpu.warm_pipelines && self.pipelines.is_none() {
+            self.pipelines = Some(Self::build_pipelines(gpu));
+        }
+    }
+
     fn prepare(
         &mut self,
         world: &mut World,

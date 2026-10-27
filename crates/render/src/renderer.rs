@@ -530,7 +530,13 @@ impl Renderer {
         height: u32,
         settings: &RenderSettings,
     ) -> Result<Self, String> {
-        let (gpu, surface) = gpu::create(window.map(|w| w.0), width, height, settings.vsync)?;
+        let started = Instant::now();
+        let headless = window.is_none();
+        let (gpu, surface) = {
+            let _span = tracing::info_span!("render: create the GPU device").entered();
+            gpu::create(window.map(|w| w.0), width, height, settings.vsync)?
+        };
+        let device_ms = started.elapsed().as_secs_f64() * 1000.0;
         let device = gpu.device.clone();
         let formats = crate::features::Formats {
             hdr: wgpu::TextureFormat::Rgba16Float,
@@ -757,16 +763,25 @@ impl Renderer {
             uploads: Default::default(),
             side_work: Default::default(),
             side_commands: Default::default(),
+            warm_pipelines: settings.pipeline_warmup.on(headless),
         };
 
         let probe_gi = crate::probe_gi::ProbeGi::new(&shared.device);
-        let view = ViewState::new(
-            &shared,
-            settings,
-            width,
-            height,
-            surface.as_ref().map(|s| s.view_format),
-            probe_gi.atlas_view(),
+        let viewing = Instant::now();
+        let view = {
+            let _span = tracing::info_span!("render: the view's targets and pipelines").entered();
+            ViewState::new(
+                &shared,
+                settings,
+                width,
+                height,
+                surface.as_ref().map(|s| s.view_format),
+                probe_gi.atlas_view(),
+            )
+        };
+        tracing::info!(
+            "renderer: GPU device in {device_ms:.0} ms, the view's targets and pipelines in {:.0} ms",
+            viewing.elapsed().as_secs_f64() * 1000.0
         );
 
         Ok(Self {
@@ -844,11 +859,61 @@ impl Renderer {
         self.features.iter().map(|f| f.name().to_string()).collect()
     }
 
-    pub fn add_feature(&mut self, mut feature: Box<dyn RenderFeature>) {
-        feature.init(&self.shared);
-        feature.resize(&self.shared, self.targets.width, self.targets.height);
-        self.features.push(feature);
+    pub fn add_feature(&mut self, feature: Box<dyn RenderFeature>) {
+        self.add_features(vec![feature]);
+    }
+
+    /// Add features, starting them on threads of their own: their `init` compiles their
+    /// shaders and pipelines, which the driver does on the calling thread, so a game's dozens
+    /// of features compile side by side instead of one after another (the first start after a
+    /// shader change compiles everything). Returns each one's name and start time (ms).
+    pub fn add_features(&mut self, features: Vec<Box<dyn RenderFeature>>) -> Vec<(String, f64)> {
+        let (shared, width, height) = (&self.shared, self.targets.width, self.targets.height);
+        let start = |mut feature: Box<dyn RenderFeature>| {
+            let started = Instant::now();
+            feature.init(shared);
+            feature.resize(shared, width, height);
+            (feature, started.elapsed().as_secs_f64() * 1000.0)
+        };
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(features.len());
+        let started: Vec<(Box<dyn RenderFeature>, f64)> = if threads <= 1 {
+            features.into_iter().map(start).collect()
+        } else {
+            let queue = std::sync::Mutex::new(features.into_iter().enumerate());
+            let mut done: Vec<_> = std::thread::scope(|scope| {
+                let workers: Vec<_> = (0..threads)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            let mut out = Vec::new();
+                            loop {
+                                // Taken first: a guard in the `while let` would be held
+                                // through the start.
+                                let next = queue.lock().unwrap_or_else(|e| e.into_inner()).next();
+                                let Some((i, f)) = next else { break };
+                                out.push((i, start(f)));
+                            }
+                            out
+                        })
+                    })
+                    .collect();
+                workers
+                    .into_iter()
+                    .flat_map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+                    .collect()
+            });
+            // In the order given, as when they started one by one.
+            done.sort_by_key(|(i, _)| *i);
+            done.into_iter().map(|(_, f)| f).collect()
+        };
+        let mut times = Vec::with_capacity(started.len());
+        for (feature, ms) in started {
+            times.push((feature.name().to_string(), ms));
+            self.features.push(feature);
+        }
         self.features.sort_by_key(|f| f.order());
+        times
     }
 
     /// Size the targets for a scene of `scene` pixels in a window of `window` pixels (`extra`:
@@ -927,6 +992,12 @@ impl Renderer {
         let started = Instant::now();
         self.begin_frame(world, started);
         let composites = self.render_extra_views(world);
+        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+            // Main-thread time waiting in submits (the queue's lock is shared with the render
+            // thread's submit and present): the extra views'; the frame's side work submits
+            // with the frame. Every frame, 0 without extra views.
+            d.set("render.extract_wait_ms", self.main_thread_submit_ms);
+        }
         let mut frame = self.extract_frame(world, started, None);
         frame.composites = composites;
         frame
@@ -976,9 +1047,8 @@ impl Renderer {
             && !pending.0.is_empty()
         {
             let new: Vec<_> = std::mem::take(&mut pending.0);
-            for f in new {
-                self.add_feature(f);
-            }
+            let _span = tracing::info_span!("render: start the features").entered();
+            self.add_features(new);
         }
     }
 
@@ -1130,9 +1200,6 @@ impl Renderer {
                 started.elapsed().as_secs_f64() * 1000.0,
             );
             d.set("render.extra_views_gpu_ms", gpu_ms as f64);
-            // Main-thread time waiting in submits (the queue's lock is shared with the render
-            // thread's submit and present); the frame's side work submits with the frame.
-            d.set("render.extract_wait_ms", self.main_thread_submit_ms);
         }
         composites
     }
@@ -3123,6 +3190,8 @@ pub fn ensure_renderer(world: &mut World) -> bool {
         .map(|w| (w.width, w.height))
         .unwrap_or((1280, 720));
     let settings = crate::settings::effective(world);
+    let _span = tracing::info_span!("render: start the renderer").entered();
+    let started = Instant::now();
     match Renderer::new(
         if headless { None } else { handle },
         width,
@@ -3130,11 +3199,30 @@ pub fn ensure_renderer(world: &mut World) -> bool {
         &settings,
     ) {
         Ok(mut renderer) => {
-            if let Some(mut pending) = world.get_resource_mut::<PendingRenderFeatures>() {
-                for f in pending.0.drain(..) {
-                    renderer.add_feature(f);
+            // Each feature's start (its pipelines compile here), slowest first in the log.
+            let adding = Instant::now();
+            let mut features = match world.get_resource_mut::<PendingRenderFeatures>() {
+                Some(mut pending) => {
+                    let _span = tracing::info_span!("render: start the features").entered();
+                    renderer.add_features(std::mem::take(&mut pending.0))
                 }
-            }
+                None => Vec::new(),
+            };
+            let adding_ms = adding.elapsed().as_secs_f64() * 1000.0;
+            features.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let list: Vec<String> = features
+                .iter()
+                .take(12)
+                .map(|(name, ms)| format!("{name} {ms:.0}"))
+                .collect();
+            tracing::info!(
+                "renderer started in {:.0} ms; {} features in {adding_ms:.0} ms on threads \
+                 ({:.0} ms of work; slowest, ms: {})",
+                started.elapsed().as_secs_f64() * 1000.0,
+                features.len(),
+                features.iter().map(|f| f.1).sum::<f64>(),
+                list.join(", ")
+            );
             world.insert_resource(renderer);
             true
         }
