@@ -15,3 +15,6 @@ screenshots/
 /prefabs/
 # Files the editor imports from elsewhere on disk
 /assets/imported/
+
+# Written by ENGINE_PROFILE / --profile runs
+engine-profile.txt
