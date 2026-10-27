@@ -1,7 +1,8 @@
 //! `--loops plaza,fortress[:rounds]`: jump the camera round places for a few rounds and log,
 //! at each visit, the frame time, the profile's slowest systems and which components grew
 //! since the last visit there. For finding what builds up over a session (the lead's PC loops
-//! slowed at the plaza while the fortress didn't).
+//! slowed at the plaza while the fortress didn't). The last round warns about what still grew
+//! since the round before: a revisit should leave the world as it found it.
 
 use crate::{camera, places};
 use engine::prelude::*;
@@ -95,13 +96,39 @@ fn run(world: &mut World) {
             .collect::<Vec<_>>()
             .join(", ")
     });
+    let totals: Vec<String> = WATCHED
+        .iter()
+        .map(|w| format!("{w} {}", total(&counts, w)))
+        .collect();
     engine::core::log::info!(
-        "loop {}/{} at {}: {entities} entities; {profile}; since the last visit: {}",
+        "loop {}/{} at {}: {entities} entities ({}); {profile}; since the last visit: {}",
         l.round,
         l.rounds,
         place.key,
+        totals.join(", "),
         grown.as_deref().unwrap_or("(first visit)")
     );
+    // The last round: what still grew since the one before is a leak, or a backlog that
+    // hasn't caught up.
+    if l.round == l.rounds
+        && l.rounds > 1
+        && let Some(before) = l.seen.get(place.key)
+    {
+        let still: Vec<String> = WATCHED
+            .iter()
+            .filter(|w| total(&counts, w) > total(before, w))
+            .map(|w| format!("{w} {} -> {}", total(before, w), total(&counts, w)))
+            .collect();
+        if still.is_empty() {
+            engine::core::log::info!("loop: {} is flat on the last revisit", place.key);
+        } else {
+            engine::core::log::warn!(
+                "loop: {} still grows on the last revisit: {}",
+                place.key,
+                still.join(", ")
+            );
+        }
+    }
     l.seen.insert(place.key, counts);
     l.arrived = None;
     l.at += 1;
@@ -112,6 +139,24 @@ fn run(world: &mut World) {
             world.write_message(AppExit::Success);
         }
     }
+}
+
+/// Components whose totals every visit logs: the trees and what draws them.
+const WATCHED: [&str; 5] = [
+    "SceneryTree",
+    "SceneryTreeVisual",
+    "NearWoodsTree",
+    "PlantPart",
+    "MeshRenderer",
+];
+
+/// Entities with the component named `short` (the type's name without its path).
+fn total(counts: &HashMap<String, usize>, short: &str) -> usize {
+    counts
+        .iter()
+        .filter(|(name, _)| name.rsplit("::").next() == Some(short))
+        .map(|(_, n)| n)
+        .sum()
 }
 
 /// Entities per component type.
