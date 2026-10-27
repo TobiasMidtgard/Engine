@@ -83,15 +83,15 @@ fn run(world: &mut World) {
         .unwrap_or_else(|| "no profile (run with --profile)".into());
     let mut l = world.resource_mut::<Loops>();
     let grown = l.seen.get(place.key).map(|before| {
-        let mut diff: Vec<(i64, &String)> = counts
+        let mut diff: Vec<(i64, &String, usize)> = counts
             .iter()
-            .map(|(name, &n)| (n as i64 - *before.get(name).unwrap_or(&0) as i64, name))
-            .filter(|(d, _)| *d != 0)
+            .map(|(name, &n)| (n as i64 - *before.get(name).unwrap_or(&0) as i64, name, n))
+            .filter(|(d, ..)| *d != 0)
             .collect();
-        diff.sort_by_key(|(d, _)| -d.abs());
+        diff.sort_by_key(|(d, ..)| -d.abs());
         diff.iter()
-            .take(10)
-            .map(|(d, name)| format!("{name} {d:+}"))
+            .take(12)
+            .map(|(d, name, n)| format!("{name} {d:+} (now {n})"))
             .collect::<Vec<_>>()
             .join(", ")
     });
