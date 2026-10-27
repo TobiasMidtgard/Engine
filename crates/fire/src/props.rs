@@ -7,6 +7,8 @@
 //! bakes ambient occlusion and color variation into vertex colors.
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use engine_assets::{Assets, Handle};
 use engine_core::math::{Mat4, Quat, Rng, Vec2, Vec3, Vec4};
@@ -571,7 +573,7 @@ pub fn register_set(
             emissive: images.loaded_by_key(&key("emissive")),
         };
     }
-    let set = make();
+    let set = take_prefetched(name).unwrap_or_else(make);
     TexHandles {
         albedo: images.insert_keyed(&key("albedo"), set.albedo),
         normal: images.insert_keyed(&key("normal"), set.normal),
@@ -616,15 +618,86 @@ pub struct PropMaterials {
 /// Texture size of the props (texels per side; leaves and straw are atlases).
 const PROP_TEX: u32 = 1024;
 
+/// The props' texture sets by name.
+const PROP_SETS: [&str; 7] = [
+    "bark", "leaves", "planks", "metal", "straw", "granite", "firewood",
+];
+
+/// Make one of [`PROP_SETS`] (a second or so each, on as many threads as there are cores).
+fn make_set(name: &str) -> TexSet {
+    match name {
+        "bark" => textures::bark(PROP_TEX, 0xB4C),
+        "leaves" => textures::leaves(PROP_TEX, 0x1EAF),
+        "planks" => textures::planks(256, 2048, 0x9A4),
+        "metal" => textures::rusty_metal(PROP_TEX, 0x3E7),
+        "straw" => textures::straw(PROP_TEX, 0x57A),
+        "granite" => textures::granite(PROP_TEX, 0x6A2),
+        "firewood" => textures::firewood(PROP_TEX, 0xF12),
+        _ => unreachable!("not a prop texture set: {name}"),
+    }
+}
+
+/// Prop textures made ahead of time ([`prefetch_textures`]), waiting to be registered.
+#[derive(Default)]
+struct Prefetch {
+    sets: Mutex<Vec<(&'static str, TexSet)>>,
+    done: AtomicBool,
+}
+
+static PREFETCH: OnceLock<Prefetch> = OnceLock::new();
+
+/// Start making the fire demo's prop textures on a thread of their own, so the demo's props
+/// (`prop_materials`) find them made instead of making them on the frame. Call it once,
+/// early in loading; [`textures_ready`] says when they are done. Later calls do nothing.
+pub fn prefetch_textures() {
+    if PREFETCH.set(Prefetch::default()).is_err() {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("fire prop textures".into())
+        .spawn(|| {
+            let p = PREFETCH.get().expect("set before the thread starts");
+            for name in PROP_SETS {
+                let set = make_set(name);
+                p.sets
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((name, set));
+            }
+            p.done.store(true, Ordering::Release);
+        })
+        .expect("spawn the prop texture thread");
+}
+
+/// Whether the textures [`prefetch_textures`] started are all made (false if it wasn't called).
+pub fn textures_ready() -> bool {
+    PREFETCH
+        .get()
+        .is_some_and(|p| p.done.load(Ordering::Acquire))
+}
+
+/// A set [`prefetch_textures`] has made, taken out of its store.
+fn take_prefetched(name: &str) -> Option<TexSet> {
+    let mut sets = PREFETCH
+        .get()?
+        .sets
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let i = sets.iter().position(|(n, _)| *n == name)?;
+    Some(sets.swap_remove(i).1)
+}
+
 pub fn prop_materials(images: &mut Assets<Image>) -> PropMaterials {
     let started = std::time::Instant::now();
-    let bark = register_set(images, "bark", || textures::bark(PROP_TEX, 0xB4C));
-    let leaves = register_set(images, "leaves", || textures::leaves(PROP_TEX, 0x1EAF));
-    let planks = register_set(images, "planks", || textures::planks(256, 2048, 0x9A4));
-    let metal = register_set(images, "metal", || textures::rusty_metal(PROP_TEX, 0x3E7));
-    let straw = register_set(images, "straw", || textures::straw(PROP_TEX, 0x57A));
-    let granite = register_set(images, "granite", || textures::granite(PROP_TEX, 0x6A2));
-    let firewood = register_set(images, "firewood", || textures::firewood(PROP_TEX, 0xF12));
+    let set =
+        |images: &mut Assets<Image>, name: &str| register_set(images, name, || make_set(name));
+    let bark = set(images, "bark");
+    let leaves = set(images, "leaves");
+    let planks = set(images, "planks");
+    let metal = set(images, "metal");
+    let straw = set(images, "straw");
+    let granite = set(images, "granite");
+    let firewood = set(images, "firewood");
     // Sheet metal hardly glows when the shed burns: a dim, even emission mask.
     let dim = images.get_or_insert_keyed("fire/metal/emissive", || {
         Image::new(4, 4, [70u8, 70, 70, 255].repeat(16), true)
@@ -1769,6 +1842,21 @@ mod tests {
             }
         }
         out as f32 / total.max(1) as f32
+    }
+
+    #[test]
+    fn prop_textures_made_ahead_are_the_ones_used() {
+        prefetch_textures();
+        let started = std::time::Instant::now();
+        while !textures_ready() {
+            assert!(started.elapsed().as_secs() < 900, "never finished");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let mut images = Assets::<Image>::default();
+        prop_materials(&mut images);
+        assert!(images.loaded_by_key("fire/straw/albedo").is_some());
+        // Taken from the store, not made again.
+        assert!(take_prefetched("straw").is_none());
     }
 
     #[test]
