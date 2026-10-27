@@ -228,13 +228,21 @@ pub(crate) fn think_and_act(
             continue;
         }
         let pos = t.translation;
-        if brain.home.is_none() {
+        let fresh = brain.home.is_none();
+        if fresh {
             brain.home = Some(npc.home.unwrap_or(pos));
             brain.rng_state = crate::seed::seed_of(&seeds, me) ^ 0x5eed;
             brain.strafe = if brain.random() < 0.5 { -1.0 } else { 1.0 };
         }
         let far =
             w.focus.points.is_empty() || w.focus.distance(pos) > w.settings.far_distance as f64;
+        if fresh && far && !w.focus.points.is_empty() {
+            // Spread a far crowd's first thoughts over one far pace, so NPCs that wake together
+            // (a zone finishing loading) don't all think in one frame: 958 ms on the showcase.
+            // Near ones still think at once, as a fight in view needs.
+            let pace = w.settings.think_secs * 6.0;
+            brain.next_think = brain.next_think.max(now + (pace * brain.random()) as f64);
+        }
         if now >= brain.next_think {
             let jitter = 0.8 + 0.4 * brain.random();
             let pace = w.settings.think_secs * (1.3 - 0.5 * skills.logic) * jitter;
