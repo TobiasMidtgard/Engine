@@ -69,7 +69,6 @@ pub struct FireClock {
     /// Fast-forwarding (demo warm-up): every run of the step is one full step.
     pub(crate) fast_forward: bool,
     damage_acc: f32,
-    gust_acc: f32,
     rng: Rng,
     /// While fast-forwarding, only objects within this distance of this point are stepped (a
     /// demo's jump leaves fires elsewhere where they are).
@@ -103,7 +102,6 @@ impl Default for FireClock {
             stepped: 0.0,
             fast_forward: false,
             damage_acc: 0.0,
-            gust_acc: 0.0,
             rng: Rng::new(0xF1BE),
             scope: None,
             awake: Awake {
@@ -906,16 +904,15 @@ pub fn emit_outputs(
     }
     embers.list.extend(new_embers);
 
-    // Fire plumes pull air up (sparingly: the wind grid is coarse).
-    clock.gust_acc += dt;
-    if clock.gust_acc >= 0.25 {
-        clock.gust_acc = 0.0;
-        gusts.sort_by(|a, b| b.1.total_cmp(&a.1));
-        for (p, hrr) in gusts.into_iter().take(12) {
-            let strength = (hrr / 1.0e6).sqrt().clamp(0.0, 4.0) * 1.5;
-            if strength > 0.05 {
-                wind.add_gust(p + DVec3::Y * 4.0, 6.0, strength, Some(Vec3::Y));
-            }
+    // Fire plumes pull air up: a little every step, as much as a kick every quarter second
+    // used to give, so the wind near a fire (which smoke and grass feel) rises and holds
+    // steadily instead of jolting four times a second.
+    gusts.sort_by(|a, b| b.1.total_cmp(&a.1));
+    for (p, hrr) in gusts.into_iter().take(12) {
+        let share = (dt / 0.25).min(1.0);
+        let strength = (hrr / 1.0e6).sqrt().clamp(0.0, 4.0) * 1.5 * share;
+        if strength > 0.05 * share {
+            wind.add_gust(p + DVec3::Y * 4.0, 6.0, strength, Some(Vec3::Y));
         }
     }
 

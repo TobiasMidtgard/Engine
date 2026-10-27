@@ -7,6 +7,8 @@ struct SmokeParams {
     size: vec4<f32>,      // box size (m), blend previous -> current
     dims: vec4<f32>,      // voxels, firelight scale
     look: vec4<f32>,      // detail, max steps, tunnel count, unused
+    drift: vec4<f32>,     // billows' drift with the wind (xyz, m), rise (w, m)
+    wind: vec4<f32>,      // smoothed wind (xyz, m/s)
     tunnels: array<vec4<f32>, 32>,
 };
 

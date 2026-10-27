@@ -32,7 +32,7 @@ fn blade_color(root: vec3<f32>, seed: f32, flags: u32, green: f32) -> vec3<f32> 
 
 @vertex
 fn vs_grass(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> GrassOut {
-    let b = build_blade(instance, vertex, frame.wind.xyz, frame.time.x, frame.camera_world_frac.xyz);
+    let b = build_blade(instance, vertex, vec3<f32>(grass.misc.z, 0.0, grass.misc.w), frame.time.x, frame.camera_world_frac.xyz);
     var out: GrassOut;
     out.clip = frame.view_proj * vec4<f32>(b.rel, 1.0);
     out.rel = b.rel;

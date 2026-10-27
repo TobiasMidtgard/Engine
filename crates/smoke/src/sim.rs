@@ -165,6 +165,11 @@ pub struct SmokeDomain {
     pub stride: u32,
     /// Seconds of simulation clock since it last stepped.
     pub owed_secs: f32,
+    /// Seconds of simulation clock since the air it shows now was made (since its step
+    /// landed), and that step's length: the renderer fades from the step before to it over
+    /// that long ([`progress`](Self::progress)).
+    pub shown_secs: f32,
+    pub shown_dt: f32,
     /// Its step running on a background task, if one is.
     pub background: Background,
 }
@@ -178,6 +183,8 @@ pub struct Background {
     pending: Vec<Change>,
     /// The air before the last step landed: memory for the next job's copy.
     spare: Option<Domain>,
+    /// The running step's length, seconds.
+    dt: f32,
 }
 
 impl Background {
@@ -230,11 +237,20 @@ impl SmokeDomain {
             .max(least)
     }
 
-    /// How far it is toward its next step (0..1), for drawing smoothly between steps;
-    /// `clock` is the simulation clock's own progress.
+    /// How far to draw it from the step before to the air it shows now (0..1), for drawing
+    /// smoothly between steps; `clock` is the simulation clock's own progress. It counts from
+    /// when that air landed, not from when the step started: a step running in the background
+    /// lands a tick or more after it starts, and counting from its start showed the old air
+    /// again for that long each step (the smoke shook back and forth).
     pub fn progress(&self, clock: f32, settings: &SmokeSettings) -> f32 {
         let step = 1.0 / settings.sim_hz.clamp(1.0, 120.0);
-        ((self.owed_secs + clock * step) / (self.stride.max(1) as f32 * step)).clamp(0.0, 1.0)
+        ((self.shown_secs + clock * step) / self.shown_dt.max(step)).clamp(0.0, 1.0)
+    }
+
+    /// The air it shows was just made by a step `dt` long.
+    fn shown(&mut self, dt: f32) {
+        self.shown_secs = 0.0;
+        self.shown_dt = dt;
     }
 
     /// Do `c` to the air, and again to the step running in the background when it lands.
@@ -281,6 +297,8 @@ impl SmokeDomain {
             stepped.version = stepped.version.max(self.domain.version) + 1;
             stepped.resampled = self.domain.resampled;
             self.background.spare = Some(std::mem::replace(&mut self.domain, stepped));
+            let dt = self.background.dt;
+            self.shown(dt);
         }
         true
     }
@@ -301,6 +319,7 @@ impl SmokeDomain {
             None => self.domain.clone(),
         };
         work.sample_wind(wind);
+        self.background.dt = params.dt;
         let (tx, rx) = mpsc::channel();
         pool.spawn(async move {
             work.step_sampled(&params);
@@ -345,6 +364,8 @@ impl SmokeDomains {
             resting: false,
             stride: 1,
             owed_secs: 0.0,
+            shown_secs: 0.0,
+            shown_dt: 0.0,
             background: Background::default(),
         });
         self.list.len() - 1
@@ -850,6 +871,7 @@ pub fn step(
     let mut waiting = 0;
     for d in &mut domains.list {
         // A step done in the background since the last tick shows now.
+        d.shown_secs += dt;
         let ready = d.land(false);
         let c = d.domain.center();
         let size = d.domain.size();
@@ -888,7 +910,10 @@ pub fn step(
         match pool {
             // Fog settles every frame, so it steps on the spot.
             Some(pool) if !d.domain.fog => d.start(pool, params, &wind_fn),
-            _ => d.domain.step(&params, &wind_fn),
+            _ => {
+                d.domain.step(&params, &wind_fn);
+                d.shown(params.dt);
+            }
         }
         stepped += 1;
     }

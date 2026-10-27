@@ -11,7 +11,7 @@ struct ShadowView {
 
 @vertex
 fn vs_grass_shadow(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> @builtin(position) vec4<f32> {
-    let b = build_blade(instance, vertex, shadow_view.wind.xyz, shadow_view.time.x, shadow_view.camera_frac.xyz);
+    let b = build_blade(instance, vertex, vec3<f32>(grass.misc.z, 0.0, grass.misc.w), shadow_view.time.x, shadow_view.camera_frac.xyz);
     var clip = shadow_view.view_proj * vec4<f32>(b.rel, 1.0);
     clip.z = max(clip.z, 0.0);
     return clip;

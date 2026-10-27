@@ -7,6 +7,8 @@ struct SmokeParams {
     size: vec4<f32>,      // box size (m), blend previous -> current
     dims: vec4<f32>,      // voxels, firelight scale
     look: vec4<f32>,      // detail, max steps, tunnel count, fog (1: soft, wide ground fog)
+    drift: vec4<f32>,     // billows' drift with the wind (xyz, m), rise (w, m)
+    wind: vec4<f32>,      // smoothed wind (xyz, m/s)
     tunnels: array<vec4<f32>, 32>, // per tunnel: from + radius, to + strength (camera-relative)
 };
 
@@ -183,12 +185,12 @@ fn fs_smoke(in: VsOut) -> @location(0) vec4<f32> {
     // eroded there broke the thin edge of a plume into a spray of single-pixel flecks.
     let pixel_per_m = 2.0 / (frame.proj[1][1] * frame.viewport.y);
     // Fine billows drift with the wind and rise a little.
-    let drift = (frame.wind.xyz * 0.8 + vec3<f32>(0.0, 0.35 * (1.0 - fog), 0.0)) * (frame.time.x % 1000.0);
+    let drift = smoke.drift.xyz + vec3<f32>(0.0, smoke.drift.w * (1.0 - fog), 0.0);
     let half_sigma = mix(2.0, 0.06, fog) * fine * fine;
     // Wind shear draws thin, drifting smoke out into streaks: its billows are looked up
     // stretched along the wind (anchored to the box, so they don't swim as the camera moves).
     // Fog is too slow and low to streak.
-    let wind_flat = vec3<f32>(frame.wind.x, 0.0, frame.wind.z);
+    let wind_flat = vec3<f32>(smoke.wind.x, 0.0, smoke.wind.z);
     let wind_dir = wind_flat / max(length(wind_flat), 1e-3);
     let streak = (1.0 - 1.0 / STREAK) * smoothstep(0.5, 2.0, length(wind_flat)) * (1.0 - fog);
 

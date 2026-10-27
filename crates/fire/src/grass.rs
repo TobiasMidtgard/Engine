@@ -571,7 +571,14 @@ pub struct GrassFeature {
     draws: Vec<GrassDraw>,
     shadow_draws: [Vec<GrassDraw>; MAX_CASCADES],
     stats: FeatureStats,
+    /// The wind the blades sway in, smoothed over [`SWAY_SECS`]: the wind at the camera jumps
+    /// with every local gust (a fire's updraft, walking about), and blades fed it straight
+    /// jolted back and forth (Tobias's playtest, 2026-10-27).
+    wind: Option<Vec3>,
 }
+
+/// Seconds over which the blades follow a change in the wind.
+const SWAY_SECS: f32 = 2.0;
 
 fn lod_vertices(band: u32) -> std::ops::Range<u32> {
     let segs = match band {
@@ -1034,6 +1041,13 @@ impl RenderFeature for GrassFeature {
             d.clear();
         }
         self.stats = FeatureStats::default();
+        let flat = Vec3::new(view.wind.x, 0.0, view.wind.z);
+        let k = 1.0 - (-view.delta.clamp(0.0, 0.25) / SWAY_SECS).exp();
+        let wind = match self.wind {
+            Some(w) => w + (flat - w) * k,
+            None => flat,
+        };
+        self.wind = Some(wind);
         if self.layout.is_none() {
             return;
         }
@@ -1090,7 +1104,7 @@ impl RenderFeature for GrassFeature {
                 origin: [rel.x, rel.y, rel.z, 0.0],
                 map: [map_min.x, map_min.y, map_size.x, map_size.y],
                 lod: [FULL_DENSITY_M, LEAST_DENSITY, WIDEST, sun_up],
-                misc: [0.0, meadow.sway, 0.0, 0.0],
+                misc: [0.0, meadow.sway, wind.x, wind.z],
             };
             gpu.queue
                 .write_buffer(&m.params, 0, bytemuck::bytes_of(&params));

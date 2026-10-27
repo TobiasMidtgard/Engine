@@ -19,7 +19,7 @@ struct GrassParams {
     origin: vec4<f32>,  // camera-relative meadow center xyz, unused
     map: vec4<f32>,     // burn map min corner from the center (x, z), map size (x, z), m
     lod: vec4<f32>,     // full-density distance (m), least density fraction, widest boost, sun-up 0..1
-    misc: vec4<f32>,    // time of the burn map (unused), wind sway scale, unused, unused
+    misc: vec4<f32>,    // time of the burn map (unused), wind sway scale, smoothed wind x, z (m/s)
 };
 
 @group(1) @binding(0) var<uniform> grass: GrassParams;

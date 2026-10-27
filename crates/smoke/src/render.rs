@@ -4,7 +4,7 @@
 //! draws it lit, shadowed, fogged and blended with what's behind.
 
 use bytemuck::{Pod, Zeroable};
-use engine_core::math::{UVec3, Vec3};
+use engine_core::math::{DVec3, UVec3, Vec3};
 use engine_core::prelude::*;
 use engine_render::wgpu;
 use engine_render::{
@@ -44,6 +44,12 @@ pub struct SmokeParams {
     pub dims: [f32; 4],
     /// Detail, most steps, tunnel count, 1 for a fog bank (soft, wide fog).
     pub look: [f32; 4],
+    /// How far the fine billows have drifted with the wind (xyz, m) and risen (w, m): summed
+    /// frame by frame ([`Flow`]), so a change in the wind changes how fast they move, not
+    /// where they are.
+    pub drift: [f32; 4],
+    /// The wind the billows are streaked along, smoothed (xyz, m/s).
+    pub wind: [f32; 4],
     /// Per tunnel: from (xyz, camera-relative) + radius, to (xyz) + strength.
     pub tunnels: [[f32; 4]; MAX_TUNNELS * 2],
 }
@@ -93,6 +99,35 @@ pub struct SmokeFeature {
     pack_heat: Vec<u16>,
     frames_since_light: u32,
     stats: FeatureStats,
+    flow: Flow,
+}
+
+/// The wind the drawn billows move with: smoothed, and summed into how far they have drifted.
+/// The shader used to place them at `wind × time`, so every change in the wind at the camera
+/// (its gusts, walking into a fire's updraft) moved them by the change times the whole clock:
+/// meters in a frame, and the smoke shook (Tobias's playtest, 2026-10-27).
+#[derive(Debug, Clone, Copy, Default)]
+struct Flow {
+    wind: Vec3,
+    drift: DVec3,
+    rise: f64,
+    started: bool,
+}
+
+/// Seconds over which the drawn billows follow a change in the wind.
+const FLOW_SECS: f32 = 1.5;
+
+impl Flow {
+    fn advance(&mut self, wind: Vec3, dt: f32) {
+        let dt = dt.clamp(0.0, 0.25);
+        if !self.started {
+            self.wind = wind;
+            self.started = true;
+        }
+        self.wind += (wind - self.wind) * (1.0 - (-dt / FLOW_SECS).exp());
+        self.drift += (self.wind * 0.8).as_dvec3() * dt as f64;
+        self.rise += 0.35 * dt as f64;
+    }
 }
 
 /// Pack a domain into (σ, σ·albedo) half floats: extinction 1/m and scattering color.
@@ -558,6 +593,8 @@ impl RenderFeature for SmokeFeature {
         if !settings.enabled || self.light_pipeline.is_none() {
             return;
         }
+        self.flow.advance(view.wind, view.delta);
+        let flow = self.flow;
         let clock = world
             .get_resource::<SmokeClock>()
             .map(|c| c.progress(&settings))
@@ -661,6 +698,13 @@ impl RenderFeature for SmokeFeature {
                     count as f32,
                     if dom.fog { 1.0 } else { 0.0 },
                 ],
+                drift: [
+                    flow.drift.x as f32,
+                    flow.drift.y as f32,
+                    flow.drift.z as f32,
+                    flow.rise as f32,
+                ],
+                wind: [flow.wind.x, flow.wind.y, flow.wind.z, 0.0],
                 tunnels: packed,
             };
             gpu.queue.write_buffer(&v.params, 0, bytemuck::bytes_of(&p));
@@ -860,12 +904,37 @@ mod tests {
         assert!(lo.x >= min.x - SHADOW_REACH - 1e-3, "{lo}");
     }
 
+    /// The drawn billows follow a change in the wind smoothly: a gust changes how fast they
+    /// drift, never where they are (they used to sit at wind × time, so a gust after ten
+    /// minutes moved them by meters in one frame).
+    #[test]
+    fn billows_drift_smoothly_through_a_change_in_the_wind() {
+        let mut flow = Flow::default();
+        let dt = 1.0 / 60.0;
+        for _ in 0..36_000 {
+            flow.advance(Vec3::new(3.0, 0.0, 0.0), dt);
+        }
+        let mut last = flow.drift;
+        for frame in 0..600 {
+            // A sudden gust from another direction, as walking into a fire's updraft gives.
+            let wind = if frame < 300 {
+                Vec3::new(3.0, 4.0, 2.0)
+            } else {
+                Vec3::new(1.0, 0.0, -2.0)
+            };
+            flow.advance(wind, dt);
+            let moved = (flow.drift - last).length();
+            assert!(moved < 0.1, "frame {frame}: billows jumped {moved} m");
+            last = flow.drift;
+        }
+    }
+
     #[test]
     fn params_match_the_shader_layout() {
-        // 4 vec4 + 2 per tunnel.
+        // 6 vec4 + 2 per tunnel.
         assert_eq!(
             std::mem::size_of::<SmokeParams>(),
-            16 * (4 + MAX_TUNNELS * 2)
+            16 * (6 + MAX_TUNNELS * 2)
         );
     }
 

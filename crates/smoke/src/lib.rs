@@ -392,6 +392,49 @@ mod tests {
         assert!(c.x > at.x + 3.0, "{c:?}");
     }
 
+    /// With steps on a background task, the drawn smoke only ever moves forward: from one
+    /// landed step toward the next, never back to the step before (Tobias's playtest: "the
+    /// smoke sim shakes all over the place").
+    #[test]
+    fn drawn_smoke_never_jumps_back_to_the_step_before() {
+        engine_core::tasks::init_task_pools();
+        let mut app = app();
+        app.world.resource_mut::<SmokeSettings>().background = true;
+        app.world.resource_mut::<engine_world::WeatherState>().wind = Vec3::new(2.0, 0.0, 0.0);
+        let at = DVec3::new(10.0, 2.0, 10.0);
+        let mut last: Option<(u64, f32)> = None;
+        let mut landed = 0;
+        for frame in 0..240 {
+            if frame % 6 == 0 {
+                emit(&mut app, at, 0.2);
+            }
+            app.update();
+            // Give the worker a moment, as a frame would.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let settings = app.world.resource::<SmokeSettings>().clone();
+            let clock = app.world.resource::<sim::SmokeClock>().progress(&settings);
+            let domains = app.world.resource::<SmokeDomains>();
+            let Some(d) = domains.list.first() else {
+                continue;
+            };
+            let now = (d.domain.version, d.progress(clock, &settings));
+            if let Some((version, blend)) = last {
+                if version == now.0 {
+                    assert!(
+                        now.1 >= blend - 1e-5,
+                        "frame {frame}: drawn smoke went back from {blend} to {} without a \
+                         new step",
+                        now.1
+                    );
+                } else {
+                    landed += 1;
+                }
+            }
+            last = Some(now);
+        }
+        assert!(landed > 20, "only {landed} steps landed");
+    }
+
     #[test]
     fn explicit_volume_holds_smoke_and_bullets_cut_through_it() {
         let mut app = app();
