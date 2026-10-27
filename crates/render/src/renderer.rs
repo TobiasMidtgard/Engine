@@ -8,6 +8,7 @@
 //! → screenshot readback → blit to window
 //! ```
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -232,6 +233,182 @@ pub struct Renderer {
     last_view: Option<ViewData>,
     /// The last recorded frame's results, until `apply_return` hands them to the world.
     returned: Option<RenderReturn>,
+    /// Each `ExtraView` camera's own resources and history, by camera.
+    extra_views: HashMap<Entity, ExtraViewState>,
+}
+
+/// Declares [`ViewState`] with the [`Renderer`] fields that belong to one view, and
+/// [`Renderer::swap_view`] to swap them. A new field that differs per view goes here too.
+macro_rules! per_view {
+    ($($name:ident: $ty:ty,)*) => {
+        /// One view's resources and history (Unreal's `FSceneViewState`): its targets, frame
+        /// uniforms and bind groups, shadow maps, environment, fog, exposure and the previous
+        /// frame's view. The renderer's own fields hold the main view's; an extra view's are
+        /// swapped in while it renders.
+        struct ViewState {
+            $($name: $ty,)*
+        }
+
+        impl Renderer {
+            fn swap_view(&mut self, view: &mut ViewState) {
+                $(std::mem::swap(&mut self.$name, &mut view.$name);)*
+            }
+        }
+    };
+}
+
+per_view! {
+    targets: Targets,
+    frame_buffer: wgpu::Buffer,
+    overlay_frame_buffer: wgpu::Buffer,
+    lights: GrowBuffer,
+    shadow: ShadowResources,
+    sky_camera: crate::sky_occlusion::SkyCamera,
+    surface_weather: crate::surface_weather::SurfaceWeatherMap,
+    cloud_shadows: CloudShadowMap,
+    cloud_stand_in_ready: bool,
+    environment: EnvironmentMaps,
+    env_rendered: bool,
+    screen_stand_ins: ScreenMaps,
+    frame_group: wgpu::BindGroup,
+    compute_group: wgpu::BindGroup,
+    prepass_group: wgpu::BindGroup,
+    overlay_group: wgpu::BindGroup,
+    post: PostResources,
+    effects: ScreenEffects,
+    atmosphere: AtmosphereLuts,
+    exposure: ExposureState,
+    meter: crate::exposure::ExposureMeter,
+    volumetrics: crate::volumetrics::Volumetrics,
+    lens: crate::lens::LensEffects,
+    subsurface: Option<crate::subsurface::SubsurfacePass>,
+    perf: crate::perf::PerfLog,
+    cascade_cache: crate::shadows::CascadeCache,
+    previous: Option<PreviousView>,
+    prev_step: f64,
+    prev_aa: AntiAliasing,
+    prev_exposure: f32,
+    last_view: Option<ViewData>,
+}
+
+impl ViewState {
+    /// A view of `width` × `height` pixels (`surface`: the window's format, for the main view).
+    fn new(
+        shared: &GpuShared,
+        settings: &RenderSettings,
+        width: u32,
+        height: u32,
+        surface: Option<wgpu::TextureFormat>,
+    ) -> Self {
+        let device = &shared.device;
+        let targets = Targets::new(
+            device,
+            &shared.formats,
+            width,
+            height,
+            UVec2::new(width, height),
+        );
+        let frame_uniform_buffer = |label: &str| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: std::mem::size_of::<crate::frame::FrameUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let frame_buffer = frame_uniform_buffer("frame uniform");
+        let overlay_frame_buffer = frame_uniform_buffer("overlay frame uniform");
+        let lights = GrowBuffer::new(
+            device,
+            "point lights",
+            wgpu::BufferUsages::STORAGE,
+            64 * std::mem::size_of::<GpuPointLight>() as u64,
+        );
+        let shadow = create_shadow_resources(
+            shared,
+            settings.shadow_map_size.clamp(256, 8192),
+            settings.sky_occlusion_size.clamp(64, 4096),
+        );
+        let environment = EnvironmentMaps::new(shared);
+        let mut sky_camera = crate::sky_occlusion::SkyCamera::new(shared);
+        sky_camera.set_inputs(shared, &frame_buffer, &shadow.occlusion);
+        let volumetrics = crate::volumetrics::Volumetrics::new(shared, &targets);
+        let screen_stand_ins = ScreenMaps::stand_ins(shared, &volumetrics);
+        let atmosphere = AtmosphereLuts::new(shared, &frame_buffer);
+        let surface_weather = crate::surface_weather::SurfaceWeatherMap::new(shared);
+        let cloud_shadows = CloudShadowMap::new(device);
+        let groups = FrameGroups::new(
+            shared,
+            [&frame_buffer, &overlay_frame_buffer],
+            &lights,
+            &shadow,
+            &environment,
+            &sky_camera,
+            &atmosphere,
+            &surface_weather.view,
+            &ScreenMaps::of(&targets, &volumetrics),
+            &screen_stand_ins,
+            &cloud_shadows,
+        );
+        let post = create_post(shared, &targets, surface);
+        let effects = ScreenEffects::new(shared, &targets);
+        let mut meter = crate::exposure::ExposureMeter::new(shared);
+        meter.set_source(device, &targets.hdr.view);
+        let perf = crate::perf::PerfLog::new(device, &shared.queue);
+        Self {
+            targets,
+            frame_buffer,
+            overlay_frame_buffer,
+            lights,
+            shadow,
+            sky_camera,
+            surface_weather,
+            cloud_shadows,
+            cloud_stand_in_ready: false,
+            environment,
+            env_rendered: false,
+            screen_stand_ins,
+            frame_group: groups.scene,
+            compute_group: groups.compute,
+            prepass_group: groups.prepass,
+            overlay_group: groups.overlay,
+            post,
+            effects,
+            atmosphere,
+            exposure: ExposureState::default(),
+            meter,
+            volumetrics,
+            lens: Default::default(),
+            subsurface: None,
+            perf,
+            cascade_cache: Default::default(),
+            previous: None,
+            prev_step: 0.0,
+            prev_aa: settings.anti_aliasing,
+            prev_exposure: 0.0,
+            last_view: None,
+        }
+    }
+}
+
+/// An [`crate::ExtraView`]'s state between frames.
+struct ExtraViewState {
+    view: ViewState,
+    /// The image it renders into (canonical handle index) and the texture registered for it.
+    image: Option<(u32, wgpu::Texture)>,
+}
+
+/// An extra view's picture, copied into the main view's output at `origin` (`ViewTarget::Window`).
+struct Composite {
+    texture: wgpu::Texture,
+    origin: UVec2,
+    size: UVec2,
+}
+
+/// What an extra view's frame is: its camera's picture size and settings.
+struct ExtraJob {
+    size: UVec2,
+    settings: RenderSettings,
 }
 
 /// What [`Renderer::extract_frame`] takes from the world for [`Renderer::record_submit`]: the
@@ -253,6 +430,11 @@ struct FrameWork {
     cloud_writer: Option<(usize, crate::cloud_shadows::CloudShadowRequest)>,
     cloud_area: Option<CloudShadowArea>,
     screenshots: Vec<PathBuf>,
+    /// An extra view's frame: no window, screenshots or report of its own.
+    extra: bool,
+    /// Extra views' pictures to copy into this view's output, over the scene and under the
+    /// overlays.
+    composites: Vec<Composite>,
 }
 
 /// What a recorded frame hands back to the world, applied by [`Renderer::apply_return`] on the
@@ -558,95 +740,55 @@ impl Renderer {
             side_work: Default::default(),
         };
 
-        let targets = Targets::new(&device, &formats, width, height, UVec2::new(width, height));
-        let frame_uniform_buffer = |label: &str| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: std::mem::size_of::<crate::frame::FrameUniform>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
-        };
-        let frame_buffer = frame_uniform_buffer("frame uniform");
-        let overlay_frame_buffer = frame_uniform_buffer("overlay frame uniform");
-        let lights = GrowBuffer::new(
-            &device,
-            "point lights",
-            wgpu::BufferUsages::STORAGE,
-            64 * std::mem::size_of::<GpuPointLight>() as u64,
-        );
-        let shadow = create_shadow_resources(
+        let view = ViewState::new(
             &shared,
-            settings.shadow_map_size.clamp(256, 8192),
-            settings.sky_occlusion_size.clamp(64, 4096),
+            settings,
+            width,
+            height,
+            surface.as_ref().map(|s| s.view_format),
         );
-        let environment = EnvironmentMaps::new(&shared);
-        let mut sky_camera = crate::sky_occlusion::SkyCamera::new(&shared);
-        sky_camera.set_inputs(&shared, &frame_buffer, &shadow.occlusion);
-        let volumetrics = crate::volumetrics::Volumetrics::new(&shared, &targets);
-        let screen_stand_ins = ScreenMaps::stand_ins(&shared, &volumetrics);
-        let atmosphere = AtmosphereLuts::new(&shared, &frame_buffer);
-        let surface_weather = crate::surface_weather::SurfaceWeatherMap::new(&shared);
-        let cloud_shadows = CloudShadowMap::new(&device);
-        let groups = FrameGroups::new(
-            &shared,
-            [&frame_buffer, &overlay_frame_buffer],
-            &lights,
-            &shadow,
-            &environment,
-            &sky_camera,
-            &atmosphere,
-            &surface_weather.view,
-            &ScreenMaps::of(&targets, &volumetrics),
-            &screen_stand_ins,
-            &cloud_shadows,
-        );
-        let post = create_post(&shared, &targets, surface.as_ref().map(|s| s.view_format));
-        let effects = ScreenEffects::new(&shared, &targets);
-        let mut meter = crate::exposure::ExposureMeter::new(&shared);
-        meter.set_source(&device, &targets.hdr.view);
-        let perf = crate::perf::PerfLog::new(&shared.device, &shared.queue);
 
         Ok(Self {
             instance: gpu.instance,
             adapter: gpu.adapter,
             shared,
             surface,
-            targets,
+            targets: view.targets,
             features: Vec::new(),
-            frame_buffer,
-            overlay_frame_buffer,
-            lights,
-            shadow,
-            sky_camera,
-            surface_weather,
-            cloud_shadows,
-            cloud_stand_in_ready: false,
-            environment,
-            env_rendered: false,
-            screen_stand_ins,
-            atmosphere,
-            frame_group: groups.scene,
-            compute_group: groups.compute,
-            prepass_group: groups.prepass,
-            overlay_group: groups.overlay,
-            post,
-            effects,
-            exposure: ExposureState::default(),
-            meter,
-            volumetrics,
-            lens: Default::default(),
-            subsurface: None,
-            perf,
+            frame_buffer: view.frame_buffer,
+            overlay_frame_buffer: view.overlay_frame_buffer,
+            lights: view.lights,
+            shadow: view.shadow,
+            sky_camera: view.sky_camera,
+            surface_weather: view.surface_weather,
+            cloud_shadows: view.cloud_shadows,
+            cloud_stand_in_ready: view.cloud_stand_in_ready,
+            environment: view.environment,
+            env_rendered: view.env_rendered,
+            screen_stand_ins: view.screen_stand_ins,
+            atmosphere: view.atmosphere,
+            frame_group: view.frame_group,
+            compute_group: view.compute_group,
+            prepass_group: view.prepass_group,
+            overlay_group: view.overlay_group,
+            post: view.post,
+            effects: view.effects,
+            exposure: view.exposure,
+            meter: view.meter,
+            volumetrics: view.volumetrics,
+            lens: view.lens,
+            subsurface: view.subsurface,
+            perf: view.perf,
             thread_cpu: Default::default(),
-            cascade_cache: Default::default(),
-            previous: None,
-            prev_step: 0.0,
-            prev_aa: settings.anti_aliasing,
-            prev_exposure: 0.0,
+            cascade_cache: view.cascade_cache,
+            previous: view.previous,
+            prev_step: view.prev_step,
+            prev_aa: view.prev_aa,
+            prev_exposure: view.prev_exposure,
             frame_index: 0,
-            last_view: None,
+            last_view: view.last_view,
             returned: None,
+            extra_views: HashMap::new(),
         })
     }
 
@@ -686,10 +828,12 @@ impl Renderer {
         self.features.sort_by_key(|f| f.order());
     }
 
-    /// Size the targets for a scene of `scene` pixels in a window of `window` pixels.
-    fn resize(&mut self, scene: UVec2, window: UVec2) {
+    /// Size the targets for a scene of `scene` pixels in a window of `window` pixels (`extra`:
+    /// an extra view's, `window` its picture's size; the window and the features keep theirs).
+    fn resize(&mut self, scene: UVec2, window: UVec2, extra: bool) {
         let (width, height) = (scene.x.max(1), scene.y.max(1));
-        if let Some(s) = &mut self.surface
+        if !extra
+            && let Some(s) = &mut self.surface
             && window != self.targets.window
         {
             s.resize(&self.shared.device, window.x.max(1), window.y.max(1));
@@ -704,7 +848,10 @@ impl Renderer {
         self.post = create_post(
             &self.shared,
             &self.targets,
-            self.surface.as_ref().map(|s| s.view_format),
+            self.surface
+                .as_ref()
+                .filter(|_| !extra)
+                .map(|s| s.view_format),
         );
         self.effects.resize(&self.shared, &self.targets);
         self.lens.resize();
@@ -716,8 +863,10 @@ impl Renderer {
         self.previous = None;
         self.meter
             .set_source(&self.shared.device, &self.targets.hdr.view);
-        for f in &mut self.features {
-            f.resize(&self.shared, width, height);
+        if !extra {
+            for f in &mut self.features {
+                f.resize(&self.shared, width, height);
+            }
         }
     }
 
@@ -743,23 +892,25 @@ impl Renderer {
 
     /// Render a frame inline: extract, record and submit, then hand the results to the world.
     pub fn render(&mut self, world: &mut World) {
-        let frame = self.extract_frame(world);
+        let frame = self.extract(world);
         self.record_submit(frame);
         self.apply_return(world);
     }
 
-    /// The main-thread half of a frame: everything that reads the world, up to and including
-    /// the features' `prepare`.
-    fn extract_frame(&mut self, world: &mut World) -> FrameWork {
+    /// Everything of a frame that reads the world: the frame's start, the extra views
+    /// (recorded and submitted here, before the main view), then the main view's extraction.
+    fn extract(&mut self, world: &mut World) -> FrameWork {
         let started = Instant::now();
-        let mut cpu = crate::perf::CpuSteps::default();
-        cpu.step("frame setup");
+        self.begin_frame(world, started);
+        let composites = self.render_extra_views(world);
+        let mut frame = self.extract_frame(world, started, None);
+        frame.composites = composites;
+        frame
+    }
 
-        // Size & vsync: the scene fills the active camera's viewport, the output the window.
-        let window = world
-            .get_resource::<Window>()
-            .map(|w| UVec2::new(w.width.max(1), w.height.max(1)))
-            .unwrap_or(self.targets.window);
+    /// What every frame does once, before its views: pipeline warm-up, the image cache's and
+    /// the upload budget's frame, new features.
+    fn begin_frame(&mut self, world: &mut World, started: Instant) {
         let settings = crate::settings::effective(world);
         let headless = world
             .get_resource::<EngineConfig>()
@@ -767,20 +918,6 @@ impl Renderer {
         // Every material preset's pipelines compile in the background from the first frame.
         if settings.pipeline_warmup.on(headless) {
             self.shared.materials.warm(&self.shared);
-        }
-        let (scene_origin, viewport_size) = crate::frame::camera_viewport(world, window);
-        // At a render scale under 1 the scene renders smaller and the tonemap upscales it.
-        let scene_size = (viewport_size.as_vec2() * settings.render_scale.clamp(0.25, 2.0))
-            .round()
-            .as_uvec2()
-            .max(UVec2::ONE);
-        if scene_size != UVec2::new(self.targets.width, self.targets.height)
-            || window != self.targets.window
-        {
-            self.resize(scene_size, window);
-        }
-        if let Some(s) = &mut self.surface {
-            s.set_vsync(&self.shared.device, settings.vsync);
         }
         self.shared.images.begin_frame(
             self.frame_index,
@@ -813,6 +950,172 @@ impl Renderer {
             for f in new {
                 self.add_feature(f);
             }
+        }
+    }
+
+    /// Render every active [`crate::ExtraView`] camera, lowest `order` first: each with its own
+    /// [`ViewState`] swapped in, extracted, recorded and submitted here (so the features'
+    /// per-frame state is free again for the next view). Returns the pictures the main view
+    /// shows in the window; images get their view's picture. Drops the state of cameras that
+    /// are no extra views any more.
+    fn render_extra_views(&mut self, world: &mut World) -> Vec<Composite> {
+        let mut views: Vec<_> = world
+            .query::<(
+                Entity,
+                &crate::Camera,
+                &crate::ExtraView,
+                Option<&crate::Viewport>,
+            )>()
+            .iter(world)
+            .map(|(e, camera, extra, viewport)| {
+                (
+                    e,
+                    camera.order,
+                    camera.active,
+                    extra.clone(),
+                    viewport.copied(),
+                )
+            })
+            .collect();
+        let images = &self.shared.images;
+        self.extra_views.retain(|e, state| {
+            let keep = views.iter().any(|v| v.0 == *e);
+            if !keep && let Some((index, _)) = &state.image {
+                images.remove_target(*index);
+            }
+            keep
+        });
+        views.retain(|v| v.2);
+        if views.is_empty() {
+            return Vec::new();
+        }
+        views.sort_by_key(|v| v.1);
+        let started = Instant::now();
+        let window = world
+            .get_resource::<Window>()
+            .map(|w| UVec2::new(w.width.max(1), w.height.max(1)))
+            .unwrap_or(self.targets.window);
+        let mut composites = Vec::new();
+        let mut gpu_ms = 0.0;
+        for (camera, _, _, extra, viewport) in views {
+            let (origin, size, image) = match &extra.target {
+                crate::ViewTarget::Window => {
+                    let (origin, size) = viewport.unwrap_or_default().within(window);
+                    (Some(origin), size, None)
+                }
+                crate::ViewTarget::Image { image, size } => {
+                    let image: engine_assets::Handle<Image> = *image;
+                    let index = world
+                        .get_resource::<Assets<Image>>()
+                        .map_or(image.index(), |a| a.canonical(image).index());
+                    (None, size.max(UVec2::ONE), Some(index))
+                }
+            };
+            // The view's quality stands in for the game's while it renders, so everything that
+            // reads the settings (`settings::effective`, features) sees this view's.
+            let game_quality = extra
+                .quality
+                .map(|quality| swap_quality(world, Some(quality)));
+            let settings = crate::settings::effective(world);
+            let mut state = match self.extra_views.remove(&camera) {
+                Some(state) => state,
+                None => ExtraViewState {
+                    view: ViewState::new(&self.shared, &settings, size.x, size.y, None),
+                    image: None,
+                },
+            };
+            // A new view's image shows its (still black) picture from the start: the scene
+            // this view draws may show it too.
+            if let Some(index) = image
+                && state.image.is_none()
+            {
+                let texture = state.view.targets.ldr.texture.clone();
+                self.shared.images.set_target(index, &texture);
+                state.image = Some((index, texture));
+            }
+            self.swap_view(&mut state.view);
+            world.insert_resource(crate::frame::RenderingExtraView(camera));
+            let frame = self.extract_frame(world, started, Some(ExtraJob { size, settings }));
+            world.remove_resource::<crate::frame::RenderingExtraView>();
+            if let Some(quality) = game_quality {
+                swap_quality(world, quality);
+            }
+            self.record_submit(frame);
+            let texture = self.targets.ldr.texture.clone();
+            self.swap_view(&mut state.view);
+            gpu_ms += state.view.perf.gpu_ms.unwrap_or(0.0);
+
+            let registered = state.image.as_ref().map(|(i, t)| (*i, t));
+            if registered != image.map(|i| (i, &texture)) {
+                if let Some((old, _)) = state.image.take() {
+                    self.shared.images.remove_target(old);
+                }
+                if let Some(index) = image {
+                    self.shared.images.set_target(index, &texture);
+                    state.image = Some((index, texture.clone()));
+                }
+            }
+            if let Some(origin) = origin {
+                composites.push(Composite {
+                    texture,
+                    origin,
+                    size,
+                });
+            }
+            self.extra_views.insert(camera, state);
+        }
+        if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
+            d.set("render.extra_views", self.extra_views.len() as f64);
+            d.set(
+                "render.extra_views_ms",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+            d.set("render.extra_views_gpu_ms", gpu_ms as f64);
+        }
+        composites
+    }
+
+    /// The main-thread half of a view's frame: everything that reads the world, up to and
+    /// including the features' `prepare`. `extra`: an extra view's (its view state swapped in).
+    fn extract_frame(
+        &mut self,
+        world: &mut World,
+        started: Instant,
+        extra: Option<ExtraJob>,
+    ) -> FrameWork {
+        let mut cpu = crate::perf::CpuSteps::default();
+        cpu.step("frame setup");
+
+        // Size & vsync: the scene fills the active camera's viewport, the output the window
+        // (an extra view's picture).
+        let is_extra = extra.is_some();
+        let (window, settings) = match extra {
+            Some(job) => (job.size, job.settings),
+            None => (
+                world
+                    .get_resource::<Window>()
+                    .map(|w| UVec2::new(w.width.max(1), w.height.max(1)))
+                    .unwrap_or(self.targets.window),
+                crate::settings::effective(world),
+            ),
+        };
+        let (scene_origin, viewport_size) = if is_extra {
+            (UVec2::ZERO, window)
+        } else {
+            crate::frame::camera_viewport(world, window)
+        };
+        // At a render scale under 1 the scene renders smaller and the tonemap upscales it.
+        let scene_size = (viewport_size.as_vec2() * settings.render_scale.clamp(0.25, 2.0))
+            .round()
+            .as_uvec2()
+            .max(UVec2::ONE);
+        if scene_size != UVec2::new(self.targets.width, self.targets.height)
+            || window != self.targets.window
+        {
+            self.resize(scene_size, window, is_extra);
+        }
+        if !is_extra && let Some(s) = &mut self.surface {
+            s.set_vsync(&self.shared.device, settings.vsync);
         }
 
         // Metered exposure from earlier frames (non-blocking readback).
@@ -1012,15 +1315,23 @@ impl Renderer {
                 .write_buffer(&self.overlay_frame_buffer, offset, bytes);
         }
 
-        // Screenshots wanted from this frame.
-        let screenshots = world
-            .get_resource_mut::<Screenshots>()
-            .map(|mut s| std::mem::take(&mut s.pending))
-            .unwrap_or_default();
-        self.shared
-            .side_work
-            .uploaded(self.shared.uploads.uploaded());
+        // Screenshots wanted from this frame (of the main view).
+        let screenshots = if is_extra {
+            Vec::new()
+        } else {
+            world
+                .get_resource_mut::<Screenshots>()
+                .map(|mut s| std::mem::take(&mut s.pending))
+                .unwrap_or_default()
+        };
+        if !is_extra {
+            self.shared
+                .side_work
+                .uploaded(self.shared.uploads.uploaded());
+        }
         FrameWork {
+            extra: is_extra,
+            composites: Vec::new(),
             started,
             extract_ms: started.elapsed().as_secs_f32() * 1000.0,
             cpu: cpu.park(),
@@ -1060,6 +1371,8 @@ impl Renderer {
             cloud_writer,
             cloud_area,
             screenshots,
+            extra,
+            composites,
         } = frame;
         let recording = Instant::now();
         // CPU time this thread spends, against the wall time: what is left is waiting
@@ -1541,15 +1854,50 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // Overlays (UI), with unjittered matrices.
+        // Extra views shown in the window (split screen, picture-in-picture): their pictures
+        // over the scene, under the overlays.
+        if !composites.is_empty() {
+            self.perf.pass(&mut cpu, &mut encoder, "extra views");
+        }
+        for c in &composites {
+            let size = c
+                .size
+                .min(self.targets.window.saturating_sub(c.origin))
+                .min(UVec2::new(c.texture.width(), c.texture.height()));
+            if size.x == 0 || size.y == 0 {
+                continue;
+            }
+            encoder.copy_texture_to_texture(
+                c.texture.as_image_copy(),
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.targets.ldr.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: c.origin.x,
+                        y: c.origin.y,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: size.x,
+                    height: size.y,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        // Overlays (UI), with unjittered matrices: the main view's only.
         let ctx = FrameContext {
             frame_group: &self.overlay_group,
             ..ctx
         };
-        for f in &mut self.features {
-            self.perf
-                .pass(&mut cpu, &mut encoder, format!("overlay {}", f.name()));
-            f.overlay(&mut encoder, &ctx);
+        if !extra {
+            for f in &mut self.features {
+                self.perf
+                    .pass(&mut cpu, &mut encoder, format!("overlay {}", f.name()));
+                f.overlay(&mut encoder, &ctx);
+            }
         }
 
         // Screenshot readback.
@@ -1566,7 +1914,7 @@ impl Renderer {
         let mut surface_texture = None;
         let mut reconfigure = false;
         let mut acquire_ms = 0.0;
-        if let Some(surface) = &self.surface {
+        if !extra && let Some(surface) = &self.surface {
             cpu.step("acquire window image");
             let acquiring = Instant::now();
             let current = surface.surface.get_current_texture();
@@ -1612,7 +1960,11 @@ impl Renderer {
         cpu.step("submit");
         let submitting = Instant::now();
         self.shared.queue.submit([commands]);
-        let side_work = self.shared.side_work.take();
+        let side_work = if extra {
+            Default::default()
+        } else {
+            self.shared.side_work.take()
+        };
         let submit_ms = submitting.elapsed().as_secs_f64() * 1000.0;
         self.meter.after_submit();
         self.perf.after_submit();
@@ -1658,8 +2010,18 @@ impl Renderer {
             acquire_ms,
             cpu,
             side_work,
-            settings.perf_log_secs,
+            if extra { 0.0 } else { settings.perf_log_secs },
         );
+        if extra {
+            self.prev_step = (view.origin - view.prev_origin).length();
+            self.previous = Some(PreviousView {
+                view_proj: view.unjittered_view_proj,
+                origin: view.origin,
+                rotation: view.rotation,
+            });
+            self.last_view = Some(view);
+            return;
+        }
         {
             let d = &mut back.diagnostics;
             self.perf.publish(d);
@@ -2698,6 +3060,27 @@ pub fn ensure_renderer(world: &mut World) -> bool {
 #[derive(Resource)]
 pub struct RenderThread(engine_core::tasks::Pipelined<Renderer>);
 
+/// Put `quality` in the world as the game's `Scalability` (none: remove it) without marking it
+/// changed, and return what was there.
+fn swap_quality(
+    world: &mut World,
+    quality: Option<engine_world::Scalability>,
+) -> Option<engine_world::Scalability> {
+    let before = world.get_resource::<engine_world::Scalability>().copied();
+    match (
+        quality,
+        world.get_resource_mut::<engine_world::Scalability>(),
+    ) {
+        (Some(q), Some(mut res)) => *res.bypass_change_detection() = q,
+        (Some(q), None) => world.insert_resource(q),
+        (None, Some(_)) => {
+            world.remove_resource::<engine_world::Scalability>();
+        }
+        (None, None) => {}
+    }
+    before
+}
+
 /// The exclusive system that renders a frame.
 ///
 /// Pipelined (`RenderSettings::pipelining`), it waits for the previous frame's recording to
@@ -2739,7 +3122,7 @@ pub fn render_system(world: &mut World) {
             // The main thread held up by the render thread still recording the last frame.
             d.set("render.wait_ms", wait_ms);
         }
-        let frame = renderer.extract_frame(world);
+        let frame = renderer.extract(world);
         thread
             .0
             .dispatch(move |renderer| renderer.record_submit(frame));

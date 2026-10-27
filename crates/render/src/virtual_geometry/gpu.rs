@@ -580,7 +580,11 @@ pub struct ClusterRenderer {
     visible_capacity: u64,
     dispatch: wgpu::Buffer,
     dispatch_group: wgpu::BindGroup,
+    /// The HZB of the view being drawn (`hzb_camera`'s); other views' wait in `other_hzbs`
+    /// with the frame they were last used (each view culls against its own last frame).
     hzb: Hzb,
+    hzb_camera: Option<Entity>,
+    other_hzbs: HashMap<Option<Entity>, (Hzb, u64)>,
     /// Camera clusters to test again after the prepass.
     late_list: wgpu::Buffer,
     late_capacity: u32,
@@ -911,6 +915,8 @@ impl ClusterRenderer {
             dispatch,
             dispatch_group,
             hzb: Hzb::new(device, [1, 1]),
+            hzb_camera: None,
+            other_hzbs: HashMap::new(),
             late_list: buffer("cluster late list", 8 * 1024, U::STORAGE),
             late_capacity: 1024,
             late: false,
@@ -1338,6 +1344,19 @@ impl ClusterRenderer {
                 usage: U::STORAGE,
                 mapped_at_creation: false,
             });
+            self.cull_group = None;
+        }
+        if view.camera != self.hzb_camera {
+            let hzb = match self.other_hzbs.remove(&view.camera) {
+                Some((hzb, _)) => hzb,
+                None => Hzb::new(device, [1, 1]),
+            };
+            let previous = std::mem::replace(&mut self.hzb, hzb);
+            self.other_hzbs
+                .insert(self.hzb_camera, (previous, view.frame_index));
+            self.other_hzbs
+                .retain(|_, (_, used)| *used + 600 >= view.frame_index);
+            self.hzb_camera = view.camera;
             self.cull_group = None;
         }
         let depth_size = [view.width.max(1), view.height.max(1)];

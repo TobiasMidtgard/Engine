@@ -155,8 +155,8 @@ struct GpuTileMap {
     /// What the upload was built from: the map's change tick and the image's size.
     tick: u32,
     image_size: [u32; 2],
-    /// Last frame's placement: the map's corner in the world and its axes.
-    previous: Option<(DVec3, Mat3, u64)>,
+    /// Last frame's placement per view (camera): the map's corner in the world and its axes.
+    previous: HashMap<Option<Entity>, (DVec3, Mat3, u64)>,
     last_used: u64,
 }
 
@@ -281,8 +281,7 @@ pub struct SpriteFeature {
     /// This frame's groups by key: `(id, has normal map)`, or `None` while an image loads.
     group_memo: HashMap<TextureKey, Option<(u32, bool)>>,
     maps: HashMap<Entity, GpuTileMap>,
-    previous: HashMap<Entity, Previous>,
-    prev_origin: Option<DVec3>,
+    previous: HashMap<(Entity, Option<Entity>), Previous>,
     frame: u64,
     items: Vec<Item>,
     order: Vec<u32>,
@@ -940,8 +939,9 @@ impl SpriteFeature {
             if sprite.flip_y {
                 flags |= FLAG_FLIP_Y;
             }
+            // Per view: each camera saw it last frame in its own place (parallax).
             let prev = match self.previous.insert(
-                entity,
+                (entity, view.camera),
                 Previous {
                     corner: base_corner,
                     ax,
@@ -1061,7 +1061,7 @@ impl SpriteFeature {
                 tiles: 0,
                 tick: tick.wrapping_add(1),
                 image_size: [0, 0],
-                previous: None,
+                previous: HashMap::new(),
                 last_used: frame,
             });
             if gpu_map.tick != tick || gpu_map.image_size != image_size {
@@ -1094,11 +1094,14 @@ impl SpriteFeature {
             );
             let base_corner =
                 gt.transform_point(-anchor.as_dvec3()) + parallax_offset(parallax, view.origin);
-            let (prev_corner, prev_axes) = match gpu_map.previous {
+            let (prev_corner, prev_axes) = match gpu_map
+                .previous
+                .insert(view.camera, (base_corner, axes_m, frame))
+            {
                 Some((c, a, f)) if f + 1 == frame => (c, a),
                 _ => (base_corner, axes_m),
             };
-            gpu_map.previous = Some((base_corner, axes_m, frame));
+            gpu_map.previous.retain(|_, p| p.2 + 1 >= frame);
             let max_scale = gt.scale().abs().max_element();
             let (alpha, cutoff) = alpha_bits(map.alpha);
             let cutout = matches!(map.alpha, SpriteAlpha::Cutout(_));
@@ -1372,7 +1375,6 @@ impl RenderFeature for SpriteFeature {
             self.stats = FeatureStats::default();
             self.maps.clear();
             self.previous.clear();
-            self.prev_origin = None;
             return;
         }
         if self.pipelines.is_none() {
@@ -1382,7 +1384,8 @@ impl RenderFeature for SpriteFeature {
             .camera
             .filter(|_| view.orthographic)
             .and_then(|e| camera_pixel_grid(world_ref, e, view.height));
-        let prev_origin = self.prev_origin.unwrap_or(view.origin);
+        // This view's camera position last frame (each view has its own).
+        let prev_origin = view.prev_origin;
         let mut culled = self.gather_sprites(
             world_ref,
             &mut sprites,
@@ -1395,7 +1398,6 @@ impl RenderFeature for SpriteFeature {
             self.gather_tile_maps(world_ref, &mut tiles, gpu, view, grid.as_ref(), prev_origin);
         self.sprite_query = Some(sprites);
         self.tile_query = Some(tiles);
-        self.prev_origin = Some(view.origin);
 
         // Opaque (cut-out): by layer, then image, so runs batch (the depth buffer sorts the
         // rest). Transparent: by layer, then back to front.

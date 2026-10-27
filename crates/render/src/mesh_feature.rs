@@ -805,8 +805,6 @@ pub struct MeshFeature {
     lod_waiting: Vec<(u32, Handle<Mesh>)>,
     /// Each shadow map's casters and batch keys, kept between frames for their allocations.
     shadow_scratch: Vec<(Vec<u32>, Vec<BatchKey>, Vec<u32>)>,
-    /// Camera position last frame.
-    prev_origin: Option<DVec3>,
     /// Depth-only shadow pipeline (opaque casters).
     shadow_pipeline: Option<wgpu::RenderPipeline>,
     /// Alpha-tested shadow pipeline (masked casters).
@@ -2010,7 +2008,8 @@ impl RenderFeature for MeshFeature {
             self.collect_lods(&gpu.queue, meshes);
         }
 
-        let prev_origin = self.prev_origin.unwrap_or(view.origin);
+        // This view's camera position last frame (each view has its own).
+        let prev_origin = view.prev_origin;
         // The disk cache of cluster builds.
         let cache_settings = (
             settings.virtual_geometry_cache,
@@ -2399,7 +2398,6 @@ impl RenderFeature for MeshFeature {
         self.instanced_meshes = instanced;
         self.gather_scratch = chunks;
         self.scene = scene;
-        self.prev_origin = Some(view.origin);
         // Meshes now drawn only as clusters don't need their instanced copy.
         if !self.clustered.is_empty() {
             let clustered = &self.clustered;

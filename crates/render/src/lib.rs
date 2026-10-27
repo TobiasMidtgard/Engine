@@ -110,9 +110,9 @@ pub use cloud_shadows::{
     CLOUD_SHADOW_FORMAT, CloudShadowArea, CloudShadowRequest, CloudShadowTarget,
 };
 pub use components::{
-    AmbientLight, BoxFace, Camera, DirectionalLight, Exposure, FogShape, FogVolume, MaterialRef,
-    MaxDrawDistance, MeshRef, MeshRenderer, NoMeshLod, NoVirtualGeometry, PointLight, Projection,
-    ResolvedMesh, SkyLightVolume, Viewport,
+    AmbientLight, BoxFace, Camera, DirectionalLight, Exposure, ExtraView, FogShape, FogVolume,
+    MaterialRef, MaxDrawDistance, MeshRef, MeshRenderer, NoMeshLod, NoVirtualGeometry, PointLight,
+    Projection, ResolvedMesh, SkyLightVolume, ViewTarget, Viewport,
 };
 pub use depth_of_field::DepthOfField;
 pub use features::{
@@ -156,14 +156,14 @@ pub use wgpu;
 pub mod prelude {
     pub use crate::{
         AlphaMode, AmbientLight, AntiAliasing, Atmosphere, Billboard, BoxFace, Camera,
-        DepthOfField, DirectionalLight, Displacement, DisplacementSource, Exposure, FogSettings,
-        FogShape, FogVolume, GltfScene, GltfSceneSpawner, GrassBender, GrassField, GrassStyle,
-        Image, MaterialPreset, MaterialRef, MaxDrawDistance, Mesh, MeshRef, MeshRenderer,
-        MotionBlur, NoMeshLod, NoVirtualGeometry, Parallax, PixelPerfect, PixelSnap, PointLight,
-        Projection, RenderAppExt, RenderFeature, RenderPhase, RenderPlugin, RenderSettings,
-        Screenshots, Shape, SkyLightVolume, Sprite, SpriteAlpha, SpriteAnimation,
+        DepthOfField, DirectionalLight, Displacement, DisplacementSource, Exposure, ExtraView,
+        FogSettings, FogShape, FogVolume, GltfScene, GltfSceneSpawner, GrassBender, GrassField,
+        GrassStyle, Image, MaterialPreset, MaterialRef, MaxDrawDistance, Mesh, MeshRef,
+        MeshRenderer, MotionBlur, NoMeshLod, NoVirtualGeometry, Parallax, PixelPerfect, PixelSnap,
+        PointLight, Projection, RenderAppExt, RenderFeature, RenderPhase, RenderPlugin,
+        RenderSettings, Screenshots, Shape, SkyLightVolume, Sprite, SpriteAlpha, SpriteAnimation,
         SpriteAnimationMode, SpriteAtlas, SpriteFilter, StandardMaterial, StoneKind,
-        TextureCompression, TextureMapping, TileMap, TileSource, Tonemapper, Viewport,
+        TextureCompression, TextureMapping, TileMap, TileSource, Tonemapper, ViewTarget, Viewport,
         VirtualTextures, VolumetricQuality, WallStone, spawn_gltf_scene, spawn_gltf_scene_deferred,
     };
 }
@@ -214,6 +214,9 @@ impl Plugin for RenderPlugin {
             )
             .register_component::<NoVirtualGeometry>(
                 "Marker: keeps this entity's dense MeshRenderer off the virtual geometry cluster path (debris, fragments, meshes that change often).",
+            )
+            .register_component::<ExtraView>(
+                "Renders this camera too, besides the main one: target \"Window\" (at the camera's Viewport, over the main view: split screen, picture-in-picture) or {\"Image\": {image, size: [w, h]}} (into an image materials and UI show; make it with Image::render_target); quality: a Scalability for this view instead of the game's.",
             )
             .register_component::<NoMeshLod>(
                 "Marker: keeps this entity's instanced MeshRenderer at full detail at every distance (no automatic levels of detail), for meshes simplifying would spoil, such as many small separate stones in one mesh.",
