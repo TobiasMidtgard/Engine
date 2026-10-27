@@ -8,11 +8,13 @@
 //! normal curve this board gives, σ ≈ [`SPREAD`] bins, found by running it.
 //!
 //! What it took (each found by experiment): pins three ball widths apart, as two balls side by
-//! side arch over a narrower gap in a plane and jam it; a neck over three balls wide for the
-//! same reason; pins set a little off true, as balls dropped straight onto a perfect pin's
-//! crown balance there; a plain symmetric pour (a star wheel feeding one ball at a time pushed
-//! them all the way it turned); and bins out past the spread, as a wall close to the heap
-//! throws balls back in and flattens it.
+//! side arch over a narrower gap in a plane and jam it; a neck five balls wide for the same
+//! reason (a plane silo's runs between jams grow about tenfold per two ball widths of outlet,
+//! Janda et al. 2008, arXiv:0705.1744; at three wide one pour in a few jammed); pins set a
+//! little off true, as balls dropped straight onto a perfect pin's crown balance there; a plain
+//! symmetric pour (a star wheel feeding one ball at a time pushed them all the way it turned);
+//! and bins out past the spread, as a wall close to the heap throws balls back in and flattens
+//! it.
 
 use std::f32::consts::FRAC_PI_2;
 
@@ -51,8 +53,8 @@ pub const BIN_TOP: f32 = 0.7;
 const LOW_ROW: f32 = BIN_TOP + 0.05;
 /// Between two rows of pins (the pins sit in equilateral triangles), meters.
 const ROW_STEP: f32 = PITCH * 0.866_025_4;
-/// Half the funnel's neck (3.2 balls wide), and its walls' slope from the horizontal, radians.
-const NECK: f32 = 3.2 * BALL;
+/// Half the funnel's neck (5 balls wide), and its walls' slope from the horizontal, radians.
+const NECK: f32 = 5.0 * BALL;
 const FUNNEL_SLOPE: f32 = 0.96;
 /// The neck's height above the top row of pins, meters.
 const NECK_GAP: f32 = 0.09;
@@ -161,7 +163,7 @@ pub fn hopper() -> Vec<(f32, f32)> {
     let across = ((2.0 * (HALF_WIDTH - BALL)) / pitch).floor() as usize;
     let mut out = Vec::with_capacity(BALLS);
     // Up to half a millimeter off the lattice each, so the heap doesn't settle in lockstep.
-    let mut rng = super::Rng(0x6a17);
+    let mut rng = super::Rng(0x9a17);
     let mut row = 0;
     while out.len() < BALLS {
         let shift = if row % 2 == 0 { 0.0 } else { pitch * 0.5 };
