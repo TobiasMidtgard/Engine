@@ -186,6 +186,12 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
   `Local` or the feature struct and `clear()` them.
 - Cache `QueryState` in render features; use `par_iter_mut` for large ECS loops and
   `engine_core::tasks::par_chunks_mut` for grids.
+- Never hold a lock guard (`Mutex`, `RwLock`, a shared state's `write()`/`read()`) across a
+  task pool `scope`, `par_iter` or `par_chunks_mut`. While it waits, the thread runs other
+  modules' tasks, and one that takes the same lock (for example a `Water` or `Ground` sample)
+  deadlocks the frame. Round 9 on the PC froze this way: water's flow step held its state's
+  write lock across `par_bands`, and its thread picked up a fire task that read `Water`.
+  Copy or take what the parallel part needs, drop the guard, then go wide.
 - Never open a task pool `scope` inside a task already running on that pool. The waiting
   thread ticks the pool and runs unrelated tasks, so the outer task stretches by theirs
   (Softbody measured an 806 ms stall). Turning that ticking off can deadlock when every worker
