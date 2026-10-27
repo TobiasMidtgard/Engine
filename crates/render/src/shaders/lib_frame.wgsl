@@ -140,6 +140,15 @@ fn specular_occlusion(n_dot_v: f32, visibility: f32, roughness: f32) -> f32 {
     return saturate(pow(n_dot_v + visibility, exp2(-16.0 * roughness - 1.0)) - 1.0 + visibility);
 }
 
+// The view-space direction through screen `uv` at view depth 1 (z = -1), through the
+// unjittered projection: off-axis ones too (a portal's view, portal.rs).
+fn view_ray_at_uv(uv: vec2<f32>) -> vec3<f32> {
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    // The jitter moves the projection's center by `-jitter` (frame.rs).
+    let center = vec2<f32>(frame.proj[2][0], frame.proj[2][1]) + frame.jitter.xy;
+    return vec3<f32>((ndc + center) / vec2<f32>(frame.proj[0][0], frame.proj[1][1]), -1.0);
+}
+
 // ---------------------------------------------------------------- prepass output
 // What a feature's prepass fragment shader returns (`RenderFeature::draw_prepass`; targets from
 // `GpuShared::prepass_targets`). Fill it with `prepass_output`.
@@ -1242,7 +1251,7 @@ fn froxel_column_fog(cell: vec2<i32>, k: i32, f: f32) -> vec4<f32> {
 // fraction `f` of the slice from view depth `d0` to `d1`, taken as `froxel_column_fog` takes it.
 fn froxel_column_height_fog_t(uv: vec2<f32>, d0: f32, d1: f32, f: f32) -> f32 {
     // The column's ray, per meter of view depth.
-    let view = vec3<f32>((uv.x * 2.0 - 1.0) / frame.proj[0][0], (1.0 - uv.y * 2.0) / frame.proj[1][1], -1.0);
+    let view = view_ray_at_uv(uv);
     let ray = (frame.inv_view * vec4<f32>(view, 0.0)).xyz;
     let len = length(ray);
     let dir = ray / len;

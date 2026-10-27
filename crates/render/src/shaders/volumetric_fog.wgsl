@@ -68,11 +68,7 @@ fn slice_depth(s: f32) -> f32 {
 fn froxel_position(c: vec3<f32>) -> vec3<f32> {
     let uv = c.xy / vec2<f32>(froxels.grid.xy);
     let d = slice_depth(c.z);
-    let view = vec3<f32>(
-        (uv.x * 2.0 - 1.0) * d / frame.proj[0][0],
-        (1.0 - uv.y * 2.0) * d / frame.proj[1][1],
-        -d,
-    );
+    let view = view_ray_at_uv(uv) * d;
     return (frame.inv_view * vec4<f32>(view, 0.0)).xyz;
 }
 
@@ -308,11 +304,7 @@ fn cs_integrate(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= grid.x || id.y >= grid.y) { return; }
     // Meters along the view ray per meter of view depth, through the column's center.
     let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(grid.xy);
-    let stretch = length(vec3<f32>(
-        (uv.x * 2.0 - 1.0) / frame.proj[0][0],
-        (1.0 - uv.y * 2.0) / frame.proj[1][1],
-        1.0,
-    ));
+    let stretch = length(view_ray_at_uv(uv));
     var light = vec3<f32>(0.0);
     var transmittance = 1.0;
     var near = 0.0;

@@ -192,6 +192,16 @@ history around the camera (previous positions, temporal passes, streaming) keys 
 `view.camera`, or takes it from `ViewData` (`prev_origin`, `prev_view_proj`), never from its
 last `prepare`. Overlays draw in the main view only.
 
+**Portals** (built; engine-design/portals.md): a `Portal { exit, size }` shows what lies beyond
+its exit as if the two places were joined. The renderer gives each portal an extra view whose
+camera it places every frame from the main camera (`portal.rs`): carried through the portal,
+with an off-axis frustum through the portal's corners and its near plane in the exit's plane,
+so nothing behind the exit shows and depth stays reverse-Z infinite. The projection can be
+off-center: shaders that rebuild view rays use `view_ray_at_uv` (lib_frame.wgsl), not
+`proj[0][0]` and `proj[1][1]` alone. The portal feature draws the view's HDR scene color on
+the portal (in the main view's exposure, without fog) and the motion of what lies beyond it in
+the prepass. `Portal::carry` maps what goes through, for gameplay.
+
 **Subsurface scattering for skin** (built): a feature whose prepass writes
 `prepass_output_subsurface(normal, roughness, clip_now, clip_prev, strength)` (lib_frame.wgsl)
 marks skin, writes that pixel's specular light (pre-exposed) to alpha in its scene pass, and

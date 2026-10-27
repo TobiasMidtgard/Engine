@@ -970,21 +970,24 @@ impl Renderer {
     /// are no extra views any more.
     fn render_extra_views(&mut self, world: &mut World) -> Vec<Composite> {
         self.main_thread_submit_ms = 0.0;
+        crate::portal::place_portal_views(world);
         let mut views: Vec<_> = world
             .query::<(
                 Entity,
                 &crate::Camera,
                 &crate::ExtraView,
                 Option<&crate::Viewport>,
+                Option<&crate::portal::PortalCamera>,
             )>()
             .iter(world)
-            .map(|(e, camera, extra, viewport)| {
+            .map(|(e, camera, extra, viewport, portal)| {
                 (
                     e,
                     camera.order,
                     camera.active,
                     extra.clone(),
                     viewport.copied(),
+                    portal.copied(),
                 )
             })
             .collect();
@@ -1008,13 +1011,15 @@ impl Renderer {
             .unwrap_or(self.targets.window);
         let mut composites = Vec::new();
         let mut gpu_ms = 0.0;
-        for (camera, _, _, extra, viewport) in views {
-            let (origin, size, image) = match &extra.target {
-                crate::ViewTarget::Window => {
+        for (camera, _, _, extra, viewport, portal) in views {
+            let (origin, size, image) = match (&extra.target, portal) {
+                // A portal's view: the portal feature draws its picture.
+                (_, Some(portal)) => (None, portal.size.max(UVec2::ONE), None),
+                (crate::ViewTarget::Window, None) => {
                     let (origin, size) = viewport.unwrap_or_default().within(window);
                     (Some(origin), size, None)
                 }
-                crate::ViewTarget::Image { image, size } => {
+                (crate::ViewTarget::Image { image, size }, None) => {
                     let image: engine_assets::Handle<Image> = *image;
                     let index = world
                         .get_resource::<Assets<Image>>()
@@ -1051,7 +1056,24 @@ impl Renderer {
             if let Some(quality) = game_quality {
                 swap_quality(world, quality);
             }
+            let exposure = frame.view.exposure;
             self.record_submit(frame);
+            if let Some(portal) = portal {
+                world
+                    .get_resource_or_init::<crate::portal::PortalPictures>()
+                    .0
+                    .insert(
+                        portal.portal,
+                        crate::portal::PortalPicture {
+                            camera,
+                            color: self.targets.hdr.view.clone(),
+                            depth: self.targets.depth.view.clone(),
+                            tangents: portal.tangents,
+                            near: portal.near,
+                            exposure,
+                        },
+                    );
+            }
             let texture = self.targets.ldr.texture.clone();
             self.swap_view(&mut state.view);
             gpu_ms += state.view.perf.gpu_ms.unwrap_or(0.0);
