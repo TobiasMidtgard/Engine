@@ -38,9 +38,9 @@ use engine_world::{
 };
 use serde_json::{Value, json};
 
-/// Build first-use work (prop looks, voxel volumes' states) on the frame thread as it appears
-/// instead of on the bake threads ([`assets::bake_pool`]): for tools, examples and tests that
-/// look at the result in the next frame.
+/// Do the bake threads' work ([`assets::bake_pool`]: prop looks, voxel volumes' states, rock
+/// support solves) on the frame thread as it comes up instead: for tools, examples and tests
+/// that look at the result in the next frame.
 #[derive(Resource, Debug, Default, Clone, Copy)]
 pub struct LoadAtOnce;
 
@@ -213,6 +213,7 @@ impl Plugin for DestructionPlugin {
             .init_resource::<dress::PropMeshes>()
             .init_resource::<dress::PropBuilds>()
             .init_resource::<sync::VoxelBuilds>()
+            .init_resource::<collapse::VoxelSupportJobs>()
             .insert_resource(hits::DestructionSource(source))
             .register_component::<DestructibleWall>(
                 "Siege-style destructible wall or barricade: size [w,h] m, thickness m, cell_size m, \

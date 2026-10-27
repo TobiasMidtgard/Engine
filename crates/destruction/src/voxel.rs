@@ -177,6 +177,9 @@ pub struct VoxelState {
     pub chunk_entities: Vec<Option<Entity>>,
     pub chunk_dirty: Vec<bool>,
     pub support_dirty: bool,
+    /// Edits that added rock so far: a support solve of an older snapshot is stale once this
+    /// moved (the new rock may hold up what it found unsupported).
+    pub gains: u32,
     pub initial_volume: f32,
     /// How well each voxel holds sideways, 0..255 around 128 (coherent noise, so rock breaks
     /// along a rough, natural surface instead of a straight cut). Empty = uniform.
@@ -355,6 +358,7 @@ impl VoxelState {
             chunk_entities: vec![None; chunk_count],
             chunk_dirty: vec![true; chunk_count],
             support_dirty: false,
+            gains: 0,
             initial_volume: 0.0,
             grain: vec![128; n],
         };
@@ -818,6 +822,9 @@ impl VoxelState {
         }
         self.support_dirty = true;
         let after = self.solid_count_in(i0, j0, k0, i1, j1, k1);
+        if after > before {
+            self.gains = self.gains.wrapping_add(1);
+        }
         (before as f32 - after as f32) * s.powi(3)
     }
 
@@ -946,6 +953,59 @@ impl VoxelState {
         materials: &DestructionMaterials,
     ) -> Vec<Vec<(usize, u8, u8)>> {
         self.support_dirty = false;
+        let groups = self.unsupported_groups(materials);
+        self.remove_groups(groups)
+    }
+
+    /// What [`unsupported_groups`](Self::unsupported_groups) needs of this volume, to solve on
+    /// another thread while this one keeps being dug.
+    pub fn support_snapshot(&self) -> VoxelState {
+        VoxelState {
+            dims: self.dims,
+            size: self.size,
+            origin: self.origin,
+            density: self.density.clone(),
+            material: self.material.clone(),
+            grain: self.grain.clone(),
+            anchored: self.anchored,
+            gains: self.gains,
+            ..VoxelState::default()
+        }
+    }
+
+    /// Cut `groups` (from [`unsupported_groups`](Self::unsupported_groups), maybe of an older
+    /// snapshot) out of the volume: voxels dug out since are skipped, the rest take their
+    /// current density. Returns what was cut.
+    pub fn remove_groups(
+        &mut self,
+        groups: Vec<Vec<(usize, u8, u8)>>,
+    ) -> Vec<Vec<(usize, u8, u8)>> {
+        let mut cut = Vec::with_capacity(groups.len());
+        for group in groups {
+            let group: Vec<(usize, u8, u8)> = group
+                .into_iter()
+                .filter(|(idx, ..)| self.density.get(*idx).is_some_and(|d| *d >= SOLID))
+                .map(|(idx, _, _)| (idx, self.density[idx], self.material[idx]))
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            for &(idx, _, _) in &group {
+                self.density[idx] = 0;
+                let (i, j, k) = self.coords(idx);
+                self.mark_chunk_dirty_around(i, j, k);
+            }
+            cut.push(group);
+        }
+        cut
+    }
+
+    /// Every group of solid voxels without support (Valheim rules through the grid, from the
+    /// anchored faces), with their densities and materials.
+    pub fn unsupported_groups(
+        &self,
+        materials: &DestructionMaterials,
+    ) -> Vec<Vec<(usize, u8, u8)>> {
         let [nx, ny, nz] = self.dims;
         let n = nx * ny * nz;
         let s = self.size;
@@ -1061,13 +1121,6 @@ impl VoxelState {
             }
             groups.push(group);
         }
-        for group in &groups {
-            for &(idx, _, _) in group {
-                self.density[idx] = 0;
-                let (i, j, k) = self.coords(idx);
-                self.mark_chunk_dirty_around(i, j, k);
-            }
-        }
         groups
     }
 
@@ -1096,6 +1149,7 @@ impl VoxelState {
             chunk_entities: vec![None],
             chunk_dirty: vec![true],
             support_dirty: false,
+            gains: 0,
             initial_volume: 0.0,
             grain: Vec::new(),
         };

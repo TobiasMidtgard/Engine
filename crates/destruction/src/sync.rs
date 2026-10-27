@@ -118,14 +118,17 @@ pub fn init_voxels_system(
     table: Res<DestructionMaterials>,
     at_once: Option<Res<crate::LoadAtOnce>>,
     mut builds: ResMut<VoxelBuilds>,
+    mut support: ResMut<crate::collapse::VoxelSupportJobs>,
     q: Query<(Entity, Ref<VoxelVolume>, Option<&BuiltAt>), Changed<VoxelVolume>>,
     volumes: Query<(), With<VoxelVolume>>,
     mut states: Query<&mut VoxelState>,
     chunks: Query<&VoxelChunk>,
     mut meshes: Option<ResMut<Assets<Mesh>>>,
 ) {
-    let mut swap_in =
-        |commands: &mut Commands, e: Entity, fresh: VoxelState| match states.get_mut(e) {
+    let mut swap_in = |commands: &mut Commands, e: Entity, fresh: VoxelState| {
+        // A solve of the old rock is no use to the new.
+        support.cancel(e);
+        match states.get_mut(e) {
             Ok(mut s) => {
                 let mut fresh = fresh;
                 if fresh.chunks == s.chunks {
@@ -149,7 +152,8 @@ pub fn init_voxels_system(
             Err(_) => {
                 commands.entity(e).insert(fresh);
             }
-        };
+        }
+    };
     if !builds.pending.is_empty() {
         let _span = tracing::info_span!("voxel volumes hand-over").entered();
         builds.pending.retain(|e, task| {

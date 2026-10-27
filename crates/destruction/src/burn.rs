@@ -165,9 +165,12 @@ pub fn burn_strength(
 pub fn burn_weaken_system(
     table: Res<DestructionMaterials>,
     mut graph: ResMut<StructureGraph>,
-    mut pieces: Query<(&StructuralPiece, &Combustible, &mut Charring), Changed<Combustible>>,
+    mut pieces: Query<
+        (Entity, &StructuralPiece, &Combustible, &mut Charring),
+        Changed<Combustible>,
+    >,
 ) {
-    for (piece, fire, mut charring) in &mut pieces {
+    for (e, piece, fire, mut charring) in &mut pieces {
         let k = burn_strength(
             piece,
             &table.get(piece.material),
@@ -177,7 +180,7 @@ pub fn burn_weaken_system(
         let crossed_zero = (k <= 0.0) != (charring.strength <= 0.0);
         if (k - charring.strength).abs() >= 0.04 || crossed_zero {
             charring.strength = k;
-            graph.dirty = true;
+            graph.touched.push(e);
         }
     }
 }

@@ -1,12 +1,18 @@
 //! Things giving way: building pieces that lose support fall, voxel overhangs break off, and
 //! heavy chunks shatter when they land.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use bevy_tasks::{Task, block_on, poll_once};
+
 use engine_core::math::{DVec3, Rng, Vec3};
 use engine_core::prelude::*;
 use engine_world::physics::{ContactEvent, ContactPhase};
 use engine_world::{Combustible, Env, WorldImpulse};
 
 use crate::DestructionSettings;
+use crate::assets::bake_pool;
 use crate::burn::{Charring, burn_strength, fuel_left};
 use crate::debris::{
     Debris, DebrisBody, DebrisLook, DebrisMesh, DebrisSpawn, ShatterOnImpact, reduce_points,
@@ -40,7 +46,7 @@ pub fn structure_system(
     mut out: Outputs,
     mut impulses: MessageWriter<WorldImpulse>,
     changed: Query<
-        (),
+        Entity,
         (
             With<StructuralPiece>,
             Or<(
@@ -52,7 +58,7 @@ pub fn structure_system(
     >,
     mut removed: RemovedComponents<StructuralPiece>,
     rock: Query<(&GlobalTransform, &VoxelState)>,
-    rock_changed: Query<(), Changed<VoxelState>>,
+    rock_changed: Query<(&GlobalTransform, &VoxelState), Changed<VoxelState>>,
     mut pieces: Query<(
         Entity,
         &Transform,
@@ -67,17 +73,41 @@ pub fn structure_system(
     mut cache: Local<SupportCache>,
 ) {
     let rng = rng.get_or_insert_with(|| Rng::new(0xC011_A95E));
-    // Rock dug out from under a piece (or added under it) changes what stands on the ground.
-    if !rock_changed.is_empty() {
-        cache.ground.clear();
+    // Where something changed: the old and new boxes of moved, added, removed and weakened
+    // pieces, and the bounds of rock that was dug or filled.
+    let mut regions: Vec<(DVec3, DVec3)> = Vec::new();
+    let mut seeds: HashSet<Entity> = HashSet::new();
+    let old_box = |graph: &StructureGraph, e: Entity| {
+        graph
+            .index
+            .get(&e)
+            .map(|i| graph.boxes[*i].aabb(REGION_MARGIN))
+    };
+    for e in changed.iter().chain(std::mem::take(&mut graph.touched)) {
+        regions.extend(old_box(&graph, e));
+        seeds.insert(e);
     }
-    if !changed.is_empty() || removed.read().count() > 0 || !rock_changed.is_empty() {
-        graph.dirty = true;
+    for e in removed.read() {
+        regions.extend(old_box(&graph, e));
+    }
+    for (gt, state) in &rock_changed {
+        let (lo, hi) = rock_bounds(gt, state);
+        // Rock dug out from under a piece (or added under it) changes what stands there.
+        cache.ground.retain(|k, _| {
+            let p = DVec3::new(
+                f64::from_bits(k[0]),
+                f64::from_bits(k[1]),
+                f64::from_bits(k[2]),
+            );
+            // Anything over the rock's footprint stands on it (or on what is under it).
+            !(p.x >= lo.x && p.x <= hi.x && p.z >= lo.z && p.z <= hi.z && p.y >= lo.y)
+        });
+        regions.push((lo, hi));
     }
     let dt = time.delta_secs();
-    if graph.dirty {
+    if graph.dirty || !regions.is_empty() || !seeds.is_empty() {
         let _span = tracing::info_span!("support graph rebuild").entered();
-        graph.dirty = false;
+        let full = std::mem::take(&mut graph.dirty);
         let items: Vec<(Entity, Obb, bool)> = pieces
             .iter()
             .map(|(e, t, gt, parent, piece, ..)| {
@@ -99,11 +129,42 @@ pub fn structure_system(
                 )
             })
             .collect();
+        for (e, obb, _) in &items {
+            if seeds.contains(e) || !graph.index.contains_key(e) {
+                regions.push(obb.aabb(REGION_MARGIN));
+            }
+        }
+        let hit = |(lo, hi): (DVec3, DVec3)| {
+            regions
+                .iter()
+                .any(|(a, b)| lo.cmple(*b).all() && hi.cmpge(*a).all())
+        };
+        // The islands a change touches are re-solved whole; the rest keep their support.
+        let affected: HashSet<u32> = if full {
+            HashSet::new()
+        } else {
+            graph
+                .boxes
+                .iter()
+                .zip(&graph.island)
+                .filter(|(b, _)| hit(b.aabb(REGION_MARGIN)))
+                .map(|(_, i)| *i)
+                .collect()
+        };
+        let redo = |e: &Entity, obb: &Obb| {
+            full || match graph.index.get(e) {
+                Some(&i) => affected.contains(&graph.island[i]) || seeds.contains(e),
+                None => true,
+            } || hit(obb.aabb(REGION_MARGIN))
+        };
+        let (sub, kept): (Vec<_>, Vec<_>) = items.into_iter().partition(|(e, obb, _)| redo(e, obb));
+        let kept: HashSet<Entity> = kept.into_iter().map(|(e, ..)| e).collect();
+
         // Pieces stand on the terrain or on voxel rock.
         let rock: Vec<(&GlobalTransform, &VoxelState)> = rock.iter().collect();
         // The ground under a piece that hasn't moved is what it was at the last rebuild
         // (sampling the terrain under thousands of pieces was most of a rebuild).
-        if cache.ground.len() > 4 * items.len() + 256 {
+        if cache.ground.len() > 4 * (sub.len() + kept.len()) + 256 {
             cache.ground.clear();
         }
         let heights = std::cell::RefCell::new(std::mem::take(&mut cache.ground));
@@ -117,10 +178,10 @@ pub fn structure_system(
             heights.borrow_mut().insert(key, h);
             h
         };
-        let mut g = build_graph(&items, ground);
+        let g = build_graph(&sub, ground);
         cache.ground = heights.into_inner();
-        let mut props: Vec<MaterialProps> = Vec::with_capacity(items.len());
-        for (e, ..) in &items {
+        let mut props: Vec<MaterialProps> = Vec::with_capacity(sub.len());
+        for (e, ..) in &sub {
             let Ok((_, _, _, _, piece, _, fire, charring)) = pieces.get(*e) else {
                 props.push(table.get(DestructibleMaterial::Wood));
                 continue;
@@ -131,8 +192,9 @@ pub fn structure_system(
             props.push(p);
         }
         let support = solve_support(&g, &props);
-        cache.counting.clear();
-        for (i, (e, ..)) in items.iter().enumerate() {
+        let redone: HashSet<Entity> = sub.iter().map(|(e, ..)| *e).collect();
+        cache.counting.retain(|e| kept.contains(e));
+        for (i, (e, ..)) in sub.iter().enumerate() {
             if let Ok((.., mut state, _, _)) = pieces.get_mut(*e) {
                 state.support = support[i];
                 state.max_support = props[i].max_support;
@@ -147,8 +209,13 @@ pub fn structure_system(
                 }
             }
         }
-        g.dirty = false;
-        *graph = g;
+        *graph = merge_graphs(std::mem::take(&mut *graph), &kept, g);
+        debug_assert!(
+            graph
+                .pieces
+                .iter()
+                .all(|e| kept.contains(e) || redone.contains(e))
+        );
     }
 
     // Count down and drop: only the pieces the last rebuild found failing, not every piece.
@@ -226,7 +293,6 @@ pub fn structure_system(
     }
     cache.counting = counting;
     if !fallen.is_empty() {
-        graph.dirty = true;
         out.stats.collapses += 1;
         let total: f32 = fallen.iter().map(|f| f.2).sum();
         let center = fallen.iter().map(|f| f.1).sum::<DVec3>() / fallen.len() as f64;
@@ -257,11 +323,115 @@ pub fn structure_system(
     }
 }
 
-/// Cut out voxels that lost support (Valheim-style) and drop them as falling rock.
+/// How far around a change pieces count as touched by it, m (more than the graph's contact
+/// margin, so a piece that now touches a moved one is re-solved with it).
+const REGION_MARGIN: f32 = 0.1;
+
+/// World bounds of a voxel volume's grid.
+fn rock_bounds(gt: &GlobalTransform, state: &VoxelState) -> (DVec3, DVec3) {
+    let ext = Vec3::new(
+        state.dims[0] as f32,
+        state.dims[1] as f32,
+        state.dims[2] as f32,
+    ) * state.size;
+    let affine = gt.affine();
+    let mut lo = DVec3::splat(f64::INFINITY);
+    let mut hi = DVec3::splat(f64::NEG_INFINITY);
+    for c in 0..8 {
+        let corner = state.origin
+            + Vec3::new(
+                if c & 1 == 0 { 0.0 } else { ext.x },
+                if c & 2 == 0 { 0.0 } else { ext.y },
+                if c & 4 == 0 { 0.0 } else { ext.z },
+            );
+        let p = affine.transform_point3(corner.as_dvec3());
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    let m = DVec3::splat(REGION_MARGIN as f64);
+    (lo - m, hi + m)
+}
+
+/// `old` without the pieces outside `kept`, with `fresh` (the re-solved islands) added. Kept
+/// pieces keep their edges: an island is kept or re-solved whole, so no edge joins the two.
+fn merge_graphs(
+    old: StructureGraph,
+    kept: &HashSet<Entity>,
+    fresh: StructureGraph,
+) -> StructureGraph {
+    let mut map = vec![usize::MAX; old.pieces.len()];
+    let mut out = StructureGraph::default();
+    for (i, e) in old.pieces.iter().enumerate() {
+        if kept.contains(e) {
+            map[i] = out.pieces.len();
+            out.pieces.push(*e);
+        }
+    }
+    let mut next_island = 0;
+    for i in 0..old.pieces.len() {
+        if map[i] == usize::MAX {
+            continue;
+        }
+        out.edges.push(
+            old.edges[i]
+                .iter()
+                .filter(|(j, ..)| map[*j] != usize::MAX)
+                .map(|&(j, v, h)| (map[j], v, h))
+                .collect(),
+        );
+        out.grounded.push(old.grounded[i]);
+        out.boxes.push(old.boxes[i]);
+        out.island.push(old.island[i]);
+        next_island = next_island.max(old.island[i] + 1);
+    }
+    let base = out.pieces.len();
+    out.pieces.extend(&fresh.pieces);
+    out.edges.extend(
+        fresh
+            .edges
+            .into_iter()
+            .map(|es| es.into_iter().map(|(j, v, h)| (j + base, v, h)).collect()),
+    );
+    out.grounded.extend(fresh.grounded);
+    out.boxes.extend(fresh.boxes);
+    out.island
+        .extend(fresh.island.into_iter().map(|i| i + next_island));
+    out.index = out
+        .pieces
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (*e, i))
+        .collect();
+    out.touched = old.touched;
+    out
+}
+
+/// Support solves of dug voxel volumes running on the bake threads, by volume: a solve walks
+/// the whole grid (a few milliseconds for the fortress cliff, every dig), so it runs beside the
+/// game, the way Teardown and Red Faction resolve structural checks off the frame. Digs made
+/// meanwhile wait for the next solve; one that added rock throws the result away.
+#[derive(Resource, Default)]
+pub struct VoxelSupportJobs {
+    pending: HashMap<Entity, (u32, Task<Vec<Vec<(usize, u8, u8)>>>)>,
+}
+
+impl VoxelSupportJobs {
+    /// Forget `volume`'s solve (its state was replaced).
+    pub fn cancel(&mut self, volume: Entity) {
+        self.pending.remove(&volume);
+    }
+}
+
+/// Cut out voxels that lost support (Valheim-style) and drop them as falling rock. The solve
+/// runs on the bake threads ([`VoxelSupportJobs`]) unless [`crate::LoadAtOnce`] is present.
+#[allow(clippy::too_many_arguments)]
 pub fn voxel_support_system(
     table: Res<DestructionMaterials>,
     settings: Res<DestructionSettings>,
+    at_once: Option<Res<crate::LoadAtOnce>>,
+    mut jobs: ResMut<VoxelSupportJobs>,
     mut volumes: Query<(
+        Entity,
         &GlobalTransform,
         &Transform,
         Option<&ChildOf>,
@@ -270,13 +440,45 @@ pub fn voxel_support_system(
     )>,
     mut out: Outputs,
     mut rng: Local<Option<Rng>>,
+    mut shared: Local<Option<Arc<DestructionMaterials>>>,
 ) {
     let rng = rng.get_or_insert_with(|| Rng::new(0x0FA1_1E57));
-    for (gt, t, parent, volume, mut state) in &mut volumes {
-        if !state.support_dirty {
+    jobs.pending.retain(|e, _| volumes.contains(*e));
+    for (e, gt, t, parent, volume, mut state) in &mut volumes {
+        let groups = if at_once.is_some() {
+            if !state.support_dirty {
+                continue;
+            }
+            state.detach_unsupported(&table)
+        } else if let Some((gains, task)) = jobs.pending.get_mut(&e) {
+            let Some(groups) = block_on(poll_once(task)) else {
+                continue;
+            };
+            let stale = *gains != state.gains;
+            jobs.pending.remove(&e);
+            if stale {
+                state.support_dirty = true;
+                continue;
+            }
+            state.remove_groups(groups)
+        } else {
+            if !state.support_dirty {
+                continue;
+            }
+            state.support_dirty = false;
+            let snapshot = state.support_snapshot();
+            let table = shared
+                .get_or_insert_with(|| Arc::new(table.clone()))
+                .clone();
+            jobs.pending.insert(
+                e,
+                (
+                    snapshot.gains,
+                    bake_pool().spawn(async move { snapshot.unsupported_groups(&table) }),
+                ),
+            );
             continue;
-        }
-        let groups = state.detach_unsupported(&table);
+        };
         if groups.is_empty() {
             continue;
         }
@@ -337,36 +539,47 @@ pub fn voxel_support_system(
                     })
                     .sum::<Vec3>()
                     / part.len() as f32;
-                let mb = mesh_all(&piece, &look, com);
                 let volume_m3 = part.len() as f32 * voxel_m3;
-                if mb.is_empty() || part.len() < 2 {
+                if part.len() < 2 {
                     let at = affine.transform_point(com.as_dvec3());
                     let mut ctx = ctx(&settings, &table, rng, &mut out);
                     ctx.chips(at, Vec3::ZERO, 1.0, 2, volume.material, state.size);
                     continue;
                 }
-                let pts: Vec<Vec3> = mb.vertices.iter().map(|v| Vec3::from(v.position)).collect();
-                let (lo, hi) = pts.iter().fold(
-                    (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
-                    |(lo, hi), p| (lo.min(*p), hi.max(*p)),
-                );
-                out.pending.items.push(DebrisSpawn {
-                    position: affine.transform_point(com.as_dvec3()),
-                    rotation: affine.rotation(),
-                    velocity: rng.unit_vector() * 0.2,
-                    angular: rng.unit_vector() * 0.25,
-                    look: DebrisLook::Mesh(mb.build()),
-                    half_extents: ((hi - lo) * 0.5).max(Vec3::splat(state.size * 0.5)),
-                    hull: reduce_points(&pts, 24),
-                    mass_kg: volume_m3 * props.density,
-                    material: volume.material,
-                    // Boulders keep their rock shape: they land and roll, they don't burst into boxes.
-                    shatter_speed: 0.0,
-                    lifetime: None,
-                    reuse: None,
-                    scale: None,
-                    resting: false,
-                    from_rock: true,
+                let (velocity, angular) = (rng.unit_vector() * 0.2, rng.unit_vector() * 0.25);
+                let (look, size, material) = (look.clone(), state.size, volume.material);
+                let mass_kg = volume_m3 * props.density;
+                // Meshing the boulder is the slow part: on the bake threads.
+                ctx(&settings, &table, rng, &mut out).later(move || {
+                    let mb = mesh_all(&piece, &look, com);
+                    if mb.is_empty() {
+                        return Vec::new();
+                    }
+                    let pts: Vec<Vec3> =
+                        mb.vertices.iter().map(|v| Vec3::from(v.position)).collect();
+                    let (lo, hi) = pts.iter().fold(
+                        (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                        |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+                    );
+                    vec![DebrisSpawn {
+                        position: affine.transform_point(com.as_dvec3()),
+                        rotation: affine.rotation(),
+                        velocity,
+                        angular,
+                        look: DebrisLook::Mesh(mb.build()),
+                        half_extents: ((hi - lo) * 0.5).max(Vec3::splat(size * 0.5)),
+                        hull: reduce_points(&pts, 24),
+                        mass_kg,
+                        material,
+                        // Boulders keep their rock shape: they land and roll, they don't
+                        // burst into boxes.
+                        shatter_speed: 0.0,
+                        lifetime: None,
+                        reuse: None,
+                        scale: None,
+                        resting: false,
+                        from_rock: true,
+                    }]
                 });
             }
             let at = affine
@@ -414,6 +627,7 @@ fn ctx<'a>(
         settings,
         table,
         textured: out.textured(),
+        defer: out.defer(),
         rng,
         pending: &mut out.pending,
         stats: &mut out.stats,

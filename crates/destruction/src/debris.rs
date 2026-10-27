@@ -10,6 +10,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use bevy_tasks::{Task, block_on, poll_once};
+
 use engine_assets::{Assets, Handle};
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
@@ -345,6 +347,44 @@ pub fn settle(
 pub struct PendingDebris {
     pub items: Vec<DebrisSpawn>,
     pub dust: Vec<DustRequest>,
+    /// Debris being shattered on the bake threads (see [`crate::hits::Ctx::later`]), spawned
+    /// once made: a frame or so after the hit.
+    pub later: DebrisJobs,
+}
+
+/// Debris pieces being made on the bake threads.
+#[derive(Default)]
+pub struct DebrisJobs(pub Vec<Task<Vec<DebrisSpawn>>>);
+
+impl std::fmt::Debug for DebrisJobs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DebrisJobs({} pending)", self.0.len())
+    }
+}
+
+impl PendingDebris {
+    /// Move the debris made so far into `items`.
+    pub fn collect_later(&mut self) {
+        let mut i = 0;
+        while i < self.later.0.len() {
+            match block_on(poll_once(&mut self.later.0[i])) {
+                Some(items) => {
+                    // Finished: dropping it cancels nothing.
+                    drop(self.later.0.swap_remove(i));
+                    self.items.extend(items);
+                }
+                None => i += 1,
+            }
+        }
+    }
+
+    /// Wait for all the debris being made and move it into `items` (before a world shift,
+    /// or anything that changes the pending pieces as a whole).
+    pub fn finish_later(&mut self) {
+        for task in self.later.0.drain(..) {
+            self.items.extend(block_on(task));
+        }
+    }
 }
 
 /// A dust puff request.
@@ -389,6 +429,9 @@ pub fn spawn_debris_system(
     surfaces: Res<SurfaceMaterials>,
     mut stats: ResMut<DestructionStats>,
 ) {
+    if !pending.later.0.is_empty() {
+        pending.collect_later();
+    }
     if pending.items.is_empty() && pending.dust.is_empty() {
         return;
     }

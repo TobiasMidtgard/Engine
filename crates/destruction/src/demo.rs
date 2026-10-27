@@ -1429,6 +1429,7 @@ fn apply_aftermath(world: &mut World, ids: Aftermath) {
         move |p: DVec3| g.height(p).unwrap_or(0.0)
     };
     let mut pending = world.resource_mut::<PendingDebris>();
+    pending.finish_later();
     pending.dust.clear();
     pending
         .items
