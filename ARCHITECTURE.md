@@ -225,6 +225,12 @@ requires `NoMeshLod` and `NoVirtualGeometry`), are left out of probe GI's rays, 
 motion vectors follow the entity. CPU users of the posed surface (hair roots) skin their own
 points from the same bones. `render.meshes.skinned` counts the meshes skinned in a frame.
 
+**GPU mips** (built; `mipmaps.rs`): an image of 512² texels or more that wants mips but has no
+stored chain of the right length uploads only level 0, and the chain is drawn on the GPU (a
+bilinear downsample per level through the format's view, so sRGB filters in linear light like
+`Image::mip_chain`) with the next frame's submit. Smaller images and other formats keep the CPU
+chain. A 4096² chain cost the main thread about 330 ms on the CPU.
+
 **Subsurface scattering for skin** (built): a feature whose prepass writes
 `prepass_output_subsurface(normal, roughness, clip_now, clip_prev, strength)` (lib_frame.wgsl)
 marks skin, writes that pixel's specular light (pre-exposed) to alpha in its scene pass, and
