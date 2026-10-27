@@ -75,15 +75,13 @@ pub fn spawn(commands: &mut Commands, land: Arc<Landscape>, surfaces: Arc<Landsc
         .entity(bodies["Earth"])
         .insert((Name::new("Earth"), earth.home_transform(pad), earth));
 
-    let mut moon = PlanetTerrain::moon(LANDSCAPE_SEED).with_radius(1_737_400.0);
-    moon.ground = false;
-    moon.colliders = false;
+    // Ground and colliders on the Moon and Mars too: each answers the world's ground while
+    // the focus is near it, so a pilot can walk, a ship land and a rock roll there.
+    let moon = PlanetTerrain::moon(LANDSCAPE_SEED).with_radius(1_737_400.0);
     commands
         .entity(bodies["Moon"])
         .insert((Name::new("Moon"), moon));
-    let mut mars = PlanetTerrain::mars(LANDSCAPE_SEED).with_radius(3_389_500.0);
-    mars.ground = false;
-    mars.colliders = false;
+    let mars = PlanetTerrain::mars(LANDSCAPE_SEED).with_radius(3_389_500.0);
     commands
         .entity(bodies["Mars"])
         .insert((Name::new("Mars"), mars));
@@ -103,9 +101,16 @@ pub fn spawn(commands: &mut Commands, land: Arc<Landscape>, surfaces: Arc<Landsc
 /// round the sky once a day, so views of it are aimed when visited.
 pub fn moon_now(world: &mut World) -> Option<DVec3> {
     let mut q = world.query::<(&CelestialBody, &Transform)>();
-    q.iter(world)
+    let at = q
+        .iter(world)
         .find(|(b, _)| b.name == "Moon")
-        .map(|(_, t)| t.translation)
+        .map(|(_, t)| t.translation)?;
+    // In the valley's home coordinates, wherever the world is anchored.
+    Some(
+        world
+            .get_resource::<engine_space::SpaceState>()
+            .map_or(at, |s| s.to_home(at)),
+    )
 }
 
 /// `place` as it is to be seen now: views of the Moon aimed at where it is.

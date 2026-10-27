@@ -91,10 +91,11 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if !args.iter().any(|a| a == "--no-planet") {
         app.insert_resource(planet::UsePlanet);
-        // Stay anchored on Earth, turning with it, even at the Moon: tour stops jump between
-        // the ground and space in valley coordinates. North is +Z, as for the weather.
+        // The world re-anchors on the Moon or Mars when the camera gets there, and moves its
+        // origin under it when it lands far from the valley, so every landing is as steady as
+        // at home; jumps to places laid out in the valley take the world home first
+        // (`camera::go_to`). North is +Z, as for the weather.
         let mut frame = app.world.resource_mut::<engine_space::SpaceFrame>();
-        frame.auto_switch = false;
         frame.home_heading_deg = planet::HEADING_DEG;
         // The weather runs the day; the Sun, the Moon and the planets keep to its clock.
         app.world
