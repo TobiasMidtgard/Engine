@@ -1,7 +1,8 @@
 //! Probe GI (`RenderSettings::probe_gi`): a closed room keeps the noon sky out, a sunlit patch
 //! on the floor lights the room around it, a torch's light bounces off the walls of its room at
-//! night, and none of it leaks through a wall into the room next door. Needs a GPU or lavapipe;
-//! passes with a note when neither is available.
+//! night, and none of it leaks through a wall into the room next door; meshes far from the probe
+//! grid are not built for its rays. Needs a GPU or lavapipe; passes with a note when neither is
+//! available.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
@@ -277,4 +278,33 @@ fn a_lamp_lights_its_room_by_bounce_and_nothing_leaks_next_door() {
         b_on < b_off + 3.0 && b_on < a_on * 0.2,
         "the room next door: {b_on:.1} with probes, {b_off:.1} without (the lamp's {a_on:.1})"
     );
+}
+
+#[test]
+fn meshes_far_from_the_grid_are_not_built_for_its_rays() {
+    let meshes = |far: bool| {
+        let mut app = app(true);
+        let w = &mut app.world;
+        room(w, DVec3::ZERO, 0.7, 0.5, None);
+        ground(w);
+        sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
+        camera(w, EYE, TARGET, 12.0);
+        if far {
+            // Its own mesh (no other cuboid has this size), 2 km away.
+            slab(w, DVec3::new(2000.0, 4.0, 0.0), DVec3::splat(7.7), 0.5);
+        }
+        app.update_n(4);
+        if app.world.get_resource::<RenderDisabled>().is_some() {
+            return None;
+        }
+        app.world.resource::<Diagnostics>().get("render.gi.meshes")
+    };
+    let Some(near) = meshes(false) else {
+        eprintln!("skipping: no GPU");
+        return;
+    };
+    let with_far = meshes(true).expect("GPU");
+    eprintln!("meshes built: {near} near the room, {with_far} with a far one");
+    assert!(near > 0.0);
+    assert_eq!(with_far, near, "the far mesh was built");
 }
