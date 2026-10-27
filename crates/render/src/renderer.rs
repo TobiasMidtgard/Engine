@@ -238,6 +238,9 @@ pub struct Renderer {
     /// Main-thread time this frame in `queue.submit` (extra views submit there), for
     /// `render.extract_wait_ms`.
     main_thread_submit_ms: f64,
+    /// Probe GI (`RenderSettings::probe_gi`): the main view's, its atlas bound by every view
+    /// (frame binding 23).
+    probe_gi: crate::probe_gi::ProbeGi,
 }
 
 /// Declares [`ViewState`] with the [`Renderer`] fields that belong to one view, and
@@ -302,6 +305,7 @@ impl ViewState {
         width: u32,
         height: u32,
         surface: Option<wgpu::TextureFormat>,
+        gi_atlas: &wgpu::TextureView,
     ) -> Self {
         let device = &shared.device;
         let targets = Targets::new(
@@ -352,6 +356,7 @@ impl ViewState {
             &ScreenMaps::of(&targets, &volumetrics),
             &screen_stand_ins,
             &cloud_shadows,
+            gi_atlas,
         );
         let post = create_post(shared, &targets, surface);
         let effects = ScreenEffects::new(shared, &targets);
@@ -710,6 +715,16 @@ impl Renderer {
                 layout_entry(21, all, float_texture),
                 // Cloud shadows (cloud_shadows.rs). The 15th sampled texture in group 0.
                 layout_entry(22, all, float_texture),
+                // Probe GI's irradiance and distance atlas (probe_gi). The 16th.
+                layout_entry(
+                    23,
+                    all,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                ),
             ],
         });
         let shadow_view_layout =
@@ -744,12 +759,14 @@ impl Renderer {
             side_commands: Default::default(),
         };
 
+        let probe_gi = crate::probe_gi::ProbeGi::new(&shared.device);
         let view = ViewState::new(
             &shared,
             settings,
             width,
             height,
             surface.as_ref().map(|s| s.view_format),
+            probe_gi.atlas_view(),
         );
 
         Ok(Self {
@@ -794,6 +811,7 @@ impl Renderer {
             returned: None,
             extra_views: HashMap::new(),
             main_thread_submit_ms: 0.0,
+            probe_gi,
         })
     }
 
@@ -888,6 +906,7 @@ impl Renderer {
             &ScreenMaps::of(&self.targets, &self.volumetrics),
             &self.screen_stand_ins,
             &self.cloud_shadows,
+            self.probe_gi.atlas_view(),
         );
         self.frame_group = groups.scene;
         self.compute_group = groups.compute;
@@ -1036,7 +1055,14 @@ impl Renderer {
             let mut state = match self.extra_views.remove(&camera) {
                 Some(state) => state,
                 None => ExtraViewState {
-                    view: ViewState::new(&self.shared, &settings, size.x, size.y, None),
+                    view: ViewState::new(
+                        &self.shared,
+                        &settings,
+                        size.x,
+                        size.y,
+                        None,
+                        self.probe_gi.atlas_view(),
+                    ),
                     image: None,
                 },
             };
@@ -1238,6 +1264,11 @@ impl Renderer {
         if !gi {
             uniform.reflections[3] = 0.0;
         }
+        cpu.step("probe gi");
+        let gi_atlas_moved = !is_extra
+            && self
+                .probe_gi
+                .extract(world, &self.shared, &view, &settings, &mut uniform);
         let queue = &self.shared.queue;
         queue.write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
         let mut overlay_uniform = uniform;
@@ -1271,7 +1302,7 @@ impl Renderer {
             self.volumetrics
                 .prepare(world, &self.shared, &view, &settings, uniform.volumetrics);
         cpu.step("shadow views");
-        if lights_moved || occlusion_resized || fog_moved || surface_resized {
+        if lights_moved || occlusion_resized || fog_moved || surface_resized || gi_atlas_moved {
             self.rebuild_frame_groups();
         }
         let queue = &self.shared.queue;
@@ -1563,6 +1594,10 @@ impl Renderer {
             }
         }
         self.sky_camera.encode(&mut encoder);
+        if !extra {
+            self.perf.pass(&mut cpu, &mut encoder, "probe gi");
+            self.probe_gi.encode(&mut encoder, frame_group);
+        }
 
         // Depth prepass: depth, normals and motion of opaque geometry.
         self.perf.pass(&mut cpu, &mut encoder, "prepass");
@@ -2071,6 +2106,9 @@ impl Renderer {
         {
             let d = &mut back.diagnostics;
             self.perf.publish(d);
+            if !extra {
+                self.probe_gi.publish(d);
+            }
             // Main thread: wait (for the frame in flight, set by render_system) and extract.
             // Render thread (or inline), all of it as record_total: record (recording the
             // passes), acquire, finish (wgpu encoding the recorded passes), submit, present,
@@ -2536,10 +2574,12 @@ impl FrameGroups {
         maps: &ScreenMaps,
         stand_ins: &ScreenMaps,
         clouds: &CloudShadowMap,
+        gi_atlas: &wgpu::TextureView,
     ) -> Self {
         let group = |uniform: &wgpu::Buffer, maps: &ScreenMaps, clouds: &wgpu::TextureView| {
             create_frame_group(
-                shared, uniform, lights, shadow, env, sky_camera, atmosphere, surface, maps, clouds,
+                shared, uniform, lights, shadow, env, sky_camera, atmosphere, surface, maps,
+                clouds, gi_atlas,
             )
         };
         Self {
@@ -2563,6 +2603,7 @@ fn create_frame_group(
     surface: &wgpu::TextureView,
     maps: &ScreenMaps,
     clouds: &wgpu::TextureView,
+    gi_atlas: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     fn view(v: &wgpu::TextureView) -> wgpu::BindingResource<'_> {
         wgpu::BindingResource::TextureView(v)
@@ -2662,6 +2703,10 @@ fn create_frame_group(
             wgpu::BindGroupEntry {
                 binding: 22,
                 resource: view(clouds),
+            },
+            wgpu::BindGroupEntry {
+                binding: 23,
+                resource: view(gi_atlas),
             },
         ],
     })

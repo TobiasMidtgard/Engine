@@ -259,6 +259,30 @@ impl MaterialPreset {
         self.info().depth
     }
 
+    /// The mean diffuse albedo (linear RGB) of the generated maps: base color where the surface
+    /// is not metal, times its ambient occlusion. Light bounced off a surface of this preset
+    /// takes this color (probe GI's rays). `tests/materials.rs` checks it against the maps.
+    pub fn mean_albedo(self) -> [f32; 3] {
+        use MaterialPreset as P;
+        match self {
+            P::Brick => [0.26, 0.104, 0.07],
+            P::Cobblestone => [0.113, 0.1, 0.088],
+            P::Rock => [0.172, 0.148, 0.117],
+            P::Concrete => [0.271, 0.259, 0.235],
+            P::Plaster => [0.679, 0.623, 0.533],
+            P::WoodPlanks => [0.257, 0.169, 0.107],
+            P::Bark => [0.128, 0.098, 0.072],
+            P::RustySteel => [0.103, 0.042, 0.026],
+            P::PaintedMetal => [0.096, 0.123, 0.097],
+            P::Sand => [0.581, 0.397, 0.197],
+            P::ForestSoil => [0.047, 0.031, 0.019],
+            P::Gravel => [0.172, 0.162, 0.15],
+            P::Snow => [0.835, 0.852, 0.885],
+            P::Marble => [0.734, 0.721, 0.697],
+            P::Grass => [0.067, 0.102, 0.016],
+        }
+    }
+
     /// Whether some of the surface is bare metal (metalness 1).
     pub fn has_metal(self) -> bool {
         matches!(

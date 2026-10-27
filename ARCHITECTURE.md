@@ -202,6 +202,17 @@ off-center: shaders that rebuild view rays use `view_ray_at_uv` (lib_frame.wgsl)
 the portal (in the main view's exposure, without fog) and the motion of what lies beyond it in
 the prepass. `Portal::carry` maps what goes through, for gameplay.
 
+**Probe GI** (built, off by default; engine-design/dynamic-gi.md): `RenderSettings::probe_gi`
+(or `ENGINE_PROBE_GI=on`) lights the main view with DDGI probes (`probe_gi/`): a grid that
+scrolls with the camera, a share of it traced each frame in compute against a software BVH of
+the `MeshRenderer`s near it (one per mesh, one over the instances, rebuilt every frame), lit by
+the sun and the nearest point lights through shadow rays, glowing materials and last frame's
+probes. `probe_gi` in lib_frame.wgsl (frame binding 23, the atlas) gives every lit surface
+the probes' irradiance where the grid covers it, so other modules' shaders that call
+`shade_surface` get it too; their reflected sky dims with it. Terrain, foliage, water and
+skinned meshes are not in the rays' scene yet, extra views go without, and rays that miss see
+the environment map.
+
 **Subsurface scattering for skin** (built): a feature whose prepass writes
 `prepass_output_subsurface(normal, roughness, clip_now, clip_prev, strength)` (lib_frame.wgsl)
 marks skin, writes that pixel's specular light (pre-exposed) to alpha in its scene pass, and
