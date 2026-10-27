@@ -275,7 +275,7 @@ impl Skins {
             });
             (pipeline, layout)
         });
-        let max_binding = device.limits().max_storage_buffer_binding_size as u64;
+        let max_binding = device.limits().max_storage_buffer_binding_size;
         let mut jobs = Vec::new();
         for (index, state) in &mut self.skins {
             let Some((pool_mesh, version)) = resident(*index) else {
