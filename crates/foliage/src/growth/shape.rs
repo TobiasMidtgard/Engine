@@ -558,6 +558,7 @@ fn facing(dir: Vec3, hang: f32) -> Vec3 {
         .normalize_or(dir)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sepals(
     b: &mut MeshBuilder,
     base: Vec3,

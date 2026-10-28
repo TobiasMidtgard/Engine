@@ -537,7 +537,7 @@ fn build(graph: &PlantGraph, sk: &Skeleton, age: f32, detail: f32) -> PlantParts
 }
 
 /// Develop new and changed growing plants, move their age on, and rebuild their meshes.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn grow_plants(
     mut commands: Commands,
     time: Res<Time>,
@@ -594,17 +594,12 @@ pub fn grow_plants(
                 .as_deref()
                 .and_then(|n| library.id(n))
                 .and_then(|id| visuals.species.get(id.0 as usize)?.as_ref())
-                .map_or(mats.stems.clone(), |v| v.bark.clone());
-            let materials = [
-                stems,
-                mats.leaves.clone(),
-                mats.petals.clone(),
-                mats.fruit.clone(),
-            ];
+                .map_or(mats.stems, |v| v.bark);
+            let materials = [stems, mats.leaves, mats.petals, mats.fruit];
             let handles: [Handle<Mesh>; 4] =
                 std::array::from_fn(|_| meshes.add(Mesh::new(Vec::new(), Vec::new())));
             let parts: [Entity; 4] = std::array::from_fn(|i| {
-                let mut r = MeshRenderer::new(handles[i].clone(), materials[i].clone());
+                let mut r = MeshRenderer::new(handles[i], materials[i]);
                 r.visible = false;
                 commands
                     .spawn((Transform::IDENTITY, r, NoVirtualGeometry, ChildOf(e)))
@@ -692,7 +687,7 @@ fn put(
     for (i, mesh) in parts.meshes.into_iter().enumerate() {
         let visible = mesh.is_some();
         if let Some(mesh) = mesh {
-            meshes.set(state.meshes[i].clone(), mesh);
+            meshes.set(state.meshes[i], mesh);
         }
         if let Ok(mut r) = renderers.get_mut(state.parts[i])
             && r.visible != visible
