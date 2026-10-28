@@ -222,11 +222,13 @@ impl AppearanceExt for Appearance {
 
     /// The brows' color (their own, or the hair's darkened slightly as brows usually are).
     fn brow_color(&self) -> HairColor {
-        // Brows are darker than the hair, fair people's most of all (a blonde's are light
-        // brown, not yellow).
+        // Brows are darker than the hair, fair people's most of all: a blonde's are light
+        // brown, not yellow (the genes that set the two colors overlap only partly, those for
+        // red least, as eyebrow color genetics from QIMR Berghofer found). With less melanin
+        // than this, fair brows read as a yellow strip.
+        let m = self.hair.color.melanin.clamp(0.0, 1.0);
         self.brows.color.unwrap_or(HairColor {
-            melanin: (self.hair.color.melanin + 0.05 + 0.12 * (1.0 - self.hair.color.melanin))
-                .min(1.0),
+            melanin: (m + 0.05 + 0.3 * (1.0 - m).powf(1.5)).min(1.0),
             red: self.hair.color.red * 0.5,
             grey: self.hair.color.grey * 0.6,
         })
