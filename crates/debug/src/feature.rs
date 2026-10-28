@@ -98,6 +98,11 @@ impl RenderFeature for DebugLinesFeature {
         "debug_lines"
     }
 
+    /// Debug lines belong to the scene: the editor's split views show them too.
+    fn overlay_in_extra_views(&self) -> bool {
+        true
+    }
+
     /// Early among overlays: game UI drawn later stays on top of debug lines.
     fn order(&self) -> i32 {
         1000
