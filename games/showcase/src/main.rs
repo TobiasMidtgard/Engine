@@ -14,7 +14,8 @@
 //! by its `Name`, from behind. The valley lies on a real planet (`planet.rs`); `--no-planet`
 //! draws it as the landscape's own mesh on an empty ground instead. A tour or film whose stops
 //! all belong to zones spawns only those zones' demos; `--zones a,b` (or `none`, `all`) picks
-//! them (see `zones::demo_zones`).
+//! them (see `zones::demo_zones`). `--exe` starts as the exe does (built a step a frame, then
+//! the start screen), also headless.
 //!
 //! The map is a valley ringed by snowy mountains: a village around the material plaza, woods,
 //! a lake, and one zone per engine feature. Each zone shows placeholder content until its module
@@ -147,7 +148,9 @@ fn main() {
     let scripted = ["--tour", "--film", "--fly", "--loops"]
         .iter()
         .any(|f| args.iter().any(|a| a == f));
-    let exe = !headless && !scripted;
+    // `--exe` builds the way the exe does (a step a frame, then the start screen) in a headless
+    // run too, to measure its start.
+    let exe = (!headless && !scripted) || args.iter().any(|a| a == "--exe");
     walk::install(&mut app, exe);
     if exe {
         // The window draws a loading screen at once while the world builds a step a frame,

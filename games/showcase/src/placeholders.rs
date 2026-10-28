@@ -1,5 +1,5 @@
 //! Stand-in content for each zone until its module's `demo::spawn_demo` replaces it (see
-//! `zones::spawn_demos`). Placeholders show where a test case lives and what it will contain;
+//! `zones::spawn_cell`). Placeholders show where a test case lives and what it will contain;
 //! they don't simulate anything.
 
 use crate::landscape::Landscape;

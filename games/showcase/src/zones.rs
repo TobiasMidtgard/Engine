@@ -4,9 +4,15 @@
 //! module's demo can build around `center` without caring about hills.
 //!
 //! **Module threads:** to show your module, edit only your zone's entry in [`ZONES`] and your
-//! line in [`spawn_demos`], replacing the placeholder with
+//! line in [`spawn_cell`], replacing the placeholder with
 //! `engine_<module>::demo::spawn_demo(commands, z.center)`. Everything else in the showcase
 //! (landscape, scenery, camera, tour) belongs to the Beautiful showcase world thread.
+//!
+//! In the exe each zone is a streamed cell ([`zone_cells`], `engine::stream`): it spawns when
+//! the player comes within 150 m of it, so the start doesn't wait for zones far away, and its
+//! own random sequence ([`cell_rng`]) keeps it the same whatever loaded first. A zone stays
+//! loaded once in until its module can take it down again (an unload hook for what it keeps
+//! outside its entities); then it joins [`UNLOADABLE`]. Tours, films and tools load every zone.
 //! `TEST_CASES.md` lists every test case, which zone shows it and who owns it.
 
 use crate::landscape::{CaveHill, Cover, Lake, Landscape, Pad, Road, Scarp, Stream};
@@ -418,157 +424,233 @@ pub fn demo_zones(flag: Option<&str>, stops: Option<&str>) -> Option<DemoZones> 
     }
 }
 
-/// What each zone shows. Each zone is one line, owned by its module's thread: swap the
-/// placeholder (`ph::…`) for your demo and leave the other lines alone. `only` limits it to
-/// some zones ([`demo_zones`]).
-pub fn spawn_demos(
-    commands: &mut Commands,
-    lib: &Library,
-    land: &Landscape,
-    rng: &mut Rng,
-    only: Option<&DemoZones>,
-) {
+/// One streamed piece of the valley: a zone's demo, or a part of it that stands away from the
+/// zone (the yard's dinghy on the lake, its silks in the stream). It loads as a whole when the
+/// player comes near and is spawned by [`spawn_cell`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZoneCell {
+    pub key: &'static str,
+    /// Middle of what it spawns (world meters).
+    pub center: DVec3,
+    /// How far its content reaches from `center`, meters.
+    pub radius: f64,
+    /// Never unloaded once in: its module keeps state outside the entities it spawned (a single
+    /// proving ground, the yard's hoist) and has no unload hook yet.
+    pub keep_loaded: bool,
+}
+
+/// Zones whose content is only the entities they spawn, so they unload cleanly: the showcase's
+/// own placeholders. The modules' zones join as their unload hooks land.
+const UNLOADABLE: [&str; 2] = ["plaza", "gallery2d"];
+
+/// The streamed cells of the zones `only` names (every zone when `None`), each with its reach:
+/// a module's demo spreads past its flat pad (fences, paths, runs), so half again the pad and
+/// a margin, and the long ones as they are laid out.
+pub fn zone_cells(land: &Landscape, only: Option<&DemoZones>) -> Vec<ZoneCell> {
+    let mut cells = Vec::new();
     for z in ZONES {
         if only.is_some_and(|o| !o.0.iter().any(|k| k == z.key)) {
             continue;
         }
+        let keep_loaded = !UNLOADABLE.contains(&z.key);
+        let cell = |key, center, radius| ZoneCell {
+            key,
+            center,
+            radius,
+            keep_loaded,
+        };
         match z.key {
-            "plaza" => ph::plaza(commands, lib, z),
-            "market" => engine_ui::demo::spawn_demo(commands, z.center),
-            "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
-            "physics" => engine_physics::demo::spawn_demo(commands, z.center),
-            "yard" => {
-                engine_softbody::demo::spawn_demo(commands, z.center);
-                // Bare earth under the burning curtain's burner, so its flame lights the
-                // curtain and not the meadow.
-                commands.spawn((
-                    Name::new("Curtain burner (firebreak)"),
-                    Transform::from_translation(z.center + engine_softbody::demo::CURTAIN_BURNER),
-                    engine_fire::FuelPatch::firebreak(engine_fire::PatchShape::Disc {
-                        radius: 4.0,
-                    }),
-                ));
-                // The sailing dinghy works the lake east of the jetty, leaving a wake as wide
-                // as its hull.
-                let home =
-                    zone("lake").center + DVec3::new(-30.0, crate::landscape::LAKE_LEVEL, 30.0);
-                let boat = engine_softbody::demo::spawn_sailboat(commands, home, 22.0);
-                commands
-                    .entity(boat)
-                    .insert(engine_water::WaterInteractor::new(0.8).with_wake(1.0));
-                // Dyed silks rinsed in the stream above the falls (they tie on once the
-                // lake zone's stream is running), the pole's ends against the banks.
-                let (at, down, width) = rinse_site(land);
-                engine_softbody::demo::rinse::spawn_rinse(
-                    commands,
-                    at,
-                    Vec3::new(down.x as f32, 0.0, down.y as f32),
-                    width as f32 + 0.1,
-                );
-            }
-            "magic" => engine_vfx::demo::spawn_demo(commands, z.center),
-            "gallery2d" => ph::gallery2d(commands, lib, z),
-            "forest" => engine_foliage::demo::spawn_demo(commands, z.center),
-            "meadow" => engine_npc::demo::spawn_wildlife(commands, z.center, z.radius * 0.8),
-            "lake" => {
-                engine_water::demo::spawn_valley(
-                    commands,
-                    &lake_water(z, &|x, z| land.height(x, z)),
-                );
-                engine_physics::demo::spawn_floaters(commands, float_test(z));
-            }
-            "water" => engine_water::demo::spawn_demo(commands, z.center),
-            "footsteps" => engine_audio::demo::spawn_demo(commands, z.center),
-            "tracks" => engine_terrain::demo::spawn_demo_with(
-                commands,
-                z.center,
-                engine_terrain::demo::LabOptions {
-                    stand_in_bodies: true,
-                },
-            ),
-            "cave" => engine_foliage::demo::spawn_cave_demo(commands, z.center),
-            "arena" => engine_npc::demo::spawn_demo(commands, z.center),
-            "parkour" => engine_movement::demo::spawn_demo(commands, z.center),
-            "fortress" => {
-                engine_destruction::demo::spawn_demo(commands, z.center);
-                // The burning storehouse has straw on its floor (it goes up fast and grows back
-                // for the next loop) and stands in a bare earth yard ringed by green grass, so
-                // its fire stays a house fire: no grass fire runs off across the valley, and
-                // embers on the wind die where they land (most come down well inside 60 m).
-                let barn = z.center + DVec3::from_array(engine_destruction::barn::BARN);
-                commands.spawn((
-                    Name::new("Storehouse straw floor"),
-                    Transform::from_translation(barn),
-                    engine_fire::FuelPatch::grass(engine_fire::PatchShape::Rect {
-                        half_extents: [2.3, 1.8],
-                    })
-                    .with_load(0.6)
-                    .with_moisture(0.05)
-                    .with_regrow(90.0)
-                    .with_priority(20),
-                ));
-                commands.spawn((
-                    Name::new("Storehouse yard (firebreak)"),
-                    Transform::from_translation(barn),
-                    engine_fire::FuelPatch::firebreak(engine_fire::PatchShape::Disc {
-                        radius: 8.0,
-                    }),
-                ));
-                commands.spawn((
-                    Name::new("Storehouse green grass"),
-                    Transform::from_translation(barn),
-                    engine_fire::FuelPatch::grass(engine_fire::PatchShape::Disc { radius: 60.0 })
-                        .with_moisture(1.0)
-                        .with_priority(5),
-                ));
-            }
-            "voxel" => engine_destruction::hill::spawn_voxel_hill(commands, z.center),
-            "field" => {
-                engine_fire::demo::spawn_demo(commands, z.center);
-                ph::field_edge(commands, lib, z, rng);
-                // Air over the meadow, so the fire's smoke rises as one simulated plume. It
-                // reaches farther downwind (the valley's wind blows west and a little north) so
-                // the plume drifts out of it well clear of the fire.
-                commands.spawn((
-                    Name::new("Fire demo: smoke"),
-                    Transform::from_translation(z.center + DVec3::new(-14.0, 0.0, 4.0)),
-                    engine_smoke::SmokeVolume {
-                        size: [100.0, 40.0, 60.0],
-                        cell_m: 1.25,
-                    },
-                ));
-                // Finer air around the campfire (fire::demo puts it 22 m west, 20.5 m south of
-                // the center), so its thin wisp isn't smeared into the meadow's coarse cells.
-                commands.spawn((
-                    Name::new("Fire demo: campfire smoke"),
-                    Transform::from_translation(z.center + DVec3::new(-25.0, -1.0, -19.5)),
-                    engine_smoke::SmokeVolume {
-                        size: [16.0, 13.0, 10.0],
-                        cell_m: 0.3,
-                    },
-                ));
-            }
-            "range" => engine_smoke::demo::spawn_demo(commands, z.center),
-            "weather" => engine_weather::demo::spawn_demo(commands, z.center),
-            "track" => engine_vehicles::demo::spawn_track(commands, z.center),
             "airfield" => {
                 let (a, b) = RUNWAY;
-                engine_vehicles::demo::spawn_airfield(
-                    commands,
-                    DVec3::new(a[0], z.center.y, a[1]),
-                    DVec3::new(b[0], z.center.y, b[1]),
-                );
+                let (a, b) = (DVec2::from_array(a), DVec2::from_array(b));
+                let mid = (a + b) * 0.5;
+                cells.push(cell(
+                    z.key,
+                    DVec3::new(mid.x, z.center.y, mid.y),
+                    a.distance(b) * 0.5 + z.radius,
+                ));
             }
-            "spaceport" => {
-                ph::spaceport(commands, lib, z);
-                engine_vehicles::demo::spawn_spaceport(
-                    commands,
-                    z.center + DVec3::new(0.0, 0.4, 0.0),
-                    30.0,
-                );
+            "yard" => {
+                cells.push(cell(z.key, z.center, z.radius * 1.5 + 10.0));
+                cells.push(cell(
+                    "yard_sailboat",
+                    sailboat_home(),
+                    SAILBOAT_REACH_M + 15.0,
+                ));
+                let (at, _, width) = rinse_site(land);
+                cells.push(cell("yard_rinse", at, width + 15.0));
             }
-            _ => {}
+            _ => cells.push(cell(z.key, z.center, z.radius * 1.5 + 10.0)),
         }
+    }
+    cells
+}
+
+/// Where the yard's sailing dinghy works: on the lake east of the jetty.
+fn sailboat_home() -> DVec3 {
+    zone("lake").center + DVec3::new(-30.0, crate::landscape::LAKE_LEVEL, 30.0)
+}
+
+/// How far the dinghy sails from its home, m.
+const SAILBOAT_REACH_M: f64 = 22.0;
+
+/// A cell's own random sequence, from the world's seed and the cell's key, so what a zone
+/// draws doesn't depend on which zones loaded before it (FNV-1a of the key).
+pub fn cell_rng(seed: u64, key: &str) -> Rng {
+    let hash = key.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    Rng::new(seed ^ hash)
+}
+
+/// What each cell shows ([`zone_cells`]). Each zone is one line, owned by its module's thread:
+/// swap the placeholder (`ph::…`) for your demo and leave the other lines alone.
+pub fn spawn_cell(commands: &mut Commands, lib: &Library, land: &Landscape, seed: u64, key: &str) {
+    let rng = &mut cell_rng(seed, key);
+    // The yard's outlying parts belong to the yard.
+    let zone_key = if key.starts_with("yard_") {
+        "yard"
+    } else {
+        key
+    };
+    let Some(z) = ZONES.iter().find(|z| z.key == zone_key) else {
+        return;
+    };
+    match key {
+        "plaza" => ph::plaza(commands, lib, z),
+        "market" => engine_ui::demo::spawn_demo(commands, z.center),
+        "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
+        "physics" => engine_physics::demo::spawn_demo(commands, z.center),
+        "yard" => {
+            engine_softbody::demo::spawn_demo(commands, z.center);
+            // Bare earth under the burning curtain's burner, so its flame lights the
+            // curtain and not the meadow.
+            commands.spawn((
+                Name::new("Curtain burner (firebreak)"),
+                Transform::from_translation(z.center + engine_softbody::demo::CURTAIN_BURNER),
+                engine_fire::FuelPatch::firebreak(engine_fire::PatchShape::Disc { radius: 4.0 }),
+            ));
+        }
+        "yard_sailboat" => {
+            // The sailing dinghy works the lake east of the jetty, leaving a wake as wide
+            // as its hull.
+            let boat = engine_softbody::demo::spawn_sailboat(
+                commands,
+                sailboat_home(),
+                SAILBOAT_REACH_M as f32,
+            );
+            commands
+                .entity(boat)
+                .insert(engine_water::WaterInteractor::new(0.8).with_wake(1.0));
+        }
+        "yard_rinse" => {
+            // Dyed silks rinsed in the stream above the falls (they tie on once the
+            // lake zone's stream is running), the pole's ends against the banks.
+            let (at, down, width) = rinse_site(land);
+            engine_softbody::demo::rinse::spawn_rinse(
+                commands,
+                at,
+                Vec3::new(down.x as f32, 0.0, down.y as f32),
+                width as f32 + 0.1,
+            );
+        }
+        "magic" => engine_vfx::demo::spawn_demo(commands, z.center),
+        "gallery2d" => ph::gallery2d(commands, lib, z),
+        "forest" => engine_foliage::demo::spawn_demo(commands, z.center),
+        "meadow" => engine_npc::demo::spawn_wildlife(commands, z.center, z.radius * 0.8),
+        "lake" => {
+            engine_water::demo::spawn_valley(commands, &lake_water(z, &|x, z| land.height(x, z)));
+            engine_physics::demo::spawn_floaters(commands, float_test(z));
+        }
+        "water" => engine_water::demo::spawn_demo(commands, z.center),
+        "footsteps" => engine_audio::demo::spawn_demo(commands, z.center),
+        "tracks" => engine_terrain::demo::spawn_demo_with(
+            commands,
+            z.center,
+            engine_terrain::demo::LabOptions {
+                stand_in_bodies: true,
+            },
+        ),
+        "cave" => engine_foliage::demo::spawn_cave_demo(commands, z.center),
+        "arena" => engine_npc::demo::spawn_demo(commands, z.center),
+        "parkour" => engine_movement::demo::spawn_demo(commands, z.center),
+        "fortress" => {
+            engine_destruction::demo::spawn_demo(commands, z.center);
+            // The burning storehouse has straw on its floor (it goes up fast and grows back
+            // for the next loop) and stands in a bare earth yard ringed by green grass, so
+            // its fire stays a house fire: no grass fire runs off across the valley, and
+            // embers on the wind die where they land (most come down well inside 60 m).
+            let barn = z.center + DVec3::from_array(engine_destruction::barn::BARN);
+            commands.spawn((
+                Name::new("Storehouse straw floor"),
+                Transform::from_translation(barn),
+                engine_fire::FuelPatch::grass(engine_fire::PatchShape::Rect {
+                    half_extents: [2.3, 1.8],
+                })
+                .with_load(0.6)
+                .with_moisture(0.05)
+                .with_regrow(90.0)
+                .with_priority(20),
+            ));
+            commands.spawn((
+                Name::new("Storehouse yard (firebreak)"),
+                Transform::from_translation(barn),
+                engine_fire::FuelPatch::firebreak(engine_fire::PatchShape::Disc { radius: 8.0 }),
+            ));
+            commands.spawn((
+                Name::new("Storehouse green grass"),
+                Transform::from_translation(barn),
+                engine_fire::FuelPatch::grass(engine_fire::PatchShape::Disc { radius: 60.0 })
+                    .with_moisture(1.0)
+                    .with_priority(5),
+            ));
+        }
+        "voxel" => engine_destruction::hill::spawn_voxel_hill(commands, z.center),
+        "field" => {
+            engine_fire::demo::spawn_demo(commands, z.center);
+            ph::field_edge(commands, lib, z, rng);
+            // Air over the meadow, so the fire's smoke rises as one simulated plume. It
+            // reaches farther downwind (the valley's wind blows west and a little north) so
+            // the plume drifts out of it well clear of the fire.
+            commands.spawn((
+                Name::new("Fire demo: smoke"),
+                Transform::from_translation(z.center + DVec3::new(-14.0, 0.0, 4.0)),
+                engine_smoke::SmokeVolume {
+                    size: [100.0, 40.0, 60.0],
+                    cell_m: 1.25,
+                },
+            ));
+            // Finer air around the campfire (fire::demo puts it 22 m west, 20.5 m south of
+            // the center), so its thin wisp isn't smeared into the meadow's coarse cells.
+            commands.spawn((
+                Name::new("Fire demo: campfire smoke"),
+                Transform::from_translation(z.center + DVec3::new(-25.0, -1.0, -19.5)),
+                engine_smoke::SmokeVolume {
+                    size: [16.0, 13.0, 10.0],
+                    cell_m: 0.3,
+                },
+            ));
+        }
+        "range" => engine_smoke::demo::spawn_demo(commands, z.center),
+        "weather" => engine_weather::demo::spawn_demo(commands, z.center),
+        "track" => engine_vehicles::demo::spawn_track(commands, z.center),
+        "airfield" => {
+            let (a, b) = RUNWAY;
+            engine_vehicles::demo::spawn_airfield(
+                commands,
+                DVec3::new(a[0], z.center.y, a[1]),
+                DVec3::new(b[0], z.center.y, b[1]),
+            );
+        }
+        "spaceport" => {
+            ph::spaceport(commands, lib, z);
+            engine_vehicles::demo::spawn_spaceport(
+                commands,
+                z.center + DVec3::new(0.0, 0.4, 0.0),
+                30.0,
+            );
+        }
+        _ => {}
     }
 }
 
@@ -641,7 +723,7 @@ impl View {
 }
 
 /// Extra tour stops for each zone's demo, placed right after the zone's own stop. Like
-/// [`spawn_demos`], a module thread edits only its own zone's line.
+/// [`spawn_cell`], a module thread edits only its own zone's line.
 pub fn demo_views(z: &Zone) -> Vec<View> {
     match z.key {
         "track" | "airfield" | "spaceport" => engine_vehicles::demo::views(z.key, z.center)
@@ -1519,6 +1601,40 @@ mod tests {
         // Clear of the dinghy's mooring and its 22 m lane.
         let dinghy = lake.center + DVec3::new(-30.0, 0.0, 30.0);
         assert!((at - dinghy).length() > 22.0 + 10.0);
+    }
+
+    #[test]
+    fn every_zone_streams_as_a_cell_that_holds_it() {
+        let land = landscape(1);
+        let cells = zone_cells(&land, None);
+        for z in ZONES {
+            let cell = cells.iter().find(|c| c.key == z.key).expect(z.key);
+            assert!(
+                cell.center.distance(z.center) + z.radius <= cell.radius + 1e-6,
+                "{}'s pad reaches past its cell",
+                z.key
+            );
+        }
+        // The yard's dinghy and silks stand away from it, by the lake and in the stream.
+        for part in ["yard_sailboat", "yard_rinse"] {
+            assert!(cells.iter().any(|c| c.key == part), "{part}");
+        }
+        let keys: std::collections::HashSet<_> = cells.iter().map(|c| c.key).collect();
+        assert_eq!(keys.len(), cells.len(), "two cells share a key");
+        // Only the yard (with its parts) for `--zones yard`.
+        let yard = zone_cells(&land, Some(&DemoZones(vec!["yard".into()])));
+        assert_eq!(yard.len(), 3);
+        assert!(yard.iter().all(|c| c.key.starts_with("yard")));
+    }
+
+    #[test]
+    fn a_zone_draws_the_same_whatever_loaded_before_it() {
+        let draw = |key| {
+            let mut rng = cell_rng(7, key);
+            (0..4).map(|_| rng.next_u64()).collect::<Vec<_>>()
+        };
+        assert_eq!(draw("field"), draw("field"));
+        assert_ne!(draw("field"), draw("plaza"));
     }
 
     #[test]

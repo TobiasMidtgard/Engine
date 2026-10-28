@@ -7,6 +7,8 @@ use crate::landscape::{self, Landscape};
 use crate::{camera, placeholders, planet, scenery, zones};
 use engine::core::ecs::system::SystemState;
 use engine::prelude::*;
+use engine::stream::{StreamCell, StreamCellsExt, StreamingBudget};
+use engine::world::{CellState, StreamedCells};
 use engine_ui::color::Color;
 use engine_ui::el::El;
 use engine_ui::node::Screen;
@@ -25,12 +27,10 @@ pub struct WorldBuild {
     next: usize,
     land: Arc<Landscape>,
     rng: Rng,
-    lib: Option<scenery::Library>,
+    lib: Option<Arc<scenery::Library>>,
     hedged: Vec<(DVec2, DVec2)>,
     started: std::time::Instant,
     laps: Vec<(&'static str, f32)>,
-    /// The next zone whose demo wakes (the exe wakes one a frame).
-    zone: usize,
     /// What the loading screen names after the step's text (the zone waking).
     detail: Option<&'static str>,
     /// What ran last frame and when that frame began (wall clock: the engine's frame time
@@ -134,7 +134,7 @@ type Step = (
 
 /// The steps, in order (the scenery draws from one random sequence, so the order is the
 /// layout).
-const STEPS: [Step; 12] = [
+const STEPS: [Step; 13] = [
     (
         "library",
         "Carving the stones and weaving the grass",
@@ -153,7 +153,12 @@ const STEPS: [Step; 12] = [
             )>::new(world);
             let (mut meshes, mut materials, mut images, plants) =
                 state.get_mut(world).expect("resources the showcase adds");
-            b.lib = Some(job.finish(&mut meshes, &mut materials, &mut images, &plants));
+            b.lib = Some(Arc::new(job.finish(
+                &mut meshes,
+                &mut materials,
+                &mut images,
+                &plants,
+            )));
             true
         },
     ),
@@ -256,49 +261,57 @@ const STEPS: [Step; 12] = [
             return false;
         }
         let only = world.get_resource::<zones::DemoZones>().cloned();
-        if let Some(only) = only.as_ref().filter(|_| b.zone == 0) {
+        if let Some(only) = only.as_ref() {
             engine::core::log::info!(
                 "only the zone demos of {:?} (`--zones all` spawns every one)",
                 only.0
             );
         }
-        // Zone by zone in order (they draw from one random sequence), one a frame in the exe.
-        while let Some(z) = zones::ZONES.get(b.zone) {
-            if only
-                .as_ref()
-                .is_some_and(|o| !o.0.iter().any(|k| k == z.key))
-            {
-                b.zone += 1;
-                continue;
-            }
-            if staged
-                && PREFETCH
-                    .iter()
-                    .any(|(key, _, ready)| *key == z.key && !ready(world))
-            {
-                return false;
-            }
-            b.zone += 1;
-            let t = std::time::Instant::now();
-            let one = zones::DemoZones(vec![z.key.to_string()]);
-            with_commands(world, |c| {
-                zones::spawn_demos(
-                    c,
-                    b.lib.as_ref().expect(LIB),
-                    &b.land,
-                    &mut b.rng,
-                    Some(&one),
-                )
-            });
-            b.laps.push((z.key, t.elapsed().as_secs_f32()));
-            b.ran.push(z.key);
-            if staged {
-                b.detail = zones::ZONES.get(b.zone).map(|z| z.name);
-                return b.zone >= zones::ZONES.len();
-            }
+        // The zones whose art bakes on workers wait for it, so their spawn is quick.
+        if staged
+            && PREFETCH.iter().any(|(key, _, ready)| {
+                only.as_ref().is_none_or(|o| o.0.iter().any(|k| k == key)) && !ready(world)
+            })
+        {
+            return false;
         }
-        b.detail = None;
+        // Each zone is a streamed cell: in the exe it wakes when the player comes near (and
+        // the placeholders' zones sleep again behind them), as Unreal's World Partition
+        // streams runtime cells; tours, films and tools load every one at once, as before.
+        let seed = world.resource::<EngineConfig>().seed;
+        let lib = b.lib.clone().expect(LIB);
+        for cell in zones::zone_cells(&b.land, only.as_ref()) {
+            let (lib, land, key) = (lib.clone(), b.land.clone(), cell.key);
+            let mut streamed = StreamCell::new(key, cell.center, cell.radius, move |world| {
+                with_commands(world, |c| zones::spawn_cell(c, &lib, &land, seed, key));
+            })
+            .load_within(if staged { ZONE_LOAD_M } else { f64::INFINITY });
+            if cell.keep_loaded {
+                streamed = streamed.keep_loaded();
+            }
+            world.stream_cell(streamed);
+        }
+        if !staged {
+            world.insert_resource(StreamingBudget {
+                loads_per_frame: usize::MAX,
+                frame_ms: f32::INFINITY,
+                ..Default::default()
+            });
+        }
         true
+    }),
+    ("nearby zones", "Waking the zones nearby", |world, b| {
+        // The exe opens once the zones around the camera are in (the streaming plugin wakes
+        // one a frame); the rest wake as the player gets near them.
+        if !world.contains_resource::<Staged>() {
+            return true;
+        }
+        let cells = world.resource::<StreamedCells>();
+        let waking = cells.cells.iter().find(|c| c.state == CellState::Queued);
+        b.detail = waking
+            .and_then(|c| zones::ZONES.iter().find(|z| z.key == c.key))
+            .map(|z| z.name);
+        waking.is_none()
     }),
     ("moon", "Hanging the Moon", |world, _| {
         if !world.contains_resource::<planet::UsePlanet>() {
@@ -335,6 +348,9 @@ const STEPS: [Step; 12] = [
         },
     ),
 ];
+
+/// In the exe a zone wakes when the camera or the player comes this close to its edge, m.
+const ZONE_LOAD_M: f64 = 150.0;
 
 /// Longest wait (s) for the modules' art before the start screen opens anyway.
 const MODULE_WAIT_S: f32 = 60.0;
@@ -487,7 +503,6 @@ pub fn start(world: &mut World) {
         hedged: Vec::new(),
         started,
         laps: vec![("ground and sky", started.elapsed().as_secs_f32())],
-        zone: 0,
         detail: None,
         ran: Vec::new(),
         frame_at: None,
@@ -540,20 +555,14 @@ pub fn step(world: &mut World) {
     build.ran.clear();
     // Steps run until this frame's budget is spent, as Unity's High background loading
     // priority (50 ms a frame behind a loading screen) and Unreal's streaming time limits do:
-    // cheap steps share a frame, a heavy one has a frame to itself. A zone's demo always
-    // ends the frame: its module's systems build what it needs later in the frame (the PC
-    // showed seconds of that behind a spawn of a few milliseconds), and two of those in one
-    // frame add up.
+    // cheap steps share a frame, a heavy one has a frame to itself. Zones wake one a frame
+    // in the streaming plugin (their modules' systems build what a demo needs later in the
+    // frame: the PC showed seconds of that behind a spawn of a few milliseconds).
     loop {
-        let at = (build.next, build.zone);
+        let at = build.next;
         run_step(world, &mut build);
-        let moved = (build.next, build.zone) != at;
-        let zone = build.zone != at.1;
-        if !moved
-            || zone
-            || build.next >= STEPS.len()
-            || now.elapsed().as_secs_f32() > FRAME_BUDGET_S
-        {
+        let moved = build.next != at;
+        if !moved || build.next >= STEPS.len() || now.elapsed().as_secs_f32() > FRAME_BUDGET_S {
             break;
         }
     }
@@ -620,12 +629,15 @@ fn finish(_world: &mut World, build: &WorldBuild) {
 fn show_loading(world: &mut World, build: &WorldBuild) {
     screens::hide(world, "world_loading", true);
     let p = world.resource::<Theme>().palette.clone();
-    // The zone demos' share of the bar fills zone by zone.
-    let waking = STEPS.get(build.next).is_some_and(|s| s.0 == "zone demos");
-    let part = if waking {
-        build.zone as f32 / zones::ZONES.len() as f32
-    } else {
-        0.0
+    // The nearby zones' share of the bar fills zone by zone.
+    let waking = STEPS.get(build.next).is_some_and(|s| s.0 == "nearby zones");
+    let part = match world.get_resource::<StreamedCells>().filter(|_| waking) {
+        Some(cells) => {
+            let count = |s| cells.cells.iter().filter(|c| c.state == s).count() as f32;
+            let (loaded, queued) = (count(CellState::Loaded), count(CellState::Queued));
+            loaded / (loaded + queued).max(1.0)
+        }
+        None => 0.0,
     };
     let done = (build.next as f32 + part) / STEPS.len() as f32;
     let what = STEPS
