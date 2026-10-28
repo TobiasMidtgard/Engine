@@ -441,12 +441,25 @@ pub struct ZoneCell {
     /// A far-view proxy stands in for it while unloaded; not for cells whose content moves
     /// (the dinghy, the grazing herds) or is too small to see from afar (the silks).
     pub proxy: bool,
+    /// Frees the meshes, materials and images its spawn made when it unloads
+    /// (`StreamCell::release_assets`): only cells whose modules keep no handles to them past the
+    /// unload (see [`RELEASES_ASSETS`]).
+    pub release_assets: bool,
 }
 
 /// Zones whose content is only the entities they spawn, so they unload cleanly: the showcase's
 /// own placeholders, and the modules' zones that `ENGINE_STREAM_AUDIT` found clean (out, in
 /// and out again, 2026-10-28). The others join as their unload hooks land.
 const UNLOADABLE: [&str; 5] = ["plaza", "gallery2d", "magic", "tracks", "parkour"];
+
+/// Cells that free their assets on unload: the audit's reload found none of their meshes
+/// missing. `SHOWCASE_RELEASE_ASSETS=all` opts every cell in, to audit which may join.
+const RELEASES_ASSETS: [&str; 2] = ["tracks", "parkour"];
+
+fn releases_assets(key: &str) -> bool {
+    RELEASES_ASSETS.contains(&key)
+        || std::env::var("SHOWCASE_RELEASE_ASSETS").is_ok_and(|v| v == "all")
+}
 
 /// Cells with no far-view proxy ([`ZoneCell::proxy`]).
 const NO_PROXY: [&str; 3] = ["yard_sailboat", "yard_rinse", "meadow"];
@@ -467,6 +480,7 @@ pub fn zone_cells(land: &Landscape, only: Option<&DemoZones>) -> Vec<ZoneCell> {
             radius,
             keep_loaded,
             proxy: !NO_PROXY.contains(&key),
+            release_assets: releases_assets(key),
         };
         match z.key {
             "airfield" => {
