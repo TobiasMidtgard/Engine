@@ -15,6 +15,8 @@
 //! a scan picks one, an ability runs it) and of Unity's interactor / interactable pairs.
 //!
 //! With no [`Interactor`] anywhere (a free camera), the active camera is the actor.
+//!
+//! What is in use shows its numbers under the prompt through [`Readouts`] (speed, altitude).
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::prelude::*;
@@ -94,6 +96,25 @@ pub struct Interact {
     pub from: DVec3,
 }
 
+/// Lines the screen shows under the prompt while the player uses something: label and value
+/// (a vehicle's speed, altitude, gear, cruise). The engine clears them at the start of every
+/// frame (`First`), so whoever is in use writes its lines each frame and they go when it stops.
+#[derive(Resource, Debug, Clone, Default, PartialEq)]
+pub struct Readouts {
+    pub lines: Vec<(String, String)>,
+}
+
+impl Readouts {
+    /// Sets the line `label` (replacing one of that label), keeping the order lines came in.
+    pub fn set(&mut self, label: impl Into<String>, value: impl Into<String>) {
+        let (label, value) = (label.into(), value.into());
+        match self.lines.iter_mut().find(|l| l.0 == label) {
+            Some(line) => line.1 = value,
+            None => self.lines.push((label, value)),
+        }
+    }
+}
+
 /// One candidate for [`pick`]: the entity, its use point (world meters) and its reach.
 pub type Candidate = (Entity, DVec3, f32);
 
@@ -130,6 +151,7 @@ pub fn pick(
 
 pub(crate) fn register(app: &mut App) {
     app.init_resource::<InteractTarget>()
+        .init_resource::<Readouts>()
         .add_message::<Interact>()
         .register_component::<Interactable>(
             "Usable thing: verb (prompt text), reach_m, offset (use point, local m), enabled. \

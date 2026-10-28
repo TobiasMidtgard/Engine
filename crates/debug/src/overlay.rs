@@ -20,7 +20,7 @@ use engine_input::{Binding, ButtonInput, InputMap, KeyCode};
 use engine_render::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderSettings, ViewData,
 };
-use engine_world::{CellState, InteractTarget, StreamedCells, WindField, WindOverride};
+use engine_world::{CellState, InteractTarget, Readouts, StreamedCells, WindField, WindOverride};
 use serde::{Deserialize, Serialize};
 
 /// Shader source (standalone, no frame bindings).
@@ -320,6 +320,58 @@ fn interact_prompt(world: &World) -> Option<String> {
         })
         .unwrap_or_else(|| "E".into());
     Some(format!("{key}  {}", target.verb))
+}
+
+/// The lines of what is in use ([`Readouts`]), `label  value`, under the prompt (windowed runs
+/// only, as the prompt).
+fn readout_lines(world: &World) -> Vec<String> {
+    if world
+        .get_resource::<engine_core::config::EngineConfig>()
+        .is_some_and(|c| c.headless)
+    {
+        return Vec::new();
+    }
+    let Some(readouts) = world.get_resource::<Readouts>() else {
+        return Vec::new();
+    };
+    let width = readouts
+        .lines
+        .iter()
+        .map(|l| l.0.chars().count())
+        .max()
+        .unwrap_or(0);
+    readouts
+        .lines
+        .iter()
+        .map(|(label, value)| format!("{label:<width$}  {value}"))
+        .collect()
+}
+
+/// Readout lines in a dark box, centered under the prompt.
+pub fn build_readouts(lines: &[String], width: u32, height: u32, scale: u32) -> Vec<OverlayVertex> {
+    let mut p = Painter {
+        out: Vec::new(),
+        width: width.max(1) as f32,
+        height: height.max(1) as f32,
+        scale: scale.max(1) as f32,
+    };
+    if lines.is_empty() {
+        return p.out;
+    }
+    let s = p.scale;
+    let pad = 4.0 * s;
+    let line = 10.0 * s;
+    let cols = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let w = cols as f32 * 8.0 * s + 2.0 * pad;
+    let h = lines.len() as f32 * line - 2.0 * s + 2.0 * pad;
+    let x = ((p.width - w) * 0.5).max(0.0);
+    // Below the prompt's box (which sits at 62% and is one line of the next scale up).
+    let y = (p.height * 0.62 + 8.0 * (s + 1.0) + 8.0 * s + 4.0 * s).min(p.height - h);
+    p.rect(x, y, w, h, PANEL);
+    for (i, text) in lines.iter().enumerate() {
+        p.text(x + pad, y + pad + i as f32 * line, text, TEXT);
+    }
+    p.out
 }
 
 /// A one-line prompt in a dark box, centered a little below the middle of the screen.
@@ -653,7 +705,8 @@ impl RenderFeature for PerfOverlayFeature {
             .copied()
             .unwrap_or_default();
         let prompt = interact_prompt(world);
-        if !overlay.enabled && prompt.is_none() {
+        let readouts = readout_lines(world);
+        if !overlay.enabled && prompt.is_none() && readouts.is_empty() {
             return;
         }
         // The panel covers the window, not the camera's viewport.
@@ -671,6 +724,8 @@ impl RenderFeature for PerfOverlayFeature {
             self.scratch
                 .extend(build_prompt(&text, width, height, scale + 1));
         }
+        self.scratch
+            .extend(build_readouts(&readouts, width, height, scale));
         if self.scratch.is_empty() {
             return;
         }
@@ -803,6 +858,20 @@ mod tests {
                 .iter()
                 .all(|v| v.position[1] < 0.0 && v.position[1] > -1.0)
         );
+    }
+
+    #[test]
+    fn readouts_sit_centered_under_the_prompt() {
+        let lines = vec!["Speed  0.42 c".to_string(), "Alt    12 km".to_string()];
+        let verts = build_readouts(&lines, 1920, 1080, 2);
+        let prompt = build_prompt("E  Get out", 1920, 1080, 3);
+        let lowest_prompt = prompt.iter().map(|v| v.position[1]).fold(1.0f32, f32::min);
+        let highest = verts.iter().map(|v| v.position[1]).fold(-1.0f32, f32::max);
+        assert!(highest <= lowest_prompt + 1e-4, "{highest} {lowest_prompt}");
+        let xs = verts.iter().map(|v| v.position[0]);
+        let (min_x, max_x) = xs.fold((1.0f32, -1.0f32), |(a, b), x| (a.min(x), b.max(x)));
+        assert!((min_x + max_x).abs() < 1e-3, "{min_x} {max_x}");
+        assert!(build_readouts(&[], 1920, 1080, 2).is_empty());
     }
 
     #[test]

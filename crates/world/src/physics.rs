@@ -342,6 +342,23 @@ pub struct Velocity {
     pub angular: Vec3,
 }
 
+/// On a ship in cruise (Elite's supercruise): out of normal flight, at `velocity_mps` (world
+/// axes, any speed, past light's). Its owner makes the body kinematic for the cruise and moves
+/// its `Transform` itself; on dropping out it removes this and gives the body a velocity under
+/// the physics limit. Streaming loads nothing around a cruising ship (no cells for sources
+/// within a kilometre of it); space, rendering and audio may key on it.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Cruising {
+    pub velocity_mps: DVec3,
+}
+
+impl crate::shift::FollowsWorldShift for Cruising {
+    fn follow(&mut self, s: &crate::shift::WorldShift) {
+        self.velocity_mps = s.rotation * self.velocity_mps + s.velocity;
+    }
+}
+
 /// Force (N) and torque (N·m) applied every step until changed. World axes; the force acts
 /// at `at` (world point) if given, else at the center of mass.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -665,6 +682,8 @@ pub fn claim_backend(app: &mut App, name: &str) {
 }
 
 pub(crate) fn register(app: &mut App) {
+    use crate::shift::WorldShiftAppExt;
+    app.shift_components::<Cruising>();
     app.init_resource::<PhysicsQueries>()
         .add_message::<ApplyImpulse>()
         .add_message::<ContactEvent>()
@@ -678,6 +697,9 @@ pub(crate) fn register(app: &mut App) {
             "Fit a collider to the model's meshes once they load: box, hull, parts or mesh.",
         )
         .register_component::<Velocity>("Linear (m/s) and angular (rad/s) velocity.")
+        .register_component::<Cruising>(
+            "A ship in cruise: velocity_mps (world, any speed); kinematic, moved by its owner.",
+        )
         .register_component::<ExternalForce>("Continuous force (N) and torque (N·m).")
         .register_component::<MassProperties>(
             "Mass (kg), center of mass, inertia (written by physics).",

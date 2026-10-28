@@ -55,7 +55,7 @@ pub use character::{
 pub use environment::*;
 pub use events::*;
 pub use grid::{Blend, Grid2, Grid3};
-pub use interact::{Interact, InteractTarget, Interactable, Interactor, Using};
+pub use interact::{Interact, InteractTarget, Interactable, Interactor, Readouts, Using};
 pub use locomotion::{
     ClimbLine, Climbable, EngineKind, EngineState, Exhaust, ExhaustEffects, ExhaustKind, Exhausts,
     LocomotionMode, LocomotionState, MoveIntent, VehicleControls, WheelContact, WheelContacts,

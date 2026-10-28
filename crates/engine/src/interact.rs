@@ -4,7 +4,9 @@
 use engine_core::prelude::*;
 use engine_input::ActionState;
 use engine_render::Camera;
-use engine_world::interact::{Interact, InteractTarget, Interactable, Interactor, Using, pick};
+use engine_world::interact::{
+    Interact, InteractTarget, Interactable, Interactor, Readouts, Using, pick,
+};
 
 /// Adds the picking and the `interact` action to [`Interact`] messages. The F3 panel's font
 /// draws the prompt (`engine_debug`) until a UI takes it over.
@@ -13,9 +15,16 @@ pub struct InteractPlugin;
 impl Plugin for InteractPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InteractTarget>()
+            .init_resource::<Readouts>()
             .add_message::<Interact>()
+            .add_systems(First, clear_readouts_system)
             .add_systems(Update, (pick_target_system, interact_system).chain());
     }
+}
+
+/// `First`: [`Readouts`] start empty; what is in use writes its lines again this frame.
+pub fn clear_readouts_system(mut readouts: ResMut<Readouts>) {
+    readouts.lines.clear();
 }
 
 /// `Update`: [`InteractTarget`], from the actors (the [`Interactor`]s, or the active camera

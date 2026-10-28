@@ -580,25 +580,44 @@ impl Plugin for StreamingPlugin {
 /// Where the sources are: (point, range scale) for each, plus its lookahead point. None when
 /// there is no source and no focus (tools and tests: everything loads).
 pub(crate) fn source_points(world: &mut World) -> Option<Vec<(DVec3, f64)>> {
+    // Nothing streams around a ship in cruise: at its speed every cell would be passed before
+    // it was in. Sources riding one (its pilot, its chase camera) count as cruising.
+    let cruising: Vec<DVec3> = world
+        .query_filtered::<&GlobalTransform, With<engine_world::physics::Cruising>>()
+        .iter(world)
+        .map(|g| g.translation())
+        .collect();
+    let calm = |p: DVec3| cruising.iter().all(|c| c.distance(p) > CRUISE_REACH_M);
     let mut points = Vec::new();
+    let mut any = false;
     let mut sources = world.query::<(&GlobalTransform, &StreamingSource, Option<&Velocity>)>();
     for (g, s, v) in sources.iter(world) {
+        any = true;
         let p = g.translation();
+        if !calm(p) {
+            continue;
+        }
         points.push((p, s.range_scale));
         if let Some(v) = v {
             points.push((p + v.linear.as_dvec3() * s.lookahead_s, s.range_scale));
         }
     }
-    if points.is_empty() {
+    if !any {
         let mut foci = world.query_filtered::<&GlobalTransform, With<SimulationFocus>>();
-        points.extend(foci.iter(world).map(|g| (g.translation(), 1.0)));
-        if points.is_empty() {
-            let focus = world.resource::<FocusPoints>();
-            points.extend(focus.points.iter().map(|p| (*p, 1.0)));
+        let mut at: Vec<DVec3> = foci.iter(world).map(|g| g.translation()).collect();
+        if at.is_empty() {
+            at = world.resource::<FocusPoints>().points.clone();
         }
+        any = !at.is_empty();
+        points.extend(at.into_iter().filter(|p| calm(*p)).map(|p| (p, 1.0)));
     }
-    (!points.is_empty()).then_some(points)
+    // Sources all cruising: none wants anything (not "no sources", which loads everything).
+    any.then_some(points)
 }
+
+/// Sources within this distance of a [`Cruising`](engine_world::physics::Cruising) ship are
+/// riding it, meters.
+const CRUISE_REACH_M: f64 = 1000.0;
 
 /// `Last`: queue, build, load, fade and unload cells.
 pub fn stream_system(world: &mut World) {
@@ -1269,6 +1288,47 @@ mod tests {
             .iter(&app.world)
             .filter(|n| n.as_str() == name)
             .count()
+    }
+
+    #[test]
+    fn nothing_streams_around_a_cruising_ship() {
+        let mut app = app();
+        app.stream_cell(
+            StreamCell::new("hut", DVec3::new(50.0, 0.0, 0.0), 20.0, |world| {
+                world.spawn((Name::new("hut"), Transform::default()));
+            })
+            .load_within(100.0),
+        );
+        // The pilot's camera is the source; the ship it rides cruises.
+        let camera = app
+            .world
+            .spawn(StreamingSource {
+                lookahead_s: 0.0,
+                ..Default::default()
+            })
+            .id();
+        let ship = app.world.spawn_empty().id();
+        place(&mut app, camera, 0.0);
+        place(&mut app, ship, 10.0);
+        app.update();
+        assert_eq!(named(&mut app, "hut"), 1);
+        app.world
+            .entity_mut(ship)
+            .insert(engine_world::physics::Cruising {
+                velocity_mps: DVec3::new(3.0e8, 0.0, 0.0),
+            });
+        app.update();
+        assert_eq!(
+            named(&mut app, "hut"),
+            0,
+            "a cruise wants no cells, not all of them"
+        );
+        // Dropping out: it streams again.
+        app.world
+            .entity_mut(ship)
+            .remove::<engine_world::physics::Cruising>();
+        app.update();
+        assert_eq!(named(&mut app, "hut"), 1);
     }
 
     #[test]
