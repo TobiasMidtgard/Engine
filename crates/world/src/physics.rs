@@ -343,9 +343,10 @@ pub struct Velocity {
 }
 
 /// On a ship in cruise (Elite's supercruise): out of normal flight, at `velocity_mps` (world
-/// axes, any speed, past light's). Its owner makes the body kinematic for the cruise and moves
-/// its `Transform` itself; on dropping out it removes this and gives the body a velocity under
-/// the physics limit. Streaming loads nothing around a cruising ship (no cells for sources
+/// axes, any speed, past light's). Its owner takes the ship out of physics for the cruise
+/// (removes its `RigidBody` and `Collider`, or makes it kinematic for short hops: a kinematic
+/// body swept 1e15 m in a step is no use) and moves its `Transform` itself; on dropping out it
+/// removes this and gives the body back with a velocity under the physics limit. Streaming loads nothing around a cruising ship (no cells for sources
 /// within a kilometre of it); space, rendering and audio may key on it.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -698,7 +699,7 @@ pub(crate) fn register(app: &mut App) {
         )
         .register_component::<Velocity>("Linear (m/s) and angular (rad/s) velocity.")
         .register_component::<Cruising>(
-            "A ship in cruise: velocity_mps (world, any speed); kinematic, moved by its owner.",
+            "A ship in cruise: velocity_mps (world, any speed); out of physics, moved by its owner.",
         )
         .register_component::<ExternalForce>("Continuous force (N) and torque (N·m).")
         .register_component::<MassProperties>(
