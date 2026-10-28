@@ -25,6 +25,23 @@ compresses and stretches.
   trajectory carries on past its end. Strafing and backpedalling hand over to the blend
   tree. Fetched people move with 28 Rocketbox takes (`anim/moves/`); `examples/motion_db.rs`
   reports a database and which moves a scripted walk plays.
+- **Combat.** `combat::AttackSet`s are serde data like graphs: each move plays a clip over
+  the character's graph (`Animator::play_over`, an overlay slot with fades and crossfades)
+  and carries timed windows (Unreal's montage notify states): `hit` (the striking hand
+  lands a `DamageEvent` on the target when its knuckles come within reach of the face or
+  chest, once per window, and both fighters freeze for a few frames of hitstop,
+  `Animator::freeze_for`), `cancel` (a buffered press that matches one of the move's links
+  starts the next move), `warp` (the attacker closes to striking range and turns to face
+  the target, at a capped speed, like Unreal's Motion Warping) and `armor`. An `Attacker`
+  takes the `attack_light` / `attack_heavy` triggers; only the newest press counts and it
+  waits 0.2 s (For Honor's buffering), so an early press still links and mashing doesn't
+  queue a combo. While a strike plays, two-bone IK pulls the fist onto the target's face,
+  weighted by the clip's `strike` curve, so blows land where the target is rather than
+  where the clip was authored. The built-in `boxing` set chains jab, cross, hook and
+  uppercut (generated punch clips with chest turn, a dip on the uppercut and a pivoting
+  rear foot); the struck person's flinch (`hit`) snaps the head away from each blow.
+  Damage numbers and who may hit whom stay with the combat module, which reads the
+  published phase, cancel and armor flags.
 - **IK.** `FootIk` plants feet on uneven ground (pelvis drop, two-bone legs, foot tilt, toes
   stay flat at toe-off) and locks them: a foot that comes down still is held where it
   landed until it lifts, however the clip's stride matches the body's speed, and a body
@@ -234,7 +251,8 @@ renderer's generated materials (planks, concrete, sand, rock), and the spider cl
 | Step course | A walker leans into a ramp, crosses a deck, walks down stairs watching the steps with feet planted by IK and arms a little out, then runs back leaning into the turns (`paddock_stairs`) |
 | Footwork drill | An athlete walks a square facing one way: ahead, sidestepping left, backpedalling, sidestepping right, blending through the corners, every planted foot still on the sand (`paddock_footwork`) |
 | Shuttle lane | An athlete sprints the lane flat out from a standing start (leaning into it, then at 7 m/s with the trunk forward, knees driven high, heels kicked up and arms pumping from hip to chin), digs in to stop, runs back backwards, turns on the spot and runs sideways to the start; a coach beside the lane, arms folded, turns where they stand to keep watching, the head first and the feet stepping round once the runner is well off to one side (`paddock_sprint_start`, `paddock_sprint_stop`) |
-| Sparring partner | A lifter in a boxer's guard (lead foot and fist forward, elbows tucked, bouncing lightly) takes a jab to the chin (head snaps back), a hook to the side of the head, a blow to the stomach (folds over it) and a shove on the back of a shoulder, flinching away from each and recovering to the guard without being shoved off his feet (`paddock_flinch`) |
+| Sparring partner | A lifter in a boxer's guard (lead foot and fist forward, elbows tucked, bouncing lightly) takes the boxer's combo to the face (the head snaps back from each punch), a blow to the stomach (folds over it) and a shove on the back of a shoulder, flinching away from each and recovering to the guard without being shoved off his feet (`paddock_flinch`) |
+| Boxer | An athlete squares up to the sparring partner and throws jab, cross, hook and uppercut, each press buffered until the last punch's cancel window opens; she steps in to range on the jab and closer for the hook and uppercut, each fist reaching the face, and both freeze for a beat as each lands (`paddock_combo`) |
 | Horse oval | A textured horse walks, trots, canters and gallops by speed; in the swing the knees fold, the hocks bend and the hooves curl back behind the fetlocks; haunches and shoulders flex with each stride; the mane rides the neck and the tail streams |
 | Dog run | A furred Labrador walks off, trots, canters out of a turn and gallops down the far straight, the spine flexing with each stride, ears and tail swinging; it pants as it goes (`paddock_dog_trot`, `paddock_dog`) |
 | Spider garden | A furred red-knee tarantula climbs over boulders in alternating sets of legs, a wave running from the back legs forward; its palps tap, its jaws work and its abdomen sways (`paddock_spider`). On the far side it slows to a stop and rears up in threat: the front of the body tips up on the planted back legs, the first pair of legs rises high and the second reaches out level, the palps lift and the fangs unfold, then it settles back onto its footholds and walks on (`paddock_spider_threat`) |
@@ -271,6 +289,12 @@ back.
 and checks paces and turns, that standing, walking, running and turning each play their
 move with every jump blended (no bone turns over 0.3 rad in a frame), that motion-matched
 walking fires footsteps, and that strafing hands over to the fallback and back.
+`tests/combat.rs` puts a boxer in front of a partner and checks that four presses link into
+jab, cross, hook and uppercut that step in and all land with a few frames of hitstop, that
+an early press waits in the buffer and a stale one is dropped, that mashing plays one move
+at a time, and that blows out of reach miss (with the warp it would have taken published).
+`tests/sparring.rs` checks the paddock's boxer lands the combo and the partner's head snaps
+back from the jab.
 `tests/hits.rs` punches a person and checks the head snaps back and recovers.
 `tests/body_request.rs` asks for a hiker, a horse, a 40 cm dog and an unknown kind on
 entities the test moves itself: the bodies walk, run and gallop from that motion, step on the ground, keep the

@@ -1,7 +1,8 @@
-//! The paddock's sparring partner holds a boxer's guard, snaps his head back from a jab and
-//! folds a little over a blow to the stomach, then comes back to the guard, without being
-//! shoved off his feet.
+//! The paddock's sparring partner holds a boxer's guard, snaps his head back from the boxer's
+//! jab and folds a little over a blow to the stomach, then comes back to the guard, without
+//! being shoved off his feet; the boxer's combo lands.
 
+use engine_anim::combat::Attacker;
 use engine_anim::demo::{DemoEntities, spawn_demo_world};
 use engine_anim::{AnimationPlugin, Animator};
 use engine_core::prelude::*;
@@ -43,18 +44,27 @@ fn sparring_partner_guards_and_flinches() {
     // How far the neck is ahead of the chest (m, − forward): in the guard, then most.
     let (mut lean, mut fold) = (0.0f32, 0.0f32);
     let (mut lowest_hips, mut farthest_hips) = (f32::MAX, 0.0f32);
-    // The chin is struck at 0.8 s, the side of the head at 2.3 s, the stomach at 3.8 s and
-    // the back of a shoulder at 5 s.
+    // The boxer's combo lands on the head from about 0.6 s; the stomach is struck at 3.8 s
+    // and the back of a shoulder at 5 s.
+    let (mut hits, mut last, mut first_hit) = (0, 0, None::<f64>);
     for frame in 1..=(6.0 / STEP) as usize {
         app.update();
         let t = frame as f64 * STEP;
         let w = &app.world;
+        let landed = w.get::<Attacker>(d.boxer).unwrap().hits;
+        if landed != last {
+            if landed > last {
+                hits += landed - last;
+                first_hit.get_or_insert(t);
+            }
+            last = landed;
+        }
         let hips = local(w, e, "hips");
         if t > 0.5 {
             lowest_hips = lowest_hips.min(hips.y);
             farthest_hips = farthest_hips.max(hips.with_y(0.0).length());
         }
-        if (0.7..0.8).contains(&t) {
+        if (0.3..0.4).contains(&t) {
             guard_pitch = head_pitch(w, e);
             lean = (local(w, e, "neck") - local(w, e, "chest")).z;
             // Fists up by the chin, the lead (left) one out in front.
@@ -71,13 +81,18 @@ fn sparring_partner_guards_and_flinches() {
                 "lead fist at {lead}, rear at {rear}"
             );
         }
-        if (0.8..1.0).contains(&t) {
+        if first_hit.is_some_and(|h| t - h < 0.3) {
             snap = snap.max(head_pitch(w, e) - guard_pitch);
         }
         if (3.8..4.0).contains(&t) {
             fold = fold.min((local(w, e, "neck") - local(w, e, "chest")).z);
         }
     }
+    assert!(hits >= 4, "only {hits} of the combo's punches landed");
+    assert!(
+        first_hit.is_some_and(|h| h < 0.8),
+        "the jab landed at {first_hit:?} s"
+    );
     assert!(snap > 15.0, "the head snapped back only {snap:.1}°");
     assert!(
         fold < lean - 0.02,

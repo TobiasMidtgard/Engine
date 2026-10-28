@@ -507,6 +507,13 @@ impl MotionDatabase {
         frame + 1 < self.frame_count() && self.frame_range[frame] == self.frame_range[frame + 1]
     }
 
+    fn start_of(&self, frame: usize) -> usize {
+        match self.frame_range[frame] as usize {
+            0 => 0,
+            k => self.ranges[k - 1].end,
+        }
+    }
+
     fn end_of(&self, frame: usize) -> usize {
         self.ranges[self.frame_range[frame] as usize].end
     }
@@ -539,9 +546,18 @@ impl MotionDatabase {
 
     /// The candidate frame closest to `query`, and its cost.
     pub fn search(&self, query: &[f32; DIM]) -> Option<(usize, f32)> {
+        self.search_skipping(query, &[])
+    }
+
+    /// [`MotionDatabase::search`] leaving out the frames in `skip`.
+    pub fn search_skipping(
+        &self,
+        query: &[f32; DIM],
+        skip: &[std::ops::Range<usize>],
+    ) -> Option<(usize, f32)> {
         let mut best: Option<(usize, f32)> = None;
         for (i, f) in self.features.iter().enumerate() {
-            if !self.candidate[i] {
+            if !self.candidate[i] || skip.iter().any(|r| r.contains(&i)) {
                 continue;
             }
             let limit = best.map_or(f32::INFINITY, |b| b.1);
@@ -624,6 +640,10 @@ impl MotionDatabase {
 const SEARCH_SECS: f32 = 0.1;
 /// A search only jumps when it beats carrying on by this much (cost units).
 const SWITCH_MARGIN: f32 = 0.5;
+/// The search leaves out the stretch playing, from this many frames before it began (1/3 s)…
+const SKIP_BACK: usize = 10;
+/// …and the stretches played this long ago or less, seconds.
+const HISTORY_SECS: f32 = 0.6;
 /// Time constant of a change of pace in the predicted path, seconds.
 const ACCEL_SECS: f32 = 0.3;
 /// Half-life of the pose difference after a jump, seconds.
@@ -642,6 +662,10 @@ pub struct MotionPlayer {
     feet: [usize; 2],
     /// Frame playing (fractional), `None` before the first search.
     frame: Option<f32>,
+    /// Where the stretch playing began.
+    entered: usize,
+    /// Stretches played lately, left out of the search for a while (seconds left).
+    played: Vec<(std::ops::Range<usize>, f32)>,
     since_search: f32,
     /// Inertialization offsets per bone: translation and its velocity, rotation (scaled axis)
     /// and its velocity.
@@ -675,6 +699,8 @@ impl MotionPlayer {
             hips: rig.hips,
             feet: rig.feet,
             frame: None,
+            entered: 0,
+            played: Vec::new(),
             since_search: f32::INFINITY,
             offset_t: vec![(Vec3::ZERO, Vec3::ZERO); n],
             offset_r: vec![(Vec3::ZERO, Vec3::ZERO); n],
@@ -687,6 +713,7 @@ impl MotionPlayer {
 
     pub fn reset(&mut self) {
         self.frame = None;
+        self.played.clear();
         self.since_search = f32::INFINITY;
         self.fallback = 0.0;
         for o in self.offset_t.iter_mut().chain(self.offset_r.iter_mut()) {
@@ -812,6 +839,10 @@ impl MotionPlayer {
             *frame = next;
         }
         self.since_search += dt;
+        self.played.retain_mut(|p| {
+            p.1 -= dt;
+            p.1 > 0.0
+        });
         let at_end = self
             .frame
             .is_none_or(|f| f as usize + 1 >= db.end_of(f as usize) || !db.continues(f as usize));
@@ -827,7 +858,14 @@ impl MotionPlayer {
                 None => self.measure().unwrap_or([0.0; DIM]),
             };
             db.set_trajectory(&mut query, &trajectory);
-            if let Some((best, cost)) = db.search(&query) {
+            // Not back into the stretch playing, nor ones played lately: with nothing that
+            // fits well, the search would keep choosing the same few frames (the tail of a
+            // turn, say) and the character would stutter on the spot (Unreal's pose
+            // reselect history).
+            let here = current.map(|c| self.stretch(c));
+            let mut skip: Vec<_> = self.played.iter().map(|p| p.0.clone()).collect();
+            skip.extend(here.clone());
+            if let Some((best, cost)) = db.search_skipping(&query, &skip) {
                 let keep = current
                     .filter(|&c| db.candidate[c] && !at_end)
                     .map(|c| db.cost(c, &query));
@@ -841,7 +879,11 @@ impl MotionPlayer {
                     }
                 };
                 if jump {
+                    if let Some(h) = here {
+                        self.played.push((h, HISTORY_SECS));
+                    }
                     self.jump_to(best, dt);
+                    self.entered = best;
                 }
             }
         }
@@ -866,6 +908,18 @@ impl MotionPlayer {
         self.last_dt = dt;
         let m = n.min(out.len());
         out[..m].copy_from_slice(&self.last[..m]);
+    }
+
+    /// The frames played since entering this stretch, from a little before it (within its
+    /// move) to a little after `current`.
+    fn stretch(&self, current: usize) -> std::ops::Range<usize> {
+        let start = self.db.start_of(current);
+        let from = if (start..=current).contains(&self.entered) {
+            self.entered
+        } else {
+            current
+        };
+        from.saturating_sub(SKIP_BACK).max(start)..current + 4
     }
 
     /// Root velocity (m/s, root space) of the frame playing.
