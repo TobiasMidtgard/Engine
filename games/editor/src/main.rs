@@ -23,6 +23,8 @@ mod convert;
 mod demos;
 mod editor;
 mod egui_bridge;
+mod folder;
+mod hide;
 mod import;
 mod inspector;
 mod landscape;
@@ -136,6 +138,7 @@ fn main() {
             Some("round19") => shots::round19(dir),
             Some("round20") => shots::round20(dir),
             Some("round21") => shots::round21(dir),
+            Some("round22") => shots::round22(dir),
             Some("play") => shots::play_in_editor(dir),
             _ => shots::gallery(dir),
         };
@@ -187,6 +190,12 @@ impl Plugin for EditorPlugin {
             .register_component::<prefab::PrefabPart>(
                 "Which part of its prefab file this entity is (its key there; \"\" for the root).",
             )
+            .register_component::<folder::Folder>(
+                "An outliner folder: sorts the scene, holds what is inside it, is not a thing in \
+                 the world (the editor keeps its transform at identity).",
+            )
+            .add_systems(PostUpdate, hide::switch_off)
+            .add_systems(Last, hide::switch_on)
             .add_render_feature(egui_bridge::EguiFeature::default())
             .add_render_feature(outline::OutlineFeature::default())
             .add_systems(Startup, setup)

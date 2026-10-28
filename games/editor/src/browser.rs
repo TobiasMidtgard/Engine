@@ -85,6 +85,8 @@ pub struct Browser {
     pub tile_rects: HashMap<Asset, egui::Rect>,
     pub folder_rects: HashMap<Asset, egui::Rect>,
     pub save_as: String,
+    /// Whether the pointer was over the browser this frame (it takes F2 then).
+    pub hovered: bool,
 }
 
 impl Browser {
@@ -216,6 +218,7 @@ pub fn content(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     let mut b = std::mem::take(&mut editor.browser);
     b.tile_rects.clear();
     b.folder_rects.clear();
+    b.hovered = ui.rect_contains_pointer(ui.max_rect());
     let mut acts = Vec::new();
 
     egui::Panel::left("content sources")

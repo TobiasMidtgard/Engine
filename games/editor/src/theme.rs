@@ -118,7 +118,7 @@ pub fn entity_icon(world: &World, e: Entity) -> &'static str {
         "🎥"
     } else if world.get::<MeshRenderer>(e).is_some() {
         "◼"
-    } else if world.get::<Children>(e).is_some() {
+    } else if world.get::<crate::folder::Folder>(e).is_some() {
         "📁"
     } else {
         "○"
@@ -185,6 +185,8 @@ mod tests {
             include_str!("prefab_ui.rs"),
             include_str!("shots.rs"),
             include_str!("browser.rs"),
+            include_str!("hide.rs"),
+            include_str!("folder.rs"),
             include_str!("content.rs"),
             include_str!("thumbs.rs"),
         ];

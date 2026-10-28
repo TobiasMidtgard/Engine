@@ -2145,6 +2145,69 @@ pub fn round21(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Round 22: the outliner. A folder holding the loose props, the crate stack hidden with its
+/// eye and the ramp locked, the props isolated, a type filter, renaming in place, and Play
+/// showing what the editor hides (hiding is the editor's, not the game's).
+pub fn round22(dir: impl Into<PathBuf>) -> ShotScript {
+    use crate::hide;
+    let steps = vec![
+        Step::Do(Box::new(|world, editor| {
+            editor.icons = false;
+            editor.selection = ["Barrel", "Boulder", "Stone", "Marble ball"]
+                .iter()
+                .filter_map(|n| find(world, n))
+                .collect();
+            let folder = crate::folder::create(world, editor);
+            world.entity_mut(folder).insert(Name::new("Props"));
+            if let Some(e) = find(world, "Crate stack") {
+                editor.hide.hidden.insert(e);
+            }
+            if let Some(e) = find(world, "Ramp") {
+                editor.hide.locked.insert(e);
+            }
+            editor.select(find(world, "Ramp"));
+        })),
+        Step::Camera(DVec3::new(9.5, 6.0, 9.0), DVec3::new(-0.5, 0.6, -2.0)),
+        Step::Wait(40),
+        Step::Shot("102_folder_hidden_and_locked"),
+        Step::Do(Box::new(|world, editor| {
+            editor.select(find(world, "Props"));
+            hide::toggle_isolation(world, editor);
+        })),
+        Step::Wait(30),
+        Step::Shot("103_isolated"),
+        Step::Do(Box::new(|world, editor| {
+            hide::toggle_isolation(world, editor);
+            editor.outliner_types = vec!["Lights", "Locked"];
+            editor.select(None);
+        })),
+        Step::Wait(30),
+        Step::Shot("104_type_filter"),
+        Step::Do(Box::new(|world, editor| {
+            editor.outliner_types.clear();
+            if let Some(e) = find(world, "Props") {
+                editor.select(Some(e));
+                editor.outliner_rename = Some((e, "Rocks and props".into(), true));
+            }
+        })),
+        Step::Wait(6),
+        Step::Shot("105_rename_in_place"),
+        Step::Do(Box::new(|world, editor| {
+            editor.outliner_rename = None;
+            editor.select(None);
+            editor::play(world, editor);
+        })),
+        Step::Wait(30),
+        Step::Shot("106_play_shows_everything"),
+        Step::Do(Box::new(|world, editor| {
+            editor::stop(world, editor);
+        })),
+        Step::Wait(20),
+        Step::Shot("107_back_in_edit_still_hidden"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {

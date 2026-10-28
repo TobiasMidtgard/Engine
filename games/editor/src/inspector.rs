@@ -105,8 +105,17 @@ pub fn entity_details(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor)
     // A part of a placed prefab: what this copy changes from its file.
     let marks = crate::prefab_ui::marks(world, entity);
     let hidden = ["PrefabInstance", "PrefabPart"];
+    // A folder only sorts the outliner: it has nothing to edit but its name.
+    let folder = crate::folder::is_folder(world, entity);
+    if folder {
+        ui.label(theme::dim(
+            "A folder: it sorts the outliner and holds what is inside it. Drag rows onto it.",
+        ));
+    }
     for entry in entries {
-        if hidden.contains(&entry.name.as_str()) {
+        if hidden.contains(&entry.name.as_str())
+            || (folder && ["Transform", "Folder"].contains(&entry.name.as_str()))
+        {
             continue;
         }
         let Some(value) = (entry.get)(world, entity) else {

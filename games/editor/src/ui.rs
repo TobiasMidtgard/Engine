@@ -438,19 +438,98 @@ fn status_bar(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
 
 // ------------------------------------------------------------------------- outliner
 
+/// The outliner's type filter, as Unreal's outliner filters and Unity's `t:` search.
+pub const OUTLINER_TYPES: [&str; 8] = [
+    "Meshes",
+    "Lights",
+    "Cameras",
+    "Models",
+    "Prefab copies",
+    "Folders",
+    "Hidden",
+    "Locked",
+];
+
+fn of_type(world: &World, editor: &Editor, e: Entity, kind: &str) -> bool {
+    match kind {
+        "Meshes" => world.get::<MeshRenderer>(e).is_some(),
+        "Lights" => {
+            world.get::<PointLight>(e).is_some() || world.get::<DirectionalLight>(e).is_some()
+        }
+        "Cameras" => world.get::<Camera>(e).is_some(),
+        "Models" => world.get::<crate::models::Model>(e).is_some(),
+        "Prefab copies" => world.get::<prefab::PrefabInstance>(e).is_some(),
+        "Folders" => crate::folder::is_folder(world, e),
+        "Hidden" => editor.hide.hidden.contains(&e),
+        "Locked" => editor.hide.locked.contains(&e),
+        _ => false,
+    }
+}
+
+/// Whether the row itself passes the search and the type filter.
+fn row_matches(world: &World, editor: &Editor, e: Entity, filter: &str) -> bool {
+    (filter.is_empty() || scene_ops::label(world, e).to_lowercase().contains(filter))
+        && (editor.outliner_types.is_empty()
+            || editor
+                .outliner_types
+                .iter()
+                .any(|k| of_type(world, editor, e, k)))
+}
+
+fn filtering(editor: &Editor, filter: &str) -> bool {
+    !filter.is_empty() || !editor.outliner_types.is_empty()
+}
+
 fn outliner(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
         ui.add(
             egui::TextEdit::singleline(&mut editor.outliner_filter)
                 .hint_text("🔍 Search…")
-                .desired_width(ui.available_width() - 34.0),
+                .desired_width(ui.available_width() - 92.0),
         );
+        let label = if editor.outliner_types.is_empty() {
+            "⏷".to_string()
+        } else {
+            format!("{} ⏷", editor.outliner_types.len())
+        };
+        ui.menu_button(label, |ui| {
+            for kind in OUTLINER_TYPES {
+                let mut on = editor.outliner_types.contains(&kind);
+                if ui.checkbox(&mut on, kind).changed() {
+                    if on {
+                        editor.outliner_types.push(kind);
+                    } else {
+                        editor.outliner_types.retain(|k| *k != kind);
+                    }
+                }
+            }
+            ui.separator();
+            if ui.button("Show every type").clicked() {
+                editor.outliner_types.clear();
+                ui.close();
+            }
+        })
+        .response
+        .on_hover_text("Show only some types");
+        if ui
+            .button("📁")
+            .on_hover_text("New folder (holding the selection)")
+            .clicked()
+        {
+            let folder = crate::folder::create(world, editor);
+            editor.outliner_rename = Some((folder, "New folder".into(), true));
+        }
         ui.menu_button("➕", |ui| create_menu(ui, world, editor))
             .response
             .on_hover_text("Create");
     });
     ui.add_space(2.0);
     let filter = editor.outliner_filter.to_lowercase();
+    // The footer stays put under the list.
+    egui::Panel::bottom("outliner footer")
+        .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(2, 3)))
+        .show(ui, |ui| outliner_footer(ui, world, editor));
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -490,6 +569,149 @@ fn outliner(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
         });
 }
 
+/// Counts, and buttons to bring back what is hidden or locked.
+fn outliner_footer(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
+    let mut q = world.query_filtered::<Entity, With<InScene>>();
+    let total = q.iter(world).count();
+    let (hidden, locked) = (editor.hide.hidden.len(), editor.hide.locked.len());
+    let mut counts = vec![format!("{total} objects")];
+    if hidden > 0 {
+        counts.push(format!("{hidden} hidden"));
+    }
+    if locked > 0 {
+        counts.push(format!("{locked} locked"));
+    }
+    ui.label(theme::dim(counts.join("  ·  ")));
+    if hidden + locked > 0 {
+        ui.horizontal(|ui| {
+            if hidden > 0
+                && ui
+                    .small_button("👁 Show all")
+                    .on_hover_text("Show everything hidden in this scene")
+                    .clicked()
+            {
+                crate::hide::show_all(world, editor);
+            }
+            if locked > 0 && ui.small_button("🔓 Unlock all").clicked() {
+                crate::hide::unlock_all(world, editor);
+            }
+        });
+    }
+}
+
+/// The eye and lock beside a row: bright when set on this row, dim when a parent sets it.
+fn row_toggles(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    editor: &mut Editor,
+    entity: Entity,
+    row: egui::Rect,
+) {
+    let right = ui.clip_rect().right() - 4.0;
+    let own_hidden = editor.hide.hidden.contains(&entity);
+    let hidden = crate::hide::is_hidden(world, &editor.hide, entity);
+    let own_locked = editor.hide.locked.contains(&entity);
+    let locked = crate::hide::is_locked(world, &editor.hide, entity);
+    let hovered = ui.rect_contains_pointer(egui::Rect::from_x_y_ranges(
+        row.left()..=right,
+        row.y_range(),
+    ));
+    for (i, (on, by_parent, icon_on, icon_off, tip)) in [
+        (
+            own_hidden,
+            hidden && !own_hidden,
+            "👁",
+            "👁",
+            "Hide or show in the scene view (H); the game still shows it",
+        ),
+        (
+            own_locked,
+            locked && !own_locked,
+            "🔒",
+            "🔓",
+            "Lock: can't be clicked or moved in the scene view",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let rect = egui::Rect::from_center_size(
+            egui::pos2(right - 10.0 - 22.0 * (1 - i) as f32, row.center().y),
+            egui::vec2(20.0, row.height().min(20.0)),
+        );
+        let id = egui::Id::new(("outliner toggle", entity, i));
+        let r = ui
+            .interact(rect, id, egui::Sense::click())
+            .on_hover_text(tip);
+        let set = if i == 0 { on } else { on || by_parent };
+        // The eye shows while visible (dim) or crossed out while hidden; the lock only when
+        // locked or hovered, as Unity's pickability column.
+        let (text, color) = if i == 0 {
+            if on || by_parent {
+                (
+                    icon_off,
+                    if on {
+                        theme::WARN
+                    } else {
+                        theme::TEXT_DIM.gamma_multiply(0.6)
+                    },
+                )
+            } else if hovered || r.hovered() {
+                (icon_on, theme::TEXT)
+            } else {
+                (icon_on, theme::TEXT_DIM.gamma_multiply(0.7))
+            }
+        } else if set {
+            (
+                icon_on,
+                if on {
+                    theme::WARN
+                } else {
+                    theme::TEXT_DIM.gamma_multiply(0.6)
+                },
+            )
+        } else if hovered || r.hovered() {
+            (icon_off, theme::TEXT_DIM)
+        } else {
+            continue;
+        };
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::proportional(15.0),
+            color,
+        );
+        if i == 0 && (on || by_parent) {
+            // Crossed out.
+            ui.painter().line_segment(
+                [
+                    rect.left_bottom() + egui::vec2(4.0, -4.0),
+                    rect.right_top() + egui::vec2(-4.0, 4.0),
+                ],
+                egui::Stroke::new(1.5, color),
+            );
+        }
+        if r.clicked() {
+            let set = if i == 0 {
+                &mut editor.hide.hidden
+            } else {
+                &mut editor.hide.locked
+            };
+            if !set.remove(&entity) {
+                set.insert(entity);
+            }
+            if i == 0 && editor.hide.hidden.contains(&entity) {
+                let hide = editor.hide.clone();
+                editor
+                    .selection
+                    .retain(|&e| !crate::hide::is_hidden(world, &hide, e));
+            }
+            crate::hide::save(world, editor);
+        }
+    }
+}
+
 fn outliner_row(
     ui: &mut egui::Ui,
     world: &mut World,
@@ -507,28 +729,68 @@ fn outliner_row(
                 .collect()
         })
         .unwrap_or_default();
-    if !filter.is_empty() && !subtree_matches(world, entity, filter) {
+    let searching = filtering(editor, filter);
+    if searching && !subtree_matches(world, editor, entity, filter) {
         return;
     }
     let selected = editor.is_selected(entity);
     let id = ui.make_persistent_id(("outliner", entity));
-    let icon = theme::entity_icon(world, entity);
+    let folder = crate::folder::is_folder(world, entity);
+    let icon = if folder {
+        "📁"
+    } else {
+        theme::entity_icon(world, entity)
+    };
     let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
         ui.ctx(),
         id,
-        depth == 0 && children.len() <= 8,
+        depth == 0 && (folder || children.len() <= 8),
     );
-    if !filter.is_empty() {
+    if searching {
         state.set_open(true);
     }
+    let hidden = crate::hide::is_hidden(world, &editor.hide, entity);
+    // Rows that only lead to a match are dimmed, as Unreal's outliner does.
+    let leads_only = searching && !row_matches(world, editor, entity, filter);
     let style = crate::prefab_ui::row_style(world, entity);
     let row = |ui: &mut egui::Ui, world: &mut World, editor: &mut Editor| {
+        if let Some((e, text, focus)) = editor.outliner_rename.as_mut()
+            && *e == entity
+        {
+            let r =
+                ui.add(egui::TextEdit::singleline(text).desired_width(ui.available_width() - 50.0));
+            if *focus {
+                r.request_focus();
+                *focus = false;
+            }
+            let cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            if cancel || r.lost_focus() {
+                let new = text.trim().to_string();
+                editor.outliner_rename = None;
+                if !cancel && !new.is_empty() && new != name {
+                    editor::apply(
+                        world,
+                        editor,
+                        crate::undo::Command::Rename {
+                            entity,
+                            before: world.get::<Name>(entity).map(|n| n.as_str().to_string()),
+                            after: Some(new),
+                        },
+                    );
+                }
+            }
+            return;
+        }
         let icon = style.icon.unwrap_or(icon);
         let text = egui::RichText::new(format!("{icon}  {name}"));
         let text = if selected {
             text.color(egui::Color32::WHITE)
+        } else if hidden || leads_only {
+            text.color(theme::TEXT_DIM.gamma_multiply(0.7))
         } else if let Some(color) = style.color {
             text.color(color)
+        } else if folder {
+            text.color(egui::Color32::from_rgb(0xe0, 0xc0, 0x70))
         } else {
             text
         };
@@ -536,6 +798,7 @@ fn outliner_row(
             ui.add(egui::Button::selectable(selected, text).frame_when_inactive(selected))
         });
         let r = row.inner;
+        row_toggles(ui, world, editor, entity, r.rect);
         if style.changed {
             crate::prefab_ui::bar(ui, r.rect);
         }
@@ -584,10 +847,59 @@ fn outliner_row(
             );
         }
         r.context_menu(|ui| {
-            editor.select(Some(entity));
+            if !editor.is_selected(entity) {
+                editor.select(Some(entity));
+            }
             if ui.button("Frame").clicked() {
                 editor::focus_selection(world, editor);
             }
+            if ui.button("Rename").clicked() {
+                editor.outliner_rename = Some((entity, name.clone(), true));
+                ui.close();
+            }
+            let own_hidden = editor.hide.hidden.contains(&entity);
+            if ui
+                .button(if own_hidden { "Show" } else { "Hide" })
+                .on_hover_text("H")
+                .clicked()
+            {
+                crate::hide::toggle_selection(world, editor);
+                ui.close();
+            }
+            if ui
+                .button(if editor.hide.isolated.is_some() {
+                    "Stop isolating"
+                } else {
+                    "Isolate"
+                })
+                .on_hover_text("Shift+H: only the selection is drawn")
+                .clicked()
+            {
+                crate::hide::toggle_isolation(world, editor);
+                ui.close();
+            }
+            let own_locked = editor.hide.locked.contains(&entity);
+            if ui
+                .button(if own_locked { "Unlock" } else { "Lock" })
+                .clicked()
+            {
+                let lock = !own_locked;
+                for &e in &editor.selection.clone() {
+                    if lock {
+                        editor.hide.locked.insert(e);
+                    } else {
+                        editor.hide.locked.remove(&e);
+                    }
+                }
+                crate::hide::save(world, editor);
+                ui.close();
+            }
+            if ui.button("New folder from selection").clicked() {
+                let folder = crate::folder::create(world, editor);
+                editor.outliner_rename = Some((folder, "New folder".into(), true));
+                ui.close();
+            }
+            ui.separator();
             if ui.button("Copy").clicked() {
                 editor::copy_selection(world, editor);
             }
@@ -633,16 +945,13 @@ fn outliner_row(
         });
 }
 
-fn subtree_matches(world: &World, entity: Entity, filter: &str) -> bool {
-    if scene_ops::label(world, entity)
-        .to_lowercase()
-        .contains(filter)
-    {
+fn subtree_matches(world: &World, editor: &Editor, entity: Entity, filter: &str) -> bool {
+    if row_matches(world, editor, entity, filter) {
         return true;
     }
     world.get::<Children>(entity).is_some_and(|c| {
         c.iter()
-            .any(|k| world.get::<InScene>(k).is_some() && subtree_matches(world, k, filter))
+            .any(|k| world.get::<InScene>(k).is_some() && subtree_matches(world, editor, k, filter))
     })
 }
 
@@ -787,6 +1096,22 @@ fn shortcuts(ctx: &egui::Context, world: &mut World, editor: &mut Editor) {
     }
     if pressed(egui::Key::F, false) {
         editor::focus_selection(world, editor);
+    }
+    // H hides or shows the selection, Shift+H isolates it (Unity's keys).
+    if ctx.input(|i| i.key_pressed(egui::Key::H) && !i.modifiers.command) {
+        if ctx.input(|i| i.modifiers.shift) {
+            crate::hide::toggle_isolation(world, editor);
+        } else {
+            crate::hide::toggle_selection(world, editor);
+        }
+    }
+    // F2 renames the selected entity in the outliner (the Content Browser takes F2 when the
+    // pointer is over it).
+    if pressed(egui::Key::F2, false)
+        && !editor.browser.hovered
+        && let Some(e) = editor.primary()
+    {
+        editor.outliner_rename = Some((e, scene_ops::label(world, e), true));
     }
     if pressed(egui::Key::Escape, false) {
         if crate::camera_preview::stop_pilot(world, editor) {

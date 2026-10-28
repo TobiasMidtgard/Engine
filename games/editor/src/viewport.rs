@@ -237,6 +237,10 @@ fn gizmo(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, view: &ViewI
         if crate::camera_preview::piloting(world) == Some(e) {
             continue;
         }
+        // Locked things and folders hold still.
+        if crate::hide::is_locked(world, &editor.hide, e) || crate::folder::is_folder(world, e) {
+            continue;
+        }
         let (Some(local), Some(global)) =
             (world.get::<Transform>(e), world.get::<GlobalTransform>(e))
         else {
@@ -380,12 +384,27 @@ fn click_select(
 ) {
     let icon_hit = icons
         .iter()
+        .filter(|(e, _)| crate::hide::pickable(world, &editor.hide, *e))
         .filter(|(_, p)| p.distance(pos) < ICON_RADIUS + 3.0)
         .min_by(|a, b| a.1.distance(pos).total_cmp(&b.1.distance(pos)))
         .map(|(e, _)| *e);
     let hit = icon_hit.or_else(|| {
         let (o, d) = view.ray(pos);
-        picking::pick_mesh(world, o, d).map(|(e, _)| editor::selectable(world, e))
+        // Hidden and locked things can't be clicked.
+        let hide = editor.hide.clone();
+        let blocked: std::collections::HashSet<Entity> =
+            if hide.is_empty() && hide.locked.is_empty() {
+                Default::default()
+            } else {
+                let mut q = world.query_filtered::<Entity, With<GlobalTransform>>();
+                let all: Vec<Entity> = q.iter(world).collect();
+                all.into_iter()
+                    .filter(|&e| !crate::hide::pickable(world, &hide, e))
+                    .collect()
+            };
+        picking::pick_mesh_except(world, o, d, &|e| blocked.contains(&e))
+            .map(|(e, _)| editor::selectable(world, e))
+            .filter(|&e| crate::hide::pickable(world, &hide, e))
     });
     match (hit, additive) {
         (Some(e), true) => editor.toggle(e),
@@ -437,7 +456,8 @@ fn box_select(
     if area.width() < 4.0 && area.height() < 4.0 {
         return;
     }
-    let found = entities_in_box(world, view, area);
+    let mut found = entities_in_box(world, view, area);
+    found.retain(|&e| crate::hide::pickable(world, &editor.hide, e));
     let additive = ui.input(|i| i.modifiers.ctrl || i.modifiers.shift);
     if !additive {
         editor.selection.clear();
@@ -556,6 +576,9 @@ fn draw_icons(
         let Some(kind) = editor::has_icon(world, e) else {
             continue;
         };
+        if crate::hide::is_hidden(world, &editor.hide, e) {
+            continue;
+        }
         let Some(pos) = view.project(at) else {
             continue;
         };
@@ -793,6 +816,7 @@ fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, rect: egu
 
     axis_widget(&ctx, world, editor, rect);
     crate::prefab_ui::editing_bar(&ctx, world, editor, rect);
+    isolation_bar(&ctx, world, editor, rect);
     crate::camera_preview::ui(ui, world, editor, rect);
 
     // Play mode frame.
@@ -937,4 +961,48 @@ fn axis_widget(ctx: &egui::Context, world: &World, editor: &mut Editor, rect: eg
                  Numpad 7 / 1 / 3: top, front, right (Ctrl: the other side); 5 switches; 9 turns around.",
             );
         });
+}
+
+/// While isolating, a bar at the top of the view says so, with a way out (as Unity's).
+fn isolation_bar(ctx: &egui::Context, world: &mut World, editor: &mut Editor, rect: egui::Rect) {
+    let Some(isolated) = &editor.hide.isolated else {
+        return;
+    };
+    let n = isolated.len();
+    let mut exit = false;
+    egui::Area::new(egui::Id::new("isolation bar"))
+        .fixed_pos(egui::pos2(rect.center().x - 130.0, rect.min.y + 46.0))
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgba_unmultiplied(0x6a, 0x4a, 0x10, 235))
+                .corner_radius(5)
+                .inner_margin(egui::Margin::symmetric(10, 5))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Isolating {}",
+                                if n == 1 {
+                                    "1 object".to_string()
+                                } else {
+                                    format!("{n} objects")
+                                }
+                            ))
+                            .color(egui::Color32::WHITE)
+                            .strong(),
+                        );
+                        ui.label(
+                            egui::RichText::new("Shift+H")
+                                .color(egui::Color32::from_white_alpha(170)),
+                        );
+                        if ui.button("Exit").clicked() {
+                            exit = true;
+                        }
+                    });
+                });
+        });
+    if exit {
+        crate::hide::toggle_isolation(world, editor);
+    }
 }

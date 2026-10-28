@@ -189,6 +189,12 @@ pub struct Editor {
     pub import_path: String,
     /// The Content Browser.
     pub browser: crate::browser::Browser,
+    /// What is hidden and locked in the scene view.
+    pub hide: crate::hide::Hide,
+    /// The outliner's type filter (names from `ui::OUTLINER_TYPES`).
+    pub outliner_types: Vec<&'static str>,
+    /// The outliner row being renamed, its text, and whether to focus it.
+    pub outliner_rename: Option<(Entity, String, bool)>,
     /// When placed models' files last changed (for reimport).
     pub model_watch: crate::models::Watch,
 }
@@ -243,6 +249,9 @@ impl Editor {
             model_watch: Default::default(),
             import_path: String::new(),
             browser: Default::default(),
+            hide: Default::default(),
+            outliner_types: Vec::new(),
+            outliner_rename: None,
             file_hover: None,
             import_edit: None,
             import_materials: Vec::new(),
@@ -309,6 +318,7 @@ impl Editor {
                 *e = *new;
             }
         }
+        self.hide.remap(map);
     }
 
     pub fn is_playing(&self) -> bool {
@@ -952,6 +962,7 @@ pub fn save_scene(world: &mut World, editor: &mut Editor, path: &str) {
         Ok(()) => {
             editor.scene_path = path.to_string();
             editor.history.dirty = false;
+            crate::hide::save(world, editor);
             editor.info(
                 t,
                 format!("Saved {path} ({} root entities)", scene.entities.len()),
@@ -975,6 +986,7 @@ pub fn load_scene(world: &mut World, editor: &mut Editor, path: &str) {
             editor.history.clear();
             editor.selection.clear();
             editor.scene_path = path.to_string();
+            crate::hide::load(world, editor);
             editor.info(t, format!("Opened {path} ({} root entities)", roots.len()));
         }
         Err(e) => editor.error(t, format!("Could not open {path}: {e}")),
@@ -992,6 +1004,7 @@ pub fn new_scene(world: &mut World, editor: &mut Editor) {
     editor.history.clear();
     editor.selection.clear();
     editor.scene_path = format!("{SCENES_DIR}/untitled.scene.json");
+    editor.hide.clear();
     editor.info(t, "New scene");
 }
 
