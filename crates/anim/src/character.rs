@@ -38,6 +38,7 @@ use crate::build::sdf::{MuscleShape, add_muscle_morphs};
 use crate::clip::{AnimationClip, BoneTrack, ClipBinding};
 use crate::ik::FootIk;
 use crate::import::{ImportOptions, ImportedMaterial, ImportedModel, import_clips, import_gltf};
+use crate::motion::MotionDatabase;
 use crate::procedural::spring::SpringChainDef;
 use crate::retarget::{HandRig, RetargetMap};
 use crate::skeleton::Skeleton;
@@ -62,6 +63,9 @@ pub struct HumanCharacter {
     /// Motion-capture locomotion converted onto `logic` (see [`HumanModel`]).
     pub clips: Vec<AnimationClip>,
     pub locomotion: Option<Locomotion>,
+    /// Captured moves with their root motion, for motion matching (see
+    /// [`add_motion_matching`]).
+    pub motion: Option<MotionDatabase>,
 }
 
 const SIDES: [(&str, usize); 2] = [("L", 0), ("R", 1)];
@@ -195,6 +199,7 @@ pub fn from_biped(name: &str, model: ImportedModel) -> Result<HumanCharacter, St
         ponytail,
         clips: Vec::new(),
         locomotion: None,
+        motion: None,
     })
 }
 
@@ -257,6 +262,102 @@ pub fn add_locomotion(
     }
     c.locomotion = Some(motion);
     Ok(())
+}
+
+/// Add motion matching to a character with locomotion (after [`add_locomotion`]): clip files
+/// rigged like its model that keep their root motion (starts, stops, turns, loops at several
+/// paces) are converted onto its fitted humanoid and, with its idle, built into a
+/// [`MotionDatabase`] its graph searches while walking and running forward. Each gets
+/// `footstep` events where a foot comes down. Files that fail to load are skipped with a
+/// warning; with none left the character keeps its blended locomotion.
+pub fn add_motion_matching(c: &mut HumanCharacter, files: &[String]) -> Result<(), String> {
+    let Some(motion) = c.locomotion.as_mut() else {
+        return Ok(());
+    };
+    let retargeter = Retargeter::new(&c.logic, c.target.clone(), &c.map)?;
+    let mut clips: Vec<AnimationClip> = c
+        .clips
+        .iter()
+        .filter(|clip| clip.name == motion.idle)
+        .cloned()
+        .collect();
+    for path in files {
+        let file = Path::new(path);
+        let loaded = std::fs::read(file)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                import_clips(
+                    &bytes,
+                    file.parent(),
+                    &c.target,
+                    1.0,
+                    &ImportOptions::default(),
+                )
+            });
+        let clip = match loaded {
+            Ok((clips, _)) if !clips.is_empty() => clips.into_iter().next().unwrap(),
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::warn!("motion matching: skipping {path}: {e}");
+                continue;
+            }
+        };
+        let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("move");
+        let name = format!("{}/move/{stem}", c.logic.name);
+        let mut clip = retargeter.clip_to_source(&c.logic, &clip, &name, &["hips"]);
+        drop_reset_key(&mut clip);
+        // Cycles of a walk or run at one pace loop; starts, stops and turns play once.
+        clip.looping = ["_neutral_", "_slow_", "_fast_"]
+            .iter()
+            .any(|k| stem.contains(k));
+        let d = clip.duration.max(1e-4);
+        for (foot, bone) in [(humanoid::FOOT[1], "foot_r"), (humanoid::FOOT[0], "foot_l")] {
+            for t in strikes(&clip, &c.logic, foot) {
+                // The first sample only counts if the foot came down there (not stood on it).
+                if t > 0.0 {
+                    clip = clip.with_event((t / d).clamp(0.0, 0.999), "footstep", Some(bone));
+                }
+            }
+        }
+        clips.push(clip);
+    }
+    if clips.len() < 2 {
+        return Ok(());
+    }
+    let name = format!("{}/motion", c.logic.name);
+    let db = MotionDatabase::build(&name, &c.logic, &clips)?;
+    motion.motion = name;
+    c.motion = Some(db);
+    Ok(())
+}
+
+/// Rocketbox's root-motion takes end on a key that jumps back to the first frame (the take's
+/// reset); drop that key from every track.
+fn drop_reset_key(clip: &mut AnimationClip) {
+    let Some(hips) = clip.tracks.iter().find(|t| t.bone == "hips") else {
+        return;
+    };
+    let v = &hips.translation.values;
+    let n = v.len();
+    if n < 3 || v[n - 1].distance(v[0]) > 1e-4 || v[n - 1].distance(v[n - 2]) < 0.01 {
+        return;
+    }
+    let end = hips.translation.times[n - 2];
+    for t in &mut clip.tracks {
+        if t.translation.times.len() == n {
+            t.translation.times.pop();
+            t.translation.values.pop();
+        }
+        if t.rotation.times.len() == n {
+            t.rotation.times.pop();
+            t.rotation.values.pop();
+        }
+        if t.scale.times.len() == n {
+            t.scale.times.pop();
+            t.scale.values.pop();
+        }
+    }
+    clip.duration = end;
 }
 
 /// Turn a clip about the vertical so the hips face the skeleton's forward on average (mocap
@@ -868,6 +969,9 @@ pub struct HumanModel {
     pub idle: String,
     pub walk: String,
     pub run: String,
+    /// Motion-capture moves that keep their root motion (starts, stops, turns), searched by
+    /// motion matching on top of the idle, walk and run (see [`add_motion_matching`]).
+    pub moves: Vec<String>,
 }
 
 impl HumanModel {
@@ -885,7 +989,14 @@ impl HumanModel {
 
     /// Identifies what gets loaded (the model and its clips).
     fn key(&self) -> String {
-        format!("{}|{}|{}|{}", self.path, self.idle, self.walk, self.run)
+        format!(
+            "{}|{}|{}|{}|{}",
+            self.path,
+            self.idle,
+            self.walk,
+            self.run,
+            self.moves.join(",")
+        )
     }
 }
 
@@ -953,6 +1064,7 @@ pub struct AppliedHumanModel(pub String);
 pub fn load_human(model: &HumanModel) -> Result<HumanCharacter, String> {
     let mut c = load_human_file(&model.path)?;
     add_locomotion(&mut c, &model.idle, &model.walk, &model.run)?;
+    add_motion_matching(&mut c, &model.moves)?;
     Ok(c)
 }
 
@@ -999,6 +1111,9 @@ fn register(world: &mut World, c: HumanCharacter) -> Result<LoadedHuman, String>
         let mut lib = world.resource_mut::<AnimationLibrary>();
         for clip in c.clips {
             lib.add_clip(clip);
+        }
+        if let Some(db) = c.motion {
+            lib.add_motion(db);
         }
         lib.add_graph(humanoid::graph_with(&logic.name, &motion));
         logic.name.clone()

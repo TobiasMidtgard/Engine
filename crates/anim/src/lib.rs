@@ -15,6 +15,7 @@ pub mod horse_model;
 pub mod ik;
 pub mod import;
 pub mod model;
+pub mod motion;
 pub mod muscle;
 pub mod procedural;
 pub mod ragdoll;

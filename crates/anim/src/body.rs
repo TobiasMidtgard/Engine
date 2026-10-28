@@ -418,6 +418,7 @@ fn person(request: &BodyRequest) -> (Option<HumanModel>, Outfit) {
                     idle: clip("idle_neutral_01"),
                     walk: clip("walk_neutral_01"),
                     run: clip("run_neutral_01"),
+                    moves: crate::demo::moves("m"),
                     ..HumanModel::new(p)
                 }
             });

@@ -104,8 +104,14 @@ fn log_slow_systems(world: &World, build: &mut WorldBuild) {
 /// would make what is left on the frame).
 type Prefetch = (&'static str, fn(&mut World), fn(&World) -> bool);
 
-const PREFETCH: [Prefetch; 3] = [
+const PREFETCH: [Prefetch; 4] = [
     ("water", water_prefetch, water_ready),
+    // The animation paddock's generated bodies (6 s of meshes in release) build on a worker.
+    (
+        "paddock",
+        engine_anim::demo::prefetch,
+        engine_anim::demo::ready,
+    ),
     ("lake", water_prefetch, water_ready),
     (
         "field",

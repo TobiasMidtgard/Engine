@@ -167,3 +167,510 @@ sha256 = "c272098089d78c5cd9fd9f24ff50ee8acf8d932c55f2d55fc10adb6c8998966b"
 license = "CC-BY-4.0"
 source = "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CarConcept"
 author = "Eric Chadwick, Darmstadt Graphics Group GmbH"
+
+# Motion matching: root-motion takes (starts, stops, turns, walk and run cycles at several
+# paces) from the same library, converted with `editor --convert` (ufbx, baked at 30 fps).
+# Their last key (the take's reset to the first frame) is dropped on import.
+[[file]]
+path = "anim/moves/f_run_fast_01.glb"
+url = "mirror"
+sha256 = "1403f501a0bf540bc990958820dfd7d5d787de0fb02daaa7c234d40a950e9795"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_run_neutral_01.glb"
+url = "mirror"
+sha256 = "411c26b247d9dff4cac3e08376b7dec0ddc01274acaa639f66b5d745ab8924f7"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_run_neutral_02.glb"
+url = "mirror"
+sha256 = "b37d3ebdf5822b505c3c3065962da384ec391bd60f4dc2260aba20e426f6d756"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_run_slow_01.glb"
+url = "mirror"
+sha256 = "89553ea7085296c1ac9f121fb6dca605ad013fc08cc6ac9ee5916c7cbb52bc36"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_run_start.glb"
+url = "mirror"
+sha256 = "e3dab7eecf3e775d3bff65bfed093ad26c59ea6be28b82998712c12dd7207278"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_run_stop.glb"
+url = "mirror"
+sha256 = "4b26cddfa79db6d19c348a38110aea82f73b72d71fbea3ead10fd4780e49fb75"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_run_to_walk.glb"
+url = "mirror"
+sha256 = "94aebc2764e84e6e57504d30f60d5ee97aca225d79d6041578ad338bbef925a4"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_turn_left_120.glb"
+url = "mirror"
+sha256 = "4539064be3bb24dd89c6026e5a7ab04b56ca1fb8e1bf9cb2ffe5ff5439f478ec"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_turn_left_120_to_walk.glb"
+url = "mirror"
+sha256 = "49349d9e8e191bc16b02ffe2cbbfb0390533b98661be40bd719ea3ef8cfbbff4"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_turn_left_180.glb"
+url = "mirror"
+sha256 = "9606a4fbdda4d08a61c5e6287a16d2995c91975a7fe128647a706ce3fb133c71"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_turn_left_180_to_walk.glb"
+url = "mirror"
+sha256 = "43e5b0227340ab6c0a5a8786ca4120f5b1792e48dd955008c7c0da0ae5385897"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_turn_left_60.glb"
+url = "mirror"
+sha256 = "1e75bcda8867749f2fc7681da1a0964862fdc2520cd93bc57e16aa601421cefb"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_turn_left_60_to_walk.glb"
+url = "mirror"
+sha256 = "5c83c54fe9301d2937be2d37598785ff42083756f57ae0759ebca4207d16dd1c"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_turn_left_90.glb"
+url = "mirror"
+sha256 = "dfe9c6ac2e6dfd27a21dbc6efa325a84035299bf82d0c12579c3fc9bfd5531d0"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_turn_right_120.glb"
+url = "mirror"
+sha256 = "8ef3cd5c78826a95754d7812846080ccf3118eae2b192ce3abd8ce47f55f85d0"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_turn_right_120_to_walk.glb"
+url = "mirror"
+sha256 = "affddd492af48841a970d645b239e03876b810b5001d98fa74147107b3cb09fb"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_turn_right_180.glb"
+url = "mirror"
+sha256 = "03f5735303d2644e2aa0f9c551cccae74a32f120997e3c200fbb76cd37b17f14"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_turn_right_180_to_walk.glb"
+url = "mirror"
+sha256 = "d63bec859030d6a2ab51a2c071249b6dc5c3e5b345ed0a85935f966ef6ca3d14"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_turn_right_60.glb"
+url = "mirror"
+sha256 = "1f2d7c14dd15d6912c749a086150db5d98a63b0f803fe6a6bad50458ca301a57"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_turn_right_60_to_walk.glb"
+url = "mirror"
+sha256 = "dadff944a7dbd7091ae9c79985e6a283dbe50181efc8b23ad742221b6e0d60ad"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_turn_right_90.glb"
+url = "mirror"
+sha256 = "c61be15b2ada4d6d00a6b1c7b8fce63359fb762fe66b9d94902909834880bc4a"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_walk_fast_01.glb"
+url = "mirror"
+sha256 = "31311ef120723ebdd4962d6f0843194301aab0443db0b0875d8de68415f25a55"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_walk_neutral_01.glb"
+url = "mirror"
+sha256 = "5e5c74b3f76afa6f716c0805686c47f54ce0bf303f5713201b1da838f0b0b4ac"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_walk_neutral_02.glb"
+url = "mirror"
+sha256 = "b31feebaf42d4e1d6cf2612e689c219adb74ec7a9179aa830aa399ef572bfccf"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_walk_slow_01.glb"
+url = "mirror"
+sha256 = "8c1ff422f9682c379ea626c8525309ea77dd03bbf79219d09d9d80b37179df1d"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_walk_start.glb"
+url = "mirror"
+sha256 = "93f124d7369fc2c78eef5433ae13fc7e05c18265bd0713f577d805ec8286604b"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_walk_stop.glb"
+url = "mirror"
+sha256 = "8588bda1a70a7ba74484ed39b8da70f60492144d59d3213b97d554ba46d574a6"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/f_walk_to_run.glb"
+url = "mirror"
+sha256 = "4b2103e3d0a76e3124d012099c50aa2b0b3ca4baf663fa571d765ecc7038d0b3"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_run_fast_01.glb"
+url = "mirror"
+sha256 = "234801fd1639e04a59a906a487242bd9328f153e345f8901aef816a4c9823959"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_run_neutral_01.glb"
+url = "mirror"
+sha256 = "a7c490e9fd8acf5c421f32a3b7459130953e0bc04fdf71406d9fb7e97af6ab3a"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_run_neutral_02.glb"
+url = "mirror"
+sha256 = "909db2d85a6e0c3b8e2568e895d01a0f95d31e3af7c22b90c108daab4f3b2d00"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_run_slow_01.glb"
+url = "mirror"
+sha256 = "fc489f483b319eb0b9a09d07e641bd260d21cbef8ece0c96cbc81705bc0471ed"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_run_start.glb"
+url = "mirror"
+sha256 = "eb49ec461c41fc89fe1b5c9e713ccefb8483f37f1f79578cd08c37eb16a88d77"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_run_stop.glb"
+url = "mirror"
+sha256 = "ce5fb2c2f419fb46c3af8be58959cd7ceddf6d98ae08aa44491fbbae9eb3e762"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_run_to_walk.glb"
+url = "mirror"
+sha256 = "8389c4b5bdaa9fedced3a69157627029a7d4632ac76fd1027ecc1ba84e3cc908"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_turn_left_120.glb"
+url = "mirror"
+sha256 = "31eeaa34509830e7da95fee67ba8733ae098d6d027c41a705981204b9639efa2"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_turn_left_120_to_walk.glb"
+url = "mirror"
+sha256 = "34d881e561628e950cf1d29f71a3527879ff8196d79c291c133de87551b144f5"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_turn_left_180.glb"
+url = "mirror"
+sha256 = "57d0380b2e60551c01bbe0cc71f56965dd906d6400e386dc7b48020b9d62ad57"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_turn_left_180_to_walk.glb"
+url = "mirror"
+sha256 = "435e070210aa335f8dd2f4bc2f8cfe82676259f3ea201dc51551b2716756024a"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_turn_left_60.glb"
+url = "mirror"
+sha256 = "041eb2988d9a48250c62ed750ced452d409e87140a6af4209ba6d052d3cb2633"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_turn_left_60_to_walk.glb"
+url = "mirror"
+sha256 = "d9916a5c16061f42b7677d60f3cbb9f3a9dd4525de9e0920b1d6037268d0595d"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_turn_left_90.glb"
+url = "mirror"
+sha256 = "7d87653740edb85c35658529e05adfc5e593d66f6c6d753973be0023c0058a4a"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_turn_right_120.glb"
+url = "mirror"
+sha256 = "12998a856ca8affd0928c5a29c74572963af6259c18bf7fc392ceea162c32298"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_turn_right_120_to_walk.glb"
+url = "mirror"
+sha256 = "4f65ca1eecbfe7ee540dabaab7b50f0da763cba707f1ef6a90c5b859fa63e09b"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_turn_right_180.glb"
+url = "mirror"
+sha256 = "c18dae20353d03f598402f35809391c60f62f937263d21c96113d885bd2e43b7"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_turn_right_180_to_walk.glb"
+url = "mirror"
+sha256 = "94b7f354b92d668a0461886fb93b17f5b0e2b10b3cc125c2fa223ceb4ea4f75d"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_turn_right_60.glb"
+url = "mirror"
+sha256 = "e0a7e275dd8be68a6c5e8ac77fd0865b1a7308fa9f5e301fcb3cfe2c4d688b94"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_turn_right_60_to_walk.glb"
+url = "mirror"
+sha256 = "2375a99e33b5b2dc6ddec0c99ac53b2df01d428e2774013a24f1db151986e4ae"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_turn_right_90.glb"
+url = "mirror"
+sha256 = "88fa3bde798025a8db0a3aa84596bea0c88dac74015aadcc5f0cf63567d67871"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xyz"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_walk_fast_01.glb"
+url = "mirror"
+sha256 = "9fb13b7e6fc9e01b8968dbfa095c3c84eee144a6406ff5cd08c04139e79ea573"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_walk_neutral_01.glb"
+url = "mirror"
+sha256 = "4e71bfb0d36224613022336c58a21abc4aa666f3e1c1a5400517a60462ee615b"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_walk_neutral_02.glb"
+url = "mirror"
+sha256 = "15c5b0b6f20016ae24b8afba40452818ab15e18f7016d41a8abb5bf61948ca4c"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_walk_slow_01.glb"
+url = "mirror"
+sha256 = "ccd4179f980f84afcd58afdcc84110da1d0be512c9f66068ab3d1ef89debeb4c"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_walk_start.glb"
+url = "mirror"
+sha256 = "c79876f2e14714c2f8c1593379f97dc87fc308116ff9d73b9d05c9569efc4938"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_walk_stop.glb"
+url = "mirror"
+sha256 = "485d104ff9474c55edb40f314e79c1393b13d747a52acb70a87e480a32243e3e"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"
+
+[[file]]
+path = "anim/moves/m_walk_to_run.glb"
+url = "mirror"
+sha256 = "09437ceee1b52762a79ce3eba717fb3b00a3822f80848a62f1f8a4e2fdaf7649"
+license = "MIT"
+source = "https://github.com/microsoft/Microsoft-Rocketbox/tree/master/Assets/Animations/all_animations_max_motextr_xy"
+author = "Microsoft"
+copyright = "Copyright (c) 2020 Microsoft"

@@ -783,6 +783,46 @@ pub fn fetched_path(relative: &str) -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
+/// The root-motion takes motion matching searches, fetched as `anim/moves/{m,f}_<name>.glb`.
+pub const MOVES: [&str; 28] = [
+    "run_fast_01",
+    "run_neutral_01",
+    "run_neutral_02",
+    "run_slow_01",
+    "run_start",
+    "run_stop",
+    "run_to_walk",
+    "turn_left_120",
+    "turn_left_120_to_walk",
+    "turn_left_180",
+    "turn_left_180_to_walk",
+    "turn_left_60",
+    "turn_left_60_to_walk",
+    "turn_left_90",
+    "turn_right_120",
+    "turn_right_120_to_walk",
+    "turn_right_180",
+    "turn_right_180_to_walk",
+    "turn_right_60",
+    "turn_right_60_to_walk",
+    "turn_right_90",
+    "walk_fast_01",
+    "walk_neutral_01",
+    "walk_neutral_02",
+    "walk_slow_01",
+    "walk_start",
+    "walk_stop",
+    "walk_to_run",
+];
+
+/// The fetched [`MOVES`] of a set (`m` or `f`).
+pub fn moves(set: &str) -> Vec<String> {
+    MOVES
+        .iter()
+        .filter_map(|m| fetched_path(&format!("anim/moves/{set}_{m}.glb")))
+        .collect()
+}
+
 /// One of the paddock's detailed people (`athlete`, `lifter`, `reacher`, `walker`) with its
 /// motion-capture locomotion, if they have been fetched (`cargo run -p fetch-assets --
 /// animation`).
@@ -794,6 +834,7 @@ pub fn character_model(name: &str) -> Option<HumanModel> {
         idle: clip("idle_neutral_01"),
         walk: clip("walk_neutral_01"),
         run: clip("run_neutral_01"),
+        moves: moves(set),
         ..HumanModel::new(path)
     })
 }

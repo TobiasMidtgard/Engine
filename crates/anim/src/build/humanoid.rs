@@ -2891,6 +2891,9 @@ pub struct Locomotion {
     /// Flat out, above the run; empty for none.
     pub sprint: String,
     pub sprint_speed: f32,
+    /// A motion-matching database in the library to move with while going forward (the
+    /// blends above take over for strafing and backpedalling); empty for none.
+    pub motion: String,
 }
 
 impl Default for Locomotion {
@@ -2905,6 +2908,7 @@ impl Default for Locomotion {
             run_speed: RUN_SPEED,
             sprint: "sprint".into(),
             sprint_speed: SPRINT_SPEED,
+            motion: String::new(),
         }
     }
 }
@@ -2975,6 +2979,21 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
         sync: true,
         match_speed: false,
     };
+    // Captured moves carry their own leans into turns, starts and stops.
+    let (locomotion, lean) = if motion.motion.is_empty() {
+        (locomotion, Weight::default())
+    } else {
+        (
+            NodeDef::MotionMatch {
+                database: motion.motion.clone(),
+                fallback: Box::new(locomotion),
+            },
+            Weight {
+                value: 0.0,
+                param: None,
+            },
+        )
+    };
     let leaning = NodeDef::Additive {
         base: Box::new(locomotion),
         additive: Box::new(NodeDef::Blend1d {
@@ -2996,7 +3015,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
             sync: false,
             match_speed: false,
         }),
-        weight: Weight::default(),
+        weight: lean.clone(),
     };
     // Leaning into a start and sitting back into a stop, by `accel` (−1..1).
     let leaning = NodeDef::Additive {
@@ -3020,7 +3039,7 @@ pub fn graph_with(name: &str, motion: &Locomotion) -> AnimGraph {
             sync: false,
             match_speed: false,
         }),
-        weight: Weight::default(),
+        weight: lean,
     };
     // Leaning into a climb and watching the steps on the way down, by `grade` (−1..1).
     let leaning = NodeDef::Additive {

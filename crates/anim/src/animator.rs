@@ -10,6 +10,7 @@ use engine_world::{FocusPoints, SimulationRange};
 
 use crate::clip::AnimationClip;
 use crate::graph::{AnimGraph, EvalCtx, FiredEvent, GraphInstance};
+use crate::motion::MotionDatabase;
 use crate::skeleton::Skeleton;
 use crate::xform::Xf;
 
@@ -31,6 +32,8 @@ pub struct AnimationLibrary {
     pub skeletons: HashMap<String, Arc<Skeleton>>,
     pub clips: HashMap<String, Arc<AnimationClip>>,
     pub graphs: HashMap<String, AnimGraph>,
+    /// Motion-matching databases (graphs name them in `motion_match` nodes).
+    pub motions: HashMap<String, Arc<MotionDatabase>>,
 }
 
 impl AnimationLibrary {
@@ -54,6 +57,12 @@ impl AnimationLibrary {
         self.clips.get(name).cloned()
     }
 
+    pub fn add_motion(&mut self, db: MotionDatabase) -> Arc<MotionDatabase> {
+        let d = Arc::new(db);
+        self.motions.insert(d.name.clone(), d.clone());
+        d
+    }
+
     /// Compile a graph for a skeleton (both by name).
     pub fn instantiate(&self, skeleton: &str, graph: &str) -> Result<Animator, String> {
         let s = self.skeletons.get(skeleton).cloned().ok_or_else(|| {
@@ -71,7 +80,12 @@ impl AnimationLibrary {
                 .graphs
                 .get(graph)
                 .ok_or_else(|| format!("animation graph {graph} is not in the library"))?;
-            Some(GraphInstance::compile(def, &s, &|n| self.clip(n))?)
+            Some(GraphInstance::compile_with(
+                def,
+                &s,
+                &|n| self.clip(n),
+                &|n| self.motions.get(n).cloned(),
+            )?)
         };
         Ok(Animator::new(s, g, skeleton, graph))
     }

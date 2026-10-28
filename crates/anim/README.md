@@ -15,6 +15,16 @@ compresses and stretches.
   with sync and speed matching, additive, masked layers, and state machines with crossfades,
   one-shot triggers and conditions on parameters. Graphs are serde data, so tools and AI
   agents can add or edit them at runtime (`anim.add_graph`).
+- **Motion matching.** A `motion_match` graph node plays whichever moment of captured motion
+  best continues the pose toward where the character is going (`motion::MotionDatabase`,
+  after Clavet's For Honor talk and Holden's articles): 27 features per frame (feet
+  positions and velocities, hips velocity, the root's place and facing 1/3, 2/3 and 1 s
+  ahead), brute-force search every 0.1 s, jumps hidden by spring inertialization that keeps
+  velocity. Takes keep their root motion (starts, stops, turns on the spot and into a walk,
+  walk and run cycles at five paces), each also mirrored; loops play round, and a take's
+  trajectory carries on past its end. Strafing and backpedalling hand over to the blend
+  tree. Fetched people move with 28 Rocketbox takes (`anim/moves/`); `examples/motion_db.rs`
+  reports a database and which moves a scripted walk plays.
 - **IK.** `FootIk` plants feet on uneven ground (pelvis drop, two-bone legs, foot tilt, toes
   stay flat at toe-off) and locks them: a foot that comes down still is held where it
   landed until it lifts, however the clip's stride matches the body's speed, and a body
@@ -257,6 +267,10 @@ paddocks, shifts one halfway, and checks every pose and place still matches.
 a person and measures how far each planted foot slides (under 1 cm per step), that one
 turned on the spot steps round, and that a sprint start and a hard stop lean it forward and
 back.
+`tests/motion_matching.rs` builds a database from the humanoid's clips given root motion
+and checks paces and turns, that standing, walking, running and turning each play their
+move with every jump blended (no bone turns over 0.3 rad in a frame), that motion-matched
+walking fires footsteps, and that strafing hands over to the fallback and back.
 `tests/hits.rs` punches a person and checks the head snaps back and recovers.
 `tests/body_request.rs` asks for a hiker, a horse, a 40 cm dog and an unknown kind on
 entities the test moves itself: the bodies walk, run and gallop from that motion, step on the ground, keep the

@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::clip::{AnimationClip, ClipBinding};
+use crate::motion::{MotionDatabase, MotionPlayer};
 use crate::skeleton::{Skeleton, apply_additive, blend_masked};
 use crate::xform::{Xf, nlerp};
 
@@ -159,6 +160,13 @@ pub enum NodeDef {
         /// First state (defaults to the first listed).
         #[serde(default)]
         initial: Option<String>,
+    },
+    /// Motion matching over a [`MotionDatabase`](crate::motion::MotionDatabase) from the
+    /// library (`speed`, `heading`, `turn` and `accel` steer it); `fallback` takes over for
+    /// motion the database doesn't hold (strafing, backpedalling).
+    MotionMatch {
+        database: String,
+        fallback: Box<NodeDef>,
     },
 }
 
@@ -453,6 +461,19 @@ enum Node {
         additive: bool,
     },
     StateMachine(Box<StateMachineNode>),
+    MotionMatch {
+        player: Box<MotionPlayer>,
+        fallback: usize,
+    },
+}
+
+/// Seconds a motion-matching node takes to hand over to its fallback and back.
+const MOTION_FALLBACK_SECS: f32 = 0.3;
+
+/// What a graph's names resolve to while compiling.
+struct Lookup<'a> {
+    clips: &'a dyn Fn(&str) -> Option<Arc<AnimationClip>>,
+    motions: &'a dyn Fn(&str) -> Option<Arc<MotionDatabase>>,
 }
 
 /// A compiled graph bound to one skeleton. One per character.
@@ -471,13 +492,24 @@ impl GraphInstance {
         skeleton: &Skeleton,
         clips: &dyn Fn(&str) -> Option<Arc<AnimationClip>>,
     ) -> Result<Self, String> {
+        Self::compile_with(graph, skeleton, clips, &|_| None)
+    }
+
+    /// [`compile`](Self::compile), with `motions` resolving motion-matching databases.
+    pub fn compile_with(
+        graph: &AnimGraph,
+        skeleton: &Skeleton,
+        clips: &dyn Fn(&str) -> Option<Arc<AnimationClip>>,
+        motions: &dyn Fn(&str) -> Option<Arc<MotionDatabase>>,
+    ) -> Result<Self, String> {
         let mut g = GraphInstance {
             nodes: Vec::new(),
             root: 0,
             rest: skeleton.rest.clone(),
             pool: Vec::new(),
         };
-        g.root = g.add(&graph.root, skeleton, clips)?;
+        let lookup = Lookup { clips, motions };
+        g.root = g.add(&graph.root, skeleton, &lookup)?;
         Ok(g)
     }
 
@@ -485,8 +517,9 @@ impl GraphInstance {
         &mut self,
         def: &NodeDef,
         skeleton: &Skeleton,
-        clips: &dyn Fn(&str) -> Option<Arc<AnimationClip>>,
+        lookup: &Lookup,
     ) -> Result<usize, String> {
+        let clips = lookup.clips;
         let node = match def {
             NodeDef::Rest => Node::Rest,
             NodeDef::Clip {
@@ -520,7 +553,7 @@ impl GraphInstance {
                 }
                 let mut points = Vec::new();
                 for c in children {
-                    points.push((c.at, self.add(&c.node, skeleton, clips)?));
+                    points.push((c.at, self.add(&c.node, skeleton, lookup)?));
                 }
                 points.sort_by(|a, b| a.0.total_cmp(&b.0));
                 Node::Blend1d(Blend1dNode {
@@ -542,7 +575,7 @@ impl GraphInstance {
                 }
                 let mut points = Vec::new();
                 for c in children {
-                    points.push((Vec2::from(c.at), self.add(&c.node, skeleton, clips)?));
+                    points.push((Vec2::from(c.at), self.add(&c.node, skeleton, lookup)?));
                 }
                 Node::Blend2d(Blend2dNode {
                     x: x.clone(),
@@ -557,8 +590,8 @@ impl GraphInstance {
                 additive,
                 weight,
             } => Node::Additive {
-                base: self.add(base, skeleton, clips)?,
-                add: self.add(additive, skeleton, clips)?,
+                base: self.add(base, skeleton, lookup)?,
+                add: self.add(additive, skeleton, lookup)?,
                 weight: weight.clone(),
             },
             NodeDef::Layer {
@@ -568,8 +601,8 @@ impl GraphInstance {
                 weight,
                 additive,
             } => Node::Layer {
-                base: self.add(base, skeleton, clips)?,
-                overlay: self.add(overlay, skeleton, clips)?,
+                base: self.add(base, skeleton, lookup)?,
+                overlay: self.add(overlay, skeleton, lookup)?,
                 mask: if mask.bones.is_empty() {
                     vec![1.0; skeleton.len()]
                 } else {
@@ -590,7 +623,7 @@ impl GraphInstance {
                 for s in states {
                     rt_states.push(State {
                         name: s.name.clone(),
-                        node: self.add(&s.node, skeleton, clips)?,
+                        node: self.add(&s.node, skeleton, lookup)?,
                         speed: s.speed,
                     });
                 }
@@ -634,6 +667,14 @@ impl GraphInstance {
                     fade: None,
                     last: skeleton.rest.clone(),
                 }))
+            }
+            NodeDef::MotionMatch { database, fallback } => {
+                let db = (lookup.motions)(database)
+                    .ok_or_else(|| format!("motion database {database} is not in the library"))?;
+                Node::MotionMatch {
+                    player: Box::new(MotionPlayer::new(db, skeleton)?),
+                    fallback: self.add(fallback, skeleton, lookup)?,
+                }
             }
         };
         self.nodes.push(node);
@@ -696,7 +737,7 @@ impl GraphInstance {
             }
             Node::Additive { base, .. } | Node::Layer { base, .. } => self.duration(*base, params),
             Node::StateMachine(sm) => self.duration(sm.states[sm.current].node, params),
-            Node::Rest => 1.0,
+            Node::Rest | Node::MotionMatch { .. } => 1.0,
         }
     }
 
@@ -707,7 +748,7 @@ impl GraphInstance {
             Node::Blend2d(b) => b.points.iter().all(|(_, c)| self.finished(*c)),
             Node::Additive { base, .. } | Node::Layer { base, .. } => self.finished(*base),
             Node::StateMachine(sm) => self.finished(sm.states[sm.current].node),
-            Node::Rest => false,
+            Node::Rest | Node::MotionMatch { .. } => false,
         }
     }
 
@@ -735,6 +776,10 @@ impl GraphInstance {
                 sm.state_time = 0.0;
                 sm.fade = None;
                 children.push(sm.states[sm.current].node);
+            }
+            Node::MotionMatch { player, fallback } => {
+                player.reset();
+                children.push(*fallback);
             }
             Node::Rest => {}
         }
@@ -978,6 +1023,54 @@ impl GraphInstance {
                     sm.last.extend_from_slice(out);
                 }
             }
+            Node::MotionMatch { player, fallback } => {
+                let dt = ctx.dt * args.rate;
+                let target = if MotionPlayer::wants_fallback(ctx.params) {
+                    1.0
+                } else {
+                    0.0
+                };
+                let step = if MOTION_FALLBACK_SECS > 0.0 {
+                    dt / MOTION_FALLBACK_SECS
+                } else {
+                    1.0
+                };
+                player.fallback += (target - player.fallback).clamp(-step, step);
+                let x = player.fallback.clamp(0.0, 1.0);
+                let show = x * x * (3.0 - 2.0 * x);
+                if show < 1.0 {
+                    let mut events = Vec::new();
+                    player.update(ctx.params, dt, out, &mut events);
+                    if args.emit && show < 0.5 {
+                        ctx.events.extend(
+                            events
+                                .into_iter()
+                                .map(|(name, bone)| FiredEvent { name, bone }),
+                        );
+                    }
+                    if args.weight > 0.0 {
+                        ctx.root_delta += player.root_velocity() * dt * args.weight * (1.0 - show);
+                    }
+                }
+                if show > 0.0 {
+                    let mut tmp = self.take_pose();
+                    let child = Args {
+                        weight: args.weight * show,
+                        emit: args.emit && show >= 0.5,
+                        ..args
+                    };
+                    self.eval(*fallback, ctx, &mut tmp, child);
+                    if args.sample {
+                        if show >= 1.0 {
+                            out.copy_from_slice(&tmp[..out.len()]);
+                            player.hold(&tmp, dt);
+                        } else {
+                            blend_masked(out, &tmp, show, None);
+                        }
+                    }
+                    self.give_pose(tmp);
+                }
+            }
         }
         self.nodes[i] = node;
     }
@@ -1056,6 +1149,9 @@ impl GraphInstance {
                 self.collect_states(*base, out);
                 self.collect_states(*overlay, out);
             }
+            Node::MotionMatch { player, fallback } if player.fallback > 0.5 => {
+                self.collect_states(*fallback, out)
+            }
             _ => {}
         }
     }
@@ -1082,7 +1178,20 @@ impl GraphInstance {
                 _ => None,
             })
             .collect();
-        json!({ "states": self.active_states(), "clips": clips })
+        let motion: Vec<_> = self
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                Node::MotionMatch { player, .. } => Some(json!({
+                    "database": player.db.name,
+                    "clip": player.frame().map(|f| player.db.clip_of(f)),
+                    "frame": player.frame(),
+                    "fallback": player.fallback,
+                })),
+                _ => None,
+            })
+            .collect();
+        json!({ "states": self.active_states(), "clips": clips, "motion": motion })
     }
 
     /// Whether any state machine is in a state named `name`.
