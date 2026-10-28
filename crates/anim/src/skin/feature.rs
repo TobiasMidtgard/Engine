@@ -758,6 +758,10 @@ pub struct SkinningFeature {
     surfaces: Option<SurfaceCache>,
     /// Submeshes of every mesh in the static buffers (see `MeshSlot::submesh_base`).
     submeshes: Vec<SubmeshSlot>,
+    /// Each mesh's morphs grouped per vertex and its edges (canonical index → version and
+    /// data), so a new character arriving rebuilds the static buffers without working out
+    /// every other mesh's again.
+    derived: HashMap<u32, (u64, Arc<Derived>)>,
     query: Option<QueryState<SkinQuery>>,
     // Per frame.
     items: Vec<Instance>,
@@ -774,6 +778,67 @@ pub struct SkinningFeature {
     stats: FeatureStats,
 }
 
+/// What the static buffers need from a mesh beyond its vertices: per vertex, its morph deltas
+/// and its edges (CSR, offsets local to the mesh).
+#[derive(Default)]
+struct Derived {
+    /// Per vertex: first morph, morph count, first neighbor, neighbor count.
+    ranges: Vec<[u32; 4]>,
+    morphs: Vec<GpuMorph>,
+    neighbors: Vec<[u32; 2]>,
+}
+
+impl Derived {
+    fn of(mesh: &SkinnedMesh) -> Self {
+        // Morphs grouped per vertex (CSR), so the skin pass gathers without atomics.
+        let n = mesh.vertices.len();
+        let mut counts = vec![0u32; n];
+        for target in &mesh.morph_targets {
+            for d in &target.deltas {
+                if let Some(c) = counts.get_mut(d.vertex as usize) {
+                    *c += 1;
+                }
+            }
+        }
+        let mut first = Vec::with_capacity(n);
+        let mut total = 0u32;
+        for c in &counts {
+            first.push(total);
+            total += c;
+        }
+        let mut morphs = vec![GpuMorph::zeroed(); total as usize];
+        let mut fill = first.clone();
+        for (t, target) in mesh.morph_targets.iter().enumerate() {
+            for d in &target.deltas {
+                if let Some(at) = fill.get_mut(d.vertex as usize) {
+                    morphs[*at as usize] = GpuMorph {
+                        position: d.position.extend(d.influence).to_array(),
+                        normal: d.normal.extend(f32::from_bits(t as u32)).to_array(),
+                    };
+                    *at += 1;
+                }
+            }
+        }
+        let adjacency = mesh.neighbors();
+        let mut ranges = Vec::with_capacity(n);
+        let mut neighbors = Vec::new();
+        for (v, adj) in adjacency.iter().enumerate() {
+            ranges.push([
+                first[v],
+                counts[v],
+                neighbors.len() as u32,
+                adj.len() as u32,
+            ]);
+            neighbors.extend(adj.iter().map(|(n, l)| [*n, l.to_bits()]));
+        }
+        Self {
+            ranges,
+            morphs,
+            neighbors,
+        }
+    }
+}
+
 impl SkinningFeature {
     /// Rebuild the shared static buffers from every mesh in `meshes` (canonical index → mesh).
     fn rebuild_statics(&mut self, device: &wgpu::Device, meshes: &[(u32, u64, &SkinnedMesh)]) {
@@ -783,6 +848,9 @@ impl SkinningFeature {
         let mut morphs = Vec::new();
         let mut neighbors: Vec<[u32; 2]> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
+        // Meshes no longer drawn give up their derived data.
+        self.derived
+            .retain(|index, _| meshes.iter().any(|(i, _, _)| i == index));
         self.slots.clear();
         self.submeshes.clear();
         for &(index, version, mesh) in meshes {
@@ -805,29 +873,23 @@ impl SkinningFeature {
                     mask: v.mask.to_array(),
                 });
             }
-            // Morphs grouped per vertex (CSR), so the skin pass gathers without atomics.
-            let mut per_vertex: Vec<Vec<GpuMorph>> = vec![Vec::new(); mesh.vertices.len()];
-            for (t, target) in mesh.morph_targets.iter().enumerate() {
-                for d in &target.deltas {
-                    if let Some(list) = per_vertex.get_mut(d.vertex as usize) {
-                        list.push(GpuMorph {
-                            position: d.position.extend(d.influence).to_array(),
-                            normal: d.normal.extend(f32::from_bits(t as u32)).to_array(),
-                        });
-                    }
+            let derived = match self.derived.get(&index) {
+                Some((v, d)) if *v == version => d.clone(),
+                _ => {
+                    let d = Arc::new(Derived::of(mesh));
+                    self.derived.insert(index, (version, d.clone()));
+                    d
                 }
-            }
-            let adjacency = mesh.neighbors();
-            for (list, adj) in per_vertex.iter().zip(&adjacency) {
-                ranges.push([
-                    morphs.len() as u32,
-                    list.len() as u32,
-                    neighbors.len() as u32,
-                    adj.len() as u32,
-                ]);
-                morphs.extend_from_slice(list);
-                neighbors.extend(adj.iter().map(|(n, l)| [*n, l.to_bits()]));
-            }
+            };
+            let (morph_base, neighbor_base) = (morphs.len() as u32, neighbors.len() as u32);
+            ranges.extend(
+                derived
+                    .ranges
+                    .iter()
+                    .map(|r| [r[0] + morph_base, r[1], r[2] + neighbor_base, r[3]]),
+            );
+            morphs.extend_from_slice(&derived.morphs);
+            neighbors.extend_from_slice(&derived.neighbors);
             // Triangles with an out-of-range index become degenerate rather than dropped, so
             // submesh index ranges stay valid.
             if count > 0 {

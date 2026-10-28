@@ -419,6 +419,7 @@ pub(crate) fn register(app: &mut App) {
         )
             .in_set(UpdateSet::Logic),
     )
+    .add_systems(PreUpdate, finish_prefetch.run_if(prefetch_pending))
     .register_api(
         "anim.spawn",
         "Spawn a demo character: athlete, shirt, lifter, horse, dog, spider or car.",
@@ -442,7 +443,7 @@ pub(crate) fn register(app: &mut App) {
                 "horse" => spawn_horse(world, t),
                 "dog" => spawn_dog(world, t, 1.0),
                 "spider" => spawn_spider(world, t),
-                "car" => spawn_car(world, t, [0.55, 0.04, 0.02]),
+                "car" => spawn_car(world, t, CAR_PAINT),
                 other => {
                     return Err(format!(
                         "unknown kind {other}; use athlete, shirt, lifter, horse, dog, spider or car"
@@ -489,6 +490,188 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     commands.queue(move |world: &mut World| {
         spawn_demo_world(world, origin);
     });
+}
+
+/// The spider garden's boulders: x, z (m from the paddock's middle), half height (m), yaw (°).
+const SPIDER_ROCKS: [(f64, f64, f32, f32); 5] = [
+    (9.0, 13.0, 0.18, 10.0),
+    (11.6, 11.2, 0.28, -25.0),
+    (13.5, 14.0, 0.14, 40.0),
+    (7.2, 10.8, 0.22, 70.0),
+    (14.2, 10.6, 0.33, 15.0),
+];
+
+fn rock_key(k: usize) -> String {
+    format!("anim/rock_{k}")
+}
+
+/// Half extents of boulder `k`.
+fn rock_half(k: usize) -> Vec3 {
+    Vec3::new(0.7, SPIDER_ROCKS[k].2, 0.55)
+}
+
+fn spider_rock(k: usize) -> Mesh {
+    rock::mesh(rock_half(k), k as u32)
+}
+
+/// The paddock's meshes, made without the world ([`build_demo`]) so the slow part of loading
+/// the zone can run on a worker thread; [`place_demo`] spawns it in a moment.
+pub struct DemoParts {
+    origin: DVec3,
+    bodies: Vec<(String, SkinnedMesh)>,
+    rocks: Vec<(String, Mesh)>,
+}
+
+/// Body keys and builders of everything the paddock wears (the generated bodies: people
+/// wearing fetched models keep theirs until the model is on).
+fn paddock_bodies() -> Vec<(String, Box<dyn FnOnce() -> SkinnedMesh + Send>)> {
+    let paint = CAR_PAINT;
+    vec![
+        (
+            "anim/spider".into(),
+            Box::new(spider::mesh) as Box<dyn FnOnce() -> SkinnedMesh + Send>,
+        ),
+        ("anim/horse".into(), Box::new(horse::mesh)),
+        (
+            format!("anim/{}", dog::skeleton_name(1.0)),
+            Box::new(|| dog::mesh(1.0)),
+        ),
+        (car_key(paint), Box::new(move || car::mesh(paint))),
+        (
+            "anim/humanoid/athlete".into(),
+            Box::new(|| humanoid::mesh(humanoid::Outfit::Athlete)),
+        ),
+        (
+            "anim/humanoid/lifter".into(),
+            Box::new(|| humanoid::mesh(humanoid::Outfit::Lifter)),
+        ),
+        (
+            "anim/humanoid/shirt".into(),
+            Box::new(|| humanoid::mesh(humanoid::Outfit::Shirt)),
+        ),
+    ]
+}
+
+/// Make the paddock's meshes (generated bodies and boulders) without touching the world, the
+/// bodies side by side on scoped threads. Pair with [`place_demo`] (for
+/// `StreamCell::built`).
+pub fn build_demo(origin: DVec3) -> DemoParts {
+    let bodies = std::thread::scope(|scope| {
+        let jobs: Vec<_> = paddock_bodies()
+            .into_iter()
+            .map(|(key, make)| scope.spawn(move || (key, make())))
+            .collect();
+        jobs.into_iter()
+            .map(|j| j.join().expect("paddock body builder"))
+            .collect()
+    });
+    let rocks = (0..SPIDER_ROCKS.len())
+        .map(|k| (rock_key(k), spider_rock(k)))
+        .collect();
+    DemoParts {
+        origin,
+        bodies,
+        rocks,
+    }
+}
+
+/// Spawn the paddock from what [`build_demo`] made: its meshes go into the asset stores under
+/// the keys the paddock looks them up by, so spawning builds none of them.
+pub fn place_demo(world: &mut World, parts: DemoParts) -> DemoEntities {
+    let origin = parts.origin;
+    store_parts(world, parts);
+    spawn_demo_world(world, origin)
+}
+
+/// Put the made meshes in the asset stores (keeping any already there).
+fn store_parts(world: &mut World, parts: DemoParts) {
+    {
+        let mut bodies = world.get_resource_or_init::<Assets<SkinnedMesh>>();
+        for (key, mesh) in parts.bodies {
+            if bodies.loaded_by_key(&key).is_none() {
+                bodies.insert_keyed(&key, mesh);
+            }
+        }
+    }
+    {
+        let mut meshes = world.get_resource_or_init::<Assets<Mesh>>();
+        for (key, mesh) in parts.rocks {
+            if meshes.loaded_by_key(&key).is_none() {
+                meshes.insert_keyed(&key, mesh);
+            }
+        }
+    }
+}
+
+/// The paddock's meshes being made on a worker ([`prefetch`]).
+#[derive(Resource)]
+pub struct PaddockLoading {
+    parts: std::sync::Mutex<Option<std::sync::mpsc::Receiver<DemoParts>>>,
+    ready: bool,
+}
+
+/// Start making the paddock's meshes on a worker thread, ahead of the zone: once [`ready`]
+/// says they are in, [`spawn_demo`] builds nothing and takes a millisecond or two.
+pub fn prefetch(world: &mut World) {
+    if world.contains_resource::<PaddockLoading>() {
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("paddock meshes".into())
+        .spawn(move || {
+            let _ = tx.send(build_demo(DVec3::ZERO));
+        })
+        .expect("paddock mesh thread");
+    world.insert_resource(PaddockLoading {
+        parts: std::sync::Mutex::new(Some(rx)),
+        ready: false,
+    });
+}
+
+/// Whether the meshes [`prefetch`] started are in (true when nothing was prefetched, so a
+/// caller never waits on a prefetch it didn't start).
+pub fn ready(world: &World) -> bool {
+    world
+        .get_resource::<PaddockLoading>()
+        .is_none_or(|l| l.ready)
+}
+
+/// Still waiting on the worker [`prefetch`] started.
+fn prefetch_pending(loading: Option<Res<PaddockLoading>>) -> bool {
+    loading.is_some_and(|l| !l.ready)
+}
+
+/// Store the prefetched meshes when the worker is done.
+fn finish_prefetch(
+    mut loading: ResMut<PaddockLoading>,
+    mut bodies: ResMut<Assets<SkinnedMesh>>,
+    mut meshes: Option<ResMut<Assets<Mesh>>>,
+) {
+    let slot = loading.parts.get_mut().expect("paddock prefetch lock");
+    let parts = match slot.as_ref().map(|rx| rx.try_recv()) {
+        Some(Ok(parts)) => Some(parts),
+        Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return,
+        // The worker died: spawning builds the meshes itself.
+        _ => None,
+    };
+    *slot = None;
+    loading.ready = true;
+    let Some(parts) = parts else {
+        return;
+    };
+    for (key, mesh) in parts.bodies {
+        if bodies.loaded_by_key(&key).is_none() {
+            bodies.insert_keyed(&key, mesh);
+        }
+    }
+    if let Some(meshes) = meshes.as_mut() {
+        for (key, mesh) in parts.rocks {
+            if meshes.loaded_by_key(&key).is_none() {
+                meshes.insert_keyed(&key, mesh);
+            }
+        }
+    }
 }
 
 fn mesh_handle(
@@ -879,6 +1062,13 @@ pub fn give_spider_body(world: &mut World, spider: Entity) {
     ));
 }
 
+/// The paddock car's paint (linear RGB).
+const CAR_PAINT: [f32; 3] = [0.55, 0.04, 0.02];
+
+fn car_key(paint: [f32; 3]) -> String {
+    format!("anim/car/{:.2}_{:.2}_{:.2}", paint[0], paint[1], paint[2])
+}
+
 /// The paddock car: the detailed concept car when it has been fetched (and the world loads
 /// glTF files), else a procedural car in `paint` (linear RGB).
 pub fn spawn_car(world: &mut World, transform: Transform, paint: [f32; 3]) -> Entity {
@@ -902,8 +1092,7 @@ pub fn spawn_car(world: &mut World, transform: Transform, paint: [f32; 3]) -> En
             ))
             .id();
     }
-    let key = format!("anim/car/{:.2}_{:.2}_{:.2}", paint[0], paint[1], paint[2]);
-    let handle = mesh_handle(world, &key, || car::mesh(paint));
+    let handle = mesh_handle(world, &car_key(paint), || car::mesh(paint));
     let skeleton = world
         .resource::<AnimationLibrary>()
         .skeletons
@@ -1781,21 +1970,12 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     });
 
     // --- Spider garden: flat-topped boulders to climb over.
-    for (k, (x, z, hy, yaw)) in [
-        (9.0, 13.0, 0.18, 10.0),
-        (11.6, 11.2, 0.28, -25.0),
-        (13.5, 14.0, 0.14, 40.0),
-        (7.2, 10.8, 0.22, 70.0),
-        (14.2, 10.6, 0.33, 15.0),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (k, (x, z, hy, yaw)) in SPIDER_ROCKS.into_iter().enumerate() {
         let t = Transform::from_translation(at(x, hy as f64, z)).with_rotation(facing(yaw));
-        let half = Vec3::new(0.7, hy, 0.55);
         let mesh = world
             .get_resource_or_init::<Assets<Mesh>>()
-            .get_or_insert_keyed(&format!("anim/rock_{k}"), || rock::mesh(half, k as u32));
+            .get_or_insert_keyed(&rock_key(k), || spider_rock(k));
+        let half = rock_half(k);
         world.spawn((
             t,
             GlobalTransform::from(t),
@@ -1853,7 +2033,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     let car_e = spawn_car(
         world,
         Transform::from_translation(at(0.0, 0.0, -27.0)).with_rotation(facing(-90.0)),
-        [0.55, 0.04, 0.02],
+        CAR_PAINT,
     );
     world.entity_mut(car_e).insert(DemoPath {
         effort_speed: 10.0,

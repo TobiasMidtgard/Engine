@@ -35,7 +35,17 @@ fn main() {
         GlobalTransform::from(focus),
         SimulationFocus::default(),
     ));
-    engine_anim::demo::spawn_demo_world(&mut app.world, DVec3::ZERO);
+    // The zone's load: meshes on a worker (here this thread), then the spawn.
+    let t = std::time::Instant::now();
+    let parts = engine_anim::demo::build_demo(DVec3::ZERO);
+    let build = t.elapsed();
+    let t = std::time::Instant::now();
+    engine_anim::demo::place_demo(&mut app.world, parts);
+    println!(
+        "paddock load: build {:.0} ms (worker), place {:.0} ms (main thread)",
+        build.as_secs_f64() * 1e3,
+        t.elapsed().as_secs_f64() * 1e3
+    );
     app.update();
     engine_anim::character::finish_loading(&mut app.world);
     // Settle (first poses, models worn) before timing.

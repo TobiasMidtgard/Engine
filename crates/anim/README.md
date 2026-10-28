@@ -135,6 +135,11 @@ compresses and stretches.
   history over (`Animator::fresh`). Car wheels probe the ground again only once they move.
   `cargo run -p engine_anim --release --example paddock_bench -- 20 150 --profile` times the
   paddock without a renderer.
+- **Loading.** The paddock's generated bodies take seconds to make, so they are made off the
+  main thread: `demo::prefetch` starts them on a worker (`demo::ready` says when they are
+  in) and `spawn_demo` then makes none; a streamed cell can use `demo::build_demo` (worker)
+  and `demo::place_demo` (about a millisecond). The skinning pass keeps each mesh's morph and
+  edge tables, so a character arriving doesn't redo every other mesh's.
 - **World shifts.** On a `WorldShift` (floating origin, a new planet's frame) planted feet,
   spring chains, muscle jiggle, wheel contacts, look and reach targets and demo paths move
   with the world, so nothing pops, whips or slides.
