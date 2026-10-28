@@ -12,6 +12,7 @@ pub mod grass_wear;
 pub mod growth;
 pub mod hand_felling;
 pub mod loading;
+pub mod lod_fade;
 pub mod meshgen;
 pub mod near_woods;
 pub mod plant;
@@ -55,6 +56,7 @@ impl Plugin for FoliagePlugin {
             .init_resource::<ecology::GrowthClock>()
             .init_resource::<assets::FoliageVisuals>()
             .init_resource::<loading::FoliageLoading>()
+            .init_resource::<lod_fade::LodFades>()
             .init_resource::<visuals::GlowLights>()
             .init_resource::<FarWoods>()
             .init_resource::<far_woods::FarWoodsState>()
@@ -216,9 +218,11 @@ impl Plugin for FoliagePlugin {
                         assets::ensure_species_visuals,
                         season::apply_season_colors,
                         season::apply_litter_color,
+                        lod_fade::begin_fades,
                         visuals::sync_plant_visuals,
                         growth::grow_plants,
                         scenery_tree::sync_scenery_trees,
+                        lod_fade::advance_fades,
                         far_woods::stream_far_woods,
                         near_woods::stream_near_woods,
                         visuals::sync_log_visuals,

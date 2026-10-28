@@ -294,7 +294,8 @@ pub fn sync_plant_visuals(
         Option<&PlantBase>,
         Option<&InRegion>,
     )>,
-    mut parts: Query<&mut MeshRenderer, With<PlantPart>>,
+    mut parts: Query<(&mut MeshRenderer, crate::lod_fade::Busy), With<PlantPart>>,
+    mut fades: ResMut<crate::lod_fade::LodFades>,
     meadows: Query<(), With<RegionGrass>>,
 ) {
     *frame = frame.wrapping_add(1);
@@ -356,10 +357,19 @@ pub fn sync_plant_visuals(
             && region
                 .and_then(|r| r.0)
                 .is_some_and(|r| meadows.contains(r));
-        let want = if meadow {
-            [None, None, None]
-        } else {
-            desired_parts(&plant, sp, vis, distance, &settings, season.day_of_year)
+        let pick = |d: f32| {
+            if meadow {
+                [None, None, None]
+            } else {
+                desired_parts(&plant, sp, vis, d, &settings, season.day_of_year)
+            }
+        };
+        let want = match &visual {
+            // A level shown stays a little past its switch distance (no flicker on the edge).
+            Some(v) if !plant.is_changed() => {
+                crate::lod_fade::with_hysteresis(v.shown, distance, pick)
+            }
+            _ => pick(distance),
         };
         let shadows = sp.layer != Layer::Ground && sp.form != PlantForm::Mushroom;
         let want_fungi = if sp.is_tree() {
@@ -369,7 +379,7 @@ pub fn sync_plant_visuals(
         };
         match fungi {
             Some(mut fungi) if fungi.shown != want_fungi => {
-                if let Ok(mut r) = parts.get_mut(fungi.part) {
+                if let Ok((mut r, _)) = parts.get_mut(fungi.part) {
                     apply(&mut r, want_fungi);
                 }
                 fungi.shown = want_fungi;
@@ -392,8 +402,18 @@ pub fn sync_plant_visuals(
                     if visual.shown[i] == *part {
                         continue;
                     }
-                    if let Ok(mut r) = parts.get_mut(visual.parts[i]) {
-                        apply(&mut r, *part);
+                    if let Ok((mut r, busy)) = parts.get_mut(visual.parts[i]) {
+                        crate::lod_fade::swap(
+                            &mut commands,
+                            &mut fades,
+                            entity,
+                            visual.parts[i],
+                            Transform::default(),
+                            &mut r,
+                            visual.shown[i],
+                            *part,
+                            busy,
+                        );
                     }
                 }
                 visual.shown = want;

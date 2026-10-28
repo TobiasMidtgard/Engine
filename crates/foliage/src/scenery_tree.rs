@@ -101,7 +101,8 @@ pub fn sync_scenery_trees(
         Ref<GlobalTransform>,
         Option<&mut SceneryTreeVisual>,
     )>,
-    mut parts: Query<(&mut MeshRenderer, &mut Transform), With<PlantPart>>,
+    mut parts: Query<(&mut MeshRenderer, &mut Transform, crate::lod_fade::Busy), With<PlantPart>>,
+    mut fades: ResMut<crate::lod_fade::LodFades>,
 ) {
     *frame = frame.wrapping_add(1);
     let render_changed = render.as_ref().is_some_and(|r| r.is_changed());
@@ -144,10 +145,19 @@ pub fn sync_scenery_trees(
         let plant = tree.plant();
         let distance = cam.distance(global.translation()) as f32;
         let shadows = distance <= shadow_reach;
-        let want = if distance > settings.scenery_tree_draw_distance_m {
-            [None; 3]
-        } else {
-            desired_parts(&plant, sp, vis, distance, &settings, season.day_of_year)
+        let pick = |d: f32| {
+            if d > settings.scenery_tree_draw_distance_m {
+                [None, None, None]
+            } else {
+                desired_parts(&plant, sp, vis, d, &settings, season.day_of_year)
+            }
+        };
+        let want = match &visual {
+            // A level shown stays a little past its switch distance (no flicker on the edge).
+            Some(v) if !tree.is_changed() => {
+                crate::lod_fade::with_hysteresis(v.shown, distance, pick)
+            }
+            _ => pick(distance),
         };
         // The parts carry the tree's own lean and size under the entity's transform.
         let (rotation, scale) = plant_pose(&plant);
@@ -158,11 +168,23 @@ pub fn sync_scenery_trees(
                     continue;
                 }
                 for (i, &part) in visual.parts.iter().enumerate() {
-                    let Ok((mut r, mut t)) = parts.get_mut(part) else {
+                    let Ok((mut r, mut t, busy)) = parts.get_mut(part) else {
                         continue;
                     };
                     if visual.shown[i] != want[i] {
-                        apply(&mut r, want[i]);
+                        // A tree that changed (felled, grown) switches at once.
+                        let busy = busy || tree.is_changed();
+                        crate::lod_fade::swap(
+                            &mut commands,
+                            &mut fades,
+                            entity,
+                            part,
+                            pose,
+                            &mut r,
+                            visual.shown[i],
+                            want[i],
+                            busy,
+                        );
                     }
                     if r.cast_shadows != shadows {
                         r.cast_shadows = shadows;
