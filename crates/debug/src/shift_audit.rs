@@ -44,6 +44,10 @@ const REPORT_AFTER: [u32; 2] = [60, 600];
 const ROWS: usize = 25;
 /// The planet's radius for `rehome`, meters (Earth's).
 const PLANET_RADIUS_M: f64 = 6_371_000.0;
+/// A report row: how many, where one of them is, and how far that one is from where it
+/// should be (for "floating" and "buried", its change in height above the ground).
+type Row = (usize, DVec3, DVec3);
+
 /// Frames a `trip` stays away.
 const TRIP_FRAMES: u32 = 60;
 
@@ -284,8 +288,8 @@ fn report(world: &mut World) {
         HashMap::new()
     };
     let audit = world.resource::<ShiftAudit>();
-    let mut floating: HashMap<String, (usize, DVec3)> = HashMap::new();
-    let mut buried: HashMap<String, (usize, DVec3)> = HashMap::new();
+    let mut floating: HashMap<String, Row> = HashMap::new();
+    let mut buried: HashMap<String, Row> = HashMap::new();
     for &(e, p) in &now {
         let (Some(was), Some(is)) = (audit.heights_before.get(&e), heights_now.get(&e)) else {
             continue;
@@ -295,10 +299,11 @@ fn report(world: &mut World) {
             d if d < -20.0 => &mut buried,
             _ => continue,
         };
-        bucket.entry(kind(world, e)).or_insert((0, p)).0 += 1;
+        let off = DVec3::new(0.0, is - was, 0.0);
+        bucket.entry(kind(world, e)).or_insert((0, p, off)).0 += 1;
     }
-    let mut stayed: HashMap<String, (usize, DVec3)> = HashMap::new();
-    let mut elsewhere: HashMap<String, (usize, DVec3)> = HashMap::new();
+    let mut stayed: HashMap<String, Row> = HashMap::new();
+    let mut elsewhere: HashMap<String, Row> = HashMap::new();
     let mut kinds_now: HashMap<String, usize> = HashMap::new();
     let mut followed = 0;
     for &(e, p) in &now {
@@ -328,7 +333,7 @@ fn report(world: &mut World) {
             followed += 1;
             continue;
         };
-        let row = bucket.entry(k).or_insert((0, p));
+        let row = bucket.entry(k).or_insert((0, p, p - expected));
         row.0 += 1;
     }
     let mut out = format!(
@@ -349,10 +354,17 @@ fn report(world: &mut World) {
     ] {
         let mut rows: Vec<_> = bucket.iter().collect();
         rows.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(a.0.cmp(b.0)));
-        for (k, (n, p)) in rows.into_iter().take(ROWS) {
+        for (k, (n, p, off)) in rows.into_iter().take(ROWS) {
             out.push_str(&format!(
-                "  {title}: {n:>5} x {k} (one at {:.0} {:.0} {:.0})\n",
-                p.x, p.y, p.z
+                "  {title}: {n:>5} x {k} (one at {:.0} {:.0} {:.0}, {:.1} m off: {:.1} {:.1} \
+                 {:.1})\n",
+                p.x,
+                p.y,
+                p.z,
+                off.length(),
+                off.x,
+                off.y,
+                off.z
             ));
         }
     }
