@@ -1053,6 +1053,7 @@ fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, pane: egu
                         ui.toggle_value(&mut editor.icons, "💡")
                             .on_hover_text("Icons for lights, cameras and demos");
                         layout_menu(ui, world, editor);
+                        crate::bookmarks::menu(ui, world, editor);
                         let speed = world
                             .get::<crate::camera::EditorCamera>(editor.camera)
                             .map(|c| c.speed)

@@ -2397,6 +2397,30 @@ pub fn round26(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Round 27: camera bookmarks. Bookmark 1 on the crates, a view across the courtyard, then
+/// back to bookmark 1.
+pub fn round27(dir: impl Into<PathBuf>) -> ShotScript {
+    let steps = vec![
+        Step::Camera(DVec3::new(1.5, 2.5, 2.5), DVec3::new(-2.5, 0.8, -3.5)),
+        Step::Do(Box::new(|world, editor| {
+            editor.icons = false;
+            crate::bookmarks::clear(editor, 1);
+            crate::bookmarks::set(world, editor, 1);
+        })),
+        Step::Wait(40),
+        Step::Shot("125_bookmark_1_set"),
+        Step::Camera(DVec3::new(9.5, 6.0, 9.0), DVec3::new(-0.5, 0.6, -2.0)),
+        Step::Wait(30),
+        Step::Shot("126_somewhere_else"),
+        Step::Do(Box::new(|world, editor| {
+            crate::bookmarks::jump(world, editor, 1)
+        })),
+        Step::Wait(30),
+        Step::Shot("127_back_at_bookmark_1"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {

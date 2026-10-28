@@ -116,6 +116,17 @@ impl EditorCamera {
         Quat::from_rotation_y(self.yaw) * Quat::from_rotation_x(self.pitch)
     }
 
+    /// Put the camera at `at`, turned to `yaw` and `pitch`, with its pivot `distance` ahead
+    /// (a bookmark): at once, any framing flight dropped.
+    pub fn jump(&mut self, t: &mut Transform, at: DVec3, yaw: f32, pitch: f32, distance: f64) {
+        self.flight = None;
+        self.yaw = yaw;
+        self.pitch = pitch;
+        self.pivot_distance = distance;
+        t.translation = at;
+        t.rotation = self.rotation();
+    }
+
     /// Whether a mouse drag in the scene view is steering the camera.
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()

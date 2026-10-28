@@ -1107,6 +1107,7 @@ fn shortcuts(ctx: &egui::Context, world: &mut World, editor: &mut Editor) {
     if pressed(egui::Key::F, false) {
         editor::focus_selection(world, editor);
     }
+    crate::bookmarks::keys(ctx, world, editor);
     // Ctrl+Space maximizes the view under the pointer or restores the layout, Ctrl+Alt+Q
     // switches between four views and one (Blender's keys).
     if pressed(egui::Key::Space, true) {
