@@ -195,7 +195,11 @@ fn strand_shade(in: StrandOut) -> vec3<f32> {
     let w2 = sin(dot(in.rest, vec3<f32>(-487.0, 913.0, 701.0)) + random * 43.0);
     let lean = vec2<f32>(fract(random * 23.7), fract(random * 71.3)) - 0.5;
     let ts = normalize(t + nc * (0.06 * w1 + 0.1 * lean.x) + b * (0.04 * w2 + 0.06 * lean.y));
-    let scatter = mix(0.8, 1.15, saturate(dot(base, vec3<f32>(0.3, 0.5, 0.2)) * 2.5));
+    // Brows and lashes lie one or two fibers deep on the skin, so there is next to no light
+    // scattered between fibers behind them (in dual scattering the back-scatter comes from the
+    // hair behind, Zinke et al. 2008). With a full head's worth, fair brows glow orange.
+    let layer = select(1.0, 0.4, kind == 1u || kind == 2u);
+    let scatter = mix(0.8, 1.15, saturate(dot(base, vec3<f32>(0.3, 0.5, 0.2)) * 2.5)) * layer;
     // The hair in the way of each light shades it (below); occlusion keeps the gaps between
     // locks and the roots darker.
     let lit = mix(occ, 1.0, 0.6);
