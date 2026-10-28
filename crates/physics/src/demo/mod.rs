@@ -57,7 +57,9 @@ use engine_world::physics::{
     BodyKind, CharacterController, CharacterMove, Collider, ColliderShape, Joint, JointKind,
     JointMotor, RigidBody, Velocity,
 };
-use engine_world::{FocusPoints, SurfaceId, SurfaceMaterial, SurfaceMaterials, WorldShift};
+use engine_world::{
+    FocusPoints, Interact, Interactable, SurfaceId, SurfaceMaterial, SurfaceMaterials, WorldShift,
+};
 
 /// Size of the concrete yard (x, z), meters.
 pub const YARD_SIZE: [f64; 2] = [70.0, 50.0];
@@ -365,6 +367,31 @@ impl Station {
         }
     }
 
+    /// What pressing the use key at the station does (the prompt reads `E  Pour`): it
+    /// replays the station now.
+    pub fn verb(self) -> &'static str {
+        match self {
+            Station::Tower => "Rebuild the tower",
+            Station::Pile => "Rain crates",
+            Station::Dominoes => "Set up the dominoes",
+            Station::Ragdolls => "Drop the dummies",
+            Station::WreckingBall => "Swing the ball",
+            Station::Seesaw => "Launch",
+            Station::PaddleWheel => "Restart the wheel",
+            Station::Bridge => "Drop crates",
+            Station::Turntable => "Restart the turntable",
+            Station::Balls => "Drop the balls",
+            Station::BarrelRun => "Roll the drums",
+            Station::Rockfall => "Pour the rocks",
+            Station::Pendulums => "Start the wave",
+            Station::Cradle => "Lift the ball",
+            Station::Pool => "Break",
+            Station::Galton => "Refill and pour",
+            Station::Catapult => "Fire",
+            Station::Jenga => "Restack",
+        }
+    }
+
     pub fn from_key(key: &str) -> Option<Station> {
         Station::ALL.into_iter().find(|s| s.key() == key)
     }
@@ -410,6 +437,32 @@ pub struct ProvingGround {
     unbuilt: [bool; Station::ALL.len()],
     /// Replay stations on their cycles (on by default).
     pub replay: bool,
+}
+
+/// A station's use point (playtest #1: stations usable by hand): an [`Interactable`] a meter
+/// over the station's middle, outside the station's own parts so a replay keeps it. Pressing
+/// the use key there replays the station ([`use_stations`]).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct StationControl {
+    pub ground: Entity,
+    pub station: Station,
+}
+
+/// How near a station's middle the player must be to replay it by hand, meters (stations are
+/// up to about 10 m across).
+const CONTROL_REACH_M: f32 = 7.0;
+
+/// `Update`: a press on a station's use point replays that station next step.
+pub(crate) fn use_stations(
+    mut presses: MessageReader<Interact>,
+    controls: Query<&StationControl>,
+    mut work: ResMut<StationWork>,
+) {
+    for press in presses.read() {
+        if let Ok(c) = controls.get(press.target) {
+            work.due.push((c.ground, c.station));
+        }
+    }
 }
 
 /// Marks everything a station spawned, so a replay clears it.
@@ -712,6 +765,18 @@ fn build(world: &mut World, origin: DVec3) {
         unbuilt: [true; Station::ALL.len()],
         replay: true,
     });
+    for station in Station::ALL {
+        let at = origin + station.base() + DVec3::Y;
+        world.spawn((
+            Transform::from_translation(at),
+            Interactable::new(station.verb()).reach(CONTROL_REACH_M),
+            StationControl {
+                ground: pad,
+                station,
+            },
+            Name::new(format!("{} control", station.key())),
+        ));
+    }
     // Without a renderer (tests, tools) everything is built at once: there is no art.
     if !world.contains_resource::<Assets<Mesh>>() {
         build_unbuilt(world, usize::MAX);

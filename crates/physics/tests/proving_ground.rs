@@ -8,7 +8,7 @@ use engine_core::time::TimeSource;
 use engine_physics::demo::{self, Station};
 use engine_physics::{PhysicsPlugin, PhysicsStats};
 use engine_world::physics::{BodyKind, Collider, ColliderShape, RigidBody, Velocity};
-use engine_world::{SimulationFocus, WorldPlugin, WorldShift};
+use engine_world::{Interact, Interactable, SimulationFocus, WorldPlugin, WorldShift};
 use serde_json::json;
 
 fn app() -> App {
@@ -863,4 +863,37 @@ fn the_yard_follows_a_world_shift() {
         off.length() < 0.05,
         "the replayed Galton board is {off:?} off the moved yard"
     );
+}
+
+/// Each station has a use point (playtest #1): pressing the use key there replays it, so the
+/// Galton board refills its hopper after a pour.
+#[test]
+fn pressing_use_at_a_station_replays_it() {
+    let mut app = app();
+    app.update();
+    let hopper = |app: &mut App| {
+        named(app, "Galton ball")
+            .into_iter()
+            .map(|e| app.world.get::<Transform>(e).unwrap().translation)
+            .fold(DVec3::splat(f64::INFINITY), |a, b| a.min(b))
+    };
+    let full = hopper(&mut app);
+    app.update_n(10 * 60);
+    assert!(
+        (hopper(&mut app) - full).length() > 0.3,
+        "the board didn't pour"
+    );
+    let control = named(&mut app, "galton control")[0];
+    let verb = &app.world.get::<Interactable>(control).unwrap().verb;
+    assert_eq!(verb, Station::Galton.verb());
+    let actor = app.world.spawn(Transform::default()).id();
+    app.world.write_message(Interact {
+        actor,
+        target: control,
+        from: DVec3::ZERO,
+    });
+    // Read in `Update`; the station replays at the next fixed step.
+    app.update_n(2);
+    let off = hopper(&mut app) - full;
+    assert!(off.length() < 0.05, "the hopper wasn't refilled: {off:?}");
 }

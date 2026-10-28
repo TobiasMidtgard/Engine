@@ -201,6 +201,7 @@ impl Plugin for PhysicsPlugin {
                     .in_set(SimSet::Gameplay),
             )
             .add_systems(Update, demo::finish_art.run_if(demo::art_busy))
+            .add_systems(Update, demo::use_stations)
             .add_systems(Update, fit::fit_colliders.run_if(fit::fits_waiting))
             .add_systems(
                 PostUpdate,
