@@ -110,6 +110,13 @@ pub struct Editor {
     pub snap_move: f32,
     pub snap_angle_deg: f32,
     pub snap_scale: f32,
+    /// A V or Ctrl+Shift snap drag in progress.
+    pub snap_drag: Option<crate::snap::Drag>,
+    /// Surface snaps tilt the selection's up axis to the surface (Unreal's Rotate to Surface
+    /// Normal).
+    pub surface_align: bool,
+    /// Surface snaps hold the selection this far off the surface, meters.
+    pub surface_offset: f32,
     pub history: History,
     pub scene_path: String,
     pub log: Vec<LogLine>,
@@ -174,6 +181,9 @@ impl Editor {
             snap_move: 0.25,
             snap_angle_deg: 15.0,
             snap_scale: 0.1,
+            snap_drag: None,
+            surface_align: false,
+            surface_offset: 0.0,
             history: History::default(),
             scene_path: format!("{SCENES_DIR}/untitled.scene.json"),
             log: Vec::new(),

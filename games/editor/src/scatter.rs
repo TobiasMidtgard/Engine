@@ -148,38 +148,7 @@ pub fn surface(world: &mut World, origin: DVec3, dir: Vec3) -> Option<(DVec3, Ve
             all
         })
         .collect();
-    let skip = |e: Entity| skip_painted.contains(&e);
-    let hit = crate::picking::pick_surface(world, origin, dir, 10_000.0, &skip)?;
-    let distance = (hit - origin).length().max(0.01);
-    let step = (0.03 / distance) as f32;
-    let side = dir.any_orthonormal_vector();
-    let up = dir.cross(side);
-    let a = crate::picking::pick_surface(
-        world,
-        origin,
-        (dir + side * step).normalize(),
-        10_000.0,
-        &skip,
-    );
-    let b = crate::picking::pick_surface(
-        world,
-        origin,
-        (dir + up * step).normalize(),
-        10_000.0,
-        &skip,
-    );
-    let normal = match (a, b) {
-        (Some(a), Some(b)) => (a - hit).cross(b - hit).as_vec3().normalize_or_zero(),
-        _ => Vec3::Y,
-    };
-    let normal = if normal == Vec3::ZERO {
-        Vec3::Y
-    } else if normal.dot(dir) > 0.0 {
-        -normal
-    } else {
-        normal
-    };
-    Some((hit, normal))
+    crate::picking::surface_and_normal(world, origin, dir, &|e| skip_painted.contains(&e))
 }
 
 /// The group holding `model`'s copies, made (and recorded in the stroke) when missing.

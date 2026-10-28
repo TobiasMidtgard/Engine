@@ -90,6 +90,41 @@ pub fn pick_surface(
     (d <= max).then(|| origin + dir.as_dvec3() * d)
 }
 
+/// [`pick_surface`] (any distance) and the surface's normal there, from two neighbouring rays;
+/// the normal faces the ray.
+pub fn surface_and_normal(
+    world: &mut World,
+    origin: DVec3,
+    dir: Vec3,
+    skip: &dyn Fn(Entity) -> bool,
+) -> Option<(DVec3, Vec3)> {
+    let hit = pick_surface(world, origin, dir, 10_000.0, skip)?;
+    let distance = (hit - origin).length().max(0.01);
+    let step = (0.03 / distance) as f32;
+    let side = dir.any_orthonormal_vector();
+    let up = dir.cross(side);
+    let a = pick_surface(
+        world,
+        origin,
+        (dir + side * step).normalize(),
+        10_000.0,
+        skip,
+    );
+    let b = pick_surface(world, origin, (dir + up * step).normalize(), 10_000.0, skip);
+    let normal = match (a, b) {
+        (Some(a), Some(b)) => (a - hit).cross(b - hit).as_vec3().normalize_or_zero(),
+        _ => Vec3::Y,
+    };
+    let normal = if normal == Vec3::ZERO {
+        Vec3::Y
+    } else if normal.dot(dir) > 0.0 {
+        -normal
+    } else {
+        normal
+    };
+    Some((hit, normal))
+}
+
 /// Distance along a world ray to the first triangle of `mesh` placed at `global`.
 pub fn ray_mesh(global: &GlobalTransform, mesh: &Mesh, origin: DVec3, dir: Vec3) -> Option<f64> {
     let aabb = mesh.aabb();

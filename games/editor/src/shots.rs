@@ -1340,6 +1340,172 @@ pub fn round15(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// The corner of `name`'s mesh bounds furthest along `dir`.
+fn corner(world: &mut World, name: &str, dir: DVec3) -> DVec3 {
+    let e = find(world, name).expect("entity");
+    crate::snap::box_corners(world, e)
+        .into_iter()
+        .max_by(|a, b| a.dot(dir).total_cmp(&b.dot(dir)))
+        .unwrap_or_default()
+}
+
+/// Where `at` is on screen.
+fn screen(editor: &Editor, at: DVec3) -> egui::Pos2 {
+    editor
+        .view
+        .and_then(|v| v.project(at))
+        .unwrap_or(egui::pos2(800.0, 450.0))
+}
+
+/// Queue input events for the next frame, as a user's hands would make them.
+fn inject(world: &mut World, events: Vec<egui::Event>) {
+    world
+        .resource_mut::<crate::egui_bridge::EguiInput>()
+        .injected
+        .extend(events);
+}
+
+fn key_v(pressed: bool) -> egui::Event {
+    egui::Event::Key {
+        key: egui::Key::V,
+        physical_key: Some(egui::Key::V),
+        pressed,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    }
+}
+
+fn button(at: egui::Pos2, pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
+    egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers,
+    }
+}
+
+/// Round 16: snapping. A crate's corner dragged onto another crate's corner with V held, then
+/// the barrel dragged up the ramp with Ctrl+Shift, tilted to its slope.
+pub fn round16(dir: impl Into<PathBuf>) -> ShotScript {
+    // The front-left-bottom corner of the loose crate onto the front-right-bottom of Crate 3.
+    const GRAB: DVec3 = DVec3::new(-1.0, -1.0, 1.0);
+    const ONTO: DVec3 = DVec3::new(1.0, -1.0, 1.0);
+    let both = egui::Modifiers {
+        ctrl: true,
+        shift: true,
+        command: true,
+        ..egui::Modifiers::NONE
+    };
+    let steps = vec![
+        Step::Camera(DVec3::new(1.2, 2.4, 3.2), DVec3::new(-0.9, 0.5, -3.0)),
+        Step::Select("Crate 6"),
+        Step::Tool(Tool::Move),
+        Step::Tab(Tab::History),
+        Step::Do(Box::new(|world, _| {
+            // Crate 6 off the stack, loose on the ground to the right.
+            let e = find(world, "Crate 6").expect("crate");
+            if let Some(mut t) = world.get_mut::<Transform>(e) {
+                t.translation = DVec3::new(2.9, 0.45, 1.6);
+                t.rotation = Quat::from_rotation_y(0.35);
+            }
+        })),
+        Step::Wait(30),
+        Step::Do(Box::new(|world, editor| {
+            let at = screen(editor, corner(world, "Crate 6", GRAB));
+            inject(world, vec![egui::Event::PointerMoved(at), key_v(true)]);
+        })),
+        Step::Wait(4),
+        Step::Shot("68_hold_v_grabs_a_corner"),
+        Step::Do(Box::new(|world, editor| {
+            let at = screen(editor, corner(world, "Crate 6", GRAB));
+            inject(world, vec![button(at, true, egui::Modifiers::NONE)]);
+        })),
+        Step::Wait(2),
+        Step::Do(Box::new(|world, editor| {
+            // Near the other crate's corner, not on it: the snap pulls it in.
+            let at = screen(editor, corner(world, "Crate 3", ONTO)) + egui::vec2(9.0, -6.0);
+            inject(world, vec![egui::Event::PointerMoved(at)]);
+        })),
+        Step::Wait(4),
+        Step::Shot("69_dragged_onto_a_corner"),
+        Step::Do(Box::new(|world, editor| {
+            let at = screen(editor, corner(world, "Crate 3", ONTO)) + egui::vec2(9.0, -6.0);
+            inject(
+                world,
+                vec![button(at, false, egui::Modifiers::NONE), key_v(false)],
+            );
+        })),
+        Step::Wait(4),
+        Step::Do(Box::new(|world, _| {
+            let a = corner(world, "Crate 6", GRAB);
+            let b = corner(world, "Crate 3", ONTO);
+            engine::core::log::info!("corner gap after the snap: {:.4} m", (a - b).length());
+        })),
+        Step::Camera(DVec3::new(-0.4, 1.3, -1.2), DVec3::new(-1.3, 0.4, -2.9)),
+        Step::Wait(30),
+        Step::Shot("70_corners_meet"),
+        // Surface snap: the barrel up onto the ramp.
+        Step::Camera(DVec3::new(9.5, 3.4, 3.0), DVec3::new(3.2, 0.6, -2.6)),
+        Step::Select("Barrel"),
+        Step::Do(Box::new(|_, editor| {
+            editor.surface_align = true;
+        })),
+        Step::Wait(30),
+        Step::Do(Box::new(move |world, editor| {
+            let e = find(world, "Barrel").expect("barrel");
+            let at = world
+                .get::<GlobalTransform>(e)
+                .map(|g| screen(editor, g.translation()))
+                .unwrap_or_default();
+            inject(
+                world,
+                vec![
+                    egui::Event::PointerMoved(at),
+                    egui::Event::ModifiersChanged(both),
+                ],
+            );
+        })),
+        Step::Wait(2),
+        Step::Do(Box::new(move |world, editor| {
+            let e = find(world, "Barrel").expect("barrel");
+            let at = world
+                .get::<GlobalTransform>(e)
+                .map(|g| screen(editor, g.translation()))
+                .unwrap_or_default();
+            inject(world, vec![button(at, true, both)]);
+        })),
+        Step::Wait(2),
+        Step::Do(Box::new(|world, editor| {
+            let ramp = find(world, "Ramp").expect("ramp");
+            let at = world
+                .get::<GlobalTransform>(ramp)
+                .map(|g| screen(editor, g.translation() + DVec3::new(0.6, 0.0, 0.0)))
+                .unwrap_or_default();
+            inject(world, vec![egui::Event::PointerMoved(at)]);
+        })),
+        Step::Wait(4),
+        Step::Shot("71_ctrl_shift_slides_onto_the_ramp"),
+        Step::Do(Box::new(move |world, editor| {
+            let ramp = find(world, "Ramp").expect("ramp");
+            let at = world
+                .get::<GlobalTransform>(ramp)
+                .map(|g| screen(editor, g.translation() + DVec3::new(0.6, 0.0, 0.0)))
+                .unwrap_or_default();
+            inject(
+                world,
+                vec![
+                    button(at, false, both),
+                    egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+                ],
+            );
+        })),
+        Step::Select(""),
+        Step::Wait(30),
+        Step::Shot("72_barrel_on_the_slope"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {

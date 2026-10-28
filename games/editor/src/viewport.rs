@@ -39,7 +39,8 @@ pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
         Vec::new()
     };
 
-    let gizmo_used = gizmo(ui, world, editor, &view);
+    let snapping = crate::snap::interact(ui, world, editor, &view, &response);
+    let gizmo_used = !snapping && gizmo(ui, world, editor, &view);
     drop_target(ui, world, editor, &view, &response);
 
     let alt = ui.input(|i| i.modifiers.alt);
@@ -57,7 +58,7 @@ pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
         overlays(ui, world, editor, rect);
         return;
     }
-    if response.clicked() && !gizmo_used && !alt && !editor.gizmo.is_focused() {
+    if response.clicked() && !gizmo_used && !snapping && !alt && !editor.gizmo.is_focused() {
         let additive = ui.input(|i| i.modifiers.ctrl || i.modifiers.shift);
         if let Some(pos) = response.interact_pointer_pos() {
             click_select(world, editor, &view, &icons, pos, additive);
@@ -66,7 +67,15 @@ pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     if response.double_clicked() && editor.primary().is_some() {
         editor::focus_selection(world, editor);
     }
-    box_select(ui, world, editor, &view, &response, alt || gizmo_used);
+    box_select(
+        ui,
+        world,
+        editor,
+        &view,
+        &response,
+        alt || gizmo_used || snapping,
+    );
+    crate::snap::hint(ui, editor, rect);
 
     overlays(ui, world, editor, rect);
 }
@@ -641,6 +650,19 @@ fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, rect: egu
                                     .range(1.0..=90.0)
                                     .suffix("°"),
                             );
+                        }
+                        if editor.tool == Tool::Move {
+                            ui.toggle_value(&mut editor.surface_align, "Tilt to surface")
+                                .on_hover_text(
+                                    "Ctrl+Shift drags turn the selection's up to the surface",
+                                );
+                            ui.add(
+                                egui::DragValue::new(&mut editor.surface_offset)
+                                    .speed(0.01)
+                                    .range(-10.0..=10.0)
+                                    .suffix(" m"),
+                            )
+                            .on_hover_text("How far Ctrl+Shift drags hold it off the surface");
                         }
                         ui.separator();
                         ui.toggle_value(&mut editor.grid, "⊞")

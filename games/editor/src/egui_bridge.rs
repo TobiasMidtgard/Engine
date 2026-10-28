@@ -165,6 +165,7 @@ pub fn gather_input(
     for event in events.read() {
         match *event {
             InputEvent::Key { key, pressed } => {
+                let before = input.modifiers;
                 let m = &mut input.modifiers;
                 match key {
                     KeyCode::ShiftLeft | KeyCode::ShiftRight => m.shift = pressed,
@@ -174,6 +175,10 @@ pub fn gather_input(
                     }
                     KeyCode::AltLeft | KeyCode::AltRight => m.alt = pressed,
                     _ => {}
+                }
+                // egui tracks held modifiers only through this event (`i.modifiers`).
+                if *m != before {
+                    raw.events.push(egui::Event::ModifiersChanged(*m));
                 }
                 if let Some(key) = map_key(key) {
                     let modifiers = input.modifiers;
@@ -229,6 +234,8 @@ pub fn gather_input(
             }),
             InputEvent::FocusLost => {
                 input.modifiers = egui::Modifiers::NONE;
+                raw.events
+                    .push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
                 raw.events.push(egui::Event::WindowFocused(false));
             }
             _ => {}
@@ -242,8 +249,10 @@ pub fn gather_input(
     }
     let injected = std::mem::take(&mut input.injected);
     for event in &injected {
-        if let egui::Event::PointerMoved(pos) = event {
-            input.pointer = Some(*pos);
+        match event {
+            egui::Event::PointerMoved(pos) => input.pointer = Some(*pos),
+            egui::Event::ModifiersChanged(m) => input.modifiers = *m,
+            _ => {}
         }
     }
     raw.events.extend(injected);
