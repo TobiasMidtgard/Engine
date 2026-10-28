@@ -20,6 +20,11 @@
 //! its proxy on disk ([`HlodSettings::cache_dir`]), so the next run shows it before the cell was
 //! ever visited; `ENGINE_HLOD_BAKE=1` loads every such cell once, in turn, to fill the cache
 //! (a release step, or a tool).
+//!
+//! Farther out a second level takes over (Unreal's HLOD1): the proxies of every out
+//! cell in one [`HlodSettings::group_m`] square merge into one coarser mesh that shows past
+//! [`HlodSettings::group_from_m`], so a far valley is a handful of draws instead of a hundred,
+//! and draws farther ([`HlodSettings::group_draw_m`]).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -37,6 +42,9 @@ use engine_render::{
 use engine_world::physics::{BodyKind, RigidBody, Velocity};
 use engine_world::shift::{FollowsWorldShift, WorldShift};
 use engine_world::{CellId, CellMember, CellState, StreamedCells};
+
+mod groups;
+pub use groups::HlodGroupProxy;
 
 /// How proxies are made and shown.
 #[derive(Resource, Debug, Clone)]
@@ -57,6 +65,18 @@ pub struct HlodSettings {
     /// Load every versioned cell without a proxy once, in turn, to make one
     /// (`ENGINE_HLOD_BAKE=1`).
     pub bake: bool,
+    /// Width of the squares whose out cells' proxies merge into one group proxy far away
+    /// (the second level, Unreal's HLOD1), meters.
+    pub group_m: f64,
+    /// A group shows instead of its members' proxies once every source is this far from it
+    /// (and gives way again at 85% of it), meters.
+    pub group_from_m: f64,
+    /// Triangles a group proxy may have at most.
+    pub group_triangles: usize,
+    /// Farthest a group proxy draws, meters.
+    pub group_draw_m: f32,
+    /// Seconds a group takes to fade in over its members' proxies.
+    pub group_fade_s: f32,
 }
 
 impl Default for HlodSettings {
@@ -71,6 +91,11 @@ impl Default for HlodSettings {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("hlod-cache")),
             bake: std::env::var("ENGINE_HLOD_BAKE").is_ok_and(|v| v != "0"),
+            group_m: 1024.0,
+            group_from_m: 1500.0,
+            group_triangles: 24_000,
+            group_draw_m: 12_000.0,
+            group_fade_s: 0.75,
         }
     }
 }
@@ -152,6 +177,8 @@ pub struct Proxies {
     baked_out: Vec<String>,
     /// Bake mode: every versioned cell has its proxy.
     pub baked: bool,
+    /// Far groups of cells whose proxies merge into one.
+    groups: groups::Groups,
 }
 
 #[derive(Default)]
@@ -188,6 +215,7 @@ impl FollowsWorldShift for Proxies {
                 *frame = s.transform(frame);
             }
         }
+        self.groups.shift(s);
     }
 }
 
@@ -200,7 +228,8 @@ pub(crate) fn register(app: &mut App) {
         .register_api(
             "stream.proxies",
             "The far-view proxies of streamed cells: each cell's key, its proxy's triangles \
-             (0 = none yet) and whether it is showing.",
+             (0 = none yet) and whether it is showing; and the far groups whose members' \
+             proxies merge into one (square, members, triangles, showing).",
             "{}",
             |world, _| {
                 let cells = world.resource::<StreamedCells>();
@@ -218,7 +247,25 @@ pub(crate) fn register(app: &mut App) {
                         })
                     })
                     .collect();
-                Ok(serde_json::json!({ "cells": rows, "baked": proxies.baked }))
+                let groups: Vec<_> = proxies
+                    .groups
+                    .list
+                    .iter()
+                    .map(|g| {
+                        let members: Vec<&str> = g
+                            .members
+                            .iter()
+                            .filter_map(|&i| cells.cells.get(i).map(|c| c.key.as_str()))
+                            .collect();
+                        serde_json::json!({
+                            "square": [g.bucket.0, g.bucket.1],
+                            "members": members,
+                            "triangles": g.triangles,
+                            "showing": g.showing,
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::json!({ "cells": rows, "groups": groups, "baked": proxies.baked }))
             },
         );
 }
@@ -232,8 +279,9 @@ pub(crate) fn update(
     configs: &[ProxyConfig],
     fading: &[CellId],
     poses: &[Option<(DVec3, DQuat)>],
-    streaming: bool,
+    sources: Option<&[(DVec3, f64)]>,
 ) {
+    let streaming = sources.is_some();
     let settings = world.resource::<HlodSettings>().clone();
     // Without the renderer's assets (a server, a tool) there is nothing to draw proxies with.
     let drawable = world.contains_resource::<Assets<Mesh>>()
@@ -260,6 +308,7 @@ pub(crate) fn update(
             proxies.slots.resize_with(cells.len(), Default::default);
         }
     }
+    groups::update(world, configs, sources, &settings);
     for (i, (key, center, state)) in cells.iter().enumerate() {
         let config = configs.get(i).copied().unwrap_or_default();
         if !config.enabled {
@@ -293,6 +342,14 @@ pub(crate) fn update(
             }
             CellState::Loaded => {}
             _ => {
+                // A far group stands in for this proxy.
+                let covered = world.resource::<Proxies>().groups.covered.get(i).copied();
+                if covered.unwrap_or(false) {
+                    if let Some(e) = entity {
+                        despawn(world, i, e);
+                    }
+                    continue;
+                }
                 let slot = &mut world.resource_mut::<Proxies>().slots[i];
                 slot.settled = 0;
                 slot.gather = None;
@@ -1012,6 +1069,100 @@ mod tests {
             .query_filtered::<Entity, With<HlodProxy>>()
             .iter(&app.world)
             .collect()
+    }
+
+    /// Two boxes around `x`.
+    fn shed(x: f64) -> impl FnMut(&mut World) + Send + Sync + 'static {
+        move |world| {
+            for dx in [-5.0, 5.0] {
+                let t = Transform::from_xyz(x + dx, 2.0, 0.0);
+                world.spawn((
+                    t,
+                    GlobalTransform::from(t),
+                    MeshRenderer::new(
+                        Shape::Cuboid {
+                            size: [4.0, 4.0, 4.0],
+                        },
+                        StandardMaterial::default(),
+                    ),
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn far_cells_in_one_square_merge_into_one_group_proxy() {
+        let dir = tempdir("groups");
+        let mut app = app(&dir);
+        app.world.resource_mut::<HlodSettings>().group_fade_s = 0.05;
+        for (i, x) in [100.0, 300.0, 500.0].into_iter().enumerate() {
+            app.stream_cell(
+                StreamCell::new(format!("shed{i}"), DVec3::new(x, 0.0, 0.0), 10.0, shed(x))
+                    .load_within(50.0)
+                    .proxy_version(7),
+            );
+        }
+        // One far off in the next square has no one to merge with.
+        app.stream_cell(
+            StreamCell::new("lone", DVec3::new(3000.0, 0.0, 0.0), 10.0, shed(3000.0))
+                .load_within(50.0),
+        );
+        let player = app
+            .world
+            .spawn(StreamingSource {
+                lookahead_s: 0.0,
+                ..Default::default()
+            })
+            .id();
+        // Visit each shed so it leaves a proxy.
+        for (i, x) in [100.0, 300.0, 500.0].into_iter().enumerate() {
+            place(&mut app, player, x);
+            until(&mut app, |app| {
+                app.world.resource::<Proxies>().triangles()[i] > 0
+            });
+        }
+        let group = |app: &App| {
+            let g = &app.world.resource::<Proxies>().groups.list;
+            assert_eq!(g.len(), 1, "one square with more than one cell");
+            (g[0].members.clone(), g[0].triangles, g[0].showing)
+        };
+        // Near, each out shed shows its own proxy.
+        place(&mut app, player, 700.0);
+        until(&mut app, |app| group(app).1 > 0);
+        let (members, triangles, showing) = group(&app);
+        assert_eq!(members, vec![0, 1, 2]);
+        assert!(triangles > 0 && !showing);
+        assert_eq!(proxies(&mut app).len(), 3);
+        // Far, the group stands in for all three.
+        place(&mut app, player, -2500.0);
+        until(&mut app, |app| proxies(app).is_empty());
+        assert!(group(&app).2);
+        let shown: Vec<Entity> = app
+            .world
+            .query_filtered::<Entity, With<HlodGroupProxy>>()
+            .iter(&app.world)
+            .collect();
+        assert_eq!(shown.len(), 1);
+        let at = app.world.get::<Transform>(shown[0]).unwrap().translation;
+        assert!((at.x - 300.0).abs() < 1e-6, "{at:?}");
+        // The versioned group is kept on disk.
+        let kept = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|f| f.file_name().to_string_lossy().starts_with("hlod1_0_0-"));
+        assert!(kept);
+        // Closer again, the members' proxies are back and the group goes.
+        place(&mut app, player, -500.0);
+        app.update();
+        assert!(!group(&app).2);
+        assert_eq!(proxies(&mut app).len(), 3);
+        let groups = app
+            .world
+            .query_filtered::<Entity, With<HlodGroupProxy>>()
+            .iter(&app.world)
+            .count();
+        assert_eq!(groups, 0);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

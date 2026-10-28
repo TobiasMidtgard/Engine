@@ -9,6 +9,8 @@
 //! - `map.png`: the cells from above, green loaded, amber shown by a proxy, the camera and its
 //!   256 m load reach in white;
 //! - `moved.png`, `map_moved.png`: the camera down the road by the castle;
+//! - `far_cells.png`, `far_groups.png`: from the hills 2 km west, every cell's own proxy, then
+//!   the far groups that merge each kilometre's proxies into one;
 //!
 //! and prints the entities and assets in each case.
 //!
@@ -17,7 +19,7 @@
 use std::path::{Path, PathBuf};
 
 use engine::assets::{AssetAppExt, AssetTypes};
-use engine::hlod::{HlodSettings, Proxies};
+use engine::hlod::{HlodGroupProxy, HlodProxy, HlodSettings, Proxies};
 use engine::scene_stream::{PlannedCell, SceneLayout, ScenePartition, stream_scene};
 use engine::stream::{StreamingBudget, StreamingPlugin};
 use engine_core::math::{DVec3, Quat, Vec3};
@@ -558,4 +560,55 @@ fn main() {
     );
     shot(&mut app, "moved");
     map(&out.join("map_moved.png"), &layout, &s, eye);
+    // From the hills 2 km west, every cell is out: first each cell's own proxy, then the far
+    // groups (HLOD1) standing in for every out cell of their kilometre.
+    let eye = DVec3::new(-1900.0, 320.0, 650.0);
+    {
+        let mut q = app.world.query::<(&mut Transform, &mut Camera)>();
+        for (mut t, mut camera) in q.iter_mut(&mut app.world) {
+            *t = Transform::from_translation(eye)
+                .looking_at(DVec3::new(750.0, 0.0, -150.0), Vec3::Y);
+            // A long lens, as from a lookout.
+            *camera = Camera {
+                exposure: Exposure::Manual { ev100: 14.2 },
+                ..Camera::perspective(13.0)
+            };
+        }
+    }
+    let far = |app: &mut App, name: &str, groups: bool| {
+        app.world.resource_mut::<HlodSettings>().group_from_m =
+            if groups { 1500.0 } else { f64::INFINITY };
+        settle(app);
+        // Group fades take wall time; lavapipe frames are slow enough for it.
+        app.update_n(2);
+        let cells = app
+            .world
+            .query_filtered::<&MeshRenderer, With<HlodProxy>>()
+            .iter(&app.world)
+            .count();
+        let groups = app
+            .world
+            .query_filtered::<&MeshRenderer, With<HlodGroupProxy>>()
+            .iter(&app.world)
+            .count();
+        let drawn: Vec<engine::assets::Handle<Mesh>> = app
+            .world
+            .query::<(&MeshRenderer, Option<&HlodProxy>, Option<&HlodGroupProxy>)>()
+            .iter(&app.world)
+            .filter(|(_, a, b)| a.is_some() || b.is_some())
+            .filter_map(|(r, _, _)| match &r.mesh {
+                MeshRef::Handle(h) => Some(*h),
+                _ => None,
+            })
+            .collect();
+        let meshes = app.world.resource::<engine::assets::Assets<Mesh>>();
+        let tris: usize = drawn
+            .iter()
+            .filter_map(|h| meshes.get(*h).map(|m| m.indices.len() / 3))
+            .sum();
+        println!("{name}: {cells} cell proxies + {groups} group proxies drawn, {tris} triangles");
+        shot(app, name);
+    };
+    far(&mut app, "far_cells", false);
+    far(&mut app, "far_groups", true);
 }

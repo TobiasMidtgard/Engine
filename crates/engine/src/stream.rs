@@ -666,7 +666,7 @@ pub fn stream_system(world: &mut World) {
         .map(|s| s.loader.proxy)
         .collect();
     let fading: Vec<CellId> = world.resource::<Fades>().0.iter().map(|f| f.cell).collect();
-    hlod::update(world, &configs, &fading, &poses, sources.is_some());
+    hlod::update(world, &configs, &fading, &poses, sources.as_deref());
 }
 
 /// Where each cell's frame stands now (`None`: no frame, or it isn't there); moves framed
