@@ -20,3 +20,6 @@ screenshots/
 
 # Written by ENGINE_PROFILE / --profile runs
 engine-profile.txt
+
+# Far-view proxies baked at run time (engine::hlod; ENGINE_HLOD_DIR moves it)
+hlod-cache/
