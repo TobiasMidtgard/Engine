@@ -69,12 +69,17 @@ fracture and debris.
   dished and darkened the treads' middles. Real stair proportions: 171 mm rise, 286 mm
   going.
 - **Doors** (`door`): a ledged and braced plank door (iron strap hinges, clenched nails, a
-  ring pull on each face) hangs in every doorway built in build mode. `interact` (E, gamepad
-  West) opens or shuts the door nearest a character within 2.2 m; it swings 95° away from
+  ring pull on each face) hangs in every doorway built in build mode. Each door is an
+  `engine_world::Interactable` ("Open" / "Shut", 2.2 m): the use key (E, gamepad West) opens
+  or shuts the one the engine picks; it swings 95° away from
   whoever opens it, either way, and with a physics module it is a kinematic body that swings
   with it (shut, it closes the doorway; swinging, it shoves crates out of its way). When its
   doorway falls the door swings shut and falls with it; take the doorway down and the door
   goes too.
+- **Mounted rifle** (`gun`): a rifle on a tripod in front of the breach range, an
+  `Interactable` ("Fire"). The use key swings it, within 85° either side, to what the player
+  looks at (a physics ray along the view, else 25 m out) and fires a burst of
+  `ProjectileTrace`s through walls, rock and crates.
 - **Burning wood** (`burn`): wooden building pieces get an `engine_world::Combustible`
   holding their wood as fuel, so the fire module (when installed) can light and burn them.
   As they burn they char (scorched, then black alligator char with embers glowing in its
@@ -119,8 +124,8 @@ module. Voxel volumes here are local destructible rock (cliffs, caves, arches) p
 Reads: `DamageEvent` (bullets, melee, explosions; `target` picks the wall or piece),
 `WorldImpulse` (explosions: energy falls off with distance), `ProjectileTrace` (bullets pass
 through soft material and lose energy), `ContactEvent` (hard impacts, debris landing),
-`TerrainEdit` (dig and build rock), `Combustible` state, the `build_*` and `interact` input
-actions, `BuildRequest` (script a builder), `DoorRequest` (open or shut a door),
+`TerrainEdit` (dig and build rock), `Combustible` state, the `build_*` input actions,
+`Interact` (the use key on doors and the mounted rifle), `BuildRequest` (script a builder), `DoorRequest` (open or shut a door),
 `ReinforceRequest` (reinforce a wall).
 
 Writes: `WorldImpulse` (falling structures, strength only), `NoiseEvent` (breaks, collapses,

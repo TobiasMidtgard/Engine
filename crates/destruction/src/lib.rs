@@ -15,6 +15,7 @@ pub mod demo;
 pub mod door;
 pub mod dress;
 pub mod fracture;
+pub mod gun;
 pub mod hill;
 pub mod hits;
 pub mod material;
@@ -258,6 +259,11 @@ impl Plugin for DestructionPlugin {
                 "A plank door hung in a doorway piece: hinge (doorway space), open 0 shut..1 open, \
                  opening, toward (+1 out through the front, -1 in), swing_secs, loose (its doorway fell).",
             )
+            .register_component::<gun::MountedGun>(
+                "A rifle on a tripod the player fires with the use key (E): burst rounds, \
+                 rounds_per_sec, arc_deg either side, pitch_deg [low, high], range_m, speed m/s, \
+                 spread rad, slew_rad_s; aim [yaw, pitch] rad (read-only).",
+            )
             .register_component::<Fracturable>(
                 "Prop that shatters into Voronoi pieces: shape, material, break_energy_j, pieces, damage_j.",
             )
@@ -332,6 +338,10 @@ impl Plugin for DestructionPlugin {
                 )
                     .chain()
                     .in_set(UpdateSet::Logic),
+            )
+            .add_systems(
+                Update,
+                gun::mounted_gun_system.in_set(UpdateSet::Logic),
             )
             .add_systems(
                 PostUpdate,

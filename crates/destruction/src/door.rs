@@ -3,8 +3,8 @@
 //! ([`PropKind::PlankDoor`]) hinged on the opening's left (seen from the front, +Z). It swings
 //! [`OPEN_DEG`] either way, away from whoever opens it, like a door in Valheim.
 //!
-//! The `interact` action (E, gamepad West) opens or shuts the door nearest a character (or an
-//! input-driven [`Builder`]) within [`REACH_M`]; scripts send [`DoorRequest`]s and AI agents
+//! Each door is an [`Interactable`] ("Open" / "Shut", within [`REACH_M`]): the use key (E,
+//! gamepad West) opens or shuts the one the engine picks; scripts send [`DoorRequest`]s and AI agents
 //! call `destruction.door`. With a physics module a door is a kinematic body that swings with
 //! it: shut, it closes the doorway; open, it stands where it swung to; swinging, it shoves
 //! crates and bodies in its way. When its doorway falls, the door swings shut and falls with
@@ -12,13 +12,11 @@
 
 use engine_core::math::{DVec3, Quat, Vec3, smoothstep};
 use engine_core::prelude::*;
-use engine_input::{ActionState, Binding, GamepadButton, InputMap, KeyCode};
-use engine_world::physics::{
-    CharacterController, Collider, ColliderShape, PhysicsBackend, RigidBody,
-};
-use engine_world::{NoiseEvent, SurfaceMaterials};
+use engine_input::{Binding, GamepadButton, InputMap, KeyCode};
+use engine_world::physics::{Collider, ColliderShape, PhysicsBackend, RigidBody};
+use engine_world::{Interact, Interactable, NoiseEvent, SurfaceMaterials};
 
-use crate::build::{BuildKind, Builder, BuiltPiece};
+use crate::build::{BuildKind, BuiltPiece};
 use crate::dress::PropModel;
 use crate::material::{DestructibleMaterial, DestructionMaterials};
 use crate::props::{PropKind, wall_opening};
@@ -158,6 +156,7 @@ pub fn hang_doors_system(
                 Name::new("Plank door"),
                 door.transform(size),
                 door,
+                Interactable::new("Open").reach(REACH_M),
                 PropModel::new(
                     PropKind::PlankDoor {
                         size: size.to_array(),
@@ -171,53 +170,20 @@ pub fn hang_doors_system(
     }
 }
 
-/// Where everything that can open doors stands: characters, and builders the player drives.
-fn openers(
-    characters: &Query<&GlobalTransform, With<CharacterController>>,
-    builders: &Query<(&Builder, &GlobalTransform)>,
-) -> Vec<DVec3> {
-    characters
-        .iter()
-        .map(|gt| gt.translation())
-        .chain(
-            builders
-                .iter()
-                .filter(|(b, _)| b.use_input)
-                .map(|(_, gt)| gt.translation()),
-        )
-        .collect()
-}
-
-/// The `interact` action opens or shuts the door nearest someone who can reach it (Update).
+/// The use key opens or shuts the door it was pressed at (Update).
 pub fn door_input_system(
-    actions: Option<Res<ActionState>>,
-    characters: Query<&GlobalTransform, With<CharacterController>>,
-    builders: Query<(&Builder, &GlobalTransform)>,
-    doors: Query<(Entity, &Door, &GlobalTransform)>,
+    mut used: MessageReader<Interact>,
+    doors: Query<(), With<Door>>,
     mut out: MessageWriter<DoorRequest>,
 ) {
-    if !actions.is_some_and(|a| a.just_pressed("interact")) {
-        return;
-    }
-    let who = openers(&characters, &builders);
-    let mut best: Option<(f64, Entity, DVec3)> = None;
-    for (e, door, gt) in &doors {
-        if door.loose {
-            continue;
+    for u in used.read() {
+        if doors.contains(u.target) {
+            out.write(DoorRequest {
+                door: u.target,
+                open: None,
+                from: Some(u.from),
+            });
         }
-        for &p in &who {
-            let d = p.distance(gt.translation());
-            if d <= REACH_M as f64 && best.is_none_or(|(b, ..)| d < b) {
-                best = Some((d, e, p));
-            }
-        }
-    }
-    if let Some((_, door, from)) = best {
-        out.write(DoorRequest {
-            door,
-            open: None,
-            from: Some(from),
-        });
     }
 }
 
@@ -241,11 +207,12 @@ pub fn door_system(
         &ChildOf,
         &PropModel,
         Has<Collider>,
+        Option<&mut Interactable>,
     )>,
     frames: Query<(&Transform, Has<StructuralPiece>), Without<Door>>,
 ) {
     for r in requests.read() {
-        let Ok((_, mut door, _, parent, _, _)) = doors.get_mut(r.door) else {
+        let Ok((_, mut door, _, parent, _, _, _)) = doors.get_mut(r.door) else {
             continue;
         };
         if door.loose {
@@ -275,13 +242,21 @@ pub fn door_system(
     }
     let dt = time.delta_secs();
     let wood = table.get(DestructibleMaterial::Wood);
-    for (e, mut door, mut t, parent, model, has_collider) in &mut doors {
+    for (e, mut door, mut t, parent, model, has_collider, use_it) in &mut doors {
         let standing = frames.get(parent.parent()).is_ok_and(|(_, s)| s);
         if !standing && !door.loose {
             // The doorway fell: the door swings shut and rides it down.
             door.loose = true;
             door.opening = false;
             commands.entity(e).remove::<(RigidBody, Collider)>();
+        }
+        // The prompt says what the key does next; a fallen door can't be used.
+        if let Some(mut use_it) = use_it {
+            let verb = if door.opening { "Shut" } else { "Open" };
+            if use_it.verb != verb || use_it.enabled == door.loose {
+                use_it.verb = verb.into();
+                use_it.enabled = !door.loose;
+            }
         }
         let PropKind::PlankDoor { size } = model.kind else {
             continue;

@@ -13,8 +13,8 @@ use engine_world::physics::{
     PhysicsQuery, QueryFilter, RigidBody,
 };
 use engine_world::{
-    DamageEvent, DamageKind, EditOp, EditShape, NoiseEvent, ProjectileTrace, SmokeEmission,
-    SurfaceMaterials, TerrainEdit, WorldPlugin, WorldShift,
+    DamageEvent, DamageKind, EditOp, EditShape, Interact, Interactable, NoiseEvent,
+    ProjectileTrace, SmokeEmission, SurfaceMaterials, TerrainEdit, WorldPlugin, WorldShift,
 };
 use serde_json::json;
 
@@ -1627,39 +1627,35 @@ fn doors_hang_in_doorways_swing_away_from_you_and_fall_with_them() {
     assert_eq!(open_state(&app).open, 0.0);
     assert!(leaf_z(&app).abs() < 0.01, "shut, it sits in the wall");
 
-    // Someone in front presses interact: it swings in, away from them; again, it shuts.
-    let walker = app
-        .world
-        .spawn((
-            Transform::from_xyz(0.3, 1.0, 1.2),
-            CharacterController::default(),
-        ))
-        .id();
-    app.update();
-    let interact = |app: &mut App| {
-        app.world
-            .resource_mut::<engine_input::ActionState>()
-            .tap("interact", 1);
+    // It is usable with the use key: the engine picks it and sends `Interact`.
+    let verb = |app: &App| {
+        let i = app.world.get::<Interactable>(door).expect("usable");
+        (i.verb.clone(), i.enabled, i.reach_m)
+    };
+    assert_eq!(verb(&app), ("Open".to_string(), true, door::REACH_M));
+    // Someone in front uses it: it swings in, away from them; again, it shuts.
+    let walker = app.world.spawn(Transform::from_xyz(0.3, 1.0, 1.2)).id();
+    let interact = |app: &mut App, from: DVec3| {
+        app.world.write_message(Interact {
+            actor: walker,
+            target: door,
+            from,
+        });
         run_secs(app, 1.2);
     };
-    interact(&mut app);
+    interact(&mut app, DVec3::new(0.3, 1.0, 1.2));
     let d = open_state(&app);
     assert!(d.is_open() && d.toward < 0.0, "{d:?}");
     assert!(leaf_z(&app) < -0.3, "swung in to {}", leaf_z(&app));
-    interact(&mut app);
+    assert_eq!(verb(&app).0, "Shut");
+    interact(&mut app, DVec3::new(0.3, 1.0, 1.2));
     assert_eq!(open_state(&app).open, 0.0, "shut again");
+    assert_eq!(verb(&app).0, "Open");
     // From behind it swings out through the front.
-    app.world.get_mut::<Transform>(walker).unwrap().translation = DVec3::new(0.3, 1.0, -1.2);
-    app.update();
-    interact(&mut app);
+    interact(&mut app, DVec3::new(0.3, 1.0, -1.2));
     let d = open_state(&app);
     assert!(d.is_open() && d.toward > 0.0, "{d:?}");
     assert!(leaf_z(&app) > 0.3, "swung out to {}", leaf_z(&app));
-    // Out of reach, interact does nothing.
-    app.world.get_mut::<Transform>(walker).unwrap().translation = DVec3::new(0.3, 1.0, -6.0);
-    app.update();
-    interact(&mut app);
-    assert!(open_state(&app).is_open());
     // AI agents open and shut it by where they stand.
     let r = call_api(
         &mut app.world,
@@ -1679,6 +1675,10 @@ fn doors_hang_in_doorways_swing_away_from_you_and_fall_with_them() {
     assert!(app.world.get::<Debris>(high).is_some(), "the doorway fell");
     let d = *app.world.get::<Door>(high_door).unwrap();
     assert!(d.loose && d.open == 0.0, "{d:?}");
+    assert!(
+        !app.world.get::<Interactable>(high_door).unwrap().enabled,
+        "a fallen door can't be used"
+    );
     assert!(
         app.world.get::<Collider>(high_door).is_none()
             && app.world.get::<RigidBody>(high_door).is_none(),
@@ -2288,4 +2288,57 @@ fn light_chunks_use_the_built_in_solver_and_physics_bodies_are_budgeted() {
             (600.0, true, false)
         ]
     );
+}
+
+#[test]
+fn the_mounted_rifle_fires_where_you_look() {
+    let mut app = app();
+    let wall = spawn_wall(&mut app, DestructibleWall::barricade(2.4, 2.2), DVec3::ZERO);
+    // The rifle 8 m in front, facing the wall (its forward is −Z).
+    let mut commands_queue = bevy_ecs::world::CommandQueue::default();
+    let gun = {
+        let mut commands = Commands::new(&mut commands_queue, &app.world);
+        gun::spawn_mounted_gun(&mut commands, DVec3::new(0.0, 0.0, 8.0), 0.0)
+    };
+    commands_queue.apply(&mut app.world);
+    // The player behind it looks at the right half of the wall.
+    app.world.spawn((
+        engine_render::Camera::default(),
+        Transform::from_xyz(0.0, 1.6, 8.7).looking_at(DVec3::new(0.7, 1.1, 0.0), Vec3::Y),
+    ));
+    app.update();
+    assert_eq!(app.world.get::<Interactable>(gun).unwrap().verb, "Fire");
+    let before = app.world.get::<WallState>(wall).unwrap().clone();
+    let was_solid = |p: Vec2| before.grid.solid[before.grid.cell_at(p).unwrap()];
+    let player = app.world.spawn(Transform::from_xyz(0.0, 1.0, 8.7)).id();
+    app.world.write_message(Interact {
+        actor: player,
+        target: gun,
+        from: DVec3::new(0.0, 1.0, 8.7),
+    });
+    app.update();
+    assert!(
+        !app.world.get::<Interactable>(gun).unwrap().enabled,
+        "no prompt while it fires"
+    );
+    run_secs(&mut app, 2.0);
+    let g = app.world.get::<gun::MountedGun>(gun).unwrap();
+    assert_eq!(g.firing(), 0, "the burst is done");
+    assert!(g.aim[0] < -0.05, "it swung right: {:?}", g.aim);
+    assert!(app.world.get::<Interactable>(gun).unwrap().enabled);
+    let state = app.world.get::<WallState>(wall).unwrap();
+    assert!(state.integrity() < 1.0, "the burst holed the wall");
+    // With no physics module to say what the view hits, it aims at a point 25 m out along the
+    // view: from its pivot that crosses the wall right of the middle, about (0.66, 0.76);
+    // nothing on the left.
+    let holed = |c: Vec2| {
+        (-4..=4).any(|i| {
+            (-4..=4).any(|j| {
+                let p = c + Vec2::new(i as f32, j as f32) * 0.04;
+                was_solid(p) && !solid_at(&app, wall, p)
+            })
+        })
+    };
+    assert!(holed(Vec2::new(0.66, 0.76)), "holes where it was aimed");
+    assert!(!holed(Vec2::new(-0.66, 0.76)), "and none elsewhere");
 }

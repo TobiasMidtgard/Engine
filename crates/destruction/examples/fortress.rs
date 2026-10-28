@@ -222,6 +222,26 @@ fn shots() -> Vec<(f32, &'static str, [f64; 3], [f64; 3])> {
             [-3.0, 2.5, 4.0],
         ),
         (
+            0.5,
+            "36_mounted_rifle",
+            [-1.2, 1.8, -15.3],
+            [-3.6, 0.9, -12.5],
+        ),
+        // Bay 1's drywall before and after a burst from the mounted rifle (aimed from behind
+        // the gun at [`RIFLE_AIM`] when the "fired" shot comes up; nothing else hits there).
+        (
+            0.9,
+            "36b_mounted_rifle_target",
+            [18.6, 1.6, -12.8],
+            [19.2, 1.2, -8.0],
+        ),
+        (
+            2.2,
+            "37_mounted_rifle_fired",
+            [18.6, 1.6, -12.8],
+            [19.2, 1.2, -8.0],
+        ),
+        (
             17.6,
             "34_reinforce_behind_cut_through",
             [-23.6, 2.3, -2.6],
@@ -231,6 +251,9 @@ fn shots() -> Vec<(f32, &'static str, [f64; 3], [f64; 3])> {
     v.sort_by(|a, b| a.0.total_cmp(&b.0));
     v
 }
+
+/// Where the player behind the mounted rifle looks when they press E: (eye, look-at point).
+const RIFLE_AIM: ([f64; 3], [f64; 3]) = ([-3.0, 1.75, -13.4], [18.9, 1.9, -8.0]);
 
 #[derive(Resource)]
 struct Origin(DVec3);
@@ -300,6 +323,25 @@ fn main() {
     for (at, name, eye, target) in shots() {
         if !only.is_empty() && !only.iter().any(|w| name.contains(w.as_str())) {
             continue;
+        }
+        if name.contains("rifle_fired") {
+            // The player behind the mounted rifle looks at its target and presses E.
+            let mut q = app.world.query::<(&mut Transform, &Camera)>();
+            for (mut c, _) in q.iter_mut(&mut app.world) {
+                *c = Transform::from_translation(DVec3::from_array(RIFLE_AIM.0))
+                    .looking_at(DVec3::from_array(RIFLE_AIM.1), Vec3::Y);
+            }
+            app.update();
+            let mut guns = app
+                .world
+                .query_filtered::<Entity, With<engine_destruction::gun::MountedGun>>();
+            let gun = guns.iter(&app.world).next().expect("the range has a rifle");
+            let player = app.world.spawn(Transform::default()).id();
+            app.world.write_message(engine_world::Interact {
+                actor: player,
+                target: gun,
+                from: DVec3::from_array(RIFLE_AIM.0),
+            });
         }
         // Simulate up to the shot without drawing (a CPU renderer takes seconds a frame).
         let renderer = app.world.remove_resource::<Renderer>();

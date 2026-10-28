@@ -334,6 +334,8 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     let o = origin;
     let yaw = std::f32::consts::PI;
     spawn_fortress(commands, o);
+    // A mounted rifle in front of the middle of the range, for the player (E to fire).
+    crate::gun::spawn_mounted_gun(commands, o + DVec3::new(ROW_MID, 0.0, ROW_Z - 4.5), yaw);
     // The range: a gravel pad, concrete pillars between the bays and a steel lintel on top.
     let (t, g) = placed(o + DVec3::new(ROW_MID, 0.0, ROW_Z - 1.0), 0.0);
     commands.spawn((
