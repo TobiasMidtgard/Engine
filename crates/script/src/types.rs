@@ -127,6 +127,8 @@ declare task: {
 	cancel: (t: thread) -> (),
 	tween: (seconds: number, step: (alpha: number) -> (), ease: ((number) -> number)?) -> (),
 	wait_until: (check: () -> boolean, timeout: number?) -> boolean,
+	-- In parallel_update: the rest of it runs after the parallel phase, with the whole world.
+	synchronize: () -> (),
 }
 
 declare ease: {

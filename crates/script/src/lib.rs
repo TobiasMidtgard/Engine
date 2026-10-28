@@ -30,7 +30,8 @@
 //! return Lantern
 //! ```
 //!
-//! Hooks (each optional): `start`, `update(dt)`, `fixed_update(dt)`, `on_interact(actor)`,
+//! Hooks (each optional): `start`, `update(dt)`, `fixed_update(dt)`, `parallel_update(dt)`
+//! (below), `on_interact(actor)`,
 //! `on_contact(other, info)`, `on_message(event, data)` (or a method named after the event),
 //! `on_props()`, `on_reload()`, `on_destroy()`, `on_world_shift(shift)` (the world moved to a
 //! new frame: map kept positions with `shift:point(p)`, `shift:direction(v)`,
@@ -60,6 +61,25 @@
 //! methods and an `on_reload()` call, and the props they don't set in `Script::props` take the
 //! new defaults (state belongs in `self` fields). `reload = "restart"` on a class restarts its
 //! instances instead. Editing a `require`d module reloads its users.
+//!
+//! ## Parallel scripts
+//!
+//! `parallel_update(dt)` runs every frame like `update`, but on several cores at once: scripts
+//! with it are spread over actor VMs ([`ScriptActor`]; [`ScriptSettings::parallel_vms`], by
+//! default one fewer than the cores), and each VM runs its scripts on its own thread while the
+//! others run theirs. In it a script reads the world as it was when the parallel phase began
+//! (other scripts' changes this frame don't show, so the result is the same on any number of
+//! cores), sees its own changes to `Transform`s at once, and its other changes (`e:set`,
+//! `e.name =`, `e:material(patch)`, `e:despawn()`) are queued and applied right after the
+//! phase, VM after VM. Engine calls that need the whole world (`module.verb`, spawning) fail
+//! there with a hint: call `task.synchronize()` and the rest of `parallel_update` runs after
+//! the phase, one script at a time, with the world. Roblox's Parallel Luau works the same way
+//! with actors, but forbids the changes instead of queueing them.
+//!
+//! A VM has its own globals and `require`d modules, so `e.script` reaches only scripts in the
+//! same VM; scripts talk across VMs with `e:send` (delivered the next frame) or share a VM by
+//! being given the same `ScriptActor`. With `ENGINE_SCRIPT_DEBUG` set at start there are no
+//! actor VMs, so breakpoints reach every script.
 //!
 //! ## Debugging
 //!
@@ -108,8 +128,10 @@
 //!
 //! ## Showcase
 //!
-//! [`demo`]: the Script courtyard, whose lanterns, orrery and lever ritual are scripts
-//! (`assets/scripts/showcase/`), with a [`board::CodeBoard`] showing the director's source.
+//! [`demo`]: the Script courtyard, whose lanterns, orrery, lever ritual and swarm of 320
+//! wisps (`parallel_update`, on every core) are scripts (`assets/scripts/showcase/`), with a
+//! [`board::CodeBoard`] showing the director's source and a [`board::ProfileBoard`] its
+//! profile.
 //!
 //! ## Reads and writes (for replacing this module)
 //!
@@ -182,6 +204,14 @@ impl Script {
     }
 }
 
+/// The actor VM (1, 2, ...) that runs the script on this entity. Added by the runtime when a
+/// script with `parallel_update` starts (to the VM with the fewest scripts); set it yourself to
+/// keep scripts that work together in one VM, where they run one after another and can reach
+/// each other's `self` (`entity.script`). Numbers wrap around the VMs there are; 0 is the main
+/// VM.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptActor(pub u32);
+
 /// How scripts are found, reloaded and limited.
 #[derive(Resource, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -194,11 +224,15 @@ pub struct ScriptSettings {
     pub poll_secs: f32,
     /// Longest one call into a script may run before it is stopped, milliseconds.
     pub call_limit_ms: f32,
-    /// Memory the scripts may use in all, MiB.
+    /// Memory the scripts may use, MiB, per VM (the main one and each actor VM).
     pub memory_limit_mb: u32,
     /// Port the script debugger listens on for VS Code and other DAP clients (localhost only;
     /// `ENGINE_SCRIPT_DEBUG=4711`, or `script.debug` at run time). None: not listening.
     pub debug_port: Option<u16>,
+    /// Actor VMs that run `parallel_update` side by side (`ENGINE_SCRIPT_VMS`). None: one fewer
+    /// than the cores, at most 8, or none when `debug_port` is set at start (the debugger sees
+    /// the main VM). 0: `parallel_update` runs in the main VM, with the same rules.
+    pub parallel_vms: Option<u32>,
 }
 
 impl Default for ScriptSettings {
@@ -210,6 +244,9 @@ impl Default for ScriptSettings {
             call_limit_ms: 250.0,
             memory_limit_mb: 512,
             debug_port: std::env::var("ENGINE_SCRIPT_DEBUG")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+            parallel_vms: std::env::var("ENGINE_SCRIPT_VMS")
                 .ok()
                 .and_then(|v| v.parse().ok()),
         }
@@ -234,6 +271,10 @@ impl Plugin for ScriptPlugin {
             "Runs a Luau script from assets/scripts on this entity: path (\"showcase/lantern.luau\"), \
              props (JSON over the script's defaults), enabled.",
         )
+        .register_component::<ScriptActor>(
+            "The actor VM (1, 2, ...) that runs this entity's script; set by the runtime for \
+             scripts with parallel_update, or by hand to keep scripts in one VM.",
+        )
         .register_component::<board::CodeBoard>(
             "Shows a script's source on this entity's mesh (its material's emissive texture), \
              syntax-colored, redrawn whenever the file reloads, with logpoint values, the line \
@@ -246,7 +287,8 @@ impl Plugin for ScriptPlugin {
         )
         .register_resource::<ScriptSettings>(
             "Scripting: folder under the asset root, hot_reload, poll_secs, call_limit_ms (per \
-             call), memory_limit_mb, debug_port (the debugger's, for VS Code).",
+             call), memory_limit_mb (per VM), debug_port (the debugger's, for VS Code), \
+             parallel_vms (actor VMs for parallel_update; null: cores - 1).",
         )
         .add_systems(Update, run_scripts.in_set(UpdateSet::Logic))
         .add_systems(FixedUpdate, run_fixed_scripts.in_set(SimSet::Gameplay))
@@ -358,22 +400,24 @@ fn run_scripts(world: &mut World) {
         .is_none();
     let has_work = world.get_resource::<ScriptRuntime>().is_some_and(|rt| {
         // A debugger client may attach before the first script spawns.
-        rt.task_count() > 0 || !rt.instances.is_empty() || rt.debugger.listening()
+        rt.task_count() > 0 || rt.instance_count() > 0 || rt.debugger.listening()
     });
     if !has_scripts && !has_work {
         return;
     }
     let _ = with_runtime(world, |world, rt, settings| rt.run_frame(world, settings));
     if let Some(rt) = world.get_resource::<ScriptRuntime>() {
-        let (ms, instances, tasks) = (rt.frame_ms, rt.instances.len(), rt.task_count());
-        let memory_mb = rt.lua.used_memory() as f64 / (1024.0 * 1024.0);
-        let errors = access::shared(&rt.lua).errors_total;
+        let (ms, instances, tasks) = (rt.frame_ms, rt.instance_count(), rt.task_count());
+        let memory_mb = rt.used_memory() as f64 / (1024.0 * 1024.0);
+        let (errors, vms, parallel_ms) = (rt.errors_total(), rt.vm_count(), rt.parallel_ms());
         if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
             d.set("script.ms", ms as f64);
             d.set("script.instances", instances as f64);
             d.set("script.tasks", tasks as f64);
             d.set("script.memory_mb", memory_mb);
             d.set("script.errors", errors as f64);
+            d.set("script.vms", vms as f64);
+            d.set("script.parallel_ms", parallel_ms as f64);
         }
     }
 }

@@ -80,23 +80,23 @@ pub const LIVE_VALUES_ON: &[(&str, &str)] = &[
     ),
     (
         "script.logpoint",
-        r#"{"path": "showcase/courtyard.luau", "line": 25, "message": "t = {self.t}"}"#,
+        r#"{"path": "showcase/courtyard.luau", "line": 26, "message": "t = {self.t}"}"#,
     ),
     (
         "script.logpoint",
-        r#"{"path": "showcase/courtyard.luau", "line": 29, "message": "lamp {i}: phase = {phase}"}"#,
+        r#"{"path": "showcase/courtyard.luau", "line": 30, "message": "lamp {i}: phase = {phase}"}"#,
     ),
     (
         "script.logpoint",
-        r#"{"path": "showcase/courtyard.luau", "line": 30, "message": "crest = {crest}"}"#,
+        r#"{"path": "showcase/courtyard.luau", "line": 31, "message": "crest = {crest}"}"#,
     ),
     (
         "script.logpoint",
-        r#"{"path": "showcase/courtyard.luau", "line": 31, "message": "glow = {glow}"}"#,
+        r#"{"path": "showcase/courtyard.luau", "line": 32, "message": "glow = {glow}"}"#,
     ),
     (
         "script.logpoint",
-        r#"{"path": "showcase/courtyard.luau", "line": 35, "message": "spin = {self.spin}"}"#,
+        r#"{"path": "showcase/courtyard.luau", "line": 36, "message": "spin = {self.spin}"}"#,
     ),
 ];
 const LIVE_VALUES_OFF: &[(&str, &str)] = &[
@@ -129,6 +129,19 @@ const PROFILE_RESET: (&str, &str) = ("script.profile", r#"{"reset": true}"#);
 const TYPO: &str = r#"{"path": "showcase/courtyard.luau", "find": "local glow = lamp.dim * (", "replace": "local glow = lamp.dimm * ("}"#;
 const FIX: &str = r#"{"path": "showcase/courtyard.luau", "find": "local glow = lamp.dimm * (", "replace": "local glow = lamp.dim * ("}"#;
 
+/// Undoes the tour's edits if a tour was stopped before it could (a killed screenshot run
+/// left the typo in the file once). Stops that show the courtyard as written start with it.
+const TIDY: &[(&str, &str)] = &[
+    (
+        "script.edit",
+        r#"{"path": "showcase/courtyard.luau", "find": "local glow = lamp.dimm * (", "replace": "local glow = lamp.dim * (", "missing_ok": true}"#,
+    ),
+    (
+        "script.edit",
+        r#"{"path": "showcase/courtyard.luau", "find": "color = vec3(0.25, 0.62, 1.0)", "replace": "color = vec3(1.0, 0.56, 0.22)", "missing_ok": true}"#,
+    ),
+];
+
 /// The courtyard's overview, from above the lanterns in the south-east, looking down enough
 /// that the floor fills the frame (the moonlit grass outside it outshone the lanterns).
 const OVERVIEW: ([f64; 3], [f64; 3]) = ([7.0, 11.0, 11.0], [0.0, 0.0, -1.0]);
@@ -144,7 +157,7 @@ pub const VIEWS: &[DemoView] = &[
         target: OVERVIEW.1,
         hour: 18.9,
         warmup_secs: 2.0,
-        on_arrive: &[PROFILE_START],
+        on_arrive: &[TIDY[0], TIDY[1], PROFILE_START],
         on_leave: &[],
     },
     DemoView {
@@ -177,6 +190,17 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 1.0,
         on_arrive: LIVE_VALUES_ON,
         on_leave: LIVE_VALUES_OFF,
+    },
+    DemoView {
+        key: "script_swarm",
+        name: "Parallel scripts: 320 wisps, each its own Luau script, run side by side on every \
+               core round the orrery",
+        eye: [-7.5, 1.7, 8.6],
+        target: [0.0, 3.4, 0.0],
+        hour: 18.9,
+        warmup_secs: 2.0,
+        on_arrive: TIDY,
+        on_leave: &[],
     },
     DemoView {
         key: "script_ritual",

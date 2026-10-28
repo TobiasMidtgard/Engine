@@ -9,7 +9,7 @@ use engine_core::registry::call_api;
 use engine_core::time::TimeSource;
 use serde_json::{Value, json};
 
-use crate::{Script, ScriptPlugin, ScriptSettings};
+use crate::{Script, ScriptActor, ScriptPlugin, ScriptRuntime, ScriptSettings};
 
 /// A scripts folder of its own for one test, removed when the test ends.
 struct Folder(PathBuf);
@@ -55,6 +55,7 @@ fn app_in(folder: &Path) -> App {
         call_limit_ms: 250.0,
         memory_limit_mb: 64,
         debug_port: None,
+        parallel_vms: None,
     });
     app.register_api(
         "test.add",
@@ -650,6 +651,20 @@ fn the_showcase_courtyard_builds_and_plays_its_ritual() {
     assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
     let lanterns = eval(&mut app, "#world.find_all('Lantern ')");
     assert_eq!(lanterns, json!(12));
+    // The swarm: wisps on the actor VMs.
+    let wisps = eval(&mut app, "#world.find_all('Wisp ')");
+    assert_eq!(wisps, json!(320));
+    let list = call_api(&mut app.world, "script.list", json!({})).unwrap();
+    let on_actors = list["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["path"] == "showcase/wisp.luau" && i["vm"].as_u64() > Some(0))
+        .count();
+    assert_eq!(on_actors, 320, "{}", list["vms"]);
+    const WISP_HEIGHT: &str =
+        "local s = 0 for _, w in world.find_all('Wisp ') do s += w.position.y end return s / 320";
+    let resting = eval(&mut app, WISP_HEIGHT).as_f64().unwrap();
     assert!(
         eval(&mut app, "world.find('Ring 3') ~= nil")
             .as_bool()
@@ -670,7 +685,7 @@ fn the_showcase_courtyard_builds_and_plays_its_ritual() {
         .debugger
         .inline_values("showcase/courtyard.luau");
     assert_eq!(values.len(), 5, "{values:?}");
-    assert!(values[&31].starts_with("glow = "), "{values:?}");
+    assert!(values[&32].starts_with("glow = "), "{values:?}");
     call_api(&mut app.world, "script.logpoint", json!({"clear": true})).unwrap();
 
     // The profiler stops' recording, over the ritual.
@@ -695,6 +710,11 @@ fn the_showcase_courtyard_builds_and_plays_its_ritual() {
     assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
     let director = "world.find('Courtyard director').script";
     assert_eq!(eval(&mut app, &format!("{director}.busy")), json!(true));
+    let risen = eval(&mut app, WISP_HEIGHT).as_f64().unwrap();
+    assert!(
+        risen > resting + 3.0,
+        "the swarm rises: {resting} -> {risen}"
+    );
     assert!(
         eval(&mut app, &format!("{director}.flare"))
             .as_f64()
@@ -716,6 +736,12 @@ fn the_showcase_courtyard_builds_and_plays_its_ritual() {
     assert!(
         functions.iter().any(|f| f["engine"] == true),
         "engine calls are entries of their own: {profile}"
+    );
+    assert!(
+        functions
+            .iter()
+            .any(|f| f["name"] == "parallel_update" && f["source"] == "showcase/wisp.luau"),
+        "the actor VMs' samples are in it: {profile}"
     );
     // The error stop's typo is on a line the board shows once scrolled to `update`.
     let source = std::fs::read_to_string(shipped.join(crate::demo::COURTYARD_SCRIPT)).unwrap();
@@ -1238,10 +1264,12 @@ fn the_profiler_finds_the_hot_function_its_lines_and_slow_engine_calls() {
     };
     assert!(line(15) >= pct(hot, "total_pct"), "{report}");
     assert!(line(17) >= pct(slow, "total_pct"), "{report}");
-    assert!(line(5) > line(11), "{report}");
+    // Built-ins like math.sin run on Luau's fast path, without the interrupt the samples come
+    // from, so a tight loop's samples land on its back edge: the `for` line.
+    assert!(line(4) + line(5) > line(11), "{report}");
     let lines = report["lines"].as_array().unwrap();
-    let body = lines.iter().find(|l| l["line"] == 5).unwrap();
-    assert_eq!(body["code"], json!("s += math.sin(i) * math.cos(i)"));
+    let head = lines.iter().find(|l| l["line"] == 4).unwrap();
+    assert_eq!(head["code"], json!("for i = 1, n do"));
     let folded = report["folded"].as_str().unwrap();
     assert!(
         folded.contains("update;update (busy.luau:14);test.slow "),
@@ -1394,6 +1422,304 @@ fn the_debugger_stops_where_an_uncaught_error_is_raised() {
     );
 }
 
+const PAIR: &str = r#"
+local Pair = {}
+Pair.props = { other = "" }
+
+function Pair:start()
+	self.other = world.find(self.props.other)
+end
+
+function Pair:parallel_update(dt)
+	local x = self.other.position.x
+	self.entity.position = vec3(x + 1, 0, 0)
+	print(self.entity.name, "sees itself at", self.entity.position.x)
+end
+
+return Pair
+"#;
+
+/// An app whose scripts may use `vms` actor VMs.
+fn app_with_vms(folder: &Path, vms: u32) -> App {
+    let mut app = app_in(folder);
+    app.world.resource_mut::<ScriptSettings>().parallel_vms = Some(vms);
+    app
+}
+
+fn x_of(app: &App, e: Entity) -> f64 {
+    app.world.get::<Transform>(e).unwrap().translation.x
+}
+
+#[test]
+fn parallel_scripts_read_the_frame_start_and_their_changes_apply_after() {
+    for vms in [0, 2] {
+        let folder = Folder::new();
+        folder.write("pair.luau", PAIR);
+        let mut app = app_with_vms(&folder.0, vms);
+        let a = spawn_script(&mut app, "A", "pair");
+        let b = spawn_script(&mut app, "B", "pair");
+        for (e, other, x) in [(a, "B", 0.0), (b, "A", 10.0)] {
+            app.world.get_mut::<Script>(e).unwrap().props = json!({ "other": other });
+            app.world.get_mut::<Transform>(e).unwrap().translation.x = x;
+        }
+        app.update();
+        assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+        // Both read the other where the frame began (one after the other, B would see 11).
+        assert_eq!(
+            (x_of(&app, a), x_of(&app, b)),
+            (11.0, 1.0),
+            "with {vms} actor VMs"
+        );
+        let log = call_api(&mut app.world, "script.log", json!({})).unwrap();
+        let log = log.to_string();
+        assert!(
+            log.contains("A\\tsees itself at\\t11"),
+            "reads its own change: {log}"
+        );
+        let actors: Vec<Option<u32>> = [a, b]
+            .iter()
+            .map(|&e| app.world.get::<ScriptActor>(e).map(|a| a.0))
+            .collect();
+        if vms == 0 {
+            assert_eq!(actors, [None, None]);
+        } else {
+            assert_eq!(actors, [Some(1), Some(2)], "spread over the actor VMs");
+            let list = call_api(&mut app.world, "script.list", json!({})).unwrap();
+            assert_eq!(list["vms"], json!(3), "{list}");
+        }
+    }
+}
+
+const SWARM: &str = r#"
+local Mote = {}
+Mote.props = { seed = 0, leader = "" }
+
+function Mote:start()
+	self.leader = world.find(self.props.leader)
+	self.phase = self.props.seed * 0.37
+end
+
+function Mote:parallel_update(dt)
+	self.phase += dt
+	local p = self.entity.position
+	local to = self.leader.position - p
+	local swirl = vec3(math.cos(self.phase), math.sin(self.phase * 1.3), math.sin(self.phase))
+	self.entity.position = p + to * (0.05 * dt) + swirl * dt
+	self.entity:rotate_y(dt * 0.5)
+end
+
+return Mote
+"#;
+
+/// Positions of a swarm of `n` motes, each following the one before it, after `frames`.
+fn swarm_positions(vms: u32, n: usize, frames: usize) -> Vec<[f64; 3]> {
+    let folder = Folder::new();
+    folder.write("mote.luau", SWARM);
+    let mut app = app_with_vms(&folder.0, vms);
+    let motes: Vec<Entity> = (0..n)
+        .map(|i| {
+            let e = spawn_script(&mut app, &format!("Mote {i}"), "mote");
+            app.world.get_mut::<Script>(e).unwrap().props =
+                json!({ "seed": i, "leader": format!("Mote {}", (i + 1) % n) });
+            app.world.get_mut::<Transform>(e).unwrap().translation =
+                engine_core::math::DVec3::new(i as f64, (i % 7) as f64, -(i as f64) * 0.5);
+            e
+        })
+        .collect();
+    app.update_n(frames);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+    if vms > 0 {
+        let used: std::collections::BTreeSet<u32> = motes
+            .iter()
+            .filter_map(|&e| app.world.get::<ScriptActor>(e).map(|a| a.0))
+            .collect();
+        assert_eq!(used.len(), vms as usize, "every actor VM gets motes");
+    }
+    motes
+        .iter()
+        .map(|&e| {
+            app.world
+                .get::<Transform>(e)
+                .unwrap()
+                .translation
+                .to_array()
+        })
+        .collect()
+}
+
+#[test]
+fn parallel_scripts_give_the_same_result_on_any_number_of_vms() {
+    let one = swarm_positions(0, 48, 20);
+    let three = swarm_positions(3, 48, 20);
+    assert_eq!(
+        one, three,
+        "parallel_update reads the frame's start, so no order shows"
+    );
+    assert_ne!(one[0], [0.0, 0.0, 0.0]);
+}
+
+const SYNCS: &str = r#"
+local Syncs = {}
+
+function Syncs:parallel_update(dt)
+	if self.done then
+		return
+	end
+	self.done = true
+	local ok, err = pcall(test.add, { a = 1, b = 2 })
+	print("parallel", ok, string.find(tostring(err), "task.synchronize", 1, true) ~= nil)
+	self.entity.name = "Renamed"
+	print("name until applied", self.entity.name)
+	task.synchronize()
+	print("serial", test.add({ a = 1, b = 2 }), self.entity.name)
+	test.add({})
+end
+
+return Syncs
+"#;
+
+#[test]
+fn engine_calls_wait_for_task_synchronize_and_changes_apply_after_the_phase() {
+    let folder = Folder::new();
+    folder.write("syncs.luau", SYNCS);
+    let mut app = app_with_vms(&folder.0, 1);
+    let e = spawn_script(&mut app, "Syncs", "syncs");
+    app.update_n(2);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+    let log = call_api(&mut app.world, "script.log", json!({})).unwrap();
+    let log: Vec<&str> = log
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap())
+        .collect();
+    let line = |start: &str| {
+        log.iter()
+            .find(|l| l.contains(start))
+            .unwrap_or_else(|| panic!("no {start} in {log:?}"))
+            .to_string()
+    };
+    assert!(
+        line("parallel").ends_with("parallel\tfalse\ttrue"),
+        "{log:?}"
+    );
+    assert!(
+        line("name until").ends_with("Syncs"),
+        "a queued change shows after: {log:?}"
+    );
+    assert!(line("serial").ends_with("serial\t3\tRenamed"), "{log:?}");
+    assert_eq!(app.world.get::<Name>(e).unwrap().as_str(), "Renamed");
+    assert_eq!(app.world.get::<ScriptActor>(e), Some(&ScriptActor(1)));
+}
+
+const PINGER: &str = r#"
+local Pinger = {}
+
+function Pinger:parallel_update(dt)
+	if not self.sent then
+		self.sent = true
+		world.find("Ponger"):send("ping", { from = self.entity.id })
+	end
+end
+
+function Pinger:on_message(event, data)
+	print("pinger got", event, data.n)
+end
+
+return Pinger
+"#;
+
+const PONGER: &str = r#"
+local Ponger = {}
+
+function Ponger:on_message(event, data)
+	print("ponger got", event)
+	world.entity(data.from):send("pong", { n = 7 })
+end
+
+return Ponger
+"#;
+
+#[test]
+fn messages_reach_scripts_in_other_vms() {
+    let folder = Folder::new();
+    folder.write("pinger.luau", PINGER);
+    folder.write("ponger.luau", PONGER);
+    let mut app = app_with_vms(&folder.0, 2);
+    let pinger = spawn_script(&mut app, "Pinger", "pinger");
+    spawn_script(&mut app, "Ponger", "ponger");
+    app.update_n(4);
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+    assert!(app.world.get::<ScriptActor>(pinger).is_some());
+    let log = call_api(&mut app.world, "script.log", json!({}))
+        .unwrap()
+        .to_string();
+    assert!(log.contains("ponger got\\tping"), "{log}");
+    assert!(log.contains("pinger got\\tpong\\t7"), "{log}");
+}
+
+#[test]
+fn parallel_errors_are_reported_marked_and_fixed_by_hot_reload() {
+    let folder = Folder::new();
+    folder.write(
+        "faulty_mote.luau",
+        "local M = {}\nfunction M:parallel_update(dt)\n\tlocal t = nil\n\tself.entity.position = t.x\nend\nreturn M\n",
+    );
+    let mut app = app_with_vms(&folder.0, 2);
+    let e = spawn_script(&mut app, "Faulty", "faulty_mote");
+    app.update_n(3);
+    let errs = errors(&mut app);
+    assert!(
+        errs.iter().any(|m| m.contains("faulty_mote.luau:4")),
+        "{errs:?}"
+    );
+    assert_eq!(
+        file_info(&mut app, "faulty_mote.luau")["fault"]["line"],
+        json!(4)
+    );
+    edit(
+        &folder,
+        "faulty_mote.luau",
+        "local M = {}\nfunction M:parallel_update(dt)\n\tself.entity.position = vec3(5, 0, 0)\nend\nreturn M\n",
+    );
+    app.update_n(3);
+    assert_eq!(x_of(&app, e), 5.0, "the actor VM reloaded the file");
+    assert_eq!(
+        file_info(&mut app, "faulty_mote.luau")["fault"],
+        Value::Null
+    );
+}
+
+/// How much faster `parallel_update` runs on several VMs:
+/// `cargo test -p engine_script --release -- --ignored --nocapture parallel_speed`.
+#[test]
+#[ignore]
+fn parallel_speed() {
+    const BUSY_MOTE: &str = "local M = {}
+function M:parallel_update(dt)
+	local p = self.entity.position
+	local s = 0
+	for i = 1, 300 do s += math.sin(p.x + i) * math.cos(p.z + i) end
+	self.entity.position = p + vec3(s * 1e-6, 0, 0)
+end
+return M
+";
+    for vms in [0, 1, 2, 3, 7] {
+        let folder = Folder::new();
+        folder.write("busy_mote.luau", BUSY_MOTE);
+        let mut app = app_with_vms(&folder.0, vms);
+        for i in 0..2000 {
+            spawn_script(&mut app, &format!("Mote {i}"), "busy_mote");
+        }
+        app.update_n(5);
+        let t0 = std::time::Instant::now();
+        app.update_n(30);
+        let ms = t0.elapsed().as_secs_f64() * 1000.0 / 30.0;
+        let parallel_ms = app.world.resource::<ScriptRuntime>().parallel_ms();
+        println!("{vms} actor VMs: {ms:.2} ms a frame (parallel phase {parallel_ms:.2} ms)");
+    }
+}
+
 /// How fast a tight Luau loop runs, for comparing interrupt costs:
 /// `cargo test -p engine_script --release -- --ignored --nocapture tight_loop`.
 #[test]
@@ -1417,5 +1743,57 @@ fn tight_loop_speed() {
         );
         let calls_ms = t0.elapsed().as_secs_f64() * 1000.0;
         println!("20M loop iterations: {loop_ms:.0} ms; 5M calls: {calls_ms:.0} ms");
+    }
+}
+
+/// What common script operations cost, a million times each:
+/// `cargo test -p engine_script --release -- --ignored --nocapture math_speed`.
+#[test]
+#[ignore]
+fn math_speed() {
+    let folder = Folder::new();
+    let mut app = app_in(&folder.0);
+    app.world.resource_mut::<ScriptSettings>().call_limit_ms = 60_000.0;
+    eval(&mut app, "return 1");
+    for (label, code) in [
+        (
+            "1M plain adds",
+            "local x = 1.5 local s = 0 for i = 1, 1000000 do s += x end return s",
+        ),
+        (
+            "1M math.sin",
+            "local s = 0 for i = 1, 1000000 do s += math.sin(i) end return s",
+        ),
+        (
+            "1M local sin",
+            "local sin = math.sin local s = 0 for i = 1, 1000000 do s += sin(i) end return s",
+        ),
+        (
+            "1M p.x",
+            "local p = vec3(1, 2, 3) local s = 0 for i = 1, 1000000 do s += p.x end return s",
+        ),
+        (
+            "1M p + q",
+            "local p = vec3(1, 2, 3) local q = p for i = 1, 1000000 do q = q + p end return q.x",
+        ),
+        (
+            "1M p * 2",
+            "local p = vec3(1, 2, 3) local q = p for i = 1, 1000000 do q = p * 2 end return q.x",
+        ),
+        (
+            "1M vector.x",
+            "local p = vector.create(1, 2, 3) local s = 0 for i = 1, 1000000 do s += p.x end return s",
+        ),
+        (
+            "1M vector +",
+            "local p = vector.create(1, 2, 3) local q = p for i = 1, 1000000 do q = q + p end return q.x",
+        ),
+    ] {
+        let t0 = std::time::Instant::now();
+        let r = eval(&mut app, code);
+        println!(
+            "{label}: {:.1} ms ({r})",
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
     }
 }

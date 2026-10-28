@@ -22,12 +22,15 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use engine_assets::Assets;
-use engine_core::prelude::{GlobalTransform, Transform};
-use engine_core::registry::{TypeRegistry, call_api, find_by_name};
+use engine_core::prelude::GlobalTransform;
+use engine_core::registry::{TypeRegistry, call_api};
 use mlua::{FromLua, Lua, MetaMethod, Table, UserData, UserDataFields, UserDataMethods, Value};
 use serde_json::json;
 
-use crate::access::{Outgoing, shared, with_world, with_world_as};
+use crate::access::{
+    Outgoing, edit_transform_as, in_parallel, missing, read_transform_as, read_world_as, shared,
+    with_world_as, write_world_as,
+};
 use engine_render::{MaterialRef, MeshRenderer, StandardMaterial};
 
 use crate::convert::{merge, to_json, to_lua};
@@ -159,74 +162,39 @@ fn material(
 /// Registry name of the hidden table of script instances by entity id (`entity.script`).
 pub(crate) const SELVES: &str = "engine_script.selves";
 
-fn missing(e: Entity) -> mlua::Error {
-    mlua::Error::runtime(format!(
-        "entity {e} no longer exists (check entity:exists() before using a kept handle)"
-    ))
-}
-
-fn transform(world: &World, e: Entity) -> mlua::Result<Transform> {
-    if world.get_entity(e).is_err() {
-        return Err(missing(e));
-    }
-    Ok(world.get::<Transform>(e).copied().unwrap_or_default())
-}
-
-fn edit_transform(
-    world: &mut World,
-    e: Entity,
-    f: impl FnOnce(&mut Transform),
-) -> mlua::Result<()> {
-    let mut ent = world.get_entity_mut(e).map_err(|_| missing(e))?;
-    match ent.get_mut::<Transform>() {
-        Some(mut t) => f(&mut t),
-        None => {
-            let mut t = Transform::default();
-            f(&mut t);
-            ent.insert(t);
-        }
-    }
-    Ok(())
-}
-
 impl UserData for EntityRef {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("id", |_, e| Ok(e.0.to_bits() as f64));
         fields.add_field_method_get("name", |lua, e| {
-            with_world_as(lua, "e.name", |w| {
+            read_world_as(lua, "e.name", |w| {
                 Ok(w.get::<Name>(e.0).map(|n| n.as_str().to_string()))
             })
         });
         fields.add_field_method_set("name", |lua, e, name: String| {
-            with_world_as(lua, "e.name =", |w| {
-                w.get_entity_mut(e.0)
-                    .map_err(|_| missing(e.0))?
+            let e = e.0;
+            write_world_as(lua, "e.name =", move |w| {
+                w.get_entity_mut(e)
+                    .map_err(|_| missing(e))?
                     .insert(Name::new(name));
                 Ok(())
             })
         });
         fields.add_field_method_get("position", |lua, e| {
-            with_world_as(lua, "e.position", |w| {
-                Ok(Vec3(transform(w, e.0)?.translation))
-            })
+            Ok(Vec3(read_transform_as(lua, "e.position", e.0)?.translation))
         });
         fields.add_field_method_set("position", |lua, e, v: Vec3| {
-            with_world_as(lua, "e.position =", |w| {
-                edit_transform(w, e.0, |t| t.translation = v.0)
-            })
+            edit_transform_as(lua, "e.position =", e.0, |t| t.translation = v.0)
         });
         fields.add_field_method_get("rotation", |lua, e| {
-            with_world_as(lua, "e.rotation", |w| Ok(Quat(transform(w, e.0)?.rotation)))
+            Ok(Quat(read_transform_as(lua, "e.rotation", e.0)?.rotation))
         });
         fields.add_field_method_set("rotation", |lua, e, q: Quat| {
-            with_world_as(lua, "e.rotation =", |w| {
-                edit_transform(w, e.0, |t| t.rotation = q.0)
-            })
+            edit_transform_as(lua, "e.rotation =", e.0, |t| t.rotation = q.0)
         });
         fields.add_field_method_get("scale", |lua, e| {
-            with_world_as(lua, "e.scale", |w| {
-                Ok(Vec3(transform(w, e.0)?.scale.as_dvec3()))
-            })
+            Ok(Vec3(
+                read_transform_as(lua, "e.scale", e.0)?.scale.as_dvec3(),
+            ))
         });
         fields.add_field_method_set("scale", |lua, e, v: Value| {
             let s = match v {
@@ -234,35 +202,44 @@ impl UserData for EntityRef {
                 Value::Number(n) => engine_core::math::Vec3::splat(n as f32),
                 other => Vec3::from_lua(other, lua)?.f32(),
             };
-            with_world_as(lua, "e.scale =", |w| {
-                edit_transform(w, e.0, |t| t.scale = s)
-            })
+            edit_transform_as(lua, "e.scale =", e.0, |t| t.scale = s)
         });
         fields.add_field_method_get("world_position", |lua, e| {
-            with_world_as(lua, "e.world_position", |w| {
+            // Where the hierarchy put it last frame; for an entity this VM moved in the
+            // parallel phase (or a root), its own position.
+            if in_parallel(lua) {
+                let own = read_transform_as(lua, "e.world_position", e.0)?;
+                let root = read_world_as(lua, "e.world_position", |w| {
+                    Ok(w.get::<ChildOf>(e.0).is_none())
+                })?;
+                if root {
+                    return Ok(Vec3(own.translation));
+                }
+            }
+            read_world_as(lua, "e.world_position", |w| {
                 match w.get::<GlobalTransform>(e.0) {
                     Some(g) => Ok(Vec3(g.translation())),
-                    None => Ok(Vec3(transform(w, e.0)?.translation)),
+                    None => Ok(Vec3(crate::access::transform_of(w, e.0)?.translation)),
                 }
             })
         });
         fields.add_field_method_get("forward", |lua, e| {
-            with_world_as(lua, "e.forward", |w| {
-                Ok(Vec3(transform(w, e.0)?.forward().as_dvec3()))
-            })
+            Ok(Vec3(
+                read_transform_as(lua, "e.forward", e.0)?
+                    .forward()
+                    .as_dvec3(),
+            ))
         });
         fields.add_field_method_get("right", |lua, e| {
-            with_world_as(lua, "e.right", |w| {
-                Ok(Vec3(transform(w, e.0)?.right().as_dvec3()))
-            })
+            Ok(Vec3(
+                read_transform_as(lua, "e.right", e.0)?.right().as_dvec3(),
+            ))
         });
         fields.add_field_method_get("up", |lua, e| {
-            with_world_as(lua, "e.up", |w| {
-                Ok(Vec3(transform(w, e.0)?.up().as_dvec3()))
-            })
+            Ok(Vec3(read_transform_as(lua, "e.up", e.0)?.up().as_dvec3()))
         });
         fields.add_field_method_get("parent", |lua, e| {
-            with_world_as(lua, "e.parent", |w| {
+            read_world_as(lua, "e.parent", |w| {
                 Ok(w.get::<ChildOf>(e.0).map(|c| EntityRef(c.0)))
             })
         });
@@ -274,10 +251,10 @@ impl UserData for EntityRef {
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("exists", |lua, e, ()| {
-            with_world_as(lua, "e:exists", |w| Ok(w.get_entity(e.0).is_ok()))
+            read_world_as(lua, "e:exists", |w| Ok(w.get_entity(e.0).is_ok()))
         });
         methods.add_method("get", |lua, e, name: String| {
-            with_world_as(lua, "e:get", |w| {
+            read_world_as(lua, "e:get", |w| {
                 let get = w
                     .resource::<TypeRegistry>()
                     .component_or_err(&name)
@@ -294,17 +271,18 @@ impl UserData for EntityRef {
         });
         methods.add_method("set", |lua, e, (name, value): (String, Value)| {
             let value = to_json(&value)?;
-            with_world_as(lua, "e:set", |w| {
+            let e = e.0;
+            write_world_as(lua, "e:set", move |w| {
                 let patch = w
                     .resource::<TypeRegistry>()
                     .component_or_err(&name)
                     .map_err(mlua::Error::runtime)?
                     .patch;
-                patch(w, e.0, value).map_err(mlua::Error::runtime)
+                patch(w, e, value).map_err(mlua::Error::runtime)
             })
         });
         methods.add_method("has", |lua, e, name: String| {
-            with_world_as(lua, "e:has", |w| {
+            read_world_as(lua, "e:has", |w| {
                 let has = w
                     .resource::<TypeRegistry>()
                     .component_or_err(&name)
@@ -314,54 +292,65 @@ impl UserData for EntityRef {
             })
         });
         methods.add_method("remove", |lua, e, name: String| {
-            with_world_as(lua, "e:remove", |w| {
-                let remove = w
-                    .resource::<TypeRegistry>()
-                    .component_or_err(&name)
-                    .map_err(mlua::Error::runtime)?
-                    .remove;
-                Ok(remove(w, e.0))
-            })
+            if in_parallel(lua) {
+                let e = e.0;
+                write_world_as(lua, "e:remove", move |w| {
+                    removal(w, &name)?(w, e);
+                    Ok(())
+                })?;
+                return Ok(None);
+            }
+            with_world_as(lua, "e:remove", |w| Ok(Some(removal(w, &name)?(w, e.0))))
         });
         methods.add_method("material", |lua, e, patch: Option<Value>| {
             let patch = patch.map(|v| to_json(&v)).transpose()?;
+            if in_parallel(lua) && patch.is_some() {
+                // Changed after the parallel phase; nothing to return yet.
+                let e = e.0;
+                write_world_as(lua, "e:material", move |w| {
+                    material(w, e, patch).map(|_| ())
+                })?;
+                return Ok(Value::Nil);
+            }
             let out = with_world_as(lua, "e:material", |w| material(w, e.0, patch))?;
             to_lua(lua, &out)
         });
         methods.add_method("despawn", |lua, e, ()| {
+            if in_parallel(lua) {
+                let e = e.0;
+                write_world_as(lua, "e:despawn", move |w| {
+                    if w.get_entity(e).is_ok() {
+                        w.despawn(e);
+                    }
+                    Ok(())
+                })?;
+                return Ok(None);
+            }
             with_world_as(lua, "e:despawn", |w| {
-                Ok(w.get_entity(e.0).is_ok() && w.despawn(e.0))
+                Ok(Some(w.get_entity(e.0).is_ok() && w.despawn(e.0)))
             })
         });
         methods.add_method("look_at", |lua, e, (target, up): (Vec3, Option<Vec3>)| {
-            with_world_as(lua, "e:look_at", |w| {
-                let at = transform(w, e.0)?.translation;
-                let dir = (target.0 - at).as_vec3();
-                if dir.length_squared() < 1e-12 {
-                    return Ok(());
-                }
-                let up = up.map(|u| u.f32()).unwrap_or(engine_core::math::Vec3::Y);
-                let rot = look_rotation(dir.normalize(), up);
-                edit_transform(w, e.0, |t| t.rotation = rot)
-            })
+            let at = read_transform_as(lua, "e:look_at", e.0)?.translation;
+            let dir = (target.0 - at).as_vec3();
+            if dir.length_squared() < 1e-12 {
+                return Ok(());
+            }
+            let up = up.map(|u| u.f32()).unwrap_or(engine_core::math::Vec3::Y);
+            let rot = look_rotation(dir.normalize(), up);
+            edit_transform_as(lua, "e:look_at", e.0, |t| t.rotation = rot)
         });
         methods.add_method("translate", |lua, e, by: Vec3| {
-            with_world_as(lua, "e:translate", |w| {
-                edit_transform(w, e.0, |t| t.translation += by.0)
-            })
+            edit_transform_as(lua, "e:translate", e.0, |t| t.translation += by.0)
         });
         methods.add_method("rotate", |lua, e, q: Quat| {
-            with_world_as(lua, "e:rotate", |w| {
-                edit_transform(w, e.0, |t| t.rotation = q.0 * t.rotation)
-            })
+            edit_transform_as(lua, "e:rotate", e.0, |t| t.rotation = q.0 * t.rotation)
         });
         methods.add_method("rotate_y", |lua, e, angle: f32| {
-            with_world_as(lua, "e:rotate_y", |w| {
-                edit_transform(w, e.0, |t| t.rotate_y(angle))
-            })
+            edit_transform_as(lua, "e:rotate_y", e.0, |t| t.rotate_y(angle))
         });
         methods.add_method("children", |lua, e, ()| {
-            with_world_as(lua, "e:children", |w| {
+            read_world_as(lua, "e:children", |w| {
                 let kids: Vec<EntityRef> = w
                     .get::<Children>(e.0)
                     .map(|c| c.iter().map(EntityRef).collect())
@@ -370,7 +359,7 @@ impl UserData for EntityRef {
             })
         });
         methods.add_method("find", |lua, e, name: String| {
-            with_world_as(lua, "e:find", |w| {
+            read_world_as(lua, "e:find", |w| {
                 Ok(find_descendant(w, e.0, &name).map(EntityRef))
             })
         });
@@ -391,7 +380,7 @@ impl UserData for EntityRef {
             Ok(a == b)
         });
         methods.add_meta_method(MetaMethod::ToString, |lua, e, ()| {
-            let name = with_world(lua, |w| {
+            let name = read_world_as(lua, "tostring", |w| {
                 Ok(w.get::<Name>(e.0).map(|n| n.as_str().to_string()))
             })
             .ok()
@@ -402,6 +391,29 @@ impl UserData for EntityRef {
             })
         });
     }
+}
+
+/// The registry's remover for component `name`.
+fn removal(w: &World, name: &str) -> mlua::Result<fn(&mut World, Entity) -> bool> {
+    Ok(w.resource::<TypeRegistry>()
+        .component_or_err(name)
+        .map_err(mlua::Error::runtime)?
+        .remove)
+}
+
+/// Entities whose `Name` is `name` (or contains `needle`, any case), sorted by name so the
+/// order doesn't depend on how they are stored.
+fn named(w: &World, test: impl Fn(&str) -> bool) -> Vec<(String, Entity)> {
+    let Some(mut q) = w.try_query::<(Entity, &Name)>() else {
+        return Vec::new();
+    };
+    let mut found: Vec<(String, Entity)> = q
+        .iter(w)
+        .filter(|(_, n)| test(n.as_str()))
+        .map(|(e, n)| (n.as_str().to_string(), e))
+        .collect();
+    found.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    found
 }
 
 /// Depth-first search under `root` for an entity named `name`.
@@ -451,25 +463,22 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
     world.set(
         "find",
         lua.create_function(|lua, name: String| {
-            with_world_as(lua, "world.find", |w| {
-                Ok(find_by_name(w, &name).ok().map(EntityRef))
+            read_world_as(lua, "world.find", |w| {
+                let Some(mut q) = w.try_query::<(Entity, &Name)>() else {
+                    return Ok(None);
+                };
+                Ok(q.iter(w)
+                    .find(|(_, n)| n.as_str() == name)
+                    .map(|(e, _)| EntityRef(e)))
             })
         })?,
     )?;
     world.set(
         "find_all",
         lua.create_function(|lua, needle: String| {
-            with_world_as(lua, "world.find_all", |w| {
+            read_world_as(lua, "world.find_all", |w| {
                 let needle = needle.to_lowercase();
-                let mut q = w.query::<(Entity, &Name)>();
-                let mut found: Vec<(String, Entity)> = q
-                    .iter(w)
-                    .filter(|(_, n)| n.as_str().to_lowercase().contains(&needle))
-                    .map(|(e, n)| (n.as_str().to_string(), e))
-                    .collect();
-                // By name, so the order doesn't depend on how entities were stored.
-                found.sort_by(|a, b| a.0.cmp(&b.0));
-                Ok(found
+                Ok(named(w, |n| n.to_lowercase().contains(&needle))
                     .into_iter()
                     .map(|(_, e)| EntityRef(e))
                     .collect::<Vec<_>>())

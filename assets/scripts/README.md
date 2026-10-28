@@ -34,6 +34,31 @@ Every engine function is there as `module.verb(args)` (`fire.ignite`, `weather.s
 (`wait`, `spawn`, `delay`, `defer`, `cancel`, `tween`, `wait_until`), `self:every`,
 `self:after`, `ease.*`, `input.pressed`, and `require("lib/name")` for shared modules.
 
+## Many scripts at once: `parallel_update`
+
+For hundreds of scripts that each move their own entity (a swarm, a crowd, flocks), use
+`parallel_update(dt)` instead of `update`: those scripts run in actor VMs side by side, one per
+core. In it a script reads the world as the frame's parallel part began, sees its own moves at
+once, and its other changes (`e:set`, `e.name =`, `e:material`, `e:despawn`) apply right after.
+An engine call that needs the whole world (`fire.ignite`, spawning) needs `task.synchronize()`
+first; the rest of the function then runs after the parallel part, one script at a time.
+
+```lua
+function Wisp:parallel_update(dt: number)
+	local at = self.entity.position
+	self.velocity = self.velocity * (1 - 2.5 * dt) + (self:orbit_point() - at) * (6 * dt)
+	self.entity.position = at + self.velocity * dt
+	if self.entity.position.y > 30 then
+		task.synchronize()
+		vfx.spawn({ effect = "spell.starburst", position = self.entity.world_position })
+	end
+end
+```
+
+Each VM has its own globals and modules: talk to a script in another VM with `e:send`, or give
+scripts the same `ScriptActor` number to keep them in one VM. The showcase swarm:
+`showcase/wisp.luau`.
+
 ## Editor setup (autocomplete and type checking)
 
 1. Install the **Luau Language Server** extension (`JohnnyMorganz.luau-lsp`) in VS Code.
@@ -79,3 +104,4 @@ and a `ProfileBoard` draws the flame graph (the Script courtyard has one recordi
 
 - `showcase/courtyard.luau`: the Script courtyard's director (lanterns, orrery, the ritual).
 - `showcase/lever.luau`: a lever that sends an event to another entity's script.
+- `showcase/wisp.luau`: one of the 320 wisps round the orrery (`parallel_update`, on every core).

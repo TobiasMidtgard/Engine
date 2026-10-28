@@ -48,7 +48,7 @@ pub(crate) fn register(app: &mut App) {
             with_runtime(world, |_, rt, _| {
                 let errors = rt.errors();
                 if args["clear"].as_bool() == Some(true) {
-                    shared(&rt.lua).errors.clear();
+                    rt.clear_errors();
                 }
                 json!(errors)
             })
@@ -80,13 +80,9 @@ pub(crate) fn register(app: &mut App) {
             with_runtime(world, |world, rt, settings| {
                 let paths: Vec<String> = match str_arg(&args, "path") {
                     Some(p) => vec![normalize(p)],
-                    None => rt.files().map.keys().cloned().collect(),
+                    None => Vec::new(),
                 };
-                let _lent = crate::access::lend_world(&rt.lua, world);
-                for p in &paths {
-                    rt.reload(p, settings, true);
-                }
-                json!({"reloaded": paths})
+                json!({"reloaded": rt.reload_all(world, paths, settings)})
             })
         },
     )
@@ -155,7 +151,8 @@ pub(crate) fn register(app: &mut App) {
     .register_api(
         "script.edit",
         "Edit a script file in place: replace the text \"find\" with \"replace\" (the first \
-         match, or every one with \"all\": true). A loaded script reloads within a moment.",
+         match, or every one with \"all\": true). A loaded script reloads within a moment. \
+         \"missing_ok\": true leaves a file without \"find\" as it is instead of failing.",
         r#"{"path": "showcase/courtyard.luau", "find": "lanterns = 12", "replace": "lanterns = 16", "all": false}"#,
         |world, args| {
             let path = safe_path(str_arg(&args, "path").ok_or("missing 'path'")?)?;
@@ -171,6 +168,9 @@ pub(crate) fn register(app: &mut App) {
                 .map_err(|e| format!("can't read {}: {e}", full.display()))?;
             let count = text.matches(find).count();
             if count == 0 {
+                if args["missing_ok"].as_bool() == Some(true) {
+                    return Ok(json!({"path": path, "replaced": 0}));
+                }
                 return Err(format!("{path} has no \"{find}\""));
             }
             let all = args["all"].as_bool() == Some(true);
@@ -244,19 +244,19 @@ pub(crate) fn register(app: &mut App) {
             with_runtime(world, |_, rt, _| {
                 let flag = |key: &str| args[key].as_bool() == Some(true);
                 if flag("reset") {
-                    rt.profiler.reset(&rt.lua);
+                    rt.profile_reset();
                     return Ok(json!({"reset": true}));
                 }
                 if flag("stop") {
-                    rt.profiler.stop(&rt.lua);
+                    rt.profile_stop();
                 } else if let Some(seconds) = args["seconds"].as_f64() {
                     let hz = args["hz"].as_u64().unwrap_or(1000).min(20_000) as u32;
-                    rt.profiler.start(&rt.lua, hz, seconds.max(0.0), false);
+                    rt.profile_start(hz, seconds.max(0.0), false);
                 }
                 let top = args["top"].as_u64().unwrap_or(15).clamp(1, 200) as usize;
                 Ok(crate::profiler::report(
-                    &rt.lua,
-                    rt.profiler.recording(),
+                    &rt.luas(),
+                    rt.profile_recording(),
                     top,
                     flag("folded"),
                 ))

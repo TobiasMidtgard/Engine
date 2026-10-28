@@ -10,7 +10,9 @@
 //! is taken when the call returns and charged to the call, so a slow engine function shows as
 //! itself rather than as the Luau line after it. The flame graph's first level says what the
 //! runtime was running (`update`, `tasks`, `events`, ...); garbage collection is charged to the
-//! code that runs after it.
+//! code that runs after it. Built-ins that Luau runs on its fast path (`math.sin`, `vector`
+//! math) never reach the interrupt, so time in a tight loop lands on the loop's back edge: the
+//! `for` or `while` line, not its body.
 //!
 //! When not recording it costs one atomic load per interrupt and per engine call.
 
@@ -45,9 +47,10 @@ pub(crate) enum Phase {
     Tasks,
     Reload,
     Console,
+    Parallel,
 }
 
-const PHASES: [&str; 7] = [
+const PHASES: [&str; 8] = [
     "update",
     "fixed_update",
     "start",
@@ -55,6 +58,7 @@ const PHASES: [&str; 7] = [
     "tasks",
     "reload",
     "console",
+    "parallel_update",
 ];
 
 /// Shared by the timer thread, the VM's interrupt and the engine calls.
@@ -478,6 +482,8 @@ pub(crate) struct Summary {
     pub samples: u64,
     pub script_ms: f64,
     pub frames: u64,
+    /// VMs whose samples are in it (the main one and the actor VMs that recorded).
+    pub vms: usize,
 }
 
 impl Summary {
@@ -499,9 +505,9 @@ pub(crate) struct FlameNode {
 }
 
 impl FlameNode {
-    fn child(&mut self, rec: &Recording, id: u32) -> &mut FlameNode {
-        let f = &rec.frames_seen[id as usize];
-        let at = f.source.map(|s| (rec.sources[s as usize].clone(), f.line));
+    fn child(&mut self, m: &Merged, id: u32) -> &mut FlameNode {
+        let f = &m.frames[id as usize];
+        let at = f.source.clone().map(|s| (s, f.line));
         let found = self
             .children
             .iter()
@@ -530,122 +536,192 @@ impl FlameNode {
     }
 }
 
-fn summary(rec: &Recording, recording: bool) -> Summary {
-    Summary {
-        recording,
-        hz: rec.hz,
-        seconds: rec.elapsed(),
-        samples: rec.samples,
-        script_ms: rec.total_ns as f64 / 1e6,
-        frames: rec.frames,
+/// A frame of [`Merged`]: like [`Frame`], with its source's text.
+struct MergedFrame {
+    name: String,
+    source: Option<String>,
+    line: u32,
+    kind: Kind,
+}
+
+/// The recordings of every VM (the main one and the actor VMs) as one: functions with the
+/// same name, file and line are one function.
+#[derive(Default)]
+struct Merged {
+    frames: Vec<MergedFrame>,
+    by_key: HashMap<(String, Option<String>, u32, u8), u32>,
+    stacks: HashMap<Vec<u32>, u64>,
+    lines: HashMap<(String, u32), u64>,
+    samples: u64,
+    total_ns: u64,
+    frames_run: u64,
+    hz: u32,
+    seconds: f64,
+    started: bool,
+    shown: u64,
+    vms: usize,
+}
+
+impl Merged {
+    fn of(luas: &[&Lua]) -> Self {
+        let mut m = Merged::default();
+        for (vm, lua) in luas.iter().enumerate() {
+            let Some(rec) = lua.app_data_ref::<Recording>() else {
+                continue;
+            };
+            m.shown += rec.shown;
+            if rec.started.is_none() {
+                continue;
+            }
+            m.started = true;
+            m.vms += 1;
+            if vm == 0 || m.hz == 0 {
+                m.hz = rec.hz;
+            }
+            m.seconds = m.seconds.max(rec.elapsed());
+            m.frames_run = m.frames_run.max(rec.frames);
+            m.samples += rec.samples;
+            m.total_ns += rec.total_ns;
+            let ids: Vec<u32> = rec
+                .frames_seen
+                .iter()
+                .map(|f| {
+                    let source = f.source.map(|s| rec.sources[s as usize].clone());
+                    let key = (f.name.clone(), source.clone(), f.line, f.kind as u8);
+                    if let Some(&id) = m.by_key.get(&key) {
+                        return id;
+                    }
+                    let id = m.frames.len() as u32;
+                    m.frames.push(MergedFrame {
+                        name: f.name.clone(),
+                        source,
+                        line: f.line,
+                        kind: f.kind,
+                    });
+                    m.by_key.insert(key, id);
+                    id
+                })
+                .collect();
+            for (stack, &w) in &rec.stacks {
+                let mapped: Vec<u32> = stack.iter().map(|&id| ids[id as usize]).collect();
+                *m.stacks.entry(mapped).or_default() += w;
+            }
+            for (&(source, line), &w) in &rec.lines {
+                *m.lines
+                    .entry((rec.sources[source as usize].clone(), line))
+                    .or_default() += w;
+            }
+        }
+        m
+    }
+
+    fn summary(&self, recording: bool) -> Summary {
+        Summary {
+            recording,
+            hz: self.hz,
+            seconds: self.seconds,
+            samples: self.samples,
+            script_ms: self.total_ns as f64 / 1e6,
+            frames: self.frames_run,
+            vms: self.vms,
+        }
     }
 }
 
-/// The flame graph of the current (or last) recording; `None` before the first one.
-pub(crate) fn flame(lua: &Lua, recording: bool) -> Option<(Summary, FlameNode)> {
-    let rec = lua.app_data_ref::<Recording>()?;
-    rec.started?;
+/// The flame graph of the current (or last) recording of every VM in `luas`; `None` before
+/// the first one.
+pub(crate) fn flame(luas: &[&Lua], recording: bool) -> Option<(Summary, FlameNode)> {
+    let m = Merged::of(luas);
+    if !m.started {
+        return None;
+    }
     let mut root = FlameNode {
         name: "all scripts".into(),
         kind: Kind::Phase,
         at: None,
-        ns: rec.total_ns,
+        ns: m.total_ns,
         children: Vec::new(),
     };
-    for (stack, &w) in &rec.stacks {
+    for (stack, &w) in &m.stacks {
         let mut node = &mut root;
         for &id in stack {
-            node = node.child(&rec, id);
+            node = node.child(&m, id);
             node.ns += w;
         }
     }
     root.sort();
-    Some((summary(&rec, recording), root))
+    Some((m.summary(recording), root))
 }
 
 /// Each line's share of the recorded script time (percent), for `path`; and a number that
 /// changes when boards should redraw.
-pub(crate) fn line_heat(lua: &Lua, path: &str) -> (u64, BTreeMap<u32, f32>) {
-    let Some(rec) = lua.app_data_ref::<Recording>() else {
-        return (0, BTreeMap::new());
-    };
-    let Some(source) = rec.sources.iter().position(|s| s == path) else {
-        return (rec.shown, BTreeMap::new());
-    };
-    let total = rec.total_ns.max(1) as f64;
-    let heat = rec
+pub(crate) fn line_heat(luas: &[&Lua], path: &str) -> (u64, BTreeMap<u32, f32>) {
+    let m = Merged::of(luas);
+    let total = m.total_ns.max(1) as f64;
+    let heat = m
         .lines
         .iter()
-        .filter(|((s, _), _)| *s == source as u32)
+        .filter(|((s, _), _)| s == path)
         .map(|(&(_, line), &w)| (line, (w as f64 / total * 100.0) as f32))
         .collect();
-    (rec.shown, heat)
+    (m.shown, heat)
 }
 
 /// The number [`line_heat`] returns first: changes when boards should redraw.
-pub(crate) fn shown(lua: &Lua) -> u64 {
-    lua.app_data_ref::<Recording>().map_or(0, |r| r.shown)
+pub(crate) fn shown(luas: &[&Lua]) -> u64 {
+    luas.iter()
+        .map(|lua| lua.app_data_ref::<Recording>().map_or(0, |r| r.shown))
+        .sum()
 }
 
-/// A line's text from a loaded file, trimmed.
-fn code_line(lua: &Lua, path: &str, line: u32) -> Option<String> {
-    let files = lua.app_data_ref::<Files>()?;
-    let source = &files.map.get(path)?.source;
-    let text = source.lines().nth(line.checked_sub(1)? as usize)?;
-    Some(text.trim().to_string())
+/// A line's text from a file one of the VMs loaded, trimmed.
+fn code_line(luas: &[&Lua], path: &str, line: u32) -> Option<String> {
+    luas.iter().find_map(|lua| {
+        let files = lua.app_data_ref::<Files>()?;
+        let source = &files.map.get(path)?.source;
+        let text = source.lines().nth(line.checked_sub(1)? as usize)?;
+        Some(text.trim().to_string())
+    })
 }
 
-/// The hottest lines: (file, line, percent, code).
-pub(crate) fn hot_lines(lua: &Lua, top: usize) -> Vec<(String, u32, f64, String)> {
-    let found: Vec<(String, u32, f64)> = {
-        let Some(rec) = lua.app_data_ref::<Recording>() else {
-            return Vec::new();
-        };
-        let total = rec.total_ns.max(1) as f64;
-        let mut lines: Vec<((u32, u32), u64)> = rec.lines.iter().map(|(k, v)| (*k, *v)).collect();
-        lines.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        lines
-            .into_iter()
-            .filter(|((s, _), _)| !rec.sources[*s as usize].starts_with("engine/"))
-            .take(top)
-            .map(|((s, line), w)| {
-                (
-                    rec.sources[s as usize].clone(),
-                    line,
-                    w as f64 / total * 100.0,
-                )
-            })
-            .collect()
-    };
-    found
+fn hottest(m: &Merged, luas: &[&Lua], top: usize) -> Vec<(String, u32, f64, String)> {
+    let total = m.total_ns.max(1) as f64;
+    let mut lines: Vec<(&(String, u32), &u64)> = m.lines.iter().collect();
+    lines.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    lines
         .into_iter()
-        .map(|(path, line, pct)| {
-            let code = code_line(lua, &path, line).unwrap_or_default();
-            (path, line, pct, code)
+        .filter(|((s, _), _)| !s.starts_with("engine/"))
+        .take(top)
+        .map(|((path, line), &w)| {
+            let code = code_line(luas, path, *line).unwrap_or_default();
+            (path.clone(), *line, w as f64 / total * 100.0, code)
         })
         .collect()
 }
 
+/// The hottest lines: (file, line, percent, code).
+pub(crate) fn hot_lines(luas: &[&Lua], top: usize) -> Vec<(String, u32, f64, String)> {
+    hottest(&Merged::of(luas), luas, top)
+}
+
 /// `script.profile`'s answer: the headline numbers, the functions and lines that took the most
 /// time, the time per phase, and (`folded`) every stack in the folded format flame graph
-/// tools read (`a;b;c microseconds` per line).
-pub(crate) fn report(lua: &Lua, recording: bool, top: usize, folded: bool) -> Json {
-    let lines = hot_lines(lua, top);
-    let Some(rec) = lua.app_data_ref::<Recording>() else {
-        return json!({"recording": false, "samples": 0});
-    };
-    if rec.started.is_none() {
+/// tools read (`a;b;c microseconds` per line). Over every VM in `luas`.
+pub(crate) fn report(luas: &[&Lua], recording: bool, top: usize, folded: bool) -> Json {
+    let m = Merged::of(luas);
+    if !m.started {
         return json!({"recording": false, "samples": 0,
             "hint": "start one with {\"seconds\": 5}"});
     }
-    let s = summary(&rec, recording);
-    let total = rec.total_ns.max(1) as f64;
+    let lines = hottest(&m, luas, top);
+    let s = m.summary(recording);
+    let total = m.total_ns.max(1) as f64;
     let ms = |ns: u64| (ns as f64 / 1e4).round() / 100.0;
     let pct = |ns: u64| (ns as f64 / total * 1000.0).round() / 10.0;
-    let n = rec.frames_seen.len();
+    let n = m.frames.len();
     let (mut own, mut all) = (vec![0u64; n], vec![0u64; n]);
     let mut seen = Vec::new();
-    for (stack, &w) in &rec.stacks {
+    for (stack, &w) in &m.stacks {
         if let Some(&leaf) = stack.last() {
             own[leaf as usize] += w;
         }
@@ -658,17 +734,17 @@ pub(crate) fn report(lua: &Lua, recording: bool, top: usize, folded: bool) -> Js
         }
     }
     let mut order: Vec<usize> = (0..n)
-        .filter(|&i| rec.frames_seen[i].kind != Kind::Phase && all[i] > 0)
+        .filter(|&i| m.frames[i].kind != Kind::Phase && all[i] > 0)
         .collect();
     order.sort_by(|&a, &b| all[b].cmp(&all[a]).then(own[b].cmp(&own[a])));
     let functions: Vec<Json> = order
         .into_iter()
         .take(top)
         .map(|i| {
-            let f = &rec.frames_seen[i];
+            let f = &m.frames[i];
             json!({
                 "name": f.name,
-                "source": f.source.map(|s| rec.sources[s as usize].clone()),
+                "source": f.source,
                 "line": (f.kind == Kind::Lua).then_some(f.line),
                 "engine": f.kind == Kind::Engine,
                 "self_ms": ms(own[i]),
@@ -679,8 +755,8 @@ pub(crate) fn report(lua: &Lua, recording: bool, top: usize, folded: bool) -> Js
         })
         .collect();
     let phases: serde_json::Map<String, Json> = (0..n)
-        .filter(|&i| rec.frames_seen[i].kind == Kind::Phase)
-        .map(|i| (rec.frames_seen[i].name.clone(), json!(ms(all[i]))))
+        .filter(|&i| m.frames[i].kind == Kind::Phase)
+        .map(|i| (m.frames[i].name.clone(), json!(ms(all[i]))))
         .collect();
     let mut out = json!({
         "recording": s.recording,
@@ -688,6 +764,7 @@ pub(crate) fn report(lua: &Lua, recording: bool, top: usize, folded: bool) -> Js
         "seconds": (s.seconds * 100.0).round() / 100.0,
         "samples": s.samples,
         "frames": s.frames,
+        "vms": s.vms,
         "script_ms": (s.script_ms * 100.0).round() / 100.0,
         "ms_per_frame": (s.ms_per_frame() * 1000.0).round() / 1000.0,
         "phases": phases,
@@ -698,13 +775,13 @@ pub(crate) fn report(lua: &Lua, recording: bool, top: usize, folded: bool) -> Js
     });
     if folded {
         let name = |id: u32| {
-            let f = &rec.frames_seen[id as usize];
-            match f.source {
-                Some(src) => format!("{} ({}:{})", f.name, rec.sources[src as usize], f.line),
+            let f = &m.frames[id as usize];
+            match &f.source {
+                Some(src) => format!("{} ({}:{})", f.name, src, f.line),
                 None => f.name.clone(),
             }
         };
-        let mut text: Vec<String> = rec
+        let mut text: Vec<String> = m
             .stacks
             .iter()
             .map(|(stack, w)| {
@@ -736,7 +813,7 @@ mod tests {
         rec.started = Some(Instant::now());
         let lua = Lua::new();
         lua.set_app_data(rec);
-        let (summary, root) = flame(&lua, false).unwrap();
+        let (summary, root) = flame(&[&lua], false).unwrap();
         assert_eq!(summary.script_ms, 450.0 / 1e6);
         assert_eq!(root.children[0].name, "update", "biggest first");
         assert_eq!(root.children[0].ns, 400);

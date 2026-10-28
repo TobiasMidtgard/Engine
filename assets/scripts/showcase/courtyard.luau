@@ -12,6 +12,7 @@ Courtyard.props = {
 	glow = 2600, -- lumens at the crest of the wave
 	wave_speed = 0.11, -- turns of the wave per second
 	spin = 0.05, -- the orrery's turns per second
+	wisps = 320, -- in the swarm round the orrery (wisp.luau, run on every core)
 }
 
 function Courtyard:start()
@@ -39,7 +40,7 @@ end
 -- After an edit: rebuild only when the lantern ring itself changed.
 function Courtyard:on_reload()
 	local p = self.props
-	if #self.lanterns ~= p.lanterns or self.built_radius ~= p.radius then
+	if #self.lanterns ~= p.lanterns or self.built_radius ~= p.radius or #self.wisps ~= p.wisps then
 		self:build()
 	end
 	self.spin = p.spin
@@ -61,6 +62,9 @@ function Courtyard:ritual()
 		task.wait(0.08)
 	end
 	task.wait(0.6)
+	for _, wisp in self.wisps do -- the swarm rises (wisp.luau, Wisp:ritual)
+		wisp:send("ritual")
+	end
 	for i, lamp in self.lanterns do -- back in sequence, each with a flash
 		vfx.spawn({ effect = "spell.charge", position = lamp.bulb.world_position, scale = 0.6 })
 		task.spawn(task.tween, 0.5, function(a)
@@ -189,9 +193,36 @@ local function orrery(): any
 	return spec
 end
 
+local WISP_GLOW = { { 1, 0.62, 0.3 }, { 1, 0.82, 0.5 }, { 0.55, 0.75, 1 } }
+
+local function wisp(i: number): any
+	local u = (i * 0.618034) % 1 -- spread evenly in radius and height
+	local v = (i * 0.754878) % 1
+	local radius, height = 3.2 + 6.3 * u, 1.3 + 4.2 * v
+	local angle = i * 2.399963
+	return {
+		name = `Wisp {i}`,
+		components = {
+			Transform = { translation = vec3(math.cos(angle) * radius, height, math.sin(angle) * radius) },
+			MeshRenderer = {
+				mesh = { shape = { Sphere = { radius = 0.075, segments = 10 } } },
+				material = { inline = {
+					base_color = { 0, 0, 0, 1 },
+					emissive = WISP_GLOW[i % 3 + 1],
+					emissive_strength = 90,
+				} },
+			},
+			Script = { path = "showcase/wisp.luau", props = { seed = i, radius = radius, height = height } },
+		},
+	}
+end
+
 function Courtyard:build()
 	for _, lamp in self.lanterns or {} do
 		lamp.post:despawn()
+	end
+	for _, w in self.wisps or {} do
+		w:despawn()
 	end
 	if self.orrery then
 		self.orrery:despawn()
@@ -209,6 +240,10 @@ function Courtyard:build()
 	self.rings = {}
 	for k = 1, #RINGS do
 		table.insert(self.rings, self.orrery:find(`Ring {k}`))
+	end
+	self.wisps = {}
+	for i = 1, p.wisps do
+		table.insert(self.wisps, self:spawn(wisp(i)))
 	end
 end
 

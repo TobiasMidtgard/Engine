@@ -1,10 +1,18 @@
 //! The script runtime: one Luau VM, the script files it loaded, the script instances on
-//! entities, the task scheduler and hot reload.
+//! entities, the task scheduler and hot reload; and the actor VMs that run `parallel_update`
+//! side by side.
 //!
 //! The runner systems take [`ScriptRuntime`] out of the world for the length of their run and
 //! lend the world to the VM (`access`). Lua callbacks reach shared bookkeeping (new tasks,
 //! messages, errors, the file table for `require`) through the VM's app data, so nothing here is
 //! borrowed while Lua code runs.
+//!
+//! A frame: the main VM's serial work (hot reload, new instances, events, `update`, tasks),
+//! then each actor VM's, then the parallel phase, where every VM runs its instances'
+//! `parallel_update` on its own thread with the world shared read-only; then each VM's queued
+//! changes are applied, VM after VM, and the code that called `task.synchronize()` goes on, one
+//! script at a time. Instances of a script with `parallel_update` are spread over the actor
+//! VMs ([`crate::ScriptActor`] says which); everything else runs in the main VM.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -17,12 +25,13 @@ use engine_core::registry::ApiRegistry;
 use mlua::{Function, Lua, MultiValue, RegistryKey, Table, Thread, Value, Variadic};
 
 use crate::access::{
-    KEEP_LINES, NewTask, Shared, Watchdog, lend_world, push_error, shared, with_world,
+    KEEP_LINES, NewTask, Shared, Watchdog, apply_deferred, lend_world, lend_world_parallel,
+    push_error, shared, with_world,
 };
 use crate::convert::{to_lua, to_lua_like};
 use crate::entity::{EntityRef, SELVES};
 use crate::profiler::Phase;
-use crate::{Script, ScriptSettings};
+use crate::{Script, ScriptActor, ScriptSettings};
 
 /// Registry name of the class every instance inherits helpers from (`every`, `after`, `spawn`).
 const BASE: &str = "engine_script.base";
@@ -33,6 +42,7 @@ pub(crate) struct Hooks {
     pub start: bool,
     pub update: bool,
     pub fixed_update: bool,
+    pub parallel_update: bool,
     pub on_interact: bool,
     pub on_contact: bool,
     pub on_message: bool,
@@ -51,6 +61,7 @@ impl Hooks {
             start: has("start"),
             update: has("update"),
             fixed_update: has("fixed_update"),
+            parallel_update: has("parallel_update"),
             on_interact: has("on_interact"),
             on_contact: has("on_contact"),
             on_message: has("on_message"),
@@ -225,6 +236,19 @@ pub struct ScriptRuntime {
     interact_cursor: Option<bevy_ecs::message::MessageCursor<engine_world::Interact>>,
     contact_cursor: Option<bevy_ecs::message::MessageCursor<engine_world::physics::ContactEvent>>,
     pub(crate) reloads: u32,
+    /// 0 for the main VM; `k` for actor VM `k` (1-based, its [`ScriptActor`] number).
+    role: u32,
+    /// For an actor VM: how many actor VMs there are.
+    peers: u32,
+    /// The actor VMs (the main VM's; made when the first `parallel_update` script starts).
+    pub(crate) actors: Vec<ScriptRuntime>,
+    /// A finished `parallel_update` coroutine, reused for the next call.
+    spare: Option<Thread>,
+    /// `parallel_update` calls that called `task.synchronize()`: they go on after the parallel
+    /// phase.
+    synced: Vec<(Thread, Entity, String)>,
+    /// Wall-clock milliseconds of last frame's parallel phase (every VM).
+    pub(crate) parallel_ms: f32,
 }
 
 /// Normalizes a script path: forward slashes, no leading `./` or `/`, `.luau` added when it has
@@ -251,6 +275,16 @@ fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
 impl ScriptRuntime {
     /// A fresh VM with the engine's globals, reading scripts from `root`.
     pub fn new(api: &ApiRegistry, root: PathBuf, settings: &ScriptSettings) -> mlua::Result<Self> {
+        Self::vm(api, root, settings, (0, 0))
+    }
+
+    /// A VM for `role` (0: the main one; `k`: actor VM `k` of `peers`).
+    fn vm(
+        api: &ApiRegistry,
+        root: PathBuf,
+        settings: &ScriptSettings,
+        (role, peers): (u32, u32),
+    ) -> mlua::Result<Self> {
         let lua = Lua::new();
         lua.set_memory_limit(settings.memory_limit_mb as usize * 1024 * 1024)?;
         lua.set_app_data(Shared::default());
@@ -281,6 +315,7 @@ impl ScriptRuntime {
             "__task_delay",
             "__task_cancel",
             "__script_stopped",
+            "__script_parallel",
         ] {
             g.raw_set(internal, Value::Nil)?;
         }
@@ -298,7 +333,18 @@ impl ScriptRuntime {
             interact_cursor: None,
             contact_cursor: None,
             reloads: 0,
+            role,
+            peers,
+            actors: Vec::new(),
+            spare: None,
+            synced: Vec::new(),
+            parallel_ms: 0.0,
         })
+    }
+
+    /// Every VM: this one, then its actor VMs.
+    pub(crate) fn vms(&self) -> impl Iterator<Item = &ScriptRuntime> {
+        std::iter::once(self).chain(self.actors.iter())
     }
 
     /// The scripts folder (absolute).
@@ -315,19 +361,106 @@ impl ScriptRuntime {
             .expect("files are installed")
     }
 
-    /// Number of live tasks.
+    /// Number of live tasks, in every VM.
     pub fn task_count(&self) -> usize {
-        self.tasks.len()
+        self.vms().map(|v| v.tasks.len()).sum()
     }
 
-    /// Recent errors, oldest first.
+    /// Number of script instances, in every VM.
+    pub fn instance_count(&self) -> usize {
+        self.vms().map(|v| v.instances.len()).sum()
+    }
+
+    /// Number of VMs: the main one and the actor VMs.
+    pub fn vm_count(&self) -> usize {
+        1 + self.actors.len()
+    }
+
+    /// Wall-clock milliseconds of last frame's parallel phase.
+    pub fn parallel_ms(&self) -> f32 {
+        self.parallel_ms
+    }
+
+    /// Recent errors of every VM, oldest first.
     pub fn errors(&self) -> Vec<crate::access::ScriptError> {
-        shared(&self.lua).errors.iter().cloned().collect()
+        let mut all: Vec<crate::access::ScriptError> = self
+            .vms()
+            .flat_map(|v| shared(&v.lua).errors.iter().cloned().collect::<Vec<_>>())
+            .collect();
+        all.sort_by(|a, b| a.at_secs.total_cmp(&b.at_secs));
+        all
     }
 
-    /// Recent `print` output, oldest first.
+    /// Empties every VM's error list.
+    pub(crate) fn clear_errors(&self) {
+        for v in self.vms() {
+            shared(&v.lua).errors.clear();
+        }
+    }
+
+    /// Errors ever reported, in every VM.
+    pub(crate) fn errors_total(&self) -> u64 {
+        self.vms().map(|v| shared(&v.lua).errors_total).sum()
+    }
+
+    /// Memory the VMs use, bytes.
+    pub(crate) fn used_memory(&self) -> usize {
+        self.vms().map(|v| v.lua.used_memory()).sum()
+    }
+
+    /// Recent `print` output, oldest first (the main VM's, then each actor VM's).
     pub fn log(&self) -> Vec<String> {
-        shared(&self.lua).log.iter().cloned().collect()
+        self.vms()
+            .flat_map(|v| shared(&v.lua).log.iter().cloned().collect::<Vec<_>>())
+            .collect()
+    }
+
+    /// Every VM's Lua state, the main one first.
+    pub(crate) fn luas(&self) -> Vec<&Lua> {
+        self.vms().map(|v| &v.lua).collect()
+    }
+
+    /// The last runtime error in `path`'s code, in whichever VM ran it.
+    pub(crate) fn fault_of(&self, path: &str) -> Option<Fault> {
+        self.vms().find_map(|v| {
+            v.lua
+                .app_data_ref::<Files>()
+                .and_then(|f| f.map.get(path).and_then(|f| f.fault.clone()))
+        })
+    }
+
+    /// Starts a profiler recording in every VM.
+    pub(crate) fn profile_start(&mut self, hz: u32, seconds: f64, auto: bool) {
+        self.profiler.start(&self.lua, hz, seconds, auto);
+        for a in &mut self.actors {
+            a.profiler.start(&a.lua, hz, seconds, auto);
+        }
+    }
+
+    /// Ends every VM's recording (the results stay).
+    pub(crate) fn profile_stop(&mut self) {
+        self.profiler.stop(&self.lua);
+        for a in &mut self.actors {
+            a.profiler.stop(&a.lua);
+        }
+    }
+
+    /// Drops every VM's recording.
+    pub(crate) fn profile_reset(&mut self) {
+        self.profiler.reset(&self.lua);
+        for a in &mut self.actors {
+            a.profiler.reset(&a.lua);
+        }
+    }
+
+    /// Some VM is recording.
+    pub(crate) fn profile_recording(&self) -> bool {
+        self.vms().any(|v| v.profiler.recording())
+    }
+
+    /// A live profile board may start a recording (see `Profiler::idle_for_boards`).
+    pub(crate) fn profile_idle_for_boards(&self) -> bool {
+        self.vms().all(|v| v.profiler.idle_for_boards(&v.lua))
     }
 
     /// Source and version of a loaded file, if it is loaded.
@@ -351,9 +484,28 @@ impl ScriptRuntime {
 
     // ------------------------------------------------------------------------- the frame
 
-    /// One frame's script work (`Update`): hot reload, instances, events, `update`, tasks.
+    /// One frame's script work (`Update`): every VM's serial part (hot reload, instances,
+    /// events, `update`, tasks), then the parallel phase (`parallel_update`), then messages
+    /// move to the VMs of the scripts they are for.
     pub(crate) fn run_frame(&mut self, world: &mut World, settings: &ScriptSettings) {
         let started = Instant::now();
+        self.route_messages();
+        self.run_serial(world, settings);
+        for actor in &mut self.actors {
+            actor.run_serial(world, settings);
+        }
+        self.run_parallel(world, settings);
+        self.route_messages();
+        self.debugger.flush(&self.lua);
+        self.profiler.frame(&self.lua);
+        for actor in &mut self.actors {
+            actor.profiler.frame(&actor.lua);
+        }
+        self.frame_ms = started.elapsed().as_secs_f32() * 1000.0;
+    }
+
+    /// One VM's serial work for the frame.
+    fn run_serial(&mut self, world: &mut World, settings: &ScriptSettings) {
         let now = world.resource::<Time>().elapsed_secs_f64();
         shared(&self.lua).world_secs = now;
         // The debugger's client: console code it sends runs like `script.eval` (which lends
@@ -412,13 +564,266 @@ impl ScriptRuntime {
             }
         }
         self.run_tasks(now, settings);
-        self.debugger.flush(&self.lua);
-        self.profiler.frame(&self.lua);
-        self.frame_ms = started.elapsed().as_secs_f32() * 1000.0;
     }
 
-    /// The fixed-step hook (`FixedUpdate`, `SimSet::Gameplay`).
+    // ------------------------------------------------------------------------- parallel
+
+    /// Whether this VM has instances to run in the parallel phase.
+    fn wants_parallel(&self) -> bool {
+        self.instances
+            .values()
+            .any(|i| i.enabled && i.started && i.hooks.parallel_update)
+    }
+
+    /// The parallel phase: every VM runs its `parallel_update`s on its own thread (the compute
+    /// pool's), reading the world as the serial phase left it; then the VMs' changes are
+    /// applied in VM order, and the calls that synchronized go on.
+    fn run_parallel(&mut self, world: &mut World, settings: &ScriptSettings) {
+        let main = self.wants_parallel();
+        let busy = self.actors.iter().filter(|a| a.wants_parallel()).count();
+        if !main && busy == 0 {
+            self.parallel_ms = 0.0;
+            return;
+        }
+        let t0 = Instant::now();
+        {
+            let w: &World = world;
+            let mut actors = std::mem::take(&mut self.actors);
+            if usize::from(main) + busy == 1 {
+                // One VM: no hand-off to another thread.
+                if main {
+                    self.parallel_part(w, settings);
+                }
+                for actor in actors.iter_mut().filter(|a| a.wants_parallel()) {
+                    actor.parallel_part(w, settings);
+                }
+            } else {
+                let pool = engine_core::tasks::ComputeTaskPool::get_or_init(Default::default);
+                let this = &mut *self;
+                pool.scope(|scope| {
+                    for actor in actors.iter_mut().filter(|a| a.wants_parallel()) {
+                        scope.spawn(async move { actor.parallel_part(w, settings) });
+                    }
+                    if main {
+                        scope.spawn(async move { this.parallel_part(w, settings) });
+                    }
+                });
+            }
+            self.actors = actors;
+        }
+        self.parallel_ms = t0.elapsed().as_secs_f32() * 1000.0;
+        self.apply_parallel(world);
+        for actor in &mut self.actors {
+            actor.apply_parallel(world);
+        }
+        self.resume_synced(world, settings);
+        for actor in &mut self.actors {
+            actor.resume_synced(world, settings);
+        }
+    }
+
+    /// This VM's share of the parallel phase.
+    fn parallel_part(&mut self, world: &World, settings: &ScriptSettings) {
+        let ids: Vec<Entity> = self
+            .instances
+            .iter()
+            .filter(|(_, i)| i.enabled && i.started && i.hooks.parallel_update)
+            .map(|(e, _)| *e)
+            .collect();
+        let _lent = lend_world_parallel(&self.lua, world);
+        let time = world.resource::<Time>();
+        for e in ids {
+            let dt = time.delta_for(world.get::<LocalTimeScale>(e)) as f64;
+            let t0 = Instant::now();
+            self.call_parallel(e, dt, settings);
+            if let Some(i) = self.instances.get_mut(&e) {
+                let ms = t0.elapsed().as_secs_f32() * 1000.0;
+                i.ms = i.ms * 0.9 + ms * 0.1;
+            }
+        }
+    }
+
+    /// `self:parallel_update(dt)` on `e`'s instance, in a coroutine so it can
+    /// `task.synchronize()`.
+    fn call_parallel(&mut self, e: Entity, dt: f64, settings: &ScriptSettings) {
+        let Some(i) = self.instances.get(&e) else {
+            return;
+        };
+        let Ok(Value::Table(this)) = self.lua.registry_value::<Value>(&i.this) else {
+            return;
+        };
+        let path = i.path.clone();
+        let Ok(Value::Function(f)) = this.get::<Value>("parallel_update") else {
+            return;
+        };
+        let thread = match self.spare.take() {
+            Some(t) if t.reset(f.clone()).is_ok() => t,
+            _ => match self.lua.create_thread(f) {
+                Ok(t) => t,
+                Err(err) => return self.report(e, &path, &err),
+            },
+        };
+        self.profiler.phase(Phase::Parallel);
+        shared(&self.lua).owner = Some(e);
+        if self.debugger.attached() {
+            self.debugger.prepare(&self.lua, &thread);
+        }
+        self.watchdog.arm(settings.call_limit_ms);
+        let result = thread.resume::<MultiValue>((this, dt));
+        self.watchdog.disarm();
+        self.profiler.settle(&self.lua);
+        shared(&self.lua).owner = None;
+        if let Err(err) = &result
+            && self.debugger.breaks_on_errors()
+        {
+            self.debugger.stop_on_task_error(&self.lua, &thread, err);
+        }
+        match result {
+            Ok(values) if thread.is_resumable() => {
+                let sync = matches!(values.front(), Some(Value::String(s)) if s.to_str().is_ok_and(|s| &*s == "sync"));
+                if sync {
+                    self.synced.push((thread, e, path));
+                } else {
+                    // Like `update`, it runs again next frame, so it can't also wait.
+                    let err = mlua::Error::runtime(
+                        "parallel_update can't wait (it runs again next frame); start a task \
+                         with task.spawn for things that take time",
+                    );
+                    self.report(e, &path, &err);
+                    self.spare = Some(thread);
+                }
+            }
+            Ok(_) => self.spare = Some(thread),
+            Err(err) => {
+                self.report(e, &path, &err);
+                self.spare = Some(thread);
+            }
+        }
+        self.adopt_new_tasks();
+    }
+
+    /// Applies what this VM changed in the parallel phase.
+    fn apply_parallel(&mut self, world: &mut World) {
+        for (owner, message) in apply_deferred(&self.lua, world) {
+            let err = mlua::Error::runtime(message);
+            match owner.and_then(|e| self.instances.get(&e).map(|i| (e, i.path.clone()))) {
+                Some((e, path)) => self.report(e, &path, &err),
+                None => push_error(&self.lua, None, owner, &err.to_string()),
+            }
+        }
+    }
+
+    /// The `parallel_update` calls that called `task.synchronize()` go on, with the world.
+    fn resume_synced(&mut self, world: &mut World, settings: &ScriptSettings) {
+        if self.synced.is_empty() {
+            return;
+        }
+        let _lent = lend_world(&self.lua, world);
+        self.profiler.phase(Phase::Parallel);
+        for (thread, e, path) in std::mem::take(&mut self.synced) {
+            self.resume(thread, Some(e), &path, (), settings);
+            self.adopt_new_tasks();
+        }
+    }
+
+    /// Moves messages to the VM that runs the script they are for (the main VM when none
+    /// does yet).
+    fn route_messages(&mut self) {
+        if self.actors.is_empty() {
+            return;
+        }
+        let mut all = std::mem::take(&mut shared(&self.lua).outbox);
+        for actor in &self.actors {
+            all.append(&mut shared(&actor.lua).outbox);
+        }
+        for m in all {
+            let lua = self
+                .actors
+                .iter()
+                .find(|a| a.instances.contains_key(&m.to))
+                .map_or(&self.lua, |a| &a.lua);
+            shared(lua).outbox.push(m);
+        }
+    }
+
+    /// How many actor VMs to make: `ScriptSettings::parallel_vms`, or by default one fewer than
+    /// the cores (at most 8). None while a debugger was asked for at start, so breakpoints
+    /// reach every script.
+    fn actor_count(settings: &ScriptSettings) -> usize {
+        match settings.parallel_vms {
+            Some(n) => n as usize,
+            None if settings.debug_port.is_some() => 0,
+            None => std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .saturating_sub(1)
+                .clamp(1, 8),
+        }
+    }
+
+    /// The actor VM to run a new `parallel_update` script on (making the actor VMs the first
+    /// time): the one with the fewest instances. `planned` counts those handed out this frame.
+    fn pick_actor(
+        &mut self,
+        world: &World,
+        settings: &ScriptSettings,
+        planned: &mut Vec<usize>,
+    ) -> Option<u32> {
+        if self.role != 0 {
+            return None;
+        }
+        if self.actors.is_empty() {
+            let n = Self::actor_count(settings);
+            if n == 0 {
+                return None;
+            }
+            let api = world
+                .get_resource::<ApiRegistry>()
+                .cloned()
+                .unwrap_or_default();
+            let root = self.root();
+            for k in 1..=n as u32 {
+                match Self::vm(&api, root.clone(), settings, (k, n as u32)) {
+                    Ok(vm) => self.actors.push(vm),
+                    Err(err) => {
+                        tracing::warn!(target: "script", "actor VM {k} could not start: {err}");
+                        break;
+                    }
+                }
+            }
+            if self.actors.is_empty() {
+                return None;
+            }
+            tracing::info!(target: "script", "{} actor VMs run parallel_update", self.actors.len());
+        }
+        planned.resize(self.actors.len(), 0);
+        let k =
+            (0..self.actors.len()).min_by_key(|&k| self.actors[k].instances.len() + planned[k])?;
+        planned[k] += 1;
+        Some(k as u32 + 1)
+    }
+
+    /// The VM (0: main) that runs the script on an entity with this [`ScriptActor`].
+    fn vm_of(&self, actor: Option<&ScriptActor>) -> u32 {
+        let n = match self.role {
+            0 => self.actors.len() as u32,
+            _ => self.peers,
+        };
+        match actor {
+            Some(a) if a.0 > 0 && n > 0 => (a.0 - 1) % n + 1,
+            _ => 0,
+        }
+    }
+
+    /// The fixed-step hook (`FixedUpdate`, `SimSet::Gameplay`), in every VM.
     pub(crate) fn run_fixed(&mut self, world: &mut World, settings: &ScriptSettings) {
+        self.run_fixed_here(world, settings);
+        for actor in &mut self.actors {
+            actor.run_fixed_here(world, settings);
+        }
+    }
+
+    fn run_fixed_here(&mut self, world: &mut World, settings: &ScriptSettings) {
         let world_ptr: *mut World = world;
         let _lent = lend_world(&self.lua, world_ptr);
         let fixed: Vec<Entity> = self
@@ -437,14 +842,26 @@ impl ScriptRuntime {
 
     /// True when any instance keeps world positions of its own (`on_world_shift`).
     pub(crate) fn wants_world_shift(&self) -> bool {
-        self.instances
-            .values()
+        self.vms()
+            .flat_map(|v| v.instances.values())
             .any(|i| i.started && i.hooks.on_world_shift)
     }
 
     /// The world moved to a new frame: `on_world_shift(shift)` on every script that has it, so
     /// positions it keeps follow (`WorldShiftSet::Apply`, before the next frame's scripts).
     pub(crate) fn world_shift(
+        &mut self,
+        world: &mut World,
+        shift: engine_world::WorldShift,
+        settings: &ScriptSettings,
+    ) {
+        self.world_shift_here(world, shift, settings);
+        for actor in &mut self.actors {
+            actor.world_shift_here(world, shift, settings);
+        }
+    }
+
+    fn world_shift_here(
         &mut self,
         world: &mut World,
         shift: engine_world::WorldShift,
@@ -464,7 +881,9 @@ impl ScriptRuntime {
 
     /// True when any instance wants the fixed-step hook.
     pub(crate) fn wants_fixed(&self) -> bool {
-        self.instances.values().any(|i| i.hooks.fixed_update)
+        self.vms()
+            .flat_map(|v| v.instances.values())
+            .any(|i| i.hooks.fixed_update)
     }
 
     /// Each instance's clock: world seconds times its entity's `LocalTimeScale` (real seconds
@@ -482,18 +901,26 @@ impl ScriptRuntime {
 
     fn sync_instances(&mut self, world: &mut World, settings: &ScriptSettings) {
         let this_run = world.change_tick();
-        let mut seen: Vec<(Entity, Option<Script>, Tick)> = Vec::new();
+        let mut seen: Vec<(Entity, Option<Script>, Tick, bool)> = Vec::new();
         {
-            let mut q = world.query::<(Entity, Ref<Script>)>();
-            for (e, s) in q.iter(world) {
+            let mut q = world.query::<(Entity, Ref<Script>, Option<&ScriptActor>)>();
+            for (e, s, actor) in q.iter(world) {
+                if self.vm_of(actor) != self.role {
+                    continue;
+                }
                 let changed = match self.instances.get(&e) {
                     None => true,
                     Some(i) => s.last_changed().is_newer_than(i.synced, this_run),
                 };
-                seen.push((e, changed.then(|| Script::clone(&s)), s.last_changed()));
+                seen.push((
+                    e,
+                    changed.then(|| Script::clone(&s)),
+                    s.last_changed(),
+                    actor.is_some(),
+                ));
             }
         }
-        let live: std::collections::HashSet<Entity> = seen.iter().map(|(e, _, _)| *e).collect();
+        let live: std::collections::HashSet<Entity> = seen.iter().map(|(e, _, _, _)| *e).collect();
         let gone: Vec<Entity> = self
             .instances
             .keys()
@@ -503,9 +930,20 @@ impl ScriptRuntime {
         for e in gone {
             self.destroy_instance(e, settings);
         }
-        for (e, script, tick) in seen {
+        let mut planned = Vec::new();
+        for (e, script, tick, placed) in seen {
             let Some(script) = script else { continue };
             let path = normalize(&script.path);
+            // A new `parallel_update` script goes to an actor VM (unless placed already).
+            if self.role == 0
+                && !placed
+                && !self.instances.contains_key(&e)
+                && self.hooks_of(&path).is_some_and(|h| h.parallel_update)
+                && let Some(k) = self.pick_actor(world, settings, &mut planned)
+            {
+                world.entity_mut(e).insert(ScriptActor(k));
+                continue;
+            }
             match self.instances.get(&e) {
                 Some(i) if i.path == path => {
                     let props_changed = self.update_props(e, &script);
@@ -524,6 +962,17 @@ impl ScriptRuntime {
                 None => self.create_instance(e, &script, tick, settings),
             }
         }
+    }
+
+    /// The hooks of the script at `path`, loading it if it isn't yet; None if it doesn't load.
+    fn hooks_of(&self, path: &str) -> Option<Hooks> {
+        let loaded = self
+            .files()
+            .map
+            .get(path)
+            .filter(|f| f.value.is_some())
+            .map(|f| f.hooks);
+        loaded.or_else(|| load_file(&self.lua, &self.watchdog, path, FileKind::Script).ok())
     }
 
     /// Makes `self` for a script on `e` and starts it.
@@ -698,8 +1147,20 @@ impl ScriptRuntime {
         }
     }
 
-    /// Restarts the script on `e` from scratch (fresh `self`, `start` again).
+    /// Restarts the script on `e` from scratch (fresh `self`, `start` again), in the VM that
+    /// runs it.
     pub(crate) fn restart(&mut self, world: &mut World, e: Entity, settings: &ScriptSettings) {
+        if let Some(actor) = self
+            .actors
+            .iter_mut()
+            .find(|a| a.instances.contains_key(&e))
+        {
+            return actor.restart_here(world, e, settings);
+        }
+        self.restart_here(world, e, settings);
+    }
+
+    fn restart_here(&mut self, world: &mut World, e: Entity, settings: &ScriptSettings) {
         let world_ptr: *mut World = world;
         let _lent = lend_world(&self.lua, world_ptr);
         // From the file as it is now, even if the poller hasn't seen an edit yet.
@@ -1055,6 +1516,41 @@ impl ScriptRuntime {
         }
     }
 
+    /// Reloads `paths` (every loaded file when empty) in every VM that loaded them. Returns
+    /// the paths.
+    pub(crate) fn reload_all(
+        &mut self,
+        world: &mut World,
+        paths: Vec<String>,
+        settings: &ScriptSettings,
+    ) -> Vec<String> {
+        let paths = if paths.is_empty() {
+            let mut all: Vec<String> = self
+                .vms()
+                .flat_map(|v| v.files().map.keys().cloned().collect::<Vec<_>>())
+                .collect();
+            all.sort();
+            all.dedup();
+            all
+        } else {
+            paths
+        };
+        let world_ptr: *mut World = world;
+        let reload = |vm: &mut ScriptRuntime| {
+            let _lent = lend_world(&vm.lua, world_ptr);
+            for p in &paths {
+                if vm.files().map.contains_key(p) || vm.role == 0 {
+                    vm.reload(p, settings, true);
+                }
+            }
+        };
+        reload(self);
+        for a in &mut self.actors {
+            reload(a);
+        }
+        paths
+    }
+
     /// Reloads one file (and what depends on it). `force` reloads even when the text is the
     /// same.
     pub(crate) fn reload(&mut self, path: &str, settings: &ScriptSettings, force: bool) {
@@ -1275,13 +1771,17 @@ impl ScriptRuntime {
             .map
             .iter()
             .map(|(path, f)| {
-                let users = self.instances.values().filter(|i| i.path == *path).count();
+                let users: usize = self
+                    .vms()
+                    .map(|v| v.instances.values().filter(|i| i.path == *path).count())
+                    .sum();
+                let fault = f.fault.clone().or_else(|| self.fault_of(path));
                 serde_json::json!({
                     "path": path,
                     "kind": match f.kind { FileKind::Script => "script", FileKind::Module => "module" },
                     "version": f.version,
                     "error": f.error,
-                    "fault": f.fault.as_ref().map(|x| serde_json::json!({
+                    "fault": fault.map(|x| serde_json::json!({
                         "line": x.line, "message": x.message, "count": x.count,
                     })),
                     "instances": users,
@@ -1289,20 +1789,22 @@ impl ScriptRuntime {
             })
             .collect();
         let instances: Vec<serde_json::Value> = self
-            .instances
-            .iter()
-            .map(|(e, i)| {
-                serde_json::json!({
-                    "entity": e.to_bits(),
-                    "name": world.get::<Name>(*e).map(|n| n.as_str().to_string()),
-                    "path": i.path,
-                    "enabled": i.enabled,
-                    "running": i.started,
-                    "clock_secs": i.clock,
-                    "ms": i.ms,
-                    "errors": i.errors,
-                    "last_error": i.last_error,
-                    "tasks": self.tasks.iter().filter(|t| t.owner == Some(*e)).count(),
+            .vms()
+            .flat_map(|v| {
+                v.instances.iter().map(move |(e, i)| {
+                    serde_json::json!({
+                        "entity": e.to_bits(),
+                        "name": world.get::<Name>(*e).map(|n| n.as_str().to_string()),
+                        "path": i.path,
+                        "vm": v.role,
+                        "enabled": i.enabled,
+                        "running": i.started,
+                        "clock_secs": i.clock,
+                        "ms": i.ms,
+                        "errors": i.errors,
+                        "last_error": i.last_error,
+                        "tasks": v.tasks.iter().filter(|t| t.owner == Some(*e)).count(),
+                    })
                 })
             })
             .collect();
@@ -1310,10 +1812,12 @@ impl ScriptRuntime {
             "root": files.root.display().to_string(),
             "files": file_list,
             "instances": instances,
-            "tasks": self.tasks.len(),
+            "tasks": self.task_count(),
+            "vms": self.vm_count(),
             "frame_ms": self.frame_ms,
+            "parallel_ms": self.parallel_ms,
             "reloads": self.reloads,
-            "memory_kb": self.lua.used_memory() / 1024,
+            "memory_kb": self.used_memory() / 1024,
         })
     }
 }
@@ -1333,12 +1837,15 @@ fn wait_secs(values: &MultiValue) -> f64 {
 }
 
 /// A new global table for one script: reads fall through to the shared (read-only) globals,
-/// writes stay in the script.
+/// writes stay in the script. It is marked safe, like the sandbox's own thread globals: Luau then
+/// resolves `math.sin` and the like once and calls built-ins on its fast path (about 2x faster
+/// for `math`; the compiler leaves out any built-in a file assigns to itself).
 fn script_env(lua: &Lua) -> mlua::Result<Table> {
     let env = lua.create_table()?;
     let meta = lua.create_table()?;
     meta.raw_set("__index", lua.globals())?;
     env.set_metatable(Some(meta))?;
+    env.set_safeenv(true);
     Ok(env)
 }
 
@@ -1623,6 +2130,10 @@ fn install_tasks(lua: &Lua) -> mlua::Result<()> {
             });
             Ok(thread)
         })?,
+    )?;
+    g.set(
+        "__script_parallel",
+        lua.create_function(|lua, ()| Ok(crate::access::in_parallel(lua)))?,
     )?;
     g.set(
         "__task_cancel",

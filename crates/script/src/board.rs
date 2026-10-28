@@ -755,7 +755,8 @@ pub(crate) fn draw_boards(
                     f.source.clone(),
                     f.version,
                     f.error.clone(),
-                    f.fault.clone(),
+                    // Raised in whichever VM runs the script.
+                    f.fault.clone().or_else(|| rt.fault_of(&path)),
                 )
             })
         });
@@ -766,7 +767,7 @@ pub(crate) fn draw_boards(
             .unwrap_or_default();
         let (heat_version, heat) = runtime
             .as_ref()
-            .map(|rt| crate::profiler::line_heat(&rt.lua, &path))
+            .map(|rt| crate::profiler::line_heat(&rt.luas(), &path))
             .unwrap_or_default();
         // A file no script runs yet is read from disk (a few times a second).
         let (source, version, error, fault) = match loaded {
@@ -1005,6 +1006,7 @@ mod tests {
             samples: 1000,
             script_ms: 10.0,
             frames: 300,
+            vms: 1,
         };
         let mut font = BoardFont::load(None);
         let board = ProfileBoard {
@@ -1200,6 +1202,17 @@ fn draw_profile(
             format!("● recording · {:.1} s · {khz}", summary.seconds),
             VALUE,
         )
+    } else if summary.vms > 1 {
+        // Summed over VMs that ran side by side: CPU time, not frame time.
+        (
+            format!(
+                "● {:.1} s · {} VMs · {:.2} ms of script CPU per frame",
+                summary.seconds,
+                summary.vms,
+                summary.ms_per_frame()
+            ),
+            OK,
+        )
     } else {
         (
             format!(
@@ -1307,7 +1320,7 @@ pub(crate) fn draw_profile_boards(
     }
     let ProfileBoards { drawn, font } = &mut *state;
     drawn.retain(|e, _| boards.contains(*e));
-    let shown = crate::profiler::shown(&runtime.lua);
+    let shown = crate::profiler::shown(&runtime.luas());
     let mut profile = None;
     let mut lines = None;
     let mut live = None;
@@ -1319,9 +1332,9 @@ pub(crate) fn draw_profile_boards(
             continue;
         }
         let rt = &*runtime;
-        let profile =
-            profile.get_or_insert_with(|| crate::profiler::flame(&rt.lua, rt.profiler.recording()));
-        let lines = lines.get_or_insert_with(|| crate::profiler::hot_lines(&rt.lua, 6));
+        let profile = profile
+            .get_or_insert_with(|| crate::profiler::flame(&rt.luas(), rt.profile_recording()));
+        let lines = lines.get_or_insert_with(|| crate::profiler::hot_lines(&rt.luas(), 6));
         let font = font.get_or_insert_with(|| BoardFont::load(server.as_ref().map(|s| s.root())));
         let pictures = draw_profile(board, font, profile.as_ref(), lines);
         let (image, glow) = show(
@@ -1334,9 +1347,8 @@ pub(crate) fn draw_profile_boards(
         drawn.insert(e, (shown, image, glow, board.clone()));
     }
     if let Some((hz, secs)) = live
-        && runtime.profiler.idle_for_boards(&runtime.lua)
+        && runtime.profile_idle_for_boards()
     {
-        let rt = &mut *runtime;
-        rt.profiler.start(&rt.lua, hz, secs.max(1.0) as f64, true);
+        runtime.profile_start(hz, secs.max(1.0) as f64, true);
     }
 }

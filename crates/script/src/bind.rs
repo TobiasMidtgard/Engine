@@ -15,7 +15,7 @@ use engine_core::registry::{ApiFn, ApiRegistry, unknown_name_error};
 use engine_input::ActionState;
 use mlua::{Function, Lua, MultiValue, Table, Value, Variadic};
 
-use crate::access::{push_log, with_world, with_world_as};
+use crate::access::{push_log, read_world_as, with_world_as};
 use crate::convert::{to_json, to_lua};
 
 /// Registry name of the hidden cache of resolved functions and sub-namespaces.
@@ -61,7 +61,7 @@ fn namespace(lua: &Lua, prefix: &str, names: &Names, table: Option<Table>) -> ml
                 return cache.raw_get::<Value>(full.as_str());
             }
             if names.0.contains(&full) {
-                let func = with_world(lua, |w| {
+                let func = read_world_as(lua, "api lookup", |w| {
                     w.resource::<ApiRegistry>()
                         .get(&full)
                         .map(|e| e.func.clone())
@@ -108,7 +108,7 @@ pub fn install(lua: &Lua, api: &ApiRegistry) -> mlua::Result<()> {
     input.set(
         "pressed",
         lua.create_function(|lua, action: String| {
-            with_world_as(lua, "input.pressed", |w| {
+            read_world_as(lua, "input.pressed", |w| {
                 Ok(actions(w).is_some_and(|a| a.pressed(&action)))
             })
         })?,
@@ -116,7 +116,7 @@ pub fn install(lua: &Lua, api: &ApiRegistry) -> mlua::Result<()> {
     input.set(
         "just_pressed",
         lua.create_function(|lua, action: String| {
-            with_world_as(lua, "input.just_pressed", |w| {
+            read_world_as(lua, "input.just_pressed", |w| {
                 Ok(actions(w).is_some_and(|a| a.just_pressed(&action)))
             })
         })?,
@@ -124,7 +124,7 @@ pub fn install(lua: &Lua, api: &ApiRegistry) -> mlua::Result<()> {
     input.set(
         "just_released",
         lua.create_function(|lua, action: String| {
-            with_world_as(lua, "input.just_released", |w| {
+            read_world_as(lua, "input.just_released", |w| {
                 Ok(actions(w).is_some_and(|a| a.just_released(&action)))
             })
         })?,
@@ -132,7 +132,7 @@ pub fn install(lua: &Lua, api: &ApiRegistry) -> mlua::Result<()> {
     input.set(
         "value",
         lua.create_function(|lua, action: String| {
-            with_world_as(lua, "input.value", |w| {
+            read_world_as(lua, "input.value", |w| {
                 Ok(actions(w).map(|a| a.value(&action)).unwrap_or(0.0))
             })
         })?,
@@ -140,7 +140,7 @@ pub fn install(lua: &Lua, api: &ApiRegistry) -> mlua::Result<()> {
     input.set(
         "stick",
         lua.create_function(|lua, action: String| {
-            with_world_as(lua, "input.stick", |w| {
+            read_world_as(lua, "input.stick", |w| {
                 let v = actions(w).map(|a| a.axis(&action)).unwrap_or_default();
                 Ok((v.x, v.y))
             })
@@ -182,7 +182,7 @@ pub fn install(lua: &Lua, api: &ApiRegistry) -> mlua::Result<()> {
     g.raw_set(
         "api",
         lua.create_function(|lua, (name, args): (String, Variadic<Value>)| {
-            let func = with_world(lua, |w| {
+            let func = read_world_as(lua, "api lookup", |w| {
                 let reg = w.resource::<ApiRegistry>();
                 reg.get(&name).map(|e| e.func.clone()).ok_or_else(|| {
                     mlua::Error::runtime(unknown_name_error(

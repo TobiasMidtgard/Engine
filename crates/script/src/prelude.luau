@@ -8,6 +8,7 @@ local spawn_task = __task_spawn
 local delay_task = __task_delay
 local cancel_task = __task_cancel
 local stopped = __script_stopped
+local in_parallel = __script_parallel
 
 -- A script the time limit stopped stays stopped: catching the stop (pcall in a loop) would
 -- otherwise let an endless loop run on forever, so these pass it on.
@@ -54,6 +55,15 @@ end
 -- Runs `f(...)` as a new task at the end of this frame's script work.
 function task.defer(f: (...any) -> ...any, ...: any): thread
 	return delay_task(0, f, ...)
+end
+
+-- In `parallel_update`: the rest of it runs after the parallel part of the frame, one script
+-- at a time with the whole world (engine calls, spawning, reading what others changed).
+-- Elsewhere it does nothing.
+function task.synchronize()
+	if in_parallel() then
+		yield("sync")
+	end
 end
 
 -- Stops a task started with spawn, delay or defer.

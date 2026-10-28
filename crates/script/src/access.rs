@@ -4,27 +4,52 @@
 //! it to the Lua VM as a pointer in the VM's app data ([`lend_world`]). Callbacks
 //! ([`with_world`]) borrow it for the length of one engine call. Outside the runner the pointer
 //! is absent and callbacks fail with a plain error instead of touching freed memory.
+//!
+//! In the parallel phase (`parallel_update`, several VMs at once) each VM gets the world shared
+//! and read-only ([`lend_world_parallel`]): reads ([`read_world_as`]) work as always, changes
+//! ([`write_world_as`], [`edit_transform_as`]) are queued and applied right after the phase, in
+//! a fixed order, and anything else ([`with_world_as`]) fails with a hint to call
+//! `task.synchronize()` first.
 
 use std::cell::Cell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::c_int;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use bevy_ecs::prelude::*;
+use engine_core::prelude::Transform;
 use mlua::{Lua, RegistryKey, Thread, ffi};
 
 /// The world, lent to the VM while scripts run.
-struct WorldPtr(*mut World);
+struct WorldPtr {
+    ptr: *mut World,
+    /// Lent shared, for the parallel phase: reads only, changes are queued.
+    parallel: bool,
+}
 
-// SAFETY: the pointer is only set while the runner holds `&mut World` on this thread and is
-// removed before it returns ([`LentWorld`]'s drop); the VM itself never leaves the runner.
+// SAFETY: the pointer is only set while the runner holds the world (`&mut` in the serial
+// phases on the runner's thread; `&` shared by every VM in the parallel phase, when nothing
+// writes to it) and is removed before the runner gives it back ([`LentWorld`]'s drop).
 unsafe impl Send for WorldPtr {}
 
 /// Lends `world` to the VM until the guard drops.
 pub(crate) fn lend_world(lua: &Lua, world: *mut World) -> LentWorld {
-    lua.set_app_data(WorldPtr(world));
+    lua.set_app_data(WorldPtr {
+        ptr: world,
+        parallel: false,
+    });
+    LentWorld { lua: lua.clone() }
+}
+
+/// Lends `world` for the parallel phase: read-only and shared with the other VMs running at the
+/// same time; changes go to the VM's [`Deferred`] queue.
+pub(crate) fn lend_world_parallel(lua: &Lua, world: &World) -> LentWorld {
+    lua.set_app_data(WorldPtr {
+        ptr: world as *const World as *mut World,
+        parallel: true,
+    });
     LentWorld { lua: lua.clone() }
 }
 
@@ -40,6 +65,22 @@ impl Drop for LentWorld {
     }
 }
 
+/// The VM runs `parallel_update` now (the world is shared and read-only).
+pub(crate) fn in_parallel(lua: &Lua) -> bool {
+    lua.app_data_ref::<WorldPtr>().is_some_and(|p| p.parallel)
+}
+
+fn lent(lua: &Lua) -> mlua::Result<(*mut World, bool)> {
+    lua.app_data_ref::<WorldPtr>()
+        .map(|p| (p.ptr, p.parallel))
+        .ok_or_else(|| {
+            mlua::Error::runtime(
+                "the world can only be used while scripts run (in start, update, events and \
+                 tasks)",
+            )
+        })
+}
+
 /// Runs `f` with the world the runner lent. Fails outside the runner (a callback kept and called
 /// later from somewhere else).
 pub(crate) fn with_world<R>(
@@ -50,22 +91,186 @@ pub(crate) fn with_world<R>(
 }
 
 /// [`with_world`] for an engine call scripts make, named `label` in the profiler
-/// (`"e:set"`, `"fire.ignite"`).
+/// (`"e:set"`, `"fire.ignite"`). Not in the parallel phase: it fails there, pointing to
+/// `task.synchronize()`.
 pub(crate) fn with_world_as<R>(
     lua: &Lua,
     label: &str,
     f: impl FnOnce(&mut World) -> mlua::Result<R>,
 ) -> mlua::Result<R> {
-    let ptr = lua.app_data_ref::<WorldPtr>().map(|p| p.0).ok_or_else(|| {
-        mlua::Error::runtime(
-            "the world can only be used while scripts run (in start, update, events and tasks)",
-        )
-    })?;
+    let (ptr, parallel) = lent(lua)?;
+    if parallel {
+        return Err(mlua::Error::runtime(format!(
+            "{label} can't run in parallel_update, where scripts run side by side and only read \
+             the world; call task.synchronize() first (the rest of parallel_update then runs \
+             after the parallel part), or do it in update"
+        )));
+    }
     // SAFETY: see `WorldPtr`. The runner doesn't touch the world while the VM runs, and every
     // callback's borrow ends before it returns to Lua, so no two borrows overlap.
     let out = f(unsafe { &mut *ptr });
     crate::profiler::after_engine_call(lua, label);
     out
+}
+
+/// Reads the world: in every phase, the parallel one included.
+pub(crate) fn read_world_as<R>(
+    lua: &Lua,
+    label: &str,
+    f: impl FnOnce(&World) -> mlua::Result<R>,
+) -> mlua::Result<R> {
+    let (ptr, _) = lent(lua)?;
+    // SAFETY: see `WorldPtr`: shared reads only, while nothing writes (in the parallel phase
+    // all changes are queued; in the serial phases only this thread uses the world).
+    let out = f(unsafe { &*ptr });
+    crate::profiler::after_engine_call(lua, label);
+    out
+}
+
+/// Changes the world: now in the serial phases; in the parallel phase queued and applied right
+/// after it (the VM's changes in the order made, VM after VM).
+pub(crate) fn write_world_as(
+    lua: &Lua,
+    label: &'static str,
+    f: impl FnOnce(&mut World) -> mlua::Result<()> + Send + 'static,
+) -> mlua::Result<()> {
+    let (_, parallel) = lent(lua)?;
+    if !parallel {
+        return with_world_as(lua, label, f);
+    }
+    let owner = shared(lua).owner;
+    deferred(lua).writes.push(DeferredWrite {
+        owner,
+        label,
+        run: Box::new(f),
+    });
+    Ok(())
+}
+
+/// `e`'s own `Transform`, as the running script sees it: in the parallel phase, with the
+/// changes this script made to it, and otherwise as the phase began (so what a script sees
+/// doesn't depend on which VM ran which script first).
+pub(crate) fn read_transform_as(lua: &Lua, label: &str, e: Entity) -> mlua::Result<Transform> {
+    let owner = lua.app_data_ref::<Shared>().and_then(|s| s.owner);
+    if let Some(t) = lua.app_data_ref::<Deferred>().and_then(|d| {
+        d.index
+            .get(&e)
+            .map(|&i| &d.transforms[i])
+            .filter(|(_, _, by)| *by == owner)
+            .map(|(_, t, _)| *t)
+    }) {
+        return Ok(t);
+    }
+    read_world_as(lua, label, |w| transform_of(w, e))
+}
+
+/// Edits `e`'s `Transform` (adding one if it has none): now, or in the parallel phase on this
+/// VM's copy, which later reads see and which is written back after the phase.
+pub(crate) fn edit_transform_as(
+    lua: &Lua,
+    label: &str,
+    e: Entity,
+    f: impl FnOnce(&mut Transform),
+) -> mlua::Result<()> {
+    let (_, parallel) = lent(lua)?;
+    if !parallel {
+        return with_world_as(lua, label, |w| edit_transform(w, e, f));
+    }
+    let mut t = read_transform_as(lua, label, e)?;
+    f(&mut t);
+    let owner = shared(lua).owner;
+    let mut d = deferred(lua);
+    match d.index.get(&e) {
+        Some(&i) => d.transforms[i] = (e, t, owner),
+        None => {
+            let i = d.transforms.len();
+            d.transforms.push((e, t, owner));
+            d.index.insert(e, i);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn missing(e: Entity) -> mlua::Error {
+    mlua::Error::runtime(format!(
+        "entity {e} no longer exists (check entity:exists() before using a kept handle)"
+    ))
+}
+
+pub(crate) fn transform_of(world: &World, e: Entity) -> mlua::Result<Transform> {
+    if world.get_entity(e).is_err() {
+        return Err(missing(e));
+    }
+    Ok(world.get::<Transform>(e).copied().unwrap_or_default())
+}
+
+pub(crate) fn edit_transform(
+    world: &mut World,
+    e: Entity,
+    f: impl FnOnce(&mut Transform),
+) -> mlua::Result<()> {
+    let mut ent = world.get_entity_mut(e).map_err(|_| missing(e))?;
+    match ent.get_mut::<Transform>() {
+        Some(mut t) => f(&mut t),
+        None => {
+            let mut t = Transform::default();
+            f(&mut t);
+            ent.insert(t);
+        }
+    }
+    Ok(())
+}
+
+/// A world change queued in the parallel phase.
+pub(crate) type WorldWrite = Box<dyn FnOnce(&mut World) -> mlua::Result<()> + Send>;
+
+/// A change a script made in the parallel phase, applied after it.
+pub(crate) struct DeferredWrite {
+    /// The script instance that made it (its errors are reported as its own).
+    pub owner: Option<Entity>,
+    pub label: &'static str,
+    pub run: WorldWrite,
+}
+
+/// What one VM changed in the parallel phase: `Transform`s (with the script that changed each
+/// last, which alone sees the change before it is applied) and other changes in the order
+/// made.
+#[derive(Default)]
+pub(crate) struct Deferred {
+    pub transforms: Vec<(Entity, Transform, Option<Entity>)>,
+    index: HashMap<Entity, usize>,
+    pub writes: Vec<DeferredWrite>,
+}
+
+fn deferred(lua: &Lua) -> mlua::AppDataRefMut<'_, Deferred> {
+    if lua.app_data_ref::<Deferred>().is_none() {
+        lua.set_app_data(Deferred::default());
+    }
+    lua.app_data_mut::<Deferred>()
+        .expect("the deferred queue was just made")
+}
+
+/// Applies what the VM queued in the parallel phase: its `Transform`s first, then its other
+/// changes in order. Returns the failures, by script instance.
+pub(crate) fn apply_deferred(lua: &Lua, world: &mut World) -> Vec<(Option<Entity>, String)> {
+    let Some(d) = lua.remove_app_data::<Deferred>() else {
+        return Vec::new();
+    };
+    let mut failed = Vec::new();
+    for (e, t, by) in d.transforms {
+        if let Err(err) = edit_transform(world, e, |old| *old = t) {
+            failed.push((by, format!("moving {e} (after parallel_update): {err}")));
+        }
+    }
+    for w in d.writes {
+        if let Err(err) = (w.run)(world) {
+            failed.push((
+                w.owner,
+                format!("{} (after parallel_update): {err}", w.label),
+            ));
+        }
+    }
+    failed
 }
 
 /// A coroutine started by `task.spawn`/`task.delay` (or a script's `start`) and not yet
