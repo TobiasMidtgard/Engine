@@ -998,6 +998,40 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                     "Parked spaceplane",
                     vec![("input.press", serde_json::json!({"action": "ascend"}))],
                 ),
+                // Cruise (J) from 15 km over the spaceport, nose 30° up and the lever full
+                // (Shift): the speed grows with the height, 50-odd km up a few seconds on.
+                DemoView::new(
+                    "spaceport_cruise",
+                    "Spaceplane in cruise, climbing out of the atmosphere",
+                    [58.0, 15_004.0, -20.0],
+                    [58.0, 15_000.0, -45.0],
+                )
+                .at(17.0, 3.5)
+                .call(
+                    "vehicles.place",
+                    serde_json::json!({
+                        "vehicle": "Parked spaceplane",
+                        "at": abs(58.0, 15_000.0, -45.0),
+                        "on_ground": false,
+                        "yaw_deg": 0.0,
+                        "pitch_deg": 30.0,
+                        "velocity": [0.0, 300.0, -520.0],
+                    }),
+                )
+                .call(
+                    "vehicles.control",
+                    serde_json::json!({"vehicle": "Parked spaceplane", "gear": "up"}),
+                )
+                .drive(
+                    "Parked spaceplane",
+                    vec![
+                        (
+                            "vehicles.cruise",
+                            serde_json::json!({"vehicle": "Parked spaceplane", "on": true}),
+                        ),
+                        ("input.press", serde_json::json!({"action": "sprint"})),
+                    ],
+                ),
             ]
         }
         _ => Vec::new(),
@@ -1039,6 +1073,10 @@ mod tests {
                         }
                         "vehicles.board" => {
                             assert!(args["vehicle"].is_string(), "{}", v.key);
+                            None
+                        }
+                        "vehicles.cruise" => {
+                            assert!(args["on"].is_boolean(), "{}", v.key);
                             None
                         }
                         "input.axis" | "input.press" => {

@@ -385,6 +385,13 @@ pub(crate) fn get_out(world: &mut World, vehicle: Entity, force: bool, stay: boo
         return;
     };
     let b = world.get::<Boardable>(vehicle).copied();
+    // Cruising: only a forced exit (a script, the tour), and it drops back into physics first.
+    if world.get::<Cruise>(vehicle).is_some() {
+        if !force {
+            return;
+        }
+        crate::cruise::drop_out(world, vehicle);
+    }
     if world.get_entity(driven.actor).is_ok() {
         // Moving: stay in.
         if !force && speed(world, vehicle) > BOARD_SPEED {
