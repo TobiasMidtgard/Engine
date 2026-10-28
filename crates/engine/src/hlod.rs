@@ -6,9 +6,13 @@
 //! its still meshes ([`MeshRenderer`] without a moving body above them) are gathered on the main
 //! thread and merged on a worker by vertex clustering (Rossignac and Borrel's simplification: snap
 //! corners to a grid, merge what lands in one grid cell, drop the triangles that collapse),
-//! coarsening the grid until it fits [`HlodSettings::triangles`]. Colors come from each mesh's
-//! material (its base color, times its texture's or preset's mean albedo) into the vertices, so
-//! one plain material draws every proxy in one go. A proxy shows wherever its cell is out (up to
+//! coarsening the grid until it fits [`HlodSettings::triangles`]. Each corner's color is what
+//! the loaded mesh shows from afar: its vertex color times its material's base color, its
+//! texture's mean albedo (or its preset's) and part of its occlusion map's mean, averaged by area
+//! over the corners merged into it; it goes into the proxy's vertices, so one plain material
+//! draws every proxy in one go. Texture means are taken while the images still have their
+//! pixels ([`ImageMeans`]): the renderer frees uploaded pixels after a couple of seconds, long
+//! before most cells are captured. A proxy shows wherever its cell is out (up to
 //! [`HlodSettings::draw_m`]); when the cell comes back its meshes fade in over the proxy with the
 //! complementary dither ([`DitherFade::pair`]), and the proxy goes.
 //!
@@ -93,6 +97,50 @@ impl Default for ProxyConfig {
 pub struct HlodProxy(pub CellId);
 
 /// Each cell's proxy, in the order of [`StreamedCells::cells`].
+/// Linear mean color of every image, taken while it still has its pixels, by slot: (the slot's
+/// generation, the asset version it was taken from, the mean).
+#[derive(Resource, Default)]
+pub struct ImageMeans {
+    means: HashMap<u32, (Option<u32>, u64, Vec4)>,
+    /// `Assets::<Image>::latest_version` the last full pass saw.
+    seen: u64,
+    /// Where an unfinished pass goes on.
+    cursor: usize,
+}
+
+impl ImageMeans {
+    /// The mean of `h`'s image, if one was taken for this asset.
+    pub fn get(&self, h: Handle<Image>) -> Option<Vec4> {
+        let (generation, _, mean) = self.means.get(&h.index())?;
+        (h.generation().is_none() || h.generation() == *generation).then_some(*mean)
+    }
+
+    /// Takes the means of new and changed images until `deadline`.
+    fn refresh(&mut self, images: &Assets<Image>, deadline: Instant) {
+        let latest = images.latest_version();
+        if latest == self.seen && self.cursor == 0 {
+            return;
+        }
+        for (n, (h, img)) in images.iter().enumerate().skip(self.cursor) {
+            if Instant::now() > deadline {
+                self.cursor = n;
+                return;
+            }
+            let version = images.version(h);
+            let fresh = self
+                .means
+                .get(&h.index())
+                .is_some_and(|(g, v, _)| *g == h.generation() && *v == version);
+            if !fresh && !img.is_released() {
+                self.means
+                    .insert(h.index(), (h.generation(), version, mean_of(img)));
+            }
+        }
+        self.cursor = 0;
+        self.seen = latest;
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct Proxies {
     slots: Vec<ProxySlot>,
@@ -144,6 +192,7 @@ pub(crate) fn register(app: &mut App) {
     use engine_world::shift::WorldShiftAppExt;
     app.init_resource::<HlodSettings>()
         .init_resource::<Proxies>()
+        .init_resource::<ImageMeans>()
         .shift_resource::<Proxies>()
         .register_api(
             "stream.proxies",
@@ -188,6 +237,12 @@ pub(crate) fn update(
         && world.contains_resource::<Assets<Image>>();
     if !settings.enabled || !drawable {
         return;
+    }
+    {
+        let deadline = Instant::now() + std::time::Duration::from_micros(500);
+        let mut means = world.remove_resource::<ImageMeans>().unwrap_or_default();
+        means.refresh(world.resource::<Assets<Image>>(), deadline);
+        world.insert_resource(means);
     }
     let cells: Vec<(String, DVec3, CellState)> = world
         .resource::<StreamedCells>()
@@ -332,9 +387,10 @@ fn proxy_material(world: &mut World) -> Handle<StandardMaterial> {
     handle
 }
 
-/// One still mesh of a cell: corners and triangles shared by its instances.
+/// One still mesh of a cell: corners, their colors and triangles shared by its instances.
 struct Source {
     positions: Vec<Vec3>,
+    colors: Vec<Vec3>,
     indices: Vec<u32>,
 }
 
@@ -544,6 +600,7 @@ impl Gather {
         let meshes = world.resource::<Assets<Mesh>>();
         let materials = world.resource::<Assets<StandardMaterial>>();
         let images = world.resource::<Assets<Image>>();
+        let means = world.get_resource::<ImageMeans>();
         let inverse = self.frame.rotation.inverse();
         // Skips what moves (a body that isn't static, or anything with a velocity) together
         // with everything under it.
@@ -590,6 +647,11 @@ impl Gather {
                     // Copied once per mesh, corners only; instances share it.
                     let take = |m: &Mesh| Source {
                         positions: m.vertices.iter().map(|v| Vec3::from(v.position)).collect(),
+                        colors: m
+                            .vertices
+                            .iter()
+                            .map(|v| Vec3::new(v.color[0], v.color[1], v.color[2]))
+                            .collect(),
                         indices: m.indices.clone(),
                     };
                     let source = match &renderer.mesh {
@@ -619,27 +681,39 @@ impl Gather {
             self.instances.push(Instance {
                 source,
                 matrix,
-                color: material.map_or(Vec4::splat(0.5), |m| albedo(m, images)),
+                color: material.map_or(Vec4::splat(0.5), |m| albedo(m, images, means)),
             });
         }
         true
     }
 }
 
-/// A material's mean color: its base color times its texture's mean (sampled) or its preset's.
-fn albedo(m: &StandardMaterial, images: &Assets<Image>) -> Vec4 {
+/// Share of a surface's light the occlusion map darkens: it shades ambient light, not the sun,
+/// and outdoors in daylight ambient is roughly this part of what a wall reflects.
+const AMBIENT_SHARE: f32 = 0.4;
+
+/// A material's mean color from afar: its base color times its texture's mean (or its preset's;
+/// an untextured material's is its base color alone), darkened by its occlusion map's mean on
+/// the ambient share of the light.
+fn albedo(m: &StandardMaterial, images: &Assets<Image>, means: Option<&ImageMeans>) -> Vec4 {
     let base = Vec4::from(m.base_color);
-    let texture = m
-        .base_color_texture
-        .and_then(|h| images.get(h))
-        .filter(|img| !img.is_released())
-        .map(mean_of);
-    let tint = match (texture, m.preset) {
-        (Some(t), _) => t,
+    let mean = |h: Handle<Image>| {
+        images
+            .get(h)
+            .filter(|img| !img.is_released())
+            .map(mean_of)
+            .or_else(|| means.and_then(|m| m.get(h)))
+    };
+    let tint = match (m.base_color_texture, m.preset) {
+        (Some(h), preset) => mean(h)
+            .or(preset.map(|p| Vec3::from(p.mean_albedo()).extend(1.0)))
+            // Pixels gone before anyone saw them: a typical surface, not a white one.
+            .unwrap_or(Vec4::splat(0.45)),
         (None, Some(p)) => Vec3::from(p.mean_albedo()).extend(1.0),
         (None, None) => Vec4::ONE,
     };
-    let mut c = base * tint;
+    let occlusion = m.occlusion_texture.and_then(mean).map_or(1.0, |o| o.x);
+    let mut c = base * tint * (1.0 - AMBIENT_SHARE * (1.0 - occlusion.clamp(0.0, 1.0)));
     c.w = 1.0;
     c
 }
@@ -703,7 +777,8 @@ fn cluster(sources: &[Source], instances: &[Instance], budget: usize) -> Option<
                     let e = &mut sum[id as usize];
                     e.0 += p[k];
                     e.1 += 1.0;
-                    e.2 += n.color.truncate() * area.max(1e-6);
+                    let color = n.color.truncate() * s.colors[t[k] as usize];
+                    e.2 += color * area.max(1e-6);
                     e.3 += area.max(1e-6);
                     c[k] = id;
                 }
@@ -763,7 +838,8 @@ fn cache_path(settings: &HlodSettings, key: &str, version: u64) -> PathBuf {
         .join(format!("{safe}-{version:016x}.hlod"))
 }
 
-const MAGIC: &[u8; 8] = b"HLOD0001";
+/// Bumped whenever proxies come out differently, so caches of the old look are made again.
+const MAGIC: &[u8; 8] = b"HLOD0002";
 
 fn write_mesh(path: &std::path::Path, mesh: &Mesh) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
@@ -1057,7 +1133,12 @@ mod tests {
                 indices.extend([i, i + n + 1, i + 1, i + 1, i + n + 1, i + n + 2]);
             }
         }
-        let sources = [Source { positions, indices }];
+        let colors = vec![Vec3::ONE; positions.len()];
+        let sources = [Source {
+            positions,
+            colors,
+            indices,
+        }];
         let instances = [Instance {
             source: 0,
             matrix: Mat4::IDENTITY,
@@ -1073,6 +1154,64 @@ mod tests {
         );
         assert!(aabb.max.y > 2.0, "the waves are still there: {aabb:?}");
         assert!(mesh.vertices.iter().all(|v| v.normal[1] > 0.0), "faces up");
+    }
+
+    #[test]
+    fn proxy_colors_follow_vertex_colors_textures_and_occlusion() {
+        let mut images = Assets::<Image>::default();
+        // Linear 0.5 grey once decoded (sRGB 186 ≈ 0.5^(1/2.2) × 255).
+        let grey = images.add(Image::solid([186, 186, 186, 255], true));
+        let ao = images.add(Image::solid([128, 255, 255, 255], false));
+        let mut means = ImageMeans::default();
+        means.refresh(&images, Instant::now() + std::time::Duration::from_secs(1));
+        // The renderer frees the pixels later; the means stay.
+        for h in [grey, ao] {
+            images.get_mut(h).unwrap().data.clear();
+        }
+        let wall = StandardMaterial {
+            base_color: [1.0, 0.8, 0.6, 1.0],
+            base_color_texture: Some(grey),
+            occlusion_texture: Some(ao),
+            ..Default::default()
+        };
+        let c = albedo(&wall, &images, Some(&means));
+        let occlusion = 1.0 - AMBIENT_SHARE * (1.0 - 128.0 / 255.0);
+        for (got, want) in [(c.x, 1.0), (c.y, 0.8), (c.z, 0.6)] {
+            let want = want * 0.5 * occlusion;
+            assert!((got - want).abs() < 0.02, "{c} vs {want}");
+        }
+        // Pixels gone before anyone saw them: a typical surface, not white.
+        let unseen = images.add(Image::solid([255; 4], true));
+        images.get_mut(unseen).unwrap().data.clear();
+        let lost = StandardMaterial {
+            base_color_texture: Some(unseen),
+            ..Default::default()
+        };
+        assert!(albedo(&lost, &images, Some(&means)).x < 0.5);
+
+        // A quad tinted dark on one side: the proxy keeps the tint.
+        let positions = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::new(10.0, 0.0, 10.0),
+            Vec3::new(0.0, 0.0, 10.0),
+        ];
+        let colors = vec![Vec3::splat(0.2), Vec3::ONE, Vec3::ONE, Vec3::splat(0.2)];
+        let sources = [Source {
+            positions,
+            colors,
+            indices: vec![0, 2, 1, 0, 3, 2],
+        }];
+        let instances = [Instance {
+            source: 0,
+            matrix: Mat4::IDENTITY,
+            color: Vec4::new(0.5, 0.5, 0.5, 1.0),
+        }];
+        let (mesh, _) = cluster(&sources, &instances, 100).unwrap();
+        for v in &mesh.vertices {
+            let want = if v.position[0] < 5.0 { 0.1 } else { 0.5 };
+            assert!((v.color[0] - want).abs() < 1e-4, "{v:?}");
+        }
     }
 
     #[test]
