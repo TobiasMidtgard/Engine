@@ -137,6 +137,17 @@ fn run_calls(world: &mut World, calls: &[(String, String)]) {
 }
 
 /// Eye and target relative to a zone's center. The eye never ends up below the ground.
+/// Eye and target for the fortress seen from afar: from the village's west edge, 25 m up.
+fn far_fortress_view() -> (DVec3, DVec3) {
+    let fortress = zone("fortress").center;
+    let land = crate::landscape::shared();
+    let (x, z) = (-70.0, 40.0);
+    (
+        DVec3::new(x, land.height(x, z) + 25.0, z),
+        fortress + DVec3::new(0.0, 12.0, 0.0),
+    )
+}
+
 fn near(key: &str, eye: [f64; 3], look: [f64; 3]) -> (DVec3, DVec3) {
     let c = zone(key).center;
     (
@@ -193,6 +204,31 @@ pub fn places() -> Vec<Place> {
             "Material plaza and the village",
             near("plaza", [10.0, 4.5, 16.0], [0.0, 1.8, -1.0]),
             11.0,
+        ),
+        // The siege fortress from the village's west edge, 280 m off: loaded, then unloaded
+        // with its far-view proxy standing in (the streaming core's proxies, captured while the
+        // first stop settles; compare the two).
+        place(
+            "far_fortress",
+            "The siege fortress from afar, loaded",
+            far_fortress_view(),
+            10.5,
+        )
+        .warmup(2.0),
+        place(
+            "far_fortress_proxy",
+            "The siege fortress from afar, unloaded: its far-view proxy",
+            far_fortress_view(),
+            10.5,
+        )
+        .warmup(1.0)
+        .arriving(
+            "stream.pin",
+            r#"{"key": "fortress", "loaded": false}"#.into(),
+        )
+        .leaving(
+            "stream.pin",
+            r#"{"key": "fortress", "loaded": null}"#.into(),
         ),
         place(
             "village_garden",

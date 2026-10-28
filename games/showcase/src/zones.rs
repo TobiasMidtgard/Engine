@@ -355,8 +355,9 @@ pub struct DemoZones(pub Vec<String>);
 /// water reads from that height (without it the lake is a bare basin), so they load just the
 /// lake, as do the waterfall that feeds it and the start screen's view. The walk's stops load
 /// where the pilot stands.
-const ZONE_ALIASES: [(&str, &str); 15] = [
+const ZONE_ALIASES: [(&str, &str); 16] = [
     ("fire", "field"),
+    ("far_fortress", "fortress"),
     ("village", "plaza"),
     ("smoke", "range"),
     ("sunset", "plaza"),
