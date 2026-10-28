@@ -391,7 +391,8 @@ fn plant_regions(world: &mut World, loading: &FoliageLoading) {
                     spawn_sim_plant(world, p, Some(entity));
                 }
             } else if let Some(log) = built.logs.pop() {
-                spawn_log(world, &log);
+                let l = spawn_log(world, &log);
+                world.entity_mut(l).insert(InRegion(Some(entity)));
             } else {
                 break;
             }
@@ -786,6 +787,25 @@ pub fn scorch_small_plants(
     });
 }
 
+/// When a region goes (its zone unloaded), its plants and logs go with it, so a zone loaded
+/// again doesn't find the last visit's forest still standing beside the new one.
+pub fn drop_unloaded_regions(
+    mut commands: Commands,
+    mut removed: RemovedComponents<EcologyRegion>,
+    regions: Query<(), With<EcologyRegion>>,
+    owned: Query<(Entity, &InRegion)>,
+) {
+    let gone: Vec<Entity> = removed.read().filter(|e| !regions.contains(*e)).collect();
+    if gone.is_empty() {
+        return;
+    }
+    for (e, r) in &owned {
+        if r.0.is_some_and(|r| gone.contains(&r)) {
+            commands.entity(e).despawn();
+        }
+    }
+}
+
 /// Spawn a felled log lying on the ground (from a region's history).
 pub fn spawn_log(world: &mut World, log: &SimLog) -> Entity {
     world
@@ -1108,7 +1128,8 @@ pub fn ecology_step(world: &mut World) {
                 logs.into_iter().partition(|l| l.entity.is_some());
             fit_logs(&region, state.center, &library, &plants, &lying, &mut fresh);
             for l in &fresh {
-                spawn_log(world, l);
+                let l = spawn_log(world, l);
+                world.entity_mut(l).insert(InRegion(Some(region_entity)));
             }
         }
         for b in out.births {
@@ -1282,6 +1303,38 @@ mod tests {
             LogSpan::of(DVec3::ZERO, &lying[0], &lib),
         );
         assert!(a.distance_to_span(&b) >= a.radius + b.radius);
+    }
+
+    #[test]
+    fn a_region_unloaded_takes_its_plants_and_logs_with_it() {
+        let mut app = App::new();
+        app.add_plugins(engine_world::WorldPlugin);
+        app.add_plugins(crate::FoliagePlugin);
+        app.world.insert_resource(crate::FoliageLoading::in_frame());
+        app.world.resource_mut::<EcologySettings>().paused = true;
+        let region = app.world.spawn((Transform::default(), forest())).id();
+        // A plant of its own, not the region's, stays.
+        let lone = crate::api::spawn_plant(
+            &mut app.world,
+            "oak",
+            DVec3::new(900.0, 0.0, 0.0),
+            0.5,
+            None,
+        )
+        .unwrap();
+        app.update();
+        app.update();
+        let owned = |app: &mut App| {
+            let mut q = app.world.query::<&InRegion>();
+            q.iter(&app.world).filter(|r| r.0 == Some(region)).count()
+        };
+        assert!(owned(&mut app) > 100);
+        app.world.despawn(region);
+        app.update();
+        assert_eq!(owned(&mut app), 0, "the region's plants stayed behind");
+        assert!(app.world.get_entity(lone).is_ok());
+        let mut logs = app.world.query::<&FelledLog>();
+        assert_eq!(logs.iter(&app.world).count(), 0, "its logs stayed behind");
     }
 
     #[test]

@@ -3455,7 +3455,7 @@ fn place_cover(world: &mut World, built: CoverBuilt) {
     if scattered > 0
         && let Some(assets) = scenery_assets(world)
     {
-        debris.spawn(world, &assets);
+        debris.spawn(world, &assets, job.entity);
     }
     tracing::info!(
         "foliage: ground cover {} built ({} triangles, {} rocks, {} debris) in {:.0} ms",
@@ -3556,7 +3556,7 @@ impl PlacedDebris {
         self.pieces.len() + self.pebbles.len()
     }
 
-    fn spawn(self, world: &mut World, assets: &SceneryAssets) {
+    fn spawn(self, world: &mut World, assets: &SceneryAssets, cover: Entity) {
         let batch: Vec<_> = self
             .pieces
             .into_iter()
@@ -3579,11 +3579,38 @@ impl PlacedDebris {
                     LitterPiece {
                         draw_distance_m: distance,
                     },
+                    CoverPiece(cover),
                 )
             })
             .collect();
         world.spawn_batch(batch);
-        world.spawn_batch(self.pebbles);
+        world.spawn_batch(
+            self.pebbles
+                .into_iter()
+                .map(|(t, rock)| (t, rock, CoverPiece(cover))),
+        );
+    }
+}
+
+/// Litter and pebbles a ground cover scattered (world roots, gone with the cover).
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct CoverPiece(pub Entity);
+
+/// When a ground cover goes (its zone unloaded), the litter and pebbles it scattered go too.
+pub fn drop_unloaded_covers(
+    mut commands: Commands,
+    mut removed: RemovedComponents<GroundCover>,
+    covers: Query<(), With<GroundCover>>,
+    pieces: Query<(Entity, &CoverPiece)>,
+) {
+    let gone: Vec<Entity> = removed.read().filter(|e| !covers.contains(*e)).collect();
+    if gone.is_empty() {
+        return;
+    }
+    for (e, p) in &pieces {
+        if gone.contains(&p.0) {
+            commands.entity(e).despawn();
+        }
     }
 }
 

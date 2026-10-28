@@ -918,6 +918,59 @@ pub fn fern_pinna(size: u32) -> TextureSet {
     }
 }
 
+// ---------------------------------------------------------------- grown leaves
+
+/// One leaf blade filling the whole texture, for leaves grown from a growth graph (their
+/// outline is geometry, so the texture is opaque): `u` across the blade (0.5 the midrib), `v`
+/// along it (0 the tip, 1 the base, as images run top down). A pale sunken midrib, `veins`
+/// side veins a side running out and up toward the margin (each into a tooth, as on a
+/// strawberry or a hornbeam), the blade between them puckered and quilted, a little mottled,
+/// paler toward the edge. Neutral in hue: the vertex colors give the green.
+pub fn grown_leaf(size: u32, veins: u32) -> TextureSet {
+    let size = size.max(32);
+    let mut cv = Canvas::new(size, size);
+    let veins = veins.max(3) as f32;
+    let px = size as f32;
+    cv.fill([0, 0, size as i32, size as i32], |s, t| {
+        // t is 0 at the top of the image (the tip): along the blade from the base.
+        let along = 1.0 - t;
+        let x = (s - 0.5) * 2.0; // -1 .. 1 across
+        let ax = x.abs();
+        let midrib = 1.0 - smoothstep(0.0, 6.0 / px * 2.0, ax);
+        // Side veins leave the midrib and arc up toward the margin.
+        let rise = 0.32 * ax + 0.12 * ax * ax;
+        let phase = (along - rise) * veins;
+        let k = phase - phase.floor();
+        let line =
+            (1.0 - smoothstep(0.0, 0.07, (k - 0.5).abs() * 2.0 * (1.0 - 0.6 * ax))).powf(1.5);
+        let vein = line * smoothstep(0.03, 0.12, ax) * (1.0 - 0.6 * smoothstep(0.75, 1.0, ax));
+        // Fine reticulate veins between them.
+        let fine = (0.5 + 0.5 * ((s * 47.0 + fbm(s * 7.0, t * 7.0, 5) * 3.0) * TAU).cos())
+            .powf(14.0)
+            * 0.5
+            + (0.5 + 0.5 * ((t * 53.0 + fbm(s * 6.0, t * 6.0, 9) * 3.0) * TAU).cos()).powf(14.0)
+                * 0.5;
+        let mottle = fbm(s * 5.0, t * 5.0, 41);
+        let lum = 0.74
+            * (1.0 + 0.32 * midrib + 0.2 * vein + 0.05 * fine)
+            * (1.0 + 0.1 * mottle)
+            * (0.9 + 0.16 * ax);
+        let pale = (0.25 * midrib + 0.12 * vein).min(1.0);
+        let l = leafy(lum);
+        let color = [l[0] + pale * 0.06, l[1] + pale * 0.04, l[2] - pale * 0.02];
+        // Pleated: the blade bulges between sunken veins, creased along the midrib.
+        let bulge = (k * std::f32::consts::PI).sin().max(0.0).sqrt();
+        let h = (2.4 * bulge * smoothstep(0.05, 0.3, ax) - 2.0 * midrib - 1.4 * vein - 0.3 * fine)
+            * (1.0 - 0.5 * smoothstep(0.85, 1.0, ax));
+        Texel::new(color, 1.0, h)
+    });
+    TextureSet {
+        normal: encode_normal(&cv, [1.0, 1.0], false),
+        albedo: encode_albedo(&cv, false),
+        emissive: None,
+    }
+}
+
 // ---------------------------------------------------------------- fungi
 
 /// Periodic Voronoi in u (`nu` cells around, `nv` down): distance to the nearest feature, the

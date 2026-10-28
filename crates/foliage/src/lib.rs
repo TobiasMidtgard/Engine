@@ -9,6 +9,7 @@ pub mod far_woods;
 pub mod felling;
 pub mod grass;
 pub mod grass_wear;
+pub mod growth;
 pub mod hand_felling;
 pub mod loading;
 pub mod meshgen;
@@ -134,6 +135,11 @@ impl Plugin for FoliagePlugin {
                  them): no growth, seeding, fire or felling and no collider; it draws near, far \
                  or distant detail by camera distance and follows the season.",
             )
+            .register_component::<growth::GrowingPlant>(
+                "A plant grown from a growth graph (preset strawberry or sapling, or graph: a \
+                 PlantGraph of stems, leaves, flowers and fruit generators), aged age_days and \
+                 moving on days_per_second (a time-lapse); repeat starts it again from seed.",
+            )
             .register_component::<scenery::LitterPiece>(
                 "Scattered twig, branch, cone, leaves or reeds; hidden beyond draw_distance_m.",
             )
@@ -199,6 +205,8 @@ impl Plugin for FoliagePlugin {
                 season::follow_weather_calendar,
                 (grass::sync_region_grass, grass_wear::wear_grass).chain(),
                 felling::remove_orphan_colliders,
+                ecology::drop_unloaded_regions,
+                scenery::drop_unloaded_covers,
                 (hand_felling::chop_on_interact, hand_felling::offer_chops).chain(),
                 cave::sync_chamber_colliders,
                 (
@@ -208,6 +216,7 @@ impl Plugin for FoliagePlugin {
                     season::apply_season_colors,
                     season::apply_litter_color,
                     visuals::sync_plant_visuals,
+                    growth::grow_plants,
                     scenery_tree::sync_scenery_trees,
                     far_woods::stream_far_woods,
                     near_woods::stream_near_woods,

@@ -167,9 +167,10 @@ fn grass_wind(p: vec3<f32>, t: f32, wind: vec3<f32>, run: f32, phase: f32) -> ve
     let q = vec2<f32>((along - 0.9 * run) * 0.06 - t * 0.03, across * 0.05);
     let n = 0.65 * value_noise2(q) + 0.35 * value_noise2(q * 2.7 + vec2<f32>(5.3, 1.7));
     let gust = min(roll * (0.5 + 0.75 * smoothstep(0.25, 0.8, n)), 1.0);
-    // Blades bob a little out of step with their neighbours, slowly: well under a hertz, a
-    // little faster in stronger wind.
-    let flutter = sin(t * 1.6 + run * 0.12 + phase * 2.4 + along * 0.35) * 0.18;
+    // In strong wind, tufts bob a little out of step with each other, slowly: well under a
+    // hertz, a little faster in stronger wind (`phase` is the clump's, so a tuft moves as one).
+    let flutter = sin(t * 1.6 + run * 0.12 + phase * 2.4 + along * 0.35) * 0.18
+        * smoothstep(3.0, 8.0, speed);
     let strength = min(speed / 9.0, 1.4);
     let idle = 0.03 * sin(t * 1.1 + phase * TAU);
     return dir * (strength * (0.2 + 0.8 * gust + flutter * (0.4 + gust)) + idle);
@@ -250,7 +251,7 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, tiling: vec3<f32>) -> Blade {
     var tip_dir = normalize(up + facing * lean);
     let wind = f.gust.xyz;
     let run = f.gust.w + length(wind) * t;
-    let w = grass_wind(root + tiling, t, wind, run, r0.w) * f.dry.w;
+    let w = grass_wind(root + tiling, t, wind, run, fract(clump.hash.w + 0.2 * r0.w)) * f.dry.w;
     tip_dir = normalize(tip_dir + (w - up * dot(w, up)) * 1.2);
     // Benders push blades away from their center and flatten them under it.
     for (var i = 0u; i < min(grass_benders.count.x, 16u); i++) {
