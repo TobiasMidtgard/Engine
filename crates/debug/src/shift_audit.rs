@@ -140,7 +140,7 @@ pub(crate) fn install(app: &mut App) {
 
 /// The module an entity belongs to and its components there, e.g.
 /// `engine_anim: Animator, DemoPath`. Core, render and world components are left out.
-fn kind(world: &World, entity: Entity) -> String {
+pub(crate) fn kind(world: &World, entity: Entity) -> String {
     let Ok(components) = world.inspect_entity(entity) else {
         return String::new();
     };

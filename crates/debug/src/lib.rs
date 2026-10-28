@@ -39,6 +39,8 @@ pub mod feature;
 pub mod overlay;
 pub mod shapes;
 mod shift_audit;
+mod stream_audit;
+pub use stream_audit::{AuditedCell, StreamAuditPlugin, StreamAuditReport};
 pub mod views;
 
 pub use color::Color;
@@ -106,6 +108,7 @@ impl Plugin for DebugPlugin {
             .add_render_feature(PerfOverlayFeature::default());
         api::register(app);
         shift_audit::install(app);
+        stream_audit::install(app);
     }
 }
 

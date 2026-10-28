@@ -166,6 +166,24 @@ impl Plugin for StreamingPlugin {
                 },
             )
             .register_api(
+                "stream.pin",
+                "Hold a streamed cell loaded (true) or unloaded (false) whatever the sources \
+                 say, or let the sources decide again (null). Returns the pins.",
+                r#"{"key": "forest", "loaded": true}"#,
+                |world, args| {
+                    let key = args["key"].as_str().ok_or("key: a cell's key")?.to_string();
+                    let mut cells = world.resource_mut::<StreamedCells>();
+                    if cells.find(&key).is_none() {
+                        return Err(format!("no cell {key:?}"));
+                    }
+                    match args["loaded"].as_bool() {
+                        Some(v) => cells.pins.insert(key, v),
+                        None => cells.pins.remove(&key),
+                    };
+                    serde_json::to_value(&cells.pins).map_err(|e| e.to_string())
+                },
+            )
+            .register_api(
                 "stream.budget",
                 "Get or change the streaming budget: loads_per_frame, frame_ms, ram_mb and \
                  vram_mb (caps in MB; over one, cells no source needs unload early; null = no \
@@ -232,13 +250,19 @@ pub fn stream_system(world: &mut World) {
     let mut queued = Vec::new();
     let mut leaving = Vec::new();
     let mut spare: Option<(f64, usize)> = None;
+    let pins = std::mem::take(&mut cells.pins);
     for (i, c) in cells.cells.iter_mut().enumerate() {
-        let r = reach(c);
+        let r = match pins.get(&c.key) {
+            Some(true) => 0.0,
+            Some(false) => f64::INFINITY,
+            None => reach(c),
+        };
+        let kept = c.keep_loaded && pins.get(&c.key) != Some(&false);
         match c.state {
             CellState::Unloaded if r <= 1.0 => c.state = CellState::Queued,
             CellState::Queued if r > 1.0 + hysteresis => c.state = CellState::Unloaded,
-            CellState::Loaded if r > 1.0 + hysteresis && !c.keep_loaded => leaving.push(i),
-            CellState::Loaded if r > 1.0 && !c.keep_loaded && spare.is_none_or(|s| r > s.0) => {
+            CellState::Loaded if r > 1.0 + hysteresis && !kept => leaving.push(i),
+            CellState::Loaded if r > 1.0 && !kept && spare.is_none_or(|s| r > s.0) => {
                 spare = Some((r, i));
             }
             _ => {}
@@ -247,6 +271,7 @@ pub fn stream_system(world: &mut World) {
             queued.push((r, i));
         }
     }
+    cells.pins = pins;
     let pressed = leaving.is_empty() && budget.over(world.resource::<Diagnostics>());
     if let Some((_, i)) = spare.filter(|_| pressed) {
         leaving.push(i);
@@ -456,6 +481,31 @@ mod tests {
             (set.ram_mb, set.loads_per_frame, set.vram_mb),
             (Some(12000.0), 2, None)
         );
+    }
+
+    #[test]
+    fn pins_hold_a_cell_in_or_out() {
+        let mut app = app();
+        app.stream_cell(
+            StreamCell::new("far", DVec3::new(5000.0, 0.0, 0.0), 5.0, |w| {
+                w.spawn(Name::new("far"));
+            })
+            .keep_loaded(),
+        );
+        let player = app.world.spawn(StreamingSource::default()).id();
+        place(&mut app, player, 0.0);
+        app.update();
+        assert_eq!(named(&mut app, "far"), 0);
+        let pin = |app: &mut App, v| {
+            let mut cells = app.world.resource_mut::<StreamedCells>();
+            cells.pins.insert("far".into(), v);
+        };
+        pin(&mut app, true);
+        app.update();
+        assert_eq!(named(&mut app, "far"), 1, "pinned in");
+        pin(&mut app, false);
+        app.update();
+        assert_eq!(named(&mut app, "far"), 0, "pinned out, though kept");
     }
 
     #[test]

@@ -10,6 +10,8 @@
 //!
 //! Cells keep world points, so they follow [`crate::WorldShift`] and [`crate::SurfaceMoved`].
 
+use std::collections::BTreeMap;
+
 use engine_core::math::DVec3;
 use engine_core::prelude::*;
 
@@ -85,6 +87,9 @@ pub struct StreamedCells {
     pub cells: Vec<CellInfo>,
     /// Unload a cell once every source is farther than `load_m × (1 + hysteresis)`.
     pub hysteresis: f64,
+    /// Cells held in or out whatever the sources say, by key: `true` keeps one loaded,
+    /// `false` keeps it unloaded (even a kept one). For tools, the editor and audits.
+    pub pins: BTreeMap<String, bool>,
 }
 
 impl StreamedCells {
@@ -152,6 +157,7 @@ mod tests {
                 cell("far", 500.0, CellState::Unloaded),
             ],
             hysteresis: 0.25,
+            ..Default::default()
         };
         assert!(cells.is_ready_around(DVec3::ZERO, 100.0));
         assert!(!cells.is_ready_around(DVec3::new(450.0, 0.0, 0.0), 100.0));
