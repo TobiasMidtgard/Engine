@@ -1073,9 +1073,19 @@ fn on_the_moon_only_the_moon_pulls() {
     let mut app = app();
     travel_to(&mut app.world, "Moon", 0.0, 0.0, 2.0).unwrap();
     app.update();
-    let g = app.world.resource::<Gravity>();
-    // Earth is left out: the Moon falls around it with us.
-    assert_eq!(g.bodies.len(), 1);
+    let g = app.world.resource::<Gravity>().clone();
+    // Earth doesn't pull: the Moon falls around it with us. Every other body is listed
+    // after the Moon with no pull, where it is and how big (for a cruise drive to slow toward).
+    assert!(g.bodies[0].mu > 4.0e12);
+    assert!(g.bodies[1..].iter().all(|b| b.mu == 0.0));
+    let s = state(&app);
+    assert_eq!(g.bodies.len(), s.bodies.len());
+    let sirius = s.body("Sirius").unwrap();
+    assert!(
+        g.bodies
+            .iter()
+            .any(|b| b.center == sirius.world_position && b.radius == sirius.radius_m)
+    );
     let up = g.up_at(DVec3::new(0.0, 2.0, 0.0));
     assert!(up.y > 0.999_999, "{up:?}");
 }

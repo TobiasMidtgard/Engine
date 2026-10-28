@@ -1233,7 +1233,7 @@ pub fn update_space(world: &mut World) {
     }
 
     // Gravity: the anchor, plus every body whose reach (1.5× its sphere of influence) holds
-    // the focus. The root star and whatever the anchor orbits are left out: the anchor falls
+    // the focus, pull. The root star and whatever the anchor orbits are left out: the anchor falls
     // around them with us (on the Moon, Earth's pull is only a tide). Out past the planets the
     // world anchors on the Sun, which then pulls.
     if settings.drive_gravity {
@@ -1244,18 +1244,23 @@ pub fn update_space(world: &mut World) {
             around.push(p);
             up = states[p].parent;
         }
-        let list: Vec<GravityBody> = states
+        let pulls = |i: usize, s: &BodyState| {
+            i == anchor
+                || (s.parent.is_some()
+                    && !around.contains(&i)
+                    && (s.world_position - f).length() < s.soi_m * 1.5)
+        };
+        // The rest follow with no pull (μ 0): where every body is and how big, for whatever
+        // slows down or aims toward them (a cruise drive). Pulling bodies come first.
+        let (pulling, rest): (Vec<_>, Vec<_>) =
+            states.iter().enumerate().partition(|(i, s)| pulls(*i, s));
+        let list: Vec<GravityBody> = pulling
             .iter()
-            .enumerate()
-            .filter(|(i, s)| {
-                *i == anchor
-                    || (s.parent.is_some()
-                        && !around.contains(i)
-                        && (s.world_position - f).length() < s.soi_m * 1.5)
-            })
-            .map(|(_, s)| GravityBody {
+            .map(|(_, s)| (s, s.mu))
+            .chain(rest.iter().map(|(_, s)| (s, 0.0)))
+            .map(|(s, mu)| GravityBody {
                 center: s.world_position,
-                mu: s.mu,
+                mu,
                 radius: s.radius_m,
             })
             .collect();
