@@ -36,18 +36,32 @@ pub struct PartFade {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct FadeGhost;
 
-/// This frame's fading: how many started, and whether the camera cut.
-#[derive(Resource, Debug, Default)]
+/// Whether levels cross-fade, and this frame's fading: how many started, and whether the
+/// camera cut.
+#[derive(Resource, Debug)]
 pub struct LodFades {
+    /// Cross-fade (true) or switch at once (for comparisons).
+    pub enabled: bool,
     started: usize,
     cut: bool,
     camera: Option<DVec3>,
 }
 
+impl Default for LodFades {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            started: 0,
+            cut: false,
+            camera: None,
+        }
+    }
+}
+
 impl LodFades {
     /// Whether a swap seen now should fade (and count it).
     fn take(&mut self) -> bool {
-        if self.cut || self.started >= MAX_FADES_PER_FRAME {
+        if !self.enabled || self.cut || self.started >= MAX_FADES_PER_FRAME {
             return false;
         }
         self.started += 1;
