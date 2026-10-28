@@ -7,7 +7,7 @@
 //! JetBrains Mono when `fetched/fonts/JetBrainsMono-Regular.ttf` is there (assets/manifests/
 //! script.toml), else the built-in 8×8 font.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 use bevy_ecs::prelude::*;
@@ -70,6 +70,10 @@ pub(crate) struct Drawn {
     changed_at: f64,
     error: Option<String>,
     faded: bool,
+    /// The logpoint values drawn (`Debugger::inline_values`).
+    inline_version: u64,
+    /// The board's settings when drawn (scrolling it redraws it).
+    board: CodeBoard,
 }
 
 /// Glyph coverage, cached per character.
@@ -214,6 +218,10 @@ const OK: Rgb = [0.45, 0.85, 0.50];
 const ERROR: Rgb = [1.0, 0.40, 0.38];
 const CHANGED_BG: Rgb = [0.15, 0.12, 0.035];
 const ERROR_BG: Rgb = [0.16, 0.04, 0.045];
+/// Logpoint values (`script.logpoint`) beside their lines.
+const VALUE: Rgb = [1.0, 0.80, 0.40];
+const VALUE_BG: Rgb = [0.13, 0.095, 0.03];
+const VALUE_GLOW: f32 = 0.55;
 
 /// How much the panels glow next to the text (which glows fully): enough to read the board's
 /// shape in the dark, little enough that the text stands out at night.
@@ -431,6 +439,14 @@ impl Canvas {
     }
 }
 
+/// What a board marks beside its lines.
+struct Marks<'a> {
+    /// Lines (0-based) the last reload changed, lit.
+    changed: &'a HashSet<usize>,
+    /// Logpoint values by line (1-based), drawn after the code.
+    values: &'a BTreeMap<u32, String>,
+}
+
 /// Draws `source` (with `error`, if the last reload failed) onto a board's image.
 fn draw(
     board: &CodeBoard,
@@ -439,8 +455,9 @@ fn draw(
     version: u32,
     source: &str,
     error: Option<&str>,
-    changed: &HashSet<usize>,
+    marks: Marks<'_>,
 ) -> (Image, Image) {
+    let Marks { changed, values } = marks;
     let (w, h) = (
         board.size[0].max(64) as usize,
         board.size[1].max(64) as usize,
@@ -503,6 +520,22 @@ fn draw(
         cv.text(font, &text, gutter + adv, base, &|k| {
             colors.get(k).copied().unwrap_or(TEXT)
         });
+        if let Some(value) = values.get(&(i as u32 + 1)) {
+            // After the code, or over its end when the line is long.
+            let label: String = format!("\u{25C0} {value}").chars().take(48).collect();
+            let width = adv * (label.chars().count() as f32 + 1.0);
+            let after = gutter + adv * (text.chars().count() as f32 + 3.0);
+            let x = after.min(w as f32 - margin - width).max(gutter + adv);
+            cv.rect(
+                (x - adv * 0.5) as i32,
+                (top + line_h * 0.06) as i32,
+                (x + width) as i32,
+                (top + line_h * 0.94) as i32,
+                VALUE_BG,
+                VALUE_GLOW,
+            );
+            cv.text(font, &label, x, base, &|_| VALUE);
+        }
     }
     if let Some(err) = error {
         let top = h as f32 - margin - line_h * error_lines as f32;
@@ -577,6 +610,10 @@ pub(crate) fn draw_boards(
                 .map(|f| (f.source.clone(), f.version, f.error.clone()))
         });
         let known = drawn.get(&e);
+        let (inline_version, inline) = runtime
+            .as_ref()
+            .map(|rt| rt.debugger.inline_values(&path))
+            .unwrap_or_default();
         // A file no script runs yet is read from disk (a few times a second).
         let (source, version, error) = match loaded {
             Some(l) => l,
@@ -603,9 +640,12 @@ pub(crate) fn draw_boards(
         let fade = known.is_some_and(|d| {
             !d.faded && !d.changed.is_empty() && now - d.changed_at > board.changed_secs as f64
         });
-        let same =
-            known.is_some_and(|d| d.version == version && d.text == source && d.error == error);
-        if same && !fade {
+        let same = known.is_some_and(|d| {
+            d.version == version && d.text == source && d.error == error && d.board == *board
+        });
+        // New logpoint values redraw a few times a second at most.
+        let values = checking && known.is_some_and(|d| d.inline_version != inline_version);
+        if same && !fade && !values {
             continue;
         }
         let font = font.get_or_insert_with(|| BoardFont::load(server.as_ref().map(|s| s.root())));
@@ -622,7 +662,10 @@ pub(crate) fn draw_boards(
             version,
             &source,
             error.as_deref(),
-            &changed,
+            Marks {
+                changed: &changed,
+                values: &inline,
+            },
         );
         // Redrawn in place, so the material (and its key in the material cache) stays the same.
         let mut put = |old: Option<Handle<Image>>, new: Image| match old {
@@ -659,6 +702,8 @@ pub(crate) fn draw_boards(
                 changed_at,
                 error,
                 faded,
+                inline_version,
+                board: board.clone(),
             },
         );
     }
@@ -704,7 +749,10 @@ mod tests {
             3,
             "local S = {}\nfunction S:update(dt)\n  self.t += dt\nend\nreturn S",
             Some("demo.luau:3: attempt to add nil"),
-            &HashSet::from([2]),
+            Marks {
+                changed: &HashSet::from([2]),
+                values: &BTreeMap::from([(3, "self.t = 0.25".to_string())]),
+            },
         );
         assert_eq!((img.width, img.height), (512, 320));
         // Some text pixels are much brighter than the background.

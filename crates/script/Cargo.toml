@@ -21,3 +21,9 @@ font8x8.workspace = true
 mlua = { version = "0.12", features = ["luau", "send"] }
 # Rasterizes the code board's font (engine-design/scripting-research.md, "The showcase stop").
 ab_glyph = "0.2"
+# Rust hot patching through `dx serve --hot-patch` (src/hotpatch.rs); dev builds only.
+dioxus-devtools = { version = "0.7.10", optional = true }
+
+[features]
+# Patch the game crate's Rust systems while it runs (crate docs, "Rust hot patching").
+hotpatch = ["bevy_ecs/hotpatching", "dep:dioxus-devtools"]

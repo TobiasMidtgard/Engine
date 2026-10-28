@@ -56,6 +56,15 @@ Every engine function is there as `module.verb(args)` (`fire.ignite`, `weather.s
 instance with its cost per frame, `script.edit` and `script.write` change files like an editor,
 and `script.restart` starts an entity's script from scratch.
 
+## Debugging
+
+Start the game with `ENGINE_SCRIPT_DEBUG=4711` (or call `script.debug` while it runs) and attach
+VS Code with the extension in `crates/script/vscode` (its README has the setup) or any other
+Debug Adapter Protocol client. Breakpoints with conditions, hit counts and logpoints, stepping,
+the call stack, variables, watches and the debug console all work in these files, and follow hot
+reloads. Without an editor, `script.logpoint {path, line, message}` prints values from a line
+without stopping (`"message": "glow = {glow}"`), and code boards show them beside the line.
+
 ## In this folder
 
 - `showcase/courtyard.luau`: the Script courtyard's director (lanterns, orrery, the ritual).

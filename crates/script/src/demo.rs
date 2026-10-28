@@ -62,8 +62,46 @@ pub struct DemoView {
 const WARM: &str = r#"{"path": "showcase/courtyard.luau", "find": "color = vec3(1.0, 0.56, 0.22)", "replace": "color = vec3(0.25, 0.62, 1.0)"}"#;
 const COOL: &str = r#"{"path": "showcase/courtyard.luau", "find": "color = vec3(0.25, 0.62, 1.0)", "replace": "color = vec3(1.0, 0.56, 0.22)"}"#;
 
-/// The courtyard's overview, from the south-east above the lanterns.
-const OVERVIEW: ([f64; 3], [f64; 3]) = ([13.0, 6.5, 17.0], [-0.5, 1.2, -1.5]);
+/// The debugger stop: the board scrolls to `update` and logpoints show what its lines compute
+/// each frame (`script.logpoint`), without stopping the game. Line numbers are
+/// courtyard.luau's (the courtyard test checks they still hold code).
+pub const LIVE_VALUES_ON: &[(&str, &str)] = &[
+    (
+        "script.eval",
+        r#"{"code": "world.find('Code board'):set('CodeBoard', { first_line = 17 })"}"#,
+    ),
+    (
+        "script.logpoint",
+        r#"{"path": "showcase/courtyard.luau", "line": 25, "message": "t = {self.t}"}"#,
+    ),
+    (
+        "script.logpoint",
+        r#"{"path": "showcase/courtyard.luau", "line": 29, "message": "lamp {i}: phase = {phase}"}"#,
+    ),
+    (
+        "script.logpoint",
+        r#"{"path": "showcase/courtyard.luau", "line": 30, "message": "crest = {crest}"}"#,
+    ),
+    (
+        "script.logpoint",
+        r#"{"path": "showcase/courtyard.luau", "line": 31, "message": "glow = {glow}"}"#,
+    ),
+    (
+        "script.logpoint",
+        r#"{"path": "showcase/courtyard.luau", "line": 35, "message": "spin = {self.spin}"}"#,
+    ),
+];
+const LIVE_VALUES_OFF: &[(&str, &str)] = &[
+    ("script.logpoint", r#"{"clear": true}"#),
+    (
+        "script.eval",
+        r#"{"code": "world.find('Code board'):set('CodeBoard', { first_line = 1 })"}"#,
+    ),
+];
+
+/// The courtyard's overview, from above the lanterns in the south-east, looking down enough
+/// that the floor fills the frame (the moonlit grass outside it outshone the lanterns).
+const OVERVIEW: ([f64; 3], [f64; 3]) = ([7.0, 11.0, 11.0], [0.0, 0.0, -1.0]);
 
 /// Suggested viewpoints (camera bookmarks and screenshot-tour stops). The first two are a
 /// before and after pair: the same view, then again once the tour has edited the lanterns'
@@ -98,6 +136,17 @@ pub const VIEWS: &[DemoView] = &[
         warmup_secs: 0.5,
         on_arrive: &[],
         on_leave: &[],
+    },
+    DemoView {
+        key: "script_live_values",
+        name: "Live values: logpoints print what update() computes beside each line, without \
+               stopping the game",
+        eye: [0.5, 2.2, -5.9],
+        target: [0.0, 2.05, -9.0],
+        hour: 18.9,
+        warmup_secs: 1.0,
+        on_arrive: LIVE_VALUES_ON,
+        on_leave: LIVE_VALUES_OFF,
     },
     DemoView {
         key: "script_ritual",

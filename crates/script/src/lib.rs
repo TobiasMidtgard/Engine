@@ -32,7 +32,9 @@
 //!
 //! Hooks (each optional): `start`, `update(dt)`, `fixed_update(dt)`, `on_interact(actor)`,
 //! `on_contact(other, info)`, `on_message(event, data)` (or a method named after the event),
-//! `on_props()`, `on_reload()`, `on_destroy()`. `start` and the event hooks (interact, contact,
+//! `on_props()`, `on_reload()`, `on_destroy()`, `on_world_shift(shift)` (the world moved to a
+//! new frame: map kept positions with `shift:point(p)`, `shift:direction(v)`,
+//! `shift:orientation(q)`; entities move on their own). `start` and the event hooks (interact, contact,
 //! messages) run as tasks of their own, so they may `task.wait`; `update` must not wait.
 //!
 //! ## What scripts can use
@@ -59,6 +61,22 @@
 //! new defaults (state belongs in `self` fields). `reload = "restart"` on a class restarts its
 //! instances instead. Editing a `require`d module reloads its users.
 //!
+//! ## Debugging
+//!
+//! A script debugger for VS Code (`crates/script/vscode`) and any other Debug Adapter Protocol
+//! client: run the game with `ENGINE_SCRIPT_DEBUG=4711` (or call `script.debug`), attach, and
+//! set breakpoints in `.luau` files: conditions, hit counts and logpoints, step in, over and
+//! out, the call stack, locals, upvalues and `self` expandable, watches and hovers, and the debug
+//! console evaluating in the stopped frame. A stop holds the game still until you continue.
+//! Without a client, `script.logpoint {path, line, message}` prints values from a line without
+//! stopping, and code boards show the newest beside it. How it works: `src/debugger.rs`.
+//!
+//! ## Rust hot patching
+//!
+//! With the `hotpatch` cargo feature, [`hotpatch::HotPatchPlugin`] (added by [`ScriptPlugin`])
+//! lets `dx serve --hot-patch` swap the game crate's Rust systems while the game runs: see the
+//! [`hotpatch`] module for the commands and what can and can't change live.
+//!
 //! ## Safety
 //!
 //! Sandboxed (read-only libraries, a private global table per file), a time limit per call
@@ -71,7 +89,8 @@
 //! `script.list`, `script.errors`, `script.log`, `script.eval {code}` (run Luau in the live
 //! game), `script.reload {path}`, `script.restart {entity}`, `script.send {entity, event, data}`,
 //! `script.source {path}`, `script.write {path, source}`, `script.edit {path, find, replace}`,
-//! `script.types` (writes `engine.d.luau` for luau-lsp autocompletion).
+//! `script.types` (writes `engine.d.luau` for luau-lsp autocompletion), `script.debug {port}`
+//! (start the debugger), `script.logpoint {path, line, message}`.
 //!
 //! ## Showcase
 //!
@@ -89,8 +108,12 @@ mod api;
 mod bind;
 pub mod board;
 mod convert;
+mod dap;
+mod debugger;
 pub mod demo;
 mod entity;
+#[cfg(feature = "hotpatch")]
+pub mod hotpatch;
 mod math;
 mod runtime;
 mod types;
@@ -158,6 +181,9 @@ pub struct ScriptSettings {
     pub call_limit_ms: f32,
     /// Memory the scripts may use in all, MiB.
     pub memory_limit_mb: u32,
+    /// Port the script debugger listens on for VS Code and other DAP clients (localhost only;
+    /// `ENGINE_SCRIPT_DEBUG=4711`, or `script.debug` at run time). None: not listening.
+    pub debug_port: Option<u16>,
 }
 
 impl Default for ScriptSettings {
@@ -168,6 +194,9 @@ impl Default for ScriptSettings {
             poll_secs: 0.25,
             call_limit_ms: 250.0,
             memory_limit_mb: 512,
+            debug_port: std::env::var("ENGINE_SCRIPT_DEBUG")
+                .ok()
+                .and_then(|v| v.parse().ok()),
         }
     }
 }
@@ -196,13 +225,19 @@ impl Plugin for ScriptPlugin {
         )
         .register_resource::<ScriptSettings>(
             "Scripting: folder under the asset root, hot_reload, poll_secs, call_limit_ms (per \
-             call), memory_limit_mb.",
+             call), memory_limit_mb, debug_port (the debugger's, for VS Code).",
         )
         .add_systems(Update, run_scripts.in_set(UpdateSet::Logic))
         .add_systems(FixedUpdate, run_fixed_scripts.in_set(SimSet::Gameplay))
         .add_systems(Update, board::draw_boards.after(run_scripts))
+        .add_systems(
+            PostUpdate,
+            shift_scripts.in_set(engine_world::WorldShiftSet::Apply),
+        )
         .init_resource::<entity::OwnMaterials>()
         .add_systems(Last, entity::free_own_materials);
+        #[cfg(feature = "hotpatch")]
+        app.add_plugins(hotpatch::HotPatchPlugin);
         api::register(app);
     }
 }
@@ -249,6 +284,11 @@ pub(crate) fn ensure_runtime(world: &mut World) -> bool {
     };
     match made {
         Ok(rt) => {
+            if let Some(port) = settings.debug_port
+                && let Err(err) = rt.debugger.listen(port)
+            {
+                tracing::warn!(target: "script", "the script debugger can't listen on port {port}: {err}");
+            }
             world.insert_resource(rt);
             true
         }
@@ -305,6 +345,31 @@ fn run_scripts(world: &mut World) {
             d.set("script.instances", instances as f64);
             d.set("script.tasks", tasks as f64);
         }
+    }
+}
+
+/// The world moved to a new frame: scripts that keep world positions map them
+/// (`on_world_shift`).
+fn shift_scripts(
+    world: &mut World,
+    mut cursor: Local<Option<bevy_ecs::message::MessageCursor<engine_world::WorldShift>>>,
+) {
+    let Some(messages) =
+        world.get_resource::<bevy_ecs::message::Messages<engine_world::WorldShift>>()
+    else {
+        return;
+    };
+    let cursor = cursor.get_or_insert_with(|| messages.get_cursor_current());
+    let Some(shift) = cursor.read(messages).copied().reduce(|a, b| a.then(&b)) else {
+        return;
+    };
+    if world
+        .get_resource::<ScriptRuntime>()
+        .is_some_and(|rt| rt.wants_world_shift())
+    {
+        let _ = with_runtime(world, |world, rt, settings| {
+            rt.world_shift(world, shift, settings)
+        });
     }
 }
 

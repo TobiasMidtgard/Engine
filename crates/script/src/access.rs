@@ -101,6 +101,9 @@ pub(crate) struct Shared {
     /// `module path → files that required it`.
     pub required_by: Vec<(String, String)>,
     pub world_secs: f64,
+    /// Log lines and errors ever pushed (the debugger forwards the new ones).
+    pub log_total: u64,
+    pub errors_total: u64,
 }
 
 /// Errors and log lines kept for the API.
@@ -121,6 +124,7 @@ pub(crate) fn push_error(lua: &Lua, path: Option<&str>, entity: Option<Entity>, 
         message: message.to_string(),
         at_secs,
     });
+    s.errors_total += 1;
     while s.errors.len() > KEEP_LINES {
         s.errors.pop_front();
     }
@@ -130,6 +134,7 @@ pub(crate) fn push_log(lua: &Lua, line: String) {
     tracing::info!(target: "script", "{line}");
     let mut s = shared(lua);
     s.log.push_back(line);
+    s.log_total += 1;
     while s.log.len() > KEEP_LINES {
         s.log.pop_front();
     }
@@ -198,4 +203,30 @@ impl Watchdog {
     pub fn disarm(&self) {
         self.deadline.store(0, Ordering::Relaxed);
     }
+
+    /// Takes the running call's limit away (while the debugger has the scripts stopped, or runs
+    /// its own code); [`Watchdog::resume`] gives it back, moved on by the time held.
+    pub fn suspend(&self) -> Held {
+        Held {
+            deadline: self.deadline.swap(0, Ordering::Relaxed),
+            at: self.epoch.elapsed().as_nanos() as u64,
+            fired: self.fired.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn resume(&self, held: Held) {
+        let deadline = match held.deadline {
+            0 => 0,
+            d => d + (self.epoch.elapsed().as_nanos() as u64).saturating_sub(held.at),
+        };
+        self.deadline.store(deadline, Ordering::Relaxed);
+        self.fired.store(held.fired, Ordering::Relaxed);
+    }
+}
+
+/// A call's limit while [`Watchdog::suspend`]ed.
+pub(crate) struct Held {
+    deadline: u64,
+    at: u64,
+    fired: bool,
 }

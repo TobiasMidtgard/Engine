@@ -184,6 +184,55 @@ pub(crate) fn register(app: &mut App) {
         },
     )
     .register_api(
+        "script.debug",
+        "Start the script debugger on a localhost port (\"port\", default 4711; 0 picks a \
+         free one) for VS Code or another DAP client to attach to. Returns the port, whether a \
+         client is attached, and every breakpoint and logpoint.",
+        r#"{"port": 4711}"#,
+        |world, args| {
+            with_runtime(world, |_, rt, _| {
+                if args.is_object() || args.is_u64() {
+                    let port = args["port"].as_u64().or(args.as_u64()).unwrap_or(4711);
+                    let port = u16::try_from(port).map_err(|_| format!("bad port {port}"))?;
+                    rt.debugger
+                        .listen(port)
+                        .map_err(|e| format!("can't listen on port {port}: {e}"))?;
+                }
+                Ok(rt.debugger.status())
+            })?
+        },
+    )
+    .register_api(
+        "script.logpoint",
+        "Print values from a script line each time it runs, without stopping: \"message\" \
+         fills in {expressions} with the line's locals (\"glow = {glow}\"). Code boards show \
+         the newest beside the line; \"log\": true also writes script.log. \"clear\": true \
+         removes the logpoints (of \"path\", or all).",
+        r#"{"path": "showcase/courtyard.luau", "line": 40, "message": "glow = {glow}", "log": false}"#,
+        |world, args| {
+            with_runtime(world, |_, rt, _| {
+                if args["clear"].as_bool() == Some(true) {
+                    let path = str_arg(&args, "path").map(normalize);
+                    let removed = rt.debugger.clear_logpoints(&rt.lua, path.as_deref());
+                    return Ok(json!({"removed": removed}));
+                }
+                let path = safe_path(str_arg(&args, "path").ok_or("missing 'path'")?)?;
+                let line = args["line"]
+                    .as_u64()
+                    .filter(|l| *l > 0)
+                    .ok_or("missing 'line': the 1-based line number")?;
+                let message = args["message"]
+                    .as_str()
+                    .ok_or("missing 'message', e.g. \"glow = {glow}\"")?
+                    .to_string();
+                let log = args["log"].as_bool() == Some(true);
+                Ok(rt
+                    .debugger
+                    .add_logpoint(&rt.lua, &path, line as u32, message, log))
+            })?
+        },
+    )
+    .register_api(
         "script.types",
         "Write engine.d.luau (Luau type definitions of every engine function, vec3, quat, \
          entities and tasks) into the scripts folder for luau-lsp autocompletion; returns its \

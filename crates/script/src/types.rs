@@ -89,6 +89,14 @@ end
 
 type EntitySpec = { name: string?, components: { [string]: any }?, children: { any }? }
 
+declare class WorldShift
+	translation: Vec3
+	rotation: Quat
+	function point(self, p: Vec3): Vec3
+	function direction(self, v: Vec3): Vec3
+	function orientation(self, q: Quat): Quat
+end
+
 declare vec3: ((x: number?, y: number?, z: number?) -> Vec3) & {
 	zero: Vec3, one: Vec3, up: Vec3, down: Vec3, right: Vec3, left: Vec3, forward: Vec3, back: Vec3,
 	lerp: (a: Vec3, b: Vec3, t: number) -> Vec3,

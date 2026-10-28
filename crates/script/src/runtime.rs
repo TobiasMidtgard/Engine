@@ -38,6 +38,7 @@ pub(crate) struct Hooks {
     pub on_reload: bool,
     pub on_props: bool,
     pub on_destroy: bool,
+    pub on_world_shift: bool,
     /// `reload = "restart"`: hot reload restarts instances instead of keeping their state.
     pub restart_on_reload: bool,
 }
@@ -55,6 +56,7 @@ impl Hooks {
             on_reload: has("on_reload"),
             on_props: has("on_props"),
             on_destroy: has("on_destroy"),
+            on_world_shift: has("on_world_shift"),
             restart_on_reload: matches!(
                 class.raw_get::<Value>("reload"),
                 Ok(Value::String(s)) if s.to_str().is_ok_and(|s| &*s == "restart")
@@ -85,6 +87,8 @@ pub(crate) struct FileState {
     pub error: Option<String>,
     /// Bumps on every successful load.
     pub version: u32,
+    /// The compiled file of the current version (the debugger sets breakpoints on it).
+    pub chunk: Option<mlua::Function>,
 }
 
 /// Every file loaded, by path relative to the scripts folder (`showcase/lantern.luau`).
@@ -124,6 +128,7 @@ struct Task {
 pub struct ScriptRuntime {
     pub(crate) lua: Lua,
     watchdog: Watchdog,
+    pub(crate) debugger: crate::debugger::Debugger,
     pub(crate) instances: BTreeMap<Entity, Instance>,
     tasks: Vec<Task>,
     next_poll: Option<Instant>,
@@ -175,6 +180,7 @@ impl ScriptRuntime {
         install_require(&lua)?;
         let watchdog = Watchdog::new();
         watchdog.install(&lua)?;
+        let debugger = crate::debugger::Debugger::install(&lua, watchdog.clone())?;
         let g = lua.globals();
         lua.load(include_str!("prelude.luau"))
             .set_name("@engine/prelude.luau")
@@ -195,6 +201,7 @@ impl ScriptRuntime {
         Ok(Self {
             lua,
             watchdog,
+            debugger,
             instances: BTreeMap::new(),
             tasks: Vec::new(),
             next_poll: None,
@@ -260,6 +267,22 @@ impl ScriptRuntime {
         let started = Instant::now();
         let now = world.resource::<Time>().elapsed_secs_f64();
         shared(&self.lua).world_secs = now;
+        // The debugger's client: console code it sends runs like `script.eval` (which lends
+        // the world itself, so before the frame does).
+        for request in self.debugger.poll(&self.lua) {
+            let code = request["arguments"]["expression"]
+                .as_str()
+                .unwrap_or_default();
+            let result = self.eval(world, code, settings).map(|v| {
+                let text = match v {
+                    serde_json::Value::String(s) => s,
+                    serde_json::Value::Null => "nil".into(),
+                    other => other.to_string(),
+                };
+                serde_json::json!({"result": text, "variablesReference": 0})
+            });
+            self.debugger.respond(&request, result);
+        }
         let world_ptr: *mut World = world;
         let _lent = lend_world(&self.lua, world_ptr);
         // SAFETY (for every `unsafe { &mut *world_ptr }` below): the runner owns the world for
@@ -300,6 +323,7 @@ impl ScriptRuntime {
             }
         }
         self.run_tasks(now, settings);
+        self.debugger.flush(&self.lua);
         self.frame_ms = started.elapsed().as_secs_f32() * 1000.0;
     }
 
@@ -318,6 +342,33 @@ impl ScriptRuntime {
             let w = unsafe { &*world_ptr };
             let dt_e = w.resource::<Time>().delta_for(w.get::<LocalTimeScale>(e)) as f64;
             self.call_hook(e, "fixed_update", dt_e, settings);
+        }
+    }
+
+    /// True when any instance keeps world positions of its own (`on_world_shift`).
+    pub(crate) fn wants_world_shift(&self) -> bool {
+        self.instances
+            .values()
+            .any(|i| i.started && i.hooks.on_world_shift)
+    }
+
+    /// The world moved to a new frame: `on_world_shift(shift)` on every script that has it, so
+    /// positions it keeps follow (`WorldShiftSet::Apply`, before the next frame's scripts).
+    pub(crate) fn world_shift(
+        &mut self,
+        world: &mut World,
+        shift: engine_world::WorldShift,
+        settings: &ScriptSettings,
+    ) {
+        let _lent = lend_world(&self.lua, world);
+        let shifted: Vec<Entity> = self
+            .instances
+            .iter()
+            .filter(|(_, i)| i.started && i.hooks.on_world_shift)
+            .map(|(e, _)| *e)
+            .collect();
+        for e in shifted {
+            self.call_hook(e, "on_world_shift", crate::math::Shift(shift), settings);
         }
     }
 
@@ -838,6 +889,9 @@ impl ScriptRuntime {
         settings: &ScriptSettings,
     ) {
         shared(&self.lua).owner = owner;
+        if self.debugger.attached() {
+            self.debugger.prepare(&self.lua, &thread);
+        }
         self.watchdog.arm(settings.call_limit_ms);
         let result = thread.resume::<MultiValue>(args);
         self.watchdog.disarm();
@@ -913,9 +967,9 @@ impl ScriptRuntime {
             return;
         }
         match eval_file(&self.lua, &self.watchdog, &path, &source, kind) {
-            Ok(value) => {
+            Ok((chunk, value)) => {
                 self.reloads += 1;
-                let hooks = match swap_in(&self.lua, &path, value, source) {
+                let hooks = match swap_in(&self.lua, &path, value, source, chunk) {
                     Ok(h) => h,
                     Err(err) => {
                         push_error(&self.lua, Some(&path), None, &err.to_string());
@@ -1171,22 +1225,23 @@ fn script_env(lua: &Lua) -> mlua::Result<Table> {
     Ok(env)
 }
 
-/// Compiles and runs `source` as `path`, returning what it returns.
+/// Compiles and runs `source` as `path`, returning the compiled file and what it returns.
 fn eval_file(
     lua: &Lua,
     watchdog: &Watchdog,
     path: &str,
     source: &str,
     kind: FileKind,
-) -> mlua::Result<Value> {
+) -> mlua::Result<(Function, Value)> {
     let env = script_env(lua)?;
-    shared(lua).loading.push(path.to_string());
-    watchdog.arm(1000.0);
-    let result = lua
+    let chunk = lua
         .load(source)
         .set_name(format!("@{path}"))
         .set_environment(env)
-        .eval::<Value>();
+        .into_function()?;
+    shared(lua).loading.push(path.to_string());
+    watchdog.arm(1000.0);
+    let result = chunk.call::<Value>(());
     watchdog.disarm();
     shared(lua).loading.pop();
     let value = result?;
@@ -1196,7 +1251,7 @@ fn eval_file(
             value.type_name()
         )));
     }
-    Ok(value)
+    Ok((chunk, value))
 }
 
 /// Loads `path` for the first time; returns its hooks.
@@ -1230,10 +1285,11 @@ fn load_file(lua: &Lua, watchdog: &Watchdog, path: &str, kind: FileKind) -> mlua
             hooks: Hooks::default(),
             error: None,
             version: 0,
+            chunk: None,
         });
     }
     match eval_file(lua, watchdog, path, &source, kind) {
-        Ok(value) => swap_in(lua, path, value, source),
+        Ok((chunk, value)) => swap_in(lua, path, value, source, chunk),
         Err(err) => {
             if let Some(f) = lua
                 .app_data_mut::<Files>()
@@ -1250,7 +1306,13 @@ fn load_file(lua: &Lua, watchdog: &Watchdog, path: &str, kind: FileKind) -> mlua
 
 /// Stores a freshly evaluated value for `path`. A table that replaces a table is copied into the
 /// old one, so instances, metatables and other scripts' `require`s see the new code.
-fn swap_in(lua: &Lua, path: &str, value: Value, source: String) -> mlua::Result<Hooks> {
+fn swap_in(
+    lua: &Lua,
+    path: &str,
+    value: Value,
+    source: String,
+    chunk: Function,
+) -> mlua::Result<Hooks> {
     let old: Option<Value> = {
         let files = lua.app_data_ref::<Files>().expect("files");
         files
@@ -1287,26 +1349,30 @@ fn swap_in(lua: &Lua, path: &str, value: Value, source: String) -> mlua::Result<
         }
         _ => Hooks::default(),
     };
-    let mut files = lua.app_data_mut::<Files>().expect("files");
-    let f = files
-        .map
-        .get_mut(path)
-        .ok_or_else(|| mlua::Error::runtime("file vanished"))?;
-    if f.meta.is_none()
-        && let Value::Table(class) = &kept
     {
-        let meta = lua.create_table()?;
-        meta.raw_set("__index", class.clone())?;
-        f.meta = Some(lua.create_registry_value(meta)?);
+        let mut files = lua.app_data_mut::<Files>().expect("files");
+        let f = files
+            .map
+            .get_mut(path)
+            .ok_or_else(|| mlua::Error::runtime("file vanished"))?;
+        if f.meta.is_none()
+            && let Value::Table(class) = &kept
+        {
+            let meta = lua.create_table()?;
+            meta.raw_set("__index", class.clone())?;
+            f.meta = Some(lua.create_registry_value(meta)?);
+        }
+        let key = lua.create_registry_value(kept)?;
+        if let Some(old) = f.value.replace(key) {
+            let _ = lua.remove_registry_value(old);
+        }
+        f.source = source;
+        f.error = None;
+        f.version += 1;
+        f.hooks = hooks;
+        f.chunk = Some(chunk);
     }
-    let key = lua.create_registry_value(kept)?;
-    if let Some(old) = f.value.replace(key) {
-        let _ = lua.remove_registry_value(old);
-    }
-    f.source = source;
-    f.error = None;
-    f.version += 1;
-    f.hooks = hooks;
+    crate::debugger::loaded(lua, path);
     Ok(hooks)
 }
 

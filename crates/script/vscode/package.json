@@ -1,0 +1,59 @@
+{
+  "name": "engine-luau-debug",
+  "displayName": "Engine Luau debugger",
+  "description": "Debug the engine's Luau scripts in the running game: breakpoints, logpoints, stepping, variables and watches.",
+  "version": "0.1.0",
+  "publisher": "engine",
+  "license": "MIT OR Apache-2.0",
+  "private": true,
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Debuggers"],
+  "main": "./extension.js",
+  "activationEvents": ["onDebugResolve:engine-luau", "onDebugInitialConfigurations"],
+  "contributes": {
+    "breakpoints": [{ "language": "luau" }, { "language": "lua" }],
+    "debuggers": [
+      {
+        "type": "engine-luau",
+        "label": "Engine Luau scripts",
+        "languages": ["luau", "lua"],
+        "configurationAttributes": {
+          "attach": {
+            "properties": {
+              "port": {
+                "type": "number",
+                "default": 4711,
+                "description": "The game's script debugger port (ENGINE_SCRIPT_DEBUG, or script.debug)."
+              },
+              "host": {
+                "type": "string",
+                "default": "127.0.0.1",
+                "description": "Where the game runs."
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "engine-luau",
+            "request": "attach",
+            "name": "Attach to the game's scripts",
+            "port": 4711
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Engine: attach to the game's scripts",
+            "description": "Debug the Luau scripts of a running game.",
+            "body": {
+              "type": "engine-luau",
+              "request": "attach",
+              "name": "Attach to the game's scripts",
+              "port": 4711
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

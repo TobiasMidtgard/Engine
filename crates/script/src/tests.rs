@@ -53,6 +53,7 @@ fn app_in(folder: &Path) -> App {
         poll_secs: 0.0,
         call_limit_ms: 250.0,
         memory_limit_mb: 64,
+        debug_port: None,
     });
     app.register_api(
         "test.add",
@@ -654,6 +655,23 @@ fn the_showcase_courtyard_builds_and_plays_its_ritual() {
             .unwrap()
     );
 
+    // The live-values stop: its logpoints sit on lines with code, and fill in.
+    for (name, args) in crate::demo::LIVE_VALUES_ON {
+        let out = call_api(&mut app.world, name, serde_json::from_str(args).unwrap()).unwrap();
+        if *name == "script.logpoint" {
+            assert_eq!(out["at"], out["line"], "{args} moved: {out}");
+        }
+    }
+    app.update_n(2);
+    let (_, values) = app
+        .world
+        .resource::<crate::ScriptRuntime>()
+        .debugger
+        .inline_values("showcase/courtyard.luau");
+    assert_eq!(values.len(), 5, "{values:?}");
+    assert!(values[&31].starts_with("glow = "), "{values:?}");
+    call_api(&mut app.world, "script.logpoint", json!({"clear": true})).unwrap();
+
     let lever = eval(&mut app, "world.find('Ritual lever').id")
         .as_u64()
         .unwrap();
@@ -680,4 +698,347 @@ fn the_showcase_courtyard_builds_and_plays_its_ritual() {
     assert_eq!(eval(&mut app, &format!("{director}.busy")), json!(false));
     let log = call_api(&mut app.world, "script.log", json!({})).unwrap();
     assert!(log.as_array().unwrap().is_empty(), "{log}");
+}
+
+#[test]
+fn positions_a_script_keeps_follow_a_world_shift() {
+    let folder = Folder::new();
+    folder.write(
+        "keeper.luau",
+        r#"
+local K = {}
+function K:start()
+	self.home = vec3(1, 2, 3)
+end
+function K:on_world_shift(shift)
+	self.home = shift:point(self.home)
+end
+return K
+"#,
+    );
+    let mut app = app_in(&folder.0);
+    app.add_message::<engine_world::WorldShift>();
+    spawn_script(&mut app, "Keeper", "keeper");
+    app.update_n(2);
+    app.world
+        .write_message(engine_world::WorldShift::translate(DVec3::new(
+            100.0, 0.0, -50.0,
+        )));
+    app.update_n(1);
+    assert_eq!(
+        eval(&mut app, "world.find('Keeper').script.home"),
+        json!([101, 2, -47])
+    );
+}
+
+const COUNTER: &str = "local Counter = {}
+function Counter:start()
+	self.count = 0
+end
+function Counter:update(dt)
+	local step = 2
+	self.count += step
+	local double = self.count * 2
+end
+return Counter
+";
+
+/// A small Debug Adapter Protocol client, as VS Code talks to the debugger.
+struct Client {
+    stream: std::net::TcpStream,
+    reader: std::io::BufReader<std::net::TcpStream>,
+    seq: i64,
+    events: Vec<Value>,
+}
+
+impl Client {
+    fn connect(port: u16) -> Self {
+        let stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(20)))
+            .unwrap();
+        let reader = std::io::BufReader::new(stream.try_clone().unwrap());
+        Self {
+            stream,
+            reader,
+            seq: 0,
+            events: Vec::new(),
+        }
+    }
+
+    fn read(&mut self) -> Value {
+        crate::dap::read_message(&mut self.reader).expect("the debugger went away")
+    }
+
+    /// Sends a request and returns its response's body (panics when it failed).
+    fn request(&mut self, command: &str, arguments: Value) -> Value {
+        use std::io::Write;
+        self.seq += 1;
+        let message = json!({"seq": self.seq, "type": "request", "command": command,
+            "arguments": arguments});
+        self.stream.write_all(&crate::dap::frame(&message)).unwrap();
+        loop {
+            let m = self.read();
+            if m["type"] == "response" && m["request_seq"] == self.seq {
+                assert_eq!(m["success"], json!(true), "{command}: {m}");
+                return m["body"].clone();
+            }
+            self.events.push(m);
+        }
+    }
+
+    fn event(&mut self, name: &str) -> Value {
+        if let Some(i) = self.events.iter().position(|e| e["event"] == name) {
+            return self.events.remove(i)["body"].clone();
+        }
+        loop {
+            let m = self.read();
+            if m["event"] == name {
+                return m["body"].clone();
+            }
+            self.events.push(m);
+        }
+    }
+
+    fn variable(&mut self, reference: &Value, name: &str) -> Value {
+        let vars = self.request("variables", json!({"variablesReference": reference}));
+        vars["variables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {name} in {vars}"))
+    }
+}
+
+#[test]
+fn the_debugger_stops_at_a_breakpoint_shows_variables_and_steps() {
+    let folder = Folder::new();
+    folder.write("debug/counter.luau", COUNTER);
+    let mut app = app_in(&folder.0);
+    let counter = spawn_script(&mut app, "Counter", "debug/counter");
+    app.update_n(2);
+    let port = call_api(&mut app.world, "script.debug", json!({"port": 0})).unwrap()["port"]
+        .as_u64()
+        .unwrap() as u16;
+    let file = std::path::absolute(folder.0.join("debug/counter.luau"))
+        .unwrap()
+        .display()
+        .to_string();
+
+    // The client drives the session from its own thread while the game runs frames here; a
+    // stop holds `app.update()` until the client continues.
+    let client = std::thread::spawn(move || {
+        let mut c = Client::connect(port);
+        let caps = c.request("initialize", json!({"adapterID": "engine-luau"}));
+        assert_eq!(caps["supportsLogPoints"], json!(true));
+        c.event("initialized");
+        c.request("attach", json!({}));
+        let set = c.request(
+            "setBreakpoints",
+            json!({"source": {"path": file}, "breakpoints": [
+                {"line": 7, "condition": "self.count >= 4"}
+            ]}),
+        );
+        assert_eq!(set["breakpoints"][0]["verified"], json!(true), "{set}");
+        assert_eq!(set["breakpoints"][0]["line"], json!(7));
+        c.request("configurationDone", json!({}));
+
+        let stopped = c.event("stopped");
+        assert_eq!(stopped["reason"], json!("breakpoint"));
+        let stack = c.request("stackTrace", json!({"threadId": 1}));
+        let top = &stack["stackFrames"][0];
+        assert_eq!(top["name"], json!("update"), "{stack}");
+        assert_eq!(top["line"], json!(7));
+        assert!(
+            top["source"]["path"]
+                .as_str()
+                .unwrap()
+                .ends_with("counter.luau")
+        );
+        let scopes = c.request("scopes", json!({"frameId": top["id"]}));
+        let locals = scopes["scopes"][0]["variablesReference"].clone();
+        assert_eq!(c.variable(&locals, "step")["value"], json!("2"));
+        let this = c.variable(&locals, "self");
+        let count: f64 = c.variable(&this["variablesReference"], "count")["value"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(count >= 4.0, "the condition held: {count}");
+        let sum = c.request(
+            "evaluate",
+            json!({"expression": "self.count + step", "frameId": top["id"], "context": "watch"}),
+        );
+        assert_eq!(sum["result"], json!((count + 2.0).to_string()));
+
+        c.request("next", json!({"threadId": 1}));
+        assert_eq!(c.event("stopped")["reason"], json!("step"));
+        let stack = c.request("stackTrace", json!({"threadId": 1}));
+        assert_eq!(stack["stackFrames"][0]["line"], json!(8), "{stack}");
+        let now = c.request(
+            "evaluate",
+            json!({"expression": "self.count", "frameId": 0}),
+        );
+        assert_eq!(now["result"], json!((count + 2.0).to_string()));
+
+        c.request(
+            "setBreakpoints",
+            json!({"source": {"path": file}, "breakpoints": []}),
+        );
+        c.request("continue", json!({"threadId": 1}));
+        c.request("disconnect", json!({}));
+    });
+    let mut frames = 0;
+    while !client.is_finished() && frames < 600 {
+        app.update();
+        frames += 1;
+    }
+    client.join().expect("the debug session failed");
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+    let before = eval(&mut app, "world.find('Counter').script.count")
+        .as_f64()
+        .unwrap();
+    app.update_n(3);
+    let after = eval(&mut app, "world.find('Counter').script.count")
+        .as_f64()
+        .unwrap();
+    assert_eq!(
+        after,
+        before + 6.0,
+        "the script runs on after the client left"
+    );
+    assert!(app.world.get::<Script>(counter).is_some());
+}
+
+#[test]
+fn logpoints_print_values_without_stopping_and_survive_a_reload() {
+    let folder = Folder::new();
+    folder.write("debug/counter.luau", COUNTER);
+    let mut app = app_in(&folder.0);
+    spawn_script(&mut app, "Counter", "debug/counter");
+    app.update_n(2);
+    let set = call_api(
+        &mut app.world,
+        "script.logpoint",
+        json!({"path": "debug/counter.luau", "line": 8, "message": "count = {self.count}", "log": true}),
+    )
+    .unwrap();
+    assert_eq!(set["at"], json!(8), "{set}");
+    app.update_n(3);
+    let count = eval(&mut app, "world.find('Counter').script.count")
+        .as_f64()
+        .unwrap();
+    let log = call_api(&mut app.world, "script.log", json!({})).unwrap();
+    let lines: Vec<&str> = log
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l.as_str())
+        .collect();
+    assert_eq!(lines.len(), 3, "once a frame: {log}");
+    assert_eq!(lines[2], format!("debug/counter.luau:8: count = {count}"));
+    let inline = |app: &mut App| {
+        app.world
+            .resource::<crate::ScriptRuntime>()
+            .debugger
+            .inline_values("debug/counter.luau")
+    };
+    let (v1, values) = inline(&mut app);
+    assert_eq!(values.get(&8).cloned(), Some(format!("count = {count}")));
+
+    // A hot reload moves the logpoint onto the new code.
+    edit(
+        &folder,
+        "debug/counter.luau",
+        &COUNTER.replace("local step = 2", "local step = 3"),
+    );
+    app.update_n(2);
+    let (v2, values) = inline(&mut app);
+    assert!(v2 > v1);
+    let count = eval(&mut app, "world.find('Counter').script.count")
+        .as_f64()
+        .unwrap();
+    assert_eq!(values.get(&8).cloned(), Some(format!("count = {count}")));
+
+    let removed = call_api(&mut app.world, "script.logpoint", json!({"clear": true})).unwrap();
+    assert_eq!(removed["removed"], json!(1));
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+}
+
+#[test]
+fn the_debugger_steps_over_waits_in_tasks_and_pauses_on_request() {
+    let folder = Folder::new();
+    folder.write(
+        "debug/waiter.luau",
+        "local Waiter = {}
+function Waiter:start()
+	self.n = 0
+	while true do
+		self.n += 1
+		task.wait(0.1)
+	end
+end
+return Waiter
+",
+    );
+    let mut app = app_in(&folder.0);
+    spawn_script(&mut app, "Waiter", "debug/waiter");
+    app.update_n(2);
+    let port = call_api(&mut app.world, "script.debug", json!({"port": 0})).unwrap()["port"]
+        .as_u64()
+        .unwrap() as u16;
+    let file = std::path::absolute(folder.0.join("debug/waiter.luau"))
+        .unwrap()
+        .display()
+        .to_string();
+    let client = std::thread::spawn(move || {
+        let mut c = Client::connect(port);
+        c.request("initialize", json!({}));
+        c.request("attach", json!({}));
+        c.request(
+            "setBreakpoints",
+            json!({"source": {"path": file}, "breakpoints": [{"line": 6}]}),
+        );
+        c.request("configurationDone", json!({}));
+        assert_eq!(c.event("stopped")["reason"], json!("breakpoint"));
+        let n =
+            c.request("evaluate", json!({"expression": "self.n", "frameId": 0}))["result"].clone();
+        c.request(
+            "setBreakpoints",
+            json!({"source": {"path": file}, "breakpoints": []}),
+        );
+        // Over the wait: the task yields, and the step ends when it runs again, a few frames
+        // later, still in start().
+        c.request("next", json!({"threadId": 1}));
+        assert_eq!(c.event("stopped")["reason"], json!("step"));
+        let top = c.request("stackTrace", json!({"threadId": 1}))["stackFrames"][0].clone();
+        assert_eq!(top["name"], json!("start"), "{top}");
+        assert_eq!(
+            c.request("evaluate", json!({"expression": "self.n", "frameId": 0}))["result"],
+            n,
+            "stopped before the loop counted again"
+        );
+        c.request("continue", json!({"threadId": 1}));
+        c.request("pause", json!({"threadId": 1}));
+        assert_eq!(c.event("stopped")["reason"], json!("pause"));
+        c.request("continue", json!({"threadId": 1}));
+        c.request("disconnect", json!({}));
+    });
+    let mut frames = 0;
+    while !client.is_finished() && frames < 600 {
+        app.update();
+        frames += 1;
+    }
+    client.join().expect("the debug session failed");
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+    let before = eval(&mut app, "world.find('Waiter').script.n")
+        .as_f64()
+        .unwrap();
+    app.update_n(10);
+    let after = eval(&mut app, "world.find('Waiter').script.n")
+        .as_f64()
+        .unwrap();
+    assert!(after > before, "the task runs on after the client left");
 }

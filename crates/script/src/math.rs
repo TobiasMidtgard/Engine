@@ -197,6 +197,31 @@ impl UserData for Quat {
     }
 }
 
+/// A [`engine_world::WorldShift`] as scripts see it in `on_world_shift(shift)`: where kept
+/// positions, directions and rotations go in the new frame.
+#[derive(Clone, Copy)]
+pub struct Shift(pub engine_world::WorldShift);
+
+impl UserData for Shift {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("translation", |_, s| Ok(Vec3(s.0.translation)));
+        fields.add_field_method_get("rotation", |_, s| Ok(Quat(s.0.rotation.as_quat())));
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("point", |_, s, p: Vec3| Ok(Vec3(s.0.point(p.0))));
+        methods.add_method("direction", |_, s, v: Vec3| {
+            Ok(Vec3(s.0.direction(v.f32()).as_dvec3()))
+        });
+        methods.add_method("orientation", |_, s, q: Quat| {
+            Ok(Quat(s.0.orientation(q.0)))
+        });
+        methods.add_meta_method(MetaMethod::ToString, |_, s, ()| {
+            Ok(format!("world shift by {}", s.0.translation))
+        });
+    }
+}
+
 /// Adds the `vec3` and `quat` globals (callable tables with constants and constructors).
 pub fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
