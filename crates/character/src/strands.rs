@@ -798,6 +798,19 @@ fn grow_scalp(
         // (Nor from the front of hanging hair, where one falls across the face.)
         let at_front = fine < 1.0 || (d.z > 0.03 && d.y < 0.07) || (g.gravity > 0.5 && d.z > 0.0);
         let flyaway = g.points > 5 && !at_front && r.f32() < 0.015;
+        // Hanging hair also holds short hairs, broken or growing back (hairs shed and regrow
+        // all the time, a few percent of them at any length; 4% here), which stand a little off the
+        // combed surface over the top and back: the fine halo real long hair shows against the
+        // light, where a groom of only full-length hairs has the clean edge of a wig.
+        let broken = g.gravity > 0.5
+            && !flyaway
+            && fine >= 1.0
+            && d.y > 0.03
+            && d.z < 0.03
+            && r.f32() < 0.04;
+        if broken {
+            scale *= r.range(0.1, 0.4);
+        }
         let mut pts = grow_hair(a, &g, sp, collider, lm, rest, &mut r, scale);
         // No two hairs grow quite the same way (groomers' "crossover"): turned a little about
         // the scalp's normal, most at the hairline, where combed-back hair otherwise lines up
@@ -876,6 +889,16 @@ fn grow_scalp(
                     (c * 1.2 * t.sqrt()).min(1.0)
                 };
                 *p = *p + (follow - *p) * w;
+            }
+        }
+        if broken {
+            // Standing off the hair over it, more toward the tip.
+            let out = (sp.p - lm.head).normalize_or(Vec3::Y);
+            let lift = r.range(0.003, 0.01);
+            let last = pts.len() - 1;
+            for (k, p) in pts.iter_mut().enumerate() {
+                let t = k as f32 / last as f32;
+                *p += out * (lift * t * t);
             }
         }
         if flyaway {
