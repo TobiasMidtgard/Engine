@@ -14,7 +14,7 @@ use crate::build::humanoid;
 use crate::ik::{GroundProbe, IkSurfaces, LookAt};
 use crate::xform::smoothing;
 
-/// One leg of a [`Shuttle`]: run to `to` (`[x, z]`, m from the origin) facing `facing_deg`
+/// One leg of a [`ShuttleRun`]: run to `to` (`[x, z]`, m from the origin) facing `facing_deg`
 /// (yaw, degrees; 0 faces −Z) at up to `top` m/s.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ShuttleLeg {
@@ -23,7 +23,7 @@ pub struct ShuttleLeg {
     pub top: f32,
 }
 
-/// What a [`Shuttle`] runner is doing.
+/// What a [`ShuttleRun`] runner is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub enum ShuttlePhase {
     /// Turning on the spot to face the next leg.
@@ -40,7 +40,7 @@ pub enum ShuttlePhase {
 /// parameters.
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Shuttle {
+pub struct ShuttleRun {
     pub origin: DVec3,
     /// Where the loop starts and ends, `[x, z]` m from the origin.
     pub start: [f32; 2],
@@ -65,7 +65,7 @@ pub struct Shuttle {
     pub(crate) accel_now: f32,
 }
 
-impl Default for Shuttle {
+impl Default for ShuttleRun {
     fn default() -> Self {
         Self {
             origin: DVec3::ZERO,
@@ -85,7 +85,7 @@ impl Default for Shuttle {
     }
 }
 
-impl Shuttle {
+impl ShuttleRun {
     /// Where leg `i` starts, `[x, z]`.
     fn from(&self, i: usize) -> Vec2 {
         let n = self.legs.len();
@@ -222,7 +222,7 @@ pub(crate) fn shuttle_system(
     surfaces: Res<IkSurfaces>,
     mut q: Query<(
         Entity,
-        &mut Shuttle,
+        &mut ShuttleRun,
         &mut Transform,
         Option<&mut AnimationParams>,
         Option<&LocalTimeScale>,
@@ -315,8 +315,8 @@ pub(crate) fn watch_system(
 mod tests {
     use super::*;
 
-    fn lane() -> Shuttle {
-        Shuttle {
+    fn lane() -> ShuttleRun {
+        ShuttleRun {
             start: [0.0, 7.0],
             legs: vec![
                 ShuttleLeg {

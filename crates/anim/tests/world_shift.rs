@@ -34,7 +34,7 @@ fn a_world_shift_changes_nothing_anyone_sees() {
     let (mut still, d) = app();
     let (mut moved, _) = app();
     // Mid-swing for the athlete, mid-stride for the walker, horse, spider and car, the
-    // stuntman on the stairs.
+    // stuntman on the stairs, the shuttle runner down his lane.
     run(&mut still, 3.0);
     run(&mut moved, 3.0);
     let shift = DVec3::new(-250.0, 0.0, 400.0);
@@ -51,6 +51,8 @@ fn a_world_shift_changes_nothing_anyone_sees() {
         ("spider", d.spider),
         ("car", d.car),
         ("stuntman", d.stuntman),
+        ("shuttle runner", d.runner),
+        ("coach", d.coach),
     ];
     for (name, e) in people {
         let a = still.world.get::<GlobalTransform>(e).unwrap();

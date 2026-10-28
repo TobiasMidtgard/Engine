@@ -46,7 +46,7 @@ use crate::ik::{GroundProbe, IkShape, IkSurface, IkSurfaces, LookAt, Reach, Reac
 use crate::muscle::{MorphWeights, MuscleRig};
 use crate::procedural::spring::SpringChains;
 use crate::retarget::HandGrip;
-use crate::shuttle::{Shuttle, ShuttleLeg, Watch};
+use crate::shuttle::{ShuttleLeg, ShuttleRun, Watch};
 use crate::skin::{SkinMaterial, SkinnedMesh, SkinnedMeshRenderer};
 use crate::stunt;
 use crate::xform::smoothing;
@@ -400,7 +400,7 @@ pub(crate) fn register(app: &mut App) {
     .register_component::<DemoScript>(
         "Demo timeline: triggers and parameter values at times (s), repeating every period.",
     )
-    .register_component::<Shuttle>(
+    .register_component::<ShuttleRun>(
         "Shuttle runner: straight legs from a standing start to a standing stop, turning on \
          the spot between them.",
     )
@@ -1688,7 +1688,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
     let (x, z) = (LANE.x as f32, LANE.z as f32);
     world.entity_mut(runner).insert((
         Name::new("Shuttle runner"),
-        Shuttle {
+        ShuttleRun {
             origin,
             start: [x, z],
             legs: vec![
