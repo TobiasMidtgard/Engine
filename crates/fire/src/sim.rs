@@ -53,6 +53,14 @@ pub enum FireCommand {
         radius: f32,
         water_kg_m2: f32,
     },
+    /// Spill burning petrol (a Molotov): see [`FireField::splash`].
+    Splash {
+        at: DVec3,
+        radius: f32,
+        kg: f32,
+        seed: u32,
+        lit: bool,
+    },
     Clear,
 }
 
@@ -397,6 +405,27 @@ pub fn handle_ignition(
                         let area = std::f32::consts::PI * shape.radius * shape.radius;
                         c.moisture += water_kg_m2 * area / c.fuel_kg.max(0.5);
                         c.temperature_c = c.temperature_c.min(100.0);
+                    }
+                }
+            }
+            FireCommand::Splash {
+                at,
+                radius,
+                kg,
+                seed,
+                lit,
+            } => {
+                field.splash(at, radius, kg, seed, lit, &mut fuel);
+                // The fireball as the bottle bursts heats what it splashes.
+                if lit {
+                    for (gt, mut c, shape) in &mut objects {
+                        let shape = shape
+                            .copied()
+                            .unwrap_or_else(|| FlameShape::from_fuel(c.fuel_kg));
+                        let d = shape.center(gt.translation()).distance(at) as f32;
+                        if d <= radius + shape.radius {
+                            c.temperature_c = c.temperature_c.max(700.0);
+                        }
                     }
                 }
             }

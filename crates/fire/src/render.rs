@@ -15,6 +15,7 @@ use engine_world::{Combustible, WindField};
 
 use crate::embers::Embers;
 use crate::field::{FireField, TILE};
+use crate::fuel::FuelKind;
 use crate::ground::PaintedGround;
 use crate::objects::{Burning, FlameShape};
 use crate::settings::FireSettings;
@@ -391,12 +392,15 @@ impl FireFeature {
                     }
                     let c = t.cell(IVec2::new(lx, ly));
                     let ground = (t.base_y + c.ground_y as f64 - base_y) as f32;
-                    self.map_data[(ty as u32 * w + tx as u32) as usize] = [
-                        f16(c.scorch),
-                        f16(c.glow.max(c.burn * 0.6)),
-                        f16(c.burn),
-                        f16(ground),
-                    ];
+                    // Burning petrol has no glowing bed under its flames (they stand off the
+                    // liquid on a dark layer of vapor): only the light of the flames above.
+                    let (glow, base) = if c.kind == FuelKind::Accelerant {
+                        (0.0, c.burn * 0.2)
+                    } else {
+                        (c.glow.max(c.burn * 0.6), c.burn)
+                    };
+                    self.map_data[(ty as u32 * w + tx as u32) as usize] =
+                        [f16(c.scorch), f16(glow), f16(base), f16(ground)];
                 }
             }
         }

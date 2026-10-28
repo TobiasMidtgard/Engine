@@ -29,7 +29,7 @@ use std::collections::hash_map::Entry;
 use engine_core::math::{DVec2, DVec3, IVec2, Vec2, Vec3, smoothstep};
 use engine_world::WorldShift;
 
-use crate::fuel::{CellFuel, FuelKind};
+use crate::fuel::{ACCELERANT_BURN_RATE, ACCELERANT_HEAT, CellFuel, FuelKind};
 
 /// Cells along one side of a tile.
 pub const TILE: i32 = 32;
@@ -250,10 +250,27 @@ impl Cell {
         (1.0 - 2.59 * r + 5.11 * r * r - 3.52 * r * r * r).clamp(0.0, 1.0)
     }
 
+    /// Seconds this cell's fuel flames at full intensity: its kind's, or for spilled petrol
+    /// as long as the puddle takes to burn off at a pool fire's rate.
+    pub fn burn_secs(&self) -> f32 {
+        match self.kind {
+            FuelKind::Accelerant => (self.load / ACCELERANT_BURN_RATE).max(0.5),
+            k => k.behavior().burn_secs,
+        }
+    }
+
+    /// Heat released in flames per kg of this cell's fuel, J.
+    pub fn flame_heat_j_kg(&self) -> f32 {
+        let heat = match self.kind {
+            FuelKind::Accelerant => ACCELERANT_HEAT,
+            _ => HEAT_OF_COMBUSTION,
+        };
+        heat * COMBUSTION_EFFICIENCY
+    }
+
     /// Flaming heat release at full intensity, W/m².
     pub fn peak_hrr(&self) -> f32 {
-        let b = self.kind.behavior();
-        self.load / b.burn_secs.max(0.1) * HEAT_OF_COMBUSTION * COMBUSTION_EFFICIENCY
+        self.load / self.burn_secs().max(0.1) * self.flame_heat_j_kg()
     }
 
     /// Start flaming now if the fuel can carry fire. Returns whether it ignited.
@@ -606,6 +623,104 @@ impl FireField {
             }
         });
         caught
+    }
+
+    /// Spill `kg` of petrol round `p` (a Molotov breaking): a ragged puddle about `radius`
+    /// meters across, deepest in the middle, and a few splashes flung past its edge. Soaked
+    /// cells burn at a pool fire's rate whatever lay there (bare rock and gravel too), and fuel
+    /// already there (grass) burns with it. With `lit` (a burning wick) the middle catches at
+    /// once and the flames run across the rest of the film within a step or two, as they do
+    /// over spilled petrol. `seed` picks the puddle's shape. Returns how many cells it soaked.
+    pub fn splash(
+        &mut self,
+        p: DVec3,
+        radius: f32,
+        kg: f32,
+        seed: u32,
+        lit: bool,
+        fuel: &mut dyn FuelSource,
+    ) -> usize {
+        let radius = radius.max(self.cell_m);
+        // The puddle's edge wanders in and out with direction (three lobes' worth of sines).
+        let s =
+            |k: u32| (seed.wrapping_mul(2654435761).wrapping_add(k * 40503) % 6283) as f32 * 1e-3;
+        let edge = |a: f32| {
+            radius
+                * (0.8
+                    + 0.14 * (2.0 * a + s(1)).sin()
+                    + 0.1 * (3.0 * a + s(2)).sin()
+                    + 0.06 * (5.0 * a + s(3)).sin())
+        };
+        // Splashes: small pools flung out past the edge.
+        let drops: Vec<(DVec2, f32)> = (0..5u32)
+            .map(|i| {
+                let a = s(10 + i) + i as f32 * 1.2566;
+                let d = edge(a) * (1.15 + 0.35 * (s(20 + i) / std::f32::consts::TAU));
+                let r = (radius * 0.18).max(self.cell_m * 0.75);
+                (
+                    DVec2::new(p.x, p.z) + DVec2::new(a.cos() as f64, a.sin() as f64) * d as f64,
+                    r,
+                )
+            })
+            .collect();
+        let reach = radius * 1.6 + self.cell_m;
+        let lo = self.cell_coord(p - DVec3::splat(reach as f64));
+        let hi = self.cell_coord(p + DVec3::splat(reach as f64));
+        let mut wet: Vec<(IVec2, f32, f32)> = Vec::new();
+        for cy in lo.y..=hi.y {
+            for cx in lo.x..=hi.x {
+                let c = IVec2::new(cx, cy);
+                let at = self.cell_center(c) - DVec2::new(p.x, p.z);
+                let d = at.length() as f32;
+                let e = edge(at.y.atan2(at.x) as f32);
+                let mut w = (1.0 - (d / e).powi(2)).max(0.0);
+                for (center, r) in &drops {
+                    let dd = (self.cell_center(c) - *center).length() as f32;
+                    w = w.max(0.45 * (1.0 - (dd / r).powi(2)).max(0.0));
+                }
+                if w > 0.0 {
+                    wet.push((c, w, d / e));
+                }
+            }
+        }
+        let area = self.cell_m * self.cell_m;
+        let total: f32 = wet.iter().map(|(_, w, _)| w * area).sum();
+        if total <= 0.0 {
+            return 0;
+        }
+        let per = kg.max(0.0) / total;
+        let mut soaked = 0;
+        for (c, w, near) in wet {
+            let (key, local) = Self::split(c);
+            let Some(i) = self.ensure_tile(key, p.y + 2.0, fuel) else {
+                continue;
+            };
+            let tile = &mut self.tiles[i];
+            let cell = tile.cell_mut(local);
+            let petrol = w * per;
+            // Grass under the petrol burns with it; a burnt or bare cell has only the petrol.
+            let under = if cell.is_intact() || cell.is_burning() {
+                cell.fuel
+            } else {
+                0.0
+            };
+            cell.kind = FuelKind::Accelerant;
+            cell.fuel = under + petrol;
+            cell.load = cell.fuel;
+            cell.moisture = 0.0;
+            cell.green_moisture = 0.0;
+            cell.ignition_c = 0.0;
+            cell.regrow_secs = 0.0;
+            cell.burnt_for = 0.0;
+            if lit && near < 0.35 {
+                cell.burn = cell.burn.max(0.25);
+                cell.heat = 0.0;
+            }
+            tile.active = true;
+            tile.version += 1;
+            soaked += 1;
+        }
+        soaked
     }
 
     /// Add heat (J/m²) to cells within `radius` of `p`, fading to zero at the edge.
@@ -1403,13 +1518,12 @@ fn update_tile(
             if c.burn < 0.01 {
                 c.burn = 0.0;
             }
-            let consumed = (c.load / b.burn_secs * c.burn * dt).min(c.fuel);
+            let burn_secs = c.burn_secs();
+            let consumed = (c.load / burn_secs * c.burn * dt).min(c.fuel);
             c.fuel -= consumed;
-            c.hrr = consumed / dt * HEAT_OF_COMBUSTION * COMBUSTION_EFFICIENCY;
+            c.hrr = consumed / dt * c.flame_heat_j_kg();
             // Coals build up while it flames.
-            c.glow = (c.glow + dt / (b.burn_secs * 0.5))
-                .min(1.0)
-                .max(c.burn * 0.5);
+            c.glow = (c.glow + dt / (burn_secs * 0.5)).min(1.0).max(c.burn * 0.5);
             c.temp = c.temp.max(FLAME_TEMP_C * c.burn);
             c.temp += (FLAME_TEMP_C * c.burn - c.temp) * (dt * 2.0).min(1.0);
             c.scorch = c
@@ -1821,6 +1935,72 @@ mod tests {
             .filter(|(p, c)| p.z > 7.0 && c.state() == CellState::Burnt)
             .count();
         assert_eq!(wet_burnt, 0, "soaked grass burned");
+    }
+
+    /// A Molotov: on bare gravel it burns by itself for several seconds and goes out, leaving
+    /// a black stain; on dry grass it lights the meadow round it.
+    #[test]
+    fn a_molotov_burns_on_bare_ground_and_lights_grass() {
+        pools();
+        let calm = |_p: DVec3| Vec3::ZERO;
+        let wet = |_p: DVec3| 0.0;
+        let step = StepInput {
+            dt: 0.05,
+            ambient_c: 20.0,
+            rain_mm_h: 0.0,
+            humidity: 0.3,
+            wind: &calm,
+            wetness: &wet,
+            params: SpreadParams::default(),
+            near: None,
+        };
+        let burning = |f: &FireField| {
+            f.cells_near(DVec3::ZERO, 10.0)
+                .filter(|(_, c)| c.is_burning())
+                .count()
+        };
+
+        // Bare gravel.
+        let mut field = FireField::new(0.5);
+        let mut bare = |_p: DVec3| (CellFuel::NONE, 0.0);
+        let soaked = field.splash(DVec3::ZERO, 1.8, 0.75, 7, true, &mut bare);
+        assert!((25..200).contains(&soaked), "{soaked} cells soaked");
+        let mut lit_at = None;
+        let mut out_at = None;
+        for i in 0..(20.0 / 0.05) as usize {
+            field.step(&step, &mut bare);
+            let n = burning(&field);
+            let t = i as f32 * 0.05;
+            if lit_at.is_none() && n * 10 >= soaked * 8 {
+                lit_at = Some(t);
+            }
+            if lit_at.is_some() && out_at.is_none() && n == 0 {
+                out_at = Some(t);
+            }
+        }
+        let lit_at = lit_at.expect("the flames run over the puddle");
+        assert!(
+            lit_at < 1.0,
+            "the whole puddle catches within a second: {lit_at}"
+        );
+        let out_at = out_at.expect("it burns out on bare ground");
+        assert!(
+            (3.0..15.0).contains(&out_at),
+            "burns several seconds: {out_at}"
+        );
+        let stain = field.cell_at(DVec3::ZERO).unwrap().scorch;
+        assert!(stain > 0.9, "a black stain where it burnt: {stain}");
+
+        // Dry grass: the meadow round it catches.
+        let mut field = FireField::new(0.5);
+        let mut fuel = grass;
+        field.splash(DVec3::ZERO, 1.8, 0.75, 7, true, &mut fuel);
+        // Grass creeps out slowly in still air (a few cm/s): give it half a minute.
+        for _ in 0..(30.0 / 0.05) as usize {
+            field.step(&step, &mut fuel);
+        }
+        let reached = front(&field, DVec3::ZERO, DVec3::X);
+        assert!(reached > 3.5, "the grass round the puddle burns: {reached}");
     }
 
     #[test]

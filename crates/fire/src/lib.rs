@@ -205,6 +205,27 @@ fn register_apis(app: &mut App) {
         },
     )
     .register_api(
+        "fire.molotov",
+        "Break a Molotov at a point: kg of burning petrol (a 1 l bottle is 0.75) spills into a \
+         ragged puddle about radius m across and burns for several seconds on anything, grass \
+         or bare rock, lighting what's around it.",
+        r#"{"at": [130, 0, 150], "kg": 0.75, "radius": 1.8}"#,
+        |world, args| {
+            let at = vec3_arg(&args, "at")?;
+            let kg = f32_arg(&args, "kg", 0.75).clamp(0.0, 50.0);
+            let radius = f32_arg(&args, "radius", 1.8).clamp(0.3, 20.0);
+            let seed = (at.x * 13.0 + at.z * 7.0).to_bits() as u32;
+            world.resource_mut::<FireCommands>().0.push(FireCommand::Splash {
+                at,
+                radius,
+                kg,
+                seed,
+                lit: true,
+            });
+            Ok(json!({"queued": true, "at": at.to_array(), "kg": kg, "radius": radius}))
+        },
+    )
+    .register_api(
         "fire.clear",
         "Remove every fire, coal and scorch mark (the fuel comes back).",
         "{}",

@@ -68,7 +68,9 @@ pub(crate) fn shift_fire(
     }
     for c in &mut queued.0 {
         match c {
-            FireCommand::Ignite { at, .. } | FireCommand::Extinguish { at, .. } => {
+            FireCommand::Ignite { at, .. }
+            | FireCommand::Extinguish { at, .. }
+            | FireCommand::Splash { at, .. } => {
                 *at = s.point(*at);
             }
             FireCommand::Clear => {}

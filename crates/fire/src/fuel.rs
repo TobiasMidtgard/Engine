@@ -23,7 +23,18 @@ pub enum FuelKind {
     Brush,
     /// Timber, planks, logs: slow, hot, long-glowing coals, dark smoke.
     Wood,
+    /// Spilled liquid fuel (a Molotov's petrol): any flame lights it, it burns off at a pool
+    /// fire's steady rate (see [`ACCELERANT_BURN_RATE`]) whatever lies under it, with tall
+    /// flames and black smoke, and leaves no coals. Placed by
+    /// [`FireField::splash`](crate::field::FireField::splash), never by the ground.
+    Accelerant,
 }
+
+/// How fast spilled petrol burns off, kg/m²/s: a pool fire's steady burning rate (gasoline
+/// 0.046-0.052 kg/m²/s in 0.5-1 m pans; Babrauskas; Chen et al. 2019, PMC7014283).
+pub const ACCELERANT_BURN_RATE: f32 = 0.05;
+/// Heat of combustion of petrol, J/kg (43.7 MJ/kg, the same source).
+pub const ACCELERANT_HEAT: f32 = 43.7e6;
 
 /// Behaviour of one [`FuelKind`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -84,6 +95,16 @@ impl FuelKind {
                 glow_secs: 240.0,
                 smoke_darkness: 0.6,
                 embers: 1.0,
+            },
+            // Burn time follows the puddle's depth (`Cell::burn_secs`); this is a typical
+            // Molotov puddle's. Petrol floats on water, so a wet ground hardly damps it.
+            FuelKind::Accelerant => FuelBehavior {
+                burn_secs: 6.0,
+                extinction_moisture: 3.0,
+                flame_m: 2.0,
+                glow_secs: 1.5,
+                smoke_darkness: 0.9,
+                embers: 0.0,
             },
         }
     }

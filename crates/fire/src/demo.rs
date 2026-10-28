@@ -51,6 +51,13 @@ const ROAD_X: f32 = 14.0;
 const ROAD_HALF: f32 = 1.5;
 /// Width of the mown border around it (m).
 const BORDER: f32 = 4.0;
+/// A Molotov breaks on the bare corner of the mown border (demo-relative X/Z, m) this many
+/// seconds into each fire: petrol burning on bare ground, well clear of the meadow.
+const MOLOTOV: [f32; 2] = [30.0, -20.5];
+const MOLOTOV_AT: f32 = 20.0;
+/// Its petrol (kg; a 1 l bottle) and puddle radius (m).
+const MOLOTOV_KG: f32 = 0.75;
+const MOLOTOV_RADIUS: f32 = 1.4;
 /// Half extents of the ground the demo covers (m).
 pub const FOOTPRINT: [f32; 2] = [MEADOW[0] + BORDER, MEADOW[1] + BORDER];
 
@@ -124,6 +131,15 @@ pub const VIEWS: &[DemoView] = &[
         at_secs: 35.0,
         warmup_secs: WATCH_SECS,
     },
+    DemoView {
+        key: "fire_molotov",
+        name: "Molotov on bare ground",
+        eye: [26.6, 1.5, -24.2],
+        target: [30.0, 0.5, -20.5],
+        hour: 17.6,
+        at_secs: MOLOTOV_AT - 0.5,
+        warmup_secs: 2.0,
+    },
 ];
 
 /// A burning-meadow demo, centered on its `Transform`. Tune it live through the AI bridge.
@@ -172,6 +188,8 @@ pub struct FireDemoState {
     pub jump_to: Option<f32>,
     /// The fire's jump ahead still to run (spread over a loading screen's frames).
     ahead: Option<Ahead>,
+    /// This fire's Molotov has broken (or the fire started past it).
+    molotov_done: bool,
 }
 
 /// A jump ahead under way: steps left, and how far the wind it burns in has got.
@@ -665,7 +683,8 @@ fn due(demo: &FireDemo, state: &FireDemoState) -> bool {
         && (state.jump_to.is_some()
             || !state.started
             || state.ahead.is_some()
-            || state.since >= demo.cycle_secs)
+            || state.since >= demo.cycle_secs
+            || state.started && !state.molotov_done && state.since >= MOLOTOV_AT)
 }
 
 /// Every frame, as a normal system: count each [`FireDemo`]'s frames and time its fire (a
@@ -726,6 +745,7 @@ pub fn run_demos(world: &mut World) {
             light(world, place, &demo);
             state.ahead = ahead_of(world, at);
             state.since = at;
+            state.molotov_done = at > MOLOTOV_AT;
             run_ahead(world, place, &demo, &mut state);
         } else if !state.started {
             state.started = true;
@@ -733,6 +753,7 @@ pub fn run_demos(world: &mut World) {
             light(world, place, &demo);
             state.ahead = ahead_of(world, demo.warmup_secs);
             state.since = demo.warmup_secs;
+            state.molotov_done = demo.warmup_secs > MOLOTOV_AT;
             run_ahead(world, place, &demo, &mut state);
         } else if state.ahead.is_some() {
             run_ahead(world, place, &demo, &mut state);
@@ -741,6 +762,20 @@ pub fn run_demos(world: &mut World) {
             light(world, place, &demo);
             state.since = 0.0;
             state.cycles += 1;
+            state.molotov_done = false;
+        } else if !state.molotov_done && state.since >= MOLOTOV_AT {
+            state.molotov_done = true;
+            let at = place.world(MOLOTOV[0] as f64, MOLOTOV[1] as f64);
+            world
+                .resource_mut::<sim::FireCommands>()
+                .0
+                .push(sim::FireCommand::Splash {
+                    at,
+                    radius: MOLOTOV_RADIUS,
+                    kg: MOLOTOV_KG,
+                    seed: state.cycles,
+                    lit: true,
+                });
         }
         contain(&mut world.resource_mut::<FireField>(), place, &demo);
         world.entity_mut(entity).insert(state);
@@ -1056,6 +1091,37 @@ mod tests {
         assert_eq!(r["demos"], 1);
         app.update_n(2);
         (app, origin)
+    }
+
+    /// Each fire, a Molotov breaks on the bare corner of the border, burns there by itself and
+    /// goes out without reaching the meadow.
+    #[test]
+    fn a_molotov_breaks_on_the_border_and_burns_out_there() {
+        let (mut app, origin) = jumped(MOLOTOV_AT - 0.5, Vec3::new(0.0, 0.0, 0.0));
+        let at = origin + DVec3::new(MOLOTOV[0] as f64, 0.0, MOLOTOV[1] as f64);
+        let burning = |app: &App| {
+            app.world
+                .resource::<FireField>()
+                .cells_near(at, 4.0)
+                .filter(|(_, c)| c.is_burning())
+                .count()
+        };
+        assert_eq!(burning(&app), 0, "not yet thrown");
+        // A second and a half later (30 updates a second), the puddle is alight.
+        app.update_n(45);
+        let lit = burning(&app);
+        assert!(lit > 20, "the puddle burns: {lit} cells");
+        // Twenty seconds on it has burnt out, leaving a stain, and the meadow next to it is
+        // untouched.
+        app.update_n(600);
+        assert_eq!(burning(&app), 0, "burnt out");
+        let field = app.world.resource::<FireField>();
+        assert!(field.cell_at(at).unwrap().scorch > 0.9);
+        let meadow = origin + DVec3::new(MEADOW[0] as f64 - 2.0, 0.0, -MEADOW[1] as f64 + 2.0);
+        assert!(
+            field.cell_at(meadow).is_none_or(|c| c.is_intact()),
+            "the meadow by the border didn't catch"
+        );
     }
 
     #[test]
