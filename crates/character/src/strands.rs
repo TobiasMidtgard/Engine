@@ -641,7 +641,7 @@ fn grow_scalp(
             points: 10 + (12.0 * a.hair.curl.clamp(0.0, 1.0)) as u32,
             density: 130.0,
             gravity: 0.25,
-            loft: 0.009,
+            loft: 0.012,
             clump: 0.55,
             root_radius: 0.00006,
             bun: Vec3::ZERO,
@@ -805,7 +805,15 @@ fn grow_scalp(
             }
         }
         // The strand of hairs this one grows with (see the locks below).
-        let strand = strand_center(sp.rest, if g.gravity > 0.5 { 0.004 } else { 0.003 });
+        // (Curls coil in wider strands.)
+        let strand = strand_center(
+            sp.rest,
+            if g.gravity > 0.5 {
+                0.004
+            } else {
+                0.003 + 0.004 * curl
+            },
+        );
         let mut lock_tone = None;
         // How far out in its lock the hair is (0 on the guide .. 1 at the lock's edge).
         let mut lock_edge = 0.0;
@@ -921,6 +929,7 @@ fn grow_scalp(
         let last = pts.len() - 1;
         let mut face_side = None;
         let jitter = hash01(sp.rest);
+        let loft = loft_at(a, &g, d);
         // A hanging hair crossing the middle of the forehead low, below the swept hair, shows
         // alone against the skin as a stray line: leave it out (the hair above it covers). (The
         // narrow side's hair, swept away from the middle, stays.)
@@ -938,7 +947,7 @@ fn grow_scalp(
                     lm,
                 );
             }
-            *p = collider.push_out(*p, 0.0008 + g.loft * t.min(0.4) / 0.4 * 0.6);
+            *p = collider.push_out(*p, 0.0008 + loft * t.min(0.4) / 0.4 * 0.6 * tuck(a, t));
         }
         // A point pushed out of the thin ear one way while its neighbours went the other way
         // spikes the hair out by centimetres: take it back to between them (inside the ear's
@@ -1140,6 +1149,45 @@ fn len_of(pts: &[Vec3]) -> f32 {
 }
 
 /// A stable 0..1 value from a position (so a hair's guide pass and final pass agree).
+/// How much of its style's length a hair at `d` (from the head's center, rest) has: short hair
+/// is cut, not grown evenly, shorter over the sides and nape (graduated up to the weight at the
+/// back of the head) and longest on top and at the front, as a barber's cut. Other styles are
+/// even.
+fn cut_length(a: &Appearance, d: Vec3) -> f32 {
+    if a.hair_style() != HairStyle::Short {
+        return 1.0;
+    }
+    let top = smoothstep(-0.03, 0.08, d.y);
+    (0.45 + 0.55 * top) * (1.0 + 0.1 * smoothstep(0.0, 0.08, d.z))
+}
+
+/// How far the hair at `d` (from the head's center, rest) stands off the scalp. Short hair is
+/// set to a shape, full on top and close over the sides and nape, its surface wandering a
+/// little over a few centimetres (curly hair has more volume); a constant height everywhere
+/// reads as a helmet or a fur hat. Other styles stand off evenly.
+fn loft_at(a: &Appearance, g: &Groom, d: Vec3) -> f32 {
+    if a.hair_style() != HairStyle::Short {
+        return g.loft;
+    }
+    let curl = a.hair.curl.clamp(0.0, 1.0);
+    let top = smoothstep(-0.02, 0.09, d.y);
+    let wander = 1.0
+        + 0.1
+            * ((d.x * 140.0 + 1.3).sin() * (d.z * 120.0 + 0.7).sin()
+                + 0.5 * (d.y * 170.0 + 2.1).sin());
+    g.loft * (1.0 + curl) * (0.3 + 0.7 * top) * wander
+}
+
+/// Short hair's tips tuck in under the hair beyond them, as shingles lie (the hair's surface
+/// is its mid-lengths, not a pile of tips).
+fn tuck(a: &Appearance, t: f32) -> f32 {
+    if a.hair_style() == HairStyle::Short {
+        1.0 - 0.35 * smoothstep(0.7, 1.0, t)
+    } else {
+        1.0
+    }
+}
+
 /// Where the strand of the hair rooted at `rest` gathers: the nearest of points jittered
 /// about a grid of `cell` (so strands are irregular patches about a cell across).
 fn strand_center(rest: Vec3, cell: f32) -> Vec3 {
@@ -1231,7 +1279,7 @@ fn grow_hair(
         }
         HairStyle::Bald => Vec3::NEG_Y,
     };
-    let len = g.length * length_scale;
+    let len = g.length * length_scale * cut_length(a, d);
     let seg = len / (n - 1) as f32;
     let mut pts = Vec::with_capacity(n);
     pts.push(sp.p);
@@ -1252,10 +1300,17 @@ fn grow_hair(
     let mut rise = if g.gravity > 0.5 { 0.26 } else { 0.24 } + 0.4 * near_part;
     let mut along = tangent(flow, sp.n);
     if matches!(a.hair_style(), HairStyle::Buzz | HairStyle::Short) {
-        // Coily hair isn't combed flat: it stands up and points every way.
+        // Coily hair isn't combed flat: it stands up and points every way. Short hair that is
+        // only wavy or curly is still combed and set (each hair pointing its own way made a
+        // frizz like fur), lifting more on top, where a set cut has its volume.
+        let coily = if a.hair_style() == HairStyle::Buzz {
+            curl
+        } else {
+            smoothstep(0.6, 1.0, curl)
+        };
         let any = tangent(Vec3::new(r.normal(), r.normal(), r.normal()), sp.n);
-        along = (along * (1.0 - 0.85 * curl) + any * curl).normalize_or(along);
-        rise += 0.5 * curl;
+        along = (along * (1.0 - 0.85 * coily) + any * coily).normalize_or(along);
+        rise += 0.5 * coily + 0.3 * (curl - coily) * smoothstep(-0.02, 0.09, d.y);
     }
     let mut dir = (along + sp.n * rise).normalize();
     let bun_center = lm.head + g.bun;
@@ -1267,7 +1322,13 @@ fn grow_hair(
     let mut drift = Vec3::ZERO;
     // How far this hair stands off the head (one value per hair: a new one at every point
     // pushed hanging hair in and out into a crimp).
-    let lift = r.range(0.4, 1.0);
+    // (Short hair lies on its set shape: nearly the same height for every hair.)
+    let lift = if a.hair_style() == HairStyle::Short {
+        r.range(0.85, 1.0)
+    } else {
+        r.range(0.4, 1.0)
+    };
+    let loft = loft_at(a, g, d);
     for k in 1..n {
         let t = k as f32 / (n - 1) as f32;
         let p_prev = pts[k - 1];
@@ -1298,7 +1359,7 @@ fn grow_hair(
         if g.gravity > 0.5 {
             p = keep_off_face(p, &mut face_side, jitter, lm);
         }
-        let offset = 0.0008 + g.loft * (t / 0.4).min(1.0) * lift;
+        let offset = 0.0008 + loft * (t / 0.4).min(1.0) * lift * tuck(a, t);
         p = collider.push_out(p, offset);
         // Hair that fell past the shoulders hangs straight on.
         dir = (p - p_prev).normalize_or(next_dir);

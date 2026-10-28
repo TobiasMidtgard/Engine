@@ -182,7 +182,16 @@ fn strand_shade(in: StrandOut) -> vec3<f32> {
     let glint = vec2<f32>(0.6 + 0.8 * fract(random * 91.7), 0.4 + 1.2 * fract(random * 53.1));
     // Scalp hair is smoother than brows and beard; fair hair scatters more light between
     // fibers than dark.
-    let rough = select(0.42, 0.3, kind == 0u) * (0.85 + 0.3 * fract(random * 37.3));
+    let rough = select(0.42, 0.33, kind == 0u) * (0.85 + 0.3 * fract(random * 37.3));
+    // No fiber runs quite straight: each wavers a few degrees every few millimetres and leans
+    // its own way, and its highlight moves with it (Unreal's photoreal character jitters the
+    // shading tangent per strand; Scheuermann 2004 shifts it by noise). With every fiber of a
+    // lock along the same tangent, the highlight is one smooth band, the sheen of a wig.
+    let b = normalize(cross(t, nc));
+    let w1 = sin(dot(in.rest, vec3<f32>(631.0, 797.0, 563.0)) + random * 61.0);
+    let w2 = sin(dot(in.rest, vec3<f32>(-487.0, 913.0, 701.0)) + random * 43.0);
+    let lean = vec2<f32>(fract(random * 23.7), fract(random * 71.3)) - 0.5;
+    let ts = normalize(t + nc * (0.06 * w1 + 0.1 * lean.x) + b * (0.04 * w2 + 0.06 * lean.y));
     let scatter = mix(0.8, 1.3, saturate(dot(base, vec3<f32>(0.3, 0.5, 0.2)) * 2.5));
     // The hair in the way of each light shades it (below); occlusion keeps the gaps between
     // locks and the roots darker.
@@ -194,7 +203,7 @@ fn strand_shade(in: StrandOut) -> vec3<f32> {
     if (dot(sun, sun) > 0.0) {
         let shadow = shadow_factor(in.rel, nc);
         let depth = strand_depth_toward(in, l);
-        color += hair_light(t, v, l, base, rough, glint, shadow, depth, scatter) * sun * lit;
+        color += hair_light(ts, v, l, base, rough, glint, shadow, depth, scatter) * sun * lit;
     }
     let count = frame.counts.x;
     for (var i = 0u; i < count; i++) {
@@ -206,7 +215,7 @@ fn strand_shade(in: StrandOut) -> vec3<f32> {
         let pl = to_light * inverseSqrt(max(dist2, 1e-8));
         let falloff = sq(saturate(1.0 - sq(dist2 / (range * range)))) / max(dist2, sq(light.color_radius.w));
         let depth = strand_depth_toward(in, pl);
-        color += hair_light(t, v, pl, base, rough, glint, 1.0, depth, scatter) * light.color_radius.rgb * falloff * lit;
+        color += hair_light(ts, v, pl, base, rough, glint, 1.0, depth, scatter) * light.color_radius.rgb * falloff * lit;
     }
     let sky_vis = sky_visibility(in.rel, nc);
     let fill = frame.ambient.rgb;
