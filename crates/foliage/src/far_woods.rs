@@ -631,7 +631,15 @@ pub fn stream_far_woods(
                 continue;
             }
             let d = flat_distance(center((i, j)));
-            if d > settings.end_m + half_diag || d + half_diag < settings.start_m {
+            if d + half_diag < settings.start_m {
+                // Wholly inside the start (the camera jumped or ran into it): the real trees
+                // stand here, so its cards go rather than drawing over them.
+                if let Some(e) = state.cells.remove(&(i, j)) {
+                    drop_cell(e, &cells, &mut commands, &mut meshes);
+                }
+                continue;
+            }
+            if d > settings.end_m + half_diag {
                 continue;
             }
             let b = band(&settings, d.max(settings.start_m));
@@ -700,6 +708,10 @@ pub fn stream_far_woods(
         let Some(parts) = p.build.take() else {
             continue;
         };
+        // The camera has come in over it while it built.
+        if flat_distance(center(key)) + half_diag < settings.start_m {
+            continue;
+        }
         if let Some(e) = state.cells.remove(&key) {
             drop_cell(e, &cells, &mut commands, &mut meshes);
         }
@@ -943,6 +955,33 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
             frames += 1;
             assert!(frames < 5000, "worker builds never arrived");
+        }
+    }
+
+    #[test]
+    fn a_camera_jumping_into_the_woods_leaves_no_cards_round_it() {
+        let (mut app, cam) = woods_app();
+        // A start wide enough for cells to lie wholly inside it.
+        app.world.resource_mut::<FarWoods>().start_m = 300.0;
+        app.world
+            .insert_resource(ForestCover(std::sync::Arc::new(Everywhere)));
+        app.update_n(COVER_SETTLE_FRAMES as usize + 2);
+        // A jump of 500 m (a tour or walk stop, a sprint over a few seconds): cells that stood
+        // in the ring are now wholly inside the start, where the real trees are.
+        let to = DVec3::new(500.0, 0.0, 0.0);
+        app.world.get_mut::<Transform>(cam).unwrap().translation = to;
+        app.update_n(2);
+        let mut cells = app.world.query::<(&FarWoodCell, &Transform)>();
+        for (c, t) in cells.iter(&app.world) {
+            if c.meshes.is_empty() {
+                continue;
+            }
+            let center = t.translation + DVec3::new(64.0, 0.0, 64.0);
+            let d = DVec2::new(center.x - to.x, center.z - to.z).length();
+            assert!(
+                d > 300.0 - 91.0,
+                "far woods cell left at {d:.0} m from the camera"
+            );
         }
     }
 
