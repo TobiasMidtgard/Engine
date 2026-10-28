@@ -1731,6 +1731,231 @@ fn guard(s: &Skeleton) -> AnimationClip {
     .with_curve("fist", 2, |_| 0.9)
 }
 
+/// A boxer's guard arms (lead left fist before the chin, rear right fist by the cheek), as in
+/// [`guard`] without its weave.
+const GUARD_ARMS: [Arm; 2] = [
+    Arm {
+        flex: 50.0,
+        twist: 0.0,
+        abduct: -16.0,
+        elbow: 110.0,
+        wrist: -6.0,
+        protract: 8.0,
+        elevate: 7.0,
+    },
+    Arm {
+        flex: 55.0,
+        twist: 10.0,
+        abduct: -28.0,
+        elbow: 145.0,
+        wrist: -8.0,
+        protract: 5.0,
+        elevate: 9.0,
+    },
+];
+
+/// The punches of the paddock's combo ([`crate::combat`]), all from and back to the guard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Punch {
+    /// Lead (left) straight: quick, the shoulder turned in.
+    Jab,
+    /// Rear (right) straight: the hips and chest turn through it.
+    Cross,
+    /// Lead hook: the elbow up level with the fist, the body turning hard behind it.
+    Hook,
+    /// Rear uppercut: dip, then drive up through the legs.
+    Uppercut,
+}
+
+impl Punch {
+    pub const ALL: [Punch; 4] = [Punch::Jab, Punch::Cross, Punch::Hook, Punch::Uppercut];
+
+    pub fn clip_name(self) -> &'static str {
+        match self {
+            Punch::Jab => "jab",
+            Punch::Cross => "cross",
+            Punch::Hook => "hook",
+            Punch::Uppercut => "uppercut",
+        }
+    }
+
+    /// The punching side (0 left, 1 right).
+    pub fn side(self) -> usize {
+        match self {
+            Punch::Jab | Punch::Hook => 0,
+            Punch::Cross | Punch::Uppercut => 1,
+        }
+    }
+
+    /// Length, and the phase where the fist lands.
+    pub fn timing(self) -> (f32, f32) {
+        match self {
+            Punch::Jab => (0.5, 0.32),
+            Punch::Cross => (0.62, 0.36),
+            Punch::Hook => (0.72, 0.42),
+            Punch::Uppercut => (0.75, 0.45),
+        }
+    }
+}
+
+/// A punch from the guard: wind-up, the fist out on the landing phase, back to the guard.
+/// `impact` fires on the punching hand where it lands; `effort` peaks there.
+fn punch(s: &Skeleton, kind: Punch) -> AnimationClip {
+    let (secs, land) = kind.timing();
+    let side = kind.side();
+    let keys = 31;
+    // Phases: start (guard), load, land, hold a moment, back.
+    let load = land * 0.45;
+    let back = (land + 0.12).min(0.75);
+    let out = match kind {
+        Punch::Jab => Arm {
+            flex: 88.0,
+            twist: -55.0,
+            abduct: -4.0,
+            elbow: 6.0,
+            wrist: 0.0,
+            protract: 22.0,
+            elevate: 6.0,
+        },
+        Punch::Cross => Arm {
+            flex: 86.0,
+            twist: -60.0,
+            abduct: -2.0,
+            elbow: 5.0,
+            wrist: 0.0,
+            protract: 26.0,
+            elevate: 5.0,
+        },
+        Punch::Hook => Arm {
+            flex: 72.0,
+            twist: 30.0,
+            abduct: 62.0,
+            elbow: 95.0,
+            wrist: 0.0,
+            protract: 18.0,
+            elevate: 12.0,
+        },
+        Punch::Uppercut => Arm {
+            flex: 70.0,
+            twist: 20.0,
+            abduct: -18.0,
+            elbow: 85.0,
+            wrist: -10.0,
+            protract: 14.0,
+            elevate: 4.0,
+        },
+    };
+    // The punching arm draws back a little on the load (a hook swings out first).
+    let guard = GUARD_ARMS[side];
+    let loaded = match kind {
+        Punch::Hook => Arm {
+            abduct: 35.0,
+            elbow: 100.0,
+            ..guard
+        },
+        Punch::Uppercut => Arm {
+            flex: 30.0,
+            elbow: 100.0,
+            abduct: -24.0,
+            ..guard
+        },
+        _ => Arm {
+            flex: guard.flex - 6.0,
+            ..guard
+        },
+    };
+    // Chest yaw (+ turns left) at the landing: the punching shoulder comes through.
+    let turn = match kind {
+        Punch::Jab => -10.0,
+        Punch::Cross => 28.0,
+        Punch::Hook => -34.0,
+        Punch::Uppercut => 20.0,
+    };
+    let wind = match kind {
+        Punch::Hook => 10.0,
+        Punch::Uppercut => -8.0,
+        _ => -turn * 0.15,
+    };
+    let dip = if kind == Punch::Uppercut { 14.0 } else { 0.0 };
+    let effort = [
+        (0.0, 0.1),
+        (load, 0.4),
+        (land, 1.0),
+        (back, 0.5),
+        (1.0, 0.15),
+    ];
+    // How much aim IK pulls the fist onto the target (combat::aim_strikes).
+    let strike = [
+        (0.0, 0.0),
+        (load, 0.2),
+        (land, 1.0),
+        (back, 0.6),
+        (1.0, 0.0),
+    ];
+    let name = kind.clip_name();
+    AnimationClip::from_fn(name, secs, keys, false, move |ph| {
+        let mut p = PoseBuilder::new(s);
+        let k = |keys: &[(f32, f32)]| keyed(ph, keys);
+        let yaw = k(&[
+            (0.0, 0.0),
+            (load, wind),
+            (land, turn),
+            (back, turn * 0.8),
+            (1.0, 0.0),
+        ]);
+        // Knees: the boxer's stance, sinking on the load (an uppercut dips and drives up).
+        let sink = k(&[
+            (0.0, 0.0),
+            (load, 3.0 + dip),
+            (land, if dip > 0.0 { -4.0 } else { 2.0 }),
+            (1.0, 0.0),
+        ]);
+        p.rot_move(
+            "hips",
+            Vec3::new(0.0, -0.045 - sink * 0.004, 0.0),
+            2.0 + sink * 0.3,
+            -24.0 + yaw * 0.5,
+            0.0,
+        );
+        spine(
+            &mut p,
+            [-2.0 + sink * 0.4, -3.0, 2.0, -8.0],
+            [yaw * 0.25, yaw * 0.35, -yaw * 0.2, -yaw * 0.25],
+            [0.0, 0.0, 0.0, 0.0],
+        );
+        let punching = arm_keyed(
+            ph,
+            &[
+                (0.0, guard),
+                (load, loaded),
+                (land, out),
+                (back, out.lerp(&guard, 0.25)),
+                (1.0, guard),
+            ],
+        );
+        arm(&mut p, side, punching);
+        // The other hand stays up by the chin.
+        arm(&mut p, 1 - side, GUARD_ARMS[1 - side]);
+        // Stance: lead leg ahead, rear heel up; the rear foot pivots on a cross.
+        let pivot = if side == 1 {
+            k(&[(0.0, 8.0), (land, 18.0), (1.0, 8.0)])
+        } else {
+            8.0
+        };
+        leg(&mut p, 0, 20.0, 4.0, 26.0 + sink, 8.0, 0.0);
+        leg(&mut p, 1, -6.0, 6.0, 20.0 + sink, -6.0, pivot);
+        p.take()
+    })
+    .with_curve("effort", keys, move |ph| keyed(ph, &effort))
+    .with_curve("fist", 2, |_| 1.0)
+    .with_curve("strike", keys, move |ph| keyed(ph, &strike))
+    .with_event(
+        land,
+        "impact",
+        Some(if side == 0 { "hand_l" } else { "hand_r" }),
+    )
+}
+
 /// The right hand of the hammer block: the handle held across in front of the face,
 /// pointing left, the forearm up.
 const BLOCK_ARM: Arm = Arm {
@@ -2863,6 +3088,10 @@ pub fn clips(s: &Skeleton) -> Vec<AnimationClip> {
         get_up_back(s),
         get_up_front(s),
         fall_brace(s),
+        punch(s, Punch::Jab),
+        punch(s, Punch::Cross),
+        punch(s, Punch::Hook),
+        punch(s, Punch::Uppercut),
     ]
 }
 

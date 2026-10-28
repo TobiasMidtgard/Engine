@@ -6,6 +6,7 @@ pub mod body;
 pub mod build;
 pub mod character;
 pub mod clip;
+pub mod combat;
 pub mod demo;
 pub mod events;
 pub mod face;
@@ -82,6 +83,7 @@ pub struct AnimationPlugin;
 impl Plugin for AnimationPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AnimationLibrary>()
+            .init_resource::<combat::AttackSets>()
             .init_resource::<ik::IkSurfaces>()
             .init_resource::<ragdoll::RagdollDefs>()
             .init_asset::<SkinnedMesh>()
@@ -125,6 +127,7 @@ impl Plugin for AnimationPlugin {
                     horse_model::load_horse_models,
                     animator::build_animators,
                     animator::queue_triggers,
+                    combat::run_attacks,
                     (model::spawn_rig_models, model::despawn_orphan_parts),
                     body::drive_bodies,
                     body::hide_drawn_bodies,
@@ -148,7 +151,12 @@ impl Plugin for AnimationPlugin {
                 )
                     .chain()
                     .in_set(AnimSet::Procedural),
-                (ik::foot_ik_system, ik::look_at_system, ik::reach_ik_system)
+                (
+                    ik::foot_ik_system,
+                    ik::look_at_system,
+                    ik::reach_ik_system,
+                    combat::aim_strikes,
+                )
                     .chain()
                     .in_set(AnimSet::Ik),
                 (
@@ -183,6 +191,11 @@ fn register_types(app: &mut App) {
     app.register_component::<AnimatorSettings>(
         "Animated character: skeleton and graph names from the AnimationLibrary, playback \
          speed, pause, root motion, LOD distance (m).",
+    )
+    .register_component::<combat::Attacker>(
+        "Attacks with a named AttackSet: takes attack_light/attack_heavy presses (buffered \
+         0.2 s), links combos in cancel windows, closes in on its target, lands DamageEvents \
+         with hitstop; publishes the move, phase and cancel/armor flags.",
     )
     .register_component::<FootIk>(
         "Plants feet on uneven ground: pelvis drop, two-bone legs, foot tilt (meters, degrees).",

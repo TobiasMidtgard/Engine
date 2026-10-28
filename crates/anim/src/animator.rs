@@ -8,7 +8,7 @@ use engine_core::prelude::*;
 use engine_world::animation::{AnimationParams, AnimationTrigger, Ragdoll, SkeletonPose};
 use engine_world::{FocusPoints, SimulationRange};
 
-use crate::clip::AnimationClip;
+use crate::clip::{AnimationClip, ClipBinding};
 use crate::graph::{AnimGraph, EvalCtx, FiredEvent, GraphInstance};
 use crate::motion::MotionDatabase;
 use crate::skeleton::Skeleton;
@@ -174,6 +174,24 @@ pub struct Animator {
     posed: bool,
     /// The first pose after frames without one: systems with motion history restart it.
     fresh: bool,
+    /// A one-shot clip laid over the graph's pose (an attack, a hit reaction).
+    overlay: Option<Overlay>,
+    /// Seconds the pose holds still (hitstop).
+    freeze: f32,
+}
+
+/// A clip playing over an [`Animator`]'s graph, from [`Animator::play_over`].
+pub struct Overlay {
+    pub clip: Arc<AnimationClip>,
+    binding: ClipBinding,
+    /// Seconds into the clip.
+    pub time: f32,
+    pub fade_in: f32,
+    pub fade_out: f32,
+    /// The pose shown when this replaced another overlay: crossfaded from over `fade_in`.
+    from: Option<Vec<Xf>>,
+    /// Stopped early: (seconds since, fade length).
+    stopping: Option<(f32, f32)>,
 }
 
 impl Animator {
@@ -201,6 +219,8 @@ impl Animator {
             rest_secs: 0.0,
             posed: true,
             fresh: false,
+            overlay: None,
+            freeze: 0.0,
         }
     }
 
@@ -279,8 +299,116 @@ impl Animator {
         )
     }
 
+    /// Play `clip` over the graph's pose from its start, fading in over `fade_in` seconds
+    /// and out over its last `fade_out`. Over a clip already playing it crossfades from the
+    /// pose shown.
+    pub fn play_over(&mut self, clip: Arc<AnimationClip>, fade_in: f32, fade_out: f32) {
+        let from = self.overlay.as_ref().map(|_| self.local.clone());
+        self.overlay = Some(Overlay {
+            binding: ClipBinding::new(&clip, &self.skeleton),
+            clip,
+            time: 0.0,
+            fade_in: fade_in.max(0.0),
+            fade_out: fade_out.max(0.0),
+            from,
+            stopping: None,
+        });
+    }
+
+    /// Fade the overlay out over `fade` seconds from now.
+    pub fn stop_overlay(&mut self, fade: f32) {
+        if let Some(o) = &mut self.overlay
+            && o.stopping.is_none()
+        {
+            o.stopping = Some((0.0, fade.max(1e-3)));
+        }
+    }
+
+    /// The clip playing over the graph, if any.
+    pub fn overlay(&self) -> Option<&Overlay> {
+        self.overlay.as_ref()
+    }
+
+    /// Hold the pose still for `secs` (hitstop: a blow lands and both fighters freeze for a
+    /// few frames). The graph and any overlay pause with it.
+    pub fn freeze_for(&mut self, secs: f32) {
+        self.freeze = self.freeze.max(secs);
+    }
+
+    /// Seconds of freeze left.
+    pub fn frozen(&self) -> f32 {
+        self.freeze
+    }
+
+    /// Lay the overlay over `local` and advance it.
+    fn apply_overlay(&mut self, dt: f32) {
+        let Some(o) = &mut self.overlay else {
+            return;
+        };
+        let prev = o.time;
+        let d = o.clip.duration.max(1e-4);
+        o.time = (o.time + dt).min(d);
+        if o.time > prev {
+            for e in o.clip.events_between(prev, o.time) {
+                self.events.push(FiredEvent {
+                    name: e.name.clone(),
+                    bone: e.bone.clone(),
+                });
+            }
+        }
+        let smooth = |x: f32| {
+            let x = x.clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        };
+        let fade_in = if o.fade_in > 0.0 {
+            smooth(o.time / o.fade_in)
+        } else {
+            1.0
+        };
+        let fade_out = match &mut o.stopping {
+            Some((t, len)) => {
+                *t += dt;
+                1.0 - smooth(*t / *len)
+            }
+            None if o.fade_out > 0.0 => smooth((d - o.time) / o.fade_out),
+            None => 1.0,
+        };
+        let mut pose = self.local.clone();
+        o.clip.sample(o.time, &o.binding, &mut pose);
+        // Over another overlay: from the pose that showed then, into this one.
+        if let Some(from) = &o.from {
+            for (p, f) in pose.iter_mut().zip(from) {
+                *p = f.lerp(p, fade_in);
+            }
+        }
+        let w = if o.from.is_some() {
+            fade_out
+        } else {
+            fade_in.min(fade_out)
+        };
+        for (l, p) in self.local.iter_mut().zip(&pose) {
+            *l = l.lerp(p, w);
+        }
+        for c in &o.clip.curves {
+            if let Some(v) = c.track.sample(o.time) {
+                match self.curves.iter_mut().find(|x| x.0 == c.name) {
+                    Some(x) => x.1 = x.1 * (1.0 - w) + v * w,
+                    None => self.curves.push((c.name.clone(), v * w)),
+                }
+            }
+        }
+        if o.time >= d || o.stopping.is_some_and(|(t, len)| t >= len) {
+            self.overlay = None;
+        }
+    }
+
     /// Evaluate the graph for `dt` seconds.
     pub fn evaluate(&mut self, params: &AnimationParams, dt: f32) {
+        if self.freeze > 0.0 {
+            self.freeze -= dt;
+            self.hold();
+            return;
+        }
         self.dt = dt;
         self.events.clear();
         self.curves.clear();
@@ -307,6 +435,7 @@ impl Animator {
                 });
             }
         }
+        self.apply_overlay(dt);
         self.base.clone_from(&self.local);
     }
 

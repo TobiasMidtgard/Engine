@@ -96,6 +96,8 @@ pub struct DemoEntities {
     pub drill: Entity,
     /// Flinches from blows on a timeline.
     pub sparring: Entity,
+    /// Throws a jab, cross, hook and uppercut combo at the sparring partner.
+    pub boxer: Entity,
     pub horse: Entity,
     pub spider: Entity,
     pub dog: Entity,
@@ -1440,6 +1442,14 @@ pub const VIEWS: &[DemoView] = &[
         at: 0.9,
     },
     DemoView {
+        key: "paddock_combo",
+        name: "Jab, cross, hook: the boxer steps in, each punch freezing both for a beat",
+        eye: [-3.9, 1.5, 1.4],
+        target: [-6.0, 1.25, 1.5],
+        hour: 15.0,
+        at: 1.45,
+    },
+    DemoView {
         key: "paddock_sprint_start",
         name: "Driving off into a sprint, leaning into it",
         eye: [-18.6, 1.3, 7.8],
@@ -1898,10 +1908,34 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
             period: 6.0,
             steps: vec![
                 DemoStep::param(0.05, "guarding", 1.0),
-                DemoStep::hit(0.8, Vec3::new(0.0, 1.58, -0.12), Vec3::new(0.0, 0.0, 26.0)),
-                DemoStep::hit(2.3, Vec3::new(-0.1, 1.6, -0.03), Vec3::new(24.0, 0.0, 6.0)),
+                // The boxer's combo lands on the head between 0.6 and 2 s (see below).
                 DemoStep::hit(3.8, Vec3::new(0.02, 1.1, -0.15), Vec3::new(0.0, 0.0, 32.0)),
                 DemoStep::hit(5.0, Vec3::new(0.18, 1.42, 0.08), Vec3::new(0.0, 0.0, -24.0)),
+            ],
+            time: 0.0,
+        },
+    ));
+
+    // Boxer: squares up to the sparring partner and throws a four-punch combo every cycle,
+    // each press a little before the last punch's cancel window opens (the buffer holds it),
+    // stepping in to range on the jab; each punch that lands freezes both for a few frames.
+    let boxer = spawn_humanoid(
+        world,
+        humanoid::Outfit::Athlete,
+        Transform::from_translation(at(-6.0, 0.0, 2.0)),
+    );
+    dress(world, boxer, "athlete", SkinMaterial::default());
+    world.entity_mut(boxer).insert((
+        Name::new("Boxer"),
+        crate::combat::Attacker::new("boxing", Some(sparring)),
+        DemoScript {
+            period: 6.0,
+            steps: vec![
+                DemoStep::param(0.05, "guarding", 1.0),
+                DemoStep::trigger(0.45, "attack_light"),
+                DemoStep::trigger(0.72, "attack_light"),
+                DemoStep::trigger(1.15, "attack_light"),
+                DemoStep::trigger(1.62, "attack_light"),
             ],
             time: 0.0,
         },
@@ -2125,6 +2159,7 @@ fn build_paddock(world: &mut World, origin: DVec3) -> DemoEntities {
         walker,
         drill,
         sparring,
+        boxer,
         horse: horse_e,
         spider: spider_e,
         dog: dog_e,
