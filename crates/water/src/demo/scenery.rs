@@ -6,6 +6,7 @@ use engine_assets::Assets;
 use engine_core::math::{DVec2, Mat4};
 use engine_core::prelude::*;
 use engine_render::{Mesh, MeshRenderer, StandardMaterial};
+use engine_world::physics::{Fit, FitCollider};
 
 use super::props::{self, Part};
 use crate::buoyancy::{Buoyancy, Floating, Tether};
@@ -171,6 +172,9 @@ pub fn spawn_jetty(commands: &mut Commands, jetty: &Jetty) -> Entity {
                 min: [-0.3, -POST_ACROSS],
                 max: [jetty.length, POST_ACROSS],
             },
+            // Solid as drawn (deck, piles, cleats, ladder): physics fits the triangles once
+            // the merged parts' meshes are in.
+            FitCollider::new(Fit::Mesh),
         ))
         .id();
     add_parts(commands, e, merged(placed));
