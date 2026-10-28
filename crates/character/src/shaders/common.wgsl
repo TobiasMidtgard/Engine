@@ -533,8 +533,10 @@ fn hair_color(eumelanin: f32, red: f32, grey: f32, random: f32) -> vec3<f32> {
     // The cuticle reflects a little neutral light however dark the pigment, so black hair
     // stays black rather than turning dark red.
     let pigmented = exp(-sigma * 1.6) * 0.92 + vec3<f32>(0.012, 0.0115, 0.011);
-    // Grey hair: the strands that lost their pigment.
+    // Grey hair: the strands that lost their pigment. Even the whitest head keeps some
+    // pigmented strands (MetaHuman sets grey as a share of white hairs, "salt and pepper"),
+    // which give white hair its depth; all white it reads as a cloud.
     let white = vec3<f32>(0.78, 0.76, 0.72) * (0.85 + 0.25 * random);
-    let is_grey = select(0.0, 1.0, fract(random * 7.31) < grey);
+    let is_grey = select(0.0, 1.0, fract(random * 7.31) < grey * 0.85);
     return mix(pigmented, white, is_grey);
 }

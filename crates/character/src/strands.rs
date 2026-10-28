@@ -941,8 +941,10 @@ fn grow_scalp(
             for k in 1..pts.len() {
                 let t = k as f32 / last as f32;
                 let dir = (base[k] - base[k - 1]).normalize_or(Vec3::NEG_Y);
-                // (A frame that turns smoothly along the hair for hanging hair.)
-                let side = if hanging {
+                // (A frame that turns smoothly along the hair, and alike on neighboring hairs, so
+                // a strand's hairs coil in step: an arbitrary one flipped from point to point and
+                // zigzagged short curls into wool.)
+                let side = if hanging || g.points > 5 {
                     dir.cross(base[k] - lm.head)
                         .normalize_or(dir.any_orthonormal_vector())
                 } else {
@@ -1375,8 +1377,13 @@ fn grow_hair(
             // Gravity pulls down more as the hair leaves the scalp.
             let pull = Vec3::NEG_Y * (g.gravity * (0.15 + 0.6 * t));
             let kick = Vec3::new(r.normal(), r.normal(), r.normal());
+            // (Short hair too: a new kick at every point zigzagged each hair, and a head of
+            // zigzagging hairs reads as wool.)
             let wander = if g.gravity > 0.5 {
                 drift = drift * 0.85 + kick * 0.012;
+                drift
+            } else if g.points > 5 {
+                drift = drift * 0.8 + kick * 0.012;
                 drift
             } else {
                 kick * (0.015 + 0.025 * g.gravity)

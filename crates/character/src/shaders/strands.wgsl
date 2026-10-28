@@ -136,11 +136,14 @@ fn hair_multiple(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, shad
 // `shadow` is the shadow map's, `depth` the optical depth of the hair in the way. Light scattered
 // between fibers gets through deeper (it goes around them), and takes on their color.
 fn hair_light(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: vec2<f32>, shadow: f32, depth: f32, scatter: f32) -> vec3<f32> {
-    // Fair fibers let more light through than dark ones.
+    // Fair fibers let more light through than dark ones, but only to the light scattered
+    // between them: the hair in the way blocks light singly scattered toward the eye by its
+    // cover alone, whatever its color (Zinke et al. 2008, dual scattering). Thinned for fair
+    // hair too, every fiber of a light head lit alike and it read as cotton wool.
     let fair = saturate(dot(base, vec3<f32>(0.3, 0.5, 0.2)) * 2.0);
     let tau = depth * mix(1.0, 0.45, fair);
     // The shadow map holds the hair too, so the darker of the two counts, not both.
-    let single = min(shadow, exp(-tau));
+    let single = min(shadow, exp(-depth));
     // Light that went around many fibers is deeper in their color (its brightest channel kept).
     let tint = pow(base / max(max(base.r, base.g), max(base.b, 1e-4)), vec3<f32>(0.12 * tau));
     let through = min(shadow, exp(-0.3 * tau)) * tint;
@@ -192,7 +195,7 @@ fn strand_shade(in: StrandOut) -> vec3<f32> {
     let w2 = sin(dot(in.rest, vec3<f32>(-487.0, 913.0, 701.0)) + random * 43.0);
     let lean = vec2<f32>(fract(random * 23.7), fract(random * 71.3)) - 0.5;
     let ts = normalize(t + nc * (0.06 * w1 + 0.1 * lean.x) + b * (0.04 * w2 + 0.06 * lean.y));
-    let scatter = mix(0.8, 1.3, saturate(dot(base, vec3<f32>(0.3, 0.5, 0.2)) * 2.5));
+    let scatter = mix(0.8, 1.15, saturate(dot(base, vec3<f32>(0.3, 0.5, 0.2)) * 2.5));
     // The hair in the way of each light shades it (below); occlusion keeps the gaps between
     // locks and the roots darker.
     let lit = mix(occ, 1.0, 0.6);
