@@ -425,6 +425,12 @@ pub struct SkyLightVolume {
     pub fade: f32,
     /// Faces sky light comes in through: a cave mouth, a doorway, an open hangar door.
     pub open_faces: Vec<BoxFace>,
+    /// Only this rectangle of each open face lets light in (a cave mouth in a wide rock face, a
+    /// door in a wall): its lowest and highest corner in the face's own axes, meters from the
+    /// box's center: (z, y) on the x faces, (x, z) on the y faces, (x, y) on the z faces.
+    /// Light fades with the distance to the rectangle, and probe GI's rays pass only through
+    /// it. `None`: the whole face. Within ±327 m, to the centimeter.
+    pub opening: Option<[[f32; 2]; 2]>,
 }
 
 impl Default for SkyLightVolume {
@@ -434,6 +440,7 @@ impl Default for SkyLightVolume {
             sky_light: 0.0,
             fade: 8.0,
             open_faces: Vec::new(),
+            opening: None,
         }
     }
 }
@@ -462,6 +469,12 @@ impl SkyLightVolume {
 
     pub fn with_fade(mut self, fade: f32) -> Self {
         self.fade = fade;
+        self
+    }
+
+    /// Let light in only through the rectangle `min..max` of the open faces (see `opening`).
+    pub fn with_opening(mut self, min: [f32; 2], max: [f32; 2]) -> Self {
+        self.opening = Some([min, max]);
         self
     }
 }

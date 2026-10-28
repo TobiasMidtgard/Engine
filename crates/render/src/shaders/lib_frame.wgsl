@@ -609,20 +609,38 @@ fn sky_volume_factor_within(rel: vec3<f32>, margin: f32) -> f32 {
         let local = vec3<f32>(dot(v.to_local[0], p), dot(v.to_local[1], p), dot(v.to_local[2], p));
         if (any(abs(local) >= half + margin)) { continue; }
         let q = clamp(local, -half, half);
-        // Distance to the nearest open face (+x, -x, +y, -y, +z, -z).
+        // Distance to the nearest opening: an open face (+x, -x, +y, -y, +z, -z), or the
+        // rectangle of it that lets light in.
         let mask = u32(v.params.y);
-        let to_pos = half - q;
-        let to_neg = half + q;
+        let opening = sky_volume_opening(v);
         var open = 1e9;
-        if ((mask & 1u) != 0u) { open = min(open, to_pos.x); }
-        if ((mask & 2u) != 0u) { open = min(open, to_neg.x); }
-        if ((mask & 4u) != 0u) { open = min(open, to_pos.y); }
-        if ((mask & 8u) != 0u) { open = min(open, to_neg.y); }
-        if ((mask & 16u) != 0u) { open = min(open, to_pos.z); }
-        if ((mask & 32u) != 0u) { open = min(open, to_neg.z); }
+        for (var face = 0u; face < 6u; face++) {
+            if ((mask & (1u << face)) == 0u) { continue; }
+            let axis = face / 2u;
+            let to_plane = half[axis] - select(q[axis], -q[axis], (face & 1u) == 1u);
+            let uv = sky_volume_face_point(q, axis);
+            let beside = max(opening.xy - uv, vec2<f32>(0.0)) + max(uv - opening.zw, vec2<f32>(0.0));
+            open = min(open, length(vec3<f32>(to_plane, beside)));
+        }
         f = min(f, mix(1.0, v.params.x, smoothstep(0.0, 1.0, open / v.half_fade.w)));
     }
     return f;
+}
+
+// The rectangle of a volume's open faces that lets light in (`SkyLightVolume::opening`): its
+// lowest corner in xy, its highest in zw, in the faces' own axes (`sky_volume_face_point`).
+fn sky_volume_opening(v: SkyVolume) -> vec4<f32> {
+    let lo = bitcast<u32>(v.params.z);
+    let hi = bitcast<u32>(v.params.w);
+    return vec4<f32>(f32(lo & 0xffffu), f32(lo >> 16u), f32(hi & 0xffffu), f32(hi >> 16u)) * 0.01 - 327.68;
+}
+
+// A box-local point in the axes of the faces across `axis`: (z, y) for x, (x, z) for y, (x, y)
+// for z.
+fn sky_volume_face_point(q: vec3<f32>, axis: u32) -> vec2<f32> {
+    if (axis == 0u) { return q.zy; }
+    if (axis == 1u) { return q.xz; }
+    return q.xy;
 }
 
 // Sky visibility from the top-down occlusion map alone.

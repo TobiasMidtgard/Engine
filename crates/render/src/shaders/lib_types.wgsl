@@ -69,7 +69,7 @@ struct Frame {
 struct SkyVolume {
     to_local: array<vec4<f32>, 3>, // rows of camera-relative -> box-local (meters, no scale)
     half_fade: vec4<f32>,          // half extents xyz (m), fade distance from open faces (m)
-    params: vec4<f32>,             // sky light left inside, open face mask (+x -x +y -y +z -z bits), unused, unused
+    params: vec4<f32>,             // sky light left inside, open face mask (+x -x +y -y +z -z bits), opening min and max corners on the open faces (two u16 cm per f32, see sky_volume_opening)
 };
 
 struct PointLight {

@@ -193,12 +193,15 @@ fn volume_wall(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> f32 {
         let t_out = min(min(far.x, far.y), far.z);
         if (t_out < 0.0 || t_in > t_out || t_in > min(t_max, best)) { continue; }
         let mask = u32(v.params.y);
+        let opening = sky_volume_opening(v);
         // Face bits: +x 1, -x 2, +y 4, -y 8, +z 16, -z 32. A ray going up an axis enters
-        // through the face at its low end and leaves through the one at its high end.
+        // through the face at its low end and leaves through the one at its high end; an open
+        // face lets it through only within its opening.
         if (t_in > 0.0) {
             let axis = select(select(2u, 1u, near.y >= near.z), 0u, near.x >= near.y && near.x >= near.z);
             let bit = 1u << (2u * axis + select(0u, 1u, d[axis] > 0.0));
-            if ((mask & bit) == 0u) {
+            let uv = sky_volume_face_point(o + d * t_in, axis);
+            if ((mask & bit) == 0u || any(uv < opening.xy) || any(uv > opening.zw)) {
                 best = t_in;
                 continue;
             }
@@ -206,7 +209,8 @@ fn volume_wall(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> f32 {
         if (t_out <= t_max) {
             let axis = select(select(2u, 1u, far.y <= far.z), 0u, far.x <= far.y && far.x <= far.z);
             let bit = 1u << (2u * axis + select(1u, 0u, d[axis] > 0.0));
-            if ((mask & bit) == 0u) {
+            let uv = sky_volume_face_point(o + d * t_out, axis);
+            if ((mask & bit) == 0u || any(uv < opening.xy) || any(uv > opening.zw)) {
                 best = min(best, t_out);
             }
         }
