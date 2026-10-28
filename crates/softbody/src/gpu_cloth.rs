@@ -145,10 +145,10 @@ pub struct GpuClothShift(pub Option<WorldShift>);
 /// the anchors' transforms move), so moving with the world doesn't count as the anchor
 /// moving.
 pub fn follow_world_shift(
-    mut shifts: MessageReader<WorldShift>,
+    frame: Res<crate::systems::FrameShift>,
     mut pending: ResMut<GpuClothShift>,
 ) {
-    for s in shifts.read() {
+    if let Some(s) = &frame.0 {
         pending.0 = Some(pending.0.map_or(*s, |p| p.then(s)));
     }
 }

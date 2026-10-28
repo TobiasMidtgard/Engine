@@ -13,8 +13,8 @@ use engine_world::physics::{
 };
 use engine_world::{
     ContactKind, Env, FocusPoints, GroundContact, IgniteRequest, NoiseEvent, ProjectileTrace,
-    Scalability, SimulationRange, SmokeEmission, SurfaceMaterials, WaterDisturbance, WorldImpulse,
-    WorldShift,
+    Scalability, SimulationRange, SmokeEmission, SurfaceMaterials, SurfaceMoved, WaterDisturbance,
+    WorldImpulse, WorldShift,
 };
 
 use crate::body::{FrameSource, SoftBodySim, SoftKind};
@@ -486,13 +486,28 @@ pub fn follow_scalability(
 }
 
 /// Move every body, the collider history (for sweeps) and the gathered loads into the new
-/// frame when the world is re-anchored. Runs in `WorldShiftSet::Apply`.
+/// frame when the world is re-anchored or its surface is put back ([`SurfaceMoved`]), and
+/// leave what moved them in [`FrameShift`] for the crate's other followers. Runs in
+/// `WorldShiftSet::Apply`.
 pub fn follow_world_shift(
     mut shifts: MessageReader<WorldShift>,
+    mut surface: MessageReader<SurfaceMoved>,
+    mut seen: ResMut<SurfaceSeen>,
+    mut frame: ResMut<FrameShift>,
     mut caches: ShiftCaches,
     mut anchors: Query<&mut SurfaceAnchor>,
 ) {
-    let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) else {
+    let shift = shifts.read().copied().reduce(|a, b| a.then(&b));
+    let moved = surface.read().map(|m| m.shift).reduce(|a, b| a.then(&b));
+    // When the anchors already saw this move (it landed before this frame's fixed steps),
+    // the bodies went along then.
+    let moved = moved.filter(|_| !seen.0);
+    seen.0 = false;
+    frame.0 = match (shift, moved) {
+        (Some(s), Some(m)) => Some(s.then(&m)),
+        (s, m) => s.or(m),
+    };
+    let Some(s) = frame.0 else {
         return;
     };
     caches.shift(&s, None);
@@ -503,6 +518,15 @@ pub fn follow_world_shift(
         }
     }
 }
+
+/// What moved world points this frame: its [`WorldShift`]s, then a [`SurfaceMoved`] the
+/// anchors hadn't seen. Set in `WorldShiftSet::Apply` by [`follow_world_shift`].
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct FrameShift(pub Option<WorldShift>);
+
+/// Whether a [`SurfaceAnchor`] saw the surface move since the last `WorldShiftSet::Apply`.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct SurfaceSeen(bool);
 
 /// A still root entity, near soft bodies and props, that nothing in this crate moves: when
 /// something other than a [`WorldShift`] re-places it, the bodies' world positions go along.
@@ -529,6 +553,7 @@ const SURFACE_REACH_M: f64 = 20_000.0;
 pub fn follow_surface_anchors(
     mut anchors: Query<(&Transform, &mut SurfaceAnchor), Without<ChildOf>>,
     mut moved: ResMut<SurfaceMove>,
+    mut seen: ResMut<SurfaceSeen>,
     mut caches: ShiftCaches,
 ) {
     moved.0 = None;
@@ -554,6 +579,7 @@ pub fn follow_surface_anchors(
             (s.point(from) - from).length()
         );
         caches.shift(&s, Some(from));
+        seen.0 = true;
     }
 }
 

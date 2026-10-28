@@ -212,9 +212,9 @@ pub struct DemoCutter {
 /// Without it a jump that re-anchors the world (`showcase.goto`) left the unveiling sheet
 /// hoisted where the statue used to be. The motions keep +Y as up, which a re-anchoring turns
 /// only negligibly within a zone. Runs in `WorldShiftSet::Apply`.
-pub fn follow_world_shift(mut shifts: MessageReader<WorldShift>, mut points: DemoPoints) {
-    if let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) {
-        points.shift(&s);
+pub fn follow_world_shift(frame: Res<crate::systems::FrameShift>, mut points: DemoPoints) {
+    if let Some(s) = &frame.0 {
+        points.shift(s);
     }
 }
 
@@ -331,7 +331,9 @@ pub fn register(app: &mut App) {
         .add_systems(Update, (man_turrets, work_winches))
         .add_systems(
             PostUpdate,
-            follow_world_shift.in_set(engine_world::WorldShiftSet::Apply),
+            follow_world_shift
+                .after(crate::systems::follow_world_shift)
+                .in_set(engine_world::WorldShiftSet::Apply),
         )
         .add_systems(
             FixedPreUpdate,

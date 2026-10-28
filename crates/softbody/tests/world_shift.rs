@@ -205,8 +205,36 @@ fn unpark_all(app: &mut App, s: &WorldShift) {
     }
 }
 
-#[test]
-fn the_yard_follows_its_anchor_put_back_after_a_trip() {
+/// How the yard is put back after a trip in a test: by hand between frames (what the space
+/// module did before `SurfaceMoved`), or with a `SurfaceMoved` written before the frame's
+/// shifts apply, or with one written after the roots moved (read a frame late).
+#[derive(Clone, Copy, PartialEq)]
+enum PutBack {
+    ByHand,
+    MessageInWrite,
+    MessageLate,
+}
+
+#[derive(Resource)]
+struct PendingSurface(Option<WorldShift>);
+
+fn put_back_in_write(
+    mut pending: ResMut<PendingSurface>,
+    mut out: MessageWriter<engine_world::SurfaceMoved>,
+    mut roots: Query<&mut Transform, Without<ChildOf>>,
+) {
+    if let Some(s) = pending.0.take() {
+        for mut t in &mut roots {
+            *t = s.transform(&t);
+        }
+        out.write(engine_world::SurfaceMoved {
+            body: Entity::PLACEHOLDER,
+            shift: s,
+        });
+    }
+}
+
+fn yard_put_back(how: PutBack) {
     let app = || {
         let mut app = App::new();
         app.add_plugins((engine_world::WorldPlugin, SoftBodyPlugin));
@@ -216,6 +244,8 @@ fn the_yard_follows_its_anchor_put_back_after_a_trip() {
                 step_secs: 1.0 / 60.0,
             });
         app.world.resource_mut::<FixedTime>().set_hz(60.0);
+        app.insert_resource(PendingSurface(None))
+            .add_systems(PostUpdate, put_back_in_write.in_set(WorldShiftSet::Write));
         app.add_systems(Startup, |mut commands: Commands| {
             commands.spawn((
                 Transform::IDENTITY,
@@ -248,16 +278,42 @@ fn the_yard_follows_its_anchor_put_back_after_a_trip() {
         ..WorldShift::IDENTITY
     };
     let (mut home, mut back) = (app(), app());
-    unpark_all(&mut back, &s);
+    match how {
+        PutBack::ByHand => unpark_all(&mut back, &s),
+        PutBack::MessageInWrite => back.world.resource_mut::<PendingSurface>().0 = Some(s),
+        PutBack::MessageLate => {
+            unpark_all(&mut back, &s);
+            back.world.write_message(engine_world::SurfaceMoved {
+                body: Entity::PLACEHOLDER,
+                shift: s,
+            });
+        }
+    }
     home.update_n(30);
     back.update_n(30);
-    // The sheet goes on as if the yard had always stood there, not dragged 11 m by its hook.
+    // The sheet goes on as if the yard had always stood there, not dragged 11 m by its hook
+    // (nor moved twice).
     let far = sheet(&mut home)
         .iter()
         .zip(sheet(&mut back))
         .map(|(h, b)| (s.point(*h) - b).length())
         .fold(0.0, f64::max);
     assert!(far < 0.05, "the moved yard's sheet is {far} m off");
+}
+
+#[test]
+fn the_yard_follows_its_anchor_put_back_after_a_trip() {
+    yard_put_back(PutBack::ByHand);
+}
+
+#[test]
+fn the_yard_follows_a_surface_moved_once() {
+    yard_put_back(PutBack::MessageInWrite);
+}
+
+#[test]
+fn the_yard_follows_a_late_surface_moved_once() {
+    yard_put_back(PutBack::MessageLate);
 }
 
 #[test]
