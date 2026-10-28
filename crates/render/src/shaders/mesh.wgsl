@@ -1049,6 +1049,8 @@ struct PrepassVertexOut {
     @location(9) @interpolate(flat) axis_x: vec3<f32>,
     @location(10) @interpolate(flat) axis_y: vec3<f32>,
     @location(11) @interpolate(flat) axis_z: vec3<f32>,
+    // 0, or how far the instance is through its cross-fade into its impostor (`n0.w`).
+    @location(12) @interpolate(flat) fade: f32,
 };
 
 @vertex
@@ -1074,11 +1076,17 @@ fn standard_prepass_vertex(in: VertexIn) -> PrepassVertexOut {
     out.axis_x = vertex_axis(in, 0u);
     out.axis_y = vertex_axis(in, 1u);
     out.axis_z = vertex_axis(in, 2u);
+    out.fade = in.n0.w;
     return out;
 }
 
 @fragment
 fn fs_prepass(in: PrepassVertexOut, @builtin(front_facing) front: bool) -> PrepassOutput {
+    // Cross-fading into its impostor: the mesh keeps the pixels the impostor leaves (the scene
+    // pass shades only what the prepass kept).
+    if (in.fade > 0.0 && frame_noise(in.clip.xy) < in.fade) {
+        discard;
+    }
     let mat = materials[in.material];
     vt_feedback_on = vt_feedback_pixel(in.clip.xy);
     let si = SurfaceIn(in.rel, in.normal, in.uv, in.color, in.material, in.local, in.object_normal,

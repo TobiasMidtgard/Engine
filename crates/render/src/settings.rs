@@ -360,7 +360,8 @@ pub struct RenderSettings {
     pub min_object_pixels: f32,
     /// Instanced meshes whose levels of detail stay above a few hundred triangles (leaf-card
     /// trees, ragged props) are drawn as impostors, one baked quad each, once smaller than this
-    /// many pixels on screen (or texels in a shadow map); see `impostor.rs`. 0 = never.
+    /// many pixels on screen (or texels in a shadow map); see `impostor.rs`. On screen they
+    /// cross-fade, from this size down to 70% of it. 0 = never.
     pub impostor_pixels: f32,
     /// Most meshes baked into the impostor atlas at once. A full atlas reuses the layer of the
     /// mesh drawn as an impostor longest ago (once unseen for 300 frames). Layers are BC7 (1.5 MB
