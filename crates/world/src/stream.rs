@@ -49,7 +49,7 @@ pub struct CellMember(pub CellId);
 
 /// Where a cell is in its life: `Unloaded`, then (wanted) `Building` off the main thread when it
 /// has a build step, `Queued` for its turn in the frame budget, `Loading` while it spawns over
-/// several frames, and `Loaded`.
+/// several frames, and `Loaded`; on the way out, `Unloading` while it fades and despawns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum CellState {
     #[default]
@@ -61,6 +61,9 @@ pub enum CellState {
     /// Spawning, a step a frame (or more, within the budget).
     Loading,
     Loaded,
+    /// Leaving: its meshes fade out (its far-view proxy in), then it despawns over a few
+    /// frames within the budget.
+    Unloading,
 }
 
 impl CellState {

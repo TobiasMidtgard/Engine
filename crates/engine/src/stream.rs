@@ -13,6 +13,8 @@
 //! step that touches the world can run in slices, a few a frame ([`StreamCell::in_steps`]), so
 //! no single frame hitches. While a cell loads, and for a few frames after (shaders and uploads
 //! warm up), its meshes stay hidden; then they fade in with [`DitherFade`] instead of popping.
+//! A cell leaving fades out the same way over its far-view proxy ([`crate::hlod`]) and then
+//! despawns a slice of roots a frame within the budget.
 
 use std::any::Any;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -343,6 +345,7 @@ impl Plugin for StreamingPlugin {
             .init_resource::<CellHooks>()
             .init_resource::<StreamingBudget>()
             .init_resource::<Fades>()
+            .init_resource::<Leaves>()
             .add_systems(Last, stream_system)
             .register_api(
                 "stream.cells",
@@ -496,9 +499,16 @@ pub fn stream_system(world: &mut World) {
     for i in dropped {
         world.resource_mut::<CellHooks>().0[i].reset();
     }
+    let fading = sources.is_some() && budget.fade_s > 0.0;
     for &i in &leaving {
-        unload(world, i);
+        let loaded = world.resource::<StreamedCells>().cells[i].state == CellState::Loaded;
+        if fading && loaded {
+            begin_leave(world, i);
+        } else {
+            unload(world, i);
+        }
     }
+    leave(world, &budget);
     want.retain(|w| !leaving.contains(&w.1));
     want.sort_by(|a, b| a.0.total_cmp(&b.0));
     builds(world, &want, budget.builds);
@@ -814,6 +824,101 @@ fn fade(world: &mut World, budget: &StreamingBudget) {
     res.0 = fades;
 }
 
+/// Cells on their way out: their meshes fading (their proxies coming in), then their roots
+/// despawning a slice a frame.
+#[derive(Resource, Default)]
+struct Leaves(Vec<Leave>);
+
+struct Leave {
+    cell: CellId,
+    meshes: Vec<Entity>,
+    started: Instant,
+    /// Roots still to despawn, once the fade is over.
+    roots: Option<Vec<Entity>>,
+}
+
+/// The cell starts to leave: its meshes fade out over the budget's fade (its far-view proxy
+/// comes in on the complementary pattern), then it despawns within the frame budget.
+fn begin_leave(world: &mut World, i: usize) {
+    let id = CellId(i as u32);
+    // A fade-in still running gives way.
+    world.resource_mut::<Fades>().0.retain(|f| f.cell != id);
+    let roots: Vec<Entity> = world
+        .query::<(Entity, &CellMember)>()
+        .iter(world)
+        .filter(|(_, m)| m.0 == id)
+        .map(|(e, _)| e)
+        .collect();
+    let mut meshes = Vec::new();
+    for e in tree(world, &roots) {
+        let Ok(r) = world.get_entity(e) else {
+            continue;
+        };
+        let ours = r.contains::<StreamFade>();
+        if r.contains::<MeshRenderer>() && (ours || !r.contains::<DitherFade>()) {
+            world.entity_mut(e).insert((DitherFade(0.0), StreamFade));
+            meshes.push(e);
+        }
+    }
+    world.resource_mut::<Leaves>().0.push(Leave {
+        cell: id,
+        meshes,
+        started: Instant::now(),
+        roots: None,
+    });
+    world.resource_mut::<StreamedCells>().cells[i].state = CellState::Unloading;
+}
+
+/// Fades leaving cells out, then despawns their roots within the frame budget (at least one a
+/// frame) and finishes their unload.
+fn leave(world: &mut World, budget: &StreamingBudget) {
+    let mut leaves = std::mem::take(&mut world.resource_mut::<Leaves>().0);
+    let start = Instant::now();
+    leaves.retain_mut(|l| {
+        let i = l.cell.0 as usize;
+        if l.roots.is_none() {
+            let t = l.started.elapsed().as_secs_f32() / budget.fade_s.max(1e-3);
+            hlod::fade_in(world, l.cell, t.min(1.0));
+            if t < 1.0 {
+                let (out, _) = DitherFade::pair(t);
+                for &e in &l.meshes {
+                    if let Ok(mut entity) = world.get_entity_mut(e)
+                        && let Some(mut d) = entity.get_mut::<DitherFade>()
+                    {
+                        *d = out;
+                    }
+                }
+                return true;
+            }
+            l.roots = Some(
+                world
+                    .query::<(Entity, &CellMember)>()
+                    .iter(world)
+                    .filter(|(_, m)| m.0 == l.cell)
+                    .map(|(e, _)| e)
+                    .collect(),
+            );
+        }
+        let roots = l.roots.as_mut().expect("set above");
+        while let Some(e) = roots.pop() {
+            if let Ok(entity) = world.get_entity_mut(e) {
+                entity.despawn();
+            }
+            if start.elapsed().as_secs_f32() * 1000.0 > budget.frame_ms {
+                break;
+            }
+        }
+        if !roots.is_empty() {
+            return true;
+        }
+        unload(world, i);
+        false
+    });
+    let mut res = world.resource_mut::<Leaves>();
+    leaves.append(&mut res.0);
+    res.0 = leaves;
+}
+
 /// Puts the slots back, after any cells a hook itself registered.
 fn restore(world: &mut World, mut hooks: Vec<Slot>) {
     let mut res = world.resource_mut::<CellHooks>();
@@ -835,6 +940,8 @@ fn unload(world: &mut World, i: usize) {
         }
     }
     world.resource_mut::<Fades>().0.retain(|f| f.cell != id);
+    world.resource_mut::<Leaves>().0.retain(|l| l.cell != id);
+    hlod::fade_in(world, id, 1.0);
     let mut hooks = std::mem::take(&mut world.resource_mut::<CellHooks>().0);
     hooks[i].reset();
     if let Some(unload) = hooks[i].loader.unload.as_mut() {
@@ -852,9 +959,11 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Without fades, so cells come and go at once (the fades have tests of their own).
     fn app() -> App {
         let mut app = App::new();
         app.add_plugins((engine_world::WorldPlugin, StreamingPlugin));
+        app.world.resource_mut::<StreamingBudget>().fade_s = 0.0;
         app
     }
 

@@ -45,6 +45,8 @@ pub struct HlodSettings {
     pub draw_m: f32,
     /// Frames a loaded cell settles (and its fade-in ends) before it is captured.
     pub settle_frames: u32,
+    /// Milliseconds a frame may spend walking a cell's meshes for its capture.
+    pub gather_ms: f32,
     /// Where proxies of versioned cells are kept between runs (`ENGINE_HLOD_DIR`, else
     /// `hlod-cache` in the working directory).
     pub cache_dir: PathBuf,
@@ -60,6 +62,7 @@ impl Default for HlodSettings {
             triangles: 16_000,
             draw_m: 3000.0,
             settle_frames: 30,
+            gather_ms: 2.0,
             cache_dir: std::env::var_os("ENGINE_HLOD_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("hlod-cache")),
@@ -108,6 +111,8 @@ struct ProxySlot {
     triangles: usize,
     entity: Option<Entity>,
     settled: u32,
+    /// A capture walking the cell's meshes, a slice a frame.
+    gather: Option<Box<Gather>>,
     /// A worker merging the capture (behind a lock only so the resource is `Sync`).
     capturing: Option<Mutex<Receiver<Option<Mesh>>>>,
     /// Tried and found nothing to show (or the worker failed): don't capture again.
@@ -223,9 +228,15 @@ pub(crate) fn update(
             }
             CellState::Loaded => {}
             _ => {
-                world.resource_mut::<Proxies>().slots[i].settled = 0;
+                let slot = &mut world.resource_mut::<Proxies>().slots[i];
+                slot.settled = 0;
+                slot.gather = None;
                 if let (Some(mesh), None) = (mesh, entity) {
                     show(world, i, id, mesh, &settings);
+                    // A leaving cell still shows: the proxy comes in as it fades out.
+                    if *state == CellState::Unloading {
+                        fade_in(world, id, 0.0);
+                    }
                 }
             }
         }
@@ -247,6 +258,26 @@ pub(crate) fn fade_out(world: &mut World, id: CellId, t: f32) {
         despawn(world, id.0 as usize, entity);
     } else if let Ok(mut e) = world.get_entity_mut(entity) {
         e.insert(DitherFade::pair(t).0);
+    }
+}
+
+/// The proxy of cell `id` fades in as its meshes fade out, `t` of the way (1 = all in).
+pub(crate) fn fade_in(world: &mut World, id: CellId, t: f32) {
+    let Some(entity) = world
+        .resource::<Proxies>()
+        .slots
+        .get(id.0 as usize)
+        .and_then(|s| s.entity)
+    else {
+        return;
+    };
+    let Ok(mut e) = world.get_entity_mut(entity) else {
+        return;
+    };
+    if t >= 1.0 {
+        e.remove::<DitherFade>();
+    } else {
+        e.insert(DitherFade::pair(t).1);
     }
 }
 
@@ -326,13 +357,26 @@ fn capture(world: &mut World, i: usize, id: CellId, key: &str, settings: &HlodSe
     let Some(frame) = world.resource::<Proxies>().slots[i].frame else {
         return;
     };
-    let roots: Vec<Entity> = world
-        .query::<(Entity, &CellMember)>()
-        .iter(world)
-        .filter(|(_, m)| m.0 == id)
-        .map(|(e, _)| e)
-        .collect();
-    let (sources, instances) = gather(world, &roots, &frame);
+    let mut gather = match world.resource_mut::<Proxies>().slots[i].gather.take() {
+        Some(g) => g,
+        None => {
+            let roots: Vec<Entity> = world
+                .query::<(Entity, &CellMember)>()
+                .iter(world)
+                .filter(|(_, m)| m.0 == id)
+                .map(|(e, _)| e)
+                .collect();
+            Box::new(Gather::new(roots, frame))
+        }
+    };
+    let deadline = Instant::now() + std::time::Duration::from_secs_f32(settings.gather_ms / 1000.0);
+    if !gather.step(world, deadline) {
+        world.resource_mut::<Proxies>().slots[i].gather = Some(gather);
+        return;
+    }
+    let Gather {
+        sources, instances, ..
+    } = *gather;
     let budget = settings.triangles;
     let key = key.to_string();
     let (tx, rx) = mpsc::channel();
@@ -455,90 +499,112 @@ fn bake(
     }
 }
 
-/// The still meshes under `roots`, in `frame`'s space, with their colors.
-fn gather(world: &World, roots: &[Entity], frame: &Transform) -> (Vec<Source>, Vec<Instance>) {
-    let meshes = world.resource::<Assets<Mesh>>();
-    let materials = world.resource::<Assets<StandardMaterial>>();
-    let images = world.resource::<Assets<Image>>();
-    let inverse = frame.rotation.inverse();
-    let mut sources = Vec::new();
-    let mut by_mesh: HashMap<String, usize> = HashMap::new();
-    let mut instances = Vec::new();
-    // Walk the trees, skipping what moves (a body that isn't static, or anything with a
-    // velocity) together with everything under it.
-    let mut stack: Vec<Entity> = roots.to_vec();
-    while let Some(e) = stack.pop() {
-        let Ok(entity) = world.get_entity(e) else {
-            continue;
-        };
-        let moves = entity
-            .get::<RigidBody>()
-            .is_some_and(|b| b.kind != BodyKind::Static)
-            || entity.contains::<Velocity>();
-        if moves {
-            continue;
+/// Walks a settled cell's trees for its still meshes, in the proxy's space with their colors,
+/// a slice of entities a frame ([`HlodSettings::gather_ms`]) so a big zone doesn't hitch.
+struct Gather {
+    frame: Transform,
+    stack: Vec<Entity>,
+    sources: Vec<Source>,
+    by_mesh: HashMap<String, usize>,
+    instances: Vec<Instance>,
+}
+
+impl Gather {
+    fn new(roots: Vec<Entity>, frame: Transform) -> Self {
+        Self {
+            frame,
+            stack: roots,
+            sources: Vec::new(),
+            by_mesh: HashMap::new(),
+            instances: Vec::new(),
         }
-        if let Some(children) = entity.get::<Children>() {
-            stack.extend(children.iter());
-        }
-        let (Some(renderer), Some(global)) = (
-            entity.get::<MeshRenderer>(),
-            entity.get::<GlobalTransform>(),
-        ) else {
-            continue;
-        };
-        // Hidden ones, and ones a game fades out itself, stay out.
-        let faded = entity
-            .get::<DitherFade>()
-            .is_some_and(|d| d.hidden() >= 0.5)
-            && !entity.contains::<crate::stream::StreamFade>();
-        if !renderer.visible || faded {
-            continue;
-        }
-        let (mesh_key, mesh) = match &renderer.mesh {
-            MeshRef::Handle(h) => (format!("h{}", h.index()), meshes.get(*h).cloned()),
-            MeshRef::Shape(s) => (s.key(), Some(s.mesh())),
-            MeshRef::Asset(k) => (
-                format!("a{k}"),
-                meshes.by_key(k).and_then(|h| meshes.get(h)).cloned(),
-            ),
-        };
-        let source = match by_mesh.get(&mesh_key) {
-            Some(&s) => s,
-            None => {
-                let Some(mesh) = mesh else {
-                    continue;
-                };
-                sources.push(Source {
-                    positions: mesh
-                        .vertices
-                        .iter()
-                        .map(|v| Vec3::from(v.position))
-                        .collect(),
-                    indices: mesh.indices,
-                });
-                by_mesh.insert(mesh_key, sources.len() - 1);
-                sources.len() - 1
-            }
-        };
-        let material = match &renderer.material {
-            MaterialRef::Handle(h) => materials.get(*h),
-            MaterialRef::Inline(m) => Some(m),
-            MaterialRef::Asset(k) => materials.by_key(k).and_then(|h| materials.get(h)),
-        };
-        let translation = inverse * (global.translation() - frame.translation).as_vec3();
-        let matrix = Mat4::from_scale_rotation_translation(
-            global.scale(),
-            inverse * global.rotation(),
-            translation,
-        );
-        instances.push(Instance {
-            source,
-            matrix,
-            color: material.map_or(Vec4::splat(0.5), |m| albedo(m, images)),
-        });
     }
-    (sources, instances)
+
+    /// Walks on until `deadline`; true once every tree is done.
+    fn step(&mut self, world: &World, deadline: Instant) -> bool {
+        let meshes = world.resource::<Assets<Mesh>>();
+        let materials = world.resource::<Assets<StandardMaterial>>();
+        let images = world.resource::<Assets<Image>>();
+        let inverse = self.frame.rotation.inverse();
+        // Skips what moves (a body that isn't static, or anything with a velocity) together
+        // with everything under it.
+        while let Some(e) = self.stack.pop() {
+            if Instant::now() > deadline {
+                self.stack.push(e);
+                return false;
+            }
+            let Ok(entity) = world.get_entity(e) else {
+                continue;
+            };
+            let moves = entity
+                .get::<RigidBody>()
+                .is_some_and(|b| b.kind != BodyKind::Static)
+                || entity.contains::<Velocity>();
+            if moves {
+                continue;
+            }
+            if let Some(children) = entity.get::<Children>() {
+                self.stack.extend(children.iter());
+            }
+            let (Some(renderer), Some(global)) = (
+                entity.get::<MeshRenderer>(),
+                entity.get::<GlobalTransform>(),
+            ) else {
+                continue;
+            };
+            // Hidden ones, and ones a game fades out itself, stay out.
+            let faded = entity
+                .get::<DitherFade>()
+                .is_some_and(|d| d.hidden() >= 0.5)
+                && !entity.contains::<crate::stream::StreamFade>();
+            if !renderer.visible || faded {
+                continue;
+            }
+            let mesh_key = match &renderer.mesh {
+                MeshRef::Handle(h) => format!("h{}", h.index()),
+                MeshRef::Shape(s) => s.key(),
+                MeshRef::Asset(k) => format!("a{k}"),
+            };
+            let source = match self.by_mesh.get(&mesh_key) {
+                Some(&s) => s,
+                None => {
+                    // Copied once per mesh, corners only; instances share it.
+                    let take = |m: &Mesh| Source {
+                        positions: m.vertices.iter().map(|v| Vec3::from(v.position)).collect(),
+                        indices: m.indices.clone(),
+                    };
+                    let source = match &renderer.mesh {
+                        MeshRef::Handle(h) => meshes.get(*h).map(take),
+                        MeshRef::Shape(s) => Some(take(&s.mesh())),
+                        MeshRef::Asset(k) => meshes.by_key(k).and_then(|h| meshes.get(h)).map(take),
+                    };
+                    let Some(source) = source else {
+                        continue;
+                    };
+                    self.sources.push(source);
+                    self.by_mesh.insert(mesh_key, self.sources.len() - 1);
+                    self.sources.len() - 1
+                }
+            };
+            let material = match &renderer.material {
+                MaterialRef::Handle(h) => materials.get(*h),
+                MaterialRef::Inline(m) => Some(m),
+                MaterialRef::Asset(k) => materials.by_key(k).and_then(|h| materials.get(h)),
+            };
+            let translation = inverse * (global.translation() - self.frame.translation).as_vec3();
+            let matrix = Mat4::from_scale_rotation_translation(
+                global.scale(),
+                inverse * global.rotation(),
+                translation,
+            );
+            self.instances.push(Instance {
+                source,
+                matrix,
+                color: material.map_or(Vec4::splat(0.5), |m| albedo(m, images)),
+            });
+        }
+        true
+    }
 }
 
 /// A material's mean color: its base color times its texture's mean (sampled) or its preset's.
@@ -860,6 +926,49 @@ mod tests {
             "kept while the hut loads hidden"
         );
         until(&mut app, |app| proxies(app).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_leaving_cell_fades_out_over_its_proxy_then_despawns() {
+        let dir = tempdir("leave");
+        let mut app = app(&dir);
+        app.world.resource_mut::<StreamingBudget>().fade_s = 0.3;
+        app.stream_cell(
+            StreamCell::new("hut", DVec3::new(1000.0, 0.0, 0.0), 10.0, hut).load_within(50.0),
+        );
+        let player = app.world.spawn(StreamingSource::default()).id();
+        place(&mut app, player, 1000.0);
+        until(&mut app, |app| {
+            app.world.resource::<Proxies>().triangles()[0] > 0
+        });
+        let fades = |app: &mut App| -> Vec<f32> {
+            app.world
+                .query_filtered::<&DitherFade, Without<HlodProxy>>()
+                .iter(&app.world)
+                .map(|d| d.0)
+                .collect()
+        };
+        place(&mut app, player, 0.0);
+        app.update();
+        let state = |app: &App| app.world.resource::<StreamedCells>().cells[0].state;
+        assert_eq!(state(&app), CellState::Unloading);
+        let proxy = proxies(&mut app)[0];
+        let p = app.world.get::<DitherFade>(proxy).copied().unwrap().0;
+        let cell = fades(&mut app);
+        assert_eq!(cell.len(), 3, "the boxes and the cart fade out: {cell:?}");
+        // Complementary patterns: what the cell hides, the proxy shows.
+        assert!(
+            p < 0.0 && cell.iter().all(|&c| (c - (1.0 + p)).abs() < 0.2),
+            "{p} {cell:?}"
+        );
+        until(&mut app, |app| state(app) == CellState::Unloaded);
+        assert!(fades(&mut app).is_empty(), "the hut is gone");
+        assert_eq!(
+            app.world.get::<DitherFade>(proxy),
+            None,
+            "the proxy is all in"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
