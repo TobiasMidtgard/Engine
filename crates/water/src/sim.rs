@@ -178,74 +178,130 @@ fn ripple_center(state: &WaterState, focus: DVec3, half: f64) -> DVec2 {
 /// Still-water depth of the interactive bodies under each ripple cell, kept between
 /// rebuilds: reading it means a terrain sample per cell under a lake on the ground, seconds
 /// for the whole grid on a real landscape, and it only changes when the grid moves (then
-/// only the cells it newly covers are read) or the bodies do.
+/// only the cells it newly covers are read) or the bodies do. After a jump (a teleport, a
+/// tour stop) the new cells are read [`STILL_READS`] a step, nearest the focus first, rather
+/// than all at once (188 ms in one frame on arriving at the yard).
 #[derive(Default)]
 pub struct StillDepths {
     /// (grid corner, cells, cell size, `SimBook::layout`) the depths were read for.
     at: Option<(DVec2, usize, f32, u64)>,
-    /// Per cell: the deepest interactive body there, NaN for none.
+    /// Per cell: the deepest interactive body there, NaN for none, infinite while unread.
     depth: Vec<f32>,
+    /// Cells still unread.
+    unread: usize,
 }
 
+/// Cells of the ripple grid whose still depth is read per step after a jump (on four cores
+/// about 2 ms of terrain samples).
+const STILL_READS: usize = 2048;
+
 impl StillDepths {
-    /// Make `depth` the bodies' depths under a grid of `n`² cells of `cell` m from `origin`.
-    /// Runs with the water unlocked: it goes wide when much is new.
+    /// Make `depth` the bodies' depths under a grid of `n`² cells of `cell` m from `origin`,
+    /// reading at most `budget` new cells (all of them on the first read, or when the bodies
+    /// change): call again while [`StillDepths::unread`] is above zero. Runs with the water
+    /// unlocked: it goes wide when much is new.
     fn read(
         &mut self,
         at: (DVec2, usize, f32, u64),
         bodies: &[BodyState],
         ground: &Ground,
         level_y: f64,
+        focus: DVec2,
     ) {
-        if self.at == Some(at) {
-            return;
-        }
         let (origin, n, cell, layout) = at;
-        let mut depth = vec![f32::INFINITY; n * n];
-        if let Some((old, old_n, old_cell, old_layout)) = self.at
-            && (old_n, old_cell, old_layout) == (n, cell, layout)
-            && self.depth.len() == n * n
-        {
-            let step = ((origin - old) / cell as f64).round();
-            if step.x.abs() < n as f64 && step.y.abs() < n as f64 {
-                let (di, dj) = (step.x as i64, step.y as i64);
-                for (idx, d) in depth.iter_mut().enumerate() {
-                    let (i, j) = ((idx % n) as i64 + di, (idx / n) as i64 + dj);
-                    if i >= 0 && j >= 0 && i < n as i64 && j < n as i64 {
-                        *d = self.depth[j as usize * n + i as usize];
+        let mut budget = STILL_READS;
+        if self.at != Some(at) {
+            let mut depth = vec![f32::INFINITY; n * n];
+            match self.at {
+                Some((old, old_n, old_cell, old_layout))
+                    if (old_n, old_cell, old_layout) == (n, cell, layout)
+                        && self.depth.len() == n * n =>
+                {
+                    let step = ((origin - old) / cell as f64).round();
+                    if step.x.abs() < n as f64 && step.y.abs() < n as f64 {
+                        let (di, dj) = (step.x as i64, step.y as i64);
+                        for (idx, d) in depth.iter_mut().enumerate() {
+                            let (i, j) = ((idx % n) as i64 + di, (idx / n) as i64 + dj);
+                            if i >= 0 && j >= 0 && i < n as i64 && j < n as i64 {
+                                *d = self.depth[j as usize * n + i as usize];
+                            }
+                        }
                     }
                 }
+                // The first read, or the lakes changed: all at once (the loading screen
+                // covers it).
+                _ => budget = usize::MAX,
             }
+            self.unread = depth.iter().filter(|d| **d == f32::INFINITY).count();
+            self.depth = depth;
+            self.at = Some(at);
         }
-        let read = |idx: usize, d: &mut f32| {
-            if *d == f32::INFINITY {
+        if self.unread == 0 {
+            return;
+        }
+        // The unread cells nearest the focus first.
+        let mut todo: Vec<(f32, usize)> = self
+            .depth
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| **d == f32::INFINITY)
+            .map(|(idx, _)| {
                 let p = origin
                     + DVec2::new((idx % n) as f64 + 0.5, (idx / n) as f64 + 0.5) * cell as f64;
-                let p3 = DVec3::new(p.x, level_y, p.y);
-                *d = bodies
-                    .iter()
-                    .filter_map(|b| b.depth_at(p3, ground))
-                    .fold(f32::NAN, f32::max);
-            }
+                ((p - focus).length_squared() as f32, idx)
+            })
+            .collect();
+        if todo.len() > budget {
+            todo.select_nth_unstable_by(budget, |a, b| a.0.total_cmp(&b.0));
+            todo.truncate(budget);
+        }
+        let read = |idx: usize| {
+            let p =
+                origin + DVec2::new((idx % n) as f64 + 0.5, (idx / n) as f64 + 0.5) * cell as f64;
+            let p3 = DVec3::new(p.x, level_y, p.y);
+            bodies
+                .iter()
+                .filter_map(|b| b.depth_at(p3, ground))
+                .fold(f32::NAN, f32::max)
         };
-        if depth.iter().filter(|d| **d == f32::INFINITY).count() > 4 * n {
-            let rows = 8;
-            engine_core::tasks::par_chunks_mut(&mut depth, n * rows, |k, chunk| {
-                for (o, d) in chunk.iter_mut().enumerate() {
-                    read(k * n * rows + o, d);
+        let mut got: Vec<(f32, usize)> = todo;
+        if got.len() > 4 * n {
+            engine_core::tasks::par_chunks_mut(&mut got, n * 8, |_, chunk| {
+                for c in chunk {
+                    c.0 = read(c.1);
                 }
             });
         } else {
-            for (idx, d) in depth.iter_mut().enumerate() {
-                read(idx, d);
+            for c in &mut got {
+                c.0 = read(c.1);
             }
         }
-        self.depth = depth;
-        self.at = Some(at);
+        for (d, idx) in got {
+            // A body that reads infinitely deep would never count as read.
+            self.depth[idx] = if d == f32::INFINITY { f32::MAX } else { d };
+            self.unread -= 1;
+        }
+    }
+
+    /// Depth under cell `idx`: NaN where there is no still water or it isn't read yet.
+    fn at_cell(&self, idx: usize) -> f32 {
+        let d = self.depth[idx];
+        if d == f32::INFINITY { f32::NAN } else { d }
     }
 }
 
-/// Follow the focus and advance the interactive ripples.
+/// Fields stepped beside the physics step ([`SimSet::DuringPhysics`]), waiting to be put back
+/// in [`SimSet::Environment`]. Meanwhile readers (the physics step's buoyancy among them) see
+/// a copy of the state as it was, so what they read doesn't depend on which finishes first.
+#[derive(Resource, Default)]
+pub struct RipplesInFlight {
+    /// The ripple field stepped this step, and the spare that holds readers' copy.
+    ripples: Option<crate::ripples::RippleField>,
+    ripple_spare: Option<crate::ripples::RippleField>,
+}
+
+/// Follow the focus and advance the interactive ripples, on a field taken out of the water
+/// (readers see a copy of it until [`publish_ripples_system`] puts it back).
 #[allow(clippy::too_many_arguments)]
 pub fn ripple_system(
     time: Res<Time>,
@@ -254,7 +310,7 @@ pub fn ripple_system(
     focus: Res<FocusPoints>,
     cameras: Query<(&GlobalTransform, &Camera)>,
     mut book: ResMut<SimBook>,
-    mut spare: Local<Option<crate::ripples::RippleField>>,
+    mut flight: ResMut<RipplesInFlight>,
     mut still: Local<StillDepths>,
 ) {
     let dt = time.delta_secs();
@@ -266,18 +322,39 @@ pub fn ripple_system(
     if book.ripple_dims != dims {
         book.ripple_dims = dims;
         state.ripples = crate::ripples::RippleField::new(dims.0 as usize, dims.1);
+        flight.ripple_spare = None;
         book.since_rebuild = f32::INFINITY;
     }
     let f = focus_point(&focus, &cameras);
     let center = ripple_center(&state, f, state.ripples.size() * 0.5);
-    let moved = state.ripples.recenter(center);
     book.since_rebuild += dt;
-    if moved || book.since_rebuild > 2.0 {
+    let rebuild =
+        state.ripples.would_recenter(center) || book.since_rebuild > 2.0 || still.unread > 0;
+    if !rebuild && !state.ripples.needs_step() {
+        // Calm water: nothing to step, copy or upload.
+        state.ripples.pending.clear();
+        return;
+    }
+    // Step with the water unlocked: the step runs on the compute pool, and a thread waiting
+    // for it there may pick up another system that reads the water, which would wait for
+    // this lock forever. The field steps aside, and readers see a copy of what it held until
+    // it is put back.
+    let mut field = flight
+        .ripple_spare
+        .take()
+        .unwrap_or_else(|| state.ripples.clone());
+    std::mem::swap(&mut state.ripples, &mut field);
+    if state.ripples.n != field.n {
+        state.ripples = field.clone();
+    }
+    state.ripples.copy_view_from(&field);
+    state.ripples.pending.clear();
+    if rebuild {
+        field.recenter(center);
         book.since_rebuild = 0.0;
         // The lakes under the grid, read with the water unlocked (AGENTS.md, "Performance
         // rules"): only cells the grid newly covers, or all of them when the lakes change.
-        let r = &state.ripples;
-        let at = (r.origin, r.n, r.cell, book.layout);
+        let at = (field.origin, field.n, field.cell, book.layout);
         let bodies: Vec<BodyState> = state
             .bodies
             .iter()
@@ -286,11 +363,9 @@ pub fn ripple_system(
             .collect();
         let ground = state.ground.clone();
         drop(state);
-        still.read(at, &bodies, &ground, f.y);
+        still.read(at, &bodies, &ground, f.y, DVec2::new(f.x, f.z));
         state = shared.0.write();
-        let state = &mut *state;
-        let r = &state.ripples;
-        let (origin, n, cell) = (r.origin, r.n, r.cell);
+        let (origin, n, cell) = (field.origin, field.n, field.cell);
         // Streams, cell by cell only where each one lies (cheap: a grid lookup).
         let mut stream = vec![(f32::NAN, None::<Vec2>); n * n];
         for sim in state.flows.iter().filter(|f| f.visible) {
@@ -312,48 +387,41 @@ pub fn ripple_system(
                 }
             }
         }
+        drop(state);
         let index = |p: DVec2| {
             let g = ((p - origin) / cell as f64 - DVec2::splat(0.5)).round();
             (g.y as usize * n + g.x as usize).min(n * n - 1)
         };
-        let speed = settings.ripple_speed;
         // Lakes and streams: footsteps, cloth and swimmers ring both.
-        let depths = &still.depth;
-        state.ripples.rebuild_speeds(speed, |p| {
+        let still = &*still;
+        field.rebuild_speeds(settings.ripple_speed, |p| {
             let k = index(p);
-            let d = depths[k].max(stream[k].0);
+            let d = still.at_cell(k).max(stream[k].0);
             (!d.is_nan()).then_some(d)
         });
         // Streams carry their rings and foam downstream.
-        state.ripples.rebuild_drift(|p| stream[index(p)].1);
-        if !state.ripples.needs_step() {
-            // Calm water: nothing to step, copy or upload.
-            state.ripples.pending.clear();
-            return;
-        }
-    } else if !state.ripples.needs_step() {
-        state.ripples.pending.clear();
+        field.rebuild_drift(|p| stream[index(p)].1);
+    } else {
+        drop(state);
+    }
+    if field.needs_step() {
+        field.current_damping = 1.1 / settings.current_life_s.max(0.1);
+        field.swirl = settings.swirl.max(0.0);
+        field.step(dt, settings.ripple_damping, settings.foam_life_s);
+    }
+    flight.ripples = Some(field);
+}
+
+/// Put the ripple field stepped beside the physics step back where readers see it.
+pub fn publish_ripples_system(shared: Res<SharedWater>, mut flight: ResMut<RipplesInFlight>) {
+    let Some(mut field) = flight.ripples.take() else {
         return;
-    }
-    // Step with the water unlocked: the step runs on the compute pool, and a thread waiting
-    // for it there may pick up another system that reads the water, which would wait for
-    // this lock forever. The field steps aside, and readers see a copy of what it held until
-    // it is swapped back.
-    let field = spare.get_or_insert_with(|| state.ripples.clone());
-    std::mem::swap(&mut state.ripples, field);
-    if state.ripples.n != field.n {
-        state.ripples = field.clone();
-    }
-    state.ripples.copy_view_from(field);
-    state.ripples.pending.clear();
-    drop(state);
-    field.current_damping = 1.1 / settings.current_life_s.max(0.1);
-    field.swirl = settings.swirl.max(0.0);
-    field.step(dt, settings.ripple_damping, settings.foam_life_s);
+    };
     let mut state = shared.0.write();
     // Disturbances that came in meanwhile wait for the next step.
     field.pending.append(&mut state.ripples.pending);
-    std::mem::swap(&mut state.ripples, field);
+    std::mem::swap(&mut state.ripples, &mut field);
+    flight.ripple_spare = Some(field);
 }
 
 /// Bed heights for a new flow region (relative to its origin; the grid turned by `yaw`).
@@ -408,11 +476,10 @@ fn set_reservoirs(sim: &mut FlowSim, state_bodies: &[BodyState], ground: &Ground
     }
 }
 
-/// Create, update and advance flowing-water regions. Those out of the `SimulationRange` of
-/// every focus hold still, as they last ran, until one comes near.
+/// Create and update flowing-water regions (stepped by [`flow_step_system`]). Those out of
+/// the `SimulationRange` of every focus hold still, as they last ran, until one comes near.
 #[allow(clippy::too_many_arguments)]
 pub fn flow_system(
-    time: Res<Time>,
     shared: Res<SharedWater>,
     focus: Res<FocusPoints>,
     range: Res<SimulationRange>,
@@ -424,22 +491,12 @@ pub fn flow_system(
         &FlowRegion,
     )>,
     book: Res<SimBook>,
-    mut splashes: MessageWriter<WaterSplash>,
     config: Res<EngineConfig>,
     mut status: ResMut<WaterLoading>,
     mut loading: Local<Vec<(Entity, Task<FlowSim>)>>,
-    mut views: Local<Vec<FlowSim>>,
     mut last_layout: Local<u64>,
-    mut since_spray: Local<f32>,
 ) {
     engine_core::tasks::init_task_pools();
-    let dt = time.delta_secs();
-    // Falls send their spray out as `WaterSplash` puffs (particles show it, audio plays it).
-    *since_spray += dt;
-    let spray = *since_spray >= SPRAY_PERIOD;
-    if spray {
-        *since_spray = 0.0;
-    }
     let mut guard = shared.0.write();
     let state = &mut *guard;
     let relayout = *last_layout != book.layout;
@@ -513,13 +570,49 @@ pub fn flow_system(
     if status.settling != loading.len() {
         status.settling = loading.len();
     }
+    if builds.is_empty() {
+        return;
+    }
+    // Made with the water unlocked (AGENTS.md, "Performance rules").
+    drop(guard);
+    let built: Vec<FlowSim> = builds.into_iter().map(FlowJob::build).collect();
+    shared.0.write().flows.extend(built);
+}
 
+/// Flow regions stepped beside the physics step, waiting for [`publish_flows_system`], and the
+/// copies readers see meanwhile.
+#[derive(Resource, Default)]
+pub struct FlowsInFlight {
+    flows: Option<Vec<FlowSim>>,
+    views: Vec<FlowSim>,
+}
+
+/// Advance the flowing-water regions that aren't resting, on the regions taken out of the
+/// water: readers see copies of them as they were until [`publish_flows_system`] puts them
+/// back. Falls send their spray out as `WaterSplash` puffs (particles show it, audio plays
+/// it).
+pub fn flow_step_system(
+    time: Res<Time>,
+    shared: Res<SharedWater>,
+    mut splashes: MessageWriter<WaterSplash>,
+    mut flight: ResMut<FlowsInFlight>,
+    mut since_spray: Local<f32>,
+) {
+    let dt = time.delta_secs();
+    *since_spray += dt;
+    let spray = *since_spray >= SPRAY_PERIOD;
+    if spray {
+        *since_spray = 0.0;
+    }
+    let mut state = shared.0.write();
+    if state.flows.iter().all(|f| f.resting) {
+        return;
+    }
     // Step with the water unlocked (AGENTS.md, "Performance rules"): the step goes wide on
     // the compute pool, and a thread waiting there runs other modules' tasks, such as fire
-    // sampling `Water`, which would wait for this lock forever. The flows step aside and
-    // readers see a copy of them as they were, until they are put back.
+    // sampling `Water`, which would wait for this lock forever.
     let mut flows = std::mem::take(&mut state.flows);
-    let mut view = std::mem::take(&mut *views);
+    let mut view = std::mem::take(&mut flight.views);
     view.truncate(flows.len());
     for (i, sim) in flows.iter().enumerate() {
         match view.get_mut(i) {
@@ -529,12 +622,12 @@ pub fn flow_system(
         }
     }
     state.flows = view;
-    drop(guard);
+    drop(state);
 
     for sim in flows.iter_mut().filter(|sim| !sim.resting) {
         sim.step(dt);
         if spray {
-            for (foot, v, power) in sim.plunges(0.5) {
+            for &(foot, v, power) in &sim.falls().plunges {
                 // About 1 kg of spray per second per 2 kW of falling water.
                 let mass = power * 5e-4 * SPRAY_PERIOD;
                 if mass < 0.02 {
@@ -554,10 +647,16 @@ pub fn flow_system(
             }
         }
     }
-    flows.extend(builds.into_iter().map(FlowJob::build));
+    flight.flows = Some(flows);
+}
 
+/// Put the flow regions stepped beside the physics step back where readers see them.
+pub fn publish_flows_system(shared: Res<SharedWater>, mut flight: ResMut<FlowsInFlight>) {
+    let Some(flows) = flight.flows.take() else {
+        return;
+    };
     let mut state = shared.0.write();
-    *views = std::mem::replace(&mut state.flows, flows);
+    flight.views = std::mem::replace(&mut state.flows, flows);
 }
 
 /// Flowing water still being made ready: a loading screen waits until [`is_ready`].
@@ -615,6 +714,7 @@ impl FlowJob {
         }
         sim.sources = region.sources.clone();
         sim.drained_m3 = 0.0;
+        sim.refresh_falls();
         sim
     }
 }

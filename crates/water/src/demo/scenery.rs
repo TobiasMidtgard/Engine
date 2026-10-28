@@ -9,6 +9,7 @@ use engine_render::{Mesh, MeshRenderer, StandardMaterial};
 use engine_world::physics::{Fit, FitCollider};
 
 use super::props::{self, Part};
+use crate::boat::Boat;
 use crate::buoyancy::{Buoyancy, Floating, Tether};
 use crate::interact::WaterInteractor;
 
@@ -181,8 +182,10 @@ pub fn spawn_jetty(commands: &mut Commands, jetty: &Jetty) -> Entity {
     e
 }
 
-/// A rowboat floating at `at` (on the water), bow along `yaw`, tied to `anchor`.
+/// A rowboat floating at `at` (on the water), bow along `yaw`, tied to `anchor`. A physics
+/// body once a physics backend is installed ([`Boat`]).
 pub fn spawn_rowboat(commands: &mut Commands, at: DVec3, yaw: f32, anchor: DVec3) -> Entity {
+    let (parts, hull, inside) = super::art::rowboat();
     let e = commands
         .spawn((
             Name::new("Rowboat"),
@@ -197,15 +200,23 @@ pub fn spawn_rowboat(commands: &mut Commands, at: DVec3, yaw: f32, anchor: DVec3
                 length_m: 2.8,
                 stiffness: 900.0,
             },
+            // Painter on the stem head.
+            Boat::new(hull, 140.0, 0.16).with_interior(inside).moored(
+                Vec3::new(1.72, 0.4, 0.0),
+                anchor,
+                2.8,
+            ),
             WaterInteractor::new(0.6).with_wake(0.6),
         ))
         .id();
-    add_parts(commands, e, props::rowboat());
+    add_parts(commands, e, parts);
     e
 }
 
-/// A motorboat floating at `at`, bow along `yaw`; give it a role or a tether to keep it busy.
+/// A motorboat floating at `at`, bow along `yaw`; give it a role or a mooring
+/// ([`moor_motorboat`]) to keep it busy. A physics body once a physics backend is installed.
 pub fn spawn_motorboat(commands: &mut Commands, at: DVec3, yaw: f32) -> Entity {
+    let (parts, hull, inside) = super::art::motorboat();
     let e = commands
         .spawn((
             Name::new("Motorboat"),
@@ -219,11 +230,33 @@ pub fn spawn_motorboat(commands: &mut Commands, at: DVec3, yaw: f32) -> Entity {
                     .with_probes(3, 2)
             },
             Floating::default(),
+            Boat::new(hull, 650.0, 0.3).with_interior(inside),
             WaterInteractor::new(0.9).with_wake(2.5),
         ))
         .id();
-    add_parts(commands, e, props::motorboat());
+    add_parts(commands, e, parts);
     e
+}
+
+/// Tie a motorboat's bow to `anchor` with `length_m` of rope (`stiffness` N/m for the water
+/// module's own float, when no physics backend runs).
+pub fn moor_motorboat(
+    commands: &mut Commands,
+    boat: Entity,
+    anchor: DVec3,
+    length_m: f32,
+    stiffness: f32,
+) {
+    commands.entity(boat).insert(Tether {
+        anchor,
+        length_m,
+        stiffness,
+    });
+    commands.queue(move |world: &mut World| {
+        if let Some(mut b) = world.get_mut::<Boat>(boat) {
+            b.mooring = Some((Vec3::new(2.5, 0.42, 0.0), anchor, length_m));
+        }
+    });
 }
 
 /// A mooring buoy floating at `at`, roped to `anchor` on the bottom.

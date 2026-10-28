@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod api;
+pub mod boat;
 pub mod body;
 pub mod buoyancy;
 pub mod demo;
@@ -15,8 +16,10 @@ pub mod sim;
 pub mod state;
 pub mod waves;
 
+pub use boat::{Boat, HullCut, Interior, hull_collider};
 pub use body::{
-    RainShower, WaterBed, WaterBody, WaterExtent, WaterOptics, WaterSettings, WaveSettings,
+    RainShower, WaterBed, WaterBody, WaterConstituents, WaterExtent, WaterOptics, WaterSettings,
+    WaveSettings,
 };
 pub use buoyancy::{Buoyancy, Floating, Tether};
 pub use flow::{FlowBed, FlowFill, FlowRegion, FlowSource, Lip};
@@ -63,6 +66,8 @@ impl Plugin for WaterPlugin {
         app.insert_resource(Water(Arc::new(state::WaterProvider(shared.0.clone()))))
             .insert_resource(shared)
             .init_resource::<sim::SimBook>()
+            .init_resource::<sim::RipplesInFlight>()
+            .init_resource::<sim::FlowsInFlight>()
             .init_resource::<WaterLoading>()
             .register_resource::<WaterSettings>(
                 "Water quality and behavior: ripple grid size (cells, meters), ripple speed (m/s) \
@@ -106,13 +111,21 @@ impl Plugin for WaterPlugin {
                 FixedUpdate,
                 buoyancy::buoyancy_system.in_set(SimSet::Gameplay),
             )
+            // The ripple and flow steps run beside the physics step on last step's state
+            // (AGENTS.md, "Let systems run side by side"), and are put back after it, so the
+            // physics step reads the same water whichever finishes first.
+            .add_systems(
+                FixedUpdate,
+                (sim::ripple_system, sim::flow_step_system).in_set(SimSet::DuringPhysics),
+            )
             .add_systems(
                 FixedUpdate,
                 (
                     sim::sync_bodies_system,
-                    interact::disturbance_system,
-                    sim::ripple_system,
+                    sim::publish_ripples_system,
+                    sim::publish_flows_system,
                     sim::flow_system,
+                    interact::disturbance_system,
                     puddles::puddle_system,
                     shore::shore_wetness_system,
                     sim::diagnostics_system,
@@ -120,7 +133,13 @@ impl Plugin for WaterPlugin {
                     .chain()
                     .in_set(SimSet::Environment),
             )
-            .add_systems(FixedUpdate, demo::demo_system.in_set(SimSet::Gameplay))
+            .add_systems(
+                FixedUpdate,
+                (demo::demo_system, boat::boat_air_system)
+                    .chain()
+                    .in_set(SimSet::Gameplay),
+            )
+            .add_systems(Update, boat::boat_bodies_system)
             .add_systems(
                 PreUpdate,
                 (

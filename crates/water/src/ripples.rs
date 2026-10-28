@@ -716,16 +716,21 @@ impl RippleField {
         self.max_current = 0.0;
     }
 
+    /// Whether [`RippleField::recenter`] on `focus` would move the grid.
+    pub fn would_recenter(&self, focus: DVec2) -> bool {
+        let half = self.size() * 0.5;
+        let d = focus - (self.origin + DVec2::splat(half));
+        d.x.abs() >= half * 0.25 || d.y.abs() >= half * 0.25
+    }
+
     /// Follow the focus: shift the grid by whole cells when it drifts from the center.
     /// Returns true when the grid moved (wave speeds must then be rebuilt).
     pub fn recenter(&mut self, focus: DVec2) -> bool {
-        let cell = self.cell as f64;
-        let half = self.size() * 0.5;
-        let center = self.origin + DVec2::splat(half);
-        let d = focus - center;
-        if d.x.abs() < half * 0.25 && d.y.abs() < half * 0.25 {
+        if !self.would_recenter(focus) {
             return false;
         }
+        let cell = self.cell as f64;
+        let half = self.size() * 0.5;
         let target = ((focus - DVec2::splat(half)) / cell).round() * cell;
         let shift = ((target - self.origin) / cell).round();
         let (sx, sz) = (shift.x as i64, shift.y as i64);

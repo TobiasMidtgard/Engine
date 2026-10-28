@@ -300,7 +300,29 @@ pub struct FlowSim {
     pub resting: bool,
     /// Lowest and highest bed, meters above `origin.y` (the bed never changes).
     bed_span: [f32; 2],
+    /// The falls as last worked out ([`FlowSim::falls`]), and seconds of flow since.
+    falls: std::sync::Arc<Falls>,
+    since_falls: f32,
 }
+
+/// Where a region's water falls, worked out from its flow every [`FALLS_PERIOD`] of flow
+/// (the lips move slowly once a stream has settled): the renderer draws the curtains, the
+/// spray and the boil from it each frame, and the shores wet round the feet, without each
+/// tracing every fall again.
+#[derive(Debug, Clone, Default)]
+pub struct Falls {
+    /// The lips with a drop of at least [`FlowSim::fall_drop`].
+    pub lips: Vec<Lip>,
+    /// Each lip's path down ([`FlowSim::fall_path`], [`FALL_POINTS`] segments).
+    pub paths: Vec<Vec<FallPoint>>,
+    /// Where they land ([`FlowSim::plunges`]).
+    pub plunges: Vec<(DVec3, Vec2, f32)>,
+}
+
+/// Seconds of flow between working out a region's [`Falls`] again.
+pub const FALLS_PERIOD: f32 = 0.2;
+/// Segments of each cached fall path.
+pub const FALL_POINTS: usize = 16;
 
 impl FlowSim {
     /// A region with `bed` heights (relative to `origin.y`).
@@ -340,7 +362,37 @@ impl FlowSim {
             drained_m3: 0.0,
             resting: false,
             bed_span,
+            falls: Default::default(),
+            since_falls: f32::INFINITY,
         }
+    }
+
+    /// The least drop that makes a fall (one the renderer draws a curtain over): at least a
+    /// cell's width, so a steep bank isn't a waterfall, and half a meter.
+    pub fn fall_drop(&self) -> f32 {
+        self.cell.max(0.5)
+    }
+
+    /// The falls as last worked out (see [`Falls`]); [`FlowSim::refresh_falls`] works them out
+    /// now.
+    pub fn falls(&self) -> &Falls {
+        &self.falls
+    }
+
+    /// Work the falls out again from the flow as it is.
+    pub fn refresh_falls(&mut self) {
+        let lips = self.lips(self.fall_drop());
+        let paths = lips
+            .iter()
+            .map(|lip| self.fall_path(lip, FALL_POINTS))
+            .collect::<Vec<_>>();
+        let plunges = self.plunges_of(&lips, &paths);
+        self.falls = std::sync::Arc::new(Falls {
+            lips,
+            paths,
+            plunges,
+        });
+        self.since_falls = 0.0;
     }
 
     /// Update the tunable parts from the component (sources, friction, look).
@@ -380,6 +432,8 @@ impl FlowSim {
             drained_m3,
             resting,
             bed_span,
+            falls,
+            since_falls,
         } = other;
         if self.entity != *entity || self.bed.len() != bed.len() {
             self.bed.clone_from(bed);
@@ -405,6 +459,8 @@ impl FlowSim {
         self.drained_m3 = *drained_m3;
         self.resting = *resting;
         self.bed_span = *bed_span;
+        self.falls = falls.clone();
+        self.since_falls = *since_falls;
     }
 
     /// The middle of the grid and the distance from it to a corner, meters: a sphere round
@@ -446,6 +502,7 @@ impl FlowSim {
         self.origin = s.point(self.origin);
         self.yaw = turned_yaw(s, self.yaw);
         self.version += 1;
+        self.refresh_falls();
     }
 
     /// Where water falls over a drop: (world position at the foot, horizontal velocity of the
@@ -454,13 +511,19 @@ impl FlowSim {
     /// free fall; a sheet sliding down rock spends most of it on the way, so less of it
     /// reaches the foot (less spray, mist and boil).
     pub fn plunges(&self, min_drop: f32) -> Vec<(DVec3, Vec2, f32)> {
+        let lips = self.lips(min_drop);
+        let paths: Vec<_> = lips.iter().map(|lip| self.fall_path(lip, 6)).collect();
+        self.plunges_of(&lips, &paths)
+    }
+
+    /// [`FlowSim::plunges`] of `lips` falling down `paths`.
+    fn plunges_of(&self, lips: &[Lip], paths: &[Vec<FallPoint>]) -> Vec<(DVec3, Vec2, f32)> {
         // Feet cluster into squares 8 cells wide, so a wide fall is one plunge, two falls two.
         let size = 8.0 * self.cell as f64;
         let mut buckets: Vec<((i64, i64), DVec3, Vec2, f32)> = Vec::new();
-        for lip in self.lips(min_drop) {
+        for (lip, path) in lips.iter().zip(paths) {
             // Where it lands in the water or on ground below, down its arc and any rock it
             // slides over.
-            let path = self.fall_path(&lip, 6);
             let end = *path.last().unwrap();
             let foot = end.pos;
             let free =
@@ -705,6 +768,10 @@ impl FlowSim {
             self.substep(sdt);
         }
         self.version += 1;
+        self.since_falls += dt;
+        if self.since_falls >= FALLS_PERIOD {
+            self.refresh_falls();
+        }
     }
 
     fn substep(&mut self, dt: f32) {

@@ -110,5 +110,27 @@ fn the_ripple_grid_reads_the_lake_bed_once() {
         moved < cells * 3 / 4,
         "{moved} terrain reads for a 20 m move"
     );
-    println!("terrain reads: {still} in 7 s still, {moved} for a 20 m move ({cells} cells)");
+
+    // A jump across the lake (a teleport, a tour stop): the new grid is read a few thousand
+    // cells a step, not all in one frame, and is whole a second later.
+    app.world.get_mut::<Transform>(eye).unwrap().translation = DVec3::new(-20.0, 2.0, 35.0);
+    let before = reads.load(Ordering::Relaxed);
+    app.update();
+    let jump = reads.load(Ordering::Relaxed) - before;
+    assert!(
+        jump < cells / 4,
+        "{jump} terrain reads in the frame after a jump"
+    );
+    let before = reads.load(Ordering::Relaxed);
+    app.update_n(30);
+    let after = reads.load(Ordering::Relaxed) - before;
+    assert!(
+        jump + after > cells / 2,
+        "only {} of the new grid read a second after the jump",
+        jump + after
+    );
+    println!(
+        "terrain reads: {still} in 7 s still, {moved} for a 20 m move, {jump} the frame after \
+         a jump ({cells} cells)"
+    );
 }

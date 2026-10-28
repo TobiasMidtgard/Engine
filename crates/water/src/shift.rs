@@ -2,7 +2,7 @@
 //!
 //! In `WorldShiftSet::Apply` everything the water module keeps in world space moves into the
 //! new frame: body centers and their waves, the ripple grid and its waiting splashes, flow
-//! grids, interactors' last positions, tethers, things the water floats itself, and the test
+//! grids, interactors' last positions, tethers and boats' moorings, things the water floats itself, and the test
 //! area's routes. The `Water` query, buoyancy and the renderer then agree with the rest of the
 //! world in the same frame, and nothing reads the jump as motion (no wake from a boat that
 //! "moved" 10 km).
@@ -10,6 +10,7 @@
 use engine_core::prelude::*;
 use engine_world::WorldShift;
 
+use crate::boat::Boat;
 use crate::buoyancy::{Floating, Tether};
 use crate::demo::{DemoRole, DemoState};
 use crate::interact::WaterInteractor;
@@ -22,6 +23,7 @@ pub fn shift_system(
     shared: Res<SharedWater>,
     mut interactors: Query<&mut WaterInteractor>,
     mut tethers: Query<&mut Tether>,
+    mut boats: Query<&mut Boat>,
     mut floating: Query<&mut Floating>,
     mut roles: Query<&mut DemoRole>,
     demo: Option<ResMut<DemoState>>,
@@ -35,6 +37,11 @@ pub fn shift_system(
     }
     for mut t in &mut tethers {
         t.anchor = s.point(t.anchor);
+    }
+    for mut b in &mut boats {
+        if let Some((_, anchor, _)) = &mut b.mooring {
+            *anchor = s.point(*anchor);
+        }
     }
     // Floating things move relative to the water, which keeps its place in the world (like
     // `WaterSplash` velocities): their motion only turns.

@@ -20,16 +20,15 @@ use crate::body::{WaterBed, WaterSettings};
 use crate::flow::FlowSim;
 use crate::state::SharedWater;
 
-/// How often shores update, seconds.
-const PERIOD: f32 = 0.25;
-/// Each update visits every `STRIDE`th row of the grid, so the reach is refreshed once a
-/// second.
-const STRIDE: usize = 4;
+/// Each step visits every `STRIDE`th row of the grid, so at 60 steps a second the reach is
+/// refreshed once a second, a sixtieth of the work each step (not a quarter of it every
+/// quarter second: a spike of 59 ms at the fortress).
+const STRIDE: usize = 60;
 /// Shores are wetted within this distance of the focus, meters.
 const REACH_M: f64 = 128.0;
-/// Ground heights sampled per update at most: after the grid moves, the first pass is spread
-/// over a few updates.
-const SAMPLES_PER_UPDATE: usize = 6000;
+/// Ground heights sampled per step at most: after the grid moves, the first pass is spread
+/// over many steps (a terrain sample costs about 10 µs on a planet).
+const SAMPLES_PER_UPDATE: usize = 200;
 /// Height of the wet band above a lake's still level in calm water, meters: sand wicks water
 /// up a few decimeters, and even ripples lap. Waves add 1.5 times their significant height.
 const SWASH_M: f32 = 0.4;
@@ -40,8 +39,6 @@ const RUNUP_M: f64 = 24.0;
 const BLOCK: usize = 8;
 /// How far beyond a stream's edge its bank is wet, meters.
 const BANK_M: f32 = 1.5;
-/// Falls at least this high throw spray (as for their splashes).
-const SPRAY_DROP_M: f32 = 0.5;
 /// Spray wets the ground at most this far from a fall's foot, meters.
 const SPRAY_MAX_M: f32 = 14.0;
 /// A cell whose highest point is this far under the water is under it, meters.
@@ -163,7 +160,6 @@ pub fn shore_wetness_system(
     covers: Query<(&GlobalTransform, &ShoreCover)>,
     mut changes: MessageReader<TerrainChanged>,
     mut surface: ResMut<SurfaceLayers>,
-    mut accumulated: Local<f32>,
     mut cache: Local<ShoreCache>,
 ) {
     // Changes to the ground land between updates, so note them on every step.
@@ -176,11 +172,7 @@ pub fn shore_wetness_system(
     if !settings.wet_shores {
         return;
     }
-    *accumulated += time.delta_secs();
-    if *accumulated < PERIOD {
-        return;
-    }
-    let dt = std::mem::take(&mut *accumulated);
+    let dt = time.delta_secs();
     let state = shared.0.read();
     let lakes: Vec<_> = state
         .bodies
@@ -194,8 +186,8 @@ pub fn shore_wetness_system(
     let plunges: Vec<(DVec3, f32)> = state
         .flows
         .iter()
-        .flat_map(|f| f.plunges(SPRAY_DROP_M))
-        .map(|(foot, _, power)| (foot, power))
+        .flat_map(|f| &f.falls().plunges)
+        .map(|&(foot, _, power)| (foot, power))
         .collect();
     let covers: Vec<(DVec3, Quat, ShoreCover)> = covers
         .iter()

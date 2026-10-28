@@ -6,7 +6,7 @@
 //!
 //! `seconds` of simulation run before the first picture (default 12); `views` is a
 //! comma-separated subset of: overview, falls, shore, under, pond, wake, aerial, swirl, ditch,
-//! cascade, crevice.
+//! cascade, crevice, ford, pools, pools_near, pools_dark.
 
 use engine_core::prelude::*;
 use engine_core::time::TimeSource;
@@ -33,6 +33,10 @@ const VIEWS: &[(&str, [f64; 3], [f64; 3])] = &[
     ("crevice", [-14.9, 8.0, -18.5], [-23.0, 10.5, -23.0]),
     // The wader fording the stream above the falls.
     ("ford", [19.5, 9.0, 27.0], [24.5, 5.3, 24.0]),
+    // The row of pools on the rim, one per water color, and its clearest and darkest ends.
+    ("pools", [36.8, 20.0, -40.9], [21.0, 5.5, -24.0]),
+    ("pools_near", [-5.6, 10.0, -39.6], [18.0, 5.0, -31.2]),
+    ("pools_dark", [40.0, 10.0, 1.4], [29.1, 5.0, -21.2]),
 ];
 
 fn main() {

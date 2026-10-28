@@ -26,7 +26,7 @@ use crate::waves::MAX_WAVES;
 pub const SHADER: &str = include_str!("water.wgsl");
 
 /// Bodies drawn at once (the nearest ones).
-pub const MAX_BODIES: usize = 8;
+pub const MAX_BODIES: usize = 16;
 const MAX_SHOWERS: usize = 4;
 /// Most plunge pools boiling under falls (nearest first).
 const MAX_PLUNGES: usize = 8;
@@ -40,14 +40,10 @@ const MAX_RINGS: u32 = 420;
 const PUDDLE_N: u32 = 128;
 /// How far an ocean is drawn, meters.
 const OCEAN_REACH: f64 = 30_000.0;
-/// Water falls free where its surface drops more than this many cells' widths in one cell
-/// (steeper than 45°), and at least [`FALL_LEAST_DROP`]; the flow surface hides triangles as
-/// steep as that (`fs_flow`).
-const FALL_SLOPE: f32 = 1.0;
-/// Least drop drawn as a falling curtain, meters.
-const FALL_LEAST_DROP: f32 = 0.5;
-/// Segments down each falling curtain.
-const FALL_SEGMENTS: usize = 16;
+/// Segments down each falling curtain. Water falls free where its surface drops more than a
+/// cell's width in one cell (steeper than 45°, [`crate::flow::FlowSim::fall_drop`]); the flow
+/// surface hides triangles as steep as that (`fs_flow`).
+const FALL_SEGMENTS: usize = crate::flow::FALL_POINTS;
 /// `FallVertex::uv_speed.w` on a curtain where it slides down rock (0 where it falls free, 1
 /// on a spray cloud): `fs_falls` reads anything under a half as how much it touches rock.
 const ROCK_KIND: f32 = 0.45;
@@ -72,9 +68,32 @@ struct FallVertex {
     uv_speed: [f32; 4],
 }
 
+/// Turbulence of the water leaving a natural brink (rough rock, a ragged lip, a stream
+/// already white above it): the share of its speed that wanders across. Laboratory spillways
+/// run 1-5% (Castillo et al. 2015); a rough mountain brink several times that.
+const FALL_TURBULENCE: f32 = 0.18;
+/// `FallVertex::uv_speed.w` on the aerated spray round a falling curtain (see `fall_shell`).
+const SHELL_KIND: f32 = -1.0;
+
+/// How far a free-falling jet of `q` m²/s that left its brink at `speed` m/s has spread to
+/// each side of its core after falling `drop` meters: the turbulent spreading of a
+/// rectangular jet, ξ = 2φ √h₀ (√H − √h₀) with φ = 1.07 Tu, h₀ the brink's velocity head
+/// and H = h₀ + drop (Castillo, Carrillo & Sordo-Ward 2015); plus, once it has broken up
+/// (past its break-up length L_b = 6 q^0.32, Horeni 1956), the spray thrown off its broken
+/// clumps.
+fn jet_spread(q: f32, speed: f32, drop: f32) -> f32 {
+    let h0 = speed * speed / (2.0 * 9.81);
+    let phi = 1.07 * FALL_TURBULENCE;
+    let turbulent = 2.0 * phi * h0.sqrt() * ((h0 + drop.max(0.0)).sqrt() - h0.sqrt());
+    let break_up = 6.0 * q.max(1e-4).powf(0.32);
+    turbulent + 0.06 * (drop - 0.5 * break_up).max(0.0)
+}
+
 /// The curtain of water over `lip` as triangles down its `path` (see
 /// [`FlowSim::fall_path`](crate::flow::FlowSim::fall_path)), relative to the camera via `rel`.
-/// Where it slides down rock it lies on it, spreading wider.
+/// Where it slides down rock it lies on it, spreading wider. Falling free it is a volume:
+/// the glassy core, and in front of and behind it the aerated water and spray that it
+/// spreads into as it falls ([`jet_spread`]), so it has depth from every side.
 fn fall_strip(
     lip: &crate::flow::Lip,
     path: &[crate::flow::FallPoint],
@@ -86,7 +105,8 @@ fn fall_strip(
     let u0 = (lip.top.x * across.x as f64 + lip.top.z * across.z as f64).rem_euclid(4096.0) as f32;
     let last = path.len().saturating_sub(1).max(1);
     let mut spread = 0.0f32;
-    let mut prev: Option<[FallVertex; 2]> = None;
+    // Core, front spray, back spray.
+    let mut prev: [Option<[FallVertex; 2]>; 3] = [None; 3];
     for (k, point) in path.iter().enumerate() {
         let frac = k as f32 / last as f32;
         let on_rock = point.rock != Vec3::ZERO;
@@ -103,23 +123,49 @@ fn fall_strip(
             spread += 0.06;
         }
         let half = lip.width * (0.66 + 0.3 * frac + spread.min(0.35));
+        let drop = (lip.top.y - point.pos.y) as f32;
+        let jet = jet_spread(lip.q, lip.speed, drop);
+        // The core's own thickness: the water over the brink at the speed it falls.
+        let core = (0.5 * lip.q / point.vel.length().max(0.3)).clamp(0.003, 0.3);
         let p = rel(point.pos);
-        let ring = [-1.0f32, 1.0].map(|side| FallVertex {
-            rel_q: (p + across * (half * side)).extend(lip.q).to_array(),
-            normal_frac: normal.extend(frac).to_array(),
-            across_side: across.extend(side).to_array(),
-            uv_speed: [
-                u0 + half * side,
-                point.t,
-                lip.speed,
-                if on_rock { ROCK_KIND } else { 0.0 },
-            ],
-        });
-        if let Some(prev) = prev {
-            // Wound so the front face is the one `normal` points out of.
-            out.extend_from_slice(&[prev[0], prev[1], ring[0], prev[1], ring[1], ring[0]]);
+        let layers = [
+            (p, normal, half, 0.0, if on_rock { ROCK_KIND } else { 0.0 }),
+            // On rock the spray lies over the sheet; falling free it surrounds the core.
+            (
+                p + normal * (core + jet),
+                normal,
+                half + jet,
+                37.0,
+                SHELL_KIND,
+            ),
+            (
+                p - normal * if on_rock { 0.0 } else { core + jet },
+                -normal,
+                half + jet,
+                71.0,
+                SHELL_KIND,
+            ),
+        ];
+        for (layer, (at, n, w, du, kind)) in layers.into_iter().enumerate() {
+            // Behind a sheet on rock is the rock.
+            if layer == 2 && on_rock {
+                prev[2] = None;
+                continue;
+            }
+            let ring = [-1.0f32, 1.0].map(|side| FallVertex {
+                rel_q: (at + across * (w * side)).extend(lip.q).to_array(),
+                normal_frac: n.extend(frac).to_array(),
+                across_side: across.extend(side).to_array(),
+                uv_speed: [u0 + du + w * side, point.t, lip.speed, kind],
+            });
+            if let Some(before) = prev[layer] {
+                // Wound so the front face is the one `normal` points out of.
+                out.extend_from_slice(&[
+                    before[0], before[1], ring[0], before[1], ring[1], ring[0],
+                ]);
+            }
+            prev[layer] = Some(ring);
         }
-        prev = Some(ring);
     }
 }
 
@@ -130,33 +176,43 @@ fn boil_radius(power: f32) -> f32 {
 }
 
 /// The cloud of spray where a fall of `power` watts lands at `foot` (world; `rel` relative
-/// to the camera): a quad facing the camera (`right`, `up`), drawn over the curtain's foot.
-/// Corners go in `normal_frac.xy`, its radius in `.z` and how dense it is in `.w`.
+/// to the camera): camera-facing quads (`right`, `up`) drawn over the curtain's foot. A dense
+/// cloud boiling off the pool, and over it a plume that billows up, grows and thins (the
+/// air the plunge drags down comes back up full of droplets). Corners go in
+/// `normal_frac.xy`, the radius in `.z` and how dense it is in `.w`.
 fn mist_puff(foot: DVec3, rel: Vec3, power: f32, right: Vec3, up: Vec3, out: &mut Vec<FallVertex>) {
     // Flow times drop (m⁴/s), as for the spray particles: bigger falls make bigger clouds.
     let size = (power / 9810.0).max(0.0).sqrt();
     let radius = (0.8 + size * 0.9).min(8.0);
     let strength = (0.45 + size * 0.2).min(1.0);
-    // Its lower half is under the pool; it boils up from where the curtain goes in.
-    let center = rel + Vec3::Y * (radius * 0.1);
     // Each cloud billows differently.
     let seed = (foot.x * 0.37 + foot.z * 0.61).rem_euclid(97.0) as f32;
-    let corner = |cx: f32, cy: f32| FallVertex {
-        rel_q: (center + (right * cx + up * cy) * radius)
-            .extend(0.0)
-            .to_array(),
-        normal_frac: [cx, cy, radius, strength],
-        across_side: [0.0; 4],
-        uv_speed: [seed, 0.0, 0.0, 1.0],
-    };
-    out.extend_from_slice(&[
-        corner(-1.0, -1.0),
-        corner(1.0, -1.0),
-        corner(-1.0, 1.0),
-        corner(-1.0, 1.0),
-        corner(1.0, -1.0),
-        corner(1.0, 1.0),
-    ]);
+    // (height over the foot, radius, density) in units of the foot cloud's radius: its lower
+    // half is under the pool; the plume above it rises with the falls' power.
+    let rise = (0.5 + size * 0.2).min(1.4);
+    let layers = [
+        (0.1, 1.0, 1.0),
+        (0.55 * rise, 1.3, 0.3),
+        (1.1 * rise, 1.6, 0.12),
+    ];
+    for (k, (lift, scale, density)) in layers.into_iter().enumerate() {
+        let r = radius * scale;
+        let center = rel + Vec3::Y * (radius * lift);
+        let corner = |cx: f32, cy: f32| FallVertex {
+            rel_q: (center + (right * cx + up * cy) * r).extend(0.0).to_array(),
+            normal_frac: [cx, cy, r, strength * density],
+            across_side: [0.0; 4],
+            uv_speed: [seed + k as f32 * 13.7, 0.0, 0.0, 1.0],
+        };
+        out.extend_from_slice(&[
+            corner(-1.0, -1.0),
+            corner(1.0, -1.0),
+            corner(-1.0, 1.0),
+            corner(-1.0, 1.0),
+            corner(1.0, -1.0),
+            corner(1.0, 1.0),
+        ]);
+    }
 }
 
 #[repr(C)]
@@ -221,10 +277,12 @@ fn optics_vectors(o: &WaterOptics) -> ([f32; 4], [f32; 4]) {
             o.absorption[2],
             o.scattering,
         ],
+        // Per meter of scattering, what each band sends back (the shader multiplies by
+        // the scattering).
         [
-            o.scatter_color[0],
-            o.scatter_color[1],
-            o.scatter_color[2],
+            o.scatter_color[0] * o.backscatter,
+            o.scatter_color[1] * o.backscatter,
+            o.scatter_color[2] * o.backscatter,
             o.roughness,
         ],
     )
@@ -725,23 +783,26 @@ impl WaterFeature {
         view: &ViewData,
         plunges: &[(DVec3, f32)],
     ) {
-        let mut lips: Vec<(f64, &crate::flow::FlowSim, crate::flow::Lip)> = state
+        // The falls as the flow step last worked them out (not traced again each frame).
+        let mut lips: Vec<(f64, &crate::flow::Lip, &[crate::flow::FallPoint])> = state
             .flows
             .iter()
             .filter(|sim| sim.visible)
             .flat_map(|sim| {
-                sim.lips((sim.cell * FALL_SLOPE).max(FALL_LEAST_DROP))
-                    .into_iter()
-                    .map(move |lip| (lip.top.distance(view.origin), sim, lip))
+                let falls = sim.falls();
+                falls
+                    .lips
+                    .iter()
+                    .zip(&falls.paths)
+                    .map(|(lip, path)| (lip.top.distance(view.origin), lip, path.as_slice()))
             })
             .filter(|(d, _, _)| *d < FALLS_REACH)
             .collect();
         lips.sort_by(|a, b| a.0.total_cmp(&b.0));
         lips.truncate(MAX_LIPS);
-        let mut vertices = Vec::with_capacity(lips.len() * FALL_SEGMENTS * 6);
-        for (_, sim, lip) in &lips {
-            let path = sim.fall_path(lip, FALL_SEGMENTS);
-            fall_strip(lip, &path, |p| view.relative(p), &mut vertices);
+        let mut vertices = Vec::with_capacity(lips.len() * crate::flow::FALL_POINTS * 18);
+        for (_, lip, path) in &lips {
+            fall_strip(lip, path, |p| view.relative(p), &mut vertices);
         }
         // Spray clouds last, so they draw over the curtains' feet.
         if !lips.is_empty() {
@@ -1280,8 +1341,8 @@ impl RenderFeature for WaterFeature {
             .flows
             .iter()
             .filter(|sim| sim.visible)
-            .flat_map(|sim| sim.plunges((sim.cell * FALL_SLOPE).max(FALL_LEAST_DROP)))
-            .map(|(foot, _, power)| (foot, power))
+            .flat_map(|sim| &sim.falls().plunges)
+            .map(|&(foot, _, power)| (foot, power))
             .collect();
         let mut near: Vec<_> = plunges
             .iter()
@@ -1511,8 +1572,24 @@ mod tests {
         let mut v = Vec::new();
         let camera = DVec3::new(9.0, 7.0, -3.0);
         fall_strip(&lip, &path, |p| (p - camera).as_vec3(), &mut v);
-        assert_eq!(v.len(), FALL_SEGMENTS * 6);
+        // The core, and the spray in front of and behind it.
+        assert_eq!(v.len(), FALL_SEGMENTS * 6 * 3);
+        let (core, shells): (Vec<FallVertex>, Vec<FallVertex>) =
+            v.iter().partition(|f| f.uv_speed[3] == 0.0);
+        assert_eq!(core.len(), FALL_SEGMENTS * 6);
+        assert!(shells.iter().all(|f| f.uv_speed[3] == SHELL_KIND));
         let pos = |f: &FallVertex| Vec3::from_slice(&f.rel_q[..3]);
+        // The spray spreads wider than the core as the jet falls (`jet_spread`), and stands
+        // off it to both sides.
+        let width = |set: &[FallVertex]| {
+            set.iter()
+                .filter(|f| f.normal_frac[3] == 1.0)
+                .map(|f| pos(f).z)
+                .fold((f32::MAX, f32::MIN), |(lo, hi), z| (lo.min(z), hi.max(z)))
+        };
+        let (c, s) = (width(&core), width(&shells));
+        assert!(s.1 - s.0 > c.1 - c.0 + 0.2, "core {c:?}, spray {s:?}");
+        let v = core;
         // Starts at the lip, a strip as wide as the lip (a little more, to overlap).
         let first = &v[0];
         assert!(first.normal_frac[3] == 0.0 && first.normal_frac[1] > 0.99);
@@ -1545,12 +1622,19 @@ mod tests {
         let foot = Vec3::new(0.0, -5.0, -20.0);
         // A small stream falling 8 m (0.2 m³/s): about 16 kW.
         mist_puff(DVec3::new(3.0, 1.0, 4.0), foot, 16_000.0, right, up, &mut v);
-        assert_eq!(v.len(), 6);
+        // The cloud on the pool and two layers of plume over it, each rising and spreading.
+        assert_eq!(v.len(), 18);
         let pos = |f: &FallVertex| Vec3::from_slice(&f.rel_q[..3]);
-        let center = v.iter().map(pos).sum::<Vec3>() / 6.0;
+        let mut below = (foot.y, 0.0);
+        for layer in v.chunks(6) {
+            let center = layer.iter().map(pos).sum::<Vec3>() / 6.0;
+            let radius = layer[0].normal_frac[2];
+            assert!(center.y > below.0 && radius > below.1, "{center} {radius}");
+            assert!((center.with_y(0.0) - foot.with_y(0.0)).length() < 1e-4);
+            below = (center.y, radius);
+        }
         let radius = v[0].normal_frac[2];
         assert!((1.5..3.0).contains(&radius), "{radius}");
-        assert!(center.y > foot.y && (center.with_y(0.0) - foot.with_y(0.0)).length() < 1e-4);
         for f in &v {
             assert_eq!(f.uv_speed[3], 1.0);
             assert!((pos(f).z - foot.z).abs() < 1e-4, "not facing the camera");

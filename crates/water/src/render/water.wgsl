@@ -46,7 +46,7 @@ struct Globals {
 
 struct WaterUniform {
     g: Globals,
-    bodies: array<GpuBody, 8>,
+    bodies: array<GpuBody, 16>,
 };
 
 @group(1) @binding(0) var<uniform> water: WaterUniform;
@@ -65,6 +65,10 @@ struct FlowGpu {
 };
 @group(2) @binding(0) var<uniform> flow: FlowGpu;
 @group(2) @binding(1) var flow_tex: texture_2d<f32>;        // r surface (m above base), g depth, b vel x, a vel z
+
+// Deep water's reflectance (Gordon) gives what one look straight down sees; light scattered
+// in from the sides and the view's slant through the bright top layer add to it.
+const SCATTER_GAIN: f32 = 2.5;
 
 // ---------------------------------------------------------------- helpers
 struct WaterLook {
@@ -381,11 +385,15 @@ fn medium_radiance(look: WaterLook, rel: vec3<f32>, depth_below: f32) -> vec3<f3
     let sky = sky_ambient(vec3<f32>(0.0, 1.0, 0.0)) * sky_visibility(rel, vec3<f32>(0.0, 1.0, 0.0)) * PI;
     let down = exp(-(look.absorb + vec3<f32>(look.scattering)) * max(depth_below, 0.0));
     let e = (sun * 0.98 + sky) * INV_PI * down;
-    let sigma_t = look.absorb + vec3<f32>(look.scattering);
-    let albedo = vec3<f32>(look.scattering) / max(sigma_t, vec3<f32>(1e-4));
-    // Light scattered toward the eye, from all the water around (multiple scattering
-    // brightens it well beyond single scattering).
-    return look.scatter_color * albedo * e * 0.4;
+    // Light the water sends back up from below the surface: Gordon's reflectance of deep
+    // water, r = (0.0949 + 0.0794 u) u with u = bb / (a + bb), per band. It is what the
+    // particles scatter back (`scatter_color` is backscattering per meter of scattering)
+    // against what the water absorbs: blue for pure water, turquoise for rock flour, green
+    // for algae, brown for silt and tannins.
+    let bb = look.scattering * look.scatter_color;
+    let u = bb / max(look.absorb + bb, vec3<f32>(1e-5));
+    let r = (0.0949 + 0.0794 * u) * u;
+    return r * e * PI * SCATTER_GAIN;
 }
 
 // Screen-space reflection: march the reflected ray against the scene depth copy.
@@ -556,7 +564,12 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
 
     // ---- light through thin crests (wave tips glow when the sun is behind them)
     let behind_sun = pow(saturate(dot(v, -normalize(vec3<f32>(l.x, 0.0, l.z) + vec3<f32>(0.0001)))), 3.0);
-    let sss = pre_expose(look.scatter_color * sun * shadow * behind_sun * crest * 0.012);
+    // Light through a crest: what a meter and a half of this water lets through, tinted by
+    // what its particles scatter.
+    let bs = look.scatter_color / max(max(look.scatter_color.r, max(look.scatter_color.g, look.scatter_color.b)), 1e-5);
+    let through = exp(-look.absorb * 1.5) * mix(vec3<f32>(1.0), bs, 0.5);
+    let tint = through / max(max(through.r, max(through.g, through.b)), 1e-5);
+    let sss = pre_expose(tint * 0.6 * sun * shadow * behind_sun * crest * 0.012);
 
     var color = water_col * (1.0 - fresnel) + refl * fresnel + glitter + sss;
 
@@ -864,7 +877,7 @@ struct FallOut {
     @location(2) across: vec3<f32>,
     @location(3) uv: vec2<f32>,
     @location(4) look: vec4<f32>,        // q, frac, side, lip speed
-    @location(5) kind: f32,              // 1 spray cloud; under a half a curtain, 0.45 where it slides down rock
+    @location(5) kind: f32,              // 1 spray cloud; -1 spray round a curtain; under a half a curtain, 0.45 where it slides down rock
 };
 
 @vertex
@@ -906,7 +919,9 @@ fn fall_mist(in: FallOut) -> vec4<f32> {
     let phase = 0.3 + 1.6 * pow(saturate(dot(-v, l)), 6.0);
     let out_dir = normalize(vec3<f32>(v.x, 0.0, v.z) + vec3<f32>(0.0, 1e-3, 0.0));
     let n = normalize(out_dir + vec3<f32>(0.0, 0.7, 0.0));
-    let sky = sky_ambient(n) * sky_visibility(in.rel, n) * PI;
+    // A dense cloud scatters many times over: the blue of the sky light washes out to grey.
+    let sky_in = sky_ambient(n) * sky_visibility(in.rel, n) * PI;
+    let sky = mix(sky_in, vec3<f32>(dot(sky_in, vec3<f32>(0.2126, 0.7152, 0.0722))), 0.6);
     let color = apply_fog(pre_expose(0.9 * (sun * phase + sky) * INV_PI), in.rel);
     return vec4<f32>(color * alpha, alpha);
 }
@@ -922,9 +937,72 @@ fn fall_streaks(u: f32, t0: f32, fine: f32) -> f32 {
     return smoothstep(0.25, 0.75, mix(raw, raw * 0.7 + thread * 0.3, fine));
 }
 
+// How broken up a free-falling jet of `q` m²/s is, `tau` seconds after it left the brink:
+// compact and glassy at first, broken into clumps and spray past its break-up length
+// L_b = 6 q^0.32 (Horeni 1956; rectangular jets break up at 0.5-3 L_b, Castillo et al.), 0..1.
+fn fall_broken(q: f32, tau: f32) -> f32 {
+    let drop = 0.5 * 9.81 * tau * tau;
+    let lb = 6.0 * pow(max(q, 1e-4), 0.32);
+    return smoothstep(0.3, 1.4, drop / lb);
+}
+
+// Aerated water lit like froth: the sun wrapping round it and glowing through it with the
+// sun behind, and the sky over it.
+fn froth_light(rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
+    let l = frame.sun_dir.xyz;
+    let sun = frame.sun_color.rgb * sun_transmittance(rel);
+    let shadow = shadow_factor(rel, n);
+    // Light bounces many times inside froth: the sky's blue washes out toward grey-white.
+    let sky = sky_ambient(n) * sky_visibility(rel, n) * PI;
+    let up = mix(sky, vec3<f32>(dot(sky, vec3<f32>(0.2126, 0.7152, 0.0722))), 0.5);
+    let wrap = saturate(dot(n, l) * 0.6 + 0.4);
+    let through = pow(saturate(dot(-v, l)), 4.0) * 0.8;
+    return pre_expose(0.9 * (sun * shadow * (wrap + through) + up) * INV_PI);
+}
+
+// The aerated water and spray round a falling core: none over the brink, then, as the jet
+// breaks up, white clumps streaming down with it, frayed into drops at their edges, and a
+// haze of fine spray between them that thickens toward the foot. Seen edge-on it is
+// thicker (the look passes through more of it).
+fn fall_shell(in: FallOut) -> vec4<f32> {
+    let q = in.look.x;
+    let frac = in.look.y;
+    let tau = in.uv.y;
+    let u = in.uv.x;
+    let v = -in.rel / max(length(in.rel), 1e-4);
+    let broken = fall_broken(q, tau);
+    if (broken < 0.01) { discard; }
+    let t0 = time_s() - tau;
+    let fine = saturate(1.5 - footprint(in.rel).across * 40.0);
+    let body = saturate(q * 6.0 + 0.2);
+    // Clumps stretch as the water speeds up: the pattern rides with it (time since the lip).
+    let clumps = fbm2(vec2<f32>(u * 1.9, t0 * 4.2), 4) / 0.9375;
+    let drops = value_noise2(vec2<f32>(u * 21.0 + 4.1, t0 * 27.0));
+    // Fine spray hangs thickest low down, where the clumps have shed most of it.
+    let haze = 0.05 + 0.3 * frac * frac;
+    var alpha = smoothstep(0.42, 0.78, clumps) * 0.7 + haze * smoothstep(0.2, 0.6, clumps);
+    alpha = max(alpha, fine * 0.35 * smoothstep(0.6, 0.95, drops) * smoothstep(0.3, 0.6, clumps));
+    let n_dot_v = abs(dot(in.normal, v));
+    alpha *= broken * body * mix(1.5, 0.75, n_dot_v);
+    // Frayed at the sides.
+    alpha *= 1.0 - smoothstep(0.3, 1.0, abs(in.look.z) + (clumps - 0.5) * 0.6);
+    // Soft against the rock behind and the pool below.
+    let size = vec2<f32>(textureDimensions(scene_color));
+    let pix = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), size - 1.0));
+    let z_scene = linear_depth(textureLoad(scene_depth, pix, 0));
+    alpha *= saturate((z_scene - max(view_depth(in.rel), 1e-3)) / 0.6);
+    alpha = min(alpha, 0.92);
+    if (alpha < 0.004) { discard; }
+    var n = in.normal;
+    if (dot(n, v) < 0.0) { n = -n; }
+    let color = apply_fog(froth_light(in.rel, n, v) * (0.75 + 0.35 * clumps), in.rel);
+    return vec4<f32>(color * alpha, alpha);
+}
+
 @fragment
 fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     if (in.kind > 0.5) { return fall_mist(in); }
+    if (in.kind < -0.5) { return fall_shell(in); }
     // No lip is level: the water gathers into tongues where the rock dips and runs thin
     // between them (the pattern is fixed to the rock, `u` being meters across in the world).
     let gather = value_noise2(vec2<f32>(in.uv.x * 0.45, 3.7)) * 0.65
@@ -946,7 +1024,10 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     // Glassy as it rolls over the lip, white with air a few tenths of a second later. From
     // behind or below, the churned water under the tongue shows.
     let front = dot(in.normal, v) >= 0.0;
+    // Past its break-up length the core is no longer a sheet but clumps of white water.
+    let broken = fall_broken(in.look.x, tau);
     var aerated = max(smoothstep(0.03, 0.22, tau + (s - 0.5) * 0.1), select(0.6, 0.0, front));
+    aerated = max(aerated, broken);
     // Sliding down rock (`ROCK_KIND`), the sheet tumbles over every bump: white in its
     // streaks, glassier between them.
     let rock = saturate(in.kind / 0.45);
@@ -963,7 +1044,7 @@ fn fs_falls(in: FallOut) -> @location(0) vec4<f32> {
     // thin haze of drops hangs between them. A thick flow and a sheet sliding down rock stay
     // whole.
     // (From afar the torn packets blur together with the spray: the fall reads whole.)
-    let tear = smoothstep(0.15, 0.9, frac) * (1.0 - rock * 0.7) * mix(0.35, 1.0, fine);
+    let tear = max(smoothstep(0.15, 0.9, frac) * 0.5, broken) * (1.0 - rock * 0.7) * mix(0.35, 1.0, fine);
     let packets = fbm2(vec2<f32>(u * 3.1 + 7.7, t0 * 7.0), 3) / 0.875;
     let edge = 0.2 + 0.3 * tear;
     var alpha = smoothstep(gaps, gaps + edge, s - (1.0 - packets) * 0.35 * tear * (1.3 - body * 0.7)) * body

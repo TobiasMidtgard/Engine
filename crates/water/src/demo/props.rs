@@ -5792,6 +5792,65 @@ pub fn wader() -> Vec<Part> {
     kit.finish()
 }
 
+/// A deep concrete pool sunk into the ground, the paving's top at y = `paving`: water
+/// `half` meters each way from the center, walls `wall` thick, a floor `depth` below the
+/// ground, and `apron` meters of paving round it.
+pub fn pool_liner(half: f32, wall: f32, apron: f32, depth: f32, paving: f32) -> Vec<Part> {
+    let mut m = Mesh::default();
+    let pale = Vec4::new(0.86, 0.85, 0.81, 1.0);
+    let c = 0.012;
+    let outer = half + wall;
+    let slab = 0.2;
+    // The floor, its top `depth` down.
+    chamfer_box(
+        &mut m,
+        Vec3::new(outer, slab * 0.5, outer),
+        c,
+        Mat4::from_translation(Vec3::new(0.0, -depth - slab * 0.5, 0.0)),
+        pale,
+    );
+    // Walls from under the floor to the paving's top.
+    let (lo, hi) = (-depth - slab, paving);
+    let mid = (lo + hi) * 0.5;
+    let h = (hi - lo) * 0.5;
+    for s in [-1.0f32, 1.0] {
+        chamfer_box(
+            &mut m,
+            Vec3::new(wall * 0.5, h, outer),
+            c,
+            Mat4::from_translation(Vec3::new(s * (half + wall * 0.5), mid, 0.0)),
+            pale,
+        );
+        chamfer_box(
+            &mut m,
+            Vec3::new(half, h, wall * 0.5),
+            c,
+            Mat4::from_translation(Vec3::new(0.0, mid, s * (half + wall * 0.5))),
+            pale,
+        );
+    }
+    // Paving slabs round the top, a shade darker and weathered.
+    let paver = Vec4::new(0.72, 0.71, 0.67, 1.0);
+    let t = 0.12;
+    for s in [-1.0f32, 1.0] {
+        chamfer_box(
+            &mut m,
+            Vec3::new(apron * 0.5, t * 0.5, outer + apron),
+            c,
+            Mat4::from_translation(Vec3::new(s * (outer + apron * 0.5), paving - t * 0.5, 0.0)),
+            paver,
+        );
+        chamfer_box(
+            &mut m,
+            Vec3::new(outer, t * 0.5, apron * 0.5),
+            c,
+            Mat4::from_translation(Vec3::new(0.0, paving - t * 0.5, s * (outer + apron * 0.5))),
+            paver,
+        );
+    }
+    vec![Part::new(m, Surface::Concrete)]
+}
+
 /// A cube of edge `size` centered on the origin with chamfered edges and per-face UVs in
 /// meters (the density test blocks).
 pub fn block(size: f32) -> Mesh {

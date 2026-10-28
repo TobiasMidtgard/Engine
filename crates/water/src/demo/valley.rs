@@ -7,9 +7,10 @@ use engine_core::math::{DVec2, DVec3};
 use engine_core::prelude::*;
 
 use super::DemoView;
-use super::scenery::{Jetty, spawn_buoy, spawn_jetty, spawn_motorboat, spawn_rowboat};
+use super::scenery::{
+    Jetty, moor_motorboat, spawn_buoy, spawn_jetty, spawn_motorboat, spawn_rowboat,
+};
 use crate::body::{WaterBed, WaterBody, WaterOptics};
-use crate::buoyancy::Tether;
 use crate::flow::{FlowBed, FlowFill, FlowRegion, FlowSource};
 
 /// A stream laid into the landscape.
@@ -152,11 +153,13 @@ fn moor_boats(commands: &mut Commands, jetty: &Jetty, ground: &dyn Fn(f64, f64) 
         on_water(jetty.point(along - 7.0, -3.0)),
         yaw + std::f32::consts::PI,
     );
-    commands.entity(motorboat).insert(Tether {
-        anchor: jetty.point(along - 7.0, -0.9),
-        length_m: 3.0,
-        stiffness: 1400.0,
-    });
+    moor_motorboat(
+        commands,
+        motorboat,
+        jetty.point(along - 7.0, -0.9),
+        3.6,
+        1400.0,
+    );
     for k in 0..3 {
         let p = on_water(jetty.point(along + 7.0 + k as f64 * 5.0, (k as f64 - 1.0) * 6.0));
         let bottom = DVec3::new(p.x, ground(p.x, p.z), p.z);

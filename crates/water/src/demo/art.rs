@@ -17,9 +17,11 @@ use engine_assets::Assets;
 use engine_core::prelude::*;
 use engine_core::tasks::AsyncComputeTaskPool;
 use engine_render::{Image, Mesh};
+use engine_world::physics::Collider;
 
 use super::materials::{Built, DemoMaterials, synthesize_all};
 use super::props::{self, Part};
+use crate::boat::{HullCut, Interior, hull_collider};
 use crate::sim::WaterLoading;
 
 static TARN: OnceLock<Mesh> = OnceLock::new();
@@ -27,6 +29,8 @@ static CRAG: OnceLock<(Mesh, Mesh)> = OnceLock::new();
 static ROCKS: OnceLock<Vec<Vec<Part>>> = OnceLock::new();
 static SWIMMER: OnceLock<Vec<Part>> = OnceLock::new();
 static WADER: OnceLock<Vec<Part>> = OnceLock::new();
+static ROWBOAT: OnceLock<(Vec<Part>, Collider, Interior)> = OnceLock::new();
+static MOTORBOAT: OnceLock<(Vec<Part>, Collider, Interior)> = OnceLock::new();
 
 /// The test area's hill and tarn bed (0.5 m spacing).
 pub(crate) fn tarn() -> Mesh {
@@ -56,6 +60,42 @@ pub(crate) fn swimmer() -> Vec<Part> {
 
 pub(crate) fn wader() -> Vec<Part> {
     WADER.get_or_init(props::wader).clone()
+}
+
+/// The rowboat's model and its collider.
+pub(crate) fn rowboat() -> (Vec<Part>, Collider, Interior) {
+    ROWBOAT.get_or_init(make_rowboat).clone()
+}
+
+/// The motorboat's model and its collider.
+pub(crate) fn motorboat() -> (Vec<Part>, Collider, Interior) {
+    MOTORBOAT.get_or_init(make_motorboat).clone()
+}
+
+fn make_rowboat() -> (Vec<Part>, Collider, Interior) {
+    let parts = props::rowboat();
+    let (hull, inside) = hull_collider(
+        &parts,
+        HullCut {
+            floor_y: -0.16,
+            transom_x: -1.82,
+            wall: 0.05,
+        },
+    );
+    (parts, hull, inside)
+}
+
+fn make_motorboat() -> (Vec<Part>, Collider, Interior) {
+    let parts = props::motorboat();
+    let (hull, inside) = hull_collider(
+        &parts,
+        HullCut {
+            floor_y: -0.05,
+            transom_x: -2.62,
+            wall: 0.07,
+        },
+    );
+    (parts, hull, inside)
 }
 
 /// The demo art still being made on workers.
@@ -95,17 +135,22 @@ impl WaterDemoArt {
 }
 
 /// Start the demo art on the async compute pool once [`WaterDemoArt::prefetch`] asked for it
-/// (in an app with a mesh and an image store).
-pub fn start_demo_art_system(world: &mut World) {
-    if !world
-        .get_resource::<WaterDemoArt>()
-        .is_some_and(|a| !a.started)
-        || !world.contains_resource::<Assets<Mesh>>()
-        || !world.contains_resource::<Assets<Image>>()
-    {
+/// (in an app with a mesh and an image store). A plain system that queues the start, so it
+/// doesn't hold the frame to itself every frame as a `&mut World` system would.
+pub fn start_demo_art_system(mut commands: Commands, art: Option<ResMut<WaterDemoArt>>) {
+    let Some(mut art) = art.filter(|a| !a.started) else {
+        return;
+    };
+    art.started = true;
+    commands.queue(start_demo_art);
+}
+
+fn start_demo_art(world: &mut World) {
+    if !world.contains_resource::<Assets<Mesh>>() || !world.contains_resource::<Assets<Image>>() {
+        // Asked again next frame.
+        world.resource_mut::<WaterDemoArt>().started = false;
         return;
     }
-    world.resource_mut::<WaterDemoArt>().started = true;
     if world.contains_resource::<DemoMaterials>() {
         return;
     }
@@ -116,7 +161,7 @@ pub fn start_demo_art_system(world: &mut World) {
         meshes: Vec::new(),
     };
     // Longest first, so the pool's few threads finish together.
-    let jobs: [fn(); 5] = [
+    let jobs: [fn(); 7] = [
         // (One core: the compute pool's threads are the frame's.)
         || {
             ROCKS.get_or_init(|| super::rock_shapes(false));
@@ -133,6 +178,12 @@ pub fn start_demo_art_system(world: &mut World) {
         || {
             TARN.get_or_init(|| super::tarn_mesh(0.5));
         },
+        || {
+            ROWBOAT.get_or_init(make_rowboat);
+        },
+        || {
+            MOTORBOAT.get_or_init(make_motorboat);
+        },
     ];
     for job in jobs {
         loading.meshes.push(pool.spawn(async move { job() }));
@@ -144,8 +195,12 @@ pub fn start_demo_art_system(world: &mut World) {
 
 /// Put finished art in: the textures become [`DemoMaterials`] (the meshes wait in their
 /// caches for the demos). Keeps [`WaterLoading::art`] up to date.
-pub fn finish_demo_art_system(world: &mut World) {
-    let Some(mut loading) = world.get_resource_mut::<DemoArtLoading>() else {
+pub fn finish_demo_art_system(
+    mut commands: Commands,
+    loading: Option<ResMut<DemoArtLoading>>,
+    mut status: ResMut<WaterLoading>,
+) {
+    let Some(mut loading) = loading else {
         return;
     };
     loading.meshes.retain_mut(|t| check_ready(t).is_none());
@@ -158,17 +213,19 @@ pub fn finish_demo_art_system(world: &mut World) {
     };
     let pending = loading.pending();
     if pending == 0 {
-        world.remove_resource::<DemoArtLoading>();
+        commands.remove_resource::<DemoArtLoading>();
     }
-    if let Some(built) = textures
-        && !world.contains_resource::<DemoMaterials>()
-    {
-        let materials =
-            DemoMaterials::from_built(&mut world.resource_mut::<Assets<Image>>(), built);
-        world.insert_resource(materials);
+    if let Some(built) = textures {
+        commands.queue(move |world: &mut World| {
+            if !world.contains_resource::<DemoMaterials>() {
+                let materials =
+                    DemoMaterials::from_built(&mut world.resource_mut::<Assets<Image>>(), built);
+                world.insert_resource(materials);
+            }
+        });
     }
-    if world.resource::<WaterLoading>().art != pending {
-        world.resource_mut::<WaterLoading>().art = pending;
+    if status.art != pending {
+        status.art = pending;
     }
 }
 

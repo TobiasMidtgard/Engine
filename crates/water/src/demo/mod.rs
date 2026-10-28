@@ -22,6 +22,7 @@
 pub mod art;
 pub mod crag;
 pub mod materials;
+pub mod pools;
 pub mod props;
 pub mod scenery;
 pub mod valley;
@@ -34,8 +35,10 @@ use engine_core::math::noise;
 use engine_core::prelude::*;
 use engine_core::tasks::{ComputeTaskPool, par_chunks_mut};
 use engine_render::{Mesh, Vertex};
+use engine_world::physics::Velocity;
 use engine_world::{ContactKind, GroundContact, ProjectileTrace, WorldImpulse, WorldShift};
 
+use crate::boat::Boat;
 use crate::body::{RainShower, WaterBed, WaterBody, WaterOptics};
 use crate::buoyancy::{Buoyancy, Floating};
 use crate::flow::{FlowBed, FlowFill, FlowRegion, FlowSource};
@@ -180,7 +183,7 @@ pub fn tarn_height(x: f32, z: f32) -> f32 {
         let end = smooth(DITCH_TO - 0.2, DITCH_TO + 0.3, along) * (1.0 - smooth(1.5, 4.0, across));
         h = h.max((bed + 0.45) * end);
     }
-    crag::shape(x, z, h + fine * 0.08)
+    pools::shape(x, z, crag::shape(x, z, h + fine * 0.08))
 }
 
 /// `a.min(b)`, rounded over a band `k` wide where the two are close.
@@ -436,6 +439,8 @@ fn height_mesh(
             p.x >= a.x - 1e-3 && p.y >= a.y - 1e-3 && p.x <= b.x + 1e-3 && p.y <= b.y + 1e-3
         })
     };
+    // The pools' own walls and floors close the ground round them.
+    let in_pool = |v: u32| pools::hole(pos(v % nx, v / nx));
     let mut indices = Vec::new();
     for j in 0..nz - 1 {
         for i in 0..nx - 1 {
@@ -444,6 +449,7 @@ fn height_mesh(
             let h = |v: u32| heights[v as usize];
             if [a, b, c, d].iter().all(|v| h(*v) <= 0.015)
                 || [a, b, c, d].iter().all(|v| inside(*v))
+                || [a, b, c, d].iter().any(|v| in_pool(*v))
             {
                 continue;
             }
@@ -575,6 +581,33 @@ pub const VIEWS: &[DemoView] = &[
         hour: 10.0,
         warmup_secs: 3.0,
         quick_warmup: false,
+    },
+    DemoView {
+        key: "water_pools",
+        name: "Twelve pools, one per water color: iceberg-clear to a silty river",
+        eye: [36.8, 20.0, -40.9],
+        target: [21.0, 5.5, -24.0],
+        hour: 13.0,
+        warmup_secs: 2.0,
+        quick_warmup: true,
+    },
+    DemoView {
+        key: "water_pools_near",
+        name: "The clearest pools: iceberg meltwater, ocean, tropical lagoon, alpine lake",
+        eye: [-5.6, 10.0, -39.6],
+        target: [18.0, 5.0, -31.2],
+        hour: 13.0,
+        warmup_secs: 2.0,
+        quick_warmup: true,
+    },
+    DemoView {
+        key: "water_pools_dark",
+        name: "The darkest pools: algal bloom, murky pond, peat bog, swamp, silty river",
+        eye: [40.0, 10.0, 1.4],
+        target: [29.1, 5.0, -21.2],
+        hour: 13.0,
+        warmup_secs: 2.0,
+        quick_warmup: true,
     },
     DemoView {
         key: "water_pond",
@@ -749,6 +782,9 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
             })
             .with_optics(WaterOptics::clear_lake()),
     ));
+
+    // The row of pools, one per water color.
+    pools::spawn_pools(commands, origin);
 
     // The outlet stream, falls and pond: fed by the tarn through the notch in its rim.
     let mut bed = Vec::with_capacity((FLOW_CELLS * FLOW_CELLS) as usize);
@@ -1065,6 +1101,15 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
     });
 }
 
+/// For a streamed zone holding the test area ([`spawn_demo`]) when it unloads
+/// (`StreamCell::on_unload`): drops the demo's clock, the one thing it keeps outside its
+/// entities. The water bodies and streams leave the simulation with their entities; the art
+/// stays cached for the next visit. The valley ([`spawn_valley`]) keeps nothing and needs no
+/// hook.
+pub fn unload_demo(world: &mut World) {
+    world.remove_resource::<DemoState>();
+}
+
 /// Signed angle (radians) to turn about +y from `from` to `to` (horizontal parts).
 fn yaw_between(from: Vec3, to: Vec3) -> f32 {
     let cross = from.z * to.x - from.x * to.z;
@@ -1084,6 +1129,7 @@ pub fn demo_system(
         &DemoRole,
         Option<&mut Floating>,
         Option<&Buoyancy>,
+        Option<(&mut Boat, &Velocity)>,
     )>,
     mut traces: MessageWriter<ProjectileTrace>,
     mut blasts: MessageWriter<WorldImpulse>,
@@ -1113,22 +1159,40 @@ pub fn demo_system(
         step = Some(demo.step_left);
     }
 
-    for (entity, mut tf, role, floating, buoyancy) in &mut actors {
+    for (entity, mut tf, role, floating, buoyancy, body) in &mut actors {
         match *role {
             DemoRole::Motorboat {
                 center,
                 radius,
                 thrust,
             } => {
-                let (Some(mut fl), Some(b)) = (floating, buoyancy) else {
-                    continue;
-                };
                 let rel = (tf.translation - center).as_vec3() * Vec3::new(1.0, 0.0, 1.0);
                 let r = rel.length().max(0.1);
                 let tangent = Vec3::new(rel.z, 0.0, -rel.x) / r;
                 let pull = ((r - radius) * 0.25).clamp(-0.8, 0.8);
                 let desired = (tangent - rel / r * pull).normalize();
                 let fwd = tf.rotation * Vec3::X;
+                // A physics body: the same helm, through the backend's forces.
+                if let Some((mut boat, v)) = body {
+                    let err = yaw_between(fwd, desired);
+                    let flat = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
+                    let in_water =
+                        surface(tf.translation).is_some_and(|h| h > tf.translation.y - 0.25);
+                    let mut drive = (Vec3::ZERO, Vec3::ZERO);
+                    if in_water {
+                        let lin = Vec3::new(v.linear.x, 0.0, v.linear.z);
+                        let side = lin - flat * flat.dot(lin);
+                        drive.0 = flat * thrust - side * boat.mass_kg * 1.8;
+                        drive.1.y = boat.inertia.y * (10.0 * err - 3.0 * v.angular.y);
+                    }
+                    if boat.drive != drive {
+                        boat.drive = drive;
+                    }
+                    continue;
+                }
+                let (Some(mut fl), Some(b)) = (floating, buoyancy) else {
+                    continue;
+                };
                 let mass = b.density * b.volume();
                 let he = b.half_extents;
                 let inertia = mass / 3.0 * (he.x * he.x + he.z * he.z);

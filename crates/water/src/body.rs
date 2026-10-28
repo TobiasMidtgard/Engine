@@ -69,18 +69,25 @@ pub enum WaterBed {
 /// How light behaves in the water: its color, clarity and surface.
 ///
 /// Absorption and scattering are per meter of water. Clear water absorbs red first (so deep
-/// water turns blue-green); silt and algae scatter light back (murky water glows with their
-/// color and hides the bottom).
+/// water turns blue); dissolved tannins absorb blue (tea-brown bogs); algae absorb blue and red
+/// (green lakes); silt and rock flour scatter light back (milky turquoise glacier lakes, brown
+/// rivers) and hide the bottom. The color a deep body shows is what its particles scatter
+/// back against what the water absorbs (Gordon's reflectance model, in the shader). Build one
+/// from what is in the water with [`WaterOptics::from_constituents`], or take a preset.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WaterOptics {
-    /// Light absorbed per meter, linear RGB, 1/m. Pure water ≈ [0.45, 0.07, 0.04].
+    /// Light absorbed per meter, linear RGB, 1/m. Pure water ≈ [0.40, 0.05, 0.012].
     pub absorption: [f32; 3],
-    /// Light scattered back per meter by particles (turbidity), 1/m. 0.02 crystal clear,
-    /// 0.1 lake, 0.5 murky pond.
+    /// Light scattered per meter by particles (turbidity), 1/m: how fast the bottom fades.
+    /// 0.03 iceberg-clear, 0.3 a clean lake, 1-2 a glacier lake, 5+ a swamp, 20 a flood.
     pub scattering: f32,
-    /// Color of what scatters (linear RGB): blue-green plankton, brown silt, green algae.
+    /// Color of what scatters (linear RGB, about 0..1): white rock flour, tan silt, green
+    /// algae.
     pub scatter_color: [f32; 3],
+    /// Fraction of the scattered light sent back toward where it came from: 0.005 algae,
+    /// 0.02 mineral silt (bright, milky water), 0.06 pure water.
+    pub backscatter: f32,
     /// Roughness of the calm surface (0 mirror .. 1 matte). Wind adds to it.
     pub roughness: f32,
     /// How readily whitecaps, wakes and splashes leave foam, 0..1.
@@ -97,80 +104,265 @@ impl Default for WaterOptics {
     }
 }
 
-impl WaterOptics {
-    /// Clean mountain lake: see a few meters down, blue-green deep water.
-    pub fn clear_lake() -> Self {
+/// What is in the water, from which its color follows ([`WaterOptics::from_constituents`]).
+/// The bio-optical model of ocean and lake science, reduced to three color bands: pure water
+/// after Pope & Fry (1997); dissolved organic matter after Bricaud, Morel & Prieur (1981);
+/// phytoplankton absorption after Bricaud et al. (1998) and its scattering after Gordon &
+/// Morel (1983); mineral particles after Babin et al. (2003).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WaterConstituents {
+    /// Chlorophyll (algae, plankton), mg/m³: 0.05 open ocean, 1-5 lakes, 50+ a bloom.
+    pub chlorophyll: f32,
+    /// Dissolved organic matter ("yellow substance": tannins from peat and leaves), as its
+    /// absorption at 440 nm, 1/m: 0.01 ocean, 0.05-0.3 clear lakes, 4-10 bogs and blackwater.
+    pub cdom_440: f32,
+    /// Mineral particles (silt, clay, glacial rock flour), g/m³: 0.02 iceberg melt, 2-5
+    /// glacier lakes, 40+ a river in flood.
+    pub sediment: f32,
+    /// What the particles look like (linear RGB reflectance): white rock flour, tan silt,
+    /// red clay.
+    pub sediment_color: [f32; 3],
+}
+
+impl Default for WaterConstituents {
+    fn default() -> Self {
         Self {
-            absorption: [0.42, 0.11, 0.075],
-            scattering: 0.08,
-            scatter_color: [0.32, 0.65, 0.62],
+            chlorophyll: 1.0,
+            cdom_440: 0.15,
+            sediment: 0.3,
+            sediment_color: [0.8, 0.75, 0.65],
+        }
+    }
+}
+
+/// Pure water's absorption in the red, green and blue bands (600-700, 500-570, 420-490 nm),
+/// 1/m (Pope & Fry 1997).
+const PURE_WATER: [f32; 3] = [0.40, 0.050, 0.012];
+/// Dissolved organic matter's absorption in each band per unit of its 440 nm absorption:
+/// exp(-0.015 (λ - 440)) at 640, 535 and 465 nm.
+const CDOM_BANDS: [f32; 3] = [0.050, 0.240, 0.687];
+/// Phytoplankton absorption per (mg/m³)^0.65 of chlorophyll in each band (blue and red
+/// peaks, a green gap).
+const ALGAE_BANDS: [f32; 3] = [0.010, 0.006, 0.032];
+/// Mineral particles' absorption per g/m³ in each band (0.031 m²/g at 443 nm, slope 0.0123).
+const MINERAL_BANDS: [f32; 3] = [0.0027, 0.0096, 0.023];
+/// The light algae scatter back (green-tinted cells), linear RGB.
+const ALGAE_COLOR: [f32; 3] = [0.35, 0.75, 0.45];
+
+impl WaterOptics {
+    /// Optics of water holding `c`: a calm surface, and caustics and a bent view of the
+    /// bottom that fade as the water clouds.
+    pub fn from_constituents(c: WaterConstituents) -> Self {
+        let chl = c.chlorophyll.max(0.0);
+        let sediment = c.sediment.max(0.0);
+        let mut absorption = [0.0; 3];
+        for (k, a) in absorption.iter_mut().enumerate() {
+            *a = PURE_WATER[k]
+                + c.cdom_440.max(0.0) * CDOM_BANDS[k]
+                + ALGAE_BANDS[k] * chl.powf(0.65)
+                + MINERAL_BANDS[k] * sediment;
+        }
+        // Scattering: algae (Gordon & Morel), mineral particles (about 0.5 m²/g) and the
+        // water itself; each sends a different share back.
+        let (b_algae, b_mineral, b_water) = (0.3 * chl.powf(0.62), 0.5 * sediment, 0.003);
+        let back = (0.007 * b_algae, 0.019 * b_mineral, 0.5 * b_water);
+        let scattering = b_algae + b_mineral + b_water;
+        let total_back = back.0 + back.1 + back.2;
+        let mut color = [0.0; 3];
+        for (k, col) in color.iter_mut().enumerate() {
+            *col = (back.0 * ALGAE_COLOR[k] + back.1 * c.sediment_color[k] + back.2)
+                / total_back.max(1e-9);
+        }
+        // Murky water hides the bottom: the caustics and the bent view of it go too.
+        let clarity = (-scattering * 0.6).exp();
+        Self {
+            absorption,
+            scattering,
+            scatter_color: color,
+            backscatter: total_back / scattering.max(1e-9),
             roughness: 0.04,
             foam: 0.7,
-            caustics: 0.8,
-            refraction: 0.5,
+            caustics: 0.15 + 0.85 * clarity,
+            refraction: 0.3 + 0.3 * clarity,
         }
+    }
+
+    /// Meltwater off an iceberg: almost pure water, deep sapphire blue, the bottom visible
+    /// tens of meters down.
+    pub fn iceberg() -> Self {
+        Self::from_constituents(WaterConstituents {
+            chlorophyll: 0.01,
+            cdom_440: 0.003,
+            sediment: 0.02,
+            sediment_color: [1.0, 1.0, 1.0],
+        })
+    }
+
+    /// A glacier-fed lake: rock flour turns it milky turquoise (Lake Louise, Peyto).
+    pub fn glacial() -> Self {
+        Self::from_constituents(WaterConstituents {
+            chlorophyll: 0.1,
+            cdom_440: 0.02,
+            sediment: 2.0,
+            sediment_color: [0.92, 0.94, 0.95],
+        })
+    }
+
+    /// A high mountain lake: clear, blue-green.
+    pub fn alpine() -> Self {
+        Self::from_constituents(WaterConstituents {
+            chlorophyll: 0.3,
+            cdom_440: 0.05,
+            sediment: 0.2,
+            sediment_color: [0.85, 0.85, 0.8],
+        })
+    }
+
+    /// Clean lake: see a few meters down, green-blue deep water.
+    pub fn clear_lake() -> Self {
+        Self::from_constituents(WaterConstituents {
+            chlorophyll: 1.0,
+            cdom_440: 0.15,
+            sediment: 0.3,
+            sediment_color: [0.8, 0.75, 0.65],
+        })
     }
 
     /// Open ocean: deep blue, clear.
     pub fn ocean() -> Self {
         Self {
-            absorption: [0.45, 0.065, 0.03],
-            scattering: 0.05,
-            scatter_color: [0.12, 0.38, 0.62],
             roughness: 0.06,
             foam: 1.0,
-            caustics: 0.6,
-            refraction: 0.4,
+            ..Self::from_constituents(WaterConstituents {
+                chlorophyll: 0.05,
+                cdom_440: 0.01,
+                sediment: 0.05,
+                sediment_color: [0.9, 0.9, 0.9],
+            })
         }
     }
 
-    /// Tropical lagoon: turquoise over white sand.
+    /// Tropical lagoon: turquoise over white sand, clear for tens of meters.
     pub fn tropical() -> Self {
         Self {
-            absorption: [0.38, 0.05, 0.05],
-            scattering: 0.04,
-            scatter_color: [0.25, 0.8, 0.78],
             roughness: 0.03,
             foam: 0.8,
-            caustics: 1.0,
-            refraction: 0.6,
-        }
-    }
-
-    /// Murky green-brown pond: the bottom vanishes within a meter.
-    pub fn murky_pond() -> Self {
-        Self {
-            absorption: [0.9, 0.55, 0.85],
-            scattering: 0.8,
-            scatter_color: [0.32, 0.36, 0.16],
-            roughness: 0.05,
-            foam: 0.4,
-            caustics: 0.15,
-            refraction: 0.3,
+            ..Self::from_constituents(WaterConstituents {
+                chlorophyll: 0.1,
+                cdom_440: 0.01,
+                sediment: 0.1,
+                sediment_color: [0.95, 0.93, 0.85],
+            })
         }
     }
 
     /// Fast mountain stream: clear with a little silt.
     pub fn stream() -> Self {
         Self {
-            absorption: [0.4, 0.1, 0.09],
-            scattering: 0.15,
-            scatter_color: [0.45, 0.6, 0.5],
             roughness: 0.06,
             foam: 1.0,
-            caustics: 0.7,
-            refraction: 0.5,
+            ..Self::from_constituents(WaterConstituents {
+                chlorophyll: 0.5,
+                cdom_440: 0.1,
+                sediment: 0.6,
+                sediment_color: [0.8, 0.75, 0.65],
+            })
         }
     }
 
-    /// A preset by name: `clear_lake`, `ocean`, `tropical`, `murky_pond`, `stream`.
+    /// A river in spate: opaque with brown silt.
+    pub fn silty_river() -> Self {
+        Self {
+            foam: 1.0,
+            ..Self::from_constituents(WaterConstituents {
+                chlorophyll: 1.0,
+                cdom_440: 0.4,
+                sediment: 40.0,
+                sediment_color: [0.56, 0.48, 0.38],
+            })
+        }
+    }
+
+    /// Peat-stained blackwater: clear but tea-brown, black where deep.
+    pub fn peat() -> Self {
+        Self::from_constituents(WaterConstituents {
+            chlorophyll: 1.0,
+            cdom_440: 8.0,
+            // Fine humic flocs: what little light comes back is tea-brown.
+            sediment: 2.0,
+            sediment_color: [0.5, 0.3, 0.1],
+        })
+    }
+
+    /// A swamp: brown-olive, tannins, algae and mud; the bottom gone within a hand's depth.
+    pub fn swamp() -> Self {
+        Self {
+            foam: 0.4,
+            ..Self::from_constituents(WaterConstituents {
+                chlorophyll: 25.0,
+                cdom_440: 4.0,
+                sediment: 6.0,
+                sediment_color: [0.45, 0.42, 0.3],
+            })
+        }
+    }
+
+    /// An algal bloom: pea-soup green.
+    pub fn algal_bloom() -> Self {
+        Self::from_constituents(WaterConstituents {
+            chlorophyll: 60.0,
+            cdom_440: 0.5,
+            sediment: 2.0,
+            sediment_color: [0.6, 0.6, 0.5],
+        })
+    }
+
+    /// Murky green-brown pond: the bottom vanishes within a meter.
+    pub fn murky_pond() -> Self {
+        Self {
+            foam: 0.4,
+            ..Self::from_constituents(WaterConstituents {
+                chlorophyll: 12.0,
+                cdom_440: 1.5,
+                sediment: 4.0,
+                sediment_color: [0.55, 0.5, 0.38],
+            })
+        }
+    }
+
+    /// Every preset by name, clearest first (the showcase's row of pools).
+    pub const PRESETS: [&'static str; 12] = [
+        "iceberg",
+        "ocean",
+        "tropical",
+        "alpine",
+        "glacial",
+        "clear_lake",
+        "stream",
+        "algal_bloom",
+        "murky_pond",
+        "peat",
+        "swamp",
+        "silty_river",
+    ];
+
+    /// A preset by name (see [`Self::PRESETS`]; also `lake`, `sea`, `lagoon`, `pond`,
+    /// `river`, `blackwater`, `bloom`, `silt`).
     pub fn preset(name: &str) -> Option<Self> {
         Some(match name {
+            "iceberg" | "meltwater" => Self::iceberg(),
+            "glacial" | "glacier" => Self::glacial(),
+            "alpine" => Self::alpine(),
             "clear_lake" | "lake" => Self::clear_lake(),
             "ocean" | "sea" => Self::ocean(),
             "tropical" | "lagoon" => Self::tropical(),
-            "murky_pond" | "pond" | "swamp" => Self::murky_pond(),
             "stream" | "river" => Self::stream(),
+            "silty_river" | "silt" | "flood" => Self::silty_river(),
+            "peat" | "blackwater" => Self::peat(),
+            "swamp" => Self::swamp(),
+            "algal_bloom" | "bloom" => Self::algal_bloom(),
+            "murky_pond" | "pond" => Self::murky_pond(),
             _ => return None,
         })
     }
@@ -178,6 +370,12 @@ impl WaterOptics {
     /// Total extinction (absorption + scattering) per channel, 1/m.
     pub fn extinction(&self) -> Vec3 {
         Vec3::from(self.absorption) + Vec3::splat(self.scattering)
+    }
+
+    /// Backscattering per meter in each band (what the shader's reflectance model uses).
+    pub fn backscattering(&self) -> [f32; 3] {
+        self.scatter_color
+            .map(|c| c * self.scattering * self.backscatter)
     }
 }
 
