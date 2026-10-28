@@ -187,15 +187,16 @@ fn set_viewport(world: &mut World, editor: &Editor, rect: egui::Rect, ppp: f32) 
 fn camera_view(world: &World, editor: &Editor, screen: egui::Rect) -> Option<ViewInfo> {
     let t = world.get::<Transform>(editor.camera)?;
     let camera = world.get::<Camera>(editor.camera)?;
-    let (fov_y, near) = match camera.projection {
-        Projection::Perspective { fov_y_deg, near } => (fov_y_deg.to_radians(), near),
-        Projection::Orthographic { .. } => (60f32.to_radians(), 0.05),
+    let (fov_y, near, ortho) = match camera.projection {
+        Projection::Perspective { fov_y_deg, near } => (fov_y_deg.to_radians(), near, None),
+        Projection::Orthographic { height, .. } => (60f32.to_radians(), 0.05, Some(height)),
     };
     Some(ViewInfo {
         origin: t.translation,
         rotation: t.rotation,
         fov_y,
         near,
+        ortho,
         screen,
     })
 }
@@ -743,6 +744,7 @@ fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, rect: egu
     );
     painter.galley(bg.min + egui::vec2(8.0, 4.0), galley, egui::Color32::WHITE);
 
+    axis_widget(&ctx, world, editor, rect);
     crate::camera_preview::ui(ui, world, editor, rect);
 
     // Play mode frame.
@@ -774,4 +776,117 @@ fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, rect: egu
             egui::Color32::BLACK,
         );
     }
+}
+
+/// Where the axis widget's middle is in the scene view `rect`.
+pub fn axis_widget_center(rect: egui::Rect) -> egui::Pos2 {
+    rect.right_top() + egui::vec2(-52.0, 98.0)
+}
+
+/// The axis widget under the stats (Unity's scene gizmo, Blender's navigation gizmo): the world
+/// axes as the camera sees them. Clicking an axis looks along it from that side, orthographic;
+/// clicking the middle switches perspective and orthographic. The view's name sits below.
+fn axis_widget(ctx: &egui::Context, world: &World, editor: &mut Editor, rect: egui::Rect) {
+    const RADIUS: f32 = 30.0;
+    const KNOB: f32 = 8.5;
+    let Some(view) = editor.view else {
+        return;
+    };
+    let ortho = world
+        .get::<crate::camera::EditorCamera>(editor.camera)
+        .is_some_and(|c| c.ortho);
+    let center = axis_widget_center(rect);
+    let area =
+        egui::Rect::from_center_size(center, egui::vec2(RADIUS * 2.0 + 24.0, RADIUS * 2.0 + 24.0));
+    egui::Area::new(egui::Id::new("axis widget"))
+        .fixed_pos(area.min)
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            let response = ui.allocate_rect(
+                egui::Rect::from_min_size(area.min, area.size() + egui::vec2(0.0, 16.0)),
+                egui::Sense::click(),
+            );
+            let painter = ui.painter();
+            let hover = response.hover_pos();
+            painter.circle_filled(
+                center,
+                RADIUS + KNOB + 3.0,
+                egui::Color32::from_rgba_unmultiplied(22, 23, 26, if hover.is_some() { 170 } else { 110 }),
+            );
+            // Each axis end: where it shows, how near it is, which way it points.
+            let inverse = view.rotation.inverse();
+            let mut ends: Vec<(egui::Pos2, f32, Vec3, usize, bool)> = Vec::new();
+            for (i, axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
+                for positive in [true, false] {
+                    let a = if positive { axis } else { -axis };
+                    let v = inverse * a;
+                    ends.push((center + egui::vec2(v.x, -v.y) * RADIUS, v.z, a, i, positive));
+                }
+            }
+            // Far ends first, so the near ones draw over them.
+            ends.sort_by(|a, b| a.1.total_cmp(&b.1));
+            // An axis pointing at or away from the viewer sits on the middle, which is the
+            // perspective switch then.
+            let hovered = hover.and_then(|p| {
+                ends.iter()
+                    .rev()
+                    .filter(|e| e.0.distance(center) > KNOB)
+                    .find(|e| e.0.distance(p) <= KNOB + 2.0)
+                    .map(|e| e.2)
+            });
+            for &(at, _, dir, i, positive) in &ends {
+                let color = theme::AXIS_COLORS[i];
+                let lit = hovered == Some(dir);
+                if positive {
+                    painter.line_segment([center, at], egui::Stroke::new(2.0, color));
+                    painter.circle_filled(at, KNOB, if lit { egui::Color32::WHITE } else { color });
+                    painter.text(
+                        at,
+                        egui::Align2::CENTER_CENTER,
+                        ["X", "Y", "Z"][i],
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::from_rgb(20, 20, 24),
+                    );
+                } else {
+                    painter.circle(
+                        at,
+                        KNOB * 0.75,
+                        color.gamma_multiply(if lit { 0.9 } else { 0.35 }),
+                        egui::Stroke::new(1.5, color),
+                    );
+                }
+            }
+            let middle = hover.is_some_and(|p| p.distance(center) < KNOB) && hovered.is_none();
+            painter.circle_filled(
+                center,
+                if middle { 5.0 } else { 3.5 },
+                egui::Color32::from_white_alpha(if middle { 255 } else { 160 }),
+            );
+            let forward = view.rotation * Vec3::NEG_Z;
+            let name = crate::camera::view_name(forward, ortho);
+            let label = if ortho && name != "Orthographic" {
+                format!("{name} · ortho")
+            } else {
+                name.to_string()
+            };
+            painter.text(
+                center + egui::vec2(0.0, RADIUS + KNOB + 8.0),
+                egui::Align2::CENTER_TOP,
+                label,
+                egui::FontId::proportional(11.5),
+                egui::Color32::from_white_alpha(210),
+            );
+            if response.clicked() {
+                // An axis end: look from that side toward the middle.
+                editor.view_request = match hovered {
+                    Some(dir) => Some(crate::camera::ViewRequest::Along(-dir)),
+                    None if middle => Some(crate::camera::ViewRequest::Toggle),
+                    None => None,
+                };
+            }
+            response.on_hover_text(
+                "Click an axis to look along it (orthographic), the middle for perspective.\n\
+                 Numpad 7 / 1 / 3: top, front, right (Ctrl: the other side); 5 switches; 9 turns around.",
+            );
+        });
 }

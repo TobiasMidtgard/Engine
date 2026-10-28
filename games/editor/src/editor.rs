@@ -110,6 +110,8 @@ pub struct Editor {
     pub snap_move: f32,
     pub snap_angle_deg: f32,
     pub snap_scale: f32,
+    /// A view change for the editor camera (the axis widget's clicks).
+    pub view_request: Option<crate::camera::ViewRequest>,
     /// A V or Ctrl+Shift snap drag in progress.
     pub snap_drag: Option<crate::snap::Drag>,
     /// Surface snaps tilt the selection's up axis to the surface (Unreal's Rotate to Surface
@@ -181,6 +183,7 @@ impl Editor {
             snap_move: 0.25,
             snap_angle_deg: 15.0,
             snap_scale: 0.1,
+            view_request: None,
             snap_drag: None,
             surface_align: false,
             surface_offset: 0.0,

@@ -1506,6 +1506,60 @@ pub fn round16(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Click the axis widget: the end of `axis` (or the middle), as a mouse would.
+fn click_axis_widget(axis: Option<Vec3>) -> Vec<Step> {
+    let at = move |editor: &Editor| {
+        let view = editor.view.expect("a scene view");
+        let center = crate::viewport::axis_widget_center(view.screen);
+        match axis {
+            Some(a) => {
+                let v = view.rotation.inverse() * a;
+                center + egui::vec2(v.x, -v.y) * 30.0
+            }
+            None => center,
+        }
+    };
+    vec![
+        Step::Do(Box::new(move |world, editor| {
+            let p = at(editor);
+            inject(world, vec![egui::Event::PointerMoved(p)]);
+        })),
+        Step::Wait(2),
+        Step::Do(Box::new(move |world, editor| {
+            let p = at(editor);
+            inject(world, vec![button(p, true, egui::Modifiers::NONE)]);
+        })),
+        Step::Wait(1),
+        Step::Do(Box::new(move |world, editor| {
+            let p = at(editor);
+            inject(world, vec![button(p, false, egui::Modifiers::NONE)]);
+        })),
+        Step::Wait(30),
+    ]
+}
+
+/// Round 17: orthographic views from the axis widget. The courtyard in perspective, then a
+/// click on the widget's Y for the top view, Z for the front, X for the right side, and the
+/// middle back to perspective.
+pub fn round17(dir: impl Into<PathBuf>) -> ShotScript {
+    let mut steps = vec![
+        Step::Camera(DVec3::new(9.0, 6.5, 9.0), DVec3::new(0.0, 0.6, -2.0)),
+        Step::Select("Barrel"),
+        Step::Tool(Tool::Move),
+        Step::Wait(30),
+        Step::Shot("73_perspective"),
+    ];
+    steps.extend(click_axis_widget(Some(Vec3::Y)));
+    steps.push(Step::Shot("74_top"));
+    steps.extend(click_axis_widget(Some(Vec3::Z)));
+    steps.push(Step::Shot("75_front"));
+    steps.extend(click_axis_widget(Some(Vec3::X)));
+    steps.push(Step::Shot("76_right"));
+    steps.extend(click_axis_widget(None));
+    steps.push(Step::Shot("77_right_in_perspective"));
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {

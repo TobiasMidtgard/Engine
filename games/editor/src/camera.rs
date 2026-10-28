@@ -4,6 +4,10 @@
 //! * Middle mouse drag: pan. Wheel: dolly toward the view center.
 //! * Alt + left drag: orbit around the pivot (the last framed point).
 //! * F: frame the selection.
+//! * Numpad 7 / 1 / 3: top, front and right views (Ctrl: bottom, back, left), orthographic;
+//!   numpad 5 switches perspective and orthographic, numpad 9 turns to the other side (Blender's
+//!   keys). The axis widget in the scene view does the same with clicks. Turning the view
+//!   (right or Alt+left drag) goes back to perspective, as Blender's Auto Perspective does.
 //!
 //! It runs on real time, so it works while the world is paused in Edit mode.
 
@@ -11,6 +15,18 @@ use engine::input::{ButtonInput, KeyCode, Mouse, MouseButton};
 use engine::prelude::*;
 
 use crate::editor::Editor;
+use crate::view::ORTHO_DEPTH;
+
+/// A change of view the axis widget or the keys ask for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ViewRequest {
+    /// Look along this direction, orthographic (top, front, right...).
+    Along(Vec3),
+    /// Switch between perspective and orthographic, looking the same way.
+    Toggle,
+    /// Look at the pivot from the other side.
+    Opposite,
+}
 
 /// Editor camera state: angles, fly speed (m/s) and the orbit pivot.
 #[derive(Component, Debug, Clone)]
@@ -23,6 +39,10 @@ pub struct EditorCamera {
     drag: Option<MouseButton>,
     /// Smooth framing: target position and pivot distance.
     flight: Option<(DVec3, f64)>,
+    /// Orthographic, sized to show what the perspective view showed at the pivot.
+    pub ortho: bool,
+    /// The perspective projection to go back to.
+    perspective: Option<Projection>,
 }
 
 impl EditorCamera {
@@ -35,6 +55,60 @@ impl EditorCamera {
             pivot_distance: 10.0,
             drag: None,
             flight: None,
+            ortho: false,
+            perspective: None,
+        }
+    }
+
+    /// Turn to look along `forward` about the pivot (exactly straight down or up for the top
+    /// and bottom views, north up).
+    fn look_along(&mut self, t: &mut Transform, forward: Vec3) {
+        let pivot = t.translation + t.forward().as_dvec3() * self.pivot_distance;
+        let forward = forward.normalize();
+        if forward.y.abs() > 0.999 {
+            self.yaw = 0.0;
+            self.pitch = std::f32::consts::FRAC_PI_2.copysign(forward.y);
+        } else {
+            self.yaw = (-forward.x).atan2(-forward.z);
+            self.pitch = forward.y.asin();
+        }
+        t.rotation = self.rotation();
+        t.translation = pivot - t.forward().as_dvec3() * self.pivot_distance;
+    }
+
+    fn request(&mut self, t: &mut Transform, request: ViewRequest) {
+        self.flight = None;
+        match request {
+            ViewRequest::Along(forward) => {
+                self.look_along(t, forward);
+                self.ortho = true;
+            }
+            ViewRequest::Toggle => self.ortho = !self.ortho,
+            ViewRequest::Opposite => {
+                let back = -t.forward();
+                self.look_along(t, back);
+            }
+        }
+    }
+
+    /// The camera's projection for the view: orthographic as tall as the perspective view
+    /// is at the pivot.
+    fn projection(&mut self, current: Projection) -> Projection {
+        if let Projection::Perspective { .. } = current {
+            self.perspective = Some(current);
+        }
+        let perspective = self.perspective.unwrap_or(current);
+        if !self.ortho {
+            return perspective;
+        }
+        let fov = match perspective {
+            Projection::Perspective { fov_y_deg, .. } => fov_y_deg.to_radians(),
+            Projection::Orthographic { .. } => 60f32.to_radians(),
+        };
+        Projection::Orthographic {
+            height: (2.0 * self.pivot_distance * (fov as f64 * 0.5).tan()) as f32,
+            near: -ORTHO_DEPTH,
+            far: ORTHO_DEPTH,
         }
     }
 
@@ -48,6 +122,40 @@ impl EditorCamera {
     }
 }
 
+/// The name of a view looking along `forward`: an axis view's name, or how it projects.
+pub fn view_name(forward: Vec3, ortho: bool) -> &'static str {
+    let along = |axis: Vec3| forward.dot(axis) > 0.999;
+    match () {
+        _ if along(Vec3::NEG_Y) => "Top",
+        _ if along(Vec3::Y) => "Bottom",
+        _ if along(Vec3::NEG_Z) => "Front",
+        _ if along(Vec3::Z) => "Back",
+        _ if along(Vec3::NEG_X) => "Right",
+        _ if along(Vec3::X) => "Left",
+        _ if ortho => "Orthographic",
+        _ => "Perspective",
+    }
+}
+
+/// The view Blender's numpad keys ask for.
+fn numpad(keys: &ButtonInput<KeyCode>) -> Option<ViewRequest> {
+    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    let side = if ctrl { -1.0 } else { 1.0 };
+    if keys.just_pressed(KeyCode::Numpad7) {
+        Some(ViewRequest::Along(Vec3::NEG_Y * side))
+    } else if keys.just_pressed(KeyCode::Numpad1) {
+        Some(ViewRequest::Along(Vec3::NEG_Z * side))
+    } else if keys.just_pressed(KeyCode::Numpad3) {
+        Some(ViewRequest::Along(Vec3::NEG_X * side))
+    } else if keys.just_pressed(KeyCode::Numpad5) {
+        Some(ViewRequest::Toggle)
+    } else if keys.just_pressed(KeyCode::Numpad9) {
+        Some(ViewRequest::Opposite)
+    } else {
+        None
+    }
+}
+
 /// Fly, pan, orbit and frame (Update, before the editor UI).
 #[allow(clippy::too_many_arguments)]
 pub fn editor_camera(
@@ -58,13 +166,21 @@ pub fn editor_camera(
     time: Res<Time>,
     egui: Res<crate::egui_bridge::Egui>,
     mut window: ResMut<Window>,
-    mut q: Query<(&mut Transform, &mut EditorCamera)>,
+    mut q: Query<(&mut Transform, &mut EditorCamera, &mut Camera)>,
 ) {
-    let Ok((mut t, mut cam)) = q.get_mut(editor.camera) else {
+    let Ok((mut t, mut cam, mut camera)) = q.get_mut(editor.camera) else {
         return;
     };
     let dt = time.real_delta_secs().min(0.1);
     let typing = egui.ctx.egui_wants_keyboard_input();
+
+    let request = editor
+        .view_request
+        .take()
+        .or_else(|| (!typing).then(|| numpad(&keys)).flatten());
+    if let Some(request) = request {
+        cam.request(&mut t, request);
+    }
 
     // Who owns the mouse: a drag that started over the scene view keeps it until release.
     if cam.drag.is_none() && editor.viewport_hovered {
@@ -93,6 +209,10 @@ pub fn editor_camera(
     }
 
     let delta = mouse.delta;
+    // Turning the view leaves an orthographic one (Blender's Auto Perspective).
+    if matches!(cam.drag, Some(MouseButton::Right | MouseButton::Left)) && delta != Vec2::ZERO {
+        cam.ortho = false;
+    }
     match cam.drag {
         Some(MouseButton::Right) => {
             cam.flight = None;
@@ -160,6 +280,10 @@ pub fn editor_camera(
             t.translation = target;
             cam.flight = None;
         }
+    }
+    let projection = cam.projection(camera.projection);
+    if camera.projection != projection {
+        camera.projection = projection;
     }
     editor.frame_secs += (dt - editor.frame_secs) * 0.1;
 }
