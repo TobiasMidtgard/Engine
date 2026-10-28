@@ -746,12 +746,22 @@ fn grow_scalp(
         guides.push((sp, pts));
     }
     let guide_grid = GuideGrid::new(&guides);
+    // A hair takes its shape (and its motion) only from guides on its own side of the part:
+    // a hair following a guide from across it is combed the other way, and the part zigzags
+    // along the edges of the guides' patches instead of running straight.
+    let parted = matches!(a.hair_style(), HairStyle::Medium | HairStyle::Long);
+    let part_side = |rest: Vec3| {
+        let d = rest - head;
+        (parted && d.z > PART_END_Z).then_some(d.x > PART_X)
+    };
     // Long and medium hair moves: every hair with the guide nearest its root.
     let moves = g.gravity > 0.5 && !guides.is_empty();
     for _ in 0..total {
         let Some(sp) = sampler.sample(&mut r) else {
             break;
         };
+        let side = part_side(sp.rest);
+        let same_side = |g: &SkinPoint| side.is_none_or(|s| part_side(g.rest) != Some(!s));
         // Hairs at the hairline are short and fine (vellus), as on a real forehead.
         let d = sp.rest - head;
         let line = ragged.at(d.x.atan2(d.z));
@@ -769,7 +779,8 @@ fn grow_scalp(
         let thin = 0.55 + 0.45 * fine;
         // A few hairs stray from the groom: flyaways.
         // (Not from the front hairline, where they would cross the forehead.)
-        let at_front = fine < 1.0 || (d.z > 0.03 && d.y < 0.07);
+        // (Nor from the front of hanging hair, where one falls across the face.)
+        let at_front = fine < 1.0 || (d.z > 0.03 && d.y < 0.07) || (g.gravity > 0.5 && d.z > 0.0);
         let flyaway = g.points > 5 && !at_front && r.f32() < 0.015;
         let mut pts = grow_hair(a, &g, sp, collider, lm, rest, &mut r, scale);
         // No two hairs grow quite the same way (groomers' "crossover"): turned a little about
@@ -786,10 +797,22 @@ fn grow_scalp(
         // How far out in its lock the hair is (0 on the guide .. 1 at the lock's edge).
         let mut lock_edge = 0.0;
         // Follow the nearest guide if it is close (a lone hair far from any guide stays free).
+        let reach = if g.gravity > 0.5 { 0.025 } else { 0.012 };
+        let near = |gi: &usize| (guides[*gi].0.p - sp.p).length() < reach;
+        let lock = guide_grid
+            .nearest(sp.p, &guides, |i| same_side(&guides[i].0))
+            .filter(near);
+        // Beside the part with only locks from across it near: left free, it would hang
+        // unsettled across the forehead; one hair fewer doesn't show.
         if !flyaway
-            && let Some(gi) = guide_grid.nearest(sp.p, &guides)
-            && (guides[gi].0.p - sp.p).length() < if g.gravity > 0.5 { 0.025 } else { 0.012 }
+            && lock.is_none()
+            && guide_grid
+                .nearest(sp.p, &guides, |_| true)
+                .is_some_and(|gi| near(&gi))
         {
+            continue;
+        }
+        if !flyaway && let Some(gi) = lock {
             let (gsp, gpts) = &guides[gi];
             let off = sp.p - gsp.p;
             let c = g.clump * r.range(if g.gravity > 0.5 { 0.8 } else { 0.6 }, 1.0);
@@ -899,7 +922,8 @@ fn grow_scalp(
             }
         }
         if moves {
-            set.follow.push(guide_grid.follow(sp.p, &guides));
+            set.follow
+                .push(guide_grid.follow(sp.p, &guides, |i| same_side(&guides[i].0)));
         }
     }
     if moves {
@@ -1003,6 +1027,9 @@ fn nearest_guide(p: Vec3, guides: &[(SkinPoint, Vec<Vec3>)]) -> Option<usize> {
 
 /// The part of long hair: on the character's left, 2.5 cm off center.
 pub(crate) const PART_X: f32 = 0.025;
+/// The part runs back from the hairline to here (rest z from the head's center, m); behind it
+/// the hair falls straight down.
+const PART_END_Z: f32 = -0.03;
 
 /// Hair that would hang in front of the face is moved aside to frame it: easing out over the
 /// forehead (so a hair bends aside instead of jumping), then beside the eyes and cheeks and back
@@ -1093,7 +1120,7 @@ fn grow_hair(
         HairStyle::Medium | HairStyle::Long => {
             // Swept back from the face and away from the part at the front and over the top;
             // straight down behind the crown (the part ends there).
-            let front = ((d.z + 0.03) / 0.07).clamp(0.0, 1.0);
+            let front = ((d.z - PART_END_Z) / 0.07).clamp(0.0, 1.0);
             // On the part's narrow side, hairline hair goes more to the side than back, so the
             // front of the part stays covered (the wide side would sweep across the forehead).
             let hairline = ((d.z - 0.02) / 0.04).clamp(0.0, 1.0) * f32::max(side, 0.0);
@@ -1223,7 +1250,12 @@ impl GuideGrid {
 
     /// The three guides nearest a root, weighted by closeness: a hair at a guide's root
     /// takes nearly all its motion, one between guides takes their average.
-    fn follow(&self, p: Vec3, guides: &[(SkinPoint, Vec<Vec3>)]) -> Follow {
+    fn follow(
+        &self,
+        p: Vec3,
+        guides: &[(SkinPoint, Vec<Vec3>)],
+        allowed: impl Fn(usize) -> bool,
+    ) -> Follow {
         /// Within this distance of a root (m), the root's guide dominates.
         const NEAR: f32 = 0.004;
         let k = Self::key(p);
@@ -1234,7 +1266,7 @@ impl GuideGrid {
                     let Some(list) = self.cells.get(&[k[0] + dx, k[1] + dy, k[2] + dz]) else {
                         continue;
                     };
-                    for &i in list {
+                    for &i in list.iter().filter(|&&i| allowed(i as usize)) {
                         let d = (guides[i as usize].0.p - p).length_squared();
                         if d < best[2].1 {
                             best[2] = (i, d);
@@ -1267,7 +1299,12 @@ impl GuideGrid {
         }
     }
 
-    fn nearest(&self, p: Vec3, guides: &[(SkinPoint, Vec<Vec3>)]) -> Option<usize> {
+    fn nearest(
+        &self,
+        p: Vec3,
+        guides: &[(SkinPoint, Vec<Vec3>)],
+        allowed: impl Fn(usize) -> bool,
+    ) -> Option<usize> {
         let k = Self::key(p);
         let mut best: Option<(usize, f32)> = None;
         for dx in -1..=1 {
@@ -1276,7 +1313,7 @@ impl GuideGrid {
                     let Some(list) = self.cells.get(&[k[0] + dx, k[1] + dy, k[2] + dz]) else {
                         continue;
                     };
-                    for &i in list {
+                    for &i in list.iter().filter(|&&i| allowed(i as usize)) {
                         let d = (guides[i as usize].0.p - p).length_squared();
                         if best.is_none_or(|(_, b)| d < b) {
                             best = Some((i as usize, d));
@@ -1499,15 +1536,15 @@ mod tests {
         let guides = vec![guide(0.0), guide(0.01), guide(0.02), guide(0.2)];
         let grid = GuideGrid::new(&guides);
         // At a guide's root: nearly all of its motion.
-        let at = grid.follow(Vec3::new(0.0, 0.7, 0.0), &guides);
+        let at = grid.follow(Vec3::new(0.0, 0.7, 0.0), &guides, |_| true);
         assert_eq!(at.guides[0], 0);
         assert!(at.weights[0] > 0.7, "{at:?}");
         // Halfway between two guides: an even share of both, and the weights sum to 1.
-        let mid = grid.follow(Vec3::new(0.005, 0.7, 0.0), &guides);
+        let mid = grid.follow(Vec3::new(0.005, 0.7, 0.0), &guides, |_| true);
         assert!((mid.weights[0] - mid.weights[1]).abs() < 1e-4, "{mid:?}");
         assert!((mid.weights.iter().sum::<f32>() - 1.0).abs() < 1e-5);
         // Far from every guide but one: that one alone.
-        let far = grid.follow(Vec3::new(0.3, 0.7, 0.0), &guides);
+        let far = grid.follow(Vec3::new(0.3, 0.7, 0.0), &guides, |_| true);
         assert_eq!(far.guides[0], 3);
         assert!((far.weights[0] - 1.0).abs() < 1e-5, "{far:?}");
     }
