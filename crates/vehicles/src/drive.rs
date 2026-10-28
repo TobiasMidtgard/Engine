@@ -450,15 +450,15 @@ fn restore(world: &mut World, hidden: &[Entity], camera: Entity, cursor: CursorM
 }
 
 /// Prompts: a moving vehicle can't be boarded, and one being driven says how to get out.
-fn prompts(
-    mut q: Query<(
-        &mut Interactable,
-        &Boardable,
-        Option<&Velocity>,
-        Has<Driven>,
-        Has<Cruise>,
-    )>,
-) {
+type Prompt<'a> = (
+    &'a mut Interactable,
+    &'a Boardable,
+    Option<&'a Velocity>,
+    Has<Driven>,
+    Has<Cruise>,
+);
+
+fn prompts(mut q: Query<Prompt>) {
     for (mut i, b, v, driven, cruising) in &mut q {
         let moving = cruising || v.is_some_and(|v| v.linear.length() > BOARD_SPEED);
         let (verb, enabled) = match (driven, moving) {
