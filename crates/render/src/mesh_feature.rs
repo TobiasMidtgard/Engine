@@ -375,8 +375,11 @@ struct Item {
     material_slot: u32,
     /// Its mesh and material may be drawn as an impostor.
     impostor_ok: bool,
-    /// Small enough on screen to be drawn as one.
+    /// Small enough on screen to be drawn as one, or about to be (its bake is requested).
     impostor_size: bool,
+    /// 0, or how far it is through the cross-fade from its mesh to its impostor (0..1): both
+    /// are drawn, each in its share of the pixels (`IMPOSTOR_FADE`).
+    fade: f32,
 }
 
 /// What the gather needs of a mesh, looked up once a frame for the meshes the scene uses (by
@@ -571,18 +574,28 @@ impl Cull<'_> {
             && !mat.blend
             && !mat.glows
             && mesh.impostor;
-        let impostor_size =
-            meters_per_pixel.is_some_and(|m| 2.0 * radius < self.p.impostor_pixels * m);
+        // Size on screen in units of the impostor threshold: from 1 down to `IMPOSTOR_FADE`
+        // both are drawn (the cross-fade), under that the impostor alone.
+        let size = meters_per_pixel.map_or(f32::INFINITY, |m| {
+            2.0 * radius / (self.p.impostor_pixels * m).max(f32::MIN_POSITIVE)
+        });
+        let impostor_size = size < 1.0;
         let impostor = self
             .impostors
             .filter(|_| impostor_ok)
             .zip(mat.impostor_key)
             .and_then(|(i, key)| i.layer((mesh.index, key)))
             .unwrap_or(crate::impostor::NONE);
-        let lod = if impostor != crate::impostor::NONE && impostor_size {
+        let baked = impostor != crate::impostor::NONE;
+        let lod = if baked && size < IMPOSTOR_FADE {
             IMPOSTOR_LOD
         } else {
             lod
+        };
+        let fade = if baked && (IMPOSTOR_FADE..1.0).contains(&size) {
+            ((1.0 - size) / (1.0 - IMPOSTOR_FADE)).max(f32::EPSILON)
+        } else {
+            0.0
         };
         let pipeline = if mat.blend { PIPE_BLEND } else { 0 }
             | if mat.double_sided { PIPE_DOUBLE } else { 0 }
@@ -612,6 +625,7 @@ impl Cull<'_> {
             material_slot: 0,
             impostor_ok,
             impostor_size,
+            fade,
         })
     }
 }
@@ -907,6 +921,8 @@ pub struct MeshFeature {
     impostors: Option<Impostors>,
     /// The impostors' range of the instance buffer in the view (first, count).
     impostor_view: (u32, u32),
+    /// How many of them are cross-fading from their meshes (drawn both ways).
+    impostors_fading: u32,
     /// Their ranges per shadow map: the cascades, the sky occlusion map, the far shadow map.
     impostor_shadow: [(u32, u32); FAR_SHADOW_MAP + 1],
     stats: FeatureStats,
@@ -930,6 +946,10 @@ const MAX_LOD_JOBS: usize = 2;
 const AS_IMPOSTOR: u32 = 1 << 31;
 /// `Item::lod` of an instance drawn as its impostor.
 const IMPOSTOR_LOD: u8 = u8::MAX;
+/// Meshes cross-fade into their impostors (dithered, smoothed by temporal anti-aliasing) while
+/// their size on screen falls from `RenderSettings::impostor_pixels` to this share of it,
+/// instead of popping (as Unreal's dithered LOD transitions and Unity's LOD cross-fade do).
+const IMPOSTOR_FADE: f32 = 0.7;
 /// From this many shadow casters on, each shadow map's list is made on its own thread.
 const PARALLEL_CASTERS: usize = 2000;
 /// Slots (and instances) from which the gather's loops run on the worker threads.
@@ -2580,10 +2600,11 @@ impl RenderFeature for MeshFeature {
         let first = self.layout.len();
         self.layout.extend(
             ordered()
-                .filter(|(_, i)| i.lod == IMPOSTOR_LOD)
+                .filter(|(_, i)| i.lod == IMPOSTOR_LOD || i.fade > 0.0)
                 .map(|(n, _)| n | AS_IMPOSTOR),
         );
         self.impostor_view = (first as u32, (self.layout.len() - first) as u32);
+        self.impostors_fading = ordered().filter(|(_, i)| i.fade > 0.0).count() as u32;
         self.impostor_shadow = Default::default();
         // Transparent.
         let first = self.layout.len();
@@ -2754,9 +2775,12 @@ impl RenderFeature for MeshFeature {
                 } else {
                     0
                 };
+                // The cross-fade rides in the normal matrix's spare lane (0 elsewhere).
+                let mut normal = cold.normal;
+                normal[0][3] = item.fade;
                 bytemuck::cast::<MeshInstance, [u8; SIZE]>(MeshInstance {
                     m: cold.rows(view.origin),
-                    n: cold.normal,
+                    n: normal,
                     extra: [
                         item.material_slot,
                         impostor,
@@ -3079,6 +3103,7 @@ impl RenderFeature for MeshFeature {
             "impostors": self.impostors.as_ref().map_or(0, Impostors::count),
             "impostor_atlas_bc7": self.impostors.as_ref().is_some_and(Impostors::compressed),
             "impostors_in_view": self.impostor_view.1,
+            "impostors_fading": self.impostors_fading,
             "virtual_geometry": self.clusters.as_ref().map(ClusterRenderer::describe),
             "virtual_textures": self.vt.as_ref().map(VirtualTextureSystem::describe),
         })

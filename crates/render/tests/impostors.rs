@@ -109,16 +109,19 @@ fn describe(app: &App) -> serde_json::Value {
         .unwrap_or_default()
 }
 
-/// Render the valley with impostors off, on, or on with a BC7 atlas (`Bc7`): the triangles
-/// drawn, the impostors in view and the image's pixels.
+/// Render the valley with impostors off, on, on with a BC7 atlas (`Bc7`) or only for trees
+/// under a fifth as big on screen (`Fade`, so that rows of trees cross-fade): the triangles
+/// drawn, the impostors in view, those of them cross-fading from their meshes and the image's
+/// pixels.
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Meshes,
     Impostors,
     Bc7,
+    Fade,
 }
 
-fn render(mode: Mode, shot: &str) -> Option<(u64, u64, Vec<u8>)> {
+fn render(mode: Mode, shot: &str) -> Option<(u64, u64, u64, Vec<u8>)> {
     engine_core::log::init("error");
     let mut app = App::new();
     app.world.resource_mut::<EngineConfig>().headless = true;
@@ -137,6 +140,10 @@ fn render(mode: Mode, shot: &str) -> Option<(u64, u64, Vec<u8>)> {
             Mode::Impostors => s.texture_compression = TextureCompression::Off,
             // Compressed atlas layers, also under a software GPU.
             Mode::Bc7 => s.texture_compression_on_cpu = true,
+            Mode::Fade => {
+                s.texture_compression = TextureCompression::Off;
+                s.impostor_pixels = 20.0;
+            }
         }
     }
     let leaves = StandardMaterial {
@@ -196,24 +203,29 @@ fn render(mode: Mode, shot: &str) -> Option<(u64, u64, Vec<u8>)> {
     let image = image::open(&path).expect("read the shot").to_rgb8();
     let state = describe(&app);
     let in_view = state["impostors_in_view"].as_u64().unwrap_or(0);
+    let fading = state["impostors_fading"].as_u64().unwrap_or(0);
     assert_eq!(
         state["impostor_atlas_bc7"].as_bool(),
         Some(mode == Mode::Bc7),
         "atlas format: {state}"
     );
     let tris = app.world.resource::<RenderStats>().triangles;
-    Some((tris, in_view, image.into_raw()))
+    Some((tris, in_view, fading, image.into_raw()))
 }
 
 #[test]
 fn far_card_trees_become_impostors_and_look_the_same() {
-    let Some((full, _, before)) = render(Mode::Meshes, "trees_meshes.png") else {
+    let Some((full, _, _, before)) = render(Mode::Meshes, "trees_meshes.png") else {
         return;
     };
-    let Some((fewer, impostors, after)) = render(Mode::Impostors, "trees_impostors.png") else {
+    let Some((fewer, impostors, fading, after)) = render(Mode::Impostors, "trees_impostors.png")
+    else {
         return;
     };
-    eprintln!("triangles: {full} as meshes, {fewer} with {impostors} impostors in view");
+    eprintln!(
+        "triangles: {full} as meshes, {fewer} with {impostors} impostors in view \
+         ({fading} cross-fading from their meshes)"
+    );
     assert!(impostors > 100, "{impostors} impostors in view");
     assert!(fewer * 2 < full, "{fewer} of {full} triangles");
     let diff = difference(&before, &after);
@@ -225,11 +237,32 @@ fn far_card_trees_become_impostors_and_look_the_same() {
 }
 
 #[test]
-fn a_bc7_atlas_looks_like_the_rgba8_one() {
-    let Some((_, _, meshes)) = render(Mode::Meshes, "trees_meshes_bc7_test.png") else {
+fn meshes_cross_fade_into_their_impostors() {
+    let Some((_, _, _, meshes)) = render(Mode::Meshes, "trees_meshes_fade_test.png") else {
         return;
     };
-    let Some((_, impostors, bc7)) = render(Mode::Bc7, "trees_impostors_bc7.png") else {
+    let Some((_, impostors, fading, faded)) = render(Mode::Fade, "trees_cross_fade.png") else {
+        return;
+    };
+    eprintln!("{impostors} impostors in view, {fading} of them cross-fading from their meshes");
+    // The rows where meshes hand over to impostors draw both, dithered, instead of popping.
+    assert!(fading > 5, "{fading} trees cross-fading");
+    assert!(impostors > fading, "{impostors} impostors in view");
+    // Each tree in the band is drawn once over: mesh and impostor split its pixels.
+    let diff = difference(&meshes, &faded);
+    eprintln!("cross-fade: mean difference over 4x4 blocks {diff:.2} of 255");
+    assert!(
+        diff < 3.5,
+        "the images differ by {diff:.2} of 255 on average"
+    );
+}
+
+#[test]
+fn a_bc7_atlas_looks_like_the_rgba8_one() {
+    let Some((_, _, _, meshes)) = render(Mode::Meshes, "trees_meshes_bc7_test.png") else {
+        return;
+    };
+    let Some((_, impostors, _, bc7)) = render(Mode::Bc7, "trees_impostors_bc7.png") else {
         return;
     };
     assert!(impostors > 100, "{impostors} impostors in view");

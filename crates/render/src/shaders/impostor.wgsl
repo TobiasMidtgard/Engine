@@ -77,6 +77,8 @@ struct ImpostorOut {
     // How far the center moved since last frame, relative to last frame's camera.
     @location(8) @interpolate(flat) moved: vec3<f32>,
     @location(9) @interpolate(flat) ids: vec2<u32>,
+    // 0, or how far the mesh is through its cross-fade into this impostor (`n0.w`).
+    @location(10) @interpolate(flat) fade: f32,
 };
 
 fn impostor_corner(v: u32) -> vec2<f32> {
@@ -123,6 +125,7 @@ fn vs_impostor(in: ImpostorIn, @builtin(vertex_index) v: u32) -> ImpostorOut {
     out.n2 = in.n2.xyz;
     out.moved = rows_apply(in.p0, in.p1, in.p2, vec4<f32>(sphere.xyz, 1.0)) - center;
     out.ids = in.extra.xy;
+    out.fade = in.n0.w;
     return out;
 }
 
@@ -137,6 +140,10 @@ struct ImpostorSurface {
 // picked stochastically from the four around the view direction (the same in the prepass and
 // the scene pass, so their depths match).
 fn impostor_surface(in: ImpostorOut) -> ImpostorSurface {
+    // Cross-fading in: the pixels the mesh leaves (`fs_prepass` in mesh.wgsl).
+    if (in.fade > 0.0 && frame_noise(in.clip.xy) >= in.fade) {
+        discard;
+    }
     let layer = in.ids.y;
     let sphere = impostors[layer].center_radius;
     let pixel = in.clip.xy + f32(u32(frame.time.w) % 64u) * vec2<f32>(5.588238, 7.236068);
