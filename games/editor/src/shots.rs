@@ -910,7 +910,7 @@ pub fn round11(dir: impl Into<PathBuf>) -> ShotScript {
         Step::Do(Box::new(|world, editor| {
             let source = PathBuf::from(std::env::var("ROUND11_SETS").unwrap_or_default());
             crate::import::import_paths(world, editor, &[source], None, None);
-            editor.model_filter = "materials/".into();
+            editor.browser.search = "materials/".into();
             world.insert_resource(crate::ui::EditorDock(crate::ui::layout(0.5)));
         })),
         Step::Tab(Tab::Content),
@@ -997,7 +997,7 @@ pub fn round12(dir: impl Into<PathBuf>) -> ShotScript {
                 .next()
                 .unwrap_or_default()
                 .into();
-            editor.model_filter = "stonewell".into();
+            editor.browser.search = "stonewell".into();
             crate::import::save_remaps(world, editor, WELL, &settings);
         })),
         Step::Tab(Tab::Console),
@@ -1288,7 +1288,7 @@ pub fn round15(dir: impl Into<PathBuf>) -> ShotScript {
             nature(world, "Stump");
             nature(world, "Pine");
             editor.models = None;
-            editor.model_filter = "imported".into();
+            editor.browser.search = "imported".into();
             editor.tool = Tool::Scatter;
             editor.scatter.palette = rocks;
         })),
@@ -1976,6 +1976,172 @@ pub fn round20(dir: impl Into<PathBuf>) -> ShotScript {
     })));
     steps.push(Step::Wait(20));
     steps.push(Step::Shot("94_variant_follows_base"));
+    ShotScript::new(dir, steps)
+}
+
+/// Round 21: the Content Browser. Tiles with pictures for every kind of asset beside the
+/// folder tree and favorites, a search across everything, a prefab's users, renaming it while
+/// its copies and the prefab nesting it follow, the right-click menu, and a delete that first
+/// says what still uses the asset.
+pub fn round21(dir: impl Into<PathBuf>) -> ShotScript {
+    use crate::browser::{self, Act};
+    use crate::content::{Asset, Root};
+    use crate::prefab;
+    const ROCK: &str = "imported/materials/rock_face/rock_face.material.gltf";
+    fn post() -> Asset {
+        Asset::new(Root::Prefabs, "lamp_post.prefab.json")
+    }
+    fn renamed() -> Asset {
+        Asset::new(Root::Prefabs, "street_light.prefab.json")
+    }
+    fn mouse(world: &mut World, at: egui::Pos2, button: egui::PointerButton, pressed: bool) {
+        inject(
+            world,
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+    fn tile(editor: &Editor, a: &Asset) -> egui::Pos2 {
+        editor
+            .browser
+            .tile_rects
+            .get(a)
+            .map_or(egui::pos2(0.0, 0.0), |r| r.center())
+    }
+    let steps = vec![
+        Step::Do(Box::new(|world, editor| {
+            // This script's own files from an earlier run.
+            for f in prefab::prefab_files() {
+                let name = f.rsplit('/').next().unwrap_or("");
+                if ["lamp_post", "street_lamps", "street_light"]
+                    .iter()
+                    .any(|p| name.starts_with(p))
+                {
+                    let _ = std::fs::remove_file(&f);
+                }
+            }
+            // A lamp post prefab, a loose copy, and a street of three that nests it.
+            if let Some(lamp) = find(world, "Lamp post") {
+                prefab::create(world, editor, lamp);
+            }
+            let path = post().key();
+            prefab::place(world, editor, &path, Some(DVec3::new(-1.0, 0.0, 1.5)), None);
+            let street = world
+                .spawn((
+                    crate::scene_ops::InScene,
+                    crate::scene_ops::SceneOrder::next(),
+                    Name::new("Street lamps"),
+                    Transform::from_xyz(-1.0, 0.0, 5.0),
+                ))
+                .id();
+            for x in [-3.0, 0.0, 3.0] {
+                if let Some(p) = prefab::place(world, editor, &path, None, Some(street))
+                    && let Some(mut t) = world.get_mut::<Transform>(p)
+                {
+                    t.translation.x = x;
+                }
+            }
+            prefab::create(world, editor, street);
+            // The rock material on three objects.
+            for object in ["Sphere", "Barrel", "Boulder"] {
+                if let Some(e) = find(world, object) {
+                    crate::materials::apply(world, editor, ROCK, &[e]);
+                }
+            }
+            editor.select(None);
+            let favorites = editor.browser.favorites();
+            *favorites = vec![
+                Asset::new(Root::Assets, "imported/materials"),
+                Asset::new(Root::Assets, "imported/rock_b/Rock_B.glb"),
+                post(),
+            ];
+            crate::content::save_favorites(favorites);
+            world.insert_resource(crate::ui::EditorDock(crate::ui::layout(0.42)));
+            let rock = Asset::new(Root::Assets, ROCK);
+            editor.browser.go(rock.parent());
+            editor.browser.selected = Some(rock);
+        })),
+        Step::Camera(DVec3::new(6.0, 4.5, 11.0), DVec3::new(0.0, 0.8, 1.0)),
+        Step::Tab(Tab::Content),
+        Step::Wait(80),
+        Step::Shot("95_tiles_tree_and_details"),
+        Step::Do(Box::new(|_, editor| {
+            editor.browser.search = "rock".into();
+            editor.browser.types =
+                vec![crate::content::Kind::Material, crate::content::Kind::Model];
+            editor.browser.selected = Some(Asset::new(Root::Assets, "imported/rock_b/Rock_B.glb"));
+        })),
+        Step::Wait(80),
+        Step::Shot("96_search_everything"),
+        Step::Do(Box::new(|_, editor| {
+            editor.browser.types.clear();
+            editor.browser.go(Asset::new(Root::Prefabs, ""));
+            editor.browser.selected = Some(post());
+        })),
+        Step::Wait(60),
+        Step::Shot("97_prefab_and_its_users"),
+        Step::Do(Box::new(|_, editor| {
+            editor.browser.renaming = Some((post(), "street_light.prefab.json".into()));
+        })),
+        Step::Wait(6),
+        Step::Shot("98_renaming"),
+        Step::Do(Box::new(|world, editor| {
+            editor.browser.renaming = None;
+            browser::act(world, editor, Act::Rename(post(), "street_light".into()));
+            editor.browser.selected = Some(renamed());
+        })),
+        Step::Wait(40),
+        Step::Shot("99_renamed_and_users_follow"),
+        Step::Do(Box::new(|_, editor| {
+            let rock = Asset::new(Root::Assets, ROCK);
+            editor.browser.go(rock.parent());
+            editor.browser.selected = Some(rock);
+        })),
+        Step::Wait(20),
+        Step::Do(Box::new(|world, editor| {
+            let at = tile(editor, &Asset::new(Root::Assets, ROCK));
+            inject(world, vec![egui::Event::PointerMoved(at)]);
+        })),
+        Step::Wait(2),
+        Step::Do(Box::new(|world, editor| {
+            let at = tile(editor, &Asset::new(Root::Assets, ROCK));
+            mouse(world, at, egui::PointerButton::Secondary, true);
+        })),
+        Step::Wait(1),
+        Step::Do(Box::new(|world, editor| {
+            let at = tile(editor, &Asset::new(Root::Assets, ROCK));
+            mouse(world, at, egui::PointerButton::Secondary, false);
+        })),
+        Step::Wait(6),
+        Step::Shot("100_right_click_menu"),
+        Step::Do(Box::new(|world, editor| {
+            inject(
+                world,
+                vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: Some(egui::Key::Escape),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            browser::act(
+                world,
+                editor,
+                Act::AskDelete(Asset::new(Root::Assets, ROCK)),
+            );
+        })),
+        Step::Wait(10),
+        Step::Shot("101_delete_says_what_uses_it"),
+        Step::Do(Box::new(|_, editor| {
+            editor.browser.deleting = None;
+        })),
+        Step::Wait(2),
+    ];
     ShotScript::new(dir, steps)
 }
 

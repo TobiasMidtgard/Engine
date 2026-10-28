@@ -163,8 +163,21 @@ fn cached(path: &Path) -> Result<RgbaImage, String> {
 /// A material as the rasterizer sees it.
 struct Surface {
     color: Vec4,
+    /// Light the surface gives off (lamps stay bright in their pictures).
+    emissive: Vec3,
     texture: Option<usize>,
     cutoff: Option<f32>,
+}
+
+impl Surface {
+    fn plain(color: Vec4) -> Self {
+        Self {
+            color,
+            emissive: Vec3::ZERO,
+            texture: None,
+            cutoff: None,
+        }
+    }
 }
 
 /// A decoded texture, RGBA8.
@@ -244,106 +257,253 @@ struct Tri {
     surface: usize,
 }
 
-/// Draw the glTF file at `path` as a `size`² picture with a transparent background.
+/// Draw the file at `path` as a `size`² picture with a transparent background: a glTF model
+/// or material, a texture (scaled to fit), or a prefab (its shapes and models together).
 pub fn render(path: &Path, size: u32) -> Result<RgbaImage, String> {
-    let (doc, buffers, images) =
-        gltf::import(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let textures: Vec<Option<Texture>> = images.iter().map(Texture::new).collect();
-    let mut surfaces: Vec<Surface> = doc
-        .materials()
-        .map(|m| {
-            let pbr = m.pbr_metallic_roughness();
-            Surface {
-                color: Vec4::from(pbr.base_color_factor()),
-                texture: pbr
-                    .base_color_texture()
-                    .map(|t| t.texture().source().index())
-                    .filter(|&i| textures.get(i).is_some_and(|t| t.is_some())),
-                cutoff: (m.alpha_mode() == gltf::material::AlphaMode::Mask)
-                    .then(|| m.alpha_cutoff().unwrap_or(0.5)),
-            }
-        })
-        .collect();
-    let default_surface = surfaces.len();
-    surfaces.push(Surface {
-        color: Vec4::new(0.8, 0.8, 0.8, 1.0),
-        texture: None,
-        cutoff: None,
-    });
+    let name = path.to_string_lossy().to_lowercase();
+    if name.ends_with(".prefab.json") {
+        return render_prefab(path, size);
+    }
+    if crate::content::kind_of(&name) == crate::content::Kind::Texture {
+        return picture(path, size);
+    }
+    let mut model = Model::default();
+    model.add_gltf(path, Mat4::IDENTITY)?;
+    model.draw(size)
+}
 
-    // A material file (no meshes): its material on a ball, as Unreal and Unity show them.
-    if doc.meshes().len() == 0 && doc.materials().len() > 0 {
-        return Ok(rasterize(&ball(0), &surfaces, &textures, size));
+/// Triangles to draw, with the surfaces and textures they use.
+#[derive(Default)]
+struct Model {
+    tris: Vec<Tri>,
+    surfaces: Vec<Surface>,
+    textures: Vec<Option<Texture>>,
+}
+
+impl Model {
+    fn draw(&self, size: u32) -> Result<RgbaImage, String> {
+        if self.tris.is_empty() {
+            return Err(NOTHING_TO_DRAW.into());
+        }
+        Ok(rasterize(&self.tris, &self.surfaces, &self.textures, size))
     }
 
-    // Every triangle of the default scene, in world space.
-    let mut tris = Vec::new();
-    let scene = doc
-        .default_scene()
-        .or_else(|| doc.scenes().next())
-        .ok_or("the file has no scene")?;
-    let mut stack: Vec<(gltf::Node, Mat4)> = scene.nodes().map(|n| (n, Mat4::IDENTITY)).collect();
-    while let Some((node, parent)) = stack.pop() {
-        let global = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
-        if let Some(mesh) = node.mesh() {
-            // A skinned mesh is drawn in its bind pose, which glTF puts in the skin's space
-            // rather than under its node.
-            let m = if node.skin().is_some() {
-                Mat4::IDENTITY
-            } else {
-                global
-            };
-            let nm = Mat3::from_mat4(m).inverse().transpose();
-            for prim in mesh.primitives() {
-                if prim.mode() != gltf::mesh::Mode::Triangles {
-                    continue;
+    /// The triangles of `tris` placed by `m`.
+    fn add_tris(&mut self, tris: Vec<Tri>, m: Mat4) {
+        let nm = Mat3::from_mat4(m).inverse().transpose();
+        self.tris.extend(tris.into_iter().map(|t| Tri {
+            p: t.p.map(|p| m.transform_point3(p)),
+            n: t.n.map(|n| (nm * n).normalize_or_zero()),
+            ..t
+        }));
+    }
+
+    /// Every mesh of the glTF file's default scene, placed by `m`. A file of materials only
+    /// adds its first material on a ball, as Unreal and Unity show materials.
+    fn add_gltf(&mut self, path: &Path, m: Mat4) -> Result<(), String> {
+        let (doc, buffers, images) =
+            gltf::import(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let first_texture = self.textures.len();
+        self.textures.extend(images.iter().map(Texture::new));
+        let first = self.surfaces.len();
+        let textures = &self.textures;
+        let surfaces: Vec<Surface> = doc
+            .materials()
+            .map(|mat| {
+                let pbr = mat.pbr_metallic_roughness();
+                Surface {
+                    color: Vec4::from(pbr.base_color_factor()),
+                    emissive: Vec3::from(mat.emissive_factor())
+                        * mat.emissive_strength().unwrap_or(1.0).min(4.0),
+                    texture: pbr
+                        .base_color_texture()
+                        .map(|t| first_texture + t.texture().source().index())
+                        .filter(|&i| textures.get(i).is_some_and(|t| t.is_some())),
+                    cutoff: (mat.alpha_mode() == gltf::material::AlphaMode::Mask)
+                        .then(|| mat.alpha_cutoff().unwrap_or(0.5)),
                 }
-                let r = prim.reader(|b| buffers.get(b.index()).map(|d| &d.0[..]));
-                let Some(positions) = r.read_positions() else {
-                    continue;
-                };
-                let p: Vec<Vec3> = positions
-                    .map(|v| m.transform_point3(Vec3::from(v)))
-                    .collect();
-                let n: Vec<Vec3> = r
-                    .read_normals()
-                    .map(|it| {
-                        it.map(|v| (nm * Vec3::from(v)).normalize_or_zero())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let uv: Vec<Vec2> = r
-                    .read_tex_coords(0)
-                    .map(|it| it.into_f32().map(Vec2::from).collect())
-                    .unwrap_or_default();
-                let indices: Vec<u32> = r
-                    .read_indices()
-                    .map(|it| it.into_u32().collect())
-                    .unwrap_or_else(|| (0..p.len() as u32).collect());
-                let surface = prim.material().index().unwrap_or(default_surface);
-                for t in indices.as_chunks::<3>().0 {
-                    let [a, b, c] = [t[0] as usize, t[1] as usize, t[2] as usize];
-                    if a.max(b).max(c) >= p.len() {
+            })
+            .collect();
+        self.surfaces.extend(surfaces);
+        let default_surface = self.surfaces.len();
+        self.surfaces
+            .push(Surface::plain(Vec4::new(0.8, 0.8, 0.8, 1.0)));
+
+        if doc.meshes().len() == 0 && doc.materials().len() > 0 {
+            self.add_tris(ball(first), m);
+            return Ok(());
+        }
+
+        // Every triangle of the default scene.
+        let scene = doc
+            .default_scene()
+            .or_else(|| doc.scenes().next())
+            .ok_or("the file has no scene")?;
+        let mut stack: Vec<(gltf::Node, Mat4)> = scene.nodes().map(|n| (n, m)).collect();
+        while let Some((node, parent)) = stack.pop() {
+            let global = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
+            if let Some(mesh) = node.mesh() {
+                // A skinned mesh is drawn in its bind pose, which glTF puts in the skin's space
+                // rather than under its node.
+                let at = if node.skin().is_some() { m } else { global };
+                let nm = Mat3::from_mat4(at).inverse().transpose();
+                for prim in mesh.primitives() {
+                    if prim.mode() != gltf::mesh::Mode::Triangles {
                         continue;
                     }
-                    let face = (p[b] - p[a]).cross(p[c] - p[a]).normalize_or_zero();
-                    let normal = |i: usize| n.get(i).copied().unwrap_or(face);
-                    let tex = |i: usize| uv.get(i).copied().unwrap_or(Vec2::ZERO);
-                    tris.push(Tri {
-                        p: [p[a], p[b], p[c]],
-                        n: [normal(a), normal(b), normal(c)],
-                        uv: [tex(a), tex(b), tex(c)],
-                        surface,
-                    });
+                    let r = prim.reader(|b| buffers.get(b.index()).map(|d| &d.0[..]));
+                    let Some(positions) = r.read_positions() else {
+                        continue;
+                    };
+                    let p: Vec<Vec3> = positions
+                        .map(|v| at.transform_point3(Vec3::from(v)))
+                        .collect();
+                    let n: Vec<Vec3> = r
+                        .read_normals()
+                        .map(|it| {
+                            it.map(|v| (nm * Vec3::from(v)).normalize_or_zero())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let uv: Vec<Vec2> = r
+                        .read_tex_coords(0)
+                        .map(|it| it.into_f32().map(Vec2::from).collect())
+                        .unwrap_or_default();
+                    let indices: Vec<u32> = r
+                        .read_indices()
+                        .map(|it| it.into_u32().collect())
+                        .unwrap_or_else(|| (0..p.len() as u32).collect());
+                    let surface = prim
+                        .material()
+                        .index()
+                        .map_or(default_surface, |i| first + i);
+                    push_tris(&mut self.tris, &p, &n, &uv, &indices, surface);
                 }
             }
+            stack.extend(node.children().map(|c| (c, global)));
         }
-        stack.extend(node.children().map(|c| (c, global)));
+        Ok(())
     }
-    if tris.is_empty() {
-        return Err(NOTHING_TO_DRAW.into());
+}
+
+/// Indexed triangles, with face normals where the mesh has none.
+fn push_tris(
+    tris: &mut Vec<Tri>,
+    p: &[Vec3],
+    n: &[Vec3],
+    uv: &[Vec2],
+    indices: &[u32],
+    surface: usize,
+) {
+    for t in indices.as_chunks::<3>().0 {
+        let [a, b, c] = [t[0] as usize, t[1] as usize, t[2] as usize];
+        if a.max(b).max(c) >= p.len() {
+            continue;
+        }
+        let face = (p[b] - p[a]).cross(p[c] - p[a]).normalize_or_zero();
+        let normal = |i: usize| n.get(i).copied().unwrap_or(face);
+        let tex = |i: usize| uv.get(i).copied().unwrap_or(Vec2::ZERO);
+        tris.push(Tri {
+            p: [p[a], p[b], p[c]],
+            n: [normal(a), normal(b), normal(c)],
+            uv: [tex(a), tex(b), tex(c)],
+            surface,
+        });
     }
-    Ok(rasterize(&tris, &surfaces, &textures, size))
+}
+
+/// A texture scaled to fit the picture, centered.
+fn picture(path: &Path, size: u32) -> Result<RgbaImage, String> {
+    let img = image::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let small = img.thumbnail(size, size).to_rgba8();
+    let mut out = RgbaImage::new(size, size);
+    image::imageops::overlay(
+        &mut out,
+        &small,
+        i64::from((size - small.width()) / 2),
+        i64::from((size - small.height()) / 2),
+    );
+    Ok(out)
+}
+
+/// The folder model keys are relative to, set by the editor for prefab pictures.
+pub static ASSET_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// A prefab file drawn as placed: each part's shape or model under its transform, in the
+/// part's own color (with its glow), nested parts included (files are stored expanded).
+fn render_prefab(path: &Path, size: u32) -> Result<RgbaImage, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let doc: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let mut model = Model::default();
+    let mut stack: Vec<(&serde_json::Value, Mat4)> = doc["entities"]
+        .as_array()
+        .map(|a| a.iter().map(|e| (e, Mat4::IDENTITY)).collect())
+        .unwrap_or_default();
+    let vec3 = |v: &serde_json::Value, or: Vec3| -> Vec3 {
+        match v
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_f64()).collect::<Vec<_>>())
+        {
+            Some(a) if a.len() == 3 => Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32),
+            _ => or,
+        }
+    };
+    while let Some((e, parent)) = stack.pop() {
+        let c = &e["components"];
+        let t = &c["Transform"];
+        let rotation = match t["rotation"].as_array() {
+            Some(q) if q.len() == 4 => {
+                let f = |i: usize| q[i].as_f64().unwrap_or(0.0) as f32;
+                Quat::from_xyzw(f(0), f(1), f(2), f(3)).normalize()
+            }
+            _ => Quat::IDENTITY,
+        };
+        let local = Mat4::from_scale_rotation_translation(
+            vec3(&t["scale"], Vec3::ONE),
+            rotation,
+            vec3(&t["translation"], Vec3::ZERO),
+        );
+        // (Where the root stands doesn't matter: the picture is fitted to the model.)
+        let m = parent * local;
+        let r = &c["MeshRenderer"];
+        if r.is_object() && r["visible"].as_bool() != Some(false) {
+            let inline = &r["material"]["inline"];
+            let color = match inline["base_color"].as_array() {
+                Some(a) if a.len() == 4 => {
+                    let f = |i: usize| a[i].as_f64().unwrap_or(1.0) as f32;
+                    Vec4::new(f(0), f(1), f(2), f(3))
+                }
+                _ => Vec4::new(0.8, 0.8, 0.8, 1.0),
+            };
+            let glow = inline["emissive_strength"].as_f64().unwrap_or(0.0).min(1.0) as f32;
+            let mut surface = Surface::plain(color);
+            surface.emissive = vec3(&inline["emissive"], Vec3::ZERO) * glow;
+            if let Ok(shape) = serde_json::from_value::<Shape>(r["mesh"]["shape"].clone()) {
+                let mesh = shape.mesh();
+                let index = model.surfaces.len();
+                model.surfaces.push(surface);
+                let p: Vec<Vec3> = mesh
+                    .vertices
+                    .iter()
+                    .map(|v| Vec3::from(v.position))
+                    .collect();
+                let n: Vec<Vec3> = mesh.vertices.iter().map(|v| Vec3::from(v.normal)).collect();
+                let uv: Vec<Vec2> = mesh.vertices.iter().map(|v| Vec2::from(v.uv)).collect();
+                let mut tris = Vec::new();
+                push_tris(&mut tris, &p, &n, &uv, &mesh.indices, index);
+                model.add_tris(tris, m);
+            } else if let Some(key) = r["mesh"]["asset"].as_str()
+                && let Some(root) = ASSET_ROOT.get()
+            {
+                let file = key.split('#').next().unwrap_or(key);
+                let _ = model.add_gltf(&root.join(file), m);
+            }
+        }
+        if let Some(children) = e["children"].as_array() {
+            stack.extend(children.iter().map(|ch| (ch, m)));
+        }
+    }
+    model.draw(size)
 }
 
 /// A unit ball of triangles with `surface`, its texture wrapped twice around.
@@ -482,7 +642,9 @@ fn rasterize(
                 let key = n.dot(light).max(0.0);
                 let sky = 0.5 + 0.5 * n.y;
                 let rim = (1.0 - n.dot(back).max(0.0)).powi(3) * 0.25;
-                let lit = albedo.truncate() * (0.95 * key + 0.35 * sky) + Vec3::splat(rim);
+                let lit = albedo.truncate() * (0.95 * key + 0.35 * sky)
+                    + Vec3::splat(rim)
+                    + surface.emissive;
                 depth[i] = z;
                 color[i] = lit.extend(1.0);
             }
@@ -542,6 +704,53 @@ mod tests {
             "lit red: {middle:?}"
         );
         assert_eq!(img.get_pixel(0, 0)[3], 0, "the corner stays clear");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn prefabs_draw_their_shapes_and_textures_draw_scaled() {
+        let dir = std::env::temp_dir().join(format!("editor-thumbs-p-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let part = |color: [f32; 4], at: [f32; 3]| {
+            serde_json::json!({
+                "MeshRenderer": {
+                    "mesh": {"shape": {"Cuboid": {"size": [1.0, 1.0, 1.0]}}},
+                    "material": {"inline": {"base_color": color}},
+                    "visible": true
+                },
+                "Transform": {"translation": at, "rotation": [0.0, 0.0, 0.0, 1.0], "scale": [1.0, 1.0, 1.0]}
+            })
+        };
+        let doc = serde_json::json!({"entities": [{
+            "name": "Two boxes",
+            "components": part([1.0, 0.0, 0.0, 1.0], [5.0, 0.0, 0.0]),
+            "children": [{"name": "Top", "components": part([0.0, 0.0, 1.0, 1.0], [0.0, 3.0, 0.0])}]
+        }]});
+        let file = dir.join("boxes.prefab.json");
+        std::fs::write(&file, doc.to_string()).unwrap();
+        let img = render(&file, 64).unwrap();
+        let reddest = img
+            .pixels()
+            .filter(|p| p[3] > 0 && p[0] > 120 && p[2] < 40)
+            .count();
+        let bluest = img
+            .pixels()
+            .filter(|p| p[3] > 0 && p[2] > 120 && p[0] < 40)
+            .count();
+        assert!(
+            reddest > 50 && bluest > 50,
+            "both boxes drawn: {reddest} {bluest}"
+        );
+        assert!(
+            img.get_pixel(32, 5)[2] > img.get_pixel(32, 5)[0],
+            "the child sits above its parent"
+        );
+
+        let wide = RgbaImage::from_pixel(40, 20, image::Rgba([0, 255, 0, 255]));
+        wide.save(dir.join("wide.png")).unwrap();
+        let img = render(&dir.join("wide.png"), 32).unwrap();
+        assert_eq!(img.get_pixel(16, 16)[1], 255, "middle covered");
+        assert_eq!(img.get_pixel(16, 1)[3], 0, "letterboxed above");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -98,11 +98,6 @@ pub fn display_name(key: &str) -> String {
     stem.replace('_', " ")
 }
 
-/// The folder a key sits in ("" at the root).
-pub fn folder(key: &str) -> &str {
-    key.rsplit_once('/').map_or("", |(dir, _)| dir)
-}
-
 /// Load `key` if needed and place it with its lowest point on `at`, as one undo step.
 pub fn place(world: &mut World, editor: &mut Editor, key: &str, at: DVec3) -> Option<Entity> {
     let t = now(world);
@@ -500,8 +495,6 @@ mod tests {
             "Horse"
         );
         assert_eq!(display_name("car_concept.glb"), "car concept");
-        assert_eq!(folder("fetched/anim/clips/m_run.glb"), "fetched/anim/clips");
-        assert_eq!(folder("rock.glb"), "");
     }
 
     /// A one-triangle glTF (y from 1 to 2) whose node is called `node`.

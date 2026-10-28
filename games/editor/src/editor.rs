@@ -157,7 +157,6 @@ pub struct Editor {
     pub play: Option<PlaySnapshot>,
     /// Advance one frame while paused.
     pub step_once: bool,
-    pub save_as: String,
     /// Frame time smoothing for the stats overlay, seconds.
     pub frame_secs: f32,
     /// Draw the ground grid.
@@ -174,8 +173,6 @@ pub struct Editor {
     pub brush: crate::landscape::Brush,
     /// Model files under the asset root (scanned when the Content panel first shows them).
     pub models: Option<Vec<String>>,
-    /// Content panel model search.
-    pub model_filter: String,
     /// A file from the desktop being dragged over the window.
     pub file_hover: Option<std::path::PathBuf>,
     /// Files dropped on the window, imported by the next UI pass.
@@ -190,6 +187,8 @@ pub struct Editor {
     pub model_info: HashMap<String, String>,
     /// The Content panel's import path.
     pub import_path: String,
+    /// The Content Browser.
+    pub browser: crate::browser::Browser,
     /// When placed models' files last changed (for reimport).
     pub model_watch: crate::models::Watch,
 }
@@ -233,7 +232,6 @@ impl Editor {
             enum_cache: HashMap::new(),
             play: None,
             step_once: false,
-            save_as: String::new(),
             frame_secs: 1.0 / 60.0,
             grid: true,
             icons: true,
@@ -242,9 +240,9 @@ impl Editor {
             clipboard: Vec::new(),
             brush: Default::default(),
             models: None,
-            model_filter: String::new(),
             model_watch: Default::default(),
             import_path: String::new(),
+            browser: Default::default(),
             file_hover: None,
             import_edit: None,
             import_materials: Vec::new(),

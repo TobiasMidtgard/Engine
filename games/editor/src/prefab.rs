@@ -239,6 +239,15 @@ fn stamp(path: &str) -> Option<SystemTime> {
 }
 
 /// Run `f` with the prefab file cache.
+/// Drop every cached prefab file, so the next read sees the files as they are now (after the
+/// Content Browser rewrote references in them).
+pub fn forget_files(world: &mut World) {
+    if let Some(mut files) = world.get_resource_mut::<PrefabFiles>() {
+        files.stored.clear();
+        files.expanded.clear();
+    }
+}
+
 pub fn with_files<R>(world: &mut World, f: impl FnOnce(&mut PrefabFiles, &mut World) -> R) -> R {
     if !world.contains_resource::<PrefabFiles>() {
         let registry = world
@@ -1008,13 +1017,15 @@ pub fn track(world: &mut World) {
         }
         let done = sync_all(world);
         refresh_all(world);
+        // A file saved as it was (or one no copy uses) changes nothing worth a word.
+        if done.is_empty() {
+            return;
+        }
         let names: Vec<String> = changed.iter().map(|p| display_name(p)).collect();
         let label = format!("{} changed on disk", names.join(", "));
-        if !done.is_empty() {
-            editor
-                .history
-                .record(world, Command::Group(label.clone(), done), t);
-        }
+        editor
+            .history
+            .record(world, Command::Group(label.clone(), done), t);
         editor.info(t, format!("{label}: copies updated"));
     });
 }
@@ -2134,6 +2145,19 @@ mod tests {
         apply_all(world, &mut editor, a);
         assert_eq!(world.get::<Transform>(row_lamp).unwrap().scale.x, 3.0);
         assert_eq!(scale(world, b), 3.0);
+
+        // The file written again as it is (an outside save): nothing in the scene changes.
+        refresh_all(world);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let text = std::fs::read_to_string(&post_path).unwrap();
+        std::fs::write(&post_path, text).unwrap();
+        let changed = with_files(world, |f, _| f.changed_on_disk());
+        assert_eq!(changed, std::slice::from_ref(&post_path));
+        let done = sync_all(world);
+        assert!(
+            done.is_empty(),
+            "an unchanged file changes nothing: {done:#?}"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

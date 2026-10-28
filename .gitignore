@@ -13,6 +13,8 @@ screenshots/
 # Scenes and prefabs the editor saves when run from the repo root (games/editor)
 /scenes/
 /prefabs/
+# The editor's favorites and trash (games/editor)
+/.editor/
 # Files the editor imports from elsewhere on disk
 /assets/imported/
 

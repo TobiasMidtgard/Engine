@@ -14,9 +14,11 @@
 //! The UI is egui, drawn as a render overlay on top of the scene (`egui_bridge`), and talks to
 //! the world only through the type registry and the engine's contracts, like the AI bridge.
 
+mod browser;
 mod camera;
 mod camera_preview;
 mod collision;
+mod content;
 mod convert;
 mod demos;
 mod editor;
@@ -133,6 +135,7 @@ fn main() {
             Some("round18") => shots::round18(dir),
             Some("round19") => shots::round19(dir),
             Some("round20") => shots::round20(dir),
+            Some("round21") => shots::round21(dir),
             Some("play") => shots::play_in_editor(dir),
             _ => shots::gallery(dir),
         };
