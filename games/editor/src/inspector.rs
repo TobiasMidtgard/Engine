@@ -1162,7 +1162,7 @@ fn enum_variants(ctx: &mut EditCtx, path: &str) -> Option<Vec<String>> {
 }
 
 /// Replace the value at a `/a/b/0` path; false when the path doesn't exist.
-fn set_at(root: &mut Value, path: &str, new: Value) -> bool {
+pub(crate) fn set_at(root: &mut Value, path: &str, new: Value) -> bool {
     let mut cur = root;
     for part in path.split('/').filter(|p| !p.is_empty()) {
         cur = match cur {

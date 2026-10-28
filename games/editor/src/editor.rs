@@ -53,6 +53,7 @@ pub enum Tab {
     Console,
     History,
     Partition,
+    Matrix,
 }
 
 /// A message in the console.
@@ -225,6 +226,8 @@ pub struct Editor {
     pub browser: crate::browser::Browser,
     /// The World Partition panel and streaming in Play.
     pub partition: crate::partition::Partition,
+    /// The Property Matrix.
+    pub matrix: crate::matrix::Matrix,
     /// Scene views: the layout, each view's state (see [`Pane`]), the one being drawn, the
     /// active one, and the one maximized (when it fills the tab alone).
     pub layout: Layout,
@@ -297,6 +300,7 @@ impl Editor {
             import_path: String::new(),
             browser: Default::default(),
             partition: Default::default(),
+            matrix: Default::default(),
             layout: Layout::One,
             panes: vec![Pane::new(camera)],
             pane: 0,

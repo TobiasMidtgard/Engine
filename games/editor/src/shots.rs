@@ -2365,6 +2365,38 @@ pub fn round25(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Round 26: the Property Matrix. Six crates as rows with their transform as columns, sorted
+/// by height, then four props compared on their MeshRenderer fields.
+pub fn round26(dir: impl Into<PathBuf>) -> ShotScript {
+    let steps = vec![
+        Step::Camera(DVec3::new(6.5, 4.0, 6.0), DVec3::new(-2.5, 0.8, -3.5)),
+        Step::Do(Box::new(|world, editor| {
+            editor.icons = false;
+            editor.selection = (1..=6)
+                .filter_map(|i| find(world, &format!("Crate {i}")))
+                .collect();
+        })),
+        Step::Tab(Tab::Matrix),
+        Step::Wait(40),
+        Step::Shot("122_matrix_six_crates"),
+        Step::Do(Box::new(|_, editor| {
+            editor.matrix.sort = Some(("/translation/1".into(), false));
+        })),
+        Step::Wait(10),
+        Step::Shot("123_sorted_by_height"),
+        Step::Do(Box::new(|world, editor| {
+            editor.selection = ["Barrel", "Boulder", "Stone", "Marble ball"]
+                .iter()
+                .filter_map(|n| find(world, n))
+                .collect();
+            editor.matrix.component = Some("MeshRenderer".into());
+        })),
+        Step::Wait(20),
+        Step::Shot("124_props_mesh_renderer_compared"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {

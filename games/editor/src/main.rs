@@ -30,6 +30,7 @@ mod inspector;
 mod landscape;
 mod material_edit;
 mod materials;
+mod matrix;
 mod measure;
 mod models;
 mod outline;
@@ -143,6 +144,7 @@ fn main() {
             Some("round23") => shots::round23(dir),
             Some("round24") => shots::round24(dir),
             Some("round25") => shots::round25(dir),
+            Some("round26") => shots::round26(dir),
             Some("play") => shots::play_in_editor(dir),
             _ => shots::gallery(dir),
         };

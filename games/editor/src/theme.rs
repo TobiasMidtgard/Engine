@@ -188,6 +188,7 @@ mod tests {
             include_str!("hide.rs"),
             include_str!("folder.rs"),
             include_str!("partition.rs"),
+            include_str!("matrix.rs"),
             include_str!("content.rs"),
             include_str!("thumbs.rs"),
         ];
