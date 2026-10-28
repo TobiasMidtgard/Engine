@@ -1,0 +1,346 @@
+//! The scripting showcase: the Script courtyard, a cobbled circle at dusk run entirely by Luau.
+//!
+//! What to look for:
+//!
+//! - The ring of twelve lanterns and the brass orrery in the middle are built by
+//!   `assets/scripts/showcase/courtyard.luau` when it starts, not by Rust: the stone, the
+//!   braziers, the lever and the code board are the only things spawned here.
+//! - A wave of light chases round the lanterns and the orrery's rings turn, every frame from
+//!   the script's `update`.
+//! - The code board on the north side shows the director script's own source, syntax-colored.
+//!   Edit the file while the game runs and the courtyard changes within a quarter second: the
+//!   board shows the new text with the changed lines lit, the lanterns keep their place in the
+//!   wave (the script keeps its state), and a typo shows an error on the board while the old
+//!   code keeps running.
+//! - Pull the lever (E) and the ritual plays: the lanterns go out one by one, flare back in
+//!   sequence, the braziers light, the orrery spins up and a beam goes up from its core, with a
+//!   moment of slow motion. It is one coroutine in the script, written with `task.wait`.
+//!
+//! `script.send {"entity": {"name": "Courtyard director"}, "event": "ritual"}` plays the ritual
+//! from the console or a tour stop; `script.edit` changes a script file like an editor would.
+
+use engine_core::math::{DVec3, Quat};
+use engine_core::prelude::*;
+use engine_render::{MaterialPreset, MeshRenderer, Shape, StandardMaterial};
+use engine_world::Interactable;
+use serde_json::json;
+
+use crate::Script;
+use crate::board::CodeBoard;
+
+/// The director: its script builds the lanterns and the orrery and plays the ritual.
+pub const DIRECTOR: &str = "Courtyard director";
+/// The director's script.
+pub const COURTYARD_SCRIPT: &str = "showcase/courtyard.luau";
+/// The lever's script.
+pub const LEVER_SCRIPT: &str = "showcase/lever.luau";
+
+/// Radius of the cobbled floor, meters.
+pub const FLOOR_RADIUS: f64 = 14.0;
+/// Where the code board stands (meters from the middle, facing the middle).
+pub const BOARD: [f64; 3] = [0.0, 2.05, -9.0];
+/// Where the lever stands.
+pub const LEVER: [f64; 3] = [4.2, 0.0, 6.6];
+/// Where the braziers stand: on the diagonals between the lanterns and the middle.
+pub const BRAZIER_RADIUS: f64 = 7.6;
+
+/// A tour stop: eye and target relative to the courtyard's middle, and API calls made on
+/// arriving and leaving (name, JSON args).
+pub struct DemoView {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub eye: [f64; 3],
+    pub target: [f64; 3],
+    pub hour: f32,
+    pub warmup_secs: f32,
+    pub on_arrive: &'static [(&'static str, &'static str)],
+    pub on_leave: &'static [(&'static str, &'static str)],
+}
+
+/// The lanterns' color as the director script ships, and the color the hot-reload stop edits
+/// it to (`script.edit` finds this exact text).
+const WARM: &str = r#"{"path": "showcase/courtyard.luau", "find": "color = vec3(1.0, 0.56, 0.22)", "replace": "color = vec3(0.25, 0.62, 1.0)"}"#;
+const COOL: &str = r#"{"path": "showcase/courtyard.luau", "find": "color = vec3(0.25, 0.62, 1.0)", "replace": "color = vec3(1.0, 0.56, 0.22)"}"#;
+
+/// The courtyard's overview, from the south-east above the lanterns.
+const OVERVIEW: ([f64; 3], [f64; 3]) = ([13.0, 6.5, 17.0], [-0.5, 1.2, -1.5]);
+
+/// Suggested viewpoints (camera bookmarks and screenshot-tour stops). The first two are a
+/// before and after pair: the same view, then again once the tour has edited the lanterns'
+/// color in the file.
+pub const VIEWS: &[DemoView] = &[
+    DemoView {
+        key: "script_courtyard",
+        name: "Script courtyard at dusk: lanterns and orrery built and run by Luau",
+        eye: OVERVIEW.0,
+        target: OVERVIEW.1,
+        hour: 18.9,
+        warmup_secs: 2.0,
+        on_arrive: &[],
+        on_leave: &[],
+    },
+    DemoView {
+        key: "script_reload",
+        name: "Hot reload: the lantern color edited in the file while the game runs",
+        eye: OVERVIEW.0,
+        target: OVERVIEW.1,
+        hour: 18.9,
+        warmup_secs: 2.0,
+        on_arrive: &[("script.edit", WARM)],
+        on_leave: &[("script.edit", COOL)],
+    },
+    DemoView {
+        key: "script_board",
+        name: "The code board: the director script's live source, the edited line lit",
+        eye: [0.5, 2.2, -5.9],
+        target: [0.0, 2.05, -9.0],
+        hour: 18.9,
+        warmup_secs: 0.5,
+        on_arrive: &[],
+        on_leave: &[],
+    },
+    DemoView {
+        key: "script_ritual",
+        name: "The lever ritual: braziers, flaring lanterns and the orrery's beam",
+        eye: [9.5, 3.2, 12.5],
+        target: [0.0, 2.6, 0.0],
+        hour: 18.9,
+        // The ritual peaks 5.6 s after it starts (courtyard.luau, Courtyard:ritual).
+        warmup_secs: 5.5,
+        on_arrive: &[(
+            "script.send",
+            r#"{"entity": {"name": "Courtyard director"}, "event": "ritual"}"#,
+        )],
+        on_leave: &[],
+    },
+];
+
+fn mesh(shape: Shape, material: StandardMaterial) -> MeshRenderer {
+    MeshRenderer::new(shape, material)
+}
+
+/// Spawns the courtyard's stone, braziers, lever, code board and director around `origin`
+/// (on the ground there).
+pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
+    let at = |x: f64, y: f64, z: f64| Transform::from_translation(origin + DVec3::new(x, y, z));
+    let cobbles = StandardMaterial::preset(MaterialPreset::Cobblestone).with_triplanar_world();
+    let marble = StandardMaterial::preset(MaterialPreset::Marble);
+    let granite = StandardMaterial::preset(MaterialPreset::Rock).with_tint(0.62, 0.6, 0.58);
+    let iron = StandardMaterial::color(0.045, 0.043, 0.042)
+        .with_metallic(0.85)
+        .with_roughness(0.55);
+    let brass = StandardMaterial::color(0.78, 0.56, 0.26)
+        .with_metallic(1.0)
+        .with_roughness(0.28);
+    let walnut = StandardMaterial::preset(MaterialPreset::WoodPlanks).with_tint(0.38, 0.27, 0.2);
+
+    // The floor: cobbles in a ring of marble curb stones, a dark polished disc in the middle
+    // with a brass inlay where the orrery stands.
+    commands.spawn((
+        Name::new("Courtyard floor"),
+        at(0.0, -0.13, 0.0),
+        mesh(
+            Shape::Cylinder {
+                radius: FLOOR_RADIUS as f32,
+                height: 0.3,
+                segments: 96,
+            },
+            cobbles,
+        ),
+    ));
+    let curb_stones = 36;
+    let curb_r = FLOOR_RADIUS + 0.25;
+    let curb_len = (std::f64::consts::TAU * curb_r / curb_stones as f64 - 0.04) as f32;
+    for i in 0..curb_stones {
+        let a = i as f64 / curb_stones as f64 * std::f64::consts::TAU;
+        commands.spawn((
+            Name::new(format!("Curb stone {}", i + 1)),
+            at(a.cos() * curb_r, 0.06, a.sin() * curb_r).with_rotation(Quat::from_rotation_y(
+                -(a as f32) + std::f32::consts::FRAC_PI_2,
+            )),
+            mesh(
+                Shape::RoundedCuboid {
+                    size: [curb_len, 0.24, 0.5],
+                    radius: 0.04,
+                    segments: 0,
+                },
+                marble,
+            ),
+        ));
+    }
+    commands.spawn((
+        Name::new("Orrery dais"),
+        at(0.0, 0.035, 0.0),
+        mesh(
+            Shape::Cylinder {
+                radius: 3.4,
+                height: 0.07,
+                segments: 64,
+            },
+            StandardMaterial::preset(MaterialPreset::Marble)
+                .with_tint(0.16, 0.17, 0.2)
+                .with_roughness(0.12)
+                .with_triplanar_world(),
+        ),
+    ));
+    commands.spawn((
+        Name::new("Dais inlay"),
+        at(0.0, 0.07, 0.0),
+        mesh(
+            Shape::Torus {
+                radius: 3.4,
+                tube: 0.035,
+                segments: 96,
+            },
+            brass,
+        ),
+    ));
+
+    // The code board: a walnut easel holding the director script's source.
+    let [bx, by, bz] = BOARD;
+    commands.spawn((
+        Name::new("Code board frame"),
+        at(bx, by, bz - 0.08),
+        mesh(
+            Shape::RoundedCuboid {
+                size: [3.85, 2.5, 0.14],
+                radius: 0.04,
+                segments: 0,
+            },
+            walnut,
+        ),
+    ));
+    for side in [-1.0, 1.0] {
+        commands.spawn((
+            Name::new("Code board post"),
+            at(bx + side * 1.78, 1.68, bz - 0.17),
+            mesh(
+                Shape::RoundedCuboid {
+                    size: [0.13, 3.36, 0.13],
+                    radius: 0.03,
+                    segments: 0,
+                },
+                walnut,
+            ),
+        ));
+    }
+    commands.spawn((
+        Name::new("Code board"),
+        at(bx, by, bz),
+        mesh(
+            Shape::Quad { size: [3.6, 2.25] },
+            StandardMaterial::color(0.02, 0.022, 0.026),
+        )
+        .without_shadows(),
+        CodeBoard {
+            // Big enough to read from the board's tour stop; the props and `update` fit.
+            lines: 28,
+            ..CodeBoard::new(COURTYARD_SCRIPT)
+        },
+    ));
+
+    // Four braziers on the diagonals, cold until the ritual lights them.
+    for i in 0..4 {
+        let a = (i as f64 + 0.5) * std::f64::consts::FRAC_PI_2;
+        let (x, z) = (a.cos() * BRAZIER_RADIUS, a.sin() * BRAZIER_RADIUS);
+        commands
+            .spawn((Name::new(format!("Brazier {}", i + 1)), at(x, 0.0, z)))
+            .with_children(|b| {
+                b.spawn((
+                    Transform::from_xyz(0.0, 0.42, 0.0),
+                    mesh(
+                        Shape::Cylinder {
+                            radius: 0.24,
+                            height: 0.84,
+                            segments: 24,
+                        },
+                        granite,
+                    ),
+                ));
+                b.spawn((
+                    Transform::from_xyz(0.0, 1.06, 0.0)
+                        .with_rotation(Quat::from_rotation_x(std::f32::consts::PI)),
+                    mesh(
+                        Shape::Cone {
+                            radius: 0.52,
+                            height: 0.44,
+                            segments: 32,
+                        },
+                        iron,
+                    ),
+                ));
+            });
+    }
+
+    // The lever on its stone pedestal: pulling it sends "ritual" to the director.
+    let [lx, _, lz] = LEVER;
+    // Facing the middle (its -Z toward the orrery).
+    let facing = Quat::from_rotation_y(lx.atan2(lz) as f32);
+    commands.spawn((
+        Name::new("Lever pedestal"),
+        at(lx, 0.5, lz).with_rotation(facing),
+        mesh(
+            Shape::RoundedCuboid {
+                size: [0.62, 1.0, 0.46],
+                radius: 0.05,
+                segments: 0,
+            },
+            granite,
+        ),
+    ));
+    commands
+        .spawn((
+            Name::new("Ritual lever"),
+            at(lx, 1.025, lz).with_rotation(facing),
+            mesh(
+                Shape::RoundedCuboid {
+                    size: [0.16, 0.05, 0.42],
+                    radius: 0.015,
+                    segments: 0,
+                },
+                brass,
+            ),
+            Interactable {
+                verb: "Pull".into(),
+                reach_m: 2.5,
+                ..Default::default()
+            },
+            Script::new(LEVER_SCRIPT).with_props(json!({ "target": DIRECTOR })),
+        ))
+        .with_children(|l| {
+            l.spawn((
+                Name::new("Lever arm"),
+                Transform::from_xyz(0.0, 0.02, 0.0).with_rotation(Quat::from_rotation_x(-0.55)),
+            ))
+            .with_children(|arm| {
+                arm.spawn((
+                    Transform::from_xyz(0.0, 0.3, 0.0),
+                    mesh(
+                        Shape::Cylinder {
+                            radius: 0.022,
+                            height: 0.6,
+                            segments: 12,
+                        },
+                        iron,
+                    ),
+                ));
+                arm.spawn((
+                    Transform::from_xyz(0.0, 0.62, 0.0),
+                    mesh(
+                        Shape::Sphere {
+                            radius: 0.055,
+                            segments: 16,
+                        },
+                        StandardMaterial::color(0.42, 0.05, 0.04).with_roughness(0.3),
+                    ),
+                ));
+            });
+        });
+
+    // The director: everything that moves or glows is its script's doing.
+    commands.spawn((
+        Name::new(DIRECTOR),
+        at(0.0, 0.0, 0.0),
+        Script::new(COURTYARD_SCRIPT),
+    ));
+}

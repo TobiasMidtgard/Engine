@@ -77,6 +77,13 @@ pub const ZONES: &[Zone] = &[
         module: "vfx",
     },
     Zone {
+        key: "script",
+        name: "Script courtyard (Luau scripts, hot reload)",
+        center: DVec3::new(70.0, 0.0, -105.0),
+        radius: 22.0,
+        module: "script",
+    },
+    Zone {
         key: "gallery2d",
         name: "2D and 2.5D gallery",
         center: DVec3::new(-65.0, 0.0, -115.0),
@@ -619,6 +626,7 @@ pub fn spawn_cell(commands: &mut Commands, lib: &Library, land: &Landscape, seed
             );
         }
         "magic" => engine_vfx::demo::spawn_demo(commands, z.center),
+        "script" => engine_script::demo::spawn_demo(commands, z.center),
         "gallery2d" => ph::gallery2d(commands, lib, z),
         "forest" => engine_foliage::demo::spawn_demo(commands, z.center),
         "meadow" => engine_npc::demo::spawn_wildlife(commands, z.center, z.radius * 0.8),
@@ -1349,6 +1357,19 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
         "magic" => engine_vfx::demo::VIEWS
             .iter()
             .map(|v| View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup))
+            .collect(),
+        "script" => engine_script::demo::VIEWS
+            .iter()
+            .map(|v| {
+                let view = View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs);
+                let view = v
+                    .on_arrive
+                    .iter()
+                    .fold(view, |view, (api, args)| view.on_arrive(api, args));
+                v.on_leave
+                    .iter()
+                    .fold(view, |view, (api, args)| view.on_leave(api, args))
+            })
             .collect(),
         _ => Vec::new(),
     }

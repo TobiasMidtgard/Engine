@@ -1,0 +1,23 @@
+[package]
+name = "engine_script"
+description = "Hot-reloaded gameplay scripting in Luau: scripts on entities, every module.verb callable from script, tasks over world time, sandboxed, with editor type definitions."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engine_core.workspace = true
+engine_world.workspace = true
+engine_render.workspace = true
+engine_assets.workspace = true
+engine_input.workspace = true
+bevy_ecs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+font8x8.workspace = true
+# Luau (Roblox's typed, sandboxed Lua), compiled from source by `cc`. `send` makes the VM a
+# plain resource; the runtime only touches it from the systems that hold the world.
+mlua = { version = "0.12", features = ["luau", "send"] }
+# Rasterizes the code board's font (engine-design/scripting-research.md, "The showcase stop").
+ab_glyph = "0.2"

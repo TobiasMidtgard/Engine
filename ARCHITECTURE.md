@@ -93,7 +93,7 @@ zone's entry; the rest of the showcase belongs to the Beautiful showcase world t
 | `engine_movement` | Advanced locomotion (wall-run, slide, dash), combat movement, time-dilation gameplay (perception levels, slow-mo on attacks) | Movement and slow motion |
 | `engine_audio` | Spatial audio, footsteps/impacts from surface materials | Audio and footsteps |
 | `engine_character`, `games/character_creator`, `assets/manifests/character.toml` | People's faces and busts from a morphable human (MakeHuman's CC0 base mesh and shape targets): appearance, skin, eyes, strand hair, brows, lashes and beards; the character creator | Character creator |
-| `engine_script` | Hot-reloaded gameplay scripting | Later |
+| `engine_script` | Luau gameplay scripting, hot reloaded (`Script` component, `script.*` API) | Scripting and hot reload |
 
 ### Dependencies between modules: none
 

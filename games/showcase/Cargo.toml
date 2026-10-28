@@ -29,3 +29,4 @@ engine_movement.workspace = true
 engine_audio.workspace = true
 engine_softbody.workspace = true
 engine_character.workspace = true
+engine_script.workspace = true

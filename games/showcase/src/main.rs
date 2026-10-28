@@ -79,6 +79,8 @@ fn main() {
         // People with an Appearance are drawn by the character creator's module (faces that
         // blink, look around and wince); anim still poses them.
         .add_plugins(engine_character::CharacterPlugin)
+        // Luau scripts from assets/scripts, hot reloaded (the Script courtyard runs on them).
+        .add_plugins(engine_script::ScriptPlugin)
         .add_systems(Startup, build::start)
         // The showcase's `&mut World` systems run only while they have work, so the rest of
         // the frame isn't held up behind them (AGENTS.md "Let systems run side by side").

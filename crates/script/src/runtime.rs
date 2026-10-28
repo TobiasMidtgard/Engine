@@ -1,0 +1,1500 @@
+//! The script runtime: one Luau VM, the script files it loaded, the script instances on
+//! entities, the task scheduler and hot reload.
+//!
+//! The runner systems take [`ScriptRuntime`] out of the world for the length of their run and
+//! lend the world to the VM (`access`). Lua callbacks reach shared bookkeeping (new tasks,
+//! messages, errors, the file table for `require`) through the VM's app data, so nothing here is
+//! borrowed while Lua code runs.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::{Instant, SystemTime};
+
+use bevy_ecs::change_detection::Tick;
+use bevy_ecs::prelude::*;
+use engine_core::prelude::{LocalTimeScale, Name, Time};
+use engine_core::registry::ApiRegistry;
+use mlua::{Function, Lua, MultiValue, RegistryKey, Table, Thread, Value, Variadic};
+
+use crate::access::{
+    KEEP_LINES, NewTask, Shared, Watchdog, lend_world, push_error, shared, with_world,
+};
+use crate::convert::{to_lua, to_lua_like};
+use crate::entity::{EntityRef, SELVES};
+use crate::{Script, ScriptSettings};
+
+/// Registry name of the class every instance inherits helpers from (`every`, `after`, `spawn`).
+const BASE: &str = "engine_script.base";
+
+/// Hooks a script's class defines, looked up when it loads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Hooks {
+    pub start: bool,
+    pub update: bool,
+    pub fixed_update: bool,
+    pub on_interact: bool,
+    pub on_contact: bool,
+    pub on_message: bool,
+    pub on_reload: bool,
+    pub on_props: bool,
+    pub on_destroy: bool,
+    /// `reload = "restart"`: hot reload restarts instances instead of keeping their state.
+    pub restart_on_reload: bool,
+}
+
+impl Hooks {
+    fn of(class: &Table) -> Self {
+        let has = |name: &str| matches!(class.raw_get::<Value>(name), Ok(Value::Function(_)));
+        Self {
+            start: has("start"),
+            update: has("update"),
+            fixed_update: has("fixed_update"),
+            on_interact: has("on_interact"),
+            on_contact: has("on_contact"),
+            on_message: has("on_message"),
+            on_reload: has("on_reload"),
+            on_props: has("on_props"),
+            on_destroy: has("on_destroy"),
+            restart_on_reload: matches!(
+                class.raw_get::<Value>("reload"),
+                Ok(Value::String(s)) if s.to_str().is_ok_and(|s| &*s == "restart")
+            ),
+        }
+    }
+}
+
+/// Whether a file is a script (returns a class, runs on entities) or a module (`require`d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileKind {
+    Script,
+    Module,
+}
+
+/// One `.luau` file the runtime loaded.
+pub(crate) struct FileState {
+    pub kind: FileKind,
+    pub full: PathBuf,
+    stamp: Option<(SystemTime, u64)>,
+    pub source: String,
+    /// The class table (scripts) or the returned value (modules). Kept across reloads: a
+    /// reload copies the new class into the same table, so everything holding it sees new code.
+    value: Option<RegistryKey>,
+    /// Instances' metatable: `{ __index = class }`.
+    meta: Option<RegistryKey>,
+    pub hooks: Hooks,
+    pub error: Option<String>,
+    /// Bumps on every successful load.
+    pub version: u32,
+}
+
+/// Every file loaded, by path relative to the scripts folder (`showcase/lantern.luau`).
+#[derive(Default)]
+pub(crate) struct Files {
+    pub root: PathBuf,
+    pub map: BTreeMap<String, FileState>,
+}
+
+/// A script running on one entity.
+pub(crate) struct Instance {
+    pub path: String,
+    this: RegistryKey,
+    pub started: bool,
+    pub enabled: bool,
+    /// Seconds on this instance's clock (world time scaled by its entity's LocalTimeScale).
+    pub clock: f64,
+    synced: Tick,
+    pub hooks: Hooks,
+    pub last_error: Option<String>,
+    pub errors: u32,
+    /// Milliseconds spent in this script last frame (smoothed).
+    pub ms: f32,
+}
+
+struct Task {
+    thread: Thread,
+    owner: Option<Entity>,
+    wake_at: f64,
+    since: f64,
+    /// Hasn't run yet (started with `task.delay` or `task.defer`).
+    fresh: bool,
+}
+
+/// The scripting VM and everything running in it. A resource; see the crate docs.
+#[derive(Resource)]
+pub struct ScriptRuntime {
+    pub(crate) lua: Lua,
+    watchdog: Watchdog,
+    pub(crate) instances: BTreeMap<Entity, Instance>,
+    tasks: Vec<Task>,
+    next_poll: Option<Instant>,
+    /// Milliseconds the scripts took last frame.
+    pub(crate) frame_ms: f32,
+    /// Interact and contact messages read so far.
+    interact_cursor: Option<bevy_ecs::message::MessageCursor<engine_world::Interact>>,
+    contact_cursor: Option<bevy_ecs::message::MessageCursor<engine_world::physics::ContactEvent>>,
+    pub(crate) reloads: u32,
+}
+
+/// Normalizes a script path: forward slashes, no leading `./` or `/`, `.luau` added when it has
+/// no extension.
+pub fn normalize(path: &str) -> String {
+    let mut p = path.trim().replace('\\', "/");
+    while let Some(rest) = p.strip_prefix("./") {
+        p = rest.to_string();
+    }
+    let p = p.trim_start_matches('/').to_string();
+    let file = p.rsplit('/').next().unwrap_or("");
+    if file.contains('.') {
+        p
+    } else {
+        format!("{p}.luau")
+    }
+}
+
+fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+impl ScriptRuntime {
+    /// A fresh VM with the engine's globals, reading scripts from `root`.
+    pub fn new(api: &ApiRegistry, root: PathBuf, settings: &ScriptSettings) -> mlua::Result<Self> {
+        let lua = Lua::new();
+        lua.set_memory_limit(settings.memory_limit_mb as usize * 1024 * 1024)?;
+        lua.set_app_data(Shared::default());
+        lua.set_app_data(Files {
+            root,
+            map: BTreeMap::new(),
+        });
+        lua.set_named_registry_value(SELVES, lua.create_table()?)?;
+
+        crate::math::install(&lua)?;
+        crate::entity::install(&lua)?;
+        crate::bind::install(&lua, api)?;
+        install_tasks(&lua)?;
+        install_require(&lua)?;
+        let watchdog = Watchdog::new();
+        watchdog.install(&lua)?;
+        let g = lua.globals();
+        lua.load(include_str!("prelude.luau"))
+            .set_name("@engine/prelude.luau")
+            .exec()?;
+        let base: Table = g.get("__script_base")?;
+        lua.set_named_registry_value(BASE, base)?;
+        for internal in [
+            "__script_base",
+            "__task_spawn",
+            "__task_delay",
+            "__task_cancel",
+            "__script_stopped",
+        ] {
+            g.raw_set(internal, Value::Nil)?;
+        }
+        // Read-only libraries and globals; each script gets its own global table (below).
+        lua.sandbox(true)?;
+        Ok(Self {
+            lua,
+            watchdog,
+            instances: BTreeMap::new(),
+            tasks: Vec::new(),
+            next_poll: None,
+            frame_ms: 0.0,
+            interact_cursor: None,
+            contact_cursor: None,
+            reloads: 0,
+        })
+    }
+
+    /// The scripts folder (absolute).
+    pub fn root(&self) -> PathBuf {
+        self.lua
+            .app_data_ref::<Files>()
+            .map(|f| f.root.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn files(&self) -> mlua::AppDataRef<'_, Files> {
+        self.lua
+            .app_data_ref::<Files>()
+            .expect("files are installed")
+    }
+
+    /// Number of live tasks.
+    pub fn task_count(&self) -> usize {
+        self.tasks.len()
+    }
+
+    /// Recent errors, oldest first.
+    pub fn errors(&self) -> Vec<crate::access::ScriptError> {
+        shared(&self.lua).errors.iter().cloned().collect()
+    }
+
+    /// Recent `print` output, oldest first.
+    pub fn log(&self) -> Vec<String> {
+        shared(&self.lua).log.iter().cloned().collect()
+    }
+
+    /// Source and version of a loaded file, if it is loaded.
+    pub fn file_source(&self, path: &str) -> Option<(String, u32)> {
+        let path = normalize(path);
+        self.files()
+            .map
+            .get(&path)
+            .map(|f| (f.source.clone(), f.version))
+    }
+
+    /// Loads `path` now (or returns the error that kept it from loading). Scripts load on their
+    /// own when an entity gets a `Script`; this is for tools.
+    pub fn ensure_loaded(&mut self, world: &mut World, path: &str) -> Result<(), String> {
+        let path = normalize(path);
+        let _lent = lend_world(&self.lua, world);
+        load_file(&self.lua, &self.watchdog, &path, FileKind::Script)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    // ------------------------------------------------------------------------- the frame
+
+    /// One frame's script work (`Update`): hot reload, instances, events, `update`, tasks.
+    pub(crate) fn run_frame(&mut self, world: &mut World, settings: &ScriptSettings) {
+        let started = Instant::now();
+        let now = world.resource::<Time>().elapsed_secs_f64();
+        shared(&self.lua).world_secs = now;
+        let world_ptr: *mut World = world;
+        let _lent = lend_world(&self.lua, world_ptr);
+        // SAFETY (for every `unsafe { &mut *world_ptr }` below): the runner owns the world for
+        // this call; borrows taken here end before any call into Lua, whose callbacks borrow it
+        // through the same pointer (`access::with_world`).
+        let w = || unsafe { &mut *world_ptr };
+
+        if settings.hot_reload {
+            let due = self.next_poll.is_none_or(|t| Instant::now() >= t);
+            if due {
+                self.next_poll =
+                    Some(Instant::now() + std::time::Duration::from_secs_f32(settings.poll_secs));
+                self.poll_files(w(), settings);
+            }
+        }
+        self.sync_instances(w(), settings);
+        self.advance_clocks(w());
+        self.deliver_interactions(w(), settings);
+        self.deliver_contacts(w(), settings);
+        self.deliver_messages(settings);
+
+        let updating: Vec<Entity> = self
+            .instances
+            .iter()
+            .filter(|(_, i)| i.enabled && i.started && i.hooks.update)
+            .map(|(e, _)| *e)
+            .collect();
+        for e in updating {
+            let dt_e = {
+                let w = w();
+                w.resource::<Time>().delta_for(w.get::<LocalTimeScale>(e)) as f64
+            };
+            let t0 = Instant::now();
+            self.call_hook(e, "update", dt_e, settings);
+            if let Some(i) = self.instances.get_mut(&e) {
+                let ms = t0.elapsed().as_secs_f32() * 1000.0;
+                i.ms = i.ms * 0.9 + ms * 0.1;
+            }
+        }
+        self.run_tasks(now, settings);
+        self.frame_ms = started.elapsed().as_secs_f32() * 1000.0;
+    }
+
+    /// The fixed-step hook (`FixedUpdate`, `SimSet::Gameplay`).
+    pub(crate) fn run_fixed(&mut self, world: &mut World, settings: &ScriptSettings) {
+        let world_ptr: *mut World = world;
+        let _lent = lend_world(&self.lua, world_ptr);
+        let fixed: Vec<Entity> = self
+            .instances
+            .iter()
+            .filter(|(_, i)| i.enabled && i.started && i.hooks.fixed_update)
+            .map(|(e, _)| *e)
+            .collect();
+        for e in fixed {
+            // SAFETY: as in `run_frame`.
+            let w = unsafe { &*world_ptr };
+            let dt_e = w.resource::<Time>().delta_for(w.get::<LocalTimeScale>(e)) as f64;
+            self.call_hook(e, "fixed_update", dt_e, settings);
+        }
+    }
+
+    /// True when any instance wants the fixed-step hook.
+    pub(crate) fn wants_fixed(&self) -> bool {
+        self.instances.values().any(|i| i.hooks.fixed_update)
+    }
+
+    /// Each instance's clock: world seconds times its entity's `LocalTimeScale` (real seconds
+    /// for an entity that ignores world slow motion).
+    fn advance_clocks(&mut self, world: &World) {
+        let time = world.resource::<Time>();
+        for (e, i) in self.instances.iter_mut() {
+            if i.enabled {
+                i.clock += time.delta_for(world.get::<LocalTimeScale>(*e)) as f64;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------- instances
+
+    fn sync_instances(&mut self, world: &mut World, settings: &ScriptSettings) {
+        let this_run = world.change_tick();
+        let mut seen: Vec<(Entity, Option<Script>, Tick)> = Vec::new();
+        {
+            let mut q = world.query::<(Entity, Ref<Script>)>();
+            for (e, s) in q.iter(world) {
+                let changed = match self.instances.get(&e) {
+                    None => true,
+                    Some(i) => s.last_changed().is_newer_than(i.synced, this_run),
+                };
+                seen.push((e, changed.then(|| Script::clone(&s)), s.last_changed()));
+            }
+        }
+        let live: std::collections::HashSet<Entity> = seen.iter().map(|(e, _, _)| *e).collect();
+        let gone: Vec<Entity> = self
+            .instances
+            .keys()
+            .filter(|e| !live.contains(e))
+            .copied()
+            .collect();
+        for e in gone {
+            self.destroy_instance(e, settings);
+        }
+        for (e, script, tick) in seen {
+            let Some(script) = script else { continue };
+            let path = normalize(&script.path);
+            match self.instances.get(&e) {
+                Some(i) if i.path == path => {
+                    let props_changed = self.update_props(e, &script);
+                    if let Some(i) = self.instances.get_mut(&e) {
+                        i.enabled = script.enabled;
+                        i.synced = tick;
+                        if props_changed && i.hooks.on_props {
+                            self.call_hook(e, "on_props", (), settings);
+                        }
+                    }
+                }
+                Some(_) => {
+                    self.destroy_instance(e, settings);
+                    self.create_instance(e, &script, tick, settings);
+                }
+                None => self.create_instance(e, &script, tick, settings),
+            }
+        }
+    }
+
+    /// Makes `self` for a script on `e` and starts it.
+    fn create_instance(
+        &mut self,
+        e: Entity,
+        script: &Script,
+        tick: Tick,
+        settings: &ScriptSettings,
+    ) {
+        let path = normalize(&script.path);
+        let loaded = {
+            let files = self.files();
+            files
+                .map
+                .get(&path)
+                .filter(|f| f.value.is_some())
+                .map(|f| f.hooks)
+        };
+        let hooks = match loaded {
+            Some(h) => h,
+            None => match load_file(&self.lua, &self.watchdog, &path, FileKind::Script) {
+                Ok(h) => h,
+                Err(err) => {
+                    // Still tracked, so fixing the file starts it.
+                    push_error(&self.lua, Some(&path), Some(e), &err.to_string());
+                    self.instances
+                        .insert(e, self.placeholder(path, script, tick, &err));
+                    return;
+                }
+            },
+        };
+        match self.make_self(e, &path, script) {
+            Ok(this) => {
+                self.instances.insert(
+                    e,
+                    Instance {
+                        path: path.clone(),
+                        this,
+                        started: false,
+                        enabled: script.enabled,
+                        clock: 0.0,
+                        synced: tick,
+                        hooks,
+                        last_error: None,
+                        errors: 0,
+                        ms: 0.0,
+                    },
+                );
+                self.start_instance(e, settings);
+            }
+            Err(err) => {
+                push_error(&self.lua, Some(&path), Some(e), &err.to_string());
+                self.instances
+                    .insert(e, self.placeholder(path, script, tick, &err));
+            }
+        }
+    }
+
+    /// An instance whose script didn't load: no hooks until a reload succeeds.
+    fn placeholder(
+        &self,
+        path: String,
+        script: &Script,
+        tick: Tick,
+        err: &mlua::Error,
+    ) -> Instance {
+        Instance {
+            path,
+            this: self
+                .lua
+                .create_registry_value(Value::Nil)
+                .expect("a nil registry value"),
+            started: false,
+            enabled: script.enabled,
+            clock: 0.0,
+            synced: tick,
+            hooks: Hooks::default(),
+            last_error: Some(err.to_string()),
+            errors: 1,
+            ms: 0.0,
+        }
+    }
+
+    fn make_self(&self, e: Entity, path: &str, script: &Script) -> mlua::Result<RegistryKey> {
+        let lua = &self.lua;
+        let (class, meta): (Table, Table) = {
+            let files = self.files();
+            let f = files
+                .map
+                .get(path)
+                .ok_or_else(|| mlua::Error::runtime("script not loaded"))?;
+            (
+                lua.registry_value(f.value.as_ref().expect("loaded"))?,
+                lua.registry_value(f.meta.as_ref().expect("loaded"))?,
+            )
+        };
+        let this = lua.create_table()?;
+        this.raw_set("entity", EntityRef(e))?;
+        this.raw_set("props", props_table(lua, &class, &script.props)?)?;
+        this.set_metatable(Some(meta))?;
+        let selves: Table = lua.named_registry_value(SELVES)?;
+        selves.raw_set(e.to_bits() as f64, this.clone())?;
+        lua.create_registry_value(this)
+    }
+
+    /// Re-reads `props` from the component; true when they changed.
+    fn update_props(&mut self, e: Entity, script: &Script) -> bool {
+        let Some(i) = self.instances.get(&e) else {
+            return false;
+        };
+        let Ok(Value::Table(this)) = self.lua.registry_value::<Value>(&i.this) else {
+            return false;
+        };
+        let class = {
+            let files = self.files();
+            files
+                .map
+                .get(&i.path)
+                .and_then(|f| f.value.as_ref())
+                .and_then(|k| self.lua.registry_value::<Table>(k).ok())
+        };
+        let Some(class) = class else { return false };
+        match props_table(&self.lua, &class, &script.props) {
+            Ok(p) => this.raw_set("props", p).is_ok(),
+            Err(_) => false,
+        }
+    }
+
+    fn start_instance(&mut self, e: Entity, settings: &ScriptSettings) {
+        let Some(i) = self.instances.get_mut(&e) else {
+            return;
+        };
+        i.started = true;
+        if !i.hooks.start {
+            return;
+        }
+        let path = i.path.clone();
+        let this: Value = match self.lua.registry_value(&i.this) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let start: Function = match &this {
+            Value::Table(t) => match t.get("start") {
+                Ok(f) => f,
+                Err(_) => return,
+            },
+            _ => return,
+        };
+        // `start` runs as a task, so it may wait.
+        match self.lua.create_thread(start) {
+            Ok(thread) => self.resume(thread, Some(e), &path, (this,), settings),
+            Err(err) => push_error(&self.lua, Some(&path), Some(e), &err.to_string()),
+        }
+        self.adopt_new_tasks();
+    }
+
+    fn destroy_instance(&mut self, e: Entity, settings: &ScriptSettings) {
+        let Some(i) = self.instances.get(&e) else {
+            return;
+        };
+        if i.hooks.on_destroy && i.started {
+            self.call_hook(e, "on_destroy", (), settings);
+        }
+        self.tasks.retain(|t| t.owner != Some(e));
+        if let Some(i) = self.instances.remove(&e) {
+            let _ = self.lua.remove_registry_value(i.this);
+        }
+        if let Ok(selves) = self.lua.named_registry_value::<Table>(SELVES) {
+            let _ = selves.raw_set(e.to_bits() as f64, Value::Nil);
+        }
+    }
+
+    /// Restarts the script on `e` from scratch (fresh `self`, `start` again).
+    pub(crate) fn restart(&mut self, world: &mut World, e: Entity, settings: &ScriptSettings) {
+        let world_ptr: *mut World = world;
+        let _lent = lend_world(&self.lua, world_ptr);
+        // From the file as it is now, even if the poller hasn't seen an edit yet.
+        // SAFETY: as in `run_frame`.
+        self.poll_files(unsafe { &mut *world_ptr }, settings);
+        self.destroy_instance(e, settings);
+        // SAFETY: as in `run_frame`.
+        let world = unsafe { &mut *world_ptr };
+        if let Some(script) = world.get::<Script>(e).cloned() {
+            let tick = world.change_tick();
+            self.create_instance(e, &script, tick, settings);
+        }
+    }
+
+    /// Calls `self:<hook>(args)` on `e`'s instance with the watchdog armed. Errors are reported
+    /// and counted; the script keeps running.
+    fn call_hook(
+        &mut self,
+        e: Entity,
+        hook: &str,
+        args: impl mlua::IntoLuaMulti,
+        settings: &ScriptSettings,
+    ) {
+        let Some(i) = self.instances.get(&e) else {
+            return;
+        };
+        let Ok(Value::Table(this)) = self.lua.registry_value::<Value>(&i.this) else {
+            return;
+        };
+        let path = i.path.clone();
+        let Ok(Value::Function(f)) = this.get::<Value>(hook) else {
+            return;
+        };
+        shared(&self.lua).owner = Some(e);
+        self.watchdog.arm(settings.call_limit_ms);
+        let result = f.call::<()>((this, args));
+        self.watchdog.disarm();
+        shared(&self.lua).owner = None;
+        if let Err(err) = result {
+            self.report(e, &path, &err);
+        }
+        self.adopt_new_tasks();
+    }
+
+    /// Runs `self:<hook>(args)` on `e`'s instance as a task of its own, so an event handler may
+    /// wait (`task.wait`) without holding up the frame or the events after it.
+    fn spawn_hook(
+        &mut self,
+        e: Entity,
+        hook: &str,
+        args: impl mlua::IntoLuaMulti,
+        settings: &ScriptSettings,
+    ) {
+        let Some(i) = self.instances.get(&e) else {
+            return;
+        };
+        let Ok(Value::Table(this)) = self.lua.registry_value::<Value>(&i.this) else {
+            return;
+        };
+        let path = i.path.clone();
+        let Ok(Value::Function(f)) = this.get::<Value>(hook) else {
+            return;
+        };
+        let mut args = match args.into_lua_multi(&self.lua) {
+            Ok(a) => a,
+            Err(err) => return self.report(e, &path, &err),
+        };
+        args.push_front(Value::Table(this));
+        match self.lua.create_thread(f) {
+            Ok(thread) => self.resume(thread, Some(e), &path, args, settings),
+            Err(err) => self.report(e, &path, &err),
+        }
+        self.adopt_new_tasks();
+    }
+
+    /// Records an error from `e`'s script, logging it once while it repeats.
+    fn report(&mut self, e: Entity, path: &str, err: &mlua::Error) {
+        let message = err.to_string();
+        if let Some(i) = self.instances.get_mut(&e) {
+            i.errors += 1;
+            if i.last_error.as_deref() == Some(message.as_str()) {
+                return;
+            }
+            i.last_error = Some(message.clone());
+        }
+        push_error(&self.lua, Some(path), Some(e), &message);
+    }
+
+    // ------------------------------------------------------------------------- events
+
+    fn deliver_interactions(&mut self, world: &mut World, settings: &ScriptSettings) {
+        let Some(messages) =
+            world.get_resource::<bevy_ecs::message::Messages<engine_world::Interact>>()
+        else {
+            return;
+        };
+        let cursor = self
+            .interact_cursor
+            .get_or_insert_with(|| messages.get_cursor_current());
+        let hits: Vec<(Entity, Entity)> =
+            cursor.read(messages).map(|m| (m.target, m.actor)).collect();
+        for (target, actor) in hits {
+            if self
+                .instances
+                .get(&target)
+                .is_some_and(|i| i.started && i.enabled && i.hooks.on_interact)
+            {
+                self.spawn_hook(target, "on_interact", EntityRef(actor), settings);
+            }
+        }
+    }
+
+    fn deliver_contacts(&mut self, world: &mut World, settings: &ScriptSettings) {
+        let Some(messages) = world
+            .get_resource::<bevy_ecs::message::Messages<engine_world::physics::ContactEvent>>()
+        else {
+            return;
+        };
+        let cursor = self
+            .contact_cursor
+            .get_or_insert_with(|| messages.get_cursor_current());
+        let wanted = self.instances.values().any(|i| i.hooks.on_contact);
+        let contacts: Vec<engine_world::physics::ContactEvent> =
+            cursor.read(messages).copied().collect();
+        if !wanted {
+            return;
+        }
+        for c in contacts {
+            for (me, other) in [(c.a, c.b), (c.b, c.a)] {
+                if !self
+                    .instances
+                    .get(&me)
+                    .is_some_and(|i| i.started && i.enabled && i.hooks.on_contact)
+                {
+                    continue;
+                }
+                let info = (|| -> mlua::Result<Table> {
+                    let t = self.lua.create_table()?;
+                    let started = matches!(c.phase, engine_world::physics::ContactPhase::Started);
+                    t.raw_set("phase", if started { "started" } else { "ended" })?;
+                    t.raw_set("point", crate::math::Vec3(c.point))?;
+                    let n = if me == c.a { c.normal } else { -c.normal };
+                    t.raw_set("normal", crate::math::Vec3(n.as_dvec3()))?;
+                    t.raw_set("impulse", c.impulse)?;
+                    t.raw_set("sensor", c.sensor)?;
+                    Ok(t)
+                })();
+                if let Ok(info) = info {
+                    self.spawn_hook(me, "on_contact", (EntityRef(other), info), settings);
+                }
+            }
+        }
+    }
+
+    fn deliver_messages(&mut self, settings: &ScriptSettings) {
+        let outbox = std::mem::take(&mut shared(&self.lua).outbox);
+        for m in outbox {
+            let Some(i) = self.instances.get(&m.to) else {
+                continue;
+            };
+            if !i.started {
+                continue;
+            }
+            let data = to_lua(&self.lua, &m.data).unwrap_or(Value::Nil);
+            if i.hooks.on_message {
+                self.spawn_hook(m.to, "on_message", (m.event, data), settings);
+            } else {
+                // A message named after one of the class's methods calls it: `door:send("open")`.
+                let has_method = self
+                    .lua
+                    .registry_value::<Value>(&i.this)
+                    .ok()
+                    .and_then(|v| match v {
+                        Value::Table(t) => t.get::<Value>(m.event.as_str()).ok(),
+                        _ => None,
+                    })
+                    .is_some_and(|v| matches!(v, Value::Function(_)));
+                if has_method {
+                    self.spawn_hook(m.to, &m.event, data, settings);
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------- tasks
+
+    fn clock_of(&self, owner: Option<Entity>, world_secs: f64) -> f64 {
+        match owner {
+            Some(e) => self.instances.get(&e).map(|i| i.clock).unwrap_or(0.0),
+            None => world_secs,
+        }
+    }
+
+    /// Moves tasks callbacks started into the schedule, and drops cancelled ones.
+    fn adopt_new_tasks(&mut self) {
+        let (new, cancelled) = {
+            let mut s = shared(&self.lua);
+            (
+                std::mem::take(&mut s.new_tasks),
+                std::mem::take(&mut s.cancelled),
+            )
+        };
+        let world_secs = shared(&self.lua).world_secs;
+        for t in new {
+            let clock = self.clock_of(t.owner, world_secs);
+            let wait = t.delay.or(t.yielded).unwrap_or(0.0).max(0.0);
+            if let Some(args) = t.args {
+                // Arguments for a delayed task's first run, kept with its thread.
+                let _ = t.thread.set_named_registry_args(&self.lua, args);
+            }
+            self.tasks.push(Task {
+                thread: t.thread,
+                owner: t.owner,
+                wake_at: clock + wait,
+                since: clock,
+                fresh: t.yielded.is_none(),
+            });
+        }
+        if !cancelled.is_empty() {
+            self.tasks.retain(|t| !cancelled.contains(&t.thread));
+        }
+    }
+
+    /// Resumes the tasks whose wait is over, each once a frame at most (a task that waits 0
+    /// seconds comes back next frame). Tasks started during the pass with `task.defer` or
+    /// `task.delay(0)` run in it too, up to a limit, so a chain of defers can't stall the frame.
+    fn run_tasks(&mut self, world_secs: f64, settings: &ScriptSettings) {
+        let mut ran = 0usize;
+        let mut first_pass = true;
+        loop {
+            let mut due = Vec::new();
+            let mut i = 0;
+            while i < self.tasks.len() {
+                let t = &self.tasks[i];
+                let paused = t
+                    .owner
+                    .is_some_and(|e| self.instances.get(&e).is_none_or(|i| !i.enabled));
+                let clock = self.clock_of(t.owner, world_secs);
+                if paused || clock < t.wake_at || !(first_pass || t.fresh) {
+                    i += 1;
+                    continue;
+                }
+                due.push(self.tasks.swap_remove(i));
+            }
+            if due.is_empty() {
+                break;
+            }
+            // In the order they were due, so the same scripts run the same way every time.
+            due.sort_by(|a, b| a.wake_at.total_cmp(&b.wake_at));
+            for t in due {
+                let clock = self.clock_of(t.owner, world_secs);
+                let path = t
+                    .owner
+                    .and_then(|e| self.instances.get(&e))
+                    .map(|i| i.path.clone())
+                    .unwrap_or_else(|| "console".into());
+                match take_task_args(&self.lua, &t.thread) {
+                    Some(args) => self.resume(t.thread, t.owner, &path, args, settings),
+                    None => self.resume(t.thread, t.owner, &path, clock - t.since, settings),
+                }
+                self.adopt_new_tasks();
+                ran += 1;
+            }
+            first_pass = false;
+            if ran > 10_000 {
+                break;
+            }
+        }
+    }
+
+    /// Resumes `thread` for `owner`; schedules it again when it waits.
+    fn resume(
+        &mut self,
+        thread: Thread,
+        owner: Option<Entity>,
+        path: &str,
+        args: impl mlua::IntoLuaMulti,
+        settings: &ScriptSettings,
+    ) {
+        shared(&self.lua).owner = owner;
+        self.watchdog.arm(settings.call_limit_ms);
+        let result = thread.resume::<MultiValue>(args);
+        self.watchdog.disarm();
+        shared(&self.lua).owner = None;
+        match result {
+            Ok(values) => {
+                if thread.is_resumable() {
+                    let wait = wait_secs(&values);
+                    let world_secs = shared(&self.lua).world_secs;
+                    let clock = self.clock_of(owner, world_secs);
+                    self.tasks.push(Task {
+                        thread,
+                        owner,
+                        wake_at: clock + wait,
+                        since: clock,
+                        fresh: false,
+                    });
+                }
+            }
+            Err(err) => match owner {
+                Some(e) => self.report(e, path, &err),
+                None => push_error(&self.lua, Some(path), None, &err.to_string()),
+            },
+        }
+    }
+
+    // ------------------------------------------------------------------------- hot reload
+
+    /// Checks every loaded file's modification time and reloads those that changed.
+    fn poll_files(&mut self, world: &mut World, settings: &ScriptSettings) {
+        let _ = world;
+        let changed: Vec<String> = {
+            let mut files = self
+                .lua
+                .app_data_mut::<Files>()
+                .expect("files are installed");
+            let mut out = Vec::new();
+            for (path, f) in files.map.iter_mut() {
+                let now = stamp(&f.full);
+                if now.is_some() && now != f.stamp {
+                    f.stamp = now;
+                    out.push(path.clone());
+                }
+            }
+            out
+        };
+        for path in changed {
+            self.reload(&path, settings, false);
+        }
+    }
+
+    /// Reloads one file (and what depends on it). `force` reloads even when the text is the
+    /// same.
+    pub(crate) fn reload(&mut self, path: &str, settings: &ScriptSettings, force: bool) {
+        let path = normalize(path);
+        let (full, kind, old_source) = {
+            let files = self.files();
+            match files.map.get(&path) {
+                Some(f) => (f.full.clone(), f.kind, f.source.clone()),
+                None => return,
+            }
+        };
+        let source = match std::fs::read_to_string(&full) {
+            Ok(s) => s,
+            Err(err) => {
+                let msg =
+                    format!("{path}: can't read the file ({err}); the old version keeps running");
+                push_error(&self.lua, Some(&path), None, &msg);
+                return;
+            }
+        };
+        if source == old_source && !force {
+            return;
+        }
+        match eval_file(&self.lua, &self.watchdog, &path, &source, kind) {
+            Ok(value) => {
+                self.reloads += 1;
+                let hooks = match swap_in(&self.lua, &path, value, source) {
+                    Ok(h) => h,
+                    Err(err) => {
+                        push_error(&self.lua, Some(&path), None, &err.to_string());
+                        return;
+                    }
+                };
+                tracing::info!(target: "script", "reloaded {path}");
+                match kind {
+                    FileKind::Script => self.refresh_instances(&path, hooks, settings),
+                    FileKind::Module => {
+                        let users: Vec<String> = shared(&self.lua)
+                            .required_by
+                            .iter()
+                            .filter(|(m, _)| *m == path)
+                            .map(|(_, by)| by.clone())
+                            .collect();
+                        for by in users {
+                            self.reload(&by, settings, true);
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                let message = format!("{err}\n(the previous version of {path} keeps running)");
+                if let Some(f) = self
+                    .lua
+                    .app_data_mut::<Files>()
+                    .expect("files")
+                    .map
+                    .get_mut(&path)
+                {
+                    f.error = Some(message.clone());
+                    f.source = source;
+                }
+                push_error(&self.lua, Some(&path), None, &message);
+            }
+        }
+    }
+
+    /// After a script's class changed: new hooks, new default props, `on_reload` (or a restart).
+    fn refresh_instances(&mut self, path: &str, hooks: Hooks, settings: &ScriptSettings) {
+        let users: Vec<Entity> = self
+            .instances
+            .iter()
+            .filter(|(_, i)| i.path == path)
+            .map(|(e, _)| *e)
+            .collect();
+        for e in users {
+            let placeholder = self.instances.get(&e).is_some_and(|i| !i.started);
+            if hooks.restart_on_reload || placeholder {
+                let script = with_world(&self.lua, |w| Ok(w.get::<Script>(e).cloned()))
+                    .ok()
+                    .flatten();
+                self.destroy_instance(e, settings);
+                if let Some(script) = script {
+                    let tick = with_world(&self.lua, |w| Ok(w.change_tick())).unwrap_or_default();
+                    self.create_instance(e, &script, tick, settings);
+                }
+                continue;
+            }
+            if let Some(i) = self.instances.get_mut(&e) {
+                i.hooks = hooks;
+                i.last_error = None;
+            }
+            self.merge_default_props(e);
+            if hooks.on_reload {
+                self.call_hook(e, "on_reload", (), settings);
+            }
+        }
+    }
+
+    /// Takes the props this instance doesn't override (in its `Script::props`) from the new
+    /// version's defaults, so a default edited in the file shows at once. State belongs in
+    /// `self` fields, which a reload keeps.
+    fn merge_default_props(&self, e: Entity) {
+        let Some(i) = self.instances.get(&e) else {
+            return;
+        };
+        let (Ok(Value::Table(this)), Some(class)) = (
+            self.lua.registry_value::<Value>(&i.this),
+            self.files()
+                .map
+                .get(&i.path)
+                .and_then(|f| f.value.as_ref())
+                .and_then(|k| self.lua.registry_value::<Table>(k).ok()),
+        ) else {
+            return;
+        };
+        let (Ok(Value::Table(defaults)), Ok(Value::Table(props))) = (
+            class.raw_get::<Value>("props"),
+            this.raw_get::<Value>("props"),
+        ) else {
+            return;
+        };
+        let overrides = with_world(&self.lua, |w| {
+            Ok(w.get::<Script>(e).map(|s| s.props.clone()))
+        })
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        for (k, v) in defaults.pairs::<Value, Value>().flatten() {
+            let overridden = match &k {
+                Value::String(name) => name
+                    .to_str()
+                    .is_ok_and(|name| overrides.get(&*name).is_some()),
+                _ => false,
+            };
+            if !overridden {
+                let _ = props.raw_set(k, deep_copy(&self.lua, &v).unwrap_or(v));
+            }
+        }
+    }
+
+    /// Runs a snippet as the console: with the world, outside any script instance. Tasks it
+    /// starts run on world time.
+    pub(crate) fn eval(
+        &mut self,
+        world: &mut World,
+        code: &str,
+        settings: &ScriptSettings,
+    ) -> Result<serde_json::Value, String> {
+        let world_ptr: *mut World = world;
+        let _lent = lend_world(&self.lua, world_ptr);
+        let env = script_env(&self.lua).map_err(|e| e.to_string())?;
+        let chunk_src = if code.trim_start().starts_with("return") || code.contains('\n') {
+            code.to_string()
+        } else {
+            // A bare expression: show its value, like a REPL.
+            format!("return {code}")
+        };
+        let func = match self
+            .lua
+            .load(&chunk_src)
+            .set_name("@console")
+            .set_environment(env.clone())
+            .into_function()
+        {
+            Ok(f) => f,
+            Err(_) => self
+                .lua
+                .load(code)
+                .set_name("@console")
+                .set_environment(env)
+                .into_function()
+                .map_err(|e| e.to_string())?,
+        };
+        let thread = self.lua.create_thread(func).map_err(|e| e.to_string())?;
+        self.watchdog.arm(settings.call_limit_ms);
+        let result = thread.resume::<MultiValue>(());
+        self.watchdog.disarm();
+        let out = match result {
+            Ok(values) => {
+                if thread.is_resumable() {
+                    let wait = wait_secs(&values);
+                    let now = shared(&self.lua).world_secs;
+                    self.tasks.push(Task {
+                        thread,
+                        owner: None,
+                        wake_at: now + wait,
+                        since: now,
+                        fresh: false,
+                    });
+                    Ok(serde_json::json!({"waiting": true}))
+                } else {
+                    let list: Vec<serde_json::Value> = values
+                        .iter()
+                        .map(|v| {
+                            crate::convert::to_json(v)
+                                .unwrap_or_else(|_| serde_json::json!(crate::bind::display(v)))
+                        })
+                        .collect();
+                    Ok(match list.len() {
+                        0 => serde_json::Value::Null,
+                        1 => list.into_iter().next().unwrap_or_default(),
+                        _ => serde_json::Value::Array(list),
+                    })
+                }
+            }
+            Err(e) => Err(e.to_string()),
+        };
+        self.adopt_new_tasks();
+        out
+    }
+
+    /// The JSON summary `script.list` returns.
+    pub(crate) fn describe(&self, world: &World) -> serde_json::Value {
+        let files = self.files();
+        let file_list: Vec<serde_json::Value> = files
+            .map
+            .iter()
+            .map(|(path, f)| {
+                let users = self.instances.values().filter(|i| i.path == *path).count();
+                serde_json::json!({
+                    "path": path,
+                    "kind": match f.kind { FileKind::Script => "script", FileKind::Module => "module" },
+                    "version": f.version,
+                    "error": f.error,
+                    "instances": users,
+                })
+            })
+            .collect();
+        let instances: Vec<serde_json::Value> = self
+            .instances
+            .iter()
+            .map(|(e, i)| {
+                serde_json::json!({
+                    "entity": e.to_bits(),
+                    "name": world.get::<Name>(*e).map(|n| n.as_str().to_string()),
+                    "path": i.path,
+                    "enabled": i.enabled,
+                    "running": i.started,
+                    "clock_secs": i.clock,
+                    "ms": i.ms,
+                    "errors": i.errors,
+                    "last_error": i.last_error,
+                    "tasks": self.tasks.iter().filter(|t| t.owner == Some(*e)).count(),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "root": files.root.display().to_string(),
+            "files": file_list,
+            "instances": instances,
+            "tasks": self.tasks.len(),
+            "frame_ms": self.frame_ms,
+            "reloads": self.reloads,
+            "memory_kb": self.lua.used_memory() / 1024,
+        })
+    }
+}
+
+/// Seconds a task asked to wait (`task.wait` yields `"wait", seconds`); anything else waits a
+/// frame.
+fn wait_secs(values: &MultiValue) -> f64 {
+    let mut it = values.iter();
+    match (it.next(), it.next()) {
+        (Some(Value::String(s)), Some(v)) if s.to_str().is_ok_and(|s| &*s == "wait") => match v {
+            Value::Integer(i) => *i as f64,
+            Value::Number(n) => *n,
+            _ => 0.0,
+        },
+        _ => 0.0,
+    }
+}
+
+/// A new global table for one script: reads fall through to the shared (read-only) globals,
+/// writes stay in the script.
+fn script_env(lua: &Lua) -> mlua::Result<Table> {
+    let env = lua.create_table()?;
+    let meta = lua.create_table()?;
+    meta.raw_set("__index", lua.globals())?;
+    env.set_metatable(Some(meta))?;
+    Ok(env)
+}
+
+/// Compiles and runs `source` as `path`, returning what it returns.
+fn eval_file(
+    lua: &Lua,
+    watchdog: &Watchdog,
+    path: &str,
+    source: &str,
+    kind: FileKind,
+) -> mlua::Result<Value> {
+    let env = script_env(lua)?;
+    shared(lua).loading.push(path.to_string());
+    watchdog.arm(1000.0);
+    let result = lua
+        .load(source)
+        .set_name(format!("@{path}"))
+        .set_environment(env)
+        .eval::<Value>();
+    watchdog.disarm();
+    shared(lua).loading.pop();
+    let value = result?;
+    if kind == FileKind::Script && !matches!(value, Value::Table(_)) {
+        return Err(mlua::Error::runtime(format!(
+            "{path} must end by returning its class table, e.g. `return Lantern` (it returned {})",
+            value.type_name()
+        )));
+    }
+    Ok(value)
+}
+
+/// Loads `path` for the first time; returns its hooks.
+fn load_file(lua: &Lua, watchdog: &Watchdog, path: &str, kind: FileKind) -> mlua::Result<Hooks> {
+    let full = {
+        let files = lua.app_data_ref::<Files>().expect("files");
+        if let Some(f) = files.map.get(path)
+            && f.value.is_some()
+        {
+            return Ok(f.hooks);
+        }
+        files.root.join(path)
+    };
+    let source = std::fs::read_to_string(&full).map_err(|err| {
+        mlua::Error::runtime(format!(
+            "can't read script {path} ({err}); scripts live in {}",
+            full.parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        ))
+    })?;
+    {
+        let mut files = lua.app_data_mut::<Files>().expect("files");
+        files.map.entry(path.to_string()).or_insert(FileState {
+            kind,
+            full: full.clone(),
+            stamp: stamp(&full),
+            source: source.clone(),
+            value: None,
+            meta: None,
+            hooks: Hooks::default(),
+            error: None,
+            version: 0,
+        });
+    }
+    match eval_file(lua, watchdog, path, &source, kind) {
+        Ok(value) => swap_in(lua, path, value, source),
+        Err(err) => {
+            if let Some(f) = lua
+                .app_data_mut::<Files>()
+                .expect("files")
+                .map
+                .get_mut(path)
+            {
+                f.error = Some(err.to_string());
+            }
+            Err(err)
+        }
+    }
+}
+
+/// Stores a freshly evaluated value for `path`. A table that replaces a table is copied into the
+/// old one, so instances, metatables and other scripts' `require`s see the new code.
+fn swap_in(lua: &Lua, path: &str, value: Value, source: String) -> mlua::Result<Hooks> {
+    let old: Option<Value> = {
+        let files = lua.app_data_ref::<Files>().expect("files");
+        files
+            .map
+            .get(path)
+            .and_then(|f| f.value.as_ref())
+            .map(|k| lua.registry_value::<Value>(k))
+            .transpose()?
+    };
+    let kept = match (old, &value) {
+        (Some(Value::Table(old)), Value::Table(new)) if !old.is_readonly() => {
+            let keys: Vec<Value> = old
+                .pairs::<Value, Value>()
+                .filter_map(|p| p.ok().map(|(k, _)| k))
+                .collect();
+            for k in keys {
+                old.raw_set(k, Value::Nil)?;
+            }
+            for pair in new.pairs::<Value, Value>() {
+                let (k, v) = pair?;
+                old.raw_set(k, v)?;
+            }
+            Value::Table(old)
+        }
+        _ => value,
+    };
+    let hooks = match &kept {
+        Value::Table(class) => {
+            if class.metatable().is_none() {
+                let base: Table = lua.named_registry_value(BASE)?;
+                class.set_metatable(Some(base))?;
+            }
+            Hooks::of(class)
+        }
+        _ => Hooks::default(),
+    };
+    let mut files = lua.app_data_mut::<Files>().expect("files");
+    let f = files
+        .map
+        .get_mut(path)
+        .ok_or_else(|| mlua::Error::runtime("file vanished"))?;
+    if f.meta.is_none()
+        && let Value::Table(class) = &kept
+    {
+        let meta = lua.create_table()?;
+        meta.raw_set("__index", class.clone())?;
+        f.meta = Some(lua.create_registry_value(meta)?);
+    }
+    let key = lua.create_registry_value(kept)?;
+    if let Some(old) = f.value.replace(key) {
+        let _ = lua.remove_registry_value(old);
+    }
+    f.source = source;
+    f.error = None;
+    f.version += 1;
+    f.hooks = hooks;
+    Ok(hooks)
+}
+
+/// A copy of a props default, so instances don't share one table.
+fn deep_copy(lua: &Lua, v: &Value) -> mlua::Result<Value> {
+    match v {
+        Value::Table(t) => {
+            let c = lua.create_table()?;
+            for pair in t.pairs::<Value, Value>() {
+                let (k, v) = pair?;
+                c.raw_set(k, deep_copy(lua, &v)?)?;
+            }
+            Ok(Value::Table(c))
+        }
+        other => Ok(other.clone()),
+    }
+}
+
+/// `self.props`: the class's `props` defaults with the component's values over them.
+fn props_table(lua: &Lua, class: &Table, overrides: &serde_json::Value) -> mlua::Result<Table> {
+    let defaults = match class.raw_get::<Value>("props")? {
+        Value::Table(t) => t,
+        _ => lua.create_table()?,
+    };
+    let props = match deep_copy(lua, &Value::Table(defaults.clone()))? {
+        Value::Table(t) => t,
+        _ => lua.create_table()?,
+    };
+    if let serde_json::Value::Object(map) = overrides {
+        for (k, v) in map {
+            let d: Value = defaults.raw_get(k.as_str())?;
+            props.raw_set(k.as_str(), to_lua_like(lua, v, &d)?)?;
+        }
+    }
+    Ok(props)
+}
+
+// ------------------------------------------------------------------------- task functions
+
+/// Arguments for a delayed task's first run.
+trait TaskArgs {
+    fn set_named_registry_args(&self, lua: &Lua, args: RegistryKey) -> mlua::Result<()>;
+}
+
+/// Registry table: thread → packed first-run arguments.
+const TASK_ARGS: &str = "engine_script.task_args";
+
+impl TaskArgs for Thread {
+    fn set_named_registry_args(&self, lua: &Lua, args: RegistryKey) -> mlua::Result<()> {
+        let table: Table = match lua.named_registry_value::<Value>(TASK_ARGS)? {
+            Value::Table(t) => t,
+            _ => {
+                let t = lua.create_table()?;
+                // Weak keys: a cancelled task's arguments go with it.
+                let meta = lua.create_table()?;
+                meta.raw_set("__mode", "k")?;
+                t.set_metatable(Some(meta))?;
+                lua.set_named_registry_value(TASK_ARGS, t.clone())?;
+                t
+            }
+        };
+        let packed: Value = lua.registry_value(&args)?;
+        lua.remove_registry_value(args)?;
+        table.raw_set(self.clone(), packed)
+    }
+}
+
+/// The packed arguments a delayed task was given, removed once taken.
+fn take_task_args(lua: &Lua, thread: &Thread) -> Option<MultiValue> {
+    let table: Table = lua.named_registry_value(TASK_ARGS).ok()?;
+    let packed: Table = table.raw_get(thread.clone()).ok()?;
+    table.raw_set(thread.clone(), Value::Nil).ok()?;
+    let n: usize = packed.raw_get("n").unwrap_or(0);
+    let mut args = MultiValue::new();
+    for i in 1..=n {
+        args.push_back(packed.raw_get(i).unwrap_or(Value::Nil));
+    }
+    Some(args)
+}
+
+fn install_tasks(lua: &Lua) -> mlua::Result<()> {
+    let g = lua.globals();
+    g.set(
+        "__task_spawn",
+        lua.create_function(|lua, (f, args): (Function, Variadic<Value>)| {
+            let thread = lua.create_thread(f)?;
+            let owner = shared(lua).owner;
+            let result = thread.resume::<MultiValue>(MultiValue::from_iter(args));
+            // A nested task may have cleared the owner when it finished.
+            shared(lua).owner = owner;
+            match result {
+                Ok(values) => {
+                    if thread.is_resumable() {
+                        shared(lua).new_tasks.push(NewTask {
+                            thread: thread.clone(),
+                            owner,
+                            delay: None,
+                            yielded: Some(wait_secs(&values)),
+                            args: None,
+                        });
+                    }
+                }
+                Err(err) => {
+                    let at = crate::bind::caller(lua);
+                    push_error(lua, at.as_deref(), owner, &err.to_string());
+                }
+            }
+            Ok(thread)
+        })?,
+    )?;
+    g.set(
+        "__task_delay",
+        lua.create_function(|lua, (secs, f, args): (f64, Function, Variadic<Value>)| {
+            let thread = lua.create_thread(f)?;
+            let packed = lua.create_table()?;
+            packed.raw_set("n", args.len())?;
+            for (i, a) in args.into_iter().enumerate() {
+                packed.raw_set(i + 1, a)?;
+            }
+            let owner = shared(lua).owner;
+            let key = lua.create_registry_value(packed)?;
+            shared(lua).new_tasks.push(NewTask {
+                thread: thread.clone(),
+                owner,
+                delay: Some(secs),
+                yielded: None,
+                args: Some(key),
+            });
+            Ok(thread)
+        })?,
+    )?;
+    g.set(
+        "__task_cancel",
+        lua.create_function(|lua, thread: Thread| {
+            shared(lua).cancelled.push(thread);
+            Ok(())
+        })?,
+    )?;
+    Ok(())
+}
+
+/// `require("lib/tween")`: loads a module from the scripts folder once and returns its value;
+/// `./name` is relative to the requiring file. Editing a module reloads the files that use it.
+fn install_require(lua: &Lua) -> mlua::Result<()> {
+    lua.globals().set(
+        "require",
+        lua.create_function(|lua, name: String| {
+            let from = shared(lua).loading.last().cloned().or_else(|| {
+                crate::bind::caller(lua).map(|at| at.split(':').next().unwrap_or("").to_string())
+            });
+            let path = if let Some(rel) = name.strip_prefix("./") {
+                let dir = from
+                    .as_deref()
+                    .and_then(|f| f.rsplit_once('/').map(|(d, _)| d.to_string()))
+                    .unwrap_or_default();
+                normalize(&if dir.is_empty() {
+                    rel.to_string()
+                } else {
+                    format!("{dir}/{rel}")
+                })
+            } else {
+                normalize(&name)
+            };
+            if shared(lua).loading.contains(&path) {
+                return Err(mlua::Error::runtime(format!(
+                    "require cycle: {path} is already loading ({})",
+                    shared(lua).loading.join(" -> ")
+                )));
+            }
+            if let Some(by) = &from {
+                let mut s = shared(lua);
+                let pair = (path.clone(), by.clone());
+                if !s.required_by.contains(&pair) {
+                    s.required_by.push(pair);
+                }
+            }
+            let watchdog = Watchdog::new();
+            load_file(lua, &watchdog, &path, FileKind::Module)?;
+            let files = lua.app_data_ref::<Files>().expect("files");
+            match files.map.get(&path).and_then(|f| f.value.as_ref()) {
+                Some(k) => lua.registry_value::<Value>(k),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+    Ok(())
+}
+
+/// Keeps `errors`/`log` bounded (they are trimmed on push; this is for tests).
+#[allow(dead_code)]
+pub(crate) const LINES: usize = KEEP_LINES;

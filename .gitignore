@@ -18,6 +18,9 @@ screenshots/
 # Files the editor imports from elsewhere on disk
 /assets/imported/
 
+# Luau type definitions `script.types` writes for luau-lsp (engine_script)
+/assets/scripts/engine.d.luau
+
 # Written by ENGINE_PROFILE / --profile runs
 engine-profile.txt
 
