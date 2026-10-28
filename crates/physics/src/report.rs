@@ -10,6 +10,7 @@ use std::time::Instant;
 use engine_core::math::DVec3;
 use engine_core::prelude::*;
 use parking_lot::Mutex;
+use rapier3d::prelude::ColliderHandle;
 
 use crate::sim::{RegionId, Simulation};
 
@@ -185,6 +186,25 @@ pub(crate) fn step_done(world: &World, sim: &Simulation, foci: &[DVec3], started
         );
         for (e, reach, kind) in wide.into_iter().take(4) {
             out += &format!(" {} ({kind:?}, {reach:.1} m)", label(world, e));
+        }
+        // What its pairs are: the colliders in the most of them (a big floor or a mesh under
+        // a heap is in one with everything on it).
+        let mut per: HashMap<ColliderHandle, usize> = HashMap::new();
+        for p in w.narrow_phase.contact_pairs() {
+            *per.entry(p.collider1).or_default() += 1;
+            *per.entry(p.collider2).or_default() += 1;
+        }
+        let mut most: Vec<(ColliderHandle, usize)> = per.into_iter().collect();
+        most.sort_by_key(|m| std::cmp::Reverse(m.1));
+        if !most.is_empty() {
+            out += "; most pairs:";
+            for (h, n) in most.into_iter().take(5) {
+                let name = w.colliders.get(h).map_or_else(
+                    || "?".into(),
+                    |c| label(world, crate::convert::entity_of(c.user_data)),
+                );
+                out += &format!(" {name} ({n})");
+            }
         }
         // What keeps it stepping: its fastest awake bodies.
         let mut moving: Vec<(f32, Entity, bool, DVec3)> = w
