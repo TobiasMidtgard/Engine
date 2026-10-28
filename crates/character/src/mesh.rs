@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use engine_core::math::{Vec2, Vec3};
 
-use crate::appearance::Appearance;
+use crate::appearance::{Appearance, Rng};
 use crate::morph;
 use crate::pack::HumanPack;
 use crate::subdiv::QuadMesh;
@@ -574,8 +574,92 @@ pub fn build_skin(
 ) -> (SkinMesh, Vec<Vec3>) {
     let mut morphed = morph::morph(pack, a);
     seal_lips(pack, regions, &mut morphed);
+    asymmetry(pack, regions, a, &mut morphed);
     let skin = build_from(pack, regions, &morphed, region, levels);
     (skin, morphed)
+}
+
+/// Make the face a little uneven, the same way every time for the same seed: no real face is
+/// mirrored. One eye sits higher (with its lids, brow and the eyeball), one brow higher still,
+/// the nose tip and chin lean to a side, one mouth corner is higher, one cheek fuller and one
+/// ear higher. Magnitudes are around the population means in anthropometry (eye and brow
+/// heights differ by about 0.5 to 2 mm, the chin and nose tip lean about 1 mm; 3 to 4 mm is
+/// where people start to notice), growing somewhat with age. Shading reads rest space, so pores,
+/// lip outlines and brows move with the skin.
+pub fn asymmetry(pack: &HumanPack, regions: &Regions, a: &Appearance, morphed: &mut [Vec3]) {
+    let mut r = Rng::new(a.seed ^ 0xA5F1_3E2D_77C0_19B4);
+    let age = 0.8 + 0.4 * smoothstep(20.0, 75.0, a.age);
+    let mut draw = |mean_mm: f32, sigma_mm: f32, max_mm: f32| {
+        (mean_mm + r.normal() * sigma_mm).clamp(-max_mm, max_mm) * 0.001 * age
+    };
+    // Each the left side (+X) against the right, mm: left eye, brow, mouth corner and ear up,
+    // left cheek out, nose tip and chin toward the left. The right half of the face is wider in
+    // about four of five people and the chin leans left as often (Haraguchi 2008).
+    let eye = draw(0.0, 0.8, 1.8);
+    let brow = draw(0.0, 1.1, 2.4);
+    let nose = draw(0.0, 0.7, 1.6);
+    let chin = draw(0.6, 1.0, 3.0);
+    let corner = draw(0.0, 0.8, 1.8);
+    let cheek = draw(-0.5, 0.6, 1.5);
+    let ear = draw(0.0, 2.0, 4.0);
+    let lm = regions.landmarks;
+    let mask = |v: usize, m: Mask| regions.masks[v * MASKS + m as usize];
+    let mut helper = vec![false; morphed.len()];
+    for side in ["l", "r"] {
+        for v in pack.group_vertices(&format!("helper-{side}-eye")) {
+            helper[v as usize] = true;
+        }
+    }
+    for i in 0..morphed.len().min(pack.positions.len()) {
+        let p = pack.positions[i];
+        let d = p - lm.head;
+        // Only the head: nothing below the jaw's underside, nothing behind the ears.
+        if d.y < -0.17 || d.z < -0.13 {
+            continue;
+        }
+        let mut shift = Vec3::ZERO;
+        for (k, e) in lm.eyes.iter().enumerate() {
+            let sign = if k == 0 { 0.5 } else { -0.5 };
+            let near = 1.0 - smoothstep(0.018, 0.036, (p - *e).length());
+            shift.y += sign * eye * near;
+            if helper[i] {
+                continue;
+            }
+            // The brow: above the lid crease, over the eye's width and a little past it.
+            let out = (p.x - e.x) * e.x.signum();
+            let over = smoothstep(e.y + 0.008, e.y + 0.016, p.y)
+                * (1.0 - smoothstep(0.03, 0.045, p.y - e.y))
+                * (1.0 - smoothstep(0.022, 0.04, out.abs()))
+                * smoothstep(e.z - 0.03, e.z - 0.005, p.z);
+            shift.y += sign * brow * over;
+            // The cheek below the eye fills out sideways.
+            let c = *e + Vec3::new(0.012 * e.x.signum(), -0.035, -0.005);
+            let full = (-(p - c).length_squared() / (2.0 * 0.018 * 0.018)).exp();
+            shift.x += sign * cheek * full * e.x.signum();
+            // The ear on this side sits higher or lower.
+            if d.x * e.x > 0.0 {
+                shift.y += sign * ear * mask(i, Mask::Ears);
+            }
+        }
+        if !helper[i] {
+            let m = p - lm.mouth;
+            // The nose tip leans; its bridge stays where the eyes are.
+            let down = smoothstep(lm.eyes[0].y - 0.005, lm.eyes[0].y - 0.035, p.y);
+            shift.x += nose * mask(i, Mask::Nose) * down;
+            // The chin and jaw lean, from nothing at the lips.
+            let jaw = smoothstep(LIP_LINE - 0.006, LIP_LINE - 0.03, m.y)
+                * (1.0 - smoothstep(0.035, 0.07, m.x.abs()));
+            shift.x += chin * jaw.max(mask(i, Mask::Chin));
+            // One mouth corner higher, both lips together
+            // (flat across the lips' height, so the line where they meet keeps sealed).
+            let at = |x: f32| (-(m.x - x).powi(2) / (2.0 * 0.01 * 0.01)).exp();
+            let lift = (at(0.023) - at(-0.023))
+                * (1.0 - smoothstep(0.008, 0.02, (m.y - LIP_LINE).abs()))
+                * smoothstep(-0.035, -0.015, m.z);
+            shift.y += corner * lift * 0.5;
+        }
+        morphed[i] += shift;
+    }
 }
 
 /// Where the base mesh's lips part, m below the mouth landmark (the shaders' `LIP_LINE`).
@@ -815,6 +899,75 @@ mod tests {
         for c in k {
             assert!((c - 10.0).abs() < 0.5, "{c}");
         }
+    }
+
+    #[test]
+    fn asymmetry_is_small_keeps_eyes_whole_and_lips_closed() {
+        use crate::pack::Quad;
+        let lm = Landmarks {
+            eyes: [Vec3::new(0.032, 1.65, 0.08), Vec3::new(-0.032, 1.65, 0.08)],
+            eye_radius: 0.012,
+            head: Vec3::new(0.0, 1.65, 0.0),
+            mouth: Vec3::new(0.0, 1.57, 0.1),
+        };
+        let mut positions = Vec::new();
+        for e in lm.eyes {
+            for o in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                positions.push(e + Vec3::new(o.0, o.1, 0.0) * 0.012);
+            }
+        }
+        // Upper and lower lip at both corners and the middle.
+        for x in [0.02, 0.0, -0.02] {
+            for dy in [0.002, -0.002] {
+                positions.push(lm.mouth + Vec3::new(x, LIP_LINE + dy, 0.0));
+            }
+        }
+        let quad = |v: u32, group: u16| Quad {
+            v: [v, v + 1, v + 2, v + 3],
+            uv: [0; 4],
+            group,
+        };
+        let pack = HumanPack::new(
+            positions.clone(),
+            vec![Vec2::ZERO],
+            vec!["helper-l-eye".into(), "helper-r-eye".into()],
+            vec![quad(0, 0), quad(4, 1)],
+            vec![],
+        );
+        let regions = Regions {
+            masks: vec![0.0; positions.len() * MASKS],
+            landmarks: lm,
+            lid_margins: Default::default(),
+        };
+        let mut moved = 0;
+        for seed in 0..200 {
+            let a = Appearance {
+                seed,
+                ..Default::default()
+            };
+            let mut p = positions.clone();
+            asymmetry(&pack, &regions, &a, &mut p);
+            let mut again = positions.clone();
+            asymmetry(&pack, &regions, &a, &mut again);
+            assert_eq!(p, again);
+            let shift: Vec<Vec3> = p.iter().zip(&positions).map(|(a, b)| *a - *b).collect();
+            assert!(
+                shift.iter().all(|s| s.length() < 0.003),
+                "{seed}: {shift:?}"
+            );
+            for eye in [0..4, 4..8] {
+                let s = &shift[eye];
+                assert!(
+                    s.iter().all(|x| (*x - s[0]).length() < 1e-6),
+                    "{seed}: {s:?}"
+                );
+            }
+            for pair in shift[8..].chunks(2) {
+                assert!((pair[0].y - pair[1].y).abs() < 1e-6, "{seed}: {pair:?}");
+            }
+            moved += (shift[0].y - shift[4].y).abs().gt(&0.0003) as u32;
+        }
+        assert!(moved > 100, "{moved}");
     }
 
     #[test]
