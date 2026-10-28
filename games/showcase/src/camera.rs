@@ -8,7 +8,7 @@
 //!   the space module re-anchors the world under it as it lands, wherever that is.
 //! - `[` and `]` change the hour, `T` starts or stops the clock.
 //! - While play mode (P) is on, the pilot's camera has the controls; this one picks up from
-//!   there when play ends.
+//!   there when play ends. While a vehicle is driven (E), its chase camera has them.
 
 use crate::places::{self, Place};
 use engine::prelude::*;
@@ -154,7 +154,10 @@ pub fn fly(
     mut sky: ResMut<engine_weather::Sky>,
     mut window: ResMut<Window>,
     mut q: Query<(&mut Transform, &mut ShowcaseCamera)>,
-    play: Option<Res<engine_movement::Play>>,
+    (play, driven): (
+        Option<Res<engine_movement::Play>>,
+        Query<(), With<engine_vehicles::drive::Driven>>,
+    ),
     views: Query<&GlobalTransform, Without<ShowcaseCamera>>,
     mut play_view: Local<Option<(DVec3, Vec3)>>,
     bodies: Query<(&engine_space::CelestialBody, &Transform), Without<ShowcaseCamera>>,
@@ -171,6 +174,11 @@ pub fn fly(
                 cam.level = (shift.rotation.as_quat() * cam.level).normalize();
             }
         }
+    }
+    // While someone drives a vehicle, its chase camera renders and the keys are the vehicle's:
+    // this one waits where it is (getting out puts it beside the vehicle).
+    if !driven.is_empty() {
+        return;
     }
     // While someone plays (P), the pilot's camera renders and owns the keys, mouse and cursor.
     // This one waits, then carries on from where the pilot's camera was when play ends.

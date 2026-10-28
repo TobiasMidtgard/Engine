@@ -91,6 +91,13 @@ fn walk_up_drive_off_stop_and_get_out() {
         speed(&app, car)
     );
     assert!(p.z < -10.0, "drove {:.1} m", -p.z);
+    let gauges = app.world.resource::<engine_world::Readouts>().lines.clone();
+    for label in ["Speed", "Gear"] {
+        assert!(
+            gauges.iter().any(|(l, _)| l == label),
+            "no {label} in {gauges:?}"
+        );
+    }
     let cam = transform(&app, driven.camera);
     let behind = (cam.translation - p).as_vec3();
     assert!(

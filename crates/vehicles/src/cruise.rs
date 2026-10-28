@@ -12,11 +12,13 @@
 //! `Transform` in f64 along its nose, turning at fixed rates from its `VehicleControls`
 //! (pitch, yaw, steer as roll), so the mouse aim of [`crate::drive`] steers it as in space.
 //! The world re-centers on it as it goes (the space module's world shifts), so positions stay
-//! fine however far it flies. [`Cruise`] holds its speed; `VehicleTelemetry` reads as usual.
+//! fine however far it flies. [`Cruise`] holds its speed, `engine_world::physics::Cruising`
+//! tells the rest of the world (streaming loads nothing around it); `VehicleTelemetry` reads as
+//! usual.
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
-use engine_world::physics::{Collider, RigidBody, Velocity};
+use engine_world::physics::{Collider, Cruising as CruisingNow, RigidBody, Velocity};
 use engine_world::{Gravity, VehicleControls};
 
 use crate::chassis::{Vehicle, VehicleTelemetry};
@@ -63,6 +65,10 @@ pub struct Cruise {
     pub target: Option<usize>,
     /// The arrival point from the target's center, meters.
     side: DVec3,
+    /// The target's radius and where it was: `Gravity::bodies` is reordered as the frame
+    /// changes anchor, so the target is found again by these each step.
+    target_radius: f64,
+    target_at: DVec3,
     /// Turn rates now (local pitch, yaw, roll), radians per second, eased.
     rates: Vec3,
     /// Taken off while cruising, put back on dropping out.
@@ -123,6 +129,9 @@ pub fn engage(world: &mut World, ship: Entity) -> Result<(), String> {
     let mut e = world.entity_mut(ship);
     let collider = e.take::<Collider>();
     e.remove::<RigidBody>();
+    e.insert(CruisingNow {
+        velocity_mps: heading * speed.max(SPEED_MIN),
+    });
     e.insert(Cruise {
         speed: speed.max(SPEED_MIN),
         limit: speed.max(SPEED_MIN),
@@ -130,6 +139,8 @@ pub fn engage(world: &mut World, ship: Entity) -> Result<(), String> {
         heading,
         target: None,
         side: DVec3::X,
+        target_radius: 0.0,
+        target_at: DVec3::ZERO,
         rates: Vec3::ZERO,
         body,
         collider,
@@ -147,7 +158,7 @@ pub fn drop_out(world: &mut World, ship: Entity) {
     };
     let forward = cruise.heading.as_vec3();
     let mut e = world.entity_mut(ship);
-    e.remove::<Cruise>();
+    e.remove::<(Cruise, CruisingNow)>();
     e.insert(cruise.body);
     if let Some(c) = cruise.collider {
         e.insert(c);
@@ -166,6 +177,18 @@ pub fn drop_out(world: &mut World, ship: Entity) {
 fn home(gravity: &Gravity, p: DVec3, forward: DVec3, cruise: &mut Cruise) -> (DVec3, Option<f64>) {
     let bodies = &gravity.bodies;
     // Still on it? Released when the nose is off its center by more than its size and 15°.
+    // The list may have been reordered since the last step: find the target again.
+    if cruise.target.is_some() {
+        cruise.target = bodies
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.radius == cruise.target_radius)
+            .min_by(|a, b| {
+                let d = |c: DVec3| (c - cruise.target_at).length_squared();
+                d(a.1.center).total_cmp(&d(b.1.center))
+            })
+            .map(|(i, _)| i);
+    }
     if let Some(i) = cruise.target {
         let keep = bodies.get(i).is_some_and(|b| {
             let to = b.center - p;
@@ -194,6 +217,7 @@ fn home(gravity: &Gravity, p: DVec3, forward: DVec3, cruise: &mut Cruise) -> (DV
             .min_by(|a, b| a.1.total_cmp(&b.1));
         if let Some((i, _, to)) = pick {
             cruise.target = Some(i);
+            cruise.target_radius = bodies[i].radius;
             // Beside it on the side the nose points to (any side when dead on): where the
             // line from here touches the sphere `ARRIVE_ALTITUDE_M` over it, so the way in
             // skims that height and never dips below.
@@ -210,6 +234,7 @@ fn home(gravity: &Gravity, p: DVec3, forward: DVec3, cruise: &mut Cruise) -> (DV
     let Some(b) = cruise.target.and_then(|i| bodies.get(i)) else {
         return (forward, None);
     };
+    cruise.target_at = b.center;
     let aim = b.center + cruise.side;
     let d = (aim - p).length();
     ((aim - p).normalize_or(forward), Some(d))
@@ -221,6 +246,7 @@ type Cruising<'a> = (
     &'a mut Cruise,
     &'a VehicleControls,
     Option<&'a mut VehicleTelemetry>,
+    Option<&'a mut CruisingNow>,
 );
 
 /// `FixedUpdate`, after the vehicle systems: flies every cruising ship one step and drops out
@@ -235,7 +261,7 @@ pub(crate) fn cruise_system(
     if dt <= 0.0 {
         return;
     }
-    for (e, mut t, mut cruise, c, tel) in &mut q {
+    for (e, mut t, mut cruise, c, tel, now) in &mut q {
         // Turn: pitch up, yaw right and roll right as the controls ask, eased in.
         let want = Vec3::new(c.pitch, -c.yaw, -c.steer).clamp(Vec3::NEG_ONE, Vec3::ONE) * TURN;
         let k = 1.0 - (-dt as f32 * 6.0).exp();
@@ -280,6 +306,9 @@ pub(crate) fn cruise_system(
 
         let velocity = heading * cruise.speed;
         t.translation += velocity * dt;
+        if let Some(mut now) = now {
+            now.velocity_mps = velocity;
+        }
 
         if let Some(mut tel) = tel {
             tel.speed = cruise.speed as f32;
@@ -302,5 +331,31 @@ pub(crate) fn cruise_system(
         if arrived || (h < DROP_ALTITUDE_M && velocity.dot(up) < 0.0) {
             commands.queue(move |world: &mut World| drop_out(world, e));
         }
+    }
+}
+
+/// A distance for the screen: m, km, AU or light years.
+pub fn distance_text(m: f64) -> String {
+    const AU: f64 = 1.495_978_707e11;
+    const LY: f64 = 9.460_730_472_6e15;
+    if m < 10_000.0 {
+        format!("{m:.0} m")
+    } else if m < 0.01 * AU {
+        format!("{:.0} km", m / 1000.0)
+    } else if m < 0.1 * LY {
+        format!("{:.2} AU", m / AU)
+    } else {
+        format!("{:.2} ly", m / LY)
+    }
+}
+
+/// A speed for the screen: km/h, km/s or in light speeds.
+pub fn speed_text(mps: f64) -> String {
+    if mps < 1_000.0 {
+        format!("{:.0} km/h", mps * 3.6)
+    } else if mps < 0.01 * C {
+        format!("{:.1} km/s", mps / 1000.0)
+    } else {
+        format!("{:.2} c", mps / C)
     }
 }

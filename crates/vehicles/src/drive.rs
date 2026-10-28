@@ -120,7 +120,7 @@ pub struct ChaseCamera {
 pub(crate) fn register(app: &mut App) {
     app.add_systems(
         Update,
-        (make_boardable, board, prompts, drive_controls)
+        (make_boardable, board, prompts, drive_controls, readouts)
             .chain()
             .in_set(UpdateSet::Logic),
     )
@@ -666,6 +666,86 @@ type ChaseTarget<'a> = (
     &'a Boardable,
     Option<&'a VehicleTelemetry>,
 );
+
+type Gauges<'a> = (
+    Entity,
+    &'a Driven,
+    &'a Transform,
+    &'a VehicleTelemetry,
+    Option<&'a Aircraft>,
+    Option<&'a Spacecraft>,
+    Option<&'a Cruise>,
+);
+
+/// What the driver reads under the prompt: speed, height, throttle, gear, cruise.
+fn readouts(
+    gravity: Res<Gravity>,
+    mut out: Option<ResMut<engine_world::Readouts>>,
+    q: Query<Gauges>,
+) {
+    use crate::cruise::{ENGAGE_ALTITUDE_M, distance_text, speed_text};
+    let Some(out) = out.as_mut() else { return };
+    for (_, d, t, tel, aircraft, ship, cruise) in &q {
+        match cruise {
+            Some(c) => {
+                out.set("Speed", speed_text(c.speed));
+                out.set("Altitude", distance_text(c.altitude_m));
+                out.set(
+                    "Cruise",
+                    match c.target {
+                        Some(_) => "homing on the body ahead (J drops out)".to_string(),
+                        None => "aim at a planet or star to home on it (J drops out)".to_string(),
+                    },
+                );
+                out.set("Lever", format!("{:.0}%  W/S", d.lever * 100.0));
+                continue;
+            }
+            None => out.set("Speed", speed_text(tel.speed as f64)),
+        }
+        match d.style {
+            Style::Car => {
+                let gear = match tel.gear {
+                    g if g < 0 => "R".to_string(),
+                    0 => "N".to_string(),
+                    g => g.to_string(),
+                };
+                out.set("Gear", gear);
+                out.set("Engine", format!("{:.0} rpm", tel.rpm));
+            }
+            Style::Plane | Style::Ship => {
+                let h = crate::cruise::altitude(&gravity, t.translation).0;
+                out.set("Altitude", distance_text(h.max(0.0)));
+                out.set(
+                    "Throttle",
+                    format!("{:.0}%  W/S, Shift full", d.lever * 100.0),
+                );
+                if let Some(a) = aircraft {
+                    out.set("Gear", if a.gear_down { "down  G" } else { "up  G" });
+                }
+                if d.style == Style::Plane && tel.stalled {
+                    out.set("Stall", "nose down");
+                }
+                if let Some(s) = ship {
+                    let assist = match s.assist.mode {
+                        AssistMode::Hover => "hover  H",
+                        AssistMode::Full => "full  H for hover",
+                        AssistMode::Rotation => "rotation",
+                        AssistMode::Off => "off",
+                    };
+                    out.set("Assist", assist);
+                    out.set(
+                        "Cruise",
+                        if h >= ENGAGE_ALTITUDE_M {
+                            "J".to_string()
+                        } else {
+                            format!("over {:.0} km (J)", ENGAGE_ALTITUDE_M / 1000.0)
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
 
 /// Puts each chase camera behind its vehicle.
 #[allow(clippy::too_many_arguments)]
