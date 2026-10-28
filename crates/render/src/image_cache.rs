@@ -330,6 +330,8 @@ struct CachedImage {
     views: [Option<Arc<ImageTexture>>; VIEW_SLOTS],
     /// Views due to be compressed, and to what.
     pending: [Option<Encoding>; VIEW_SLOTS],
+    /// Mean linear color of the pixels as uploaded (RGBA8 images), which outlives a release.
+    mean: Option<[f32; 3]>,
 }
 
 impl CachedImage {
@@ -431,6 +433,14 @@ impl ImageCache {
             TextureUse::Linear
         };
         self.get_for(gpu, images, handle, usage)
+    }
+
+    /// Mean linear color of `handle`'s pixels (sRGB decoded), known once it was uploaded (as
+    /// anything) while its pixels were there; `None` before, and for HDR images. Probe GI's rays
+    /// see textured surfaces in this color.
+    pub fn mean_color(&self, images: &Assets<Image>, handle: Handle<Image>) -> Option<[f32; 3]> {
+        let index = images.canonical(handle).index();
+        self.lock().images.get(&index).and_then(|c| c.mean)
     }
 
     /// The texture of `handle` for a slot that reads it as `usage`, uploading it when it is not
@@ -573,6 +583,7 @@ impl ImageCache {
             released: false,
             views: Default::default(),
             pending: [None; VIEW_SLOTS],
+            mean: mean_color(image),
         });
         cached.views[slot] = Some(uploaded.clone());
         cached.pending[slot] = encoding;
@@ -1196,6 +1207,35 @@ fn alias_view(other: &ImageTexture, srgb: bool, id: u64) -> ImageTexture {
 /// (mips are re-generated in the matching color space when the stored ones don't match).
 /// Levels larger than the device allows are skipped. `aliasable` also lets the RGBA8 texture be
 /// viewed in the other color space.
+/// Mean linear color of an RGBA8 image's pixels (about 4096 of them, evenly spread), sRGB
+/// decoded when the image is sRGB.
+fn mean_color(image: &Image) -> Option<[f32; 3]> {
+    if image.format != PixelFormat::Rgba8 || image.data.len() < 4 {
+        return None;
+    }
+    let pixels = image.data.len() / 4;
+    let step = (pixels / 4096).max(1);
+    let decode = |c: u8| {
+        let c = c as f32 / 255.0;
+        if !image.srgb {
+            c
+        } else if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let mut sum = [0.0f64; 3];
+    let mut n = 0.0f64;
+    for p in image.data.as_chunks::<4>().0.iter().step_by(step) {
+        for c in 0..3 {
+            sum[c] += decode(p[c]) as f64;
+        }
+        n += 1.0;
+    }
+    Some(sum.map(|s| (s / n) as f32))
+}
+
 pub(crate) fn upload_image(
     gpu: &GpuShared,
     image: &Image,
@@ -1317,6 +1357,20 @@ pub(crate) fn upload_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_textures_mean_color_is_linear() {
+        // Half black, half sRGB 188 (linear 0.5): a mean of 0.25, not of the encoded values.
+        let mut data = Vec::new();
+        for i in 0..64 {
+            let c = if i % 2 == 0 { 0 } else { 188 };
+            data.extend_from_slice(&[c, c, 0, 255]);
+        }
+        let mean = mean_color(&Image::new(8, 8, data.clone(), true)).expect("RGBA8");
+        assert!((mean[0] - 0.25).abs() < 0.01 && mean[2] == 0.0, "{mean:?}");
+        let linear = mean_color(&Image::new(8, 8, data, false)).expect("RGBA8");
+        assert!((linear[1] - 94.0 / 255.0).abs() < 0.01, "{linear:?}");
+    }
 
     #[test]
     fn the_budget_follows_the_measured_rate() {

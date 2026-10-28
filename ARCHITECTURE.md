@@ -215,7 +215,12 @@ probes. `probe_gi` in lib_frame.wgsl (frame binding 23, the atlas) gives every l
 the probes' irradiance where the grid covers it, so other modules' shaders that call
 `shade_surface` get it too; their reflected sky dims with it. Terrain, foliage, water and
 skinned meshes are not in the rays' scene yet, extra views go without, and rays that miss see
-the environment map.
+the environment map. Textured surfaces show to the rays in their texture's mean color. The same
+scene gives **world reflections** (`RenderSettings::world_reflections`, engine-design/
+lighting-round-reflections.md): `cs_reflect` traces one ray a texel at half resolution along
+each smooth surface's reflection, lights the hit like a probe ray's, and ssr.wgsl blends it,
+blurred over the reflection lobe, under its own reflection wherever the screen can't see what
+the surface reflects.
 
 **GPU skinning** (built; `skinning.rs`): a module that poses a mesh puts `GpuSkin` (per-vertex
 bones and weights in an `Arc<SkinWeights>`, each bone's `SkinBone` dual quaternion from the

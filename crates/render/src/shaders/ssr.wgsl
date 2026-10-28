@@ -9,18 +9,23 @@
 // distance. Wide discs read a blurred mip of that image (ssr_chain.wgsl) whose blur closes the
 // gaps between the taps, so rough and distant reflections are soft glows rather than a sharp
 // image broken up by the surface's bumps. Coverage (alpha) fades toward screen edges, the end of
-// the ray, rays toward the camera and the roughness limit; `shade_surface` blends the rest from
-// the prefiltered sky. Output: reflected radiance (cd/m^2, not pre-exposed), coverage.
+// the ray, rays toward the camera and the roughness limit. Where it falls short, world
+// reflections fill in: what probe GI's scene showed a ray along the same direction
+// (probe_gi.wgsl `cs_reflect`, half resolution), blurred over the lobe's footprint among
+// neighbors on the same surface. `shade_surface` blends the rest from the prefiltered sky.
+// Output: reflected radiance (cd/m^2, not pre-exposed), coverage.
 
 @group(1) @binding(0) var normal_input: texture_2d<f32>;   // prepass normals (octahedral xy, roughness, written)
 @group(1) @binding(1) var depth_input: texture_depth_2d;   // prepass depth (reverse-Z)
 @group(1) @binding(2) var motion_input: texture_2d<f32>;   // screen motion (uv, current - previous)
 @group(1) @binding(3) var previous_color: texture_2d<f32>; // last frame's image, pre-exposed by frame.reflections.y
 @group(1) @binding(4) var previous_blur: texture_2d<f32>;  // previous_color at half resolution, blurred more per mip
+@group(1) @binding(5) var world_input: texture_2d<f32>;    // world reflections, half resolution: radiance, hit distance (0 = none)
 
 const MAX_STEPS: i32 = 64;
 const REFINE_STEPS: i32 = 6;
 const GATHER_TAPS: i32 = 8;
+const WORLD_TAPS: i32 = 8;
 
 @vertex
 fn vs_ssr(@builtin(vertex_index) i: u32) -> FullscreenOut {
@@ -133,6 +138,48 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>, max_len: f32, jitter: f32) -> Hit {
     return hit;
 }
 
+// World reflections around pixel `px` (view depth `depth`, world normal `n`, squared roughness
+// `alpha`), blurred over the reflection lobe's footprint: radiance and the share of it they
+// cover (0 where their rays hit nothing, which leaves the sky to `shade_surface`). Texel `t`
+// was traced from pixel 2t; taps off this surface (another depth or facing) don't count.
+fn world_reflection(px: vec2<i32>, depth: f32, n: vec3<f32>, alpha: f32, noise: f32) -> vec4<f32> {
+    let texels = vec2<i32>(textureDimensions(world_input));
+    let center = (vec2<f32>(px) + 0.5) * 0.5;
+    let near = textureLoad(world_input, clamp(px / 2, vec2<i32>(0), texels - 1), 0);
+    // About alpha radians wide at the hit distance, as seen at this surface's depth.
+    let pixel_size = 2.0 * depth / (frame.proj[1][1] * frame.viewport.y);
+    let hit_dist = select(4.0, near.w, near.w > 0.0);
+    let radius = clamp(hit_dist * alpha / max(pixel_size, 1e-5) * 0.5, 0.75, 24.0);
+    var color = vec3<f32>(0.0);
+    var hits = 0.0;
+    var weight = 0.0;
+    let angle0 = noise * TAU;
+    for (var i = 0; i < WORLD_TAPS; i++) {
+        let t = (f32(i) + 0.5) / f32(WORLD_TAPS);
+        let a = angle0 + f32(i) * 2.39996323;
+        let o = vec2<f32>(cos(a), sin(a)) * sqrt(t) * radius;
+        let texel = clamp(vec2<i32>(floor(center + o)), vec2<i32>(0), texels - 1);
+        let from_px = min(texel * 2, size_i() - 1);
+        let z = textureLoad(depth_input, from_px, 0);
+        if (z <= 0.0) { continue; }
+        let tap_depth = scene_linear_depth((vec2<f32>(from_px) + 0.5) * frame.viewport.zw, z);
+        let tap_n = oct_decode(textureLoad(normal_input, from_px, 0).xy);
+        let w = select(0.0, 1.0, abs(tap_depth - depth) < 0.03 * depth + 0.05)
+            * pow(saturate(dot(tap_n, n)), 16.0);
+        let tap = textureLoad(world_input, texel, 0);
+        weight += w;
+        if (tap.w > 0.0) {
+            color += tap.rgb * w;
+            hits += w;
+        }
+    }
+    if (weight <= 1e-4) {
+        // Nothing alike nearby (a thin edge): the nearest texel alone.
+        return select(vec4<f32>(0.0), vec4<f32>(near.rgb, 1.0), near.w > 0.0);
+    }
+    return vec4<f32>(color / max(hits, 1e-4), hits / weight);
+}
+
 @fragment
 fn fs_ssr(in: FullscreenOut) -> @location(0) vec4<f32> {
     let px = vec2<i32>(floor(in.position.xy));
@@ -146,7 +193,8 @@ fn fs_ssr(in: FullscreenOut) -> @location(0) vec4<f32> {
     let alpha = roughness * roughness;
     let uv = (vec2<f32>(px) + 0.5) * frame.viewport.zw;
     let pos = view_position(uv, z);
-    let n = normalize((frame.view * vec4<f32>(oct_decode(nr.xy), 0.0)).xyz);
+    let world_n = oct_decode(nr.xy);
+    let n = normalize((frame.view * vec4<f32>(world_n, 0.0)).xyz);
     let v = normalize(-pos);
     // Reflect around the lobe's dominant direction (as `shade_surface` does for the sky).
     let r = reflect(-v, n);
@@ -154,8 +202,13 @@ fn fs_ssr(in: FullscreenOut) -> @location(0) vec4<f32> {
     let depth = -pos.z;
     let origin = pos + n * (0.02 + 0.002 * depth);
     let noise = interleaved_gradient_noise(vec2<f32>(px) + frame.time.w * 5.588238);
+    // Fade out evenly over the upper half of the roughness range: a narrow band would turn
+    // the reflection on and off across a surface whose roughness varies a little around it.
+    let rough_fade = saturate(2.0 - 2.0 * roughness / max_roughness);
+    var world = world_reflection(px, depth, world_n, alpha, noise);
+    world = vec4<f32>(min(world.rgb, vec3<f32>(60000.0)), world.a * rough_fade);
     let hit = trace(origin, dir, min(depth * 3.0 + 30.0, 1000.0), noise);
-    if (!hit.found && !hit.escaped) { return vec4<f32>(0.0); }
+    if (!hit.found && !hit.escaped) { return world; }
 
     let hit_px = clamp(vec2<i32>(floor(hit.uv * frame.viewport.xy)), vec2<i32>(0), size_i() - 1);
     var facing = 1.0;
@@ -199,7 +252,7 @@ fn fs_ssr(in: FullscreenOut) -> @location(0) vec4<f32> {
         color += c * w;
         weight += w;
     }
-    if (weight <= 1e-3) { return vec4<f32>(0.0); }
+    if (weight <= 1e-3) { return world; }
     color = color / weight / frame.reflections.y;
     if (hit.escaped) {
         // A mirror shows the sky in exactly the ray's direction (where the camera sees it is
@@ -213,10 +266,12 @@ fn fs_ssr(in: FullscreenOut) -> @location(0) vec4<f32> {
     if (hit.found) {
         coverage *= 1.0 - smoothstep(0.75, 1.0, hit.along);
     }
-    // Fade out evenly over the upper half of the roughness range: a narrow band would turn
-    // the reflection on and off across a surface whose roughness varies a little around it.
-    coverage *= saturate(2.0 - 2.0 * roughness / max_roughness);
+    coverage *= rough_fade;
     // Rays toward the camera mostly hit the backs of things the camera can't see.
-    coverage *= 1.0 - smoothstep(0.3, 0.8, dir.z);
-    return vec4<f32>(min(color, vec3<f32>(60000.0)), saturate(coverage));
+    coverage = saturate(coverage * (1.0 - smoothstep(0.3, 0.8, dir.z)));
+    // World reflections under what the screen covers.
+    let total = coverage + (1.0 - coverage) * world.a;
+    if (total <= 1e-4) { return vec4<f32>(0.0); }
+    color = (min(color, vec3<f32>(60000.0)) * coverage + world.rgb * world.a * (1.0 - coverage)) / total;
+    return vec4<f32>(color, total);
 }

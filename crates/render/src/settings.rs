@@ -228,6 +228,12 @@ pub struct RenderSettings {
     pub screen_space_reflections: bool,
     /// Surfaces rougher than this (perceptual roughness) reflect only the sky.
     pub ssr_max_roughness: f32,
+    /// World reflections: while probe GI is on, what screen-space reflections can't see (off
+    /// screen, or hidden behind something) is traced against the probes' scene at half
+    /// resolution and lit like a probe ray's hit (sun and lamps through shadow rays, glow,
+    /// bounce light from the probes), instead of reflecting the sky. Needs
+    /// `screen_space_reflections` and `probe_gi`.
+    pub world_reflections: bool,
     /// Screen-space global illumination: diffuse light bounced off nearby surfaces that are on
     /// screen (sunlit walls tint the ground, lamps and emissive surfaces light their
     /// surroundings). Builds up over a few frames.
@@ -461,6 +467,7 @@ impl Default for RenderSettings {
             ao_intensity: 1.0,
             screen_space_reflections: true,
             ssr_max_roughness: 0.6,
+            world_reflections: true,
             screen_space_gi: true,
             gi_intensity: 1.0,
             probe_gi: false,

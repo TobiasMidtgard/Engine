@@ -223,6 +223,22 @@ fn cs_trace(@builtin(global_invocation_id) id: vec3<u32>) {
         rays[id.x] = vec4<f32>(sky * PROBE_GI_SCALE, t_max);
         return;
     }
+    let shaded = shade_hit(origin, dir, hit, spacing);
+    if (shaded.w < 0.0) {
+        // The back of a single-sided surface: inside something. DDGI counts these to find
+        // probes stuck in walls.
+        rays[id.x] = vec4<f32>(0.0, 0.0, 0.0, -hit.t * 0.2);
+        return;
+    }
+    rays[id.x] = vec4<f32>(shaded.rgb * PROBE_GI_SCALE, min(hit.t, t_max));
+}
+
+// Light leaving the surface a ray from `origin` along `dir` hit (`hit`, not a miss), toward the
+// ray: radiance (cd/m^2, not pre-exposed), and -1 in w for the back of a single-sided surface
+// (inside something), else 1. Lit by the sun and the nearest point lights through shadow rays,
+// its emissive, and last frame's probes (light bounced more than once). `spacing` is the
+// probes' spacing, which sizes how far shadow rays look.
+fn shade_hit(origin: vec3<f32>, dir: vec3<f32>, hit: Hit, spacing: f32) -> vec4<f32> {
     let inst = instances[hit.instance];
     let a = triangles[hit.triangle * 3u].xyz;
     let local_n = cross(triangles[hit.triangle * 3u + 1u].xyz - a, triangles[hit.triangle * 3u + 2u].xyz - a);
@@ -230,10 +246,7 @@ fn cs_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     var n = normalize(local_n.x * inst.to_local_x.xyz + local_n.y * inst.to_local_y.xyz + local_n.z * inst.to_local_z.xyz);
     if (dot(n, dir) > 0.0) {
         if ((inst.mesh.z & 1u) == 0u) {
-            // The back of a single-sided surface: inside something. DDGI counts these to find
-            // probes stuck in walls.
-            rays[id.x] = vec4<f32>(0.0, 0.0, 0.0, -hit.t * 0.2);
-            return;
+            return vec4<f32>(0.0, 0.0, 0.0, -1.0);
         }
         n = -n;
     }
@@ -266,8 +279,7 @@ fn cs_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     // Last frame's probes: light bounced more than once.
     let indirect = probe_gi(p, n, -dir);
     light += indirect.rgb * indirect.a;
-    let radiance = inst.albedo.rgb * INV_PI * light + inst.emissive.rgb;
-    rays[id.x] = vec4<f32>(radiance * PROBE_GI_SCALE, min(hit.t, t_max));
+    return vec4<f32>(inst.albedo.rgb * INV_PI * light + inst.emissive.rgb, 1.0);
 }
 
 var<workgroup> shared_rays: array<vec4<f32>, MAX_RAYS>;
@@ -330,4 +342,59 @@ fn cs_update(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_
     if (thread == 0u) {
         probe_state[slot] = vec4<i32>(world, 1);
     }
+}
+
+// World reflections (`cs_reflect`): what screen-space reflections can't see (off screen, or
+// hidden behind something), traced against the same scene as the probes. One ray a texel at
+// half resolution, from the top-left pixel of each 2x2 block, along the reflection lobe's
+// dominant direction; ssr.wgsl blurs it over the lobe's footprint and blends it under its own
+// reflection.
+@group(2) @binding(0) var reflect_normal: texture_2d<f32>; // prepass normals (octahedral xy, roughness, written)
+@group(2) @binding(1) var reflect_depth: texture_depth_2d; // prepass depth (reverse-Z)
+// Reflected radiance (cd/m^2, not pre-exposed) and the distance to what the ray hit; 0 where
+// it hit nothing (the sky, which `shade_surface` reflects already) or wasn't traced.
+@group(2) @binding(2) var reflect_out: texture_storage_2d<rgba16float, write>;
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_reflect(@builtin(global_invocation_id) id: vec3<u32>) {
+    let out_size = textureDimensions(reflect_out);
+    if (any(id.xy >= out_size)) { return; }
+    let full = vec2<i32>(textureDimensions(reflect_depth));
+    let px = min(vec2<i32>(id.xy) * 2, full - 1);
+    let nr = textureLoad(reflect_normal, px, 0);
+    let z = textureLoad(reflect_depth, px, 0);
+    if (z <= 0.0 || nr.w < 0.5 || nr.z > frame.reflections.z) {
+        textureStore(reflect_out, id.xy, vec4<f32>(0.0));
+        return;
+    }
+    let uv = (vec2<f32>(px) + 0.5) / vec2<f32>(full);
+    let pos = view_position(uv, z);
+    let rel = (frame.inv_view * vec4<f32>(pos, 1.0)).xyz;
+    let n = oct_decode(nr.xy);
+    let alpha = nr.z * nr.z;
+    let v = normalize(-rel);
+    // The lobe's dominant direction, as `shade_surface` and ssr.wgsl reflect.
+    let r = reflect(-v, n);
+    let dir = normalize(mix(n, r, (1.0 - alpha) * (sqrt(1.0 - alpha) + alpha)));
+    let depth = -pos.z;
+    let origin = rel + n * (0.02 + 0.002 * depth);
+    let spacing = frame.gi_volume.w;
+    let t_max = spacing * 64.0;
+    let hit = trace_scene(origin, dir, t_max, false);
+    let wall = sky_volume_wall(origin, dir, min(hit.t, t_max));
+    var out = vec4<f32>(0.0);
+    if (wall < NO_HIT) {
+        // A wall of an indoor volume (a cave's rock): lit by the probes around it.
+        let p = origin + dir * wall;
+        let indirect = probe_gi(p, -dir, -dir);
+        out = vec4<f32>(VOLUME_WALL_ALBEDO * INV_PI * indirect.rgb * indirect.a, max(wall, 1e-3));
+    } else if (hit.instance != 0xffffffffu) {
+        let shaded = shade_hit(origin, dir, hit, spacing);
+        // The back of a single-sided surface: the ray started inside something, so it
+        // reflects nothing of its own.
+        if (shaded.w > 0.0) {
+            out = vec4<f32>(min(shaded.rgb, vec3<f32>(60000.0)), max(hit.t, 1e-3));
+        }
+    }
+    textureStore(reflect_out, id.xy, out);
 }
