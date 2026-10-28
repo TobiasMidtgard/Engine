@@ -1560,6 +1560,160 @@ pub fn round17(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Finds a screen position when a scripted step runs.
+type ScreenPointFn = dyn Fn(&mut World, &Editor) -> egui::Pos2 + Send + Sync;
+type ScreenPoint = Box<ScreenPointFn>;
+
+/// A primary-button drag through `points` (screen positions found when each step runs), with
+/// `modifiers` held, as a hand on the mouse would make it.
+fn drag(points: Vec<ScreenPoint>, modifiers: egui::Modifiers) -> Vec<Step> {
+    let points: Vec<std::sync::Arc<ScreenPointFn>> =
+        points.into_iter().map(std::sync::Arc::from).collect();
+    let mut steps = Vec::new();
+    let first = points[0].clone();
+    steps.push(Step::Do(Box::new(move |world, editor| {
+        let p = first(world, editor);
+        inject(
+            world,
+            vec![
+                egui::Event::PointerMoved(p),
+                egui::Event::ModifiersChanged(modifiers),
+            ],
+        );
+    })));
+    steps.push(Step::Wait(3));
+    let first = points[0].clone();
+    steps.push(Step::Do(Box::new(move |world, editor| {
+        let p = first(world, editor);
+        inject(world, vec![button(p, true, modifiers)]);
+    })));
+    steps.push(Step::Wait(2));
+    for point in points.iter().skip(1) {
+        let point = point.clone();
+        steps.push(Step::Do(Box::new(move |world, editor| {
+            let p = point(world, editor);
+            inject(world, vec![egui::Event::PointerMoved(p)]);
+        })));
+        steps.push(Step::Wait(2));
+    }
+    let last = points[points.len() - 1].clone();
+    steps.push(Step::Do(Box::new(move |world, editor| {
+        let p = last(world, editor);
+        inject(
+            world,
+            vec![
+                button(p, false, modifiers),
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            ],
+        );
+    })));
+    steps.push(Step::Wait(3));
+    steps
+}
+
+/// Round 18: Alt+drag on the move gizmo leaves copies behind (a row of lamp posts), then the
+/// Measure tool: the posts' spacing, and the crate stack's height in the front view.
+pub fn round18(dir: impl Into<PathBuf>) -> ShotScript {
+    // The gizmo's X arrow, about 55 points out from its middle, on a post standing `start`
+    // meters east of the first one, pulled `step` meters further.
+    fn x_arrow(start: f64, step: f64) -> ScreenPoint {
+        Box::new(move |world, editor| {
+            let first = find(world, "Lamp post").expect("lamp post");
+            let p = world
+                .get::<GlobalTransform>(first)
+                .map(|g| g.translation())
+                .unwrap_or_default()
+                + DVec3::X * start;
+            let a = screen(editor, p);
+            let b = screen(editor, p + DVec3::X);
+            let arrow = a + (b - a).normalized() * 55.0;
+            arrow + (screen(editor, p + DVec3::X * step) - a)
+        })
+    }
+    let alt = egui::Modifiers {
+        alt: true,
+        ..egui::Modifiers::NONE
+    };
+    let mut steps = vec![
+        Step::Camera(DVec3::new(9.5, 4.2, 9.0), DVec3::new(1.5, 1.0, 0.5)),
+        Step::Select("Lamp post"),
+        Step::Tool(Tool::Move),
+        Step::Tab(Tab::History),
+        Step::Wait(30),
+        Step::Shot("78_one_lamp_post"),
+    ];
+    // Each drag leaves a copy and moves the selection (the newest copy) on by 3.5 m.
+    for i in 0..2 {
+        let start = 3.5 * i as f64;
+        steps.extend(drag(
+            vec![
+                x_arrow(start, 0.0),
+                x_arrow(start, 1.5),
+                x_arrow(start, 3.5),
+            ],
+            alt,
+        ));
+    }
+    steps.push(Step::Wait(20));
+    steps.push(Step::Shot("79_alt_drag_left_copies"));
+    steps.push(Step::Tool(Tool::Measure));
+    steps.push(Step::Select(""));
+    steps.extend(drag(
+        vec![
+            Box::new(|world, editor| {
+                // The ground at the foot of each post.
+                let posts = lamp_posts(world);
+                screen(editor, posts[0] * DVec3::new(1.0, 0.0, 1.0))
+            }),
+            Box::new(|world, editor| {
+                let posts = lamp_posts(world);
+                screen(editor, posts[posts.len() - 1] * DVec3::new(1.0, 0.0, 1.0))
+            }),
+        ],
+        egui::Modifiers::NONE,
+    ));
+    steps.push(Step::Wait(20));
+    steps.push(Step::Shot("80_measure_post_spacing"));
+    // The crate stack's height, corner to corner, in the front view.
+    steps.push(Step::Camera(
+        DVec3::new(-2.5, 1.4, 4.0),
+        DVec3::new(-2.5, 1.4, -3.5),
+    ));
+    steps.push(Step::Do(Box::new(|_, editor| {
+        editor.view_request = Some(crate::camera::ViewRequest::Along(Vec3::NEG_Z));
+    })));
+    steps.push(Step::Wait(20));
+    steps.extend(drag(
+        vec![
+            Box::new(|world, editor| {
+                screen(
+                    editor,
+                    corner(world, "Crate 1", DVec3::new(-1.0, -1.0, 1.0)),
+                )
+            }),
+            Box::new(|world, editor| {
+                screen(editor, corner(world, "Crate 6", DVec3::new(-1.0, 1.0, 1.0)))
+            }),
+        ],
+        egui::Modifiers::NONE,
+    ));
+    steps.push(Step::Wait(20));
+    steps.push(Step::Shot("81_measure_stack_height_front"));
+    ShotScript::new(dir, steps)
+}
+
+/// Where the lamp posts stand, west to east.
+fn lamp_posts(world: &mut World) -> Vec<DVec3> {
+    let mut q = world.query::<(&Name, &GlobalTransform)>();
+    let mut posts: Vec<DVec3> = q
+        .iter(world)
+        .filter(|(n, _)| n.as_str().starts_with("Lamp post"))
+        .map(|(_, g)| g.translation())
+        .collect();
+    posts.sort_by(|a, b| a.x.total_cmp(&b.x));
+    posts
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {

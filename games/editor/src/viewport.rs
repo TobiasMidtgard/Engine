@@ -58,6 +58,13 @@ pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
         overlays(ui, world, editor, rect);
         return;
     }
+    if editor.tool == Tool::Measure {
+        if !alt {
+            crate::measure::brush(ui, world, editor, &view, &response);
+        }
+        overlays(ui, world, editor, rect);
+        return;
+    }
     if response.clicked() && !gizmo_used && !snapping && !alt && !editor.gizmo.is_focused() {
         let additive = ui.input(|i| i.modifiers.ctrl || i.modifiers.shift);
         if let Some(pos) = response.interact_pointer_pos() {
@@ -211,7 +218,7 @@ struct GizmoTarget {
 /// Run the transform gizmo; true while it is being used.
 fn gizmo(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, view: &ViewInfo) -> bool {
     let modes: EnumSet<GizmoMode> = match editor.tool {
-        Tool::Select | Tool::Sculpt | Tool::Scatter => return false,
+        Tool::Select | Tool::Sculpt | Tool::Scatter | Tool::Measure => return false,
         Tool::Move => GizmoMode::all_translate(),
         Tool::Rotate => GizmoMode::all_rotate(),
         Tool::Scale => GizmoMode::all_scale(),
@@ -283,8 +290,19 @@ fn gizmo(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, view: &ViewI
         ..Default::default()
     });
     let Some((_, results)) = editor.gizmo.interact(ui, &gizmo_transforms) else {
+        editor.gizmo_dragging = false;
         return editor.gizmo.is_focused();
     };
+    // Alt as a drag starts: move copies and leave the originals where they were (Unreal).
+    if !editor.gizmo_dragging && ui.input(|i| i.modifiers.alt) {
+        let copies = editor::duplicate_offset(world, editor, DVec3::ZERO);
+        for target in &mut targets {
+            if let Some(&(_, copy)) = copies.iter().find(|c| c.0 == target.entity) {
+                target.entity = copy;
+            }
+        }
+    }
+    editor.gizmo_dragging = true;
     let mut commands = Vec::new();
     for (target, new) in targets.iter().zip(results) {
         let scale = from_mint3(new.scale);
@@ -603,6 +621,11 @@ fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, rect: egu
                                 Tool::Scatter,
                                 "🌲",
                                 "Paint rocks, trees and props onto surfaces (G)",
+                            ),
+                            (
+                                Tool::Measure,
+                                "📐",
+                                "Measure: drag between two points; ends snap to corners (M)",
                             ),
                         ] {
                             let on = editor.tool == tool;

@@ -213,6 +213,17 @@ fn target_corner(
     nearest(&corners, pos, REACH)
 }
 
+/// The corner of anything nearest `pos` within `reach` points (the Measure tool's ends).
+pub fn corner_near(
+    world: &mut World,
+    view: &ViewInfo,
+    pos: egui::Pos2,
+    reach: f32,
+) -> Option<DVec3> {
+    let corners = corners_near(world, view, pos, &|_| true);
+    nearest(&corners, pos, reach)
+}
+
 /// Start a snap drag of the selection, grabbing it at `grab` (vertex) or its pivot (surface).
 pub fn begin(world: &mut World, editor: &mut Editor, kind: Kind, grab: Option<DVec3>) {
     let selected: HashSet<Entity> = editor.selection.iter().copied().collect();

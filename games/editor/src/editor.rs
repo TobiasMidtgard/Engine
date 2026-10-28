@@ -38,6 +38,8 @@ pub enum Tool {
     Sculpt,
     /// Paint copies of models onto surfaces (see `scatter`).
     Scatter,
+    /// Measure distances (see `measure`).
+    Measure,
 }
 
 /// A panel in the dock.
@@ -110,6 +112,10 @@ pub struct Editor {
     pub snap_move: f32,
     pub snap_angle_deg: f32,
     pub snap_scale: f32,
+    /// The Measure tool's ruler.
+    pub measure: crate::measure::Measure,
+    /// The transform gizmo was being dragged last frame (Alt at the start of a drag duplicates).
+    pub gizmo_dragging: bool,
     /// A view change for the editor camera (the axis widget's clicks).
     pub view_request: Option<crate::camera::ViewRequest>,
     /// A V or Ctrl+Shift snap drag in progress.
@@ -184,6 +190,8 @@ impl Editor {
             snap_angle_deg: 15.0,
             snap_scale: 0.1,
             view_request: None,
+            measure: Default::default(),
+            gizmo_dragging: false,
             snap_drag: None,
             surface_align: false,
             surface_offset: 0.0,
@@ -654,6 +662,16 @@ pub fn delete_selection(world: &mut World, editor: &mut Editor) {
 
 /// Duplicate the selected scene entities next to themselves and select the copies.
 pub fn duplicate_selection(world: &mut World, editor: &mut Editor) {
+    duplicate_offset(world, editor, DVec3::new(1.0, 0.0, 0.0));
+}
+
+/// Duplicate the selected scene entities `offset` from themselves (in their parent's space) and
+/// select the copies; returns (original, copy) pairs.
+pub fn duplicate_offset(
+    world: &mut World,
+    editor: &mut Editor,
+    offset: DVec3,
+) -> Vec<(Entity, Entity)> {
     let t = now(world);
     let targets: Vec<Entity> = editor
         .selection
@@ -669,7 +687,7 @@ pub fn duplicate_selection(world: &mut World, editor: &mut Editor) {
         let mut remap = Remap::new();
         let copy = scene_ops::restore_entity(world, &saved, parent, &mut remap);
         if let Some(mut tr) = world.get_mut::<Transform>(copy) {
-            tr.translation += DVec3::new(1.0, 0.0, 0.0);
+            tr.translation += offset;
         }
         if let Some(name) = world.get::<Name>(copy).map(|n| n.as_str().to_string()) {
             world.entity_mut(copy).insert(Name::new(next_name(&name)));
@@ -678,17 +696,19 @@ pub fn duplicate_selection(world: &mut World, editor: &mut Editor) {
             saved: scene_ops::save_entity(world, copy),
             parent,
         });
-        copies.push(copy);
+        copies.push((e, copy));
     }
     if copies.is_empty() {
-        return;
+        return copies;
     }
-    let label = count_label(world, "Duplicate", &copies);
+    let new: Vec<Entity> = copies.iter().map(|c| c.1).collect();
+    let label = count_label(world, "Duplicate", &new);
     editor
         .history
         .record(world, Command::Group(label.clone(), commands), t);
-    editor.selection = copies;
+    editor.selection = new;
     editor.info(t, label);
+    copies
 }
 
 /// Copy the selection (topmost entities, with their children) to the editor's clipboard.

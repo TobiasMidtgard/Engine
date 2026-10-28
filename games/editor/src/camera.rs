@@ -189,7 +189,7 @@ pub fn editor_camera(
             cam.drag = Some(MouseButton::Right);
         } else if buttons.just_pressed(MouseButton::Middle) {
             cam.drag = Some(MouseButton::Middle);
-        } else if alt && buttons.just_pressed(MouseButton::Left) {
+        } else if alt && buttons.just_pressed(MouseButton::Left) && !editor.gizmo.is_focused() {
             cam.drag = Some(MouseButton::Left);
         }
     }
