@@ -809,7 +809,7 @@ mod tests {
             json!({"mesh": "rocks/b.glb#Mesh0/Primitive0", "other": "rocks/a.glbx"})
         );
 
-        let dir = std::env::temp_dir().join(format!("editor-content-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("editor-gltf-uris-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let gltf = dir.join("bark.material.gltf");
         std::fs::write(&gltf, r#"{"images": [{"uri": "bark_basecolor.jpg"}]}"#).unwrap();
@@ -829,7 +829,8 @@ mod tests {
 
     #[test]
     fn free_names() {
-        let dir = std::env::temp_dir().join(format!("editor-content-{}", std::process::id()));
+        // Each test its own folder: tests run in parallel.
+        let dir = std::env::temp_dir().join(format!("editor-free-names-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("crate.glb"), "").unwrap();

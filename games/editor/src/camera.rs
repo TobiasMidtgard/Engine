@@ -122,6 +122,39 @@ impl EditorCamera {
     }
 }
 
+/// A camera for another scene view: looking along `forward` at `pivot` from `distance`,
+/// orthographic for the axis views of a quad layout (3ds Max's and Blender's quad view). It
+/// draws as an extra view into its pane.
+pub fn pane_camera(
+    world: &mut World,
+    forward: Vec3,
+    pivot: DVec3,
+    distance: f64,
+    ortho: bool,
+) -> Entity {
+    let mut cam = EditorCamera::looking(forward);
+    cam.pivot_distance = distance;
+    let mut t = Transform::from_translation(pivot + DVec3::Z * distance);
+    cam.look_along(&mut t, forward);
+    cam.ortho = ortho;
+    let base = Camera::perspective(60.0);
+    let projection = cam.projection(base.projection);
+    world
+        .spawn((
+            crate::scene_ops::EditorOnly,
+            Name::new("Editor view camera"),
+            Camera {
+                order: 999,
+                projection,
+                ..base
+            },
+            cam,
+            t,
+            ExtraView::window(),
+        ))
+        .id()
+}
+
 /// The name of a view looking along `forward`: an axis view's name, or how it projects.
 pub fn view_name(forward: Vec3, ortho: bool) -> &'static str {
     let along = |axis: Vec3| forward.dot(axis) > 0.999;

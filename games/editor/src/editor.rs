@@ -100,6 +100,39 @@ fn world_resources(world: &World) -> Vec<(String, Value)> {
         .collect()
 }
 
+/// How the scene tab is split into views (Unreal's viewport layouts, 3ds Max's quad view).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    One,
+    /// Side by side: perspective and top.
+    Two,
+    /// Top, front, right and perspective.
+    Four,
+}
+
+/// A scene view's own camera and pointer state. The active view's lives in [`Editor`]'s
+/// `camera`, `gizmo`, `view`, `box_start` and `viewport_hovered`, so everything that works
+/// on "the view" works on the one the pointer is in.
+pub struct Pane {
+    pub camera: Entity,
+    pub gizmo: transform_gizmo_egui::Gizmo,
+    pub view: Option<ViewInfo>,
+    pub box_start: Option<egui::Pos2>,
+    pub viewport_hovered: bool,
+}
+
+impl Pane {
+    pub fn new(camera: Entity) -> Self {
+        Self {
+            camera,
+            gizmo: Default::default(),
+            view: None,
+            box_start: None,
+            viewport_hovered: false,
+        }
+    }
+}
+
 /// All editor state other than the dock layout.
 #[derive(Resource)]
 pub struct Editor {
@@ -189,6 +222,17 @@ pub struct Editor {
     pub import_path: String,
     /// The Content Browser.
     pub browser: crate::browser::Browser,
+    /// Scene views: the layout, each view's state (see [`Pane`]), the one being drawn, the
+    /// active one, and the one maximized (when it fills the tab alone).
+    pub layout: Layout,
+    pub panes: Vec<Pane>,
+    pub pane: usize,
+    pub active_pane: usize,
+    pub maximized: Option<usize>,
+    /// A view's Maximize or Restore button was clicked.
+    pub maximize_request: Option<usize>,
+    /// The whole scene tab (toolbars and bars go there, not in one view).
+    pub tab_rect: Option<egui::Rect>,
     /// What is hidden and locked in the scene view.
     pub hide: crate::hide::Hide,
     /// The outliner's type filter (names from `ui::OUTLINER_TYPES`).
@@ -249,6 +293,13 @@ impl Editor {
             model_watch: Default::default(),
             import_path: String::new(),
             browser: Default::default(),
+            layout: Layout::One,
+            panes: vec![Pane::new(camera)],
+            pane: 0,
+            active_pane: 0,
+            maximized: None,
+            maximize_request: None,
+            tab_rect: None,
             hide: Default::default(),
             outliner_types: Vec::new(),
             outliner_rename: None,
@@ -319,6 +370,27 @@ impl Editor {
             }
         }
         self.hide.remap(map);
+    }
+
+    /// Swap the editor's view state with pane `i`'s (twice puts it back).
+    pub fn swap_pane(&mut self, i: usize) {
+        let p = &mut self.panes[i];
+        std::mem::swap(&mut self.camera, &mut p.camera);
+        std::mem::swap(&mut self.gizmo, &mut p.gizmo);
+        std::mem::swap(&mut self.view, &mut p.view);
+        std::mem::swap(&mut self.box_start, &mut p.box_start);
+        std::mem::swap(&mut self.viewport_hovered, &mut p.viewport_hovered);
+    }
+
+    /// Make pane `i` the active view.
+    pub fn activate_pane(&mut self, i: usize) {
+        if i == self.active_pane || i >= self.panes.len() {
+            return;
+        }
+        let a = self.active_pane;
+        self.swap_pane(a);
+        self.swap_pane(i);
+        self.active_pane = i;
     }
 
     pub fn is_playing(&self) -> bool {

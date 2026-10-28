@@ -132,7 +132,7 @@ impl TabViewer for Viewer<'_> {
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
         let (world, editor) = (&mut *self.world, &mut *self.editor);
         match tab {
-            Tab::Viewport => crate::viewport::scene_view(ui, world, editor),
+            Tab::Viewport => crate::viewport::panes(ui, world, editor),
             Tab::Outliner => outliner(ui, world, editor),
             Tab::Inspector => {
                 egui::ScrollArea::vertical()
@@ -1096,6 +1096,19 @@ fn shortcuts(ctx: &egui::Context, world: &mut World, editor: &mut Editor) {
     }
     if pressed(egui::Key::F, false) {
         editor::focus_selection(world, editor);
+    }
+    // Ctrl+Space maximizes the view under the pointer or restores the layout, Ctrl+Alt+Q
+    // switches between four views and one (Blender's keys).
+    if pressed(egui::Key::Space, true) {
+        crate::viewport::toggle_maximized(world, editor);
+    }
+    if pressed(egui::Key::Q, true) && ctx.input(|i| i.modifiers.alt) {
+        let layout = if editor.layout == editor::Layout::Four {
+            editor::Layout::One
+        } else {
+            editor::Layout::Four
+        };
+        crate::viewport::set_layout(world, editor, layout);
     }
     // H hides or shows the selection, Shift+H isolates it (Unity's keys).
     if ctx.input(|i| i.key_pressed(egui::Key::H) && !i.modifiers.command) {

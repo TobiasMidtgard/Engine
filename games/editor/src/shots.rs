@@ -2208,6 +2208,47 @@ pub fn round22(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Round 23: several scene views. One view, then four (top, front, right, perspective, as 3ds
+/// Max and Blender's quad view), the top view active, maximized, and two side by side.
+pub fn round23(dir: impl Into<PathBuf>) -> ShotScript {
+    use crate::editor::Layout;
+    use crate::viewport::{set_layout, toggle_maximized};
+    let at = DVec3::new(9.5, 6.0, 9.0);
+    let target = DVec3::new(-0.5, 0.6, -2.0);
+    let steps = vec![
+        Step::Camera(at, target),
+        Step::Do(Box::new(move |world, editor| {
+            editor.icons = false;
+            editor.tool = Tool::Move;
+            editor.select(find(world, "Crate stack"));
+            if let Some(mut cam) = world.get_mut::<crate::camera::EditorCamera>(editor.camera) {
+                cam.pivot_distance = (target - at).length();
+            }
+        })),
+        Step::Wait(40),
+        Step::Shot("108_one_view"),
+        Step::Do(Box::new(|world, editor| {
+            set_layout(world, editor, Layout::Four)
+        })),
+        Step::Wait(60),
+        Step::Shot("109_four_views"),
+        Step::Do(Box::new(|_, editor| editor.activate_pane(1))),
+        Step::Wait(20),
+        Step::Shot("110_top_view_active"),
+        Step::Do(Box::new(toggle_maximized)),
+        Step::Wait(40),
+        Step::Shot("111_top_view_maximized"),
+        Step::Do(Box::new(|world, editor| {
+            toggle_maximized(world, editor);
+            set_layout(world, editor, Layout::Two);
+            editor.activate_pane(0);
+        })),
+        Step::Wait(40),
+        Step::Shot("112_two_views"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {

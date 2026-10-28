@@ -316,8 +316,10 @@ pub fn sync(world: &mut World) {
     });
     match (wanted, existing) {
         (Some((lens, eye, viewport)), existing) => {
+            // Extra views draw lowest order first: the preview goes over the scene views.
             let lens = Camera {
                 active: true,
+                order: 2000,
                 ..lens
             };
             match existing.filter(|&e| world.get_entity(e).is_ok()) {

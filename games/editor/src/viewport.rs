@@ -7,7 +7,7 @@ use transform_gizmo_egui::{
     EnumSet, GizmoConfig, GizmoExt, GizmoMode, GizmoOrientation, GizmoVisuals,
 };
 
-use crate::editor::{self, Editor, Mode, Tool};
+use crate::editor::{self, Editor, Layout, Mode, Pane, Tool};
 use crate::models::Dragged;
 use crate::picking;
 use crate::scene_ops::{EditorOnly, InScene};
@@ -17,6 +17,301 @@ use crate::view::{ViewInfo, mint_rows};
 
 /// Screen radius of an icon, points.
 const ICON_RADIUS: f32 = 11.0;
+
+/// Gap between scene views, points.
+const PANE_GAP: f32 = 2.0;
+
+/// The scene tab: one, two or four scene views (Unreal's viewport layouts, 3ds Max's and
+/// Blender's quad view), each with its own camera. The view under the pointer is the active
+/// one: the camera keys, the tool bar and the gizmo work there.
+pub fn panes(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
+    let rect = ui.max_rect();
+    editor.tab_rect = Some(rect);
+    ensure_panes(world, editor);
+    let shown = pane_rects(editor, rect);
+    // A layout of one view shows the active one; make sure it is.
+    if shown.len() == 1 && shown[0].0 != editor.active_pane {
+        crate::camera_preview::stop_pilot(world, editor);
+        editor.activate_pane(shown[0].0);
+    }
+    // The pointer picks the active view, but never in the middle of something (a drag, a fly,
+    // a box, a pilot), so a drag that leaves its view stays with it.
+    let busy = ui.input(|i| i.pointer.any_down())
+        || ui.ctx().dragged_id().is_some()
+        || editor.gizmo.is_focused()
+        || editor.box_start.is_some()
+        || crate::camera_preview::piloting(world).is_some()
+        || world
+            .get::<crate::camera::EditorCamera>(editor.camera)
+            .is_some_and(|c| c.is_dragging());
+    if !busy
+        && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
+        && let Some(&(i, _)) = shown.iter().find(|(_, r)| r.contains(pos))
+    {
+        editor.activate_pane(i);
+    }
+    sync_cameras(world, editor, &shown);
+
+    for &(i, r) in &shown {
+        if i != editor.active_pane {
+            editor.swap_pane(i);
+        }
+        editor.pane = i;
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(r)
+                .id_salt(("scene view", i)),
+        );
+        scene_view(&mut child, world, editor);
+        if i != editor.active_pane {
+            editor.swap_pane(i);
+        }
+    }
+    editor.pane = editor.active_pane;
+    if let Some(i) = editor.maximize_request.take() {
+        crate::camera_preview::stop_pilot(world, editor);
+        editor.activate_pane(i);
+        toggle_maximized(world, editor);
+    }
+
+    if shown.len() > 1 {
+        let painter = ui.painter_at(rect);
+        // The gaps between views, and the active one outlined (as Unreal's yellow frame).
+        let mut gaps = vec![rect];
+        for &(_, r) in &shown {
+            gaps = gaps.into_iter().flat_map(|g| subtract(g, r)).collect();
+        }
+        for g in gaps {
+            painter.rect_filled(g, 0, theme::BORDER);
+        }
+        if let Some(&(_, r)) = shown.iter().find(|(i, _)| *i == editor.active_pane) {
+            painter.rect_stroke(
+                r,
+                0,
+                egui::Stroke::new(1.5, theme::ACCENT),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+}
+
+/// `a` without `b`: up to four rectangles.
+fn subtract(a: egui::Rect, b: egui::Rect) -> Vec<egui::Rect> {
+    let b = a.intersect(b);
+    if !b.is_positive() {
+        return vec![a];
+    }
+    [
+        egui::Rect::from_min_max(a.min, egui::pos2(a.max.x, b.min.y)),
+        egui::Rect::from_min_max(egui::pos2(a.min.x, b.max.y), a.max),
+        egui::Rect::from_min_max(egui::pos2(a.min.x, b.min.y), egui::pos2(b.min.x, b.max.y)),
+        egui::Rect::from_min_max(egui::pos2(b.max.x, b.min.y), egui::pos2(a.max.x, b.max.y)),
+    ]
+    .into_iter()
+    .filter(|r| r.is_positive())
+    .collect()
+}
+
+/// The axis views of the quad layout: top, front and right, orthographic, looking at what the
+/// perspective view looks at (3ds Max's and Blender's quad view).
+const AXIS_PANES: [Vec3; 3] = [Vec3::NEG_Y, Vec3::NEG_Z, Vec3::NEG_X];
+
+/// The other views' cameras, made the first time a layout needs them.
+fn ensure_panes(world: &mut World, editor: &mut Editor) {
+    if editor.layout == Layout::One || editor.panes.len() > AXIS_PANES.len() {
+        return;
+    }
+    let (pivot, distance) = match (
+        world.get::<Transform>(editor.camera),
+        world.get::<crate::camera::EditorCamera>(editor.camera),
+    ) {
+        (Some(t), Some(c)) => (
+            t.translation + t.forward().as_dvec3() * c.pivot_distance,
+            c.pivot_distance.max(12.0),
+        ),
+        _ => (DVec3::ZERO, 20.0),
+    };
+    for forward in AXIS_PANES {
+        let camera = crate::camera::pane_camera(world, forward, pivot, distance, true);
+        editor.panes.push(Pane::new(camera));
+    }
+}
+
+/// The views the layout shows and where (pane 0 is the perspective view, then top, front and
+/// right).
+pub fn pane_rects(editor: &Editor, rect: egui::Rect) -> Vec<(usize, egui::Rect)> {
+    let half = PANE_GAP * 0.5;
+    let mid = rect.center();
+    let left = egui::Rect::from_min_max(rect.min, egui::pos2(mid.x - half, rect.max.y));
+    let right = egui::Rect::from_min_max(egui::pos2(mid.x + half, rect.min.y), rect.max);
+    let top = |r: egui::Rect| egui::Rect::from_min_max(r.min, egui::pos2(r.max.x, mid.y - half));
+    let bottom = |r: egui::Rect| egui::Rect::from_min_max(egui::pos2(r.min.x, mid.y + half), r.max);
+    let one = vec![(editor.active_pane, rect)];
+    match (editor.layout, editor.maximized) {
+        (Layout::One, _) => one,
+        (_, Some(i)) if i < editor.panes.len() => vec![(i, rect)],
+        _ if editor.panes.len() <= AXIS_PANES.len() => one,
+        (Layout::Two, _) => vec![(0, left), (1, right)],
+        // Top and front above, right and perspective below, as 3ds Max lays them out.
+        (Layout::Four, _) => vec![
+            (1, top(left)),
+            (2, top(right)),
+            (3, bottom(left)),
+            (0, bottom(right)),
+        ],
+    }
+}
+
+/// The camera of pane `i` (the active pane's lives in the editor).
+fn pane_camera(editor: &Editor, i: usize) -> Entity {
+    if i == editor.active_pane {
+        editor.camera
+    } else {
+        editor.panes[i].camera
+    }
+}
+
+/// Shown views render, the rest don't. One shown view is the main view (the perspective one when
+/// it is shown, at full quality); the others draw as extra views into their panes.
+fn sync_cameras(world: &mut World, editor: &Editor, shown: &[(usize, egui::Rect)]) {
+    let main = if shown.iter().any(|&(i, _)| i == 0) {
+        0
+    } else {
+        shown[0].0
+    };
+    for i in 0..editor.panes.len() {
+        let e = pane_camera(editor, i);
+        let on = shown.iter().any(|&(j, _)| j == i);
+        let Ok(mut entity) = world.get_entity_mut(e) else {
+            continue;
+        };
+        if let Some(mut camera) = entity.get_mut::<Camera>()
+            && camera.active != on
+        {
+            camera.active = on;
+        }
+        let extra = entity.contains::<ExtraView>();
+        if on && i == main && extra {
+            entity.remove::<ExtraView>();
+        } else if on && i != main && !extra {
+            entity.insert(
+                ExtraView::window().with_quality(engine::world::Scalability::preset(
+                    engine::world::QualityPreset::Medium,
+                )),
+            );
+        }
+    }
+}
+
+/// Switch the scene tab's layout.
+pub fn set_layout(world: &mut World, editor: &mut Editor, layout: Layout) {
+    // Flying a camera from one view must not carry over to another.
+    crate::camera_preview::stop_pilot(world, editor);
+    editor.layout = layout;
+    editor.maximized = None;
+    // Back to one view is back to the perspective view, not whichever axis view was active:
+    // Blender does this so leaving quad view never loses the user's view.
+    if layout == Layout::One {
+        editor.activate_pane(0);
+    }
+}
+
+/// Let the active view fill the scene tab, or put the layout back (Blender's Ctrl+Space).
+pub fn toggle_maximized(world: &mut World, editor: &mut Editor) {
+    if editor.layout == Layout::One {
+        return;
+    }
+    crate::camera_preview::stop_pilot(world, editor);
+    editor.maximized = match editor.maximized {
+        Some(_) => None,
+        None => Some(editor.active_pane),
+    };
+}
+
+/// The layout menu in the tool bar.
+fn layout_menu(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
+    let label = match (editor.layout, editor.maximized) {
+        (Layout::One, _) => "1 view ⏷",
+        (_, Some(_)) => "Maximized ⏷",
+        (Layout::Two, _) => "2 views ⏷",
+        (Layout::Four, _) => "4 views ⏷",
+    };
+    ui.menu_button(label, |ui| {
+        for (layout, name) in [
+            (Layout::One, "One view"),
+            (Layout::Two, "Two side by side"),
+            (Layout::Four, "Four: top, front, right, perspective"),
+        ] {
+            let on = editor.layout == layout && editor.maximized.is_none();
+            if ui.selectable_label(on, name).clicked() {
+                set_layout(world, editor, layout);
+                ui.close();
+            }
+        }
+        ui.separator();
+        let text = if editor.maximized.is_some() {
+            "Restore the views"
+        } else {
+            "Maximize this view"
+        };
+        if ui
+            .add_enabled(
+                editor.layout != Layout::One,
+                egui::Button::new(text).shortcut_text("Ctrl+Space"),
+            )
+            .clicked()
+        {
+            toggle_maximized(world, editor);
+            ui.close();
+        }
+        ui.label(theme::dim("Ctrl+Alt+Q: four views or one"));
+    })
+    .response
+    .on_hover_text("Scene view layout: one, two or four views, each with its own camera");
+}
+
+/// With several views, each names its view at its bottom left, with a button to maximize it.
+fn pane_label(ui: &mut egui::Ui, editor: &mut Editor, pane: egui::Rect) {
+    if editor.layout == Layout::One {
+        return;
+    }
+    let Some(view) = editor.view else {
+        return;
+    };
+    let ortho = view.ortho.is_some();
+    let name = crate::camera::view_name(view.rotation * Vec3::NEG_Z, ortho);
+    let i = editor.pane;
+    let mut toggle = false;
+    egui::Area::new(egui::Id::new(("pane label", i)))
+        .fixed_pos(pane.left_bottom() + egui::vec2(8.0, -32.0))
+        .order(egui::Order::Middle)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgba_unmultiplied(22, 23, 26, 200))
+                .corner_radius(4)
+                .inner_margin(egui::Margin::symmetric(6, 2))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let color = if i == editor.active_pane {
+                            theme::ACCENT
+                        } else {
+                            theme::TEXT
+                        };
+                        ui.label(egui::RichText::new(name).color(color).strong());
+                        let text = if editor.maximized.is_some() {
+                            "Restore"
+                        } else {
+                            "Maximize"
+                        };
+                        toggle = ui.small_button(text).on_hover_text("Ctrl+Space").clicked();
+                    });
+                });
+        });
+    if toggle {
+        // Applied once every view is drawn (this one's state is swapped in now).
+        editor.maximize_request = Some(i);
+    }
+}
 
 pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     let rect = ui.max_rect();
@@ -29,10 +324,12 @@ pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     editor.viewport_hovered = response.contains_pointer();
 
     let painter = ui.painter_at(rect);
-    if !editor.game_view {
+    // World-space helpers show in every view: draw them once, for the active one.
+    let active = editor.pane == editor.active_pane;
+    if !editor.game_view && active {
         draw_selection(world, editor);
     }
-    if editor.grid && !editor.game_view {
+    if editor.grid && !editor.game_view && active {
         draw_grid(world, &view);
     }
     let icons = if editor.icons && !editor.game_view {
@@ -84,7 +381,11 @@ pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
         &response,
         alt || gizmo_used || snapping,
     );
-    crate::snap::hint(ui, editor, rect);
+    // The snap hint runs along the bottom of a lone view; with several it would cover their
+    // labels.
+    if editor.layout == Layout::One || editor.maximized.is_some() {
+        crate::snap::hint(ui, editor, rect);
+    }
 
     overlays(ui, world, editor, rect);
 }
@@ -627,8 +928,16 @@ fn draw_icons(
 }
 
 /// Tool bar (top left), stats (top right) and the play-mode frame.
-fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, rect: egui::Rect) {
+fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, pane: egui::Rect) {
     let ctx = ui.ctx().clone();
+    pane_label(ui, editor, pane);
+    axis_widget(&ctx, world, editor, pane);
+    // With several views, each has its label and axis widget; the tool bar, stats and bars
+    // belong to the whole tab (drawn once, with the active view).
+    if editor.pane != editor.active_pane {
+        return;
+    }
+    let rect = editor.tab_rect.unwrap_or(pane);
     egui::Area::new(egui::Id::new("viewport tools"))
         .fixed_pos(rect.min + egui::vec2(8.0, 8.0))
         .order(egui::Order::Middle)
@@ -743,6 +1052,7 @@ fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, rect: egu
                             .on_hover_text("Ground grid");
                         ui.toggle_value(&mut editor.icons, "💡")
                             .on_hover_text("Icons for lights, cameras and demos");
+                        layout_menu(ui, world, editor);
                         let speed = world
                             .get::<crate::camera::EditorCamera>(editor.camera)
                             .map(|c| c.speed)
@@ -814,7 +1124,6 @@ fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, rect: egu
     );
     painter.galley(bg.min + egui::vec2(8.0, 4.0), galley, egui::Color32::WHITE);
 
-    axis_widget(&ctx, world, editor, rect);
     crate::prefab_ui::editing_bar(&ctx, world, editor, rect);
     isolation_bar(&ctx, world, editor, rect);
     crate::camera_preview::ui(ui, world, editor, rect);
@@ -870,7 +1179,7 @@ fn axis_widget(ctx: &egui::Context, world: &World, editor: &mut Editor, rect: eg
     let center = axis_widget_center(rect);
     let area =
         egui::Rect::from_center_size(center, egui::vec2(RADIUS * 2.0 + 24.0, RADIUS * 2.0 + 24.0));
-    egui::Area::new(egui::Id::new("axis widget"))
+    egui::Area::new(egui::Id::new(("axis widget", editor.pane)))
         .fixed_pos(area.min)
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
@@ -1004,5 +1313,81 @@ fn isolation_bar(ctx: &egui::Context, world: &mut World, editor: &mut Editor, re
         });
     if exit {
         crate::hide::toggle_isolation(world, editor);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::camera::EditorCamera;
+
+    /// Four views tile the tab with thin gaps, the active one keeps its state while the others
+    /// are drawn, and only the perspective view renders as the main view.
+    #[test]
+    fn four_views_tile_the_tab_and_keep_their_cameras() {
+        let mut world = World::new();
+        let start = Transform::from_xyz(0.0, 5.0, 10.0).looking_at(DVec3::ZERO, Vec3::Y);
+        let main = world
+            .spawn((
+                Camera::perspective(60.0),
+                EditorCamera::looking(start.forward()),
+                start,
+            ))
+            .id();
+        let mut editor = Editor::new(main);
+        let tab = egui::Rect::from_min_size(egui::pos2(0.0, 20.0), egui::vec2(800.0, 400.0));
+        assert_eq!(pane_rects(&editor, tab), vec![(0, tab)]);
+
+        editor.layout = Layout::Four;
+        ensure_panes(&mut world, &mut editor);
+        assert_eq!(editor.panes.len(), 4);
+        let shown = pane_rects(&editor, tab);
+        let order: Vec<usize> = shown.iter().map(|s| s.0).collect();
+        assert_eq!(order, [1, 2, 3, 0]);
+        let area: f32 = shown.iter().map(|s| s.1.area()).sum();
+        assert!(tab.area() - area < 2.0 * PANE_GAP * 800.0, "{area}");
+        let gaps = shown.iter().fold(vec![tab], |g, &(_, r)| {
+            g.into_iter().flat_map(|g| subtract(g, r)).collect()
+        });
+        assert!(
+            !gaps.is_empty()
+                && gaps
+                    .iter()
+                    .all(|g| g.width() <= PANE_GAP + 0.01 || g.height() <= PANE_GAP + 0.01)
+        );
+
+        // The axis views look at what the perspective view looks at, orthographic.
+        let top = editor.panes[1].camera;
+        let t = world.get::<Transform>(top).unwrap();
+        assert!(t.forward().dot(Vec3::NEG_Y) > 0.999);
+        assert!(world.get::<EditorCamera>(top).unwrap().ortho);
+
+        sync_cameras(&mut world, &editor, &shown);
+        assert!(world.get::<ExtraView>(main).is_none());
+        assert!(world.get::<ExtraView>(top).is_some());
+
+        // Activating the top view swaps its camera in; the old one keeps its place.
+        editor.activate_pane(1);
+        assert_eq!(editor.camera, top);
+        assert_eq!(pane_camera(&editor, 0), main);
+        editor.activate_pane(0);
+        assert_eq!(editor.camera, main);
+        assert_eq!(pane_camera(&editor, 1), top);
+
+        // Maximizing the front view makes it the only one and the main view.
+        editor.activate_pane(2);
+        toggle_maximized(&mut world, &mut editor);
+        let shown = pane_rects(&editor, tab);
+        assert_eq!(shown, vec![(2, tab)]);
+        sync_cameras(&mut world, &editor, &shown);
+        let front = pane_camera(&editor, 2);
+        assert!(world.get::<ExtraView>(front).is_none());
+        assert!(!world.get::<Camera>(main).unwrap().active);
+        assert!(world.get::<Camera>(front).unwrap().active);
+
+        // One view again is the perspective view (Blender's quad toggle).
+        set_layout(&mut world, &mut editor, Layout::One);
+        assert_eq!(editor.camera, main);
+        assert_eq!(pane_rects(&editor, tab), vec![(0, tab)]);
     }
 }
