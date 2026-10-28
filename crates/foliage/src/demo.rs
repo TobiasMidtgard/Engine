@@ -155,8 +155,8 @@ pub fn forest_viewpoints(center: DVec3) -> Vec<Viewpoint> {
                 "forest_garden",
                 "A garden bed in time-lapse: strawberries leaf, flower, fruit and send runners; a sapling climbs",
             ),
-            [GARDEN[0] + 0.7, 0.95, GARDEN[1] + 1.75],
-            [GARDEN[0] - 0.1, 0.12, GARDEN[1] - 0.15],
+            [GARDEN[0] + 0.45, 0.62, GARDEN[1] + 1.15],
+            [GARDEN[0] - 0.05, 0.1, GARDEN[1] - 0.2],
             10.0,
         ),
         view(
