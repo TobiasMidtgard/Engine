@@ -1,8 +1,10 @@
 //! Cross-fades between a plant's levels of detail, so trees and plants don't pop as the camera
 //! moves (playtest #33). The part that changes takes its new mesh at once and dithers in while
-//! a short-lived ghost beside it, carrying the old mesh, dithers out on the complementary
-//! pattern ([`DitherFade::pair`]): together they cover every pixel once, and TAA smooths the
-//! dither, as Unity's LOD Group "Cross Fade" and Unreal's dithered LOD transitions do. The
+//! a short-lived ghost beside it, carrying the old mesh, dithers out ([`overlapped`]). The new
+//! one comes in fully before the old one starts to go: two alpha-tested crowns (leaf cards and
+//! leaf-by-leaf, say) cover different pixels, so a complementary swap ([`DitherFade::pair`])
+//! thins the crown to half its leaves mid-way and the sky shows through, where overlapping
+//! briefly draws both, which reads as a crown no thinner than either. TAA smooths the dither, as Unity's LOD Group "Cross Fade" and Unreal's dithered LOD transitions do. The
 //! fade runs on time (`FADE_S`), so it finishes even when the camera stops, and the switch
 //! distances have a band of hysteresis ([`HYSTERESIS`]) so a camera resting on a boundary
 //! doesn't flicker. Research: engine-design/foliage-research.md, section 4.
@@ -16,7 +18,7 @@ use engine_core::prelude::*;
 use engine_render::{Camera, DitherFade, MeshRenderer};
 
 /// How long a cross-fade takes (seconds).
-pub const FADE_S: f32 = 0.35;
+pub const FADE_S: f32 = 0.5;
 /// Most fades started in one frame; past it parts switch at once (a camera turning onto a
 /// whole new forest shouldn't dither it all).
 pub const MAX_FADES_PER_FRAME: usize = 96;
@@ -126,6 +128,16 @@ pub fn swap(
     }
 }
 
+/// The old look's and the new one's dither `t` of the way through a fade (0..=1): the new one
+/// comes in over the first half, the old one goes over the second, on opposite patterns.
+pub fn overlapped(t: f32) -> (DitherFade, DitherFade) {
+    let t = t.clamp(0.0, 1.0);
+    (
+        DitherFade((2.0 * t - 1.0).max(0.0)),
+        DitherFade(-(1.0 - 2.0 * t).max(0.0)),
+    )
+}
+
 /// Note a camera cut at the start of the frame and reset the frame's count.
 pub fn begin_fades(mut fades: ResMut<LodFades>, cams: Query<(&Camera, &GlobalTransform)>) {
     let at = crate::visuals::camera_position(&cams);
@@ -147,7 +159,7 @@ pub fn advance_fades(
     let step = time.delta_secs() / FADE_S;
     for (e, mut fade, dither) in &mut parts {
         fade.t = (fade.t + step).min(1.0);
-        let (out, into) = DitherFade::pair(fade.t);
+        let (out, into) = overlapped(fade.t);
         if let Some(g) = fade.ghost
             && let Ok(mut d) = ghosts.get_mut(g)
         {
@@ -201,6 +213,20 @@ mod tests {
         // Well past the band it does switch, both ways.
         assert_eq!(with_hysteresis(level(1), 60.0, pick), level(2));
         assert_eq!(with_hysteresis(level(2), 40.0, pick), level(1));
+    }
+
+    #[test]
+    fn a_fade_never_thins_the_crown() {
+        // Whatever the coverage of each, at every step one of the two shows whole.
+        for k in 0..=20 {
+            let (out, into) = overlapped(k as f32 / 20.0);
+            assert!(
+                out.hidden() == 0.0 || into.hidden() == 0.0,
+                "{k}: {out:?} {into:?}"
+            );
+        }
+        assert_eq!(overlapped(0.0).1.hidden(), 1.0);
+        assert_eq!(overlapped(1.0).0.hidden(), 1.0);
     }
 
     #[test]
