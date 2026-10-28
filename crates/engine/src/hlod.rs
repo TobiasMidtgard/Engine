@@ -367,6 +367,27 @@ pub(crate) fn fade_in(world: &mut World, id: CellId, t: f32) {
     }
 }
 
+/// Cell `i` was taken out or replaced: its proxy goes, with its mesh.
+pub(crate) fn forget(world: &mut World, i: usize) {
+    let Some(mut proxies) = world.get_resource_mut::<Proxies>() else {
+        return;
+    };
+    let Some(slot) = proxies.slots.get_mut(i) else {
+        return;
+    };
+    let slot = std::mem::take(slot);
+    if let Some(e) = slot.entity
+        && let Ok(entity) = world.get_entity_mut(e)
+    {
+        entity.despawn();
+    }
+    if let Some(mesh) = slot.mesh
+        && let Some(mut meshes) = world.get_resource_mut::<Assets<Mesh>>()
+    {
+        meshes.remove(mesh);
+    }
+}
+
 fn despawn(world: &mut World, i: usize, entity: Entity) {
     if let Ok(e) = world.get_entity_mut(entity) {
         e.despawn();

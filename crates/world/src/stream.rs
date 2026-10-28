@@ -48,6 +48,33 @@ impl Default for StreamingSource {
 #[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamFrame(pub String);
 
+/// How an entity of a scene is streamed when the scene is partitioned into cells (the engine's
+/// `scene_stream`), as Unreal's actors carry "Is Spatially Loaded" and a runtime grid. Without
+/// one, a root with a `Transform` goes to the default grid's cell under it, and a root without
+/// one (sky, settings, global lights) is always loaded.
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StreamPlacement {
+    /// Loads with the cell it stands in (false: always loaded, with the scene).
+    pub spatial: bool,
+    /// The runtime grid it belongs to (a grid has its own cell size and load distance:
+    /// small props in a fine near grid, landmarks in a coarse far one); empty: the first grid.
+    pub grid: String,
+    /// How far it reaches from its origin, meters. Something bigger than a cell goes to a
+    /// coarser level of its grid, whose cells are 2, 4, 8… times as wide.
+    pub radius: f32,
+}
+
+impl Default for StreamPlacement {
+    fn default() -> Self {
+        Self {
+            spatial: true,
+            grid: String::new(),
+            radius: 0.0,
+        }
+    }
+}
+
 /// Index of a cell in [`StreamedCells`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CellId(pub u32);
@@ -114,6 +141,10 @@ pub struct CellInfo {
     /// The [`StreamFrame`] it rides with (`None`: it stays put in the world, following only
     /// shifts). `center` is where the frame puts it now.
     pub frame: Option<String>,
+    /// Taken out of streaming (its scene was unloaded or replaced): never loads again, and
+    /// readiness checks skip it. Registering a cell with its key brings the slot back.
+    #[serde(default)]
+    pub retired: bool,
 }
 
 impl CellInfo {
@@ -140,7 +171,7 @@ impl StreamedCells {
     pub fn is_ready_around(&self, p: DVec3, radius: f64) -> bool {
         self.cells
             .iter()
-            .filter(|c| c.distance(p) <= radius)
+            .filter(|c| !c.retired && c.distance(p) <= radius)
             .all(|c| c.state == CellState::Loaded)
     }
 
@@ -180,6 +211,11 @@ pub(crate) fn register(app: &mut App) {
         "Pulls streamed cells in around itself: range_scale (times each cell's load distance), \
          lookahead_s (also loads ahead along its velocity). Without any, the simulation foci are \
          sources.",
+    )
+    .register_component::<StreamPlacement>(
+        "How a scene entity streams when its scene is partitioned into cells: spatial (false: \
+         always loaded), grid (runtime grid name, empty = the first), radius (meters it reaches; \
+         bigger than a cell goes to a coarser grid level).",
     );
 }
 
@@ -204,6 +240,7 @@ mod tests {
             assets_mb: 0.0,
             releases_assets: false,
             frame: None,
+            retired: false,
         };
         let mut cells = StreamedCells {
             cells: vec![
@@ -218,6 +255,9 @@ mod tests {
         cells.cells[1].state = CellState::Building;
         assert_eq!(cells.waking().count(), 1);
         cells.cells[1].state = CellState::Loaded;
+        assert!(cells.is_ready_around(DVec3::new(450.0, 0.0, 0.0), 100.0));
+        cells.cells[1].state = CellState::Unloaded;
+        cells.cells[1].retired = true;
         assert!(cells.is_ready_around(DVec3::new(450.0, 0.0, 0.0), 100.0));
         assert_eq!(cells.find("far"), Some(CellId(1)));
         assert_eq!(cells.cells[1].distance(DVec3::new(480.0, 0.0, 0.0)), 10.0);

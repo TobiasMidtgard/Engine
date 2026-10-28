@@ -10,6 +10,12 @@
 //! [`crate::stream::StreamCell::release_assets`], removes those no [`MeshRenderer`] still
 //! draws once its entities are gone.
 //!
+//! Keyed assets the renderer makes again from their key whenever something asks (`shape:`
+//! meshes of [`MeshRef::Shape`], `mat:` materials of [`MaterialRef::Inline`]) are shared but
+//! cost nothing to bring back, so a releasing cell also frees the ones its entities drew that
+//! nothing draws once they are gone: a scene of hand-sized props makes thousands of distinct
+//! shapes, and they would otherwise stay for good.
+//!
 //! A module that keeps one of those handles in a cache past the unload gets a missing asset
 //! (handles carry generations), not another one; the stream audit counts such meshes after a
 //! reload, so a zone opts in once its module keeps mesh data, not handles, between loads.
@@ -18,7 +24,14 @@ use std::collections::HashSet;
 
 use engine_assets::{Assets, Handle};
 use engine_core::prelude::*;
-use engine_render::{Image, MaterialRef, Mesh, MeshRef, MeshRenderer, StandardMaterial, Vertex};
+use engine_render::{
+    Image, MaterialRef, Mesh, MeshRef, MeshRenderer, ResolvedMesh, StandardMaterial, Vertex,
+};
+
+/// Key prefixes of assets the renderer makes again on demand (`Shape::key`,
+/// `StandardMaterial::key`).
+const REMADE_MESHES: &str = "shape:";
+const REMADE_MATERIALS: &str = "mat:";
 
 /// Marks of the three asset stores, taken before and after a spawn step.
 #[derive(Debug, Clone, Copy, Default)]
@@ -52,6 +65,9 @@ pub(crate) struct CellAssets {
     meshes: Vec<Handle<Mesh>>,
     materials: Vec<Handle<StandardMaterial>>,
     images: Vec<Handle<Image>>,
+    /// What its entities drew (resolved handles), noted as it leaves: keyed ones the renderer
+    /// remakes on demand go too if nothing else draws them.
+    drawn: HashSet<(Handle<Mesh>, Handle<StandardMaterial>)>,
 }
 
 impl CellAssets {
@@ -62,6 +78,15 @@ impl CellAssets {
         added(world, m0, m1, &mut self.meshes);
         added(world, t0, t1, &mut self.materials);
         added(world, i0, i1, &mut self.images);
+    }
+
+    /// Notes what `entities` draw (call before they despawn).
+    pub(crate) fn note_drawn(&mut self, world: &World, entities: &[Entity]) {
+        for &e in entities {
+            if let Some(r) = world.get::<ResolvedMesh>(e) {
+                self.drawn.insert((r.mesh, r.material));
+            }
+        }
     }
 
     /// How many of them are unkeyed and still live, and their heap bytes.
@@ -84,6 +109,10 @@ impl CellAssets {
         let mut meshes = HashSet::new();
         let mut materials = HashSet::new();
         let mut images = HashSet::new();
+        for r in world.query::<&ResolvedMesh>().iter(world) {
+            meshes.insert(r.mesh.index());
+            materials.insert(r.material.index());
+        }
         for r in world.query::<&MeshRenderer>().iter(world) {
             if let MeshRef::Handle(h) = &r.mesh {
                 meshes.insert(h.index());
@@ -96,8 +125,11 @@ impl CellAssets {
                 MaterialRef::Asset(_) => {}
             }
         }
+        let (remade_meshes, remade_materials): (Vec<_>, Vec<_>) = self.drawn.into_iter().unzip();
         let (mut n, mut bytes) = remove_unused(world, self.meshes, &meshes);
         let (n2, b2) = remove_unused(world, self.materials, &materials);
+        let (n4, b4) = remove_remade(world, remade_meshes, &meshes, REMADE_MESHES);
+        let (n5, b5) = remove_remade(world, remade_materials, &materials, REMADE_MATERIALS);
         // Images: what the materials left standing still use stays.
         if let Some(all) = world.get_resource::<Assets<StandardMaterial>>() {
             for (_, m) in all.iter() {
@@ -105,8 +137,8 @@ impl CellAssets {
             }
         }
         let (n3, b3) = remove_unused(world, self.images, &images);
-        n += n2 + n3;
-        bytes += b2 + b3;
+        n += n2 + n3 + n4 + n5;
+        bytes += b2 + b3 + b4 + b5;
         (n, bytes)
     }
 }
@@ -155,6 +187,37 @@ fn remove_unused<T: engine_assets::Asset>(
         }
         let size = assets.bytes_of(h) as u64;
         // An old generation (the module removed it itself) removes nothing.
+        if assets.remove(h).is_some() {
+            n += 1;
+            bytes += size;
+        }
+    }
+    (n, bytes)
+}
+
+/// Removes the keyed assets among `handles` whose key starts with `prefix` (the renderer makes
+/// them again from the key) and that nothing in `used` draws.
+fn remove_remade<T: engine_assets::Asset>(
+    world: &mut World,
+    handles: Vec<Handle<T>>,
+    used: &HashSet<u32>,
+    prefix: &str,
+) -> (u32, u64) {
+    let Some(mut assets) = world.get_resource_mut::<Assets<T>>() else {
+        return (0, 0);
+    };
+    let remade: HashSet<u32> = assets
+        .keys()
+        .filter(|(k, _)| k.starts_with(prefix))
+        .map(|(_, h)| h.index())
+        .collect();
+    let (mut n, mut bytes) = (0, 0);
+    let mut seen = HashSet::new();
+    for h in handles {
+        if !remade.contains(&h.index()) || used.contains(&h.index()) || !seen.insert(h.index()) {
+            continue;
+        }
+        let size = assets.bytes_of(h) as u64;
         if assets.remove(h).is_some() {
             n += 1;
             bytes += size;

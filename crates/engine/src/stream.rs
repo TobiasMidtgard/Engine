@@ -85,6 +85,7 @@ impl StreamCell {
                 assets_mb: 0.0,
                 releases_assets: false,
                 frame: None,
+                retired: false,
             },
             loader: Loader {
                 build,
@@ -241,6 +242,8 @@ impl StreamCell {
 
 /// Registers streamed cells.
 pub trait StreamCellsExt {
+    /// Adds `cell`. A cell already registered under its key (a scene loaded again, a hot
+    /// reload) is replaced: it unloads now if it was in, and the new one takes its place.
     fn stream_cell(&mut self, cell: StreamCell) -> &mut Self;
 }
 
@@ -248,12 +251,67 @@ impl StreamCellsExt for World {
     fn stream_cell(&mut self, cell: StreamCell) -> &mut Self {
         self.init_resource::<StreamedCells>();
         self.init_resource::<CellHooks>();
-        self.resource_mut::<StreamedCells>().cells.push(cell.info);
-        self.resource_mut::<CellHooks>()
-            .0
-            .push(Slot::new(cell.loader));
+        let at = self.resource::<StreamedCells>().find(&cell.info.key);
+        // Within a cell's own spawn the slots are lent out; a cell it registers is added.
+        let slots = self.resource::<CellHooks>().0.len();
+        match at.filter(|id| (id.0 as usize) < slots) {
+            Some(id) => {
+                let i = id.0 as usize;
+                take_out(self, i);
+                self.resource_mut::<StreamedCells>().cells[i] = cell.info;
+                self.resource_mut::<CellHooks>().0[i] = Slot::new(cell.loader);
+            }
+            None => {
+                self.resource_mut::<StreamedCells>().cells.push(cell.info);
+                self.resource_mut::<CellHooks>()
+                    .0
+                    .push(Slot::new(cell.loader));
+            }
+        }
         self
     }
+}
+
+/// Takes the cell named `key` out of streaming: it unloads now if it is in (its entities go,
+/// its assets are freed if it releases them, its proxy goes) and never loads again, until a
+/// cell is registered under its key again. False if there is no such cell.
+pub fn unstream_cell(world: &mut World, key: &str) -> bool {
+    let Some(id) = world
+        .get_resource::<StreamedCells>()
+        .and_then(|c| c.find(key))
+    else {
+        return false;
+    };
+    let i = id.0 as usize;
+    if world.resource::<CellHooks>().0.len() <= i {
+        return false;
+    }
+    take_out(world, i);
+    let mut cells = world.resource_mut::<StreamedCells>();
+    cells.cells[i].retired = true;
+    cells.pins.remove(key);
+    world.resource_mut::<CellHooks>().0[i] = Slot::new(Loader {
+        build: None,
+        step: Box::new(|_, _, _| true),
+        unload: None,
+        proxy: ProxyConfig {
+            enabled: false,
+            version: None,
+        },
+        release: false,
+    });
+    true
+}
+
+/// Cell `i` unloads now, whatever it was doing, and its far-view proxy is dropped.
+fn take_out(world: &mut World, i: usize) {
+    let state = world.resource::<StreamedCells>().cells[i].state;
+    if state != CellState::Unloaded && world.contains_resource::<Fades>() {
+        unload(world, i);
+    }
+    world.resource_mut::<CellHooks>().0[i].reset();
+    world.resource_mut::<StreamedCells>().cells[i].state = CellState::Unloaded;
+    hlod::forget(world, i);
 }
 
 impl StreamCellsExt for App {
@@ -379,6 +437,7 @@ pub struct StreamingPlugin;
 impl Plugin for StreamingPlugin {
     fn build(&self, app: &mut App) {
         hlod::register(app);
+        crate::scene_stream::register(app);
         cell_assets::install_sizers(&mut app.world);
         app.init_resource::<StreamedCells>()
             .init_resource::<CellHooks>()
@@ -512,6 +571,9 @@ pub fn stream_system(world: &mut World) {
     let mut spare: Option<(f64, usize)> = None;
     let pins = std::mem::take(&mut cells.pins);
     for (i, c) in cells.cells.iter_mut().enumerate() {
+        if c.retired {
+            continue;
+        }
         let r = match pins.get(&c.key) {
             Some(true) => 0.0,
             Some(false) => f64::INFINITY,
@@ -992,14 +1054,14 @@ fn leave(world: &mut World, budget: &StreamingBudget) {
                 }
                 return true;
             }
-            l.roots = Some(
-                world
-                    .query::<(Entity, &CellMember)>()
-                    .iter(world)
-                    .filter(|(_, m)| m.0 == l.cell)
-                    .map(|(e, _)| e)
-                    .collect(),
-            );
+            let roots: Vec<Entity> = world
+                .query::<(Entity, &CellMember)>()
+                .iter(world)
+                .filter(|(_, m)| m.0 == l.cell)
+                .map(|(e, _)| e)
+                .collect();
+            note_drawn(world, i, &roots);
+            l.roots = Some(roots);
         }
         let roots = l.roots.as_mut().expect("set above");
         while let Some(e) = roots.pop() {
@@ -1021,6 +1083,17 @@ fn leave(world: &mut World, budget: &StreamingBudget) {
     res.0 = leaves;
 }
 
+/// Notes what cell `i`'s `roots` and their descendants draw, for its release.
+fn note_drawn(world: &mut World, i: usize, roots: &[Entity]) {
+    if !world.resource::<CellHooks>().0[i].loader.release {
+        return;
+    }
+    let all = tree(world, roots);
+    let mut hooks = std::mem::take(&mut world.resource_mut::<CellHooks>().0);
+    hooks[i].assets.note_drawn(world, &all);
+    restore(world, hooks);
+}
+
 /// Puts the slots back, after any cells a hook itself registered.
 fn restore(world: &mut World, mut hooks: Vec<Slot>) {
     let mut res = world.resource_mut::<CellHooks>();
@@ -1036,6 +1109,7 @@ fn unload(world: &mut World, i: usize) {
         .filter(|(_, m)| m.0 == id)
         .map(|(e, _)| e)
         .collect();
+    note_drawn(world, i, &members);
     for e in members {
         if let Ok(entity) = world.get_entity_mut(e) {
             entity.despawn();
@@ -1499,6 +1573,82 @@ mod tests {
         let next = app.world.resource_mut::<Assets<Mesh>>().add(cube());
         assert_eq!(next.index(), own.index());
         assert!(!app.world.resource::<Assets<Mesh>>().contains(own));
+    }
+
+    #[test]
+    fn shapes_and_inline_materials_go_with_the_last_cell_that_drew_them() {
+        use engine_assets::{AssetAppExt, Assets};
+        use engine_render::{MaterialRef, Mesh, MeshRef, ResolvedMesh, Shape, StandardMaterial};
+
+        let mut app = app();
+        app.init_asset::<Mesh>().init_asset::<StandardMaterial>();
+        // Draws a shape with an inline material and resolves it as the renderer would.
+        fn draw(world: &mut World, size: f32, color: f32) {
+            let shape = Shape::Cuboid { size: [size; 3] };
+            let material = StandardMaterial {
+                base_color: [color, 0.5, 0.5, 1.0],
+                ..Default::default()
+            };
+            let mesh = world
+                .resource_mut::<Assets<Mesh>>()
+                .get_or_insert_keyed(&shape.key(), || shape.mesh());
+            let mat = world
+                .resource_mut::<Assets<StandardMaterial>>()
+                .get_or_insert_keyed(&material.key(), || material);
+            world.spawn((
+                MeshRenderer {
+                    mesh: MeshRef::Shape(shape),
+                    material: MaterialRef::Inline(material),
+                    ..Default::default()
+                },
+                ResolvedMesh {
+                    mesh,
+                    material: mat,
+                },
+            ));
+        }
+        // Both draw the 1 m cube in red; each has a shape of its own.
+        app.stream_cell(
+            StreamCell::new("a", DVec3::ZERO, 10.0, |w| {
+                draw(w, 1.0, 1.0);
+                draw(w, 2.0, 0.2);
+            })
+            .release_assets(),
+        );
+        app.stream_cell(
+            StreamCell::new("b", DVec3::new(30.0, 0.0, 0.0), 10.0, |w| {
+                draw(w, 1.0, 1.0);
+                draw(w, 3.0, 0.3);
+            })
+            .release_assets(),
+        );
+        app.update_n(2);
+        let counts = |app: &App| {
+            (
+                app.world.resource::<Assets<Mesh>>().len(),
+                app.world.resource::<Assets<StandardMaterial>>().len(),
+            )
+        };
+        assert_eq!(counts(&app), (3, 3));
+        let pin = |app: &mut App, key: &str| {
+            app.world
+                .resource_mut::<StreamedCells>()
+                .pins
+                .insert(key.into(), false);
+            app.update();
+        };
+        pin(&mut app, "a");
+        assert_eq!(
+            counts(&app),
+            (2, 2),
+            "a's own shape went, the shared cube stays"
+        );
+        pin(&mut app, "b");
+        assert_eq!(counts(&app), (0, 0));
+        // Back in, the renderer makes them again from their keys.
+        app.world.resource_mut::<StreamedCells>().pins.clear();
+        app.update_n(2);
+        assert_eq!(counts(&app), (3, 3));
     }
 
     #[test]

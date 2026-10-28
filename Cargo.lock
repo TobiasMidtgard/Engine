@@ -1090,6 +1090,7 @@ dependencies = [
  "engine_platform",
  "engine_render",
  "engine_world",
+ "image",
  "serde",
  "serde_json",
 ]

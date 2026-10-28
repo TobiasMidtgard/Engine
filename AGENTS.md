@@ -251,4 +251,8 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
 - Asset handles carry generations: one kept past `Assets::remove` reads as missing. A demo
   whose streamed cell frees its assets (`StreamCell::release_assets`) keeps mesh data, not
   handles, between loads.
+- A level that is one big scene document streams by itself: `engine::scene_stream::stream_scene`
+  (or `scene.stream`) cuts its roots into 128 m runtime-grid cells by position, the way Unreal's
+  World Partition does; mark sky, settings and global lights `StreamPlacement { spatial: false }`
+  and give big things their `radius`. Don't cut levels into cells by hand.
 - Commit messages: imperative subject, body explains why.

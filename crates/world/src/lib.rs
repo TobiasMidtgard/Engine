@@ -63,7 +63,9 @@ pub use locomotion::{
 pub use physical::*;
 pub use scalability::{QualityPreset, Scalability};
 pub use shift::{FollowsWorldShift, SurfaceMoved, WorldShift, WorldShiftAppExt, WorldShiftSet};
-pub use stream::{CellId, CellMember, CellState, StreamFrame, StreamedCells, StreamingSource};
+pub use stream::{
+    CellId, CellMember, CellState, StreamFrame, StreamPlacement, StreamedCells, StreamingSource,
+};
 pub use terrain::{EditOp, EditShape, TerrainChanged, TerrainEdit};
 
 use engine_core::math::{DVec2, DVec3, Vec3};

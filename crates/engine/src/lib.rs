@@ -31,6 +31,7 @@ use engine_core::{App, PluginGroup, PluginGroupBuilder};
 pub mod cell_assets;
 pub mod hlod;
 pub mod interact;
+pub mod scene_stream;
 pub mod stream;
 
 /// Everything a typical game needs: world simulation contracts, input, rendering, the window,
