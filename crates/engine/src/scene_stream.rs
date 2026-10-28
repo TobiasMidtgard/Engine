@@ -24,7 +24,7 @@ use std::sync::Arc;
 use engine_core::prelude::*;
 use engine_core::registry::TypeRegistry;
 use engine_core::scene::{EntityDoc, SceneDoc, spawn_entity_doc};
-use engine_world::StreamPlacement;
+use engine_world::{StreamPlacement, StreamedCells};
 
 use crate::stream::{StreamCell, StreamCellsExt, unstream_cell};
 
@@ -61,6 +61,8 @@ pub struct ScenePartition {
     pub release_assets: bool,
     /// Cells show far-view proxies while out ([`crate::hlod`]).
     pub proxies: bool,
+    /// Cells remember what happened in them while out ([`StreamCell::remember`]).
+    pub remember: bool,
 }
 
 impl Default for ScenePartition {
@@ -70,6 +72,7 @@ impl Default for ScenePartition {
             roots_per_step: 16,
             release_assets: true,
             proxies: true,
+            remember: true,
         }
     }
 }
@@ -255,15 +258,31 @@ pub fn stream_scene(
         );
         let version = content_hash(&roots);
         let key = planned.key.clone();
+        let planned_at = planned.center;
         let mut cell = StreamCell::in_steps(
             planned.key.clone(),
             planned.center,
             planned.radius,
             move |world, step| {
+                // The document is in the world as it was when the scene was streamed; the
+                // cell's center has followed every world shift since, and so do its roots.
+                let moved = {
+                    let cells = world.resource::<StreamedCells>();
+                    cells
+                        .find(&key)
+                        .and_then(|id| cells.get(id))
+                        .map_or(DVec3::ZERO, |c| c.center - planned_at)
+                };
                 let from = step * per_step;
                 for root in roots.iter().skip(from).take(per_step) {
-                    if let Err(e) = spawn_entity_doc(world, root, None) {
-                        engine_core::log::error!("scene streaming: {key}: {e}");
+                    match spawn_entity_doc(world, root, None) {
+                        Ok(e) if moved != DVec3::ZERO => {
+                            if let Some(mut t) = world.get_mut::<Transform>(e) {
+                                t.translation += moved;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => engine_core::log::error!("scene streaming: {key}: {e}"),
                     }
                 }
                 from + per_step >= roots.len()
@@ -277,6 +296,9 @@ pub fn stream_scene(
         };
         if how.release_assets {
             cell = cell.release_assets();
+        }
+        if how.remember {
+            cell = cell.remember();
         }
         world.stream_cell(cell);
     }
@@ -571,6 +593,57 @@ mod tests {
         settle(&mut app);
         assert_eq!(named(&mut app, "hut 0"), 2);
         assert_eq!(app.world.resource::<StreamedCells>().cells.len(), 9);
+    }
+
+    #[test]
+    fn a_scene_follows_world_shifts_and_remembers_what_was_destroyed() {
+        use engine_world::shift::WorldShift;
+
+        let mut app = app();
+        let player = app
+            .world
+            .spawn((
+                Transform::default(),
+                GlobalTransform::default(),
+                StreamingSource::default(),
+            ))
+            .id();
+        let go = |app: &mut App, x: f64| {
+            let t = Transform::from_translation(DVec3::new(x, 0.0, 0.0));
+            app.world
+                .entity_mut(player)
+                .insert((t, GlobalTransform::from(t)));
+            settle(app);
+        };
+        stream_scene(
+            &mut app.world,
+            "valley",
+            &valley(),
+            &ScenePartition::default(),
+        )
+        .unwrap();
+        settle(&mut app);
+        let hut = |app: &mut App, name: &str| -> Option<Entity> {
+            app.world
+                .query::<(Entity, &Name)>()
+                .iter(&app.world)
+                .find(|(_, n)| n.as_str() == name)
+                .map(|(e, _)| e)
+        };
+        let gone = hut(&mut app, "hut 1").unwrap();
+        app.world.entity_mut(gone).despawn();
+        go(&mut app, 3000.0);
+        assert!(hut(&mut app, "hut 0").is_none());
+        // The world moves 10 km while the huts are out.
+        app.world
+            .write_message(WorldShift::translate(DVec3::new(10_000.0, 0.0, 0.0)));
+        app.update();
+        go(&mut app, 10_000.0);
+        let first = hut(&mut app, "hut 0").expect("back in");
+        let at = app.world.get::<Transform>(first).unwrap().translation;
+        assert!(at.distance(DVec3::new(10_010.0, 0.0, 5.0)) < 1e-6, "{at:?}");
+        assert!(hut(&mut app, "hut 1").is_none(), "stays destroyed");
+        assert!(hut(&mut app, "hut 2").is_some());
     }
 
     #[test]

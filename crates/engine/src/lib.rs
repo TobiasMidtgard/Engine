@@ -29,6 +29,7 @@ pub use engine_world as world;
 use engine_core::{App, PluginGroup, PluginGroupBuilder};
 
 pub mod cell_assets;
+pub(crate) mod cell_memory;
 pub mod hlod;
 pub mod interact;
 pub mod scene_stream;

@@ -539,6 +539,18 @@ fn main() {
     }
     settle(&mut app);
     println!("all loaded: {}", census(&mut app));
+    {
+        let cells = app.world.resource::<StreamedCells>();
+        let secs: f32 = cells.cells.iter().map(|c| c.load_secs).sum();
+        let entities: u32 = cells.cells.iter().map(|c| c.entities).sum();
+        let worst = cells.cells.iter().map(|c| c.load_secs).fold(0.0, f32::max);
+        println!(
+            "spawning: {:.1} ms for {entities} entities ({:.1} µs each), slowest cell {:.1} ms",
+            secs * 1000.0,
+            secs * 1e6 / entities.max(1) as f32,
+            worst * 1000.0
+        );
+    }
     shot(&mut app, "all_loaded");
     // Down the road by the castle: the west end goes, the east end comes.
     app.world.resource_mut::<StreamedCells>().pins.clear();

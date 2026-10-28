@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::cell_assets::{self, CellAssets, Marks};
+use crate::cell_memory;
 use crate::hlod::{self, ProxyConfig};
 use engine_core::diagnostics::{Diagnostics, PROCESS_RAM_MB, process_ram_mb};
 use engine_core::ecs::resource::IsResource;
@@ -59,6 +60,7 @@ struct Loader {
     unload: Option<Hook>,
     proxy: ProxyConfig,
     release: bool,
+    remember: bool,
 }
 
 impl StreamCell {
@@ -93,6 +95,7 @@ impl StreamCell {
                 unload: None,
                 proxy: ProxyConfig::default(),
                 release: false,
+                remember: false,
             },
         }
     }
@@ -232,6 +235,15 @@ impl StreamCell {
         self
     }
 
+    /// What happens in the cell survives its unload ([`engine_world::CellMemory`]): what was
+    /// destroyed stays gone and what moved or changed (`Transform` and the components modules
+    /// add to the memory) is set again when it comes back. Its spawn must make the same
+    /// entities, with the same names and places, every time (as a scene document does).
+    pub fn remember(mut self) -> Self {
+        self.loader.remember = true;
+        self
+    }
+
     /// Runs after the cell's entities are despawned, to drop what its module keeps elsewhere
     /// (a resource, a cache).
     pub fn on_unload(mut self, unload: impl FnMut(&mut World) + Send + Sync + 'static) -> Self {
@@ -299,6 +311,7 @@ pub fn unstream_cell(world: &mut World, key: &str) -> bool {
             version: None,
         },
         release: false,
+        remember: false,
     });
     true
 }
@@ -387,6 +400,10 @@ struct Slot {
     assets: CellAssets,
     /// The center in its frame's space, once the frame has shown up.
     local: Option<DVec3>,
+    /// Twins (same name, same place) given ids so far in this load.
+    ids_seen: std::collections::HashMap<u64, u32>,
+    /// A remembering cell's spawned values, from its last load.
+    baseline: Option<cell_memory::Baseline>,
 }
 
 impl Slot {
@@ -401,6 +418,8 @@ impl Slot {
             ram: None,
             assets: CellAssets::default(),
             local: None,
+            ids_seen: Default::default(),
+            baseline: None,
         }
     }
 
@@ -411,6 +430,7 @@ impl Slot {
         self.step = 0;
         self.secs = 0.0;
         self.ram = None;
+        self.ids_seen.clear();
     }
 }
 
@@ -442,6 +462,7 @@ impl Plugin for StreamingPlugin {
         app.init_resource::<StreamedCells>()
             .init_resource::<CellHooks>()
             .init_resource::<StreamingBudget>()
+            .init_resource::<engine_world::CellMemory>()
             .init_resource::<Fades>()
             .init_resource::<Leaves>()
             .add_systems(Last, stream_system)
@@ -473,6 +494,29 @@ impl Plugin for StreamingPlugin {
                         "vram_mb": diag.get("render.gpu_memory_mb"),
                         "assets": assets,
                     }))
+                },
+            )
+            .register_api(
+                "stream.memory",
+                "What remembering cells keep while out (destroyed ones, moved and changed \
+                 components, per cell key), for save games: no args returns it; {\"set\": \
+                 memory} replaces it (load a save; cells in now pick it up on their next \
+                 load); {\"forget\": key} resets one cell; {\"remember\": name} adds a \
+                 registered component to what is kept.",
+                r#"{"forget": "scene:valley/main/L0/0,0"}"#,
+                |world, args| {
+                    let mut memory = world.resource_mut::<engine_world::CellMemory>();
+                    if let Some(set) = args.get("set") {
+                        *memory = serde_json::from_value(set.clone())
+                            .map_err(|e| format!("bad memory: {e}"))?;
+                    }
+                    if let Some(key) = args["forget"].as_str() {
+                        memory.cells.remove(key);
+                    }
+                    if let Some(name) = args["remember"].as_str() {
+                        memory.remember(name);
+                    }
+                    serde_json::to_value(&*memory).map_err(|e| e.to_string())
                 },
             )
             .register_api(
@@ -834,8 +878,17 @@ fn step(world: &mut World, id: CellId) -> bool {
         .iter(world)
         .filter(|e| !before.has(*e))
         .collect();
-    for e in new {
+    for &e in &new {
         world.entity_mut(e).insert(CellMember(id));
+    }
+    if world.resource::<CellHooks>().0[i].loader.remember {
+        let (key, center) = {
+            let c = &world.resource::<StreamedCells>().cells[i];
+            (c.key.clone(), c.center)
+        };
+        let mut seen = std::mem::take(&mut world.resource_mut::<CellHooks>().0[i].ids_seen);
+        cell_memory::assign_ids(world, &key, center, &new, &mut seen);
+        world.resource_mut::<CellHooks>().0[i].ids_seen = seen;
     }
     world.resource_mut::<CellHooks>().0[i].secs += t.elapsed().as_secs_f32();
     done
@@ -876,6 +929,18 @@ fn finish(world: &mut World, i: usize) {
         .iter(world)
         .filter(|(_, m)| m.0 == id)
         .map(|(e, _)| e)
+        .collect();
+    if world.resource::<CellHooks>().0[i].loader.remember {
+        let (key, center) = {
+            let c = &world.resource::<StreamedCells>().cells[i];
+            (c.key.clone(), c.center)
+        };
+        let baseline = cell_memory::loaded(world, &key, center, &roots);
+        world.resource_mut::<CellHooks>().0[i].baseline = Some(baseline);
+    }
+    let roots: Vec<Entity> = roots
+        .into_iter()
+        .filter(|e| world.get_entity(*e).is_ok())
         .collect();
     let entities = tree(world, &roots).len() as u32;
     let ram = process_ram_mb().zip(ram0).map(|(b, a)| (b - a) as f32);
@@ -1061,6 +1126,7 @@ fn leave(world: &mut World, budget: &StreamingBudget) {
                 .map(|(e, _)| e)
                 .collect();
             note_drawn(world, i, &roots);
+            remember_leaving(world, i, &roots);
             l.roots = Some(roots);
         }
         let roots = l.roots.as_mut().expect("set above");
@@ -1081,6 +1147,18 @@ fn leave(world: &mut World, budget: &StreamingBudget) {
     let mut res = world.resource_mut::<Leaves>();
     leaves.append(&mut res.0);
     res.0 = leaves;
+}
+
+/// Cell `i` is leaving with `roots` still there: a remembering cell notes what changed.
+fn remember_leaving(world: &mut World, i: usize, roots: &[Entity]) {
+    let Some(baseline) = world.resource_mut::<CellHooks>().0[i].baseline.take() else {
+        return;
+    };
+    let (key, center) = {
+        let c = &world.resource::<StreamedCells>().cells[i];
+        (c.key.clone(), c.center)
+    };
+    cell_memory::leaving(world, &key, center, roots, baseline);
 }
 
 /// Notes what cell `i`'s `roots` and their descendants draw, for its release.
@@ -1110,6 +1188,7 @@ fn unload(world: &mut World, i: usize) {
         .map(|(e, _)| e)
         .collect();
     note_drawn(world, i, &members);
+    remember_leaving(world, i, &members);
     for e in members {
         if let Ok(entity) = world.get_entity_mut(e) {
             entity.despawn();
@@ -1649,6 +1728,145 @@ mod tests {
         app.world.resource_mut::<StreamedCells>().pins.clear();
         app.update_n(2);
         assert_eq!(counts(&app), (3, 3));
+    }
+
+    #[test]
+    fn a_remembering_cell_keeps_what_was_destroyed_and_moved() {
+        use engine_world::CellMemory;
+        use engine_world::shift::WorldShift;
+
+        let mut app = app();
+        // Spawned where the cell is now (world shifts move it), as streamed content must be.
+        let yard = |w: &mut World| {
+            let cells = w.resource::<StreamedCells>();
+            let at = cells.get(cells.find("yard").unwrap()).unwrap().center - DVec3::X * 5.0;
+            for (i, x) in [0.0, 2.0, 4.0].into_iter().enumerate() {
+                w.spawn((
+                    Name::new(format!("crate {i}")),
+                    Transform::from_translation(at + DVec3::new(x, 0.0, 0.0)),
+                ))
+                .with_children(|c| {
+                    c.spawn((Name::new("lid"), Transform::from_xyz(0.0, 1.0, 0.0)));
+                });
+            }
+            // Two alike in one place: still told apart.
+            for _ in 0..2 {
+                w.spawn((
+                    Name::new("barrel"),
+                    Transform::from_translation(at + DVec3::new(10.0, 0.0, 0.0)),
+                ));
+            }
+        };
+        app.stream_cell(
+            StreamCell::new("yard", DVec3::new(505.0, 0.0, 0.0), 20.0, yard)
+                .load_within(50.0)
+                .remember(),
+        );
+        // The same yard, forgetful.
+        app.stream_cell(
+            StreamCell::new("shed", DVec3::new(-505.0, 0.0, 0.0), 20.0, move |w| {
+                w.spawn((
+                    Name::new("tool"),
+                    Transform::from_translation(DVec3::new(-505.0, 0.0, 0.0)),
+                ));
+            })
+            .load_within(50.0),
+        );
+        let player = app.world.spawn(StreamingSource::default()).id();
+        let find = |app: &mut App, name: &str| -> Vec<Entity> {
+            app.world
+                .query::<(Entity, &Name)>()
+                .iter(&app.world)
+                .filter(|(_, n)| n.as_str() == name)
+                .map(|(e, _)| e)
+                .collect()
+        };
+        place(&mut app, player, 505.0);
+        app.update();
+        assert_eq!(state(&app, "yard"), CellState::Loaded);
+        // Play: crate 1 is blown up, crate 2 is pushed 3 m, one barrel rolls away, a lid tips.
+        let gone = find(&mut app, "crate 1")[0];
+        app.world.entity_mut(gone).despawn();
+        let pushed = find(&mut app, "crate 2")[0];
+        app.world
+            .get_mut::<Transform>(pushed)
+            .unwrap()
+            .translation
+            .z = 3.0;
+        let barrel = find(&mut app, "barrel")[1];
+        app.world
+            .get_mut::<Transform>(barrel)
+            .unwrap()
+            .translation
+            .x = 520.0;
+        let crate0 = find(&mut app, "crate 0")[0];
+        let lid = app.world.get::<Children>(crate0).unwrap()[0];
+        app.world.get_mut::<Transform>(lid).unwrap().translation.y = 0.2;
+        // Away, and the world shifts 1 km while the yard is out.
+        place(&mut app, player, 0.0);
+        app.update();
+        assert_eq!(state(&app, "yard"), CellState::Unloaded);
+        let memory = app.world.resource::<CellMemory>().cells["yard"].clone();
+        assert_eq!(memory.removed.len(), 2, "crate 1 and its lid");
+        assert_eq!(
+            memory.changed.len(),
+            3,
+            "crate 2, a barrel, a lid: {memory:?}"
+        );
+        app.world
+            .write_message(WorldShift::translate(DVec3::new(-1000.0, 0.0, 0.0)));
+        app.update();
+        // Back: as it was left, at the shifted place.
+        place(&mut app, player, -495.0);
+        app.update();
+        assert_eq!(state(&app, "yard"), CellState::Loaded);
+        assert!(find(&mut app, "crate 1").is_empty(), "stays destroyed");
+        assert_eq!(find(&mut app, "lid").len(), 2);
+        let crate2 = find(&mut app, "crate 2")[0];
+        let at = app.world.get::<Transform>(crate2).unwrap().translation;
+        assert!(at.distance(DVec3::new(-496.0, 0.0, 3.0)) < 1e-6, "{at:?}");
+        let mut barrels: Vec<f64> = find(&mut app, "barrel")
+            .into_iter()
+            .map(|e| app.world.get::<Transform>(e).unwrap().translation.x)
+            .collect();
+        barrels.sort_by(f64::total_cmp);
+        assert!((barrels[0] + 490.0).abs() < 1e-6 && (barrels[1] + 480.0).abs() < 1e-6);
+        let crate0 = find(&mut app, "crate 0")[0];
+        let lid = app.world.get::<Children>(crate0).unwrap()[0];
+        assert!((app.world.get::<Transform>(lid).unwrap().translation.y - 0.2).abs() < 1e-6);
+        // Nothing changed this time: the memory stays as it was.
+        place(&mut app, player, 0.0);
+        app.update();
+        assert_eq!(app.world.resource::<CellMemory>().cells["yard"], memory);
+        // A forgetful cell starts over every time.
+        place(&mut app, player, -1505.0);
+        app.update();
+        let tool = find(&mut app, "tool")[0];
+        app.world.entity_mut(tool).despawn();
+        place(&mut app, player, 0.0);
+        app.update();
+        place(&mut app, player, -1505.0);
+        app.update();
+        assert_eq!(find(&mut app, "tool").len(), 1);
+        assert!(
+            !app.world
+                .resource::<CellMemory>()
+                .cells
+                .contains_key("shed")
+        );
+        // A save game takes the memory and gives it back; forgetting resets the cell.
+        let saved = app.world.resource::<CellMemory>().clone();
+        app.world.resource_mut::<CellMemory>().cells.clear();
+        *app.world.resource_mut::<CellMemory>() = saved.clone();
+        assert_eq!(*app.world.resource::<CellMemory>(), saved);
+        app.world.resource_mut::<CellMemory>().cells.remove("yard");
+        place(&mut app, player, -495.0);
+        app.update();
+        assert_eq!(
+            find(&mut app, "crate 1").len(),
+            1,
+            "a reset cell is new again"
+        );
     }
 
     #[test]

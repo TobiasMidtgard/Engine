@@ -255,4 +255,9 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
   (or `scene.stream`) cuts its roots into 128 m runtime-grid cells by position, the way Unreal's
   World Partition does; mark sky, settings and global lights `StreamPlacement { spatial: false }`
   and give big things their `radius`. Don't cut levels into cells by hand.
+- Streamed content spawns where its cell is now: a cell's center follows world shifts, so place
+  things from `StreamedCells` (or a module's shifted anchor), never from coordinates fixed at
+  startup. A cell that `remember()`s must spawn the same entities with the same names and places
+  every time; a module whose state matters across unloads adds its component with
+  `CellMemory::remember("Name")`.
 - Commit messages: imperative subject, body explains why.

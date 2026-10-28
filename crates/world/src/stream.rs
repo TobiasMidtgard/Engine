@@ -75,6 +75,56 @@ impl Default for StreamPlacement {
     }
 }
 
+/// A stable name for an entity a cell spawned, the same on every load of the cell (from its
+/// name and where it was spawned, unless its spawn gave it one), so what happened to it can be
+/// found again in [`CellMemory`]: Bethesda's reference ids, Unreal's actor paths.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PersistentId(pub u64);
+
+/// What changed in one cell while it was in, by [`PersistentId`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CellDelta {
+    /// Gone since the cell spawned them (destroyed, picked up): they stay gone.
+    pub removed: std::collections::BTreeSet<u64>,
+    /// Remembered components whose values changed, by registered name, as they were when the
+    /// cell last went out. A root's `Transform` translation is kept from the cell's center, so
+    /// it survives world shifts.
+    pub changed: BTreeMap<u64, serde_json::Map<String, serde_json::Value>>,
+}
+
+/// What changed in remembering cells (`StreamCell::remember`), so a building blown up stays a
+/// ruin and a moved crate stays where it was put after the player walks away and comes back,
+/// as Unreal's level streaming persistence and Bethesda's change forms keep them. A save game
+/// stores and restores it whole (`stream.memory`).
+#[derive(Resource, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CellMemory {
+    /// Per cell key.
+    pub cells: BTreeMap<String, CellDelta>,
+    /// Registered components remembered (a module adds its own: a building's damage, a
+    /// chest's contents). `Transform` by default.
+    pub components: Vec<String>,
+}
+
+impl Default for CellMemory {
+    fn default() -> Self {
+        Self {
+            cells: BTreeMap::new(),
+            components: vec!["Transform".into()],
+        }
+    }
+}
+
+impl CellMemory {
+    /// Also remember the registered component `name` in every remembering cell.
+    pub fn remember(&mut self, name: &str) {
+        if !self.components.iter().any(|c| c == name) {
+            self.components.push(name.to_string());
+        }
+    }
+}
+
 /// Index of a cell in [`StreamedCells`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CellId(pub u32);
@@ -212,6 +262,7 @@ pub(crate) fn register(app: &mut App) {
          lookahead_s (also loads ahead along its velocity). Without any, the simulation foci are \
          sources.",
     )
+    .init_resource::<CellMemory>()
     .register_component::<StreamPlacement>(
         "How a scene entity streams when its scene is partitioned into cells: spatial (false: \
          always loaded), grid (runtime grid name, empty = the first), radius (meters it reaches; \

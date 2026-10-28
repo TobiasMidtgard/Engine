@@ -64,7 +64,8 @@ pub use physical::*;
 pub use scalability::{QualityPreset, Scalability};
 pub use shift::{FollowsWorldShift, SurfaceMoved, WorldShift, WorldShiftAppExt, WorldShiftSet};
 pub use stream::{
-    CellId, CellMember, CellState, StreamFrame, StreamPlacement, StreamedCells, StreamingSource,
+    CellDelta, CellId, CellMember, CellMemory, CellState, PersistentId, StreamFrame,
+    StreamPlacement, StreamedCells, StreamingSource,
 };
 pub use terrain::{EditOp, EditShape, TerrainChanged, TerrainEdit};
 
