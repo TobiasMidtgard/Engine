@@ -12,7 +12,7 @@ use engine_world::{
 };
 
 use crate::embers::{Ember, Embers};
-use crate::field::{CellState, FireField, FuelSource, StepInput, TILE};
+use crate::field::{FireField, FuelSource, StepInput, TILE};
 use crate::fuel::{CellFuel, FuelPatch, PlacedPatch};
 use crate::objects::{
     Burning, Charring, ContainedFire, FlameShape, ObjectEnv, radiant_flux, step_object,
@@ -673,7 +673,6 @@ pub fn emit_outputs(
     settings: Res<FireSettings>,
     field: Res<FireField>,
     mut heat: ResMut<HeatField>,
-    mut surface: ResMut<SurfaceLayers>,
     mut wind: ResMut<WindField>,
     mut smoke: MessageWriter<SmokeEmission>,
     mut embers: ResMut<Embers>,
@@ -747,18 +746,9 @@ pub fn emit_outputs(
                             tile.base_y + c.ground_y as f64,
                             origin.y + (y as f64 + 0.5) * cell as f64,
                         );
-                        // Heat and scorch to the shared fields.
+                        // Heat to the shared field (scorch: `stamp_scorch`).
                         if c.temp > 1.0 {
                             heat.grid.modify_disc(p, cell * 0.5, c.temp);
-                        }
-                        if c.scorch > 0.0 {
-                            surface.modify(p, |s| s.scorch = s.scorch.max(c.scorch));
-                        } else if c.load > 0.0 {
-                            surface.modify(p, |s| {
-                                if s.scorch > 0.0 && c.state() == CellState::Intact {
-                                    s.scorch = 0.0;
-                                }
-                            });
                         }
                         if c.hrr <= 0.0 && c.glow <= 0.0 {
                             continue;
@@ -945,6 +935,112 @@ pub fn emit_outputs(
     diagnostics.set("fire.tiles", field.stats.tiles as f64);
     diagnostics.set("fire.embers", embers.list.len() as f64);
     diagnostics.set("fire.smoke_emissions", emissions as f64);
+}
+
+/// What [`stamp_scorch`] last wrote: each tile's version and whether it had scorch, and the
+/// field and surface frames it was written in.
+#[derive(Default)]
+pub struct ScorchStamps {
+    tiles: std::collections::HashMap<IVec2, (u64, bool)>,
+    frame: Option<(DVec2, DVec2)>,
+}
+
+/// Keep the shared surface's scorch ([`SurfaceLayers`], which the ground, walls and props
+/// darken by) a copy of the field's, wherever and whenever it changes: a tile that changed is
+/// written again whole, its unburnt cells too, so a meadow the fire demo reset loses its ash;
+/// a tile that went away is cleared; and when the surface window follows the player, every
+/// scorched tile is written into it again, so burnt ground is still burnt on the way back.
+/// (Writing only burning tiles near someone, as before, left stale ash after a reset and lost
+/// the ash for good once the window had moved past it.)
+pub fn stamp_scorch(
+    field: Res<FireField>,
+    mut surface: ResMut<SurfaceLayers>,
+    mut stamps: Local<ScorchStamps>,
+) {
+    let grid = &mut surface.grid;
+    let frame = (field.origin, grid.origin);
+    let size = field.tile_size();
+    let mut redo: Vec<(DVec2, DVec2)> = Vec::new();
+    match stamps.frame {
+        // The field moved (a world shift): start again from a clean surface.
+        Some((field_origin, _)) if field_origin != frame.0 => {
+            for c in &mut grid.data {
+                c.scorch = 0.0;
+            }
+            stamps.tiles.clear();
+        }
+        // The window followed the player: what it brought in is blank.
+        Some((_, grid_origin)) if grid_origin != frame.1 => {
+            for (version, scorched) in stamps.tiles.values_mut() {
+                if *scorched {
+                    *version = 0;
+                }
+            }
+        }
+        _ => {}
+    }
+    stamps.frame = Some(frame);
+    // Tiles gone from the field since: clear where they were.
+    stamps.tiles.retain(|key, (_, scorched)| {
+        let keep = field.tile(*key).is_some();
+        if !keep && *scorched {
+            let o = field.tile_origin(*key);
+            redo.push((o, o + DVec2::splat(size)));
+        }
+        keep
+    });
+    for tile in &field.tiles {
+        let entry = stamps.tiles.entry(tile.key).or_insert((0, false));
+        if entry.0 == tile.version {
+            continue;
+        }
+        let scorched = tile.cells.iter().any(|c| c.scorch > 0.0);
+        // A tile that never had scorch has nothing to write or clear.
+        if scorched || entry.1 {
+            let o = field.tile_origin(tile.key);
+            redo.push((o, o + DVec2::splat(size)));
+        }
+        *entry = (tile.version, scorched);
+    }
+    for (min, max) in redo {
+        stamp_area(&field, grid, min, max);
+    }
+}
+
+/// Write the field's scorch into the surface cells over `min`..`max` (X/Z): each surface cell
+/// takes the most scorched fire cell inside it, none for no tile.
+fn stamp_area(
+    field: &FireField,
+    grid: &mut engine_world::Grid2<engine_world::SurfaceCell>,
+    min: DVec2,
+    max: DVec2,
+) {
+    let step = grid.cell as f64;
+    let n = (step / field.cell_m as f64).round().max(1.0) as i32;
+    let a = grid.cell_at(DVec3::new(min.x, 0.0, min.y));
+    let b = grid.cell_at(DVec3::new(max.x - 1e-6, 0.0, max.y - 1e-6));
+    let (w, h) = (grid.width as i32, grid.height as i32);
+    if b.x < 0 || b.y < 0 || a.x >= w || a.y >= h {
+        return;
+    }
+    for y in a.y.max(0)..=b.y.min(h - 1) {
+        for x in a.x.max(0)..=b.x.min(w - 1) {
+            let c = IVec2::new(x, y);
+            let low = grid.origin + c.as_dvec2() * step;
+            let mut scorch = 0.0f32;
+            for j in 0..n {
+                for i in 0..n {
+                    let p = low + (DVec2::new(i as f64, j as f64) + 0.5) * (step / n as f64);
+                    if let Some(f) = field.cell_at(DVec3::new(p.x, 0.0, p.y)) {
+                        scorch = scorch.max(f.scorch);
+                    }
+                }
+            }
+            if let Some(s) = grid.get_mut(c) {
+                s.scorch = scorch;
+            }
+        }
+    }
 }
 
 /// Fly embers every fixed step and let hot landings try to start spot fires.
@@ -1185,5 +1281,60 @@ mod tests {
         assert!(fuel.fuel_at(DVec3::new(0.0, 5.0, 0.0)).0.burns());
         // …except in the firebreak.
         assert!(!fuel.fuel_at(DVec3::new(10.5, 5.0, 0.0)).0.burns());
+    }
+
+    /// Playtest: burnt ground lost its ash once the player walked away, and a reset meadow
+    /// kept the old fire's ash.
+    #[test]
+    fn the_ground_keeps_the_fields_scorch_wherever_the_player_goes() {
+        let mut world = World::new();
+        let mut field = FireField::new(0.5);
+        let mut fuel = |_: DVec3| (CellFuel::NONE, 0.0);
+        let i = field.ensure_tile(IVec2::ZERO, 0.0, &mut fuel).unwrap();
+        // A burnt patch 2 m across, at 4..6 m.
+        for y in 8..12 {
+            for x in 8..12 {
+                field.tiles[i].cell_mut(IVec2::new(x, y)).scorch = 1.0;
+            }
+        }
+        field.tiles[i].version += 1;
+        world.insert_resource(field);
+        world.insert_resource(SurfaceLayers::default());
+        let mut schedule = Schedule::default();
+        schedule.add_systems(stamp_scorch);
+        let ash = |world: &World, x: f64| {
+            world
+                .resource::<SurfaceLayers>()
+                .sample(DVec3::new(x, 0.0, 5.0))
+                .scorch
+        };
+
+        schedule.run(&mut world);
+        assert!(ash(&world, 5.0) > 0.9, "the burnt patch is ash");
+        assert_eq!(ash(&world, 8.0), 0.0, "and the grass beside it isn't");
+
+        // The player walks 1 km off and back: the window drops the patch, then brings it back.
+        world
+            .resource_mut::<SurfaceLayers>()
+            .grid
+            .recenter(DVec2::new(1000.0, 0.0));
+        schedule.run(&mut world);
+        world
+            .resource_mut::<SurfaceLayers>()
+            .grid
+            .recenter(DVec2::ZERO);
+        schedule.run(&mut world);
+        assert!(ash(&world, 5.0) > 0.9, "still ash on the way back");
+
+        // The demo resets the meadow: the ash goes.
+        {
+            let mut field = world.resource_mut::<FireField>();
+            for c in &mut field.tiles[0].cells {
+                c.scorch = 0.0;
+            }
+            field.tiles[0].version += 1;
+        }
+        schedule.run(&mut world);
+        assert_eq!(ash(&world, 5.0), 0.0, "a reset meadow has no ash");
     }
 }

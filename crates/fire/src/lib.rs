@@ -121,6 +121,7 @@ impl Plugin for FirePlugin {
             // Unordered where nothing needs an order, so each runs beside other modules'
             // systems (AGENTS.md "Let systems run side by side").
             .add_systems(FixedUpdate, sim::add_burning.in_set(SimSet::Environment))
+            .add_systems(FixedUpdate, sim::stamp_scorch.in_set(SimSet::Environment))
             .add_systems(
                 Update,
                 (

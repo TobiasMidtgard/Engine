@@ -27,6 +27,8 @@ struct VsOut {
     @location(2) size: vec2<f32>,                      // half-width, height (m)
     @location(3) rel: vec3<f32>,
     @location(4) @interpolate(flat) pixels_per_m: f32, // screen pixels per meter at the flame
+    @location(5) @interpolate(flat) base: vec3<f32>,   // flames: camera-relative base
+    @location(6) @interpolate(flat) lean: vec2<f32>,   // flames: lean x, z (m per m of height)
 };
 
 // Linear sRGB color of a blackbody at `kelvin`, normalized to luminance 1.
@@ -98,6 +100,8 @@ fn flame_vertex(inst: FlameInstance, c: vec2<f32>, grow: f32, widen: f32) -> VsO
     out.rel = p;
     let d = max(view_depth(base + a * h * 0.5), 0.05);
     out.pixels_per_m = frame.proj[1].y * 0.5 * frame.viewport.y / d;
+    out.base = base;
+    out.lean = lean.xz;
     return out;
 }
 
@@ -177,6 +181,72 @@ fn flame_sample(uv: vec2<f32>, size: vec2<f32>, seed: f32, t: f32) -> vec2<f32> 
     return textureSampleLevel(flipbook, linear_repeat, p, 0.0).xy;
 }
 
+// Turbulence round a flame, in units of its width (Fuller et al. 2007: the noise domain is
+// scaled by the flame's size so it never stretches): three octaves rising with the gas.
+fn flame_turb(q: vec3<f32>, rise: f32) -> f32 {
+    var sum = 0.0;
+    var amp = 0.5;
+    var f = 1.0;
+    for (var i = 0; i < 3; i++) {
+        sum += amp * (value_noise3((q - vec3<f32>(0.0, rise, 0.0)) * f) - 0.5);
+        f *= 2.03;
+        amp *= 0.5;
+    }
+    return sum;
+}
+
+// Steps through a flame's volume, from up close.
+const VOLUME_STEPS: i32 = 7; // odd, so one step lies on the axis plane
+// Half-width on screen, pixels, from which a flame starts turning into a volume.
+const VOLUME_FROM_PX: f32 = 24.0;
+
+// A flame seen from close by, as a volume rather than a sheet (after Fuller et al. 2007,
+// "Real-time procedural volumetric fire"): the flipbook is turned about the flame's axis into a
+// solid of revolution and sampled at several depths along the view ray through it, its
+// coordinates bent by turbulence rising in 3D, so its tongues have depth, shift as the camera
+// moves round them and never repeat. Returns (heat, soot) as the sheet's `flame_sample` would.
+fn flame_volume(in: VsOut, seed: f32, t: f32) -> vec2<f32> {
+    let w = in.size.x;
+    let h = in.size.y;
+    let dir = normalize(in.rel);
+    let to_cam = normalize(-in.base);
+    var right = cross(vec3<f32>(0.0, 1.0, 0.0), to_cam);
+    right = right / max(length(right), 1e-4);
+    // The chord through the flame's round body under this pixel.
+    let half = w * sqrt(max(1.0 - in.uv.x * in.uv.x, 0.0)) + 0.02;
+    // Hot gas rises about as fast as sqrt(g h) (flame-length scaling).
+    let rise = t * 1.4 * sqrt(max(h, 0.1)) / w;
+    var out = vec2<f32>(0.0);
+    for (var i = 0; i < VOLUME_STEPS; i++) {
+        let s = ((f32(i) + 0.5) / f32(VOLUME_STEPS) * 2.0 - 1.0) * half;
+        let p = in.rel + dir * s - in.base;
+        let y = p.y / h;
+        let axis = vec2<f32>(in.lean.x, in.lean.y) * (bend(clamp(y, 0.0, 1.5)) * h);
+        let d = p.xz - axis;
+        let r = length(d) / w;
+        let side = select(-1.0, 1.0, dot(d, right.xz) >= 0.0);
+        // Turbulence in the flame's own frame, so it stays put as the camera moves.
+        let q = vec3<f32>(d.x, p.y, d.y) / w * 1.2 + vec3<f32>(seed * 7.1, 0.0, seed * 3.3);
+        let n = flame_turb(q, rise);
+        let n2 = flame_turb(q.zyx + vec3<f32>(17.3, 0.0, 5.9), rise);
+        // Tongues: displacement grows up the flame (as sqrt of height, as in the paper).
+        let up = sqrt(saturate(y));
+        let u = clamp(side * r + n * 0.35 * up, -1.2, 1.2);
+        let v = y + n2 * 0.18 * up;
+        var fs = flame_sample(vec2<f32>(u, v), in.size, seed, t)
+            * (1.0 - smoothstep(0.7, 1.0, abs(u)));
+        // Fine eddies, rising faster, tear the gas into ragged tongues and wisps up the flame
+        // (the flipbook's own detail is too coarse to hold up from a meter or two).
+        let fine = value_noise3((q - vec3<f32>(0.0, rise * 1.8, 0.0)) * 4.7);
+        fs.x *= mix(1.0, 0.45 + 1.1 * fine, 0.35 + 0.5 * up);
+        out = max(out, fs);
+    }
+    // The hottest gas along the ray shows (flames are bright emitters that hide what's behind
+    // their cores): through the axis that is the sheet's own flame, so the flame keeps its size,
+    // while the tongues in front of and behind it, each bent its own way, give it depth.
+    return out;
+}
+
 // Brightness of a flame's hottest gas, in exposed units: physically about 10 000 cd/m², but
 // kept between a little over the scene's white (so flames show by day) and a few stops above
 // it (so at night they're yellow-white at the core and orange through the body, not a white
@@ -219,7 +289,14 @@ fn fs_flame(in: VsOut) -> @location(0) vec4<f32> {
 
     // Faded toward the sprite's sides too, so soot spreading wide never ends in a straight
     // edge (from close by, a flame's sprite can fill the view).
-    let s = flame_sample(in.uv, in.size, seed, t) * (1.0 - smoothstep(0.7, 1.0, abs(in.uv.x)));
+    // From close by, where a sheet would look like one, the flame is drawn as a volume; the
+    // two blend over a short range of sizes on screen so nothing pops.
+    let sheet = flame_sample(in.uv, in.size, seed, t) * (1.0 - smoothstep(0.7, 1.0, abs(in.uv.x)));
+    let near = smoothstep(VOLUME_FROM_PX, VOLUME_FROM_PX * 1.6, in.pixels_per_m * in.size.x);
+    var s = sheet;
+    if (near > 0.0) {
+        s = mix(sheet, flame_volume(in, seed, t), near);
+    }
     // The root of the sprite fades in (the base of a flame is thin, bluish and dim; a flame
     // rising out of a bigger fire has no base of its own), raggedly so it never shows a
     // straight edge; wisps fade out at its top, and the whole flame dims as it dies down.
