@@ -54,4 +54,27 @@ pub fn frame_diagnostics_system(
     }
     diag.frame = time.frame_count();
     diag.entities = entities.count_spawned();
+    if diag.frame.is_multiple_of(15)
+        && let Some(mb) = process_ram_mb()
+    {
+        diag.set(PROCESS_RAM_MB, mb);
+    }
+}
+
+/// The [`Diagnostics`] metric with the process's resident memory, MB (refreshed every 15
+/// frames).
+pub const PROCESS_RAM_MB: &str = "process.ram_mb";
+
+/// The process's resident memory (RAM it holds now: the working set on Windows), MB.
+pub fn process_ram_mb() -> Option<f64> {
+    memory_stats::memory_stats().map(|m| m.physical_mem as f64 / (1024.0 * 1024.0))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_process_ram_reads() {
+        let mb = super::process_ram_mb().expect("supported on every target we ship");
+        assert!(mb > 1.0 && mb < 1.0e6, "{mb} MB");
+    }
 }

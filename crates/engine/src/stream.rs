@@ -10,6 +10,7 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
+use engine_core::diagnostics::{Diagnostics, PROCESS_RAM_MB};
 use engine_core::prelude::*;
 use engine_world::physics::Velocity;
 use engine_world::stream::CellInfo;
@@ -97,13 +98,20 @@ impl StreamCellsExt for App {
     }
 }
 
-/// How much loading one frame may do.
-#[derive(Resource, Debug, Clone, Copy)]
+/// How much loading one frame may do, and the memory caps.
+#[derive(Resource, Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StreamingBudget {
     /// Cells spawned per frame at most.
     pub loads_per_frame: usize,
     /// No further cell starts once this frame's loading took this long, ms.
     pub frame_ms: f32,
+    /// Over this much process RAM (MB, `process.ram_mb`), cells no source needs right now
+    /// (loaded, outside their load distance, not kept) unload early, farthest first, one a
+    /// frame, instead of waiting for the hysteresis margin.
+    pub ram_mb: Option<f64>,
+    /// The same for GPU memory (MB, `render.gpu_memory_mb`).
+    pub vram_mb: Option<f64>,
 }
 
 impl Default for StreamingBudget {
@@ -111,7 +119,20 @@ impl Default for StreamingBudget {
         Self {
             loads_per_frame: 1,
             frame_ms: 8.0,
+            ram_mb: None,
+            vram_mb: None,
         }
+    }
+}
+
+impl StreamingBudget {
+    /// Whether memory is over a cap, from the [`Diagnostics`] metrics.
+    pub fn over(&self, diagnostics: &Diagnostics) -> bool {
+        let over = |cap: Option<f64>, metric: &str| {
+            cap.zip(diagnostics.get(metric))
+                .is_some_and(|(cap, mb)| mb > cap)
+        };
+        over(self.ram_mb, PROCESS_RAM_MB) || over(self.vram_mb, "render.gpu_memory_mb")
     }
 }
 
@@ -127,7 +148,44 @@ impl Plugin for StreamingPlugin {
         app.init_resource::<StreamedCells>()
             .init_resource::<CellHooks>()
             .init_resource::<StreamingBudget>()
-            .add_systems(Last, stream_system);
+            .add_systems(Last, stream_system)
+            .register_api(
+                "stream.cells",
+                "List the streamed cells (key, center, radius, load distance, state, last load \
+                 time), what is loaded, and the process RAM and GPU memory in MB.",
+                "{}",
+                |world, _| {
+                    let cells = world.resource::<StreamedCells>();
+                    let diag = world.resource::<Diagnostics>();
+                    Ok(serde_json::json!({
+                        "cells": cells.cells,
+                        "loaded": cells.cells.iter().filter(|c| c.state == CellState::Loaded).count(),
+                        "ram_mb": diag.get(PROCESS_RAM_MB),
+                        "vram_mb": diag.get("render.gpu_memory_mb"),
+                    }))
+                },
+            )
+            .register_api(
+                "stream.budget",
+                "Get or change the streaming budget: loads_per_frame, frame_ms, ram_mb and \
+                 vram_mb (caps in MB; over one, cells no source needs unload early; null = no \
+                 cap). Send fields to change; returns the budget.",
+                r#"{"ram_mb": 12000, "loads_per_frame": 1}"#,
+                |world, args| {
+                    let mut budget = world.resource_mut::<StreamingBudget>();
+                    if args.as_object().is_some_and(|a| !a.is_empty()) {
+                        let mut current =
+                            serde_json::to_value(*budget).map_err(|e| e.to_string())?;
+                        if let (Some(into), Some(from)) = (current.as_object_mut(), args.as_object()) {
+                            for (k, v) in from {
+                                into.insert(k.clone(), v.clone());
+                            }
+                        }
+                        *budget = serde_json::from_value(current).map_err(|e| e.to_string())?;
+                    }
+                    serde_json::to_value(*budget).map_err(|e| e.to_string())
+                },
+            );
     }
 }
 
@@ -173,17 +231,25 @@ pub fn stream_system(world: &mut World) {
     };
     let mut queued = Vec::new();
     let mut leaving = Vec::new();
+    let mut spare: Option<(f64, usize)> = None;
     for (i, c) in cells.cells.iter_mut().enumerate() {
         let r = reach(c);
         match c.state {
             CellState::Unloaded if r <= 1.0 => c.state = CellState::Queued,
             CellState::Queued if r > 1.0 + hysteresis => c.state = CellState::Unloaded,
             CellState::Loaded if r > 1.0 + hysteresis && !c.keep_loaded => leaving.push(i),
+            CellState::Loaded if r > 1.0 && !c.keep_loaded && spare.is_none_or(|s| r > s.0) => {
+                spare = Some((r, i));
+            }
             _ => {}
         }
         if c.state == CellState::Queued {
             queued.push((r, i));
         }
+    }
+    let pressed = leaving.is_empty() && budget.over(world.resource::<Diagnostics>());
+    if let Some((_, i)) = spare.filter(|_| pressed) {
+        leaving.push(i);
     }
     for i in leaving {
         unload(world, i);
@@ -331,6 +397,65 @@ mod tests {
         place(&mut app, player, 480.0);
         app.update();
         assert_eq!(named(&mut app, "hut"), 1);
+    }
+
+    #[test]
+    fn over_the_memory_cap_a_cell_in_the_margin_goes_early() {
+        let mut app = app();
+        for (key, x) in [("left", 100.0), ("ahead", 160.0)] {
+            app.stream_cell(
+                StreamCell::new(key, DVec3::new(x, 0.0, 0.0), 10.0, move |world| {
+                    world.spawn(Name::new(key));
+                })
+                .load_within(100.0),
+            );
+        }
+        let player = app
+            .world
+            .spawn(StreamingSource {
+                lookahead_s: 0.0,
+                ..Default::default()
+            })
+            .id();
+        place(&mut app, player, 100.0);
+        app.update_n(2);
+        assert_eq!((named(&mut app, "left"), named(&mut app, "ahead")), (1, 1));
+        // 115 m past "left"'s edge: inside its margin, so it stays while memory is fine.
+        place(&mut app, player, 215.0);
+        app.update();
+        assert_eq!(named(&mut app, "left"), 1);
+        app.world.resource_mut::<StreamingBudget>().ram_mb = Some(1.0);
+        app.world
+            .resource_mut::<Diagnostics>()
+            .set(PROCESS_RAM_MB, 150.0);
+        app.update();
+        assert_eq!((named(&mut app, "left"), named(&mut app, "ahead")), (0, 1));
+    }
+
+    #[test]
+    fn the_bridge_lists_cells_and_sets_the_budget() {
+        use engine_core::registry::call_api;
+        let mut app = app();
+        app.stream_cell(StreamCell::new("hut", DVec3::ZERO, 5.0, |w| {
+            w.spawn(Name::new("hut"));
+        }));
+        app.update();
+        let cells = call_api(&mut app.world, "stream.cells", serde_json::json!({})).unwrap();
+        assert_eq!(cells["loaded"], 1);
+        assert_eq!(cells["cells"][0]["key"], "hut");
+        assert_eq!(cells["cells"][0]["state"], "Loaded");
+        let budget = call_api(
+            &mut app.world,
+            "stream.budget",
+            serde_json::json!({"ram_mb": 12000, "loads_per_frame": 2}),
+        )
+        .unwrap();
+        assert_eq!(budget["ram_mb"], 12000.0);
+        let set = *app.world.resource::<StreamingBudget>();
+        assert_eq!(
+            (set.ram_mb, set.loads_per_frame, set.vram_mb),
+            (Some(12000.0), 2, None)
+        );
     }
 
     #[test]

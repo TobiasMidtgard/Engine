@@ -20,7 +20,7 @@ use engine_input::{Binding, ButtonInput, InputMap, KeyCode};
 use engine_render::{
     FeatureStats, FrameContext, GpuShared, GrowBuffer, RenderFeature, RenderSettings, ViewData,
 };
-use engine_world::{InteractTarget, WindField, WindOverride};
+use engine_world::{CellState, InteractTarget, StreamedCells, WindField, WindOverride};
 use serde::{Deserialize, Serialize};
 
 /// Shader source (standalone, no frame bindings).
@@ -107,6 +107,10 @@ pub struct PanelData {
     pub frames_ms: Vec<f32>,
     pub gpu_ms: Option<f64>,
     pub gpu_memory_mb: Option<f64>,
+    /// The process's resident memory, MB.
+    pub ram_mb: Option<f64>,
+    /// Streamed cells: (loaded, queued, all).
+    pub cells: Option<(usize, usize, usize)>,
     /// `(pass, ms)`, slowest first.
     pub gpu_passes: Vec<(String, f64)>,
     /// `(step, ms)`, slowest first.
@@ -134,11 +138,23 @@ impl PanelData {
                     .is_some_and(|t| t.speed_m_s.is_some());
                 (w.prevailing.length(), set)
             }),
+            cells: world
+                .get_resource::<StreamedCells>()
+                .filter(|c| !c.cells.is_empty())
+                .map(|c| {
+                    let count = |s| c.cells.iter().filter(|c| c.state == s).count();
+                    (
+                        count(CellState::Loaded),
+                        count(CellState::Queued),
+                        c.cells.len(),
+                    )
+                }),
             ..Default::default()
         };
         if let Some(diag) = world.get_resource::<Diagnostics>() {
             data.gpu_ms = diag.get("render.gpu_ms");
             data.gpu_memory_mb = diag.get("render.gpu_memory_mb");
+            data.ram_mb = diag.get(engine_core::diagnostics::PROCESS_RAM_MB);
             for (name, value) in &diag.metrics {
                 if let Some(pass) = name.strip_prefix("render.gpu.") {
                     data.gpu_passes.push((pass.to_string(), *value));
@@ -377,11 +393,22 @@ pub fn build_panel(data: &PanelData, width: u32, height: u32, scale: u32) -> Vec
     if !data.cpu_steps.is_empty() {
         second.push_str(&format!("  render CPU {cpu:6.2} ms"));
     }
+    if let Some(mb) = data.ram_mb {
+        second.push_str(&format!("  RAM {:.2} GB", mb / 1024.0));
+    }
     if let Some(mb) = data.gpu_memory_mb {
         second.push_str(&format!("  VRAM {:.2} GB", mb / 1024.0));
     }
     if !second.is_empty() {
         lines.push((second, DIM));
+    }
+    if let Some((loaded, queued, all)) = data.cells {
+        let waiting = if queued > 0 {
+            format!(", {queued} waiting")
+        } else {
+            String::new()
+        };
+        lines.push((format!("cells {loaded}/{all} loaded{waiting}"), DIM));
     }
     if let Some((speed, set)) = data.wind {
         let source = if set {
@@ -740,6 +767,8 @@ mod tests {
             frames_ms: (0..HISTORY).map(|i| 10.0 + (i % 40) as f32).collect(),
             gpu_ms: Some(12.5),
             gpu_memory_mb: Some(4096.0),
+            ram_mb: Some(6200.0),
+            cells: Some((12, 2, 31)),
             gpu_passes: vec![("scene".into(), 9.8), ("shadows".into(), 1.7)],
             cpu_steps: vec![("prepare meshes".into(), 9.75)],
             systems: vec![("engine_physics::physics_step".into(), 3.2)],

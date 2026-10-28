@@ -18,3 +18,4 @@ tracing-subscriber.workspace = true
 raw-window-handle.workspace = true
 parking_lot.workspace = true
 crossbeam-channel.workspace = true
+memory-stats.workspace = true
