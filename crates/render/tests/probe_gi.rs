@@ -1,7 +1,8 @@
 //! Probe GI (`RenderSettings::probe_gi`): a closed room keeps the noon sky out, a sunlit patch
 //! on the floor lights the room around it, a torch's light bounces off the walls of its room at
 //! night, and none of it leaks through a wall into the room next door; meshes far from the probe
-//! grid are not built for its rays. Needs a GPU or lavapipe; passes with a note when neither is
+//! grid are not built for its rays; an indoor volume's closed faces stop the probes' rays where
+//! no mesh does (rock drawn by another feature). Needs a GPU or lavapipe; passes with a note when neither is
 //! available.
 
 use engine_core::prelude::*;
@@ -307,4 +308,37 @@ fn meshes_far_from_the_grid_are_not_built_for_its_rays() {
     eprintln!("meshes built: {near} near the room, {with_far} with a far one");
     assert!(near > 0.0);
     assert_eq!(with_far, near, "the far mesh was built");
+}
+
+#[test]
+fn an_indoor_volume_keeps_the_sky_out_where_no_mesh_roofs_the_room() {
+    // A room whose roof the probes can't see (a cave's rock drawn by another feature): open to
+    // the sky for their rays unless a `SkyLightVolume` closes it.
+    let scene = |volume: bool| {
+        let mut app = app(true);
+        let w = &mut app.world;
+        room(w, DVec3::ZERO, 0.7, 0.5, Some((2.0 * HALF, 0.0)));
+        ground(w);
+        // Its light falls away from the far wall's inner face.
+        sun(w, 110_000.0, DVec3::new(0.3, -1.0, 0.4));
+        if volume {
+            w.spawn((
+                Transform::from_xyz(0.0, HEIGHT * 0.5, 0.0),
+                SkyLightVolume::new([HALF as f32, HEIGHT as f32 * 0.5 + 0.2, HALF as f32])
+                    .open(BoxFace::NegZ),
+            ));
+        }
+        camera(w, EYE, DVec3::new(0.3, 1.0, -3.0), 12.0);
+        app
+    };
+    // The far wall, below the sky over the open top.
+    const WALL: [f32; 4] = [0.2, 0.35, 0.8, 0.65];
+    let Some(open) = shoot(scene(false), 16, "roofless_open.png", WALL) else {
+        return;
+    };
+    let closed = shoot(scene(true), 16, "roofless_volume.png", WALL).expect("GPU");
+    assert!(
+        closed < open * 0.5,
+        "far wall: {closed:.1} inside the volume, {open:.1} without it"
+    );
 }
