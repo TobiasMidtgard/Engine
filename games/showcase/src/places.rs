@@ -201,8 +201,22 @@ pub fn places() -> Vec<Place> {
         ),
         place(
             "plaza",
-            "Material plaza and the village",
+            "The market square and the village",
             near("plaza", [10.0, 4.5, 16.0], [0.0, 1.8, -1.0]),
+            11.0,
+        ),
+        // Rendering's roughness ladders on the stalls: red glaze and copper, glossy to matte
+        // left to right.
+        place(
+            "plaza_potter",
+            "The potter's stall: red glaze from glossy to matte",
+            crate::plaza::stall_view(crate::plaza::POTTER),
+            11.0,
+        ),
+        place(
+            "plaza_copper",
+            "The coppersmith's stall: copper from polished to dull",
+            crate::plaza::stall_view(crate::plaza::COPPERSMITH),
             11.0,
         ),
         // The siege fortress from the village's west edge, 280 m off: loaded, then unloaded

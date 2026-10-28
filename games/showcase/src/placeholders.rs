@@ -3,7 +3,6 @@
 //! they don't simulate anything.
 
 use crate::landscape::Landscape;
-use crate::meshgen::TreeKind;
 use crate::scenery::{self, Library};
 use crate::zones::Zone;
 use engine::prelude::*;
@@ -15,14 +14,6 @@ fn spawn(commands: &mut Commands, shape: Shape, material: StandardMaterial, tran
 
 fn cuboid(x: f32, y: f32, z: f32) -> Shape {
     Shape::Cuboid { size: [x, y, z] }
-}
-
-fn cyl(radius: f32, height: f32) -> Shape {
-    Shape::Cylinder {
-        radius,
-        height,
-        segments: 24,
-    }
 }
 
 fn at(p: DVec3) -> Transform {
@@ -37,23 +28,13 @@ fn mat(hex: u32, roughness: f32) -> StandardMaterial {
     StandardMaterial::hex(hex).with_roughness(roughness)
 }
 
-/// Dressed stone (walls, pedestals, planters): warm cast stone, mapped in the object's meters.
-fn stone() -> StandardMaterial {
-    StandardMaterial::preset(MaterialPreset::Concrete)
-        .with_tint_hex(0xe6ddd0)
-        .with_triplanar()
-}
 fn wood() -> StandardMaterial {
     mat(0x7a5434, 0.8)
 }
 fn dark_wood() -> StandardMaterial {
     mat(0x4a3220, 0.8)
 }
-fn metal() -> StandardMaterial {
-    StandardMaterial::hex(0xc8ccd4)
-        .with_metallic(1.0)
-        .with_roughness(0.3)
-}
+
 /// Vertex tint for flat rock surfaces drawn with the rock kit's material (as dark as the
 /// boulders, which the textures multiply).
 const ROCK_TINT: Vec3 = Vec3::new(0.31, 0.3, 0.28);
@@ -75,166 +56,6 @@ fn rock_face(b: crate::meshgen::Builder) -> Mesh {
         v.uv = (q / crate::rock_textures::ROCK_TILE_M).to_array();
     }
     mesh
-}
-
-/// Material plaza: a paved square with a roughness ladder (dielectric and metal), a glass orb
-/// inside an emissive ring and pedestals. The Rendering and lighting thread owns its content.
-pub fn plaza(commands: &mut Commands, lib: &Library, z: &Zone) {
-    let c = z.center;
-    // Paving: granite setts in concentric bands (a darker band of smaller setts between two
-    // light ones) round a polished marble middle, laid in world meters so the joints line up.
-    let cobbles = |tile: f32, tint: u32| {
-        StandardMaterial::preset(MaterialPreset::Cobblestone)
-            .with_texture_scale(tile)
-            .with_tint_hex(tint)
-    };
-    let paving = [
-        (31.0f32, cobbles(1.5, 0xf2eee8)),
-        (24.0, cobbles(1.0, 0xc4beb6)),
-        (16.0, cobbles(1.5, 0xfaf6f0)),
-        (
-            8.0,
-            StandardMaterial::preset(MaterialPreset::Marble).with_texture_scale(1.6),
-        ),
-    ];
-    for (i, (r, material)) in paving.into_iter().enumerate() {
-        spawn(
-            commands,
-            Shape::Cylinder {
-                radius: r,
-                height: 0.2,
-                segments: 128,
-            },
-            material.with_triplanar_world(),
-            at(c + DVec3::new(0.0, 0.1 + i as f64 * 0.005, 0.0)),
-        );
-    }
-    // Low wall with benches around the edge.
-    for i in 0..32 {
-        let a = i as f64 / 32.0 * TAU64;
-        if i % 8 == 0 {
-            continue; // gaps for the roads
-        }
-        spawn(
-            commands,
-            cuboid(6.2, 0.55, 0.6),
-            stone(),
-            yawed(
-                c + DVec3::new(a.cos() * 31.0, 0.35, a.sin() * 31.0),
-                -(a as f32) + std::f32::consts::FRAC_PI_2,
-            ),
-        );
-    }
-    // A carved fountain in the middle of the marble (Particles' court fountain, a third bigger),
-    // its jets falling into the basin.
-    let fountain = 1.3;
-    engine_vfx::demo::art::spawn_prop(
-        commands,
-        "plaza.fountain",
-        at(c + DVec3::new(0.0, 0.2, 0.0)).with_scale(Vec3::splat(fountain)),
-        engine_vfx::demo::art::props::water::fountain,
-    );
-    commands.spawn((
-        at(c + DVec3::new(
-            0.0,
-            0.2 + (engine_vfx::demo::art::props::water::NOZZLE * fountain) as f64,
-            0.0,
-        )),
-        engine_vfx::ParticleEffect::new("water.fountain"),
-    ));
-    // Polished garden spheres on stone pedestals in a ring round it: a roughness sweep in red
-    // glaze on the near side and in gilt on the far side, smooth to matte left to right.
-    for i in 0..7 {
-        let r = i as f32 / 6.0;
-        let ball = Shape::Sphere {
-            radius: 0.45,
-            segments: 48,
-        };
-        for (side, material) in [
-            (1.0, mat(0xc0392b, r.max(0.05))),
-            (
-                -1.0,
-                StandardMaterial::hex(0xe6b450)
-                    .with_metallic(1.0)
-                    .with_roughness(r.max(0.05)),
-            ),
-        ] {
-            // 25° to 155° round the near (+Z) or the far (−Z) half.
-            let a = (25.0 + i as f64 * 130.0 / 6.0).to_radians();
-            let p = DVec3::new(-a.cos() * 11.5, 0.0, side * a.sin() * 11.5);
-            // A marble pedestal: plinth, slim shaft and a cap the ball sits in.
-            for (radius, height, y) in [(0.36, 0.12, 0.26), (0.24, 0.72, 0.68), (0.32, 0.1, 1.09)] {
-                spawn(
-                    commands,
-                    cyl(radius, height),
-                    StandardMaterial::preset(MaterialPreset::Marble).with_triplanar(),
-                    at(c + p + DVec3::Y * y),
-                );
-            }
-            spawn(commands, ball, material, at(c + p + DVec3::Y * 1.56));
-        }
-    }
-    // Behind them, toward the north road: a glass globe in a glowing ring, between two steel
-    // sculptures on plinths.
-    spawn(
-        commands,
-        Shape::Torus {
-            radius: 2.5,
-            tube: 0.25,
-            segments: 64,
-        },
-        StandardMaterial::hex(0x202830).with_emissive([0.3, 0.7, 1.0], 600.0),
-        Transform::from_translation(c + DVec3::new(0.0, 3.5, -19.0))
-            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
-    );
-    let mut glass = StandardMaterial::hex(0xd8f0ff)
-        .with_roughness(0.05)
-        .with_alpha(0.25);
-    glass.reflectance = 0.6;
-    spawn(
-        commands,
-        Shape::Sphere {
-            radius: 1.5,
-            segments: 64,
-        },
-        glass,
-        at(c + DVec3::new(0.0, 3.5, -19.0)),
-    );
-    for (i, x) in [-6.0, 6.0].into_iter().enumerate() {
-        spawn(
-            commands,
-            cuboid(2.0, 1.0, 2.0),
-            stone(),
-            at(c + DVec3::new(x, 0.7, -19.0)),
-        );
-        let shape = if i == 0 {
-            Shape::Capsule {
-                radius: 0.6,
-                height: 2.4,
-                segments: 32,
-            }
-        } else {
-            Shape::Cone {
-                radius: 0.9,
-                height: 2.2,
-                segments: 48,
-            }
-        };
-        spawn(commands, shape, metal(), at(c + DVec3::new(x, 2.4, -19.0)));
-    }
-    // Trees in big planters at the four diagonals.
-    for k in 0..4 {
-        let a = (k as f64 + 0.5) / 4.0 * TAU64;
-        let p = c + DVec3::new(a.cos() * 22.0, 0.0, a.sin() * 22.0);
-        spawn(
-            commands,
-            cyl(2.0, 0.8),
-            stone(),
-            at(p + DVec3::new(0.0, 0.4, 0.0)),
-        );
-        let t = &lib.trees_of(TreeKind::Oak).nth(k).expect("oak");
-        scenery::spawn_tree(commands, t, p + DVec3::new(0.0, 0.8, 0.0), a as f32, 0.8);
-    }
 }
 
 /// 2D and 2.5D gallery: a side-on diorama (platforms, coins, a hero) that the 2D cameras will

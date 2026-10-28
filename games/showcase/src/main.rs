@@ -17,7 +17,7 @@
 //! them (see `zones::demo_zones`). `--exe` starts as the exe does (built a step a frame, then
 //! the start screen), also headless.
 //!
-//! The map is a valley ringed by snowy mountains: a village around the material plaza, woods,
+//! The map is a valley ringed by snowy mountains: a village around the market square, woods,
 //! a lake, and one zone per engine feature. Each zone shows placeholder content until its module
 //! ships a `demo::spawn_demo` (see `zones.rs`); `TEST_CASES.md` lists every test case and its
 //! owner.
@@ -34,6 +34,7 @@ mod paint_cache;
 mod placeholders;
 mod places;
 mod planet;
+mod plaza;
 mod rock_textures;
 mod rocks;
 mod scenery;

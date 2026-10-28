@@ -1561,7 +1561,7 @@ pub fn spawn_house(
 }
 
 /// A prop (bench, barrels, wood pile, cart) whose front faces `yaw` (radians around Y).
-fn spawn_prop(
+pub(crate) fn spawn_prop(
     commands: &mut Commands,
     lib: &Library,
     prop: &PropHandles,

@@ -98,7 +98,7 @@ are built, nothing simulates yet) · ⬜ not visible yet
 | # | Test case | Zone / viewpoint | Owner | Status |
 |---|---|---|---|---|
 | 46 | Hyper-realistic, beautiful scenery | every viewpoint | Beautiful showcase world (renderer: Rendering and lighting) | 🟨 valley, mountains, village, meadows of GPU grass blades, a cliff with a waterfall; Foliage's oaks, birches, spruces, pines and hazels in the woods and hedges; dry-stone walls of real rock on virtual geometry. Round 25: kitchen gardens behind 14 of the village's 34 houses (`village_garden`, `village_gardens`), after medieval cottage gardens: a woven wattle fence with a gate, raised beds edged in boards on crumbly soil, rows of colewort, leeks, onions, lettuce, marigolds and a bean wigwam; the meadow grass stops at the fence (pictures in round25/) |
-| 47 | Physically based materials and lighting, day and night | `plaza`, `sunset`, `night` | Rendering and lighting | ✅ |
+| 47 | Physically based materials and lighting, day and night | `plaza`, `plaza_potter`, `plaza_copper` (roughness ladders in red glaze and copper on the market stalls), `sunset`, `night` | Rendering and lighting | ✅ |
 | 48 | 2D and 2.5D games | `gallery2d` | Rendering and lighting | 🟨 diorama, no 2D camera yet |
 | 49 | All platforms | build matrix | Game engine and test game | ⬜ |
 | 50 | Direct AI integration: an AI can inspect, change and screenshot the running game | `showcase.*` APIs, `engine.describe` | Game engine and test game | ✅ |

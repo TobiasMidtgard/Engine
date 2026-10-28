@@ -36,7 +36,7 @@ pub struct Zone {
 pub const ZONES: &[Zone] = &[
     Zone {
         key: "plaza",
-        name: "Material plaza",
+        name: "Market square",
         center: DVec3::new(0.0, 0.0, 0.0),
         radius: 40.0,
         module: "render",
@@ -444,8 +444,9 @@ pub struct ZoneCell {
 }
 
 /// Zones whose content is only the entities they spawn, so they unload cleanly: the showcase's
-/// own placeholders. The modules' zones join as their unload hooks land.
-const UNLOADABLE: [&str; 2] = ["plaza", "gallery2d"];
+/// own placeholders, and the modules' zones that `ENGINE_STREAM_AUDIT` found clean (out, in
+/// and out again, 2026-10-28). The others join as their unload hooks land.
+const UNLOADABLE: [&str; 5] = ["plaza", "gallery2d", "magic", "tracks", "parkour"];
 
 /// Cells with no far-view proxy ([`ZoneCell::proxy`]).
 const NO_PROXY: [&str; 3] = ["yard_sailboat", "yard_rinse", "meadow"];
@@ -519,7 +520,7 @@ fn fnv(h: u64, bytes: &[u8]) -> u64 {
 
 /// Bump when the showcase changes what its zones spawn, so far-view proxies kept on disk from
 /// an older build aren't shown for them.
-const ZONE_CONTENT_REVISION: u64 = 1;
+const ZONE_CONTENT_REVISION: u64 = 2;
 
 /// The version a cell's far-view proxy is kept on disk under (`engine::hlod`): the world's
 /// seed, the cell, the commit a release was built from (CI sets `GITHUB_SHA`; a local build
@@ -547,7 +548,7 @@ pub fn spawn_cell(commands: &mut Commands, lib: &Library, land: &Landscape, seed
         return;
     };
     match key {
-        "plaza" => ph::plaza(commands, lib, z),
+        "plaza" => crate::plaza::spawn(commands, lib, z),
         "market" => engine_ui::demo::spawn_demo(commands, z.center),
         "paddock" => engine_anim::demo::spawn_demo(commands, z.center),
         "physics" => engine_physics::demo::spawn_demo(commands, z.center),
