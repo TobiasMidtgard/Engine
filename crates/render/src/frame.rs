@@ -13,7 +13,7 @@ use crate::cloud_shadows::GpuCloudShadow;
 use crate::components::{
     AmbientLight, Camera, DirectionalLight, Exposure, PointLight, Projection, SkyLightVolume,
 };
-use crate::settings::{Atmosphere, DebugView, FogSettings};
+use crate::settings::{Atmosphere, DebugView, FogSettings, RenderSettings};
 use crate::shadows::{Cascades, FarShadowView, SkyOcclusionView};
 
 /// GPU layout of `struct Frame` in `lib_types.wgsl`.
@@ -377,6 +377,40 @@ impl Default for ExposureState {
 /// view of sunlit grass and sky reads about 0.15 EV above it, a snowfield 2.4.
 const BRIGHT_SCENE_START_EV: f32 = 0.4;
 
+/// How far below the light's gray (`estimate_scene_luminance`) the meter starts and ends
+/// fading in `RenderSettings::interior_exposure_bias`, in EV: shade under trees reads 1 to 2 EV
+/// below it, the breach house at noon about 3.2 (lit by world GI) and the mushroom cave 7.9.
+const INTERIOR_START_EV: f32 = 2.0;
+const INTERIOR_FULL_EV: f32 = 4.5;
+
+/// How many EV darker (positive) or brighter (negative) than average gray auto exposure shows
+/// a scene, from its meter reading and the light's gray (`incident`, both EV100), the sun's
+/// height `sun_y` and how much the camera faces it (0..1).
+fn exposure_grade(
+    settings: &RenderSettings,
+    metered: f32,
+    incident: f32,
+    sun_y: f32,
+    facing_sun: f32,
+) -> f32 {
+    let day = smoothstep(0.0, 0.1, sun_y);
+    // Dark scenes stay darker than average gray, like the eye sees them.
+    let night = smoothstep(5.0, -2.0, metered) * settings.night_exposure_bias;
+    // Caves and interiors by day stay darker than the valley outside, the way games grade
+    // them: by how far the meter reads below gray things in the daylight here.
+    let interior = smoothstep(INTERIOR_START_EV, INTERIOR_FULL_EV, incident - metered)
+        * settings.interior_exposure_bias.max(0.0)
+        * day;
+    // Bright scenes by day (snow, cloud tops) show brighter than average gray: by how far the
+    // meter reads above gray things in the light here, past what an ordinary view of sky and
+    // land reads above it. Not at night, when lamps outshine the light the estimate knows of.
+    let bright = (metered - incident - BRIGHT_SCENE_START_EV)
+        .clamp(0.0, settings.bright_scene_exposure.max(0.0))
+        * (1.0 - facing_sun)
+        * day;
+    night.max(interior) - bright
+}
+
 /// Estimate the scene's average luminance from the light setup (cd/m²).
 ///
 /// A physically motivated heuristic: 18% gray lit by direct sun (mix of horizontal and
@@ -602,22 +636,13 @@ pub fn build_view(
                 let lum = estimate_scene_luminance(sun_dir, sun_camera, ambient_lum).max(1e-4);
                 (lum * 100.0 / 12.5).log2()
             });
-            // Dark scenes stay darker than average gray, like the eye sees them.
-            let night = smoothstep(5.0, -2.0, metered) * settings.night_exposure_bias;
-            // Bright scenes by day (snow, cloud tops) show brighter than average gray: by how
-            // far the meter reads above gray things in the light here, past what an ordinary
-            // view of sky and land reads above it. Not at night, when lamps outshine the light
-            // the estimate knows of.
             let incident = (estimate_scene_luminance(sun_dir, sun_camera, ambient_lum).max(1e-4)
                 * 100.0
                 / 12.5)
                 .log2();
             let facing_sun = smoothstep(0.3, 0.8, (rotation * Vec3::NEG_Z).dot(sun_dir));
-            let bright = (metered - incident - BRIGHT_SCENE_START_EV)
-                .clamp(0.0, settings.bright_scene_exposure.max(0.0))
-                * (1.0 - facing_sun)
-                * smoothstep(0.0, 0.1, sun_dir.y);
-            let target = (metered + night - bright - compensation - crate::exposure::METER_BIAS_EV)
+            let grade = exposure_grade(&settings, metered, incident, sun_dir.y, facing_sun);
+            let target = (metered + grade - compensation - crate::exposure::METER_BIAS_EV)
                 .clamp(min_ev100, max_ev100);
             if !exposure_state.initialized || exposure_state.snap {
                 exposure_state.ev100 = target;
@@ -993,6 +1018,28 @@ mod tests {
             (q[0] + 327.68).abs() < 1e-3 && (q[1] - 327.67).abs() < 1e-3,
             "{q:?}"
         );
+    }
+
+    #[test]
+    fn caves_and_interiors_by_day_show_darker_than_the_valley() {
+        let settings = RenderSettings::default();
+        let noon = 15.2;
+        let grade = |metered: f32, sun_y: f32| exposure_grade(&settings, metered, noon, sun_y, 0.0);
+        // The valley in the sun, and shade under trees: as metered.
+        assert_eq!(grade(15.3, 0.9), 0.0);
+        assert_eq!(grade(13.5, 0.9), 0.0);
+        // The breach house and the mushroom cave at noon.
+        let house = grade(12.0, 0.9);
+        assert!(house > 0.4 && house < 1.0, "{house}");
+        assert_eq!(grade(7.4, 0.9), settings.interior_exposure_bias);
+        // Not by night, and never on top of the night bias.
+        assert_eq!(grade(7.4, -0.3), 0.0);
+        assert_eq!(grade(-2.5, 0.9), settings.night_exposure_bias);
+        let off = RenderSettings {
+            interior_exposure_bias: 0.0,
+            ..RenderSettings::default()
+        };
+        assert_eq!(exposure_grade(&off, 7.4, noon, 0.9, 0.0), 0.0);
     }
 
     #[test]

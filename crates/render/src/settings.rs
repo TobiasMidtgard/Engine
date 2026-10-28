@@ -321,6 +321,12 @@ pub struct RenderSettings {
     /// How many EV darker than "average gray" very dark scenes are shown (0 = a moonlit night
     /// is exposed like noon; 2.5 = night looks like night). Ramps in below EV100 ≈ 5.
     pub night_exposure_bias: f32,
+    /// How many EV darker than "average gray" caves and interiors are shown by day, as games
+    /// grade them, so they read darker than the valley even after the eye adapts. Fades in by
+    /// how far the meter reads below gray things in the daylight here: from 2 EV below (deep
+    /// shade) to fully at 4.5 EV below (a cave, a dim room lit through its windows). Does not
+    /// add to `night_exposure_bias`; the larger of the two applies. 0 = off.
+    pub interior_exposure_bias: f32,
     /// Up to how many EV brighter than "average gray" auto exposure shows a scene that is
     /// brighter than gray things would be in the light falling on it: a sunlit snowfield, a sea
     /// of cloud tops, white sand. The meter alone would show them gray, as a camera's does; this
@@ -490,6 +496,7 @@ impl Default for RenderSettings {
             sky_occlusion_size: 512,
             cloud_shadows: true,
             night_exposure_bias: 2.5,
+            interior_exposure_bias: 1.25,
             bright_scene_exposure: 2.0,
             night_desaturation: 0.7,
             virtual_geometry: true,
