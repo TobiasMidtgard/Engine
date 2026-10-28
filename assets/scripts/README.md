@@ -62,8 +62,18 @@ Start the game with `ENGINE_SCRIPT_DEBUG=4711` (or call `script.debug` while it 
 VS Code with the extension in `crates/script/vscode` (its README has the setup) or any other
 Debug Adapter Protocol client. Breakpoints with conditions, hit counts and logpoints, stepping,
 the call stack, variables, watches and the debug console all work in these files, and follow hot
-reloads. Without an editor, `script.logpoint {path, line, message}` prints values from a line
-without stopping (`"message": "glow = {glow}"`), and code boards show them beside the line.
+reloads. "Uncaught errors" in VS Code's breakpoint list (on by default) stops where an error
+nothing catches is raised, with the stack and locals still there. Without an editor,
+`script.logpoint {path, line, message}` prints values from a line without stopping
+(`"message": "glow = {glow}"`), and code boards show them beside the line. A code board also
+marks the line the last error came from, with the message, until the file is fixed.
+
+## Profiling
+
+`script.profile {"seconds": 5}` records where the scripts spend their time while the game runs;
+`script.profile {}` lists the functions and lines that took the most, with engine calls such as
+`e:set` or `fire.ignite` as entries of their own. Code boards show each line's share beside it,
+and a `ProfileBoard` draws the flame graph (the Script courtyard has one recording live).
 
 ## In this folder
 

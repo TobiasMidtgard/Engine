@@ -48,7 +48,29 @@ pub(crate) struct Debugger {
     main: usize,
     session: Arc<Mutex<Session>>,
     attached: Arc<AtomicBool>,
+    /// The client's "Uncaught errors" filter is on.
+    break_errors: Arc<AtomicBool>,
+    /// `catch(handler, f, ...)`: calls `f` under `xpcall` with `handler`, then raises the error
+    /// again (`CATCH`).
+    catch: Function,
+    /// Stops at an error where it was raised (the handler `catch` gives `xpcall`).
+    handler: Function,
 }
+
+/// Runs a hook so an error stops the debugger before the stack unwinds: `xpcall` calls its
+/// handler where the error was raised. The error goes on unchanged afterwards.
+const CATCH: &str = r#"
+local xpcall, error = xpcall, error
+return function(handler, f, ...)
+	local ok, err = xpcall(f, handler, ...)
+	if not ok then
+		error(err, 0)
+	end
+end
+"#;
+
+/// Where [`CATCH`] lives; its frames are left out of the stack a client sees.
+const CATCH_SOURCE: &str = "engine/debugger.luau";
 
 /// Lets `load_file` and `reload` (which only have the VM) tell the session about new code.
 struct SessionRef(Arc<Mutex<Session>>);
@@ -77,12 +99,14 @@ impl Debugger {
             })?;
         }
         let attached = Arc::new(AtomicBool::new(false));
+        let break_errors = Arc::new(AtomicBool::new(false));
         let session = Arc::new(Mutex::new(Session {
             lua: lua.weak(),
             main,
             watchdog,
             link: None,
             attached: attached.clone(),
+            break_errors: break_errors.clone(),
             breakpoints: BTreeMap::new(),
             next_id: 1,
             step: None,
@@ -99,10 +123,35 @@ impl Debugger {
             .lock()
             .map_err(|_| mlua::Error::runtime("debug sessions poisoned"))?
             .push((main, session.clone()));
+        let catch: Function = lua
+            .load(CATCH)
+            .set_name(format!("@{CATCH_SOURCE}"))
+            .eval()?;
+        let weak = Arc::downgrade(&session);
+        let handler = lua.create_function(move |lua, error: Value| {
+            let text = match &error {
+                Value::String(s) => s.to_string_lossy(),
+                Value::Error(err) => err.to_string(),
+                other => display(other, false),
+            };
+            let mut thread = std::ptr::null_mut();
+            // SAFETY: only reads which thread is running (the one that raised the error).
+            unsafe { lua.exec_raw::<()>((), |state| thread = state)? };
+            if let Some(session) = weak.upgrade()
+                && let Ok(mut s) = session.try_lock()
+                && s.attached.load(Ordering::Relaxed)
+            {
+                s.stop_here(lua, thread, "exception", None, Some(text));
+            }
+            Ok(error)
+        })?;
         Ok(Self {
             main,
             session,
             attached,
+            break_errors,
+            catch,
+            handler,
         })
     }
 
@@ -123,9 +172,42 @@ impl Debugger {
         Ok(port)
     }
 
+    /// The DAP server is up (its requests are handled every frame).
+    pub fn listening(&self) -> bool {
+        self.lock().link.is_some()
+    }
+
     /// A client is attached (scripts run in single-step mode).
     pub fn attached(&self) -> bool {
         self.attached.load(Ordering::Relaxed)
+    }
+
+    /// The client wants to stop on uncaught errors.
+    pub fn breaks_on_errors(&self) -> bool {
+        self.attached() && self.break_errors.load(Ordering::Relaxed)
+    }
+
+    /// When stopping on errors: [`CATCH`] and its handler, to call a hook through.
+    pub fn catcher(&self) -> Option<(&Function, &Function)> {
+        self.breaks_on_errors()
+            .then_some((&self.catch, &self.handler))
+    }
+
+    /// A task failed: stops on its stack, which a coroutine keeps after an error.
+    pub fn stop_on_task_error(&self, lua: &Lua, thread: &Thread, err: &mlua::Error) {
+        let mut t = std::ptr::null_mut();
+        // SAFETY: the thread is a coroutine of this VM, pushed as the only argument.
+        let _ = unsafe {
+            lua.exec_raw::<()>(thread.clone(), |state| {
+                t = ffi::lua_tothread(state, -1);
+                ffi::lua_pop(state, 1);
+            })
+        };
+        if t.is_null() {
+            return;
+        }
+        self.lock()
+            .stop_here(lua, t, "exception", None, Some(err.to_string()));
     }
 
     /// Puts a task thread in single-step mode before it resumes, so stepping follows it.
@@ -299,6 +381,8 @@ struct Stop {
     /// Stack levels of the Luau frames, innermost first.
     frames: Vec<c_int>,
     vars: Vec<Var>,
+    /// The error it stopped on.
+    exception: Option<String>,
 }
 
 pub(crate) struct Session {
@@ -307,6 +391,7 @@ pub(crate) struct Session {
     watchdog: Watchdog,
     link: Option<Link>,
     attached: Arc<AtomicBool>,
+    break_errors: Arc<AtomicBool>,
     breakpoints: BTreeMap<String, Vec<Breakpoint>>,
     next_id: i64,
     step: Option<Step>,
@@ -421,6 +506,7 @@ impl Session {
     /// The client left: its breakpoints go, the scripts run at full speed again.
     fn detach(&mut self, lua: &Lua) {
         self.attached.store(false, Ordering::Relaxed);
+        self.break_errors.store(false, Ordering::Relaxed);
         self.step = None;
         self.pause_requested = false;
         self.set_stepping(false);
@@ -463,7 +549,7 @@ impl Session {
         if let Some(id) = stop
             && self.attached.load(Ordering::Relaxed)
         {
-            self.stop_here(&lua, l, "breakpoint", Some(id));
+            self.stop_here(&lua, l, "breakpoint", Some(id), None);
         }
     }
 
@@ -529,7 +615,7 @@ impl Session {
             return;
         };
         if self.pause_requested {
-            self.stop_here(&lua, l, "pause", None);
+            self.stop_here(&lua, l, "pause", None, None);
             return;
         }
         let Some(step) = &self.step else {
@@ -546,12 +632,20 @@ impl Session {
             StepKind::Out => depth < step.depth,
         };
         if stop {
-            self.stop_here(&lua, l, "step", None);
+            self.stop_here(&lua, l, "step", None, None);
         }
     }
 
-    /// Stops the scripts at `l`'s current line and serves the client until it continues.
-    fn stop_here(&mut self, lua: &Lua, l: *mut ffi::lua_State, reason: &str, bp: Option<i64>) {
+    /// Stops the scripts at `l`'s current line and serves the client until it continues
+    /// (`exception`: the error it stopped on).
+    fn stop_here(
+        &mut self,
+        lua: &Lua,
+        l: *mut ffi::lua_State,
+        reason: &str,
+        bp: Option<i64>,
+        exception: Option<String>,
+    ) {
         if !self.connected() {
             self.detach(lua);
             return;
@@ -560,14 +654,23 @@ impl Session {
         self.set_stepping(false);
         self.step = None;
         self.pause_requested = false;
-        self.stop = Some(Stop {
-            frames: lua_frames(l),
-            vars: Vec::new(),
-        });
+        let frames = lua_frames(l)
+            .into_iter()
+            .filter(|&level| source_at(l, level).as_deref() != Some(CATCH_SOURCE))
+            .collect();
         let mut body = json!({"reason": reason, "threadId": 1, "allThreadsStopped": true});
         if let Some(id) = bp {
             body["hitBreakpointIds"] = json!([id]);
         }
+        if let Some(text) = &exception {
+            body["description"] = json!("Paused on an error");
+            body["text"] = json!(text.lines().next().unwrap_or_default());
+        }
+        self.stop = Some(Stop {
+            frames,
+            vars: Vec::new(),
+            exception,
+        });
         self.flush_output(lua);
         if let Some(link) = &self.link {
             link.event("stopped", body);
@@ -663,6 +766,31 @@ impl Session {
                 self.reply(request, Ok(json!({"allThreadsContinued": true})));
                 true
             }
+            // An error unwinds the stack on continuing: there is no next line to step to.
+            "next" | "stepIn" | "stepOut"
+                if self.stop.as_ref().is_some_and(|s| s.exception.is_some()) =>
+            {
+                self.reply(request, Ok(Json::Null));
+                true
+            }
+            "exceptionInfo" => {
+                let text = self
+                    .stop
+                    .as_ref()
+                    .and_then(|s| s.exception.clone())
+                    .unwrap_or_default();
+                let first = text.lines().next().unwrap_or_default().to_string();
+                self.reply(
+                    request,
+                    Ok(json!({
+                        "exceptionId": "error",
+                        "description": first,
+                        "breakMode": "unhandled",
+                        "details": {"message": first, "typeName": "error", "stackTrace": text},
+                    })),
+                );
+                false
+            }
             "next" | "stepIn" | "stepOut" => {
                 let kind = match command {
                     "next" => StepKind::Over,
@@ -744,6 +872,15 @@ impl Session {
                         "supportsHitConditionalBreakpoints": true,
                         "supportsLogPoints": true,
                         "supportsEvaluateForHovers": true,
+                        "supportsExceptionInfoRequest": true,
+                        "exceptionBreakpointFilters": [{
+                            "filter": "uncaught",
+                            "label": "Uncaught errors",
+                            "description": "Stop where a script error nothing catches is \
+                                raised, with its stack and locals, before the script's call \
+                                fails.",
+                            "default": true,
+                        }],
                         "supportTerminateDebuggee": false,
                     })),
                 );
@@ -769,7 +906,18 @@ impl Session {
                 let result = self.set_breakpoints(lua, &request["arguments"]);
                 self.reply(request, result);
             }
-            "setExceptionBreakpoints" => self.reply(request, Ok(json!({"breakpoints": []}))),
+            "setExceptionBreakpoints" => {
+                let filters: Vec<&str> = request["arguments"]["filters"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|f| f.as_str())
+                    .collect();
+                self.break_errors
+                    .store(filters.contains(&"uncaught"), Ordering::Relaxed);
+                let list: Vec<Json> = filters.iter().map(|_| json!({"verified": true})).collect();
+                self.reply(request, Ok(json!({"breakpoints": list})));
+            }
             "configurationDone" => self.reply(request, Ok(Json::Null)),
             "threads" => self.reply(
                 request,

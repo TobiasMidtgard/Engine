@@ -21,6 +21,7 @@ use crate::access::{
 };
 use crate::convert::{to_lua, to_lua_like};
 use crate::entity::{EntityRef, SELVES};
+use crate::profiler::Phase;
 use crate::{Script, ScriptSettings};
 
 /// Registry name of the class every instance inherits helpers from (`every`, `after`, `spawn`).
@@ -89,6 +90,91 @@ pub(crate) struct FileState {
     pub version: u32,
     /// The compiled file of the current version (the debugger sets breakpoints on it).
     pub chunk: Option<mlua::Function>,
+    /// The last error raised in this file's code since it last loaded (code boards mark it).
+    pub fault: Option<Fault>,
+}
+
+/// A runtime error located in a file.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Fault {
+    pub line: u32,
+    /// The error without its location and traceback.
+    pub message: String,
+    /// Times it was raised.
+    pub count: u64,
+}
+
+/// Where an error message says it happened: the first `file.luau:LINE:` in it (a traceback's
+/// first Luau frame for errors raised by engine calls).
+pub(crate) fn error_location(message: &str) -> Option<(String, u32)> {
+    let mut rest = message;
+    while let Some(i) = rest.find(".luau:").or_else(|| rest.find(".lua:")) {
+        let ext = if rest[i..].starts_with(".luau:") {
+            6
+        } else {
+            5
+        };
+        let start = rest[..i]
+            .rfind(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '(')
+            .map(|j| j + 1)
+            .unwrap_or(0);
+        let digits: String = rest[i + ext..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if !digits.is_empty() && rest[i + ext + digits.len()..].starts_with(':') {
+            let path = rest[start..i + ext - 1].trim_start_matches('@').to_string();
+            return Some((path, digits.parse().ok()?));
+        }
+        rest = &rest[i + ext..];
+    }
+    None
+}
+
+/// An error message's gist: what an engine call failed with, or the message without the
+/// `file:line:` in front and the traceback after.
+pub(crate) fn error_gist(message: &str) -> String {
+    let text = match message.rfind("caused by: ") {
+        Some(i) => &message[i + "caused by: ".len()..],
+        None => message,
+    };
+    let first = text.lines().next().unwrap_or_default();
+    let first = first.strip_prefix("runtime error: ").unwrap_or(first);
+    let first = first.strip_prefix("syntax error: ").unwrap_or(first);
+    match error_location(first) {
+        Some((path, line)) => {
+            let at = format!("{path}:{line}:");
+            match first.find(&at) {
+                Some(i) => first[i + at.len()..].trim().to_string(),
+                None => first.trim().to_string(),
+            }
+        }
+        None => first.trim().to_string(),
+    }
+}
+
+/// Notes a runtime error on the file and line it names (code boards mark it).
+pub(crate) fn note_fault(lua: &Lua, message: &str) {
+    let Some((path, line)) = error_location(message) else {
+        return;
+    };
+    let Some(mut files) = lua.app_data_mut::<Files>() else {
+        return;
+    };
+    let Some(f) = files.map.get_mut(&path) else {
+        return;
+    };
+    let gist = error_gist(message);
+    match &mut f.fault {
+        Some(fault) if fault.line == line && fault.message == gist => fault.count += 1,
+        slot => {
+            *slot = Some(Fault {
+                line,
+                message: gist,
+                count: 1,
+            })
+        }
+    }
 }
 
 /// Every file loaded, by path relative to the scripts folder (`showcase/lantern.luau`).
@@ -129,6 +215,7 @@ pub struct ScriptRuntime {
     pub(crate) lua: Lua,
     watchdog: Watchdog,
     pub(crate) debugger: crate::debugger::Debugger,
+    pub(crate) profiler: crate::profiler::Profiler,
     pub(crate) instances: BTreeMap<Entity, Instance>,
     tasks: Vec<Task>,
     next_poll: Option<Instant>,
@@ -181,6 +268,7 @@ impl ScriptRuntime {
         let watchdog = Watchdog::new();
         watchdog.install(&lua)?;
         let debugger = crate::debugger::Debugger::install(&lua, watchdog.clone())?;
+        let profiler = crate::profiler::Profiler::new(&lua, &watchdog);
         let g = lua.globals();
         lua.load(include_str!("prelude.luau"))
             .set_name("@engine/prelude.luau")
@@ -202,6 +290,7 @@ impl ScriptRuntime {
             lua,
             watchdog,
             debugger,
+            profiler,
             instances: BTreeMap::new(),
             tasks: Vec::new(),
             next_poll: None,
@@ -324,6 +413,7 @@ impl ScriptRuntime {
         }
         self.run_tasks(now, settings);
         self.debugger.flush(&self.lua);
+        self.profiler.frame(&self.lua);
         self.frame_ms = started.elapsed().as_secs_f32() * 1000.0;
     }
 
@@ -584,6 +674,7 @@ impl ScriptRuntime {
             _ => return,
         };
         // `start` runs as a task, so it may wait.
+        self.profiler.phase(Phase::Start);
         match self.lua.create_thread(start) {
             Ok(thread) => self.resume(thread, Some(e), &path, (this,), settings),
             Err(err) => push_error(&self.lua, Some(&path), Some(e), &err.to_string()),
@@ -642,10 +733,21 @@ impl ScriptRuntime {
         let Ok(Value::Function(f)) = this.get::<Value>(hook) else {
             return;
         };
+        self.profiler.phase(match hook {
+            "update" => Phase::Update,
+            "fixed_update" => Phase::FixedUpdate,
+            _ => Phase::Events,
+        });
         shared(&self.lua).owner = Some(e);
         self.watchdog.arm(settings.call_limit_ms);
-        let result = f.call::<()>((this, args));
+        // With the debugger set to stop on errors, through a handler that stops where the
+        // error is raised, before the stack unwinds.
+        let result = match self.debugger.catcher() {
+            Some((catch, handler)) => catch.call::<()>((handler, f, this, args)),
+            None => f.call::<()>((this, args)),
+        };
         self.watchdog.disarm();
+        self.profiler.settle(&self.lua);
         shared(&self.lua).owner = None;
         if let Err(err) = result {
             self.report(e, &path, &err);
@@ -677,6 +779,7 @@ impl ScriptRuntime {
             Err(err) => return self.report(e, &path, &err),
         };
         args.push_front(Value::Table(this));
+        self.profiler.phase(Phase::Events);
         match self.lua.create_thread(f) {
             Ok(thread) => self.resume(thread, Some(e), &path, args, settings),
             Err(err) => self.report(e, &path, &err),
@@ -687,6 +790,7 @@ impl ScriptRuntime {
     /// Records an error from `e`'s script, logging it once while it repeats.
     fn report(&mut self, e: Entity, path: &str, err: &mlua::Error) {
         let message = err.to_string();
+        note_fault(&self.lua, &message);
         if let Some(i) = self.instances.get_mut(&e) {
             i.errors += 1;
             if i.last_error.as_deref() == Some(message.as_str()) {
@@ -858,6 +962,7 @@ impl ScriptRuntime {
             }
             // In the order they were due, so the same scripts run the same way every time.
             due.sort_by(|a, b| a.wake_at.total_cmp(&b.wake_at));
+            self.profiler.phase(Phase::Tasks);
             for t in due {
                 let clock = self.clock_of(t.owner, world_secs);
                 let path = t
@@ -895,7 +1000,14 @@ impl ScriptRuntime {
         self.watchdog.arm(settings.call_limit_ms);
         let result = thread.resume::<MultiValue>(args);
         self.watchdog.disarm();
+        self.profiler.settle(&self.lua);
         shared(&self.lua).owner = None;
+        if let Err(err) = &result
+            && self.debugger.breaks_on_errors()
+        {
+            // The task's stack is still there (a coroutine that fails keeps its frames).
+            self.debugger.stop_on_task_error(&self.lua, &thread, err);
+        }
         match result {
             Ok(values) => {
                 if thread.is_resumable() {
@@ -1117,9 +1229,11 @@ impl ScriptRuntime {
                 .map_err(|e| e.to_string())?,
         };
         let thread = self.lua.create_thread(func).map_err(|e| e.to_string())?;
+        self.profiler.phase(Phase::Console);
         self.watchdog.arm(settings.call_limit_ms);
         let result = thread.resume::<MultiValue>(());
         self.watchdog.disarm();
+        self.profiler.settle(&self.lua);
         let out = match result {
             Ok(values) => {
                 if thread.is_resumable() {
@@ -1167,6 +1281,9 @@ impl ScriptRuntime {
                     "kind": match f.kind { FileKind::Script => "script", FileKind::Module => "module" },
                     "version": f.version,
                     "error": f.error,
+                    "fault": f.fault.as_ref().map(|x| serde_json::json!({
+                        "line": x.line, "message": x.message, "count": x.count,
+                    })),
                     "instances": users,
                 })
             })
@@ -1240,6 +1357,7 @@ fn eval_file(
         .set_environment(env)
         .into_function()?;
     shared(lua).loading.push(path.to_string());
+    watchdog.clock.set_phase(Phase::Reload);
     watchdog.arm(1000.0);
     let result = chunk.call::<Value>(());
     watchdog.disarm();
@@ -1286,6 +1404,7 @@ fn load_file(lua: &Lua, watchdog: &Watchdog, path: &str, kind: FileKind) -> mlua
             error: None,
             version: 0,
             chunk: None,
+            fault: None,
         });
     }
     match eval_file(lua, watchdog, path, &source, kind) {
@@ -1368,6 +1487,7 @@ fn swap_in(
         }
         f.source = source;
         f.error = None;
+        f.fault = None;
         f.version += 1;
         f.hooks = hooks;
         f.chunk = Some(chunk);

@@ -15,7 +15,7 @@ use engine_core::registry::{ApiFn, ApiRegistry, unknown_name_error};
 use engine_input::ActionState;
 use mlua::{Function, Lua, MultiValue, Table, Value, Variadic};
 
-use crate::access::{push_log, with_world};
+use crate::access::{push_log, with_world, with_world_as};
 use crate::convert::{to_json, to_lua};
 
 /// Registry name of the hidden cache of resolved functions and sub-namespaces.
@@ -31,7 +31,7 @@ fn call_entry(lua: &Lua, name: &str, func: &ApiFn, args: Variadic<Value>) -> mlu
         None | Some(Value::Nil) => serde_json::json!({}),
         Some(v) => to_json(v)?,
     };
-    let out = with_world(lua, |w| {
+    let out = with_world_as(lua, name, |w| {
         func(w, json).map_err(|e| mlua::Error::runtime(format!("{name}: {e}")))
     })?;
     to_lua(lua, &out)
@@ -108,13 +108,15 @@ pub fn install(lua: &Lua, api: &ApiRegistry) -> mlua::Result<()> {
     input.set(
         "pressed",
         lua.create_function(|lua, action: String| {
-            with_world(lua, |w| Ok(actions(w).is_some_and(|a| a.pressed(&action))))
+            with_world_as(lua, "input.pressed", |w| {
+                Ok(actions(w).is_some_and(|a| a.pressed(&action)))
+            })
         })?,
     )?;
     input.set(
         "just_pressed",
         lua.create_function(|lua, action: String| {
-            with_world(lua, |w| {
+            with_world_as(lua, "input.just_pressed", |w| {
                 Ok(actions(w).is_some_and(|a| a.just_pressed(&action)))
             })
         })?,
@@ -122,7 +124,7 @@ pub fn install(lua: &Lua, api: &ApiRegistry) -> mlua::Result<()> {
     input.set(
         "just_released",
         lua.create_function(|lua, action: String| {
-            with_world(lua, |w| {
+            with_world_as(lua, "input.just_released", |w| {
                 Ok(actions(w).is_some_and(|a| a.just_released(&action)))
             })
         })?,
@@ -130,7 +132,7 @@ pub fn install(lua: &Lua, api: &ApiRegistry) -> mlua::Result<()> {
     input.set(
         "value",
         lua.create_function(|lua, action: String| {
-            with_world(lua, |w| {
+            with_world_as(lua, "input.value", |w| {
                 Ok(actions(w).map(|a| a.value(&action)).unwrap_or(0.0))
             })
         })?,
@@ -138,7 +140,7 @@ pub fn install(lua: &Lua, api: &ApiRegistry) -> mlua::Result<()> {
     input.set(
         "stick",
         lua.create_function(|lua, action: String| {
-            with_world(lua, |w| {
+            with_world_as(lua, "input.stick", |w| {
                 let v = actions(w).map(|a| a.axis(&action)).unwrap_or_default();
                 Ok((v.x, v.y))
             })

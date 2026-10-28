@@ -68,8 +68,22 @@
 //! set breakpoints in `.luau` files: conditions, hit counts and logpoints, step in, over and
 //! out, the call stack, locals, upvalues and `self` expandable, watches and hovers, and the debug
 //! console evaluating in the stopped frame. A stop holds the game still until you continue.
-//! Without a client, `script.logpoint {path, line, message}` prints values from a line without
-//! stopping, and code boards show the newest beside it. How it works: `src/debugger.rs`.
+//! "Uncaught errors" (on by default in VS Code's breakpoint list) stops where an error nothing
+//! catches is raised, with its stack and locals, before the call fails. Without a client,
+//! `script.logpoint {path, line, message}` prints values from a line without stopping, and
+//! code boards show the newest beside it. How it works: `src/debugger.rs`.
+//!
+//! ## Profiling
+//!
+//! `script.profile {seconds = 5}` samples the scripts while the game runs (1000 times a second
+//! by default, `hz` up to 20000) and `script.profile {}` reports the functions and lines that
+//! took the most time, self and total, with engine calls (`e:set`, `fire.ignite`) as their own
+//! entries; `folded = true` adds the stacks for flame graph tools. Code boards draw each line's
+//! share of the time beside it, and a [`board::ProfileBoard`] draws the flame graph. Not
+//! recording, it costs nothing measurable. How it works: `src/profiler.rs`.
+//!
+//! Errors are marked where they happen: a code board shows the line an error came from in red,
+//! with the message and how often it repeated, until the file is fixed.
 //!
 //! ## Rust hot patching
 //!
@@ -90,7 +104,7 @@
 //! game), `script.reload {path}`, `script.restart {entity}`, `script.send {entity, event, data}`,
 //! `script.source {path}`, `script.write {path, source}`, `script.edit {path, find, replace}`,
 //! `script.types` (writes `engine.d.luau` for luau-lsp autocompletion), `script.debug {port}`
-//! (start the debugger), `script.logpoint {path, line, message}`.
+//! (start the debugger), `script.logpoint {path, line, message}`, `script.profile {seconds}`.
 //!
 //! ## Showcase
 //!
@@ -115,6 +129,7 @@ mod entity;
 #[cfg(feature = "hotpatch")]
 pub mod hotpatch;
 mod math;
+mod profiler;
 mod runtime;
 mod types;
 
@@ -221,7 +236,13 @@ impl Plugin for ScriptPlugin {
         )
         .register_component::<board::CodeBoard>(
             "Shows a script's source on this entity's mesh (its material's emissive texture), \
-             syntax-colored, redrawn whenever the file reloads.",
+             syntax-colored, redrawn whenever the file reloads, with logpoint values, the line \
+             of the last error and the profiler's heat per line.",
+        )
+        .register_component::<board::ProfileBoard>(
+            "Shows the script profiler's flame graph and hottest lines on this entity's mesh; \
+             live: records by itself, window_secs at a time, while no script.profile \
+             recording is shown.",
         )
         .register_resource::<ScriptSettings>(
             "Scripting: folder under the asset root, hot_reload, poll_secs, call_limit_ms (per \
@@ -230,6 +251,10 @@ impl Plugin for ScriptPlugin {
         .add_systems(Update, run_scripts.in_set(UpdateSet::Logic))
         .add_systems(FixedUpdate, run_fixed_scripts.in_set(SimSet::Gameplay))
         .add_systems(Update, board::draw_boards.after(run_scripts))
+        .add_systems(
+            Update,
+            board::draw_profile_boards.after(board::draw_boards),
+        )
         .add_systems(
             PostUpdate,
             shift_scripts.in_set(engine_world::WorldShiftSet::Apply),
@@ -331,19 +356,24 @@ fn run_scripts(world: &mut World) {
         .iter(world)
         .next()
         .is_none();
-    let has_work = world
-        .get_resource::<ScriptRuntime>()
-        .is_some_and(|rt| rt.task_count() > 0 || !rt.instances.is_empty());
+    let has_work = world.get_resource::<ScriptRuntime>().is_some_and(|rt| {
+        // A debugger client may attach before the first script spawns.
+        rt.task_count() > 0 || !rt.instances.is_empty() || rt.debugger.listening()
+    });
     if !has_scripts && !has_work {
         return;
     }
     let _ = with_runtime(world, |world, rt, settings| rt.run_frame(world, settings));
     if let Some(rt) = world.get_resource::<ScriptRuntime>() {
         let (ms, instances, tasks) = (rt.frame_ms, rt.instances.len(), rt.task_count());
+        let memory_mb = rt.lua.used_memory() as f64 / (1024.0 * 1024.0);
+        let errors = access::shared(&rt.lua).errors_total;
         if let Some(mut d) = world.get_resource_mut::<Diagnostics>() {
             d.set("script.ms", ms as f64);
             d.set("script.instances", instances as f64);
             d.set("script.tasks", tasks as f64);
+            d.set("script.memory_mb", memory_mb);
+            d.set("script.errors", errors as f64);
         }
     }
 }

@@ -15,6 +15,11 @@
 //! - Pull the lever (E) and the ritual plays: the lanterns go out one by one, flare back in
 //!   sequence, the braziers light, the orrery spins up and a beam goes up from its core, with a
 //!   moment of slow motion. It is one coroutine in the script, written with `task.wait`.
+//! - The profile board beside the code board shows where the scripts spend their time, as a
+//!   flame graph and the hottest lines, recorded live ten seconds at a time; the code board
+//!   shows each line's share of it beside the line.
+//! - An error in a script marks its line on the board in red with the message, and the rest of
+//!   the courtyard keeps running.
 //!
 //! `script.send {"entity": {"name": "Courtyard director"}, "event": "ritual"}` plays the ritual
 //! from the console or a tour stop; `script.edit` changes a script file like an editor would.
@@ -26,7 +31,7 @@ use engine_world::Interactable;
 use serde_json::json;
 
 use crate::Script;
-use crate::board::CodeBoard;
+use crate::board::{CodeBoard, ProfileBoard};
 
 /// The director: its script builds the lanterns and the orrery and plays the ritual.
 pub const DIRECTOR: &str = "Courtyard director";
@@ -39,6 +44,9 @@ pub const LEVER_SCRIPT: &str = "showcase/lever.luau";
 pub const FLOOR_RADIUS: f64 = 14.0;
 /// Where the code board stands (meters from the middle, facing the middle).
 pub const BOARD: [f64; 3] = [0.0, 2.05, -9.0];
+/// Where the profile board stands, and its turn about Y (it faces the middle).
+pub const PROFILE_BOARD: [f64; 3] = [4.3, 2.05, -8.2];
+pub const PROFILE_BOARD_YAW: f32 = -0.483;
 /// Where the lever stands.
 pub const LEVER: [f64; 3] = [4.2, 0.0, 6.6];
 /// Where the braziers stand: on the diagonals between the lanterns and the middle.
@@ -99,6 +107,28 @@ const LIVE_VALUES_OFF: &[(&str, &str)] = &[
     ),
 ];
 
+/// Scrolls the code board to `update` (the lines the profile and the error stops show).
+const BOARD_AT_UPDATE: (&str, &str) = (
+    "script.eval",
+    r#"{"code": "world.find('Code board'):set('CodeBoard', { first_line = 17 })"}"#,
+);
+const BOARD_AT_TOP: (&str, &str) = (
+    "script.eval",
+    r#"{"code": "world.find('Code board'):set('CodeBoard', { first_line = 1 })"}"#,
+);
+
+/// The tour records one profile from its first courtyard stop to the profiler's stop, so the
+/// flame graph covers the ritual too.
+const PROFILE_START: (&str, &str) = ("script.profile", r#"{"seconds": 0, "hz": 4000}"#);
+const PROFILE_STOP: (&str, &str) = ("script.profile", r#"{"stop": true}"#);
+/// Back to the live profile, a window at a time.
+const PROFILE_RESET: (&str, &str) = ("script.profile", r#"{"reset": true}"#);
+
+/// The error stop's typo (a field that doesn't exist, so `update` fails on that line every
+/// frame), and its fix.
+const TYPO: &str = r#"{"path": "showcase/courtyard.luau", "find": "local glow = lamp.dim * (", "replace": "local glow = lamp.dimm * ("}"#;
+const FIX: &str = r#"{"path": "showcase/courtyard.luau", "find": "local glow = lamp.dimm * (", "replace": "local glow = lamp.dim * ("}"#;
+
 /// The courtyard's overview, from above the lanterns in the south-east, looking down enough
 /// that the floor fills the frame (the moonlit grass outside it outshone the lanterns).
 const OVERVIEW: ([f64; 3], [f64; 3]) = ([7.0, 11.0, 11.0], [0.0, 0.0, -1.0]);
@@ -114,7 +144,7 @@ pub const VIEWS: &[DemoView] = &[
         target: OVERVIEW.1,
         hour: 18.9,
         warmup_secs: 2.0,
-        on_arrive: &[],
+        on_arrive: &[PROFILE_START],
         on_leave: &[],
     },
     DemoView {
@@ -161,6 +191,39 @@ pub const VIEWS: &[DemoView] = &[
             r#"{"entity": {"name": "Courtyard director"}, "event": "ritual"}"#,
         )],
         on_leave: &[],
+    },
+    DemoView {
+        key: "script_profiler",
+        name: "The script profiler: a flame graph of where the courtyard's scripts spend their \
+               time, engine calls included, and the hottest lines",
+        eye: [2.86, 2.2, -5.46],
+        target: [4.3, 2.05, -8.2],
+        hour: 18.9,
+        warmup_secs: 1.0,
+        on_arrive: &[PROFILE_STOP],
+        on_leave: &[],
+    },
+    DemoView {
+        key: "script_heat",
+        name: "Profile heat on the code board: each line of update() with its share of the \
+               script time",
+        eye: [0.5, 2.2, -5.9],
+        target: [0.0, 2.05, -9.0],
+        hour: 18.9,
+        warmup_secs: 0.5,
+        on_arrive: &[BOARD_AT_UPDATE],
+        on_leave: &[],
+    },
+    DemoView {
+        key: "script_error",
+        name: "A typo while the game runs: the board marks the failing line with the error and \
+               how often it repeated; the rest of the courtyard keeps running",
+        eye: [0.5, 2.2, -5.9],
+        target: [0.0, 2.05, -9.0],
+        hour: 18.9,
+        warmup_secs: 1.0,
+        on_arrive: &[("script.edit", TYPO), BOARD_AT_UPDATE],
+        on_leave: &[("script.edit", FIX), BOARD_AT_TOP, PROFILE_RESET],
     },
 ];
 
@@ -286,6 +349,50 @@ pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
             lines: 28,
             ..CodeBoard::new(COURTYARD_SCRIPT)
         },
+    ));
+
+    // The profile board, on its own easel to the code board's right, turned to the middle.
+    let [px, py, pz] = PROFILE_BOARD;
+    let turn = Quat::from_rotation_y(PROFILE_BOARD_YAW);
+    let local = |x: f64, y: f64, z: f64| {
+        let o = turn.as_dquat() * DVec3::new(x, y, z);
+        at(px + o.x, py + o.y, pz + o.z).with_rotation(turn)
+    };
+    commands.spawn((
+        Name::new("Profile board frame"),
+        local(0.0, 0.0, -0.08),
+        mesh(
+            Shape::RoundedCuboid {
+                size: [3.85, 2.5, 0.14],
+                radius: 0.04,
+                segments: 0,
+            },
+            walnut,
+        ),
+    ));
+    for side in [-1.0, 1.0] {
+        commands.spawn((
+            Name::new("Profile board post"),
+            local(side * 1.78, 1.68 - py, -0.17),
+            mesh(
+                Shape::RoundedCuboid {
+                    size: [0.13, 3.36, 0.13],
+                    radius: 0.03,
+                    segments: 0,
+                },
+                walnut,
+            ),
+        ));
+    }
+    commands.spawn((
+        Name::new("Profile board"),
+        local(0.0, 0.0, 0.0),
+        mesh(
+            Shape::Quad { size: [3.6, 2.25] },
+            StandardMaterial::color(0.02, 0.022, 0.026),
+        )
+        .without_shadows(),
+        ProfileBoard::default(),
     ));
 
     // Four braziers on the diagonals, cold until the ritual lights them.

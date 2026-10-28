@@ -5,13 +5,15 @@
 //! ([`with_world`]) borrow it for the length of one engine call. Outside the runner the pointer
 //! is absent and callbacks fail with a plain error instead of touching freed memory.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::ffi::c_int;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use bevy_ecs::prelude::*;
-use mlua::{Lua, RegistryKey, Thread};
+use mlua::{Lua, RegistryKey, Thread, ffi};
 
 /// The world, lent to the VM while scripts run.
 struct WorldPtr(*mut World);
@@ -44,6 +46,16 @@ pub(crate) fn with_world<R>(
     lua: &Lua,
     f: impl FnOnce(&mut World) -> mlua::Result<R>,
 ) -> mlua::Result<R> {
+    with_world_as(lua, "engine", f)
+}
+
+/// [`with_world`] for an engine call scripts make, named `label` in the profiler
+/// (`"e:set"`, `"fire.ignite"`).
+pub(crate) fn with_world_as<R>(
+    lua: &Lua,
+    label: &str,
+    f: impl FnOnce(&mut World) -> mlua::Result<R>,
+) -> mlua::Result<R> {
     let ptr = lua.app_data_ref::<WorldPtr>().map(|p| p.0).ok_or_else(|| {
         mlua::Error::runtime(
             "the world can only be used while scripts run (in start, update, events and tasks)",
@@ -51,7 +63,9 @@ pub(crate) fn with_world<R>(
     })?;
     // SAFETY: see `WorldPtr`. The runner doesn't touch the world while the VM runs, and every
     // callback's borrow ends before it returns to Lua, so no two borrows overlap.
-    f(unsafe { &mut *ptr })
+    let out = f(unsafe { &mut *ptr });
+    crate::profiler::after_engine_call(lua, label);
+    out
 }
 
 /// A coroutine started by `task.spawn`/`task.delay` (or a script's `start`) and not yet
@@ -144,18 +158,51 @@ pub(crate) fn push_log(lua: &Lua, line: String) {
 pub(crate) const STOPPED: &str = "the script ran too long without yielding and was stopped (an \
      endless loop? use task.wait() inside long loops)";
 
+type InterruptFn = unsafe extern "C-unwind" fn(*mut ffi::lua_State, c_int);
+
+/// mlua's interrupt function (one for every VM), which runs [`Watchdog::install`]'s callback.
+static SLOW_INTERRUPT: OnceLock<InterruptFn> = OnceLock::new();
+
+thread_local! {
+    static INTERRUPTS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Luau calls the interrupt at every loop back-edge, call and return, and mlua's interrupt goes
+/// through a full Rust callback each time (tens of nanoseconds; a tight loop's iteration takes a
+/// few). This one counts in a thread-local and passes every 1024th call on to mlua's (for the
+/// watchdog's clock check), and the ones that find a profiler sample due.
+unsafe extern "C-unwind" fn fast_interrupt(l: *mut ffi::lua_State, gc: c_int) {
+    if gc >= 0 {
+        return; // mlua ignores the collector's interrupts too
+    }
+    let n = INTERRUPTS.with(|c| {
+        let n = c.get().wrapping_add(1);
+        c.set(n);
+        n
+    });
+    if n & 1023 != 0 && !crate::profiler::due_anywhere() {
+        return;
+    }
+    if let Some(slow) = SLOW_INTERRUPT.get() {
+        // SAFETY: mlua's own interrupt, called as Luau would have called it. Nothing of this
+        // frame needs dropping if it raises an error.
+        unsafe { slow(l, gc) }
+    }
+}
+
 /// Stops a script that runs too long in one go (an endless loop) instead of freezing the game.
-/// Luau calls the interrupt at loop back-edges and calls, so it only reads the clock every
-/// 1024th time.
+/// Luau calls the interrupt at loop back-edges and calls; [`fast_interrupt`] lets every 1024th
+/// through, and only those read the clock.
 #[derive(Clone)]
 pub(crate) struct Watchdog {
     epoch: Instant,
     /// Nanoseconds since `epoch` after which the running script is stopped (0 = no limit).
     deadline: Arc<AtomicU64>,
-    ticks: Arc<AtomicU32>,
     /// Set when it stops a script, until the next call is armed: the prelude's `pcall`,
     /// `xpcall` and `coroutine.resume` pass the stop on instead of swallowing it.
     fired: Arc<AtomicBool>,
+    /// The profiler's sample clock: the interrupt takes a sample when one is due.
+    pub(crate) clock: Arc<crate::profiler::Clock>,
 }
 
 impl Watchdog {
@@ -163,8 +210,8 @@ impl Watchdog {
         Self {
             epoch: Instant::now(),
             deadline: Arc::new(AtomicU64::new(0)),
-            ticks: Arc::new(AtomicU32::new(0)),
             fired: Arc::new(AtomicBool::new(false)),
+            clock: Arc::default(),
         }
     }
 
@@ -175,9 +222,9 @@ impl Watchdog {
             lua.create_function(move |_, ()| Ok(fired.load(Ordering::Relaxed)))?,
         )?;
         let dog = self.clone();
-        lua.set_interrupt(move |_| {
-            if dog.ticks.fetch_add(1, Ordering::Relaxed) & 1023 != 0 {
-                return Ok(mlua::VmState::Continue);
+        lua.set_interrupt(move |lua| {
+            if dog.clock.due.load(Ordering::Relaxed) {
+                crate::profiler::sample(lua, None);
             }
             let deadline = dog.deadline.load(Ordering::Relaxed);
             if deadline != 0 && dog.epoch.elapsed().as_nanos() as u64 > deadline {
@@ -187,6 +234,16 @@ impl Watchdog {
             }
             Ok(mlua::VmState::Continue)
         });
+        // SAFETY: only swaps the callback pointer mlua just set for the filter in front of it.
+        unsafe {
+            lua.exec_raw::<()>((), |state| {
+                let callbacks = ffi::lua_callbacks(ffi::lua_mainthread(state));
+                if let Some(slow) = (*callbacks).interrupt {
+                    let _ = SLOW_INTERRUPT.set(slow);
+                    (*callbacks).interrupt = Some(fast_interrupt);
+                }
+            })?;
+        }
         Ok(())
     }
 
@@ -202,6 +259,11 @@ impl Watchdog {
 
     pub fn disarm(&self) {
         self.deadline.store(0, Ordering::Relaxed);
+    }
+
+    /// A call into Lua is running (armed and not held by the debugger).
+    pub fn running(&self) -> bool {
+        self.deadline.load(Ordering::Relaxed) != 0
     }
 
     /// Takes the running call's limit away (while the debugger has the scripts stopped, or runs

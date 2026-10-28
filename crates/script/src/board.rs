@@ -1,6 +1,9 @@
 //! Code boards: a script's source drawn onto a mesh in the world, syntax-colored, redrawn the
-//! moment the file reloads, with the lines that just changed lit up. The showcase's scripted
-//! courtyard stands one beside what the script drives, so one picture shows code and effect.
+//! moment the file reloads, with the lines that just changed lit up, logpoint values beside
+//! their lines, the line an error came from marked, and each line's share of the script time
+//! when the profiler has recorded. The showcase's scripted courtyard stands one beside what the
+//! script drives, so one picture shows code and effect. [`ProfileBoard`] draws the profiler's
+//! flame graph and hottest lines the same way.
 //!
 //! The text is rasterized on the CPU into an sRGB image (with mips) set as the material's
 //! base color and emissive texture, so it reads by day and glows at night. The font is
@@ -16,7 +19,8 @@ use engine_core::prelude::*;
 use engine_render::{Image, MaterialRef, MeshRenderer, StandardMaterial};
 
 use crate::ScriptRuntime;
-use crate::runtime::normalize;
+use crate::profiler::{FlameNode, Kind, Summary};
+use crate::runtime::{Fault, error_location, normalize};
 
 /// Draws a script's source on this entity's [`MeshRenderer`] (a plane or box face whose UVs
 /// span the board). Changes to the file show within a moment.
@@ -72,6 +76,11 @@ pub(crate) struct Drawn {
     faded: bool,
     /// The logpoint values drawn (`Debugger::inline_values`).
     inline_version: u64,
+    /// The profile drawn (`profiler::line_heat`).
+    heat_version: u64,
+    fault: Option<Fault>,
+    /// When it was drawn (real seconds).
+    drawn_at: f64,
     /// The board's settings when drawn (scrolling it redraws it).
     board: CodeBoard,
 }
@@ -222,6 +231,27 @@ const ERROR_BG: Rgb = [0.16, 0.04, 0.045];
 const VALUE: Rgb = [1.0, 0.80, 0.40];
 const VALUE_BG: Rgb = [0.13, 0.095, 0.03];
 const VALUE_GLOW: f32 = 0.55;
+const ERROR_GLOW: f32 = 0.6;
+/// The error's message beside its line.
+const FAULT_BG: Rgb = [0.30, 0.05, 0.05];
+const FAULT_TEXT: Rgb = [1.0, 0.72, 0.68];
+/// The profiler's heat, from a line that took little of the script time to the hottest.
+const HEAT: [Rgb; 3] = [[0.30, 0.045, 0.03], [1.0, 0.36, 0.06], [1.0, 0.86, 0.42]];
+const HEAT_GLOW: f32 = 0.7;
+
+fn heat_color(t: f32) -> Rgb {
+    let t = t.clamp(0.0, 1.0) * 2.0;
+    let (a, b, k) = if t < 1.0 {
+        (HEAT[0], HEAT[1], t)
+    } else {
+        (HEAT[1], HEAT[2], t - 1.0)
+    };
+    [
+        a[0] + (b[0] - a[0]) * k,
+        a[1] + (b[1] - a[1]) * k,
+        a[2] + (b[2] - a[2]) * k,
+    ]
+}
 
 /// How much the panels glow next to the text (which glows fully): enough to read the board's
 /// shape in the dark, little enough that the text stands out at night.
@@ -419,17 +449,24 @@ impl Canvas {
 
     /// The color and glow images (sRGB).
     fn into_images(self) -> (Image, Image) {
+        // Linear to sRGB through a table: a board has millions of channels to convert.
+        const STEPS: usize = 4096;
+        let table: Vec<u8> = (0..=STEPS)
+            .map(|i| {
+                let v = i as f32 / STEPS as f32;
+                let s = if v <= 0.003_130_8 {
+                    v * 12.92
+                } else {
+                    1.055 * v.powf(1.0 / 2.4) - 0.055
+                };
+                (s.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+            })
+            .collect();
         let image = |px: Vec<Rgb>| {
             let mut data = Vec::with_capacity(self.w * self.h * 4);
             for p in px {
                 for v in p {
-                    // Linear to sRGB.
-                    let s = if v <= 0.003_130_8 {
-                        v * 12.92
-                    } else {
-                        1.055 * v.powf(1.0 / 2.4) - 0.055
-                    };
-                    data.push((s.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+                    data.push(table[(v.clamp(0.0, 1.0) * STEPS as f32 + 0.5) as usize]);
                 }
                 data.push(255);
             }
@@ -437,14 +474,29 @@ impl Canvas {
         };
         (image(self.px), image(self.glow))
     }
+
+    /// Text that fits in `max_chars` (cut with an ellipsis).
+    fn fitted(s: &str, max_chars: usize) -> String {
+        if s.chars().count() <= max_chars {
+            return s.to_string();
+        }
+        let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
 }
 
 /// What a board marks beside its lines.
+#[derive(Clone, Copy)]
 struct Marks<'a> {
     /// Lines (0-based) the last reload changed, lit.
     changed: &'a HashSet<usize>,
     /// Logpoint values by line (1-based), drawn after the code.
     values: &'a BTreeMap<u32, String>,
+    /// Each line's share of the recorded script time, percent (1-based lines).
+    heat: &'a BTreeMap<u32, f32>,
+    /// The last runtime error raised in this file.
+    fault: Option<&'a Fault>,
 }
 
 /// Draws `source` (with `error`, if the last reload failed) onto a board's image.
@@ -457,7 +509,18 @@ fn draw(
     error: Option<&str>,
     marks: Marks<'_>,
 ) -> (Image, Image) {
-    let Marks { changed, values } = marks;
+    let Marks {
+        changed,
+        values,
+        heat,
+        fault,
+    } = marks;
+    // The line the error is on: the runtime error's, or the failed reload's.
+    let error_line = fault.map(|f| f.line).or_else(|| {
+        let (path, line) = error_location(error?)?;
+        title.ends_with(&path).then_some(line)
+    });
+    let hottest = heat.values().fold(0.0f32, |a, &b| a.max(b));
     let (w, h) = (
         board.size[0].max(64) as usize,
         board.size[1].max(64) as usize,
@@ -473,9 +536,13 @@ fn draw(
     cv.rect(0, 0, w as i32, header as i32, HEADER_BG, PANEL_GLOW);
     let header_base = header * 0.5 + font.ascent() * 0.4;
     cv.text(font, title, margin, header_base, &|_| TITLE);
-    let (status, status_color) = match error {
-        Some(_) => ("● error: previous version running".to_string(), ERROR),
-        None => (format!("● running · version {version}"), OK),
+    let (status, status_color) = match (error, fault) {
+        (Some(_), _) => ("● error: previous version running".to_string(), ERROR),
+        (None, Some(f)) => (
+            format!("● error on line {} · version {version}", f.line),
+            ERROR,
+        ),
+        (None, None) => (format!("● running · version {version}"), OK),
     };
     let adv = font.advance();
     let sx = w as f32 - margin - adv * status.chars().count() as f32;
@@ -498,11 +565,33 @@ fn draw(
     for line in all.iter().take(first) {
         highlight(line, &mut in_comment);
     }
-    let error_lines = if error.is_some() { 3 } else { 0 };
+    // A runtime error whose line is out of view goes in the footer, like a failed reload.
+    let fault_hidden = fault.is_some_and(|f| {
+        let l = f.line as usize;
+        l <= first || l > (first + lines as usize).min(all.len())
+    });
+    let footer: Option<String> = match (error, fault) {
+        (Some(e), _) => Some(e.to_string()),
+        (None, Some(f)) if fault_hidden => {
+            Some(format!("line {}: {} (×{})", f.line, f.message, f.count))
+        }
+        _ => None,
+    };
+    let error_lines = if footer.is_some() { 3 } else { 0 };
     let shown = (lines as usize).saturating_sub(error_lines);
     for (row, i) in (first..all.len()).take(shown).enumerate() {
         let top = header + margin + row as f32 * line_h;
-        if changed.contains(&i) {
+        let line_no = i as u32 + 1;
+        if error_line == Some(line_no) {
+            cv.rect(
+                0,
+                top as i32,
+                w as i32,
+                (top + line_h) as i32,
+                ERROR_BG,
+                ERROR_GLOW,
+            );
+        } else if changed.contains(&i) {
             cv.rect(
                 gutter as i32,
                 top as i32,
@@ -513,8 +602,45 @@ fn draw(
             );
         }
         let base = top + line_h * 0.5 + font.ascent() * 0.4;
+        let pct = heat.get(&line_no).copied().unwrap_or(0.0);
+        if pct > 0.0 && hottest > 0.0 {
+            // Heat: the line tinted by its share of the hottest line's time, a strip at the
+            // board's edge in the full color, and the share at the right.
+            let t = (pct / hottest).sqrt();
+            let c = heat_color(t);
+            if error_line != Some(line_no) && !changed.contains(&i) {
+                cv.rect(
+                    gutter as i32,
+                    top as i32,
+                    w as i32,
+                    (top + line_h) as i32,
+                    scaled(c, 0.07 + 0.2 * t),
+                    0.45,
+                );
+            }
+            cv.rect(
+                0,
+                top as i32,
+                (margin * 0.55) as i32,
+                (top + line_h) as i32,
+                c,
+                HEAT_GLOW,
+            );
+            if pct >= 0.5 {
+                let label = format!("{pct:.1}%");
+                let x = w as f32 - margin - adv * label.chars().count() as f32;
+                cv.text(font, &label, x, base, &|_| heat_color(t.max(0.55)));
+            }
+        }
         let no = format!("{:>3}", i + 1);
-        cv.text(font, &no, margin, base, &|_| LINE_NO);
+        let no_color = if error_line == Some(line_no) {
+            ERROR
+        } else if pct > 0.0 {
+            TEXT
+        } else {
+            LINE_NO
+        };
+        cv.text(font, &no, margin, base, &|_| no_color);
         let text = all[i].replace('\t', "    ");
         let colors = highlight(&text, &mut in_comment);
         cv.text(font, &text, gutter + adv, base, &|k| {
@@ -536,8 +662,28 @@ fn draw(
             );
             cv.text(font, &label, x, base, &|_| VALUE);
         }
+        if let Some(f) = fault.filter(|f| f.line == line_no) {
+            let count = if f.count > 1 {
+                format!(" (×{})", f.count)
+            } else {
+                String::new()
+            };
+            let label = Canvas::fitted(&format!("⚠ {}{count}", f.message), 60);
+            let width = adv * (label.chars().count() as f32 + 1.0);
+            let after = gutter + adv * (text.chars().count() as f32 + 3.0);
+            let x = after.min(w as f32 - margin - width).max(gutter + adv);
+            cv.rect(
+                (x - adv * 0.5) as i32,
+                (top + line_h * 0.06) as i32,
+                (x + width) as i32,
+                (top + line_h * 0.94) as i32,
+                FAULT_BG,
+                ERROR_GLOW,
+            );
+            cv.text(font, &label, x, base, &|_| FAULT_TEXT);
+        }
     }
-    if let Some(err) = error {
+    if let Some(err) = footer.as_deref() {
         let top = h as f32 - margin - line_h * error_lines as f32;
         cv.rect(
             0,
@@ -604,18 +750,26 @@ pub(crate) fn draw_boards(
         let path = normalize(&board.path);
         let loaded = runtime.as_ref().and_then(|rt| {
             let files = rt.files();
-            files
-                .map
-                .get(&path)
-                .map(|f| (f.source.clone(), f.version, f.error.clone()))
+            files.map.get(&path).map(|f| {
+                (
+                    f.source.clone(),
+                    f.version,
+                    f.error.clone(),
+                    f.fault.clone(),
+                )
+            })
         });
         let known = drawn.get(&e);
         let (inline_version, inline) = runtime
             .as_ref()
             .map(|rt| rt.debugger.inline_values(&path))
             .unwrap_or_default();
+        let (heat_version, heat) = runtime
+            .as_ref()
+            .map(|rt| crate::profiler::line_heat(&rt.lua, &path))
+            .unwrap_or_default();
         // A file no script runs yet is read from disk (a few times a second).
-        let (source, version, error) = match loaded {
+        let (source, version, error, fault) = match loaded {
             Some(l) => l,
             None => {
                 if !checking && known.is_some() {
@@ -632,20 +786,35 @@ pub(crate) fn draw_boards(
                     .join(root)
                     .join(&path);
                 match std::fs::read_to_string(&full) {
-                    Ok(s) => (s, 0, None),
-                    Err(err) => (String::new(), 0, Some(format!("can't read {path}: {err}"))),
+                    Ok(s) => (s, 0, None, None),
+                    Err(err) => (
+                        String::new(),
+                        0,
+                        Some(format!("can't read {path}: {err}")),
+                        None,
+                    ),
                 }
             }
         };
         let fade = known.is_some_and(|d| {
             !d.faded && !d.changed.is_empty() && now - d.changed_at > board.changed_secs as f64
         });
+        // An error that repeats every frame only updates its count every two seconds.
+        let fault_key = |f: &Option<Fault>| f.as_ref().map(|f| (f.line, f.message.clone()));
         let same = known.is_some_and(|d| {
-            d.version == version && d.text == source && d.error == error && d.board == *board
+            d.version == version
+                && d.text == source
+                && d.error == error
+                && fault_key(&d.fault) == fault_key(&fault)
+                && d.board == *board
         });
-        // New logpoint values redraw a few times a second at most.
-        let values = checking && known.is_some_and(|d| d.inline_version != inline_version);
-        if same && !fade && !values {
+        let recount = known.is_some_and(|d| d.fault != fault && now - d.drawn_at > 2.0);
+        // New logpoint values redraw a few times a second at most; a new profile (once a
+        // second at most) at once, before a live profile board starts the next one.
+        let values = known.is_some_and(|d| {
+            (checking && d.inline_version != inline_version) || d.heat_version != heat_version
+        });
+        if same && !fade && !values && !recount {
             continue;
         }
         let font = font.get_or_insert_with(|| BoardFont::load(server.as_ref().map(|s| s.root())));
@@ -665,32 +834,17 @@ pub(crate) fn draw_boards(
             Marks {
                 changed: &changed,
                 values: &inline,
+                heat: &heat,
+                fault: fault.as_ref(),
             },
         );
-        // Redrawn in place, so the material (and its key in the material cache) stays the same.
-        let mut put = |old: Option<Handle<Image>>, new: Image| match old {
-            Some(h) if images.get(h).is_some() => {
-                if let Some(slot) = images.get_mut(h) {
-                    *slot = new;
-                }
-                h
-            }
-            _ => images.add(new),
-        };
-        let handle = put(drawn.get(&e).map(|d| d.image), image);
-        let glow_handle = put(drawn.get(&e).map(|d| d.glow), glow);
-        let mut material = match &renderer.material {
-            MaterialRef::Inline(m) => *m,
-            _ => StandardMaterial::default(),
-        };
-        material.base_color = [1.0, 1.0, 1.0, 1.0];
-        material.base_color_texture = Some(handle);
-        material.emissive_texture = Some(glow_handle);
-        material.emissive = [1.0, 1.0, 1.0];
-        material.emissive_strength = board.glow_cd_m2;
-        material.perceptual_roughness = 0.35;
-        material.metallic = 0.0;
-        renderer.material = MaterialRef::Inline(material);
+        let (handle, glow_handle) = show(
+            images,
+            drawn.get(&e).map(|d| (d.image, d.glow)),
+            (image, glow),
+            &mut renderer,
+            board.glow_cd_m2,
+        );
         drawn.insert(
             e,
             Drawn {
@@ -703,10 +857,48 @@ pub(crate) fn draw_boards(
                 error,
                 faded,
                 inline_version,
+                heat_version,
+                fault,
+                drawn_at: now,
                 board: board.clone(),
             },
         );
     }
+}
+
+/// Puts a board's new images on its mesh: redrawn in place, so the material (and its key in the
+/// material cache) stays the same. Returns the image handles.
+fn show(
+    images: &mut Assets<Image>,
+    old: Option<(Handle<Image>, Handle<Image>)>,
+    (image, glow): (Image, Image),
+    renderer: &mut MeshRenderer,
+    glow_cd_m2: f32,
+) -> (Handle<Image>, Handle<Image>) {
+    let mut put = |old: Option<Handle<Image>>, new: Image| match old {
+        Some(h) if images.get(h).is_some() => {
+            if let Some(slot) = images.get_mut(h) {
+                *slot = new;
+            }
+            h
+        }
+        _ => images.add(new),
+    };
+    let handle = put(old.map(|o| o.0), image);
+    let glow_handle = put(old.map(|o| o.1), glow);
+    let mut material = match &renderer.material {
+        MaterialRef::Inline(m) => *m,
+        _ => StandardMaterial::default(),
+    };
+    material.base_color = [1.0, 1.0, 1.0, 1.0];
+    material.base_color_texture = Some(handle);
+    material.emissive_texture = Some(glow_handle);
+    material.emissive = [1.0, 1.0, 1.0];
+    material.emissive_strength = glow_cd_m2;
+    material.perceptual_roughness = 0.35;
+    material.metallic = 0.0;
+    renderer.material = MaterialRef::Inline(material);
+    (handle, glow_handle)
 }
 
 #[cfg(test)]
@@ -752,6 +944,12 @@ mod tests {
             Marks {
                 changed: &HashSet::from([2]),
                 values: &BTreeMap::from([(3, "self.t = 0.25".to_string())]),
+                heat: &BTreeMap::from([(2, 100.0), (3, 62.5)]),
+                fault: Some(&Fault {
+                    line: 4,
+                    message: "attempt to add nil".into(),
+                    count: 30,
+                }),
             },
         );
         assert_eq!((img.width, img.height), (512, 320));
@@ -773,5 +971,372 @@ mod tests {
             lit(&glow) < lit(&img),
             "the panels glow less than they are colored"
         );
+    }
+
+    #[test]
+    fn a_profile_board_draws_a_flame_graph() {
+        let node = |name: &str, kind, ns, children| FlameNode {
+            name: name.into(),
+            kind,
+            at: (kind == Kind::Lua).then(|| ("demo.luau".to_string(), 3)),
+            ns,
+            children,
+        };
+        let root = node(
+            "all scripts",
+            Kind::Phase,
+            1000,
+            vec![node(
+                "update",
+                Kind::Phase,
+                900,
+                vec![node(
+                    "update",
+                    Kind::Lua,
+                    900,
+                    vec![node("e:set", Kind::Engine, 500, vec![])],
+                )],
+            )],
+        );
+        let summary = Summary {
+            recording: false,
+            hz: 1000,
+            seconds: 5.0,
+            samples: 1000,
+            script_ms: 10.0,
+            frames: 300,
+        };
+        let mut font = BoardFont::load(None);
+        let board = ProfileBoard {
+            size: [512, 320],
+            ..Default::default()
+        };
+        let lines = vec![(
+            "demo.luau".to_string(),
+            4,
+            50.0,
+            "self.entity:set(\"PointLight\", {})".to_string(),
+        )];
+        let (img, _) = draw_profile(&board, &mut font, Some(&(summary, root)), &lines);
+        assert_eq!((img.width, img.height), (512, 320));
+        // The engine call's teal box is drawn.
+        let teal = img
+            .data
+            .chunks(4)
+            .filter(|p| p[1] > 120 && p[2] > 120 && p[0] < 110)
+            .count();
+        assert!(teal > 500, "{teal}");
+        let (empty, _) = draw_profile(&board, &mut font, None, &[]);
+        assert_eq!(empty.width, 512);
+    }
+}
+
+// ----------------------------------------------------------------------------- profile boards
+
+/// Draws the script profiler's results on this entity's [`MeshRenderer`]: the flame graph (each
+/// box a function, as wide as its share of the script time, under the function that called it)
+/// and the hottest lines with their code. Shows what `script.profile` recorded; with `live`, it
+/// records on its own, a window at a time, whenever no one else has.
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfileBoard {
+    /// Texture size, pixels (width, height); its aspect should match the board's.
+    pub size: [u32; 2],
+    /// Glow, cd/m² for the brightest parts.
+    pub glow_cd_m2: f32,
+    /// Records by itself while no `script.profile` recording is shown.
+    pub live: bool,
+    /// Seconds per live recording (the board shows the last finished one).
+    pub window_secs: f32,
+    /// Live recordings' samples per second.
+    pub hz: u32,
+}
+
+impl Default for ProfileBoard {
+    fn default() -> Self {
+        Self {
+            size: [2048, 1280],
+            glow_cd_m2: 60.0,
+            live: true,
+            window_secs: 10.0,
+            hz: 1000,
+        }
+    }
+}
+
+const PHASE_BOX: Rgb = [0.22, 0.27, 0.40];
+const ENGINE_BOX: Rgb = [0.14, 0.50, 0.50];
+const BOX_TEXT: Rgb = [0.02, 0.02, 0.025];
+const BOX_GLOW: f32 = 0.35;
+
+/// A Luau function's box color: warm, and the same for the same function every time.
+fn lua_color(name: &str, at: &Option<(String, u32)>) -> Rgb {
+    let mut h: u32 = 2166136261;
+    for b in name
+        .bytes()
+        .chain(at.as_ref().map(|a| a.0.as_str()).unwrap_or("").bytes())
+    {
+        h = (h ^ b as u32).wrapping_mul(16777619);
+    }
+    let t = (h % 1000) as f32 / 1000.0;
+    // From deep orange to amber.
+    [0.85 + 0.15 * t, 0.30 + 0.38 * t, 0.06 + 0.10 * (1.0 - t)]
+}
+
+/// What one flame-graph row needs to draw a node.
+struct FlameCtx<'a> {
+    total: f64,
+    x0: f32,
+    width: f32,
+    top: f32,
+    row_h: f32,
+    max_depth: usize,
+    adv: f32,
+    ascent: f32,
+    ms_per_ns: &'a dyn Fn(u64) -> f64,
+}
+
+fn flame_node(
+    cv: &mut Canvas,
+    font: &mut BoardFont,
+    node: &FlameNode,
+    depth: usize,
+    x: f32,
+    cx: &FlameCtx<'_>,
+) {
+    if depth > cx.max_depth {
+        return;
+    }
+    let w = (node.ns as f64 / cx.total) as f32 * cx.width;
+    if w < 2.0 {
+        return;
+    }
+    let top = cx.top + depth as f32 * cx.row_h;
+    let color = match node.kind {
+        Kind::Phase => PHASE_BOX,
+        Kind::Engine => ENGINE_BOX,
+        Kind::Lua => lua_color(&node.name, &node.at),
+    };
+    cv.rect(
+        (cx.x0 + x) as i32,
+        top as i32,
+        (cx.x0 + x + w - 2.0) as i32,
+        (top + cx.row_h - 2.0) as i32,
+        color,
+        BOX_GLOW,
+    );
+    let chars = ((w - cx.adv) / cx.adv).floor() as usize;
+    if chars >= 3 {
+        let pct = node.ns as f64 / cx.total * 100.0;
+        let name = match node.kind {
+            Kind::Engine => format!("⚙ {}", node.name),
+            _ => node.name.clone(),
+        };
+        let full = if depth == 0 {
+            format!("{name} · {:.2} ms", (cx.ms_per_ns)(node.ns))
+        } else {
+            format!("{name} {pct:.0}%")
+        };
+        let label = Canvas::fitted(
+            if full.chars().count() <= chars {
+                &full
+            } else {
+                &name
+            },
+            chars,
+        );
+        let text_color = if node.kind == Kind::Phase {
+            TEXT
+        } else {
+            BOX_TEXT
+        };
+        let base = top + cx.row_h * 0.5 + cx.ascent * 0.4 - 1.0;
+        cv.text(font, &label, cx.x0 + x + cx.adv * 0.5, base, &|_| {
+            text_color
+        });
+    }
+    let mut cx_x = x;
+    for c in &node.children {
+        flame_node(cv, font, c, depth + 1, cx_x, cx);
+        cx_x += (c.ns as f64 / cx.total) as f32 * cx.width;
+    }
+}
+
+/// Draws a profile board: header, flame graph, hottest lines.
+fn draw_profile(
+    board: &ProfileBoard,
+    font: &mut BoardFont,
+    profile: Option<&(Summary, FlameNode)>,
+    lines: &[(String, u32, f64, String)],
+) -> (Image, Image) {
+    let (w, h) = (
+        board.size[0].max(64) as usize,
+        board.size[1].max(64) as usize,
+    );
+    let mut cv = Canvas::new(w, h);
+    let margin = (h as f32 * 0.035).round();
+    let header = (h as f32 * 0.085).round();
+    font.set_size(header * 0.42);
+    cv.rect(0, 0, w as i32, header as i32, HEADER_BG, PANEL_GLOW);
+    let header_base = header * 0.5 + font.ascent() * 0.4;
+    cv.text(font, "Script profile", margin, header_base, &|_| TITLE);
+    let adv = font.advance();
+    let Some((summary, root)) = profile.filter(|(s, _)| s.samples > 0) else {
+        let note = match profile {
+            Some((s, _)) if s.recording => "● recording…",
+            _ => "no profile yet: script.profile {seconds = 5}",
+        };
+        let sx = w as f32 - margin - adv * note.chars().count() as f32;
+        cv.text(font, note, sx, header_base, &|_| LINE_NO);
+        return cv.into_images();
+    };
+    let khz = if summary.hz >= 1000 {
+        format!("{:.0} kHz", summary.hz as f64 / 1000.0)
+    } else {
+        format!("{} Hz", summary.hz)
+    };
+    let (status, status_color) = if summary.recording {
+        (
+            format!("● recording · {:.1} s · {khz}", summary.seconds),
+            VALUE,
+        )
+    } else {
+        (
+            format!(
+                "● {:.1} s · {} samples · {:.2} ms of script per frame",
+                summary.seconds,
+                summary.samples,
+                summary.ms_per_frame()
+            ),
+            OK,
+        )
+    };
+    let sx = w as f32 - margin - adv * status.chars().count() as f32;
+    cv.text(font, &status, sx, header_base, &|_| status_color);
+
+    // The flame graph: callers above, callees below (an icicle), widest first.
+    let flame_top = header + margin * 0.8;
+    let flame_bottom = h as f32 * 0.64;
+    let max_depth = 9;
+    let row_h = ((flame_bottom - flame_top) / (max_depth + 1) as f32).floor();
+    font.set_size(row_h * 0.52);
+    let frames = summary.frames.max(1) as f64;
+    let per_frame = move |ns: u64| ns as f64 / 1e6 / frames;
+    let cx = FlameCtx {
+        total: root.ns.max(1) as f64,
+        x0: margin,
+        width: w as f32 - margin * 2.0,
+        top: flame_top,
+        row_h,
+        max_depth,
+        adv: font.advance(),
+        ascent: font.ascent(),
+        ms_per_ns: &per_frame,
+    };
+    flame_node(&mut cv, font, root, 0, 0.0, &cx);
+
+    // The hottest lines: share, file:line, the code.
+    let table_top = flame_bottom + margin * 0.6;
+    let rows = 6usize;
+    let line_h = ((h as f32 - table_top - margin) / (rows + 1) as f32).floor();
+    font.set_size(line_h * 0.56);
+    let adv = font.advance();
+    let base0 = table_top + line_h * 0.5 + font.ascent() * 0.4;
+    cv.text(
+        font,
+        "Hottest lines (time on the line, calls included)",
+        margin,
+        base0,
+        &|_| TITLE,
+    );
+    let hottest = lines.first().map(|l| l.2).unwrap_or(1.0).max(1e-6);
+    for (k, (path, line, pct, code)) in lines.iter().take(rows).enumerate() {
+        let top = table_top + (k + 1) as f32 * line_h;
+        let base = top + line_h * 0.5 + font.ascent() * 0.4;
+        let t = ((*pct / hottest) as f32).sqrt();
+        let bar = adv * 7.0;
+        cv.rect(
+            margin as i32,
+            (top + line_h * 0.15) as i32,
+            (margin + bar * t.max(0.05)) as i32,
+            (top + line_h * 0.85) as i32,
+            heat_color(t),
+            HEAT_GLOW,
+        );
+        let share = format!("{pct:>5.1}%");
+        cv.text(font, &share, margin + bar + adv, base, &|_| {
+            heat_color(t.max(0.55))
+        });
+        let file = path.rsplit('/').next().unwrap_or(path);
+        let at = format!("{file}:{line}");
+        let at_x = margin + bar + adv * 8.5;
+        cv.text(font, &at, at_x, base, &|_| LINE_NO);
+        let code_x = at_x + adv * 22.0;
+        let max = ((w as f32 - margin - code_x) / adv).max(4.0) as usize;
+        let code = Canvas::fitted(code, max);
+        let mut in_comment = false;
+        let colors = highlight(&code, &mut in_comment);
+        cv.text(font, &code, code_x, base, &|i| {
+            colors.get(i).copied().unwrap_or(TEXT)
+        });
+    }
+    cv.into_images()
+}
+
+/// What [`draw_profile_boards`] keeps between frames.
+#[derive(Default)]
+pub(crate) struct ProfileBoards {
+    drawn: HashMap<Entity, (u64, Handle<Image>, Handle<Image>, ProfileBoard)>,
+    font: Option<BoardFont>,
+}
+
+/// Redraws profile boards when a recording ends (or grows, for `script.profile`), and starts
+/// live boards' recordings (`Update`, after the code boards drew the last one's heat).
+pub(crate) fn draw_profile_boards(
+    mut boards: Query<(Entity, &ProfileBoard, &mut MeshRenderer)>,
+    runtime: Option<ResMut<ScriptRuntime>>,
+    server: Option<Res<AssetServer>>,
+    mut images: Option<ResMut<Assets<Image>>>,
+    mut state: Local<ProfileBoards>,
+) {
+    let (Some(images), Some(mut runtime)) = (images.as_deref_mut(), runtime) else {
+        return;
+    };
+    if boards.is_empty() {
+        return;
+    }
+    let ProfileBoards { drawn, font } = &mut *state;
+    drawn.retain(|e, _| boards.contains(*e));
+    let shown = crate::profiler::shown(&runtime.lua);
+    let mut profile = None;
+    let mut lines = None;
+    let mut live = None;
+    for (e, board, mut renderer) in boards.iter_mut() {
+        if board.live && live.is_none() {
+            live = Some((board.hz, board.window_secs));
+        }
+        if drawn.get(&e).is_some_and(|d| d.0 == shown && d.3 == *board) {
+            continue;
+        }
+        let rt = &*runtime;
+        let profile =
+            profile.get_or_insert_with(|| crate::profiler::flame(&rt.lua, rt.profiler.recording()));
+        let lines = lines.get_or_insert_with(|| crate::profiler::hot_lines(&rt.lua, 6));
+        let font = font.get_or_insert_with(|| BoardFont::load(server.as_ref().map(|s| s.root())));
+        let pictures = draw_profile(board, font, profile.as_ref(), lines);
+        let (image, glow) = show(
+            images,
+            drawn.get(&e).map(|d| (d.1, d.2)),
+            pictures,
+            &mut renderer,
+            board.glow_cd_m2,
+        );
+        drawn.insert(e, (shown, image, glow, board.clone()));
+    }
+    if let Some((hz, secs)) = live
+        && runtime.profiler.idle_for_boards(&runtime.lua)
+    {
+        let rt = &mut *runtime;
+        rt.profiler.start(&rt.lua, hz, secs.max(1.0) as f64, true);
     }
 }

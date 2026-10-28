@@ -1,7 +1,8 @@
 //! The runtime end to end: scripts in a temporary folder, run by the plugin in a headless app.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use engine_core::prelude::*;
 use engine_core::registry::call_api;
@@ -672,6 +673,13 @@ fn the_showcase_courtyard_builds_and_plays_its_ritual() {
     assert!(values[&31].starts_with("glow = "), "{values:?}");
     call_api(&mut app.world, "script.logpoint", json!({"clear": true})).unwrap();
 
+    // The profiler stops' recording, over the ritual.
+    call_api(
+        &mut app.world,
+        "script.profile",
+        json!({"seconds": 0, "hz": 4000}),
+    )
+    .unwrap();
     let lever = eval(&mut app, "world.find('Ritual lever').id")
         .as_u64()
         .unwrap();
@@ -696,6 +704,27 @@ fn the_showcase_courtyard_builds_and_plays_its_ritual() {
     app.update_n(30 * 8);
     assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
     assert_eq!(eval(&mut app, &format!("{director}.busy")), json!(false));
+    let profile = call_api(&mut app.world, "script.profile", json!({"stop": true})).unwrap();
+    assert!(profile["samples"].as_u64().unwrap() > 10, "{profile}");
+    let functions = profile["functions"].as_array().unwrap();
+    assert!(
+        functions
+            .iter()
+            .any(|f| f["name"] == "update" && f["source"] == "showcase/courtyard.luau"),
+        "{profile}"
+    );
+    assert!(
+        functions.iter().any(|f| f["engine"] == true),
+        "engine calls are entries of their own: {profile}"
+    );
+    // The error stop's typo is on a line the board shows once scrolled to `update`.
+    let source = std::fs::read_to_string(shipped.join(crate::demo::COURTYARD_SCRIPT)).unwrap();
+    let typo_line = source
+        .lines()
+        .position(|l| l.contains("local glow = lamp.dim * ("))
+        .expect("the error stop's line is in the director script")
+        + 1;
+    assert!((17..17 + 28).contains(&typo_line), "{typo_line}");
     let log = call_api(&mut app.world, "script.log", json!({})).unwrap();
     assert!(log.as_array().unwrap().is_empty(), "{log}");
 }
@@ -1041,4 +1070,352 @@ return Waiter
         .as_f64()
         .unwrap();
     assert!(after > before, "the task runs on after the client left");
+}
+
+#[test]
+fn error_locations_and_gists_are_read_from_messages() {
+    use crate::runtime::{error_gist, error_location};
+    let runtime = "runtime error: showcase/courtyard.luau:31: attempt to perform arithmetic (mul) \
+                   on nil and number\nstack traceback:\n\tshowcase/courtyard.luau:31: in function 'update'";
+    assert_eq!(
+        error_location(runtime),
+        Some(("showcase/courtyard.luau".into(), 31))
+    );
+    assert_eq!(
+        error_gist(runtime),
+        "attempt to perform arithmetic (mul) on nil and number"
+    );
+    // An engine call's error names the call; the traceback names the line.
+    let callback = "runtime error: test.fail: no such thing\nstack traceback:\n\t[C]: in ?\n\t\
+                    lib/util.lua:7: in function 'go'";
+    assert_eq!(error_location(callback), Some(("lib/util.lua".into(), 7)));
+    assert_eq!(error_gist(callback), "test.fail: no such thing");
+    assert_eq!(error_location("no place at all: 3"), None);
+}
+
+#[test]
+fn runtime_errors_mark_their_line_until_the_file_is_fixed() {
+    let folder = Folder::new();
+    folder.write(
+        "faulty.luau",
+        "local F = {}\nfunction F:update()\n\tlocal x = nil\n\tx.y = 1\nend\nreturn F\n",
+    );
+    folder.write(
+        "calls.luau",
+        "local C = {}\nfunction C:update()\n\ttest.fail({})\nend\nreturn C\n",
+    );
+    let mut app = app_in(&folder.0);
+    app.register_api("test.fail", "Fails.", "{}", |_, _| {
+        Err("no such thing".to_string())
+    });
+    spawn_script(&mut app, "Faulty", "faulty");
+    spawn_script(&mut app, "Calls", "calls");
+    app.update_n(10);
+    let fault = &file_info(&mut app, "faulty.luau")["fault"];
+    assert_eq!(fault["line"], json!(4), "{fault}");
+    assert!(
+        fault["message"]
+            .as_str()
+            .unwrap()
+            .contains("attempt to index nil"),
+        "{fault}"
+    );
+    assert!(
+        fault["count"].as_u64().unwrap() >= 9,
+        "counted every time: {fault}"
+    );
+    let fault = &file_info(&mut app, "calls.luau")["fault"];
+    assert_eq!(
+        fault["line"],
+        json!(3),
+        "an engine call's error marks the call: {fault}"
+    );
+    assert!(
+        fault["message"].as_str().unwrap().contains("test.fail"),
+        "{fault}"
+    );
+
+    edit(
+        &folder,
+        "faulty.luau",
+        "local F = {}\nfunction F:update()\n\tlocal x = {}\n\tx.y = 1\nend\nreturn F\n",
+    );
+    app.update_n(3);
+    assert_eq!(file_info(&mut app, "faulty.luau")["fault"], Value::Null);
+}
+
+const BUSY: &str = "local Busy = {}
+local function hot(n)
+\tlocal s = 0
+\tfor i = 1, n do
+\t\ts += math.sin(i) * math.cos(i)
+\tend
+\treturn s
+end
+local function cold(n)
+\tlocal s = 0
+\tfor i = 1, n do s += i end
+\treturn s
+end
+function Busy:update(dt)
+\tself.a = hot(20000)
+\tself.b = cold(500)
+\ttest.slow({ ms = 1 })
+end
+return Busy
+";
+
+#[test]
+fn the_profiler_finds_the_hot_function_its_lines_and_slow_engine_calls() {
+    let folder = Folder::new();
+    folder.write("busy.luau", BUSY);
+    let mut app = app_in(&folder.0);
+    app.register_api("test.slow", "Busy-waits ms.", r#"{"ms": 1}"#, |_, args| {
+        let until = std::time::Instant::now()
+            + std::time::Duration::from_secs_f64(args["ms"].as_f64().unwrap_or(1.0) / 1000.0);
+        while std::time::Instant::now() < until {
+            std::hint::spin_loop();
+        }
+        Ok(Value::Null)
+    });
+    spawn_script(&mut app, "Busy", "busy");
+    app.update_n(2);
+    let started = call_api(
+        &mut app.world,
+        "script.profile",
+        json!({"seconds": 0, "hz": 5000}),
+    )
+    .unwrap();
+    assert_eq!(started["recording"], json!(true));
+    let t0 = std::time::Instant::now();
+    while t0.elapsed() < std::time::Duration::from_millis(700) {
+        app.update();
+    }
+    let report = call_api(
+        &mut app.world,
+        "script.profile",
+        json!({"stop": true, "folded": true}),
+    )
+    .unwrap();
+    assert!(errors(&mut app).is_empty(), "{:?}", errors(&mut app));
+    assert_eq!(report["recording"], json!(false));
+    assert!(report["samples"].as_u64().unwrap() > 40, "{report}");
+    let functions = report["functions"].as_array().unwrap();
+    let find = |name: &str| {
+        functions
+            .iter()
+            .find(|f| f["name"] == name)
+            .unwrap_or_else(|| panic!("no {name} in {report}"))
+    };
+    let pct = |f: &Value, key: &str| f[key].as_f64().unwrap();
+    let (update, hot, slow) = (find("update"), find("hot"), find("test.slow"));
+    assert_eq!(update["source"], json!("busy.luau"));
+    assert_eq!(hot["line"], json!(2), "where hot starts");
+    assert_eq!(slow["engine"], json!(true));
+    assert!(pct(update, "total_pct") > 80.0, "{report}");
+    assert!(pct(hot, "self_pct") > 15.0, "{report}");
+    // test.slow busy-waits 1 ms a frame (however loaded the machine is, which makes Luau's
+    // share vary): the samples that come due during it are charged to it.
+    let frames = report["frames"].as_f64().unwrap();
+    assert!(
+        slow["self_ms"].as_f64().unwrap() > 0.6 * frames,
+        "charged to the engine call: {report}"
+    );
+    let cold = functions
+        .iter()
+        .find(|f| f["name"] == "cold")
+        .map_or(0.0, |f| pct(f, "total_pct"));
+    assert!(pct(hot, "total_pct") > cold * 3.0, "{report}");
+    // Lines: the call to hot and the engine call take their callees' time; the loop body
+    // is the hottest line inside hot.
+    let line = |n: u64| {
+        report["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["line"] == n && l["source"] == "busy.luau")
+            .map_or(0.0, |l| l["pct"].as_f64().unwrap())
+    };
+    assert!(line(15) >= pct(hot, "total_pct"), "{report}");
+    assert!(line(17) >= pct(slow, "total_pct"), "{report}");
+    assert!(line(5) > line(11), "{report}");
+    let lines = report["lines"].as_array().unwrap();
+    let body = lines.iter().find(|l| l["line"] == 5).unwrap();
+    assert_eq!(body["code"], json!("s += math.sin(i) * math.cos(i)"));
+    let folded = report["folded"].as_str().unwrap();
+    assert!(
+        folded.contains("update;update (busy.luau:14);test.slow "),
+        "{folded}"
+    );
+    // Not recording, the scripts don't pay for it: reset drops the results.
+    call_api(&mut app.world, "script.profile", json!({"reset": true})).unwrap();
+    let empty = call_api(&mut app.world, "script.profile", json!({})).unwrap();
+    assert_eq!(empty["samples"], json!(0), "{empty}");
+}
+
+const FAULTS: &str = r#"
+local Faults = {}
+
+function Faults:start()
+	self.n = 0
+	task.wait(0.5)
+	local in_task = "yes"
+	error("the task failed: " .. in_task)
+end
+
+function Faults:update(dt)
+	self.n += 1
+	local limit = 30
+	if self.n > limit then
+		local missing = nil
+		missing.field = self.n
+	end
+end
+
+return Faults
+"#;
+
+#[test]
+fn the_debugger_stops_where_an_uncaught_error_is_raised() {
+    let folder = Folder::new();
+    folder.write("debug/faults.luau", FAULTS);
+    let mut app = app_in(&folder.0);
+    app.update_n(2);
+    let port = call_api(&mut app.world, "script.debug", json!({"port": 0})).unwrap()["port"]
+        .as_u64()
+        .unwrap() as u16;
+    // The script starts once the client is set up, so its errors come at known frames.
+    let ready = Arc::new(AtomicBool::new(false));
+    let configured = ready.clone();
+    let client = std::thread::spawn(move || {
+        let mut c = Client::connect(port);
+        let caps = c.request("initialize", json!({"adapterID": "engine-luau"}));
+        assert_eq!(
+            caps["exceptionBreakpointFilters"][0]["filter"],
+            json!("uncaught")
+        );
+        assert_eq!(caps["supportsExceptionInfoRequest"], json!(true));
+        c.request("attach", json!({}));
+        c.request("setExceptionBreakpoints", json!({"filters": ["uncaught"]}));
+        c.request("configurationDone", json!({}));
+        configured.store(true, Ordering::Relaxed);
+
+        // The task's error: its coroutine keeps its frames, so the stop shows them.
+        let stopped = c.event("stopped");
+        assert_eq!(stopped["reason"], json!("exception"), "{stopped}");
+        assert!(
+            stopped["text"]
+                .as_str()
+                .unwrap()
+                .contains("the task failed: yes")
+        );
+        let stack = c.request("stackTrace", json!({"threadId": 1}));
+        let top = stack["stackFrames"][0].clone();
+        assert_eq!(top["line"], json!(8), "{stack}");
+        assert_eq!(top["name"], json!("start"), "{stack}");
+        let scopes = c.request("scopes", json!({"frameId": top["id"]}));
+        let locals = scopes["scopes"][0]["variablesReference"].clone();
+        assert!(
+            c.variable(&locals, "in_task")["value"]
+                .as_str()
+                .unwrap()
+                .contains("yes")
+        );
+        c.request("continue", json!({"threadId": 1}));
+
+        // The update hook's error: stopped before the stack unwinds.
+        let stopped = c.event("stopped");
+        assert_eq!(stopped["reason"], json!("exception"), "{stopped}");
+        let info = c.request("exceptionInfo", json!({"threadId": 1}));
+        assert!(
+            info["description"]
+                .as_str()
+                .unwrap()
+                .contains("attempt to index nil"),
+            "{info}"
+        );
+        let stack = c.request("stackTrace", json!({"threadId": 1}));
+        let top = stack["stackFrames"][0].clone();
+        assert_eq!(top["line"], json!(16), "{stack}");
+        assert_eq!(top["name"], json!("update"), "{stack}");
+        assert!(
+            stack["stackFrames"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| !f["source"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("debugger")),
+            "the catching helper stays out of sight: {stack}"
+        );
+        let scopes = c.request("scopes", json!({"frameId": top["id"]}));
+        let locals = scopes["scopes"][0]["variablesReference"].clone();
+        assert_eq!(c.variable(&locals, "limit")["value"], json!("30"));
+        assert_eq!(c.variable(&locals, "missing")["value"], json!("nil"));
+        let n = c.request(
+            "evaluate",
+            json!({"expression": "self.n", "frameId": top["id"], "context": "watch"}),
+        );
+        assert_eq!(n["result"], json!("31"));
+        // Stepping from an error goes on (the stack unwinds).
+        c.request("next", json!({"threadId": 1}));
+        // Filter off: the error repeats every frame but no longer stops.
+        let stopped = c.event("stopped");
+        assert_eq!(stopped["reason"], json!("exception"));
+        c.request("setExceptionBreakpoints", json!({"filters": []}));
+        c.request("continue", json!({"threadId": 1}));
+        c.request("disconnect", json!({}));
+    });
+    let t0 = std::time::Instant::now();
+    while !ready.load(Ordering::Relaxed) && !client.is_finished() && t0.elapsed().as_secs() < 30 {
+        app.update();
+    }
+    spawn_script(&mut app, "Faults", "debug/faults");
+    let mut frames = 0;
+    while !client.is_finished() && frames < 900 {
+        app.update();
+        frames += 1;
+    }
+    client.join().expect("the debug session failed");
+    app.update_n(3);
+    let errs = errors(&mut app);
+    assert!(
+        errs.iter().any(|e| e.contains("the task failed: yes")),
+        "the errors are still reported: {errs:?}"
+    );
+    assert!(
+        errs.iter().any(|e| e.contains("attempt to index nil")),
+        "{errs:?}"
+    );
+    assert_eq!(
+        file_info(&mut app, "debug/faults.luau")["fault"]["line"],
+        json!(16)
+    );
+}
+
+/// How fast a tight Luau loop runs, for comparing interrupt costs:
+/// `cargo test -p engine_script --release -- --ignored --nocapture tight_loop`.
+#[test]
+#[ignore]
+fn tight_loop_speed() {
+    let folder = Folder::new();
+    let mut app = app_in(&folder.0);
+    app.world.resource_mut::<ScriptSettings>().call_limit_ms = 60_000.0;
+    eval(&mut app, "return 1");
+    for _ in 0..3 {
+        let t0 = std::time::Instant::now();
+        eval(
+            &mut app,
+            "local s = 0 for i = 1, 20000000 do s += i % 7 end return s",
+        );
+        let loop_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let t0 = std::time::Instant::now();
+        eval(
+            &mut app,
+            "local function f(x) return x + 1 end local s = 0 for i = 1, 5000000 do s = f(s) end return s",
+        );
+        let calls_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        println!("20M loop iterations: {loop_ms:.0} ms; 5M calls: {calls_ms:.0} ms");
+    }
 }

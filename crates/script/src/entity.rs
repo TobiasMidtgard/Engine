@@ -27,7 +27,7 @@ use engine_core::registry::{TypeRegistry, call_api, find_by_name};
 use mlua::{FromLua, Lua, MetaMethod, Table, UserData, UserDataFields, UserDataMethods, Value};
 use serde_json::json;
 
-use crate::access::{Outgoing, shared, with_world};
+use crate::access::{Outgoing, shared, with_world, with_world_as};
 use engine_render::{MaterialRef, MeshRenderer, StandardMaterial};
 
 use crate::convert::{merge, to_json, to_lua};
@@ -193,12 +193,12 @@ impl UserData for EntityRef {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("id", |_, e| Ok(e.0.to_bits() as f64));
         fields.add_field_method_get("name", |lua, e| {
-            with_world(lua, |w| {
+            with_world_as(lua, "e.name", |w| {
                 Ok(w.get::<Name>(e.0).map(|n| n.as_str().to_string()))
             })
         });
         fields.add_field_method_set("name", |lua, e, name: String| {
-            with_world(lua, |w| {
+            with_world_as(lua, "e.name =", |w| {
                 w.get_entity_mut(e.0)
                     .map_err(|_| missing(e.0))?
                     .insert(Name::new(name));
@@ -206,19 +206,27 @@ impl UserData for EntityRef {
             })
         });
         fields.add_field_method_get("position", |lua, e| {
-            with_world(lua, |w| Ok(Vec3(transform(w, e.0)?.translation)))
+            with_world_as(lua, "e.position", |w| {
+                Ok(Vec3(transform(w, e.0)?.translation))
+            })
         });
         fields.add_field_method_set("position", |lua, e, v: Vec3| {
-            with_world(lua, |w| edit_transform(w, e.0, |t| t.translation = v.0))
+            with_world_as(lua, "e.position =", |w| {
+                edit_transform(w, e.0, |t| t.translation = v.0)
+            })
         });
         fields.add_field_method_get("rotation", |lua, e| {
-            with_world(lua, |w| Ok(Quat(transform(w, e.0)?.rotation)))
+            with_world_as(lua, "e.rotation", |w| Ok(Quat(transform(w, e.0)?.rotation)))
         });
         fields.add_field_method_set("rotation", |lua, e, q: Quat| {
-            with_world(lua, |w| edit_transform(w, e.0, |t| t.rotation = q.0))
+            with_world_as(lua, "e.rotation =", |w| {
+                edit_transform(w, e.0, |t| t.rotation = q.0)
+            })
         });
         fields.add_field_method_get("scale", |lua, e| {
-            with_world(lua, |w| Ok(Vec3(transform(w, e.0)?.scale.as_dvec3())))
+            with_world_as(lua, "e.scale", |w| {
+                Ok(Vec3(transform(w, e.0)?.scale.as_dvec3()))
+            })
         });
         fields.add_field_method_set("scale", |lua, e, v: Value| {
             let s = match v {
@@ -226,25 +234,37 @@ impl UserData for EntityRef {
                 Value::Number(n) => engine_core::math::Vec3::splat(n as f32),
                 other => Vec3::from_lua(other, lua)?.f32(),
             };
-            with_world(lua, |w| edit_transform(w, e.0, |t| t.scale = s))
+            with_world_as(lua, "e.scale =", |w| {
+                edit_transform(w, e.0, |t| t.scale = s)
+            })
         });
         fields.add_field_method_get("world_position", |lua, e| {
-            with_world(lua, |w| match w.get::<GlobalTransform>(e.0) {
-                Some(g) => Ok(Vec3(g.translation())),
-                None => Ok(Vec3(transform(w, e.0)?.translation)),
+            with_world_as(lua, "e.world_position", |w| {
+                match w.get::<GlobalTransform>(e.0) {
+                    Some(g) => Ok(Vec3(g.translation())),
+                    None => Ok(Vec3(transform(w, e.0)?.translation)),
+                }
             })
         });
         fields.add_field_method_get("forward", |lua, e| {
-            with_world(lua, |w| Ok(Vec3(transform(w, e.0)?.forward().as_dvec3())))
+            with_world_as(lua, "e.forward", |w| {
+                Ok(Vec3(transform(w, e.0)?.forward().as_dvec3()))
+            })
         });
         fields.add_field_method_get("right", |lua, e| {
-            with_world(lua, |w| Ok(Vec3(transform(w, e.0)?.right().as_dvec3())))
+            with_world_as(lua, "e.right", |w| {
+                Ok(Vec3(transform(w, e.0)?.right().as_dvec3()))
+            })
         });
         fields.add_field_method_get("up", |lua, e| {
-            with_world(lua, |w| Ok(Vec3(transform(w, e.0)?.up().as_dvec3())))
+            with_world_as(lua, "e.up", |w| {
+                Ok(Vec3(transform(w, e.0)?.up().as_dvec3()))
+            })
         });
         fields.add_field_method_get("parent", |lua, e| {
-            with_world(lua, |w| Ok(w.get::<ChildOf>(e.0).map(|c| EntityRef(c.0))))
+            with_world_as(lua, "e.parent", |w| {
+                Ok(w.get::<ChildOf>(e.0).map(|c| EntityRef(c.0)))
+            })
         });
         fields.add_field_method_get("script", |lua, e| {
             let selves: Table = lua.named_registry_value(SELVES)?;
@@ -254,10 +274,10 @@ impl UserData for EntityRef {
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("exists", |lua, e, ()| {
-            with_world(lua, |w| Ok(w.get_entity(e.0).is_ok()))
+            with_world_as(lua, "e:exists", |w| Ok(w.get_entity(e.0).is_ok()))
         });
         methods.add_method("get", |lua, e, name: String| {
-            with_world(lua, |w| {
+            with_world_as(lua, "e:get", |w| {
                 let get = w
                     .resource::<TypeRegistry>()
                     .component_or_err(&name)
@@ -274,7 +294,7 @@ impl UserData for EntityRef {
         });
         methods.add_method("set", |lua, e, (name, value): (String, Value)| {
             let value = to_json(&value)?;
-            with_world(lua, |w| {
+            with_world_as(lua, "e:set", |w| {
                 let patch = w
                     .resource::<TypeRegistry>()
                     .component_or_err(&name)
@@ -284,7 +304,7 @@ impl UserData for EntityRef {
             })
         });
         methods.add_method("has", |lua, e, name: String| {
-            with_world(lua, |w| {
+            with_world_as(lua, "e:has", |w| {
                 let has = w
                     .resource::<TypeRegistry>()
                     .component_or_err(&name)
@@ -294,7 +314,7 @@ impl UserData for EntityRef {
             })
         });
         methods.add_method("remove", |lua, e, name: String| {
-            with_world(lua, |w| {
+            with_world_as(lua, "e:remove", |w| {
                 let remove = w
                     .resource::<TypeRegistry>()
                     .component_or_err(&name)
@@ -305,14 +325,16 @@ impl UserData for EntityRef {
         });
         methods.add_method("material", |lua, e, patch: Option<Value>| {
             let patch = patch.map(|v| to_json(&v)).transpose()?;
-            let out = with_world(lua, |w| material(w, e.0, patch))?;
+            let out = with_world_as(lua, "e:material", |w| material(w, e.0, patch))?;
             to_lua(lua, &out)
         });
         methods.add_method("despawn", |lua, e, ()| {
-            with_world(lua, |w| Ok(w.get_entity(e.0).is_ok() && w.despawn(e.0)))
+            with_world_as(lua, "e:despawn", |w| {
+                Ok(w.get_entity(e.0).is_ok() && w.despawn(e.0))
+            })
         });
         methods.add_method("look_at", |lua, e, (target, up): (Vec3, Option<Vec3>)| {
-            with_world(lua, |w| {
+            with_world_as(lua, "e:look_at", |w| {
                 let at = transform(w, e.0)?.translation;
                 let dir = (target.0 - at).as_vec3();
                 if dir.length_squared() < 1e-12 {
@@ -324,18 +346,22 @@ impl UserData for EntityRef {
             })
         });
         methods.add_method("translate", |lua, e, by: Vec3| {
-            with_world(lua, |w| edit_transform(w, e.0, |t| t.translation += by.0))
+            with_world_as(lua, "e:translate", |w| {
+                edit_transform(w, e.0, |t| t.translation += by.0)
+            })
         });
         methods.add_method("rotate", |lua, e, q: Quat| {
-            with_world(lua, |w| {
+            with_world_as(lua, "e:rotate", |w| {
                 edit_transform(w, e.0, |t| t.rotation = q.0 * t.rotation)
             })
         });
         methods.add_method("rotate_y", |lua, e, angle: f32| {
-            with_world(lua, |w| edit_transform(w, e.0, |t| t.rotate_y(angle)))
+            with_world_as(lua, "e:rotate_y", |w| {
+                edit_transform(w, e.0, |t| t.rotate_y(angle))
+            })
         });
         methods.add_method("children", |lua, e, ()| {
-            with_world(lua, |w| {
+            with_world_as(lua, "e:children", |w| {
                 let kids: Vec<EntityRef> = w
                     .get::<Children>(e.0)
                     .map(|c| c.iter().map(EntityRef).collect())
@@ -344,7 +370,9 @@ impl UserData for EntityRef {
             })
         });
         methods.add_method("find", |lua, e, name: String| {
-            with_world(lua, |w| Ok(find_descendant(w, e.0, &name).map(EntityRef)))
+            with_world_as(lua, "e:find", |w| {
+                Ok(find_descendant(w, e.0, &name).map(EntityRef))
+            })
         });
         methods.add_method("spawn", |lua, e, spec: Value| spawn(lua, spec, Some(e.0)));
         methods.add_method("send", |lua, e, (event, data): (String, Option<Value>)| {
@@ -406,7 +434,7 @@ fn spawn(lua: &Lua, spec: Value, parent: Option<Entity>) -> mlua::Result<EntityR
         map.insert("parent".into(), json!(p.to_bits()));
     }
     map.entry("components").or_insert_with(|| json!({}));
-    let out = with_world(lua, |w| {
+    let out = with_world_as(lua, "spawn", |w| {
         call_api(w, "entity.spawn", args).map_err(mlua::Error::runtime)
     })?;
     let bits = out["id"]
@@ -423,13 +451,15 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
     world.set(
         "find",
         lua.create_function(|lua, name: String| {
-            with_world(lua, |w| Ok(find_by_name(w, &name).ok().map(EntityRef)))
+            with_world_as(lua, "world.find", |w| {
+                Ok(find_by_name(w, &name).ok().map(EntityRef))
+            })
         })?,
     )?;
     world.set(
         "find_all",
         lua.create_function(|lua, needle: String| {
-            with_world(lua, |w| {
+            with_world_as(lua, "world.find_all", |w| {
                 let needle = needle.to_lowercase();
                 let mut q = w.query::<(Entity, &Name)>();
                 let mut found: Vec<(String, Entity)> = q

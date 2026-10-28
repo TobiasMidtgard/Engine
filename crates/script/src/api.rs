@@ -233,6 +233,37 @@ pub(crate) fn register(app: &mut App) {
         },
     )
     .register_api(
+        "script.profile",
+        "Profile the scripts while the game runs: \"seconds\" starts a recording (0: until \
+         stopped; \"hz\": samples a second, default 1000), \"stop\": true ends it, \"reset\": \
+         true drops it. Returns the script time per function (self and total; engine calls \
+         like e:set are their own entries) and per line, hottest first (\"top\" of each); \
+         \"folded\": true adds every stack in the folded format flame graph tools read.",
+        r#"{"seconds": 5, "hz": 1000}"#,
+        |world, args| {
+            with_runtime(world, |_, rt, _| {
+                let flag = |key: &str| args[key].as_bool() == Some(true);
+                if flag("reset") {
+                    rt.profiler.reset(&rt.lua);
+                    return Ok(json!({"reset": true}));
+                }
+                if flag("stop") {
+                    rt.profiler.stop(&rt.lua);
+                } else if let Some(seconds) = args["seconds"].as_f64() {
+                    let hz = args["hz"].as_u64().unwrap_or(1000).min(20_000) as u32;
+                    rt.profiler.start(&rt.lua, hz, seconds.max(0.0), false);
+                }
+                let top = args["top"].as_u64().unwrap_or(15).clamp(1, 200) as usize;
+                Ok(crate::profiler::report(
+                    &rt.lua,
+                    rt.profiler.recording(),
+                    top,
+                    flag("folded"),
+                ))
+            })?
+        },
+    )
+    .register_api(
         "script.types",
         "Write engine.d.luau (Luau type definitions of every engine function, vec3, quat, \
          entities and tasks) into the scripts folder for luau-lsp autocompletion; returns its \

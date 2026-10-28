@@ -36,6 +36,11 @@ While stopped the game stands still (it continues when you do), like a native de
 or Unreal. Logpoints never stop. Breakpoints follow hot reloads: save the file and they move onto
 the new code. Script `print`s and errors appear in the debug console.
 
+**Uncaught errors** (in the Breakpoints list, on by default) stops on a script error nothing
+catches, at the line that raised it, with the call stack, locals and watches as they were; the
+error shows beside the line. Continuing (or stepping) lets the error go on as usual: it is
+reported, and the script keeps running from its next call.
+
 ## Other editors
 
 Any Debug Adapter Protocol client can attach to the same port. Neovim (nvim-dap):
