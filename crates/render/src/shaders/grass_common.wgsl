@@ -42,6 +42,7 @@ struct GrassField {
     look: vec4<f32>,    // clump color spread, droop, gloss, snow depth by the camera (m)
     tip: vec4<f32>,     // tip tint (rgb, x the blade's color), unused
     wear: vec4<f32>,    // worn-ground map: first point (field-local m, xz), points per m, 1 = present
+    gust: vec4<f32>,    // steady wind (m/s, xyz), w: the wind's run (m) less speed x time
 };
 
 struct GrassBenders {
@@ -151,29 +152,32 @@ fn grass_lod(f: GrassField, d: f32) -> f32 {
 }
 
 // How far the wind pushes a blade's tip sideways, per meter of blade, at tiling position `p`
-// (world, wrapped) and time `t`. Bands of stronger gusts roll across the field with the wind.
-fn grass_wind(p: vec3<f32>, t: f32, wind: vec3<f32>, phase: f32) -> vec3<f32> {
+// (world, wrapped) and time `t`, in steady wind `wind` that has moved `run` meters of air.
+// Bands of stronger gusts roll across the field with the air, through patches of noise drifting
+// with it. Everything that moves faster in stronger wind advances with the run, never with
+// time x speed, so a change in wind changes how fast it moves on, not where it is.
+fn grass_wind(p: vec3<f32>, t: f32, wind: vec3<f32>, run: f32, phase: f32) -> vec3<f32> {
     let speed = length(wind);
     let dir = select(vec3<f32>(1.0, 0.0, 0.0), wind / max(speed, 1e-3), speed > 0.01);
     let along = dot(p, dir);
     let across = dot(p.xz, vec2<f32>(-dir.z, dir.x));
-    // Gust fronts roll downwind as waves, stronger in patches of noise drifting with the wind,
-    // so they sweep across the field in broken bands rather than as straight lines.
-    let wave = along * 0.18 - t * (0.6 + speed * 0.45) + 0.8 * sin(across * 0.07 + t * 0.21);
+    // Gust fronts ride the air (about 35 m apart), bent into broken bands across it.
+    let wave = (along - run) * 0.18 - t * 0.35 + 0.8 * sin(across * 0.07 + t * 0.21);
     let roll = pow(0.5 + 0.5 * sin(wave), 2.0);
-    let drift = t * (0.5 + speed * 0.9);
-    let q = vec2<f32>(along * 0.06 - drift * 0.06, across * 0.05);
+    let q = vec2<f32>((along - 0.9 * run) * 0.06 - t * 0.03, across * 0.05);
     let n = 0.65 * value_noise2(q) + 0.35 * value_noise2(q * 2.7 + vec2<f32>(5.3, 1.7));
     let gust = min(roll * (0.5 + 0.75 * smoothstep(0.25, 0.8, n)), 1.0);
-    let flutter = sin(t * (2.0 + speed * 0.3) + phase * TAU + along * 0.9) * 0.25;
+    // Blades bob a little out of step with their neighbours, slowly: well under a hertz, a
+    // little faster in stronger wind.
+    let flutter = sin(t * 1.6 + run * 0.12 + phase * 2.4 + along * 0.35) * 0.18;
     let strength = min(speed / 9.0, 1.4);
-    let idle = 0.03 * sin(t * 1.3 + phase * TAU);
+    let idle = 0.03 * sin(t * 1.1 + phase * TAU);
     return dir * (strength * (0.2 + 0.8 * gust + flutter * (0.4 + gust)) + idle);
 }
 
-// Vertex `vertex` of blade `instance` at time `t` in wind `wind`; `tiling` is the camera's
+// Vertex `vertex` of blade `instance` at time `t`, in its field's steady wind; `tiling` is the camera's
 // tiling position (world position modulo 4096 m) so the wind pattern stays put in the world.
-fn grass_blade(instance: u32, vertex: u32, t: f32, wind: vec3<f32>, tiling: vec3<f32>) -> Blade {
+fn grass_blade(instance: u32, vertex: u32, t: f32, tiling: vec3<f32>) -> Blade {
     var out: Blade;
     out.visible = false;
     out.rel = vec3<f32>(0.0);
@@ -244,7 +248,9 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, wind: vec3<f32>, tiling: vec3
     let side = cross(up, facing);
     let lean = f.shape.w * (0.2 + 0.8 * r1.z) * mix(1.0, 0.55 + 1.1 * clump.dist, f.clump.z);
     var tip_dir = normalize(up + facing * lean);
-    let w = grass_wind(root + tiling, t, wind, r0.w) * f.dry.w;
+    let wind = f.gust.xyz;
+    let run = f.gust.w + length(wind) * t;
+    let w = grass_wind(root + tiling, t, wind, run, r0.w) * f.dry.w;
     tip_dir = normalize(tip_dir + (w - up * dot(w, up)) * 1.2);
     // Benders push blades away from their center and flatten them under it.
     for (var i = 0u; i < min(grass_benders.count.x, 16u); i++) {
@@ -286,7 +292,7 @@ fn grass_blade(instance: u32, vertex: u32, t: f32, wind: vec3<f32>, tiling: vec3
     // A ripple runs up the blade, strongest at the tip (barely at all in still air).
     let speed = length(wind);
     let wind_dir = select(facing, wind / max(speed, 1e-3), speed > 0.01);
-    let ripple = sin(t * (3.1 + speed * 0.25) + r0.w * TAU - u * 2.2) * u * u;
+    let ripple = sin(t * 2.6 + run * 0.2 + r0.w * TAU - u * 2.2) * u * u;
     pos += wind_dir * (ripple * height * (0.003 + 0.06 * min(speed / 8.0, 1.5)) * f.dry.w);
     let half_width = 0.5 * width * pow(q, 0.6);
     // Seen edge-on a blade is widened across the view, so the field keeps its cover (from a
