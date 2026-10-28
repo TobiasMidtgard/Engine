@@ -2469,7 +2469,13 @@ impl Simulation {
             region.stale_all = true;
             delta
         };
-        let _ = delta;
+        // Kinematic goals are in the region's frame too: left as they were, a deck driven by
+        // its `Transform` glided the whole re-anchoring in one step and threw off its crates.
+        for b in self.bodies.values_mut().filter(|b| b.region == id) {
+            if let Some(goal) = &mut b.kinematic_goal {
+                goal.translation -= delta;
+            }
+        }
         // Static copies: drop the ones left out of reach (a region following a car or a ship
         // would otherwise collect every static it passed), re-place the rest, and copy in
         // the ones now in reach. A copy stays a little past the reach it came in at, so one at
@@ -2692,6 +2698,9 @@ impl Simulation {
             pose.translation += shift;
             let sleeping = rb.is_sleeping();
             rb.set_position(pose, false);
+            if rb.is_kinematic() {
+                rb.set_next_kinematic_position(pose);
+            }
             let nb = dst.world.bodies.insert(rb);
             // (Rapier wakes what it inserts: a sleeping body sleeps on in its new region.)
             if sleeping {
@@ -2710,6 +2719,11 @@ impl Simulation {
             let entry = self.bodies.get_mut(&e).unwrap();
             entry.region = target;
             entry.handle = nb;
+            // A kinematic body's goal is in its region's frame: left in the old one, the body
+            // glides to it at the regions' distance in one step and launches what it carries.
+            if let Some(goal) = &mut entry.kinematic_goal {
+                goal.translation += shift;
+            }
             entry.forces_set = true;
             self.forced.insert(e);
             for ce in collider_entities {

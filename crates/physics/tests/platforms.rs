@@ -497,3 +497,43 @@ fn a_kinematic_body_moving_by_velocity_jumps_where_its_transform_is_put() {
     let x = pos(&app, cart).x;
     assert!((x - 11.0).abs() < 1e-3, "the cart is at {x}");
 }
+
+/// A deck moved by its `Transform` far enough that its region is re-anchored under it (past a
+/// quarter of the region radius): the glide toward its goal follows the new frame, so the crate
+/// on it rides on, not launched by a jump of the regions' distance in one step.
+#[test]
+fn a_deck_moved_by_its_transform_rides_through_a_re_anchoring() {
+    let mut app = app();
+    let deck = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, -0.5, 0.0),
+            RigidBody::kinematic(),
+            Collider::cuboid(Vec3::new(3.0, 0.5, 3.0)),
+        ))
+        .id();
+    let crate_box = app
+        .world
+        .spawn((
+            Transform::from_xyz(0.0, 0.5, 0.0),
+            RigidBody::dynamic(),
+            Collider::cuboid(Vec3::splat(0.5)),
+            Velocity::default(),
+        ))
+        .id();
+    app.update_n(30);
+    // Up to 12 m/s over two seconds, then 30 s on: 350 m.
+    let mut worst = 0.0f64;
+    for frame in 1..=32 * 60 {
+        let speed = 12.0 * (frame as f64 / 120.0).min(1.0);
+        app.world.get_mut::<Transform>(deck).unwrap().translation.x += speed / 60.0;
+        app.update();
+        let off = pos(&app, crate_box) - pos(&app, deck);
+        worst = worst.max((off - DVec3::Y).length());
+    }
+    assert!(pos(&app, deck).x > 340.0);
+    assert!(
+        worst < 0.5,
+        "the crate left its place on the deck by {worst:.2} m"
+    );
+}
