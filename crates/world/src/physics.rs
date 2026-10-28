@@ -4,8 +4,9 @@
 //! movement, animation (ragdolls) and AI never name a physics crate; they use only the types
 //! here:
 //!
-//! * **Components you put on entities**: [`RigidBody`], [`Collider`], [`Velocity`],
-//!   [`ExternalForce`], [`Joint`], [`CharacterController`] (+ [`CharacterMove`] input).
+//! * **Components you put on entities**: [`RigidBody`], [`Collider`] (or a [`FitCollider`] to
+//!   have one fitted to a model's meshes), [`Velocity`], [`ExternalForce`], [`Joint`],
+//!   [`CharacterController`] (+ [`CharacterMove`] input).
 //! * **Components the backend writes back**: `Transform` and [`Velocity`] of dynamic bodies,
 //!   [`MassProperties`], [`CharacterState`].
 //! * **Messages**: [`ApplyImpulse`] in, [`ContactEvent`] out.
@@ -255,6 +256,68 @@ impl Collider {
                 half_height,
             },
             ..Self::default()
+        }
+    }
+
+    pub fn with_surface(mut self, surface: SurfaceId) -> Self {
+        self.surface = surface;
+        self
+    }
+
+    pub fn with_density(mut self, density: f32) -> Self {
+        self.density = density;
+        self
+    }
+}
+
+/// How a [`FitCollider`] wraps a model, as Unreal's collision presets (simple box, Auto Convex
+/// Collision, complex as simple) and Unity's `MeshCollider` (exact, or `convex`) do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum Fit {
+    /// One box around the whole model. Cheapest.
+    Box,
+    /// One convex hull (hollows and doorways filled in).
+    Hull,
+    /// Convex pieces (convex decomposition), so hollows, arches and hulls stay open. Works on
+    /// moving bodies.
+    Parts,
+    /// The exact triangles (the default: scenery that never moves). A dynamic body gets
+    /// [`Fit::Parts`] instead.
+    #[default]
+    Mesh,
+}
+
+/// Fit a [`Collider`] to this model's meshes once they have loaded, for scenery and props
+/// built from art that has no collision shape of its own (buildings, piers, boats). The
+/// backend puts the collider on this entity, in its space, with `surface` and `density`;
+/// an entity without a [`RigidBody`] gets [`RigidBody::fixed`] (scenery). Meshes named for
+/// collision (Unreal's `UBX_` / `USP_` / `UCP_` / `UCX_` prefixes, Godot's `-colonly` /
+/// `-convcolonly` suffixes) win over the fit and are hidden. The backend removes this
+/// component once the collider is in.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FitCollider {
+    pub fit: Fit,
+    pub surface: SurfaceId,
+    /// kg/m³, as [`Collider::density`].
+    pub density: f32,
+}
+
+impl Default for FitCollider {
+    fn default() -> Self {
+        Self {
+            fit: Fit::Mesh,
+            surface: SurfaceId::default(),
+            density: Collider::default().density,
+        }
+    }
+}
+
+impl FitCollider {
+    pub fn new(fit: Fit) -> Self {
+        Self {
+            fit,
+            ..Default::default()
         }
     }
 
@@ -610,6 +673,9 @@ pub(crate) fn register(app: &mut App) {
         )
         .register_component::<Collider>(
             "Collision shape (meters), surface material, density (kg/m³), sensor flag, layers.",
+        )
+        .register_component::<FitCollider>(
+            "Fit a collider to the model's meshes once they load: box, hull, parts or mesh.",
         )
         .register_component::<Velocity>("Linear (m/s) and angular (rad/s) velocity.")
         .register_component::<ExternalForce>("Continuous force (N) and torque (N·m).")

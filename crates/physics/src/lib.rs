@@ -29,8 +29,8 @@ use engine_world::{GroundContact, NoiseEvent, WorldImpulse};
 use parking_lot::RwLock;
 
 pub use debug::PhysicsDebug;
+pub use engine_world::physics::{Fit, FitCollider};
 pub use fine::FineSteps;
-pub use fit::{Fit, FitCollider};
 pub use settings::PhysicsSettings;
 
 /// Rigid-body physics on Rapier: bodies, colliders, joints, characters and scene queries,

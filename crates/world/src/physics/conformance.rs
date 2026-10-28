@@ -21,6 +21,17 @@
 //! `Transform` (collisions and queries follow, and bodies resting on them ride along) and the
 //! character controller (including its time scaling: a character moves in its own seconds,
 //! so one that ignores world slow motion keeps full speed).
+//!
+//! **Not checked here, still owed:** [`FitCollider`]. This crate doesn't see meshes, so a
+//! backend checks it in its own tests (`engine_physics`'s `tests/fit.rs` is the one to copy).
+//! A backend owes: nothing is fitted while a mesh under the entity is still loading; once all
+//! have loaded, one [`Collider`] wraps them (in the entity's space, children's transforms
+//! applied) as the [`Fit`] asks, with the request's surface and density, on the entity
+//! itself; an entity without a [`RigidBody`] gets [`RigidBody::fixed`]; a dynamic body asking
+//! for [`Fit::Mesh`] gets [`Fit::Parts`]; meshes named for collision (`UBX_` box, `USP_`
+//! sphere, `UCP_` capsule, `UCX_` convex prefixes, `-colonly` mesh and `-convcolonly` convex
+//! suffixes) are used instead of the fit and hidden; and the [`FitCollider`] is removed
+//! once the collider is in.
 
 use engine_core::math::{DVec3, Vec3};
 use engine_core::time::{LocalTimeScale, TimeSource};

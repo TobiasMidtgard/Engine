@@ -1,7 +1,7 @@
-//! Colliders fitted to a model's meshes, for scenery and props built from art that has no
-//! collision shape of its own: buildings, piers, boats. Like Unreal's collision presets (simple
-//! box, Auto Convex Collision, complex as simple) and Unity's `MeshCollider` (exact, or
-//! `convex`), a [`Fit`] picks the shape:
+//! Colliders fitted to a model's meshes ([`FitCollider`], part of the physics contract), for
+//! scenery and props built from art that has no collision shape of its own: buildings, piers,
+//! boats. Like Unreal's collision presets (simple box, Auto Convex Collision, complex as
+//! simple) and Unity's `MeshCollider` (exact, or `convex`), a [`Fit`] picks the shape:
 //!
 //! * [`Fit::Box`]: one box around the whole model. Cheapest.
 //! * [`Fit::Hull`]: one convex hull (hollows and doorways filled in).
@@ -24,7 +24,7 @@ use engine_assets::{Assets, Handle};
 use engine_core::math::{DAffine3, Quat, Vec3};
 use engine_core::prelude::*;
 use engine_render::{Mesh, MeshRef, MeshRenderer};
-use engine_world::physics::{BodyKind, Collider, ColliderShape, RigidBody};
+use engine_world::physics::{BodyKind, Collider, ColliderShape, Fit, FitCollider, RigidBody};
 use rapier3d::parry::math::Vector;
 use rapier3d::parry::transformation::vhacd::{VHACD, VHACDParameters};
 
@@ -32,57 +32,6 @@ use rapier3d::parry::transformation::vhacd::{VHACD, VHACDParameters};
 pub const MAX_HULL_POINTS: usize = 32;
 /// Most pieces [`Fit::Parts`] makes (Unreal's Auto Convex Collision defaults to 4 to 32).
 pub const MAX_PARTS: u32 = 24;
-
-/// How a collider wraps a model (see the [module docs](self)).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-pub enum Fit {
-    Box,
-    Hull,
-    Parts,
-    /// The exact triangles (the default: scenery that never moves).
-    #[default]
-    Mesh,
-}
-
-/// Fit a collider to this model's meshes once they have loaded (see the [module docs](self)).
-/// The collider goes on this entity, in its space, with `surface` and `density`; an entity
-/// without a `RigidBody` gets `RigidBody::fixed()` (scenery). Removed once fitted.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct FitCollider {
-    pub fit: Fit,
-    pub surface: engine_world::SurfaceId,
-    pub density: f32,
-}
-
-impl Default for FitCollider {
-    fn default() -> Self {
-        Self {
-            fit: Fit::Mesh,
-            surface: engine_world::SurfaceId::default(),
-            density: Collider::default().density,
-        }
-    }
-}
-
-impl FitCollider {
-    pub fn new(fit: Fit) -> Self {
-        Self {
-            fit,
-            ..Default::default()
-        }
-    }
-
-    pub fn with_surface(mut self, surface: engine_world::SurfaceId) -> Self {
-        self.surface = surface;
-        self
-    }
-
-    pub fn with_density(mut self, density: f32) -> Self {
-        self.density = density;
-        self
-    }
-}
 
 /// What a mesh named for collision stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
