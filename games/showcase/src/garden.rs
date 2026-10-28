@@ -71,6 +71,31 @@ const FENCE_OUT: f64 = 0.15;
 /// Width of the gate in the fence on the house side, m.
 const GATE: f64 = 1.0;
 
+/// The fence as a collider in the garden's local frame (origin on the ground at the plot's
+/// middle, as [`meshes`] builds it): a thin box along each side, the house side split round
+/// the gate.
+pub fn fence_solid(g: &Garden) -> engine::world::physics::ColliderShape {
+    use engine::world::physics::ColliderShape;
+    let (hx, hz) = ((g.half.x + FENCE_OUT) as f32, (g.half.y + FENCE_OUT) as f32);
+    let gate = GATE as f32 * 0.5;
+    let (t, h) = (0.06, 0.55);
+    let side = |center: Vec3, half: Vec3| {
+        (
+            center + Vec3::Y * h,
+            Quat::IDENTITY,
+            ColliderShape::Cuboid { half_extents: half },
+        )
+    };
+    let run = (hx - gate) * 0.5;
+    ColliderShape::Compound(vec![
+        side(Vec3::new(-gate - run, 0.0, -hz), Vec3::new(run, h, t)),
+        side(Vec3::new(gate + run, 0.0, -hz), Vec3::new(run, h, t)),
+        side(Vec3::new(0.0, 0.0, hz), Vec3::new(hx, h, t)),
+        side(Vec3::new(-hx, 0.0, 0.0), Vec3::new(t, h, hz)),
+        side(Vec3::new(hx, 0.0, 0.0), Vec3::new(t, h, hz)),
+    ])
+}
+
 /// A garden's meshes, in its local frame (origin at the plot's middle on the ground).
 pub struct GardenMeshes {
     pub earth: Mesh,

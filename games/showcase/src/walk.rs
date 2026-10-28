@@ -376,7 +376,7 @@ fn show_menu(world: &mut World) -> Result<(), String> {
                         .align_items(Align::Center)
                 })
                 .child(
-                    El::text("On foot: WASD, mouse, Space to jump, Shift to sprint. P switches to the free camera.")
+                    El::text("On foot: WASD, mouse, Space to jump, Shift to sprint (scroll: faster), E to use. P: free camera. F3, then Page Up/Down: wind.")
                         .class("caption")
                         .text_style(|t| t.nowrap()),
                 ),

@@ -1228,31 +1228,37 @@ impl CliffField {
         let cap = (n2(u / 14.0, 2.5, seed + 1, 2) + 0.15).max(0.0) * 2.6;
         prot += cap * smoothstep(0.7, 0.86, t) * (1.0 - falls);
         // Rounded bed edges (grooves at the bedding planes) and joints between blocks.
-        // Hard beds keep square edges, soft ones weather round.
+        // Hard beds keep square edges, soft ones weather round. The grooves are at least two
+        // of the field's ~0.3 m cells wide (narrower ones alias into cell-sized square pits),
+        // and where a joint meets a bedding plane the deeper groove wins rather than their
+        // sum, as a recess worn along both is no deeper than either.
         let edge = (2.0 * tau - 1.0).abs();
-        let rounding = edge.powi(3) * (1.0 - hard) + edge.powi(8) * hard;
-        prot -= rounding * (0.25 + 0.35 * hard) * (th / 1.5).min(1.0);
+        let rounding = edge.powi(3) * (1.0 - hard) + edge.powi(5) * hard;
+        let bed = rounding * (0.25 + 0.3 * hard) * (th / 1.5).min(1.0);
         let jd = bf.min(1.0 - bf) * blen;
-        prot -= 0.4 * hard * (-(jd / 0.2).powi(2)).exp();
+        let mut groove = bed.max(0.3 * hard * (-(jd / 0.4).powi(2)).exp());
         for &(ju, depth) in joints {
             let du = u - ju;
-            if du.abs() < 1.5 {
-                prot -= depth * (-(du / 0.32).powi(2)).exp() * smoothstep(-0.1, 0.25, t);
+            if du.abs() < 1.8 {
+                groove =
+                    groove.max(depth * (-(du / 0.45).powi(2)).exp() * smoothstep(-0.1, 0.25, t));
             }
         }
+        prot -= groove;
         prot *= 1.0 - 0.6 * falls;
         f -= prot;
         f += 0.18 * n2(u / 2.2, y / 2.2, seed + 2, 3) + 0.05 * n2(u / 0.7, y / 0.7, seed + 3, 2);
-        // Sharp vertical fractures and flutes (worn by runoff) in the hard beds.
+        // Vertical fractures and flutes (worn by runoff) in the hard beds, broad enough for
+        // the field's cells.
         let flute = 1.0
             - n2(
-                u / 1.3 + 0.25 * n2(y / 3.0, u / 7.0, seed + 4, 1),
+                u / 2.0 + 0.25 * n2(y / 3.0, u / 7.0, seed + 4, 1),
                 0.5,
                 seed + 5,
                 1,
             )
             .abs()
-                * 2.5;
+                * 1.6;
         f -= 0.12 * hard * flute.max(0.0).powi(2);
         // Never behind the terrain's own (coarsely meshed) step, which narrows and moves back
         // in the falls' notch as the face does (or the ground shows through beside the water).

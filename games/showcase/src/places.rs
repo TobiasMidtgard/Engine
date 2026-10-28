@@ -280,6 +280,18 @@ pub fn places() -> Vec<Place> {
         ),
         place("falls", "Waterfall into the lake", falls_view(), 15.0),
         place(
+            "falls_cliff",
+            "The valley's cliff close up, east of the waterfall",
+            cliff_view(25.0),
+            15.0,
+        ),
+        place(
+            "falls_cliff_west",
+            "The valley's cliff close up, west of the waterfall",
+            cliff_view(110.0),
+            15.0,
+        ),
+        place(
             "start_screen",
             "The exe's start screen over the valley",
             crate::walk::start_view(0.0),
@@ -547,6 +559,25 @@ fn falls_view() -> (DVec3, DVec3) {
     (
         DVec3::new(eye.x, ground + 3.0, eye.y),
         DVec3::new(lip.x, st.bed[top] - 1.5, lip.y),
+    )
+}
+
+/// At the cliff's foot `along` meters from its east end (the falls are at about 64 m),
+/// looking up its face: bedding, joints and fractures from about 18 m.
+fn cliff_view(along: f64) -> (DVec3, DVec3) {
+    let land = landscape::shared();
+    let Some(sc) = land.scarps.first() else {
+        return near("lake", [0.0, 20.0, 0.0], [0.0, 0.0, 0.0]);
+    };
+    let d = (sc.b - sc.a).normalize();
+    // The low side, where the face looks.
+    let out = -DVec2::new(-d.y, d.x);
+    let face = sc.a + d * along;
+    let eye = face + out * 18.0;
+    let ground = land.height(eye.x, eye.y).max(crate::landscape::LAKE_LEVEL);
+    (
+        DVec3::new(eye.x, ground + 1.8, eye.y),
+        DVec3::new(face.x, ground + 6.0, face.y),
     )
 }
 

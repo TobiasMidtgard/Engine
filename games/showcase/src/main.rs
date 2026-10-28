@@ -100,8 +100,14 @@ fn main() {
         )
         .add_systems(Update, forest::install)
         .add_systems(Update, paint_cache::track_eye.after(camera::fly))
-        .add_systems(Update, scenery::stream_wall_colliders)
-        .add_systems(Update, scenery::stream_wall_heroes)
+        .add_systems(
+            Update,
+            (scenery::add_trunk_solids, scenery::stream_near_solids).chain(),
+        )
+        .add_systems(
+            Update,
+            (scenery::stream_wall_heroes, scenery::pilot_interacts),
+        )
         .add_systems(Update, report_assets);
     register_apis(&mut app);
 
@@ -164,6 +170,11 @@ fn main() {
             ..Default::default()
         });
     }
+    app.insert_resource(scenery::LodScale(
+        value("--lod-scale").map_or(scenery::LodScale::default().0, |k| {
+            k.parse().expect("--lod-scale <x>")
+        }),
+    ));
     if let Some(m) = value("--trees-within") {
         let m = if m == "all" {
             f64::INFINITY

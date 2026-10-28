@@ -14,6 +14,7 @@ use crate::village::{self, Part, PropKind, PropSpot};
 use crate::zones::{ZONES, zone};
 use engine::prelude::*;
 use engine::render::Displacement;
+use engine::world::physics::{Collider, ColliderShape};
 use std::sync::Arc;
 
 /// Materials shared by the scenery (vertex colors carry the variation).
@@ -39,6 +40,8 @@ pub struct HouseHandles {
     /// Footprint half extents (x, z) including the roof overhang.
     pub half: Vec2,
     pub props: Vec<PropSpot>,
+    /// Walls and roof as a collider in the build frame (see [`house_solid`]).
+    pub solid: Option<ColliderShape>,
 }
 
 /// A prop: one mesh per material.
@@ -333,6 +336,7 @@ fn add_parts(
     let houses: Vec<HouseHandles> = houses
         .into_iter()
         .map(|(near, far)| HouseHandles {
+            solid: house_solid(&near.parts),
             half: near.half,
             props: near.props,
             near: add_parts(near.parts),
@@ -392,8 +396,20 @@ fn add_parts(
     }
 }
 
+/// Stretches every [`Lod`]'s distances, like Unreal's view distance scale or Unity's LOD bias:
+/// the distances in the code are set for a mid-range GPU, and things popping in near the
+/// player read worse than the frames the extra detail costs. `--lod-scale <x>` sets it.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct LodScale(pub f32);
+
+impl Default for LodScale {
+    fn default() -> Self {
+        Self(1.5)
+    }
+}
+
 /// Distance-based detail: beyond `switch` meters from the camera the entity shows `far` (or
-/// hides when there is none), and beyond `hide` it hides either way.
+/// hides when there is none), and beyond `hide` it hides either way (both times [`LodScale`]).
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Lod {
     pub near: Handle<Mesh>,
@@ -428,6 +444,7 @@ impl Lod {
 
 /// Swap meshes or hide entities by distance to the active camera.
 pub fn update_lods(
+    scale: Option<Res<LodScale>>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     mut q: Query<(
         &GlobalTransform,
@@ -444,11 +461,12 @@ pub fn update_lods(
     else {
         return;
     };
+    let k = scale.map_or(1.0, |s| s.0) as f64;
     q.par_iter_mut()
         .for_each(|(t, mut lod, mut renderer, within)| {
             let d2 = (t.translation() - eye).length_squared();
-            let far = d2 > (lod.switch as f64).powi(2);
-            let shown = d2 <= (lod.hide as f64).powi(2)
+            let far = d2 > (lod.switch as f64 * k).powi(2);
+            let shown = d2 <= (lod.hide as f64 * k).powi(2)
                 && (!far || lod.far.is_some())
                 && within.is_none_or(|w| d2 >= (w.0 as f64).powi(2));
             if far == lod.far_shown && renderer.visible == shown {
@@ -932,13 +950,15 @@ pub fn spawn_rocks(commands: &mut Commands, lib: &Library, land: &Landscape, rng
             },
         );
         count += 1;
-        if big && near_wildlife(x, z) {
-            solid(
-                commands,
-                DVec3::new(x, h, z),
-                r * 0.75,
-                v.extent.y * scale * squash,
-            );
+        if big {
+            let (foot, radius, height) =
+                (DVec3::new(x, h, z), r * 0.75, v.extent.y * scale * squash);
+            // Wildlife paths round them, so there they stay solid whoever is near.
+            if near_wildlife(x, z) {
+                solid(commands, foot, radius, height);
+            } else {
+                NearSolid::upright(commands, foot, radius, height);
+            }
         }
     }
     engine::core::log::info!("scenery: {count} boulders and stones");
@@ -955,7 +975,7 @@ fn solid(commands: &mut Commands, base: DVec3, radius: f32, height: f32) {
     let half = (height * 0.5 - radius).max(0.0);
     commands.spawn((
         Transform::from_translation(base + DVec3::new(0.0, height as f64 * 0.5, 0.0)),
-        engine::world::physics::Collider::capsule(radius, half),
+        Collider::capsule(radius, half),
     ));
 }
 
@@ -1288,6 +1308,95 @@ fn house_transform(pos: DVec3, facing: f32, look: &HouseLook) -> Transform {
         .with_scale(Vec3::new(mirror, 1.0, 1.0))
 }
 
+/// A house's collider in its build frame (y up from the ground under its middle, ridge along
+/// Z), from its near meshes: a box round the walls' plaster up to the eaves (jettied floors
+/// included) and the roof as a prism from the eaves to the ridge. Chimneys, door steps, sills
+/// and flower boxes are left out.
+pub fn house_solid(parts: &[(Part, Mesh)]) -> Option<ColliderShape> {
+    let points = |want: &[Part]| -> Vec<Vec3> {
+        parts
+            .iter()
+            .filter(|(p, _)| want.contains(p))
+            .flat_map(|(_, m)| m.vertices.iter().map(|v| Vec3::from(v.position)))
+            .collect()
+    };
+    let roof = points(&[Part::Roof]);
+    let (rlo, rhi) = roof.iter().fold(
+        (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+        |(lo, hi), &p| (lo.min(p), hi.max(p)),
+    );
+    if roof.is_empty() {
+        return None;
+    }
+    let eaves = rlo.y;
+    // The plaster infill marks the walls' faces (timbers stick out at the eaves, stone
+    // steps at the door).
+    let (wlo, whi) = points(&[Part::Plaster])
+        .into_iter()
+        .filter(|p| p.y < eaves - 0.02)
+        .fold(
+            (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+            |(lo, hi), p| (lo.min(p), hi.max(p)),
+        );
+    if wlo.x > whi.x {
+        return None;
+    }
+    let walls_lo = Vec3::new(wlo.x, wlo.y, wlo.z);
+    let walls_hi = Vec3::new(whi.x, eaves, whi.z);
+    // The ridge runs along Z, or along X on houses turned eaves to the street: the way the
+    // roof's top spreads out.
+    let (tlo, thi) = roof.iter().filter(|p| p.y > rhi.y - 0.4).fold(
+        (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+        |(lo, hi), &p| (lo.min(p), hi.max(p)),
+    );
+    let along_z = thi.z - tlo.z >= thi.x - tlo.x;
+    let mid = (rlo + rhi) * 0.5;
+    let mut prism = vec![
+        Vec3::new(rlo.x, eaves, rlo.z),
+        Vec3::new(rhi.x, eaves, rlo.z),
+        Vec3::new(rlo.x, eaves, rhi.z),
+        Vec3::new(rhi.x, eaves, rhi.z),
+    ];
+    if along_z {
+        prism.push(Vec3::new(mid.x, rhi.y, rlo.z));
+        prism.push(Vec3::new(mid.x, rhi.y, rhi.z));
+    } else {
+        prism.push(Vec3::new(rlo.x, rhi.y, mid.z));
+        prism.push(Vec3::new(rhi.x, rhi.y, mid.z));
+    }
+    Some(ColliderShape::Compound(vec![
+        (
+            (walls_lo + walls_hi) * 0.5,
+            Quat::IDENTITY,
+            ColliderShape::Cuboid {
+                half_extents: (walls_hi - walls_lo) * 0.5,
+            },
+        ),
+        (
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            ColliderShape::ConvexHull { points: prism },
+        ),
+    ]))
+}
+
+/// `shape` mirrored across its local X (for houses built mirrored).
+fn mirror_x(shape: &ColliderShape) -> ColliderShape {
+    let flip = |v: Vec3| Vec3::new(-v.x, v.y, v.z);
+    match shape {
+        ColliderShape::Compound(parts) => ColliderShape::Compound(
+            parts
+                .iter()
+                .map(|(at, rot, s)| (flip(*at), *rot, mirror_x(s)))
+                .collect(),
+        ),
+        ColliderShape::ConvexHull { points } => ColliderShape::ConvexHull {
+            points: points.iter().map(|&p| flip(p)).collect(),
+        },
+        other => other.clone(),
+    }
+}
+
 /// A house with its door facing `facing` (radians around Y; 0 = +Z): one entity per material,
 /// each switching to the archetype's far mesh (or hiding) with distance.
 pub fn spawn_house(
@@ -1314,6 +1423,21 @@ pub fn spawn_house(
                 switch: house_lod_distance(*part),
                 hide: f32::INFINITY,
                 far_shown: false,
+            },
+        ));
+    }
+    if let Some(solid) = &h.solid {
+        // Its own entity, unscaled: the mirror goes into the shape.
+        let shape = if look.mirror {
+            mirror_x(solid)
+        } else {
+            solid.clone()
+        };
+        commands.spawn((
+            Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(facing)),
+            NearSolid {
+                shape,
+                reach: WALL_COLLIDER_DISTANCE as f32,
             },
         ));
     }
@@ -1348,6 +1472,7 @@ fn spawn_prop(
 /// A street lamp with a warm point light (lumens).
 pub fn spawn_lamp(commands: &mut Commands, lib: &Library, pos: DVec3) {
     let tf = Transform::from_translation(pos);
+    NearSolid::upright(commands, pos, 0.12, 4.1);
     let vm = &lib.mats.village;
     let (near, far) = (lib.lamp.near, lib.lamp.far);
     commands.spawn((
@@ -1707,6 +1832,13 @@ pub fn spawn_gardens(
                 Lod::hide_beyond(mesh, hide),
             ));
         }
+        commands.spawn((
+            tf,
+            NearSolid {
+                shape: crate::garden::fence_solid(&g),
+                reach: SMALL_SOLID_REACH,
+            },
+        ));
         gardens.push(g);
         fences.push(fp);
     }
@@ -2232,11 +2364,36 @@ pub fn stream_wall_heroes(
     }
 }
 
-/// A wall segment's box collider, there while a focus point is near ([`stream_wall_colliders`]).
-#[derive(Component, Clone, Copy)]
-pub struct WallCollider {
-    pub half: Vec3,
+/// A static collider that exists only while a focus point (the player, NPCs, the camera) is
+/// within `reach` meters of it ([`stream_near_solids`]): walls, houses, trunks, boulders,
+/// lamps and garden fences. There are thousands of them in the valley, and every collider
+/// added or removed anywhere has the NPC tactical world rebuilt.
+#[derive(Component, Clone)]
+pub struct NearSolid {
+    pub shape: ColliderShape,
+    pub reach: f32,
 }
+
+impl NearSolid {
+    /// An upright capsule from the ground up to `height` (the entity stands at its foot).
+    fn upright(commands: &mut Commands, foot: DVec3, radius: f32, height: f32) {
+        let half = (height * 0.5 - radius).max(0.0);
+        commands.spawn((
+            Transform::from_translation(foot + DVec3::Y * (height as f64 * 0.5)),
+            NearSolid {
+                shape: ColliderShape::Capsule {
+                    radius,
+                    half_height: half,
+                },
+                reach: SMALL_SOLID_REACH,
+            },
+        ));
+    }
+}
+
+/// Trunks, boulders, lamps and fences get their colliders within this distance of a focus
+/// point, m (houses and walls at [`WALL_COLLIDER_DISTANCE`]).
+const SMALL_SOLID_REACH: f32 = 70.0;
 
 /// The dry-stone walls ([`plan_walls`]): the stones, the core, a box collider per segment
 /// (streamed in near the action) and the heads that end the runs.
@@ -2282,8 +2439,11 @@ pub fn spawn_walls(
         commands.spawn((
             Transform::from_translation(seg.pos + (seg.rot * Vec3::Y * mid_y).as_dvec3())
                 .with_rotation(seg.rot),
-            WallCollider {
-                half: Vec3::new(seg.len * 0.5, (HEIGHT + SINK) * 0.5, HALF_FOOT * 0.75),
+            NearSolid {
+                shape: ColliderShape::Cuboid {
+                    half_extents: Vec3::new(seg.len * 0.5, (HEIGHT + SINK) * 0.5, HALF_FOOT * 0.75),
+                },
+                reach: WALL_COLLIDER_DISTANCE as f32,
             },
         ));
     }
@@ -2313,19 +2473,14 @@ pub fn spawn_walls(
     );
 }
 
-/// Gives wall segments near a focus point their colliders and takes them from those far off,
+/// Gives [`NearSolid`]s near a focus point their colliders and takes them from those far off,
 /// twice a second.
-pub fn stream_wall_colliders(
+pub fn stream_near_solids(
     mut commands: Commands,
     mut timer: Local<f32>,
     time: Res<Time>,
     focus: Option<Res<engine::world::FocusPoints>>,
-    walls: Query<(
-        Entity,
-        &WallCollider,
-        &Transform,
-        Has<engine::world::physics::Collider>,
-    )>,
+    solids: Query<(Entity, &NearSolid, &GlobalTransform, Has<Collider>)>,
 ) {
     *timer -= time.real_delta_secs();
     if *timer > 0.0 {
@@ -2335,23 +2490,113 @@ pub fn stream_wall_colliders(
     let Some(focus) = focus.filter(|f| !f.points.is_empty()) else {
         return;
     };
-    for (e, wall, t, has) in &walls {
-        let d = focus.distance(t.translation);
-        if !has && d < WALL_COLLIDER_DISTANCE {
-            commands
-                .entity(e)
-                .insert(engine::world::physics::Collider::cuboid(wall.half));
-        } else if has && d > WALL_COLLIDER_DISTANCE + WALL_COLLIDER_SLACK {
-            commands
-                .entity(e)
-                .remove::<engine::world::physics::Collider>();
+    for (e, solid, t, has) in &solids {
+        let d = focus.distance(t.translation());
+        let reach = solid.reach as f64;
+        if !has && d < reach {
+            commands.entity(e).insert(Collider {
+                shape: solid.shape.clone(),
+                ..Default::default()
+            });
+        } else if has && d > reach + WALL_COLLIDER_SLACK {
+            commands.entity(e).remove::<Collider>();
         }
+    }
+}
+
+/// The play-mode pilot (the body the walk and P put the player in) is the one that uses
+/// things: E reaches what is near it rather than what is near the camera.
+pub fn pilot_interacts(
+    mut commands: Commands,
+    play: Option<Res<engine_movement::Play>>,
+    actors: Query<(), With<engine::world::Interactor>>,
+) {
+    if let Some(pilot) = play.and_then(|p| p.pilot)
+        && actors.get(pilot).is_err()
+        && let Ok(mut e) = commands.get_entity(pilot)
+    {
+        e.insert(engine::world::Interactor);
+    }
+}
+
+/// Trees, the valley's and the near woods' alike, get a trunk to bump into: a capsule up the
+/// bole, as a child so it goes with the tree. Understory shrubs (hazel) stay walk-through.
+pub fn add_trunk_solids(
+    mut commands: Commands,
+    library: Res<engine_foliage::PlantLibrary>,
+    trees: Query<(Entity, &engine_foliage::SceneryTree), Added<engine_foliage::SceneryTree>>,
+) {
+    for (e, tree) in &trees {
+        let sp = library.get(tree.species);
+        if sp.layer != engine_foliage::Layer::Canopy {
+            continue;
+        }
+        let radius = (sp.trunk_radius_m * tree.size.max(0.3)).clamp(0.12, 0.6);
+        let height = 3.5f32;
+        commands.spawn((
+            Transform::from_translation(DVec3::Y * (height as f64 * 0.5)),
+            NearSolid {
+                shape: ColliderShape::Capsule {
+                    radius,
+                    half_height: height * 0.5 - radius,
+                },
+                reach: SMALL_SOLID_REACH,
+            },
+            ChildOf(e),
+        ));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_house_collider_wraps_its_walls_and_roof() {
+        for spec in village::archetypes() {
+            let near = village::house(&spec, false);
+            let Some(ColliderShape::Compound(parts)) = house_solid(&near.parts) else {
+                panic!("house {} has no collider", spec.seed);
+            };
+            let (at, _, walls) = &parts[0];
+            let ColliderShape::Cuboid { half_extents: h } = walls else {
+                panic!("walls aren't a box");
+            };
+            // About the ground floor's size, plus the upper floors' jetties.
+            // (Houses with the eaves to the street are built turned, ridge along X.)
+            let out = 1.2 + 2.0 * spec.jetty * (spec.floors - 1) as f32;
+            let (w, l) = if spec.eaves_front {
+                (h.z, h.x)
+            } else {
+                (h.x, h.z)
+            };
+            assert!(
+                (w * 2.0 - spec.width).abs() < out && (l * 2.0 - spec.length).abs() < out,
+                "house {}: walls {h} for {} x {}",
+                spec.seed,
+                spec.width,
+                spec.length
+            );
+            let wall_top = at.y + h.y;
+            assert!(
+                wall_top > 2.4 * spec.floors as f32,
+                "house {}: walls end at {wall_top}",
+                spec.seed
+            );
+            let ColliderShape::ConvexHull { points } = &parts[1].2 else {
+                panic!("roof isn't a hull");
+            };
+            let ridge = points.iter().map(|p| p.y).fold(f32::MIN, f32::max);
+            assert!(ridge > wall_top + 2.0, "house {}: ridge {ridge}", spec.seed);
+            let top: Vec<_> = points.iter().filter(|p| p.y == ridge).collect();
+            let along_x = (top[0].x - top[1].x).abs() > (top[0].z - top[1].z).abs();
+            assert_eq!(
+                along_x, spec.eaves_front,
+                "house {}: ridge {top:?}",
+                spec.seed
+            );
+        }
+    }
 
     #[test]
     fn the_meadow_grows_on_pastures_but_not_on_roads_water_or_paved_zones() {
