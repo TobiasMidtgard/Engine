@@ -1591,6 +1591,7 @@ dependencies = [
  "bevy_ecs",
  "engine_assets",
  "engine_core",
+ "engine_input",
  "engine_render",
  "engine_world",
  "image",

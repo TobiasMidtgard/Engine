@@ -398,6 +398,21 @@ pub fn spawn_track(commands: &mut Commands, center: DVec3) {
             clockwise: false,
         },
     );
+
+    // One to drive yourself: parked in the pit lane's working lane, in front of the garages,
+    // nose toward the pit exit (E to get in).
+    let parked = center
+        + DVec3::new(
+            20.0,
+            TRACK_SURFACE + presets::ride_height("sports_car"),
+            -61.0,
+        );
+    let e = presets::sports_car(
+        commands,
+        Transform::from_translation(parked).with_rotation(facing(Vec3::X)),
+        0xe0a81c,
+    );
+    commands.entity(e).insert(Name::new("Parked car"));
 }
 
 /// A runway from `start` to `end` (centers of its two ends on flat ground), 45 m wide, with
@@ -463,6 +478,18 @@ pub fn spawn_airfield(commands: &mut Commands, start: DVec3, end: DVec3) {
     commands
         .entity(e)
         .insert((Name::new("Departing plane"), Autopilot::new(fly)));
+
+    // One to fly yourself: on the west apron's third stand, nose toward the taxi lane (E to
+    // get in).
+    let stand = Vec3::new(
+        64.0,
+        0.07 + presets::ride_height("sport_plane") as f32,
+        16.0,
+    );
+    let t = Transform::from_translation(mid + (yaw * stand).as_dvec3())
+        .with_rotation(yaw * Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+    let e = presets::sport_plane(commands, t);
+    commands.entity(e).insert(Name::new("Parked plane"));
 }
 
 /// A spaceplane hopping off the landing pad at `pad` (center of its top surface) and one
@@ -537,6 +564,8 @@ pub struct DemoView {
     pub hour: f32,
     pub warmup_secs: f32,
     pub on_arrive: Vec<(&'static str, String)>,
+    /// Calls made when the tour moves on (getting out of a vehicle driven for the shot).
+    pub on_leave: Vec<(&'static str, String)>,
 }
 
 impl DemoView {
@@ -549,6 +578,7 @@ impl DemoView {
             hour: 15.5,
             warmup_secs: 0.5,
             on_arrive: Vec::new(),
+            on_leave: Vec::new(),
         }
     }
 
@@ -560,6 +590,24 @@ impl DemoView {
 
     fn call(mut self, api: &'static str, args: serde_json::Value) -> Self {
         self.on_arrive.push((api, args.to_string()));
+        self
+    }
+
+    /// Get into `vehicle` as the player does with E and hold `keys` (input.axis / input.press
+    /// calls) through the warm-up; let go and get out when the tour moves on.
+    fn drive(mut self, vehicle: &str, keys: Vec<(&'static str, serde_json::Value)>) -> Self {
+        self = self.call("vehicles.board", serde_json::json!({"vehicle": vehicle}));
+        for (api, args) in keys {
+            self = self.call(api, args);
+        }
+        self.on_leave.push((
+            "input.release",
+            serde_json::json!({"all": true}).to_string(),
+        ));
+        self.on_leave.push((
+            "vehicles.board",
+            serde_json::json!({"vehicle": vehicle, "out": true, "stay": true}).to_string(),
+        ));
         self
     }
 }
@@ -643,6 +691,31 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                     "vehicles.place",
                     on_oval("Red car", JUMP_ANGLE - 0.42, 40.0),
                 ),
+                // Driving the parked car out of the pits by hand (W held), seen from its
+                // chase camera.
+                DemoView::new(
+                    "track_drive",
+                    "Driving the parked car out of the pits",
+                    [12.0, 2.5, -61.0],
+                    [20.0, 1.0, -61.0],
+                )
+                .at(15.5, 1.6)
+                .call(
+                    "vehicles.place",
+                    serde_json::json!({
+                        "vehicle": "Parked car",
+                        "at": abs(20.0, TRACK_SURFACE, -61.0),
+                        "yaw_deg": 90.0,
+                        "speed": 0.0,
+                    }),
+                )
+                .drive(
+                    "Parked car",
+                    vec![(
+                        "input.axis",
+                        serde_json::json!({"action": "move", "x": 0.0, "y": 1.0}),
+                    )],
+                ),
             ]
         }
         "airfield" => {
@@ -701,6 +774,33 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                 )
                 .call("entity.despawn", gone)
                 .call("vehicles.spawn", line_up),
+                // Flying the apron's parked plane by hand at full throttle (Shift), 150 m over
+                // the runway's south end, from its chase camera.
+                DemoView::new(
+                    "airfield_fly",
+                    "Flying the parked plane by hand",
+                    [0.0, 152.0, -430.0],
+                    [0.0, 150.0, -380.0],
+                )
+                .at(10.0, 2.0)
+                .call(
+                    "vehicles.place",
+                    serde_json::json!({
+                        "vehicle": "Parked plane",
+                        "at": abs(0.0, 150.0, -400.0),
+                        "on_ground": false,
+                        "yaw_deg": 180.0,
+                        "speed": 55.0,
+                    }),
+                )
+                .call(
+                    "vehicles.control",
+                    serde_json::json!({"vehicle": "Parked plane", "gear": "up"}),
+                )
+                .drive(
+                    "Parked plane",
+                    vec![("input.press", serde_json::json!({"action": "sprint"}))],
+                ),
             ]
         }
         "spaceport" => {
@@ -884,6 +984,19 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                         "vehicle": "Hopper",
                         "mode": {"Return": {"pad": abs(0.0, 0.4, 0.0)}},
                     }),
+                ),
+                // Lifting the apron's parked spaceplane off by hand on its hover engines
+                // (Space held), from its chase camera.
+                DemoView::new(
+                    "spaceport_fly",
+                    "Lifting the parked spaceplane off by hand",
+                    [75.0, 3.6, -26.0],
+                    [58.0, 3.0, -45.0],
+                )
+                .at(17.0, 3.0)
+                .drive(
+                    "Parked spaceplane",
+                    vec![("input.press", serde_json::json!({"action": "ascend"}))],
                 ),
             ]
         }

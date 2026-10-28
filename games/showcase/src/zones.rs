@@ -802,9 +802,13 @@ pub fn demo_views(z: &Zone) -> Vec<View> {
             .into_iter()
             .map(|v| {
                 let view = View::new(v.key, v.name, v.eye, v.target, v.hour).warmup(v.warmup_secs);
-                v.on_arrive
+                let view = v
+                    .on_arrive
                     .iter()
-                    .fold(view, |view, (api, args)| view.on_arrive(api, args))
+                    .fold(view, |view, (api, args)| view.on_arrive(api, args));
+                v.on_leave
+                    .iter()
+                    .fold(view, |view, (api, args)| view.on_leave(api, args))
             })
             .collect(),
         "field" => engine_fire::demo::VIEWS

@@ -5,6 +5,7 @@ pub mod api;
 pub mod autopilot;
 pub mod chassis;
 pub mod demo;
+pub mod drive;
 pub mod drivetrain;
 pub mod entry;
 pub mod events;
@@ -119,6 +120,7 @@ impl Plugin for VehiclesPlugin {
             );
         register_types(app);
         api::register(app);
+        drive::register(app);
     }
 }
 

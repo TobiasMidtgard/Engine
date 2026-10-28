@@ -282,6 +282,53 @@ fn telemetry_api(world: &mut World, args: Value) -> Result<Value, String> {
     Ok(v)
 }
 
+fn board_api(world: &mut World, args: Value) -> Result<Value, String> {
+    use crate::drive::{Boardable, ChaseCamera, Driven};
+    let vehicle = vehicle_entity(world, &args)?;
+    if args.get("out").and_then(Value::as_bool).unwrap_or(false) {
+        let stay = args.get("stay").and_then(Value::as_bool).unwrap_or(false);
+        let was = world.get::<Driven>(vehicle).is_some();
+        crate::drive::get_out(world, vehicle, true, stay);
+        return Ok(json!({ "out": was }));
+    }
+    if world.get::<Driven>(vehicle).is_some() {
+        return Err(format!("entity {vehicle} is being driven already"));
+    }
+    let b = match world.get::<Boardable>(vehicle).copied() {
+        Some(b) => b,
+        None => {
+            return Err(format!(
+                "entity {vehicle} can't be boarded yet (next frame)"
+            ));
+        }
+    };
+    let actor = match args.get("actor") {
+        Some(sel) => resolve_entity(world, sel)?,
+        None => {
+            let mut bodies = world
+                .query_filtered::<Entity, (With<engine_world::Interactor>, Without<ChaseCamera>)>();
+            match bodies.iter(world).next() {
+                Some(e) => e,
+                None => {
+                    let mut cams = world
+                        .query_filtered::<(Entity, &engine_render::Camera), Without<ChaseCamera>>();
+                    cams.iter(world)
+                        .filter(|(_, c)| c.active)
+                        .max_by_key(|(_, c)| c.order)
+                        .map(|(e, _)| e)
+                        .ok_or("no actor: nobody walks and no camera is active")?
+                }
+            }
+        }
+    };
+    if world.get::<crate::drive::Seated>(actor).is_some() {
+        return Err(format!("entity {actor} sits in a vehicle already"));
+    }
+    crate::drive::get_in(world, actor, vehicle, b);
+    let camera = world.get::<Driven>(vehicle).map(|d| d.camera);
+    Ok(json!({ "actor": actor.to_bits(), "camera": camera.map(|c| c.to_bits()) }))
+}
+
 pub(crate) fn register(app: &mut App) {
     app.register_api(
         "vehicles.presets",
@@ -329,6 +376,16 @@ pub(crate) fn register(app: &mut App) {
          Hop (fields as in the Autopilot component).",
         r#"{"vehicle": "Plane", "mode": {"Fly": {"waypoints": [[0,300,0],[2000,300,0]], "looped": true, "cruise_speed": 60, "rotate_speed": 33}}}"#,
         autopilot_api,
+    )
+    .register_api(
+        "vehicles.board",
+        "Get into a vehicle as the player would with E (\"actor\": an entity id or name; by \
+         default the player's body, or the free camera when nobody walks), or out of it with \
+         \"out\": true (at once even when moving; \"stay\": true leaves the actor where it \
+         is instead of beside the vehicle). The vehicle's camera takes the view, its \
+         autopilot goes off and keys and mouse drive it.",
+        r#"{"vehicle": "Parked car"}"#,
+        board_api,
     )
     .register_api(
         "vehicles.telemetry",
