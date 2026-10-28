@@ -706,7 +706,7 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                         "vehicle": "Parked car",
                         "at": abs(20.0, TRACK_SURFACE, -61.0),
                         "yaw_deg": 90.0,
-                        "speed": 0.0,
+                        "velocity": [0.0, 0.0, 0.0],
                     }),
                 )
                 .drive(
@@ -790,7 +790,7 @@ pub fn views(zone: &str, center: DVec3) -> Vec<DemoView> {
                         "at": abs(0.0, 150.0, -400.0),
                         "on_ground": false,
                         "yaw_deg": 180.0,
-                        "speed": 55.0,
+                        "velocity": [0.0, 0.0, 55.0],
                     }),
                 )
                 .call(
@@ -1031,9 +1031,18 @@ mod tests {
                         "vehicles.autopilot" => args.get("mode"),
                         "entity.despawn" => None,
                         "vehicles.control" => {
-                            let assist = args["assist"].clone();
-                            serde_json::from_value::<crate::ship::AssistMode>(assist)
-                                .unwrap_or_else(|e| panic!("{} assist: {e}", v.key));
+                            if let Some(assist) = args.get("assist") {
+                                serde_json::from_value::<crate::ship::AssistMode>(assist.clone())
+                                    .unwrap_or_else(|e| panic!("{} assist: {e}", v.key));
+                            }
+                            None
+                        }
+                        "vehicles.board" => {
+                            assert!(args["vehicle"].is_string(), "{}", v.key);
+                            None
+                        }
+                        "input.axis" | "input.press" => {
+                            assert!(args["action"].is_string(), "{}", v.key);
                             None
                         }
                         "vehicles.place" => {
