@@ -636,7 +636,8 @@ fn grow_scalp(
         },
         HairStyle::Short => Groom {
             length: 0.055 * k,
-            points: 10,
+            // Curly hair needs the points for its turns.
+            points: 10 + (12.0 * a.hair.curl.clamp(0.0, 1.0)) as u32,
             density: 80.0,
             gravity: 0.25,
             loft: 0.009,
@@ -845,16 +846,22 @@ fn grow_scalp(
             }
         }
         // Curls: a helix around the hair, growing from the root (tight coils on short hair).
-        // Hanging hair waves with its lock (above), so its own coil is small and at least
-        // eight points a turn: a coarser helix zigzags, and the zigzags of neighboring hairs
-        // cross like straw.
+        // Hanging hair waves with its lock (above), so its own coil is small. Anything longer
+        // than a buzz turns once per wavelength of its curl, as hair is graded by the size of
+        // its curve (Loussouarn et al. 2007: waves centimetres long, coils under one), and with
+        // at least eight points a turn: a coarser helix zigzags, and the zigzags of
+        // neighboring hairs cross like straw (slightly wavy short hair had two turns on ten
+        // points).
         if curl > 0.02 && g.points > 4 {
             let hanging = g.gravity > 0.5;
             let mut radius = (0.002 + 0.01 * curl) * (g.length / 0.05).min(1.0);
             let mut turns = 2.0 + 10.0 * curl * (g.length / 0.2).min(2.0);
+            if g.points > 5 {
+                let wavelength = 0.12 - 0.108 * curl;
+                turns = (len_of(&pts) / wavelength).min((g.points - 1) as f32 / 8.0);
+            }
             if hanging {
                 radius *= 0.3;
-                turns = turns.min((g.points - 1) as f32 / 8.0);
             }
             let phase = r.f32() * std::f32::consts::TAU;
             let last = pts.len() - 1;
@@ -1075,6 +1082,11 @@ fn keep_off_face(p: Vec3, side: &mut Option<f32>, jitter: f32, lm: &Landmarks) -
         p.x
     };
     Vec3::new(x, p.y, p.z + (z - p.z) * back)
+}
+
+/// The length of a polyline.
+fn len_of(pts: &[Vec3]) -> f32 {
+    pts.windows(2).map(|w| (w[1] - w[0]).length()).sum()
 }
 
 /// A stable 0..1 value from a position (so a hair's guide pass and final pass agree).
