@@ -13,7 +13,7 @@ use engine_ui::color::Color;
 use engine_ui::el::El;
 use engine_ui::node::Screen;
 use engine_ui::screens;
-use engine_ui::style::{Align, Corners, Justify, Position, pct};
+use engine_ui::style::{Corners, Justify, Position, pct};
 use engine_ui::theme::Theme;
 use std::sync::Arc;
 
@@ -749,8 +749,8 @@ pub struct HeldJump {
 #[derive(Default)]
 pub struct Jump {
     last: Option<DVec3>,
-    /// How far the view moved the frame before (m): flight, however fast, moves about as far
-    /// each frame; a jump is a step well beyond it.
+    /// How far the view moved the frame before (m): only a view at rest jumps. Flight never
+    /// does, however fast or however long a frame hitches.
     step: f64,
     since: Option<std::time::Instant>,
     frames: u32,
@@ -769,10 +769,11 @@ const CALM_FRAMES: u32 = 3;
 /// Longest a jump stays covered (s).
 const COVER_MAX_S: f32 = 6.0;
 
-/// Other moves this far (m) in a frame, and this many times the last frame's, are covered
-/// once they happen. A re-anchored world (a [`WorldShift`]) moves the view without a jump.
+/// Other moves this far (m) in a frame from a view that was at rest (moved under
+/// [`REST_M`] the frame before) are covered once they happen. A re-anchored world (a
+/// [`WorldShift`]) moves the view without a jump.
 const JUMP_M: f64 = 150.0;
-const JUMP_STEPS: f64 = 4.0;
+const REST_M: f64 = 2.0;
 
 /// Frames the cover is drawn before a held jump moves the view, and at least after it.
 pub const COVER_FRAMES: u32 = 2;
@@ -839,7 +840,7 @@ pub fn track_jumps(
         return;
     };
     let step = jump.last.map_or(0.0, |l| l.distance(eye));
-    let jumped = step > JUMP_M.max(jump.step * JUMP_STEPS);
+    let jumped = step > JUMP_M && jump.step < REST_M;
     jump.step = step;
     jump.last = Some(eye);
     if jumped && jump.since.is_none() {
@@ -881,23 +882,16 @@ pub fn apply_cover(world: &mut World) {
 fn show_cover(world: &mut World) {
     // Behind the cover, as behind the loading screen, modules may load faster.
     world.insert_resource(engine::world::LoadingBudget::default());
-    let p = world.resource::<Theme>().palette.clone();
-    let el = El::new()
-        .with_style(|s| {
-            s.position(Position::Absolute)
-                .left(0.0)
-                .right(0.0)
-                .top(0.0)
-                .bottom(0.0)
-                .background(Color::hex(0x0b0f0d))
-                .justify(Justify::Center)
-                .align_items(Align::Center)
-        })
-        .child(
-            El::text("Arriving…")
-                .text_style(|t| t.nowrap())
-                .with_style(|s| s.font_size(18.0).color(p.text_dim)),
-        );
+    // A plain dark frame: no message (Tobias, 2026-10-28: flight from the ground to
+    // interstellar space is never interrupted; only bookmark jumps are covered).
+    let el = El::new().with_style(|s| {
+        s.position(Position::Absolute)
+            .left(0.0)
+            .right(0.0)
+            .top(0.0)
+            .bottom(0.0)
+            .background(Color::hex(0x0b0f0d))
+    });
     if let Err(e) = screens::spawn_screen(
         world,
         Screen {

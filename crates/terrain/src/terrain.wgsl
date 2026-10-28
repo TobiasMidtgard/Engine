@@ -51,6 +51,16 @@ const C_CONCRETE: u32 = 9u;
 @group(1) @binding(2) var deform_tex: texture_2d<f32>;   // r: print depth (m, + down), g: grass flattened 0..1
 @group(1) @binding(3) var surface_tex: texture_2d<f32>;  // wetness, puddle depth (m), snow depth (m), scorch
 @group(1) @binding(4) var map_sampler: sampler;
+// The two newest prints reaching each deformation cell (slot + 1, 0 = none), and their shapes:
+// the grid's 4 cm cells only carry a print's depth, the shader draws its outline and tread.
+@group(1) @binding(11) var print_ids: texture_2d<u32>;
+// Must match `PrintGpu` in render.rs.
+struct Print {
+    at: vec4<f32>,    // center relative to the deformation grid's corner (x/z), forward (x/z)
+    size: vec4<f32>,  // half width, half length, depth (m), rim share
+    info: vec4<f32>,  // grid depth at the center when pressed, contact kind, cell kind, unused
+};
+@group(1) @binding(12) var<storage, read> prints: array<Print>;
 
 // Must match `MaterialsGpu` in render.rs.
 struct Materials {
@@ -131,6 +141,106 @@ fn planet_up(p: PlanetGpu, rel: vec3<f32>) -> vec3<f32> {
 
 fn deform_uv(rel: vec3<f32>) -> vec2<f32> {
     return (rel.xz - maps.deform.xy) / (maps.deform.z * maps.deform.w);
+}
+
+fn ellipse_d(u: f32, v: f32, cu: f32, cv: f32, ru: f32, rv: f32) -> f32 {
+    return length(vec2<f32>((u - cu) / ru, (v - cv) / rv));
+}
+
+// Distance-like measure from a print's middle (u, v ∈ [−1, 1], v forward): below 1 inside,
+// 1 at its wall. Matches `shape_distance` in deform.rs.
+fn print_distance(contact: u32, u: f32, v: f32) -> f32 {
+    switch contact {
+        case 0u: {
+            let heel = ellipse_d(u, v, 0.0, -0.6, 0.82, 0.42);
+            let fore = ellipse_d(u, v, 0.05, 0.35, 1.0, 0.64);
+            let arch = ellipse_d(u, v, 0.08, -0.12, 0.74, 0.52);
+            return min(min(heel, fore), arch);
+        }
+        case 1u: {
+            var d = ellipse_d(u, v, 0.0, -0.35, 0.6, 0.45);
+            d = min(d, ellipse_d(u, v, -0.62, 0.35, 0.24, 0.26));
+            d = min(d, ellipse_d(u, v, -0.22, 0.62, 0.24, 0.26));
+            d = min(d, ellipse_d(u, v, 0.22, 0.62, 0.24, 0.26));
+            return min(d, ellipse_d(u, v, 0.62, 0.35, 0.24, 0.26));
+        }
+        case 2u: {
+            let notch = ellipse_d(u, v, 0.0, -0.75, 0.3, 0.55);
+            return select(ellipse_d(u, v, 0.0, 0.0, 1.0, 1.0), 1.0 + (1.0 - notch) * 0.5, notch < 1.0);
+        }
+        case 3u, 4u: {
+            let u2 = u * u;
+            let v2 = v * v;
+            return pow(max(u2 * u2 * u2 + v2 * v2 * v2, 1e-12), 1.0 / 6.0);
+        }
+        default: {
+            return length(vec2<f32>(u, v));
+        }
+    }
+}
+
+// Where a sole's lugs (boots), a tire's chevrons or a track's cleats pressed (1) and the gaps
+// between them, at a point x (across) and y (along) meters from the print's middle.
+fn print_tread(contact: u32, x: f32, y: f32, half_l: f32) -> f32 {
+    switch contact {
+        case 0u: {
+            let v = y / half_l;
+            // Forefoot: chevron lugs about 1.6 cm apart split by a center groove; heel: bars.
+            let fore = smoothstep(0.1, 0.2, fract((y + abs(x) * 0.6) / 0.016)) * (1.0 - smoothstep(0.55, 0.65, fract((y + abs(x) * 0.6) / 0.016)))
+                * smoothstep(0.003, 0.005, abs(x - 0.004));
+            let heel = smoothstep(0.1, 0.2, fract(y / 0.013)) * (1.0 - smoothstep(0.6, 0.7, fract(y / 0.013)));
+            let in_heel = 1.0 - smoothstep(-0.42, -0.34, v);
+            let in_fore = smoothstep(-0.12, -0.04, v);
+            return fore * in_fore + heel * in_heel;
+        }
+        case 3u: {
+            let p = y * 40.0 + abs(x) * 25.0;
+            return smoothstep(0.3, 0.6, abs(sin(p * 3.14159)));
+        }
+        case 4u: {
+            return smoothstep(0.6, 0.8, abs(sin(y * 12.0 * 3.14159)));
+        }
+        default: {
+            return 1.0;
+        }
+    }
+}
+
+// One print at grid point g: (pressed depth m, rim height m, inside 0..1, reach 0..1).
+// `amp` its depth now, `relief` how much shallower the tread's gaps are (m).
+fn print_one(i: u32, g: vec2<f32>, amp: f32, relief: f32) -> vec4<f32> {
+    let p = prints[i];
+    let rel = g - p.at.xy;
+    let side = vec2<f32>(p.at.w, -p.at.z);
+    let x = dot(rel, side);
+    let y = dot(rel, p.at.zw);
+    let contact = u32(p.info.y + 0.5);
+    let d = print_distance(contact, x / p.size.x, y / p.size.y);
+    let inside = 1.0 - smoothstep(0.82, 1.0, d);
+    let edge = select(0.0, (1.0 - smoothstep(1.0, 1.7, d)) * smoothstep(0.9, 1.08, d), d >= 1.0);
+    var press = amp * inside;
+    if (contact == 0u) {
+        // The arch barely touches.
+        press *= 1.0 - 0.35 * (1.0 - smoothstep(0.08, 0.22, abs(y / p.size.y + 0.2)));
+    }
+    if (relief > 0.0 && inside > 0.0) {
+        // Wheels' tread runs on along the rut (its prints overlap), soles' is their own.
+        let ty = select(y, dot(g, p.at.zw), contact == 3u || contact == 4u);
+        press -= relief * inside * (1.0 - print_tread(contact, x, ty, p.size.y));
+    }
+    return vec4<f32>(press, amp * p.size.w * edge, inside, 1.0 - smoothstep(2.2, 2.8, d));
+}
+
+// The newest two prints at grid point g: (depth m, + down; inside 0..1; rim 0..1; reach 0..1).
+fn prints_at(ids: vec2<u32>, g: vec2<f32>, amp: vec2<f32>, relief: vec2<f32>) -> vec4<f32> {
+    var a = vec4<f32>(0.0);
+    if (ids.x != 0u) { a = print_one(ids.x - 1u, g, amp.x, relief.x); }
+    if (ids.y != 0u) {
+        let b = print_one(ids.y - 1u, g, amp.y, relief.y);
+        a = vec4<f32>(max(a.x, b.x), max(a.y, b.y), max(a.z, b.z), max(a.w, b.w));
+    }
+    let amp_max = max(max(amp.x, amp.y), 1e-5);
+    return vec4<f32>(a.x - a.y * (1.0 - a.z), a.z, saturate(a.y / amp_max) * (1.0 - a.z), a.w);
 }
 
 fn surface_uv(rel: vec3<f32>) -> vec2<f32> {
@@ -1973,18 +2083,70 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 
     // ---- Footprints and tracks: normals from the print depth field, darker hollows.
     let cell = maps.deform.z;
-    let grad = vec2<f32>(dxp - dxn, dzp - dzn) / (2.0 * cell);
-    let print_n = normalize(n + vec3<f32>(grad.x, 0.0, grad.y) * 1.4);
+    var grad = vec2<f32>(dxp - dxn, dzp - dzn) / (2.0 * cell) * 1.4;
+    var print_depth = depth;
+    var rim = saturate(-depth * 20.0);
+    var pressed = 0.0;
+    var print_sharp = 0.0;
+    let sun = frame.sun_dir.xyz;
+    let sun_flat = length(sun.xz);
+    // Prints with a shape: their outline, walls and tread at pixel scale instead of the grid's
+    // 4 cm cells (a dry boot print is a few millimeters deep: what shows is its crisp wall and
+    // the lugs, caught by a low sun).
+    var ids = vec2<u32>(0u);
+    if (print_fade > 0.0) {
+        let n_cells = i32(maps.deform.w);
+        ids = textureLoad(print_ids, clamp(vec2<i32>(floor(duv * maps.deform.w)), vec2<i32>(0), vec2<i32>(n_cells - 1)), 0).rg;
+    }
+    if (ids.x != 0u) {
+        let g = in.rel.xz - maps.deform.xy;
+        let span = cell * maps.deform.w;
+        // How deep each print is now: the grid's depth at its middle against when it was
+        // pressed (sand softens, snow fills in, digging wipes it).
+        var amp = vec2<f32>(0.0);
+        var relief = vec2<f32>(0.0);
+        let tread_fade = 1.0 - smoothstep(0.004, 0.012, pixel);
+        for (var k = 0; k < 2; k++) {
+            let id = ids[k];
+            if (id == 0u) { continue; }
+            let p = prints[id - 1u];
+            let now = textureSampleLevel(deform_tex, map_sampler, p.at.xy / span, 0.0).r;
+            let left = select(1.0, saturate(now / p.info.x), p.info.x > 1e-4);
+            amp[k] = p.size.z * left;
+            relief[k] = min(amp[k] * 0.35, 0.004) * tread_fade;
+        }
+        let e = max(pixel * 0.5, 0.0015);
+        let p0 = prints_at(ids, g, amp, relief);
+        let px = prints_at(ids, g + vec2<f32>(e, 0.0), amp, relief);
+        let pz = prints_at(ids, g + vec2<f32>(0.0, e), amp, relief);
+        print_sharp = p0.w * print_fade;
+        grad = mix(grad, vec2<f32>(px.x - p0.x, pz.x - p0.x) / e, print_sharp);
+        print_depth = mix(depth, p0.x, print_sharp);
+        rim = mix(rim, p0.z, print_sharp);
+        pressed = p0.y * print_sharp;
+        // The wall nearest the sun shades the floor: march toward the sun over the prints.
+        if (p0.x > 0.0005 && sun.y > 0.0 && sun_flat > 1e-3) {
+            let amp_max = max(amp.x, amp.y);
+            let reach = min(amp_max * sun_flat / sun.y, 0.3);
+            let dir = sun.xz / sun_flat;
+            var shade = 0.0;
+            for (var k = 1; k <= 8; k++) {
+                let s = reach * f32(k) / 8.0;
+                let dk = prints_at(ids, g + dir * s, amp, relief).x;
+                shade = max(shade, saturate((p0.x - dk - s * sun.y / sun_flat) / max(amp_max * 0.12, 0.0004)));
+            }
+            albedo *= 1.0 - shade * 0.6 * print_sharp * saturate(sun.y * 5.0);
+        }
+    }
+    let print_n = normalize(n + vec3<f32>(grad.x, 0.0, grad.y));
     n = normalize(mix(n, print_n, print_fade));
-    let hollow = saturate(depth * 6.0);
+    let hollow = saturate(print_depth * 6.0);
     occlusion *= 1.0 - hollow * 0.35 * print_fade;
     // Under a low sun a print's near wall shades its floor, which is what makes shallow prints
     // (sand) read as hollows rather than bumps. March the depth grid toward the sun: a cell whose
     // surface rises above the sun ray hides this point. Surface has no direct-light-only input,
     // so the shadow darkens the albedo by roughly the sun's share of the light.
-    let sun = frame.sun_dir.xyz;
-    let sun_flat = length(sun.xz);
-    if (depth > 0.002 && print_fade > 0.01 && sun.y > 0.0 && sun_flat > 1e-3) {
+    if (print_sharp < 0.99 && depth > 0.002 && print_fade > 0.01 && sun.y > 0.0 && sun_flat > 1e-3) {
         let step_uv = sun.xz / sun_flat * texel;
         let rise = cell * sun.y / sun_flat;
         var print_shadow = 0.0;
@@ -1992,10 +2154,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             let dk = textureSampleLevel(deform_tex, map_sampler, duv + step_uv * f32(k), 0.0).r;
             print_shadow = max(print_shadow, saturate((depth - dk - rise * f32(k)) / 0.004));
         }
-        albedo *= 1.0 - print_shadow * 0.6 * print_fade * saturate(sun.y * 5.0);
+        albedo *= 1.0 - print_shadow * 0.6 * print_fade * (1.0 - print_sharp) * saturate(sun.y * 5.0);
     }
-    let rim = saturate(-depth * 20.0);
-    albedo *= 1.0 + rim * 0.06;
+    // Pressed ground is packed: its fine grains settle, so it reads a little darker and
+    // smoother. Soil pushed up around it is loose and dry on top: a little lighter.
+    albedo *= (1.0 - pressed * 0.1) * (1.0 + rim * 0.15);
+    roughness = mix(roughness, roughness * 0.8, pressed);
     // Trampled grass: flattened blades read slightly darker and yellower.
     albedo = mix(albedo, albedo * vec3<f32>(0.78, 0.82, 0.62), flattened * 0.7);
     roughness = mix(roughness, 0.7, flattened * 0.5);

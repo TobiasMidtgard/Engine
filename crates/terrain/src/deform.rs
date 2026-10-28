@@ -67,6 +67,34 @@ pub const TILE: u32 = 32;
 /// Prints remembered so they come back when the grid moves over them again.
 pub const HISTORY: usize = 40_000;
 
+/// Prints the shader draws sharper than the grid (a ring the cells point into).
+pub const SLOTS: usize = 16_384;
+
+/// Farthest a wheel's print is joined to its last one, meters.
+const ROLL_GAP_M: f64 = 3.0;
+/// Wheels remembered for joining ruts.
+const ROLLING: usize = 64;
+
+/// A print's shape, for the shader to draw its outline and tread at pixel scale (the grid's
+/// 4 cm cells only carry its depth: a sole, a lug or a tire's chevrons are finer than that).
+#[derive(Debug, Clone, Copy)]
+pub struct PrintSlot {
+    /// World x/z of the print's center.
+    pub center: DVec2,
+    /// Along the print (yaw 0 = −Z).
+    pub forward: Vec2,
+    /// Half width and half length, meters.
+    pub half: Vec2,
+    pub contact: ContactKind,
+    pub kind: CellKind,
+    /// Depth pressed, meters, and the rim's share of it.
+    pub depth: f32,
+    pub rim: f32,
+    /// The grid's depth at the center right after pressing: the shader scales the print by
+    /// how much of that is left (sand softening, snow filling in, ground dug away).
+    pub center_depth: f32,
+}
+
 /// A remembered print.
 #[derive(Debug, Clone, Copy)]
 pub struct StampRecord {
@@ -101,6 +129,16 @@ pub struct DeformationMap {
     pub stamps: u64,
     /// Recent prints (newest last), re-applied when the grid moves over them.
     pub history: VecDeque<StampRecord>,
+    /// The two newest prints reaching each cell (slot + 1, 0 = none).
+    pub prints: Vec<[u16; 2]>,
+    /// Print shapes the cells point into (up to [`SLOTS`]).
+    pub slots: Vec<PrintSlot>,
+    /// Next slot to fill.
+    pub next_slot: usize,
+    /// Slots changed since the last upload (first, last exclusive).
+    pub slots_dirty: Option<(usize, usize)>,
+    /// Where wheels last pressed (whose, world x/z), to join their prints into ruts.
+    rolling: Vec<(Option<Entity>, DVec2)>,
 }
 
 impl DeformationMap {
@@ -119,6 +157,11 @@ impl DeformationMap {
             generation: 1,
             stamps: 0,
             history: VecDeque::new(),
+            prints: vec![[0; 2]; n],
+            slots: Vec::new(),
+            next_slot: 0,
+            slots_dirty: None,
+            rolling: Vec::new(),
         }
     }
 
@@ -225,11 +268,15 @@ impl DeformationMap {
             for r in &mut self.history {
                 r.contact.follow(s);
             }
+            for p in &mut self.slots {
+                p.center += DVec2::new(s.translation.x, s.translation.z);
+            }
         } else {
             self.depth.iter_mut().for_each(|d| *d = 0.0);
             self.flatten.iter_mut().for_each(|f| *f = 0.0);
             self.kind.iter_mut().for_each(|k| *k = CellKind::None);
             self.active.iter_mut().for_each(|a| *a = false);
+            self.prints.iter_mut().for_each(|p| *p = [0; 2]);
             self.history.clear();
         }
         self.dirty = Some((0, 0, self.size, self.size));
@@ -254,6 +301,7 @@ impl DeformationMap {
                         self.depth[i] = 0.0;
                         self.flatten[i] = 0.0;
                         self.kind[i] = CellKind::None;
+                        self.prints[i] = [0; 2];
                     }
                 }
             }
@@ -278,6 +326,7 @@ impl DeformationMap {
         let mut depth = vec![0.0; self.depth.len()];
         let mut flatten = vec![0.0; self.flatten.len()];
         let mut kind = vec![CellKind::None; self.kind.len()];
+        let mut prints = vec![[0; 2]; self.prints.len()];
         for y in 0..n {
             let sy = y + shift_y;
             if sy < 0 || sy >= n {
@@ -292,11 +341,13 @@ impl DeformationMap {
                 depth[di] = self.depth[si];
                 flatten[di] = self.flatten[si];
                 kind[di] = self.kind[si];
+                prints[di] = self.prints[si];
             }
         }
         self.depth = depth;
         self.flatten = flatten;
         self.kind = kind;
+        self.prints = prints;
         self.origin += DVec2::new(shift_x as f64, shift_y as f64) * self.cell as f64;
         self.active.iter_mut().for_each(|a| *a = true);
         self.dirty = Some((0, 0, self.size, self.size));
@@ -308,7 +359,11 @@ impl DeformationMap {
     /// it, `flatten` 0..1 grass bending, `shape` the print's outline.
     pub fn stamp(&mut self, c: &GroundContact, kind: CellKind, depth: f32, rim: f32, flatten: f32) {
         let (w, l) = contact_size(c);
-        let reach = (w.max(l) * 0.5 * if flatten > 0.0 { 1.8 } else { 1.4 }) as f64 + 0.1;
+        // A rolling wheel touches the ground all the way from its last print: stretch this one
+        // back to it, so the rut is unbroken however far it rolled between frames.
+        let (rolled, l) = self.roll_back(c, w, l);
+        let c = &rolled;
+        let reach = (w.max(l) * 0.5 * if flatten > 0.0 { 1.8 } else { RIM_END + 0.1 }) as f64 + 0.1;
         let lo = (DVec2::new(c.position.x, c.position.z) - reach - self.origin) / self.cell as f64;
         let hi = (DVec2::new(c.position.x, c.position.z) + reach - self.origin) / self.cell as f64;
         let x0 = lo.x.floor().max(0.0) as u32;
@@ -321,14 +376,49 @@ impl DeformationMap {
         // Print frame: `fwd` along the long axis (yaw 0 = −Z, like `Transform::forward`).
         let fwd = Vec2::new(-c.yaw.sin(), -c.yaw.cos());
         let side = Vec2::new(fwd.y, -fwd.x);
+        // Pressed prints get a slot the shader draws sharp; cells within a cell of its rim
+        // point at it. (Bent grass is drawn by the grass itself.)
+        let slot = (depth > 0.0 && kind != CellKind::Grass).then(|| {
+            let s = self.next_slot;
+            self.next_slot = (s + 1) % SLOTS;
+            let p = PrintSlot {
+                center: DVec2::new(c.position.x, c.position.z),
+                forward: fwd,
+                half: Vec2::new(w, l) * 0.5,
+                contact: c.kind,
+                kind,
+                depth,
+                rim,
+                center_depth: 0.0,
+            };
+            if s < self.slots.len() {
+                self.slots[s] = p;
+            } else {
+                self.slots.push(p);
+            }
+            s
+        });
+        // How far (in the shape's units) a cell's center can be from the farthest point of
+        // the cell.
+        let margin = self.cell * 0.71 * 2.5 / (w.min(l) * 0.5);
         for y in y0..y1 {
             for x in x0..x1 {
                 let world = self.origin + (DVec2::new(x as f64, y as f64) + 0.5) * self.cell as f64;
                 let rel = (world - DVec2::new(c.position.x, c.position.z)).as_vec2();
                 let u = rel.dot(side) / (w * 0.5);
                 let v = rel.dot(fwd) / (l * 0.5);
-                let (inside, edge) = print_shape(c.kind, u, v);
+                let d = shape_distance(c.kind, u, v);
+                let (inside, edge) = shape_weights(d);
                 let i = self.index(x, y);
+                if let Some(s) = slot
+                    && d - margin < RIM_END
+                {
+                    let id = s as u16 + 1;
+                    let p = &mut self.prints[i];
+                    if p[0] != id {
+                        *p = [id, p[0]];
+                    }
+                }
                 if depth > 0.0 {
                     if inside > 0.0 {
                         let tread = tread(c.kind, u, v, l);
@@ -355,6 +445,55 @@ impl DeformationMap {
         }
         self.mark(x0, y0, x1, y1);
         self.stamps += 1;
+        if let Some(s) = slot {
+            self.slots[s].center_depth = self.sample(c.position).0;
+            self.slots_dirty = Some(match self.slots_dirty {
+                None => (s, s + 1),
+                Some((a, b)) => (a.min(s), b.max(s + 1)),
+            });
+        }
+    }
+
+    /// For a wheel or track: this contact stretched back along its way to the same wheel's
+    /// last print (the nearest one of the same entity behind it, in line with it, within
+    /// [`ROLL_GAP_M`]), and its new length. Anything else stays as it is.
+    fn roll_back(&mut self, c: &GroundContact, w: f32, l: f32) -> (GroundContact, f32) {
+        if !matches!(c.kind, ContactKind::Wheel | ContactKind::Track) {
+            return (*c, l);
+        }
+        let at = DVec2::new(c.position.x, c.position.z);
+        let fwd = DVec2::new(-(c.yaw as f64).sin(), -(c.yaw as f64).cos());
+        let mut best: Option<(usize, f64)> = None;
+        for (i, r) in self.rolling.iter().enumerate() {
+            if r.0 != c.entity {
+                continue;
+            }
+            let back = at - r.1;
+            let along = back.dot(fwd);
+            let across = (back - fwd * along).length();
+            if along > 0.0
+                && along <= ROLL_GAP_M
+                && across < w as f64 * 0.5
+                && best.is_none_or(|b| along < b.1)
+            {
+                best = Some((i, along));
+            }
+        }
+        let out = match best {
+            Some((i, along)) => {
+                self.rolling.swap_remove(i);
+                let mut s = *c;
+                s.position.x -= fwd.x * along * 0.5;
+                s.position.z -= fwd.y * along * 0.5;
+                (s, l + along as f32)
+            }
+            None => (*c, l),
+        };
+        if self.rolling.len() >= ROLLING {
+            self.rolling.remove(0);
+        }
+        self.rolling.push((c.entity, at));
+        out
     }
 
     /// Let prints recover over `dt` seconds. `snowfall_m_s`: new snow depth per second;
@@ -440,15 +579,19 @@ fn ellipse(u: f32, v: f32, cu: f32, cv: f32, ru: f32, rv: f32) -> f32 {
     d.sqrt()
 }
 
-/// (inside 0..1 with soft walls, rim weight 0..1 just outside) in print coordinates where
-/// the print spans u, v ∈ [−1, 1] (v forward).
-fn print_shape(kind: ContactKind, u: f32, v: f32) -> (f32, f32) {
-    let d = match kind {
+/// Where the rim ends, in [`shape_distance`] units.
+const RIM_END: f32 = 1.7;
+
+/// Distance-like measure from a print's middle in print coordinates where the print spans
+/// u, v ∈ [−1, 1] (v forward): below 1 inside, 1 at its wall. Matches `print_distance` in
+/// terrain.wgsl.
+fn shape_distance(kind: ContactKind, u: f32, v: f32) -> f32 {
+    match kind {
         ContactKind::Foot => {
-            // Heel and forefoot pads joined by a narrower arch.
-            let heel = ellipse(u, v, 0.0, -0.62, 0.78, 0.4);
-            let fore = ellipse(u, v, 0.08, 0.32, 0.95, 0.68);
-            let arch = ellipse(u, v, 0.18, -0.15, 0.55, 0.45);
+            // A sole: the forefoot widest, the heel a little narrower, joined by a waist.
+            let heel = ellipse(u, v, 0.0, -0.6, 0.82, 0.42);
+            let fore = ellipse(u, v, 0.05, 0.35, 1.0, 0.64);
+            let arch = ellipse(u, v, 0.08, -0.12, 0.74, 0.52);
             heel.min(fore).min(arch)
         }
         ContactKind::Paw => {
@@ -474,10 +617,14 @@ fn print_shape(kind: ContactKind, u: f32, v: f32) -> (f32, f32) {
             (u.abs().powi(6) + v.abs().powi(6)).powf(1.0 / 6.0)
         }
         ContactKind::Body => ellipse(u, v, 0.0, 0.0, 1.0, 1.0),
-    };
+    }
+}
+
+/// (inside 0..1 with soft walls, rim weight 0..1 just outside) at a [`shape_distance`].
+fn shape_weights(d: f32) -> (f32, f32) {
     let inside = 1.0 - smooth(0.82, 1.0, d);
     let edge = if d >= 1.0 {
-        1.0 - smooth(1.0, 1.45, d)
+        1.0 - smooth(1.0, RIM_END, d)
     } else {
         0.0
     };
@@ -659,6 +806,68 @@ mod tests {
         assert!(peak(&map, 3.0, 0.0) > 0.01, "prints outside stay");
         assert!(map.dirty.is_some());
         assert_eq!(map.history.len(), 1);
+    }
+
+    /// Slots (+1) pointed at by the cell under a world point.
+    fn ids_at(map: &DeformationMap, x: f64, z: f64) -> [u16; 2] {
+        let g = (DVec2::new(x, z) - map.origin) / map.cell as f64;
+        map.prints[map.index(g.x as u32, g.y as u32)]
+    }
+
+    #[test]
+    fn cells_point_at_the_prints_that_reach_them() {
+        let mut map = DeformationMap::new(0.04, 256);
+        let s = DeformationSettings::default();
+        let (k, d, rim, f) = response(Deform::Plastic { depth_m: 0.01 }, 80.0, 0.0, 0.0, &s);
+        map.stamp(&contact(0.0, 0.0, ContactKind::Foot), k, d, rim, f);
+        map.stamp(&contact(0.2, 0.0, ContactKind::Foot), k, d, rim, f);
+        assert_eq!(ids_at(&map, 0.0, 0.05), [1, 0]);
+        assert_eq!(ids_at(&map, 0.2, 0.05), [2, 0]);
+        assert_eq!(ids_at(&map, 1.0, 0.0), [0, 0], "far from both");
+        // Between the feet both rims reach: the newest comes first.
+        assert_eq!(ids_at(&map, 0.1, 0.0), [2, 1]);
+        let p = map.slots[0];
+        assert!(p.center_depth > 0.005 && p.depth == d && p.half.y > 0.1);
+        assert_eq!(map.slots_dirty, Some((0, 2)));
+        // Grass is drawn by the grass: no slot.
+        map.stamp(
+            &contact(3.0, 0.0, ContactKind::Foot),
+            CellKind::Grass,
+            0.004,
+            0.0,
+            1.0,
+        );
+        assert_eq!(ids_at(&map, 3.0, 0.05), [0, 0]);
+        // Moving the grid carries the pointers along; digging clears them.
+        let before = ids_at(&map, 0.0, 0.05);
+        map.follow(DVec3::new(4.0, 0.0, 0.0), 0.0, 20.0, 240.0);
+        assert_eq!(ids_at(&map, 0.0, 0.05), before);
+        map.erase(DVec3::ZERO, 0.3);
+        assert_eq!(ids_at(&map, 0.0, 0.05), [0, 0]);
+    }
+
+    #[test]
+    fn a_rolling_wheel_leaves_an_unbroken_rut() {
+        let mut map = DeformationMap::new(0.04, 256);
+        // A wheel rolling toward −Z (yaw 0), pressing every 0.8 m: longer than its 0.3 m print.
+        for i in 0..5 {
+            let mut c = contact(0.0, 2.0 - i as f64 * 0.8, ContactKind::Wheel);
+            c.size = [0.2, 0.3];
+            map.stamp(&c, CellKind::Plastic, 0.05, 0.3, 0.0);
+        }
+        // Between the presses the rut is as deep as under them.
+        for z in [1.6, 0.8, 0.0, -0.8] {
+            assert!(
+                peak(&map, 0.0, z) > 0.04,
+                "gap at z {z}: {}",
+                peak(&map, 0.0, z)
+            );
+        }
+        // A wheel beside it is another wheel: no rut across.
+        let mut c = contact(1.0, -2.0, ContactKind::Wheel);
+        c.size = [0.2, 0.3];
+        map.stamp(&c, CellKind::Plastic, 0.05, 0.3, 0.0);
+        assert!(peak(&map, 1.0, -1.0) < 0.01);
     }
 
     #[test]

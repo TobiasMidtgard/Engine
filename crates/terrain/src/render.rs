@@ -19,7 +19,7 @@ use engine_world::{Grid2, SurfaceCell, SurfaceLayers};
 
 use crate::chunk::{ChunkSource, TerrainVertex, VERTS_PER_CHUNK, build_chunk, chunk_indices};
 use crate::cube::NodeKey;
-use crate::deform::DeformationMap;
+use crate::deform::{DeformationMap, SLOTS};
 use crate::lights::{CityLights, NO_PAGE, NightPages};
 use crate::lod::{Lod, SelectInput};
 use crate::materials::{self, BakedMaterials, MATERIAL_COUNT};
@@ -167,6 +167,31 @@ struct MapsGpu {
     wear_far: [f32; 4],
 }
 
+/// A print the shader draws sharp. Matches `Print` in terrain.wgsl.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable, Default)]
+struct PrintGpu {
+    /// Center relative to the deformation grid's corner (x/z), forward (x/z).
+    at: [f32; 4],
+    /// Half width, half length, depth (m), rim share.
+    size: [f32; 4],
+    /// Grid depth at the center when pressed, contact kind, cell kind, unused.
+    info: [f32; 4],
+}
+
+/// A contact kind as `print_distance` in terrain.wgsl numbers it.
+fn contact_code(k: engine_world::ContactKind) -> f32 {
+    use engine_world::ContactKind as C;
+    match k {
+        C::Foot => 0.0,
+        C::Paw => 1.0,
+        C::Hoof => 2.0,
+        C::Wheel => 3.0,
+        C::Track => 4.0,
+        C::Body => 5.0,
+    }
+}
+
 struct Gpu {
     pipeline: wgpu::RenderPipeline,
     /// Depth, normals and motion for ambient occlusion, contact shadows and anti-aliasing.
@@ -180,6 +205,10 @@ struct Gpu {
     maps: wgpu::Buffer,
     sampler: wgpu::Sampler,
     deform_tex: Option<(wgpu::Texture, wgpu::TextureView, u32)>,
+    /// The two newest prints reaching each deformation cell (Rg16Uint, slot + 1).
+    print_ids: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// Print shapes ([`SLOTS`] of them).
+    prints: wgpu::Buffer,
     surface_tex: Option<(wgpu::Texture, wgpu::TextureView, u32, u32)>,
     /// Worn paths around the camera (R8, cells per side).
     wear_tex: Option<(wgpu::Texture, wgpu::TextureView, u32)>,
@@ -480,9 +509,12 @@ impl TerrainFeature {
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
-        let (Some(deform), Some(surface), Some(wear)) =
-            (&gpu.deform_tex, &gpu.surface_tex, &gpu.wear_tex)
-        else {
+        let (Some(deform), Some(ids), Some(surface), Some(wear)) = (
+            &gpu.deform_tex,
+            &gpu.print_ids,
+            &gpu.surface_tex,
+            &gpu.wear_tex,
+        ) else {
             return;
         };
         gpu.group = Some(
@@ -535,6 +567,14 @@ impl TerrainFeature {
                         wgpu::BindGroupEntry {
                             binding: 10,
                             resource: wgpu::BindingResource::TextureView(&gpu.night.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 11,
+                            resource: wgpu::BindingResource::TextureView(&ids.1),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 12,
+                            resource: gpu.prints.as_entire_binding(),
                         },
                     ],
                 }),
@@ -808,11 +848,59 @@ impl TerrainFeature {
                 });
                 let view = tex.create_view(&Default::default());
                 gpu.deform_tex = Some((tex, view, size));
+                let ids = gpu_shared.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("terrain print ids"),
+                    size: wgpu::Extent3d {
+                        width: size,
+                        height: size,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rg16Uint,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let view = ids.create_view(&Default::default());
+                gpu.print_ids = Some((ids, view));
                 recreate = true;
                 def.dirty = Some((0, 0, size, size));
             }
-            if fresh || def.generation != self.deform_generation {
+            // Print shapes are kept relative to the grid's corner: all of them again when it
+            // moved, else the new ones.
+            let slots = if fresh || def.generation != self.deform_generation {
                 self.deform_generation = def.generation;
+                def.slots_dirty = None;
+                Some((0, def.slots.len()))
+            } else {
+                def.slots_dirty.take()
+            };
+            if let Some((a, b)) = slots.filter(|(a, b)| a < b) {
+                let o = def.origin;
+                let data: Vec<PrintGpu> = def.slots[a..b]
+                    .iter()
+                    .map(|p| PrintGpu {
+                        at: [
+                            (p.center.x - o.x) as f32,
+                            (p.center.y - o.y) as f32,
+                            p.forward.x,
+                            p.forward.y,
+                        ],
+                        size: [p.half.x, p.half.y, p.depth, p.rim],
+                        info: [
+                            p.center_depth,
+                            contact_code(p.contact),
+                            p.kind as u8 as f32,
+                            0.0,
+                        ],
+                    })
+                    .collect();
+                gpu_shared.queue.write_buffer(
+                    &gpu.prints,
+                    (a * std::mem::size_of::<PrintGpu>()) as u64,
+                    bytemuck::cast_slice(&data),
+                );
             }
             if let Some((x0, y0, x1, y1)) = def.dirty.take() {
                 let (w, h) = (x1 - x0, y1 - y0);
@@ -824,6 +912,33 @@ impl TerrainFeature {
                         data.push(f16_bits(def.flatten[i]));
                     }
                 }
+                let ids: Vec<[u16; 2]> = (y0..y1)
+                    .flat_map(|y| {
+                        let row = (y * size) as usize;
+                        def.prints[row + x0 as usize..row + x1 as usize]
+                            .iter()
+                            .copied()
+                    })
+                    .collect();
+                gpu_shared.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &gpu.print_ids.as_ref().expect("texture").0,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x: x0, y: y0, z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytemuck::cast_slice(&ids),
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(w * 4),
+                        rows_per_image: Some(h),
+                    },
+                    wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                );
                 let tex = &gpu.deform_tex.as_ref().expect("texture").0;
                 gpu_shared.queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
@@ -955,6 +1070,24 @@ impl TerrainFeature {
                     }),
                     ..Default::default()
                 });
+                if slot == 0 {
+                    let ids = gpu_shared.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("print ids"),
+                        size: wgpu::Extent3d {
+                            width: 1,
+                            height: 1,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rg16Uint,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    });
+                    let view = ids.create_view(&Default::default());
+                    gpu.print_ids = Some((ids, view));
+                }
                 match slot {
                     0 => gpu.deform_tex = Some((tex, v, 0)),
                     1 => gpu.surface_tex = Some((tex, v, 0, 0)),
@@ -1083,6 +1216,26 @@ impl RenderFeature for TerrainFeature {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2Array,
                         multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
@@ -1242,6 +1395,13 @@ impl RenderFeature for TerrainFeature {
             maps,
             sampler,
             deform_tex: None,
+            print_ids: None,
+            prints: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("terrain prints"),
+                size: (SLOTS * std::mem::size_of::<PrintGpu>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
             surface_tex: None,
             wear_tex: None,
             mat_albedo,
@@ -1982,6 +2142,11 @@ mod tests {
                 assert_eq!(
                     size("Maps"),
                     Some(std::mem::size_of::<MapsGpu>()),
+                    "{label}"
+                );
+                assert_eq!(
+                    size("Print"),
+                    Some(std::mem::size_of::<PrintGpu>()),
                     "{label}"
                 );
             }
