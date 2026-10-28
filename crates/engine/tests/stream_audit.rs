@@ -19,6 +19,14 @@ fn spawn_walkers(mut demo: ResMut<LeakyDemo>, mut commands: Commands) {
     }
 }
 
+/// Something else streaming meanwhile (foliage around a moving camera): a leaf a frame.
+#[derive(Component)]
+struct Leaf;
+
+fn fall_leaves(mut commands: Commands) {
+    commands.spawn((Name::new("leaf"), Leaf));
+}
+
 #[test]
 fn the_audit_finds_what_an_unload_leaves() {
     let mut app = App::new();
@@ -31,7 +39,7 @@ fn the_audit_finds_what_an_unload_leaves() {
         },
     ))
     .init_resource::<LeakyDemo>()
-    .add_systems(Update, spawn_walkers);
+    .add_systems(Update, (spawn_walkers, fall_leaves));
     app.stream_cell(StreamCell::new("tidy", DVec3::ZERO, 10.0, |world| {
         world
             .spawn((Name::new("hut"), Transform::default()))
@@ -58,6 +66,7 @@ fn the_audit_finds_what_an_unload_leaves() {
     let report = app.world.resource::<StreamAuditReport>().clone();
     assert!(report.done, "{report:?}");
     let cell = |key: &str| report.cells.iter().find(|c| c.key == key).unwrap();
+    // The leaves change with every cell out too, so they are nobody's leak.
     assert!(cell("tidy").clean(), "{:?}", cell("tidy"));
     assert_eq!(cell("tidy").loaded, 2);
     let leaky = cell("leaky");

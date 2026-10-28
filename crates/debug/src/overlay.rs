@@ -142,12 +142,8 @@ impl PanelData {
                 .get_resource::<StreamedCells>()
                 .filter(|c| !c.cells.is_empty())
                 .map(|c| {
-                    let count = |s| c.cells.iter().filter(|c| c.state == s).count();
-                    (
-                        count(CellState::Loaded),
-                        count(CellState::Queued),
-                        c.cells.len(),
-                    )
+                    let loaded = c.cells.iter().filter(|c| c.state == CellState::Loaded);
+                    (loaded.count(), c.waking().count(), c.cells.len())
                 }),
             ..Default::default()
         };

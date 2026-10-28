@@ -47,14 +47,27 @@ pub struct CellId(pub u32);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellMember(pub CellId);
 
-/// Where a cell is in its life.
+/// Where a cell is in its life: `Unloaded`, then (wanted) `Building` off the main thread when it
+/// has a build step, `Queued` for its turn in the frame budget, `Loading` while it spawns over
+/// several frames, and `Loaded`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum CellState {
     #[default]
     Unloaded,
+    /// Wanted; its world-free build step runs on a worker thread.
+    Building,
     /// Wanted; waits for its turn in the load budget.
     Queued,
+    /// Spawning, a step a frame (or more, within the budget).
+    Loading,
     Loaded,
+}
+
+impl CellState {
+    /// Wanted but not in yet: building, queued or loading. Loading screens wait for these.
+    pub fn is_waking(self) -> bool {
+        matches!(self, Self::Building | Self::Queued | Self::Loading)
+    }
 }
 
 /// One cell: a sphere of the world that loads and unloads as a whole.
@@ -70,8 +83,15 @@ pub struct CellInfo {
     /// Never unloads once loaded (content that can't be taken down yet).
     pub keep_loaded: bool,
     pub state: CellState,
-    /// Seconds spent spawning it the last time it loaded.
+    /// Seconds spent spawning it the last time it loaded (main thread; its build step is
+    /// `build_secs`).
     pub load_secs: f32,
+    /// Seconds its build step took on a worker the last time it loaded.
+    pub build_secs: f32,
+    /// Entities it spawned the last time it loaded (roots and their descendants).
+    pub entities: u32,
+    /// How much the process RAM grew while it loaded, MB (other threads' allocations blur it).
+    pub ram_mb: Option<f32>,
 }
 
 impl CellInfo {
@@ -100,6 +120,11 @@ impl StreamedCells {
             .iter()
             .filter(|c| c.distance(p) <= radius)
             .all(|c| c.state == CellState::Loaded)
+    }
+
+    /// The cells wanted but not in yet ([`CellState::is_waking`]).
+    pub fn waking(&self) -> impl Iterator<Item = &CellInfo> {
+        self.cells.iter().filter(|c| c.state.is_waking())
     }
 
     pub fn find(&self, key: &str) -> Option<CellId> {
@@ -150,6 +175,9 @@ mod tests {
             keep_loaded: false,
             state,
             load_secs: 0.0,
+            build_secs: 0.0,
+            entities: 0,
+            ram_mb: None,
         };
         let mut cells = StreamedCells {
             cells: vec![
@@ -161,6 +189,8 @@ mod tests {
         };
         assert!(cells.is_ready_around(DVec3::ZERO, 100.0));
         assert!(!cells.is_ready_around(DVec3::new(450.0, 0.0, 0.0), 100.0));
+        cells.cells[1].state = CellState::Building;
+        assert_eq!(cells.waking().count(), 1);
         cells.cells[1].state = CellState::Loaded;
         assert!(cells.is_ready_around(DVec3::new(450.0, 0.0, 0.0), 100.0));
         assert_eq!(cells.find("far"), Some(CellId(1)));

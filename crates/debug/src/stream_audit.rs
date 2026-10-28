@@ -9,11 +9,19 @@
 //! loading added (by module, as the shift audit groups it), what stayed after the unload, and
 //! how the reload differs from the first load, with the process RAM at each step.
 //!
+//! Other streamers keep working meanwhile (foliage cells around the camera, other cells), so
+//! the counts take only entities within the cell's reach (its radius plus [`MARGIN`]; entities
+//! without a place count everywhere), and the baseline is taken twice: kinds whose count changes
+//! between the two with the cell out change on their own, and are listed apart, not blamed on
+//! the cell.
+//!
 //! `ENGINE_STREAM_AUDIT=<settle frames>` audits every cell; `<settle>:<key>,<key>` only those.
 
 use std::collections::{BTreeMap, HashMap};
 
 use engine_core::diagnostics::{Diagnostics, PROCESS_RAM_MB};
+use engine_core::ecs::resource::IsResource;
+use engine_core::math::DVec3;
 use engine_core::prelude::*;
 use engine_world::{CellState, StreamedCells};
 
@@ -22,10 +30,15 @@ use crate::shift_audit::kind;
 /// Kinds listed per line at most.
 const ROWS: usize = 12;
 
+/// Meters past a cell's radius that still count as its own.
+pub const MARGIN: f64 = 50.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
     /// Pinned out: the baseline without the cell.
     Out,
+    /// Still out, a settle later: what changes on its own.
+    Still,
     /// Pinned in: the first load.
     In,
     /// Pinned out again: what the unload left.
@@ -115,8 +128,14 @@ impl AuditedCell {
     }
 }
 
-fn census(world: &mut World) -> Census {
-    let entities: Vec<Entity> = world.query::<Entity>().iter(world).collect();
+/// Entities by kind within `reach` of `center` (or with no place), and the process RAM.
+fn census(world: &mut World, center: DVec3, reach: f64) -> Census {
+    let entities: Vec<Entity> = world
+        .query_filtered::<(Entity, Option<&GlobalTransform>), Without<IsResource>>()
+        .iter(world)
+        .filter(|(_, g)| g.is_none_or(|g| g.translation().distance(center) <= reach))
+        .map(|(e, _)| e)
+        .collect();
     let mut kinds: HashMap<String, usize> = HashMap::new();
     for e in entities {
         *kinds.entry(kind(world, e)).or_default() += 1;
@@ -193,10 +212,11 @@ fn run(world: &mut World, audit: &mut StreamAudit) {
     let Some(key) = audit.queue.last().cloned() else {
         return;
     };
-    let state = cells
-        .find(&key)
-        .and_then(|id| cells.get(id))
-        .map(|c| c.state);
+    let cell = cells.find(&key).and_then(|id| cells.get(id));
+    let state = cell.map(|c| c.state);
+    let (center, reach) = cell.map_or((DVec3::ZERO, f64::INFINITY), |c| {
+        (c.center, c.radius + MARGIN)
+    });
     let want_in = matches!(audit.step, Step::In | Step::InAgain);
     world
         .resource_mut::<StreamedCells>()
@@ -217,9 +237,10 @@ fn run(world: &mut World, audit: &mut StreamAudit) {
         return;
     }
     audit.waited = 0;
-    audit.census.push(census(world));
+    audit.census.push(census(world, center, reach));
     audit.step = match audit.step {
-        Step::Out => Step::In,
+        Step::Out => Step::Still,
+        Step::Still => Step::In,
         Step::In => Step::OutAgain,
         Step::OutAgain => Step::InAgain,
         Step::InAgain => {
@@ -241,12 +262,26 @@ fn run(world: &mut World, audit: &mut StreamAudit) {
 }
 
 fn report(key: &str, census: &[Census]) -> Option<AuditedCell> {
-    let [(base, r0), (loaded, r1), (after, r2), (reloaded, r3)] = census else {
+    let [
+        (base, r0),
+        (still, _),
+        (loaded, r1),
+        (after, r2),
+        (reloaded, r3),
+    ] = census
+    else {
         return None;
     };
-    let load = diff(base, loaded);
-    let left = diff(base, after);
-    let again = diff(loaded, reloaded);
+    // Kinds that changed with the cell out change on their own: not the cell's.
+    let churn: Vec<(String, i64)> = diff(base, still);
+    let own = |d: Vec<(String, i64)>| -> Vec<(String, i64)> {
+        d.into_iter()
+            .filter(|(k, _)| !churn.iter().any(|(c, _)| c == k))
+            .collect()
+    };
+    let load = own(diff(base, loaded));
+    let left = own(diff(base, after));
+    let again = own(diff(loaded, reloaded));
     let verdict = if left.is_empty() && again.is_empty() {
         "clean"
     } else {
@@ -254,13 +289,19 @@ fn report(key: &str, census: &[Census]) -> Option<AuditedCell> {
     };
     engine_core::log::info!(
         "stream audit: {key}: {verdict}\n  load {} ({})\n  left after unload {} ({})\n  \
-         reload vs first load {} ({})",
+         reload vs first load {} ({}){}",
         rows(&load),
         ram(*r0, *r1),
         rows(&left),
         ram(*r0, *r2),
         rows(&again),
         ram(*r1, *r3),
+        if churn.is_empty() {
+            String::new()
+        } else {
+            let kinds: Vec<&str> = churn.iter().map(|(k, _)| k.as_str()).collect();
+            format!("\n  left out (change on their own): {}", kinds.join(", "))
+        },
     );
     Some(AuditedCell {
         key: key.to_string(),
