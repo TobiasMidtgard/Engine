@@ -630,6 +630,15 @@ pub trait RenderFeature: Send + Sync + 'static {
     /// Draw onto the tonemapped LDR image.
     fn overlay(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {}
 
+    /// Whether `overlay` also draws in extra views (`ExtraView` cameras, such as an editor's
+    /// split scene views), with that view's context (its LDR image, viewport, scene depth copy
+    /// and unjittered frame group). Off by default: most overlays are the game's window-wide
+    /// UI, drawn once over the main view. Overlays that belong to the scene, such as debug
+    /// lines and selection outlines, turn it on.
+    fn overlay_in_extra_views(&self) -> bool {
+        false
+    }
+
     fn stats(&self) -> FeatureStats {
         FeatureStats::default()
     }

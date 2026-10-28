@@ -187,7 +187,9 @@ too, besides the main view (the active camera with the highest order that has no
 either into its `Viewport` of the window (`ViewTarget::Window`: split screen,
 picture-in-picture, composited over the scene and under the overlays) or into an image made
 with `Image::render_target` (`ViewTarget::Image`), which materials and UI show from that frame
-on. Its `quality` is an optional `Scalability` for that view. Each view keeps its own
+on. Its `quality` is an optional `Scalability` for that view. Overlays are the window's UI and
+draw over the main view only, except those whose `overlay_in_extra_views()` says they belong to
+the scene (debug lines, selection outlines), which draw in every view. Each view keeps its own
 `ViewState`: targets, history, shadows, environment, fog, exposure and the previous view.
 Extra views render before the main view, each one extracted, recorded and submitted on the
 main thread, so a feature's `prepare` runs once per view per frame. While one renders,
