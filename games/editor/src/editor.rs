@@ -52,6 +52,7 @@ pub enum Tab {
     Content,
     Console,
     History,
+    Partition,
 }
 
 /// A message in the console.
@@ -222,6 +223,8 @@ pub struct Editor {
     pub import_path: String,
     /// The Content Browser.
     pub browser: crate::browser::Browser,
+    /// The World Partition panel and streaming in Play.
+    pub partition: crate::partition::Partition,
     /// Scene views: the layout, each view's state (see [`Pane`]), the one being drawn, the
     /// active one, and the one maximized (when it fills the tab alone).
     pub layout: Layout,
@@ -293,6 +296,7 @@ impl Editor {
             model_watch: Default::default(),
             import_path: String::new(),
             browser: Default::default(),
+            partition: Default::default(),
             layout: Layout::One,
             panes: vec![Pane::new(camera)],
             pane: 0,
@@ -1107,6 +1111,9 @@ pub fn play(world: &mut World, editor: &mut Editor) {
         resources: world_resources(world),
         was_dirty: editor.history.dirty,
     });
+    if editor.partition.stream_play {
+        crate::partition::start_streaming(world, editor);
+    }
     editor.mode = Mode::Play;
     world.resource_mut::<Time>().resume();
     editor.info(
@@ -1131,11 +1138,14 @@ pub fn stop(world: &mut World, editor: &mut Editor) {
         return;
     };
     world.resource_mut::<Time>().pause();
+    // A streamed level's cells go first, so none loads again.
+    crate::partition::stop_streaming(world, editor);
     // Everything spatial that appeared while playing (projectiles, debris, effects).
     let mut q = world.query_filtered::<Entity, (With<GlobalTransform>, Without<EditorOnly>)>();
     let spawned: Vec<Entity> = q
         .iter(world)
         .filter(|e| !snapshot.existing.contains(e))
+        .filter(|&e| !crate::partition::is_streamed(world, e))
         .collect();
     for e in spawned {
         if let Ok(e) = world.get_entity_mut(e) {

@@ -2298,6 +2298,73 @@ pub fn round24(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Round 25: the World Partition panel. A level 1.4 km wide (props every ~110 m and a keep big
+/// enough for a coarser cell) cut into 128 m cells, then Play streaming it around the view as
+/// the view travels east, and Stop putting the whole level back.
+pub fn round25(dir: impl Into<PathBuf>) -> ShotScript {
+    let steps = vec![
+        Step::Do(Box::new(|world, editor| {
+            editor.icons = false;
+            let shapes = editor::shape_presets();
+            let mut n = 0usize;
+            for i in 0..13 {
+                for j in 0..6 {
+                    // A little jitter, so props don't line up with the cells.
+                    let jx = ((i * 7 + j * 3) % 11) as f64 * 6.0 - 30.0;
+                    let jz = ((i * 5 + j * 9) % 13) as f64 * 5.0 - 30.0;
+                    let at = DVec3::new(
+                        -700.0 + i as f64 * 115.0 + jx,
+                        0.0,
+                        -330.0 + j as f64 * 120.0 + jz,
+                    );
+                    let (label, shape) = shapes[n % shapes.len()];
+                    let e = editor::create(world, editor, Create::Shape(label, shape), at);
+                    world.entity_mut(e).insert(Name::new(format!("Prop {n}")));
+                    n += 1;
+                }
+            }
+            let (label, shape) = shapes[0];
+            let keep = editor::create(
+                world,
+                editor,
+                Create::Shape(label, shape),
+                DVec3::new(420.0, 0.0, -260.0),
+            );
+            let mut t = *world.get::<Transform>(keep).unwrap();
+            t.scale = Vec3::new(60.0, 30.0, 60.0);
+            world.entity_mut(keep).insert((
+                Name::new("Keep"),
+                t,
+                engine::world::StreamPlacement {
+                    radius: 150.0,
+                    ..Default::default()
+                },
+            ));
+            editor.select(None);
+        })),
+        Step::Tab(Tab::Partition),
+        Step::Camera(DVec3::new(-560.0, 25.0, 60.0), DVec3::new(-480.0, 0.0, 0.0)),
+        Step::Wait(40),
+        Step::Shot("118_level_cut_into_cells"),
+        Step::Do(Box::new(|world, editor| {
+            editor.partition.stream_play = true;
+            editor::play(world, editor);
+        })),
+        Step::Wait(70),
+        Step::Shot("119_play_streams_around_the_view"),
+        Step::Camera(
+            DVec3::new(330.0, 25.0, -140.0),
+            DVec3::new(420.0, 0.0, -220.0),
+        ),
+        Step::Wait(90),
+        Step::Shot("120_view_moved_east_cells_follow"),
+        Step::Do(Box::new(editor::stop)),
+        Step::Wait(30),
+        Step::Shot("121_stop_puts_the_level_back"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {

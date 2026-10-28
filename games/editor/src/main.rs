@@ -33,6 +33,7 @@ mod materials;
 mod measure;
 mod models;
 mod outline;
+mod partition;
 mod picking;
 mod prefab;
 mod prefab_ui;
@@ -141,6 +142,7 @@ fn main() {
             Some("round22") => shots::round22(dir),
             Some("round23") => shots::round23(dir),
             Some("round24") => shots::round24(dir),
+            Some("round25") => shots::round25(dir),
             Some("play") => shots::play_in_editor(dir),
             _ => shots::gallery(dir),
         };

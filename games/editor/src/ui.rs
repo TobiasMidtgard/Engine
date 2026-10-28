@@ -39,7 +39,7 @@ pub fn layout(scene: f32) -> DockState<Tab> {
     let [_center, _bottom] = surface.split_below(
         center,
         scene,
-        vec![Tab::Content, Tab::Console, Tab::History],
+        vec![Tab::Content, Tab::Console, Tab::History, Tab::Partition],
     );
     dock
 }
@@ -125,6 +125,7 @@ impl TabViewer for Viewer<'_> {
             Tab::Content => "📦 Content",
             Tab::Console => "📋 Console",
             Tab::History => "↺ History",
+            Tab::Partition => "🗺 World Partition",
         }
         .into()
     }
@@ -147,6 +148,7 @@ impl TabViewer for Viewer<'_> {
             Tab::Content => crate::browser::content(ui, world, editor),
             Tab::Console => console(ui, editor),
             Tab::History => history(ui, world, editor),
+            Tab::Partition => crate::partition::panel(ui, world, editor),
         }
     }
 

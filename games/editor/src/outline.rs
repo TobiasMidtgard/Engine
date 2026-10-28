@@ -259,6 +259,11 @@ impl RenderFeature for OutlineFeature {
         900
     }
 
+    /// The selection outlines in every scene view, not just the main one.
+    fn overlay_in_extra_views(&self) -> bool {
+        true
+    }
+
     fn init(&mut self, gpu: &GpuShared) {
         let device = &gpu.device;
         let depth_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -414,10 +419,8 @@ impl RenderFeature for OutlineFeature {
         view: &ViewData,
         _settings: &RenderSettings,
     ) {
-        // Overlays draw in the main view only; extra views (camera previews) prepare first.
-        if view.extra_view {
-            return;
-        }
+        // Every view prepares and submits in turn (extra views first), so this view's draws and
+        // buffers are the ones its overlay uses.
         self.draws.clear();
         self.rect = None;
         self.triangles = 0;
