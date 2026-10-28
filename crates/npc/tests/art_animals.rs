@@ -1458,6 +1458,13 @@ fn motion_strips(only: Option<&[&str]>, size: (u32, u32)) {
         .set_source(TimeSource::Manual { step_secs: 0.0 });
     app.add_plugins((WorldPlugin, RenderPlugin, NpcPlugin));
     app.world.resource_mut::<WildlifeSettings>().enabled = false;
+    // The animals as meshes, never as far-off impostors: in a small strip they are under the
+    // impostor size, and impostors are baked one every few frames once the renderer's
+    // encoders are ready (built on a thread), so what a shot shows hung on that timing. On CI
+    // one frame's deer drew next to nothing (deer-hurt frame 1: 59 px, 730 here).
+    app.world
+        .resource_mut::<engine_render::RenderSettings>()
+        .impostor_pixels = 0.0;
     app.add_systems(FixedUpdate, (drive, fly_course).in_set(NpcSet::Decide));
     app.add_systems(FixedUpdate, record.in_set(NpcSet::Show));
     app.update_n(2);
