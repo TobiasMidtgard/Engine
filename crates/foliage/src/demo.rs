@@ -38,6 +38,8 @@ pub const CLEARING: [f32; 3] = [40.0, 28.0, 18.0];
 pub const BURN: [f32; 3] = [-34.0, 52.0, 17.0];
 /// Spring-fed pond (x, z, radius of open water).
 pub const POND: [f32; 3] = [-10.0, 10.0, 4.5];
+/// A garden bed by the trail in the clearing, growing in time-lapse (x, z, radius).
+pub const GARDEN: [f32; 3] = [48.0, 21.0, 1.9];
 /// Dry ridge (x, z, radius).
 pub const RIDGE: [f32; 3] = [-55.0, -40.0, 26.0];
 /// Height of the pond's water above the ground, meters (its shore sinks to meet it).
@@ -149,6 +151,16 @@ pub fn forest_viewpoints(center: DVec3) -> Vec<Viewpoint> {
         ),
         view(
             center,
+            (
+                "forest_garden",
+                "A garden bed in time-lapse: strawberries leaf, flower, fruit and send runners; a sapling climbs",
+            ),
+            [GARDEN[0] + 0.7, 0.95, GARDEN[1] + 1.75],
+            [GARDEN[0] - 0.1, 0.12, GARDEN[1] - 0.15],
+            10.0,
+        ),
+        view(
+            center,
             ("forest_spring", "Ferns and birches by the spring-fed pond"),
             [-1.0, 1.7, 15.5],
             [-11.0, 0.3, 9.0],
@@ -209,6 +221,57 @@ pub fn cave_viewpoints(center: DVec3) -> Vec<Viewpoint> {
     ]
 }
 
+/// The garden bed: tilled soil, six strawberries a season apart in their growth (each looping
+/// through 150 days in about 50 s, the middle front one three times as fast, from seed to ripe
+/// berries in a quarter of a minute) and a sapling growing three years in a minute behind them.
+pub fn spawn_garden(commands: &mut Commands, at: DVec3) {
+    use crate::growth::GrowingPlant;
+    let mut soil = StandardMaterial::hex(0x2a1c12)
+        .with_roughness(0.96)
+        .with_detail(0.9, 0.015);
+    soil.receives_wetness = true;
+    commands.spawn((
+        Name::new("garden bed"),
+        Transform::from_translation(at + DVec3::Y * 0.012),
+        MeshRenderer::new(
+            Shape::Cylinder {
+                radius: GARDEN[2] - 0.2,
+                height: 0.035,
+                segments: 48,
+            },
+            soil,
+        ),
+    ));
+    let spots = [
+        (-0.45, 0.35, 70.0, 3.0),
+        (0.0, 0.55, 0.0, 10.0),
+        (0.45, 0.35, 110.0, 3.0),
+        (-0.5, -0.2, 30.0, 3.0),
+        (0.05, -0.05, 90.0, 3.0),
+        (0.55, -0.25, 130.0, 3.0),
+    ];
+    for (i, (x, z, age, rate)) in spots.into_iter().enumerate() {
+        let mut plant = GrowingPlant::new("strawberry", 40 + i as u64)
+            .aged(age)
+            .growing(rate);
+        plant.repeat = true;
+        commands.spawn((
+            Name::new(format!("garden strawberry {i}")),
+            Transform::from_translation(at + DVec3::new(x, 0.03, z))
+                .with_rotation(Quat::from_rotation_y(i as f32 * 2.1)),
+            plant,
+        ));
+    }
+    let mut sapling = GrowingPlant::new("sapling", 77).aged(200.0).growing(18.0);
+    sapling.repeat = true;
+    sapling.detail = 0.6;
+    commands.spawn((
+        Name::new("garden sapling"),
+        Transform::from_translation(at + DVec3::new(-0.2, 0.03, -1.15)),
+        sapling,
+    ));
+}
+
 fn local(center: DVec3, x: f32, z: f32) -> DVec3 {
     center + DVec3::new(x as f64, 0.0, z as f64)
 }
@@ -240,7 +303,7 @@ pub fn forest_region() -> EcologyRegion {
         max_plants: [700, 600, 14000],
         step_years: 0.25,
         time_scale: 30.0,
-        keep_clear: [vec![POND], trail_clearance()].concat(),
+        keep_clear: [vec![POND, GARDEN], trail_clearance()].concat(),
         sight_lines: lens_clearance(),
         history: RegionHistory {
             grow_years: 110.0,
@@ -488,6 +551,7 @@ pub fn spawn_demo(commands: &mut Commands, center: DVec3) {
             .with_fade(2.5),
     ));
     spawn_rocks(commands, center, rocks);
+    spawn_garden(commands, local(center, GARDEN[0], GARDEN[1]));
     // Leaf litter, needles, moss, ash and packed earth under the trees.
     commands.spawn((
         Transform::from_translation(center),

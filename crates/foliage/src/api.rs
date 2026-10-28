@@ -422,6 +422,54 @@ pub fn register(app: &mut App) {
             let e = world.spawn((Transform::from_translation(at), source)).id();
             Ok(json!({"id": e.to_bits()}))
         },
+    )
+    .register_api(
+        "foliage.grow",
+        "Grow a plant from a growth graph at \"at\" (snapped to the ground): \"preset\" (see \
+         foliage.growth_presets: strawberry, sapling) or a whole \"graph\" (stems, leaves, \
+         flowers and fruit generators, as foliage.growth_presets prints them), \"age\" in \
+         days, \"days_per_second\" to watch it grow (a time-lapse), \"seed\". Returns its id; \
+         change its GrowingPlant to age it or swap its graph.",
+        r#"{"preset": "strawberry", "at": [0, 0, 2], "age": 20, "days_per_second": 2}"#,
+        |world, args| {
+            let at = vec3_arg(&args, "at")?.ok_or("Give \"at\": [x, y, z].")?;
+            let y = world
+                .get_resource::<Ground>()
+                .and_then(|g| g.height(at + DVec3::Y * 2.0))
+                .unwrap_or(at.y);
+            let graph = match args.get("graph") {
+                Some(g) => Some(
+                    serde_json::from_value::<crate::growth::PlantGraph>(g.clone())
+                        .map_err(|e| format!("Bad graph: {e}"))?,
+                ),
+                None => None,
+            };
+            let plant = crate::growth::GrowingPlant {
+                preset: args
+                    .get("preset")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("strawberry")
+                    .to_string(),
+                graph,
+                seed: args.get("seed").and_then(|s| s.as_u64()).unwrap_or(1),
+                age_days: f32_arg(&args, "age", 0.0).max(0.0),
+                days_per_second: f32_arg(&args, "days_per_second", 0.0),
+                repeat: args.get("repeat").and_then(|r| r.as_bool()).unwrap_or(false),
+                detail: f32_arg(&args, "detail", 1.0).clamp(0.2, 1.0),
+            };
+            plant.resolve()?;
+            let e = world
+                .spawn((Transform::from_xyz(at.x, y, at.z), plant))
+                .id();
+            Ok(json!({"id": e.to_bits()}))
+        },
+    )
+    .register_api(
+        "foliage.growth_presets",
+        "The growth graphs that come with the engine, in full (a start for your own: change \
+         sizes, timings, colors or generators and pass it to foliage.grow as \"graph\").",
+        "{}",
+        |_world, _args| Ok(json!(crate::growth::presets())),
     );
 }
 
