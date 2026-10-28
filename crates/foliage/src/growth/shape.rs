@@ -316,7 +316,15 @@ fn blade(
     if length < 1e-4 {
         return;
     }
-    let rows = ((14.0 * detail).round() as usize).max(4) + 2 * l.teeth.min(8) as usize;
+    // Rows along the blade: fewer on small blades, teeth cut in only at full detail (a far or
+    // busy plant has its teeth in the texture alone).
+    let small = (length / 0.12).clamp(0.3, 1.0);
+    let teeth = if detail >= 0.75 {
+        2 * l.teeth.min(8) as usize
+    } else {
+        0
+    };
+    let rows = ((14.0 * detail * small).round() as usize).max(3) + teeth;
     let cols = 2usize; // vertices each side of the midrib, plus the midrib
     let side = dir.cross(up).normalize_or(perpendicular(dir));
     let up = side.cross(dir).normalize();
@@ -393,7 +401,7 @@ fn leaf(
     let mid_dir = (dir + end_dir).normalize();
     let mut path = vec![base];
     let mut radius = vec![l.petiole_radius_m * o.scale * (0.4 + 0.6 * g)];
-    let segs = 5;
+    let segs = if detail >= 0.75 { 5 } else { 3 };
     for k in 1..=segs {
         let f = k as f32 / segs as f32;
         let d = if f < 0.5 {
@@ -406,9 +414,10 @@ fn leaf(
         radius.push(radius[0] * (1.0 - 0.35 * f));
     }
     let stalk = rgba(mix3([0.20, 0.28, 0.07], color, 0.3), 1.0);
+    let sides = if detail >= 0.75 { 4 } else { 3 };
     if petiole > 0.002 {
         out.stems
-            .tube(&path, &radius, 4, 1.0, &|_, _| stalk, None, None);
+            .tube(&path, &radius, sides, 1.0, &|_, _| stalk, None, None);
     }
     let tip = *path.last().unwrap();
     let up = (UP - end_dir * UP.dot(end_dir)).normalize_or(UP);
