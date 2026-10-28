@@ -1,12 +1,15 @@
 //! Extra views: a camera with an `ExtraView` renders too, besides the main camera, into its
 //! rectangle of the window (picture-in-picture) or into an image a material shows (a monitor).
 //! The inset looks as that camera does on its own, and the main view around it is the same as
-//! without the inset. Needs a GPU or lavapipe; passes with a note when neither is available.
+//! without the inset; overlays that belong to the scene draw in it too, the window's UI doesn't.
+//! Needs a GPU or lavapipe; passes with a note when neither is available.
 
 use engine_assets::Assets;
 use engine_core::prelude::*;
 use engine_render::prelude::*;
-use engine_render::{Pipelining, RenderDisabled, capture_now};
+use engine_render::{FrameContext, Pipelining, RenderDisabled, capture_now, wgpu};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const WINDOW: UVec2 = UVec2::new(400, 200);
 /// Where the inset goes.
@@ -258,5 +261,85 @@ fn a_camera_renders_into_an_image_a_material_shows() {
     assert!(
         distinct.len() > 50,
         "the screen shows a picture, not one color"
+    );
+}
+
+/// An overlay that counts the views it draws in; `scene`: it belongs to the scene, so it draws in
+/// extra views too, and paints its whole view green.
+struct Paint {
+    scene: bool,
+    calls: Arc<AtomicUsize>,
+}
+
+impl RenderFeature for Paint {
+    fn name(&self) -> &str {
+        if self.scene {
+            "scene paint"
+        } else {
+            "ui paint"
+        }
+    }
+
+    fn overlay(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        if !self.scene {
+            return;
+        }
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("paint"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: ctx.ldr,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::GREEN),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+    }
+
+    fn overlay_in_extra_views(&self) -> bool {
+        self.scene
+    }
+}
+
+#[test]
+fn scene_overlays_draw_in_extra_views_and_ui_ones_do_not() {
+    let mut app = app(WINDOW, Pipelining::Off);
+    scene(&mut app.world, Second::Inset);
+    let (scene_calls, ui_calls) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    app.add_render_feature(Paint {
+        scene: true,
+        calls: scene_calls.clone(),
+    });
+    app.add_render_feature(Paint {
+        scene: false,
+        calls: ui_calls.clone(),
+    });
+    app.update_n(3);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return;
+    }
+    let path = std::env::temp_dir().join("engine-extra-views-overlays.png");
+    capture_now(&mut app.world, &path).expect("screenshot");
+    let shot = image::open(&path).expect("read the shot").to_rgb8();
+    let middle = INSET.position + INSET.size / 2;
+    let inset = shot.get_pixel(middle.x, middle.y).0;
+    let main = shot.get_pixel(20, 150).0;
+    // The scene overlay painted both views; the UI one ran once a frame, in the main view only.
+    assert!(inset[1] > 200 && inset[0] < 50, "inset {inset:?}");
+    assert!(main[1] > 200 && main[0] < 50, "main view {main:?}");
+    let (scene_calls, ui_calls) = (
+        scene_calls.load(Ordering::Relaxed),
+        ui_calls.load(Ordering::Relaxed),
+    );
+    assert!(ui_calls > 0, "the UI overlay ran");
+    assert_eq!(
+        scene_calls,
+        2 * ui_calls,
+        "scene overlay calls, UI {ui_calls}"
     );
 }

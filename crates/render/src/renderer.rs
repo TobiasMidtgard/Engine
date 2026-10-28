@@ -2085,17 +2085,19 @@ impl Renderer {
             );
         }
 
-        // Overlays (UI), with unjittered matrices: the main view's only.
+        // Overlays (UI), with unjittered matrices: the main view's, and in extra views those
+        // that belong to the scene (`RenderFeature::overlay_in_extra_views`).
         let ctx = FrameContext {
             frame_group: &self.overlay_group,
             ..ctx
         };
-        if !extra {
-            for f in &mut self.features {
-                self.perf
-                    .pass(&mut cpu, &mut encoder, format!("overlay {}", f.name()));
-                f.overlay(&mut encoder, &ctx);
+        for f in &mut self.features {
+            if extra && !f.overlay_in_extra_views() {
+                continue;
             }
+            self.perf
+                .pass(&mut cpu, &mut encoder, format!("overlay {}", f.name()));
+            f.overlay(&mut encoder, &ctx);
         }
 
         // Screenshot readback.
