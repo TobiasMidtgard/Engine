@@ -349,6 +349,8 @@ struct Inner {
     /// image is reported once per version instead of every frame.
     failed: HashMap<(u32, usize), u64>,
     frame: u64,
+    /// `Assets::<Image>::removals()` when the cache was last swept.
+    removals: u64,
     release: bool,
     next_id: u64,
     stats: ImageMemoryStats,
@@ -849,9 +851,15 @@ impl ImageCache {
                 released += 1;
             }
         }
-        if frame.is_multiple_of(120) {
+        // Every couple of seconds, and as soon as images are removed (a streamed zone unloaded
+        // and freed its images): their GPU copies go at once.
+        let removed = images.removals() != inner.removals;
+        if frame.is_multiple_of(120) || removed {
+            inner.removals = images.removals();
             inner.images.retain(|&index, cached| {
-                if cached.released {
+                if !images.contains(Handle::from_index(index)) {
+                    false
+                } else if cached.released {
                     // The GPU copy is the only one: keep it while the asset is there and still
                     // released (new pixels upload again when it is next drawn).
                     images

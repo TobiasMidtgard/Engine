@@ -932,6 +932,8 @@ pub struct MeshFeature {
     cache_settings: Option<(bool, String, u32)>,
     /// Displaced entities whose material has no height to displace by (warned once).
     warned_no_height: HashSet<u32>,
+    /// `Assets::<Mesh>::removals()` when the GPU copies of removed meshes were last swept.
+    mesh_removals: u64,
     /// Far instances drawn as impostors (made in `init`).
     impostors: Option<Impostors>,
     /// The impostors' range of the instance buffer in the view (first, count).
@@ -1112,6 +1114,26 @@ impl MeshFeature {
                 Some(build_shadow_masked_pipeline(&self.shadow_inputs(gpu)?))
             }
         }
+    }
+
+    /// Give back the GPU space of meshes whose asset is gone (a streamed zone unloaded and
+    /// freed its meshes): their vertices, indices and levels in the pool (pages left empty are
+    /// released), and the levels still building. Cluster builds of a mesh nobody draws go after
+    /// `EVICT_AFTER_FRAMES` (virtual_geometry/gpu.rs).
+    fn forget_removed_meshes(&mut self, assets: &Assets<Mesh>) {
+        let gone = |index: u32| !assets.contains(Handle::from_index(index));
+        let pool = &mut self.pool;
+        self.meshes.retain(|&index, mesh| {
+            if gone(index) {
+                mesh.free(pool);
+                return false;
+            }
+            true
+        });
+        // A finished build of a mesh that is gone is never collected; its thread ends alone.
+        self.lod_jobs.retain(|&index, _| !gone(index));
+        self.lod_waiting.retain(|(index, _)| !gone(*index));
+        self.warned_no_height.retain(|&index| !gone(index));
     }
 
     fn upload_mesh(&mut self, gpu: &GpuShared, index: u32, mesh: &Mesh, version: u64) {
@@ -2070,6 +2092,10 @@ impl RenderFeature for MeshFeature {
             self.skin_query = Some(skin_query);
             return;
         };
+        if mesh_assets.removals() != self.mesh_removals {
+            self.mesh_removals = mesh_assets.removals();
+            self.forget_removed_meshes(mesh_assets);
+        }
         let material_assets = world_ref.get_resource::<Assets<StandardMaterial>>();
         let sources = TextureSources {
             images: world_ref.get_resource::<Assets<Image>>(),
@@ -2963,6 +2989,8 @@ impl RenderFeature for MeshFeature {
             d.set("render.meshes.skins", self.skins.skins.len() as f64);
             d.set("render.meshes.pool_mb", reserved as f64 / (1 << 20) as f64);
             d.set("render.meshes.pool_used_mb", used as f64 / (1 << 20) as f64);
+            // Meshes with a copy in the pool.
+            d.set("render.meshes.resident", self.meshes.len() as f64);
         }
         steps.publish(Some(diagnostics), gpu);
     }
