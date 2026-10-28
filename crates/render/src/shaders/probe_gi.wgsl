@@ -167,6 +167,53 @@ fn visible(start: vec3<f32>, end: vec3<f32>) -> bool {
     return trace_scene(start, d / len, len, true).instance == 0xffffffffu;
 }
 
+// Albedo of the walls the indoor volumes stand for (rock, plaster): what a ray stopped by one
+// sees, lit by last frame's probes.
+const VOLUME_WALL_ALBEDO: f32 = 0.3;
+
+// The first closed face of an indoor volume (`SkyLightVolume`) a ray crosses within `t_max`, or
+// NO_HIT. The volumes stand for walls the probes' rays may not see: rock, terrain and buildings
+// drawn by other features (a cave's chamber, a house's shell), so without this a probe inside
+// sees the sky and the ground below the horizon through them. A ray leaves a volume it starts
+// in through the face its path crosses, and enters one it meets the same way; only open faces
+// let it through. Boxes are in camera-relative meters with no scale, so distances carry over.
+fn volume_wall(origin: vec3<f32>, dir: vec3<f32>, t_max: f32) -> f32 {
+    var best = NO_HIT;
+    for (var i = 0u; i < min(frame.counts.w, 16u); i++) {
+        let v = frame.sky_volumes[i];
+        let o = vec3<f32>(dot(v.to_local[0], vec4<f32>(origin, 1.0)), dot(v.to_local[1], vec4<f32>(origin, 1.0)), dot(v.to_local[2], vec4<f32>(origin, 1.0)));
+        let d = vec3<f32>(dot(v.to_local[0].xyz, dir), dot(v.to_local[1].xyz, dir), dot(v.to_local[2].xyz, dir));
+        let half = v.half_fade.xyz;
+        let inv = safe_inverse(d);
+        let t0 = (-half - o) * inv;
+        let t1 = (half - o) * inv;
+        let near = min(t0, t1);
+        let far = max(t0, t1);
+        let t_in = max(max(near.x, near.y), near.z);
+        let t_out = min(min(far.x, far.y), far.z);
+        if (t_out < 0.0 || t_in > t_out || t_in > min(t_max, best)) { continue; }
+        let mask = u32(v.params.y);
+        // Face bits: +x 1, -x 2, +y 4, -y 8, +z 16, -z 32. A ray going up an axis enters
+        // through the face at its low end and leaves through the one at its high end.
+        if (t_in > 0.0) {
+            let axis = select(select(2u, 1u, near.y >= near.z), 0u, near.x >= near.y && near.x >= near.z);
+            let bit = 1u << (2u * axis + select(0u, 1u, d[axis] > 0.0));
+            if ((mask & bit) == 0u) {
+                best = t_in;
+                continue;
+            }
+        }
+        if (t_out <= t_max) {
+            let axis = select(select(2u, 1u, far.y <= far.z), 0u, far.x <= far.y && far.x <= far.z);
+            let bit = 1u << (2u * axis + select(1u, 0u, d[axis] > 0.0));
+            if ((mask & bit) == 0u) {
+                best = min(best, t_out);
+            }
+        }
+    }
+    return best;
+}
+
 // Ray `r` of `n`: spherical Fibonacci directions, turned by this frame's rotation.
 fn ray_direction(r: u32, n: u32) -> vec3<f32> {
     let i = f32(r) + 0.5;
@@ -204,6 +251,15 @@ fn cs_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     let spacing = frame.gi_volume.w;
     let t_max = spacing * 64.0;
     let hit = trace_scene(origin, dir, t_max, false);
+    let wall = volume_wall(origin, dir, min(hit.t, t_max));
+    if (wall < NO_HIT) {
+        // A wall of an indoor volume, before any mesh: lit by the probes around it.
+        let p = origin + dir * wall;
+        let indirect = probe_gi(p, -dir, -dir);
+        let radiance = VOLUME_WALL_ALBEDO * INV_PI * indirect.rgb * indirect.a;
+        rays[id.x] = vec4<f32>(radiance * PROBE_GI_SCALE, wall);
+        return;
+    }
     if (hit.instance == 0xffffffffu) {
         // The sky and the ground beyond, blurred so the sun's disc doesn't flicker in.
         let sky = sample_env_rough(dir, 0.6);
@@ -231,7 +287,8 @@ fn cs_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     let l = frame.sun_dir.xyz;
     let n_dot_l = dot(n, l);
     if (n_dot_l > 0.0 && dot(frame.sun_color.rgb, frame.sun_color.rgb) > 0.0) {
-        if (trace_scene(lift, l, spacing * 256.0, true).instance == 0xffffffffu) {
+        if (trace_scene(lift, l, spacing * 256.0, true).instance == 0xffffffffu
+            && volume_wall(lift, l, spacing * 256.0) == NO_HIT) {
             light += frame.sun_color.rgb * sun_transmittance(p) * cloud_shadow(p) * n_dot_l;
         }
     }
