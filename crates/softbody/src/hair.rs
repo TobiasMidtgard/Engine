@@ -347,7 +347,7 @@ impl HairGroom {
     /// Solver settings that suit hair.
     pub fn hair_settings() -> SimSettings {
         SimSettings {
-            substeps: 12,
+            substeps: 6,
             damping: 0.6,
             friction: 0.2,
             thickness: 0.008,

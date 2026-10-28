@@ -753,7 +753,7 @@ pub(super) fn dog(commands: &mut Commands, center: DVec3) {
         }
     };
     let fur_sim = SimSettings {
-        substeps: 6,
+        substeps: 3,
         ..HairGroom::hair_settings()
     };
     commands.spawn((
@@ -786,7 +786,7 @@ pub(super) fn dog(commands: &mut Commands, center: DVec3) {
                 comb: 0.93,
                 ..coat
             },
-            sim: HairGroom::hair_settings(),
+            sim: fur_sim,
         },
         ChildOf(dog),
     ));

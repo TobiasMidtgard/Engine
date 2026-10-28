@@ -61,6 +61,9 @@ fn main() {
     println!("warm-up: {:.0} ms", warm.elapsed().as_secs_f64() * 1000.0);
     let start = Instant::now();
     let mut worst = (0.0, 0);
+    // The app's update alone (the bench's own bookkeeping below is not the engine's cost).
+    let mut updating = 0.0;
+    let mut stepping = 0.0;
     // Skinned meshes uploaded (changed) each frame, bytes.
     let mut versions = std::collections::HashMap::new();
     let mut uploaded = 0usize;
@@ -71,6 +74,12 @@ fn main() {
         let t = Instant::now();
         app.update();
         let ms = t.elapsed().as_secs_f64() * 1000.0;
+        updating += ms;
+        stepping += app
+            .world
+            .resource::<Diagnostics>()
+            .get("softbody.step_ms")
+            .unwrap_or(0.0);
         {
             let mut q = app.world.query_filtered::<
                 (Entity, &engine_render::MeshRenderer),
@@ -294,8 +303,10 @@ fn main() {
     }
     let d = app.world.resource::<Diagnostics>();
     println!(
-        "focus {distance} m from the yard: {ms:.2} ms per frame; last step {:.2} ms, {} bodies \
-         ({} frozen), {} particles",
+        "focus {distance} m from the yard: {ms:.2} ms per frame ({:.2} updating, {:.2} \
+         stepping soft bodies); last step {:.2} ms, {} bodies ({} frozen), {} particles",
+        updating / frames as f64,
+        stepping / frames as f64,
         d.get("softbody.step_ms").unwrap_or(0.0),
         d.get("softbody.bodies").unwrap_or(0.0),
         d.get("softbody.frozen").unwrap_or(0.0),
