@@ -149,6 +149,28 @@ pub fn place(world: &mut World, editor: &mut Editor, key: &str, at: DVec3) -> Op
     Some(entity)
 }
 
+/// Spawn a copy of model `key` at `transform` (under `parent`) without an undo step: the
+/// caller records it (the scatter brush records a whole stroke as one).
+pub fn spawn_copy(
+    world: &mut World,
+    key: &str,
+    transform: Transform,
+    parent: Option<Entity>,
+) -> Result<Entity, String> {
+    let entity = spawn(world, key, transform, (None, None))?;
+    let mut e = world.entity_mut(entity);
+    e.insert((
+        SceneOrder::next(),
+        Name::new(display_name(key)),
+        Model { path: key.into() },
+    ));
+    if let Some(parent) = parent {
+        e.insert(ChildOf(parent));
+    }
+    tag_tree(world, entity);
+    Ok(entity)
+}
+
 /// Read `key` from disk again and rebuild every placed copy of it, keeping each one's place,
 /// parent, name and outliner position (edits inside the model are replaced). One undo step.
 pub fn reimport(world: &mut World, editor: &mut Editor, key: &str) {

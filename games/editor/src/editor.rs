@@ -36,6 +36,8 @@ pub enum Tool {
     Scale,
     /// Landscape brush (see `landscape`).
     Sculpt,
+    /// Paint copies of models onto surfaces (see `scatter`).
+    Scatter,
 }
 
 /// A panel in the dock.
@@ -151,6 +153,8 @@ pub struct Editor {
     pub import_edit: Option<(String, crate::import::ImportSettings)>,
     /// The materials of the file `import_edit` is for, for its remap list.
     pub import_materials: Vec<crate::remap::FileMaterial>,
+    /// The scatter brush's settings and stroke.
+    pub scatter: crate::scatter::Scatter,
     /// What each model file holds (the Content panel's hover preview), by asset key.
     pub model_info: HashMap<String, String>,
     /// The Content panel's import path.
@@ -198,6 +202,7 @@ impl Editor {
             file_hover: None,
             import_edit: None,
             import_materials: Vec::new(),
+            scatter: crate::scatter::Scatter::default(),
             model_info: HashMap::new(),
             file_drops: Vec::new(),
         }
@@ -1031,7 +1036,10 @@ pub fn spawn_camera(world: &mut World, at: DVec3, target: DVec3) -> Entity {
 
 /// Mark components a module needs for picking ([`ModuleDemo`] has no mesh, so it gets an icon).
 pub fn has_icon(world: &World, e: Entity) -> Option<&'static str> {
-    if world.get::<ModuleDemo>(e).is_some() {
+    if crate::scatter::painted(world, e) {
+        // Hundreds of painted rocks would bury the view in icons; the outliner lists them.
+        None
+    } else if world.get::<ModuleDemo>(e).is_some() {
         Some("demo")
     } else if world.get::<DirectionalLight>(e).is_some() {
         Some("sun")

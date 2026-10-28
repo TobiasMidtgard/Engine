@@ -425,6 +425,7 @@ fn status_bar(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
                 Tool::Rotate => "Rotate",
                 Tool::Scale => "Scale",
                 Tool::Sculpt => "Sculpt",
+                Tool::Scatter => "Scatter",
             };
             ui.label(theme::dim(format!(
                 "{tool} · {}",
@@ -1100,6 +1101,7 @@ fn shortcuts(ctx: &egui::Context, world: &mut World, editor: &mut Editor) {
         (egui::Key::E, Tool::Rotate),
         (egui::Key::R, Tool::Scale),
         (egui::Key::T, Tool::Sculpt),
+        (egui::Key::G, Tool::Scatter),
     ] {
         if pressed(key, false) {
             editor.tool = tool;

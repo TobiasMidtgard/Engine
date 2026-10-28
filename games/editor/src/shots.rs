@@ -1255,6 +1255,91 @@ pub fn round14(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Imported keys of round 15's models, by file stem.
+fn nature(world: &World, stem: &str) -> String {
+    let root = world
+        .get_resource::<engine::assets::AssetServer>()
+        .map(|s| s.root())
+        .unwrap_or_default();
+    let folder = PathBuf::from(std::env::var("ROUND15_MODELS").unwrap_or_default());
+    crate::import::import_file(&root, &folder.join(format!("{stem}.fbx"))).unwrap_or_default()
+}
+
+/// One brush stroke through `points` (x, z), as the scatter brush paints while dragging.
+fn stroke(world: &mut World, editor: &mut Editor, points: &[(f64, f64)], erase: bool) {
+    for &(x, z) in points {
+        crate::scatter::dab(world, editor, DVec3::new(x, 0.0, z), erase);
+    }
+    crate::scatter::end_stroke(world, editor);
+}
+
+/// Round 15: the scatter brush. Rocks, stumps and small pines made in Blender
+/// (`ROUND15_MODELS`: Rock_A/B/C, Stump, Pine .fbx and a Textures folder) painted onto the
+/// ground beside the courtyard, then a patch erased.
+pub fn round15(dir: impl Into<PathBuf>) -> ShotScript {
+    let steps = vec![
+        Step::Camera(DVec3::new(15.0, 7.5, 23.0), DVec3::new(7.0, 0.0, 9.0)),
+        Step::Select(""),
+        Step::Do(Box::new(|world, editor| {
+            let rocks: Vec<String> = ["Rock_A", "Rock_B", "Rock_C"]
+                .iter()
+                .map(|s| nature(world, s))
+                .collect();
+            nature(world, "Stump");
+            nature(world, "Pine");
+            editor.models = None;
+            editor.model_filter = "imported".into();
+            editor.tool = Tool::Scatter;
+            editor.scatter.palette = rocks;
+        })),
+        Step::Tab(Tab::History),
+        Step::Wait(40),
+        Step::Shot("64_scatter_brush"),
+        Step::Do(Box::new(|world, editor| {
+            let s = &mut editor.scatter;
+            s.radius = 4.5;
+            s.density = 14.0;
+            s.scale = [0.5, 1.5];
+            s.align = true;
+            s.sink = 0.08;
+            let path: Vec<(f64, f64)> = (0..8)
+                .map(|i| (1.5 + 2.0 * i as f64, 7.5 + (i as f64 * 0.9).sin() * 1.5))
+                .collect();
+            stroke(world, editor, &path, false);
+            let pine = nature(world, "Pine");
+            let stump = nature(world, "Stump");
+            let s = &mut editor.scatter;
+            s.palette = vec![pine.clone(), pine, stump];
+            s.radius = 3.5;
+            s.density = 9.0;
+            s.scale = [0.6, 1.2];
+            s.align = false;
+            s.sink = 0.02;
+            let path: Vec<(f64, f64)> = (0..6).map(|i| (3.0 + 2.6 * i as f64, 2.5)).collect();
+            stroke(world, editor, &path, false);
+        })),
+        Step::Wait(90),
+        Step::Shot("65_painted"),
+        Step::Do(Box::new(|world, editor| {
+            // Erase only the rocks: the picked models are the ones erased.
+            let mut groups = world.query::<&crate::scatter::ScatterGroup>();
+            editor.scatter.palette = groups
+                .iter(world)
+                .map(|g| g.model.clone())
+                .filter(|m| m.contains("Rock_"))
+                .collect();
+            editor.scatter.radius = 3.0;
+            stroke(world, editor, &[(9.0, 8.5), (10.0, 9.5)], true);
+        })),
+        Step::Wait(40),
+        Step::Shot("66_patch_erased"),
+        Step::Camera(DVec3::new(5.0, 1.5, 12.0), DVec3::new(10.0, 0.6, 5.0)),
+        Step::Wait(40),
+        Step::Shot("67_close_up"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {

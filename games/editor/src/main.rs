@@ -33,6 +33,7 @@ mod prefab;
 mod remap;
 mod rigs;
 mod sample;
+mod scatter;
 mod scene_ops;
 mod shots;
 mod theme;
@@ -122,6 +123,7 @@ fn main() {
             Some("round12") => shots::round12(dir),
             Some("round13") => shots::round13(dir),
             Some("round14") => shots::round14(dir),
+            Some("round15") => shots::round15(dir),
             Some("play") => shots::play_in_editor(dir),
             _ => shots::gallery(dir),
         };
@@ -161,6 +163,9 @@ impl Plugin for EditorPlugin {
             .register_component::<rigs::ModelClips>(
                 "Animation files (asset keys) whose clips this rigged model plays too, bones \
                  matched by name.",
+            )
+            .register_component::<scatter::ScatterGroup>(
+                "Holds the copies of `model` painted with the scatter brush (one group per model).",
             )
             .register_component::<prefab::PrefabInstance>(
                 "Placed from the prefab file at `path`; the editor can apply changes back to \

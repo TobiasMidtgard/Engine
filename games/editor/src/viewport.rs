@@ -50,6 +50,13 @@ pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
         overlays(ui, world, editor, rect);
         return;
     }
+    if editor.tool == Tool::Scatter {
+        if !alt {
+            crate::scatter::brush(ui, world, editor, &view, &response);
+        }
+        overlays(ui, world, editor, rect);
+        return;
+    }
     if response.clicked() && !gizmo_used && !alt && !editor.gizmo.is_focused() {
         let additive = ui.input(|i| i.modifiers.ctrl || i.modifiers.shift);
         if let Some(pos) = response.interact_pointer_pos() {
@@ -194,7 +201,7 @@ struct GizmoTarget {
 /// Run the transform gizmo; true while it is being used.
 fn gizmo(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, view: &ViewInfo) -> bool {
     let modes: EnumSet<GizmoMode> = match editor.tool {
-        Tool::Select | Tool::Sculpt => return false,
+        Tool::Select | Tool::Sculpt | Tool::Scatter => return false,
         Tool::Move => GizmoMode::all_translate(),
         Tool::Rotate => GizmoMode::all_rotate(),
         Tool::Scale => GizmoMode::all_scale(),
@@ -582,6 +589,11 @@ fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, rect: egu
                             (Tool::Rotate, "🔄", "Rotate (E)"),
                             (Tool::Scale, "⛶", "Scale (R)"),
                             (Tool::Sculpt, "🌄", "Sculpt the landscape (T)"),
+                            (
+                                Tool::Scatter,
+                                "🌲",
+                                "Paint rocks, trees and props onto surfaces (G)",
+                            ),
                         ] {
                             let on = editor.tool == tool;
                             if ui
@@ -660,6 +672,22 @@ fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, rect: egu
                         ui.set_max_width(300.0);
                         ui.label(egui::RichText::new("🌄 Landscape").strong());
                         crate::landscape::panel(ui, world, editor);
+                    });
+            });
+    }
+    if editor.tool == Tool::Scatter {
+        egui::Area::new(egui::Id::new("scatter brush"))
+            .fixed_pos(rect.min + egui::vec2(8.0, 46.0))
+            .order(egui::Order::Middle)
+            .show(&ctx, |ui| {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgba_unmultiplied(22, 23, 26, 235))
+                    .corner_radius(5)
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.set_max_width(320.0);
+                        ui.label(egui::RichText::new("🌲 Scatter").strong());
+                        crate::scatter::panel(ui, world, editor);
                     });
             });
     }
