@@ -22,7 +22,7 @@ use super::{
     BodyImpostor, BodyLook, BodyRings, FULL_MAP_WIDTH, ImpostorPart, LookBakes, RING_MAP_WIDTH,
     SMALL_MAP_WIDTH, spheroid_radii,
 };
-use crate::{CelestialBody, SpaceClock, SpaceSettings, StarLight};
+use crate::{BodyKind, CelestialBody, SpaceClock, SpaceSettings, StarLight};
 
 /// The bodies shader (composed after `lib_types` and `lib_frame`).
 pub const SHADER: &str = include_str!("bodies.wgsl");
@@ -37,6 +37,7 @@ const F_AIR: u32 = 8;
 const F_FULLSCREEN: u32 = 16;
 const F_HAZE: u32 = 32;
 const F_SHELL_ON: u32 = 128;
+const F_STAR: u32 = 256;
 
 /// Height of the cloud tops drawn as their own layer from high up, meters.
 const SHELL_HEIGHT_M: f64 = 5_000.0;
@@ -62,6 +63,61 @@ fn far_cloud_layer(altitude_m: f64, cloud_hole_m: f64) -> FarCloudLayer {
         outer_m: cloud_hole_m as f32,
         weight: shell_fade(altitude_m) as f32,
     }
+}
+
+/// A star seen from afar: a glowing disc (its impostor keeps it a few pixels wide; the
+/// luminance drops by as much as the disc is widened, so its light stays true). `None` when
+/// out of view.
+fn star_instance(
+    body: &CelestialBody,
+    gt: &GlobalTransform,
+    view: &ViewData,
+    lumens_per_watt: f64,
+) -> Option<(f64, GpuBody)> {
+    let scale = gt.0.matrix3.x_axis.length().max(1e-9);
+    let rel = gt.translation() - view.origin;
+    let d = rel.length();
+    let r = body.radius_m * scale;
+    let rel_f = rel.as_vec3();
+    if !view.frustum.intersects_sphere(rel_f, r as f32) {
+        return None;
+    }
+    // Surface luminance (cd/m²): luminosity over the surface, per steradian.
+    let lum = body.luminosity_w * lumens_per_watt
+        / (4.0 * std::f64::consts::PI * std::f64::consts::PI * body.radius_m * body.radius_m)
+        / (scale * scale);
+    let c = body.color;
+    let luma = (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]).max(1e-3) as f64;
+    let rgb = c.map(|k| (k as f64 / luma * lum) as f32);
+    let fwd = rel.normalize_or(DVec3::Z);
+    let side = if fwd.y.abs() > 0.9 {
+        DVec3::X
+    } else {
+        DVec3::Y
+    };
+    let x = side.cross(fwd).normalize();
+    let y = fwd.cross(x);
+    let v4 = |v: DVec3, w: f64| [v.x as f32, v.y as f32, v.z as f32, w as f32];
+    let g = GpuBody {
+        center: [rel_f.x, rel_f.y, rel_f.z, r as f32],
+        axis_x: v4(x, r),
+        axis_y: v4(y, r),
+        axis_z: v4(fwd, r),
+        sun: [0.0; 4],
+        light: [rgb[0], rgb[1], rgb[2], 0.0],
+        shade: [0.0; 4],
+        haze: [0.0; 4],
+        haze2: [0.0; 4],
+        haze3: [0.0; 4],
+        rings: [0.0; 4],
+        flags: [
+            F_STAR | if d < r * 1.15 { F_FULLSCREEN } else { 0 },
+            0,
+            0,
+            0,
+        ],
+    };
+    Some((d, g))
 }
 
 /// GPU layout of `Body` in `bodies.wgsl`.
@@ -131,6 +187,8 @@ pub struct BodiesFeature {
     map_sampler: Option<wgpu::Sampler>,
     ring_sampler: Option<wgpu::Sampler>,
     blank: Option<(wgpu::Texture, wgpu::Texture)>,
+    /// Maps for stars (they glow and need none: the blank ones).
+    star_group: Option<wgpu::BindGroup>,
     maps: HashMap<Entity, BodyMaps>,
     /// Bodies that want full-detail maps, with their size on screen (pixels).
     wanted: Vec<(Entity, f32)>,
@@ -457,6 +515,28 @@ impl RenderFeature for BodiesFeature {
             wgpu::BufferUsages::STORAGE,
             16 * std::mem::size_of::<GpuBody>() as u64,
         ));
+        if let Some((aux, ring)) = &self.blank {
+            let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
+            let (va, vr) = (view(aux), view(ring));
+            self.star_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("star maps"),
+                layout: &layout2,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&va),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&va),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&vr),
+                    },
+                ],
+            }));
+        }
         self.layout1 = Some(layout1);
         self.layout2 = Some(layout2);
     }
@@ -477,12 +557,21 @@ impl RenderFeature for BodiesFeature {
         let mut bakes = world.remove_resource::<LookBakes>().unwrap_or_default();
 
         // Stars light the bodies; the StarLight's color tints it.
-        let mut q = world.query::<(&CelestialBody, &GlobalTransform)>();
-        let stars: Vec<(DVec3, f64)> = q
+        let mut q = world.query::<(Entity, &CelestialBody, &GlobalTransform)>();
+        let lit: Vec<(Entity, DVec3, f64)> = q
             .iter(world)
-            .filter(|(b, _)| b.luminosity_w > 0.0)
-            .map(|(b, gt)| (gt.translation(), b.luminosity_w))
+            .filter(|(_, b, _)| b.luminosity_w > 0.0)
+            .map(|(e, b, gt)| (e, gt.translation(), b.luminosity_w))
             .collect();
+        let stars: Vec<(DVec3, f64)> = lit.iter().map(|s| (s.1, s.2)).collect();
+        // The star lighting the camera is the sky's sun disc: not drawn here too.
+        let sun = lit
+            .iter()
+            .max_by(|a, b| {
+                let lux = |s: &(Entity, DVec3, f64)| s.2 / (s.1 - view.origin).length_squared();
+                lux(a).total_cmp(&lux(b))
+            })
+            .map(|s| s.0);
         let mut q = world.query_filtered::<&DirectionalLight, With<StarLight>>();
         let light_color = q
             .iter(world)
@@ -514,7 +603,16 @@ impl RenderFeature for BodiesFeature {
             let Some(body) = world.get::<CelestialBody>(entity).cloned() else {
                 continue;
             };
-            if !space.draw_bodies || body.look == BodyLook::None {
+            let is_star = body.kind == BodyKind::Star;
+            if !space.draw_bodies || (body.look == BodyLook::None && !is_star) {
+                continue;
+            }
+            if is_star {
+                if Some(entity) != sun
+                    && let Some((d, g)) = star_instance(&body, &gt, view, space.lumens_per_watt)
+                {
+                    self.scratch.push((d, entity, g, false));
+                }
                 continue;
             }
             let m = gt.0.matrix3;
@@ -748,11 +846,16 @@ impl RenderFeature for BodiesFeature {
         };
         pass.set_bind_group(1, group1, &[]);
         for (i, (e, shell)) in self.draws.iter().enumerate() {
-            if let Some(m) = self.maps.get(e) {
-                pass.set_pipeline(if *shell { shells } else { pipeline });
-                pass.set_bind_group(2, &m.group, &[]);
-                pass.draw(0..6, i as u32..i as u32 + 1);
-            }
+            let group = match self.maps.get(e) {
+                Some(m) => &m.group,
+                None => match &self.star_group {
+                    Some(g) => g,
+                    None => continue,
+                },
+            };
+            pass.set_pipeline(if *shell { shells } else { pipeline });
+            pass.set_bind_group(2, group, &[]);
+            pass.draw(0..6, i as u32..i as u32 + 1);
         }
     }
 

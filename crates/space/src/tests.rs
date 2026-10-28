@@ -465,11 +465,13 @@ fn far_bodies_get_spheres_rings_and_stay_visible() {
             .filter(|(p, ..)| *p == e)
             .collect::<Vec<_>>()
     };
-    // One sphere per planet and moon, none for the Sun; Saturn also has its rings.
-    assert!(of("Sun").is_empty());
+    // One sphere per planet, moon and star (the sky draws the lit one); Saturn also has its
+    // rings.
+    assert_eq!(of("Sun").len(), 1);
+    assert_eq!(of("Sirius").len(), 1);
     assert_eq!(of("Jupiter").len(), 1);
     assert_eq!(of("Saturn").len(), 2);
-    assert_eq!(impostors.len(), 10);
+    assert_eq!(impostors.len(), 20);
     // Inside the body (under any terrain), and the Moon is big enough to be seen as it is.
     let moon = of("Moon")[0];
     assert!(moon.1.radius_m < 1_737_400.0 && moon.1.radius_m > 1_700_000.0);
@@ -1152,4 +1154,140 @@ fn every_body_is_a_stream_frame_named_after_it() {
     assert!(tagged.iter().all(|(b, f)| b == f));
     let mut all = app.world.query::<&CelestialBody>();
     assert_eq!(tagged.len(), all.iter(&app.world).count());
+}
+
+fn anchor_name(app: &App) -> Option<String> {
+    let s = state(app);
+    s.anchor.map(|a| s.bodies[a].name.clone())
+}
+
+/// Puts the focus `out` meters beyond Earth's sphere of influence, straight away from the Sun.
+fn past_earths_reach(app: &mut App, out: f64) -> DVec3 {
+    let s = state(app).clone();
+    let earth = s.body("Earth").unwrap();
+    let away = (earth.world_position - s.body("Sun").unwrap().world_position).normalize();
+    let p = earth.world_position + away * (earth.soi_m + out);
+    put_focus(app, p);
+    s.to_inertial(p)
+}
+
+#[test]
+fn past_earths_reach_the_world_anchors_on_the_sun() {
+    let mut app = app();
+    app.world.resource_mut::<SpaceClock>().paused = true;
+    let inertial_before = past_earths_reach(&mut app, 2.0e8);
+    app.update();
+    assert_eq!(anchor_name(&app).as_deref(), Some("Sun"));
+    assert!(!app.world.resource::<SpaceFrame>().rotating);
+    // Same true position, the world origin right on the focus.
+    let p = focus(&mut app);
+    assert!(p.length() < 1.0, "{p:?}");
+    let inertial_after = state(&app).to_inertial(p);
+    assert!(
+        (inertial_after - inertial_before).length() < 1.0,
+        "{}",
+        (inertial_after - inertial_before).length()
+    );
+    // The Sun pulls again: about 5.7 mm/s² at 1 AU, toward it.
+    let sun = state(&app).body("Sun").unwrap().world_position;
+    let g = app.world.resource::<Gravity>().at(p).as_dvec3();
+    assert!((0.0050..0.0065).contains(&g.length()), "{g:?}");
+    assert!(g.normalize().dot((sun - p).normalize()) > 0.99);
+}
+
+#[test]
+fn far_out_the_origin_follows_the_focus_with_a_plain_shift() {
+    let mut app = app();
+    app.world.resource_mut::<SpaceClock>().paused = true;
+    past_earths_reach(&mut app, 2.0e8);
+    app.update();
+    assert_eq!(anchor_name(&app).as_deref(), Some("Sun"));
+    let marker = app.world.spawn(Transform::from_xyz(5.0, 0.0, 0.0)).id();
+    app.update();
+    let switches = state(&app).switches;
+    let origin = DVec3::from_array(app.world.resource::<SpaceFrame>().origin_m);
+    // Within reach of the origin nothing moves.
+    put_focus(&mut app, DVec3::new(15_000.0, 0.0, 0.0));
+    app.update();
+    assert_eq!(focus(&mut app), DVec3::new(15_000.0, 0.0, 0.0));
+    // Beyond it, the origin jumps onto the focus and everything shifts with it, unturned.
+    let far = DVec3::new(15_000.0, -8_000.0, 30_000.0);
+    let inertial_before = state(&app).to_inertial(far);
+    put_focus(&mut app, far);
+    app.update();
+    let p = focus(&mut app);
+    assert!(p.length() < 1e-3, "{p:?}");
+    let m = app.world.get::<Transform>(marker).unwrap();
+    assert!((m.translation - (DVec3::new(5.0, 0.0, 0.0) - far)).length() < 1e-3);
+    assert!(m.rotation.angle_between(Quat::IDENTITY) < 1e-6);
+    let frame = app.world.resource::<SpaceFrame>();
+    assert!((DVec3::from_array(frame.origin_m) - origin - far).length() < 1e-3);
+    let inertial_after = state(&app).to_inertial(DVec3::ZERO);
+    assert!((inertial_after - inertial_before).length() < 1e-3);
+    assert_eq!(anchor_name(&app).as_deref(), Some("Sun"));
+    assert!(state(&app).switches > switches);
+}
+
+#[test]
+fn coming_back_into_earths_reach_anchors_on_it_again() {
+    let mut app = app();
+    app.world.resource_mut::<SpaceClock>().paused = true;
+    past_earths_reach(&mut app, 2.0e8);
+    app.update();
+    assert_eq!(anchor_name(&app).as_deref(), Some("Sun"));
+    let s = state(&app).clone();
+    let earth = s.body("Earth").unwrap();
+    let back = earth.world_position
+        + (s.body("Sun").unwrap().world_position - earth.world_position).normalize() * 2.0e8;
+    put_focus(&mut app, back);
+    app.update();
+    assert_eq!(anchor_name(&app).as_deref(), Some("Earth"));
+    let p = focus(&mut app);
+    let d = (p - state(&app).body("Earth").unwrap().world_position).length();
+    assert!((d - 2.0e8).abs() < 10.0, "{d}");
+}
+
+#[test]
+fn the_nearest_stars_are_where_the_sky_shows_them() {
+    let app = app();
+    let s = state(&app);
+    let sun = s.body("Sun").unwrap().inertial_position;
+    let at = |name: &str| s.body(name).unwrap().inertial_position - sun;
+    // Sirius: ecliptic longitude 104.1°, latitude -39.6°, 8.6 light years.
+    let sirius = at("Sirius");
+    let ly = sirius.length() / system::LIGHT_YEAR;
+    assert!((ly - 8.6).abs() < 0.01, "{ly}");
+    let (l, b) = (104.08_f64.to_radians(), (-39.61_f64).to_radians());
+    let dir = DVec3::new(b.cos() * l.cos(), b.sin(), -b.cos() * l.sin());
+    assert!(
+        sirius.normalize().angle_between(dir).to_degrees() < 0.05,
+        "{}°",
+        sirius.normalize().angle_between(dir).to_degrees()
+    );
+    // Proxima is 2.2° from Alpha Centauri on the sky and a little closer.
+    let (a, p) = (at("Alpha Centauri A"), at("Proxima Centauri"));
+    let apart = a.angle_between(p).to_degrees();
+    assert!((2.0..2.4).contains(&apart), "{apart}°");
+    assert!(p.length() < a.length());
+    // B circles A tens of AU away.
+    let ab = (at("Alpha Centauri B") - a).length() / AU;
+    assert!((10.0..40.0).contains(&ab), "{ab} AU");
+    // None of them takes over the world near home.
+    assert_eq!(
+        s.dominant(s.to_inertial(DVec3::ZERO))
+            .map(|i| s.bodies[i].name.as_str()),
+        Some("Earth")
+    );
+}
+
+#[test]
+fn star_colors_run_from_red_to_blue() {
+    let red = system::star_color(3042.0);
+    let sun = system::star_color(5772.0);
+    let blue = system::star_color(9940.0);
+    assert_eq!(red[0], 1.0);
+    assert!(red[2] < 0.2, "{red:?}");
+    assert!(sun[2] > 0.6 && sun[2] < 1.0, "{sun:?}");
+    assert_eq!(blue[2], 1.0);
+    assert!(blue[0] < 0.9, "{blue:?}");
 }

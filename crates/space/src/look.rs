@@ -333,7 +333,8 @@ pub(crate) fn spawn_impostors(
     }
     for (e, body) in &bodies {
         commands.entity(e).insert(ImpostorSpawned);
-        if body.kind == BodyKind::Star || body.look == BodyLook::None {
+        // Stars are drawn glowing (all but the one lighting the scene, which the sky draws).
+        if body.kind != BodyKind::Star && body.look == BodyLook::None {
             continue;
         }
         commands.spawn((

@@ -18,11 +18,14 @@ use engine_core::prelude::*;
 
 use crate::{CelestialBody, SpaceFrame};
 
-/// Spawn the Sun, the eight planets and the Moon, anchored on Earth. Returns the entities by
-/// name.
+/// Spawn the Sun, the eight planets and the Moon, anchored on Earth, and the stars nearest
+/// the Sun to fly to. Returns the entities by name.
 pub fn spawn_solar_system(commands: &mut Commands) -> HashMap<String, Entity> {
     let mut out = HashMap::new();
-    for body in crate::system::solar_system() {
+    for body in crate::system::solar_system()
+        .into_iter()
+        .chain(crate::system::nearby_stars())
+    {
         let name = body.name.clone();
         let id = commands.spawn((body, Transform::default())).id();
         out.insert(name, id);

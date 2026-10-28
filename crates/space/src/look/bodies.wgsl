@@ -29,6 +29,7 @@ const F_FULLSCREEN: u32 = 16u;
 const F_HAZE: u32 = 32u;
 const F_SOLID_AIR: u32 = 64u;  // unused
 const F_SHELL_ON: u32 = 128u;  // a cloud shell (fs_shell) draws the cloud tops: shade only
+const F_STAR: u32 = 256u;      // a star: light.rgb is its surface's luminance (cd/m²)
 
 @group(1) @binding(0) var<storage, read> bodies: array<Body>;
 @group(1) @binding(1) var map_sampler: sampler;   // repeat in u, clamp in v, trilinear, anisotropic
@@ -174,6 +175,20 @@ fn fs_body(in: VsOut) -> FsOut {
     let cloud_s = textureSampleGrad(aux_map, map_sampler, cloud_uv, gx, gy).r;
     let ring_s = textureSampleGrad(ring_map, ring_sampler, vec2<f32>(ring_u, 0.5),
                                    vec2<f32>(ring_g.x, 0.0), vec2<f32>(ring_g.y, 0.0));
+
+    // A star glows: its surface's luminance, darker toward the limb (the Sun's limb
+    // darkening, 0.4 + 0.6 cos). Far off its disc is drawn wider than it is and dimmer by as
+    // much, so it stays a point of the same light.
+    if ((flags & F_STAR) != 0u) {
+        if (cover <= 0.0) {
+            discard;
+        }
+        let mu_s = sqrt(max(h, 0.0));
+        var star: FsOut;
+        star.depth = depth_of(dir * (max(t_surf, 1e-6) * r_eq));
+        star.color = vec4<f32>(pre_expose(b.light.rgb * (0.4 + 0.6 * mu_s) * cover), cover);
+        return star;
+    }
 
     let s = normalize(b.sun.xyz);
     let sun_e = b.light.rgb;

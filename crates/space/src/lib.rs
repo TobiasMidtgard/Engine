@@ -268,6 +268,11 @@ pub struct SpaceFrame {
     pub rotating: bool,
     /// The anchor's orientation (x, y, z, w) when the world stopped turning.
     pub frozen_orientation: [f64; 4],
+    /// In a fixed (not turning) frame: where the world origin is, meters from the home spot
+    /// along the world axes. The origin follows the focus this way out in space (see
+    /// [`SpaceSettings::recenter_distance_m`]), so positions near it stay fine however far
+    /// from any body the flight goes. Zero in a turning frame.
+    pub origin_m: [f64; 3],
 }
 
 impl Default for SpaceFrame {
@@ -281,6 +286,7 @@ impl Default for SpaceFrame {
             auto_switch: true,
             rotating: true,
             frozen_orientation: [0.0, 0.0, 0.0, 1.0],
+            origin_m: [0.0; 3],
         }
     }
 }
@@ -340,6 +346,12 @@ pub struct SpaceSettings {
     /// the [`HomeFrame`]'s spot (turning with its anchor) puts the world back in that frame
     /// exactly, so places laid out in home coordinates are where they were.
     pub home_return_m: f64,
+    /// With [`SpaceFrame::auto_switch`], in a fixed frame (out in space), the world origin
+    /// moves to the focus once it is farther than this from it: a plain shift, as a floating
+    /// origin (KSP keeps its within 500 m; physics here keeps its own regions, so the reach
+    /// can be longer). Near the origin f64 keeps sub-millimeter positions even light years
+    /// from the Sun.
+    pub recenter_distance_m: f64,
 }
 
 impl Default for SpaceSettings {
@@ -360,6 +372,7 @@ impl Default for SpaceSettings {
             rehome_distance_m: 40_000.0,
             rehome_altitude_m: 30_000.0,
             home_return_m: 30_000.0,
+            recenter_distance_m: 20_000.0,
         }
     }
 }
@@ -557,6 +570,14 @@ fn stored_home(frame: &SpaceFrame) -> (Quat, DQuat) {
     (q, q.as_dquat().normalize())
 }
 
+/// Share of its distance from the Sun within which another star pulls (its sphere of
+/// influence; see `propagate`).
+const STAR_REACH: f64 = 0.05;
+
+/// Narrowest the sky draws the lit star's disc, degrees (it keeps the star's light, so a far
+/// sun is a small bright point rather than a disc that drops between pixels).
+const MIN_STAR_DISC_DEG: f64 = 0.02;
+
 /// Orbits, spin, the world frame, gravity, atmosphere and starlight.
 pub struct SpacePlugin;
 
@@ -658,7 +679,13 @@ fn propagate(bodies: &[(Entity, CelestialBody)], t: f64) -> Vec<BodyState> {
                 let ps = states[p].as_ref().expect("parent state");
                 // Two-body motion: the orbit's period uses both masses.
                 let (r, v) = b.orbit.state_at(ps.mu + b.mu, t);
-                let soi = b.orbit.sphere_of_influence(b.mu, ps.mu);
+                let mut soi = b.orbit.sphere_of_influence(b.mu, ps.mu);
+                if b.kind == BodyKind::Star {
+                    // Another star light years off: its pull matters within a small share of
+                    // the way (the Laplace formula, made for a light body, would reach past
+                    // the Sun).
+                    soi = soi.min(b.orbit.semi_major_axis_m * STAR_REACH);
+                }
                 (ps.inertial_position + r, ps.inertial_velocity + v, soi)
             }
             None => (DVec3::ZERO, DVec3::ZERO, f64::INFINITY),
@@ -709,7 +736,23 @@ fn frame_for(anchor: &BodyState, frame: &SpaceFrame) -> (DQuat, DVec3) {
     let pad = dir_from_lat_lon(frame.home_lat_deg, frame.home_lon_deg)
         * (anchor.radius_m + frame.home_height_m);
     let t = -(home * pad);
-    (rot, t - rot * anchor.inertial_position)
+    let origin = if frame.rotating {
+        DVec3::ZERO
+    } else {
+        DVec3::from_array(frame.origin_m)
+    };
+    (rot, t - rot * anchor.inertial_position - origin)
+}
+
+/// A new frame with its origin on an inertial point: fixed frames start centered on the
+/// focus, turning ones on their home spot.
+fn centered(mut next: SpaceFrame, anchor: &BodyState, inertial: DVec3) -> SpaceFrame {
+    next.origin_m = [0.0; 3];
+    if !next.rotating {
+        let (r, o) = frame_for(anchor, &next);
+        next.origin_m = (r * inertial + o).to_array();
+    }
+    next
 }
 
 /// The anchor orientation the world follows: the live one when turning, else the frozen one.
@@ -872,9 +915,11 @@ pub fn reanchor(world: &mut World) {
         };
         let dist = |i: usize| (inertial - states[i].inertial_position).length();
         let mut target = anchor;
+        // Out past every planet's sphere of influence the Sun (the root star) holds the focus:
+        // the world re-anchors on it, in a fixed frame, and its pull comes back.
         if let Some(d) = probe
             .dominant(inertial)
-            .filter(|&d| states[d].kind != BodyKind::Star)
+            .filter(|&d| states[d].kind != BodyKind::Star || states[d].parent.is_none())
             && d != anchor
             && (dist(d) < states[d].soi_m * 0.98 || dist(anchor) > states[anchor].soi_m * 1.02)
         {
@@ -905,7 +950,13 @@ pub fn reanchor(world: &mut World) {
             if !rotating {
                 next.frozen_orientation = states[target].orientation.to_array();
             }
-            next_frame = Some(next);
+            next_frame = Some(centered(next, &states[target], inertial));
+        } else if !rotating && f.length() > settings.recenter_distance_m {
+            // Out in space far from the origin: it moves to the focus (a plain shift).
+            next_frame = Some(SpaceFrame {
+                origin_m: (DVec3::from_array(frame.origin_m) + f).to_array(),
+                ..frame.clone()
+            });
         } else if rotating && altitude < settings.rehome_altitude_m {
             // Low over the anchor far from the home spot: home moves under the focus, so the
             // world origin stays near it and +Y stays up.
@@ -918,6 +969,7 @@ pub fn reanchor(world: &mut World) {
                     home_lat_deg: dir.y.clamp(-1.0, 1.0).asin().to_degrees(),
                     home_lon_deg: dir.x.atan2(dir.z).to_degrees(),
                     home_height_m: 0.0,
+                    origin_m: [0.0; 3],
                     ..frame.clone()
                 });
             }
@@ -939,6 +991,7 @@ pub fn reanchor(world: &mut World) {
             {
                 next_frame = Some(SpaceFrame {
                     auto_switch: frame.auto_switch,
+                    origin_m: [0.0; 3],
                     ..home
                 });
             }
@@ -1004,6 +1057,7 @@ fn same_frame(states: &[BodyState], a: &SpaceFrame, b: &SpaceFrame) -> bool {
         && a.home_lon_deg == b.home_lon_deg
         && a.home_height_m == b.home_height_m
         && a.home_heading_deg == b.home_heading_deg
+        && (a.rotating || a.origin_m == b.origin_m)
 }
 
 /// Altitude below which the world turns with a body.
@@ -1173,9 +1227,10 @@ pub fn update_space(world: &mut World) {
         }
     }
 
-    // Gravity: the anchor, plus every non-star body whose reach (1.5× its sphere of
-    // influence) holds the focus. Stars and whatever the anchor orbits are left out: the
-    // anchor falls around them with us (on the Moon, Earth's pull is only a tide).
+    // Gravity: the anchor, plus every body whose reach (1.5× its sphere of influence) holds
+    // the focus. The root star and whatever the anchor orbits are left out: the anchor falls
+    // around them with us (on the Moon, Earth's pull is only a tide). Out past the planets the
+    // world anchors on the Sun, which then pulls.
     if settings.drive_gravity {
         let f = focus.unwrap_or(DVec3::ZERO);
         let mut around = Vec::new();
@@ -1189,7 +1244,7 @@ pub fn update_space(world: &mut World) {
             .enumerate()
             .filter(|(i, s)| {
                 *i == anchor
-                    || (s.kind != BodyKind::Star
+                    || (s.parent.is_some()
                         && !around.contains(i)
                         && (s.world_position - f).length() < s.soi_m * 1.5)
             })
@@ -1261,11 +1316,11 @@ pub fn update_space(world: &mut World) {
     // Starlight.
     if settings.drive_starlight {
         let f = focus.unwrap_or(DVec3::ZERO);
-        let stars: Vec<(String, DVec3, f64)> = bodies
+        let stars: Vec<(String, DVec3, f64, f64)> = bodies
             .iter()
             .zip(&states)
             .filter(|((_, b), _)| b.luminosity_w > 0.0)
-            .map(|((_, b), s)| (b.name.clone(), s.world_position, b.luminosity_w))
+            .map(|((_, b), s)| (b.name.clone(), s.world_position, b.luminosity_w, b.radius_m))
             .collect();
         let mut sun_dir = None;
         let mut lights = world.query::<(&StarLight, &mut Transform, &mut DirectionalLight)>();
@@ -1278,11 +1333,15 @@ pub fn update_space(world: &mut World) {
                 .iter()
                 .filter(|s| star.star.is_empty() || s.0.eq_ignore_ascii_case(&star.star))
                 .max_by(|a, b| lux(a.1, a.2).total_cmp(&lux(b.1, b.2)));
-            if let Some((_, p, l)) = pick {
+            if let Some((_, p, l, r)) = pick {
                 let dir = (*p - f).normalize_or(DVec3::Y);
                 let up = if dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
                 *tf = Transform::default().looking_at(-dir, up);
                 light.illuminance = lux(*p, *l) as f32;
+                // The sky draws the light's star as a disc this wide: its true size, shrinking
+                // to a bright point (a few pixels, the same light) far out.
+                let size = (2.0 * (r / (*p - f).length().max(*r)).asin()).to_degrees();
+                light.angular_size_deg = size.max(MIN_STAR_DISC_DEG) as f32;
                 sun_dir.get_or_insert(dir);
             }
         }
