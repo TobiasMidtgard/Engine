@@ -25,11 +25,24 @@ struct EyeOut {
     @location(5) clip_prev: vec4<f32>,
 };
 
-const CORNEA_ANGLE: f32 = 0.5;
-const IRIS_RADIUS: f32 = 0.47;    // sin of the cornea angle: where the iris meets the sclera
-const IRIS_DEPTH: f32 = 0.84;     // eye-local z of the iris plane
 const CORNEA_IOR: f32 = 1.376;
 
+// Sine of the cornea's angle from the gaze axis: an 11.7 mm cornea whatever the eye's size
+// (as `eyes::cornea_angle`), at most 0.5 rad.
+fn cornea_sin() -> f32 {
+    return min(0.00585 / max(character.rest_eye_l.w, 1e-4), 0.4794);
+}
+fn cornea_angle() -> f32 {
+    return asin(cornea_sin());
+}
+// Where the iris meets the sclera (eye-local radius), and the iris plane's eye-local z, a
+// little behind the cornea's base.
+fn iris_radius() -> f32 {
+    return cornea_sin() * 0.98;
+}
+fn iris_depth() -> f32 {
+    return cos(cornea_angle()) - 0.038;
+}
 // Turns the eye about its center to look `yaw` toward the person's left and `pitch` up.
 fn gaze_turn(p: vec3<f32>, center: vec3<f32>, yaw: f32, pitch: f32, dir: bool) -> vec3<f32> {
     var d = select(p - center, p, dir);
@@ -131,7 +144,7 @@ fn iris_base(m: f32, y: f32) -> vec3<f32> {
 
 fn iris_color(uv: vec2<f32>, seed: f32) -> vec3<f32> {
     let rad = length(uv);
-    let t = rad / IRIS_RADIUS;
+    let t = rad / iris_radius();
     let ang = atan2(uv.y, uv.x);
     let m = character.eye.x;
     let y = character.eye.y;
@@ -173,7 +186,7 @@ fn sclera_color(local: vec3<f32>, seed: f32) -> vec3<f32> {
     // corners, and a slightly duskier white.
     let melanin = smoothstep(0.35, 0.9, character.skin.x);
     let theta = acos(clamp(local.z, -1.0, 1.0));
-    let limbus = smoothstep(CORNEA_ANGLE + 0.45, CORNEA_ANGLE + 0.05, theta);
+    let limbus = smoothstep(cornea_angle() + 0.45, cornea_angle() + 0.05, theta);
     let patches = smoothstep(0.42, 0.72, value_noise2(local.xy * 7.0 + seed * 5.0));
     let pigment = melanin * saturate(limbus * 0.6 + where_ * 0.5) * (0.3 + 0.7 * patches);
     c *= mix(1.0, 0.85, melanin);
@@ -198,18 +211,20 @@ fn fs_eye(in: EyeOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let v_local = normalize(vec3<f32>(dot(v, ex), dot(v, ey), dot(v, ez)));
     let n_local = normalize(vec3<f32>(dot(n, ex), dot(n, ey), dot(n, ez)));
 
-    let in_cornea = smoothstep(CORNEA_ANGLE + 0.02, CORNEA_ANGLE - 0.03, theta);
+    let cornea = cornea_angle();
+    let iris_r = iris_radius();
+    let in_cornea = smoothstep(cornea + 0.02, cornea - 0.03, theta);
     var albedo = sclera_color(local, seed);
     var under_n = n;
     if (in_cornea > 0.0) {
         // Refract into the cornea and find the iris plane.
         let refr = refract(-v_local, n_local, 1.0 / CORNEA_IOR);
         let p = local * (1.0 + 0.06 * in_cornea);
-        let t = (IRIS_DEPTH - p.z) / min(refr.z, -0.05);
+        let t = (iris_depth() - p.z) / min(refr.z, -0.05);
         let hit = p + refr * t;
         let iris = iris_color(hit.xy, seed);
         // The iris is a little concave; light it as facing forward.
-        albedo = mix(albedo, iris, in_cornea * smoothstep(IRIS_RADIUS + 0.01, IRIS_RADIUS - 0.02, length(hit.xy)));
+        albedo = mix(albedo, iris, in_cornea * smoothstep(iris_r + 0.01, iris_r - 0.02, length(hit.xy)));
         under_n = normalize(mix(n, ez, in_cornea * 0.7));
     }
     // Shadow of the socket, the lids and lashes over the eye, worked out in the head's frame

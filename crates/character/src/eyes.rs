@@ -7,10 +7,22 @@ use engine_core::math::Vec3;
 
 /// Eyeball radius as a share of the eye helper's (the helper wraps the eye loosely).
 pub const RADIUS_SCALE: f32 = 0.93;
-/// Angle from the gaze axis where the cornea starts, radians (an 11.5 mm cornea on a 24 mm eye).
+/// The cornea's diameter (and so the iris's, seen through it), m. It hardly varies between
+/// adults (white-to-white 11.7 ± 0.3 mm), so a larger eyeball shows the same iris, not a larger
+/// one: scaled with the eye, the iris filled two thirds of the opening and read as a doll's.
+pub const CORNEA_DIAMETER: f32 = 0.0117;
+/// The cornea's angle from the gaze axis at most, radians (an 11.5 mm cornea on a 24 mm eye).
 pub const CORNEA_ANGLE: f32 = 0.5;
-/// How far the cornea's apex stands out of the sphere, as a share of the radius.
+/// How far the cornea's apex stands out of the sphere, as a share of the radius (for a cornea
+/// of `CORNEA_ANGLE`; a narrower one stands out less).
 pub const CORNEA_BULGE: f32 = 0.085;
+
+/// Angle from the gaze axis where the cornea starts on an eye of `radius` (m), radians.
+pub fn cornea_angle(radius: f32) -> f32 {
+    (0.5 * CORNEA_DIAMETER / radius.max(1e-4))
+        .min(CORNEA_ANGLE.sin())
+        .asin()
+}
 
 /// One eye vertex: model-space position and normal, and the eye-local direction (unit, +Z
 /// along the gaze, +Y up) that the shader works in.
@@ -29,13 +41,13 @@ pub struct EyeMesh {
 }
 
 /// Local radius scale of the surface at angle `theta` from the gaze axis: 1 on the sclera, the
-/// cornea's dome inside `CORNEA_ANGLE`.
-pub fn bulge(theta: f32) -> f32 {
-    if theta >= CORNEA_ANGLE {
+/// cornea's dome inside `cornea` (its angle).
+pub fn bulge(theta: f32, cornea: f32) -> f32 {
+    if theta >= cornea {
         return 1.0;
     }
-    let x = 1.0 - theta / CORNEA_ANGLE;
-    1.0 + CORNEA_BULGE * x * x * (3.0 - 2.0 * x) * (0.6 + 0.4 * x)
+    let x = 1.0 - theta / cornea;
+    1.0 + CORNEA_BULGE * (cornea / CORNEA_ANGLE) * x * x * (3.0 - 2.0 * x) * (0.6 + 0.4 * x)
 }
 
 /// Build both eyeballs at `centers` (model space) with `radius`, looking along +Z.
@@ -43,6 +55,7 @@ pub fn build(centers: [Vec3; 2], radius: f32) -> EyeMesh {
     const RINGS: u32 = 48;
     const SEGMENTS: u32 = 64;
     let mut mesh = EyeMesh::default();
+    let cornea = cornea_angle(radius);
     for center in centers {
         let base = mesh.vertices.len() as u32;
         // Rings from the front pole (theta 0) to the back (pi), denser near the cornea edge.
@@ -56,7 +69,7 @@ pub fn build(centers: [Vec3; 2], radius: f32) -> EyeMesh {
                     theta.sin() * phi.sin(),
                     theta.cos(),
                 );
-                let r = radius * bulge(theta);
+                let r = radius * bulge(theta, cornea);
                 mesh.vertices.push(EyeVertex {
                     position: center + local * r,
                     normal: local,
@@ -214,6 +227,6 @@ mod tests {
                 assert!(n.dot(a - center) > 0.0);
             }
         }
-        assert_eq!(bulge(1.0), 1.0);
+        assert_eq!(bulge(1.0, CORNEA_ANGLE), 1.0);
     }
 }
