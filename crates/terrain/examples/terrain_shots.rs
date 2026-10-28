@@ -218,6 +218,40 @@ fn views() -> Vec<View> {
             painted: true,
             ..BASE
         },
+        // Face to the ground: a crouched look at the dirt road, the gravel ring round the
+        // plaza, and the road seen standing, under a low sun (pebbles, clods and grit).
+        View {
+            name: "ground_macro_dirt",
+            eye: DVec3::new(0.0, 0.0, 0.3),
+            target: DVec3::new(0.7, 0.0, -0.5),
+            above_ground: Some(0.45),
+            target_above_ground: Some(0.0),
+            sun: (200.0, 18.0),
+            fov: 60.0,
+            painted: true,
+            ..BASE
+        },
+        View {
+            name: "ground_macro_gravel",
+            eye: DVec3::new(0.0, 0.0, -57.0),
+            target: DVec3::new(0.6, 0.0, -58.2),
+            above_ground: Some(0.5),
+            target_above_ground: Some(0.0),
+            sun: (200.0, 18.0),
+            fov: 60.0,
+            painted: true,
+            ..BASE
+        },
+        View {
+            name: "ground_road_eye",
+            eye: DVec3::new(-3.0, 0.0, -0.8),
+            target: DVec3::new(4.0, 0.0, 1.5),
+            above_ground: Some(1.7),
+            target_above_ground: Some(0.0),
+            sun: (200.0, 18.0),
+            painted: true,
+            ..BASE
+        },
         View {
             name: "painted_snow",
             eye: DVec3::new(-35.0, 38.0, 75.0),

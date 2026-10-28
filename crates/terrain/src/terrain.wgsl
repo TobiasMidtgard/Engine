@@ -1260,6 +1260,134 @@ fn sample_ground(i: u32, tp: vec3<f32>, n: vec3<f32>, dp1: vec3<f32>, dp2: vec3<
     return sample_planar(i, tp, n, dp1, dp2, pixel);
 }
 
+// ---- Parallax relief near the eye (parallax occlusion mapping: Tatarchuk 2006; the
+// research is in game-engine-research/planets-wave2.md). Pebbles, clods and grit stand out
+// of the ground by their material's height, shift as the eye moves and shade each other
+// under a low sun. Heights of the material's texels (albedo alpha) span this much, meters.
+var<private> RELIEF_M: array<f32, 9> = array<f32, 9>(
+    0.02,   // grass (the turf between blades)
+    0.05,   // forest floor: litter, roots and clods
+    0.025,  // soil
+    0.02,   // mud
+    0.0,    // rock: triplanar, drawn without
+    0.015,  // snow
+    0.012,  // sand ripples
+    0.022,  // gravel
+    0.004,  // concrete
+);
+
+// One material's height for the march: its anti-tiling pair as `mat_fetch` picks it, fixed
+// per pixel (the switch noise varies over tiles, not texels).
+struct ReliefLayer {
+    i: u32,
+    tile: f32,
+    oa: vec2<f32>,
+    ob: vec2<f32>,
+    f: f32,
+    weight: f32,
+};
+
+fn relief_layer(i: u32, tp: vec3<f32>, weight: f32) -> ReliefLayer {
+    let tile = mat_tile(i);
+    let uv = tp.xz / tile;
+    let k = pnoise3(vec3<f32>(uv * 0.25, f32(i) * 7.31), 4096.0 / tile * 0.25) * 8.0;
+    let ia = floor(k);
+    return ReliefLayer(i, tile, sin(vec2<f32>(3.0, 7.0) * ia), sin(vec2<f32>(3.0, 7.0) * (ia + 1.0)), fract(k), weight);
+}
+
+fn relief_height(l: ReliefLayer, xz: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> f32 {
+    if (l.weight <= 0.0) {
+        return 0.0;
+    }
+    let uv = xz / l.tile;
+    let a = textureSampleGrad(mat_albedo, mat_sampler, uv + l.oa, l.i, gx / l.tile, gy / l.tile).a;
+    let b = textureSampleGrad(mat_albedo, mat_sampler, uv + l.ob, l.i, gx / l.tile, gy / l.tile).a;
+    return mix(a, b, smoothstep(0.2, 0.8, l.f + (b - a) * 0.8)) * l.weight;
+}
+
+// Depth below the relief's top (meters) of the ground at `xz`.
+fn relief_depth(a: ReliefLayer, b: ReliefLayer, amp: f32, xz: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> f32 {
+    return (1.0 - relief_height(a, xz, gx, gy) - relief_height(b, xz, gx, gy)) * amp;
+}
+
+struct Relief {
+    // Where the eye's ray meets the relief, as an offset of the tiling position (x, z).
+    offset: vec2<f32>,
+    // How much of the sun the relief hides there (0..1).
+    shadow: f32,
+};
+
+// March the eye's ray down into the relief of the two strongest planar materials, then
+// toward the sun from where it lands. `strength` fades it all out with distance.
+fn relief(w: array<f32, 9>, tp: vec3<f32>, rel: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, strength: f32) -> Relief {
+    var out = Relief(vec2<f32>(0.0), 0.0);
+    var i0 = 99u;
+    var i1 = 99u;
+    for (var i = 0u; i < MAT_COUNT; i++) {
+        if (RELIEF_M[i] <= 0.0 || w[i] <= 0.003) {
+            continue;
+        }
+        if (i0 == 99u || w[i] > w[i0]) {
+            i1 = i0;
+            i0 = i;
+        } else if (i1 == 99u || w[i] > w[i1]) {
+            i1 = i;
+        }
+    }
+    if (i0 == 99u) {
+        return out;
+    }
+    let w0 = w[i0];
+    let w1 = select(0.0, w[i1], i1 != 99u);
+    let total = w0 + w1;
+    let amp = (RELIEF_M[i0] * w0 + select(0.0, RELIEF_M[i1] * w1, i1 != 99u)) / total * strength;
+    if (amp < 1e-4) {
+        return out;
+    }
+    let a = relief_layer(i0, tp, w0 / total);
+    let b = relief_layer(select(i0, i1, i1 != 99u), tp, w1 / total);
+    let gx = dp1.xz;
+    let gy = dp2.xz;
+    // The materials lie flat along world X/Z, their relief along Y.
+    let v = normalize(rel);
+    let down = max(-v.y, 0.2);
+    let along = v.xz / down;
+    let steps = mix(8.0, 24.0, 1.0 - down);
+    let dd = amp / steps;
+    var d_prev = 0.0;
+    var s_prev = relief_depth(a, b, amp, tp.xz, gx, gy);
+    var d = 0.0;
+    var s = s_prev;
+    for (var k = 1; k <= 24; k++) {
+        if (f32(k) > steps || d >= s) {
+            break;
+        }
+        d_prev = d;
+        s_prev = s;
+        d = dd * f32(k);
+        s = relief_depth(a, b, amp, tp.xz + along * d, gx, gy);
+    }
+    // Between the last step above the ground and the first below it (secant).
+    let gap_prev = s_prev - d_prev;
+    let gap = s - d;
+    let t = saturate(gap_prev / max(gap_prev - gap, 1e-5));
+    let hit = mix(d_prev, d, t);
+    out.offset = along * hit;
+    // Toward the sun: does the relief rise above the ray back up to the top?
+    let sun = frame.sun_dir.xyz;
+    if (sun.y > 0.02 && hit > amp * 0.05) {
+        let climb = sun.xz / max(sun.y, 0.08);
+        let p = tp.xz + out.offset;
+        for (var k = 1; k <= 6; k++) {
+            let dk = hit * (1.0 - f32(k) / 7.0);
+            let sk = relief_depth(a, b, amp, p + climb * (hit - dk), gx, gy);
+            out.shadow = max(out.shadow, saturate((dk - sk) / (0.06 * amp)));
+        }
+        out.shadow *= saturate(sun.y * 6.0);
+    }
+    return out;
+}
+
 // Cover `height` (0..1) with a layer of the given amount (0..1): low spots fill first, high
 // ones last.
 fn fill_low(amount: f32, height: f32) -> f32 {
@@ -1644,13 +1772,21 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     col[M_SAND] *= bare_v;
     col[M_GRAVEL] *= bare_v;
 
+    // ---- Parallax relief within a few meters (pixels under about 3–8 mm).
+    let relief_k = (1.0 - smoothstep(0.003, 0.008, tex_pixel)) * (1.0 - far) * mats.flags.x;
+    var rel_shift = Relief(vec2<f32>(0.0), 0.0);
+    if (relief_k > 0.0) {
+        rel_shift = relief(w, tp, in.rel, dp1, dp2, relief_k);
+    }
+    let tp_m = tp + vec3<f32>(rel_shift.offset.x, 0.0, rel_shift.offset.y);
+
     // ---- Sample the materials present and blend them by height.
     var ms: array<MatSample, 9>;
     var bh: array<f32, 9>;
     var hmax = -10.0;
     for (var i = 0u; i < MAT_COUNT; i++) {
         if (w[i] > 0.003) {
-            ms[i] = sample_ground(i, tp, n_geo, dp1, dp2, tex_pixel);
+            ms[i] = sample_ground(i, tp_m, n_geo, dp1, dp2, tex_pixel);
             // Natural woods from a distance are canopy, not leaf litter: no litter texture
             // there (painted leaves are a level's forest floor and keep theirs).
             if (i == M_FOREST) {
@@ -1732,6 +1868,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     let inv_b = 1.0 / max(bsum, 1e-4);
     albedo *= inv_b;
+    // Pebbles and clods shade the hollows beside them; the light is all one input, so the
+    // sun's share comes off the albedo (as for footprints).
+    albedo *= 1.0 - rel_shift.shadow * 0.45;
+    occlusion *= 1.0 - rel_shift.shadow * 0.1;
     roughness *= inv_b;
     occlusion *= inv_b;
     ground_h *= inv_b;
