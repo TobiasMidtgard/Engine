@@ -423,8 +423,18 @@ mod tests {
             for visit in 0..4 {
                 let x = if visit % 2 == 0 { 0.0 } else { 2000.0 };
                 app.world.get_mut::<Transform>(cam).unwrap().translation = DVec3::new(x, 0.0, 0.0);
-                for _ in 0..(COVER_SETTLE_FRAMES as usize + 40) {
+                // Long enough for the cover to settle, then until every cell in reach is laid
+                // out and planted (background layouts take as long as the machine needs).
+                let start = std::time::Instant::now();
+                for frame in 0.. {
                     app.update();
+                    let state = app.world.resource::<NearWoodsState>();
+                    let done = state.pending.is_empty() && !state.backlog;
+                    if (frame >= COVER_SETTLE_FRAMES as usize + 40 && done)
+                        || start.elapsed().as_secs() > 120
+                    {
+                        break;
+                    }
                     if background {
                         std::thread::sleep(std::time::Duration::from_millis(2));
                     }
