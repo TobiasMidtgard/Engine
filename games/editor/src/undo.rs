@@ -276,13 +276,19 @@ impl Command {
             Command::Resource { name, .. } => Some((None, format!("resource {name}"))),
             Command::Material { key, .. } => Some((None, format!("material {key}"))),
             Command::Rename { entity, .. } => Some((Some(*entity), "Name".into())),
-            Command::Group(label, commands) if label.starts_with("Move") => Some((
-                commands.first().and_then(|c| match c {
-                    Command::Component { entity, .. } => Some(*entity),
-                    _ => None,
-                }),
-                format!("{label} x{}", commands.len()),
-            )),
+            // Moves, and one field edited on several objects (inspector.rs), merge while dragged.
+            Command::Group(label, commands)
+                if label.starts_with("Move")
+                    || (label.starts_with("Edit ") && label.ends_with(" objects")) =>
+            {
+                Some((
+                    commands.first().and_then(|c| match c {
+                        Command::Component { entity, .. } => Some(*entity),
+                        _ => None,
+                    }),
+                    format!("{label} x{}", commands.len()),
+                ))
+            }
             _ => None,
         }
     }

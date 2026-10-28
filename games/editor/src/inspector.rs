@@ -5,9 +5,16 @@
 //! rows, fields named like colors get color pickers, enums get a dropdown of their variants (the
 //! variant names come from asking serde, see [`enum_variants`]), and nested structs fold out. So
 //! a component a module registers tomorrow is editable without editor changes.
+//!
+//! With several objects selected it edits them all, as Unity's Inspector does: only the
+//! components every one of them has show, a dash marks a field whose values differ, and an edit
+//! sets just the field that was touched on each object (one undo step). Right-clicking a
+//! differing field sets all of them to the shown object's value.
 
 use engine::core::registry::{ComponentEntry, TypeRegistry};
 use engine::prelude::*;
+use std::collections::HashSet;
+
 use serde_json::{Map, Number, Value, json};
 
 use crate::editor::{self, Editor};
@@ -41,8 +48,20 @@ pub fn entity_details(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor)
         .get::<Name>(entity)
         .map(|n| n.as_str().to_string())
         .unwrap_or_default();
+    // The other selected scene objects, edited together with this one.
+    let others = companions(world, editor, entity);
+    let multi = !others.is_empty();
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(theme::entity_icon(world, entity)).size(18.0));
+        if multi {
+            // One name for many objects makes no sense: greyed out, as Unreal's is.
+            let mut count = format!("{} objects", others.len() + 1);
+            ui.add_enabled(
+                false,
+                egui::TextEdit::singleline(&mut count).desired_width(ui.available_width() - 8.0),
+            );
+            return;
+        }
         let edit = ui.add(
             egui::TextEdit::singleline(&mut name)
                 .hint_text("Name")
@@ -74,25 +93,42 @@ pub fn entity_details(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor)
             ui.label(theme::dim(format!("{entity}")));
         });
     });
-    if editor.selection.len() > 1 {
+    if multi {
         ui.label(theme::dim(format!(
-            "{} selected; editing the last one",
-            editor.selection.len()
+            "Changes go to all {} (shown: {}). - marks values that differ.",
+            others.len() + 1,
+            crate::scene_ops::label(world, entity)
         )));
     }
     ui.add_space(4.0);
 
-    crate::prefab_ui::details_bar(ui, world, editor, entity);
-    quick_actions(ui, world, editor, entity);
-    crate::import::settings_panel(ui, world, editor, entity);
-    crate::rigs::animation_panel(ui, world, editor, entity);
-    crate::material_edit::panel(ui, world, editor, entity);
+    if !multi {
+        crate::prefab_ui::details_bar(ui, world, editor, entity);
+        quick_actions(ui, world, editor, entity);
+        crate::import::settings_panel(ui, world, editor, entity);
+        crate::rigs::animation_panel(ui, world, editor, entity);
+        crate::material_edit::panel(ui, world, editor, entity);
+    }
 
     let registry = world.resource::<TypeRegistry>().clone();
+    let on_all = |world: &World, c: &ComponentEntry| {
+        (c.has)(world, entity) && others.iter().all(|&o| (c.has)(world, o))
+    };
     let mut entries: Vec<&ComponentEntry> = registry
         .components()
-        .filter(|c| c.name != "Name" && (c.has)(world, entity))
+        .filter(|c| c.name != "Name" && on_all(world, c))
         .collect();
+    // Components only some of the selection has stay out, and say so (as Unity does).
+    let partial = registry
+        .components()
+        .filter(|c| {
+            c.name != "Name"
+                && !on_all(world, c)
+                && std::iter::once(entity)
+                    .chain(others.iter().copied())
+                    .any(|e| (c.has)(world, e))
+        })
+        .count();
     // What the entity is first (transform, light, demo, body), the big render data last.
     let rank = |name: &str| match name {
         "Transform" => 0,
@@ -103,7 +139,11 @@ pub fn entity_details(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor)
     };
     entries.sort_by_key(|c| (rank(&c.name), c.name.clone()));
     // A part of a placed prefab: what this copy changes from its file.
-    let marks = crate::prefab_ui::marks(world, entity);
+    let marks = if multi {
+        None
+    } else {
+        crate::prefab_ui::marks(world, entity)
+    };
     let hidden = ["PrefabInstance", "PrefabPart"];
     // A folder only sorts the outliner: it has nothing to edit but its name.
     let folder = crate::folder::is_folder(world, entity);
@@ -171,23 +211,36 @@ pub fn entity_details(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor)
                 let target = Target::Component(entity, entry.clone());
                 let marked = marks.as_ref().map(|m| (m, entry.name.as_str()));
                 if entry.name == "Transform" {
-                    transform_editor(ui, world, editor, entity, &value, marked);
+                    transform_editor(ui, world, editor, entity, &others, &value, marked);
+                } else if multi {
+                    let mixed = mixed_paths(world, entry, &value, &others);
+                    edit_many(ui, world, editor, &target, &value, &others, &mixed);
                 } else {
                     edit_marked(ui, world, editor, &target, &value, marked);
                 }
             });
         if remove {
-            editor::apply(
-                world,
-                editor,
-                Command::Component {
-                    entity,
-                    name: entry.name.clone(),
-                    before: Some(value),
-                    after: None,
-                },
-            );
+            let commands: Vec<Command> = std::iter::once(entity)
+                .chain(others.iter().copied())
+                .filter_map(|e| {
+                    Some(Command::Component {
+                        entity: e,
+                        name: entry.name.clone(),
+                        before: Some((entry.get)(world, e)?),
+                        after: None,
+                    })
+                })
+                .collect();
+            apply_all(world, editor, format!("Remove {}", entry.name), commands);
         }
+    }
+    if partial > 0 {
+        ui.add_space(4.0);
+        ui.label(theme::dim(format!(
+            "{partial} component{} not on every selected object {} hidden.",
+            if partial == 1 { "" } else { "s" },
+            if partial == 1 { "is" } else { "are" },
+        )));
     }
     if let Some(m) = &marks {
         for name in m.removed() {
@@ -211,7 +264,194 @@ pub fn entity_details(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor)
         }
     }
     ui.add_space(8.0);
-    add_component_button(ui, world, editor, entity, &registry);
+    let all: Vec<Entity> = std::iter::once(entity).chain(others).collect();
+    add_component_button(ui, world, editor, &all, &registry);
+}
+
+/// The selected scene entities besides `primary` (only scene entities edit together).
+fn companions(world: &World, editor: &Editor, primary: Entity) -> Vec<Entity> {
+    if world.get::<crate::scene_ops::InScene>(primary).is_none() {
+        return Vec::new();
+    }
+    editor
+        .selection
+        .iter()
+        .copied()
+        .filter(|&e| e != primary && world.get::<crate::scene_ops::InScene>(e).is_some())
+        .collect()
+}
+
+/// One command for one object, a group (one undo step) for several.
+fn apply_all(world: &mut World, editor: &mut Editor, label: String, mut commands: Vec<Command>) {
+    match commands.len() {
+        0 => {}
+        1 => editor::apply(world, editor, commands.remove(0)),
+        n => {
+            // "Edit ... objects" groups merge while a field is dragged (see undo.rs).
+            let label = format!("{label} of {n} objects");
+            editor::apply(world, editor, Command::Group(label, commands));
+        }
+    }
+}
+
+/// Where `after` differs from `before`, as `/a/0/b` paths and the new values: the smallest
+/// pieces that changed (a whole object when its keys changed, as for an enum's variant).
+pub fn changed_paths(before: &Value, after: &Value, path: &str, out: &mut Vec<(String, Value)>) {
+    match (before, after) {
+        (Value::Object(a), Value::Object(b))
+            if a.len() == b.len() && a.keys().all(|k| b.contains_key(k)) =>
+        {
+            for (k, av) in a {
+                changed_paths(av, &b[k], &format!("{path}/{k}"), out);
+            }
+        }
+        (Value::Array(a), Value::Array(b)) if a.len() == b.len() => {
+            for (i, (av, bv)) in a.iter().zip(b).enumerate() {
+                changed_paths(av, bv, &format!("{path}/{i}"), out);
+            }
+        }
+        _ if before != after => out.push((path.to_string(), after.clone())),
+        _ => {}
+    }
+}
+
+/// The paths where any of `others` differs from the shown `value`.
+fn mixed_paths(
+    world: &World,
+    entry: &ComponentEntry,
+    value: &Value,
+    others: &[Entity],
+) -> HashSet<String> {
+    let mut out = Vec::new();
+    for &o in others {
+        if let Some(v) = (entry.get)(world, o) {
+            changed_paths(value, &v, "", &mut out);
+        }
+    }
+    out.into_iter().map(|(p, _)| p).collect()
+}
+
+/// Whether the field at `path` shows a dash: it, something in it or what holds it differs.
+fn is_mixed(mixed: Option<&HashSet<String>>, path: &str) -> bool {
+    mixed.is_some_and(|m| {
+        m.iter().any(|p| {
+            p == path
+                || p.strip_prefix(path)
+                    .is_some_and(|rest| rest.starts_with('/'))
+                || path
+                    .strip_prefix(p.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+                || p.is_empty()
+        })
+    })
+}
+
+/// The value at a `/a/b/0` path.
+fn value_at<'v>(root: &'v Value, path: &str) -> Option<&'v Value> {
+    if path.is_empty() {
+        return Some(root);
+    }
+    root.pointer(path)
+}
+
+/// Edit one component of several objects at once: the shown one's value, with differing
+/// fields dashed; what changes is set on each object, field by field.
+fn edit_many(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    editor: &mut Editor,
+    target: &Target,
+    value: &Value,
+    others: &[Entity],
+    mixed: &HashSet<String>,
+) {
+    let mut edited = value.clone();
+    let mut ctx = EditCtx {
+        world,
+        editor,
+        target,
+        root: value,
+        marks: None,
+        mixed: Some(mixed),
+        set_all: None,
+    };
+    let changed = match &mut edited {
+        Value::Object(map) => edit_fields(ui, &mut ctx, "", map),
+        other => edit_value(ui, &mut ctx, "", "value", other),
+    };
+    let set_all = ctx.set_all.take();
+    let Target::Component(entity, entry) = target else {
+        return;
+    };
+    let mut changes = Vec::new();
+    if changed {
+        changed_paths(value, &edited, "", &mut changes);
+    }
+    if let Some(path) = set_all
+        && let Some(v) = value_at(value, &path)
+    {
+        changes.push((path, v.clone()));
+    }
+    if changes.is_empty() {
+        return;
+    }
+    let commands = set_fields(
+        world,
+        entry,
+        std::iter::once(*entity).chain(others.iter().copied()),
+        &changes,
+    );
+    apply_all(world, editor, format!("Edit {}", entry.name), commands);
+}
+
+/// Set one field of a component on several entities, one undo step (what a Details edit does
+/// with several objects selected; scripts use it too).
+pub fn set_on_all(
+    world: &mut World,
+    editor: &mut Editor,
+    entities: &[Entity],
+    component: &str,
+    path: &str,
+    value: Value,
+) {
+    let Some(entry) = world
+        .resource::<TypeRegistry>()
+        .component(component)
+        .cloned()
+    else {
+        return;
+    };
+    let changes = [(path.to_string(), value)];
+    let commands = set_fields(world, &entry, entities.iter().copied(), &changes);
+    apply_all(world, editor, format!("Edit {component}"), commands);
+}
+
+/// Commands that set `changes` (paths and values) in each entity's own value of a component.
+fn set_fields(
+    world: &World,
+    entry: &ComponentEntry,
+    entities: impl Iterator<Item = Entity>,
+    changes: &[(String, Value)],
+) -> Vec<Command> {
+    entities
+        .filter_map(|e| {
+            let before = (entry.get)(world, e)?;
+            let mut after = before.clone();
+            for (path, v) in changes {
+                if path.is_empty() {
+                    after = v.clone();
+                } else {
+                    set_at(&mut after, path, v.clone());
+                }
+            }
+            (after != before).then(|| Command::Component {
+                entity: e,
+                name: entry.name.clone(),
+                before: Some(before),
+                after: Some(after),
+            })
+        })
+        .collect()
 }
 
 /// One-click setups that span modules (they only add registered components).
@@ -322,7 +562,7 @@ fn add_component_button(
     ui: &mut egui::Ui,
     world: &mut World,
     editor: &mut Editor,
-    entity: Entity,
+    entities: &[Entity],
     registry: &TypeRegistry,
 ) {
     let button = ui.add_sized(
@@ -344,8 +584,9 @@ fn add_component_button(
                 .max_height(360.0)
                 .show(ui, |ui| {
                     for entry in registry.components() {
+                        // What every selected object already has isn't offered.
                         if entry.name == "Name"
-                            || (entry.has)(world, entity)
+                            || entities.iter().all(|&e| (entry.has)(world, e))
                             || (!filter.is_empty()
                                 && !entry.name.to_lowercase().contains(&filter)
                                 && !entry.doc.to_lowercase().contains(&filter))
@@ -356,16 +597,17 @@ fn add_component_button(
                             .add(egui::Button::new(&entry.name).frame(false))
                             .on_hover_text(&entry.doc);
                         if r.clicked() {
-                            editor::apply(
-                                world,
-                                editor,
-                                Command::Component {
-                                    entity,
+                            let commands = entities
+                                .iter()
+                                .filter(|&&e| !(entry.has)(world, e))
+                                .map(|&e| Command::Component {
+                                    entity: e,
                                     name: entry.name.clone(),
                                     before: None,
                                     after: Some(json!({})),
-                                },
-                            );
+                                })
+                                .collect();
+                            apply_all(world, editor, format!("Add {}", entry.name), commands);
                             editor.add_filter.clear();
                             ui.close();
                         }
@@ -436,6 +678,8 @@ fn edit_marked(
         target,
         root: value,
         marks,
+        mixed: None,
+        set_all: None,
     };
     let changed = match &mut edited {
         Value::Object(map) => edit_fields(ui, &mut ctx, "", map),
@@ -470,6 +714,16 @@ struct EditCtx<'a> {
     root: &'a Value,
     /// The prefab overrides of the part being edited, and the component's name.
     marks: Option<(&'a crate::prefab_ui::Marks, &'a str)>,
+    /// Editing several objects: the paths whose values differ between them.
+    mixed: Option<&'a HashSet<String>>,
+    /// A differing field to set to the shown value on all of them.
+    set_all: Option<String>,
+}
+
+impl EditCtx<'_> {
+    fn mixed(&self, path: &str) -> bool {
+        is_mixed(self.mixed, path)
+    }
 }
 
 fn edit_fields(
@@ -529,6 +783,15 @@ fn edit_fields(
                         r.context_menu(|ui| {
                             crate::prefab_ui::item_menu(ui, ctx.world, ctx.editor, m.root, item);
                         });
+                    } else if ctx.mixed(&child_path) {
+                        // Unity's "Set to Value of ...".
+                        r.on_hover_text("Differs between the selected objects. Right-click to set all to this value.")
+                            .context_menu(|ui| {
+                                if ui.button("Set all to this value").clicked() {
+                                    ctx.set_all = Some(child_path.clone());
+                                    ui.close();
+                                }
+                            });
                     }
                 },
             );
@@ -572,9 +835,12 @@ fn edit_value(
     key: &str,
     value: &mut Value,
 ) -> bool {
+    let mixed = ctx.mixed(path);
     match value {
-        Value::Bool(b) => ui.checkbox(b, "").changed(),
-        Value::Number(n) => edit_number(ui, key, n),
+        Value::Bool(b) => ui
+            .add(egui::Checkbox::new(b, "").indeterminate(mixed))
+            .changed(),
+        Value::Number(n) => edit_number_sized(ui, key, n, None, mixed),
         Value::String(s) => edit_string(ui, ctx, path, s),
         Value::Null => {
             ui.label(theme::dim("None"));
@@ -590,10 +856,6 @@ fn edit_value(
     }
 }
 
-fn edit_number(ui: &mut egui::Ui, key: &str, n: &mut Number) -> bool {
-    edit_number_sized(ui, key, n, None)
-}
-
 /// Width for each of `n` fields sharing the rest of the row, each after a one-letter label.
 fn field_width(ui: &egui::Ui, n: usize) -> f32 {
     let spacing = ui.spacing().item_spacing.x;
@@ -607,10 +869,23 @@ fn add_sized_opt(ui: &mut egui::Ui, width: Option<f32>, w: impl egui::Widget) ->
     }
 }
 
-fn edit_number_sized(ui: &mut egui::Ui, key: &str, n: &mut Number, width: Option<f32>) -> bool {
+/// A dash in place of a number that differs between the selected objects (Unity's "-").
+const MIXED: &str = "-";
+
+fn edit_number_sized(
+    ui: &mut egui::Ui,
+    key: &str,
+    n: &mut Number,
+    width: Option<f32>,
+    mixed: bool,
+) -> bool {
     if let Some(i) = n.as_i64().filter(|_| !n.is_f64()) {
         let mut v = i;
-        let r = add_sized_opt(ui, width, egui::DragValue::new(&mut v).speed(0.1));
+        let mut drag = egui::DragValue::new(&mut v).speed(0.1);
+        if mixed {
+            drag = drag.custom_formatter(|_, _| MIXED.into());
+        }
+        let r = add_sized_opt(ui, width, drag);
         if r.changed() {
             *n = Number::from(v);
             return true;
@@ -620,7 +895,9 @@ fn edit_number_sized(ui: &mut egui::Ui, key: &str, n: &mut Number, width: Option
     let mut v = n.as_f64().unwrap_or(0.0);
     let speed = (v.abs() * 0.01).clamp(0.001, 1000.0);
     let mut drag = egui::DragValue::new(&mut v).speed(speed).max_decimals(4);
-    if key.ends_with("_deg") {
+    if mixed {
+        // Just the dash: a unit after it would read as a value.
+    } else if key.ends_with("_deg") {
         drag = drag.suffix("°");
     } else if key.ends_with("_m") || key == "range" || key == "radius" || key == "height" {
         drag = drag.suffix(" m");
@@ -628,6 +905,9 @@ fn edit_number_sized(ui: &mut egui::Ui, key: &str, n: &mut Number, width: Option
         drag = drag.suffix(" kg");
     } else if key.ends_with("_c") {
         drag = drag.suffix(" °C");
+    }
+    if mixed {
+        drag = drag.custom_formatter(|_, _| MIXED.into());
     }
     let r = add_sized_opt(ui, width, drag);
     if r.changed()
@@ -652,8 +932,9 @@ fn edit_string(ui: &mut egui::Ui, ctx: &mut EditCtx, path: &str, s: &mut String)
     };
     if let Some(variants) = variants {
         let mut changed = false;
+        let shown = if ctx.mixed(path) { MIXED } else { s.as_str() };
         egui::ComboBox::from_id_salt(("enum", path))
-            .selected_text(s.as_str())
+            .selected_text(shown)
             .show_ui(ui, |ui| {
                 for v in &variants {
                     if ui.selectable_label(s == v, v).clicked() && s != v {
@@ -663,6 +944,10 @@ fn edit_string(ui: &mut egui::Ui, ctx: &mut EditCtx, path: &str, s: &mut String)
                 }
             });
         return changed;
+    }
+    if ctx.mixed(path) {
+        ui.label(theme::dim(MIXED))
+            .on_hover_text("Differs between the selected objects");
     }
     ui.add(egui::TextEdit::singleline(s).desired_width(180.0))
         .changed()
@@ -683,8 +968,10 @@ fn edit_enum_object(
     ui.vertical(|ui| {
         match enum_variants(ctx, path) {
             Some(variants) => {
+                // Differing variants dash; the same variant shows, with its differing fields.
+                let differs = ctx.mixed.is_some_and(|m| m.contains(path));
                 egui::ComboBox::from_id_salt(("enum", path))
-                    .selected_text(&variant)
+                    .selected_text(if differs { MIXED } else { variant.as_str() })
                     .show_ui(ui, |ui| {
                         for v in &variants {
                             if ui.selectable_label(&variant == v, v).clicked() && &variant != v {
@@ -692,6 +979,10 @@ fn edit_enum_object(
                             }
                         }
                     });
+            }
+            None if ctx.mixed.is_some_and(|m| m.contains(path)) => {
+                ui.label(theme::dim(MIXED))
+                    .on_hover_text("Differs between the selected objects");
             }
             None => {
                 ui.label(egui::RichText::new(&variant).color(theme::ACCENT));
@@ -728,6 +1019,10 @@ fn edit_array(
     let all_numbers = !items.is_empty() && items.iter().all(|v| v.is_number());
     if all_numbers && (2..=4).contains(&items.len()) {
         if is_color_key(key) && items.len() >= 3 {
+            if ctx.mixed(path) {
+                ui.label(theme::dim(MIXED))
+                    .on_hover_text("Differs between the selected objects");
+            }
             return edit_color(ui, items);
         }
         let labels = ["X", "Y", "Z", "W"];
@@ -742,7 +1037,8 @@ fn edit_array(
                             .color(theme::AXIS_COLORS[i])
                             .small(),
                     );
-                    changed |= edit_number_sized(ui, key, n, Some(width));
+                    let mixed = ctx.mixed(&format!("{path}/{i}"));
+                    changed |= edit_number_sized(ui, key, n, Some(width), mixed);
                 }
             }
         });
@@ -831,7 +1127,7 @@ fn edit_color(ui: &mut egui::Ui, items: &mut [Value]) -> bool {
         let width = field_width(ui, items.len()) + 10.0;
         for item in items.iter_mut() {
             if let Value::Number(n) = item {
-                changed |= edit_number_sized(ui, "", n, Some(width));
+                changed |= edit_number_sized(ui, "", n, Some(width), false);
             }
         }
     });
@@ -924,16 +1220,18 @@ pub fn parse_variants(err: &str) -> Option<Vec<String>> {
     (!names.is_empty()).then_some(names)
 }
 
-/// Transform with Euler angles in degrees and a uniform-scale lock.
+/// Transform with Euler angles in degrees. With several objects, each axis that differs shows a
+/// dash, and an edit sets only the axis that was touched on each object.
 fn transform_editor(
     ui: &mut egui::Ui,
     world: &mut World,
     editor: &mut Editor,
     entity: Entity,
+    others: &[Entity],
     value: &Value,
     marks: Option<(&crate::prefab_ui::Marks, &str)>,
 ) {
-    let Ok(mut t) = serde_json::from_value::<Transform>(value.clone()) else {
+    let Ok(t) = serde_json::from_value::<Transform>(value.clone()) else {
         return;
     };
     // A row's label, marked when a prefab copy overrides that field.
@@ -955,109 +1253,104 @@ fn transform_editor(
                 r.context_menu(|ui| crate::prefab_ui::item_menu(ui, world, editor, m.root, item));
             }
         };
-    let mut changed = false;
+    let rows = |t: &Transform| -> [[f64; 3]; 3] {
+        let (y, x, z) = t.rotation.to_euler(glam::EulerRot::YXZ);
+        [
+            t.translation.to_array(),
+            [x, y, z].map(|a| a.to_degrees() as f64),
+            t.scale.to_array().map(|v| v as f64),
+        ]
+    };
+    let shown = rows(&t);
+    let all: Vec<(Entity, Transform)> = std::iter::once((entity, t))
+        .chain(others.iter().filter_map(|&o| {
+            let v = world.get::<Transform>(o)?;
+            Some((o, *v))
+        }))
+        .collect();
+    // Which axes differ (a hair's difference is no difference).
+    let mut mixed = [[false; 3]; 3];
+    for (_, o) in &all[1..] {
+        let r = rows(o);
+        for (row, tol) in [1e-4, 1e-3, 1e-5].into_iter().enumerate() {
+            for axis in 0..3 {
+                mixed[row][axis] |= (r[row][axis] - shown[row][axis]).abs() > tol;
+            }
+        }
+    }
+    let mut edited = shown;
     egui::Grid::new(("transform", entity))
         .num_columns(2)
         .spacing([10.0, 4.0])
         .min_col_width(70.0)
         .show(ui, |ui| {
-            label(ui, world, editor, "Position", "/translation");
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 3.0;
-                let w = field_width(ui, 3);
-                for (i, v) in [
-                    &mut t.translation.x,
-                    &mut t.translation.y,
-                    &mut t.translation.z,
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    ui.label(
-                        egui::RichText::new(["X", "Y", "Z"][i])
-                            .color(theme::AXIS_COLORS[i])
-                            .small(),
-                    );
-                    changed |= ui
-                        .add_sized(
-                            [w, 20.0],
-                            egui::DragValue::new(v).speed(0.01).max_decimals(3),
-                        )
-                        .changed();
-                }
-            });
-            ui.end_row();
-
-            label(ui, world, editor, "Rotation", "/rotation");
-            let (y, x, z) = t.rotation.to_euler(glam::EulerRot::YXZ);
-            let mut deg = [x.to_degrees(), y.to_degrees(), z.to_degrees()];
-            let mut rot_changed = false;
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 3.0;
-                let w = field_width(ui, 3);
-                for (i, v) in deg.iter_mut().enumerate() {
-                    ui.label(
-                        egui::RichText::new(["X", "Y", "Z"][i])
-                            .color(theme::AXIS_COLORS[i])
-                            .small(),
-                    );
-                    rot_changed |= ui
-                        .add_sized(
-                            [w, 20.0],
-                            egui::DragValue::new(v)
-                                .speed(0.5)
-                                .max_decimals(2)
-                                .suffix("°"),
-                        )
-                        .changed();
-                }
-            });
-            if rot_changed {
-                t.rotation = Quat::from_euler(
-                    glam::EulerRot::YXZ,
-                    deg[1].to_radians(),
-                    deg[0].to_radians(),
-                    deg[2].to_radians(),
-                );
-                changed = true;
+            for (row, (text, field, speed, decimals, suffix)) in [
+                ("Position", "/translation", 0.01, 3, ""),
+                ("Rotation", "/rotation", 0.5, 2, "°"),
+                ("Scale", "/scale", 0.01, 3, ""),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                label(ui, world, editor, text, field);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    let w = field_width(ui, 3);
+                    for axis in 0..3 {
+                        ui.label(
+                            egui::RichText::new(["X", "Y", "Z"][axis])
+                                .color(theme::AXIS_COLORS[axis])
+                                .small(),
+                        );
+                        let mut drag = egui::DragValue::new(&mut edited[row][axis])
+                            .speed(speed)
+                            .max_decimals(decimals);
+                        drag = if mixed[row][axis] {
+                            drag.custom_formatter(|_, _| MIXED.into())
+                        } else {
+                            drag.suffix(suffix)
+                        };
+                        ui.add_sized([w, 20.0], drag);
+                    }
+                });
+                ui.end_row();
             }
-            ui.end_row();
-
-            label(ui, world, editor, "Scale", "/scale");
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 3.0;
-                let w = field_width(ui, 3);
-                for (i, v) in [&mut t.scale.x, &mut t.scale.y, &mut t.scale.z]
-                    .into_iter()
-                    .enumerate()
-                {
-                    ui.label(
-                        egui::RichText::new(["X", "Y", "Z"][i])
-                            .color(theme::AXIS_COLORS[i])
-                            .small(),
-                    );
-                    changed |= ui
-                        .add_sized(
-                            [w, 20.0],
-                            egui::DragValue::new(v).speed(0.01).max_decimals(3),
-                        )
-                        .changed();
-                }
-            });
-            ui.end_row();
         });
-    if changed && let Ok(after) = serde_json::to_value(t) {
-        editor::apply(
-            world,
-            editor,
-            Command::Component {
-                entity,
-                name: "Transform".into(),
-                before: Some(value.clone()),
-                after: Some(after),
-            },
-        );
+    if edited == shown {
+        return;
     }
+    // Each object keeps its own values but the touched axes.
+    let commands: Vec<Command> = all
+        .iter()
+        .filter_map(|&(e, before)| {
+            let mut r = rows(&before);
+            for row in 0..3 {
+                for axis in 0..3 {
+                    if edited[row][axis] != shown[row][axis] {
+                        r[row][axis] = edited[row][axis];
+                    }
+                }
+            }
+            let mut after = before;
+            after.translation = DVec3::from_array(r[0]);
+            if r[1] != rows(&before)[1] {
+                after.rotation = Quat::from_euler(
+                    glam::EulerRot::YXZ,
+                    (r[1][1] as f32).to_radians(),
+                    (r[1][0] as f32).to_radians(),
+                    (r[1][2] as f32).to_radians(),
+                );
+            }
+            after.scale = Vec3::from_array(r[2].map(|v| v as f32));
+            (after != before).then(|| Command::Component {
+                entity: e,
+                name: "Transform".into(),
+                before: serde_json::to_value(before).ok(),
+                after: serde_json::to_value(after).ok(),
+            })
+        })
+        .collect();
+    apply_all(world, editor, "Edit Transform".into(), commands);
 }
 
 #[cfg(test)]
@@ -1085,6 +1378,45 @@ mod tests {
         assert_eq!(
             parse_variants(&err).unwrap(),
             vec!["Dynamic", "Kinematic", "Static"]
+        );
+    }
+
+    #[test]
+    fn many_objects_change_only_the_touched_field() {
+        // Two lights that differ in color: the shown one's intensity is dragged.
+        let shown = json!({"color": [1.0, 0.5, 0.2], "intensity_lm": 800.0, "shadows": true});
+        let other = json!({"color": [0.2, 0.5, 1.0], "intensity_lm": 800.0, "shadows": true});
+        let mut differs = Vec::new();
+        changed_paths(&shown, &other, "", &mut differs);
+        let mixed: HashSet<String> = differs.into_iter().map(|(p, _)| p).collect();
+        assert!(is_mixed(Some(&mixed), "/color"));
+        assert!(is_mixed(Some(&mixed), "/color/0"));
+        assert!(!is_mixed(Some(&mixed), "/color/1"), "{mixed:?}");
+        assert!(!is_mixed(Some(&mixed), "/intensity_lm"));
+
+        let mut edited = shown.clone();
+        edited["intensity_lm"] = json!(1200.0);
+        let mut changes = Vec::new();
+        changed_paths(&shown, &edited, "", &mut changes);
+        assert_eq!(changes, vec![("/intensity_lm".to_string(), json!(1200.0))]);
+        let mut theirs = other.clone();
+        for (path, v) in &changes {
+            assert!(set_at(&mut theirs, path, v.clone()));
+        }
+        // The other light keeps its own color.
+        assert_eq!(theirs["color"], json!([0.2, 0.5, 1.0]));
+        assert_eq!(theirs["intensity_lm"], json!(1200.0));
+
+        // Another enum variant is one change of the whole enum.
+        let a = json!({"projection": {"Perspective": {"fov_y_deg": 60.0}}});
+        let b = json!({"projection": {"Orthographic": {"height": 10.0}}});
+        let mut changes = Vec::new();
+        changed_paths(&a, &b, "", &mut changes);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].0, "/projection");
+        assert_eq!(
+            value_at(&b, "/projection/Orthographic/height"),
+            Some(&json!(10.0))
         );
     }
 

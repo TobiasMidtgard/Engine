@@ -140,6 +140,7 @@ fn main() {
             Some("round21") => shots::round21(dir),
             Some("round22") => shots::round22(dir),
             Some("round23") => shots::round23(dir),
+            Some("round24") => shots::round24(dir),
             Some("play") => shots::play_in_editor(dir),
             _ => shots::gallery(dir),
         };

@@ -2249,6 +2249,55 @@ pub fn round23(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Round 24: Details edits several objects at once. Six crates (differing positions dashed),
+/// all made taller in one edit, then a mixed selection that hides what not all of them have.
+pub fn round24(dir: impl Into<PathBuf>) -> ShotScript {
+    let crates = |world: &mut World| -> Vec<Entity> {
+        (1..=6)
+            .filter_map(|i| find(world, &format!("Crate {i}")))
+            .collect()
+    };
+    let steps = vec![
+        Step::Camera(DVec3::new(6.5, 4.0, 6.0), DVec3::new(-2.5, 0.8, -3.5)),
+        Step::Do(Box::new(move |world, editor| {
+            editor.icons = false;
+            editor.select(find(world, "Crate 1"));
+        })),
+        Step::Wait(40),
+        Step::Shot("113_one_crate"),
+        Step::Do(Box::new(move |world, editor| {
+            editor.selection = crates(world);
+        })),
+        Step::Wait(20),
+        Step::Shot("114_six_crates_differing_dashed"),
+        Step::Do(Box::new(move |world, editor| {
+            let all = crates(world);
+            crate::inspector::set_on_all(
+                world,
+                editor,
+                &all,
+                "Transform",
+                "/scale/1",
+                serde_json::json!(1.6),
+            );
+        })),
+        Step::Wait(30),
+        Step::Shot("115_all_taller_in_one_edit"),
+        Step::Do(Box::new(editor::undo)),
+        Step::Wait(30),
+        Step::Shot("116_one_undo_puts_all_back"),
+        Step::Do(Box::new(|world, editor| {
+            editor.selection = ["Barrel", "Boulder", "Lamp post", "Crate 3"]
+                .iter()
+                .filter_map(|n| find(world, n))
+                .collect();
+        })),
+        Step::Wait(20),
+        Step::Shot("117_mixed_selection_shared_only"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {
