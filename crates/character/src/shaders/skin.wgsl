@@ -188,8 +188,10 @@ fn skin_relief(r: vec3<f32>, m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, footpr
     let lids = m0.z;
     let cloth = m2.x;
     let pore_size = mix(0.0006, 0.00095, character.skin2.w) * (1.0 + 0.45 * nose - 0.3 * lids);
-    // Fade detail that is smaller than a pixel (it would only shimmer).
-    let pore_vis = saturate((pore_size / max(footprint, 1e-7) - 1.2) * 0.6);
+    // Fade detail that is smaller than a pixel (it would only shimmer). Temporal anti-aliasing
+    // resolves pores down to about a pixel, and at portrait distance that is all of them; faded
+    // out any sooner, the face reads as smooth wax.
+    let pore_vis = saturate((pore_size / max(footprint, 1e-7) - 0.7) * 0.7);
     var h = 0.0;
     if (pore_vis > 0.0) {
         let c = cells3(r / pore_size);
@@ -370,8 +372,10 @@ fn skin_spec(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, rough: f32) -> f32 {
     let h = normalize(l + v);
     let n_dot_l = saturate(dot(n, l));
     let n_dot_v = max(dot(n, v), 1e-4);
-    let a1 = max(rough * rough, 0.01);
-    let a2 = min(sq(rough * 1.65), 1.0);
+    // Two lobes, as Unreal's skin (0.75 and 1.3 times the roughness, mostly the sharper): one
+    // broad, soft highlight is the sheen of wax or plastic.
+    let a1 = max(sq(rough * 0.75), 0.01);
+    let a2 = min(sq(rough * 1.3), 1.0);
     let d = mix(d_ggx(saturate(dot(n, h)), a2), d_ggx(saturate(dot(n, h)), a1), 0.85);
     let vis = v_smith_ggx_correlated(n_dot_v, n_dot_l, a1);
     let f = f_schlick(vec3<f32>(0.028), saturate(dot(l, h))).x;
@@ -489,7 +493,7 @@ fn shade_skin(s: SkinLight, rel: vec3<f32>) -> SkinShade {
     let brdf = env_brdf_approx(vec3<f32>(0.028), rough, n_dot_v);
     specular += env * brdf * s.specular * specular_occlusion(n_dot_v, visibility, rough * rough);
     // Peach fuzz catches light at grazing angles (on the surface: not blurred).
-    let fuzz = pow(1.0 - n_dot_v, 4.0) * 0.05 * s.scatter;
+    let fuzz = pow(1.0 - n_dot_v, 4.0) * 0.09 * s.scatter;
     specular += fuzz * (sky_r * PI * INV_PI) * visibility;
     return SkinShade(pre_expose(color + specular), pre_expose(specular));
 }
@@ -663,6 +667,9 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     // Undertone: warm is golden-olive, cool is pinker.
     let ut = character.skin.z;
     albedo *= select(vec3<f32>(1.0, 1.0 - 0.04 * ut, 1.0 + 0.04 * ut), vec3<f32>(1.0, 1.0 - 0.02 * ut, 1.0 - 0.16 * ut), ut > 0.0);
+    // The face's color zones (Gurney; Jimenez et al. 2010): the forehead a little golden, over
+    // less blood than the band of the cheeks, nose and ears.
+    albedo *= mix(vec3<f32>(1.0), vec3<f32>(1.03, 1.0, 0.92), forehead * 0.7 * (1.0 - saturate(mel * 1.3)));
     // Darker, slightly violet skin around the eyes.
     albedo *= mix(vec3<f32>(1.0), vec3<f32>(0.88, 0.83, 0.88), lids * 0.55);
     // Lips: thin skin over blood, rose on fair skin, deeper on dark skin, where the outer
@@ -721,14 +728,26 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     // Pores hold a little shadow.
     albedo *= 1.0 - 0.12 * d0.pore - 0.15 * d0.wrinkle;
 
-    // Shine: oily T-zone, wet lips and lid rims, matte pores.
+    // Shine, by region as Weyrich et al. measured faces (2006): the nose shiniest and the most
+    // specular, then the lids and the forehead (sebum), the cheeks driest; patchy over a few
+    // centimetres. Wet lips and lid rims; matte pores and creases. One even shine all over
+    // reads as wax.
     let oil = character.skin.w;
-    var rough = 0.56 - 0.12 * oil * saturate(forehead + nose + chin) - 0.08 * oil;
-    rough += (value_noise3(r * 300.0 + seed) - 0.5) * 0.06 + (value_noise3(r * 900.0 + seed) - 0.5) * 0.05;
-    rough = mix(rough, mix(0.4, 0.28, wet), lips);
+    let tzone = saturate(forehead + nose + chin);
+    // (Before the lobes' scale: the sharper lobe is three quarters of this.)
+    var rough = 0.7 - 0.12 * nose - 0.08 * forehead - 0.03 * chin - 0.08 * lids;
+    rough = max(rough, 0.54) - 0.08 * oil * tzone - 0.05 * oil;
+    let patchy = value_noise3(r * 50.0 + seed * 0.3) - 0.5;
+    rough += patchy * 0.1 + (value_noise3(r * 300.0 + seed) - 0.5) * 0.06 + (value_noise3(r * 900.0 + seed) - 0.5) * 0.05;
+    // Pores too small to see still scatter the highlight (the normals they would bend, as
+    // roughness: Toksvig).
+    let pore_size = mix(0.0006, 0.00095, character.skin2.w);
+    rough += 0.05 * (1.0 - saturate((pore_size / max(footprint, 1e-7) - 0.7) * 0.7)) * (1.0 - lips);
+    rough = mix(rough, mix(0.45, 0.32, wet), lips);
     rough = mix(rough, 0.18, rim);
-    rough += 0.12 * d0.pore + 0.1 * d0.wrinkle + 0.06 * scalp_tint;
-    var specular = (1.0 - 0.6 * d0.pore) * (1.0 - 0.3 * scalp_tint);
+    rough += 0.12 * d0.pore + 0.1 * d0.wrinkle + 0.06 * scalp_tint + 0.12 * d0.lines;
+    var specular = (1.0 - 0.8 * d0.pore) * (1.0 - 0.3 * scalp_tint) * (1.0 - 0.5 * d0.lines);
+    specular *= saturate(1.0 + 0.15 * nose + 0.1 * forehead - 0.2 * cheeks) * (1.0 - patchy * 0.3);
 
     var scatter = 1.0;
     // The shirt: a heather knit in the outfit's color, its collar band a shade darker, and

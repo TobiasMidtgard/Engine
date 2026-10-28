@@ -507,9 +507,12 @@ fn grow_beard(a: &Appearance, skin: &SkinMesh, collider: &SkinCollider) -> Optio
         // Stubble is many fine hairs (a few hundred per cm² on a man's cheek): at a few
         // dozen thick ones it reads as dirt.
         BeardStyle::Stubble => (0.0014, 140.0, 3u32),
-        BeardStyle::Short => (0.009, 60.0, 6),
-        BeardStyle::Full => (0.03, 60.0, 9),
-        BeardStyle::Goatee => (0.014, 60.0, 7),
+        // Beard hairs are coarser than scalp hair, about 100-150 um (and as many per cm² as
+        // the scalp's thinner areas): drawn twice as thick at half the count they read as
+        // steel wool.
+        BeardStyle::Short => (0.009, 95.0, 6),
+        BeardStyle::Full => (0.03, 95.0, 9),
+        BeardStyle::Goatee => (0.014, 95.0, 7),
     };
     let goatee = a.beard_style() == BeardStyle::Goatee;
     let stubble = a.beard_style() == BeardStyle::Stubble;
@@ -542,13 +545,15 @@ fn grow_beard(a: &Appearance, skin: &SkinMesh, collider: &SkinCollider) -> Optio
         // Moustache hairs fan down and out from the middle; the rest grow down the face and
         // under the jaw lie toward the throat.
         let above_lips = sp.rest.y > 0.668 && sp.rest.x.abs() < 0.03;
+        // (Moustache hairs are trimmed short of the lips: grown as long as the beard and
+        // fanned out, one crossed the cheek.)
         let down = if above_lips {
-            Vec3::new(sp.rest.x.signum() * 0.6, -1.0, 0.1)
+            Vec3::new(sp.rest.x.signum() * 0.35, -1.0, 0.1)
         } else {
             Vec3::new(sp.rest.x.signum() * 0.12, -1.0, 0.25)
         };
         let d = tangent(down, sp.n);
-        let l = len * r.range(0.6, 1.2);
+        let l = f32::min(len, if above_lips { 0.014 } else { f32::MAX }) * r.range(0.6, 1.2);
         let lift = r.range(0.25, 0.55);
         let mut dir = (d + sp.n * lift).normalize();
         let seg = l / (n - 1) as f32;
@@ -563,7 +568,7 @@ fn grow_beard(a: &Appearance, skin: &SkinMesh, collider: &SkinCollider) -> Optio
             let p = pts[k - 1] + dir * seg;
             pts[k] = collider.push_out(p, 0.0006 + l * 0.15 * t);
         }
-        let root = if stubble { 0.00005 } else { 0.00009 };
+        let root = if stubble { 0.00005 } else { 0.000065 };
         set.push(&pts, root * HAIR_WIDTH, 0.00004 * HAIR_WIDTH, r.f32());
     }
     Some(set)
