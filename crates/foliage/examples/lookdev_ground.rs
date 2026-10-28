@@ -216,7 +216,7 @@ fn lay_out_debris(world: &mut World) {
 
 /// Debris pieces shown (not culled by distance) and their triangles before frustum culling.
 fn debris_load(world: &mut World) -> (usize, usize) {
-    let mut q = world.query_filtered::<&MeshRenderer, With<scenery::Debris>>();
+    let mut q = world.query_filtered::<&MeshRenderer, With<scenery::LitterPiece>>();
     let handles: Vec<_> = q
         .iter(world)
         .filter(|r| r.visible)
@@ -380,7 +380,7 @@ fn main() {
     // And at the ground where the most debris lies, off the trail.
     let spots: Vec<Vec2> = app
         .world
-        .query_filtered::<&Transform, With<scenery::Debris>>()
+        .query_filtered::<&Transform, With<scenery::LitterPiece>>()
         .iter(&app.world)
         .map(|t| {
             Vec2::new(
@@ -454,7 +454,7 @@ fn main() {
     let rocks = app.world.query::<&scenery::Rock>().iter(&app.world).count();
     let debris = app
         .world
-        .query::<&scenery::Debris>()
+        .query::<&scenery::LitterPiece>()
         .iter(&app.world)
         .count();
     println!("scenery: {rocks} rocks (with pebbles), {debris} debris and reeds");

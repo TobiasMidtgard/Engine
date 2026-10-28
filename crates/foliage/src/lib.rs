@@ -124,7 +124,7 @@ impl Plugin for FoliagePlugin {
                  them): no growth, seeding, fire or felling and no collider; it draws near, far \
                  or distant detail by camera distance and follows the season.",
             )
-            .register_component::<scenery::Debris>(
+            .register_component::<scenery::LitterPiece>(
                 "Scattered twig, branch, cone, leaves or reeds; hidden beyond draw_distance_m.",
             )
             .register_component::<demo::DemoFelling>(
