@@ -301,4 +301,59 @@ mod tests {
         let mut plants = app.world.query::<&Plant>();
         assert_eq!(plants.iter(&app.world).count(), 0);
     }
+
+    #[test]
+    fn walking_up_to_a_tree_cross_fades_its_detail() {
+        use crate::lod_fade::FadeGhost;
+        use engine_render::DitherFade;
+        let mut app = app();
+        let library = app.world.resource::<PlantLibrary>().clone();
+        let pine = SceneryTree::new(&library, "pine", 7).unwrap();
+        let cam = app
+            .world
+            .spawn((Camera::default(), Transform::from_translation(DVec3::ZERO)))
+            .id();
+        let tree = app
+            .world
+            .spawn((
+                Transform::from_translation(DVec3::new(150.0, 0.0, 0.0)),
+                pine,
+            ))
+            .id();
+        app.update_n(SLICES as usize + 2);
+        let before = shown(&app, tree);
+        // Walk up at 1.5 m a frame (90 m/s at 60 fps: brisk, but no cut).
+        let (mut ghosts_seen, mut dithered_seen) = (0, 0);
+        for k in 1..=80 {
+            app.world.get_mut::<Transform>(cam).unwrap().translation =
+                DVec3::new(1.5 * k as f64, 0.0, 0.0);
+            app.update();
+            let mut ghosts = app.world.query_filtered::<(), With<FadeGhost>>();
+            ghosts_seen += ghosts.iter(&app.world).count();
+            let parts = app.world.get::<SceneryTreeVisual>(tree).unwrap().parts;
+            dithered_seen += parts
+                .iter()
+                .filter(|&&p| app.world.get::<DitherFade>(p).is_some())
+                .count();
+        }
+        assert_ne!(
+            shown(&app, tree),
+            before,
+            "the tree should be in full detail by now"
+        );
+        assert!(
+            ghosts_seen > 0 && dithered_seen > 0,
+            "it switched without a fade"
+        );
+        // A second after, every fade is over: no ghosts, no dither left on the parts.
+        app.update_n(60);
+        let mut ghosts = app.world.query_filtered::<(), With<FadeGhost>>();
+        assert_eq!(ghosts.iter(&app.world).count(), 0);
+        let parts = app.world.get::<SceneryTreeVisual>(tree).unwrap().parts;
+        assert!(
+            parts
+                .iter()
+                .all(|&p| app.world.get::<DitherFade>(p).is_none())
+        );
+    }
 }
