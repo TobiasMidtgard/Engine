@@ -28,6 +28,7 @@ pub use engine_world as world;
 
 use engine_core::{App, PluginGroup, PluginGroupBuilder};
 
+pub mod hlod;
 pub mod interact;
 pub mod stream;
 

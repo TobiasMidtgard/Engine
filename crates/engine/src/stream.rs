@@ -19,6 +19,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::hlod::{self, ProxyConfig};
 use engine_core::diagnostics::{Diagnostics, PROCESS_RAM_MB, process_ram_mb};
 use engine_core::ecs::resource::IsResource;
 use engine_core::prelude::*;
@@ -48,6 +49,7 @@ struct Loader {
     build: Option<BuildFn>,
     step: StepFn,
     unload: Option<Hook>,
+    proxy: ProxyConfig,
 }
 
 impl StreamCell {
@@ -75,6 +77,7 @@ impl StreamCell {
                 build,
                 step,
                 unload: None,
+                proxy: ProxyConfig::default(),
             },
         }
     }
@@ -176,6 +179,21 @@ impl StreamCell {
     /// and has no [`StreamCell::on_unload`] yet.
     pub fn keep_loaded(mut self) -> Self {
         self.info.keep_loaded = true;
+        self
+    }
+
+    /// No far-view proxy for this cell ([`crate::hlod`]): for content that moves, or that is
+    /// never seen from afar.
+    pub fn without_proxy(mut self) -> Self {
+        self.loader.proxy.enabled = false;
+        self
+    }
+
+    /// Keep the cell's far-view proxy on disk for this content version, so later runs show it
+    /// before the cell is ever visited: change `version` whenever what the cell spawns changes
+    /// (a hash of the seed and the build, say).
+    pub fn proxy_version(mut self, version: u64) -> Self {
+        self.loader.proxy.version = Some(version);
         self
     }
 
@@ -320,6 +338,7 @@ pub struct StreamingPlugin;
 
 impl Plugin for StreamingPlugin {
     fn build(&self, app: &mut App) {
+        hlod::register(app);
         app.init_resource::<StreamedCells>()
             .init_resource::<CellHooks>()
             .init_resource::<StreamingBudget>()
@@ -516,6 +535,14 @@ pub fn stream_system(world: &mut World) {
         }
     }
     fade(world, &budget);
+    let configs: Vec<ProxyConfig> = world
+        .resource::<CellHooks>()
+        .0
+        .iter()
+        .map(|s| s.loader.proxy)
+        .collect();
+    let fading: Vec<CellId> = world.resource::<Fades>().0.iter().map(|f| f.cell).collect();
+    hlod::update(world, &configs, &fading, sources.is_some());
 }
 
 /// Starts the wanted cells' builds on workers, nearest first, and collects finished ones.
@@ -724,7 +751,7 @@ fn tree(world: &World, roots: &[Entity]) -> Vec<Entity> {
 
 /// Marks the meshes this plugin hid, so their own fades are left alone.
 #[derive(Component)]
-struct StreamFade;
+pub(crate) struct StreamFade;
 
 /// Keeps loading cells' meshes hidden, then fades them in.
 fn fade(world: &mut World, budget: &StreamingBudget) {
@@ -763,6 +790,9 @@ fn fade(world: &mut World, budget: &StreamingBudget) {
             Some(at) => at.elapsed().as_secs_f32() / budget.fade_s.max(1e-3),
         };
         let done = t >= 1.0;
+        // The cell's meshes come in on the complementary pattern of its proxy going out, so
+        // together they cover every pixel once (DitherFade::pair).
+        hlod::fade_out(world, f.cell, t.min(1.0));
         for &e in &f.meshes {
             let Ok(mut entity) = world.get_entity_mut(e) else {
                 continue;
@@ -773,7 +803,7 @@ fn fade(world: &mut World, budget: &StreamingBudget) {
             if done {
                 entity.remove::<(DitherFade, StreamFade)>();
             } else if let Some(mut d) = entity.get_mut::<DitherFade>() {
-                d.0 = 1.0 - t;
+                *d = DitherFade::pair(t).1;
             }
         }
         !done

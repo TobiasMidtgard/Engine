@@ -16,6 +16,7 @@ engine_debug.workspace = true
 engine_ai_bridge.workspace = true
 bevy_ecs.workspace = true
 serde.workspace = true
+bytemuck.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
