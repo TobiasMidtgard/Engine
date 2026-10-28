@@ -27,6 +27,8 @@ pub struct FoliageLoading {
     pub(crate) trees_waiting: bool,
     /// Ground covers being rebuilt or waiting for their regions.
     pub(crate) scenery_building: usize,
+    /// How long the last frame took on the wall clock (ms), measured by [`measure_frames`].
+    pub(crate) last_frame_ms: f32,
 }
 
 impl Default for FoliageLoading {
@@ -40,6 +42,7 @@ impl Default for FoliageLoading {
             plants_waiting: false,
             trees_waiting: false,
             scenery_building: 0,
+            last_frame_ms: 0.0,
         }
     }
 }
@@ -70,9 +73,18 @@ impl FoliageLoading {
     pub(crate) fn frame_budget_ms(&self, screen: Option<&LoadingBudget>) -> f32 {
         match (self.background, screen) {
             (false, _) => f32::INFINITY,
-            (true, Some(screen)) => (screen.budget_ms as f32).max(self.budget_ms),
-            (true, None) => self.budget_ms,
+            (true, Some(screen)) => (screen.budget_ms as f32)
+                .max(self.budget_ms)
+                .max(self.frame_share_ms()),
+            (true, None) => self.budget_ms.max(self.frame_share_ms()),
         }
+    }
+
+    /// A tenth of the last frame: when frames are slow anyway (a headless render takes
+    /// seconds), loading a few ms of each would take most of an hour and change nothing a
+    /// player feels.
+    fn frame_share_ms(&self) -> f32 {
+        0.1 * self.last_frame_ms.min(5000.0)
     }
 
     /// How long a frame spends giving new plants and trees their parts: a third of the
@@ -94,5 +106,37 @@ impl FoliageLoading {
     /// Regions still working out their history or planting it.
     pub fn regions_building(&self) -> usize {
         self.regions_building
+    }
+}
+
+/// Notes how long each frame takes on the wall clock (for [`FoliageLoading`]'s budgets).
+pub(crate) fn measure_frames(
+    mut loading: ResMut<FoliageLoading>,
+    mut last: Local<Option<std::time::Instant>>,
+) {
+    let now = std::time::Instant::now();
+    if let Some(before) = last.replace(now) {
+        loading.bypass_change_detection().last_frame_ms =
+            now.duration_since(before).as_secs_f32() * 1000.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slow_frames_get_a_bigger_loading_budget() {
+        let mut l = FoliageLoading::default();
+        l.last_frame_ms = 16.0;
+        assert_eq!(l.frame_budget_ms(None), l.budget_ms);
+        // A headless render frame of 20 s may load for 0.5 s (a tenth, capped at 5 s).
+        l.last_frame_ms = 20_000.0;
+        assert_eq!(l.frame_budget_ms(None), 500.0);
+        assert!(
+            FoliageLoading::in_frame()
+                .frame_budget_ms(None)
+                .is_infinite()
+        );
     }
 }

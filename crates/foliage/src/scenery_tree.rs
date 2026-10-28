@@ -114,17 +114,21 @@ pub fn sync_scenery_trees(
     let shadow_reach = render.as_ref().map_or(350.0, |r| r.shadow_distance) + SHADOW_MARGIN_M;
     // While loading, new ones get their parts a few ms a frame (their spawns cost about as
     // much again when the commands apply).
-    let started = std::time::Instant::now();
+    // Timed from the first new one: the pass over the old ones isn't loading work.
+    let mut started: Option<std::time::Instant> = None;
     let fresh_budget = loading.fresh_budget(screen.as_deref());
-    let (mut fresh_seen, mut out_of_time) = (0u32, false);
+    let (mut fresh_seen, mut out_of_time, mut skipped) = (0u32, false, false);
     for (entity, tree, global, visual) in &mut trees {
         let fresh = visual.is_none();
         if fresh {
             if out_of_time {
+                // Only one left without its parts is still loading.
+                skipped = true;
                 continue;
             }
+            let since = *started.get_or_insert_with(std::time::Instant::now);
             fresh_seen += 1;
-            out_of_time = fresh_seen.is_multiple_of(16) && started.elapsed() > fresh_budget;
+            out_of_time = fresh_seen.is_multiple_of(16) && since.elapsed() > fresh_budget;
         }
         // Not propagated yet: its world transform still says the origin.
         if fresh && global.is_added() {
@@ -188,7 +192,7 @@ pub fn sync_scenery_trees(
             }
         }
     }
-    loading.bypass_change_detection().trees_waiting = out_of_time;
+    loading.bypass_change_detection().trees_waiting = skipped;
 }
 
 #[cfg(test)]

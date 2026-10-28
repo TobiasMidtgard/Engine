@@ -156,78 +156,79 @@ impl Plugin for FoliagePlugin {
         }
         api::register(app);
 
-        app.add_systems(
-            PreUpdate,
-            (
-                api::apply_new_sources,
-                ecology::init_regions,
-                ecology::assign_regions,
-            )
-                .chain(),
-        )
-        .add_systems(
-            FixedUpdate,
-            (
-                demo::run_demo_felling.in_set(SimSet::Gameplay),
+        app.add_systems(First, loading::measure_frames)
+            .add_systems(
+                PreUpdate,
                 (
-                    felling::apply_damage,
-                    felling::update_falling_trees,
-                    felling::place_logs,
-                    felling::release_grass_presses,
+                    api::apply_new_sources,
+                    ecology::init_regions,
+                    ecology::assign_regions,
                 )
-                    .chain()
-                    .in_set(SimSet::PostPhysics),
-                (
-                    ecology::react_to_fire,
-                    ecology::scorch_small_plants,
-                    ecology::trample,
-                    ecology::follow_terrain,
-                    ecology::grow_plants,
-                    ecology::ecology_step,
-                )
-                    .chain()
-                    .in_set(SimSet::Environment),
-            ),
-        )
-        .add_systems(
-            PostUpdate,
-            (
-                shift::follow_world_shift,
-                far_woods::follow_world_shift,
-                near_woods::follow_world_shift,
+                    .chain(),
             )
-                .in_set(engine_world::WorldShiftSet::Apply),
-        )
-        .add_systems(
-            Update,
-            (
-                (felling::stream_tree_colliders, felling::sync_tree_colliders).chain(),
-                season::follow_weather_calendar,
-                (grass::sync_region_grass, grass_wear::wear_grass).chain(),
-                felling::remove_orphan_colliders,
-                ecology::drop_unloaded_regions,
-                scenery::drop_unloaded_covers,
-                (hand_felling::chop_on_interact, hand_felling::offer_chops).chain(),
-                cave::sync_chamber_colliders,
+            .add_systems(
+                FixedUpdate,
                 (
-                    scenery::build_scenery,
-                    scenery::cull_debris,
-                    assets::ensure_species_visuals,
-                    season::apply_season_colors,
-                    season::apply_litter_color,
-                    visuals::sync_plant_visuals,
-                    growth::grow_plants,
-                    scenery_tree::sync_scenery_trees,
-                    far_woods::stream_far_woods,
-                    near_woods::stream_near_woods,
-                    visuals::sync_log_visuals,
-                    visuals::update_glow_lights,
-                    visuals::pulse_glow,
-                )
-                    .chain()
-                    .run_if(resource_exists::<Assets<Mesh>>),
+                    demo::run_demo_felling.in_set(SimSet::Gameplay),
+                    (
+                        felling::apply_damage,
+                        felling::update_falling_trees,
+                        felling::place_logs,
+                        felling::release_grass_presses,
+                    )
+                        .chain()
+                        .in_set(SimSet::PostPhysics),
+                    (
+                        ecology::react_to_fire,
+                        ecology::scorch_small_plants,
+                        ecology::trample,
+                        ecology::follow_terrain,
+                        ecology::grow_plants,
+                        ecology::ecology_step,
+                    )
+                        .chain()
+                        .in_set(SimSet::Environment),
+                ),
             )
-                .in_set(UpdateSet::Logic),
-        );
+            .add_systems(
+                PostUpdate,
+                (
+                    shift::follow_world_shift,
+                    far_woods::follow_world_shift,
+                    near_woods::follow_world_shift,
+                )
+                    .in_set(engine_world::WorldShiftSet::Apply),
+            )
+            .add_systems(
+                Update,
+                (
+                    (felling::stream_tree_colliders, felling::sync_tree_colliders).chain(),
+                    season::follow_weather_calendar,
+                    (grass::sync_region_grass, grass_wear::wear_grass).chain(),
+                    felling::remove_orphan_colliders,
+                    ecology::drop_unloaded_regions,
+                    scenery::drop_unloaded_covers,
+                    (hand_felling::chop_on_interact, hand_felling::offer_chops).chain(),
+                    cave::sync_chamber_colliders,
+                    (
+                        scenery::build_scenery,
+                        scenery::cull_debris,
+                        assets::ensure_species_visuals,
+                        season::apply_season_colors,
+                        season::apply_litter_color,
+                        visuals::sync_plant_visuals,
+                        growth::grow_plants,
+                        scenery_tree::sync_scenery_trees,
+                        far_woods::stream_far_woods,
+                        near_woods::stream_near_woods,
+                        visuals::sync_log_visuals,
+                        visuals::update_glow_lights,
+                        visuals::pulse_glow,
+                    )
+                        .chain()
+                        .run_if(resource_exists::<Assets<Mesh>>),
+                )
+                    .in_set(UpdateSet::Logic),
+            );
     }
 }
