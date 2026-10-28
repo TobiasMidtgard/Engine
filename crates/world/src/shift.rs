@@ -157,6 +157,26 @@ pub enum WorldShiftSet {
     Rebuild,
 }
 
+/// The ground under parked things moved without a [`WorldShift`]: when the focus leaves a
+/// turning frame (a trip to the Moon), the space module parks the home body's surface roots in
+/// its frame and puts them back where the body is now when the focus returns. Their transforms
+/// are moved already; world points that modules keep for them (demo paths, anchors, homes, sim
+/// caches) take `shift` as one more [`WorldShift`], after this frame's shifts.
+///
+/// `shift` maps a point as the shifts since parking left it to where the surface puts it now
+/// (`P1 · P0⁻¹ · S⁻¹`: the body's pose at unpark, the inverse of its pose at park, the inverse
+/// of the shifts between). Its `velocity` and `angular_velocity` are zero: nothing starts
+/// moving. Registered [`WorldShiftAppExt`] components, resources and pending messages follow it
+/// on their own; caches of a module's own read it as they read [`WorldShift`]. Things not on
+/// that body (orbiting ships, the camera, the sun) don't move with it, so the writer only sends
+/// it while nothing of the kind keeps world points (in practice: on the way home).
+#[derive(Message, Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceMoved {
+    /// The body whose surface moved (its `engine_space` entity).
+    pub body: Entity,
+    pub shift: WorldShift,
+}
+
 /// Something holding world positions or directions: a message, a component or a resource.
 ///
 /// Messages written before a shift and read after it would land in the wrong place (an
@@ -248,11 +268,14 @@ impl WorldShiftAppExt for App {
     }
 }
 
-fn shift_components<C>(mut shifts: MessageReader<WorldShift>, mut all: Query<&mut C>)
-where
+fn shift_components<C>(
+    mut shifts: MessageReader<WorldShift>,
+    mut surface: MessageReader<SurfaceMoved>,
+    mut all: Query<&mut C>,
+) where
     C: Component<Mutability = bevy_ecs::component::Mutable> + FollowsWorldShift,
 {
-    let Some(s) = combined(&mut shifts) else {
+    let Some(s) = with_surface(&mut shifts, &mut surface) else {
         return;
     };
     for mut c in &mut all {
@@ -260,11 +283,14 @@ where
     }
 }
 
-fn shift_resource<R>(mut shifts: MessageReader<WorldShift>, resource: Option<ResMut<R>>)
-where
+fn shift_resource<R>(
+    mut shifts: MessageReader<WorldShift>,
+    mut surface: MessageReader<SurfaceMoved>,
+    resource: Option<ResMut<R>>,
+) where
     R: Resource + Component<Mutability = bevy_ecs::component::Mutable> + FollowsWorldShift,
 {
-    let Some(s) = combined(&mut shifts) else {
+    let Some(s) = with_surface(&mut shifts, &mut surface) else {
         return;
     };
     if let Some(mut r) = resource {
@@ -276,9 +302,10 @@ where
 /// shift are in the old frame; older ones were moved by that shift), so move them all.
 fn shift_pending_messages<M: Message + FollowsWorldShift>(
     mut shifts: MessageReader<WorldShift>,
+    mut surface: MessageReader<SurfaceMoved>,
     messages: Option<ResMut<Messages<M>>>,
 ) {
-    let Some(s) = combined(&mut shifts) else {
+    let Some(s) = with_surface(&mut shifts, &mut surface) else {
         return;
     };
     let Some(mut messages) = messages else {
@@ -292,6 +319,7 @@ fn shift_pending_messages<M: Message + FollowsWorldShift>(
 
 pub(crate) fn register(app: &mut App) {
     app.add_message::<WorldShift>()
+        .add_message::<SurfaceMoved>()
         .configure_sets(
             PostUpdate,
             (
@@ -311,6 +339,22 @@ pub(crate) fn register(app: &mut App) {
 /// All shifts written this frame, combined.
 fn combined(shifts: &mut MessageReader<WorldShift>) -> Option<WorldShift> {
     shifts.read().copied().reduce(|acc, next| acc.then(&next))
+}
+
+/// This frame's shifts, then its [`SurfaceMoved`]s, combined: what a kept world point takes.
+pub fn with_surface(
+    shifts: &mut MessageReader<WorldShift>,
+    surface: &mut MessageReader<SurfaceMoved>,
+) -> Option<WorldShift> {
+    let shifts = combined(shifts);
+    let moved = surface
+        .read()
+        .map(|m| m.shift)
+        .reduce(|acc, next| acc.then(&next));
+    match (shifts, moved) {
+        (Some(s), Some(m)) => Some(s.then(&m)),
+        (s, m) => s.or(m),
+    }
 }
 
 type RootQuery<'w, 's> = Query<
@@ -609,6 +653,60 @@ mod tests {
             velocity: DVec3::new(30.0, 0.0, -12.0),
             angular_velocity: DVec3::new(0.0, 7.3e-5, 1.0e-5),
         }
+    }
+
+    #[derive(Component)]
+    struct Kept(DVec3);
+
+    #[derive(Resource)]
+    struct KeptHome(DVec3);
+
+    impl FollowsWorldShift for Kept {
+        fn follow(&mut self, s: &WorldShift) {
+            self.0.follow(s);
+        }
+    }
+
+    impl FollowsWorldShift for KeptHome {
+        fn follow(&mut self, s: &WorldShift) {
+            self.0.follow(s);
+        }
+    }
+
+    #[test]
+    fn kept_points_follow_a_moved_surface_after_the_shift() {
+        let mut app = App::new();
+        app.add_plugins(crate::WorldPlugin);
+        app.shift_components::<Kept>().shift_resource::<KeptHome>();
+        let kept = app.world.spawn(Kept(DVec3::new(10.0, 0.0, 0.0))).id();
+        app.insert_resource(KeptHome(DVec3::new(0.0, 0.0, 5.0)));
+        let body = app.world.spawn_empty().id();
+        let shift = WorldShift::translate(DVec3::new(100.0, 0.0, 0.0));
+        let moved = WorldShift {
+            rotation: DQuat::from_rotation_y(std::f64::consts::FRAC_PI_2),
+            ..WorldShift::translate(DVec3::new(0.0, 11.0, 0.0))
+        };
+        app.world.write_message(shift);
+        app.world.write_message(SurfaceMoved { body, shift: moved });
+        app.update();
+        let want = |p: DVec3| moved.point(shift.point(p));
+        let got = app.world.get::<Kept>(kept).unwrap().0;
+        assert!(
+            (got - want(DVec3::new(10.0, 0.0, 0.0))).length() < 1e-9,
+            "{got}"
+        );
+        let got = app.world.resource::<KeptHome>().0;
+        assert!(
+            (got - want(DVec3::new(0.0, 0.0, 5.0))).length() < 1e-9,
+            "{got}"
+        );
+
+        // A surface move alone, without a shift.
+        app.world.write_message(SurfaceMoved { body, shift: moved });
+        let before = app.world.get::<Kept>(kept).unwrap().0;
+        app.update();
+        let got = app.world.get::<Kept>(kept).unwrap().0;
+        assert!((got - moved.point(before)).length() < 1e-9, "{got}");
     }
 
     #[test]
