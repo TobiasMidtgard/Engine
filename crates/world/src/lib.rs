@@ -19,6 +19,8 @@
 //! * **World shifts** ([`shift`]): when the world is re-anchored (floating origin, a new
 //!   planet's frame), [`WorldShift`] says how; this crate moves everything the contracts hold
 //!   and modules move their own caches.
+//! * **Streaming** ([`stream`]): the world in cells that load around [`StreamingSource`]s;
+//!   [`StreamedCells`] says which are in.
 //! * **Combustible** ([`Combustible`]): anything that can burn, declared by its owner (foliage,
 //!   props, buildings) and simulated by the fire module.
 //! * **Module contracts** for the systems other modules build on, so each module can be ripped
@@ -42,6 +44,7 @@ pub mod physical;
 pub mod physics;
 pub mod scalability;
 pub mod shift;
+pub mod stream;
 pub mod terrain;
 
 pub use air::{AirSample, Atmospheres, BodyAtmosphere};
@@ -60,6 +63,7 @@ pub use locomotion::{
 pub use physical::*;
 pub use scalability::{QualityPreset, Scalability};
 pub use shift::{FollowsWorldShift, SurfaceMoved, WorldShift, WorldShiftAppExt, WorldShiftSet};
+pub use stream::{CellId, CellMember, CellState, StreamedCells, StreamingSource};
 pub use terrain::{EditOp, EditShape, TerrainChanged, TerrainEdit};
 
 use engine_core::math::{DVec2, DVec3, Vec3};
@@ -276,6 +280,7 @@ impl Plugin for WorldPlugin {
         terrain::register(app);
         shift::register(app);
         interact::register(app);
+        stream::register(app);
         app.init_resource::<WeatherState>()
             .init_resource::<WindField>()
             .init_resource::<WindOverride>()
