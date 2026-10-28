@@ -82,6 +82,7 @@ pub fn entity_details(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor)
     }
     ui.add_space(4.0);
 
+    crate::prefab_ui::details_bar(ui, world, editor, entity);
     quick_actions(ui, world, editor, entity);
     crate::import::settings_panel(ui, world, editor, entity);
     crate::rigs::animation_panel(ui, world, editor, entity);
@@ -101,7 +102,13 @@ pub fn entity_details(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor)
         _ => 3,
     };
     entries.sort_by_key(|c| (rank(&c.name), c.name.clone()));
+    // A part of a placed prefab: what this copy changes from its file.
+    let marks = crate::prefab_ui::marks(world, entity);
+    let hidden = ["PrefabInstance", "PrefabPart"];
     for entry in entries {
+        if hidden.contains(&entry.name.as_str()) {
+            continue;
+        }
         let Some(value) = (entry.get)(world, entity) else {
             continue;
         };
@@ -109,8 +116,37 @@ pub fn entity_details(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor)
         let mut remove = false;
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
             .show_header(ui, |ui| {
-                ui.label(egui::RichText::new(&entry.name).strong())
-                    .on_hover_text(&entry.doc);
+                let mut title = egui::RichText::new(&entry.name).strong();
+                let mut tip = entry.doc.clone();
+                if let Some(m) = &marks {
+                    if m.added(&entry.name) {
+                        title = egui::RichText::new(format!("+ {}", entry.name))
+                            .strong()
+                            .color(crate::prefab_ui::ADDED);
+                        tip = format!("Added to this copy (not in its prefab)\n\n{tip}");
+                    } else if m.changed(&entry.name) {
+                        title = title.color(crate::prefab_ui::PREFAB);
+                        tip = format!(
+                            "Changed in this copy (right-click to revert or apply)\n\n{tip}"
+                        );
+                    }
+                }
+                let r = ui
+                    .add(egui::Label::new(title).sense(egui::Sense::click()))
+                    .on_hover_text(tip);
+                if let Some(m) = &marks
+                    && m.changed(&entry.name)
+                {
+                    crate::prefab_ui::bar(ui, r.rect);
+                    let item = crate::prefab::Item::Field {
+                        part: m.part.clone(),
+                        component: entry.name.clone(),
+                        field: String::new(),
+                    };
+                    r.context_menu(|ui| {
+                        crate::prefab_ui::item_menu(ui, world, editor, m.root, item.clone());
+                    });
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if entry.name != "Transform"
                         && ui
@@ -124,10 +160,11 @@ pub fn entity_details(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor)
             })
             .body(|ui| {
                 let target = Target::Component(entity, entry.clone());
+                let marked = marks.as_ref().map(|m| (m, entry.name.as_str()));
                 if entry.name == "Transform" {
-                    transform_editor(ui, world, editor, entity, &value);
+                    transform_editor(ui, world, editor, entity, &value, marked);
                 } else {
-                    edit_root(ui, world, editor, &target, &value);
+                    edit_marked(ui, world, editor, &target, &value, marked);
                 }
             });
         if remove {
@@ -141,6 +178,27 @@ pub fn entity_details(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor)
                     after: None,
                 },
             );
+        }
+    }
+    if let Some(m) = &marks {
+        for name in m.removed() {
+            ui.horizontal(|ui| {
+                let r = ui.label(
+                    egui::RichText::new(format!("− {name}"))
+                        .strikethrough()
+                        .color(theme::TEXT_DIM),
+                );
+                crate::prefab_ui::bar(ui, r.rect);
+                ui.label(theme::dim("removed from this copy"));
+                let item = crate::prefab::Item::Field {
+                    part: m.part.clone(),
+                    component: name.clone(),
+                    field: String::new(),
+                };
+                ui.menu_button("⏷", |ui| {
+                    crate::prefab_ui::item_menu(ui, world, editor, m.root, item);
+                });
+            });
         }
     }
     ui.add_space(8.0);
@@ -166,10 +224,7 @@ fn quick_actions(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, enti
             .component("RigidBody")
             .is_some();
     let is_demo = has(world, "ModuleDemo");
-    let prefab = world
-        .get::<crate::prefab::PrefabInstance>(entity)
-        .map(|p| p.path.clone());
-    if !can_body && !is_demo && prefab.is_none() && model.is_none() {
+    if !can_body && !is_demo && model.is_none() {
         return;
     }
     ui.horizontal_wrapped(|ui| {
@@ -187,24 +242,6 @@ fn quick_actions(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, enti
                 .clicked()
             {
                 add_physics(world, editor, entity, false);
-            }
-        }
-        if let Some(path) = &prefab {
-            if ui
-                .button("📦 Apply to prefab")
-                .on_hover_text(format!(
-                    "Save this to {path} and update every other instance"
-                ))
-                .clicked()
-            {
-                crate::prefab::apply_changes(world, editor, entity);
-            }
-            if ui
-                .button("↻ Revert")
-                .on_hover_text(format!("Rebuild this from {path}"))
-                .clicked()
-            {
-                crate::prefab::revert(world, editor, entity);
             }
         }
         if let Some(path) = &model
@@ -370,12 +407,26 @@ pub fn edit_root(
     target: &Target,
     value: &Value,
 ) {
+    edit_marked(ui, world, editor, target, value, None);
+}
+
+/// [`edit_root`] for a component of a prefab part: fields this copy overrides get the
+/// override bar and a revert / apply menu.
+fn edit_marked(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    editor: &mut Editor,
+    target: &Target,
+    value: &Value,
+    marks: Option<(&crate::prefab_ui::Marks, &str)>,
+) {
     let mut edited = value.clone();
     let mut ctx = EditCtx {
         world,
         editor,
         target,
         root: value,
+        marks,
     };
     let changed = match &mut edited {
         Value::Object(map) => edit_fields(ui, &mut ctx, "", map),
@@ -408,6 +459,8 @@ struct EditCtx<'a> {
     editor: &'a mut Editor,
     target: &'a Target,
     root: &'a Value,
+    /// The prefab overrides of the part being edited, and the component's name.
+    marks: Option<(&'a crate::prefab_ui::Marks, &'a str)>,
 }
 
 fn edit_fields(
@@ -443,8 +496,31 @@ fn edit_fields(
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     ui.set_min_width(label_w);
-                    ui.add(egui::Label::new(pretty(&key)).truncate())
+                    let marked = ctx
+                        .marks
+                        .filter(|(m, component)| m.field(component, &child_path));
+                    let mut text = egui::RichText::new(pretty(&key));
+                    if marked.is_some() {
+                        text = text.color(crate::prefab_ui::PREFAB).strong();
+                    }
+                    let r = ui
+                        .add(
+                            egui::Label::new(text)
+                                .truncate()
+                                .sense(egui::Sense::click()),
+                        )
                         .on_hover_text(&key);
+                    if let Some((m, component)) = marked {
+                        crate::prefab_ui::bar(ui, r.rect);
+                        let item = crate::prefab::Item::Field {
+                            part: m.part.clone(),
+                            component: component.to_string(),
+                            field: child_path.clone(),
+                        };
+                        r.context_menu(|ui| {
+                            crate::prefab_ui::item_menu(ui, ctx.world, ctx.editor, m.root, item);
+                        });
+                    }
                 },
             );
             changed |= edit_value(ui, ctx, &child_path, &key, value);
@@ -846,17 +922,37 @@ fn transform_editor(
     editor: &mut Editor,
     entity: Entity,
     value: &Value,
+    marks: Option<(&crate::prefab_ui::Marks, &str)>,
 ) {
     let Ok(mut t) = serde_json::from_value::<Transform>(value.clone()) else {
         return;
     };
+    // A row's label, marked when a prefab copy overrides that field.
+    let label =
+        |ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, text: &str, field: &str| {
+            let marked = marks.filter(|(m, component)| m.field(component, field));
+            let mut rich = egui::RichText::new(text);
+            if marked.is_some() {
+                rich = rich.color(crate::prefab_ui::PREFAB).strong();
+            }
+            let r = ui.add(egui::Label::new(rich).sense(egui::Sense::click()));
+            if let Some((m, component)) = marked {
+                crate::prefab_ui::bar(ui, r.rect);
+                let item = crate::prefab::Item::Field {
+                    part: m.part.clone(),
+                    component: component.to_string(),
+                    field: field.to_string(),
+                };
+                r.context_menu(|ui| crate::prefab_ui::item_menu(ui, world, editor, m.root, item));
+            }
+        };
     let mut changed = false;
     egui::Grid::new(("transform", entity))
         .num_columns(2)
         .spacing([10.0, 4.0])
         .min_col_width(70.0)
         .show(ui, |ui| {
-            ui.label("Position");
+            label(ui, world, editor, "Position", "/translation");
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 let w = field_width(ui, 3);
@@ -883,7 +979,7 @@ fn transform_editor(
             });
             ui.end_row();
 
-            ui.label("Rotation");
+            label(ui, world, editor, "Rotation", "/rotation");
             let (y, x, z) = t.rotation.to_euler(glam::EulerRot::YXZ);
             let mut deg = [x.to_degrees(), y.to_degrees(), z.to_degrees()];
             let mut rot_changed = false;
@@ -918,7 +1014,7 @@ fn transform_editor(
             }
             ui.end_row();
 
-            ui.label("Scale");
+            label(ui, world, editor, "Scale", "/scale");
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 let w = field_width(ui, 3);

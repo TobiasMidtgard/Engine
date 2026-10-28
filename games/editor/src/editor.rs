@@ -122,6 +122,14 @@ pub struct Editor {
     pub show_button: Option<egui::Rect>,
     /// The Measure tool's ruler.
     pub measure: crate::measure::Measure,
+    /// Prefabs open for editing, outermost first (empty: editing the scene).
+    pub prefab_mode: Vec<crate::prefab::Focus>,
+    /// Prefab changes asked for this frame, done after the UI pass.
+    pub prefab_actions: Vec<crate::prefab_ui::Action>,
+    /// When prefab overrides are next refreshed (seconds, [`now`]).
+    pub prefab_track_next: f64,
+    /// Where the Details panel's Overrides button was drawn (for scripted clicks).
+    pub overrides_button: Option<egui::Rect>,
     /// The transform gizmo was being dragged last frame (Alt at the start of a drag duplicates).
     pub gizmo_dragging: bool,
     /// A view change for the editor camera (the axis widget's clicks).
@@ -197,6 +205,10 @@ impl Editor {
             snap_move: 0.25,
             snap_angle_deg: 15.0,
             snap_scale: 0.1,
+            prefab_mode: Vec::new(),
+            prefab_actions: Vec::new(),
+            prefab_track_next: 0.0,
+            overrides_button: None,
             view_request: None,
             measure: Default::default(),
             game_view: false,
@@ -931,6 +943,12 @@ pub fn save_scene(world: &mut World, editor: &mut Editor, path: &str) {
         );
         return;
     }
+    if !editor.prefab_mode.is_empty() {
+        // Ctrl+S while a prefab is open saves the prefab (as in Unity).
+        crate::prefab::save_focus(world, editor);
+        return;
+    }
+    crate::prefab::refresh_all(world);
     let scene = scene_ops::snapshot_scene(world);
     match scene.save(path) {
         Ok(()) => {
@@ -952,8 +970,10 @@ pub fn load_scene(world: &mut World, editor: &mut Editor, path: &str) {
     }
     match SceneDoc::load(path) {
         Ok(scene) => {
+            crate::prefab::exit_all(world, editor);
             scene_ops::clear_scene(world);
             let roots = scene_ops::load_scene(world, &scene);
+            crate::prefab::after_load(world);
             editor.history.clear();
             editor.selection.clear();
             editor.scene_path = path.to_string();
@@ -968,6 +988,7 @@ pub fn new_scene(world: &mut World, editor: &mut Editor) {
     if editor.is_playing() {
         stop(world, editor);
     }
+    crate::prefab::exit_all(world, editor);
     scene_ops::clear_scene(world);
     scene_ops::load_scene(world, &crate::sample::starter_scene());
     editor.history.clear();
@@ -990,6 +1011,7 @@ pub fn play(world: &mut World, editor: &mut Editor) {
         Mode::Play => return,
         Mode::Edit => {}
     }
+    crate::prefab::exit_all(world, editor);
     let roots = scene_ops::scene_roots(world);
     let saved = roots
         .iter()

@@ -31,6 +31,7 @@ mod models;
 mod outline;
 mod picking;
 mod prefab;
+mod prefab_ui;
 mod remap;
 mod rigs;
 mod sample;
@@ -131,6 +132,7 @@ fn main() {
             Some("round17") => shots::round17(dir),
             Some("round18") => shots::round18(dir),
             Some("round19") => shots::round19(dir),
+            Some("round20") => shots::round20(dir),
             Some("play") => shots::play_in_editor(dir),
             _ => shots::gallery(dir),
         };
@@ -175,8 +177,12 @@ impl Plugin for EditorPlugin {
                 "Holds the copies of `model` painted with the scatter brush (one group per model).",
             )
             .register_component::<prefab::PrefabInstance>(
-                "Placed from the prefab file at `path`; the editor can apply changes back to \
-                 the file or revert to it.",
+                "Placed from the prefab file at `path`; `overrides` and `removed` are what this \
+                 copy changes, by part. Nested inside a prefab file: a nested prefab (at the \
+                 root: the base of a variant).",
+            )
+            .register_component::<prefab::PrefabPart>(
+                "Which part of its prefab file this entity is (its key there; \"\" for the root).",
             )
             .add_render_feature(egui_bridge::EguiFeature::default())
             .add_render_feature(outline::OutlineFeature::default())
@@ -194,6 +200,7 @@ impl Plugin for EditorPlugin {
                     demos::sync_demos,
                     landscape::sync_sculpt,
                     models::watch_files,
+                    prefab::track,
                     material_edit::flush,
                     step_frames,
                     shots::run_script,

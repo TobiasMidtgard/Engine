@@ -175,7 +175,9 @@ fn drop_target(
                 crate::models::place(world, editor, key, at);
             }
         },
-        Dragged::Prefab(path) => crate::prefab::place(world, editor, path, Some(at)),
+        Dragged::Prefab(path) => {
+            crate::prefab::place(world, editor, path, Some(at), None);
+        }
     }
 }
 
@@ -790,6 +792,7 @@ fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, rect: egu
     painter.galley(bg.min + egui::vec2(8.0, 4.0), galley, egui::Color32::WHITE);
 
     axis_widget(&ctx, world, editor, rect);
+    crate::prefab_ui::editing_bar(&ctx, world, editor, rect);
     crate::camera_preview::ui(ui, world, editor, rect);
 
     // Play mode frame.

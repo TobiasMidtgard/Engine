@@ -58,6 +58,12 @@ pub enum Command {
         before: Value,
         after: Value,
     },
+    /// A prefab file's text (`None`: no file).
+    PrefabFile {
+        path: String,
+        before: Option<String>,
+        after: Option<String>,
+    },
     /// Several changes as one step (multi-selection edits, duplicate of many).
     Group(String, Vec<Command>),
 }
@@ -92,8 +98,18 @@ impl Command {
             Command::Material { key, .. } => {
                 format!("Edit material {}", crate::materials::display_name(key))
             }
+            Command::PrefabFile { path, .. } => {
+                format!("Save prefab {}", crate::prefab::display_name(path))
+            }
             Command::Group(label, _) => label.clone(),
         }
+    }
+
+    /// Make this change now without recording it (the caller records the step it belongs to).
+    pub fn run_now(&self, world: &mut World) -> Result<Remap, String> {
+        let mut remap = Remap::new();
+        self.run(world, &mut remap)?;
+        Ok(remap)
     }
 
     /// Apply this command forward. Errors are plain sentences for the status bar.
@@ -122,6 +138,9 @@ impl Command {
                 let params = serde_json::from_value(after.clone()).map_err(|e| e.to_string())?;
                 crate::material_edit::set(world, key, &params);
                 Ok(())
+            }
+            Command::PrefabFile { path, after, .. } => {
+                crate::prefab::write_text(world, path, after.as_deref())
             }
             Command::Group(_, commands) => {
                 for c in commands {
@@ -184,6 +203,15 @@ impl Command {
                 before: after,
                 after: before,
             },
+            Command::PrefabFile {
+                path,
+                before,
+                after,
+            } => Command::PrefabFile {
+                path,
+                before: after,
+                after: before,
+            },
             Command::Group(label, commands) => {
                 Command::Group(label, commands.iter().rev().map(Command::inverse).collect())
             }
@@ -207,7 +235,7 @@ impl Command {
         }
         match self {
             Command::Component { entity, .. } | Command::Rename { entity, .. } => fix(entity),
-            Command::Resource { .. } | Command::Material { .. } => {}
+            Command::Resource { .. } | Command::Material { .. } | Command::PrefabFile { .. } => {}
             Command::Spawned { saved, parent } | Command::Despawned { saved, parent } => {
                 fix_saved(saved, map);
                 if let Some(p) = parent {

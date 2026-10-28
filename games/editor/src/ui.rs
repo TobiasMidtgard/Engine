@@ -102,6 +102,7 @@ fn draw(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, dock: &mut Do
         crate::import::import_dropped(world, editor, None, None);
     }
     shortcuts(ui.ctx(), world, editor);
+    crate::prefab_ui::run_actions(world, editor);
 }
 
 struct Viewer<'a> {
@@ -454,7 +455,11 @@ fn outliner(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let roots = scene_ops::scene_roots(world);
+            // While a prefab is open, only it is listed.
+            let roots = match editor.prefab_mode.last() {
+                Some(focus) => vec![focus.entity],
+                None => scene_ops::scene_roots(world),
+            };
             for root in roots {
                 outliner_row(ui, world, editor, root, &filter, 0);
             }
@@ -517,10 +522,14 @@ fn outliner_row(
     if !filter.is_empty() {
         state.set_open(true);
     }
+    let style = crate::prefab_ui::row_style(world, entity);
     let row = |ui: &mut egui::Ui, world: &mut World, editor: &mut Editor| {
+        let icon = style.icon.unwrap_or(icon);
         let text = egui::RichText::new(format!("{icon}  {name}"));
         let text = if selected {
             text.color(egui::Color32::WHITE)
+        } else if let Some(color) = style.color {
+            text.color(color)
         } else {
             text
         };
@@ -528,6 +537,17 @@ fn outliner_row(
             ui.add(egui::Button::selectable(selected, text).frame_when_inactive(selected))
         });
         let r = row.inner;
+        if style.changed {
+            crate::prefab_ui::bar(ui, r.rect);
+        }
+        if style.added {
+            ui.label(
+                egui::RichText::new("+")
+                    .color(crate::prefab_ui::ADDED)
+                    .strong(),
+            )
+            .on_hover_text("Added to this prefab copy (not in its file)");
+        }
         if r.clicked() {
             let additive = ui.input(|i| i.modifiers.ctrl || i.modifiers.shift);
             if additive {
@@ -545,7 +565,18 @@ fn outliner_row(
         {
             editor::reparent(world, editor, *dragged, Some(entity));
         }
-        if row.response.dnd_hover_payload::<Entity>().is_some() {
+        // A prefab dragged from the Content panel lands under this entity.
+        if let Some(dragged) = row.response.dnd_release_payload::<crate::models::Dragged>()
+            && let crate::models::Dragged::Prefab(path) = &*dragged
+        {
+            prefab::place(world, editor, path, None, Some(entity));
+        }
+        if row.response.dnd_hover_payload::<Entity>().is_some()
+            || row
+                .response
+                .dnd_hover_payload::<crate::models::Dragged>()
+                .is_some_and(|d| matches!(*d, crate::models::Dragged::Prefab(_)))
+        {
             ui.painter().rect_stroke(
                 row.response.rect,
                 3,
@@ -560,6 +591,14 @@ fn outliner_row(
             }
             if ui.button("Copy").clicked() {
                 editor::copy_selection(world, editor);
+            }
+            if world.get::<prefab::PrefabInstance>(entity).is_some()
+                && !editor.prefab_mode.iter().any(|f| f.entity == entity)
+                && ui.button("✏ Edit prefab").clicked()
+            {
+                editor
+                    .prefab_actions
+                    .push(crate::prefab_ui::Action::Enter(entity));
             }
             if ui.button("Save as prefab").clicked() {
                 prefab::create(world, editor, entity);
@@ -782,16 +821,27 @@ fn content(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
                 for f in files {
                     let id = egui::Id::new(("drag prefab", &f));
                     let drag = Dragged::Prefab(f.clone());
-                    let r = ui.dnd_drag_source(id, drag, |ui| {
-                        ui.button(format!("📦 {}", prefab::display_name(&f)))
-                    });
+                    let base = prefab::base_of(world, &f);
+                    let label = match &base {
+                        Some(_) => format!("📦 {} (variant)", prefab::display_name(&f)),
+                        None => format!("📦 {}", prefab::display_name(&f)),
+                    };
+                    let r = ui.dnd_drag_source(id, drag, |ui| ui.button(label));
+                    let tip = match &base {
+                        Some(b) => format!(
+                            "Variant of {}: follows it, with its own changes.\n",
+                            prefab::display_name(b)
+                        ),
+                        None => String::new(),
+                    };
                     if r.inner
                         .on_hover_text(format!(
-                            "Place {f} where the view is looking, or drag it into the scene"
+                            "{tip}Place {f} where the view is looking, drag it into the scene, \
+                             or onto an outliner row to put it inside that entity"
                         ))
                         .clicked()
                     {
-                        prefab::place(world, editor, &f, None);
+                        prefab::place(world, editor, &f, None, None);
                     }
                 }
             });

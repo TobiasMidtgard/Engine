@@ -253,7 +253,7 @@ pub fn round2(dir: impl Into<PathBuf>) -> ShotScript {
                 crate::prefab::create(world, editor, post);
                 let path = crate::prefab::path_for("Lamp post");
                 for at in [DVec3::new(-3.0, 0.0, 2.5), DVec3::new(0.5, 0.0, 4.0)] {
-                    crate::prefab::place(world, editor, &path, None);
+                    crate::prefab::place(world, editor, &path, None, None);
                     move_selection_to(world, editor, at);
                 }
             }
@@ -281,7 +281,7 @@ pub fn round2(dir: impl Into<PathBuf>) -> ShotScript {
                 t.scale = Vec3::splat(1.8);
             }
             editor.select(Some(post));
-            crate::prefab::apply_changes(world, editor, post);
+            crate::prefab::apply_all(world, editor, post);
         })),
         Step::Tab(Tab::History),
         Step::Wait(4),
@@ -1780,6 +1780,202 @@ pub fn round19(dir: impl Into<PathBuf>) -> ShotScript {
     })));
     steps.push(Step::Wait(20));
     steps.push(Step::Shot("88_game_view"));
+    ShotScript::new(dir, steps)
+}
+
+/// Round 20: prefabs. Lamp posts as copies of one prefab: one copy's changes marked and
+/// listed, one applied to all; a street of lamp posts nesting the prefab; the prefab edited in
+/// place reaching every copy, nested ones too; a variant that follows its base.
+pub fn round20(dir: impl Into<PathBuf>) -> ShotScript {
+    use crate::prefab::{self, Item};
+    const POST: &str = "prefabs/lamp_post.prefab.json";
+    // Loose lamp post copies (not inside the street), west to east.
+    fn loose(world: &mut World) -> Vec<Entity> {
+        let mut q = world.query_filtered::<(Entity, &prefab::PrefabInstance, &GlobalTransform), Without<ChildOf>>();
+        let mut found: Vec<(f64, Entity)> = q
+            .iter(world)
+            .filter(|(_, l, _)| l.path.starts_with("prefabs/lamp_post"))
+            .map(|(e, _, g)| (g.translation().x, e))
+            .collect();
+        found.sort_by(|a, b| a.0.total_cmp(&b.0));
+        found.into_iter().map(|(_, e)| e).collect()
+    }
+    fn lamp(world: &World, root: Entity) -> Entity {
+        prefab::part_entities(world, root)
+            .get("lamp")
+            .copied()
+            .unwrap_or(root)
+    }
+    // A lamp's light and its glowing bulb.
+    fn light_color(world: &mut World, e: Entity, color: [f32; 3]) {
+        if let Some(mut l) = world.get_mut::<PointLight>(e) {
+            l.color = color;
+        }
+        let [r, g, b] = color;
+        let patch = world
+            .resource::<TypeRegistry>()
+            .component("MeshRenderer")
+            .map(|c| c.patch);
+        if let Some(patch) = patch {
+            let _ = patch(
+                world,
+                e,
+                serde_json::json!({"material": {"inline": {
+                    "base_color": [r, g, b, 1.0],
+                    "emissive": [r, g, b],
+                    "emissive_strength": 8.0,
+                }}}),
+            );
+        }
+    }
+    let mut steps = vec![
+        Step::Do(Box::new(|world, editor| {
+            // This script's own files from an earlier run.
+            // Dusk, so the lamps' colors show; no icons over the bulbs.
+            editor.icons = false;
+            let sky = world
+                .resource::<TypeRegistry>()
+                .resource("Sky")
+                .map(|r| r.patch);
+            if let Some(patch) = sky {
+                let _ = patch(
+                    world,
+                    serde_json::json!({"hour": 19.3, "hours_per_second": 0.0}),
+                );
+            }
+            for f in prefab::prefab_files() {
+                let name = f.rsplit('/').next().unwrap_or("");
+                if name.starts_with("lamp_post") || name.starts_with("street_lamps") {
+                    let _ = std::fs::remove_file(&f);
+                }
+            }
+            let Some(post) = find(world, "Lamp post") else {
+                return;
+            };
+            prefab::create(world, editor, post);
+            for x in [-0.5, -3.5] {
+                prefab::place(world, editor, POST, Some(DVec3::new(x, 0.0, 1.5)), None);
+            }
+            // The middle copy: a red, bigger lamp of its own.
+            let middle = loose(world)[1];
+            let l = lamp(world, middle);
+            light_color(world, l, [1.0, 0.3, 0.15]);
+            if let Some(mut t) = world.get_mut::<Transform>(l) {
+                t.scale = Vec3::splat(1.6);
+            }
+            editor.select(Some(l));
+        })),
+        Step::Camera(DVec3::new(2.0, 5.0, 12.0), DVec3::new(-0.8, 1.7, 3.0)),
+        Step::Tab(Tab::History),
+        Step::Wait(40),
+        Step::Shot("89_overrides_marked"),
+        Step::Do(Box::new(|world, editor| {
+            let middle = loose(world)[1];
+            editor.select(Some(middle));
+        })),
+        Step::Wait(4),
+    ];
+    steps.extend(click_toolbar(|e| e.overrides_button));
+    steps.push(Step::Wait(6));
+    steps.push(Step::Shot("90_overrides_list"));
+    steps.extend(click_toolbar(|e| e.overrides_button));
+    // Apply the red light and bulb (as the list's ✔ would): every copy turns red, the size
+    // stays the middle one's own.
+    steps.push(Step::Do(Box::new(|world, editor| {
+        let middle = loose(world)[1];
+        for component in ["PointLight", "MeshRenderer"] {
+            let item = Item::Field {
+                part: "lamp".into(),
+                component: component.into(),
+                field: String::new(),
+            };
+            if let Some(target) = prefab::targets(world, middle, "lamp", component).first() {
+                prefab::apply_item(world, editor, middle, &item, target);
+            }
+        }
+    })));
+    steps.push(Step::Wait(20));
+    steps.push(Step::Shot("91_color_applied_to_all"));
+    // A street: three lamp posts inside one entity, saved as a prefab that nests them, and a
+    // second street placed behind.
+    steps.push(Step::Do(Box::new(|world, editor| {
+        let street = world
+            .spawn((
+                crate::scene_ops::InScene,
+                crate::scene_ops::SceneOrder::next(),
+                Name::new("Street lamps"),
+                Transform::from_xyz(-1.0, 0.0, 4.0),
+            ))
+            .id();
+        for x in [-3.0, 0.0, 3.0] {
+            if let Some(p) = prefab::place(world, editor, POST, None, Some(street))
+                && let Some(mut t) = world.get_mut::<Transform>(p)
+            {
+                t.translation.x = x;
+            }
+        }
+        prefab::create(world, editor, street);
+        prefab::place(
+            world,
+            editor,
+            "prefabs/street_lamps.prefab.json",
+            Some(DVec3::new(-1.0, 0.0, 6.5)),
+            None,
+        );
+    })));
+    // Edit the lamp post prefab in place: a blue lamp and a sign.
+    steps.push(Step::Do(Box::new(|world, editor| {
+        let east = *loose(world).last().expect("posts");
+        prefab::enter(world, editor, east);
+        let l = lamp(world, east);
+        light_color(world, l, [0.4, 0.7, 1.0]);
+        let sign = editor::create(
+            world,
+            editor,
+            editor::Create::Shape(
+                "Cube",
+                Shape::Cuboid {
+                    size: [0.6, 0.36, 0.06],
+                },
+            ),
+            DVec3::ZERO,
+        );
+        editor::reparent(world, editor, sign, Some(east));
+        if let Some(mut t) = world.get_mut::<Transform>(sign) {
+            *t = Transform::from_xyz(0.33, 0.2, 0.0);
+        }
+        world.entity_mut(sign).insert(Name::new("Sign"));
+        editor.select(Some(sign));
+    })));
+    steps.push(Step::Wait(20));
+    steps.push(Step::Shot("92_editing_the_prefab"));
+    steps.push(Step::Do(Box::new(|world, editor| {
+        prefab::exit(world, editor);
+        editor.select(None);
+    })));
+    steps.push(Step::Wait(20));
+    steps.push(Step::Shot("93_every_copy_updated"));
+    // A variant: the west copy goes green without its sign and is saved as a variant; then the
+    // base gets a bigger lamp, which the variant takes while staying green.
+    steps.push(Step::Do(Box::new(|world, editor| {
+        let west = loose(world)[0];
+        let l = lamp(world, west);
+        light_color(world, l, [0.3, 1.0, 0.35]);
+        if let Some(sign) = prefab::part_entities(world, west).get("sign").copied() {
+            world.entity_mut(sign).despawn();
+        }
+        prefab::save_variant(world, editor, west);
+        let east = *loose(world).last().expect("posts");
+        prefab::enter(world, editor, east);
+        let l = lamp(world, east);
+        if let Some(mut t) = world.get_mut::<Transform>(l) {
+            t.scale = Vec3::splat(1.5);
+        }
+        prefab::exit(world, editor);
+        editor.select(Some(west));
+    })));
+    steps.push(Step::Wait(20));
+    steps.push(Step::Shot("94_variant_follows_base"));
     ShotScript::new(dir, steps)
 }
 
