@@ -77,6 +77,14 @@ fn views() -> Vec<View> {
             horizon_deg: Some(4.0),
             ..v("mars_edge", "Mars", 1.0 + 30.0 / 3389.5, 20.0, 38.0, 14.0)
         },
+        // Out past the planets: the Sun from Neptune, a bright point; a star close up; the
+        // Alpha Centauri pair from between them.
+        v("sun_from_neptune", "Neptune", 3.0, 0.0, 0.0, 9.0),
+        v("sirius_close", "Sirius", 25.0, 0.0, 10.0, 34.5),
+        View {
+            fov: 60.0,
+            ..v("alpha_centauri", "Alpha Centauri A", 2_000.0, 0.0, 0.0, 9.0)
+        },
     ]
 }
 
@@ -307,7 +315,21 @@ fn main() {
         let (sp, cp) = view.phase_deg.to_radians().sin_cos();
         let (se, ce) = view.elevation_deg.to_radians().sin_cos();
         let dir = ((flat_sun * cp + side * sp) * ce + pole * se).normalize();
-        let (eye, target) = if view.name == "moon_and_earth" {
+        let (eye, target) = if view.name == "sun_from_neptune" {
+            // Just sunward of Neptune, looking at the Sun 30 AU away.
+            (center + to_sun * radius * view.distance_radii, sun)
+        } else if view.name == "alpha_centauri" {
+            // Off to the side of A and B, both in view.
+            let b = app
+                .world
+                .resource::<SpaceState>()
+                .body("Alpha Centauri B")
+                .unwrap()
+                .world_position;
+            let mid = (center + b) * 0.5;
+            let across = (b - center).cross(DVec3::Y).normalize();
+            (mid + across * (b - center).length() * 1.2, mid)
+        } else if view.name == "moon_and_earth" {
             // Behind the Moon and above it, looking at Earth over the Moon's limb.
             let to_earth = (earth - center).normalize();
             let up = to_earth.cross(side).normalize();

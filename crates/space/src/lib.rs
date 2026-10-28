@@ -382,6 +382,10 @@ impl Default for SpaceSettings {
 #[serde(default)]
 pub struct StarLight {
     pub star: String,
+    /// The tint last put on the light's color: another star's color against the Sun's (white
+    /// for the Sun), so the light's own color is the Sun's and the tint is taken off again.
+    #[serde(skip)]
+    pub tint: Option<[f32; 3]>,
 }
 
 /// What the world left behind on each body when it stopped turning with it (by body name):
@@ -574,9 +578,10 @@ fn stored_home(frame: &SpaceFrame) -> (Quat, DQuat) {
 /// influence; see `propagate`).
 const STAR_REACH: f64 = 0.05;
 
-/// Narrowest the sky draws the lit star's disc, degrees (it keeps the star's light, so a far
-/// sun is a small bright point rather than a disc that drops between pixels).
-const MIN_STAR_DISC_DEG: f64 = 0.02;
+/// Narrowest the sky draws the lit star's disc, degrees: about two pixels on a 1080p screen
+/// (it keeps the star's light, so a far sun is a small bright point; much narrower, the sky's
+/// f32 disc test can't hold it and the Sun vanishes).
+const MIN_STAR_DISC_DEG: f64 = 0.12;
 
 /// Orbits, spin, the world frame, gravity, atmosphere and starlight.
 pub struct SpacePlugin;
@@ -1316,15 +1321,29 @@ pub fn update_space(world: &mut World) {
     // Starlight.
     if settings.drive_starlight {
         let f = focus.unwrap_or(DVec3::ZERO);
-        let stars: Vec<(String, DVec3, f64, f64)> = bodies
+        let root_color = bodies
+            .iter()
+            .find(|(_, b)| b.kind == BodyKind::Star && b.parent.is_none())
+            .map_or([1.0; 3], |(_, b)| b.color);
+        let stars: Vec<(String, DVec3, f64, f64, [f32; 3])> = bodies
             .iter()
             .zip(&states)
             .filter(|((_, b), _)| b.luminosity_w > 0.0)
-            .map(|((_, b), s)| (b.name.clone(), s.world_position, b.luminosity_w, b.radius_m))
+            .map(|((_, b), s)| {
+                let rel: [f32; 3] = std::array::from_fn(|i| b.color[i] / root_color[i].max(1e-3));
+                let luma = (0.2126 * rel[0] + 0.7152 * rel[1] + 0.0722 * rel[2]).max(1e-3);
+                (
+                    b.name.clone(),
+                    s.world_position,
+                    b.luminosity_w,
+                    b.radius_m,
+                    rel.map(|c| (c / luma).max(1e-3)),
+                )
+            })
             .collect();
         let mut sun_dir = None;
-        let mut lights = world.query::<(&StarLight, &mut Transform, &mut DirectionalLight)>();
-        for (star, mut tf, mut light) in lights.iter_mut(world) {
+        let mut lights = world.query::<(&mut StarLight, &mut Transform, &mut DirectionalLight)>();
+        for (mut star, mut tf, mut light) in lights.iter_mut(world) {
             let lux = |p: DVec3, l: f64| {
                 l / (4.0 * std::f64::consts::PI * (p - f).length_squared().max(1.0))
                     * settings.lumens_per_watt
@@ -1333,7 +1352,7 @@ pub fn update_space(world: &mut World) {
                 .iter()
                 .filter(|s| star.star.is_empty() || s.0.eq_ignore_ascii_case(&star.star))
                 .max_by(|a, b| lux(a.1, a.2).total_cmp(&lux(b.1, b.2)));
-            if let Some((_, p, l, r)) = pick {
+            if let Some((_, p, l, r, tint)) = pick {
                 let dir = (*p - f).normalize_or(DVec3::Y);
                 let up = if dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
                 *tf = Transform::default().looking_at(-dir, up);
@@ -1342,6 +1361,12 @@ pub fn update_space(world: &mut World) {
                 // to a bright point (a few pixels, the same light) far out.
                 let size = (2.0 * (r / (*p - f).length().max(*r)).asin()).to_degrees();
                 light.angular_size_deg = size.max(MIN_STAR_DISC_DEG) as f32;
+                // Another star's light has its color (Sirius blue-white, Proxima red).
+                let old = star.tint.unwrap_or([1.0; 3]);
+                if old != *tint {
+                    light.color = std::array::from_fn(|i| light.color[i] / old[i] * tint[i]);
+                    star.tint = Some(*tint);
+                }
                 sun_dir.get_or_insert(dir);
             }
         }
