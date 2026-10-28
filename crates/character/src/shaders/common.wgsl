@@ -433,7 +433,7 @@ fn cloth_folds(r: vec3<f32>, g: u32) -> vec2<f32> {
 @group(1) @binding(4) var hair_shadow: texture_3d<f32>;
 @group(1) @binding(5) var hair_shadow_sampler: sampler;
 
-const SHADOW_REACH: u32 = 16u;
+const SHADOW_REACH: u32 = 24u;
 const SHADOW_BODY_TAU: f32 = 4.0;
 
 // Optical depth of the hair (and with `body` 1, the body) between `p` and the outside toward

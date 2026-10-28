@@ -793,7 +793,7 @@ fn skin_debug(in: SkinOut, s: SkinLight) -> vec3<f32> {
 @fragment
 fn fs_skin(in: SkinOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     var s = skin_surface(in, front);
-    // The hair shadow grid (4 mm cells) can't resolve a part a few millimetres wide, where
+    // The hair shadow grid (2.5 mm cells) can't resolve a part a few millimetres wide, where
     // nothing but the hair beside it stands over the scalp: leave the part in the open.
     if (in.part == 0u && part_gap(in.rest) < 0.5) {
         s.bind = in.bind;

@@ -82,8 +82,9 @@ fn hair_gauss(b: f32, x: f32) -> f32 {
 
 // Light from `l` scattered toward `v` by a fiber along `t` of color `base` (per unit of
 // incoming light; includes the fiber's projected width). `rough` is the cuticle's longitudinal
-// roughness, `glint` scales the TRT lobe per fiber.
-fn hair_bsdf(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: f32) -> vec3<f32> {
+// roughness; per fiber, `glint.x` scales the TRT lobe and `glint.y` the tilt of its cuticle
+// scales.
+fn hair_bsdf(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: vec2<f32>) -> vec3<f32> {
     let sin_v = clamp(dot(t, v), -1.0, 1.0);
     let sin_l = clamp(dot(t, l), -1.0, 1.0);
     let cos_theta_d = max(cos(0.5 * abs(asin(sin_v) - asin(sin_l))), 0.05);
@@ -92,7 +93,11 @@ fn hair_bsdf(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f
     let cos_phi = dot(lp, vp) * inverseSqrt(dot(lp, lp) * dot(vp, vp) + 1e-4);
     let cos_half_phi = sqrt(saturate(0.5 + 0.5 * cos_phi));
     let n_prime = 1.19 / cos_theta_d + 0.36 * cos_theta_d;
-    let shift = 0.035;
+    // The cuticle scales tilt the highlights toward the root, about 2-4 degrees (Marschner et al.
+    // 2003), differently on each fiber: with one tilt for all, every fiber in a lock lights up at
+    // the same place and the highlights read as smooth patches on a wig's shell, not as the
+    // streaks real hair shows.
+    let shift = 0.035 * glint.y;
     let b = rough * rough;
     let s = sin_l + sin_v;
     let vol = dot(v, l);
@@ -111,7 +116,7 @@ fn hair_bsdf(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f
     let mtrt = hair_gauss(b * 2.0, s - shift * 4.0);
     let ftrt = hair_fresnel(cos_theta_d * 0.5);
     let ttrt = pow(base, vec3<f32>(0.8 / cos_theta_d));
-    out += mtrt * exp(17.0 * cos_phi - 16.78) * sq(1.0 - ftrt) * ftrt * ttrt * glint;
+    out += mtrt * exp(17.0 * cos_phi - 16.78) * sq(1.0 - ftrt) * ftrt * ttrt * glint.x;
     return out;
 }
 
@@ -130,7 +135,7 @@ fn hair_multiple(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, shad
 
 // `shadow` is the shadow map's, `depth` the optical depth of the hair in the way. Light scattered
 // between fibers gets through deeper (it goes around them), and takes on their color.
-fn hair_light(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: f32, shadow: f32, depth: f32, scatter: f32) -> vec3<f32> {
+fn hair_light(t: vec3<f32>, v: vec3<f32>, l: vec3<f32>, base: vec3<f32>, rough: f32, glint: vec2<f32>, shadow: f32, depth: f32, scatter: f32) -> vec3<f32> {
     // Fair fibers let more light through than dark ones.
     let fair = saturate(dot(base, vec3<f32>(0.3, 0.5, 0.2)) * 2.0);
     let tau = depth * mix(1.0, 0.45, fair);
@@ -174,10 +179,10 @@ fn strand_shade(in: StrandOut) -> vec3<f32> {
     let base = strand_base_color(kind, random);
     let occ = in.attrs.x;
     // Glints: fibers differ in how they catch the light.
-    let glint = 0.6 + 0.8 * fract(random * 91.7);
+    let glint = vec2<f32>(0.6 + 0.8 * fract(random * 91.7), 0.4 + 1.2 * fract(random * 53.1));
     // Scalp hair is smoother than brows and beard; fair hair scatters more light between
     // fibers than dark.
-    let rough = select(0.42, 0.3, kind == 0u);
+    let rough = select(0.42, 0.3, kind == 0u) * (0.85 + 0.3 * fract(random * 37.3));
     let scatter = mix(0.8, 1.3, saturate(dot(base, vec3<f32>(0.3, 0.5, 0.2)) * 2.5));
     // The hair in the way of each light shades it (below); occlusion keeps the gaps between
     // locks and the roots darker.

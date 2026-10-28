@@ -27,8 +27,9 @@ use crate::mesh::{
     smoothstep,
 };
 
-/// Drawn hairs are fewer than real ones (tens per cm² where a scalp has ~150), so each stands
-/// for a few and is drawn that much wider; this scales every hair's width.
+/// Scales every hair's width. Scalp hairs are drawn near their true width and count (about
+/// 100-150 μm wide and 130-190 per cm², where a real scalp has 70 μm and ~150): hairs a few
+/// times too thick and too few merge into sheets with hard edges, the look of a wig.
 const HAIR_WIDTH: f32 = 1.0;
 
 /// Which kind of hair a set holds (the shader colors and shades each its own way).
@@ -627,52 +628,52 @@ fn grow_scalp(
         HairStyle::Buzz => Groom {
             length: 0.006 * k,
             points: 5,
-            density: 110.0,
+            density: 150.0,
             gravity: 0.0,
             loft: 0.0015,
             clump: 0.0,
-            root_radius: 0.00009,
+            root_radius: 0.00007,
             bun: Vec3::ZERO,
         },
         HairStyle::Short => Groom {
             length: 0.055 * k,
             // Curly hair needs the points for its turns.
             points: 10 + (12.0 * a.hair.curl.clamp(0.0, 1.0)) as u32,
-            density: 80.0,
+            density: 130.0,
             gravity: 0.25,
             loft: 0.009,
             clump: 0.55,
-            root_radius: 0.00011,
+            root_radius: 0.00006,
             bun: Vec3::ZERO,
         },
         HairStyle::Medium => Groom {
             length: 0.2 * k,
             points: 18,
-            density: 120.0,
+            density: 170.0,
             gravity: 1.0,
             loft: 0.016,
             clump: 0.6,
-            root_radius: 0.00012,
+            root_radius: 0.00006,
             bun: Vec3::ZERO,
         },
         HairStyle::Long => Groom {
             length: 0.42 * k,
             points: 32,
-            density: 140.0,
+            density: 190.0,
             gravity: 1.0,
             loft: 0.012,
             clump: 0.75,
-            root_radius: 0.00012,
+            root_radius: 0.00006,
             bun: Vec3::ZERO,
         },
         HairStyle::Bun => Groom {
             length: 0.3,
             points: 20,
-            density: 80.0,
+            density: 130.0,
             gravity: 0.0,
             loft: 0.004,
             clump: 0.6,
-            root_radius: 0.00012,
+            root_radius: 0.00006,
             bun: Vec3::ZERO,
         },
     };
@@ -706,7 +707,7 @@ fn grow_scalp(
     let mut set = StrandSet::new(StrandKind::Scalp, g.points);
     // Guides first: one per clump, grown in full; then the hairs that follow them.
     // Long hair gathers into fewer, bigger locks.
-    let per_guide = if g.gravity > 0.5 { 90 } else { 40 };
+    let per_guide = if g.gravity > 0.5 { 125 } else { 65 };
     let guides_n = if g.clump > 0.0 {
         (total / per_guide).clamp(60, 1500)
     } else {
@@ -746,6 +747,12 @@ fn grow_scalp(
         }
         guides.push((sp, pts));
     }
+    // A lock from the front of the part that settled low across the forehead (nothing holds it
+    // back there) hangs over the face as a stray rope below the swept hair: leave it out, and
+    // its hairs join the locks beside it.
+    if g.gravity > 0.5 {
+        guides.retain(|(_, pts)| !pts.iter().skip(2).any(|p| over_forehead(*p, lm)));
+    }
     let guide_grid = GuideGrid::new(&guides);
     // A hair takes its shape (and its motion) only from guides on its own side of the part:
     // a hair following a guide from across it is combed the other way, and the part zigzags
@@ -767,7 +774,10 @@ fn grow_scalp(
         let d = sp.rest - head;
         let line = ragged.at(d.x.atan2(d.z));
         let fine = ((d.y - line) / 0.01).clamp(0.0, 1.0);
-        let mut scale = r.range(0.85, 1.1) * (0.3 + 0.7 * fine);
+        // Hairs grow for different spans, so lengths vary (by a third on short hair, where it
+        // breaks up the even pile of a fur hat; less on long hair, whose tips thin out).
+        let spread = if g.gravity > 0.5 { 0.78 } else { 0.7 };
+        let mut scale = r.range(spread, 1.08) * (0.3 + 0.7 * fine);
         // Hanging hair from the sideburn in front of the ear would fall across the cheek: there
         // it stays short, as a real sideburn's fine hairs do under the long hair over them.
         if g.gravity > 0.5 {
@@ -794,6 +804,8 @@ fn grow_scalp(
                 *p = root + turn * (*p - root);
             }
         }
+        // The strand of hairs this one grows with (see the locks below).
+        let strand = strand_center(sp.rest, if g.gravity > 0.5 { 0.004 } else { 0.003 });
         let mut lock_tone = None;
         // How far out in its lock the hair is (0 on the guide .. 1 at the lock's edge).
         let mut lock_edge = 0.0;
@@ -813,17 +825,36 @@ fn grow_scalp(
         {
             continue;
         }
+        // Nor does a hanging hair at the front with no lock near: it would hang unsettled
+        // over the face.
+        if !flyaway && lock.is_none() && g.gravity > 0.5 && d.z > 0.03 {
+            continue;
+        }
         if !flyaway && let Some(gi) = lock {
             let (gsp, gpts) = &guides[gi];
             let off = sp.p - gsp.p;
             let c = g.clump * r.range(if g.gravity > 0.5 { 0.8 } else { 0.6 }, 1.0);
-            // The hairs of a lock share most of its tone.
-            lock_tone = Some(hash01(gsp.rest));
+            // Within its lock, a hair gathers with the hairs rooted a few millimetres around it
+            // into a strand of its own (MetaHuman's secondary clumps): one clump level makes
+            // each lock a smooth sheet, and the strands give it the breakup of real hair. Some
+            // hairs stay out of any strand, and strands gather more or less tightly.
+            let to_strand = strand - sp.rest;
+            let to_strand = to_strand - sp.n * to_strand.dot(sp.n);
+            let tight = if r.f32() < 0.08 {
+                0.0
+            } else {
+                0.75 * (0.7 + 0.6 * hash01(strand * 1000.0))
+            };
+            // The hairs of a lock share most of its tone, and a strand some of its own.
+            lock_tone = Some(0.6 * hash01(gsp.rest) + 0.4 * hash01(strand * 1000.0 + Vec3::X));
             lock_edge = (off.length() / 0.025).min(1.0);
+            // A shorter hair follows its lock only as far as it reaches.
+            let reach = scale.min(1.0);
             let last = pts.len() - 1;
             for (k, p) in pts.iter_mut().enumerate() {
                 let t = k as f32 / last as f32;
-                let follow = gpts[k] + off * (1.0 - c * t.powf(0.8));
+                let own = off + to_strand * (tight * t.sqrt());
+                let follow = along(gpts, t * reach) + own * (1.0 - c * t.powf(0.8));
                 // Hanging hair takes its lock's shape all along (its own wander would cross
                 // its neighbors' and look like straw); short hair only toward the tip.
                 let w = if g.gravity > 0.5 {
@@ -863,7 +894,12 @@ fn grow_scalp(
             if hanging {
                 radius *= 0.3;
             }
-            let phase = r.f32() * std::f32::consts::TAU;
+            // The hairs of a strand curl in step, and so coil together into ringlets; each
+            // hair curling its own way makes a frizz like fur (Houdini and MetaHuman grooms
+            // share the curl's phase within a clump). Strands differ a little in size.
+            let phase =
+                hash01(strand * 1000.0 + Vec3::Z) * std::f32::consts::TAU + r.normal() * 0.25;
+            radius *= 0.8 + 0.4 * hash01(strand * 1000.0 + Vec3::Y);
             let last = pts.len() - 1;
             let base = pts.clone();
             for k in 1..pts.len() {
@@ -885,6 +921,13 @@ fn grow_scalp(
         let last = pts.len() - 1;
         let mut face_side = None;
         let jitter = hash01(sp.rest);
+        // A hanging hair crossing the middle of the forehead low, below the swept hair, shows
+        // alone against the skin as a stray line: leave it out (the hair above it covers). (The
+        // narrow side's hair, swept away from the middle, stays.)
+        let stray = |p: &Vec3| over_forehead(*p, lm) && (*p - lm.head).x.abs() < PART_X;
+        if g.gravity > 0.5 && !flyaway && pts.iter().skip(3).any(stray) {
+            continue;
+        }
         for (k, p) in pts.iter_mut().enumerate().skip(1) {
             let t = k as f32 / last as f32;
             if g.gravity > 0.5 {
@@ -910,7 +953,7 @@ fn grow_scalp(
         set.push(
             &pts,
             g.root_radius * HAIR_WIDTH * thin,
-            g.root_radius * HAIR_WIDTH * thin * 0.35,
+            g.root_radius * HAIR_WIDTH * thin * 0.25,
             // Hanging locks show their own tone; short or slicked hair mixes across its clumps,
             // and tones shared by whole clumps read as stripes.
             lock_tone.map_or(r.f32(), |l| {
@@ -1046,6 +1089,13 @@ const PART_END_Z: f32 = -0.03;
 /// Over the forehead hair stays up at the hairline (swept to the side along it, then down past
 /// the temple): a lock lying across the brow reads as a band, not a fringe. For hair already
 /// grown (lifting while growing would send it out sideways).
+/// Whether `p` hangs in front of the forehead, below where swept hair lies on it (the floor of
+/// `keep_off_forehead`).
+fn over_forehead(p: Vec3, lm: &Landmarks) -> bool {
+    let d = p - lm.head;
+    d.z > 0.06 && d.x.abs() < 0.04 && d.y > -0.01 && d.y < 0.05
+}
+
 fn keep_off_forehead(p: Vec3, jitter: f32, lm: &Landmarks) -> Vec3 {
     let d = p - lm.head;
     let floor = 0.05 + 0.006 * jitter;
@@ -1090,6 +1140,38 @@ fn len_of(pts: &[Vec3]) -> f32 {
 }
 
 /// A stable 0..1 value from a position (so a hair's guide pass and final pass agree).
+/// Where the strand of the hair rooted at `rest` gathers: the nearest of points jittered
+/// about a grid of `cell` (so strands are irregular patches about a cell across).
+fn strand_center(rest: Vec3, cell: f32) -> Vec3 {
+    let c = (rest / cell).floor();
+    let mut best = (f32::MAX, rest);
+    for dz in -1..=1 {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let k = c + Vec3::new(dx as f32, dy as f32, dz as f32);
+                let jitter = Vec3::new(
+                    hash01(k + Vec3::new(0.13, 0.0, 0.0)),
+                    hash01(k + Vec3::new(0.0, 0.29, 0.0)),
+                    hash01(k + Vec3::new(0.0, 0.0, 0.47)),
+                );
+                let q = (k + 0.15 + 0.7 * jitter) * cell;
+                let d = q.distance_squared(rest);
+                if d < best.0 {
+                    best = (d, q);
+                }
+            }
+        }
+    }
+    best.1
+}
+
+/// The point at `u` (0 root .. 1 tip) along a hair, between its points.
+fn along(pts: &[Vec3], u: f32) -> Vec3 {
+    let x = u.clamp(0.0, 1.0) * (pts.len() - 1) as f32;
+    let k = (x as usize).min(pts.len() - 2);
+    pts[k].lerp(pts[k + 1], x - k as f32)
+}
+
 fn hash01(p: Vec3) -> f32 {
     ((p.x * 12.9898 + p.y * 78.233 + p.z * 37.719).sin() * 43758.547)
         .fract()
@@ -1338,11 +1420,11 @@ impl GuideGrid {
     }
 }
 
-/// Occlusion of every point from the hair around it: a density grid (4 mm cells) of all
+/// Occlusion of every point from the hair around it: a density grid (2.5 mm cells) of all
 /// points, summed along the way out from the head center (light into a hairdo comes mostly
 /// from outside it).
 fn occlude(set: &mut StrandSet, head: Vec3) {
-    const CELL: f32 = 0.004;
+    const CELL: f32 = 0.0025;
     let mut density: HashMap<[i32; 3], f32> = HashMap::new();
     let key = |p: Vec3| (p / CELL).floor().as_ivec3().to_array();
     for p in &set.points {
@@ -1350,15 +1432,15 @@ fn occlude(set: &mut StrandSet, head: Vec3) {
         *density.entry(key(Vec3::new(p[0], p[1], p[2]))).or_default() += w;
     }
     let per_cell = match set.kind {
-        StrandKind::Scalp => 0.045,
-        StrandKind::Beard => 0.06,
-        _ => 0.02,
+        StrandKind::Scalp => 0.17,
+        StrandKind::Beard => 0.15,
+        _ => 0.05,
     };
     for (p, attr) in set.points.iter().zip(set.attrs.iter_mut()) {
         let p = Vec3::new(p[0], p[1], p[2]);
         let out = (p - head).normalize_or(Vec3::Y);
         let mut sum = 0.0;
-        for step in 1..8 {
+        for step in 1..12 {
             let q = p + out * (CELL * step as f32);
             sum += density.get(&key(q)).copied().unwrap_or(0.0);
         }
@@ -1371,17 +1453,17 @@ fn occlude(set: &mut StrandSet, head: Vec3) {
 }
 
 /// Grid cell of the hair shadow density (m).
-const SHADOW_CELL: f32 = 0.004;
+const SHADOW_CELL: f32 = 0.0025;
 /// How far the shader marches toward a light (cells); the grid keeps this margin around the
 /// hair.
-pub const SHADOW_REACH: usize = 16;
+pub const SHADOW_REACH: usize = 24;
 /// Optical depth of one cell inside the skin (the body is opaque); the most a cell holds.
 pub const BODY_TAU: f32 = 4.0;
-/// Hair is more opaque than its fibers' bare cross-section: drawn hairs stand for a few real
-/// ones (see `HAIR_WIDTH`), and light crossing a fiber is mostly turned away.
-const HAIR_OPACITY: f32 = 1.5;
+/// Hair is more opaque than its fibers' bare cross-section: drawn hairs are still a little fewer
+/// than real ones (see `HAIR_WIDTH`), and light crossing a fiber is mostly turned away.
+const HAIR_OPACITY: f32 = 2.2;
 
-/// How much hair and body fills the space around the hair: per 4 mm cell, the optical depth
+/// How much hair and body fills the space around the hair: per 2.5 mm cell, the optical depth
 /// of crossing its hair and of crossing its body, each as a share of [`BODY_TAU`] in a byte
 /// (two bytes a cell, x fastest, then y, then z). Uploaded as a 3D texture; the strand shader
 /// marches each light through both, the skin shader through the hair only (the skin shades
@@ -1422,7 +1504,7 @@ impl ShadowGrid {
     }
 }
 
-/// The density of the scalp hair and beard (their fibers splatted into 4 mm cells) and of the
+/// The density of the scalp hair and beard (their fibers splatted into 2.5 mm cells) and of the
 /// body (the skin as a 2 cm opaque shell), around the hair with a margin of the shader's reach.
 /// `None` without hair that shades itself. Like the deep opacity maps of Unreal's grooms, but
 /// one grid serves every light, in any direction.
