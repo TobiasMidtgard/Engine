@@ -10,13 +10,16 @@
 //! dx serve --hot-patch -p showcase --features hotpatch
 //! ```
 //!
-//! On Linux `dx` links with clang and lld (`.cargo/config.toml`: `linker = "clang"`,
-//! `rustflags = ["-C", "link-arg=-fuse-ld=lld"]`); Windows and macOS need nothing extra.
+//! What patches (tried with dx 0.7.10 on 2026-10-28): code in the game binary's crate
+//! (`games/<game>/src`), in dev builds. A saved edit to a system, or to a function it calls, was
+//! live about a second later and the game kept its state. Edits to engine crates (`crates/*`)
+//! compile and "patch", but calls still reach the old code, so they need a restart, as do
+//! changes to a struct, component or resource layout and a system's parameters. Luau scripts
+//! reload in release builds too, and are the way to iterate on gameplay.
 //!
-//! What patches: code in the game binary's crate (`games/<game>/src`), in dev builds. Engine
-//! crates (`crates/*`) are libraries, which subsecond leaves alone; their edits need a restart,
-//! as do changes to a struct, component or resource layout and a system's parameters. Luau
-//! scripts reload in release builds too, and are the way to iterate on gameplay.
+//! Serve a game crate, not an engine crate's example: dx also recompiles every workspace crate
+//! that depends on the one you edited, and stops ("Missing rustc args for replay") when one of
+//! them isn't part of the program it serves.
 
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
