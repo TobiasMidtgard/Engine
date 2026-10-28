@@ -28,6 +28,8 @@ use engine_audio::AudioListener;
 
 /// Frames rendered before recording starts, so auto-exposure and the demos have settled.
 const SETTLE_FRAMES: u32 = 8;
+/// Most frames spent waiting at the first place for the ground to load before the film starts.
+const MAX_HOLD_FRAMES: u32 = 400;
 const OUT_DIR: &str = "screenshots/film";
 
 #[derive(Resource, Debug)]
@@ -37,6 +39,8 @@ pub struct Film {
     pub secs: f32,
     pub fps: f32,
     pub frame: u32,
+    /// Frames spent waiting for the ground at the first place (see [`ground_loading`]).
+    held: u32,
     /// `Name` of the entity to follow (`--follow`), instead of moving between the places.
     pub follow: Option<String>,
     rig: Option<Rig>,
@@ -93,6 +97,7 @@ pub fn install(app: &mut App, keys: &str, secs: f32, fps: f32, follow: Option<St
         secs: secs.max(0.5),
         fps,
         frame: 0,
+        held: 0,
         follow,
         rig: None,
         ears: None,
@@ -261,6 +266,21 @@ fn smootherstep(x: f32) -> f32 {
     x * x * x * (x * (x * 6.0 - 15.0) + 10.0)
 }
 
+/// Whether terrain patches or foliage near the camera are still being built.
+fn ground_loading(world: &World) -> bool {
+    let terrain = world
+        .get_resource::<engine::core::diagnostics::Diagnostics>()
+        .is_some_and(|d| {
+            d.get("terrain.patches_building").unwrap_or(0.0)
+                + d.get("terrain.patches_missing").unwrap_or(0.0)
+                > 0.0
+        });
+    let foliage = world
+        .get_resource::<engine_foliage::FoliageLoading>()
+        .is_some_and(|f| !f.is_ready());
+    terrain || foliage
+}
+
 fn call(world: &mut World, name: &str, args: serde_json::Value) {
     if let Err(e) = engine::core::registry::call_api(world, name, args) {
         engine::core::log::warn!("film: {name}: {e}");
@@ -289,6 +309,24 @@ fn run(world: &mut World) {
         .map(|p| crate::planet::aim(world, p))
         .collect();
     if frame == 0 {
+        // Before the place's demo starts, let the ground around it finish loading: headless a
+        // frame takes seconds, and the terrain's coarse patches would show through the scene
+        // for the first second of film while the fine ones stream in. (A frame or two first,
+        // so the camera has moved there and the terrain sees what it lacks.)
+        let held = world.resource::<Film>().held;
+        if held < MAX_HOLD_FRAMES && (held < 2 || ground_loading(world)) {
+            let (eye, target, hour) = pose(&places, secs, 0.0);
+            let mut q = world.query::<(&mut Transform, &mut ShowcaseCamera)>();
+            for (mut tf, mut cam) in q.iter_mut(world) {
+                camera::look(&mut tf, &mut cam, eye, target);
+            }
+            world.resource_mut::<engine_weather::Sky>().hour = hour;
+            world.resource_mut::<Film>().held += 1;
+            return;
+        }
+        if held > 2 {
+            engine::core::log::info!("film: waited {held} frames for the ground to load");
+        }
         if let Err(e) = std::fs::create_dir_all(OUT_DIR) {
             engine::core::log::warn!("film: can't create {OUT_DIR}: {e}");
         }
