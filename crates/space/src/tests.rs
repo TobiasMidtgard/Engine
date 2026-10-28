@@ -1095,3 +1095,61 @@ fn going_home_from_the_moon_lands_on_a_home_place() {
     assert!(focus(&mut app).distance(place) < 1e-6);
     assert!(home.length() < 1e-3, "{home:?}");
 }
+
+/// A world point a module keeps (a demo path's waypoint, an anchor): it follows shifts and
+/// surface moves.
+#[derive(Component)]
+struct KeptPoint(DVec3);
+
+impl engine_world::FollowsWorldShift for KeptPoint {
+    fn follow(&mut self, s: &WorldShift) {
+        engine_world::FollowsWorldShift::follow(&mut self.0, s);
+    }
+}
+
+#[test]
+fn kept_points_come_home_with_the_valley_after_a_moon_trip() {
+    use engine_world::WorldShiftAppExt;
+    let mut app = app();
+    app.shift_components::<KeptPoint>();
+    let spot = DVec3::new(120.0, 3.0, -340.0);
+    let house = app.world.spawn(Transform::from_translation(spot)).id();
+    // Not a root on the ground: the module's own copy of the spot.
+    let kept = app.world.spawn(KeptPoint(spot)).id();
+
+    travel_to(&mut app.world, "Moon", 0.0, 0.0, 2.0).unwrap();
+    app.update();
+    let away = app.world.get::<KeptPoint>(kept).unwrap().0;
+    assert!((away - spot).length() > 1_000.0, "{away}");
+    // Earth turns for an hour while we are away; we walk about on the Moon.
+    app.world.resource_mut::<SpaceClock>().seconds += 3_600.0;
+    app.update_n(3);
+    travel_home(&mut app.world, 2.0);
+    app.update();
+
+    let house_at = app.world.get::<Transform>(house).unwrap().translation;
+    assert!((house_at - spot).length() < 1e-3, "{house_at}");
+    let kept_at = app.world.get::<KeptPoint>(kept).unwrap().0;
+    assert!(
+        (kept_at - house_at).length() < 1e-3,
+        "kept {kept_at} house {house_at}"
+    );
+    assert!(!app.world.resource::<Parked>().kept.contains_key("Earth"));
+}
+
+#[test]
+fn every_body_is_a_stream_frame_named_after_it() {
+    let mut app = app();
+    app.update();
+    let mut q = app
+        .world
+        .query::<(&CelestialBody, &engine_world::StreamFrame)>();
+    let tagged: Vec<_> = q
+        .iter(&app.world)
+        .map(|(b, f)| (b.name.clone(), f.0.clone()))
+        .collect();
+    assert!(tagged.iter().any(|(b, _)| b == "Moon"));
+    assert!(tagged.iter().all(|(b, f)| b == f));
+    let mut all = app.world.query::<&CelestialBody>();
+    assert_eq!(tagged.len(), all.iter(&app.world).count());
+}

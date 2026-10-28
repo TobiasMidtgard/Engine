@@ -16,7 +16,8 @@ use engine_render::RenderAppExt;
 use engine_render::prelude::{Atmosphere, DirectionalLight};
 use engine_world::physics::Velocity;
 use engine_world::{
-    Atmospheres, FocusPoints, Gravity, GravityBody, SimulationFocus, WorldShift, WorldShiftSet,
+    Atmospheres, FocusPoints, Gravity, GravityBody, SimulationFocus, StreamFrame, SurfaceMoved,
+    WorldShift, WorldShiftSet,
 };
 
 pub use conic::Conic;
@@ -378,8 +379,13 @@ pub struct StarLight {
 #[derive(Resource, Debug, Clone, Default)]
 pub struct Parked {
     pub bodies: HashMap<String, Vec<ParkedEntity>>,
-    /// The body whose things go back once the world has shifted into its turning frame.
-    restore: Option<String>,
+    /// Per parked body: where a point in today's world coordinates sits on that body
+    /// (body-local), following every shift since it was parked. On the way back the world's
+    /// kept points take it to the body's new pose as one [`SurfaceMoved`].
+    kept: HashMap<String, WorldShift>,
+    /// The body whose things go back once the world has shifted into its turning frame, and
+    /// where that body sits in the world then.
+    restore: Option<(String, (DVec3, DQuat))>,
 }
 
 /// One thing left on a body: pose and motion in body-local coordinates (+Y north).
@@ -592,10 +598,12 @@ impl Plugin for SpacePlugin {
             )
             .init_resource::<PendingTravel>()
             .add_systems(PostUpdate, reanchor.in_set(WorldShiftSet::Write))
+            .add_systems(PostUpdate, follow_parked.in_set(WorldShiftSet::Apply))
             .add_systems(
                 PostUpdate,
                 (
                     look::spawn_impostors,
+                    tag_stream_frames,
                     update_space,
                     rails::fly,
                     look::scale_impostors,
@@ -948,7 +956,9 @@ pub fn reanchor(world: &mut World) {
             park(world, &states[anchor], at, limit * 0.5);
         }
         if next_frame.rotating {
-            world.resource_mut::<Parked>().restore = Some(states[target].name.clone());
+            let t = &states[target];
+            let at = placement(t, true, &next_frame, frame_for(t, &next_frame));
+            world.resource_mut::<Parked>().restore = Some((t.name.clone(), at));
         }
     }
     let shift = frame_shift(
@@ -964,6 +974,22 @@ pub fn reanchor(world: &mut World) {
         },
     );
     world.write_message(shift);
+    // Coming back to a parked body: what modules keep in world points on it goes to where
+    // the body is now, as its roots do in `unpark` (after this frame's shift).
+    if let Some((name, at)) = world.resource::<Parked>().restore.clone()
+        && let Some(kept) = world.resource_mut::<Parked>().kept.remove(&name)
+        && let Some(body) = states.iter().find(|s| s.name == name)
+    {
+        let moved = inverse(&shift).then(&kept).then(&pose(at));
+        world.write_message(SurfaceMoved {
+            body: body.entity,
+            shift: WorldShift {
+                velocity: DVec3::ZERO,
+                angular_velocity: DVec3::ZERO,
+                ..moved
+            },
+        });
+    }
     world.insert_resource(WrittenFrame(next_frame.clone()));
     *world.resource_mut::<SpaceFrame>() = next_frame;
     world.resource_mut::<SpaceState>().switches += 1;
@@ -993,6 +1019,10 @@ fn turning_limit(s: &BodyState, body: &CelestialBody, settings: &SpaceSettings) 
 fn park(world: &mut World, body: &BodyState, at: (DVec3, DQuat), reach: f64) {
     let (pos, rot) = at;
     let inv = rot.inverse();
+    world
+        .resource_mut::<Parked>()
+        .kept
+        .insert(body.name.clone(), inverse(&pose(at)));
     let mut q = world.query_filtered::<(Entity, &Transform, Option<&Velocity>), (
         Without<ChildOf>,
         Without<CelestialBody>,
@@ -1021,6 +1051,44 @@ fn park(world: &mut World, body: &BodyState, at: (DVec3, DQuat), reach: f64) {
     let list = parked.bodies.entry(body.name.clone()).or_default();
     list.retain(|p| !left.iter().any(|l| l.entity == p.entity));
     list.extend(left);
+}
+
+/// Every body is a frame streamed cells can ride ([`StreamFrame`], named after the body):
+/// zones laid out on a planet stay on it while the world is anchored elsewhere.
+fn tag_stream_frames(
+    mut commands: Commands,
+    bodies: Query<(Entity, &CelestialBody), Without<StreamFrame>>,
+) {
+    for (e, body) in &bodies {
+        commands.entity(e).insert(StreamFrame(body.name.clone()));
+    }
+}
+
+/// A body's pose (body-local to world) as a shift.
+fn pose((position, rotation): (DVec3, DQuat)) -> WorldShift {
+    WorldShift {
+        rotation,
+        ..WorldShift::translate(position)
+    }
+}
+
+/// The shift that undoes `s`'s placement (its motion is dropped).
+fn inverse(s: &WorldShift) -> WorldShift {
+    let rotation = s.rotation.inverse();
+    WorldShift {
+        rotation,
+        ..WorldShift::translate(-(rotation * s.translation))
+    }
+}
+
+/// Every shift moves the world's points; the map from them to each parked body follows.
+fn follow_parked(mut shifts: MessageReader<WorldShift>, mut parked: ResMut<Parked>) {
+    for s in shifts.read() {
+        let back = inverse(s);
+        for kept in parked.kept.values_mut() {
+            *kept = back.then(kept);
+        }
+    }
 }
 
 /// Put what was left on `body` back where it was on it (`at`: where the body sits in the
@@ -1088,12 +1156,11 @@ pub fn update_space(world: &mut World) {
     }
     // Back on a body the world left: its things go back where they were on it.
     let restore = world.resource_mut::<Parked>().restore.take();
-    if let Some(name) = restore
+    if let Some((name, at)) = restore
         && frame.rotating
         && states[anchor].name == name
     {
-        let s = &states[anchor];
-        unpark(world, &name, (s.world_position, s.world_rotation));
+        unpark(world, &name, at);
     }
     for (i, s) in states.iter().enumerate() {
         if let Some(mut tf) = world.get_mut::<Transform>(s.entity) {

@@ -94,6 +94,21 @@ impl ChunkSource {
         self.edits.apply(base, up, height, &coarse).1
     }
 
+    /// Ground height only at a surface column (no paint), with detail down to
+    /// `min_wavelength`: what colliders and ground queries need.
+    pub fn ground_height(&self, base: DVec3, up: DVec3, dir: DVec3, min_wavelength: f64) -> f64 {
+        let h = self.shape.sample(dir, min_wavelength).height;
+        if self.edits.is_empty() {
+            return h;
+        }
+        let coarse = |wavelength: f64| {
+            self.shape
+                .sample(dir, wavelength.max(min_wavelength))
+                .height
+        };
+        self.edits.apply(base, up, h, &coarse).0
+    }
+
     /// Sample at a surface column (`base` at height 0 with `up`; `dir` for the shape).
     pub fn sample(&self, base: DVec3, up: DVec3, dir: DVec3, min_wavelength: f64) -> Sample {
         let s = self.shape.sample(dir, min_wavelength);

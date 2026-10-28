@@ -97,7 +97,14 @@ pub fn build_tile(
     samples: u32,
     ids: &SurfaceIds,
 ) -> (Transform, Collider) {
-    let shape = tile_shape(&t.source, &t.config.palette, key, samples, ids);
+    let shape = tile_shape(
+        &t.source,
+        &t.config.palette,
+        key,
+        samples,
+        ids,
+        t.config.finest_spacing_m,
+    );
     (shape.transform(t), shape.collider)
 }
 
@@ -108,6 +115,7 @@ fn tile_shape(
     key: NodeKey,
     samples: u32,
     ids: &SurfaceIds,
+    finest_spacing_m: f64,
 ) -> TileShape {
     let map = &source.map;
     let (lo, size) = key.face_rect();
@@ -125,6 +133,10 @@ fn tile_shape(
     let _ = pb;
     let n = samples.max(2);
     let step = size / (n - 1) as f64;
+    // The ground as the finest patches draw it (they leave out wavelengths under two vertex
+    // spacings): finer detail costs most of a sample and a heightfield this coarse can't
+    // hold it anyway.
+    let detail = (2.0 * finest_spacing_m).min(step);
     let mut heights = vec![0.0f32; (n * n) as usize];
     // Rows run along +local Z = −b (b increases toward −Z because z = x × y).
     let b_sign = if (pb - origin).dot(z_axis) > 0.0 {
@@ -143,8 +155,8 @@ fn tile_shape(
                 lo.y + size - row as f64 * step
             };
             let (base, u, dir) = map.base(key.face, a, b);
-            let s = source.sample(base, u, dir, 0.0);
-            let p = base + u * s.height - origin;
+            let height = source.ground_height(base, u, dir, detail);
+            let p = base + u * height - origin;
             heights[(row * n + col) as usize] = p.dot(up) as f32;
             extent_x = extent_x.max(p.dot(x_axis).abs());
             extent_z = extent_z.max(p.dot(z_axis).abs());
@@ -335,7 +347,14 @@ pub fn update_colliders(
                     Some((
                         k,
                         scope.spawn(move || {
-                            tile_shape(&t.source, &t.config.palette, k.1, samples, ids)
+                            tile_shape(
+                                &t.source,
+                                &t.config.palette,
+                                k.1,
+                                samples,
+                                ids,
+                                t.config.finest_spacing_m,
+                            )
                         }),
                     ))
                 })
@@ -363,10 +382,11 @@ pub fn update_colliders(
             continue;
         };
         let (source, palette, ids) = (t.source.clone(), t.config.palette.clone(), ids.clone());
+        let finest = t.config.finest_spacing_m;
         let samples = settings.collider_samples;
         let handle = std::thread::Builder::new()
             .name("terrain-collider".into())
-            .spawn(move || tile_shape(&source, &palette, k.1, samples, &ids))
+            .spawn(move || tile_shape(&source, &palette, k.1, samples, &ids, finest))
             .expect("spawn a terrain collider thread");
         state.building.insert(k, handle);
     }
@@ -440,6 +460,46 @@ mod tests {
         assert!((tf.rotation * Vec3::Y).y > 0.9999);
         assert!(size[0] > 30.0 && size[0] < 120.0, "{size:?}");
         assert!(tf.translation.y.abs() < 0.05);
+    }
+
+    /// Time to build one collider tile in the hills beyond the pad, and how far its heights
+    /// stray from the ground at full detail.
+    /// `cargo test --release -p engine_terrain tile_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing; run in release"]
+    fn tile_cost() {
+        let pad = FlatPad::default();
+        let config = PlanetTerrain::earthlike(2).with_pad(pad);
+        let t = TerrainRuntime::new(&config, Default::default(), 1);
+        let level = tile_level(&t, 64.0);
+        let ids = SurfaceIds::new(&SurfaceMaterials::default());
+        let dir = pad.direction();
+        let east = DVec3::Y.cross(dir).normalize();
+        let mut full = Vec::new();
+        for (name, finest) in [("full detail", 0.0), ("as drawn", config.finest_spacing_m)] {
+            let started = std::time::Instant::now();
+            let mut heights = Vec::new();
+            for i in 0..8 {
+                let local =
+                    (dir + east * (0.002 + 0.0005 * i as f64)).normalize() * t.source.map.radius;
+                let key = t.source.map.node_at(local, level).unwrap();
+                let shape = tile_shape(&t.source, &config.palette, key, 65, &ids, finest);
+                let ColliderShape::Heightfield { heights: h, .. } = shape.collider.shape else {
+                    panic!("not a heightfield");
+                };
+                heights.extend(h);
+            }
+            let ms = started.elapsed().as_secs_f64() * 1e3 / 8.0;
+            if full.is_empty() {
+                full = heights.clone();
+            }
+            let worst = full
+                .iter()
+                .zip(&heights)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            println!("{name}: {ms:.1} ms a tile, worst {worst:.3} m off full detail");
+        }
     }
 
     fn app_with_planet() -> (App, Entity) {
