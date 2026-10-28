@@ -80,7 +80,7 @@ struct ImpostorOut {
     // How far the center moved since last frame, relative to last frame's camera.
     @location(8) @interpolate(flat) moved: vec3<f32>,
     @location(9) @interpolate(flat) ids: vec2<u32>,
-    // 0, or how far the mesh is through its cross-fade into this impostor (`n0.w`).
+    // Its dither (`n0.w`, `dither_keeps` in lib_frame.wgsl; 0: drawn whole).
     @location(10) @interpolate(flat) fade: f32,
 };
 
@@ -144,8 +144,9 @@ struct ImpostorSurface {
 // picked stochastically from the four around the view direction (the same in the prepass and
 // the scene pass, so their depths match).
 fn impostor_surface(in: ImpostorOut) -> ImpostorSurface {
-    // Cross-fading in: the pixels the mesh leaves (`fs_prepass` in mesh.wgsl).
-    if (in.fade > 0.0 && frame_noise(in.clip.xy) >= in.fade) {
+    // Cross-fading in, the pixels the mesh leaves (`fs_prepass` in mesh.wgsl); or dithered out
+    // with its mesh (`DitherFade`).
+    if (!dither_keeps(in.fade, in.clip.xy)) {
         discard;
     }
     let layer = in.ids.y;

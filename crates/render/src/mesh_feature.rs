@@ -380,6 +380,8 @@ struct Item {
     /// 0, or how far it is through the cross-fade from its mesh to its impostor (0..1): both
     /// are drawn, each in its share of the pixels (`IMPOSTOR_FADE`).
     fade: f32,
+    /// `DitherFade` (0 without one).
+    dither: f32,
 }
 
 /// What the gather needs of a mesh, looked up once a frame for the meshes the scene uses (by
@@ -500,9 +502,11 @@ fn run_jobs<'env, F: FnOnce() + Send + 'env>(jobs: impl Iterator<Item = F>) {
     }
 }
 
-/// Whether a slot may take the cluster path (virtual geometry).
+/// Whether a slot may take the cluster path (virtual geometry). Not while it dithers out
+/// (`DitherFade`): the instanced path draws the dither.
 fn cluster_candidate(hot: &Hot, mesh: &MeshFrame, mat: &MaterialFrame) -> bool {
     hot.flags & mesh_scene::INSTANCED_ONLY == 0
+        && hot.dither == 0.0
         && mat.still_opaque
         && mesh.exists
         && (mesh.dense || hot.flags & mesh_scene::DISPLACED != 0)
@@ -545,7 +549,7 @@ impl Cull<'_> {
         let center = (hot.center - self.p.view.origin).as_vec3();
         let radius = hot.radius;
         let distance = center.length();
-        if distance - radius > hot.max_distance {
+        if distance - radius > hot.max_distance || hot.dither.abs() >= 1.0 {
             return None;
         }
         // Too small to cover a pixel: left out of the view (it may still cast a shadow).
@@ -555,7 +559,15 @@ impl Cull<'_> {
             .map(|k| k * (distance - radius).max(self.p.view.near));
         let big_enough = meters_per_pixel.is_none_or(|m| 2.0 * radius >= self.p.min_pixels * m);
         let visible = big_enough && self.p.view.frustum.intersects_sphere(center, radius);
-        let casts = self.p.shadows && hot.flags & mesh_scene::CASTS != 0 && !mat.blend;
+        // Dithering out (`DitherFade`), it casts while at least half of it shows: one of a pair
+        // swapping at a time (the one fading in takes over at the middle).
+        let dither_casts = if hot.dither >= 0.0 {
+            hot.dither < 0.5
+        } else {
+            hot.dither >= -0.5
+        };
+        let casts =
+            self.p.shadows && hot.flags & mesh_scene::CASTS != 0 && !mat.blend && dither_casts;
         if !visible && !casts {
             return None;
         }
@@ -592,7 +604,9 @@ impl Cull<'_> {
         } else {
             lod
         };
-        let fade = if baked && (IMPOSTOR_FADE..1.0).contains(&size) {
+        // A game's own fade (`DitherFade`) takes the dither's place: the impostor then swaps in
+        // at the bottom of the cross-fade range without one.
+        let fade = if baked && hot.dither == 0.0 && (IMPOSTOR_FADE..1.0).contains(&size) {
             ((1.0 - size) / (1.0 - IMPOSTOR_FADE)).max(f32::EPSILON)
         } else {
             0.0
@@ -626,6 +640,7 @@ impl Cull<'_> {
             impostor_ok,
             impostor_size,
             fade,
+            dither: hot.dither,
         })
     }
 }
@@ -2775,9 +2790,21 @@ impl RenderFeature for MeshFeature {
                 } else {
                     0
                 };
-                // The cross-fade rides in the normal matrix's spare lane (0 elsewhere).
+                // The dither rides in the normal matrix's spare lane (0: drawn whole): a
+                // positive share hides the pixels whose noise is below it, a negative one keeps
+                // only those below its negation (`dither_keeps` in lib_frame.wgsl). A game's
+                // `DitherFade` hides `|t|` of the pixels; in a cross-fade the mesh hides the
+                // `fade` share its impostor shows.
                 let mut normal = cold.normal;
-                normal[0][3] = item.fade;
+                normal[0][3] = if item.dither > 0.0 {
+                    item.dither
+                } else if item.dither < 0.0 {
+                    -(1.0 + item.dither)
+                } else if n & AS_IMPOSTOR != 0 {
+                    -item.fade
+                } else {
+                    item.fade
+                };
                 bytemuck::cast::<MeshInstance, [u8; SIZE]>(MeshInstance {
                     m: cold.rows(view.origin),
                     n: normal,
