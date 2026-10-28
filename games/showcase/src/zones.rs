@@ -450,11 +450,30 @@ pub struct ZoneCell {
 /// Zones whose content is only the entities they spawn, so they unload cleanly: the showcase's
 /// own placeholders, and the modules' zones that `ENGINE_STREAM_AUDIT` found clean (out, in
 /// and out again, 2026-10-28). The others join as their unload hooks land.
-const UNLOADABLE: [&str; 5] = ["plaza", "gallery2d", "magic", "tracks", "parkour"];
+const UNLOADABLE: [&str; 10] = [
+    "plaza",
+    "gallery2d",
+    "magic",
+    "tracks",
+    "parkour",
+    "market",
+    "arena",
+    "voxel",
+    "range",
+    "footsteps",
+];
 
 /// Cells that free their assets on unload: the audit's reload found none of their meshes
 /// missing. `SHOWCASE_RELEASE_ASSETS=all` opts every cell in, to audit which may join.
-const RELEASES_ASSETS: [&str; 2] = ["tracks", "parkour"];
+const RELEASES_ASSETS: [&str; 7] = [
+    "tracks",
+    "parkour",
+    "gallery2d",
+    "market",
+    "arena",
+    "voxel",
+    "range",
+];
 
 fn releases_assets(key: &str) -> bool {
     RELEASES_ASSETS.contains(&key)
