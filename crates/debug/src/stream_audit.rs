@@ -31,7 +31,7 @@ use engine_core::ecs::resource::IsResource;
 use engine_core::math::DVec3;
 use engine_core::prelude::*;
 use engine_render::{Image, MaterialRef, MeshRef, MeshRenderer, StandardMaterial};
-use engine_world::{CellState, StreamedCells};
+use engine_world::{CellId, CellMember, CellState, StreamedCells};
 
 use crate::shift_audit::kind;
 
@@ -137,7 +137,8 @@ pub struct AuditedCell {
     pub reload: Vec<(String, i64)>,
     /// Assets by type the unload left: (type, count, bytes).
     pub assets_left: Vec<(String, i64, i64)>,
-    /// The cell's meshes that name a missing mesh, material or texture after the reload.
+    /// The cell's own meshes (its members and their trees, not neighbours within reach) that
+    /// name a missing mesh, material or texture after the reload.
     pub missing: u32,
 }
 
@@ -151,8 +152,10 @@ impl AuditedCell {
 }
 
 /// Entities by kind within `reach` of `center` (or with no place), the process RAM, every
-/// asset type's count and bytes, and the meshes within reach that name a missing asset.
-fn census(world: &mut World, center: DVec3, reach: f64) -> Census {
+/// asset type's count and bytes, and the cell's own meshes (`cell`'s members and everything
+/// under them) that name a missing asset: a neighbour's broken meshes within reach are its
+/// own audit's business.
+fn census(world: &mut World, center: DVec3, reach: f64, cell: Option<CellId>) -> Census {
     let entities: Vec<Entity> = world
         .query_filtered::<(Entity, Option<&GlobalTransform>), Without<IsResource>>()
         .iter(world)
@@ -171,7 +174,20 @@ fn census(world: &mut World, center: DVec3, reach: f64) -> Census {
         .into_iter()
         .map(|(name, s)| (name.to_string(), (s.count as i64, s.bytes as i64)))
         .collect();
-    let missing = missing_assets(world, &entities);
+    let mut own: Vec<Entity> = world
+        .query::<(Entity, &CellMember)>()
+        .iter(world)
+        .filter(|(_, m)| Some(m.0) == cell)
+        .map(|(e, _)| e)
+        .collect();
+    let mut next = 0;
+    while next < own.len() {
+        if let Some(children) = world.get::<Children>(own[next]) {
+            own.extend(children.iter());
+        }
+        next += 1;
+    }
+    let missing = missing_assets(world, &own);
     Census {
         kinds,
         ram,
@@ -341,7 +357,8 @@ fn run(world: &mut World, audit: &mut StreamAudit) {
         return;
     }
     audit.waited = 0;
-    audit.census.push(census(world, center, reach));
+    let id = world.resource::<StreamedCells>().find(&key);
+    audit.census.push(census(world, center, reach, id));
     audit.step = match audit.step {
         Step::Out => Step::Still,
         Step::Still => Step::In,

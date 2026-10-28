@@ -1731,6 +1731,59 @@ mod tests {
     }
 
     #[test]
+    fn inline_materials_and_shapes_resolve_again_after_a_release() {
+        use engine_assets::{AssetAppExt, Assets};
+        use engine_render::{Mesh, ResolvedMesh, Shape, StandardMaterial};
+
+        let mut app = app();
+        app.init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .add_systems(Update, engine_render::resolve_mesh_renderers);
+        let draw = |x: f64| {
+            move |w: &mut World| {
+                w.spawn((
+                    Transform::from_translation(DVec3::new(x, 0.0, 0.0)),
+                    MeshRenderer::new(
+                        Shape::Cuboid { size: [1.0; 3] },
+                        StandardMaterial::hex(0x6fb3e0),
+                    ),
+                ));
+            }
+        };
+        // Two cells drawing the same shape and material, as neighbouring zones do.
+        app.stream_cell(StreamCell::new("a", DVec3::ZERO, 10.0, draw(0.0)).release_assets());
+        app.stream_cell(
+            StreamCell::new("b", DVec3::new(30.0, 0.0, 0.0), 10.0, draw(30.0)).release_assets(),
+        );
+        let live = |app: &mut App| {
+            let resolved: Vec<ResolvedMesh> = app
+                .world
+                .query::<&ResolvedMesh>()
+                .iter(&app.world)
+                .copied()
+                .collect();
+            let meshes = app.world.resource::<Assets<Mesh>>();
+            let materials = app.world.resource::<Assets<StandardMaterial>>();
+            resolved
+                .iter()
+                .all(|r| meshes.contains(r.mesh) && materials.contains(r.material))
+                .then_some(resolved.len())
+        };
+        app.update_n(3);
+        assert_eq!(live(&mut app), Some(2));
+        for key in ["a", "b", "a"] {
+            app.world
+                .resource_mut::<StreamedCells>()
+                .pins
+                .insert(key.into(), false);
+            app.update_n(2);
+            app.world.resource_mut::<StreamedCells>().pins.remove(key);
+            app.update_n(3);
+            assert_eq!(live(&mut app), Some(2), "after {key} went and came back");
+        }
+    }
+
+    #[test]
     fn a_remembering_cell_keeps_what_was_destroyed_and_moved() {
         use engine_world::CellMemory;
         use engine_world::shift::WorldShift;

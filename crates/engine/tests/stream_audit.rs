@@ -106,7 +106,8 @@ fn the_audit_counts_assets_left_and_meshes_missing_theirs() {
         engine::world::WorldPlugin,
         StreamingPlugin,
         StreamAuditPlugin {
-            settle: 3,
+            // Long enough that every cell is in before the first count.
+            settle: 8,
             only: None,
         },
     ))
@@ -138,7 +139,16 @@ fn the_audit_counts_assets_left_and_meshes_missing_theirs() {
         })
         .release_assets(),
     );
-    for _ in 0..300 {
+    // Next to the cacher (within its reach) and audited after it: the cacher's broken mesh is
+    // not this cell's.
+    app.stream_cell(
+        StreamCell::new("neighbour", DVec3::new(75.0, 0.0, 0.0), 10.0, |world| {
+            let mesh = world.resource_mut::<Assets<Mesh>>().add(cube());
+            draw(world, mesh);
+        })
+        .release_assets(),
+    );
+    for _ in 0..800 {
         app.update();
         if app.world.resource::<StreamAuditReport>().done {
             break;
@@ -163,4 +173,5 @@ fn the_audit_counts_assets_left_and_meshes_missing_theirs() {
     let cacher = cell("cacher");
     assert_eq!(cacher.missing, 1, "{cacher:?}");
     assert!(!cacher.clean());
+    assert!(cell("neighbour").clean(), "{:?}", cell("neighbour"));
 }
