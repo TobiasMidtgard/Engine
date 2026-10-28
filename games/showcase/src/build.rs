@@ -8,7 +8,7 @@ use crate::{camera, placeholders, planet, scenery, zones};
 use engine::core::ecs::system::SystemState;
 use engine::prelude::*;
 use engine::stream::{StreamCell, StreamCellsExt, StreamingBudget};
-use engine::world::{CellState, StreamedCells};
+use engine::world::{CellState, StreamedCells, WorldShift};
 use engine_ui::color::Color;
 use engine_ui::el::El;
 use engine_ui::node::Screen;
@@ -743,6 +743,9 @@ pub struct HeldJump {
 #[derive(Default)]
 pub struct Jump {
     last: Option<DVec3>,
+    /// How far the view moved the frame before (m): flight, however fast, moves about as far
+    /// each frame; a jump is a step well beyond it.
+    step: f64,
     since: Option<std::time::Instant>,
     frames: u32,
     /// When this system last ran (wall clock), and frames in a row since the move that took
@@ -760,8 +763,10 @@ const CALM_FRAMES: u32 = 3;
 /// Longest a jump stays covered (s).
 const COVER_MAX_S: f32 = 6.0;
 
-/// Other moves this far (m) in a frame are covered once they happen.
+/// Other moves this far (m) in a frame, and this many times the last frame's, are covered
+/// once they happen. A re-anchored world (a [`WorldShift`]) moves the view without a jump.
 const JUMP_M: f64 = 150.0;
+const JUMP_STEPS: f64 = 4.0;
 
 /// Frames the cover is drawn before a held jump moves the view, and at least after it.
 pub const COVER_FRAMES: u32 = 2;
@@ -789,7 +794,13 @@ pub fn track_jumps(
     uploads: Res<Uploads>,
     diagnostics: Option<Res<engine::core::diagnostics::Diagnostics>>,
     cameras: Query<(&Camera, &GlobalTransform)>,
+    mut shifts: MessageReader<WorldShift>,
 ) {
+    for s in shifts.read() {
+        if let Some(last) = jump.last.as_mut() {
+            *last = s.point(*last);
+        }
+    }
     if build.is_some() {
         return;
     }
@@ -821,7 +832,9 @@ pub fn track_jumps(
     else {
         return;
     };
-    let jumped = jump.last.is_some_and(|l| l.distance(eye) > JUMP_M);
+    let step = jump.last.map_or(0.0, |l| l.distance(eye));
+    let jumped = step > JUMP_M.max(jump.step * JUMP_STEPS);
+    jump.step = step;
     jump.last = Some(eye);
     if jumped && jump.since.is_none() {
         jump.since = Some(now);
