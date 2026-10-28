@@ -42,6 +42,7 @@ use engine_world::{
 use crate::aero::Aircraft;
 use crate::autopilot::{Autopilot, AutopilotMode};
 use crate::chassis::{Vehicle, VehicleTelemetry};
+use crate::cruise::Cruise;
 use crate::ship::{AssistMode, Spacecraft};
 
 /// Fastest a vehicle may be going to get in or out, m/s.
@@ -263,6 +264,9 @@ fn board(world: &mut World, mut cursor: Local<bevy_ecs::message::MessageCursor<I
 }
 
 fn speed(world: &World, e: Entity) -> f32 {
+    if let Some(c) = world.get::<Cruise>(e) {
+        return c.speed as f32;
+    }
     world.get::<Velocity>(e).map_or(0.0, |v| v.linear.length())
 }
 
@@ -452,10 +456,11 @@ fn prompts(
         &Boardable,
         Option<&Velocity>,
         Has<Driven>,
+        Has<Cruise>,
     )>,
 ) {
-    for (mut i, b, v, driven) in &mut q {
-        let moving = v.is_some_and(|v| v.linear.length() > BOARD_SPEED);
+    for (mut i, b, v, driven, cruising) in &mut q {
+        let moving = cruising || v.is_some_and(|v| v.linear.length() > BOARD_SPEED);
         let (verb, enabled) = match (driven, moving) {
             (true, false) => ("Get out", true),
             (true, true) => ("Stop to get out", true),
@@ -518,6 +523,7 @@ fn toward(value: f32, target: f32, rate: f32, dt: f32) -> f32 {
 }
 
 type DrivenParts<'a> = (
+    Entity,
     &'a mut Driven,
     &'a mut VehicleControls,
     &'a Transform,
@@ -535,13 +541,14 @@ fn drive_controls(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     cameras: Query<&Transform, (With<ChaseCamera>, Without<Driven>)>,
     mut q: Query<DrivenParts>,
+    mut commands: Commands,
 ) {
     let dt = time.delta_secs();
     let Some(actions) = actions else { return };
     let held = |k: KeyCode| keys.as_ref().is_some_and(|keys| keys.pressed(k));
     let tapped = |k: KeyCode| keys.as_ref().is_some_and(|keys| keys.just_pressed(k));
     let mv = actions.axis("move");
-    for (mut d, mut c, t, tel, aircraft, ship) in &mut q {
+    for (e, mut d, mut c, t, tel, aircraft, ship) in &mut q {
         let up = gravity.up_at(t.translation);
         let aim = cameras
             .get(d.camera)
@@ -627,6 +634,16 @@ fn drive_controls(
                     && tapped(KeyCode::G)
                 {
                     a.gear_down = !a.gear_down;
+                }
+                // J: into cruise (out of the air) or back out of it.
+                if tapped(KeyCode::J) {
+                    commands.queue(move |world: &mut World| {
+                        if world.get::<Cruise>(e).is_some() {
+                            crate::cruise::drop_out(world, e);
+                        } else if let Err(why) = crate::cruise::engage(world, e) {
+                            engine_core::log::info!("cruise: {why}");
+                        }
+                    });
                 }
                 if let Some(mut s) = ship
                     && tapped(KeyCode::H)

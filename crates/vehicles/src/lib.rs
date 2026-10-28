@@ -4,6 +4,7 @@ pub mod aero;
 pub mod api;
 pub mod autopilot;
 pub mod chassis;
+pub mod cruise;
 pub mod demo;
 pub mod drive;
 pub mod drivetrain;
@@ -97,6 +98,9 @@ impl Plugin for VehiclesPlugin {
                     )
                         .chain()
                         .in_set(VehicleSet::Events),
+                    cruise::cruise_system
+                        .after(VehicleSet::Events)
+                        .before(SimSet::Physics),
                 ),
             )
             // Crashes are reported by the backend during the physics step.

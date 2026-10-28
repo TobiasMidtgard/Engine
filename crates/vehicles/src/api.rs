@@ -282,6 +282,21 @@ fn telemetry_api(world: &mut World, args: Value) -> Result<Value, String> {
     Ok(v)
 }
 
+fn cruise_api(world: &mut World, args: Value) -> Result<Value, String> {
+    let ship = vehicle_entity(world, &args)?;
+    if args.get("on").and_then(Value::as_bool).unwrap_or(true) {
+        crate::cruise::engage(world, ship)?;
+    } else {
+        crate::cruise::drop_out(world, ship);
+    }
+    let c = world.get::<crate::cruise::Cruise>(ship);
+    Ok(json!({
+        "cruising": c.is_some(),
+        "speed": c.map(|c| c.speed),
+        "altitude_m": c.map(|c| c.altitude_m),
+    }))
+}
+
 fn board_api(world: &mut World, args: Value) -> Result<Value, String> {
     use crate::drive::{Boardable, ChaseCamera, Driven};
     let vehicle = vehicle_entity(world, &args)?;
@@ -386,6 +401,15 @@ pub(crate) fn register(app: &mut App) {
          autopilot goes off and keys and mouse drive it.",
         r#"{"vehicle": "Parked car"}"#,
         board_api,
+    )
+    .register_api(
+        "vehicles.cruise",
+        "Put a spacecraft into cruise (\"on\": true, the default; it must be over 12 km up) or \
+         drop it out (false). Cruising, it flies its nose at a speed set by the nearest body's \
+         distance (throttle 0..1 sets how many times that distance per second, up to 0.6) and \
+         drops out by itself closing on a surface under 10 km.",
+        r#"{"vehicle": "Parked spaceplane", "on": true}"#,
+        cruise_api,
     )
     .register_api(
         "vehicles.telemetry",

@@ -258,12 +258,16 @@ pub(crate) fn axis_capacity(thrusters: &[Thruster]) -> [f32; 6] {
 
 /// Flight assist + allocation + thrust, and propellant use.
 pub fn spacecraft_system(
-    mut q: Query<(
-        &mut Spacecraft,
-        &VehicleControls,
-        &mut VehicleForces,
-        &mut VehicleTelemetry,
-    )>,
+    mut q: Query<
+        (
+            &mut Spacecraft,
+            &VehicleControls,
+            &mut VehicleForces,
+            &mut VehicleTelemetry,
+        ),
+        // Cruising ships fly by their cruise drive, not their thrusters.
+        Without<crate::cruise::Cruise>,
+    >,
 ) {
     q.par_iter_mut()
         .for_each(|(mut ship, controls, mut forces, mut tel)| {
