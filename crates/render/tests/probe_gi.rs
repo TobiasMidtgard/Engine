@@ -342,3 +342,34 @@ fn an_indoor_volume_keeps_the_sky_out_where_no_mesh_roofs_the_room() {
         "far wall: {closed:.1} inside the volume, {open:.1} without it"
     );
 }
+
+#[test]
+fn a_volume_lets_the_sky_in_only_through_its_opening() {
+    // The same roofless room, its volume open at the top: through the whole top, or only
+    // through a skylight a tenth of its width (a cave mouth in a wide rock face).
+    let scene = |opening: bool| {
+        let mut app = app(true);
+        let w = &mut app.world;
+        room(w, DVec3::ZERO, 0.7, 0.5, Some((2.0 * HALF, 0.0)));
+        ground(w);
+        sun(w, 110_000.0, DVec3::new(0.3, -1.0, 0.4));
+        let mut volume = SkyLightVolume::new([HALF as f32, HEIGHT as f32 * 0.5 + 0.2, HALF as f32])
+            .open(BoxFace::PosY);
+        if opening {
+            let r = HALF as f32 * 0.1;
+            volume = volume.with_opening([-r, -r], [r, r]);
+        }
+        w.spawn((Transform::from_xyz(0.0, HEIGHT * 0.5, 0.0), volume));
+        camera(w, EYE, DVec3::new(0.3, 1.0, -3.0), 12.0);
+        app
+    };
+    const WALL: [f32; 4] = [0.2, 0.35, 0.8, 0.65];
+    let Some(whole) = shoot(scene(false), 16, "skylight_whole.png", WALL) else {
+        return;
+    };
+    let small = shoot(scene(true), 16, "skylight_small.png", WALL).expect("GPU");
+    assert!(
+        small < whole * 0.5,
+        "far wall: {small:.1} through a skylight, {whole:.1} through the whole top"
+    );
+}

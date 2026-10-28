@@ -123,8 +123,16 @@ pub struct GpuSkyVolume {
     pub to_local: [[f32; 4]; 3],
     /// Half extents xyz (m), fade distance (m).
     pub half_fade: [f32; 4],
-    /// Sky light left inside, open face mask (as a float), unused, unused.
+    /// Sky light left inside, open face mask (as a float), and the opening's lowest and
+    /// highest corner, each as two 16-bit centimeter counts offset by 327.68 m (bits).
     pub params: [f32; 4],
+}
+
+/// A point of a face's plane (meters) as two 16-bit centimeter counts offset by 327.68 m,
+/// packed into an `f32`'s bits (`sky_volume_opening` in lib_frame.wgsl unpacks it).
+fn pack_opening_corner(p: [f32; 2]) -> f32 {
+    let q = |x: f32| ((x * 100.0).round() + 32768.0).clamp(0.0, 65535.0) as u32;
+    f32::from_bits(q(p[0]) | q(p[1]) << 16)
 }
 
 impl GpuSkyVolume {
@@ -136,10 +144,16 @@ impl GpuSkyVolume {
         };
         let [hx, hy, hz] = volume.half_extents.map(|h| h.max(0.0));
         let mask = volume.open_faces.iter().fold(0, |m, f| m | f.bit());
+        let opening = volume.opening.unwrap_or([[-400.0; 2], [400.0; 2]]);
         Self {
             to_local: [row(0), row(1), row(2)],
             half_fade: [hx, hy, hz, volume.fade.max(0.01)],
-            params: [volume.sky_light.clamp(0.0, 1.0), mask as f32, 0.0, 0.0],
+            params: [
+                volume.sky_light.clamp(0.0, 1.0),
+                mask as f32,
+                pack_opening_corner(opening[0]),
+                pack_opening_corner(opening[1]),
+            ],
         }
     }
 }
@@ -959,6 +973,27 @@ pub fn frame_uniform(world: &World, v: &ViewData) -> FrameUniform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_opening_packs_to_the_centimeter() {
+        let unpack = |f: f32| {
+            let b = f.to_bits();
+            [(b & 0xffff) as f32, (b >> 16) as f32].map(|c| c * 0.01 - 327.68)
+        };
+        for p in [[-5.0, 0.0], [5.0, 6.5], [-327.68, 327.67], [0.004, -0.004]] {
+            let q = unpack(pack_opening_corner(p));
+            assert!(
+                (q[0] - p[0]).abs() < 0.006 && (q[1] - p[1]).abs() < 0.006,
+                "{p:?} -> {q:?}"
+            );
+        }
+        // Beyond the range: clamped to its ends.
+        let q = unpack(pack_opening_corner([-400.0, 400.0]));
+        assert!(
+            (q[0] + 327.68).abs() < 1e-3 && (q[1] - 327.67).abs() < 1e-3,
+            "{q:?}"
+        );
+    }
 
     #[test]
     fn frame_uniform_matches_wgsl_size() {
