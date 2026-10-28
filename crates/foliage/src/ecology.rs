@@ -42,6 +42,8 @@ pub struct RegionState {
     pub rain_species: Vec<SpeciesId>,
     pub center: DVec3,
     pub stats: RegionStats,
+    /// A catch-up under way, one coarse step a frame: steps left and years each.
+    pub catch_up: Option<(u32, f32)>,
 }
 
 /// Counters from the last step, for `foliage.stats` and diagnostics.
@@ -246,6 +248,7 @@ fn build_region(
             rain_species: rain,
             center,
             stats: RegionStats::default(),
+            catch_up: None,
         },
         grew: (plants.len(), logs.len()),
         plants,
@@ -961,7 +964,10 @@ pub fn ecology_step(world: &mut World) {
         }
         let years = years * region.time_scale.max(0.0);
         state.accum_years += years + std::mem::take(&mut state.pending_years);
-        if state.accum_years >= region.step_years {
+        if state.catch_up.is_some() {
+            // Its next coarse step (the years since keep gathering for after).
+            due.push((e, 0.0));
+        } else if state.accum_years >= region.step_years {
             let take = state.accum_years;
             state.accum_years = 0.0;
             due.push((e, take));
@@ -1032,10 +1038,26 @@ pub fn ecology_step(world: &mut World) {
         let log_ids: Vec<Entity> = logs.iter().filter_map(|l| l.entity).collect();
         let start = std::time::Instant::now();
         let mut out = StepOutput::default();
-        // Long catch-ups run in coarse steps; a step's worth (and the frame that tipped it over)
-        // is one step.
-        let steps = (years / region.step_years - 0.25).ceil().clamp(1.0, 8.0);
-        let catch_up = steps > 1.0;
+        // Long catch-ups run in coarse steps, one a frame (all at once they took over 100 ms on
+        // coming back to the forest); a step's worth (and the frame that tipped it over) is
+        // one step.
+        let (dt, catch_up) = match state.catch_up.take() {
+            Some((left, dt)) => {
+                if left > 1 {
+                    state.catch_up = Some((left - 1, dt));
+                }
+                (dt, true)
+            }
+            None => {
+                let steps = (years / region.step_years - 0.25).ceil().clamp(1.0, 8.0);
+                let dt = years / steps;
+                if steps > 1.0 {
+                    state.catch_up = Some((steps as u32 - 1, dt));
+                }
+                (dt, steps > 1.0)
+            }
+        };
+        let years = dt;
         {
             let env = EnvView::from_world(world);
             let ctx = StepContext {
@@ -1045,12 +1067,9 @@ pub fn ecology_step(world: &mut World) {
                 rain_species: &state.rain_species,
                 env: &env,
             };
-            let dt = years / steps;
-            for _ in 0..steps as u32 {
-                state
-                    .sim
-                    .step(&ctx, &mut plants, &mut logs, dt, catch_up, &mut out);
-            }
+            state
+                .sim
+                .step(&ctx, &mut plants, &mut logs, dt, catch_up, &mut out);
         }
         let mut stats = RegionStats {
             years,
@@ -1229,6 +1248,52 @@ mod tests {
         (p, l, sim)
     }
 
+    /// How long a step of the showcase forest takes (`cargo test --release -p engine_foliage
+    /// forest_step_timing -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn forest_step_timing() {
+        let region = crate::demo::forest_region();
+        let t = std::time::Instant::now();
+        let (mut plants, mut logs, mut sim) = grow(&region, &[]);
+        eprintln!(
+            "history: {} plants, {} logs in {:.0} ms",
+            plants.len(),
+            logs.len(),
+            t.elapsed().as_secs_f64() * 1000.0
+        );
+        let library = PlantLibrary::default();
+        let env = FlatEnv::default();
+        let rain = rain_species(&region, &library);
+        let ctx = StepContext {
+            library: &library,
+            region: &region,
+            center: DVec3::ZERO,
+            rain_species: &rain,
+            env: &env,
+        };
+        for _ in 0..5 {
+            let mut out = StepOutput::default();
+            let t = std::time::Instant::now();
+            sim.step(
+                &ctx,
+                &mut plants,
+                &mut logs,
+                region.step_years,
+                false,
+                &mut out,
+            );
+            eprintln!(
+                "step: {:.1} ms, {} plants, {} births",
+                t.elapsed().as_secs_f64() * 1000.0,
+                plants.len(),
+                out.births.len()
+            );
+            plants.retain(|p| !p.removed);
+            plants.extend(out.births);
+        }
+    }
+
     fn count(plants: &[SimPlant], lib: &PlantLibrary, name: &str, min_size: f32) -> usize {
         let id = lib.id(name).unwrap();
         plants
@@ -1335,6 +1400,53 @@ mod tests {
         assert!(app.world.get_entity(lone).is_ok());
         let mut logs = app.world.query::<&FelledLog>();
         assert_eq!(logs.iter(&app.world).count(), 0, "its logs stayed behind");
+    }
+
+    #[test]
+    fn a_long_catch_up_runs_one_coarse_step_a_tick() {
+        let mut app = App::new();
+        app.world
+            .resource_mut::<Time>()
+            .set_source(engine_core::time::TimeSource::Manual { step_secs: 0.1 });
+        app.add_plugins(engine_world::WorldPlugin);
+        app.add_plugins(crate::FoliagePlugin);
+        app.world.insert_resource(crate::FoliageLoading::in_frame());
+        let region = app.world.spawn((Transform::default(), forest())).id();
+        let focus = app
+            .world
+            .spawn((
+                Transform::default(),
+                engine_world::SimulationFocus::default(),
+            ))
+            .id();
+        app.world.resource_mut::<EcologySettings>().years_per_second = 0.5;
+        app.update_n(2);
+        // Away for a while: years pile up.
+        app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::new(50_000.0, 0.0, 0.0);
+        app.update_n(200);
+        let missed = app.world.get::<RegionState>(region).unwrap().pending_years;
+        let step = app.world.get::<EcologyRegion>(region).unwrap().step_years;
+        assert!(missed > 8.0 * step, "{missed} years missed");
+        // Back: the catch-up runs in coarse steps (up to eight), one a fixed tick, so it spreads
+        // over frames (two ticks a frame here).
+        app.world.get_mut::<Transform>(focus).unwrap().translation = DVec3::ZERO;
+        let mut steps = Vec::new();
+        for _ in 0..12 {
+            app.update();
+            let state = app.world.get::<RegionState>(region).unwrap();
+            steps.push(state.stats.years);
+        }
+        let coarse: Vec<_> = steps.iter().filter(|&&y| y > step * 1.5).collect();
+        assert!((3..=8).contains(&coarse.len()), "{steps:?}");
+        // Each tick ran one of them (the same size), not all of them.
+        assert!(coarse.iter().all(|&&y| y == *coarse[0]), "{steps:?}");
+        assert!(
+            app.world
+                .get::<RegionState>(region)
+                .unwrap()
+                .catch_up
+                .is_none()
+        );
     }
 
     #[test]
