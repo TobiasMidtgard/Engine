@@ -636,17 +636,26 @@ pub fn spawn_cave_demo(commands: &mut Commands, center: DVec3) {
 
 /// The rock around the mushroom cave ([`spawn_cave_demo`]) when nothing else provides it: a
 /// [`CaveChamber`] at `center` (30 × 34 m inside, a 9 m roof, the mouth facing −Z), and a
-/// [`SkyLightVolume`] keeping the sky's light out of it except through the mouth.
+/// [`SkyLightVolume`] keeping the sky's light out of it except through the mouth's opening.
 pub fn spawn_cave_chamber(commands: &mut Commands, center: DVec3) {
     let chamber = CaveChamber::default();
     let [hx, hz] = chamber.half_extents;
     let h = chamber.height_m;
-    // Reaching past the rock's deepest alcoves, or the sky lights them.
+    let [mw, mh] = chamber.mouth;
+    // The volume's center above the floor.
+    let cy = h * 0.5 + 0.4;
+    // Reaching past the rock's deepest alcoves, or the sky lights them. Light comes in only
+    // through the mouth, with a meter's margin for rays slanting from it out to the face,
+    // 2.8 m in front of the rock.
     commands.spawn((
-        Transform::from_translation(center + DVec3::Y * (h * 0.5 + 0.4) as f64),
+        Transform::from_translation(center + DVec3::Y * cy as f64),
         SkyLightVolume::new([hx + 2.8, h * 0.5 + 2.2, hz + 2.8])
             .open(BoxFace::NegZ)
-            .with_fade(12.0),
+            .with_fade(12.0)
+            .with_opening(
+                [-0.5 * mw - 1.0, -(h * 0.5 + 2.2)],
+                [0.5 * mw + 1.0, mh - cy + 1.0],
+            ),
     ));
     commands.spawn((Transform::from_translation(center), chamber));
 }
