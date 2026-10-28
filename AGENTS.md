@@ -245,4 +245,10 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
   message anywhere renumbers everything spawned after it and changes looks and behaviour
   (an NPC revive test moved from 5.8 s to 6.6 s when engine_world gained one message). Store a
   seed on the entity when it is spawned (like `BodyRequest::seed`) and use that.
+- Don't let the order a query visits entities in decide behaviour ("the first eight to wake
+  think now"): it follows archetype creation, so any unrelated archetype or resource made
+  earlier changes it. Count first, then decide per entity from its own seed.
+- Asset handles carry generations: one kept past `Assets::remove` reads as missing. A demo
+  whose streamed cell frees its assets (`StreamCell::release_assets`) keeps mesh data, not
+  handles, between loads.
 - Commit messages: imperative subject, body explains why.

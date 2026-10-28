@@ -95,6 +95,12 @@ pub struct CellInfo {
     pub entities: u32,
     /// How much the process RAM grew while it loaded, MB (other threads' allocations blur it).
     pub ram_mb: Option<f32>,
+    /// Assets its last load added (meshes, materials and images it made, not shared keyed
+    /// ones): how many, and their heap MB.
+    pub assets: u32,
+    pub assets_mb: f32,
+    /// The cell frees those assets when it unloads (unless something still draws them).
+    pub releases_assets: bool,
 }
 
 impl CellInfo {
@@ -181,6 +187,9 @@ mod tests {
             build_secs: 0.0,
             entities: 0,
             ram_mb: None,
+            assets: 0,
+            assets_mb: 0.0,
+            releases_assets: false,
         };
         let mut cells = StreamedCells {
             cells: vec![

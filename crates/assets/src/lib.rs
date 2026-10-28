@@ -37,6 +37,16 @@
 //! Every slot has a version. GPU-side caches compare versions to know when to re-upload, so
 //! editing an asset with [`Assets::get_mut`] is all a game needs to do.
 //!
+//! ## Lifetime
+//!
+//! Assets live until [`Assets::remove`]; nothing counts references. A removed slot is reused
+//! by a later asset, but handles carry the slot's generation, so a handle kept past a remove
+//! reads as missing, never as the asset that took its slot. Code that frees assets in bulk
+//! (streaming releases what a cell made, see `engine::stream`) finds them with
+//! [`Assets::allocations`] and [`Assets::added_between`]; caches drop what is gone by
+//! watching [`Assets::removals`]. [`AssetTypes`] lists every installed type with its count
+//! and bytes for memory reports.
+//!
 //! ## AI / console API
 //!
 //! `assets.load {path, wait}`, `assets.status {path}`, `assets.list {}`,
@@ -61,16 +71,32 @@ pub use server::{
 pub trait Asset: Send + Sync + 'static {}
 
 /// Reference to an asset in [`Assets<T>`]. Copy, compare and hash freely.
+///
+/// A handle names a slot and the slot's generation when the asset was added: after the asset
+/// is removed the handle reads as missing, even once another asset reuses the slot.
+/// Comparing, hashing, ordering and serializing go by the slot index alone.
 pub struct Handle<T> {
     index: u32,
+    /// The slot's generation, or [`ANY_GENERATION`] for a handle made from an index.
+    generation: u32,
     _marker: PhantomData<fn() -> T>,
 }
 
+/// Generation of a handle made with [`Handle::from_index`]: it matches whatever asset holds
+/// the slot now.
+const ANY_GENERATION: u32 = u32::MAX;
+
 impl<T> Handle<T> {
-    /// A handle for slot `index` (normally you get handles from [`Assets`]).
+    /// A handle for whatever asset holds slot `index` now (normally you get handles from
+    /// [`Assets`]; GPU caches keyed by index use this to name the slot again).
     pub const fn from_index(index: u32) -> Self {
+        Self::new(index, ANY_GENERATION)
+    }
+
+    const fn new(index: u32, generation: u32) -> Self {
         Self {
             index,
+            generation,
             _marker: PhantomData,
         }
     }
@@ -78,6 +104,11 @@ impl<T> Handle<T> {
     /// Slot index inside [`Assets<T>`]; also what the handle serializes to.
     pub fn index(&self) -> u32 {
         self.index
+    }
+
+    /// The slot's generation this handle was made for (`None` for [`Handle::from_index`]).
+    pub fn generation(&self) -> Option<u32> {
+        (self.generation != ANY_GENERATION).then_some(self.generation)
     }
 }
 
@@ -127,6 +158,10 @@ impl<'de, T> Deserialize<'de> for Handle<T> {
 struct Slot<T> {
     value: Option<T>,
     version: u64,
+    /// Bumped each time the slot is freed, so older handles stop matching it.
+    generation: u32,
+    /// [`Assets::allocations`] right after this slot was allocated.
+    born: u64,
     /// Allocated: holds a value, or is reserved for a keyed asset that is still loading.
     live: bool,
     /// A reserved slot that turned out to name the same asset as another slot (see
@@ -145,6 +180,9 @@ pub struct Assets<T: Asset> {
     free: Vec<u32>,
     keys: HashMap<String, Handle<T>>,
     next_version: u64,
+    allocations: u64,
+    removals: u64,
+    sizer: Option<fn(&T) -> usize>,
 }
 
 impl<T: Asset> Default for Assets<T> {
@@ -154,6 +192,9 @@ impl<T: Asset> Default for Assets<T> {
             free: Vec::new(),
             keys: HashMap::new(),
             next_version: 1,
+            allocations: 0,
+            removals: 0,
+            sizer: None,
         }
     }
 }
@@ -166,38 +207,52 @@ impl<T: Asset> Assets<T> {
 
     fn alloc(&mut self, value: Option<T>) -> Handle<T> {
         let version = if value.is_some() { self.bump() } else { 0 };
-        let slot = Slot {
+        self.allocations += 1;
+        let mut slot = Slot {
             value,
             version,
+            generation: 0,
+            born: self.allocations,
             live: true,
             forward: None,
         };
         if let Some(index) = self.free.pop() {
+            slot.generation = self.slots[index as usize].generation;
+            let h = Handle::new(index, slot.generation);
             self.slots[index as usize] = slot;
-            Handle::from_index(index)
+            h
         } else {
             self.slots.push(slot);
-            Handle::from_index(self.slots.len() as u32 - 1)
+            Handle::new(self.slots.len() as u32 - 1, 0)
         }
+    }
+
+    /// `h`'s own slot, if `h` is of its current generation (whether or not it is live).
+    fn slot(&self, h: Handle<T>) -> Option<&Slot<T>> {
+        self.slots
+            .get(h.index as usize)
+            .filter(|s| h.generation == ANY_GENERATION || s.generation == h.generation)
     }
 
     fn is_live(&self, h: Handle<T>) -> bool {
-        self.slots.get(h.index as usize).is_some_and(|s| s.live)
+        self.slot(h).is_some_and(|s| s.live)
     }
 
-    /// Index of the slot that holds `h`'s value (follows a forwarded reservation).
-    fn resolve(&self, h: Handle<T>) -> usize {
-        match self.slots.get(h.index as usize).and_then(|s| s.forward) {
-            Some(target) => target as usize,
-            None => h.index as usize,
-        }
+    /// Index of the slot that holds `h`'s value (follows a forwarded reservation); `None` for
+    /// a handle of an older generation.
+    fn resolve(&self, h: Handle<T>) -> Option<usize> {
+        let slot = self.slot(h)?;
+        Some(slot.forward.map_or(h.index as usize, |t| t as usize))
     }
 
     /// The handle whose slot actually holds `h`'s value: `h` itself, or the target of a
     /// forwarded reservation (see [`Assets::forward`]). GPU caches key by this so two handles
     /// that name the same asset share one upload.
     pub fn canonical(&self, h: Handle<T>) -> Handle<T> {
-        Handle::from_index(self.resolve(h) as u32)
+        match self.resolve(h) {
+            Some(i) if i != h.index as usize => Handle::new(i as u32, self.slots[i].generation),
+            _ => h,
+        }
     }
 
     /// Make the empty reserved slot `from` an alias of `to`: from now on `from` reads and
@@ -205,10 +260,11 @@ impl<T: Asset> Assets<T> {
     /// both turned out to name the same asset. Returns false (and does nothing) unless `from`
     /// is reserved and empty and `to` is allocated.
     pub fn forward(&mut self, from: Handle<T>, to: Handle<T>) -> bool {
-        let target = self.resolve(to) as u32;
+        let Some(target) = self.resolve(to).map(|t| t as u32) else {
+            return false;
+        };
         let from_ok = self
-            .slots
-            .get(from.index as usize)
+            .slot(from)
             .is_some_and(|s| s.live && s.value.is_none() && s.forward.is_none());
         if !from_ok || target == from.index || !self.is_live(Handle::from_index(target)) {
             return false;
@@ -298,7 +354,7 @@ impl<T: Asset> Assets<T> {
 
     /// The asset's value, if present.
     pub fn get(&self, h: Handle<T>) -> Option<&T> {
-        self.slots.get(self.resolve(h))?.value.as_ref()
+        self.slots.get(self.resolve(h)?)?.value.as_ref()
     }
 
     /// True if the handle's value is present (false while a reserved asset is loading).
@@ -308,8 +364,8 @@ impl<T: Asset> Assets<T> {
 
     /// Mutable access; marks the asset changed.
     pub fn get_mut(&mut self, h: Handle<T>) -> Option<&mut T> {
+        let index = self.resolve(h)?;
         let version = self.bump();
-        let index = self.resolve(h);
         let slot = self.slots.get_mut(index)?;
         if slot.value.is_some() {
             slot.version = version;
@@ -320,8 +376,10 @@ impl<T: Asset> Assets<T> {
     /// Replace an allocated asset's value, or fill a reserved slot (marks it changed).
     /// Does nothing for handles whose slot was removed.
     pub fn set(&mut self, h: Handle<T>, value: T) {
+        let Some(index) = self.resolve(h) else {
+            return;
+        };
         let version = self.bump();
-        let index = self.resolve(h);
         if let Some(slot) = self.slots.get_mut(index)
             && slot.live
         {
@@ -330,16 +388,22 @@ impl<T: Asset> Assets<T> {
         }
     }
 
-    /// Remove an asset (or a reservation) and every key that names it.
+    /// Remove an asset (or a reservation) and every key that names it. A handle of an older
+    /// generation removes nothing.
     pub fn remove(&mut self, h: Handle<T>) -> Option<T> {
-        let slot = self.slots.get_mut(h.index as usize)?;
-        if !slot.live {
+        if !self.is_live(h) {
             return None;
         }
+        let slot = &mut self.slots[h.index as usize];
         let v = slot.value.take();
         slot.live = false;
         slot.version = 0;
         slot.forward = None;
+        slot.generation = match slot.generation.wrapping_add(1) {
+            ANY_GENERATION => 0,
+            g => g,
+        };
+        self.removals += 1;
         self.free.push(h.index);
         self.keys.retain(|_, k| *k != h);
         // Reservations forwarded here go back to waiting (their keys were removed above or
@@ -355,8 +419,8 @@ impl<T: Asset> Assets<T> {
     /// Version of the asset's current value (changes on every edit). 0 if missing or still
     /// loading.
     pub fn version(&self, h: Handle<T>) -> u64 {
-        self.slots
-            .get(self.resolve(h))
+        self.resolve(h)
+            .and_then(|i| self.slots.get(i))
             .filter(|s| s.value.is_some())
             .map(|s| s.version)
             .unwrap_or(0)
@@ -384,10 +448,109 @@ impl<T: Asset> Assets<T> {
 
     /// Every asset with a value.
     pub fn iter(&self) -> impl Iterator<Item = (Handle<T>, &T)> {
+        self.slots.iter().enumerate().filter_map(|(i, s)| {
+            s.value
+                .as_ref()
+                .map(|v| (Handle::new(i as u32, s.generation), v))
+        })
+    }
+
+    /// Slots allocated so far (each add or reservation counts one). Take it before and after
+    /// some code runs; [`Assets::added_between`] then lists what that code added.
+    pub fn allocations(&self) -> u64 {
+        self.allocations
+    }
+
+    /// Live assets and reservations allocated after mark `from` and up to mark `to` (both from
+    /// [`Assets::allocations`]).
+    pub fn added_between(&self, from: u64, to: u64) -> impl Iterator<Item = Handle<T>> + '_ {
         self.slots
             .iter()
             .enumerate()
-            .filter_map(|(i, s)| s.value.as_ref().map(|v| (Handle::from_index(i as u32), v)))
+            .filter(move |(_, s)| s.live && s.born > from && s.born <= to)
+            .map(|(i, s)| Handle::new(i as u32, s.generation))
+    }
+
+    /// True if some key names `h`'s slot (keyed assets are shared by whoever asks for the key).
+    pub fn is_keyed(&self, h: Handle<T>) -> bool {
+        self.keys.values().any(|k| k.index == h.index)
+    }
+
+    /// Slot indices some key names.
+    pub fn keyed_indices(&self) -> std::collections::HashSet<u32> {
+        self.keys.values().map(|k| k.index).collect()
+    }
+
+    /// Assets and reservations removed so far: a cache keyed by handle sweeps out what is gone
+    /// when this changes.
+    pub fn removals(&self) -> u64 {
+        self.removals
+    }
+
+    /// Count the heap bytes of each asset with `sizer` (for [`Assets::bytes`] and memory
+    /// reports; without one, assets count 0 bytes).
+    pub fn set_sizer(&mut self, sizer: fn(&T) -> usize) {
+        self.sizer = Some(sizer);
+    }
+
+    /// Heap bytes of `h`'s value, by the sizer (0 if missing or without one).
+    pub fn bytes_of(&self, h: Handle<T>) -> usize {
+        match (self.sizer, self.get(h)) {
+            (Some(f), Some(v)) => f(v),
+            _ => 0,
+        }
+    }
+
+    /// Heap bytes of every asset, by the sizer.
+    pub fn bytes(&self) -> u64 {
+        self.sizer.map_or(0, |f| {
+            self.slots
+                .iter()
+                .filter_map(|s| s.value.as_ref())
+                .map(|v| f(v) as u64)
+                .sum()
+        })
+    }
+
+    /// Count and bytes of the assets with a value.
+    pub fn stats(&self) -> AssetStats {
+        AssetStats {
+            count: self.len(),
+            bytes: self.bytes(),
+        }
+    }
+}
+
+/// How many assets of a type there are and their heap bytes ([`Assets::set_sizer`]).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AssetStats {
+    pub count: usize,
+    pub bytes: u64,
+}
+
+/// Every asset type installed with [`AssetAppExt::init_asset`], for code that reports on
+/// assets without knowing their types (the streaming audit, memory reports).
+#[derive(Resource, Default)]
+pub struct AssetTypes(Vec<(&'static str, StatsFn)>);
+
+type StatsFn = fn(&World) -> Option<AssetStats>;
+
+impl AssetTypes {
+    /// Each type's short name and its [`AssetStats`] in `world`.
+    pub fn report(&self, world: &World) -> Vec<(&'static str, AssetStats)> {
+        self.0
+            .iter()
+            .filter_map(|(name, stats)| Some((*name, stats(world)?)))
+            .collect()
+    }
+
+    fn add<T: Asset>(&mut self) {
+        let full = std::any::type_name::<T>();
+        let name = full.rsplit("::").next().unwrap_or(full);
+        if !self.0.iter().any(|(n, _)| *n == name) {
+            self.0
+                .push((name, |w| w.get_resource::<Assets<T>>().map(Assets::stats)));
+        }
     }
 }
 
@@ -406,6 +569,9 @@ impl AssetAppExt for engine_core::App {
         if !self.world.contains_resource::<Assets<T>>() {
             self.world.insert_resource(Assets::<T>::default());
         }
+        self.world
+            .get_resource_or_insert_with(AssetTypes::default)
+            .add::<T>();
         self
     }
 
@@ -440,6 +606,50 @@ mod tests {
         assert!(a.get(h1).is_none());
         let h3 = a.add(Thing(9));
         assert_eq!(h3.index(), h1.index());
+    }
+
+    #[test]
+    fn a_handle_kept_past_its_remove_reads_as_missing() {
+        let mut a = Assets::<Thing>::default();
+        let old = a.add(Thing(1));
+        assert_eq!(a.remove(old).map(|t| t.0), Some(1));
+        let new = a.add(Thing(2));
+        assert_eq!(new.index(), old.index(), "the slot is reused");
+        assert!(a.get(old).is_none(), "not the asset that took the slot");
+        assert_eq!(a.version(old), 0);
+        assert!(a.get_mut(old).is_none());
+        a.set(old, Thing(3));
+        assert!(a.remove(old).is_none(), "an old handle removes nothing");
+        assert_eq!(a.get(new).map(|t| t.0), Some(2));
+        // A handle made from the index names whatever holds the slot now.
+        assert_eq!(a.get(Handle::from_index(old.index())).map(|t| t.0), Some(2));
+        assert_eq!(
+            a.iter().next().map(|(h, _)| h.generation()),
+            Some(new.generation())
+        );
+        assert_eq!(a.removals(), 1);
+    }
+
+    #[test]
+    fn what_some_code_added_and_its_bytes() {
+        let mut a = Assets::<Thing>::default();
+        let before = a.add(Thing(1));
+        let mark = a.allocations();
+        let x = a.add(Thing(20));
+        let y = a.get_or_insert_keyed("shared", || Thing(300));
+        let gone = a.add(Thing(4));
+        a.remove(gone);
+        let end = a.allocations();
+        a.add(Thing(5));
+        let added: Vec<_> = a.added_between(mark, end).collect();
+        assert_eq!(added, vec![x, y]);
+        assert!(!added.contains(&before));
+        assert!(a.is_keyed(y) && !a.is_keyed(x));
+        assert_eq!(a.bytes(), 0, "no sizer");
+        a.set_sizer(|t| t.0 as usize);
+        assert_eq!(a.bytes(), 1 + 20 + 300 + 5);
+        assert_eq!(a.bytes_of(x), 20);
+        assert_eq!(a.stats().count, 4);
     }
 
     #[test]

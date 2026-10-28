@@ -9,6 +9,7 @@ license.workspace = true
 engine_core.workspace = true
 engine_world.workspace = true
 engine_render.workspace = true
+engine_assets.workspace = true
 engine_input.workspace = true
 font8x8.workspace = true
 bevy_ecs.workspace = true

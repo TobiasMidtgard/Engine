@@ -82,3 +82,85 @@ fn the_audit_finds_what_an_unload_leaves() {
         "{leaky:?}"
     );
 }
+
+/// A demo that caches its mesh handle across loads (the mistake `release_assets` exposes).
+#[derive(Resource, Default)]
+struct CachedMesh(Option<engine::assets::Handle<engine::render::Mesh>>);
+
+#[test]
+fn the_audit_counts_assets_left_and_meshes_missing_theirs() {
+    use engine::assets::{AssetAppExt, Assets};
+    use engine::render::{Mesh, MeshRef, MeshRenderer, Shape, StandardMaterial};
+
+    fn cube() -> Mesh {
+        Shape::Cuboid { size: [1.0; 3] }.mesh()
+    }
+    fn draw(world: &mut World, mesh: engine::assets::Handle<Mesh>) {
+        world.spawn(MeshRenderer {
+            mesh: MeshRef::Handle(mesh),
+            ..Default::default()
+        });
+    }
+    let mut app = App::new();
+    app.add_plugins((
+        engine::world::WorldPlugin,
+        StreamingPlugin,
+        StreamAuditPlugin {
+            settle: 3,
+            only: None,
+        },
+    ))
+    .init_asset::<Mesh>()
+    .init_asset::<StandardMaterial>()
+    .init_resource::<CachedMesh>();
+    // Makes a mesh each load and never frees it.
+    app.stream_cell(StreamCell::new("hoarder", DVec3::ZERO, 10.0, |world| {
+        let mesh = world.resource_mut::<Assets<Mesh>>().add(cube());
+        draw(world, mesh);
+    }));
+    // Frees what it made.
+    app.stream_cell(
+        StreamCell::new("tidy", DVec3::new(30.0, 0.0, 0.0), 10.0, |world| {
+            let mesh = world.resource_mut::<Assets<Mesh>>().add(cube());
+            draw(world, mesh);
+        })
+        .release_assets(),
+    );
+    // Frees what it made but draws its first mesh again on the reload.
+    app.stream_cell(
+        StreamCell::new("cacher", DVec3::new(60.0, 0.0, 0.0), 10.0, |world| {
+            let mesh = match world.resource::<CachedMesh>().0 {
+                Some(mesh) => mesh,
+                None => world.resource_mut::<Assets<Mesh>>().add(cube()),
+            };
+            world.resource_mut::<CachedMesh>().0 = Some(mesh);
+            draw(world, mesh);
+        })
+        .release_assets(),
+    );
+    for _ in 0..300 {
+        app.update();
+        if app.world.resource::<StreamAuditReport>().done {
+            break;
+        }
+    }
+    let report = app.world.resource::<StreamAuditReport>().clone();
+    assert!(report.done, "{report:?}");
+    let cell = |key: &str| report.cells.iter().find(|c| c.key == key).unwrap().clone();
+    let hoarder = cell("hoarder");
+    assert_eq!(hoarder.left, Vec::new(), "its entities go");
+    assert_eq!(
+        hoarder
+            .assets_left
+            .iter()
+            .map(|(k, n, _)| (k.as_str(), *n))
+            .collect::<Vec<_>>(),
+        vec![("Mesh", 1)],
+        "{hoarder:?}"
+    );
+    assert!(!hoarder.clean());
+    assert!(cell("tidy").clean(), "{:?}", cell("tidy"));
+    let cacher = cell("cacher");
+    assert_eq!(cacher.missing, 1, "{cacher:?}");
+    assert!(!cacher.clean());
+}

@@ -15,12 +15,16 @@
 //! warm up), its meshes stay hidden; then they fade in with [`DitherFade`] instead of popping.
 //! A cell leaving fades out the same way over its far-view proxy ([`crate::hlod`]) and then
 //! despawns a slice of roots a frame within the budget.
+//!
+//! Assets the cell's spawn added are its own ([`crate::cell_assets`]); a cell that opts in with
+//! [`StreamCell::release_assets`] frees them when it unloads.
 
 use std::any::Any;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::cell_assets::{self, CellAssets, Marks};
 use crate::hlod::{self, ProxyConfig};
 use engine_core::diagnostics::{Diagnostics, PROCESS_RAM_MB, process_ram_mb};
 use engine_core::ecs::resource::IsResource;
@@ -52,6 +56,7 @@ struct Loader {
     step: StepFn,
     unload: Option<Hook>,
     proxy: ProxyConfig,
+    release: bool,
 }
 
 impl StreamCell {
@@ -74,12 +79,16 @@ impl StreamCell {
                 build_secs: 0.0,
                 entities: 0,
                 ram_mb: None,
+                assets: 0,
+                assets_mb: 0.0,
+                releases_assets: false,
             },
             loader: Loader {
                 build,
                 step,
                 unload: None,
                 proxy: ProxyConfig::default(),
+                release: false,
             },
         }
     }
@@ -199,6 +208,17 @@ impl StreamCell {
         self
     }
 
+    /// Free the meshes, materials and images the cell's spawn added when it unloads, except
+    /// keyed (shared) ones and any a [`MeshRenderer`] outside the cell still draws
+    /// ([`crate::cell_assets`]). Opt in once the module that spawns the cell keeps no handle
+    /// to them past the unload (it would read as missing on the next load; the stream audit
+    /// counts those).
+    pub fn release_assets(mut self) -> Self {
+        self.loader.release = true;
+        self.info.releases_assets = true;
+        self
+    }
+
     /// Runs after the cell's entities are despawned, to drop what its module keeps elsewhere
     /// (a resource, a cache).
     pub fn on_unload(mut self, unload: impl FnMut(&mut World) + Send + Sync + 'static) -> Self {
@@ -293,6 +313,8 @@ struct Slot {
     step: usize,
     secs: f32,
     ram: Option<f64>,
+    /// What the spawn added since the cell last unloaded.
+    assets: CellAssets,
 }
 
 impl Slot {
@@ -305,6 +327,7 @@ impl Slot {
             step: 0,
             secs: 0.0,
             ram: None,
+            assets: CellAssets::default(),
         }
     }
 
@@ -341,6 +364,7 @@ pub struct StreamingPlugin;
 impl Plugin for StreamingPlugin {
     fn build(&self, app: &mut App) {
         hlod::register(app);
+        cell_assets::install_sizers(&mut app.world);
         app.init_resource::<StreamedCells>()
             .init_resource::<CellHooks>()
             .init_resource::<StreamingBudget>()
@@ -351,17 +375,29 @@ impl Plugin for StreamingPlugin {
                 "stream.cells",
                 "List the streamed cells (key, center, radius, load distance, state; from the \
                  last load: seconds spawning, seconds building on a worker, entities spawned and \
-                 the RAM it added in MB), how many are loaded, and the process RAM and GPU \
-                 memory in MB.",
+                 the RAM it added in MB, the assets it made and their MB, whether it frees them \
+                 on unload), how many are loaded, the process RAM and GPU memory in MB, and \
+                 every asset type's count and heap MB.",
                 "{}",
                 |world, _| {
                     let cells = world.resource::<StreamedCells>();
                     let diag = world.resource::<Diagnostics>();
+                    let assets: serde_json::Map<String, serde_json::Value> = world
+                        .get_resource::<engine_assets::AssetTypes>()
+                        .map(|t| t.report(world))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(name, s)| {
+                            let mb = s.bytes as f64 / (1 << 20) as f64;
+                            (name.to_string(), serde_json::json!({"count": s.count, "mb": mb}))
+                        })
+                        .collect();
                     Ok(serde_json::json!({
                         "cells": cells.cells,
                         "loaded": cells.cells.iter().filter(|c| c.state == CellState::Loaded).count(),
                         "ram_mb": diag.get(PROCESS_RAM_MB),
                         "vram_mb": diag.get("render.gpu_memory_mb"),
+                        "assets": assets,
                     }))
                 },
             )
@@ -642,6 +678,8 @@ fn builds(world: &mut World, want: &[(f64, usize, CellState)], at_once: usize) {
 
 /// The cell goes from queued to loading.
 fn begin(world: &mut World, i: usize, fade: bool) {
+    // Asset stores a game installs after the plugin count their bytes too.
+    cell_assets::install_sizers(world);
     let slot = &mut world.resource_mut::<CellHooks>().0[i];
     slot.step = 0;
     slot.secs = 0.0;
@@ -663,11 +701,13 @@ fn step(world: &mut World, id: CellId) -> bool {
     let i = id.0 as usize;
     let t = Instant::now();
     let before = Snapshot::of(world);
+    let marks = Marks::of(world);
     let mut hooks = std::mem::take(&mut world.resource_mut::<CellHooks>().0);
     let slot = &mut hooks[i];
     let built = slot.built.as_mut().and_then(|b| b.get_mut().ok());
     let done = (slot.loader.step)(world, built, slot.step);
     slot.step += 1;
+    slot.assets.note(world, marks, Marks::of(world));
     restore(world, hooks);
     // Resources are entities too (bevy 0.20); one a spawn inserts stays when the cell goes.
     let new: Vec<Entity> = world
@@ -720,6 +760,8 @@ fn finish(world: &mut World, i: usize) {
         .collect();
     let entities = tree(world, &roots).len() as u32;
     let ram = process_ram_mb().zip(ram0).map(|(b, a)| (b - a) as f32);
+    let (assets, asset_bytes) = world.resource::<CellHooks>().0[i].assets.footprint(world);
+    let assets_mb = asset_bytes as f32 / (1 << 20) as f32;
     if let Some(fade) = world
         .resource_mut::<Fades>()
         .0
@@ -734,6 +776,8 @@ fn finish(world: &mut World, i: usize) {
     c.load_secs = secs;
     c.entities = entities;
     c.ram_mb = ram;
+    c.assets = assets;
+    c.assets_mb = assets_mb;
     let built = if c.build_secs > 0.0 {
         format!(", built in {:.2} s on a worker", c.build_secs)
     } else {
@@ -741,7 +785,8 @@ fn finish(world: &mut World, i: usize) {
     };
     let ram = ram.map_or("n/a".to_string(), |mb| format!("{mb:+.0} MB"));
     engine_core::log::info!(
-        "streaming: loaded {} in {secs:.2} s ({steps} steps{built}), {entities} entities, RAM {ram}",
+        "streaming: loaded {} in {secs:.2} s ({steps} steps{built}), {entities} entities, \
+         {assets} assets ({assets_mb:.0} MB), RAM {ram}",
         c.key
     );
 }
@@ -947,10 +992,21 @@ fn unload(world: &mut World, i: usize) {
     if let Some(unload) = hooks[i].loader.unload.as_mut() {
         unload(world);
     }
+    let assets = std::mem::take(&mut hooks[i].assets);
+    let release = hooks[i].loader.release;
     restore(world, hooks);
+    let freed = if release {
+        let (n, bytes) = assets.release(world);
+        format!(
+            ", freed {n} assets ({:.0} MB)",
+            bytes as f64 / (1 << 20) as f64
+        )
+    } else {
+        String::new()
+    };
     let mut cells = world.resource_mut::<StreamedCells>();
     cells.cells[i].state = CellState::Unloaded;
-    engine_core::log::info!("streaming: unloaded {}", cells.cells[i].key);
+    engine_core::log::info!("streaming: unloaded {}{freed}", cells.cells[i].key);
 }
 
 #[cfg(test)]
@@ -1305,6 +1361,87 @@ mod tests {
         place(&mut app, player, 100.0);
         app.update_n(3);
         assert_eq!(named(&mut app, "brick"), 3);
+    }
+
+    #[test]
+    fn a_cell_that_releases_its_assets_frees_what_nothing_else_draws() {
+        use engine_assets::{AssetAppExt, Assets, Handle};
+        use engine_render::{Image, MaterialRef, Mesh, MeshRef, Shape, StandardMaterial};
+        use std::sync::Mutex;
+
+        let mut app = app();
+        app.init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .init_asset::<Image>();
+        let cube = || Shape::Cuboid { size: [1.0; 3] }.mesh();
+        // Made before the cell: not its own.
+        let shared = app.world.resource_mut::<Assets<Mesh>>().add(cube());
+        type Made = (
+            Handle<Mesh>,
+            Handle<Mesh>,
+            Handle<Mesh>,
+            Handle<StandardMaterial>,
+            Handle<Image>,
+        );
+        let made: Arc<Mutex<Option<Made>>> = Arc::default();
+        let out = made.clone();
+        app.stream_cell(
+            StreamCell::new("yard", DVec3::ZERO, 10.0, move |world| {
+                let mut meshes = world.resource_mut::<Assets<Mesh>>();
+                let own = meshes.add(cube());
+                let lent = meshes.add(cube());
+                let keyed = meshes.get_or_insert_keyed("shape:test", cube);
+                let image = world.resource_mut::<Assets<Image>>().add(Image::default());
+                let material = world
+                    .resource_mut::<Assets<StandardMaterial>>()
+                    .add(StandardMaterial::default().with_base_color_texture(image));
+                world.spawn(MeshRenderer {
+                    mesh: MeshRef::Handle(own),
+                    material: MaterialRef::Handle(material),
+                    ..Default::default()
+                });
+                world.spawn(MeshRenderer {
+                    mesh: MeshRef::Handle(shared),
+                    ..Default::default()
+                });
+                *out.lock().unwrap() = Some((own, lent, keyed, material, image));
+            })
+            .release_assets(),
+        );
+        app.update();
+        assert_eq!(state(&app, "yard"), CellState::Loaded);
+        let (own, lent, keyed, material, image) = made.lock().unwrap().take().unwrap();
+        let info = app.world.resource::<StreamedCells>().cells[0].clone();
+        assert_eq!(info.assets, 4, "own, lent, the material and the image");
+        assert!(info.assets_mb > 0.0 && info.releases_assets);
+        // Something outside the cell draws one of its meshes.
+        app.world.spawn(MeshRenderer {
+            mesh: MeshRef::Handle(lent),
+            ..Default::default()
+        });
+        app.world
+            .resource_mut::<StreamedCells>()
+            .pins
+            .insert("yard".into(), false);
+        app.update();
+        assert_eq!(state(&app, "yard"), CellState::Unloaded);
+        let meshes = app.world.resource::<Assets<Mesh>>();
+        assert!(!meshes.contains(own), "freed");
+        assert!(meshes.contains(lent), "still drawn");
+        assert!(
+            meshes.contains(keyed) && meshes.contains(shared),
+            "not the cell's"
+        );
+        assert!(
+            !app.world
+                .resource::<Assets<StandardMaterial>>()
+                .contains(material)
+        );
+        assert!(!app.world.resource::<Assets<Image>>().contains(image));
+        // The next asset takes the freed slot; the old handle still reads as missing.
+        let next = app.world.resource_mut::<Assets<Mesh>>().add(cube());
+        assert_eq!(next.index(), own.index());
+        assert!(!app.world.resource::<Assets<Mesh>>().contains(own));
     }
 
     #[test]

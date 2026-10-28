@@ -9,6 +9,12 @@
 //! loading added (by module, as the shift audit groups it), what stayed after the unload, and
 //! how the reload differs from the first load, with the process RAM at each step.
 //!
+//! Assets are counted too, by type with their heap bytes ([`AssetTypes`]): what the unload left
+//! (a cell that doesn't free them with the engine's `StreamCell::release_assets` leaves all it
+//! made, and a reload makes them again), and after the reload how many of the cell's
+//! meshes name a missing mesh, material or texture (a module kept a handle to an asset the
+//! unload freed).
+//!
 //! Other streamers keep working meanwhile (foliage cells around the camera, other cells), so
 //! the counts take only entities within the cell's reach (its radius plus [`MARGIN`]; entities
 //! without a place count everywhere), and the baseline is taken twice: kinds whose count changes
@@ -19,10 +25,12 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use engine_assets::{AssetTypes, Assets, Handle};
 use engine_core::diagnostics::{Diagnostics, PROCESS_RAM_MB};
 use engine_core::ecs::resource::IsResource;
 use engine_core::math::DVec3;
 use engine_core::prelude::*;
+use engine_render::{Image, MaterialRef, MeshRef, MeshRenderer, StandardMaterial};
 use engine_world::{CellState, StreamedCells};
 
 use crate::shift_audit::kind;
@@ -47,7 +55,14 @@ enum Step {
     InAgain,
 }
 
-type Census = (HashMap<String, usize>, Option<f64>);
+/// Entities by kind, the process RAM, assets by type (count, bytes) and meshes that name a
+/// missing asset.
+struct Census {
+    kinds: HashMap<String, usize>,
+    ram: Option<f64>,
+    assets: HashMap<String, (i64, i64)>,
+    missing: u32,
+}
 
 #[derive(Resource)]
 struct StreamAudit {
@@ -120,15 +135,23 @@ pub struct AuditedCell {
     pub loaded: i64,
     pub left: Vec<(String, i64)>,
     pub reload: Vec<(String, i64)>,
+    /// Assets by type the unload left: (type, count, bytes).
+    pub assets_left: Vec<(String, i64, i64)>,
+    /// The cell's meshes that name a missing mesh, material or texture after the reload.
+    pub missing: u32,
 }
 
 impl AuditedCell {
     pub fn clean(&self) -> bool {
-        self.left.is_empty() && self.reload.is_empty()
+        self.left.is_empty()
+            && self.reload.is_empty()
+            && self.assets_left.is_empty()
+            && self.missing == 0
     }
 }
 
-/// Entities by kind within `reach` of `center` (or with no place), and the process RAM.
+/// Entities by kind within `reach` of `center` (or with no place), the process RAM, every
+/// asset type's count and bytes, and the meshes within reach that name a missing asset.
 fn census(world: &mut World, center: DVec3, reach: f64) -> Census {
     let entities: Vec<Entity> = world
         .query_filtered::<(Entity, Option<&GlobalTransform>), Without<IsResource>>()
@@ -137,11 +160,92 @@ fn census(world: &mut World, center: DVec3, reach: f64) -> Census {
         .map(|(e, _)| e)
         .collect();
     let mut kinds: HashMap<String, usize> = HashMap::new();
-    for e in entities {
+    for &e in &entities {
         *kinds.entry(kind(world, e)).or_default() += 1;
     }
     let ram = world.resource::<Diagnostics>().get(PROCESS_RAM_MB);
-    (kinds, ram)
+    let assets = world
+        .get_resource::<AssetTypes>()
+        .map(|t| t.report(world))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, s)| (name.to_string(), (s.count as i64, s.bytes as i64)))
+        .collect();
+    let missing = missing_assets(world, &entities);
+    Census {
+        kinds,
+        ram,
+        assets,
+        missing,
+    }
+}
+
+/// How many of `entities`' [`MeshRenderer`]s name a missing mesh, material or texture (one
+/// freed while a module still kept its handle).
+fn missing_assets(world: &World, entities: &[Entity]) -> u32 {
+    let meshes = world.get_resource::<Assets<engine_render::Mesh>>();
+    let materials = world.get_resource::<Assets<StandardMaterial>>();
+    let images = world.get_resource::<Assets<Image>>();
+    let gone = |t: Option<Handle<Image>>| t.is_some_and(|t| images.is_none_or(|i| !i.contains(t)));
+    let gone_texture = |m: &StandardMaterial| {
+        [
+            m.base_color_texture,
+            m.normal_texture,
+            m.metallic_roughness_texture,
+            m.emissive_texture,
+            m.occlusion_texture,
+            m.height_texture,
+        ]
+        .into_iter()
+        .any(gone)
+    };
+    entities
+        .iter()
+        .filter_map(|&e| world.get::<MeshRenderer>(e))
+        .filter(|r| {
+            let mesh = match &r.mesh {
+                MeshRef::Handle(h) => meshes.is_none_or(|m| !m.contains(*h)),
+                _ => false,
+            };
+            let material = match &r.material {
+                MaterialRef::Handle(h) => {
+                    materials.and_then(|m| m.get(*h)).is_none_or(gone_texture)
+                }
+                MaterialRef::Inline(m) => gone_texture(m),
+                MaterialRef::Asset(_) => false,
+            };
+            mesh || material
+        })
+        .count() as u32
+}
+
+/// `after - before` per asset type (count, bytes), without types that didn't change and
+/// without `churn`.
+fn asset_diff(
+    before: &HashMap<String, (i64, i64)>,
+    after: &HashMap<String, (i64, i64)>,
+    churn: &[String],
+) -> Vec<(String, i64, i64)> {
+    let mut out: Vec<(String, i64, i64)> = after
+        .iter()
+        .map(|(k, (n, b))| {
+            let (n0, b0) = before.get(k).copied().unwrap_or_default();
+            (k.clone(), n - n0, b - b0)
+        })
+        .filter(|(k, n, b)| (*n != 0 || *b != 0) && !churn.contains(k))
+        .collect();
+    out.sort_by_key(|(_, _, b)| std::cmp::Reverse(b.abs()));
+    out
+}
+
+fn asset_rows(d: &[(String, i64, i64)]) -> String {
+    if d.is_empty() {
+        return "none".into();
+    }
+    d.iter()
+        .map(|(k, n, b)| format!("{k} {n:+} ({:+.1} MB)", *b as f64 / (1 << 20) as f64))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `after - before` per kind, largest changes first, without zeros.
@@ -262,16 +366,22 @@ fn run(world: &mut World, audit: &mut StreamAudit) {
 }
 
 fn report(key: &str, census: &[Census]) -> Option<AuditedCell> {
-    let [
-        (base, r0),
-        (still, _),
-        (loaded, r1),
-        (after, r2),
-        (reloaded, r3),
-    ] = census
-    else {
+    let [c0, c1, c2, c3, c4] = census else {
         return None;
     };
+    let (base, r0) = (&c0.kinds, &c0.ram);
+    let still = &c1.kinds;
+    let (loaded, r1) = (&c2.kinds, &c2.ram);
+    let (after, r2) = (&c3.kinds, &c3.ram);
+    let (reloaded, r3) = (&c4.kinds, &c4.ram);
+    // Asset types that changed with the cell out change on their own too.
+    let asset_churn: Vec<String> = asset_diff(&c0.assets, &c1.assets, &[])
+        .into_iter()
+        .map(|(k, ..)| k)
+        .collect();
+    let assets_load = asset_diff(&c0.assets, &c2.assets, &asset_churn);
+    let assets_left = asset_diff(&c0.assets, &c3.assets, &asset_churn);
+    let missing = c4.missing;
     // Kinds that changed with the cell out change on their own: not the cell's.
     let churn: Vec<(String, i64)> = diff(base, still);
     let own = |d: Vec<(String, i64)>| -> Vec<(String, i64)> {
@@ -282,20 +392,23 @@ fn report(key: &str, census: &[Census]) -> Option<AuditedCell> {
     let load = own(diff(base, loaded));
     let left = own(diff(base, after));
     let again = own(diff(loaded, reloaded));
-    let verdict = if left.is_empty() && again.is_empty() {
+    let verdict = if left.is_empty() && again.is_empty() && assets_left.is_empty() && missing == 0 {
         "clean"
     } else {
         "LEAKS"
     };
     engine_core::log::info!(
         "stream audit: {key}: {verdict}\n  load {} ({})\n  left after unload {} ({})\n  \
-         reload vs first load {} ({}){}",
+         reload vs first load {} ({})\n  assets: load {}; left after unload {}; meshes \
+         missing an asset after the reload: {missing}{}",
         rows(&load),
         ram(*r0, *r1),
         rows(&left),
         ram(*r0, *r2),
         rows(&again),
         ram(*r1, *r3),
+        asset_rows(&assets_load),
+        asset_rows(&assets_left),
         if churn.is_empty() {
             String::new()
         } else {
@@ -308,6 +421,8 @@ fn report(key: &str, census: &[Census]) -> Option<AuditedCell> {
         loaded: load.iter().map(|(_, n)| n).sum(),
         left,
         reload: again,
+        assets_left,
+        missing,
     })
 }
 
