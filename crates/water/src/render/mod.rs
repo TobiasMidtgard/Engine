@@ -22,6 +22,8 @@ use crate::body::{RainShower, WaterBed, WaterExtent, WaterOptics};
 use crate::state::{BodyState, SharedWater, WaterState};
 use crate::waves::MAX_WAVES;
 
+mod detail;
+
 /// The water shader (composed after the renderer's `lib_types` and `lib_frame`).
 pub const SHADER: &str = include_str!("water.wgsl");
 
@@ -235,6 +237,7 @@ struct GpuBody {
     grid: [f32; 4],
     grid2: [f32; 4],
     wind: [f32; 4],
+    detail: [f32; 4],
     waves: [GpuWave; MAX_WAVES],
 }
 
@@ -249,6 +252,8 @@ struct Globals {
     counts: [u32; 4],
     under: [f32; 4],
     under2: [f32; 4],
+    detail: [f32; 4],
+    detail2: [f32; 4],
     plunges: [[f32; 4]; MAX_PLUNGES],
 }
 
@@ -286,6 +291,51 @@ fn optics_vectors(o: &WaterOptics) -> ([f32; 4], [f32; 4]) {
             o.roughness,
         ],
     )
+}
+
+/// The fine wind waves a body's wind sea raises, if any ([`crate::detail`]).
+fn detail_sea(b: &BodyState) -> Option<crate::detail::DetailSea> {
+    let w = &b.body.waves;
+    let wind = engine_core::math::Vec2::new(b.wind.x, b.wind.z);
+    let speed = wind.length();
+    (w.wind_waves && speed > 0.2).then(|| crate::detail::DetailSea {
+        wind: speed,
+        dir: wind / speed,
+        fetch_m: w.fetch_m,
+        height_scale: w.height_scale,
+        choppiness: w.choppiness,
+    })
+}
+
+/// A body's view of the fine waves' tiles: (amplitude scale, cos and sin of the turn from the
+/// tiles' wind to its own, the slope variance nothing draws).
+fn body_detail(b: &BodyState, tiles: Option<&detail::DetailState>) -> [f32; 4] {
+    // Slopes the Gerstner waves draw: (k·a)²/2 each.
+    let gerstner: f32 = b
+        .waves
+        .waves
+        .iter()
+        .map(|w| 0.5 * (w.k * w.amp) * (w.k * w.amp))
+        .sum();
+    let sea = detail_sea(b);
+    let wind = sea.map_or(0.0, |s| s.wind);
+    let (scale, turn, held) = match (
+        tiles,
+        sea.and_then(|s| Some((s, crate::detail::Spectrum::of(&s)?))),
+    ) {
+        (Some(t), Some((s, spectrum))) => {
+            let scale = t.scale_for(&spectrum);
+            let turn = [t.sea.dir.dot(s.dir), t.sea.dir.perp_dot(s.dir)];
+            (scale, turn, t.slope_variance * scale * scale)
+        }
+        _ => (0.0, [1.0, 0.0], 0.0),
+    };
+    [
+        scale,
+        turn[0],
+        turn[1],
+        crate::detail::residual_slope_variance(wind, gerstner + held),
+    ]
 }
 
 /// One body's draw: which bands of the grid to draw.
@@ -332,6 +382,8 @@ struct Gpu {
     /// Vertices the buffer holds, and how many to draw this frame.
     fall_capacity: usize,
     fall_count: u32,
+    /// The fine wind waves' tiles.
+    detail: detail::DetailGpu,
 }
 
 /// What the puddle window holds.
@@ -580,6 +632,16 @@ impl WaterFeature {
                 tex(3, wgpu::TextureSampleType::Depth),
                 tex(4, wgpu::TextureSampleType::Float { filterable: false }),
                 tex(5, wgpu::TextureSampleType::Float { filterable: true }),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: vf,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let group2_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -741,6 +803,7 @@ impl WaterFeature {
             PUDDLE_N,
             wgpu::TextureFormat::Rg32Float,
         );
+        let detail = detail::DetailGpu::new(gpu);
         Gpu {
             body,
             flow,
@@ -762,6 +825,7 @@ impl WaterFeature {
             fall_buffer,
             fall_capacity,
             fall_count: 0,
+            detail,
         }
     }
 
@@ -899,6 +963,8 @@ impl WaterFeature {
                 b.waves.max_height().max(0.01),
             ],
             wind: [dir[0], dir[1], b.body.current[0], b.body.current[1]],
+            // Filled in by `prepare` once the fine waves' tiles are known.
+            detail: [0.0; 4],
             waves,
         };
         Some((
@@ -1294,15 +1360,40 @@ impl RenderFeature for WaterFeature {
             .map(|(i, b)| (extent_range(b, cam_xz).0, i))
             .collect();
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // The fine waves follow the nearest sea with wind waves.
+        let sea = order
+            .iter()
+            .map(|&(_, i)| detail_sea(&state.bodies[i]))
+            .find(|s| s.is_some_and(|s| crate::detail::Spectrum::of(&s).is_some()))
+            .flatten();
+        // Without one, streams still take the ripples of the breeze.
+        let breeze = || {
+            let wind = engine_core::math::Vec2::new(view.wind.x, view.wind.z);
+            crate::detail::DetailSea {
+                wind: wind.length().max(3.0),
+                dir: wind.try_normalize().unwrap_or(engine_core::math::Vec2::X),
+                fetch_m: 50.0,
+                height_scale: 1.0,
+                choppiness: 0.5,
+            }
+        };
+        gpu.detail.update(
+            shared,
+            Some(sea.unwrap_or_else(breeze)),
+            view.time,
+            view.delta,
+        );
+        let tiles = gpu.detail.state.filter(|_| gpu.detail.active);
         let mut under: Option<(usize, f32)> = None;
         for &(_, i) in order.iter() {
             if self.bodies.len() >= MAX_BODIES {
                 break;
             }
             let b = &state.bodies[i];
-            let Some((body, draw)) = Self::body_uniform(b, view) else {
+            let Some((mut body, draw)) = Self::body_uniform(b, view) else {
                 continue;
             };
+            body.detail = body_detail(b, tiles.as_ref());
             let slot = self.bodies.len();
             if under.is_none()
                 && let Some((height, depth, ..)) = state.sample_body(b, cam)
@@ -1354,6 +1445,8 @@ impl RenderFeature for WaterFeature {
             *dst = view.relative(*foot).extend(boil_radius(*power)).to_array();
         }
         g.counts[3] = near.len().min(MAX_PLUNGES) as u32;
+        let frame_wind = engine_core::math::Vec2::new(view.wind.x, view.wind.z);
+        (g.detail, g.detail2) = gpu.detail.globals(frame_wind);
         if let Some((slot, depth)) = under {
             let b = &uniform.bodies[slot];
             g.rain[2] = slot as f32;
@@ -1394,10 +1487,11 @@ impl RenderFeature for WaterFeature {
         self.puddles.wet = puddles_on;
     }
 
-    fn compute(&mut self, _encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
+    fn compute(&mut self, encoder: &mut wgpu::CommandEncoder, ctx: &FrameContext) {
         let Some(gpu) = &mut self.gpu else {
             return;
         };
+        gpu.detail.dispatch(encoder);
         // Built again only when what it binds is made anew: the scene copies on resize, the
         // ripple textures when the grid changes size (both clear it).
         if gpu.group1.is_some() {
@@ -1436,6 +1530,10 @@ impl RenderFeature for WaterFeature {
                         wgpu::BindGroupEntry {
                             binding: 5,
                             resource: wgpu::BindingResource::TextureView(&currents),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(&gpu.detail.view),
                         },
                     ],
                 }),
@@ -1526,9 +1624,9 @@ mod tests {
 
     #[test]
     fn uniform_layout_matches_the_shader() {
-        // WGSL: Globals 7 vec4 + 4 showers + 8 plunges; GpuBody 10 vec4 + 24 waves of 2 vec4.
-        assert_eq!(std::mem::size_of::<Globals>(), (7 + 4 + 8) * 16);
-        assert_eq!(std::mem::size_of::<GpuBody>(), (10 + MAX_WAVES * 2) * 16);
+        // WGSL: Globals 9 vec4 + 4 showers + 8 plunges; GpuBody 11 vec4 + 24 waves of 2 vec4.
+        assert_eq!(std::mem::size_of::<Globals>(), (9 + 4 + 8) * 16);
+        assert_eq!(std::mem::size_of::<GpuBody>(), (11 + MAX_WAVES * 2) * 16);
         assert_eq!(
             std::mem::size_of::<WaterUniform>(),
             std::mem::size_of::<Globals>() + MAX_BODIES * std::mem::size_of::<GpuBody>()

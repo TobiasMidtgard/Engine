@@ -81,6 +81,23 @@ pub fn wavenumber(omega: f32, depth: f32) -> f32 {
     k
 }
 
+/// The frequencies (rad/s) the Gerstner waves of a wind sea peaking at `wp` cover: from just
+/// below the peak to about 5× it, but no shorter than 12 cm waves. Shorter waves are the
+/// renderer's fine detail ([`crate::detail`]), continuing the same spectrum.
+pub fn wind_band(wp: f32) -> (f32, f32) {
+    let w_min = 0.72 * wp;
+    let w_max = (5.0 * wp).min((G * std::f32::consts::TAU / 0.12).sqrt());
+    (w_min, w_max.max(w_min * 1.5))
+}
+
+/// The JONSWAP spectrum's shape at `w` (rad/s) for a sea peaking at `wp`, unscaled: ω⁻⁵ with
+/// the Pierson–Moskowitz roll-off below the peak and the peak enhanced 3.3×.
+pub fn jonswap_shape(w: f32, wp: f32) -> f32 {
+    let sigma = if w <= wp { 0.07 } else { 0.09 };
+    let r = (-((w - wp) * (w - wp)) / (2.0 * sigma * sigma * wp * wp)).exp();
+    w.powf(-5.0) * (-1.25 * (wp / w).powi(4)).exp() * 3.3f32.powf(r)
+}
+
 fn hash01(seed: u64, i: u64) -> f32 {
     let x = engine_core::math::hash_u64(seed ^ i.wrapping_mul(0x9E37_79B9_7F4A_7C15));
     (x >> 40) as f32 / (1u64 << 24) as f32
@@ -112,11 +129,7 @@ pub fn build_waves(settings: &WaveSettings, wind: Vec2, depth: f32) -> Vec<Wave>
         let hs = hs * scale;
         let wind_dir = wind / wind_speed;
         let base_angle = wind_dir.y.atan2(wind_dir.x);
-        // Frequencies from just below the peak to ~5× it, but no shorter than 12 cm waves
-        // (shorter ripples are drawn by the shader's detail normals).
-        let w_min = 0.72 * wp;
-        let w_max = (5.0 * wp).min((G * std::f32::consts::TAU / 0.12).sqrt());
-        let w_max = w_max.max(w_min * 1.5);
+        let (w_min, w_max) = wind_band(wp);
         let ratio = (w_max / w_min).powf(1.0 / (wind_count as f32 - 1.0).max(1.0));
         let mut weights = Vec::with_capacity(wind_count);
         let mut omegas = Vec::with_capacity(wind_count);
@@ -125,11 +138,7 @@ pub fn build_waves(settings: &WaveSettings, wind: Vec2, depth: f32) -> Vec<Wave>
             let jitter = 1.0 + (hash01(seed, i as u64 * 3 + 1) - 0.5) * 0.18;
             let w = w_min * ratio.powf(i as f32) * jitter;
             let dw = w * (ratio - 1.0);
-            // JONSWAP spectral shape.
-            let sigma = if w <= wp { 0.07 } else { 0.09 };
-            let r = (-((w - wp) * (w - wp)) / (2.0 * sigma * sigma * wp * wp)).exp();
-            let s = w.powf(-5.0) * (-1.25 * (wp / w).powi(4)).exp() * 3.3f32.powf(r);
-            weights.push((s * dw).max(0.0));
+            weights.push((jonswap_shape(w, wp) * dw).max(0.0));
             omegas.push(w);
         }
         let total: f32 = weights.iter().sum();

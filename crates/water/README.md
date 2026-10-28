@@ -46,9 +46,14 @@ Background research: `game-engine-research/graphics.md` in the project files.
   surfaces read the wetness of the ground they stand on.
 - **Rendering** (`WaterFeature`): refraction of the scene behind, depth absorption and
   scattering, caustics on the bed, screen-space and sky reflections, sun glitter, light through
-  thin crests, foam (whitecaps, wakes, rapids, shorelines), soft waterlines, ripples that fade
-  with the pixel footprint (no shimmer at grazing angles), puddles, and an underwater view
-  (Snell's window, fog, caustics, light shafts). Shaders are validated in a unit test.
+  thin crests, foam (whitecaps, wakes, rapids, shorelines), soft waterlines, puddles, and an
+  underwater view (Snell's window, fog, caustics, light shafts). Waves too short for the
+  Gerstner set, down to 2 cm ripples, continue its spectrum in two FFT tiles evolved on the GPU
+  each frame (`detail`, after Tessendorf): they ride every lake, sea and stream (carried
+  downstream on streams) and pinch into whitecaps that linger. Their mips keep slope moments
+  (LEAN mapping), so what a pixel can't resolve widens the sun's glitter and blurs reflections
+  by Cox and Munk's measured slopes instead of shimmering, and the sun glitters as a disk, not
+  a point. Shaders are validated in a unit test.
 - **Script API**: `water.sample`, `water.splash`, `water.bodies`, `water.spawn_lake`,
   `water.spawn_ocean`, `water.pour`, `water.calm`.
 

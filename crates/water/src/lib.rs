@@ -5,6 +5,7 @@ pub mod boat;
 pub mod body;
 pub mod buoyancy;
 pub mod demo;
+pub mod detail;
 pub mod flow;
 pub mod interact;
 pub mod puddles;

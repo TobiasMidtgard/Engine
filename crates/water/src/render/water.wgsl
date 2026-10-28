@@ -11,7 +11,7 @@
 // ============================================================================
 
 const MAX_WAVES: u32 = 24u;
-const MAX_BODIES: u32 = 8u;
+const MAX_BODIES: u32 = 16u;
 
 struct GpuWave {
     a: vec4<f32>, // dir.x, dir.z, k (rad/m), amplitude (m)
@@ -29,6 +29,7 @@ struct GpuBody {
     grid: vec4<f32>,    // grid center rel camera x, z, inner spacing s0 (m), growth alpha
     grid2: vec4<f32>,   // rings, segments, outer radius (m), max wave amplitude (m)
     wind: vec4<f32>,    // wind direction x, z, current x, z (m/s)
+    detail: vec4<f32>,  // fine waves: amplitude scale, cos and sin of the turn from the tiles' wind, slope variance nothing draws
     waves: array<GpuWave, 24>,
 };
 
@@ -41,6 +42,8 @@ struct Globals {
     counts: vec4<u32>,   // bodies, showers, puddles on, plunges
     under: vec4<f32>,    // underwater absorption rgb, scattering
     under2: vec4<f32>,   // underwater scatter color rgb, surface level rel camera y
+    detail: vec4<f32>,   // fine waves: 1/tile size (1/m) x, y; streams' amplitude scale, unused
+    detail2: vec4<f32>,  // fine waves: tiles' wind direction x, z; on (1/0), unused
     plunges: array<vec4<f32>, 8>, // where falls land: foot rel camera xyz, boil radius (m)
 };
 
@@ -55,6 +58,7 @@ struct WaterUniform {
 @group(1) @binding(3) var scene_depth: texture_depth_2d;    // reverse-Z
 @group(1) @binding(4) var puddle_tex: texture_2d<f32>;      // r depth (m), g ground y rel puddle2.x
 @group(1) @binding(5) var current_tex: texture_2d<f32>;     // ripple grid currents: x, z (m/s), turn (1/s)
+@group(1) @binding(6) var detail_tex: texture_2d_array<f32>; // fine waves, per tile: (dh/dx, dh/dz, h, Jacobian), (moments, foam)
 
 struct FlowGpu {
     origin: vec4<f32>,  // corner rel camera x, base y, z, cell (m)
@@ -219,6 +223,8 @@ struct WaveOut {
     offset: vec3<f32>,
     normal: vec3<f32>,
     jacobian: f32,
+    // Mean square slope of the waves faded out for being too short to draw.
+    slope_var: f32,
 };
 
 // Sum of Gerstner waves at rest position p0 (rel. the body's reference). Waves shorter than
@@ -230,12 +236,17 @@ fn eval_waves(bi: u32, p0: vec2<f32>, depth: f32, min_len: f32) -> WaveOut {
     var jxx = 0.0;
     var jzz = 0.0;
     var jxz = 0.0;
+    var faded = 0.0;
     let count = min(u32(water.bodies[bi].bed.w), MAX_WAVES);
     for (var i = 0u; i < count; i++) {
         let w = water.bodies[bi].waves[i];
         let k = w.a.z;
         let lod = saturate((TAU / max(k, 1e-4)) / max(min_len, 1e-4) - 1.0);
-        let f = tanh(k * max(depth, 0.0) * 1.2) * lod;
+        let shoal = tanh(k * max(depth, 0.0) * 1.2);
+        // What fading takes away from the drawn slopes still roughens the pixel.
+        let ka_full = k * w.a.w * shoal;
+        faded += 0.5 * ka_full * ka_full * (1.0 - lod * lod);
+        let f = shoal * lod;
         if (f <= 0.0) { continue; }
         let a = w.a.w * f;
         let c = w.b.x * f;
@@ -258,7 +269,72 @@ fn eval_waves(bi: u32, p0: vec2<f32>, depth: f32, min_len: f32) -> WaveOut {
     out.offset = off;
     out.normal = normalize(cross(tz, tx));
     out.jacobian = (1.0 - jxx) * (1.0 - jzz) - jxz * jxz;
+    out.slope_var = faded;
     return out;
+}
+
+// ---------------------------------------------------------------- fine wind waves
+// The fine waves' tiles (`render/detail.rs`) at world x/z `p`, for a body that shows them at
+// `scale` (amplitude) with its wind turned `turn` (cos, sin) from the tiles' wind. The pixel's
+// footprint `fp` picks the mip, and what the mip averages away comes back as slope variance
+// (LEAN mapping: the mips hold the slopes' second moments too).
+struct Detail {
+    grad: vec2<f32>,  // dh/dx, dh/dz
+    variance: f32,    // mean square slope the pixel doesn't resolve
+    height: f32,
+    squeeze: f32,     // 1 − Jacobian of the chop: > 0 where crests pinch
+    foam: f32,        // foam lingering where they broke
+};
+
+fn turn_by(v: vec2<f32>, turn: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(turn.x * v.x - turn.y * v.y, turn.y * v.x + turn.x * v.y);
+}
+
+fn detail_at(p: vec2<f32>, scale: f32, turn: vec2<f32>, fp: Footprint) -> Detail {
+    var out = Detail(vec2<f32>(0.0), 0.0, 0.0, 0.0, 0.0);
+    if (scale <= 0.0 || water.g.detail2.z < 0.5) { return out; }
+    // Into the tiles' frame.
+    let back = vec2<f32>(turn.x, -turn.y);
+    let q = turn_by(p, back);
+    let along = turn_by(fp.view, back);
+    let side = vec2<f32>(-along.y, along.x);
+    // The sampler filters isotropically: the footprint's geometric mean along the view, so
+    // grazing views keep their ripples (what it misses is in the variance anyway).
+    let len_along = fp.across * sqrt(fp.stretch);
+    var g = vec2<f32>(0.0);
+    for (var c = 0; c < 2; c++) {
+        let inv = select(water.g.detail.y, water.g.detail.x, c == 0);
+        let uv = q * inv;
+        let ddx = along * (len_along * inv);
+        let ddy = side * (fp.across * inv);
+        let a = textureSampleGrad(detail_tex, linear_repeat, uv, c * 2, ddx, ddy);
+        let m = textureSampleGrad(detail_tex, linear_repeat, uv, c * 2 + 1, ddx, ddy);
+        g += a.xy;
+        out.variance += max(m.x - a.x * a.x, 0.0) + max(m.y - a.y * a.y, 0.0);
+        out.height += a.z;
+        out.squeeze += 1.0 - a.w;
+        out.foam = max(out.foam, m.w);
+    }
+    out.grad = turn_by(g, turn) * scale;
+    out.variance *= scale * scale;
+    out.height *= scale;
+    out.squeeze *= scale;
+    return out;
+}
+
+// The fine waves' height at a vertex `spacing` meters from its neighbors (mips average away
+// what the grid can't hold).
+fn detail_height(p: vec2<f32>, scale: f32, turn: vec2<f32>, spacing: f32) -> f32 {
+    if (scale <= 0.0 || water.g.detail2.z < 0.5) { return 0.0; }
+    let q = turn_by(p, vec2<f32>(turn.x, -turn.y));
+    var h = 0.0;
+    for (var c = 0; c < 2; c++) {
+        let inv = select(water.g.detail.y, water.g.detail.x, c == 0);
+        // Texels per grid cell; a cell needs two texels' worth of mip to hold a wave.
+        let lod = log2(max(spacing * 2.0 * inv * 128.0, 1.0));
+        h += textureSampleLevel(detail_tex, linear_repeat, q * inv, c * 2, lod).z;
+    }
+    return h * scale;
 }
 
 // Interactive ripples at a camera-relative x/z: (height, foam, dh/dx, dh/dz), faded at the edge.
@@ -290,6 +366,14 @@ fn rain_at(rel_xz: vec2<f32>) -> f32 {
         if (length(rel_xz - s.xy) < s.z) { r += s.w; }
     }
     return r;
+}
+
+// Gusts: the breeze roughens the water in drifting patches (cat's paws), calm in between.
+// About 1 on average.
+fn gusts(p: vec2<f32>, wind_dir: vec2<f32>, wind: f32) -> f32 {
+    let drift = wind_dir * time_s() * (0.4 + 0.1 * wind);
+    let gust = value_noise2(p * 0.09 - drift * 0.09) * 0.65 + value_noise2(p * 0.31 - drift * 0.31) * 0.35;
+    return 0.35 + 1.3 * smoothstep(0.3, 0.75, gust);
 }
 
 // Small wind ripples (capillary waves): gradient (dh/dx, dh/dz) of short analytic waves
@@ -478,18 +562,19 @@ fn streak_foam(wp: vec2<f32>, vel: vec2<f32>) -> f32 {
 // as for streams, which lap by their own depth). `vel`: the current (m/s), which carries the
 // foam downstream.
 fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, crest: f32,
-               frag: vec4<f32>, wind: f32, edge: f32, shore_depth: f32, vel: vec2<f32>) -> vec3<f32> {
+               frag: vec4<f32>, wind: f32, edge: f32, shore_depth: f32, vel: vec2<f32>,
+               slope_var: f32) -> vec3<f32> {
     let dist = length(rel);
     let v = -rel / max(dist, 1e-4);
     var n = n_in;
     let ndv0 = dot(n, v);
     if (ndv0 < 0.02) { n = normalize(n + v * (0.02 - ndv0)); }
     let n_dot_v = max(dot(n, v), 1e-3);
-    // Wind roughens the water below what the waves and ripples resolve: the facets' slopes
-    // spread by about 0.003 + 0.00512·U (Cox–Munk), more of it unresolved further off. A gale
-    // blurs the reflections and breaks up the grazing mirror (facets tilt toward the eye).
-    let unresolved = sqrt(0.003 + 0.00512 * wind) * smoothstep(5.0, 14.0, wind)
-        * mix(0.6, 1.5, saturate(dist / 80.0));
+    // Wind roughens the water below what the waves and ripples resolve (`slope_var`, the mean
+    // square slope of what the pixel holds but can't draw; all of it adds up to Cox and Munk's
+    // 0.003 + 0.00512·U). Rough water blurs the reflections and breaks up the grazing mirror
+    // (facets tilt toward the eye).
+    let unresolved = sqrt(max(slope_var, 0.0));
     let fresnel = 0.02 + 0.98 * pow(1.0 - n_dot_v, 5.0) * (1.0 - 0.55 * saturate(unresolved * 2.0));
     let size = vec2<f32>(textureDimensions(scene_color));
     let pix = vec2<i32>(frag.xy);
@@ -543,7 +628,9 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
     // ---- reflection
     var r = reflect(-v, n);
     if (r.y < 0.02) { r = normalize(vec3<f32>(r.x, 0.02 + (0.02 - r.y) * 0.5, r.z)); }
-    let rough = clamp(look.roughness + 0.01 * wind + dist * 0.00015 + unresolved, 0.02, 0.75);
+    // GGX's α² follows the facets' mean square slope (as Beckmann's m² does).
+    let base_a = look.roughness * look.roughness;
+    let rough = clamp(sqrt(sqrt(base_a * base_a + slope_var)), 0.02, 0.75);
     let sky_vis = sky_visibility(rel, vec3<f32>(0.0, 1.0, 0.0));
     let fill = frame.ambient.rgb;
     let env = (mix(sample_env(r), sky_ambient(r), saturate(rough * 1.5)) - fill) * sky_vis + fill;
@@ -557,7 +644,10 @@ fn shade_water(rel: vec3<f32>, n_in: vec3<f32>, look: WaterLook, foam_in: f32, c
     let shadow = shadow_factor(rel, n);
     let h = normalize(l + v);
     let n_dot_l = saturate(dot(n, l));
-    let a = rough * rough;
+    // The sun is a disk, not a point: its glitter spreads over at least its own width, so a
+    // calm surface mirrors a sun, not a burning pixel.
+    let tan_sun = tan(frame.sun_dir.w);
+    let a = sqrt(rough * rough * rough * rough + tan_sun * tan_sun);
     let spec = d_ggx(saturate(dot(n, h)), a) * v_smith_ggx_correlated(n_dot_v, max(n_dot_l, 1e-3), a)
         * f_schlick(vec3<f32>(0.02), saturate(dot(l, h))) * n_dot_l;
     let glitter = pre_expose(spec * sun * shadow);
@@ -657,6 +747,9 @@ fn vs_body(@builtin(vertex_index) vid: u32, @builtin(instance_index) bi: u32) ->
     if (water.bodies[bi].look.w > 0.5) { y += ripple_at(rest).x; }
     var out: BodyOut;
     out.rel = vec3<f32>(rest.x + w.offset.x, y, rest.y + w.offset.z);
+    // The fine waves near the camera, where the grid is fine enough to hold them.
+    let bd = water.bodies[bi].detail;
+    out.rel.y += detail_height(tiling_pos(out.rel).xz, bd.x, bd.yz, spacing);
     out.clip = frame.view_proj * vec4<f32>(out.rel, 1.0);
     out.p0 = p0;
     out.rest = rest;
@@ -686,15 +779,22 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
         // Foam rides the stirred currents: its streaks follow their swirls.
         vel += current_at(in.rest).xy;
     }
-    // Whitecaps where the waves pinch.
     let wind = water.bodies[bi].bed.z;
-    foam += saturate((0.55 - in.jac) * 2.5) * saturate((wind - 4.0) * 0.25);
     let wp = tiling_pos(in.rel).xz;
+    let wind_dir = normalize(water.bodies[bi].wind.xy + vec2<f32>(1e-4, 0.0));
+    // The fine waves, roughened in gusts.
+    let bd = water.bodies[bi].detail;
+    let fine = detail_at(wp, bd.x, bd.yz, footprint(in.rel));
+    let gust = gusts(wp, wind_dir, wind);
+    // Whitecaps where the waves pinch (the long waves and the fine ones riding them), and the
+    // foam the fine ones leave as they break, thinning.
+    let jac = in.jac - fine.squeeze * gust;
+    foam += saturate((0.55 - jac) * 2.5) * saturate((wind - 4.0) * 0.25);
+    foam += fine.foam * saturate(bd.x) * saturate((wind - 5.0) * 0.2) * 0.6;
     // In a strong wind the crests break all over, in patches too small and quick for the waves
     // above to pinch: about 3.84e-6·U^3.41 of the sea is white (Monahan), the breakers drawn
     // out downwind. The wind drags the surface along at about 3% of its speed, so foam streaks
     // run with it.
-    let wind_dir = normalize(water.bodies[bi].wind.xy + vec2<f32>(1e-4, 0.0));
     let caps = 3.84e-6 * pow(max(wind, 0.0), 3.41);
     if (caps > 0.002) {
         let across = vec2<f32>(-wind_dir.y, wind_dir.x);
@@ -705,13 +805,18 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
         // A breaker is froth, not a sheet: fine noise tears holes in it.
         let lace = value_noise2(wp * 5.3 + vec2<f32>(time_s() * 0.9, 0.0)) * 0.6
             + value_noise2(wp * 13.0 + vec2<f32>(1.7, time_s() * 1.3)) * 0.4;
-        foam += smoothstep(edge, edge + 0.1, breaking) * smoothstep(0.3, 0.6, lace) * 1.3;
+        // Waves break at their crests: the white gathers there, thin in the troughs.
+        let on_crest = 0.3 + 0.7 * smoothstep(0.45, 0.8, in.crest + fine.squeeze);
+        foam += smoothstep(edge, edge + 0.15, breaking) * smoothstep(0.3, 0.6, lace) * on_crest;
         // From a near gale on, the foam the breakers leave is drawn into rows along the wind.
         let rows = value_noise2(vec2<f32>(dot(wp, wind_dir) * 0.06, dot(wp, across) * 1.1));
         foam += smoothstep(0.6, 0.8, rows) * 0.35 * smoothstep(10.0, 16.0, wind);
         vel += wind_dir * wind * 0.03;
     }
-    var g = capillary_gradient(wp, water.bodies[bi].wind.xy, wind, footprint(in.rel));
+    var g = fine.grad * gust;
+    // What the pixel can't resolve roughens it: waves faded for being too short to draw, fine
+    // waves averaged away by the mips, and ripples under 2 cm.
+    let slope_var = w.slope_var + fine.variance * gust * gust + bd.w;
     g += rain_gradient(wp, rain_at(in.rest), saturate(1.0 - pixel / 0.02));
     let boil = plunge_boil(in.rel);
     foam += boil.x;
@@ -723,7 +828,7 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     if (water.g.rain.z >= 0.0) {
         color = shade_underside(in.rel, n, look, in.clip);
     } else {
-        color = shade_water(in.rel, n, look, foam, in.crest, in.clip, wind, 0.05, 0.3, vel);
+        color = shade_water(in.rel, n, look, foam, in.crest, in.clip, wind, 0.05, 0.3, vel, slope_var);
     }
     return vec4<f32>(color, 1.0);
 }
@@ -800,10 +905,22 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     // The ripples' directions follow the wind, not the local current: a direction that turns
     // from place to place would wind the pattern up into fine moiré far from the camera.
     let wind_dir = normalize(frame.wind.xz + vec2<f32>(1e-4, 0.0));
-    let g0 = capillary_gradient(wp - shift * phase0, wind_dir, 3.0 + speed * 3.0, fp);
-    let g1 = capillary_gradient(wp - shift * phase1 + vec2<f32>(4.7, 1.3), wind_dir, 3.0 + speed * 3.0, fp);
+    // The fine waves' tiles turned to the wind here, carried downstream.
+    let tiles = water.g.detail2.xy;
+    let turn = vec2<f32>(dot(tiles, wind_dir), tiles.x * wind_dir.y - tiles.y * wind_dir.x);
+    // A stream's surface rolls in boils and bulges bigger than a breeze's ripples: the tiles
+    // drawn 2.5 times larger (slopes kept), livelier where the water runs fast, and patchy.
+    let big = 2.5;
+    var fp_big = fp;
+    fp_big.across = fp.across / big;
+    let lively = (1.0 + speed * 0.5) * gusts(wp - shift * 0.5, wind_dir, 3.0 + speed);
+    let d0 = detail_at((wp - shift * phase0) / big, water.g.detail.z, turn, fp_big);
+    let d1 = detail_at((wp - shift * phase1) / big + vec2<f32>(4.7, 1.3), water.g.detail.z, turn, fp_big);
     let wgt = abs(phase0 - 0.5) * 2.0;
-    var g = mix(g0, g1, wgt) * (1.0 + speed * 0.5);
+    var g = mix(d0.grad, d1.grad, wgt) * lively;
+    // The current livens what can be seen; what a pixel can't is the breeze's alone, or
+    // fast water would go milky with roughness.
+    let slope_var = mix(d0.variance, d1.variance, wgt);
     g += rain_gradient(wp, rain_at(in.rel.xz), saturate(1.0 - pixel / 0.02));
     // Rings, wakes and foam from whatever moves through the stream (the interactive field
     // covers streams near the camera too).
@@ -852,7 +969,7 @@ fn fs_flow(in: FlowOut, @builtin(front_facing) front: bool) -> @location(0) vec4
         // Streams run shallow over riffles: only the last centimeter fades. Their banks lap
         // white by the stream's own depth (above), not the depth seen through it: a sheet a
         // centimeter or two deep over a slab looks like shoreline all over from here.
-        color = shade_water(in.rel, n, look, foam, saturate(steep * 2.0), in.clip, 3.0 + speed, 0.01, 0.0, in.vel);
+        color = shade_water(in.rel, n, look, foam, saturate(steep * 2.0), in.clip, 3.0 + speed, 0.01, 0.0, in.vel, slope_var);
     } else {
         color = shade_underside(in.rel, n, look, in.clip);
     }
