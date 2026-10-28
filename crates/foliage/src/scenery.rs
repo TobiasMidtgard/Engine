@@ -3096,11 +3096,11 @@ fn scenery_assets(world: &mut World) -> Option<SceneryAssets> {
 /// `draw_distance_m` from the camera.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Debris {
+pub struct LitterPiece {
     pub draw_distance_m: f32,
 }
 
-impl Default for Debris {
+impl Default for LitterPiece {
     fn default() -> Self {
         Self {
             draw_distance_m: 45.0,
@@ -3112,7 +3112,7 @@ impl Default for Debris {
 pub fn cull_debris(
     mut frame: Local<u32>,
     cams: Query<(&engine_render::Camera, &GlobalTransform)>,
-    mut debris: Query<(&Debris, &GlobalTransform, &mut MeshRenderer)>,
+    mut debris: Query<(&LitterPiece, &GlobalTransform, &mut MeshRenderer)>,
 ) {
     *frame = frame.wrapping_add(1);
     if *frame % 8 != 1 {
@@ -3576,7 +3576,7 @@ impl PlacedDebris {
                 (
                     t,
                     renderer,
-                    Debris {
+                    LitterPiece {
                         draw_distance_m: distance,
                     },
                 )
@@ -5278,7 +5278,7 @@ mod tests {
             assert!(app.world.get::<Rock>(rock).unwrap().settled);
             let debris = app
                 .world
-                .query_filtered::<(), With<Debris>>()
+                .query_filtered::<(), With<LitterPiece>>()
                 .iter(&app.world)
                 .count();
             (
