@@ -12,6 +12,13 @@
 //! critically damped spring, and the face winces (the `brace` curve the [`Face`] reads) for
 //! as long as it lasts. It runs before foot IK, so planted feet stay put.
 //!
+//! A hard blow (at least [`HitReaction::physical_above`] N·s) also rocks the upper body with
+//! physics for a moment when a physics backend is installed: the parts from the spine up
+//! simulate, driven toward the flinching pose, take part of the blow at the point it landed
+//! and show up to about half their simulated pose before settling back, while the legs stay
+//! animated and planted ([`PhysicalBlend`]). That gives each blow its own wobble on top of
+//! the flinch, as Unreal's physical-animation hit reactions and Euphoria do.
+//!
 //! People get a [`HitReaction`] when they are first hit; insert one to tune it.
 //!
 //! [`Face`]: crate::face::Face
@@ -21,6 +28,7 @@ use engine_world::DamageEvent;
 
 use crate::animator::Animator;
 use crate::ik::to_model;
+use crate::ragdoll::{PhysicalBlend, PhysicalPulse, RagdollRig};
 
 /// Bones that flinch, and how much of the blow each can take.
 const BONES: [(&str, f32); 7] = [
@@ -48,6 +56,15 @@ pub struct HitReaction {
     pub reach: f32,
     /// How far the hips are shoved along the blow, meters per N·s.
     pub shove_per_impulse: f32,
+    /// Blows at least this hard (N·s) rock the upper body with physics for a moment (0 = never).
+    pub physical_above: f32,
+    /// Most of the simulated pose such a blow shows (0..1), reached at three times
+    /// `physical_above`.
+    pub physical_peak: f32,
+    /// How long the upper body takes to settle back to the animation, s.
+    pub physical_secs: f32,
+    /// Share of the blow the physical parts take (the flinch shows the rest).
+    pub physical_push: f32,
     /// Each bone's turn (model space, radians, as an axis times an angle) and its rate.
     #[serde(skip)]
     pub state: Vec<(Vec3, Vec3)>,
@@ -65,6 +82,10 @@ impl Default for HitReaction {
             settle_secs: 0.45,
             reach: 0.35,
             shove_per_impulse: 0.002,
+            physical_above: 15.0,
+            physical_peak: 0.6,
+            physical_secs: 0.5,
+            physical_push: 0.35,
             state: Vec::new(),
             shove: (Vec3::ZERO, Vec3::ZERO),
         }
@@ -142,13 +163,20 @@ impl HitReaction {
 }
 
 /// Kick the bodies that were hit this frame.
+#[allow(clippy::type_complexity)]
 pub(crate) fn take_hits(
     mut commands: Commands,
     mut hits: MessageReader<DamageEvent>,
-    mut q: Query<(&Animator, &GlobalTransform, Option<&mut HitReaction>)>,
+    mut q: Query<(
+        &Animator,
+        &GlobalTransform,
+        Option<&mut HitReaction>,
+        Option<&RagdollRig>,
+        Option<&mut PhysicalBlend>,
+    )>,
 ) {
     for hit in hits.read() {
-        let Ok((animator, gt, reaction)) = q.get_mut(hit.target) else {
+        let Ok((animator, gt, reaction, rig, physical)) = q.get_mut(hit.target) else {
             continue;
         };
         let skeleton = &animator.skeleton;
@@ -170,12 +198,35 @@ pub(crate) fn take_hits(
             .iter()
             .map(|(name, _)| skeleton.index_of(name).map(|i| animator.model[i].t))
             .collect();
-        match reaction {
-            Some(mut r) => r.strike(point, push, pelvis, &bones),
+        let tuning = match reaction {
+            Some(mut r) => {
+                r.strike(point, push, pelvis, &bones);
+                r.clone()
+            }
             None => {
                 let mut r = HitReaction::default();
                 r.strike(point, push, pelvis, &bones);
-                commands.entity(hit.target).insert(r);
+                commands.entity(hit.target).insert(r.clone());
+                r
+            }
+        };
+        // A hard blow rocks the upper body with physics too.
+        let strength = push.length();
+        if rig.is_some()
+            && tuning.enabled
+            && tuning.physical_above > 0.0
+            && strength >= tuning.physical_above
+        {
+            let peak = tuning.physical_peak * (strength / (3.0 * tuning.physical_above)).min(1.0);
+            let pulse = PhysicalPulse::new("spine", peak, 0.05, tuning.physical_secs);
+            let impulse = gt.rotation() * push * tuning.physical_push;
+            match physical {
+                Some(mut p) => p.hit(pulse, hit.point, impulse),
+                None => {
+                    let mut p = PhysicalBlend::default();
+                    p.hit(pulse, hit.point, impulse);
+                    commands.entity(hit.target).insert(p);
+                }
             }
         }
     }

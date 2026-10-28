@@ -135,6 +135,16 @@ compresses and stretches.
   each other or their owner's controller (`RAGDOLL_LAYER`), foot IK ignores them, and hard
   hits become `GroundContact`s of kind `Body` and `NoiseEvent`s. Without a physics module the
   body stays animated. It runs in `AnimSet::Ragdoll`, after IK and before muscles.
+- **Physical hit reactions.** `PhysicalBlend` makes part of a body physical for a moment
+  (Unreal's `SetAllBodiesBelowPhysicsBlendWeight`): each `PhysicalPulse` simulates the parts
+  from a root bone down, driven toward the animated pose with drives softened by its weight,
+  and shows up to `peak` of their simulated pose, rising and falling back to the animation.
+  The parts it doesn't reach are kinematic bodies moved with the animation, so the legs of a
+  person rocked by a blow stay planted. A blow of at least `HitReaction::physical_above`
+  (15 N·s) starts one from the spine up, peaking at about half the simulated pose and
+  settling in half a second, and pushes the part nearest the hit with a share of the blow,
+  so each punch rocks the head and chest its own way on top of the flinch. The bodies exist
+  only while a pulse runs.
 - **Getting up.** A person whose weight returns to 0 while lying flat gets up rather than
   blending straight to standing: `get_up_back` (sits up, tucks a leg, plants a hand and a
   knee, steps up) or `get_up_front` (palms down, pushes up to all fours, kneels, steps up),
@@ -299,6 +309,10 @@ back from the jab.
 `tests/body_request.rs` asks for a hiker, a horse, a 40 cm dog and an unknown kind on
 entities the test moves itself: the bodies walk, run and gallop from that motion, step on the ground, keep the
 requester's own parameters, rebuild on a changed request and go with a removed one.
+`tests/hit_physics.rs` punches a person on a stand-in backend that integrates forces: a
+hard blow spawns bodies with kinematic legs, pushes the neck, moves the head beyond the
+flinch while the feet stay within 5 mm, and the bodies are gone and the pose is the
+animation's again a second later; a light blow only flinches.
 `tests/ragdoll.rs` turns a walking person limp on a stand-in physics backend: fourteen
 jointed parts that start together, keep the walk's momentum and ignore each other and the
 owner's controller; the pose follows them, footsteps stop, half-limp parts are pulled

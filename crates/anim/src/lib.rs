@@ -42,7 +42,7 @@ pub use muscle::{MorphWeights, Muscle, MuscleDriver, MuscleRig};
 pub use procedural::gait::{GaitLeg, GaitStage, LeggedGait};
 pub use procedural::spring::{SpringChainDef, SpringChains};
 pub use procedural::vehicle::{VehicleRig, WheelRig};
-pub use ragdoll::{RagdollDef, RagdollPart, RagdollRig, RagdollTone};
+pub use ragdoll::{PhysicalBlend, PhysicalPulse, RagdollDef, RagdollPart, RagdollRig, RagdollTone};
 pub use retarget::{HandGrip, HandRig, Retarget, RetargetMap, Retargeter};
 pub use skeleton::Skeleton;
 pub use skin::feature::SkinningFeature;
@@ -248,7 +248,13 @@ fn register_types(app: &mut App) {
     .register_component::<HitReaction>(
         "Hit flinch: a DamageEvent turns the spine, head and a struck arm away from the blow \
          (degrees_per_impulse per N·s, up to max_degrees), shoves the hips \
-         (shove_per_impulse) and springs back over settle_secs.",
+         (shove_per_impulse) and springs back over settle_secs; blows of at least \
+         physical_above N·s also rock the upper body with physics for physical_secs.",
+    )
+    .register_component::<PhysicalBlend>(
+        "Parts of a body made physical for a moment: each pulse simulates the parts from its \
+         root bone down, showing up to peak of their simulated pose over rise + fall seconds, \
+         while the rest stays animated (needs a physics backend).",
     );
 }
 

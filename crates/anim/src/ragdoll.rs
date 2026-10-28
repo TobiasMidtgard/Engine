@@ -25,6 +25,11 @@
 //!   [`BLEND_OUT_SECS`]. Blends run on each bone's local rotation, so limbs keep their length.
 //! * Parts are on [`RAGDOLL_LAYER`] and don't collide with each other; while a body is
 //!   physical its own character controller ignores them.
+//! * [`PhysicalBlend`] makes part of a body physical for a moment (a hit reaction, like
+//!   Unreal's `SetAllBodiesBelowPhysicsBlendWeight`): the parts from a root bone down follow
+//!   the animation through drives softened by their weight and show that much of their
+//!   simulated pose, the rest of the body (the legs, for a blow to the head) stays animated,
+//!   and a push lands on the part nearest the blow. The bodies go once the pulses are over.
 //! * A part hitting something hard reports a `GroundContact` of kind `Body` (body falls for
 //!   sounds and prints in snow) and a `NoiseEvent`.
 
@@ -546,6 +551,29 @@ impl RagdollDef {
     }
 
     /// The bone's model transform for part `i`'s body at `pos`, `rot` (world).
+    /// The part that moves `bone`, or else the nearest part above it.
+    pub fn part_of(&self, skeleton: &Skeleton, bone: &str) -> Option<usize> {
+        let mut b = skeleton.index_of(bone)?;
+        loop {
+            if let Some(i) = self.part_of_bone.get(b).copied().flatten() {
+                return Some(i);
+            }
+            b = skeleton.parents[b]? as usize;
+        }
+    }
+
+    /// Whether part `i` is `root` or hangs from it.
+    pub fn hangs_from(&self, i: usize, root: usize) -> bool {
+        let mut at = Some(i);
+        while let Some(p) = at {
+            if p == root {
+                return true;
+            }
+            at = self.parts[p].parent;
+        }
+        false
+    }
+
     fn bone_model(&self, i: usize, pos: DVec3, rot: Quat, gt: &GlobalTransform) -> Xf {
         let inv = gt.rotation().inverse();
         let scale = gt.scale().max_element().max(1e-6);
@@ -752,6 +780,9 @@ pub struct RagdollRig {
     blend: Option<BlendBack>,
     /// Whether this took the ragdoll layer out of the owner's character controller.
     took_controller_bit: bool,
+    /// Parts spawned kinematic, moved along with the animation (the ones a moment of physics
+    /// doesn't reach, which hold the rest up); empty for a ragdoll.
+    kinematic: Vec<bool>,
 }
 
 impl RagdollRig {
@@ -768,6 +799,7 @@ impl RagdollRig {
             spawned: 0,
             blend: None,
             took_controller_bit: false,
+            kinematic: Vec::new(),
         }
     }
 
@@ -922,6 +954,7 @@ type Owners<'w, 's> = Query<
         Option<&'static Name>,
         Option<&'static mut CharacterController>,
         Option<&'static mut RagdollTone>,
+        Option<&'static mut PhysicalBlend>,
     ),
     Without<RagdollPart>,
 >;
@@ -930,7 +963,7 @@ type Parts<'w, 's> = Query<
     'w,
     's,
     (
-        &'static Transform,
+        &'static mut Transform,
         &'static Velocity,
         &'static mut ExternalForce,
     ),
@@ -967,6 +1000,88 @@ impl Default for RagdollTone {
     }
 }
 
+/// A moment of physics on part of a body: the parts from `root` (a bone; its own part, or
+/// the part that moves it) down are simulated and show up to `peak` of their simulated
+/// pose, rising over `rise` seconds and falling back to the animation over `fall`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhysicalPulse {
+    pub root: String,
+    pub peak: f32,
+    pub rise: f32,
+    pub fall: f32,
+    /// Seconds since it began.
+    pub time: f32,
+}
+
+impl PhysicalPulse {
+    pub fn new(root: &str, peak: f32, rise: f32, fall: f32) -> Self {
+        Self {
+            root: root.into(),
+            peak: peak.clamp(0.0, 1.0),
+            rise: rise.max(1e-3),
+            fall: fall.max(1e-3),
+            time: 0.0,
+        }
+    }
+
+    /// How much of the simulated pose shows now.
+    pub fn weight(&self) -> f32 {
+        let smooth = |x: f32| {
+            let x = x.clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        };
+        if self.time < self.rise {
+            self.peak * smooth(self.time / self.rise)
+        } else {
+            self.peak * (1.0 - smooth((self.time - self.rise) / self.fall))
+        }
+    }
+
+    pub fn is_over(&self) -> bool {
+        self.time >= self.rise + self.fall
+    }
+}
+
+/// Parts of a body made physical for a moment ([`PhysicalPulse`]s, e.g. the upper body
+/// rocked by a blow while the legs stay planted), and pushes for its parts. Needs a physics
+/// backend and a skeleton with a [`RagdollDef`]; without them the pulses run out unseen.
+#[derive(Component, Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PhysicalBlend {
+    pub pulses: Vec<PhysicalPulse>,
+    /// Pushes (world point, N·s) for the parts nearest those points, given as soon as the
+    /// parts exist.
+    #[serde(skip)]
+    pub pushes: Vec<(DVec3, Vec3)>,
+}
+
+impl PhysicalBlend {
+    /// Start a pulse, and push the part nearest `point` by `impulse`.
+    pub fn hit(&mut self, pulse: PhysicalPulse, point: DVec3, impulse: Vec3) {
+        self.pulses.push(pulse);
+        if impulse != Vec3::ZERO {
+            self.pushes.push((point, impulse));
+        }
+    }
+
+    /// Each part's weight now (0 for parts no pulse reaches).
+    fn part_weights(&self, def: &RagdollDef, skeleton: &Skeleton) -> Vec<f32> {
+        let mut w = vec![0.0f32; def.parts.len()];
+        for pulse in &self.pulses {
+            let Some(root) = def.part_of(skeleton, &pulse.root) else {
+                continue;
+            };
+            let weight = pulse.weight();
+            for (i, wi) in w.iter_mut().enumerate() {
+                if def.hangs_from(i, root) {
+                    *wi = wi.max(weight);
+                }
+            }
+        }
+        w
+    }
+}
+
 /// Turn bodies physical and back as their weight changes, pose them from their parts, and
 /// drive the parts toward the animation.
 #[allow(clippy::too_many_arguments)]
@@ -982,35 +1097,71 @@ pub(crate) fn ragdoll_system(
     let frame = time.frame_count();
     let dt = time.delta_secs();
     let flesh = surfaces.id_or_default("flesh");
-    for (entity, mut animator, mut rig, gt, published, ragdoll, name, controller, tone) in
-        &mut owners
+    for (
+        entity,
+        mut animator,
+        mut rig,
+        gt,
+        published,
+        ragdoll,
+        name,
+        controller,
+        tone,
+        mut pulses,
+    ) in &mut owners
     {
         let rig = &mut *rig;
         let def = rig.def.clone();
         let weight = ragdoll.map_or(0.0, |r| r.weight.clamp(0.0, 1.0));
+        // Parts made physical for a moment (hit reactions).
+        let partial = pulses.as_deref().map_or_else(
+            || vec![0.0; def.parts.len()],
+            |p| p.part_weights(&def, &animator.skeleton),
+        );
+        let physical = weight > 0.0 || partial.iter().any(|&w| w > 0.0);
+        if let Some(p) = pulses.as_deref_mut()
+            && !p.pulses.is_empty()
+        {
+            for pulse in &mut p.pulses {
+                pulse.time += dt;
+            }
+            p.pulses.retain(|pulse| !pulse.is_over());
+        }
         animator.refresh_model();
         let animated: Vec<(DVec3, Quat)> = (0..def.parts.len())
             .map(|i| def.body_pose(i, &animator.model[def.bones[i]], gt))
             .collect();
-        if weight > 0.0 && !rig.is_physical() && backend.is_some() {
+        // A body going limp while only part of it was physical starts over with every part
+        // simulated.
+        let respawn = weight > 0.0 && rig.kinematic.contains(&true);
+        if physical && !rig.is_physical() && backend.is_some() {
+            // For a moment of physics alone, the parts it doesn't reach move with the
+            // animation.
+            let kinematic: Vec<bool> = if weight > 0.0 {
+                Vec::new()
+            } else {
+                partial.iter().map(|&w| w <= 0.0).collect()
+            };
             spawn_parts(
                 &mut commands,
                 rig,
                 entity,
-                &animator,
-                &animated,
-                gt,
+                (&animator, &animated, gt),
                 name,
                 frame,
                 flesh,
+                kinematic,
             );
             if let Some(mut c) = controller {
                 rig.took_controller_bit = c.layers.collides_with & RAGDOLL_LAYER != 0;
                 c.layers.collides_with &= !RAGDOLL_LAYER;
             }
-        } else if weight <= 0.0 && rig.is_physical() {
+        } else if (!physical || respawn) && rig.is_physical() {
             // Blend back from the pose shown last frame; get up if it lay on the floor.
-            if published.bones.len() == animator.skeleton.len() && frame > rig.spawned + 1 {
+            if !respawn
+                && published.bones.len() == animator.skeleton.len()
+                && frame > rig.spawned + 1
+            {
                 let skeleton = animator.skeleton.clone();
                 let model: Vec<Xf> = published.bones.iter().map(Xf::from_bone_pose).collect();
                 // A body far from its entity was moved (teleported or re-placed) while limp:
@@ -1054,6 +1205,7 @@ pub(crate) fn ragdoll_system(
             for e in rig.parts.drain(..).chain(rig.joints.drain(..)) {
                 commands.entity(e).try_despawn();
             }
+            rig.kinematic.clear();
             if let Some(mut c) = controller
                 && rig.took_controller_bit
             {
@@ -1079,12 +1231,21 @@ pub(crate) fn ragdoll_system(
             None => 0.0,
         };
         if rig.is_physical() && frame > rig.spawned {
+            let pushes = pulses
+                .as_deref_mut()
+                .map(|p| std::mem::take(&mut p.pushes))
+                .unwrap_or_default();
             follow_parts(
                 &def,
                 rig,
                 &mut animator,
                 (gt, &animated),
-                (weight, tone),
+                Drive {
+                    weight,
+                    tone,
+                    partial: &partial,
+                    pushes: &pushes,
+                },
                 (frame, dt),
                 &gravity,
                 &mut parts,
@@ -1093,6 +1254,13 @@ pub(crate) fn ragdoll_system(
             && blend_back(blend, &mut animator, dt)
         {
             rig.blend = None;
+        }
+        if !rig.is_physical()
+            && let Some(p) = pulses.as_deref_mut()
+            && !p.pushes.is_empty()
+            && backend.is_none()
+        {
+            p.pushes.clear();
         }
         // How the animated parts move (teleports don't count).
         let a = crate::xform::smoothing(dt, MOMENTUM_SECS);
@@ -1170,12 +1338,11 @@ fn spawn_parts(
     commands: &mut Commands,
     rig: &mut RagdollRig,
     owner: Entity,
-    animator: &Animator,
-    animated: &[(DVec3, Quat)],
-    gt: &GlobalTransform,
+    (animator, animated, gt): (&Animator, &[(DVec3, Quat)], &GlobalTransform),
     name: Option<&Name>,
     frame: u64,
     surface: engine_world::SurfaceId,
+    kinematic: Vec<bool>,
 ) {
     let def = rig.def.clone();
     let scale = gt.scale().max_element();
@@ -1200,7 +1367,11 @@ fn spawn_parts(
                         linear_damping: 0.02,
                         angular_damping: 0.1,
                         ccd: true,
-                        ..RigidBody::dynamic()
+                        ..if kinematic.get(i) == Some(&true) {
+                            RigidBody::kinematic()
+                        } else {
+                            RigidBody::dynamic()
+                        }
                     },
                     def.collider(i, scale, surface),
                     velocity,
@@ -1233,12 +1404,22 @@ fn spawn_parts(
     rig.held = animator.local.clone();
     rig.blend = None;
     rig.spawned = frame;
+    rig.kinematic = kinematic;
 }
 
 /// Rotation vector (axis × angle, shortest way round) of a rotation.
 fn rotation_vector(q: Quat) -> Vec3 {
     let q = if q.w < 0.0 { -q } else { q };
     q.to_scaled_axis()
+}
+
+/// How physical a body is this frame: its `Ragdoll` weight, muscle tone, the weight of each
+/// part made physical for a moment, and pushes for the parts.
+struct Drive<'a> {
+    weight: f32,
+    tone: f32,
+    partial: &'a [f32],
+    pushes: &'a [(DVec3, Vec3)],
 }
 
 /// Pose the skeleton from the part bodies, and set the forces that keep the joints in range
@@ -1249,12 +1430,32 @@ fn follow_parts(
     rig: &RagdollRig,
     animator: &mut Animator,
     (gt, animated): (&GlobalTransform, &[(DVec3, Quat)]),
-    (weight, tone): (f32, f32),
+    drive: Drive,
     (frame, dt): (u64, f32),
     gravity: &Gravity,
     parts: &mut Parts,
 ) {
     let n = def.parts.len();
+    let Drive {
+        weight,
+        tone,
+        partial,
+        pushes,
+    } = drive;
+    // Each part's weight, and how much of its simulated pose shows: all of it while the body
+    // is a ragdoll, else (a part made physical for a moment) its weight.
+    let part_weight: Vec<f32> = (0..n)
+        .map(|i| weight.max(partial.get(i).copied().unwrap_or(0.0)))
+        .collect();
+    let shown: Vec<f32> = (0..n)
+        .map(|i| {
+            if weight > 0.0 {
+                1.0
+            } else {
+                partial.get(i).copied().unwrap_or(0.0)
+            }
+        })
+        .collect();
     let mut pos = Vec::with_capacity(n);
     let mut rot = Vec::with_capacity(n);
     let mut spin = Vec::with_capacity(n);
@@ -1278,6 +1479,10 @@ fn follow_parts(
         if let Some(i) = def.part_of_bone[b] {
             let mut m = def.bone_model(i, pos[i], rot[i], gt);
             m.s = model[b].s;
+            if shown[i] < 1.0 {
+                // Part physical for a moment: between the animation and the body.
+                m = parent.mul(&local[b]).lerp(&m, shown[i]);
+            }
             local[b] = parent.inverse().mul(&m);
             model[b] = m;
         } else {
@@ -1293,7 +1498,17 @@ fn follow_parts(
     // Joint torques keep the joints in range and add friction. Their gains are accelerations
     // scaled by the inertia a torque actually turns: a part between ball joints spins about
     // its own center against only its own inertia, shared among everything that pushes it.
-    let drive = 1.0 - weight;
+    let kinematic = |i: usize| rig.kinematic.get(i) == Some(&true);
+    // (Kinematic parts aren't pushed or pulled: they are put where the animation has them.)
+    let drive: Vec<f32> = (0..n)
+        .map(|i| {
+            if kinematic(i) {
+                0.0
+            } else {
+                1.0 - part_weight[i]
+            }
+        })
+        .collect();
     // A spring and damper set once a frame (semi-implicit) stay stable while
     // (w·dt)² + 2·c·dt < 4: keep w·dt under 1 and c·dt under 1.4.
     let cap = |w: f32| w.min(1.0 / dt.max(1e-4));
@@ -1302,7 +1517,7 @@ fn follow_parts(
     let delta = def.deltas(&rot, gt);
     let e_rot = gt.rotation();
     let scale = gt.scale().max_element();
-    let pushers = |i: usize| def.joint_count[i] + if drive > 0.0 { 1.0 } else { 0.0 };
+    let pushers = |i: usize| def.joint_count[i] + if drive[i] > 0.0 { 1.0 } else { 0.0 };
     let inverse: Vec<Mat3> = (0..n)
         .map(|i| def.inverse_inertia(i, rot[i], scale) * pushers(i))
         .collect();
@@ -1341,12 +1556,15 @@ fn follow_parts(
 
     // Below weight 1 each part is pulled toward where the animation has it and held up
     // against gravity: fully until the body is half limp, then less and less.
-    if drive > 0.0 {
-        let support = (drive * 2.0).min(1.0);
-        let w = cap(DRIVE_FREQUENCY) * drive;
-        let c = (2.0 * DRIVE_DAMPING * w).min(max_damping);
+    {
         let moving = rig.last_frame.is_some_and(|f| f + 1 == frame) && dt > 0.0;
         for i in 0..n {
+            if drive[i] <= 0.0 {
+                continue;
+            }
+            let support = (drive[i] * 2.0).min(1.0);
+            let w = cap(DRIVE_FREQUENCY) * drive[i];
+            let c = (2.0 * DRIVE_DAMPING * w).min(max_damping);
             let (target, aim) = animated[i];
             let (target_velocity, target_spin) = match rig.last.get(i) {
                 Some(&(p0, r0)) if moving => (
@@ -1364,7 +1582,26 @@ fn follow_parts(
                 * (rotation_vector(aim * rot[i].inverse()) * w * w + (target_spin - spin[i]) * c);
         }
     }
+    // Pushes land on the part nearest each point, all in this frame.
+    for &(point, impulse) in pushes {
+        let nearest = (0..n).min_by(|&a, &b| {
+            pos[a]
+                .distance_squared(point)
+                .total_cmp(&pos[b].distance_squared(point))
+        });
+        if let Some(i) = nearest {
+            let f = impulse / dt.max(1e-4);
+            force[i] += f;
+            torque[i] += (point - pos[i]).as_vec3().cross(f);
+        }
+    }
     for (i, &e) in rig.parts.iter().enumerate() {
+        if kinematic(i)
+            && let Ok((mut t, _, _)) = parts.get_mut(e)
+        {
+            (t.translation, t.rotation) = animated[i];
+            continue;
+        }
         if let Ok((_, _, mut f)) = parts.get_mut(e) {
             let new = ExternalForce {
                 force: force[i],
