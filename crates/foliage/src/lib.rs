@@ -9,6 +9,7 @@ pub mod far_woods;
 pub mod felling;
 pub mod grass;
 pub mod grass_wear;
+pub mod hand_felling;
 pub mod loading;
 pub mod meshgen;
 pub mod near_woods;
@@ -24,6 +25,7 @@ pub mod visuals;
 use engine_assets::Assets;
 use engine_core::prelude::*;
 use engine_render::Mesh;
+use engine_world::WorldShiftAppExt;
 
 pub use api::spawn_plant;
 pub use ecology::{InRegion, RegionState, RegionStats};
@@ -57,6 +59,9 @@ impl Plugin for FoliagePlugin {
             .init_resource::<far_woods::FarWoodsState>()
             .init_resource::<NearWoods>()
             .init_resource::<near_woods::NearWoodsState>()
+            .init_resource::<hand_felling::HandFelling>()
+            .init_resource::<hand_felling::ChoppedSpots>()
+            .shift_resource::<hand_felling::ChoppedSpots>()
             .add_message::<engine_world::DamageEvent>()
             .add_message::<engine_world::WorldImpulse>()
             .add_message::<engine_world::NoiseEvent>()
@@ -66,6 +71,11 @@ impl Plugin for FoliagePlugin {
                 "Plant species: looks, size, growth speed, needs (water, light, nutrients, minerals, \
                  temperature as tolerance curves), seeding, glow, fuel and toughness. Edit to tune a \
                  species live; add new ones with foliage.define_species.",
+            )
+            .register_resource::<hand_felling::HandFelling>(
+                "Felling by hand: grown trees within offer_radius_m of the player offer verb (E); \
+                 each press is one axe blow, a grown tree takes `blows` (bigger ones more, at most \
+                 max_blows). enabled = false turns it off.",
             )
             .register_resource::<EcologySettings>(
                 "Ecology speed (simulated years per second), pause, and draw distances for small \
@@ -189,6 +199,7 @@ impl Plugin for FoliagePlugin {
                 season::follow_weather_calendar,
                 (grass::sync_region_grass, grass_wear::wear_grass).chain(),
                 felling::remove_orphan_colliders,
+                (hand_felling::chop_on_interact, hand_felling::offer_chops).chain(),
                 cave::sync_chamber_colliders,
                 (
                     scenery::build_scenery,

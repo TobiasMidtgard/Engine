@@ -143,6 +143,7 @@ pub fn stream_near_woods(
     cams: Query<(&Camera, &GlobalTransform)>,
     mut state: ResMut<NearWoodsState>,
     cells: Query<&NearWoodsCell>,
+    chopped: Option<Res<crate::hand_felling::ChoppedSpots>>,
 ) {
     if !settings.enabled || settings.is_changed() {
         for (_, e) in std::mem::take(&mut state.cells) {
@@ -287,6 +288,13 @@ pub fn stream_near_woods(
             let Some(species) = library.id(card.tree.species()) else {
                 continue;
             };
+            // Chopped by the player (now a plant or a stump of its own).
+            if chopped
+                .as_ref()
+                .is_some_and(|c| c.contains(p.corner + card.foot.as_dvec3()))
+            {
+                continue;
+            }
             // Genes from where the tree stands, so a replanted cell grows the same wood.
             let mut rng = Rng::new(seed ^ (n as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
             let genes = Genes::random(&mut rng);
