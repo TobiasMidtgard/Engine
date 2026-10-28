@@ -133,6 +133,7 @@ impl ScreenEffects {
                 float_tex(2),
                 float_tex(3),
                 float_tex(4),
+                float_tex(5),
             ],
         });
         let chain_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -437,6 +438,10 @@ impl ScreenEffects {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: view(chain),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: view(&t.world_reflection.view),
                     },
                 ],
             })

@@ -2,7 +2,8 @@
 //! on the floor lights the room around it, a torch's light bounces off the walls of its room at
 //! night, and none of it leaks through a wall into the room next door; meshes far from the probe
 //! grid are not built for its rays; an indoor volume's closed faces stop the probes' rays where
-//! no mesh does (rock drawn by another feature). Needs a GPU or lavapipe; passes with a note when neither is
+//! no mesh does (rock drawn by another feature); a mirror reflects what is behind the camera
+//! through world reflections. Needs a GPU or lavapipe; passes with a note when neither is
 //! available.
 
 use engine_core::prelude::*;
@@ -404,4 +405,86 @@ fn probes_outside_a_closed_volume_do_not_light_its_walls() {
         closed < open * 0.1,
         "upper walls: {closed:.1} inside the closed volume, {open:.1} without it"
     );
+}
+
+/// A mirror facing the camera reflects a sunlit red wall behind the camera: off screen, so
+/// screen-space reflections can't see it, but world reflections trace it in probe GI's scene.
+#[test]
+fn a_mirror_reflects_a_wall_behind_the_camera() {
+    let scene = |world_reflections: bool| {
+        let mut app = app(true);
+        app.world.resource_mut::<RenderSettings>().world_reflections = world_reflections;
+        let w = &mut app.world;
+        ground(w);
+        w.spawn((
+            Transform::from_translation(DVec3::new(0.0, 1.5, -3.0)),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [5.0, 3.0, 0.1],
+                },
+                StandardMaterial::color(0.95, 0.95, 0.95)
+                    .with_metallic(1.0)
+                    .with_roughness(0.05),
+            ),
+        ));
+        w.spawn((
+            Transform::from_translation(DVec3::new(0.0, 2.0, 4.0)),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [8.0, 4.0, 0.3],
+                },
+                StandardMaterial::color(0.8, 0.05, 0.05).with_roughness(0.9),
+            ),
+        ));
+        // From behind the mirror, onto the red wall's face.
+        sun(w, 110_000.0, DVec3::new(0.2, -0.8, 0.6));
+        camera(
+            w,
+            DVec3::new(0.0, 1.5, 1.0),
+            DVec3::new(0.0, 1.5, -3.0),
+            14.0,
+        );
+        app
+    };
+    let Some(off) = red_share(scene(false), "mirror_off.png") else {
+        return;
+    };
+    let on = red_share(scene(true), "mirror_on.png").expect("GPU");
+    assert!(
+        on > 0.25 && on > off + 0.2,
+        "mirror's red share: {on:.2} with world reflections, {off:.2} without"
+    );
+}
+
+/// How much redder than its other channels the middle of the picture is (0 = gray, 1 = pure
+/// red), after 12 frames; `None` without a GPU.
+fn red_share(mut app: App, name: &str) -> Option<f32> {
+    app.update_n(12);
+    if let Some(d) = app.world.get_resource::<RenderDisabled>() {
+        eprintln!("skipping: no GPU ({})", d.0);
+        return None;
+    }
+    let dir = std::env::temp_dir().join("engine-probe-gi");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(name);
+    capture_now(&mut app.world, &path).expect("screenshot");
+    if let Ok(out) = std::env::var("ENGINE_SHOTS") {
+        let _ = std::fs::copy(&path, std::path::Path::new(&out).join(name));
+    }
+    let image = image::open(&path).expect("read the shot").to_rgb8();
+    let mut sum = [0.0f32; 3];
+    let mut n = 0.0;
+    for y in H * 3 / 10..H * 7 / 10 {
+        for x in W * 3 / 10..W * 7 / 10 {
+            let p = image.get_pixel(x, y);
+            for c in 0..3 {
+                sum[c] += p[c] as f32;
+            }
+            n += 1.0;
+        }
+    }
+    let [r, g, b] = sum.map(|c| c / n);
+    let share = (r - 0.5 * (g + b)) / r.max(1.0);
+    eprintln!("{name}: rgb {r:.1} {g:.1} {b:.1}, red share {share:.2}");
+    Some(share)
 }

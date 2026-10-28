@@ -9,6 +9,11 @@
 //! the eight probes around it, with DDGI's visibility weights so light doesn't leak through
 //! walls. See /engine-design/dynamic-gi.md in the project files for the research behind it.
 //!
+//! The same scene gives world reflections (`encode_reflections`, `RenderSettings::
+//! world_reflections`): what screen-space reflections can't see is traced at half resolution and
+//! lit like a probe ray's hit (see /engine-design/lighting-round-reflections.md). Rays see a
+//! textured surface in its texture's mean color once the texture was uploaded.
+//!
 //! Meshes only for now ([`crate::MeshRenderer`]); terrain, foliage and water are not in the
 //! rays' scene yet, and rays that miss see the environment map's ground below the horizon.
 
@@ -110,6 +115,9 @@ struct Work {
 struct Active {
     trace: wgpu::ComputePipeline,
     update: wgpu::ComputePipeline,
+    /// World reflections (`cs_reflect`) and their inputs and output (group 2).
+    reflect: wgpu::ComputePipeline,
+    reflect_layout: wgpu::BindGroupLayout,
     layout: wgpu::BindGroupLayout,
     /// What `cs_update` writes; copied into the atlas the frame samples.
     next: wgpu::Texture,
@@ -183,12 +191,16 @@ fn array_view(texture: &wgpu::Texture) -> wgpu::TextureView {
 }
 
 /// Diffuse albedo and glow (cd/m², not pre-exposed) of a material, as the probes' rays see it.
-fn material_light(m: &StandardMaterial) -> (Vec3, Vec3) {
+/// Albedo and emissive (cd/m^2) a ray sees on `m`; `texture_mean`: the mean color of its base
+/// color texture, when known.
+fn material_light(m: &StandardMaterial, texture_mean: Option<Vec3>) -> (Vec3, Vec3) {
     let tint = Vec3::new(m.base_color[0], m.base_color[1], m.base_color[2]);
     let albedo = match m.preset {
         Some(p) => tint * Vec3::from(p.mean_albedo()),
-        // A texture's mean is unknown here: about half of the tint.
-        None if m.base_color_texture.is_some() => tint * 0.5,
+        // A texture's mean before it is uploaded: about half of the tint.
+        None if m.base_color_texture.is_some() => {
+            tint * texture_mean.unwrap_or(Vec3::splat(0.5)) * (1.0 - m.metallic.clamp(0.0, 1.0))
+        }
         None => tint * (1.0 - m.metallic.clamp(0.0, 1.0)),
     };
     let emissive = Vec3::from(m.emissive) * m.emissive_strength;
@@ -314,16 +326,58 @@ impl ProbeGi {
                 layout_entry(8, S::COMPUTE, storage(true)),
             ],
         });
+        let reflect_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("world reflection inputs"),
+            entries: &[
+                layout_entry(
+                    0,
+                    S::COMPUTE,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
+                layout_entry(
+                    1,
+                    S::COMPUTE,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
+                layout_entry(
+                    2,
+                    S::COMPUTE,
+                    wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                ),
+            ],
+        });
         let module = shared.shader("probe gi", include_str!("../shaders/probe_gi.wgsl"), true);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("probe gi"),
             bind_group_layouts: &[Some(&shared.frame_layout), Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = |entry: &str| {
+        let reflect_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("world reflections"),
+                bind_group_layouts: &[
+                    Some(&shared.frame_layout),
+                    Some(&layout),
+                    Some(&reflect_layout),
+                ],
+                immediate_size: 0,
+            });
+        let pipeline = |entry: &str, layout: &wgpu::PipelineLayout| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
-                layout: Some(&pipeline_layout),
+                layout: Some(layout),
                 module: &module,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
@@ -332,8 +386,10 @@ impl ProbeGi {
         };
         let usage = wgpu::BufferUsages::STORAGE;
         self.active = Some(Active {
-            trace: pipeline("cs_trace"),
-            update: pipeline("cs_update"),
+            trace: pipeline("cs_trace", &pipeline_layout),
+            update: pipeline("cs_update", &pipeline_layout),
+            reflect: pipeline("cs_reflect", &reflect_pipeline_layout),
+            reflect_layout,
             layout,
             next,
             next_view,
@@ -459,6 +515,7 @@ impl ProbeGi {
         let world: &World = world;
         let meshes = world.get_resource::<Assets<Mesh>>();
         let materials = world.get_resource::<Assets<StandardMaterial>>();
+        let images = world.get_resource::<Assets<crate::Image>>();
         let default_material = StandardMaterial::default();
         if let Some(meshes) = meshes {
             for (resolved, transform, renderer) in query.iter(world) {
@@ -538,7 +595,13 @@ impl ProbeGi {
                     let r = m.row(i);
                     [r.x, r.y, r.z, t[i]]
                 };
-                let (albedo, emissive) = material_light(material);
+                let texture_mean = match (&material.base_color_texture, images) {
+                    (Some(handle), Some(images)) => {
+                        shared.images.mean_color(images, *handle).map(Vec3::from)
+                    }
+                    _ => None,
+                };
+                let (albedo, emissive) = material_light(material, texture_mean);
                 found.push((
                     GpuInstance {
                         to_local: [row(0), row(1), row(2)],
@@ -779,6 +842,53 @@ impl ProbeGi {
                 },
             );
         }
+    }
+
+    /// Trace world reflections into `targets.world_reflection` from the prepass (after it, before
+    /// screen-space reflections). False, writing nothing, while probe GI is off or has no scene
+    /// yet: the target then holds no reflections only if the caller cleared it.
+    pub fn encode_reflections(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        frame_group: &wgpu::BindGroup,
+        targets: &crate::targets::Targets,
+    ) -> bool {
+        let Some(active) = self.active.as_ref() else {
+            return false;
+        };
+        let Some(group) = &active.group else {
+            return false;
+        };
+        let inputs = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("world reflection inputs"),
+            layout: &active.reflect_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&targets.prepass_normal.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&targets.prepass_depth.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&targets.world_reflection.view),
+                },
+            ],
+        });
+        let size = targets.world_reflection.texture.size();
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("world reflections"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&active.reflect);
+        pass.set_bind_group(0, frame_group, &[]);
+        pass.set_bind_group(1, group, &[]);
+        pass.set_bind_group(2, &inputs, &[]);
+        pass.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
+        true
     }
 
     /// `render.gi.*` diagnostics.

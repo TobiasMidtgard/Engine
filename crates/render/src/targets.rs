@@ -69,6 +69,9 @@ pub struct Targets {
     pub history: [Tex; 2],
     /// Screen-space reflections: radiance (not pre-exposed), coverage.
     pub ssr: Tex,
+    /// World reflections at half resolution (probe_gi.wgsl `cs_reflect`): radiance (not
+    /// pre-exposed), distance to the hit (0 = none). Screen-space reflections blend them in.
+    pub world_reflection: Tex,
     /// Screen-space global illumination: this frame's rays, the temporal results (ping-ponged,
     /// view depth in alpha) and the blurred result the scene reads.
     pub gi_raw: Tex,
@@ -145,6 +148,14 @@ impl Targets {
             )
         });
         let ssr = screen("screen-space reflections", formats.hdr);
+        let world_reflection = Tex::new(
+            device,
+            "world reflections",
+            width.div_ceil(2),
+            height.div_ceil(2),
+            wgpu::TextureFormat::Rgba16Float,
+            U::STORAGE_BINDING | U::TEXTURE_BINDING | U::RENDER_ATTACHMENT,
+        );
         let gi_raw = screen("screen-space gi trace", formats.hdr);
         let gi_history =
             [0, 1].map(|i| screen(&format!("screen-space gi history {i}"), formats.hdr));
@@ -203,6 +214,7 @@ impl Targets {
             ao,
             history,
             ssr,
+            world_reflection,
             gi_raw,
             gi_history,
             gi,

@@ -241,6 +241,8 @@ pub struct Renderer {
     /// Probe GI (`RenderSettings::probe_gi`): the main view's, its atlas bound by every view
     /// (frame binding 23).
     probe_gi: crate::probe_gi::ProbeGi,
+    /// The main view's world reflections target holds a trace (clear it when they stop).
+    world_reflection_written: bool,
 }
 
 /// Declares [`ViewState`] with the [`Renderer`] fields that belong to one view, and
@@ -832,6 +834,7 @@ impl Renderer {
             extra_views: HashMap::new(),
             main_thread_submit_ms: 0.0,
             probe_gi,
+            world_reflection_written: false,
         })
     }
 
@@ -1793,6 +1796,35 @@ impl Renderer {
                 .encode_ao(&mut encoder, &self.targets, &self.prepass_group);
         }
         if ssr {
+            // What screen-space reflections can't see, traced against probe GI's scene.
+            if !extra {
+                self.perf.pass(&mut cpu, &mut encoder, "world reflections");
+                if settings.world_reflections
+                    && self.probe_gi.encode_reflections(
+                        &self.shared.device,
+                        &mut encoder,
+                        frame_group,
+                        &self.targets,
+                    )
+                {
+                    self.world_reflection_written = true;
+                } else if self.world_reflection_written {
+                    self.world_reflection_written = false;
+                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("clear world reflections"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &self.targets.world_reflection.view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        ..Default::default()
+                    });
+                }
+            }
             self.perf.pass(&mut cpu, &mut encoder, "reflections");
             self.effects
                 .encode_ssr(&mut encoder, &self.targets, &self.prepass_group);
