@@ -45,6 +45,8 @@ fn app(pipelining: Pipelining) -> App {
         // Screen-space bounce light sees only what is on screen, and the portal's view doesn't
         // see what lies between its eye and the exit: the bounce from there differs.
         s.screen_space_gi = false;
+        // Probe GI lights only the main view, and the portal's view is an extra view.
+        s.probe_gi = false;
     }
     app
 }

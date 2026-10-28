@@ -1340,6 +1340,9 @@ impl Renderer {
             uniform.reflections[3] = 0.0;
         }
         cpu.step("probe gi");
+        if !is_extra && let Some(ms) = self.perf.fresh_gpu_pass("probe gi") {
+            self.probe_gi.measured(ms);
+        }
         let gi_atlas_moved = !is_extra
             && self
                 .probe_gi

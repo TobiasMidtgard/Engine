@@ -1082,9 +1082,11 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
         sky_light = mix(sky_light, atmosphere_sky_ambient(rel, n) * frame.sun_color.rgb + fill, own_sky);
     }
     // Sunlight the fog above scatters down, from the whole sky above.
+    var fog_light = vec3<f32>(0.0);
     if (in_fog.y > 0.0) {
-        sky_light += sun_above * (in_fog.y * INV_PI * (0.5 + 0.5 * dot(n, fog_up(rel))));
+        fog_light = sun_above * (in_fog.y * INV_PI * (0.5 + 0.5 * dot(n, fog_up(rel))));
     }
+    sky_light += fog_light;
     var irradiance = ((sky_light - fill) * sky_vis + fill) * PI;
     // Where the probes cover, their light instead: the sky through whatever openings their rays
     // find, and light bounced off everything around, on screen or not.
@@ -1095,7 +1097,9 @@ fn shade_surface_sides(s: Surface, rel: vec3<f32>, sun_visibility: f32, face: ve
     var reflection_scale = 1.0;
     if (probe_share > 0.0) {
         let guess = irradiance;
-        let lit = probes.rgb + fill * PI;
+        // The probes' rays see the environment map, without the fog's light: that stays the
+        // guess's.
+        let lit = probes.rgb + (fill + fog_light * sky_vis) * PI;
         irradiance = mix(guess, lit, probe_share);
         reflection_scale = mix(1.0, saturate(luminance(lit) / max(luminance(guess), 1e-4)), probe_share);
     }

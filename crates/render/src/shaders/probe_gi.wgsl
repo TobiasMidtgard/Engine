@@ -1,7 +1,13 @@
 // Probe GI (probe_gi/mod.rs): DDGI (Majercik et al. 2019) traced in software against the
 // meshes' hierarchies (probe_gi/bvh.rs). `cs_trace` shoots each updated probe's rays and lights
 // what they hit; `cs_update` blends them into the probe's irradiance and distance maps, which
-// `probe_gi` in lib_frame.wgsl samples. Positions are camera-relative, as everywhere.
+// `probe_gi` in lib_frame.wgsl samples. Positions are camera-relative, as everywhere, except
+// the instances and their hierarchy: those are relative to an anchor that moves in 64 m steps
+// (`GiPass::anchor`), so they stay put while the camera moves.
+//
+// Probes with nothing within `SLEEP_REACH` probe spacings sleep (Majercik et al. 2021, section
+// 6): they light no surface, so they trace one turn in `SLEEP_TURNS` and keep their light the
+// rest of the time. `probe_state.w` is 1 for an awake probe, 2 + turns slept for a sleeping one.
 
 struct GiPass {
     // probes updated this frame, rays per probe, unused, probes in the grid
@@ -14,6 +20,8 @@ struct GiPass {
     params: vec4<f32>,
     // world probe index of the grid's first probe (its lowest corner)
     world_origin: vec4<i32>,
+    // the instances' anchor, camera-relative
+    anchor: vec4<f32>,
 };
 
 struct BvhNode {
@@ -24,7 +32,7 @@ struct BvhNode {
 };
 
 struct Instance {
-    // rows of the camera-relative -> mesh transform
+    // rows of the anchor-relative -> mesh transform
     to_local_x: vec4<f32>,
     to_local_y: vec4<f32>,
     to_local_z: vec4<f32>,
@@ -49,6 +57,11 @@ struct Instance {
 const STACK: u32 = 48u;
 const NO_HIT: f32 = 1e30;
 const MAX_RAYS: u32 = 256u;
+// A probe sleeps with nothing nearer than this many spacings: the probes around a surface are
+// at most sqrt(3) spacings from it.
+const SLEEP_REACH: f32 = 2.0;
+// A sleeping probe traces one of this many turns.
+const SLEEP_TURNS: i32 = 8;
 
 struct Hit {
     t: f32,
@@ -89,7 +102,7 @@ fn ray_triangle(origin: vec3<f32>, dir: vec3<f32>, t: u32) -> f32 {
     return select(NO_HIT, d, d > 0.0);
 }
 
-// The nearest triangle of instance `i` along a camera-relative ray, if nearer than `best`.
+// The nearest triangle of instance `i` along an anchor-relative ray, if nearer than `best`.
 // `first_hit`: stop at the first hit (shadow rays).
 fn trace_instance(i: u32, origin_rel: vec3<f32>, dir_rel: vec3<f32>, first_hit: bool, best: ptr<function, Hit>) {
     let inst = instances[i];
@@ -136,6 +149,7 @@ fn trace_scene(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, first_hit: bool) -
     best.instance = 0xffffffffu;
     best.triangle = 0u;
     if (u32(pass_.params.z) == 0u) { return best; }
+    let o = origin - pass_.anchor.xyz;
     let inv = safe_inverse(dir);
     var stack: array<u32, STACK>;
     var top = 1u;
@@ -145,10 +159,10 @@ fn trace_scene(origin: vec3<f32>, dir: vec3<f32>, t_max: f32, first_hit: bool) -
         top -= 1u;
         let index = stack[top];
         let node = tlas[index];
-        if (ray_box(origin, inv, node.min, node.max, best.t) >= NO_HIT) { continue; }
+        if (ray_box(o, inv, node.min, node.max, best.t) >= NO_HIT) { continue; }
         if (node.count > 0u) {
             for (var k = 0u; k < node.count; k++) {
-                trace_instance(node.right_or_first + k, origin, dir, first_hit, &best);
+                trace_instance(node.right_or_first + k, o, dir, first_hit, &best);
                 if (first_hit && best.instance != 0xffffffffu) { return best; }
             }
         } else if (top + 2u <= STACK) {
@@ -193,6 +207,16 @@ fn updated_slot(probe: u32) -> u32 {
     return updates[probe] % pass_.counts.w;
 }
 
+// Whether the probe in storage slot `slot`, at world probe `world`, sleeps through this turn: it
+// was asleep there in this epoch and it isn't its turn to trace.
+fn sleeps_now(slot: u32, world: vec3<i32>) -> bool {
+    let state = probe_state[slot];
+    if (any(state.xyz != world) || state.w < 2) { return false; }
+    let tile = vec2<u32>(slot % PROBE_GI_TILES_X, slot / PROBE_GI_TILES_X) * PROBE_GI_TEXELS;
+    if (abs(textureLoad(gi_atlas, vec2<i32>(tile), 1, 0).w - frame.gi_grid.w) > 0.5) { return false; }
+    return (state.w - 2) % SLEEP_TURNS != SLEEP_TURNS - 1;
+}
+
 // What a probe ray sees: radiance (not pre-exposed, scaled by PROBE_GI_SCALE), and the distance
 // to what it hit (negative for the back of a single-sided surface).
 @compute @workgroup_size(64, 1, 1)
@@ -202,7 +226,9 @@ fn cs_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= total) { return; }
     let probe = id.x / rays_per_probe;
     let r = id.x % rays_per_probe;
-    let g = slot_grid(updated_slot(probe));
+    let slot = updated_slot(probe);
+    let g = slot_grid(slot);
+    if (sleeps_now(slot, pass_.world_origin.xyz + vec3<i32>(g))) { return; }
     let origin = probe_gi_position(vec3<f32>(g));
     let dir = ray_direction(r, rays_per_probe);
     let spacing = frame.gi_volume.w;
@@ -300,6 +326,13 @@ fn cs_update(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_
     let g = slot_grid(slot);
     let world = pass_.world_origin.xyz + vec3<i32>(g);
     let state = probe_state[slot];
+    if (sleeps_now(slot, world)) {
+        // Its maps stay as they are (`atlas_out` still holds them); count the turn.
+        if (thread == 0u) {
+            probe_state[slot] = vec4<i32>(world, state.w + 1);
+        }
+        return;
+    }
     let tile = vec2<u32>(slot % PROBE_GI_TILES_X, slot / PROBE_GI_TILES_X) * PROBE_GI_TEXELS;
     let texel = vec2<i32>(tile + local.xy);
     let old_irradiance = textureLoad(gi_atlas, texel, 0, 0);
@@ -316,10 +349,12 @@ fn cs_update(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_
     var moments = vec2<f32>(0.0);
     var moments_w = 0.0;
     var backfaces = 0u;
+    var nearest = NO_HIT;
     let sharpness = pass_.params.y;
     for (var r = 0u; r < rays_per_probe; r++) {
         let ray = shared_rays[r];
         let c = dot(texel_dir, shared_dirs[r]);
+        nearest = min(nearest, abs(ray.w));
         if (ray.w < 0.0) { backfaces += 1u; }
         if (c <= 0.0) { continue; }
         irradiance += ray.rgb * c;
@@ -340,7 +375,9 @@ fn cs_update(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_
     // w: the epoch it was written in (`probe_gi` ignores probes from another).
     textureStore(atlas_out, texel, 1, vec4<f32>(mix(moments, old_moments.xy, keep), in_use, frame.gi_grid.w));
     if (thread == 0u) {
-        probe_state[slot] = vec4<i32>(world, 1);
+        // Awake while something is near; a fresh probe stays awake for its first turn.
+        let asleep = !fresh && nearest > SLEEP_REACH * spacing;
+        probe_state[slot] = vec4<i32>(world, select(1, 2, asleep));
     }
 }
 

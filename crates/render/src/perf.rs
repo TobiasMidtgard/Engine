@@ -568,6 +568,8 @@ pub(crate) struct PerfLog {
     /// This frame's steps inside them ([`CpuSteps::inner`]).
     inner_steps: Vec<(&'static str, f32)>,
     gpu_passes: Vec<(Label, f32)>,
+    /// `gpu_passes` arrived in the latest `frame` call.
+    gpu_fresh: bool,
     /// Each feature's draws and triangles in the latest frame, for the profile table.
     features: Vec<(String, crate::FeatureStats)>,
     /// When a slow frame was last logged.
@@ -595,6 +597,7 @@ impl PerfLog {
             cpu_steps: Vec::new(),
             inner_steps: Vec::new(),
             gpu_passes: Vec::new(),
+            gpu_fresh: false,
             features: Vec::new(),
             last_slow: None,
             usual: None,
@@ -639,6 +642,18 @@ impl PerfLog {
         }
     }
 
+    /// GPU milliseconds of pass `name` in the frame whose times arrived with the latest
+    /// `frame` call (none when no times arrived then, or it had no such pass).
+    pub fn fresh_gpu_pass(&self, name: &str) -> Option<f32> {
+        if !self.gpu_fresh {
+            return None;
+        }
+        self.gpu_passes
+            .iter()
+            .find(|(label, _)| label == name)
+            .map(|&(_, ms)| ms)
+    }
+
     /// Call right after `queue.submit`.
     pub fn after_submit(&mut self) {
         if let Some(t) = &mut self.timer {
@@ -676,6 +691,7 @@ impl PerfLog {
         self.last_frame = Some(now);
         self.acquire_ms = acquire_ms;
         self.gpu_samples.clear();
+        self.gpu_fresh = false;
         if let Some(t) = &mut self.timer {
             t.collect(&mut self.gpu_samples);
         }
@@ -698,6 +714,7 @@ impl PerfLog {
             }
             self.gpu_ms = Some(frame.total);
             self.gpu_passes = frame.passes;
+            self.gpu_fresh = true;
         }
         if every_secs <= 0.0 || (now - self.window_start).as_secs_f32() < every_secs {
             return;

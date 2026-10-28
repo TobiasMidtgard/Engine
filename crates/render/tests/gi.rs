@@ -22,6 +22,8 @@ fn base_app(configure: impl FnOnce(&mut RenderSettings)) -> App {
     app.add_plugins(RenderPlugin);
     {
         let mut s = app.world.resource_mut::<RenderSettings>();
+        // Screen-space GI on its own: probe GI would bounce the light with it off too.
+        s.probe_gi = false;
         s.tonemapper = Tonemapper::None;
         s.bloom_intensity = 0.0;
         s.vignette = 0.0;

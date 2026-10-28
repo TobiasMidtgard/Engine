@@ -203,6 +203,9 @@ fn app(eye: DVec3, target: DVec3, configure: impl FnOnce(&mut RenderSettings)) -
         s.ambient_occlusion = false;
         s.screen_space_reflections = false;
         s.screen_space_gi = false;
+        // Probe rays see a whole texture in its mean color but a virtual one in its tint alone,
+        // so the bounce light would differ between the two paths.
+        s.probe_gi = false;
         s.volumetric_fog = false;
         s.bloom_intensity = 0.0;
         s.vignette = 0.0;

@@ -3,8 +3,9 @@
 //! night, and none of it leaks through a wall into the room next door; meshes far from the probe
 //! grid are not built for its rays; an indoor volume's closed faces stop the probes' rays where
 //! no mesh does (rock drawn by another feature); a mirror reflects what is behind the camera
-//! through world reflections. Needs a GPU or lavapipe; passes with a note when neither is
-//! available.
+//! through world reflections; a still scene isn't gathered again every frame, and a large mesh
+//! builds on a worker before the rays see it. Needs a GPU or lavapipe; passes with a note when
+//! neither is available.
 
 use engine_core::prelude::*;
 use engine_render::prelude::*;
@@ -487,4 +488,113 @@ fn red_share(mut app: App, name: &str) -> Option<f32> {
     let share = (r - 0.5 * (g + b)) / r.max(1.0);
     eprintln!("{name}: rgb {r:.1} {g:.1} {b:.1}, red share {share:.2}");
     Some(share)
+}
+
+/// The instance gather runs again only when the scene changes: a still room is gathered in the
+/// first frames and then left alone, and a wall that moves is gathered again the next frame.
+#[test]
+fn a_still_scene_is_not_gathered_again_every_frame() {
+    let mut app = app(true);
+    let w = &mut app.world;
+    room(w, DVec3::ZERO, 0.7, 0.5, None);
+    sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
+    camera(w, EYE, TARGET, 12.0);
+    let block = w
+        .spawn((
+            Transform::from_translation(DVec3::new(0.0, 0.5, 0.0)),
+            MeshRenderer::new(
+                Shape::Cuboid {
+                    size: [0.5, 1.0, 0.5],
+                },
+                StandardMaterial::color(0.5, 0.5, 0.5),
+            ),
+        ))
+        .id();
+    app.update_n(6);
+    if app.world.get_resource::<RenderDisabled>().is_some() {
+        eprintln!("skipping: no GPU");
+        return;
+    }
+    let gathered = |app: &App| {
+        let d = app.world.resource::<Diagnostics>();
+        (
+            d.get("render.gi.gathered").unwrap_or(-1.0),
+            d.get("render.gi.instances").unwrap_or(-1.0),
+        )
+    };
+    let still = gathered(&app);
+    app.world
+        .get_mut::<Transform>(block)
+        .expect("block")
+        .translation
+        .x = 1.0;
+    app.update();
+    let moved = gathered(&app);
+    eprintln!("still: {still:?}, after a move: {moved:?}");
+    assert_eq!(
+        still,
+        (0.0, 7.0),
+        "a still room's gather (gathered, instances)"
+    );
+    assert_eq!(moved, (1.0, 7.0), "after the block moved");
+}
+
+/// A mesh too large to build on the render thread builds on a worker, and the rays see it once
+/// it's done: a closed sphere of 66k triangles around the camera keeps most of the noon sky out.
+#[test]
+fn a_large_mesh_builds_on_a_worker_and_then_blocks_the_sky() {
+    let scene = |gi: bool| {
+        let mut app = app(gi);
+        let w = &mut app.world;
+        w.spawn((
+            Transform::from_translation(DVec3::new(0.0, 1.5, 0.0)),
+            MeshRenderer::new(
+                // Inside the probe grid (8 m high around the camera).
+                Shape::Sphere {
+                    radius: 3.0,
+                    segments: 256,
+                },
+                StandardMaterial {
+                    double_sided: true,
+                    ..StandardMaterial::color(0.7, 0.7, 0.7).with_roughness(0.9)
+                },
+            ),
+        ));
+        sun(w, 110_000.0, DVec3::new(0.3, -1.0, -0.4));
+        camera(w, EYE, TARGET, 12.0);
+        app
+    };
+    let mut app = scene(true);
+    app.update();
+    if app.world.get_resource::<RenderDisabled>().is_some() {
+        eprintln!("skipping: no GPU");
+        return;
+    }
+    let diag = |app: &App, name: &str| {
+        app.world
+            .resource::<Diagnostics>()
+            .get(name)
+            .unwrap_or(-1.0)
+    };
+    let building = diag(&app, "render.gi.building");
+    let mut seen_after = None;
+    for frame in 1..200 {
+        if diag(&app, "render.gi.instances") == 1.0 {
+            seen_after = Some(frame);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        app.update();
+    }
+    eprintln!("building at first: {building}, in the rays after {seen_after:?} frames");
+    assert_eq!(building, 1.0, "the sphere builds on a worker");
+    assert!(seen_after.is_some(), "the sphere never reached the rays");
+    assert_eq!(diag(&app, "render.gi.building"), 0.0);
+    let on = shoot(app, 12, "large_sphere.png", UPPER).expect("GPU");
+    let off = shoot(scene(false), 6, "large_sphere_off.png", UPPER).expect("GPU");
+    // Without the probes the inside sees the sky through the guess.
+    assert!(
+        on < off * 0.7,
+        "inside the sphere: {on:.1}, {off:.1} without probes"
+    );
 }
