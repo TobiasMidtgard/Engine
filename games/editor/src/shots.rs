@@ -1714,6 +1714,75 @@ fn lamp_posts(world: &mut World) -> Vec<DVec3> {
     posts
 }
 
+/// Click a toolbar button whose rect the toolbar recorded (`pick` finds it in the editor).
+fn click_toolbar(pick: fn(&Editor) -> Option<egui::Rect>) -> Vec<Step> {
+    let at = move |editor: &Editor| pick(editor).map_or(egui::pos2(0.0, 0.0), |r| r.center());
+    vec![
+        Step::Do(Box::new(move |world, editor| {
+            let p = at(editor);
+            inject(world, vec![egui::Event::PointerMoved(p)]);
+        })),
+        Step::Wait(2),
+        Step::Do(Box::new(move |world, editor| {
+            let p = at(editor);
+            inject(world, vec![button(p, true, egui::Modifiers::NONE)]);
+        })),
+        Step::Wait(1),
+        Step::Do(Box::new(move |world, editor| {
+            let p = at(editor);
+            inject(world, vec![button(p, false, egui::Modifiers::NONE)]);
+        })),
+        Step::Wait(4),
+    ]
+}
+
+/// Round 19: the View and Show menus. The lit courtyard, the View menu open, the normals and
+/// ambient occlusion buffers, the Show menu with physics colliders and wind on, what they draw,
+/// and Game view with every editor helper hidden.
+pub fn round19(dir: impl Into<PathBuf>) -> ShotScript {
+    use engine::render::DebugView;
+    let mut steps = vec![
+        Step::Camera(DVec3::new(9.0, 6.5, 9.0), DVec3::new(0.0, 0.6, -2.0)),
+        Step::Select("Barrel"),
+        Step::Tool(Tool::Move),
+        Step::Wait(30),
+        Step::Shot("82_lit"),
+    ];
+    steps.extend(click_toolbar(|e| e.view_button));
+    steps.push(Step::Shot("83_view_menu"));
+    // Close it with a second click, then pick views as its items would.
+    steps.extend(click_toolbar(|e| e.view_button));
+    steps.push(Step::Do(Box::new(|world, _| {
+        crate::show::set_view(world, DebugView::Normals);
+    })));
+    steps.push(Step::Wait(20));
+    steps.push(Step::Shot("84_normals"));
+    steps.push(Step::Do(Box::new(|world, _| {
+        crate::show::set_view(world, DebugView::AmbientOcclusion);
+    })));
+    steps.push(Step::Wait(30));
+    steps.push(Step::Shot("85_ambient_occlusion"));
+    steps.push(Step::Do(Box::new(|world, _| {
+        crate::show::set_view(world, DebugView::None);
+        crate::show::set_flag(world, "PhysicsDebug", &["colliders"], true);
+        crate::show::set_flag(world, "DebugViews", &["wind", "enabled"], true);
+    })));
+    steps.extend(click_toolbar(|e| e.show_button));
+    steps.push(Step::Wait(20));
+    steps.push(Step::Shot("86_show_menu"));
+    steps.extend(click_toolbar(|e| e.show_button));
+    steps.push(Step::Wait(20));
+    steps.push(Step::Shot("87_colliders_and_wind"));
+    steps.push(Step::Do(Box::new(|world, editor| {
+        crate::show::set_flag(world, "PhysicsDebug", &["colliders"], false);
+        crate::show::set_flag(world, "DebugViews", &["wind", "enabled"], false);
+        editor.game_view = true;
+    })));
+    steps.push(Step::Wait(20));
+    steps.push(Step::Shot("88_game_view"));
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {

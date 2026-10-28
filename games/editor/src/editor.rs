@@ -112,6 +112,14 @@ pub struct Editor {
     pub snap_move: f32,
     pub snap_angle_deg: f32,
     pub snap_scale: f32,
+    /// Hide every editor helper to see the scene as a player will (the Show menu).
+    pub game_view: bool,
+    /// Draw the selection's outline and its colliders (the Show menu).
+    pub show_outline: bool,
+    pub show_colliders: bool,
+    /// Where the toolbar's View and Show buttons were drawn (for scripted clicks).
+    pub view_button: Option<egui::Rect>,
+    pub show_button: Option<egui::Rect>,
     /// The Measure tool's ruler.
     pub measure: crate::measure::Measure,
     /// The transform gizmo was being dragged last frame (Alt at the start of a drag duplicates).
@@ -191,6 +199,11 @@ impl Editor {
             snap_scale: 0.1,
             view_request: None,
             measure: Default::default(),
+            game_view: false,
+            show_outline: true,
+            show_colliders: true,
+            view_button: None,
+            show_button: None,
             gizmo_dragging: false,
             snap_drag: None,
             surface_align: false,

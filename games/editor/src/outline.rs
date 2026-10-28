@@ -75,6 +75,9 @@ pub fn selected_parts(world: &World) -> Vec<Part> {
     let Some(editor) = world.get_resource::<Editor>() else {
         return Vec::new();
     };
+    if editor.game_view || !editor.show_outline {
+        return Vec::new();
+    }
     let mut roots: Vec<(Entity, bool)> = editor.selection.iter().map(|&e| (e, false)).collect();
     if let Some(last) = roots.pop() {
         roots.insert(0, (last.0, true));

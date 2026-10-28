@@ -29,18 +29,20 @@ pub fn scene_view(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     editor.viewport_hovered = response.contains_pointer();
 
     let painter = ui.painter_at(rect);
-    draw_selection(world, editor);
-    if editor.grid {
+    if !editor.game_view {
+        draw_selection(world, editor);
+    }
+    if editor.grid && !editor.game_view {
         draw_grid(world, &view);
     }
-    let icons = if editor.icons {
+    let icons = if editor.icons && !editor.game_view {
         draw_icons(&painter, world, editor, &view)
     } else {
         Vec::new()
     };
 
     let snapping = crate::snap::interact(ui, world, editor, &view, &response);
-    let gizmo_used = !snapping && gizmo(ui, world, editor, &view);
+    let gizmo_used = !snapping && !editor.game_view && gizmo(ui, world, editor, &view);
     drop_target(ui, world, editor, &view, &response);
 
     let alt = ui.input(|i| i.modifiers.alt);
@@ -474,7 +476,9 @@ pub fn entities_in_box(world: &mut World, view: &ViewInfo, area: egui::Rect) -> 
 /// silhouette outlined by [`crate::outline`].
 fn draw_selection(world: &mut World, editor: &Editor) {
     for &e in &editor.selection {
-        crate::collision::draw(world, e);
+        if editor.show_colliders {
+            crate::collision::draw(world, e);
+        }
         let Some(&global) = world.get::<GlobalTransform>(e) else {
             continue;
         };
@@ -689,6 +693,27 @@ fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, rect: egu
                             .on_hover_text("How far Ctrl+Shift drags hold it off the surface");
                         }
                         ui.separator();
+                        let view = ui
+                            .menu_button(format!("🎨 {}", crate::show::view_name(world)), |ui| {
+                                crate::show::view_menu(ui, world)
+                            })
+                            .response
+                            .on_hover_text(
+                                "View mode: the lit scene or one of the renderer's buffers",
+                            );
+                        editor.view_button = Some(view.rect);
+                        let show = ui
+                            .menu_button(
+                                if editor.game_view {
+                                    "👁 Game view"
+                                } else {
+                                    "👁 Show"
+                                },
+                                |ui| crate::show::show_menu(ui, world, editor),
+                            )
+                            .response
+                            .on_hover_text("Editor helpers and module debug drawing");
+                        editor.show_button = Some(show.rect);
                         ui.toggle_value(&mut editor.grid, "⊞")
                             .on_hover_text("Ground grid");
                         ui.toggle_value(&mut editor.icons, "💡")
@@ -748,18 +773,15 @@ fn overlays(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor, rect: egu
         editor.frame_secs * 1000.0
     );
     let painter = ui.painter_at(rect);
-    let pos = rect.right_top() + egui::vec2(-10.0, 10.0);
+    // Bottom right, clear of the toolbar (which grows with the view and show menus).
     let galley = painter.layout(
         stats,
         egui::FontId::monospace(11.5),
         egui::Color32::from_white_alpha(220),
         300.0,
     );
-    let bg = egui::Rect::from_min_size(
-        pos - egui::vec2(galley.size().x + 8.0, -0.0),
-        galley.size() + egui::vec2(16.0, 8.0),
-    );
-    let bg = bg.translate(egui::vec2(-8.0, 0.0));
+    let size = galley.size() + egui::vec2(16.0, 8.0);
+    let bg = egui::Rect::from_min_size(rect.right_bottom() - size - egui::vec2(10.0, 10.0), size);
     painter.rect_filled(
         bg,
         4,

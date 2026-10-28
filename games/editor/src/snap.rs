@@ -465,7 +465,7 @@ fn mark(ui: &egui::Ui, view: &ViewInfo, at: DVec3, color: egui::Color32, half: f
 
 /// A one-line hint at the bottom of the scene view while the Move tool has a selection.
 pub fn hint(ui: &egui::Ui, editor: &Editor, rect: egui::Rect) {
-    if editor.tool != Tool::Move || editor.selection.is_empty() {
+    if editor.tool != Tool::Move || editor.selection.is_empty() || editor.game_view {
         return;
     }
     let text = match editor.snap_drag.as_ref().map(|d| d.kind) {

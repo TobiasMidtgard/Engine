@@ -181,6 +181,7 @@ mod tests {
             include_str!("materials.rs"),
             include_str!("scatter.rs"),
             include_str!("measure.rs"),
+            include_str!("show.rs"),
         ];
         let faces: Vec<_> = [
             epaint_default_fonts::UBUNTU_LIGHT,

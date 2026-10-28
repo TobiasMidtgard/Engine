@@ -37,6 +37,7 @@ mod sample;
 mod scatter;
 mod scene_ops;
 mod shots;
+mod show;
 mod snap;
 mod theme;
 mod thumbs;
@@ -129,6 +130,7 @@ fn main() {
             Some("round16") => shots::round16(dir),
             Some("round17") => shots::round17(dir),
             Some("round18") => shots::round18(dir),
+            Some("round19") => shots::round19(dir),
             Some("play") => shots::play_in_editor(dir),
             _ => shots::gallery(dir),
         };
