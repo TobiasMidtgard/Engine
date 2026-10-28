@@ -440,6 +440,10 @@ impl Build {
     }
 }
 
+/// An inner cell built for a camera further than this from where it is now is dropped at once
+/// (its cards could stand among the real trees); within it, it draws on until rebuilt.
+const JUMPED_M: f32 = 160.0;
+
 /// Everything a cell's build needs, owned, so it can run on a worker thread.
 struct CellJob {
     origin: DVec3,
@@ -627,16 +631,17 @@ pub fn stream_far_woods(
     let mut todo = Vec::new();
     for j in cj - r..=cj + r {
         for i in ci - r..=ci + r {
-            if state.pending.contains_key(&(i, j)) {
-                continue;
-            }
             let d = flat_distance(center((i, j)));
             if d + half_diag < settings.start_m {
                 // Wholly inside the start (the camera jumped or ran into it): the real trees
-                // stand here, so its cards go rather than drawing over them.
+                // stand here, so its cards go rather than drawing over them, even while a
+                // rebuild of it is still running (that build is dropped when it lands).
                 if let Some(e) = state.cells.remove(&(i, j)) {
                     drop_cell(e, &cells, &mut commands, &mut meshes);
                 }
+                continue;
+            }
+            if state.pending.contains_key(&(i, j)) {
                 continue;
             }
             if d > settings.end_m + half_diag {
@@ -653,6 +658,16 @@ pub fn stream_far_woods(
                 }
             };
             if stale {
+                // Built for a camera far from here, an inner cell's cards may stand right
+                // where the real trees are now: they go at once, not when the rebuild lands.
+                let moved_far = state
+                    .cells
+                    .get(&(i, j))
+                    .and_then(|&e| cells.get(e).ok())
+                    .is_some_and(|c| inner && flat_distance(c.built_from) > JUMPED_M);
+                if moved_far && let Some(e) = state.cells.remove(&(i, j)) {
+                    drop_cell(e, &cells, &mut commands, &mut meshes);
+                }
                 todo.push((d, (i, j), b));
             }
         }
