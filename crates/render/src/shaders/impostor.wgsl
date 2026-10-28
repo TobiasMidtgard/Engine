@@ -41,9 +41,12 @@ fn fs_impostor_bake(in: VertexOut, @builtin(front_facing) front: bool) -> BakeOu
         discard;
     }
     var out: BakeOut;
-    out.albedo = vec4<f32>(m.albedo * m.occlusion, 1.0);
-    // Mesh space: the identity model matrix makes the shaded normal a mesh-space one.
-    out.normal_depth = vec4<f32>(m.normal * 0.5 + 0.5, in.clip.z);
+    // Occlusion apart (it darkens ambient light only, as on the mesh: baked into the albedo it
+    // dimmed sunlit fur and cavities to a dark block).
+    out.albedo = vec4<f32>(m.albedo, 1.0);
+    // Mesh space (the identity model matrix makes the shaded normal a mesh-space one),
+    // octahedral, then the occlusion and the depth.
+    out.normal_depth = vec4<f32>(oct_encode(m.normal) * 0.5 + 0.5, m.occlusion, in.clip.z);
     return out;
 }
 
@@ -131,6 +134,7 @@ fn vs_impostor(in: ImpostorIn, @builtin(vertex_index) v: u32) -> ImpostorOut {
 
 struct ImpostorSurface {
     albedo: vec3<f32>,
+    occlusion: f32,
     normal: vec3<f32>,  // world, unit
     rel: vec3<f32>,     // camera-relative position of the surface
     depth: f32,         // its depth buffer value
@@ -175,7 +179,8 @@ fn impostor_surface(in: ImpostorOut) -> ImpostorSurface {
         + sphere.xyz;
     var out: ImpostorSurface;
     out.albedo = albedo.rgb / albedo.a;
-    let n = nd.xyz * 2.0 - 1.0;
+    out.occlusion = nd.z;
+    let n = oct_decode(nd.xy * 2.0 - 1.0);
     out.normal = normalize(in.n0 * n.x + in.n1 * n.y + in.n2 * n.z);
     out.rel = rows_apply(in.m0, in.m1, in.m2, vec4<f32>(p, 1.0));
     let clip = frame.view_proj * vec4<f32>(out.rel, 1.0);
@@ -200,6 +205,7 @@ fn fs_impostor(in: ImpostorOut) -> ImpostorColor {
     s.subsurface = mat.params2.x;
     s.normal = surface.normal;
     s.smooth_normal = surface.normal;
+    s.occlusion = surface.occlusion;
     var color: vec3<f32>;
     if ((mat.flags.x & 16u) != 0u) {
         color = s.albedo;
