@@ -869,7 +869,9 @@ fn grow_scalp(
             let tight = if r.f32() < 0.08 {
                 0.0
             } else {
-                0.75 * (0.7 + 0.6 * hash01(strand * 1000.0))
+                // (Short hair's strands gather more loosely, 0.3-0.5 at the tip in groomers'
+                // practice: gathered tightly its tips meet in gelled spikes.)
+                (if g.gravity > 0.5 { 0.75 } else { 0.45 }) * (0.7 + 0.6 * hash01(strand * 1000.0))
             };
             // The hairs of a lock share most of its tone, and a strand some of its own.
             lock_tone = Some(0.6 * hash01(gsp.rest) + 0.4 * hash01(strand * 1000.0 + Vec3::X));

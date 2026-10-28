@@ -222,8 +222,10 @@ fn skin_relief(r: vec3<f32>, m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, footpr
     // (the white roll), and the two ridges of the philtrum from the cupid's bow to the nose
     // with the groove between them.
     if (lips > 0.01) {
-        let wave = r.x * 6283.0 / 1.15 + value_noise3(r * 900.0) * 3.0;
-        let line = pow(1.0 - abs(sin(wave)), 5.0) * smoothstep(0.3, 1.5, lip.border);
+        // (Under a millimetre apart, deepest toward the middle of the mouth.)
+        let wave = r.x * 6283.0 / 0.8 + value_noise3(r * 900.0) * 3.0;
+        let middle = 1.0 + 0.6 * (1.0 - smoothstep(0.0, 20.0, lip.a));
+        let line = pow(1.0 - abs(sin(wave)), 5.0) * smoothstep(0.3, 1.5, lip.border) * middle;
         d.lines = line * lips * saturate((0.0009 / max(footprint, 1e-7) - 1.0));
         h -= d.lines * 0.00005;
     }
@@ -743,7 +745,8 @@ fn skin_surface(in: SkinOut, front: bool) -> SkinLight {
     // roughness: Toksvig).
     let pore_size = mix(0.0006, 0.00095, character.skin2.w);
     rough += 0.05 * (1.0 - saturate((pore_size / max(footprint, 1e-7) - 0.7) * 0.7)) * (1.0 - lips);
-    rough = mix(rough, mix(0.45, 0.32, wet), lips);
+    // (Lips are smooth but not lacquered: 0.3-0.45 before the sharper lobe's scale.)
+    rough = mix(rough, mix(0.5, 0.4, wet), lips);
     rough = mix(rough, 0.18, rim);
     rough += 0.12 * d0.pore + 0.1 * d0.wrinkle + 0.06 * scalp_tint + 0.12 * d0.lines;
     var specular = (1.0 - 0.8 * d0.pore) * (1.0 - 0.3 * scalp_tint) * (1.0 - 0.5 * d0.lines);
