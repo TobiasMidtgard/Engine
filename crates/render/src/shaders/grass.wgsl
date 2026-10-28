@@ -21,7 +21,7 @@ const GRASS_HIDDEN: vec4<f32> = vec4<f32>(0.0, 0.0, -2.0, 1.0);
 @vertex
 fn vs_main(@builtin(instance_index) instance: u32, @builtin(vertex_index) vertex: u32) -> GrassOut {
     var out: GrassOut;
-    let b = grass_blade(instance, vertex, frame.time.x, frame.wind.xyz, frame.camera_world_frac.xyz);
+    let b = grass_blade(instance, vertex, frame.time.x, frame.camera_world_frac.xyz);
     out.clip = select(GRASS_HIDDEN, frame.view_proj * vec4<f32>(b.rel, 1.0), b.visible);
     out.rel = b.rel;
     out.normal = b.normal;
@@ -93,11 +93,11 @@ struct GrassPrepassOut {
 @vertex
 fn vs_prepass(@builtin(instance_index) instance: u32, @builtin(vertex_index) vertex: u32) -> GrassPrepassOut {
     var out: GrassPrepassOut;
-    let b = grass_blade(instance, vertex, frame.time.x, frame.wind.xyz, frame.camera_world_frac.xyz);
+    let b = grass_blade(instance, vertex, frame.time.x, frame.camera_world_frac.xyz);
     out.clip = select(GRASS_HIDDEN, frame.view_proj * vec4<f32>(b.rel, 1.0), b.visible);
     out.normal = b.normal;
     // Where the blade was last frame: same root, last frame's wind.
-    let p = grass_blade(instance, vertex, frame.time.x - frame.time.z, frame.wind.xyz, frame.camera_world_frac.xyz);
+    let p = grass_blade(instance, vertex, frame.time.x - frame.time.z, frame.camera_world_frac.xyz);
     out.motion_now = motion_clip(b.rel);
     out.motion_prev = prev_motion_clip(static_prev_rel(p.rel));
     return out;

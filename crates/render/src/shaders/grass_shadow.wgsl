@@ -17,7 +17,7 @@ fn grass_snow_depth(f: GrassField, rel: vec3<f32>) -> f32 {
 
 @vertex
 fn vs_shadow(@builtin(instance_index) instance: u32, @builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
-    let b = grass_blade(instance, vertex, shadow_view.time.x, shadow_view.wind.xyz, shadow_view.camera_frac.xyz);
+    let b = grass_blade(instance, vertex, shadow_view.time.x, shadow_view.camera_frac.xyz);
     // An invisible blade collapses to one point: no area, nothing drawn.
     return shadow_view.view_proj * vec4<f32>(b.rel, 1.0);
 }

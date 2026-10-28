@@ -414,6 +414,7 @@ struct GpuField {
     look: [f32; 4],
     tip: [f32; 4],
     wear: [f32; 4],
+    gust: [f32; 4],
 }
 
 #[repr(C)]
@@ -654,6 +655,52 @@ pub struct GrassFeature {
     draws: Vec<Draw>,
     shadow_draws: [Vec<Draw>; MAX_CASCADES],
     stats: FeatureStats,
+    wind: SteadyWind,
+}
+
+/// The wind the blades sway in, kept steady. The frame's wind (sampled where the camera is,
+/// so it changes with every gust and step) is eased toward over about a second, and the
+/// distance the air has moved (its run) is added up frame by frame. Every gust front, flutter
+/// and ripple moves with that run (`grass_wind`), so a change in wind speeds them up or slows
+/// them down from where they are. Phases worked out as `time x frequency(speed)` instead jump
+/// by the whole elapsed time times the change, every frame the wind changes, which is what
+/// made meadows shake (playtest #16).
+#[derive(Default)]
+struct SteadyWind {
+    wind: Vec3,
+    run: f64,
+    time: Option<f32>,
+}
+
+impl SteadyWind {
+    /// Seconds the blades take to follow a change in the wind (63 %).
+    const EASE_S: f32 = 0.8;
+    /// The run wraps after this many meters (one pattern jump every few hours of wind).
+    const WRAP_M: f64 = 65536.0;
+
+    /// Moves on to frame `time` (seconds, the frame's clock), `dt` seconds after the last.
+    fn update(&mut self, wind: Vec3, time: f32, dt: f32) {
+        match self.time {
+            Some(last) if last == time => return,
+            Some(_) => {
+                let dt = dt.clamp(0.0, 0.25);
+                let k = 1.0 - (-dt / Self::EASE_S).exp();
+                self.wind += (wind - self.wind) * k;
+                self.run = (self.run + self.wind.length() as f64 * dt as f64) % Self::WRAP_M;
+            }
+            None => self.wind = wind,
+        }
+        self.time = Some(time);
+    }
+
+    /// The field's `gust`: the steady wind (xyz) and the run less speed x `time`, so the
+    /// shader's run at any time t near this frame is `w + |xyz| t` (also for the previous
+    /// frame's positions in the motion vectors).
+    fn uniform(&self, time: f32) -> [f32; 4] {
+        let w = self.wind;
+        let offset = self.run - w.length() as f64 * time as f64;
+        [w.x, w.y, w.z, offset as f32]
+    }
 }
 
 impl GrassFeature {
@@ -869,6 +916,10 @@ impl RenderFeature for GrassFeature {
         let snow_here = world
             .get_resource::<engine_world::SurfaceLayers>()
             .map_or(0.0, |l| l.grid.sample(view.origin).snow_m.max(0.0));
+        if !view.extra_view {
+            self.wind.update(view.wind, view.time, view.delta);
+        }
+        let gust = self.wind.uniform(view.time);
         let mut seen = Vec::new();
         let mut q = world.query::<(
             Entity,
@@ -1037,6 +1088,7 @@ impl RenderFeature for GrassFeature {
                     0.0,
                 ],
                 wear: map.wear_params(),
+                gust,
             });
         }
         self.maps.retain(|e, _| seen.contains(e));
@@ -1172,8 +1224,57 @@ mod tests {
 
     #[test]
     fn gpu_field_matches_the_shader_struct() {
-        // Thirteen vec4s, as `GrassField` in grass_common.wgsl.
-        assert_eq!(std::mem::size_of::<GpuField>(), 13 * 16);
+        // Fourteen vec4s, as `GrassField` in grass_common.wgsl.
+        assert_eq!(std::mem::size_of::<GpuField>(), 14 * 16);
+    }
+
+    /// The run the shader sees (`gust.w + speed x t`) at frame time `t`.
+    fn shader_run(w: &SteadyWind, t: f32) -> f32 {
+        let g = w.uniform(t);
+        g[3] + Vec3::new(g[0], g[1], g[2]).length() * t
+    }
+
+    #[test]
+    fn gusts_move_the_sway_on_smoothly_however_late_in_the_day() {
+        // An hour and a half into play, the wind at the camera changes every frame (gusts,
+        // walking about). The sway's phase must move on by about speed x dt a frame, not by the
+        // clock times the change (which shook meadows, playtest #16).
+        let mut w = SteadyWind::default();
+        let dt = 1.0 / 60.0;
+        let mut t = 5400.0_f32;
+        w.update(Vec3::new(4.0, 0.0, 0.0), t, dt);
+        let mut last = shader_run(&w, t);
+        let mut eased = Vec::new();
+        for i in 0..600 {
+            t += dt;
+            // Gusty: 2 to 12 m/s over a few seconds, changing direction, jittering each frame.
+            let speed = 7.0 + 4.0 * (i as f32 * 0.01).sin() + (i as f32 * 2.3).sin();
+            let dir = Vec3::new((i as f32 * 0.002).cos(), 0.0, (i as f32 * 0.002).sin());
+            w.update(dir * speed, t, dt);
+            // A second view in the same frame changes nothing.
+            w.update(dir * 30.0, t, dt);
+            let run = shader_run(&w, t);
+            let step = run - last;
+            assert!(
+                step >= -0.02 && step < 12.0 * dt + 0.02,
+                "frame {i}: the run stepped {step} m"
+            );
+            // The previous frame's run, as the motion vectors work it out, is where it was.
+            let prev = w.uniform(t)[3] + w.wind.length() * (t - dt);
+            assert!(
+                (prev - last).abs() < 12.0 * dt + 0.05,
+                "frame {i}: {prev} vs {last}"
+            );
+            last = run;
+            eased.push(w.wind.length());
+        }
+        // The steady wind follows the gusts, without their frame-to-frame jitter.
+        let jumps = eased
+            .windows(2)
+            .map(|p| (p[1] - p[0]).abs())
+            .fold(0.0, f32::max);
+        assert!(jumps < 0.2, "steady wind jumped {jumps} m/s in a frame");
+        assert!(eased.iter().cloned().fold(0.0, f32::max) > 9.0);
     }
 
     #[test]
