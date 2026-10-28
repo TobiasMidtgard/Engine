@@ -489,42 +489,136 @@ pub fn follow_scalability(
 /// frame when the world is re-anchored. Runs in `WorldShiftSet::Apply`.
 pub fn follow_world_shift(
     mut shifts: MessageReader<WorldShift>,
-    mut bodies: Query<&mut SoftBodySim>,
-    mut colliders: ResMut<ColliderWorld>,
-    mut loads: ResMut<LoadList>,
-    mut ropes: Query<&mut Rope>,
+    mut caches: ShiftCaches,
+    mut anchors: Query<&mut SurfaceAnchor>,
 ) {
     let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) else {
         return;
     };
-    // World-anchored rope ends move with the world (without counting as a spec change, which
-    // would rebuild the rope), so a later rebuild ties them in the right place.
-    for mut rope in &mut ropes {
-        let rope = rope.bypass_change_detection();
-        for end in [&mut rope.end_a, &mut rope.end_b] {
-            if let rope::RopeEnd::World { at } = end {
-                *at = s.point(DVec3::from_array(*at)).to_array();
-            }
+    caches.shift(&s, None);
+    // The world crate moves the anchors themselves; what they were is in the new frame too.
+    for mut a in &mut anchors {
+        if let Some((p, r)) = a.last {
+            a.last = Some((s.point(p), s.orientation(r)));
         }
     }
-    for mut b in &mut bodies {
-        b.follow_shift(&s);
+}
+
+/// A still root entity, near soft bodies and props, that nothing in this crate moves: when
+/// something other than a [`WorldShift`] re-places it, the bodies' world positions go along.
+/// The space module does that coming back from a trip: it puts what it parked on the planet
+/// back where it was on the planet, while the shifts in between map world points only nearly
+/// so (the yard came back 11 m off from a Moon trip, and more the longer the trip). An editor
+/// moving the whole scene works the same way. `spawn_demo` and `spawn_sailboat` place one.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
+pub struct SurfaceAnchor {
+    last: Option<(DVec3, Quat)>,
+}
+
+/// How a [`SurfaceAnchor`] moved this fixed step outside a [`WorldShift`], as a shift, and
+/// where it was before.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct SurfaceMove(pub Option<(WorldShift, DVec3)>);
+
+/// Soft bodies this far from a moved anchor go along with it, m.
+const SURFACE_REACH_M: f64 = 20_000.0;
+
+/// `FixedPreUpdate`: see whether a [`SurfaceAnchor`] was re-placed since the last step and
+/// move the bodies near it, before anything steps. One move per step (the first anchor's):
+/// anchors moved together all moved alike.
+pub fn follow_surface_anchors(
+    mut anchors: Query<(&Transform, &mut SurfaceAnchor), Without<ChildOf>>,
+    mut moved: ResMut<SurfaceMove>,
+    mut caches: ShiftCaches,
+) {
+    moved.0 = None;
+    for (t, mut a) in &mut anchors {
+        let now = (t.translation, t.rotation);
+        if let Some((p, r)) = a.last
+            && moved.0.is_none()
+            && ((now.0 - p).length() > 1e-3 || turned(now.1, r) > 1e-4)
+        {
+            let rotation = (now.1.as_dquat() * r.as_dquat().inverse()).normalize();
+            let s = WorldShift {
+                rotation,
+                translation: now.0 - rotation * p,
+                ..WorldShift::IDENTITY
+            };
+            moved.0 = Some((s, p));
+        }
+        a.last = Some(now);
     }
-    let colliders = &mut *colliders;
-    for (p, r) in colliders
-        .prev
-        .values_mut()
-        .chain(colliders.seen.values_mut())
-    {
-        (*p, *r) = (s.point(*p), s.orientation(*r));
+    if let Some((s, from)) = moved.0 {
+        engine_core::log::info!(
+            "softbody: the surface moved by {:.2} m outside a world shift; bodies follow",
+            (s.point(from) - from).length()
+        );
+        caches.shift(&s, Some(from));
     }
-    for c in &mut colliders.list {
-        (c.pos, c.rot) = (s.point(c.pos), s.orientation(c.rot));
-        (c.prev_pos, c.prev_rot) = (s.point(c.prev_pos), s.orientation(c.prev_rot));
-        c.com = s.point(c.com);
-    }
-    for (p, _, _) in &mut loads.0 {
-        *p = s.point(*p);
+}
+
+/// The angle between two orientations, radians, in f64. `acos` of their dot product reads
+/// an f32 quaternion's rounding (a length off 1 by 1e-8) as a turn of 1e-4 rad, so this
+/// takes the angle of the relative turn from its sine and cosine instead.
+fn turned(a: Quat, b: Quat) -> f64 {
+    let d = a.as_dquat().normalize() * b.as_dquat().normalize().inverse();
+    2.0 * d.xyz().length().atan2(d.w.abs())
+}
+
+/// Soft bodies and the crate's caches of world positions.
+#[derive(SystemParam)]
+pub struct ShiftCaches<'w, 's> {
+    bodies: Query<'w, 's, &'static mut SoftBodySim>,
+    colliders: ResMut<'w, ColliderWorld>,
+    loads: ResMut<'w, LoadList>,
+    ropes: Query<'w, 's, &'static mut Rope>,
+    gpu: ResMut<'w, crate::gpu_cloth::GpuClothShift>,
+}
+
+impl ShiftCaches<'_, '_> {
+    /// Move everything by `s`; with `near`, only the bodies within [`SURFACE_REACH_M`] of it
+    /// (and GPU cloth, the colliders and loads, which are all near the focus).
+    fn shift(&mut self, s: &WorldShift, near: Option<DVec3>) {
+        let s = *s;
+        let close = |p: DVec3| near.is_none_or(|n| (p - n).length() < SURFACE_REACH_M);
+        // World-anchored rope ends move with the world (without counting as a spec change,
+        // which would rebuild the rope), so a later rebuild ties them in the right place.
+        for mut rope in &mut self.ropes {
+            let rope = rope.bypass_change_detection();
+            for end in [&mut rope.end_a, &mut rope.end_b] {
+                if let rope::RopeEnd::World { at } = end
+                    && close(DVec3::from_array(*at))
+                {
+                    *at = s.point(DVec3::from_array(*at)).to_array();
+                }
+            }
+        }
+        for mut b in &mut self.bodies {
+            if close(b.center) {
+                b.follow_shift(&s);
+            }
+        }
+        if near.is_some() {
+            // A world shift reaches the GPU cloth through its own reader.
+            let pending = &mut self.gpu.0;
+            *pending = Some(pending.map_or(s, |p| p.then(&s)));
+        }
+        let colliders = &mut *self.colliders;
+        for (p, r) in colliders
+            .prev
+            .values_mut()
+            .chain(colliders.seen.values_mut())
+        {
+            (*p, *r) = (s.point(*p), s.orientation(*r));
+        }
+        for c in &mut colliders.list {
+            (c.pos, c.rot) = (s.point(c.pos), s.orientation(c.rot));
+            (c.prev_pos, c.prev_rot) = (s.point(c.prev_pos), s.orientation(c.prev_rot));
+            c.com = s.point(c.com);
+        }
+        for (p, _, _) in &mut self.loads.0 {
+            *p = s.point(*p);
+        }
     }
 }
 

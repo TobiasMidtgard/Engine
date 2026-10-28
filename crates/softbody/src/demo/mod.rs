@@ -147,7 +147,9 @@ pub struct DemoBridgeWalker {
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
 pub struct DemoStride(pub f32);
 
-/// Fires a bullet through a random point of a rectangle every `period` seconds.
+/// Fires a bullet through a random point of a rectangle every `period` seconds, until the
+/// player takes it over with the use key ("Fire"): then it fires a burst at what they look at
+/// and waits a while for the next press before it goes back to its own pattern.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct DemoTurret {
     pub target: DVec3,
@@ -156,7 +158,36 @@ pub struct DemoTurret {
     pub period: f32,
     pub shots: u32,
     pub next: f32,
+    /// Where the player last aimed it (world), while it is theirs.
+    pub manned: Option<DVec3>,
+    /// Rounds left in the player's burst.
+    pub burst: u32,
+    /// Clock time when it goes back to its own pattern, s.
+    pub idle_until: f32,
 }
+
+impl DemoTurret {
+    pub fn new(target: DVec3, spread: Vec2, period: f32, first: f32) -> Self {
+        Self {
+            target,
+            spread,
+            period,
+            shots: 0,
+            next: first,
+            manned: None,
+            burst: 0,
+            idle_until: 0.0,
+        }
+    }
+}
+
+/// Rounds in a burst the player fires, and their rate.
+const PLAYER_BURST: u32 = 6;
+const PLAYER_PERIOD: f32 = 0.11;
+/// Seconds the turret waits for the player's next press before it goes back to its pattern.
+const PLAYER_HOLD_SECS: f32 = 8.0;
+/// How far out the turret aims when the view hits nothing, m.
+const CONVERGE_M: f32 = 25.0;
 
 /// Lights the cloth at `at` after `delay` seconds and rebuilds it every `period`.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
@@ -181,64 +212,95 @@ pub struct DemoCutter {
 /// Without it a jump that re-anchors the world (`showcase.goto`) left the unveiling sheet
 /// hoisted where the statue used to be. The motions keep +Y as up, which a re-anchoring turns
 /// only negligibly within a zone. Runs in `WorldShiftSet::Apply`.
+pub fn follow_world_shift(mut shifts: MessageReader<WorldShift>, mut points: DemoPoints) {
+    if let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) {
+        points.shift(&s);
+    }
+}
+
+/// `FixedPreUpdate`: move the props' world points as [`crate::systems::SurfaceAnchor`]s
+/// moved without a `WorldShift` (the space module putting the planet's surface back after a
+/// trip), as [`follow_world_shift`] does for a shift.
+pub fn follow_surface(moved: Res<crate::systems::SurfaceMove>, mut points: DemoPoints) {
+    if let Some((s, _)) = moved.0 {
+        points.shift(&s);
+    }
+}
+
+/// The props' world-space paths and targets.
+#[derive(SystemParam)]
 #[allow(clippy::type_complexity)]
-pub fn follow_world_shift(
-    mut shifts: MessageReader<WorldShift>,
-    mut motions: Query<&mut DemoMotion>,
-    mut aims: Query<(
-        Option<&mut DemoTurret>,
-        Option<&mut DemoBurner>,
-        Option<&mut DemoCutter>,
-        Option<&mut DemoRoll>,
-    )>,
-    mut cords: Query<&mut statue::DemoCord>,
-    mut helms: Query<&mut sailboat::Helm>,
-    mut settled: Query<&mut DemoSettled>,
-) {
-    let Some(s) = shifts.read().copied().reduce(|a, b| a.then(&b)) else {
-        return;
-    };
-    // A remembered body is put back where the world has moved it to.
-    for mut kept in &mut settled {
-        kept.0.follow_shift(&s);
-    }
-    for mut m in &mut motions {
-        match &mut *m {
-            DemoMotion::Pendulum { pivot, swing, .. } => {
-                *pivot = s.point(*pivot);
-                *swing = s.direction(*swing);
+pub struct DemoPoints<'w, 's> {
+    motions: Query<'w, 's, &'static mut DemoMotion>,
+    aims: Query<
+        'w,
+        's,
+        (
+            Option<&'static mut DemoTurret>,
+            Option<&'static mut DemoBurner>,
+            Option<&'static mut DemoCutter>,
+            Option<&'static mut DemoRoll>,
+        ),
+    >,
+    cords: Query<'w, 's, &'static mut statue::DemoCord>,
+    helms: Query<'w, 's, &'static mut sailboat::Helm>,
+    settled: Query<'w, 's, &'static mut DemoSettled>,
+}
+
+impl DemoPoints<'_, '_> {
+    fn shift(&mut self, s: &WorldShift) {
+        let s = *s;
+        let Self {
+            motions,
+            aims,
+            cords,
+            helms,
+            settled,
+        } = self;
+        // A remembered body is put back where the world has moved it to.
+        for mut kept in settled.iter_mut() {
+            kept.0.follow_shift(&s);
+        }
+        for mut m in motions.iter_mut() {
+            match &mut *m {
+                DemoMotion::Pendulum { pivot, swing, .. } => {
+                    *pivot = s.point(*pivot);
+                    *swing = s.direction(*swing);
+                }
+                DemoMotion::Shuttle { from, to, .. } => {
+                    (*from, *to) = (s.point(*from), s.point(*to));
+                }
+                DemoMotion::Press { top, .. } => *top = s.point(*top),
+                DemoMotion::Circle { center, .. } => *center = s.point(*center),
+                DemoMotion::Hoist { low, high, .. } => {
+                    (*low, *high) = (s.point(*low), s.point(*high));
+                }
             }
-            DemoMotion::Shuttle { from, to, .. } => {
-                (*from, *to) = (s.point(*from), s.point(*to));
+        }
+        for (turret, burner, cutter, roll) in aims.iter_mut() {
+            if let Some(mut t) = turret {
+                t.target = s.point(t.target);
+                t.manned = t.manned.map(|p| s.point(p));
             }
-            DemoMotion::Press { top, .. } => *top = s.point(*top),
-            DemoMotion::Circle { center, .. } => *center = s.point(*center),
-            DemoMotion::Hoist { low, high, .. } => {
-                (*low, *high) = (s.point(*low), s.point(*high));
+            if let Some(mut b) = burner {
+                b.at = s.point(b.at);
+            }
+            if let Some(mut c) = cutter {
+                c.at = s.point(c.at);
+            }
+            if let Some(mut r) = roll
+                && let Some(last) = r.last
+            {
+                r.last = Some(s.point(last));
             }
         }
-    }
-    for (turret, burner, cutter, roll) in &mut aims {
-        if let Some(mut t) = turret {
-            t.target = s.point(t.target);
+        for mut c in cords.iter_mut() {
+            c.top = s.point(c.top);
         }
-        if let Some(mut b) = burner {
-            b.at = s.point(b.at);
+        for mut h in helms.iter_mut() {
+            h.home = s.point(h.home);
+            h.mooring = s.transform(&h.mooring);
         }
-        if let Some(mut c) = cutter {
-            c.at = s.point(c.at);
-        }
-        if let Some(mut r) = roll
-            && let Some(last) = r.last
-        {
-            r.last = Some(s.point(last));
-        }
-    }
-    for mut c in &mut cords {
-        c.top = s.point(c.top);
-    }
-    for mut h in &mut helms {
-        h.home = s.point(h.home);
     }
 }
 
@@ -266,9 +328,14 @@ pub fn register(app: &mut App) {
                 .before(UpdateSet::Propagate),
         )
         .add_systems(FixedPreUpdate, skin::snapshot_poses)
+        .add_systems(Update, man_turrets)
         .add_systems(
             PostUpdate,
             follow_world_shift.in_set(engine_world::WorldShiftSet::Apply),
+        )
+        .add_systems(
+            FixedPreUpdate,
+            follow_surface.after(crate::systems::follow_surface_anchors),
         );
     app.add_systems(
         FixedUpdate,
@@ -301,6 +368,11 @@ pub const CURTAIN_BURNER: DVec3 = DVec3::new(-9.1, 0.0, 6.25);
 /// Build the whole yard around `origin` (ground level at `origin.y`).
 pub fn spawn_demo(commands: &mut Commands, origin: DVec3) {
     let c = origin;
+    commands.spawn((
+        Name::new("Yard anchor"),
+        at(c),
+        crate::systems::SurfaceAnchor::default(),
+    ));
     // Procedural textures and materials of the props (made once per world).
     commands.queue(kit::ensure_materials);
     flags(commands, c);
@@ -439,14 +511,14 @@ fn curtains(commands: &mut Commands, c: DVec3) {
         .spawn((
             Name::new("Curtain turret"),
             at(turret),
-            DemoTurret {
-                target: c + DVec3::new(-2.6, 3.0, -1.0),
-                spread: Vec2::new(1.8, 1.8),
-                period: 0.7,
-                shots: 0,
-                next: 1.5,
-            },
+            DemoTurret::new(
+                c + DVec3::new(-2.6, 3.0, -1.0),
+                Vec2::new(1.8, 1.8),
+                0.7,
+                1.5,
+            ),
             DemoClock::default(),
+            engine_world::Interactable::new("Fire").reach(2.5),
         ))
         .id();
     let (pedestal, pedestal_collider) = gun_pedestal(commands);
@@ -1112,11 +1184,49 @@ fn hash01(x: u32) -> f32 {
 
 pub fn fire_turrets(
     time: Res<Time>,
-    mut turrets: Query<(&Transform, &mut DemoTurret, &mut DemoClock)>,
+    mut turrets: Query<(
+        &Transform,
+        &mut DemoTurret,
+        &mut DemoClock,
+        Option<&mut engine_world::Interactable>,
+    )>,
     mut traces: MessageWriter<ProjectileTrace>,
 ) {
-    for (t, mut turret, mut clock) in &mut turrets {
+    for (t, mut turret, mut clock, offer) in &mut turrets {
         clock.0 += time.delta_for(None);
+        if let Some(aim) = turret.manned {
+            if turret.burst == 0 {
+                if clock.0 >= turret.idle_until {
+                    // The player walked off: back to its own pattern.
+                    turret.manned = None;
+                    turret.next = clock.0 + turret.period;
+                }
+                continue;
+            }
+            if clock.0 < turret.next {
+                continue;
+            }
+            turret.burst -= 1;
+            turret.next = clock.0 + PLAYER_PERIOD;
+            let n = turret.burst + turret.shots;
+            let jitter = Vec3::new(hash01(n * 7) - 0.5, hash01(n * 7 + 1) - 0.5, 0.0) * 0.012;
+            let dir =
+                ((aim - t.translation).as_vec3().normalize_or(Vec3::NEG_Z) + jitter).normalize();
+            traces.write(ProjectileTrace {
+                from: t.translation,
+                to: t.translation + (dir * 60.0).as_dvec3(),
+                radius: 0.02,
+                speed: 420.0,
+                shooter: None,
+            });
+            if turret.burst == 0 {
+                turret.idle_until = clock.0 + PLAYER_HOLD_SECS;
+                if let Some(mut offer) = offer {
+                    offer.enabled = true;
+                }
+            }
+            continue;
+        }
         if clock.0 < turret.next {
             continue;
         }
@@ -1141,6 +1251,50 @@ pub fn fire_turrets(
             speed: 420.0,
             shooter: None,
         });
+    }
+}
+
+/// `Update`: E at a turret takes it over: a burst at what the player looks at (the first
+/// thing along the view, else a point [`CONVERGE_M`] out), once it has swung onto it.
+pub fn man_turrets(
+    mut used: MessageReader<engine_world::Interact>,
+    cameras: Query<(&engine_render::Camera, &GlobalTransform)>,
+    queries: Option<Res<engine_world::physics::PhysicsQueries>>,
+    mut turrets: Query<(
+        &mut DemoTurret,
+        &DemoClock,
+        Option<&mut engine_world::Interactable>,
+    )>,
+) {
+    let view = cameras
+        .iter()
+        .filter(|(c, _)| c.active)
+        .max_by_key(|(c, _)| c.order)
+        .map(|(_, g)| (g.translation(), g.forward()));
+    for u in used.read() {
+        let Ok((mut turret, clock, offer)) = turrets.get_mut(u.target) else {
+            continue;
+        };
+        if turret.burst > 0 {
+            continue;
+        }
+        let Some((eye, look)) = view else {
+            continue;
+        };
+        let hit = queries.as_deref().and_then(|q| {
+            let past = engine_world::physics::QueryFilter {
+                exclude: vec![u.target, u.actor],
+                ..Default::default()
+            };
+            q.0.raycast(eye, look, 150.0, &past)
+        });
+        turret.manned = Some(eye + (look * hit.map_or(CONVERGE_M, |h| h.distance)).as_dvec3());
+        turret.burst = PLAYER_BURST;
+        // Give the gun a moment to swing onto it.
+        turret.next = clock.0 + 0.35;
+        if let Some(mut offer) = offer {
+            offer.enabled = false;
+        }
     }
 }
 

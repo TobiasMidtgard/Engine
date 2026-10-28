@@ -113,7 +113,9 @@ pub fn aim_guns(
         let Ok((tt, turret)) = turrets.get(aim.turret) else {
             continue;
         };
-        let target = turret_aim(turret, turret.shots + 1);
+        let target = turret
+            .manned
+            .unwrap_or_else(|| turret_aim(turret, turret.shots + 1));
         let dir = (target - tt.translation)
             .as_vec3()
             .normalize_or(Vec3::NEG_Z);

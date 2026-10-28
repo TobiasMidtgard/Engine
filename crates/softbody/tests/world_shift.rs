@@ -151,3 +151,145 @@ fn the_unveiling_hoist_follows_a_world_shift() {
         "the sheet hangs at {after} after the shift, expected about {want}"
     );
 }
+
+#[test]
+fn the_dinghy_waits_at_its_shifted_mooring() {
+    let mut app = App::new();
+    app.add_plugins((engine_world::WorldPlugin, SoftBodyPlugin));
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual {
+            step_secs: 1.0 / 60.0,
+        });
+    app.world.resource_mut::<FixedTime>().set_hz(60.0);
+    app.init_resource::<PendingShift>()
+        .add_systems(PostUpdate, write_pending_shift.in_set(WorldShiftSet::Write));
+    // No water here, so the dinghy waits at its mooring (re-placed there every step).
+    let home = DVec3::new(211.0, 0.0, -145.0);
+    app.add_systems(Startup, move |mut commands: Commands| {
+        engine_softbody::demo::spawn_sailboat(&mut commands, home, 22.0);
+    });
+    app.update_n(30);
+    let mut boats = app
+        .world
+        .query_filtered::<&Transform, With<engine_softbody::demo::sailboat::Helm>>();
+    let shift = WorldShift {
+        rotation: DQuat::from_rotation_y(0.9),
+        translation: DVec3::new(-3.0e3, 125.0, 4.0e4),
+        ..WorldShift::IDENTITY
+    };
+    app.world.resource_mut::<PendingShift>().0 = Some(shift);
+    app.update_n(10);
+    let at = boats.single(&app.world).unwrap().translation;
+    let want = shift.point(home);
+    assert!(
+        (at - want).length() < 0.05,
+        "the dinghy is at {at} after the shift, its mooring moved to {want}"
+    );
+    let mut sails = app.world.query::<(&Cloth, &SoftBodySim)>();
+    let (_, sail) = sails.single(&app.world).expect("the sail");
+    let far = (0..sail.sim.len())
+        .map(|i| (sail.world_position(i) - want).length())
+        .fold(0.0, f64::max);
+    assert!(far < 6.0, "sail particles {far} m from the boat");
+}
+
+/// Move every root entity by `s`, as the space module puts what it parked on a planet back
+/// where it was on it after a trip (not a `WorldShift`).
+fn unpark_all(app: &mut App, s: &WorldShift) {
+    let mut roots = app
+        .world
+        .query_filtered::<&mut Transform, Without<ChildOf>>();
+    for mut t in roots.iter_mut(&mut app.world) {
+        *t = s.transform(&t);
+    }
+}
+
+#[test]
+fn the_yard_follows_its_anchor_put_back_after_a_trip() {
+    let app = || {
+        let mut app = App::new();
+        app.add_plugins((engine_world::WorldPlugin, SoftBodyPlugin));
+        app.world
+            .resource_mut::<Time>()
+            .set_source(TimeSource::Manual {
+                step_secs: 1.0 / 60.0,
+            });
+        app.world.resource_mut::<FixedTime>().set_hz(60.0);
+        app.add_systems(Startup, |mut commands: Commands| {
+            commands.spawn((
+                Transform::IDENTITY,
+                engine_softbody::systems::SurfaceAnchor::default(),
+            ));
+            engine_softbody::demo::statue::spawn_unveiling(
+                &mut commands,
+                DVec3::ZERO,
+                Vec3::new(0.5, 0.0, -0.87),
+            );
+        });
+        app.update_n(30);
+        app
+    };
+    let sheet = |app: &mut App| {
+        let mut q = app.world.query::<(&Name, &SoftBodySim)>();
+        let (_, b) = q
+            .iter(&app.world)
+            .find(|(n, _)| n.as_str() == "Unveiling sheet")
+            .expect("the sheet");
+        (0..b.sim.len())
+            .map(|i| b.world_position(i))
+            .collect::<Vec<_>>()
+    };
+    // Back from the Moon: the yard's roots are put back 11 m and a hair of a turn from where
+    // the shifts in between took them. Alongside, the same yard that stayed home.
+    let s = WorldShift {
+        rotation: DQuat::from_rotation_y(0.002),
+        translation: DVec3::new(-11.0, 0.3, -1.9),
+        ..WorldShift::IDENTITY
+    };
+    let (mut home, mut back) = (app(), app());
+    unpark_all(&mut back, &s);
+    home.update_n(30);
+    back.update_n(30);
+    // The sheet goes on as if the yard had always stood there, not dragged 11 m by its hook.
+    let far = sheet(&mut home)
+        .iter()
+        .zip(sheet(&mut back))
+        .map(|(h, b)| (s.point(*h) - b).length())
+        .fold(0.0, f64::max);
+    assert!(far < 0.05, "the moved yard's sheet is {far} m off");
+}
+
+#[test]
+fn a_turning_world_shift_is_not_read_as_the_surface_moving() {
+    use engine_softbody::systems::{SurfaceAnchor, SurfaceMove};
+    let mut app = App::new();
+    app.add_plugins((engine_world::WorldPlugin, SoftBodyPlugin));
+    app.world
+        .resource_mut::<Time>()
+        .set_source(TimeSource::Manual {
+            step_secs: 1.0 / 60.0,
+        });
+    app.world.resource_mut::<FixedTime>().set_hz(60.0);
+    app.init_resource::<PendingShift>()
+        .add_systems(PostUpdate, write_pending_shift.in_set(WorldShiftSet::Write));
+    app.world.spawn((
+        Transform::from_xyz(125.0, 0.0, -35.0),
+        SurfaceAnchor::default(),
+    ));
+    app.update_n(10);
+    // The walk audit's re-home: 45 km north and 0.405° of a turn, which leaves the anchor's
+    // f32 orientation a hair off unit length.
+    app.world.resource_mut::<PendingShift>().0 = Some(WorldShift {
+        rotation: DQuat::from_rotation_x(0.405f64.to_radians()),
+        translation: DVec3::new(-10.06, -99.0, -45_011.0),
+        ..WorldShift::IDENTITY
+    });
+    for step in 0..30 {
+        app.update();
+        assert!(
+            app.world.resource::<SurfaceMove>().0.is_none(),
+            "step {step}: the anchor read as moved"
+        );
+    }
+}

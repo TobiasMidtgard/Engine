@@ -8,6 +8,7 @@ pub mod collide;
 pub mod demo;
 pub mod field;
 pub mod gpu_cloth;
+pub mod grab;
 pub mod guides;
 pub mod hair;
 pub mod render;
@@ -53,6 +54,7 @@ impl Plugin for SoftBodyPlugin {
             .init_resource::<systems::LoadList>()
             .init_resource::<systems::SlowestBody>()
             .init_resource::<systems::BesidePhysics>()
+            .init_resource::<systems::SurfaceMove>()
             .init_resource::<gpu_cloth::GpuClothShift>()
             .register_resource::<SoftBodyConfig>(
                 "Soft-body quality: enabled, lod_distance and freeze_distance (m from the focus), quality (substep multiplier).",
@@ -108,6 +110,8 @@ impl Plugin for SoftBodyPlugin {
                 ),
             )
             .add_systems(PreUpdate, systems::follow_scalability)
+            .add_systems(FixedPreUpdate, systems::follow_surface_anchors)
+            .add_systems(Update, (grab::grab_and_release, grab::slip).chain())
             .add_systems(
                 PostUpdate,
                 (systems::follow_world_shift, gpu_cloth::follow_world_shift)
@@ -119,6 +123,7 @@ impl Plugin for SoftBodyPlugin {
                     systems::rebuild_changed,
                     systems::build_bodies,
                     guides::build_guide_hair,
+                    grab::offer_handholds,
                 )
                     .chain()
                     .in_set(UpdateSet::AfterPropagate),

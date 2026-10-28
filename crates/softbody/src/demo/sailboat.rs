@@ -82,6 +82,11 @@ const BOOM_RATE: f32 = 1.6;
 /// of water under it): it sails `range` meters each way across the wind from there.
 pub fn spawn_sailboat(commands: &mut Commands, home: DVec3, range: f32) -> Entity {
     let mooring = Transform::from_translation(home);
+    commands.spawn((
+        Name::new("Dinghy mooring anchor"),
+        mooring,
+        crate::systems::SurfaceAnchor::default(),
+    ));
     let boat = commands
         .spawn((
             Name::new("Sailing dinghy"),
