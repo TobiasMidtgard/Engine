@@ -24,6 +24,7 @@ mod egui_bridge;
 mod import;
 mod inspector;
 mod landscape;
+mod material_edit;
 mod materials;
 mod models;
 mod outline;
@@ -120,6 +121,7 @@ fn main() {
             Some("round11") => shots::round11(dir),
             Some("round12") => shots::round12(dir),
             Some("round13") => shots::round13(dir),
+            Some("round14") => shots::round14(dir),
             Some("play") => shots::play_in_editor(dir),
             _ => shots::gallery(dir),
         };
@@ -180,6 +182,7 @@ impl Plugin for EditorPlugin {
                     demos::sync_demos,
                     landscape::sync_sculpt,
                     models::watch_files,
+                    material_edit::flush,
                     step_frames,
                     shots::run_script,
                 )

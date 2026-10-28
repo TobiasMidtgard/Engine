@@ -30,7 +30,7 @@ use crate::undo::Command;
 /// What a material file's key ends with.
 pub const MATERIAL_SUFFIX: &str = ".material.gltf";
 /// Folder under `imported/` that texture sets go to.
-const MATERIALS_DIR: &str = "materials";
+pub const MATERIALS_DIR: &str = "materials";
 
 /// One map of a texture set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

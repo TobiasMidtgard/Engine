@@ -85,6 +85,7 @@ pub fn entity_details(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor)
     quick_actions(ui, world, editor, entity);
     crate::import::settings_panel(ui, world, editor, entity);
     crate::rigs::animation_panel(ui, world, editor, entity);
+    crate::material_edit::panel(ui, world, editor, entity);
 
     let registry = world.resource::<TypeRegistry>().clone();
     let mut entries: Vec<&ComponentEntry> = registry

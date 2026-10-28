@@ -52,6 +52,12 @@ pub enum Command {
         before_local: Transform,
         after_local: Transform,
     },
+    /// A material file's parameters ([`crate::material_edit::Params`] as JSON).
+    Material {
+        key: String,
+        before: Value,
+        after: Value,
+    },
     /// Several changes as one step (multi-selection edits, duplicate of many).
     Group(String, Vec<Command>),
 }
@@ -83,6 +89,9 @@ impl Command {
                 format!("Delete {}", saved.doc.name.as_deref().unwrap_or("entity"))
             }
             Command::Reparent { entity, .. } => format!("Reparent {}", who(entity)),
+            Command::Material { key, .. } => {
+                format!("Edit material {}", crate::materials::display_name(key))
+            }
             Command::Group(label, _) => label.clone(),
         }
     }
@@ -109,6 +118,11 @@ impl Command {
                 after_local,
                 ..
             } => reparent(world, *entity, *after, *after_local),
+            Command::Material { key, after, .. } => {
+                let params = serde_json::from_value(after.clone()).map_err(|e| e.to_string())?;
+                crate::material_edit::set(world, key, &params);
+                Ok(())
+            }
             Command::Group(_, commands) => {
                 for c in commands {
                     c.run(world, remap)?;
@@ -165,6 +179,11 @@ impl Command {
                 before_local: after_local,
                 after_local: before_local,
             },
+            Command::Material { key, before, after } => Command::Material {
+                key,
+                before: after,
+                after: before,
+            },
             Command::Group(label, commands) => {
                 Command::Group(label, commands.iter().rev().map(Command::inverse).collect())
             }
@@ -188,7 +207,7 @@ impl Command {
         }
         match self {
             Command::Component { entity, .. } | Command::Rename { entity, .. } => fix(entity),
-            Command::Resource { .. } => {}
+            Command::Resource { .. } | Command::Material { .. } => {}
             Command::Spawned { saved, parent } | Command::Despawned { saved, parent } => {
                 fix_saved(saved, map);
                 if let Some(p) = parent {
@@ -227,6 +246,7 @@ impl Command {
                 after: Some(_),
             } => Some((Some(*entity), name.clone())),
             Command::Resource { name, .. } => Some((None, format!("resource {name}"))),
+            Command::Material { key, .. } => Some((None, format!("material {key}"))),
             Command::Rename { entity, .. } => Some((Some(*entity), "Name".into())),
             Command::Group(label, commands) if label.starts_with("Move") => Some((
                 commands.first().and_then(|c| match c {
@@ -251,6 +271,12 @@ impl Command {
             (
                 Command::Resource { after, .. },
                 Command::Resource {
+                    after: later_after, ..
+                },
+            ) => *after = later_after,
+            (
+                Command::Material { after, .. },
+                Command::Material {
                     after: later_after, ..
                 },
             ) => *after = later_after,

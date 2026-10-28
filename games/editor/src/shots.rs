@@ -1117,6 +1117,144 @@ pub fn round13(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// The entity called `name` under `root`.
+fn find_under(world: &World, root: Entity, name: &str) -> Option<Entity> {
+    let mut stack = vec![root];
+    while let Some(e) = stack.pop() {
+        if world.get::<Name>(e).is_some_and(|n| n.as_str() == name) {
+            return Some(e);
+        }
+        if let Some(children) = world.get::<Children>(e) {
+            stack.extend(children.iter());
+        }
+    }
+    None
+}
+
+/// Select the part called `part` of the placed well.
+fn select_part(world: &mut World, editor: &mut Editor, part: &str) {
+    editor.selection = find(world, "StoneWell")
+        .and_then(|well| find_under(world, well, part))
+        .into_iter()
+        .collect();
+}
+
+/// Edit material file `key` through the history, as the Details panel does.
+fn edit_material(
+    world: &mut World,
+    editor: &mut Editor,
+    key: &str,
+    change: impl FnOnce(&mut crate::material_edit::Params),
+) {
+    let root = world
+        .get_resource::<engine::assets::AssetServer>()
+        .map(|s| s.root())
+        .unwrap_or_default();
+    let Ok((before, _)) = crate::material_edit::read(&root, key) else {
+        return;
+    };
+    let mut after = before.clone();
+    change(&mut after);
+    let (Ok(before), Ok(after)) = (serde_json::to_value(before), serde_json::to_value(after))
+    else {
+        return;
+    };
+    editor::apply(
+        world,
+        editor,
+        crate::undo::Command::Material {
+            key: key.into(),
+            before,
+            after,
+        },
+    );
+    crate::material_edit::flush_all(world);
+}
+
+const STONE: &str = "imported/materials/stonewell_stone/stonewell_stone.material.gltf";
+
+/// Round 14: materials edited in Details. Round 12's well (`ROUND12_MODEL`): its stone gets
+/// tiled and toned down, and the water and bucket, which live inside the model file, are made
+/// editable and turned into water and metal.
+pub fn round14(dir: impl Into<PathBuf>) -> ShotScript {
+    let steps = vec![
+        Step::Camera(DVec3::new(4.0, 2.3, 4.7), DVec3::new(1.6, 0.8, 1.8)),
+        Step::Select(""),
+        // The well as round 12 left it: stone untiled, water and bucket the file's own.
+        Step::Do(Box::new(|world, editor| {
+            let root = world
+                .get_resource::<engine::assets::AssetServer>()
+                .map(|s| s.root())
+                .unwrap_or_default();
+            let folder = PathBuf::from(std::env::var("ROUND12_MODEL").unwrap_or_default());
+            crate::import::import_file(&root, &folder.join("StoneWell.fbx")).ok();
+            if let Ok((mut p, _)) = crate::material_edit::read(&root, STONE) {
+                p.tiling = [1.0, 1.0];
+                p.tint = [1.0; 4];
+                p.normal_strength = 1.0;
+                crate::material_edit::save(&root, STONE, &p).ok();
+            }
+            let mut settings = well_settings(world);
+            settings
+                .materials
+                .retain(|name, _| ["Cobbles", "Stone", "Wood"].contains(&name.as_str()));
+            settings.collider = "box".into();
+            crate::import::save_settings(&root, WELL, &settings).ok();
+            crate::models::place(world, editor, WELL, DVec3::new(1.6, 0.0, 1.8));
+            select_part(world, editor, "Wall");
+        })),
+        Step::Tab(Tab::History),
+        Step::Wait(60),
+        Step::Shot("60_stone_before"),
+        Step::Do(Box::new(|world, editor| {
+            edit_material(world, editor, STONE, |p| {
+                p.tiling = [4.0, 1.5];
+                p.tint = [0.8, 0.78, 0.76, 1.0];
+                p.normal_strength = 1.6;
+            });
+        })),
+        Step::Wait(50),
+        Step::Shot("61_stone_tiled"),
+        // Water and bucket out of the model, then edited.
+        Step::Do(Box::new(|world, editor| {
+            let root = world
+                .get_resource::<engine::assets::AssetServer>()
+                .map(|s| s.root())
+                .unwrap_or_default();
+            let names = crate::remap::file_materials(&root.join(WELL));
+            let index = |n: &str| names.iter().position(|m| m.name == n);
+            if let Some(i) = index("Water")
+                && let Some(key) = crate::material_edit::make_editable(world, editor, WELL, i)
+            {
+                edit_material(world, editor, &key, |p| {
+                    p.tint = [0.02, 0.07, 0.08, 1.0];
+                    p.roughness = 0.03;
+                    p.metallic = 0.0;
+                });
+            }
+            if let Some(i) = index("Bucket_Metal")
+                && let Some(key) = crate::material_edit::make_editable(world, editor, WELL, i)
+            {
+                edit_material(world, editor, &key, |p| {
+                    p.tint = [0.62, 0.6, 0.56, 1.0];
+                    p.roughness = 0.32;
+                    p.metallic = 1.0;
+                });
+            }
+            select_part(world, editor, "Bucket");
+        })),
+        Step::Wait(80),
+        Step::Shot("62_water_and_bucket"),
+        Step::Camera(DVec3::new(2.6, 1.7, 3.4), DVec3::new(1.6, 0.7, 1.8)),
+        Step::Do(Box::new(|world, editor| {
+            select_part(world, editor, "Water")
+        })),
+        Step::Wait(40),
+        Step::Shot("63_close_up"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {
