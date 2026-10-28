@@ -487,6 +487,15 @@ fn releases_assets(key: &str) -> bool {
         || std::env::var("SHOWCASE_RELEASE_ASSETS").is_ok_and(|v| v == "all")
 }
 
+/// A cell's module unload hook (`StreamCell::on_unload`), for what the module keeps outside
+/// the entities the zone spawned.
+pub fn unload_hook(key: &str) -> Option<fn(&mut World)> {
+    match key {
+        "water" => Some(engine_water::demo::unload_demo),
+        _ => None,
+    }
+}
+
 /// Cells with no far-view proxy ([`ZoneCell::proxy`]).
 const NO_PROXY: [&str; 3] = ["yard_sailboat", "yard_rinse", "meadow"];
 

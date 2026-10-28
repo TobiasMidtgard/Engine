@@ -298,6 +298,9 @@ const STEPS: [Step; 13] = [
             if cell.release_assets {
                 streamed = streamed.release_assets();
             }
+            if let Some(unload) = zones::unload_hook(cell.key) {
+                streamed = streamed.on_unload(unload);
+            }
             // A merged far-view mesh stands in for an unloaded zone (the streaming core's
             // proxies), kept on disk so later runs show it before the zone is visited.
             streamed = if cell.proxy {

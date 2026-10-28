@@ -1021,7 +1021,7 @@ impl CliffField {
         let ch = 0.6f32;
         let cnu = ((u1 - u0) / ch).ceil() as usize + 2;
         let cns = ((s1 - s0) / ch).ceil() as usize + 2;
-        let mut coarse = vec![[0.0f32; 4]; cnu * cns];
+        let mut coarse = vec![[0.0f32; 5]; cnu * cns];
         par_each(&mut coarse, |idx, out| {
             let (ci, cj) = (idx / cns, idx % cns);
             let (u, s) = (u0 + ci as f32 * ch, s0 + cj as f32 * ch);
@@ -1030,9 +1030,12 @@ impl CliffField {
             let hu = uncarved_height(land, p.x, p.y) as f32;
             let mut c = 1.0e3f32;
             let mut funnel = 0.0f32;
+            // How far outside the water's width this point is, m (negative inside it).
+            let mut beside = f32::MAX;
             for st in &land.streams {
                 if let Some((d, bed)) = st.closest(p) {
                     let d = d as f32;
+                    beside = beside.min(d - st.width as f32 * 0.5);
                     if d < 14.0 {
                         c = c.min(bed as f32 - 0.25 + (d - 2.3).max(0.0) * 1.2);
                     }
@@ -1054,8 +1057,39 @@ impl CliffField {
             // showed through as a smooth slab beside the falls with a dark seam at the rock).
             let carved = (hu - g).max(0.0);
             c = c.max(g + 2.0 * (1.0 - smoothstep(0.05, 0.6, carved)));
-            *out = [g, hu, c, funnel];
+            *out = [g, hu, c, funnel, beside];
         });
+        // Beside the water the rock still covers the carved ground: cut down to the stream's
+        // bed there, it left the terrain's carved bank up to 0.9 m in front of the rock beside
+        // the lip, rock-textured and seamed, which read as terrain clipping through the cliff
+        // (playtest 2026-10-27 #3). The bank is steep, so the rock rises over the highest
+        // ground a cell around it, not just the ground under it.
+        let banks: Vec<f32> = (0..cnu * cns)
+            .map(|idx| {
+                let (ci, cj) = (idx / cns, idx % cns);
+                let [_, _, c, _, beside] = coarse[idx];
+                let cover = smoothstep(0.0, 0.75, beside);
+                if cover <= 0.0 {
+                    return c;
+                }
+                let mut high = f32::MIN;
+                for di in -1i32..=1 {
+                    for dj in -1i32..=1 {
+                        let (ni, nj) = (ci as i32 + di, cj as i32 + dj);
+                        if ni >= 0 && nj >= 0 && (ni as usize) < cnu && (nj as usize) < cns {
+                            let n = coarse[ni as usize * cns + nj as usize];
+                            if n[4] > 0.0 {
+                                high = high.max(n[0]);
+                            }
+                        }
+                    }
+                }
+                c.max(high + 0.15 - 2.0 * (1.0 - cover))
+            })
+            .collect();
+        for (c, b) in coarse.iter_mut().zip(banks) {
+            c[2] = b;
+        }
         let coarse_at = |u: f32, s: f32, k: usize| {
             let fu = ((u - u0) / ch).clamp(0.0, (cnu - 1) as f32 - 1e-3);
             let fs = ((s - s0) / ch).clamp(0.0, (cns - 1) as f32 - 1e-3);
@@ -1816,6 +1850,48 @@ mod tests {
         assert!(
             worst.0 < 0.1,
             "the ground stands {:.2} m in front of the rock {:.1} m along from the falls, {:.0}% up",
+            worst.0,
+            worst.1,
+            worst.2 * 100.0
+        );
+    }
+
+    #[test]
+    fn the_cliff_covers_the_ground_the_falls_carved() {
+        // Beside the lip the stream has carved the ground down the cliff wider than its
+        // water; the rock stands over that carved bank, or it shows beside the falls as
+        // terrain clipping the cliff (playtest 2026-10-27 #3).
+        let land = crate::zones::landscape(7);
+        let cliff = cliff_meshes(&land, CLIFF_VOXEL);
+        let f = &cliff.fields[0];
+        let falls = f.falls.as_ref().expect("the falls are on the first scarp");
+        let mut worst = (0.0f32, 0.0f32, 0.0f32);
+        for k in -40..=40 {
+            let u = falls.u + k as f32 * 0.25;
+            let i = (((u - f.u0) / f.h).round() as usize).min(f.nu - 1);
+            let (low, height) = (f.low[i], f.height[i].max(1.0));
+            for j in 0..=200 {
+                let s = -8.0 + j as f32 * 0.1;
+                let w = f.world(u as f64, s as f64);
+                let y = land.height(w.x, w.y);
+                let t = (y as f32 - low) / height;
+                let carved = uncarved_height(&land, w.x, w.y) - y > 0.05;
+                let beside = land
+                    .streams
+                    .iter()
+                    .filter_map(|st| Some(st.closest(w)?.0 - st.width * 0.5))
+                    .fold(f64::MAX, f64::min);
+                if (0.3..0.98).contains(&t) && carved && beside > 1.0 {
+                    let air = f.sample(u, s, y as f32 + 0.05);
+                    if air > worst.0 {
+                        worst = (air, u - falls.u, t);
+                    }
+                }
+            }
+        }
+        assert!(
+            worst.0 < 0.15,
+            "the carved ground stands {:.2} m in front of the rock {:.1} m along from the falls, {:.0}% up",
             worst.0,
             worst.1,
             worst.2 * 100.0
