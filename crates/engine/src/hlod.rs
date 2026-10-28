@@ -99,6 +99,9 @@ pub struct Proxies {
     material: Option<Handle<StandardMaterial>>,
     /// Bake mode: the cell pinned in for its capture.
     baking: Option<usize>,
+    /// Bake mode: cells pinned out after their capture (kept ones too), so memory stays at
+    /// about one cell; unpinned when the bake ends.
+    baked_out: Vec<String>,
     /// Bake mode: every versioned cell has its proxy.
     pub baked: bool,
 }
@@ -476,8 +479,10 @@ fn bake(
         world
             .resource_mut::<StreamedCells>()
             .pins
-            .remove(&cells[i].0);
-        world.resource_mut::<Proxies>().baking = None;
+            .insert(cells[i].0.clone(), false);
+        let mut proxies = world.resource_mut::<Proxies>();
+        proxies.baking = None;
+        proxies.baked_out.push(cells[i].0.clone());
     }
     let next = (0..cells.len()).find(|&i| {
         let c = configs.get(i).copied().unwrap_or_default();
@@ -493,6 +498,20 @@ fn bake(
             world.resource_mut::<Proxies>().baking = Some(i);
         }
         None => {
+            // Done once the last ones are out too.
+            let leaving = world.resource::<Proxies>().baked_out.iter().any(|key| {
+                cells
+                    .iter()
+                    .any(|(k, _, state)| k == key && *state != CellState::Unloaded)
+            });
+            if leaving {
+                return;
+            }
+            let out = std::mem::take(&mut world.resource_mut::<Proxies>().baked_out);
+            let mut streamed = world.resource_mut::<StreamedCells>();
+            for key in out {
+                streamed.pins.remove(&key);
+            }
             world.resource_mut::<Proxies>().baked = true;
             engine_core::log::info!("hlod bake: done");
         }
@@ -984,10 +1003,15 @@ mod tests {
             // A bake: every versioned cell loads once, in turn, and leaves its proxy on disk.
             let mut app = app(&dir);
             app.world.resource_mut::<HlodSettings>().bake = true;
-            app.stream_cell(cell());
+            // Kept cells too: each goes out after its capture, so a bake holds one at a time.
+            app.stream_cell(cell().keep_loaded());
             let player = app.world.spawn(StreamingSource::default()).id();
             place(&mut app, player, 0.0);
             until(&mut app, |app| app.world.resource::<Proxies>().baked);
+            assert_eq!(
+                app.world.resource::<StreamedCells>().cells[0].state,
+                CellState::Unloaded
+            );
             assert!(app.world.resource::<StreamedCells>().pins.is_empty());
         }
         assert!(dir.join(format!("hut-{:016x}.hlod", 7)).exists());
