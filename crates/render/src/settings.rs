@@ -244,16 +244,20 @@ pub struct RenderSettings {
     /// meshes around it, so rooms, caves and streets at night get light bounced off everything
     /// near, on screen or not: a sunlit patch on the floor lights the ceiling, a torch the walls
     /// around it, and closed rooms keep the sky out without a `SkyLightVolume`. Where the grid
-    /// covers, it replaces the sky visibility guess for diffuse ambient light. Off by default
-    /// for now (`ENGINE_PROBE_GI=on` turns it on in any game); `render.gi.*` diagnostics.
+    /// covers, it replaces the sky visibility guess for diffuse ambient light. On from High
+    /// quality (`ENGINE_PROBE_GI=on|off` overrides it in any game); `render.gi.*` diagnostics.
     pub probe_gi: bool,
     /// Meters between probes (smaller: finer light, a smaller grid).
     pub gi_probe_spacing: f32,
     /// Probes along x, y and z (at most 16 384 in all).
     pub gi_probe_grid: [u32; 3],
-    /// Probes traced per frame (probes the camera's move brings in first, then the rest in
-    /// turn).
+    /// Probes traced per frame at most (probes the camera's move brings in first, then the rest
+    /// in turn).
     pub gi_probes_per_frame: u32,
+    /// GPU milliseconds a frame the probes may take: timestamps measure their cost per ray and
+    /// each frame traces the probes that fit, up to `gi_probes_per_frame`. 0, a software GPU or
+    /// a GPU without timestamps: always `gi_probes_per_frame`.
+    pub gi_budget_ms: f32,
     /// Rays per traced probe, 16..256.
     pub gi_rays_per_probe: u32,
     /// How much of a probe's light carries over to its next update, 0..0.995 (higher: smoother,
@@ -470,10 +474,11 @@ impl Default for RenderSettings {
             world_reflections: true,
             screen_space_gi: true,
             gi_intensity: 1.0,
-            probe_gi: false,
+            probe_gi: true,
             gi_probe_spacing: 1.5,
             gi_probe_grid: [32, 16, 32],
             gi_probes_per_frame: 2048,
+            gi_budget_ms: 1.5,
             gi_rays_per_probe: 64,
             gi_hysteresis: 0.9,
             gi_shadowed_lights: 8,
@@ -611,6 +616,7 @@ impl RenderSettings {
         s.screen_space_reflections &= quality.allows(0.75);
         s.screen_space_gi &= quality.allows(1.0);
         s.probe_gi &= quality.allows(1.0);
+        s.gi_budget_ms = self.gi_budget_ms * effects.max(1.0);
         s.ambient_occlusion &= quality.allows(0.5);
         s.max_point_lights =
             ((self.max_point_lights as f32 * effects.clamp(0.25, 1.0)) as u32).max(8);

@@ -94,7 +94,11 @@ fn scene_app_with_ground(
 }
 
 fn roof_app(occlusion: bool, debug: DebugView) -> App {
-    scene_app(&[CARPORT, HOUSE], debug, |s| s.sky_occlusion = occlusion)
+    scene_app(&[CARPORT, HOUSE], debug, |s| {
+        s.sky_occlusion = occlusion;
+        // The sky occlusion map on its own: probe GI's rays find the roof either way.
+        s.probe_gi = false;
+    })
 }
 
 fn render(app: &mut App, name: &str) -> Option<RgbaImage> {
@@ -329,6 +333,8 @@ fn a_closed_room_isnt_lit_by_the_ground_outside() {
         s.film_grain = 0.0;
         s.saturation = 1.0;
         s.screen_space_gi = false;
+        // The sky light guess on its own (probe GI replaces it where its grid covers).
+        s.probe_gi = false;
     });
     app.world.resource_mut::<Atmosphere>().ground_color = [0.02, 0.4, 0.02];
     app.world.spawn((

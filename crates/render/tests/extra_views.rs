@@ -48,6 +48,9 @@ fn app(window: UVec2, pipelining: Pipelining) -> App {
         s.anti_aliasing = AntiAliasing::None;
         s.film_grain = 0.0;
         s.pipelining = pipelining;
+        // Probe GI lights only the main view, so a camera alone (the main view) and the same
+        // camera as an inset would differ by the bounce light.
+        s.probe_gi = false;
     }
     app
 }

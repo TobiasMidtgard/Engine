@@ -1,13 +1,22 @@
 //! Probe GI: dynamic diffuse global illumination (DDGI, Majercik et al. 2019) without
 //! ray-tracing hardware. A grid of probes scrolls with the camera; each frame a share of them
 //! shoots rays against a software hierarchy of the meshes around (`bvh.rs`): one per mesh, built
-//! when it first shows up, and one over the instances near the grid, rebuilt every frame. A hit
+//! when it first shows up (large meshes on a worker thread), and one over the instances near
+//! the grid. A hit
 //! is lit by the sun and the point lights through shadow rays, by its own glow and by last
 //! frame's probes (so light bounces more than once over frames); a miss sees the environment
 //! map. `cs_update` blends the rays into each probe's octahedral irradiance and distance maps
 //! (the atlas, frame binding 23), and `probe_gi` in lib_frame.wgsl lights every surface from
 //! the eight probes around it, with DDGI's visibility weights so light doesn't leak through
 //! walls. See /engine-design/dynamic-gi.md in the project files for the research behind it.
+//!
+//! Made cheap enough to be on by default (/engine-design/world-gi-on.md): the instances are
+//! gathered again only when a mesh entity changes (by change ticks), a mesh or material asset
+//! changes, or the camera leaves the snapped region; they stay relative to an anchor that moves
+//! in 64 m steps, so a moving camera leaves them as they are. The hierarchies are packed in one
+//! store that only appends what's new. Each frame traces the probes that fit
+//! `RenderSettings::gi_budget_ms` at the cost per ray timestamps measured, and probes with
+//! nothing near sleep (Majercik et al. 2021).
 //!
 //! The same scene gives world reflections (`encode_reflections`, `RenderSettings::
 //! world_reflections`): what screen-space reflections can't see is traced at half resolution and
@@ -21,6 +30,7 @@ mod bvh;
 
 use std::collections::HashMap;
 
+use bevy_ecs::change_detection::Tick;
 use bytemuck::{Pod, Zeroable};
 use engine_core::prelude::*;
 
@@ -40,8 +50,23 @@ pub(crate) const MAX_PROBES: u32 = TILES_X * TILES_X;
 /// Rays per probe at most (`MAX_RAYS` in probe_gi.wgsl).
 const MAX_RAYS: u32 = 256;
 const ATLAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-/// Triangles whose hierarchies may be built per frame (at least one mesh is, however large).
-const BUILD_TRIANGLES_PER_FRAME: usize = 150_000;
+/// Triangles whose hierarchies may be built per frame on the render thread (at least one mesh
+/// is).
+const BUILD_TRIANGLES_PER_FRAME: usize = 60_000;
+/// Meshes with more triangles than this build on a worker thread instead.
+const INLINE_BUILD_TRIANGLES: usize = 20_000;
+/// Worker builds at once.
+const MAX_BUILD_JOBS: usize = 2;
+/// Meters between the anchors instances are kept relative to.
+const ANCHOR_CELL: f64 = 64.0;
+/// Meters the region instances are gathered from snaps to.
+const REGION_SNAP: f64 = 8.0;
+/// Frames between gathers of a scene that didn't change (texture colors arrive late).
+const REGATHER_FRAMES: u64 = 240;
+/// Probes a frame at least under a time budget.
+const MIN_PROBES_PER_FRAME: u32 = 128;
+/// Probes a frame under a time budget before timestamps measured their cost.
+const UNMEASURED_PROBES_PER_FRAME: u32 = 512;
 /// Frames a mesh's hierarchy stays after its last use.
 const KEEP_UNUSED_FRAMES: u64 = 600;
 
@@ -53,6 +78,7 @@ struct GiPass {
     rotation: [[f32; 4]; 3],
     params: [f32; 4],
     world_origin: [i32; 4],
+    anchor: [f32; 4],
 }
 
 /// `Instance` in probe_gi.wgsl.
@@ -65,16 +91,148 @@ struct GpuInstance {
     emissive: [f32; 4],
 }
 
-/// A mesh's hierarchy and where it sits in the shared buffers.
+/// A mesh's hierarchy: where it sits in the shared buffers ([`BlasStore`]).
 struct MeshEntry {
     version: u64,
-    bvh: bvh::MeshBvh,
     root: u32,
     first_triangle: u32,
+    /// Its nodes and triangle corners in the store.
+    nodes: u32,
+    corners: u32,
     last_used: u64,
-    /// In this frame's hierarchy upload (false: left out for the GPU's binding limit).
+    /// In the store (false: left out for the GPU's binding limit).
     uploaded: bool,
+    /// No triangles: nothing to hit.
+    empty: bool,
 }
+
+/// A hierarchy building on a worker thread.
+struct BuildJob {
+    version: u64,
+    job: std::thread::JoinHandle<bvh::MeshBvh>,
+}
+
+/// Every mesh's hierarchy, packed one after another as the GPU reads them (node and triangle
+/// indices inside one are relative to its first, so hierarchies can move). New ones append, and
+/// only what was appended is uploaded; forgotten ones leave gaps until a compaction.
+#[derive(Default)]
+struct BlasStore {
+    nodes: Vec<bvh::Node>,
+    /// Three corners per triangle.
+    corners: Vec<[f32; 4]>,
+    /// Nodes and corners of forgotten hierarchies.
+    dead_nodes: usize,
+    dead_corners: usize,
+    /// How much of each the GPU holds: a prefix, the rest is new.
+    gpu_nodes: usize,
+    gpu_corners: usize,
+    /// Bumped when hierarchies move (a compaction): gather the instances again.
+    layout: u64,
+}
+
+impl BlasStore {
+    /// Append a hierarchy: its first node and first triangle, or `None` past `limit` bytes.
+    fn add(&mut self, bvh: &bvh::MeshBvh, limit: u64) -> Option<(u32, u32)> {
+        let nodes = (self.nodes.len() + bvh.nodes.len()) * size_of::<bvh::Node>();
+        let corners = (self.corners.len() + bvh.triangles.len()) * 16;
+        if nodes as u64 > limit || corners as u64 > limit {
+            return None;
+        }
+        let at = (self.nodes.len() as u32, (self.corners.len() / 3) as u32);
+        self.nodes.extend_from_slice(&bvh.nodes);
+        self.corners.extend_from_slice(&bvh.triangles);
+        Some(at)
+    }
+
+    /// Close the gaps: copy every stored hierarchy down, in `meshes` order.
+    fn compact(&mut self, meshes: &mut HashMap<u32, MeshEntry>) {
+        let mut nodes = Vec::with_capacity(self.nodes.len() - self.dead_nodes);
+        let mut corners = Vec::with_capacity(self.corners.len() - self.dead_corners);
+        for e in meshes.values_mut().filter(|e| e.uploaded) {
+            let n = e.root as usize;
+            let c = e.first_triangle as usize * 3;
+            e.root = nodes.len() as u32;
+            e.first_triangle = (corners.len() / 3) as u32;
+            nodes.extend_from_slice(&self.nodes[n..n + e.nodes as usize]);
+            corners.extend_from_slice(&self.corners[c..c + e.corners as usize]);
+        }
+        self.nodes = nodes;
+        self.corners = corners;
+        self.dead_nodes = 0;
+        self.dead_corners = 0;
+        self.gpu_nodes = 0;
+        self.gpu_corners = 0;
+        self.layout += 1;
+    }
+
+    /// Upload what the GPU doesn't hold yet; true when a buffer was recreated.
+    fn upload(&mut self, active: &mut Active, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
+        let mut regroup = false;
+        if self.gpu_nodes < self.nodes.len() {
+            regroup |= append(&mut active.blas, device, queue, &self.nodes, self.gpu_nodes);
+            self.gpu_nodes = self.nodes.len();
+        }
+        if self.gpu_corners < self.corners.len() {
+            regroup |= append(
+                &mut active.triangles,
+                device,
+                queue,
+                &self.corners,
+                self.gpu_corners,
+            );
+            self.gpu_corners = self.corners.len();
+        }
+        regroup
+    }
+}
+
+/// Write `data[held..]` after the `held` items `buffer` holds, or all of it where it doesn't fit;
+/// true when the buffer was recreated.
+fn append<T: Pod>(
+    buffer: &mut GrowBuffer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    data: &[T],
+    held: usize,
+) -> bool {
+    let bytes: &[u8] = bytemuck::cast_slice(data);
+    if held == 0 || bytes.len() as u64 > buffer.capacity() {
+        return buffer.write(device, queue, bytes);
+    }
+    let from = held * size_of::<T>();
+    queue.write_buffer(&buffer.buffer, from as u64, &bytes[from..]);
+    false
+}
+
+/// What the instances were last gathered for: gather again when any of it changes.
+#[derive(Clone, Copy, PartialEq)]
+struct GatherKey {
+    /// The anchor's cell and the region (in `REGION_SNAP` cells).
+    anchor: IVec3,
+    region: (IVec3, IVec3),
+    /// The mesh and material assets' latest versions and removals.
+    meshes: (u64, u64),
+    materials: (u64, u64),
+    layout: u64,
+}
+
+/// The instances near the grid as last gathered (on the GPU with their hierarchy).
+struct Gathered {
+    key: GatherKey,
+    frame: u64,
+    instances: u32,
+    /// Meshes were left for later (the frame's build budget, busy workers): gather again.
+    incomplete: bool,
+}
+
+/// What the instance gather reads; only change ticks while nothing changed.
+type GatherQuery = (
+    Ref<'static, GlobalTransform>,
+    Ref<'static, crate::MeshRenderer>,
+    Ref<'static, crate::ResolvedMesh>,
+);
+/// Skinned meshes are left out: the rays would see their bind pose.
+type GatherFilter = Without<crate::GpuSkin>;
 
 /// The probes' placement: `dims` probes `spacing` apart from world probe `origin` (probe `i` of
 /// the world lattice sits at `(i + 0.5) * spacing`).
@@ -139,12 +297,22 @@ pub(crate) struct ProbeGi {
     atlas_view: wgpu::TextureView,
     active: Option<Active>,
     meshes: HashMap<u32, MeshEntry>,
+    store: BlasStore,
+    /// Hierarchies of large meshes building on workers, by mesh index.
+    jobs: HashMap<u32, BuildJob>,
     /// Each mesh's local bounds by version, to leave meshes away from the grid unbuilt.
     bounds: HashMap<u32, (u64, (Vec3, Vec3))>,
-    /// Triangles left out of the last upload for the binding limit (warned once).
+    /// Triangles left out for the binding limit (warned once).
     left_out_warned: bool,
-    /// The meshes' hierarchies changed: upload them again.
-    blas_dirty: bool,
+    gathered: Option<Gathered>,
+    query: Option<QueryState<GatherQuery, GatherFilter>>,
+    /// The world's change tick at the last gather check, and the mesh entities it found.
+    tick: Option<Tick>,
+    entities: usize,
+    /// Measured GPU milliseconds per thousand probe rays (0: not yet), and rays traced a frame
+    /// lately (a moving average, as the measurements arrive a few frames late).
+    ms_per_kray: f32,
+    rays_lately: f32,
     grid: Option<Grid>,
     /// Bumped when every probe's history is void (a jump, a new grid): `probe_gi` ignores probes
     /// last written in another epoch.
@@ -162,6 +330,8 @@ struct Stats {
     instances: u32,
     meshes: u32,
     built_triangles: u32,
+    building: u32,
+    gathered: bool,
     build_ms: f32,
     extract_ms: f32,
 }
@@ -257,9 +427,16 @@ impl ProbeGi {
             atlas_view,
             active: None,
             meshes: HashMap::new(),
+            store: BlasStore::default(),
+            jobs: HashMap::new(),
             bounds: HashMap::new(),
             left_out_warned: false,
-            blas_dirty: true,
+            gathered: None,
+            query: None,
+            tick: None,
+            entities: 0,
+            ms_per_kray: 0.0,
+            rays_lately: 0.0,
             grid: None,
             epoch: 1,
             cursor: 0,
@@ -413,8 +590,130 @@ impl ProbeGi {
             updates: GrowBuffer::new(device, "probe gi updates", usage, 4096),
             group: None,
         });
-        self.blas_dirty = true;
+        // The new buffers hold nothing yet.
+        self.store.gpu_nodes = 0;
+        self.store.gpu_corners = 0;
+        self.gathered = None;
         self.grid = None;
+    }
+
+    /// A GPU time for the latest probe pass the timestamps measured (milliseconds).
+    pub fn measured(&mut self, ms: f32) {
+        if self.rays_lately < 1000.0 || !ms.is_finite() || ms <= 0.0 {
+            return;
+        }
+        let sample = (ms / (self.rays_lately / 1000.0)).clamp(1e-5, 100.0);
+        self.ms_per_kray = if self.ms_per_kray > 0.0 {
+            self.ms_per_kray * 0.8 + sample * 0.2
+        } else {
+            sample
+        };
+    }
+
+    /// Probes to trace this frame: what fits `gi_budget_ms` at the measured cost, up to
+    /// `gi_probes_per_frame` (always that many without a budget, timestamps or a hardware GPU).
+    fn probes_this_frame(&self, shared: &GpuShared, settings: &RenderSettings, count: u32) -> u32 {
+        let most = settings.gi_probes_per_frame.clamp(1, count);
+        let budgeted = settings.gi_budget_ms > 0.0
+            && shared.adapter_info.device_type != wgpu::DeviceType::Cpu
+            && shared
+                .device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY);
+        if !budgeted {
+            return most;
+        }
+        let least = MIN_PROBES_PER_FRAME.min(most);
+        if self.ms_per_kray <= 0.0 {
+            return UNMEASURED_PROBES_PER_FRAME.clamp(least, most);
+        }
+        let rays = settings.gi_rays_per_probe.clamp(16, MAX_RAYS) as f32;
+        let fit = settings.gi_budget_ms / self.ms_per_kray * 1000.0 / rays;
+        (fit as u32).clamp(least, most)
+    }
+
+    /// Store the hierarchies the workers finished; true when any did.
+    fn collect_builds(&mut self, limit: u64) -> bool {
+        let done: Vec<u32> = self
+            .jobs
+            .iter()
+            .filter(|(_, j)| j.job.is_finished())
+            .map(|(k, _)| *k)
+            .collect();
+        for key in &done {
+            let Some(BuildJob { version, job }) = self.jobs.remove(key) else {
+                continue;
+            };
+            match job.join() {
+                Ok(bvh) => self.add_mesh(*key, version, bvh, limit),
+                Err(_) => tracing::warn!("probe GI: building a mesh's hierarchy failed"),
+            }
+        }
+        !done.is_empty()
+    }
+
+    /// Store mesh `key`'s hierarchy (replacing an older version's).
+    fn add_mesh(&mut self, key: u32, version: u64, bvh: bvh::MeshBvh, limit: u64) {
+        if let Some(old) = self.meshes.remove(&key) {
+            self.forget(&old);
+        }
+        let root = bvh.nodes[0];
+        let empty = root.count == 0 && root.min[0] > root.max[0];
+        let at = self.store.add(&bvh, limit);
+        if at.is_none() && !self.left_out_warned {
+            self.left_out_warned = true;
+            tracing::warn!(
+                "probe GI: the meshes near the grid don't fit one GPU binding ({} MB); the rays \
+                 miss some",
+                limit >> 20
+            );
+        }
+        let (root, first_triangle) = at.unwrap_or((0, 0));
+        self.meshes.insert(
+            key,
+            MeshEntry {
+                version,
+                root,
+                first_triangle,
+                nodes: bvh.nodes.len() as u32,
+                corners: bvh.triangles.len() as u32,
+                last_used: self.frame,
+                uploaded: at.is_some(),
+                empty,
+            },
+        );
+    }
+
+    fn forget(&mut self, e: &MeshEntry) {
+        if e.uploaded {
+            self.store.dead_nodes += e.nodes as usize;
+            self.store.dead_corners += e.corners as usize;
+        }
+    }
+
+    /// Forget the hierarchies of meshes no gather used in a while, and close the gaps once
+    /// they're most of the store.
+    fn forget_unused(&mut self) {
+        let frame = self.frame;
+        let gone: Vec<u32> = self
+            .meshes
+            .iter()
+            .filter(|(_, e)| frame - e.last_used >= KEEP_UNUSED_FRAMES)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in gone {
+            if let Some(e) = self.meshes.remove(&key) {
+                self.forget(&e);
+            }
+        }
+        let store = &self.store;
+        if store.dead_nodes > 4096 && store.dead_nodes * 2 > store.nodes.len() {
+            self.store.compact(&mut self.meshes);
+        }
+        if self.bounds.len() > 4 * self.meshes.len() + 1024 {
+            let meshes = &self.meshes;
+            self.bounds.retain(|k, _| meshes.contains_key(k));
+        }
     }
 
     /// The main view's half on the main thread: place the grid, gather the instances near it,
@@ -459,7 +758,7 @@ impl ProbeGi {
             origin,
         };
         let count = grid.count();
-        let per_frame = settings.gi_probes_per_frame.clamp(1, count);
+        let per_frame = self.probes_this_frame(shared, settings, count);
         let rays = settings.gi_rays_per_probe.clamp(16, MAX_RAYS);
 
         // Probes that scrolled in go first, then the rest in turn.
@@ -495,30 +794,73 @@ impl ProbeGi {
             self.cursor = (self.cursor + 1) % count;
         }
 
-        // Instances near the grid.
-        let build_started = std::time::Instant::now();
-        let mut built = 0usize;
+        // Hierarchies the workers finished.
+        let limit = shared.device.limits().max_storage_buffer_binding_size;
+        let mut scene_changed = self.collect_builds(limit);
+
+        // Instances are kept relative to an anchor that moves in whole cells, and gathered from a
+        // region snapped outward, so a moving camera changes neither most frames.
+        let anchor_cell = (view.origin / ANCHOR_CELL).floor();
+        let anchor = anchor_cell * ANCHOR_CELL;
         // Probes sit between whole multiples of the spacing: level design snaps walls and floors
         // to whole meters, and a probe on a surface sees through it along its plane.
-        let rel_origin = (origin.as_dvec3() + 0.5) * spacing - view.origin;
-        let margin = (spacing * 16.0) as f32;
+        let first_probe = (origin.as_dvec3() + 0.5) * spacing;
+        let rel_origin = first_probe - view.origin;
+        let margin = spacing * 16.0;
+        let lo = ((first_probe - margin) / REGION_SNAP).floor();
+        let hi = ((first_probe + (dims - 1).as_dvec3() * spacing + margin) / REGION_SNAP).ceil();
         let region = (
-            rel_origin.as_vec3() - margin,
-            (rel_origin + (dims - 1).as_dvec3() * spacing).as_vec3() + margin,
+            (lo * REGION_SNAP - anchor).as_vec3(),
+            (hi * REGION_SNAP - anchor).as_vec3(),
         );
-        let mut found: Vec<(GpuInstance, (Vec3, Vec3))> = Vec::new();
-        // Skinned meshes are left out: the rays would see their bind pose.
-        let mut query = world.query_filtered::<
-            (&crate::ResolvedMesh, &GlobalTransform, &crate::MeshRenderer),
-            Without<crate::GpuSkin>,
-        >();
+        // Which mesh entities changed, from their change ticks alone.
+        let mut query = self.query.take().unwrap_or_else(|| world.query_filtered());
+        let (touched, entities) = match self.tick {
+            Some(tick) => world.last_change_tick_scope(tick, |w| {
+                let mut touched = false;
+                let mut n = 0usize;
+                for (transform, renderer, resolved) in query.iter(w) {
+                    n += 1;
+                    touched |=
+                        transform.is_changed() || renderer.is_changed() || resolved.is_changed();
+                }
+                (touched, n)
+            }),
+            None => (true, 0),
+        };
+        // Changes from here on get a newer tick, so the next frame finds them.
+        self.tick = Some(world.increment_change_tick());
+        scene_changed |= touched || entities != self.entities;
+        self.entities = entities;
         let world: &World = world;
         let meshes = world.get_resource::<Assets<Mesh>>();
         let materials = world.get_resource::<Assets<StandardMaterial>>();
-        let images = world.get_resource::<Assets<crate::Image>>();
-        let default_material = StandardMaterial::default();
-        if let Some(meshes) = meshes {
-            for (resolved, transform, renderer) in query.iter(world) {
+        let mut key = GatherKey {
+            anchor: anchor_cell.as_ivec3(),
+            region: (lo.as_ivec3(), hi.as_ivec3()),
+            meshes: meshes.map_or((0, 0), |m| (m.latest_version(), m.removals())),
+            materials: materials.map_or((0, 0), |m| (m.latest_version(), m.removals())),
+            layout: self.store.layout,
+        };
+
+        let regather = scene_changed
+            || self.gathered.as_ref().is_none_or(|g| {
+                g.key != key || g.incomplete || self.frame >= g.frame + REGATHER_FRAMES
+            });
+
+        let build_started = std::time::Instant::now();
+        if regather {
+            // Before gathering: a compaction moves hierarchies, so it can't come after.
+            self.forget_unused();
+            key.layout = self.store.layout;
+        }
+        let mut built = 0usize;
+        let mut found: Vec<(GpuInstance, (Vec3, Vec3))> = Vec::new();
+        let mut incomplete = false;
+        if regather && let Some(meshes) = meshes {
+            let images = world.get_resource::<Assets<crate::Image>>();
+            let default_material = StandardMaterial::default();
+            for (transform, renderer, resolved) in query.iter(world) {
                 if !renderer.visible {
                     continue;
                 }
@@ -547,47 +889,58 @@ impl ProbeGi {
                 if local.0.cmpgt(local.1).any() {
                     continue;
                 }
-                let bounds = world_box(local, &transform.0, view.origin);
+                let bounds = world_box(local, &transform.0, anchor);
                 if bounds.1.cmplt(region.0).any() || bounds.0.cmpgt(region.1).any() {
                     continue;
                 }
-                let entry = match self.meshes.get_mut(&key) {
-                    Some(e) if e.version == version => e,
-                    _ => {
-                        let Some(mesh) = meshes.get(handle) else {
-                            continue;
-                        };
-                        let triangles = mesh.indices.len() / 3;
-                        if built > 0 && built + triangles > BUILD_TRIANGLES_PER_FRAME {
-                            continue;
-                        }
-                        built += triangles;
-                        let positions: Vec<[f32; 3]> =
-                            mesh.vertices.iter().map(|v| v.position).collect();
-                        let bvh = bvh::build_mesh(&positions, &mesh.indices);
-                        self.blas_dirty = true;
-                        self.meshes.insert(
-                            key,
-                            MeshEntry {
-                                version,
-                                bvh,
-                                root: 0,
-                                first_triangle: 0,
-                                last_used: self.frame,
-                                uploaded: false,
-                            },
-                        );
-                        self.meshes.get_mut(&key).expect("just inserted")
+                let current = self.meshes.get(&key).is_some_and(|e| e.version == version);
+                if !current {
+                    if self.jobs.get(&key).is_some_and(|j| j.version == version) {
+                        // Still building.
+                        continue;
                     }
+                    let Some(mesh) = meshes.get(handle) else {
+                        continue;
+                    };
+                    let triangles = mesh.indices.len() / 3;
+                    let positions: Vec<[f32; 3]> =
+                        mesh.vertices.iter().map(|v| v.position).collect();
+                    if triangles > INLINE_BUILD_TRIANGLES {
+                        // Large meshes build on a worker; the rays miss them until it's done.
+                        if self.jobs.len() < MAX_BUILD_JOBS {
+                            let indices = mesh.indices.clone();
+                            match std::thread::Builder::new()
+                                .name("probe gi bvh".into())
+                                .spawn(move || bvh::build_mesh(&positions, &indices))
+                            {
+                                Ok(job) => {
+                                    self.jobs.insert(key, BuildJob { version, job });
+                                }
+                                Err(e) => tracing::warn!("probe GI: no worker for a mesh: {e}"),
+                            }
+                        } else {
+                            incomplete = true;
+                        }
+                        continue;
+                    }
+                    if built > 0 && built + triangles > BUILD_TRIANGLES_PER_FRAME {
+                        incomplete = true;
+                        continue;
+                    }
+                    built += triangles;
+                    let bvh = bvh::build_mesh(&positions, &mesh.indices);
+                    self.add_mesh(key, version, bvh, limit);
+                }
+                let Some(entry) = self.meshes.get_mut(&key) else {
+                    continue;
                 };
                 entry.last_used = self.frame;
-                let root = entry.bvh.nodes[0];
-                if root.count == 0 && root.min[0] > root.max[0] {
+                if !entry.uploaded || entry.empty {
                     continue;
                 }
-                // Camera-relative -> mesh.
+                // Anchor-relative -> mesh.
                 let mut rel = transform.0;
-                rel.translation -= view.origin;
+                rel.translation -= anchor;
                 let inv = rel.inverse();
                 let m = inv.matrix3.as_mat3();
                 let t = inv.translation.as_vec3();
@@ -605,7 +958,12 @@ impl ProbeGi {
                 found.push((
                     GpuInstance {
                         to_local: [row(0), row(1), row(2)],
-                        mesh: [0, 0, material.double_sided as u32, key],
+                        mesh: [
+                            entry.root,
+                            entry.first_triangle,
+                            material.double_sided as u32,
+                            key,
+                        ],
                         albedo: albedo.extend(0.0).to_array(),
                         emissive: emissive.extend(0.0).to_array(),
                     },
@@ -613,83 +971,37 @@ impl ProbeGi {
                 ));
             }
         }
-        // Forget meshes nobody used in a while.
-        let frame = self.frame;
-        let before = self.meshes.len();
-        self.meshes
-            .retain(|_, e| frame - e.last_used < KEEP_UNUSED_FRAMES);
-        self.blas_dirty |= self.meshes.len() != before;
-        if self.bounds.len() > 4 * self.meshes.len() + 1024 {
-            let meshes = &self.meshes;
-            self.bounds.retain(|k, _| meshes.contains_key(k));
-        }
+        self.query = Some(query);
         let build_ms = build_started.elapsed().as_secs_f32() * 1000.0;
 
         let active = self.active.as_mut().expect("activated above");
         let device = &shared.device;
         let queue = &shared.queue;
         let mut regroup = recreated || active.group.is_none();
-        if self.blas_dirty {
-            // What one storage binding holds: meshes past it are left out (most recently
-            // used first in).
-            let limit = device.limits().max_storage_buffer_binding_size;
-            let mut order: Vec<_> = self.meshes.iter_mut().collect();
-            order.sort_unstable_by_key(|(k, e)| (std::cmp::Reverse(e.last_used), **k));
-            let mut nodes: Vec<bvh::Node> = Vec::new();
-            let mut triangles: Vec<[f32; 4]> = Vec::new();
-            let mut left_out = 0usize;
-            for (_, e) in order {
-                let node_bytes = (nodes.len() + e.bvh.nodes.len()) * size_of::<bvh::Node>();
-                let triangle_bytes = (triangles.len() + e.bvh.triangles.len()) * 16;
-                e.uploaded = node_bytes as u64 <= limit && triangle_bytes as u64 <= limit;
-                if !e.uploaded {
-                    left_out += e.bvh.triangles.len() / 3;
-                    continue;
-                }
-                e.root = nodes.len() as u32;
-                e.first_triangle = (triangles.len() / 3) as u32;
-                nodes.extend_from_slice(&e.bvh.nodes);
-                triangles.extend_from_slice(&e.bvh.triangles);
-            }
-            if left_out > 0 && !self.left_out_warned {
-                self.left_out_warned = true;
-                tracing::warn!(
-                    "probe GI: {:.1} M triangles near the grid don't fit one GPU binding \
-                     ({} MB); the rays miss them",
-                    left_out as f64 / 1e6,
-                    limit >> 20
-                );
-            }
-            if triangles.is_empty() {
-                triangles.resize(3, [0.0; 4]);
+        regroup |= self.store.upload(active, device, queue);
+        if regather {
+            let boxes: Vec<(Vec3, Vec3)> = found.iter().map(|(_, b)| *b).collect();
+            let (tlas, order) = bvh::build(&boxes);
+            let mut instances: Vec<GpuInstance> =
+                order.iter().map(|&i| found[i as usize].0).collect();
+            let count = instances.len();
+            if instances.is_empty() {
+                instances.push(GpuInstance::zeroed());
             }
             regroup |= active
-                .blas
-                .write(device, queue, bytemuck::cast_slice(&nodes));
+                .tlas
+                .write(device, queue, bytemuck::cast_slice(&tlas));
             regroup |= active
-                .triangles
-                .write(device, queue, bytemuck::cast_slice(&triangles));
-            self.blas_dirty = false;
+                .instances
+                .write(device, queue, bytemuck::cast_slice(&instances));
+            self.gathered = Some(Gathered {
+                key,
+                frame: self.frame,
+                instances: count as u32,
+                incomplete,
+            });
         }
-        found.retain(|(inst, _)| self.meshes[&inst.mesh[3]].uploaded);
-        for (inst, _) in &mut found {
-            let e = &self.meshes[&inst.mesh[3]];
-            inst.mesh[0] = e.root;
-            inst.mesh[1] = e.first_triangle;
-        }
-        let boxes: Vec<(Vec3, Vec3)> = found.iter().map(|(_, b)| *b).collect();
-        let (tlas, order) = bvh::build(&boxes);
-        let mut instances: Vec<GpuInstance> = order.iter().map(|&i| found[i as usize].0).collect();
-        let instance_count = instances.len();
-        if instances.is_empty() {
-            instances.push(GpuInstance::zeroed());
-        }
-        regroup |= active
-            .tlas
-            .write(device, queue, bytemuck::cast_slice(&tlas));
-        regroup |= active
-            .instances
-            .write(device, queue, bytemuck::cast_slice(&instances));
+        let instance_count = self.gathered.as_ref().map_or(0, |g| g.instances);
         regroup |= active
             .updates
             .write(device, queue, bytemuck::cast_slice(&updates));
@@ -707,6 +1019,7 @@ impl ProbeGi {
                 settings.gi_shadowed_lights as f32,
             ],
             world_origin: origin.extend(0).to_array(),
+            anchor: (anchor - view.origin).as_vec3().extend(0.0).to_array(),
         };
         queue.write_buffer(&active.uniform, 0, bytemuck::bytes_of(&pass));
         if regroup {
@@ -783,11 +1096,19 @@ impl ProbeGi {
         ];
         uniform.gi_size = [dims.x as f32, dims.y as f32, dims.z as f32, 1.0];
         uniform.gi_grid = [offset.x, offset.y, offset.z, self.epoch as f32];
+        let rays_now = (updates.len() as u32 * rays) as f32;
+        self.rays_lately = if self.rays_lately > 0.0 {
+            self.rays_lately * 0.7 + rays_now * 0.3
+        } else {
+            rays_now
+        };
         self.stats = Stats {
             probes: updates.len() as u32,
-            instances: instance_count as u32,
+            instances: instance_count,
             meshes: self.meshes.len() as u32,
             built_triangles: built as u32,
+            building: self.jobs.len() as u32,
+            gathered: regather,
             build_ms,
             extract_ms: started.elapsed().as_secs_f32() * 1000.0,
         };
@@ -907,6 +1228,9 @@ impl ProbeGi {
         d.set("render.gi.instances", s.instances as f64);
         d.set("render.gi.meshes", s.meshes as f64);
         d.set("render.gi.built_triangles", s.built_triangles as f64);
+        d.set("render.gi.building", s.building as f64);
+        d.set("render.gi.gathered", s.gathered as u8 as f64);
+        d.set("render.gi.gpu_ms_per_kray", self.ms_per_kray as f64);
         d.set("render.gi.build_ms", s.build_ms as f64);
         d.set("render.gi.extract_ms", s.extract_ms as f64);
     }

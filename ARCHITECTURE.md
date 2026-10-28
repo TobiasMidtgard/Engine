@@ -208,10 +208,13 @@ off-center: shaders that rebuild view rays use `view_ray_at_uv` (lib_frame.wgsl)
 the portal (in the main view's exposure, without fog) and the motion of what lies beyond it in
 the prepass. `Portal::carry` maps what goes through, for gameplay.
 
-**Probe GI** (built, off by default; engine-design/dynamic-gi.md): `RenderSettings::probe_gi`
-(or `ENGINE_PROBE_GI=on`) lights the main view with DDGI probes (`probe_gi/`): a grid that
-scrolls with the camera, a share of it traced each frame in compute against a software BVH of
-the `MeshRenderer`s near it (one per mesh, one over the instances, rebuilt every frame), lit by
+**Probe GI** (built, on from High quality; engine-design/dynamic-gi.md, world-gi-on.md):
+`RenderSettings::probe_gi` (`ENGINE_PROBE_GI=on|off` overrides it) lights the main view with
+DDGI probes (`probe_gi/`): a grid that scrolls with the camera, as many probes traced each
+frame as fit `gi_budget_ms` of GPU time, in compute against a software BVH of the
+`MeshRenderer`s near it (one per mesh, large ones built on workers; one over the instances,
+gathered again only when an entity, asset or the snapped region changes). Probes with nothing
+near sleep and trace one turn in eight. Hits are lit by
 the sun and the nearest point lights through shadow rays, glowing materials and last frame's
 probes. `probe_gi` in lib_frame.wgsl (frame binding 23, the atlas) gives every lit surface
 the probes' irradiance where the grid covers it, so other modules' shaders that call
