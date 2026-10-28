@@ -9,7 +9,7 @@
 //! (landscape, scenery, camera, tour) belongs to the Beautiful showcase world thread.
 //!
 //! In the exe each zone is a streamed cell ([`zone_cells`], `engine::stream`): it spawns when
-//! the player comes within 150 m of it, so the start doesn't wait for zones far away, and its
+//! the player comes within 100 m of it, so the start doesn't wait for zones far away, and its
 //! own random sequence ([`cell_rng`]) keeps it the same whatever loaded first. A zone stays
 //! loaded once in until its module can take it down again (an unload hook for what it keeps
 //! outside its entities); then it joins [`UNLOADABLE`]. Tours, films and tools load every zone.

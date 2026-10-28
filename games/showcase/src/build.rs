@@ -307,7 +307,7 @@ const STEPS: [Step; 13] = [
             return true;
         }
         let cells = world.resource::<StreamedCells>();
-        let waking = cells.cells.iter().find(|c| c.state == CellState::Queued);
+        let waking = cells.waking().next();
         b.detail = waking
             .and_then(|c| zones::ZONES.iter().find(|z| z.key == c.key))
             .map(|z| z.name);
@@ -349,8 +349,10 @@ const STEPS: [Step; 13] = [
     ),
 ];
 
-/// In the exe a zone wakes when the camera or the player comes this close to its edge, m.
-const ZONE_LOAD_M: f64 = 150.0;
+/// In the exe a zone wakes when the camera or the player comes this close to its edge, m:
+/// a sprinting walker takes over 10 s to cover it, and the start screen then waits for about
+/// half the zones around the plaza instead of twelve (at 150 m).
+const ZONE_LOAD_M: f64 = 100.0;
 
 /// Longest wait (s) for the modules' art before the start screen opens anyway.
 const MODULE_WAIT_S: f32 = 60.0;
@@ -633,9 +635,13 @@ fn show_loading(world: &mut World, build: &WorldBuild) {
     let waking = STEPS.get(build.next).is_some_and(|s| s.0 == "nearby zones");
     let part = match world.get_resource::<StreamedCells>().filter(|_| waking) {
         Some(cells) => {
-            let count = |s| cells.cells.iter().filter(|c| c.state == s).count() as f32;
-            let (loaded, queued) = (count(CellState::Loaded), count(CellState::Queued));
-            loaded / (loaded + queued).max(1.0)
+            let loaded = cells
+                .cells
+                .iter()
+                .filter(|c| c.state == CellState::Loaded)
+                .count() as f32;
+            let waking = cells.waking().count() as f32;
+            loaded / (loaded + waking).max(1.0)
         }
         None => 0.0,
     };
