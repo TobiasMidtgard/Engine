@@ -437,11 +437,17 @@ pub struct ZoneCell {
     /// Never unloaded once in: its module keeps state outside the entities it spawned (a single
     /// proving ground, the yard's hoist) and has no unload hook yet.
     pub keep_loaded: bool,
+    /// A far-view proxy stands in for it while unloaded; not for cells whose content moves
+    /// (the dinghy, the grazing herds) or is too small to see from afar (the silks).
+    pub proxy: bool,
 }
 
 /// Zones whose content is only the entities they spawn, so they unload cleanly: the showcase's
 /// own placeholders. The modules' zones join as their unload hooks land.
 const UNLOADABLE: [&str; 2] = ["plaza", "gallery2d"];
+
+/// Cells with no far-view proxy ([`ZoneCell::proxy`]).
+const NO_PROXY: [&str; 3] = ["yard_sailboat", "yard_rinse", "meadow"];
 
 /// The streamed cells of the zones `only` names (every zone when `None`), each with its reach:
 /// a module's demo spreads past its flat pad (fences, paths, runs), so half again the pad and
@@ -453,11 +459,12 @@ pub fn zone_cells(land: &Landscape, only: Option<&DemoZones>) -> Vec<ZoneCell> {
             continue;
         }
         let keep_loaded = !UNLOADABLE.contains(&z.key);
-        let cell = |key, center, radius| ZoneCell {
+        let cell = |key: &'static str, center, radius| ZoneCell {
             key,
             center,
             radius,
             keep_loaded,
+            proxy: !NO_PROXY.contains(&key),
         };
         match z.key {
             "airfield" => {
@@ -497,10 +504,32 @@ const SAILBOAT_REACH_M: f64 = 22.0;
 /// A cell's own random sequence, from the world's seed and the cell's key, so what a zone
 /// draws doesn't depend on which zones loaded before it (FNV-1a of the key).
 pub fn cell_rng(seed: u64, key: &str) -> Rng {
-    let hash = key.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
-        (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
-    });
-    Rng::new(seed ^ hash)
+    Rng::new(seed ^ fnv(FNV_START, key.as_bytes()))
+}
+
+const FNV_START: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// FNV-1a over `bytes`, continuing from `h`.
+fn fnv(h: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(h, |h, b| {
+        (h ^ *b as u64).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// Bump when the showcase changes what its zones spawn, so far-view proxies kept on disk from
+/// an older build aren't shown for them.
+const ZONE_CONTENT_REVISION: u64 = 1;
+
+/// The version a cell's far-view proxy is kept on disk under (`engine::hlod`): the world's
+/// seed, the cell, the commit a release was built from (CI sets `GITHUB_SHA`; a local build
+/// says "local", so it keeps its proxies until a zone is visited again) and
+/// [`ZONE_CONTENT_REVISION`].
+pub fn proxy_version(seed: u64, key: &str) -> u64 {
+    let build = option_env!("GITHUB_SHA").unwrap_or("local");
+    let h = fnv(FNV_START, &seed.to_le_bytes());
+    let h = fnv(h, key.as_bytes());
+    let h = fnv(h, build.as_bytes());
+    fnv(h, &ZONE_CONTENT_REVISION.to_le_bytes())
 }
 
 /// What each cell shows ([`zone_cells`]). Each zone is one line, owned by its module's thread:
@@ -1635,6 +1664,17 @@ mod tests {
         };
         assert_eq!(draw("field"), draw("field"));
         assert_ne!(draw("field"), draw("plaza"));
+    }
+
+    #[test]
+    fn each_zone_keeps_its_far_view_under_its_own_version() {
+        assert_eq!(proxy_version(7, "fortress"), proxy_version(7, "fortress"));
+        assert_ne!(proxy_version(7, "fortress"), proxy_version(7, "plaza"));
+        assert_ne!(proxy_version(7, "fortress"), proxy_version(8, "fortress"));
+        let cells = zone_cells(&landscape(1), None);
+        let proxied = |key| cells.iter().find(|c| c.key == key).unwrap().proxy;
+        assert!(proxied("fortress") && proxied("plaza"));
+        assert!(!proxied("yard_sailboat") && !proxied("meadow"));
     }
 
     #[test]

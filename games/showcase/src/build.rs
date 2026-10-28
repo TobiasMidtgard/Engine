@@ -289,6 +289,13 @@ const STEPS: [Step; 13] = [
             if cell.keep_loaded {
                 streamed = streamed.keep_loaded();
             }
+            // A merged far-view mesh stands in for an unloaded zone (the streaming core's
+            // proxies), kept on disk so later runs show it before the zone is visited.
+            streamed = if cell.proxy {
+                streamed.proxy_version(zones::proxy_version(seed, key))
+            } else {
+                streamed.without_proxy()
+            };
             world.stream_cell(streamed);
         }
         if !staged {
