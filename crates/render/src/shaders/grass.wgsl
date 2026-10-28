@@ -12,7 +12,10 @@ struct GrassOut {
 
 // Snow depth (m) on the ground at camera-relative `rel` (for `grass_blade`).
 fn grass_snow_depth(f: GrassField, rel: vec3<f32>) -> f32 {
-    return surface_weather(rel).z * SURFACE_SNOW_SCALE_M;
+    // The ground's snow is stored up to SURFACE_SNOW_SCALE_M; deeper snow reads as full, so
+    // there take the depth by the camera (exact) when it is deeper.
+    let snow = surface_weather(rel).z * SURFACE_SNOW_SCALE_M;
+    return select(snow, max(snow, f.look.w), snow > 0.95 * SURFACE_SNOW_SCALE_M);
 }
 
 // Collapses an invisible blade to a point outside the view.
