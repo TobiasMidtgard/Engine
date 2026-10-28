@@ -373,3 +373,35 @@ fn a_volume_lets_the_sky_in_only_through_its_opening() {
         "far wall: {small:.1} through a skylight, {whole:.1} through the whole top"
     );
 }
+
+#[test]
+fn probes_outside_a_closed_volume_do_not_light_its_walls() {
+    // The roofless room under its closed volume: the probes above it, outside the volume, see
+    // the open sky. The upper walls, between them and the probes inside, must not take their
+    // light.
+    let scene = |volume: bool| {
+        let mut app = app(true);
+        let w = &mut app.world;
+        room(w, DVec3::ZERO, 0.7, 0.5, Some((2.0 * HALF, 0.0)));
+        ground(w);
+        sun(w, 110_000.0, DVec3::new(0.3, -1.0, 0.4));
+        if volume {
+            w.spawn((
+                Transform::from_xyz(0.0, HEIGHT * 0.5, 0.0),
+                SkyLightVolume::new([HALF as f32, HEIGHT as f32 * 0.5 + 0.2, HALF as f32]),
+            ));
+        }
+        camera(w, EYE, TARGET, 12.0);
+        app
+    };
+    // The far wall's upper part, in its shade.
+    const FAR_UPPER: [f32; 4] = [0.15, 0.35, 0.8, 0.6];
+    let Some(open) = shoot(scene(false), 16, "walled_open.png", FAR_UPPER) else {
+        return;
+    };
+    let closed = shoot(scene(true), 16, "walled_closed.png", FAR_UPPER).expect("GPU");
+    assert!(
+        closed < open * 0.1,
+        "upper walls: {closed:.1} inside the closed volume, {open:.1} without it"
+    );
+}
