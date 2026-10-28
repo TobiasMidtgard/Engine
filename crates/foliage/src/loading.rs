@@ -127,8 +127,10 @@ mod tests {
 
     #[test]
     fn slow_frames_get_a_bigger_loading_budget() {
-        let mut l = FoliageLoading::default();
-        l.last_frame_ms = 16.0;
+        let mut l = FoliageLoading {
+            last_frame_ms: 16.0,
+            ..Default::default()
+        };
         assert_eq!(l.frame_budget_ms(None), l.budget_ms);
         // A headless render frame of 20 s may load for 0.5 s (a tenth, capped at 5 s).
         l.last_frame_ms = 20_000.0;
