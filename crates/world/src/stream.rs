@@ -9,6 +9,9 @@
 //! screens, teleports and tests) and [`CellMember`] on what a cell spawned.
 //!
 //! Cells keep world points, so they follow [`crate::WorldShift`] and [`crate::SurfaceMoved`].
+//! A cell on something that moves through the world (a planet's surface while the world is
+//! anchored to its moon, a station in orbit) names that thing's [`StreamFrame`] and rides with
+//! it, as Star Citizen's object containers nest content in the frame it moves with.
 
 use std::collections::BTreeMap;
 
@@ -37,6 +40,13 @@ impl Default for StreamingSource {
         }
     }
 }
+
+/// On an entity whose `Transform` is a frame streamed cells can live in: a planet or a moon
+/// (the space module puts one on each body, named after it), a station, a carrier. A cell
+/// registered on the frame's `name` keeps its place relative to it however the frame moves
+/// and turns in the world, and its proxy goes along.
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamFrame(pub String);
 
 /// Index of a cell in [`StreamedCells`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -101,6 +111,9 @@ pub struct CellInfo {
     pub assets_mb: f32,
     /// The cell frees those assets when it unloads (unless something still draws them).
     pub releases_assets: bool,
+    /// The [`StreamFrame`] it rides with (`None`: it stays put in the world, following only
+    /// shifts). `center` is where the frame puts it now.
+    pub frame: Option<String>,
 }
 
 impl CellInfo {
@@ -190,6 +203,7 @@ mod tests {
             assets: 0,
             assets_mb: 0.0,
             releases_assets: false,
+            frame: None,
         };
         let mut cells = StreamedCells {
             cells: vec![

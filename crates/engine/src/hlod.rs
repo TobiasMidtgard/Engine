@@ -28,7 +28,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Instant;
 
 use engine_assets::{Assets, Handle};
-use engine_core::math::{Mat4, Vec2, Vec3, Vec4};
+use engine_core::math::{DQuat, Mat4, Vec2, Vec3, Vec4};
 use engine_core::prelude::*;
 use engine_render::{
     DitherFade, Image, MaterialRef, MaxDrawDistance, Mesh, MeshRef, MeshRenderer, StandardMaterial,
@@ -156,8 +156,11 @@ pub struct Proxies {
 
 #[derive(Default)]
 struct ProxySlot {
-    /// The cell's frame at registration, following world shifts: proxies are in its space.
+    /// The cell's frame at registration, following world shifts (and its [`StreamFrame`](engine_world::StreamFrame) when
+    /// it rides one): proxies are in its space.
     frame: Option<Transform>,
+    /// `frame` in its [`StreamFrame`](engine_world::StreamFrame)'s space, for a cell that rides one.
+    local: Option<Transform>,
     mesh: Option<Handle<Mesh>>,
     triangles: usize,
     entity: Option<Entity>,
@@ -228,6 +231,7 @@ pub(crate) fn update(
     world: &mut World,
     configs: &[ProxyConfig],
     fading: &[CellId],
+    poses: &[Option<(DVec3, DQuat)>],
     streaming: bool,
 ) {
     let settings = world.resource::<HlodSettings>().clone();
@@ -270,6 +274,9 @@ pub(crate) fn update(
                 load_from_disk(world, i, key, version, &settings);
             }
         }
+        if let Some(Some(pose)) = poses.get(i) {
+            ride(world, i, *pose);
+        }
         collect(world, i, key, config, &settings);
         let fading_in = fading.contains(&id);
         let slot = &world.resource::<Proxies>().slots[i];
@@ -300,6 +307,27 @@ pub(crate) fn update(
         }
     }
     bake(world, configs, &cells, &settings);
+}
+
+/// Keeps cell `i`'s proxy where its [`StreamFrame`](engine_world::StreamFrame) (now at `pose`) carries it.
+fn ride(world: &mut World, i: usize, (at, turn): (DVec3, DQuat)) {
+    let slot = &mut world.resource_mut::<Proxies>().slots[i];
+    let Some(frame) = slot.frame else {
+        return;
+    };
+    let local = *slot.local.get_or_insert_with(|| {
+        let inv = turn.inverse();
+        Transform::from_translation(inv * (frame.translation - at))
+            .with_rotation((inv * frame.rotation.as_dquat()).as_quat())
+    });
+    let now = Transform::from_translation(at + turn * local.translation)
+        .with_rotation((turn * local.rotation.as_dquat()).normalize().as_quat());
+    slot.frame = Some(now);
+    if let Some(e) = slot.entity
+        && let Ok(mut entity) = world.get_entity_mut(e)
+    {
+        entity.insert((now, GlobalTransform::from(now)));
+    }
 }
 
 /// The proxy of cell `id` fades out as its meshes fade in, `t` of the way (1 = gone).
@@ -1212,6 +1240,29 @@ mod tests {
             let want = if v.position[0] < 5.0 { 0.1 } else { 0.5 };
             assert!((v.color[0] - want).abs() < 1e-4, "{v:?}");
         }
+    }
+
+    #[test]
+    fn a_proxy_rides_with_its_cells_frame() {
+        let mut world = World::new();
+        let shown = world.spawn(Transform::default()).id();
+        let mut proxies = Proxies::default();
+        proxies.slots.push(ProxySlot {
+            frame: Some(Transform::from_translation(DVec3::new(100.0, 0.0, 0.0))),
+            entity: Some(shown),
+            ..Default::default()
+        });
+        world.insert_resource(proxies);
+        ride(&mut world, 0, (DVec3::ZERO, DQuat::IDENTITY));
+        let quarter = DQuat::from_rotation_y(std::f64::consts::FRAC_PI_2);
+        ride(&mut world, 0, (DVec3::new(1000.0, 0.0, 0.0), quarter));
+        let at = world.get::<GlobalTransform>(shown).unwrap().translation();
+        assert!(
+            (at - DVec3::new(1000.0, 0.0, -100.0)).length() < 1e-3,
+            "{at}"
+        );
+        let slot = &world.resource::<Proxies>().slots[0];
+        assert_eq!(slot.frame.unwrap().translation, at);
     }
 
     #[test]

@@ -28,12 +28,14 @@ use crate::cell_assets::{self, CellAssets, Marks};
 use crate::hlod::{self, ProxyConfig};
 use engine_core::diagnostics::{Diagnostics, PROCESS_RAM_MB, process_ram_mb};
 use engine_core::ecs::resource::IsResource;
+use engine_core::math::DQuat;
 use engine_core::prelude::*;
 use engine_render::{DitherFade, MeshRenderer};
 use engine_world::physics::Velocity;
 use engine_world::stream::CellInfo;
 use engine_world::{
-    CellId, CellMember, CellState, FocusPoints, SimulationFocus, StreamedCells, StreamingSource,
+    CellId, CellMember, CellState, FocusPoints, SimulationFocus, StreamFrame, StreamedCells,
+    StreamingSource,
 };
 
 type Hook = Box<dyn FnMut(&mut World) + Send + Sync>;
@@ -82,6 +84,7 @@ impl StreamCell {
                 assets: 0,
                 assets_mb: 0.0,
                 releases_assets: false,
+                frame: None,
             },
             loader: Loader {
                 build,
@@ -219,6 +222,15 @@ impl StreamCell {
         self
     }
 
+    /// The cell rides with the [`StreamFrame`] named `frame` (a planet, a moon, a station):
+    /// its center, given in the world as the frame stands when it first shows up, keeps its
+    /// place on the frame however the frame moves later, and so does its far-view proxy. Its
+    /// entities are the frame owner's to carry (space parks them on their body).
+    pub fn on_frame(mut self, frame: impl Into<String>) -> Self {
+        self.info.frame = Some(frame.into());
+        self
+    }
+
     /// Runs after the cell's entities are despawned, to drop what its module keeps elsewhere
     /// (a resource, a cache).
     pub fn on_unload(mut self, unload: impl FnMut(&mut World) + Send + Sync + 'static) -> Self {
@@ -315,6 +327,8 @@ struct Slot {
     ram: Option<f64>,
     /// What the spawn added since the cell last unloaded.
     assets: CellAssets,
+    /// The center in its frame's space, once the frame has shown up.
+    local: Option<DVec3>,
 }
 
 impl Slot {
@@ -328,6 +342,7 @@ impl Slot {
             secs: 0.0,
             ram: None,
             assets: CellAssets::default(),
+            local: None,
         }
     }
 
@@ -472,6 +487,7 @@ pub fn stream_system(world: &mut World) {
     if world.resource::<StreamedCells>().cells.is_empty() {
         return;
     }
+    let poses = follow_frames(world);
     let sources = source_points(world);
     let budget = *world.resource::<StreamingBudget>();
     let has_build: Vec<(bool, bool)> = world
@@ -588,7 +604,48 @@ pub fn stream_system(world: &mut World) {
         .map(|s| s.loader.proxy)
         .collect();
     let fading: Vec<CellId> = world.resource::<Fades>().0.iter().map(|f| f.cell).collect();
-    hlod::update(world, &configs, &fading, sources.is_some());
+    hlod::update(world, &configs, &fading, &poses, sources.is_some());
+}
+
+/// Where each cell's frame stands now (`None`: no frame, or it isn't there); moves framed
+/// cells' centers with their frames.
+fn follow_frames(world: &mut World) -> Vec<Option<(DVec3, DQuat)>> {
+    let framed: Vec<(usize, String)> = world
+        .resource::<StreamedCells>()
+        .cells
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| Some((i, c.frame.clone()?)))
+        .collect();
+    let n = world.resource::<StreamedCells>().cells.len();
+    let mut poses = vec![None; n];
+    if framed.is_empty() {
+        return poses;
+    }
+    let frames: Vec<(String, DVec3, DQuat)> = world
+        .query::<(&StreamFrame, &GlobalTransform)>()
+        .iter(world)
+        .map(|(f, g)| {
+            let (_, rotation, translation) = g.0.to_scale_rotation_translation();
+            (f.0.clone(), translation, rotation)
+        })
+        .collect();
+    for (i, name) in framed {
+        let Some((_, at, turn)) = frames.iter().find(|f| f.0 == name) else {
+            continue;
+        };
+        poses[i] = Some((*at, *turn));
+        let center = world.resource::<StreamedCells>().cells[i].center;
+        let mut hooks = world.resource_mut::<CellHooks>();
+        let Some(slot) = hooks.0.get_mut(i) else {
+            continue;
+        };
+        let local = *slot
+            .local
+            .get_or_insert_with(|| turn.inverse() * (center - *at));
+        world.resource_mut::<StreamedCells>().cells[i].center = *at + *turn * local;
+    }
+    poses
 }
 
 /// Starts the wanted cells' builds on workers, nearest first, and collects finished ones.
@@ -1442,6 +1499,56 @@ mod tests {
         let next = app.world.resource_mut::<Assets<Mesh>>().add(cube());
         assert_eq!(next.index(), own.index());
         assert!(!app.world.resource::<Assets<Mesh>>().contains(own));
+    }
+
+    #[test]
+    fn a_cell_on_a_moving_frame_rides_with_it() {
+        let mut app = app();
+        let pose = |app: &mut App, e: Entity, at: DVec3, turn_deg: f64| {
+            let t = Transform::from_translation(at)
+                .with_rotation(DQuat::from_rotation_y(turn_deg.to_radians()).as_quat());
+            app.world
+                .entity_mut(e)
+                .insert((t, GlobalTransform::from(t)));
+        };
+        app.stream_cell(
+            StreamCell::new("base", DVec3::new(100.0, 0.0, 0.0), 10.0, |w| {
+                w.spawn(Name::new("dome"));
+            })
+            .load_within(50.0)
+            .on_frame("moon"),
+        );
+        let player = app.world.spawn(StreamingSource::default()).id();
+        place(&mut app, player, 100.0);
+        // Before the frame shows up the cell stays where it was given.
+        app.update();
+        assert_eq!(state(&app, "base"), CellState::Loaded);
+        let moon = app.world.spawn(StreamFrame("moon".into())).id();
+        pose(&mut app, moon, DVec3::ZERO, 0.0);
+        app.update();
+        // The moon moves off and turns a quarter: the base goes with it.
+        pose(&mut app, moon, DVec3::new(1000.0, 0.0, 0.0), 90.0);
+        app.update();
+        let center = app.world.resource::<StreamedCells>().cells[0].center;
+        assert!(
+            (center - DVec3::new(1000.0, 0.0, -100.0)).length() < 1e-3,
+            "{center}"
+        );
+        assert_eq!(
+            state(&app, "base"),
+            CellState::Unloaded,
+            "the player stayed"
+        );
+        let there = Transform::from_xyz(1000.0, 0.0, -100.0);
+        app.world
+            .entity_mut(player)
+            .insert((there, GlobalTransform::from(there)));
+        app.update();
+        assert_eq!(
+            state(&app, "base"),
+            CellState::Loaded,
+            "found where it went"
+        );
     }
 
     #[test]
