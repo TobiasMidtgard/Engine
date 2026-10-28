@@ -34,6 +34,7 @@ pub mod hlod;
 pub mod interact;
 pub mod scene_stream;
 pub mod stream;
+pub mod stream_grid;
 
 /// Everything a typical game needs: world simulation contracts, input, rendering, the window,
 /// debug drawing and the AI bridge (off unless `ENGINE_BRIDGE` is set, see `engine_ai_bridge`).

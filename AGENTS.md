@@ -260,4 +260,10 @@ lighting (8K only for a visible backdrop). JPG or PNG for color, HDR or EXR only
   startup. A cell that `remember()`s must spawn the same entities with the same names and places
   every time; a module whose state matters across unloads adds its component with
   `CellMemory::remember("Name")`.
+- Generated content that is too big to register up front (a planet's surface details, a belt,
+  a star system) streams through a procedural grid: `world.stream_grid(StreamGrid::new(name,
+  cell_m, load_m), maker)`; the maker decides per `GridCell` from its `seed()` (`None` = empty)
+  and spawns from the `CellPlace` it is handed. Space uses `.vertical()` cube cells and
+  `.on_frame(body)`; content that rides the body is a child of `place.frame` at
+  `place.in_frame(..)`. Cells retire behind the sources and come back with the same key.
 - Commit messages: imperative subject, body explains why.

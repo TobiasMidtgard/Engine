@@ -274,10 +274,24 @@ impl StreamCellsExt for World {
                 self.resource_mut::<CellHooks>().0[i] = Slot::new(cell.loader);
             }
             None => {
-                self.resource_mut::<StreamedCells>().cells.push(cell.info);
-                self.resource_mut::<CellHooks>()
-                    .0
-                    .push(Slot::new(cell.loader));
+                // A retired cell's slot takes the new one (procedural grids retire and make
+                // cells all trip long).
+                let free = self.resource::<StreamedCells>().cells
+                    [..slots.min(self.resource::<StreamedCells>().cells.len())]
+                    .iter()
+                    .position(|c| c.retired);
+                match free {
+                    Some(i) => {
+                        self.resource_mut::<StreamedCells>().cells[i] = cell.info;
+                        self.resource_mut::<CellHooks>().0[i] = Slot::new(cell.loader);
+                    }
+                    None => {
+                        self.resource_mut::<StreamedCells>().cells.push(cell.info);
+                        self.resource_mut::<CellHooks>()
+                            .0
+                            .push(Slot::new(cell.loader));
+                    }
+                }
             }
         }
         self
@@ -458,6 +472,7 @@ impl Plugin for StreamingPlugin {
     fn build(&self, app: &mut App) {
         hlod::register(app);
         crate::scene_stream::register(app);
+        crate::stream_grid::register_plugin(app);
         cell_assets::install_sizers(&mut app.world);
         app.init_resource::<StreamedCells>()
             .init_resource::<CellHooks>()
@@ -564,7 +579,7 @@ impl Plugin for StreamingPlugin {
 
 /// Where the sources are: (point, range scale) for each, plus its lookahead point. None when
 /// there is no source and no focus (tools and tests: everything loads).
-fn source_points(world: &mut World) -> Option<Vec<(DVec3, f64)>> {
+pub(crate) fn source_points(world: &mut World) -> Option<Vec<(DVec3, f64)>> {
     let mut points = Vec::new();
     let mut sources = world.query::<(&GlobalTransform, &StreamingSource, Option<&Velocity>)>();
     for (g, s, v) in sources.iter(world) {
@@ -587,6 +602,7 @@ fn source_points(world: &mut World) -> Option<Vec<(DVec3, f64)>> {
 
 /// `Last`: queue, build, load, fade and unload cells.
 pub fn stream_system(world: &mut World) {
+    crate::stream_grid::update(world);
     if world.resource::<StreamedCells>().cells.is_empty() {
         return;
     }
@@ -873,10 +889,13 @@ fn step(world: &mut World, id: CellId) -> bool {
     slot.assets.note(world, marks, Marks::of(world));
     restore(world, hooks);
     // Resources are entities too (bevy 0.20); one a spawn inserts stays when the cell goes.
+    // The tops of what it spawned: new entities with no parent, or a parent from before (a
+    // planet's frame, a station the content hangs on).
     let new: Vec<Entity> = world
-        .query_filtered::<Entity, (Without<ChildOf>, Without<IsResource>)>()
+        .query_filtered::<(Entity, Option<&ChildOf>), Without<IsResource>>()
         .iter(world)
-        .filter(|e| !before.has(*e))
+        .filter(|(e, parent)| !before.has(*e) && parent.is_none_or(|p| before.has(p.parent())))
+        .map(|(e, _)| e)
         .collect();
     for &e in &new {
         world.entity_mut(e).insert(CellMember(id));

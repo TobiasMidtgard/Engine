@@ -11,7 +11,8 @@
 //! moved, deleted, inventory), kept as plain JSON per component so a save game stores it whole.
 //!
 //! A root's `Transform` translation is kept from the cell's center, so memory survives world
-//! shifts; cells riding a moving frame keep only the shifts' translation.
+//! shifts; content a cell hangs on an entity from before (a frame's) keeps its translation on
+//! that entity, so it survives the frame's motion.
 
 use std::collections::HashMap;
 
@@ -69,7 +70,12 @@ pub(crate) fn assign_ids(
                 let at = entity
                     .get::<Transform>()
                     .map_or(DVec3::ZERO, |t| t.translation);
-                let at = if root { at - center } else { at };
+                // A top hung on something from before (a frame) keeps its place on it.
+                let at = if root && entity.get::<ChildOf>().is_none() {
+                    at - center
+                } else {
+                    at
+                };
                 let mut base = fnv(parent, name.unwrap_or_default().bytes());
                 base = fnv(base, cm(at));
                 let n = seen.entry(base).or_default();

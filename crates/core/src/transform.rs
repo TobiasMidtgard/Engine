@@ -450,13 +450,18 @@ pub fn propagate_transforms_system(
         .for_each(|(entity, t, interp, mut global, kids)| {
             let local = interp.map_or(*t, |i| i.visual(t, alpha));
             let new = GlobalTransform::from(local);
-            if *global != new {
+            // A world transform written with its Transform (as attachments and teleports do)
+            // is already right, but its children still have to follow.
+            let written = global.is_changed();
+            let moved = *global != new;
+            if moved {
                 *global = new;
-                if kids.is_some()
-                    && let Ok(mut changed) = changed_roots.lock()
-                {
-                    changed.push((entity, new));
-                }
+            }
+            if (moved || written)
+                && kids.is_some()
+                && let Ok(mut changed) = changed_roots.lock()
+            {
+                changed.push((entity, new));
             }
         });
 
@@ -541,6 +546,29 @@ mod tests {
             (g.translation() - expected).length() < 1e-6,
             "{:?}",
             g.translation()
+        );
+    }
+
+    #[test]
+    fn children_follow_a_root_whose_world_transform_was_written_with_it() {
+        let mut app = App::new();
+        let root = app.world.spawn(Transform::from_xyz(10.0, 0.0, 0.0)).id();
+        let child = app
+            .world
+            .spawn((Transform::from_xyz(1.0, 0.0, 0.0), ChildOf(root)))
+            .id();
+        app.update();
+        assert!((world_x(&app, child) - 11.0).abs() < 1e-9);
+        // A teleport writes both, so the root's world transform is already right.
+        let t = Transform::from_xyz(500.0, 0.0, 0.0);
+        app.world
+            .entity_mut(root)
+            .insert((t, GlobalTransform::from(t)));
+        app.update();
+        assert!(
+            (world_x(&app, child) - 501.0).abs() < 1e-9,
+            "{}",
+            world_x(&app, child)
         );
     }
 
