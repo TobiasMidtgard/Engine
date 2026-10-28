@@ -181,9 +181,10 @@ impl SurfaceMap {
         }
     }
 
-    /// The node at `level` containing a terrain-local point (sphere: by direction).
-    pub fn node_at(&self, local: DVec3, level: u8) -> Option<NodeKey> {
-        let (face, a, b) = match self.domain {
+    /// Face and face coordinates (`[-1, 1]²`) of a terrain-local point (sphere: by direction).
+    /// `None` for a point at the center, or outside a flat terrain's square.
+    pub fn face_coords(&self, local: DVec3) -> Option<(u8, f64, f64)> {
+        match self.domain {
             TerrainDomain::Sphere => {
                 let d = local.try_normalize()?;
                 let (face, (n, u, v)) = FACES
@@ -191,23 +192,22 @@ impl SurfaceMap {
                     .enumerate()
                     .max_by(|x, y| d.dot(x.1.0).total_cmp(&d.dot(y.1.0)))?;
                 let k = d.dot(*n);
-                let ta = d.dot(*u) / k;
-                let tb = d.dot(*v) / k;
-                (
+                Some((
                     face as u8,
-                    ta.atan() / std::f64::consts::FRAC_PI_4,
-                    tb.atan() / std::f64::consts::FRAC_PI_4,
-                )
+                    (d.dot(*u) / k).atan() / std::f64::consts::FRAC_PI_4,
+                    (d.dot(*v) / k).atan() / std::f64::consts::FRAC_PI_4,
+                ))
             }
             TerrainDomain::Flat { size_m, .. } => {
                 let a = local.x / (size_m * 0.5);
                 let b = -local.z / (size_m * 0.5);
-                if a.abs() > 1.0 || b.abs() > 1.0 {
-                    return None;
-                }
-                (0, a, b)
+                (a.abs() <= 1.0 && b.abs() <= 1.0).then_some((0, a, b))
             }
-        };
+        }
+    }
+
+    pub fn node_at(&self, local: DVec3, level: u8) -> Option<NodeKey> {
+        let (face, a, b) = self.face_coords(local)?;
         let n = (1u64 << level) as f64;
         let to_cell = |t: f64| (((t + 1.0) * 0.5 * n).floor() as i64).clamp(0, n as i64 - 1) as u32;
         Some(NodeKey {

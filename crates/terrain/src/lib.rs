@@ -9,6 +9,7 @@ pub mod edits;
 pub mod forest;
 pub mod ground;
 pub mod landforms;
+pub mod lights;
 pub mod lod;
 pub mod materials;
 pub mod noise;
@@ -524,6 +525,7 @@ impl Plugin for TerrainPlugin {
             .init_resource::<collider::TerrainColliders>()
             .init_resource::<rocks::RockCells>()
             .init_resource::<RecoverClock>()
+            .init_resource::<lights::CityLights>()
             .register_component::<PlanetTerrain>(
                 "Procedural planet or flat terrain on this entity (shape, palette, level of \
                  detail, ocean, ground query, colliders). Lengths in meters.",
@@ -546,6 +548,7 @@ impl Plugin for TerrainPlugin {
                 PostUpdate,
                 (
                     sync_terrains,
+                    lights::register_lamps,
                     apply_edits,
                     collider::update_colliders,
                     rocks::update_rocks,
@@ -1250,6 +1253,79 @@ mod tests {
             engine_world::SimulationFocus::default(),
         ));
         app
+    }
+
+    /// A town's lamps in a streamed cell: they keep glowing after the cell unloads, are
+    /// replaced (not doubled) when it loads again, and go with its scene.
+    #[test]
+    fn a_streamed_towns_lamps_outlive_its_unloading_until_its_scene_goes() {
+        use engine_world::stream::CellInfo;
+        use engine_world::{CellId, CellMember, CellState, StreamedCells};
+        let mut app = app_with_planet();
+        app.world
+            .resource_mut::<StreamedCells>()
+            .cells
+            .push(CellInfo {
+                key: "town".into(),
+                center: DVec3::ZERO,
+                radius: 100.0,
+                load_m: 256.0,
+                keep_loaded: false,
+                state: CellState::Loaded,
+                load_secs: 0.0,
+                build_secs: 0.0,
+                entities: 0,
+                ram_mb: None,
+                assets: 0,
+                assets_mb: 0.0,
+                releases_assets: false,
+                frame: None,
+                retired: false,
+            });
+        let lamp = |lm: f32| engine_render::PointLight {
+            intensity_lm: lm,
+            range: 30.0,
+            ..Default::default()
+        };
+        let spawn_town = |app: &mut App| {
+            let root = app
+                .world
+                .spawn((Transform::from_xyz(40.0, 0.0, 0.0), CellMember(CellId(0))))
+                .id();
+            let light = app
+                .world
+                .spawn((
+                    lamp(20_000.0),
+                    Transform::from_xyz(0.0, 8.0, 0.0),
+                    ChildOf(root),
+                ))
+                .id();
+            (root, light)
+        };
+        // A lamp of the world's own (no cell), and the town's.
+        app.world
+            .spawn((lamp(5_000.0), Transform::from_xyz(-60.0, 8.0, 0.0)));
+        let (root, light) = spawn_town(&mut app);
+        app.update_n(2);
+        let lumens = |app: &App| app.world.resource::<lights::CityLights>().lumens();
+        assert_eq!(lumens(&app), 25_000.0);
+        // The player walks off: the cell unloads, its lamps stay lit.
+        app.world.despawn(light);
+        app.world.despawn(root);
+        app.update_n(2);
+        assert_eq!(lumens(&app), 25_000.0);
+        // Back again: the cell spawns its lamp anew, in place of the kept one.
+        let (root, light) = spawn_town(&mut app);
+        app.update_n(2);
+        assert_eq!(lumens(&app), 25_000.0);
+        app.world.despawn(light);
+        app.world.despawn(root);
+        app.update_n(2);
+        assert_eq!(lumens(&app), 25_000.0);
+        // Its scene is unloaded for good.
+        app.world.resource_mut::<StreamedCells>().cells[0].retired = true;
+        app.update();
+        assert_eq!(lumens(&app), 5_000.0);
     }
 
     #[test]

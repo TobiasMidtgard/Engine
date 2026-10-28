@@ -20,6 +20,7 @@ use engine_world::{Grid2, SurfaceCell, SurfaceLayers};
 use crate::chunk::{ChunkSource, TerrainVertex, VERTS_PER_CHUNK, build_chunk, chunk_indices};
 use crate::cube::NodeKey;
 use crate::deform::DeformationMap;
+use crate::lights::{CityLights, NO_PAGE, NightPages};
 use crate::lod::{Lod, SelectInput};
 use crate::materials::{self, BakedMaterials, MATERIAL_COUNT};
 use crate::wear::{PathWear, TILE, WearSettings};
@@ -54,12 +55,15 @@ struct ChunkInstance {
     /// Vertex spacing (m), quadtree level, and the camera distances where the geomorph
     /// toward the parent patch starts and ends (0 = off).
     lod: [f32; 4],
+    /// The night glow page the patch samples (see [`NightPages::lookup`]).
+    night: [f32; 4],
 }
 
 impl ChunkInstance {
     fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 3] =
-            wgpu::vertex_attr_array![5 => Float32x3, 6 => Uint32, 7 => Float32x4];
+        const ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+            5 => Float32x3, 6 => Uint32, 7 => Float32x4, 12 => Float32x4
+        ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<ChunkInstance>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
@@ -131,7 +135,8 @@ struct PlanetGpu {
     /// Young ground with few craters: planet-local direction of the middle times its youth
     /// (xyz), angular radius (w, radians).
     young: [[f32; 4]; MAX_YOUNG],
-    /// Night lights of towns and cities (0..1), unused ×3.
+    /// Night lights of towns and cities (0..1), the distance from which the world's own
+    /// lamps glow from their pages (m), unused ×2.
     params4: [f32; 4],
 }
 
@@ -189,6 +194,8 @@ struct Gpu {
     mat_key: Option<(u32, Option<PathBuf>)>,
     /// Materials built from scans.
     mat_scanned: usize,
+    /// City lights: the night glow of the world's own lamps.
+    night: NightPages,
     group: Option<wgpu::BindGroup>,
 }
 
@@ -524,6 +531,10 @@ impl TerrainFeature {
                         wgpu::BindGroupEntry {
                             binding: 9,
                             resource: wgpu::BindingResource::TextureView(&wear.1),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: wgpu::BindingResource::TextureView(&gpu.night.view),
                         },
                     ],
                 }),
@@ -1065,6 +1076,16 @@ impl RenderFeature for TerrainFeature {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let buffers = [Some(TerrainVertex::layout()), Some(ChunkInstance::layout())];
@@ -1230,6 +1251,7 @@ impl RenderFeature for TerrainFeature {
             mat_size: 0,
             mat_key: None,
             mat_scanned: 0,
+            night: NightPages::new(device),
             group: None,
         });
     }
@@ -1239,10 +1261,12 @@ impl RenderFeature for TerrainFeature {
         world: &mut World,
         gpu_shared: &GpuShared,
         view: &ViewData,
-        _settings: &RenderSettings,
+        render_settings: &RenderSettings,
     ) {
         self.frame += 1;
         self.draws.clear();
+        let lamp_handoff =
+            crate::lights::handoff_distance(world, view, render_settings.max_point_lights);
         for s in &mut self.shadow_draws {
             s.clear();
         }
@@ -1291,6 +1315,13 @@ impl RenderFeature for TerrainFeature {
 
         let mut entities: Vec<Entity> = terrains.entries.keys().copied().collect();
         entities.sort();
+        let city = world.get_resource::<CityLights>();
+
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.night.begin_frame();
+            gpu.night
+                .retain_planets(|e| terrains.entries.contains_key(e));
+        }
         let mut planet_gpu = Vec::with_capacity(entities.len());
         let mut instances: Vec<ChunkInstance> = Vec::new();
         let mut built_total = 0usize;
@@ -1473,6 +1504,9 @@ impl RenderFeature for TerrainFeature {
             }
 
             // Draw lists.
+            let lamps = city
+                .and_then(|c| c.planets.get(e))
+                .filter(|l| !l.is_empty() && src.map.is_sphere());
             let rot_f = Mat3::from_quat(rot.as_quat());
             let casts = t.config.cast_shadows && view.sun_shadows;
             // The parent takes over at `split` parent sizes; be fully morphed by then.
@@ -1491,10 +1525,18 @@ impl RenderFeature for TerrainFeature {
                 let morph = morph(key.level);
                 let rel = (pos + rot * c.origin - view.origin).as_vec3();
                 let instance = instances.len() as u32;
+                let night = match (lamps, self.gpu.as_mut()) {
+                    (Some(lamps), Some(gpu)) => {
+                        gpu.night
+                            .lookup(&gpu_shared.queue, *e, lamps, &state.lod.map, *key)
+                    }
+                    _ => NO_PAGE,
+                };
                 instances.push(ChunkInstance {
                     origin: rel.to_array(),
                     planet: pi as u32,
                     lod: [c.spacing as f32, key.level as f32, morph.0, morph.1],
+                    night,
                 });
                 self.draws.push(Draw {
                     slot: c.slot,
@@ -1523,6 +1565,7 @@ impl RenderFeature for TerrainFeature {
                     origin: rel.to_array(),
                     planet: pi as u32,
                     lod: [c.spacing as f32, key.level as f32, morph.0, morph.1],
+                    night: NO_PAGE,
                 });
                 self.far_shadow_draws.push(Draw {
                     slot: c.slot,
@@ -1582,7 +1625,7 @@ impl RenderFeature for TerrainFeature {
                 ],
                 rays: state.rays,
                 young: state.young,
-                params4: [p.night_lights, 0.0, 0.0, 0.0],
+                params4: [p.night_lights, lamp_handoff, 0.0, 0.0],
             });
         }
         self.built_last_frame = built_total;
@@ -1640,6 +1683,9 @@ impl RenderFeature for TerrainFeature {
             d.set("terrain.patches_missing", missing_total as f64);
             d.set("terrain.patches_building", building_total as f64);
             d.set("terrain.detail_boost", max_boost);
+            if let Some(gpu) = &self.gpu {
+                d.set("terrain.night_pages", gpu.night.resident() as f64);
+            }
         }
     }
 

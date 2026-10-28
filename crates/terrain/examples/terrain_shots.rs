@@ -69,6 +69,11 @@ struct View {
     /// the straight line instead, for a before picture.
     places: &'static [(f64, f64, f32)],
     trips: u32,
+    /// A town of street lamps around home, lit at night (no procedural towns and cities, so
+    /// only its own lamps glow).
+    town: bool,
+    /// Someone walked along the dirt road and the grass beside it (footprints).
+    steps: bool,
 }
 
 /// A path walked `passes` times along a line of (meters ahead of the eye, meters to its
@@ -133,6 +138,8 @@ const BASE: View = View {
     paths_from: None,
     places: &[],
     trips: 0,
+    town: false,
+    steps: false,
 };
 
 /// A farm by the meadow's edge and four places its people walk to (and between).
@@ -250,6 +257,17 @@ fn views() -> Vec<View> {
             target_above_ground: Some(0.0),
             sun: (200.0, 18.0),
             painted: true,
+            ..BASE
+        },
+        View {
+            name: "ground_steps_eye",
+            eye: DVec3::new(-3.0, 0.0, -0.8),
+            target: DVec3::new(4.0, 0.0, 1.5),
+            above_ground: Some(1.7),
+            target_above_ground: Some(0.0),
+            sun: (200.0, 18.0),
+            painted: true,
+            steps: true,
             ..BASE
         },
         View {
@@ -633,6 +651,29 @@ fn views() -> Vec<View> {
             exposure: Exposure::Manual { ev100: -1.5 },
             ..BASE
         },
+        // City lights from the world's own lamps: a town of street lamps at night.
+        View {
+            name: "earth_town_plane",
+            eye: DVec3::new(-2_600.0, 0.0, 2_200.0),
+            target: DVec3::new(0.0, 0.0, -200.0),
+            above_ground: Some(1_500.0),
+            target_above_ground: Some(0.0),
+            sun: (200.0, -25.0),
+            exposure: Exposure::Manual { ev100: 0.0 },
+            town: true,
+            ..BASE
+        },
+        View {
+            name: "earth_town_orbit",
+            eye: DVec3::new(-150_000.0, 0.0, 150_000.0),
+            above_ground: Some(400_000.0),
+            target_above_ground: Some(0.0),
+            sun: (200.0, -25.0),
+            fov: 6.0,
+            exposure: Exposure::Manual { ev100: 0.0 },
+            town: true,
+            ..BASE
+        },
         View {
             name: "moon_surface",
             world: World3::Moon,
@@ -827,6 +868,86 @@ fn painted_ground(x: f64, z: f64) -> Option<OverlayPaint> {
     None
 }
 
+/// Street lamps of a town about 2.5 km across around home: bright main roads every 400 m,
+/// sodium-lit side streets every 80 m, a lamp every 40 m, thinning out toward a ragged edge.
+/// With `NO_CITY=1` the terrain doesn't see them (a before picture): each is registered
+/// below the lamps' threshold, with its color scaled so the renderer lights the same.
+fn spawn_town(app: &mut App, place: &dyn Fn(DVec3, Option<f64>) -> DVec3) {
+    let hidden = std::env::var_os("NO_CITY").is_some();
+    let mut lamps = 0;
+    for street in -15i32..=15 {
+        let main = street % 5 == 0;
+        for step in -30i32..=30 {
+            for along_x in [true, false] {
+                let (u, v) = (street as f64 * 80.0, step as f64 * 40.0);
+                let (x, z) = if along_x { (v, u) } else { (u, v) };
+                // A ragged edge: the town thins out from 900 to 1300 m.
+                let r = x.hypot(z) * (1.0 + 0.15 * (x / 210.0).sin() * (z / 170.0).cos());
+                let keep = ((1300.0 - r) / 400.0).clamp(0.0, 1.0);
+                let hash = ((x * 12.9898 + z * 78.233).sin() * 43758.5453)
+                    .fract()
+                    .abs();
+                if hash > keep {
+                    continue;
+                }
+                let (lumens, color) = if main {
+                    (20_000.0, [1.0, 0.95, 0.85])
+                } else {
+                    (9_000.0, [1.0, 0.72, 0.42])
+                };
+                let at = place(DVec3::new(x, 0.0, z), Some(8.0));
+                let light = if hidden {
+                    let k = lumens / 150.0;
+                    PointLight {
+                        color: [color[0] * k, color[1] * k, color[2] * k],
+                        intensity_lm: 150.0,
+                        range: 35.0,
+                        radius: 0.2,
+                    }
+                } else {
+                    PointLight {
+                        color,
+                        intensity_lm: lumens,
+                        range: 35.0,
+                        radius: 0.2,
+                    }
+                };
+                app.world.spawn((light, Transform::from_translation(at)));
+                lamps += 1;
+            }
+        }
+    }
+    eprintln!("town: {lamps} lamps");
+}
+
+/// Footprints of someone who walked up the painted dirt road (its middle follows
+/// `z = 12 sin(x / 45)`) and of someone on the grass beside it: a step every 0.7 m.
+fn walk_steps(app: &mut App, place: &dyn Fn(DVec3, Option<f64>) -> DVec3) {
+    for side in [0.0, 4.5] {
+        let mut left = false;
+        let mut x: f64 = -2.5;
+        while x < 9.0 {
+            let z = 12.0 * (x / 45.0).sin() + side;
+            let ahead = DVec3::new(1.0, 0.0, (12.0 / 45.0) * (x / 45.0).cos()).normalize();
+            let right = DVec3::new(-ahead.z, 0.0, ahead.x);
+            let foot = DVec3::new(x, 0.0, z) + right * if left { -0.12 } else { 0.12 };
+            app.world.write_message(engine_world::GroundContact {
+                position: place(foot, Some(0.0)),
+                normal: Vec3::Y,
+                size: [0.11, 0.28],
+                yaw: engine_world::GroundContact::yaw_of(ahead.as_vec3()),
+                load_kg: 75.0,
+                speed: 1.4,
+                kind: engine_world::ContactKind::Foot,
+                surface: None,
+                entity: None,
+            });
+            left = !left;
+            x += 0.7;
+        }
+    }
+}
+
 fn sun_dir(azimuth_deg: f64, elevation_deg: f64) -> DVec3 {
     let (az, el) = (azimuth_deg.to_radians(), elevation_deg.to_radians());
     // North is −Z, east is +X.
@@ -857,7 +978,7 @@ fn build(view: &View, size: (u32, u32)) -> App {
     .with_pad(pad);
     // `NO_LIGHTS=1`: the night side without towns and cities, for a before picture.
     let mut planet = planet;
-    if std::env::var_os("NO_LIGHTS").is_some() {
+    if std::env::var_os("NO_LIGHTS").is_some() || view.town {
         planet.palette.night_lights = 0.0;
     }
     // `NO_ROCKS=1`: bare ground without stones and boulders, for a before picture.
@@ -1034,6 +1155,12 @@ fn main() {
                 Some(_) => (eye - tf.translation).normalize().as_vec3(),
                 None => (tf.rotation.as_dquat() * DVec3::Y).as_vec3(),
             };
+        }
+        if view.town {
+            spawn_town(&mut app, &place);
+        }
+        if view.steps {
+            walk_steps(&mut app, &place);
         }
         if (!view.paths.is_empty() || !view.places.is_empty())
             && std::env::var_os("NO_PATHS").is_none()

@@ -20,7 +20,7 @@ struct PlanetGpu {
     params3: vec4<f32>,             // regolith scattering (0..1), rayed craters, young areas, smallest crater radius
     rays: array<vec4<f32>, 8>,      // rayed craters: center (planet-local unit direction), radius on the ground (m)
     young: array<vec4<f32>, 12>,    // young ground: middle (planet-local direction) × youth, angular radius
-    params4: vec4<f32>,             // night lights (0..1), unused ×3
+    params4: vec4<f32>,             // night lights (0..1), lamp page handoff distance (m), unused ×2
 };
 
 // Must match `MapsGpu` in render.rs.
@@ -58,6 +58,8 @@ struct Materials {
     flags: vec4<f32>,            // textures ready
 };
 @group(1) @binding(5) var<uniform> mats: Materials;
+// The night glow of the world's own lamps: one page per patch with lamps under it (lights.rs).
+@group(1) @binding(10) var night_tex: texture_2d_array<f32>;
 @group(1) @binding(6) var mat_albedo: texture_2d_array<f32>;  // sRGB albedo, height in alpha
 @group(1) @binding(7) var mat_normal: texture_2d_array<f32>;  // normal xy, roughness, occlusion
 @group(1) @binding(8) var mat_sampler: sampler;
@@ -90,6 +92,7 @@ struct VertexIn {
     @location(7) lod: vec4<f32>,       // vertex spacing (m), level
     @location(8) tint: vec4<f32>,      // hand-made ground tint: sqrt(color), amount
     @location(11) river: vec4<f32>,    // river and lake water (0..1), lake share, river banks, spare
+    @location(12) night: vec4<f32>,    // night glow page: face corner a, b, edge, layer·8 + face (−1 none)
 };
 
 // `@invariant` keeps the prepass and the scene pass depths bit-identical.
@@ -109,6 +112,7 @@ struct VertexOut {
     @location(9) paint_b: vec4<f32>,
     @location(10) paint_c: vec2<f32>,
     @location(11) water: vec3<f32>,       // river and lake water, lake share, river banks
+    @location(12) @interpolate(flat) night: vec4<f32>,  // see `VertexIn`
 };
 
 // Geomorph offsets are stored in vertex spacings (`chunk::MORPH_RANGE`).
@@ -567,6 +571,36 @@ fn settlements(p: vec3<f32>, radius: f32, cell_m: f32, salt: u32, odds: f32, r_m
 }
 
 // Every town's and city's light at a planet-local point `p` (meters from the center).
+// Cube faces: outward normal, `a` axis, `b` axis (cube.rs `FACES`).
+var<private> FACE_N: array<vec3<f32>, 6> = array<vec3<f32>, 6>(
+    vec3(1.0, 0.0, 0.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0),
+    vec3(0.0, -1.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(0.0, 0.0, -1.0));
+var<private> FACE_A: array<vec3<f32>, 6> = array<vec3<f32>, 6>(
+    vec3(0.0, 0.0, -1.0), vec3(0.0, 0.0, 1.0), vec3(1.0, 0.0, 0.0),
+    vec3(1.0, 0.0, 0.0), vec3(1.0, 0.0, 0.0), vec3(-1.0, 0.0, 0.0));
+var<private> FACE_B: array<vec3<f32>, 6> = array<vec3<f32>, 6>(
+    vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, -1.0),
+    vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0));
+
+// The lamps' glow (cd/m², linear RGB) at the planet-local direction `d`, from the page
+// `page` (see `VertexIn.night`).
+fn lamp_glow(page: vec4<f32>, d: vec3<f32>) -> vec3<f32> {
+    let packed = u32(page.w);
+    let face = packed % 8u;
+    let k = dot(d, FACE_N[face]);
+    if (k <= 0.0) {
+        return vec3(0.0);
+    }
+    // Face coordinates (the tangent warp undone), then the page's texture coordinates.
+    let ab = atan(vec2<f32>(dot(d, FACE_A[face]), dot(d, FACE_B[face])) / k) * (4.0 / 3.14159265);
+    let uv = (ab - page.xy) / page.z;
+    let edge = 0.5 / 128.0;
+    if (any(uv < vec2(-edge)) || any(uv > vec2(1.0 + edge))) {
+        return vec3(0.0);
+    }
+    return textureSampleLevel(night_tex, map_sampler, clamp(uv, vec2(edge), vec2(1.0 - edge)), packed / 8u, 0.0).rgb;
+}
+
 fn night_lights(p: vec3<f32>, radius: f32, pixel: f32) -> vec3<f32> {
     // Where people live in numbers: regions hundreds of kilometers wide are busy or nearly
     // empty (big cities stand in both).
@@ -932,6 +966,7 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.paint_c = in.paint_c.xy;
     out.lod = vec4<f32>(in.lod.xy, convex, 0.0);
     out.water = in.river.xyz;
+    out.night = in.night;
     out.tint = vec4<f32>(in.tint.rgb * in.tint.rgb, in.tint.a);
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     return out;
@@ -2313,6 +2348,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             let rot = planet_rot(planet);
             let local = transpose(rot) * up;
             color += pre_expose(night_lights(local * planet.center.w, planet.center.w, pixel) * night * hab);
+        }
+    }
+    // The world's own lamps, from where the renderer stops lighting the ground with them.
+    if (in.night.w >= 0.0) {
+        let handoff = planet.params4.y;
+        let night = smoothstep(0.03, -0.1, dot(up, to_sun)) * smoothstep(handoff, handoff * 1.25 + 50.0, dist);
+        if (night > 0.0) {
+            let local = transpose(planet_rot(planet)) * up;
+            color += pre_expose(lamp_glow(in.night, local) * night);
         }
     }
     color = apply_fog(color, in.rel);
