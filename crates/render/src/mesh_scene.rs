@@ -16,7 +16,7 @@ use bevy_ecs::change_detection::Tick;
 use engine_core::prelude::*;
 
 use crate::components::{
-    MaxDrawDistance, MeshRenderer, NoMeshLod, NoVirtualGeometry, ResolvedMesh,
+    DitherFade, MaxDrawDistance, MeshRenderer, NoMeshLod, NoVirtualGeometry, ResolvedMesh,
 };
 use crate::mesh_feature::max_scale;
 use crate::virtual_geometry::Displacement;
@@ -45,6 +45,8 @@ pub(crate) struct Hot {
     pub scale: f32,
     /// `MaxDrawDistance` (`f32::MAX` without one).
     pub max_distance: f32,
+    /// `DitherFade` (0 without one).
+    pub dither: f32,
     /// Mesh and material handle indices, as the entity names them (not canonical).
     pub mesh: u32,
     pub material: u32,
@@ -109,6 +111,7 @@ type SceneQuery = (
     Ref<'static, MeshRenderer>,
     Ref<'static, ResolvedMesh>,
     Option<Ref<'static, MaxDrawDistance>>,
+    Option<Ref<'static, DitherFade>>,
     Has<NoVirtualGeometry>,
     Has<Displacement>,
     Has<NoMeshLod>,
@@ -190,6 +193,7 @@ impl MeshScene {
             renderer,
             resolved,
             max_distance,
+            dither,
             instanced_only,
             displaced,
             full_detail,
@@ -221,6 +225,10 @@ impl MeshScene {
                         || match &max_distance {
                             Some(m) => m.is_changed(),
                             None => hot.max_distance != f32::MAX,
+                        }
+                        || match &dither {
+                            Some(d) => d.is_changed(),
+                            None => hot.dither != 0.0,
                         };
                     if !changed {
                         continue;
@@ -255,6 +263,7 @@ impl MeshScene {
                         radius: 0.0,
                         scale: 1.0,
                         max_distance: f32::MAX,
+                        dither: 0.0,
                         mesh: 0,
                         material: 0,
                         mesh_version: u64::MAX,
@@ -272,6 +281,13 @@ impl MeshScene {
             self.hot[s] = Hot {
                 scale: max_scale(&transform),
                 max_distance: max,
+                dither: dither.as_ref().map_or(0.0, |d| {
+                    if d.0.is_finite() {
+                        d.0.clamp(-1.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                }),
                 mesh: resolved.mesh.index(),
                 material: resolved.material.index(),
                 // Bounds again, from the mesh, when next culled.

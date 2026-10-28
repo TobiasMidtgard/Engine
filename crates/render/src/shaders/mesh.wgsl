@@ -88,6 +88,8 @@ struct VertexOut {
     @location(7) @interpolate(flat) axis_x: vec3<f32>,
     @location(8) @interpolate(flat) axis_y: vec3<f32>,
     @location(9) @interpolate(flat) axis_z: vec3<f32>,
+    // Its dither (`n0.w`, `dither_keeps` in lib_frame.wgsl; 0: drawn whole).
+    @location(10) @interpolate(flat) dither: f32,
 };
 
 // Wind sway of a vertex (meters, camera-relative): the material's `wind_sway` times the vertex
@@ -158,6 +160,7 @@ fn standard_vertex(in: VertexIn) -> VertexOut {
     out.axis_x = vertex_axis(in, 0u);
     out.axis_y = vertex_axis(in, 1u);
     out.axis_z = vertex_axis(in, 2u);
+    out.dither = in.n0.w;
     out.clip = frame.view_proj * vec4<f32>(rel, 1.0);
     return out;
 }
@@ -931,6 +934,11 @@ fn surface_in(in: VertexOut, front: bool) -> SurfaceIn {
 
 @fragment
 fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    // The prepass's dither again: where a fading pair's two meshes lie at the same depth (flat
+    // faces both levels share), each shades only its own pixels.
+    if (!dither_keeps(in.dither, in.clip.xy)) {
+        discard;
+    }
     let mat = materials[in.material];
     let flags = mat.flags.x;
     // Blended materials have no prepass: they ask for their virtual texture tiles here.
@@ -1049,7 +1057,7 @@ struct PrepassVertexOut {
     @location(9) @interpolate(flat) axis_x: vec3<f32>,
     @location(10) @interpolate(flat) axis_y: vec3<f32>,
     @location(11) @interpolate(flat) axis_z: vec3<f32>,
-    // 0, or how far the instance is through its cross-fade into its impostor (`n0.w`).
+    // Its dither (`n0.w`, `dither_keeps` in lib_frame.wgsl; 0: drawn whole).
     @location(12) @interpolate(flat) fade: f32,
 };
 
@@ -1082,9 +1090,9 @@ fn standard_prepass_vertex(in: VertexIn) -> PrepassVertexOut {
 
 @fragment
 fn fs_prepass(in: PrepassVertexOut, @builtin(front_facing) front: bool) -> PrepassOutput {
-    // Cross-fading into its impostor: the mesh keeps the pixels the impostor leaves (the scene
-    // pass shades only what the prepass kept).
-    if (in.fade > 0.0 && frame_noise(in.clip.xy) < in.fade) {
+    // Dithered out (`DitherFade`, or cross-fading into its impostor, which takes the pixels the
+    // mesh leaves): the scene pass shades only what the prepass kept.
+    if (!dither_keeps(in.fade, in.clip.xy)) {
         discard;
     }
     let mat = materials[in.material];

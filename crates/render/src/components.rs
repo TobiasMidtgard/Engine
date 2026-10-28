@@ -302,6 +302,33 @@ impl Default for MaxDrawDistance {
     }
 }
 
+/// Fades this entity's [`MeshRenderer`] out with a stable screen dither (as Unreal's dithered LOD
+/// transitions and Unity's LOD cross-fade do), for levels of detail and props a game swaps
+/// itself: fade the old one out while the new one fades in, and neither pops. Temporal
+/// anti-aliasing smooths the dither into a blend.
+///
+/// `DitherFade(t)` with `t` in 0..=1 hides that share of the mesh's pixels (0 drawn, 1 gone).
+/// A negative value hides `-t` of them with the opposite pattern, so a pair made by
+/// [`DitherFade::pair`] covers every pixel exactly once at every step of the swap. The mesh casts
+/// its shadow while at least half of it shows (one of a pair at a time). While fading, a dense
+/// mesh is drawn instanced rather than as virtual geometry clusters.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct DitherFade(pub f32);
+
+impl DitherFade {
+    /// The two sides of a swap `t` of the way through (0..=1): the one fading out, then the one
+    /// fading in. Together they draw every pixel once.
+    pub fn pair(t: f32) -> (Self, Self) {
+        let t = t.clamp(0.0, 1.0);
+        (Self(t), Self(-(1.0 - t)))
+    }
+
+    /// The share of the mesh's pixels hidden (0..=1).
+    pub fn hidden(self) -> f32 {
+        self.0.abs().min(1.0)
+    }
+}
+
 impl Default for MeshRenderer {
     fn default() -> Self {
         Self {

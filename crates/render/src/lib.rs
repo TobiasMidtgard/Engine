@@ -114,9 +114,9 @@ pub use cloud_shadows::{
     CLOUD_SHADOW_FORMAT, CloudShadowArea, CloudShadowRequest, CloudShadowTarget,
 };
 pub use components::{
-    AmbientLight, BoxFace, Camera, DirectionalLight, Exposure, ExtraView, FogShape, FogVolume,
-    MaterialRef, MaxDrawDistance, MeshRef, MeshRenderer, NoMeshLod, NoVirtualGeometry, PointLight,
-    Projection, ResolvedMesh, SkyLightVolume, ViewTarget, Viewport,
+    AmbientLight, BoxFace, Camera, DirectionalLight, DitherFade, Exposure, ExtraView, FogShape,
+    FogVolume, MaterialRef, MaxDrawDistance, MeshRef, MeshRenderer, NoMeshLod, NoVirtualGeometry,
+    PointLight, Projection, ResolvedMesh, SkyLightVolume, ViewTarget, Viewport,
 };
 pub use depth_of_field::DepthOfField;
 pub use features::{
@@ -162,9 +162,9 @@ pub use wgpu;
 pub mod prelude {
     pub use crate::{
         AlphaMode, AmbientLight, AntiAliasing, Atmosphere, Billboard, BoxFace, Camera,
-        DepthOfField, DirectionalLight, Displacement, DisplacementSource, Exposure, ExtraView,
-        FogSettings, FogShape, FogVolume, GltfScene, GltfSceneSpawner, GrassBender, GrassField,
-        GrassStyle, Image, MaterialPreset, MaterialRef, MaxDrawDistance, Mesh, MeshRef,
+        DepthOfField, DirectionalLight, Displacement, DisplacementSource, DitherFade, Exposure,
+        ExtraView, FogSettings, FogShape, FogVolume, GltfScene, GltfSceneSpawner, GrassBender,
+        GrassField, GrassStyle, Image, MaterialPreset, MaterialRef, MaxDrawDistance, Mesh, MeshRef,
         MeshRenderer, MotionBlur, NoMeshLod, NoVirtualGeometry, Parallax, PixelPerfect, PixelSnap,
         PointLight, Portal, Projection, RenderAppExt, RenderFeature, RenderPhase, RenderPlugin,
         RenderSettings, Screenshots, Shape, SkyLightVolume, Sprite, SpriteAlpha, SpriteAnimation,
@@ -232,6 +232,9 @@ impl Plugin for RenderPlugin {
             )
             .register_component::<Displacement>(
                 "Real displaced geometry for this entity's MeshRenderer, made when its virtual geometry clusters are built (background, cached on disk): amplitude_m (m; 0 = the material's parallax_depth), midlevel (height left on the surface), edge_m / max_edge_m (finest / coarsest triangle edges, m), tolerance_m, max_triangles, cavity_darkening, normal_map_strength, source: \"MaterialHeight\" (the material's height map or preset) | {\"Stone\": {kind: SplitFace|RoughHewn|Slab, seed, scale, lichen, grime}}.",
+            )
+            .register_component::<DitherFade>(
+                "Fades this entity's MeshRenderer out with a stable screen dither, for levels of detail a game swaps itself: 0 drawn, 1 gone; a negative value hides that share with the opposite pattern, so DitherFade(t) on the old mesh and DitherFade(-(1 - t)) on the new one cover every pixel once. Casts its shadow while at least half shows.",
             )
             .register_component::<MaxDrawDistance>(
                 "Meters from the camera beyond which this entity's MeshRenderer (and its shadow) is not drawn: small props and clutter. Measured to the mesh's bounding sphere.",

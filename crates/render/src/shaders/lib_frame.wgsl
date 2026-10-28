@@ -237,6 +237,16 @@ fn frame_noise(pixel: vec2<f32>) -> f32 {
     return interleaved_gradient_noise(pixel + offset);
 }
 
+// Whether a dithered instance (`DitherFade`, or a mesh cross-fading into its impostor) draws this
+// pixel. `dither` 0 draws them all; a positive share hides the pixels whose `frame_noise` is
+// below it, a negative one keeps only those below its negation, so `t` and `-t` split the pixels
+// between them.
+fn dither_keeps(dither: f32, pixel: vec2<f32>) -> bool {
+    if (dither == 0.0) { return true; }
+    let n = frame_noise(pixel);
+    return select((n < -dither), (n >= dither), dither > 0.0);
+}
+
 // Point i of n on a Vogel (sunflower) disk of radius 1, turned by `angle`.
 fn vogel_disk(i: i32, n: i32, angle: f32) -> vec2<f32> {
     let r = sqrt((f32(i) + 0.5) / f32(n));
