@@ -83,6 +83,7 @@ pub(crate) struct Request {
 /// The bake recorded in this frame's `compute`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Bake {
+    pub key: Key,
     pub layer: u32,
     pub mesh: u32,
     pub textures: u32,
@@ -162,12 +163,52 @@ struct Scratch {
     blocks: wgpu::Buffer,
 }
 
-pub(crate) struct Impostors {
-    /// Baked layers by mesh and material.
-    layers: HashMap<Key, u32>,
-    /// Each layer's mesh and material, and the frame it was last drawn.
+/// Which mesh and material holds each atlas layer, and which of them are baked.
+#[derive(Default)]
+struct Layers {
+    /// Baked layers by mesh and material: those a bake has been recorded into.
+    baked: HashMap<Key, u32>,
+    /// Each layer's mesh and material, and the frame it was last drawn (or claimed).
     owners: Vec<(Key, u64)>,
-    /// Frames scheduled so far (the clock of `owners`).
+}
+
+impl Layers {
+    /// A layer to bake `key` into: the one it already holds (a bake that never got recorded is
+    /// retried there), else a free one or the one drawn longest ago (see [`pick_layer`]).
+    fn claim(&mut self, key: Key, frame: u64, max: u32) -> Option<u32> {
+        let layer = match self.owners.iter().position(|(k, _)| *k == key) {
+            Some(layer) => layer as u32,
+            None => pick_layer(&self.owners, frame, max)?,
+        };
+        match self.owners.get_mut(layer as usize) {
+            Some(owner) => {
+                if owner.0 != key {
+                    // Reuse a layer nobody has drawn for a while.
+                    self.baked.remove(&owner.0);
+                }
+                *owner = (key, frame);
+            }
+            None => self.owners.push((key, frame)),
+        }
+        Some(layer)
+    }
+
+    /// The bake of `key` into `layer` is recorded: draw it from now on (unless the layer went
+    /// to another mesh meanwhile).
+    fn baked(&mut self, key: Key, layer: u32) {
+        if self
+            .owners
+            .get(layer as usize)
+            .is_some_and(|(k, _)| *k == key)
+        {
+            self.baked.insert(key, layer);
+        }
+    }
+}
+
+pub(crate) struct Impostors {
+    layers: Layers,
+    /// Frames scheduled so far (the clock of `layers`).
     frame: u64,
     /// The atlas is BC7 (decided with the first bake).
     compressed: Option<bool>,
@@ -317,8 +358,7 @@ impl Impostors {
             ],
         );
         Self {
-            layers: HashMap::new(),
-            owners: Vec::new(),
+            layers: Layers::default(),
             frame: 0,
             compressed: None,
             scratch: None,
@@ -349,12 +389,12 @@ impl Impostors {
 
     /// The baked layer of a mesh with a material.
     pub(crate) fn layer(&self, key: Key) -> Option<u32> {
-        self.layers.get(&key).copied()
+        self.layers.baked.get(&key).copied()
     }
 
     /// A layer counts as drawn this frame (a full atlas reuses the one drawn longest ago).
     pub(crate) fn mark_drawn(&mut self, layer: u32) {
-        if let Some(owner) = self.owners.get_mut(layer as usize) {
+        if let Some(owner) = self.layers.owners.get_mut(layer as usize) {
             owner.1 = self.frame;
         }
     }
@@ -369,7 +409,7 @@ impl Impostors {
 
     /// Whether anything is baked (the draw pipelines are needed).
     pub(crate) fn any(&self) -> bool {
-        !self.layers.is_empty()
+        !self.layers.baked.is_empty()
     }
 
     /// Pick this frame's bake from the requests: the most wanted one, if the atlas has room or
@@ -410,7 +450,7 @@ impl Impostors {
             .min(cap)
             .min(device.limits().max_texture_array_layers)
             .max(1);
-        let Some(layer) = pick_layer(&self.owners, self.frame, max) else {
+        let Some(layer) = self.layers.claim(key, self.frame, max) else {
             if !self.warned_full {
                 self.warned_full = true;
                 tracing::info!(
@@ -420,14 +460,6 @@ impl Impostors {
             }
             return;
         };
-        match self.owners.get_mut(layer as usize) {
-            Some(owner) => {
-                // Reuse a layer nobody has drawn for a while.
-                self.layers.remove(&owner.0);
-                *owner = (key, self.frame);
-            }
-            None => self.owners.push((key, self.frame)),
-        }
         if self.atlas.as_ref().is_none_or(|a| layer >= a.layers) {
             let layers = (layer + GROW).min(max);
             self.grown_from = self.atlas.replace(Atlas::new(device, layers, compressed));
@@ -499,10 +531,12 @@ impl Impostors {
         let instances = vec![instance; TILES as usize];
         gpu.queue
             .write_buffer(&self.bake_instances, 0, bytemuck::cast_slice(&instances));
-        self.layers.insert(key, layer);
+        // Drawn once `encode` has recorded the bake (`Layers::baked`); until then, and if it
+        // can't, the mesh stays a mesh and asks again.
         self.warned_full = false;
         self.last_bake = self.frame;
         self.pending = Some(Bake {
+            key,
             layer,
             mesh: request.mesh,
             textures: request.textures,
@@ -608,7 +642,11 @@ impl Impostors {
         }
         drop(pass);
         // Compressed atlas: the scratch pair into BC7 blocks, then into the layer.
-        if let Some(scratch) = &self.scratch {
+        let Some(scratch) = &self.scratch else {
+            self.layers.baked(bake.key, bake.layer);
+            return;
+        };
+        {
             let albedo = scratch.albedo.create_view(&wgpu::TextureViewDescriptor {
                 format: Some(wgpu::TextureFormat::Rgba8Unorm),
                 ..Default::default()
@@ -635,6 +673,7 @@ impl Impostors {
                 for (texture, offset) in [(&atlas.albedo, 0), (&atlas.normal, BC7_LAYER_BYTES)] {
                     copy_blocks(encoder, blocks, offset, texture, at, (SIZE, SIZE), 16);
                 }
+                self.layers.baked(bake.key, bake.layer);
             }
         }
     }
@@ -785,7 +824,7 @@ impl Impostors {
 
     /// Meshes baked now.
     pub(crate) fn count(&self) -> usize {
-        self.layers.len()
+        self.layers.baked.len()
     }
 
     /// Whether the atlas is BC7.
@@ -987,5 +1026,27 @@ mod tests {
         assert_eq!(pick_layer(&owners, 1000, 3), Some(1));
         // A smaller budget than the atlas has: only its first layers are candidates.
         assert_eq!(pick_layer(&owners, 1000, 1), None);
+    }
+
+    #[test]
+    fn a_bake_that_was_never_recorded_is_retried_in_its_layer() {
+        let (a, b) = ((1, 0u64), (2, 0u64));
+        let mut layers = Layers::default();
+        // Claimed, but `encode` bailed: not drawn, and the next claim gets the same layer.
+        assert_eq!(layers.claim(a, 1, 4), Some(0));
+        assert!(layers.baked.is_empty());
+        assert_eq!(layers.claim(b, 2, 4), Some(1));
+        assert_eq!(layers.claim(a, 3, 4), Some(0));
+        layers.baked(a, 0);
+        assert_eq!(layers.baked.get(&a), Some(&0));
+        assert_eq!(layers.owners.len(), 2);
+        // A layer handed to another mesh before its bake was recorded stays the new owner's.
+        let mut full = Layers::default();
+        assert_eq!(full.claim(a, 1, 1), Some(0));
+        full.baked(a, 0);
+        assert_eq!(full.claim(b, 1 + EVICT_AFTER_FRAMES, 1), Some(0));
+        assert!(!full.baked.contains_key(&a));
+        full.baked(a, 0);
+        assert!(full.baked.is_empty(), "a late bake of the old owner");
     }
 }
