@@ -147,6 +147,7 @@ fn main() {
             Some("round25") => shots::round25(dir),
             Some("round26") => shots::round26(dir),
             Some("round27") => shots::round27(dir),
+            Some("round27b") => shots::round27b(dir),
             Some("play") => shots::play_in_editor(dir),
             _ => shots::gallery(dir),
         };

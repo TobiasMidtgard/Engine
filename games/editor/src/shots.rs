@@ -2421,6 +2421,20 @@ pub fn round27(dir: impl Into<PathBuf>) -> ShotScript {
     ShotScript::new(dir, steps)
 }
 
+/// Round 27b: Shift+double-click on the World Partition map plays from that spot, streaming.
+pub fn round27b(dir: impl Into<PathBuf>) -> ShotScript {
+    let steps = vec![
+        Step::Tab(Tab::Partition),
+        Step::Do(Box::new(|world, editor| {
+            editor.icons = false;
+            crate::partition::play_at(world, editor, DVec3::new(-2.0, 0.0, -3.0));
+        })),
+        Step::Wait(60),
+        Step::Shot("128_play_from_the_map"),
+    ];
+    ShotScript::new(dir, steps)
+}
+
 /// Play in editor with a window: rigs and the physics courtyard play, stop puts the scene
 /// back. For checking the windowed renderer (run under a real or virtual display).
 pub fn play_in_editor(dir: impl Into<PathBuf>) -> ShotScript {

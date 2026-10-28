@@ -5,7 +5,7 @@
 //! map shows each cell loading, in and leaving as the view moves.
 //!
 //! Click a root to select it, double-click anywhere to fly the view there (Unreal's minimap
-//! double-click), drag to pan and scroll to zoom.
+//! double-click), Shift+double-click to play from there, drag to pan and scroll to zoom.
 
 use engine::prelude::*;
 use engine::scene_stream::{RuntimeGrid, SceneLayout, ScenePartition, partition, stream_scene};
@@ -141,7 +141,7 @@ pub fn start_streaming(world: &mut World, editor: &mut Editor) -> bool {
 /// Stop streaming (Stop, before it restores the scene).
 pub fn stop_streaming(world: &mut World, editor: &mut Editor) {
     if std::mem::take(&mut editor.partition.streaming) {
-        // Its cells fade out and despawn by themselves over the next frames.
+        // Its cells unload at once, inside the call, despawning their own entities.
         engine::scene_stream::unstream_scene(world, PLAY_SCENE);
         editor.partition.cut_at = f64::NEG_INFINITY;
     }
@@ -459,8 +459,26 @@ pub fn panel(ui: &mut egui::Ui, world: &mut World, editor: &mut Editor) {
     {
         // Fly the view over that spot, looking at it as it looks now.
         let target = to_world(&editor.partition, rect, at);
-        editor.focus = Some((DVec3::new(target.x, 0.0, target.y), 12.0));
+        let point = DVec3::new(target.x, 0.0, target.y);
+        if ui.input(|i| i.modifiers.shift) && editor.mode == Mode::Edit {
+            // Unreal's Shift+double-click: play from there, streaming the level around it.
+            play_at(world, editor, point);
+        } else {
+            editor.focus = Some((point, 12.0));
+        }
     }
+}
+
+/// Play with the view over `point`, the level streaming around it (Shift+double-click).
+pub fn play_at(world: &mut World, editor: &mut Editor, point: DVec3) {
+    if let Some(mut t) = world.get::<Transform>(editor.camera).copied() {
+        let back = t.forward().as_dvec3() * 14.0;
+        t.translation =
+            DVec3::new(point.x, point.y + 6.0, point.z) - DVec3::new(back.x, 0.0, back.z);
+        world.entity_mut(editor.camera).insert(t);
+    }
+    editor.partition.stream_play = true;
+    editor::play(world, editor);
 }
 
 fn to_world(p: &Partition, rect: egui::Rect, at: egui::Pos2) -> DVec2 {
