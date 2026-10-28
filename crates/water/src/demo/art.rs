@@ -40,7 +40,14 @@ pub(crate) fn crag() -> (Mesh, Mesh) {
 
 /// The test area's boulder shapes.
 pub(crate) fn rocks() -> Vec<Vec<Part>> {
-    ROCKS.get_or_init(|| super::rock_shapes(true)).clone()
+    if let Some(rocks) = ROCKS.get() {
+        return rocks.clone();
+    }
+    // Built outside the lock: while the wide build waits for its pieces this thread runs other
+    // pool tasks, and one may be another app's demo asking for the rocks (tests run several
+    // apps in one process), which would wait on the lock this thread holds forever.
+    let built = super::rock_shapes(true);
+    ROCKS.get_or_init(|| built).clone()
 }
 
 pub(crate) fn swimmer() -> Vec<Part> {
