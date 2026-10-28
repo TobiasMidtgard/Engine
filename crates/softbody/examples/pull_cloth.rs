@@ -1,6 +1,7 @@
-//! Pulling cloth by hand with the use key (E): a stand-in player walks up to the covered
-//! statue in the yard, takes hold of the silk sheet's hem and backs away, dragging it off.
-//! Saves one PNG per moment. Software Vulkan (lavapipe) is enough.
+//! Pulling the sheet off the statue with the use key (E): a stand-in player walks up to the
+//! crane's winch while the silk covers the statue, presses E ("Pull up") and the crane lifts
+//! the sheet off; E again ("Lower") lets it back down. Saves one PNG per moment. Software
+//! Vulkan (lavapipe) is enough.
 //!
 //! ```sh
 //! cargo run -p engine_softbody --example pull_cloth --release -- [out_dir] [WIDTHxHEIGHT] [shot,...]
@@ -14,26 +15,20 @@ use engine_world::interact::Interact;
 
 /// The way the statue faces.
 const FACING: Vec3 = Vec3::new(0.5, 0.0, -0.87);
-/// Seconds into the hoist's cycle when the sheet has settled over the statue.
-const COVERED: f32 = 10.0;
-/// Where the player stands to take hold (meters in front of the statue), and how far it
-/// backs away, at walking pace.
-const GRAB_AT: f64 = 1.3;
-const BACK_OFF: f64 = 2.6;
-const WALK_SECS: f32 = 2.6;
+/// Seconds into the hoist's cycle when the sheet has settled over the statue: the player
+/// reaches the winch and presses E.
+const COVERED: f32 = 11.0;
+/// Seconds after that when it presses E again.
+const LOWER_AT: f32 = 7.0;
+/// How far from the crank the player stands, m.
+const STAND_OFF: f64 = 0.55;
 
-/// Seconds into the cycle, and the camera: distance out in front, to the statue's right,
-/// height; and the height it looks at.
-const SHOTS: &[(&str, f32, [f64; 3], f64)] = &[
-    ("covered", COVERED, [4.6, 3.0, 2.0], 1.6),
-    ("taking_hold", COVERED + 0.6, [4.6, 3.0, 2.0], 1.6),
-    (
-        "pulling",
-        COVERED + 0.6 + 0.6 * WALK_SECS,
-        [5.2, 3.4, 2.1],
-        1.5,
-    ),
-    ("pulled", COVERED + 0.9 + WALK_SECS, [5.6, 3.6, 2.2], 1.4),
+/// Name, seconds, and the camera: meters out in front of the statue, to its right, height.
+const SHOTS: &[(&str, f32, [f64; 3])] = &[
+    ("covered", COVERED - 1.5, [7.6, -2.4, 2.4]),
+    ("pulling_up", COVERED + 1.4, [7.6, -2.4, 2.4]),
+    ("pulled_up", COVERED + 5.0, [7.6, -2.4, 2.4]),
+    ("lowering", COVERED + LOWER_AT + 3.0, [7.6, -2.4, 2.4]),
 ];
 
 fn main() {
@@ -107,15 +102,24 @@ fn main() {
     std::fs::create_dir_all(&out).expect("output directory");
     let front = FACING.as_dvec3();
     let right = DVec3::new(-front.z, 0.0, front.x);
-    // The stand-in player: a grey mannequin, its position at its feet, facing the statue.
-    let start = front * (GRAB_AT + 4.0);
-    let grab_spot = front * GRAB_AT;
-    let face = Quat::from_rotation_arc(Vec3::NEG_Z, -FACING.normalize());
+    app.update();
+    let (winch, crank) = {
+        let mut q = app
+            .world
+            .query_filtered::<(Entity, &Transform), With<engine_softbody::demo::statue::Winch>>();
+        let (e, t) = q.single(&app.world).expect("the winch");
+        (e, (t.translation, (t.rotation * Vec3::Z).as_dvec3()))
+    };
+    let (crank, handle_side) = crank;
+    // The stand-in player: a grey capsule, its position at its feet. It stands at the crank
+    // on the handle's side, and walks there from out in front.
+    let spot = crank.with_y(0.0) + handle_side.with_y(0.0).normalize() * STAND_OFF;
+    let start = spot + front * 4.0;
     let player = app
         .world
         .spawn((
             Name::new("Player stand-in"),
-            Transform::from_translation(start).with_rotation(face),
+            Transform::from_translation(start),
         ))
         .id();
     app.world.spawn((
@@ -130,38 +134,22 @@ fn main() {
         ),
         ChildOf(player),
     ));
-    let mut grabbed = false;
+    let mut presses = [COVERED, COVERED + LOWER_AT].into_iter().peekable();
     let mut elapsed = 0.0f32;
-    for (i, (name, secs, [ahead, side, up], look)) in SHOTS.iter().enumerate().take(last + 1) {
+    for (i, (name, secs, [ahead, side, up])) in SHOTS.iter().enumerate().take(last + 1) {
         if !wanted(name) {
             continue;
         }
         while elapsed < *secs {
-            // Walk up before the grab, back away after it.
-            let at = if elapsed < COVERED {
-                start.lerp(
-                    grab_spot,
-                    f64::from((elapsed / COVERED * 4.0 - 3.0).clamp(0.0, 1.0)),
-                )
-            } else {
-                let k = ((elapsed - COVERED - 0.3) / WALK_SECS).clamp(0.0, 1.0);
-                grab_spot + front * BACK_OFF * f64::from(k * k * (3.0 - 2.0 * k))
-            };
+            let k = f64::from(((elapsed - (COVERED - 3.0)) / 3.0).clamp(0.0, 1.0));
+            let at = start.lerp(spot, k * k * (3.0 - 2.0 * k));
             app.world.get_mut::<Transform>(player).unwrap().translation = at;
-            if !grabbed && elapsed >= COVERED {
-                let sheet = {
-                    let mut q = app.world.query::<(Entity, &Name)>();
-                    q.iter(&app.world)
-                        .find(|(_, n)| n.as_str() == "Unveiling sheet")
-                        .map(|(e, _)| e)
-                        .expect("the sheet")
-                };
+            if presses.next_if(|&t| elapsed >= t).is_some() {
                 app.world.write_message(Interact {
                     actor: player,
-                    target: sheet,
+                    target: winch,
                     from: at,
                 });
-                grabbed = true;
             }
             app.update();
             elapsed += 1.0 / 30.0;
@@ -171,8 +159,8 @@ fn main() {
             return;
         }
         let eye = front * *ahead + right * *side + DVec3::Y * *up;
-        let t =
-            Transform::from_translation(eye).looking_at(front * 1.2 + DVec3::Y * *look, Vec3::Y);
+        let look = crank.with_y(0.0) * 0.45 + DVec3::Y * 2.9;
+        let t = Transform::from_translation(eye).looking_at(look, Vec3::Y);
         *app.world.get_mut::<Transform>(camera).unwrap() = t;
         *app.world.get_mut::<GlobalTransform>(camera).unwrap() = GlobalTransform::from(t);
         let path = out.join(format!("{:02}_{name}.png", i + 1));

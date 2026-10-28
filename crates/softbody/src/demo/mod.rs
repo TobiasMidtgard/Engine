@@ -328,7 +328,7 @@ pub fn register(app: &mut App) {
                 .before(UpdateSet::Propagate),
         )
         .add_systems(FixedPreUpdate, skin::snapshot_poses)
-        .add_systems(Update, man_turrets)
+        .add_systems(Update, (man_turrets, work_winches))
         .add_systems(
             PostUpdate,
             follow_world_shift.in_set(engine_world::WorldShiftSet::Apply),
@@ -999,6 +999,87 @@ fn hoist_drop(f: f32) -> f32 {
     }
 }
 
+/// A [`DemoMotion::Hoist`] worked by hand from its winch ([`statue::Winch`]): it winds to
+/// covering (`cover`) or lifted and stays there, instead of running its own cycle.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct HoistByHand {
+    /// How far down it is, 0 (lifted) to 1 (covering), before easing.
+    pub down: f32,
+    pub cover: bool,
+}
+
+/// Seconds the winch takes to wind the sheet up off the statue, and to let it down.
+const WINCH_UP_SECS: f32 = 2.5;
+const WINCH_DOWN_SECS: f32 = 5.0;
+
+impl HoistByHand {
+    /// Taking over a hoist that is `k` of the way down (eased, as [`hoist_drop`] gives it),
+    /// heading the other way from where it is closer to.
+    pub fn take_over(k: f32) -> Self {
+        // Undo the smoothstep, so taking over doesn't jump.
+        let down = 0.5 - ((1.0 - 2.0 * k.clamp(0.0, 1.0)).asin() / 3.0).sin();
+        Self {
+            down,
+            cover: k < 0.5,
+        }
+    }
+
+    /// Wind on for `dt` seconds; returns how far down it is, eased.
+    fn step(&mut self, dt: f32) -> f32 {
+        self.down = if self.cover {
+            (self.down + dt / WINCH_DOWN_SECS).min(1.0)
+        } else {
+            (self.down - dt / WINCH_UP_SECS).max(0.0)
+        };
+        smoothstep(0.0, 1.0, self.down)
+    }
+}
+
+/// `Update`: E on a crane's winch pulls its sheet up off the statue, or lowers it back on.
+pub fn work_winches(
+    mut commands: Commands,
+    mut presses: MessageReader<engine_world::Interact>,
+    mut winches: Query<(&statue::Winch, &mut engine_world::Interactable)>,
+    sheets: Query<(&DemoMotion, &DemoClock, Option<&HoistByHand>)>,
+) {
+    let covering = |(motion, clock, hand): (&DemoMotion, &DemoClock, Option<&HoistByHand>)| {
+        let DemoMotion::Hoist { period, .. } = *motion else {
+            return None;
+        };
+        let k = hoist_drop((clock.0 / period).fract());
+        Some((k, hand.map_or(k >= 0.5, |h| h.cover), hand.copied()))
+    };
+    for press in presses.read() {
+        let Ok((winch, _)) = winches.get(press.target) else {
+            continue;
+        };
+        let Some((k, _, hand)) = sheets.get(winch.sheet).ok().and_then(covering) else {
+            continue;
+        };
+        let next = match hand {
+            Some(h) => HoistByHand {
+                cover: !h.cover,
+                ..h
+            },
+            None => HoistByHand::take_over(k),
+        };
+        commands.entity(winch.sheet).insert(next);
+    }
+    for (winch, mut offer) in &mut winches {
+        let Some((_, cover, _)) = sheets.get(winch.sheet).ok().and_then(covering) else {
+            continue;
+        };
+        let verb = if cover {
+            statue::PULL_UP
+        } else {
+            statue::LOWER
+        };
+        if offer.verb != verb {
+            offer.verb = verb.into();
+        }
+    }
+}
+
 /// Move kinematic props and walkers.
 #[allow(clippy::type_complexity)]
 pub fn drive_motion(
@@ -1009,15 +1090,17 @@ pub fn drive_motion(
         &mut DemoClock,
         Option<&LocalTimeScale>,
         Option<&SoftBodySim>,
+        Option<&mut HoistByHand>,
     )>,
 ) {
-    for (mut t, motion, mut clock, scale, body) in &mut movers {
+    for (mut t, motion, mut clock, scale, body, hand) in &mut movers {
         // A body waiting for a mesh near it to bake waits where it is, or it would be dragged
         // the whole way in one step when it starts.
         if body.is_some_and(|b| b.waiting_for_bake()) {
             continue;
         }
-        clock.0 += time.delta_for(scale);
+        let dt = time.delta_for(scale);
+        clock.0 += dt;
         let s = clock.0;
         match *motion {
             DemoMotion::Pendulum {
@@ -1062,7 +1145,10 @@ pub fn drive_motion(
                 t.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, forward);
             }
             DemoMotion::Hoist { low, high, period } => {
-                let k = hoist_drop((s / period).fract());
+                let k = match hand {
+                    Some(mut h) => h.step(dt),
+                    None => hoist_drop((s / period).fract()),
+                };
                 t.translation = high.lerp(low, f64::from(k));
             }
         }

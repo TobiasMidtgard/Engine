@@ -35,6 +35,17 @@ const CRANE_HEIGHT: f32 = 7.0;
 const CRANIUM: Vec3 = Vec3::new(0.0, 1.737, 0.012);
 const CRANIUM_RADII: Vec3 = Vec3::new(0.079, 0.099, 0.103);
 
+/// The crane's winch, worked with the use key: E winds `sheet` up off the statue or lets it
+/// down onto it. Once worked by hand, the hoist stays where the player leaves it.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct Winch {
+    pub sheet: Entity,
+}
+
+/// What the winch's prompt says.
+pub const PULL_UP: &str = "Pull up";
+pub const LOWER: &str = "Lower";
+
 /// A posed body to turn into fixed geometry: once it's skinned, its mesh plus `extra` (in
 /// the same space, carved details) becomes its collider and it stops being skinned.
 #[derive(Component, Debug, Clone)]
@@ -184,7 +195,7 @@ pub fn spawn_unveiling(commands: &mut Commands, c: DVec3, facing: Vec3) {
     let post = c + (face * Vec3::new(-0.75, 0.0, 0.65).normalize() * 2.3).as_dvec3();
     let to_statue = (crown - post).with_y(0.0);
     let reach = to_statue.length() as f32;
-    let (crane, crane_shape, sheave) = crane(commands, reach);
+    let (crane, crane_shape, sheave, crank) = crane(commands, reach);
     let crane_rot = Quat::from_rotation_arc(Vec3::X, to_statue.normalize().as_vec3());
     crane.spawn_solid(commands, at(post).with_rotation(crane_rot), crane_shape);
     let cord_top = post + (crane_rot * sheave).as_dvec3();
@@ -232,8 +243,17 @@ pub fn spawn_unveiling(commands: &mut Commands, c: DVec3, facing: Vec3) {
                 period: UNVEIL_PERIOD,
             },
             DemoClock::default(),
+            crate::grab::NoHandhold,
         ))
         .id();
+    // The crank on the crane's winch takes the use key: pull the sheet up off the statue,
+    // or lower it back on.
+    commands.spawn((
+        Name::new("Crane winch"),
+        at(post + (crane_rot * crank).as_dvec3()).with_rotation(crane_rot),
+        Winch { sheet },
+        engine_world::Interactable::new(PULL_UP).reach(1.8),
+    ));
     // The brass ring on the hook, upright (the sheet's frame lies flat), just above the silk.
     let ring = hook_ring(commands);
     ring.attach(
@@ -315,7 +335,7 @@ fn plinth(commands: &mut Commands) -> (Model, ColliderShape) {
 /// A timber jib crane: a post on a concrete footing with a jib along +X reaching `reach`
 /// meters, braced, a sheave block at the tip and a hand winch on the post. Returns the model,
 /// its collider and where the cord leaves the sheave (local).
-fn crane(commands: &mut Commands, reach: f32) -> (Model, ColliderShape, Vec3) {
+fn crane(commands: &mut Commands, reach: f32) -> (Model, ColliderShape, Vec3, Vec3) {
     let mut mb = ModelBuilder::new("statue_crane").grounded();
     let h = CRANE_HEIGHT;
     let post = 0.22f32;
@@ -549,7 +569,12 @@ fn crane(commands: &mut Commands, reach: f32) -> (Model, ColliderShape, Vec3) {
         part(Vec3::Y * (0.5 * h), cuboid(Vec3::new(post, h, post))),
     ]);
     // The cord drops from the far side of the sheave.
-    (mb.build(commands), shape, hub + Vec3::X * sheave_r)
+    (
+        mb.build(commands),
+        shape,
+        hub + Vec3::X * sheave_r,
+        crank_at,
+    )
 }
 
 /// The crane hook's brass ring and swivel eye.

@@ -44,6 +44,11 @@ pub struct Held {
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct HandFrame(pub u16);
 
+/// Keeps a body off the use key's handholds: something else is worked to move it (the
+/// statue's sheet hangs on a crane worked from its winch).
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
+pub struct NoHandhold;
+
 /// Whether a hand can take hold of this body: cloth, ropes and soft volumes simulated on the
 /// CPU that don't ride a skeleton (a cape stays on its wearer).
 pub fn graspable(b: &SoftBodySim) -> bool {
@@ -61,13 +66,16 @@ pub fn graspable(b: &SoftBodySim) -> bool {
 #[allow(clippy::type_complexity)]
 pub fn offer_handholds(
     mut commands: Commands,
-    mut bodies: Query<(
-        Entity,
-        &SoftBodySim,
-        &GlobalTransform,
-        Option<&mut Interactable>,
-        Has<Held>,
-    )>,
+    mut bodies: Query<
+        (
+            Entity,
+            &SoftBodySim,
+            &GlobalTransform,
+            Option<&mut Interactable>,
+            Has<Held>,
+        ),
+        Without<NoHandhold>,
+    >,
 ) {
     for (e, b, t, offer, held) in &mut bodies {
         if !graspable(b) {
@@ -98,10 +106,11 @@ pub fn offer_handholds(
 }
 
 /// `Update`: E on a body takes hold of the bit of it nearest the hand, or lets go of it.
+#[allow(clippy::type_complexity)]
 pub fn grab_and_release(
     mut commands: Commands,
     mut presses: MessageReader<Interact>,
-    mut bodies: Query<(&mut SoftBodySim, Option<&Held>, Option<&HandFrame>)>,
+    mut bodies: Query<(&mut SoftBodySim, Option<&Held>, Option<&HandFrame>), Without<NoHandhold>>,
     actors: Query<&GlobalTransform>,
 ) {
     for press in presses.read() {
