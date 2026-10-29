@@ -122,6 +122,7 @@ impl Plugin for VehiclesPlugin {
                 )
                     .in_set(UpdateSet::Logic),
             );
+        engine_world::WorldShiftAppExt::shift_components::<cruise::Cruise>(app);
         register_types(app);
         api::register(app);
         drive::register(app);

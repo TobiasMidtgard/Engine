@@ -766,11 +766,19 @@ fn readouts(
                 match c.target {
                     Some(_) => {
                         let name = c.target_name.as_deref().unwrap_or("the body ahead");
+                        let back = if c.returning { ", where you left" } else { "" };
                         out.set(
                             "Target",
-                            format!("{name}, {}", distance_text(c.target_distance_m)),
+                            format!("{name}{back}, {}", distance_text(c.target_distance_m)),
                         );
-                        out.set("Cruise", "homing, slows by itself (J drops out)");
+                        out.set(
+                            "Cruise",
+                            if c.returning {
+                                "flying you back, slows by itself (J drops out)"
+                            } else {
+                                "homing, slows by itself (J drops out)"
+                            },
+                        );
                     }
                     None => out.set(
                         "Cruise",

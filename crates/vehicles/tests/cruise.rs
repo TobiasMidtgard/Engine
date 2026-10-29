@@ -206,3 +206,85 @@ fn names_the_body_it_homes_on() {
         c.target_distance_m
     );
 }
+
+/// Out from 20 km over the valley, then nose back on the Earth: the ship flies itself back
+/// over where it left and comes out level, slow, a few km short of it.
+#[test]
+fn comes_back_over_where_it_left() {
+    let mut app = space_app();
+    let start = DVec3::new(0.0, 20_000.0, 0.0);
+    let ship = ship_at(&mut app, start.y, 900.0);
+    cruise::engage(&mut app.world, ship).expect("engage");
+    app.world
+        .get_mut::<VehicleControls>(ship)
+        .expect("controls")
+        .throttle = 1.0;
+    run_until(&mut app, 60.0, |app| {
+        transform(app, ship).translation.y > 3.0e8
+    });
+    assert!(transform(&app, ship).translation.y > 3.0e8, "never got out");
+    back_home(
+        &mut app,
+        ship,
+        start,
+        Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+    );
+}
+
+/// From the far side (the spot is behind the Earth): round the planet at the spot's height,
+/// never through it.
+#[test]
+fn comes_back_round_the_planet_from_its_far_side() {
+    let mut app = space_app();
+    let start = DVec3::new(0.0, 20_000.0, 0.0);
+    let ship = ship_at(&mut app, start.y, 900.0);
+    cruise::engage(&mut app.world, ship).expect("engage");
+    // Out the other side, 400 000 km below the Earth (the Moon's distance), nose up on it.
+    app.world
+        .get_mut::<Transform>(ship)
+        .expect("ship")
+        .translation = DVec3::new(1.0e6, -EARTH_R - 4.0e8, 0.0);
+    app.world
+        .get_mut::<VehicleControls>(ship)
+        .expect("controls")
+        .throttle = 1.0;
+    back_home(
+        &mut app,
+        ship,
+        start,
+        Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+    );
+}
+
+fn back_home(app: &mut App, ship: Entity, start: DVec3, nose: Quat) {
+    app.world.get_mut::<Transform>(ship).expect("ship").rotation = nose;
+    let ground = |app: &App| {
+        (transform(app, ship).translation - DVec3::new(0.0, -EARTH_R, 0.0)).length() - EARTH_R
+    };
+    let mut lowest = f64::MAX;
+    let mut t = 0.0;
+    while t < 240.0 && app.world.get::<Cruise>(ship).is_some() {
+        run_for(app, 0.25);
+        t += 0.25;
+        lowest = lowest.min(ground(app));
+        if t == 1.0 {
+            let c = app.world.get::<Cruise>(ship).expect("cruising");
+            assert!(c.returning, "not flying back: target {:?}", c.target);
+        }
+    }
+    assert!(
+        app.world.get::<Cruise>(ship).is_none(),
+        "still cruising after {t} s"
+    );
+    eprintln!("back after {t} s, lowest {lowest:.0} m");
+    assert!(t < 150.0, "took {t} s");
+    let p = transform(app, ship).translation;
+    let off = (p - start).length();
+    assert!(off < 3_500.0, "came out {off:.0} m from where it left");
+    assert!(lowest > 15_000.0, "dipped to {lowest:.0} m");
+    let v = velocity(app, ship).linear;
+    let up = (p - DVec3::new(0.0, -EARTH_R, 0.0)).normalize().as_vec3();
+    assert!(v.length() <= 300.5, "{:.0} m/s", v.length());
+    // Level when it came out; a quarter second of falling since.
+    assert!(v.dot(up).abs() < 4.0, "not level: {v:?}");
+}

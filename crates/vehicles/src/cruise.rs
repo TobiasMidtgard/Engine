@@ -7,6 +7,14 @@
 //! the ship slows down by itself and drops out of cruise near the surface, handed back to
 //! physics at under [`DROP_SPEED`]. J again drops out anywhere.
 //!
+//! Back where you left: aim at the planet cruise started from and the ship flies itself back
+//! over the spot where it went into cruise (Elite's supercruise assist, Star Citizen's
+//! quantum travel to a surface marker). Its way in is a straight line where that spot is in
+//! view; from the far side it first skims round the planet at the spot's height, aiming each
+//! step for where the line from the ship touches that height on the spot's side (a jump in
+//! Star Citizen can't pass through a planet either). It comes out level, a few kilometers
+//! short, at [`SPEED_MIN`].
+//!
 //! A cruising ship has no `RigidBody` or `Collider` (both come back on dropping out): moving
 //! a body 1e15 m in one step is nothing a physics backend is built for. It moves its own
 //! `Transform` in f64 along its nose, turning at fixed rates from its `VehicleControls`
@@ -18,8 +26,9 @@
 
 use engine_core::math::{DVec3, Quat, Vec3};
 use engine_core::prelude::*;
+use engine_core::transform::look_rotation;
 use engine_world::physics::{Collider, Cruising as CruisingNow, RigidBody, Velocity};
-use engine_world::{Gravity, VehicleControls};
+use engine_world::{FollowsWorldShift, Gravity, GravityBody, VehicleControls, WorldShift};
 
 use crate::chassis::{Vehicle, VehicleTelemetry};
 use crate::ship::Spacecraft;
@@ -45,6 +54,16 @@ pub const SPEED_MAX: f64 = 3.0e16;
 /// How fast the speed follows its limit, per second (up, down).
 const EASE_UP: f64 = 1.2;
 const EASE_DOWN: f64 = 4.0;
+/// Cruise started this close to a surface remembers the spot to come back to, meters up.
+pub const ORIGIN_MAX_ALTITUDE_M: f64 = 1.0e6;
+/// Back over the spot: out of cruise this close to it, meters.
+pub const ORIGIN_DROP_M: f64 = 3_000.0;
+/// Skimming round the planet, the point aimed for is at least this far ahead round it,
+/// radians (about 130 km on Earth).
+const ORIGIN_LOOKAHEAD_RAD: f64 = 0.02;
+/// Skimming round the planet: speed per meter of height at full lever is this many times
+/// [`K_MAX`], so a few hundred km/s at 30 km and round Earth in half a minute.
+const SKIM_FACTOR: f64 = 20.0;
 /// Turn rates at full stick, radians per second (pitch, yaw, roll).
 const TURN: Vec3 = Vec3::new(0.7, 0.7, 1.2);
 /// Light speed, m/s (for readouts).
@@ -69,6 +88,12 @@ pub struct Cruise {
     pub target_distance_m: f64,
     /// Just picked a target: look up its name.
     naming: bool,
+    /// Where cruise started, when that was near a surface.
+    pub origin: Option<Origin>,
+    /// The target is the planet it left: flying itself back over the spot.
+    pub returning: bool,
+    /// Returning, with the spot in view: straight there.
+    direct: bool,
     /// The arrival point from the target's center, meters.
     side: DVec3,
     /// The target's radius and where it was: `Gravity::bodies` is reordered as the frame
@@ -80,6 +105,25 @@ pub struct Cruise {
     /// Taken off while cruising, put back on dropping out.
     body: RigidBody,
     collider: Option<Collider>,
+}
+
+/// Where a cruise started: on the body of this radius, at this offset from its center
+/// (world axes; turned with world shifts, so it keeps its place on a planet-fixed frame).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Origin {
+    pub radius: f64,
+    pub offset: DVec3,
+}
+
+impl FollowsWorldShift for Cruise {
+    fn follow(&mut self, s: &WorldShift) {
+        self.heading = s.rotation * self.heading;
+        self.side = s.rotation * self.side;
+        self.target_at.follow(s);
+        if let Some(o) = &mut self.origin {
+            o.offset = s.rotation * o.offset;
+        }
+    }
 }
 
 /// Altitude over the nearest body's surface at `p` and the way up there; without bodies, the
@@ -131,7 +175,23 @@ pub fn engage(world: &mut World, ship: Entity) -> Result<(), String> {
         .map_or((DVec3::ZERO, DVec3::NEG_Z), |t| {
             (t.translation, t.forward().as_dvec3())
         });
-    let (h, _) = altitude(world.resource::<Gravity>(), p);
+    let gravity = world.resource::<Gravity>();
+    let (h, _) = altitude(gravity, p);
+    let origin = (h < ORIGIN_MAX_ALTITUDE_M)
+        .then(|| {
+            gravity
+                .bodies
+                .iter()
+                .min_by(|a, b| {
+                    let h = |b: &GravityBody| (p - b.center).length() - b.radius;
+                    h(a).total_cmp(&h(b))
+                })
+                .map(|b| Origin {
+                    radius: b.radius,
+                    offset: p - b.center,
+                })
+        })
+        .flatten();
     let mut e = world.entity_mut(ship);
     let collider = e.take::<Collider>();
     e.remove::<RigidBody>();
@@ -147,6 +207,9 @@ pub fn engage(world: &mut World, ship: Entity) -> Result<(), String> {
         target_name: None,
         target_distance_m: 0.0,
         naming: false,
+        origin,
+        returning: false,
+        direct: false,
         side: DVec3::X,
         target_radius: 0.0,
         target_at: DVec3::ZERO,
@@ -160,12 +223,26 @@ pub fn engage(world: &mut World, ship: Entity) -> Result<(), String> {
     Ok(())
 }
 
-/// Out of cruise: back to physics along the nose at up to [`DROP_SPEED`].
+/// Out of cruise: back to physics along the nose at up to [`DROP_SPEED`]; back over where it
+/// left, level at [`SPEED_MIN`].
 pub fn drop_out(world: &mut World, ship: Entity) {
     let Some(cruise) = world.get::<Cruise>(ship).cloned() else {
         return;
     };
-    let forward = cruise.heading.as_vec3();
+    let mut forward = cruise.heading.as_vec3();
+    let mut speed = cruise.speed.min(DROP_SPEED);
+    if cruise.returning && cruise.direct {
+        let p = world
+            .get::<Transform>(ship)
+            .map_or(DVec3::ZERO, |t| t.translation);
+        let up = altitude(world.resource::<Gravity>(), p).1.as_vec3();
+        let level = (forward - up * forward.dot(up)).normalize_or(up.any_orthonormal_vector());
+        if let Some(mut t) = world.get_mut::<Transform>(ship) {
+            t.rotation = look_rotation(level, up).unwrap_or(t.rotation);
+        }
+        forward = level;
+        speed = speed.min(SPEED_MIN);
+    }
     let mut e = world.entity_mut(ship);
     e.remove::<(Cruise, CruisingNow)>();
     e.insert(cruise.body);
@@ -173,7 +250,7 @@ pub fn drop_out(world: &mut World, ship: Entity) {
         e.insert(c);
     }
     e.insert(Velocity {
-        linear: forward * cruise.speed.min(DROP_SPEED) as f32,
+        linear: forward * speed as f32,
         angular: Vec3::ZERO,
     });
 }
@@ -198,7 +275,8 @@ fn home(gravity: &Gravity, p: DVec3, forward: DVec3, cruise: &mut Cruise) -> (DV
             })
             .map(|(i, _)| i);
     }
-    if let Some(i) = cruise.target {
+    // Returning, the ship flies itself (only J ends it).
+    if let Some(i) = cruise.target.filter(|_| !cruise.returning) {
         let keep = bodies.get(i).is_some_and(|b| {
             let to = b.center - p;
             let d = to.length();
@@ -222,7 +300,16 @@ fn home(gravity: &Gravity, p: DVec3, forward: DVec3, cruise: &mut Cruise) -> (DV
                 }
                 let off = forward.dot(to / d).clamp(-1.0, 1.0).acos();
                 let size = (b.radius / d).asin();
-                (off < CAPTURE_RAD && size < CAPTURE_RAD).then_some((i, off, to / d))
+                // The planet it left: anywhere on its disc, once well away from it.
+                let left = cruise.origin.is_some_and(|o| o.radius == b.radius)
+                    && d > b.radius * 2.0
+                    && off < size + CAPTURE_RAD;
+                // Nearest the nose by its edge: a planet in front of a star is picked.
+                (left || (off < CAPTURE_RAD && size < CAPTURE_RAD)).then_some((
+                    i,
+                    off - size,
+                    to / d,
+                ))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1));
         if let Some((i, _, to)) = pick {
@@ -230,6 +317,8 @@ fn home(gravity: &Gravity, p: DVec3, forward: DVec3, cruise: &mut Cruise) -> (DV
             cruise.target_radius = bodies[i].radius;
             cruise.target_name = None;
             cruise.naming = true;
+            cruise.returning = cruise.origin.is_some_and(|o| o.radius == bodies[i].radius);
+            cruise.direct = false;
             // Beside it on the side the nose points to (any side when dead on): where the
             // line from here touches the sphere `ARRIVE_ALTITUDE_M` over it, so the way in
             // skims that height and never dips below.
@@ -244,12 +333,59 @@ fn home(gravity: &Gravity, p: DVec3, forward: DVec3, cruise: &mut Cruise) -> (DV
         }
     }
     let Some(b) = cruise.target.and_then(|i| bodies.get(i)) else {
+        cruise.returning = false;
         return (forward, None);
     };
     cruise.target_at = b.center;
+    if cruise.returning
+        && let Some(o) = cruise.origin
+    {
+        return back_over(b, o, p, forward, cruise);
+    }
     let aim = b.center + cruise.side;
     let d = (aim - p).length();
     ((aim - p).normalize_or(forward), Some(d))
+}
+
+/// Returning to `o` on `b`: straight for the spot once it is in view (the line from here rises
+/// from it, so it clears the planet), else for the point ahead round the planet at the spot's
+/// height where the line from here touches that height. Returns the heading and the way left:
+/// to the spot, or to that point and on round.
+fn back_over(
+    b: &GravityBody,
+    o: Origin,
+    p: DVec3,
+    forward: DVec3,
+    cruise: &mut Cruise,
+) -> (DVec3, Option<f64>) {
+    let spot = b.center + o.offset;
+    let (a, n) = (o.offset.length(), o.offset.normalize_or(DVec3::Y));
+    let to_spot = spot - p;
+    let dist = to_spot.length();
+    if !cruise.direct && -to_spot.dot(n) > -0.01 * dist {
+        cruise.direct = true;
+    }
+    if cruise.direct {
+        return (to_spot.normalize_or(forward), Some(dist));
+    }
+    let r = p - b.center;
+    let d = r.length();
+    let u = r / d;
+    let w = (n - u * n.dot(u))
+        .try_normalize()
+        .unwrap_or_else(|| u.any_orthonormal_vector());
+    let round = u.dot(n).clamp(-1.0, 1.0).acos();
+    let theta = (a / d)
+        .clamp(-1.0, 1.0)
+        .acos()
+        .max(ORIGIN_LOOKAHEAD_RAD)
+        .min(round);
+    let ahead = b.center + (u * theta.cos() + w * theta.sin()) * a;
+    let to = ahead - p;
+    (
+        to.normalize_or(forward),
+        Some(to.length() + a * (round - theta)),
+    )
 }
 
 type Cruising<'a> = (
@@ -275,7 +411,11 @@ pub(crate) fn cruise_system(
     }
     for (e, mut t, mut cruise, c, tel, now) in &mut q {
         // Turn: pitch up, yaw right and roll right as the controls ask, eased in.
-        let want = Vec3::new(c.pitch, -c.yaw, -c.steer).clamp(Vec3::NEG_ONE, Vec3::ONE) * TURN;
+        let want = if cruise.returning {
+            Vec3::ZERO
+        } else {
+            Vec3::new(c.pitch, -c.yaw, -c.steer).clamp(Vec3::NEG_ONE, Vec3::ONE) * TURN
+        };
         let k = 1.0 - (-dt as f32 * 6.0).exp();
         cruise.rates = cruise.rates.lerp(want, k);
         let r = cruise.rates * dt as f32;
@@ -287,6 +427,13 @@ pub(crate) fn cruise_system(
         let forward = t.forward().as_dvec3();
         let (heading, to_aim) = home(&gravity, t.translation, forward, &mut cruise);
         cruise.heading = heading;
+        let (h, up) = altitude(&gravity, t.translation);
+        if cruise.returning {
+            // Flying itself: the nose comes round onto the way it goes.
+            if let Some(want) = look_rotation(heading.as_vec3(), up.as_vec3()) {
+                t.rotation = t.rotation.slerp(want, 1.0 - (-dt as f32 * 1.5).exp());
+            }
+        }
         cruise.target_distance_m = to_aim.unwrap_or(0.0);
         if std::mem::take(&mut cruise.naming) {
             commands.queue(move |world: &mut World| name_target(world, e));
@@ -294,7 +441,6 @@ pub(crate) fn cruise_system(
 
         // Speed: the gravity well's limit (homing on a target, the distance to the arrival
         // point: the way there skims past the body), eased toward, never past it.
-        let (h, up) = altitude(&gravity, t.translation);
         let lever = if c.boost {
             1.0
         } else {
@@ -313,6 +459,12 @@ pub(crate) fn cruise_system(
             _ => h,
         }
         .max(1.0);
+        // Skimming round the planet it left: held to its height, not the way round.
+        let room = if cruise.returning && !cruise.direct {
+            room.min(SKIM_FACTOR * h.max(1.0))
+        } else {
+            room
+        };
         let limit = (k * room).clamp(SPEED_MIN, SPEED_MAX);
         let ratio = (limit / cruise.speed.max(1.0)).ln();
         cruise.speed *= ratio.clamp(-EASE_DOWN * dt, EASE_UP * dt).exp();
@@ -343,8 +495,14 @@ pub(crate) fn cruise_system(
         }
 
         // Arrived, or closing on a surface: back to physics.
-        let arrived = to_aim.is_some_and(|d| d < DROP_ALTITUDE_M);
-        if arrived || (h < DROP_ALTITUDE_M && velocity.dot(up) < 0.0) {
+        let (arrive, low) = if cruise.returning {
+            // The spot is low (cruise starts from 12 km): only under 2 km is too low.
+            (if cruise.direct { ORIGIN_DROP_M } else { 0.0 }, 2_000.0)
+        } else {
+            (DROP_ALTITUDE_M, DROP_ALTITUDE_M)
+        };
+        let arrived = to_aim.is_some_and(|d| d < arrive);
+        if arrived || (h < low && velocity.dot(up) < 0.0) {
             commands.queue(move |world: &mut World| drop_out(world, e));
         }
     }
