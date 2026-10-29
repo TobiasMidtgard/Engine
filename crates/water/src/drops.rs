@@ -115,6 +115,7 @@ pub fn landing(d: &Drop) -> Disturbance {
         stir: None,
         spin: 0.0,
         press: 0.0,
+        keel: Vec2::ZERO,
     }
 }
 

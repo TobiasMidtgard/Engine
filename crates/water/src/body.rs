@@ -562,6 +562,11 @@ pub struct WaterSettings {
     pub ripple_speed: f32,
     /// How fast ripples die out, 1/s.
     pub ripple_damping: f32,
+    /// How fast the dispersive surface's waves ([`crate::surface`]) die out, 1/s, besides the
+    /// viscosity that takes the shortest. Real waves a meter or more long hardly lose anything
+    /// to the water in a minute (a boat's wake rocks the far shore); this only keeps what
+    /// the boats churn up from piling up in a quiet bay.
+    pub surface_damping: f32,
     /// Seconds for foam to fade to a third (white foam on fresh water bursts in about 2.5 s;
     /// the bubbles under it linger on, see [`crate::ripples::RippleField::bubbles`]).
     pub foam_life_s: f32,
@@ -595,6 +600,7 @@ impl Default for WaterSettings {
             ripple_cell_m: 0.25,
             ripple_speed: 1.3,
             ripple_damping: 0.35,
+            surface_damping: 0.05,
             foam_life_s: 3.0,
             current_life_s: 9.0,
             swirl: 0.5,

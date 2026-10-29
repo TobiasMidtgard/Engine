@@ -1359,9 +1359,9 @@ impl RenderFeature for WaterFeature {
             .filter(|w| w.is_raining())
             .map_or(0.0, |w| w.precipitation_mm_h);
         let (puddle, puddle2, puddles_on) = self.upload_puddles(world, shared, view);
-        let ripple_damping = world
+        let surface_damping = world
             .get_resource::<crate::body::WaterSettings>()
-            .map_or(0.35, |s| s.ripple_damping);
+            .map_or(0.05, |s| s.surface_damping);
 
         let state = water.0.read();
         let gpu = self.gpu.as_mut().expect("checked above");
@@ -1469,7 +1469,7 @@ impl RenderFeature for WaterFeature {
             &state.ripples,
             state.shifts,
             view.delta,
-            ripple_damping,
+            surface_damping,
         );
         // The ripples' heights come from the dispersive surface while it runs.
         g.detail[3] = if gpu.surface.drawn() { 1.0 } else { 0.0 };

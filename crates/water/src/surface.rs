@@ -30,7 +30,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use engine_core::math::{DVec2, Vec2};
+use engine_core::math::{DVec2, Vec2, smoothstep};
 use engine_core::prelude::*;
 use parking_lot::{Mutex, RwLock};
 
@@ -133,8 +133,12 @@ impl Medium for RippleField {
         self.cell_wet(k)
     }
 
-    fn carry(&self, i: usize, j: usize, k: usize) -> Vec2 {
-        self.cell_current(i, j) + self.cell_drift(k)
+    /// The stream under the waves only. The grid's stirred currents (a hull's wash, a
+    /// swimmer's eddies) are a few meters across and gone in seconds: the waves a hull makes
+    /// run out of its wash at once, and tracing the surface back through it every frame
+    /// would only blur its wake away (the grid's foam swirls with them instead).
+    fn carry(&self, _: usize, _: usize, k: usize) -> Vec2 {
+        self.cell_drift(k)
     }
 }
 
@@ -341,6 +345,9 @@ pub fn rasterize(
     fine_cell: f32,
     d: &Disturbance,
 ) -> Option<(usize, usize)> {
+    if d.press != 0.0 && d.keel != Vec2::ZERO {
+        return rasterize_hull(push, n, cell, origin, d);
+    }
     let base = d.radius.max(fine_cell * 0.75);
     let r = base.max(cell * 0.75);
     let keep = (base / r).powi(2);
@@ -370,12 +377,71 @@ pub fn rasterize(
     Some((j0 as usize, j1 as usize))
 }
 
+/// A long hull's pressure (`d.keel`, `d.radius` half its beam): its waterline, round aft of
+/// midships and drawn to a point at the bow, full `press` inside, its edge smoothed over about
+/// a cell (sharper than that the grid would alias it).
+fn rasterize_hull(
+    push: &mut [[f32; 2]],
+    n: usize,
+    cell: f32,
+    origin: DVec2,
+    d: &Disturbance,
+) -> Option<(usize, usize)> {
+    let len = d.keel.length();
+    let along = d.keel / len;
+    let across = Vec2::new(-along.y, along.x);
+    let beam = d.radius.max(1e-3);
+    let soft = 0.6 * cell;
+    let reach = ((len.max(beam) + 2.0 * soft) / cell).ceil() as i64 + 1;
+    let c = ((d.pos - origin) / cell as f64).floor();
+    let (ci, cj) = (c.x as i64, c.y as i64);
+    let n_i = n as i64;
+    let (i0, i1) = ((ci - reach).max(0), (ci + reach).min(n_i - 1));
+    let (j0, j1) = ((cj - reach).max(0), (cj + reach).min(n_i - 1));
+    if i0 > i1 || j0 > j1 {
+        return None;
+    }
+    for j in j0..=j1 {
+        for i in i0..=i1 {
+            let p = origin + DVec2::new(i as f64 + 0.5, j as f64 + 0.5) * cell as f64;
+            let q = (p - d.pos).as_vec2();
+            let u = q.dot(along) / len;
+            let v = q.dot(across).abs();
+            let w = if u.abs() >= 1.0 {
+                0.0
+            } else if u > 0.0 {
+                beam * (1.0 - u * u)
+            } else {
+                beam * (1.0 - u * u).sqrt()
+            };
+            // (Roughly how far inside the waterline, meters.)
+            let inside = (len * (1.0 - u.abs())).min(w - v);
+            let cover = smoothstep(-soft, soft, inside);
+            if cover > 0.0 {
+                push[j as usize * n + i as usize][1] += d.press * cover;
+            }
+        }
+    }
+    Some((j0 as usize, j1 as usize))
+}
+
 /// How much of a step's waves a cell keeps within `width` cells of the grid's edge (the
 /// sponge), for a step of `dt` seconds.
 pub fn sponge(n: usize, width: f32, i: usize, j: usize, dt: f32) -> f32 {
     let edge = i.min(j).min(n - 1 - i).min(n - 1 - j) as f32;
     let t = (1.0 - edge / width).clamp(0.0, 1.0);
     (-6.0 * t * t * dt).exp()
+}
+
+/// Catmull-Rom weights of the four samples around a point `t` (0..1) past the second.
+pub fn catmull_rom(t: f32) -> [f32; 4] {
+    let (t2, t3) = (t * t, t * t * t);
+    [
+        0.5 * (-t3 + 2.0 * t2 - t),
+        0.5 * (3.0 * t3 - 5.0 * t2 + 2.0),
+        0.5 * (-3.0 * t3 + 4.0 * t2 + t),
+        0.5 * (t3 - t2),
+    ]
 }
 
 /// The signed wavenumber index of bin `i` of `n` (0..n/2−1, then −n/2..−1).
@@ -565,24 +631,27 @@ impl SurfaceSim {
         if self.quiet_s > RING_S {
             return;
         }
-        // Carried along the currents, shut out of dry land, soaked up at the edge.
+        // Carried along the currents, shut out of dry land, soaked up at the edge. Traced back
+        // through a cubic (Catmull-Rom): a bilinear lookup each step would blur away the
+        // short waves wherever the water moves (a boat's own wash drowned its wake).
         let at = |state: &[[f32; 2]], x: f32, z: f32| {
             let (bx, bz) = (x.floor(), z.floor());
-            let (fx, fz) = (x - bx, z - bz);
+            let (wx, wz) = (catmull_rom(x - bx), catmull_rom(z - bz));
             let mut s = [0.0f32; 2];
-            for (dx, dz, w) in [
-                (0, 0, (1.0 - fx) * (1.0 - fz)),
-                (1, 0, fx * (1.0 - fz)),
-                (0, 1, (1.0 - fx) * fz),
-                (1, 1, fx * fz),
-            ] {
-                let (ci, cj) = (bx as i64 + dx, bz as i64 + dz);
-                if ci < 0 || cj < 0 || ci >= n as i64 || cj >= n as i64 {
+            for (dz, wz) in wz.iter().enumerate() {
+                let cj = bz as i64 + dz as i64 - 1;
+                if cj < 0 || cj >= n as i64 {
                     continue;
                 }
-                let v = state[cj as usize * n + ci as usize];
-                s[0] += v[0] * w;
-                s[1] += v[1] * w;
+                for (dx, wx) in wx.iter().enumerate() {
+                    let ci = bx as i64 + dx as i64 - 1;
+                    if ci < 0 || ci >= n as i64 {
+                        continue;
+                    }
+                    let v = state[cj as usize * n + ci as usize];
+                    s[0] += v[0] * wx * wz;
+                    s[1] += v[1] * wx * wz;
+                }
             }
             s
         };
@@ -594,8 +663,12 @@ impl SurfaceSim {
                     continue;
                 }
                 let v = medium.carry(i, j, k);
-                let back = (Vec2::new(i as f32, j as f32) - v * (dt / self.cell)).to_array();
-                let s = at(&self.state, back[0], back[1]);
+                let s = if v == Vec2::ZERO {
+                    self.state[k]
+                } else {
+                    let back = Vec2::new(i as f32, j as f32) - v * (dt / self.cell);
+                    at(&self.state, back.x, back.y)
+                };
                 let keep = sponge(n, self.sponge, i, j, dt);
                 self.work[k] = [s[0] * keep, s[1] * keep];
             }
@@ -693,7 +766,7 @@ pub fn cpu_surface_system(
     }
     let link = r.surface.clone();
     let stamps = link.take_stamps();
-    let (dt, damping) = (time.delta_secs(), settings.ripple_damping);
+    let (dt, damping) = (time.delta_secs(), settings.surface_damping);
     let k0 = Band::crossover(r.cell);
     let band = if r.coarse.is_some() {
         Band::Fine(k0)
@@ -1078,5 +1151,117 @@ mod tests {
         let (near, far) = (peak(-25.0, -12.0), peak(-55.0, -40.0));
         assert!(far > 0.2 * near, "near {near} far {far}");
         assert!(fine.heights().sample(DVec2::new(-50.0, 0.0)).is_none());
+    }
+
+    #[test]
+    fn a_hull_presses_its_waterline_pointed_at_the_bow() {
+        let n = 64;
+        let mut push = vec![[0.0f32; 2]; n * n];
+        let (len, beam) = (2.3f32, 0.9f32);
+        let hull = Disturbance {
+            pos: DVec2::new(8.0, 8.0),
+            radius: beam,
+            press: 1.0,
+            keel: Vec2::new(len, 0.0),
+            ..Default::default()
+        };
+        rasterize(&mut push, n, 0.25, DVec2::ZERO, 0.25, &hull).expect("on the grid");
+        // Its area: half an ellipse aft, a parabola's point forward.
+        let area: f32 = push.iter().map(|p| p[1]).sum::<f32>() * 0.25 * 0.25;
+        let want = beam * len * (std::f32::consts::FRAC_PI_2 + 4.0 / 3.0);
+        assert!((area - want).abs() < 0.05 * want, "{area} m², want {want}");
+        assert!(push.iter().all(|p| p[0] == 0.0));
+        // As wide as its beam amidships, narrower toward the bow than the stern.
+        let width = |x: f64| {
+            let i = (x / 0.25) as usize;
+            (0..n).map(|j| push[j * n + i][1]).sum::<f32>() * 0.25
+        };
+        assert!((width(8.0) - 2.0 * beam).abs() < 0.15, "{}", width(8.0));
+        assert!(
+            width(9.6) < 0.8 * width(6.4),
+            "{} {}",
+            width(9.6),
+            width(6.4)
+        );
+    }
+
+    #[test]
+    fn a_sharp_hull_draws_short_waves_a_smooth_patch_does_not() {
+        // The same pressure volume at 5 m/s, as the hull's waterline or as one round patch:
+        // the waterline's edges make the short divergent waves whose steep faces show the V.
+        let field = pond();
+        let dt = 1.0 / 30.0;
+        let run = |shape: Disturbance| {
+            let mut sim = SurfaceSim::new(N, field.cell, field.origin);
+            for s in 0..180 {
+                let d = Disturbance {
+                    pos: DVec2::new(-25.0 + 5.0 * dt as f64 * s as f64, 0.0),
+                    ..shape
+                };
+                sim.step(&field, &[d], field.cell, dt, 0.0);
+            }
+            // Mean square slope over the wake behind it.
+            let h = sim.heights();
+            let mut sum = 0.0f32;
+            let mut count = 0;
+            for x in 0..60 {
+                for z in -32..=32 {
+                    let p = DVec2::new(-15.0 + x as f64 * 0.25, z as f64 * 0.25);
+                    let g = h.sample(p).unwrap().1;
+                    sum += g.length_squared();
+                    count += 1;
+                }
+            }
+            sum / count as f32
+        };
+        let head = 0.25 * dt;
+        let sharp = run(Disturbance {
+            radius: 0.9,
+            press: head,
+            keel: Vec2::new(2.3, 0.0),
+            ..Default::default()
+        });
+        // exp(−2(d/r)²) holds πr²/2 under it.
+        let area = 0.9 * 2.3 * (std::f32::consts::FRAC_PI_2 + 4.0 / 3.0);
+        let r = 2.0f32;
+        let smooth = run(Disturbance {
+            radius: r,
+            press: head * area / (std::f32::consts::PI * r * r * 0.5),
+            ..Default::default()
+        });
+        assert!(sharp > 2.0 * smooth, "sharp {sharp}, smooth {smooth}");
+    }
+
+    #[test]
+    fn a_current_carries_short_waves_without_wearing_them_down() {
+        // A 2 m wave train riding a 1 m/s stream for two seconds keeps its height as it does
+        // in still water (a bilinear trace back lost half of it).
+        struct Flowing(f32);
+        impl Medium for Flowing {
+            fn wet(&self, _: usize) -> f32 {
+                1.0
+            }
+            fn carry(&self, _: usize, _: usize, _: usize) -> Vec2 {
+                Vec2::new(self.0, 0.0)
+            }
+        }
+        let run = |v: f32| {
+            let mut sim = SurfaceSim::level(N, 0.25, DVec2::ZERO, Band::All, 2.0);
+            let k = std::f32::consts::TAU / 2.0;
+            for j in 0..N {
+                for i in 0..N {
+                    sim.state[j * N + i][0] = 0.02 * (k * i as f32 * 0.25).cos();
+                }
+            }
+            sim.quiet_s = 0.0;
+            for _ in 0..120 {
+                sim.step(&Flowing(v), &[], 0.25, 1.0 / 60.0, 0.0);
+            }
+            let h = sim.heights();
+            h.h.iter().fold(0.0f32, |m, v| m.max(v.abs()))
+        };
+        let (still, carried) = (run(0.0), run(1.0));
+        assert!(still > 0.008, "{still}");
+        assert!(carried > 0.6 * still, "still {still}, carried {carried}");
     }
 }

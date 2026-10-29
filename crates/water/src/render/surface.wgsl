@@ -47,19 +47,27 @@ fn conj(a: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(a.x, -a.y);
 }
 
+// Catmull-Rom weights of the four samples around a point `t` (0..1) past the second.
+fn catmull_rom(t: f32) -> vec4<f32> {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    return 0.5 * vec4<f32>(-t3 + 2.0 * t2 - t, 3.0 * t3 - 5.0 * t2 + 2.0, -3.0 * t3 + 4.0 * t2 + t, t3 - t2);
+}
+
 // Last frame's surface at grid coordinates `p` (cell centers at whole numbers, in this
-// frame's grid), bilinear; still water off the grid.
+// frame's grid), through a cubic (a bilinear lookup each frame would blur away the short waves
+// wherever the water moves); still water off the grid.
 fn surface_at(p: vec2<f32>) -> vec2<f32> {
     let q = p + vec2<f32>(params.shift.xy);
     let base = floor(q);
-    let f = q - base;
+    let wx = catmull_rom(q.x - base.x);
+    let wz = catmull_rom(q.y - base.y);
     var s = vec2<f32>(0.0);
-    for (var dz = 0; dz < 2; dz++) {
-        for (var dx = 0; dx < 2; dx++) {
-            let c = vec2<i32>(base) + vec2<i32>(dx, dz);
+    for (var dz = 0; dz < 4; dz++) {
+        for (var dx = 0; dx < 4; dx++) {
+            let c = vec2<i32>(base) + vec2<i32>(dx - 1, dz - 1);
             if (c.x < 0 || c.y < 0 || c.x >= i32(N) || c.y >= i32(N)) { continue; }
-            let w = select(1.0 - f.x, f.x, dx == 1) * select(1.0 - f.y, f.y, dz == 1);
-            s += surface[u32(c.y) * N + u32(c.x)] * w;
+            s += surface[u32(c.y) * N + u32(c.x)] * (wx[dx] * wz[dz]);
         }
     }
     return s;

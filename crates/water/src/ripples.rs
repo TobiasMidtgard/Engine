@@ -83,6 +83,10 @@ pub struct Disturbance {
     /// way draws its wake from it (Havelock's moving pressure patch, 1908), the lake neither
     /// rising nor sinking; it then ignores `depth`, which only the grid takes.
     pub press: f32,
+    /// A long hull's keel: half its length, pointing to the bow (world x/z, m), with
+    /// `radius` half its beam. The dispersive surface then presses its waterline's own shape,
+    /// edges and pointed bow and all (zero: a round Gaussian push).
+    pub keel: Vec2,
 }
 
 /// The interactive surface at a point (see [`RippleField::sample`]).
@@ -1529,6 +1533,7 @@ mod tests {
             stir: None,
             spin: 0.0,
             press: 0.0,
+            keel: Vec2::ZERO,
         }
     }
 

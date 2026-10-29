@@ -118,6 +118,7 @@ pub fn splash(pos: DVec3, radius: f32, speed: f32) -> Disturbance {
         stir: None,
         spin: 0.0,
         press: 0.0,
+        keel: Vec2::ZERO,
     }
 }
 
@@ -273,22 +274,23 @@ pub fn disturbance_system(
                     // behind it runs on and curls into eddies at its edges.
                     let flat = Vec2::new(through.x, through.z);
                     // A long hull also holds the water down along its length as it goes: a
-                    // pressure patch, which the dispersive surface turns into a Kelvin wake
-                    // whose waves are as long as the speed makes them (Havelock 1908; the
-                    // grid takes the plain push). Five overlapping patches a beam wide,
-                    // bow to stern, sum to `head` under the hull.
+                    // pressure patch the shape of its waterline, which the dispersive surface
+                    // turns into a Kelvin wake whose waves are as long as the speed makes them
+                    // (Havelock 1908; the grid takes the plain push). The patch's sharp edges
+                    // and pointed bow make the short divergent waves that draw the wake's V; a
+                    // smooth patch makes only the long ones, too gentle to see (Darmon,
+                    // Benzaquen and Raphaël 2014).
                     let long = it.length > r && speed > 0.3;
                     let head = if long {
                         (HULL_HEAD * it.wake).min(0.4) * smoothstep(0.3, 1.0, speed)
                     } else {
                         0.0
                     };
-                    const PATCHES: usize = 5;
-                    let along = if long { flat / speed } else { Vec2::ZERO };
-                    let spacing = 1.6 * it.length / (PATCHES - 1) as f32;
-                    // Overlapping Gaussians exp(−2(d/r)²), σ = r/2, every `spacing` meters.
-                    let overlap = (0.5 * r * (std::f32::consts::TAU).sqrt() / spacing).max(1.0);
-                    let press = head * step / overlap;
+                    let keel = if long {
+                        flat / speed * it.length
+                    } else {
+                        Vec2::ZERO
+                    };
                     out.push(Disturbance {
                         pos: DVec2::new(p.x, p.z),
                         radius: r * 0.9,
@@ -296,19 +298,9 @@ pub fn disturbance_system(
                         foam: (speed * 0.07 * it.wake).min(0.5) * dt * 30.0,
                         stir: (speed > 0.1).then_some(flat * 0.6),
                         spin: 0.0,
-                        press,
+                        press: head * step,
+                        keel,
                     });
-                    if press > 0.0 {
-                        for k in [0, 1, 3, 4] {
-                            let t = k as f32 * spacing - 0.8 * it.length;
-                            out.push(Disturbance {
-                                pos: DVec2::new(p.x, p.z) + (along * t).as_dvec2(),
-                                radius: r,
-                                press,
-                                ..Default::default()
-                            });
-                        }
-                    }
                     // Eddies peel off alternate sides behind it, turning the way the water
                     // dragged past that side turns: its wake winds into a vortex street.
                     if speed > 0.3 {
@@ -349,6 +341,7 @@ pub fn disturbance_system(
                             stir: Some(wobble.rotate(flat) * (0.6 - 0.45 * churn)),
                             spin: 0.0,
                             press: 0.0,
+                            keel: Vec2::ZERO,
                         });
                     }
                 }
@@ -371,6 +364,7 @@ pub fn disturbance_system(
                     stir: None,
                     spin: 0.0,
                     press: 0.0,
+                    keel: Vec2::ZERO,
                 });
             }
         }
@@ -404,6 +398,7 @@ pub fn disturbance_system(
                 stir: (sweep > 0.1).then_some(flat.clamp_length_max(4.0) * 0.5 * solid),
                 spin: 0.0,
                 press: 0.0,
+                keel: Vec2::ZERO,
             });
             if plunge > SPLASH_SPEED {
                 let owed = spray_owed.entry(d.source).or_insert(0.0);
@@ -473,6 +468,7 @@ pub fn disturbance_system(
                 stir: None,
                 spin: 0.0,
                 press: 0.0,
+                keel: Vec2::ZERO,
             });
             if settings.noise_events {
                 noises.push(NoiseEvent {
@@ -509,6 +505,7 @@ pub fn disturbance_system(
                 stir: None,
                 spin: 0.0,
                 press: 0.0,
+                keel: Vec2::ZERO,
             });
             if settings.noise_events {
                 noises.push(NoiseEvent {
@@ -548,6 +545,7 @@ pub fn disturbance_system(
                         stir: None,
                         spin: 0.0,
                         press: 0.0,
+                        keel: Vec2::ZERO,
                     });
                 }
             };

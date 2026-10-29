@@ -256,7 +256,18 @@ fn main() {
         .insert(Schedule::new(Render));
     let frames = (seconds * 30.0) as usize;
     let started = std::time::Instant::now();
-    app.update_n(frames.max(2));
+    app.update_n(frames.max(2) - 1);
+    let boat_at = |app: &mut App| {
+        let mut q = app.world.query::<(&Name, &GlobalTransform)>();
+        q.iter(&app.world)
+            .find(|(n, _)| n.as_str() == "Motorboat")
+            .map(|(_, g)| g.translation())
+    };
+    let before = boat_at(&mut app);
+    app.update_n(1);
+    if let (Some(a), Some(b)) = (before, boat_at(&mut app)) {
+        eprintln!("motorboat at {:.1} m/s", (b - a).length() * 30.0);
+    }
     eprintln!(
         "simulated {seconds} s in {:.1} s",
         started.elapsed().as_secs_f32()
@@ -275,15 +286,27 @@ fn main() {
         );
         // The surfaces side by side, seen from above (the grid's own, the dispersive fine
         // level over it, and its coarse level four times larger when it runs): what the water
-        // itself feels, without the light. Red up, blue down, full colour at 5 cm.
+        // itself feels, without the light. Red up, blue down, full colour at 5 cm; last, the
+        // fine level's steepness.
         if let Some(h) = link.heights() {
             let n = state.ripples.n;
             let scale = 0.05;
             let coarse = link.coarse();
+            // (And the fine level's slope, full colour at 0.2: what the light sees.)
+            let slope: Vec<f32> = (0..n * n)
+                .map(|k| {
+                    let (i, j) = (k % n, k / n);
+                    let at = |ii: usize, jj: usize| h.h[jj.min(n - 1) * n + ii.min(n - 1)];
+                    let gx = at(i + 1, j) - at(i.saturating_sub(1), j);
+                    let gz = at(i, j + 1) - at(i, j.saturating_sub(1));
+                    (gx * gx + gz * gz).sqrt() / (2.0 * state.ripples.cell) * scale / 0.2
+                })
+                .collect();
             let mut panels = vec![&state.ripples.h, &h.h];
             if let Some(c) = &coarse {
                 panels.push(&c.h);
             }
+            panels.push(&slope);
             let mut img = image::RgbImage::new(((n + 8) * panels.len() - 8) as u32, n as u32);
             for (side, buf) in panels.into_iter().enumerate() {
                 for j in 0..n {
@@ -357,6 +380,19 @@ fn main() {
             ),
             Err(e) => eprintln!("{path}: {e}"),
         }
+    }
+    {
+        // What the renderer drew from (the GPU picks the surface up from the CPU).
+        let water = app.world.resource::<SharedWater>().clone();
+        let state = water.0.read();
+        let link = &state.ripples.surface;
+        let peak = link
+            .heights()
+            .map_or(0.0, |h| h.h.iter().fold(0.0f32, |m, v| m.max(v.abs())));
+        eprintln!(
+            "surface after the views: {:?}, highest ripple {peak:.4} m",
+            link.runner()
+        );
     }
     let stats = app.world.resource::<engine_render::RenderStats>();
     eprintln!("{stats:?}");

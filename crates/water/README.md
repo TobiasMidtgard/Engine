@@ -42,17 +42,20 @@ Background research: `game-engine-research/graphics.md` in the project files.
   floated on is evolved for every wavelength at once in Fourier space (Tessendorf's eWave;
   the hybrid with a shallow-water solver is Jeschke & Wojtan 2023): long waves outrun short
   ones, a stone sends out a spreading train of rings and hulls draw Kelvin wakes, the 19.5°
-  wedge of feathered crests. It is carried along the field's currents and streams, shut out
-  of dry land and soaked up at the edge. The renderer runs it on the GPU and reads its
+  wedge of feathered crests. It is carried along streams (through a cubic, which keeps short
+  waves where a bilinear trace would blur them away; a hull's own short-lived wash carries
+  nothing), shut out of dry land and soaked up at the edge. The renderer runs it on the GPU and reads its
   heights back for floating things; `WaterSettings::cpu_surface` runs it on the CPU where
   there is no GPU (the GPU picks up where it left off). `ENGINE_WATER_CPU_RIPPLES=1` draws the
   field's own waves instead, to compare. It runs on two levels, the fine one over the field
   (64 m) and a coarse one of 1 m cells (256 m) feeling the lake's mean depth; waves shorter
   than 4 m belong to the fine level, longer ones to the coarse, each push going into both
   for its own band, so a boat's long transverse waves spread into its whole wake. Long hulls
-  (`WaterInteractor::with_length`) press the water down along their length (a moving
-  pressure patch, Havelock 1908) rather than pushing it away, so the lake neither rises nor
-  sinks round their course.
+  (`WaterInteractor::with_length`) press the water down in the shape of their waterline,
+  pointed at the bow (a moving pressure patch, Havelock 1908) rather than pushing it away,
+  so the lake neither rises nor sinks round their course; its sharp edges make the short
+  divergent waves that draw the wake's V. Its waves fade by `WaterSettings::surface_damping`
+  (0.05/s), so a wake rolls on across the lake.
 - **Floating** (`Buoyancy`): Archimedes over a probe grid with drag and wave forces, for props
   the module moves itself (`Floating`): buoys, moored boats, debris. Physics bodies
   (`RigidBody`) float in the physics module from their real collider shapes, through the same

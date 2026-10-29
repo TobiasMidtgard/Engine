@@ -451,7 +451,13 @@ impl SurfaceGpu {
             l.map_copied();
         }
         let _ = shared.device.poll(wgpu::PollType::Poll);
-        let Some(link) = self.link.as_ref().filter(|l| Arc::ptr_eq(l, &r.surface)) else {
+        // (Only while the GPU runs the surface: readbacks still in flight when it stopped
+        // would bury the heights the CPU has moved on to since, which it hands back.)
+        let Some(link) = self
+            .link
+            .as_ref()
+            .filter(|l| Arc::ptr_eq(l, &r.surface) && l.runner() == Runner::Gpu)
+        else {
             for l in &mut self.levels {
                 l.newest();
             }
