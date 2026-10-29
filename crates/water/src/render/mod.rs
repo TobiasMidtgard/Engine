@@ -1825,6 +1825,7 @@ impl RenderFeature for WaterFeature {
                 (r.origin, r.cell, r.n),
                 (&ripple_view, &current_view),
                 lake,
+                &state.ripples.swash_link,
                 view.delta,
                 foam_life,
             );

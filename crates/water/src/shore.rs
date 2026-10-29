@@ -237,6 +237,7 @@ pub fn shore_wetness_system(
     let rows = (c0.y as i64 - reach).max(0)..=(c0.y as i64 + reach).min(height as i64 - 1);
     let cols = (c0.x as i64 - reach).max(0)..=(c0.x as i64 + reach).min(width as i64 - 1);
     let runup_cells = (RUNUP_M / cell).ceil() as usize;
+    let swash = state.ripples.swash_link.reach();
     let mut budget = SAMPLES_PER_UPDATE;
     let started = std::time::Instant::now();
     let mut writes: Vec<(usize, f32)> = Vec::new();
@@ -292,8 +293,11 @@ pub fn shore_wetness_system(
             let mut target = 0.0f32;
             let mut under_lake = false;
             // Wakes and rings that ran up here since the last visit: the swash band of waves
-            // that tall (`swash_wetness`), for this pass.
+            // that tall (`swash_wetness`), for this pass. Where the swash runs it says itself
+            // how far they went.
             let ran = std::mem::take(&mut cache.runup[idx]) / 1.5;
+            let swashed = swash.as_ref().and_then(|r| r.damp_at(xz));
+            let ran = if swashed.is_some() { 0.0 } else { ran };
             for (b, hs) in lakes.iter().filter(|(b, _)| b.contains(ground_p)) {
                 let above = (h - b.center.y) as f32;
                 if above + spread < -UNDER_M {
@@ -314,6 +318,7 @@ pub fn shore_wetness_system(
                 let d = (DVec2::new(foot.x, foot.z) - xz).length().hypot(rise) as f32;
                 target = target.max(spray_wetness(d, *power));
             }
+            target = target.max(swashed.unwrap_or(0.0));
             for f in state
                 .flows
                 .iter()

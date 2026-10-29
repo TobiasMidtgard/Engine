@@ -1105,7 +1105,9 @@ fn fs_body(in: BodyOut) -> @location(0) vec4<f32> {
     // foam its bores and run-up tips make.
     if (sw.w > 0.0) {
         let ss = swash_slope(in.rest);
-        let n_swash = normalize(vec3<f32>(-ss.x - g.x * 0.3, 1.0, -ss.y - g.y * 0.3));
+        // The wind's fine ripples ride it too, flattening out only in the last few centimeters.
+        let keep = mix(0.3, 1.0, saturate(sw.depth / 0.15));
+        let n_swash = normalize(vec3<f32>(-ss.x - g.x * keep, 1.0, -ss.y - g.y * keep));
         n = normalize(mix(n, n_swash, sw.w));
         foam += sw.foam * sw.w * 1.4;
     }

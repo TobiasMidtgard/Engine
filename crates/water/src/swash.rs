@@ -28,6 +28,13 @@
 //!   of the uprush, and is stranded where the water drains: the swash mark at the top of
 //!   each run.
 //!
+//! - **Things standing in it** (feet, a wader, a beached hull) press on the water as a
+//!   surface pressure head, the hull pressure patch of Havelock (1908) that the dispersive
+//!   surface uses too: the water flows away from under them and round them, piles up in
+//!   front of a moving one and leaves a wake behind. Their wash drags the water along and
+//!   they churn foam. Coupling by displaced volume as in Chentanez & Müller's shallow-water
+//!   rigid bodies (2010) comes to the same at rest; the pressure keeps the scheme's balance.
+//!
 //! The renderer runs it on the GPU (`render/swash.rs`, `swash.wgsl`) in step with this
 //! reference, which the tests use.
 
@@ -37,6 +44,7 @@ use engine_core::math::{DVec2, DVec3, Vec2};
 use engine_core::prelude::*;
 use engine_world::Ground;
 
+use crate::ripples::Disturbance;
 use crate::state::BodyState;
 
 /// Cells per side.
@@ -75,6 +83,15 @@ pub const DAMP_S: f32 = 90.0;
 pub const MARK_S: f32 = 20.0;
 /// Sand this little above the still level stays wet (the water table), meters.
 pub const TABLE_M: f32 = 0.05;
+/// Most pushes the swash takes in a step.
+pub const MAX_PUSHES: usize = 64;
+/// How fast a push's wash drags the water toward its own velocity, per second.
+pub const STIR_RATE: f32 = 8.0;
+/// Deepest a push presses, meters.
+pub const MAX_PRESS_M: f32 = 1.0;
+/// Cells of the swash per cell of [`SwashReach`] (1 m).
+pub const REACH_BLOCK: usize = 8;
+
 /// A bore front steeper than this foams.
 pub const BORE_SLOPE: f32 = 0.3;
 /// Foam a bore front makes per second.
@@ -230,6 +247,8 @@ pub struct SwashField {
     pub reach: Vec<f32>,
     /// The surface's waves per cell (set before each step).
     pub target: Vec<Target>,
+    /// Pressure head of what stands in the water, per cell, meters ([`Self::push`]).
+    pub press: Vec<f32>,
     /// Tiles that take part (the shore runs through them).
     pub band: Vec<bool>,
     /// Steps taken in the last frame.
@@ -264,6 +283,7 @@ impl SwashField {
             sand: vec![Sand::default(); cells],
             reach: vec![f32::NEG_INFINITY; cells],
             target: vec![Target::default(); cells],
+            press: vec![0.0; cells],
             band: vec![false; tiles],
             steps: 0,
             friction: true,
@@ -496,7 +516,12 @@ impl SwashField {
             }
             let q = |o: usize| {
                 let c = self.water[o];
-                [c.h, c.h + self.bed[o], self.vel[o].x, self.vel[o].y]
+                [
+                    c.h,
+                    c.h + self.bed[o] + self.press[o],
+                    self.vel[o].x,
+                    self.vel[o].y,
+                ]
             };
             let (c, w, e, s, nn) = (q(k), q(nb[0]), q(nb[1]), q(nb[2]), q(nb[3]));
             self.slopes[k] = [
@@ -509,7 +534,7 @@ impl SwashField {
             let c = self.water[k];
             let d = self.slopes[k][axis];
             let h = (c.h + 0.5 * sign * d[0]).max(0.0);
-            let level = c.h + self.bed[k] + 0.5 * sign * d[1];
+            let level = c.h + self.bed[k] + self.press[k] + 0.5 * sign * d[1];
             let (u, v) = (
                 self.vel[k].x + 0.5 * sign * d[2],
                 self.vel[k].y + 0.5 * sign * d[3],
@@ -584,7 +609,7 @@ impl SwashField {
                 continue;
             }
             let t = self.target[k];
-            let h = (self.still[k] + t.eta - self.bed[k]).max(0.0);
+            let h = (self.still[k] + t.eta - self.bed[k] - self.press[k]).max(0.0);
             let want = Cell {
                 h,
                 hu: h * t.vel.x,
@@ -666,6 +691,46 @@ impl SwashField {
         }
     }
 
+    /// What stands in the water this frame (`dt` s): each push presses on it (its `depth` as a
+    /// pressure head, a Gaussian of its radius as the ripple grid spreads it), drags it toward
+    /// its `stir` and churns `foam` into it. The pressure stays until the next call.
+    pub fn push(&mut self, pushes: &[Disturbance], dt: f32) {
+        self.press.fill(0.0);
+        let n = self.n as i64;
+        let cell = self.cell as f64;
+        let drag = 1.0 - (-STIR_RATE * dt).exp();
+        for d in pushes.iter().take(MAX_PUSHES) {
+            let r = d.radius.max(self.cell * 0.75);
+            let reach = (r * 2.0 / self.cell).ceil() as i64;
+            let c = ((d.pos - self.origin) / cell).floor();
+            let (i0, i1) = ((c.x as i64 - reach).max(0), (c.x as i64 + reach).min(n - 1));
+            let (j0, j1) = ((c.y as i64 - reach).max(0), (c.y as i64 + reach).min(n - 1));
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    let k = (j * n + i) as usize;
+                    let p = self.cell_center(i as usize, j as usize);
+                    let dist = (p - d.pos).length() as f32 / r;
+                    let g = (-2.0 * dist * dist).exp();
+                    if g < 1e-3 {
+                        continue;
+                    }
+                    self.press[k] = (self.press[k] + d.depth.max(0.0) * g).min(MAX_PRESS_M);
+                    let w = &mut self.water[k];
+                    if w.h <= DRY_M {
+                        continue;
+                    }
+                    if let Some(s) = d.stir {
+                        let v = Vec2::new(velocity(w.h, w.hu), velocity(w.h, w.hv));
+                        let v = v + (s - v) * (drag * g);
+                        w.hu = w.h * v.x;
+                        w.hv = w.h * v.y;
+                    }
+                    w.hc = (w.hc + w.h * d.foam * g).min(w.h);
+                }
+            }
+        }
+    }
+
     /// The highest level reached per cell since the last call (over `datum`), and forget it.
     pub fn take_reach(&mut self) -> Vec<f32> {
         std::mem::replace(&mut self.reach, vec![f32::NEG_INFINITY; self.n * self.n])
@@ -679,6 +744,79 @@ impl SwashField {
 pub struct BeachGround {
     pub half_size: f32,
     pub height: Arc<dyn Fn(f32, f32) -> f32 + Send + Sync>,
+}
+
+/// What the swash and the rest of the water hand each other across the simulation and the
+/// renderer ([`crate::ripples::RippleField::swash_link`]): the pushes of the latest step, and
+/// how wet the swash has left the sand.
+#[derive(Debug, Default)]
+pub struct SwashLink {
+    pushes: parking_lot::Mutex<Arc<Vec<Disturbance>>>,
+    reach: parking_lot::Mutex<Option<Arc<SwashReach>>>,
+}
+
+impl SwashLink {
+    /// The pushes the ripple grid took this step (they replace the last step's).
+    pub fn set_pushes(&self, pushes: Vec<Disturbance>) {
+        *self.pushes.lock() = Arc::new(pushes);
+    }
+
+    /// The latest step's pushes.
+    pub fn pushes(&self) -> Arc<Vec<Disturbance>> {
+        self.pushes.lock().clone()
+    }
+
+    /// Hand out how wet the sand is (the renderer reads it back from the GPU now and then).
+    pub fn set_reach(&self, reach: Option<SwashReach>) {
+        *self.reach.lock() = reach.map(Arc::new);
+    }
+
+    /// How wet the swash has left the sand, when it runs.
+    pub fn reach(&self) -> Option<Arc<SwashReach>> {
+        self.reach.lock().clone()
+    }
+}
+
+/// How damp the swash has left the sand, per meter ([`REACH_BLOCK`] swash cells): the wettest
+/// cell in each.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwashReach {
+    /// World x/z of the corner.
+    pub origin: DVec2,
+    /// Cell size, meters.
+    pub cell: f64,
+    /// Cells per side.
+    pub n: usize,
+    /// Damp 0..1 per cell (row-major).
+    pub damp: Vec<f32>,
+}
+
+impl SwashReach {
+    /// How damp the sand is at world x/z (`None` outside).
+    pub fn damp_at(&self, xz: DVec2) -> Option<f32> {
+        let g = ((xz - self.origin) / self.cell).floor();
+        if g.x < 0.0 || g.y < 0.0 || g.x >= self.n as f64 || g.y >= self.n as f64 {
+            return None;
+        }
+        Some(self.damp[g.y as usize * self.n + g.x as usize])
+    }
+
+    /// The reach of a field's sand (the CPU's own, for tests and the CPU fallback).
+    pub fn of(field: &SwashField) -> Self {
+        let m = field.n / REACH_BLOCK;
+        let mut damp = vec![0.0f32; m * m];
+        for (k, s) in field.sand.iter().enumerate() {
+            let (i, j) = ((k % field.n) / REACH_BLOCK, (k / field.n) / REACH_BLOCK);
+            let d = &mut damp[j * m + i];
+            *d = d.max(s.damp);
+        }
+        Self {
+            origin: field.origin,
+            cell: field.cell as f64 * REACH_BLOCK as f64,
+            n: m,
+            damp,
+        }
+    }
 }
 
 /// The ground and the still water under the swash grid, laid over the ripple grid's window
@@ -1166,5 +1304,89 @@ mod tests {
         let k = row * n + top - 1;
         assert!(s.sand[k].damp > 0.5, "{:?}", s.sand[k]);
         assert!(s.sand[k].sheen < 0.2, "{:?}", s.sand[k]);
+    }
+
+    /// A push `depth` deep at `pos`, its wash at `stir`.
+    fn foot(pos: DVec2, depth: f32, stir: Option<Vec2>) -> Disturbance {
+        Disturbance {
+            pos,
+            radius: 0.25,
+            depth,
+            foam: 0.0,
+            stir,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_foot_parts_the_water_and_keeps_it() {
+        // 0.15 m of water on a flat bed; a foot stands in the middle for 4 s.
+        let mut s = basin(64, 0.125, &|_, _| -0.15);
+        let v0 = s.volume();
+        let mid = DVec2::splat(4.0);
+        for _ in 0..240 {
+            s.push(&[foot(mid, 0.08, None)], 1.0 / 60.0);
+            s.step(1.0 / 60.0, 6.0);
+        }
+        let at = |s: &SwashField, p: DVec2| {
+            let g = (p / 0.125).floor();
+            s.water[g.y as usize * 64 + g.x as usize].h
+        };
+        let (under, away) = (at(&s, mid), at(&s, mid + DVec2::new(2.5, 0.0)));
+        assert!(
+            (away - under - 0.08).abs() < 0.02,
+            "under the foot {under}, away {away}"
+        );
+        assert!(
+            (s.volume() - v0).abs() < 1e-3 * v0,
+            "{} vs {v0}",
+            s.volume()
+        );
+        // Stepped away: the water closes over where it stood.
+        for _ in 0..240 {
+            s.push(&[], 1.0 / 60.0);
+            s.step(1.0 / 60.0, 6.0);
+        }
+        assert!((at(&s, mid) - 0.15).abs() < 0.01, "{}", at(&s, mid));
+    }
+
+    #[test]
+    fn a_wading_foot_pushes_a_bow_wave_and_drags_a_wash() {
+        // 0.2 m of water; a foot wades along x at 1.2 m/s.
+        let mut s = basin(96, 0.125, &|_, _| -0.2);
+        let mut bow = 0.0f32;
+        let mut wash = 0.0f32;
+        for f in 0..180 {
+            let x = 2.0 + 1.2 * f as f64 / 60.0;
+            let at = DVec2::new(x, 6.0);
+            s.push(&[foot(at, 0.1, Some(Vec2::new(1.2, 0.0)))], 1.0 / 60.0);
+            s.step(1.0 / 60.0, 6.0);
+            let cell = |p: DVec2| {
+                let g = (p / 0.125).floor();
+                g.y as usize * 96 + g.x as usize
+            };
+            let ahead = cell(at + DVec2::new(0.4, 0.0));
+            bow = bow.max(s.level(ahead));
+            let behind = s.water[cell(at - DVec2::new(0.4, 0.0))];
+            wash = wash.max(velocity(behind.h, behind.hu));
+        }
+        assert!(bow > 0.01, "no bow wave: {bow}");
+        assert!(wash > 0.3, "no wash behind: {wash}");
+    }
+
+    #[test]
+    fn the_reach_says_where_the_sand_is_wet() {
+        let mut s = basin(64, 0.125, &|x, _| -0.3 + x * 0.1);
+        // Wet the sand up to 5 m by hand, as a run that drained.
+        for k in 0..s.sand.len() {
+            if s.cell_center(k % 64, k / 64).x < 5.0 {
+                s.sand[k].damp = 1.0;
+            }
+        }
+        let r = SwashReach::of(&s);
+        assert_eq!(r.n, 64 / REACH_BLOCK);
+        assert_eq!(r.damp_at(DVec2::new(4.5, 3.0)), Some(1.0));
+        assert_eq!(r.damp_at(DVec2::new(6.5, 3.0)), Some(0.0));
+        assert_eq!(r.damp_at(DVec2::new(-1.0, 3.0)), None);
     }
 }

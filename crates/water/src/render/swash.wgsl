@@ -21,7 +21,7 @@ struct Params {
     fine: vec4<f32>,    // the surface's fine level: corner rel this grid's corner x, z (m), cell (m), cells
     coarse: vec4<f32>,  // its coarse level, the same
     ripple: vec4<f32>,  // the ripple grid, the same
-    shift: vec4<i32>,   // cells this grid moved by since the last frame (x, z), unused, unused
+    shift: vec4<i32>,   // cells this grid moved by since the last frame (x, z), pushes, unused
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -38,6 +38,9 @@ struct Params {
 @group(0) @binding(11) var out_a: texture_storage_2d<rgba16float, write>; // level drawn (m over the datum), depth, strip weight, foam
 @group(0) @binding(12) var out_b: texture_storage_2d<rgba16float, write>; // sheen, damp, mark, bed (m over the datum)
 @group(0) @binding(13) var<storage, read> waves: array<vec4<f32>>;        // per wave: (dir x, z, k, amp), (ω, phase at the corner, 0, 0)
+@group(0) @binding(14) var<storage, read_write> press: array<f32>;        // pressure head of what stands in the water (m)
+@group(0) @binding(15) var<storage, read> pushes: array<vec4<f32>>;      // per push: (x, z from the corner, radius, depth), (stir x, z, foam, stirs 1/0)
+@group(0) @binding(16) var<storage, read_write> reach: array<f32>;       // damp per REACH_BLOCK² cells
 
 const N: u32 = 512u;
 const TILE: u32 = 16u;
@@ -59,6 +62,9 @@ const TIP_SPEED_MS: f32 = 0.4;
 const TIP_FOAM: f32 = 2.0;
 // A still level below this is none.
 const NONE: f32 = -1e4;
+const STIR_RATE: f32 = 8.0;
+const MAX_PRESS_M: f32 = 1.0;
+const REACH_BLOCK: u32 = 8u;
 
 fn velocity(h: f32, q: f32) -> f32 {
     let h4 = h * h * h * h;
@@ -100,6 +106,11 @@ fn work(wg: u32, local: vec2<u32>) -> Work {
     return Work(j * N + i, i32(i), i32(j), (t >> 31u) != 0u);
 }
 
+// The bed the water flows over: the ground, and the pressure of what stands on the water.
+fn bed(k: u32) -> f32 {
+    return ground[k].x + press[k];
+}
+
 fn wet(base: u32, k: u32) -> bool {
     return water[base + k].x > DRY_M;
 }
@@ -107,7 +118,7 @@ fn wet(base: u32, k: u32) -> bool {
 // (h, level, u, v) of cell k in the state at `base`.
 fn quantities(base: u32, k: u32) -> vec4<f32> {
     let c = water[base + k];
-    return vec4<f32>(c.x, c.x + ground[k].x, velocity(c.x, c.y), velocity(c.x, c.z));
+    return vec4<f32>(c.x, c.x + bed(k), velocity(c.x, c.y), velocity(c.x, c.z));
 }
 
 fn prep(base: u32, wg: u32, local: vec2<u32>) {
@@ -158,7 +169,7 @@ fn side(base: u32, k: u32, axis: u32, sign: f32) -> Side {
     let c = water[base + k];
     let d = slopes[2u * k + axis];
     let h = max(c.x + 0.5 * sign * d.x, 0.0);
-    let level = c.x + ground[k].x + 0.5 * sign * d.y;
+    let level = c.x + bed(k) + 0.5 * sign * d.y;
     let u = velocity(c.x, c.y) + 0.5 * sign * d.z;
     let v = velocity(c.x, c.z) + 0.5 * sign * d.w;
     var foam = 0.0;
@@ -292,7 +303,7 @@ fn stage2(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l:
     // The strip: toward the surface's waves.
     if (g.z > 0.0 && g.y > NONE) {
         let t = targets[k];
-        let h = max(g.y + t.x - g.x, 0.0);
+        let h = max(g.y + t.x - bed(k), 0.0);
         c = mix(c, vec4<f32>(h, h * t.y, h * t.z, h * t.w), g.z);
     }
     water[k] = clamp_cell(c);
@@ -431,6 +442,50 @@ fn after(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: 
     let p = vec2<i32>(w.i, w.j);
     textureStore(out_a, p, vec4<f32>(level, c.x, g.z, foam));
     textureStore(out_b, p, vec4<f32>(s.x, s.y, s.z, g.x));
+}
+
+// What stands in the water this frame (`crate::swash::SwashField::push`): its pressure, over
+// every tile stepped (the band reads its neighbours' beds); its wash and foam, over the band.
+@compute @workgroup_size(16, 16)
+fn push(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
+    let w = work(wg.x, l.xy);
+    let k = w.k;
+    let p = (vec2<f32>(f32(w.i), f32(w.j)) + 0.5) * params.grid.y;
+    let drag = 1.0 - exp(-STIR_RATE * params.grid.w);
+    var head = 0.0;
+    var c = water[k];
+    for (var m = 0u; m < u32(params.shift.z); m++) {
+        let a = pushes[2u * m];
+        let r = max(a.z, params.grid.y * 0.75);
+        let dist = length(p - a.xy) / r;
+        if (dist > 2.0) { continue; }
+        let g = exp(-2.0 * dist * dist);
+        head = min(head + max(a.w, 0.0) * g, MAX_PRESS_M);
+        if (!w.band || c.x <= DRY_M) { continue; }
+        let b = pushes[2u * m + 1u];
+        if (b.w > 0.5) {
+            var v = vec2<f32>(velocity(c.x, c.y), velocity(c.x, c.z));
+            v += (b.xy - v) * (drag * g);
+            c = vec4<f32>(c.x, c.x * v, c.w);
+        }
+        c.w = min(c.w + c.x * b.z * g, c.x);
+    }
+    press[k] = head;
+    if (w.band) { water[k] = c; }
+}
+
+// How damp the sand is per meter, for the shore's wetness (read back now and then).
+@compute @workgroup_size(8, 8)
+fn reach_damp(@builtin(global_invocation_id) id: vec3<u32>) {
+    let m = N / REACH_BLOCK;
+    if (id.x >= m || id.y >= m) { return; }
+    var d = 0.0;
+    for (var j = 0u; j < REACH_BLOCK; j++) {
+        for (var i = 0u; i < REACH_BLOCK; i++) {
+            d = max(d, sand[(id.y * REACH_BLOCK + j) * N + id.x * REACH_BLOCK + i].y);
+        }
+    }
+    reach[id.y * m + id.x] = d;
 }
 
 // A fresh bed: the water at rest, the sand dry, nothing drawn.

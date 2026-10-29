@@ -9,7 +9,9 @@ use bytemuck::{Pod, Zeroable};
 use engine_core::math::DVec2;
 use engine_render::features::GpuShared;
 
-use crate::swash::{CELL_M, N, SwashBed, SwashField, TILE};
+use crate::swash::{
+    CELL_M, MAX_PUSHES, N, REACH_BLOCK, SwashBed, SwashField, SwashLink, SwashReach, TILE,
+};
 
 const SHADER: &str = include_str!("swash.wgsl");
 
@@ -42,6 +44,23 @@ enum Lay {
     Shift([i32; 2]),
 }
 
+/// The damp sand read back for the shore ([`SwashLink::set_reach`]), copied every this many
+/// frames.
+const REACH_EVERY: u32 = 20;
+/// Reach cells per side.
+const REACH_N: usize = N / REACH_BLOCK;
+
+/// Where the reach read back stands.
+#[derive(Debug, Clone, Default)]
+enum ReachRead {
+    #[default]
+    Idle,
+    /// Copied this frame (grid corner then); mapped once that is submitted.
+    Copied(DVec2),
+    /// Waiting on the map.
+    Mapping(DVec2, Arc<std::sync::atomic::AtomicBool>),
+}
+
 /// Where the swash lies this frame, for the water shader.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SwashFrame {
@@ -55,7 +74,7 @@ pub struct SwashFrame {
 
 pub struct SwashGpu {
     layout: wgpu::BindGroupLayout,
-    pipelines: [wgpu::ComputePipeline; 9],
+    pipelines: [wgpu::ComputePipeline; 11],
     params: wgpu::Buffer,
     water: wgpu::Buffer,
     slopes: wgpu::Buffer,
@@ -66,6 +85,15 @@ pub struct SwashGpu {
     /// The lake's long waves over the band: (dir x, z, k, amp), (ω, phase at the grid's
     /// corner, 0, 0) each.
     waves: wgpu::Buffer,
+    /// What stands in the water: its pressure per cell, and the pushes (see `swash.wgsl`).
+    press: wgpu::Buffer,
+    pushes: wgpu::Buffer,
+    push_count: u32,
+    /// The damp sand per meter, and its copy read back.
+    reach: wgpu::Buffer,
+    reach_read: wgpu::Buffer,
+    reach_state: ReachRead,
+    reach_frames: u32,
     view_a: wgpu::TextureView,
     view_b: wgpu::TextureView,
     /// The bed laid: (version, corner, cell size).
@@ -90,7 +118,9 @@ const AFTER: usize = 5;
 const REST: usize = 6;
 const SHIFT_OUT: usize = 7;
 const SHIFT_IN: usize = 8;
-const ENTRIES: [&str; 9] = [
+const PUSH: usize = 9;
+const REACH: usize = 10;
+const ENTRIES: [&str; 11] = [
     "prep_a",
     "prep_b",
     "stage1",
@@ -100,6 +130,8 @@ const ENTRIES: [&str; 9] = [
     "rest",
     "shift_out",
     "shift_in",
+    "push",
+    "reach_damp",
 ];
 
 fn entry(binding: u32, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
@@ -189,6 +221,9 @@ impl SwashGpu {
                 entry(11, storage_texture()),
                 entry(12, storage_texture()),
                 entry(13, storage(true)),
+                entry(14, storage(false)),
+                entry(15, storage(true)),
+                entry(16, storage(false)),
             ],
         });
         let module = gpu.shader("water swash", SHADER, false);
@@ -262,6 +297,21 @@ impl SwashGpu {
                 (crate::waves::MAX_WAVES * 32) as u64,
                 storage_dst,
             ),
+            press: buffer("water swash press", cells * 4, wgpu::BufferUsages::STORAGE),
+            pushes: buffer("water swash pushes", (MAX_PUSHES * 32) as u64, storage_dst),
+            push_count: 0,
+            reach: buffer(
+                "water swash reach",
+                (REACH_N * REACH_N * 4) as u64,
+                storage_src,
+            ),
+            reach_read: buffer(
+                "water swash reach read",
+                (REACH_N * REACH_N * 4) as u64,
+                wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            ),
+            reach_state: ReachRead::Idle,
+            reach_frames: 0,
             view_a: tex("water swash"),
             view_b: tex("water swash sand"),
             laid: None,
@@ -299,7 +349,8 @@ impl SwashGpu {
 
     /// Follow the ripple grid's beaches this frame (`bed`, `None` when no shore is near) and
     /// set the steps for `dt` seconds. `surface` binds the dispersive surface's levels, when
-    /// it runs, `ripple` and `currents` the ripple grid's textures (corner, cell, cells).
+    /// it runs, `ripple` and `currents` the ripple grid's textures (corner, cell, cells);
+    /// `link` brings what stands in the water and takes how wet the sand is.
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
@@ -309,6 +360,7 @@ impl SwashGpu {
         ripple: (DVec2, f32, usize),
         ripple_views: (&wgpu::TextureView, &wgpu::TextureView),
         lake: Option<(DVec2, &[crate::waves::Wave])>,
+        link: &SwashLink,
         dt: f32,
         foam_life_s: f32,
     ) {
@@ -317,10 +369,28 @@ impl SwashGpu {
         if let Some(bed) = bed {
             self.read_probe(shared, bed);
         }
+        self.read_reach(shared, link);
         let Some(bed) = bed.filter(|b| b.n == N && dt > 0.0) else {
-            self.laid = None;
+            if self.laid.take().is_some() {
+                link.set_reach(None);
+            }
             return;
         };
+        // What stands in the water, from the grid's corner.
+        let mut pushes = [[[0.0f32; 4]; 2]; MAX_PUSHES];
+        let latest = link.pushes();
+        self.push_count = latest.len().min(MAX_PUSHES) as u32;
+        for (g, d) in pushes.iter_mut().zip(latest.iter()) {
+            let at = (d.pos - bed.origin).as_vec2();
+            let stir = d.stir.unwrap_or_default();
+            *g = [
+                [at.x, at.y, d.radius, d.depth],
+                [stir.x, stir.y, d.foam, d.stir.is_some() as u32 as f32],
+            ];
+        }
+        shared
+            .queue
+            .write_buffer(&self.pushes, 0, bytemuck::cast_slice(&pushes));
         if self
             .laid
             .is_none_or(|l| l.0 != bed.version || l.1 != bed.origin)
@@ -414,8 +484,8 @@ impl SwashGpu {
             coarse: level(coarse),
             ripple: [r.x, r.y, ripple.1, ripple.2 as f32],
             shift: match self.lay {
-                Lay::Shift(s) => [s[0], s[1], 0, 0],
-                _ => [0; 4],
+                Lay::Shift(s) => [s[0], s[1], self.push_count as i32, 0],
+                _ => [0, 0, self.push_count as i32, 0],
             },
         };
         shared
@@ -457,6 +527,9 @@ impl SwashGpu {
                     resource: wgpu::BindingResource::TextureView(&self.view_b),
                 },
                 res(&self.waves, 13),
+                res(&self.press, 14),
+                res(&self.pushes, 15),
+                res(&self.reach, 16),
             ],
         }));
         self.frame = Some(SwashFrame {
@@ -464,6 +537,41 @@ impl SwashGpu {
             size: bed.cell * N as f32,
             datum: bed.datum,
         });
+    }
+
+    /// Map the reach copied last frame, and hand it out once mapped.
+    fn read_reach(&mut self, shared: &GpuShared, link: &SwashLink) {
+        match std::mem::take(&mut self.reach_state) {
+            ReachRead::Idle => {}
+            ReachRead::Copied(origin) => {
+                let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let flag = done.clone();
+                self.reach_read
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |r| {
+                        if r.is_ok() {
+                            flag.store(true, std::sync::atomic::Ordering::Release);
+                        }
+                    });
+                self.reach_state = ReachRead::Mapping(origin, done);
+            }
+            ReachRead::Mapping(origin, done) => {
+                let _ = shared.device.poll(wgpu::PollType::Poll);
+                if !done.load(std::sync::atomic::Ordering::Acquire) {
+                    self.reach_state = ReachRead::Mapping(origin, done);
+                    return;
+                }
+                if let Ok(data) = self.reach_read.slice(..).get_mapped_range() {
+                    link.set_reach(Some(SwashReach {
+                        origin,
+                        cell: CELL_M as f64 * REACH_BLOCK as f64,
+                        n: REACH_N,
+                        damp: bytemuck::cast_slice(&data).to_vec(),
+                    }));
+                }
+                self.reach_read.unmap();
+            }
+        }
     }
 
     /// Print what the band holds (`ENGINE_WATER_SWASH_DEBUG`).
@@ -546,6 +654,7 @@ impl SwashGpu {
         if self.tile_count == 0 {
             return;
         }
+        run(PUSH, tiles);
         run(TARGET, tiles);
         for _ in 0..self.steps {
             run(PREP_A, tiles);
@@ -554,7 +663,26 @@ impl SwashGpu {
             run(STAGE2, tiles);
         }
         run(AFTER, tiles);
+        self.reach_frames += 1;
+        let copy_reach = self.reach_frames >= REACH_EVERY
+            && matches!(self.reach_state, ReachRead::Idle)
+            && self.frame.is_some();
+        if copy_reach {
+            let groups = (REACH_N as u32).div_ceil(8);
+            run(REACH, (groups, groups));
+        }
         drop(pass);
+        if copy_reach && let Some(f) = self.frame {
+            self.reach_frames = 0;
+            encoder.copy_buffer_to_buffer(
+                &self.reach,
+                0,
+                &self.reach_read,
+                0,
+                (REACH_N * REACH_N * 4) as u64,
+            );
+            self.reach_state = ReachRead::Copied(f.origin);
+        }
         if let Some((probe, frames, pending)) = &mut self.probe {
             *frames += 1;
             if *frames >= 30 && !*pending {

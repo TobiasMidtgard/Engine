@@ -149,6 +149,8 @@ const VIEWS: &[(&str, [f64; 3], [f64; 3])] = &[
     ("swash", [-1.0, 7.0, 31.0], [-3.0, 5.2, 21.0]),
     // Along the beach toward the motorboat's laps: its wake running up the sand.
     ("beach", [-1.0, 6.9, 28.0], [-14.0, 5.3, 18.0]),
+    // Close by the paddler wading along the beach, its legs parting the swash.
+    ("paddler", [-1.5, 6.6, 25.5], [-6.0, 5.2, 20.5]),
     ("under", [-2.0, 3.6, 7.0], [5.0, 4.6, 17.5]),
     ("pond", [56.0, 2.0, 38.0], [46.7, 0.3, 46.7]),
     ("wake", [-3.0, 11.0, 26.0], [-5.0, 5.5, -3.0]),

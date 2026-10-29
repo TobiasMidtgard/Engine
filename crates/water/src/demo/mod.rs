@@ -1110,10 +1110,11 @@ pub fn spawn_demo_with(commands: &mut Commands, origin: DVec3, options: DemoOpti
         },
     ));
 
-    let wade_angle = 0.25f32;
-    let (a, b) = (wade_angle - 0.12, wade_angle + 0.12);
+    // A paddler wading along the beach knee-deep, in the swash: its legs part the run-up
+    // and leave a wake on the sand's film.
+    let (a, b) = (BEACH_ANGLE - 0.18, BEACH_ANGLE + 0.18);
     let wade = |angle: f32| {
-        let p = polar(angle, shore_radius(angle) - 2.6);
+        let p = polar(angle, shore_radius(angle) - 6.0);
         at(p.x, tarn_height(p.x, p.y), p.y)
     };
     let e = spawn_prop(

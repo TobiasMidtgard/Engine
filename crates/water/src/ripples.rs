@@ -212,6 +212,8 @@ pub struct RippleField {
     /// The beaches under this grid for the swash ([`crate::swash`]); `None` where no shore
     /// lies under it.
     pub swash: Option<Arc<crate::swash::SwashBed>>,
+    /// The swash's pushes and how wet it leaves the sand, shared with the renderer's copy.
+    pub swash_link: Arc<crate::swash::SwashLink>,
 }
 
 /// Bilinear sample of one velocity component, `g` in that component's own grid coordinates
@@ -717,6 +719,7 @@ impl RippleField {
             surface: Arc::default(),
             coarse: None,
             swash: None,
+            swash_link: Arc::default(),
         }
     }
 
@@ -922,6 +925,7 @@ impl RippleField {
         self.surface = other.surface.clone();
         self.coarse.clone_from(&other.coarse);
         self.swash.clone_from(&other.swash);
+        self.swash_link = other.swash_link.clone();
     }
 
     /// Derive what the step needs from `speed2`: the open faces' depths, the wet mask and the
@@ -967,7 +971,19 @@ impl RippleField {
         let n = self.n as i64;
         let tiles = self.tiles();
         let cell = self.cell as f64;
-        for d in std::mem::take(&mut self.pending) {
+        let pending = std::mem::take(&mut self.pending);
+        // What stands in the water this step, for the swash.
+        self.swash_link.set_pushes(
+            pending
+                .iter()
+                .filter(|d| {
+                    self.swash.is_some() && (d.depth > 0.0 || d.stir.is_some() || d.foam > 0.0)
+                })
+                .take(crate::swash::MAX_PUSHES)
+                .copied()
+                .collect(),
+        );
+        for d in pending {
             self.surface.record(&d);
             let r = d.radius.max(self.cell * 0.75);
             let reach = (r * 2.0 / self.cell).ceil() as i64;
